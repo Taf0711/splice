@@ -1,6 +1,6 @@
 # Splice build/test/lint targets.
 .DEFAULT_GOAL := build
-.PHONY: build build-all test test-race vet fmt fmt-check lint tidy clean help install-memd
+.PHONY: build build-all test test-race test-memd check vet fmt fmt-check lint tidy clean help install-memd
 
 # Build the main CLI binary into ./splice.
 build:
@@ -17,6 +17,18 @@ test:
 # Faster, no race detector.
 test-quick:
 	go test ./...
+
+# Test the memd sidecar (separate Go module; root go test does not see it).
+test-memd:
+	cd memd && go test ./...
+
+# Full pre-push gate: fmt + vet + build + test in one command. Skips two
+# known-local-failures that CI runs clean: TestRealMemdSidecarMemoryRetrieval
+# (zombie-memd-socket hang on dev machines) and the WSL2 sandbox backend
+# selection test (false-positive under WSL2; passes on real Linux). Use
+# `make test` for the unskipped race suite that matches CI.
+check: fmt-check vet build-all
+	go test -count=1 -skip 'TestRealMemdSidecarMemoryRetrieval|TestSelectBackendChoosesPlatformAdapterWithFallback' ./...
 
 vet:
 	go vet ./...
@@ -44,4 +56,4 @@ clean:
 	go clean ./...
 
 help:
-	@echo "Targets: build (default), build-all, test, test-quick, vet, fmt, fmt-check, lint, tidy, install-memd, clean"
+	@echo "Targets: build (default), build-all, check, test, test-quick, test-memd, vet, fmt, fmt-check, lint, tidy, install-memd, clean"
