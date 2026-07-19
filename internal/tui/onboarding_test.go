@@ -1718,35 +1718,123 @@ func TestSetupPipelineUpDownMovesFocus(t *testing.T) {
 	}
 }
 
-func TestSetupPipelineLeftRightCyclesModel(t *testing.T) {
+func TestSetupPipelineRightOpensPicker(t *testing.T) {
 	m, _ := newSetupModelForPipeline(t, "gpt-5.6-sol")
-	// Focus code_writer (its pick is qwen/qwen3-coder-30b-a3b-instruct, the cheapest in its dropdown).
-	idx := indexOfString(m.sortedSetupPipelineStages(), "code_writer")
-	if idx < 0 {
-		t.Fatal("code_writer not in stages")
+	if m.setup.pipelinePickerActive {
+		t.Fatal("overview should not start with picker open")
 	}
-	m.setup.pipelineIndex = idx
-	opts := m.setup.pipelineOptions["code_writer"]
-	nanoIdx := setupOptionIndex(opts, "qwen/qwen3-coder-30b-a3b-instruct")
-	if nanoIdx < 0 {
-		t.Fatal("qwen/qwen3-coder-30b-a3b-instruct not in code_writer options")
+	upd, _ := m.Update(testKey(tea.KeyRight))
+	m = upd.(model)
+	if !m.setup.pipelinePickerActive {
+		t.Fatal("Right should open the pipeline model picker")
 	}
-	// Right at the last option wraps to the first; Right elsewhere advances by one.
-	// Move to the option just before nano and press Right to land on nano.
-	if nanoIdx == 0 {
-		// nano is first; press Right to go to the second option.
-		upd, _ := m.Update(testKey(tea.KeyRight))
-		m = upd.(model)
-		if m.setup.pipelinePicks["code_writer"] != opts[1].value {
-			t.Fatalf("after Right from first, pick = %q, want %q", m.setup.pipelinePicks["code_writer"], opts[1].value)
+	stage := m.sortedSetupPipelineStages()[m.setup.pipelineIndex]
+	if len(m.setup.pipelineOptions[stage]) == 0 {
+		t.Fatalf("stage %q has no model options to pick from", stage)
+	}
+}
+
+func TestSetupPipelinePickerSearchFilters(t *testing.T) {
+	m, _ := newSetupModelForPipeline(t, "gpt-5.6-sol")
+	stages := m.sortedSetupPipelineStages()
+	if idx := indexOfString(stages, "plan_critic"); idx >= 0 {
+		m.setup.pipelineIndex = idx
+	}
+	m.openSetupPipelinePicker()
+	if !m.setup.pipelinePickerActive {
+		t.Fatal("picker should be open")
+	}
+	before := len(m.setupPipelinePickerFiltered())
+	if before == 0 {
+		t.Fatal("picker should have options before filtering")
+	}
+	upd, _ := m.Update(testKeyText("sol"))
+	m = upd.(model)
+	after := m.setupPipelinePickerFiltered()
+	if len(after) >= before {
+		t.Fatalf("filter should shrink the list, before=%d after=%d", before, len(after))
+	}
+	found := false
+	for _, opt := range after {
+		if strings.Contains(opt.value, "gpt-5.6-sol") {
+			found = true
+			break
 		}
-	} else {
-		m.setup.pipelinePicks["code_writer"] = opts[nanoIdx-1].value
-		upd, _ := m.Update(testKey(tea.KeyRight))
-		m = upd.(model)
-		if m.setup.pipelinePicks["code_writer"] != "qwen/qwen3-coder-30b-a3b-instruct" {
-			t.Fatalf("after Right, pick = %q, want qwen/qwen3-coder-30b-a3b-instruct", m.setup.pipelinePicks["code_writer"])
-		}
+	}
+	if !found {
+		t.Fatalf("filter should keep gpt-5.6-sol, got %v", after)
+	}
+}
+
+func TestSetupPipelinePickerEnterCommits(t *testing.T) {
+	m, _ := newSetupModelForPipeline(t, "gpt-5.6-sol")
+	stage := m.sortedSetupPipelineStages()[m.setup.pipelineIndex]
+	original := m.setup.pipelinePicks[stage]
+	m.openSetupPipelinePicker()
+	if !m.setup.pipelinePickerActive {
+		t.Fatal("picker should be open")
+	}
+	if len(m.setupPipelinePickerFiltered()) < 2 {
+		t.Fatal("need at least two options to test commit change")
+	}
+	upd, _ := m.Update(testKey(tea.KeyDown))
+	m = upd.(model)
+	upd, _ = m.Update(testKey(tea.KeyEnter))
+	m = upd.(model)
+	if m.setup.pipelinePickerActive {
+		t.Fatal("Enter should close the picker")
+	}
+	if m.setup.pipelinePicks[stage] == original {
+		t.Fatalf("pick did not change: %q", m.setup.pipelinePicks[stage])
+	}
+}
+
+func TestSetupPipelinePickerEscClosesWithoutCommit(t *testing.T) {
+	m, _ := newSetupModelForPipeline(t, "gpt-5.6-sol")
+	stage := m.sortedSetupPipelineStages()[m.setup.pipelineIndex]
+	original := m.setup.pipelinePicks[stage]
+	m.openSetupPipelinePicker()
+	upd, _ := m.Update(testKey(tea.KeyDown))
+	m = upd.(model)
+	upd, _ = m.Update(testKey(tea.KeyEsc))
+	m = upd.(model)
+	if m.setup.pipelinePickerActive {
+		t.Fatal("Esc should close the picker")
+	}
+	if m.setup.pipelinePicks[stage] != original {
+		t.Fatalf("Esc should not commit changes, got %q want %q", m.setup.pipelinePicks[stage], original)
+	}
+}
+
+func TestSetupPipelinePickerLeftClosesWithoutCommit(t *testing.T) {
+	m, _ := newSetupModelForPipeline(t, "gpt-5.6-sol")
+	stage := m.sortedSetupPipelineStages()[m.setup.pipelineIndex]
+	original := m.setup.pipelinePicks[stage]
+	m.openSetupPipelinePicker()
+	upd, _ := m.Update(testKey(tea.KeyDown))
+	m = upd.(model)
+	upd, _ = m.Update(testKey(tea.KeyLeft))
+	m = upd.(model)
+	if m.setup.pipelinePickerActive {
+		t.Fatal("Left should close the picker")
+	}
+	if m.setup.pipelinePicks[stage] != original {
+		t.Fatalf("Left should not commit changes, got %q want %q", m.setup.pipelinePicks[stage], original)
+	}
+}
+
+func TestSetupPipelineTypingInOverviewOpensPicker(t *testing.T) {
+	m, _ := newSetupModelForPipeline(t, "gpt-5.6-sol")
+	if m.setup.pipelinePickerActive {
+		t.Fatal("overview should not start with picker open")
+	}
+	upd, _ := m.Update(testKeyText("g"))
+	m = upd.(model)
+	if !m.setup.pipelinePickerActive {
+		t.Fatal("typing in overview should open the picker")
+	}
+	if m.setup.pipelinePickerQuery != "g" {
+		t.Fatalf("query = %q, want g", m.setup.pipelinePickerQuery)
 	}
 }
 

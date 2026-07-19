@@ -73,6 +73,9 @@ type setupState struct {
 	pipelinePicks         map[string]string
 	pipelineOptions       map[string][]stageModelOption
 	pipelineIndex         int
+	pipelinePickerActive  bool
+	pipelinePickerQuery   string
+	pipelineModelIndex    int
 }
 
 // setupOAuthMsg carries the result of a first-run browser OAuth login.
@@ -161,6 +164,10 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case keyCtrl(msg, 'c'):
 		return m, tea.Quit
 	case keyIs(msg, tea.KeyEsc):
+		if m.setup.stage == setupStagePipeline && m.setup.pipelinePickerActive {
+			m.closeSetupPipelinePicker()
+			return m, nil
+		}
 		if m.setup.stage > setupStageWelcome {
 			prev := m.previousSetupStage()
 			if prev == setupStageMethod {
@@ -176,6 +183,10 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.exitSetupToChat()
 	case keyIs(msg, tea.KeyLeft):
 		if m.setup.stage == setupStagePipeline {
+			if m.setup.pipelinePickerActive {
+				m.closeSetupPipelinePicker()
+				return m, nil
+			}
 			if m.setupPipelineLeftAtTop() {
 				prev := m.previousSetupStage()
 				if prev == setupStageMethod {
@@ -183,6 +194,8 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				m.setup.stage = prev
 				m.setup.err = ""
+			} else {
+				m.moveSetupPipelineIndex(-1)
 			}
 			return m, nil
 		}
@@ -196,6 +209,10 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case keyIs(msg, tea.KeyEnter):
+		if m.setup.stage == setupStagePipeline && m.setup.pipelinePickerActive {
+			m.confirmSetupPipelinePicker()
+			return m, nil
+		}
 		if m.setup.stage == setupStageMethod || m.setup.stage == setupStageProvider || m.setup.stage == setupStageModel || m.setup.stage == setupStagePipeline || m.setup.stage == setupStageReady {
 			return m.advanceSetup()
 		}
@@ -207,7 +224,9 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case keyIs(msg, tea.KeyRight):
 		if m.setup.stage == setupStagePipeline {
-			m.cycleSetupPipelineModel(1)
+			if !m.setup.pipelinePickerActive {
+				m.openSetupPipelinePicker()
+			}
 		}
 		return m, nil
 	case keyIs(msg, tea.KeyUp):
@@ -218,7 +237,11 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else if m.setup.stage == setupStageModel {
 			m.moveSetupModel(-1)
 		} else if m.setup.stage == setupStagePipeline {
-			m.moveSetupPipelineIndex(-1)
+			if m.setup.pipelinePickerActive {
+				m.moveSetupPipelinePicker(-1)
+			} else {
+				m.moveSetupPipelineIndex(-1)
+			}
 		}
 		return m, nil
 	case keyIs(msg, tea.KeyDown):
@@ -229,7 +252,11 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else if m.setup.stage == setupStageModel {
 			m.moveSetupModel(1)
 		} else if m.setup.stage == setupStagePipeline {
-			m.moveSetupPipelineIndex(1)
+			if m.setup.pipelinePickerActive {
+				m.moveSetupPipelinePicker(1)
+			} else {
+				m.moveSetupPipelineIndex(1)
+			}
 		}
 		return m, nil
 	case keyText(msg) != "":
@@ -238,6 +265,12 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.setup.stage == setupStagePipeline {
+			if m.setup.pipelinePickerActive {
+				m.appendPipelinePickerQuery(keyRunes(msg))
+			} else {
+				m.openSetupPipelinePicker()
+				m.appendPipelinePickerQuery(keyRunes(msg))
+			}
 			return m, nil
 		}
 		switch keyText(msg) {
@@ -262,11 +295,18 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.setup.stage == setupStageModel {
 			m.deleteSetupModelQueryRune()
 		}
+		if m.setup.stage == setupStagePipeline && m.setup.pipelinePickerActive {
+			m.deletePipelinePickerQueryRune()
+		}
 		return m, nil
 	case keyCtrl(msg, 'u'):
 		if m.setup.stage == setupStageModel {
 			m.setup.modelQuery = ""
 			m.setup.modelIndex = 0
+		}
+		if m.setup.stage == setupStagePipeline && m.setup.pipelinePickerActive {
+			m.setup.pipelinePickerQuery = ""
+			m.setup.pipelineModelIndex = 0
 		}
 		return m, nil
 	}
@@ -931,6 +971,8 @@ func (m *model) populateSetupPipelinePicks() {
 		}
 		m.setup.pipelineOptions[stage] = options
 	}
+	m.setup.pipelinePickerActive = false
+	m.setup.pipelinePickerQuery = ""
 }
 
 func (m model) setupModelDiscoveryCmd(gen uint64) tea.Cmd {
@@ -1624,6 +1666,9 @@ func (m model) setupPipelineLines(width int, height int) []string {
 	rowWidth := setupPipelineBlockWidth(width, stages, m.setup.pipelineOptions)
 	maxIndex := maxInt(0, len(stages)-1)
 	m.setup.pipelineIndex = clampInt(m.setup.pipelineIndex, 0, maxIndex)
+	if m.setup.pipelinePickerActive {
+		return m.setupPipelinePickerLines(width, height)
+	}
 
 	lines := []string{
 		padSetupLine("  "+zeroTheme.ink.Bold(true).Render("Your pipeline (auto-resolved, editable)"), rowWidth),
@@ -1661,6 +1706,57 @@ func (m model) setupPipelineSingleModelLines(width int) []string {
 	}
 }
 
+func (m model) setupPipelinePickerLines(width int, height int) []string {
+	stages := m.sortedSetupPipelineStages()
+	rowWidth := setupPipelineBlockWidth(width, stages, m.setup.pipelineOptions)
+	m.setup.pipelineIndex = clampInt(m.setup.pipelineIndex, 0, len(stages)-1)
+	stage := stages[m.setup.pipelineIndex]
+	filtered := m.setupPipelinePickerFiltered()
+
+	lines := []string{
+		padSetupLine("  "+zeroTheme.ink.Bold(true).Render("Pick model for "+stage), rowWidth),
+		blankSetupBlockLine(rowWidth),
+		padSetupLine("  "+m.setupPipelinePickerSearchLine(rowWidth-2), rowWidth),
+	}
+	if len(filtered) == 0 {
+		lines = append(lines,
+			blankSetupBlockLine(rowWidth),
+			padSetupLine("  "+zeroTheme.faint.Render("No matching models"), rowWidth),
+		)
+		return lines
+	}
+	maxVisible := setupModelMaxVisible(height, len(filtered))
+	start := selectableListStart(len(filtered), maxVisible, m.setup.pipelineModelIndex)
+	visibleOptions := filtered[start : start+maxVisible]
+	lines = append(lines, blankSetupBlockLine(rowWidth))
+	for offset, option := range visibleOptions {
+		lines = append(lines, m.setupPipelinePickerRow(rowWidth, start+offset, option))
+	}
+	return lines
+}
+
+func (m model) setupPipelinePickerSearchLine(width int) string {
+	query := strings.TrimSpace(m.setup.pipelinePickerQuery)
+	prompt := zeroTheme.userPrompt.Render("search > ")
+	cursor := zeroTheme.accent.Render("▌")
+	if query == "" {
+		return fitStyledLine(prompt+cursor+zeroTheme.faint.Render("model name..."), width)
+	}
+	return fitStyledLine(prompt+zeroTheme.ink.Render(query)+cursor, width)
+}
+
+func (m model) setupPipelinePickerRow(width int, index int, option stageModelOption) string {
+	selected := index == m.setup.pipelineModelIndex
+	marker := "  "
+	style := zeroTheme.ink
+	if selected {
+		marker = "❯ "
+		style = zeroTheme.accent.Bold(true)
+	}
+	left := marker + style.Render(option.label)
+	return padSetupLine(left, width)
+}
+
 func (m *model) moveSetupPipelineIndex(delta int) {
 	stages := m.sortedSetupPipelineStages()
 	if len(stages) == 0 {
@@ -1669,7 +1765,7 @@ func (m *model) moveSetupPipelineIndex(delta int) {
 	m.setup.pipelineIndex = ((m.setup.pipelineIndex+delta)%len(stages) + len(stages)) % len(stages)
 }
 
-func (m *model) cycleSetupPipelineModel(delta int) {
+func (m *model) openSetupPipelinePicker() {
 	if setupProviderUsesTypedModel(m.setupProvider()) {
 		return
 	}
@@ -1683,16 +1779,70 @@ func (m *model) cycleSetupPipelineModel(delta int) {
 	if len(options) == 0 {
 		return
 	}
-	idx := setupOptionIndex(options, m.setup.pipelinePicks[stage])
+	m.setup.pipelinePickerActive = true
+	m.setup.pipelinePickerQuery = ""
+	filtered := filterStageModelOptions(options, "")
+	idx := setupOptionIndex(filtered, m.setup.pipelinePicks[stage])
 	if idx < 0 {
 		idx = 0
-	} else {
-		idx = (idx + delta) % len(options)
-		if idx < 0 {
-			idx += len(options)
-		}
 	}
-	m.setup.pipelinePicks[stage] = options[idx].value
+	m.setup.pipelineModelIndex = idx
+}
+
+func (m *model) closeSetupPipelinePicker() {
+	m.setup.pipelinePickerActive = false
+	m.setup.pipelinePickerQuery = ""
+}
+
+func (m model) setupPipelinePickerFiltered() []stageModelOption {
+	stages := m.sortedSetupPipelineStages()
+	if len(stages) == 0 {
+		return nil
+	}
+	stage := stages[m.setup.pipelineIndex]
+	return filterStageModelOptions(m.setup.pipelineOptions[stage], m.setup.pipelinePickerQuery)
+}
+
+func (m *model) moveSetupPipelinePicker(delta int) {
+	filtered := m.setupPipelinePickerFiltered()
+	if len(filtered) == 0 {
+		return
+	}
+	m.setup.pipelineModelIndex = ((m.setup.pipelineModelIndex+delta)%len(filtered) + len(filtered)) % len(filtered)
+}
+
+func (m *model) appendPipelinePickerQuery(runes []rune) {
+	for _, r := range runes {
+		if r < 32 || r == 127 {
+			continue
+		}
+		m.setup.pipelinePickerQuery += string(r)
+	}
+	m.setup.pipelineModelIndex = 0
+}
+
+func (m *model) deletePipelinePickerQueryRune() {
+	if m.setup.pipelinePickerQuery == "" {
+		return
+	}
+	runes := []rune(m.setup.pipelinePickerQuery)
+	m.setup.pipelinePickerQuery = string(runes[:len(runes)-1])
+	m.setup.pipelineModelIndex = 0
+}
+
+func (m *model) confirmSetupPipelinePicker() {
+	stages := m.sortedSetupPipelineStages()
+	if len(stages) == 0 {
+		return
+	}
+	stage := stages[m.setup.pipelineIndex]
+	filtered := m.setupPipelinePickerFiltered()
+	if len(filtered) == 0 {
+		return
+	}
+	idx := clampInt(m.setup.pipelineModelIndex, 0, len(filtered)-1)
+	m.setup.pipelinePicks[stage] = filtered[idx].value
+	m.closeSetupPipelinePicker()
 }
 
 func (m *model) setupPipelineLeftAtTop() bool {
@@ -1704,23 +1854,7 @@ func (m *model) setupPipelineLeftAtTop() bool {
 		return true
 	}
 	m.setup.pipelineIndex = clampInt(m.setup.pipelineIndex, 0, len(stages)-1)
-	stage := stages[m.setup.pipelineIndex]
-	options := m.setup.pipelineOptions[stage]
-	if len(options) == 0 {
-		return true
-	}
-	idx := setupOptionIndex(options, m.setup.pipelinePicks[stage])
-	if m.setup.pipelineIndex == 0 && idx == 0 {
-		return true
-	}
-	if idx < 0 {
-		m.setup.pipelinePicks[stage] = options[0].value
-	} else if idx == 0 {
-		m.setup.pipelinePicks[stage] = options[len(options)-1].value
-	} else {
-		m.setup.pipelinePicks[stage] = options[idx-1].value
-	}
-	return false
+	return m.setup.pipelineIndex == 0
 }
 
 func setupOptionIndex(options []stageModelOption, value string) int {
@@ -2006,7 +2140,10 @@ func (m model) setupFooter() string {
 		if setupProviderUsesTypedModel(m.setupProvider()) {
 			return zeroTheme.accent.Render("Enter") + zeroTheme.faint.Render(" continue")
 		}
-		return zeroTheme.faint.Render("↑/↓ stage   ←/→ change model   ") + zeroTheme.accent.Render("Enter") + zeroTheme.faint.Render(" continue")
+		if m.setup.pipelinePickerActive {
+			return zeroTheme.faint.Render("type search   Backspace edit   Ctrl+U clear   ↑/↓ move   Enter choose   ←/Esc back")
+		}
+		return zeroTheme.faint.Render("↑/↓ stage   → pick model   ") + zeroTheme.accent.Render("Enter") + zeroTheme.faint.Render(" continue")
 	case setupStageWelcome:
 		return zeroTheme.accent.Render("Space") + zeroTheme.faint.Render(" to set up Splice")
 	default:
