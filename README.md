@@ -181,6 +181,23 @@ support. If a model omits the required typed tool call or returns invalid JSON,
 Splice gives it up to two corrective retries and then reports an actionable
 error. Splice never falls back from a local model to a cloud provider.
 
+### Your first prompt: planning vs execution
+
+A fresh interactive session starts in **planning mode** (design). Describe
+what you want to build; Splice runs a design conversation, then `/crystallize`
+turns it into a typed plan and `/approve` hands it to the execution pipeline.
+This two-phase flow is for work that benefits from a plan first.
+
+To skip planning and run a prompt straight through the pipeline, use
+`/exec <prompt>` in the TUI or `splice exec "<prompt>"` headlessly:
+
+```bash
+splice exec "fix the failing test in ./pkg"
+```
+
+`/exec` is the escape hatch when you already know what you want and do not
+need a planning step. Type `/design` to re-enter planning mode.
+
 ## Daily Use
 
 ### Interactive TUI

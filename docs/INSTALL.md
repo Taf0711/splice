@@ -9,12 +9,8 @@ Splice is distributed as:
 The npm package and install scripts download a platform-specific release archive.
 They require a published GitHub Release for the requested version.
 
-> **Status:** Release infrastructure is now set up. The first release
-> (v0.1.0) will be cut by merging the Release Please PR on `main`. Until
-> that first release is published, install Splice **from source** (see
-> [From Source](#from-source)) for a working setup. After the first release,
-> the npm, Bun, install-script, and release-archive flows below become
-> active.
+Releases are published on [GitHub Releases](https://github.com/Taf0711/splice/releases)
+and the npm package is `@taf0711/splice` (via OIDC trusted publishing).
 
 ## npm
 

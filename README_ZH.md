@@ -138,6 +138,18 @@ splice providers setup longcat --set-active
 
 对于本地模型，运行 Ollama 或 LM Studio，然后使用 `splice setup` 或 `splice providers detect`。由模型驱动的流水线阶段要求模型支持工具调用。如果模型没有调用所需的类型化工具，或返回无效 JSON，Splice 最多会进行两次纠正重试，之后给出可操作的错误信息。Splice 绝不会从本地模型静默回退到云端提供商。
 
+### 你的第一个提示：规划与执行
+
+一个新的交互式会话默认从**规划模式**（design）开始。描述你想要构建的内容；Splice 会运行设计对话，然后 `/crystallize` 将其转化为类型化计划，`/approve` 将其交给执行流水线。这个两阶段流程适用于需要先规划的工作。
+
+要跳过规划，直接通过流水线运行提示，请在 TUI 中使用 `/exec <prompt>`，或在无头模式下使用 `splice exec "<prompt>"`：
+
+```bash
+splice exec "fix the failing test in ./pkg"
+```
+
+当你已经知道自己想要什么、不需要规划步骤时，`/exec` 是快速通道。输入 `/design` 可重新进入规划模式。
+
 ## 日常使用
 
 ### 交互式 TUI
