@@ -13,7 +13,7 @@ Then identify your working role and read the matching section under "Working in 
 
 ## What This Project Is
 
-Splice is a terminal coding agent written in Go. It is a full-history clone of the open-source Zero CLI (`gitlawb/zero`, MIT) with a deterministic, orchestrator-mediated multi-stage pipeline layered on top. The pipeline paradigm was designed and first built in Python under the name Flug; that repo is archived at `Taf0711/flug_archive`, and the paradigm was ported to Go here as Track F-Zero.
+Splice is a terminal coding agent written in Go. It is a full-history clone of the open-source Zero CLI (`gitlawb/zero`, MIT) with a deterministic, orchestrator-mediated multi-stage pipeline layered on top. The pipeline paradigm was designed and first built in Python under the name Flug; that repo is archived privately, and the paradigm was ported to Go here as Track F-Zero.
 
 Two layers, one binary:
 
