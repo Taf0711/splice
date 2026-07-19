@@ -17,10 +17,10 @@ type MemoryStore interface {
 	Upsert(ctx context.Context, obs schemas.MemoryObservation) (schemas.MemoryObservation, error)
 }
 
-// newMemoryQuery builds the bounded search the orchestrator issues for a stage,
-// per docs/flug-design/10-structured-memory.md Retrieval Flow: owner_agent is the
-// stage name, the query is the first 200 runes of the distilled request intent,
-// and project_path is the working dir. Include flags are left nil so the sidecar
+// newMemoryQuery builds the bounded search the orchestrator issues for a stage:
+// owner_agent is the stage name, the query is the first 200 runes of the
+// distilled request intent, and project_path is the working dir. Include flags
+// are left nil so the sidecar
 // applies its default-true.
 func newMemoryQuery(stageName, intent, workDir string) schemas.MemoryQuery {
 	q := []rune(intent)

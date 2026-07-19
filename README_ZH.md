@@ -196,7 +196,7 @@ Stream-JSON 协议文档在 [docs/STREAM_JSON_PROTOCOL.md](docs/STREAM_JSON_PROT
 
 ## 流水线
 
-Splice 的标志性层是 `internal/splice/` 中的确定性流水线。它从 Flug 范式移植而来（Flug 是已归档的 Python 前身；参见 `AGENTS.zero.md` 和 `docs/flug-design/` 了解历史），并用 Go 在 Zero 的引擎之上全新构建。
+Splice 的标志性层是 `internal/splice/` 中的确定性流水线。它从 Flug 范式移植而来（Flug 是已归档的 Python 前身），并用 Go 在 Zero 的引擎之上全新构建。
 
 流程如下：
 

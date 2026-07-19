@@ -3,7 +3,7 @@
 // The sidecar (built from the memd/ module in this repo) serves five JSON
 // endpoints over a Unix domain socket. This package speaks that protocol and
 // never imports the sidecar module; the wire contract is the only coupling.
-// See docs/flug-design/10-structured-memory.md for the architecture.
+// The structured-memory architecture is documented alongside the sidecar.
 package memd
 
 import (

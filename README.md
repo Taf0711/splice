@@ -247,8 +247,7 @@ The stream-JSON contract is documented in
 
 Splice's distinguishing layer is the deterministic pipeline in
 `internal/splice/`. It is ported from the Flug paradigm (Flug is the archived
-Python predecessor; see `AGENTS.zero.md` and `docs/flug-design/` for
-history) and built new in Go on top of Zero's engine.
+Python predecessor) and built new in Go on top of Zero's engine.
 
 The flow:
 

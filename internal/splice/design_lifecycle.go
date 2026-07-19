@@ -13,8 +13,7 @@ import (
 // the splice package so the sessions package never imports splice schemas;
 // the plan and critique are stored as json.RawMessage and decoded here.
 //
-// See plans/design-phase-tui-wiring-2026-07-13.md checkpoint D0 for the
-// full contract.
+// The full lifecycle contract is documented with ReconstructDesignState.
 
 // PlanCrystallizedPayload records one crystallized plan revision.
 type PlanCrystallizedPayload struct {
