@@ -1,0 +1,64 @@
+# dependencies (bun install)
+node_modules
+
+# output
+out
+dist
+*.tgz
+
+# code coverage
+coverage
+*.lcov
+
+# logs
+logs
+_.log
+report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
+
+# dotenv environment variable files
+.env
+.env.development.local
+.env.test.local
+.env.production.local
+.env.local
+
+# caches
+.eslintcache
+.cache
+*.tsbuildinfo
+
+# IntelliJ based IDEs
+.idea
+
+# Finder (MacOS) folder config
+.DS_Store
+
+.cursor
+
+/zero
+/zero.exe
+/zero-skills
+/splice-skills
+/snake-game.html
+
+# Superpowers skill artifacts (brainstorm mockups, specs, plans) — local only
+.superpowers/
+docs/superpowers/
+
+# Termux/Android build artifacts
+splice-termux-arm64
+splice-linux-sandbox
+
+# Renamed binary artifacts
+/splice
+/splice.exe
+/splice-skills
+/splice-termux-arm64
+/splice-linux-sandbox
+
+# memd sidecar build artifacts
+/memd/splice-memd
+/memd/flug-memd
+
+# pi-subagents artifacts
+.pi-subagents/

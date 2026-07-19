@@ -1,0 +1,42 @@
+{
+  "name": "@taf0711/splice",
+  "version": "0.1.1",
+  "description": "Splice \u2014 a fast, multi-provider terminal coding agent.",
+  "type": "module",
+  "module": "bin/splice.js",
+  "bin": {
+    "splice": "bin/splice.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.mjs"
+  },
+  "files": [
+    "bin/splice.js",
+    "scripts/postinstall.mjs"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "agent-browser": "^0.30.1",
+    "tuistory": "^0.10.0"
+  },
+  "os": [
+    "linux",
+    "darwin",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Taf0711/splice.git"
+  },
+  "homepage": "https://github.com/Taf0711/splice#readme",
+  "bugs": {
+    "url": "https://github.com/Taf0711/splice/issues"
+  },
+  "license": "MIT"
+}

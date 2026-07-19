@@ -1,0 +1,39 @@
+{
+  "presets": {
+    "free-qwen-coder": {
+      "nano":    { "provider": "openrouter", "model": "qwen/qwen3-coder:free" },
+      "small":   { "provider": "openrouter", "model": "qwen/qwen3-coder:free" },
+      "medium":  { "provider": "openrouter", "model": "qwen/qwen3-coder:free" },
+      "large":   { "provider": "openrouter", "model": "qwen/qwen3-coder:free" },
+      "reasoning": { "provider": "openrouter", "model": "qwen/qwen3-coder:free" }
+    },
+    "free-llama-70b": {
+      "nano":    { "provider": "openrouter", "model": "meta-llama/llama-3.3-70b-instruct:free" },
+      "small":   { "provider": "openrouter", "model": "meta-llama/llama-3.3-70b-instruct:free" },
+      "medium":  { "provider": "openrouter", "model": "meta-llama/llama-3.3-70b-instruct:free" },
+      "large":   { "provider": "openrouter", "model": "meta-llama/llama-3.3-70b-instruct:free" },
+      "reasoning": { "provider": "openrouter", "model": "meta-llama/llama-3.3-70b-instruct:free" }
+    },
+    "glm-5.2": {
+      "nano":    { "provider": "openrouter", "model": "z-ai/glm-4.7-flash" },
+      "small":   { "provider": "openrouter", "model": "z-ai/glm-4.7-flash" },
+      "medium":  { "provider": "openrouter", "model": "z-ai/glm-5.2" },
+      "large":   { "provider": "openrouter", "model": "z-ai/glm-5.2" },
+      "reasoning": { "provider": "openrouter", "model": "z-ai/glm-5.2" }
+    },
+    "deepseek-v4": {
+      "nano":    { "provider": "openrouter", "model": "deepseek/deepseek-v4-flash" },
+      "small":   { "provider": "openrouter", "model": "deepseek/deepseek-v4-flash" },
+      "medium":  { "provider": "openrouter", "model": "deepseek/deepseek-v4-pro" },
+      "large":   { "provider": "openrouter", "model": "deepseek/deepseek-v4-pro" },
+      "reasoning": { "provider": "openrouter", "model": "deepseek/deepseek-v4-pro" }
+    },
+    "claude-sonnet": {
+      "nano":    { "provider": "anthropic", "model": "claude-3-5-haiku-20241022" },
+      "small":   { "provider": "anthropic", "model": "claude-3-5-haiku-20241022" },
+      "medium":  { "provider": "anthropic", "model": "claude-sonnet-4-20250514" },
+      "large":   { "provider": "anthropic", "model": "claude-sonnet-4-20250514" },
+      "reasoning": { "provider": "anthropic", "model": "claude-sonnet-4-20250514" }
+    }
+  }
+}

@@ -1,0 +1,225 @@
+name: Release Artifacts
+
+# Triggers when Release Please creates a GitHub Release (on tag merge).
+# Cross-compiles the splice binary + splice-memd sidecar for each
+# platform/arch, creates archives with SHA-256 checksums, and uploads
+# them as release assets.
+#
+# Asset naming follows internal/release/release.go:
+#   splice-v{version}-{linux|macos|windows}-{x64|arm64}.{tar.gz|zip}
+#   + matching .sha256 sidecar
+#
+# The memd sidecar (memd/ module, pure-Go modernc.org/sqlite) is included
+# inside each archive as "splice-memd" so the auto-spawn client finds it
+# without a separate download.
+on:
+  release:
+    types: [published]
+  # Also trigger manually (needed when Release Please uses GITHUB_TOKEN,
+  # which doesn't trigger downstream workflows from the release event).
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.1.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            platform: linux
+            arch: x64
+            ext: tar.gz
+          - goos: linux
+            goarch: arm64
+            platform: linux
+            arch: arm64
+            ext: tar.gz
+          - goos: darwin
+            goarch: amd64
+            platform: macos
+            arch: x64
+            ext: tar.gz
+          - goos: darwin
+            goarch: arm64
+            platform: macos
+            arch: arm64
+            ext: tar.gz
+          - goos: windows
+            goarch: amd64
+            platform: windows
+            arch: x64
+            ext: zip
+          - goos: windows
+            goarch: arm64
+            platform: windows
+            arch: arm64
+            ext: zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Get version from tag
+        id: version
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "VERSION=${TAG#v}" >> $GITHUB_OUTPUT
+          echo "TAG=${TAG}" >> $GITHUB_OUTPUT
+
+      - name: Build splice binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p staging
+          BINARY_NAME="splice"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            BINARY_NAME="splice.exe"
+          fi
+          go build -ldflags "-s -w -X main.version=${{ steps.version.outputs.VERSION }}" \
+            -o "staging/$BINARY_NAME" ./cmd/splice
+
+      - name: Build splice-memd sidecar
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          cd memd
+          MEMD_NAME="splice-memd"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            MEMD_NAME="splice-memd.exe"
+          fi
+          go build -ldflags "-s -w" -o "../staging/$MEMD_NAME" .
+          cd ..
+
+      - name: Create archive
+        id: archive
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          ARCHIVE_NAME="splice-v${VERSION}-${{ matrix.platform }}-${{ matrix.arch }}"
+          if [ "${{ matrix.ext }}" = "zip" ]; then
+            (cd staging && zip -r "../${ARCHIVE_NAME}.zip" .)
+            echo "path=${ARCHIVE_NAME}.zip" >> $GITHUB_OUTPUT
+          else
+            tar -czf "${ARCHIVE_NAME}.tar.gz" -C staging .
+            echo "path=${ARCHIVE_NAME}.tar.gz" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate SHA-256 checksum
+        id: checksum
+        run: |
+          CHECKSUM=$(sha256sum "${{ steps.archive.outputs.path }}" | awk '{print $1}')
+          echo "${CHECKSUM}  ${{ steps.archive.outputs.path }}" > "${{ steps.archive.outputs.path }}.sha256"
+          echo "checksum=${CHECKSUM}" >> $GITHUB_OUTPUT
+
+      - name: Upload archive to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ steps.version.outputs.TAG }}" \
+            "${{ steps.archive.outputs.path }}" \
+            "${{ steps.archive.outputs.path }}.sha256" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Summary
+        run: |
+          echo "### Built ${{ matrix.platform }}/${{ matrix.arch }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Archive: \`${{ steps.archive.outputs.path }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- SHA-256: \`${{ steps.checksum.outputs.checksum }}\`" >> $GITHUB_STEP_SUMMARY
+
+  publish-npm:
+    # Runs AFTER all build jobs succeed, so the release assets are already
+    # uploaded. This ensures users installing from npm can always download
+    # the matching platform binary from GitHub Releases.
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Get version from tag
+        id: version
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "VERSION=${TAG#v}" >> $GITHUB_OUTPUT
+          echo "TAG=${TAG}" >> $GITHUB_OUTPUT
+
+      - name: Verify release assets exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Fail fast if the binaries aren't uploaded yet (prevents
+          # publishing an npm package whose postinstall would 404).
+          ASSET_COUNT=$(gh release view "${{ steps.version.outputs.TAG }}" \
+            --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets | length')
+          if [ "$ASSET_COUNT" -lt 12 ]; then
+            echo "Expected 12 release assets (6 archives + 6 checksums), found $ASSET_COUNT"
+            echo "Aborting npm publish — binaries are not ready."
+            exit 1
+          fi
+          echo "Found $ASSET_COUNT assets. Proceeding with npm publish."
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          # Trusted publishing (OIDC) requires Node 22.14.0+ and npm CLI 11.5.1+.
+          node-version: '22'
+
+      - name: Sync package.json version to tag
+        run: |
+          # Release Please manages the Go module version, not package.json.
+          # Force package.json to match the tag so postinstall downloads the
+          # correct release binaries.
+          node -e "
+            const fs = require('fs');
+            const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            p.version = '${{ steps.version.outputs.VERSION }}';
+            fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\\n');
+            console.log('package.json version set to: ' + p.version);
+          "
+
+      - name: Publish to npm (trusted publishing / OIDC)
+        # No NPM_TOKEN needed: npm auto-detects the OIDC environment and
+        # exchanges a short-lived GitHub OIDC token for a publish token.
+        # This bypasses 2FA (OIDC IS the proof of identity) and eliminates
+        # long-lived credential storage. Provenance is auto-generated.
+        run: npm publish --access public
+
+      - name: Summary
+        run: |
+          echo "### Published @taf0711/splice@${{ steps.version.outputs.VERSION }} to npm" >> $GITHUB_STEP_SUMMARY
+          echo "Users can now install: \`npm install -g @taf0711/splice\`" >> $GITHUB_STEP_SUMMARY

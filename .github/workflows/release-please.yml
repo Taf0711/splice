@@ -1,0 +1,33 @@
+name: Release Please
+
+on:
+  push:
+    branches:
+      - main
+
+# Release Please opens and keeps a release PR up to date from conventional
+# commits. Merging that PR cuts a GitHub Release with an auto-generated
+# changelog and tag. Binary publishing (cross-compile + checksum + upload) is
+# handled by release-artifacts.yml, which triggers on release creation.
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          release-type: go
+          manifest-file: .release-please-manifest.json
+          include-component-in-tag: false
+          # Bootstrap: Splice's own versioning starts at v0.1.0 (separate
+          # from upstream Zero-era tags that were deleted). release-please
+          # defaults to 1.0.0 from a 0.0.0 manifest; this forces the first
+          # release to 0.1.0. After v0.1.0 is cut, normal semver bumping
+          # takes over (feat: -> 0.2.0, fix: -> 0.1.1).
+          release-as: 0.1.1
+          # Keep 0.x versioning: features bump minor (not major) below 1.0.0.
+          bump-minor-pre-major: true
+          prerelease: false

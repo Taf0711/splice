@@ -1,0 +1,26 @@
+[
+  {
+    "id": "typo-readme",
+    "request": "Fix a typo in README.md.",
+    "expected_tier": "trivial",
+    "baseline_tokens_estimate": 1500
+  },
+  {
+    "id": "parser-bug",
+    "request": "Fix a parser bug and add a regression test.",
+    "expected_tier": "light",
+    "baseline_tokens_estimate": 6000
+  },
+  {
+    "id": "oauth-service",
+    "request": "Design an OAuth service with permission checks.",
+    "expected_tier": "substantial",
+    "baseline_tokens_estimate": 18000
+  },
+  {
+    "id": "storage-layer",
+    "request": "Redesign the orchestrator storage layer.",
+    "expected_tier": "architectural",
+    "baseline_tokens_estimate": 22000
+  }
+]
