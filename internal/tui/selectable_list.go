@@ -12,7 +12,10 @@ type selectableListOptions struct {
 	MaxVisible int
 }
 
-const selectableListAnchorRow = 3
+// selectableListAnchorRow is how many rows above the cursor the window
+// keeps visible. 1 means the window scrolls as soon as the cursor moves
+// past the first visible row, keeping one row of context above.
+const selectableListAnchorRow = 1
 
 func selectableListStart(total, maxVisible, selected int) int {
 	if total <= maxVisible {

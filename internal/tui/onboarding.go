@@ -1712,9 +1712,11 @@ func (m model) setupPipelinePickerLines(width int, height int) []string {
 	m.setup.pipelineIndex = clampInt(m.setup.pipelineIndex, 0, len(stages)-1)
 	stage := stages[m.setup.pipelineIndex]
 	filtered := m.setupPipelinePickerFiltered()
+	currentPick := m.setup.pipelinePicks[stage]
 
+	title := fmt.Sprintf("Pick model for %s (%d)", stage, len(filtered))
 	lines := []string{
-		padSetupLine("  "+zeroTheme.ink.Bold(true).Render("Pick model for "+stage), rowWidth),
+		padSetupLine("  "+zeroTheme.ink.Bold(true).Render(title), rowWidth),
 		blankSetupBlockLine(rowWidth),
 		padSetupLine("  "+m.setupPipelinePickerSearchLine(rowWidth-2), rowWidth),
 	}
@@ -1727,10 +1729,19 @@ func (m model) setupPipelinePickerLines(width int, height int) []string {
 	}
 	maxVisible := setupModelMaxVisible(height, len(filtered))
 	start := selectableListStart(len(filtered), maxVisible, m.setup.pipelineModelIndex)
-	visibleOptions := filtered[start : start+maxVisible]
-	lines = append(lines, blankSetupBlockLine(rowWidth))
+	end := start + maxVisible
+	if end > len(filtered) {
+		end = len(filtered)
+	}
+	visibleOptions := filtered[start:end]
+	if start > 0 {
+		lines = append(lines, padSetupLine("  "+zeroTheme.faint.Render(fmt.Sprintf("↑ %d more above", start)), rowWidth))
+	}
 	for offset, option := range visibleOptions {
-		lines = append(lines, m.setupPipelinePickerRow(rowWidth, start+offset, option))
+		lines = append(lines, m.setupPipelinePickerRow(rowWidth, start+offset, option, option.value == currentPick))
+	}
+	if end < len(filtered) {
+		lines = append(lines, padSetupLine("  "+zeroTheme.faint.Render(fmt.Sprintf("↓ %d more below", len(filtered)-end)), rowWidth))
 	}
 	return lines
 }
@@ -1745,7 +1756,7 @@ func (m model) setupPipelinePickerSearchLine(width int) string {
 	return fitStyledLine(prompt+zeroTheme.ink.Render(query)+cursor, width)
 }
 
-func (m model) setupPipelinePickerRow(width int, index int, option stageModelOption) string {
+func (m model) setupPipelinePickerRow(width int, index int, option stageModelOption, isCurrent bool) string {
 	selected := index == m.setup.pipelineModelIndex
 	marker := "  "
 	style := zeroTheme.ink
@@ -1753,7 +1764,11 @@ func (m model) setupPipelinePickerRow(width int, index int, option stageModelOpt
 		marker = "❯ "
 		style = zeroTheme.accent.Bold(true)
 	}
-	left := marker + style.Render(option.label)
+	suffix := ""
+	if isCurrent && !selected {
+		suffix = " " + zeroTheme.faint.Render("(current)")
+	}
+	left := marker + style.Render(option.label) + suffix
 	return padSetupLine(left, width)
 }
 

@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1764,6 +1765,55 @@ func TestSetupPipelinePickerSearchFilters(t *testing.T) {
 	if !found {
 		t.Fatalf("filter should keep gpt-5.6-sol, got %v", after)
 	}
+}
+
+func TestSetupPipelinePickerShowsCountAndCurrentMarker(t *testing.T) {
+	m, _ := newSetupModelForPipeline(t, "gpt-5.6-sol")
+	stage := m.sortedSetupPipelineStages()[m.setup.pipelineIndex]
+	currentPick := m.setup.pipelinePicks[stage]
+	m.openSetupPipelinePicker()
+	view := plainRender(t, m.setupView(100))
+	// Title shows the stage name and the total option count.
+	if !strings.Contains(view, "Pick model for "+stage) {
+		t.Fatalf("picker title missing stage %q:\n%s", stage, view)
+	}
+	filtered := m.setupPipelinePickerFiltered()
+	if !strings.Contains(view, fmt.Sprintf("(%d)", len(filtered))) {
+		t.Fatalf("picker title missing count (%d):\n%s", len(filtered), view)
+	}
+	// The current committed pick is marked as (current) when not selected.
+	// The picker opens with the cursor on the current pick, so move it first.
+	upd, _ := m.Update(testKey(tea.KeyDown))
+	m = upd.(model)
+	view = plainRender(t, m.setupView(100))
+	if currentPick != "" && !strings.Contains(view, "(current)") {
+		t.Fatalf("picker missing (current) marker for %q after moving cursor:\n%s", currentPick, view)
+	}
+}
+
+func TestSetupPipelinePickerScrollIndicatorWhenWindowed(t *testing.T) {
+	m, _ := newSetupModelForPipeline(t, "gpt-5.6-sol")
+	stage := m.sortedSetupPipelineStages()[m.setup.pipelineIndex]
+	m.openSetupPipelinePicker()
+	filtered := m.setupPipelinePickerFiltered()
+	if len(filtered) < 3 {
+		t.Skip("need at least 3 options to test windowing")
+	}
+	// Force a tiny window so not all options are visible.
+	view := plainRender(t, m.setupView(80))
+	// Move the cursor to the last option so the window scrolls to the bottom.
+	m.setup.pipelineModelIndex = len(filtered) - 1
+	view = plainRender(t, m.setupView(80))
+	// When windowed at the bottom, the top indicator must show more above.
+	// (If the terminal is tall enough to show all, neither indicator appears,
+	// which is also correct; assert only when the list is actually windowed.)
+	maxVisible := setupModelMaxVisible(normalizedStartupHeight(0), len(filtered))
+	if maxVisible < len(filtered) {
+		if !strings.Contains(view, "more above") {
+			t.Fatalf("windowed picker missing 'more above' indicator (maxVisible=%d, total=%d):\n%s", maxVisible, len(filtered), view)
+		}
+	}
+	_ = stage
 }
 
 func TestSetupPipelinePickerEnterCommits(t *testing.T) {
