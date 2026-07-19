@@ -196,8 +196,8 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          # Trusted publishing (OIDC) requires Node 22.14.0+ and npm CLI 11.5.1+.
-          node-version: '22'
+          # Trusted publishing (OIDC) requires npm CLI 11.5.1+, bundled with Node 24.
+          node-version: '24'
 
       - name: Sync package.json version to tag
         run: |
