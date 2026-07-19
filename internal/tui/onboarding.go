@@ -977,7 +977,15 @@ func (m *model) populateSetupPipelinePicks() {
 			if !candidate.Supports(modelregistry.ModelCapabilityToolCalling) {
 				continue
 			}
-			toolOptions = append(toolOptions, stageModelOption{label: candidate.DisplayName, value: candidate.ID})
+			meta := providerWizardModelMeta(
+				candidate.ContextLimits.ContextWindow,
+				candidate.Supports(modelregistry.ModelCapabilityToolCalling),
+				candidate.Supports(modelregistry.ModelCapabilityReasoning),
+				candidate.Cost.InputPerMillion,
+				candidate.Cost.OutputPerMillion,
+				nil,
+			)
+			toolOptions = append(toolOptions, stageModelOption{label: candidate.DisplayName, value: candidate.ID, meta: meta})
 		}
 	}
 
@@ -1769,6 +1777,16 @@ func (m model) setupPipelinePickerLines(width int, height int) []string {
 	}
 	if end < len(filtered) {
 		lines = append(lines, padSetupLine("  "+zeroTheme.faint.Render(fmt.Sprintf("↓ %d more below", len(filtered)-end)), rowWidth))
+	}
+	// Detail line mirroring the Model step: show the selected option's meta
+	// (description, context window, tools, reasoning, cost) so the picker is
+	// as informative as the primary model picker.
+	selectedIdx := clampInt(m.setup.pipelineModelIndex, 0, len(filtered)-1)
+	if detail := strings.TrimSpace(filtered[selectedIdx].meta); detail != "" {
+		lines = append(lines,
+			blankSetupBlockLine(rowWidth),
+			padSetupLine("  "+zeroTheme.faint.Render(detail), rowWidth),
+		)
 	}
 	return lines
 }

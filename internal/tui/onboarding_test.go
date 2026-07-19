@@ -1791,6 +1791,26 @@ func TestSetupPipelinePickerShowsCountAndCurrentMarker(t *testing.T) {
 	}
 }
 
+func TestSetupPipelinePickerShowsSelectedDetail(t *testing.T) {
+	m, _ := newSetupModelForPipeline(t, "gpt-5.6-sol")
+	m.openSetupPipelinePicker()
+	filtered := m.setupPipelinePickerFiltered()
+	if len(filtered) == 0 {
+		t.Fatal("picker has no options")
+	}
+	// The selected option's meta must appear as a faint detail line at the
+	// bottom, mirroring the Model step's setupModelSelectedDetail.
+	selectedIdx := clampInt(m.setup.pipelineModelIndex, 0, len(filtered)-1)
+	wantMeta := filtered[selectedIdx].meta
+	if wantMeta == "" {
+		t.Skip("selected option has no meta to assert")
+	}
+	view := plainRender(t, m.setupView(100))
+	if !strings.Contains(view, wantMeta) {
+		t.Fatalf("picker missing selected-option detail %q:\n%s", wantMeta, view)
+	}
+}
+
 func TestSetupPipelinePickerScrollIndicatorWhenWindowed(t *testing.T) {
 	m, _ := newSetupModelForPipeline(t, "gpt-5.6-sol")
 	stage := m.sortedSetupPipelineStages()[m.setup.pipelineIndex]
