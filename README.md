@@ -496,5 +496,4 @@ Splice is built on top of [Gitlawb's Zero CLI](https://github.com/gitlawb/zero),
 an open-source MIT-licensed terminal coding agent. Splice extends Zero's engine
 with a deterministic, orchestrator-mediated multi-stage pipeline paradigm ported
 from the archived Flug prototype. All upstream Zero code retains its original
-copyright and license. See [UPSTREAM.md](UPSTREAM.md) for the full divergence
-list and the upstream sync procedure.
+copyright and license.

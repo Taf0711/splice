@@ -375,4 +375,4 @@ Splice 基于 [MIT 许可证](LICENSE) 发布。
 
 ## 致谢
 
-Splice 构建于 [Gitlawb 的 Zero CLI](https://github.com/gitlawb/zero) 之上——一个开源的、MIT 许可的终端编码智能体。Splice 在 Zero 的引擎之上扩展了一个从已归档的 Flug 原型移植而来的、确定性的、由编排器驱动的多阶段流水线范式。所有上游 Zero 代码保留其原始版权和许可证。完整的分歧列表和上游同步流程参见 [UPSTREAM.md](UPSTREAM.md)。
+Splice 构建于 [Gitlawb 的 Zero CLI](https://github.com/gitlawb/zero) 之上——一个开源的、MIT 许可的终端编码智能体。Splice 在 Zero 的引擎之上扩展了一个从已归档的 Flug 原型移植而来的、确定性的、由编排器驱动的多阶段流水线范式。所有上游 Zero 代码保留其原始版权和许可证。

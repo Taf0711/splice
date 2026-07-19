@@ -15,7 +15,8 @@ Two layers, one binary:
 
 - **The Zero substrate**: interactive TUI, session storage, provider adapters
   (25+), tool registry, sandbox and permission policy, worktrees, MCP/skills/
-  plugins. Inherited upstream code; divergences are tracked in `UPSTREAM.md`.
+  plugins. Inherited upstream code, with Splice-specific extensions in
+  `internal/splice/` and thin seams in `internal/cli/`.
 - **The Splice pipeline** (`internal/splice/`): a request is classified into a
   tier, turned into a typed `ExecutionPlan`, and run through specialized stages
   (code writer, static analyzer, test generator, security auditor, test runner)
@@ -85,8 +86,8 @@ almost certainly wrong.
 ## Upstream Discipline
 
 Splice is a fork of Zero. Changes to inherited Zero code (`internal/agent`,
-`internal/tui`, `internal/tools`, and the rest) should stay minimal and be
-recorded in `UPSTREAM.md`, because every divergence is a future merge conflict.
+`internal/tui`, `internal/tools`, and the rest) should stay minimal, because
+every divergence is a future merge conflict.
 New Splice behavior belongs in `internal/splice/`, `internal/memd/`,
 `internal/worktrees/` extensions, or thin seams in `internal/cli/`.
 
@@ -161,8 +162,6 @@ go run ./cmd/splice-release build --goos linux --goarch amd64
 ## Documentation
 
 - `README.md` / `README_ZH.md`: project overview (keep both languages in sync).
-- `UPSTREAM.md`: every divergence from `gitlawb/zero` and the upstream sync
-  procedure.
 - `AGENTS.zero.md`: Zero's upstream extension guide (project AGENTS.md files,
   specialists, skills, hooks, plugins), kept for reference.
 - `docs/STREAM_JSON_PROTOCOL.md`: the stream-JSON event contract for headless
@@ -185,5 +184,4 @@ won't understand. If you're tempted to use a feature unique to one tool
 conversation, not in the repo files.
 
 The only model-aware files are the thin entry-point pointers (`CLAUDE.md`,
-`.cursorrules`). Everything substantive lives in `AGENTS.md`, `UPSTREAM.md`, and
-`docs/`.
+`.cursorrules`). Everything substantive lives in `AGENTS.md` and `docs/`.
