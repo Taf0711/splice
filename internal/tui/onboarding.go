@@ -948,28 +948,55 @@ func (m *model) populateSetupPipelinePicks() {
 		Model:        primaryModelID,
 	}
 
+	// Build the per-stage options from the discovered model list the user just
+	// picked the primary from (m.setup.models), filtered to tool-calling. This
+	// is the same surface the Model step showed, so the pipeline picker sees
+	// every tool-capable model the provider offers (e.g. all of OpenRouter),
+	// not just the small built-in catalog. Falls back to the catalog only when
+	// discovery produced no tool-calling models.
+	toolOptions := make([]stageModelOption, 0, len(m.setup.models))
+	for _, model := range m.setup.models {
+		if !model.ToolCall {
+			continue
+		}
+		label := model.ID
+		if desc := strings.TrimSpace(model.Description); desc != "" && desc != "live model" {
+			label = desc
+		}
+		toolOptions = append(toolOptions, stageModelOption{label: label, value: model.ID, meta: model.Meta})
+	}
+	if len(toolOptions) == 0 {
+		// Discovery returned nothing tool-capable (e.g. offline, or a provider
+		// whose /models endpoint omits the flag). Fall back to the catalog so the
+		// picker is not empty; the user can still type to search.
+		sourceProvider := modelregistry.ProviderKind(provider.Transport)
+		if hasPrimary {
+			sourceProvider = primaryEntry.Provider
+		}
+		for _, candidate := range m.modelCatalog.ListByProvider(sourceProvider) {
+			if !candidate.Supports(modelregistry.ModelCapabilityToolCalling) {
+				continue
+			}
+			toolOptions = append(toolOptions, stageModelOption{label: candidate.DisplayName, value: candidate.ID})
+		}
+	}
+
 	for stage := range splicerun.StageTierLabels() {
 		entry := splicerun.ResolveStageTierModel(stage, profile, m.modelCatalog)
 		pick := primaryModelID
 		if entry != nil {
 			pick = entry.ID
 		}
-		m.setup.pipelinePicks[stage] = pick
-
-		var sourceProvider modelregistry.ProviderKind
-		if entry != nil {
-			sourceProvider = entry.Provider
-		} else if hasPrimary {
-			sourceProvider = primaryEntry.Provider
-		}
-		var options []stageModelOption
-		for _, candidate := range m.modelCatalog.ListByProvider(sourceProvider) {
-			if !candidate.Supports(modelregistry.ModelCapabilityToolCalling) {
-				continue
+		// If the tier-resolved pick is not in the discovered tool-calling list
+		// (e.g. it is a catalog-only model), keep the primary as the pick so the
+		// picker opens on a real, selectable entry.
+		if setupOptionIndex(toolOptions, pick) < 0 {
+			if setupOptionIndex(toolOptions, primaryModelID) >= 0 {
+				pick = primaryModelID
 			}
-			options = append(options, stageModelOption{label: candidate.DisplayName, value: candidate.ID})
 		}
-		m.setup.pipelineOptions[stage] = options
+		m.setup.pipelinePicks[stage] = pick
+		m.setup.pipelineOptions[stage] = toolOptions
 	}
 	m.setup.pipelinePickerActive = false
 	m.setup.pipelinePickerQuery = ""

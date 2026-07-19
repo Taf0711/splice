@@ -16,6 +16,7 @@ func providerWizardModelOptions(provider providercatalog.Descriptor) []providerW
 			ID:          model.ID,
 			Description: model.Description,
 			Meta:        providerWizardModelMeta(model.ContextWindow, model.ToolCall, model.Reasoning, model.InputCost, model.OutputCost, model.Tags),
+			ToolCall:    model.ToolCall,
 		})
 	}
 	return models

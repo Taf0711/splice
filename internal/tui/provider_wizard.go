@@ -289,6 +289,7 @@ type providerWizardModel struct {
 	ID          string
 	Description string
 	Meta        string
+	ToolCall    bool
 }
 
 type providerWizardState struct {

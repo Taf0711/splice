@@ -2011,6 +2011,110 @@ func TestSetupPipelineLocalProviderWritesDefaultOnly(t *testing.T) {
 	}
 }
 
+func TestSetupPipelineOptionsFromDiscoveredModels(t *testing.T) {
+	discovered := []providermodeldiscovery.Model{
+		{ID: "discovered-tool-1", Description: "Tool One", ToolCall: true},
+		{ID: "discovered-notool", Description: "No Tool", ToolCall: false},
+		{ID: "discovered-tool-2", Description: "Tool Two", ToolCall: true},
+	}
+	m := newModel(context.Background(), Options{
+		UserConfigPath: filepath.Join(t.TempDir(), "config.json"),
+		DiscoverProviderModels: func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+			return discovered, nil
+		},
+		Setup: SetupOptions{
+			Visible:    true,
+			Required:   true,
+			ConfigPath: filepath.Join(t.TempDir(), "config.json"),
+			Providers: []SetupProviderOption{
+				{ID: "openai", Name: "OpenAI", DefaultModel: "gpt-4.1", EnvVar: "OPENAI_API_KEY", RequiresAuth: true},
+			},
+			Save: func(selection SetupSelection) (SetupResult, error) {
+				return SetupResult{
+					ConfigPath: filepath.Join(t.TempDir(), "config.json"),
+					Provider: config.ProviderProfile{
+						Name:      selection.CatalogID,
+						CatalogID: selection.CatalogID,
+						Model:     selection.Model,
+					},
+				}, nil
+			},
+		},
+	})
+	m.width = 100
+	m.height = 30
+	m.setup.visible = true
+	m.setup.stage = setupStageCredentials
+
+	// Trigger model discovery and apply its result.
+	upd, cmd := m.Update(testKey(tea.KeyEnter))
+	m = upd.(model)
+	if cmd == nil {
+		t.Fatal("entering credentials step should start model discovery")
+	}
+	upd, _ = m.Update(cmd())
+	m = upd.(model)
+
+	// Advance through provider/API-key steps if still there.
+	for m.setup.stage != setupStageModel && m.setup.stage != setupStageReady {
+		m = pressSetupContinue(m)
+	}
+	if m.setup.stage != setupStageModel {
+		t.Fatalf("expected model step, got %v", m.setup.stage)
+	}
+
+	// Pick the first discovered model as the primary.
+	m.setup.modelIndex = 0
+	m = pressSetupContinueOnce(m)
+	if m.setup.stage != setupStagePipeline {
+		t.Fatalf("expected pipeline step, got %v", m.setup.stage)
+	}
+
+	for _, stage := range m.sortedSetupPipelineStages() {
+		opts := m.setup.pipelineOptions[stage]
+		if len(opts) == 0 {
+			t.Fatalf("stage %q has no pipeline options", stage)
+		}
+		// Every option must be a tool-calling model from the discovered list.
+		for _, opt := range opts {
+			found := false
+			toolCalling := false
+			for _, dm := range discovered {
+				if dm.ID == opt.value {
+					found = true
+					toolCalling = dm.ToolCall
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("stage %q option %q is not from the discovered list", stage, opt.value)
+			}
+			if !toolCalling {
+				t.Fatalf("stage %q option %q is not tool-calling", stage, opt.value)
+			}
+		}
+		// The non-tool-calling discovered model must be excluded.
+		for _, opt := range opts {
+			if opt.value == "discovered-notool" {
+				t.Fatalf("stage %q included non-tool-calling discovered model", stage)
+			}
+		}
+		// At least one of the discovered tool-calling options must appear.
+		var sawTool1, sawTool2 bool
+		for _, opt := range opts {
+			if opt.value == "discovered-tool-1" {
+				sawTool1 = true
+			}
+			if opt.value == "discovered-tool-2" {
+				sawTool2 = true
+			}
+		}
+		if !sawTool1 || !sawTool2 {
+			t.Fatalf("stage %q missing discovered tool options: sawTool1=%v sawTool2=%v", stage, sawTool1, sawTool2)
+		}
+	}
+}
+
 func TestSetupPipelineReadySummaryRow(t *testing.T) {
 	m, _ := newSetupModelForPipeline(t, "gpt-5.6-sol")
 	m.setup.stage = setupStageReady

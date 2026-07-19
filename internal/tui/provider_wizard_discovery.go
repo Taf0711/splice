@@ -151,6 +151,7 @@ func providerWizardModelsFromDiscovery(models []providermodeldiscovery.Model) []
 			ID:          id,
 			Description: firstProviderDisplayValue(model.Description, "live model"),
 			Meta:        providerWizardModelMeta(model.ContextWindow, model.ToolCall, model.Reasoning, model.InputCost, model.OutputCost, model.Tags),
+			ToolCall:    model.ToolCall,
 		})
 	}
 	return result
