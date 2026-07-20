@@ -11,7 +11,7 @@ import (
 // hooks configured the dispatcher selects nothing and runs no commands, so the
 // hot path stays free of overhead until a user opts in via hooks.json.
 func newHookDispatcher(workspaceRoot string) *hooks.Dispatcher {
-	return newHookDispatcherWithExtra(workspaceRoot, nil)
+	return newHookDispatcherWithExtra(workspaceRoot, false, nil)
 }
 
 // newHookDispatcherWithExtra builds the dispatcher like newHookDispatcher but also
@@ -19,9 +19,10 @@ func newHookDispatcher(workspaceRoot string) *hooks.Dispatcher {
 // declared hooks run alongside the user/project hooks.json hooks. Plugin hooks are
 // appended after the configured hooks; their ids are plugin-namespaced (plugin
 // id + hook name) so they never collide with hooks.json ids. A nil/empty extra
-// slice is byte-equivalent to newHookDispatcher.
-func newHookDispatcherWithExtra(workspaceRoot string, extra []hooks.Definition) *hooks.Dispatcher {
-	loaded, err := hooks.LoadConfig(hooks.LoadOptions{Cwd: workspaceRoot})
+// slice is byte-equivalent to newHookDispatcher. When disableProject is true,
+// the project hooks.json layer is skipped (untrusted workspace).
+func newHookDispatcherWithExtra(workspaceRoot string, disableProject bool, extra []hooks.Definition) *hooks.Dispatcher {
+	loaded, err := hooks.LoadConfig(hooks.LoadOptions{Cwd: workspaceRoot, DisableProject: disableProject})
 	if err != nil {
 		return nil
 	}

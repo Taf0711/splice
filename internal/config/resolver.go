@@ -142,22 +142,23 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		// normalized (but active-less) profile list — keep it so a caller can fall
 		// back to an already-configured usable provider instead of treating this
 		// like a config with nothing set up at all.
-		return ResolvedConfig{Providers: providers}, err
+		return ResolvedConfig{Providers: providers, DefaultProjectTrust: cfg.DefaultProjectTrust}, err
 	}
 
 	return ResolvedConfig{
-		ActiveProvider: active.Name,
-		Providers:      providers,
-		Provider:       active,
-		MaxTurns:       cfg.MaxTurns,
-		MCP:            cfg.MCP,
-		Sandbox:        cfg.Sandbox,
-		Notify:         cfg.Notify,
-		Tools:          cfg.Tools,
-		Swarm:          cfg.Swarm,
-		Preferences:    cfg.Preferences,
-		KeyBindings:    cfg.KeyBindings,
-		LocalControl:   cfg.LocalControl,
+		ActiveProvider:      active.Name,
+		Providers:           providers,
+		Provider:            active,
+		MaxTurns:            cfg.MaxTurns,
+		MCP:                 cfg.MCP,
+		Sandbox:             cfg.Sandbox,
+		Notify:              cfg.Notify,
+		Tools:               cfg.Tools,
+		Swarm:               cfg.Swarm,
+		Preferences:         cfg.Preferences,
+		KeyBindings:         cfg.KeyBindings,
+		LocalControl:        cfg.LocalControl,
+		DefaultProjectTrust: cfg.DefaultProjectTrust,
 	}, nil
 }
 

@@ -286,18 +286,19 @@ type Overrides struct {
 }
 
 type ResolvedConfig struct {
-	ActiveProvider string
-	Providers      []ProviderProfile
-	Provider       ProviderProfile
-	MaxTurns       int
-	MCP            MCPConfig
-	Sandbox        SandboxConfig
-	Notify         NotifyConfig
-	Tools          ToolsConfig
-	Swarm          SwarmConfig
-	Preferences    PreferencesConfig
-	KeyBindings    KeyBindingsConfig
-	LocalControl   LocalControlConfig
+	ActiveProvider      string
+	Providers           []ProviderProfile
+	Provider            ProviderProfile
+	MaxTurns            int
+	MCP                 MCPConfig
+	Sandbox             SandboxConfig
+	Notify              NotifyConfig
+	Tools               ToolsConfig
+	Swarm               SwarmConfig
+	Preferences         PreferencesConfig
+	KeyBindings         KeyBindingsConfig
+	LocalControl        LocalControlConfig
+	DefaultProjectTrust string
 }
 
 type MCPConfig struct {

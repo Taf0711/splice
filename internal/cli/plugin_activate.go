@@ -28,8 +28,15 @@ type pluginActivation struct {
 // It fails OPEN: any load error (or a malformed plugin) is surfaced as a warning
 // on stderr and otherwise skipped, so a broken plugin can never wedge startup —
 // mirroring how newHookDispatcher and skills.Load tolerate bad input.
-func activatePlugins(workspaceRoot string, registry *tools.Registry, deps appDeps, stderr io.Writer) pluginActivation {
-	loaded, err := deps.loadPlugins(plugins.LoadOptions{Cwd: workspaceRoot})
+func activatePlugins(workspaceRoot string, registry *tools.Registry, deps appDeps, trusted bool, stderr io.Writer) pluginActivation {
+	loadOptions := plugins.LoadOptions{Cwd: workspaceRoot}
+	if !trusted {
+		// Untrusted workspace: never scan the project plugins directory.
+		loadOptions = plugins.LoadOptions{
+			Roots: []plugins.Root{{Source: plugins.SourceUser, Path: deps.pluginsDir()}},
+		}
+	}
+	loaded, err := deps.loadPlugins(loadOptions)
 	if err != nil {
 		writePluginActivationWarning(stderr, "failed to load plugins: "+err.Error())
 		return pluginActivation{}

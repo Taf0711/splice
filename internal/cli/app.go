@@ -54,12 +54,13 @@ var (
 )
 
 type appDeps struct {
-	getwd            func() (string, error)
-	stdin            io.Reader
-	userConfigPath   func() (string, error)
-	resolveConfig    func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error)
-	resolveMCPConfig func(workspaceRoot string) (config.MCPConfig, error)
-	newProvider      func(config.ProviderProfile) (zeroruntime.Provider, error)
+	getwd                 func() (string, error)
+	stdin                 io.Reader
+	userConfigPath        func() (string, error)
+	resolveConfig         func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error)
+	resolveMCPConfig      func(workspaceRoot string) (config.MCPConfig, error)
+	resolveMCPConfigTrust func(workspaceRoot string, projectTrusted bool) (config.MCPConfig, error)
+	newProvider           func(config.ProviderProfile) (zeroruntime.Provider, error)
 	// exportActiveProvider pins spawned children to the run's provider (production:
 	// config.SetActiveProviderEnv, set in defaultAppDeps — deliberately NOT filled
 	// by fillAppDeps, so tests never mutate the process environment unless they
@@ -133,11 +134,10 @@ func defaultAppDeps() appDeps {
 			return config.Resolve(options)
 		},
 		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
-			options, err := config.DefaultResolveOptions(workspaceRoot)
-			if err != nil {
-				return config.MCPConfig{}, err
-			}
-			return config.ResolveMCP(options)
+			return defaultResolveMCPConfig(workspaceRoot, true)
+		},
+		resolveMCPConfigTrust: func(workspaceRoot string, projectTrusted bool) (config.MCPConfig, error) {
+			return defaultResolveMCPConfig(workspaceRoot, projectTrusted)
 		},
 		newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
 			// Resolve the OAuth login ONCE: the bearer resolver and the login key it
@@ -484,6 +484,18 @@ func fillAppDeps(deps appDeps) appDeps {
 	if deps.resolveConfig == nil {
 		deps.resolveConfig = defaults.resolveConfig
 	}
+	if deps.resolveMCPConfigTrust == nil {
+		// If the caller injected only the legacy resolver, wrap it so the
+		// trust-aware path still compiles and behaves the same regardless of
+		// trust. Otherwise fall back to the production trust-aware resolver.
+		if deps.resolveMCPConfig != nil {
+			deps.resolveMCPConfigTrust = func(workspaceRoot string, _ bool) (config.MCPConfig, error) {
+				return deps.resolveMCPConfig(workspaceRoot)
+			}
+		} else {
+			deps.resolveMCPConfigTrust = defaults.resolveMCPConfigTrust
+		}
+	}
 	if deps.resolveMCPConfig == nil {
 		deps.resolveMCPConfig = defaults.resolveMCPConfig
 	}
@@ -678,6 +690,27 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		}
 	}
 
+	// Resolve workspace trust before loading any project-scope executables.
+	setting := resolved.DefaultProjectTrust
+	if setting == "" {
+		setting = "ask"
+	}
+	trusted, persist, store, err := resolveWorkspaceTrust(workspaceRoot, setting, rootTrust, rootNoTrust)
+	if err != nil {
+		fmt.Fprintf(stderr, "warning: failed to resolve workspace trust: %s\n", err)
+		trusted = false
+		persist = false
+	}
+	if persist && store != nil {
+		_ = store.SetTrusted(workspaceRoot, trusted)
+		if saveErr := store.Save(); saveErr != nil {
+			fmt.Fprintf(stderr, "warning: failed to persist trust decision: %s\n", saveErr)
+		}
+	}
+	if !trusted && projectConfigExists(workspaceRoot) {
+		fmt.Fprintf(stderr, "workspace %s is not trusted; skipped project MCP servers, hooks, plugins. Run with --trust or set defaultProjectTrust=always to load them.\n", workspaceRoot)
+	}
+
 	scope, err := sandbox.NewScope(workspaceRoot, append(append([]string{}, resolved.Sandbox.AdditionalWriteRoots...), addDirs...))
 	if err != nil {
 		return writeAppError(stderr, err.Error(), 1)
@@ -695,7 +728,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		return writeAppError(stderr, "failed to initialize specialist tools: "+err.Error(), 1)
 	}
 	defer closeSpecialistRuntime(stderr, specialistRuntime)
-	mcpConfig, err := deps.resolveMCPConfig(workspaceRoot)
+	mcpConfig, err := deps.resolveMCPConfigTrust(workspaceRoot, trusted)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), 1)
 	}
@@ -731,7 +764,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// collect their hooks + skill roots for the dispatcher and skill tool below.
 	// Done after specialist + MCP registration so plugin tools are part of the
 	// deferral count, and it fails OPEN — a malformed plugin is warned and skipped.
-	pluginActivation := activatePlugins(workspaceRoot, registry, deps, stderr)
+	pluginActivation := activatePlugins(workspaceRoot, registry, deps, trusted, stderr)
 	// Ask (not Auto) is the interactive default: in Auto, ToolAdvertised exposes
 	// only PermissionAllow tools, so prompt-gated tools (write_file/edit_file/bash/
 	// apply_patch) would never be offered to the model — the TUI could neither edit
@@ -768,6 +801,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	lastKnownMCPConfig := mcpConfig
 	return deps.runTUI(context.Background(), tui.Options{
 		Cwd:                  workspaceRoot,
+		Trusted:              trusted,
 		Version:              version,
 		Theme:                theme,
 		SavedTheme:           resolved.Preferences.Theme,
@@ -816,7 +850,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			Autonomy:       "low",
 			Sandbox:        sandboxEngine,
 			FileTracker:    tools.NewFileTracker(),
-			Hooks:          newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks),
+			Hooks:          newHookDispatcherWithExtra(workspaceRoot, !trusted, pluginActivation.hooks),
 			DeferThreshold: resolved.Tools.DeferThreshold,
 			Specialists:    specialistRuntime.specialists,
 			Skills:         pluginActivation.skillInfos(deps.skillsDir()),

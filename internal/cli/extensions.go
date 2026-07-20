@@ -286,7 +286,7 @@ func runMCPTools(ctx context.Context, args []string, stdout io.Writer, stderr io
 			return writeAppError(stderr, "failed to resolve workspace: "+err.Error(), exitCrash)
 		}
 		registry := tools.NewRegistry()
-		mcpRuntime, err := registerMCPToolsForWorkspace(ctx, cwd, registry, deps, mcp.AutonomyLow)
+		mcpRuntime, err := registerMCPToolsForWorkspace(ctx, cwd, registry, deps, true, mcp.AutonomyLow)
 		if err != nil {
 			return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 		}
