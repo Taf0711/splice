@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Taf0711/splice/internal/secrets"
 )
 
 type RemoteTool struct {
@@ -433,7 +435,7 @@ func (client *Client) notify(method string, params any) error {
 }
 
 func mergeProcessEnv(env map[string]string) []string {
-	merged := append([]string{}, os.Environ()...)
+	merged := append([]string{}, secrets.ScrubChildEnv(os.Environ())...)
 	for key, value := range env {
 		merged = append(merged, key+"="+value)
 	}

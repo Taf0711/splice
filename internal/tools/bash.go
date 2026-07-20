@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -282,6 +283,9 @@ func buildBashCommand(ctx context.Context, commandText string, absoluteCwd strin
 	}
 	command := exec.CommandContext(ctx, spec.Name, spec.Args...)
 	command.Dir = spec.Dir
+	// Escalated (non-sandboxed) commands inherit the process env by default.
+	// Scrub credential-bearing variables so the child cannot exfiltrate keys.
+	command.Env = secrets.ScrubChildEnv(os.Environ())
 	applyWindowsShellCommandLine(command, commandText, plan.Wrapped)
 	return command, plan, nil
 }

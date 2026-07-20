@@ -594,7 +594,7 @@ func (tool pluginTool) commandCwd(cwd string) string {
 func (tool pluginTool) commandEnv() []string {
 	base := tool.options.Env
 	if base == nil {
-		base = os.Environ()
+		base = secrets.ScrubChildEnv(os.Environ())
 	}
 	env := append([]string{}, base...)
 	if strings.TrimSpace(tool.pluginDir) != "" {

@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strings"
 	"sync/atomic"
+
+	"github.com/Taf0711/splice/internal/secrets"
 )
 
 var errNativeSandboxUnavailable = errors.New("native sandbox backend is unavailable")
@@ -377,10 +379,11 @@ func sandboxEnvironment(policy Policy, backend BackendName, _ string) []string {
 func sandboxEnvironmentForCommand(specEnv []string, policy Policy, backend BackendName) []string {
 	env := cloneStrings(specEnv)
 	if specEnv == nil {
-		// Preserve the caller environment for sandboxed commands. The sandbox
-		// boundary is the filesystem/network policy, not env scrubbing; explicit
-		// command env values still replace inherited values below.
-		env = os.Environ()
+		// Preserve the caller environment for sandboxed commands. Scrub
+		// credential-bearing variables so a prompt-injected `env`/`printenv`
+		// cannot exfiltrate provider keys; explicit command env values still
+		// replace inherited values below.
+		env = secrets.ScrubChildEnv(os.Environ())
 	}
 	pathValue := envListValue(env, "PATH", defaultPath())
 	if runtime.GOOS == "darwin" {
