@@ -213,6 +213,10 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.confirmSetupPipelinePicker()
 			return m, nil
 		}
+		if m.setup.stage == setupStagePipeline && !m.setup.pipelinePickerActive && !setupProviderUsesTypedModel(m.setupProvider()) {
+			m.openSetupPipelinePicker()
+			return m, nil
+		}
 		if m.setup.stage == setupStageMethod || m.setup.stage == setupStageProvider || m.setup.stage == setupStageModel || m.setup.stage == setupStagePipeline || m.setup.stage == setupStageReady {
 			return m.advanceSetup()
 		}
@@ -223,10 +227,8 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case keyIs(msg, tea.KeyRight):
-		if m.setup.stage == setupStagePipeline {
-			if !m.setup.pipelinePickerActive {
-				m.openSetupPipelinePicker()
-			}
+		if m.setup.stage == setupStagePipeline && !m.setup.pipelinePickerActive {
+			return m.advanceSetup()
 		}
 		return m, nil
 	case keyIs(msg, tea.KeyUp):
@@ -2203,7 +2205,7 @@ func (m model) setupFooter() string {
 		if m.setup.pipelinePickerActive {
 			return zeroTheme.faint.Render("type search   Backspace edit   Ctrl+U clear   ↑/↓ move   Enter choose   ←/Esc back")
 		}
-		return zeroTheme.faint.Render("↑/↓ stage   → pick model   ") + zeroTheme.accent.Render("Enter") + zeroTheme.faint.Render(" continue")
+		return zeroTheme.faint.Render("↑/↓ stage   ") + zeroTheme.accent.Render("Enter") + zeroTheme.faint.Render(" pick model   → continue")
 	case setupStageWelcome:
 		return zeroTheme.accent.Render("Space") + zeroTheme.faint.Render(" to set up Splice")
 	default:

@@ -1719,19 +1719,34 @@ func TestSetupPipelineUpDownMovesFocus(t *testing.T) {
 	}
 }
 
-func TestSetupPipelineRightOpensPicker(t *testing.T) {
+func TestSetupPipelineEnterOpensPicker(t *testing.T) {
+	m, _ := newSetupModelForPipeline(t, "gpt-5.6-sol")
+	if m.setup.pipelinePickerActive {
+		t.Fatal("overview should not start with picker open")
+	}
+	upd, _ := m.Update(testKey(tea.KeyEnter))
+	m = upd.(model)
+	if !m.setup.pipelinePickerActive {
+		t.Fatal("Enter on the overview should open the pipeline model picker")
+	}
+	stage := m.sortedSetupPipelineStages()[m.setup.pipelineIndex]
+	if len(m.setup.pipelineOptions[stage]) == 0 {
+		t.Fatalf("stage %q has no model options to pick from", stage)
+	}
+}
+
+func TestSetupPipelineRightAdvancesToSafety(t *testing.T) {
 	m, _ := newSetupModelForPipeline(t, "gpt-5.6-sol")
 	if m.setup.pipelinePickerActive {
 		t.Fatal("overview should not start with picker open")
 	}
 	upd, _ := m.Update(testKey(tea.KeyRight))
 	m = upd.(model)
-	if !m.setup.pipelinePickerActive {
-		t.Fatal("Right should open the pipeline model picker")
+	if m.setup.stage != setupStageSafety {
+		t.Fatalf("Right on the overview should advance to Safety, got stage %v", m.setup.stage)
 	}
-	stage := m.sortedSetupPipelineStages()[m.setup.pipelineIndex]
-	if len(m.setup.pipelineOptions[stage]) == 0 {
-		t.Fatalf("stage %q has no model options to pick from", stage)
+	if m.setup.pipelinePickerActive {
+		t.Fatal("Right should not open the picker")
 	}
 }
 
