@@ -99,6 +99,7 @@ func TestUserCommandShadowsSkill(t *testing.T) {
 	writeUserCommand(t, root, "greet.md", "Say hello from the user command.")
 	m := newModel(context.Background(), Options{
 		Cwd:        root,
+		Trusted:    true,
 		LoadSkills: func() []skills.Skill { return []skills.Skill{{Name: "greet", Content: "Skill body must not run."}} },
 	})
 
@@ -190,6 +191,7 @@ func TestShadowedSkillNotSuggested(t *testing.T) {
 	}
 	m := newModel(context.Background(), Options{
 		Cwd:          root,
+		Trusted:      true,
 		LoadSkills:   func() []skills.Skill { return installed },
 		AgentOptions: agent.Options{Skills: infos},
 	})
@@ -359,7 +361,7 @@ func TestSkillInvocationWarnsDuringCompaction(t *testing.T) {
 func TestUserCommandQueuedWhileRunPending(t *testing.T) {
 	root := t.TempDir()
 	writeUserCommand(t, root, "greet.md", "Say hello to $1.")
-	m := newModel(context.Background(), Options{Cwd: root})
+	m := newModel(context.Background(), Options{Cwd: root, Trusted: true})
 	m.pending = true
 
 	next, _, handled := m.handleUserCommand("/greet world")
