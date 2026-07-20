@@ -63,7 +63,8 @@ const defaultDeferThreshold = 3
 
 func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 	cfg := FileConfig{
-		MaxTurns: defaultMaxTurns,
+		MaxTurns:            defaultMaxTurns,
+		DefaultProjectTrust: "ask",
 	}
 
 	if options.UserConfigPath != "" {
@@ -105,6 +106,13 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 	if cfg.Swarm.MaxTeamSize < 0 {
 		return ResolvedConfig{}, fmt.Errorf("invalid swarm.maxTeamSize %d: must be >= 0 (0 uses the default)", cfg.Swarm.MaxTeamSize)
 	}
+	if trust := strings.TrimSpace(cfg.DefaultProjectTrust); trust != "" {
+		switch trust {
+		case "ask", "always", "never":
+		default:
+			return ResolvedConfig{}, fmt.Errorf("invalid defaultProjectTrust %q: expected ask, always, or never", trust)
+		}
+	}
 
 	if network := strings.TrimSpace(cfg.Sandbox.Network); network != "" {
 		switch sandbox.NetworkMode(network) {
@@ -134,22 +142,23 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		// normalized (but active-less) profile list — keep it so a caller can fall
 		// back to an already-configured usable provider instead of treating this
 		// like a config with nothing set up at all.
-		return ResolvedConfig{Providers: providers}, err
+		return ResolvedConfig{Providers: providers, DefaultProjectTrust: cfg.DefaultProjectTrust}, err
 	}
 
 	return ResolvedConfig{
-		ActiveProvider: active.Name,
-		Providers:      providers,
-		Provider:       active,
-		MaxTurns:       cfg.MaxTurns,
-		MCP:            cfg.MCP,
-		Sandbox:        cfg.Sandbox,
-		Notify:         cfg.Notify,
-		Tools:          cfg.Tools,
-		Swarm:          cfg.Swarm,
-		Preferences:    cfg.Preferences,
-		KeyBindings:    cfg.KeyBindings,
-		LocalControl:   cfg.LocalControl,
+		ActiveProvider:      active.Name,
+		Providers:           providers,
+		Provider:            active,
+		MaxTurns:            cfg.MaxTurns,
+		MCP:                 cfg.MCP,
+		Sandbox:             cfg.Sandbox,
+		Notify:              cfg.Notify,
+		Tools:               cfg.Tools,
+		Swarm:               cfg.Swarm,
+		Preferences:         cfg.Preferences,
+		KeyBindings:         cfg.KeyBindings,
+		LocalControl:        cfg.LocalControl,
+		DefaultProjectTrust: cfg.DefaultProjectTrust,
 	}, nil
 }
 
@@ -228,6 +237,9 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 	}
 	if strings.TrimSpace(src.Preferences.Theme) != "" {
 		dst.Preferences.Theme = strings.TrimSpace(src.Preferences.Theme)
+	}
+	if trust := strings.TrimSpace(src.DefaultProjectTrust); trust != "" {
+		dst.DefaultProjectTrust = trust
 	}
 	mergeLocalControlConfig(&dst.LocalControl, src.LocalControl)
 	mergeKeyBindings(&dst.KeyBindings, src.KeyBindings)

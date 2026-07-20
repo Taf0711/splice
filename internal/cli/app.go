@@ -45,13 +45,22 @@ import (
 
 var version = "dev"
 
+// rootTrust and rootNoTrust hold the values of the global --trust / --no-trust
+// persistent flags parsed before subcommand dispatch. They are consulted by
+// startup paths that need to decide whether the workspace is trusted.
+var (
+	rootTrust   bool
+	rootNoTrust bool
+)
+
 type appDeps struct {
-	getwd            func() (string, error)
-	stdin            io.Reader
-	userConfigPath   func() (string, error)
-	resolveConfig    func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error)
-	resolveMCPConfig func(workspaceRoot string) (config.MCPConfig, error)
-	newProvider      func(config.ProviderProfile) (zeroruntime.Provider, error)
+	getwd                 func() (string, error)
+	stdin                 io.Reader
+	userConfigPath        func() (string, error)
+	resolveConfig         func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error)
+	resolveMCPConfig      func(workspaceRoot string) (config.MCPConfig, error)
+	resolveMCPConfigTrust func(workspaceRoot string, projectTrusted bool) (config.MCPConfig, error)
+	newProvider           func(config.ProviderProfile) (zeroruntime.Provider, error)
 	// exportActiveProvider pins spawned children to the run's provider (production:
 	// config.SetActiveProviderEnv, set in defaultAppDeps — deliberately NOT filled
 	// by fillAppDeps, so tests never mutate the process environment unless they
@@ -125,11 +134,10 @@ func defaultAppDeps() appDeps {
 			return config.Resolve(options)
 		},
 		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
-			options, err := config.DefaultResolveOptions(workspaceRoot)
-			if err != nil {
-				return config.MCPConfig{}, err
-			}
-			return config.ResolveMCP(options)
+			return defaultResolveMCPConfig(workspaceRoot, true)
+		},
+		resolveMCPConfigTrust: func(workspaceRoot string, projectTrusted bool) (config.MCPConfig, error) {
+			return defaultResolveMCPConfig(workspaceRoot, projectTrusted)
 		},
 		newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
 			// Resolve the OAuth login ONCE: the bearer resolver and the login key it
@@ -260,6 +268,17 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	}
 	addDirs = append(addDirs, moreDirs...)
 
+	// Reset global trust flags so stale values from prior invocations in the same
+	// process (e.g. tests) do not affect this run.
+	rootTrust, rootNoTrust = false, false
+	rootTrust, rootNoTrust, args, err = splitLeadingTrustFlags(args)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), 1)
+	}
+	if rootTrust && rootNoTrust {
+		return writeAppError(stderr, "Use either --trust or --no-trust, not both.", 1)
+	}
+
 	if len(args) == 0 {
 		return runInteractiveTUI(stderr, deps, agent.PermissionModeAsk, addDirs, theme)
 	}
@@ -351,10 +370,23 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		// a flag and rejected with "--prompt requires a value" (matches the cron path).
 		execArgs := append(addDirFlagArgs(addDirs), "--prompt="+args[1])
 		execArgs = append(execArgs, args[2:]...)
+		if rootTrust {
+			execArgs = append([]string{"--trust"}, execArgs...)
+		}
+		if rootNoTrust {
+			execArgs = append([]string{"--no-trust"}, execArgs...)
+		}
 		return runExec(execArgs, stdout, stderr, deps)
 	case "exec":
 		// Forward leading --add-dir occurrences so exec's own parser collects them.
-		return runExec(append(addDirFlagArgs(addDirs), args[1:]...), stdout, stderr, deps)
+		execArgs := append(addDirFlagArgs(addDirs), args[1:]...)
+		if rootTrust {
+			execArgs = append([]string{"--trust"}, execArgs...)
+		}
+		if rootNoTrust {
+			execArgs = append([]string{"--no-trust"}, execArgs...)
+		}
+		return runExec(execArgs, stdout, stderr, deps)
 	case "daemon":
 		return runDaemon(args[1:], stdout, stderr, deps)
 	case "config":
@@ -451,6 +483,18 @@ func fillAppDeps(deps appDeps) appDeps {
 	}
 	if deps.resolveConfig == nil {
 		deps.resolveConfig = defaults.resolveConfig
+	}
+	if deps.resolveMCPConfigTrust == nil {
+		// If the caller injected only the legacy resolver, wrap it so the
+		// trust-aware path still compiles and behaves the same regardless of
+		// trust. Otherwise fall back to the production trust-aware resolver.
+		if deps.resolveMCPConfig != nil {
+			deps.resolveMCPConfigTrust = func(workspaceRoot string, _ bool) (config.MCPConfig, error) {
+				return deps.resolveMCPConfig(workspaceRoot)
+			}
+		} else {
+			deps.resolveMCPConfigTrust = defaults.resolveMCPConfigTrust
+		}
 	}
 	if deps.resolveMCPConfig == nil {
 		deps.resolveMCPConfig = defaults.resolveMCPConfig
@@ -646,6 +690,27 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		}
 	}
 
+	// Resolve workspace trust before loading any project-scope executables.
+	setting := resolved.DefaultProjectTrust
+	if setting == "" {
+		setting = "ask"
+	}
+	trusted, persist, store, err := resolveWorkspaceTrust(workspaceRoot, setting, rootTrust, rootNoTrust)
+	if err != nil {
+		fmt.Fprintf(stderr, "warning: failed to resolve workspace trust: %s\n", err)
+		trusted = false
+		persist = false
+	}
+	if persist && store != nil {
+		_ = store.SetTrusted(workspaceRoot, trusted)
+		if saveErr := store.Save(); saveErr != nil {
+			fmt.Fprintf(stderr, "warning: failed to persist trust decision: %s\n", saveErr)
+		}
+	}
+	if !trusted && projectConfigExists(workspaceRoot) {
+		fmt.Fprintf(stderr, "workspace %s is not trusted; skipped project MCP servers, hooks, plugins. Run with --trust or set defaultProjectTrust=always to load them.\n", workspaceRoot)
+	}
+
 	scope, err := sandbox.NewScope(workspaceRoot, append(append([]string{}, resolved.Sandbox.AdditionalWriteRoots...), addDirs...))
 	if err != nil {
 		return writeAppError(stderr, err.Error(), 1)
@@ -663,7 +728,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		return writeAppError(stderr, "failed to initialize specialist tools: "+err.Error(), 1)
 	}
 	defer closeSpecialistRuntime(stderr, specialistRuntime)
-	mcpConfig, err := deps.resolveMCPConfig(workspaceRoot)
+	mcpConfig, err := deps.resolveMCPConfigTrust(workspaceRoot, trusted)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), 1)
 	}
@@ -699,7 +764,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// collect their hooks + skill roots for the dispatcher and skill tool below.
 	// Done after specialist + MCP registration so plugin tools are part of the
 	// deferral count, and it fails OPEN — a malformed plugin is warned and skipped.
-	pluginActivation := activatePlugins(workspaceRoot, registry, deps, stderr)
+	pluginActivation := activatePlugins(workspaceRoot, registry, deps, trusted, stderr)
 	// Ask (not Auto) is the interactive default: in Auto, ToolAdvertised exposes
 	// only PermissionAllow tools, so prompt-gated tools (write_file/edit_file/bash/
 	// apply_patch) would never be offered to the model — the TUI could neither edit
@@ -736,6 +801,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	lastKnownMCPConfig := mcpConfig
 	return deps.runTUI(context.Background(), tui.Options{
 		Cwd:                  workspaceRoot,
+		Trusted:              trusted,
 		Version:              version,
 		Theme:                theme,
 		SavedTheme:           resolved.Preferences.Theme,
@@ -784,7 +850,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			Autonomy:       "low",
 			Sandbox:        sandboxEngine,
 			FileTracker:    tools.NewFileTracker(),
-			Hooks:          newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks),
+			Hooks:          newHookDispatcherWithExtra(workspaceRoot, !trusted, pluginActivation.hooks),
 			DeferThreshold: resolved.Tools.DeferThreshold,
 			Specialists:    specialistRuntime.specialists,
 			Skills:         pluginActivation.skillInfos(deps.skillsDir()),
@@ -1198,6 +1264,29 @@ func splitLeadingThemeFlag(args []string) (string, []string, error) {
 		theme = strings.ToLower(value)
 	}
 	return theme, args, nil
+}
+
+// splitLeadingTrustFlags strips leading --trust and --no-trust flags from the
+// root argument list before subcommand dispatch. It returns an error if both are
+// present. The values are also stored in rootTrust/rootNoTrust for the startup
+// path.
+func splitLeadingTrustFlags(args []string) (trust bool, noTrust bool, rest []string, err error) {
+	for len(args) > 0 {
+		switch {
+		case args[0] == "--trust":
+			trust = true
+			args = args[1:]
+		case args[0] == "--no-trust":
+			noTrust = true
+			args = args[1:]
+		default:
+			return trust, noTrust, args, nil
+		}
+	}
+	if trust && noTrust {
+		return true, true, args, errors.New("Use either --trust or --no-trust, not both.")
+	}
+	return trust, noTrust, args, nil
 }
 
 // profileHasCredential reports whether the profile can authenticate: a direct API

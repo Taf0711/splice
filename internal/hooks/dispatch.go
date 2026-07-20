@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/Taf0711/splice/internal/secrets"
 )
 
 // defaultHookTimeout bounds a single hook command so a hung or slow hook cannot
@@ -154,7 +156,7 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, input DispatchInput)
 func (dispatcher *Dispatcher) runWithTimeout(ctx context.Context, hook Definition, stdin []byte) commandResult {
 	runCtx, cancel := context.WithTimeout(ctx, dispatcher.timeout)
 	defer cancel()
-	env := os.Environ()
+	env := secrets.ScrubChildEnv(os.Environ())
 	if len(dispatcher.env) > 0 {
 		env = append(env, dispatcher.env...)
 	}

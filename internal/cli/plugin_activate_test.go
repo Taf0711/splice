@@ -51,7 +51,7 @@ func TestActivatePluginsRegistersToolAndCollectsHooks(t *testing.T) {
 
 	registry := tools.NewRegistry()
 	var stderr bytes.Buffer
-	activation := activatePlugins(t.TempDir(), registry, fakePluginDeps(t, loaded), &stderr)
+	activation := activatePlugins(t.TempDir(), registry, fakePluginDeps(t, loaded), true, &stderr)
 
 	if _, ok := registry.Get("demo_lookup"); !ok {
 		t.Fatalf("plugin tool not registered into the bootstrap registry")
@@ -90,7 +90,7 @@ func TestActivatePluginsRegistersPluginSkillTool(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewSkillTool(t.TempDir())) // core skill tool, like the real bootstrap
 	var stderr bytes.Buffer
-	activation := activatePlugins(t.TempDir(), registry, fakePluginDeps(t, loaded), &stderr)
+	activation := activatePlugins(t.TempDir(), registry, fakePluginDeps(t, loaded), true, &stderr)
 
 	if len(activation.skillRoots) != 1 {
 		t.Fatalf("expected one plugin skill root, got %#v", activation.skillRoots)
@@ -124,7 +124,7 @@ func TestActivatePluginsSurfacesLoadDiagnostics(t *testing.T) {
 	}
 	registry := tools.NewRegistry()
 	var stderr bytes.Buffer
-	activatePlugins(t.TempDir(), registry, deps, &stderr)
+	activatePlugins(t.TempDir(), registry, deps, true, &stderr)
 
 	if stderr.Len() == 0 {
 		t.Fatal("a load diagnostic must be surfaced on stderr")
@@ -143,7 +143,7 @@ func TestActivatePluginsFailsOpenOnLoadError(t *testing.T) {
 	}
 	registry := tools.NewRegistry()
 	var stderr bytes.Buffer
-	activation := activatePlugins(t.TempDir(), registry, deps, &stderr)
+	activation := activatePlugins(t.TempDir(), registry, deps, true, &stderr)
 
 	if len(activation.hooks) != 0 || len(activation.skillRoots) != 0 {
 		t.Fatalf("a load error must yield an inert activation, got %#v", activation)
@@ -173,7 +173,7 @@ func TestActivatePluginsWarnsOnMalformedPluginButKeepsGood(t *testing.T) {
 
 	registry := tools.NewRegistry()
 	var stderr bytes.Buffer
-	activatePlugins(t.TempDir(), registry, fakePluginDeps(t, []plugins.LoadedPlugin{bad, good}), &stderr)
+	activatePlugins(t.TempDir(), registry, fakePluginDeps(t, []plugins.LoadedPlugin{bad, good}), true, &stderr)
 
 	if _, ok := registry.Get("good_tool"); !ok {
 		t.Fatal("the good plugin tool must still register despite a malformed sibling")
@@ -198,7 +198,7 @@ func TestNewHookDispatcherWithExtraFoldsPluginHooks(t *testing.T) {
 		Enabled: true,
 	}}
 
-	dispatcher := newHookDispatcherWithExtra(workspace, extra)
+	dispatcher := newHookDispatcherWithExtra(workspace, false, extra)
 	if dispatcher == nil {
 		t.Fatal("dispatcher should never be nil for a clean workspace")
 	}

@@ -5,7 +5,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 
@@ -150,7 +152,20 @@ func validateHTTPURL(serverName string, value string) error {
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return fmt.Errorf("MCP server %s url must use http or https", serverName)
 	}
+	if parsed.Scheme == "http" && !isLoopbackHost(parsed.Hostname()) {
+		fmt.Fprintf(os.Stderr, "warning: MCP server %s uses plaintext http://; tokens and request bodies will travel unencrypted\n", serverName)
+	}
 	return nil
+}
+
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 func computeServerIdentity(server Server) string {

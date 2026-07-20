@@ -109,6 +109,10 @@ type execOptions struct {
 	// default — a run without the flag is byte-identical to before (no tool, nil
 	// switcher).
 	allowEscalation bool
+	// trust explicitly marks the workspace as trusted for this run.
+	trust bool
+	// noTrust explicitly marks the workspace as untrusted for this run.
+	noTrust bool
 	// selfCorrect opts the run into the post-edit verify-and-correct loop: after a
 	// mutating tool call SPLICE runs the workspace verification plan and feeds
 	// failures back to the model to fix, bounded by an attempt ceiling and the
@@ -226,7 +230,31 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if options.useSpec {
 		permissionMode = agent.PermissionModeSpecDraft
 	}
-	mcpRuntime, err := registerMCPToolsForWorkspace(context.Background(), workspaceRoot, registry, deps, execMCPAutonomy(options))
+
+	// Resolve workspace trust before loading project-scope executables. In the
+	// headless path there is no interactive prompt, so "ask" with no prior
+	// decision falls back to untrusted (fail-safe).
+	trustSetting := "ask"
+	if trustCfg, err := deps.resolveConfig(workspaceRoot, config.Overrides{}); err == nil {
+		trustSetting = trustCfg.DefaultProjectTrust
+	}
+	trusted, persist, store, err := resolveWorkspaceTrust(workspaceRoot, trustSetting, options.trust, options.noTrust)
+	if err != nil {
+		fmt.Fprintf(stderr, "warning: failed to resolve workspace trust: %s\n", err)
+		trusted = false
+		persist = false
+	}
+	if persist && store != nil {
+		_ = store.SetTrusted(workspaceRoot, trusted)
+		if saveErr := store.Save(); saveErr != nil {
+			fmt.Fprintf(stderr, "warning: failed to persist trust decision: %s\n", saveErr)
+		}
+	}
+	if !trusted && projectConfigExists(workspaceRoot) {
+		fmt.Fprintf(stderr, "workspace %s is not trusted; skipped project MCP servers, hooks, plugins. Run with --trust or set defaultProjectTrust=always to load them.\n", workspaceRoot)
+	}
+
+	mcpRuntime, err := registerMCPToolsForWorkspace(context.Background(), workspaceRoot, registry, deps, trusted, execMCPAutonomy(options))
 	if err != nil {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "mcp_error", err.Error())
 	}
@@ -235,7 +263,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// registry and collect their hooks + skill roots for the dispatcher and skill
 	// tool below. Done before --list-tools and filter validation so plugin tools
 	// are listable and filter-validatable; it fails OPEN (a bad plugin is skipped).
-	pluginActivation := activatePlugins(workspaceRoot, registry, deps, stderr)
+	pluginActivation := activatePlugins(workspaceRoot, registry, deps, trusted, stderr)
 	if options.useSpec {
 		specmode.RegisterDraftTools(registry, workspaceRoot, deps.now)
 	}
@@ -619,7 +647,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		RequireCompletionSignal: true,
 		Sandbox:                 sandboxEngine,
 		FileTracker:             tools.NewFileTracker(),
-		Hooks:                   newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks),
+		Hooks:                   newHookDispatcherWithExtra(workspaceRoot, !trusted, pluginActivation.hooks),
 		EnabledTools:            options.enabledTools,
 		DisabledTools:           options.disabledTools,
 		OnText:                  writer.text,

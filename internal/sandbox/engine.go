@@ -398,6 +398,12 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	if workspaceWriteAutoAllowed(policy, request, scope) {
 		return Decision{Action: ActionAllow, Risk: risk, Reason: "workspace write is allowed", AutoAllowed: true}
 	}
+	// An unparseable / obfuscated shell command must NOT be auto-allowed, even
+	// when the native sandbox is active. It falls through to the normal
+	// prompt/deny path so the user reviews it.
+	if request.SideEffect == SideEffectShell && HasRiskCategory(risk, "unparseable_command") {
+		return Decision{Action: ActionPrompt, Risk: risk, Reason: "unparseable shell command requires explicit approval"}
+	}
 	// Auto-allow an ordinary shell command when the active native sandbox is the
 	// safety boundary. Network, destructive, and path checks run before this
 	// branch, so they still prompt or deny as configured. If the backend is

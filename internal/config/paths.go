@@ -41,6 +41,17 @@ func DefaultUserConfigPath() (string, error) {
 	return filepath.Join(userConfigDir, "splice", "config.json"), nil
 }
 
+// DefaultTrustStorePath returns the canonical persistent trust store path
+// (~/.config/splice/trust.json on Unix, %XDG_CONFIG_HOME%/splice/trust.json
+// when set on Windows).
+func DefaultTrustStorePath() (string, error) {
+	userConfigDir, err := UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user config directory: %w", err)
+	}
+	return filepath.Join(userConfigDir, "splice", "trust.json"), nil
+}
+
 // UserConfigDir returns the base directory Splice stores per-user config under.
 // It mirrors os.UserConfigDir everywhere except macOS: there Go defaults to
 // ~/Library/Application Support, but Splice deliberately uses ~/.config (XDG-style,

@@ -84,6 +84,11 @@ type Options struct {
 	// Setup configures the first-run/setup takeover. It is shown before the
 	// normal chat surface when Visible is true.
 	Setup SetupOptions
+
+	// Trusted, when false, causes the TUI to skip project-scope resources
+	// (handled in app.go: .splice/commands, plugin skill roots, etc.).
+	// AGENTS.md / CLAUDE.md / .cursorrules and user-scope config are still loaded.
+	Trusted bool
 }
 
 type MCPCommandResult struct {

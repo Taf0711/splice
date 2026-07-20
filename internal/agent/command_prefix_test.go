@@ -3,6 +3,7 @@ package agent
 import (
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/Taf0711/splice/internal/sandbox"
@@ -193,5 +194,38 @@ func TestProposedCommandPrefixRejectsRequestedUnsafeLauncherPrefix(t *testing.T)
 	})
 	if got != nil {
 		t.Fatalf("unsafe requested launcher prefix should be rejected, got %#v", got)
+	}
+}
+
+func TestSafeGitCommandRejectsUnsafeGlobalOptions(t *testing.T) {
+	cases := [][]string{
+		{"git", "--git-dir=/etc", "log"},
+		{"git", "status", "--work-tree=/outside"},
+		{"git", "-c", "core.pager=cat", "log"},
+		{"git", "log", "-c"},
+	}
+	for _, args := range cases {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			if safeGitCommand(args) {
+				t.Fatalf("expected %v to be rejected as non-read-only", args)
+			}
+		})
+	}
+}
+
+func TestSafeGitCommandStillAllowsOrdinaryReadOnly(t *testing.T) {
+	cases := [][]string{
+		{"git", "status"},
+		{"git", "log"},
+		{"git", "diff"},
+		{"git", "show"},
+		{"git", "branch", "--show-current"},
+	}
+	for _, args := range cases {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			if !safeGitCommand(args) {
+				t.Fatalf("expected %v to be classified as read-only", args)
+			}
+		})
 	}
 }

@@ -24,7 +24,7 @@ func TestUserCommandExpandsAndSubmits(t *testing.T) {
 	root := t.TempDir()
 	writeUserCommand(t, root, "greet.md", "Say hello to $1 from the team.")
 
-	m := newModel(context.Background(), Options{Cwd: root})
+	m := newModel(context.Background(), Options{Cwd: root, Trusted: true})
 	if len(m.userCommands) != 1 {
 		t.Fatalf("expected the user command to load, got %d", len(m.userCommands))
 	}
@@ -56,7 +56,7 @@ func TestUnknownSlashStillReportsUnknown(t *testing.T) {
 func TestUserCommandAppearsInAutocomplete(t *testing.T) {
 	root := t.TempDir()
 	writeUserCommand(t, root, "deploy.md", "Deploy it.")
-	m := newModel(context.Background(), Options{Cwd: root})
+	m := newModel(context.Background(), Options{Cwd: root, Trusted: true})
 
 	got := m.matchCommandSuggestions("/dep")
 	found := false

@@ -1,6 +1,9 @@
 package mcp
 
 import (
+	"bytes"
+	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -198,6 +201,60 @@ func TestNormalizeConfigRejectsAuthOnStdio(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "auth is only supported") {
 		t.Fatalf("error = %q, want auth-on-stdio error", err.Error())
+	}
+}
+
+func TestNormalizeConfigWarnsOnPlaintextHTTP(t *testing.T) {
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+
+	_, err = NormalizeConfig(config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"remote": {Type: "http", URL: "http://example.com/mcp"},
+	}})
+
+	w.Close()
+	os.Stderr = oldStderr
+	if err != nil {
+		t.Fatalf("NormalizeConfig() error = %v", err)
+	}
+
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "warning: MCP server remote uses plaintext http://") {
+		t.Fatalf("stderr = %q, want plaintext http warning", buf.String())
+	}
+}
+
+func TestNormalizeConfigDoesNotWarnOnLoopbackHTTP(t *testing.T) {
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+
+	_, err = NormalizeConfig(config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"local": {Type: "http", URL: "http://localhost:8080/mcp"},
+	}})
+
+	w.Close()
+	os.Stderr = oldStderr
+	if err != nil {
+		t.Fatalf("NormalizeConfig() error = %v", err)
+	}
+
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("stderr = %q, want no warning for loopback http", buf.String())
 	}
 }
 

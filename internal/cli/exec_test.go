@@ -16,7 +16,10 @@ import (
 
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/config"
+	"github.com/Taf0711/splice/internal/hooks"
+	"github.com/Taf0711/splice/internal/mcp"
 	"github.com/Taf0711/splice/internal/modelregistry"
+	"github.com/Taf0711/splice/internal/plugins"
 	"github.com/Taf0711/splice/internal/sessions"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/tools"
@@ -1939,5 +1942,90 @@ func TestRunExecTopTierDeclineNoSwitch(t *testing.T) {
 	}
 	if providerModels[0] != "claude-opus-4.1" {
 		t.Fatalf("provider model = %q, want claude-opus-4.1", providerModels[0])
+	}
+}
+
+func TestExecListToolsSkipsProjectScopeWhenUntrusted(t *testing.T) {
+	cwd := t.TempDir()
+	setCLIUserConfigRoot(t)
+
+	projectConfig := filepath.Join(cwd, ".splice", "config.json")
+	if err := os.MkdirAll(filepath.Dir(projectConfig), 0o700); err != nil {
+		t.Fatalf("create project dir: %v", err)
+	}
+	if err := os.WriteFile(projectConfig, []byte(`{"mcp":{"servers":{"proj":{"type":"stdio","command":"proj-mcp"}}}}`), 0o600); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+
+	var registeredConfig config.MCPConfig
+	var pluginOptions plugins.LoadOptions
+
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"exec", "--list-tools"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		resolveConfig: func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{DefaultProjectTrust: "ask", MaxTurns: 3}, nil
+		},
+		registerMCPTools: func(_ context.Context, _ *tools.Registry, cfg config.MCPConfig, _ mcp.RegisterOptions) (mcpToolRuntime, error) {
+			registeredConfig = cfg
+			return noopMCPRuntime{}, nil
+		},
+		loadPlugins: func(options plugins.LoadOptions) (plugins.LoadResult, error) {
+			pluginOptions = options
+			return plugins.LoadResult{}, nil
+		},
+		loadHooks: func(_ hooks.LoadOptions) (hooks.LoadResult, error) { return hooks.LoadResult{}, nil },
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
+	}
+	if _, ok := registeredConfig.Servers["proj"]; ok {
+		t.Fatalf("project MCP server registered when untrusted: %#v", registeredConfig.Servers)
+	}
+	if len(pluginOptions.Roots) != 1 || pluginOptions.Roots[0].Source != plugins.SourceUser {
+		t.Fatalf("plugins loaded with roots %#v, want one user root", pluginOptions.Roots)
+	}
+	if !strings.Contains(stderr.String(), "is not trusted") {
+		t.Fatalf("stderr = %q, want untrusted warning", stderr.String())
+	}
+}
+
+func TestExecListToolsLoadsProjectScopeWhenTrusted(t *testing.T) {
+	cwd := t.TempDir()
+	setCLIUserConfigRoot(t)
+	writeTrustStore(t, cwd, true)
+
+	projectConfig := filepath.Join(cwd, ".splice", "config.json")
+	if err := os.MkdirAll(filepath.Dir(projectConfig), 0o700); err != nil {
+		t.Fatalf("create project dir: %v", err)
+	}
+	if err := os.WriteFile(projectConfig, []byte(`{"mcp":{"servers":{"proj":{"type":"stdio","command":"proj-mcp"}}}}`), 0o600); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+
+	var registeredConfig config.MCPConfig
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"exec", "--list-tools"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		resolveConfig: func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{DefaultProjectTrust: "ask", MaxTurns: 3}, nil
+		},
+		registerMCPTools: func(_ context.Context, _ *tools.Registry, cfg config.MCPConfig, _ mcp.RegisterOptions) (mcpToolRuntime, error) {
+			registeredConfig = cfg
+			return noopMCPRuntime{}, nil
+		},
+		loadPlugins: func(_ plugins.LoadOptions) (plugins.LoadResult, error) { return plugins.LoadResult{}, nil },
+		loadHooks:   func(_ hooks.LoadOptions) (hooks.LoadResult, error) { return hooks.LoadResult{}, nil },
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
+	}
+	if _, ok := registeredConfig.Servers["proj"]; !ok {
+		t.Fatalf("project MCP server missing when trusted: %#v", registeredConfig.Servers)
+	}
+	if strings.Contains(stderr.String(), "is not trusted") {
+		t.Fatalf("stderr = %q, want no untrusted warning", stderr.String())
 	}
 }

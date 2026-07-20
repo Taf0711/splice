@@ -178,7 +178,8 @@ func execStageResolvedConfig(model string, maxTurns int) config.ResolvedConfig {
 		maxTurns = 3
 	}
 	return config.ResolvedConfig{
-		ActiveProvider: "echo",
+		ActiveProvider:      "echo",
+		DefaultProjectTrust: "always",
 		Provider: config.ProviderProfile{
 			Name:         "echo",
 			ProviderKind: config.ProviderKindOpenAICompatible,

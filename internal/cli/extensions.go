@@ -285,8 +285,32 @@ func runMCPTools(ctx context.Context, args []string, stdout io.Writer, stderr io
 		if err != nil {
 			return writeAppError(stderr, "failed to resolve workspace: "+err.Error(), exitCrash)
 		}
+
+		setting := "ask"
+		if resolved, rerr := deps.resolveConfig(cwd, config.Overrides{}); rerr == nil {
+			setting = resolved.DefaultProjectTrust
+			if setting == "" {
+				setting = "ask"
+			}
+		}
+		trusted, persist, store, terr := resolveWorkspaceTrust(cwd, setting, rootTrust, rootNoTrust)
+		if terr != nil {
+			fmt.Fprintf(stderr, "warning: failed to resolve workspace trust: %s\n", terr)
+			trusted = false
+			persist = false
+		}
+		if persist && store != nil {
+			_ = store.SetTrusted(cwd, trusted)
+			if saveErr := store.Save(); saveErr != nil {
+				fmt.Fprintf(stderr, "warning: failed to persist trust decision: %s\n", saveErr)
+			}
+		}
+		if !trusted && projectConfigExists(cwd) {
+			fmt.Fprintf(stderr, "workspace %s is not trusted; skipped project MCP servers. Run with --trust or set defaultProjectTrust=always to load them.\n", cwd)
+		}
+
 		registry := tools.NewRegistry()
-		mcpRuntime, err := registerMCPToolsForWorkspace(ctx, cwd, registry, deps, mcp.AutonomyLow)
+		mcpRuntime, err := registerMCPToolsForWorkspace(ctx, cwd, registry, deps, trusted, mcp.AutonomyLow)
 		if err != nil {
 			return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 		}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -19,8 +21,39 @@ type mcpToolListItem struct {
 	Permission  string `json:"permission"`
 }
 
-func registerMCPToolsForWorkspace(ctx context.Context, workspaceRoot string, registry *tools.Registry, deps appDeps, autonomy mcp.PermissionAutonomy) (mcpToolRuntime, error) {
-	cfg, err := deps.resolveMCPConfig(workspaceRoot)
+// defaultResolveMCPConfig resolves the merged MCP config for workspaceRoot,
+// optionally excluding the project-layer config. It is the trust-aware seam
+// used by both the TUI startup and headless exec paths.
+func defaultResolveMCPConfig(workspaceRoot string, includeProject bool) (config.MCPConfig, error) {
+	options, err := config.DefaultResolveOptions(workspaceRoot)
+	if err != nil {
+		return config.MCPConfig{}, err
+	}
+	if !includeProject {
+		options.ProjectConfigPath = ""
+	}
+	return config.ResolveMCP(options)
+}
+
+// projectConfigExists reports whether workspaceRoot has any project-layer
+// executable-bearing config (.splice/config.json with MCP servers,
+// .splice/hooks.json, or .splice/plugins/). It gates the trust warning so we
+// only warn when something was actually skipped (fail-loud without noise).
+func projectConfigExists(workspaceRoot string) bool {
+	for _, candidate := range []string{
+		filepath.Join(workspaceRoot, ".splice", "config.json"),
+		filepath.Join(workspaceRoot, ".splice", "hooks.json"),
+		filepath.Join(workspaceRoot, ".splice", "plugins"),
+	} {
+		if _, err := os.Stat(candidate); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func registerMCPToolsForWorkspace(ctx context.Context, workspaceRoot string, registry *tools.Registry, deps appDeps, projectTrusted bool, autonomy mcp.PermissionAutonomy) (mcpToolRuntime, error) {
+	cfg, err := deps.resolveMCPConfigTrust(workspaceRoot, projectTrusted)
 	if err != nil {
 		return nil, err
 	}

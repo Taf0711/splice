@@ -16,7 +16,9 @@ import (
 
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/config"
+	"github.com/Taf0711/splice/internal/hooks"
 	"github.com/Taf0711/splice/internal/mcp"
+	"github.com/Taf0711/splice/internal/plugins"
 	"github.com/Taf0711/splice/internal/tools"
 	"github.com/Taf0711/splice/internal/tui"
 	"github.com/Taf0711/splice/internal/update"
@@ -103,7 +105,7 @@ func TestRunNoArgsLaunchesSetupTUIWithNilProviderWhenNoProviderConfigured(t *tes
 			if workspaceRoot != cwd {
 				t.Fatalf("workspaceRoot = %q, want %q", workspaceRoot, cwd)
 			}
-			return config.ResolvedConfig{MaxTurns: 12}, nil
+			return config.ResolvedConfig{MaxTurns: 12, DefaultProjectTrust: "always"}, nil
 		},
 		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
 			t.Fatal("newProvider should not be called without a resolved provider")
@@ -1754,5 +1756,167 @@ func TestRunUnknownLoginSuggestsAuthLogin(t *testing.T) {
 	runWithDeps([]string{"frobnicate"}, &stdout, &stderr, appDeps{})
 	if strings.Contains(stderr.String(), "did you mean") {
 		t.Fatalf("stderr = %q, unrelated commands must not get the auth hint", stderr.String())
+	}
+}
+
+func writeTrustStore(t *testing.T, workspaceRoot string, trusted bool) {
+	t.Helper()
+	path, err := config.DefaultTrustStorePath()
+	if err != nil {
+		t.Fatalf("DefaultTrustStorePath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("create trust dir: %v", err)
+	}
+	store, err := config.LoadTrustStore(path)
+	if err != nil {
+		t.Fatalf("LoadTrustStore: %v", err)
+	}
+	if err := store.SetTrusted(workspaceRoot, trusted); err != nil {
+		t.Fatalf("SetTrusted: %v", err)
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("Save trust store: %v", err)
+	}
+}
+
+func TestTUIStartupSkipsProjectScopeWhenUntrusted(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cwd := t.TempDir()
+	setCLIUserConfigRoot(t)
+
+	projectConfig := filepath.Join(cwd, ".splice", "config.json")
+	if err := os.MkdirAll(filepath.Dir(projectConfig), 0o700); err != nil {
+		t.Fatalf("create project dir: %v", err)
+	}
+	if err := os.WriteFile(projectConfig, []byte(`{"mcp":{"servers":{"proj":{"type":"stdio","command":"proj-mcp"}}}}`), 0o600); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+
+	var registeredConfig config.MCPConfig
+	var pluginOptions plugins.LoadOptions
+
+	exitCode := runWithDeps([]string{}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		userConfigPath: func() (string, error) {
+			return filepath.Join(t.TempDir(), "splice", "config.json"), nil
+		},
+		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			if workspaceRoot != cwd {
+				t.Fatalf("workspaceRoot = %q, want %q", workspaceRoot, cwd)
+			}
+			return config.ResolvedConfig{MaxTurns: 8}, nil
+		},
+		registerMCPTools: func(_ context.Context, _ *tools.Registry, cfg config.MCPConfig, _ mcp.RegisterOptions) (mcpToolRuntime, error) {
+			registeredConfig = cfg
+			return noopMCPRuntime{}, nil
+		},
+		loadPlugins: func(options plugins.LoadOptions) (plugins.LoadResult, error) {
+			pluginOptions = options
+			return plugins.LoadResult{}, nil
+		},
+		loadHooks: func(_ hooks.LoadOptions) (hooks.LoadResult, error) { return hooks.LoadResult{}, nil },
+		runTUI:    func(_ context.Context, _ tui.Options) int { return 0 },
+	})
+
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
+	}
+	if _, ok := registeredConfig.Servers["proj"]; ok {
+		t.Fatalf("project MCP server registered when untrusted: %#v", registeredConfig.Servers)
+	}
+	if len(pluginOptions.Roots) != 1 || pluginOptions.Roots[0].Source != plugins.SourceUser {
+		t.Fatalf("plugins loaded with roots %#v, want one user root", pluginOptions.Roots)
+	}
+	if !strings.Contains(stderr.String(), "is not trusted") {
+		t.Fatalf("stderr = %q, want untrusted warning", stderr.String())
+	}
+}
+
+func TestTUIStartupLoadsProjectScopeWhenTrusted(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cwd := t.TempDir()
+	setCLIUserConfigRoot(t)
+	writeTrustStore(t, cwd, true)
+
+	projectConfig := filepath.Join(cwd, ".splice", "config.json")
+	if err := os.MkdirAll(filepath.Dir(projectConfig), 0o700); err != nil {
+		t.Fatalf("create project dir: %v", err)
+	}
+	if err := os.WriteFile(projectConfig, []byte(`{"mcp":{"servers":{"proj":{"type":"stdio","command":"proj-mcp"}}}}`), 0o600); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+
+	var registeredConfig config.MCPConfig
+
+	exitCode := runWithDeps([]string{}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		userConfigPath: func() (string, error) {
+			return filepath.Join(t.TempDir(), "splice", "config.json"), nil
+		},
+		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{MaxTurns: 8}, nil
+		},
+		registerMCPTools: func(_ context.Context, _ *tools.Registry, cfg config.MCPConfig, _ mcp.RegisterOptions) (mcpToolRuntime, error) {
+			registeredConfig = cfg
+			return noopMCPRuntime{}, nil
+		},
+		loadPlugins: func(_ plugins.LoadOptions) (plugins.LoadResult, error) { return plugins.LoadResult{}, nil },
+		loadHooks:   func(_ hooks.LoadOptions) (hooks.LoadResult, error) { return hooks.LoadResult{}, nil },
+		runTUI:      func(_ context.Context, _ tui.Options) int { return 0 },
+	})
+
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
+	}
+	if _, ok := registeredConfig.Servers["proj"]; !ok {
+		t.Fatalf("project MCP server missing when trusted: %#v", registeredConfig.Servers)
+	}
+	if strings.Contains(stderr.String(), "is not trusted") {
+		t.Fatalf("stderr = %q, want no untrusted warning", stderr.String())
+	}
+}
+
+func TestTUIStartupNoTrustFlagSkipsProjectScope(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cwd := t.TempDir()
+	setCLIUserConfigRoot(t)
+	writeTrustStore(t, cwd, true)
+
+	projectConfig := filepath.Join(cwd, ".splice", "config.json")
+	if err := os.MkdirAll(filepath.Dir(projectConfig), 0o700); err != nil {
+		t.Fatalf("create project dir: %v", err)
+	}
+	if err := os.WriteFile(projectConfig, []byte(`{"mcp":{"servers":{"proj":{"type":"stdio","command":"proj-mcp"}}}}`), 0o600); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+
+	var registeredConfig config.MCPConfig
+
+	exitCode := runWithDeps([]string{"--no-trust"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		userConfigPath: func() (string, error) {
+			return filepath.Join(t.TempDir(), "splice", "config.json"), nil
+		},
+		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{MaxTurns: 8}, nil
+		},
+		registerMCPTools: func(_ context.Context, _ *tools.Registry, cfg config.MCPConfig, _ mcp.RegisterOptions) (mcpToolRuntime, error) {
+			registeredConfig = cfg
+			return noopMCPRuntime{}, nil
+		},
+		loadPlugins: func(_ plugins.LoadOptions) (plugins.LoadResult, error) { return plugins.LoadResult{}, nil },
+		loadHooks:   func(_ hooks.LoadOptions) (hooks.LoadResult, error) { return hooks.LoadResult{}, nil },
+		runTUI:      func(_ context.Context, _ tui.Options) int { return 0 },
+	})
+
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
+	}
+	if _, ok := registeredConfig.Servers["proj"]; ok {
+		t.Fatalf("project MCP server registered with --no-trust: %#v", registeredConfig.Servers)
+	}
+	if !strings.Contains(stderr.String(), "is not trusted") {
+		t.Fatalf("stderr = %q, want untrusted warning", stderr.String())
 	}
 }

@@ -728,7 +728,11 @@ func newModel(ctx context.Context, options Options) model {
 	}
 
 	userConfigDir, _ := config.UserConfigDir()
-	loadedUserCommands := usercommands.Load(usercommands.DefaultPaths(cwd, userConfigDir))
+	commandPaths := usercommands.DefaultPaths(cwd, userConfigDir)
+	if !options.Trusted {
+		commandPaths.ProjectDir = ""
+	}
+	loadedUserCommands := usercommands.Load(commandPaths)
 
 	registry := options.Registry
 	if registry == nil {

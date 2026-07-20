@@ -77,7 +77,8 @@ func runLinuxSandboxInnerStage(config LinuxSandboxHelperConfig, stderr io.Writer
 	}
 	if config.BlockUnixSockets {
 		if err := applyUnixSocketBlockFilter(); err != nil {
-			fmt.Fprintln(stderr, LinuxSandboxHelperName+": warning: "+err.Error()+"; running without the Unix-socket filter")
+			fmt.Fprintln(stderr, LinuxSandboxHelperName+": apply unix-socket block: "+err.Error())
+			return 125
 		}
 	}
 	binary, err := exec.LookPath(config.Command[0])

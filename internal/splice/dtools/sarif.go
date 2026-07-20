@@ -2,10 +2,7 @@ package dtools
 
 import (
 	"context"
-	"fmt"
 	"os/exec"
-	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/Taf0711/splice/internal/tools"
@@ -97,7 +94,7 @@ func (t sarifTool) Run(ctx context.Context, args map[string]any) tools.Result {
 			if !ok {
 				return tools.Result{Status: tools.StatusError, Output: "paths must be strings"}
 			}
-			abs, err := t.resolveWorkspacePath(p)
+			abs, err := resolveWorkspacePath(t.workspaceRoot, p)
 			if err != nil {
 				return tools.Result{Status: tools.StatusError, Output: err.Error()}
 			}
@@ -140,29 +137,4 @@ func (t sarifTool) Run(ctx context.Context, args map[string]any) tools.Result {
 		Status: tools.StatusOK,
 		Output: string(out),
 	}
-}
-
-func (t sarifTool) resolveWorkspacePath(requested string) (string, error) {
-	root, err := filepath.Abs(t.workspaceRoot)
-	if err != nil {
-		return "", err
-	}
-
-	target := requested
-	if !filepath.IsAbs(target) {
-		target = filepath.Join(root, target)
-	}
-	abs, err := filepath.Abs(target)
-	if err != nil {
-		return "", err
-	}
-
-	rel, err := filepath.Rel(root, abs)
-	if err != nil {
-		return "", fmt.Errorf("%s escapes workspace", requested)
-	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return "", fmt.Errorf("%s escapes workspace", requested)
-	}
-	return abs, nil
 }
