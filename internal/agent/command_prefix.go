@@ -439,6 +439,12 @@ func gitHasUnsafeGlobalOption(args []string) bool {
 			return true
 		case arg == "-C" || strings.HasPrefix(arg, "-C"):
 			return true
+		case arg == "-c" || strings.HasPrefix(arg, "-c"):
+			return true
+		case strings.HasPrefix(arg, "--git-dir"):
+			return true
+		case strings.HasPrefix(arg, "--work-tree"):
+			return true
 		case gitOptionConsumesValue(arg):
 			index++
 		}
@@ -452,6 +458,12 @@ func gitArgsReadOnly(args []string) bool {
 		case strings.HasPrefix(arg, "--output="), strings.HasPrefix(arg, "--exec="):
 			return false
 		case arg == "--output", arg == "--exec":
+			return false
+		case strings.HasPrefix(arg, "--git-dir"):
+			return false
+		case strings.HasPrefix(arg, "--work-tree"):
+			return false
+		case arg == "-c" || (strings.HasPrefix(arg, "-c") && len(arg) > 2):
 			return false
 		}
 	}

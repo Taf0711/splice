@@ -93,6 +93,23 @@ func TestSandboxedBashAutoAllowDoesNotAffectNonShell(t *testing.T) {
 	}
 }
 
+func TestSandboxedBashAutoAllowRejectsUnparseableCommand(t *testing.T) {
+	engine := sandboxedShellEngine(t, nativeWrappingBackend)
+	request := bashRequest()
+	request.Args["command"] = `echo "unterminated`
+
+	decision := engine.Evaluate(context.Background(), request)
+	if decision.Action != ActionPrompt {
+		t.Fatalf("decision = %#v, want prompt (unparseable command)", decision)
+	}
+	if decision.AutoAllowed {
+		t.Fatalf("unparseable command must not be auto-allowed: %#v", decision)
+	}
+	if !HasRiskCategory(decision.Risk, "unparseable_command") {
+		t.Fatalf("expected unparseable_command risk category, got %#v", decision.Risk)
+	}
+}
+
 // TestShellSandboxActive reports correctly across backends and policy modes.
 func TestShellSandboxActive(t *testing.T) {
 	root := t.TempDir()
