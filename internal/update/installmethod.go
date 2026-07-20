@@ -11,7 +11,7 @@ import (
 // binary into the same directory as package.json and leaves a
 // ".splice-binary-version" marker file next to it — both are reliable signals
 // that a given executable came from an npm install.
-const npmPackageName = "@gitlawb/splice"
+const npmPackageName = "@taf0711/splice"
 
 // InstallMethod identifies how the running splice binary was installed.
 type InstallMethod string
