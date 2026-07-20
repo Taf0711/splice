@@ -1816,13 +1816,16 @@ func TestSetupPipelinePickerShowsSelectedDetail(t *testing.T) {
 	// The selected option's meta must appear as a faint detail line at the
 	// bottom, mirroring the Model step's setupModelSelectedDetail.
 	selectedIdx := clampInt(m.setup.pipelineModelIndex, 0, len(filtered)-1)
-	wantMeta := filtered[selectedIdx].meta
-	if wantMeta == "" {
-		t.Skip("selected option has no meta to assert")
-	}
+	selected := filtered[selectedIdx]
 	view := plainRender(t, m.setupView(100))
-	if !strings.Contains(view, wantMeta) {
-		t.Fatalf("picker missing selected-option detail %q:\n%s", wantMeta, view)
+	// The model ID (value) must appear as the name part of the detail line,
+	// mirroring the Model step (e.g. "moonshotai/kimi-k3  1M ctx · ...").
+	if name := strings.TrimSpace(selected.value); name != "" && !strings.Contains(view, name) {
+		t.Fatalf("picker detail missing model ID %q:\n%s", name, view)
+	}
+	// The meta (context/tools/cost) must also appear.
+	if wantMeta := strings.TrimSpace(selected.meta); wantMeta != "" && !strings.Contains(view, wantMeta) {
+		t.Fatalf("picker detail missing meta %q:\n%s", wantMeta, view)
 	}
 }
 

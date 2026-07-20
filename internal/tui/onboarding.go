@@ -1780,11 +1780,19 @@ func (m model) setupPipelinePickerLines(width int, height int) []string {
 	if end < len(filtered) {
 		lines = append(lines, padSetupLine("  "+zeroTheme.faint.Render(fmt.Sprintf("↓ %d more below", len(filtered)-end)), rowWidth))
 	}
-	// Detail line mirroring the Model step: show the selected option's meta
-	// (description, context window, tools, reasoning, cost) so the picker is
+	// Detail line mirroring the Model step: show the selected option's model
+	// ID and meta (context window, tools, reasoning, cost) so the picker is
 	// as informative as the primary model picker.
 	selectedIdx := clampInt(m.setup.pipelineModelIndex, 0, len(filtered)-1)
-	if detail := strings.TrimSpace(filtered[selectedIdx].meta); detail != "" {
+	selected := filtered[selectedIdx]
+	detailParts := []string{}
+	if name := strings.TrimSpace(selected.value); name != "" {
+		detailParts = append(detailParts, name)
+	}
+	if meta := strings.TrimSpace(selected.meta); meta != "" {
+		detailParts = append(detailParts, meta)
+	}
+	if detail := strings.Join(detailParts, "  "); detail != "" {
 		lines = append(lines,
 			blankSetupBlockLine(rowWidth),
 			padSetupLine("  "+zeroTheme.faint.Render(detail), rowWidth),
