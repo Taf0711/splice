@@ -45,6 +45,14 @@ import (
 
 var version = "dev"
 
+// rootTrust and rootNoTrust hold the values of the global --trust / --no-trust
+// persistent flags parsed before subcommand dispatch. They are consulted by
+// startup paths that need to decide whether the workspace is trusted.
+var (
+	rootTrust   bool
+	rootNoTrust bool
+)
+
 type appDeps struct {
 	getwd            func() (string, error)
 	stdin            io.Reader
@@ -260,6 +268,17 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	}
 	addDirs = append(addDirs, moreDirs...)
 
+	// Reset global trust flags so stale values from prior invocations in the same
+	// process (e.g. tests) do not affect this run.
+	rootTrust, rootNoTrust = false, false
+	rootTrust, rootNoTrust, args, err = splitLeadingTrustFlags(args)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), 1)
+	}
+	if rootTrust && rootNoTrust {
+		return writeAppError(stderr, "Use either --trust or --no-trust, not both.", 1)
+	}
+
 	if len(args) == 0 {
 		return runInteractiveTUI(stderr, deps, agent.PermissionModeAsk, addDirs, theme)
 	}
@@ -351,10 +370,23 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		// a flag and rejected with "--prompt requires a value" (matches the cron path).
 		execArgs := append(addDirFlagArgs(addDirs), "--prompt="+args[1])
 		execArgs = append(execArgs, args[2:]...)
+		if rootTrust {
+			execArgs = append([]string{"--trust"}, execArgs...)
+		}
+		if rootNoTrust {
+			execArgs = append([]string{"--no-trust"}, execArgs...)
+		}
 		return runExec(execArgs, stdout, stderr, deps)
 	case "exec":
 		// Forward leading --add-dir occurrences so exec's own parser collects them.
-		return runExec(append(addDirFlagArgs(addDirs), args[1:]...), stdout, stderr, deps)
+		execArgs := append(addDirFlagArgs(addDirs), args[1:]...)
+		if rootTrust {
+			execArgs = append([]string{"--trust"}, execArgs...)
+		}
+		if rootNoTrust {
+			execArgs = append([]string{"--no-trust"}, execArgs...)
+		}
+		return runExec(execArgs, stdout, stderr, deps)
 	case "daemon":
 		return runDaemon(args[1:], stdout, stderr, deps)
 	case "config":
@@ -1198,6 +1230,29 @@ func splitLeadingThemeFlag(args []string) (string, []string, error) {
 		theme = strings.ToLower(value)
 	}
 	return theme, args, nil
+}
+
+// splitLeadingTrustFlags strips leading --trust and --no-trust flags from the
+// root argument list before subcommand dispatch. It returns an error if both are
+// present. The values are also stored in rootTrust/rootNoTrust for the startup
+// path.
+func splitLeadingTrustFlags(args []string) (trust bool, noTrust bool, rest []string, err error) {
+	for len(args) > 0 {
+		switch {
+		case args[0] == "--trust":
+			trust = true
+			args = args[1:]
+		case args[0] == "--no-trust":
+			noTrust = true
+			args = args[1:]
+		default:
+			return trust, noTrust, args, nil
+		}
+	}
+	if trust && noTrust {
+		return true, true, args, errors.New("Use either --trust or --no-trust, not both.")
+	}
+	return trust, noTrust, args, nil
 }
 
 // profileHasCredential reports whether the profile can authenticate: a direct API

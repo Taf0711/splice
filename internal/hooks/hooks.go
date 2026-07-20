@@ -98,6 +98,10 @@ type LoadOptions struct {
 	Env               map[string]string
 	UserConfigPath    string
 	ProjectConfigPath string
+	// DisableProject, when true, skips the project hooks.json layer entirely,
+	// loading only the user layer. Used by the trust gate to keep untrusted
+	// workspaces from running project-scope hooks.
+	DisableProject bool
 }
 
 type StoreOptions struct {
@@ -213,13 +217,19 @@ func LoadConfig(options LoadOptions) (LoadResult, error) {
 	diagnostics := []Diagnostic{}
 	layers := []hookLayer{}
 
-	for _, candidate := range []struct {
+	candidates := []struct {
 		source ConfigSource
 		path   string
 	}{
 		{source: SourceUser, path: userConfigPath},
-		{source: SourceProject, path: projectConfigPath},
-	} {
+	}
+	if !options.DisableProject {
+		candidates = append(candidates, struct {
+			source ConfigSource
+			path   string
+		}{source: SourceProject, path: projectConfigPath})
+	}
+	for _, candidate := range candidates {
 		layer, ok := readLayer(candidate.source, candidate.path, &diagnostics)
 		if ok {
 			layers = append(layers, layer)

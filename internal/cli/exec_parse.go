@@ -26,6 +26,10 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 			options.listTools = true
 		case arg == "--allow-escalation":
 			options.allowEscalation = true
+		case arg == "--trust":
+			options.trust = true
+		case arg == "--no-trust":
+			options.noTrust = true
 		case arg == "--self-correct":
 			options.selfCorrect = true
 		case arg == "--no-notify":
@@ -392,6 +396,9 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 		}
 	}
 
+	if options.trust && options.noTrust {
+		return options, false, execUsageError{"Use either --trust or --no-trust, not both."}
+	}
 	if options.noNotify && options.notifyMode != "" {
 		return options, false, execUsageError{"Use either --notify or --no-notify, not both."}
 	}

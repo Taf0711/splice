@@ -109,6 +109,10 @@ type execOptions struct {
 	// default — a run without the flag is byte-identical to before (no tool, nil
 	// switcher).
 	allowEscalation bool
+	// trust explicitly marks the workspace as trusted for this run.
+	trust bool
+	// noTrust explicitly marks the workspace as untrusted for this run.
+	noTrust bool
 	// selfCorrect opts the run into the post-edit verify-and-correct loop: after a
 	// mutating tool call SPLICE runs the workspace verification plan and feeds
 	// failures back to the model to fix, bounded by an attempt ceiling and the
