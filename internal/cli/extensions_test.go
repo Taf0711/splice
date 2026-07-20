@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -204,6 +205,9 @@ func TestRunMCPToolsListJSONAndText(t *testing.T) {
 	closeCalls := 0
 	deps := appDeps{
 		getwd: func() (string, error) { return cwd, nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{DefaultProjectTrust: "always"}, nil
+		},
 		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
 			if workspaceRoot != cwd {
 				t.Fatalf("workspaceRoot = %q, want %q", workspaceRoot, cwd)
@@ -264,6 +268,9 @@ func TestRunMCPLegacyListAliases(t *testing.T) {
 	closeCalls := 0
 	deps := appDeps{
 		getwd: func() (string, error) { return cwd, nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{DefaultProjectTrust: "always"}, nil
+		},
 		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
 			if workspaceRoot != cwd {
 				t.Fatalf("workspaceRoot = %q, want %q", workspaceRoot, cwd)
@@ -302,6 +309,51 @@ func TestRunMCPLegacyListAliases(t *testing.T) {
 	}
 	if closeCalls != 1 {
 		t.Fatalf("legacy server list should not connect tools, closeCalls = %d", closeCalls)
+	}
+}
+
+func TestRunMCPToolsListUntrustedWorkspaceSkipsProjectServers(t *testing.T) {
+	cwd := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cwd, ".splice"), 0755); err != nil {
+		t.Fatalf("mkdir .splice: %v", err)
+	}
+	projectConfig := []byte(`{"mcpServers":{"docs":{"type":"stdio","command":"docs-mcp"}}}`)
+	if err := os.WriteFile(filepath.Join(cwd, ".splice", "config.json"), projectConfig, 0644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+
+	var gotTrusted *bool
+	deps := appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{DefaultProjectTrust: "ask"}, nil
+		},
+		resolveMCPConfigTrust: func(workspaceRoot string, projectTrusted bool) (config.MCPConfig, error) {
+			if workspaceRoot != cwd {
+				t.Fatalf("workspaceRoot = %q, want %q", workspaceRoot, cwd)
+			}
+			gotTrusted = &projectTrusted
+			return config.MCPConfig{}, nil
+		},
+		registerMCPTools: func(ctx context.Context, registry *tools.Registry, cfg config.MCPConfig, options mcp.RegisterOptions) (mcpToolRuntime, error) {
+			return noopMCPRuntime{}, nil
+		},
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"mcp", "tools", "list", "--json"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("exitCode = %d stderr=%s", exitCode, stderr.String())
+	}
+	if gotTrusted == nil {
+		t.Fatal("resolveMCPConfigTrust was not called")
+	}
+	if *gotTrusted {
+		t.Fatalf("projectTrusted = true, want false")
+	}
+	if !strings.Contains(stderr.String(), "is not trusted") {
+		t.Fatalf("expected trust warning, got stderr=%q", stderr.String())
 	}
 }
 
