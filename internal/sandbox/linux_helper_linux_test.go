@@ -5,6 +5,7 @@ package sandbox
 import (
 	"bytes"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -63,5 +64,30 @@ func TestLinuxSandboxInnerStageSkipsNetworkDenySeccompWhenAllowed(t *testing.T) 
 
 	if code != 127 {
 		t.Fatalf("exit code = %d, want lookup failure 127 without network filter; stderr=%s", code, stderr.String())
+	}
+}
+
+func TestLinuxSandboxInnerStageFailsClosedOnUnixSocketBlockError(t *testing.T) {
+	originalUnixBlock := applyUnixSocketBlockFilter
+	t.Cleanup(func() {
+		applyUnixSocketBlockFilter = originalUnixBlock
+	})
+
+	applyUnixSocketBlockFilter = func() error {
+		return errors.New("seccomp install failed")
+	}
+
+	var stderr bytes.Buffer
+	code := runLinuxSandboxInnerStage(LinuxSandboxHelperConfig{
+		PermissionProfile: PermissionProfile{Network: NetworkPolicy{Mode: NetworkAllow}},
+		BlockUnixSockets:  true,
+		Command:           []string{"definitely-not-a-real-splice-test-command"},
+	}, &stderr)
+
+	if code != 125 {
+		t.Fatalf("exit code = %d, want 125 on unix-socket filter failure; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "seccomp install failed") {
+		t.Fatalf("stderr = %q, want seccomp error message", stderr.String())
 	}
 }
