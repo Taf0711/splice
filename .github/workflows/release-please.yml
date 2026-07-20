@@ -22,12 +22,11 @@ jobs:
           release-type: go
           manifest-file: .release-please-manifest.json
           include-component-in-tag: false
-          # Bootstrap: Splice's own versioning starts at v0.1.0 (separate
-          # from upstream Zero-era tags that were deleted). release-please
-          # defaults to 1.0.0 from a 0.0.0 manifest; this forces the first
-          # release to 0.1.0. After v0.1.0 is cut, normal semver bumping
-          # takes over (feat: -> 0.2.0, fix: -> 0.1.1).
-          release-as: 0.1.1
+          # release-as overrides the computed version for ONE release. v0.1.2 is
+          # a security/hardening bundle shipped as a patch (the feat: commit
+          # would otherwise bump to 0.2.0 under bump-minor-pre-major). Remove
+          # this line after v0.1.2 is cut so normal semver resumes.
+          release-as: 0.1.2
           # Keep 0.x versioning: features bump minor (not major) below 1.0.0.
           bump-minor-pre-major: true
           prerelease: false
