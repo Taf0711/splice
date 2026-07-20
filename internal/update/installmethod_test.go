@@ -37,7 +37,7 @@ func TestDetectInstallMethodNpmViaPackageJSON(t *testing.T) {
 	if err := os.WriteFile(exePath, []byte("binary"), 0o755); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"name":"@gitlawb/splice"}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"name":"@taf0711/splice"}`), 0o644); err != nil {
 		t.Fatalf("WriteFile package.json: %v", err)
 	}
 	if method := DetectInstallMethod(exePath); method != InstallMethodNpm {
