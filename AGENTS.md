@@ -74,6 +74,15 @@ almost certainly wrong.
   library code.
 - **No em-dashes in new or actively-edited user-facing strings or documentation.**
   Use periods, commas, or parentheses.
+- **Documentation follows ASD-STE100 Simplified Technical English.** All
+  user-facing documentation (README.md, README_ZH.md, `docs/`, user-facing Go
+  comments) uses the controlled vocabulary and rules of ASD-STE100: approved
+  words only (use an approved synonym when a word is not in the STE word list;
+  do not use synonyms for an approved word), short sentences (maximum 20 words
+  for procedures, 25 for descriptive), active voice, imperative mood for
+  instructions, one topic per sentence, articles before nouns, no gerunds
+  (-ing verb forms) or nouns used as verbs, maximum three lines per paragraph.
+  Keep the two README mirrors consistent under this standard.
 - **Tests**: standard `testing` package, table-driven where natural, `_test.go`
   next to the code under test. Prefer extending an existing test file over
   creating a new one; create a new file only for a new package or clearly
