@@ -138,6 +138,62 @@ func TestCycleReasoningEffortNoOpOnUnsupportedModel(t *testing.T) {
 	}
 }
 
+// Models unknown to the catalog (custom endpoints, unlisted IDs such as
+// glm-5.2) expose no effort list, so /effort and Ctrl+T may FORCE an effort:
+// it is forwarded to the provider as-is with an unverified warning, mirroring
+// the exec path's unknown-model passthrough. Known non-reasoning models
+// (gpt-4.1) keep the strict refusal.
+
+func TestEffortCommandForcesOnUnknownModel(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "glm-5.2"})
+	next, card := m.handleEffortCommand("high")
+	if next.reasoningEffort != modelregistry.ReasoningEffortHigh {
+		t.Fatalf("expected forced effort high on unknown model, got %q", next.reasoningEffort)
+	}
+	if !strings.Contains(card, "unverified") {
+		t.Fatalf("expected unverified warning in status card, got %q", card)
+	}
+}
+
+func TestEffortCommandStillRefusesKnownModelWithoutControls(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-4.1"})
+	next, card := m.handleEffortCommand("high")
+	if next.reasoningEffort != "" {
+		t.Fatalf("expected refusal on known non-reasoning model, got %q", next.reasoningEffort)
+	}
+	if !strings.Contains(card, "does not expose reasoning effort controls") {
+		t.Fatalf("expected refusal card, got %q", card)
+	}
+}
+
+func TestEffortCommandRejectsInvalidLevelOnUnknownModel(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "glm-5.2"})
+	next, card := m.handleEffortCommand("warp")
+	if next.reasoningEffort != "" {
+		t.Fatalf("expected invalid level to be rejected, got %q", next.reasoningEffort)
+	}
+	if !strings.Contains(card, "Unknown reasoning effort") {
+		t.Fatalf("expected unknown-effort card, got %q", card)
+	}
+}
+
+func TestCycleReasoningEffortForcedRingOnUnknownModel(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "glm-5.2"})
+	want := []modelregistry.ReasoningEffort{
+		modelregistry.ReasoningEffortLow,
+		modelregistry.ReasoningEffortMedium,
+		modelregistry.ReasoningEffortHigh,
+		"", // wraps back to auto
+	}
+	for i, w := range want {
+		next, _ := m.cycleReasoningEffort()
+		if next.reasoningEffort != w {
+			t.Fatalf("cycle step %d: got %q, want %q", i, next.reasoningEffort, w)
+		}
+		m = next
+	}
+}
+
 func TestStyleCommandListsAndSetsSessionPreference(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.input.SetValue("/style")

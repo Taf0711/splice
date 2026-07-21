@@ -70,7 +70,14 @@ func (m model) handleEffortCommand(args string) (model, string) {
 	}
 	efforts := m.availableReasoningEfforts()
 	if len(efforts) == 0 {
-		return m, m.effortStatusCard("", "Active model does not expose reasoning effort controls.")
+		if !m.effortForcingAllowed() {
+			return m, m.effortStatusCard("", "Active model does not expose reasoning effort controls.")
+		}
+		// Unknown model (glm-5.2 via a custom endpoint, a new OpenRouter ID):
+		// force the effort and forward it as-is, mirroring the exec path's
+		// unknown-model passthrough in cli/exec.go forwardedReasoningEffort.
+		m.reasoningEffort = requested
+		return m, m.effortStatusCard(string(requested), "Effort unverified for "+displayValue(m.modelName, "the active model")+": forwarded to the provider as-is.")
 	}
 	if !reasoningEffortAllowed(efforts, requested) {
 		return m, m.effortStatusCard(string(requested),
@@ -156,10 +163,39 @@ func (m model) effortDisplay() string {
 // keypress — so the DefaultRegistry() lookup inside availableReasoningEfforts
 // is fine here, but MUST NOT be called from the render path (the registry is
 // rebuilt on every call).
+// forcedEffortRing is the fallback cycle for models unknown to the catalog
+// that expose no effort list: the three levels every major reasoning API
+// recognizes. Forcing is unverified; the provider normalizes or ignores it.
+var forcedEffortRing = []modelregistry.ReasoningEffort{
+	modelregistry.ReasoningEffortLow,
+	modelregistry.ReasoningEffortMedium,
+	modelregistry.ReasoningEffortHigh,
+}
+
+// effortForcingAllowed reports whether the active model is unknown to the
+// catalog (a custom-endpoint or unlisted model whose name matches no known
+// reasoning family). Known non-reasoning models (gpt-4.1) return false: an
+// empty effort list there is authoritative, not missing metadata.
+func (m model) effortForcingAllowed() bool {
+	name := strings.TrimSpace(m.modelName)
+	if name == "" {
+		return false
+	}
+	registry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		return false
+	}
+	_, known := registry.Get(name)
+	return !known
+}
+
 func (m model) cycleReasoningEffort() (model, tea.Cmd) {
 	efforts := m.availableReasoningEfforts()
 	if len(efforts) == 0 {
-		return m, nil
+		if !m.effortForcingAllowed() {
+			return m, nil
+		}
+		efforts = forcedEffortRing
 	}
 	if m.reasoningEffort == "" {
 		m.reasoningEffort = efforts[0]

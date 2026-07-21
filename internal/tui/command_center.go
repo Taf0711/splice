@@ -445,7 +445,10 @@ func (m model) handleModelCommand(args string) (model, string) {
 	config.SetActiveProviderEnv(nextProfile.Name)
 	m.modelName = target.modelID
 	resetEffort := false
-	if m.reasoningEffort != "" && !reasoningEffortAllowed(target.reasoningEfforts, m.reasoningEffort) {
+	// entry is nil for models unknown to the catalog: a carry-over preference
+	// there may be a forced (unverified) effort, so it survives the switch.
+	// Known models keep the strict reset.
+	if m.reasoningEffort != "" && target.entry != nil && !reasoningEffortAllowed(target.reasoningEfforts, m.reasoningEffort) {
 		// Drop an unsupported carry-over preference and fall back to the
 		// model's effective default for the new model.
 		m.reasoningEffort = ""
