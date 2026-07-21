@@ -1192,6 +1192,44 @@ func TestRunExecReasoningEffortNoticeUsesEffectiveModel(t *testing.T) {
 	}
 }
 
+func TestRunExecReasoningEffortFallsBackToProfile(t *testing.T) {
+	// gpt-4.1 does not support reasoning effort. When the profile carries a
+	// persisted ReasoningEffort and no --reasoning-effort flag is passed, exec
+	// must fall back to the profile value and emit the same advisory it would
+	// for an explicit flag.
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cwd := t.TempDir()
+	exitCode := runWithDeps([]string{"exec", "--cwd", cwd, "-o", "json", "hi"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{
+				ActiveProvider: "echo",
+				Provider: config.ProviderProfile{
+					Name:            "echo",
+					ProviderKind:    config.ProviderKindOpenAICompatible,
+					BaseURL:         "http://127.0.0.1/v1",
+					Model:           "gpt-4.1",
+					ReasoningEffort: "high",
+				},
+				MaxTurns: 3,
+			}, nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return newExecStageAwareProvider(execStageProviderOptions{}), nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "does not support reasoning effort") {
+		t.Fatalf("expected effort fallback notice on stderr, got %q", stderr.String())
+	}
+}
+
 // TestRunExecAutoHighEmitsUnsafeWarning asserts that --auto high (which resolves
 // to PermissionModeUnsafe) surfaces the same unsafe warning as
 // --skip-permissions-unsafe.

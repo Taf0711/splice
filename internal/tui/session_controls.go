@@ -138,6 +138,26 @@ func (m model) effortText() string {
 	})
 }
 
+// reasoningEffortOptionsForModel returns the effort levels to offer for
+// modelID: the catalog/name-fallback efforts when the model has them, the
+// forced ring when the model is unknown to the catalog, and nil for known
+// non-reasoning models (e.g. gpt-4.1).
+func reasoningEffortOptionsForModel(registry modelregistry.Registry, modelID string) []modelregistry.ReasoningEffort {
+	name := strings.TrimSpace(modelID)
+	if name == "" {
+		return nil
+	}
+	// Catalog efforts, or the name-fallback list for unknown models whose
+	// names match a known reasoning family (gpt-5*, codex*, o-series).
+	if efforts := registry.ReasoningEfforts(name); len(efforts) > 0 {
+		return efforts
+	}
+	if _, known := registry.Get(name); !known {
+		return forcedEffortRing
+	}
+	return nil
+}
+
 func (m model) availableReasoningEfforts() []modelregistry.ReasoningEffort {
 	if strings.TrimSpace(m.modelName) == "" {
 		return nil

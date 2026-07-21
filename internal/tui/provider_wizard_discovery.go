@@ -60,7 +60,7 @@ func (m model) advanceProviderWizard() (model, tea.Cmd) {
 		}
 	}
 	previous := m.providerWizard.step
-	m.providerWizard.advance()
+	m.providerWizard.advance(m.modelCatalog)
 	if m.providerWizard.step == providerWizardStepModel && previous != providerWizardStepModel {
 		return m, m.providerModelDiscoveryCmd()
 	}

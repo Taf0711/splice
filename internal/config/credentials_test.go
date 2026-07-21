@@ -173,6 +173,34 @@ func TestProviderProfileAPIKeyStoredRoundTrips(t *testing.T) {
 	}
 }
 
+func TestProviderProfileReasoningEffortRoundTrips(t *testing.T) {
+	var p ProviderProfile
+	if err := p.UnmarshalJSON([]byte(`{"name":"anthropic","model":"claude-sonnet-4.5","reasoningEffort":"high"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if p.ReasoningEffort != "high" {
+		t.Fatalf("ReasoningEffort = %q, want high", p.ReasoningEffort)
+	}
+
+	// Snake-case alias is also accepted for consistency with other profile fields.
+	var q ProviderProfile
+	if err := q.UnmarshalJSON([]byte(`{"name":"anthropic","reasoning_effort":"low"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if q.ReasoningEffort != "low" {
+		t.Fatalf("ReasoningEffort from snake_case = %q, want low", q.ReasoningEffort)
+	}
+
+	// Empty or missing value leaves the field unset.
+	var r ProviderProfile
+	if err := r.UnmarshalJSON([]byte(`{"name":"openai"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if r.ReasoningEffort != "" {
+		t.Fatalf("ReasoningEffort = %q, want empty", r.ReasoningEffort)
+	}
+}
+
 // OAuthLoginCandidates always offers the profile name, adds the catalog ID as a
 // fallback ONLY when the profile has no effective own credential, and dedupes
 // case-sensitively (the OAuth store is a case-sensitive map).

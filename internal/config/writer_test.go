@@ -359,6 +359,45 @@ func TestSetFavoriteModelsCreatesMissingConfig(t *testing.T) {
 	}
 }
 
+func TestUpsertProviderRoundTripsReasoningEffort(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "splice.json")
+	_, err := UpsertProvider(path, ProviderProfile{
+		Name:            "anthropic",
+		ProviderKind:    ProviderKindAnthropic,
+		BaseURL:         AnthropicBaseURL,
+		APIKey:          "sk-test",
+		Model:           "claude-sonnet-4.5",
+		ReasoningEffort: "high",
+	}, true)
+	if err != nil {
+		t.Fatalf("UpsertProvider() error = %v", err)
+	}
+
+	persisted := readConfigFixture(t, path)
+	if len(persisted.Providers) != 1 {
+		t.Fatalf("providers length = %d, want 1", len(persisted.Providers))
+	}
+	profile := persisted.Providers[0]
+	if profile.ReasoningEffort != "high" {
+		t.Fatalf("ReasoningEffort = %q, want high", profile.ReasoningEffort)
+	}
+
+	// Updating the same provider with a new effort value replaces it.
+	_, err = UpsertProvider(path, ProviderProfile{
+		Name:            "anthropic",
+		ProviderKind:    ProviderKindAnthropic,
+		Model:           "claude-sonnet-4.5",
+		ReasoningEffort: "low",
+	}, true)
+	if err != nil {
+		t.Fatalf("UpsertProvider() update error = %v", err)
+	}
+	persisted = readConfigFixture(t, path)
+	if persisted.Providers[0].ReasoningEffort != "low" {
+		t.Fatalf("updated ReasoningEffort = %q, want low", persisted.Providers[0].ReasoningEffort)
+	}
+}
+
 func writeConfigFixture(t *testing.T, path string, cfg FileConfig, mode fs.FileMode) []byte {
 	t.Helper()
 

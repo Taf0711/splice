@@ -810,20 +810,26 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		ProjectConfigPath:    projectConfigPath,
 		ProviderName:         resolved.Provider.Name,
 		ModelName:            resolved.Provider.Model,
-		ProviderProfile:      resolved.Provider,
-		SavedProviders:       usableSavedProviders(resolved.Providers),
-		FavoriteModels:       resolved.Preferences.FavoriteModels,
-		RecapsEnabled:        resolved.Preferences.RecapsEnabled(),
-		Provider:             provider,
-		NewProvider:          deps.newProvider,
-		ProbeProviderHealth:  deps.probeProviderHealth,
-		UserAgent:            userAgent(),
-		Registry:             registry,
-		SessionStore:         deps.newSessionStore(),
-		SandboxStore:         sandboxStore,
-		MCPConfig:            mcpConfig,
-		MCPPermissionStore:   mcpPermissionStore,
-		MCPTokenStore:        mcpTokenStore,
+		ReasoningEffort: func() modelregistry.ReasoningEffort {
+			if modelregistry.ValidReasoningEffort(modelregistry.ReasoningEffort(resolved.Provider.ReasoningEffort)) {
+				return modelregistry.ReasoningEffort(resolved.Provider.ReasoningEffort)
+			}
+			return ""
+		}(),
+		ProviderProfile:     resolved.Provider,
+		SavedProviders:      usableSavedProviders(resolved.Providers),
+		FavoriteModels:      resolved.Preferences.FavoriteModels,
+		RecapsEnabled:       resolved.Preferences.RecapsEnabled(),
+		Provider:            provider,
+		NewProvider:         deps.newProvider,
+		ProbeProviderHealth: deps.probeProviderHealth,
+		UserAgent:           userAgent(),
+		Registry:            registry,
+		SessionStore:        deps.newSessionStore(),
+		SandboxStore:        sandboxStore,
+		MCPConfig:           mcpConfig,
+		MCPPermissionStore:  mcpPermissionStore,
+		MCPTokenStore:       mcpTokenStore,
 		MCPCommand: func(ctx context.Context, args []string) tui.MCPCommandResult {
 			if ctx == nil {
 				ctx = context.Background()

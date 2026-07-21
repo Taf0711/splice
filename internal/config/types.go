@@ -41,6 +41,9 @@ type ProviderProfile struct {
 	Model           string            `json:"model,omitempty"`
 	ParseThinkTags  *bool             `json:"parseThinkTags,omitempty"`
 	Description     string            `json:"description,omitempty"`
+	// ReasoningEffort is an optional per-profile reasoning effort preference
+	// (low/medium/high/...), seeded into the TUI session and exec runs.
+	ReasoningEffort string `json:"reasoningEffort,omitempty"`
 }
 
 func HasProviderProfile(profile ProviderProfile) bool {
@@ -58,7 +61,8 @@ func HasProviderProfile(profile ProviderProfile) bool {
 		profile.CustomHeaders != nil ||
 		strings.TrimSpace(profile.Model) != "" ||
 		profile.ParseThinkTags != nil ||
-		strings.TrimSpace(profile.Description) != ""
+		strings.TrimSpace(profile.Description) != "" ||
+		strings.TrimSpace(profile.ReasoningEffort) != ""
 }
 
 type SandboxConfig struct {
@@ -543,6 +547,8 @@ func (profile *ProviderProfile) UnmarshalJSON(data []byte) error {
 		ParseThinkTags       *bool             `json:"parseThinkTags"`
 		ParseThinkTagsSnake  *bool             `json:"parse_think_tags"`
 		Description          string            `json:"description"`
+		ReasoningEffort      string            `json:"reasoningEffort"`
+		ReasoningEffortSnake string            `json:"reasoning_effort"`
 	}
 
 	var raw rawProfile
@@ -566,6 +572,7 @@ func (profile *ProviderProfile) UnmarshalJSON(data []byte) error {
 	profile.Model = strings.TrimSpace(firstNonEmpty(raw.Model, raw.ModelID))
 	profile.ParseThinkTags = firstNonNilBool(raw.ParseThinkTags, raw.ParseThinkTagsSnake)
 	profile.Description = strings.TrimSpace(raw.Description)
+	profile.ReasoningEffort = strings.TrimSpace(firstNonEmpty(raw.ReasoningEffort, raw.ReasoningEffortSnake))
 	return nil
 }
 

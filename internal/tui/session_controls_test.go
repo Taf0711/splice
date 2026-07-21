@@ -166,6 +166,52 @@ func TestEffortCommandStillRefusesKnownModelWithoutControls(t *testing.T) {
 	}
 }
 
+func TestReasoningEffortOptionsForModel(t *testing.T) {
+	registry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry: %v", err)
+	}
+
+	cases := []struct {
+		name    string
+		modelID string
+		want    []string
+	}{
+		{
+			name:    "catalog reasoning model uses catalog efforts",
+			modelID: "claude-sonnet-4.5",
+			want:    []string{"low", "medium", "high"},
+		},
+		{
+			name:    "unknown model falls back to forced ring",
+			modelID: "z-ai/glm-5.2",
+			want:    []string{"low", "medium", "high"},
+		},
+		{
+			name:    "known non-reasoning model returns nil",
+			modelID: "gpt-4.1",
+			want:    nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := reasoningEffortOptionsForModel(registry, tc.modelID)
+			var gotStrings []string
+			for _, effort := range got {
+				gotStrings = append(gotStrings, string(effort))
+			}
+			if len(gotStrings) != len(tc.want) {
+				t.Fatalf("reasoningEffortOptionsForModel() = %v, want %v", gotStrings, tc.want)
+			}
+			for i := range tc.want {
+				if gotStrings[i] != tc.want[i] {
+					t.Fatalf("reasoningEffortOptionsForModel() = %v, want %v", gotStrings, tc.want)
+				}
+			}
+		})
+	}
+}
+
 func TestEffortCommandRejectsInvalidLevelOnUnknownModel(t *testing.T) {
 	m := newModel(context.Background(), Options{ModelName: "glm-5.2"})
 	next, card := m.handleEffortCommand("warp")

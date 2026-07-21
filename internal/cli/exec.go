@@ -402,6 +402,11 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "sandbox_error", err.Error())
 	}
 	runReasoningEffort := options.reasoningEffort
+	if runReasoningEffort == "" {
+		if modelregistry.ValidReasoningEffort(modelregistry.ReasoningEffort(resolved.Provider.ReasoningEffort)) {
+			runReasoningEffort = resolved.Provider.ReasoningEffort
+		}
+	}
 	if options.useSpec && options.specReasoningEffort != "" {
 		runReasoningEffort = options.specReasoningEffort
 	}

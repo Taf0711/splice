@@ -13,6 +13,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Taf0711/splice/internal/config"
+	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/providercatalog"
 	"github.com/Taf0711/splice/internal/providermodeldiscovery"
 	"github.com/Taf0711/splice/internal/zeroruntime"
@@ -228,6 +229,10 @@ func TestProviderWizardAdvancesProviderAPIKeyAndModelSteps(t *testing.T) {
 
 	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
+	if next.providerWizard.step == providerWizardStepEffort {
+		updated, _ = next.Update(testKey(tea.KeyEnter))
+		next = updated.(model)
+	}
 	if next.providerWizard.step != providerWizardStepDone {
 		t.Fatalf("wizard step = %v, want done", next.providerWizard.step)
 	}
@@ -297,14 +302,31 @@ func TestProviderWizardSupportsLeftAndGuardedRightNavigation(t *testing.T) {
 	next = updated.(model)
 	updated, _ = next.Update(testKey(tea.KeyRight))
 	next = updated.(model)
-	if next.providerWizard.step != providerWizardStepDone {
-		t.Fatalf("right from model step = %v, want ready", next.providerWizard.step)
+	if next.providerWizard.step != providerWizardStepEffort {
+		t.Fatalf("right from model step = %v, want effort", next.providerWizard.step)
 	}
 
 	updated, _ = next.Update(testKey(tea.KeyLeft))
 	next = updated.(model)
 	if next.providerWizard.step != providerWizardStepModel {
-		t.Fatalf("left from ready step = %v, want model", next.providerWizard.step)
+		t.Fatalf("left from effort step = %v, want model", next.providerWizard.step)
+	}
+
+	updated, _ = next.Update(testKey(tea.KeyRight))
+	next = updated.(model)
+	if next.providerWizard.step != providerWizardStepEffort {
+		t.Fatalf("right from model step = %v, want effort", next.providerWizard.step)
+	}
+	updated, _ = next.Update(testKey(tea.KeyRight))
+	next = updated.(model)
+	if next.providerWizard.step != providerWizardStepDone {
+		t.Fatalf("right from effort step = %v, want done", next.providerWizard.step)
+	}
+
+	updated, _ = next.Update(testKey(tea.KeyLeft))
+	next = updated.(model)
+	if next.providerWizard.step != providerWizardStepEffort {
+		t.Fatalf("left from ready step = %v, want effort", next.providerWizard.step)
 	}
 }
 
@@ -428,6 +450,10 @@ func TestProviderWizardCustomCompatibleProviderCollectsEndpointAndModel(t *testi
 	next = updated.(model)
 	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
+	if next.providerWizard.step == providerWizardStepEffort {
+		updated, _ = next.Update(testKey(tea.KeyEnter))
+		next = updated.(model)
+	}
 	if next.providerWizard.step != providerWizardStepDone {
 		t.Fatalf("model step advanced to %v, want ready", next.providerWizard.step)
 	}
@@ -533,6 +559,10 @@ func TestProviderWizardCustomCompatibleProviderDerivesIPName(t *testing.T) {
 	next = updated.(model)
 	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
+	if next.providerWizard.step == providerWizardStepEffort {
+		updated, _ = next.Update(testKey(tea.KeyEnter))
+		next = updated.(model)
+	}
 	if next.providerWizard.step != providerWizardStepDone {
 		t.Fatalf("model step advanced to %v, want ready", next.providerWizard.step)
 	}
@@ -627,6 +657,10 @@ func TestProviderWizardAppliesPastedKeyToCurrentSession(t *testing.T) {
 	next = finishProviderWizardModelDiscoveryForTest(t, next)
 	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
+	if next.providerWizard.step == providerWizardStepEffort {
+		updated, _ = next.Update(testKey(tea.KeyEnter))
+		next = updated.(model)
+	}
 	if next.providerWizard.step != providerWizardStepDone {
 		t.Fatalf("wizard step = %v, want done", next.providerWizard.step)
 	}
@@ -677,6 +711,10 @@ func TestProviderWizardPersistsPastedKeyToUserConfig(t *testing.T) {
 	next = finishProviderWizardModelDiscoveryForTest(t, next)
 	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
+	if next.providerWizard.step == providerWizardStepEffort {
+		updated, _ = next.Update(testKey(tea.KeyEnter))
+		next = updated.(model)
+	}
 	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 
@@ -734,6 +772,10 @@ func TestProviderWizardUsesAPIKeyEnvForCurrentSessionWithoutPersistingSecret(t *
 	next = finishProviderWizardModelDiscoveryForTest(t, next)
 	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
+	if next.providerWizard.step == providerWizardStepEffort {
+		updated, _ = next.Update(testKey(tea.KeyEnter))
+		next = updated.(model)
+	}
 	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 
@@ -891,6 +933,108 @@ func TestProviderWizardKeepsFallbackModelsWhenLiveDiscoveryFails(t *testing.T) {
 	view = plainRender(t, next.View())
 	assertContains(t, view, "Using built-in model list")
 	assertNotContains(t, view, "offline")
+}
+
+func TestProviderWizardEffortStep(t *testing.T) {
+	cases := []struct {
+		name    string
+		modelID string
+		want    providerWizardStep
+	}{
+		{
+			name:    "unknown model offers effort step",
+			modelID: "z-ai/glm-5.2",
+			want:    providerWizardStepEffort,
+		},
+		{
+			name:    "catalog reasoning model offers effort step",
+			modelID: "claude-sonnet-4.5",
+			want:    providerWizardStepEffort,
+		},
+		{
+			name:    "known non-reasoning model skips effort step",
+			modelID: "gpt-4.1",
+			want:    providerWizardStepDone,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newModel(context.Background(), Options{})
+			m = openProviderWizardForTest(t, m)
+			m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "custom-openai-compatible")
+
+			updated, _ := m.Update(testKey(tea.KeyEnter))
+			next := updated.(model)
+			updated, _ = next.Update(testKeyText("https://proxy.example/v1"))
+			next = updated.(model)
+			updated, _ = next.Update(testKey(tea.KeyEnter))
+			next = updated.(model)
+			updated, _ = next.Update(testKey(tea.KeyEnter))
+			next = updated.(model)
+			updated, _ = next.Update(testKey(tea.KeyEnter))
+			next = updated.(model)
+			updated, _ = next.Update(testKeyText(tc.modelID))
+			next = updated.(model)
+			updated, _ = next.Update(testKey(tea.KeyEnter))
+			next = updated.(model)
+
+			if next.providerWizard.step != tc.want {
+				t.Fatalf("after model selection step = %v, want %v", next.providerWizard.step, tc.want)
+			}
+		})
+	}
+}
+
+func TestProviderWizardSavesReasoningEffort(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &fakeProvider{}, nil
+		},
+	})
+	m = openProviderWizardForTest(t, m)
+	m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "custom-openai-compatible")
+
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	updated, _ = next.Update(testKeyText("https://proxy.example/v1"))
+	next = updated.(model)
+	updated, _ = next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+	updated, _ = next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+	updated, _ = next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+	updated, _ = next.Update(testKeyText("z-ai/glm-5.2"))
+	next = updated.(model)
+	updated, _ = next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+	if next.providerWizard.step != providerWizardStepEffort {
+		t.Fatalf("expected effort step, got %v", next.providerWizard.step)
+	}
+
+	// Cursor starts on auto (0). One down selects the first forced option (low).
+	updated, _ = next.Update(testKey(tea.KeyDown))
+	next = updated.(model)
+	updated, _ = next.Update(testKey(tea.KeyDown))
+	next = updated.(model)
+	updated, _ = next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+	if next.providerWizard.step != providerWizardStepDone {
+		t.Fatalf("expected done step, got %v", next.providerWizard.step)
+	}
+
+	// Saving should close the wizard and apply medium to the live profile and session.
+	updated, _ = next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+	if next.providerWizard != nil {
+		t.Fatal("saving provider should close the wizard")
+	}
+	if next.providerProfile.ReasoningEffort != "medium" {
+		t.Fatalf("profile ReasoningEffort = %q, want medium", next.providerProfile.ReasoningEffort)
+	}
+	if next.reasoningEffort != modelregistry.ReasoningEffortMedium {
+		t.Fatalf("session reasoningEffort = %q, want medium", next.reasoningEffort)
+	}
 }
 
 func TestProviderWizardRendersDiscoveredModelMetadata(t *testing.T) {

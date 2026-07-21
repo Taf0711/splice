@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/Taf0711/splice/internal/browser"
 	"github.com/Taf0711/splice/internal/config"
+	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/oauth"
 	"github.com/Taf0711/splice/internal/providercatalog"
 	"github.com/Taf0711/splice/internal/provideroauth"
@@ -248,6 +250,7 @@ const (
 	providerWizardStepName
 	providerWizardStepCredential
 	providerWizardStepModel
+	providerWizardStepEffort
 	providerWizardStepDone
 )
 
@@ -320,6 +323,10 @@ type providerWizardState struct {
 	oauthDevice           bool
 	deviceUserCode        string
 	deviceVerificationURI string
+	// Reasoning-effort chooser state. effortCursor 0 means "auto" (empty);
+	// cursor positions 1..len(effortOptions) map to effortOptions[cursor-1].
+	effortCursor  int
+	effortOptions []modelregistry.ReasoningEffort
 }
 
 func (m model) newProviderWizard() *providerWizardState {
@@ -436,10 +443,16 @@ func (wizard *providerWizardState) move(delta int) {
 			return
 		}
 		wizard.selectedModel = ((wizard.selectedModel+delta)%len(models) + len(models)) % len(models)
+	case providerWizardStepEffort:
+		if len(wizard.effortOptions) == 0 {
+			return
+		}
+		count := len(wizard.effortOptions) + 1 // include auto at index 0
+		wizard.effortCursor = ((wizard.effortCursor+delta)%count + count) % count
 	}
 }
 
-func (wizard *providerWizardState) advance() {
+func (wizard *providerWizardState) advance(registry modelregistry.Registry) {
 	if wizard == nil {
 		return
 	}
@@ -512,18 +525,26 @@ func (wizard *providerWizardState) advance() {
 				wizard.err = "enter a model name before continuing"
 				return
 			}
-			wizard.step = providerWizardStepDone
-			return
 		}
 		if wizard.modelLoading {
 			wizard.err = "Models are still loading."
 			return
 		}
 		wizard.refreshModels()
-		if len(wizard.filteredModels()) == 0 {
+		if len(wizard.filteredModels()) == 0 && !providerWizardUsesTypedModel(wizard.currentProvider()) {
 			wizard.err = "choose a matching model before continuing"
 			return
 		}
+		modelID := wizard.currentModel().ID
+		wizard.effortOptions = reasoningEffortOptionsForModel(registry, modelID)
+		wizard.effortCursor = 0
+		if len(wizard.effortOptions) > 0 {
+			wizard.step = providerWizardStepEffort
+		} else {
+			wizard.step = providerWizardStepDone
+		}
+	case providerWizardStepEffort:
+		wizard.err = ""
 		wizard.step = providerWizardStepDone
 	case providerWizardStepDone:
 		wizard.step = providerWizardStepProvider
@@ -561,8 +582,14 @@ func (wizard *providerWizardState) retreat() {
 		} else {
 			wizard.step = providerWizardStepProvider
 		}
-	case providerWizardStepDone:
+	case providerWizardStepEffort:
 		wizard.step = providerWizardStepModel
+	case providerWizardStepDone:
+		if len(wizard.effortOptions) > 0 {
+			wizard.step = providerWizardStepEffort
+		} else {
+			wizard.step = providerWizardStepModel
+		}
 	}
 }
 
@@ -828,6 +855,8 @@ func (wizard *providerWizardState) canAdvanceWithRight() bool {
 		}
 		wizard.refreshModels()
 		return len(wizard.filteredModels()) > 0
+	case providerWizardStepEffort:
+		return len(wizard.effortOptions) > 0
 	default:
 		return false
 	}
@@ -993,6 +1022,13 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 		}
 		nextProvider = built
 	}
+	// Translate the effort chooser cursor into the persisted profile value.
+	if wizard.effortCursor > 0 && wizard.effortCursor <= len(wizard.effortOptions) {
+		profile.ReasoningEffort = string(wizard.effortOptions[wizard.effortCursor-1])
+	} else {
+		profile.ReasoningEffort = ""
+	}
+
 	if strings.TrimSpace(m.userConfigPath) != "" {
 		// Capture flip: move the freshly entered key into the encrypted credential
 		// store before persisting, so config.json never holds the cleartext. The
@@ -1013,6 +1049,11 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 	m.providerProfile = profile
 	m.providerName = profile.Name
 	m.modelName = profile.Model
+	if modelregistry.ValidReasoningEffort(modelregistry.ReasoningEffort(profile.ReasoningEffort)) {
+		m.reasoningEffort = modelregistry.ReasoningEffort(profile.ReasoningEffort)
+	} else {
+		m.reasoningEffort = ""
+	}
 	// Keep sub-agent child processes on the same provider we just switched to —
 	// same as the /model and /provider switch paths (command_center.go). Without
 	// this, a ZERO_PROVIDER exported by an earlier switch stays pointing at the
@@ -1086,10 +1127,10 @@ func (m model) providerWizardOverlay(width int) string {
 	if m.providerWizard == nil {
 		return ""
 	}
-	return m.providerWizard.render(width)
+	return m.providerWizard.render(width, m.providerWizardStepLine(m.providerWizard))
 }
 
-func (wizard *providerWizardState) render(width int) string {
+func (wizard *providerWizardState) render(width int, stepLine string) string {
 	if wizard == nil {
 		return ""
 	}
@@ -1097,7 +1138,7 @@ func (wizard *providerWizardState) render(width int) string {
 	innerWidth := maxInt(20, overlayWidth-4)
 
 	lines := []string{
-		zeroTheme.faint.Render(providerWizardStepLine(wizard)),
+		zeroTheme.faint.Render(stepLine),
 		zeroTheme.line.Render(strings.Repeat("─", innerWidth)),
 	}
 	if wizard.err != "" {
@@ -1130,6 +1171,8 @@ func (wizard *providerWizardState) render(width int) string {
 		lines = append(lines, wizard.renderCredentialStep(innerWidth)...)
 	case providerWizardStepModel:
 		lines = append(lines, wizard.renderModelStep(innerWidth)...)
+	case providerWizardStepEffort:
+		lines = append(lines, wizard.renderEffortStep(innerWidth)...)
 	case providerWizardStepDone:
 		lines = append(lines, wizard.renderDoneStep(innerWidth)...)
 	}
@@ -1172,6 +1215,8 @@ func (wizard *providerWizardState) footer() string {
 			return "↑/↓ move   Enter/→ continue   ← back   Esc close"
 		}
 		return "↑/↓ move   Enter continue   ← back   Esc close"
+	case providerWizardStepEffort:
+		return "↑/↓ move   Enter/→ continue   ← back   Esc close"
 	case providerWizardStepDone:
 		return "Enter save   ← back   Esc close"
 	default:
@@ -1200,7 +1245,7 @@ func providerWizardOverlayWidth(width int, step providerWizardStep) int {
 	return target
 }
 
-func providerWizardStepLine(wizard *providerWizardState) string {
+func (m model) providerWizardStepLine(wizard *providerWizardState) string {
 	if wizard == nil {
 		return ""
 	}
@@ -1209,38 +1254,45 @@ func providerWizardStepLine(wizard *providerWizardState) string {
 		step  providerWizardStep
 		label string
 	}
+
+	var hasEffort bool
+	switch wizard.step {
+	case providerWizardStepModel, providerWizardStepEffort, providerWizardStepDone:
+		hasEffort = len(wizard.effortOptions) > 0
+	default:
+		if modelID := wizard.currentProvider().DefaultModel; modelID != "" {
+			hasEffort = len(reasoningEffortOptionsForModel(m.modelCatalog, modelID)) > 0
+		}
+	}
+
 	steps := []stepLabel{
-		{providerWizardStepMethod, "1 method"},
-		{providerWizardStepProvider, "2 provider"},
+		{providerWizardStepMethod, "method"},
+		{providerWizardStepProvider, "provider"},
 	}
 	switch {
 	case wizard.oauthMode:
 		// OAuth path skips endpoint/name/key entirely.
-		steps = append(steps,
-			stepLabel{providerWizardStepModel, "3 model"},
-			stepLabel{providerWizardStepDone, "4 ready"},
-		)
 	case providerWizardNeedsEndpoint(wizard.currentProvider()):
 		steps = append(steps,
-			stepLabel{providerWizardStepEndpoint, "3 endpoint"},
-			stepLabel{providerWizardStepName, "4 name"},
-			stepLabel{providerWizardStepCredential, "5 key"},
-			stepLabel{providerWizardStepModel, "6 model"},
-			stepLabel{providerWizardStepDone, "7 ready"},
+			stepLabel{providerWizardStepEndpoint, "endpoint"},
+			stepLabel{providerWizardStepName, "name"},
 		)
 	default:
-		steps = append(steps,
-			stepLabel{providerWizardStepCredential, "3 key"},
-			stepLabel{providerWizardStepModel, "4 model"},
-			stepLabel{providerWizardStepDone, "5 ready"},
-		)
+		steps = append(steps, stepLabel{providerWizardStepCredential, "key"})
 	}
+	steps = append(steps, stepLabel{providerWizardStepModel, "model"})
+	if hasEffort {
+		steps = append(steps, stepLabel{providerWizardStepEffort, "effort"})
+	}
+	steps = append(steps, stepLabel{providerWizardStepDone, "ready"})
+
 	parts := make([]string, 0, len(steps))
-	for _, item := range steps {
+	for index, item := range steps {
+		label := fmt.Sprintf("%d %s", index+1, item.label)
 		if item.step == step {
-			parts = append(parts, "["+item.label+"]")
+			parts = append(parts, "["+label+"]")
 		} else {
-			parts = append(parts, item.label)
+			parts = append(parts, label)
 		}
 	}
 	return strings.Join(parts, "  ")
@@ -1512,6 +1564,42 @@ func (wizard *providerWizardState) renderModelStep(width int) []string {
 	}
 	if detail := providerWizardModelDetail(wizard.currentModel()); detail != "" {
 		lines = append(lines, fitStyledLine(zeroTheme.faint.Render("  "+detail), width))
+	}
+	return lines
+}
+
+func (wizard *providerWizardState) renderEffortStep(width int) []string {
+	lines := []string{zeroTheme.accent.Render("Choose reasoning effort")}
+	options := wizard.effortOptions
+	choices := make([]struct {
+		label  string
+		value  string
+		detail string
+	}, 0, len(options)+1)
+	choices = append(choices, struct {
+		label  string
+		value  string
+		detail string
+	}{label: "auto", value: "", detail: "follow the model's default"})
+	for _, opt := range options {
+		choices = append(choices, struct {
+			label  string
+			value  string
+			detail string
+		}{label: string(opt), value: string(opt), detail: ""})
+	}
+	for index, choice := range choices {
+		surface := transparentSurface
+		marker := surface(zeroTheme.faintest).Render("  ")
+		if index == wizard.effortCursor {
+			surface = zeroTheme.onSel
+			marker = surface(zeroTheme.accent).Render("❯ ")
+		}
+		left := marker + surface(zeroTheme.ink).Render(choice.label)
+		if choice.detail != "" {
+			left += surface(zeroTheme.faint).Render("   " + choice.detail)
+		}
+		lines = append(lines, fitStyledLine(left, width))
 	}
 	return lines
 }
