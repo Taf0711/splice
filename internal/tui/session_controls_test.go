@@ -177,6 +177,24 @@ func TestEffortCommandRejectsInvalidLevelOnUnknownModel(t *testing.T) {
 	}
 }
 
+func TestEffortPickerOffersForcedRingOnUnknownModel(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "z-ai/glm-5.2"})
+	p := m.newEffortPicker()
+	got := make([]string, 0, len(p.items))
+	for _, it := range p.items {
+		got = append(got, it.Value)
+	}
+	want := []string{"auto", "low", "medium", "high"}
+	if len(got) != len(want) {
+		t.Fatalf("picker items = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("picker items = %v, want %v", got, want)
+		}
+	}
+}
+
 func TestCycleReasoningEffortForcedRingOnUnknownModel(t *testing.T) {
 	m := newModel(context.Background(), Options{ModelName: "glm-5.2"})
 	want := []modelregistry.ReasoningEffort{

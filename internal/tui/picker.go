@@ -878,6 +878,13 @@ func (m *model) selectPickerValue(value string) {
 // anything other than auto.
 func (m model) newEffortPicker() *commandPicker {
 	efforts := m.availableReasoningEfforts()
+	if len(efforts) == 0 && m.effortForcingAllowed() {
+		// Unknown-to-catalog model (z-ai/glm-5.2, custom endpoints): offer the
+		// forced ring so effort can be set at all. handleEffortCommand forwards
+		// it as-is with an unverified warning. Known non-reasoning models keep
+		// auto only.
+		efforts = forcedEffortRing
+	}
 	items := []pickerItem{{Label: "auto", Value: "auto"}}
 	selected := 0
 	if m.reasoningEffort == "" {
