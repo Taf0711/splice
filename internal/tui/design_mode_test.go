@@ -721,3 +721,27 @@ func TestPersistentPlanHeaderInertWhenToggleOff(t *testing.T) {
 		t.Fatalf("plan header should be empty when toggle off, got %q", header)
 	}
 }
+func TestPersistentPlanHeaderRendersTaskGraph(t *testing.T) {
+	store := testSessionStore(t)
+	m := newDesignModeTestModel(t.TempDir(), &fakeProvider{}, store)
+	m.designMode = true
+	m.planPanelPersistent = true
+	m.pendingPlan = &schemas.DesignPlan{
+		Epic: "add diagrams",
+		Tasks: []schemas.Task{
+			{ID: "d1", Title: "Renderer", Intent: "build the renderer"},
+			{ID: "d2", Title: "Seam", Intent: "wire the panel", DependsOn: []string{"d1"}},
+		},
+	}
+	header := m.persistentPlanHeader(80)
+	if !strings.Contains(header, "Task graph") {
+		t.Fatalf("plan header missing task graph section: %q", header)
+	}
+	if !strings.Contains(header, "Renderer") || !strings.Contains(header, "Seam") || !strings.Contains(header, "▼") {
+		t.Fatalf("plan header missing rendered task graph: %q", header)
+	}
+	narrow := m.persistentPlanHeader(40)
+	if !strings.Contains(narrow, "- Renderer") || strings.Contains(narrow, "▼") {
+		t.Fatalf("narrow plan header should use the list fallback: %q", narrow)
+	}
+}

@@ -300,7 +300,28 @@ func (m model) persistentPlanHeader(width int) string {
 		return ""
 	}
 	lines := append([]string{zeroTheme.faint.Render("Plan")}, strings.Split(body, "\n")...)
+	lines = append(lines, taskGraphLines(*m.pendingPlan, width-4)...)
 	return borderedBlock(width, lines)
+}
+
+// taskGraphLines renders the plan's task dependency DAG as ASCII art for the
+// plan panel. The panel re-renders at View time with a real width, so box art
+// is safe here (static transcript rows rewrap and would mangle it). Rendering
+// is deterministic and token-free; failures degrade to one faint line instead
+// of failing the header.
+func taskGraphLines(plan schemas.DesignPlan, width int) []string {
+	if len(plan.Tasks) == 0 {
+		return nil
+	}
+	graph, err := splicerun.TaskGraphFromPlan(plan)
+	if err == nil {
+		var art string
+		art, err = splicerun.RenderDiagram(graph, width)
+		if err == nil {
+			return append([]string{"", zeroTheme.faint.Render("Task graph")}, strings.Split(art, "\n")...)
+		}
+	}
+	return []string{"", zeroTheme.faint.Render("Task graph unavailable: " + err.Error())}
 }
 
 func formatPlanCritique(critique schemas.PlanCritique) string {
