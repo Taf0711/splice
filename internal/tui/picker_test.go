@@ -838,10 +838,13 @@ func readTUIConfigFixture(t *testing.T, path string) config.FileConfig {
 }
 
 func TestEffortPickerOpensForModelWithoutEffortControls(t *testing.T) {
-	// glm-5.1 is not in the hard-coded registry, so availableReasoningEfforts is
-	// empty. /effort should still open a picker (offering auto only) instead of
-	// rendering a static "Effort / available: none for active model" status card.
-	m := newModel(context.Background(), Options{ModelName: "glm-5.1"})
+	// gpt-4.1 is a catalog model with no reasoning controls, so
+	// availableReasoningEfforts is empty and forcing is not allowed. /effort
+	// should still open a picker (offering auto only) instead of rendering a
+	// static "Effort / available: none for active model" status card.
+	// (Unknown-to-catalog models get the forced ring instead; that path is
+	// covered in session_controls_test.go.)
+	m := newModel(context.Background(), Options{ModelName: "gpt-4.1"})
 	m.input.SetValue("/effort")
 
 	updated, _ := m.Update(testKey(tea.KeyEnter))
@@ -858,9 +861,9 @@ func TestEffortPickerOpensForModelWithoutEffortControls(t *testing.T) {
 }
 
 func TestEffortPickerAutoSelectionKeepsEffortUnset(t *testing.T) {
-	// Picking "auto" on a model without effort controls clears any stale
+	// Picking "auto" on a catalog model without effort controls clears any stale
 	// preference and emits the success status text (handleEffortCommand("auto")).
-	m := newModel(context.Background(), Options{ModelName: "glm-5.1"})
+	m := newModel(context.Background(), Options{ModelName: "gpt-4.1"})
 	m.reasoningEffort = modelregistry.ReasoningEffortHigh
 	m.input.SetValue("/effort")
 
