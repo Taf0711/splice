@@ -47,8 +47,8 @@ func TestAltScreenKeepsSettledRowsInManagedView(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("alt-screen mode should not print rows into native scrollback")
 	}
-	if next.flushed != 0 {
-		t.Fatalf("alt-screen mode should keep the flush frontier unchanged, got %d", next.flushed)
+	if next.flushed != 3 {
+		t.Fatalf("alt-screen mode should advance the flush frontier to the settled prefix, got %d", next.flushed)
 	}
 	view := viewString(next.View())
 	if !strings.Contains(view, "hello there") || !strings.Contains(view, "noted") {

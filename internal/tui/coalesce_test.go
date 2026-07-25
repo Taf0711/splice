@@ -180,3 +180,99 @@ func TestCoalescerTimerFlushes(t *testing.T) {
 		t.Fatalf("timer-flushed message = %#v", got[0])
 	}
 }
+
+// Contiguous reasoning deltas batch into one forwarded agentReasoningMsg
+// carrying the concatenated text, mirroring TestCoalescerBatchesDeltas.
+func TestCoalescerBatchesReasoningDeltas(t *testing.T) {
+	rec := &recorder{}
+	c := newTextCoalescer(rec.forward)
+	c.afterFunc = func(func()) coalesceTimer { return &manualTimer{} }
+
+	c.send(agentReasoningMsg{runID: 1, delta: "think"})
+	c.send(agentReasoningMsg{runID: 1, delta: "ing"})
+	c.send(agentReasoningMsg{runID: 1, delta: " hard"})
+
+	if got := rec.snapshot(); len(got) != 0 {
+		t.Fatalf("reasoning deltas should buffer, forwarded %d early: %#v", len(got), got)
+	}
+
+	c.flush()
+
+	got := rec.snapshot()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 coalesced message, got %d: %#v", len(got), got)
+	}
+	r, ok := got[0].(agentReasoningMsg)
+	if !ok || r.delta != "thinking hard" || r.runID != 1 {
+		t.Fatalf("coalesced message = %#v, want agentReasoningMsg{1, `thinking hard`}", got[0])
+	}
+}
+
+// A non-stream message flushes buffered reasoning first, so ordering
+// (reasoning before the tool call it precedes) is preserved.
+func TestCoalescerFlushesReasoningBeforeOtherMessages(t *testing.T) {
+	rec := &recorder{}
+	c := newTextCoalescer(rec.forward)
+
+	c.send(agentReasoningMsg{runID: 1, delta: "planning the next step"})
+	c.send(toolCallStreamStartMsg{runID: 1, id: "t1", name: "bash"})
+
+	got := rec.snapshot()
+	if len(got) != 2 {
+		t.Fatalf("expected reasoning then tool-call, got %d: %#v", len(got), got)
+	}
+	if r, ok := got[0].(agentReasoningMsg); !ok || r.delta != "planning the next step" {
+		t.Fatalf("first forwarded message must be the flushed reasoning, got %#v", got[0])
+	}
+	if _, ok := got[1].(toolCallStreamStartMsg); !ok {
+		t.Fatalf("second forwarded message must be the tool-call start, got %#v", got[1])
+	}
+}
+
+// A text delta arriving while reasoning is buffered flushes the reasoning first,
+// then buffers the text, so arrival order across a kind switch is preserved.
+func TestCoalescerFlushesOnKindSwitch(t *testing.T) {
+	rec := &recorder{}
+	c := newTextCoalescer(rec.forward)
+	c.afterFunc = func(func()) coalesceTimer { return &manualTimer{} }
+
+	c.send(agentReasoningMsg{runID: 1, delta: "reasoned"})
+	c.send(agentTextMsg{runID: 1, delta: "answered"})
+	c.flush()
+
+	got := rec.snapshot()
+	if len(got) != 2 {
+		t.Fatalf("expected reasoning then text, got %d: %#v", len(got), got)
+	}
+	if r, ok := got[0].(agentReasoningMsg); !ok || r.delta != "reasoned" {
+		t.Fatalf("first message = %#v, want flushed reasoning", got[0])
+	}
+	if text, ok := got[1].(agentTextMsg); !ok || text.delta != "answered" {
+		t.Fatalf("second message = %#v, want buffered text after kind switch", got[1])
+	}
+}
+
+// The frame timer flushes buffered reasoning on its own without an explicit
+// flush or a following message, mirroring TestCoalescerTimerFlushes.
+func TestCoalescerTimerFlushesReasoning(t *testing.T) {
+	rec := &recorder{}
+	c := newTextCoalescer(rec.forward)
+
+	c.send(agentReasoningMsg{runID: 1, delta: "timer-driven reasoning"})
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if len(rec.snapshot()) > 0 {
+			break
+		}
+		time.Sleep(streamCoalesceInterval)
+	}
+
+	got := rec.snapshot()
+	if len(got) != 1 {
+		t.Fatalf("timer should have flushed exactly one message, got %d: %#v", len(got), got)
+	}
+	if r := got[0].(agentReasoningMsg); r.delta != "timer-driven reasoning" {
+		t.Fatalf("timer-flushed message = %#v", got[0])
+	}
+}

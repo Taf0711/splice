@@ -293,16 +293,23 @@ type model struct {
 	chatBodyLines int
 
 	// Flush-frontier state (see flush.go). In inline mode, transcript[:flushed]
-	// is already in native scrollback; in alt-screen mode this frontier stays
-	// idle so history cannot reveal prior shell output.
+	// is already in native scrollback. Alt-screen mode advances the same
+	// frontier, but keeps the settled prefix as cached body items so fullscreen
+	// scrolling still exposes the complete transcript without rebuilding it on
+	// every frame.
 	// flushedAny gates the first turn-separator blank line; flushQueue/
 	// printInFlight serialize ordered scrollback prints; headerPrinted records
 	// the one-time inline title-bar print at startup.
-	flushed       int
-	flushedAny    bool
-	flushQueue    []string
-	printInFlight bool
-	headerPrinted bool
+	flushed                  int
+	flushedAny               bool
+	flushedPreviousKind      rowKind
+	flushedHavePreviousKind  bool
+	flushQueue               []string
+	printInFlight            bool
+	headerPrinted            bool
+	altScreenSettledItems    []transcriptBodyItem
+	altScreenSettledWidth    int
+	altScreenSettledFrontier int
 
 	// Composer input history (shell-style ↑/↓ recall of submitted inputs).
 	// lastPrompt is the verbatim text of the most recent submitted prompt, so
@@ -382,8 +389,9 @@ type model struct {
 	// mouseReleased, when true, forces terminal mouse capture OFF so the user can
 	// drag-select and copy text natively (Ctrl+E toggles it). App mouse features
 	// (clickable suggestions, right-click paste, transcript select) pause while on.
-	mouseReleased       bool
-	transcriptSelection transcriptSelectionState
+	mouseReleased         bool
+	transcriptSelection   transcriptSelectionState
+	transcriptInteraction *transcriptRenderInteraction
 	// hover identifies the single clickable row (if any) currently under the
 	// mouse cursor with no button pressed, so it renders in a distinct style —
 	// the visual cue that it's clickable. Requires AllMotion mouse reporting
@@ -776,7 +784,7 @@ func newModel(ctx context.Context, options Options) model {
 	}
 
 	input := textinput.New()
-	input.Prompt = "λ "
+	input.Prompt = "∞ "
 	input.Placeholder = composerPlaceholder
 	// Bubble's Ctrl+V binding reads the clipboard itself. Keep it disabled so
 	// terminal bracketed paste (Paste: true) is the single paste path.
@@ -842,6 +850,7 @@ func newModel(ctx context.Context, options Options) model {
 		usageTracker:                usageTracker,
 		transcript:                  initialTranscript(),
 		transcriptBodyHeights:       newTranscriptBodyHeightCache(defaultTranscriptBodyHeightCacheMaxEntries),
+		transcriptInteraction:       &transcriptRenderInteraction{},
 		prService:                   prService,
 		prState:                     prService.GetState(),
 		input:                       input,
@@ -1070,6 +1079,10 @@ func (m model) disarmCancelConfirmation() model {
 // frontier for inline rendering. Alt-screen runs keep rows in the managed view
 // instead of printing into terminal scrollback (see flush.go).
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	updateStart := time.Now()
+	perf.lastTag = tagForMsg(msg)
+	defer func() { perf.recordUpdate(time.Since(updateStart)) }()
+
 	if _, ok := msg.(flushedMsg); ok {
 		m.printInFlight = false
 		return m.drainFlushQueue()
@@ -1321,7 +1334,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// selection is a passive highlight, so Esc dropping it is cheap and
 			// expected (mirrors how editors clear selection on Esc).
 			if m.selectedFile != "" {
-				m.selectedFile = ""
+				m.setSelectedFile("")
 				return m, nil
 			}
 			if m.hasQueuedMessage() {
@@ -2423,7 +2436,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Collapse a repeated swarm status/collect card so re-checks don't flood
 		// the chat with identical blocks.
+		beforeCollapse := len(m.transcript)
 		m.transcript = collapseRepeatedStatusCard(m.transcript, msg.row)
+		if removed := beforeCollapse - len(m.transcript); removed > 0 {
+			m.flushed = max(0, m.flushed-removed)
+			m.altScreenSettledWidth = 0
+		}
 		m.transcript = appendTranscriptRow(m.transcript, msg.row)
 		m = m.captureStepWork(msg.row)
 		// A finished command tool may have mutated files git can see but no
@@ -2506,6 +2524,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() tea.View {
+	viewStart := time.Now()
+	defer func() { perf.recordView(time.Since(viewStart)) }()
+
 	var content string
 	if m.setup.visible {
 		content = m.setupView(chatWidth(m.width))

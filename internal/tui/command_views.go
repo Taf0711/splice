@@ -685,18 +685,72 @@ func (m model) debugText() string {
 	if m.pending {
 		state = "running"
 	}
+	frames := perf.summary()
+	cache := defaultRenderCache.stats()
+	cacheLookups := cache.Hits + cache.Misses
+	hitRate := "n/a"
+	if cacheLookups > 0 {
+		hitRate = fmt.Sprintf("%.1f%%", 100*float64(cache.Hits)/float64(cacheLookups))
+	}
 	return renderCommandOutput(commandOutput{
 		Title:  "Debug",
 		Status: commandStatusInfo,
-		Sections: []commandSection{{
-			Title: "Runtime",
-			Lines: []string{
-				"run state: " + state,
-				"active run: " + fmt.Sprint(m.activeRunID),
-				"pending permission: " + boolText(m.pendingPermission != nil),
+		Sections: []commandSection{
+			{
+				Title: "Runtime",
+				Lines: []string{
+					"run state: " + state,
+					"active run: " + fmt.Sprint(m.activeRunID),
+					"pending permission: " + boolText(m.pendingPermission != nil),
+				},
 			},
-		}},
+			{
+				Title: "Frames (last " + fmt.Sprint(perfRingSize) + ")",
+				Lines: []string{
+					"view: p50 " + formatDuration(frames.ViewP50) + " · p95 " + formatDuration(frames.ViewP95) + " · max " + formatDuration(frames.ViewMax) + " · mean " + formatDuration(frames.ViewMean),
+					"update: p50 " + formatDuration(frames.UpdateP50) + " · p95 " + formatDuration(frames.UpdateP95) + " · max " + formatDuration(frames.UpdateMax) + " · mean " + formatDuration(frames.UpdateMean),
+					"calls: view " + fmt.Sprint(frames.ViewCount) + " · update " + fmt.Sprint(frames.UpdateCount),
+				},
+			},
+			{
+				Title: "Frames by trigger (view p95 / max, worst first)",
+				Lines: frameByTriggerLines(frames.ByTag),
+			},
+			{
+				Title: "Render cache",
+				Lines: []string{
+					"hits: " + fmt.Sprint(cache.Hits) + " · misses: " + fmt.Sprint(cache.Misses) + " · hit rate: " + hitRate,
+					"evictions: " + fmt.Sprint(cache.Evictions) + " · skipped oversized: " + fmt.Sprint(cache.SkippedOversized),
+				},
+			},
+			{
+				Title: "Transcript",
+				Lines: []string{
+					"rows: " + fmt.Sprint(len(m.transcript)) + " · flushed: " + fmt.Sprint(m.flushed),
+					"alt screen: " + boolText(m.altScreen) + " · sidebar: " + boolText(m.sidebarActive()),
+				},
+			},
+		},
 	})
+}
+
+// frameByTriggerLines renders the per-trigger frame table for /debug. Each line
+// is "<tag>: view p95 <d> · max <d> · n <count>"; update stats are omitted when
+// zero so idle triggers do not add noise. The list is already sorted
+// worst-view-p95-first by perfSummary.
+func frameByTriggerLines(byTag []tagStat) []string {
+	if len(byTag) == 0 {
+		return []string{"(no frames recorded yet)"}
+	}
+	lines := make([]string, 0, len(byTag))
+	for _, t := range byTag {
+		line := t.Tag + ": view p95 " + formatDuration(t.ViewP95) + " · max " + formatDuration(t.ViewMax) + " · n " + fmt.Sprint(t.ViewCount)
+		if t.UpdateCount > 0 {
+			line += " · update p95 " + formatDuration(t.UpdateP95) + " · max " + formatDuration(t.UpdateMax)
+		}
+		lines = append(lines, line)
+	}
+	return lines
 }
 
 // skillsText is the /skills fallback when NO skills are installed — an install

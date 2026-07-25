@@ -14,17 +14,18 @@ import (
 // second. Rendering stays smooth regardless of provider speed.
 const streamCoalesceInterval = 16 * time.Millisecond
 
-// textCoalescer batches agentTextMsg deltas before forwarding them to the Bubble
-// Tea program. Any OTHER message flushes the pending text first, so ordering
-// between streamed prose and tool-call / reasoning / row / usage messages is
-// preserved. The turn's final agentResponseMsg does not pass through here (it is
-// a tea.Cmd return, not a sink message), but the model drops deltas whose runID
-// is no longer active, so a flush that races just past end-of-turn is harmless.
+// textCoalescer batches agentTextMsg and agentReasoningMsg deltas before
+// forwarding them to the Bubble Tea program. Any OTHER message flushes the
+// pending buffer first, so ordering between streamed prose / reasoning and
+// tool-call / row / usage messages is preserved. The turn's final
+// agentResponseMsg does not pass through here (it is a tea.Cmd return, not a
+// sink message), but the model drops deltas whose runID is no longer active,
+// so a flush that races just past end-of-turn is harmless.
 //
 // Sink messages originate from the single agent goroutine and so arrive
 // serially; the only concurrent caller is the flush timer. The mutex guards the
-// buffer/timer AND is held across the downstream forward, so a timer-fired text
-// flush can never overtake a concurrent non-text message: whoever holds the lock
+// buffer/timer AND is held across the downstream forward, so a timer-fired flush
+// can never overtake a concurrent non-text message: whoever holds the lock
 // drains and forwards atomically, and the other caller blocks until it is done.
 type textCoalescer struct {
 	forward func(tea.Msg) // downstream sink (external sink + program.Send)
@@ -37,6 +38,7 @@ type textCoalescer struct {
 	mu    sync.Mutex
 	buf   []byte
 	runID int
+	kind  byte // 0=empty, 1=text, 2=reasoning
 	timer coalesceTimer
 }
 
@@ -55,28 +57,46 @@ func newTextCoalescer(forward func(tea.Msg)) *textCoalescer {
 	}
 }
 
+const (
+	coalesceEmpty     byte = 0
+	coalesceText      byte = 1
+	coalesceReasoning byte = 2
+)
+
 // send is the coalescing entry point installed as the RuntimeMessageSink.
 func (c *textCoalescer) send(msg tea.Msg) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	text, ok := msg.(agentTextMsg)
-	if !ok {
-		// Non-text message: flush buffered text first (preserving order), then
-		// forward it — both under the lock so nothing can interleave between them.
+	var delta string
+	var msgRunID int
+	var msgKind byte
+
+	switch msg := msg.(type) {
+	case agentTextMsg:
+		delta = msg.delta
+		msgRunID = msg.runID
+		msgKind = coalesceText
+	case agentReasoningMsg:
+		delta = msg.delta
+		msgRunID = msg.runID
+		msgKind = coalesceReasoning
+	default:
+		// Non-stream message: flush whatever is buffered first (preserving order),
+		// then forward it — both under the lock so nothing can interleave.
 		c.drainAndForwardLocked()
 		c.forward(msg)
 		return
 	}
 
-	// A delta for a different run than the one buffered: flush the old run's text
-	// before buffering the new run's. In practice runs are sequential (the prior
-	// run's end already flushed via a non-text message), so this is belt-and-braces.
-	if len(c.buf) > 0 && text.runID != c.runID {
+	// A delta whose kind or runID differs from what is buffered flushes the old
+	// buffer first, preserving arrival order across kind/run switches.
+	if len(c.buf) > 0 && (c.kind != msgKind || msgRunID != c.runID) {
 		c.drainAndForwardLocked()
 	}
-	c.runID = text.runID
-	c.buf = append(c.buf, text.delta...)
+	c.kind = msgKind
+	c.runID = msgRunID
+	c.buf = append(c.buf, delta...)
 	if c.timer == nil {
 		c.timer = c.afterFunc(c.flush)
 	}
@@ -91,10 +111,11 @@ func (c *textCoalescer) flush() {
 	c.drainAndForwardLocked()
 }
 
-// drainAndForwardLocked forwards any buffered text as one agentTextMsg and stops
-// the timer, all while the caller holds c.mu — so a text flush and any non-text
-// forward are strictly ordered and never interleave. A no-op when nothing is
-// buffered. string(c.buf) copies, so reusing the backing array via [:0] is safe.
+// drainAndForwardLocked forwards any buffered delta as one agentTextMsg or
+// agentReasoningMsg (depending on the current kind) and stops the timer, all
+// while the caller holds c.mu — so a flush and any non-stream forward are
+// strictly ordered and never interleave. A no-op when nothing is buffered.
+// string(c.buf) copies, so reusing the backing array via [:0] is safe.
 func (c *textCoalescer) drainAndForwardLocked() {
 	if len(c.buf) == 0 {
 		return
@@ -103,7 +124,14 @@ func (c *textCoalescer) drainAndForwardLocked() {
 		c.timer.Stop()
 		c.timer = nil
 	}
-	msg := agentTextMsg{runID: c.runID, delta: string(c.buf)}
+	delta := string(c.buf)
+	kind := c.kind
 	c.buf = c.buf[:0]
-	c.forward(msg)
+	c.kind = coalesceEmpty
+	switch kind {
+	case coalesceText:
+		c.forward(agentTextMsg{runID: c.runID, delta: delta})
+	case coalesceReasoning:
+		c.forward(agentReasoningMsg{runID: c.runID, delta: delta})
+	}
 }
