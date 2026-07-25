@@ -73,7 +73,7 @@ func TestUserRowRendersPromptGutter(t *testing.T) {
 	m := limeTestModel()
 	row := transcriptRow{kind: rowUser, text: "add a --version flag"}
 	got := plainRender(t, m.renderRow(row, 96, buildRowContext(nil)))
-	if !strings.Contains(got, "\nλ  add a --version flag") {
+	if !strings.Contains(got, "\n∞  add a --version flag") {
 		t.Fatalf("user row = %q, want rail-prefixed text", got)
 	}
 }
@@ -87,7 +87,7 @@ func TestTranscriptSeparatesUserPromptFromContinuation(t *testing.T) {
 	body, _ := m.transcriptBody(96, "")
 	got := plainRender(t, body)
 	lines := strings.Split(got, "\n")
-	if len(lines) < 4 || !strings.HasPrefix(lines[1], "λ  hey") || lines[2] != "" || !strings.HasPrefix(lines[3], "▸ Thought") {
+	if len(lines) < 4 || !strings.HasPrefix(lines[1], "∞  hey") || lines[2] != "" || !strings.HasPrefix(lines[3], "▸ Thought") {
 		t.Fatalf("transcript body should keep a small gap before thought, got:\n%s", got)
 	}
 }
@@ -1314,7 +1314,7 @@ func TestComposerBoxFramesInputAndBottomModelLabel(t *testing.T) {
 	got := plainRender(t, m.composerBox(96))
 	// The box bottom rule shows the model only; the permission mode moved to the
 	// status line below the box.
-	for _, want := range []string{"╭", "│", "λ add a flag", "╰", "test-model"} {
+	for _, want := range []string{"╭", "│", "∞ add a flag", "╰", "test-model"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("composer box = %q, missing %q", got, want)
 		}
@@ -1355,7 +1355,7 @@ func TestComposerBoxCapsLongPromptHeightAroundCursor(t *testing.T) {
 	if !strings.Contains(got, "final words") {
 		t.Fatalf("composer box should keep cursor-adjacent tail visible, got:\n%s", got)
 	}
-	if !strings.Contains(got, "λ") {
+	if !strings.Contains(got, "∞") {
 		t.Fatalf("composer box should keep the prompt marker visible when capped, got:\n%s", got)
 	}
 	assertRenderedLineWidths(t, got, 44)

@@ -66,6 +66,11 @@ func rcKey(runID int, id string) string {
 }
 
 func buildRowContext(rows []transcriptRow) rowContext {
+	if len(rows) == 0 {
+		// Nil maps are safe for all rowContext lookups. This is the steady-state
+		// frontier-at-tail path, so avoid allocating maps on every View.
+		return rowContext{}
+	}
 	rc := rowContext{
 		resolved: map[string]bool{},
 		hints:    map[string]string{},
@@ -525,7 +530,7 @@ func renderUserRow(row transcriptRow, width int) string {
 	return strings.Join(lines, "\n")
 }
 
-const userPromptPrefix = "λ  "
+const userPromptPrefix = "∞  "
 
 func userPromptContentWidth(width int) int {
 	if width <= 0 {
@@ -537,10 +542,10 @@ func userPromptContentWidth(width int) int {
 
 func renderUserPromptStyledLine(styledText string, contentWidth int) string {
 	if contentWidth <= 0 {
-		return zeroTheme.userPrompt.Render("λ")
+		return zeroTheme.userPrompt.Render("∞")
 	}
 	fitted := fitStyledLine(styledText, contentWidth)
-	return zeroTheme.userPrompt.Render("λ") + "  " + fitted
+	return zeroTheme.userPrompt.Render("∞") + "  " + fitted
 }
 
 // renderAssistantRow draws final answers as plain response text plus completion

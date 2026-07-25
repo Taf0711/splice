@@ -13,38 +13,38 @@ const (
 	minStartupWidth      = 58
 )
 
-// spliceWordmarkPrefixLines is the ink/white SPL part of the empty-state ANSI
-// Shadow wordmark. spliceWordmarkAccentLines is the lime I glyph.
-// spliceWordmarkSuffixLines is the ink/white CE part.
-var spliceWordmarkPrefixLines = []string{
-	`███████╗██████╗ ██╗     `,
-	`██╔════╝██╔══██╗██║     `,
-	`███████╗██████╔╝██║     `,
-	`╚════██║██╔═══╝ ██║     `,
-	`███████║██║     ███████╗`,
-	`╚══════╝╚═╝     ╚══════╝`,
-	`                        `,
+// spliceBraidBitmap is the "splice" braid mark from the locked brand design
+// (Claude design 11c): the two SVG strands weave and merge into one. The exact
+// bezier paths were rasterized once into this 1-bit-per-pixel bitmap ('#' is a
+// strand pixel). At render time each pair of rows becomes one line of colored
+// upper-half-block cells (▀), so the strokes are solid and gapless in any font,
+// unlike braille or box-drawing approximations. The glyph is static, so the
+// raster is baked here rather than recomputed at runtime.
+var spliceBraidBitmap = []string{
+	".###...........####.........",
+	"######......#########.......",
+	".#######...############.....",
+	"...######.######..######....",
+	".....########.......#####...",
+	".......#####..........#####.",
+	"........###............#####",
+	".......#####..........#####.",
+	".....########.......#####...",
+	"...######.######..######....",
+	".#######...############.....",
+	"######......#########.......",
+	".###...........####.........",
+	"............................",
 }
 
-var spliceWordmarkAccentLines = []string{
-	`██╗`,
-	`██║`,
-	`██║`,
-	`██║`,
-	`██║`,
-	`╚═╝`,
-	`   `,
-}
-
-var spliceWordmarkSuffixLines = []string{
-	` ██████╗███████╗`,
-	`██╔════╝██╔════╝`,
-	`██║     █████╗  `,
-	`██║     ██╔══╝  `,
-	`╚██████╗███████╗`,
-	` ╚═════╝╚══════╝`,
-	`                `,
-}
+// Brand tile colors from design 11c: paper strands on an ink tile. These are
+// fixed (the mark's identity), not theme tokens, so the logo reads the same in
+// every palette. The tile is a small bounded region, not the full canvas, so
+// painting its background does not break the "never full-bleed" convention.
+const (
+	spliceBraidStrand = "#faf9f6"
+	spliceBraidTile   = "#141414"
+)
 
 const emptyStateTagline = "Any model. Every tool. Splice limits."
 
@@ -78,7 +78,7 @@ func (m model) emptyStateWithOverlay(width int, overlay string) string {
 
 func (m model) emptyStateLines(width int) []string {
 	lines := []string{}
-	for _, glyph := range spliceWordmarkLines() {
+	for _, glyph := range spliceLockupLines() {
 		lines = append(lines, centerLine(glyph, width))
 	}
 	lines = append(lines, "")
@@ -142,12 +142,53 @@ func displayVersion(version string) string {
 	return version
 }
 
-func spliceWordmarkLines() []string {
-	count := minInt(len(spliceWordmarkPrefixLines), minInt(len(spliceWordmarkAccentLines), len(spliceWordmarkSuffixLines)))
-	lines := make([]string, 0, count)
-	for index := 0; index < count; index++ {
-		lines = append(lines, zeroTheme.ink.Render(spliceWordmarkPrefixLines[index])+zeroTheme.accent.Render(spliceWordmarkAccentLines[index])+zeroTheme.ink.Render(spliceWordmarkSuffixLines[index]))
+// spliceLockupLines renders the locked brand mark (Claude design 11c): the
+// braid glyph on a rounded ink tile, icon only. Each output row draws two
+// bitmap rows via the upper-half block "▀" (foreground = top pixel, background =
+// bottom pixel), so a strand pixel is a solid block and the curve stays
+// unbroken in any terminal font. The caller centers each row; every row is the
+// tile's exact width, so the whole tile centers as one block.
+func spliceLockupLines() []string {
+	strand := lipgloss.Color(spliceBraidStrand)
+	ink := lipgloss.Color(spliceBraidTile)
+	tileBG := lipgloss.NewStyle().Background(ink)
+	frame := lipgloss.NewStyle().Foreground(ink)
+
+	width := 0
+	for _, row := range spliceBraidBitmap {
+		if len(row) > width {
+			width = len(row)
+		}
 	}
+	on := func(y, x int) bool {
+		return y >= 0 && y < len(spliceBraidBitmap) && x < len(spliceBraidBitmap[y]) && spliceBraidBitmap[y][x] == '#'
+	}
+
+	// One space of tile margin each side; the rounded frame sits on the ink.
+	inner := width + 2
+	top := frame.Render("╭" + strings.Repeat("─", inner) + "╮")
+	bottom := frame.Render("╰" + strings.Repeat("─", inner) + "╯")
+	blank := frame.Render("│") + tileBG.Render(strings.Repeat(" ", inner)) + frame.Render("│")
+
+	lines := make([]string, 0, len(spliceBraidBitmap)/2+4)
+	lines = append(lines, top, blank)
+	for y := 0; y < len(spliceBraidBitmap); y += 2 {
+		var b strings.Builder
+		b.WriteString(frame.Render("│") + tileBG.Render(" "))
+		for x := 0; x < width; x++ {
+			fg, bg := ink, ink
+			if on(y, x) {
+				fg = strand
+			}
+			if on(y+1, x) {
+				bg = strand
+			}
+			b.WriteString(lipgloss.NewStyle().Foreground(fg).Background(bg).Render("▀"))
+		}
+		b.WriteString(tileBG.Render(" ") + frame.Render("│"))
+		lines = append(lines, b.String())
+	}
+	lines = append(lines, blank, bottom)
 	return lines
 }
 

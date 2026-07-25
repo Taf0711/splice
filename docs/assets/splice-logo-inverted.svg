@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="340" height="120" viewBox="0 0 340 120">
+  <rect width="120" height="120" rx="26" fill="#faf9f6"/>
+  <svg x="18" y="27" width="84" height="66" viewBox="0 0 132 90" fill="none" stroke-linecap="round">
+    <path d="M14 24 C48 24 48 66 82 66 C104 66 108 45 122 45" stroke="#141414" stroke-width="12"/>
+    <path d="M14 66 C48 66 48 24 82 24 C104 24 108 45 122 45" stroke="#141414" stroke-width="12"/>
+  </svg>
+  <text x="150" y="79" font-family="Space Grotesk, sans-serif" font-weight="700" font-size="52" letter-spacing="-1" fill="#faf9f6">splice</text>
+</svg>

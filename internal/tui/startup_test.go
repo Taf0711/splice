@@ -13,7 +13,7 @@ func TestEmptyStateShowsBrandAndTaglineOnly(t *testing.T) {
 	m.width, m.height = 100, 30
 
 	view := plainRender(t, m.View())
-	assertContains(t, view, "███████╗██████╗ ██╗     ██╗ ██████╗███████╗")
+	assertContains(t, view, "▀") // braid mark, half-block pixels
 	assertContains(t, view, emptyStateTagline)
 	assertNotContains(t, view, "running splice against ")
 	assertNotContains(t, view, "add a --version flag")
