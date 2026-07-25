@@ -2566,9 +2566,9 @@ func (m model) View() tea.View {
 			// CellMotion only reports motion while a button is held (drag) —
 			// see bubbletea's MouseMode docs. AllMotion has marginally worse
 			// terminal compatibility but is well supported by the terminals
-			// this app targets; the existing 15ms mouse-event throttle
-			// (mouseEventThrottleInterval) already bounds the redraw rate
-			// from the extra motion events.
+			// this app targets; the 15ms mouse-motion throttle
+			// (mouseEventThrottleInterval) bounds the redraw rate from the
+			// extra motion events (wheel events pass through unthrottled).
 			view.MouseMode = tea.MouseModeAllMotion
 		}
 	}
