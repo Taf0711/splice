@@ -16,6 +16,54 @@ import (
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
+func TestSpecDraftCompactionOptions(t *testing.T) {
+	tests := []struct {
+		name           string
+		cfg            config.CompactionConfig
+		wantWindow     int
+		wantReserve    int
+		wantKeepRecent int
+	}{
+		{
+			name:           "unset defaults to enabled and passes the resolved window through",
+			cfg:            config.CompactionConfig{},
+			wantWindow:     128000,
+			wantReserve:    0,
+			wantKeepRecent: 0,
+		},
+		{
+			name:           "explicit reserve and keep-recent pass through when enabled",
+			cfg:            config.CompactionConfig{ReserveTokens: 1234, KeepRecentTokens: 5678},
+			wantWindow:     128000,
+			wantReserve:    1234,
+			wantKeepRecent: 5678,
+		},
+		{
+			name:           "disabled forces the window and both knobs to zero",
+			cfg:            config.CompactionConfig{Enabled: ptrBool(false), ReserveTokens: 1234, KeepRecentTokens: 5678},
+			wantWindow:     0,
+			wantReserve:    0,
+			wantKeepRecent: 0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			window, reserve, keepRecent := specDraftCompactionOptions(tt.cfg, 128000)
+			if window != tt.wantWindow {
+				t.Fatalf("contextWindow = %d, want %d", window, tt.wantWindow)
+			}
+			if reserve != tt.wantReserve {
+				t.Fatalf("reserveTokens = %d, want %d", reserve, tt.wantReserve)
+			}
+			if keepRecent != tt.wantKeepRecent {
+				t.Fatalf("keepRecentTokens = %d, want %d", keepRecent, tt.wantKeepRecent)
+			}
+		})
+	}
+}
+
+func ptrBool(v bool) *bool { return &v }
+
 func TestRunExecUseSpecCreatesDraftSession(t *testing.T) {
 	workspaceRoot := t.TempDir()
 	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir(), Now: fixedCLISpecTime})

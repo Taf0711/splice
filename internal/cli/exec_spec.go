@@ -48,6 +48,18 @@ type execSpecDraftInfo struct {
 	DraftSessionID string
 }
 
+// specDraftCompactionOptions mirrors the TUI's compaction gate
+// (internal/tui/model.go, runAgentWithOptions): when compaction is enabled,
+// the caller's resolved context window and the configured reserve/keep-recent
+// knobs pass through; when disabled, ContextWindow is forced to 0, which
+// makes the agent loop's maybeCompact and recover strict no-ops.
+func specDraftCompactionOptions(cfg config.CompactionConfig, resolvedContextWindow int) (contextWindow, reserveTokens, keepRecentTokens int) {
+	if !cfg.EnabledOrDefault() {
+		return 0, 0, 0
+	}
+	return resolvedContextWindow, cfg.ReserveTokens, cfg.KeepRecentTokens
+}
+
 func runExecSpecDraft(run execSpecDraftRun) int {
 	store := run.deps.newSessionStore()
 	draftSession, err := store.Create(sessions.CreateInput{
@@ -96,27 +108,33 @@ func runExecSpecDraft(run execSpecDraftRun) int {
 	var draftInfo execSpecDraftInfo
 	runCtx, stopSignals := signalContext()
 	defer stopSignals()
+	contextWindow, compactionReserve, compactionKeepRecent := specDraftCompactionOptions(
+		run.resolved.Compaction,
+		resolveAgentContextWindow(runCtx, run.modelRegistry, run.resolved.Provider),
+	)
 	result, err := agent.Run(runCtx, run.prompt, run.provider, agent.Options{
-		MaxTurns:        run.resolved.MaxTurns,
-		ContextWindow:   resolveAgentContextWindow(runCtx, run.modelRegistry, run.resolved.Provider),
-		SessionID:       draftSession.SessionID,
-		SessionTitle:    run.sessionTitle,
-		ProviderName:    run.resolved.Provider.Name,
-		Model:           run.resolved.Provider.Model,
-		ReasoningEffort: run.reasoningEffort,
-		Cwd:             run.workspaceRoot,
-		SystemPrompt:    specmode.DraftSystemPrompt,
-		Images:          run.images,
-		Registry:        run.registry,
-		PermissionMode:  agent.PermissionModeSpecDraft,
-		Autonomy:        "low",
-		Sandbox:         run.sandboxEngine,
-		FileTracker:     tools.NewFileTracker(),
-		Hooks:           newHookDispatcher(run.workspaceRoot),
-		EnabledTools:    run.options.enabledTools,
-		DisabledTools:   run.options.disabledTools,
-		OnText:          writer.text,
-		OnReasoning:     writer.reasoning,
+		MaxTurns:                   run.resolved.MaxTurns,
+		ContextWindow:              contextWindow,
+		CompactionReserveTokens:    compactionReserve,
+		CompactionKeepRecentTokens: compactionKeepRecent,
+		SessionID:                  draftSession.SessionID,
+		SessionTitle:               run.sessionTitle,
+		ProviderName:               run.resolved.Provider.Name,
+		Model:                      run.resolved.Provider.Model,
+		ReasoningEffort:            run.reasoningEffort,
+		Cwd:                        run.workspaceRoot,
+		SystemPrompt:               specmode.DraftSystemPrompt,
+		Images:                     run.images,
+		Registry:                   run.registry,
+		PermissionMode:             agent.PermissionModeSpecDraft,
+		Autonomy:                   "low",
+		Sandbox:                    run.sandboxEngine,
+		FileTracker:                tools.NewFileTracker(),
+		Hooks:                      newHookDispatcher(run.workspaceRoot),
+		EnabledTools:               run.options.enabledTools,
+		DisabledTools:              run.options.disabledTools,
+		OnText:                     writer.text,
+		OnReasoning:                writer.reasoning,
 		OnToolCall: func(call agent.ToolCall) {
 			writer.toolCall(call, run.registry)
 			sessionRecorder.append(sessions.EventToolCall, map[string]any{
