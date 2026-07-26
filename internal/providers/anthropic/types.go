@@ -11,8 +11,11 @@ type messagesRequest struct {
 	// Thinking enables extended thinking when a reasoning effort was requested.
 	// Omitted (nil) for normal requests so behavior is unchanged.
 	Thinking *thinkingConfig `json:"thinking,omitempty"`
-	Tools    []anthropicTool `json:"tools,omitempty"`
-	Stream   bool            `json:"stream"`
+	// ToolChoice, when non-nil, forces the model to call one named tool this
+	// turn. Nil keeps auto tool selection (omitted via omitempty).
+	ToolChoice *toolChoice     `json:"tool_choice,omitempty"`
+	Tools      []anthropicTool `json:"tools,omitempty"`
+	Stream     bool            `json:"stream"`
 }
 
 // thinkingConfig requests extended thinking with a token budget. Type is always
@@ -21,6 +24,14 @@ type messagesRequest struct {
 type thinkingConfig struct {
 	Type         string `json:"type"`
 	BudgetTokens int    `json:"budget_tokens"`
+}
+
+// toolChoice forces the model to call one specific tool this turn. Type is
+// "tool" with the named tool; Anthropic rejects forcing an unnamed tool. Nil
+// keeps the current auto behavior (omitted via omitempty).
+type toolChoice struct {
+	Type string `json:"type"`
+	Name string `json:"name"`
 }
 
 type anthropicMessage struct {

@@ -1317,3 +1317,71 @@ func TestOpenAIRequestPromptCacheKey(t *testing.T) {
 		}
 	}
 }
+
+// TestOpenAIRequestMapsToolChoice locks in forced tool use: when the caller
+// names one tool, the request serializes the native
+// {"type":"function","function":{"name":<tool>}} shape so the model must call
+// that exact function this turn. An empty ToolChoice omits the field entirely
+// (byte-identical to the pre-ToolChoice behavior, so strict servers see no
+// change).
+func TestOpenAIRequestMapsToolChoice(t *testing.T) {
+	provider, err := New(Options{Model: "gpt-test"})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	messages := []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}}
+	tools := []zeroruntime.ToolDefinition{{Name: "submit_design_plan", Parameters: map[string]any{"type": "object"}}}
+
+	req := provider.openAIRequest(zeroruntime.CompletionRequest{
+		Messages:   messages,
+		Tools:      tools,
+		ToolChoice: "submit_design_plan",
+	})
+	if req.ToolChoice == nil {
+		t.Fatalf("ToolChoice = nil, want the forced function map")
+	}
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(data, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	choice, ok := body["tool_choice"].(map[string]any)
+	if !ok {
+		t.Fatalf("tool_choice not a map: %#v", body["tool_choice"])
+	}
+	if choice["type"] != "function" {
+		t.Fatalf("tool_choice.type = %#v, want function", choice["type"])
+	}
+	fn, ok := choice["function"].(map[string]any)
+	if !ok {
+		t.Fatalf("tool_choice.function not a map: %#v", choice["function"])
+	}
+	if fn["name"] != "submit_design_plan" {
+		t.Fatalf("tool_choice.function.name = %#v, want submit_design_plan", fn["name"])
+	}
+}
+
+// TestOpenAIRequestOmitsToolChoiceWhenEmpty confirms a keyless request omits
+// tool_choice so behavior stays byte-identical to before the field existed.
+func TestOpenAIRequestOmitsToolChoiceWhenEmpty(t *testing.T) {
+	provider, err := New(Options{Model: "gpt-test"})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	messages := []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}}
+
+	req := provider.openAIRequest(zeroruntime.CompletionRequest{Messages: messages})
+	if req.ToolChoice != nil {
+		t.Fatalf("ToolChoice = %#v, want nil for an empty request", req.ToolChoice)
+	}
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(data), "tool_choice") {
+		t.Fatalf("keyless request must omit tool_choice: %s", data)
+	}
+}

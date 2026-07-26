@@ -355,6 +355,20 @@ func (provider *Provider) geminiRequest(request zeroruntime.CompletionRequest) (
 		}
 		mapped.Tools = []geminiToolGroup{{FunctionDeclarations: declarations}}
 	}
+	// Forced tool use: when the caller names one tool, force the model to call
+	// that exact function. Gemini requires mode "ANY" plus an
+	// allowedFunctionNames list of one to force a single named function. Typed
+	// stages rely on this to make the model call their single typed tool instead
+	// of answering in prose. Empty leaves ToolConfig nil, which omits the field
+	// (byte-identical to before).
+	if name := strings.TrimSpace(request.ToolChoice); name != "" {
+		mapped.ToolConfig = &toolConfig{
+			FunctionCallingConfig: functionCallingConfig{
+				Mode:                 "ANY",
+				AllowedFunctionNames: []string{name},
+			},
+		}
+	}
 	return mapped, nil
 }
 

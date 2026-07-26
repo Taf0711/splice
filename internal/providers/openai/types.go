@@ -13,6 +13,11 @@ type chatCompletionRequest struct {
 	// `prompt_cache_key` parameter). Omitted when the caller carries no session
 	// identity or when ZERO_DISABLE_PROMPT_CACHE_KEY is set.
 	PromptCacheKey string `json:"prompt_cache_key,omitempty"`
+	// ToolChoice, when non-nil, forces the model to call one specific function
+	// this request (forced tool use). The mapper builds the native
+	// {"type":"function","function":{"name":<ToolChoice>}} object. Nil keeps
+	// the current auto behavior byte-for-byte (omitted via omitempty).
+	ToolChoice any `json:"tool_choice,omitempty"`
 }
 
 // streamOptions requests the final usage chunk on a streaming response. Without

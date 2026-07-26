@@ -441,6 +441,17 @@ func (provider *Provider) openAIRequest(request zeroruntime.CompletionRequest) c
 			})
 		}
 	}
+	// Forced tool use: when the caller names one tool, send the native
+	// {"type":"function","function":{"name":<tool>}} shape so the model must
+	// call that exact function this turn. Typed stages rely on this to make the
+	// model call their single typed tool instead of answering in prose. Empty
+	// leaves ToolChoice nil, which omits the field (byte-identical to before).
+	if name := strings.TrimSpace(request.ToolChoice); name != "" {
+		mapped.ToolChoice = map[string]any{
+			"type":     "function",
+			"function": map[string]any{"name": name},
+		}
+	}
 	return mapped
 }
 

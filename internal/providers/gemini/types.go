@@ -5,6 +5,22 @@ type generateContentRequest struct {
 	Contents          []geminiContent   `json:"contents"`
 	GenerationConfig  generationConfig  `json:"generationConfig"`
 	Tools             []geminiToolGroup `json:"tools,omitempty"`
+	// ToolConfig, when non-nil, forces tool-calling behavior. Gemini requires
+	// mode "ANY" plus an allowedFunctionNames list of one to force a single
+	// named function. Nil keeps the default auto behavior (omitted via omitempty).
+	ToolConfig *toolConfig `json:"toolConfig,omitempty"`
+}
+
+// toolConfig controls function-calling mode. Mode "ANY" forces the model to
+// call a function; AllowedFunctionNames narrows it to exactly one tool.
+type toolConfig struct {
+	FunctionCallingConfig functionCallingConfig `json:"functionCallingConfig"`
+}
+
+// functionCallingConfig sets the mode and the allowed function set.
+type functionCallingConfig struct {
+	Mode                 string   `json:"mode"`
+	AllowedFunctionNames []string `json:"allowedFunctionNames,omitempty"`
 }
 
 type generationConfig struct {

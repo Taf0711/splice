@@ -1775,3 +1775,22 @@ func TestSecurityAuditorGoRepoGosecMissingIncomplete(t *testing.T) {
 		t.Fatalf("unexpected summary %q", report.Summary)
 	}
 }
+
+// TestCallToolUseForcesToolChoice confirms callToolUse sets ToolChoice to the
+// single tool's name on the request, so typed stages force the model to call
+// that exact tool instead of answering in prose.
+func TestCallToolUseForcesToolChoice(t *testing.T) {
+	provider := &requestCapturingProvider{}
+	tool := zeroruntime.ToolDefinition{Name: "submit_design_plan", Parameters: map[string]any{"type": "object"}}
+
+	_, err := callToolUse(context.Background(), provider, "model-test", "", "system", "user", nil, tool, nil)
+	if err != nil {
+		t.Fatalf("callToolUse: %v", err)
+	}
+	if provider.request.ToolChoice != "submit_design_plan" {
+		t.Fatalf("ToolChoice = %q, want submit_design_plan", provider.request.ToolChoice)
+	}
+	if len(provider.request.Tools) != 1 || provider.request.Tools[0].Name != "submit_design_plan" {
+		t.Fatalf("tools = %#v, want one submit_design_plan", provider.request.Tools)
+	}
+}

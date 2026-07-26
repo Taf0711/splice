@@ -682,3 +682,69 @@ func TestGeminiRequestOmitsAdditionalPropertiesInToolSchema(t *testing.T) {
 		t.Fatalf("tool property must survive sanitization: %#v", props)
 	}
 }
+
+// TestGeminiRequestMapsToolChoice locks in forced tool use: when the caller
+// names one tool, the request serializes toolConfig with mode "ANY" and an
+// allowedFunctionNames list of one so the model must call that exact function
+// this turn. An empty ToolChoice omits the field entirely (byte-identical to
+// the pre-ToolChoice behavior).
+func TestGeminiRequestMapsToolChoice(t *testing.T) {
+	provider, err := New(Options{Model: "gemini-test"})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	messages := []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}}
+	tools := []zeroruntime.ToolDefinition{{Name: "submit_design_plan", Parameters: map[string]any{"type": "object"}}}
+
+	req, err := provider.geminiRequest(zeroruntime.CompletionRequest{
+		Messages:   messages,
+		Tools:      tools,
+		ToolChoice: "submit_design_plan",
+	})
+	if err != nil {
+		t.Fatalf("geminiRequest: %v", err)
+	}
+	if req.ToolConfig == nil {
+		t.Fatalf("ToolConfig = nil, want the forcing config")
+	}
+	if req.ToolConfig.FunctionCallingConfig.Mode != "ANY" {
+		t.Fatalf("mode = %q, want ANY", req.ToolConfig.FunctionCallingConfig.Mode)
+	}
+	names := req.ToolConfig.FunctionCallingConfig.AllowedFunctionNames
+	if len(names) != 1 || names[0] != "submit_design_plan" {
+		t.Fatalf("allowedFunctionNames = %#v, want [submit_design_plan]", names)
+	}
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	want := `"toolConfig":{"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["submit_design_plan"]}}`
+	if !strings.Contains(string(data), want) {
+		t.Fatalf("body missing toolConfig forcing: %s", data)
+	}
+}
+
+// TestGeminiRequestOmitsToolChoiceWhenEmpty confirms a keyless request omits
+// toolConfig so behavior stays byte-identical to before the field.
+func TestGeminiRequestOmitsToolChoiceWhenEmpty(t *testing.T) {
+	provider, err := New(Options{Model: "gemini-test"})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	messages := []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}}
+
+	req, err := provider.geminiRequest(zeroruntime.CompletionRequest{Messages: messages})
+	if err != nil {
+		t.Fatalf("geminiRequest: %v", err)
+	}
+	if req.ToolConfig != nil {
+		t.Fatalf("ToolConfig = %#v, want nil for an empty request", req.ToolConfig)
+	}
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(data), "toolConfig") {
+		t.Fatalf("keyless request must omit toolConfig: %s", data)
+	}
+}

@@ -210,6 +210,13 @@ type CompletionRequest struct {
 	// re-billing the full prefix each turn. Providers without an equivalent
 	// ignore it.
 	PromptCacheKey string
+	// ToolChoice, when non-empty, is the name of the single tool the model MUST
+	// call this request (forced tool use). Adapters map it to their native
+	// forcing mechanism (OpenAI tool_choice function, Anthropic tool_choice
+	// tool, Gemini functionCallingConfig ANY). Empty keeps the current auto
+	// behavior byte-for-byte. Used by typed stages that require one typed tool
+	// call.
+	ToolChoice string
 }
 
 // Provider streams normalized completion events for one request.

@@ -405,6 +405,13 @@ func (provider *Provider) anthropicRequest(request zeroruntime.CompletionRequest
 		}
 		mapped.Tools[len(mapped.Tools)-1].CacheControl = &cacheControl{Type: cacheEphemeral}
 	}
+	// Forced tool use: when the caller names one tool, force the model to call
+	// that exact tool this turn. Typed stages rely on this to make the model call
+	// their single typed tool instead of answering in prose. Empty leaves
+	// ToolChoice nil, which omits the field (byte-identical to before).
+	if name := strings.TrimSpace(request.ToolChoice); name != "" {
+		mapped.ToolChoice = &toolChoice{Type: "tool", Name: name}
+	}
 	applyMessageCacheBreakpoints(mapped.Messages)
 	return mapped, nil
 }

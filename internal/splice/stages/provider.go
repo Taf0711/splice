@@ -52,6 +52,11 @@ func callToolUse(ctx context.Context, provider zeroruntime.Provider, model, reas
 		Messages:        messages,
 		Tools:           []zeroruntime.ToolDefinition{tool},
 		ReasoningEffort: reasoningEffort,
+		// Force the model to call this stage's single typed tool so a prose
+		// answer cannot strand the typed-output retry loop. Empty keeps auto
+		// behavior; callToolUse always passes exactly one tool, so forcing its
+		// name is always correct here.
+		ToolChoice: tool.Name,
 	}
 	events, err := provider.StreamCompletion(ctx, request)
 	if err != nil {
