@@ -116,6 +116,29 @@ func (p PreferencesConfig) RecapsEnabled() bool {
 	return p.Recaps == nil || *p.Recaps
 }
 
+// CompactionConfig configures agent-loop context compaction. It mirrors pi's
+// compaction settings so a user can tune Splice the same way. All fields are
+// optional; zero/nil values keep the built-in default behavior.
+type CompactionConfig struct {
+	// Enabled gates compaction. nil (unset) defaults to ON, matching the
+	// pre-existing behavior. An explicit false disables compaction (the TUI
+	// then sets the agent ContextWindow to 0). Tri-state like Recaps.
+	Enabled *bool `json:"enabled,omitempty"`
+	// ReserveTokens is the response budget reserved below the context window:
+	// compaction fires when estimated tokens exceed ContextWindow - ReserveTokens
+	// (pi-style), instead of the built-in 0.7 ratio. 0 keeps the ratio default.
+	ReserveTokens int `json:"reserveTokens,omitempty"`
+	// KeepRecentTokens is the trailing-token budget kept verbatim (pi-style),
+	// instead of the built-in 6-message preserve count. 0 keeps the
+	// message-count default.
+	KeepRecentTokens int `json:"keepRecentTokens,omitempty"`
+}
+
+// EnabledOrDefault reports whether compaction is on. Unset defaults to ON.
+func (c CompactionConfig) EnabledOrDefault() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
 // KeyBindingDef defines one key binding string (e.g. "ctrl+o") that the TUI
 // can remap. An empty string means "use the built-in default" for that action.
 type KeyBindingDef string
@@ -231,6 +254,7 @@ type FileConfig struct {
 	Preferences         PreferencesConfig  `json:"preferences,omitempty"`
 	KeyBindings         KeyBindingsConfig  `json:"keybindings,omitempty"`
 	LocalControl        LocalControlConfig `json:"localControl,omitempty"`
+	Compaction          CompactionConfig   `json:"compaction,omitempty"`
 	DefaultProjectTrust string             `json:"defaultProjectTrust,omitempty"`
 }
 
@@ -247,6 +271,7 @@ func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 		Preferences         PreferencesConfig   `json:"preferences,omitempty"`
 		KeyBindings         KeyBindingsConfig   `json:"keybindings,omitempty"`
 		LocalControl        *LocalControlConfig `json:"localControl,omitempty"`
+		Compaction          CompactionConfig    `json:"compaction,omitempty"`
 		DefaultProjectTrust string              `json:"defaultProjectTrust,omitempty"`
 	}
 	raw := rawConfig{
@@ -260,6 +285,7 @@ func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 		Swarm:               cfg.Swarm,
 		Preferences:         cfg.Preferences,
 		KeyBindings:         cfg.KeyBindings,
+		Compaction:          cfg.Compaction,
 		DefaultProjectTrust: cfg.DefaultProjectTrust,
 	}
 	if !cfg.LocalControl.Empty() {
@@ -294,6 +320,7 @@ type ResolvedConfig struct {
 	Providers           []ProviderProfile
 	Provider            ProviderProfile
 	MaxTurns            int
+	Compaction          CompactionConfig
 	MCP                 MCPConfig
 	Sandbox             SandboxConfig
 	Notify              NotifyConfig
@@ -350,6 +377,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 		Preferences         PreferencesConfig          `json:"preferences"`
 		KeyBindings         KeyBindingsConfig          `json:"keybindings"`
 		LocalControl        LocalControlConfig         `json:"localControl"`
+		Compaction          CompactionConfig           `json:"compaction"`
 		DefaultProjectTrust string                     `json:"defaultProjectTrust"`
 		MCPServers          map[string]MCPServerConfig `json:"mcpServers"`
 		MCPServersSnake     map[string]MCPServerConfig `json:"mcp_servers"`
@@ -378,6 +406,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	cfg.Preferences = raw.Preferences
 	cfg.KeyBindings = raw.KeyBindings
 	cfg.LocalControl = raw.LocalControl
+	cfg.Compaction = raw.Compaction
 	cfg.DefaultProjectTrust = raw.DefaultProjectTrust
 	if cfg.MCP.Servers == nil && (len(raw.MCPServers) > 0 || len(raw.MCPServersSnake) > 0) {
 		cfg.MCP.Servers = map[string]MCPServerConfig{}

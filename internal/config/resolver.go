@@ -150,6 +150,7 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		Providers:           providers,
 		Provider:            active,
 		MaxTurns:            cfg.MaxTurns,
+		Compaction:          cfg.Compaction,
 		MCP:                 cfg.MCP,
 		Sandbox:             cfg.Sandbox,
 		Notify:              cfg.Notify,
@@ -241,6 +242,7 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 	if trust := strings.TrimSpace(src.DefaultProjectTrust); trust != "" {
 		dst.DefaultProjectTrust = trust
 	}
+	mergeCompactionConfig(&dst.Compaction, src.Compaction)
 	mergeLocalControlConfig(&dst.LocalControl, src.LocalControl)
 	mergeKeyBindings(&dst.KeyBindings, src.KeyBindings)
 }
@@ -295,6 +297,7 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 	if src.Swarm.MaxTeamSize != 0 {
 		dst.Swarm.MaxTeamSize = src.Swarm.MaxTeamSize
 	}
+	mergeCompactionConfig(&dst.Compaction, src.Compaction)
 	mergeKeyBindings(&dst.KeyBindings, src.KeyBindings)
 	// Local control is intentionally user-config/override only. A cloned project
 	// must not be able to make browser, desktop, or terminal automation tools
@@ -746,6 +749,18 @@ func mergeKeyBindings(dst *KeyBindingsConfig, src KeyBindingsConfig) {
 	}
 	if src.ToggleSidebar != "" {
 		dst.ToggleSidebar = src.ToggleSidebar
+	}
+}
+
+func mergeCompactionConfig(dst *CompactionConfig, src CompactionConfig) {
+	if src.Enabled != nil {
+		dst.Enabled = src.Enabled
+	}
+	if src.ReserveTokens != 0 {
+		dst.ReserveTokens = src.ReserveTokens
+	}
+	if src.KeepRecentTokens != 0 {
+		dst.KeepRecentTokens = src.KeepRecentTokens
 	}
 }
 

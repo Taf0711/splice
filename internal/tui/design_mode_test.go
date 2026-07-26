@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/config"
 	"github.com/Taf0711/splice/internal/sessions"
 	splicerun "github.com/Taf0711/splice/internal/splice"
 	"github.com/Taf0711/splice/internal/splice/schemas"
@@ -358,6 +359,66 @@ func newDesignModeTestModel(root string, provider zeroruntime.Provider, store *s
 		SessionStore:   store,
 		PermissionMode: agent.PermissionModeAsk,
 	})
+}
+
+func ptrBool(v bool) *bool { return &v }
+
+func TestCompactionDisabledConfigSetsContextWindowZero(t *testing.T) {
+	store := testSessionStore(t)
+	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventText, Content: "ack"},
+		{Type: zeroruntime.StreamEventDone},
+	}}
+	m := newDesignModeTestModel(t.TempDir(), provider, store)
+	m.compaction = config.CompactionConfig{Enabled: ptrBool(false)}
+
+	var captured agent.Options
+	m.captureRunOptions = func(opts agent.Options) { captured = opts }
+
+	m.input.SetValue("hello")
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected prompt submit to start an agent run")
+	}
+	updated, _ = next.Update(execCmd(cmd))
+	_ = updated.(model)
+
+	if captured.ContextWindow != 0 {
+		t.Fatalf("ContextWindow = %d, want 0 when compaction is disabled", captured.ContextWindow)
+	}
+}
+
+func TestCompactionEnabledConfigPassesReserveAndKeep(t *testing.T) {
+	store := testSessionStore(t)
+	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventText, Content: "ack"},
+		{Type: zeroruntime.StreamEventDone},
+	}}
+	m := newDesignModeTestModel(t.TempDir(), provider, store)
+	m.compaction = config.CompactionConfig{ReserveTokens: 1234, KeepRecentTokens: 5678}
+
+	var captured agent.Options
+	m.captureRunOptions = func(opts agent.Options) { captured = opts }
+
+	m.input.SetValue("hello")
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected prompt submit to start an agent run")
+	}
+	updated, _ = next.Update(execCmd(cmd))
+	_ = updated.(model)
+
+	if captured.ContextWindow == 0 {
+		t.Fatal("ContextWindow must be non-zero when compaction is enabled")
+	}
+	if captured.CompactionReserveTokens != 1234 {
+		t.Fatalf("CompactionReserveTokens = %d, want 1234", captured.CompactionReserveTokens)
+	}
+	if captured.CompactionKeepRecentTokens != 5678 {
+		t.Fatalf("CompactionKeepRecentTokens = %d, want 5678", captured.CompactionKeepRecentTokens)
+	}
 }
 
 func eventTypesContain(events []sessions.Event, want sessions.EventType) bool {

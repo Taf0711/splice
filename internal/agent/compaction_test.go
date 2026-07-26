@@ -641,3 +641,70 @@ func TestRecoverDisabledIsNoop(t *testing.T) {
 		t.Fatalf("disabled recover must be a no-op, got retried=%v err=%v len=%d", retried, err, len(got))
 	}
 }
+
+func TestNewCompactionStateReserveThreshold(t *testing.T) {
+	st := newCompactionState(Options{ContextWindow: 100000, CompactionReserveTokens: 16384})
+	if st.threshold != 100000-16384 {
+		t.Fatalf("threshold = %d, want %d", st.threshold, 100000-16384)
+	}
+}
+
+func TestNewCompactionStateReserveClamped(t *testing.T) {
+	st := newCompactionState(Options{ContextWindow: 20000, CompactionReserveTokens: 16384})
+	if st.threshold != 10000 {
+		t.Fatalf("threshold = %d, want 10000", st.threshold)
+	}
+}
+
+func TestNewCompactionStateDefaultRatio(t *testing.T) {
+	st := newCompactionState(Options{ContextWindow: 100000})
+	want := int(float64(100000) * compactionTriggerRatio)
+	if st.threshold != want {
+		t.Fatalf("threshold = %d, want %d", st.threshold, want)
+	}
+}
+
+func TestCompactMessagesKeepRecentTokens(t *testing.T) {
+	mk := func(role zeroruntime.MessageRole, text string) zeroruntime.Message {
+		return zeroruntime.Message{Role: role, Content: text}
+	}
+	system := mk(zeroruntime.MessageRoleSystem, "sys")
+	m1 := mk(zeroruntime.MessageRoleUser, strings.Repeat("a", 200))
+	a1 := mk(zeroruntime.MessageRoleAssistant, strings.Repeat("b", 200))
+	m2 := mk(zeroruntime.MessageRoleUser, strings.Repeat("c", 200))
+	// The assistant tool-call and its tool-result form a trailing pair.
+	a2 := mk(zeroruntime.MessageRoleAssistant, "call tool")
+	a2.ToolCalls = []zeroruntime.ToolCall{{ID: "1", Name: "read", Arguments: `{"path":"x"}`}}
+	tr := mk(zeroruntime.MessageRoleTool, strings.Repeat("d", 200))
+
+	messages := []zeroruntime.Message{system, m1, a1, m2, a2, tr}
+
+	// Set a budget smaller than the trailing tool result alone. The token walk
+	// backward will return a preserveLast of 1, landing on the tool result; the
+	// safe-boundary widening then pulls the boundary back to the assistant tool
+	// call so both messages are preserved.
+	budget := estimateTokens([]zeroruntime.Message{tr}) - 1
+
+	result, err := CompactMessages(messages, CompactionOptions{
+		KeepRecentTokens: budget,
+		Summarize:        func([]zeroruntime.Message) (string, error) { return "SUMMARY", nil },
+	})
+	if err != nil {
+		t.Fatalf("CompactMessages error = %v", err)
+	}
+	if !result.Compacted {
+		t.Fatal("expected compaction to run")
+	}
+	if result.PreservedCount != 3 { // system + a2 + tr
+		t.Fatalf("PreservedCount = %d, want 3", result.PreservedCount)
+	}
+	// Widened boundary must keep the assistant tool call, not just the tool result.
+	last := result.Messages[len(result.Messages)-1]
+	if last.Role != zeroruntime.MessageRoleTool {
+		t.Fatalf("expected last preserved message to be tool result, got %s", last.Role)
+	}
+	secondLast := result.Messages[len(result.Messages)-2]
+	if secondLast.Role != zeroruntime.MessageRoleAssistant || len(secondLast.ToolCalls) == 0 {
+		t.Fatalf("expected second-to-last preserved message to be assistant tool call")
+	}
+}

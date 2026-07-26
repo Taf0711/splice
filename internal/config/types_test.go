@@ -43,3 +43,72 @@ func TestToolsConfigPresentOnOverridesAndResolved(t *testing.T) {
 		t.Fatalf("ResolvedConfig.Tools.DeferThreshold = %d, want 4", resolved.Tools.DeferThreshold)
 	}
 }
+
+func ptrBool(v bool) *bool { return &v }
+
+func TestCompactionConfigDefaults(t *testing.T) {
+	var cfg FileConfig
+	if err := json.Unmarshal([]byte(`{}`), &cfg); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if !cfg.Compaction.EnabledOrDefault() {
+		t.Fatalf("expected compaction enabled by default")
+	}
+	if cfg.Compaction.ReserveTokens != 0 {
+		t.Fatalf("ReserveTokens = %d, want 0", cfg.Compaction.ReserveTokens)
+	}
+	if cfg.Compaction.KeepRecentTokens != 0 {
+		t.Fatalf("KeepRecentTokens = %d, want 0", cfg.Compaction.KeepRecentTokens)
+	}
+}
+
+func TestCompactionConfigExplicit(t *testing.T) {
+	var cfg FileConfig
+	if err := json.Unmarshal([]byte(`{"compaction":{"enabled":false,"reserveTokens":1000,"keepRecentTokens":2000}}`), &cfg); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if cfg.Compaction.EnabledOrDefault() {
+		t.Fatalf("expected compaction disabled")
+	}
+	if cfg.Compaction.ReserveTokens != 1000 {
+		t.Fatalf("ReserveTokens = %d, want 1000", cfg.Compaction.ReserveTokens)
+	}
+	if cfg.Compaction.KeepRecentTokens != 2000 {
+		t.Fatalf("KeepRecentTokens = %d, want 2000", cfg.Compaction.KeepRecentTokens)
+	}
+}
+
+func TestFileConfigMarshalRoundTripCompaction(t *testing.T) {
+	cfg := FileConfig{
+		Compaction: CompactionConfig{
+			Enabled:          ptrBool(true),
+			ReserveTokens:    16384,
+			KeepRecentTokens: 20000,
+		},
+	}
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	var back FileConfig
+	if err := json.Unmarshal(encoded, &back); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if back.Compaction.Enabled == nil || !*back.Compaction.Enabled {
+		t.Fatalf("Enabled did not round-trip")
+	}
+	if back.Compaction.ReserveTokens != 16384 {
+		t.Fatalf("ReserveTokens = %d, want 16384", back.Compaction.ReserveTokens)
+	}
+	if back.Compaction.KeepRecentTokens != 20000 {
+		t.Fatalf("KeepRecentTokens = %d, want 20000", back.Compaction.KeepRecentTokens)
+	}
+}
+
+func TestCompactionConfigPresentOnResolved(t *testing.T) {
+	// Compile-time guard that ResolvedConfig carries the field.
+	resolved := ResolvedConfig{Compaction: CompactionConfig{ReserveTokens: 7}}
+	if resolved.Compaction.ReserveTokens != 7 {
+		t.Fatalf("ResolvedConfig.Compaction.ReserveTokens = %d, want 7", resolved.Compaction.ReserveTokens)
+	}
+}

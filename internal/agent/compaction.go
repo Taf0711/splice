@@ -51,6 +51,10 @@ type CompactionOptions struct {
 	// preserved suffix is widened (never shrunk) so it begins at a safe
 	// user/assistant boundary. <= 0 falls back to defaultCompactionPreserveLast.
 	PreserveLast int
+	// KeepRecentTokens overrides PreserveLast when > 0. Compaction keeps the
+	// trailing messages whose combined token estimate stays under this budget,
+	// widening to a safe boundary afterward.
+	KeepRecentTokens int
 	// Summarize turns the to-be-elided middle into a single dense summary. It is
 	// injected so Compact stays pure and testable; the agent loop wires it to a
 	// real provider call.
@@ -151,6 +155,26 @@ func compactionThreshold(contextWindow int) int {
 	return int(float64(contextWindow) * compactionTriggerRatio)
 }
 
+// preserveLastFromTokens walks backward from the end of messages, accumulating
+// the per-message token estimate, and returns how many trailing messages fit
+// within keepRecentTokens. It never returns 0; at least one trailing message is
+// always preserved so Compact has a non-empty suffix.
+func preserveLastFromTokens(messages []zeroruntime.Message, systemEnd int, keepRecentTokens int) int {
+	preserveLast := 0
+	total := 0
+	for i := len(messages) - 1; i >= systemEnd; i-- {
+		total += estimateTokens([]zeroruntime.Message{messages[i]})
+		if total > keepRecentTokens && preserveLast > 0 {
+			break
+		}
+		preserveLast++
+	}
+	if preserveLast == 0 {
+		preserveLast = 1
+	}
+	return preserveLast
+}
+
 // Compact summarizes the oldest middle of a conversation, keeping the leading
 // system message(s) and the most recent turns verbatim. The result is:
 //
@@ -192,6 +216,9 @@ func CompactMessages(messages []zeroruntime.Message, opts CompactionOptions) (Co
 	systemEnd := 0
 	for systemEnd < len(messages) && messages[systemEnd].Role == zeroruntime.MessageRoleSystem {
 		systemEnd++
+	}
+	if opts.KeepRecentTokens > 0 {
+		preserveLast = preserveLastFromTokens(messages, systemEnd, opts.KeepRecentTokens)
 	}
 
 	// Naive boundary: keep the last preserveLast messages. Then widen the suffix
@@ -316,6 +343,10 @@ type compactionState struct {
 	// the loop only compacts when the history has grown past it AND is over the
 	// threshold. This prevents compacting on every turn once near the limit.
 	lowWaterMark int
+	// reserveTokens, when > 0, overrides the ratio-based trigger in newCompactionState.
+	reserveTokens int
+	// keepRecentTokens, when > 0, overrides the message-count preserve in Compact.
+	keepRecentTokens int
 	// reactiveAttempted guards the reactive path so it fires at most once per
 	// run. Without this a provider that keeps returning context-limit errors
 	// (even after compaction) could loop indefinitely; one attempt then the
@@ -365,11 +396,24 @@ func (state *compactionState) calibratedTokens(raw int) int {
 }
 
 func newCompactionState(options Options) *compactionState {
+	threshold := compactionThreshold(options.ContextWindow) // default ratio
+	if options.CompactionReserveTokens > 0 && options.ContextWindow > 0 {
+		reserveThreshold := options.ContextWindow - options.CompactionReserveTokens
+		// Guard against a nonsensical reserve >= window: never go below half the
+		// window, and never negative.
+		half := options.ContextWindow / 2
+		if reserveThreshold < half {
+			reserveThreshold = half
+		}
+		threshold = reserveThreshold
+	}
 	return &compactionState{
-		enabled:      options.ContextWindow > 0,
-		threshold:    compactionThreshold(options.ContextWindow),
-		preserveLast: options.CompactionPreserveLast,
-		onUsage:      options.OnUsage,
+		enabled:          options.ContextWindow > 0,
+		threshold:        threshold,
+		preserveLast:     options.CompactionPreserveLast,
+		reserveTokens:    options.CompactionReserveTokens,
+		keepRecentTokens: options.CompactionKeepRecentTokens,
+		onUsage:          options.OnUsage,
 	}
 }
 
@@ -415,8 +459,9 @@ func (state *compactionState) maybeCompact(
 	}
 
 	compacted, err := Compact(messages, CompactionOptions{
-		PreserveLast: state.preserveLast,
-		Summarize:    summarizeClosure(ctx, provider, state.onUsage),
+		PreserveLast:     state.preserveLast,
+		KeepRecentTokens: state.keepRecentTokens,
+		Summarize:        summarizeClosure(ctx, provider, state.onUsage),
 	})
 	if err != nil {
 		// Summarizer failed: keep the original history. The reactive path (or a
@@ -459,8 +504,9 @@ func (state *compactionState) recover(
 	}
 
 	result, compactErr := Compact(messages, CompactionOptions{
-		PreserveLast: state.preserveLast,
-		Summarize:    summarizeClosure(ctx, provider, state.onUsage),
+		PreserveLast:     state.preserveLast,
+		KeepRecentTokens: state.keepRecentTokens,
+		Summarize:        summarizeClosure(ctx, provider, state.onUsage),
 	})
 	if compactErr != nil {
 		// A genuine compaction attempt was made (and failed): the budget is spent

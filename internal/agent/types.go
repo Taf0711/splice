@@ -265,10 +265,20 @@ type Options struct {
 	// CompactionPreserveLast is how many trailing messages compaction keeps
 	// verbatim. <= 0 falls back to defaultCompactionPreserveLast.
 	CompactionPreserveLast int
-	Registry               *tools.Registry
-	PermissionMode         PermissionMode
-	Autonomy               string
-	Sandbox                *sandbox.Engine
+	// CompactionReserveTokens, when > 0, overrides the default ratio-based trigger:
+	// compaction fires when estimated tokens exceed ContextWindow - this value
+	// (pi-style reserve), instead of ContextWindow * 0.7. 0 keeps the ratio
+	// default. The TUI sets this from config.CompactionConfig.ReserveTokens.
+	CompactionReserveTokens int
+	// CompactionKeepRecentTokens, when > 0, overrides the message-count preserve
+	// (CompactionPreserveLast): the trailing messages whose combined token
+	// estimate is under this budget are kept verbatim (pi-style), widened to a
+	// safe boundary. 0 keeps the message-count default.
+	CompactionKeepRecentTokens int
+	Registry                   *tools.Registry
+	PermissionMode             PermissionMode
+	Autonomy                   string
+	Sandbox                    *sandbox.Engine
 	// FileTracker records per-session file read/write versions so the write tools
 	// can detect a file changed on disk outside Splice since it was last read. nil
 	// disables the check. Created once per session and threaded into every tool run.

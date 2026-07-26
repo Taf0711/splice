@@ -435,7 +435,8 @@ type model struct {
 	mcpManager                   *mcpManagerState
 	mcpAddWizard                 *mcpAddWizardState
 	favoriteModels               map[string]bool
-	recapsEnabled                bool         // post-turn "※ recap:" line (config: recaps on|off)
+	recapsEnabled                bool // post-turn "※ recap:" line (config: recaps on|off)
+	compaction                   config.CompactionConfig
 	recappedRuns                 map[int]bool // per-run guard so a recap fires at most once per turn
 	modelPickerLoading           bool
 	modelPickerLoadingProviderID string
@@ -467,6 +468,10 @@ type model struct {
 	// with. Nil in production; used by tests to assert image threading without a
 	// real provider round-trip.
 	captureRunImages func([]zeroruntime.ImageBlock)
+	// captureRunOptions, when set, is invoked with the agent.Options a run is
+	// launched with. Nil in production; used by tests to assert compaction and
+	// run-config threading without a real provider round-trip.
+	captureRunOptions func(agent.Options)
 }
 
 type agentTextMsg struct {
@@ -825,6 +830,7 @@ func newModel(ctx context.Context, options Options) model {
 		providerProfile:             options.ProviderProfile,
 		favoriteModels:              favoriteModelSet(options.FavoriteModels),
 		recapsEnabled:               options.RecapsEnabled,
+		compaction:                  options.Compaction,
 		provider:                    options.Provider,
 		newProvider:                 options.NewProvider,
 		probeProviderHealth:         options.ProbeProviderHealth,
@@ -4807,7 +4813,18 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		// AgentContextWindow applies a positive fallback for unknown/custom models so
 		// compaction (proactive + reactive) is enabled for every model, not just
 		// catalogued ones.
-		options.ContextWindow = modelregistry.AgentContextWindow(m.modelContextWindow(m.modelName))
+		if m.compaction.EnabledOrDefault() {
+			options.ContextWindow = modelregistry.AgentContextWindow(m.modelContextWindow(m.modelName))
+			options.CompactionReserveTokens = m.compaction.ReserveTokens
+			options.CompactionKeepRecentTokens = m.compaction.KeepRecentTokens
+		} else {
+			// Compaction explicitly disabled: ContextWindow 0 makes the loop's
+			// maybeCompact and recover strict no-ops.
+			options.ContextWindow = 0
+		}
+		if m.captureRunOptions != nil {
+			m.captureRunOptions(options)
+		}
 
 		// Post-edit self-correction is on by default in the TUI but kept FAST: it
 		// runs LSP diagnostics over the changed files only — cheap, change-scoped,

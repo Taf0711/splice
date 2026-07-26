@@ -72,6 +72,11 @@ type Options struct {
 	// Notify configures completion / awaiting-input notifications.
 	Notify config.NotifyConfig
 
+	// Compaction is the resolved compaction config (enabled/reserve/keepRecent)
+	// applied to every agent run. Default zero value means compaction stays ON
+	// with the built-in ratio/message-count defaults.
+	Compaction config.CompactionConfig
+
 	// KeyBindings configures remappable TUI keybindings. An empty/splice
 	// KeyBindingsConfig means "use built-in defaults" for each action.
 	KeyBindings config.KeyBindingsConfig
