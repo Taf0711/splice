@@ -58,11 +58,15 @@ type TaskFailedPayload struct {
 // Transient busy states (crystallizing, critic running) are not represented
 // here because they are in-memory only.
 type DesignState struct {
-	Phase        schemas.DesignPhase
-	Revision     schemas.PlanRevision
-	Plan         *schemas.DesignPlan
-	Critique     *schemas.PlanCritique
-	TaskOutcomes map[string]schemas.TaskRunOutcome // task_id -> outcome
+	Phase    schemas.DesignPhase
+	Revision schemas.PlanRevision
+	Plan     *schemas.DesignPlan
+	Critique *schemas.PlanCritique
+	// TaskOutcomes is task_id -> status, including in-flight "running" for a
+	// task_started event with no terminal event after it yet (e.g. a run
+	// interrupted mid-task). schemas.TaskRunOutcome is strictly terminal and
+	// cannot represent that state; TaskRunStatus can.
+	TaskOutcomes map[string]schemas.TaskRunStatus
 }
 
 // ReconstructDesignState replays session lifecycle events in sequence order
@@ -77,13 +81,13 @@ type DesignState struct {
 //
 // Malformed payloads return a named error and do not silently default (G2).
 func ReconstructDesignState(events []sessions.Event) (DesignState, error) {
-	state := DesignState{TaskOutcomes: map[string]schemas.TaskRunOutcome{}}
+	state := DesignState{TaskOutcomes: map[string]schemas.TaskRunStatus{}}
 	for _, event := range events {
 		switch event.Type {
 		case sessions.EventDesignModeEntered:
 			state = DesignState{
 				Phase:        schemas.DesignPhaseConversation,
-				TaskOutcomes: map[string]schemas.TaskRunOutcome{},
+				TaskOutcomes: map[string]schemas.TaskRunStatus{},
 			}
 		case sessions.EventPlanCrystallized:
 			var p PlanCrystallizedPayload
@@ -104,7 +108,7 @@ func ReconstructDesignState(events []sessions.Event) (DesignState, error) {
 			state.Revision = schemas.PlanRevision{PlanID: p.PlanID, Revision: p.Revision}
 			state.Plan = &plan
 			state.Critique = nil
-			state.TaskOutcomes = map[string]schemas.TaskRunOutcome{}
+			state.TaskOutcomes = map[string]schemas.TaskRunStatus{}
 		case sessions.EventCritiqueRecorded:
 			var c CritiqueRecordedPayload
 			if err := json.Unmarshal(event.Payload, &c); err != nil {
@@ -130,7 +134,7 @@ func ReconstructDesignState(events []sessions.Event) (DesignState, error) {
 				return DesignState{}, fmt.Errorf("design_mode plan_approved seq %d: plan_id is required", event.Sequence)
 			}
 			state.Phase = schemas.DesignPhaseExecuting
-			state.TaskOutcomes = map[string]schemas.TaskRunOutcome{}
+			state.TaskOutcomes = map[string]schemas.TaskRunStatus{}
 		case sessions.EventTaskStarted:
 			var t TaskStartedPayload
 			if err := json.Unmarshal(event.Payload, &t); err != nil {
@@ -139,9 +143,9 @@ func ReconstructDesignState(events []sessions.Event) (DesignState, error) {
 			if t.TaskID == "" || t.RunID == "" {
 				return DesignState{}, fmt.Errorf("design_mode task_started seq %d: task_id and run_id are required", event.Sequence)
 			}
-			state.TaskOutcomes[t.TaskID] = schemas.TaskRunOutcome{
+			state.TaskOutcomes[t.TaskID] = schemas.TaskRunStatus{
 				TaskID: t.TaskID,
-				RunID:  t.RunID,
+				RunID:  &t.RunID,
 				Status: "running",
 			}
 		case sessions.EventTaskCompleted:
@@ -152,9 +156,9 @@ func ReconstructDesignState(events []sessions.Event) (DesignState, error) {
 			if t.TaskID == "" || t.RunID == "" {
 				return DesignState{}, fmt.Errorf("design_mode task_completed seq %d: task_id and run_id are required", event.Sequence)
 			}
-			state.TaskOutcomes[t.TaskID] = schemas.TaskRunOutcome{
+			state.TaskOutcomes[t.TaskID] = schemas.TaskRunStatus{
 				TaskID: t.TaskID,
-				RunID:  t.RunID,
+				RunID:  &t.RunID,
 				Status: "completed",
 			}
 		case sessions.EventTaskFailed:
@@ -165,9 +169,9 @@ func ReconstructDesignState(events []sessions.Event) (DesignState, error) {
 			if t.TaskID == "" || t.RunID == "" {
 				return DesignState{}, fmt.Errorf("design_mode task_failed seq %d: task_id and run_id are required", event.Sequence)
 			}
-			state.TaskOutcomes[t.TaskID] = schemas.TaskRunOutcome{
+			state.TaskOutcomes[t.TaskID] = schemas.TaskRunStatus{
 				TaskID: t.TaskID,
-				RunID:  t.RunID,
+				RunID:  &t.RunID,
 				Status: "failed",
 			}
 		}

@@ -405,6 +405,71 @@ func (provider *designCapturingProvider) StreamCompletion(ctx context.Context, r
 	return provider.runFakeProvider.StreamCompletion(ctx, request)
 }
 
+func TestRunDesignPlanWithResume_OnTaskStartFires(t *testing.T) {
+	workDir, registry := newRunTestWorkspace(t)
+	plan := designPlan([]schemas.Task{
+		designTask("t1", "First", nil),
+		designTask("t2", "Second", []string{"t1"}),
+		designTask("t3", "Third", []string{"t1"}),
+	})
+
+	var starts []struct {
+		TaskID string
+		RunID  string
+	}
+	onTaskStart := func(task schemas.Task, runID string) {
+		starts = append(starts, struct {
+			TaskID string
+			RunID  string
+		}{TaskID: task.ID, RunID: runID})
+	}
+
+	_, err := RunDesignPlanWithResume(context.Background(), plan, designHappyProvider{workDir: workDir}, agent.Options{
+		Cwd:            workDir,
+		Registry:       registry,
+		PermissionMode: agent.PermissionModeAuto,
+		SessionID:      "plan-start",
+		MaxTurns:       1,
+	}, nil, nil, RunDesignPlanOptions{
+		PlanID:           "plan-start",
+		CompletedTaskIDs: []string{"t1"},
+		OnTaskStart:      onTaskStart,
+	})
+	if err != nil {
+		t.Fatalf("RunDesignPlanWithResume returned error: %v", err)
+	}
+
+	// t1 is already complete on resume: OnTaskStart must not fire for it.
+	if len(starts) != 2 {
+		t.Fatalf("OnTaskStart fired %d times, want 2 (t1 is already complete): %#v", len(starts), starts)
+	}
+	if starts[0].TaskID != "t2" || starts[1].TaskID != "t3" {
+		t.Fatalf("OnTaskStart order = %#v, want t2 then t3", starts)
+	}
+	for _, s := range starts {
+		if s.RunID == "" {
+			t.Fatalf("OnTaskStart for %s got empty runID", s.TaskID)
+		}
+	}
+}
+
+func TestRunDesignPlanWithResume_OnTaskStartNilSafe(t *testing.T) {
+	workDir, registry := newRunTestWorkspace(t)
+	plan := designPlan([]schemas.Task{designTask("t1", "First", nil)})
+
+	// RunDesignPlanOptions.OnTaskStart left nil: must not panic.
+	_, err := RunDesignPlanWithResume(context.Background(), plan, designHappyProvider{workDir: workDir}, agent.Options{
+		Cwd:            workDir,
+		Registry:       registry,
+		PermissionMode: agent.PermissionModeAuto,
+		SessionID:      "plan-nil-start",
+		MaxTurns:       1,
+	}, nil, nil, RunDesignPlanOptions{PlanID: "plan-nil-start"})
+	if err != nil {
+		t.Fatalf("RunDesignPlanWithResume returned error: %v", err)
+	}
+}
+
 func TestRunDesignPlanWithResume_AcceptanceFactsInIntent(t *testing.T) {
 	workDir, registry := newRunTestWorkspace(t)
 	fact := schemas.AcceptanceFact{Statement: "it must return 42"}

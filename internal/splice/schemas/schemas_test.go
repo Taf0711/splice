@@ -451,6 +451,7 @@ func TestJSONRoundTrip(t *testing.T) {
 			Critique{Category: "correctness", Severity: SeverityHigh, Issue: "i"},
 			PlanCritique{OverallAssessment: "looks good", Critiques: []Critique{{Category: "security", Severity: SeverityLow, Issue: "i"}}},
 			TaskRunStatus{TaskID: "t1", Status: "pending"},
+			TaskRunStatus{TaskID: "t1", Status: "running"},
 			TaskRunOutcome{TaskID: "t1", RunID: "r1", Status: "completed"},
 			DesignPlanResult{PlanID: "p1", Status: "completed", CompletedTasks: []TaskRunOutcome{{TaskID: "t1", RunID: "r1", Status: "completed"}}},
 			DesignPlan{Epic: "e", Requirements: []string{"r"}, InScope: []string{"x"}, OutOfScope: []string{"y"}, SystemDesign: "d", Tasks: []Task{task}, Source: "authored"},
@@ -462,6 +463,21 @@ func TestJSONRoundTrip(t *testing.T) {
 			if err := roundTripAndValidate(t, v); err != nil {
 				t.Fatalf("case %d (%T): %v", i, v, err)
 			}
+		}
+	})
+
+	t.Run("TaskRunStatus vocabulary matches TaskRunOutcome's terminal states", func(t *testing.T) {
+		// TaskRunStatus and TaskRunOutcome previously drifted: TaskRunStatus
+		// accepted "succeeded" where TaskRunOutcome (and the actual runner
+		// writes) use "completed". Pin the aligned vocabulary both ways so
+		// they cannot drift apart again.
+		for _, status := range []string{"pending", "running", "completed", "failed", "aborted"} {
+			if err := (TaskRunStatus{TaskID: "t1", Status: status}).Validate(); err != nil {
+				t.Errorf("TaskRunStatus rejected %q: %v", status, err)
+			}
+		}
+		if err := (TaskRunStatus{TaskID: "t1", Status: "succeeded"}).Validate(); err == nil {
+			t.Error("TaskRunStatus accepted the old drifted status \"succeeded\"; vocabulary must stay aligned to TaskRunOutcome's \"completed\"")
 		}
 	})
 

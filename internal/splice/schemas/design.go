@@ -124,10 +124,13 @@ func (p PlanCritique) Validate() error {
 	return nil
 }
 
-// TaskRunStatus is per-task execution status persisted alongside a DesignPlan.
+// TaskRunStatus is per-task execution status persisted alongside a DesignPlan,
+// including in-flight states. It backs DesignState.TaskOutcomes, which a
+// reconstructed design session reads to tell a task that started but never
+// reached a terminal event apart from one that never started at all.
 type TaskRunStatus struct {
 	TaskID string  `json:"task_id"`
-	Status string  `json:"status"` // pending, running, succeeded, failed
+	Status string  `json:"status"` // pending, running, completed, failed, aborted
 	RunID  *string `json:"run_id,omitempty"`
 }
 
@@ -137,7 +140,7 @@ func (t TaskRunStatus) Validate() error {
 		return errors.New("task_id is required")
 	}
 	switch t.Status {
-	case "pending", "running", "succeeded", "failed":
+	case "pending", "running", "completed", "failed", "aborted":
 	default:
 		return fmt.Errorf("invalid status %q", t.Status)
 	}
@@ -171,6 +174,11 @@ func (t TaskRunOutcome) Validate() error {
 // TUI uses it for live progress; the runner uses it before starting the next
 // task. pipelineResult is the full result of the task's pipeline run.
 type TaskLifecycleCallback func(task Task, runID string, pipelineResult PipelineResult)
+
+// TaskStartCallback is invoked immediately before a task's pipeline run
+// dispatches, before that task's TaskLifecycleCallback can fire. Not invoked
+// for tasks skipped as already complete on resume.
+type TaskStartCallback func(task Task, runID string)
 
 // DesignPlanResult is the plan-level result returned by run_design_plan.
 type DesignPlanResult struct {

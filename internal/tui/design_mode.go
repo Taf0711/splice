@@ -121,6 +121,18 @@ func (m model) handleApproveCommand() (model, tea.Cmd) {
 		})
 	}
 
+	// Build the start callback: persists task_started before the task dispatches,
+	// so a run interrupted mid-task reconstructs as "running" on resume rather
+	// than as absent (indistinguishable from a task that never began).
+	onTaskStart := func(task schemas.Task, taskRunID string) {
+		if store != nil && sessionID != "" {
+			_, _ = store.AppendEvent(sessionID, sessions.AppendEventInput{
+				Type:    sessions.EventTaskStarted,
+				Payload: splicerun.TaskStartedPayload{TaskID: task.ID, RunID: taskRunID},
+			})
+		}
+	}
+
 	// Build the lifecycle callback: persists task events and emits progress.
 	onTaskLifecycle := func(task schemas.Task, taskRunID string, pipelineResult schemas.PipelineResult) {
 		if store != nil && sessionID != "" {
@@ -142,6 +154,7 @@ func (m model) handleApproveCommand() (model, tea.Cmd) {
 		func() tea.Msg {
 			result, err := splicerun.RunDesignPlanWithResume(runCtx, plan, provider, options, mem, nil, splicerun.RunDesignPlanOptions{
 				PlanID:          planID,
+				OnTaskStart:     onTaskStart,
 				OnTaskLifecycle: onTaskLifecycle,
 			})
 			return planExecutionResultMsg{runID: runID, result: result, err: err, store: store, sessionID: sessionID}

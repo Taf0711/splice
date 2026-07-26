@@ -204,6 +204,46 @@ func TestReconstructTaskFailedStaysExecuting(t *testing.T) {
 	}
 }
 
+func TestReconstructTaskStartedStaysRunning(t *testing.T) {
+	// A run interrupted mid-task (crash, kill, terminal close) leaves a
+	// task_started event with no terminal event after it. Reconstruction
+	// must read that as "running", not as absent (indistinguishable from a
+	// task that never began) and not error (TaskRunOutcome.Validate would
+	// reject "running", which is why DesignState.TaskOutcomes uses the
+	// in-flight-capable TaskRunStatus instead).
+	plan := validPlan()
+	planJSON, _ := json.Marshal(plan)
+	events := []sessions.Event{
+		designEvent(1, sessions.EventDesignModeEntered, nil),
+		designEvent(2, sessions.EventPlanCrystallized, PlanCrystallizedPayload{
+			PlanID: "plan-1", Revision: 1, Plan: planJSON,
+		}),
+		designEvent(3, sessions.EventPlanApproved, PlanApprovedPayload{PlanID: "plan-1"}),
+		designEvent(4, sessions.EventTaskStarted, TaskStartedPayload{TaskID: "t1", RunID: "r1"}),
+	}
+	state, err := ReconstructDesignState(events)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if state.Phase != schemas.DesignPhaseExecuting {
+		t.Fatalf("phase = %q, want %q (an in-flight task does not complete the plan)", state.Phase, schemas.DesignPhaseExecuting)
+	}
+	outcome, ok := state.TaskOutcomes["t1"]
+	if !ok {
+		t.Fatal("t1 missing from TaskOutcomes; an interrupted task must not read as absent")
+	}
+	if outcome.Status != "running" {
+		t.Fatalf("t1 status = %q, want %q", outcome.Status, "running")
+	}
+	if outcome.RunID == nil || *outcome.RunID != "r1" {
+		t.Fatalf("t1 run id = %v, want \"r1\"", outcome.RunID)
+	}
+	// t2 was never started at all: absent, not "running" and not "pending".
+	if _, ok := state.TaskOutcomes["t2"]; ok {
+		t.Fatal("t2 present in TaskOutcomes; a task with no event at all must stay absent")
+	}
+}
+
 func TestReconstructSecondDesignModeResets(t *testing.T) {
 	plan := validPlan()
 	planJSON, _ := json.Marshal(plan)

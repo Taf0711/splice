@@ -73,6 +73,9 @@ type RunDesignPlanOptions struct {
 	// OnTaskLifecycle is invoked after each task completes or fails, before
 	// the next task starts. May be nil.
 	OnTaskLifecycle schemas.TaskLifecycleCallback
+	// OnTaskStart is invoked immediately before a task's pipeline run
+	// dispatches. May be nil. Not invoked for tasks in CompletedTaskIDs.
+	OnTaskStart schemas.TaskStartCallback
 }
 
 // RunDesignPlan executes each task in a design plan as an independent pipeline run.
@@ -130,6 +133,10 @@ func RunDesignPlanWithResume(ctx context.Context, plan schemas.DesignPlan, provi
 
 		emitProgress(options, fmt.Sprintf("Starting task %d/%d %s: %s\n", nextTaskNumber, totalTasks, task.ID, task.Title))
 		nextTaskNumber++
+
+		if runOpts.OnTaskStart != nil {
+			runOpts.OnTaskStart(task, runID)
+		}
 
 		taskPlan, acceptanceFacts, err := BuildExecutionPlanForTaskWithFacts(task)
 		if err != nil {
