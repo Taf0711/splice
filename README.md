@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="docs/assets/splice-logo.png" alt="splice" width="560">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/splice-logo-inverted.svg">
+    <img src="docs/assets/splice-logo.svg" alt="splice" width="560">
+  </picture>
 </p>
 
 <p align="center"><strong>A terminal coding agent with a deterministic, multi-stage pipeline.</strong></p>
