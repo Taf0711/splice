@@ -602,8 +602,16 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	)
 
 	runOptions := agent.Options{
-		MaxTurns:      resolved.MaxTurns,
-		ContextWindow: resolveAgentContextWindow(runCtx, modelRegistry, resolved.Provider),
+		MaxTurns: resolved.MaxTurns,
+		// ContextWindow / compaction are agent-loop only: the deterministic
+		// pipeline (internal/splice) never reads Options.ContextWindow, so
+		// compaction is inert under `splice exec` by architecture, not by
+		// omission. Left unset here rather than computed and discarded, which
+		// also drops a live-provider-discovery network round trip on a
+		// registry miss for a value nothing consumes. `splice exec --spec`
+		// runs a real agent.Run loop and wires this for real; see
+		// exec_spec.go's specDraftCompactionOptions.
+		//
 		// DeferThreshold is agent-loop only: the deterministic pipeline has no
 		// deferred MCP-tool registry deferral concept, so it is inert under
 		// `splice exec` and only affects the interactive agent.Run path.

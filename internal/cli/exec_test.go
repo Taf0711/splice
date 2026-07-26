@@ -26,6 +26,34 @@ import (
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
+// TestPipelineNeverReadsContextWindow guards the invariant that exec.go:604's
+// pipeline runOptions leaves ContextWindow unset (compaction is inert under
+// `splice exec` by architecture, see the comment there). If a future change
+// makes internal/splice read Options.ContextWindow, this fails loudly instead
+// of leaving the exec.go comment quietly wrong.
+func TestPipelineNeverReadsContextWindow(t *testing.T) {
+	root := filepath.Join("..", "splice")
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if strings.Contains(string(data), "ContextWindow") {
+			t.Errorf("%s references ContextWindow; internal/splice must not read it directly under the exec.go:604 pipeline path without updating that comment", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+}
+
 func TestRunExecHelpDocumentsM1Flags(t *testing.T) {
 	for _, args := range [][]string{
 		{"exec", "--help"},
