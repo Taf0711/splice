@@ -1,110 +1,232 @@
-# Install Splice
+# Installing Splice
 
-Splice runs locally and is available in three forms. Pick the path that matches
-how you want to use it:
+Splice is distributed as:
 
-| Path | Best for | What you get |
-|---|---|---|
-| npm | Most users | A platform binary and the `splice` command |
-| GitHub Releases | Managed or offline installs | A versioned archive |
-| Source | Contributors and local development | A build from this checkout |
+- an npm package, `@taf0711/splice`
+- release archives on GitHub Releases
+- source builds with Go 1.25+
 
-Splice is built on [Zero's Engine](https://github.com/gitlawb/zero), but the
-commands and binaries below are Splice's (`splice`, not `zero`).
+The npm package and install scripts download a platform-specific release archive.
+They require a published GitHub Release for the requested version.
 
-## Fast path: npm
+Releases are published on [GitHub Releases](https://github.com/Taf0711/splice/releases)
+and the npm package is `@taf0711/splice` (via OIDC trusted publishing).
 
-Requirements:
+## npm
 
-- Node.js 18 or newer
-- network access to npm and GitHub Releases
-- Linux, macOS, or Windows on x64 or arm64
+Install via `npm install -g @taf0711/splice` (downloads the matching GitHub Release binary) or download archives directly from [GitHub Releases](https://github.com/Taf0711/splice/releases).
 
 ```bash
 npm install -g @taf0711/splice
 splice
 ```
 
-The npm package installs a small wrapper and downloads the matching Splice
-release binary during `postinstall`. The first launch opens the provider setup
-wizard. To check the installation without starting a session:
+The package supports Linux, macOS, and Windows on x64 and arm64. It installs the
+`splice` command and downloads the matching release binary during `postinstall`.
+
+Requirements:
+
+- Node.js 18+
+- network access to npm and GitHub Releases
+
+## Bun
+
+> **Planned / work in progress** (depends on the npm package above).
+
+Bun is "default-secure" and does not run lifecycle scripts of installed
+dependencies (only the installing project's own scripts), so the `postinstall`
+that fetches the Splice binary is silently skipped. The first run then fails with
+`No native binary found next to the npm wrapper`.
+
+The simplest fix is to trust the package after installing, which runs the
+blocked postinstall. This works for project and global installs:
 
 ```bash
-splice --version
-splice doctor
-```
+# project install
+bun add @taf0711/splice
+bun pm trust @taf0711/splice
 
-### Bun
-
-Bun does not run dependency lifecycle scripts unless a package is trusted. If
-the wrapper is installed but no native binary is found, trust the package and
-rerun the installer:
-
-```bash
+# global install
 bun add -g @taf0711/splice
 bun pm -g trust @taf0711/splice
 ```
 
-For a project install:
+`bun pm untrusted` (or `bun pm -g untrusted`) lists the blocked postinstalls if
+you want to inspect before trusting.
+
+Alternatively, allow the postinstall to run at install time by adding the
+package to your project's `trustedDependencies` before installing:
+
+```json
+{
+  "trustedDependencies": ["@taf0711/splice"]
+}
+```
 
 ```bash
 bun add @taf0711/splice
-bun pm trust @taf0711/splice
 ```
 
-You can inspect blocked scripts with `bun pm untrusted`. On Bun versions without
-`bun pm trust`, run the wrapper installer directly after installing:
+On Bun versions that do not have `bun pm trust`, run the installer manually
+after installing:
 
 ```bash
 node node_modules/@taf0711/splice/scripts/postinstall.mjs
 ```
 
-## Versioned install: GitHub Releases
+Reference: <https://bun.sh/docs/pm/lifecycle>
 
-Release archives and checksums are published on
-[GitHub Releases](https://github.com/Taf0711/splice/releases). Download the
-archive for your operating system and architecture, unpack it, and put the
-binaries on `PATH`.
+## Linux And macOS Script
 
-Supported release targets:
+> **Planned / work in progress.** The install script depends on published
+> GitHub Releases, which do not exist yet.
 
-- Linux: x64, arm64
-- macOS: x64, arm64
-- Windows: x64, arm64
+Install the latest release:
 
-Verify the matching `.sha256` file before installing a binary. Archive names
-follow this pattern:
-
-```text
-splice-v<version>-linux-<arch>.tar.gz
-splice-v<version>-macos-<arch>.tar.gz
-splice-v<version>-windows-<arch>.zip
+```bash
+curl -fsSL https://raw.githubusercontent.com/Taf0711/splice/main/scripts/install.sh | bash
 ```
 
-The release archive includes the platform helpers needed by the sandbox. Keep
-`splice` and its helper binaries together when copying them to a directory on
-`PATH`.
+From a checkout:
 
-## Build from source
+```bash
+scripts/install.sh
+```
 
-Source builds require Go 1.25 or newer.
+Install a specific version:
+
+```bash
+ZERO_VERSION=0.1.0 scripts/install.sh
+scripts/install.sh --version 0.1.0
+```
+
+Install somewhere else:
+
+```bash
+SPLICE_INSTALL_DIR="$HOME/bin" scripts/install.sh
+scripts/install.sh --install-dir "$HOME/bin"
+```
+
+> **Note:** `ZERO_VERSION` retains the upstream `ZERO_` prefix; a rename to
+> `SPLICE_VERSION` is planned. The repo and install-dir variables are already
+> `SPLICE_`-prefixed.
+
+Defaults:
+
+- Repository: `Taf0711/splice`
+- Version: latest GitHub release
+- Install path: `~/.local/bin/splice`
+
+Custom GitHub Enterprise endpoints can be configured via environment variables:
+
+- `ZERO_GITHUB_API` — base URL for the GitHub API (e.g. `https://github.example.com/api/v3`).
+- `ZERO_GITHUB_BASE_URL` — base URL for the GitHub instance (e.g. `https://github.example.com`).
+
+> **Note:** Both variables retain the upstream `ZERO_` prefix; a rename to
+> `SPLICE_` is planned.
+
+Requirements: Bash, `curl` or `wget`, `tar`, and `shasum` or `sha256sum`.
+
+## Windows PowerShell Script
+
+> **Planned / work in progress.** The install script depends on published
+> GitHub Releases, which do not exist yet.
+
+Install the latest release:
+
+```powershell
+irm https://raw.githubusercontent.com/Taf0711/splice/main/scripts/install.ps1 | iex
+```
+
+From a checkout:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/install.ps1
+```
+
+Install a specific version:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -Version 0.1.0
+```
+
+Install somewhere else:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -InstallDir "$env:USERPROFILE\bin"
+```
+
+Defaults:
+
+- Repository: `Taf0711/splice`
+- Version: latest GitHub release
+- Install path: `%LOCALAPPDATA%\splice\bin\splice.exe`
+
+## From Source
+
+This is the currently working install path.
 
 ```bash
 git clone https://github.com/Taf0711/splice.git
 cd splice
-go build -o splice ./cmd/splice
-./splice
-```
-
-To run without creating a binary:
-
-```bash
 go run ./cmd/splice
 ```
 
-### Linux helpers
+Build a local binary:
 
-Build the native sandbox helper beside the main binary:
+```bash
+go build -o splice ./cmd/splice
+```
+
+Source builds require Go 1.25+.
+
+## Memory sidecar (optional)
+
+Splice includes an optional memory sidecar (`splice-memd`) that persists
+observations across sessions for context injection. It auto-spawns when
+the TUI or CLI starts a pipeline run, if the binary is discoverable.
+
+### Install the sidecar
+
+```bash
+make install-memd
+```
+
+This runs `go install` in the `memd/` module, placing `splice-memd` on
+your PATH. The main `splice` binary will find and auto-spawn it on the
+first pipeline run.
+
+### Manual binary path
+
+If the sidecar is not on PATH (e.g. a dev build), set the
+`SPLICE_MEMD_BIN` environment variable to the full path of the binary:
+
+```bash
+export SPLICE_MEMD_BIN=/path/to/splice/memd/splice-memd
+```
+
+The binary is also discovered automatically when it sits next to the
+`splice` executable (the install directory), so `go install ./cmd/splice`
+followed by `make install-memd` places both binaries in the same
+directory.
+
+### Socket and data directory
+
+The sidecar listens on a Unix socket and stores observations in a SQLite
+database. The default locations are platform-specific:
+
+- macOS: `~/Library/Application Support/splice/` (mem.sock, mem.db)
+- Linux: `~/.local/share/splice/` (or `$XDG_DATA_HOME/splice/`)
+
+Override the socket path with `SPLICE_MEMD_SOCKET` and the database path
+with `SPLICE_MEMD_DB`.
+
+### Sandbox Helpers For Source Builds
+
+Release archives include the platform sandbox helpers. If you build directly
+from source, build the helpers you need:
+
+Linux:
 
 ```bash
 go build -o splice ./cmd/splice
@@ -112,14 +234,78 @@ go build -o splice-linux-sandbox ./cmd/splice-linux-sandbox
 go build -o splice-seccomp ./cmd/splice-seccomp
 ```
 
-`splice-seccomp` is an optional compatibility wrapper. Native Linux sandboxing
-also requires [Bubblewrap](https://github.com/containers/bubblewrap) to be
-installed. macOS uses the system sandbox and does not need an extra helper.
+Put `splice` and `splice-linux-sandbox` in the same directory on `PATH`, for example
+`~/.local/bin`. `splice-seccomp` is kept as a compatibility wrapper; the sandbox
+helper applies the Unix-socket filter itself when that sandbox option is enabled.
+Linux native sandboxing also requires Bubblewrap to be installed.
 
-### Windows helpers
+macOS uses the system sandbox and does not need an extra helper binary.
 
-The main `splice.exe` can run source builds through its built-in dispatch path.
-For a release-style layout, build the standalone helpers beside it:
+### Termux (Android)
+
+> **Note:** Android is currently **unsupported**. Splice no longer publishes an
+> Android target in the npm package's `os` list, and `scripts/postinstall.mjs`
+> fails on Android because there is no prebuilt binary. The source-build steps
+> below are informational only; the supported install paths are documented in
+> [From Source](#from-source) on Linux, macOS, and Windows. On mobile, run Splice
+> from a source build on a supported platform.
+
+Splice can run natively on Android via [Termux](https://termux.dev/). Build with
+`GOOS=android` to avoid the `faccessat2` syscall that is blocked by Samsung's
+seccomp filter on Android:
+
+```bash
+# Install Go in Termux
+pkg install golang
+
+# Build Splice for Android
+git clone https://github.com/Taf0711/splice.git
+cd splice
+CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -ldflags="-s -w" -o splice ./cmd/splice
+
+# Move into PATH
+mv splice ~/.local/bin/
+```
+
+> **Why `GOOS=android`?** Go 1.26+ detects `runtime.GOOS == "android"` and skips
+> the `faccessat2` syscall inside `os/exec.findExecutable`, falling back to
+> permission-bit checks. Without this flag, Android's seccomp sends SIGSYS and
+> kills the process whenever Splice looks up a binary on `PATH` (git, sh, etc.).
+
+**DNS.** Android does not expose `/etc/resolv.conf`. Go's pure-Go DNS resolver
+needs one. Use `proot` to bind-mount Termux's resolver config:
+
+```bash
+pkg install proot
+proot -b "$PREFIX/etc/resolv.conf:/etc/resolv.conf" splice
+```
+
+Create a wrapper at `~/.local/bin/splice` to avoid typing proot every time:
+
+```bash
+#!/data/data/com.termux/files/usr/bin/bash
+exec proot -b "$PREFIX/etc/resolv.conf:/etc/resolv.conf" ~/.local/bin/splice.bin "$@"
+```
+
+**Scroll.** On native Termux (not under PRoot), mouse scrolling works out of the
+box. The TUI uses Bubble Tea's `AllMotion` mouse mode by default. If you run Splice
+inside PRoot (e.g. through proot-distro), the scroll fix activates `CellMotion`
+to avoid PRoot's ptrace interference with the 1003 escape sequence.
+
+**Providers.** Splice works with any OpenAI-compatible provider on Termux. For
+example, to use OpenCode Zen's free tier:
+
+```bash
+splice providers add opencode \
+  --name opencode \
+  --model deepseek-v4-flash-free \
+  --base-url https://opencode.ai/zen/v1 \
+  --set-active
+```
+
+Windows source builds can use the main `splice.exe` as the command runner and setup
+helper through Splice's built-in self-dispatch path. If you want a release-style
+layout anyway, build the standalone helper executables next to `splice.exe`:
 
 ```powershell
 go build -o splice.exe ./cmd/splice
@@ -127,108 +313,36 @@ go build -o splice-windows-command-runner.exe ./cmd/splice-windows-command-runne
 go build -o splice-windows-sandbox-setup.exe ./cmd/splice-windows-sandbox-setup
 ```
 
-### Optional memory sidecar
+## Release Archive Format
 
-The pipeline can use `splice-memd` to persist useful observations between
-sessions. It is optional. Without it, Splice still runs normally.
+> **Planned / work in progress.** Release archives do not exist yet; this
+> describes the intended format once Splice releases are published.
 
-```bash
-make install-memd
-```
+Release archives are named:
 
-That command installs the sidecar from the separate `memd/` Go module. Splice
-finds it on `PATH` or beside the main binary. To select an explicit binary:
+- `splice-v<version>-linux-<arch>.tar.gz`
+- `splice-v<version>-macos-<arch>.tar.gz`
+- `splice-v<version>-windows-<arch>.zip`
 
-```bash
-export SPLICE_MEMD_BIN=/path/to/splice-memd
-```
+Supported targets:
 
-The sidecar stores a SQLite database and listens on a Unix socket. Defaults are:
+- `linux-x64`
+- `linux-arm64`
+- `macos-x64`
+- `macos-arm64`
+- `windows-x64`
+- `windows-arm64`
 
-- macOS: `~/Library/Application Support/splice/`
-- Linux: `~/.local/share/splice/` or `$XDG_DATA_HOME/splice/`
-
-Override either location when needed:
-
-```bash
-export SPLICE_MEMD_SOCKET=/path/to/mem.sock
-export SPLICE_MEMD_DB=/path/to/mem.db
-```
-
-## After installation
-
-Configure a provider:
-
-```bash
-splice setup
-splice providers list
-splice models list
-splice doctor
-```
-
-Or use a local model through Ollama or LM Studio. Model-backed pipeline stages
-need tool-calling support. Splice reports invalid typed responses instead of
-silently changing providers.
-
-To inspect permissions before allowing a run:
-
-```bash
-splice sandbox policy
-splice sandbox grants list
-```
-
-For a first headless run:
-
-```bash
-splice exec "summarize this repository"
-```
-
-## Platform notes
-
-### Termux on Android
-
-Android is not a published binary target. A source build can work in Termux,
-but it is an unsupported platform and may require `proot` for DNS resolution.
-For supported installations, use Linux, macOS, or Windows as listed above.
-
-### Custom install directories
-
-For a source build, copy the binary and its helpers to any directory on `PATH`.
-`~/.local/bin` is a common choice on Linux and macOS. On Windows, use a
-PowerShell profile or a system PATH entry for the directory containing
-`splice.exe`.
+Each archive must have a matching `.sha256` file. The install scripts download
+both files, verify the checksum, and then copy the binary into the install
+directory.
 
 ## Updating
 
-Check for an update from the installed binary:
+Check for a newer release:
 
 ```bash
 splice update --check
 ```
 
-Then install the newer npm package or download the matching release archive.
-Source builds update by pulling the repository and rebuilding:
-
-```bash
-git pull
-go build -o splice ./cmd/splice
-```
-
-## Troubleshooting
-
-### `No native binary found next to the npm wrapper`
-
-The package lifecycle script did not run. With Bun, trust the package as shown
-above. With npm, reinstall the package and check that the install process can
-reach GitHub Releases.
-
-### A local model returns invalid stage output
-
-The selected model must support tool calling. Run `splice doctor`, choose a model
-with tool-call support, and retry. Splice allows corrective retries, then stops
-with the invalid field in the error.
-
-### Linux sandbox is unavailable
-
-Build `splice-linux-sandbox`, install Bubblewrap, and keep the helper beside
-`splice` on `PATH`. Inspect the active policy with `splice sandbox policy`.
+Then reinstall with npm or rerun the install script for the version you want.
