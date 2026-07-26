@@ -597,6 +597,69 @@ func TestFreshSessionComposeRoutesToDesignConversation(t *testing.T) {
 	}
 }
 
+func TestDesignRunPassesFullPriorContent(t *testing.T) {
+	store := testSessionStore(t)
+	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventText, Content: "ack"},
+		{Type: zeroruntime.StreamEventDone},
+	}}
+	m := newDesignModeTestModel(t.TempDir(), provider, store)
+	m, err := m.ensureActiveSession("test")
+	if err != nil {
+		t.Fatalf("ensureActiveSession: %v", err)
+	}
+	m.designNoticeShown = true // do not let launchPrompt record a second design epoch
+	m, _ = m.appendSessionEvent(sessions.EventDesignModeEntered, nil)
+	m, _ = m.appendSessionEvent(sessions.EventMessage, map[string]any{
+		"role":    "user",
+		"content": "What should we build?",
+	})
+	longAssistant := strings.Repeat("a", 1200)
+	m, _ = m.appendSessionEvent(sessions.EventMessage, map[string]any{
+		"role":    "assistant",
+		"content": longAssistant,
+	})
+	if len(longAssistant) <= 500 {
+		t.Fatal("test setup: assistant content must exceed the old truncation cap")
+	}
+
+	m.input.SetValue("refine the plan")
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected prompt submit to start an agent run")
+	}
+	if !next.designMode {
+		t.Fatal("expected design mode to stay active")
+	}
+
+	updated, _ = next.Update(execCmd(cmd))
+	next = updated.(model)
+	if !transcriptContains(next.transcript, "ack") {
+		t.Fatalf("expected design response in transcript, got %#v", next.transcript)
+	}
+	if len(provider.requests) == 0 {
+		t.Fatal("expected provider request")
+	}
+
+	var foundPrior bool
+	var lastUser string
+	for _, msg := range provider.requests[0].Messages {
+		if msg.Role == zeroruntime.MessageRoleAssistant && msg.Content == longAssistant {
+			foundPrior = true
+		}
+		if msg.Role == zeroruntime.MessageRoleUser {
+			lastUser = msg.Content
+		}
+	}
+	if !foundPrior {
+		t.Fatalf("expected full prior assistant content in messages, got %+v", provider.requests[0].Messages)
+	}
+	if !strings.Contains(lastUser, "refine the plan") {
+		t.Fatalf("expected current raw prompt as final user message, got %q", lastUser)
+	}
+}
+
 func TestExecPromptBypassesDesignMode(t *testing.T) {
 	store := testSessionStore(t)
 	provider := &fakeProvider{events: []zeroruntime.StreamEvent{

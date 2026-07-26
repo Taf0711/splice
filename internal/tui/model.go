@@ -721,6 +721,7 @@ type tuiAgentRunOptions struct {
 	permissionMode agent.PermissionMode
 	systemPrompt   string
 	runKind        tuiRunKind
+	priorMessages  []zeroruntime.Message
 }
 
 func newModel(ctx context.Context, options Options) model {
@@ -4486,6 +4487,7 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 		prompt = preamble + prompt
 	}
 	var err error
+	rawPrompt := prompt
 	m, err = m.ensureActiveSession(prompt)
 	if err != nil {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{
@@ -4530,11 +4532,17 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 	m = m.beginRun(cancel)
 	if m.designMode {
 		designRegistry := designConversationRegistry(m.registry)
-		return m, tea.Batch(m.runAgentWithOptions(m.activeRunID, runCtx, prompt, turnImages, tuiAgentRunOptions{
+		// The design-conversation agent gets the raw current prompt plus real
+		// prior turns (full content, not the truncated sessionPrompt block).
+		// designPriorMessages excludes the trailing current-user event that
+		// launchPrompt just appended, so agent.Run seeds it as the final turn.
+		prior := designPriorMessages(m.sessionEvents)
+		return m, tea.Batch(m.runAgentWithOptions(m.activeRunID, runCtx, rawPrompt, turnImages, tuiAgentRunOptions{
 			registry:       designRegistry,
 			permissionMode: agent.PermissionModeAsk,
 			systemPrompt:   stages.DesignConversationPrompt(),
 			runKind:        tuiRunDesignConversation,
+			priorMessages:  prior,
 		}), m.spinner.Tick)
 	}
 	return m, tea.Batch(m.runAgent(m.activeRunID, runCtx, prompt, turnImages), m.spinner.Tick)
@@ -4756,6 +4764,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		options.ResponseStyle = m.responseStyle
 		options.Cwd = m.cwd
 		options.Images = images
+		options.PriorMessages = runOptions.priorMessages
 		if runOptions.runKind == tuiRunPipeline && strings.TrimSpace(m.userConfigPath) != "" {
 			options.StageModelResolver = nil
 			options.EscalationModelResolver = nil

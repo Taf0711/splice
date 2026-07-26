@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -371,6 +372,42 @@ func (m model) reconstructDesignState() model {
 		m.designMode = false
 	}
 	return m
+}
+
+// designPriorMessages builds real user/assistant messages from the session's
+// design epoch for the live design-conversation agent. It replaces the
+// truncated text block that sessionPrompt produces. It excludes the current
+// turn's user message (the last event, just appended by launchPrompt) so
+// agent.Run can seed it as the final user turn. Returns nil for the first
+// turn of an epoch (byte-identical to pre-existing seeding).
+func designPriorMessages(events []sessions.Event) []zeroruntime.Message {
+	if len(events) == 0 {
+		return nil
+	}
+	// Drop the trailing current-user message (launchPrompt appends it just
+	// before calling runAgentWithOptions). If the last event is not a user
+	// message, keep the events as-is; this path is defensive.
+	prior := events
+	if last := events[len(events)-1]; last.Type == sessions.EventMessage {
+		var msg struct {
+			Role string `json:"role"`
+		}
+		if err := json.Unmarshal(last.Payload, &msg); err == nil && msg.Role == "user" {
+			prior = events[:len(events)-1]
+		}
+	}
+	conv := splicerun.MapDesignHistory(prior)
+	if len(conv) == 0 {
+		return nil
+	}
+	out := make([]zeroruntime.Message, 0, len(conv))
+	for _, m := range conv {
+		out = append(out, zeroruntime.Message{
+			Role:    zeroruntime.MessageRole(m.Role),
+			Content: m.Content,
+		})
+	}
+	return out
 }
 
 func designConversationRegistry(registry *tools.Registry) *tools.Registry {

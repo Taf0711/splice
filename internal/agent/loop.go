@@ -132,7 +132,27 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	options.runPermissions = runPermissions
 	defer runPermissions.cleanup()
 
-	messages := zeroruntime.SeedMessagesWithImages(buildSystemPrompt(options), prompt, options.Images)
+	systemPrompt := buildSystemPrompt(options)
+	var messages []zeroruntime.Message
+	if len(options.PriorMessages) > 0 {
+		// Build [system] + priorMessages + [user(prompt, images)]. Deep copy is
+		// not required: PriorMessages are built from session events per turn and
+		// are not retained by the caller after Run. copyMessages (below) handles
+		// request/result isolation; message contents are never mutated.
+		messages = make([]zeroruntime.Message, 0, 2+len(options.PriorMessages))
+		messages = append(messages, zeroruntime.Message{
+			Role:    zeroruntime.MessageRoleSystem,
+			Content: systemPrompt,
+		})
+		messages = append(messages, options.PriorMessages...)
+		messages = append(messages, zeroruntime.Message{
+			Role:    zeroruntime.MessageRoleUser,
+			Content: prompt,
+			Images:  zeroruntime.CloneImageBlocks(options.Images),
+		})
+	} else {
+		messages = zeroruntime.SeedMessagesWithImages(systemPrompt, prompt, options.Images)
+	}
 
 	guards := newGuardState()
 	compactor := newCompactionState(options)

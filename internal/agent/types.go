@@ -252,6 +252,11 @@ type Options struct {
 	// nil for text-only runs (the seeded message then carries no images, exactly
 	// as before).
 	Images []zeroruntime.ImageBlock
+	// PriorMessages are real user/assistant turns from earlier in the session,
+	// seeded before the current prompt so the agent has true multi-turn memory.
+	// nil (the default) reproduces the pre-existing single-prompt seeding
+	// byte-for-byte. The loop's proactive compaction (ContextWindow) bounds them.
+	PriorMessages []zeroruntime.Message
 	// ContextWindow is the model's maximum input token budget. When > 0 the agent
 	// loop compacts long conversations once the estimated size crosses a fraction
 	// of this window. 0 DISABLES compaction entirely (every existing caller/test

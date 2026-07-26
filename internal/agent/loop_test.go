@@ -3379,3 +3379,64 @@ func TestRunDoesNotFlagCleanToolOutput(t *testing.T) {
 		t.Errorf("clean output should not get a reminder, got %q", captured.Output)
 	}
 }
+
+func TestRunSeedsPriorMessages(t *testing.T) {
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{{
+		{Type: zeroruntime.StreamEventText, Content: "done"},
+		{Type: zeroruntime.StreamEventDone},
+	}}}
+	prior := []zeroruntime.Message{
+		{Role: zeroruntime.MessageRoleUser, Content: "first user"},
+		{Role: zeroruntime.MessageRoleAssistant, Content: "first assistant"},
+	}
+
+	result, err := Run(context.Background(), "second user", provider, Options{
+		Registry:      tools.NewRegistry(),
+		PriorMessages: prior,
+		MaxTurns:      1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "done" {
+		t.Fatalf("expected final answer, got %q", result.FinalAnswer)
+	}
+	if len(provider.requests) != 1 {
+		t.Fatalf("expected one provider request, got %d", len(provider.requests))
+	}
+	msgs := provider.requests[0].Messages
+	if len(msgs) != 4 {
+		t.Fatalf("expected 4 messages [system, prior1, prior2, user], got %d: %+v", len(msgs), msgs)
+	}
+	assertMessage(t, msgs[0], zeroruntime.MessageRoleSystem, "")
+	assertMessage(t, msgs[1], zeroruntime.MessageRoleUser, "first user")
+	assertMessage(t, msgs[2], zeroruntime.MessageRoleAssistant, "first assistant")
+	assertMessage(t, msgs[3], zeroruntime.MessageRoleUser, "second user")
+}
+
+func TestRunWithoutPriorMessagesUnchanged(t *testing.T) {
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{{
+		{Type: zeroruntime.StreamEventText, Content: "done"},
+		{Type: zeroruntime.StreamEventDone},
+	}}}
+
+	result, err := Run(context.Background(), "only user", provider, Options{
+		Registry: tools.NewRegistry(),
+		MaxTurns: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "done" {
+		t.Fatalf("expected final answer, got %q", result.FinalAnswer)
+	}
+	if len(provider.requests) != 1 {
+		t.Fatalf("expected one provider request, got %d", len(provider.requests))
+	}
+	msgs := provider.requests[0].Messages
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages [system, user], got %d: %+v", len(msgs), msgs)
+	}
+	assertMessage(t, msgs[0], zeroruntime.MessageRoleSystem, "")
+	assertMessage(t, msgs[1], zeroruntime.MessageRoleUser, "only user")
+}
