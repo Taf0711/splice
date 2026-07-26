@@ -72,6 +72,14 @@ type Critique struct {
 	SuggestedMitigation string   `json:"suggested_mitigation,omitempty"`
 }
 
+// CritiqueCategories returns the category values a critique may carry. It is
+// the single source of truth shared by Critique.Validate and the plan_critic
+// tool schema, so the machine contract given to the model cannot drift from
+// the runtime validator.
+func CritiqueCategories() []string {
+	return []string{"scalability", "security", "maintainability", "complexity", "operability", "correctness"}
+}
+
 // Validate checks the critique.
 func (c Critique) Validate() error {
 	if c.Issue == "" {
@@ -82,9 +90,14 @@ func (c Critique) Validate() error {
 	default:
 		return fmt.Errorf("invalid severity %q", c.Severity)
 	}
-	switch c.Category {
-	case "scalability", "security", "maintainability", "complexity", "operability", "correctness":
-	default:
+	categoryValid := false
+	for _, category := range CritiqueCategories() {
+		if c.Category == category {
+			categoryValid = true
+			break
+		}
+	}
+	if !categoryValid {
 		return fmt.Errorf("invalid category %q", c.Category)
 	}
 	return nil

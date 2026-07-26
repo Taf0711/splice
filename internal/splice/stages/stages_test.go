@@ -1060,6 +1060,65 @@ func TestSecurityAuditorPermissionDeniedFails(t *testing.T) {
 	}
 }
 
+// TestPlanCriticCategoryEnumMatchesValidator guards the fix for the
+// crystallize failure where the plan critic tool schema did not declare the
+// category enum but Critique.Validate enforced it: the model had no source
+// for the valid values and the run failed after retries. The schema enum and
+// the validator must stay the same set.
+func TestPlanCriticCategoryEnumMatchesValidator(t *testing.T) {
+	tool := planCriticToolDefinition()
+	properties, ok := tool.Parameters["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("schema properties missing")
+	}
+	critiques, ok := properties["critiques"].(map[string]any)
+	if !ok {
+		t.Fatalf("schema critiques missing")
+	}
+	items, ok := critiques["items"].(map[string]any)
+	if !ok {
+		t.Fatalf("schema critique items missing")
+	}
+	itemProperties, ok := items["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("schema critique item properties missing")
+	}
+	category, ok := itemProperties["category"].(map[string]any)
+	if !ok {
+		t.Fatalf("schema category field missing")
+	}
+	enum, ok := category["enum"].([]string)
+	if !ok || len(enum) == 0 {
+		t.Fatalf("schema category must declare a non-empty enum (got %#v); without it the model has no source for the valid categories", category["enum"])
+	}
+
+	// Every schema enum value must pass the validator, and the schema enum
+	// must contain every value the validator accepts, so the machine contract
+	// and Critique.Validate cannot drift apart.
+	for _, value := range schemas.CritiqueCategories() {
+		found := false
+		for _, schemaValue := range enum {
+			if schemaValue == value {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("validator category %q is not in the plan critic schema enum %v", value, enum)
+		}
+	}
+	for _, schemaValue := range enum {
+		critique := schemas.Critique{Category: schemaValue, Severity: schemas.SeverityLow, Issue: "x"}
+		if err := critique.Validate(); err != nil {
+			t.Errorf("schema enum category %q fails Critique.Validate: %v", schemaValue, err)
+		}
+	}
+	bogus := schemas.Critique{Category: "performance", Severity: schemas.SeverityLow, Issue: "x"}
+	if err := bogus.Validate(); err == nil {
+		t.Errorf("expected validator to reject category \"performance\" (the value seen in the production failure)")
+	}
+}
+
 func TestPlanCriticReturnsCritique(t *testing.T) {
 	plan := schemas.DesignPlan{
 		Source:       "conversation",

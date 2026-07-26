@@ -84,7 +84,7 @@ func planCriticToolDefinition() zeroruntime.ToolDefinition {
 					"items": map[string]any{
 						"type": "object",
 						"properties": map[string]any{
-							"category":             map[string]any{"type": "string"},
+							"category":             map[string]any{"type": "string", "enum": schemas.CritiqueCategories()},
 							"severity":             map[string]any{"type": "string", "enum": []string{"info", "low", "medium", "high", "critical"}},
 							"issue":                map[string]any{"type": "string"},
 							"suggested_mitigation": map[string]any{"type": "string"},
