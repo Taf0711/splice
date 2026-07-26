@@ -39,6 +39,43 @@ func TestRunReportRedactsProviderSecretsAndWarnsWithoutConnectivity(t *testing.T
 	}
 }
 
+func TestRunReportConnectivityRequestedWithoutProbeResult(t *testing.T) {
+	// Reached only when a caller sets Connectivity true without supplying a
+	// ProviderHealth result. Both shipped callers (splice doctor --connectivity
+	// and the TUI's doctorOptions) always probe when connectivity is
+	// requested and the profile resolves, so this is a caller-bug branch, not
+	// a real "backend unbuilt" condition. Pin the corrected message so it
+	// cannot silently drift back to claiming the backend is unwired.
+	report := Run(Options{
+		Now:          fixedDoctorClock("2026-06-04T15:00:00Z"),
+		Runtime:      "go",
+		UserConfig:   "missing",
+		Connectivity: true,
+		Provider: config.ProviderProfile{
+			Name:         "openai",
+			ProviderKind: config.ProviderKindOpenAI,
+			BaseURL:      config.OpenAIBaseURL,
+			APIKey:       "sk-proj-secret1234567890",
+			Model:        "gpt-4.1",
+		},
+		ProviderHealth: nil,
+	})
+
+	check := report.Check("provider.connectivity")
+	if check == nil {
+		t.Fatal("provider.connectivity check missing")
+	}
+	if check.Status != StatusWarn {
+		t.Fatalf("status = %q, want %q", check.Status, StatusWarn)
+	}
+	if strings.Contains(check.Message, "not wired") {
+		t.Fatalf("message still claims the backend is unwired (stale): %q", check.Message)
+	}
+	if !strings.Contains(check.Message, "no provider health probe result was supplied") {
+		t.Fatalf("message = %q, want it to name the real condition", check.Message)
+	}
+}
+
 func TestRunReportFailsInvalidModelAndMissingProvider(t *testing.T) {
 	missing := Run(Options{Now: fixedDoctorClock("2026-06-04T15:30:00Z"), Runtime: "go"})
 	if missing.OK {

@@ -233,7 +233,15 @@ func connectivityCheck(profile config.ProviderProfile, enabled bool, modelStatus
 	if emptyProviderProfile(profile) || modelStatus == StatusFail {
 		return check("provider.connectivity", "Provider connectivity", StatusWarn, "Connectivity check was skipped because provider runtime did not resolve.", nil)
 	}
-	return check("provider.connectivity", "Provider connectivity", StatusWarn, "Connectivity probing is not wired in the Go doctor backend yet.", map[string]any{"baseURL": profile.BaseURL})
+	// Reached only when a caller sets Connectivity true but does not supply a
+	// ProviderHealth probe result. Both shipped callers (internal/cli's
+	// `splice doctor --connectivity` and the TUI's doctorOptions) always probe
+	// and pass a result when connectivity is requested and the profile
+	// resolves, so this branch is a caller bug, not an unbuilt backend. The
+	// message used to claim "not wired in the Go doctor backend yet", which
+	// was false: providerhealth.Probe is wired and working; the caller just
+	// didn't run it.
+	return check("provider.connectivity", "Provider connectivity", StatusWarn, "Connectivity was requested, but no provider health probe result was supplied.", map[string]any{"baseURL": profile.BaseURL})
 }
 
 func doctorStatus(status providerhealth.Status) Status {
