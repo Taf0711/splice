@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/splice/dtools"
@@ -17,8 +18,7 @@ import (
 type stageRegistry map[string]stages.Stage
 
 // buildStageRegistry creates a registry of Splice pipeline stages from agent options.
-func buildStageRegistry(provider agent.Provider, options agent.Options, workDir string, runner ToolRunner) (stageRegistry, error) {
-	language := detectLanguage(workDir)
+func buildStageRegistry(options agent.Options, workDir string) (stageRegistry, error) {
 	r := stageRegistry{
 		"code_writer":    stages.CodeWriter{},
 		"test_generator": stages.TestGenerator{},
@@ -45,9 +45,6 @@ func buildStageRegistry(provider agent.Provider, options agent.Options, workDir 
 			options.Registry.Register(dtools.NewSarifTool(workDir))
 		}
 	}
-	_ = provider
-	_ = runner
-	_ = language
 	return r, nil
 }
 
@@ -116,7 +113,44 @@ func adaptToolRunner(runner ToolRunner) func(context.Context, string, map[string
 	}
 }
 
+// languageCache memoizes the last computed workDir -> language mapping.
+// stageOptions calls detectLanguage once per stage per iteration with the
+// same workDir every time; without this, each call re-walks the whole
+// workspace when no go.mod/tsconfig.json/package.json marker is present
+// (i.e. on every Python target).
+//
+// ponytail: single-entry cache, not keyed per workDir. A caller that
+// interleaves pipeline stages across multiple distinct workspaces in one
+// process (e.g. a future daemon serving concurrent runs) would thrash it
+// back to a walk per call; upgrade to a small bounded map if that happens.
+var (
+	languageCacheMu    sync.Mutex
+	languageCacheValid bool
+	languageCacheDir   string
+	languageCacheVal   string
+)
+
 func detectLanguage(workDir string) string {
+	languageCacheMu.Lock()
+	if languageCacheValid && workDir == languageCacheDir {
+		val := languageCacheVal
+		languageCacheMu.Unlock()
+		return val
+	}
+	languageCacheMu.Unlock()
+
+	lang := detectLanguageUncached(workDir)
+
+	languageCacheMu.Lock()
+	languageCacheValid = true
+	languageCacheDir = workDir
+	languageCacheVal = lang
+	languageCacheMu.Unlock()
+
+	return lang
+}
+
+func detectLanguageUncached(workDir string) string {
 	if workDir == "" {
 		return "python"
 	}

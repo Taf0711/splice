@@ -71,7 +71,7 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 
 	runner := newAgentToolRunner(options, absWorkDir)
 
-	registry, err := buildStageRegistry(provider, options, absWorkDir, runner)
+	registry, err := buildStageRegistry(options, absWorkDir)
 	if err != nil {
 		return schemas.PipelineResult{}, fmt.Errorf("build stage registry: %w", err)
 	}
