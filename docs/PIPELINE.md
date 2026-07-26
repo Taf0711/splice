@@ -130,6 +130,30 @@ Each model-backed stage receives `pipeline_meta.md` prepended to its own prompt
 - **Output (`StepBackAnalysis`):** hypothesized root cause and a recommended
   approach, fed back to the next code writer iteration.
 
+## Options that do not apply under `splice exec`
+
+`splice exec` runs the deterministic pipeline (`splicerun.Run` or
+`splicerun.RunDesignPlan`), not the interactive agent loop
+(`agent.Run`). Some run options and flags only affect the agent loop.
+The pipeline ignores them. This table names each one and the reason.
+
+| Option or flag | Effect under `splice exec` |
+|---|---|
+| Specialist delegation | None. The pipeline does not use the Task tool. |
+| Skills | None. The pipeline does not load skills at run time. |
+| MCP tool deferral | None. The pipeline has no deferred-tool registry concept. |
+| `--allow-escalation` | None. No `splice exec` path (default or `--spec`) wires mid-run model escalation into a run today. Only the interactive TUI does. |
+| `--self-correct` | None. No `splice exec` path wires the post-edit verify-and-correct loop into a run today. Only the interactive TUI does. |
+| File diagnostics between turns | None. The pipeline does not run an LSP diagnostics pass between stages. |
+| Compaction config (the `compaction` block in `config.json`) | None under the default `splice exec` run. The pipeline never reads the context window setting that compaction depends on. `splice exec --spec` and the interactive TUI both honor compaction, because both run the agent loop. |
+
+None of this is a bug. The pipeline is a fixed, typed sequence of stages
+(see "Stage contracts" above), by design with no delegation, no skill
+loading, and no mid-run recovery loop.
+
+This table exists so a flag or config setting with no effect is not
+mistaken for a wiring failure.
+
 ## Token and cost accounting
 
 Each model-backed stage reports a typed `StageUsage` (input, output, cached,
