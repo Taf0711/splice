@@ -138,3 +138,20 @@ output or stop a still-running task by id.
 If Splice is restarted while a background task is still marked `running`, the new
 manager marks that task `error` and clears its PID. This avoids sending
 `TaskStop` to a stale PID that may now belong to an unrelated process.
+
+## Process Lifecycle On Cancel Or Timeout
+
+On Linux and macOS, a specialist child process starts its own process group.
+Cancel or timeout sends the kill signal to the whole group, so any process the
+child spawned dies with it.
+
+Windows has no equivalent to a POSIX process group. Cancel or timeout there
+kills only the direct child process. A grandchild process the specialist
+spawned (for example a build tool or a shell it started) can survive the
+kill and keep running.
+
+A `WaitDelay` of two seconds stops Splice itself from hanging if a leaked
+grandchild still holds the child's output pipe open. It does not stop the
+grandchild from running. This is a known limitation of the Windows build,
+tracked as a future fix (process termination through a Windows Job Object).
+It has no effect on Linux or macOS builds.
