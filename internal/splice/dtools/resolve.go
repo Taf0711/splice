@@ -11,6 +11,14 @@ func resolveWorkspacePath(workspaceRoot, requested string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Resolve the root through symlinks too, not just the target below. Without
+	// this, a workspace root reached through a symlink (e.g. macOS /var ->
+	// /private/var) compares an unresolved root against a resolved target,
+	// so every path rejects as "escapes workspace".
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", err
+	}
 
 	target := requested
 	if !filepath.IsAbs(target) {
