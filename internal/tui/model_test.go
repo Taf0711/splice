@@ -197,6 +197,64 @@ func TestPromptSubmitStoresReasoningSeparatelyFromAnswer(t *testing.T) {
 	}
 }
 
+// TestPromptSubmitPersistsReasoningEvent: reasoning flushed during a turn is
+// written to the session log as EventReasoning so it survives /resume.
+func TestPromptSubmitPersistsReasoningEvent(t *testing.T) {
+	store := testSessionStore(t)
+	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventReasoning, Content: "private "},
+		{Type: zeroruntime.StreamEventReasoning, Content: "thought"},
+		{Type: zeroruntime.StreamEventText, Content: "public answer"},
+		{Type: zeroruntime.StreamEventDone},
+	}}
+	m := newModel(context.Background(), Options{
+		Cwd:          "repo",
+		ProviderName: "openai",
+		ModelName:    "gpt-4.1",
+		Provider:     provider,
+		Registry:     tools.NewRegistry(),
+		SessionStore: store,
+	})
+	m.designMode = false
+	m.input.SetValue("hello")
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected prompt submit to start an agent run")
+	}
+
+	updated, _ = next.Update(execCmd(cmd))
+	next = updated.(model)
+
+	list, err := store.List()
+	if err != nil {
+		t.Fatalf("List returned error: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("expected one persisted session, got %d", len(list))
+	}
+	events, err := store.ReadEvents(list[0].SessionID)
+	if err != nil {
+		t.Fatalf("ReadEvents returned error: %v", err)
+	}
+	// Sequence: user message, reasoning, assistant message.
+	if got := eventTypes(events); !equalEventTypes(got, []sessions.EventType{
+		sessions.EventMessage,
+		sessions.EventReasoning,
+		sessions.EventMessage,
+	}) {
+		t.Fatalf("unexpected event sequence: %#v", got)
+	}
+	assertPayloadField(t, events[0], "role", "user")
+	assertPayloadField(t, events[1], "content", "private thought")
+	assertPayloadField(t, events[2], "role", "assistant")
+	assertPayloadField(t, events[2], "content", "public answer")
+	if !transcriptContains(next.transcript, "public answer") {
+		t.Fatalf("expected assistant text in transcript, got %#v", next.transcript)
+	}
+}
+
 func TestParseCommand(t *testing.T) {
 	cases := []struct {
 		input string

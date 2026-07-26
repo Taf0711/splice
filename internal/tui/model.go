@@ -4886,6 +4886,13 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				reasoningSeq++
 				rows = append(rows, row)
 				m.sendAgentRow(runID, row)
+				// Persist the reasoning text so it survives /resume. One event per
+				// flushed segment; the text mirrors the row (trimmed by
+				// reasoningTranscriptRow).
+				sessionEvents = append(sessionEvents, pendingSessionEvent{
+					Type:    sessions.EventReasoning,
+					Payload: map[string]any{"content": row.text},
+				})
 			}
 			reasoningText = ""
 			reasoningStarted = time.Time{}

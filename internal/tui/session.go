@@ -565,6 +565,14 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 			default:
 				rows = append(rows, transcriptRow{kind: rowSystem, text: content})
 			}
+		case sessions.EventReasoning:
+			// Rehydrate reasoning as a collapsed row so thinking survives /resume.
+			// The row shape matches the live path (reasoningTranscriptRow).
+			if content := payloadString(payload, "content"); content != "" {
+				if row, ok := reasoningTranscriptRow("", 0, content); ok {
+					rows = append(rows, row)
+				}
+			}
 		case sessions.EventToolCall:
 			name := payloadString(payload, "name")
 			if name == "" {
