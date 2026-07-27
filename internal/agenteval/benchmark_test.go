@@ -263,8 +263,8 @@ func TestHarnessAccumulatesUsageEventsAndCost(t *testing.T) {
 			}
 			return AgentRunResult{
 				ExitCode: 0,
-				Stdout: "{\"type\":\"usage\",\"promptTokens\":100,\"completionTokens\":50,\"totalTokens\":150,\"cachedInputTokens\":80}\n" +
-					"{\"type\":\"usage\",\"promptTokens\":100,\"completionTokens\":50,\"totalTokens\":150,\"cacheWriteTokens\":10,\"reasoningTokens\":20}\n",
+				Stdout: "{\"type\":\"usage\",\"model\":\"gpt-4.1\",\"promptTokens\":100,\"completionTokens\":50,\"totalTokens\":150,\"cachedInputTokens\":80}\n" +
+					"{\"type\":\"usage\",\"model\":\"gpt-4.1\",\"promptTokens\":100,\"completionTokens\":50,\"totalTokens\":150,\"cacheWriteTokens\":10,\"reasoningTokens\":20}\n",
 				LatencyMs: 5,
 			}
 		}),
@@ -341,6 +341,112 @@ func TestHarnessLeavesUsageAndCostZeroWhenStdoutHasNoUsageEvents(t *testing.T) {
 	}
 	if report.Summary.TotalInputTokens != 0 || report.Summary.TotalOutputTokens != 0 || report.Summary.TotalCostUSD != 0 {
 		t.Fatalf("Summary usage/cost should remain zero: %#v", report.Summary)
+	}
+}
+
+func TestAccountAgentRunUsagePricesEachSampleModel(t *testing.T) {
+	registry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := AgentRunResult{UsageSamples: []UsageSample{
+		{Model: "gpt-4.1", InputTokens: 1_000_000, UsageReported: boolPointer(true)},
+		{Model: "gpt-4.1-mini", InputTokens: 1_000_000, UsageReported: boolPointer(true)},
+	}}
+	populateAgentRunUsage(&result)
+	accountAgentRunUsage(&result, &registry)
+	if result.CostCoverage != CostCoverageComplete {
+		t.Fatalf("coverage = %q, want complete", result.CostCoverage)
+	}
+	if result.CostUSD != 2.4 {
+		t.Fatalf("cost = %v, want 2.4", result.CostUSD)
+	}
+	for i, sample := range result.UsageSamples {
+		if sample.CostStatus != CostStatusPriced || sample.CostProvenance != "reconstructed_estimate" || sample.CostUSD == nil {
+			t.Fatalf("sample[%d] = %#v, want reconstructed priced sample", i, sample)
+		}
+	}
+}
+
+func TestAccountAgentRunUsagePreservesPricedZeroAndUnpriced(t *testing.T) {
+	zero := 0.0
+	reported := true
+	result := AgentRunResult{UsageSamples: []UsageSample{
+		{Model: "gpt-4.1", UsageReported: &reported, CostStatus: CostStatusPriced, CostUSD: &zero, CostProvenance: "reported"},
+		{Model: "gpt-4.1", InputTokens: 1, UsageReported: &reported, CostStatus: CostStatusUnpriced, UnpricedReason: "provider omitted price"},
+	}}
+	populateAgentRunUsage(&result)
+	accountAgentRunUsage(&result, nil)
+	if result.CostCoverage != CostCoveragePartial || result.CostUSD != 0 {
+		t.Fatalf("coverage/cost = %q/%v, want partial/0", result.CostCoverage, result.CostUSD)
+	}
+	if result.UsageSamples[0].CostUSD == nil || *result.UsageSamples[0].CostUSD != 0 {
+		t.Fatalf("priced zero sample = %#v, want non-nil zero", result.UsageSamples[0])
+	}
+	if result.UsageSamples[1].CostUSD != nil || result.UsageSamples[1].CostStatus != CostStatusUnpriced {
+		t.Fatalf("unpriced sample = %#v, want nil unpriced cost", result.UsageSamples[1])
+	}
+}
+
+func TestAccountAgentRunUsageMissingModelIsUnpriced(t *testing.T) {
+	result := AgentRunResult{UsageSamples: []UsageSample{{InputTokens: 10, OutputTokens: 5}}}
+	populateAgentRunUsage(&result)
+	accountAgentRunUsage(&result, nil)
+	if result.CostUSD != 0 || result.CostCoverage != CostCoverageUnavailable {
+		t.Fatalf("cost/coverage = %v/%q, want 0/unavailable", result.CostUSD, result.CostCoverage)
+	}
+	if result.UsageSamples[0].CostStatus != CostStatusUnpriced || result.UsageSamples[0].CostUSD != nil {
+		t.Fatalf("sample = %#v, want unpriced with nil cost", result.UsageSamples[0])
+	}
+}
+
+func TestAccountAgentRunUsagePartialAndCoverageStates(t *testing.T) {
+	reported := true
+	one := 0.25
+	tests := []struct {
+		name     string
+		result   AgentRunResult
+		registry *modelregistry.Registry
+		coverage string
+		cost     float64
+	}{
+		{name: "partial", result: AgentRunResult{UsageSamples: []UsageSample{
+			{Model: "gpt-4.1", UsageReported: &reported, CostStatus: CostStatusPriced, CostUSD: &one},
+			{Model: "gpt-4.1", InputTokens: 1, UsageReported: &reported, CostStatus: CostStatusUnpriced, UnpricedReason: "missing"},
+		}}, coverage: CostCoveragePartial, cost: one},
+		{name: "not applicable", result: AgentRunResult{}, coverage: CostCoverageNotApplicable},
+		{name: "unavailable", result: AgentRunResult{UsageSamples: []UsageSample{{Model: "gpt-4.1", UsageReported: boolPointer(false)}}}, coverage: CostCoverageUnavailable},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			populateAgentRunUsage(&test.result)
+			accountAgentRunUsage(&test.result, test.registry)
+			if test.result.CostCoverage != test.coverage || test.result.CostUSD != test.cost {
+				t.Fatalf("cost/coverage = %v/%q, want %v/%q", test.result.CostUSD, test.result.CostCoverage, test.cost, test.coverage)
+			}
+		})
+	}
+}
+
+func TestAccountAgentRunUsageAuxiliarySamplesAffectTotalsNotStages(t *testing.T) {
+	registry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := AgentRunResult{
+		Stdout: `{"type":"final","text":"{\"stages\":[{\"name\":\"code_writer\",\"tokens_input\":999,\"cost_usd\":99}]}"}`,
+		UsageSamples: []UsageSample{
+			{Model: "gpt-4.1", Stage: "code_writer", InputTokens: 10, UsageReported: boolPointer(true)},
+			{Model: "gpt-4.1", Stage: "step_back", InputTokens: 20, UsageReported: boolPointer(true)},
+		},
+	}
+	populateAgentRunUsage(&result)
+	accountAgentRunUsage(&result, &registry)
+	if result.InputTokens != 30 {
+		t.Fatalf("input tokens = %d, want 30 including auxiliary sample", result.InputTokens)
+	}
+	if len(result.Stages) != 1 || result.Stages[0].TokensInput != 999 || result.CostUSD == 99 {
+		t.Fatalf("stages/cost = %#v/%v, final stage diagnostics must not drive accounting", result.Stages, result.CostUSD)
 	}
 }
 

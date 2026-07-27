@@ -43,6 +43,7 @@ type BenchmarkTaskReport struct {
 	CacheWriteTokens  int              `json:"cacheWriteTokens,omitempty"`
 	ReasoningTokens   int              `json:"reasoningTokens,omitempty"`
 	CostUSD           float64          `json:"costUsd,omitempty"`
+	CostCoverage      string           `json:"costCoverage,omitempty"`
 	LatencyMs         int64            `json:"latencyMs,omitempty"`
 	Stages            []StageBreakdown `json:"stages,omitempty"`
 	Agent             AgentRunResult   `json:"agent"`
@@ -155,10 +156,8 @@ func (harness Harness) runTask(ctx context.Context, suitePath string, suite Suit
 		Prompt:        task.Prompt,
 		WorkspacePath: workspace.Path,
 	})
-	if !agentRunHasUsageTotals(agentResult) {
-		populateAgentRunUsage(&agentResult)
-	}
-	estimateAgentRunCost(&agentResult, model, input.Registry)
+	populateAgentRunUsage(&agentResult)
+	accountAgentRunUsage(&agentResult, input.Registry)
 	taskReport.Agent = agentResult
 	copyAgentMetrics(&taskReport, agentResult)
 	if agentResult.Error != "" || agentResult.ExitCode != 0 {
@@ -222,62 +221,135 @@ func copyAgentMetrics(taskReport *BenchmarkTaskReport, agentResult AgentRunResul
 	taskReport.CacheWriteTokens = agentResult.CacheWriteTokens
 	taskReport.ReasoningTokens = agentResult.ReasoningTokens
 	taskReport.CostUSD = agentResult.CostUSD
+	taskReport.CostCoverage = agentResult.CostCoverage
 	taskReport.LatencyMs = agentResult.LatencyMs
 	taskReport.Stages = agentResult.Stages
 }
 
-func agentRunHasUsageTotals(result AgentRunResult) bool {
-	return result.InputTokens != 0 ||
-		result.OutputTokens != 0 ||
-		result.CachedInputTokens != 0 ||
-		result.CacheWriteTokens != 0 ||
-		result.ReasoningTokens != 0
-}
+const (
+	CostStatusPriced   = "priced"
+	CostStatusUnpriced = "unpriced"
+	CostStatusError    = "error"
 
-func estimateAgentRunCost(result *AgentRunResult, model string, registry *modelregistry.Registry) {
+	CostCoverageComplete      = "complete"
+	CostCoveragePartial       = "partial"
+	CostCoverageUnavailable   = "unavailable"
+	CostCoverageNotApplicable = "not_applicable"
+)
+
+func accountAgentRunUsage(result *AgentRunResult, registry *modelregistry.Registry) {
 	if result == nil {
 		return
 	}
 	result.CostUSD = 0
-	if registry == nil || strings.TrimSpace(model) == "" || !agentRunHasUsageTotals(*result) {
+	result.CostCoverage = CostCoverageNotApplicable
+	if len(result.UsageSamples) == 0 {
 		return
 	}
-	usage := zeroruntime.Usage{
-		InputTokens:       result.InputTokens,
-		OutputTokens:      result.OutputTokens,
-		CachedInputTokens: result.CachedInputTokens,
-		CacheWriteTokens:  result.CacheWriteTokens,
-		ReasoningTokens:   result.ReasoningTokens,
+
+	priced := 0
+	for i := range result.UsageSamples {
+		sample := &result.UsageSamples[i]
+		if !sampleHasUsage(*sample) {
+			markSampleUnpriced(sample, "usage was not reported")
+			continue
+		}
+		model := usageSampleModel(*sample)
+		if model == "" {
+			markSampleUnpriced(sample, "model identity is missing")
+			continue
+		}
+		if sample.CostStatus == CostStatusPriced && sample.CostUSD != nil {
+			result.CostUSD += *sample.CostUSD
+			priced++
+			continue
+		}
+		if sample.CostStatus == CostStatusPriced && sample.CostUSD == nil {
+			markSampleUnpriced(sample, "priced event is missing cost")
+			continue
+		}
+		if sample.CostStatus == CostStatusUnpriced || sample.CostStatus == CostStatusError {
+			continue
+		}
+		if registry == nil {
+			markSampleUnpriced(sample, "pricing registry is unavailable")
+			continue
+		}
+		entry, err := registry.Require(model)
+		if err != nil && strings.TrimSpace(sample.APIModel) != "" && strings.TrimSpace(sample.APIModel) != model {
+			model = strings.TrimSpace(sample.APIModel)
+			entry, err = registry.Require(model)
+		}
+		if err != nil {
+			markSampleUnpriced(sample, fmt.Sprintf("price unavailable for model %q: %v", model, err))
+			continue
+		}
+		cost, err := registry.EstimateCost(model, zeroruntime.Usage{
+			InputTokens:       sample.InputTokens,
+			OutputTokens:      sample.OutputTokens,
+			CachedInputTokens: sample.CachedInputTokens,
+			CacheWriteTokens:  sample.CacheWriteTokens,
+			ReasoningTokens:   sample.ReasoningTokens,
+		})
+		if err != nil {
+			markSampleUnpriced(sample, fmt.Sprintf("price calculation failed for model %q: %v", model, err))
+			continue
+		}
+		pricedCost := cost.TotalCost
+		sample.CostUSD = &pricedCost
+		sample.CostStatus = CostStatusPriced
+		sample.CostProvenance = "reconstructed_estimate"
+		sample.CostEstimated = boolPointer(true)
+		sample.PricingSource = entry.Cost.Source
+		sample.PricingAsOf = entry.Cost.SourceLastVerified
+		sample.UnpricedReason = ""
+		result.CostUSD += pricedCost
+		priced++
 	}
-	cost, err := registry.EstimateCost(model, usage)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "agent eval cost estimate failed for model %q: %v\n", model, err)
+	switch {
+	case priced == len(result.UsageSamples):
+		result.CostCoverage = CostCoverageComplete
+	case priced > 0:
+		result.CostCoverage = CostCoveragePartial
+	default:
+		result.CostCoverage = CostCoverageUnavailable
+	}
+}
+
+func sampleHasUsage(sample UsageSample) bool {
+	if sample.UsageReported != nil {
+		return *sample.UsageReported
+	}
+	if sample.CostUSD != nil {
+		return true
+	}
+	return sample.InputTokens != 0 || sample.OutputTokens != 0 || sample.CachedInputTokens != 0 || sample.CacheWriteTokens != 0 || sample.ReasoningTokens != 0
+}
+
+func usageSampleModel(sample UsageSample) string {
+	if strings.TrimSpace(sample.Model) != "" {
+		return strings.TrimSpace(sample.Model)
+	}
+	return strings.TrimSpace(sample.APIModel)
+}
+
+func markSampleUnpriced(sample *UsageSample, reason string) {
+	if sample == nil {
 		return
 	}
-	result.CostUSD = cost.TotalCost
-	// Estimate per-stage cost using each stage's own model (or the task model
-	// as fallback). Overwrites the zero cost the pipeline records (StageUsage
-	// carries tokens, not cost). When stages use different models, the sum of
-	// per-stage costs is more accurate than the single-model estimate above.
-	var stageCostSum float64
-	for i := range result.Stages {
-		stageModel := result.Stages[i].Model
-		if stageModel == "" {
-			stageModel = model
-		}
-		stageUsage := zeroruntime.Usage{
-			InputTokens:       result.Stages[i].TokensInput,
-			OutputTokens:      result.Stages[i].TokensOutput,
-			CachedInputTokens: result.Stages[i].TokensCached,
-		}
-		if stageCost, err := registry.EstimateCost(stageModel, stageUsage); err == nil {
-			result.Stages[i].CostUSD = stageCost.TotalCost
-			stageCostSum += stageCost.TotalCost
-		}
+	sample.CostUSD = nil
+	sample.CostStatus = CostStatusUnpriced
+	sample.CostProvenance = ""
+	sample.PricingSource = ""
+	sample.PricingAsOf = ""
+	sample.CostEstimated = nil
+	if sample.UnpricedReason == "" {
+		sample.UnpricedReason = reason
 	}
-	if len(result.Stages) > 0 && stageCostSum > 0 {
-		result.CostUSD = stageCostSum
-	}
+}
+
+func boolPointer(value bool) *bool {
+	return &value
 }
 
 func WriteBenchmarkCSV(w io.Writer, report BenchmarkReport) error {

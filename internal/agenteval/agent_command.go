@@ -42,29 +42,40 @@ type AgentRunResult struct {
 	// Truncated is set when captured stdout/stderr exceeded the runner's
 	// OutputLimit and some output was dropped.
 	Truncated bool `json:"truncated,omitempty"`
-	// Stages carries per-stage token/cost breakdown when the agent is the
-	// Splice pipeline (parsed from the stream-json final event's PipelineResult).
+	// Stages carries diagnostic per-stage token/cost data when the agent is the
+	// Splice pipeline. Accounting does not use this final-event ledger.
 	Stages []StageBreakdown `json:"stages,omitempty"`
 	// UsageSamples retains each usage event parsed while the agent ran. Existing
-	// accounting fields continue to be populated from Stdout for compatibility.
+	// accounting fields are derived from these samples.
 	UsageSamples []UsageSample `json:"usageSamples,omitempty"`
+	CostCoverage string        `json:"costCoverage,omitempty"`
 }
 
 // UsageSample is one usage event emitted by an agent's stream-json output.
 // PromptTokens and CompletionTokens preserve the event fields. InputTokens and
 // OutputTokens contain the effective values used by the runtime accounting.
 type UsageSample struct {
-	InputTokens       int     `json:"inputTokens,omitempty"`
-	OutputTokens      int     `json:"outputTokens,omitempty"`
-	PromptTokens      int     `json:"promptTokens,omitempty"`
-	CompletionTokens  int     `json:"completionTokens,omitempty"`
-	CachedInputTokens int     `json:"cachedInputTokens,omitempty"`
-	CacheWriteTokens  int     `json:"cacheWriteTokens,omitempty"`
-	ReasoningTokens   int     `json:"reasoningTokens,omitempty"`
-	CostUSD           float64 `json:"costUsd,omitempty"`
-	Stage             string  `json:"stage,omitempty"`
-	Iteration         *int    `json:"iteration,omitempty"`
-	UsageSequence     *int    `json:"usageSequence,omitempty"`
+	InputTokens       int      `json:"inputTokens,omitempty"`
+	OutputTokens      int      `json:"outputTokens,omitempty"`
+	PromptTokens      int      `json:"promptTokens,omitempty"`
+	CompletionTokens  int      `json:"completionTokens,omitempty"`
+	CachedInputTokens int      `json:"cachedInputTokens,omitempty"`
+	CacheWriteTokens  int      `json:"cacheWriteTokens,omitempty"`
+	ReasoningTokens   int      `json:"reasoningTokens,omitempty"`
+	Provider          string   `json:"provider,omitempty"`
+	Model             string   `json:"model,omitempty"`
+	APIModel          string   `json:"apiModel,omitempty"`
+	CostUSD           *float64 `json:"costUsd,omitempty"`
+	CostStatus        string   `json:"costStatus,omitempty"`
+	CostEstimated     *bool    `json:"costEstimated,omitempty"`
+	CostProvenance    string   `json:"costProvenance,omitempty"`
+	PricingSource     string   `json:"pricingSource,omitempty"`
+	PricingAsOf       string   `json:"pricingAsOf,omitempty"`
+	UnpricedReason    string   `json:"unpricedReason,omitempty"`
+	UsageReported     *bool    `json:"usageReported,omitempty"`
+	Stage             string   `json:"stage,omitempty"`
+	Iteration         *int     `json:"iteration,omitempty"`
+	UsageSequence     *int     `json:"usageSequence,omitempty"`
 }
 
 type StageBreakdown struct {
@@ -201,13 +212,41 @@ func populateAgentRunUsage(result *AgentRunResult) {
 	if result == nil {
 		return
 	}
-	inputTokens, outputTokens, cachedInput, cacheWrite, reasoning := parseUsageFromStdout(result.Stdout)
-	result.InputTokens = inputTokens
-	result.OutputTokens = outputTokens
-	result.CachedInputTokens = cachedInput
-	result.CacheWriteTokens = cacheWrite
-	result.ReasoningTokens = reasoning
+	if result.UsageSamples == nil {
+		result.UsageSamples = parseUsageSamplesFromStdout(result.Stdout)
+	}
+	result.InputTokens, result.OutputTokens, result.CachedInputTokens, result.CacheWriteTokens, result.ReasoningTokens = usageTotalsFromSamples(result.UsageSamples)
 	result.Stages = parsePipelineStagesFromStdout(result.Stdout)
+}
+
+func parseUsageSamplesFromStdout(stdout string) []UsageSample {
+	samples := make([]UsageSample, 0)
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var event streamjson.Event
+		if err := json.Unmarshal([]byte(line), &event); err != nil || event.Type != streamjson.EventUsage {
+			continue
+		}
+		samples = append(samples, usageSampleFromEvent(event))
+	}
+	if len(samples) == 0 {
+		return nil
+	}
+	return samples
+}
+
+func usageTotalsFromSamples(samples []UsageSample) (inputTokens, outputTokens, cachedInput, cacheWrite, reasoning int) {
+	for _, sample := range samples {
+		inputTokens += sample.InputTokens
+		outputTokens += sample.OutputTokens
+		cachedInput += sample.CachedInputTokens
+		cacheWrite += sample.CacheWriteTokens
+		reasoning += sample.ReasoningTokens
+	}
+	return inputTokens, outputTokens, cachedInput, cacheWrite, reasoning
 }
 
 // parsePipelineStagesFromStdout extracts the per-stage token/cost ledger from
@@ -391,20 +430,7 @@ func (c *usageCollector) processLine(line []byte) {
 		return
 	}
 	if event.Type == streamjson.EventUsage {
-		usage := usageFromEvent(event)
-		c.samples = append(c.samples, UsageSample{
-			InputTokens:       usage.EffectiveInputTokens(),
-			OutputTokens:      usage.EffectiveOutputTokens(),
-			PromptTokens:      intValue(event.PromptTokens),
-			CompletionTokens:  intValue(event.CompletionTokens),
-			CachedInputTokens: usage.CachedInputTokens,
-			CacheWriteTokens:  usage.CacheWriteTokens,
-			ReasoningTokens:   usage.ReasoningTokens,
-			CostUSD:           floatValue(event.CostUSD),
-			Stage:             event.Stage,
-			Iteration:         event.Iteration,
-			UsageSequence:     event.UsageSequence,
-		})
+		c.samples = append(c.samples, usageSampleFromEvent(event))
 	}
 	if event.Type == streamjson.EventFinal {
 		if stages := parsePipelineStagesFromJSONLLine(line); len(stages) > 0 {
@@ -413,11 +439,31 @@ func (c *usageCollector) processLine(line []byte) {
 	}
 }
 
-func floatValue(value *float64) float64 {
-	if value == nil {
-		return 0
+func usageSampleFromEvent(event streamjson.Event) UsageSample {
+	usage := usageFromEvent(event)
+	return UsageSample{
+		InputTokens:       usage.EffectiveInputTokens(),
+		OutputTokens:      usage.EffectiveOutputTokens(),
+		PromptTokens:      intValue(event.PromptTokens),
+		CompletionTokens:  intValue(event.CompletionTokens),
+		CachedInputTokens: usage.CachedInputTokens,
+		CacheWriteTokens:  usage.CacheWriteTokens,
+		ReasoningTokens:   usage.ReasoningTokens,
+		Provider:          event.Provider,
+		Model:             event.Model,
+		APIModel:          event.APIModel,
+		CostUSD:           event.CostUSD,
+		CostStatus:        event.CostStatus,
+		CostEstimated:     event.CostEstimated,
+		CostProvenance:    event.CostProvenance,
+		PricingSource:     event.PricingSource,
+		PricingAsOf:       event.PricingAsOf,
+		UnpricedReason:    event.UnpricedReason,
+		UsageReported:     event.UsageReported,
+		Stage:             event.Stage,
+		Iteration:         event.Iteration,
+		UsageSequence:     event.UsageSequence,
 	}
-	return *value
 }
 
 func (w *capWriter) Write(p []byte) (int, error) {

@@ -100,8 +100,8 @@ func TestCommandAgentRunnerCollectsUsageAfterDiagnosticLimit(t *testing.T) {
 	if sample.InputTokens != 11 || sample.OutputTokens != 22 {
 		t.Fatalf("usage sample = %#v, want input=11 output=22", sample)
 	}
-	if result.InputTokens != 0 || result.OutputTokens != 0 {
-		t.Fatalf("existing stdout accounting changed: input=%d output=%d", result.InputTokens, result.OutputTokens)
+	if result.InputTokens != 11 || result.OutputTokens != 22 {
+		t.Fatalf("sample accounting = input=%d output=%d, want 11/22", result.InputTokens, result.OutputTokens)
 	}
 	if len(result.Stages) != 1 || result.Stages[0].Name != "code_writer" {
 		t.Fatalf("final pipeline stages = %#v", result.Stages)
@@ -184,6 +184,30 @@ func TestUsageCollectorCapturesFinalPipelineDiagnostics(t *testing.T) {
 	}
 	if len(collector.finalStages) != 1 || collector.finalStages[0].Name != "code_writer" {
 		t.Fatalf("final stages = %#v", collector.finalStages)
+	}
+}
+
+func TestUsageCollectorPreservesUsageIdentityAndCostState(t *testing.T) {
+	zero := 0.0
+	reported := true
+	estimated := false
+	line := `{"type":"usage","provider":"openai","model":"gpt-4.1","apiModel":"gpt-4.1-2026","promptTokens":3,"completionTokens":4,"costUsd":0,"costStatus":"priced","costEstimated":false,"costProvenance":"reported","pricingSource":"provider","pricingAsOf":"2026-07-27","usageReported":true,"stage":"code_writer","usageSequence":2}` + "\n"
+	collector := newUsageCollector(1024)
+	if _, err := collector.Write([]byte(line)); err != nil {
+		t.Fatal(err)
+	}
+	if err := collector.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if len(collector.samples) != 1 {
+		t.Fatalf("samples = %#v, want one sample", collector.samples)
+	}
+	sample := collector.samples[0]
+	if sample.Provider != "openai" || sample.Model != "gpt-4.1" || sample.APIModel != "gpt-4.1-2026" || sample.CostStatus != CostStatusPriced || sample.CostProvenance != "reported" || sample.PricingSource != "provider" || sample.PricingAsOf != "2026-07-27" {
+		t.Fatalf("sample identity/cost state = %#v", sample)
+	}
+	if sample.CostUSD == nil || *sample.CostUSD != zero || sample.UsageReported == nil || *sample.UsageReported != reported || sample.CostEstimated == nil || *sample.CostEstimated != estimated {
+		t.Fatalf("sample pointers = %#v, want priced zero and preserved flags", sample)
 	}
 }
 
