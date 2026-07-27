@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Taf0711/splice/internal/config"
 	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/sessions"
 	"github.com/Taf0711/splice/internal/usage"
@@ -227,9 +228,21 @@ func runUsage(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) i
 		}
 	}
 
-	registry, err := modelregistry.DefaultRegistry()
-	if err != nil {
-		return writeAppError(stderr, err.Error(), exitCrash)
+	providerProfile := ""
+	if workspaceRoot, rootErr := resolveWorkspaceRoot("", deps); rootErr == nil {
+		if resolved, configErr := deps.resolveConfig(workspaceRoot, config.Overrides{}); configErr == nil {
+			providerProfile = resolved.Provider.Name
+		}
+	}
+	var registry modelregistry.Registry
+	var registryErr error
+	if strings.TrimSpace(providerProfile) == "" {
+		registry, registryErr = modelregistry.DefaultRegistry()
+	} else {
+		registry, registryErr = modelregistry.DefaultRegistry(providerProfile)
+	}
+	if registryErr != nil {
+		return writeAppError(stderr, registryErr.Error(), exitCrash)
 	}
 	report, err := usage.BuildReport(events, set.meta, &registry, diff.NetLOC())
 	if err != nil {

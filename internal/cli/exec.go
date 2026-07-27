@@ -273,7 +273,16 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// compiles its match patterns, so rebuilding it per lookup is wasteful.
 	// modelRegistry is the splice Registry when the catalog fails to build; the
 	// helpers below degrade to safe no-op behavior in that case.
-	modelRegistry, _ := modelregistry.DefaultRegistry()
+	providerProfile := ""
+	if resolved, configErr := deps.resolveConfig(workspaceRoot, config.Overrides{}); configErr == nil {
+		providerProfile = resolved.Provider.Name
+	}
+	var modelRegistry modelregistry.Registry
+	if strings.TrimSpace(providerProfile) == "" {
+		modelRegistry, _ = modelregistry.DefaultRegistry()
+	} else {
+		modelRegistry, _ = modelregistry.DefaultRegistry(providerProfile)
+	}
 
 	overrides := config.Overrides{}
 	modelOverride := options.model

@@ -68,7 +68,7 @@ type ModelCost struct {
 	CachedInputPerMillion float64
 	// CacheWritePerMillion is the cache-creation (cache-write) rate, billed at a
 	// premium over input by providers that support it (Anthropic ~1.25x input).
-	// Splice means "not priced separately" — cache-write tokens fall back to the
+	// Splice means "not priced separately". Cache-write tokens fall back to the
 	// input rate, preserving prior behavior for models without the rate.
 	CacheWritePerMillion float64
 	Tiers                []ModelCostTier
@@ -111,6 +111,9 @@ type ModelEntry struct {
 	// models). Resolved and availability-checked by Registry.UpgradeTarget.
 	UpgradeTargetID string
 	Description     string
+	// ModelsDevProvider identifies the models.dev provider for a derived entry.
+	// Curated entries leave this empty and remain the identity authority.
+	ModelsDevProvider string
 }
 
 // DeprecationRule describes how a deprecated model is phased out and what to use
@@ -295,6 +298,9 @@ type Registry struct {
 	entries  map[string]ModelEntry
 	models   []ModelEntry
 	patterns []compiledMatch
+	// ModelsDevSkippedRecords counts derived snapshot records rejected during
+	// registry construction. Curated entries remain strict and are not counted.
+	ModelsDevSkippedRecords int
 }
 
 type compiledMatch struct {
@@ -358,7 +364,7 @@ func NewRegistry(entries []ModelEntry) (Registry, error) {
 	}
 	// A non-empty UpgradeTargetID must resolve to a known model. Otherwise
 	// UpgradeTarget would silently disable escalation at runtime (a catalog typo)
-	// instead of failing loudly here — mirroring the deprecation fallback check.
+	// instead of failing loudly here. This mirrors the deprecation fallback check.
 	for _, entry := range registry.models {
 		targetID := strings.TrimSpace(entry.UpgradeTargetID)
 		if targetID == "" {

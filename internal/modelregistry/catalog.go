@@ -9,7 +9,7 @@ const DefaultModelID = "gpt-4.1"
 
 // FallbackContextWindow is the assumed context window (max input tokens) for a
 // model that isn't in the curated registry and wasn't resolved from live provider
-// discovery — e.g. proxy/custom models like the GPT-5 Codex, xAI, or Ollama-cloud
+// discovery, for example proxy/custom models like the GPT-5 Codex, xAI, or Ollama-cloud
 // variants. A positive value here is what enables agent-loop compaction (both the
 // proactive ~80% trigger and the reactive post-overflow recovery) for those models;
 // without it compaction stays disabled and long sessions overflow. It is only a
@@ -42,11 +42,27 @@ type ListOptions struct {
 	Capability        ModelCapability
 }
 
-func DefaultRegistry() (Registry, error) {
-	return NewRegistry(DefaultModelEntries())
+// DefaultRegistry builds the catalog. An optional provider profile name scopes
+// derived models.dev entries to that provider, for example "openrouter".
+func DefaultRegistry(providerProfile ...string) (Registry, error) {
+	entries, skipped := defaultModelEntries(providerProfile...)
+	registry, err := NewRegistry(entries)
+	if err != nil {
+		return Registry{}, err
+	}
+	registry.ModelsDevSkippedRecords = skipped
+	return registry, nil
 }
 
-func DefaultModelEntries() []ModelEntry {
+// DefaultModelEntries returns curated entries plus derived entries for the
+// optional provider profile. Without a profile, the result is curated-only
+// apart from volatile overrides of curated entries.
+func DefaultModelEntries(providerProfile ...string) []ModelEntry {
+	entries, _ := defaultModelEntries(providerProfile...)
+	return entries
+}
+
+func defaultModelEntries(providerProfile ...string) ([]ModelEntry, int) {
 	entries := []ModelEntry{
 		openAIModel("gpt-5.6-sol", "GPT-5.6 Sol", "gpt-5.6-sol", ModelStatusActive, []string{"openai:gpt-5.6-sol", "gpt-5.6"}, ContextLimits{ContextWindow: 1_050_000, MaxOutputTokens: 128_000}, ModelCost{InputPerMillion: 5, CachedInputPerMillion: 0.5, OutputPerMillion: 30}, []ModelCapability{ModelCapabilityVision, ModelCapabilityReasoning, ModelCapabilityJSONMode, ModelCapabilityLongContext, ModelCapabilityPromptCache}, "OpenAI flagship GPT-5.6 model for complex reasoning and coding."),
 		openAIModel("gpt-5.6-terra", "GPT-5.6 Terra", "gpt-5.6-terra", ModelStatusActive, []string{"openai:gpt-5.6-terra"}, ContextLimits{ContextWindow: 1_050_000, MaxOutputTokens: 128_000}, ModelCost{InputPerMillion: 2.5, CachedInputPerMillion: 0.25, OutputPerMillion: 15}, []ModelCapability{ModelCapabilityVision, ModelCapabilityReasoning, ModelCapabilityJSONMode, ModelCapabilityLongContext, ModelCapabilityPromptCache}, "OpenAI balanced GPT-5.6 model for intelligence and cost."),
@@ -69,10 +85,11 @@ func DefaultModelEntries() []ModelEntry {
 	}
 	decorateModelDepth(entries)
 	// Overlay volatile facts (context limits, base pricing) from a cached
-	// models.dev snapshot when one is present and fresh — see modelsdev.go.
+	// models.dev snapshot when one is present and fresh. See modelsdev.go.
 	// Identity fields (ids, aliases, patterns, deprecations) stay curated.
-	entries = applyModelsDevOverrides(entries, cachedModelsDevProviders())
-	return cloneModelEntries(entries)
+	var skipped int
+	entries, skipped = applyModelsDevOverridesWithStats(entries, cachedModelsDevProviders(), providerProfile...)
+	return cloneModelEntries(entries), skipped
 }
 
 // decorateModelDepth layers slice-3 registry-depth metadata (fuzzy match
@@ -211,7 +228,7 @@ func (registry Registry) ReasoningEfforts(pattern string) []ReasoningEffort {
 	if model, ok := registry.Get(pattern); ok {
 		return append([]ReasoningEffort{}, effectiveReasoningEfforts(model)...)
 	}
-	// Unknown model not in the curated catalog — e.g. a GPT-5 / Codex / o-series
+	// Unknown model not in the curated catalog, for example a GPT-5 / Codex / o-series
 	// variant served via the ChatGPT proxy or a custom OpenAI-compatible endpoint.
 	// Infer from the name so /effort still shows controls for it.
 	return reasoningEffortsForModelName(pattern)

@@ -151,7 +151,7 @@ func runProviders(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	return exitSuccess
 }
 
-func runModels(args []string, stdout io.Writer, stderr io.Writer) int {
+func runModels(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	if len(args) > 0 && (args[0] == "list" || args[0] == "ls") {
 		args = args[1:]
 	}
@@ -166,9 +166,21 @@ func runModels(args []string, stdout io.Writer, stderr io.Writer) int {
 		return exitSuccess
 	}
 
-	registry, err := modelregistry.DefaultRegistry()
-	if err != nil {
-		return writeAppError(stderr, err.Error(), exitCrash)
+	providerProfile := ""
+	if workspaceRoot, rootErr := resolveWorkspaceRoot("", deps); rootErr == nil {
+		if resolved, configErr := deps.resolveConfig(workspaceRoot, config.Overrides{}); configErr == nil {
+			providerProfile = resolved.Provider.Name
+		}
+	}
+	var registry modelregistry.Registry
+	var registryErr error
+	if strings.TrimSpace(providerProfile) == "" {
+		registry, registryErr = modelregistry.DefaultRegistry()
+	} else {
+		registry, registryErr = modelregistry.DefaultRegistry(providerProfile)
+	}
+	if registryErr != nil {
+		return writeAppError(stderr, registryErr.Error(), exitCrash)
 	}
 	models, err := listModelSummaries(registry, options)
 	if err != nil {

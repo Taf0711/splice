@@ -402,7 +402,13 @@ func (m model) handleModelCommand(args string) (model, string) {
 		return m, "Model\nCannot switch models while a run is active."
 	}
 
-	registry, err := modelregistry.DefaultRegistry()
+	var registry modelregistry.Registry
+	var err error
+	if strings.TrimSpace(m.providerProfile.Name) == "" {
+		registry, err = modelregistry.DefaultRegistry()
+	} else {
+		registry, err = modelregistry.DefaultRegistry(m.providerProfile.Name)
+	}
 	if err != nil {
 		return m, "Model\nFailed to load model catalog: " + err.Error()
 	}

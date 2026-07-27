@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,15 +16,15 @@ import (
 )
 
 // Live models.dev overlay for the curated catalog. The hand-maintained
-// DefaultModelEntries list is the source of truth for identity — ids, aliases,
-// match patterns, deprecations, escalation targets — but its VOLATILE facts
+// DefaultModelEntries list is the source of truth for identity: ids, aliases,
+// match patterns, deprecations, escalation targets. Its VOLATILE facts
 // (context window, max output tokens, per-million pricing) go stale between
 // releases. When a cached snapshot of https://models.dev/api.json is present,
 // those fields are refreshed from it at registry construction; everything else
-// stays curated. The overlay never adds models (an auto-added entry would lack
-// aliases, match patterns, and provider wiring) and never touches the network
-// on the registry hot path — fetching happens only in the explicit background
-// refresh, cached to disk with a TTL.
+// stays curated. The overlay adds derived entries only with an explicit
+// models.dev provider key and never touches the network on the registry hot
+// path. Fetching happens only in the explicit background refresh, cached to
+// disk with a TTL.
 
 const (
 	modelsDevDefaultURL = "https://models.dev/api.json"
@@ -77,10 +78,9 @@ func parseModelsDev(data []byte) (map[string]map[string]modelsDevModel, error) {
 	return providers, nil
 }
 
-// modelsDevSlugs maps an entry's provider kind to the models.dev provider ids
-// worth checking. Only first-party slugs are used: router entries on models.dev
-// carry generic or stale numbers.
-func modelsDevSlugs(kind ProviderKind) []string {
+// modelsDevSlugs maps a curated entry's provider kind to first-party provider
+// ids. Derived entries use an explicit provider profile key instead.
+func modelsDevSlugs(kind ProviderKind, providerKey ...string) []string {
 	switch kind {
 	case ProviderAnthropic:
 		return []string{"anthropic"}
@@ -88,18 +88,62 @@ func modelsDevSlugs(kind ProviderKind) []string {
 		return []string{"openai"}
 	case ProviderGoogle:
 		return []string{"google", "google-vertex"}
+	case ProviderOpenAICompatible:
+		if len(providerKey) > 0 && strings.TrimSpace(providerKey[0]) != "" {
+			return []string{strings.ToLower(strings.TrimSpace(providerKey[0]))}
+		}
+		return nil
 	default:
 		return nil
 	}
 }
 
-// applyModelsDevOverrides refreshes each curated entry's context limits and
-// base pricing from the snapshot, when the snapshot knows the model. Tiered
-// pricing is never touched: models.dev has no tier data, and mixing a live
-// base rate with curated tiers would misprice the tier boundaries.
-func applyModelsDevOverrides(entries []ModelEntry, providers map[string]map[string]modelsDevModel) []ModelEntry {
+var modelsDevProviderAliases = map[string]string{
+	"chatgpt": "openai",
+}
+
+func modelsDevProviderKey(profileName string, providers map[string]map[string]modelsDevModel) (string, bool) {
+	name := strings.ToLower(strings.TrimSpace(profileName))
+	if name == "" {
+		return "", false
+	}
+	if key, ok := modelsDevProviderAliases[name]; ok {
+		name = key
+	}
+	if _, ok := providers[name]; !ok {
+		return "", false
+	}
+	return name, true
+}
+
+func modelsDevEntryProviders(providerKey string) (ProviderKind, []ProviderKind) {
+	switch providerKey {
+	case "anthropic":
+		return ProviderAnthropic, []ProviderKind{ProviderAnthropic}
+	case "google", "google-vertex":
+		return ProviderGoogle, []ProviderKind{ProviderGoogle}
+	case "openai":
+		return ProviderOpenAI, []ProviderKind{ProviderOpenAI, ProviderOpenAICompatible}
+	default:
+		return ProviderOpenAI, []ProviderKind{ProviderOpenAI, ProviderOpenAICompatible}
+	}
+}
+
+// applyModelsDevOverrides refreshes curated volatile facts and appends derived
+// entries from one explicit models.dev provider profile.
+func applyModelsDevOverrides(entries []ModelEntry, providers map[string]map[string]modelsDevModel, providerProfile ...string) []ModelEntry {
+	entries, _ = applyModelsDevOverridesWithStats(entries, providers, providerProfile...)
+	return entries
+}
+
+// applyModelsDevOverridesWithStats also counts derived records rejected by
+// ModelEntry validation. Tiered pricing is never touched: models.dev has no
+// tier data, and mixing a live base rate with curated tiers would misprice the
+// tier boundaries. Without provider context, no derived entries are added
+// because a model id can have different prices under different providers.
+func applyModelsDevOverridesWithStats(entries []ModelEntry, providers map[string]map[string]modelsDevModel, providerProfile ...string) ([]ModelEntry, int) {
 	if len(providers) == 0 {
-		return entries
+		return entries, 0
 	}
 	for i := range entries {
 		entry := &entries[i]
@@ -135,7 +179,76 @@ func applyModelsDevOverrides(entries []ModelEntry, providers map[string]map[stri
 			entry.Cost.Source = "models.dev/api.json (cached)"
 		}
 	}
-	return entries
+
+	if len(providerProfile) == 0 {
+		return entries, 0
+	}
+	providerKey, ok := modelsDevProviderKey(providerProfile[0], providers)
+	if !ok {
+		return entries, 0
+	}
+	curatedModels := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		curatedModels[strings.ToLower(strings.TrimSpace(entry.ID))] = struct{}{}
+		curatedModels[strings.ToLower(strings.TrimSpace(entry.APIModel))] = struct{}{}
+		for _, alias := range entry.Aliases {
+			curatedModels[strings.ToLower(strings.TrimSpace(alias))] = struct{}{}
+		}
+	}
+	modelIDs := make([]string, 0, len(providers[providerKey]))
+	for apiModel := range providers[providerKey] {
+		modelIDs = append(modelIDs, apiModel)
+	}
+	sort.Strings(modelIDs)
+	skipped := 0
+	derivedModels := make(map[string]struct{}, len(modelIDs))
+	for _, apiModel := range modelIDs {
+		record := providers[providerKey][apiModel]
+		modelID := strings.TrimSpace(apiModel)
+		if modelID == "" {
+			skipped++
+			continue
+		}
+		if _, exists := curatedModels[strings.ToLower(modelID)]; exists {
+			continue
+		}
+		primaryProvider, apiProviders := modelsDevEntryProviders(providerKey)
+		candidate := ModelEntry{
+			ID:            modelID,
+			DisplayName:   modelID,
+			APIModel:      modelID,
+			Provider:      primaryProvider,
+			APIProviders:  apiProviders,
+			ContextLimits: ContextLimits{ContextWindow: record.Limit.Context, MaxOutputTokens: record.Limit.Output},
+			Capabilities:  withBaseCapabilities(),
+			Cost: ModelCost{
+				Currency:              "USD",
+				Unit:                  "per_1m_tokens",
+				InputPerMillion:       record.Cost.Input,
+				OutputPerMillion:      record.Cost.Output,
+				CachedInputPerMillion: record.Cost.CacheRead,
+				CacheWritePerMillion:  record.Cost.CacheWrite,
+				Source:                "models.dev/api.json (cached)",
+				SourceLastVerified:    sourceLastVerified,
+			},
+			Status:            ModelStatusActive,
+			Aliases:           []string{modelID},
+			Description:       fmt.Sprintf("Model from the %s models.dev provider.", providerKey),
+			ModelsDevProvider: providerKey,
+		}
+		if err := candidate.Validate(); err != nil {
+			skipped++
+			continue
+		}
+		normalizedID := strings.ToLower(strings.TrimSpace(candidate.ID))
+		if _, exists := derivedModels[normalizedID]; exists {
+			skipped++
+			continue
+		}
+		derivedModels[normalizedID] = struct{}{}
+		entries = append(entries, candidate)
+	}
+	return entries, skipped
 }
 
 // modelsDevCachePath returns the on-disk cache location. ZERO_MODELS_CACHE_PATH

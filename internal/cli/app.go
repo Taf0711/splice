@@ -393,7 +393,7 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	case "config":
 		return runConfig(args[1:], stdout, stderr, deps)
 	case "models":
-		return runModels(args[1:], stdout, stderr)
+		return runModels(args[1:], stdout, stderr, deps)
 	case "providers":
 		return runProviders(args[1:], stdout, stderr, deps)
 	case "doctor":

@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -25,6 +26,37 @@ const sampleModelsDev = `{
       "gemini-2.5-pro": {
         "limit": {"context": 2097152, "output": 65536},
         "cost": {"input": 9.99, "output": 9.99}
+      }
+    }
+  }
+}`
+
+const sampleModelsDevProviderScoped = `{
+  "openrouter": {
+    "models": {
+      "z-ai/glm-5.2": {
+        "limit": {"context": 202752, "output": 16384},
+        "cost": {"input": 0.6692, "output": 2.1032, "cache_read": 0.12428}
+      },
+      "gpt-4.1-mini": {
+        "limit": {"context": 999, "output": 99},
+        "cost": {"input": 99, "output": 99}
+      }
+    }
+  },
+  "crossmodel": {
+    "models": {
+      "z-ai/glm-5.2": {
+        "limit": {"context": 131072, "output": 8192},
+        "cost": {"input": 1.2, "output": 4.4}
+      }
+    }
+  },
+  "nvidia": {
+    "models": {
+      "z-ai/glm-5.2": {
+        "limit": {"context": 131072, "output": 8192},
+        "cost": {"input": 0, "output": 0}
       }
     }
   }
@@ -98,6 +130,277 @@ func TestApplyModelsDevOverrides(t *testing.T) {
 	// Model absent from the snapshot: untouched.
 	if opus.ContextLimits.ContextWindow != 200_000 || opus.Cost.InputPerMillion != 15 {
 		t.Fatalf("opus must be untouched: %+v %+v", opus.ContextLimits, opus.Cost)
+	}
+}
+
+func TestApplyModelsDevOverridesDerivesProviderScopedModel(t *testing.T) {
+	providers, err := parseModelsDev([]byte(sampleModelsDevProviderScoped))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := applyModelsDevOverrides(DefaultModelEntries(), providers, "openrouter")
+	registry, err := NewRegistry(entries)
+	if err != nil {
+		t.Fatalf("NewRegistry with derived entry: %v", err)
+	}
+	model, ok := registry.Get("z-ai/glm-5.2")
+	if !ok {
+		t.Fatal("provider-scoped derived model did not resolve")
+	}
+	if model.Cost.InputPerMillion != 0.6692 || model.Cost.OutputPerMillion != 2.1032 || model.Cost.CachedInputPerMillion != 0.12428 {
+		t.Fatalf("derived pricing = %+v, want openrouter pricing", model.Cost)
+	}
+	if model.ContextLimits.ContextWindow != 202752 || model.ContextLimits.MaxOutputTokens != 16384 {
+		t.Fatalf("derived limits = %+v, want openrouter limits", model.ContextLimits)
+	}
+	if model.ModelsDevProvider != "openrouter" {
+		t.Fatalf("derived provider = %q, want openrouter", model.ModelsDevProvider)
+	}
+}
+
+func TestApplyModelsDevOverridesSkipsInvalidDerivedRecords(t *testing.T) {
+	providers, err := parseModelsDev([]byte(`{
+  "openrouter": {
+    "models": {
+      "bad-limits": {
+        "limit": {"context": 16384, "output": 65536},
+        "cost": {"input": 1, "output": 2}
+      },
+      "bad-cost": {
+        "limit": {"context": 16384, "output": 8192},
+        "cost": {"input": 0, "output": 0}
+      },
+      "good": {
+        "limit": {"context": 16384, "output": 8192},
+        "cost": {"input": 1, "output": 2}
+      }
+    }
+  }
+}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, skipped := applyModelsDevOverridesWithStats(DefaultModelEntries(), providers, "openrouter")
+	if skipped != 2 {
+		t.Fatalf("skipped records = %d, want 2", skipped)
+	}
+	registry, err := NewRegistry(entries)
+	if err != nil {
+		t.Fatalf("invalid derived record made registry construction fail: %v", err)
+	}
+	if _, ok := registry.Get("bad-limits"); ok {
+		t.Fatal("derived record with invalid limits was not skipped")
+	}
+	if _, ok := registry.Get("bad-cost"); ok {
+		t.Fatal("derived record with invalid cost was not skipped")
+	}
+	if _, ok := registry.Get("good"); !ok {
+		t.Fatal("valid derived record was skipped")
+	}
+}
+
+func TestApplyModelsDevOverridesKeepsMalformedCuratedRecordsStrict(t *testing.T) {
+	providers, err := parseModelsDev([]byte(`{
+  "openai": {
+    "models": {
+      "gpt-4.1": {
+        "limit": {"context": 1024, "output": 2048},
+        "cost": {"input": 1, "output": 2}
+      }
+    }
+  }
+}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := applyModelsDevOverrides(DefaultModelEntries(), providers)
+	if _, err := NewRegistry(entries); err == nil {
+		t.Fatal("malformed curated override must remain fatal")
+	}
+}
+
+func TestDefaultRegistryReportsSkippedModelsDevRecords(t *testing.T) {
+	data := []byte(`{
+  "openrouter": {
+    "models": {
+      "bad-limits": {
+        "limit": {"context": 16384, "output": 65536},
+        "cost": {"input": 1, "output": 2}
+      }
+    }
+  }
+
+}`)
+	cachePath := filepath.Join(t.TempDir(), "modelsdev.json")
+	if err := os.WriteFile(cachePath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ZERO_MODELS_CACHE_PATH", cachePath)
+	resetModelsDevCacheForTest()
+	t.Cleanup(resetModelsDevCacheForTest)
+	EnableModelsDevOverlay()
+	registry, err := DefaultRegistry("openrouter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if registry.ModelsDevSkippedRecords != 1 {
+		t.Fatalf("reported skipped records = %d, want 1", registry.ModelsDevSkippedRecords)
+	}
+}
+
+func TestDefaultRegistryResolvesProviderScopedDerivedModel(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "modelsdev.json")
+	if err := os.WriteFile(cachePath, []byte(sampleModelsDevProviderScoped), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ZERO_MODELS_CACHE_PATH", cachePath)
+	resetModelsDevCacheForTest()
+	t.Cleanup(resetModelsDevCacheForTest)
+	EnableModelsDevOverlay()
+	registry, err := DefaultRegistry("openrouter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, ok := registry.Get("z-ai/glm-5.2")
+	if !ok || model.Cost.InputPerMillion != 0.6692 || model.Cost.OutputPerMillion != 2.1032 || model.Cost.CachedInputPerMillion != 0.12428 {
+		t.Fatalf("DefaultRegistry openrouter model = %+v/%v", model.Cost, ok)
+	}
+}
+
+func TestApplyModelsDevOverridesUsesRequestedProviderNotFirstMatch(t *testing.T) {
+	providers, err := parseModelsDev([]byte(sampleModelsDevProviderScoped))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := applyModelsDevOverrides(DefaultModelEntries(), providers, "crossmodel")
+	registry, err := NewRegistry(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, ok := registry.Get("z-ai/glm-5.2")
+	if !ok || model.Cost.InputPerMillion != 1.2 || model.Cost.OutputPerMillion != 4.4 {
+		t.Fatalf("crossmodel pricing = %+v, want 1.2/4.4", model.Cost)
+	}
+}
+
+func TestApplyModelsDevOverridesLeavesAmbiguousModelUnpricedWithoutProvider(t *testing.T) {
+	providers, err := parseModelsDev([]byte(sampleModelsDevProviderScoped))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := applyModelsDevOverrides(DefaultModelEntries(), providers)
+	registry, err := NewRegistry(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := registry.Get("z-ai/glm-5.2"); ok {
+		t.Fatal("model with no provider context must not guess a price")
+	}
+	unknownRegistry, err := NewRegistry(applyModelsDevOverrides(DefaultModelEntries(), providers, "unknown"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := unknownRegistry.Get("z-ai/glm-5.2"); ok {
+		t.Fatal("unknown provider must not guess a price")
+	}
+}
+
+func TestApplyModelsDevOverridesDoesNotOverwriteCuratedIdentityOrUpgradeTarget(t *testing.T) {
+	providers, err := parseModelsDev([]byte(sampleModelsDevProviderScoped))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := applyModelsDevOverrides(DefaultModelEntries(), providers, "openrouter")
+	registry, err := NewRegistry(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, ok := registry.Get("gpt-4.1-mini")
+	if !ok {
+		t.Fatal("curated model not found")
+	}
+	if model.ID != "gpt-4.1-mini" || model.APIModel != "gpt-4.1-mini" || model.UpgradeTargetID != "gpt-4.1" {
+		t.Fatalf("curated identity changed: %+v", model)
+	}
+	if model.ModelsDevProvider != "" {
+		t.Fatalf("curated model marked as derived: %q", model.ModelsDevProvider)
+	}
+}
+
+func TestModelsDevProviderAliases(t *testing.T) {
+	providers, err := parseModelsDev([]byte(`{"openai":{"models":{"x":{"limit":{"context":1,"output":1},"cost":{"input":1,"output":1}}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := modelsDevProviderKey("chatgpt", providers); !ok || got != "openai" {
+		t.Fatalf("chatgpt provider key = %q/%v, want openai/true", got, ok)
+	}
+	if _, ok := modelsDevProviderKey("unknown", providers); ok {
+		t.Fatal("unknown provider must not resolve")
+	}
+}
+
+func TestDefaultModelEntriesOverlayDisabledIsCuratedOnly(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "modelsdev.json")
+	if err := os.WriteFile(cachePath, []byte(sampleModelsDevProviderScoped), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ZERO_MODELS_CACHE_PATH", cachePath)
+	resetModelsDevCacheForTest()
+	t.Cleanup(resetModelsDevCacheForTest)
+	want := DefaultModelEntries()
+	got := DefaultModelEntries("openrouter")
+	if !reflect.DeepEqual(got, want) {
+		t.Fatal("overlay-disabled registry differs from curated catalog")
+	}
+	registry, err := NewRegistry(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := registry.Get("z-ai/glm-5.2"); ok {
+		t.Fatal("overlay-disabled registry must not add derived models")
+	}
+}
+
+func TestDefaultRegistryRealCachedSnapshot(t *testing.T) {
+	cachePath, err := modelsDevCachePath()
+	if err != nil {
+		t.Skipf("models.dev cache path unavailable: %v", err)
+	}
+	if _, err := os.Stat(cachePath); err != nil {
+		t.Skipf("models.dev cache is absent: %v", err)
+	}
+	t.Setenv("ZERO_MODELS_CACHE_PATH", cachePath)
+	resetModelsDevCacheForTest()
+	t.Cleanup(resetModelsDevCacheForTest)
+	EnableModelsDevOverlay()
+
+	openrouter, err := DefaultRegistry("openrouter")
+	if err != nil {
+		t.Fatalf("DefaultRegistry(openrouter): %v", err)
+	}
+	t.Logf("openrouter skipped models.dev records: %d", openrouter.ModelsDevSkippedRecords)
+	if openrouter.ModelsDevSkippedRecords == 0 {
+		t.Fatal("real openrouter snapshot should contain skipped malformed records")
+	}
+	glm, ok := openrouter.Get("z-ai/glm-5.2")
+	if !ok {
+		t.Fatal("openrouter registry did not resolve z-ai/glm-5.2")
+	}
+	if glm.Cost.InputPerMillion != 0.6692 || glm.Cost.OutputPerMillion != 2.1032 || glm.Cost.CachedInputPerMillion != 0.12428 {
+		t.Fatalf("openrouter z-ai/glm-5.2 pricing = %+v", glm.Cost)
+	}
+
+	chatgpt, err := DefaultRegistry("chatgpt")
+	if err != nil {
+		t.Fatalf("DefaultRegistry(chatgpt): %v", err)
+	}
+	gpt, ok := chatgpt.Get("gpt-5.5")
+	if !ok {
+		t.Fatal("chatgpt registry did not resolve gpt-5.5")
+	}
+	if gpt.Cost.InputPerMillion != 5 || gpt.Cost.OutputPerMillion != 30 || gpt.Cost.CachedInputPerMillion != 0.5 {
+		t.Fatalf("chatgpt gpt-5.5 pricing = %+v", gpt.Cost)
 	}
 }
 

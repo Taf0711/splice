@@ -35,7 +35,7 @@ func runContext(args []string, stdout io.Writer, stderr io.Writer, deps appDeps)
 		return writeAppError(stderr, err.Error(), exitProvider)
 	}
 
-	modelRegistry, err := modelregistry.DefaultRegistry()
+	modelRegistry, err := modelregistry.DefaultRegistry(resolved.Provider.Name)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
