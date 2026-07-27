@@ -524,6 +524,7 @@ type agentUsageMsg struct {
 	runID   int
 	modelID string
 	usage   zeroruntime.Usage
+	cost    *agent.UsageCostEstimate
 }
 
 type agentResponseMsg struct {
@@ -2050,7 +2051,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 						continue
 					}
 					var usageRows []transcriptRow
-					m, usageRows = m.recordUsageEvent(msg.usageModelID, event)
+					m, usageRows = m.recordUsageEvent(msg.usageModelID, event, nil)
 					for _, row := range usageRows {
 						m.transcript = appendTranscriptRow(m.transcript, row)
 					}
@@ -2136,7 +2137,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				continue
 			}
 			var usageRows []transcriptRow
-			m, usageRows = m.recordUsageEvent(msg.usageModelID, event)
+			m, usageRows = m.recordUsageEvent(msg.usageModelID, event, nil)
 			for _, row := range usageRows {
 				m.transcript = appendTranscriptRow(m.transcript, row)
 			}
@@ -2366,7 +2367,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		var usageRows []transcriptRow
-		m, usageRows = m.recordUsageEvent(msg.modelID, msg.usage)
+		m, usageRows = m.recordUsageEvent(msg.modelID, msg.usage, msg.cost)
 		if m.liveUsageCounts == nil {
 			m.liveUsageCounts = map[int]int{}
 		}
@@ -5259,7 +5260,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				Type:    sessions.EventUsage,
 				Payload: usage.EventUsagePayload(event),
 			})
-			m.sendAgentUsage(runID, usageModelID, event)
+			m.sendAgentUsage(runID, usageModelID, event, nil)
 			if onUsage != nil {
 				onUsage(event)
 			}
@@ -5278,7 +5279,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 					Type:    sessions.EventUsage,
 					Payload: payload,
 				})
-				m.sendAgentUsage(runID, au.Model, au.Usage)
+				m.sendAgentUsage(runID, au.Model, au.Usage, &au.Cost)
 				if downstreamAU != nil {
 					downstreamAU(au)
 				}
@@ -5482,11 +5483,15 @@ func (m model) sendPipelineStageMarker(runID int, line string) {
 	m.runtimeMessageSink(pipelineStageMarkerMsg{runID: runID, line: line})
 }
 
-func (m model) sendAgentUsage(runID int, modelID string, event zeroruntime.Usage) {
+func (m model) sendAgentUsage(runID int, modelID string, event zeroruntime.Usage, costs ...*agent.UsageCostEstimate) {
 	if m.runtimeMessageSink == nil {
 		return
 	}
-	m.runtimeMessageSink(agentUsageMsg{runID: runID, modelID: modelID, usage: event})
+	var cost *agent.UsageCostEstimate
+	if len(costs) > 0 {
+		cost = costs[0]
+	}
+	m.runtimeMessageSink(agentUsageMsg{runID: runID, modelID: modelID, usage: event, cost: cost})
 }
 
 // toolResultDetail is the card body source: the rich card-only Display.Preview

@@ -12,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/usage"
 )
 
 const (
@@ -349,8 +350,8 @@ func (m model) permissionModeLabel() (string, lipgloss.Style) {
 	}
 }
 
-// usageStatusSegment shows the latest provider step's token footprint, plus
-// cumulative cost once anything is priced.
+// usageStatusSegment shows the latest provider step's token footprint and the
+// session cost only when the summary has complete pricing coverage.
 func (m model) usageStatusSegment() string {
 	if m.usageTracker == nil {
 		return ""
@@ -358,10 +359,19 @@ func (m model) usageStatusSegment() string {
 	summary := m.usageTracker.Summary()
 	tokens := m.latestUsageTokens(summary)
 	if tokens <= 0 {
-		return ""
+		if summary.RecordCount == 0 {
+			return ""
+		}
+		if summary.CostCoverage == usage.CostCoverageComplete {
+			return strings.TrimSpace(summary.FormattedTotalCost)
+		}
+		return usageCoverageLabel(summary.CostCoverage)
 	}
-	if summary.RecordCount == 0 {
+	if summary.RecordCount == 0 || summary.CostCoverage == usage.CostCoverageNotApplicable {
 		return humanCount(tokens) + " tok"
+	}
+	if summary.CostCoverage != usage.CostCoverageComplete {
+		return fmt.Sprintf("%s tok · %s", humanCount(tokens), usageCoverageLabel(summary.CostCoverage))
 	}
 	return fmt.Sprintf("%s tok · %s",
 		humanCount(tokens),
@@ -371,8 +381,7 @@ func (m model) usageStatusSegment() string {
 
 // usageCostSegment returns just the session cost, with the token figure dropped.
 // Used in the status line when the sidebar is open and already showing tokens at
-// its floor, so the cost survives without duplicating the token count. Empty
-// until a priced usage record lands (no cost to show yet).
+// its floor, so the cost survives without duplicating the token count.
 func (m model) usageCostSegment() string {
 	if m.usageTracker == nil {
 		return ""
@@ -381,7 +390,23 @@ func (m model) usageCostSegment() string {
 	if summary.RecordCount == 0 {
 		return ""
 	}
+	if summary.CostCoverage != usage.CostCoverageComplete {
+		return usageCoverageLabel(summary.CostCoverage)
+	}
 	return strings.TrimSpace(summary.FormattedTotalCost)
+}
+
+func usageCoverageLabel(coverage string) string {
+	switch coverage {
+	case usage.CostCoveragePartial:
+		return "cost partial"
+	case usage.CostCoverageUnavailable:
+		return "cost unavailable"
+	case usage.CostCoverageNotApplicable:
+		return "cost n/a"
+	default:
+		return "cost unavailable"
+	}
 }
 
 // contextFillPercent returns the latest request's context-window fill as a percent

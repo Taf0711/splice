@@ -54,6 +54,74 @@ func TestRunUsageTextReport(t *testing.T) {
 	}
 }
 
+func TestRunUsageReportShowsPricingCoverage(t *testing.T) {
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir(), Now: fixedCLITime("2026-06-01T09:00:00Z")})
+	session, err := store.Create(sessions.CreateInput{SessionID: "coverage_s1", Title: "Coverage", Cwd: "/repo", ModelID: "gpt-4.1", Provider: "openai"})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if _, err := store.AppendEvent(session.SessionID, sessions.AppendEventInput{
+		Type: sessions.EventUsage,
+		Payload: map[string]any{
+			"promptTokens":     100,
+			"completionTokens": 20,
+			"totalTokens":      120,
+			"costUsd":          1.25,
+			"costStatus":       "priced",
+		},
+	}); err != nil {
+		t.Fatalf("AppendEvent persisted: %v", err)
+	}
+	if _, err := store.AppendEvent(session.SessionID, sessions.AppendEventInput{
+		Type: sessions.EventUsage,
+		Payload: map[string]any{
+			"promptTokens":     50,
+			"completionTokens": 10,
+			"totalTokens":      60,
+			"costStatus":       "unpriced",
+			"unpricedReason":   "provider did not report usage",
+		},
+	}); err != nil {
+		t.Fatalf("AppendEvent unpriced: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if exitCode := runWithDeps([]string{"usage", "report"}, &stdout, &stderr, appDeps{
+		newSessionStore: func() *sessions.Store { return store },
+		inspectChanges:  stubInspectChanges(""),
+	}); exitCode != exitSuccess {
+		t.Fatalf("expected exit %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	output := stdout.String()
+	for _, want := range []string{"cost uses persisted", "pricing: partial", "persisted 1", "unpriced 1"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("usage report missing %q in:\n%s", want, output)
+		}
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if exitCode := runWithDeps([]string{"usage", "report", "--json"}, &stdout, &stderr, appDeps{
+		newSessionStore: func() *sessions.Store { return store },
+		inspectChanges:  stubInspectChanges(""),
+	}); exitCode != exitSuccess {
+		t.Fatalf("expected JSON exit %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	var report struct {
+		PersistedCount     int    `json:"persistedCount"`
+		ReconstructedCount int    `json:"reconstructedCount"`
+		UnpricedCount      int    `json:"unpricedCount"`
+		ErrorCount         int    `json:"errorCount"`
+		CostCoverage       string `json:"costCoverage"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("usage JSON did not decode: %v\n%s", err, stdout.String())
+	}
+	if report.PersistedCount != 1 || report.UnpricedCount != 1 || report.CostCoverage != "partial" {
+		t.Fatalf("unexpected coverage JSON: %+v", report)
+	}
+}
+
 func TestRunUsageDefaultsToReport(t *testing.T) {
 	store := seedUsageStore(t)
 	var stdout, stderr bytes.Buffer

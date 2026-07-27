@@ -891,6 +891,74 @@ func TestUnpricedUsageStatusUsesLatestEventNotCumulative(t *testing.T) {
 	}
 }
 
+func TestUsageStatusShowsCoverageAndPricedZero(t *testing.T) {
+	zero := float64(0)
+	cost := &agent.UsageCostEstimate{
+		CostUSD:       &zero,
+		Status:        agent.CostStatusPriced,
+		Provenance:    agent.CostProvenanceRuntimeEstimate,
+		PricingSource: "test",
+		PricingAsOf:   "2026-06-01",
+	}
+	m := newModel(context.Background(), Options{ModelName: "gpt-4.1"})
+	m, _ = m.recordUsageEvent("gpt-4.1", zeroruntime.Usage{InputTokens: 10, OutputTokens: 5}, cost)
+	if got := m.usageStatusSegment(); !strings.Contains(got, "$0.0000") {
+		t.Fatalf("priced zero status = %q, want a cost", got)
+	}
+	zeroUsage := newModel(context.Background(), Options{ModelName: "gpt-4.1"})
+	zeroUsage, _ = zeroUsage.recordUsageEvent("gpt-4.1", zeroruntime.Usage{}, cost)
+	if got := zeroUsage.usageStatusSegment(); got != "$0.0000" {
+		t.Fatalf("zero-token priced zero status = %q, want $0.0000", got)
+	}
+
+	m, _ = m.recordUsageEvent("unknown-model", zeroruntime.Usage{InputTokens: 10, OutputTokens: 5})
+	if got := m.usageStatusSegment(); !strings.Contains(got, "cost partial") {
+		t.Fatalf("mixed pricing status = %q, want partial coverage", got)
+	}
+
+	unpriced := newModel(context.Background(), Options{ModelName: "unknown-model"})
+	unpriced, _ = unpriced.recordUsageEvent("unknown-model", zeroruntime.Usage{InputTokens: 10, OutputTokens: 5})
+	if got := unpriced.usageStatusSegment(); !strings.Contains(got, "cost unavailable") || strings.Contains(got, "$0.0000") {
+		t.Fatalf("unknown pricing status = %q, want unavailable without priced zero", got)
+	}
+}
+
+func TestAttributedUsageUsesRoutedModelAndPersistsCost(t *testing.T) {
+	persisted := float64(4.25)
+	cost := &agent.UsageCostEstimate{
+		CostUSD:       &persisted,
+		Status:        agent.CostStatusPriced,
+		Provenance:    agent.CostProvenanceRuntimeEstimate,
+		PricingSource: "routed-catalog",
+		PricingAsOf:   "2026-06-01",
+	}
+	m := newModel(context.Background(), Options{ModelName: "session-model"})
+	m.activeRunID = 7
+	updated, _ := m.Update(agentUsageMsg{
+		runID:   7,
+		modelID: "routed-model",
+		usage:   zeroruntime.Usage{InputTokens: 100, OutputTokens: 20},
+		cost:    cost,
+	})
+	next := updated.(model)
+	records := next.usageTracker.Records()
+	if len(records) != 1 {
+		t.Fatalf("records = %d, want 1", len(records))
+	}
+	if records[0].ModelID != "routed-model" {
+		t.Fatalf("record model = %q, want routed model", records[0].ModelID)
+	}
+	if records[0].Cost == nil || records[0].Cost.CostUSD == nil || *records[0].Cost.CostUSD != persisted {
+		t.Fatalf("record cost = %#v, want persisted estimate", records[0].Cost)
+	}
+	if records[0].Cost.PricingSource != "routed-catalog" || records[0].Cost.PricingAsOf != "2026-06-01" {
+		t.Fatalf("record pricing metadata = %#v", records[0].Cost)
+	}
+	if summary := next.usageTracker.Summary(); summary.PersistedCount != 1 {
+		t.Fatalf("summary = %#v, want one persisted record", summary)
+	}
+}
+
 func TestStatusLineDropsTokenFigureWhenSidebarShowsIt(t *testing.T) {
 	m := sidebarTestModel()
 	m, _ = m.recordUsageEvent("test-model", zeroruntime.Usage{InputTokens: 100, OutputTokens: 20})

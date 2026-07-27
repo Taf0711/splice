@@ -2,8 +2,10 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"strings"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/Taf0711/splice/internal/sessions"
 	"github.com/Taf0711/splice/internal/usage"
 	"github.com/Taf0711/splice/internal/zerogit"
+	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
 type usageOptions struct {
@@ -27,6 +30,30 @@ type usageEventSet struct {
 	events  []sessions.Event
 	meta    []sessions.Metadata
 	skipped int
+}
+
+type usageCoverage struct {
+	PersistedCount     int    `json:"persistedCount"`
+	ReconstructedCount int    `json:"reconstructedCount"`
+	UnpricedCount      int    `json:"unpricedCount"`
+	ErrorCount         int    `json:"errorCount"`
+	CostCoverage       string `json:"costCoverage"`
+}
+
+type usageReportJSON struct {
+	usage.Report
+	usageCoverage
+}
+
+type historicalUsagePayload struct {
+	PromptTokens      int      `json:"promptTokens"`
+	CompletionTokens  int      `json:"completionTokens"`
+	CachedInputTokens int      `json:"cachedInputTokens"`
+	CacheWriteTokens  int      `json:"cacheWriteTokens"`
+	ReasoningTokens   int      `json:"reasoningTokens"`
+	Model             string   `json:"model"`
+	CostUSD           *float64 `json:"costUsd"`
+	CostStatus        string   `json:"costStatus"`
 }
 
 // collectUsageData reads every persisted session's events (optionally limited to
@@ -68,6 +95,76 @@ func filterEventsSince(events []sessions.Event, since string) []sessions.Event {
 		}
 	}
 	return filtered
+}
+
+func classifyUsageCoverage(events []sessions.Event, meta []sessions.Metadata, registry *modelregistry.Registry) (usageCoverage, error) {
+	modelBySession := map[string]string{}
+	for _, item := range meta {
+		modelBySession[item.SessionID] = item.ModelID
+	}
+	coverage := usageCoverage{CostCoverage: usage.CostCoverageNotApplicable}
+	for _, event := range events {
+		if event.Type != sessions.EventUsage {
+			continue
+		}
+		var payload historicalUsagePayload
+		if len(event.Payload) > 0 {
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				return usageCoverage{}, fmt.Errorf("usage event %d: decode payload: %w", event.Sequence, err)
+			}
+		}
+		switch payload.CostStatus {
+		case usage.CostStatusPriced:
+			if payload.CostUSD == nil || math.IsNaN(*payload.CostUSD) || math.IsInf(*payload.CostUSD, 0) || *payload.CostUSD < 0 {
+				return usageCoverage{}, fmt.Errorf("usage event %d: priced cost must be a finite non-negative cost_usd", event.Sequence)
+			}
+			coverage.PersistedCount++
+		case usage.CostStatusUnpriced:
+			coverage.UnpricedCount++
+		case usage.CostStatusError:
+			coverage.ErrorCount++
+		case "":
+			modelID := payload.Model
+			if modelID == "" {
+				modelID = modelBySession[event.SessionID]
+			}
+			if modelID == "" || registry == nil {
+				coverage.UnpricedCount++
+				continue
+			}
+			model, err := registry.Require(modelID)
+			if err != nil {
+				coverage.UnpricedCount++
+				continue
+			}
+			if _, err := modelregistry.CalculateCost(model, zeroruntime.Usage{
+				InputTokens:       payload.PromptTokens,
+				OutputTokens:      payload.CompletionTokens,
+				CachedInputTokens: payload.CachedInputTokens,
+				CacheWriteTokens:  payload.CacheWriteTokens,
+				ReasoningTokens:   payload.ReasoningTokens,
+			}); err != nil {
+				coverage.ErrorCount++
+				continue
+			}
+			coverage.ReconstructedCount++
+		default:
+			return usageCoverage{}, fmt.Errorf("usage event %d: unknown cost_status %q", event.Sequence, payload.CostStatus)
+		}
+	}
+	priced := coverage.PersistedCount + coverage.ReconstructedCount
+	total := priced + coverage.UnpricedCount + coverage.ErrorCount
+	switch {
+	case total == 0:
+		coverage.CostCoverage = usage.CostCoverageNotApplicable
+	case priced == total:
+		coverage.CostCoverage = usage.CostCoverageComplete
+	case priced > 0:
+		coverage.CostCoverage = usage.CostCoveragePartial
+	default:
+		coverage.CostCoverage = usage.CostCoverageUnavailable
+	}
+	return coverage, nil
 }
 
 // eventUTCDate maps an RFC3339 timestamp to its UTC calendar date (YYYY-MM-DD)
@@ -138,14 +235,18 @@ func runUsage(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) i
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
+	coverage, err := classifyUsageCoverage(events, set.meta, &registry)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
 
 	if options.json {
-		if err := writePrettyJSON(stdout, report); err != nil {
+		if err := writePrettyJSON(stdout, usageReportJSON{Report: report, usageCoverage: coverage}); err != nil {
 			return exitCrash
 		}
 		return exitSuccess
 	}
-	if _, err := fmt.Fprintln(stdout, FormatReport(report, diff.Insertions, diff.Deletions)); err != nil {
+	if _, err := fmt.Fprintln(stdout, FormatReport(report, diff.Insertions, diff.Deletions, coverage)); err != nil {
 		return exitCrash
 	}
 	return exitSuccess
@@ -237,13 +338,16 @@ func parseUsageArgs(args []string) (usageOptions, bool, error) {
 }
 
 // FormatReport renders a usage Report as a per-day table plus totals and net-LOC
-// efficiency ratios. Cost and net-LOC are labeled as estimates: persisted usage
-// events carry no model id or cost (cost is reconstructed from session
-// metadata), and net-LOC is a working-tree diff proxy. The insertions/deletions
-// counts come straight from the parsed working-tree --stat.
-func FormatReport(report usage.Report, insertions int, deletions int) string {
+// efficiency ratios. Cost labels identify persisted and reconstructed estimates.
+// Legacy events without a persisted estimate are reconstructed from session
+// metadata. Net-LOC is a working-tree diff proxy.
+func FormatReport(report usage.Report, insertions int, deletions int, coverage ...usageCoverage) string {
 	var builder strings.Builder
-	builder.WriteString("Usage report (cost is a reconstructed estimate)\n\n")
+	var costLabel = "cost is a reconstructed estimate"
+	if len(coverage) > 0 {
+		costLabel = historicalCostLabel(coverage[0])
+	}
+	builder.WriteString("Usage report (" + costLabel + ")\n\n")
 	builder.WriteString(fmt.Sprintf("%-12s %10s %14s %14s\n", "date", "requests", "tokens", "est. cost"))
 	for _, bucket := range report.Buckets {
 		builder.WriteString(fmt.Sprintf("%-12s %10d %14s %14s\n",
@@ -251,6 +355,11 @@ func FormatReport(report usage.Report, insertions int, deletions int) string {
 	}
 	builder.WriteString(fmt.Sprintf("\n%-12s %10d %14s %14s\n",
 		"total", report.Total.Requests, groupThousands(report.Total.TotalTokens), formatUSD(report.Total.TotalCost)))
+	if len(coverage) > 0 {
+		metrics := coverage[0]
+		builder.WriteString(fmt.Sprintf("\npricing: %s (persisted %d, reconstructed %d, unpriced %d, errors %d)\n",
+			metrics.CostCoverage, metrics.PersistedCount, metrics.ReconstructedCount, metrics.UnpricedCount, metrics.ErrorCount))
+	}
 
 	builder.WriteString(fmt.Sprintf("\nnet LOC (estimate): +%d / -%d = %d\n",
 		insertions, deletions, report.NetLOC))
@@ -262,6 +371,30 @@ func FormatReport(report usage.Report, insertions int, deletions int) string {
 		builder.WriteString("est. cost per net LOC: n/a (net LOC <= 0)\n")
 	}
 	return strings.TrimRight(builder.String(), "\n")
+}
+
+func historicalCostLabel(coverage usageCoverage) string {
+	switch coverage.CostCoverage {
+	case usage.CostCoverageComplete:
+		switch {
+		case coverage.PersistedCount > 0 && coverage.ReconstructedCount > 0:
+			return "cost uses persisted and reconstructed estimates"
+		case coverage.PersistedCount > 0:
+			return "cost is a persisted estimate"
+		case coverage.ReconstructedCount > 0:
+			return "cost is a reconstructed estimate"
+		}
+	case usage.CostCoveragePartial:
+		switch {
+		case coverage.PersistedCount > 0 && coverage.ReconstructedCount > 0:
+			return "cost uses persisted and reconstructed estimates with partial coverage"
+		case coverage.PersistedCount > 0:
+			return "cost uses persisted estimates with partial coverage"
+		case coverage.ReconstructedCount > 0:
+			return "cost uses reconstructed estimates with partial coverage"
+		}
+	}
+	return "cost unavailable"
 }
 
 func formatUSD(value float64) string {

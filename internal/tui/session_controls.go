@@ -796,9 +796,13 @@ func (m model) setCompactStatusRow(text string) model {
 	return m
 }
 
-func (m model) recordUsageEvent(modelID string, event zeroruntime.Usage) (model, []transcriptRow) {
-	if m.usageTracker == nil || strings.TrimSpace(modelID) == "" {
+func (m model) recordUsageEvent(modelID string, event zeroruntime.Usage, attributedCosts ...*agent.UsageCostEstimate) (model, []transcriptRow) {
+	if m.usageTracker == nil {
 		return m, nil
+	}
+	var attributedCost *agent.UsageCostEstimate
+	if len(attributedCosts) > 0 {
+		attributedCost = attributedCosts[0]
 	}
 	normalized, runtimeUsage, err := usage.Normalize(event)
 	if err != nil {
@@ -806,17 +810,28 @@ func (m model) recordUsageEvent(modelID string, event zeroruntime.Usage) (model,
 	}
 	m.lastUsage = normalized
 	m.lastUsageSeen = true
-	if _, err := m.usageTracker.Record(usage.RecordInput{
+	input := usage.RecordInput{
 		ModelID: modelID,
 		Usage:   runtimeUsage,
 		Source:  "tui",
-	}); err != nil {
+	}
+	if attributedCost != nil {
+		input.Cost = &usage.CostEstimate{
+			CostUSD:        attributedCost.CostUSD,
+			CostStatus:     attributedCost.Status,
+			CostProvenance: attributedCost.Provenance,
+			PricingSource:  attributedCost.PricingSource,
+			PricingAsOf:    attributedCost.PricingAsOf,
+			UnpricedReason: attributedCost.UnpricedReason,
+		}
+	}
+	if _, err := m.usageTracker.Record(input); err != nil {
 		if isUnpricedUsageError(err) {
 			m.unpricedRequests++
 			m.unpricedTokens += normalized.TotalTokens
-			return m, nil
+		} else {
+			return m, []transcriptRow{{kind: rowError, text: "usage: " + err.Error()}}
 		}
-		return m, []transcriptRow{{kind: rowError, text: "usage: " + err.Error()}}
 	}
 	return m, nil
 }
@@ -861,10 +876,14 @@ func (m model) usageSummaryText() string {
 	if summary.RecordCount == 0 {
 		return formatUnpricedUsage(m.unpricedRequests, m.unpricedTokens)
 	}
-	if m.unpricedRequests == 0 {
+	if summary.CostCoverage == usage.CostCoverageComplete {
 		return usage.FormatSummary(summary)
 	}
-	return usage.FormatSummary(summary) + "; " + formatUnpricedUsage(m.unpricedRequests, m.unpricedTokens)
+	requestLabel := "requests"
+	if summary.RecordCount == 1 {
+		requestLabel = "request"
+	}
+	return fmt.Sprintf("%d %s, %d tokens, %s", summary.RecordCount, requestLabel, summary.TotalTokens, usageCoverageLabel(summary.CostCoverage))
 }
 
 // cacheEfficiencyText reports the session's prompt-cache hit rate for /context so a
