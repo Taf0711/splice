@@ -111,7 +111,7 @@ func TestBuildReportPricesFromEventModelWhenPresent(t *testing.T) {
 		t.Fatalf("DefaultRegistry: %v", err)
 	}
 	// An escalation-run event carries its own model. The session metadata has no
-	// model id, so cost can only be reconstructed from the event's model — proving
+	// model id, so cost can only be reconstructed from the event's model. This proves
 	// the report prefers payload.Model rather than ignoring it.
 	payload, err := json.Marshal(map[string]any{
 		"promptTokens":     1000,
@@ -148,6 +148,42 @@ func TestBuildReportPricesFromEventModelWhenPresent(t *testing.T) {
 	}
 	if report.Total.TotalCost != want.TotalCost {
 		t.Fatalf("cost = %v, want %v (must price from the event's model, not the empty session model)", report.Total.TotalCost, want.TotalCost)
+	}
+}
+
+func TestBuildReportPrefersPersistedCostEstimate(t *testing.T) {
+	registry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry: %v", err)
+	}
+	persisted := 3.75
+	payload, err := json.Marshal(map[string]any{
+		"promptTokens":     1000,
+		"completionTokens": 200,
+		"totalTokens":      1200,
+		"model":            "gpt-4.1",
+		"costUsd":          persisted,
+		"costStatus":       CostStatusPriced,
+		"costProvenance":   CostProvenancePersistedEstimate,
+		"pricingSource":    "persisted-catalog",
+		"pricingAsOf":      "2026-06-01",
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	events := []sessions.Event{{
+		SessionID: "s1",
+		Sequence:  1,
+		Type:      sessions.EventUsage,
+		CreatedAt: "2026-06-01T09:00:00Z",
+		Payload:   payload,
+	}}
+	report, err := BuildReport(events, nil, &registry, 10)
+	if err != nil {
+		t.Fatalf("BuildReport: %v", err)
+	}
+	if report.Total.TotalTokens != 1200 || report.Total.TotalCost != persisted {
+		t.Fatalf("report = %#v, want persisted cost %v", report.Total, persisted)
 	}
 }
 

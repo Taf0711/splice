@@ -2,6 +2,8 @@ package usage
 
 import (
 	"encoding/json"
+	"fmt"
+	"math"
 	"sort"
 	"time"
 
@@ -20,13 +22,19 @@ import (
 // mid-run only under --allow-escalation); when absent, cost is reconstructed from
 // the session's Metadata.ModelID and is a labeled estimate.
 type usageEventPayload struct {
-	PromptTokens      int    `json:"promptTokens"`
-	CompletionTokens  int    `json:"completionTokens"`
-	TotalTokens       int    `json:"totalTokens"`
-	CachedInputTokens int    `json:"cachedInputTokens,omitempty"`
-	CacheWriteTokens  int    `json:"cacheWriteTokens,omitempty"`
-	ReasoningTokens   int    `json:"reasoningTokens,omitempty"`
-	Model             string `json:"model,omitempty"`
+	PromptTokens      int      `json:"promptTokens"`
+	CompletionTokens  int      `json:"completionTokens"`
+	TotalTokens       int      `json:"totalTokens"`
+	CachedInputTokens int      `json:"cachedInputTokens,omitempty"`
+	CacheWriteTokens  int      `json:"cacheWriteTokens,omitempty"`
+	ReasoningTokens   int      `json:"reasoningTokens,omitempty"`
+	Model             string   `json:"model,omitempty"`
+	CostUSD           *float64 `json:"costUsd,omitempty"`
+	CostStatus        string   `json:"costStatus,omitempty"`
+	CostProvenance    string   `json:"costProvenance,omitempty"`
+	PricingSource     string   `json:"pricingSource,omitempty"`
+	PricingAsOf       string   `json:"pricingAsOf,omitempty"`
+	UnpricedReason    string   `json:"unpricedReason,omitempty"`
 }
 
 // EventUsagePayload builds the persisted EventUsage payload for a usage record.
@@ -114,9 +122,9 @@ type Totals struct {
 	TotalCost    float64 `json:"totalCost"`
 }
 
-// Report is the aggregated usage view rendered by `splice usage report`. Cost is a
-// reconstructed estimate (see usageEventPayload) and NetLOC is a working-tree
-// estimate; both are surfaced as estimates in the rendered output.
+// Report is the aggregated usage view rendered by `splice usage report`. Cost
+// uses a persisted estimate when present, and otherwise uses reconstruction.
+// NetLOC is a working-tree estimate.
 type Report struct {
 	Buckets         []DayBucket `json:"buckets"`
 	Total           Totals      `json:"total"`
@@ -129,10 +137,10 @@ type Report struct {
 }
 
 // BuildReport aggregates persisted EventUsage events into per-day buckets and a
-// report-wide total, reconstructing cost from the owning session's
-// Metadata.ModelID via modelregistry.CalculateCost. Sessions whose model id is
-// empty or unknown contribute token counts but no cost. The per-net-LOC ratios
-// are guarded against a non-positive netLOC.
+// report-wide total. It honors a persisted priced estimate before it attempts
+// reconstruction from the owning session's Metadata.ModelID. Sessions whose
+// model id is empty or unknown contribute token counts but no cost. The
+// per-net-LOC ratios are guarded against a non-positive netLOC.
 func BuildReport(events []sessions.Event, meta []sessions.Metadata, registry *modelregistry.Registry, netLOC int) (Report, error) {
 	modelBySession := map[string]string{}
 	for _, m := range meta {
@@ -173,6 +181,20 @@ func BuildReport(events []sessions.Event, meta []sessions.Metadata, registry *mo
 		report.Total.InputTokens += payload.PromptTokens
 		report.Total.OutputTokens += payload.CompletionTokens
 		report.Total.TotalTokens += payload.TotalTokens
+
+		// A persisted priced estimate is authoritative. Do not rewrite it from
+		// the current registry.
+		if payload.CostStatus == CostStatusPriced {
+			if payload.CostUSD == nil || math.IsNaN(*payload.CostUSD) || math.IsInf(*payload.CostUSD, 0) || *payload.CostUSD < 0 {
+				return Report{}, fmt.Errorf("usage event %d: priced cost must be a finite non-negative cost_usd", event.Sequence)
+			}
+			bucket.TotalCost += *payload.CostUSD
+			report.Total.TotalCost += *payload.CostUSD
+			continue
+		}
+		if payload.CostStatus == CostStatusUnpriced || payload.CostStatus == CostStatusError {
+			continue
+		}
 
 		// Prefer the model the event itself recorded (set on escalation runs, where
 		// the model changed mid-run) so that usage is priced at the model actually

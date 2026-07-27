@@ -37,6 +37,9 @@ func TestTrackerNormalizesUsageAndComputesModelCost(t *testing.T) {
 	if record.Cost.TotalCost <= 0 || record.Cost.ModelID != "gpt-4.1" {
 		t.Fatalf("cost not computed: %#v", record.Cost)
 	}
+	if record.Cost.CostStatus != CostStatusPriced || record.Cost.CostProvenance != CostProvenanceReconstructedEstimate {
+		t.Fatalf("cost metadata = %#v, want reconstructed priced", record.Cost)
+	}
 
 	summary := tracker.Summary()
 	if summary.RecordCount != 1 || summary.TotalTokens != 1_250 || summary.ByModel[0].ModelID != "gpt-4.1" {
@@ -44,6 +47,170 @@ func TestTrackerNormalizesUsageAndComputesModelCost(t *testing.T) {
 	}
 	if FormatSummary(summary) != "1 request, 1,250 tokens, "+summary.FormattedTotalCost {
 		t.Fatalf("unexpected formatted summary: %q", FormatSummary(summary))
+	}
+}
+
+func TestTrackerPrefersPersistedEstimateAfterRegistryPriceChange(t *testing.T) {
+	tracker, err := NewTracker(TrackerOptions{})
+	if err != nil {
+		t.Fatalf("NewTracker returned error: %v", err)
+	}
+	persisted := 7.25
+	first, err := tracker.Record(RecordInput{
+		ModelID: "gpt-4.1",
+		Usage:   zeroruntime.Usage{InputTokens: 100, OutputTokens: 20},
+		Cost: &CostEstimate{
+			CostUSD:        &persisted,
+			CostStatus:     CostStatusPriced,
+			CostProvenance: CostProvenancePersistedEstimate,
+			PricingSource:  "persisted-catalog",
+			PricingAsOf:    "2026-06-01",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Record returned error: %v", err)
+	}
+
+	entries := tracker.registry.List(modelregistry.ListOptions{IncludeDeprecated: true})
+	for index := range entries {
+		if entries[index].ID == "gpt-4.1" {
+			entries[index].Cost.InputPerMillion *= 10
+			entries[index].Cost.OutputPerMillion *= 10
+		}
+	}
+	changed, err := modelregistry.NewRegistry(entries)
+	if err != nil {
+		t.Fatalf("NewRegistry returned error: %v", err)
+	}
+	tracker.registry = changed
+	second, err := tracker.Record(RecordInput{
+		ModelID: "gpt-4.1",
+		Usage:   zeroruntime.Usage{InputTokens: 100, OutputTokens: 20},
+		Cost: &CostEstimate{
+			CostUSD:        &persisted,
+			CostStatus:     CostStatusPriced,
+			CostProvenance: CostProvenancePersistedEstimate,
+			PricingSource:  "persisted-catalog",
+			PricingAsOf:    "2026-06-01",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Record returned error after registry change: %v", err)
+	}
+	if first.Cost.CostUSD == nil || second.Cost.CostUSD == nil || *second.Cost.CostUSD != persisted {
+		t.Fatalf("persisted cost changed: first=%#v second=%#v", first.Cost, second.Cost)
+	}
+	if summary := tracker.Summary(); summary.PersistedCount != 2 || summary.TotalCost != persisted*2 {
+		t.Fatalf("persisted summary = %#v", summary)
+	}
+}
+
+func TestTrackerReconstructsCostWhenEstimateMissing(t *testing.T) {
+	tracker, err := NewTracker(TrackerOptions{})
+	if err != nil {
+		t.Fatalf("NewTracker returned error: %v", err)
+	}
+	record, err := tracker.Record(RecordInput{
+		ModelID: "gpt-4.1",
+		Usage:   zeroruntime.Usage{InputTokens: 100, OutputTokens: 20},
+	})
+	if err != nil {
+		t.Fatalf("Record returned error: %v", err)
+	}
+	if record.Cost == nil || record.Cost.CostStatus != CostStatusPriced || record.Cost.CostProvenance != CostProvenanceReconstructedEstimate {
+		t.Fatalf("record cost = %#v, want reconstructed priced", record.Cost)
+	}
+	if summary := tracker.Summary(); summary.ReconstructedCount != 1 || summary.CostCoverage != CostCoverageComplete {
+		t.Fatalf("summary = %#v", summary)
+	}
+}
+
+func TestTrackerRecordsUnpricedWithoutModelAndRetainsTokens(t *testing.T) {
+	tracker, err := NewTracker(TrackerOptions{})
+	if err != nil {
+		t.Fatalf("NewTracker returned error: %v", err)
+	}
+	record, err := tracker.Record(RecordInput{Usage: zeroruntime.Usage{InputTokens: 80, OutputTokens: 20}})
+	if err != nil {
+		t.Fatalf("Record returned error: %v", err)
+	}
+	if record.Cost == nil || record.Cost.CostStatus != CostStatusUnpriced || record.Cost.CostUSD != nil {
+		t.Fatalf("record cost = %#v, want unpriced with unknown cost", record.Cost)
+	}
+	summary := tracker.Summary()
+	if summary.TotalTokens != 100 || summary.UnpricedCount != 1 || summary.CostCoverage != CostCoverageUnavailable || summary.TotalCost != 0 {
+		t.Fatalf("summary = %#v", summary)
+	}
+}
+
+func TestTrackerDistinguishesPricedZeroFromUnpriced(t *testing.T) {
+	tracker, err := NewTracker(TrackerOptions{})
+	if err != nil {
+		t.Fatalf("NewTracker returned error: %v", err)
+	}
+	zero := 0.0
+	priced, err := tracker.Record(RecordInput{
+		Cost: &CostEstimate{
+			CostUSD:        &zero,
+			CostStatus:     CostStatusPriced,
+			CostProvenance: CostProvenancePersistedEstimate,
+			PricingSource:  "test",
+			PricingAsOf:    "2026-06-01",
+		},
+		Usage: zeroruntime.Usage{InputTokens: 1},
+	})
+	if err != nil {
+		t.Fatalf("Record priced zero returned error: %v", err)
+	}
+	unpriced, err := tracker.Record(RecordInput{Usage: zeroruntime.Usage{InputTokens: 1}})
+	if err != nil {
+		t.Fatalf("Record unpriced returned error: %v", err)
+	}
+	if priced.Cost.CostUSD == nil || *priced.Cost.CostUSD != 0 {
+		t.Fatalf("priced zero cost = %#v", priced.Cost)
+	}
+	if unpriced.Cost.CostUSD != nil {
+		t.Fatalf("unpriced cost = %#v, want nil CostUSD", unpriced.Cost)
+	}
+	summary := tracker.Summary()
+	if summary.PersistedCount != 1 || summary.UnpricedCount != 1 || summary.CostCoverage != CostCoveragePartial {
+		t.Fatalf("summary = %#v", summary)
+	}
+}
+
+func TestTrackerCoverageStates(t *testing.T) {
+	zero := 0.0
+	persisted := &CostEstimate{
+		CostUSD:        &zero,
+		CostStatus:     CostStatusPriced,
+		CostProvenance: CostProvenancePersistedEstimate,
+		PricingSource:  "test",
+		PricingAsOf:    "2026-06-01",
+	}
+	tests := []struct {
+		name     string
+		inputs   []RecordInput
+		coverage string
+	}{
+		{name: "none", coverage: CostCoverageNotApplicable},
+		{name: "all unpriced", inputs: []RecordInput{{Usage: zeroruntime.Usage{InputTokens: 1}}}, coverage: CostCoverageUnavailable},
+		{name: "mixed", inputs: []RecordInput{{Cost: persisted, Usage: zeroruntime.Usage{InputTokens: 1}}, {Usage: zeroruntime.Usage{InputTokens: 1}}}, coverage: CostCoveragePartial},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			tracker, err := NewTracker(TrackerOptions{})
+			if err != nil {
+				t.Fatalf("NewTracker returned error: %v", err)
+			}
+			for _, input := range test.inputs {
+				if _, err := tracker.Record(input); err != nil {
+					t.Fatalf("Record returned error: %v", err)
+				}
+			}
+			if got := tracker.Summary().CostCoverage; got != test.coverage {
+				t.Fatalf("coverage = %q, want %q", got, test.coverage)
+			}
+		})
 	}
 }
 
@@ -57,6 +224,10 @@ func TestTrackerRejectsInvalidUsageAndUnknownModels(t *testing.T) {
 	}
 	if _, err := tracker.Record(RecordInput{ModelID: "gpt-4.1", Usage: zeroruntime.Usage{InputTokens: -1}}); err == nil {
 		t.Fatal("expected invalid usage error")
+	}
+	summary := tracker.Summary()
+	if summary.ErrorCount != 1 || summary.TotalTokens != 1 || summary.CostCoverage != CostCoverageUnavailable {
+		t.Fatalf("error record summary = %#v", summary)
 	}
 }
 
