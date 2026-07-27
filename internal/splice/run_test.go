@@ -2159,42 +2159,6 @@ func TestRequestLedgerRecordsOnceAndPreservesCallbackModes(t *testing.T) {
 	}
 }
 
-func TestRequestLedgerMarksMissingUsageUnpriced(t *testing.T) {
-	ledger := newRequestLedger()
-	ledgerOpts := agent.Options{
-		OnAttributedUsage: func(au agent.AttributedUsage) {
-			au.Sequence = len(ledger.records) + 1
-			if au.UsageReported {
-				au.Cost = agent.UsageCostEstimate{Status: agent.CostStatusPriced, CostUSD: Ptr(0.0), Provenance: agent.CostProvenanceRuntimeEstimate, PricingSource: "t", PricingAsOf: "2026-01-01"}
-			} else {
-				au.Cost = agent.UsageCostEstimate{Status: agent.CostStatusUnpriced, UnpricedReason: "usage not reported by provider"}
-			}
-			rec := schemas.PipelineUsageRecord{
-				Sequence: au.Sequence, Stage: au.Stage, Iteration: au.Iteration,
-				UsageReported: au.UsageReported, CostStatus: au.Cost.Status,
-				UnpricedReason: au.Cost.UnpricedReason, CostUSD: au.Cost.CostUSD,
-			}
-			ledger.append(rec)
-		},
-	}
-	ledgerOpts.OnAttributedUsage(agent.AttributedUsage{
-		UsageReported: false, Stage: "test_runner", Iteration: 1,
-	})
-	if len(ledger.records) != 1 {
-		t.Fatalf("records = %d, want 1", len(ledger.records))
-	}
-	rec := ledger.records[0]
-	if rec.CostStatus != schemas.CostStatusUnpriced {
-		t.Fatalf("cost_status = %s, want unpriced", rec.CostStatus)
-	}
-	if rec.UsageReported {
-		t.Fatal("expected usage_reported=false")
-	}
-	if rec.InputTokens != 0 || rec.OutputTokens != 0 {
-		t.Fatal("expected zero tokens for missing usage")
-	}
-}
-
 func TestRequestLedgerRejectsMalformedUsageBeforePricing(t *testing.T) {
 	ledger := newRequestLedger()
 	estimatorCalls := 0
@@ -2215,141 +2179,191 @@ func TestRequestLedgerRejectsMalformedUsageBeforePricing(t *testing.T) {
 	}
 }
 
-func TestRequestLedgerPreservesPricedZero(t *testing.T) {
+func TestRequestLedgerRecordingOptionsCases(t *testing.T) {
 	zero := 0.0
-	estimator := func(model string, u zeroruntime.Usage, reported bool) agent.UsageCostEstimate {
-		if reported {
-			return agent.UsageCostEstimate{
-				CostUSD: &zero, Status: schemas.CostStatusPriced,
-				Provenance:    agent.CostProvenanceRuntimeEstimate,
-				PricingSource: "test", PricingAsOf: "2026-01-01",
-			}
-		}
-		return agent.UsageCostEstimate{Status: agent.CostStatusUnpriced, UnpricedReason: "not reported"}
-	}
-	ledger := newRequestLedger()
-	var captured agent.AttributedUsage
-	ledgerOpts := agent.Options{
-		EstimateUsageCost: estimator,
-		OnAttributedUsage: func(au agent.AttributedUsage) {
-			au.Sequence = len(ledger.records) + 1
-			au.Cost = estimator(au.Model, au.Usage, au.UsageReported)
-			rec := schemas.PipelineUsageRecord{
-				Sequence: au.Sequence, Stage: au.Stage, Iteration: au.Iteration,
-				UsageReported: au.UsageReported, InputTokens: au.Usage.EffectiveInputTokens(),
-				OutputTokens: au.Usage.EffectiveOutputTokens(), CostStatus: au.Cost.Status,
-				CostUSD: au.Cost.CostUSD, CostProvenance: au.Cost.Provenance,
-				PricingSource: au.Cost.PricingSource, PricingAsOf: au.Cost.PricingAsOf,
-			}
-			ledger.append(rec)
-			captured = au
+	tests := []struct {
+		name      string
+		estimator func(string, agent.Usage, bool) agent.UsageCostEstimate
+		usages    []agent.AttributedUsage
+		check     func(*testing.T, *requestLedger, []agent.AttributedUsage)
+	}{
+		{
+			name: "missing usage is unpriced",
+			usages: []agent.AttributedUsage{{
+				UsageReported: false, Stage: "test_runner", Iteration: 1,
+			}},
+			check: func(t *testing.T, ledger *requestLedger, _ []agent.AttributedUsage) {
+				if len(ledger.records) != 1 {
+					t.Fatalf("records = %d, want 1", len(ledger.records))
+				}
+				rec := ledger.records[0]
+				if rec.CostStatus != schemas.CostStatusUnpriced {
+					t.Fatalf("cost_status = %s, want unpriced", rec.CostStatus)
+				}
+				if rec.UsageReported {
+					t.Fatal("expected usage_reported=false")
+				}
+				if rec.InputTokens != 0 || rec.OutputTokens != 0 {
+					t.Fatal("expected zero tokens for missing usage")
+				}
+			},
+		},
+		{
+			name: "preserves priced zero",
+			estimator: func(string, agent.Usage, bool) agent.UsageCostEstimate {
+				return agent.UsageCostEstimate{
+					CostUSD: &zero, Status: schemas.CostStatusPriced,
+					Provenance:    agent.CostProvenanceRuntimeEstimate,
+					PricingSource: "test", PricingAsOf: "2026-01-01",
+				}
+			},
+			usages: []agent.AttributedUsage{{
+				Usage:         zeroruntime.Usage{InputTokens: 50, OutputTokens: 10},
+				UsageReported: true, Stage: "code_writer", Iteration: 1,
+			}},
+			check: func(t *testing.T, ledger *requestLedger, captured []agent.AttributedUsage) {
+				if captured[0].Cost.CostUSD == nil || *captured[0].Cost.CostUSD != 0 {
+					t.Fatalf("expected priced zero, got %+v", captured[0].Cost)
+				}
+				if ledger.records[0].CostStatus != schemas.CostStatusPriced {
+					t.Fatalf("expected priced status, got %s", ledger.records[0].CostStatus)
+				}
+			},
+		},
+		{
+			name: "prices routed models independently",
+			estimator: func(model string, u agent.Usage, reported bool) agent.UsageCostEstimate {
+				if !reported {
+					return agent.UsageCostEstimate{Status: agent.CostStatusUnpriced, UnpricedReason: "not reported"}
+				}
+				var inputRate float64
+				switch model {
+				case "model-a":
+					inputRate = 0.01
+				case "model-b":
+					inputRate = 0.001
+				default:
+					return agent.UsageCostEstimate{Status: agent.CostStatusUnpriced, UnpricedReason: "unknown"}
+				}
+				cost := float64(u.EffectiveInputTokens()) * inputRate
+				return agent.UsageCostEstimate{
+					CostUSD: &cost, Status: schemas.CostStatusPriced,
+					Provenance:    agent.CostProvenanceRuntimeEstimate,
+					PricingSource: "test", PricingAsOf: "2026-01-01",
+				}
+			},
+			usages: []agent.AttributedUsage{
+				{Usage: zeroruntime.Usage{InputTokens: 100}, UsageReported: true, Stage: "code_writer", Iteration: 1, Model: "model-a"},
+				{Usage: zeroruntime.Usage{InputTokens: 100}, UsageReported: true, Stage: "test_generator", Iteration: 1, Model: "model-b"},
+			},
+			check: func(t *testing.T, ledger *requestLedger, _ []agent.AttributedUsage) {
+				if len(ledger.records) != 2 {
+					t.Fatalf("records = %d, want 2", len(ledger.records))
+				}
+				if ledger.records[0].CostUSD == nil || *ledger.records[0].CostUSD != 1.0 {
+					t.Fatalf("model-a cost = %v, want $1.00", ledger.records[0].CostUSD)
+				}
+				if ledger.records[1].CostUSD == nil || *ledger.records[1].CostUSD != 0.1 {
+					t.Fatalf("model-b cost = %v, want $0.10", ledger.records[1].CostUSD)
+				}
+			},
+		},
+		{
+			name: "does not add reasoning to output",
+			usages: []agent.AttributedUsage{{
+				Usage:         zeroruntime.Usage{InputTokens: 100, OutputTokens: 60, ReasoningTokens: 30},
+				UsageReported: true, Stage: "code_writer", Iteration: 1,
+			}},
+			check: func(t *testing.T, ledger *requestLedger, _ []agent.AttributedUsage) {
+				rec := ledger.records[0]
+				if rec.OutputTokens != 60 {
+					t.Fatalf("output = %d, want 60", rec.OutputTokens)
+				}
+				if rec.Reasoning != 30 {
+					t.Fatalf("reasoning = %d, want 30", rec.Reasoning)
+				}
+				result := schemas.PipelineResult{
+					RunID: "test", Status: "completed", Tier: schemas.TierLight,
+					Stages: []schemas.StageRecord{{Name: "code_writer", Status: schemas.StageCompleted, Iteration: 1}},
+				}
+				applyRequestLedger(&result, ledger)
+				if result.TotalTokensOutput != 60 {
+					t.Fatalf("total output = %d, want 60", result.TotalTokensOutput)
+				}
+				if result.TotalTokensReasoning != 30 {
+					t.Fatalf("total reasoning = %d, want 30", result.TotalTokensReasoning)
+				}
+			},
+		},
+		{
+			name: "includes step back only in pipeline totals",
+			usages: []agent.AttributedUsage{
+				{Usage: zeroruntime.Usage{InputTokens: 100, OutputTokens: 50}, UsageReported: true, Stage: "code_writer", Iteration: 1},
+				{Usage: zeroruntime.Usage{InputTokens: 20, OutputTokens: 10}, UsageReported: true, Stage: "step_back", Iteration: 1},
+				{Usage: zeroruntime.Usage{InputTokens: 110, OutputTokens: 55}, UsageReported: true, Stage: "code_writer", Iteration: 2},
+			},
+			check: func(t *testing.T, ledger *requestLedger, _ []agent.AttributedUsage) {
+				result := schemas.PipelineResult{
+					RunID: "test", Status: "completed", Tier: schemas.TierLight,
+					Stages: []schemas.StageRecord{
+						{Name: "code_writer", Status: schemas.StageCompleted, Iteration: 1},
+						{Name: "code_writer", Status: schemas.StageCompleted, Iteration: 2},
+					},
+				}
+				applyRequestLedger(&result, ledger)
+				if result.TotalTokensInput != 230 {
+					t.Fatalf("total input = %d, want 230 (including step_back)", result.TotalTokensInput)
+				}
+				if result.TotalTokensOutput != 115 {
+					t.Fatalf("total output = %d, want 115", result.TotalTokensOutput)
+				}
+				for _, s := range result.Stages {
+					if s.Name == "step_back" {
+						t.Fatal("step_back should not be a stage record")
+					}
+				}
+			},
+		},
+		{
+			name: "groups context retry by stage",
+			usages: []agent.AttributedUsage{
+				{Usage: zeroruntime.Usage{InputTokens: 4, OutputTokens: 3, CachedInputTokens: 1, CacheWriteTokens: 1, ReasoningTokens: 1}, UsageReported: true, Stage: "code_writer", Iteration: 1},
+				{Usage: zeroruntime.Usage{InputTokens: 6, OutputTokens: 5, CachedInputTokens: 2, CacheWriteTokens: 1, ReasoningTokens: 2}, UsageReported: true, Stage: "code_writer", Iteration: 1},
+			},
+			check: func(t *testing.T, ledger *requestLedger, _ []agent.AttributedUsage) {
+				if len(ledger.records) != 2 {
+					t.Fatalf("records = %d, want 2", len(ledger.records))
+				}
+				result := schemas.PipelineResult{
+					RunID: "test", Status: "completed", Tier: schemas.TierLight,
+					Stages: []schemas.StageRecord{{Name: "code_writer", Status: schemas.StageCompleted, Iteration: 1}},
+				}
+				applyRequestLedger(&result, ledger)
+				if result.Stages[0].TokensInput != 10 {
+					t.Fatalf("stage input = %d, want 10", result.Stages[0].TokensInput)
+				}
+				if result.Stages[0].TokensOutput != 8 {
+					t.Fatalf("stage output = %d, want 8", result.Stages[0].TokensOutput)
+				}
+				if result.TotalTokensInput != 10 {
+					t.Fatalf("total input = %d, want 10", result.TotalTokensInput)
+				}
+			},
 		},
 	}
-	ledgerOpts.OnAttributedUsage(agent.AttributedUsage{
-		Usage:         zeroruntime.Usage{InputTokens: 50, OutputTokens: 10},
-		UsageReported: true, Stage: "code_writer", Iteration: 1,
-	})
-	if captured.Cost.CostUSD == nil || *captured.Cost.CostUSD != 0 {
-		t.Fatalf("expected priced zero, got %+v", captured.Cost)
-	}
-	if ledger.records[0].CostStatus != schemas.CostStatusPriced {
-		t.Fatalf("expected priced status, got %s", ledger.records[0].CostStatus)
-	}
-}
-
-func TestRequestLedgerPricesRoutedModelsIndependently(t *testing.T) {
-	estimator := func(model string, u zeroruntime.Usage, reported bool) agent.UsageCostEstimate {
-		if !reported {
-			return agent.UsageCostEstimate{Status: agent.CostStatusUnpriced, UnpricedReason: "not reported"}
-		}
-		var inputRate float64
-		switch model {
-		case "model-a":
-			inputRate = 0.01
-		case "model-b":
-			inputRate = 0.001
-		default:
-			return agent.UsageCostEstimate{Status: agent.CostStatusUnpriced, UnpricedReason: "unknown"}
-		}
-		cost := float64(u.EffectiveInputTokens()) * inputRate
-		return agent.UsageCostEstimate{
-			CostUSD: &cost, Status: schemas.CostStatusPriced,
-			Provenance:    agent.CostProvenanceRuntimeEstimate,
-			PricingSource: "test", PricingAsOf: "2026-01-01",
-		}
-	}
-	ledger := newRequestLedger()
-	ledgerOpts := agent.Options{
-		EstimateUsageCost: estimator,
-		OnAttributedUsage: func(au agent.AttributedUsage) {
-			au.Sequence = len(ledger.records) + 1
-			au.Cost = estimator(au.Model, au.Usage, au.UsageReported)
-			rec := schemas.PipelineUsageRecord{
-				Sequence: au.Sequence, Stage: au.Stage, Iteration: au.Iteration,
-				UsageReported: au.UsageReported, InputTokens: au.Usage.EffectiveInputTokens(),
-				OutputTokens: au.Usage.EffectiveOutputTokens(), CostStatus: au.Cost.Status,
-				CostUSD: au.Cost.CostUSD, CostProvenance: au.Cost.Provenance,
-				PricingSource: au.Cost.PricingSource, PricingAsOf: au.Cost.PricingAsOf,
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ledger := newRequestLedger()
+			var captured []agent.AttributedUsage
+			options := ledger.recordingOptions(agent.Options{
+				EstimateUsageCost: tc.estimator,
+				OnAttributedUsage: func(usage agent.AttributedUsage) { captured = append(captured, usage) },
+			})
+			for _, usage := range tc.usages {
+				options.OnAttributedUsage(usage)
 			}
-			ledger.append(rec)
-		},
-	}
-	ledgerOpts.OnAttributedUsage(agent.AttributedUsage{
-		Usage: zeroruntime.Usage{InputTokens: 100}, UsageReported: true,
-		Stage: "code_writer", Iteration: 1, Model: "model-a",
-	})
-	ledgerOpts.OnAttributedUsage(agent.AttributedUsage{
-		Usage: zeroruntime.Usage{InputTokens: 100}, UsageReported: true,
-		Stage: "test_generator", Iteration: 1, Model: "model-b",
-	})
-	if len(ledger.records) != 2 {
-		t.Fatalf("records = %d, want 2", len(ledger.records))
-	}
-	if ledger.records[0].CostUSD == nil || *ledger.records[0].CostUSD != 1.0 {
-		t.Fatalf("model-a cost = %v, want $1.00", ledger.records[0].CostUSD)
-	}
-	if ledger.records[1].CostUSD == nil || *ledger.records[1].CostUSD != 0.1 {
-		t.Fatalf("model-b cost = %v, want $0.10", ledger.records[1].CostUSD)
-	}
-}
-
-func TestRequestLedgerDoesNotAddReasoningToOutput(t *testing.T) {
-	ledger := newRequestLedger()
-	ledgerOpts := agent.Options{
-		OnAttributedUsage: func(au agent.AttributedUsage) {
-			au.Sequence = len(ledger.records) + 1
-			au.Cost = agent.UsageCostEstimate{Status: schemas.CostStatusUnpriced, UnpricedReason: "test"}
-			rec := schemas.PipelineUsageRecord{
-				Sequence: au.Sequence, Stage: au.Stage, Iteration: au.Iteration,
-				UsageReported: au.UsageReported, InputTokens: au.Usage.EffectiveInputTokens(),
-				OutputTokens: au.Usage.EffectiveOutputTokens(), CachedTokens: au.Usage.CachedInputTokens,
-				CacheWrite: au.Usage.CacheWriteTokens, Reasoning: au.Usage.ReasoningTokens,
-				CostStatus: au.Cost.Status, UnpricedReason: au.Cost.UnpricedReason,
-			}
-			ledger.append(rec)
-		},
-	}
-	ledgerOpts.OnAttributedUsage(agent.AttributedUsage{
-		Usage:         zeroruntime.Usage{InputTokens: 100, OutputTokens: 60, ReasoningTokens: 30},
-		UsageReported: true, Stage: "code_writer", Iteration: 1,
-	})
-	rec := ledger.records[0]
-	if rec.OutputTokens != 60 {
-		t.Fatalf("output = %d, want 60", rec.OutputTokens)
-	}
-	if rec.Reasoning != 30 {
-		t.Fatalf("reasoning = %d, want 30", rec.Reasoning)
-	}
-	result := schemas.PipelineResult{
-		RunID: "test", Status: "completed", Tier: schemas.TierLight,
-		Stages: []schemas.StageRecord{{Name: "code_writer", Status: schemas.StageCompleted, Iteration: 1}},
-	}
-	applyRequestLedger(&result, ledger)
-	if result.TotalTokensOutput != 60 {
-		t.Fatalf("total output = %d, want 60", result.TotalTokensOutput)
-	}
-	if result.TotalTokensReasoning != 30 {
-		t.Fatalf("total reasoning = %d, want 30", result.TotalTokensReasoning)
+			tc.check(t, ledger, captured)
+		})
 	}
 }
 
@@ -2381,140 +2395,47 @@ func TestRequestLedgerDerivesCoverageStates(t *testing.T) {
 		Sequence: 3, Stage: "s", Iteration: 1, UsageReported: true, InputTokens: 10, OutputTokens: 5,
 		CostStatus: schemas.CostStatusError, UnpricedReason: "malformed",
 	}
-	// Not applicable: empty ledger
-	result := makeResult()
-	applyRequestLedger(&result, makeLedger())
-	if result.CostCoverage != schemas.CostCoverageNotApplicable {
-		t.Fatalf("empty: coverage = %s, want not_applicable", result.CostCoverage)
-	}
-	// Complete: all priced
-	result = makeResult()
-	applyRequestLedger(&result, makeLedger(priced))
-	if result.CostCoverage != schemas.CostCoverageComplete {
-		t.Fatalf("complete: coverage = %s, want complete", result.CostCoverage)
-	}
-	if result.PricedRequestCount != 1 || result.UnpricedRequestCount != 0 {
-		t.Fatalf("complete counts: priced=%d unpriced=%d", result.PricedRequestCount, result.UnpricedRequestCount)
-	}
-	// Partial: priced + unpriced
-	result = makeResult()
-	applyRequestLedger(&result, makeLedger(priced, unpriced))
-	if result.CostCoverage != schemas.CostCoveragePartial {
-		t.Fatalf("partial: coverage = %s, want partial", result.CostCoverage)
-	}
-	// Unavailable: unpriced + error
-	result = makeResult()
 	u := unpriced
 	u.Sequence = 1
 	e := errRec
 	e.Sequence = 2
-	applyRequestLedger(&result, makeLedger(u, e))
-	if result.CostCoverage != schemas.CostCoverageUnavailable {
-		t.Fatalf("unavailable: coverage = %s, want unavailable", result.CostCoverage)
+	tests := []struct {
+		name         string
+		records      []schemas.PipelineUsageRecord
+		wantCoverage string
+		checkCounts  func(*testing.T, schemas.PipelineResult)
+	}{
+		{name: "not-applicable", wantCoverage: schemas.CostCoverageNotApplicable},
+		{
+			name: "complete", records: []schemas.PipelineUsageRecord{priced},
+			wantCoverage: schemas.CostCoverageComplete,
+			checkCounts: func(t *testing.T, result schemas.PipelineResult) {
+				if result.PricedRequestCount != 1 || result.UnpricedRequestCount != 0 {
+					t.Fatalf("complete counts: priced=%d unpriced=%d", result.PricedRequestCount, result.UnpricedRequestCount)
+				}
+			},
+		},
+		{name: "partial", records: []schemas.PipelineUsageRecord{priced, unpriced}, wantCoverage: schemas.CostCoveragePartial},
+		{
+			name: "unavailable", records: []schemas.PipelineUsageRecord{u, e},
+			wantCoverage: schemas.CostCoverageUnavailable,
+			checkCounts: func(t *testing.T, result schemas.PipelineResult) {
+				if result.ErrorRequestCount != 1 || result.UnpricedRequestCount != 1 {
+					t.Fatalf("unavailable counts: error=%d unpriced=%d", result.ErrorRequestCount, result.UnpricedRequestCount)
+				}
+			},
+		},
 	}
-	if result.ErrorRequestCount != 1 || result.UnpricedRequestCount != 1 {
-		t.Fatalf("unavailable counts: error=%d unpriced=%d", result.ErrorRequestCount, result.UnpricedRequestCount)
-	}
-}
-
-func TestRequestLedgerIncludesStepBackOnlyInPipelineTotals(t *testing.T) {
-	ledger := newRequestLedger()
-	ledgerOpts := agent.Options{
-		OnAttributedUsage: func(au agent.AttributedUsage) {
-			au.Sequence = len(ledger.records) + 1
-			au.Cost = agent.UsageCostEstimate{Status: schemas.CostStatusUnpriced, UnpricedReason: "test"}
-			rec := schemas.PipelineUsageRecord{
-				Sequence: au.Sequence, Stage: au.Stage, Iteration: au.Iteration,
-				UsageReported: au.UsageReported, InputTokens: au.Usage.EffectiveInputTokens(),
-				OutputTokens: au.Usage.EffectiveOutputTokens(), CostStatus: au.Cost.Status,
-				UnpricedReason: au.Cost.UnpricedReason,
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := makeResult()
+			applyRequestLedger(&result, makeLedger(tc.records...))
+			if result.CostCoverage != tc.wantCoverage {
+				t.Fatalf("coverage = %s, want %s", result.CostCoverage, tc.wantCoverage)
 			}
-			ledger.append(rec)
-		},
-	}
-	// Simulate: code_writer (iter 1) + step_back + code_writer (iter 2)
-	ledgerOpts.OnAttributedUsage(agent.AttributedUsage{
-		Usage: zeroruntime.Usage{InputTokens: 100, OutputTokens: 50}, UsageReported: true,
-		Stage: "code_writer", Iteration: 1,
-	})
-	ledgerOpts.OnAttributedUsage(agent.AttributedUsage{
-		Usage: zeroruntime.Usage{InputTokens: 20, OutputTokens: 10}, UsageReported: true,
-		Stage: "step_back", Iteration: 1,
-	})
-	ledgerOpts.OnAttributedUsage(agent.AttributedUsage{
-		Usage: zeroruntime.Usage{InputTokens: 110, OutputTokens: 55}, UsageReported: true,
-		Stage: "code_writer", Iteration: 2,
-	})
-	result := schemas.PipelineResult{
-		RunID: "test", Status: "completed", Tier: schemas.TierLight,
-		Stages: []schemas.StageRecord{
-			{Name: "code_writer", Status: schemas.StageCompleted, Iteration: 1},
-			{Name: "code_writer", Status: schemas.StageCompleted, Iteration: 2},
-		},
-	}
-	applyRequestLedger(&result, ledger)
-	// step_back not in stages but contributes to totals
-	if result.TotalTokensInput != 230 {
-		t.Fatalf("total input = %d, want 230 (including step_back)", result.TotalTokensInput)
-	}
-	if result.TotalTokensOutput != 115 {
-		t.Fatalf("total output = %d, want 115", result.TotalTokensOutput)
-	}
-	// Verify step_back is NOT a stage record
-	for _, s := range result.Stages {
-		if s.Name == "step_back" {
-			t.Fatal("step_back should not be a stage record")
-		}
-	}
-}
-
-func TestRequestLedgerGroupsContextRetryByStage(t *testing.T) {
-	var captured []agent.AttributedUsage
-	ledger := newRequestLedger()
-	downstreamAU := func(au agent.AttributedUsage) { captured = append(captured, au) }
-	ledgerOpts := agent.Options{
-		OnAttributedUsage: func(au agent.AttributedUsage) {
-			au.Sequence = len(ledger.records) + 1
-			au.Cost = agent.UsageCostEstimate{Status: schemas.CostStatusUnpriced, UnpricedReason: "test"}
-			rec := schemas.PipelineUsageRecord{
-				Sequence: au.Sequence, Stage: au.Stage, Iteration: au.Iteration,
-				UsageReported: au.UsageReported, InputTokens: au.Usage.EffectiveInputTokens(),
-				OutputTokens: au.Usage.EffectiveOutputTokens(),
-				CachedTokens: au.Usage.CachedInputTokens, CacheWrite: au.Usage.CacheWriteTokens,
-				Reasoning: au.Usage.ReasoningTokens, CostStatus: au.Cost.Status,
-				UnpricedReason: au.Cost.UnpricedReason,
+			if tc.checkCounts != nil {
+				tc.checkCounts(t, result)
 			}
-			ledger.append(rec)
-			downstreamAU(au)
-		},
-	}
-	// Simulate two provider calls for one stage (context retry)
-	ledgerOpts.OnAttributedUsage(agent.AttributedUsage{
-		Usage:         zeroruntime.Usage{InputTokens: 4, OutputTokens: 3, CachedInputTokens: 1, CacheWriteTokens: 1, ReasoningTokens: 1},
-		UsageReported: true, Stage: "code_writer", Iteration: 1,
-	})
-	ledgerOpts.OnAttributedUsage(agent.AttributedUsage{
-		Usage:         zeroruntime.Usage{InputTokens: 6, OutputTokens: 5, CachedInputTokens: 2, CacheWriteTokens: 1, ReasoningTokens: 2},
-		UsageReported: true, Stage: "code_writer", Iteration: 1,
-	})
-	if len(ledger.records) != 2 {
-		t.Fatalf("records = %d, want 2", len(ledger.records))
-	}
-	result := schemas.PipelineResult{
-		RunID: "test", Status: "completed", Tier: schemas.TierLight,
-		Stages: []schemas.StageRecord{
-			{Name: "code_writer", Status: schemas.StageCompleted, Iteration: 1},
-		},
-	}
-	applyRequestLedger(&result, ledger)
-	// One grouped stage record with summed tokens
-	if result.Stages[0].TokensInput != 10 {
-		t.Fatalf("stage input = %d, want 10", result.Stages[0].TokensInput)
-	}
-	if result.Stages[0].TokensOutput != 8 {
-		t.Fatalf("stage output = %d, want 8", result.Stages[0].TokensOutput)
-	}
-	if result.TotalTokensInput != 10 {
-		t.Fatalf("total input = %d, want 10", result.TotalTokensInput)
+		})
 	}
 }

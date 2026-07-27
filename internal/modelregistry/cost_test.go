@@ -228,30 +228,6 @@ func TestCalculateCostRejectsAllMalformedSubsets(t *testing.T) {
 	}
 }
 
-func TestCalculateCostDisjointCachedReadWritePricing(t *testing.T) {
-	registry, err := DefaultRegistry()
-	if err != nil {
-		t.Fatalf("DefaultRegistry returned error: %v", err)
-	}
-	// gpt-4.1: input=2/M, cached=0.5/M, cacheWrite=0 (not priced separately, stays at input rate)
-	cost, err := registry.EstimateCost("gpt-4.1", zeroruntime.Usage{
-		InputTokens:       1_000_000,
-		CachedInputTokens: 300_000,
-		CacheWriteTokens:  200_000,
-		OutputTokens:      500_000,
-	})
-	if err != nil {
-		t.Fatalf("EstimateCost returned error: %v", err)
-	}
-	// cachedRate > 0, so cachedInputTokens = 300K; cacheWriteRate = 0, so cacheWriteTokens = 0
-	// uncached = 1M - 300K - 0 = 700K at 2/M = 1.4
-	// cached = 300K at 0.5/M = 0.15
-	// output = 500K at 8/M = 4.0
-	assertClose(t, cost.InputCost, 1.4)
-	assertClose(t, cost.CachedInputCost, 0.15)
-	assertClose(t, cost.TotalCost, 5.55)
-}
-
 func TestCalculateCostPricedZeroForKnownModelWithZeroUsage(t *testing.T) {
 	registry, err := DefaultRegistry()
 	if err != nil {

@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
@@ -126,12 +127,7 @@ func TestNormalizeRejectsAllMalformedSubsets(t *testing.T) {
 }
 
 func TestNewCostEstimatorPricedZero(t *testing.T) {
-	estimator := NewCostEstimator(nil)
-	registry, err := modelregistry.DefaultRegistry()
-	if err != nil {
-		t.Fatalf("DefaultRegistry returned error: %v", err)
-	}
-	estimator = NewCostEstimator(&registry)
+	estimator := newDefaultCostEstimator(t)
 
 	result := estimator("gpt-4.1", zeroruntime.Usage{InputTokens: 0, OutputTokens: 0}, true)
 	if result.Status != "priced" {
@@ -149,11 +145,7 @@ func TestNewCostEstimatorPricedZero(t *testing.T) {
 }
 
 func TestNewCostEstimatorUnknownModel(t *testing.T) {
-	registry, err := modelregistry.DefaultRegistry()
-	if err != nil {
-		t.Fatalf("DefaultRegistry returned error: %v", err)
-	}
-	estimator := NewCostEstimator(&registry)
+	estimator := newDefaultCostEstimator(t)
 
 	result := estimator("nonexistent-model", zeroruntime.Usage{InputTokens: 100, OutputTokens: 50}, true)
 	if result.Status != "unpriced" {
@@ -177,11 +169,7 @@ func TestNewCostEstimatorMissingUsage(t *testing.T) {
 }
 
 func TestNewCostEstimatorMalformedUsage(t *testing.T) {
-	registry, err := modelregistry.DefaultRegistry()
-	if err != nil {
-		t.Fatalf("DefaultRegistry returned error: %v", err)
-	}
-	estimator := NewCostEstimator(&registry)
+	estimator := newDefaultCostEstimator(t)
 
 	result := estimator("gpt-4.1", zeroruntime.Usage{InputTokens: 10, CachedInputTokens: 20, OutputTokens: 5}, true)
 	if result.Status != "error" {
@@ -199,4 +187,13 @@ func TestNewCostEstimatorNilRegistry(t *testing.T) {
 	if result.Status != "unpriced" {
 		t.Fatalf("status = %q, want unpriced for nil registry", result.Status)
 	}
+}
+
+func newDefaultCostEstimator(t *testing.T) func(string, zeroruntime.Usage, bool) agent.UsageCostEstimate {
+	t.Helper()
+	registry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry returned error: %v", err)
+	}
+	return NewCostEstimator(&registry)
 }

@@ -27,6 +27,23 @@ func TestCalculateCostCacheWritePremium(t *testing.T) {
 	if cost.CacheWriteTokens != 100_000 || math.Abs(cost.CacheWriteCost-1.25) > 1e-9 {
 		t.Fatalf("cacheWrite = %d tok / $%v", cost.CacheWriteTokens, cost.CacheWriteCost)
 	}
+
+	t.Run("unpriced write with cached read", func(t *testing.T) {
+		registry, err := DefaultRegistry()
+		if err != nil {
+			t.Fatalf("DefaultRegistry returned error: %v", err)
+		}
+		cost, err := registry.EstimateCost("gpt-4.1", zeroruntime.Usage{
+			InputTokens: 1_000_000, CachedInputTokens: 300_000,
+			CacheWriteTokens: 200_000, OutputTokens: 500_000,
+		})
+		if err != nil {
+			t.Fatalf("EstimateCost returned error: %v", err)
+		}
+		assertClose(t, cost.InputCost, 1.4)
+		assertClose(t, cost.CachedInputCost, 0.15)
+		assertClose(t, cost.TotalCost, 5.55)
+	})
 }
 
 // Without a configured cache-write rate, cache-write tokens fall back to the full
