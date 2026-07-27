@@ -20,10 +20,7 @@ func BuildStageModelResolvers(
 	profiles []config.ProviderProfile,
 	newProvider func(config.ProviderProfile) (agent.Provider, error),
 	tierResolverConfig TierResolverConfig,
-) (
-	func(string) (agent.Provider, string, string, error),
-	func() (agent.Provider, string, string, error),
-) {
+) (agent.StageModelResolver, agent.EscalationModelResolver) {
 	profilesByName := make(map[string]config.ProviderProfile, len(profiles))
 	for _, profile := range profiles {
 		profilesByName[profile.Name] = profile
@@ -40,48 +37,55 @@ func BuildStageModelResolvers(
 		)
 	}
 
-	build := func(scope string, cfg schemas.StageModelConfig) (agent.Provider, string, string, error) {
+	build := func(scope string, cfg schemas.StageModelConfig) (agent.ModelSelection, error) {
 		profile, ok := profilesByName[cfg.ProviderProfile]
 		if !ok {
-			return nil, "", "", fmt.Errorf("%s references unknown provider profile %q", scope, cfg.ProviderProfile)
+			return agent.ModelSelection{}, fmt.Errorf("%s references unknown provider profile %q", scope, cfg.ProviderProfile)
+		}
+		selection := agent.ModelSelection{
+			ProviderName:    cfg.ProviderProfile,
+			Model:           cfg.Model,
+			ReasoningEffort: cfg.ReasoningEffort,
 		}
 		cacheKey := providerCacheKey(cfg.ProviderProfile, cfg.Model, cfg.ReasoningEffort)
 		if cached, ok := providerCache[cacheKey]; ok {
-			return cached, cfg.Model, cfg.ReasoningEffort, nil
+			selection.Provider = cached
+			return selection, nil
 		}
 		if newProvider == nil {
-			return nil, "", "", fmt.Errorf("%s cannot build provider: provider factory is nil", scope)
+			return agent.ModelSelection{}, fmt.Errorf("%s cannot build provider: provider factory is nil", scope)
 		}
 		cloned := profile
 		cloned.Model = cfg.Model
 		provider, err := newProvider(cloned)
 		if err != nil {
-			return nil, "", "", fmt.Errorf("build provider for %s: %w", scope, err)
+			return agent.ModelSelection{}, fmt.Errorf("build provider for %s: %w", scope, err)
 		}
 		providerCache[cacheKey] = provider
-		return provider, cfg.Model, cfg.ReasoningEffort, nil
+		selection.Provider = provider
+		return selection, nil
 	}
 
-	stageResolver := func(stageName string) (agent.Provider, string, string, error) {
+	stageResolver := func(stageName string) (agent.ModelSelection, error) {
 		cfg, specific := stageConfig.Resolve(stageName)
 		if specific || (cfg.ProviderProfile != "" && cfg.Model != "") {
 			return build(fmt.Sprintf("stage %q", stageName), cfg)
 		}
 		// Layer 2: batteries-included tier fallback (no explicit override).
 		if tierResolver != nil {
-			if p, m, e, err := tierResolver(stageName); err != nil {
-				return nil, "", "", err
-			} else if p != nil {
-				return p, m, e, nil
+			if selection, err := tierResolver(stageName); err != nil {
+				return agent.ModelSelection{}, err
+			} else if selection.Provider != nil {
+				return selection, nil
 			}
 		}
 		// Layer 3: primary (caller's fallback).
-		return nil, "", "", nil
+		return agent.ModelSelection{}, nil
 	}
 
-	escalationResolver := func() (agent.Provider, string, string, error) {
+	escalationResolver := func() (agent.ModelSelection, error) {
 		if stageConfig.Escalation == nil {
-			return nil, "", "", nil
+			return agent.ModelSelection{}, nil
 		}
 		return build("escalation", *stageConfig.Escalation)
 	}

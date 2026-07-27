@@ -20,6 +20,18 @@ func (m model) toggleDetailedTranscript() model {
 	return m
 }
 
+func (m model) normalTranscriptHeader(width int) string {
+	header := m.pinnedTitleBar(width)
+	if planHeader := m.persistentPlanHeader(width); planHeader != "" {
+		if header != "" {
+			header += "\n" + planHeader
+		} else {
+			header = planHeader
+		}
+	}
+	return header
+}
+
 // detailedTranscriptView renders the full (uncapped) transcript viewport.
 // Tool output that would be truncated in the live view appears in full here.
 func (m model) detailedTranscriptView() string {

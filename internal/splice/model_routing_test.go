@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/config"
 	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/splice/schemas"
@@ -35,47 +36,47 @@ func TestBuildStageModelResolvers(t *testing.T) {
 		return &routingTestProvider{model: profile.Model}, nil
 	}, TierResolverConfig{})
 
-	provider, model, effort, err := stageResolver("code_writer")
+	selection, err := stageResolver("code_writer")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := provider.(*routingTestProvider).model; got != "qwen-coder" || model != "qwen-coder" || effort != "medium" {
-		t.Fatalf("specific route = provider %q, model %q, effort %q", got, model, effort)
+	if got := selection.Provider.(*routingTestProvider).model; got != "qwen-coder" || selection.ProviderName != "local" || selection.Model != "qwen-coder" || selection.ReasoningEffort != "medium" {
+		t.Fatalf("specific route = %+v, provider model %q", selection, got)
 	}
 
-	defaultProvider, model, effort, err := stageResolver("test_generator")
+	defaultSelection, err := stageResolver("test_generator")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := defaultProvider.(*routingTestProvider).model; got != "qwen-default" || model != "qwen-default" || effort != "low" {
-		t.Fatalf("default route = provider %q, model %q, effort %q", got, model, effort)
+	if got := defaultSelection.Provider.(*routingTestProvider).model; got != "qwen-default" || defaultSelection.ProviderName != "local" || defaultSelection.Model != "qwen-default" || defaultSelection.ReasoningEffort != "low" {
+		t.Fatalf("default route = %+v, provider model %q", defaultSelection, got)
 	}
-	cachedProvider, _, _, err := stageResolver("static_analyzer")
+	cachedSelection, err := stageResolver("static_analyzer")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cachedProvider != defaultProvider || builds["local/qwen-default"] != 1 {
+	if cachedSelection.Provider != defaultSelection.Provider || builds["local/qwen-default"] != 1 {
 		t.Fatalf("default provider was not cached: builds=%v", builds)
 	}
 
-	escalated, model, effort, err := escalationResolver()
+	escalation, err := escalationResolver()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := escalated.(*routingTestProvider).model; got != "cloud-large" || model != "cloud-large" || effort != "high" {
-		t.Fatalf("escalation route = provider %q, model %q, effort %q", got, model, effort)
+	if got := escalation.Provider.(*routingTestProvider).model; got != "cloud-large" || escalation.ProviderName != "cloud" || escalation.Model != "cloud-large" || escalation.ReasoningEffort != "high" {
+		t.Fatalf("escalation route = %+v, provider model %q", escalation, got)
 	}
 }
 
 func TestBuildStageModelResolversAbsentConfigIsNoOp(t *testing.T) {
 	stageResolver, escalationResolver := BuildStageModelResolvers(schemas.StageModelConfigFile{}, nil, nil, TierResolverConfig{})
-	provider, model, effort, err := stageResolver("code_writer")
-	if err != nil || provider != nil || model != "" || effort != "" {
-		t.Fatalf("absent stage config = (%v, %q, %q, %v), want no-op", provider, model, effort, err)
+	selection, err := stageResolver("code_writer")
+	if err != nil || selection != (agent.ModelSelection{}) {
+		t.Fatalf("absent stage config = (%+v, %v), want no-op", selection, err)
 	}
-	provider, model, effort, err = escalationResolver()
-	if err != nil || provider != nil || model != "" || effort != "" {
-		t.Fatalf("absent escalation = (%v, %q, %q, %v), want no-op", provider, model, effort, err)
+	selection, err = escalationResolver()
+	if err != nil || selection != (agent.ModelSelection{}) {
+		t.Fatalf("absent escalation = (%+v, %v), want no-op", selection, err)
 	}
 }
 
@@ -89,10 +90,10 @@ func TestBuildStageModelResolversErrorsNameRoute(t *testing.T) {
 	stageResolver, _ := BuildStageModelResolvers(configFile, []config.ProviderProfile{{Name: "broken"}}, func(config.ProviderProfile) (zeroruntime.Provider, error) {
 		return nil, errors.New("factory failed")
 	}, TierResolverConfig{})
-	if _, _, _, err := stageResolver("test_generator"); err == nil || !strings.Contains(err.Error(), `stage "test_generator" references unknown provider profile "missing"`) {
+	if _, err := stageResolver("test_generator"); err == nil || !strings.Contains(err.Error(), `stage "test_generator" references unknown provider profile "missing"`) {
 		t.Fatalf("unknown-profile error = %v", err)
 	}
-	if _, _, _, err := stageResolver("code_writer"); err == nil || !strings.Contains(err.Error(), `build provider for stage "code_writer": factory failed`) {
+	if _, err := stageResolver("code_writer"); err == nil || !strings.Contains(err.Error(), `build provider for stage "code_writer": factory failed`) {
 		t.Fatalf("factory error = %v", err)
 	}
 }
@@ -116,14 +117,14 @@ func TestBuildStageModelResolversExplicitOverrideWinsOverTier(t *testing.T) {
 		},
 		TierResolverConfig{PrimaryProfile: primaryProfile, Registry: &registry},
 	)
-	provider, model, _, err := stageResolver("code_writer")
+	selection, err := stageResolver("code_writer")
 	if err != nil {
 		t.Fatalf("stageResolver: %v", err)
 	}
-	if model != "explicit-model" {
-		t.Fatalf("model = %q, want explicit-model", model)
+	if selection.Model != "explicit-model" || selection.ProviderName != "primary" {
+		t.Fatalf("selection = %+v, want explicit primary route", selection)
 	}
-	if got := provider.(*routingTestProvider).model; got != "explicit-model" {
+	if got := selection.Provider.(*routingTestProvider).model; got != "explicit-model" {
 		t.Fatalf("provider model = %q, want explicit-model", got)
 	}
 }
@@ -142,15 +143,15 @@ func TestBuildStageModelResolversTierFallbackUsedWhenNoOverride(t *testing.T) {
 		},
 		TierResolverConfig{PrimaryProfile: primaryProfile, Registry: &registry},
 	)
-	provider, model, _, err := stageResolver("code_writer")
+	selection, err := stageResolver("code_writer")
 	if err != nil {
 		t.Fatalf("stageResolver: %v", err)
 	}
-	if provider == nil || model == "" {
-		t.Fatal("expected tier fallback to resolve a model")
+	if selection.Provider == nil || selection.Model == "" || selection.ProviderName != "primary" {
+		t.Fatalf("expected tier fallback, got %+v", selection)
 	}
-	if model != "qwen/qwen3-coder-30b-a3b-instruct" {
-		t.Fatalf("tier fallback model = %q, want qwen/qwen3-coder-30b-a3b-instruct", model)
+	if selection.Model != "qwen/qwen3-coder-30b-a3b-instruct" {
+		t.Fatalf("tier fallback model = %q, want qwen/qwen3-coder-30b-a3b-instruct", selection.Model)
 	}
 }
 
@@ -168,11 +169,11 @@ func TestBuildStageModelResolversNoTierLabelFallsBackToPrimary(t *testing.T) {
 		},
 		TierResolverConfig{PrimaryProfile: primaryProfile, Registry: &registry},
 	)
-	provider, model, _, err := stageResolver("static_analyzer")
+	selection, err := stageResolver("static_analyzer")
 	if err != nil {
 		t.Fatalf("stageResolver: %v", err)
 	}
-	if provider != nil || model != "" {
-		t.Fatalf("deterministic stage = (%v, %q), want nil/empty", provider, model)
+	if selection.Provider != nil || selection.Model != "" {
+		t.Fatalf("deterministic stage = %+v, want zero selection", selection)
 	}
 }

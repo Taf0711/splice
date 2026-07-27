@@ -48,12 +48,15 @@ func CalculateCost(model ModelEntry, usage zeroruntime.Usage) (CostBreakdown, er
 	if err != nil {
 		return CostBreakdown{}, err
 	}
+	if reasoningTokens > outputTokens {
+		return CostBreakdown{}, fmt.Errorf("reasoning tokens %d exceeds output tokens %d", reasoningTokens, outputTokens)
+	}
 	requestedCachedInputTokens, err := nonNegativeUsage(usage.CachedInputTokens, "cached input tokens")
 	if err != nil {
 		return CostBreakdown{}, err
 	}
 	if requestedCachedInputTokens > inputTokens {
-		requestedCachedInputTokens = inputTokens
+		return CostBreakdown{}, fmt.Errorf("cached input tokens %d exceeds input tokens %d", requestedCachedInputTokens, inputTokens)
 	}
 	requestedCacheWriteTokens, err := nonNegativeUsage(usage.CacheWriteTokens, "cache write tokens")
 	if err != nil {
@@ -61,10 +64,7 @@ func CalculateCost(model ModelEntry, usage zeroruntime.Usage) (CostBreakdown, er
 	}
 	// Cache-read and cache-write are disjoint subsets of the input.
 	if requestedCacheWriteTokens > inputTokens-requestedCachedInputTokens {
-		requestedCacheWriteTokens = inputTokens - requestedCachedInputTokens
-		if requestedCacheWriteTokens < 0 {
-			requestedCacheWriteTokens = 0
-		}
+		return CostBreakdown{}, fmt.Errorf("cache write tokens %d plus cached input tokens %d exceeds input tokens %d", requestedCacheWriteTokens, requestedCachedInputTokens, inputTokens)
 	}
 
 	tier, err := selectCostTier(model.Cost, inputTokens)

@@ -3,6 +3,7 @@ package schemas
 import (
 	"errors"
 	"fmt"
+	"math"
 )
 
 // PipelineTier is a request complexity tier.
@@ -412,6 +413,7 @@ type StageRecord struct {
 	TokensOutput     int         `json:"tokens_output"`
 	TokensCached     int         `json:"tokens_cached"`
 	TokensCacheWrite int         `json:"tokens_cache_write"`
+	TokensReasoning  int         `json:"tokens_reasoning"`
 	CostUSD          float64     `json:"cost_usd"`
 	LatencyMs        int         `json:"latency_ms"`
 	CommitSHA        *string     `json:"commit_sha,omitempty"`
@@ -435,11 +437,17 @@ func (s StageRecord) Validate() error {
 			return err
 		}
 	}
-	if s.TokensInput < 0 || s.TokensOutput < 0 || s.TokensCached < 0 || s.TokensCacheWrite < 0 {
+	if s.TokensInput < 0 || s.TokensOutput < 0 || s.TokensCached < 0 || s.TokensCacheWrite < 0 || s.TokensReasoning < 0 {
 		return errors.New("token counts must be non-negative")
 	}
-	if s.CostUSD < 0 {
-		return errors.New("cost_usd must be non-negative")
+	if s.TokensCached > s.TokensInput || s.TokensCacheWrite > s.TokensInput-s.TokensCached {
+		return errors.New("cached and cache-write tokens must be disjoint input subsets")
+	}
+	if s.TokensReasoning > s.TokensOutput {
+		return errors.New("reasoning tokens must be an output subset")
+	}
+	if math.IsNaN(s.CostUSD) || math.IsInf(s.CostUSD, 0) || s.CostUSD < 0 {
+		return errors.New("cost_usd must be finite and non-negative")
 	}
 	if s.LatencyMs < 0 {
 		return errors.New("latency_ms must be non-negative")
@@ -492,16 +500,14 @@ func (h HarnessStageInput) Validate() error {
 	return nil
 }
 
-// StageUsage is the typed token and cost ledger a stage reports to the
-// orchestrator. It is the single source of truth for per-stage metering;
-// the orchestrator copies it into StageRecord and sums it into PipelineResult.
-// CostUSD is zero until a pricing source is wired (known gap).
+// StageUsage is the typed token ledger a stage reports to the orchestrator.
+// The orchestrator copies it into StageRecord and sums it into PipelineResult.
 type StageUsage struct {
-	InputTokens       int     `json:"input_tokens"`
-	OutputTokens      int     `json:"output_tokens"`
-	CachedInputTokens int     `json:"cached_input_tokens"`
-	CacheWriteTokens  int     `json:"cache_write_tokens"`
-	CostUSD           float64 `json:"cost_usd"`
+	InputTokens       int `json:"input_tokens"`
+	OutputTokens      int `json:"output_tokens"`
+	CachedInputTokens int `json:"cached_input_tokens"`
+	CacheWriteTokens  int `json:"cache_write_tokens"`
+	ReasoningTokens   int `json:"reasoning_tokens"`
 }
 
 // HarnessStageOutput is minimal typed output returned by harness agents.
@@ -530,21 +536,128 @@ func (h HarnessStageOutput) Validate() error {
 	return nil
 }
 
+// Cost coverage states for aggregate request pricing.
+const (
+	CostCoverageComplete      = "complete"
+	CostCoveragePartial       = "partial"
+	CostCoverageUnavailable   = "unavailable"
+	CostCoverageNotApplicable = "not_applicable"
+
+	CostStatusPriced   = "priced"
+	CostStatusUnpriced = "unpriced"
+	CostStatusError    = "error"
+)
+
+// PipelineUsageRecord is one provider request priced at the orchestrator ledger.
+type PipelineUsageRecord struct {
+	Sequence       int      `json:"sequence"`
+	Provider       string   `json:"provider,omitempty"`
+	Model          string   `json:"model,omitempty"`
+	Stage          string   `json:"stage"`
+	Iteration      int      `json:"iteration"`
+	UsageReported  bool     `json:"usage_reported"`
+	InputTokens    int      `json:"input_tokens"`
+	OutputTokens   int      `json:"output_tokens"`
+	CachedTokens   int      `json:"cached_input_tokens"`
+	CacheWrite     int      `json:"cache_write_tokens"`
+	Reasoning      int      `json:"reasoning_tokens"`
+	CostUSD        *float64 `json:"cost_usd,omitempty"`
+	CostStatus     string   `json:"cost_status"`
+	CostProvenance string   `json:"cost_provenance,omitempty"`
+	PricingSource  string   `json:"pricing_source,omitempty"`
+	PricingAsOf    string   `json:"pricing_as_of,omitempty"`
+	UnpricedReason string   `json:"unpriced_reason,omitempty"`
+}
+
+// Validate checks the pipeline usage record.
+func (r PipelineUsageRecord) Validate() error {
+	if r.Sequence < 1 {
+		return errors.New("sequence must be >= 1")
+	}
+	if r.Stage == "" {
+		return errors.New("stage is required")
+	}
+	if r.Iteration < 1 {
+		return errors.New("iteration must be >= 1")
+	}
+	if r.InputTokens < 0 || r.OutputTokens < 0 || r.CachedTokens < 0 || r.CacheWrite < 0 || r.Reasoning < 0 {
+		return errors.New("token counts must be non-negative")
+	}
+	if r.CachedTokens > r.InputTokens {
+		return fmt.Errorf("cached input tokens %d exceeds input tokens %d", r.CachedTokens, r.InputTokens)
+	}
+	if r.CacheWrite > r.InputTokens-r.CachedTokens {
+		return fmt.Errorf("cache write tokens %d plus cached input tokens %d exceeds input tokens %d", r.CacheWrite, r.CachedTokens, r.InputTokens)
+	}
+	if r.Reasoning > r.OutputTokens {
+		return fmt.Errorf("reasoning tokens %d exceeds output tokens %d", r.Reasoning, r.OutputTokens)
+	}
+	if !r.UsageReported {
+		if r.InputTokens != 0 || r.OutputTokens != 0 || r.CachedTokens != 0 || r.CacheWrite != 0 || r.Reasoning != 0 {
+			return errors.New("usage_reported false requires zero token counts")
+		}
+		if r.CostStatus != CostStatusUnpriced {
+			return errors.New("usage_reported false requires unpriced cost status")
+		}
+	}
+	switch r.CostStatus {
+	case CostStatusPriced:
+		if !r.UsageReported {
+			return errors.New("priced record requires reported usage")
+		}
+		if r.CostUSD == nil || math.IsNaN(*r.CostUSD) || math.IsInf(*r.CostUSD, 0) || *r.CostUSD < 0 {
+			return errors.New("priced record requires a finite non-negative cost_usd")
+		}
+		switch r.CostProvenance {
+		case "runtime_estimate", "persisted_estimate", "reconstructed_estimate", "reported":
+		default:
+			return fmt.Errorf("invalid cost_provenance %q", r.CostProvenance)
+		}
+		if r.PricingSource == "" || r.PricingAsOf == "" {
+			return errors.New("priced record requires pricing_source and pricing_as_of")
+		}
+		if r.UnpricedReason != "" {
+			return errors.New("priced record must not have unpriced_reason")
+		}
+	case CostStatusUnpriced, CostStatusError:
+		if r.CostUSD != nil {
+			return fmt.Errorf("%s record must not have cost_usd", r.CostStatus)
+		}
+		if r.CostProvenance != "" || r.PricingSource != "" || r.PricingAsOf != "" {
+			return fmt.Errorf("%s record must not have pricing provenance", r.CostStatus)
+		}
+		if r.UnpricedReason == "" {
+			return fmt.Errorf("%s record must have unpriced_reason", r.CostStatus)
+		}
+	default:
+		return fmt.Errorf("invalid cost_status %q", r.CostStatus)
+	}
+	return nil
+}
+
 // PipelineResult is the final pipeline result returned by the CLI.
 type PipelineResult struct {
-	RunID             string                 `json:"run_id"`
-	Status            string                 `json:"status"`
-	Tier              PipelineTier           `json:"tier"`
-	Stages            []StageRecord          `json:"stages"`
-	FinalOutput       map[string]interface{} `json:"final_output,omitempty"`
-	TotalCostUSD      float64                `json:"total_cost_usd"`
-	TotalTokensInput  int                    `json:"total_tokens_input"`
-	TotalTokensOutput int                    `json:"total_tokens_output"`
-	AbortReason       *string                `json:"abort_reason,omitempty"`
-	MergeStatus       *string                `json:"merge_status,omitempty"`
-	MergeBranch       *string                `json:"merge_branch,omitempty"`
-	MergeCommitSHA    *string                `json:"merge_commit_sha,omitempty"`
-	MergeMessage      *string                `json:"merge_message,omitempty"`
+	RunID                 string                 `json:"run_id"`
+	Status                string                 `json:"status"`
+	Tier                  PipelineTier           `json:"tier"`
+	Stages                []StageRecord          `json:"stages"`
+	FinalOutput           map[string]interface{} `json:"final_output,omitempty"`
+	TotalCostUSD          float64                `json:"total_cost_usd"`
+	TotalTokensInput      int                    `json:"total_tokens_input"`
+	TotalTokensOutput     int                    `json:"total_tokens_output"`
+	TotalTokensCached     int                    `json:"total_tokens_cached"`
+	TotalTokensCacheWrite int                    `json:"total_tokens_cache_write"`
+	TotalTokensReasoning  int                    `json:"total_tokens_reasoning"`
+	UsageRecords          []PipelineUsageRecord  `json:"usage_records,omitempty"`
+	CostCoverage          string                 `json:"cost_coverage,omitempty"`
+	PricedRequestCount    int                    `json:"priced_request_count"`
+	UnpricedRequestCount  int                    `json:"unpriced_request_count"`
+	ErrorRequestCount     int                    `json:"error_request_count"`
+	AbortReason           *string                `json:"abort_reason,omitempty"`
+	MergeStatus           *string                `json:"merge_status,omitempty"`
+	MergeBranch           *string                `json:"merge_branch,omitempty"`
+	MergeCommitSHA        *string                `json:"merge_commit_sha,omitempty"`
+	MergeMessage          *string                `json:"merge_message,omitempty"`
 }
 
 // Validate checks the pipeline result.
@@ -567,10 +680,10 @@ func (p PipelineResult) Validate() error {
 			return fmt.Errorf("stages[%d]: %w", i, err)
 		}
 	}
-	if p.TotalCostUSD < 0 {
-		return errors.New("total_cost_usd must be non-negative")
+	if math.IsNaN(p.TotalCostUSD) || math.IsInf(p.TotalCostUSD, 0) || p.TotalCostUSD < 0 {
+		return errors.New("total_cost_usd must be finite and non-negative")
 	}
-	if p.TotalTokensInput < 0 || p.TotalTokensOutput < 0 {
+	if p.TotalTokensInput < 0 || p.TotalTokensOutput < 0 || p.TotalTokensCached < 0 || p.TotalTokensCacheWrite < 0 || p.TotalTokensReasoning < 0 {
 		return errors.New("token counts must be non-negative")
 	}
 	if p.MergeStatus != nil {
@@ -579,6 +692,57 @@ func (p PipelineResult) Validate() error {
 		default:
 			return fmt.Errorf("invalid merge_status %q", *p.MergeStatus)
 		}
+	}
+	if p.PricedRequestCount < 0 || p.UnpricedRequestCount < 0 || p.ErrorRequestCount < 0 {
+		return errors.New("request counts must be non-negative")
+	}
+	var input, output, cached, cacheWrite, reasoning int
+	var cost float64
+	var priced, unpriced, costErrors int
+	for i, record := range p.UsageRecords {
+		if err := record.Validate(); err != nil {
+			return fmt.Errorf("usage_records[%d]: %w", i, err)
+		}
+		if record.Sequence != i+1 {
+			return fmt.Errorf("usage_records[%d] sequence %d must be %d", i, record.Sequence, i+1)
+		}
+		input += record.InputTokens
+		output += record.OutputTokens
+		cached += record.CachedTokens
+		cacheWrite += record.CacheWrite
+		reasoning += record.Reasoning
+		if record.CostUSD != nil {
+			cost += *record.CostUSD
+		}
+		switch record.CostStatus {
+		case CostStatusPriced:
+			priced++
+		case CostStatusUnpriced:
+			unpriced++
+		case CostStatusError:
+			costErrors++
+		}
+	}
+	if priced != p.PricedRequestCount || unpriced != p.UnpricedRequestCount || costErrors != p.ErrorRequestCount || len(p.UsageRecords) != priced+unpriced+costErrors {
+		return errors.New("request counts do not match usage records")
+	}
+	if input != p.TotalTokensInput || output != p.TotalTokensOutput || cached != p.TotalTokensCached || cacheWrite != p.TotalTokensCacheWrite || reasoning != p.TotalTokensReasoning {
+		return errors.New("token totals do not match usage record sums")
+	}
+	if math.Abs(cost-p.TotalCostUSD) > 1e-12 {
+		return errors.New("total_cost_usd does not match priced usage records")
+	}
+	wantCoverage := CostCoverageUnavailable
+	switch {
+	case len(p.UsageRecords) == 0:
+		wantCoverage = CostCoverageNotApplicable
+	case priced == len(p.UsageRecords):
+		wantCoverage = CostCoverageComplete
+	case priced > 0:
+		wantCoverage = CostCoveragePartial
+	}
+	if p.CostCoverage != wantCoverage {
+		return fmt.Errorf("cost_coverage %q must be %q", p.CostCoverage, wantCoverage)
 	}
 	return nil
 }

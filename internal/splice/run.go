@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,12 +21,132 @@ import (
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/splice/stages"
 	"github.com/Taf0711/splice/internal/tools"
+	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
 const (
 	defaultMaxIterations  = 5
 	defaultMaxWallSeconds = 600
 )
+
+type requestLedger struct {
+	records []schemas.PipelineUsageRecord
+	nextSeq int
+}
+
+func newRequestLedger() *requestLedger { return &requestLedger{nextSeq: 1} }
+
+func (ledger *requestLedger) append(record schemas.PipelineUsageRecord) {
+	record.Sequence = ledger.nextSeq
+	ledger.nextSeq++
+	ledger.records = append(ledger.records, record)
+}
+
+func (ledger *requestLedger) recordingOptions(options agent.Options) agent.Options {
+	recorded := options
+	downstreamAttributed := options.OnAttributedUsage
+	downstreamLegacy := options.OnUsage
+	recorded.OnAttributedUsage = func(attributed agent.AttributedUsage) {
+		attributed.Sequence = ledger.nextSeq
+		if attributed.UsageError != "" {
+			attributed.Usage = zeroruntime.Usage{}
+			attributed.Cost = costError(attributed.UsageError)
+		} else if attributed.UsageReported {
+			normalized, err := zeroruntime.NormalizeUsage(zeroruntime.TokenUsage{
+				InputTokens:       attributed.Usage.InputTokens,
+				PromptTokens:      attributed.Usage.PromptTokens,
+				CachedInputTokens: attributed.Usage.CachedInputTokens,
+				CacheWriteTokens:  attributed.Usage.CacheWriteTokens,
+				OutputTokens:      attributed.Usage.OutputTokens,
+				CompletionTokens:  attributed.Usage.CompletionTokens,
+				ReasoningTokens:   attributed.Usage.ReasoningTokens,
+			})
+			if err != nil {
+				attributed.Usage = zeroruntime.Usage{}
+				attributed.Cost = costError(err.Error())
+			} else {
+				attributed.Usage = normalized
+				attributed.Cost = estimateUsageCost(options.EstimateUsageCost, attributed)
+			}
+		} else {
+			attributed.Usage = zeroruntime.Usage{}
+			attributed.Cost = estimateUsageCost(options.EstimateUsageCost, attributed)
+		}
+		if err := validateUsageCostEstimate(attributed.Cost); err != nil {
+			attributed.Cost = costError("invalid cost estimate: " + err.Error())
+		}
+
+		record := schemas.PipelineUsageRecord{
+			Sequence:       attributed.Sequence,
+			Provider:       attributed.ProviderName,
+			Model:          attributed.Model,
+			Stage:          attributed.Stage,
+			Iteration:      attributed.Iteration,
+			UsageReported:  attributed.UsageReported,
+			InputTokens:    attributed.Usage.EffectiveInputTokens(),
+			OutputTokens:   attributed.Usage.EffectiveOutputTokens(),
+			CachedTokens:   attributed.Usage.CachedInputTokens,
+			CacheWrite:     attributed.Usage.CacheWriteTokens,
+			Reasoning:      attributed.Usage.ReasoningTokens,
+			CostStatus:     attributed.Cost.Status,
+			CostProvenance: attributed.Cost.Provenance,
+			PricingSource:  attributed.Cost.PricingSource,
+			PricingAsOf:    attributed.Cost.PricingAsOf,
+			UnpricedReason: attributed.Cost.UnpricedReason,
+		}
+		if attributed.Cost.CostUSD != nil {
+			cost := *attributed.Cost.CostUSD
+			record.CostUSD = &cost
+		}
+		ledger.append(record)
+
+		if downstreamAttributed != nil {
+			downstreamAttributed(attributed)
+		} else if downstreamLegacy != nil && attributed.UsageReported {
+			downstreamLegacy(attributed.Usage)
+		}
+	}
+	return recorded
+}
+
+func estimateUsageCost(estimator func(string, agent.Usage, bool) agent.UsageCostEstimate, attributed agent.AttributedUsage) agent.UsageCostEstimate {
+	if estimator != nil {
+		return estimator(attributed.Model, attributed.Usage, attributed.UsageReported)
+	}
+	reason := "usage not reported by provider"
+	if attributed.UsageReported {
+		reason = "cost estimator unavailable"
+	}
+	return agent.UsageCostEstimate{Status: agent.CostStatusUnpriced, UnpricedReason: reason}
+}
+
+func costError(reason string) agent.UsageCostEstimate {
+	return agent.UsageCostEstimate{Status: agent.CostStatusError, UnpricedReason: reason}
+}
+
+func validateUsageCostEstimate(estimate agent.UsageCostEstimate) error {
+	switch estimate.Status {
+	case agent.CostStatusPriced:
+		if estimate.CostUSD == nil || math.IsNaN(*estimate.CostUSD) || math.IsInf(*estimate.CostUSD, 0) || *estimate.CostUSD < 0 {
+			return errors.New("priced estimate requires a finite non-negative cost")
+		}
+		switch estimate.Provenance {
+		case agent.CostProvenanceRuntimeEstimate, agent.CostProvenancePersistedEstimate, agent.CostProvenanceReconstructedEstimate, agent.CostProvenanceReported:
+		default:
+			return fmt.Errorf("invalid cost provenance %q", estimate.Provenance)
+		}
+		if estimate.PricingSource == "" || estimate.PricingAsOf == "" || estimate.UnpricedReason != "" {
+			return errors.New("priced estimate requires source, date, and no unpriced reason")
+		}
+	case agent.CostStatusUnpriced, agent.CostStatusError:
+		if estimate.CostUSD != nil || estimate.Provenance != "" || estimate.PricingSource != "" || estimate.PricingAsOf != "" || estimate.UnpricedReason == "" {
+			return fmt.Errorf("%s estimate has inconsistent pricing fields", estimate.Status)
+		}
+	default:
+		return fmt.Errorf("invalid cost status %q", estimate.Status)
+	}
+	return nil
+}
 
 // Run executes the Splice deterministic pipeline for a user prompt.
 // It mirrors agent.Run's signature so it can be swapped in at the TUI/CLI seams.
@@ -76,6 +197,9 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 		return schemas.PipelineResult{}, fmt.Errorf("build stage registry: %w", err)
 	}
 
+	ledger := newRequestLedger()
+	ledgerOpts := ledger.recordingOptions(options)
+
 	if mem != nil {
 		obs := buildConfigObservation(runID, absWorkDir, plan)
 		persistObservation(ctx, mem, obs, func(msg string) {
@@ -83,10 +207,15 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 		})
 	}
 
-	result, err := runIterationLoop(ctx, runID, plan, registry, provider, options, absWorkDir, runner, mem, rec)
+	result, err := runIterationLoop(ctx, runID, plan, registry, provider, ledgerOpts, absWorkDir, runner, mem, rec)
 	if err != nil {
 		return schemas.PipelineResult{}, err
 	}
+
+	if err := applyRequestLedger(&result, ledger); err != nil {
+		return schemas.PipelineResult{}, fmt.Errorf("apply request ledger: %w", err)
+	}
+
 	if err := result.Validate(); err != nil {
 		return schemas.PipelineResult{}, fmt.Errorf("validate pipeline result: %w", err)
 	}
@@ -223,7 +352,13 @@ func runIterationLoop(
 		}
 		if decision.Action == schemas.ActionStepBack {
 			report := buildStepBackReport(plan.RequestIntent, history, passOutputs, decision)
-			stageOpts := stageOptions("step_back", options, workDir, runner)
+			sbSelection := agent.ModelSelection{
+				Provider:        provider,
+				ProviderName:    options.ProviderName,
+				Model:           options.Model,
+				ReasoningEffort: options.ReasoningEffort,
+			}
+			stageOpts := stageOptions("step_back", i, sbSelection, options, workDir, runner)
 			analysis, sbErr := stages.StepBack(ctx, provider, stageOpts, report)
 			if sbErr != nil {
 				if errors.Is(sbErr, context.Canceled) || ctx.Err() != nil {
@@ -240,16 +375,20 @@ func runIterationLoop(
 			if !escalated {
 				if options.EscalationModelResolver != nil {
 					escalated = true // do not retry: escalation fires at most once per run
-					escProvider, escModel, escEffort, escErr := options.EscalationModelResolver()
+					escalation, escErr := options.EscalationModelResolver()
 					if escErr != nil {
 						emitProgress(options, fmt.Sprintf("[escalation] resolver error: %v (continuing without escalation)\n", escErr))
-					} else if escProvider == nil {
+					} else if escalation.Provider == nil {
 						emitProgress(options, "[escalation] no escalation provider configured (continuing without escalation)\n")
 					} else {
-						provider = escProvider
-						options.Model = escModel
-						options.ReasoningEffort = escEffort
-						emitProgress(options, fmt.Sprintf("[escalation] switched to model %s for iteration %d\n", escModel, i+1))
+						provider = escalation.Provider
+						options.ProviderName = escalation.ProviderName
+						options.Model = escalation.Model
+						options.ReasoningEffort = escalation.ReasoningEffort
+						// Escalation applies to every later LLM-backed stage. Do not let
+						// the original stage router replace it on the next iteration.
+						options.StageModelResolver = nil
+						emitProgress(options, fmt.Sprintf("[escalation] switched to model %s for iteration %d\n", escalation.Model, i+1))
 					}
 				} else {
 					escalated = true
@@ -392,27 +531,26 @@ func runPass(
 
 		// Model-free stages skip provider resolution and attribution.
 		modelFree := isModelFreeStage(stageName)
-		stageProvider := provider
-		stageModel := options.Model
-		stageEffort := options.ReasoningEffort
+		selection := agent.ModelSelection{
+			Provider:        provider,
+			ProviderName:    options.ProviderName,
+			Model:           options.Model,
+			ReasoningEffort: options.ReasoningEffort,
+		}
 		if options.StageModelResolver != nil && !modelFree {
-			resolved, model, effort, rerr := options.StageModelResolver(stageName)
+			resolved, rerr := options.StageModelResolver(stageName)
 			if rerr != nil {
 				emitProgress(options, fmt.Sprintf("[%s] stage model resolution failed: %v\n", stageName, rerr))
-			} else if resolved != nil {
-				stageProvider = resolved
-				stageModel = model
-				stageEffort = effort
+			} else if resolved.Provider != nil {
+				selection = resolved
 			}
 		}
 		if modelFree {
-			stageProvider = nil
-			stageModel = ""
-			stageEffort = ""
+			selection = agent.ModelSelection{}
 		}
 
 		start := time.Now()
-		output, err := runStageWithContext(ctx, input, agentStage, stageProvider, stageModel, stageEffort, options, workDir, runner, mem)
+		output, err := runStageWithContext(ctx, input, agentStage, iteration, selection, options, workDir, runner, mem)
 		latencyMs := int(time.Since(start).Milliseconds())
 		emitProgress(options, fmt.Sprintf("[%s] stage finished\n", stageName))
 		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
@@ -425,11 +563,11 @@ func runPass(
 			LatencyMs: latencyMs,
 		}
 		if !modelFree {
-			if stageModel != "" {
-				record.Model = Ptr(stageModel)
+			if selection.Model != "" {
+				record.Model = Ptr(selection.Model)
 			}
-			if options.ProviderName != "" {
-				record.Provider = Ptr(options.ProviderName)
+			if selection.ProviderName != "" {
+				record.Provider = Ptr(selection.ProviderName)
 			}
 		}
 		if err != nil {
@@ -482,6 +620,26 @@ func runPass(
 	return records, outputs, true, nil
 }
 
+type stageRunError struct {
+	err   error
+	usage *schemas.StageUsage
+}
+
+func (e stageRunError) Error() string                   { return e.err.Error() }
+func (e stageRunError) Unwrap() error                   { return e.err }
+func (e stageRunError) StageUsage() *schemas.StageUsage { return e.usage }
+
+func withStageUsage(err error, usage *schemas.StageUsage) error {
+	if err == nil || usage == nil {
+		return err
+	}
+	var metered interface{ StageUsage() *schemas.StageUsage }
+	if errors.As(err, &metered) {
+		usage = mergeStageUsage(usage, metered.StageUsage())
+	}
+	return stageRunError{err: err, usage: usage}
+}
+
 func applyStageUsage(record *schemas.StageRecord, usage *schemas.StageUsage) {
 	if record == nil || usage == nil {
 		return
@@ -490,25 +648,24 @@ func applyStageUsage(record *schemas.StageRecord, usage *schemas.StageUsage) {
 	record.TokensOutput = usage.OutputTokens
 	record.TokensCached = usage.CachedInputTokens
 	record.TokensCacheWrite = usage.CacheWriteTokens
-	record.CostUSD = usage.CostUSD
+	record.TokensReasoning = usage.ReasoningTokens
 }
 
 func runStageWithContext(
 	ctx context.Context,
 	input schemas.HarnessStageInput,
 	stage stages.Stage,
-	provider agent.Provider,
-	modelOverride string,
-	reasoningEffort string,
+	iteration int,
+	selection agent.ModelSelection,
 	options agent.Options,
 	workDir string,
 	runner ToolRunner,
 	mem MemoryStore,
 ) (schemas.HarnessStageOutput, error) {
-	stageOpts := stageOptions(input.StageName, options, workDir, runner)
-	stageOpts.ModelOverride = modelOverride
-	stageOpts.ReasoningEffort = reasoningEffort
-	output, err := stage.Run(ctx, input, provider, stageOpts)
+	stageOpts := stageOptions(input.StageName, iteration, selection, options, workDir, runner)
+	stageOpts.ModelOverride = selection.Model
+	stageOpts.ReasoningEffort = selection.ReasoningEffort
+	output, err := stage.Run(ctx, input, selection.Provider, stageOpts)
 	if err != nil {
 		return schemas.HarnessStageOutput{}, err
 	}
@@ -518,7 +675,7 @@ func runStageWithContext(
 
 	bundle, err := FulfillContextRequest(ctx, *output.ContextRequest, runner)
 	if err != nil {
-		return schemas.HarnessStageOutput{}, fmt.Errorf("fulfill context: %w", err)
+		return schemas.HarnessStageOutput{}, withStageUsage(fmt.Errorf("fulfill context: %w", err), output.Usage)
 	}
 	input.Context = &bundle
 	if mem != nil {
@@ -528,12 +685,13 @@ func runStageWithContext(
 			})
 		}
 	}
-	finalOutput, err := stage.Run(ctx, input, provider, stageOpts)
+	finalOutput, err := stage.Run(ctx, input, selection.Provider, stageOpts)
 	if err != nil {
-		return schemas.HarnessStageOutput{}, err
+		return schemas.HarnessStageOutput{}, withStageUsage(err, output.Usage)
 	}
 	if finalOutput.ContextRequest != nil {
-		return schemas.HarnessStageOutput{}, fmt.Errorf("stage requested context more than once")
+		usage := mergeStageUsage(output.Usage, finalOutput.Usage)
+		return schemas.HarnessStageOutput{}, withStageUsage(fmt.Errorf("stage requested context more than once"), usage)
 	}
 	finalOutput.Usage = mergeStageUsage(output.Usage, finalOutput.Usage)
 	return finalOutput, nil
@@ -1207,9 +1365,128 @@ func sumTotals(result schemas.PipelineResult) schemas.PipelineResult {
 	for _, r := range result.Stages {
 		result.TotalTokensInput += r.TokensInput
 		result.TotalTokensOutput += r.TokensOutput
+		result.TotalTokensCached += r.TokensCached
+		result.TotalTokensCacheWrite += r.TokensCacheWrite
+		result.TotalTokensReasoning += r.TokensReasoning
 		result.TotalCostUSD += r.CostUSD
 	}
 	return result
+}
+
+// applyRequestLedger replaces stage-derived totals with authoritative request totals.
+func applyRequestLedger(result *schemas.PipelineResult, ledger *requestLedger) error {
+	type stageUsageKey struct {
+		name      string
+		iteration int
+	}
+	expected := make(map[stageUsageKey]schemas.StageUsage, len(result.Stages))
+	for _, stage := range result.Stages {
+		expected[stageUsageKey{stage.Name, stage.Iteration}] = schemas.StageUsage{
+			InputTokens: stage.TokensInput, OutputTokens: stage.TokensOutput,
+			CachedInputTokens: stage.TokensCached, CacheWriteTokens: stage.TokensCacheWrite,
+			ReasoningTokens: stage.TokensReasoning,
+		}
+	}
+	result.UsageRecords = append([]schemas.PipelineUsageRecord(nil), ledger.records...)
+
+	// Reset old stage-derived totals so retries and auxiliary calls are counted
+	// once.
+	result.TotalTokensInput = 0
+	result.TotalTokensOutput = 0
+	result.TotalTokensCached = 0
+	result.TotalTokensCacheWrite = 0
+	result.TotalTokensReasoning = 0
+	result.TotalCostUSD = 0
+	for i := range result.Stages {
+		result.Stages[i].TokensInput = 0
+		result.Stages[i].TokensOutput = 0
+		result.Stages[i].TokensCached = 0
+		result.Stages[i].TokensCacheWrite = 0
+		result.Stages[i].TokensReasoning = 0
+		result.Stages[i].CostUSD = 0
+	}
+
+	// Sum pipeline totals from request records.
+	for _, r := range ledger.records {
+		result.TotalTokensInput += r.InputTokens
+		result.TotalTokensOutput += r.OutputTokens
+		result.TotalTokensCached += r.CachedTokens
+		result.TotalTokensCacheWrite += r.CacheWrite
+		result.TotalTokensReasoning += r.Reasoning
+		if r.CostUSD != nil {
+			result.TotalCostUSD += *r.CostUSD
+		}
+	}
+
+	// Group matching stage and iteration records. Auxiliary requests remain only
+	// in pipeline totals.
+	grouped := make(map[stageUsageKey]schemas.StageUsage)
+	for _, r := range ledger.records {
+		key := stageUsageKey{r.Stage, r.Iteration}
+		usage := grouped[key]
+		usage.InputTokens += r.InputTokens
+		usage.OutputTokens += r.OutputTokens
+		usage.CachedInputTokens += r.CachedTokens
+		usage.CacheWriteTokens += r.CacheWrite
+		usage.ReasoningTokens += r.Reasoning
+		grouped[key] = usage
+		// Find the matching stage record.
+		for i, s := range result.Stages {
+			if s.Name == r.Stage && s.Iteration == r.Iteration {
+				result.Stages[i].TokensInput += r.InputTokens
+				result.Stages[i].TokensOutput += r.OutputTokens
+				result.Stages[i].TokensCached += r.CachedTokens
+				result.Stages[i].TokensCacheWrite += r.CacheWrite
+				result.Stages[i].TokensReasoning += r.Reasoning
+				if r.CostUSD != nil {
+					result.Stages[i].CostUSD += *r.CostUSD
+				}
+				break
+			}
+		}
+	}
+
+	for key, got := range grouped {
+		want, isStage := expected[key]
+		if isStage && got != want {
+			return fmt.Errorf("stage %s iteration %d usage %+v does not match request usage %+v", key.name, key.iteration, want, got)
+		}
+	}
+	for key, want := range expected {
+		if _, ok := grouped[key]; !ok && want != (schemas.StageUsage{}) {
+			return fmt.Errorf("stage %s iteration %d reported usage %+v without request records", key.name, key.iteration, want)
+		}
+	}
+
+	// Derive priced/unpriced/error counts and coverage.
+	var priced, unpriced, costErrors int
+	for _, r := range ledger.records {
+		switch r.CostStatus {
+		case schemas.CostStatusPriced:
+			priced++
+		case schemas.CostStatusUnpriced:
+			unpriced++
+		case schemas.CostStatusError:
+			costErrors++
+		}
+	}
+	result.PricedRequestCount = priced
+	result.UnpricedRequestCount = unpriced
+	result.ErrorRequestCount = costErrors
+
+	// Derive coverage.
+	total := len(ledger.records)
+	switch {
+	case total == 0:
+		result.CostCoverage = schemas.CostCoverageNotApplicable
+	case priced == total:
+		result.CostCoverage = schemas.CostCoverageComplete
+	case priced > 0:
+		result.CostCoverage = schemas.CostCoveragePartial
+	default:
+		result.CostCoverage = schemas.CostCoverageUnavailable
+	}
+	return nil
 }
 
 // mergeStageUsage sums two StageUsage pointers so a context-fulfillment call
@@ -1227,7 +1504,7 @@ func mergeStageUsage(a, b *schemas.StageUsage) *schemas.StageUsage {
 		OutputTokens:      a.OutputTokens + b.OutputTokens,
 		CachedInputTokens: a.CachedInputTokens + b.CachedInputTokens,
 		CacheWriteTokens:  a.CacheWriteTokens + b.CacheWriteTokens,
-		CostUSD:           a.CostUSD + b.CostUSD,
+		ReasoningTokens:   a.ReasoningTokens + b.ReasoningTokens,
 	}
 }
 

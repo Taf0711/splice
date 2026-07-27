@@ -1,9 +1,11 @@
 package usage
 
 import (
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
@@ -98,4 +100,103 @@ func fixedUsageClock(value string) func() time.Time {
 		panic(err)
 	}
 	return func() time.Time { return parsed }
+}
+
+func TestNormalizeRejectsAllMalformedSubsets(t *testing.T) {
+	tests := []struct {
+		name    string
+		usage   zeroruntime.Usage
+		wantErr string
+	}{
+		{"cached exceeds input", zeroruntime.Usage{InputTokens: 10, CachedInputTokens: 15, OutputTokens: 5}, "cached input tokens"},
+		{"cache write plus cached exceeds input", zeroruntime.Usage{InputTokens: 100, CachedInputTokens: 60, CacheWriteTokens: 50, OutputTokens: 10}, "cache write tokens"},
+		{"reasoning exceeds output", zeroruntime.Usage{InputTokens: 100, OutputTokens: 10, ReasoningTokens: 20}, "reasoning tokens"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := Normalize(tc.usage)
+			if err == nil {
+				t.Fatalf("expected error containing %q", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %q, want %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestNewCostEstimatorPricedZero(t *testing.T) {
+	estimator := NewCostEstimator(nil)
+	registry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry returned error: %v", err)
+	}
+	estimator = NewCostEstimator(&registry)
+
+	result := estimator("gpt-4.1", zeroruntime.Usage{InputTokens: 0, OutputTokens: 0}, true)
+	if result.Status != "priced" {
+		t.Fatalf("status = %q, want priced", result.Status)
+	}
+	if result.CostUSD == nil {
+		t.Fatal("CostUSD should be non-nil for priced zero")
+	}
+	if *result.CostUSD != 0 {
+		t.Fatalf("CostUSD = %v, want 0", *result.CostUSD)
+	}
+	if result.Provenance != "runtime_estimate" {
+		t.Fatalf("provenance = %q, want runtime_estimate", result.Provenance)
+	}
+}
+
+func TestNewCostEstimatorUnknownModel(t *testing.T) {
+	registry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry returned error: %v", err)
+	}
+	estimator := NewCostEstimator(&registry)
+
+	result := estimator("nonexistent-model", zeroruntime.Usage{InputTokens: 100, OutputTokens: 50}, true)
+	if result.Status != "unpriced" {
+		t.Fatalf("status = %q, want unpriced", result.Status)
+	}
+	if result.CostUSD != nil {
+		t.Fatalf("CostUSD should be nil for unpriced, got %v", *result.CostUSD)
+	}
+}
+
+func TestNewCostEstimatorMissingUsage(t *testing.T) {
+	estimator := NewCostEstimator(nil)
+
+	result := estimator("gpt-4.1", zeroruntime.Usage{}, false)
+	if result.Status != "unpriced" {
+		t.Fatalf("status = %q, want unpriced", result.Status)
+	}
+	if result.UnpricedReason == "" {
+		t.Fatal("unpriced_reason should not be empty")
+	}
+}
+
+func TestNewCostEstimatorMalformedUsage(t *testing.T) {
+	registry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry returned error: %v", err)
+	}
+	estimator := NewCostEstimator(&registry)
+
+	result := estimator("gpt-4.1", zeroruntime.Usage{InputTokens: 10, CachedInputTokens: 20, OutputTokens: 5}, true)
+	if result.Status != "error" {
+		t.Fatalf("status = %q, want error", result.Status)
+	}
+	if result.UnpricedReason == "" {
+		t.Fatal("unpriced_reason should not be empty for error")
+	}
+}
+
+func TestNewCostEstimatorNilRegistry(t *testing.T) {
+	estimator := NewCostEstimator(nil)
+
+	result := estimator("gpt-4.1", zeroruntime.Usage{InputTokens: 100, OutputTokens: 50}, true)
+	if result.Status != "unpriced" {
+		t.Fatalf("status = %q, want unpriced for nil registry", result.Status)
+	}
 }

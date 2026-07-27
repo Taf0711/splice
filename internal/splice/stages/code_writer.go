@@ -63,11 +63,11 @@ func (CodeWriter) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 		return err
 	})
 	if err != nil {
-		return schemas.HarnessStageOutput{}, err
+		return schemas.HarnessStageOutput{}, withCollectedUsage(err, collected)
 	}
 	output, err := parseCodeWriterOutput(collected)
 	if err != nil {
-		return schemas.HarnessStageOutput{}, err
+		return schemas.HarnessStageOutput{}, withCollectedUsage(err, collected)
 	}
 
 	changedPaths := make([]string, len(output.Files))
@@ -83,15 +83,15 @@ func (CodeWriter) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 
 	if len(output.Files) > 0 {
 		if options.WorkDir == "" {
-			return schemas.HarnessStageOutput{}, fmt.Errorf("code writer: WorkDir is required to apply %d file change(s)", len(output.Files))
+			return schemas.HarnessStageOutput{}, withCollectedUsage(fmt.Errorf("code writer: WorkDir is required to apply %d file change(s)", len(output.Files)), collected)
 		}
 		options.report(fmt.Sprintf("applying %d file change(s)", len(output.Files)))
 		apply, err := applyFileChanges(ctx, options.WorkDir, output.Files, options.RunTool)
 		if err != nil {
-			return schemas.HarnessStageOutput{}, fmt.Errorf("code writer: %w", err)
+			return schemas.HarnessStageOutput{}, withCollectedUsage(fmt.Errorf("code writer: %w", err), collected)
 		}
 		if len(apply.Applied) != len(output.Files) {
-			return schemas.HarnessStageOutput{}, fmt.Errorf("code writer: applied %d of %d file changes", len(apply.Applied), len(output.Files))
+			return schemas.HarnessStageOutput{}, withCollectedUsage(fmt.Errorf("code writer: applied %d of %d file changes", len(apply.Applied), len(output.Files)), collected)
 		}
 		options.report(fmt.Sprintf("applied %d file change(s)", len(apply.Applied)))
 		data["file_apply_result"] = apply

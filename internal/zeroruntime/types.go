@@ -46,6 +46,7 @@ const (
 	// uses this to ask the model to retry instead of silently ending the turn.
 	StreamEventToolCallDropped StreamEventType = "tool-call-dropped"
 	StreamEventUsage           StreamEventType = "usage"
+	StreamEventUsageError      StreamEventType = "usage-error"
 	StreamEventDone            StreamEventType = "done"
 	StreamEventError           StreamEventType = "error"
 )

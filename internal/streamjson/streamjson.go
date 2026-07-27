@@ -101,11 +101,23 @@ type Event struct {
 	CacheWriteTokens  *int              `json:"cacheWriteTokens,omitempty"`
 	ReasoningTokens   *int              `json:"reasoningTokens,omitempty"`
 	CostUSD           *float64          `json:"costUsd,omitempty"`
-	Text              string            `json:"text,omitempty"`
-	Message           string            `json:"message,omitempty"`
-	Code              string            `json:"code,omitempty"`
-	Recoverable       *bool             `json:"recoverable,omitempty"`
-	ExitCode          *int              `json:"exitCode,omitempty"`
+	// Cost fields are present only on usage events.
+	CostStatus     string `json:"costStatus,omitempty"`
+	CostEstimated  *bool  `json:"costEstimated,omitempty"`
+	CostProvenance string `json:"costProvenance,omitempty"`
+	PricingSource  string `json:"pricingSource,omitempty"`
+	PricingAsOf    string `json:"pricingAsOf,omitempty"`
+	UnpricedReason string `json:"unpricedReason,omitempty"`
+	// Usage attribution fields are present only on usage events.
+	UsageReported *bool  `json:"usageReported,omitempty"`
+	Stage         string `json:"stage,omitempty"`
+	Iteration     *int   `json:"iteration,omitempty"`
+	UsageSequence *int   `json:"usageSequence,omitempty"`
+	Text          string `json:"text,omitempty"`
+	Message       string `json:"message,omitempty"`
+	Code          string `json:"code,omitempty"`
+	Recoverable   *bool  `json:"recoverable,omitempty"`
+	ExitCode      *int   `json:"exitCode,omitempty"`
 }
 
 type InputEvent struct {

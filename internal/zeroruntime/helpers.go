@@ -38,6 +38,13 @@ type CollectOptions struct {
 	OnText      func(string)
 	OnReasoning func(string)
 	OnUsage     func(Usage)
+	// OnUsageResult fires exactly once when the provider stream finishes. The bool
+	// is true iff at least one StreamEventUsage event was seen during the stream.
+	// Legacy OnUsage only fires when usage was seen; OnUsageResult fires always,
+	// giving callers a clean "stream ended" signal with or without usage.
+	OnUsageResult func(Usage, bool)
+	// OnUsageError replaces OnUsageResult when a provider reports malformed usage.
+	OnUsageError func(string)
 	// OnToolCallStart fires when a tool call opens (id + tool name), and
 	// OnToolCallDelta fires for each streamed argument fragment. Together they let
 	// a surface render a tool call's arguments LIVE (e.g. a file being written)
@@ -94,10 +101,20 @@ func CollectStreamWithOptions(ctx context.Context, events <-chan StreamEvent, op
 	collected := CollectedStream{}
 	collector := newToolCallCollector()
 	usageSeen := false
+	usageError := ""
 	finish := func() CollectedStream {
 		collector.flush(&collected)
-		if usageSeen && options.OnUsage != nil {
-			options.OnUsage(collected.Usage)
+		if usageError != "" {
+			if options.OnUsageError != nil {
+				options.OnUsageError(usageError)
+			}
+		} else {
+			if options.OnUsageResult != nil {
+				options.OnUsageResult(collected.Usage, usageSeen)
+			}
+			if usageSeen && options.OnUsage != nil {
+				options.OnUsage(collected.Usage)
+			}
 		}
 		return collected
 	}
@@ -158,6 +175,12 @@ func CollectStreamWithOptions(ctx context.Context, events <-chan StreamEvent, op
 			case StreamEventUsage:
 				collected.Usage = mergeUsageSnapshot(collected.Usage, event.Usage)
 				usageSeen = true
+			case StreamEventUsageError:
+				usageSeen = true
+				usageError = event.Error
+				if usageError == "" {
+					usageError = "provider reported malformed usage"
+				}
 			case StreamEventError:
 				collected.Error = event.Error
 				return finish()

@@ -196,3 +196,75 @@ func assertClose(t *testing.T, got float64, want float64) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
 }
+
+func TestCalculateCostRejectsAllMalformedSubsets(t *testing.T) {
+	registry, err := DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry returned error: %v", err)
+	}
+	model, err := registry.Require("gpt-4.1")
+	if err != nil {
+		t.Fatalf("Require returned error: %v", err)
+	}
+	tests := []struct {
+		name    string
+		usage   zeroruntime.Usage
+		wantErr string
+	}{
+		{"cached exceeds input", zeroruntime.Usage{InputTokens: 10, CachedInputTokens: 15, OutputTokens: 5}, "cached input tokens"},
+		{"cache write plus cached exceeds input", zeroruntime.Usage{InputTokens: 100, CachedInputTokens: 60, CacheWriteTokens: 50, OutputTokens: 10}, "cache write tokens"},
+		{"reasoning exceeds output", zeroruntime.Usage{InputTokens: 100, OutputTokens: 10, ReasoningTokens: 20}, "reasoning tokens"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := CalculateCost(model, tc.usage)
+			if err == nil {
+				t.Fatalf("expected error containing %q", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %q, want %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestCalculateCostDisjointCachedReadWritePricing(t *testing.T) {
+	registry, err := DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry returned error: %v", err)
+	}
+	// gpt-4.1: input=2/M, cached=0.5/M, cacheWrite=0 (not priced separately, stays at input rate)
+	cost, err := registry.EstimateCost("gpt-4.1", zeroruntime.Usage{
+		InputTokens:       1_000_000,
+		CachedInputTokens: 300_000,
+		CacheWriteTokens:  200_000,
+		OutputTokens:      500_000,
+	})
+	if err != nil {
+		t.Fatalf("EstimateCost returned error: %v", err)
+	}
+	// cachedRate > 0, so cachedInputTokens = 300K; cacheWriteRate = 0, so cacheWriteTokens = 0
+	// uncached = 1M - 300K - 0 = 700K at 2/M = 1.4
+	// cached = 300K at 0.5/M = 0.15
+	// output = 500K at 8/M = 4.0
+	assertClose(t, cost.InputCost, 1.4)
+	assertClose(t, cost.CachedInputCost, 0.15)
+	assertClose(t, cost.TotalCost, 5.55)
+}
+
+func TestCalculateCostPricedZeroForKnownModelWithZeroUsage(t *testing.T) {
+	registry, err := DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry returned error: %v", err)
+	}
+	cost, err := registry.EstimateCost("gpt-4.1", zeroruntime.Usage{
+		InputTokens:  0,
+		OutputTokens: 0,
+	})
+	if err != nil {
+		t.Fatalf("EstimateCost returned error: %v", err)
+	}
+	if cost.TotalCost != 0 {
+		t.Fatalf("total cost = %v, want 0 for zero usage", cost.TotalCost)
+	}
+}

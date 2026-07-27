@@ -207,11 +207,11 @@ func TestValidatedToolUseRetriesContractFailuresAndAccumulatesUsage(t *testing.T
 	validArgs, _ := json.Marshal(valid)
 	provider := &retryScriptProvider{scripts: [][]zeroruntime.StreamEvent{
 		{
-			{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 2, OutputTokens: 1}},
+			{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 4, OutputTokens: 3, CachedInputTokens: 1, CacheWriteTokens: 1, ReasoningTokens: 1}},
 			{Type: zeroruntime.StreamEventDone},
 		},
-		append([]zeroruntime.StreamEvent{{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 3, OutputTokens: 2}}}, toolCallEvent(codeWriterToolName, `{`)...),
-		append([]zeroruntime.StreamEvent{{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 5, OutputTokens: 4}}}, toolCallEvent(codeWriterToolName, string(validArgs))...),
+		append([]zeroruntime.StreamEvent{{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 5, OutputTokens: 4, CachedInputTokens: 1, CacheWriteTokens: 2, ReasoningTokens: 2}}}, toolCallEvent(codeWriterToolName, `{`)...),
+		append([]zeroruntime.StreamEvent{{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 6, OutputTokens: 5, CachedInputTokens: 2, CacheWriteTokens: 1, ReasoningTokens: 3}}}, toolCallEvent(codeWriterToolName, string(validArgs))...),
 	}}
 
 	collected, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(), nil, func(collected *zeroruntime.CollectedStream) error {
@@ -224,8 +224,9 @@ func TestValidatedToolUseRetriesContractFailuresAndAccumulatesUsage(t *testing.T
 	if len(provider.requests) != 3 {
 		t.Fatalf("provider calls = %d, want 3", len(provider.requests))
 	}
-	if collected.Usage.InputTokens != 10 || collected.Usage.OutputTokens != 7 {
-		t.Fatalf("accumulated usage = %#v, want input=10 output=7", collected.Usage)
+	wantUsage := zeroruntime.Usage{InputTokens: 15, OutputTokens: 12, CachedInputTokens: 4, CacheWriteTokens: 4, ReasoningTokens: 6}
+	if collected.Usage.InputTokens != wantUsage.InputTokens || collected.Usage.OutputTokens != wantUsage.OutputTokens || collected.Usage.CachedInputTokens != wantUsage.CachedInputTokens || collected.Usage.CacheWriteTokens != wantUsage.CacheWriteTokens || collected.Usage.ReasoningTokens != wantUsage.ReasoningTokens {
+		t.Fatalf("accumulated usage = %#v, want %#v", collected.Usage, wantUsage)
 	}
 	for _, index := range []int{1, 2} {
 		user := provider.requests[index].Messages[1].Content
@@ -306,7 +307,7 @@ func TestValidatedToolUseDoesNotRetryCancellation(t *testing.T) {
 
 func TestValidatedToolUseExhaustionIsActionableAndMetered(t *testing.T) {
 	missing := []zeroruntime.StreamEvent{
-		{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 2, OutputTokens: 1}},
+		{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 4, OutputTokens: 3, CachedInputTokens: 1, CacheWriteTokens: 1, ReasoningTokens: 1}},
 		{Type: zeroruntime.StreamEventDone},
 	}
 	provider := &retryScriptProvider{scripts: [][]zeroruntime.StreamEvent{missing, missing, missing}}
@@ -322,8 +323,9 @@ func TestValidatedToolUseExhaustionIsActionableAndMetered(t *testing.T) {
 		t.Fatalf("exhaustion error is not actionable: %v", err)
 	}
 	usage := typedErr.StageUsage()
-	if usage == nil || usage.InputTokens != 6 || usage.OutputTokens != 3 {
-		t.Fatalf("exhausted usage = %#v, want input=6 output=3", usage)
+	wantUsage := schemas.StageUsage{InputTokens: 12, OutputTokens: 9, CachedInputTokens: 3, CacheWriteTokens: 3, ReasoningTokens: 3}
+	if usage == nil || *usage != wantUsage {
+		t.Fatalf("exhausted usage = %#v, want %#v", usage, wantUsage)
 	}
 }
 

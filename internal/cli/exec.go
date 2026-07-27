@@ -430,10 +430,6 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", err.Error())
 	}
 
-	// currentModel tracks the model in force for usage attribution. It starts at
-	// the resolved model and is reassigned by the model switcher on a mid-run
-	// escalation so post-switch turns are attributed to the escalated model.
-	currentModel := resolved.Provider.Model
 	var modelSwitcher func(context.Context, string) (agent.Provider, error)
 	if options.allowEscalation {
 		modelSwitcher = func(_ context.Context, modelID string) (agent.Provider, error) {
@@ -445,13 +441,6 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			switchedProvider, err := deps.newProvider(switchedProfile)
 			if err != nil {
 				return nil, err
-			}
-			// Mirror the agent loop's switch guard (it only reassigns the provider
-			// when newProvider != nil). Updating currentModel only on a non-nil
-			// provider keeps usage attribution consistent with whether the loop
-			// actually switched — a (nil, nil) return leaves both untouched.
-			if switchedProvider != nil {
-				currentModel = modelID
 			}
 			return switchedProvider, nil
 		}
@@ -601,6 +590,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		tierResolverConfig,
 	)
 
+	estimator := usage.NewCostEstimator(&modelRegistry)
 	runOptions := agent.Options{
 		MaxTurns: resolved.MaxTurns,
 		// ContextWindow / compaction are agent-loop only: the deterministic
@@ -642,11 +632,13 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		// from ~/.config/splice/stage-models.json "escalation" entry (AR10c).
 		// nil/empty keeps pre-AR10c behavior: escalation is skipped.
 		EscalationModelResolver: escalationModelResolver,
-		Cwd:                     workspaceRoot,
-		Images:                  images,
-		Registry:                registry,
-		PermissionMode:          permissionMode,
-		Autonomy:                options.autonomy,
+		// Price each pipeline request from the same registry used for routing.
+		EstimateUsageCost: estimator,
+		Cwd:               workspaceRoot,
+		Images:            images,
+		Registry:          registry,
+		PermissionMode:    permissionMode,
+		Autonomy:          options.autonomy,
 		// SelfCorrect is agent-loop only: the deterministic pipeline does not run
 		// the post-edit verify-and-correct loop, so it is inert under `splice exec`.
 		SelfCorrect: selfCorrector,
@@ -702,16 +694,67 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			}
 			sessionRecorder.append(sessions.EventToolResult, payload)
 		},
-		OnUsage: func(u agent.Usage) {
-			writer.usage(u)
-			payload := usage.EventUsagePayload(u)
-			// Attribute usage to a specific model ONLY when escalation is enabled:
-			// the model in force can change mid-run only under --allow-escalation, so
-			// the "model" key is meaningful exclusively then. Omitting it otherwise
-			// keeps a non-escalation run's persisted usage payload compact.
-			if options.allowEscalation {
-				payload["model"] = currentModel
+		OnAttributedUsage: func(au agent.AttributedUsage) {
+			// Legacy JSON output keeps the basic usage shape. Stream JSON uses
+			// the enriched attributed event below, never both.
+			if writer.format != execOutputStreamJSON {
+				writer.usage(au.Usage)
 			}
+			if writer.format == execOutputStreamJSON {
+				promptTokens := au.Usage.EffectiveInputTokens()
+				completionTokens := au.Usage.EffectiveOutputTokens()
+				totalTokens := au.Usage.TotalTokens()
+				ereport := au.UsageReported
+				iter := au.Iteration
+				sequence := au.Sequence
+				event := streamjson.Event{
+					Type:             streamjson.EventUsage,
+					RunID:            writer.runID,
+					PromptTokens:     &promptTokens,
+					CompletionTokens: &completionTokens,
+					TotalTokens:      &totalTokens,
+					Provider:         au.ProviderName,
+					Model:            au.Model,
+					UsageReported:    &ereport,
+					Stage:            au.Stage,
+					Iteration:        &iter,
+					UsageSequence:    &sequence,
+				}
+				if au.Usage.CachedInputTokens > 0 {
+					cached := au.Usage.CachedInputTokens
+					event.CachedInputTokens = &cached
+				}
+				if au.Usage.CacheWriteTokens > 0 {
+					cacheWrite := au.Usage.CacheWriteTokens
+					event.CacheWriteTokens = &cacheWrite
+				}
+				if au.Usage.ReasoningTokens > 0 {
+					reasoning := au.Usage.ReasoningTokens
+					event.ReasoningTokens = &reasoning
+				}
+				if au.Cost.CostUSD != nil {
+					event.CostUSD = au.Cost.CostUSD
+				}
+				event.CostStatus = au.Cost.Status
+				if au.Cost.CostUSD != nil {
+					estimated := au.Cost.Provenance != agent.CostProvenanceReported
+					event.CostEstimated = &estimated
+				}
+				if au.Cost.Provenance != "" {
+					event.CostProvenance = au.Cost.Provenance
+				}
+				if au.Cost.PricingSource != "" {
+					event.PricingSource = au.Cost.PricingSource
+				}
+				if au.Cost.PricingAsOf != "" {
+					event.PricingAsOf = au.Cost.PricingAsOf
+				}
+				if au.Cost.UnpricedReason != "" {
+					event.UnpricedReason = au.Cost.UnpricedReason
+				}
+				writer.writeStreamJSON(event)
+			}
+			payload := usage.AttributedUsagePayload(au)
 			sessionRecorder.append(sessions.EventUsage, payload)
 		},
 	}

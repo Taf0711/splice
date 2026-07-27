@@ -1,6 +1,29 @@
 package tui
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/Taf0711/splice/internal/splice/schemas"
+)
+
+func TestChatViewportIncludesPersistentPlanHeader(t *testing.T) {
+	m := transcriptViewTestModel()
+	m.altScreen = true
+	m.height = 20
+	m.designMode = true
+	m.planPanelPersistent = true
+	m.pendingPlan = &schemas.DesignPlan{Epic: "persistent plan"}
+	width := m.chatColumnWidth()
+
+	viewport, ok := m.chatTranscriptViewport()
+	if !ok {
+		t.Fatal("expected an alt-screen viewport")
+	}
+	frame := m.scrollableTranscriptFrame(m.normalTranscriptHeader(width), m.footerView(width))
+	if viewport.height != frame.bodyRect.height {
+		t.Fatalf("cached viewport height = %d, rendered body height = %d", viewport.height, frame.bodyRect.height)
+	}
+}
 
 func TestSyncChatScrollPinsWhileScrolledUp(t *testing.T) {
 	m := transcriptViewTestModel()

@@ -92,31 +92,34 @@ func TestStageTierResolver(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cache := make(map[string]agent.Provider)
 			resolver := NewStageTierResolver(tc.profile, registry, newProvider, cache)
-			provider, model, effort, err := resolver(tc.stage)
+			selection, err := resolver(tc.stage)
 			if err != nil {
 				t.Fatalf("resolver: %v", err)
 			}
 			if tc.wantNil {
-				if provider != nil || model != "" || effort != "" {
-					t.Fatalf("want nil, got provider=%v model=%q effort=%q", provider, model, effort)
+				if selection.Provider != nil || selection.Model != "" || selection.ReasoningEffort != "" {
+					t.Fatalf("want zero selection, got %+v", selection)
 				}
 				return
 			}
-			if provider == nil {
+			if selection.Provider == nil {
 				t.Fatalf("expected provider, got nil")
 			}
-			if model != tc.wantModel {
-				t.Fatalf("model = %q, want %q", model, tc.wantModel)
+			if selection.ProviderName != tc.profile.Name {
+				t.Fatalf("provider name = %q, want %q", selection.ProviderName, tc.profile.Name)
 			}
-			if effort != "" {
-				t.Fatalf("effort = %q, want empty", effort)
+			if selection.Model != tc.wantModel {
+				t.Fatalf("model = %q, want %q", selection.Model, tc.wantModel)
 			}
-			entry, ok := registry.Resolve(model)
+			if selection.ReasoningEffort != "" {
+				t.Fatalf("effort = %q, want empty", selection.ReasoningEffort)
+			}
+			entry, ok := registry.Resolve(selection.Model)
 			if !ok {
-				t.Fatalf("resolved model %q not in registry", model)
+				t.Fatalf("resolved model %q not in registry", selection.Model)
 			}
-			if got := provider.(*tierTestProvider).model; got != entry.APIModel {
-				t.Fatalf("provider model = %q, want api model for %q", got, model)
+			if got := selection.Provider.(*tierTestProvider).model; got != entry.APIModel {
+				t.Fatalf("provider model = %q, want api model for %q", got, selection.Model)
 			}
 		})
 	}
@@ -135,18 +138,18 @@ func TestStageTierResolverCachesProvider(t *testing.T) {
 	}
 	cache := make(map[string]agent.Provider)
 	resolver := NewStageTierResolver(profile, registry, newProvider, cache)
-	p1, _, _, err := resolver("code_writer")
+	first, err := resolver("code_writer")
 	if err != nil {
 		t.Fatalf("first resolve: %v", err)
 	}
-	p2, _, _, err := resolver("code_writer")
+	second, err := resolver("code_writer")
 	if err != nil {
 		t.Fatalf("second resolve: %v", err)
 	}
 	if builds != 1 {
 		t.Fatalf("provider built %d times, want 1", builds)
 	}
-	if p1 != p2 {
+	if first.Provider != second.Provider {
 		t.Fatal("cached provider was not reused")
 	}
 }

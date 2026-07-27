@@ -33,7 +33,7 @@ func StageTierLabels() map[string]string {
 // when no suitable model is found (caller falls back to the primary). It is
 // the middle layer: explicit stage-models.json overrides are checked first
 // by the caller.
-type StageTierResolver func(stageName string) (agent.Provider, string, string, error)
+type StageTierResolver func(stageName string) (agent.ModelSelection, error)
 
 // TierResolverConfig provides the inputs needed to construct the optional
 // stage tier resolver inside BuildStageModelResolvers. A nil Registry
@@ -119,10 +119,10 @@ func NewStageTierResolver(
 	if providerCache == nil {
 		providerCache = make(map[string]agent.Provider)
 	}
-	return func(stageName string) (agent.Provider, string, string, error) {
+	return func(stageName string) (agent.ModelSelection, error) {
 		best := ResolveStageTierModel(stageName, primaryProfile, registry)
 		if best == nil {
-			return nil, "", "", nil
+			return agent.ModelSelection{}, nil
 		}
 		return buildCachedProvider(primaryProfile, *best, newProvider, providerCache)
 	}
@@ -133,22 +133,25 @@ func buildCachedProvider(
 	candidate modelregistry.ModelEntry,
 	newProvider func(config.ProviderProfile) (agent.Provider, error),
 	providerCache map[string]agent.Provider,
-) (agent.Provider, string, string, error) {
+) (agent.ModelSelection, error) {
+	selection := agent.ModelSelection{ProviderName: primaryProfile.Name, Model: candidate.ID}
 	key := providerCacheKey(primaryProfile.Name, candidate.APIModel, "")
 	if cached, ok := providerCache[key]; ok {
-		return cached, candidate.ID, "", nil
+		selection.Provider = cached
+		return selection, nil
 	}
 	if newProvider == nil {
-		return nil, "", "", fmt.Errorf("build provider for %q: provider factory is nil", candidate.ID)
+		return agent.ModelSelection{}, fmt.Errorf("build provider for %q: provider factory is nil", candidate.ID)
 	}
 	cloned := primaryProfile
 	cloned.Model = candidate.APIModel
 	provider, err := newProvider(cloned)
 	if err != nil {
-		return nil, "", "", fmt.Errorf("build provider for %q: %w", candidate.ID, err)
+		return agent.ModelSelection{}, fmt.Errorf("build provider for %q: %w", candidate.ID, err)
 	}
 	providerCache[key] = provider
-	return provider, candidate.ID, "", nil
+	selection.Provider = provider
+	return selection, nil
 }
 
 func effectiveInputRate(cost modelregistry.ModelCost) float64 {

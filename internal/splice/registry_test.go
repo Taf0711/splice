@@ -1,12 +1,14 @@
 package splice
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/tools"
+	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
 func TestBuildStageRegistryRegistersAllStages(t *testing.T) {
@@ -42,6 +44,75 @@ func TestBuildStageRegistryRegistersDeterministicToolsExactlyOnce(t *testing.T) 
 	// call on the same *tools.Registry must not panic or double-register; the
 	// Get checks above already prove the tools are present, this documents why
 	// calling it twice (e.g. once for the pipeline, once for a design task) is safe.
+}
+
+func TestStageOptionsEmitsAttributedUsageWithoutLegacyDuplicate(t *testing.T) {
+	var attributed []agent.AttributedUsage
+	legacyCalls := 0
+	selection := agent.ModelSelection{ProviderName: "routed", Model: "model-a"}
+	options := stageOptions("code_writer", 2, selection, agent.Options{
+		OnUsage: func(agent.Usage) { legacyCalls++ },
+		OnAttributedUsage: func(usage agent.AttributedUsage) {
+			attributed = append(attributed, usage)
+		},
+	}, t.TempDir(), nil)
+
+	events := make(chan zeroruntime.StreamEvent, 2)
+	events <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 4, OutputTokens: 2}}
+	events <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+	close(events)
+	zeroruntime.CollectStreamWithOptions(context.Background(), events, options.Stream)
+
+	if legacyCalls != 0 || len(attributed) != 1 {
+		t.Fatalf("legacy calls = %d, attributed = %#v", legacyCalls, attributed)
+	}
+	got := attributed[0]
+	if !got.UsageReported || got.ProviderName != "routed" || got.Model != "model-a" || got.Stage != "code_writer" || got.Iteration != 2 || got.Usage.InputTokens != 4 || got.Usage.OutputTokens != 2 {
+		t.Fatalf("attributed usage = %+v", got)
+	}
+}
+
+func TestStageOptionsEmitsMissingUsageAndPreservesLegacyFallback(t *testing.T) {
+	selection := agent.ModelSelection{ProviderName: "primary", Model: "model-a"}
+	var missing agent.AttributedUsage
+	attributedOptions := stageOptions("test_generator", 3, selection, agent.Options{
+		OnAttributedUsage: func(usage agent.AttributedUsage) { missing = usage },
+	}, t.TempDir(), nil)
+
+	noUsage := make(chan zeroruntime.StreamEvent, 1)
+	noUsage <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+	close(noUsage)
+	zeroruntime.CollectStreamWithOptions(context.Background(), noUsage, attributedOptions.Stream)
+	if missing.UsageReported || missing.Stage != "test_generator" || missing.Iteration != 3 || missing.Model != "model-a" {
+		t.Fatalf("missing usage attribution = %+v", missing)
+	}
+
+	malformed := make(chan zeroruntime.StreamEvent, 2)
+	malformed <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsageError, Error: "invalid usage"}
+	malformed <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+	close(malformed)
+	zeroruntime.CollectStreamWithOptions(context.Background(), malformed, attributedOptions.Stream)
+	if !missing.UsageReported || missing.UsageError != "invalid usage" {
+		t.Fatalf("malformed usage attribution = %+v", missing)
+	}
+
+	legacyCalls := 0
+	legacyOptions := stageOptions("code_writer", 1, selection, agent.Options{
+		OnUsage: func(usage agent.Usage) {
+			legacyCalls++
+			if usage.InputTokens != 2 {
+				t.Fatalf("legacy usage = %+v", usage)
+			}
+		},
+	}, t.TempDir(), nil)
+	withUsage := make(chan zeroruntime.StreamEvent, 2)
+	withUsage <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 2}}
+	withUsage <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+	close(withUsage)
+	zeroruntime.CollectStreamWithOptions(context.Background(), withUsage, legacyOptions.Stream)
+	if legacyCalls != 1 {
+		t.Fatalf("legacy usage calls = %d, want 1", legacyCalls)
+	}
 }
 
 func TestDetectLanguageMarkerFiles(t *testing.T) {

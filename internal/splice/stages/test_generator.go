@@ -62,11 +62,11 @@ func (TestGenerator) Run(ctx context.Context, input schemas.HarnessStageInput, p
 		return err
 	})
 	if err != nil {
-		return schemas.HarnessStageOutput{}, err
+		return schemas.HarnessStageOutput{}, withCollectedUsage(err, collected)
 	}
 	output, err := parseTestGeneratorOutput(collected)
 	if err != nil {
-		return schemas.HarnessStageOutput{}, err
+		return schemas.HarnessStageOutput{}, withCollectedUsage(err, collected)
 	}
 
 	changedPaths := make([]string, len(output.Files))
@@ -81,15 +81,15 @@ func (TestGenerator) Run(ctx context.Context, input schemas.HarnessStageInput, p
 	}
 	if len(output.Files) > 0 {
 		if options.WorkDir == "" {
-			return schemas.HarnessStageOutput{}, fmt.Errorf("test generator: WorkDir is required to apply %d file change(s)", len(output.Files))
+			return schemas.HarnessStageOutput{}, withCollectedUsage(fmt.Errorf("test generator: WorkDir is required to apply %d file change(s)", len(output.Files)), collected)
 		}
 		options.report(fmt.Sprintf("applying %d test file change(s)", len(output.Files)))
 		apply, err := applyFileChanges(ctx, options.WorkDir, output.Files, options.RunTool)
 		if err != nil {
-			return schemas.HarnessStageOutput{}, fmt.Errorf("test generator: %w", err)
+			return schemas.HarnessStageOutput{}, withCollectedUsage(fmt.Errorf("test generator: %w", err), collected)
 		}
 		if len(apply.Applied) != len(output.Files) {
-			return schemas.HarnessStageOutput{}, fmt.Errorf("test generator: applied %d of %d file changes", len(apply.Applied), len(output.Files))
+			return schemas.HarnessStageOutput{}, withCollectedUsage(fmt.Errorf("test generator: applied %d of %d file changes", len(apply.Applied), len(output.Files)), collected)
 		}
 		options.report(fmt.Sprintf("applied %d test file change(s)", len(apply.Applied)))
 		data["file_apply_result"] = apply

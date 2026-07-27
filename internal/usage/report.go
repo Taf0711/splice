@@ -5,6 +5,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/sessions"
 	"github.com/Taf0711/splice/internal/zeroruntime"
@@ -49,6 +50,47 @@ func EventUsagePayload(u zeroruntime.Usage) map[string]any {
 	}
 	if u.ReasoningTokens > 0 {
 		payload["reasoningTokens"] = u.ReasoningTokens
+	}
+	return payload
+}
+
+// AttributedUsagePayload builds a persisted usage payload from an
+// agent.AttributedUsage, including identity, sequence, usageReported, all
+// token dimensions, and all estimate fields. Legacy EventUsagePayload is
+// retained for callers that do not need attribution.
+func AttributedUsagePayload(au agent.AttributedUsage) map[string]any {
+	payload := map[string]any{
+		"promptTokens":      au.Usage.EffectiveInputTokens(),
+		"completionTokens":  au.Usage.EffectiveOutputTokens(),
+		"totalTokens":       au.Usage.TotalTokens(),
+		"cachedInputTokens": au.Usage.CachedInputTokens,
+		"cacheWriteTokens":  au.Usage.CacheWriteTokens,
+		"reasoningTokens":   au.Usage.ReasoningTokens,
+		"provider":          au.ProviderName,
+		"model":             au.Model,
+		"stage":             au.Stage,
+		"iteration":         au.Iteration,
+		"usageReported":     au.UsageReported,
+		"usageSequence":     au.Sequence,
+	}
+	if au.Cost.CostUSD != nil {
+		payload["costUsd"] = *au.Cost.CostUSD
+		payload["costEstimated"] = au.Cost.Provenance != agent.CostProvenanceReported
+	}
+	if au.Cost.Status != "" {
+		payload["costStatus"] = au.Cost.Status
+	}
+	if au.Cost.Provenance != "" {
+		payload["costProvenance"] = au.Cost.Provenance
+	}
+	if au.Cost.PricingSource != "" {
+		payload["pricingSource"] = au.Cost.PricingSource
+	}
+	if au.Cost.PricingAsOf != "" {
+		payload["pricingAsOf"] = au.Cost.PricingAsOf
+	}
+	if au.Cost.UnpricedReason != "" {
+		payload["unpricedReason"] = au.Cost.UnpricedReason
 	}
 	return payload
 }

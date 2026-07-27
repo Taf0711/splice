@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
@@ -179,18 +180,21 @@ func Normalize(usage zeroruntime.Usage) (Normalized, zeroruntime.Usage, error) {
 		return Normalized{}, zeroruntime.Usage{}, err
 	}
 	if cachedInputTokens > inputTokens {
-		cachedInputTokens = inputTokens
+		return Normalized{}, zeroruntime.Usage{}, fmt.Errorf("cached input tokens %d exceeds input tokens %d", cachedInputTokens, inputTokens)
 	}
 	cacheWriteTokens, err := nonNegative(usage.CacheWriteTokens, "cacheWriteTokens")
 	if err != nil {
 		return Normalized{}, zeroruntime.Usage{}, err
 	}
 	if cacheWriteTokens > inputTokens-cachedInputTokens {
-		cacheWriteTokens = inputTokens - cachedInputTokens
+		return Normalized{}, zeroruntime.Usage{}, fmt.Errorf("cache write tokens %d plus cached input tokens %d exceeds input tokens %d", cacheWriteTokens, cachedInputTokens, inputTokens)
 	}
 	reasoningTokens, err := nonNegative(usage.ReasoningTokens, "reasoningTokens")
 	if err != nil {
 		return Normalized{}, zeroruntime.Usage{}, err
+	}
+	if reasoningTokens > outputTokens {
+		return Normalized{}, zeroruntime.Usage{}, fmt.Errorf("reasoning tokens %d exceeds output tokens %d", reasoningTokens, outputTokens)
 	}
 	normalized := Normalized{
 		InputTokens:       inputTokens,
@@ -322,4 +326,61 @@ func comma(value int) string {
 		out = append(out, digits[index:index+3]...)
 	}
 	return sign + string(out)
+}
+
+// NewCostEstimator returns an agent.EstimateUsageCost callback that prices
+// LLM requests using the provided model registry. Missing provider usage,
+// unknown models, and missing rates produce unpriced records. Malformed
+// reported usage produces error records. Known models including reported zero
+// usage produce priced records with CostUSD set.
+func NewCostEstimator(registry *modelregistry.Registry) func(model string, usage zeroruntime.Usage, reported bool) agent.UsageCostEstimate {
+	return func(model string, usage zeroruntime.Usage, reported bool) agent.UsageCostEstimate {
+		if !reported {
+			return agent.UsageCostEstimate{
+				Status:         agent.CostStatusUnpriced,
+				UnpricedReason: "usage not reported by provider",
+			}
+		}
+		_, normalizedUsage, err := Normalize(usage)
+		if err != nil {
+			return agent.UsageCostEstimate{
+				Status:         agent.CostStatusError,
+				UnpricedReason: err.Error(),
+			}
+		}
+		if model == "" {
+			return agent.UsageCostEstimate{
+				Status:         agent.CostStatusUnpriced,
+				UnpricedReason: "model unknown",
+			}
+		}
+		if registry == nil {
+			return agent.UsageCostEstimate{
+				Status:         agent.CostStatusUnpriced,
+				UnpricedReason: "model registry unavailable",
+			}
+		}
+		entry, err := registry.Require(model)
+		if err != nil {
+			return agent.UsageCostEstimate{
+				Status:         agent.CostStatusUnpriced,
+				UnpricedReason: fmt.Sprintf("model %q not in registry", model),
+			}
+		}
+		breakdown, err := modelregistry.CalculateCost(entry, normalizedUsage)
+		if err != nil {
+			return agent.UsageCostEstimate{
+				Status:         agent.CostStatusUnpriced,
+				UnpricedReason: err.Error(),
+			}
+		}
+		costUSD := breakdown.TotalCost
+		return agent.UsageCostEstimate{
+			CostUSD:       &costUSD,
+			Status:        agent.CostStatusPriced,
+			Provenance:    agent.CostProvenanceRuntimeEstimate,
+			PricingSource: entry.Cost.Source,
+			PricingAsOf:   entry.Cost.SourceLastVerified,
+		}
+	}
 }

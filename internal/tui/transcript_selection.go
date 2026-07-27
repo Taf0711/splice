@@ -634,7 +634,7 @@ func measureTranscriptBodyItems(items []transcriptBodyItem, cache *transcriptBod
 }
 
 func layoutVisibleTranscriptBodyItems(items []transcriptBodyItem, metrics transcriptBodyLayout, window transcriptViewportWindow) transcriptBodyLayout {
-	layout := transcriptBodyLayout{spans: append([]transcriptBodyItemSpan(nil), metrics.spans...)}
+	layout := transcriptBodyLayout{spans: metrics.spans}
 	if window.end <= window.start {
 		return layout
 	}
@@ -1125,7 +1125,7 @@ func (m model) transcriptHitTestSource() (header string, items []transcriptBodyI
 		return renderSubchatNavBar(m.subchat.childSessionTitle, width), m.transcriptBodyItemsFromRows(m.subchat.childRows, width), width
 	}
 	width = m.chatColumnWidth()
-	return m.pinnedTitleBar(width), m.transcriptBodyItems(width, "", false), width
+	return m.normalTranscriptHeader(width), m.transcriptBodyItems(width, "", false), width
 }
 
 // transcriptHitTestBlocked reports whether mouse hit-testing must be skipped

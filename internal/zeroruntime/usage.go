@@ -19,7 +19,7 @@ func NormalizeUsage(input TokenUsage) (Usage, error) {
 		return Usage{}, err
 	}
 	if cachedInputTokens > inputTokens {
-		cachedInputTokens = inputTokens
+		return Usage{}, fmt.Errorf("cached input tokens %d exceeds input tokens %d", cachedInputTokens, inputTokens)
 	}
 
 	cacheWriteTokens, err := nonNegative(input.CacheWriteTokens, "cache write tokens")
@@ -27,9 +27,9 @@ func NormalizeUsage(input TokenUsage) (Usage, error) {
 		return Usage{}, err
 	}
 	// Cache-read and cache-write are disjoint subsets of the input; together they
-	// can never exceed it. Clamp the write portion to whatever input remains.
+	// can never exceed it.
 	if cacheWriteTokens > inputTokens-cachedInputTokens {
-		cacheWriteTokens = inputTokens - cachedInputTokens
+		return Usage{}, fmt.Errorf("cache write tokens %d plus cached input tokens %d exceeds input tokens %d", cacheWriteTokens, cachedInputTokens, inputTokens)
 	}
 
 	reasoningTokens, err := nonNegative(input.ReasoningTokens, "reasoning tokens")
@@ -37,7 +37,7 @@ func NormalizeUsage(input TokenUsage) (Usage, error) {
 		return Usage{}, err
 	}
 	if reasoningTokens > outputTokens {
-		reasoningTokens = outputTokens
+		return Usage{}, fmt.Errorf("reasoning tokens %d exceeds output tokens %d", reasoningTokens, outputTokens)
 	}
 
 	return Usage{

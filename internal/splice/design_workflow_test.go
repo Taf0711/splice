@@ -186,14 +186,14 @@ func TestCrystallizeAndCritique_ResolverChoosesProviderPerStage(t *testing.T) {
 		workflowDone(),
 	)}
 
-	resolver := func(stage string) (agent.Provider, string, string, error) {
+	resolver := func(stage string) (agent.ModelSelection, error) {
 		switch stage {
 		case "design_crystallize":
-			return crystallizeProvider, "model-a", "high", nil
+			return agent.ModelSelection{Provider: crystallizeProvider, ProviderName: "provider-a", Model: "model-a", ReasoningEffort: "high"}, nil
 		case "plan_critic":
-			return criticProvider, "model-b", "low", nil
+			return agent.ModelSelection{Provider: criticProvider, ProviderName: "provider-b", Model: "model-b", ReasoningEffort: "low"}, nil
 		default:
-			return nil, "", "", fmt.Errorf("unknown stage %q", stage)
+			return agent.ModelSelection{}, fmt.Errorf("unknown stage %q", stage)
 		}
 	}
 
@@ -360,11 +360,15 @@ func TestCrystallizeAndCritique_ResolverErrorFallsBack(t *testing.T) {
 		workflowDone(),
 	)}
 
-	resolver := func(stage string) (agent.Provider, string, string, error) {
-		return nil, "", "", errors.New("resolver unavailable")
+	resolver := func(stage string) (agent.ModelSelection, error) {
+		return agent.ModelSelection{}, errors.New("resolver unavailable")
 	}
 
-	wf := NewDesignWorkflow(store, "test-session", "plan-1")
+	wf := NewDesignWorkflow(store, "test-session", "plan-1").WithPrimarySelection("primary", "primary-model", "medium")
+	selection := wf.resolveProvider(defaultProvider, resolver, "design_crystallize")
+	if selection.Provider != defaultProvider || selection.ProviderName != "primary" || selection.Model != "primary-model" || selection.ReasoningEffort != "medium" {
+		t.Fatalf("fallback selection = %+v", selection)
+	}
 	if _, _, err := wf.CrystallizeAndCritique(ctx, events, defaultProvider, resolver, zeroruntime.CollectOptions{}, "", nil); err != nil {
 		t.Fatalf("CrystallizeAndCritique: %v", err)
 	}

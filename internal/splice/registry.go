@@ -49,8 +49,29 @@ func buildStageRegistry(options agent.Options, workDir string) (stageRegistry, e
 }
 
 // stageOptions builds StageOptions for a named stage.
-func stageOptions(name string, options agent.Options, workDir string, runner ToolRunner) stages.StageOptions {
+// iteration and selection provide attribution context for usage callbacks.
+func stageOptions(name string, iteration int, selection agent.ModelSelection, options agent.Options, workDir string, runner ToolRunner) stages.StageOptions {
 	language := detectLanguage(workDir)
+	var onUsageResult func(zeroruntime.Usage, bool)
+	var onUsageError func(string)
+	var onLegacyUsage func(zeroruntime.Usage)
+	if options.OnAttributedUsage != nil {
+		emitAttributed := func(usage zeroruntime.Usage, reported bool, usageError string) {
+			options.OnAttributedUsage(agent.AttributedUsage{
+				Usage:         usage,
+				UsageReported: reported,
+				UsageError:    usageError,
+				ProviderName:  selection.ProviderName,
+				Model:         selection.Model,
+				Stage:         name,
+				Iteration:     iteration,
+			})
+		}
+		onUsageResult = func(usage zeroruntime.Usage, reported bool) { emitAttributed(usage, reported, "") }
+		onUsageError = func(reason string) { emitAttributed(zeroruntime.Usage{}, true, reason) }
+	} else {
+		onLegacyUsage = options.OnUsage
+	}
 	return stages.StageOptions{
 		WorkDir:        workDir,
 		Language:       language,
@@ -60,7 +81,9 @@ func stageOptions(name string, options agent.Options, workDir string, runner Too
 		Stream: zeroruntime.CollectOptions{
 			OnText:          options.OnText,
 			OnReasoning:     options.OnReasoning,
-			OnUsage:         options.OnUsage,
+			OnUsage:         onLegacyUsage,
+			OnUsageResult:   onUsageResult,
+			OnUsageError:    onUsageError,
 			OnToolCallStart: options.OnToolCallStart,
 			OnToolCallDelta: options.OnToolCallDelta,
 		},

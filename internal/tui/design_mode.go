@@ -226,7 +226,7 @@ func (m model) handleCrystallizeCommand() (model, tea.Cmd) {
 
 	return m, tea.Batch(
 		func() tea.Msg {
-			wf := splicerun.NewDesignWorkflow(store, sessionID, planID).WithPrimaryModel(m.modelName)
+			wf := splicerun.NewDesignWorkflow(store, sessionID, planID).WithPrimarySelection(m.providerName, m.modelName, string(m.reasoningEffort))
 			plan, critique, err := wf.CrystallizeAndCritique(runCtx, events, provider, resolver, zeroruntime.CollectOptions{}, cwd, nil)
 			return crystallizeResultMsg{runID: runID, plan: plan, critique: critique, err: err, store: store, sessionID: sessionID}
 		},

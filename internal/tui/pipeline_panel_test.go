@@ -143,15 +143,15 @@ func TestTUIReloadsStageModelRoutingForEachPipelineRun(t *testing.T) {
 		if options.StageModelResolver == nil {
 			t.Fatal("TUI pipeline run has no stage model resolver")
 		}
-		provider, model, effort, err := options.StageModelResolver("code_writer")
+		selection, err := options.StageModelResolver("code_writer")
 		if err != nil {
 			t.Fatalf("resolve code_writer route: %v", err)
 		}
-		if provider == nil {
+		if selection.Provider == nil {
 			t.Fatal("configured stage route returned nil provider")
 		}
-		routedModels = append(routedModels, model)
-		routedEfforts = append(routedEfforts, effort)
+		routedModels = append(routedModels, selection.Model)
+		routedEfforts = append(routedEfforts, selection.ReasoningEffort)
 		return agent.Result{FinalAnswer: "done"}, nil
 	}
 
@@ -208,7 +208,7 @@ func (provider *tuiPipelineFeatureProvider) StreamCompletion(ctx context.Context
 	default:
 		return nil, fmt.Errorf("unexpected LLM stage tool %q", toolName)
 	}
-	ch := make(chan zeroruntime.StreamEvent, 5)
+	ch := make(chan zeroruntime.StreamEvent, 6)
 	select {
 	case <-ctx.Done():
 		close(ch)
@@ -219,6 +219,7 @@ func (provider *tuiPipelineFeatureProvider) StreamCompletion(ctx context.Context
 	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: callID, ToolName: toolName}
 	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: callID, ArgumentsFragment: string(arguments)}
 	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: callID}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 11, OutputTokens: 5}}
 	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
 	close(ch)
 	return ch, nil
@@ -346,6 +347,19 @@ func TestTUIPipelineEndToEndFeature(t *testing.T) {
 	}
 	if storedResult.Status != "completed" || len(storedResult.Stages) != 3 {
 		t.Fatalf("stored pipeline result = %#v", storedResult)
+	}
+	if len(response.usageEvents) != 1 {
+		t.Fatalf("response usage events = %d, want 1", len(response.usageEvents))
+	}
+	var usagePayload map[string]any
+	for _, event := range response.sessionEvents {
+		if event.Type == sessions.EventUsage {
+			usagePayload, _ = event.Payload.(map[string]any)
+			break
+		}
+	}
+	if usagePayload["model"] != "qwen-local" || usagePayload["provider"] != "local" || usagePayload["usageSequence"] != 1 || usagePayload["costStatus"] != agent.CostStatusUnpriced {
+		t.Fatalf("attributed TUI usage payload = %#v", usagePayload)
 	}
 }
 

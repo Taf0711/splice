@@ -111,34 +111,46 @@ func TestNormalizeUsageMapsProviderAliasesAndReasoningTokens(t *testing.T) {
 	}
 }
 
-func TestNormalizeUsageClampsCachedInputTokens(t *testing.T) {
-	usage, err := NormalizeUsage(TokenUsage{
+func TestNormalizeUsageRejectsExcessiveCachedInputTokens(t *testing.T) {
+	_, err := NormalizeUsage(TokenUsage{
 		InputTokens:       5,
 		CachedInputTokens: 12,
 		OutputTokens:      3,
 	})
-	if err != nil {
-		t.Fatalf("NormalizeUsage returned error: %v", err)
+	if err == nil {
+		t.Fatal("expected cached input tokens error")
 	}
-	if usage.CachedInputTokens != 5 {
-		t.Fatalf("cached input tokens = %d, want 5", usage.CachedInputTokens)
+	if !strings.Contains(err.Error(), "cached input tokens") {
+		t.Fatalf("error = %q, want cached input tokens", err.Error())
 	}
 }
 
-func TestNormalizeUsageClampsReasoningTokensToOutput(t *testing.T) {
-	usage, err := NormalizeUsage(TokenUsage{
+func TestNormalizeUsageRejectsExcessiveReasoningTokens(t *testing.T) {
+	_, err := NormalizeUsage(TokenUsage{
 		InputTokens:     10,
 		OutputTokens:    4,
 		ReasoningTokens: 9,
 	})
-	if err != nil {
-		t.Fatalf("NormalizeUsage returned error: %v", err)
+	if err == nil {
+		t.Fatal("expected reasoning tokens error")
 	}
-	if usage.ReasoningTokens != 4 {
-		t.Fatalf("reasoning tokens = %d, want 4", usage.ReasoningTokens)
+	if !strings.Contains(err.Error(), "reasoning tokens") {
+		t.Fatalf("error = %q, want reasoning tokens", err.Error())
 	}
-	if usage.TotalTokens() != 14 {
-		t.Fatalf("total tokens = %d, want 14", usage.TotalTokens())
+}
+
+func TestNormalizeUsageRejectsCacheWriteExceedingInput(t *testing.T) {
+	_, err := NormalizeUsage(TokenUsage{
+		InputTokens:       100,
+		CachedInputTokens: 60,
+		CacheWriteTokens:  50,
+		OutputTokens:      10,
+	})
+	if err == nil {
+		t.Fatal("expected cache write plus cached input exceeds input error")
+	}
+	if !strings.Contains(err.Error(), "cache write tokens") {
+		t.Fatalf("error = %q, want cache write tokens", err.Error())
 	}
 }
 
@@ -421,6 +433,77 @@ func TestCollectStreamSurfacesStreamErrors(t *testing.T) {
 	}
 }
 
+func TestCollectStreamWithOptionsReportsFinalUsageStateOnce(t *testing.T) {
+	tests := []struct {
+		name     string
+		events   []StreamEvent
+		reported bool
+		usage    Usage
+	}{
+		{name: "reported", events: []StreamEvent{{Type: StreamEventUsage, Usage: Usage{InputTokens: 10, OutputTokens: 5}}, {Type: StreamEventDone}}, reported: true, usage: Usage{InputTokens: 10, OutputTokens: 5}},
+		{name: "not reported", events: []StreamEvent{{Type: StreamEventText, Content: "hello"}, {Type: StreamEventDone}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			events := make(chan StreamEvent, len(test.events))
+			for _, event := range test.events {
+				events <- event
+			}
+			close(events)
+
+			calls := 0
+			CollectStreamWithOptions(context.Background(), events, CollectOptions{
+				OnUsageResult: func(usage Usage, reported bool) {
+					calls++
+					if usage.EffectiveInputTokens() != test.usage.EffectiveInputTokens() || usage.EffectiveOutputTokens() != test.usage.EffectiveOutputTokens() || reported != test.reported {
+						t.Fatalf("usage result = (%+v, %t), want (%+v, %t)", usage, reported, test.usage, test.reported)
+					}
+				},
+			})
+			if calls != 1 {
+				t.Fatalf("OnUsageResult calls = %d, want 1", calls)
+			}
+		})
+	}
+}
+
+func TestCollectStreamWithOptionsReportsMalformedUsageOnce(t *testing.T) {
+	events := make(chan StreamEvent, 2)
+	events <- StreamEvent{Type: StreamEventUsageError, Error: "reasoning exceeds output"}
+	events <- StreamEvent{Type: StreamEventDone}
+	close(events)
+
+	resultCalls := 0
+	errorCalls := 0
+	CollectStreamWithOptions(context.Background(), events, CollectOptions{
+		OnUsageResult: func(Usage, bool) { resultCalls++ },
+		OnUsageError: func(reason string) {
+			errorCalls++
+			if reason != "reasoning exceeds output" {
+				t.Fatalf("usage error = %q", reason)
+			}
+		},
+	})
+	if resultCalls != 0 || errorCalls != 1 {
+		t.Fatalf("usage result calls=%d error calls=%d", resultCalls, errorCalls)
+	}
+}
+
+func TestCollectStreamWithOptionsLegacyOnUsageStillRequiresUsage(t *testing.T) {
+	events := make(chan StreamEvent, 2)
+	events <- StreamEvent{Type: StreamEventText, Content: "x"}
+	events <- StreamEvent{Type: StreamEventDone}
+	close(events)
+
+	called := false
+	CollectStreamWithOptions(context.Background(), events, CollectOptions{
+		OnUsage: func(Usage) { called = true },
+	})
+	if called {
+		t.Fatal("legacy OnUsage fired without a usage event")
+	}
+}
+
 func TestProviderContractCanBeImplementedByMock(t *testing.T) {
 	var provider Provider = mockProvider{
 		events: []StreamEvent{
@@ -446,5 +529,45 @@ func TestProviderContractCanBeImplementedByMock(t *testing.T) {
 	collected := CollectStream(context.Background(), stream)
 	if collected.Text != "ok" {
 		t.Fatalf("text = %q, want ok", collected.Text)
+	}
+}
+
+func TestNormalizeUsageRejectsAllMalformedSubsets(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   TokenUsage
+		wantErr string
+	}{
+		{"cached exceeds input", TokenUsage{InputTokens: 10, CachedInputTokens: 15, OutputTokens: 5}, "cached input tokens"},
+		{"cache write plus cached exceeds input", TokenUsage{InputTokens: 100, CachedInputTokens: 60, CacheWriteTokens: 50, OutputTokens: 10}, "cache write tokens"},
+		{"reasoning exceeds output", TokenUsage{InputTokens: 100, OutputTokens: 10, ReasoningTokens: 20}, "reasoning tokens"},
+		{"all bad", TokenUsage{InputTokens: 10, CachedInputTokens: 10, CacheWriteTokens: 10, OutputTokens: 5, ReasoningTokens: 6}, "cached input tokens"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NormalizeUsage(tc.input)
+			if err == nil {
+				t.Fatalf("expected error containing %q", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %q, want %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestNormalizeUsageAcceptsValidSubsets(t *testing.T) {
+	usage, err := NormalizeUsage(TokenUsage{
+		InputTokens:       100,
+		CachedInputTokens: 40,
+		CacheWriteTokens:  20,
+		OutputTokens:      50,
+		ReasoningTokens:   10,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if usage.CachedInputTokens != 40 || usage.CacheWriteTokens != 20 || usage.ReasoningTokens != 10 {
+		t.Fatalf("unexpected tokens: %+v", usage)
 	}
 }

@@ -46,6 +46,12 @@ func TestSelectBackendChoosesPlatformAdapterWithFallback(t *testing.T) {
 				return "", errors.New("missing")
 			},
 		})
+		if detectWSL().IsWSL {
+			if backend.Name != BackendWSL || backend.Available || !strings.Contains(backend.Message, "WSL") {
+				t.Fatalf("linux backend = %#v, want explicit WSL fallback", backend)
+			}
+			return
+		}
 		if backend.Name != BackendUnavailable || backend.Available {
 			t.Fatalf("linux backend = %#v, want native sandbox unavailable without Linux helper", backend)
 		}

@@ -75,6 +75,40 @@ func TestFormatEventRedactsSecretsAndSerializesOneLine(t *testing.T) {
 	}
 }
 
+func TestFormatUsageEventPreservesAttributionAndFalseReportedFlag(t *testing.T) {
+	reported := false
+	iteration := 2
+	sequence := 3
+	zeroCost := 0.0
+	estimated := true
+	line, err := FormatEvent(Event{
+		Type:           EventUsage,
+		RunID:          "run_test",
+		Provider:       "provider-a",
+		Model:          "model-a",
+		Stage:          "code_writer",
+		Iteration:      &iteration,
+		UsageSequence:  &sequence,
+		UsageReported:  &reported,
+		CostUSD:        &zeroCost,
+		CostStatus:     "priced",
+		CostEstimated:  &estimated,
+		CostProvenance: "runtime_estimate",
+		PricingSource:  "test catalog",
+		PricingAsOf:    "2026-07-26",
+	})
+	if err != nil {
+		t.Fatalf("FormatEvent returned error: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(line), &decoded); err != nil {
+		t.Fatalf("unmarshal usage event: %v", err)
+	}
+	if decoded["provider"] != "provider-a" || decoded["model"] != "model-a" || decoded["stage"] != "code_writer" || decoded["iteration"] != float64(2) || decoded["usageSequence"] != float64(3) || decoded["usageReported"] != false || decoded["costUsd"] != float64(0) || decoded["costStatus"] != "priced" || decoded["costEstimated"] != true {
+		t.Fatalf("usage attribution = %#v", decoded)
+	}
+}
+
 func TestFormatEventRedactsSensitiveObjectKeys(t *testing.T) {
 	apiKey := "plain-api-key-value"
 	accessToken := "plain-access-token-value"

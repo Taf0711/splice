@@ -953,6 +953,8 @@ func TestRunExecJSONUnsafeOutputsWarningEvent(t *testing.T) {
 
 func TestRunExecUsesProjectConfigAndOpenAICompatibleProvider(t *testing.T) {
 	clearProviderEnv(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	root := t.TempDir()
 	configDir := filepath.Join(root, ".splice")
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
@@ -1009,7 +1011,7 @@ func TestRunExecUsesProjectConfigAndOpenAICompatibleProvider(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := Run([]string{"exec", "--cwd", root, "hello provider"}, &stdout, &stderr)
+	exitCode := Run([]string{"--trust", "exec", "--cwd", root, "hello provider"}, &stdout, &stderr)
 
 	if exitCode != 0 {
 		t.Fatalf("expected exit code 0, got %d: %s", exitCode, stderr.String())
@@ -1712,14 +1714,13 @@ func (usageEmittingEchoProvider) StreamCompletion(ctx context.Context, request z
 	return ch, nil
 }
 
-// TestRunExecUsageOmitsModelKeyWithoutEscalationFlag verifies the back-compat
-// guarantee: a run WITHOUT --allow-escalation persists EventUsage payloads that
-// carry NO "model" key (byte-identical to before the escalation feature), since
-// the model can never change mid-run when escalation is off. The flag-ON,
-// post-escalation case is covered by TestRunExecAttributesUsageToEscalatedModel.
-func TestRunExecUsageOmitsModelKeyWithoutEscalationFlag(t *testing.T) {
+// TestRunExecUsageAlwaysIncludesAttributionFields verifies PE2: every persisted
+// EventUsage payload now carries provider, model, stage, iteration,
+// usageReported, and usageSequence, regardless of --allow-escalation.
+func TestRunExecUsageAlwaysIncludesAttributionFields(t *testing.T) {
 	dataHome := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	cwd := t.TempDir()
 
 	var stdout bytes.Buffer
@@ -1728,6 +1729,7 @@ func TestRunExecUsageOmitsModelKeyWithoutEscalationFlag(t *testing.T) {
 		"exec",
 		"--model", "claude-haiku-4.5",
 		"--init-session-id", "no_escalation_run",
+		"--output-format", "stream-json",
 		"hello",
 	}, &stdout, &stderr, appDeps{
 		getwd: func() (string, error) {
@@ -1757,22 +1759,54 @@ func TestRunExecUsageOmitsModelKeyWithoutEscalationFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadEvents returned error: %v", err)
 	}
-	var sawUsage bool
+	sessionUsage := map[int]map[string]any{}
 	for _, event := range events {
 		if event.Type != sessions.EventUsage {
 			continue
 		}
-		sawUsage = true
 		var payload map[string]any
 		if err := json.Unmarshal(event.Payload, &payload); err != nil {
 			t.Fatalf("unmarshal usage payload: %v", err)
 		}
-		if _, ok := payload["model"]; ok {
-			t.Fatalf("flag-OFF usage payload must NOT carry a model key, got %#v", payload)
+		for _, key := range []string{"provider", "model", "stage", "iteration", "usageReported", "usageSequence", "costUsd", "costStatus", "costEstimated", "costProvenance", "pricingSource", "pricingAsOf"} {
+			if _, ok := payload[key]; !ok {
+				t.Fatalf("usage payload missing %q, got %#v", key, payload)
+			}
+		}
+		if payload["costStatus"] != agent.CostStatusPriced || payload["costEstimated"] != true {
+			t.Fatalf("persisted usage cost state = %#v", payload)
+		}
+		sequence := int(payload["usageSequence"].(float64))
+		sessionUsage[sequence] = payload
+	}
+	if len(sessionUsage) == 0 {
+		t.Fatal("expected at least one persisted usage event")
+	}
+
+	streamUsage := 0
+	for _, event := range decodeJSONLines(t, stdout.String()) {
+		if event["type"] != "usage" {
+			continue
+		}
+		streamUsage++
+		for _, key := range []string{"provider", "model", "stage", "iteration", "usageReported", "usageSequence", "costUsd", "costStatus", "costEstimated", "costProvenance", "pricingSource", "pricingAsOf"} {
+			if _, ok := event[key]; !ok {
+				t.Fatalf("stream usage missing %q, got %#v", key, event)
+			}
+		}
+		sequence := int(event["usageSequence"].(float64))
+		persisted, ok := sessionUsage[sequence]
+		if !ok {
+			t.Fatalf("stream usage sequence %d has no matching session event", sequence)
+		}
+		for _, key := range []string{"provider", "model", "stage", "iteration", "usageReported", "costUsd", "costStatus", "costEstimated", "costProvenance", "pricingSource", "pricingAsOf"} {
+			if event[key] != persisted[key] {
+				t.Fatalf("sequence %d field %s differs: stream=%v session=%v", sequence, key, event[key], persisted[key])
+			}
 		}
 	}
-	if !sawUsage {
-		t.Fatal("expected at least one usage event to be recorded")
+	if streamUsage != len(sessionUsage) {
+		t.Fatalf("stream usage events = %d, session usage events = %d", streamUsage, len(sessionUsage))
 	}
 }
 

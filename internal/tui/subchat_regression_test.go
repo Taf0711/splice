@@ -15,6 +15,27 @@ import (
 // show in that view, and a selection in progress must extend across a wheel-scroll
 // instead of freezing at whatever was visible when the drag started.
 
+func TestSubchatScrollUsesChildRows(t *testing.T) {
+	m := mouseTestModel()
+	m.altScreen = true
+	m.height = 12
+	m.transcript = nil
+	for i := 0; i < 80; i++ {
+		m.transcript = appendRow(m.transcript, rowUser, "parent row")
+	}
+	m.subchat.active = true
+	m.subchat.childSessionTitle = "child"
+	m.subchat.childRows = appendRow(nil, rowUser, "child row")
+
+	viewport, ok := m.chatTranscriptViewport()
+	if !ok {
+		t.Fatal("expected an alt-screen subchat viewport")
+	}
+	if got := viewport.maxOffset(); got != 0 {
+		t.Fatalf("subchat viewport max offset = %d, want 0 for one child row", got)
+	}
+}
+
 func TestFooterHidesPlanPanelDuringSubchat(t *testing.T) {
 	m := runningPlanModel(t, 3)
 	m.altScreen = true

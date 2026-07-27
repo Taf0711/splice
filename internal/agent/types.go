@@ -15,6 +15,56 @@ type Provider = zeroruntime.Provider
 type ToolCall = zeroruntime.ToolCall
 type Usage = zeroruntime.Usage
 
+// Cost status values for request-level pricing.
+const (
+	CostStatusPriced   = "priced"
+	CostStatusUnpriced = "unpriced"
+	CostStatusError    = "error"
+)
+
+// Cost provenance values identify how a cost estimate was derived.
+const (
+	CostProvenanceRuntimeEstimate       = "runtime_estimate"
+	CostProvenancePersistedEstimate     = "persisted_estimate"
+	CostProvenanceReconstructedEstimate = "reconstructed_estimate"
+	CostProvenanceReported              = "reported"
+)
+
+// UsageCostEstimate carries the estimated cost of one LLM request.
+type UsageCostEstimate struct {
+	CostUSD        *float64
+	Status         string
+	Provenance     string
+	PricingSource  string
+	PricingAsOf    string
+	UnpricedReason string
+}
+
+// AttributedUsage carries usage with its attribution context (provider, model,
+// stage, iteration). Emitted once per provider stream by the pipeline.
+type AttributedUsage struct {
+	Sequence      int
+	Usage         Usage
+	UsageReported bool
+	UsageError    string
+	ProviderName  string
+	Model         string
+	Stage         string
+	Iteration     int
+	Cost          UsageCostEstimate
+}
+
+// ModelSelection is one resolved provider route for a pipeline stage.
+type ModelSelection struct {
+	Provider        Provider
+	ProviderName    string
+	Model           string
+	ReasoningEffort string
+}
+
+type StageModelResolver func(stageName string) (ModelSelection, error)
+type EscalationModelResolver func() (ModelSelection, error)
+
 type PermissionMode string
 type PermissionAction string
 type PermissionDecisionAction string
@@ -304,6 +354,15 @@ type Options struct {
 	OnAskUser           func(context.Context, AskUserRequest) (AskUserResponse, error)
 	OnToolResult        func(ToolResult)
 	OnUsage             func(Usage)
+	// OnAttributedUsage, when set, is called exactly once per provider stream
+	// with the usage attributed to its provider, model, stage, and iteration.
+	// When set, the legacy OnUsage callback is NOT called (no double emit).
+	// When nil, legacy OnUsage behavior is preserved.
+	OnAttributedUsage func(AttributedUsage)
+	// EstimateUsageCost, when set, prices an attributed usage record once at
+	// the pipeline ledger boundary. The pipeline owns sequence assignment and
+	// calls this exactly once per provider stream. Nil disables pipeline pricing.
+	EstimateUsageCost func(model string, usage Usage, reported bool) UsageCostEstimate
 	// OnToolProgress, when set, is called with each stream-json event a
 	// specialist child process emits while running. The toolCallID identifies
 	// which Task tool call the progress belongs to. nil is a no-op.
@@ -338,13 +397,13 @@ type Options struct {
 	// effort for the Splice pipeline. When nil, the default provider and
 	// options.Model/ReasoningEffort are used for every stage (byte-identical to
 	// pre-AR11 behavior). Splice addition (AR11b).
-	StageModelResolver func(stageName string) (Provider, string, string, error)
+	StageModelResolver StageModelResolver
 
 	// EscalationModelResolver resolves an escalation provider, model, and
 	// reasoning effort when the trajectory monitor fires cycle or oscillation
 	// actions. When nil, escalation is skipped (best-effort, non-fatal). Splice
 	// addition (AR10c).
-	EscalationModelResolver func() (Provider, string, string, error)
+	EscalationModelResolver EscalationModelResolver
 
 	// OnSurfaceToUser is called when the trajectory monitor fires
 	// ActionSurfaceToUser (confidence is strictly decreasing across the last

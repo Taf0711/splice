@@ -16,10 +16,10 @@ import (
 // epoch. It owns: history mapping, provider routing, typed results, and
 // lifecycle event persistence. The TUI calls it; it does not call the TUI.
 type DesignWorkflow struct {
-	store        *sessions.Store
-	sessionID    string
-	planID       string
-	primaryModel string
+	store            *sessions.Store
+	sessionID        string
+	planID           string
+	primarySelection agent.ModelSelection
 }
 
 // NewDesignWorkflow creates a workflow bound to a session store + session ID.
@@ -38,7 +38,15 @@ func NewDesignWorkflow(store *sessions.Store, sessionID, planID string) *DesignW
 // primary, so that design-phase stage errors are attributed to the real
 // primary model instead of a literal tier label.
 func (w *DesignWorkflow) WithPrimaryModel(model string) *DesignWorkflow {
-	w.primaryModel = model
+	w.primarySelection.Model = model
+	return w
+}
+
+// WithPrimarySelection sets the identity and effort of the default route.
+func (w *DesignWorkflow) WithPrimarySelection(providerName, model, effort string) *DesignWorkflow {
+	w.primarySelection.ProviderName = providerName
+	w.primarySelection.Model = model
+	w.primarySelection.ReasoningEffort = effort
 	return w
 }
 
@@ -56,7 +64,7 @@ func (w *DesignWorkflow) CrystallizeAndCritique(
 	ctx context.Context,
 	events []sessions.Event,
 	provider agent.Provider,
-	stageModelResolver func(string) (agent.Provider, string, string, error),
+	stageModelResolver agent.StageModelResolver,
 	stream zeroruntime.CollectOptions,
 	workDir string,
 	images []zeroruntime.ImageBlock,
@@ -71,16 +79,16 @@ func (w *DesignWorkflow) CrystallizeAndCritique(
 		return schemas.DesignPlan{}, schemas.PlanCritique{}, fmt.Errorf("crystallize input: %w", err)
 	}
 
-	resolvedProvider, model, effort := w.resolveProvider(provider, stageModelResolver, "design_crystallize")
+	selection := w.resolveProvider(provider, stageModelResolver, "design_crystallize")
 	opts := stages.StageOptions{
 		WorkDir:         workDir,
 		Stream:          stream,
 		Images:          images,
-		ModelOverride:   model,
-		ReasoningEffort: effort,
+		ModelOverride:   selection.Model,
+		ReasoningEffort: selection.ReasoningEffort,
 	}
 
-	plan, err := stages.DesignCrystallizer{}.Crystallize(ctx, resolvedProvider, opts, input)
+	plan, err := stages.DesignCrystallizer{}.Crystallize(ctx, selection.Provider, opts, input)
 	if err != nil {
 		return schemas.DesignPlan{}, schemas.PlanCritique{}, err
 	}
@@ -108,9 +116,9 @@ func (w *DesignWorkflow) CrystallizeAndCritique(
 		Images:  images,
 		Plan:    &plan,
 	}
-	criticProvider, criticModel, criticEffort := w.resolveProvider(provider, stageModelResolver, "plan_critic")
-	criticOpts.ModelOverride = criticModel
-	criticOpts.ReasoningEffort = criticEffort
+	criticSelection := w.resolveProvider(provider, stageModelResolver, "plan_critic")
+	criticOpts.ModelOverride = criticSelection.Model
+	criticOpts.ReasoningEffort = criticSelection.ReasoningEffort
 
 	criticInput := schemas.HarnessStageInput{
 		RunID:         w.planID,
@@ -120,7 +128,7 @@ func (w *DesignWorkflow) CrystallizeAndCritique(
 		RequestIntent: plan.Epic,
 	}
 
-	output, err := stages.PlanCritic{}.Run(ctx, criticInput, criticProvider, criticOpts)
+	output, err := stages.PlanCritic{}.Run(ctx, criticInput, criticSelection.Provider, criticOpts)
 	if err != nil {
 		return plan, schemas.PlanCritique{}, err
 	}
@@ -147,17 +155,16 @@ func (w *DesignWorkflow) CrystallizeAndCritique(
 
 func (w *DesignWorkflow) resolveProvider(
 	defaultProvider agent.Provider,
-	resolver func(string) (agent.Provider, string, string, error),
+	resolver agent.StageModelResolver,
 	stageName string,
-) (agent.Provider, string, string) {
+) agent.ModelSelection {
 	if resolver != nil {
-		p, m, e, err := resolver(stageName)
-		if err == nil && p != nil {
-			return p, m, e
+		selection, err := resolver(stageName)
+		if err == nil && selection.Provider != nil {
+			return selection
 		}
 	}
-	if w.primaryModel != "" {
-		return defaultProvider, w.primaryModel, ""
-	}
-	return defaultProvider, "", ""
+	selection := w.primarySelection
+	selection.Provider = defaultProvider
+	return selection
 }

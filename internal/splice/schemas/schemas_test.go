@@ -343,10 +343,11 @@ func TestStageModelConfigFileResolveUnchanged(t *testing.T) {
 
 func TestPipelineResultValidation(t *testing.T) {
 	res := PipelineResult{
-		RunID:  "run-1",
-		Status: "completed",
-		Tier:   TierLight,
-		Stages: []StageRecord{{Name: "s", Status: StageCompleted}},
+		RunID:        "run-1",
+		Status:       "completed",
+		Tier:         TierLight,
+		Stages:       []StageRecord{{Name: "s", Status: StageCompleted}},
+		CostCoverage: CostCoverageNotApplicable,
 	}
 	if err := res.Validate(); err != nil {
 		t.Fatalf("valid: %v", err)
@@ -354,6 +355,266 @@ func TestPipelineResultValidation(t *testing.T) {
 	res.Status = "weird"
 	if err := res.Validate(); err == nil {
 		t.Fatal("expected status error")
+	}
+}
+
+func TestPipelineUsageRecordValidation(t *testing.T) {
+	zero := 0.0
+	valid := PipelineUsageRecord{
+		Sequence:       1,
+		Stage:          "code_writer",
+		Iteration:      1,
+		UsageReported:  true,
+		InputTokens:    100,
+		OutputTokens:   50,
+		CostStatus:     CostStatusPriced,
+		CostUSD:        &zero,
+		CostProvenance: "runtime_estimate",
+		PricingSource:  "test catalog",
+		PricingAsOf:    "2026-07-26",
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid record: %v", err)
+	}
+	// Bad sequence.
+	bad := valid
+	bad.Sequence = 0
+	if err := bad.Validate(); err == nil || !strings.Contains(err.Error(), "sequence") {
+		t.Fatalf("expected sequence error, got %v", err)
+	}
+	// Bad stage.
+	bad = valid
+	bad.Stage = ""
+	if err := bad.Validate(); err == nil || !strings.Contains(err.Error(), "stage") {
+		t.Fatalf("expected stage error, got %v", err)
+	}
+	// Bad iteration.
+	bad = valid
+	bad.Iteration = -1
+	if err := bad.Validate(); err == nil || !strings.Contains(err.Error(), "iteration") {
+		t.Fatalf("expected iteration error, got %v", err)
+	}
+	// Cached exceeds input.
+	bad = valid
+	bad.InputTokens = 10
+	bad.CachedTokens = 20
+	if err := bad.Validate(); err == nil || !strings.Contains(err.Error(), "cached input tokens") {
+		t.Fatalf("expected cached error, got %v", err)
+	}
+	// Cache write plus cached exceeds input.
+	bad = valid
+	bad.InputTokens = 100
+	bad.CachedTokens = 60
+	bad.CacheWrite = 50
+	if err := bad.Validate(); err == nil || !strings.Contains(err.Error(), "cache write tokens") {
+		t.Fatalf("expected cache write error, got %v", err)
+	}
+	// Reasoning exceeds output.
+	bad = valid
+	bad.OutputTokens = 10
+	bad.Reasoning = 20
+	if err := bad.Validate(); err == nil || !strings.Contains(err.Error(), "reasoning tokens") {
+		t.Fatalf("expected reasoning error, got %v", err)
+	}
+	// Priced without cost_usd.
+	bad = valid
+	bad.CostUSD = nil
+	if err := bad.Validate(); err == nil || !strings.Contains(err.Error(), "cost_usd") {
+		t.Fatalf("expected priced cost_usd error, got %v", err)
+	}
+	// Priced without provenance.
+	bad = valid
+	bad.CostProvenance = ""
+	if err := bad.Validate(); err == nil || !strings.Contains(err.Error(), "cost_provenance") {
+		t.Fatalf("expected provenance error, got %v", err)
+	}
+	// Unpriced with cost_usd.
+	unpriced := PipelineUsageRecord{
+		Sequence: 1, Stage: "s", Iteration: 1, UsageReported: true,
+		InputTokens: 10, OutputTokens: 5,
+		CostStatus: CostStatusUnpriced, UnpricedReason: "no model", CostUSD: &zero,
+	}
+	if err := unpriced.Validate(); err == nil || !strings.Contains(err.Error(), "unpriced record must not have cost_usd") {
+		t.Fatalf("expected unpriced cost_usd error, got %v", err)
+	}
+	// Unpriced without reason.
+	unpriced.CostUSD = nil
+	unpriced.UnpricedReason = ""
+	if err := unpriced.Validate(); err == nil || !strings.Contains(err.Error(), "unpriced_reason") {
+		t.Fatalf("expected unpriced reason error, got %v", err)
+	}
+	// Bad cost_status.
+	bad = valid
+	bad.CostStatus = "unknown"
+	if err := bad.Validate(); err == nil || !strings.Contains(err.Error(), "cost_status") {
+		t.Fatalf("expected cost_status error, got %v", err)
+	}
+}
+
+func TestPipelineResultCoverageStates(t *testing.T) {
+	one := 1.0
+	priced := PipelineUsageRecord{
+		Sequence: 1, Stage: "s", Iteration: 1, UsageReported: true,
+		InputTokens: 10, OutputTokens: 5,
+		CostStatus: CostStatusPriced, CostUSD: &one, CostProvenance: "runtime_estimate", PricingSource: "test catalog", PricingAsOf: "2026-07-26",
+	}
+	unpriced := PipelineUsageRecord{
+		Sequence: 2, Stage: "s", Iteration: 1,
+		CostStatus: CostStatusUnpriced, UnpricedReason: "no model",
+	}
+	errRec := PipelineUsageRecord{
+		Sequence: 3, Stage: "s", Iteration: 1, UsageReported: true,
+		InputTokens: 10, OutputTokens: 5,
+		CostStatus: CostStatusError, UnpricedReason: "malformed",
+	}
+	base := func() PipelineResult {
+		return PipelineResult{
+			RunID: "r1", Status: "completed", Tier: TierLight,
+			Stages: []StageRecord{{Name: "s", Status: StageCompleted}}, CostCoverage: CostCoverageNotApplicable,
+		}
+	}
+	// not_applicable with no records.
+	res := base()
+	res.CostCoverage = CostCoverageNotApplicable
+	if err := res.Validate(); err != nil {
+		notApplicableValid(t, err)
+	}
+	// not_applicable with records should fail.
+	res.UsageRecords = []PipelineUsageRecord{priced}
+	res.PricedRequestCount = 1
+	res.TotalTokensInput = 10
+	res.TotalTokensOutput = 5
+	res.TotalCostUSD = 1
+	if err := res.Validate(); err == nil || !strings.Contains(err.Error(), "not_applicable") {
+		notApplicableShouldFail(t, err)
+	}
+	// complete: all priced.
+	res = base()
+	res.UsageRecords = []PipelineUsageRecord{priced}
+	res.CostCoverage = CostCoverageComplete
+	res.PricedRequestCount = 1
+	res.TotalTokensInput = 10
+	res.TotalTokensOutput = 5
+	res.TotalCostUSD = 1
+	if err := res.Validate(); err != nil {
+		t.Fatalf("complete valid: %v", err)
+	}
+	// partial: mix.
+	res = base()
+	res.UsageRecords = []PipelineUsageRecord{priced, unpriced}
+	res.CostCoverage = CostCoveragePartial
+	res.PricedRequestCount = 1
+	res.UnpricedRequestCount = 1
+	res.TotalTokensInput = 10
+	res.TotalTokensOutput = 5
+	res.TotalCostUSD = 1
+	if err := res.Validate(); err != nil {
+		t.Fatalf("partial valid: %v", err)
+	}
+	// unavailable: none priced.
+	res = base()
+	unpricedFirst := unpriced
+	unpricedFirst.Sequence = 1
+	errorSecond := errRec
+	errorSecond.Sequence = 2
+	res.UsageRecords = []PipelineUsageRecord{unpricedFirst, errorSecond}
+	res.CostCoverage = CostCoverageUnavailable
+	res.UnpricedRequestCount = 1
+	res.ErrorRequestCount = 1
+	res.TotalTokensInput = 10
+	res.TotalTokensOutput = 5
+	if err := res.Validate(); err != nil {
+		t.Fatalf("unavailable valid: %v", err)
+	}
+	// complete with an unpriced record should fail.
+	res = base()
+	res.UsageRecords = []PipelineUsageRecord{priced, unpriced}
+	res.CostCoverage = CostCoverageComplete
+	res.PricedRequestCount = 1
+	res.UnpricedRequestCount = 1
+	res.TotalTokensInput = 10
+	res.TotalTokensOutput = 5
+	res.TotalCostUSD = 1
+	if err := res.Validate(); err == nil || !strings.Contains(err.Error(), "cost_coverage") {
+		t.Fatalf("expected complete error, got %v", err)
+	}
+	// partial with no priced should fail.
+	res = base()
+	res.UsageRecords = []PipelineUsageRecord{unpricedFirst}
+	res.CostCoverage = CostCoveragePartial
+	res.UnpricedRequestCount = 1
+	if err := res.Validate(); err == nil || !strings.Contains(err.Error(), "cost_coverage") {
+		t.Fatalf("expected partial error, got %v", err)
+	}
+}
+
+func notApplicableValid(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("not_applicable valid: %v", err)
+	}
+}
+
+func notApplicableShouldFail(t *testing.T, err error) {
+	t.Helper()
+	if err == nil || !strings.Contains(err.Error(), "cost_coverage") {
+		t.Fatalf("expected cost coverage error, got %v", err)
+	}
+}
+
+// Ensure counts must match records.
+func TestPipelineResultCountsMustMatchRecords(t *testing.T) {
+	one := 1.0
+	rec := PipelineUsageRecord{
+		Sequence: 1, Stage: "s", Iteration: 1, UsageReported: true,
+		InputTokens: 10, OutputTokens: 5,
+		CostStatus: CostStatusPriced, CostUSD: &one, CostProvenance: "runtime_estimate", PricingSource: "test catalog", PricingAsOf: "2026-07-26",
+	}
+	res := PipelineResult{
+		RunID: "r1", Status: "completed", Tier: TierLight,
+		Stages:             []StageRecord{{Name: "s", Status: StageCompleted}},
+		UsageRecords:       []PipelineUsageRecord{rec},
+		CostCoverage:       CostCoverageComplete,
+		PricedRequestCount: 2,
+		TotalTokensInput:   10,
+		TotalTokensOutput:  5,
+		TotalCostUSD:       1,
+	}
+	if err := res.Validate(); err == nil || !strings.Contains(err.Error(), "request counts") {
+		t.Fatalf("expected count mismatch error, got %v", err)
+	}
+	// Token totals must match.
+	res.PricedRequestCount = 1
+	res.TotalTokensInput = 99
+	if err := res.Validate(); err == nil || !strings.Contains(err.Error(), "token totals") {
+		t.Fatalf("expected token totals error, got %v", err)
+	}
+	// Duplicate sequence.
+	res.TotalTokensInput = 10
+	rec2 := rec
+	rec2.Sequence = 1
+	res.UsageRecords = []PipelineUsageRecord{rec, rec2}
+	res.PricedRequestCount = 2
+	res.TotalTokensInput = 20
+	res.TotalTokensOutput = 10
+	res.TotalCostUSD = 2
+	if err := res.Validate(); err == nil || !strings.Contains(err.Error(), "sequence") {
+		t.Fatalf("expected sequence error, got %v", err)
+	}
+}
+
+// JSON round-trip for PipelineUsageRecord.
+func TestPipelineUsageRecordJSONRoundTrip(t *testing.T) {
+	zero := 0.0
+	rec := PipelineUsageRecord{
+		Sequence: 1, Provider: "openai", Model: "gpt-4.1",
+		Stage: "code_writer", Iteration: 1, UsageReported: true,
+		InputTokens: 100, OutputTokens: 50, CachedTokens: 20, CacheWrite: 10, Reasoning: 5,
+		CostUSD: &zero, CostStatus: "priced", CostProvenance: "runtime_estimate",
+		PricingSource: "https://example.com", PricingAsOf: "2026-07-26",
+	}
+	if err := rec.Validate(); err != nil {
+		t.Fatalf("valid: %v", err)
 	}
 }
 
@@ -525,7 +786,7 @@ func TestJSONRoundTrip(t *testing.T) {
 			StageRecord{Name: "s", Status: StageCompleted},
 			HarnessStageInput{RunID: "r1", StageName: "s", Sequence: 1, PlanTier: TierLight, RequestIntent: "x"},
 			HarnessStageOutput{Summary: "s", Confidence: 0.9, Data: map[string]interface{}{"k": "v", "n": 2.0}},
-			PipelineResult{RunID: "r1", Status: "completed", Tier: TierLight, Stages: []StageRecord{{Name: "s", Status: StageCompleted}}, FinalOutput: map[string]interface{}{"k": "v", "n": 3.0}},
+			PipelineResult{RunID: "r1", Status: "completed", Tier: TierLight, Stages: []StageRecord{{Name: "s", Status: StageCompleted}}, FinalOutput: map[string]interface{}{"k": "v", "n": 3.0}, CostCoverage: CostCoverageNotApplicable},
 		}
 		_ = pattern
 		_ = symbol

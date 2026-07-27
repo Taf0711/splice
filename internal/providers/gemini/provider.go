@@ -282,7 +282,9 @@ func (provider *Provider) emitDone(ctx context.Context, state *streamState, even
 			ReasoningTokens:   state.reasoningTokens,
 			CachedInputTokens: state.cachedTokens,
 		})
-		if err == nil {
+		if err != nil {
+			providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsageError, Error: err.Error()})
+		} else {
 			providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: usage})
 		}
 	}

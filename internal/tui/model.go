@@ -88,7 +88,7 @@ type model struct {
 	savedProviders              []config.ProviderProfile
 	provider                    zeroruntime.Provider
 	newProvider                 func(config.ProviderProfile) (zeroruntime.Provider, error)
-	stageModelResolver          func(string) (agent.Provider, string, string, error)
+	stageModelResolver          agent.StageModelResolver
 	probeProviderHealth         func(context.Context, providerhealth.Options) providerhealth.Result
 	discoverProviderModels      func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
 	discoverOllamaContextWindow func(ctx context.Context, baseURL string, model string) (int, error)
@@ -291,6 +291,8 @@ type model struct {
 	// the viewport (hold the read position) when content streams in while the user
 	// has scrolled up. 0 means "at the bottom / not pinned".
 	chatBodyLines int
+	chatLayoutGen uint64
+	chatViewport  chatViewportCache
 
 	// Flush-frontier state (see flush.go). In inline mode, transcript[:flushed]
 	// is already in native scrollback. Alt-screen mode advances the same
@@ -1099,6 +1101,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return next, cmd
 	}
+	// Any handled message may change transcript geometry, footer height, or
+	// viewport mode. Invalidate the per-frame line-count cache once, after the
+	// message has finished mutating the model.
+	nm.chatLayoutGen++
 	nm = nm.syncChatScroll()
 	nm, mouseCmd := nm.syncMouseCapture()
 	nm, flushCmd := nm.settleTranscript()
@@ -2668,15 +2674,7 @@ func (m model) transcriptView() string {
 	// not pinned at the top. It appears above the specialist cards like a
 	// chat message, the way todo/plan updates render inline.
 	if m.altScreen && m.height > 0 {
-		header := m.pinnedTitleBar(width)
-		if planHeader := m.persistentPlanHeader(width); planHeader != "" {
-			if header != "" {
-				header += "\n" + planHeader
-			} else {
-				header = planHeader
-			}
-		}
-		return m.scrollableTranscriptItemsView(header, bodyItems, footer, width, overlayForViewport)
+		return m.scrollableTranscriptItemsView(m.normalTranscriptHeader(width), bodyItems, footer, width, overlayForViewport)
 	}
 
 	bodyLayout := layoutTranscriptBodyItems(bodyItems)
@@ -2962,7 +2960,22 @@ func (m model) scrollableTranscriptLayoutView(header string, body transcriptBody
 
 func (m model) scrollableTranscriptItemsView(header string, items []transcriptBodyItem, footer string, width int, overlay string) string {
 	frame := m.scrollableTranscriptFrame(header, footer)
-	metrics := measureTranscriptBodyItems(items, m.transcriptBodyHeights)
+	var metrics transcriptBodyLayout
+	cache := m.chatViewport
+	detailed := m.transcriptDetailed
+	subchat := !detailed && m.subchat.active
+	sourceLen := len(m.transcript)
+	if subchat {
+		sourceLen = len(m.subchat.childRows)
+	}
+	if overlay == "" && cache.valid && cache.generation == m.chatLayoutGen &&
+		cache.width == width && cache.sourceLen == sourceLen && cache.flushed == m.flushed &&
+		cache.height == frame.bodyRect.height &&
+		cache.itemCount == len(items) && cache.detailed == detailed && cache.subchat == subchat {
+		metrics = transcriptBodyLayout{spans: cache.spans}
+	} else {
+		metrics = measureTranscriptBodyItems(items, m.transcriptBodyHeights)
+	}
 	window := transcriptViewportForLayout(metrics, frame, m.chatScrollOffset).window()
 	body := layoutVisibleTranscriptBodyItems(items, metrics, window)
 
@@ -3118,38 +3131,72 @@ func (m model) chatScrollMetrics() (int, int) {
 	return viewport.totalLines, viewport.maxOffset()
 }
 
-func (m model) chatTranscriptViewport() (transcriptViewport, bool) {
+func (m *model) chatTranscriptViewport() (transcriptViewport, bool) {
 	if !m.altScreen || m.height <= 0 {
 		return transcriptViewport{}, false
 	}
 	width := m.chatColumnWidth()
-	if m.transcriptDetailed {
-		items := m.transcriptBodyItems(width, "", true)
-		body := measureTranscriptBodyItems(items, m.transcriptBodyHeights)
-		header := detailedTranscriptHeader(width) + "\n" + zeroTheme.line.Render(strings.Repeat("-", width))
-		footer := m.detailedTranscriptFooter(width)
-		frame := m.scrollableTranscriptFrame(header, footer)
-		return transcriptViewportForLayout(body, frame, m.chatScrollOffset), true
+	detailed := m.transcriptDetailed
+	subchat := !detailed && m.subchat.active
+	sourceLen := len(m.transcript)
+	if subchat {
+		sourceLen = len(m.subchat.childRows)
 	}
-	items := m.transcriptBodyItems(width, "", false)
+	if m.chatViewport.valid && m.chatViewport.generation == m.chatLayoutGen &&
+		m.chatViewport.width == width && m.chatViewport.sourceLen == sourceLen &&
+		m.chatViewport.flushed == m.flushed &&
+		m.chatViewport.detailed == detailed && m.chatViewport.subchat == subchat {
+		return newTranscriptViewport(m.chatViewport.totalLines, m.chatViewport.height, m.chatScrollOffset), true
+	}
+
+	var header, footer string
+	var items []transcriptBodyItem
+	switch {
+	case detailed:
+		items = m.transcriptBodyItems(width, "", true)
+		header = detailedTranscriptHeader(width) + "\n" + zeroTheme.line.Render(strings.Repeat("-", width))
+		footer = m.detailedTranscriptFooter(width)
+	case subchat:
+		items = m.transcriptBodyItemsFromRows(m.subchat.childRows, width)
+		header = renderSubchatNavBar(m.subchat.childSessionTitle, width)
+		footer = m.footerView(width)
+	default:
+		items = m.transcriptBodyItems(width, "", false)
+		header = m.normalTranscriptHeader(width)
+		footer = m.footerView(width)
+	}
+	frame := m.scrollableTranscriptFrame(header, footer)
 	body := measureTranscriptBodyItems(items, m.transcriptBodyHeights)
-	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
-	return transcriptViewportForLayout(body, frame, m.chatScrollOffset), true
+	m.chatViewport = chatViewportCache{
+		generation: m.chatLayoutGen,
+		totalLines: body.totalLines(),
+		height:     frame.bodyRect.height,
+		width:      width,
+		sourceLen:  sourceLen,
+		flushed:    m.flushed,
+		itemCount:  len(items),
+		spans:      body.spans,
+		detailed:   detailed,
+		subchat:    subchat,
+		valid:      true,
+	}
+	return newTranscriptViewport(m.chatViewport.totalLines, m.chatViewport.height, m.chatScrollOffset), true
 }
 
 // syncChatScroll pins the viewport to what the user is reading. The scroll offset
 // is measured from the bottom, so when the transcript grows (streaming) the window
 // would otherwise follow the new bottom and drag the user off their spot. While
 // the user has scrolled up, shift the offset by however many lines the body changed
-// so the absolute view holds; at the bottom (offset 0) it follows normally. Only the
-// scrolled-up path renders the body, so the common case stays cheap.
+// so the absolute view holds; at the bottom (offset 0) it follows normally. The
+// measured spans are cached for the render that follows this update.
 func (m model) syncChatScroll() model {
-	if !m.altScreen || m.chatScrollOffset <= 0 {
+	viewport, ok := m.chatTranscriptViewport()
+	if !ok || m.chatScrollOffset <= 0 {
 		// At the bottom (or inline mode): follow the tail; reset the pin baseline.
 		m.chatBodyLines = 0
 		return m
 	}
-	current, maxOffset := m.chatScrollMetrics()
+	current, maxOffset := viewport.totalLines, viewport.maxOffset()
 	m.chatScrollOffset = clampInt(m.chatScrollOffset, 0, maxOffset)
 	if m.chatScrollOffset <= 0 {
 		m.chatBodyLines = 0
@@ -3162,7 +3209,7 @@ func (m model) syncChatScroll() model {
 	}
 	// Shift by the signed delta so the absolute view holds whether the body grew
 	// (streaming appended lines) or shrank (a tool card collapsed, transcript
-	// cleared). Clamp at splice so a large shrink lands the user back at the tail
+	// cleared). Clamp at zero so a large shrink lands the user back at the tail
 	// rather than underflowing past it.
 	m.chatScrollOffset = clampInt(m.chatScrollOffset+current-m.chatBodyLines, 0, maxOffset)
 	m.chatBodyLines = current
@@ -5215,6 +5262,26 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			m.sendAgentUsage(runID, usageModelID, event)
 			if onUsage != nil {
 				onUsage(event)
+			}
+		}
+
+		// Pipeline runs persist request attribution and use routed model prices.
+		// Other run kinds keep the legacy usage callback.
+		if runOptions.runKind == tuiRunPipeline {
+			estimator := usage.NewCostEstimator(&m.modelCatalog)
+			options.EstimateUsageCost = estimator
+			downstreamAU := options.OnAttributedUsage
+			options.OnAttributedUsage = func(au agent.AttributedUsage) {
+				usageEvents = append(usageEvents, au.Usage)
+				payload := usage.AttributedUsagePayload(au)
+				sessionEvents = append(sessionEvents, pendingSessionEvent{
+					Type:    sessions.EventUsage,
+					Payload: payload,
+				})
+				m.sendAgentUsage(runID, au.Model, au.Usage)
+				if downstreamAU != nil {
+					downstreamAU(au)
+				}
 			}
 		}
 

@@ -14,6 +14,23 @@ type transcriptViewportWindow struct {
 	offset    int
 }
 
+// chatViewportCache avoids measuring every transcript item three times for one
+// wheel event: scroll handling, scroll pinning, and View all need the same
+// total line count.
+type chatViewportCache struct {
+	generation uint64
+	totalLines int
+	height     int
+	width      int
+	sourceLen  int
+	flushed    int
+	itemCount  int
+	spans      []transcriptBodyItemSpan
+	detailed   bool
+	subchat    bool
+	valid      bool
+}
+
 func newTranscriptViewport(totalLines int, height int, offset int) transcriptViewport {
 	totalLines = maxInt(0, totalLines)
 	height = maxInt(1, height)

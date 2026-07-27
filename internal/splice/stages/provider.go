@@ -3,6 +3,7 @@ package stages
 import (
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 
 	"github.com/Taf0711/splice/internal/splice/schemas"
@@ -40,6 +41,26 @@ func (e *TypedOutputError) Unwrap() error { return e.Cause }
 
 // StageUsage returns usage accumulated across every completed retry attempt.
 func (e *TypedOutputError) StageUsage() *schemas.StageUsage { return e.stageUsage }
+
+type meteredStageError struct {
+	err   error
+	usage *schemas.StageUsage
+}
+
+func (e meteredStageError) Error() string                   { return e.err.Error() }
+func (e meteredStageError) Unwrap() error                   { return e.err }
+func (e meteredStageError) StageUsage() *schemas.StageUsage { return e.usage }
+
+func withCollectedUsage(err error, collected *zeroruntime.CollectedStream) error {
+	if err == nil || collected == nil {
+		return err
+	}
+	var metered interface{ StageUsage() *schemas.StageUsage }
+	if errors.As(err, &metered) {
+		return err
+	}
+	return meteredStageError{err: err, usage: usageFromCollected(collected)}
+}
 
 // callToolUse runs a single-turn tool-use completion and returns the collected stream.
 // If callbacks are provided, text and tool-call events are forwarded.
@@ -152,5 +173,6 @@ func usageFromCollected(collected *zeroruntime.CollectedStream) *schemas.StageUs
 		OutputTokens:      u.OutputTokens,
 		CachedInputTokens: u.CachedInputTokens,
 		CacheWriteTokens:  u.CacheWriteTokens,
+		ReasoningTokens:   u.ReasoningTokens,
 	}
 }
