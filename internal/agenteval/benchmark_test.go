@@ -49,7 +49,7 @@ func TestHarnessRunsSelectedTaskFromFixtureAndScoresResult(t *testing.T) {
 	if !report.OK {
 		t.Fatalf("OK = false; report=%#v", report)
 	}
-	if report.Contract != ReportContractVersion {
+	if report.Contract != BenchmarkContractVersion {
 		t.Fatalf("Contract = %q", report.Contract)
 	}
 	if report.SuiteID != suite.ID {
@@ -73,6 +73,9 @@ func TestHarnessRunsSelectedTaskFromFixtureAndScoresResult(t *testing.T) {
 	}
 	if taskReport.Report.Status != StatusPass || !taskReport.Report.OK {
 		t.Fatalf("Report = %#v", taskReport.Report)
+	}
+	if taskReport.Report.Contract != ReportContractVersion {
+		t.Fatalf("task score contract = %q, want %q", taskReport.Report.Contract, ReportContractVersion)
 	}
 }
 
@@ -489,9 +492,9 @@ func TestWriteBenchmarkCSV(t *testing.T) {
 func TestBenchmarkSummaryAggregatesUsageCostAndLatency(t *testing.T) {
 	report := BenchmarkReport{
 		Tasks: []BenchmarkTaskReport{
-			{InputTokens: 100, OutputTokens: 50, CachedInputTokens: 10, CostUSD: 1.5, LatencyMs: 100, Report: Report{Status: StatusPass, OK: true}},
-			{InputTokens: 200, OutputTokens: 100, CachedInputTokens: 20, CostUSD: 2.5, LatencyMs: 200, Report: Report{Status: StatusPass, OK: true}},
-			{InputTokens: 300, OutputTokens: 150, CachedInputTokens: 30, CostUSD: 3.0, LatencyMs: 300, Report: Report{Status: StatusFail}},
+			{InputTokens: 100, OutputTokens: 50, CachedInputTokens: 10, CacheWriteTokens: 5, ReasoningTokens: 6, CostUSD: 1.5, LatencyMs: 100, Report: Report{Status: StatusPass, OK: true}},
+			{InputTokens: 200, OutputTokens: 100, CachedInputTokens: 20, CacheWriteTokens: 7, ReasoningTokens: 8, CostUSD: 2.5, LatencyMs: 200, Report: Report{Status: StatusPass, OK: true}},
+			{InputTokens: 300, OutputTokens: 150, CachedInputTokens: 30, CacheWriteTokens: 9, ReasoningTokens: 10, CostUSD: 3.0, LatencyMs: 300, Report: Report{Status: StatusFail}},
 		},
 	}
 
@@ -500,11 +503,30 @@ func TestBenchmarkSummaryAggregatesUsageCostAndLatency(t *testing.T) {
 	if report.Summary.TotalTasks != 3 || report.Summary.PassedTasks != 2 || report.Summary.FailedTasks != 1 {
 		t.Fatalf("task counts = %#v", report.Summary)
 	}
-	if report.Summary.TotalCostUSD != 7 || report.Summary.TotalInputTokens != 600 || report.Summary.TotalOutputTokens != 300 || report.Summary.TotalCachedInputTokens != 60 {
+	if report.Summary.TotalCostUSD != 7 || report.Summary.EstimatedCostUSD != 7 || report.Summary.TotalInputTokens != 600 || report.Summary.TotalOutputTokens != 300 || report.Summary.TotalCachedInputTokens != 60 || report.Summary.TotalCacheWriteTokens != 21 || report.Summary.TotalReasoningTokens != 24 {
 		t.Fatalf("aggregate usage/cost = %#v", report.Summary)
 	}
-	if report.Summary.MeanCostPerTask != 7.0/3.0 || report.Summary.MeanCostPerPassedTask != 7.0/2.0 || report.Summary.MeanLatencyMs != 200 {
+	if report.Summary.MeanCostPerTask != 7.0/3.0 || report.Summary.MeanCostPerPassedTask != 7.0/2.0 || report.Summary.MeanEstimatedCostPerTask != 7.0/3.0 || report.Summary.MeanEstimatedCostOfPassedTasks != 4.0/2.0 || report.Summary.CampaignEstimatedCostPerPass != 7.0/2.0 || report.Summary.MeanLatencyMs != 200 {
 		t.Fatalf("aggregate means = %#v", report.Summary)
+	}
+}
+
+func TestBenchmarkSummaryCountsRequestCostStatuses(t *testing.T) {
+	zero := 0.0
+	report := BenchmarkReport{Tasks: []BenchmarkTaskReport{
+		{Agent: AgentRunResult{UsageSamples: []UsageSample{
+			{CostStatus: CostStatusPriced, CostUSD: &zero},
+			{CostStatus: CostStatusUnpriced},
+			{CostStatus: CostStatusError},
+		}}, Report: Report{Status: StatusPass, OK: true}},
+	}}
+
+	report.finishSummary()
+	if report.Summary.PricedRequestCount != 1 || report.Summary.UnpricedRequestCount != 1 || report.Summary.ErrorRequestCount != 1 {
+		t.Fatalf("request cost statuses = %#v", report.Summary)
+	}
+	if report.Summary.CostCoverage != CostCoveragePartial {
+		t.Fatalf("coverage = %q, want %q", report.Summary.CostCoverage, CostCoveragePartial)
 	}
 }
 

@@ -1,6 +1,7 @@
 package agenteval
 
 import (
+	"encoding/json"
 	"testing"
 )
 
@@ -26,7 +27,7 @@ func TestParsePipelineStagesFromStdout(t *testing.T) {
 	if stages[0].Model != "moonshotai/kimi-k3" {
 		t.Fatalf("stage[0] model = %q, want moonshotai/kimi-k3", stages[0].Model)
 	}
-	if stages[0].CostUSD != 0.005 {
+	if stages[0].CostUSD == nil || *stages[0].CostUSD != 0.005 {
 		t.Fatalf("stage[0] cost = %v, want 0.005", stages[0].CostUSD)
 	}
 	if stages[1].Name != "test_generator" {
@@ -58,9 +59,11 @@ func TestParsePipelineStagesFromStdoutEmpty(t *testing.T) {
 }
 
 func TestFormatStageBreakdown(t *testing.T) {
+	firstCost := 0.005
+	secondCost := 0.003
 	stages := []StageBreakdown{
-		{Name: "code_writer", TokensInput: 1000, TokensOutput: 500, CostUSD: 0.005},
-		{Name: "test_generator", TokensInput: 800, TokensOutput: 300, CostUSD: 0.003},
+		{Name: "code_writer", TokensInput: 1000, TokensOutput: 500, CostUSD: &firstCost},
+		{Name: "test_generator", TokensInput: 800, TokensOutput: 300, CostUSD: &secondCost},
 	}
 	got := formatStageBreakdown(stages)
 	want := "code_writer:in=1000,out=500,cost=0.0050;test_generator:in=800,out=300,cost=0.0030"
@@ -69,6 +72,44 @@ func TestFormatStageBreakdown(t *testing.T) {
 	}
 	if formatStageBreakdown(nil) != "" {
 		t.Fatalf("expected empty string for nil stages")
+	}
+}
+
+func TestStageBreakdownRoundTripsAllTokenDimensionsAndCostState(t *testing.T) {
+	zero := 0.0
+	priced := StageBreakdown{
+		Name:             "code_writer",
+		Status:           "completed",
+		Iteration:        2,
+		Provider:         "openai",
+		Model:            "gpt-4.1",
+		TokensInput:      100,
+		TokensOutput:     80,
+		TokensCached:     20,
+		TokensCacheWrite: 10,
+		TokensReasoning:  30,
+		CostUSD:          &zero,
+		CostStatus:       CostStatusPriced,
+		LatencyMs:        42,
+	}
+	unknown := StageBreakdown{Name: "test_generator", CostStatus: CostStatusUnpriced}
+	encoded, err := json.Marshal([]StageBreakdown{priced, unknown})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded []StageBreakdown
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded) != 2 {
+		t.Fatalf("decoded stages = %d, want 2", len(decoded))
+	}
+	got := decoded[0]
+	if got.Iteration != 2 || got.Provider != "openai" || got.Model != "gpt-4.1" || got.TokensInput != 100 || got.TokensOutput != 80 || got.TokensCached != 20 || got.TokensCacheWrite != 10 || got.TokensReasoning != 30 || got.CostStatus != CostStatusPriced || got.CostUSD == nil || *got.CostUSD != 0 {
+		t.Fatalf("decoded priced stage = %#v", got)
+	}
+	if decoded[1].CostStatus != CostStatusUnpriced || decoded[1].CostUSD != nil {
+		t.Fatalf("decoded unknown stage = %#v", decoded[1])
 	}
 }
 

@@ -308,6 +308,17 @@ func TestScoreNormalizesSingleTaskExpectedChangedFiles(t *testing.T) {
 	}
 }
 
+func TestScoreAndBenchmarkUseIndependentContracts(t *testing.T) {
+	score := Score(sampleSuite(), ScoreInput{TaskID: "edit-reader"})
+	if score.Contract != ReportContractVersion {
+		t.Fatalf("score contract = %q, want %q", score.Contract, ReportContractVersion)
+	}
+	report := BenchmarkReport{Contract: BenchmarkContractVersion}
+	if report.Contract != BenchmarkContractVersion {
+		t.Fatalf("benchmark contract = %q, want %q", report.Contract, BenchmarkContractVersion)
+	}
+}
+
 func TestScorePassesWhenCommandsAndChangedFilesMatch(t *testing.T) {
 	suite := sampleSuite()
 

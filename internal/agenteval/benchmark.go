@@ -51,18 +51,28 @@ type BenchmarkTaskReport struct {
 }
 
 type BenchmarkSummary struct {
-	TotalTasks             int     `json:"totalTasks"`
-	PassedTasks            int     `json:"passedTasks"`
-	FailedTasks            int     `json:"failedTasks"`
-	BlockedTasks           int     `json:"blockedTasks"`
-	ErrorTasks             int     `json:"errorTasks"`
-	TotalCostUSD           float64 `json:"totalCostUsd,omitempty"`
-	TotalInputTokens       int     `json:"totalInputTokens,omitempty"`
-	TotalOutputTokens      int     `json:"totalOutputTokens,omitempty"`
-	TotalCachedInputTokens int     `json:"totalCachedInputTokens,omitempty"`
-	MeanCostPerTask        float64 `json:"meanCostPerTask,omitempty"`
-	MeanCostPerPassedTask  float64 `json:"meanCostPerPassedTask,omitempty"`
-	MeanLatencyMs          int64   `json:"meanLatencyMs,omitempty"`
+	TotalTasks                     int     `json:"totalTasks"`
+	PassedTasks                    int     `json:"passedTasks"`
+	FailedTasks                    int     `json:"failedTasks"`
+	BlockedTasks                   int     `json:"blockedTasks"`
+	ErrorTasks                     int     `json:"errorTasks"`
+	EstimatedCostUSD               float64 `json:"estimatedCostUsd,omitempty"`
+	CostCoverage                   string  `json:"costCoverage,omitempty"`
+	PricedRequestCount             int     `json:"pricedRequestCount,omitempty"`
+	UnpricedRequestCount           int     `json:"unpricedRequestCount,omitempty"`
+	ErrorRequestCount              int     `json:"errorRequestCount,omitempty"`
+	TotalCostUSD                   float64 `json:"totalCostUsd,omitempty"`
+	TotalInputTokens               int     `json:"totalInputTokens,omitempty"`
+	TotalOutputTokens              int     `json:"totalOutputTokens,omitempty"`
+	TotalCachedInputTokens         int     `json:"totalCachedInputTokens,omitempty"`
+	TotalCacheWriteTokens          int     `json:"totalCacheWriteTokens,omitempty"`
+	TotalReasoningTokens           int     `json:"totalReasoningTokens,omitempty"`
+	MeanCostPerTask                float64 `json:"meanCostPerTask,omitempty"`
+	MeanCostPerPassedTask          float64 `json:"meanCostPerPassedTask,omitempty"`
+	MeanEstimatedCostPerTask       float64 `json:"meanEstimatedCostPerTask,omitempty"`
+	MeanEstimatedCostOfPassedTasks float64 `json:"meanEstimatedCostOfPassedTasks,omitempty"`
+	CampaignEstimatedCostPerPass   float64 `json:"campaignEstimatedCostPerPass,omitempty"`
+	MeanLatencyMs                  int64   `json:"meanLatencyMs,omitempty"`
 }
 
 type Harness struct {
@@ -76,7 +86,7 @@ func (harness Harness) Run(ctx context.Context, suitePath string, suite Suite, i
 		ctx = context.Background()
 	}
 	report := BenchmarkReport{
-		Contract: ReportContractVersion,
+		Contract: BenchmarkContractVersion,
 		SuiteID:  suite.ID,
 	}
 	tasks, err := selectBenchmarkTasks(suite, input.TaskID)
@@ -181,15 +191,33 @@ func (harness Harness) runTask(ctx context.Context, suitePath string, suite Suit
 func (report *BenchmarkReport) finishSummary() {
 	report.Summary = BenchmarkSummary{TotalTasks: len(report.Tasks)}
 	var totalLatencyMs int64
+	var passedTaskCost float64
+	var sawUsageSamples bool
 	for _, task := range report.Tasks {
 		report.Summary.TotalCostUSD += task.CostUSD
 		report.Summary.TotalInputTokens += task.InputTokens
 		report.Summary.TotalOutputTokens += task.OutputTokens
 		report.Summary.TotalCachedInputTokens += task.CachedInputTokens
+		report.Summary.TotalCacheWriteTokens += task.CacheWriteTokens
+		report.Summary.TotalReasoningTokens += task.ReasoningTokens
 		totalLatencyMs += task.LatencyMs
+		if len(task.Agent.UsageSamples) > 0 {
+			sawUsageSamples = true
+		}
+		for _, sample := range task.Agent.UsageSamples {
+			switch usageSampleCostStatus(sample) {
+			case CostStatusPriced:
+				report.Summary.PricedRequestCount++
+			case CostStatusUnpriced:
+				report.Summary.UnpricedRequestCount++
+			case CostStatusError:
+				report.Summary.ErrorRequestCount++
+			}
+		}
 		switch {
 		case task.Report.OK:
 			report.Summary.PassedTasks++
+			passedTaskCost += task.CostUSD
 		case task.Report.Status == StatusBlocked:
 			report.Summary.BlockedTasks++
 		case task.Report.Status == StatusError:
@@ -198,17 +226,49 @@ func (report *BenchmarkReport) finishSummary() {
 			report.Summary.FailedTasks++
 		}
 	}
+	report.Summary.EstimatedCostUSD = report.Summary.TotalCostUSD
 	if report.Summary.TotalTasks > 0 {
 		report.Summary.MeanCostPerTask = report.Summary.TotalCostUSD / float64(report.Summary.TotalTasks)
+		report.Summary.MeanEstimatedCostPerTask = report.Summary.EstimatedCostUSD / float64(report.Summary.TotalTasks)
 		report.Summary.MeanLatencyMs = totalLatencyMs / int64(report.Summary.TotalTasks)
 	}
 	if report.Summary.PassedTasks > 0 {
 		report.Summary.MeanCostPerPassedTask = report.Summary.TotalCostUSD / float64(report.Summary.PassedTasks)
+		report.Summary.MeanEstimatedCostOfPassedTasks = passedTaskCost / float64(report.Summary.PassedTasks)
+		report.Summary.CampaignEstimatedCostPerPass = report.Summary.TotalCostUSD / float64(report.Summary.PassedTasks)
+	}
+	if sawUsageSamples {
+		report.Summary.CostCoverage = summaryCostCoverage(report.Summary.PricedRequestCount, report.Summary.UnpricedRequestCount, report.Summary.ErrorRequestCount)
 	}
 	report.OK = report.Summary.TotalTasks > 0 &&
 		report.Summary.FailedTasks == 0 &&
 		report.Summary.BlockedTasks == 0 &&
 		report.Summary.ErrorTasks == 0
+}
+
+func usageSampleCostStatus(sample UsageSample) string {
+	switch sample.CostStatus {
+	case CostStatusPriced, CostStatusUnpriced, CostStatusError:
+		return sample.CostStatus
+	}
+	if sample.CostUSD != nil {
+		return CostStatusPriced
+	}
+	return CostStatusUnpriced
+}
+
+func summaryCostCoverage(priced, unpriced, errors int) string {
+	total := priced + unpriced + errors
+	switch {
+	case total == 0:
+		return CostCoverageNotApplicable
+	case priced == total:
+		return CostCoverageComplete
+	case priced > 0:
+		return CostCoveragePartial
+	default:
+		return CostCoverageUnavailable
+	}
 }
 
 func copyAgentMetrics(taskReport *BenchmarkTaskReport, agentResult AgentRunResult) {
@@ -386,7 +446,11 @@ func formatStageBreakdown(stages []StageBreakdown) string {
 	}
 	parts := make([]string, 0, len(stages))
 	for _, s := range stages {
-		parts = append(parts, fmt.Sprintf("%s:in=%d,out=%d,cost=%.4f", s.Name, s.TokensInput, s.TokensOutput, s.CostUSD))
+		cost := "unknown"
+		if s.CostUSD != nil {
+			cost = fmt.Sprintf("%.4f", *s.CostUSD)
+		}
+		parts = append(parts, fmt.Sprintf("%s:in=%d,out=%d,cost=%s", s.Name, s.TokensInput, s.TokensOutput, cost))
 	}
 	return strings.Join(parts, ";")
 }

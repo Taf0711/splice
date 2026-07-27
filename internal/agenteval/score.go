@@ -5,7 +5,10 @@ import (
 	"sort"
 )
 
-const ReportContractVersion = "splice.agenteval.report.v1"
+const (
+	ReportContractVersion    = "splice.agenteval.report.v1"
+	BenchmarkContractVersion = "splice.agenteval.benchmark.v2"
+)
 
 type Status string
 

@@ -22,10 +22,8 @@ type AgentRunInput struct {
 	Model         string
 }
 
-// StageBreakdown is the per-stage token/cost ledger parsed from a pipeline
-// run's final event. It mirrors the relevant fields of schemas.StageRecord
-// without coupling agenteval (Zero substrate) to the Splice pipeline layer.
-// Non-pipeline agents produce no stages (nil).
+// StageBreakdown is the per-stage token and cost ledger parsed from a
+// pipeline run's final event. Non-pipeline agents produce no stages (nil).
 
 type AgentRunResult struct {
 	ExitCode          int     `json:"exitCode"`
@@ -79,14 +77,19 @@ type UsageSample struct {
 }
 
 type StageBreakdown struct {
-	Name         string  `json:"name"`
-	Status       string  `json:"status"`
-	Model        string  `json:"model,omitempty"`
-	TokensInput  int     `json:"tokens_input"`
-	TokensOutput int     `json:"tokens_output"`
-	TokensCached int     `json:"tokens_cached"`
-	CostUSD      float64 `json:"cost_usd"`
-	LatencyMs    int64   `json:"latency_ms"`
+	Name             string   `json:"name"`
+	Status           string   `json:"status"`
+	Iteration        int      `json:"iteration"`
+	Provider         string   `json:"provider,omitempty"`
+	Model            string   `json:"model,omitempty"`
+	TokensInput      int      `json:"tokens_input"`
+	TokensOutput     int      `json:"tokens_output"`
+	TokensCached     int      `json:"tokens_cached"`
+	TokensCacheWrite int      `json:"tokens_cache_write"`
+	TokensReasoning  int      `json:"tokens_reasoning"`
+	CostUSD          *float64 `json:"cost_usd,omitempty"`
+	CostStatus       string   `json:"cost_status"`
+	LatencyMs        int64    `json:"latency_ms"`
 }
 
 type AgentRunner interface {
