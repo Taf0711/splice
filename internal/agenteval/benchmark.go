@@ -3,6 +3,7 @@ package agenteval
 import (
 	"context"
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -35,6 +36,8 @@ type BenchmarkReport struct {
 type BenchmarkTaskReport struct {
 	TaskID            string           `json:"taskId"`
 	Model             string           `json:"model,omitempty"`
+	RunnerKind        string           `json:"-"`
+	ModelsUsed        []string         `json:"-"`
 	WorkspacePath     string           `json:"workspacePath"`
 	FixturePath       string           `json:"fixturePath"`
 	InputTokens       int              `json:"inputTokens,omitempty"`
@@ -284,6 +287,7 @@ func copyAgentMetrics(taskReport *BenchmarkTaskReport, agentResult AgentRunResul
 	taskReport.CostCoverage = agentResult.CostCoverage
 	taskReport.LatencyMs = agentResult.LatencyMs
 	taskReport.Stages = agentResult.Stages
+	taskReport.ModelsUsed = modelsUsed(agentResult)
 }
 
 const (
@@ -414,19 +418,33 @@ func boolPointer(value bool) *bool {
 
 func WriteBenchmarkCSV(w io.Writer, report BenchmarkReport) error {
 	writer := csv.NewWriter(w)
-	if err := writer.Write([]string{"taskId", "model", "status", "pass", "inputTokens", "outputTokens", "cachedInputTokens", "costUSD", "latencyMs", "stageBreakdown"}); err != nil {
+	if err := writer.Write([]string{"taskId", "runner", "requestedModel", "modelsUsed", "status", "pass", "inputTokens", "outputTokens", "cachedInputTokens", "cacheWriteTokens", "reasoningTokens", "estimatedCostUSD", "costCoverage", "pricedUsageRecords", "unpricedUsageRecords", "errorUsageRecords", "latencyMs", "stageBreakdown"}); err != nil {
 		return err
 	}
 	for _, task := range report.Tasks {
+		models := task.ModelsUsed
+		if len(models) == 0 {
+			models = modelsUsedFromTask(task)
+		}
+		cost := estimatedCost(task)
+		priced, unpriced, errors := usageRecordCounts(task.Agent.UsageSamples)
 		if err := writer.Write([]string{
 			task.TaskID,
+			task.RunnerKind,
 			task.Model,
+			strings.Join(models, ","),
 			string(task.Report.Status),
 			fmt.Sprintf("%t", task.Report.Status == StatusPass),
 			fmt.Sprintf("%d", task.InputTokens),
 			fmt.Sprintf("%d", task.OutputTokens),
 			fmt.Sprintf("%d", task.CachedInputTokens),
-			fmt.Sprintf("%f", task.CostUSD),
+			fmt.Sprintf("%d", task.CacheWriteTokens),
+			fmt.Sprintf("%d", task.ReasoningTokens),
+			formatOptionalCost(cost),
+			task.CostCoverage,
+			fmt.Sprintf("%d", priced),
+			fmt.Sprintf("%d", unpriced),
+			fmt.Sprintf("%d", errors),
 			fmt.Sprintf("%d", task.LatencyMs),
 			formatStageBreakdown(task.Stages),
 		}); err != nil {
@@ -437,9 +455,8 @@ func WriteBenchmarkCSV(w io.Writer, report BenchmarkReport) error {
 	return writer.Error()
 }
 
-// formatStageBreakdown renders per-stage token/cost data as a compact
-// semicolon-delimited string: "name:in=N,out=N,cost=F;name:...". Empty for
-// non-pipeline agents.
+// formatStageBreakdown renders per-stage token and cost data as a compact
+// semicolon-delimited string. Empty for non-pipeline agents.
 func formatStageBreakdown(stages []StageBreakdown) string {
 	if len(stages) == 0 {
 		return ""
@@ -450,9 +467,77 @@ func formatStageBreakdown(stages []StageBreakdown) string {
 		if s.CostUSD != nil {
 			cost = fmt.Sprintf("%.4f", *s.CostUSD)
 		}
-		parts = append(parts, fmt.Sprintf("%s:in=%d,out=%d,cost=%s", s.Name, s.TokensInput, s.TokensOutput, cost))
+		parts = append(parts, fmt.Sprintf("%s:iteration=%d,provider=%s,model=%s,in=%d,out=%d,cached=%d,cacheWrite=%d,reasoning=%d,cost=%s,costStatus=%s", s.Name, s.Iteration, s.Provider, s.Model, s.TokensInput, s.TokensOutput, s.TokensCached, s.TokensCacheWrite, s.TokensReasoning, cost, s.CostStatus))
 	}
 	return strings.Join(parts, ";")
+}
+
+func estimatedCost(task BenchmarkTaskReport) *float64 {
+	if task.CostCoverage != CostCoverageComplete {
+		return nil
+	}
+	cost := task.CostUSD
+	return &cost
+}
+
+func (task BenchmarkTaskReport) MarshalJSON() ([]byte, error) {
+	type alias BenchmarkTaskReport
+	type withCost struct {
+		alias
+		CostUSD *float64 `json:"costUsd"`
+	}
+	return json.Marshal(withCost{alias: alias(task), CostUSD: estimatedCost(task)})
+}
+
+func formatOptionalCost(cost *float64) string {
+	if cost == nil {
+		return ""
+	}
+	return fmt.Sprintf("%.6f", *cost)
+}
+
+func usageRecordCounts(samples []UsageSample) (priced, unpriced, errors int) {
+	for _, sample := range samples {
+		switch usageSampleCostStatus(sample) {
+		case CostStatusPriced:
+			priced++
+		case CostStatusUnpriced:
+			unpriced++
+		case CostStatusError:
+			errors++
+		}
+	}
+	return priced, unpriced, errors
+}
+
+func modelsUsed(result AgentRunResult) []string {
+	models := make([]string, 0)
+	seen := map[string]bool{}
+	appendModel := func(model string) {
+		model = strings.TrimSpace(model)
+		if model == "" || seen[model] {
+			return
+		}
+		seen[model] = true
+		models = append(models, model)
+	}
+	for _, sample := range result.UsageSamples {
+		model := sample.Model
+		if strings.TrimSpace(model) == "" {
+			model = sample.APIModel
+		}
+		appendModel(model)
+	}
+	for _, stage := range result.Stages {
+		appendModel(stage.Model)
+	}
+	return models
+}
+
+func modelsUsedFromTask(task BenchmarkTaskReport) []string {
+	result := task.Agent
+	result.Stages = task.Stages
+	return modelsUsed(result)
 }
 
 func selectBenchmarkTasks(suite Suite, taskID string) ([]Task, error) {

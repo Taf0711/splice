@@ -62,11 +62,11 @@ func TestFormatStageBreakdown(t *testing.T) {
 	firstCost := 0.005
 	secondCost := 0.003
 	stages := []StageBreakdown{
-		{Name: "code_writer", TokensInput: 1000, TokensOutput: 500, CostUSD: &firstCost},
-		{Name: "test_generator", TokensInput: 800, TokensOutput: 300, CostUSD: &secondCost},
+		{Name: "code_writer", Iteration: 2, Provider: "openai", Model: "gpt-4.1", TokensInput: 1000, TokensOutput: 500, TokensCached: 200, TokensCacheWrite: 10, TokensReasoning: 30, CostUSD: &firstCost, CostStatus: CostStatusPriced},
+		{Name: "test_generator", Iteration: 3, Provider: "anthropic", Model: "claude-sonnet-4.5", TokensInput: 800, TokensOutput: 300, TokensCached: 40, TokensCacheWrite: 20, TokensReasoning: 15, CostUSD: &secondCost, CostStatus: CostStatusPriced},
 	}
 	got := formatStageBreakdown(stages)
-	want := "code_writer:in=1000,out=500,cost=0.0050;test_generator:in=800,out=300,cost=0.0030"
+	want := "code_writer:iteration=2,provider=openai,model=gpt-4.1,in=1000,out=500,cached=200,cacheWrite=10,reasoning=30,cost=0.0050,costStatus=priced;test_generator:iteration=3,provider=anthropic,model=claude-sonnet-4.5,in=800,out=300,cached=40,cacheWrite=20,reasoning=15,cost=0.0030,costStatus=priced"
 	if got != want {
 		t.Fatalf("formatStageBreakdown = %q, want %q", got, want)
 	}

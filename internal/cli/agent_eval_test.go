@@ -449,6 +449,68 @@ func TestRunEvalBenchTextOutputShowsScores(t *testing.T) {
 	}
 }
 
+func TestAgentEvalWrapperContractAndHonestBenchmarkText(t *testing.T) {
+	zero := 0.0
+	report := agenteval.BenchmarkReport{
+		Contract: agenteval.BenchmarkContractVersion,
+		SuiteID:  "suite",
+		Summary: agenteval.BenchmarkSummary{
+			TotalTasks:             1,
+			TotalInputTokens:       10,
+			TotalOutputTokens:      20,
+			TotalCachedInputTokens: 3,
+			TotalCacheWriteTokens:  4,
+			TotalReasoningTokens:   5,
+			EstimatedCostUSD:       9,
+			CostCoverage:           agenteval.CostCoveragePartial,
+			PricedRequestCount:     1,
+			UnpricedRequestCount:   1,
+		},
+		Tasks: []agenteval.BenchmarkTaskReport{{
+			TaskID: "task",
+			Model:  "requested-model",
+			Agent:  agenteval.AgentRunResult{UsageSamples: []agenteval.UsageSample{{Model: "routed-model"}}},
+			Stages: []agenteval.StageBreakdown{{Iteration: 2, Provider: "provider", Model: "routed-model", CostUSD: &zero, CostStatus: agenteval.CostStatusPriced}},
+		}},
+	}
+	converted := agentEvalReportFromBenchmark(agenteval.Suite{ID: "suite"}, report)
+	converted.RunnerKind = agentEvalRunnerKindPipeline
+	converted.RequestedModel = "requested-model"
+	converted.PrimaryModel = "requested-model"
+	text := formatAgentEvalReport(converted)
+	if !strings.Contains(text, "runner: splice_pipeline") || !strings.Contains(text, "requested model: requested-model") || !strings.Contains(text, "models used: routed-model") {
+		t.Fatalf("benchmark metadata missing from text:\n%s", text)
+	}
+	if !strings.Contains(text, "tokens: input 10, output 20, cached input 3, cache write 4, reasoning 5") {
+		t.Fatalf("token dimensions missing from text:\n%s", text)
+	}
+	if !strings.Contains(text, "estimated cost: unavailable (coverage partial)") || strings.Contains(text, "$9.0000") {
+		t.Fatalf("partial coverage rendered a confident total:\n%s", text)
+	}
+	if converted.Contract != AgentEvalContractVersion || converted.Benchmark.Contract != agenteval.BenchmarkContractVersion {
+		t.Fatalf("contracts = wrapper %q, benchmark %q", converted.Contract, converted.Benchmark.Contract)
+	}
+
+	jsonBytes, err := json.Marshal(converted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(jsonBytes), `"contract":"splice.cli.eval.v1"`) {
+		t.Fatalf("wrapper contract missing from JSON: %s", jsonBytes)
+	}
+}
+
+func TestAgentEvalTextPrintsGenuinePricedZero(t *testing.T) {
+	zero := 0.0
+	text := formatAgentEvalReport(agentEvalReport{
+		CostCoverage:     agenteval.CostCoverageComplete,
+		EstimatedCostUSD: &zero,
+	})
+	if !strings.Contains(text, "estimated cost: $0.0000 (coverage complete)") {
+		t.Fatalf("priced zero was not rendered as a cost:\n%s", text)
+	}
+}
+
 func TestRunEvalBenchTextOutputSurfacesWorkRoot(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

@@ -43,26 +43,41 @@ func (e agentEvalRuntimeError) Unwrap() error { return e.err }
 var defaultAgentEvalExecutable = os.Executable
 
 type agentEvalReport struct {
-	Suite        string                     `json:"suite"`
-	Name         string                     `json:"name,omitempty"`
-	TaskID       string                     `json:"task_id,omitempty"`
-	RunnerKind   string                     `json:"runner_kind,omitempty"`
-	PrimaryModel string                     `json:"primary_model,omitempty"`
-	Status       string                     `json:"status,omitempty"`
-	OK           bool                       `json:"ok"`
-	Tasks        int                        `json:"tasks"`
-	Checks       int                        `json:"checks"`
-	Total        int                        `json:"total"`
-	Passed       int                        `json:"passed"`
-	Failed       int                        `json:"failed"`
-	Blocked      int                        `json:"blocked"`
-	Errors       int                        `json:"errors"`
-	Truncated    bool                       `json:"truncated,omitempty"`
-	WorkRoot     string                     `json:"work_root,omitempty"`
-	ReportPath   string                     `json:"report_path,omitempty"`
-	Failures     []agentEvalFailure         `json:"failures,omitempty"`
-	Benchmark    *agenteval.BenchmarkReport `json:"benchmark,omitempty"`
+	Contract             string                     `json:"contract"`
+	Suite                string                     `json:"suite"`
+	Name                 string                     `json:"name,omitempty"`
+	TaskID               string                     `json:"task_id,omitempty"`
+	RunnerKind           string                     `json:"runner_kind,omitempty"`
+	PrimaryModel         string                     `json:"primary_model,omitempty"`
+	RequestedModel       string                     `json:"requested_model,omitempty"`
+	ModelsUsed           []string                   `json:"models_used,omitempty"`
+	Status               string                     `json:"status,omitempty"`
+	OK                   bool                       `json:"ok"`
+	Tasks                int                        `json:"tasks"`
+	Checks               int                        `json:"checks"`
+	Total                int                        `json:"total"`
+	Passed               int                        `json:"passed"`
+	Failed               int                        `json:"failed"`
+	Blocked              int                        `json:"blocked"`
+	Errors               int                        `json:"errors"`
+	InputTokens          int                        `json:"input_tokens,omitempty"`
+	OutputTokens         int                        `json:"output_tokens,omitempty"`
+	CachedInputTokens    int                        `json:"cached_input_tokens,omitempty"`
+	CacheWriteTokens     int                        `json:"cache_write_tokens,omitempty"`
+	ReasoningTokens      int                        `json:"reasoning_tokens,omitempty"`
+	EstimatedCostUSD     *float64                   `json:"estimated_cost_usd"`
+	CostCoverage         string                     `json:"cost_coverage,omitempty"`
+	PricedUsageRecords   int                        `json:"priced_usage_records,omitempty"`
+	UnpricedUsageRecords int                        `json:"unpriced_usage_records,omitempty"`
+	ErrorUsageRecords    int                        `json:"error_usage_records,omitempty"`
+	Truncated            bool                       `json:"truncated,omitempty"`
+	WorkRoot             string                     `json:"work_root,omitempty"`
+	ReportPath           string                     `json:"report_path,omitempty"`
+	Failures             []agentEvalFailure         `json:"failures,omitempty"`
+	Benchmark            *agenteval.BenchmarkReport `json:"benchmark,omitempty"`
 }
+
+const AgentEvalContractVersion = "splice.cli.eval.v1"
 
 const (
 	agentEvalRunnerKindPipeline = "splice_pipeline"
@@ -113,6 +128,9 @@ func runAgentEvalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 		}
 		return writeExecUsageError(stderr, err.Error())
 	}
+	if report.Contract == "" {
+		report.Contract = AgentEvalContractVersion
+	}
 	if options.ReportDir != "" {
 		report.ReportPath = filepath.Join(options.ReportDir, "agent-eval-report.json")
 		if err := writeAgentEvalReportFile(options.ReportDir, report); err != nil {
@@ -122,6 +140,11 @@ func runAgentEvalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 	if options.CSVOutput != "" {
 		if report.Benchmark == nil {
 			return writeAppError(stderr, "failed to write eval CSV: benchmark report is unavailable", exitCrash)
+		}
+		for index := range report.Benchmark.Tasks {
+			if report.Benchmark.Tasks[index].RunnerKind == "" {
+				report.Benchmark.Tasks[index].RunnerKind = report.RunnerKind
+			}
 		}
 		if err := writeAgentEvalCSVFile(options.CSVOutput, *report.Benchmark); err != nil {
 			return writeAppError(stderr, "failed to write eval CSV: "+err.Error(), exitCrash)
@@ -409,6 +432,19 @@ func formatAgentEvalReport(report agentEvalReport) string {
 	if report.TaskID != "" {
 		lines = append(lines, "task: "+report.TaskID)
 	}
+	if report.RunnerKind != "" {
+		lines = append(lines, "runner: "+report.RunnerKind)
+	}
+	requestedModel := strings.TrimSpace(report.RequestedModel)
+	if requestedModel == "" {
+		requestedModel = strings.TrimSpace(report.PrimaryModel)
+	}
+	if requestedModel != "" {
+		lines = append(lines, "requested model: "+requestedModel)
+	}
+	if len(report.ModelsUsed) > 0 {
+		lines = append(lines, "models used: "+strings.Join(report.ModelsUsed, ", "))
+	}
 	// Only validate mode reports a static check count; run and bench modes carry
 	// scored pass/fail/blocked/error tallies that must be surfaced instead.
 	if report.Checks > 0 {
@@ -425,6 +461,12 @@ func formatAgentEvalReport(report agentEvalReport) string {
 		}
 	}
 	lines = append(lines, "status: "+status)
+	if report.Benchmark != nil || report.InputTokens != 0 || report.OutputTokens != 0 || report.CachedInputTokens != 0 || report.CacheWriteTokens != 0 || report.ReasoningTokens != 0 {
+		lines = append(lines, fmt.Sprintf("tokens: input %d, output %d, cached input %d, cache write %d, reasoning %d", report.InputTokens, report.OutputTokens, report.CachedInputTokens, report.CacheWriteTokens, report.ReasoningTokens))
+	}
+	if report.Benchmark != nil || report.CostCoverage != "" || report.EstimatedCostUSD != nil {
+		lines = append(lines, formatAgentEvalCost(report.EstimatedCostUSD, report.CostCoverage))
+	}
 	if report.WorkRoot != "" {
 		lines = append(lines, "work-root: "+report.WorkRoot)
 	}
@@ -537,6 +579,11 @@ func defaultRunAgentEval(ctx context.Context, options agentEvalOptions, resolver
 		converted := agentEvalReportFromBenchmark(suite, report)
 		converted.RunnerKind = runnerKind
 		converted.PrimaryModel = primaryAgentEvalModel(options.Models)
+		converted.RequestedModel = converted.PrimaryModel
+		for index := range report.Tasks {
+			report.Tasks[index].RunnerKind = runnerKind
+		}
+		converted.Benchmark = &report
 		if options.KeepWorkspaces {
 			// Surface where the kept workspaces live, especially when the work
 			// root was an unnamed temp dir the caller never specified.
@@ -549,12 +596,13 @@ func defaultRunAgentEval(ctx context.Context, options agentEvalOptions, resolver
 		checks += agentEvalTaskCheckCount(task)
 	}
 	return agentEvalReport{
-		Suite:  suite.ID,
-		Name:   suite.Name,
-		Status: "valid",
-		OK:     true,
-		Tasks:  len(suite.Tasks),
-		Checks: checks,
+		Contract: AgentEvalContractVersion,
+		Suite:    suite.ID,
+		Name:     suite.Name,
+		Status:   "valid",
+		OK:       true,
+		Tasks:    len(suite.Tasks),
+		Checks:   checks,
 	}, nil
 }
 
@@ -583,18 +631,36 @@ func agentEvalBenchWorkRoot(options agentEvalOptions) (string, string, error) {
 }
 
 func agentEvalReportFromBenchmark(suite agenteval.Suite, report agenteval.BenchmarkReport) agentEvalReport {
+	coverage := report.Summary.CostCoverage
+	if coverage == "" {
+		coverage = agenteval.CostCoverageNotApplicable
+	}
 	converted := agentEvalReport{
-		Suite:     report.SuiteID,
-		Name:      suite.Name,
-		Status:    benchmarkStatus(report),
-		OK:        report.OK,
-		Tasks:     report.Summary.TotalTasks,
-		Total:     report.Summary.TotalTasks,
-		Passed:    report.Summary.PassedTasks,
-		Failed:    report.Summary.FailedTasks,
-		Blocked:   report.Summary.BlockedTasks,
-		Errors:    report.Summary.ErrorTasks,
-		Benchmark: &report,
+		Contract:             AgentEvalContractVersion,
+		Suite:                report.SuiteID,
+		Name:                 suite.Name,
+		Status:               benchmarkStatus(report),
+		OK:                   report.OK,
+		Tasks:                report.Summary.TotalTasks,
+		Total:                report.Summary.TotalTasks,
+		Passed:               report.Summary.PassedTasks,
+		Failed:               report.Summary.FailedTasks,
+		Blocked:              report.Summary.BlockedTasks,
+		Errors:               report.Summary.ErrorTasks,
+		Benchmark:            &report,
+		InputTokens:          report.Summary.TotalInputTokens,
+		OutputTokens:         report.Summary.TotalOutputTokens,
+		CachedInputTokens:    report.Summary.TotalCachedInputTokens,
+		CacheWriteTokens:     report.Summary.TotalCacheWriteTokens,
+		ReasoningTokens:      report.Summary.TotalReasoningTokens,
+		CostCoverage:         coverage,
+		PricedUsageRecords:   report.Summary.PricedRequestCount,
+		UnpricedUsageRecords: report.Summary.UnpricedRequestCount,
+		ErrorUsageRecords:    report.Summary.ErrorRequestCount,
+	}
+	if report.Summary.CostCoverage == agenteval.CostCoverageComplete {
+		cost := report.Summary.EstimatedCostUSD
+		converted.EstimatedCostUSD = &cost
 	}
 	if converted.Suite == "" {
 		converted.Suite = suite.ID
@@ -603,6 +669,13 @@ func agentEvalReportFromBenchmark(suite agenteval.Suite, report agenteval.Benchm
 		converted.TaskID = report.Tasks[0].TaskID
 	}
 	for _, task := range report.Tasks {
+		if converted.RequestedModel == "" && strings.TrimSpace(task.Model) != "" {
+			converted.RequestedModel = strings.TrimSpace(task.Model)
+			converted.PrimaryModel = converted.RequestedModel
+		}
+	}
+	for _, task := range report.Tasks {
+		converted.ModelsUsed = appendUniqueModels(converted.ModelsUsed, taskModelsUsed(task))
 		if task.Agent.Truncated {
 			converted.Truncated = true
 		}
@@ -611,6 +684,68 @@ func agentEvalReportFromBenchmark(suite agenteval.Suite, report agenteval.Benchm
 		}
 	}
 	return converted
+}
+
+func taskModelsUsed(task agenteval.BenchmarkTaskReport) []string {
+	if len(task.ModelsUsed) > 0 {
+		return task.ModelsUsed
+	}
+	models := make([]string, 0)
+	seen := map[string]bool{}
+	appendModel := func(model string) {
+		model = strings.TrimSpace(model)
+		if model == "" || seen[model] {
+			return
+		}
+		seen[model] = true
+		models = append(models, model)
+	}
+	for _, sample := range task.Agent.UsageSamples {
+		model := sample.Model
+		if strings.TrimSpace(model) == "" {
+			model = sample.APIModel
+		}
+		appendModel(model)
+	}
+	for _, stage := range task.Stages {
+		appendModel(stage.Model)
+	}
+	return models
+}
+
+func appendUniqueModels(existing []string, models []string) []string {
+	seen := make(map[string]bool, len(existing))
+	for _, model := range existing {
+		seen[model] = true
+	}
+	for _, model := range models {
+		if model != "" && !seen[model] {
+			seen[model] = true
+			existing = append(existing, model)
+		}
+	}
+	return existing
+}
+
+func formatAgentEvalCost(cost *float64, coverage string) string {
+	switch coverage {
+	case agenteval.CostCoverageComplete:
+		if cost != nil {
+			return "estimated cost: " + formatUSD(*cost) + " (coverage complete)"
+		}
+		return "estimated cost: unavailable (coverage complete but cost is missing)"
+	case agenteval.CostCoveragePartial:
+		return "estimated cost: unavailable (coverage partial)"
+	case agenteval.CostCoverageUnavailable:
+		return "estimated cost: unavailable (coverage unavailable)"
+	case agenteval.CostCoverageNotApplicable:
+		return "estimated cost: n/a (no priced usage)"
+	default:
+		if cost != nil {
+			return "estimated cost: " + formatUSD(*cost)
+		}
+		return "estimated cost: unavailable"
+	}
 }
 
 func benchmarkStatus(report agenteval.BenchmarkReport) string {
@@ -666,16 +801,17 @@ func benchmarkFailureTaskID(task agenteval.BenchmarkTaskReport) string {
 
 func agentEvalReportFromRunner(suite agenteval.Suite, report agenteval.Report) agentEvalReport {
 	converted := agentEvalReport{
-		Suite:   report.SuiteID,
-		Name:    suite.Name,
-		TaskID:  report.TaskID,
-		Status:  string(report.Status),
-		OK:      report.OK,
-		Total:   report.Summary.Total,
-		Passed:  report.Summary.Passed,
-		Failed:  report.Summary.Failed,
-		Blocked: report.Summary.Blocked,
-		Errors:  report.Summary.Errors,
+		Contract: AgentEvalContractVersion,
+		Suite:    report.SuiteID,
+		Name:     suite.Name,
+		TaskID:   report.TaskID,
+		Status:   string(report.Status),
+		OK:       report.OK,
+		Total:    report.Summary.Total,
+		Passed:   report.Summary.Passed,
+		Failed:   report.Summary.Failed,
+		Blocked:  report.Summary.Blocked,
+		Errors:   report.Summary.Errors,
 	}
 	if converted.Suite == "" {
 		converted.Suite = suite.ID

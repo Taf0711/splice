@@ -3,6 +3,7 @@ package agenteval
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -459,19 +460,24 @@ func TestWriteBenchmarkCSV(t *testing.T) {
 			{
 				TaskID:            "task-a",
 				Model:             "gpt-4.1",
+				RunnerKind:        "splice_pipeline",
+				ModelsUsed:        []string{"gpt-4.1", "gpt-4.1-mini"},
 				InputTokens:       100,
 				OutputTokens:      50,
 				CachedInputTokens: 25,
 				CostUSD:           0.125,
+				CostCoverage:      CostCoverageComplete,
 				LatencyMs:         1200,
 				Report:            Report{Status: StatusPass},
 			},
 			{
 				TaskID:       "task-b",
 				Model:        "claude-sonnet-4.5",
+				RunnerKind:   "external_command",
 				InputTokens:  10,
 				OutputTokens: 5,
 				CostUSD:      0.75,
+				CostCoverage: CostCoverageComplete,
 				LatencyMs:    300,
 				Report:       Report{Status: StatusFail},
 			},
@@ -481,11 +487,37 @@ func TestWriteBenchmarkCSV(t *testing.T) {
 	if err := WriteBenchmarkCSV(&buf, report); err != nil {
 		t.Fatalf("WriteBenchmarkCSV returned error: %v", err)
 	}
-	want := "taskId,model,status,pass,inputTokens,outputTokens,cachedInputTokens,costUSD,latencyMs,stageBreakdown\n" +
-		"task-a,gpt-4.1,pass,true,100,50,25,0.125000,1200,\n" +
-		"task-b,claude-sonnet-4.5,fail,false,10,5,0,0.750000,300,\n"
+	want := "taskId,runner,requestedModel,modelsUsed,status,pass,inputTokens,outputTokens,cachedInputTokens,cacheWriteTokens,reasoningTokens,estimatedCostUSD,costCoverage,pricedUsageRecords,unpricedUsageRecords,errorUsageRecords,latencyMs,stageBreakdown\n" +
+		"task-a,splice_pipeline,gpt-4.1,\"gpt-4.1,gpt-4.1-mini\",pass,true,100,50,25,0,0,0.125000,complete,0,0,0,1200,\n" +
+		"task-b,external_command,claude-sonnet-4.5,,fail,false,10,5,0,0,0,0.750000,complete,0,0,0,300,\n"
 	if buf.String() != want {
 		t.Fatalf("CSV = %q, want %q", buf.String(), want)
+	}
+}
+
+func TestBenchmarkCostSerializationDistinguishesUnknownAndPricedZero(t *testing.T) {
+	zero := 0.0
+	report := BenchmarkReport{Tasks: []BenchmarkTaskReport{
+		{TaskID: "unknown", CostCoverage: CostCoverageUnavailable},
+		{TaskID: "zero", CostUSD: zero, CostCoverage: CostCoverageComplete},
+	}}
+	var csvOutput bytes.Buffer
+	if err := WriteBenchmarkCSV(&csvOutput, report); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(csvOutput.String(), "unknown,,,,,false,0,0,0,0,0,0.000000") {
+		t.Fatalf("unknown cost looks priced in CSV: %q", csvOutput.String())
+	}
+	if !strings.Contains(csvOutput.String(), "zero,,,,,false,0,0,0,0,0,0.000000,complete") {
+		t.Fatalf("priced zero missing from CSV: %q", csvOutput.String())
+	}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jsonText := string(encoded)
+	if strings.Count(jsonText, `"costUsd":0`) != 1 || !strings.Contains(jsonText, `"taskId":"zero"`) {
+		t.Fatalf("priced zero missing from JSON: %s", jsonText)
 	}
 }
 
