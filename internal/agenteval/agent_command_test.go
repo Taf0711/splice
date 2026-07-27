@@ -82,6 +82,122 @@ func TestCommandAgentRunnerTruncatesOversizedOutput(t *testing.T) {
 	}
 }
 
+func TestCommandAgentRunnerCollectsUsageAfterDiagnosticLimit(t *testing.T) {
+	runner := CommandAgentRunner{Command: helperCommand("usage-tail", "8193")}
+
+	result := runner.Run(context.Background(), AgentRunInput{WorkspacePath: t.TempDir()})
+
+	if result.Error != "" || result.ExitCode != 0 {
+		t.Fatalf("Run = %#v", result)
+	}
+	if !result.Truncated {
+		t.Fatal("expected bounded diagnostic capture to be truncated")
+	}
+	if len(result.UsageSamples) != 1 {
+		t.Fatalf("usage samples = %#v, want one sample", result.UsageSamples)
+	}
+	sample := result.UsageSamples[0]
+	if sample.InputTokens != 11 || sample.OutputTokens != 22 {
+		t.Fatalf("usage sample = %#v, want input=11 output=22", sample)
+	}
+	if result.InputTokens != 0 || result.OutputTokens != 0 {
+		t.Fatalf("existing stdout accounting changed: input=%d output=%d", result.InputTokens, result.OutputTokens)
+	}
+	if len(result.Stages) != 1 || result.Stages[0].Name != "code_writer" {
+		t.Fatalf("final pipeline stages = %#v", result.Stages)
+	}
+}
+
+func TestCommandAgentRunnerSurvivesOversizedUsageLine(t *testing.T) {
+	runner := CommandAgentRunner{
+		Command:     helperCommand("oversized-usage-tail"),
+		OutputLimit: defaultAgentOutputLimit,
+	}
+
+	result := runner.Run(context.Background(), AgentRunInput{WorkspacePath: t.TempDir()})
+
+	if result.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0; result=%#v", result.ExitCode, result)
+	}
+	if strings.Contains(result.Error, "broken pipe") || strings.Contains(result.Error, "signal:") {
+		t.Fatalf("child was terminated by collector: %q", result.Error)
+	}
+	if !strings.Contains(result.Error, "JSONL line 1 exceeds 8388608-byte limit") {
+		t.Fatalf("Error = %q, want accounting error", result.Error)
+	}
+	wantStdout := strings.Repeat("x", defaultAgentOutputLimit)
+	if result.Stdout != wantStdout {
+		t.Fatalf("captured stdout len=%d, want %d-byte prefix", len(result.Stdout), len(wantStdout))
+	}
+	if !result.Truncated {
+		t.Fatal("expected bounded diagnostic capture to be truncated")
+	}
+	if len(result.UsageSamples) != 1 {
+		t.Fatalf("usage samples = %#v, want one sample after oversized line", result.UsageSamples)
+	}
+	sample := result.UsageSamples[0]
+	if sample.InputTokens != 101 || sample.OutputTokens != 202 {
+		t.Fatalf("usage sample = %#v, want input=101 output=202", sample)
+	}
+}
+
+func TestUsageCollectorRejectsOversizedLine(t *testing.T) {
+	collector := newUsageCollector(128)
+	if n, err := collector.Write([]byte(strings.Repeat("x", 128))); err != nil || n != 128 {
+		t.Fatalf("Write at limit returned error: %v", err)
+	}
+	if n, err := collector.Write([]byte("x")); err != nil || n != 1 {
+		t.Fatalf("Write beyond limit = (%d, %v), want (1, nil)", n, err)
+	}
+	if collector.err == nil || !strings.Contains(collector.err.Error(), "JSONL line 1 exceeds 128-byte limit") {
+		t.Fatalf("collector error = %v, want oversized line error", collector.err)
+	}
+	if len(collector.partial) != 0 || cap(collector.partial) != 0 {
+		t.Fatalf("discarding partial = len %d cap %d, want zero memory", len(collector.partial), cap(collector.partial))
+	}
+	if n, err := collector.Write([]byte(strings.Repeat("y", 1024))); err != nil || n != 1024 {
+		t.Fatalf("Write while discarding = (%d, %v), want (1024, nil)", n, err)
+	}
+	if len(collector.partial) != 0 || cap(collector.partial) != 0 {
+		t.Fatalf("discarding partial after skipped bytes = len %d cap %d, want zero memory", len(collector.partial), cap(collector.partial))
+	}
+	usageLine := `{"type":"usage","promptTokens":3,"completionTokens":4}` + "\n"
+	if n, err := collector.Write([]byte("\n" + usageLine)); err != nil || n != len("\n"+usageLine) {
+		t.Fatalf("Write after discarded line = (%d, %v), want full nil write", n, err)
+	}
+	if len(collector.samples) != 1 {
+		t.Fatalf("usage samples = %#v, want one sample after discarded line", collector.samples)
+	}
+	if err := collector.Flush(); err == nil {
+		t.Fatal("Flush returned nil after accounting error")
+	}
+}
+
+func TestUsageCollectorCapturesFinalPipelineDiagnostics(t *testing.T) {
+	collector := newUsageCollector(128)
+	finalLine := `{"type":"final","text":"{\"stages\":[{\"name\":\"code_writer\",\"status\":\"completed\"}]}"}`
+	if _, err := collector.Write([]byte(finalLine)); err != nil {
+		t.Fatalf("Write = %v", err)
+	}
+	if err := collector.Flush(); err != nil {
+		t.Fatalf("Flush = %v", err)
+	}
+	if len(collector.finalStages) != 1 || collector.finalStages[0].Name != "code_writer" {
+		t.Fatalf("final stages = %#v", collector.finalStages)
+	}
+}
+
+func TestParseUsageFromStdoutSmallOutputRegression(t *testing.T) {
+	stdout := `{"type":"usage","promptTokens":100,"completionTokens":200,"cachedInputTokens":25,"cacheWriteTokens":5,"reasoningTokens":40}
+{"type":"text","delta":"done"}
+{"type":"usage","promptTokens":50,"completionTokens":75}`
+
+	input, output, cached, cacheWrite, reasoning := parseUsageFromStdout(stdout)
+	if input != 150 || output != 275 || cached != 25 || cacheWrite != 5 || reasoning != 40 {
+		t.Fatalf("usage totals = %d,%d,%d,%d,%d", input, output, cached, cacheWrite, reasoning)
+	}
+}
+
 func TestCommandAgentRunnerTimesOutHangingAgent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -237,6 +353,33 @@ func TestCommandAgentRunnerHelperProcess(t *testing.T) {
 			os.Exit(2)
 		}
 		if _, err := os.Stdout.Write([]byte(strings.Repeat("a", count))); err != nil {
+			os.Exit(2)
+		}
+	case "usage-tail":
+		if len(args) < 3 {
+			os.Exit(2)
+		}
+		count, err := strconv.Atoi(args[2])
+		if err != nil {
+			os.Exit(2)
+		}
+		chunk := strings.Repeat("x", 1024) + "\n"
+		for i := 0; i < count; i++ {
+			if _, err := os.Stdout.WriteString(chunk); err != nil {
+				os.Exit(2)
+			}
+		}
+		if _, err := os.Stdout.WriteString(`{"type":"usage","promptTokens":11,"completionTokens":22}` + "\n"); err != nil {
+			os.Exit(2)
+		}
+		if _, err := os.Stdout.WriteString(`{"type":"final","text":"{\"stages\":[{\"name\":\"code_writer\",\"status\":\"completed\"}]}"}` + "\n"); err != nil {
+			os.Exit(2)
+		}
+	case "oversized-usage-tail":
+		if _, err := os.Stdout.WriteString(strings.Repeat("x", defaultAgentJSONLLineLimit+1) + "\n"); err != nil {
+			os.Exit(2)
+		}
+		if _, err := os.Stdout.WriteString(`{"type":"usage","promptTokens":101,"completionTokens":202}` + "\n"); err != nil {
 			os.Exit(2)
 		}
 	case "sleep":
