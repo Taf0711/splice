@@ -113,8 +113,24 @@ go run ./cmd/splice eval run \
 
 `splice eval bench` runs the full benchmark harness for one task or a suite. Bench
 mode copies each task fixture into `--work-root`, initializes a clean Git
-baseline, runs the supplied `--agent-command` in that workspace, then scores the
-result with the same scorer used by run mode.
+baseline, runs an agent in that workspace, then scores the result with the same
+scorer used by run mode.
+
+Omit `--agent-command` to use the built-in pipeline runner. The runner resolves
+the current Splice executable and starts this argv:
+
+```text
+<splice-executable> --no-trust exec --output-format stream-json [--model <requested-model>] <prompt>
+```
+
+The child uses the production provider configuration, model route, tool
+registry, sandbox, permission mode, memory, and event setup. The child uses the
+materialized workspace as its current directory. The `--no-trust` flag keeps
+fixture-owned project extensions disabled because the child is untrusted.
+
+Pass `--agent-command` to select an external agent. This option remains the
+external-agent override. The command receives the materialized workspace as its
+current directory.
 
 Agent commands are passed as argv, without shell interpolation. The harness
 expands these placeholders in each argument:
@@ -125,8 +141,15 @@ expands these placeholders in each argument:
 - `{model}`: current model ID for model-matrix benchmark runs.
 
 Use `--model <id>` more than once, or `--models a,b,c`, to run the same task
-matrix across several models. When no model is supplied, the harness preserves
-the previous single-run behavior and `{model}` expands to an empty string.
+matrix across several models. The model value is the requested primary model.
+Model routing stays active in model matrices, so stages can use other models.
+The report lists the requested model and the models used by the requests. When no model is supplied,
+the harness preserves the previous single-run behavior and `{model}` expands to
+an empty string.
+
+The harness parses usage events as the agent runs. Usage totals remain correct when
+diagnostic stdout exceeds 8 MiB. Captured stdout and stderr each have an 8 MiB
+limit, but usage events remain available to the collector.
 
 Example using a real local agent command:
 
@@ -212,7 +235,7 @@ go run ./cmd/splice eval bench \
 
 **Scoring caveat:** changed-file scoring inspects the workspace with
 `git status --porcelain` against the baseline commit. An agent that *commits*
-its own changes (or otherwise leaves a clean working tree) defeats this check —
+its own changes (or otherwise leaves a clean working tree) defeats this check.
 the committed edits no longer appear as changed files, so `expectedChangedFiles`
 will not match. Agents under bench should leave their edits uncommitted.
 
@@ -256,6 +279,47 @@ Command results include the command ID, display name, command argv, status,
 exit code, stdout, stderr, and an optional message. File-based results include
 expected, actual, missing, and unexpected files. Trace results include expected,
 actual, and missing event keys.
+
+The CLI wrapper uses contract `splice.cli.eval.v1`. The benchmark report uses
+contract `splice.agenteval.benchmark.v2`. The score report uses contract
+`splice.agenteval.report.v1`. These contracts version independently.
+
+All eval costs are estimates. Each usage record can include the cost
+provenance, price source, and price date. Unknown price never becomes
+zero. Cost coverage is one of `complete`, `partial`, `unavailable`, or
+`not_applicable`.
+
+The benchmark CSV uses these columns, in this order:
+
+```text
+taskId,runner,requestedModel,modelsUsed,status,pass,inputTokens,outputTokens,cachedInputTokens,cacheWriteTokens,reasoningTokens,estimatedCostUSD,costCoverage,pricedUsageRecords,unpricedUsageRecords,errorUsageRecords,latencyMs,stageBreakdown
+```
+
+The `runner` value is `splice_pipeline` or `external_command`. The
+`requestedModel` value identifies the primary model requested for the row. The
+`modelsUsed` value lists the routed models seen in usage and stage records.
+When the top-level cost is unknown, `estimatedCostUSD` is an empty CSV cell.
+Inside `stageBreakdown`, an unknown cost uses `cost=unknown`.
+
+### External-agent CSV migration
+
+An external agent remains valid with `--agent-command`:
+
+```bash
+splice eval bench \
+  --suite internal/agenteval/testdata/sample_suite.json \
+  --agent-command /opt/my-agent --workspace {workspace} --prompt {prompt}
+```
+
+Change a CSV parser that used the old fields:
+
+```text
+old: model, costUSD
+new: requestedModel, estimatedCostUSD, modelsUsed, costCoverage
+```
+
+Read an empty `estimatedCostUSD` cell as unknown. Do not convert it to zero.
+Split `modelsUsed` on commas. Use `costCoverage` before you use a cost value.
 
 ## Score Interpretation
 

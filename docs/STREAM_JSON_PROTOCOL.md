@@ -31,6 +31,13 @@ This shapes the event stream:
   (effective output), and `totalTokens`. When the provider reports them,
   `cachedInputTokens`, `cacheWriteTokens`, and `reasoningTokens` are also
   set (all optional, `omitempty`).
+- A usage event can identify the request route with `provider`, `model`, and
+  `apiModel`. It can also include `stage`, `iteration`, `usageSequence`, and
+  `usageReported` for request identity and order.
+- A usage event can include `costUsd`, `costStatus`, `costEstimated`,
+  `costProvenance`, `pricingSource`, `pricingAsOf`, and `unpricedReason`.
+  Eval reports treat all cost values as estimates. An unknown price stays
+  unknown.
 - Near the end of the run, `text` carries a short human-readable summary and
   `final` carries the machine-readable pipeline result: a JSON object with
   `runId`, `status` (`completed` | `failed` | `aborted`), `tier`, per-stage
@@ -104,6 +111,19 @@ With cache and reasoning (optional fields present when the provider reports them
 { "schemaVersion": 2, "type": "final", "runId": "run_20260603_abc123", "text": "..." }
 { "schemaVersion": 2, "type": "run_end", "runId": "run_20260603_abc123", "status": "success", "exitCode": 0 }
 ```
+
+The usage identity and price fields can appear together:
+
+```json
+{ "schemaVersion": 2, "type": "usage", "runId": "run_20260603_abc123", "provider": "openai", "model": "gpt-4.1", "apiModel": "gpt-4.1-2026", "stage": "code_writer", "iteration": 2, "usageSequence": 5, "usageReported": true, "promptTokens": 1200, "completionTokens": 500, "costUsd": 0.0123, "costStatus": "priced", "costEstimated": true, "costProvenance": "runtime_estimate", "pricingSource": "https://platform.openai.com/docs/pricing/", "pricingAsOf": "2026-07-27" }
+```
+
+The `provider` and `model` fields show the route for that request. The
+`apiModel` field shows the provider model name when it differs. The `stage`,
+`iteration`, and `usageSequence` fields locate the request in the run.
+`costProvenance`, `pricingSource`, and `pricingAsOf` explain the cost estimate.
+If a price is not available, the event can set `costStatus` to `unpriced` and
+include `unpricedReason` without a `costUsd` value.
 
 `reasoning` events carry live model reasoning/status deltas and pipeline
 progress lines. They are liveness/progress events only: they are not folded
