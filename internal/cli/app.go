@@ -61,6 +61,7 @@ type appDeps struct {
 	resolveMCPConfig      func(workspaceRoot string) (config.MCPConfig, error)
 	resolveMCPConfigTrust func(workspaceRoot string, projectTrusted bool) (config.MCPConfig, error)
 	newProvider           func(config.ProviderProfile) (zeroruntime.Provider, error)
+	resolveExecutable     func() (string, error)
 	// exportActiveProvider pins spawned children to the run's provider (production:
 	// config.SetActiveProviderEnv, set in defaultAppDeps — deliberately NOT filled
 	// by fillAppDeps, so tests never mutate the process environment unless they
@@ -150,6 +151,7 @@ func defaultAppDeps() appDeps {
 				OAuthLoginKey: loginKey,
 			})
 		},
+		resolveExecutable:      defaultAgentEvalExecutable,
 		probeProviderHealth:    providerhealth.Probe,
 		discoverProviderModels: defaultDiscoverProviderModels,
 		detectLocalRuntimes:    provideronboarding.DetectLocalRuntimes,
@@ -189,7 +191,6 @@ func defaultAppDeps() appDeps {
 		detectVerifyPlan:  verify.DetectPlan,
 		runVerify:         verify.Run,
 		runSelfVerify:     selfverify.Run,
-		runAgentEval:      defaultRunAgentEval,
 		inspectChanges:    zerogit.Inspect,
 		commitChanges:     zerogit.Commit,
 		pushChanges:       zerogit.Push,
@@ -502,6 +503,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	if deps.newProvider == nil {
 		deps.newProvider = defaults.newProvider
 	}
+	if deps.resolveExecutable == nil {
+		deps.resolveExecutable = defaults.resolveExecutable
+	}
 	if deps.probeProviderHealth == nil {
 		deps.probeProviderHealth = defaults.probeProviderHealth
 	}
@@ -563,7 +567,10 @@ func fillAppDeps(deps appDeps) appDeps {
 		deps.runSelfVerify = defaults.runSelfVerify
 	}
 	if deps.runAgentEval == nil {
-		deps.runAgentEval = defaults.runAgentEval
+		resolveExecutable := deps.resolveExecutable
+		deps.runAgentEval = func(ctx context.Context, options agentEvalOptions) (agentEvalReport, error) {
+			return defaultRunAgentEval(ctx, options, resolveExecutable)
+		}
 	}
 	if deps.inspectChanges == nil {
 		deps.inspectChanges = defaults.inspectChanges

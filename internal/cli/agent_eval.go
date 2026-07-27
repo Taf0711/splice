@@ -39,24 +39,50 @@ func (e agentEvalRuntimeError) Error() string { return e.err.Error() }
 
 func (e agentEvalRuntimeError) Unwrap() error { return e.err }
 
+// defaultAgentEvalExecutable is the production resolver seam for direct callers.
+var defaultAgentEvalExecutable = os.Executable
+
 type agentEvalReport struct {
-	Suite      string                     `json:"suite"`
-	Name       string                     `json:"name,omitempty"`
-	TaskID     string                     `json:"task_id,omitempty"`
-	Status     string                     `json:"status,omitempty"`
-	OK         bool                       `json:"ok"`
-	Tasks      int                        `json:"tasks"`
-	Checks     int                        `json:"checks"`
-	Total      int                        `json:"total"`
-	Passed     int                        `json:"passed"`
-	Failed     int                        `json:"failed"`
-	Blocked    int                        `json:"blocked"`
-	Errors     int                        `json:"errors"`
-	Truncated  bool                       `json:"truncated,omitempty"`
-	WorkRoot   string                     `json:"work_root,omitempty"`
-	ReportPath string                     `json:"report_path,omitempty"`
-	Failures   []agentEvalFailure         `json:"failures,omitempty"`
-	Benchmark  *agenteval.BenchmarkReport `json:"benchmark,omitempty"`
+	Suite        string                     `json:"suite"`
+	Name         string                     `json:"name,omitempty"`
+	TaskID       string                     `json:"task_id,omitempty"`
+	RunnerKind   string                     `json:"runner_kind,omitempty"`
+	PrimaryModel string                     `json:"primary_model,omitempty"`
+	Status       string                     `json:"status,omitempty"`
+	OK           bool                       `json:"ok"`
+	Tasks        int                        `json:"tasks"`
+	Checks       int                        `json:"checks"`
+	Total        int                        `json:"total"`
+	Passed       int                        `json:"passed"`
+	Failed       int                        `json:"failed"`
+	Blocked      int                        `json:"blocked"`
+	Errors       int                        `json:"errors"`
+	Truncated    bool                       `json:"truncated,omitempty"`
+	WorkRoot     string                     `json:"work_root,omitempty"`
+	ReportPath   string                     `json:"report_path,omitempty"`
+	Failures     []agentEvalFailure         `json:"failures,omitempty"`
+	Benchmark    *agenteval.BenchmarkReport `json:"benchmark,omitempty"`
+}
+
+const (
+	agentEvalRunnerKindPipeline = "splice_pipeline"
+	agentEvalRunnerKindExternal = "external_command"
+)
+
+type pipelineEvalRunner struct {
+	executable string
+}
+
+func (runner pipelineEvalRunner) Run(ctx context.Context, input agenteval.AgentRunInput) agenteval.AgentRunResult {
+	return (agenteval.CommandAgentRunner{Command: pipelineEvalCommandArgs(runner.executable, input)}).Run(ctx, input)
+}
+
+func pipelineEvalCommandArgs(executable string, input agenteval.AgentRunInput) []string {
+	args := []string{executable, "--no-trust", "exec", "--output-format", "stream-json"}
+	if input.Model != "" {
+		args = append(args, "--model", input.Model)
+	}
+	return append(args, input.Prompt)
 }
 
 type agentEvalFailure struct {
@@ -453,7 +479,11 @@ Flags:
 	return err
 }
 
-func defaultRunAgentEval(ctx context.Context, options agentEvalOptions) (agentEvalReport, error) {
+func defaultRunAgentEval(ctx context.Context, options agentEvalOptions, resolvers ...func() (string, error)) (agentEvalReport, error) {
+	resolveExecutable := defaultAgentEvalExecutable
+	if len(resolvers) > 0 {
+		resolveExecutable = resolvers[0]
+	}
 	suite, err := agenteval.LoadSuite(options.SuitePath)
 	if err != nil {
 		return agentEvalReport{}, err
@@ -477,10 +507,25 @@ func defaultRunAgentEval(ctx context.Context, options agentEvalOptions) (agentEv
 		if err != nil {
 			return agentEvalReport{}, agentEvalRuntimeError{fmt.Errorf("load model registry: %w", err)}
 		}
-		harness := agenteval.Harness{}
+		var runner agenteval.AgentRunner
+		runnerKind := agentEvalRunnerKindPipeline
 		if len(options.AgentCommand) > 0 {
-			harness.Agent = agenteval.CommandAgentRunner{Command: options.AgentCommand}
+			runner = agenteval.CommandAgentRunner{Command: options.AgentCommand}
+			runnerKind = agentEvalRunnerKindExternal
+		} else {
+			if resolveExecutable == nil {
+				return agentEvalReport{}, agentEvalRuntimeError{errors.New("resolve current executable: resolver is nil")}
+			}
+			executable, resolveErr := resolveExecutable()
+			if resolveErr != nil {
+				return agentEvalReport{}, agentEvalRuntimeError{fmt.Errorf("resolve current executable: %w", resolveErr)}
+			}
+			if strings.TrimSpace(executable) == "" {
+				return agentEvalReport{}, agentEvalRuntimeError{errors.New("resolve current executable: resolved path is empty")}
+			}
+			runner = pipelineEvalRunner{executable: executable}
 		}
+		harness := agenteval.Harness{Agent: runner}
 		report := harness.Run(ctx, options.SuitePath, suite, agenteval.BenchmarkInput{
 			TaskID:         options.TaskID,
 			WorkRoot:       workRoot,
@@ -490,6 +535,8 @@ func defaultRunAgentEval(ctx context.Context, options agentEvalOptions) (agentEv
 			Timeout:        options.Timeout,
 		})
 		converted := agentEvalReportFromBenchmark(suite, report)
+		converted.RunnerKind = runnerKind
+		converted.PrimaryModel = primaryAgentEvalModel(options.Models)
 		if options.KeepWorkspaces {
 			// Surface where the kept workspaces live, especially when the work
 			// root was an unnamed temp dir the caller never specified.
@@ -509,6 +556,15 @@ func defaultRunAgentEval(ctx context.Context, options agentEvalOptions) (agentEv
 		Tasks:  len(suite.Tasks),
 		Checks: checks,
 	}, nil
+}
+
+func primaryAgentEvalModel(models []string) string {
+	for _, model := range models {
+		if model = strings.TrimSpace(model); model != "" {
+			return model
+		}
+	}
+	return ""
 }
 
 func agentEvalBenchWorkRoot(options agentEvalOptions) (string, string, error) {

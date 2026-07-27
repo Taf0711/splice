@@ -8,12 +8,59 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Taf0711/splice/internal/agenteval"
 )
+
+func TestPipelineEvalCommandArgs(t *testing.T) {
+	tests := []struct {
+		name  string
+		input agenteval.AgentRunInput
+		want  []string
+	}{
+		{
+			name: "empty model",
+			input: agenteval.AgentRunInput{
+				Prompt:        "change the fixture",
+				WorkspacePath: "/tmp/workspace",
+			},
+			want: []string{"/opt/splice", "--no-trust", "exec", "--output-format", "stream-json", "change the fixture"},
+		},
+		{
+			name: "set model",
+			input: agenteval.AgentRunInput{
+				Prompt:        "change the fixture",
+				WorkspacePath: "/tmp/workspace",
+				Model:         "model-a",
+			},
+			want: []string{"/opt/splice", "--no-trust", "exec", "--output-format", "stream-json", "--model", "model-a", "change the fixture"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := pipelineEvalCommandArgs("/opt/splice", tt.input)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("argv = %#v, want %#v", got, tt.want)
+			}
+			if agentEvalSlicesContains(got, tt.input.WorkspacePath) {
+				t.Fatalf("workspace path must not be an argv element: %#v", got)
+			}
+		})
+	}
+}
+
+func agentEvalSlicesContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
 
 func TestRunEvalHelpIsListed(t *testing.T) {
 	var stdout bytes.Buffer
@@ -269,7 +316,7 @@ func TestRunEvalBenchReportDirAndKeepWorkspacesPassHarnessOptions(t *testing.T) 
 	}
 }
 
-func TestRunEvalBenchDefaultHarnessBlocksWithoutAgentCommand(t *testing.T) {
+func TestRunEvalBenchDefaultHarnessReportsExecutableResolutionFailure(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	suitePath := filepath.Join("..", "agenteval", "testdata", "sample_suite.json")
@@ -279,23 +326,20 @@ func TestRunEvalBenchDefaultHarnessBlocksWithoutAgentCommand(t *testing.T) {
 		"--suite", suitePath,
 		"--task", "document-stream-json-verify-events",
 		"--json",
-	}, &stdout, &stderr, appDeps{})
+	}, &stdout, &stderr, appDeps{
+		resolveExecutable: func() (string, error) {
+			return "", errors.New("test executable unavailable")
+		},
+	})
 
-	if exitCode != exitProvider {
-		t.Fatalf("expected provider-style failure exit %d, got %d: %s", exitProvider, exitCode, stderr.String())
+	if exitCode != exitCrash {
+		t.Fatalf("expected crash exit %d, got %d: %s", exitCrash, exitCode, stderr.String())
 	}
-	if stderr.Len() != 0 {
-		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout, got %q", stdout.String())
 	}
-	var decoded agentEvalReport
-	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
-		t.Fatalf("decode eval bench JSON: %v\n%s", err, stdout.String())
-	}
-	if decoded.Status != "blocked" || decoded.Blocked != 1 {
-		t.Fatalf("expected blocked benchmark report, got %#v", decoded)
-	}
-	if len(decoded.Failures) == 0 || !strings.Contains(decoded.Failures[0].Message, "agent command is required") {
-		t.Fatalf("expected agent command failure, got %#v", decoded.Failures)
+	if !strings.Contains(stderr.String(), "resolve current executable") || !strings.Contains(stderr.String(), "test executable unavailable") {
+		t.Fatalf("expected executable resolution error, got %q", stderr.String())
 	}
 }
 
@@ -310,7 +354,13 @@ func TestRunEvalBenchDefaultHarnessRunsModelMatrix(t *testing.T) {
 		"--task", "document-stream-json-verify-events",
 		"--models", "model-a,model-b",
 		"--json",
-	}, &stdout, &stderr, appDeps{})
+		"--agent-command", "false",
+	}, &stdout, &stderr, appDeps{
+		resolveExecutable: func() (string, error) {
+			t.Fatal("external runner must not resolve the current executable")
+			return "", nil
+		},
+	})
 
 	if exitCode != exitProvider {
 		t.Fatalf("expected provider-style failure exit %d, got %d: %s", exitProvider, exitCode, stderr.String())
@@ -321,6 +371,9 @@ func TestRunEvalBenchDefaultHarnessRunsModelMatrix(t *testing.T) {
 	}
 	if decoded.Total != 2 || decoded.Blocked != 2 {
 		t.Fatalf("expected two blocked model runs, got %#v", decoded)
+	}
+	if decoded.RunnerKind != agentEvalRunnerKindExternal || decoded.PrimaryModel != "model-a" {
+		t.Fatalf("runner metadata = kind %q, primary model %q", decoded.RunnerKind, decoded.PrimaryModel)
 	}
 	if decoded.Benchmark == nil || len(decoded.Benchmark.Tasks) != 2 {
 		t.Fatalf("expected nested benchmark detail, got %#v", decoded.Benchmark)
