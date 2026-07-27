@@ -2163,7 +2163,7 @@ func TestRequestLedgerMarksMissingUsageUnpriced(t *testing.T) {
 	ledger := newRequestLedger()
 	ledgerOpts := agent.Options{
 		OnAttributedUsage: func(au agent.AttributedUsage) {
-			au.Sequence = ledger.nextSeq
+			au.Sequence = len(ledger.records) + 1
 			if au.UsageReported {
 				au.Cost = agent.UsageCostEstimate{Status: agent.CostStatusPriced, CostUSD: Ptr(0.0), Provenance: agent.CostProvenanceRuntimeEstimate, PricingSource: "t", PricingAsOf: "2026-01-01"}
 			} else {
@@ -2232,7 +2232,7 @@ func TestRequestLedgerPreservesPricedZero(t *testing.T) {
 	ledgerOpts := agent.Options{
 		EstimateUsageCost: estimator,
 		OnAttributedUsage: func(au agent.AttributedUsage) {
-			au.Sequence = ledger.nextSeq
+			au.Sequence = len(ledger.records) + 1
 			au.Cost = estimator(au.Model, au.Usage, au.UsageReported)
 			rec := schemas.PipelineUsageRecord{
 				Sequence: au.Sequence, Stage: au.Stage, Iteration: au.Iteration,
@@ -2282,7 +2282,7 @@ func TestRequestLedgerPricesRoutedModelsIndependently(t *testing.T) {
 	ledgerOpts := agent.Options{
 		EstimateUsageCost: estimator,
 		OnAttributedUsage: func(au agent.AttributedUsage) {
-			au.Sequence = ledger.nextSeq
+			au.Sequence = len(ledger.records) + 1
 			au.Cost = estimator(au.Model, au.Usage, au.UsageReported)
 			rec := schemas.PipelineUsageRecord{
 				Sequence: au.Sequence, Stage: au.Stage, Iteration: au.Iteration,
@@ -2317,7 +2317,7 @@ func TestRequestLedgerDoesNotAddReasoningToOutput(t *testing.T) {
 	ledger := newRequestLedger()
 	ledgerOpts := agent.Options{
 		OnAttributedUsage: func(au agent.AttributedUsage) {
-			au.Sequence = ledger.nextSeq
+			au.Sequence = len(ledger.records) + 1
 			au.Cost = agent.UsageCostEstimate{Status: schemas.CostStatusUnpriced, UnpricedReason: "test"}
 			rec := schemas.PipelineUsageRecord{
 				Sequence: au.Sequence, Stage: au.Stage, Iteration: au.Iteration,
@@ -2421,7 +2421,7 @@ func TestRequestLedgerIncludesStepBackOnlyInPipelineTotals(t *testing.T) {
 	ledger := newRequestLedger()
 	ledgerOpts := agent.Options{
 		OnAttributedUsage: func(au agent.AttributedUsage) {
-			au.Sequence = ledger.nextSeq
+			au.Sequence = len(ledger.records) + 1
 			au.Cost = agent.UsageCostEstimate{Status: schemas.CostStatusUnpriced, UnpricedReason: "test"}
 			rec := schemas.PipelineUsageRecord{
 				Sequence: au.Sequence, Stage: au.Stage, Iteration: au.Iteration,
@@ -2474,7 +2474,7 @@ func TestRequestLedgerGroupsContextRetryByStage(t *testing.T) {
 	downstreamAU := func(au agent.AttributedUsage) { captured = append(captured, au) }
 	ledgerOpts := agent.Options{
 		OnAttributedUsage: func(au agent.AttributedUsage) {
-			au.Sequence = ledger.nextSeq
+			au.Sequence = len(ledger.records) + 1
 			au.Cost = agent.UsageCostEstimate{Status: schemas.CostStatusUnpriced, UnpricedReason: "test"}
 			rec := schemas.PipelineUsageRecord{
 				Sequence: au.Sequence, Stage: au.Stage, Iteration: au.Iteration,

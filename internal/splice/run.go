@@ -31,14 +31,12 @@ const (
 
 type requestLedger struct {
 	records []schemas.PipelineUsageRecord
-	nextSeq int
 }
 
-func newRequestLedger() *requestLedger { return &requestLedger{nextSeq: 1} }
+func newRequestLedger() *requestLedger { return &requestLedger{} }
 
 func (ledger *requestLedger) append(record schemas.PipelineUsageRecord) {
-	record.Sequence = ledger.nextSeq
-	ledger.nextSeq++
+	record.Sequence = len(ledger.records) + 1
 	ledger.records = append(ledger.records, record)
 }
 
@@ -47,7 +45,7 @@ func (ledger *requestLedger) recordingOptions(options agent.Options) agent.Optio
 	downstreamAttributed := options.OnAttributedUsage
 	downstreamLegacy := options.OnUsage
 	recorded.OnAttributedUsage = func(attributed agent.AttributedUsage) {
-		attributed.Sequence = ledger.nextSeq
+		attributed.Sequence = len(ledger.records) + 1
 		if attributed.UsageError != "" {
 			attributed.Usage = zeroruntime.Usage{}
 			attributed.Cost = costError(attributed.UsageError)
@@ -1334,22 +1332,22 @@ func emitPermissionDecision(options agent.Options, request agent.PermissionReque
 }
 
 func finishCompleted(runID string, plan schemas.ExecutionPlan, records []schemas.StageRecord) (schemas.PipelineResult, error) {
-	return sumTotals(schemas.PipelineResult{
+	return schemas.PipelineResult{
 		RunID:  runID,
 		Status: "completed",
 		Tier:   plan.Tier,
 		Stages: records,
-	}), nil
+	}, nil
 }
 
 func finishWithReason(runID string, plan schemas.ExecutionPlan, records []schemas.StageRecord, status, reason string) (schemas.PipelineResult, error) {
-	return sumTotals(schemas.PipelineResult{
+	return schemas.PipelineResult{
 		RunID:       runID,
 		Status:      status,
 		Tier:        plan.Tier,
 		Stages:      records,
 		AbortReason: &reason,
-	}), nil
+	}, nil
 }
 
 func abortReason(result schemas.PipelineResult) string {
@@ -1359,20 +1357,6 @@ func abortReason(result schemas.PipelineResult) string {
 	return ""
 }
 
-// sumTotals populates PipelineResult token/cost totals from the per-stage
-// records so the final answer never observes zero after real usage.
-func sumTotals(result schemas.PipelineResult) schemas.PipelineResult {
-	for _, r := range result.Stages {
-		result.TotalTokensInput += r.TokensInput
-		result.TotalTokensOutput += r.TokensOutput
-		result.TotalTokensCached += r.TokensCached
-		result.TotalTokensCacheWrite += r.TokensCacheWrite
-		result.TotalTokensReasoning += r.TokensReasoning
-		result.TotalCostUSD += r.CostUSD
-	}
-	return result
-}
-
 // applyRequestLedger replaces stage-derived totals with authoritative request totals.
 func applyRequestLedger(result *schemas.PipelineResult, ledger *requestLedger) error {
 	type stageUsageKey struct {
@@ -1380,12 +1364,15 @@ func applyRequestLedger(result *schemas.PipelineResult, ledger *requestLedger) e
 		iteration int
 	}
 	expected := make(map[stageUsageKey]schemas.StageUsage, len(result.Stages))
-	for _, stage := range result.Stages {
-		expected[stageUsageKey{stage.Name, stage.Iteration}] = schemas.StageUsage{
+	stageIndex := make(map[stageUsageKey]int, len(result.Stages))
+	for i, stage := range result.Stages {
+		key := stageUsageKey{stage.Name, stage.Iteration}
+		expected[key] = schemas.StageUsage{
 			InputTokens: stage.TokensInput, OutputTokens: stage.TokensOutput,
 			CachedInputTokens: stage.TokensCached, CacheWriteTokens: stage.TokensCacheWrite,
 			ReasoningTokens: stage.TokensReasoning,
 		}
+		stageIndex[key] = i
 	}
 	result.UsageRecords = append([]schemas.PipelineUsageRecord(nil), ledger.records...)
 
@@ -1406,7 +1393,9 @@ func applyRequestLedger(result *schemas.PipelineResult, ledger *requestLedger) e
 		result.Stages[i].CostUSD = 0
 	}
 
-	// Sum pipeline totals from request records.
+	// Sum pipeline totals and matching stage usage from request records.
+	var priced, unpriced, costErrors int
+	grouped := make(map[stageUsageKey]schemas.StageUsage)
 	for _, r := range ledger.records {
 		result.TotalTokensInput += r.InputTokens
 		result.TotalTokensOutput += r.OutputTokens
@@ -1416,39 +1405,37 @@ func applyRequestLedger(result *schemas.PipelineResult, ledger *requestLedger) e
 		if r.CostUSD != nil {
 			result.TotalCostUSD += *r.CostUSD
 		}
-	}
-
-	// Group matching stage and iteration records. Auxiliary requests remain only
-	// in pipeline totals.
-	grouped := make(map[stageUsageKey]schemas.StageUsage)
-	for _, r := range ledger.records {
 		key := stageUsageKey{r.Stage, r.Iteration}
-		usage := grouped[key]
-		usage.InputTokens += r.InputTokens
-		usage.OutputTokens += r.OutputTokens
-		usage.CachedInputTokens += r.CachedTokens
-		usage.CacheWriteTokens += r.CacheWrite
-		usage.ReasoningTokens += r.Reasoning
-		grouped[key] = usage
-		// Find the matching stage record.
-		for i, s := range result.Stages {
-			if s.Name == r.Stage && s.Iteration == r.Iteration {
-				result.Stages[i].TokensInput += r.InputTokens
-				result.Stages[i].TokensOutput += r.OutputTokens
-				result.Stages[i].TokensCached += r.CachedTokens
-				result.Stages[i].TokensCacheWrite += r.CacheWrite
-				result.Stages[i].TokensReasoning += r.Reasoning
-				if r.CostUSD != nil {
-					result.Stages[i].CostUSD += *r.CostUSD
-				}
-				break
+		if i, ok := stageIndex[key]; ok {
+			usage := grouped[key]
+			usage.InputTokens += r.InputTokens
+			usage.OutputTokens += r.OutputTokens
+			usage.CachedInputTokens += r.CachedTokens
+			usage.CacheWriteTokens += r.CacheWrite
+			usage.ReasoningTokens += r.Reasoning
+			grouped[key] = usage
+			result.Stages[i].TokensInput += r.InputTokens
+			result.Stages[i].TokensOutput += r.OutputTokens
+			result.Stages[i].TokensCached += r.CachedTokens
+			result.Stages[i].TokensCacheWrite += r.CacheWrite
+			result.Stages[i].TokensReasoning += r.Reasoning
+			if r.CostUSD != nil {
+				result.Stages[i].CostUSD += *r.CostUSD
 			}
+		}
+		switch r.CostStatus {
+		case schemas.CostStatusPriced:
+			priced++
+		case schemas.CostStatusUnpriced:
+			unpriced++
+		case schemas.CostStatusError:
+			costErrors++
 		}
 	}
 
 	for key, got := range grouped {
-		want, isStage := expected[key]
-		if isStage && got != want {
+		want := expected[key]
+		if got != want {
 			return fmt.Errorf("stage %s iteration %d usage %+v does not match request usage %+v", key.name, key.iteration, want, got)
 		}
 	}
@@ -1459,17 +1446,6 @@ func applyRequestLedger(result *schemas.PipelineResult, ledger *requestLedger) e
 	}
 
 	// Derive priced/unpriced/error counts and coverage.
-	var priced, unpriced, costErrors int
-	for _, r := range ledger.records {
-		switch r.CostStatus {
-		case schemas.CostStatusPriced:
-			priced++
-		case schemas.CostStatusUnpriced:
-			unpriced++
-		case schemas.CostStatusError:
-			costErrors++
-		}
-	}
 	result.PricedRequestCount = priced
 	result.UnpricedRequestCount = unpriced
 	result.ErrorRequestCount = costErrors
