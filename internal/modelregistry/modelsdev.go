@@ -46,11 +46,73 @@ type modelsDevModel struct {
 		Output  int `json:"output"`
 	} `json:"limit"`
 	Cost struct {
-		Input      float64 `json:"input"`
-		Output     float64 `json:"output"`
-		CacheRead  float64 `json:"cache_read"`
-		CacheWrite float64 `json:"cache_write"`
+		Input      float64             `json:"input"`
+		Output     float64             `json:"output"`
+		CacheRead  float64             `json:"cache_read"`
+		CacheWrite float64             `json:"cache_write"`
+		Tiers      []modelsDevCostTier `json:"tiers"`
 	} `json:"cost"`
+}
+
+type modelsDevCostTier struct {
+	Input      float64 `json:"input"`
+	Output     float64 `json:"output"`
+	CacheRead  float64 `json:"cache_read"`
+	CacheWrite float64 `json:"cache_write"`
+	Tier       struct {
+		Type string `json:"type"`
+		Size int    `json:"size"`
+	} `json:"tier"`
+}
+
+// modelsDevCostTiers converts models.dev context steps to registry tiers.
+// Each step changes rates above its context size.
+func modelsDevCostTiers(record modelsDevModel) []ModelCostTier {
+	if len(record.Cost.Tiers) == 0 {
+		return nil
+	}
+	steps := append([]modelsDevCostTier(nil), record.Cost.Tiers...)
+	sort.SliceStable(steps, func(left, right int) bool {
+		return steps[left].Tier.Size < steps[right].Tier.Size
+	})
+
+	tiers := make([]ModelCostTier, 0, len(steps)+1)
+	inputRate := record.Cost.Input
+	outputRate := record.Cost.Output
+	cachedRate := record.Cost.CacheRead
+	cacheWriteRate := record.Cost.CacheWrite
+	for _, step := range steps {
+		if step.Tier.Type != "context" || step.Tier.Size <= 0 || step.Input <= 0 || step.Output <= 0 {
+			return nil
+		}
+		tiers = append(tiers, ModelCostTier{
+			UpToInputTokens:       step.Tier.Size,
+			InputPerMillion:       inputRate,
+			OutputPerMillion:      outputRate,
+			CachedInputPerMillion: cachedRate,
+			CacheWritePerMillion:  cacheWriteRate,
+		})
+		inputRate = step.Input
+		outputRate = step.Output
+		// An absent or zero cache rate means the upstream record did not restate it.
+		// Keep the prior rate; cache is not free above the boundary.
+		if step.CacheRead > 0 {
+			cachedRate = step.CacheRead
+		}
+		if step.CacheWrite > 0 {
+			cacheWriteRate = step.CacheWrite
+		}
+	}
+	tiers = append(tiers, ModelCostTier{
+		InputPerMillion:       inputRate,
+		OutputPerMillion:      outputRate,
+		CachedInputPerMillion: cachedRate,
+		CacheWritePerMillion:  cacheWriteRate,
+	})
+	if err := validateCostTiers(tiers); err != nil {
+		return nil
+	}
+	return tiers
 }
 
 // modelsDevProvider matches one provider object in api.json.
@@ -137,10 +199,9 @@ func applyModelsDevOverrides(entries []ModelEntry, providers map[string]map[stri
 }
 
 // applyModelsDevOverridesWithStats also counts derived records rejected by
-// ModelEntry validation. Tiered pricing is never touched: models.dev has no
-// tier data, and mixing a live base rate with curated tiers would misprice the
-// tier boundaries. Without provider context, no derived entries are added
-// because a model id can have different prices under different providers.
+// ModelEntry validation. Base rates and tiers come from the same record, so
+// live pricing does not misprice curated tier boundaries. Without provider
+// context, no derived entries are added because prices can differ by provider.
 func applyModelsDevOverridesWithStats(entries []ModelEntry, providers map[string]map[string]modelsDevModel, providerProfile ...string) ([]ModelEntry, int) {
 	if len(providers) == 0 {
 		return entries, 0
@@ -167,7 +228,9 @@ func applyModelsDevOverridesWithStats(entries []ModelEntry, providers map[string
 		if record.Limit.Output > 0 {
 			entry.ContextLimits.MaxOutputTokens = record.Limit.Output
 		}
-		if len(entry.Cost.Tiers) == 0 && record.Cost.Input > 0 && record.Cost.Output > 0 {
+		// Base rates and tiers must come from the same record. A live base rate
+		// beside a curated boundary misprices every step.
+		if record.Cost.Input > 0 && record.Cost.Output > 0 {
 			entry.Cost.InputPerMillion = record.Cost.Input
 			entry.Cost.OutputPerMillion = record.Cost.Output
 			if record.Cost.CacheRead > 0 {
@@ -176,6 +239,7 @@ func applyModelsDevOverridesWithStats(entries []ModelEntry, providers map[string
 			if record.Cost.CacheWrite > 0 {
 				entry.Cost.CacheWritePerMillion = record.Cost.CacheWrite
 			}
+			entry.Cost.Tiers = modelsDevCostTiers(record)
 			entry.Cost.Source = "models.dev/api.json (cached)"
 		}
 	}
@@ -228,6 +292,7 @@ func applyModelsDevOverridesWithStats(entries []ModelEntry, providers map[string
 				OutputPerMillion:      record.Cost.Output,
 				CachedInputPerMillion: record.Cost.CacheRead,
 				CacheWritePerMillion:  record.Cost.CacheWrite,
+				Tiers:                 modelsDevCostTiers(record),
 				Source:                "models.dev/api.json (cached)",
 				SourceLastVerified:    sourceLastVerified,
 			},

@@ -1,6 +1,7 @@
 package modelregistry
 
 import (
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -8,6 +9,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
 const sampleModelsDev = `{
@@ -25,7 +28,10 @@ const sampleModelsDev = `{
     "models": {
       "gemini-2.5-pro": {
         "limit": {"context": 2097152, "output": 65536},
-        "cost": {"input": 9.99, "output": 9.99}
+        "cost": {
+          "input": 1.25, "output": 10, "cache_read": 0.125,
+          "tiers": [{"input": 2.5, "output": 15, "cache_read": 0.25, "tier": {"type": "context", "size": 200000}}]
+        }
       }
     }
   }
@@ -82,6 +88,139 @@ func TestParseModelsDev(t *testing.T) {
 	}
 }
 
+func TestModelsDevCostTiers(t *testing.T) {
+	step := func(input, output, cacheRead, cacheWrite float64, size int, tierType string) modelsDevCostTier {
+		return modelsDevCostTier{
+			Input: input, Output: output, CacheRead: cacheRead, CacheWrite: cacheWrite,
+			Tier: struct {
+				Type string `json:"type"`
+				Size int    `json:"size"`
+			}{Type: tierType, Size: size},
+		}
+	}
+	record := func(input, output, cacheRead, cacheWrite float64, tiers ...modelsDevCostTier) modelsDevModel {
+		var model modelsDevModel
+		model.Cost.Input = input
+		model.Cost.Output = output
+		model.Cost.CacheRead = cacheRead
+		model.Cost.CacheWrite = cacheWrite
+		model.Cost.Tiers = tiers
+		return model
+	}
+	tests := []struct {
+		name   string
+		record modelsDevModel
+		want   []ModelCostTier
+	}{
+		{
+			name:   "one step",
+			record: record(1, 2, 0.1, 0.2, step(1.5, 3, 0.15, 0.3, 16000, "context")),
+			want: []ModelCostTier{
+				{UpToInputTokens: 16000, InputPerMillion: 1, OutputPerMillion: 2, CachedInputPerMillion: 0.1, CacheWritePerMillion: 0.2},
+				{InputPerMillion: 1.5, OutputPerMillion: 3, CachedInputPerMillion: 0.15, CacheWritePerMillion: 0.3},
+			},
+		},
+		{
+			name: "two unsorted steps",
+			record: record(0.19, 0.63, 0, 0,
+				step(0.32, 1.25, 0.125, 0.32, 32000, "context"),
+				step(0.25, 1, 0.094, 0.25, 16000, "context")),
+			want: []ModelCostTier{
+				{UpToInputTokens: 16000, InputPerMillion: 0.19, OutputPerMillion: 0.63},
+				{UpToInputTokens: 32000, InputPerMillion: 0.25, OutputPerMillion: 1, CachedInputPerMillion: 0.094, CacheWritePerMillion: 0.25},
+				{InputPerMillion: 0.32, OutputPerMillion: 1.25, CachedInputPerMillion: 0.125, CacheWritePerMillion: 0.32},
+			},
+		},
+		{
+			name:   "302ai gpt-5.4 inherits omitted cache rates",
+			record: record(2.5, 15, 0.25, 0, step(5, 22.5, 0, 0, 272000, "context")),
+			want: []ModelCostTier{
+				{UpToInputTokens: 272000, InputPerMillion: 2.5, OutputPerMillion: 15, CachedInputPerMillion: 0.25, CacheWritePerMillion: 0},
+				{InputPerMillion: 5, OutputPerMillion: 22.5, CachedInputPerMillion: 0.25, CacheWritePerMillion: 0},
+			},
+		},
+		{
+			name: "cache rates override and chain",
+			record: record(1, 2, 0.1, 0.2,
+				step(1.5, 3, 0.3, 0.4, 16000, "context"),
+				step(2, 4, 0, 0, 32000, "context")),
+			want: []ModelCostTier{
+				{UpToInputTokens: 16000, InputPerMillion: 1, OutputPerMillion: 2, CachedInputPerMillion: 0.1, CacheWritePerMillion: 0.2},
+				{UpToInputTokens: 32000, InputPerMillion: 1.5, OutputPerMillion: 3, CachedInputPerMillion: 0.3, CacheWritePerMillion: 0.4},
+				{InputPerMillion: 2, OutputPerMillion: 4, CachedInputPerMillion: 0.3, CacheWritePerMillion: 0.4},
+			},
+		},
+		{
+			name:   "non-context type",
+			record: record(1, 2, 0, 0, step(2, 3, 0, 0, 16000, "output")),
+		},
+		{
+			name:   "zero size",
+			record: record(1, 2, 0, 0, step(2, 3, 0, 0, 0, "context")),
+		},
+		{
+			name:   "zero step input",
+			record: record(1, 2, 0, 0, step(0, 3, 0, 0, 16000, "context")),
+		},
+		{
+			name:   "no tiers",
+			record: record(1, 2, 0, 0),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := modelsDevCostTiers(test.record); !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("modelsDevCostTiers() = %+v, want %+v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestModelsDevCostTiersCalculateCostUsesInheritedCacheRate(t *testing.T) {
+	var record modelsDevModel
+	record.Cost.Input = 2.5
+	record.Cost.Output = 15
+	record.Cost.CacheRead = 0.25
+	record.Cost.Tiers = []modelsDevCostTier{{
+		Input:  5,
+		Output: 22.5,
+		Tier: struct {
+			Type string `json:"type"`
+			Size int    `json:"size"`
+		}{Type: "context", Size: 272000},
+	}}
+	tiers := modelsDevCostTiers(record)
+	model := ModelEntry{
+		ID: "302ai/gpt-5.4",
+		Cost: ModelCost{
+			InputPerMillion:       record.Cost.Input,
+			OutputPerMillion:      record.Cost.Output,
+			CachedInputPerMillion: record.Cost.CacheRead,
+			Tiers:                 tiers,
+		},
+	}
+	if len(tiers) != 2 {
+		t.Fatalf("modelsDevCostTiers() = %+v, want one boundary and a fallback tier", tiers)
+	}
+	fallbackTier := tiers[len(tiers)-1]
+	got, err := CalculateCost(model, zeroruntime.Usage{
+		InputTokens:       300000,
+		CachedInputTokens: 250000,
+		OutputTokens:      0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PricingTier == nil || got.PricingTier.InputPerMillion != 5 || got.PricingTier.CachedInputPerMillion != 0.25 {
+		t.Fatalf("selected fallback tier = %+v, want input 5 and cached input 0.25", got.PricingTier)
+	}
+	want := (float64(50000) / tokensPerMillion * fallbackTier.InputPerMillion) +
+		(float64(250000) / tokensPerMillion * fallbackTier.CachedInputPerMillion)
+	if math.Abs(got.TotalCost-want) > 1e-12 {
+		t.Fatalf("CalculateCost total = %.12f, want %.12f", got.TotalCost, want)
+	}
+}
+
 func TestApplyModelsDevOverrides(t *testing.T) {
 	// Point the cache at a non-existent file so DefaultModelEntries returns the
 	// pure curated catalog, then apply the sample snapshot explicitly.
@@ -118,13 +257,15 @@ func TestApplyModelsDevOverrides(t *testing.T) {
 		t.Fatalf("sonnet cost source not marked: %q", sonnet.Cost.Source)
 	}
 
-	// Tiered pricing is curated: limits refresh, cost must NOT (gemini-2.5-pro
-	// has curated tiers and the snapshot's flat 9.99 would misprice them).
+	// Tiered pricing uses the matching models.dev base rates and boundary.
 	if geminiPro.ContextLimits.ContextWindow != 2_097_152 {
 		t.Fatalf("gemini limits not overridden: %+v", geminiPro.ContextLimits)
 	}
-	if geminiPro.Cost.InputPerMillion == 9.99 || len(geminiPro.Cost.Tiers) == 0 {
-		t.Fatalf("tiered cost must stay curated: %+v", geminiPro.Cost)
+	if geminiPro.Cost.InputPerMillion != 1.25 || geminiPro.Cost.OutputPerMillion != 10 || len(geminiPro.Cost.Tiers) != 2 {
+		t.Fatalf("tiered cost mismatch: %+v", geminiPro.Cost)
+	}
+	if geminiPro.Cost.Tiers[0].UpToInputTokens != 200_000 || geminiPro.Cost.Tiers[0].InputPerMillion != 1.25 || geminiPro.Cost.Tiers[1].InputPerMillion != 2.5 {
+		t.Fatalf("tiered cost boundary mismatch: %+v", geminiPro.Cost.Tiers)
 	}
 
 	// Model absent from the snapshot: untouched.
@@ -149,6 +290,9 @@ func TestApplyModelsDevOverridesDerivesProviderScopedModel(t *testing.T) {
 	}
 	if model.Cost.InputPerMillion != 0.6692 || model.Cost.OutputPerMillion != 2.1032 || model.Cost.CachedInputPerMillion != 0.12428 {
 		t.Fatalf("derived pricing = %+v, want openrouter pricing", model.Cost)
+	}
+	if len(model.Cost.Tiers) != 0 {
+		t.Fatalf("flat derived pricing must not create tiers: %+v", model.Cost.Tiers)
 	}
 	if model.ContextLimits.ContextWindow != 202752 || model.ContextLimits.MaxOutputTokens != 16384 {
 		t.Fatalf("derived limits = %+v, want openrouter limits", model.ContextLimits)
@@ -407,6 +551,23 @@ func TestDefaultRegistryRealCachedSnapshot(t *testing.T) {
 	}
 	if gpt.Cost.InputPerMillion != 5 || gpt.Cost.OutputPerMillion != 30 || gpt.Cost.CachedInputPerMillion != 0.5 {
 		t.Fatalf("chatgpt gpt-5.5 pricing = %+v", gpt.Cost)
+	}
+	if len(gpt.Cost.Tiers) != 2 || gpt.Cost.Tiers[0].UpToInputTokens != 272_000 {
+		t.Fatalf("chatgpt gpt-5.5 tiers = %+v, want a 272k boundary and fallback", gpt.Cost.Tiers)
+	}
+	below, err := selectCostTier(gpt.Cost, 272_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	above, err := selectCostTier(gpt.Cost, 272_001)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if below.InputPerMillion != 5 || below.OutputPerMillion != 30 || below.CachedInputPerMillion != 0.5 {
+		t.Fatalf("gpt-5.5 rates at boundary = %+v", below)
+	}
+	if above.InputPerMillion != 10 || above.OutputPerMillion != 45 || above.CachedInputPerMillion != 1 {
+		t.Fatalf("gpt-5.5 rates above boundary = %+v", above)
 	}
 }
 
