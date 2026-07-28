@@ -28,14 +28,6 @@ func AgentContextWindow(resolved int) int {
 	return resolved
 }
 
-const sourceLastVerified = "2026-06-04"
-
-const (
-	openAIPricingSource    = "https://platform.openai.com/docs/pricing/"
-	anthropicPricingSource = "https://platform.claude.com/docs/en/about-claude/pricing"
-	googlePricingSource    = "https://ai.google.dev/gemini-api/docs/pricing"
-)
-
 type ListOptions struct {
 	IncludeDeprecated bool
 	Provider          ProviderKind
@@ -55,8 +47,8 @@ func DefaultRegistry(providerProfile ...string) (Registry, error) {
 }
 
 // DefaultModelEntries returns curated entries plus derived entries for the
-// optional provider profile. Without a profile, the result is curated-only
-// apart from volatile overrides of curated entries.
+// optional provider profile when the models.dev overlay is enabled. Without a
+// profile or overlay, the result is curated-only apart from volatile overrides.
 func DefaultModelEntries(providerProfile ...string) []ModelEntry {
 	entries, _ := defaultModelEntries(providerProfile...)
 	return entries
@@ -64,31 +56,30 @@ func DefaultModelEntries(providerProfile ...string) []ModelEntry {
 
 func defaultModelEntries(providerProfile ...string) ([]ModelEntry, int) {
 	entries := []ModelEntry{
-		openAIModel("gpt-5.6-sol", "GPT-5.6 Sol", "gpt-5.6-sol", ModelStatusActive, []string{"openai:gpt-5.6-sol", "gpt-5.6"}, ContextLimits{ContextWindow: 1_050_000, MaxOutputTokens: 128_000}, ModelCost{InputPerMillion: 5, CachedInputPerMillion: 0.5, OutputPerMillion: 30}, []ModelCapability{ModelCapabilityVision, ModelCapabilityReasoning, ModelCapabilityJSONMode, ModelCapabilityLongContext, ModelCapabilityPromptCache}, "OpenAI flagship GPT-5.6 model for complex reasoning and coding."),
-		openAIModel("gpt-5.6-terra", "GPT-5.6 Terra", "gpt-5.6-terra", ModelStatusActive, []string{"openai:gpt-5.6-terra"}, ContextLimits{ContextWindow: 1_050_000, MaxOutputTokens: 128_000}, ModelCost{InputPerMillion: 2.5, CachedInputPerMillion: 0.25, OutputPerMillion: 15}, []ModelCapability{ModelCapabilityVision, ModelCapabilityReasoning, ModelCapabilityJSONMode, ModelCapabilityLongContext, ModelCapabilityPromptCache}, "OpenAI balanced GPT-5.6 model for intelligence and cost."),
-		openAIModel("gpt-5.6-luna", "GPT-5.6 Luna", "gpt-5.6-luna", ModelStatusActive, []string{"openai:gpt-5.6-luna"}, ContextLimits{ContextWindow: 1_050_000, MaxOutputTokens: 128_000}, ModelCost{InputPerMillion: 1, CachedInputPerMillion: 0.1, OutputPerMillion: 6}, []ModelCapability{ModelCapabilityVision, ModelCapabilityReasoning, ModelCapabilityJSONMode, ModelCapabilityLongContext, ModelCapabilityPromptCache}, "OpenAI cost-effective GPT-5.6 model for high-volume workloads."),
-		openAIModel("gpt-4.1", "GPT-4.1", "gpt-4.1", ModelStatusActive, []string{"openai:gpt-4.1"}, ContextLimits{ContextWindow: 1_047_576, MaxOutputTokens: 32_768}, ModelCost{InputPerMillion: 2, CachedInputPerMillion: 0.5, OutputPerMillion: 8}, []ModelCapability{ModelCapabilityVision, ModelCapabilityJSONMode, ModelCapabilityLongContext}, "OpenAI stable long-context model for general coding sessions."),
-		openAIModel("gpt-4.1-mini", "GPT-4.1 mini", "gpt-4.1-mini", ModelStatusActive, []string{"openai:gpt-4.1-mini"}, ContextLimits{ContextWindow: 1_047_576, MaxOutputTokens: 32_768}, ModelCost{InputPerMillion: 0.4, CachedInputPerMillion: 0.1, OutputPerMillion: 1.6}, []ModelCapability{ModelCapabilityVision, ModelCapabilityJSONMode, ModelCapabilityLongContext}, "OpenAI lower-cost long-context model for frequent edit loops."),
-		openAIModel("gpt-4.1-nano", "GPT-4.1 nano", "gpt-4.1-nano", ModelStatusActive, []string{"openai:gpt-4.1-nano"}, ContextLimits{ContextWindow: 1_047_576, MaxOutputTokens: 32_768}, ModelCost{InputPerMillion: 0.1, CachedInputPerMillion: 0.025, OutputPerMillion: 0.4}, []ModelCapability{ModelCapabilityVision, ModelCapabilityJSONMode, ModelCapabilityLongContext}, "OpenAI smallest GPT-4.1 model for routing, summaries, and light checks."),
-		openAIModel("gpt-4o", "GPT-4o", "gpt-4o", ModelStatusActive, []string{"openai:gpt-4o"}, ContextLimits{ContextWindow: 128_000, MaxOutputTokens: 16_384}, ModelCost{InputPerMillion: 2.5, CachedInputPerMillion: 1.25, OutputPerMillion: 10}, []ModelCapability{ModelCapabilityVision, ModelCapabilityJSONMode}, "OpenAI multimodal model kept for compatibility with existing configs."),
-		openAIModel("gpt-4o-mini", "GPT-4o mini", "gpt-4o-mini", ModelStatusActive, []string{"openai:gpt-4o-mini"}, ContextLimits{ContextWindow: 128_000, MaxOutputTokens: 16_384}, ModelCost{InputPerMillion: 0.15, CachedInputPerMillion: 0.075, OutputPerMillion: 0.6}, []ModelCapability{ModelCapabilityVision, ModelCapabilityJSONMode}, "OpenAI low-cost multimodal model for lightweight sessions."),
-		openAIModel("gpt-4-turbo", "GPT-4 Turbo", "gpt-4-turbo", ModelStatusDeprecated, []string{"openai:gpt-4-turbo"}, ContextLimits{ContextWindow: 128_000, MaxOutputTokens: 4_096}, ModelCost{InputPerMillion: 10, OutputPerMillion: 30}, []ModelCapability{ModelCapabilityVision, ModelCapabilityJSONMode}, "Deprecated OpenAI model retained for config migration and historical usage display."),
-		anthropicModel("claude-opus-4.1", "Claude Opus 4.1", "claude-opus-4-1-20250805", ModelStatusActive, []string{"anthropic:claude-opus-4.1", "opus-4.1"}, ContextLimits{ContextWindow: 200_000, MaxOutputTokens: 32_000}, ModelCost{InputPerMillion: 15, CachedInputPerMillion: 1.5, OutputPerMillion: 75}, []ModelCapability{ModelCapabilityVision, ModelCapabilityReasoning, ModelCapabilityPromptCache}, standardReasoningEfforts(), "Anthropic high-capability Opus model for deep coding and planning."),
-		anthropicModel("claude-sonnet-4.5", "Claude Sonnet 4.5", "claude-sonnet-4-5-20250929", ModelStatusActive, []string{"anthropic:claude-sonnet-4.5", "sonnet-4.5"}, ContextLimits{ContextWindow: 200_000, MaxOutputTokens: 64_000}, ModelCost{InputPerMillion: 3, CachedInputPerMillion: 0.3, OutputPerMillion: 15}, []ModelCapability{ModelCapabilityVision, ModelCapabilityReasoning, ModelCapabilityPromptCache}, standardReasoningEfforts(), "Anthropic balanced coding model for high-quality daily agent work."),
-		anthropicModel("claude-haiku-4.5", "Claude Haiku 4.5", "claude-haiku-4-5-20251001", ModelStatusActive, []string{"anthropic:claude-haiku-4.5", "haiku-4.5"}, ContextLimits{ContextWindow: 200_000, MaxOutputTokens: 64_000}, ModelCost{InputPerMillion: 1, CachedInputPerMillion: 0.1, OutputPerMillion: 5}, []ModelCapability{ModelCapabilityVision, ModelCapabilityReasoning, ModelCapabilityPromptCache}, standardReasoningEfforts(), "Anthropic fast model for lightweight coding support and summaries."),
-		anthropicModel("claude-haiku-3.5", "Claude Haiku 3.5", "claude-3-5-haiku-20241022", ModelStatusDeprecated, []string{"anthropic:claude-haiku-3.5", "haiku-3.5"}, ContextLimits{ContextWindow: 200_000, MaxOutputTokens: 8_192}, ModelCost{InputPerMillion: 0.8, CachedInputPerMillion: 0.08, OutputPerMillion: 4}, []ModelCapability{ModelCapabilityPromptCache}, nil, "Retired Anthropic Haiku model retained for migration and historical usage display."),
-		googleModel("gemini-2.5-pro", "Gemini 2.5 Pro", "gemini-2.5-pro", ModelStatusActive, []string{"google:gemini-2.5-pro", "gemini-pro"}, ContextLimits{ContextWindow: 1_048_576, MaxOutputTokens: 65_536}, ModelCost{Tiers: []ModelCostTier{{UpToInputTokens: 200_000, InputPerMillion: 1.25, CachedInputPerMillion: 0.125, OutputPerMillion: 10, Note: "Prompts up to 200k tokens."}, {InputPerMillion: 2.5, CachedInputPerMillion: 0.25, OutputPerMillion: 15, Note: "Prompts above 200k tokens."}}}, []ModelCapability{ModelCapabilityVision, ModelCapabilityJSONMode, ModelCapabilityReasoning, ModelCapabilityLongContext}, standardReasoningEfforts(), "Google general-purpose Pro model with tiered long-context pricing."),
-		googleModel("gemini-2.5-flash", "Gemini 2.5 Flash", "gemini-2.5-flash", ModelStatusActive, []string{"google:gemini-2.5-flash", "gemini-flash"}, ContextLimits{ContextWindow: 1_048_576, MaxOutputTokens: 65_536}, ModelCost{InputPerMillion: 0.3, CachedInputPerMillion: 0.03, OutputPerMillion: 2.5}, []ModelCapability{ModelCapabilityVision, ModelCapabilityJSONMode, ModelCapabilityReasoning, ModelCapabilityLongContext}, standardReasoningEfforts(), "Google Flash model for low-latency coding interactions."),
-		googleModel("gemini-2.5-flash-lite", "Gemini 2.5 Flash-Lite", "gemini-2.5-flash-lite", ModelStatusActive, []string{"google:gemini-2.5-flash-lite", "gemini-flash-lite"}, ContextLimits{ContextWindow: 1_048_576, MaxOutputTokens: 65_536}, ModelCost{InputPerMillion: 0.1, CachedInputPerMillion: 0.01, OutputPerMillion: 0.4}, []ModelCapability{ModelCapabilityVision, ModelCapabilityJSONMode, ModelCapabilityReasoning, ModelCapabilityLongContext}, standardReasoningEfforts(), "Google low-cost Flash model for background routing and summaries."),
-		openAIModel("moonshotai/kimi-k3", "Kimi K3", "moonshotai/kimi-k3", ModelStatusActive, []string{"kimi-k3"}, ContextLimits{ContextWindow: 1_048_576, MaxOutputTokens: 131_072}, ModelCost{InputPerMillion: 3, CachedInputPerMillion: 0.3, OutputPerMillion: 15}, []ModelCapability{ModelCapabilityVision, ModelCapabilityReasoning, ModelCapabilityJSONMode, ModelCapabilityLongContext, ModelCapabilityPromptCache}, "Moonshot AI Kimi K3 model via OpenRouter for coding and reasoning."),
-		openAIModel("qwen/qwen3-coder-30b-a3b-instruct", "Qwen3 Coder 30B", "qwen/qwen3-coder-30b-a3b-instruct", ModelStatusActive, []string{"qwen3-coder-30b"}, ContextLimits{ContextWindow: 160_000, MaxOutputTokens: 32_768}, ModelCost{InputPerMillion: 0.07, OutputPerMillion: 0.27}, []ModelCapability{ModelCapabilityJSONMode, ModelCapabilityLongContext}, "Qwen3 Coder 30B model via OpenRouter for cost-effective code writing."),
+		openAIModel("gpt-5.6-sol", "GPT-5.6 Sol", "gpt-5.6-sol", ModelStatusActive, []string{"openai:gpt-5.6-sol", "gpt-5.6"}, ContextLimits{ContextWindow: 1_050_000, MaxOutputTokens: 128_000}, ModelCost{}, []ModelCapability{ModelCapabilityVision, ModelCapabilityReasoning, ModelCapabilityJSONMode, ModelCapabilityLongContext, ModelCapabilityPromptCache}, "OpenAI flagship GPT-5.6 model for complex reasoning and coding."),
+		openAIModel("gpt-5.6-terra", "GPT-5.6 Terra", "gpt-5.6-terra", ModelStatusActive, []string{"openai:gpt-5.6-terra"}, ContextLimits{ContextWindow: 1_050_000, MaxOutputTokens: 128_000}, ModelCost{}, []ModelCapability{ModelCapabilityVision, ModelCapabilityReasoning, ModelCapabilityJSONMode, ModelCapabilityLongContext, ModelCapabilityPromptCache}, "OpenAI balanced GPT-5.6 model for intelligence and cost."),
+		openAIModel("gpt-5.6-luna", "GPT-5.6 Luna", "gpt-5.6-luna", ModelStatusActive, []string{"openai:gpt-5.6-luna"}, ContextLimits{ContextWindow: 1_050_000, MaxOutputTokens: 128_000}, ModelCost{}, []ModelCapability{ModelCapabilityVision, ModelCapabilityReasoning, ModelCapabilityJSONMode, ModelCapabilityLongContext, ModelCapabilityPromptCache}, "OpenAI cost-effective GPT-5.6 model for high-volume workloads."),
+		openAIModel("gpt-4.1", "GPT-4.1", "gpt-4.1", ModelStatusActive, []string{"openai:gpt-4.1"}, ContextLimits{ContextWindow: 1_047_576, MaxOutputTokens: 32_768}, ModelCost{}, []ModelCapability{ModelCapabilityVision, ModelCapabilityJSONMode, ModelCapabilityLongContext}, "OpenAI stable long-context model for general coding sessions."),
+		openAIModel("gpt-4.1-mini", "GPT-4.1 mini", "gpt-4.1-mini", ModelStatusActive, []string{"openai:gpt-4.1-mini"}, ContextLimits{ContextWindow: 1_047_576, MaxOutputTokens: 32_768}, ModelCost{}, []ModelCapability{ModelCapabilityVision, ModelCapabilityJSONMode, ModelCapabilityLongContext}, "OpenAI lower-cost long-context model for frequent edit loops."),
+		openAIModel("gpt-4.1-nano", "GPT-4.1 nano", "gpt-4.1-nano", ModelStatusActive, []string{"openai:gpt-4.1-nano"}, ContextLimits{ContextWindow: 1_047_576, MaxOutputTokens: 32_768}, ModelCost{}, []ModelCapability{ModelCapabilityVision, ModelCapabilityJSONMode, ModelCapabilityLongContext}, "OpenAI smallest GPT-4.1 model for routing, summaries, and light checks."),
+		openAIModel("gpt-4o", "GPT-4o", "gpt-4o", ModelStatusActive, []string{"openai:gpt-4o"}, ContextLimits{ContextWindow: 128_000, MaxOutputTokens: 16_384}, ModelCost{}, []ModelCapability{ModelCapabilityVision, ModelCapabilityJSONMode}, "OpenAI multimodal model kept for compatibility with existing configs."),
+		openAIModel("gpt-4o-mini", "GPT-4o mini", "gpt-4o-mini", ModelStatusActive, []string{"openai:gpt-4o-mini"}, ContextLimits{ContextWindow: 128_000, MaxOutputTokens: 16_384}, ModelCost{}, []ModelCapability{ModelCapabilityVision, ModelCapabilityJSONMode}, "OpenAI low-cost multimodal model for lightweight sessions."),
+		openAIModel("gpt-4-turbo", "GPT-4 Turbo", "gpt-4-turbo", ModelStatusDeprecated, []string{"openai:gpt-4-turbo"}, ContextLimits{ContextWindow: 128_000, MaxOutputTokens: 4_096}, ModelCost{}, []ModelCapability{ModelCapabilityVision, ModelCapabilityJSONMode}, "Deprecated OpenAI model retained for config migration and historical usage display."),
+		anthropicModel("claude-opus-4.1", "Claude Opus 4.1", "claude-opus-4-1-20250805", ModelStatusActive, []string{"anthropic:claude-opus-4.1", "opus-4.1"}, ContextLimits{ContextWindow: 200_000, MaxOutputTokens: 32_000}, ModelCost{}, []ModelCapability{ModelCapabilityVision, ModelCapabilityReasoning, ModelCapabilityPromptCache}, standardReasoningEfforts(), "Anthropic high-capability Opus model for deep coding and planning."),
+		anthropicModel("claude-sonnet-4.5", "Claude Sonnet 4.5", "claude-sonnet-4-5-20250929", ModelStatusActive, []string{"anthropic:claude-sonnet-4.5", "sonnet-4.5"}, ContextLimits{ContextWindow: 200_000, MaxOutputTokens: 64_000}, ModelCost{}, []ModelCapability{ModelCapabilityVision, ModelCapabilityReasoning, ModelCapabilityPromptCache}, standardReasoningEfforts(), "Anthropic balanced coding model for high-quality daily agent work."),
+		anthropicModel("claude-haiku-4.5", "Claude Haiku 4.5", "claude-haiku-4-5-20251001", ModelStatusActive, []string{"anthropic:claude-haiku-4.5", "haiku-4.5"}, ContextLimits{ContextWindow: 200_000, MaxOutputTokens: 64_000}, ModelCost{}, []ModelCapability{ModelCapabilityVision, ModelCapabilityReasoning, ModelCapabilityPromptCache}, standardReasoningEfforts(), "Anthropic fast model for lightweight coding support and summaries."),
+		anthropicModel("claude-haiku-3.5", "Claude Haiku 3.5", "claude-3-5-haiku-20241022", ModelStatusDeprecated, []string{"anthropic:claude-haiku-3.5", "haiku-3.5"}, ContextLimits{ContextWindow: 200_000, MaxOutputTokens: 8_192}, ModelCost{}, []ModelCapability{ModelCapabilityPromptCache}, nil, "Retired Anthropic Haiku model retained for migration and historical usage display."),
+		googleModel("gemini-2.5-pro", "Gemini 2.5 Pro", "gemini-2.5-pro", ModelStatusActive, []string{"google:gemini-2.5-pro", "gemini-pro"}, ContextLimits{ContextWindow: 1_048_576, MaxOutputTokens: 65_536}, ModelCost{}, []ModelCapability{ModelCapabilityVision, ModelCapabilityJSONMode, ModelCapabilityReasoning, ModelCapabilityLongContext}, standardReasoningEfforts(), "Google general-purpose Pro model with tiered long-context pricing."),
+		googleModel("gemini-2.5-flash", "Gemini 2.5 Flash", "gemini-2.5-flash", ModelStatusActive, []string{"google:gemini-2.5-flash", "gemini-flash"}, ContextLimits{ContextWindow: 1_048_576, MaxOutputTokens: 65_536}, ModelCost{}, []ModelCapability{ModelCapabilityVision, ModelCapabilityJSONMode, ModelCapabilityReasoning, ModelCapabilityLongContext}, standardReasoningEfforts(), "Google Flash model for low-latency coding interactions."),
+		googleModel("gemini-2.5-flash-lite", "Gemini 2.5 Flash-Lite", "gemini-2.5-flash-lite", ModelStatusActive, []string{"google:gemini-2.5-flash-lite", "gemini-flash-lite"}, ContextLimits{ContextWindow: 1_048_576, MaxOutputTokens: 65_536}, ModelCost{}, []ModelCapability{ModelCapabilityVision, ModelCapabilityJSONMode, ModelCapabilityReasoning, ModelCapabilityLongContext}, standardReasoningEfforts(), "Google low-cost Flash model for background routing and summaries."),
+		openAIModel("moonshotai/kimi-k3", "Kimi K3", "moonshotai/kimi-k3", ModelStatusActive, []string{"kimi-k3"}, ContextLimits{ContextWindow: 1_048_576, MaxOutputTokens: 131_072}, ModelCost{}, []ModelCapability{ModelCapabilityVision, ModelCapabilityReasoning, ModelCapabilityJSONMode, ModelCapabilityLongContext, ModelCapabilityPromptCache}, "Moonshot AI Kimi K3 model via OpenRouter for coding and reasoning."),
+		openAIModel("qwen/qwen3-coder-30b-a3b-instruct", "Qwen3 Coder 30B", "qwen/qwen3-coder-30b-a3b-instruct", ModelStatusActive, []string{"qwen3-coder-30b"}, ContextLimits{ContextWindow: 160_000, MaxOutputTokens: 32_768}, ModelCost{}, []ModelCapability{ModelCapabilityJSONMode, ModelCapabilityLongContext}, "Qwen3 Coder 30B model via OpenRouter for cost-effective code writing."),
 	}
 	decorateModelDepth(entries)
-	// Overlay volatile facts (context limits, base pricing) from a cached
-	// models.dev snapshot when one is present and fresh. See modelsdev.go.
-	// Identity fields (ids, aliases, patterns, deprecations) stay curated.
-	var skipped int
-	entries, skipped = applyModelsDevOverridesWithStats(entries, cachedModelsDevProviders(), providerProfile...)
+	// Apply prices and limits from the embedded baseline or a newer disk cache.
+	// Identity fields (ids, aliases, patterns, and deprecations) stay curated.
+	snapshot := cachedModelsDevSnapshotInfo()
+	entries, skipped := applyModelsDevOverridesWithSource(entries, snapshot.providers, snapshot.source, snapshot.modTime, providerProfile...)
 	return cloneModelEntries(entries), skipped
 }
 
@@ -279,8 +270,6 @@ func (registry Registry) RequireProvider(pattern string, provider ProviderKind) 
 func openAIModel(id string, displayName string, apiModel string, status ModelStatus, aliases []string, limits ContextLimits, cost ModelCost, extraCapabilities []ModelCapability, description string) ModelEntry {
 	cost.Currency = "USD"
 	cost.Unit = "per_1m_tokens"
-	cost.Source = openAIPricingSource
-	cost.SourceLastVerified = sourceLastVerified
 	return ModelEntry{
 		ID:            id,
 		DisplayName:   displayName,
@@ -299,15 +288,6 @@ func openAIModel(id string, displayName string, apiModel string, status ModelSta
 func anthropicModel(id string, displayName string, apiModel string, status ModelStatus, aliases []string, limits ContextLimits, cost ModelCost, extraCapabilities []ModelCapability, efforts []ReasoningEffort, description string) ModelEntry {
 	cost.Currency = "USD"
 	cost.Unit = "per_1m_tokens"
-	cost.Source = anthropicPricingSource
-	cost.SourceLastVerified = sourceLastVerified
-	// Anthropic bills cache writes (5-minute TTL) at 1.25x the base input rate.
-	// Derive it from the input rate so every cacheable Claude model is priced
-	// without restating it per entry; explicit values still win if ever set.
-	if cost.CacheWritePerMillion == 0 && cost.InputPerMillion > 0 {
-		cost.CacheWritePerMillion = cost.InputPerMillion * 1.25
-	}
-	cost.Notes = append(cost.Notes, "Claude cached input pricing models cache hits and refreshes; cache writes bill at 1.25x input.")
 	return ModelEntry{
 		ID:               id,
 		DisplayName:      displayName,
@@ -326,8 +306,6 @@ func anthropicModel(id string, displayName string, apiModel string, status Model
 func googleModel(id string, displayName string, apiModel string, status ModelStatus, aliases []string, limits ContextLimits, cost ModelCost, extraCapabilities []ModelCapability, efforts []ReasoningEffort, description string) ModelEntry {
 	cost.Currency = "USD"
 	cost.Unit = "per_1m_tokens"
-	cost.Source = googlePricingSource
-	cost.SourceLastVerified = sourceLastVerified
 	return ModelEntry{
 		ID:               id,
 		DisplayName:      displayName,

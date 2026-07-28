@@ -28,7 +28,7 @@ func TestCalculateCostCacheWritePremium(t *testing.T) {
 		t.Fatalf("cacheWrite = %d tok / $%v", cost.CacheWriteTokens, cost.CacheWriteCost)
 	}
 
-	t.Run("unpriced write with cached read", func(t *testing.T) {
+	t.Run("embedded pricing with cached read", func(t *testing.T) {
 		registry, err := DefaultRegistry()
 		if err != nil {
 			t.Fatalf("DefaultRegistry returned error: %v", err)
@@ -40,14 +40,14 @@ func TestCalculateCostCacheWritePremium(t *testing.T) {
 		if err != nil {
 			t.Fatalf("EstimateCost returned error: %v", err)
 		}
-		assertClose(t, cost.InputCost, 1.4)
-		assertClose(t, cost.CachedInputCost, 0.15)
-		assertClose(t, cost.TotalCost, 5.55)
+		if math.Abs(cost.TotalCost-5.55) > 1e-9 {
+			t.Fatalf("EstimateCost total = %v, want 5.55", cost.TotalCost)
+		}
 	})
 }
 
 // Without a configured cache-write rate, cache-write tokens fall back to the full
-// input rate (the prior behavior) — no regression for models lacking the rate.
+// input rate. This preserves behavior for models without that rate.
 func TestCalculateCostCacheWriteFallsBackToInputRate(t *testing.T) {
 	model := ModelEntry{ID: "test", Provider: ProviderOpenAI, Cost: ModelCost{Currency: "USD", InputPerMillion: 10, OutputPerMillion: 30}}
 	usage := zeroruntime.Usage{InputTokens: 1_000_000, CacheWriteTokens: 100_000, OutputTokens: 0}
@@ -63,8 +63,7 @@ func TestCalculateCostCacheWriteFallsBackToInputRate(t *testing.T) {
 	}
 }
 
-// Anthropic models derive cache-write = 1.25x input from the helper.
-func TestAnthropicModelsDeriveCacheWriteRate(t *testing.T) {
+func TestAnthropicModelsUseEmbeddedPricing(t *testing.T) {
 	reg, err := DefaultRegistry()
 	if err != nil {
 		t.Fatal(err)
@@ -73,7 +72,7 @@ func TestAnthropicModelsDeriveCacheWriteRate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := m.Cost.CacheWritePerMillion, 3.0*1.25; math.Abs(got-want) > 1e-9 {
-		t.Fatalf("sonnet cache-write rate = %v, want %v", got, want)
+	if m.Cost.IsUnpriced() || m.Cost.Source != modelsDevEmbeddedSource {
+		t.Fatalf("sonnet cost = %+v, want embedded pricing", m.Cost)
 	}
 }

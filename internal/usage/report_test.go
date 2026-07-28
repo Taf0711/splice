@@ -29,7 +29,7 @@ func usageEvent(t *testing.T, sessionID string, sequence int, createdAt string, 
 }
 
 func TestBuildReportBucketsByDayAndSumsTokens(t *testing.T) {
-	registry, err := modelregistry.DefaultRegistry()
+	registry, err := testPricedRegistry(t)
 	if err != nil {
 		t.Fatalf("DefaultRegistry: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestBuildReportBucketsByDayAndSumsTokens(t *testing.T) {
 }
 
 func TestBuildReportReconstructsCostFromMetadataModel(t *testing.T) {
-	registry, err := modelregistry.DefaultRegistry()
+	registry, err := testPricedRegistry(t)
 	if err != nil {
 		t.Fatalf("DefaultRegistry: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestBuildReportReconstructsCostFromMetadataModel(t *testing.T) {
 }
 
 func TestBuildReportPricesFromEventModelWhenPresent(t *testing.T) {
-	registry, err := modelregistry.DefaultRegistry()
+	registry, err := testPricedRegistry(t)
 	if err != nil {
 		t.Fatalf("DefaultRegistry: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestBuildReportPricesFromEventModelWhenPresent(t *testing.T) {
 }
 
 func TestBuildReportPrefersPersistedCostEstimate(t *testing.T) {
-	registry, err := modelregistry.DefaultRegistry()
+	registry, err := testPricedRegistry(t)
 	if err != nil {
 		t.Fatalf("DefaultRegistry: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestBuildReportPrefersPersistedCostEstimate(t *testing.T) {
 }
 
 func TestBuildReportRatiosGuardNetZero(t *testing.T) {
-	registry, err := modelregistry.DefaultRegistry()
+	registry, err := testPricedRegistry(t)
 	if err != nil {
 		t.Fatalf("DefaultRegistry: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestBuildReportRatiosGuardNetZero(t *testing.T) {
 }
 
 func TestBuildReportIgnoresNonUsageEvents(t *testing.T) {
-	registry, err := modelregistry.DefaultRegistry()
+	registry, err := testPricedRegistry(t)
 	if err != nil {
 		t.Fatalf("DefaultRegistry: %v", err)
 	}

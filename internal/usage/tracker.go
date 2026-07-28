@@ -205,6 +205,12 @@ func (tracker *Tracker) Record(input RecordInput) (Record, error) {
 	record.Provider = model.Provider
 	cost, err := modelregistry.CalculateCost(model, runtimeUsage)
 	if err != nil {
+		if model.Cost.IsUnpriced() {
+			record.Cost = unpricedCost(fmt.Sprintf("price unavailable for model %q: %v", record.ModelID, err))
+			copyCostMetadata(&record, record.Cost)
+			tracker.records = append(tracker.records, record)
+			return record, nil
+		}
 		record.Cost = errorCost(fmt.Sprintf("price calculation failed for model %q: %v", record.ModelID, err))
 		copyCostMetadata(&record, record.Cost)
 		tracker.records = append(tracker.records, record)

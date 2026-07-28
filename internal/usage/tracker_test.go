@@ -11,7 +11,7 @@ import (
 )
 
 func TestTrackerNormalizesUsageAndComputesModelCost(t *testing.T) {
-	tracker, err := NewTracker(TrackerOptions{Now: fixedUsageClock("2026-06-04T13:00:00Z")})
+	tracker, err := NewTracker(TrackerOptions{Now: fixedUsageClock("2026-06-04T13:00:00Z"), Registry: mustTestPricedRegistry(t)})
 	if err != nil {
 		t.Fatalf("NewTracker returned error: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestTrackerNormalizesUsageAndComputesModelCost(t *testing.T) {
 }
 
 func TestTrackerPrefersPersistedEstimateAfterRegistryPriceChange(t *testing.T) {
-	tracker, err := NewTracker(TrackerOptions{})
+	tracker, err := NewTracker(TrackerOptions{Registry: mustTestPricedRegistry(t)})
 	if err != nil {
 		t.Fatalf("NewTracker returned error: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestTrackerPrefersPersistedEstimateAfterRegistryPriceChange(t *testing.T) {
 }
 
 func TestTrackerReconstructsCostWhenEstimateMissing(t *testing.T) {
-	tracker, err := NewTracker(TrackerOptions{})
+	tracker, err := NewTracker(TrackerOptions{Registry: mustTestPricedRegistry(t)})
 	if err != nil {
 		t.Fatalf("NewTracker returned error: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestTrackerReconstructsCostWhenEstimateMissing(t *testing.T) {
 }
 
 func TestTrackerRecordsUnpricedWithoutModelAndRetainsTokens(t *testing.T) {
-	tracker, err := NewTracker(TrackerOptions{})
+	tracker, err := NewTracker(TrackerOptions{Registry: mustTestPricedRegistry(t)})
 	if err != nil {
 		t.Fatalf("NewTracker returned error: %v", err)
 	}
@@ -143,8 +143,32 @@ func TestTrackerRecordsUnpricedWithoutModelAndRetainsTokens(t *testing.T) {
 	}
 }
 
+func TestTrackerRecordsKnownUnpricedModelWithoutError(t *testing.T) {
+	registry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry returned error: %v", err)
+	}
+	tracker, err := NewTracker(TrackerOptions{Registry: &registry})
+	if err != nil {
+		t.Fatalf("NewTracker returned error: %v", err)
+	}
+	record, err := tracker.Record(RecordInput{
+		ModelID: "claude-haiku-3.5",
+		Usage:   zeroruntime.Usage{InputTokens: 100, OutputTokens: 20},
+	})
+	if err != nil {
+		t.Fatalf("Record returned error for unpriced model: %v", err)
+	}
+	if record.Cost == nil || record.Cost.CostStatus != CostStatusUnpriced {
+		t.Fatalf("record cost = %#v, want unpriced", record.Cost)
+	}
+	if summary := tracker.Summary(); summary.UnpricedCount != 1 || summary.CostCoverage != CostCoverageUnavailable || summary.ErrorCount != 0 {
+		t.Fatalf("summary = %#v, want unavailable coverage without errors", summary)
+	}
+}
+
 func TestTrackerDistinguishesPricedZeroFromUnpriced(t *testing.T) {
-	tracker, err := NewTracker(TrackerOptions{})
+	tracker, err := NewTracker(TrackerOptions{Registry: mustTestPricedRegistry(t)})
 	if err != nil {
 		t.Fatalf("NewTracker returned error: %v", err)
 	}
@@ -198,7 +222,7 @@ func TestTrackerCoverageStates(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			tracker, err := NewTracker(TrackerOptions{})
+			tracker, err := NewTracker(TrackerOptions{Registry: mustTestPricedRegistry(t)})
 			if err != nil {
 				t.Fatalf("NewTracker returned error: %v", err)
 			}
@@ -215,7 +239,7 @@ func TestTrackerCoverageStates(t *testing.T) {
 }
 
 func TestTrackerRejectsInvalidUsageAndUnknownModels(t *testing.T) {
-	tracker, err := NewTracker(TrackerOptions{})
+	tracker, err := NewTracker(TrackerOptions{Registry: mustTestPricedRegistry(t)})
 	if err != nil {
 		t.Fatalf("NewTracker returned error: %v", err)
 	}
@@ -232,7 +256,7 @@ func TestTrackerRejectsInvalidUsageAndUnknownModels(t *testing.T) {
 }
 
 func TestTrackerTreatsReasoningAsOutputBreakdown(t *testing.T) {
-	tracker, err := NewTracker(TrackerOptions{})
+	tracker, err := NewTracker(TrackerOptions{Registry: mustTestPricedRegistry(t)})
 	if err != nil {
 		t.Fatalf("NewTracker returned error: %v", err)
 	}
@@ -253,7 +277,7 @@ func TestTrackerTreatsReasoningAsOutputBreakdown(t *testing.T) {
 }
 
 func TestTrackerResetClearsRecords(t *testing.T) {
-	tracker, err := NewTracker(TrackerOptions{})
+	tracker, err := NewTracker(TrackerOptions{Registry: mustTestPricedRegistry(t)})
 	if err != nil {
 		t.Fatalf("NewTracker returned error: %v", err)
 	}
@@ -362,9 +386,41 @@ func TestNewCostEstimatorNilRegistry(t *testing.T) {
 
 func newDefaultCostEstimator(t *testing.T) func(string, zeroruntime.Usage, bool) agent.UsageCostEstimate {
 	t.Helper()
-	registry, err := modelregistry.DefaultRegistry()
+	registry, err := testPricedRegistry(t)
 	if err != nil {
 		t.Fatalf("DefaultRegistry returned error: %v", err)
 	}
 	return NewCostEstimator(&registry)
+}
+
+func testPricedRegistry(t *testing.T) (modelregistry.Registry, error) {
+	t.Helper()
+	entries := modelregistry.DefaultModelEntries()
+	prices := map[string]modelregistry.ModelCost{
+		"gpt-4.1": {
+			Currency: "USD", Unit: "per_1m_tokens", InputPerMillion: 2,
+			CachedInputPerMillion: 0.5, OutputPerMillion: 8,
+		},
+		"claude-sonnet-4.5": {
+			Currency: "USD", Unit: "per_1m_tokens", InputPerMillion: 3,
+			CachedInputPerMillion: 0.3, CacheWritePerMillion: 3.75, OutputPerMillion: 15,
+		},
+	}
+	for index := range entries {
+		if cost, ok := prices[entries[index].ID]; ok {
+			cost.Source = "test"
+			cost.SourceLastVerified = "2026-01-01"
+			entries[index].Cost = cost
+		}
+	}
+	return modelregistry.NewRegistry(entries)
+}
+
+func mustTestPricedRegistry(t *testing.T) *modelregistry.Registry {
+	t.Helper()
+	registry, err := testPricedRegistry(t)
+	if err != nil {
+		t.Fatalf("test priced registry: %v", err)
+	}
+	return &registry
 }

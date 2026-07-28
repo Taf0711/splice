@@ -254,7 +254,7 @@ func TestHarnessAccumulatesUsageEventsAndCost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry, err := modelregistry.DefaultRegistry()
+	registry, err := pricedBenchmarkRegistry(t)
 	if err != nil {
 		t.Fatalf("DefaultRegistry returned error: %v", err)
 	}
@@ -349,7 +349,7 @@ func TestHarnessLeavesUsageAndCostZeroWhenStdoutHasNoUsageEvents(t *testing.T) {
 }
 
 func TestAccountAgentRunUsagePricesEachSampleModel(t *testing.T) {
-	registry, err := modelregistry.DefaultRegistry()
+	registry, err := pricedBenchmarkRegistry(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -433,7 +433,7 @@ func TestAccountAgentRunUsagePartialAndCoverageStates(t *testing.T) {
 }
 
 func TestAccountAgentRunUsageAuxiliarySamplesAffectTotalsNotStages(t *testing.T) {
-	registry, err := modelregistry.DefaultRegistry()
+	registry, err := pricedBenchmarkRegistry(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -845,4 +845,23 @@ func TestHarnessRemovesWorkspacesByDefaultAndKeepsWhenRequested(t *testing.T) {
 	if _, err := os.Stat(kept.Tasks[0].WorkspacePath); err != nil {
 		t.Fatalf("keep-workspaces should preserve workspace: %v", err)
 	}
+}
+
+func pricedBenchmarkRegistry(t *testing.T) (modelregistry.Registry, error) {
+	t.Helper()
+	entries := modelregistry.DefaultModelEntries()
+	prices := map[string]modelregistry.ModelCost{
+		"gpt-4.1":      {InputPerMillion: 2, CachedInputPerMillion: 0.5, OutputPerMillion: 8},
+		"gpt-4.1-mini": {InputPerMillion: 0.4, CachedInputPerMillion: 0.1, OutputPerMillion: 1.6},
+	}
+	for index := range entries {
+		if cost, ok := prices[entries[index].ID]; ok {
+			cost.Currency = "USD"
+			cost.Unit = "per_1m_tokens"
+			cost.Source = "test"
+			cost.SourceLastVerified = "2026-01-01"
+			entries[index].Cost = cost
+		}
+	}
+	return modelregistry.NewRegistry(entries)
 }

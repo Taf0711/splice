@@ -1,6 +1,7 @@
 package modelregistry
 
 import (
+	"encoding/json"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -222,8 +223,8 @@ func TestModelsDevCostTiersCalculateCostUsesInheritedCacheRate(t *testing.T) {
 }
 
 func TestApplyModelsDevOverrides(t *testing.T) {
-	// Point the cache at a non-existent file so DefaultModelEntries returns the
-	// pure curated catalog, then apply the sample snapshot explicitly.
+	// Point the cache at a non-existent file so the embedded baseline is used,
+	// then apply the sample snapshot explicitly.
 	t.Setenv("ZERO_MODELS_CACHE_PATH", filepath.Join(t.TempDir(), "absent.json"))
 	resetModelsDevCacheForTest()
 	t.Cleanup(resetModelsDevCacheForTest)
@@ -268,13 +269,16 @@ func TestApplyModelsDevOverrides(t *testing.T) {
 		t.Fatalf("tiered cost boundary mismatch: %+v", geminiPro.Cost.Tiers)
 	}
 
-	// Model absent from the snapshot: untouched.
-	if opus.ContextLimits.ContextWindow != 200_000 || opus.Cost.InputPerMillion != 15 {
+	// Model absent from the sample: the embedded baseline remains in place.
+	if opus.ContextLimits.ContextWindow != 200_000 || opus.Cost.IsUnpriced() || opus.Cost.Source != modelsDevEmbeddedSource {
 		t.Fatalf("opus must be untouched: %+v %+v", opus.ContextLimits, opus.Cost)
 	}
 }
 
 func TestApplyModelsDevOverridesDerivesProviderScopedModel(t *testing.T) {
+	resetModelsDevCacheForTest()
+	t.Cleanup(resetModelsDevCacheForTest)
+	EnableModelsDevOverlay()
 	providers, err := parseModelsDev([]byte(sampleModelsDevProviderScoped))
 	if err != nil {
 		t.Fatal(err)
@@ -303,6 +307,9 @@ func TestApplyModelsDevOverridesDerivesProviderScopedModel(t *testing.T) {
 }
 
 func TestApplyModelsDevOverridesSkipsInvalidDerivedRecords(t *testing.T) {
+	resetModelsDevCacheForTest()
+	t.Cleanup(resetModelsDevCacheForTest)
+	EnableModelsDevOverlay()
 	providers, err := parseModelsDev([]byte(`{
   "openrouter": {
     "models": {
@@ -412,6 +419,9 @@ func TestDefaultRegistryResolvesProviderScopedDerivedModel(t *testing.T) {
 }
 
 func TestApplyModelsDevOverridesUsesRequestedProviderNotFirstMatch(t *testing.T) {
+	resetModelsDevCacheForTest()
+	t.Cleanup(resetModelsDevCacheForTest)
+	EnableModelsDevOverlay()
 	providers, err := parseModelsDev([]byte(sampleModelsDevProviderScoped))
 	if err != nil {
 		t.Fatal(err)
@@ -509,8 +519,7 @@ func TestDefaultModelEntriesOverlayDisabledIsCuratedOnly(t *testing.T) {
 // TestDefaultRegistryRealCachedSnapshot runs the overlay against a real
 // models.dev response (openrouter + openai, captured 2026-07-27) so the
 // malformed records the live API carries stay exercised. The snapshot is
-// copied into a temp dir because the overlay ignores a cache older than
-// modelsDevMaxAge, and a checked-out file keeps its checkout mtime.
+// copied into a temp dir so the test controls its cache mtime.
 func TestDefaultRegistryRealCachedSnapshot(t *testing.T) {
 	snapshot, err := os.ReadFile(filepath.Join("testdata", "modelsdev_snapshot.json"))
 	if err != nil {
@@ -530,8 +539,8 @@ func TestDefaultRegistryRealCachedSnapshot(t *testing.T) {
 		t.Fatalf("DefaultRegistry(openrouter): %v", err)
 	}
 	t.Logf("openrouter skipped models.dev records: %d", openrouter.ModelsDevSkippedRecords)
-	if openrouter.ModelsDevSkippedRecords == 0 {
-		t.Fatal("real openrouter snapshot should contain skipped malformed records")
+	if openrouter.ModelsDevSkippedRecords != 28 {
+		t.Fatalf("real openrouter snapshot skipped records = %d, want 28", openrouter.ModelsDevSkippedRecords)
 	}
 	glm, ok := openrouter.Get("z-ai/glm-5.2")
 	if !ok {
@@ -641,12 +650,12 @@ func TestRefreshModelsDevCacheDisabledByEnv(t *testing.T) {
 	}
 }
 
-func TestCachedModelsDevProvidersIgnoresStaleCache(t *testing.T) {
+func TestCachedModelsDevProvidersUsesEmbeddedForOlderCache(t *testing.T) {
 	cachePath := filepath.Join(t.TempDir(), "modelsdev.json")
 	if err := os.WriteFile(cachePath, []byte(sampleModelsDev), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	stale := time.Now().Add(-modelsDevMaxAge - time.Hour)
+	stale := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
 	if err := os.Chtimes(cachePath, stale, stale); err != nil {
 		t.Fatal(err)
 	}
@@ -655,8 +664,8 @@ func TestCachedModelsDevProvidersIgnoresStaleCache(t *testing.T) {
 	t.Cleanup(resetModelsDevCacheForTest)
 	EnableModelsDevOverlay()
 
-	if providers := cachedModelsDevProviders(); providers != nil {
-		t.Fatal("stale cache must be ignored")
+	if providers := cachedModelsDevProviders(); providers == nil {
+		t.Fatal("older cache must fall back to the embedded snapshot")
 	}
 }
 
@@ -669,10 +678,9 @@ func TestCachedModelsDevProvidersRequiresOptIn(t *testing.T) {
 	resetModelsDevCacheForTest()
 	t.Cleanup(resetModelsDevCacheForTest)
 
-	// Without EnableModelsDevOverlay a fresh, valid cache must still be ignored:
-	// library consumers and hermetic tests get the pure curated catalog.
-	if providers := cachedModelsDevProviders(); providers != nil {
-		t.Fatal("overlay must be opt-in")
+	// Without EnableModelsDevOverlay the embedded baseline still applies.
+	if providers := cachedModelsDevProviders(); providers == nil {
+		t.Fatal("embedded snapshot must apply without disk overlay opt-in")
 	}
 }
 
@@ -695,4 +703,159 @@ func TestDefaultModelEntriesAppliesFreshCache(t *testing.T) {
 		}
 	}
 	t.Fatal("claude-sonnet-4.5 not found")
+}
+
+func TestModelsDevPricingAsOfUsesCacheMtime(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "modelsdev.json")
+	var doc map[string]map[string]any
+	if err := json.Unmarshal([]byte(sampleModelsDev), &doc); err != nil {
+		t.Fatal(err)
+	}
+	var scoped map[string]map[string]any
+	if err := json.Unmarshal([]byte(sampleModelsDevProviderScoped), &scoped); err != nil {
+		t.Fatal(err)
+	}
+	doc["openrouter"] = scoped["openrouter"]
+	data, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cachePath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	known := time.Date(2026, 7, 28, 4, 5, 6, 0, time.UTC)
+	if err := os.Chtimes(cachePath, known, known); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ZERO_MODELS_CACHE_PATH", cachePath)
+	resetModelsDevCacheForTest()
+	t.Cleanup(resetModelsDevCacheForTest)
+	EnableModelsDevOverlay()
+
+	registry, err := DefaultRegistry("openrouter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	curated, ok := registry.Get("claude-sonnet-4.5")
+	if !ok || curated.Cost.SourceLastVerified != "2026-07-28" {
+		t.Fatalf("curated pricing date = %q/%v, want cache mtime date", curated.Cost.SourceLastVerified, ok)
+	}
+	derived, ok := registry.Get("z-ai/glm-5.2")
+	if !ok || derived.Cost.SourceLastVerified != "2026-07-28" {
+		t.Fatalf("derived pricing date = %q/%v, want cache mtime date", derived.Cost.SourceLastVerified, ok)
+	}
+}
+
+func TestDefaultRegistryUsesEmbeddedPricingForDerivedProviderModel(t *testing.T) {
+	t.Setenv("ZERO_MODELS_CACHE_PATH", filepath.Join(t.TempDir(), "missing.json"))
+	resetModelsDevCacheForTest()
+	t.Cleanup(resetModelsDevCacheForTest)
+	EnableModelsDevOverlay()
+
+	registry, err := DefaultRegistry("openrouter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	glm, ok := registry.Get("z-ai/glm-5.2")
+	if !ok {
+		t.Fatal("openrouter registry did not resolve z-ai/glm-5.2 from the embedded snapshot")
+	}
+	if glm.Cost.InputPerMillion != 0.6692 || glm.Cost.OutputPerMillion != 2.1032 || glm.Cost.CachedInputPerMillion != 0.12428 {
+		t.Fatalf("embedded z-ai/glm-5.2 pricing = %+v", glm.Cost)
+	}
+	if glm.Cost.Source != modelsDevEmbeddedSource || glm.Cost.SourceLastVerified != "2026-07-27" {
+		t.Fatalf("embedded z-ai/glm-5.2 source = %q/%q, want embedded 2026-07-27", glm.Cost.Source, glm.Cost.SourceLastVerified)
+	}
+}
+
+func TestDefaultRegistryUsesNewerCachePricingForDerivedProviderModel(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "modelsdev.json")
+	cache := []byte(`{"openrouter":{"models":{"z-ai/glm-5.2":{"limit":{"context":999999,"output":65536},"cost":{"input":9,"output":10,"cache_read":1}}}}}`)
+	if err := os.WriteFile(cachePath, cache, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cacheDate := time.Date(2026, 7, 28, 4, 5, 6, 0, time.UTC)
+	if err := os.Chtimes(cachePath, cacheDate, cacheDate); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ZERO_MODELS_CACHE_PATH", cachePath)
+	resetModelsDevCacheForTest()
+	t.Cleanup(resetModelsDevCacheForTest)
+	EnableModelsDevOverlay()
+
+	registry, err := DefaultRegistry("openrouter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	glm, ok := registry.Get("z-ai/glm-5.2")
+	if !ok {
+		t.Fatal("openrouter registry did not resolve z-ai/glm-5.2 from the newer cache")
+	}
+	if glm.Cost.InputPerMillion != 9 || glm.Cost.OutputPerMillion != 10 || glm.Cost.CachedInputPerMillion != 1 {
+		t.Fatalf("cached z-ai/glm-5.2 pricing = %+v, want cache pricing", glm.Cost)
+	}
+	if glm.Cost.Source != modelsDevCachedSource || glm.Cost.SourceLastVerified != "2026-07-28" {
+		t.Fatalf("cached z-ai/glm-5.2 source = %q/%q, want cached 2026-07-28", glm.Cost.Source, glm.Cost.SourceLastVerified)
+	}
+}
+
+func TestDefaultRegistrySelectsEmbeddedAndNewerDiskPricing(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "modelsdev.json")
+	t.Setenv("ZERO_MODELS_CACHE_PATH", cachePath)
+	t.Cleanup(resetModelsDevCacheForTest)
+
+	check := func(t *testing.T, modTime time.Time, wantInput float64, wantSource string, wantDate string) {
+		t.Helper()
+		if err := os.WriteFile(cachePath, []byte(`{"openai":{"models":{"gpt-5.6-sol":{"limit":{"context":1050000,"output":128000},"cost":{"input":99,"output":100,"cache_read":9,"tiers":[{"input":199,"output":200,"cache_read":19,"tier":{"type":"context","size":272000}}]}}}}}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(cachePath, modTime, modTime); err != nil {
+			t.Fatal(err)
+		}
+		resetModelsDevCacheForTest()
+		EnableModelsDevOverlay()
+		registry, err := DefaultRegistry()
+		if err != nil {
+			t.Fatal(err)
+		}
+		model, ok := registry.Get("gpt-5.6-sol")
+		if !ok {
+			t.Fatal("gpt-5.6-sol is missing")
+		}
+		if model.Cost.InputPerMillion != wantInput || model.Cost.Source != wantSource || model.Cost.SourceLastVerified != wantDate {
+			t.Fatalf("gpt-5.6-sol cost = %+v, want input %v from %s on %s", model.Cost, wantInput, wantSource, wantDate)
+		}
+	}
+
+	t.Run("older cache loses", func(t *testing.T) {
+		check(t, time.Date(2026, 7, 26, 23, 59, 0, 0, time.UTC), 5, modelsDevEmbeddedSource, "2026-07-27")
+	})
+	t.Run("newer cache wins", func(t *testing.T) {
+		check(t, time.Date(2026, 7, 28, 0, 1, 0, 0, time.UTC), 99, modelsDevCachedSource, "2026-07-28")
+	})
+}
+
+func TestDefaultRegistryUsesEmbeddedPricingWithoutDiskCache(t *testing.T) {
+	t.Setenv("ZERO_MODELS_CACHE_PATH", filepath.Join(t.TempDir(), "missing.json"))
+	resetModelsDevCacheForTest()
+	t.Cleanup(resetModelsDevCacheForTest)
+
+	registry, err := DefaultRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gpt, ok := registry.Get("gpt-5.6-sol")
+	if !ok || gpt.Cost.Source != modelsDevEmbeddedSource || gpt.Cost.SourceLastVerified != "2026-07-27" {
+		t.Fatalf("gpt-5.6-sol cost = %+v/%v, want embedded pricing", gpt.Cost, ok)
+	}
+	if len(gpt.Cost.Tiers) != 2 || gpt.Cost.Tiers[0].UpToInputTokens != 272_000 {
+		t.Fatalf("gpt-5.6-sol tiers = %+v, want a 272k boundary and fallback", gpt.Cost.Tiers)
+	}
+	haiku, ok := registry.Get("claude-haiku-3.5")
+	if !ok || !haiku.Cost.IsUnpriced() {
+		t.Fatalf("claude-haiku-3.5 cost = %+v/%v, want unpriced", haiku.Cost, ok)
+	}
+	if err := haiku.Cost.Validate(); err != nil {
+		t.Fatalf("unpriced Claude Haiku cost must validate: %v", err)
+	}
 }

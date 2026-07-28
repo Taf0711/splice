@@ -243,8 +243,11 @@ func (cost ModelCost) Validate() error {
 	if cost.Unit != "per_1m_tokens" {
 		return fmt.Errorf("model cost unit must be per_1m_tokens")
 	}
-	if cost.InputPerMillion < 0 || cost.OutputPerMillion < 0 || cost.CachedInputPerMillion < 0 {
+	if cost.InputPerMillion < 0 || cost.OutputPerMillion < 0 || cost.CachedInputPerMillion < 0 || cost.CacheWritePerMillion < 0 {
 		return fmt.Errorf("model cost values must be non-negative")
+	}
+	if cost.IsUnpriced() {
+		return nil
 	}
 	if len(cost.Tiers) == 0 {
 		if cost.InputPerMillion == 0 && cost.OutputPerMillion == 0 {
@@ -270,6 +273,15 @@ func (cost ModelCost) Validate() error {
 	return nil
 }
 
+// IsUnpriced reports whether a cost has no base rates or pricing tiers.
+func (cost ModelCost) IsUnpriced() bool {
+	return len(cost.Tiers) == 0 &&
+		cost.InputPerMillion == 0 &&
+		cost.OutputPerMillion == 0 &&
+		cost.CachedInputPerMillion == 0 &&
+		cost.CacheWritePerMillion == 0
+}
+
 func validateCostTiers(tiers []ModelCostTier) error {
 	seenFallback := false
 	for index, tier := range tiers {
@@ -281,6 +293,9 @@ func validateCostTiers(tiers []ModelCostTier) error {
 		}
 		if tier.CachedInputPerMillion < 0 {
 			return fmt.Errorf("model cost tier cached input rate must be non-negative")
+		}
+		if tier.CacheWritePerMillion < 0 {
+			return fmt.Errorf("model cost tier cache-write rate must be non-negative")
 		}
 		if tier.UpToInputTokens == 0 {
 			if seenFallback {

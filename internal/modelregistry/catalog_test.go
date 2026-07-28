@@ -31,9 +31,10 @@ func TestDefaultRegistryCoversM1ModelCatalog(t *testing.T) {
 		if model.Cost.Currency != "USD" || model.Cost.Unit != "per_1m_tokens" {
 			t.Fatalf("model %q should expose USD token pricing: %#v", model.ID, model.Cost)
 		}
-		if !strings.HasPrefix(model.Cost.Source, "https://") {
-			t.Fatalf("model %q should expose source URL: %#v", model.ID, model.Cost)
-		}
+	}
+	gpt, err := registry.Require("gpt-5.6-sol")
+	if err != nil || gpt.Cost.IsUnpriced() || gpt.Cost.SourceLastVerified != "2026-07-27" {
+		t.Fatalf("gpt-5.6-sol should use embedded pricing: %v/%+v", err, gpt.Cost)
 	}
 
 	providers := map[ProviderKind]bool{}

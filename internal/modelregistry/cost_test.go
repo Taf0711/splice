@@ -8,7 +8,7 @@ import (
 )
 
 func TestRegistryEstimatesCostFromNormalizedUsage(t *testing.T) {
-	registry, err := DefaultRegistry()
+	registry, err := pricedTestRegistry(t)
 	if err != nil {
 		t.Fatalf("DefaultRegistry returned error: %v", err)
 	}
@@ -32,7 +32,7 @@ func TestRegistryEstimatesCostFromNormalizedUsage(t *testing.T) {
 }
 
 func TestRegistryCostSupportsAliasesAndFullyCachedInput(t *testing.T) {
-	registry, err := DefaultRegistry()
+	registry, err := pricedTestRegistry(t)
 	if err != nil {
 		t.Fatalf("DefaultRegistry returned error: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestRegistryCostSupportsAliasesAndFullyCachedInput(t *testing.T) {
 }
 
 func TestRegistryCostUsesPromptAndCompletionAliases(t *testing.T) {
-	registry, err := DefaultRegistry()
+	registry, err := pricedTestRegistry(t)
 	if err != nil {
 		t.Fatalf("DefaultRegistry returned error: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestRegistryCostUsesPromptAndCompletionAliases(t *testing.T) {
 }
 
 func TestRegistryCostIgnoresCachedInputWithoutCachePricing(t *testing.T) {
-	registry, err := DefaultRegistry()
+	registry, err := pricedTestRegistry(t)
 	if err != nil {
 		t.Fatalf("DefaultRegistry returned error: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestRegistryCostIgnoresCachedInputWithoutCachePricing(t *testing.T) {
 }
 
 func TestRegistryCostTreatsReasoningAsOutputBreakdown(t *testing.T) {
-	registry, err := DefaultRegistry()
+	registry, err := pricedTestRegistry(t)
 	if err != nil {
 		t.Fatalf("DefaultRegistry returned error: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestRegistryCostTreatsReasoningAsOutputBreakdown(t *testing.T) {
 }
 
 func TestRegistryCostSelectsTierForLongContextPricing(t *testing.T) {
-	registry, err := DefaultRegistry()
+	registry, err := pricedTestRegistry(t)
 	if err != nil {
 		t.Fatalf("DefaultRegistry returned error: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestCostFormattingAndValidation(t *testing.T) {
 		t.Fatal("FormatCostUSD should reject negative values")
 	}
 
-	registry, err := DefaultRegistry()
+	registry, err := pricedTestRegistry(t)
 	if err != nil {
 		t.Fatalf("DefaultRegistry returned error: %v", err)
 	}
@@ -197,8 +197,33 @@ func assertClose(t *testing.T, got float64, want float64) {
 	}
 }
 
+func pricedTestRegistry(t *testing.T) (Registry, error) {
+	t.Helper()
+	entries := DefaultModelEntries()
+	prices := map[string]ModelCost{
+		"gpt-4.1":          {InputPerMillion: 2, CachedInputPerMillion: 0.5, OutputPerMillion: 8},
+		"gpt-4.1-mini":     {InputPerMillion: 0.4, CachedInputPerMillion: 0.1, OutputPerMillion: 1.6},
+		"gpt-4-turbo":      {InputPerMillion: 10, OutputPerMillion: 30},
+		"claude-haiku-3.5": {InputPerMillion: 0.8, CachedInputPerMillion: 0.08, OutputPerMillion: 4},
+		"gemini-2.5-pro": {Tiers: []ModelCostTier{
+			{UpToInputTokens: 200_000, InputPerMillion: 1.25, CachedInputPerMillion: 0.125, OutputPerMillion: 10},
+			{InputPerMillion: 2.5, CachedInputPerMillion: 0.25, OutputPerMillion: 15},
+		}},
+	}
+	for index := range entries {
+		if cost, ok := prices[entries[index].ID]; ok {
+			cost.Currency = "USD"
+			cost.Unit = "per_1m_tokens"
+			cost.Source = "test"
+			cost.SourceLastVerified = "2026-01-01"
+			entries[index].Cost = cost
+		}
+	}
+	return NewRegistry(entries)
+}
+
 func TestCalculateCostRejectsAllMalformedSubsets(t *testing.T) {
-	registry, err := DefaultRegistry()
+	registry, err := pricedTestRegistry(t)
 	if err != nil {
 		t.Fatalf("DefaultRegistry returned error: %v", err)
 	}
@@ -229,7 +254,7 @@ func TestCalculateCostRejectsAllMalformedSubsets(t *testing.T) {
 }
 
 func TestCalculateCostPricedZeroForKnownModelWithZeroUsage(t *testing.T) {
-	registry, err := DefaultRegistry()
+	registry, err := pricedTestRegistry(t)
 	if err != nil {
 		t.Fatalf("DefaultRegistry returned error: %v", err)
 	}

@@ -209,6 +209,34 @@ func TestModelCostRequiresCompleteBasePricing(t *testing.T) {
 	}
 }
 
+func TestModelCostAcceptsWhollyUnpriced(t *testing.T) {
+	model := validModelEntry()
+	model.Cost = ModelCost{Currency: "USD", Unit: "per_1m_tokens"}
+	if err := model.Validate(); err != nil {
+		t.Fatalf("unpriced model should validate: %v", err)
+	}
+}
+
+func TestModelCostRejectsPricedWithoutSource(t *testing.T) {
+	model := validModelEntry()
+	model.Cost.Source = ""
+	if err := model.Validate(); err == nil || !strings.Contains(err.Error(), "source is required") {
+		t.Fatalf("priced model without source error = %v", err)
+	}
+}
+
+func TestValidateCostTiersChecksCacheWriteRate(t *testing.T) {
+	tier := ModelCostTier{InputPerMillion: 1, OutputPerMillion: 2, CacheWritePerMillion: -0.1}
+	if err := validateCostTiers([]ModelCostTier{tier}); err == nil || !strings.Contains(err.Error(), "cache-write") {
+		t.Fatalf("negative tier cache-write rate error = %v, want a validation error", err)
+	}
+
+	tier.CacheWritePerMillion = 0
+	if err := validateCostTiers([]ModelCostTier{tier}); err != nil {
+		t.Fatalf("zero tier cache-write rate must validate: %v", err)
+	}
+}
+
 func TestModelRegistryResolvesStablePatterns(t *testing.T) {
 	registry, err := NewRegistry([]ModelEntry{validModelEntry()})
 	if err != nil {

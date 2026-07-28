@@ -1,6 +1,8 @@
 package modelregistry
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,31 +15,39 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	_ "embed"
 )
 
-// Live models.dev overlay for the curated catalog. The hand-maintained
-// DefaultModelEntries list is the source of truth for identity: ids, aliases,
-// match patterns, deprecations, escalation targets. Its VOLATILE facts
-// (context window, max output tokens, per-million pricing) go stale between
-// releases. When a cached snapshot of https://models.dev/api.json is present,
-// those fields are refreshed from it at registry construction; everything else
-// stays curated. The overlay adds derived entries only with an explicit
-// models.dev provider key and never touches the network on the registry hot
-// path. Fetching happens only in the explicit background refresh, cached to
-// disk with a TTL.
+// The embedded models.dev snapshot supplies volatile facts for the curated
+// catalog. A newer disk snapshot can replace that baseline when the process
+// opts into the disk overlay. Identity fields remain curated. Derived entries
+// require the overlay, an explicit provider profile, and a selected snapshot.
+// Registry creation never touches the network. Fetching happens only in the
+// background refresh.
 
 const (
 	modelsDevDefaultURL = "https://models.dev/api.json"
 	// modelsDevRefreshAfter is how old the cache may get before a background
 	// refresh re-fetches it.
 	modelsDevRefreshAfter = 24 * time.Hour
-	// modelsDevMaxAge is the oldest cache still applied as an overlay. Beyond
-	// this the curated catalog (updated with the binary) is likely fresher than
-	// the snapshot, so a stale file is ignored rather than trusted.
-	modelsDevMaxAge      = 7 * 24 * time.Hour
-	modelsDevFetchLimit  = 32 << 20 // 32MiB guard on the response body
-	modelsDevFetchWindow = 15 * time.Second
+	modelsDevFetchLimit   = 32 << 20 // 32MiB guard on the response body
+	modelsDevFetchWindow  = 15 * time.Second
 )
+
+const (
+	modelsDevEmbeddedSource = "models.dev/api.json (embedded snapshot)"
+	modelsDevCachedSource   = "models.dev/api.json (cached)"
+)
+
+// The embedded snapshot supplies the baseline prices in every process.
+// Keep the date beside the compressed asset so the source date stays explicit.
+//
+//go:embed modelsdev_snapshot.json.gz
+var modelsDevEmbeddedGZIP []byte
+
+//go:embed modelsdev_snapshot_date.txt
+var modelsDevEmbeddedDate []byte
 
 // modelsDevModel is the subset of a models.dev model record the overlay uses.
 type modelsDevModel struct {
@@ -147,7 +157,9 @@ func modelsDevSlugs(kind ProviderKind, providerKey ...string) []string {
 	case ProviderAnthropic:
 		return []string{"anthropic"}
 	case ProviderOpenAI:
-		return []string{"openai"}
+		// A few curated OpenAI-compatible entries use slash-qualified
+		// OpenRouter ids. First-party records remain preferred.
+		return []string{"openai", "openrouter"}
 	case ProviderGoogle:
 		return []string{"google", "google-vertex"}
 	case ProviderOpenAICompatible:
@@ -203,8 +215,22 @@ func applyModelsDevOverrides(entries []ModelEntry, providers map[string]map[stri
 // live pricing does not misprice curated tier boundaries. Without provider
 // context, no derived entries are added because prices can differ by provider.
 func applyModelsDevOverridesWithStats(entries []ModelEntry, providers map[string]map[string]modelsDevModel, providerProfile ...string) ([]ModelEntry, int) {
+	// In-memory callers do not have a cache file. Use the call time for test and
+	// helper compatibility. The registry path passes the cache mtime directly.
+	return applyModelsDevOverridesWithSource(entries, providers, modelsDevCachedSource, time.Now().UTC(), providerProfile...)
+}
+
+func applyModelsDevOverridesWithStatsAt(entries []ModelEntry, providers map[string]map[string]modelsDevModel, cacheModTime time.Time, providerProfile ...string) ([]ModelEntry, int) {
+	return applyModelsDevOverridesWithSource(entries, providers, modelsDevCachedSource, cacheModTime, providerProfile...)
+}
+
+func applyModelsDevOverridesWithSource(entries []ModelEntry, providers map[string]map[string]modelsDevModel, source string, sourceModTime time.Time, providerProfile ...string) ([]ModelEntry, int) {
 	if len(providers) == 0 {
 		return entries, 0
+	}
+	verifiedDate := modelsDevCacheDate(sourceModTime)
+	if source == modelsDevEmbeddedSource {
+		verifiedDate = strings.TrimSpace(string(modelsDevEmbeddedDate))
 	}
 	for i := range entries {
 		entry := &entries[i]
@@ -222,11 +248,13 @@ func applyModelsDevOverridesWithStats(entries []ModelEntry, providers map[string
 		if !found {
 			continue
 		}
-		if record.Limit.Context > 0 {
-			entry.ContextLimits.ContextWindow = record.Limit.Context
-		}
-		if record.Limit.Output > 0 {
-			entry.ContextLimits.MaxOutputTokens = record.Limit.Output
+		if source != modelsDevEmbeddedSource {
+			if record.Limit.Context > 0 {
+				entry.ContextLimits.ContextWindow = record.Limit.Context
+			}
+			if record.Limit.Output > 0 {
+				entry.ContextLimits.MaxOutputTokens = record.Limit.Output
+			}
 		}
 		// Base rates and tiers must come from the same record. A live base rate
 		// beside a curated boundary misprices every step.
@@ -240,11 +268,17 @@ func applyModelsDevOverridesWithStats(entries []ModelEntry, providers map[string
 				entry.Cost.CacheWritePerMillion = record.Cost.CacheWrite
 			}
 			entry.Cost.Tiers = modelsDevCostTiers(record)
-			entry.Cost.Source = "models.dev/api.json (cached)"
+			entry.Cost.Source = source
+			entry.Cost.SourceLastVerified = verifiedDate
 		}
 	}
 
 	if len(providerProfile) == 0 {
+		return entries, 0
+	}
+	// Provider-scoped derived entries require explicit overlay opt-in. The
+	// selected source can be either the embedded snapshot or a newer disk cache.
+	if !modelsDevEnabled.Load() {
 		return entries, 0
 	}
 	providerKey, ok := modelsDevProviderKey(providerProfile[0], providers)
@@ -276,6 +310,10 @@ func applyModelsDevOverridesWithStats(entries []ModelEntry, providers map[string
 		if _, exists := curatedModels[strings.ToLower(modelID)]; exists {
 			continue
 		}
+		if record.Cost.Input <= 0 || record.Cost.Output <= 0 {
+			skipped++
+			continue
+		}
 		primaryProvider, apiProviders := modelsDevEntryProviders(providerKey)
 		candidate := ModelEntry{
 			ID:            modelID,
@@ -293,8 +331,8 @@ func applyModelsDevOverridesWithStats(entries []ModelEntry, providers map[string
 				CachedInputPerMillion: record.Cost.CacheRead,
 				CacheWritePerMillion:  record.Cost.CacheWrite,
 				Tiers:                 modelsDevCostTiers(record),
-				Source:                "models.dev/api.json (cached)",
-				SourceLastVerified:    sourceLastVerified,
+				Source:                source,
+				SourceLastVerified:    verifiedDate,
 			},
 			Status:            ModelStatusActive,
 			Aliases:           []string{modelID},
@@ -316,6 +354,13 @@ func applyModelsDevOverridesWithStats(entries []ModelEntry, providers map[string
 	return entries, skipped
 }
 
+func modelsDevCacheDate(modTime time.Time) string {
+	if modTime.IsZero() {
+		return ""
+	}
+	return modTime.UTC().Format("2006-01-02")
+}
+
 // modelsDevCachePath returns the on-disk cache location. ZERO_MODELS_CACHE_PATH
 // overrides it (used by tests and unusual setups).
 func modelsDevCachePath() (string, error) {
@@ -330,56 +375,124 @@ func modelsDevCachePath() (string, error) {
 }
 
 var (
-	modelsDevOnce    sync.Once
-	modelsDevCached  map[string]map[string]modelsDevModel
-	modelsDevEnabled atomic.Bool
+	modelsDevEmbeddedOnce       sync.Once
+	modelsDevEmbeddedProviders  map[string]map[string]modelsDevModel
+	modelsDevEmbeddedCapture    time.Time
+	modelsDevEmbeddedParseError error
+
+	modelsDevOnce     sync.Once
+	modelsDevSelected modelsDevSource
+	modelsDevEnabled  atomic.Bool
 )
 
-// EnableModelsDevOverlay opts the process into applying the cached models.dev
-// snapshot on top of the curated catalog. The CLI entrypoint calls it; library
-// consumers and tests that never do get the curated catalog byte-identical to
-// before, so hermetic tests can't be perturbed by a cache file on the machine.
-// ZERO_DISABLE_MODELS_FETCH disables both the overlay and the fetch.
+type modelsDevSource struct {
+	providers map[string]map[string]modelsDevModel
+	modTime   time.Time
+	source    string
+}
+
+// EnableModelsDevOverlay opts the process into provider-scoped derived entries
+// and applying a newer disk cache. The embedded snapshot remains the baseline
+// with or without this setting.
+// ZERO_DISABLE_MODELS_FETCH disables only the disk cache and network fetch.
 func EnableModelsDevOverlay() {
 	modelsDevEnabled.Store(true)
 }
 
-// cachedModelsDevProviders loads the cached snapshot once per process. Not
-// enabled, missing, stale (> modelsDevMaxAge), or malformed all yield nil and
-// the curated catalog is used untouched. Read once deliberately:
-// DefaultRegistry is called on hot paths (pickers, cost views) and must not
-// re-stat the file every time; a background refresh benefits the NEXT process.
-func cachedModelsDevProviders() map[string]map[string]modelsDevModel {
-	if !modelsDevEnabled.Load() || strings.TrimSpace(os.Getenv("ZERO_DISABLE_MODELS_FETCH")) != "" {
-		return nil
-	}
-	modelsDevOnce.Do(func() {
-		path, err := modelsDevCachePath()
+func embeddedModelsDevSnapshot() modelsDevSource {
+	modelsDevEmbeddedOnce.Do(func() {
+		date := strings.TrimSpace(string(modelsDevEmbeddedDate))
+		captureDate, err := time.Parse("2006-01-02", date)
 		if err != nil {
+			modelsDevEmbeddedParseError = fmt.Errorf("modelregistry: invalid embedded models.dev capture date %q: %w", date, err)
 			return
 		}
-		info, err := os.Stat(path)
-		if err != nil || time.Since(info.ModTime()) > modelsDevMaxAge {
+		reader, err := gzip.NewReader(bytes.NewReader(modelsDevEmbeddedGZIP))
+		if err != nil {
+			modelsDevEmbeddedParseError = fmt.Errorf("modelregistry: open embedded models.dev snapshot: %w", err)
 			return
 		}
-		data, err := os.ReadFile(path)
+		data, err := io.ReadAll(io.LimitReader(reader, modelsDevFetchLimit))
+		closeErr := reader.Close()
 		if err != nil {
+			modelsDevEmbeddedParseError = fmt.Errorf("modelregistry: read embedded models.dev snapshot: %w", err)
+			return
+		}
+		if closeErr != nil {
+			modelsDevEmbeddedParseError = fmt.Errorf("modelregistry: close embedded models.dev snapshot: %w", closeErr)
 			return
 		}
 		providers, err := parseModelsDev(data)
 		if err != nil {
+			modelsDevEmbeddedParseError = err
 			return
 		}
-		modelsDevCached = providers
+		modelsDevEmbeddedProviders = providers
+		modelsDevEmbeddedCapture = captureDate.UTC()
 	})
-	return modelsDevCached
+	return modelsDevSource{
+		providers: modelsDevEmbeddedProviders,
+		modTime:   modelsDevEmbeddedCapture,
+		source:    modelsDevEmbeddedSource,
+	}
+}
+
+// cachedModelsDevProviders loads the selected snapshot once per process.
+// DefaultRegistry is called on hot paths, so it does not re-stat the cache.
+func cachedModelsDevProviders() map[string]map[string]modelsDevModel {
+	return cachedModelsDevSnapshotInfo().providers
+}
+
+func cachedModelsDevSnapshot() (map[string]map[string]modelsDevModel, time.Time) {
+	snapshot := cachedModelsDevSnapshotInfo()
+	return snapshot.providers, snapshot.modTime
+}
+
+func cachedModelsDevSnapshotInfo() modelsDevSource {
+	modelsDevOnce.Do(func() {
+		selected := embeddedModelsDevSnapshot()
+		if modelsDevEmbeddedParseError != nil {
+			modelsDevSelected = selected
+			return
+		}
+		if !modelsDevEnabled.Load() || strings.TrimSpace(os.Getenv("ZERO_DISABLE_MODELS_FETCH")) != "" {
+			modelsDevSelected = selected
+			return
+		}
+		path, err := modelsDevCachePath()
+		if err != nil {
+			modelsDevSelected = selected
+			return
+		}
+		info, err := os.Stat(path)
+		if err != nil || !info.ModTime().After(selected.modTime) {
+			modelsDevSelected = selected
+			return
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			modelsDevSelected = selected
+			return
+		}
+		providers, err := parseModelsDev(data)
+		if err != nil {
+			modelsDevSelected = selected
+			return
+		}
+		modelsDevSelected = modelsDevSource{
+			providers: providers,
+			modTime:   info.ModTime(),
+			source:    modelsDevCachedSource,
+		}
+	})
+	return modelsDevSelected
 }
 
 // resetModelsDevCacheForTest clears the process-level cache memoization and
 // disables the overlay.
 func resetModelsDevCacheForTest() {
 	modelsDevOnce = sync.Once{}
-	modelsDevCached = nil
+	modelsDevSelected = modelsDevSource{}
 	modelsDevEnabled.Store(false)
 }
 

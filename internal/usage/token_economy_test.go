@@ -15,7 +15,7 @@ import (
 // cache/reasoning breakdown was persisted, BuildReport billed all input at the
 // full rate and dropped reasoning, over-pricing the session.
 func TestEventUsageRoundTripPreservesCacheAndReasoningCost(t *testing.T) {
-	registry, err := modelregistry.DefaultRegistry()
+	registry, err := testPricedRegistry(t)
 	if err != nil {
 		t.Fatalf("DefaultRegistry: %v", err)
 	}
