@@ -1,0 +1,96 @@
+name: Refresh models.dev snapshot
+
+on:
+  schedule:
+    - cron: "0 0 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Pin to dev. The snapshot and its embed directive live on dev.
+      # Development happens on dev. Main receives this change through the normal release path.
+      # Revisit this pin if the branching model changes.
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download and validate models.dev data
+        shell: bash
+        run: |
+          set -euo pipefail
+          workdir="$(mktemp -d)"
+          trap 'rm -rf "$workdir"' EXIT
+          curl --fail --silent --show-error --location --retry 3 \
+            https://models.dev/api.json -o "$workdir/modelsdev.json"
+          python3 - "$workdir/modelsdev.json" <<'PY'
+          import json
+          import os
+          import sys
+
+          path = sys.argv[1]
+          size = os.path.getsize(path)
+          if size < 1_000_000:
+              raise SystemExit(f"models.dev response is too small: {size} bytes")
+          with open(path, encoding="utf-8") as source:
+              document = json.load(source)
+          if not isinstance(document, dict) or len(document) <= 100:
+              count = len(document) if isinstance(document, dict) else "non-object"
+              raise SystemExit(f"models.dev response has too few providers: {count}")
+          print(f"validated {len(document)} providers and {size} bytes")
+          PY
+
+          # Only these two files are refreshed. Do not use testdata/modelsdev_snapshot.json.
+          snapshot="internal/modelregistry/modelsdev_snapshot.json.gz"
+          capture_date="$(date -u +%F)"
+          if [ -f "$snapshot" ] && gzip -dc "$snapshot" | cmp -s "$workdir/modelsdev.json" -; then
+            echo "models.dev content is unchanged"
+            exit 0
+          fi
+          gzip -n -c "$workdir/modelsdev.json" > "$workdir/modelsdev_snapshot.json.gz"
+          printf '%s\n' "$capture_date" > "$workdir/modelsdev_snapshot_date.txt"
+          mv "$workdir/modelsdev_snapshot.json.gz" "$snapshot"
+          mv "$workdir/modelsdev_snapshot_date.txt" internal/modelregistry/modelsdev_snapshot_date.txt
+
+      - name: Test the refreshed snapshot
+        run: go test ./internal/modelregistry/ ./internal/splice/ ./internal/usage/
+        env:
+          ZERO_DISABLE_MODELS_FETCH: "1"
+
+      - name: Open pull request when prices changed
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- internal/modelregistry/modelsdev_snapshot.json.gz internal/modelregistry/modelsdev_snapshot_date.txt; then
+            echo "snapshot files did not change"
+            exit 0
+          fi
+          capture_date="$(cat internal/modelregistry/modelsdev_snapshot_date.txt)"
+          branch="automation/modelsdev-snapshot-${capture_date}-${GITHUB_RUN_ID}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch --create "$branch"
+          git add internal/modelregistry/modelsdev_snapshot.json.gz internal/modelregistry/modelsdev_snapshot_date.txt
+          git commit -m "chore: refresh models.dev snapshot"
+          git push --set-upstream origin "$branch"
+          gh pr create \
+            --base dev \
+            --head "$branch" \
+            --title "Refresh models.dev snapshot (${capture_date})" \
+            --body "Captured models.dev data on ${capture_date} UTC. Prices changed in the embedded snapshot."

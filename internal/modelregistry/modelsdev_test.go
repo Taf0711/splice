@@ -371,6 +371,7 @@ func TestApplyModelsDevOverridesKeepsMalformedCuratedRecordsStrict(t *testing.T)
 }
 
 func TestDefaultRegistryReportsSkippedModelsDevRecords(t *testing.T) {
+	t.Setenv("ZERO_DISABLE_MODELS_FETCH", "")
 	data := []byte(`{
   "openrouter": {
     "models": {
@@ -612,6 +613,7 @@ func TestRefreshModelsDevCacheFetchesAndCaches(t *testing.T) {
 }
 
 func TestRefreshModelsDevCacheRejectsBadBodyWithoutClobbering(t *testing.T) {
+	t.Setenv("ZERO_DISABLE_MODELS_FETCH", "")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("not json"))
 	}))
@@ -685,6 +687,7 @@ func TestCachedModelsDevProvidersRequiresOptIn(t *testing.T) {
 }
 
 func TestDefaultModelEntriesAppliesFreshCache(t *testing.T) {
+	t.Setenv("ZERO_DISABLE_MODELS_FETCH", "")
 	cachePath := filepath.Join(t.TempDir(), "modelsdev.json")
 	if err := os.WriteFile(cachePath, []byte(sampleModelsDev), 0o644); err != nil {
 		t.Fatal(err)
@@ -706,6 +709,7 @@ func TestDefaultModelEntriesAppliesFreshCache(t *testing.T) {
 }
 
 func TestModelsDevPricingAsOfUsesCacheMtime(t *testing.T) {
+	t.Setenv("ZERO_DISABLE_MODELS_FETCH", "")
 	cachePath := filepath.Join(t.TempDir(), "modelsdev.json")
 	var doc map[string]map[string]any
 	if err := json.Unmarshal([]byte(sampleModelsDev), &doc); err != nil {
@@ -769,6 +773,7 @@ func TestDefaultRegistryUsesEmbeddedPricingForDerivedProviderModel(t *testing.T)
 }
 
 func TestDefaultRegistryUsesNewerCachePricingForDerivedProviderModel(t *testing.T) {
+	t.Setenv("ZERO_DISABLE_MODELS_FETCH", "")
 	cachePath := filepath.Join(t.TempDir(), "modelsdev.json")
 	cache := []byte(`{"openrouter":{"models":{"z-ai/glm-5.2":{"limit":{"context":999999,"output":65536},"cost":{"input":9,"output":10,"cache_read":1}}}}}`)
 	if err := os.WriteFile(cachePath, cache, 0o644); err != nil {
@@ -800,6 +805,7 @@ func TestDefaultRegistryUsesNewerCachePricingForDerivedProviderModel(t *testing.
 }
 
 func TestDefaultRegistrySelectsEmbeddedAndNewerDiskPricing(t *testing.T) {
+	t.Setenv("ZERO_DISABLE_MODELS_FETCH", "")
 	cachePath := filepath.Join(t.TempDir(), "modelsdev.json")
 	t.Setenv("ZERO_MODELS_CACHE_PATH", cachePath)
 	t.Cleanup(resetModelsDevCacheForTest)

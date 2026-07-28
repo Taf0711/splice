@@ -41,6 +41,9 @@ jobs:
 
       - name: Test
         run: go test -race ./...
+        # Tests must not depend on models.dev. A mid-run fetch previously raced a pricing assertion.
+        env:
+          ZERO_DISABLE_MODELS_FETCH: "1"
 
       - name: Build
         run: go build ./cmd/splice
