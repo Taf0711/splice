@@ -54,6 +54,9 @@ func TestCompactionConfigDefaults(t *testing.T) {
 	if !cfg.Compaction.EnabledOrDefault() {
 		t.Fatalf("expected compaction enabled by default")
 	}
+	if !cfg.Compaction.StayInCheapestPricingTierOrDefault() {
+		t.Fatalf("expected cheapest pricing tier cap enabled by default")
+	}
 	if cfg.Compaction.ReserveTokens != 0 {
 		t.Fatalf("ReserveTokens = %d, want 0", cfg.Compaction.ReserveTokens)
 	}
@@ -75,6 +78,19 @@ func TestCompactionConfigExplicit(t *testing.T) {
 	}
 	if cfg.Compaction.KeepRecentTokens != 2000 {
 		t.Fatalf("KeepRecentTokens = %d, want 2000", cfg.Compaction.KeepRecentTokens)
+	}
+
+	for name, value := range map[string]bool{"true": true, "false": false} {
+		t.Run(name, func(t *testing.T) {
+			var explicit FileConfig
+			payload := `{"compaction":{"stayInCheapestPricingTier":` + name + `}}`
+			if err := json.Unmarshal([]byte(payload), &explicit); err != nil {
+				t.Fatalf("Unmarshal() error = %v", err)
+			}
+			if got := explicit.Compaction.StayInCheapestPricingTierOrDefault(); got != value {
+				t.Fatalf("StayInCheapestPricingTierOrDefault() = %v, want %v", got, value)
+			}
+		})
 	}
 }
 

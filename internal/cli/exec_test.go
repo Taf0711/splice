@@ -54,6 +54,55 @@ func TestPipelineNeverReadsContextWindow(t *testing.T) {
 	}
 }
 
+func TestResolveAgentContextWindowCheapestPricingTier(t *testing.T) {
+	entry := modelregistry.ModelEntry{
+		ID:          "gpt-5.5-like",
+		DisplayName: "GPT-5.5 like",
+		APIModel:    "gpt-5.5-like",
+		Provider:    modelregistry.ProviderOpenAI,
+		ContextLimits: modelregistry.ContextLimits{
+			ContextWindow:   1_050_000,
+			MaxOutputTokens: 128_000,
+		},
+		Capabilities: modelregistry.ModelCapabilities{modelregistry.ModelCapabilityChat},
+		Cost: modelregistry.ModelCost{
+			InputPerMillion:  5,
+			OutputPerMillion: 30,
+			Tiers: []modelregistry.ModelCostTier{
+				{UpToInputTokens: 272_000, InputPerMillion: 5, OutputPerMillion: 30},
+				{InputPerMillion: 10, OutputPerMillion: 45},
+			},
+			Currency:           "USD",
+			Unit:               "per_1m_tokens",
+			Source:             "test",
+			SourceLastVerified: "2026-01-01",
+		},
+		Status:  modelregistry.ModelStatusActive,
+		Aliases: []string{"gpt-5.5-like"},
+	}
+	registry, err := modelregistry.NewRegistry([]modelregistry.ModelEntry{entry})
+	if err != nil {
+		t.Fatalf("NewRegistry() error = %v", err)
+	}
+	profile := config.ProviderProfile{Model: entry.ID}
+
+	if got := resolveAgentContextWindow(context.Background(), registry, profile, config.CompactionConfig{}); got != 272_000 {
+		t.Fatalf("default context window = %d, want 272000", got)
+	}
+	if got := resolveAgentContextWindow(context.Background(), registry, profile, config.CompactionConfig{StayInCheapestPricingTier: ptrBool(false)}); got != 1_050_000 {
+		t.Fatalf("disabled cap context window = %d, want 1050000", got)
+	}
+
+	entry.Cost.Tiers = nil
+	registry, err = modelregistry.NewRegistry([]modelregistry.ModelEntry{entry})
+	if err != nil {
+		t.Fatalf("NewRegistry() without tiers error = %v", err)
+	}
+	if got := resolveAgentContextWindow(context.Background(), registry, profile, config.CompactionConfig{}); got != 1_050_000 {
+		t.Fatalf("no-tier context window = %d, want 1050000", got)
+	}
+}
+
 func TestRunExecHelpDocumentsM1Flags(t *testing.T) {
 	for _, args := range [][]string{
 		{"exec", "--help"},

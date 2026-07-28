@@ -124,6 +124,9 @@ type CompactionConfig struct {
 	// pre-existing behavior. An explicit false disables compaction (the TUI
 	// then sets the agent ContextWindow to 0). Tri-state like Recaps.
 	Enabled *bool `json:"enabled,omitempty"`
+	// StayInCheapestPricingTier caps registry-known model windows at the lowest
+	// positive pricing boundary. nil (unset) defaults to ON.
+	StayInCheapestPricingTier *bool `json:"stayInCheapestPricingTier,omitempty"`
 	// ReserveTokens is the response budget reserved below the context window:
 	// compaction fires when estimated tokens exceed ContextWindow - ReserveTokens
 	// (pi-style), instead of the built-in 0.7 ratio. 0 keeps the ratio default.
@@ -137,6 +140,12 @@ type CompactionConfig struct {
 // EnabledOrDefault reports whether compaction is on. Unset defaults to ON.
 func (c CompactionConfig) EnabledOrDefault() bool {
 	return c.Enabled == nil || *c.Enabled
+}
+
+// StayInCheapestPricingTierOrDefault reports whether the compaction budget is
+// capped at the cheapest pricing tier. Unset defaults to ON.
+func (c CompactionConfig) StayInCheapestPricingTierOrDefault() bool {
+	return c.StayInCheapestPricingTier == nil || *c.StayInCheapestPricingTier
 }
 
 // KeyBindingDef defines one key binding string (e.g. "ctrl+o") that the TUI

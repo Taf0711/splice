@@ -51,6 +51,52 @@ func TestModelEntryValidatesPRDShape(t *testing.T) {
 	}
 }
 
+func TestCheapestPricingTierContextWindow(t *testing.T) {
+	tests := []struct {
+		name  string
+		tiers []ModelCostTier
+		want  int
+	}{
+		{
+			name:  "one tier below window",
+			tiers: []ModelCostTier{{UpToInputTokens: 272_000}},
+			want:  272_000,
+		},
+		{
+			name: "unsorted tiers choose lowest positive ceiling",
+			tiers: []ModelCostTier{
+				{UpToInputTokens: 500_000},
+				{UpToInputTokens: 0},
+				{UpToInputTokens: -1},
+				{UpToInputTokens: 200_000},
+			},
+			want: 200_000,
+		},
+		{
+			name: "no tiers",
+			want: 1_050_000,
+		},
+		{
+			name:  "fallback tier only",
+			tiers: []ModelCostTier{{UpToInputTokens: 0}},
+			want:  1_050_000,
+		},
+		{
+			name:  "tier exceeds window",
+			tiers: []ModelCostTier{{UpToInputTokens: 2_000_000}},
+			want:  1_050_000,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := ModelEntry{ContextLimits: ContextLimits{ContextWindow: 1_050_000}, Cost: ModelCost{Tiers: tt.tiers}}
+			if got := CheapestPricingTierContextWindow(model); got != tt.want {
+				t.Fatalf("CheapestPricingTierContextWindow() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestModelEntryRejectsInvalidContextLimits(t *testing.T) {
 	model := validModelEntry()
 	model.ContextLimits.ContextWindow = 1_000

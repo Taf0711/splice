@@ -1336,8 +1336,12 @@ func modelContextWindow(registry modelregistry.Registry, modelID string) int {
 // Discovery runs only on a registry miss (catalogued models pay no latency), is
 // bounded by a short timeout, and degrades to the fallback on any error — so a
 // headless run is never blocked or failed by it.
-func resolveAgentContextWindow(ctx context.Context, registry modelregistry.Registry, profile config.ProviderProfile) int {
-	if window := modelContextWindow(registry, profile.Model); window > 0 {
+func resolveAgentContextWindow(ctx context.Context, registry modelregistry.Registry, profile config.ProviderProfile, compaction config.CompactionConfig) int {
+	if entry, ok := registry.Resolve(profile.Model); ok && entry.ContextLimits.ContextWindow > 0 {
+		window := entry.ContextLimits.ContextWindow
+		if compaction.StayInCheapestPricingTierOrDefault() {
+			window = modelregistry.CheapestPricingTierContextWindow(entry)
+		}
 		return window
 	}
 	if window := discoveredModelContextWindow(ctx, profile); window > 0 {

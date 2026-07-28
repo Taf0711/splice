@@ -110,7 +110,7 @@ func runExecSpecDraft(run execSpecDraftRun) int {
 	defer stopSignals()
 	contextWindow, compactionReserve, compactionKeepRecent := specDraftCompactionOptions(
 		run.resolved.Compaction,
-		resolveAgentContextWindow(runCtx, run.modelRegistry, run.resolved.Provider),
+		resolveAgentContextWindow(runCtx, run.modelRegistry, run.resolved.Provider, run.resolved.Compaction),
 	)
 	result, err := agent.Run(runCtx, run.prompt, run.provider, agent.Options{
 		MaxTurns:                   run.resolved.MaxTurns,

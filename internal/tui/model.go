@@ -4890,7 +4890,11 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		// compaction (proactive + reactive) is enabled for every model, not just
 		// catalogued ones.
 		if m.compaction.EnabledOrDefault() {
-			options.ContextWindow = modelregistry.AgentContextWindow(m.modelContextWindow(m.modelName))
+			resolvedWindow := m.modelContextWindow(m.modelName)
+			if entry, ok := m.modelCatalog.Resolve(m.modelName); ok && m.compaction.StayInCheapestPricingTierOrDefault() {
+				resolvedWindow = modelregistry.CheapestPricingTierContextWindow(entry)
+			}
+			options.ContextWindow = modelregistry.AgentContextWindow(resolvedWindow)
 			options.CompactionReserveTokens = m.compaction.ReserveTokens
 			options.CompactionKeepRecentTokens = m.compaction.KeepRecentTokens
 		} else {

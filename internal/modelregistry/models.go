@@ -116,6 +116,28 @@ type ModelEntry struct {
 	ModelsDevProvider string
 }
 
+// CheapestPricingTierContextWindow returns the largest request window that
+// stays within the cheapest pricing tier when the registry provides one.
+// It leaves the model's true context window unchanged when no lower ceiling
+// exists.
+func CheapestPricingTierContextWindow(model ModelEntry) int {
+	window := model.ContextLimits.ContextWindow
+	lowest := 0
+	for _, tier := range model.Cost.Tiers {
+		ceiling := tier.UpToInputTokens
+		if ceiling <= 0 || ceiling >= window {
+			continue
+		}
+		if lowest == 0 || ceiling < lowest {
+			lowest = ceiling
+		}
+	}
+	if lowest > 0 {
+		return lowest
+	}
+	return window
+}
+
 // DeprecationRule describes how a deprecated model is phased out and what to use
 // instead. FallbackID is required; the date/warning fields are advisory.
 type DeprecationRule struct {

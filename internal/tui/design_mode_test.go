@@ -11,6 +11,7 @@ import (
 
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/config"
+	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/sessions"
 	splicerun "github.com/Taf0711/splice/internal/splice"
 	"github.com/Taf0711/splice/internal/splice/schemas"
@@ -638,6 +639,51 @@ func TestCompactionEnabledConfigPassesReserveAndKeep(t *testing.T) {
 	}
 	if captured.CompactionKeepRecentTokens != 5678 {
 		t.Fatalf("CompactionKeepRecentTokens = %d, want 5678", captured.CompactionKeepRecentTokens)
+	}
+}
+
+func TestCompactionCheapestPricingTierContextWindow(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		stay       *bool
+		withTiers  bool
+		wantWindow int
+	}{
+		{name: "default caps tiered model", wantWindow: 272_000, withTiers: true},
+		{name: "explicit false keeps full window", stay: ptrBool(false), wantWindow: 1_050_000, withTiers: true},
+		{name: "model without tiers keeps full window", wantWindow: 1_050_000},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := testSessionStore(t)
+			provider := &fakeProvider{events: []zeroruntime.StreamEvent{
+				{Type: zeroruntime.StreamEventText, Content: "ack"},
+				{Type: zeroruntime.StreamEventDone},
+			}}
+			m := newDesignModeTestModel(t.TempDir(), provider, store)
+			entry := testModelEntry("gpt-5.5-like", 1_050_000, []modelregistry.ModelCapability{modelregistry.ModelCapabilityChat})
+			if test.withTiers {
+				entry.Cost.Tiers = []modelregistry.ModelCostTier{
+					{UpToInputTokens: 272_000, InputPerMillion: 5, OutputPerMillion: 30},
+					{InputPerMillion: 10, OutputPerMillion: 45},
+				}
+			}
+			m.modelCatalog = mustTestModelRegistry(t, entry)
+			m.modelName = entry.ID
+			m.compaction.StayInCheapestPricingTier = test.stay
+
+			var captured agent.Options
+			m.captureRunOptions = func(opts agent.Options) { captured = opts }
+			m.input.SetValue("hello")
+			updated, cmd := m.Update(testKey(tea.KeyEnter))
+			next := updated.(model)
+			if cmd == nil {
+				t.Fatal("expected prompt submit to start an agent run")
+			}
+			_, _ = next.Update(execCmd(cmd))
+			if captured.ContextWindow != test.wantWindow {
+				t.Fatalf("ContextWindow = %d, want %d", captured.ContextWindow, test.wantWindow)
+			}
+		})
 	}
 }
 
