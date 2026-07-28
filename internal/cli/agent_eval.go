@@ -13,6 +13,7 @@ import (
 
 	"github.com/Taf0711/splice/internal/agenteval"
 	"github.com/Taf0711/splice/internal/modelregistry"
+	"github.com/Taf0711/splice/internal/usage"
 )
 
 type agentEvalOptions struct {
@@ -465,7 +466,7 @@ func formatAgentEvalReport(report agentEvalReport) string {
 		lines = append(lines, fmt.Sprintf("tokens: input %d, output %d, cached input %d, cache write %d, reasoning %d", report.InputTokens, report.OutputTokens, report.CachedInputTokens, report.CacheWriteTokens, report.ReasoningTokens))
 	}
 	if report.Benchmark != nil || report.CostCoverage != "" || report.EstimatedCostUSD != nil {
-		lines = append(lines, formatAgentEvalCost(report.EstimatedCostUSD, report.CostCoverage))
+		lines = append(lines, formatAgentEvalCost(report.EstimatedCostUSD, report.CostCoverage, report.UnpricedUsageRecords))
 	}
 	if report.WorkRoot != "" {
 		lines = append(lines, "work-root: "+report.WorkRoot)
@@ -658,7 +659,7 @@ func agentEvalReportFromBenchmark(suite agenteval.Suite, report agenteval.Benchm
 		UnpricedUsageRecords: report.Summary.UnpricedRequestCount,
 		ErrorUsageRecords:    report.Summary.ErrorRequestCount,
 	}
-	if report.Summary.CostCoverage == agenteval.CostCoverageComplete {
+	if report.Summary.CostCoverage == agenteval.CostCoverageComplete || report.Summary.CostCoverage == agenteval.CostCoveragePartial {
 		cost := report.Summary.EstimatedCostUSD
 		converted.EstimatedCostUSD = &cost
 	}
@@ -727,25 +728,31 @@ func appendUniqueModels(existing []string, models []string) []string {
 	return existing
 }
 
-func formatAgentEvalCost(cost *float64, coverage string) string {
-	switch coverage {
-	case agenteval.CostCoverageComplete:
-		if cost != nil {
-			return "estimated cost: " + formatUSD(*cost) + " (coverage complete)"
-		}
+func formatAgentEvalCost(cost *float64, coverage string, unpricedCount int) string {
+	if coverage == agenteval.CostCoverageComplete && cost == nil {
 		return "estimated cost: unavailable (coverage complete but cost is missing)"
-	case agenteval.CostCoveragePartial:
-		return "estimated cost: unavailable (coverage partial)"
-	case agenteval.CostCoverageUnavailable:
-		return "estimated cost: unavailable (coverage unavailable)"
-	case agenteval.CostCoverageNotApplicable:
-		return "estimated cost: n/a (no priced usage)"
-	default:
+	}
+	if coverage == "" {
 		if cost != nil {
 			return "estimated cost: " + formatUSD(*cost)
 		}
 		return "estimated cost: unavailable"
 	}
+	total := 0.0
+	if cost != nil {
+		total = *cost
+	}
+	display := usage.FormatCostDisplay(coverage, total, unpricedCount)
+	costText := display.Cost
+	suffix := "coverage " + coverage
+	if coverage == agenteval.CostCoverageNotApplicable {
+		costText = "n/a"
+		suffix = "no priced usage"
+	}
+	if coverage == agenteval.CostCoveragePartial && display.Unpriced != "" {
+		suffix += ", " + display.Unpriced
+	}
+	return "estimated cost: " + costText + " (" + suffix + ")"
 }
 
 func benchmarkStatus(report agenteval.BenchmarkReport) string {

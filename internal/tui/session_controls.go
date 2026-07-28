@@ -883,7 +883,12 @@ func (m model) usageSummaryText() string {
 	if summary.RecordCount == 1 {
 		requestLabel = "request"
 	}
-	return fmt.Sprintf("%d %s, %d tokens, %s", summary.RecordCount, requestLabel, summary.TotalTokens, usageCoverageLabel(summary.CostCoverage))
+	display := usage.FormatCostDisplay(summary.CostCoverage, summary.TotalCost, summary.UnpricedCount)
+	cost := display.Cost
+	if display.Unpriced != "" {
+		cost += " (" + display.Unpriced + ")"
+	}
+	return fmt.Sprintf("%d %s, %d tokens, %s", summary.RecordCount, requestLabel, summary.TotalTokens, cost)
 }
 
 // cacheEfficiencyText reports the session's prompt-cache hit rate for /context so a

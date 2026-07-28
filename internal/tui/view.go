@@ -351,7 +351,7 @@ func (m model) permissionModeLabel() (string, lipgloss.Style) {
 }
 
 // usageStatusSegment shows the latest provider step's token footprint and the
-// session cost only when the summary has complete pricing coverage.
+// session cost when pricing has complete or partial coverage.
 func (m model) usageStatusSegment() string {
 	if m.usageTracker == nil {
 		return ""
@@ -362,21 +362,13 @@ func (m model) usageStatusSegment() string {
 		if summary.RecordCount == 0 {
 			return ""
 		}
-		if summary.CostCoverage == usage.CostCoverageComplete {
-			return strings.TrimSpace(summary.FormattedTotalCost)
-		}
-		return usageCoverageLabel(summary.CostCoverage)
+		return usage.FormatCostDisplay(summary.CostCoverage, summary.TotalCost, summary.UnpricedCount).Cost
 	}
 	if summary.RecordCount == 0 || summary.CostCoverage == usage.CostCoverageNotApplicable {
 		return humanCount(tokens) + " tok"
 	}
-	if summary.CostCoverage != usage.CostCoverageComplete {
-		return fmt.Sprintf("%s tok · %s", humanCount(tokens), usageCoverageLabel(summary.CostCoverage))
-	}
-	return fmt.Sprintf("%s tok · %s",
-		humanCount(tokens),
-		summary.FormattedTotalCost,
-	)
+	cost := usage.FormatCostDisplay(summary.CostCoverage, summary.TotalCost, summary.UnpricedCount).Cost
+	return fmt.Sprintf("%s tok · %s", humanCount(tokens), cost)
 }
 
 // usageCostSegment returns just the session cost, with the token figure dropped.
@@ -390,23 +382,7 @@ func (m model) usageCostSegment() string {
 	if summary.RecordCount == 0 {
 		return ""
 	}
-	if summary.CostCoverage != usage.CostCoverageComplete {
-		return usageCoverageLabel(summary.CostCoverage)
-	}
-	return strings.TrimSpace(summary.FormattedTotalCost)
-}
-
-func usageCoverageLabel(coverage string) string {
-	switch coverage {
-	case usage.CostCoveragePartial:
-		return "cost partial"
-	case usage.CostCoverageUnavailable:
-		return "cost unavailable"
-	case usage.CostCoverageNotApplicable:
-		return "cost n/a"
-	default:
-		return "cost unavailable"
-	}
+	return usage.FormatCostDisplay(summary.CostCoverage, summary.TotalCost, summary.UnpricedCount).Cost
 }
 
 // contextFillPercent returns the latest request's context-window fill as a percent

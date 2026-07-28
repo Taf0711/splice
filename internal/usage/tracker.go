@@ -318,6 +318,41 @@ func FormatSummary(summary Summary) string {
 	return fmt.Sprintf("%s %s, %s tokens, %s", comma(summary.RecordCount), requestLabel, comma(summary.TotalTokens), summary.FormattedTotalCost)
 }
 
+// CostDisplay contains the cost text and an optional unpriced-record note.
+type CostDisplay struct {
+	Cost     string
+	Unpriced string
+}
+
+// FormatCostDisplay renders a cost and keeps partial and unavailable states clear.
+func FormatCostDisplay(coverage string, total float64, unpricedCount int) CostDisplay {
+	display := CostDisplay{}
+	switch coverage {
+	case CostCoverageComplete:
+		display.Cost = formatCost(total)
+	case CostCoveragePartial:
+		if total > 0 {
+			display.Cost = "~" + formatCost(total)
+			if unpricedCount > 0 {
+				requestLabel := "unpriced requests"
+				if unpricedCount == 1 {
+					requestLabel = "unpriced request"
+				}
+				display.Unpriced = fmt.Sprintf("%d %s", unpricedCount, requestLabel)
+			}
+			break
+		}
+		display.Cost = "cost partial"
+	case CostCoverageUnavailable:
+		display.Cost = "cost unavailable"
+	case CostCoverageNotApplicable:
+		display.Cost = "cost n/a"
+	default:
+		display.Cost = "cost unavailable"
+	}
+	return display
+}
+
 // CacheHitRate is the fraction of input tokens served from the provider's prompt
 // cache. CachedInputTokens is clamped to InputTokens in Normalize, so the result is
 // always in [0,1]; it is 0 when no input has been recorded.

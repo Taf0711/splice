@@ -484,8 +484,8 @@ func TestAgentEvalWrapperContractAndHonestBenchmarkText(t *testing.T) {
 	if !strings.Contains(text, "tokens: input 10, output 20, cached input 3, cache write 4, reasoning 5") {
 		t.Fatalf("token dimensions missing from text:\n%s", text)
 	}
-	if !strings.Contains(text, "estimated cost: unavailable (coverage partial)") || strings.Contains(text, "$9.0000") {
-		t.Fatalf("partial coverage rendered a confident total:\n%s", text)
+	if !strings.Contains(text, "estimated cost: ~$9.0000 (coverage partial, 1 unpriced request)") {
+		t.Fatalf("partial coverage did not show the lower-bound total:\n%s", text)
 	}
 	if converted.Contract != AgentEvalContractVersion || converted.Benchmark.Contract != agenteval.BenchmarkContractVersion {
 		t.Fatalf("contracts = wrapper %q, benchmark %q", converted.Contract, converted.Benchmark.Contract)
@@ -497,6 +497,30 @@ func TestAgentEvalWrapperContractAndHonestBenchmarkText(t *testing.T) {
 	}
 	if !strings.Contains(string(jsonBytes), `"contract":"splice.cli.eval.v1"`) {
 		t.Fatalf("wrapper contract missing from JSON: %s", jsonBytes)
+	}
+}
+
+func TestAgentEvalTextKeepsUnavailableCostExplicit(t *testing.T) {
+	cost := 9.0
+	text := formatAgentEvalReport(agentEvalReport{
+		CostCoverage:         agenteval.CostCoverageUnavailable,
+		EstimatedCostUSD:     &cost,
+		UnpricedUsageRecords: 1,
+	})
+	if !strings.Contains(text, "estimated cost: cost unavailable") || strings.Contains(text, "$0.0000") {
+		t.Fatalf("unavailable coverage rendered a number:\n%s", text)
+	}
+}
+
+func TestAgentEvalTextKeepsZeroPartialCostExplicit(t *testing.T) {
+	zero := 0.0
+	text := formatAgentEvalReport(agentEvalReport{
+		CostCoverage:         agenteval.CostCoveragePartial,
+		EstimatedCostUSD:     &zero,
+		UnpricedUsageRecords: 1,
+	})
+	if !strings.Contains(text, "estimated cost: cost partial") || strings.Contains(text, "~$0.0000") {
+		t.Fatalf("zero partial coverage rendered a tilde figure:\n%s", text)
 	}
 }
 

@@ -912,14 +912,45 @@ func TestUsageStatusShowsCoverageAndPricedZero(t *testing.T) {
 	}
 
 	m, _ = m.recordUsageEvent("unknown-model", zeroruntime.Usage{InputTokens: 10, OutputTokens: 5})
-	if got := m.usageStatusSegment(); !strings.Contains(got, "cost partial") {
+	if got := m.usageStatusSegment(); !strings.Contains(got, "cost partial") || strings.Contains(got, "~$") {
 		t.Fatalf("mixed pricing status = %q, want partial coverage", got)
+	}
+	if got := m.usageCostSegment(); got != "cost partial" {
+		t.Fatalf("mixed pricing cost segment = %q, want cost partial", got)
+	}
+	if got := m.usageSummaryText(); !strings.Contains(got, "cost partial") || strings.Contains(got, "~$") {
+		t.Fatalf("mixed pricing sidebar = %q, want cost partial", got)
+	}
+	partialPositive := newModel(context.Background(), Options{ModelName: "gpt-4.1"})
+	partialCost := 0.42
+	partialPositive, _ = partialPositive.recordUsageEvent("gpt-4.1", zeroruntime.Usage{InputTokens: 10, OutputTokens: 5}, &agent.UsageCostEstimate{
+		CostUSD:       &partialCost,
+		Status:        agent.CostStatusPriced,
+		Provenance:    agent.CostProvenanceRuntimeEstimate,
+		PricingSource: "test",
+		PricingAsOf:   "2026-06-01",
+	})
+	partialPositive, _ = partialPositive.recordUsageEvent("gpt-4.1", zeroruntime.Usage{InputTokens: 10, OutputTokens: 5}, &agent.UsageCostEstimate{
+		Status:         agent.CostStatusUnpriced,
+		UnpricedReason: "test",
+	})
+	if got := partialPositive.usageStatusSegment(); !strings.Contains(got, "~$0.4200") || strings.Contains(got, "unpriced") {
+		t.Fatalf("partial positive status = %q, want lower-bound cost without count", got)
+	}
+	if got := partialPositive.usageSummaryText(); !strings.Contains(got, "~$0.4200 (1 unpriced request)") {
+		t.Fatalf("partial positive sidebar = %q, want unpriced count", got)
 	}
 
 	unpriced := newModel(context.Background(), Options{ModelName: "unknown-model"})
 	unpriced, _ = unpriced.recordUsageEvent("unknown-model", zeroruntime.Usage{InputTokens: 10, OutputTokens: 5})
 	if got := unpriced.usageStatusSegment(); !strings.Contains(got, "cost unavailable") || strings.Contains(got, "$0.0000") {
 		t.Fatalf("unknown pricing status = %q, want unavailable without priced zero", got)
+	}
+	if got := unpriced.usageCostSegment(); !strings.Contains(got, "cost unavailable") || strings.Contains(got, "$0.0000") {
+		t.Fatalf("unknown pricing cost segment = %q, want unavailable without priced zero", got)
+	}
+	if got := unpriced.usageSummaryText(); !strings.Contains(got, "cost unavailable") || strings.Contains(got, "$0.0000") {
+		t.Fatalf("unknown pricing sidebar = %q, want unavailable without priced zero", got)
 	}
 }
 
