@@ -362,13 +362,19 @@ func TestDefaultModelEntriesOverlayDisabledIsCuratedOnly(t *testing.T) {
 	}
 }
 
+// TestDefaultRegistryRealCachedSnapshot runs the overlay against a real
+// models.dev response (openrouter + openai, captured 2026-07-27) so the
+// malformed records the live API carries stay exercised. The snapshot is
+// copied into a temp dir because the overlay ignores a cache older than
+// modelsDevMaxAge, and a checked-out file keeps its checkout mtime.
 func TestDefaultRegistryRealCachedSnapshot(t *testing.T) {
-	cachePath, err := modelsDevCachePath()
+	snapshot, err := os.ReadFile(filepath.Join("testdata", "modelsdev_snapshot.json"))
 	if err != nil {
-		t.Skipf("models.dev cache path unavailable: %v", err)
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(cachePath); err != nil {
-		t.Skipf("models.dev cache is absent: %v", err)
+	cachePath := filepath.Join(t.TempDir(), "modelsdev.json")
+	if err := os.WriteFile(cachePath, snapshot, 0o644); err != nil {
+		t.Fatal(err)
 	}
 	t.Setenv("ZERO_MODELS_CACHE_PATH", cachePath)
 	resetModelsDevCacheForTest()
