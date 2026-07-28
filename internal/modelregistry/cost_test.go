@@ -1,6 +1,7 @@
 package modelregistry
 
 import (
+	"math"
 	"strings"
 	"testing"
 
@@ -154,22 +155,45 @@ func TestRegistryCostSelectsTierForLongContextPricing(t *testing.T) {
 }
 
 func TestCostFormattingAndValidation(t *testing.T) {
-	got, err := FormatCostUSD(0.000123)
-	if err != nil {
-		t.Fatalf("FormatCostUSD small returned error: %v", err)
+	for _, test := range []struct {
+		name string
+		cost float64
+		want string
+	}{
+		{name: "zero", cost: 0, want: "$0.0000"},
+		{name: "micro", cost: 0.000004, want: "$0.000004"},
+		{name: "small", cost: 0.0126, want: "$0.0126"},
+		{name: "fraction", cost: 0.42, want: "$0.4200"},
+		{name: "just below one", cost: 0.999, want: "$0.9990"},
+		{name: "one", cost: 1, want: "$1.00"},
+		{name: "large fraction", cost: 1.2391, want: "$1.24"},
+		{name: "large", cost: 12.3456, want: "$12.35"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := FormatCostUSD(test.cost)
+			if err != nil {
+				t.Fatalf("FormatCostUSD returned error: %v", err)
+			}
+			if got != test.want {
+				t.Fatalf("FormatCostUSD(%v) = %q, want %q", test.cost, got, test.want)
+			}
+		})
 	}
-	if got != "$0.000123" {
-		t.Fatalf("FormatCostUSD small = %q, want $0.000123", got)
-	}
-	got, err = FormatCostUSD(1.23456)
-	if err != nil {
-		t.Fatalf("FormatCostUSD regular returned error: %v", err)
-	}
-	if got != "$1.2346" {
-		t.Fatalf("FormatCostUSD regular = %q, want $1.2346", got)
-	}
-	if _, err := FormatCostUSD(-1); err == nil {
-		t.Fatal("FormatCostUSD should reject negative values")
+
+	for _, test := range []struct {
+		name string
+		cost float64
+	}{
+		{name: "negative", cost: -1},
+		{name: "nan", cost: math.NaN()},
+		{name: "positive infinity", cost: math.Inf(1)},
+		{name: "negative infinity", cost: math.Inf(-1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := FormatCostUSD(test.cost); err == nil {
+				t.Fatal("FormatCostUSD should reject invalid values")
+			}
+		})
 	}
 
 	registry, err := pricedTestRegistry(t)

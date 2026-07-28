@@ -126,7 +126,10 @@ func FormatCostUSD(cost float64) (string, error) {
 	if cost > 0 && cost < 0.01 {
 		return fmt.Sprintf("$%.6f", cost), nil
 	}
-	return fmt.Sprintf("$%.4f", cost), nil
+	if cost < 1 {
+		return fmt.Sprintf("$%.4f", cost), nil
+	}
+	return fmt.Sprintf("$%.2f", cost), nil
 }
 
 func selectCostTier(cost ModelCost, inputTokens int) (*ModelCostTier, error) {

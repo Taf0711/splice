@@ -484,7 +484,7 @@ func TestAgentEvalWrapperContractAndHonestBenchmarkText(t *testing.T) {
 	if !strings.Contains(text, "tokens: input 10, output 20, cached input 3, cache write 4, reasoning 5") {
 		t.Fatalf("token dimensions missing from text:\n%s", text)
 	}
-	if !strings.Contains(text, "estimated cost: ~$9.0000 (coverage partial, 1 unpriced request)") {
+	if !strings.Contains(text, "estimated cost: ~$9.00 (coverage partial, 1 unpriced request)") {
 		t.Fatalf("partial coverage did not show the lower-bound total:\n%s", text)
 	}
 	if converted.Contract != AgentEvalContractVersion || converted.Benchmark.Contract != agenteval.BenchmarkContractVersion {
