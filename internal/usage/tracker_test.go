@@ -264,20 +264,22 @@ func TestTrackerCoverageStates(t *testing.T) {
 	}
 }
 
-func TestTrackerRejectsInvalidUsageAndUnknownModels(t *testing.T) {
+func TestTrackerRecordsUnknownModelsAsUnpriced(t *testing.T) {
 	tracker, err := NewTracker(TrackerOptions{Registry: mustTestPricedRegistry(t)})
 	if err != nil {
 		t.Fatalf("NewTracker returned error: %v", err)
 	}
-	if _, err := tracker.Record(RecordInput{ModelID: "missing", Usage: zeroruntime.Usage{InputTokens: 1}}); err == nil {
-		t.Fatal("expected unknown model error")
+	if record, err := tracker.Record(RecordInput{ModelID: "missing", Usage: zeroruntime.Usage{InputTokens: 1}}); err != nil {
+		t.Fatalf("unknown model returned error: %v", err)
+	} else if record.Cost == nil || record.Cost.CostStatus != CostStatusUnpriced {
+		t.Fatalf("unknown model cost = %#v, want unpriced", record.Cost)
 	}
 	if _, err := tracker.Record(RecordInput{ModelID: "gpt-4.1", Usage: zeroruntime.Usage{InputTokens: -1}}); err == nil {
 		t.Fatal("expected invalid usage error")
 	}
 	summary := tracker.Summary()
-	if summary.ErrorCount != 1 || summary.TotalTokens != 1 || summary.CostCoverage != CostCoverageUnavailable {
-		t.Fatalf("error record summary = %#v", summary)
+	if summary.ErrorCount != 0 || summary.UnpricedCount != 1 || summary.TotalTokens != 1 || summary.CostCoverage != CostCoverageUnavailable {
+		t.Fatalf("unknown model summary = %#v", summary)
 	}
 }
 

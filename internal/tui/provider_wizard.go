@@ -1047,6 +1047,7 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 		m.provider = nextProvider
 	}
 	m.providerProfile = profile
+	m.rebuildModelCatalog()
 	m.providerName = profile.Name
 	m.modelName = profile.Model
 	if modelregistry.ValidReasoningEffort(modelregistry.ReasoningEffort(profile.ReasoningEffort)) {

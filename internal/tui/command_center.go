@@ -451,6 +451,7 @@ func (m model) handleModelCommand(args string) (model, string) {
 	persisted, persistErr := m.persistSelectedModel(nextProfile)
 
 	m.providerProfile = nextProfile
+	m.rebuildModelCatalog()
 	m.provider = nextProvider
 	m.providerName = displayValue(nextProfile.Name, string(metadata.ProviderKind))
 	// Keep sub-agent child processes on the same provider we just switched to.
@@ -534,6 +535,7 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 	}
 	m.provider = next
 	m.providerProfile = target
+	m.rebuildModelCatalog()
 	m.providerName = target.Name
 	m.modelName = target.Model
 	// Keep sub-agent child processes on the same provider we just switched to.

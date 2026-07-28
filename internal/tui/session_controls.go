@@ -162,11 +162,7 @@ func (m model) availableReasoningEfforts() []modelregistry.ReasoningEffort {
 	if strings.TrimSpace(m.modelName) == "" {
 		return nil
 	}
-	registry, err := modelregistry.DefaultRegistry()
-	if err != nil {
-		return nil
-	}
-	return registry.ReasoningEfforts(m.modelName)
+	return m.modelCatalog.ReasoningEfforts(m.modelName)
 }
 
 func (m model) effortDisplay() string {
@@ -180,9 +176,8 @@ func (m model) effortDisplay() string {
 // auto ("") -> first supported -> ... -> last supported -> auto. No-op (model
 // unchanged) when the active model exposes no effort controls, so Ctrl+T stays
 // quiet on non-reasoning models. Called from the Ctrl+T key case — a rare
-// keypress — so the DefaultRegistry() lookup inside availableReasoningEfforts
-// is fine here, but MUST NOT be called from the render path (the registry is
-// rebuilt on every call).
+// keypress. The catalog is built once per provider profile and refreshed when
+// the profile changes.
 // forcedEffortRing is the fallback cycle for models unknown to the catalog
 // that expose no effort list: the three levels every major reasoning API
 // recognizes. Forcing is unverified; the provider normalizes or ignores it.
@@ -201,11 +196,7 @@ func (m model) effortForcingAllowed() bool {
 	if name == "" {
 		return false
 	}
-	registry, err := modelregistry.DefaultRegistry()
-	if err != nil {
-		return false
-	}
-	_, known := registry.Get(name)
+	_, known := m.modelCatalog.Get(name)
 	return !known
 }
 

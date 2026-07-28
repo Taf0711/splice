@@ -1,11 +1,95 @@
 package tui
 
 import (
+	"context"
+	"os"
 	"testing"
 
+	"github.com/Taf0711/splice/internal/config"
 	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/providermodeldiscovery"
+	"github.com/Taf0711/splice/internal/usage"
+	"github.com/Taf0711/splice/internal/zeroruntime"
 )
+
+func TestNewModelCatalogUsesProviderProfileForDerivedModels(t *testing.T) {
+	modelregistry.EnableModelsDevOverlay()
+	m := newModel(context.Background(), Options{
+		Cwd:             t.TempDir(),
+		ModelName:       "z-ai/glm-5.2",
+		ProviderProfile: config.ProviderProfile{Name: "openrouter"},
+	})
+	entry, ok := m.modelCatalog.Resolve("z-ai/glm-5.2")
+	if !ok {
+		t.Fatal("provider-scoped derived model is missing from the TUI catalog")
+	}
+	if entry.Cost.IsUnpriced() {
+		t.Fatalf("derived model has no price: %#v", entry.Cost)
+	}
+}
+
+func TestTUIUsageTrackerPricesDerivedModel(t *testing.T) {
+	modelregistry.EnableModelsDevOverlay()
+	m := newModel(context.Background(), Options{
+		Cwd:             t.TempDir(),
+		ProviderProfile: config.ProviderProfile{Name: "openrouter"},
+	})
+	if _, err := m.usageTracker.Record(usageRecordInput("z-ai/glm-5.2")); err != nil {
+		t.Fatalf("record derived model usage: %v", err)
+	}
+	summary := m.usageTracker.Summary()
+	if summary.CostCoverage != usage.CostCoverageComplete || summary.TotalCost <= 0 {
+		t.Fatalf("derived model usage summary = %#v, want complete non-zero cost", summary)
+	}
+}
+
+func TestProviderProfileRefreshUpdatesCatalogAndUsageTracker(t *testing.T) {
+	modelregistry.EnableModelsDevOverlay()
+	previousProvider, hadProvider := os.LookupEnv("ZERO_PROVIDER")
+	t.Cleanup(func() {
+		if hadProvider {
+			_ = os.Setenv("ZERO_PROVIDER", previousProvider)
+		} else {
+			_ = os.Unsetenv("ZERO_PROVIDER")
+		}
+	})
+	m := newModel(context.Background(), Options{
+		Cwd:             t.TempDir(),
+		Provider:        &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{Name: "openrouter", CatalogID: "openrouter"},
+		SavedProviders: []config.ProviderProfile{
+			{Name: "openrouter", CatalogID: "openrouter", APIKey: "test-key"},
+			{Name: "openai", CatalogID: "openai", APIKey: "test-key"},
+		},
+		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &fakeProvider{}, nil
+		},
+	})
+	if _, err := m.usageTracker.Record(usageRecordInput("z-ai/glm-5.2")); err != nil {
+		t.Fatalf("record initial derived model usage: %v", err)
+	}
+	next, _, _ := m.switchProviderModel("openai", "gpt-5.5")
+	if next.providerProfile.Name != "openai" {
+		t.Fatalf("provider profile = %q, want openai", next.providerProfile.Name)
+	}
+	if _, ok := next.modelCatalog.Resolve("z-ai/glm-5.2"); ok {
+		t.Fatal("openrouter-derived model remained after switching to openai")
+	}
+	record, err := next.usageTracker.Record(usageRecordInput("z-ai/glm-5.2"))
+	if err != nil {
+		t.Fatalf("record unpriced model after provider switch: %v", err)
+	}
+	if record.Cost == nil || record.Cost.CostStatus != usage.CostStatusUnpriced {
+		t.Fatalf("post-switch usage cost = %#v, want unpriced", record.Cost)
+	}
+}
+
+func usageRecordInput(modelID string) usage.RecordInput {
+	return usage.RecordInput{
+		ModelID: modelID,
+		Usage:   zeroruntime.Usage{InputTokens: 100, OutputTokens: 20},
+	}
+}
 
 func TestModelContextWindowUsesCachedCatalog(t *testing.T) {
 	registry := mustTestModelRegistry(t, testModelEntry("custom-long-context", 12345, []modelregistry.ModelCapability{

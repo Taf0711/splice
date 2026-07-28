@@ -763,7 +763,13 @@ func newModel(ctx context.Context, options Options) model {
 		sessionStore = sessions.NewStore(sessions.StoreOptions{})
 	}
 	sandboxStore := options.SandboxStore
-	modelCatalog, err := modelregistry.DefaultRegistry()
+	var modelCatalog modelregistry.Registry
+	var err error
+	if profileName := strings.TrimSpace(options.ProviderProfile.Name); profileName == "" {
+		modelCatalog, err = modelregistry.DefaultRegistry()
+	} else {
+		modelCatalog, err = modelregistry.DefaultRegistry(profileName)
+	}
 	if err != nil {
 		log.Fatalf("model registry: %v", err)
 	}
@@ -899,6 +905,30 @@ func newModel(ctx context.Context, options Options) model {
 	// free of side effects while still making the default phase planning-first.
 	m.designMode = true
 	return m
+}
+
+func (m *model) rebuildModelCatalog() {
+	if m == nil {
+		return
+	}
+	profileName := strings.TrimSpace(m.providerProfile.Name)
+	var (
+		catalog modelregistry.Registry
+		err     error
+	)
+	if profileName == "" {
+		catalog, err = modelregistry.DefaultRegistry()
+	} else {
+		catalog, err = modelregistry.DefaultRegistry(profileName)
+	}
+	if err != nil {
+		log.Printf("model registry refresh for provider %q: %v", profileName, err)
+		return
+	}
+	m.modelCatalog = catalog
+	if m.usageTracker != nil {
+		m.usageTracker.SetRegistry(&m.modelCatalog)
+	}
 }
 
 func (m model) doctorOptions(connectivity bool) doctor.Options {

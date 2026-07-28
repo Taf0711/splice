@@ -182,13 +182,9 @@ func scorePickerItem(item pickerItem, query string) (int, bool) {
 }
 
 // newModelPicker lists active (non-deprecated) models, preselecting the active
-// one. Returns nil when the catalog is unavailable so the caller falls back to
-// the plain status text.
+// one, from the cached session catalog.
 func (m model) newModelPicker() *commandPicker {
-	registry, err := modelregistry.DefaultRegistry()
-	if err != nil {
-		return nil
-	}
+	registry := m.modelCatalog
 	activeModel := strings.TrimSpace(m.modelName)
 	recent := []pickerItem{}
 	if activeModel != "" {

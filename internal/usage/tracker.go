@@ -159,6 +159,14 @@ func NewTracker(options TrackerOptions) (*Tracker, error) {
 	return &Tracker{now: now, registry: *registry, nextSeq: 1}, nil
 }
 
+// SetRegistry updates the catalog used for future usage records.
+func (tracker *Tracker) SetRegistry(registry *modelregistry.Registry) {
+	if tracker == nil || registry == nil {
+		return
+	}
+	tracker.registry = *registry
+}
+
 func (tracker *Tracker) Record(input RecordInput) (Record, error) {
 	normalized, runtimeUsage, err := Normalize(input.Usage)
 	if err != nil {
@@ -196,10 +204,10 @@ func (tracker *Tracker) Record(input RecordInput) (Record, error) {
 
 	model, err := tracker.registry.Require(record.ModelID)
 	if err != nil {
-		record.Cost = errorCost(fmt.Sprintf("price unavailable for model %q: %v", record.ModelID, err))
+		record.Cost = unpricedCost(fmt.Sprintf("price unavailable for model %q: %v", record.ModelID, err))
 		copyCostMetadata(&record, record.Cost)
 		tracker.records = append(tracker.records, record)
-		return record, fmt.Errorf("usage.Record model %q: %w", record.ModelID, err)
+		return record, nil
 	}
 	record.ModelID = model.ID
 	record.Provider = model.Provider

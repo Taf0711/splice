@@ -10,13 +10,8 @@ import (
 )
 
 func (m model) modelListText() string {
-	registry, err := modelregistry.DefaultRegistry()
-	if err != nil {
-		return "Models\nFailed to load model catalog: " + err.Error()
-	}
-
-	activeID := activeModelID(registry, m.modelName)
-	models := registry.List(modelregistry.ListOptions{})
+	activeID := activeModelID(m.modelCatalog, m.modelName)
+	models := m.modelCatalog.List(modelregistry.ListOptions{})
 	sort.SliceStable(models, func(i, j int) bool {
 		if models[i].Provider == models[j].Provider {
 			return models[i].ID < models[j].ID
