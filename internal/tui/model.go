@@ -2255,6 +2255,19 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.runCancel = nil
 		m.activeRunID = 0
 		if msg.err != nil {
+			if msg.plan.Validate() == nil {
+				m.pendingPlan = &msg.plan
+				m.pendingCritique = nil
+				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: formatDesignPlan(msg.plan)})
+				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Plan critique failed: " + msg.err.Error()})
+				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan is ready. Type /approve to execute without a critique."})
+				if msg.store != nil && msg.sessionID != "" {
+					if events, err := msg.store.ReadEvents(msg.sessionID); err == nil {
+						m.sessionEvents = events
+					}
+				}
+				return m, nil
+			}
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Crystallization failed: " + msg.err.Error()})
 			return m, nil
 		}

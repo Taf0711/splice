@@ -227,6 +227,156 @@ func TestCrystallizeResultMsgDisplaysPlan(t *testing.T) {
 	}
 }
 
+func TestCrystallizeResultMsgOutcomes(t *testing.T) {
+	validPlan := schemas.DesignPlan{
+		Epic:         "Build a feature",
+		Requirements: []string{"must work"},
+		InScope:      []string{"backend"},
+		OutOfScope:   []string{"frontend"},
+		SystemDesign: "Use Go.",
+		Tasks:        []schemas.Task{{ID: "t1", Title: "Implement it", Intent: "Write code"}},
+		Source:       "conversation",
+	}
+	validCritique := schemas.PlanCritique{OverallAssessment: "Looks good"}
+
+	tests := []struct {
+		name              string
+		plan              schemas.DesignPlan
+		critique          schemas.PlanCritique
+		err               error
+		initialCritique   *schemas.PlanCritique
+		wantPlan          bool
+		wantCritique      bool
+		wantSessionEvents bool
+		wantTranscript    []string
+		notWantTranscript []string
+	}{
+		{
+			name:              "critic failure keeps valid plan",
+			plan:              validPlan,
+			err:               fmt.Errorf("critic unavailable"),
+			initialCritique:   &schemas.PlanCritique{OverallAssessment: "stale critique"},
+			wantPlan:          true,
+			wantSessionEvents: true,
+			wantTranscript: []string{
+				"Plan critique failed: critic unavailable",
+				"Plan is ready. Type /approve to execute without a critique.",
+				validPlan.Epic,
+			},
+			notWantTranscript: []string{"Crystallization failed:"},
+		},
+		{
+			name:              "crystallize failure rejects empty plan",
+			plan:              schemas.DesignPlan{},
+			err:               fmt.Errorf("crystallizer unavailable"),
+			wantTranscript:    []string{"Crystallization failed: crystallizer unavailable"},
+			notWantTranscript: []string{"Plan is ready."},
+		},
+		{
+			name:              "success stores plan and critique",
+			plan:              validPlan,
+			critique:          validCritique,
+			wantPlan:          true,
+			wantCritique:      true,
+			wantSessionEvents: true,
+			wantTranscript: []string{
+				validPlan.Epic,
+				validCritique.OverallAssessment,
+				"Plan is ready. Type /approve to execute.",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := testSessionStore(t)
+			m := newDesignModeTestModel(t.TempDir(), &fakeProvider{}, store)
+			sess, err := store.Create(sessions.CreateInput{SessionID: "test-session", Cwd: t.TempDir()})
+			if err != nil {
+				t.Fatalf("create session: %v", err)
+			}
+			if _, err := store.AppendEvent(sess.SessionID, sessions.AppendEventInput{Type: sessions.EventDesignModeEntered}); err != nil {
+				t.Fatalf("append session event: %v", err)
+			}
+			m.activeSession = sess
+			m.activeRunID = 42
+			m.pendingCritique = tt.initialCritique
+
+			msg := crystallizeResultMsg{
+				runID:     42,
+				plan:      tt.plan,
+				critique:  tt.critique,
+				err:       tt.err,
+				store:     store,
+				sessionID: sess.SessionID,
+			}
+			updated, _ := m.Update(msg)
+			next := updated.(model)
+
+			if got := next.pendingPlan != nil; got != tt.wantPlan {
+				t.Fatalf("pendingPlan present = %v, want %v", got, tt.wantPlan)
+			}
+			if got := next.pendingCritique != nil; got != tt.wantCritique {
+				t.Fatalf("pendingCritique present = %v, want %v", got, tt.wantCritique)
+			}
+			if got := len(next.sessionEvents) > 0; got != tt.wantSessionEvents {
+				t.Fatalf("sessionEvents present = %v, want %v", got, tt.wantSessionEvents)
+			}
+			for _, want := range tt.wantTranscript {
+				if !transcriptContains(next.transcript, want) {
+					t.Errorf("expected transcript to contain %q, got %#v", want, next.transcript)
+				}
+			}
+			for _, unwanted := range tt.notWantTranscript {
+				if transcriptContains(next.transcript, unwanted) {
+					t.Errorf("expected transcript not to contain %q, got %#v", unwanted, next.transcript)
+				}
+			}
+		})
+	}
+}
+
+// TestApproveAfterCriticFailureFindsPlan pins the reported symptom. A failed
+// advisory critic discarded a plan that was already on disk, so /approve
+// answered "No pending plan". The provider is nil, so the guard chain stops at
+// the provider check. That check proves the pending-plan guard passed.
+func TestApproveAfterCriticFailureFindsPlan(t *testing.T) {
+	store := testSessionStore(t)
+	m := newDesignModeTestModel(t.TempDir(), &fakeProvider{}, store)
+	sess, err := store.Create(sessions.CreateInput{SessionID: "critic-failure", Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	m.activeSession = sess
+	m.activeRunID = 7
+
+	updated, _ := m.Update(crystallizeResultMsg{
+		runID: 7,
+		plan: schemas.DesignPlan{
+			Epic:         "Build a feature",
+			Requirements: []string{"must work"},
+			InScope:      []string{"backend"},
+			OutOfScope:   []string{"frontend"},
+			SystemDesign: "Use Go.",
+			Tasks:        []schemas.Task{{ID: "t1", Title: "Implement it", Intent: "Write code"}},
+			Source:       "conversation",
+		},
+		err:       fmt.Errorf("critic unavailable"),
+		store:     store,
+		sessionID: sess.SessionID,
+	})
+	next := updated.(model)
+	next.provider = nil
+
+	approved, _ := next.handleApproveCommand()
+	if transcriptContains(approved.transcript, "No pending plan") {
+		t.Fatalf("approve rejected a plan that survived a critic failure: %#v", approved.transcript)
+	}
+	if !transcriptContains(approved.transcript, "No provider configured") {
+		t.Fatalf("expected the guard chain to reach the provider check, got %#v", approved.transcript)
+	}
+}
+
 func TestCrystallizeResultMsgMustFixBlocksApprove(t *testing.T) {
 	store := testSessionStore(t)
 	m := newDesignModeTestModel(t.TempDir(), &fakeProvider{}, store)
