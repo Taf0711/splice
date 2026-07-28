@@ -273,6 +273,36 @@ func TestCrystallizeResultMsgOutcomes(t *testing.T) {
 			notWantTranscript: []string{"Plan is ready."},
 		},
 		{
+			name:              "critique persistence failure keeps must-fix critique",
+			plan:              validPlan,
+			critique:          schemas.PlanCritique{OverallAssessment: "Needs work", MustFixBeforeExecution: true},
+			err:               fmt.Errorf("persist critique_recorded: disk full"),
+			wantPlan:          true,
+			wantCritique:      true,
+			wantSessionEvents: true,
+			wantTranscript: []string{
+				validPlan.Epic,
+				"Needs work",
+				"Plan critique not saved: persist critique_recorded: disk full",
+				"Critic flagged must-fix issues. /approve is blocked.",
+			},
+			notWantTranscript: []string{
+				"Plan critique failed:",
+				"without a critique",
+			},
+		},
+		{
+			name:              "clean critique persistence failure keeps critique",
+			plan:              validPlan,
+			critique:          validCritique,
+			err:               fmt.Errorf("persist critique_recorded: disk full"),
+			wantPlan:          true,
+			wantCritique:      true,
+			wantSessionEvents: true,
+			wantTranscript:    []string{validCritique.OverallAssessment, "Plan critique not saved: persist critique_recorded: disk full", "Plan is ready. Type /approve to execute."},
+			notWantTranscript: []string{"without a critique", "Plan critique failed:"},
+		},
+		{
 			name:              "success stores plan and critique",
 			plan:              validPlan,
 			critique:          validCritique,
@@ -374,6 +404,46 @@ func TestApproveAfterCriticFailureFindsPlan(t *testing.T) {
 	}
 	if !transcriptContains(approved.transcript, "No provider configured") {
 		t.Fatalf("expected the guard chain to reach the provider check, got %#v", approved.transcript)
+	}
+}
+
+func TestApproveAfterCritiquePersistenceFailureBlocksMustFixPlan(t *testing.T) {
+	store := testSessionStore(t)
+	m := newDesignModeTestModel(t.TempDir(), &fakeProvider{}, store)
+	sess, err := store.Create(sessions.CreateInput{SessionID: "critique-persist-failure", Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	m.activeSession = sess
+	m.activeRunID = 8
+
+	updated, _ := m.Update(crystallizeResultMsg{
+		runID: 8,
+		plan: schemas.DesignPlan{
+			Epic:         "Build a feature",
+			Requirements: []string{"must work"},
+			InScope:      []string{"backend"},
+			OutOfScope:   []string{"frontend"},
+			SystemDesign: "Use Go.",
+			Tasks:        []schemas.Task{{ID: "t1", Title: "Implement it", Intent: "Write code"}},
+			Source:       "conversation",
+		},
+		critique: schemas.PlanCritique{
+			OverallAssessment:      "Needs work",
+			MustFixBeforeExecution: true,
+		},
+		err:       fmt.Errorf("persist critique_recorded: disk full"),
+		store:     store,
+		sessionID: sess.SessionID,
+	})
+	next := updated.(model)
+
+	approved, cmd := next.handleApproveCommand()
+	if cmd != nil {
+		t.Fatalf("expected approve to be blocked, got cmd %v", cmd)
+	}
+	if !transcriptContains(approved.transcript, "Plan has must-fix issues. Revise and re-run /crystallize.") {
+		t.Fatalf("expected must-fix error, got %#v", approved.transcript)
 	}
 }
 
@@ -643,6 +713,74 @@ func TestReconstructDesignState_ReviewPhase(t *testing.T) {
 	}
 	if m.pendingPlan == nil || m.pendingPlan.Epic != "test epic" {
 		t.Fatalf("pendingPlan not reconstructed: %#v", m.pendingPlan)
+	}
+}
+
+// This test pins resume after plan crystallization when critique recording never occurs.
+func TestReconstructDesignState_CrystallizedPlanWithoutCritique(t *testing.T) {
+	store := testSessionStore(t)
+	sess, err := store.Create(sessions.CreateInput{SessionID: "crystallized-without-critique", Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := store.AppendEvent(sess.SessionID, sessions.AppendEventInput{
+		Type: sessions.EventDesignModeEntered,
+	}); err != nil {
+		t.Fatalf("append design mode event: %v", err)
+	}
+
+	plan := schemas.DesignPlan{
+		Source:       "conversation",
+		Epic:         "resume epic",
+		Requirements: []string{"req"},
+		InScope:      []string{"in"},
+		OutOfScope:   []string{"out"},
+		SystemDesign: "design",
+		Tasks:        []schemas.Task{{ID: "t1", Title: "Task 1", Intent: "do it"}},
+	}
+	planJSON, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatalf("marshal plan: %v", err)
+	}
+	if _, err := store.AppendEvent(sess.SessionID, sessions.AppendEventInput{
+		Type: sessions.EventPlanCrystallized,
+		Payload: splicerun.PlanCrystallizedPayload{
+			PlanID:   "plan-1",
+			Revision: 1,
+			Plan:     planJSON,
+		},
+	}); err != nil {
+		t.Fatalf("append crystallized plan event: %v", err)
+	}
+
+	m := newDesignModeTestModel(t.TempDir(), &fakeProvider{}, store)
+	m.activeSession = sess
+	m.sessionEvents, err = store.ReadEvents(sess.SessionID)
+	if err != nil {
+		t.Fatalf("read session events: %v", err)
+	}
+	m = m.reconstructDesignState()
+
+	if m.pendingPlan == nil || m.pendingPlan.Epic != plan.Epic {
+		t.Fatalf("expected pending plan %q, got %#v", plan.Epic, m.pendingPlan)
+	}
+	if m.pendingCritique != nil {
+		t.Fatalf("expected no pending critique, got %#v", m.pendingCritique)
+	}
+	if !m.designMode {
+		t.Fatal("expected design mode to be enabled after resume")
+	}
+
+	m.provider = nil
+	approved, cmd := m.handleApproveCommand()
+	if cmd != nil {
+		t.Fatalf("expected provider guard to stop approve, got cmd %v", cmd)
+	}
+	if transcriptContains(approved.transcript, "No pending plan") {
+		t.Fatalf("approve rejected the resumed plan: %#v", approved.transcript)
+	}
+	if !transcriptContains(approved.transcript, "No provider configured") {
+		t.Fatalf("expected provider guard after resume, got %#v", approved.transcript)
 	}
 }
 

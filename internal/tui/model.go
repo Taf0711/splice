@@ -2259,8 +2259,20 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pendingPlan = &msg.plan
 				m.pendingCritique = nil
 				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: formatDesignPlan(msg.plan)})
-				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Plan critique failed: " + msg.err.Error()})
-				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan is ready. Type /approve to execute without a critique."})
+				if msg.critique.Validate() == nil {
+					m.pendingCritique = &msg.critique
+					m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: formatPlanCritique(msg.critique)})
+					m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Plan critique not saved: " + msg.err.Error()})
+					if msg.critique.MustFixBeforeExecution {
+						m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Critic flagged must-fix issues. /approve is blocked. Revise and re-run /crystallize."})
+					} else {
+						m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan is ready. Type /approve to execute."})
+					}
+				} else {
+					m.pendingCritique = nil
+					m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Plan critique failed: " + msg.err.Error()})
+					m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan is ready. Type /approve to execute without a critique."})
+				}
 				if msg.store != nil && msg.sessionID != "" {
 					if events, err := msg.store.ReadEvents(msg.sessionID); err == nil {
 						m.sessionEvents = events
