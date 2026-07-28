@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -29,6 +30,133 @@ func TestMouseWheelScrollsChatWithoutRecallingInputHistory(t *testing.T) {
 	}
 	if m.chatScrollOffset != chatWheelScrollLines {
 		t.Fatalf("chatScrollOffset = %d, want %d", m.chatScrollOffset, chatWheelScrollLines)
+	}
+}
+
+func TestMouseWheelKeepsChatLayoutCache(t *testing.T) {
+	m := newModel(context.Background(), Options{AltScreen: true})
+	m.width = 90
+	m.height = 14
+	m.headerPrinted = true
+	for index := 0; index < 80; index++ {
+		m.transcript = appendRow(m.transcript, rowAssistant, "message "+string(rune('A'+index%26)))
+	}
+	if _, ok := m.chatTranscriptViewport(); !ok || !m.chatViewport.valid {
+		t.Fatal("expected a valid chat viewport cache before scrolling")
+	}
+	generation := m.chatLayoutGen
+
+	for _, button := range []tea.MouseButton{tea.MouseWheelUp, tea.MouseWheelDown, tea.MouseWheelUp} {
+		updated, _ := m.Update(testMouseWheel(button, 0, 0))
+		m = updated.(model)
+		if m.chatLayoutGen != generation {
+			t.Fatalf("wheel changed chatLayoutGen from %d to %d", generation, m.chatLayoutGen)
+		}
+		if !m.chatViewport.valid || m.chatViewport.generation != generation {
+			t.Fatalf("wheel invalidated the viewport cache: valid=%v generation=%d want=%d", m.chatViewport.valid, m.chatViewport.generation, generation)
+		}
+	}
+}
+
+func TestMouseWheelChangesRenderedTranscriptOffset(t *testing.T) {
+	m := newModel(context.Background(), Options{AltScreen: true})
+	m.width = 90
+	m.height = 14
+	m.headerPrinted = true
+	for index := 0; index < 80; index++ {
+		m.transcript = appendRow(m.transcript, rowAssistant, fmt.Sprintf("transcript row %02d", index))
+	}
+	before := viewString(m.View())
+
+	updated, _ := m.Update(testMouseWheel(tea.MouseWheelUp, 0, 0))
+	m = updated.(model)
+	after := viewString(m.View())
+	if m.chatScrollOffset == 0 {
+		t.Fatal("wheel-up did not move the chat scroll offset")
+	}
+	if before == after {
+		t.Fatal("wheel-up did not change the rendered transcript")
+	}
+	var newlyVisible string
+	for index := 0; index < 80; index++ {
+		marker := fmt.Sprintf("transcript row %02d", index)
+		if !strings.Contains(before, marker) && strings.Contains(after, marker) {
+			newlyVisible = marker
+			break
+		}
+	}
+	if newlyVisible == "" {
+		t.Fatalf("wheel-up changed the view without revealing an older row:\nbefore=%q\nafter=%q", before, after)
+	}
+}
+
+func TestNonWheelMessagesBumpChatLayoutGeneration(t *testing.T) {
+	tests := []struct {
+		name      string
+		prepare   func(*model) tea.Msg
+		wantFlush bool
+	}{
+		{
+			name: "append transcript row",
+			prepare: func(m *model) tea.Msg {
+				m.activeRunID = 1
+				return agentRowMsg{runID: 1, row: transcriptRow{kind: rowAssistant, text: "new row"}}
+			},
+		},
+		{
+			name: "width resize",
+			prepare: func(m *model) tea.Msg {
+				return tea.WindowSizeMsg{Width: 100, Height: m.height}
+			},
+		},
+		{
+			name: "height-only resize",
+			prepare: func(m *model) tea.Msg {
+				return tea.WindowSizeMsg{Width: m.width, Height: m.height + 4}
+			},
+		},
+		{
+			name: "toggle detailed mode",
+			prepare: func(*model) tea.Msg {
+				return testKeyCtrl('o')
+			},
+		},
+		{
+			name: "flush advances frontier",
+			prepare: func(m *model) tea.Msg {
+				m.transcript = appendRow(m.transcript, rowAssistant, "unflushed row")
+				m.flushed = 0
+				m.flushedAny = false
+				return composerBlinkMsg{}
+			},
+			wantFlush: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			m := newModel(context.Background(), Options{AltScreen: true})
+			m.width = 90
+			m.height = 14
+			m.headerPrinted = true
+			for index := 0; index < 20; index++ {
+				m.transcript = appendRow(m.transcript, rowAssistant, "message "+string(rune('A'+index%26)))
+			}
+			if _, ok := m.chatTranscriptViewport(); !ok {
+				t.Fatal("expected a chat viewport before the message")
+			}
+			generation := m.chatLayoutGen
+			flushed := m.flushed
+
+			updated, _ := m.Update(test.prepare(&m))
+			next := updated.(model)
+			if next.chatLayoutGen != generation+1 {
+				t.Fatalf("chatLayoutGen = %d, want %d", next.chatLayoutGen, generation+1)
+			}
+			if test.wantFlush && next.flushed <= flushed {
+				t.Fatalf("flushed = %d, want it to advance past %d", next.flushed, flushed)
+			}
+		})
 	}
 }
 

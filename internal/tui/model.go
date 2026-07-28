@@ -1102,10 +1102,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return next, cmd
 	}
-	// Any handled message may change transcript geometry, footer height, or
-	// viewport mode. Invalidate the per-frame line-count cache once, after the
-	// message has finished mutating the model.
-	nm.chatLayoutGen++
+	// A wheel tick changes the viewport offset or transient styling only. The
+	// jump-to-bottom hint always occupies one footer row, so geometry is stable.
+	if _, wheel := msg.(tea.MouseWheelMsg); !wheel {
+		// Any other handled message may change transcript geometry, footer height,
+		// or viewport mode. Invalidate the cache after the message mutates the model.
+		nm.chatLayoutGen++
+	}
 	nm = nm.syncChatScroll()
 	nm, mouseCmd := nm.syncMouseCapture()
 	nm, flushCmd := nm.settleTranscript()
