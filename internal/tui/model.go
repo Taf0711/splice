@@ -730,6 +730,7 @@ type tuiAgentRunOptions struct {
 	systemPrompt   string
 	runKind        tuiRunKind
 	priorMessages  []zeroruntime.Message
+	serverTools    []zeroruntime.ServerTool
 }
 
 func newModel(ctx context.Context, options Options) model {
@@ -4661,6 +4662,7 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 			systemPrompt:  stages.DesignConversationPrompt(),
 			runKind:       tuiRunDesignConversation,
 			priorMessages: prior,
+			serverTools:   []zeroruntime.ServerTool{{Kind: zeroruntime.ServerToolWebSearch}},
 		}), m.spinner.Tick)
 	}
 	return m, tea.Batch(m.runAgent(m.activeRunID, runCtx, prompt, turnImages), m.spinner.Tick)
@@ -4883,6 +4885,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		options.Cwd = m.cwd
 		options.Images = images
 		options.PriorMessages = runOptions.priorMessages
+		options.ServerTools = runOptions.serverTools
 		if runOptions.runKind == tuiRunPipeline && strings.TrimSpace(m.userConfigPath) != "" {
 			options.StageModelResolver = nil
 			options.EscalationModelResolver = nil

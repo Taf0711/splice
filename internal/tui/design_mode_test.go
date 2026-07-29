@@ -163,6 +163,42 @@ func TestDesignRunUsesSessionPermissionMode(t *testing.T) {
 	}
 }
 
+func TestDesignRunRequestsWebSearchServerTool(t *testing.T) {
+	provider := &fakeProvider{events: []zeroruntime.StreamEvent{{Type: zeroruntime.StreamEventText, Content: "done"}, {Type: zeroruntime.StreamEventDone}}}
+	m := newDesignModeTestModel(t.TempDir(), provider, testSessionStore(t))
+	m.designMode = true
+	var captured agent.Options
+	m.captureRunOptions = func(options agent.Options) { captured = options }
+	m.input.SetValue("research this change")
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	if cmd == nil {
+		t.Fatal("expected design prompt to start an agent run")
+	}
+	_, _ = updated.(model).Update(execCmd(cmd))
+	if len(captured.ServerTools) != 1 || captured.ServerTools[0].Kind != zeroruntime.ServerToolWebSearch {
+		t.Fatalf("design ServerTools = %#v, want web_search", captured.ServerTools)
+	}
+}
+
+func TestPlainRunDoesNotRequestWebSearchServerTool(t *testing.T) {
+	provider := &fakeProvider{events: []zeroruntime.StreamEvent{{Type: zeroruntime.StreamEventText, Content: "done"}, {Type: zeroruntime.StreamEventDone}}}
+	m := newDesignModeTestModel(t.TempDir(), provider, testSessionStore(t))
+	m.designMode = false
+	var captured agent.Options
+	m.captureRunOptions = func(options agent.Options) { captured = options }
+	m.input.SetValue("answer this")
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	if cmd == nil {
+		t.Fatal("expected prompt to start an agent run")
+	}
+	_, _ = updated.(model).Update(execCmd(cmd))
+	if len(captured.ServerTools) != 0 {
+		t.Fatalf("plain-run ServerTools = %#v, want empty", captured.ServerTools)
+	}
+}
+
 func TestDesignConversationRegistryNilIsEmpty(t *testing.T) {
 	filtered := designConversationRegistry(nil)
 	if len(filtered.All()) != 0 {

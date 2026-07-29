@@ -2787,6 +2787,63 @@ func TestRunRequestsFinalAnswerAfterMaxTurns(t *testing.T) {
 	}
 }
 
+func TestRunCarriesServerToolsOnMainTurn(t *testing.T) {
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{textTurn("done")}}
+	_, err := Run(context.Background(), "search", provider, Options{
+		Registry:    tools.NewRegistry(),
+		ServerTools: []zeroruntime.ServerTool{{Kind: zeroruntime.ServerToolWebSearch}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.requests) != 1 {
+		t.Fatalf("expected one request, got %d", len(provider.requests))
+	}
+	if len(provider.requests[0].ServerTools) != 1 || provider.requests[0].ServerTools[0].Kind != zeroruntime.ServerToolWebSearch {
+		t.Fatalf("ServerTools = %#v, want web_search", provider.requests[0].ServerTools)
+	}
+}
+
+func TestRunLeavesServerToolsEmptyByDefault(t *testing.T) {
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{textTurn("done")}}
+	_, err := Run(context.Background(), "hello", provider, Options{Registry: tools.NewRegistry()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, request := range provider.requests {
+		if len(request.ServerTools) != 0 {
+			t.Fatalf("request %d ServerTools = %#v, want empty", i, request.ServerTools)
+		}
+	}
+}
+
+func TestRunFinalAnswerAfterMaxTurnsOmitsServerTools(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool(root))
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		toolTurn("call-1", "read_file", `{"path":"notes.txt"}`),
+		textTurn("summary"),
+	}}
+	_, err := Run(context.Background(), "loop", provider, Options{
+		Registry:    registry,
+		MaxTurns:    1,
+		ServerTools: []zeroruntime.ServerTool{{Kind: zeroruntime.ServerToolWebSearch}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.requests) != 2 {
+		t.Fatalf("expected working and final-answer requests, got %d", len(provider.requests))
+	}
+	if len(provider.requests[0].ServerTools) != 1 {
+		t.Fatalf("working request ServerTools = %#v, want web_search", provider.requests[0].ServerTools)
+	}
+	if len(provider.requests[len(provider.requests)-1].ServerTools) != 0 {
+		t.Fatalf("final-answer request ServerTools = %#v, want empty", provider.requests[len(provider.requests)-1].ServerTools)
+	}
+}
+
 func providerCallingWriteFileThenAnswer(answer string) *mockProvider {
 	return providerCallingWritePathThenAnswer("notes.txt", answer)
 }

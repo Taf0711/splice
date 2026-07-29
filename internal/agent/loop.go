@@ -211,6 +211,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			Tools:           exposed,
 			ReasoningEffort: options.ReasoningEffort,
 			PromptCacheKey:  options.SessionID,
+			ServerTools:     options.ServerTools,
 		}
 
 		// Report the per-category context budget for this turn so a surface can
@@ -247,6 +248,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 					Tools:           exposed,
 					ReasoningEffort: options.ReasoningEffort,
 					PromptCacheKey:  options.SessionID,
+					ServerTools:     options.ServerTools,
 				}
 				// Pre-content connect after a context-limit compaction: route through the
 				// reconnect helper so a transient upstream hiccup here doesn't fail the
@@ -308,6 +310,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 					Tools:           exposed,
 					ReasoningEffort: options.ReasoningEffort,
 					PromptCacheKey:  options.SessionID,
+					ServerTools:     options.ServerTools,
 				}
 				retryStream, retryStreamErr := streamWithReconnect(ctx, provider, retryRequest, reconnectNoticeFor(options))
 				if retryStreamErr != nil {
@@ -367,6 +370,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				Tools:           exposed,
 				ReasoningEffort: options.ReasoningEffort,
 				PromptCacheKey:  options.SessionID,
+				ServerTools:     options.ServerTools,
 			}
 			retryStream, retryErr := streamWithReconnect(ctx, provider, retryRequest, reconnectNoticeFor(options))
 			if retryErr != nil {

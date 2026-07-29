@@ -448,6 +448,96 @@ func TestRunReactiveCompactionRecovers(t *testing.T) {
 	}
 }
 
+func TestRunCompactionSummarizerOmitsServerTools(t *testing.T) {
+	provider := &reactiveProvider{
+		bigText:   strings.Repeat("b", 6000),
+		finalText: "recovered",
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool(t.TempDir()))
+	serverTools := []zeroruntime.ServerTool{{Kind: zeroruntime.ServerToolWebSearch}}
+	_, err := Run(context.Background(), strings.Repeat("z", 6000), provider, Options{
+		Registry:               registry,
+		PermissionMode:         PermissionModeUnsafe,
+		ContextWindow:          10_000_000,
+		CompactionPreserveLast: 2,
+		ServerTools:            serverTools,
+	})
+	if err != nil {
+		t.Fatalf("expected reactive compaction to recover the run, got %v", err)
+	}
+	if provider.summarizeCalls == 0 {
+		t.Fatal("expected reactive compaction to invoke the summarizer")
+	}
+	for i, request := range provider.requests {
+		if len(request.Tools) == 0 {
+			if len(request.ServerTools) != 0 {
+				t.Fatalf("summarizer request %d ServerTools = %#v, want empty", i, request.ServerTools)
+			}
+			continue
+		}
+		if len(request.ServerTools) != 1 || request.ServerTools[0].Kind != zeroruntime.ServerToolWebSearch {
+			t.Fatalf("working request %d ServerTools = %#v, want web_search", i, request.ServerTools)
+		}
+	}
+}
+
+// TestRunConnectTimeReactiveRetryCarriesServerTools drives the CONNECT-TIME
+// reactive-compaction path (StreamCompletion itself returns a context-limit
+// error, loop.go:251) using connectErrorProvider (see deferred_loop_test.go).
+// This is a distinct code path from the mid-stream StreamEventError retry
+// covered by TestRunCompactionSummarizerOmitsServerTools (loop.go:313): each
+// rebuilds its own retryRequest, so either one could drop ServerTools without
+// the other test noticing.
+func TestRunConnectTimeReactiveRetryCarriesServerTools(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool(t.TempDir()))
+	serverTools := []zeroruntime.ServerTool{{Kind: zeroruntime.ServerToolWebSearch}}
+
+	// Request indices:
+	//   0: turn 1 — a tool call whose big result bloats the history
+	//   1: turn 2 — StreamCompletion returns a connect-time context-limit error
+	//   2: the summarize call inside Compact
+	//   3: the retry rebuilt after compaction — asserted below
+	provider := &connectErrorProvider{
+		errAtRequest: 1,
+		errText:      "This model's maximum context length is 1000 tokens. Please reduce the length of the messages.",
+		turns: [][]zeroruntime.StreamEvent{
+			toolTurnWithText(strings.Repeat("b", 6000), "1", "read_file", `{"path":"x"}`),
+			nil, // index 1: replaced by the connect-time error
+			{ // index 2: summarize call inside Compact
+				{Type: zeroruntime.StreamEventText, Content: "SUMMARY"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{ // index 3: retry of turn 2 after compaction
+				{Type: zeroruntime.StreamEventText, Content: "recovered"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+
+	result, err := Run(context.Background(), strings.Repeat("z", 6000), provider, Options{
+		Registry:               registry,
+		PermissionMode:         PermissionModeUnsafe,
+		ContextWindow:          10_000_000,
+		CompactionPreserveLast: 2,
+		ServerTools:            serverTools,
+	})
+	if err != nil {
+		t.Fatalf("expected reactive compaction to recover the run, got %v", err)
+	}
+	if result.FinalAnswer != "recovered" {
+		t.Fatalf("expected recovered answer, got %q", result.FinalAnswer)
+	}
+	if len(provider.requests) != 4 {
+		t.Fatalf("expected 4 provider requests (turn1, errored connect, summarize, retry), got %d", len(provider.requests))
+	}
+	retry := provider.requests[3]
+	if len(retry.ServerTools) != 1 || retry.ServerTools[0].Kind != zeroruntime.ServerToolWebSearch {
+		t.Fatalf("connect-time retry ServerTools = %#v, want web_search", retry.ServerTools)
+	}
+}
+
 // midStreamReactiveProvider forwards some text BEFORE surfacing a context-limit
 // error mid-stream, then succeeds on the same-turn retry. It exists to prove the
 // reactive retry collect does not re-stream OnText/OnUsage (double output).

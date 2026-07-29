@@ -24,9 +24,11 @@ type stallProvider struct {
 	partialText     string
 	reasoningText   string
 	partialToolCall string
+	requests        []zeroruntime.CompletionRequest
 }
 
-func (p *stallProvider) StreamCompletion(_ context.Context, _ zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+func (p *stallProvider) StreamCompletion(_ context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	p.requests = append(p.requests, request)
 	n := atomic.AddInt32(&p.calls, 1)
 	ch := make(chan zeroruntime.StreamEvent, 5)
 	if n <= p.stallBefore {
@@ -54,6 +56,26 @@ func (p *stallProvider) StreamCompletion(_ context.Context, _ zeroruntime.Comple
 	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
 	close(ch)
 	return ch, nil
+}
+
+func TestRunCarriesServerToolsAcrossStreamStallRetry(t *testing.T) {
+	serverTools := []zeroruntime.ServerTool{{Kind: zeroruntime.ServerToolWebSearch}}
+	p := &stallProvider{stallBefore: 1}
+	_, err := Run(context.Background(), "go", p, Options{
+		Registry:    tools.NewRegistry(),
+		ServerTools: serverTools,
+	})
+	if err != nil {
+		t.Fatalf("run should recover after the stall, got %v", err)
+	}
+	if len(p.requests) != 2 {
+		t.Fatalf("expected initial and retry requests, got %d", len(p.requests))
+	}
+	for i, request := range p.requests {
+		if len(request.ServerTools) != 1 || request.ServerTools[0].Kind != zeroruntime.ServerToolWebSearch {
+			t.Fatalf("request %d ServerTools = %#v, want web_search", i, request.ServerTools)
+		}
+	}
 }
 
 // A no-output stall is re-issued on a fresh connection and recovers — this is the

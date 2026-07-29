@@ -291,8 +291,12 @@ type Options struct {
 	ProviderName     string
 	Model            string
 	ReasoningEffort  string
-	Cwd              string
-	SystemPrompt     string
+	// ServerTools asks the provider to run these tools itself during inference.
+	// A provider that does not support a kind ignores it, so a run can always
+	// ask. Empty keeps the request unchanged.
+	ServerTools  []zeroruntime.ServerTool
+	Cwd          string
+	SystemPrompt string
 	// ResponseStyle is the operator-selected reply style from the TUI /style
 	// command (e.g. "concise", "explanatory", "review"). It is rendered into the
 	// system prompt as a short directive. Empty or "balanced" adds nothing — the
