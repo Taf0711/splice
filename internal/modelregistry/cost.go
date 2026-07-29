@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
@@ -123,11 +124,15 @@ func FormatCostUSD(cost float64) (string, error) {
 	if math.IsNaN(cost) || math.IsInf(cost, 0) || cost < 0 {
 		return "", fmt.Errorf("invalid model cost: %v", cost)
 	}
-	if cost > 0 && cost < 0.01 {
-		return fmt.Sprintf("$%.6f", cost), nil
+	if cost == 0 {
+		return "$0.0000", nil
+	}
+	if cost < 0.0001 {
+		return "<$0.0001", nil
 	}
 	if cost < 1 {
-		return fmt.Sprintf("$%.4f", cost), nil
+		formatted := fmt.Sprintf("$%.4f", cost)
+		return strings.TrimRight(strings.TrimRight(formatted, "0"), "."), nil
 	}
 	return fmt.Sprintf("$%.2f", cost), nil
 }

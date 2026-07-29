@@ -985,10 +985,10 @@ func TestUsageStatusShowsCoverageAndPricedZero(t *testing.T) {
 		Status:         agent.CostStatusUnpriced,
 		UnpricedReason: "test",
 	})
-	if got := partialPositive.usageStatusSegment(); !strings.Contains(got, "~$0.4200") || strings.Contains(got, "unpriced") {
+	if got := partialPositive.usageStatusSegment(); !strings.Contains(got, "~$0.42") || strings.Contains(got, "unpriced") {
 		t.Fatalf("partial positive status = %q, want lower-bound cost without count", got)
 	}
-	if got := partialPositive.usageSummaryText(); !strings.Contains(got, "~$0.4200 (1 unpriced request)") {
+	if got := partialPositive.usageSummaryText(); !strings.Contains(got, "~$0.42 (1 unpriced request)") {
 		t.Fatalf("partial positive sidebar = %q, want unpriced count", got)
 	}
 

@@ -1095,7 +1095,7 @@ func TestResumePipelineResultFormattedOnResume(t *testing.T) {
 	}
 
 	// The transcript row must show the FORMATTED summary, not raw JSON.
-	wantFormatted := "\u2713 completed \u00b7 standard \u00b7 0 stages \u00b7 $0.1230 \u00b7 0.7k tok \u00b7 0.0s"
+	wantFormatted := "\u2713 completed \u00b7 standard \u00b7 0 stages \u00b7 $0.123 \u00b7 0.7k tok \u00b7 0.0s"
 	if !transcriptContains(next.transcript, wantFormatted) {
 		t.Fatalf("expected transcript to contain formatted pipeline summary %q, got %#v", wantFormatted, next.transcript)
 	}

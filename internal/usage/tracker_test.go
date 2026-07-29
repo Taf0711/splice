@@ -59,9 +59,9 @@ func TestFormatCostDisplay(t *testing.T) {
 		wantCost     string
 		wantUnpriced string
 	}{
-		{name: "complete", coverage: CostCoverageComplete, total: 0.42, wantCost: "$0.4200"},
-		{name: "partial positive", coverage: CostCoveragePartial, total: 0.42, unpriced: 3, wantCost: "~$0.4200", wantUnpriced: "3 unpriced requests"},
-		{name: "partial singular", coverage: CostCoveragePartial, total: 0.42, unpriced: 1, wantCost: "~$0.4200", wantUnpriced: "1 unpriced request"},
+		{name: "complete", coverage: CostCoverageComplete, total: 0.42, wantCost: "$0.42"},
+		{name: "partial positive", coverage: CostCoveragePartial, total: 0.42, unpriced: 3, wantCost: "~$0.42", wantUnpriced: "3 unpriced requests"},
+		{name: "partial singular", coverage: CostCoveragePartial, total: 0.42, unpriced: 1, wantCost: "~$0.42", wantUnpriced: "1 unpriced request"},
 		{name: "partial zero", coverage: CostCoveragePartial, total: 0, unpriced: 3, wantCost: "cost partial"},
 		{name: "unavailable", coverage: CostCoverageUnavailable, total: 0.42, unpriced: 3, wantCost: "cost unavailable"},
 		{name: "not applicable", coverage: CostCoverageNotApplicable, total: 0, wantCost: "cost n/a"},

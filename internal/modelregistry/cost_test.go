@@ -161,10 +161,14 @@ func TestCostFormattingAndValidation(t *testing.T) {
 		want string
 	}{
 		{name: "zero", cost: 0, want: "$0.0000"},
-		{name: "micro", cost: 0.000004, want: "$0.000004"},
+		{name: "micro", cost: 0.000004, want: "<$0.0001"},
+		{name: "below threshold", cost: 0.00009999, want: "<$0.0001"},
+		{name: "threshold", cost: 0.0001, want: "$0.0001"},
+		{name: "small fractional", cost: 0.009927, want: "$0.0099"},
 		{name: "small", cost: 0.0126, want: "$0.0126"},
-		{name: "fraction", cost: 0.42, want: "$0.4200"},
-		{name: "just below one", cost: 0.999, want: "$0.9990"},
+		{name: "fraction", cost: 0.42, want: "$0.42"},
+		{name: "half", cost: 0.5, want: "$0.5"},
+		{name: "just below one", cost: 0.999, want: "$0.999"},
 		{name: "one", cost: 1, want: "$1.00"},
 		{name: "large fraction", cost: 1.2391, want: "$1.24"},
 		{name: "large", cost: 12.3456, want: "$12.35"},

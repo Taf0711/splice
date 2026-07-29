@@ -5467,7 +5467,11 @@ func formatPipelineFinalAnswer(finalAnswer string) string {
 		latency += stage.LatencyMs
 	}
 	durationSeconds := float64(latency) / 1000
-	return fmt.Sprintf("%s %s · %s · %d stages · $%.4f · %.1fk tok · %.1fs", glyph, result.Status, result.Tier, len(result.Stages), result.TotalCostUSD, tokenK, durationSeconds)
+	formattedCost, err := modelregistry.FormatCostUSD(result.TotalCostUSD)
+	if err != nil {
+		formattedCost = "$0.0000"
+	}
+	return fmt.Sprintf("%s %s · %s · %d stages · %s · %.1fk tok · %.1fs", glyph, result.Status, result.Tier, len(result.Stages), formattedCost, tokenK, durationSeconds)
 }
 
 func (m model) sendPermissionRequest(runID int, request agent.PermissionRequest, decide func(agent.PermissionDecision)) {
