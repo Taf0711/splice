@@ -473,7 +473,6 @@ func designConversationRegistry(registry *tools.Registry) *tools.Registry {
 		"lsp_navigate":           true,
 		"skill":                  true,
 		"web_fetch":              true,
-		"web_search":             true,
 		tools.ToolSearchToolName: true,
 	}
 	for _, tool := range registry.All() {

@@ -116,14 +116,13 @@ func TestDesignConversationRegistryIsReadOnly(t *testing.T) {
 	for _, tool := range tools.CoreTools(t.TempDir()) {
 		registry.Register(tool)
 	}
-	registry.Register(tools.NewWebSearchTool())
 	registry.Register(tools.NewToolSearchTool(registry))
 	registry.Register(designRegistryTestTool{name: "Task"})
 	filtered := designConversationRegistry(registry)
 
 	for _, name := range []string{
 		"read_file", "list_directory", "grep", "ask_user", "read_minified_file",
-		"glob", "lsp_navigate", "skill", "web_fetch", "web_search", tools.ToolSearchToolName,
+		"glob", "lsp_navigate", "skill", "web_fetch", tools.ToolSearchToolName,
 	} {
 		if _, ok := filtered.Get(name); !ok {
 			t.Fatalf("expected %s to be in design conversation registry", name)
@@ -133,17 +132,6 @@ func TestDesignConversationRegistryIsReadOnly(t *testing.T) {
 		if _, ok := filtered.Get(name); ok {
 			t.Fatalf("expected %s to be excluded from design conversation registry", name)
 		}
-	}
-
-	withoutSearch := tools.NewRegistry()
-	for _, tool := range tools.CoreTools(t.TempDir()) {
-		if tool.Name() != "web_search" {
-			withoutSearch.Register(tool)
-		}
-	}
-	filtered = designConversationRegistry(withoutSearch)
-	if _, ok := filtered.Get("web_search"); ok {
-		t.Fatal("web_search must remain absent when the source registry does not provide it")
 	}
 }
 
