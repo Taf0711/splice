@@ -2,8 +2,9 @@
 .DEFAULT_GOAL := build
 .PHONY: build build-all test test-race test-memd check vet fmt fmt-check lint tidy clean help install-memd
 
-# Build the main CLI binary into ./splice.
+# Remove the old binary before each build. A failed build then leaves no stale binary that a person can run by accident.
 build:
+	rm -f splice
 	go build -o splice ./cmd/splice
 
 # Build every command in cmd/.
