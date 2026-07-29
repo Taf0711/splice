@@ -209,6 +209,17 @@ func TestModelCostRequiresCompleteBasePricing(t *testing.T) {
 	}
 }
 
+func TestModelCostRejectsNegativeWebSearchRate(t *testing.T) {
+	cost := ModelCost{
+		Currency: "USD", Unit: "per_1m_tokens",
+		InputPerMillion: 1, OutputPerMillion: 2,
+		WebSearchPerRequest: -0.01,
+	}
+	if err := cost.Validate(); err == nil || !strings.Contains(err.Error(), "non-negative") {
+		t.Fatalf("Validate error = %v, want negative web search rate rejection", err)
+	}
+}
+
 func TestModelCostAcceptsWhollyUnpriced(t *testing.T) {
 	model := validModelEntry()
 	model.Cost = ModelCost{Currency: "USD", Unit: "per_1m_tokens"}

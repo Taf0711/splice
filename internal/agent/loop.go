@@ -413,6 +413,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			// Preserve thinking blocks so the next turn can replay them; providers
 			// that use extended thinking reject tool conversations that drop them.
 			Reasoning: collected.ReasoningBlocks,
+			// Preserve provider-executed tool blocks so adapters can replay their
+			// opaque payloads byte-for-byte on the next turn.
+			ServerToolBlocks: collected.ServerToolBlocks,
 		})
 
 		if len(collected.ToolCalls) == 0 {

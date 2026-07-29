@@ -50,6 +50,26 @@ func TestTrackerNormalizesUsageAndComputesModelCost(t *testing.T) {
 	}
 }
 
+func TestTrackerMarksUnpricedWebSearchRequests(t *testing.T) {
+	tracker, err := NewTracker(TrackerOptions{Registry: mustTestPricedRegistry(t)})
+	if err != nil {
+		t.Fatalf("NewTracker returned error: %v", err)
+	}
+	record, err := tracker.Record(RecordInput{
+		ModelID: "gpt-4.1",
+		Usage:   zeroruntime.Usage{InputTokens: 1, WebSearchRequests: 3},
+	})
+	if err != nil {
+		t.Fatalf("Record returned error: %v", err)
+	}
+	if record.Cost == nil || record.Cost.CostStatus != CostStatusUnpriced {
+		t.Fatalf("cost = %#v, want unpriced web searches", record.Cost)
+	}
+	if record.Usage.WebSearchRequests != 3 {
+		t.Fatalf("web search requests = %d, want 3", record.Usage.WebSearchRequests)
+	}
+}
+
 func TestFormatCostDisplay(t *testing.T) {
 	tests := []struct {
 		name         string

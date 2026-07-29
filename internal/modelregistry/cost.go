@@ -20,10 +20,12 @@ type CostBreakdown struct {
 	CacheWriteTokens  int
 	OutputTokens      int
 	ReasoningTokens   int
+	WebSearchRequests int
 	InputCost         float64
 	CachedInputCost   float64
 	CacheWriteCost    float64
 	OutputCost        float64
+	WebSearchCost     float64
 	TotalCost         float64
 	PricingTier       *ModelCostTier
 }
@@ -51,6 +53,10 @@ func CalculateCost(model ModelEntry, usage zeroruntime.Usage) (CostBreakdown, er
 	}
 	if reasoningTokens > outputTokens {
 		return CostBreakdown{}, fmt.Errorf("reasoning tokens %d exceeds output tokens %d", reasoningTokens, outputTokens)
+	}
+	webSearchRequests, err := nonNegativeUsage(usage.WebSearchRequests, "web search requests")
+	if err != nil {
+		return CostBreakdown{}, err
 	}
 	requestedCachedInputTokens, err := nonNegativeUsage(usage.CachedInputTokens, "cached input tokens")
 	if err != nil {
@@ -97,6 +103,7 @@ func CalculateCost(model ModelEntry, usage zeroruntime.Usage) (CostBreakdown, er
 	cachedInputCost := costForTokens(cachedInputTokens, cachedRate)
 	cacheWriteCost := costForTokens(cacheWriteTokens, cacheWriteRate)
 	outputCost := costForTokens(outputTokens, outputRate)
+	webSearchCost := float64(webSearchRequests) * model.Cost.WebSearchPerRequest
 
 	breakdown := CostBreakdown{
 		ModelID:           model.ID,
@@ -107,15 +114,25 @@ func CalculateCost(model ModelEntry, usage zeroruntime.Usage) (CostBreakdown, er
 		CacheWriteTokens:  cacheWriteTokens,
 		OutputTokens:      outputTokens,
 		ReasoningTokens:   reasoningTokens,
+		WebSearchRequests: webSearchRequests,
 		InputCost:         inputCost,
 		CachedInputCost:   cachedInputCost,
 		CacheWriteCost:    cacheWriteCost,
 		OutputCost:        outputCost,
-		TotalCost:         inputCost + cachedInputCost + cacheWriteCost + outputCost,
+		WebSearchCost:     webSearchCost,
+		TotalCost:         inputCost + cachedInputCost + cacheWriteCost + outputCost + webSearchCost,
 	}
 	if tier != nil {
 		tierCopy := *tier
 		breakdown.PricingTier = &tierCopy
+	}
+	if webSearchRequests > 0 {
+		if !validRate(model.Cost.WebSearchPerRequest) {
+			return breakdown, fmt.Errorf("invalid model web search pricing rate")
+		}
+		if model.Cost.WebSearchPerRequest == 0 {
+			return breakdown, fmt.Errorf("web search pricing is unavailable for %d provider-executed requests", webSearchRequests)
+		}
 	}
 	return breakdown, nil
 }

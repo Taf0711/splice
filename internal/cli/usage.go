@@ -52,6 +52,7 @@ type historicalUsagePayload struct {
 	CachedInputTokens int      `json:"cachedInputTokens"`
 	CacheWriteTokens  int      `json:"cacheWriteTokens"`
 	ReasoningTokens   int      `json:"reasoningTokens"`
+	WebSearchRequests int      `json:"webSearchRequests"`
 	Model             string   `json:"model"`
 	CostUSD           *float64 `json:"costUsd"`
 	CostStatus        string   `json:"costStatus"`
@@ -144,8 +145,13 @@ func classifyUsageCoverage(events []sessions.Event, meta []sessions.Metadata, re
 				CachedInputTokens: payload.CachedInputTokens,
 				CacheWriteTokens:  payload.CacheWriteTokens,
 				ReasoningTokens:   payload.ReasoningTokens,
+				WebSearchRequests: payload.WebSearchRequests,
 			}); err != nil {
-				coverage.ErrorCount++
+				if payload.WebSearchRequests > 0 && model.Cost.WebSearchPerRequest == 0 {
+					coverage.UnpricedCount++
+				} else {
+					coverage.ErrorCount++
+				}
 				continue
 			}
 			coverage.ReconstructedCount++

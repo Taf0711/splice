@@ -28,6 +28,7 @@ type usageEventPayload struct {
 	CachedInputTokens int      `json:"cachedInputTokens,omitempty"`
 	CacheWriteTokens  int      `json:"cacheWriteTokens,omitempty"`
 	ReasoningTokens   int      `json:"reasoningTokens,omitempty"`
+	WebSearchRequests int      `json:"webSearchRequests,omitempty"`
 	Model             string   `json:"model,omitempty"`
 	CostUSD           *float64 `json:"costUsd,omitempty"`
 	CostStatus        string   `json:"costStatus,omitempty"`
@@ -59,6 +60,9 @@ func EventUsagePayload(u zeroruntime.Usage) map[string]any {
 	if u.ReasoningTokens > 0 {
 		payload["reasoningTokens"] = u.ReasoningTokens
 	}
+	if u.WebSearchRequests > 0 {
+		payload["webSearchRequests"] = u.WebSearchRequests
+	}
 	return payload
 }
 
@@ -84,6 +88,9 @@ func AttributedUsagePayload(au agent.AttributedUsage) map[string]any {
 	if au.Cost.CostUSD != nil {
 		payload["costUsd"] = *au.Cost.CostUSD
 		payload["costEstimated"] = au.Cost.Provenance != agent.CostProvenanceReported
+	}
+	if au.Usage.WebSearchRequests > 0 {
+		payload["webSearchRequests"] = au.Usage.WebSearchRequests
 	}
 	if au.Cost.Status != "" {
 		payload["costStatus"] = au.Cost.Status
@@ -216,6 +223,7 @@ func BuildReport(events []sessions.Event, meta []sessions.Metadata, registry *mo
 			CachedInputTokens: payload.CachedInputTokens,
 			CacheWriteTokens:  payload.CacheWriteTokens,
 			ReasoningTokens:   payload.ReasoningTokens,
+			WebSearchRequests: payload.WebSearchRequests,
 		})
 		if err != nil {
 			continue

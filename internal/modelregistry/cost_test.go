@@ -32,6 +32,44 @@ func TestRegistryEstimatesCostFromNormalizedUsage(t *testing.T) {
 	assertClose(t, cost.TotalCost, 5.85)
 }
 
+func TestCalculateCostAddsWebSearchRequests(t *testing.T) {
+	model := ModelEntry{
+		ID:       "search-model",
+		Provider: ProviderOpenAI,
+		Cost: ModelCost{
+			Currency: "USD", Unit: "per_1m_tokens",
+			InputPerMillion: 2, OutputPerMillion: 8, WebSearchPerRequest: 0.01,
+		},
+	}
+	breakdown, err := CalculateCost(model, zeroruntime.Usage{WebSearchRequests: 3})
+	if err != nil {
+		t.Fatalf("CalculateCost returned error: %v", err)
+	}
+	assertClose(t, breakdown.WebSearchCost, 0.03)
+	assertClose(t, breakdown.TotalCost, 0.03)
+}
+
+func TestCalculateCostReportsUnpricedWebSearchRequests(t *testing.T) {
+	model := ModelEntry{
+		ID:       "search-model",
+		Provider: ProviderOpenAI,
+		Cost: ModelCost{
+			Currency: "USD", Unit: "per_1m_tokens",
+			InputPerMillion: 2, OutputPerMillion: 8,
+		},
+	}
+	breakdown, err := CalculateCost(model, zeroruntime.Usage{WebSearchRequests: 3})
+	if err == nil {
+		t.Fatal("CalculateCost silently priced web searches at zero")
+	}
+	if breakdown.WebSearchRequests != 3 || breakdown.WebSearchCost != 0 {
+		t.Fatalf("partial breakdown = %#v, want counted unpriced searches", breakdown)
+	}
+	if !strings.Contains(err.Error(), "web search pricing") {
+		t.Fatalf("error = %q, want web search pricing status", err)
+	}
+}
+
 func TestRegistryCostSupportsAliasesAndFullyCachedInput(t *testing.T) {
 	registry, err := pricedTestRegistry(t)
 	if err != nil {

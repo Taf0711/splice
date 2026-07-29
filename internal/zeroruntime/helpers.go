@@ -21,6 +21,9 @@ type CollectedStream struct {
 	// thinking blocks) that must be replayed on the next turn. Empty for providers
 	// or runs without extended thinking.
 	ReasoningBlocks []ReasoningBlock
+	// ServerToolBlocks are the response's preserved provider-executed tool
+	// artifacts that must be replayed on the next turn.
+	ServerToolBlocks []ServerToolBlock
 	// HasReasoning records whether the provider streamed reasoning deltas. The
 	// deltas remain non-answer content, but they still prove the turn was live.
 	HasReasoning bool
@@ -49,8 +52,10 @@ type CollectOptions struct {
 	// OnToolCallDelta fires for each streamed argument fragment. Together they let
 	// a surface render a tool call's arguments LIVE (e.g. a file being written)
 	// instead of waiting for the whole call to accumulate. nil is a no-op.
-	OnToolCallStart func(id, name string)
-	OnToolCallDelta func(id, fragment string)
+	OnToolCallStart    func(id, name string)
+	OnToolCallDelta    func(id, fragment string)
+	OnServerToolUse    func(kind string, query string)
+	OnServerToolResult func(kind string, resultCount int)
 }
 
 // SeedMessages creates the initial system and user turns for a request. It is a
@@ -141,6 +146,9 @@ func CollectStreamWithOptions(ctx context.Context, events <-chan StreamEvent, op
 			if len(event.ReasoningBlocks) > 0 {
 				collected.ReasoningBlocks = append(collected.ReasoningBlocks, event.ReasoningBlocks...)
 			}
+			if len(event.ServerToolBlocks) > 0 {
+				collected.ServerToolBlocks = append(collected.ServerToolBlocks, event.ServerToolBlocks...)
+			}
 
 			switch event.Type {
 			case StreamEventText:
@@ -157,6 +165,14 @@ func CollectStreamWithOptions(ctx context.Context, events <-chan StreamEvent, op
 				}
 				if options.OnReasoning != nil {
 					options.OnReasoning(event.Content)
+				}
+			case StreamEventServerToolUse:
+				if options.OnServerToolUse != nil {
+					options.OnServerToolUse(event.ServerToolKind, event.ServerToolQuery)
+				}
+			case StreamEventServerToolResult:
+				if options.OnServerToolResult != nil {
+					options.OnServerToolResult(event.ServerToolKind, event.ServerToolResultCount)
 				}
 			case StreamEventToolCallStart:
 				collector.start(event.ToolCallID, event.ToolName, event.ToolCallSignature)
@@ -217,12 +233,18 @@ func mergeUsageSnapshot(left Usage, right Usage) Usage {
 		reasoningTokens = right.ReasoningTokens
 	}
 
+	webSearchRequests := left.WebSearchRequests
+	if right.WebSearchRequests != 0 {
+		webSearchRequests = right.WebSearchRequests
+	}
+
 	usage, err := NormalizeUsage(TokenUsage{
 		InputTokens:       inputTokens,
 		OutputTokens:      outputTokens,
 		CachedInputTokens: cachedInputTokens,
 		CacheWriteTokens:  cacheWriteTokens,
 		ReasoningTokens:   reasoningTokens,
+		WebSearchRequests: webSearchRequests,
 	})
 	if err != nil {
 		return right

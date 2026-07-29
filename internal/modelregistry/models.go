@@ -71,10 +71,15 @@ type ModelCost struct {
 	// Splice means "not priced separately". Cache-write tokens fall back to the
 	// input rate, preserving prior behavior for models without the rate.
 	CacheWritePerMillion float64
-	Tiers                []ModelCostTier
-	Source               string
-	SourceLastVerified   string
-	Notes                []string
+	// WebSearchPerRequest is the USD price of one provider-executed web search.
+	// Providers bill these per search on top of tokens. Zero means the rate is
+	// unknown, and a search is then reported as counted but unpriced rather than
+	// billed at zero.
+	WebSearchPerRequest float64
+	Tiers               []ModelCostTier
+	Source              string
+	SourceLastVerified  string
+	Notes               []string
 }
 
 type ModelCostTier struct {
@@ -243,7 +248,7 @@ func (cost ModelCost) Validate() error {
 	if cost.Unit != "per_1m_tokens" {
 		return fmt.Errorf("model cost unit must be per_1m_tokens")
 	}
-	if cost.InputPerMillion < 0 || cost.OutputPerMillion < 0 || cost.CachedInputPerMillion < 0 || cost.CacheWritePerMillion < 0 {
+	if cost.InputPerMillion < 0 || cost.OutputPerMillion < 0 || cost.CachedInputPerMillion < 0 || cost.CacheWritePerMillion < 0 || cost.WebSearchPerRequest < 0 {
 		return fmt.Errorf("model cost values must be non-negative")
 	}
 	if cost.IsUnpriced() {

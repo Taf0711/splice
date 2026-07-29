@@ -145,6 +145,7 @@ func addUsage(total *zeroruntime.Usage, current zeroruntime.Usage) {
 	total.CachedInputTokens += current.CachedInputTokens
 	total.CacheWriteTokens += current.CacheWriteTokens
 	total.ReasoningTokens += current.ReasoningTokens
+	total.WebSearchRequests += current.WebSearchRequests
 }
 
 func findToolCall(collected *zeroruntime.CollectedStream, name string) *zeroruntime.ToolCall {

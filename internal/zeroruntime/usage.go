@@ -39,6 +39,10 @@ func NormalizeUsage(input TokenUsage) (Usage, error) {
 	if reasoningTokens > outputTokens {
 		return Usage{}, fmt.Errorf("reasoning tokens %d exceeds output tokens %d", reasoningTokens, outputTokens)
 	}
+	webSearchRequests, err := nonNegative(input.WebSearchRequests, "web search requests")
+	if err != nil {
+		return Usage{}, err
+	}
 
 	return Usage{
 		InputTokens:       inputTokens,
@@ -48,6 +52,7 @@ func NormalizeUsage(input TokenUsage) (Usage, error) {
 		CachedInputTokens: cachedInputTokens,
 		CacheWriteTokens:  cacheWriteTokens,
 		ReasoningTokens:   reasoningTokens,
+		WebSearchRequests: webSearchRequests,
 	}, nil
 }
 

@@ -37,10 +37,12 @@ const (
 	StreamEventText StreamEventType = "text"
 	// StreamEventReasoning carries live reasoning deltas that must never be
 	// folded into answer text or persisted as assistant content.
-	StreamEventReasoning     StreamEventType = "reasoning"
-	StreamEventToolCallStart StreamEventType = "tool-call-start"
-	StreamEventToolCallDelta StreamEventType = "tool-call-delta"
-	StreamEventToolCallEnd   StreamEventType = "tool-call-end"
+	StreamEventReasoning        StreamEventType = "reasoning"
+	StreamEventServerToolUse    StreamEventType = "server-tool-use"
+	StreamEventServerToolResult StreamEventType = "server-tool-result"
+	StreamEventToolCallStart    StreamEventType = "tool-call-start"
+	StreamEventToolCallDelta    StreamEventType = "tool-call-delta"
+	StreamEventToolCallEnd      StreamEventType = "tool-call-end"
 	// StreamEventToolCallDropped signals the model attempted a tool call that
 	// was malformed (no usable name/id) and could not be dispatched. The agent
 	// uses this to ask the model to retry instead of silently ending the turn.
@@ -92,6 +94,15 @@ type ReasoningBlock struct {
 	Data      string // opaque provider payload (e.g. Anthropic redacted_thinking data)
 }
 
+// ServerToolBlock is one provider-executed tool block preserved for verbatim
+// replay. Anthropic rejects a later turn whose web-search result blocks are
+// missing or changed, so the raw payload must survive a round trip unmodified.
+type ServerToolBlock struct {
+	Provider string // adapter that produced and can replay this block
+	Type     string // provider block type, for example "server_tool_use"
+	Data     string // opaque provider payload, replayed byte-for-byte
+}
+
 // Message is a normalized conversation turn passed to providers.
 type Message struct {
 	Role       MessageRole
@@ -100,6 +111,9 @@ type Message struct {
 	ToolCallID string
 	Images     []ImageBlock     // optional; nil for text-only messages
 	Reasoning  []ReasoningBlock // optional; preserved thinking blocks to replay
+	// ServerToolBlocks are optional provider-executed tool blocks preserved for
+	// verbatim replay on a later turn.
+	ServerToolBlocks []ServerToolBlock
 }
 
 // ToolDefinition describes a model-visible tool and its JSON-schema parameters.
@@ -121,6 +135,9 @@ type TokenUsage struct {
 	OutputTokens     int
 	CompletionTokens int
 	ReasoningTokens  int
+	// WebSearchRequests counts provider-executed web searches in this stream.
+	// Providers bill these per search, not per token.
+	WebSearchRequests int
 }
 
 // Usage records normalized token accounting reported by a provider.
@@ -140,6 +157,9 @@ type Usage struct {
 	CachedInputTokens int
 	CacheWriteTokens  int
 	ReasoningTokens   int
+	// WebSearchRequests counts provider-executed web searches in this stream.
+	// Providers bill these per search, not per token.
+	WebSearchRequests int
 }
 
 // TotalTokens returns prompt plus completion tokens.
@@ -175,14 +195,18 @@ func (usage Usage) VisibleOutputTokens() int {
 
 // StreamEvent is one normalized event emitted by a streaming provider.
 type StreamEvent struct {
-	Type              StreamEventType
-	Content           string
-	ToolCallID        string
-	ToolName          string
-	ToolCallSignature string // opaque reasoning signature bound to this call (Gemini thoughtSignature)
-	ArgumentsFragment string
-	Usage             Usage
-	Error             string
+	Type                  StreamEventType
+	Content               string
+	ToolCallID            string
+	ToolName              string
+	ToolCallSignature     string // opaque reasoning signature bound to this call (Gemini thoughtSignature)
+	ArgumentsFragment     string
+	ServerToolKind        string
+	ServerToolQuery       string
+	ServerToolPayload     string
+	ServerToolResultCount int
+	Usage                 Usage
+	Error                 string
 	// FinishReason carries the provider's normalized terminal stop reason when a
 	// response did not end normally (e.g. FinishReasonLength when the output hit
 	// the token cap, or FinishReasonContentFilter when it was filtered). It is
@@ -192,12 +216,20 @@ type StreamEvent struct {
 	// redacted_thinking blocks) that must be preserved for replay. Providers attach
 	// them to the terminal/done event; the collector accumulates them.
 	ReasoningBlocks []ReasoningBlock
+	// ServerToolBlocks carries completed provider-executed tool artifacts that
+	// must be preserved for replay. Providers attach them to a terminal event.
+	ServerToolBlocks []ServerToolBlock
 }
 
 // CompletionRequest groups provider input messages and available tools.
 type CompletionRequest struct {
 	Messages []Message
 	Tools    []ToolDefinition
+	// ServerTools requests provider-executed tools. Unlike Tools, these carry no
+	// schema and are not dispatched by the agent loop: the provider runs them
+	// during inference and bills for them. Each adapter maps a kind to its own
+	// wire shape, and ignores a kind it does not support.
+	ServerTools []ServerTool
 	// ReasoningEffort, when non-empty, asks a reasoning-capable model to spend the
 	// given level of thinking effort ("minimal"/"low"/"medium"/"high"). Each
 	// provider adapter maps it to its own API shape (OpenAI reasoning_effort,
@@ -219,6 +251,17 @@ type CompletionRequest struct {
 	// call.
 	ToolChoice string
 }
+
+// ServerTool is one provider-executed tool request.
+type ServerTool struct {
+	Kind    ServerToolKind
+	MaxUses int // optional cap; 0 means the provider default
+}
+
+// ServerToolKind identifies a provider-executed tool.
+type ServerToolKind string
+
+const ServerToolWebSearch ServerToolKind = "web_search"
 
 // Provider streams normalized completion events for one request.
 type Provider interface {

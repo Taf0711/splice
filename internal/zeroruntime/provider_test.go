@@ -2,6 +2,7 @@ package zeroruntime
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -42,16 +43,42 @@ func TestSeedMessagesProducesSystemAndUserTurns(t *testing.T) {
 	}
 }
 
+func TestServerToolRequestAndBlocksRoundTripVerbatim(t *testing.T) {
+	payload := `{"query":"café \"splice\"","encrypted_content":"opaque-東京"}`
+	want := Message{
+		Role:    MessageRoleAssistant,
+		Content: "search complete",
+		ServerToolBlocks: []ServerToolBlock{{
+			Provider: "anthropic",
+			Type:     "web_search_tool_result",
+			Data:     payload,
+		}},
+	}
+	request := CompletionRequest{
+		Messages:    []Message{want},
+		ServerTools: []ServerTool{{Kind: ServerToolWebSearch, MaxUses: 3}},
+	}
+	got := request.Messages[0]
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("message changed across request round trip: got %#v, want %#v", got, want)
+	}
+	if request.ServerTools[0].Kind != ServerToolWebSearch || request.ServerTools[0].MaxUses != 3 {
+		t.Fatalf("server tool request changed: %#v", request.ServerTools)
+	}
+}
+
 func TestStreamEventNamesMatchProviderContract(t *testing.T) {
 	cases := map[StreamEventType]string{
-		StreamEventText:          "text",
-		StreamEventReasoning:     "reasoning",
-		StreamEventToolCallStart: "tool-call-start",
-		StreamEventToolCallDelta: "tool-call-delta",
-		StreamEventToolCallEnd:   "tool-call-end",
-		StreamEventUsage:         "usage",
-		StreamEventDone:          "done",
-		StreamEventError:         "error",
+		StreamEventText:             "text",
+		StreamEventReasoning:        "reasoning",
+		StreamEventServerToolUse:    "server-tool-use",
+		StreamEventServerToolResult: "server-tool-result",
+		StreamEventToolCallStart:    "tool-call-start",
+		StreamEventToolCallDelta:    "tool-call-delta",
+		StreamEventToolCallEnd:      "tool-call-end",
+		StreamEventUsage:            "usage",
+		StreamEventDone:             "done",
+		StreamEventError:            "error",
 	}
 
 	for eventType, want := range cases {
@@ -86,6 +113,7 @@ func TestNormalizeUsageMapsProviderAliasesAndReasoningTokens(t *testing.T) {
 		CachedInputTokens: 25,
 		CompletionTokens:  40,
 		ReasoningTokens:   10,
+		WebSearchRequests: 3,
 	})
 	if err != nil {
 		t.Fatalf("NormalizeUsage returned error: %v", err)
@@ -103,11 +131,21 @@ func TestNormalizeUsageMapsProviderAliasesAndReasoningTokens(t *testing.T) {
 	if usage.ReasoningTokens != 10 {
 		t.Fatalf("reasoning tokens = %d, want 10", usage.ReasoningTokens)
 	}
+	if usage.WebSearchRequests != 3 {
+		t.Fatalf("web search requests = %d, want 3", usage.WebSearchRequests)
+	}
 	if usage.TotalTokens() != 140 {
 		t.Fatalf("total tokens = %d, want 140", usage.TotalTokens())
 	}
 	if usage.BillableOutputTokens() != 40 {
 		t.Fatalf("billable output tokens = %d, want 40", usage.BillableOutputTokens())
+	}
+}
+
+func TestNormalizeUsageRejectsNegativeWebSearchRequests(t *testing.T) {
+	_, err := NormalizeUsage(TokenUsage{WebSearchRequests: -1})
+	if err == nil || !strings.Contains(err.Error(), "web search requests") {
+		t.Fatalf("error = %v, want web search requests validation", err)
 	}
 }
 
@@ -268,6 +306,19 @@ func TestCollectStreamMergesMixedUsageSnapshots(t *testing.T) {
 	}
 }
 
+func TestCollectStreamMergesWebSearchRequestUsage(t *testing.T) {
+	events := make(chan StreamEvent, 3)
+	events <- StreamEvent{Type: StreamEventUsage, Usage: Usage{InputTokens: 6, WebSearchRequests: 2}}
+	events <- StreamEvent{Type: StreamEventUsage, Usage: Usage{OutputTokens: 3, WebSearchRequests: 3}}
+	events <- StreamEvent{Type: StreamEventDone}
+	close(events)
+
+	collected := CollectStream(context.Background(), events)
+	if collected.Usage.WebSearchRequests != 3 {
+		t.Fatalf("web search requests = %d, want latest count 3", collected.Usage.WebSearchRequests)
+	}
+}
+
 func TestCollectStreamReportsOneMergedUsageCallback(t *testing.T) {
 	events := make(chan StreamEvent)
 	go func() {
@@ -338,6 +389,39 @@ func TestCollectStreamWithOptionsEmitsTextReasoningAndUsageCallbacks(t *testing.
 	}
 	if usageEvents[0].PromptTokens != 12 || usageEvents[0].CompletionTokens != 5 || usageEvents[0].CachedInputTokens != 2 {
 		t.Fatalf("unexpected usage callback: %#v", usageEvents[0])
+	}
+}
+
+func TestCollectStreamWithOptionsEmitsServerToolCallbacksAndBlocks(t *testing.T) {
+	events := make(chan StreamEvent, 3)
+	events <- StreamEvent{Type: StreamEventServerToolUse, ServerToolKind: "web_search", ServerToolQuery: "café"}
+	events <- StreamEvent{
+		Type:                  StreamEventServerToolResult,
+		ServerToolKind:        "web_search",
+		ServerToolResultCount: 2,
+		ServerToolBlocks: []ServerToolBlock{{
+			Provider: "anthropic",
+			Type:     "server_tool_use",
+			Data:     `{"encrypted_content":"opaque-東京"}`,
+		}},
+	}
+	events <- StreamEvent{Type: StreamEventDone}
+	close(events)
+
+	var uses []string
+	var results []int
+	collected := CollectStreamWithOptions(context.Background(), events, CollectOptions{
+		OnServerToolUse:    func(kind, query string) { uses = append(uses, kind+":"+query) },
+		OnServerToolResult: func(kind string, resultCount int) { results = append(results, resultCount) },
+	})
+	if !reflect.DeepEqual(uses, []string{"web_search:café"}) {
+		t.Fatalf("server tool use callbacks = %#v", uses)
+	}
+	if !reflect.DeepEqual(results, []int{2}) {
+		t.Fatalf("server tool result callbacks = %#v", results)
+	}
+	if len(collected.ServerToolBlocks) != 1 || collected.ServerToolBlocks[0].Data != `{"encrypted_content":"opaque-東京"}` {
+		t.Fatalf("server tool blocks = %#v", collected.ServerToolBlocks)
 	}
 }
 

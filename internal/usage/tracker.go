@@ -17,6 +17,7 @@ type Normalized struct {
 	CacheWriteTokens  int
 	OutputTokens      int
 	ReasoningTokens   int
+	WebSearchRequests int
 	TotalTokens       int
 }
 
@@ -213,7 +214,7 @@ func (tracker *Tracker) Record(input RecordInput) (Record, error) {
 	record.Provider = model.Provider
 	cost, err := modelregistry.CalculateCost(model, runtimeUsage)
 	if err != nil {
-		if model.Cost.IsUnpriced() {
+		if model.Cost.IsUnpriced() || (runtimeUsage.WebSearchRequests > 0 && model.Cost.WebSearchPerRequest == 0) {
 			record.Cost = unpricedCost(fmt.Sprintf("price unavailable for model %q: %v", record.ModelID, err))
 			copyCostMetadata(&record, record.Cost)
 			tracker.records = append(tracker.records, record)
@@ -299,12 +300,17 @@ func Normalize(usage zeroruntime.Usage) (Normalized, zeroruntime.Usage, error) {
 	if reasoningTokens > outputTokens {
 		return Normalized{}, zeroruntime.Usage{}, fmt.Errorf("reasoning tokens %d exceeds output tokens %d", reasoningTokens, outputTokens)
 	}
+	webSearchRequests, err := nonNegative(usage.WebSearchRequests, "webSearchRequests")
+	if err != nil {
+		return Normalized{}, zeroruntime.Usage{}, err
+	}
 	normalized := Normalized{
 		InputTokens:       inputTokens,
 		CachedInputTokens: cachedInputTokens,
 		CacheWriteTokens:  cacheWriteTokens,
 		OutputTokens:      outputTokens,
 		ReasoningTokens:   reasoningTokens,
+		WebSearchRequests: webSearchRequests,
 		TotalTokens:       inputTokens + outputTokens,
 	}
 	return normalized, zeroruntime.Usage{
@@ -315,6 +321,7 @@ func Normalize(usage zeroruntime.Usage) (Normalized, zeroruntime.Usage, error) {
 		OutputTokens:      outputTokens,
 		CompletionTokens:  outputTokens,
 		ReasoningTokens:   reasoningTokens,
+		WebSearchRequests: webSearchRequests,
 	}, nil
 }
 
