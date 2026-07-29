@@ -73,7 +73,9 @@ func TestCoreReadOnlyToolsExposeSafeMetadata(t *testing.T) {
 }
 
 func TestCoreNetworkToolsExposeSafetyMetadata(t *testing.T) {
-	// Provider-executed web search is not registered as a local tool.
+	// No production code reads this variable today. It stays set here as a
+	// guard: if registration ever depends on a search backend again, this
+	// test must fail without the variable set.
 	t.Setenv("SPLICE_WEBSEARCH_BASE_URL", "https://search.example/api")
 	byName := map[string]Tool{}
 	for _, tool := range CoreNetworkTools() {
@@ -101,19 +103,30 @@ func TestCoreNetworkToolsExposeSafetyMetadata(t *testing.T) {
 	}
 }
 
-func TestCoreNetworkToolsOmitWebSearchWhenUnconfigured(t *testing.T) {
-	// No backend configured → don't offer web_search (it could only error, which
-	// makes the model waste calls + prompts before falling back to an MCP search).
-	t.Setenv("SPLICE_WEBSEARCH_BASE_URL", "")
-	names := map[string]bool{}
-	for _, tool := range CoreNetworkTools() {
-		names[tool.Name()] = true
+func TestCoreNetworkToolsNeverRegisterWebSearch(t *testing.T) {
+	// The provider runs web search. Splice offers no local tool for it,
+	// no matter how the legacy search-backend variable is set.
+	tests := []struct {
+		name    string
+		baseURL string
+	}{
+		{name: "base url set", baseURL: "https://search.example/api"},
+		{name: "base url empty", baseURL: ""},
 	}
-	if !names["web_fetch"] {
-		t.Fatal("web_fetch should always be present")
-	}
-	if names["web_search"] {
-		t.Fatal("web_search must be omitted when no search backend is configured")
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("SPLICE_WEBSEARCH_BASE_URL", test.baseURL)
+			names := map[string]bool{}
+			for _, tool := range CoreNetworkTools() {
+				names[tool.Name()] = true
+			}
+			if !names["web_fetch"] {
+				t.Fatal("web_fetch should always be present")
+			}
+			if names["web_search"] {
+				t.Fatal("web_search must never be registered in core network tools")
+			}
+		})
 	}
 }
 

@@ -897,6 +897,9 @@ func TestRunRejectsLocalWebFetchBeforePermissionRequest(t *testing.T) {
 }
 
 func TestRunDoesNotAdvertiseProviderExecutedWebSearch(t *testing.T) {
+	// No production code reads this variable today. It stays set here as a
+	// guard: if CoreNetworkTools() ever reintroduces web_search when a
+	// backend is configured, this test must still catch it advertised below.
 	t.Setenv("SPLICE_WEBSEARCH_BASE_URL", "https://search.example/api")
 	registry := tools.NewRegistry()
 	for _, tool := range tools.CoreNetworkTools() {

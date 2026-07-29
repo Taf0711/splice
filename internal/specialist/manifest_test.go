@@ -379,6 +379,9 @@ Prompt.`)
 
 func TestKnownToolNamesMatchCoreRegistry(t *testing.T) {
 	// CoreTools() exposes the full set this list is meant to mirror.
+	// No production code reads this variable today. It stays set here as a
+	// guard: if a search backend var ever brings web_search back, this
+	// comparison must still catch the drift in knownToolNames.
 	t.Setenv("SPLICE_WEBSEARCH_BASE_URL", "https://search.example/api")
 	core := tools.CoreTools(t.TempDir())
 	got := make([]string, 0, len(knownToolNames))
