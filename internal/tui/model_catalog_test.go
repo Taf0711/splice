@@ -45,12 +45,12 @@ func TestTUIUsageTrackerPricesDerivedModel(t *testing.T) {
 
 func TestProviderProfileRefreshUpdatesCatalogAndUsageTracker(t *testing.T) {
 	modelregistry.EnableModelsDevOverlay()
-	previousProvider, hadProvider := os.LookupEnv("ZERO_PROVIDER")
+	previousProvider, hadProvider := os.LookupEnv("SPLICE_PROVIDER")
 	t.Cleanup(func() {
 		if hadProvider {
-			_ = os.Setenv("ZERO_PROVIDER", previousProvider)
+			_ = os.Setenv("SPLICE_PROVIDER", previousProvider)
 		} else {
-			_ = os.Unsetenv("ZERO_PROVIDER")
+			_ = os.Unsetenv("SPLICE_PROVIDER")
 		}
 	})
 	m := newModel(context.Background(), Options{

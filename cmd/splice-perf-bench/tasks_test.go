@@ -31,8 +31,8 @@ func TestParseTaskArgsRequiresSuiteAndModel(t *testing.T) {
 func TestParseTaskArgsReadsFlagsAndEnv(t *testing.T) {
 	env := func(key string) string {
 		return map[string]string{
-			"ZERO_BENCH_COMMIT":  "deadbeef",
-			"ZERO_BENCH_VERSION": "9.9.9",
+			"SPLICE_BENCH_COMMIT":  "deadbeef",
+			"SPLICE_BENCH_VERSION": "9.9.9",
 		}[key]
 	}
 	options, err := parseTaskArgs([]string{
@@ -63,7 +63,7 @@ func TestParseTaskArgsReadsFlagsAndEnv(t *testing.T) {
 
 func TestParseTaskArgsFlagsOverrideEnv(t *testing.T) {
 	env := func(key string) string {
-		return map[string]string{"ZERO_BENCH_COMMIT": "fromenv"}[key]
+		return map[string]string{"SPLICE_BENCH_COMMIT": "fromenv"}[key]
 	}
 	options, err := parseTaskArgs([]string{"--suite", "/s.json", "--model", "m", "--commit", "fromflag"}, env)
 	if err != nil {

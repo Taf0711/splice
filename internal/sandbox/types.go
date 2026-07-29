@@ -7,24 +7,24 @@ import (
 )
 
 // EnvSandboxed marks a process that splice has already wrapped in a sandbox: every
-// wrapped command carries ZERO_SANDBOXED=1 in its environment. When such a
+// wrapped command carries SPLICE_SANDBOXED=1 in its environment. When such a
 // process spawns another command through the engine, the re-entrancy guard
 // returns a pass-through plan instead of double-wrapping it; nested platform
 // wrappers fail, and a second sandbox wrapper would be redundant. Unset by
 // default.
-const EnvSandboxed = "ZERO_SANDBOXED"
+const EnvSandboxed = "SPLICE_SANDBOXED"
 
 // EnvSandboxBackend records which backend wrapped the command. sandboxEnvironment
 // always sets it alongside EnvSandboxed, so it serves as a corroborating marker:
 // the re-entrancy guard requires BOTH, raising the provenance bar above a single
-// ambient flag (a stray or hand-exported ZERO_SANDBOXED=1 with no backend marker
+// ambient flag (a stray or hand-exported SPLICE_SANDBOXED=1 with no backend marker
 // no longer forces an unsandboxed pass-through).
-const EnvSandboxBackend = "ZERO_SANDBOX_BACKEND"
+const EnvSandboxBackend = "SPLICE_SANDBOX_BACKEND"
 
 // IsAlreadySandboxed reports whether the current process is already running
 // inside a splice-created sandbox. It requires BOTH correlated markers that
 // sandboxEnvironment sets together — EnvSandboxed == "1" AND a non-empty
-// EnvSandboxBackend — so a single user-set/inherited ZERO_SANDBOXED=1 cannot by
+// EnvSandboxBackend — so a single user-set/inherited SPLICE_SANDBOXED=1 cannot by
 // itself disable wrapping. splice sets both only on genuinely wrapped commands;
 // pass-through (direct) plans set neither.
 func IsAlreadySandboxed() bool {

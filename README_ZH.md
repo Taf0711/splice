@@ -316,12 +316,12 @@ MCP 服务器（`splice mcp`）和独立的 Markdown 技能（`splice skills`）
 | 控制 | 效果 |
 |---|---|
 | `NO_COLOR=<任意值>` | 禁用颜色输出 |
-| `ZERO_THEME=<名称>` | 选择启动主题（`auto`、`dark`、`light`，或颜色主题如 `dracula`、`nord`、`gruvbox`、`tokyo-night`、`catppuccin`、`one-dark`、`solarized-dark`、`rose-pine`、`everforest`、`solarized-light`） |
+| `SPLICE_THEME=<名称>` | 选择启动主题（`auto`、`dark`、`light`，或颜色主题如 `dracula`、`nord`、`gruvbox`、`tokyo-night`、`catppuccin`、`one-dark`、`solarized-dark`、`rose-pine`、`everforest`、`solarized-light`） |
 | `--theme <名称>` | 从 CLI 选择 TUI 主题（相同名称） |
 | `/theme` | 在 TUI 中打开主题选择器（实时预览；`/theme <名称>` 直接切换） |
-| `ZERO_NO_FADE=1` | 禁用流式淡入动画 |
+| `SPLICE_NO_FADE=1` | 禁用流式淡入动画 |
 
-> 注意：这些主题环境变量仍使用来自上游引擎的 `ZERO_` 前缀。重命名为 `SPLICE_` 已计划但尚未应用；在过渡期间两个名称都将被接受。
+> 注意：这些主题环境变量仍使用来自上游引擎的 `SPLICE_` 前缀。重命名为 `SPLICE_` 已计划但尚未应用；在过渡期间两个名称都将被接受。
 
 含义不仅仅依赖于颜色；差异、权限和状态也使用文本或标记符号。
 

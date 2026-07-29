@@ -24,7 +24,7 @@ var themeModes = append([]string{string(themeAuto)}, themeNames()...)
 
 // resolveThemeMode picks the first accepted preference from candidates in
 // precedence order — the caller passes them highest-first: the --theme flag, then
-// ZERO_THEME, then the persisted config theme. A value is accepted if it is `auto`
+// SPLICE_THEME, then the persisted config theme. A value is accepted if it is `auto`
 // or names a registered theme; unrecognized/blank values are skipped, and an empty
 // list (or all-unrecognized) falls back to auto.
 func resolveThemeMode(candidates ...string) themeMode {
@@ -54,7 +54,7 @@ func validThemeMode(s string) bool {
 	return ok
 }
 
-// ValidThemeArg reports whether s is an acceptable --theme / ZERO_THEME value
+// ValidThemeArg reports whether s is an acceptable --theme / SPLICE_THEME value
 // (`auto` or a registered theme name). Exported so the CLI flag validator shares
 // this one source of truth instead of hardcoding the theme list.
 func ValidThemeArg(s string) bool { return validThemeMode(s) }

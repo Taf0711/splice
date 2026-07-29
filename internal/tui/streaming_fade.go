@@ -19,13 +19,13 @@ func defaultReducedMotion() bool {
 
 // reducedMotionEnabled reports whether animations (the streaming fade AND the
 // animated spinner) should be replaced with static equivalents. It is an
-// explicit accessibility/preference switch via ZERO_REDUCED_MOTION, and is also
+// explicit accessibility/preference switch via SPLICE_REDUCED_MOTION, and is also
 // forced when there is no TTY (animation frames are meaningless to a pipe).
 // Reduced motion never removes liveness: a steady glyph plus the advancing
 // elapsed timer keeps the "still working" cue. It is one switch for all motion,
-// whereas ZERO_NO_FADE only governs the streaming-text fade.
+// whereas SPLICE_NO_FADE only governs the streaming-text fade.
 func reducedMotionEnabled(env func(string) string, profile colorprofile.Profile) bool {
-	if v := strings.TrimSpace(env("ZERO_REDUCED_MOTION")); v != "" && v != "0" && !strings.EqualFold(v, "false") {
+	if v := strings.TrimSpace(env("SPLICE_REDUCED_MOTION")); v != "" && v != "0" && !strings.EqualFold(v, "false") {
 		return true
 	}
 	return profile == colorprofile.NoTTY

@@ -119,7 +119,7 @@ func TestSandboxCheckReportsWindowsNativeSetupStates(t *testing.T) {
 		t.Fatalf("expected native Windows backend in message, got %q", native.Message)
 	}
 
-	t.Setenv("ZERO_WINDOWS_SANDBOX_HOME", t.TempDir())
+	t.Setenv("SPLICE_WINDOWS_SANDBOX_HOME", t.TempDir())
 	needsSetup := Run(Options{
 		Now:           fixedDoctorClock("2026-06-12T10:08:30Z"),
 		Runtime:       "go",

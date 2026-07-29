@@ -258,9 +258,9 @@ func TestCheckResolvesEndpointPrecedence(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.clearEnv {
-				t.Setenv("ZERO_UPDATE_RELEASE_URL", "")
+				t.Setenv("SPLICE_UPDATE_RELEASE_URL", "")
 			} else {
-				t.Setenv("ZERO_UPDATE_RELEASE_URL", tt.env)
+				t.Setenv("SPLICE_UPDATE_RELEASE_URL", tt.env)
 			}
 			options := tt.options
 			options.CurrentVersion = "0.1.0"

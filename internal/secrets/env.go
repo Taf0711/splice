@@ -14,7 +14,6 @@ var credentialEnvExact = map[string]struct{}{
 	"GOOGLE_APPLICATION_CREDENTIALS": {},
 	"GITHUB_TOKEN":                   {},
 	"GH_TOKEN":                       {},
-	"ZERO_API_KEY":                   {},
 	"SPLICE_API_KEY":                 {},
 	"ANTHROPIC_API_KEY":              {},
 	"OPENAI_API_KEY":                 {},

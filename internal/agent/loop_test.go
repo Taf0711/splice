@@ -897,7 +897,7 @@ func TestRunRejectsLocalWebFetchBeforePermissionRequest(t *testing.T) {
 }
 
 func TestRunAdvertisesPromptedWebSearchInAutoMode(t *testing.T) {
-	t.Setenv("ZERO_WEBSEARCH_BASE_URL", "https://search.example/api")
+	t.Setenv("SPLICE_WEBSEARCH_BASE_URL", "https://search.example/api")
 	registry := tools.NewRegistry()
 	for _, tool := range tools.CoreNetworkTools() {
 		if tool.Name() == "web_search" {

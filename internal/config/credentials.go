@@ -12,7 +12,7 @@ import (
 
 // ProviderKeyStoreAt opens the encrypted credential store whose file backend lives
 // in dir. The backend resolves keyring-first, then encrypted-file, with a plaintext
-// opt-out via ZERO_CRED_STORAGE. The dir parameter exists so tests can point the file
+// opt-out via SPLICE_CRED_STORAGE. The dir parameter exists so tests can point the file
 // backend at a temp directory; production always uses the user config directory
 // (ProviderKeyStore) because provider API keys are user-scoped by design — they are
 // only ever captured under the user config, never project config (a cloned repo must

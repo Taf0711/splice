@@ -24,8 +24,8 @@ func TestProviderHasOAuthLogin(t *testing.T) {
 
 func TestSetupRequiredRecognizesOAuthLogin(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tok.json")
-	t.Setenv("ZERO_OAUTH_STORAGE", "file") // an inherited "keyring" would ignore the temp path and hit the OS keychain
-	t.Setenv("ZERO_OAUTH_TOKENS_PATH", path)
+	t.Setenv("SPLICE_OAUTH_STORAGE", "file") // an inherited "keyring" would ignore the temp path and hit the OS keychain
+	t.Setenv("SPLICE_OAUTH_TOKENS_PATH", path)
 	store, err := oauth.NewStore(oauth.StoreOptions{FilePath: path})
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
@@ -53,8 +53,8 @@ func TestSetupRequiredRecognizesOAuthLogin(t *testing.T) {
 // case-sensitive; a case-insensitive dedupe would swallow it).
 func TestOAuthResolverForProfileFallsBackToCatalogID(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tok.json")
-	t.Setenv("ZERO_OAUTH_STORAGE", "file") // an inherited "keyring" would ignore the temp path and hit the OS keychain
-	t.Setenv("ZERO_OAUTH_TOKENS_PATH", path)
+	t.Setenv("SPLICE_OAUTH_STORAGE", "file") // an inherited "keyring" would ignore the temp path and hit the OS keychain
+	t.Setenv("SPLICE_OAUTH_TOKENS_PATH", path)
 	store, err := oauth.NewStore(oauth.StoreOptions{FilePath: path})
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
@@ -93,8 +93,8 @@ func TestOAuthResolverForProfileFallsBackToCatalogID(t *testing.T) {
 // resolver even when a catalog-shared login exists.
 func TestOAuthResolverForProfileDoesNotOverrideExplicitKey(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tok.json")
-	t.Setenv("ZERO_OAUTH_STORAGE", "file") // an inherited "keyring" would ignore the temp path and hit the OS keychain
-	t.Setenv("ZERO_OAUTH_TOKENS_PATH", path)
+	t.Setenv("SPLICE_OAUTH_STORAGE", "file") // an inherited "keyring" would ignore the temp path and hit the OS keychain
+	t.Setenv("SPLICE_OAUTH_TOKENS_PATH", path)
 	store, err := oauth.NewStore(oauth.StoreOptions{FilePath: path})
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)

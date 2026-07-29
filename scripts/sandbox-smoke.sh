@@ -43,15 +43,15 @@ build_cmd windows ./cmd/splice-windows-sandbox-setup zero-windows-sandbox-setup.
 
 case "$(go env GOOS)" in
   linux)
-    ZERO_SANDBOX_REAL_SMOKE=1 go test ./internal/sandbox -run 'TestLinuxHelperRealSandboxSmoke|TestLinuxLandlockRealSandboxSmoke' -count=1
+    SPLICE_SANDBOX_REAL_SMOKE=1 go test ./internal/sandbox -run 'TestLinuxHelperRealSandboxSmoke|TestLinuxLandlockRealSandboxSmoke' -count=1
     ;;
   darwin)
     go test ./internal/sandbox -run TestSandboxExecProfileAllowsDevNullAndTemp -count=1
     ;;
   windows)
-    ZERO_SANDBOX_REAL_SMOKE=1 \
-      ZERO_WINDOWS_COMMAND_RUNNER_EXE="$tmpdir/windows-zero-windows-command-runner.exe" \
-      ZERO_WINDOWS_SANDBOX_SETUP_EXE="$tmpdir/windows-zero-windows-sandbox-setup.exe" \
+    SPLICE_SANDBOX_REAL_SMOKE=1 \
+      SPLICE_WINDOWS_COMMAND_RUNNER_EXE="$tmpdir/windows-zero-windows-command-runner.exe" \
+      SPLICE_WINDOWS_SANDBOX_SETUP_EXE="$tmpdir/windows-zero-windows-sandbox-setup.exe" \
       go test ./internal/sandbox -run TestWindowsRestrictedTokenRealSandboxSmoke -count=1
     ;;
   *)

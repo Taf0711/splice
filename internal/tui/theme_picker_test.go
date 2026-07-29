@@ -47,7 +47,7 @@ func TestThemeChoicePersistsAcrossRestart(t *testing.T) {
 	}
 }
 
-// resolveThemeMode precedence: flag > ZERO_THEME > persisted config > auto.
+// resolveThemeMode precedence: flag > SPLICE_THEME > persisted config > auto.
 func TestResolveThemeModeConfigFallback(t *testing.T) {
 	if got := resolveThemeMode("", "", "nord"); got != themeMode("nord") {
 		t.Errorf("saved-only = %q, want nord", got)

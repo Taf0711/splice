@@ -2,10 +2,10 @@
 set -euo pipefail
 
 SPLICE_REPO="${SPLICE_REPO:-Taf0711/splice}"
-ZERO_VERSION="${ZERO_VERSION:-latest}"
+SPLICE_VERSION="${SPLICE_VERSION:-latest}"
 SPLICE_INSTALL_DIR="${SPLICE_INSTALL_DIR:-$HOME/.local/bin}"
-ZERO_GITHUB_API="${ZERO_GITHUB_API:-https://api.github.com}"
-ZERO_GITHUB_BASE_URL="${ZERO_GITHUB_BASE_URL:-https://github.com}"
+SPLICE_GITHUB_API="${SPLICE_GITHUB_API:-https://api.github.com}"
+SPLICE_GITHUB_BASE_URL="${SPLICE_GITHUB_BASE_URL:-https://github.com}"
 
 usage() {
   cat <<'EOF'
@@ -15,11 +15,11 @@ Usage:
   scripts/install.sh [--version <version>] [--repo <owner/repo>] [--install-dir <path>]
 
 Environment:
-  ZERO_VERSION          Release version or tag. Defaults to latest.
+  SPLICE_VERSION          Release version or tag. Defaults to latest.
   SPLICE_REPO             GitHub repository. Defaults to Taf0711/splice.
   SPLICE_INSTALL_DIR      Directory for the splice binary. Defaults to ~/.local/bin.
-  ZERO_GITHUB_API       GitHub API base URL. Defaults to https://api.github.com.
-  ZERO_GITHUB_BASE_URL  GitHub web base URL. Defaults to https://github.com.
+  SPLICE_GITHUB_API       GitHub API base URL. Defaults to https://api.github.com.
+  SPLICE_GITHUB_BASE_URL  GitHub web base URL. Defaults to https://github.com.
 EOF
 }
 
@@ -32,7 +32,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --version)
       [ "$#" -ge 2 ] || fail "--version requires a value"
-      ZERO_VERSION="$2"
+      SPLICE_VERSION="$2"
       shift 2
       ;;
     --repo)
@@ -103,7 +103,7 @@ detect_arch() {
 
 latest_tag() {
   local metadata_file="$1"
-  local api_url="${ZERO_GITHUB_API%/}/repos/${SPLICE_REPO}/releases/latest"
+  local api_url="${SPLICE_GITHUB_API%/}/repos/${SPLICE_REPO}/releases/latest"
   local tag
 
   download_json "$api_url" "$metadata_file"
@@ -188,12 +188,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [ "$ZERO_VERSION" = "latest" ]; then
+if [ "$SPLICE_VERSION" = "latest" ]; then
   tag="$(latest_tag "$tmp_dir/latest.json")"
 else
-  case "$ZERO_VERSION" in
-    v*) tag="$ZERO_VERSION" ;;
-    *) tag="v$ZERO_VERSION" ;;
+  case "$SPLICE_VERSION" in
+    v*) tag="$SPLICE_VERSION" ;;
+    *) tag="v$SPLICE_VERSION" ;;
   esac
 fi
 
@@ -202,7 +202,7 @@ platform="$(detect_platform)"
 arch="$(detect_arch)"
 archive_name="splice-v${version}-${platform}-${arch}.tar.gz"
 checksum_name="${archive_name}.sha256"
-release_url="${ZERO_GITHUB_BASE_URL%/}/${SPLICE_REPO}/releases/download/${tag}"
+release_url="${SPLICE_GITHUB_BASE_URL%/}/${SPLICE_REPO}/releases/download/${tag}"
 archive_path="$tmp_dir/$archive_name"
 checksum_path="$tmp_dir/$checksum_name"
 extract_dir="$tmp_dir/extract"

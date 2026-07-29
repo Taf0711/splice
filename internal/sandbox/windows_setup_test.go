@@ -169,7 +169,7 @@ func TestWindowsSandboxSetupConfigFromCommandPreservesProfileInputs(t *testing.T
 			},
 			Network: NetworkPolicy{Mode: NetworkDeny},
 		},
-		Env:     map[string]string{"ZERO_SANDBOXED": "1"},
+		Env:     map[string]string{"SPLICE_SANDBOXED": "1"},
 		Command: []string{"cmd.exe", "/c", "dir"},
 	}
 	setup := WindowsSandboxSetupConfigFromCommand(command)

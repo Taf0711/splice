@@ -516,7 +516,7 @@ func mergeProfile(base ProviderProfile, next ProviderProfile) ProviderProfile {
 }
 
 // ActiveProviderEnv selects the active provider profile by name (read in applyEnv).
-const ActiveProviderEnv = "ZERO_PROVIDER"
+const ActiveProviderEnv = "SPLICE_PROVIDER"
 
 // SetActiveProviderEnv exports the active provider name to the process environment
 // so a spawned child process (which inherits the environment) resolves the SAME
@@ -536,7 +536,7 @@ func SetActiveProviderEnv(name string) {
 }
 
 // MaxTurnsEnv overrides the per-run tool-turn budget by name (read in applyEnv).
-const MaxTurnsEnv = "ZERO_MAX_TURNS"
+const MaxTurnsEnv = "SPLICE_MAX_TURNS"
 
 // SetMaxTurnsEnv exports the per-run tool-turn budget to the process environment so
 // a spawned child (sub-agent / swarm member, which inherits the environment) runs

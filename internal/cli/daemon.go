@@ -60,8 +60,8 @@ Commands:
   attach <session>          Attach to a running session's stream.
   serve-remote --addr <host:port> --tls-cert <f> --tls-key <f> [--bundle-dir <d>]
                             Serve an opt-in, TLS-only network bridge to this
-                            daemon. Requires a bearer token in $ZERO_DAEMON_REMOTE_TOKEN
-                            (or $ZERO_DAEMON_REMOTE_TOKEN_FILE). --bundle-dir enables
+                            daemon. Requires a bearer token in $SPLICE_DAEMON_REMOTE_TOKEN
+                            (or $SPLICE_DAEMON_REMOTE_TOKEN_FILE). --bundle-dir enables
                             git-bundle uploads, extracted into per-link work trees.
   link --remote <host:port> --repo <dir> --id <name> [--out <file>]
                             Upload repo's git history to the remote as a bundle and

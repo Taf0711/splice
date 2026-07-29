@@ -30,7 +30,7 @@ go run ./cmd/splice-release smoke
   archive's SHA-256, and extracts only the known binary basenames into place.
   `SPLICE_SKIP_DOWNLOAD=1` opts out cleanly (exit 0) and an unsupported
   platform/arch is a non-fatal skip. These environment variables retain the
-  upstream ZERO_ prefix; a rename to SPLICE_ is planned.
+  upstream SPLICE_ prefix; a rename to SPLICE_ is planned.
 - The wrapper binary resolves through the package `bin` entry and
   `node_modules/.bin` in a package-install smoke test.
 - The built binary exits 0 for `splice --version` or `splice --help`.

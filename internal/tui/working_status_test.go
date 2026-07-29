@@ -117,7 +117,7 @@ func TestQuietGenerationHint(t *testing.T) {
 func TestQuietGenerationHintEscalatesPastHalfIdleTimeout(t *testing.T) {
 	// 30s idle timeout: half (15s) sits comfortably above quietWorkingHint (8s),
 	// leaving a clean window to observe the plain cue before it escalates.
-	t.Setenv("ZERO_STREAM_IDLE_TIMEOUT", "30s")
+	t.Setenv("SPLICE_STREAM_IDLE_TIMEOUT", "30s")
 	base := time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
 	m := model{now: func() time.Time { return base }}
 	m.activeRunID = 7

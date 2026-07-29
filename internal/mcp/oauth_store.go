@@ -72,7 +72,7 @@ type tokenFile struct {
 // file, honoring an explicit override, XDG_CONFIG_HOME, then the user home dir.
 // It is used to locate a pre-unification file for migration.
 func ResolveTokenStorePath(env map[string]string) (string, error) {
-	override := strings.TrimSpace(envValue(env, "ZERO_MCP_OAUTH_TOKENS_PATH"))
+	override := strings.TrimSpace(envValue(env, "SPLICE_MCP_OAUTH_TOKENS_PATH"))
 	if override != "" {
 		if filepath.IsAbs(override) {
 			return filepath.Clean(override), nil

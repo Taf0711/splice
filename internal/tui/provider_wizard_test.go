@@ -687,7 +687,7 @@ func TestProviderWizardAppliesPastedKeyToCurrentSession(t *testing.T) {
 func TestProviderWizardPersistsPastedKeyToUserConfig(t *testing.T) {
 	const secret = "ollama-secret-123"
 	// Encrypted-file backend in the temp config dir keeps the test off the real keychain.
-	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	t.Setenv("SPLICE_CRED_STORAGE", "encrypted-file")
 	configPath := filepath.Join(t.TempDir(), "splice", "config.json")
 	var captured config.ProviderProfile
 	m := newModel(context.Background(), Options{
@@ -1268,7 +1268,7 @@ func TestWizardProviderStoredKey(t *testing.T) {
 }
 
 func TestProviderWizardManageKeyRemove(t *testing.T) {
-	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	t.Setenv("SPLICE_CRED_STORAGE", "encrypted-file")
 	configPath := filepath.Join(t.TempDir(), "splice", "config.json")
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 		t.Fatal(err)
@@ -1400,7 +1400,7 @@ func containsString(values []string, want string) bool {
 }
 
 // Applying the wizard switches the live provider, so it must export
-// ZERO_PROVIDER exactly like the /model and /provider switch paths — a stale
+// SPLICE_PROVIDER exactly like the /model and /provider switch paths — a stale
 // value from an earlier switch would otherwise win over config in every
 // spawned child (applyEnv) and pin specialists/swarm members to the OLD
 // provider's credentials.
@@ -1443,11 +1443,11 @@ func TestApplyProviderWizardExportsActiveProviderEnv(t *testing.T) {
 
 // On a config PERSIST failure, applyProviderWizard must leave live state fully
 // unchanged — the chat must NOT already be running on the new provider while the
-// status line and the ZERO_PROVIDER export (which pins spawned children) still
+// status line and the SPLICE_PROVIDER export (which pins spawned children) still
 // point at the old one. Build and persist are staged into locals; nothing is
 // committed unless both succeed.
 func TestApplyProviderWizardPersistFailureLeavesLiveStateUnchanged(t *testing.T) {
-	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file") // never touch the real OS keychain: apiKey is secured before the persist fails
+	t.Setenv("SPLICE_CRED_STORAGE", "encrypted-file") // never touch the real OS keychain: apiKey is secured before the persist fails
 	t.Setenv(config.ActiveProviderEnv, "old-provider")
 
 	// A config path whose parent is a regular FILE, so writeConfigFile's MkdirAll

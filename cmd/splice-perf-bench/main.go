@@ -77,23 +77,23 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 }
 
 func parseArgs(args []string, getenv func(string) string) (cliOptions, error) {
-	iterations, err := readPositiveIntegerEnv(getenv, "ZERO_PERF_ITERATIONS", defaultIterations)
+	iterations, err := readPositiveIntegerEnv(getenv, "SPLICE_PERF_ITERATIONS", defaultIterations)
 	if err != nil {
 		return cliOptions{}, err
 	}
-	warmupIterations, err := readNonNegativeIntegerEnv(getenv, "ZERO_PERF_WARMUP_ITERATIONS", defaultWarmupIterations)
+	warmupIterations, err := readNonNegativeIntegerEnv(getenv, "SPLICE_PERF_WARMUP_ITERATIONS", defaultWarmupIterations)
 	if err != nil {
 		return cliOptions{}, err
 	}
-	coldStartP95Ms, err := readPositiveNumberEnv(getenv, "ZERO_PERF_COLD_START_WARN_MS", perfbench.DefaultThresholds.ColdStartP95Ms)
+	coldStartP95Ms, err := readPositiveNumberEnv(getenv, "SPLICE_PERF_COLD_START_WARN_MS", perfbench.DefaultThresholds.ColdStartP95Ms)
 	if err != nil {
 		return cliOptions{}, err
 	}
-	firstOutputP95Ms, err := readPositiveNumberEnv(getenv, "ZERO_PERF_FIRST_OUTPUT_WARN_MS", perfbench.DefaultThresholds.FirstOutputP95Ms)
+	firstOutputP95Ms, err := readPositiveNumberEnv(getenv, "SPLICE_PERF_FIRST_OUTPUT_WARN_MS", perfbench.DefaultThresholds.FirstOutputP95Ms)
 	if err != nil {
 		return cliOptions{}, err
 	}
-	harnessEndRssMaxMb, err := readPositiveNumberEnv(getenv, "ZERO_PERF_HARNESS_END_RSS_WARN_MB", perfbench.DefaultThresholds.HarnessEndRssMaxMb)
+	harnessEndRssMaxMb, err := readPositiveNumberEnv(getenv, "SPLICE_PERF_HARNESS_END_RSS_WARN_MB", perfbench.DefaultThresholds.HarnessEndRssMaxMb)
 	if err != nil {
 		return cliOptions{}, err
 	}
@@ -221,9 +221,9 @@ func helpText() string {
 		"  -h, --help                   Show this help",
 		"",
 		"Environment overrides:",
-		"  ZERO_PERF_ITERATIONS, ZERO_PERF_WARMUP_ITERATIONS",
-		"  ZERO_PERF_COLD_START_WARN_MS, ZERO_PERF_FIRST_OUTPUT_WARN_MS",
-		"  ZERO_PERF_HARNESS_END_RSS_WARN_MB",
+		"  SPLICE_PERF_ITERATIONS, SPLICE_PERF_WARMUP_ITERATIONS",
+		"  SPLICE_PERF_COLD_START_WARN_MS, SPLICE_PERF_FIRST_OUTPUT_WARN_MS",
+		"  SPLICE_PERF_HARNESS_END_RSS_WARN_MB",
 	}, "\n") + "\n"
 }
 

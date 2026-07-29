@@ -1178,8 +1178,8 @@ func clearProviderEnv(t *testing.T) {
 	t.Helper()
 
 	for _, key := range []string{
-		"ZERO_PROVIDER_COMMAND",
-		"ZERO_PROVIDER",
+		"SPLICE_PROVIDER_COMMAND",
+		"SPLICE_PROVIDER",
 		"OPENAI_API_KEY",
 		"OPENAI_BASE_URL",
 		"OPENAI_MODEL",

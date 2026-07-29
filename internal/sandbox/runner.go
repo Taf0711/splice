@@ -129,7 +129,7 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 	}
 	preference := SandboxPreferenceAuto
 	// Re-entrancy guard: a command spawned by a process we already wrapped (both
-	// ZERO_SANDBOXED=1 and ZERO_SANDBOX_BACKEND set in its env — see
+	// SPLICE_SANDBOXED=1 and SPLICE_SANDBOX_BACKEND set in its env — see
 	// IsAlreadySandboxed) must not be wrapped again — nested platform wrappers
 	// fail and a second sandbox wrapper would be redundant. Return a pass-through
 	// plan.
@@ -396,7 +396,7 @@ func sandboxEnvironmentForCommand(specEnv []string, policy Policy, backend Backe
 		"PATH=" + pathValue,
 		"TERM=" + envListValue(env, "TERM", "dumb"),
 		EnvSandboxBackend + "=" + string(backend),
-		"ZERO_SANDBOX_NETWORK=" + string(policy.Network),
+		"SPLICE_SANDBOX_NETWORK=" + string(policy.Network),
 		EnvSandboxed + "=1",
 	}
 	if runtime.GOOS == "windows" {

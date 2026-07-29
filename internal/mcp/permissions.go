@@ -96,7 +96,7 @@ var (
 )
 
 func ResolvePermissionPath(env map[string]string) (string, error) {
-	override := strings.TrimSpace(envValue(env, "ZERO_MCP_PERMISSIONS_PATH"))
+	override := strings.TrimSpace(envValue(env, "SPLICE_MCP_PERMISSIONS_PATH"))
 	if override != "" {
 		if filepath.IsAbs(override) {
 			return filepath.Clean(override), nil

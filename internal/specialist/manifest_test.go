@@ -380,7 +380,7 @@ Prompt.`)
 func TestKnownToolNamesMatchCoreRegistry(t *testing.T) {
 	// web_search is only registered when a search backend is configured; set one so
 	// CoreTools() exposes the full set this list is meant to mirror.
-	t.Setenv("ZERO_WEBSEARCH_BASE_URL", "https://search.example/api")
+	t.Setenv("SPLICE_WEBSEARCH_BASE_URL", "https://search.example/api")
 	core := tools.CoreTools(t.TempDir())
 	got := make([]string, 0, len(knownToolNames))
 	for name := range knownToolNames {

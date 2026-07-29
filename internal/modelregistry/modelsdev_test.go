@@ -225,7 +225,7 @@ func TestModelsDevCostTiersCalculateCostUsesInheritedCacheRate(t *testing.T) {
 func TestApplyModelsDevOverrides(t *testing.T) {
 	// Point the cache at a non-existent file so the embedded baseline is used,
 	// then apply the sample snapshot explicitly.
-	t.Setenv("ZERO_MODELS_CACHE_PATH", filepath.Join(t.TempDir(), "absent.json"))
+	t.Setenv("SPLICE_MODELS_CACHE_PATH", filepath.Join(t.TempDir(), "absent.json"))
 	resetModelsDevCacheForTest()
 	t.Cleanup(resetModelsDevCacheForTest)
 
@@ -371,7 +371,7 @@ func TestApplyModelsDevOverridesKeepsMalformedCuratedRecordsStrict(t *testing.T)
 }
 
 func TestDefaultRegistryReportsSkippedModelsDevRecords(t *testing.T) {
-	t.Setenv("ZERO_DISABLE_MODELS_FETCH", "")
+	t.Setenv("SPLICE_DISABLE_MODELS_FETCH", "")
 	data := []byte(`{
   "openrouter": {
     "models": {
@@ -387,7 +387,7 @@ func TestDefaultRegistryReportsSkippedModelsDevRecords(t *testing.T) {
 	if err := os.WriteFile(cachePath, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("ZERO_MODELS_CACHE_PATH", cachePath)
+	t.Setenv("SPLICE_MODELS_CACHE_PATH", cachePath)
 	resetModelsDevCacheForTest()
 	t.Cleanup(resetModelsDevCacheForTest)
 	EnableModelsDevOverlay()
@@ -405,7 +405,7 @@ func TestDefaultRegistryResolvesProviderScopedDerivedModel(t *testing.T) {
 	if err := os.WriteFile(cachePath, []byte(sampleModelsDevProviderScoped), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("ZERO_MODELS_CACHE_PATH", cachePath)
+	t.Setenv("SPLICE_MODELS_CACHE_PATH", cachePath)
 	resetModelsDevCacheForTest()
 	t.Cleanup(resetModelsDevCacheForTest)
 	EnableModelsDevOverlay()
@@ -500,7 +500,7 @@ func TestDefaultModelEntriesOverlayDisabledIsCuratedOnly(t *testing.T) {
 	if err := os.WriteFile(cachePath, []byte(sampleModelsDevProviderScoped), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("ZERO_MODELS_CACHE_PATH", cachePath)
+	t.Setenv("SPLICE_MODELS_CACHE_PATH", cachePath)
 	resetModelsDevCacheForTest()
 	t.Cleanup(resetModelsDevCacheForTest)
 	want := DefaultModelEntries()
@@ -530,7 +530,7 @@ func TestDefaultRegistryRealCachedSnapshot(t *testing.T) {
 	if err := os.WriteFile(cachePath, snapshot, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("ZERO_MODELS_CACHE_PATH", cachePath)
+	t.Setenv("SPLICE_MODELS_CACHE_PATH", cachePath)
 	resetModelsDevCacheForTest()
 	t.Cleanup(resetModelsDevCacheForTest)
 	EnableModelsDevOverlay()
@@ -590,9 +590,9 @@ func TestRefreshModelsDevCacheFetchesAndCaches(t *testing.T) {
 	defer server.Close()
 
 	cachePath := filepath.Join(t.TempDir(), "modelsdev.json")
-	t.Setenv("ZERO_MODELS_CACHE_PATH", cachePath)
-	t.Setenv("ZERO_MODELS_URL", server.URL)
-	t.Setenv("ZERO_DISABLE_MODELS_FETCH", "")
+	t.Setenv("SPLICE_MODELS_CACHE_PATH", cachePath)
+	t.Setenv("SPLICE_MODELS_URL", server.URL)
+	t.Setenv("SPLICE_DISABLE_MODELS_FETCH", "")
 
 	if err := RefreshModelsDevCache(t.Context()); err != nil {
 		t.Fatal(err)
@@ -613,7 +613,7 @@ func TestRefreshModelsDevCacheFetchesAndCaches(t *testing.T) {
 }
 
 func TestRefreshModelsDevCacheRejectsBadBodyWithoutClobbering(t *testing.T) {
-	t.Setenv("ZERO_DISABLE_MODELS_FETCH", "")
+	t.Setenv("SPLICE_DISABLE_MODELS_FETCH", "")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("not json"))
 	}))
@@ -627,8 +627,8 @@ func TestRefreshModelsDevCacheRejectsBadBodyWithoutClobbering(t *testing.T) {
 	if err := os.Chtimes(cachePath, stale, stale); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("ZERO_MODELS_CACHE_PATH", cachePath)
-	t.Setenv("ZERO_MODELS_URL", server.URL)
+	t.Setenv("SPLICE_MODELS_CACHE_PATH", cachePath)
+	t.Setenv("SPLICE_MODELS_URL", server.URL)
 
 	if err := RefreshModelsDevCache(t.Context()); err == nil {
 		t.Fatal("bad body must return an error")
@@ -644,9 +644,9 @@ func TestRefreshModelsDevCacheDisabledByEnv(t *testing.T) {
 		t.Fatal("fetch must not happen when disabled")
 	}))
 	defer server.Close()
-	t.Setenv("ZERO_MODELS_CACHE_PATH", filepath.Join(t.TempDir(), "modelsdev.json"))
-	t.Setenv("ZERO_MODELS_URL", server.URL)
-	t.Setenv("ZERO_DISABLE_MODELS_FETCH", "1")
+	t.Setenv("SPLICE_MODELS_CACHE_PATH", filepath.Join(t.TempDir(), "modelsdev.json"))
+	t.Setenv("SPLICE_MODELS_URL", server.URL)
+	t.Setenv("SPLICE_DISABLE_MODELS_FETCH", "1")
 	if err := RefreshModelsDevCache(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -661,7 +661,7 @@ func TestCachedModelsDevProvidersUsesEmbeddedForOlderCache(t *testing.T) {
 	if err := os.Chtimes(cachePath, stale, stale); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("ZERO_MODELS_CACHE_PATH", cachePath)
+	t.Setenv("SPLICE_MODELS_CACHE_PATH", cachePath)
 	resetModelsDevCacheForTest()
 	t.Cleanup(resetModelsDevCacheForTest)
 	EnableModelsDevOverlay()
@@ -676,7 +676,7 @@ func TestCachedModelsDevProvidersRequiresOptIn(t *testing.T) {
 	if err := os.WriteFile(cachePath, []byte(sampleModelsDev), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("ZERO_MODELS_CACHE_PATH", cachePath)
+	t.Setenv("SPLICE_MODELS_CACHE_PATH", cachePath)
 	resetModelsDevCacheForTest()
 	t.Cleanup(resetModelsDevCacheForTest)
 
@@ -687,12 +687,12 @@ func TestCachedModelsDevProvidersRequiresOptIn(t *testing.T) {
 }
 
 func TestDefaultModelEntriesAppliesFreshCache(t *testing.T) {
-	t.Setenv("ZERO_DISABLE_MODELS_FETCH", "")
+	t.Setenv("SPLICE_DISABLE_MODELS_FETCH", "")
 	cachePath := filepath.Join(t.TempDir(), "modelsdev.json")
 	if err := os.WriteFile(cachePath, []byte(sampleModelsDev), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("ZERO_MODELS_CACHE_PATH", cachePath)
+	t.Setenv("SPLICE_MODELS_CACHE_PATH", cachePath)
 	resetModelsDevCacheForTest()
 	t.Cleanup(resetModelsDevCacheForTest)
 	EnableModelsDevOverlay()
@@ -709,7 +709,7 @@ func TestDefaultModelEntriesAppliesFreshCache(t *testing.T) {
 }
 
 func TestModelsDevPricingAsOfUsesCacheMtime(t *testing.T) {
-	t.Setenv("ZERO_DISABLE_MODELS_FETCH", "")
+	t.Setenv("SPLICE_DISABLE_MODELS_FETCH", "")
 	cachePath := filepath.Join(t.TempDir(), "modelsdev.json")
 	var doc map[string]map[string]any
 	if err := json.Unmarshal([]byte(sampleModelsDev), &doc); err != nil {
@@ -731,7 +731,7 @@ func TestModelsDevPricingAsOfUsesCacheMtime(t *testing.T) {
 	if err := os.Chtimes(cachePath, known, known); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("ZERO_MODELS_CACHE_PATH", cachePath)
+	t.Setenv("SPLICE_MODELS_CACHE_PATH", cachePath)
 	resetModelsDevCacheForTest()
 	t.Cleanup(resetModelsDevCacheForTest)
 	EnableModelsDevOverlay()
@@ -751,7 +751,7 @@ func TestModelsDevPricingAsOfUsesCacheMtime(t *testing.T) {
 }
 
 func TestDefaultRegistryUsesEmbeddedPricingForDerivedProviderModel(t *testing.T) {
-	t.Setenv("ZERO_MODELS_CACHE_PATH", filepath.Join(t.TempDir(), "missing.json"))
+	t.Setenv("SPLICE_MODELS_CACHE_PATH", filepath.Join(t.TempDir(), "missing.json"))
 	resetModelsDevCacheForTest()
 	t.Cleanup(resetModelsDevCacheForTest)
 	EnableModelsDevOverlay()
@@ -773,7 +773,7 @@ func TestDefaultRegistryUsesEmbeddedPricingForDerivedProviderModel(t *testing.T)
 }
 
 func TestDefaultRegistryUsesNewerCachePricingForDerivedProviderModel(t *testing.T) {
-	t.Setenv("ZERO_DISABLE_MODELS_FETCH", "")
+	t.Setenv("SPLICE_DISABLE_MODELS_FETCH", "")
 	cachePath := filepath.Join(t.TempDir(), "modelsdev.json")
 	cache := []byte(`{"openrouter":{"models":{"z-ai/glm-5.2":{"limit":{"context":999999,"output":65536},"cost":{"input":9,"output":10,"cache_read":1}}}}}`)
 	if err := os.WriteFile(cachePath, cache, 0o644); err != nil {
@@ -783,7 +783,7 @@ func TestDefaultRegistryUsesNewerCachePricingForDerivedProviderModel(t *testing.
 	if err := os.Chtimes(cachePath, cacheDate, cacheDate); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("ZERO_MODELS_CACHE_PATH", cachePath)
+	t.Setenv("SPLICE_MODELS_CACHE_PATH", cachePath)
 	resetModelsDevCacheForTest()
 	t.Cleanup(resetModelsDevCacheForTest)
 	EnableModelsDevOverlay()
@@ -805,9 +805,9 @@ func TestDefaultRegistryUsesNewerCachePricingForDerivedProviderModel(t *testing.
 }
 
 func TestDefaultRegistrySelectsEmbeddedAndNewerDiskPricing(t *testing.T) {
-	t.Setenv("ZERO_DISABLE_MODELS_FETCH", "")
+	t.Setenv("SPLICE_DISABLE_MODELS_FETCH", "")
 	cachePath := filepath.Join(t.TempDir(), "modelsdev.json")
-	t.Setenv("ZERO_MODELS_CACHE_PATH", cachePath)
+	t.Setenv("SPLICE_MODELS_CACHE_PATH", cachePath)
 	t.Cleanup(resetModelsDevCacheForTest)
 
 	check := func(t *testing.T, modTime time.Time, wantInput float64, wantSource string, wantDate string) {
@@ -842,7 +842,7 @@ func TestDefaultRegistrySelectsEmbeddedAndNewerDiskPricing(t *testing.T) {
 }
 
 func TestDefaultRegistryUsesEmbeddedPricingWithoutDiskCache(t *testing.T) {
-	t.Setenv("ZERO_MODELS_CACHE_PATH", filepath.Join(t.TempDir(), "missing.json"))
+	t.Setenv("SPLICE_MODELS_CACHE_PATH", filepath.Join(t.TempDir(), "missing.json"))
 	resetModelsDevCacheForTest()
 	t.Cleanup(resetModelsDevCacheForTest)
 

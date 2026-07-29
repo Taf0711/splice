@@ -1638,7 +1638,7 @@ func assertAgentOptions(t *testing.T, options tui.Options, maxTurns int, permiss
 
 func TestRunThemeFlagPopulatesTUIOptions(t *testing.T) {
 	// The --theme flag must reach tui.Options.Theme (resolveThemeMode prefers it
-	// over ZERO_THEME). Previously Options.Theme was read but never set by the CLI.
+	// over SPLICE_THEME). Previously Options.Theme was read but never set by the CLI.
 	for _, tc := range []struct {
 		args []string
 		want string

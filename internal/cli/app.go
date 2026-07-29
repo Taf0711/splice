@@ -258,7 +258,7 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	}
 	// --theme <name> selects the TUI palette non-interactively (auto or any registered
 	// theme; populates tui.Options.Theme, which resolveThemeMode prefers over
-	// ZERO_THEME). Re-split --add-dir afterward so it may appear on either side of --theme.
+	// SPLICE_THEME). Re-split --add-dir afterward so it may appear on either side of --theme.
 	theme, args, err := splitLeadingThemeFlag(args)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), 1)

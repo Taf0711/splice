@@ -1,10 +1,10 @@
 [CmdletBinding()]
 param(
-  [string]$Version = $env:ZERO_VERSION,
+  [string]$Version = $env:SPLICE_VERSION,
   [string]$Repository = $(if ($env:SPLICE_REPO) { $env:SPLICE_REPO } else { "Taf0711/splice" }),
   [string]$InstallDir = $env:SPLICE_INSTALL_DIR,
-  [string]$GitHubApi = $(if ($env:ZERO_GITHUB_API) { $env:ZERO_GITHUB_API } else { "https://api.github.com" }),
-  [string]$GitHubBaseUrl = $(if ($env:ZERO_GITHUB_BASE_URL) { $env:ZERO_GITHUB_BASE_URL } else { "https://github.com" })
+  [string]$GitHubApi = $(if ($env:SPLICE_GITHUB_API) { $env:SPLICE_GITHUB_API } else { "https://api.github.com" }),
+  [string]$GitHubBaseUrl = $(if ($env:SPLICE_GITHUB_BASE_URL) { $env:SPLICE_GITHUB_BASE_URL } else { "https://github.com" })
 )
 
 $ErrorActionPreference = "Stop"

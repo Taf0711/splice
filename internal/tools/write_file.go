@@ -110,7 +110,7 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	if err := os.WriteFile(absolutePath, []byte(content), 0o644); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
-	// Optional format-on-write (ZERO_FORMAT_ON_WRITE). Must run BEFORE the
+	// Optional format-on-write (SPLICE_FORMAT_ON_WRITE). Must run BEFORE the
 	// FileTracker baseline: recording pre-format content would make the very
 	// next edit look like an external modification and trip the conflict guard.
 	content = maybeFormatWrittenFile(ctx, absolutePath, content)

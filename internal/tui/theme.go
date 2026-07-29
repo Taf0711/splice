@@ -9,7 +9,7 @@ import (
 // tuiTheme is the resolved terminal palette Splice renders with. It is produced by
 // buildTheme from a palette, so the same renderers serve both the dark default
 // and the light variant; the active theme lives in the package var zeroTheme and
-// may be swapped at startup (background detection / ZERO_THEME / --theme) or live
+// may be swapped at startup (background detection / SPLICE_THEME / --theme) or live
 // via /theme. Colors are truecolor hex; lipgloss downsamples on limited displays
 // and renders plain text when there is no TTY (tests). Every renderer consumes
 // these named styles — no hex literal may appear outside theme_palettes.go (the

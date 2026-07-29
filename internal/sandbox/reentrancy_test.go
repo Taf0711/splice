@@ -6,14 +6,14 @@ import (
 )
 
 func TestIsAlreadySandboxed(t *testing.T) {
-	// A lone ZERO_SANDBOXED=1 (no corroborating backend marker) must NOT count as
+	// A lone SPLICE_SANDBOXED=1 (no corroborating backend marker) must NOT count as
 	// sandboxed — stronger provenance than a single ambient flag.
 	t.Setenv(EnvSandboxBackend, "")
 	t.Setenv(EnvSandboxed, "1")
 	if IsAlreadySandboxed() {
 		t.Fatalf("IsAlreadySandboxed must be false when only %s=1 is set without %s", EnvSandboxed, EnvSandboxBackend)
 	}
-	// The backend marker alone (no ZERO_SANDBOXED=1) must not count either.
+	// The backend marker alone (no SPLICE_SANDBOXED=1) must not count either.
 	t.Setenv(EnvSandboxBackend, string(BackendLinuxBwrap))
 	t.Setenv(EnvSandboxed, "")
 	if IsAlreadySandboxed() {
@@ -68,7 +68,7 @@ func TestSandboxEnvironmentPreservesCallerEnv(t *testing.T) {
 		"HOME=/home/user",
 		EnvSandboxed + "=1",
 		EnvSandboxBackend + "=" + string(BackendMacOSSeatbelt),
-		"ZERO_SANDBOX_NETWORK=deny",
+		"SPLICE_SANDBOX_NETWORK=deny",
 	} {
 		if !stringSliceContains(env, want) {
 			t.Fatalf("sandbox env = %#v, missing %q", env, want)

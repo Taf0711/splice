@@ -14,7 +14,7 @@ import (
 // TestMCPStdioHangHelperProcess is a stdio MCP server that starts but never
 // responds, simulating a non-responsive peer during the handshake.
 func TestMCPStdioHangHelperProcess(t *testing.T) {
-	if os.Getenv("ZERO_MCP_STDIO_HANG_HELPER") != "1" {
+	if os.Getenv("SPLICE_MCP_STDIO_HANG_HELPER") != "1" {
 		return
 	}
 	select {}
@@ -38,7 +38,7 @@ func TestConnectStdioFailsFastOnNonResponsiveInitialize(t *testing.T) {
 			Type:    ServerTypeStdio,
 			Command: executable,
 			Args:    []string{"-test.run=TestMCPStdioHangHelperProcess", "--"},
-			Env:     map[string]string{"ZERO_MCP_STDIO_HANG_HELPER": "1"},
+			Env:     map[string]string{"SPLICE_MCP_STDIO_HANG_HELPER": "1"},
 		})
 		if connectErr == nil && client != nil {
 			_ = client.Close()

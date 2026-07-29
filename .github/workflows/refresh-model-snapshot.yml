@@ -68,7 +68,7 @@ jobs:
       - name: Test the refreshed snapshot
         run: go test ./internal/modelregistry/ ./internal/splice/ ./internal/usage/
         env:
-          ZERO_DISABLE_MODELS_FETCH: "1"
+          SPLICE_DISABLE_MODELS_FETCH: "1"
 
       - name: Open pull request when prices changed
         if: success()

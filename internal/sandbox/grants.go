@@ -64,7 +64,7 @@ type GrantStore struct {
 var toolGrantNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 func ResolveGrantPath(env map[string]string) (string, error) {
-	override := strings.TrimSpace(envValue(env, "ZERO_SANDBOX_GRANTS_PATH"))
+	override := strings.TrimSpace(envValue(env, "SPLICE_SANDBOX_GRANTS_PATH"))
 	if override != "" {
 		if filepath.IsAbs(override) {
 			return filepath.Clean(override), nil

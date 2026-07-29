@@ -105,7 +105,7 @@ func TestSetupProviderOptionsUseRuntimeSupportedCatalog(t *testing.T) {
 func TestSaveSetupProviderStoresPastedAPIKey(t *testing.T) {
 	// Use the encrypted-file backend in the temp config dir so the test never
 	// touches the real OS keychain.
-	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	t.Setenv("SPLICE_CRED_STORAGE", "encrypted-file")
 	configPath := filepath.Join(t.TempDir(), "splice", "config.json")
 
 	result, err := saveSetupProvider(appDeps{

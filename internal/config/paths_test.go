@@ -15,7 +15,7 @@ func TestDefaultResolveOptionsUsesExistingConfigPathsAndProviderCommand(t *testi
 	projectPath := filepath.Join(workspaceRoot, ".splice", "config.json")
 	writeFileAt(t, userPath, "{}")
 	writeFileAt(t, projectPath, "{}")
-	t.Setenv("ZERO_PROVIDER_COMMAND", "  splice-provider  ")
+	t.Setenv("SPLICE_PROVIDER_COMMAND", "  splice-provider  ")
 
 	options, err := DefaultResolveOptions(workspaceRoot)
 	if err != nil {

@@ -39,7 +39,7 @@ func TestEvaluateWarningsClassifiesThresholds(t *testing.T) {
 }
 
 func TestRunMinimalBenchmarkEndToEnd(t *testing.T) {
-	t.Setenv("ZERO_PERF_HELPER", "1")
+	t.Setenv("SPLICE_PERF_HELPER", "1")
 	command := []string{os.Args[0], "-test.run=TestPerfBenchHelperProcess"}
 
 	result, err := Run(context.Background(), Options{
@@ -116,7 +116,7 @@ func TestEscapeActionCommand(t *testing.T) {
 }
 
 func TestPerfBenchHelperProcess(t *testing.T) {
-	if os.Getenv("ZERO_PERF_HELPER") != "1" {
+	if os.Getenv("SPLICE_PERF_HELPER") != "1" {
 		return
 	}
 	fmt.Println("splice 0.1.0")

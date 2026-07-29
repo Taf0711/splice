@@ -361,10 +361,10 @@ func modelsDevCacheDate(modTime time.Time) string {
 	return modTime.UTC().Format("2006-01-02")
 }
 
-// modelsDevCachePath returns the on-disk cache location. ZERO_MODELS_CACHE_PATH
+// modelsDevCachePath returns the on-disk cache location. SPLICE_MODELS_CACHE_PATH
 // overrides it (used by tests and unusual setups).
 func modelsDevCachePath() (string, error) {
-	if override := strings.TrimSpace(os.Getenv("ZERO_MODELS_CACHE_PATH")); override != "" {
+	if override := strings.TrimSpace(os.Getenv("SPLICE_MODELS_CACHE_PATH")); override != "" {
 		return override, nil
 	}
 	base, err := os.UserCacheDir()
@@ -394,7 +394,7 @@ type modelsDevSource struct {
 // EnableModelsDevOverlay opts the process into provider-scoped derived entries
 // and applying a newer disk cache. The embedded snapshot remains the baseline
 // with or without this setting.
-// ZERO_DISABLE_MODELS_FETCH disables only the disk cache and network fetch.
+// SPLICE_DISABLE_MODELS_FETCH disables only the disk cache and network fetch.
 func EnableModelsDevOverlay() {
 	modelsDevEnabled.Store(true)
 }
@@ -455,7 +455,7 @@ func cachedModelsDevSnapshotInfo() modelsDevSource {
 			modelsDevSelected = selected
 			return
 		}
-		if !modelsDevEnabled.Load() || strings.TrimSpace(os.Getenv("ZERO_DISABLE_MODELS_FETCH")) != "" {
+		if !modelsDevEnabled.Load() || strings.TrimSpace(os.Getenv("SPLICE_DISABLE_MODELS_FETCH")) != "" {
 			modelsDevSelected = selected
 			return
 		}
@@ -500,9 +500,9 @@ func resetModelsDevCacheForTest() {
 // when the cache is missing or older than modelsDevRefreshAfter. It is safe to
 // call fire-and-forget from startup (use a goroutine); it never affects the
 // current process's registry (see cachedModelsDevProviders). Disabled entirely
-// by ZERO_DISABLE_MODELS_FETCH. The URL can be overridden with ZERO_MODELS_URL.
+// by SPLICE_DISABLE_MODELS_FETCH. The URL can be overridden with SPLICE_MODELS_URL.
 func RefreshModelsDevCache(ctx context.Context) error {
-	if strings.TrimSpace(os.Getenv("ZERO_DISABLE_MODELS_FETCH")) != "" {
+	if strings.TrimSpace(os.Getenv("SPLICE_DISABLE_MODELS_FETCH")) != "" {
 		return nil
 	}
 	path, err := modelsDevCachePath()
@@ -513,7 +513,7 @@ func RefreshModelsDevCache(ctx context.Context) error {
 		return nil
 	}
 
-	url := strings.TrimSpace(os.Getenv("ZERO_MODELS_URL"))
+	url := strings.TrimSpace(os.Getenv("SPLICE_MODELS_URL"))
 	if url == "" {
 		url = modelsDevDefaultURL
 	}

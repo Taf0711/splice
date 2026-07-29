@@ -219,7 +219,7 @@ func runUnixInstaller(t *testing.T, fixture unixInstallFixture) (string, string,
 	command.Dir = repoRoot(t)
 	command.Env = append(os.Environ(),
 		"PATH="+fixture.mockBin+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"ZERO_GITHUB_BASE_URL=https://example.test",
+		"SPLICE_GITHUB_BASE_URL=https://example.test",
 		"SPLICE_REPO=Taf0711/splice",
 	)
 	var stdout bytes.Buffer

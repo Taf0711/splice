@@ -224,7 +224,7 @@ func TestGrantStoreRejectsUnsafeStoredCommandPrefix(t *testing.T) {
 
 func TestResolveGrantPathUsesOverrideAndConfigHome(t *testing.T) {
 	override := filepath.Join(t.TempDir(), "custom.json")
-	path, err := ResolveGrantPath(map[string]string{"ZERO_SANDBOX_GRANTS_PATH": override})
+	path, err := ResolveGrantPath(map[string]string{"SPLICE_SANDBOX_GRANTS_PATH": override})
 	if err != nil {
 		t.Fatalf("ResolveGrantPath override returned error: %v", err)
 	}

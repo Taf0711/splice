@@ -269,8 +269,8 @@ func TestNewRoutesChatGPTCatalogToCodexProvider(t *testing.T) {
 	// OAuth token and the "want empty chatgpt-account-id" assertion fails locally
 	// (it still passes in CI, where no login is stored). Mirrors the isolation in
 	// TestNewRoutesChatGPTCatalogWithStoredAccountID.
-	t.Setenv("ZERO_OAUTH_STORAGE", "file")
-	t.Setenv("ZERO_OAUTH_TOKENS_PATH", t.TempDir()+"/tokens.json")
+	t.Setenv("SPLICE_OAUTH_STORAGE", "file")
+	t.Setenv("SPLICE_OAUTH_TOKENS_PATH", t.TempDir()+"/tokens.json")
 
 	transport := &captureTransport{
 		responseBody: "data: [DONE]\n\n",
@@ -409,15 +409,15 @@ func (transport *captureTransport) body() io.Reader {
 }
 
 // newOAuthStoreForTest pins the OAuth token store to a plain temp FILE and
-// returns a Store on it. Pinning ZERO_OAUTH_STORAGE matters as much as the
+// returns a Store on it. Pinning SPLICE_OAUTH_STORAGE matters as much as the
 // path: an inherited "keyring" value would send NewStore to the OS keychain
-// and ignore ZERO_OAUTH_TOKENS_PATH entirely, making the test read/write the
+// and ignore SPLICE_OAUTH_TOKENS_PATH entirely, making the test read/write the
 // developer's real logins. Exists so the chatgpt factory tests can seed a
 // token without copying the path-handling dance from internal/cli.
 func newOAuthStoreForTest(t *testing.T) (*oauth.Store, error) {
 	t.Helper()
-	t.Setenv("ZERO_OAUTH_STORAGE", "file")
-	t.Setenv("ZERO_OAUTH_TOKENS_PATH", t.TempDir()+"/tokens.json")
+	t.Setenv("SPLICE_OAUTH_STORAGE", "file")
+	t.Setenv("SPLICE_OAUTH_TOKENS_PATH", t.TempDir()+"/tokens.json")
 	return oauth.NewStore(oauth.StoreOptions{})
 }
 

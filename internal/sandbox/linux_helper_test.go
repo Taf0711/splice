@@ -174,7 +174,7 @@ func TestBuildLinuxSandboxBwrapArgsKeepsHostNetworkWhenAllowed(t *testing.T) {
 	if indexString(bwrapArgs, "--unshare-net") >= 0 {
 		t.Fatalf("network-allowed bwrap args must not isolate loopback: %#v", bwrapArgs)
 	}
-	assertArgsContainSequence(t, bwrapArgs, "--setenv", "ZERO_SANDBOX_NETWORK", string(NetworkAllow))
+	assertArgsContainSequence(t, bwrapArgs, "--setenv", "SPLICE_SANDBOX_NETWORK", string(NetworkAllow))
 }
 
 func TestLinuxBwrapRootReadUsesReadOnlyHostRoot(t *testing.T) {
@@ -274,7 +274,7 @@ func TestLinuxHelperSandboxEnvironmentPreservesCallerEnv(t *testing.T) {
 		"HOME=/home/user",
 		EnvSandboxed + "=1",
 		EnvSandboxBackend + "=" + string(BackendLinuxBwrap),
-		"ZERO_SANDBOX_NETWORK=deny",
+		"SPLICE_SANDBOX_NETWORK=deny",
 	} {
 		if !stringSliceContains(env, want) {
 			t.Fatalf("linux helper env = %#v, missing %q", env, want)

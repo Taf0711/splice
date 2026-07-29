@@ -11,7 +11,7 @@ type chatCompletionRequest struct {
 	// PromptCacheKey asks the backend to route the request to a replica that
 	// already holds this conversation's prefix in its prompt cache (the OpenAI
 	// `prompt_cache_key` parameter). Omitted when the caller carries no session
-	// identity or when ZERO_DISABLE_PROMPT_CACHE_KEY is set.
+	// identity or when SPLICE_DISABLE_PROMPT_CACHE_KEY is set.
 	PromptCacheKey string `json:"prompt_cache_key,omitempty"`
 	// ToolChoice, when non-nil, forces the model to call one specific function
 	// this request (forced tool use). The mapper builds the native

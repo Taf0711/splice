@@ -235,7 +235,7 @@ func (backend Backend) SandboxEnvMarkers(policy Policy) []string {
 	return []string{
 		EnvSandboxed + "=1",
 		EnvSandboxBackend + "=" + string(name),
-		"ZERO_SANDBOX_NETWORK=" + string(policy.Network),
+		"SPLICE_SANDBOX_NETWORK=" + string(policy.Network),
 	}
 }
 

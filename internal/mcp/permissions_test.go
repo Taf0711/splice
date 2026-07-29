@@ -250,7 +250,7 @@ func TestPermissionStoreRejectsInvalidPersistedKeys(t *testing.T) {
 
 func TestResolvePermissionPathHonorsOverrideAndConfigHome(t *testing.T) {
 	dir := t.TempDir()
-	override, err := ResolvePermissionPath(map[string]string{"ZERO_MCP_PERMISSIONS_PATH": filepath.Join(dir, "custom.json")})
+	override, err := ResolvePermissionPath(map[string]string{"SPLICE_MCP_PERMISSIONS_PATH": filepath.Join(dir, "custom.json")})
 	if err != nil {
 		t.Fatalf("ResolvePermissionPath override returned error: %v", err)
 	}

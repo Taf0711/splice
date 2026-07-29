@@ -359,8 +359,8 @@ type model struct {
 	lineAges           []time.Time
 	lastStreamActivity time.Time
 	fadeActive         bool
-	fadeDisabled       bool // streaming fade off (ZERO_NO_FADE / SSH / tmux / low-color / reduced motion)
-	reducedMotion      bool // ZERO_REDUCED_MOTION / no-TTY: static spinner glyph, no fade
+	fadeDisabled       bool // streaming fade off (SPLICE_NO_FADE / SSH / tmux / low-color / reduced motion)
+	reducedMotion      bool // SPLICE_REDUCED_MOTION / no-TTY: static spinner glyph, no fade
 	// In-progress tool call whose arguments are streaming (a file being written),
 	// shown live by streamingToolCallView so a long write/edit isn't a frozen
 	// spinner. Cleared when the call completes (next text/turn) — see updateModel.
@@ -812,7 +812,7 @@ func newModel(ctx context.Context, options Options) model {
 		Mode:      notify.Mode(strings.TrimSpace(options.Notify.Mode)),
 		FocusMode: notify.FocusMode(strings.TrimSpace(options.Notify.FocusMode)),
 	})
-	// Opt-in webhook fan-out (ZERO_NOTIFY_WEBHOOK_URL). Delivery failures stay
+	// Opt-in webhook fan-out (SPLICE_NOTIFY_WEBHOOK_URL). Delivery failures stay
 	// silent here: the TUI owns the alt-screen, so writing to stderr would
 	// corrupt the display.
 	notify.MaybeAddWebhookSink(notifier, os.Getenv, nil)
@@ -860,7 +860,7 @@ func newModel(ctx context.Context, options Options) model {
 		reasoningEffort:             options.ReasoningEffort,
 		responseStyle:               defaultedResponseStyle(options.ResponseStyle),
 		keyBindings:                 resolvedKeyBindings,
-		themeMode:                   resolveThemeMode(options.Theme, os.Getenv("ZERO_THEME"), options.SavedTheme),
+		themeMode:                   resolveThemeMode(options.Theme, os.Getenv("SPLICE_THEME"), options.SavedTheme),
 		hasDarkBg:                   true,
 		userAgent:                   options.UserAgent,
 		usageTracker:                usageTracker,
@@ -1896,7 +1896,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// case schedules the next one). Schedule the FIRST tick only on
 		// the inactive→active transition; subsequent deltas just refresh
 		// state and rely on the existing tick chain.
-		// When the fade is disabled (ZERO_NO_FADE / SSH / tmux / low-color),
+		// When the fade is disabled (SPLICE_NO_FADE / SSH / tmux / low-color),
 		// fadeActive stays false so styleStreamingLine renders streaming text
 		// statically at base ink, and no self-perpetuating tick is scheduled.
 		if !m.fadeDisabled {
@@ -4426,7 +4426,7 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandTurns:
-		// Changing the budget mid-run would mutate the inherited ZERO_MAX_TURNS env
+		// Changing the budget mid-run would mutate the inherited SPLICE_MAX_TURNS env
 		// that sub-agents spawned later in THIS run read, making the run's budget
 		// inconsistent. Require an idle session (the new budget applies next run).
 		if m.pending && strings.TrimSpace(command.text) != "" {

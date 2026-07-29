@@ -16,7 +16,7 @@ func TestNormalizeConfigValidatesTransportBoundaries(t *testing.T) {
 			Type:    "stdio",
 			Command: "docs-mcp",
 			Args:    []string{"--workspace", "."},
-			Env:     map[string]string{"ZERO_DOCS_TOKEN": "test"},
+			Env:     map[string]string{"SPLICE_DOCS_TOKEN": "test"},
 		},
 		"web": {
 			Type:    "http",

@@ -379,7 +379,7 @@ func windowsSandboxChildEnv(specEnv []string, policy Policy, workspaceRoot strin
 		"PATH="+firstEnv("PATH", defaultPath()),
 		"TERM="+firstEnv("TERM", "dumb"),
 		EnvSandboxBackend+"="+string(BackendWindowsRestrictedToken),
-		"ZERO_SANDBOX_NETWORK="+string(policy.Network),
+		"SPLICE_SANDBOX_NETWORK="+string(policy.Network),
 		EnvSandboxed+"=1",
 		"COMSPEC="+firstEnv("COMSPEC", "cmd.exe"),
 		"SystemRoot="+firstEnv("SystemRoot", `C:\Windows`),
@@ -465,7 +465,7 @@ type WindowsCapabilitySIDs struct {
 }
 
 func ResolveWindowsSandboxHome(env map[string]string) (string, error) {
-	if override := strings.TrimSpace(envValue(env, "ZERO_WINDOWS_SANDBOX_HOME")); override != "" {
+	if override := strings.TrimSpace(envValue(env, "SPLICE_WINDOWS_SANDBOX_HOME")); override != "" {
 		if filepath.IsAbs(override) {
 			return filepath.Clean(override), nil
 		}

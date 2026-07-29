@@ -129,8 +129,8 @@ runs:
     - name: Install Splice
       shell: bash
       env:
-        ZERO_REPO: ${{ inputs.splice-repo }}
-        ZERO_VERSION_INPUT: ${{ inputs.splice-version }}
+        SPLICE_REPO: ${{ inputs.splice-repo }}
+        SPLICE_VERSION_INPUT: ${{ inputs.splice-version }}
         ACTION_REF: ${{ github.action_ref }}
         ACTION_PATH: ${{ github.action_path }}
         RUNNER_TEMP: ${{ runner.temp }}
@@ -142,7 +142,7 @@ runs:
         fi
         # Resolve the version to install: explicit input wins; otherwise the ref
         # this action was checked out at (a tag); otherwise the latest release.
-        version="${ZERO_VERSION_INPUT}"
+        version="${SPLICE_VERSION_INPUT}"
         if [ -z "${version}" ]; then
           version="${ACTION_REF}"
         fi
@@ -157,7 +157,7 @@ runs:
         install_dir="${RUNNER_TEMP}/splice-bin"
         mkdir -p "${install_dir}"
         # Reuse Splice's own checksum-verifying installer, shipped with the action.
-        SPLICE_REPO="${ZERO_REPO}" ZERO_VERSION="${version}" SPLICE_INSTALL_DIR="${install_dir}" \
+        SPLICE_REPO="${SPLICE_REPO}" SPLICE_VERSION="${version}" SPLICE_INSTALL_DIR="${install_dir}" \
           bash "${ACTION_PATH}/scripts/install.sh"
         echo "${install_dir}" >> "${GITHUB_PATH}"
 
@@ -168,18 +168,18 @@ runs:
       env:
         # Secrets are passed via the environment and never echoed. `set +x` and
         # the absence of any `echo` of these values keep them out of the log.
-        ZERO_INPUT_API_KEY: ${{ inputs.api-key }}
-        ZERO_INPUT_API_KEY_ENV: ${{ inputs.api-key-env }}
-        ZERO_INPUT_PROVIDER: ${{ inputs.provider }}
-        ZERO_INPUT_PROMPT: ${{ inputs.prompt }}
-        ZERO_INPUT_PROMPT_FILE: ${{ inputs.prompt-file }}
-        ZERO_INPUT_MODEL: ${{ inputs.model }}
-        ZERO_INPUT_MODE: ${{ inputs.mode }}
-        ZERO_INPUT_AUTO: ${{ inputs.auto }}
-        ZERO_INPUT_SELF_CORRECT: ${{ inputs.self-correct }}
-        ZERO_INPUT_ADD_DIR: ${{ inputs.add-dir }}
-        ZERO_INPUT_WORKTREE: ${{ inputs.worktree }}
-        ZERO_INPUT_OUTPUT_FORMAT: ${{ inputs.output-format }}
+        SPLICE_INPUT_API_KEY: ${{ inputs.api-key }}
+        SPLICE_INPUT_API_KEY_ENV: ${{ inputs.api-key-env }}
+        SPLICE_INPUT_PROVIDER: ${{ inputs.provider }}
+        SPLICE_INPUT_PROMPT: ${{ inputs.prompt }}
+        SPLICE_INPUT_PROMPT_FILE: ${{ inputs.prompt-file }}
+        SPLICE_INPUT_MODEL: ${{ inputs.model }}
+        SPLICE_INPUT_MODE: ${{ inputs.mode }}
+        SPLICE_INPUT_AUTO: ${{ inputs.auto }}
+        SPLICE_INPUT_SELF_CORRECT: ${{ inputs.self-correct }}
+        SPLICE_INPUT_ADD_DIR: ${{ inputs.add-dir }}
+        SPLICE_INPUT_WORKTREE: ${{ inputs.worktree }}
+        SPLICE_INPUT_OUTPUT_FORMAT: ${{ inputs.output-format }}
         ACTION_PATH: ${{ github.action_path }}
         RUNNER_TEMP: ${{ runner.temp }}
       run: |
@@ -188,51 +188,51 @@ runs:
         # Export the provider key under the env name the provider expects. This
         # keeps the action provider-agnostic: no provider->env mapping is baked
         # in. The value is never printed.
-        if [ -n "${ZERO_INPUT_API_KEY}" ] && [ -n "${ZERO_INPUT_API_KEY_ENV}" ]; then
-          if ! printf '%s' "${ZERO_INPUT_API_KEY_ENV}" | grep -qE '^[A-Za-z_][A-Za-z0-9_]*$'; then
+        if [ -n "${SPLICE_INPUT_API_KEY}" ] && [ -n "${SPLICE_INPUT_API_KEY_ENV}" ]; then
+          if ! printf '%s' "${SPLICE_INPUT_API_KEY_ENV}" | grep -qE '^[A-Za-z_][A-Za-z0-9_]*$'; then
             echo "::error::api-key-env must be a valid environment variable name." >&2
             exit 2
           fi
           # Export in-process for this Run Splice step so splice can read it; do
           # not persist provider credentials to later job steps.
-          export "${ZERO_INPUT_API_KEY_ENV}=${ZERO_INPUT_API_KEY}"
+          export "${SPLICE_INPUT_API_KEY_ENV}=${SPLICE_INPUT_API_KEY}"
         fi
-        if [ -n "${ZERO_INPUT_PROVIDER}" ]; then
-          export ZERO_PROVIDER="${ZERO_INPUT_PROVIDER}"
+        if [ -n "${SPLICE_INPUT_PROVIDER}" ]; then
+          export SPLICE_PROVIDER="${SPLICE_INPUT_PROVIDER}"
         fi
 
         args=(exec)
 
-        if [ -n "${ZERO_INPUT_PROMPT_FILE}" ] && [ -n "${ZERO_INPUT_PROMPT}" ]; then
+        if [ -n "${SPLICE_INPUT_PROMPT_FILE}" ] && [ -n "${SPLICE_INPUT_PROMPT}" ]; then
           echo "::error::The 'prompt' and 'prompt-file' inputs are mutually exclusive." >&2
           exit 2
         fi
-        if [ -n "${ZERO_INPUT_PROMPT_FILE}" ]; then
-          args+=(--file "${ZERO_INPUT_PROMPT_FILE}")
-        elif [ -n "${ZERO_INPUT_PROMPT}" ]; then
-          args+=(--prompt "${ZERO_INPUT_PROMPT}")
+        if [ -n "${SPLICE_INPUT_PROMPT_FILE}" ]; then
+          args+=(--file "${SPLICE_INPUT_PROMPT_FILE}")
+        elif [ -n "${SPLICE_INPUT_PROMPT}" ]; then
+          args+=(--prompt "${SPLICE_INPUT_PROMPT}")
         else
           echo "::error::Provide either the 'prompt' or 'prompt-file' input." >&2
           exit 2
         fi
 
-        [ -n "${ZERO_INPUT_MODEL}" ] && args+=(--model "${ZERO_INPUT_MODEL}")
-        [ -n "${ZERO_INPUT_MODE}" ] && args+=(--mode "${ZERO_INPUT_MODE}")
-        [ -n "${ZERO_INPUT_AUTO}" ] && args+=(--auto "${ZERO_INPUT_AUTO}")
-        [ "${ZERO_INPUT_SELF_CORRECT}" = "true" ] && args+=(--allow-escalation)
-        [ "${ZERO_INPUT_WORKTREE}" = "true" ] && args+=(--worktree)
-        args+=(--output-format "${ZERO_INPUT_OUTPUT_FORMAT}")
+        [ -n "${SPLICE_INPUT_MODEL}" ] && args+=(--model "${SPLICE_INPUT_MODEL}")
+        [ -n "${SPLICE_INPUT_MODE}" ] && args+=(--mode "${SPLICE_INPUT_MODE}")
+        [ -n "${SPLICE_INPUT_AUTO}" ] && args+=(--auto "${SPLICE_INPUT_AUTO}")
+        [ "${SPLICE_INPUT_SELF_CORRECT}" = "true" ] && args+=(--allow-escalation)
+        [ "${SPLICE_INPUT_WORKTREE}" = "true" ] && args+=(--worktree)
+        args+=(--output-format "${SPLICE_INPUT_OUTPUT_FORMAT}")
         # No --notify in CI (no terminal); the optional Slack post is handled
         # separately below so it works regardless of output format.
         args+=(--no-notify)
 
         # Split add-dir on newlines and commas; each non-empty entry is a root.
-        if [ -n "${ZERO_INPUT_ADD_DIR}" ]; then
+        if [ -n "${SPLICE_INPUT_ADD_DIR}" ]; then
           while IFS= read -r dir; do
             # Trim only surrounding whitespace so paths with internal spaces survive.
             dir="$(printf '%s' "${dir}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
             [ -n "${dir}" ] && args+=(--add-dir "${dir}")
-          done < <(printf '%s' "${ZERO_INPUT_ADD_DIR}" | tr ',' '\n')
+          done < <(printf '%s' "${SPLICE_INPUT_ADD_DIR}" | tr ',' '\n')
         fi
 
         output_file="${RUNNER_TEMP}/splice-output.txt"
@@ -250,11 +250,11 @@ runs:
 
         # Best-effort one-line summary. Structured output ends with lifecycle
         # metadata, so parse final/error events instead of tailing stdout.
-        summary="$(node "${ACTION_PATH}/scripts/action-summary.mjs" "${ZERO_INPUT_OUTPUT_FORMAT}" "${output_file}" || true)"
+        summary="$(node "${ACTION_PATH}/scripts/action-summary.mjs" "${SPLICE_INPUT_OUTPUT_FORMAT}" "${output_file}" || true)"
         {
-          echo "summary<<ZERO_EOF"
+          echo "summary<<SPLICE_EOF"
           printf '%s\n' "${summary}"
-          echo "ZERO_EOF"
+          echo "SPLICE_EOF"
         } >> "${GITHUB_OUTPUT}"
 
         exit "${code}"
@@ -265,13 +265,13 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.github-token }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
-        ZERO_EXIT: ${{ steps.run.outputs.exit-code }}
-        ZERO_SUMMARY: ${{ steps.run.outputs.summary }}
+        SPLICE_EXIT: ${{ steps.run.outputs.exit-code }}
+        SPLICE_SUMMARY: ${{ steps.run.outputs.summary }}
       run: |
         set -euo pipefail
         status="succeeded"
-        [ "${ZERO_EXIT}" != "0" ] && status="failed (exit ${ZERO_EXIT})"
-        body="$(printf 'Splice run %s.\n\n%s' "${status}" "${ZERO_SUMMARY}")"
+        [ "${SPLICE_EXIT}" != "0" ] && status="failed (exit ${SPLICE_EXIT})"
+        body="$(printf 'Splice run %s.\n\n%s' "${status}" "${SPLICE_SUMMARY}")"
         gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
           -f body="${body}" >/dev/null
 
@@ -280,14 +280,14 @@ runs:
       shell: bash
       env:
         SLACK_WEBHOOK_URL: ${{ inputs.slack-webhook-url }}
-        ZERO_EXIT: ${{ steps.run.outputs.exit-code }}
-        ZERO_SUMMARY: ${{ steps.run.outputs.summary }}
+        SPLICE_EXIT: ${{ steps.run.outputs.exit-code }}
+        SPLICE_SUMMARY: ${{ steps.run.outputs.summary }}
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       run: |
         set -euo pipefail
         status="succeeded"
-        [ "${ZERO_EXIT}" != "0" ] && status="failed (exit ${ZERO_EXIT})"
-        text="Splice run ${status} for ${GITHUB_REPOSITORY}@${GITHUB_REF_NAME}. ${ZERO_SUMMARY} ${RUN_URL}"
+        [ "${SPLICE_EXIT}" != "0" ] && status="failed (exit ${SPLICE_EXIT})"
+        text="Splice run ${status} for ${GITHUB_REPOSITORY}@${GITHUB_REF_NAME}. ${SPLICE_SUMMARY} ${RUN_URL}"
         # Slack incoming webhooks accept {"text": "..."}; jq escapes the body and
         # the URL is never echoed. A delivery failure is a warning, not a failure.
         payload="$(jq -n --arg text "${text}" '{text: $text}')"

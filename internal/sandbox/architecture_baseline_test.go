@@ -45,7 +45,7 @@ func TestBackendPlanCarriesPhase0ManagerFields(t *testing.T) {
 	if linux.TargetBackend != BackendLinuxBwrap || linux.EnforcementLevel != EnforcementNative || !linux.CommandWrapped {
 		t.Fatalf("linux plan metadata = %#v, want linux-bwrap native wrapped", linux)
 	}
-	for _, marker := range []string{EnvSandboxed + "=1", EnvSandboxBackend + "=" + string(BackendLinuxBwrap), "ZERO_SANDBOX_NETWORK=deny"} {
+	for _, marker := range []string{EnvSandboxed + "=1", EnvSandboxBackend + "=" + string(BackendLinuxBwrap), "SPLICE_SANDBOX_NETWORK=deny"} {
 		if !stringSliceContains(linux.SandboxEnvMarkers, marker) {
 			t.Fatalf("linux plan markers = %#v, missing %q", linux.SandboxEnvMarkers, marker)
 		}

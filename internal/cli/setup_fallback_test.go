@@ -75,8 +75,8 @@ func TestFirstUsableProviderSkipsUnresolvableCatalogWithoutBaseURL(t *testing.T)
 // goes stale.
 func TestFirstUsableProviderRecognizesOAuthLogin(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tok.json")
-	t.Setenv("ZERO_OAUTH_STORAGE", "file") // an inherited "keyring" would ignore the temp path and hit the OS keychain
-	t.Setenv("ZERO_OAUTH_TOKENS_PATH", path)
+	t.Setenv("SPLICE_OAUTH_STORAGE", "file") // an inherited "keyring" would ignore the temp path and hit the OS keychain
+	t.Setenv("SPLICE_OAUTH_TOKENS_PATH", path)
 	store, err := oauth.NewStore(oauth.StoreOptions{FilePath: path})
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)

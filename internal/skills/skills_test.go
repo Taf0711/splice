@@ -271,7 +271,7 @@ func TestListReturnsNamesAndDescriptions(t *testing.T) {
 }
 
 func TestDefaultDirHonorsEnvOverride(t *testing.T) {
-	got := DefaultDir(map[string]string{"ZERO_SKILLS_DIR": "/custom/skills"})
+	got := DefaultDir(map[string]string{"SPLICE_SKILLS_DIR": "/custom/skills"})
 	if got != "/custom/skills" {
 		t.Fatalf("DefaultDir override = %q, want /custom/skills", got)
 	}

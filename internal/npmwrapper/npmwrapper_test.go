@@ -161,9 +161,9 @@ func TestPostinstallSkipsWindowsArm64(t *testing.T) {
 }
 
 func TestPostinstallHonorsSkipEnv(t *testing.T) {
-	stdout, stderr, err := runPostinstall(t, "ZERO_SKIP_DOWNLOAD=1")
+	stdout, stderr, err := runPostinstall(t, "SPLICE_SKIP_DOWNLOAD=1")
 	if err != nil {
-		t.Fatalf("ZERO_SKIP_DOWNLOAD should exit 0, got err=%v stderr=%s", err, stderr)
+		t.Fatalf("SPLICE_SKIP_DOWNLOAD should exit 0, got err=%v stderr=%s", err, stderr)
 	}
 	if strings.TrimSpace(stdout) != "" {
 		t.Fatalf("skip should print nothing to stdout, got %q", stdout)
@@ -244,7 +244,7 @@ func TestNodeWrapperReportsMissingNativeBinary(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), nodeWrapperTimeout())
 	defer cancel()
 	command := nodeWrapperCommand(ctx, node, wrapperPath, "--version")
-	command.Env = append(withoutEnvKey(command.Env, "ZERO_LOCAL_CONTROL_HELPERS"), "ZERO_LOCAL_CONTROL_HELPERS=")
+	command.Env = append(withoutEnvKey(command.Env, "SPLICE_LOCAL_CONTROL_HELPERS"), "SPLICE_LOCAL_CONTROL_HELPERS=")
 	output, err := command.CombinedOutput()
 	if ctx.Err() != nil {
 		t.Fatalf("wrapper timed out reporting missing native binary: %v; output: %s", ctx.Err(), output)
@@ -296,7 +296,7 @@ func TestNodeWrapperPassesLocalControlHelperManifest(t *testing.T) {
 	wrapperPath := copyWrapperFixture(t)
 	root := filepath.Dir(filepath.Dir(wrapperPath))
 	nativePath := filepath.Join(root, "splice")
-	if err := os.WriteFile(nativePath, []byte("#!/usr/bin/env sh\nprintf '%s\\n' \"$ZERO_LOCAL_CONTROL_HELPERS\"\n"), 0o755); err != nil {
+	if err := os.WriteFile(nativePath, []byte("#!/usr/bin/env sh\nprintf '%s\\n' \"$SPLICE_LOCAL_CONTROL_HELPERS\"\n"), 0o755); err != nil {
 		t.Fatalf("WriteFile native fixture: %v", err)
 	}
 	binDir := filepath.Join(root, "node_modules", ".bin")
@@ -357,14 +357,14 @@ func TestNodeWrapperClearsInheritedLocalControlHelperManifestWhenNoHelpers(t *te
 	wrapperPath := copyWrapperFixture(t)
 	root := filepath.Dir(filepath.Dir(wrapperPath))
 	nativePath := filepath.Join(root, "splice")
-	if err := os.WriteFile(nativePath, []byte("#!/usr/bin/env sh\nif [ -n \"${ZERO_LOCAL_CONTROL_HELPERS+x}\" ]; then printf 'set\\n'; else printf 'unset\\n'; fi\n"), 0o755); err != nil {
+	if err := os.WriteFile(nativePath, []byte("#!/usr/bin/env sh\nif [ -n \"${SPLICE_LOCAL_CONTROL_HELPERS+x}\" ]; then printf 'set\\n'; else printf 'unset\\n'; fi\n"), 0o755); err != nil {
 		t.Fatalf("WriteFile native fixture: %v", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), nodeWrapperTimeout())
 	defer cancel()
 	command := nodeWrapperCommand(ctx, node, wrapperPath, "--version")
-	command.Env = append(withoutEnvKey(command.Env, "ZERO_LOCAL_CONTROL_HELPERS"), `ZERO_LOCAL_CONTROL_HELPERS={"version":1,"helpers":{"agent-browser":{"command":"stale"}}}`)
+	command.Env = append(withoutEnvKey(command.Env, "SPLICE_LOCAL_CONTROL_HELPERS"), `SPLICE_LOCAL_CONTROL_HELPERS={"version":1,"helpers":{"agent-browser":{"command":"stale"}}}`)
 	output, err := command.CombinedOutput()
 	if ctx.Err() != nil {
 		t.Fatalf("wrapper timed out launching native binary: %v; output: %s", ctx.Err(), output)
@@ -373,7 +373,7 @@ func TestNodeWrapperClearsInheritedLocalControlHelperManifestWhenNoHelpers(t *te
 		t.Fatalf("wrapper returned error: %v; output: %s", err, output)
 	}
 	if got := strings.TrimSpace(string(output)); got != "unset" {
-		t.Fatalf("ZERO_LOCAL_CONTROL_HELPERS state = %q, want unset", got)
+		t.Fatalf("SPLICE_LOCAL_CONTROL_HELPERS state = %q, want unset", got)
 	}
 }
 

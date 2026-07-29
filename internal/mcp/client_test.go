@@ -31,7 +31,7 @@ func TestStdioClientListsAndCallsTools(t *testing.T) {
 		Type:    ServerTypeStdio,
 		Command: executable,
 		Args:    []string{"-test.run=TestMCPStdioHelperProcess", "--"},
-		Env:     map[string]string{"ZERO_MCP_STDIO_HELPER": "1"},
+		Env:     map[string]string{"SPLICE_MCP_STDIO_HELPER": "1"},
 	})
 	if err != nil {
 		t.Fatalf("Connect() error = %v", err)
@@ -78,7 +78,7 @@ func TestStdioClientCloseAllowsConcurrentCallers(t *testing.T) {
 		Type:    ServerTypeStdio,
 		Command: executable,
 		Args:    []string{"-test.run=TestMCPStdioHelperProcess", "--"},
-		Env:     map[string]string{"ZERO_MCP_STDIO_HELPER": "1"},
+		Env:     map[string]string{"SPLICE_MCP_STDIO_HELPER": "1"},
 	})
 	if err != nil {
 		t.Fatalf("Connect() error = %v", err)
@@ -582,7 +582,7 @@ func (closer errorCloser) Close() error {
 }
 
 func TestMCPStdioHelperProcess(t *testing.T) {
-	if os.Getenv("ZERO_MCP_STDIO_HELPER") != "1" {
+	if os.Getenv("SPLICE_MCP_STDIO_HELPER") != "1" {
 		return
 	}
 

@@ -62,10 +62,10 @@ type Options struct {
 	ResponseStyle   string
 	// Theme is the operator's palette preference: "auto" (default), a built-in
 	// ("dark"/"light"), or a registered color theme. Set from the --theme flag;
-	// falls back to ZERO_THEME, then the persisted SavedTheme, then auto.
+	// falls back to SPLICE_THEME, then the persisted SavedTheme, then auto.
 	Theme string
 	// SavedTheme is the theme persisted in user config (Preferences.Theme). Applied
-	// at startup below --theme and ZERO_THEME, so a /theme choice survives restart.
+	// at startup below --theme and SPLICE_THEME, so a /theme choice survives restart.
 	SavedTheme string
 	UserAgent  string
 

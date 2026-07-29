@@ -18,7 +18,7 @@ func TestBuildMCPViewStateSummarizesConfiguredServers(t *testing.T) {
 			Type:    "stdio",
 			Command: "docs-mcp",
 			Args:    []string{"--workspace", "."},
-			Env:     map[string]string{"ZERO_DOCS_TOKEN": "sk-secret"},
+			Env:     map[string]string{"SPLICE_DOCS_TOKEN": "sk-secret"},
 		},
 		"linear": {
 			Type:     "http",
@@ -43,7 +43,7 @@ func TestBuildMCPViewStateSummarizesConfiguredServers(t *testing.T) {
 		Name:      "docs",
 		Transport: "stdio",
 		State:     "enabled",
-		Target:    "docs-mcp --workspace . env ZERO_DOCS_TOKEN=[REDACTED]",
+		Target:    "docs-mcp --workspace . env SPLICE_DOCS_TOKEN=[REDACTED]",
 	})
 	assertServerView(t, state.Servers[1], MCPServerView{
 		Name:      "linear",

@@ -15,11 +15,11 @@ import (
 )
 
 func TestWindowsRestrictedTokenRealSandboxSmoke(t *testing.T) {
-	if os.Getenv("ZERO_SANDBOX_REAL_SMOKE") != "1" {
-		t.Skip("set ZERO_SANDBOX_REAL_SMOKE=1 to run real Windows sandbox smoke tests")
+	if os.Getenv("SPLICE_SANDBOX_REAL_SMOKE") != "1" {
+		t.Skip("set SPLICE_SANDBOX_REAL_SMOKE=1 to run real Windows sandbox smoke tests")
 	}
-	setupExe := realSmokeExecutable(t, "ZERO_WINDOWS_SANDBOX_SETUP_EXE", WindowsSandboxSetupName)
-	runnerExe := realSmokeExecutable(t, "ZERO_WINDOWS_COMMAND_RUNNER_EXE", WindowsSandboxCommandRunnerName)
+	setupExe := realSmokeExecutable(t, "SPLICE_WINDOWS_SANDBOX_SETUP_EXE", WindowsSandboxSetupName)
+	runnerExe := realSmokeExecutable(t, "SPLICE_WINDOWS_COMMAND_RUNNER_EXE", WindowsSandboxCommandRunnerName)
 
 	root := t.TempDir()
 	sandboxHome := filepath.Join(root, ".splice-sandbox")
@@ -138,10 +138,10 @@ exit 0
 // restricted token, and a write outside every granted root is denied. Unlike
 // the elevated smoke above it needs no Administrator terminal.
 func TestWindowsUnelevatedRealSandboxSmoke(t *testing.T) {
-	if os.Getenv("ZERO_SANDBOX_REAL_SMOKE") != "1" {
-		t.Skip("set ZERO_SANDBOX_REAL_SMOKE=1 to run real Windows sandbox smoke tests")
+	if os.Getenv("SPLICE_SANDBOX_REAL_SMOKE") != "1" {
+		t.Skip("set SPLICE_SANDBOX_REAL_SMOKE=1 to run real Windows sandbox smoke tests")
 	}
-	runnerExe := realSmokeExecutable(t, "ZERO_WINDOWS_COMMAND_RUNNER_EXE", WindowsSandboxCommandRunnerName)
+	runnerExe := realSmokeExecutable(t, "SPLICE_WINDOWS_COMMAND_RUNNER_EXE", WindowsSandboxCommandRunnerName)
 
 	root := t.TempDir()
 	outside := t.TempDir()
@@ -203,10 +203,10 @@ func TestWindowsUnelevatedRealSandboxSmoke(t *testing.T) {
 // dance internally, so it reproduces the bug with no external dependency
 // beyond cmd.exe itself).
 func TestWindowsRestrictedTokenNestedPipeCapture(t *testing.T) {
-	if os.Getenv("ZERO_SANDBOX_REAL_SMOKE") != "1" {
-		t.Skip("set ZERO_SANDBOX_REAL_SMOKE=1 to run real Windows sandbox smoke tests")
+	if os.Getenv("SPLICE_SANDBOX_REAL_SMOKE") != "1" {
+		t.Skip("set SPLICE_SANDBOX_REAL_SMOKE=1 to run real Windows sandbox smoke tests")
 	}
-	runnerExe := realSmokeExecutable(t, "ZERO_WINDOWS_COMMAND_RUNNER_EXE", WindowsSandboxCommandRunnerName)
+	runnerExe := realSmokeExecutable(t, "SPLICE_WINDOWS_COMMAND_RUNNER_EXE", WindowsSandboxCommandRunnerName)
 
 	root := t.TempDir()
 	sandboxHome := filepath.Join(root, ".splice-sandbox")

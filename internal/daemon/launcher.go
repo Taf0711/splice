@@ -24,7 +24,7 @@ import (
 var reentrancyMarkers = []string{sandbox.EnvSandboxed, sandbox.EnvSandboxBackend}
 
 // scrubWorkerEnv returns env with the sandbox re-entrancy markers removed. Every
-// other variable is preserved — including the ZERO_SANDBOX_* policy config the
+// other variable is preserved — including the SPLICE_SANDBOX_* policy config the
 // worker reads to rebuild its own policy — so the sandbox policy is PROPAGATED,
 // not bypassed. The caller's slice is never mutated.
 func scrubWorkerEnv(env []string) []string {

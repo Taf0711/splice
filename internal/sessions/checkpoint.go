@@ -34,13 +34,13 @@ type CheckpointPayload struct {
 }
 
 // CheckpointsEnabled reports whether checkpoint capture is enabled (default on;
-// disabled with ZERO_CHECKPOINTS=off).
+// disabled with SPLICE_CHECKPOINTS=off).
 func CheckpointsEnabled() bool {
-	return os.Getenv("ZERO_CHECKPOINTS") != "off"
+	return os.Getenv("SPLICE_CHECKPOINTS") != "off"
 }
 
 func maxCheckpointBytes() int {
-	if raw := os.Getenv("ZERO_CHECKPOINT_MAX_BYTES"); raw != "" {
+	if raw := os.Getenv("SPLICE_CHECKPOINT_MAX_BYTES"); raw != "" {
 		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
 			return n
 		}

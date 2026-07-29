@@ -88,8 +88,8 @@ func runTasksCommand(args []string, getenv func(string) string, stdout io.Writer
 
 func parseTaskArgs(args []string, getenv func(string) string) (taskOptions, error) {
 	options := taskOptions{
-		Version: strings.TrimSpace(getenv("ZERO_BENCH_VERSION")),
-		Commit:  strings.TrimSpace(getenv("ZERO_BENCH_COMMIT")),
+		Version: strings.TrimSpace(getenv("SPLICE_BENCH_VERSION")),
+		Commit:  strings.TrimSpace(getenv("SPLICE_BENCH_COMMIT")),
 	}
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
@@ -206,8 +206,8 @@ func taskHelpText() string {
 		"  --mode <name>       Exec mode preset to apply",
 		"  --self-correct      Enable the post-edit verify-and-correct loop",
 		"  --binary <path>     Path to the `splice` binary (required unless --dry-run)",
-		"  --version <v>       Record the SPLICE version (default: $ZERO_BENCH_VERSION)",
-		"  --commit <sha>      Record the SPLICE commit (default: $ZERO_BENCH_COMMIT)",
+		"  --version <v>       Record the SPLICE version (default: $SPLICE_BENCH_VERSION)",
+		"  --commit <sha>      Record the SPLICE commit (default: $SPLICE_BENCH_COMMIT)",
 		"  --output <path>     Write the JSON result to path",
 		"  --json              Print only the JSON result",
 		"  --dry-run           Record every task as skipped without invoking the agent",

@@ -108,7 +108,7 @@ The full format spec (frontmatter fields, tool scopes, prompt conventions) is in
 
 Skills are markdown instruction packs the agent can pull in on demand. Each skill is a directory containing a `SKILL.md`. Skills are **user-level only** in this version — there's no project-scoped skill directory yet, so anything you want shared with the team goes in `AGENTS.md` (section 1) or as a hook (section 4).
 
-Discovery root: `$ZERO_SKILLS_DIR` → `$XDG_DATA_HOME/zero/skills` → `~/.local/share/zero/skills/`. A missing directory is fine — Zero just reports "no skills".
+Discovery root: `$SPLICE_SKILLS_DIR` → `$XDG_DATA_HOME/zero/skills` → `~/.local/share/zero/skills/`. A missing directory is fine — Zero just reports "no skills".
 
 ```
 ~/.local/share/zero/skills/
@@ -294,7 +294,7 @@ Three layers, applied in order (later layers override earlier ones):
 | User config | `~/.config/zero/config.json` | Your machine. Never committed. |
 | Project config | `./.zero/config.json` | The repo. Committed (or not, your call). |
 | CLI flags | `--model`, `--mode`, ... | Highest priority, per-invocation. |
-| Environment | `ZERO_*` | Provider commands, secrets, skills dir override. |
+| Environment | `SPLICE_*` | Provider commands, secrets, skills dir override. |
 
 The user config holds things that should follow the user across projects (default provider, default model, theme). The project config holds things the team agreed on (provider catalog, sandbox policies, model restrictions).
 

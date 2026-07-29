@@ -12,12 +12,12 @@
 // crafted archive cannot write outside the package (no zip-slip).
 //
 // Env overrides (testing / mirrors / locked-down installs):
-//   ZERO_SKIP_DOWNLOAD=1      skip entirely, exit 0 (wrapper will guide if run)
+//   SPLICE_SKIP_DOWNLOAD=1      skip entirely, exit 0 (wrapper will guide if run)
 //   SPLICE_INSTALL_DRY_RUN=1    print the resolved plan as JSON, no network, exit 0
 //   SPLICE_INSTALL_PLATFORM=…   override process.platform (linux|darwin|win32|android)
 //   SPLICE_INSTALL_ARCH=…       override process.arch (x64|arm64)
 //   SPLICE_REPO=owner/name      override the GitHub repo (default Taf0711/splice)
-//   ZERO_GITHUB_BASE_URL=…    override the download host (default https://github.com)
+//   SPLICE_GITHUB_BASE_URL=…    override the download host (default https://github.com)
 
 import {
   chmodSync,
@@ -42,11 +42,11 @@ const pkg = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'));
 const VERSION = pkg.version;
 
 const REPO = process.env.SPLICE_REPO || 'Taf0711/splice';
-const BASE = (process.env.ZERO_GITHUB_BASE_URL || 'https://github.com').replace(/\/+$/, '');
+const BASE = (process.env.SPLICE_GITHUB_BASE_URL || 'https://github.com').replace(/\/+$/, '');
 // The .sha256 is fetched from the same origin as the archive, so TLS authenticity
 // is the only real integrity control — require https unless explicitly overridden
 // for local testing (e.g. a localhost mirror in tests).
-const ALLOW_INSECURE = process.env.ZERO_ALLOW_INSECURE_DOWNLOAD === '1';
+const ALLOW_INSECURE = process.env.SPLICE_ALLOW_INSECURE_DOWNLOAD === '1';
 const MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024;
 
 function fail(message) {
@@ -86,8 +86,8 @@ function resolveArch(a) {
   }
 }
 
-if (process.env.ZERO_SKIP_DOWNLOAD === '1') {
-  warnSkip('ZERO_SKIP_DOWNLOAD=1 set — skipping native binary download.');
+if (process.env.SPLICE_SKIP_DOWNLOAD === '1') {
+  warnSkip('SPLICE_SKIP_DOWNLOAD=1 set — skipping native binary download.');
 }
 
 const rawPlatform = process.env.SPLICE_INSTALL_PLATFORM || process.platform;
@@ -174,7 +174,7 @@ async function download(url) {
   if (!ALLOW_INSECURE && !url.startsWith('https://')) {
     fail(
       `refusing insecure download origin for ${url}: only https:// is allowed ` +
-        `(set ZERO_ALLOW_INSECURE_DOWNLOAD=1 to override for local testing).`,
+        `(set SPLICE_ALLOW_INSECURE_DOWNLOAD=1 to override for local testing).`,
     );
   }
   let response;

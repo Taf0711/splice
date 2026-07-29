@@ -103,7 +103,7 @@ type PreferencesConfig struct {
 	FavoriteModels []string `json:"favoriteModels,omitempty"`
 	// Theme is the persisted TUI palette preference — "auto" or a registered theme
 	// name (e.g. "dracula"). Applied at startup below the --theme flag and
-	// ZERO_THEME, so a /theme choice survives restart. Empty = unset (defaults auto).
+	// SPLICE_THEME, so a /theme choice survives restart. Empty = unset (defaults auto).
 	Theme string `json:"theme,omitempty"`
 	// Recaps is a tri-state: nil (unset) defaults to ON; an explicit false means
 	// the user turned post-turn recaps off. A *bool is its own tri-state, so no

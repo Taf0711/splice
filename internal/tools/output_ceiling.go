@@ -23,7 +23,7 @@ const defaultOutputCeilingTokens = 16_000
 
 // outputCeilingEnv overrides the ceiling (in tokens). Splice or negative
 // disables the ceiling entirely; unset or unparsable keeps the default.
-const outputCeilingEnv = "ZERO_TOOL_OUTPUT_CEILING_TOKENS"
+const outputCeilingEnv = "SPLICE_TOOL_OUTPUT_CEILING_TOKENS"
 
 // selfBudgeting marks a tool that enforces its own deliberate output budget —
 // possibly model-raisable (exec_command) — which the registry ceiling must not

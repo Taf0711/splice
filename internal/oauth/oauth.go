@@ -18,7 +18,7 @@
 // from config/env by default, so no third-party OAuth client identity is used
 // unless the operator opts in. A small set of built-in presets (e.g. xAI's public
 // client) exists for convenience but is OFF by default and only consulted when
-// ZERO_OAUTH_ALLOW_PRESETS is set; env always overrides a preset.
+// SPLICE_OAUTH_ALLOW_PRESETS is set; env always overrides a preset.
 package oauth
 
 import (

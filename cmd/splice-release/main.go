@@ -130,8 +130,8 @@ func runVerify(args []string, stdout io.Writer, stderr io.Writer) int {
 
 func parseBuildArgs(args []string, getenv func(string) string) (release.BuildOptions, bool, error) {
 	options := release.BuildOptions{
-		GOOS:   strings.TrimSpace(getenv("ZERO_BUILD_GOOS")),
-		GOARCH: strings.TrimSpace(getenv("ZERO_BUILD_GOARCH")),
+		GOOS:   strings.TrimSpace(getenv("SPLICE_BUILD_GOOS")),
+		GOARCH: strings.TrimSpace(getenv("SPLICE_BUILD_GOARCH")),
 	}
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
@@ -357,7 +357,7 @@ Flags:
   -h, --help              Show this help
 
 Environment overrides:
-  ZERO_BUILD_GOOS, ZERO_BUILD_GOARCH
+  SPLICE_BUILD_GOOS, SPLICE_BUILD_GOARCH
 `)
 	return err
 }

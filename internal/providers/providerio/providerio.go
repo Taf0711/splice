@@ -52,7 +52,7 @@ func StreamTimeoutMessage(err error, idleTimeout time.Duration) string {
 // and reasoning backends that pause for minutes without heartbeating, while
 // still bounding a truly hung connection. 90s was too aggressive and killed
 // healthy long generations; 5 minutes is the floor a real stall must cross.
-// Override globally with ZERO_STREAM_IDLE_TIMEOUT.
+// Override globally with SPLICE_STREAM_IDLE_TIMEOUT.
 const DefaultStreamIdleTimeout = 5 * time.Minute
 
 // ContentStallTimeout bounds a heartbeat-but-no-output stream: keep-alives reset
@@ -63,14 +63,14 @@ const DefaultStreamIdleTimeout = 5 * time.Minute
 // arrives), but only 1.2× rather than the old 2×: a genuine heartbeat-pause
 // stall on chatgpt/gpt-5.x rarely recovers, so a ~10-minute dead wait (at the 5m
 // idle default) was a terrible UX for a doomed turn. At the default idle this is
-// 6 minutes; it still scales with ZERO_STREAM_IDLE_TIMEOUT. A returned value <= 0
+// 6 minutes; it still scales with SPLICE_STREAM_IDLE_TIMEOUT. A returned value <= 0
 // (idle watchdog disabled) leaves the content watchdog off too.
 func ContentStallTimeout(idleTimeout time.Duration) time.Duration {
 	if idleTimeout <= 0 {
 		return 0
 	}
 	// 1.2× computed as idle + idle/5 (not idle*6/5), plus a clamp: a
-	// pathologically large ZERO_STREAM_IDLE_TIMEOUT could make idle*6 overflow
+	// pathologically large SPLICE_STREAM_IDLE_TIMEOUT could make idle*6 overflow
 	// int64 and wrap to a NEGATIVE duration, which would arm the content timer
 	// to fire immediately and abort every stream. Clamping to the max duration
 	// on overflow just means "effectively no content watchdog" — the sane
@@ -86,11 +86,11 @@ func ContentStallTimeout(idleTimeout time.Duration) time.Duration {
 // accepts a Go duration ("5m", "300s", "90s") or a bare number of seconds
 // ("300"). A value of "0", "off", "none", or "disabled" turns the watchdog off
 // entirely (streams may then hang until the HTTP/transport layer gives up).
-const streamIdleTimeoutEnv = "ZERO_STREAM_IDLE_TIMEOUT"
+const streamIdleTimeoutEnv = "SPLICE_STREAM_IDLE_TIMEOUT"
 
 // ResolveStreamIdleTimeout selects the effective stream idle timeout. Precedence:
 // an explicit positive option (e.g. set by a test) wins; otherwise the
-// ZERO_STREAM_IDLE_TIMEOUT env override if set and valid; otherwise
+// SPLICE_STREAM_IDLE_TIMEOUT env override if set and valid; otherwise
 // DefaultStreamIdleTimeout. A returned value <= 0 disables the idle watchdog.
 func ResolveStreamIdleTimeout(option time.Duration) time.Duration {
 	if option > 0 {

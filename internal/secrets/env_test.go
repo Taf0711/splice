@@ -24,7 +24,7 @@ func TestScrubChildEnv(t *testing.T) {
 				"GOOGLE_APPLICATION_CREDENTIALS=/path",
 				"GITHUB_TOKEN=ghtoken",
 				"GH_TOKEN=ghtoken2",
-				"ZERO_API_KEY=zkey",
+				"SPLICE_API_KEY=zkey",
 				"SPLICE_API_KEY=skey",
 				"API_KEY=ak",
 				"AUTH_TOKEN=at",

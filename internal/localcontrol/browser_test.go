@@ -84,7 +84,7 @@ func TestBrowserRunUsesHelperManifest(t *testing.T) {
 	if err := os.WriteFile(helper, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatalf("write helper: %v", err)
 	}
-	t.Setenv(EnvHelperManifest, `{"version":1,"helpers":{"agent-browser":{"command":`+quoteJSON(helper)+`,"pathPrepend":[`+quoteJSON(binDir)+`],"env":{"ZERO_HELPER_TEST":"1"}}}}`)
+	t.Setenv(EnvHelperManifest, `{"version":1,"helpers":{"agent-browser":{"command":`+quoteJSON(helper)+`,"pathPrepend":[`+quoteJSON(binDir)+`],"env":{"SPLICE_HELPER_TEST":"1"}}}}`)
 
 	runner := &fakeCommandRunner{}
 	browser := NewBrowser(BrowserOptions{
@@ -98,8 +98,8 @@ func TestBrowserRunUsesHelperManifest(t *testing.T) {
 	if runner.path != helper {
 		t.Fatalf("runner path = %q, want manifest helper %q", runner.path, helper)
 	}
-	if !envContains(runner.env, "ZERO_HELPER_TEST=1") {
-		t.Fatalf("env = %#v, want ZERO_HELPER_TEST", runner.env)
+	if !envContains(runner.env, "SPLICE_HELPER_TEST=1") {
+		t.Fatalf("env = %#v, want SPLICE_HELPER_TEST", runner.env)
 	}
 	pathValue := envValue(runner.env, "PATH")
 	if !strings.HasPrefix(pathValue, binDir+string(os.PathListSeparator)) && pathValue != binDir {

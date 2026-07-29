@@ -30,8 +30,8 @@ import (
 
 // Env vars the bridge reads for its bearer token.
 const (
-	EnvToken     = "ZERO_DAEMON_REMOTE_TOKEN"
-	EnvTokenFile = "ZERO_DAEMON_REMOTE_TOKEN_FILE"
+	EnvToken     = "SPLICE_DAEMON_REMOTE_TOKEN"
+	EnvTokenFile = "SPLICE_DAEMON_REMOTE_TOKEN_FILE"
 )
 
 // ErrUnauthorized is returned when a token does not match.

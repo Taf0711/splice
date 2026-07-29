@@ -13,7 +13,7 @@ import (
 func withAuthStore(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "oauth-tokens.json")
-	t.Setenv("ZERO_OAUTH_TOKENS_PATH", path)
+	t.Setenv("SPLICE_OAUTH_TOKENS_PATH", path)
 	return path
 }
 
@@ -21,12 +21,12 @@ func TestRunAuthRejectsInvalidStorageMode(t *testing.T) {
 	withAuthStore(t)
 	// A mistyped value must fail fast, not silently fall back to plaintext while
 	// the user believes encryption is active.
-	t.Setenv("ZERO_OAUTH_STORAGE", "encryptd")
+	t.Setenv("SPLICE_OAUTH_STORAGE", "encryptd")
 	var stdout, stderr bytes.Buffer
 	if code := runWithDeps([]string{"auth", "status"}, &stdout, &stderr, appDeps{}); code == exitSuccess {
-		t.Fatalf("invalid ZERO_OAUTH_STORAGE should fail, got success; stdout=%q", stdout.String())
+		t.Fatalf("invalid SPLICE_OAUTH_STORAGE should fail, got success; stdout=%q", stdout.String())
 	}
-	if !strings.Contains(stderr.String(), "ZERO_OAUTH_STORAGE") {
+	if !strings.Contains(stderr.String(), "SPLICE_OAUTH_STORAGE") {
 		t.Fatalf("error should name the offending env var, stderr=%q", stderr.String())
 	}
 }
@@ -105,7 +105,7 @@ func TestRunAuthLoginUnknownProvider(t *testing.T) {
 
 func TestRunAuthRefreshNoToken(t *testing.T) {
 	withAuthStore(t)
-	t.Setenv("ZERO_OAUTH_DEMO_CLIENT_ID", "client") // so config resolves; refresh still fails (no token)
+	t.Setenv("SPLICE_OAUTH_DEMO_CLIENT_ID", "client") // so config resolves; refresh still fails (no token)
 	var stdout, stderr bytes.Buffer
 	if code := runWithDeps([]string{"auth", "refresh", "demo"}, &stdout, &stderr, appDeps{}); code == exitSuccess {
 		t.Fatal("refresh with no stored token should fail")

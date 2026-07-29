@@ -64,8 +64,8 @@ func TestNewManagerAllowPresetsForcesOptIn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	if m.env["ZERO_OAUTH_ALLOW_PRESETS"] != "1" {
-		t.Fatalf("AllowPresets should force the opt-in; got env[%q]=%q", "ZERO_OAUTH_ALLOW_PRESETS", m.env["ZERO_OAUTH_ALLOW_PRESETS"])
+	if m.env["SPLICE_OAUTH_ALLOW_PRESETS"] != "1" {
+		t.Fatalf("AllowPresets should force the opt-in; got env[%q]=%q", "SPLICE_OAUTH_ALLOW_PRESETS", m.env["SPLICE_OAUTH_ALLOW_PRESETS"])
 	}
 	m2, err := NewManager(ManagerOptions{Store: store})
 	if err != nil {
@@ -79,9 +79,9 @@ func TestNewManagerAllowPresetsForcesOptIn(t *testing.T) {
 func TestManagerLoginLoopback(t *testing.T) {
 	fp := newFakeProvider(t, `{"access_token":"at","refresh_token":"rt","token_type":"Bearer","expires_in":3600}`)
 	env := map[string]string{
-		"ZERO_OAUTH_DEMO_CLIENT_ID":     "client",
-		"ZERO_OAUTH_DEMO_AUTHORIZE_URL": "https://auth.example.com/authorize",
-		"ZERO_OAUTH_DEMO_TOKEN_URL":     fp.server.URL + "/token",
+		"SPLICE_OAUTH_DEMO_CLIENT_ID":     "client",
+		"SPLICE_OAUTH_DEMO_AUTHORIZE_URL": "https://auth.example.com/authorize",
+		"SPLICE_OAUTH_DEMO_TOKEN_URL":     fp.server.URL + "/token",
 	}
 	// The fake browser drives the loopback redirect with the captured state.
 	openBrowser := func(authURL string) error {
@@ -116,9 +116,9 @@ func TestManagerLoginLoopback(t *testing.T) {
 func TestManagerLoginDevice(t *testing.T) {
 	fp := newFakeProvider(t, `{"access_token":"dev-at","token_type":"Bearer","expires_in":3600}`)
 	env := map[string]string{
-		"ZERO_OAUTH_DEMODEV_CLIENT_ID":  "client",
-		"ZERO_OAUTH_DEMODEV_TOKEN_URL":  fp.server.URL + "/token",
-		"ZERO_OAUTH_DEMODEV_DEVICE_URL": fp.server.URL + "/device",
+		"SPLICE_OAUTH_DEMODEV_CLIENT_ID":  "client",
+		"SPLICE_OAUTH_DEMODEV_TOKEN_URL":  fp.server.URL + "/token",
+		"SPLICE_OAUTH_DEMODEV_DEVICE_URL": fp.server.URL + "/device",
 	}
 	m := managerFor(t, env, nil)
 	status, err := m.Login(context.Background(), LoginOptions{Provider: "demodev", Device: true})
@@ -133,9 +133,9 @@ func TestManagerLoginDevice(t *testing.T) {
 func TestManagerPrepareAndCompleteDeviceLogin(t *testing.T) {
 	fp := newFakeProvider(t, `{"access_token":"two-phase-at","token_type":"Bearer","expires_in":3600}`)
 	env := map[string]string{
-		"ZERO_OAUTH_DEMO2_CLIENT_ID":  "client",
-		"ZERO_OAUTH_DEMO2_TOKEN_URL":  fp.server.URL + "/token",
-		"ZERO_OAUTH_DEMO2_DEVICE_URL": fp.server.URL + "/device",
+		"SPLICE_OAUTH_DEMO2_CLIENT_ID":  "client",
+		"SPLICE_OAUTH_DEMO2_TOKEN_URL":  fp.server.URL + "/token",
+		"SPLICE_OAUTH_DEMO2_DEVICE_URL": fp.server.URL + "/device",
 	}
 	m := managerFor(t, env, nil)
 
@@ -181,8 +181,8 @@ func TestManagerGetFreshDiscoversIssuerEndpoints(t *testing.T) {
 		_, _ = io.WriteString(w, `{"access_token":"refreshed-at","token_type":"Bearer","expires_in":3600}`)
 	})
 	env := map[string]string{
-		"ZERO_OAUTH_ISSUERONLY_CLIENT_ID":  "client",
-		"ZERO_OAUTH_ISSUERONLY_ISSUER_URL": server.URL, // no TOKEN_URL → discovered
+		"SPLICE_OAUTH_ISSUERONLY_CLIENT_ID":  "client",
+		"SPLICE_OAUTH_ISSUERONLY_ISSUER_URL": server.URL, // no TOKEN_URL → discovered
 	}
 	m := managerFor(t, env, nil)
 	if err := m.store.Save(ProviderKey("issueronly"), Token{AccessToken: "stale", RefreshToken: "rt", ExpiresAt: time.Now().Add(-time.Hour)}); err != nil {
@@ -203,8 +203,8 @@ func TestManagerGetFreshDiscoversIssuerEndpoints(t *testing.T) {
 func TestManagerGetFreshRefreshesExpired(t *testing.T) {
 	fp := newFakeProvider(t, `{"access_token":"fresh-at","expires_in":3600}`)
 	env := map[string]string{
-		"ZERO_OAUTH_DEMO_CLIENT_ID": "client",
-		"ZERO_OAUTH_DEMO_TOKEN_URL": fp.server.URL + "/token",
+		"SPLICE_OAUTH_DEMO_CLIENT_ID": "client",
+		"SPLICE_OAUTH_DEMO_TOKEN_URL": fp.server.URL + "/token",
 	}
 	m := managerFor(t, env, nil)
 	// Seed an expired token with a refresh token.
@@ -231,8 +231,8 @@ func TestManagerGetFreshRefreshesExpired(t *testing.T) {
 func TestManagerGetFreshSkipsValidToken(t *testing.T) {
 	fp := newFakeProvider(t, `{"access_token":"should-not-be-used"}`)
 	env := map[string]string{
-		"ZERO_OAUTH_DEMO_CLIENT_ID": "client",
-		"ZERO_OAUTH_DEMO_TOKEN_URL": fp.server.URL + "/token",
+		"SPLICE_OAUTH_DEMO_CLIENT_ID": "client",
+		"SPLICE_OAUTH_DEMO_TOKEN_URL": fp.server.URL + "/token",
 	}
 	m := managerFor(t, env, nil)
 	_ = m.store.Save(ProviderKey("demo"), Token{AccessToken: "valid", RefreshToken: "rt", ExpiresAt: time.Now().Add(time.Hour)})
@@ -248,8 +248,8 @@ func TestManagerGetFreshSkipsValidToken(t *testing.T) {
 func TestManagerHandle401ForcesRefresh(t *testing.T) {
 	fp := newFakeProvider(t, `{"access_token":"after-401"}`)
 	env := map[string]string{
-		"ZERO_OAUTH_DEMO_CLIENT_ID": "client",
-		"ZERO_OAUTH_DEMO_TOKEN_URL": fp.server.URL + "/token",
+		"SPLICE_OAUTH_DEMO_CLIENT_ID": "client",
+		"SPLICE_OAUTH_DEMO_TOKEN_URL": fp.server.URL + "/token",
 	}
 	m := managerFor(t, env, nil)
 	// Token is still valid by clock, but Handle401 forces a refresh anyway.
@@ -264,7 +264,7 @@ func TestManagerHandle401ForcesRefresh(t *testing.T) {
 }
 
 func TestManagerLogout(t *testing.T) {
-	m := managerFor(t, map[string]string{"ZERO_OAUTH_DEMO_CLIENT_ID": "c"}, nil)
+	m := managerFor(t, map[string]string{"SPLICE_OAUTH_DEMO_CLIENT_ID": "c"}, nil)
 	_ = m.store.Save(ProviderKey("demo"), Token{AccessToken: "a"})
 	removed, err := m.Logout("demo")
 	if err != nil || !removed {

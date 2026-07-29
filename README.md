@@ -419,12 +419,12 @@ manifest.
 | Control | Effect |
 |---|---|
 | `NO_COLOR=<anything>` | disables color output |
-| `ZERO_THEME=<name>` | selects the startup theme (`auto`, `dark`, `light`, or a color theme like `dracula`, `nord`, `gruvbox`, `tokyo-night`, `catppuccin`, `one-dark`, `solarized-dark`, `rose-pine`, `everforest`, `solarized-light`) |
+| `SPLICE_THEME=<name>` | selects the startup theme (`auto`, `dark`, `light`, or a color theme like `dracula`, `nord`, `gruvbox`, `tokyo-night`, `catppuccin`, `one-dark`, `solarized-dark`, `rose-pine`, `everforest`, `solarized-light`) |
 | `--theme <name>` | selects the TUI theme from the CLI (same names) |
 | `/theme` | opens the theme picker inside the TUI (live preview; `/theme <name>` switches directly) |
-| `ZERO_NO_FADE=1` | disables streaming fade animation |
+| `SPLICE_NO_FADE=1` | disables streaming fade animation |
 
-> Note: the theme environment variables still use the `ZERO_` prefix from the
+> Note: the theme environment variables still use the `SPLICE_` prefix from the
 > upstream engine. A rename to `SPLICE_` is planned but not yet applied; both
 > names will be accepted during a transition.
 

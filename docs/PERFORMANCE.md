@@ -55,18 +55,18 @@ go run ./cmd/splice-perf-bench --cold-start-warn-ms=350 --first-output-warn-ms=6
 Or with environment variables:
 
 ```bash
-ZERO_PERF_COLD_START_WARN_MS=350 go run ./cmd/splice-perf-bench
+SPLICE_PERF_COLD_START_WARN_MS=350 go run ./cmd/splice-perf-bench
 ```
 
 Supported environment variables:
 
-- `ZERO_PERF_ITERATIONS`
-- `ZERO_PERF_WARMUP_ITERATIONS`
-- `ZERO_PERF_COLD_START_WARN_MS`
-- `ZERO_PERF_FIRST_OUTPUT_WARN_MS`
-- `ZERO_PERF_HARNESS_END_RSS_WARN_MB`
+- `SPLICE_PERF_ITERATIONS`
+- `SPLICE_PERF_WARMUP_ITERATIONS`
+- `SPLICE_PERF_COLD_START_WARN_MS`
+- `SPLICE_PERF_FIRST_OUTPUT_WARN_MS`
+- `SPLICE_PERF_HARNESS_END_RSS_WARN_MB`
 
-These environment variables retain the upstream ZERO_ prefix; a rename to SPLICE_ is planned.
+These environment variables retain the upstream SPLICE_ prefix; a rename to SPLICE_ is planned.
 
 ## CI Behavior
 

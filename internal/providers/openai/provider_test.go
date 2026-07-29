@@ -1264,7 +1264,7 @@ func TestOpenAIRequestEmptyContentHandling(t *testing.T) {
 // session-carrying request serializes the key so the backend can route to a
 // replica holding the cached prefix, a keyless request omits the field
 // entirely (strict servers see byte-identical requests to before), and
-// ZERO_DISABLE_PROMPT_CACHE_KEY suppresses it for endpoints that reject it.
+// SPLICE_DISABLE_PROMPT_CACHE_KEY suppresses it for endpoints that reject it.
 func TestOpenAIRequestPromptCacheKey(t *testing.T) {
 	provider, err := New(Options{Model: "gpt-test"})
 	if err != nil {
@@ -1295,7 +1295,7 @@ func TestOpenAIRequestPromptCacheKey(t *testing.T) {
 		t.Fatalf("keyless request must omit prompt_cache_key: %s", data)
 	}
 
-	t.Setenv("ZERO_DISABLE_PROMPT_CACHE_KEY", "1")
+	t.Setenv("SPLICE_DISABLE_PROMPT_CACHE_KEY", "1")
 	req = provider.openAIRequest(zeroruntime.CompletionRequest{
 		Messages:       messages,
 		PromptCacheKey: "sess_123",
@@ -1305,15 +1305,15 @@ func TestOpenAIRequestPromptCacheKey(t *testing.T) {
 	}
 
 	// Explicitly-falsy kill switch values must NOT disable forwarding — only
-	// truthy values flip the toggle (same parsing as ZERO_FORMAT_ON_WRITE).
+	// truthy values flip the toggle (same parsing as SPLICE_FORMAT_ON_WRITE).
 	for _, value := range []string{"0", "false", "FALSE"} {
-		t.Setenv("ZERO_DISABLE_PROMPT_CACHE_KEY", value)
+		t.Setenv("SPLICE_DISABLE_PROMPT_CACHE_KEY", value)
 		req = provider.openAIRequest(zeroruntime.CompletionRequest{
 			Messages:       messages,
 			PromptCacheKey: "sess_123",
 		})
 		if req.PromptCacheKey != "sess_123" {
-			t.Fatalf("ZERO_DISABLE_PROMPT_CACHE_KEY=%q must be a no-op; PromptCacheKey = %q", value, req.PromptCacheKey)
+			t.Fatalf("SPLICE_DISABLE_PROMPT_CACHE_KEY=%q must be a no-op; PromptCacheKey = %q", value, req.PromptCacheKey)
 		}
 	}
 }

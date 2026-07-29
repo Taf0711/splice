@@ -1562,7 +1562,7 @@ func absInt(value int) int {
 	return value
 }
 
-// Completing setup switches the live provider, so it must export ZERO_PROVIDER
+// Completing setup switches the live provider, so it must export SPLICE_PROVIDER
 // exactly like the /model, /provider, and wizard switch paths — a stale value
 // from an earlier switch would otherwise win over config in every spawned
 // child (applyEnv) and pin specialists/swarm members to the OLD provider's

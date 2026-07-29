@@ -96,7 +96,7 @@ scripts/install.sh
 Install a specific version:
 
 ```bash
-ZERO_VERSION=0.1.0 scripts/install.sh
+SPLICE_VERSION=0.1.0 scripts/install.sh
 scripts/install.sh --version 0.1.0
 ```
 
@@ -107,7 +107,7 @@ SPLICE_INSTALL_DIR="$HOME/bin" scripts/install.sh
 scripts/install.sh --install-dir "$HOME/bin"
 ```
 
-> **Note:** `ZERO_VERSION` retains the upstream `ZERO_` prefix; a rename to
+> **Note:** `SPLICE_VERSION` retains the upstream `SPLICE_` prefix; a rename to
 > `SPLICE_VERSION` is planned. The repo and install-dir variables are already
 > `SPLICE_`-prefixed.
 
@@ -119,10 +119,10 @@ Defaults:
 
 Custom GitHub Enterprise endpoints can be configured via environment variables:
 
-- `ZERO_GITHUB_API` — base URL for the GitHub API (e.g. `https://github.example.com/api/v3`).
-- `ZERO_GITHUB_BASE_URL` — base URL for the GitHub instance (e.g. `https://github.example.com`).
+- `SPLICE_GITHUB_API` — base URL for the GitHub API (e.g. `https://github.example.com/api/v3`).
+- `SPLICE_GITHUB_BASE_URL` — base URL for the GitHub instance (e.g. `https://github.example.com`).
 
-> **Note:** Both variables retain the upstream `ZERO_` prefix; a rename to
+> **Note:** Both variables retain the upstream `SPLICE_` prefix; a rename to
 > `SPLICE_` is planned.
 
 Requirements: Bash, `curl` or `wget`, `tar`, and `shasum` or `sha256sum`.

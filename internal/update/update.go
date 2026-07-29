@@ -141,7 +141,7 @@ func Check(ctx context.Context, options Options) (Result, error) {
 		currentVersion = "0.0.0"
 	}
 	repository := strings.TrimSpace(firstNonEmpty(options.Repository, DefaultRepository))
-	endpoint, err := resolveEndpoint(firstNonEmpty(options.Endpoint, os.Getenv("ZERO_UPDATE_RELEASE_URL")), repository)
+	endpoint, err := resolveEndpoint(firstNonEmpty(options.Endpoint, os.Getenv("SPLICE_UPDATE_RELEASE_URL")), repository)
 	if err != nil {
 		return Result{}, err
 	}

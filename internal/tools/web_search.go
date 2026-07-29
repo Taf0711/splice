@@ -129,7 +129,7 @@ func (tool webSearchTool) Run(ctx context.Context, args map[string]any) Result {
 	}
 
 	if tool.backend == nil {
-		return errorResult("Error: no search backend configured. Set ZERO_WEBSEARCH_BASE_URL (and ZERO_WEBSEARCH_API_KEY) to enable web_search.")
+		return errorResult("Error: no search backend configured. Set SPLICE_WEBSEARCH_BASE_URL (and SPLICE_WEBSEARCH_API_KEY) to enable web_search.")
 	}
 
 	runCtx, cancel := context.WithTimeout(ctx, webSearchTimeout)
@@ -186,9 +186,9 @@ func formatSearchResults(results []searchResult) string {
 }
 
 // defaultSearchBackend returns the env-configured generic backend, or nil when
-// ZERO_WEBSEARCH_BASE_URL is unset (the tool then reports it as unconfigured).
+// SPLICE_WEBSEARCH_BASE_URL is unset (the tool then reports it as unconfigured).
 func defaultSearchBackend() searchBackend {
-	baseURL := strings.TrimSpace(os.Getenv("ZERO_WEBSEARCH_BASE_URL"))
+	baseURL := strings.TrimSpace(os.Getenv("SPLICE_WEBSEARCH_BASE_URL"))
 	if baseURL == "" {
 		return nil
 	}
@@ -198,8 +198,8 @@ func defaultSearchBackend() searchBackend {
 			CheckRedirect: sameHostRedirectPolicy,
 		},
 		baseURL:  baseURL,
-		apiKey:   strings.TrimSpace(os.Getenv("ZERO_WEBSEARCH_API_KEY")),
-		provider: strings.TrimSpace(os.Getenv("ZERO_WEBSEARCH_PROVIDER")),
+		apiKey:   strings.TrimSpace(os.Getenv("SPLICE_WEBSEARCH_API_KEY")),
+		provider: strings.TrimSpace(os.Getenv("SPLICE_WEBSEARCH_PROVIDER")),
 	}
 }
 
@@ -241,7 +241,7 @@ func (backend *httpSearchBackend) Search(ctx context.Context, query string, limi
 	}
 	requestBody := map[string]any{"query": query, "limit": limit}
 	// Forward the configured provider so an aggregating endpoint can route the
-	// query; without this the ZERO_WEBSEARCH_PROVIDER knob would be inert.
+	// query; without this the SPLICE_WEBSEARCH_PROVIDER knob would be inert.
 	if backend.provider != "" {
 		requestBody["provider"] = backend.provider
 	}

@@ -117,7 +117,7 @@ jobs:
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           auto: low
           post-to: slack
-          slack-webhook-url: ${{ secrets.ZERO_SLACK_WEBHOOK_URL }}
+          slack-webhook-url: ${{ secrets.SPLICE_SLACK_WEBHOOK_URL }}
 ```
 
 ### Nightly dependency-upgrade PR
@@ -193,9 +193,9 @@ webhook after the run. Splice also has a built-in webhook notifier sink
 "finished / needs input / verify failed after N retries" to Slack or any generic
 webhook:
 
-- Configure the destination with the `ZERO_SLACK_WEBHOOK_URL` environment variable
+- Configure the destination with the `SPLICE_SLACK_WEBHOOK_URL` environment variable
   (or settings). A blank URL disables the sink. These environment variables
-  retain the upstream `ZERO_` prefix; a rename to `SPLICE_` is planned.
+  retain the upstream `SPLICE_` prefix; a rename to `SPLICE_` is planned.
 - The sink POSTs a JSON body `{ "text", "type", "message", "summary?", "links?" }`.
   The `text` field is what Slack renders; the structured fields carry the
   machine-readable detail.
