@@ -84,7 +84,7 @@ func TestCrystallizeAndCritique_Success(t *testing.T) {
 	)}
 
 	wf := NewDesignWorkflow(store, "test-session", "plan-1")
-	gotPlan, gotCritique, err := wf.CrystallizeAndCritique(ctx, events, provider, nil, zeroruntime.CollectOptions{}, "", nil)
+	gotPlan, gotCritique, err := wf.CrystallizeAndCritique(ctx, events, provider, nil, nil, "", nil)
 	if err != nil {
 		t.Fatalf("CrystallizeAndCritique: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestCrystallizeAndCritique_EmptyHistory(t *testing.T) {
 	}
 
 	wf := NewDesignWorkflow(store, "test-session", "plan-1")
-	_, _, err := wf.CrystallizeAndCritique(ctx, events, &fakeWorkflowProvider{}, nil, zeroruntime.CollectOptions{}, "", nil)
+	_, _, err := wf.CrystallizeAndCritique(ctx, events, &fakeWorkflowProvider{}, nil, nil, "", nil)
 	if err == nil || err.Error() != "crystallize requires at least one conversation message" {
 		t.Fatalf("expected empty history error, got: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestCrystallizeAndCritique_NilResolverUsesDefaultProvider(t *testing.T) {
 	)}
 
 	wf := NewDesignWorkflow(store, "test-session", "plan-1")
-	if _, _, err := wf.CrystallizeAndCritique(ctx, events, provider, nil, zeroruntime.CollectOptions{}, "", nil); err != nil {
+	if _, _, err := wf.CrystallizeAndCritique(ctx, events, provider, nil, nil, "", nil); err != nil {
 		t.Fatalf("CrystallizeAndCritique: %v", err)
 	}
 
@@ -198,7 +198,7 @@ func TestCrystallizeAndCritique_ResolverChoosesProviderPerStage(t *testing.T) {
 	}
 
 	wf := NewDesignWorkflow(store, "test-session", "plan-1")
-	if _, _, err := wf.CrystallizeAndCritique(ctx, events, &fakeWorkflowProvider{}, resolver, zeroruntime.CollectOptions{}, "", nil); err != nil {
+	if _, _, err := wf.CrystallizeAndCritique(ctx, events, &fakeWorkflowProvider{}, resolver, nil, "", nil); err != nil {
 		t.Fatalf("CrystallizeAndCritique: %v", err)
 	}
 
@@ -207,6 +207,78 @@ func TestCrystallizeAndCritique_ResolverChoosesProviderPerStage(t *testing.T) {
 	}
 	if len(criticProvider.request.Messages) == 0 {
 		t.Errorf("critic provider was not called")
+	}
+}
+
+func TestCrystallizeAndCritique_StageStreamFactoryGetsResolvedSelections(t *testing.T) {
+	ctx := context.Background()
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+	if _, err := store.Create(sessions.CreateInput{SessionID: "test-session", Cwd: t.TempDir()}); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	events := []sessions.Event{
+		{Type: sessions.EventDesignModeEntered},
+		{Type: sessions.EventMessage, Payload: mustMarshal(t, map[string]string{"role": "user", "content": "do it"})},
+	}
+	planArgs, _ := json.Marshal(validDesignPlan("do it"))
+	critiqueArgs, _ := json.Marshal(validCritique("fine"))
+	crystallizeProvider := &fakeWorkflowProvider{events: concatEvents(workflowToolCall("plan", "submit_design_plan", string(planArgs)), workflowDone())}
+	criticProvider := &fakeWorkflowProvider{events: concatEvents(workflowToolCall("critique", "submit_critique", string(critiqueArgs)), workflowDone())}
+	resolver := func(stage string) (agent.ModelSelection, error) {
+		if stage == "design_crystallize" {
+			return agent.ModelSelection{Provider: crystallizeProvider, ProviderName: "provider-a", Model: "model-a"}, nil
+		}
+		return agent.ModelSelection{Provider: criticProvider, ProviderName: "provider-b", Model: "model-b"}, nil
+	}
+	var got []struct {
+		stage     string
+		selection agent.ModelSelection
+	}
+	factory := StageStreamFactory(func(stage string, selection agent.ModelSelection) zeroruntime.CollectOptions {
+		got = append(got, struct {
+			stage     string
+			selection agent.ModelSelection
+		}{stage: stage, selection: selection})
+		return zeroruntime.CollectOptions{}
+	})
+	wf := NewDesignWorkflow(store, "test-session", "plan-1")
+	if _, _, err := wf.CrystallizeAndCritique(ctx, events, &fakeWorkflowProvider{}, resolver, factory, "", nil); err != nil {
+		t.Fatalf("CrystallizeAndCritique: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("factory calls = %d, want 2", len(got))
+	}
+	if got[0].stage != "design_crystallize" || got[1].stage != "plan_critic" {
+		t.Fatalf("factory stages = %#v, want design_crystallize then plan_critic", got)
+	}
+	if got[0].selection.Model != "model-a" || got[0].selection.ProviderName != "provider-a" {
+		t.Fatalf("crystallize selection = %+v", got[0].selection)
+	}
+	if got[1].selection.Model != "model-b" || got[1].selection.ProviderName != "provider-b" {
+		t.Fatalf("critic selection = %+v", got[1].selection)
+	}
+}
+
+func TestCrystallizeAndCritique_NilStageStreamFactoryPreservesBehavior(t *testing.T) {
+	ctx := context.Background()
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+	if _, err := store.Create(sessions.CreateInput{SessionID: "test-session", Cwd: t.TempDir()}); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	events := []sessions.Event{
+		{Type: sessions.EventDesignModeEntered},
+		{Type: sessions.EventMessage, Payload: mustMarshal(t, map[string]string{"role": "user", "content": "do it"})},
+	}
+	planArgs, _ := json.Marshal(validDesignPlan("do it"))
+	critiqueArgs, _ := json.Marshal(validCritique("fine"))
+	provider := &fakeWorkflowProvider{events: concatEvents(
+		workflowToolCall("plan", "submit_design_plan", string(planArgs)),
+		workflowToolCall("critique", "submit_critique", string(critiqueArgs)),
+		workflowDone(),
+	)}
+	wf := NewDesignWorkflow(store, "test-session", "plan-1")
+	if _, _, err := wf.CrystallizeAndCritique(ctx, events, provider, nil, nil, "", nil); err != nil {
+		t.Fatalf("CrystallizeAndCritique: %v", err)
 	}
 }
 
@@ -247,7 +319,7 @@ func TestCrystallizeAndCritique_RevisionIncrements(t *testing.T) {
 	)}
 
 	wf := NewDesignWorkflow(store, "test-session", "plan-1")
-	if _, _, err := wf.CrystallizeAndCritique(ctx, events, provider, nil, zeroruntime.CollectOptions{}, "", nil); err != nil {
+	if _, _, err := wf.CrystallizeAndCritique(ctx, events, provider, nil, nil, "", nil); err != nil {
 		t.Fatalf("first CrystallizeAndCritique: %v", err)
 	}
 
@@ -265,7 +337,7 @@ func TestCrystallizeAndCritique_RevisionIncrements(t *testing.T) {
 		workflowToolCall("call-critique", "submit_critique", string(critique2Args)),
 		workflowDone(),
 	)}
-	if _, _, err := wf.CrystallizeAndCritique(ctx, events, provider2, nil, zeroruntime.CollectOptions{}, "", nil); err != nil {
+	if _, _, err := wf.CrystallizeAndCritique(ctx, events, provider2, nil, nil, "", nil); err != nil {
 		t.Fatalf("second CrystallizeAndCritique: %v", err)
 	}
 
@@ -310,7 +382,7 @@ func TestCrystallizeAndCritique_CriticErrorReturnsPlan(t *testing.T) {
 	)}
 
 	wf := NewDesignWorkflow(store, "test-session", "plan-1")
-	gotPlan, gotCritique, err := wf.CrystallizeAndCritique(ctx, events, provider, nil, zeroruntime.CollectOptions{}, "", nil)
+	gotPlan, gotCritique, err := wf.CrystallizeAndCritique(ctx, events, provider, nil, nil, "", nil)
 	if err == nil {
 		t.Fatalf("expected critic error")
 	}
@@ -369,7 +441,7 @@ func TestCrystallizeAndCritique_ResolverErrorFallsBack(t *testing.T) {
 	if selection.Provider != defaultProvider || selection.ProviderName != "primary" || selection.Model != "primary-model" || selection.ReasoningEffort != "medium" {
 		t.Fatalf("fallback selection = %+v", selection)
 	}
-	if _, _, err := wf.CrystallizeAndCritique(ctx, events, defaultProvider, resolver, zeroruntime.CollectOptions{}, "", nil); err != nil {
+	if _, _, err := wf.CrystallizeAndCritique(ctx, events, defaultProvider, resolver, nil, "", nil); err != nil {
 		t.Fatalf("CrystallizeAndCritique: %v", err)
 	}
 	if len(defaultProvider.request.Messages) == 0 {

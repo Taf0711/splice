@@ -2281,12 +2281,19 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.runID != m.activeRunID {
 			return m, nil
 		}
+		m.clearStreamingToolCall()
 		m.pending = false
 		if m.runCancel != nil {
 			m.runCancel()
 		}
 		m.runCancel = nil
 		m.activeRunID = 0
+		var flushRows []transcriptRow
+		events := flushableSessionEvents(msg.sessionEvents)
+		m, flushRows = m.appendSessionEvents(events)
+		for _, row := range flushRows {
+			m.transcript = appendTranscriptRow(m.transcript, row)
+		}
 		if msg.err != nil {
 			if msg.plan.Validate() == nil {
 				m.pendingPlan = &msg.plan

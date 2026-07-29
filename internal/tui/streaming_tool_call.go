@@ -20,6 +20,14 @@ func isFileWritingTool(name string) bool {
 	return false
 }
 
+func isDesignStreamingTool(name string) bool {
+	switch name {
+	case "submit_design_plan", "submit_critique":
+		return true
+	}
+	return false
+}
+
 // decodeStreamingJSONString extracts the (possibly unterminated) value of a
 // top-level string field from a streaming JSON args buffer — used to pull the
 // path and the file content out of a tool call as its arguments arrive. Best
@@ -106,7 +114,7 @@ func streamingFilePath(args string) string {
 // and live line count. The code body is intentionally buffered until the result
 // card lands, so partial code does not recolor or shift while generating.
 func (m model) streamingToolCallView(width int) string {
-	if m.streamCallID == "" || !isFileWritingTool(m.streamCallName) || m.streamCallDecoder == nil {
+	if m.streamCallID == "" || (!isFileWritingTool(m.streamCallName) && !isDesignStreamingTool(m.streamCallName)) || m.streamCallDecoder == nil {
 		return ""
 	}
 	d := m.streamCallDecoder

@@ -16,6 +16,7 @@ import (
 	splicerun "github.com/Taf0711/splice/internal/splice"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/tools"
+	"github.com/Taf0711/splice/internal/usage"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
@@ -227,20 +228,54 @@ func (m model) handleCrystallizeCommand() (model, tea.Cmd) {
 	return m, tea.Batch(
 		func() tea.Msg {
 			wf := splicerun.NewDesignWorkflow(store, sessionID, planID).WithPrimarySelection(m.providerName, m.modelName, string(m.reasoningEffort))
-			plan, critique, err := wf.CrystallizeAndCritique(runCtx, events, provider, resolver, zeroruntime.CollectOptions{}, cwd, nil)
-			return crystallizeResultMsg{runID: runID, plan: plan, critique: critique, err: err, store: store, sessionID: sessionID}
+			// Both design stages run sequentially inside this one goroutine. The
+			// callback appends therefore need no mutex.
+			sessionEvents := []pendingSessionEvent{}
+			estimator := usage.NewCostEstimator(&m.modelCatalog)
+			streamFactory := splicerun.StageStreamFactory(func(stageName string, selection agent.ModelSelection) zeroruntime.CollectOptions {
+				return zeroruntime.CollectOptions{
+					OnToolCallStart: func(id, name string) {
+						m.sendToolCallStreamStart(runID, id, name)
+					},
+					OnToolCallDelta: func(id, fragment string) {
+						m.sendToolCallStreamDelta(runID, id, fragment)
+					},
+					OnReasoning: func(delta string) {
+						m.sendAgentReasoning(runID, delta)
+					},
+					OnUsage: func(event zeroruntime.Usage) {
+						cost := estimator(selection.Model, event, true)
+						attributed := agent.AttributedUsage{
+							Usage:         event,
+							UsageReported: true,
+							ProviderName:  selection.ProviderName,
+							Model:         selection.Model,
+							Stage:         stageName,
+							Cost:          cost,
+						}
+						sessionEvents = append(sessionEvents, pendingSessionEvent{
+							Type:    sessions.EventUsage,
+							Payload: usage.AttributedUsagePayload(attributed),
+						})
+						m.sendAgentUsage(runID, selection.Model, event, &cost)
+					},
+				}
+			})
+			plan, critique, err := wf.CrystallizeAndCritique(runCtx, events, provider, resolver, streamFactory, cwd, nil)
+			return crystallizeResultMsg{runID: runID, plan: plan, critique: critique, err: err, store: store, sessionID: sessionID, sessionEvents: sessionEvents}
 		},
 		m.spinner.Tick,
 	)
 }
 
 type crystallizeResultMsg struct {
-	runID     int
-	plan      schemas.DesignPlan
-	critique  schemas.PlanCritique
-	err       error
-	store     *sessions.Store
-	sessionID string
+	runID         int
+	plan          schemas.DesignPlan
+	critique      schemas.PlanCritique
+	err           error
+	store         *sessions.Store
+	sessionID     string
+	sessionEvents []pendingSessionEvent
 }
 
 type planExecutionResultMsg struct {

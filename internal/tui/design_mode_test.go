@@ -184,6 +184,86 @@ func TestCrystallizeCommandEmitsResultMessage(t *testing.T) {
 	}
 }
 
+func TestCrystallizeResultMessageCarriesRoutedUsage(t *testing.T) {
+	store := testSessionStore(t)
+	planArgs, _ := json.Marshal(schemas.DesignPlan{
+		Epic:         "Build a feature",
+		Requirements: []string{"must work"},
+		InScope:      []string{"backend"},
+		OutOfScope:   []string{"frontend"},
+		SystemDesign: "Use Go.",
+		Tasks:        []schemas.Task{{ID: "t1", Title: "Implement it", Intent: "Write code"}},
+	})
+	critiqueArgs, _ := json.Marshal(schemas.PlanCritique{OverallAssessment: "Looks good"})
+	crystallizeProvider := &fakeProvider{events: []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "plan", ToolName: "submit_design_plan"},
+		{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "plan", ArgumentsFragment: string(planArgs)},
+		{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "plan"},
+		{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 10, OutputTokens: 5}},
+		{Type: zeroruntime.StreamEventDone},
+	}}
+	criticProvider := &fakeProvider{events: []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "critique", ToolName: "submit_critique"},
+		{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "critique", ArgumentsFragment: string(critiqueArgs)},
+		{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "critique"},
+		{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 20, OutputTokens: 5}},
+		{Type: zeroruntime.StreamEventDone},
+	}}
+	m := newDesignModeTestModel(t.TempDir(), crystallizeProvider, store)
+	m.designMode = true
+	m.modelCatalog = mustTestModelRegistry(t,
+		testModelEntry("routed-plan", 2000, []modelregistry.ModelCapability{modelregistry.ModelCapabilityChat}),
+		testModelEntry("routed-critic", 2000, []modelregistry.ModelCapability{modelregistry.ModelCapabilityChat}),
+	)
+	sess, err := store.Create(sessions.CreateInput{SessionID: "test-session", Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	m.activeSession = sess
+	if _, err := store.AppendEvent(sess.SessionID, sessions.AppendEventInput{Type: sessions.EventDesignModeEntered}); err != nil {
+		t.Fatalf("append design mode event: %v", err)
+	}
+	if _, err := store.AppendEvent(sess.SessionID, sessions.AppendEventInput{Type: sessions.EventMessage, Payload: map[string]any{"role": "user", "content": "build it"}}); err != nil {
+		t.Fatalf("append message: %v", err)
+	}
+	m.sessionEvents, err = store.ReadEvents(sess.SessionID)
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	m.stageModelResolver = func(stage string) (agent.ModelSelection, error) {
+		if stage == "design_crystallize" {
+			return agent.ModelSelection{Provider: crystallizeProvider, ProviderName: "provider-a", Model: "routed-plan"}, nil
+		}
+		return agent.ModelSelection{Provider: criticProvider, ProviderName: "provider-b", Model: "routed-critic"}, nil
+	}
+	_, cmd := m.handleCrystallizeCommand()
+	msg, ok := execCmd(cmd).(crystallizeResultMsg)
+	if !ok {
+		t.Fatalf("expected crystallizeResultMsg")
+	}
+	if msg.err != nil {
+		t.Fatalf("crystallize failed: %v", msg.err)
+	}
+	var payloads []map[string]any
+	for _, event := range msg.sessionEvents {
+		if event.Type == sessions.EventUsage {
+			payloads = append(payloads, event.Payload.(map[string]any))
+		}
+	}
+	if len(payloads) != 2 {
+		t.Fatalf("usage events = %d, want 2", len(payloads))
+	}
+	if payloads[0]["model"] != "routed-plan" || payloads[1]["model"] != "routed-critic" {
+		t.Fatalf("usage models = %#v", payloads)
+	}
+	for _, payload := range payloads {
+		cost, ok := payload["costUsd"].(float64)
+		if !ok || cost <= 0 {
+			t.Fatalf("costUsd = %#v, want positive", payload["costUsd"])
+		}
+	}
+}
+
 func TestCrystallizeResultMsgDisplaysPlan(t *testing.T) {
 	store := testSessionStore(t)
 	m := newDesignModeTestModel(t.TempDir(), &fakeProvider{}, store)

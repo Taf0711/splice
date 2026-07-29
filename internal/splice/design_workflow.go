@@ -22,6 +22,12 @@ type DesignWorkflow struct {
 	primarySelection agent.ModelSelection
 }
 
+// StageStreamFactory returns the stream callbacks for one design stage. It is
+// called after the stage model is resolved, so the caller can attribute usage
+// to the model that the stage really uses. A nil factory, or a nil return,
+// disables the stream for that stage.
+type StageStreamFactory func(stageName string, selection agent.ModelSelection) zeroruntime.CollectOptions
+
 // NewDesignWorkflow creates a workflow bound to a session store + session ID.
 // planID identifies this plan revision family within the session. The TUI
 // generates a unique planID per crystallization (e.g. "plan-<timestamp>").
@@ -57,7 +63,8 @@ func (w *DesignWorkflow) WithPrimarySelection(providerName, model, effort string
 // provider is the default (active) provider. stageModelResolver is optional
 // (may be nil): when set, it resolves per-stage providers for the
 // "design_crystallize" and "plan_critic" stages; when nil or when it
-// returns nil, the default provider is used. stream carries TUI callbacks.
+// returns nil, the default provider is used. streamFactory supplies callbacks
+// for each resolved stage.
 //
 // workDir and images are passed through to the stage options.
 func (w *DesignWorkflow) CrystallizeAndCritique(
@@ -65,7 +72,7 @@ func (w *DesignWorkflow) CrystallizeAndCritique(
 	events []sessions.Event,
 	provider agent.Provider,
 	stageModelResolver agent.StageModelResolver,
-	stream zeroruntime.CollectOptions,
+	streamFactory StageStreamFactory,
 	workDir string,
 	images []zeroruntime.ImageBlock,
 ) (schemas.DesignPlan, schemas.PlanCritique, error) {
@@ -80,6 +87,10 @@ func (w *DesignWorkflow) CrystallizeAndCritique(
 	}
 
 	selection := w.resolveProvider(provider, stageModelResolver, "design_crystallize")
+	var stream zeroruntime.CollectOptions
+	if streamFactory != nil {
+		stream = streamFactory("design_crystallize", selection)
+	}
 	opts := stages.StageOptions{
 		WorkDir:         workDir,
 		Stream:          stream,
@@ -110,13 +121,17 @@ func (w *DesignWorkflow) CrystallizeAndCritique(
 		return schemas.DesignPlan{}, schemas.PlanCritique{}, fmt.Errorf("persist plan_crystallized: %w", err)
 	}
 
+	criticSelection := w.resolveProvider(provider, stageModelResolver, "plan_critic")
+	var criticStream zeroruntime.CollectOptions
+	if streamFactory != nil {
+		criticStream = streamFactory("plan_critic", criticSelection)
+	}
 	criticOpts := stages.StageOptions{
 		WorkDir: workDir,
-		Stream:  stream,
+		Stream:  criticStream,
 		Images:  images,
 		Plan:    &plan,
 	}
-	criticSelection := w.resolveProvider(provider, stageModelResolver, "plan_critic")
 	criticOpts.ModelOverride = criticSelection.Model
 	criticOpts.ReasoningEffort = criticSelection.ReasoningEffort
 

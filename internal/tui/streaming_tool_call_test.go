@@ -107,3 +107,19 @@ func TestStreamingViewShowsProgressBeforeContent(t *testing.T) {
 		t.Errorf("should show a receiving byte count before content: %q", out)
 	}
 }
+
+func TestStreamingToolCallViewShowsDesignPlanProgress(t *testing.T) {
+	out := viewModel("submit_design_plan", `{"epic":"Build`).streamingToolCallView(80)
+	if strings.TrimSpace(out) == "" {
+		t.Fatal("design plan tool should render streamed progress")
+	}
+	if !strings.Contains(plainRender(t, out), "receiving") {
+		t.Fatalf("design plan view should show receiving progress: %q", plainRender(t, out))
+	}
+	if strings.TrimSpace(viewModel("submit_critique", `{"summary":"Looks`).streamingToolCallView(80)) == "" {
+		t.Fatal("plan critique tool should render streamed progress")
+	}
+	if viewModel("unsupported_tool", `{"value":"partial"}`).streamingToolCallView(80) != "" {
+		t.Fatal("unsupported tool should render nothing")
+	}
+}
