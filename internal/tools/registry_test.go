@@ -73,7 +73,7 @@ func TestCoreReadOnlyToolsExposeSafeMetadata(t *testing.T) {
 }
 
 func TestCoreNetworkToolsExposeSafetyMetadata(t *testing.T) {
-	// web_search is only registered when a backend is configured.
+	// Provider-executed web search is not registered as a local tool.
 	t.Setenv("SPLICE_WEBSEARCH_BASE_URL", "https://search.example/api")
 	byName := map[string]Tool{}
 	for _, tool := range CoreNetworkTools() {
@@ -96,16 +96,8 @@ func TestCoreNetworkToolsExposeSafetyMetadata(t *testing.T) {
 		t.Fatalf("web_fetch safety = %#v, want prompt and advertised in auto", safety)
 	}
 
-	// web_search discovers URLs; its key parameter is "query".
-	search, ok := byName["web_search"]
-	if !ok {
-		t.Fatal("expected web_search in core network tools")
-	}
-	if property, ok := search.Parameters().Properties["query"]; !ok || property.Type != "string" {
-		t.Fatalf("web_search must expose a string query property, got %#v", search.Parameters().Properties["query"])
-	}
-	if safety := search.Safety(); safety.Permission != PermissionPrompt || !safety.AdvertiseInAuto {
-		t.Fatalf("web_search safety = %#v, want prompt and advertised in auto", safety)
+	if _, ok := byName["web_search"]; ok {
+		t.Fatal("web_search must not be registered in core network tools")
 	}
 }
 

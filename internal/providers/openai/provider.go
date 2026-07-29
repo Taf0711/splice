@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +19,11 @@ import (
 )
 
 const defaultBaseURL = "https://api.openai.com/v1"
+
+const (
+	defaultWebSearchEngine     = "parallel"
+	defaultWebSearchMaxResults = 5
+)
 
 // Options configures an OpenAI-compatible chat completions provider.
 type Options struct {
@@ -61,21 +67,23 @@ type Options struct {
 
 // Provider streams completions from an OpenAI-compatible chat completions API.
 type Provider struct {
-	apiKey            string
-	baseURL           string
-	endpoint          string
-	model             string
-	authHeader        string
-	authScheme        string
-	authHeaderValue   string
-	customHeaders     map[string]string
-	oauthResolver     providerio.TokenResolver
-	maxTokens         int
-	httpClient        *http.Client
-	userAgent         string
-	streamIdleTimeout time.Duration
-	parseThinkTags    bool
-	setRequestExtra   func(*http.Request)
+	apiKey              string
+	baseURL             string
+	endpoint            string
+	model               string
+	authHeader          string
+	authScheme          string
+	authHeaderValue     string
+	customHeaders       map[string]string
+	oauthResolver       providerio.TokenResolver
+	maxTokens           int
+	httpClient          *http.Client
+	userAgent           string
+	streamIdleTimeout   time.Duration
+	parseThinkTags      bool
+	setRequestExtra     func(*http.Request)
+	webSearchEngine     string
+	webSearchMaxResults int
 }
 
 // New creates an OpenAI-compatible provider.
@@ -115,21 +123,23 @@ func New(options Options) (*Provider, error) {
 	}
 
 	return &Provider{
-		apiKey:            options.APIKey,
-		baseURL:           baseURL,
-		endpoint:          endpoint,
-		model:             model,
-		authHeader:        strings.TrimSpace(options.AuthHeader),
-		authScheme:        strings.TrimSpace(options.AuthScheme),
-		authHeaderValue:   strings.TrimSpace(options.AuthHeaderValue),
-		customHeaders:     providerio.CopyHeaders(options.CustomHeaders),
-		oauthResolver:     options.OAuthResolver,
-		maxTokens:         maxTokens,
-		httpClient:        httpClient,
-		userAgent:         options.UserAgent,
-		streamIdleTimeout: providerio.ResolveStreamIdleTimeout(options.StreamIdleTimeout),
-		parseThinkTags:    options.ParseThinkTags,
-		setRequestExtra:   options.SetRequestExtra,
+		apiKey:              options.APIKey,
+		baseURL:             baseURL,
+		endpoint:            endpoint,
+		model:               model,
+		authHeader:          strings.TrimSpace(options.AuthHeader),
+		authScheme:          strings.TrimSpace(options.AuthScheme),
+		authHeaderValue:     strings.TrimSpace(options.AuthHeaderValue),
+		customHeaders:       providerio.CopyHeaders(options.CustomHeaders),
+		oauthResolver:       options.OAuthResolver,
+		maxTokens:           maxTokens,
+		httpClient:          httpClient,
+		userAgent:           options.UserAgent,
+		streamIdleTimeout:   providerio.ResolveStreamIdleTimeout(options.StreamIdleTimeout),
+		parseThinkTags:      options.ParseThinkTags,
+		setRequestExtra:     options.SetRequestExtra,
+		webSearchEngine:     configuredWebSearchEngine(),
+		webSearchMaxResults: configuredWebSearchMaxResults(),
 	}, nil
 }
 
@@ -138,7 +148,8 @@ func (provider *Provider) StreamCompletion(
 	ctx context.Context,
 	request zeroruntime.CompletionRequest,
 ) (<-chan zeroruntime.StreamEvent, error) {
-	body, err := json.Marshal(provider.openAIRequest(request))
+	mapped := provider.openAIRequest(request)
+	body, err := json.Marshal(mapped)
 	if err != nil {
 		return nil, fmt.Errorf("encode OpenAI request: %w", err)
 	}
@@ -146,13 +157,17 @@ func (provider *Provider) StreamCompletion(
 	events := make(chan zeroruntime.StreamEvent, 16)
 	go func() {
 		defer close(events)
-		provider.stream(ctx, body, events)
+		provider.streamWithServerTool(ctx, body, provider.hasOpenRouterWebSearch(request), events)
 	}()
 
 	return events, nil
 }
 
 func (provider *Provider) stream(ctx context.Context, body []byte, events chan<- zeroruntime.StreamEvent) {
+	provider.streamWithServerTool(ctx, body, false, events)
+}
+
+func (provider *Provider) streamWithServerTool(ctx context.Context, body []byte, serverToolEnabled bool, events chan<- zeroruntime.StreamEvent) {
 	endpoint := provider.endpoint
 
 	// streamCtx lets the idle watchdog abort an in-flight body read by cancelling
@@ -214,6 +229,7 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 	}
 
 	state := newToolState(provider.parseThinkTags)
+	state.serverToolEnabled = serverToolEnabled
 	// Use the shared SSE reader (also used by the Anthropic/Gemini providers) so
 	// multi-line "data:" continuation fields are joined into one payload, and the
 	// idle watchdog / context cancellation are handled uniformly.
@@ -244,6 +260,10 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 	if !state.done {
 		state.flushContent(ctx, events)
 		state.closeOpen(ctx, events)
+		if searches := state.webSearchRequestCount(); searches > 0 && (!state.usageSeen || state.usageReportedSearches != searches) {
+			state.lastUsage.WebSearchRequests = searches
+			sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: state.lastUsage})
+		}
 		sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone, FinishReason: state.finishReason})
 	}
 }
@@ -284,6 +304,11 @@ func (provider *Provider) emitChunk(
 	events chan<- zeroruntime.StreamEvent,
 ) {
 	for _, choice := range chunk.Choices {
+		annotations := choice.Delta.Annotations
+		if choice.Message != nil {
+			annotations = append(annotations, choice.Message.Annotations...)
+		}
+		state.emitAnnotationBatch(ctx, events, annotations)
 		if reasoning := choice.Delta.reasoningText(); reasoning != "" {
 			sendEvent(ctx, events, zeroruntime.StreamEvent{
 				Type:    zeroruntime.StreamEventReasoning,
@@ -294,6 +319,10 @@ func (provider *Provider) emitChunk(
 			state.emitContent(ctx, events, choice.Delta.Content)
 		}
 		for _, toolCall := range choice.Delta.ToolCalls {
+			if state.serverToolEnabled && (toolCall.Type == "openrouter:web_search" || state.webSearchCalls[toolCall.Index] != nil) {
+				state.applyServerToolDelta(ctx, toolCall, events)
+				continue
+			}
 			state.applyDelta(ctx, toolCall, events)
 		}
 		if choice.FinishReason == "tool_calls" {
@@ -306,14 +335,18 @@ func (provider *Provider) emitChunk(
 	}
 
 	if chunk.Usage != nil {
+		state.lastUsage = zeroruntime.Usage{
+			PromptTokens:      chunk.Usage.PromptTokens,
+			CompletionTokens:  chunk.Usage.CompletionTokens,
+			CachedInputTokens: chunk.Usage.PromptTokensDetails.CachedTokens,
+			ReasoningTokens:   chunk.Usage.CompletionTokensDetails.ReasoningTokens,
+			WebSearchRequests: state.webSearchRequestCount(),
+		}
+		state.usageSeen = true
+		state.usageReportedSearches = state.lastUsage.WebSearchRequests
 		sendEvent(ctx, events, zeroruntime.StreamEvent{
-			Type: zeroruntime.StreamEventUsage,
-			Usage: zeroruntime.Usage{
-				PromptTokens:      chunk.Usage.PromptTokens,
-				CompletionTokens:  chunk.Usage.CompletionTokens,
-				CachedInputTokens: chunk.Usage.PromptTokensDetails.CachedTokens,
-				ReasoningTokens:   chunk.Usage.CompletionTokensDetails.ReasoningTokens,
-			},
+			Type:  zeroruntime.StreamEventUsage,
+			Usage: state.lastUsage,
 		})
 	}
 }
@@ -428,8 +461,8 @@ func (provider *Provider) openAIRequest(request zeroruntime.CompletionRequest) c
 	if key := strings.TrimSpace(request.PromptCacheKey); key != "" && !promptCacheKeyDisabled() {
 		mapped.PromptCacheKey = key
 	}
-	if len(request.Tools) > 0 {
-		mapped.Tools = make([]toolDefinition, 0, len(request.Tools))
+	if len(request.Tools) > 0 || provider.hasOpenRouterWebSearch(request) {
+		mapped.Tools = make([]toolDefinition, 0, len(request.Tools)+1)
 		for _, tool := range request.Tools {
 			mapped.Tools = append(mapped.Tools, toolDefinition{
 				Type: "function",
@@ -437,6 +470,15 @@ func (provider *Provider) openAIRequest(request zeroruntime.CompletionRequest) c
 					Name:        tool.Name,
 					Description: tool.Description,
 					Parameters:  tool.Parameters,
+				},
+			})
+		}
+		if provider.hasOpenRouterWebSearch(request) {
+			mapped.Tools = append(mapped.Tools, toolDefinition{
+				Type: "openrouter:web_search",
+				Parameters: map[string]any{
+					"engine":      provider.webSearchEngine,
+					"max_results": provider.webSearchMaxResults,
 				},
 			})
 		}
@@ -453,6 +495,45 @@ func (provider *Provider) openAIRequest(request zeroruntime.CompletionRequest) c
 		}
 	}
 	return mapped
+}
+
+func (provider *Provider) hasOpenRouterWebSearch(request zeroruntime.CompletionRequest) bool {
+	if !provider.isOpenRouter() {
+		return false
+	}
+	for _, tool := range request.ServerTools {
+		if tool.Kind == zeroruntime.ServerToolWebSearch {
+			return true
+		}
+	}
+	return false
+}
+
+func (provider *Provider) isOpenRouter() bool {
+	parsed, err := url.Parse(provider.baseURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+	return host == "openrouter.ai"
+}
+
+func configuredWebSearchEngine() string {
+	value := strings.TrimSpace(os.Getenv("SPLICE_WEBSEARCH_ENGINE"))
+	switch value {
+	case "parallel", "exa", "perplexity", "firecrawl", "native":
+		return value
+	default:
+		return defaultWebSearchEngine
+	}
+}
+
+func configuredWebSearchMaxResults() int {
+	value, err := strconv.Atoi(strings.TrimSpace(os.Getenv("SPLICE_WEBSEARCH_MAX_RESULTS")))
+	if err != nil || value < 1 || value > 50 {
+		return defaultWebSearchMaxResults
+	}
+	return value
 }
 
 // promptCacheKeyDisabled reports whether the SPLICE_DISABLE_PROMPT_CACHE_KEY

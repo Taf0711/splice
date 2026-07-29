@@ -118,7 +118,6 @@ var knownToolNames = map[string]bool{
 	"write_stdin":         true,
 	"bash":                true,
 	"web_fetch":           true,
-	"web_search":          true,
 }
 
 func DefaultPaths(workspaceRoot string) (Paths, error) {

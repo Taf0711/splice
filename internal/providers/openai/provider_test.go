@@ -1385,3 +1385,138 @@ func TestOpenAIRequestOmitsToolChoiceWhenEmpty(t *testing.T) {
 		t.Fatalf("keyless request must omit tool_choice: %s", data)
 	}
 }
+
+func TestOpenRouterWebSearchToolMapping(t *testing.T) {
+	t.Setenv("SPLICE_WEBSEARCH_ENGINE", "parallel")
+	t.Setenv("SPLICE_WEBSEARCH_MAX_RESULTS", "5")
+	provider, err := New(Options{Model: "test", BaseURL: "https://openrouter.ai/api/v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := provider.openAIRequest(zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "search"}},
+		Tools:    []zeroruntime.ToolDefinition{{Name: "read_file", Description: "read", Parameters: map[string]any{"type": "object"}}},
+		ServerTools: []zeroruntime.ServerTool{{
+			Kind: zeroruntime.ServerToolWebSearch,
+		}},
+	})
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		Tools []map[string]any `json:"tools"`
+	}
+	if err := json.Unmarshal(data, &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Tools) != 2 {
+		t.Fatalf("tools = %#v, want function and server entries", body.Tools)
+	}
+	server := body.Tools[1]
+	if server["type"] != "openrouter:web_search" {
+		t.Fatalf("server tool type = %#v", server["type"])
+	}
+	parameters, ok := server["parameters"].(map[string]any)
+	if !ok || parameters["engine"] != "parallel" || parameters["max_results"] != float64(5) {
+		t.Fatalf("server tool parameters = %#v", server["parameters"])
+	}
+	if _, ok := server["function"]; ok {
+		t.Fatalf("server tool has function fields: %#v", server)
+	}
+}
+
+func TestOpenRouterWebSearchSettingsAndHostGate(t *testing.T) {
+	t.Setenv("SPLICE_WEBSEARCH_ENGINE", "exa")
+	t.Setenv("SPLICE_WEBSEARCH_MAX_RESULTS", "10")
+	request := zeroruntime.CompletionRequest{ServerTools: []zeroruntime.ServerTool{{Kind: zeroruntime.ServerToolWebSearch}}}
+	provider, err := New(Options{Model: "test", BaseURL: "https://openrouter.ai/v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(provider.openAIRequest(request))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"engine":"exa"`) || !strings.Contains(string(data), `"max_results":10`) {
+		t.Fatalf("settings not forwarded: %s", data)
+	}
+
+	for _, engine := range []string{"bogus", "; rm -rf /", ""} {
+		t.Setenv("SPLICE_WEBSEARCH_ENGINE", engine)
+		provider, err = New(Options{Model: "test", BaseURL: "https://openrouter.ai/v1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err = json.Marshal(provider.openAIRequest(request))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if (engine != "" && strings.Contains(string(data), engine)) || !strings.Contains(string(data), `"engine":"parallel"`) {
+			t.Fatalf("invalid engine reached request: %s", data)
+		}
+	}
+	for _, value := range []string{"0", "999"} {
+		t.Setenv("SPLICE_WEBSEARCH_MAX_RESULTS", value)
+		provider, err = New(Options{Model: "test", BaseURL: "https://openrouter.ai/v1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err = json.Marshal(provider.openAIRequest(request))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(data), `"max_results":5`) {
+			t.Fatalf("invalid max results not defaulted: %s", data)
+		}
+	}
+
+	for _, baseURL := range []string{"http://localhost:11434/v1", "https://evil.example.com/openrouter.ai/v1"} {
+		provider, err = New(Options{Model: "test", BaseURL: baseURL})
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err = json.Marshal(provider.openAIRequest(request))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "openrouter:web_search") {
+			t.Fatalf("non-OpenRouter request contains server tool: %s", data)
+		}
+	}
+}
+
+func TestOpenRouterWebSearchAnnotationBatches(t *testing.T) {
+	provider, err := New(Options{Model: "test", BaseURL: "https://openrouter.ai/v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := newToolState(false)
+	state.serverToolEnabled = true
+	events := make(chan zeroruntime.StreamEvent, 8)
+	for _, payload := range []string{
+		`{"choices":[{"delta":{"annotations":[{"type":"url_citation","url_citation":{"url":"https://one.example","title":"One"}}]}}]}`,
+		`{"choices":[{"delta":{"annotations":[{"type":"url_citation","url":"https://two.example","title":"Two"},{"type":"url_citation","url":"https://three.example","title":"Three"}]}}],"usage":{"prompt_tokens":1}}`,
+	} {
+		if !provider.emitPayload(context.Background(), payload, state, events) {
+			t.Fatal("emitPayload returned false")
+		}
+	}
+	var results int
+	var usage zeroruntime.Usage
+	for len(events) > 0 {
+		event := <-events
+		switch event.Type {
+		case zeroruntime.StreamEventServerToolResult:
+			results++
+		case zeroruntime.StreamEventUsage:
+			usage = event.Usage
+		}
+	}
+	if results != 2 {
+		t.Fatalf("result batches = %d, want 2", results)
+	}
+	if usage.WebSearchRequests != 2 {
+		t.Fatalf("web search requests = %d, want 2", usage.WebSearchRequests)
+	}
+}

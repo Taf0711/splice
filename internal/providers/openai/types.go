@@ -1,5 +1,7 @@
 package openai
 
+import "encoding/json"
+
 type chatCompletionRequest struct {
 	Model               string           `json:"model"`
 	Messages            []chatMessage    `json:"messages"`
@@ -64,8 +66,23 @@ type requestToolCallFunction struct {
 }
 
 type toolDefinition struct {
-	Type     string       `json:"type"`
-	Function toolFunction `json:"function"`
+	Type       string         `json:"type"`
+	Function   toolFunction   `json:"-"`
+	Parameters map[string]any `json:"-"`
+}
+
+// MarshalJSON supports function tools and OpenRouter server tools.
+func (tool toolDefinition) MarshalJSON() ([]byte, error) {
+	if tool.Type == "function" {
+		return json.Marshal(struct {
+			Type     string       `json:"type"`
+			Function toolFunction `json:"function"`
+		}{Type: tool.Type, Function: tool.Function})
+	}
+	return json.Marshal(struct {
+		Type       string         `json:"type"`
+		Parameters map[string]any `json:"parameters"`
+	}{Type: tool.Type, Parameters: tool.Parameters})
 }
 
 type toolFunction struct {
@@ -81,8 +98,13 @@ type streamChunk struct {
 }
 
 type streamChoice struct {
-	Delta        streamDelta `json:"delta"`
-	FinishReason string      `json:"finish_reason"`
+	Delta        streamDelta    `json:"delta"`
+	Message      *streamMessage `json:"message"`
+	FinishReason string         `json:"finish_reason"`
+}
+
+type streamMessage struct {
+	Annotations []streamAnnotation `json:"annotations"`
 }
 
 type streamDelta struct {
@@ -90,17 +112,31 @@ type streamDelta struct {
 	ReasoningContent string                `json:"reasoning_content"`
 	Reasoning        string                `json:"reasoning"`
 	ToolCalls        []streamToolCallDelta `json:"tool_calls"`
+	Annotations      []streamAnnotation    `json:"annotations"`
 }
 
 type streamToolCallDelta struct {
 	Index    int                 `json:"index"`
 	ID       string              `json:"id"`
+	Type     string              `json:"type"`
 	Function streamFunctionDelta `json:"function"`
 }
 
 type streamFunctionDelta struct {
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"`
+}
+
+type streamAnnotation struct {
+	Type        string             `json:"type"`
+	URL         string             `json:"url"`
+	Title       string             `json:"title"`
+	URLCitation *streamURLCitation `json:"url_citation"`
+}
+
+type streamURLCitation struct {
+	URL   string `json:"url"`
+	Title string `json:"title"`
 }
 
 type usage struct {

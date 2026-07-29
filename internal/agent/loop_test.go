@@ -896,7 +896,7 @@ func TestRunRejectsLocalWebFetchBeforePermissionRequest(t *testing.T) {
 	}
 }
 
-func TestRunAdvertisesPromptedWebSearchInAutoMode(t *testing.T) {
+func TestRunDoesNotAdvertiseProviderExecutedWebSearch(t *testing.T) {
 	t.Setenv("SPLICE_WEBSEARCH_BASE_URL", "https://search.example/api")
 	registry := tools.NewRegistry()
 	for _, tool := range tools.CoreNetworkTools() {
@@ -922,8 +922,8 @@ func TestRunAdvertisesPromptedWebSearchInAutoMode(t *testing.T) {
 	if len(provider.requests) != 1 {
 		t.Fatalf("expected one request, got %d", len(provider.requests))
 	}
-	if len(provider.requests[0].Tools) != 1 || provider.requests[0].Tools[0].Name != "web_search" {
-		t.Fatalf("expected web_search to be advertised in auto mode, got %#v", provider.requests[0].Tools)
+	if len(provider.requests[0].Tools) != 0 {
+		t.Fatalf("provider-executed web_search must not be advertised as a local tool, got %#v", provider.requests[0].Tools)
 	}
 }
 

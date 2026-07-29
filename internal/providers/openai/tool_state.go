@@ -2,6 +2,8 @@ package openai
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -23,7 +25,14 @@ type toolState struct {
 	finishReason string
 	// done is set once a terminal event (error) has been emitted so the post-scan
 	// path does not emit a second done after the stream already ended.
-	done bool
+	done                       bool
+	serverToolEnabled          bool
+	webSearchAnnotationBatches int
+	webSearchInvocationIDs     map[string]struct{}
+	webSearchCalls             map[int]*pendingServerToolCall
+	usageSeen                  bool
+	usageReportedSearches      int
+	lastUsage                  zeroruntime.Usage
 }
 
 type pendingToolCall struct {
@@ -34,8 +43,105 @@ type pendingToolCall struct {
 	ended     bool
 }
 
+type pendingServerToolCall struct {
+	id        string
+	arguments string
+	emitted   bool
+}
+
 func newToolState(parseThinkTags bool) *toolState {
-	return &toolState{calls: make(map[int]*pendingToolCall), parseThinkTags: parseThinkTags}
+	return &toolState{
+		calls:                  make(map[int]*pendingToolCall),
+		parseThinkTags:         parseThinkTags,
+		webSearchInvocationIDs: make(map[string]struct{}),
+		webSearchCalls:         make(map[int]*pendingServerToolCall),
+	}
+}
+
+func (state *toolState) webSearchRequestCount() int {
+	if len(state.webSearchInvocationIDs) > 0 {
+		return len(state.webSearchInvocationIDs)
+	}
+	return state.webSearchAnnotationBatches
+}
+
+func (state *toolState) addServerToolInvocation(id string, index int) {
+	if id == "" {
+		id = fmt.Sprintf("index:%d", index)
+	}
+	state.webSearchInvocationIDs[id] = struct{}{}
+}
+
+func (state *toolState) applyServerToolDelta(ctx context.Context, delta streamToolCallDelta, events chan<- zeroruntime.StreamEvent) {
+	call := state.webSearchCalls[delta.Index]
+	if call == nil {
+		call = &pendingServerToolCall{}
+		state.webSearchCalls[delta.Index] = call
+	}
+	previousID := call.id
+	if delta.ID != "" {
+		call.id = delta.ID
+	}
+	if delta.Function.Arguments != "" {
+		call.arguments += delta.Function.Arguments
+	}
+	if previousID == "" && call.id != "" {
+		delete(state.webSearchInvocationIDs, fmt.Sprintf("index:%d", delta.Index))
+	}
+	state.addServerToolInvocation(call.id, delta.Index)
+	if call.emitted {
+		return
+	}
+	var input struct {
+		Query string `json:"query"`
+	}
+	if err := json.Unmarshal([]byte(call.arguments), &input); err != nil || strings.TrimSpace(input.Query) == "" {
+		return
+	}
+	call.emitted = true
+	sendEvent(ctx, events, zeroruntime.StreamEvent{
+		Type:            zeroruntime.StreamEventServerToolUse,
+		ServerToolKind:  string(zeroruntime.ServerToolWebSearch),
+		ServerToolQuery: input.Query,
+	})
+}
+
+func (state *toolState) emitAnnotationBatch(ctx context.Context, events chan<- zeroruntime.StreamEvent, annotations []streamAnnotation) {
+	if !state.serverToolEnabled || len(annotations) == 0 {
+		return
+	}
+	type citation struct {
+		URL   string `json:"url"`
+		Title string `json:"title"`
+	}
+	citations := make([]citation, 0, len(annotations))
+	for _, annotation := range annotations {
+		if annotation.Type != "" && annotation.Type != "url_citation" {
+			continue
+		}
+		url, title := annotation.URL, annotation.Title
+		if annotation.URLCitation != nil {
+			url, title = annotation.URLCitation.URL, annotation.URLCitation.Title
+		}
+		if url == "" {
+			continue
+		}
+		citations = append(citations, citation{URL: url, Title: title})
+	}
+	if len(citations) == 0 {
+		return
+	}
+	payload, err := json.Marshal(citations)
+	if err != nil {
+		return
+	}
+	state.webSearchAnnotationBatches++
+	sendEvent(ctx, events, zeroruntime.StreamEvent{
+		Type:                  zeroruntime.StreamEventServerToolResult,
+		ServerToolKind:        string(zeroruntime.ServerToolWebSearch),
+		ServerToolPayload:     string(payload),
+		ServerToolResultCount: len(citations),
+	})
 }
 
 type streamEventEmitter func(zeroruntime.StreamEvent)

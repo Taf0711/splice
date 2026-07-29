@@ -102,17 +102,13 @@ func TestWebSearchRedactsBackendError(t *testing.T) {
 	}
 }
 
-func TestWebSearchRegisteredInCoreNetworkTools(t *testing.T) {
-	// web_search is registered only when a backend is configured.
+func TestWebSearchNotRegisteredInCoreNetworkTools(t *testing.T) {
+	// Provider-executed web search is not registered as a local tool.
 	t.Setenv("SPLICE_WEBSEARCH_BASE_URL", "https://search.example/api")
-	found := false
 	for _, tool := range CoreNetworkTools() {
 		if tool.Name() == "web_search" {
-			found = true
+			t.Fatal("web_search must not be registered in CoreNetworkTools")
 		}
-	}
-	if !found {
-		t.Fatal("web_search should be registered in CoreNetworkTools() when a backend is configured")
 	}
 }
 
