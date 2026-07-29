@@ -5316,15 +5316,38 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		}
 
 		onUsage := options.OnUsage
-		options.OnUsage = func(event zeroruntime.Usage) {
-			usageEvents = append(usageEvents, event)
-			sessionEvents = append(sessionEvents, pendingSessionEvent{
-				Type:    sessions.EventUsage,
-				Payload: usage.EventUsagePayload(event),
-			})
-			m.sendAgentUsage(runID, usageModelID, event, nil)
-			if onUsage != nil {
-				onUsage(event)
+		if runOptions.runKind == tuiRunPipeline {
+			options.OnUsage = func(event zeroruntime.Usage) {
+				usageEvents = append(usageEvents, event)
+				sessionEvents = append(sessionEvents, pendingSessionEvent{
+					Type:    sessions.EventUsage,
+					Payload: usage.EventUsagePayload(event),
+				})
+				m.sendAgentUsage(runID, usageModelID, event, nil)
+				if onUsage != nil {
+					onUsage(event)
+				}
+			}
+		} else {
+			estimator := usage.NewCostEstimator(&m.modelCatalog)
+			options.OnUsage = func(event zeroruntime.Usage) {
+				usageEvents = append(usageEvents, event)
+				cost := estimator(usageModelID, event, true)
+				attributed := agent.AttributedUsage{
+					Usage:         event,
+					UsageReported: true,
+					ProviderName:  m.providerName,
+					Model:         usageModelID,
+					Cost:          cost,
+				}
+				sessionEvents = append(sessionEvents, pendingSessionEvent{
+					Type:    sessions.EventUsage,
+					Payload: usage.AttributedUsagePayload(attributed),
+				})
+				m.sendAgentUsage(runID, usageModelID, event, &cost)
+				if onUsage != nil {
+					onUsage(event)
+				}
 			}
 		}
 

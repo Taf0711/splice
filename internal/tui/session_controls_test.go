@@ -748,6 +748,57 @@ func TestUsageEventsUpdateFooterAndContext(t *testing.T) {
 	}
 }
 
+// TestNonPipelineRunPersistsAttributedUsage checks the non-pipeline OnUsage
+// branch in runAgentWithOptions. Design conversation runs route through
+// agent.Run, so this run kind exercises that branch without the submit_spec
+// requirement that the spec draft kind would add.
+func TestNonPipelineRunPersistsAttributedUsage(t *testing.T) {
+	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventText, Content: "done"},
+		{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 100, CachedInputTokens: 25, OutputTokens: 20}},
+		{Type: zeroruntime.StreamEventDone},
+	}}
+	m := newModel(context.Background(), Options{
+		ModelName:    "gpt-4.1",
+		ProviderName: "openai",
+		Provider:     provider,
+		Registry:     tools.NewRegistry(),
+		SessionStore: testSessionStore(t),
+	})
+
+	msg := m.runAgentWithOptions(1, context.Background(), "design this", nil, tuiAgentRunOptions{runKind: tuiRunDesignConversation})()
+	response, ok := msg.(agentResponseMsg)
+	if !ok {
+		t.Fatalf("run result = %#v, want agentResponseMsg", msg)
+	}
+	if response.err != nil {
+		t.Fatalf("run failed: %v", response.err)
+	}
+
+	usageEventCount := 0
+	var payload map[string]any
+	for _, event := range response.sessionEvents {
+		if event.Type != sessions.EventUsage {
+			continue
+		}
+		usageEventCount++
+		payload, _ = event.Payload.(map[string]any)
+	}
+	if usageEventCount != 1 {
+		t.Fatalf("usage session events = %d, want exactly 1 (payload %#v)", usageEventCount, response.sessionEvents)
+	}
+	if payload["model"] != "gpt-4.1" {
+		t.Fatalf("payload model = %#v, want gpt-4.1", payload["model"])
+	}
+	costUsd, ok := payload["costUsd"].(float64)
+	if !ok || costUsd <= 0 {
+		t.Fatalf("payload costUsd = %#v, want a positive float64", payload["costUsd"])
+	}
+	if payload["costStatus"] == agent.CostStatusUnpriced {
+		t.Fatalf("payload costStatus = %#v, want a priced status", payload["costStatus"])
+	}
+}
+
 func TestUsageRuntimeMessageUpdatesFooterBeforeFinalResponse(t *testing.T) {
 	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
 		{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 10, OutputTokens: 5}},
