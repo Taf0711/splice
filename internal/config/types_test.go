@@ -2,8 +2,19 @@ package config
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 )
+
+func TestSandboxAdditionalReadRootsJSON(t *testing.T) {
+	var cfg FileConfig
+	if err := json.Unmarshal([]byte(`{"sandbox":{"additionalReadRoots":["/one","/two"]}}`), &cfg); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if want := []string{"/one", "/two"}; !reflect.DeepEqual(cfg.Sandbox.AdditionalReadRoots, want) {
+		t.Fatalf("AdditionalReadRoots = %v, want %v", cfg.Sandbox.AdditionalReadRoots, want)
+	}
+}
 
 func TestToolsConfigJSONRoundTrip(t *testing.T) {
 	var cfg FileConfig

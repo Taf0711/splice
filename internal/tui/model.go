@@ -4657,11 +4657,10 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 		// launchPrompt just appended, so agent.Run seeds it as the final turn.
 		prior := designPriorMessages(m.sessionEvents)
 		return m, tea.Batch(m.runAgentWithOptions(m.activeRunID, runCtx, rawPrompt, turnImages, tuiAgentRunOptions{
-			registry:       designRegistry,
-			permissionMode: agent.PermissionModeAsk,
-			systemPrompt:   stages.DesignConversationPrompt(),
-			runKind:        tuiRunDesignConversation,
-			priorMessages:  prior,
+			registry:      designRegistry,
+			systemPrompt:  stages.DesignConversationPrompt(),
+			runKind:       tuiRunDesignConversation,
+			priorMessages: prior,
 		}), m.spinner.Tick)
 	}
 	return m, tea.Batch(m.runAgent(m.activeRunID, runCtx, prompt, turnImages), m.spinner.Tick)

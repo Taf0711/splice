@@ -392,6 +392,9 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if err != nil {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "sandbox_error", err.Error())
 	}
+	if err := addConfiguredReadRoots(execScope, resolved.Sandbox.AdditionalReadRoots); err != nil {
+		return writeExecProviderError(stdout, stderr, options.outputFormat, "sandbox_error", err.Error())
+	}
 	// Re-register the core tools with the run scope, OVERWRITING the nil-scope
 	// instances registered before config resolve (the registry must exist that
 	// early for --list-tools and tool-filter validation, which run without a

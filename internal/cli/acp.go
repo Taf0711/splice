@@ -55,6 +55,9 @@ func runACP(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int
 			if err != nil {
 				return nil, nil, err
 			}
+			if err := addConfiguredReadRoots(scope, resolved.Sandbox.AdditionalReadRoots); err != nil {
+				return nil, nil, err
+			}
 			engine, err := buildExecSandboxEngine(workspaceRoot, resolved, deps, scope)
 			if err != nil {
 				return nil, nil, err

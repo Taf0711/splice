@@ -116,17 +116,62 @@ func TestDesignConversationRegistryIsReadOnly(t *testing.T) {
 	for _, tool := range tools.CoreTools(t.TempDir()) {
 		registry.Register(tool)
 	}
+	registry.Register(tools.NewWebSearchTool())
+	registry.Register(tools.NewToolSearchTool(registry))
+	registry.Register(designRegistryTestTool{name: "Task"})
 	filtered := designConversationRegistry(registry)
 
-	for _, name := range []string{"read_file", "list_directory", "grep", "ask_user"} {
+	for _, name := range []string{
+		"read_file", "list_directory", "grep", "ask_user", "read_minified_file",
+		"glob", "lsp_navigate", "skill", "web_fetch", "web_search", tools.ToolSearchToolName,
+	} {
 		if _, ok := filtered.Get(name); !ok {
 			t.Fatalf("expected %s to be in design conversation registry", name)
 		}
 	}
-	for _, name := range []string{"write_file", "edit_file", "bash"} {
+	for _, name := range []string{"write_file", "edit_file", "bash", "Task"} {
 		if _, ok := filtered.Get(name); ok {
 			t.Fatalf("expected %s to be excluded from design conversation registry", name)
 		}
+	}
+
+	withoutSearch := tools.NewRegistry()
+	for _, tool := range tools.CoreTools(t.TempDir()) {
+		if tool.Name() != "web_search" {
+			withoutSearch.Register(tool)
+		}
+	}
+	filtered = designConversationRegistry(withoutSearch)
+	if _, ok := filtered.Get("web_search"); ok {
+		t.Fatal("web_search must remain absent when the source registry does not provide it")
+	}
+}
+
+type designRegistryTestTool struct{ name string }
+
+func (tool designRegistryTestTool) Name() string             { return tool.name }
+func (tool designRegistryTestTool) Description() string      { return "test tool" }
+func (tool designRegistryTestTool) Parameters() tools.Schema { return tools.Schema{} }
+func (tool designRegistryTestTool) Safety() tools.Safety     { return tools.Safety{} }
+func (tool designRegistryTestTool) Run(context.Context, map[string]any) tools.Result {
+	return tools.Result{}
+}
+
+func TestDesignRunUsesSessionPermissionMode(t *testing.T) {
+	provider := &fakeProvider{events: []zeroruntime.StreamEvent{{Type: zeroruntime.StreamEventDone}}}
+	m := newDesignModeTestModel(t.TempDir(), provider, testSessionStore(t))
+	m.permissionMode = agent.PermissionModeAuto
+	var captured agent.Options
+	m.captureRunOptions = func(options agent.Options) { captured = options }
+	m.input.SetValue("research this change")
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	if cmd == nil {
+		t.Fatal("expected design prompt to start an agent run")
+	}
+	_, _ = updated.(model).Update(execCmd(cmd))
+	if captured.PermissionMode != agent.PermissionModeAuto {
+		t.Fatalf("design run permission mode = %q, want %q", captured.PermissionMode, agent.PermissionModeAuto)
 	}
 }
 

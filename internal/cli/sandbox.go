@@ -85,6 +85,9 @@ func runSandboxPolicy(args []string, stdout io.Writer, stderr io.Writer, deps ap
 			if fallback, fallbackErr := zeroSandbox.NewScope(workspaceRoot, nil); fallbackErr == nil {
 				writeRoots = fallback.Roots()
 			}
+		} else if readErr := addConfiguredReadRoots(scope, resolved.Sandbox.AdditionalReadRoots); readErr != nil {
+			writeRootsErr = readErr
+			writeRoots = scope.Roots()
 		} else {
 			writeRoots = scope.Roots()
 		}
@@ -152,6 +155,9 @@ func runSandboxSetup(args []string, stdout io.Writer, stderr io.Writer, deps app
 	}
 	scope, err := zeroSandbox.NewScope(workspaceRoot, resolved.Sandbox.AdditionalWriteRoots)
 	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	if err := addConfiguredReadRoots(scope, resolved.Sandbox.AdditionalReadRoots); err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
 	profile := zeroSandbox.PermissionProfileFromPolicy(workspaceRoot, policy, scope)

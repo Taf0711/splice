@@ -722,6 +722,9 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	if err != nil {
 		return writeAppError(stderr, err.Error(), 1)
 	}
+	if err := addConfiguredReadRoots(scope, resolved.Sandbox.AdditionalReadRoots); err != nil {
+		return writeAppError(stderr, err.Error(), 1)
+	}
 
 	provider, err := buildProvider(resolved, deps)
 	if err != nil {

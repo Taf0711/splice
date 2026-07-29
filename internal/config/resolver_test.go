@@ -1727,6 +1727,18 @@ func TestMergeConfigUnionsSandboxAdditionalWriteRoots(t *testing.T) {
 	}
 }
 
+func TestMergeConfigUnionsSandboxAdditionalReadRoots(t *testing.T) {
+	dst := FileConfig{}
+	dst.Sandbox.AdditionalReadRoots = []string{"/global/one"}
+	src := FileConfig{}
+	src.Sandbox.AdditionalReadRoots = []string{"/extra/one", "/global/one"}
+	mergeConfig(&dst, src)
+	want := []string{"/global/one", "/extra/one"}
+	if !reflect.DeepEqual(dst.Sandbox.AdditionalReadRoots, want) {
+		t.Fatalf("AdditionalReadRoots=%v want union %v (append + dedupe, not replace)", dst.Sandbox.AdditionalReadRoots, want)
+	}
+}
+
 func TestMergeProjectConfigIgnoresAdditionalWriteRoots(t *testing.T) {
 	dst := FileConfig{}
 	dst.Sandbox.AdditionalWriteRoots = []string{"/global/one"}
@@ -1737,6 +1749,19 @@ func TestMergeProjectConfigIgnoresAdditionalWriteRoots(t *testing.T) {
 	}
 	if !reflect.DeepEqual(dst.Sandbox.AdditionalWriteRoots, []string{"/global/one"}) {
 		t.Fatalf("AdditionalWriteRoots=%v — project config must NOT be able to add write roots", dst.Sandbox.AdditionalWriteRoots)
+	}
+}
+
+func TestMergeProjectConfigIgnoresAdditionalReadRoots(t *testing.T) {
+	dst := FileConfig{}
+	dst.Sandbox.AdditionalReadRoots = []string{"/global/one"}
+	src := FileConfig{}
+	src.Sandbox.AdditionalReadRoots = []string{"/repo/sneaky"}
+	if err := mergeProjectConfig(&dst, src); err != nil {
+		t.Fatalf("mergeProjectConfig: %v", err)
+	}
+	if !reflect.DeepEqual(dst.Sandbox.AdditionalReadRoots, []string{"/global/one"}) {
+		t.Fatalf("AdditionalReadRoots=%v: project config must NOT be able to add read roots", dst.Sandbox.AdditionalReadRoots)
 	}
 }
 

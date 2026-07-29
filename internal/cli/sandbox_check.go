@@ -86,6 +86,9 @@ func runSandboxCheck(args []string, stdout io.Writer, stderr io.Writer, deps app
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitProvider)
 	}
+	if err := addConfiguredReadRoots(scope, resolved.Sandbox.AdditionalReadRoots); err != nil {
+		return writeAppError(stderr, err.Error(), exitProvider)
+	}
 	engine := zeroSandbox.NewEngine(zeroSandbox.EngineOptions{
 		WorkspaceRoot: workspaceRoot,
 		Policy:        policy,

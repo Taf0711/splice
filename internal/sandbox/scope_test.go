@@ -157,6 +157,31 @@ func TestNewScopeRejectsBadExtraRoots(t *testing.T) {
 	}
 }
 
+func TestScopeAddReadKeepsReadRootReadOnly(t *testing.T) {
+	workspace := t.TempDir()
+	readRoot := tempDirOutsideDefaultTemp(t)
+	scope, err := NewScope(workspace, nil)
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	if _, err := scope.AddRead(readRoot); err != nil {
+		t.Fatalf("AddRead: %v", err)
+	}
+	resolvedReadRoot, err := filepath.EvalSymlinks(readRoot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(readRoot): %v", err)
+	}
+	if !stringSliceContains(scope.ReadRoots(), resolvedReadRoot) {
+		t.Fatalf("ReadRoots()=%v want %q", scope.ReadRoots(), readRoot)
+	}
+	if stringSliceContains(scope.Roots(), resolvedReadRoot) {
+		t.Fatalf("Roots()=%v must not include read-only root %q", scope.Roots(), readRoot)
+	}
+	if _, err := scope.AddRead(string(filepath.Separator)); err == nil {
+		t.Fatal("AddRead(filesystem root) = nil error, want rejection")
+	}
+}
+
 func TestScopeAddIsIdempotentAndRejectsContainedPaths(t *testing.T) {
 	workspace := t.TempDir()
 	extra := t.TempDir()

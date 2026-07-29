@@ -78,6 +78,12 @@ type SandboxConfig struct {
 	// flags only — deliberately not project config, so a cloned repo cannot
 	// grant itself write access. Session-only grants use /add-dir instead.
 	AdditionalWriteRoots []string `json:"additionalWriteRoots,omitempty"`
+	// AdditionalReadRoots lists directories outside the workspace the sandbox
+	// allows reads in, without granting write access. Entries are normalized
+	// the same way as AdditionalWriteRoots. Honored from the GLOBAL user config
+	// and CLI flags only — deliberately not project config, so a cloned repo
+	// cannot grant itself read access to the user's home directory.
+	AdditionalReadRoots []string `json:"additionalReadRoots,omitempty"`
 	// BlockUnixSockets, when true, asks the Linux sandbox helper to install a
 	// best-effort seccomp filter that denies AF_UNIX socket creation inside the
 	// sandboxed command. Off by default; ignored on non-Linux backends.

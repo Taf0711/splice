@@ -463,7 +463,19 @@ func designConversationRegistry(registry *tools.Registry) *tools.Registry {
 	if registry == nil {
 		return filtered
 	}
-	allowed := map[string]bool{"read_file": true, "list_directory": true, "grep": true, "ask_user": true}
+	allowed := map[string]bool{
+		"read_file":              true,
+		"list_directory":         true,
+		"grep":                   true,
+		"ask_user":               true,
+		"read_minified_file":     true,
+		"glob":                   true,
+		"lsp_navigate":           true,
+		"skill":                  true,
+		"web_fetch":              true,
+		"web_search":             true,
+		tools.ToolSearchToolName: true,
+	}
 	for _, tool := range registry.All() {
 		if allowed[tool.Name()] {
 			filtered.Register(tool)

@@ -211,6 +211,7 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 		dst.Sandbox.Network = network
 	}
 	dst.Sandbox.AdditionalWriteRoots = unionStrings(dst.Sandbox.AdditionalWriteRoots, src.Sandbox.AdditionalWriteRoots)
+	dst.Sandbox.AdditionalReadRoots = unionStrings(dst.Sandbox.AdditionalReadRoots, src.Sandbox.AdditionalReadRoots)
 	if src.Sandbox.BlockUnixSockets {
 		dst.Sandbox.BlockUnixSockets = true
 	}
@@ -262,10 +263,10 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 		mergeProvider(dst, provider)
 	}
 	mergeMCPConfig(&dst.MCP, src.MCP)
-	// Sandbox.AdditionalWriteRoots is intentionally NOT merged from project
-	// config: a cloned repo's .splice/config.json must not be able to grant
-	// itself write access outside the workspace. Global config and CLI flags
-	// are the only config sources for write roots.
+	// Sandbox.AdditionalWriteRoots and AdditionalReadRoots are intentionally NOT
+	// merged from project config: a cloned repo's .splice/config.json must not
+	// be able to grant itself write or read access outside the workspace. Global
+	// config and CLI flags are the only config sources for these roots.
 	//
 	// Sandbox.Network from project config may only TIGHTEN (→ "deny"), never
 	// WEAKEN (→ "allow"). A malicious repo must not be able to open network
