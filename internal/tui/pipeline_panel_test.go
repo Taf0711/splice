@@ -22,6 +22,15 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	// Tests without a SessionStore use the default store, which writes to the user data directory.
+	dataDir, err := os.MkdirTemp("", "splice-tui-test-")
+	if err != nil {
+		panic(fmt.Sprintf("create temporary XDG data directory: %v", err))
+	}
+	if err := os.Setenv("XDG_DATA_HOME", dataDir); err != nil {
+		_ = os.RemoveAll(dataDir)
+		panic(fmt.Sprintf("set XDG_DATA_HOME: %v", err))
+	}
 	tuiSpliceRun = func(ctx context.Context, prompt string, provider agent.Provider, options agent.Options, mem splicerun.MemoryStore, recovery splicerun.WorkspaceRecovery) (agent.Result, error) {
 		if recovery != nil {
 			panic("TUI must not receive workspace recovery authority")
@@ -29,7 +38,9 @@ func TestMain(m *testing.M) {
 		return agent.Run(ctx, prompt, provider, options)
 	}
 	tuiResolveMemory = func(context.Context) (*memd.Client, error) { return nil, nil }
-	os.Exit(m.Run())
+	code := m.Run()
+	_ = os.RemoveAll(dataDir)
+	os.Exit(code)
 }
 
 func TestPipelinePanelApplyStageMarker(t *testing.T) {
