@@ -220,10 +220,6 @@ func applyModelsDevOverridesWithStats(entries []ModelEntry, providers map[string
 	return applyModelsDevOverridesWithSource(entries, providers, modelsDevCachedSource, time.Now().UTC(), providerProfile...)
 }
 
-func applyModelsDevOverridesWithStatsAt(entries []ModelEntry, providers map[string]map[string]modelsDevModel, cacheModTime time.Time, providerProfile ...string) ([]ModelEntry, int) {
-	return applyModelsDevOverridesWithSource(entries, providers, modelsDevCachedSource, cacheModTime, providerProfile...)
-}
-
 func applyModelsDevOverridesWithSource(entries []ModelEntry, providers map[string]map[string]modelsDevModel, source string, sourceModTime time.Time, providerProfile ...string) ([]ModelEntry, int) {
 	if len(providers) == 0 {
 		return entries, 0
@@ -441,11 +437,6 @@ func embeddedModelsDevSnapshot() modelsDevSource {
 // DefaultRegistry is called on hot paths, so it does not re-stat the cache.
 func cachedModelsDevProviders() map[string]map[string]modelsDevModel {
 	return cachedModelsDevSnapshotInfo().providers
-}
-
-func cachedModelsDevSnapshot() (map[string]map[string]modelsDevModel, time.Time) {
-	snapshot := cachedModelsDevSnapshotInfo()
-	return snapshot.providers, snapshot.modTime
 }
 
 func cachedModelsDevSnapshotInfo() modelsDevSource {

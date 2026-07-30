@@ -163,10 +163,6 @@ func (provider *Provider) StreamCompletion(
 	return events, nil
 }
 
-func (provider *Provider) stream(ctx context.Context, body []byte, events chan<- zeroruntime.StreamEvent) {
-	provider.streamWithServerTool(ctx, body, false, events)
-}
-
 func (provider *Provider) streamWithServerTool(ctx context.Context, body []byte, serverToolEnabled bool, events chan<- zeroruntime.StreamEvent) {
 	endpoint := provider.endpoint
 

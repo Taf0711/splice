@@ -271,7 +271,6 @@ func CoreReadOnlyToolsScoped(workspaceRoot string, scope PathScope) []Tool {
 	}
 }
 
-func CoreWriteTools(workspaceRoot string) []Tool { return CoreWriteToolsScoped(workspaceRoot, nil) }
 func CoreWriteToolsScoped(workspaceRoot string, scope PathScope) []Tool {
 	return []Tool{
 		NewScopedWriteFileTool(workspaceRoot, scope),
@@ -282,7 +281,6 @@ func CoreWriteToolsScoped(workspaceRoot string, scope PathScope) []Tool {
 	}
 }
 
-func CoreShellTools(workspaceRoot string) []Tool { return CoreShellToolsScoped(workspaceRoot, nil) }
 func CoreShellToolsScoped(workspaceRoot string, scope PathScope) []Tool {
 	execManager := newExecSessionManager()
 	return []Tool{

@@ -39,15 +39,6 @@ func NewDesignWorkflow(store *sessions.Store, sessionID, planID string) *DesignW
 	}
 }
 
-// WithPrimaryModel sets the model ID of the default provider. It is used to
-// seed ModelOverride when the composed stage resolver falls back to the
-// primary, so that design-phase stage errors are attributed to the real
-// primary model instead of a literal tier label.
-func (w *DesignWorkflow) WithPrimaryModel(model string) *DesignWorkflow {
-	w.primarySelection.Model = model
-	return w
-}
-
 // WithPrimarySelection sets the identity and effort of the default route.
 func (w *DesignWorkflow) WithPrimarySelection(providerName, model, effort string) *DesignWorkflow {
 	w.primarySelection.ProviderName = providerName
