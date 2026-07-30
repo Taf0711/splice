@@ -99,10 +99,11 @@ func TestPostinstallComputesAssetPlan(t *testing.T) {
 			t.Fatalf("%s/%s: dry-run err=%v stderr=%s", tc.platform, tc.arch, err, stderr)
 		}
 		var plan struct {
-			AssetName  string `json:"assetName"`
-			AssetURL   string `json:"assetUrl"`
-			BinaryName string `json:"binaryName"`
-			Tag        string `json:"tag"`
+			AssetName        string   `json:"assetName"`
+			AssetURL         string   `json:"assetUrl"`
+			BinaryName       string   `json:"binaryName"`
+			Tag              string   `json:"tag"`
+			OptionalBinaries []string `json:"optionalBinaries"`
 		}
 		if err := json.Unmarshal([]byte(stdout), &plan); err != nil {
 			t.Fatalf("%s/%s: parse plan %q: %v", tc.platform, tc.arch, stdout, err)
@@ -119,6 +120,20 @@ func TestPostinstallComputesAssetPlan(t *testing.T) {
 		}
 		if plan.Tag != "v"+version {
 			t.Fatalf("%s/%s: tag=%q want v%s", tc.platform, tc.arch, plan.Tag, version)
+		}
+		wantMemd := "splice-memd"
+		if tc.platform == "win32" {
+			wantMemd = "splice-memd.exe"
+		}
+		foundMemd := false
+		for _, name := range plan.OptionalBinaries {
+			if name == wantMemd {
+				foundMemd = true
+				break
+			}
+		}
+		if !foundMemd {
+			t.Fatalf("%s/%s: optionalBinaries=%v does not contain %q", tc.platform, tc.arch, plan.OptionalBinaries, wantMemd)
 		}
 	}
 }

@@ -30,9 +30,9 @@ type ApplyResult struct {
 	Warnings      []string      `json:"warnings,omitempty"`
 }
 
-// windowsOptionalBinaries/linuxOptionalBinaries mirror the helper binary
-// names scripts/postinstall.mjs copies alongside the main binary when
-// present, so `splice upgrade` refreshes them too instead of leaving them stale.
+// windowsOptionalBinaries and linuxOptionalBinaries mirror the sandbox helper
+// names scripts/postinstall.mjs copies alongside the main binary when present.
+// The updater adds the memd sidecar for every platform.
 var (
 	windowsOptionalBinaries = []string{"splice-windows-command-runner.exe", "splice-windows-sandbox-setup.exe"}
 	linuxOptionalBinaries   = []string{"splice-linux-sandbox", "splice-seccomp"}
@@ -161,12 +161,9 @@ func applyStandaloneUpdate(ctx context.Context, result Result, executablePath st
 	}
 
 	binaryName := "splice"
-	optionalBinaries := linuxOptionalBinaries
+	optionalBinaries := optionalBinariesForGOOS(runtime.GOOS)
 	if runtime.GOOS == "windows" {
 		binaryName = "splice.exe"
-		optionalBinaries = windowsOptionalBinaries
-	} else if runtime.GOOS == "darwin" {
-		optionalBinaries = nil
 	}
 
 	newBinaryPath, err := findByBasename(extractDir, binaryName)
@@ -198,6 +195,23 @@ func applyStandaloneUpdate(ctx context.Context, result Result, executablePath st
 	}
 
 	return warnings, nil
+}
+
+func optionalBinariesForGOOS(goos string) []string {
+	var optionalBinaries []string
+	switch goos {
+	case "windows":
+		optionalBinaries = append(optionalBinaries, windowsOptionalBinaries...)
+	case "darwin":
+		optionalBinaries = nil
+	default:
+		optionalBinaries = append(optionalBinaries, linuxOptionalBinaries...)
+	}
+	memdName := "splice-memd"
+	if goos == "windows" {
+		memdName = "splice-memd.exe"
+	}
+	return append(optionalBinaries, memdName)
 }
 
 // verifyArchiveChecksum verifies the checksum file at checksumPath and
