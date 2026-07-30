@@ -454,6 +454,29 @@ func TestCodexProviderSendsResponsesRequestShape(t *testing.T) {
 	}
 }
 
+func TestCodexProviderOmitsMaxOutputTokens(t *testing.T) {
+	provider, err := NewCodexProvider(CodexOptions{Options: Options{
+		Model:     "gpt-5",
+		MaxTokens: 128000,
+	}})
+	if err != nil {
+		t.Fatalf("NewCodexProvider: %v", err)
+	}
+	req, err := provider.buildResponsesRequest(zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("buildResponsesRequest: %v", err)
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	if strings.Contains(string(body), "max_output_tokens") {
+		t.Fatalf("request contains max_output_tokens: %s", body)
+	}
+}
+
 func TestCodexProviderForwardsReasoningEffort(t *testing.T) {
 	// A reasoning effort must reach the Responses backend nested under
 	// `reasoning.effort` (where the chat-completions `reasoning_effort` moved).
