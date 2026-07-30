@@ -12,8 +12,6 @@
   <a href="https://www.npmjs.com/package/@taf0711/splice"><img alt="npm version" src="https://img.shields.io/npm/v/@taf0711/splice"></a>
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue"></a>
   <img alt="Go 1.25+" src="https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white">
-  <br>
-  <strong>English</strong> | <a href="README_ZH.md">中文</a>
 </p>
 
 Splice is a local-first coding agent for people who want more than a model in a

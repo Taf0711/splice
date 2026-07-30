@@ -75,7 +75,7 @@ almost certainly wrong.
 - **No em-dashes in new or actively-edited user-facing strings or documentation.**
   Use periods, commas, or parentheses.
 - **Documentation follows ASD-STE100 Simplified Technical English.** All
-  user-facing documentation (README.md, README_ZH.md, `docs/`, user-facing Go
+  user-facing documentation (README.md, `docs/`, user-facing Go
   comments) uses the controlled vocabulary and rules of ASD-STE100: approved
   words only (use an approved synonym when a word is not in the STE word list;
   do not use synonyms for an approved word), short sentences (maximum 20 words
@@ -170,7 +170,7 @@ go run ./cmd/splice-release build --goos linux --goarch amd64
 
 ## Documentation
 
-- `README.md` / `README_ZH.md`: project overview (keep both languages in sync).
+- `README.md`: project overview.
 - `AGENTS.zero.md`: Zero's upstream extension guide (project AGENTS.md files,
   specialists, skills, hooks, plugins), kept for reference.
 - `docs/STREAM_JSON_PROTOCOL.md`: the stream-JSON event contract for headless
