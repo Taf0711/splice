@@ -17,8 +17,6 @@ For any OAuth 2.0 / OIDC provider that returns a normal access token usable as
 `Authorization: Bearer …` on its API, configure it with `SPLICE_OAUTH_<NAME>_*`
 env vars and log in:
 
-> These environment variables retain the upstream SPLICE_ prefix; a rename to SPLICE_ is planned.
-
 ```sh
 export SPLICE_OAUTH_ACME_CLIENT_ID=…
 export SPLICE_OAUTH_ACME_AUTHORIZE_URL=https://acme.example/oauth/authorize
