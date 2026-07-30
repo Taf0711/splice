@@ -194,8 +194,7 @@ webhook after the run. Splice also has a built-in webhook notifier sink
 webhook:
 
 - Configure the destination with the `SPLICE_SLACK_WEBHOOK_URL` environment variable
-  (or settings). A blank URL disables the sink. These environment variables
-  retain the upstream `SPLICE_` prefix; a rename to `SPLICE_` is planned.
+  (or settings). A blank URL disables the sink.
 - The sink POSTs a JSON body `{ "text", "type", "message", "summary?", "links?" }`.
   The `text` field is what Slack renders; the structured fields carry the
   machine-readable detail.

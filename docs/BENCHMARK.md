@@ -100,9 +100,6 @@ go run ./cmd/splice-perf-bench tasks \
 `--version`/`--commit` also read from `SPLICE_BENCH_VERSION` / `SPLICE_BENCH_COMMIT`
 when the flags are omitted, so CI can stamp them once in the environment.
 
-> **Note:** These environment variables retain the upstream `SPLICE_` prefix; a
-> rename to `SPLICE_` is planned.
-
 Use `--dry-run` to exercise the record path without invoking a model (every task
 is recorded as skipped) — useful for validating a task set before a real run.
 
