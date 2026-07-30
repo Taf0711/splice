@@ -5,6 +5,65 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3](https://github.com/Taf0711/splice/compare/v0.1.2...v0.1.3) (2026-07-30)
+
+
+### Breaking Changes
+
+* All environment variables now use the `SPLICE_` prefix. Splice does not read the old `ZERO_` names, and it gives no warning when it finds them. Rename these variables in your shell, your CI configuration, and your scripts. For example, change `ZERO_API_KEY` to `SPLICE_API_KEY`. ([3b3b01c](https://github.com/Taf0711/splice/commit/3b3b01c0e65d035605cc036c41864197458e5287))
+
+
+### Documentation
+
+* The README, the security policy, and the install guide are rewritten. ([b4e3388](https://github.com/Taf0711/splice/commit/b4e3388))
+
+
+### Features
+
+* **agenteval:** derive eval cost from the request samples ([9e137e0](https://github.com/Taf0711/splice/commit/9e137e06e41f84c81b098330a90a3509e94be8da))
+* **agenteval:** parse usage events while the agent runs ([15dc68e](https://github.com/Taf0711/splice/commit/15dc68e46697619e790b8e4c272c67379f29f9b4))
+* **agenteval:** publish the benchmark v2 report contract ([eed860d](https://github.com/Taf0711/splice/commit/eed860d790cf85895de8ff4653c7cc2bc6ed8396))
+* **cli:** report eval runner, routed models, and cost coverage ([a740bb7](https://github.com/Taf0711/splice/commit/a740bb7869527c40a0d982faec5a7bd84bab1d1c))
+* **cli:** run eval benchmarks through the production pipeline by default ([4ff0a2d](https://github.com/Taf0711/splice/commit/4ff0a2d47ce40d524794aab0a3901bf5325fdbc0))
+* **compaction:** keep the agent inside the cheapest pricing tier ([eee9f67](https://github.com/Taf0711/splice/commit/eee9f67cc6691049576565ac8347d7edd5c7135d))
+* complete attributed pipeline cost accounting ([7440a8e](https://github.com/Taf0711/splice/commit/7440a8ed8bc5b79db5931e2fb386c6a4c68dc27b))
+* **design:** ask the provider to search the web ([9c5651d](https://github.com/Taf0711/splice/commit/9c5651d81b7822a0a8ab202f91c2493f8c1ce230))
+* **design:** emit task_started before each plan task dispatches ([09b3826](https://github.com/Taf0711/splice/commit/09b3826c99d5103147a26977999f3d61f065ff13))
+* **design:** give the design agent research tools and read-only roots ([4e44b86](https://github.com/Taf0711/splice/commit/4e44b86950f00eb6f85715284bd1158f2712850a))
+* **modelregistry:** price long-context tiers from models.dev ([5d6e762](https://github.com/Taf0711/splice/commit/5d6e7625c99e586b4fc98f7e81dbd18603b0b285))
+* **modelregistry:** price models the curated catalog does not carry ([00d93f2](https://github.com/Taf0711/splice/commit/00d93f2e2256f55b868550524a24d733ff26ae13))
+* **modelregistry:** ship a models.dev snapshot and stop curating prices ([8b3ad05](https://github.com/Taf0711/splice/commit/8b3ad055de41ee858d6c096afb3dc06c3199bba4))
+* **openrouter:** run web search on the provider ([fe19ea3](https://github.com/Taf0711/splice/commit/fe19ea395cec2ee62a310ff5aeac68d987284d9e))
+* **runtime:** add plumbing for provider-executed web search ([3976759](https://github.com/Taf0711/splice/commit/39767591db35d960ed07b4d1a5885c6c83349773))
+* **tui:** show honest session cost with explicit coverage ([0de1c81](https://github.com/Taf0711/splice/commit/0de1c81f84632f2bcd254111a9b2251b6ceb03ed))
+* **usage:** persist cost estimates with provenance and coverage ([0215c28](https://github.com/Taf0711/splice/commit/0215c28994ae1fbeae0957a2981b994322f763b2))
+* **usage:** round a displayed cost to cents at a dollar and above ([0703156](https://github.com/Taf0711/splice/commit/07031566efc0f8b648c2dd8c10f62963f3246c0d))
+* **usage:** show a cost figure when pricing coverage is partial ([6bad51a](https://github.com/Taf0711/splice/commit/6bad51ab921c49bab699eb2c8bb4fb17717b49e8))
+
+
+### Bug Fixes
+
+* **doctor:** correct the stale connectivity fallback message ([ce91459](https://github.com/Taf0711/splice/commit/ce914596fabf87f1cab49d1a68738c68f0746a27))
+* **dtools:** resolve the workspace root through symlinks ([e5d5542](https://github.com/Taf0711/splice/commit/e5d55422905b4f1a32e3d611de24f347ee820c43))
+* **exec:** honor compaction config in the spec-draft run ([391887c](https://github.com/Taf0711/splice/commit/391887c5bbd01926ed5f3958fef352a5a9fa4c94))
+* **tui:** give the TUI catalog its provider profile ([2c3089b](https://github.com/Taf0711/splice/commit/2c3089b76b62ee73256b79cc17b64dc8c255404b))
+* **tui:** keep a critique that failed to persist ([887c97b](https://github.com/Taf0711/splice/commit/887c97b5e8bd11e3b30221031e0464b04eec8f39))
+* **tui:** keep a crystallized plan when the critic fails ([c1f3b78](https://github.com/Taf0711/splice/commit/c1f3b782fae3cec53a434742a204c83684b031c3))
+* **tui:** persist attributed usage for non-pipeline runs ([d8e7574](https://github.com/Taf0711/splice/commit/d8e7574d85efb92ed0a6dc8caaba9acd81b70021))
+* **tui:** stream crystallize output and record its cost ([48778b9](https://github.com/Taf0711/splice/commit/48778b9032aa3a6311a7745181b174318e437675))
+* **usage:** show fewer cost digits and use one formatter ([f563ba6](https://github.com/Taf0711/splice/commit/f563ba6ef0a16e0afeb65a6e5d4ea131ed34fa05))
+
+
+### Performance Improvements
+
+* **exec:** drop the unread context window from the pipeline run options ([e858f58](https://github.com/Taf0711/splice/commit/e858f5823ee9729de00fe40b03175e6b364e10f3))
+* **tui:** stop re-measuring the transcript on every wheel tick ([c63edd0](https://github.com/Taf0711/splice/commit/c63edd04ca70d31dba260e305dd1748a991e10b9))
+
+
+### Miscellaneous Chores
+
+* **release:** cut 0.1.3 ([ad495db](https://github.com/Taf0711/splice/commit/ad495db473dd21af4f65815903fb0ba1a28d7811))
+
 ## [Unreleased]
 
 ## [0.1.2](https://github.com/Taf0711/splice/compare/v0.1.1...v0.1.2) (2026-07-20)
