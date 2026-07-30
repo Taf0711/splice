@@ -171,8 +171,6 @@ go run ./cmd/splice-release build --goos linux --goarch amd64
 ## Documentation
 
 - `README.md`: project overview.
-- `AGENTS.zero.md`: Zero's upstream extension guide (project AGENTS.md files,
-  specialists, skills, hooks, plugins), kept for reference.
 - `docs/STREAM_JSON_PROTOCOL.md`: the stream-JSON event contract for headless
   clients, including pipeline, plan-mode, and merge-back events.
 - `docs/` (INSTALL, UPDATE, oauth-subscriptions, GITHUB_ACTION, SPECIALISTS,
