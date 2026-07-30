@@ -1,23 +1,29 @@
-# Splice Documentation
+# Splice docs
 
-This directory contains public documentation for using, extending, and releasing
-Splice.
+Splice is a local-first coding agent built on [Zero's Engine](https://github.com/gitlawb/zero).
+The docs focus on what Splice adds: a deterministic pipeline, typed stage
+contracts, controlled execution, and local memory.
 
-## User Docs
+## Start here
 
-- [Install](INSTALL.md)
-- [Update flow](UPDATE.md)
-- [OAuth logins and subscription-backed providers](oauth-subscriptions.md)
+- [Install Splice](INSTALL.md)
+- [Update Splice](UPDATE.md)
+- [Security model and reporting](../SECURITY.md)
+- [Contributing](../CONTRIBUTING.md)
 
-## Automation And Integrations
+## Run it
 
 - [Stream-JSON protocol](STREAM_JSON_PROTOCOL.md)
 - [GitHub Action](GITHUB_ACTION.md)
 - [Specialists](SPECIALISTS.md)
+- [OAuth logins and subscriptions](oauth-subscriptions.md)
 
-## Maintainer Docs
+## Measure it
+
+- [Benchmarks](BENCHMARK.md)
+- [Performance](PERFORMANCE.md)
+- [Agent evaluations](AGENT_EVALS.md)
+
+## Maintain it
 
 - [npm wrapper smoke checklist](NPM_WRAPPER_SMOKE.md)
-- [Benchmarks](BENCHMARK.md)
-- [Performance benchmarks](PERFORMANCE.md)
-- [Offline agent evals](AGENT_EVALS.md)
