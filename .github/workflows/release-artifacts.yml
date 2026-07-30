@@ -99,8 +99,23 @@ jobs:
           if [ "${{ matrix.goos }}" = "windows" ]; then
             BINARY_NAME="splice.exe"
           fi
-          go build -ldflags "-s -w -X main.version=${{ steps.version.outputs.VERSION }}" \
+          go build -ldflags "-s -w -X github.com/Taf0711/splice/internal/cli.version=${{ steps.version.outputs.VERSION }}" \
             -o "staging/$BINARY_NAME" ./cmd/splice
+
+      - name: Verify splice binary version
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        env:
+          EXPECTED_VERSION: ${{ steps.version.outputs.VERSION }}
+          BINARY_PATH: staging/splice
+        run: |
+          EXPECTED="splice ${EXPECTED_VERSION}"
+          ACTUAL=$("${BINARY_PATH}" --version)
+          if [ "${ACTUAL}" != "${EXPECTED}" ]; then
+            echo "Expected version: ${EXPECTED}"
+            echo "Actual output: ${ACTUAL}"
+            exit 1
+          fi
+          echo "Version check passed: ${ACTUAL}"
 
       - name: Build splice-memd sidecar
         env:
