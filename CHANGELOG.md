@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.3](https://github.com/Taf0711/splice/compare/v0.1.2...v0.1.3) (2026-07-30)
 
 
+### Breaking Changes
+
+* All environment variables now use the `SPLICE_` prefix. Splice does not read the old `ZERO_` names, and it gives no warning when it finds them. Rename these variables in your shell, your CI configuration, and your scripts. For example, change `ZERO_API_KEY` to `SPLICE_API_KEY`. ([3b3b01c](https://github.com/Taf0711/splice/commit/3b3b01c0e65d035605cc036c41864197458e5287))
+
+
+### Documentation
+
+* The README, its Chinese mirror, the security policy, and the install guide are rewritten. ([b4e3388](https://github.com/Taf0711/splice/commit/b4e3388))
+
+
 ### Features
 
 * **agenteval:** derive eval cost from the request samples ([9e137e0](https://github.com/Taf0711/splice/commit/9e137e06e41f84c81b098330a90a3509e94be8da))
