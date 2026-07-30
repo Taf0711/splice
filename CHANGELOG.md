@@ -16,7 +16,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Documentation
 
 * The README, the security policy, and the install guide are rewritten. ([b4e3388](https://github.com/Taf0711/splice/commit/b4e3388))
-* The Chinese README is removed. Splice now keeps documentation in English only. ([fd9ba3c](https://github.com/Taf0711/splice/commit/fd9ba3c))
 
 
 ### Features
