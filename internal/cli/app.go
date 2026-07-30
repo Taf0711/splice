@@ -117,6 +117,7 @@ func (noopMCPRuntime) Skipped() []mcp.SkippedServer {
 // Run executes the minimal Go CLI surface. It returns an exit code so tests can
 // exercise command behavior without terminating the test process.
 func Run(args []string, stdout io.Writer, stderr io.Writer) int {
+	warnObsoleteEnvVars(os.Getenv, stderr)
 	return runWithDeps(args, stdout, stderr, defaultAppDeps())
 }
 
