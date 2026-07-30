@@ -1341,6 +1341,36 @@ func (meteredFailingStage) Run(context.Context, schemas.HarnessStageInput, zeror
 	return schemas.HarnessStageOutput{}, meteredStageFailure{usage: &schemas.StageUsage{InputTokens: 12, OutputTokens: 7, CachedInputTokens: 3}}
 }
 
+type terminalDetailStage struct{}
+
+func (terminalDetailStage) Run(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+	return schemas.HarnessStageOutput{}, errors.New(`provider request error: {"detail":"Unsupported parameter: max_output_tokens"}`)
+}
+
+func TestRunTerminalStageFailureIncludesOutputSummary(t *testing.T) {
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		RequestIntent: "test terminal stage failure detail",
+		Stages:        []schemas.ExecutionStage{{Name: "terminal_failure"}},
+	}
+	result, err := runIterationLoop(context.Background(), "run-terminal-failure", plan, stageRegistry{
+		"terminal_failure": terminalDetailStage{},
+	}, runFakeProvider{}, agent.Options{MaxTurns: 1}, t.TempDir(), nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	if result.Status != "failed" {
+		t.Fatalf("pipeline status = %q, want failed", result.Status)
+	}
+	if result.AbortReason == nil {
+		t.Fatalf("abort reason = %#v, want terminal stage detail", result.AbortReason)
+	}
+	reason := *result.AbortReason
+	if !strings.HasPrefix(reason, "stage failed in iteration 1: ") || !strings.Contains(reason, `provider request error: {"detail":"Unsupported parameter: max_output_tokens"}`) {
+		t.Fatalf("abort reason = %q, want terminal stage detail", reason)
+	}
+}
+
 func TestRunPassRecordsUsageFromFailedTypedOutput(t *testing.T) {
 	plan := schemas.ExecutionPlan{
 		Tier:          schemas.TierLight,

@@ -293,7 +293,12 @@ func runIterationLoop(
 				revisionContext = &rc
 				continue
 			}
-			return finishWithReason(runID, plan, allRecords, "failed", fmt.Sprintf("stage failed in iteration %d", i))
+			failed := findFailed(passRecords)
+			reason := fmt.Sprintf("stage failed in iteration %d", i)
+			if detail := DerefString(failed.OutputSummary); detail != "" {
+				reason += ": " + detail
+			}
+			return finishWithReason(runID, plan, allRecords, "failed", reason)
 		}
 
 		changeSummary := summarizeWorkspaceChanges(ctx, workDir)
