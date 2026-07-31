@@ -231,6 +231,23 @@ func TestDesignPlanTaskGraphIntegrity(t *testing.T) {
 	}
 }
 
+func TestDesignPlanTerseRequestValidates(t *testing.T) {
+	// A short request establishes no boundaries and needs no design note. The
+	// crystallizer is told not to invent scope, so a plan that honestly leaves
+	// out_of_scope and system_design empty must validate. Requiring them made
+	// the model choose between its instructions and a passing schema.
+	plan := DesignPlan{
+		Epic:         "fix the failing test in ./pkg",
+		Requirements: []string{"the test in ./pkg passes"},
+		InScope:      []string{"./pkg"},
+		Tasks:        []Task{{ID: "t1", Title: "Fix test", Intent: "make the failing test pass"}},
+		Source:       "conversation",
+	}
+	if err := plan.Validate(); err != nil {
+		t.Fatalf("terse plan must validate, got %v", err)
+	}
+}
+
 func TestDesignPlanDuplicateTaskID(t *testing.T) {
 	plan := DesignPlan{
 		Epic:         "epic",

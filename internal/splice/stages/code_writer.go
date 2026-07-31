@@ -61,7 +61,7 @@ func (CodeWriter) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 	collected, err := callValidatedToolUse(ctx, provider, options.model("medium"), options.ReasoningEffort, composeSystemPrompt(codeWriterSystemPrompt), string(payload), options.Images, submitCodeToolDefinition(), &options.Stream, func(collected *zeroruntime.CollectedStream) error {
 		_, err := parseCodeWriterOutput(collected)
 		return err
-	})
+	}, options.PromptCacheKey)
 	if err != nil {
 		return schemas.HarnessStageOutput{}, withCollectedUsage(err, collected)
 	}

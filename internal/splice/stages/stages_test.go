@@ -217,7 +217,7 @@ func TestValidatedToolUseRetriesContractFailuresAndAccumulatesUsage(t *testing.T
 	collected, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(), nil, func(collected *zeroruntime.CollectedStream) error {
 		_, err := parseCodeWriterOutput(collected)
 		return err
-	})
+	}, "")
 	if err != nil {
 		t.Fatalf("retrying typed output: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestValidatedToolUseRetriesSchemaInvalidArguments(t *testing.T) {
 	_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(), nil, func(collected *zeroruntime.CollectedStream) error {
 		_, err := parseCodeWriterOutput(collected)
 		return err
-	})
+	}, "")
 	if err != nil {
 		t.Fatalf("schema-invalid retry: %v", err)
 	}
@@ -283,7 +283,7 @@ func TestCodeWriterDoesNotRetryApplicationFailure(t *testing.T) {
 
 func TestValidatedToolUseDoesNotRetryTransportErrors(t *testing.T) {
 	provider := &retryScriptProvider{errs: []error{errors.New("connection refused")}}
-	_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(), nil, func(*zeroruntime.CollectedStream) error { return nil })
+	_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(), nil, func(*zeroruntime.CollectedStream) error { return nil }, "")
 	if err == nil || !strings.Contains(err.Error(), "connection refused") {
 		t.Fatalf("transport error = %v", err)
 	}
@@ -296,7 +296,7 @@ func TestValidatedToolUseDoesNotRetryCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	provider := &retryScriptProvider{}
-	_, err := callValidatedToolUse(ctx, provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(), nil, func(*zeroruntime.CollectedStream) error { return errors.New("invalid") })
+	_, err := callValidatedToolUse(ctx, provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(), nil, func(*zeroruntime.CollectedStream) error { return errors.New("invalid") }, "")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancellation error = %v", err)
 	}
@@ -314,7 +314,7 @@ func TestValidatedToolUseExhaustionIsActionableAndMetered(t *testing.T) {
 	_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(), nil, func(collected *zeroruntime.CollectedStream) error {
 		_, err := parseCodeWriterOutput(collected)
 		return err
-	})
+	}, "")
 	var typedErr *TypedOutputError
 	if !errors.As(err, &typedErr) {
 		t.Fatalf("exhaustion error = %T %v, want TypedOutputError", err, err)
@@ -1226,6 +1226,21 @@ func TestStepBackMissingToolCall(t *testing.T) {
 	}
 }
 
+func TestStepBackFallbackModelIsTierLabel(t *testing.T) {
+	// With no ModelOverride the fallback label is what the typed-output error
+	// reports. It must stay a tier label: naming a specific model tells a user
+	// on another provider to fix a model they never configured.
+	provider := &fakeProvider{events: toolCallEvent("submit_code", `{}`)}
+	_, err := StepBack(context.Background(), provider, StageOptions{}, StepBackReport{Intent: "x", Reason: "plateau"})
+	var typedErr *TypedOutputError
+	if !errors.As(err, &typedErr) {
+		t.Fatalf("error = %T %v, want TypedOutputError", err, err)
+	}
+	if typedErr.Model != "reasoning" {
+		t.Fatalf("Model = %q, want %q", typedErr.Model, "reasoning")
+	}
+}
+
 func TestDesignCrystallizer(t *testing.T) {
 	plan := schemas.DesignPlan{
 		Source:       "conversation",
@@ -1321,6 +1336,41 @@ func TestDesignConversationPrompt(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "Design Conversation") {
 		t.Fatalf("prompt %q should contain 'Design Conversation'", prompt)
+	}
+}
+
+// A real user asked the design agent to "hand off and start". The agent had a
+// read-only registry and no Task tool, so it invented a specialist and then
+// called skill, which errored. The prompt must state the limit and name the
+// commands that actually unblock execution.
+func TestDesignConversationPromptStatesItsLimits(t *testing.T) {
+	prompt := DesignConversationPrompt()
+	for _, want := range []string{"/crystallize", "/approve", "read-only"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("design prompt must mention %q so the agent can redirect the user", want)
+		}
+	}
+	// The execution-phase contract is false here: this phase is free-form and
+	// holds real read tools. Injecting it would tell the agent it cannot read.
+	if strings.Contains(prompt, "Your input is a typed JSON structure") {
+		t.Fatal("design prompt must not carry the execution-phase typed input/output contract")
+	}
+	// The shared overview must be present so the agent knows the two phases.
+	if !strings.Contains(prompt, SpliceOverviewPrompt()) {
+		t.Fatal("design prompt must include the shared Splice overview")
+	}
+}
+
+func TestPipelineStagePromptStatesItsLimits(t *testing.T) {
+	composed := composeSystemPrompt("STAGE BODY")
+	if !strings.Contains(composed, SpliceOverviewPrompt()) {
+		t.Fatal("composed stage prompt must include the shared overview")
+	}
+	if !strings.Contains(composed, "Your input is a typed JSON structure") {
+		t.Fatal("composed stage prompt must include the execution-phase contract")
+	}
+	if !strings.Contains(composed, "STAGE BODY") {
+		t.Fatal("composed stage prompt must include the stage's own prompt")
 	}
 }
 
@@ -1785,7 +1835,7 @@ func TestCallToolUseForcesToolChoice(t *testing.T) {
 	provider := &requestCapturingProvider{}
 	tool := zeroruntime.ToolDefinition{Name: "submit_design_plan", Parameters: map[string]any{"type": "object"}}
 
-	_, err := callToolUse(context.Background(), provider, "model-test", "", "system", "user", nil, tool, nil)
+	_, err := callToolUse(context.Background(), provider, "model-test", "", "system", "user", nil, tool, nil, "")
 	if err != nil {
 		t.Fatalf("callToolUse: %v", err)
 	}
@@ -1794,5 +1844,28 @@ func TestCallToolUseForcesToolChoice(t *testing.T) {
 	}
 	if len(provider.request.Tools) != 1 || provider.request.Tools[0].Name != "submit_design_plan" {
 		t.Fatalf("tools = %#v, want one submit_design_plan", provider.request.Tools)
+	}
+}
+
+func TestCallToolUsePromptCacheKey(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+		want string
+	}{
+		{name: "provided", key: "session-1:code_writer", want: "session-1:code_writer"},
+		{name: "empty", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := &requestCapturingProvider{}
+			tool := zeroruntime.ToolDefinition{Name: "submit_code", Parameters: map[string]any{"type": "object"}}
+			if _, err := callToolUse(context.Background(), provider, "model-test", "", "system", "user", nil, tool, nil, tt.key); err != nil {
+				t.Fatalf("callToolUse: %v", err)
+			}
+			if got := provider.request.PromptCacheKey; got != tt.want {
+				t.Fatalf("PromptCacheKey = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

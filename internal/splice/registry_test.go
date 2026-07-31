@@ -115,6 +115,18 @@ func TestStageOptionsEmitsMissingUsageAndPreservesLegacyFallback(t *testing.T) {
 	}
 }
 
+func TestStageOptionsPromptCacheKey(t *testing.T) {
+	selection := agent.ModelSelection{ProviderName: "primary", Model: "model-a"}
+	withSession := stageOptions("code_writer", 1, selection, agent.Options{SessionID: "session-1"}, t.TempDir(), nil)
+	if got, want := withSession.PromptCacheKey, "session-1:code_writer"; got != want {
+		t.Fatalf("PromptCacheKey = %q, want %q", got, want)
+	}
+	withoutSession := stageOptions("code_writer", 1, selection, agent.Options{}, t.TempDir(), nil)
+	if withoutSession.PromptCacheKey != "" {
+		t.Fatalf("PromptCacheKey = %q, want empty", withoutSession.PromptCacheKey)
+	}
+}
+
 func TestDetectLanguageMarkerFiles(t *testing.T) {
 	tests := []struct {
 		name   string

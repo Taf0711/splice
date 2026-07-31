@@ -265,12 +265,12 @@ func (d DesignPlan) Validate() error {
 	if len(d.InScope) == 0 {
 		return errors.New("in_scope is required")
 	}
-	if len(d.OutOfScope) == 0 {
-		return errors.New("out_of_scope is required")
-	}
-	if d.SystemDesign == "" {
-		return errors.New("system_design is required")
-	}
+	// OutOfScope and SystemDesign are deliberately optional. A short request
+	// establishes no boundaries and needs no design note, and the crystallizer
+	// is told not to invent scope the conversation did not cover. Requiring
+	// them here forced the model to choose between its instructions and a
+	// passing validation. The only reader of both fields already treats them
+	// as optional (internal/tui/design_mode.go).
 	if len(d.Tasks) == 0 {
 		return errors.New("at least one task is required")
 	}

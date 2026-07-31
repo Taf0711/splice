@@ -60,7 +60,7 @@ func (TestGenerator) Run(ctx context.Context, input schemas.HarnessStageInput, p
 	collected, err := callValidatedToolUse(ctx, provider, options.model("medium"), options.ReasoningEffort, composeSystemPrompt(testGeneratorSystemPrompt), string(payload), options.Images, testGeneratorToolDefinition(), &options.Stream, func(collected *zeroruntime.CollectedStream) error {
 		_, err := parseTestGeneratorOutput(collected)
 		return err
-	})
+	}, options.PromptCacheKey)
 	if err != nil {
 		return schemas.HarnessStageOutput{}, withCollectedUsage(err, collected)
 	}

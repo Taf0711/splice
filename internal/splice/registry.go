@@ -52,6 +52,10 @@ func buildStageRegistry(options agent.Options, workDir string) (stageRegistry, e
 // iteration and selection provide attribution context for usage callbacks.
 func stageOptions(name string, iteration int, selection agent.ModelSelection, options agent.Options, workDir string, runner ToolRunner) stages.StageOptions {
 	language := detectLanguage(workDir)
+	promptCacheKey := ""
+	if options.SessionID != "" {
+		promptCacheKey = options.SessionID + ":" + name
+	}
 	var onUsageResult func(zeroruntime.Usage, bool)
 	var onUsageError func(string)
 	var onLegacyUsage func(zeroruntime.Usage)
@@ -90,6 +94,7 @@ func stageOptions(name string, iteration int, selection agent.ModelSelection, op
 		Images:         append([]zeroruntime.ImageBlock(nil), options.Images...),
 		RecordCommand:  makeRecordedCommandCallback(options),
 		ModelOverride:  options.Model,
+		PromptCacheKey: promptCacheKey,
 		TimeoutSeconds: 120,
 	}
 }
