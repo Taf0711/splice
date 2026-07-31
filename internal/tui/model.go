@@ -5358,6 +5358,26 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 					onUsage(event)
 				}
 			}
+			options.OnCompactionUsage = func(event zeroruntime.Usage, modelID string) {
+				usageEvents = append(usageEvents, event)
+				cost := estimator(modelID, event, true)
+				attributed := agent.AttributedUsage{
+					Usage:         event,
+					UsageReported: true,
+					ProviderName:  m.providerName,
+					Model:         modelID,
+					Stage:         "compaction",
+					Cost:          cost,
+				}
+				sessionEvents = append(sessionEvents, pendingSessionEvent{
+					Type:    sessions.EventUsage,
+					Payload: usage.AttributedUsagePayload(attributed),
+				})
+				m.sendAgentUsage(runID, modelID, event, &cost)
+				if onUsage != nil {
+					onUsage(event)
+				}
+			}
 		}
 
 		// Pipeline runs persist request attribution and use routed model prices.

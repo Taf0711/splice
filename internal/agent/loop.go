@@ -156,6 +156,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 
 	guards := newGuardState()
 	compactor := newCompactionState(options)
+	compactor.model = func() string { return options.Model }
 
 	// Background post-edit diagnostics: files changed by mutating tools are
 	// checked off the tool-call critical path and any errors are appended as a

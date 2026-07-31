@@ -358,6 +358,10 @@ type Options struct {
 	OnAskUser           func(context.Context, AskUserRequest) (AskUserResponse, error)
 	OnToolResult        func(ToolResult)
 	OnUsage             func(Usage)
+	// OnCompactionUsage, when set, receives summarizer usage with the active
+	// model. It replaces OnUsage for compaction calls so callers can persist a
+	// stage label. When nil, compaction uses OnUsage unchanged.
+	OnCompactionUsage func(Usage, string)
 	// OnAttributedUsage, when set, is called exactly once per provider stream
 	// with the usage attributed to its provider, model, stage, and iteration.
 	// When set, the legacy OnUsage callback is NOT called (no double emit).

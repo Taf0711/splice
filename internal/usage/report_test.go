@@ -78,6 +78,40 @@ func TestBuildReportBucketsByDayAndSumsTokens(t *testing.T) {
 	}
 }
 
+func TestBuildReportKeepsCompactionStageFromPersistedPayload(t *testing.T) {
+	registry, err := testPricedRegistry(t)
+	if err != nil {
+		t.Fatalf("DefaultRegistry: %v", err)
+	}
+	payload := AttributedUsagePayload(agent.AttributedUsage{
+		Usage:        zeroruntime.Usage{InputTokens: 100, OutputTokens: 20},
+		ProviderName: "openai",
+		Model:        "gpt-4.1",
+		Stage:        "compaction",
+	})
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	report, err := BuildReport([]sessions.Event{{
+		SessionID: "s1",
+		Sequence:  1,
+		Type:      sessions.EventUsage,
+		CreatedAt: "2026-06-01T09:00:00Z",
+		Payload:   raw,
+	}}, nil, &registry, 1)
+	if err != nil {
+		t.Fatalf("BuildReport: %v", err)
+	}
+	if len(report.WorkUnits) != 1 {
+		t.Fatalf("work units = %d, want 1", len(report.WorkUnits))
+	}
+	got := report.WorkUnits[0]
+	if got.Stage != "compaction" || got.Model != "gpt-4.1" || got.Provider != "openai" {
+		t.Fatalf("work unit identity = %+v, want compaction/openai/gpt-4.1", got)
+	}
+}
+
 func TestBuildReportReconstructsCostFromMetadataModel(t *testing.T) {
 	registry, err := testPricedRegistry(t)
 	if err != nil {

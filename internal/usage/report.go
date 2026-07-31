@@ -139,8 +139,8 @@ type Totals struct {
 // WorkUnit aggregates usage for one stage/model pair. It answers "which part of
 // the pipeline costs what", which per-day buckets cannot: a run routes different
 // stages to different models, so the day total hides where the spend went.
-// Records that carry no stage (agent-loop turns, compaction) group under an
-// empty Stage rather than being dropped.
+// Records that carry no stage (legacy agent-loop turns) group under an empty
+// Stage rather than being dropped.
 type WorkUnit struct {
 	Stage        string  `json:"stage"`
 	Model        string  `json:"model,omitempty"`

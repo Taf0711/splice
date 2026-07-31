@@ -178,6 +178,13 @@ func runExecSpecDraft(run execSpecDraftRun) int {
 			writer.usage(u)
 			sessionRecorder.append(sessions.EventUsage, usage.EventUsagePayload(u))
 		},
+		OnCompactionUsage: func(u agent.Usage, model string) {
+			writer.usage(u)
+			payload := usage.EventUsagePayload(u)
+			payload["model"] = model
+			payload["stage"] = "compaction"
+			sessionRecorder.append(sessions.EventUsage, payload)
+		},
 	})
 	run.notifier.Notify(notify.Completion, notify.DefaultMessage(notify.Completion))
 	if writer.err != nil {

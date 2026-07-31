@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -175,5 +176,42 @@ func TestSummarizeForwardsUsageButNotText(t *testing.T) {
 	}
 	if got.PromptTokens != 100 || got.CompletionTokens != 20 {
 		t.Fatalf("unexpected forwarded usage: %#v", got)
+	}
+}
+
+func TestCompactionUsageUsesLabelledSinkWithFreshModel(t *testing.T) {
+	var labelled []string
+	var bare int
+	options := &Options{
+		Model: "first-model",
+		OnUsage: func(Usage) {
+			bare++
+		},
+		OnCompactionUsage: func(_ Usage, model string) {
+			labelled = append(labelled, model)
+		},
+	}
+	state := newCompactionState(*options)
+	state.model = func() string { return options.Model }
+	state.compactionUsage(Usage{PromptTokens: 1})
+	options.Model = "escalated-model"
+	state.compactionUsage(Usage{PromptTokens: 2})
+
+	if got, want := labelled, []string{"first-model", "escalated-model"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("labelled models = %#v, want %#v", got, want)
+	}
+	if bare != 0 {
+		t.Fatalf("bare OnUsage calls = %d, want 0 when labelled sink is set", bare)
+	}
+}
+
+func TestCompactionUsageFallsBackToOnUsage(t *testing.T) {
+	var got []Usage
+	state := newCompactionState(Options{
+		OnUsage: func(u Usage) { got = append(got, u) },
+	})
+	state.compactionUsage(Usage{PromptTokens: 7, CompletionTokens: 3})
+	if len(got) != 1 || got[0].PromptTokens != 7 || got[0].CompletionTokens != 3 {
+		t.Fatalf("fallback usage = %#v, want the original usage event", got)
 	}
 }
