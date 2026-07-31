@@ -72,6 +72,53 @@ func TestCoreReadOnlyToolsExposeSafeMetadata(t *testing.T) {
 	}
 }
 
+func TestWithoutEmptyBackedToolsGatesSkillToolAndAdvertisesNames(t *testing.T) {
+	skillDir := t.TempDir()
+	t.Setenv("SPLICE_SKILLS_DIR", skillDir)
+
+	// The constructor is a pure function of its arguments and always offers the
+	// skill tool; the registration-site filter is what drops it. Asserting the
+	// gate here rather than on CoreReadOnlyTools keeps the constructor's result
+	// independent of the host's skills directory.
+	if !hasTool(CoreReadOnlyTools(t.TempDir()), SkillToolName) {
+		t.Fatal("CoreReadOnlyTools must always offer the skill tool")
+	}
+	if got := WithoutEmptyBackedTools(CoreReadOnlyTools(t.TempDir())); hasTool(got, SkillToolName) {
+		t.Fatal("skill must be filtered out when the skills directory is empty")
+	}
+
+	path := filepath.Join(skillDir, "deploy", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("---\nname: deploy\n---\nDeploy safely."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	toolset := WithoutEmptyBackedTools(CoreReadOnlyTools(t.TempDir()))
+	var skill Tool
+	for _, tool := range toolset {
+		if tool.Name() == SkillToolName {
+			skill = tool
+			break
+		}
+	}
+	if skill == nil {
+		t.Fatal("skill must survive the filter when a skill exists")
+	}
+	if !strings.Contains(skill.Description(), "deploy") {
+		t.Fatalf("skill description must list the loaded skill name: %q", skill.Description())
+	}
+}
+
+func hasTool(toolset []Tool, name string) bool {
+	for _, tool := range toolset {
+		if tool.Name() == name {
+			return true
+		}
+	}
+	return false
+}
+
 func TestCoreNetworkToolsExposeSafetyMetadata(t *testing.T) {
 	// No production code reads this variable today. It stays set here as a
 	// guard: if registration ever depends on a search backend again, this

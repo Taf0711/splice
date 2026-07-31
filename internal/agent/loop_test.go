@@ -3030,6 +3030,14 @@ func TestBuildSystemPromptAllowsSpecModeOverride(t *testing.T) {
 
 func TestSpecDraftAdvertisesOnlySafeDraftTools(t *testing.T) {
 	root := t.TempDir()
+	skillDir := filepath.Join(root, "skills")
+	if err := os.MkdirAll(filepath.Join(skillDir, "draft"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "draft", "SKILL.md"), []byte("draft guidance"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SPLICE_SKILLS_DIR", skillDir)
 	registry := tools.NewRegistry()
 	for _, tool := range tools.CoreTools(root) {
 		registry.Register(tool)

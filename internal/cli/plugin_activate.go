@@ -60,6 +60,10 @@ func activatePlugins(workspaceRoot string, registry *tools.Registry, deps appDep
 	// clash), so plugin skills appear in the agent's skill list. With no plugin
 	// skill roots this is byte-equivalent to the default skills surface.
 	if len(result.SkillRoots) > 0 {
+		merged, _ := plugins.MergedSkills(deps.skillsDir(), result.SkillRoots)
+		if len(merged) == 0 {
+			return pluginActivation{hooks: result.Hooks, skillRoots: result.SkillRoots}
+		}
 		registry.Register(plugins.NewSkillTool(deps.skillsDir(), result.SkillRoots))
 	}
 

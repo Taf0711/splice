@@ -60,6 +60,7 @@ func newServeRegistry(workspaceRoot string, allowUnsafeTools bool) *tools.Regist
 	if allowUnsafeTools {
 		toolset = tools.CoreTools(workspaceRoot)
 	}
+	toolset = tools.WithoutEmptyBackedTools(toolset)
 	for _, tool := range toolset {
 		registry.Register(tool)
 	}

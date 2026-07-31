@@ -23,13 +23,18 @@ func NewSkillTool(dir string) *skillTool {
 	if strings.TrimSpace(dir) == "" {
 		dir = skills.DefaultDir(nil)
 	}
+	loaded, _ := skills.List(dir)
+	names := make([]string, 0, len(loaded))
+	for _, skill := range loaded {
+		if name := strings.TrimSpace(skill.Name); name != "" {
+			names = append(names, name)
+		}
+	}
 	return &skillTool{
 		dir: dir,
 		baseTool: baseTool{
-			name: "skill",
-			description: "Load a named Splice skill and return its instructions as the tool output. " +
-				"Skills are reusable, on-demand instruction sets (e.g. project conventions or confirmation policies). " +
-				"Call this when a relevant skill exists; an unknown name returns the list of available skills.",
+			name:        "skill",
+			description: skillDescription(names),
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
@@ -51,6 +56,15 @@ func NewSkillTool(dir string) *skillTool {
 			safety: readOnlySafety("Reads a local skill file; gathers reusable instructions only."),
 		},
 	}
+}
+
+func skillDescription(names []string) string {
+	description := "Load a named Splice skill and return its instructions as the tool output. " +
+		"Skills are reusable, on-demand instruction sets (for example, project conventions or confirmation policies)."
+	if len(names) > 0 {
+		description += " Available skills: " + strings.Join(names, ", ") + "."
+	}
+	return description
 }
 
 // Run loads the named skill and returns its Content. Unknown names return a

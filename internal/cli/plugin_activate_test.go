@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Taf0711/splice/internal/hooks"
@@ -56,6 +57,9 @@ func TestActivatePluginsRegistersToolAndCollectsHooks(t *testing.T) {
 	if _, ok := registry.Get("demo_lookup"); !ok {
 		t.Fatalf("plugin tool not registered into the bootstrap registry")
 	}
+	if _, ok := registry.Get("skill"); ok {
+		t.Fatal("empty default and plugin skill sets must not register skill")
+	}
 	if len(activation.hooks) != 1 || activation.hooks[0].Event != hooks.EventBeforeTool {
 		t.Fatalf("expected one beforeTool plugin hook, got %#v", activation.hooks)
 	}
@@ -103,6 +107,9 @@ func TestActivatePluginsRegistersPluginSkillTool(t *testing.T) {
 	res := skillTool.Run(context.Background(), map[string]any{"name": "demo-skill"})
 	if res.Status != tools.StatusOK {
 		t.Fatalf("plugin skill not resolvable via the agent skill tool: %q (%s)", res.Status, res.Output)
+	}
+	if got := skillTool.Description(); !strings.Contains(got, "demo-skill") {
+		t.Fatalf("plugin skill description must list the loaded skill: %q", got)
 	}
 }
 
