@@ -219,6 +219,14 @@ type StreamEvent struct {
 	// ServerToolBlocks carries completed provider-executed tool artifacts that
 	// must be preserved for replay. Providers attach them to a terminal event.
 	ServerToolBlocks []ServerToolBlock
+	// ReportedCostUSD carries a provider-reported exact billed charge for this
+	// request (e.g. OpenRouter's usage.cost), when the provider supplies one.
+	// It is a sibling of Usage, not a field on it: Usage is rebuilt from plain
+	// numeric literals at several call sites (retry aggregation, normalization),
+	// and a cost field there would be silently dropped by every one of them.
+	// nil means no reported cost; the caller must fall back to estimating from
+	// the pricing registry, exactly as before this field existed.
+	ReportedCostUSD *float64
 }
 
 // CompletionRequest groups provider input messages and available tools.

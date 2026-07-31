@@ -258,7 +258,7 @@ func (provider *Provider) streamWithServerTool(ctx context.Context, body []byte,
 		state.closeOpen(ctx, events)
 		if searches := state.webSearchRequestCount(); searches > 0 && (!state.usageSeen || state.usageReportedSearches != searches) {
 			state.lastUsage.WebSearchRequests = searches
-			sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: state.lastUsage})
+			sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: state.lastUsage, ReportedCostUSD: state.lastReportedCostUSD})
 		}
 		sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone, FinishReason: state.finishReason})
 	}
@@ -340,9 +340,17 @@ func (provider *Provider) emitChunk(
 		}
 		state.usageSeen = true
 		state.usageReportedSearches = state.lastUsage.WebSearchRequests
+		// Only OpenRouter's "cost" field is trusted (see the field comment in
+		// types.go); every other provider leaves lastReportedCostUSD nil, so
+		// cost estimation is byte-identical to before this change.
+		if provider.isOpenRouter() && chunk.Usage.Cost != nil {
+			reported := *chunk.Usage.Cost
+			state.lastReportedCostUSD = &reported
+		}
 		sendEvent(ctx, events, zeroruntime.StreamEvent{
-			Type:  zeroruntime.StreamEventUsage,
-			Usage: state.lastUsage,
+			Type:            zeroruntime.StreamEventUsage,
+			Usage:           state.lastUsage,
+			ReportedCostUSD: state.lastReportedCostUSD,
 		})
 	}
 }

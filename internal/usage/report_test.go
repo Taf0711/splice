@@ -112,6 +112,41 @@ func TestBuildReportKeepsCompactionStageFromPersistedPayload(t *testing.T) {
 	}
 }
 
+// TestAttributedUsagePayloadPersistsReportedCost proves acceptance criterion
+// (c): a provider-reported cost (Provenance=CostProvenanceReported) survives
+// into the persisted EventUsage payload with the exact value and with
+// costEstimated=false, so downstream readers (BuildReport, the CLI stream-json
+// writer) can tell a reported charge apart from a registry estimate.
+func TestAttributedUsagePayloadPersistsReportedCost(t *testing.T) {
+	reported := 0.00054
+	payload := AttributedUsagePayload(agent.AttributedUsage{
+		Usage:         zeroruntime.Usage{InputTokens: 12, OutputTokens: 5},
+		ProviderName:  "openai",
+		Model:         "openrouter/some-model",
+		Stage:         "code_writer",
+		UsageReported: true,
+		Cost: agent.UsageCostEstimate{
+			CostUSD:       &reported,
+			Status:        CostStatusPriced,
+			Provenance:    CostProvenanceReported,
+			PricingSource: "openrouter",
+			PricingAsOf:   "live",
+		},
+	})
+	if got, ok := payload["costUsd"].(float64); !ok || got != reported {
+		t.Fatalf("payload[costUsd] = %v, want %v", payload["costUsd"], reported)
+	}
+	if got, ok := payload["costEstimated"].(bool); !ok || got != false {
+		t.Fatalf("payload[costEstimated] = %v, want false", payload["costEstimated"])
+	}
+	if payload["costProvenance"] != CostProvenanceReported {
+		t.Fatalf("payload[costProvenance] = %v, want %s", payload["costProvenance"], CostProvenanceReported)
+	}
+	if payload["pricingSource"] != "openrouter" {
+		t.Fatalf("payload[pricingSource] = %v, want openrouter", payload["pricingSource"])
+	}
+}
+
 func TestBuildReportReconstructsCostFromMetadataModel(t *testing.T) {
 	registry, err := testPricedRegistry(t)
 	if err != nil {

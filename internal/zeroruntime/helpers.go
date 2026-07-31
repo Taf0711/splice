@@ -27,6 +27,10 @@ type CollectedStream struct {
 	// HasReasoning records whether the provider streamed reasoning deltas. The
 	// deltas remain non-answer content, but they still prove the turn was live.
 	HasReasoning bool
+	// ReportedCostUSD is the provider-reported exact billed charge for this
+	// stream, when the provider supplied one (currently only OpenRouter). nil
+	// means no reported cost was seen, so cost must be estimated as before.
+	ReportedCostUSD *float64
 }
 
 // Truncated reports whether the response ended for a non-normal reason (the
@@ -44,8 +48,9 @@ type CollectOptions struct {
 	// OnUsageResult fires exactly once when the provider stream finishes. The bool
 	// is true iff at least one StreamEventUsage event was seen during the stream.
 	// Legacy OnUsage only fires when usage was seen; OnUsageResult fires always,
-	// giving callers a clean "stream ended" signal with or without usage.
-	OnUsageResult func(Usage, bool)
+	// giving callers a clean "stream ended" signal with or without usage. The
+	// *float64 is the provider-reported cost (nil if none was reported).
+	OnUsageResult func(Usage, bool, *float64)
 	// OnUsageError replaces OnUsageResult when a provider reports malformed usage.
 	OnUsageError func(string)
 	// OnToolCallStart fires when a tool call opens (id + tool name), and
@@ -115,7 +120,7 @@ func CollectStreamWithOptions(ctx context.Context, events <-chan StreamEvent, op
 			}
 		} else {
 			if options.OnUsageResult != nil {
-				options.OnUsageResult(collected.Usage, usageSeen)
+				options.OnUsageResult(collected.Usage, usageSeen, collected.ReportedCostUSD)
 			}
 			if usageSeen && options.OnUsage != nil {
 				options.OnUsage(collected.Usage)
@@ -148,6 +153,12 @@ func CollectStreamWithOptions(ctx context.Context, events <-chan StreamEvent, op
 			}
 			if len(event.ServerToolBlocks) > 0 {
 				collected.ServerToolBlocks = append(collected.ServerToolBlocks, event.ServerToolBlocks...)
+			}
+			// A provider-reported cost can ride on any usage event; keep the
+			// latest non-nil value seen so a later chunk without it (e.g. the
+			// web-search-count correction re-emit) never erases an earlier one.
+			if event.ReportedCostUSD != nil {
+				collected.ReportedCostUSD = event.ReportedCostUSD
 			}
 
 			switch event.Type {

@@ -537,7 +537,7 @@ func TestCollectStreamWithOptionsReportsFinalUsageStateOnce(t *testing.T) {
 
 			calls := 0
 			CollectStreamWithOptions(context.Background(), events, CollectOptions{
-				OnUsageResult: func(usage Usage, reported bool) {
+				OnUsageResult: func(usage Usage, reported bool, _ *float64) {
 					calls++
 					if usage.EffectiveInputTokens() != test.usage.EffectiveInputTokens() || usage.EffectiveOutputTokens() != test.usage.EffectiveOutputTokens() || reported != test.reported {
 						t.Fatalf("usage result = (%+v, %t), want (%+v, %t)", usage, reported, test.usage, test.reported)
@@ -560,7 +560,7 @@ func TestCollectStreamWithOptionsReportsMalformedUsageOnce(t *testing.T) {
 	resultCalls := 0
 	errorCalls := 0
 	CollectStreamWithOptions(context.Background(), events, CollectOptions{
-		OnUsageResult: func(Usage, bool) { resultCalls++ },
+		OnUsageResult: func(Usage, bool, *float64) { resultCalls++ },
 		OnUsageError: func(reason string) {
 			errorCalls++
 			if reason != "reasoning exceeds output" {

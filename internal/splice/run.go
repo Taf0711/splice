@@ -65,7 +65,13 @@ func (ledger *requestLedger) recordingOptions(options agent.Options) agent.Optio
 				attributed.Cost = costError(err.Error())
 			} else {
 				attributed.Usage = normalized
-				attributed.Cost = estimateUsageCost(options.EstimateUsageCost, attributed)
+				if attributed.ReportedCostUSD != nil {
+					// The provider told us the exact charge; trust it over the
+					// registry estimate instead of computing one we'd discard.
+					attributed.Cost = reportedUsageCost(*attributed.ReportedCostUSD)
+				} else {
+					attributed.Cost = estimateUsageCost(options.EstimateUsageCost, attributed)
+				}
 			}
 		} else {
 			attributed.Usage = zeroruntime.Usage{}
@@ -121,6 +127,22 @@ func estimateUsageCost(estimator func(string, agent.Usage, bool) agent.UsageCost
 
 func costError(reason string) agent.UsageCostEstimate {
 	return agent.UsageCostEstimate{Status: agent.CostStatusError, UnpricedReason: reason}
+}
+
+// reportedUsageCost builds a priced UsageCostEstimate from a provider-reported
+// exact charge (currently only OpenRouter's usage.cost). PricingSource and
+// PricingAsOf are non-registry sentinels rather than empty: validateUsageCostEstimate
+// requires both non-empty for any priced estimate, and "as of a rate table
+// verified on some date" would misdescribe a live, per-request billed figure.
+func reportedUsageCost(costUSD float64) agent.UsageCostEstimate {
+	cost := costUSD
+	return agent.UsageCostEstimate{
+		CostUSD:       &cost,
+		Status:        agent.CostStatusPriced,
+		Provenance:    agent.CostProvenanceReported,
+		PricingSource: "openrouter",
+		PricingAsOf:   "live",
+	}
 }
 
 func validateUsageCostEstimate(estimate agent.UsageCostEstimate) error {

@@ -33,6 +33,11 @@ type toolState struct {
 	usageSeen                  bool
 	usageReportedSearches      int
 	lastUsage                  zeroruntime.Usage
+	// lastReportedCostUSD is OpenRouter's exact billed charge for the most
+	// recent usage chunk, when present. nil for every other provider (and for
+	// OpenRouter responses that omit it), so cost falls back to the registry
+	// estimate exactly as before.
+	lastReportedCostUSD *float64
 }
 
 type pendingToolCall struct {

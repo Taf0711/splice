@@ -170,7 +170,7 @@ func (s *contextRequestStage) Run(ctx context.Context, input schemas.HarnessStag
 		symbol := "foo"
 		usage := schemas.StageUsage{InputTokens: 4, OutputTokens: 3, CachedInputTokens: 1, CacheWriteTokens: 1, ReasoningTokens: 1}
 		if options.Stream.OnUsageResult != nil {
-			options.Stream.OnUsageResult(zeroruntime.Usage{InputTokens: 4, OutputTokens: 3, CachedInputTokens: 1, CacheWriteTokens: 1, ReasoningTokens: 1}, true)
+			options.Stream.OnUsageResult(zeroruntime.Usage{InputTokens: 4, OutputTokens: 3, CachedInputTokens: 1, CacheWriteTokens: 1, ReasoningTokens: 1}, true, nil)
 		}
 		return schemas.HarnessStageOutput{
 			Summary:    "needs context",
@@ -189,7 +189,7 @@ func (s *contextRequestStage) Run(ctx context.Context, input schemas.HarnessStag
 	}
 	usage := schemas.StageUsage{InputTokens: 6, OutputTokens: 5, CachedInputTokens: 2, CacheWriteTokens: 1, ReasoningTokens: 2}
 	if options.Stream.OnUsageResult != nil {
-		options.Stream.OnUsageResult(zeroruntime.Usage{InputTokens: 6, OutputTokens: 5, CachedInputTokens: 2, CacheWriteTokens: 1, ReasoningTokens: 2}, true)
+		options.Stream.OnUsageResult(zeroruntime.Usage{InputTokens: 6, OutputTokens: 5, CachedInputTokens: 2, CacheWriteTokens: 1, ReasoningTokens: 2}, true, nil)
 	}
 	return schemas.HarnessStageOutput{
 		Summary:    "context handled",
@@ -2206,6 +2206,101 @@ func TestRequestLedgerRejectsMalformedUsageBeforePricing(t *testing.T) {
 	})
 	if estimatorCalls != 0 || got.Cost.Status != agent.CostStatusError || len(ledger.records) != 1 || ledger.records[0].InputTokens != 0 || ledger.records[0].CostStatus != schemas.CostStatusError {
 		t.Fatalf("estimator calls=%d attributed=%+v records=%+v", estimatorCalls, got, ledger.records)
+	}
+}
+
+// TestRequestLedgerUsesReportedCostOverEstimate proves that a provider-reported
+// cost (AttributedUsage.ReportedCostUSD, e.g. from OpenRouter's usage.cost)
+// wins over the registry estimate: the estimator is never invoked, the final
+// Cost carries the exact reported value with Provenance=CostProvenanceReported,
+// and that provenance survives into the persisted pipeline usage record.
+func TestRequestLedgerUsesReportedCostOverEstimate(t *testing.T) {
+	ledger := newRequestLedger()
+	estimatorCalls := 0
+	var captured agent.AttributedUsage
+	reported := 0.00054
+	options := ledger.recordingOptions(agent.Options{
+		EstimateUsageCost: func(string, agent.Usage, bool) agent.UsageCostEstimate {
+			estimatorCalls++
+			// A deliberately different value: if this ever leaks into the
+			// result, the test fails on the wrong number rather than silently.
+			wrong := 99.0
+			return agent.UsageCostEstimate{
+				CostUSD: &wrong, Status: agent.CostStatusPriced,
+				Provenance:    agent.CostProvenanceRuntimeEstimate,
+				PricingSource: "registry", PricingAsOf: "2026-01-01",
+			}
+		},
+		OnAttributedUsage: func(usage agent.AttributedUsage) { captured = usage },
+	})
+	options.OnAttributedUsage(agent.AttributedUsage{
+		Usage:           zeroruntime.Usage{InputTokens: 100, OutputTokens: 50},
+		UsageReported:   true,
+		Stage:           "code_writer",
+		Iteration:       1,
+		ReportedCostUSD: &reported,
+	})
+
+	if estimatorCalls != 0 {
+		t.Fatalf("estimator calls = %d, want 0 (reported cost must bypass the registry estimate)", estimatorCalls)
+	}
+	if captured.Cost.CostUSD == nil || *captured.Cost.CostUSD != reported {
+		t.Fatalf("Cost.CostUSD = %v, want %v", captured.Cost.CostUSD, reported)
+	}
+	if captured.Cost.Status != agent.CostStatusPriced {
+		t.Fatalf("Cost.Status = %s, want priced", captured.Cost.Status)
+	}
+	if captured.Cost.Provenance != agent.CostProvenanceReported {
+		t.Fatalf("Cost.Provenance = %s, want %s", captured.Cost.Provenance, agent.CostProvenanceReported)
+	}
+	if len(ledger.records) != 1 {
+		t.Fatalf("records = %d, want 1", len(ledger.records))
+	}
+	rec := ledger.records[0]
+	if rec.CostUSD == nil || *rec.CostUSD != reported {
+		t.Fatalf("record CostUSD = %v, want %v", rec.CostUSD, reported)
+	}
+	if rec.CostProvenance != agent.CostProvenanceReported {
+		t.Fatalf("record CostProvenance = %s, want %s", rec.CostProvenance, agent.CostProvenanceReported)
+	}
+}
+
+// TestRequestLedgerFallsBackToEstimateWithoutReportedCost proves the inverse:
+// when ReportedCostUSD is nil (every non-OpenRouter provider, and OpenRouter
+// responses that omit "cost"), behavior is unchanged from before this
+// feature — the registry estimator runs and its value is used verbatim.
+func TestRequestLedgerFallsBackToEstimateWithoutReportedCost(t *testing.T) {
+	ledger := newRequestLedger()
+	estimatorCalls := 0
+	estimated := 0.42
+	var captured agent.AttributedUsage
+	options := ledger.recordingOptions(agent.Options{
+		EstimateUsageCost: func(string, agent.Usage, bool) agent.UsageCostEstimate {
+			estimatorCalls++
+			return agent.UsageCostEstimate{
+				CostUSD: &estimated, Status: agent.CostStatusPriced,
+				Provenance:    agent.CostProvenanceRuntimeEstimate,
+				PricingSource: "registry", PricingAsOf: "2026-01-01",
+			}
+		},
+		OnAttributedUsage: func(usage agent.AttributedUsage) { captured = usage },
+	})
+	options.OnAttributedUsage(agent.AttributedUsage{
+		Usage:         zeroruntime.Usage{InputTokens: 100, OutputTokens: 50},
+		UsageReported: true,
+		Stage:         "code_writer",
+		Iteration:     1,
+		// ReportedCostUSD deliberately left nil.
+	})
+
+	if estimatorCalls != 1 {
+		t.Fatalf("estimator calls = %d, want 1", estimatorCalls)
+	}
+	if captured.Cost.CostUSD == nil || *captured.Cost.CostUSD != estimated {
+		t.Fatalf("Cost.CostUSD = %v, want %v", captured.Cost.CostUSD, estimated)
+	}
+	if captured.Cost.Provenance != agent.CostProvenanceRuntimeEstimate {
+		t.Fatalf("Cost.Provenance = %s, want %s", captured.Cost.Provenance, agent.CostProvenanceRuntimeEstimate)
 	}
 }
 

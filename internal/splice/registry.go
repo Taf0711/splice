@@ -56,23 +56,26 @@ func stageOptions(name string, iteration int, selection agent.ModelSelection, op
 	if options.SessionID != "" {
 		promptCacheKey = options.SessionID + ":" + name
 	}
-	var onUsageResult func(zeroruntime.Usage, bool)
+	var onUsageResult func(zeroruntime.Usage, bool, *float64)
 	var onUsageError func(string)
 	var onLegacyUsage func(zeroruntime.Usage)
 	if options.OnAttributedUsage != nil {
-		emitAttributed := func(usage zeroruntime.Usage, reported bool, usageError string) {
+		emitAttributed := func(usage zeroruntime.Usage, reported bool, usageError string, reportedCostUSD *float64) {
 			options.OnAttributedUsage(agent.AttributedUsage{
-				Usage:         usage,
-				UsageReported: reported,
-				UsageError:    usageError,
-				ProviderName:  selection.ProviderName,
-				Model:         selection.Model,
-				Stage:         name,
-				Iteration:     iteration,
+				Usage:           usage,
+				UsageReported:   reported,
+				UsageError:      usageError,
+				ProviderName:    selection.ProviderName,
+				Model:           selection.Model,
+				Stage:           name,
+				Iteration:       iteration,
+				ReportedCostUSD: reportedCostUSD,
 			})
 		}
-		onUsageResult = func(usage zeroruntime.Usage, reported bool) { emitAttributed(usage, reported, "") }
-		onUsageError = func(reason string) { emitAttributed(zeroruntime.Usage{}, true, reason) }
+		onUsageResult = func(usage zeroruntime.Usage, reported bool, reportedCostUSD *float64) {
+			emitAttributed(usage, reported, "", reportedCostUSD)
+		}
+		onUsageError = func(reason string) { emitAttributed(zeroruntime.Usage{}, true, reason, nil) }
 	} else {
 		onLegacyUsage = options.OnUsage
 	}
