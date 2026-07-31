@@ -22,20 +22,27 @@ import (
 // mid-run only under --allow-escalation); when absent, cost is reconstructed from
 // the session's Metadata.ModelID and is a labeled estimate.
 type usageEventPayload struct {
-	PromptTokens      int      `json:"promptTokens"`
-	CompletionTokens  int      `json:"completionTokens"`
-	TotalTokens       int      `json:"totalTokens"`
-	CachedInputTokens int      `json:"cachedInputTokens,omitempty"`
-	CacheWriteTokens  int      `json:"cacheWriteTokens,omitempty"`
-	ReasoningTokens   int      `json:"reasoningTokens,omitempty"`
-	WebSearchRequests int      `json:"webSearchRequests,omitempty"`
-	Model             string   `json:"model,omitempty"`
-	CostUSD           *float64 `json:"costUsd,omitempty"`
-	CostStatus        string   `json:"costStatus,omitempty"`
-	CostProvenance    string   `json:"costProvenance,omitempty"`
-	PricingSource     string   `json:"pricingSource,omitempty"`
-	PricingAsOf       string   `json:"pricingAsOf,omitempty"`
-	UnpricedReason    string   `json:"unpricedReason,omitempty"`
+	PromptTokens      int    `json:"promptTokens"`
+	CompletionTokens  int    `json:"completionTokens"`
+	TotalTokens       int    `json:"totalTokens"`
+	CachedInputTokens int    `json:"cachedInputTokens,omitempty"`
+	CacheWriteTokens  int    `json:"cacheWriteTokens,omitempty"`
+	ReasoningTokens   int    `json:"reasoningTokens,omitempty"`
+	WebSearchRequests int    `json:"webSearchRequests,omitempty"`
+	Model             string `json:"model,omitempty"`
+	// Provider, Stage and Iteration are written by AttributedUsagePayload but
+	// were absent here, so Go silently discarded them on decode and the report
+	// could not slice usage by work unit. The writer and reader are a pair: a
+	// field added to one must be added to the other.
+	Provider       string   `json:"provider,omitempty"`
+	Stage          string   `json:"stage,omitempty"`
+	Iteration      int      `json:"iteration,omitempty"`
+	CostUSD        *float64 `json:"costUsd,omitempty"`
+	CostStatus     string   `json:"costStatus,omitempty"`
+	CostProvenance string   `json:"costProvenance,omitempty"`
+	PricingSource  string   `json:"pricingSource,omitempty"`
+	PricingAsOf    string   `json:"pricingAsOf,omitempty"`
+	UnpricedReason string   `json:"unpricedReason,omitempty"`
 }
 
 // EventUsagePayload builds the persisted EventUsage payload for a usage record.
@@ -129,11 +136,35 @@ type Totals struct {
 	TotalCost    float64 `json:"totalCost"`
 }
 
+// WorkUnit aggregates usage for one stage/model pair. It answers "which part of
+// the pipeline costs what", which per-day buckets cannot: a run routes different
+// stages to different models, so the day total hides where the spend went.
+// Records that carry no stage (agent-loop turns, compaction) group under an
+// empty Stage rather than being dropped.
+type WorkUnit struct {
+	Stage        string  `json:"stage"`
+	Model        string  `json:"model,omitempty"`
+	Provider     string  `json:"provider,omitempty"`
+	Requests     int     `json:"requests"`
+	InputTokens  int     `json:"inputTokens"`
+	OutputTokens int     `json:"outputTokens"`
+	TotalTokens  int     `json:"totalTokens"`
+	TotalCost    float64 `json:"totalCost"`
+}
+
+// workUnitKey groups usage by the dimensions an optimizer cares about.
+type workUnitKey struct {
+	Stage    string
+	Model    string
+	Provider string
+}
+
 // Report is the aggregated usage view rendered by `splice usage report`. Cost
 // uses a persisted estimate when present, and otherwise uses reconstruction.
 // NetLOC is a working-tree estimate.
 type Report struct {
 	Buckets         []DayBucket `json:"buckets"`
+	WorkUnits       []WorkUnit  `json:"workUnits,omitempty"`
 	Total           Totals      `json:"total"`
 	NetLOC          int         `json:"netLOC"`
 	NetLOCPositive  bool        `json:"netLOCPositive"`
@@ -155,6 +186,7 @@ func BuildReport(events []sessions.Event, meta []sessions.Metadata, registry *mo
 	}
 
 	buckets := map[string]*DayBucket{}
+	workUnits := map[workUnitKey]*WorkUnit{}
 	report := Report{
 		NetLOC:        netLOC,
 		LOCEstimated:  true,
@@ -189,6 +221,24 @@ func BuildReport(events []sessions.Event, meta []sessions.Metadata, registry *mo
 		report.Total.OutputTokens += payload.CompletionTokens
 		report.Total.TotalTokens += payload.TotalTokens
 
+		// Accumulate the work unit before the cost branches below: several of
+		// them `continue`, and an event with no priceable cost still spent
+		// tokens that belong in the stage/model breakdown.
+		unitModel := payload.Model
+		if unitModel == "" {
+			unitModel = modelBySession[event.SessionID]
+		}
+		unitKey := workUnitKey{Stage: payload.Stage, Model: unitModel, Provider: payload.Provider}
+		unit, ok := workUnits[unitKey]
+		if !ok {
+			unit = &WorkUnit{Stage: payload.Stage, Model: unitModel, Provider: payload.Provider}
+			workUnits[unitKey] = unit
+		}
+		unit.Requests++
+		unit.InputTokens += payload.PromptTokens
+		unit.OutputTokens += payload.CompletionTokens
+		unit.TotalTokens += payload.TotalTokens
+
 		// A persisted priced estimate is authoritative. Do not rewrite it from
 		// the current registry.
 		if payload.CostStatus == CostStatusPriced {
@@ -197,6 +247,7 @@ func BuildReport(events []sessions.Event, meta []sessions.Metadata, registry *mo
 			}
 			bucket.TotalCost += *payload.CostUSD
 			report.Total.TotalCost += *payload.CostUSD
+			unit.TotalCost += *payload.CostUSD
 			continue
 		}
 		if payload.CostStatus == CostStatusUnpriced || payload.CostStatus == CostStatusError {
@@ -230,7 +281,22 @@ func BuildReport(events []sessions.Event, meta []sessions.Metadata, registry *mo
 		}
 		bucket.TotalCost += cost.TotalCost
 		report.Total.TotalCost += cost.TotalCost
+		unit.TotalCost += cost.TotalCost
 	}
+
+	report.WorkUnits = make([]WorkUnit, 0, len(workUnits))
+	for _, unit := range workUnits {
+		report.WorkUnits = append(report.WorkUnits, *unit)
+	}
+	sort.SliceStable(report.WorkUnits, func(left int, right int) bool {
+		if report.WorkUnits[left].TotalCost != report.WorkUnits[right].TotalCost {
+			return report.WorkUnits[left].TotalCost > report.WorkUnits[right].TotalCost
+		}
+		if report.WorkUnits[left].Stage != report.WorkUnits[right].Stage {
+			return report.WorkUnits[left].Stage < report.WorkUnits[right].Stage
+		}
+		return report.WorkUnits[left].Model < report.WorkUnits[right].Model
+	})
 
 	report.Buckets = make([]DayBucket, 0, len(buckets))
 	for _, bucket := range buckets {

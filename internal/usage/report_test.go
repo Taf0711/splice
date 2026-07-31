@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/sessions"
 	"github.com/Taf0711/splice/internal/zeroruntime"
@@ -232,5 +233,42 @@ func TestBuildReportIgnoresNonUsageEvents(t *testing.T) {
 	}
 	if report.Total.Requests != 1 {
 		t.Fatalf("expected non-usage event ignored, got %d requests", report.Total.Requests)
+	}
+}
+
+// The writer (AttributedUsagePayload) emits provider/stage/iteration, but the
+// reader struct omitted them, so Go silently dropped them on decode and the
+// report could not slice usage by work unit. This pins the writer/reader pair.
+func TestBuildReportGroupsByWorkUnit(t *testing.T) {
+	cost := 0.25
+	payload := AttributedUsagePayload(agent.AttributedUsage{
+		Usage:         zeroruntime.Usage{InputTokens: 100, OutputTokens: 50},
+		ProviderName:  "openrouter",
+		Model:         "z-ai/glm-5.2",
+		Stage:         "code_writer",
+		Iteration:     1,
+		UsageReported: true,
+		Cost:          agent.UsageCostEstimate{CostUSD: &cost, Status: CostStatusPriced},
+	})
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := BuildReport(
+		[]sessions.Event{{Type: sessions.EventUsage, Payload: raw, CreatedAt: "2026-07-31T00:00:00Z", Sequence: 1}},
+		nil, nil, 1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.WorkUnits) != 1 {
+		t.Fatalf("work units = %d, want 1", len(report.WorkUnits))
+	}
+	got := report.WorkUnits[0]
+	if got.Stage != "code_writer" || got.Model != "z-ai/glm-5.2" || got.Provider != "openrouter" {
+		t.Fatalf("work unit lost identity on decode: %+v", got)
+	}
+	if got.Requests != 1 || got.TotalCost != cost {
+		t.Fatalf("work unit = %+v, want 1 request costing %v", got, cost)
 	}
 }
