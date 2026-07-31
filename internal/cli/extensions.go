@@ -293,7 +293,7 @@ func runMCPTools(ctx context.Context, args []string, stdout io.Writer, stderr io
 				setting = "ask"
 			}
 		}
-		trusted, persist, store, terr := resolveWorkspaceTrust(cwd, setting, rootTrust, rootNoTrust)
+		trusted, _, persist, store, terr := resolveWorkspaceTrust(cwd, setting, rootTrust, rootNoTrust)
 		if terr != nil {
 			fmt.Fprintf(stderr, "warning: failed to resolve workspace trust: %s\n", terr)
 			trusted = false

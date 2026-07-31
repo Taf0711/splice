@@ -238,7 +238,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if trustCfg, err := deps.resolveConfig(workspaceRoot, config.Overrides{}); err == nil {
 		trustSetting = trustCfg.DefaultProjectTrust
 	}
-	trusted, persist, store, err := resolveWorkspaceTrust(workspaceRoot, trustSetting, options.trust, options.noTrust)
+	trusted, _, persist, store, err := resolveWorkspaceTrust(workspaceRoot, trustSetting, options.trust, options.noTrust)
 	if err != nil {
 		fmt.Fprintf(stderr, "warning: failed to resolve workspace trust: %s\n", err)
 		trusted = false
@@ -406,7 +406,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	//      names lazily; --list-tools and filter validation use names only).
 	// A new wrapper that snapshots a core tool before this line would silently
 	// ship nil-scope enforcement — add it below this re-registration instead.
-	for _, tool := range tools.CoreToolsScoped(workspaceRoot, execScope) {
+	for _, tool := range tools.WithoutEmptyBackedTools(tools.CoreToolsScoped(workspaceRoot, execScope)) {
 		registry.Register(tool)
 	}
 	sandboxEngine, err := buildExecSandboxEngine(workspaceRoot, resolved, deps, execScope)

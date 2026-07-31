@@ -41,6 +41,7 @@ import (
 	"github.com/Taf0711/splice/internal/worktrees"
 	"github.com/Taf0711/splice/internal/zerogit"
 	"github.com/Taf0711/splice/internal/zeroruntime"
+	"github.com/charmbracelet/x/term"
 )
 
 var version = "dev"
@@ -282,7 +283,7 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	}
 
 	if len(args) == 0 {
-		return runInteractiveTUI(stderr, deps, agent.PermissionModeAsk, addDirs, theme)
+		return runInteractiveTUI(stdout, stderr, deps, agent.PermissionModeAsk, addDirs, theme)
 	}
 
 	// --add-dir grants an extra write root, and only the interactive TUI and
@@ -343,7 +344,7 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 				return writeAppError(stderr, "--skip-permissions-unsafe launches the interactive TUI and takes no prompt or subcommand; for a one-shot unsafe run use `splice exec --skip-permissions-unsafe -p \"...\"`", 1)
 			}
 		}
-		return runInteractiveTUI(stderr, deps, agent.PermissionModeUnsafe, append(append([]string{}, addDirs...), moreDirs...), skipTheme)
+		return runInteractiveTUI(stdout, stderr, deps, agent.PermissionModeUnsafe, append(append([]string{}, addDirs...), moreDirs...), skipTheme)
 	case "-h", "--help", "help":
 		if err := writeHelp(stdout); err != nil {
 			return 1
@@ -614,11 +615,11 @@ func fillAppDeps(deps appDeps) appDeps {
 	return deps
 }
 
-func runInteractiveTUI(stderr io.Writer, deps appDeps, permissionMode agent.PermissionMode, addDirs []string, theme string) int {
-	return runInteractiveTUIWithSetup(stderr, deps, permissionMode, addDirs, theme, false)
+func runInteractiveTUI(stdout io.Writer, stderr io.Writer, deps appDeps, permissionMode agent.PermissionMode, addDirs []string, theme string) int {
+	return runInteractiveTUIWithSetup(stdout, stderr, deps, permissionMode, addDirs, theme, false)
 }
 
-func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode agent.PermissionMode, addDirs []string, theme string, forceSetup bool) int {
+func runInteractiveTUIWithSetup(stdout io.Writer, stderr io.Writer, deps appDeps, permissionMode agent.PermissionMode, addDirs []string, theme string, forceSetup bool) int {
 	// Refresh the models.dev pricing/limits cache in the background when stale;
 	// the overlay is read at registry construction from the cache file, so this
 	// benefits the next run and never blocks or fails this one.
@@ -703,11 +704,32 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	if setting == "" {
 		setting = "ask"
 	}
-	trusted, persist, store, err := resolveWorkspaceTrust(workspaceRoot, setting, rootTrust, rootNoTrust)
+	trusted, decision, persist, store, err := resolveWorkspaceTrust(workspaceRoot, setting, rootTrust, rootNoTrust)
 	if err != nil {
 		fmt.Fprintf(stderr, "warning: failed to resolve workspace trust: %s\n", err)
 		trusted = false
+		decision = config.TrustUndecided
 		persist = false
+	}
+	if shouldPromptWorkspaceTrust(decision, resolved.DefaultProjectTrust, rootTrust, rootNoTrust, envTrustWorkspaceSet(), term.IsTerminal(os.Stdin.Fd())) {
+		answer, decided, promptErr := tui.PromptWorkspaceTrust(context.Background(), deps.stdin, stdout)
+		if promptErr != nil {
+			fmt.Fprintf(stderr, "warning: workspace trust prompt failed: %s\n", promptErr)
+		} else if decided {
+			trusted = answer
+			if store != nil {
+				if setErr := store.SetTrusted(workspaceRoot, answer); setErr != nil {
+					fmt.Fprintf(stderr, "warning: failed to persist trust decision: %s\n", setErr)
+				} else if saveErr := store.Save(); saveErr != nil {
+					fmt.Fprintf(stderr, "warning: failed to persist trust decision: %s\n", saveErr)
+				}
+			}
+			if trusted {
+				decision = config.TrustTrusted
+			} else {
+				decision = config.TrustDeclined
+			}
+		}
 	}
 	if persist && store != nil {
 		_ = store.SetTrusted(workspaceRoot, trusted)
@@ -715,7 +737,9 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			fmt.Fprintf(stderr, "warning: failed to persist trust decision: %s\n", saveErr)
 		}
 	}
-	if !trusted && projectConfigExists(workspaceRoot) {
+	// The interactive app warns even when no project config exists. This makes
+	// the degraded trust state visible before a project adds MCP, hooks, or plugins.
+	if !trusted {
 		fmt.Fprintf(stderr, "workspace %s is not trusted; skipped project MCP servers, hooks, plugins. Run with --trust or set defaultProjectTrust=always to load them.\n", workspaceRoot)
 	}
 
@@ -965,7 +989,7 @@ func newCoreRegistry(workspaceRoot string) *tools.Registry {
 
 func newCoreRegistryScoped(workspaceRoot string, scope tools.PathScope) *tools.Registry {
 	registry := tools.NewRegistry()
-	for _, tool := range tools.CoreToolsScoped(workspaceRoot, scope) {
+	for _, tool := range tools.WithoutEmptyBackedTools(tools.CoreToolsScoped(workspaceRoot, scope)) {
 		registry.Register(tool)
 	}
 	registerLocalControlTools(registry, workspaceRoot, config.LocalControlConfig{})
@@ -1059,8 +1083,12 @@ func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, max
 	if err != nil {
 		return nil, err
 	}
+	loaded, err := specialist.Load(specialist.LoadOptions{Paths: paths})
+	if err != nil {
+		return nil, err
+	}
 	executor := specialist.Executor{Paths: paths}
-	runtime, err := specialist.RegisterTools(registry, executor)
+	runtime, err := specialist.RegisterTools(registry, executor, loaded.Specialists)
 	if err != nil {
 		return nil, err
 	}
@@ -1078,7 +1106,7 @@ func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, max
 		return nil, err
 	}
 	swarm.RegisterTools(registry, sw)
-	return &agentToolRuntime{specialist: runtime, swarm: sw, specialists: specialistSummaries(paths)}, nil
+	return &agentToolRuntime{specialist: runtime, swarm: sw, specialists: specialistInfosFromManifests(loaded.Specialists)}, nil
 }
 
 // specialistSummaries loads the available specialists (built-ins + user/project
@@ -1090,8 +1118,12 @@ func specialistSummaries(paths specialist.Paths) []agent.SpecialistInfo {
 	if err != nil {
 		return nil
 	}
-	summaries := make([]agent.SpecialistInfo, 0, len(result.Specialists))
-	for _, manifest := range result.Specialists {
+	return specialistInfosFromManifests(result.Specialists)
+}
+
+func specialistInfosFromManifests(manifests []specialist.Manifest) []agent.SpecialistInfo {
+	summaries := make([]agent.SpecialistInfo, 0, len(manifests))
+	for _, manifest := range manifests {
 		name := strings.TrimSpace(manifest.Metadata.Name)
 		if name == "" {
 			continue
