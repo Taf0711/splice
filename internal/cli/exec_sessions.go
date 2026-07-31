@@ -38,7 +38,16 @@ func (recorder *execSessionRecorder) captureCheckpoint(workspaceRoot string, cal
 	return event, true
 }
 
-func shouldUseExecSession(options execOptions) bool {
+// execSessionHasExplicitReason reports whether this run gave an explicit reason
+// to attach to a real (non-ephemeral) session: stream-json output (a controlling
+// client expects a session id), --resume/--resume-latest/--fork, or an
+// --init-session-id (used by specialist sub-agent invocations, which always pair
+// it with --calling-session-id). Every exec run prepares a session now (see
+// exec.go), so usage/messages/tool-calls are recorded and readable by `splice
+// usage` even for a plain `splice exec "prompt"` that matches none of this — it
+// falls through to an ephemeral session (PrepareExec's Ephemeral option) instead
+// of recording nothing.
+func execSessionHasExplicitReason(options execOptions) bool {
 	return options.outputFormat == execOutputStreamJSON ||
 		options.resume != "" ||
 		options.resumeLatest ||
@@ -73,7 +82,11 @@ func preflightExecSession(options execOptions) error {
 			return execUsageError{"Splice session not found: " + options.resume}
 		}
 	case options.resumeLatest:
-		latest, err := store.Latest()
+		// LatestResumable, not Latest: plain exec runs now create an ephemeral
+		// session for every invocation (see execSessionHasExplicitReason), so the
+		// unfiltered "latest session" would almost always be the throwaway
+		// one-shot from whatever ran most recently instead of a real conversation.
+		latest, err := store.LatestResumable()
 		if err != nil {
 			return err
 		}

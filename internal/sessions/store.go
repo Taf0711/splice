@@ -60,6 +60,13 @@ const (
 	SessionKindChild     SessionKind = "child"
 	SessionKindSpecDraft SessionKind = "spec-draft"
 	SessionKindSpecImpl  SessionKind = "spec-impl"
+	// SessionKindEphemeral marks a session created implicitly for a plain `splice
+	// exec "prompt"` run that gave no explicit reason (--resume, --fork,
+	// --output-format stream-json, --init-session-id) to keep a session around.
+	// It exists purely so usage/messages/tool-calls are recorded and readable by
+	// `splice usage`; it is not resumable (see IsResumableKind) and is hidden
+	// from the default `splice sessions list` (pass --kind ephemeral to see it).
+	SessionKindEphemeral SessionKind = "ephemeral"
 )
 
 type SpecStatus string

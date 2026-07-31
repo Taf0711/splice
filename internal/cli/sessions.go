@@ -216,10 +216,10 @@ func parseNonEmptySessionsFlag(flag string, value string) (string, error) {
 func parseSessionKindFlag(value string) (sessions.SessionKind, error) {
 	kind := sessions.SessionKind(strings.ToLower(strings.TrimSpace(value)))
 	switch kind {
-	case sessions.SessionKindFork, sessions.SessionKindChild, sessions.SessionKindSpecDraft, sessions.SessionKindSpecImpl:
+	case sessions.SessionKindFork, sessions.SessionKindChild, sessions.SessionKindSpecDraft, sessions.SessionKindSpecImpl, sessions.SessionKindEphemeral:
 		return kind, nil
 	default:
-		return "", execUsageError{fmt.Sprintf("invalid --kind %q. Expected fork, child, spec-draft, or spec-impl.", value)}
+		return "", execUsageError{fmt.Sprintf("invalid --kind %q. Expected fork, child, spec-draft, spec-impl, or ephemeral.", value)}
 	}
 }
 
@@ -265,9 +265,19 @@ func runSessionsList(store *sessions.Store, options sessionCommandOptions, stdou
 	return exitSuccess
 }
 
+// filterSessionsByKind applies an explicit --kind filter, or — when none is
+// given — hides ephemeral one-shot exec sessions (plain `splice exec` runs with
+// no session flags; see SessionKindEphemeral) so they don't flood the default
+// listing. Pass --kind ephemeral to see them.
 func filterSessionsByKind(items []sessions.Metadata, kind sessions.SessionKind) []sessions.Metadata {
 	if kind == "" {
-		return items
+		filtered := make([]sessions.Metadata, 0, len(items))
+		for _, item := range items {
+			if item.SessionKind != sessions.SessionKindEphemeral {
+				filtered = append(filtered, item)
+			}
+		}
+		return filtered
 	}
 	filtered := make([]sessions.Metadata, 0, len(items))
 	for _, item := range items {
@@ -535,7 +545,8 @@ Commands:
 
 Flags:
       --json            Print JSON output
-      --kind <kind>     Filter list by fork, child, spec-draft, or spec-impl
+      --kind <kind>     Filter list by fork, child, spec-draft, spec-impl, or
+                        ephemeral (ephemeral sessions are hidden by default)
       --sequence <n>    Rewind target sequence (rewind-plan, rewind)
       --event <id>      Rewind target event id (rewind-plan, rewind)
       --exclude-target  Drop the target event (rewind-plan, rewind)

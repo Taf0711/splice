@@ -261,6 +261,60 @@ func TestRunSessionsListFiltersByKind(t *testing.T) {
 	}
 }
 
+// TestRunSessionsListExcludesEphemeralByDefault covers the other half of the
+// "plain exec records no usage" fix: a plain `splice exec` run now creates a
+// real session (SessionKindEphemeral, see exec_test.go's
+// TestRunExecPlainRunRecordsUsageInEphemeralSession), so the default `splice
+// sessions list` must keep hiding it — otherwise every scripted/CI exec call
+// would flood the list an interactive user actually cares about. --kind
+// ephemeral opts back in.
+func TestRunSessionsListExcludesEphemeralByDefault(t *testing.T) {
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir(), Now: sequenceClockCLI([]time.Time{
+		time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC),
+		time.Date(2026, 7, 30, 12, 0, 1, 0, time.UTC),
+	})})
+	if _, err := store.Create(sessions.CreateInput{SessionID: "regular", Title: "Regular"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(sessions.CreateInput{
+		SessionID:   "oneshot",
+		SessionKind: sessions.SessionKindEphemeral,
+		Title:       "hello from a script",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"sessions", "list"}, &stdout, &stderr, appDeps{
+		newSessionStore: func() *sessions.Store {
+			return store
+		},
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("sessions list exit = %d, stderr = %q", exitCode, stderr.String())
+	}
+	output := stdout.String()
+	if !strings.Contains(output, "regular") || strings.Contains(output, "oneshot") {
+		t.Fatalf("default sessions list = %q, want regular but not the ephemeral oneshot", output)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runWithDeps([]string{"sessions", "list", "--kind", "ephemeral"}, &stdout, &stderr, appDeps{
+		newSessionStore: func() *sessions.Store {
+			return store
+		},
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("sessions list --kind ephemeral exit = %d, stderr = %q", exitCode, stderr.String())
+	}
+	output = stdout.String()
+	if strings.Contains(output, "regular") || !strings.Contains(output, "oneshot") {
+		t.Fatalf("sessions list --kind ephemeral = %q, want oneshot but not regular", output)
+	}
+}
+
 func sequenceClockCLI(values []time.Time) func() time.Time {
 	index := 0
 	return func() time.Time {

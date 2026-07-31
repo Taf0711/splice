@@ -497,30 +497,45 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		})
 	}
 
-	preparedSession := sessions.PreparedExec{}
-	agentPrompt := prompt
-	if shouldUseExecSession(options) {
-		preparedSession, err = sessions.PrepareExec(sessions.PrepareExecOptions{
-			SessionID:        options.initSessionID,
-			Title:            sessionTitle,
-			Cwd:              workspaceRoot,
-			ModelID:          resolved.Provider.Model,
-			Provider:         runMetadata.Provider,
-			Tag:              options.tag,
-			Depth:            options.depth,
-			CallingSessionID: options.callingSessionID,
-			CallingToolUseID: options.callingToolUseID,
-			AgentName:        specialistAgentName(options.sessionTitle),
-			TaskID:           options.initSessionID,
-			Resume:           options.resume,
-			ResumeLatest:     options.resumeLatest,
-			Fork:             options.fork,
-		})
-		if err != nil {
+	// Every exec run prepares a session now, even a plain `splice exec "prompt"`
+	// with none of the flags below — so usage/messages/tool-calls are recorded
+	// and readable by `splice usage` (previously such a run recorded nothing at
+	// all). hasExplicitSessionReason marks runs that asked for a session
+	// explicitly (--resume/--resume-latest/--fork, --output-format stream-json,
+	// or --init-session-id, e.g. a specialist sub-agent); a run with none of
+	// those is Ephemeral, which PrepareExec tags SessionKindEphemeral so it stays
+	// out of `splice sessions`' default listing and out of --resume-latest.
+	hasExplicitSessionReason := execSessionHasExplicitReason(options)
+	preparedSession, err := sessions.PrepareExec(sessions.PrepareExecOptions{
+		SessionID:        options.initSessionID,
+		Title:            sessionTitle,
+		Cwd:              workspaceRoot,
+		ModelID:          resolved.Provider.Model,
+		Provider:         runMetadata.Provider,
+		Tag:              options.tag,
+		Depth:            options.depth,
+		CallingSessionID: options.callingSessionID,
+		CallingToolUseID: options.callingToolUseID,
+		AgentName:        specialistAgentName(options.sessionTitle),
+		TaskID:           options.initSessionID,
+		Resume:           options.resume,
+		ResumeLatest:     options.resumeLatest,
+		Fork:             options.fork,
+		Ephemeral:        !hasExplicitSessionReason,
+	})
+	if err != nil {
+		if hasExplicitSessionReason {
 			return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 		}
-		agentPrompt = sessions.FormatExecPrompt(prompt, preparedSession)
+		// Best-effort for the implicit/ephemeral case only: a plain `splice exec`
+		// run must not fail just because usage/session recording couldn't be set
+		// up (e.g. an unwritable session store) — that would be a behavior
+		// regression, not a recording one. Warn and continue with no session,
+		// exactly how exec behaved before this session existed.
+		fmt.Fprintf(stderr, "[splice] WARNING: session not recorded: %v\n", err)
+		preparedSession = sessions.PreparedExec{}
 	}
+	agentPrompt := sessions.FormatExecPrompt(prompt, preparedSession)
 	runID, err := streamjson.CreateRunID(time.Now())
 	if err != nil {
 		return writeAppError(stderr, "failed to create run id: "+err.Error(), exitCrash)
@@ -603,6 +618,18 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	)
 
 	estimator := usage.NewCostEstimator(&modelRegistry)
+	// runtimeSessionID feeds the deterministic pipeline's Options.SessionID, which
+	// (internal/splice/run.go, registry.go) becomes the run id AND the prompt
+	// cache key ("<sessionID>:<stage>"). An ephemeral session exists only to
+	// record usage for a plain exec run — it must not leak into pipeline
+	// identity/caching, which would silently change run-id/cache-key behavior
+	// for every bare `splice exec` call. Blank it back to "" (the old value for
+	// these runs) so a run's actual behavior is unchanged; only what gets
+	// recorded (via sessionRecorder, which uses preparedSession directly) is new.
+	runtimeSessionID := preparedSession.Session.SessionID
+	if preparedSession.Session.SessionKind == sessions.SessionKindEphemeral {
+		runtimeSessionID = ""
+	}
 	runOptions := agent.Options{
 		MaxTurns: resolved.MaxTurns,
 		// ContextWindow / compaction are agent-loop only: the deterministic
@@ -624,7 +651,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		// Skills is agent-loop only: the deterministic pipeline does not load
 		// skills at runtime, so this list is inert under `splice exec`.
 		Skills:           pluginActivation.skillInfos(deps.skillsDir()),
-		SessionID:        preparedSession.Session.SessionID,
+		SessionID:        runtimeSessionID,
 		CallingSessionID: options.callingSessionID,
 		CallingToolUseID: options.callingToolUseID,
 		Tag:              options.tag,

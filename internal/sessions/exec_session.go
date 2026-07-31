@@ -40,6 +40,12 @@ type PrepareExecOptions struct {
 	Resume           string
 	ResumeLatest     bool
 	Fork             string
+	// Ephemeral marks a newly-created session (no Resume/ResumeLatest/Fork) as a
+	// throwaway one-shot run — a plain `splice exec "prompt"` with no explicit
+	// session reason. It has no effect when CallingSessionID also applies (a
+	// specialist child session always wins) or when resuming/forking an existing
+	// session, since those already have a real session identity.
+	Ephemeral bool
 }
 
 type PreparedExec struct {
@@ -89,7 +95,10 @@ func PrepareExec(options PrepareExecOptions) (PreparedExec, error) {
 	if resumeID != "" || options.ResumeLatest {
 		sessionID := resumeID
 		if sessionID == "" && options.ResumeLatest {
-			latest, err := store.Latest()
+			// LatestResumable, not Latest: unfiltered would surface the newest
+			// ephemeral one-shot exec session (see Ephemeral) instead of a real
+			// conversation.
+			latest, err := store.LatestResumable()
 			if err != nil {
 				return PreparedExec{}, err
 			}
@@ -136,6 +145,9 @@ func PrepareExec(options PrepareExecOptions) (PreparedExec, error) {
 		createInput.AgentName = strings.TrimSpace(options.AgentName)
 		createInput.TaskID = strings.TrimSpace(firstNonEmpty(options.TaskID, options.SessionID))
 		createInput.SpawnedFromEventID = strings.TrimSpace(options.CallingToolUseID)
+	}
+	if options.Ephemeral && createInput.SessionKind == "" {
+		createInput.SessionKind = SessionKindEphemeral
 	}
 	session, err := store.Create(createInput)
 	if err != nil {
