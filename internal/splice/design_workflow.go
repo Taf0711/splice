@@ -132,6 +132,8 @@ func (w *DesignWorkflow) CrystallizeAndCritique(
 		Sequence:      1,
 		PlanTier:      schemas.TierArchitectural,
 		RequestIntent: plan.Epic,
+		// PipelineStages and NextStage stay empty: plan_critic runs in the
+		// design phase, not a tier pipeline, so no roster applies.
 	}
 
 	output, err := stages.PlanCritic{}.Run(ctx, criticInput, criticSelection.Provider, criticOpts)

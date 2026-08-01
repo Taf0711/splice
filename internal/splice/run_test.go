@@ -323,6 +323,72 @@ func TestRunPassInjectsMemoryBundleAndSkipsRetrievalErrors(t *testing.T) {
 	}
 }
 
+func TestRunPassPopulatesPipelineRoster(t *testing.T) {
+	workDir := t.TempDir()
+	stageNames := []string{"code_writer", "test_generator", "static_analyzer", "test_runner"}
+	registry := stageRegistry{}
+	var inputs []schemas.HarnessStageInput
+	for _, name := range stageNames {
+		registry[name] = &capturingStage{inputs: &inputs}
+	}
+	plan := schemas.ExecutionPlan{Tier: schemas.TierStandard, RequestIntent: "standard tier roster"}
+	for _, name := range stageNames {
+		plan.Stages = append(plan.Stages, schemas.ExecutionStage{Name: name})
+	}
+
+	_, _, completed, err := runPass(context.Background(), "run-roster-standard", 1, plan, registry, runFakeProvider{}, agent.Options{}, workDir, nil, nil, nil)
+	if err != nil || !completed {
+		t.Fatalf("runPass: completed=%v err=%v", completed, err)
+	}
+	if len(inputs) != len(stageNames) {
+		t.Fatalf("captured %d inputs, want %d", len(inputs), len(stageNames))
+	}
+	for i, in := range inputs {
+		if strings.Join(in.PipelineStages, ",") != strings.Join(stageNames, ",") {
+			t.Fatalf("stage %q pipeline_stages = %v, want %v", in.StageName, in.PipelineStages, stageNames)
+		}
+		wantNext := ""
+		if i+1 < len(stageNames) {
+			wantNext = stageNames[i+1]
+		}
+		if in.NextStage != wantNext {
+			t.Fatalf("stage %q next_stage = %q, want %q", in.StageName, in.NextStage, wantNext)
+		}
+	}
+	if inputs[0].StageName != "code_writer" || inputs[0].NextStage != "test_generator" {
+		t.Fatalf("code_writer input = %+v, want next_stage test_generator", inputs[0])
+	}
+	last := inputs[len(inputs)-1]
+	if last.StageName != "test_runner" || last.NextStage != "" {
+		t.Fatalf("last stage input = %+v, want empty next_stage", last)
+	}
+}
+
+func TestRunPassPopulatesPipelineRosterTrivialTier(t *testing.T) {
+	workDir := t.TempDir()
+	var inputs []schemas.HarnessStageInput
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierTrivial,
+		RequestIntent: "trivial tier roster",
+		Stages:        []schemas.ExecutionStage{{Name: "code_writer"}},
+	}
+	registry := stageRegistry{"code_writer": &capturingStage{inputs: &inputs}}
+
+	_, _, completed, err := runPass(context.Background(), "run-roster-trivial", 1, plan, registry, runFakeProvider{}, agent.Options{}, workDir, nil, nil, nil)
+	if err != nil || !completed {
+		t.Fatalf("runPass: completed=%v err=%v", completed, err)
+	}
+	if len(inputs) != 1 {
+		t.Fatalf("captured %d inputs, want 1", len(inputs))
+	}
+	if got := inputs[0].PipelineStages; len(got) != 1 || got[0] != "code_writer" {
+		t.Fatalf("pipeline_stages = %v, want [code_writer]", got)
+	}
+	if inputs[0].NextStage != "" {
+		t.Fatalf("next_stage = %q, want empty for the only stage", inputs[0].NextStage)
+	}
+}
+
 // captureRequestProvider records the last CompletionRequest and always returns the
 // provided submit_code tool call with no file changes.
 type captureRequestProvider struct {

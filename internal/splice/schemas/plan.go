@@ -466,6 +466,15 @@ type HarnessStageInput struct {
 	RevisionContext *string           `json:"revision_context,omitempty"`
 	Context         *ContextBundle    `json:"context,omitempty"`
 	MemoryBundle    *MemoryBundle     `json:"memory_bundle,omitempty"`
+	// PipelineStages is the full ordered roster of stage names for this run,
+	// so a stage can see what will (and will not) run after it. Empty outside
+	// a tier pipeline (e.g. design-phase stages), where no roster applies.
+	PipelineStages []string `json:"pipeline_stages,omitempty"`
+	// NextStage is the stage that consumes this stage's output, derivable as
+	// PipelineStages[Sequence] (0-indexed) — included directly so the common
+	// case needs no lookup. Empty when this is the last stage, or when
+	// PipelineStages is empty.
+	NextStage string `json:"next_stage,omitempty"`
 }
 
 // Validate checks the harness stage input.

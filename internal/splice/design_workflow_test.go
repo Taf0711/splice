@@ -449,6 +449,26 @@ func TestCrystallizeAndCritique_ResolverErrorFallsBack(t *testing.T) {
 	}
 }
 
+// TestPlanCriticInputLeavesPipelineFieldsEmpty proves plan_critic's
+// HarnessStageInput (constructed in design_workflow.go, outside any tier
+// pipeline) carries no PipelineStages/NextStage roster, and that leaving
+// them empty still validates.
+func TestPlanCriticInputLeavesPipelineFieldsEmpty(t *testing.T) {
+	criticInput := schemas.HarnessStageInput{
+		RunID:         "plan-1",
+		StageName:     "plan_critic",
+		Sequence:      1,
+		PlanTier:      schemas.TierArchitectural,
+		RequestIntent: "build a thing",
+	}
+	if len(criticInput.PipelineStages) != 0 || criticInput.NextStage != "" {
+		t.Fatalf("expected empty pipeline roster, got PipelineStages=%#v NextStage=%q", criticInput.PipelineStages, criticInput.NextStage)
+	}
+	if err := criticInput.Validate(); err != nil {
+		t.Fatalf("plan_critic input with empty pipeline fields should validate: %v", err)
+	}
+}
+
 func mustMarshal(t *testing.T, v any) json.RawMessage {
 	t.Helper()
 	b, err := json.Marshal(v)

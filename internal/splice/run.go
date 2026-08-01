@@ -503,6 +503,11 @@ func runPass(
 	records := []schemas.StageRecord{}
 	outputs := []schemas.HarnessStageOutput{}
 
+	stageNames := make([]string, len(plan.Stages))
+	for i, stage := range plan.Stages {
+		stageNames[i] = stage.Name
+	}
+
 	for seq, stage := range plan.Stages {
 		stageName := stage.Name
 		agentStage, ok := registry[stageName]
@@ -528,6 +533,11 @@ func runPass(
 			return records, outputs, false, nil
 		}
 
+		var nextStage string
+		if seq+1 < len(stageNames) {
+			nextStage = stageNames[seq+1]
+		}
+
 		input := schemas.HarnessStageInput{
 			RunID:           runID,
 			StageName:       stageName,
@@ -536,6 +546,8 @@ func runPass(
 			RequestIntent:   plan.RequestIntent,
 			PriorSummaries:  maps.Clone(priorSummaries),
 			RevisionContext: revisionContext,
+			PipelineStages:  stageNames,
+			NextStage:       nextStage,
 		}
 
 		if mem != nil {
