@@ -2,6 +2,8 @@ package usage
 
 import (
 	"encoding/json"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/Taf0711/splice/internal/agent"
@@ -9,6 +11,12 @@ import (
 	"github.com/Taf0711/splice/internal/sessions"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
+
+var writerOnlyPayloadKeys = map[string]string{
+	"usageReported": "consumed by the CLI stream-json writer and agenteval, not this report reader",
+	"usageSequence": "consumed by the CLI stream-json writer and agenteval, not this report reader",
+	"costEstimated": "redundant with costProvenance for this report reader",
+}
 
 func usageEvent(t *testing.T, sessionID string, sequence int, createdAt string, prompt int, completion int) sessions.Event {
 	t.Helper()
@@ -339,5 +347,66 @@ func TestBuildReportGroupsByWorkUnit(t *testing.T) {
 	}
 	if got.Requests != 1 || got.TotalCost != cost {
 		t.Fatalf("work unit = %+v, want 1 request costing %v", got, cost)
+	}
+}
+
+// The reader once lacked provider, stage, and iteration, so encoding/json
+// dropped them and usage could not be sliced by work unit. This pins the pair.
+func TestAttributedUsagePayloadKeysAreRead(t *testing.T) {
+	costUSD := 1.25
+	payload := AttributedUsagePayload(agent.AttributedUsage{
+		Sequence: 42,
+		Usage: zeroruntime.Usage{
+			InputTokens:       100,
+			OutputTokens:      80,
+			PromptTokens:      90,
+			CompletionTokens:  70,
+			CachedInputTokens: 10,
+			CacheWriteTokens:  5,
+			ReasoningTokens:   20,
+			WebSearchRequests: 3,
+		},
+		UsageReported: true,
+		ProviderName:  "openai",
+		Model:         "gpt-4.1",
+		Stage:         "code_writer",
+		Iteration:     2,
+		Cost: agent.UsageCostEstimate{
+			CostUSD:        &costUSD,
+			Status:         agent.CostStatusPriced,
+			Provenance:     agent.CostProvenanceRuntimeEstimate,
+			PricingSource:  "test-catalog",
+			PricingAsOf:    "2026-07-31",
+			UnpricedReason: "not applicable",
+		},
+	})
+
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal attributed payload: %v", err)
+	}
+	var encoded map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &encoded); err != nil {
+		t.Fatalf("unmarshal attributed payload: %v", err)
+	}
+
+	readerKeys := map[string]struct{}{}
+	typ := reflect.TypeOf(usageEventPayload{})
+	for i := 0; i < typ.NumField(); i++ {
+		tag := typ.Field(i).Tag.Get("json")
+		key := strings.Split(tag, ",")[0]
+		if key != "" && key != "-" {
+			readerKeys[key] = struct{}{}
+		}
+	}
+
+	for key := range encoded {
+		if _, ok := readerKeys[key]; ok {
+			continue
+		}
+		if reason, ok := writerOnlyPayloadKeys[key]; ok && reason != "" {
+			continue
+		}
+		t.Fatalf("payload key %q is not read; add it to the reader, or add it to writerOnlyPayloadKeys with a reason", key)
 	}
 }
