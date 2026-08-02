@@ -93,6 +93,28 @@ func TestResolveSelectsActiveProviderProfile(t *testing.T) {
 	}
 }
 
+func TestResolveValidatesReasoningEffortEnum(t *testing.T) {
+	for _, effort := range []string{"xhigh", "max"} {
+		t.Run(effort, func(t *testing.T) {
+			path := writeConfig(t, `{
+				"activeProvider": "main",
+				"providers": [{"name": "main", "provider_kind": "openai", "model": "gpt-test", "reasoning_effort": "`+effort+`"}]
+			}`)
+			if _, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}}); err != nil {
+				t.Fatalf("Resolve() rejected %s: %v", effort, err)
+			}
+		})
+	}
+
+	path := writeConfig(t, `{
+		"activeProvider": "main",
+		"providers": [{"name": "main", "provider_kind": "openai", "model": "gpt-test", "reasoning_effort": "hgih"}]
+	}`)
+	if _, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}}); err == nil || !strings.Contains(err.Error(), "reasoning_effort must be") {
+		t.Fatalf("Resolve() should reject an unknown effort, got %v", err)
+	}
+}
+
 func TestResolveLoadsFavoriteModelsFromUserConfigOnly(t *testing.T) {
 	userPath := writeConfig(t, `{
 		"activeProvider": "user",

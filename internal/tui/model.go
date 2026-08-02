@@ -157,20 +157,22 @@ type model struct {
 	// turnLatencySum / turnLatencyCount accumulate completed-run wall time so
 	// /context can show a rolling average turn latency (the "is it slow?" signal).
 	// Reset by /new.
-	turnLatencySum        time.Duration
-	turnLatencyCount      int
-	turnTTFTSum           time.Duration
-	turnTTFTCount         int
-	transcript            []transcriptRow
-	transcriptDetailed    bool
-	helpOverlay           bool // the `?` keyboard-shortcut overlay is open
-	transcriptBodyHeights *transcriptBodyHeightCache
-	input                 textinput.Model
-	composer              composerState
-	composerActive        bool
-	composerCursorVisible bool
-	composerPastePreviews []composerPastePreview
-	composerSelection     composerSelectionState
+	// turnVisibleOutputTokens supports the generation-time throughput clause.
+	turnLatencySum          time.Duration
+	turnLatencyCount        int
+	turnTTFTSum             time.Duration
+	turnTTFTCount           int
+	turnVisibleOutputTokens int
+	transcript              []transcriptRow
+	transcriptDetailed      bool
+	helpOverlay             bool // the `?` keyboard-shortcut overlay is open
+	transcriptBodyHeights   *transcriptBodyHeightCache
+	input                   textinput.Model
+	composer                composerState
+	composerActive          bool
+	composerCursorVisible   bool
+	composerPastePreviews   []composerPastePreview
+	composerSelection       composerSelectionState
 	// plan holds the sticky plan panel state (steps, expansion, timings)
 	// synced from the update_plan tool. See plan_panel.go.
 	plan                planPanelState
@@ -541,7 +543,8 @@ type agentResponseMsg struct {
 	turnElapsed time.Duration
 	// ttft is time-to-first-token for the turn (0 when nothing streamed — a
 	// tool-only or errored turn). Set only on the success path.
-	ttft time.Duration
+	ttft                    time.Duration
+	turnVisibleOutputTokens int
 	// Memory sidecar state captured by the run goroutine and applied on the
 	// main thread so the status line can show whether memory is active.
 	memoryStatus string
@@ -2224,6 +2227,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.turnLatencySum += msg.turnElapsed
 			m.turnLatencyCount++
 		}
+		m.turnVisibleOutputTokens += msg.turnVisibleOutputTokens
 		if msg.ttft > 0 {
 			m.turnTTFTSum += msg.ttft
 			m.turnTTFTCount++
@@ -4869,6 +4873,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		toolCalls := 0
 		rows := []transcriptRow{}
 		usageEvents := []zeroruntime.Usage{}
+		turnVisibleOutputTokens := 0
 		sessionEvents := []pendingSessionEvent{}
 		usageModelID := m.modelName
 		var specReview *pendingSpecReviewPrompt
@@ -5335,6 +5340,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		if runOptions.runKind == tuiRunPipeline {
 			options.OnUsage = func(event zeroruntime.Usage) {
 				usageEvents = append(usageEvents, event)
+				turnVisibleOutputTokens += event.VisibleOutputTokens()
 				sessionEvents = append(sessionEvents, pendingSessionEvent{
 					Type:    sessions.EventUsage,
 					Payload: usage.EventUsagePayload(event),
@@ -5348,6 +5354,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			estimator := usage.NewCostEstimator(&m.modelCatalog)
 			options.OnUsage = func(event zeroruntime.Usage) {
 				usageEvents = append(usageEvents, event)
+				turnVisibleOutputTokens += event.VisibleOutputTokens()
 				cost := estimator(usageModelID, event, true)
 				attributed := agent.AttributedUsage{
 					Usage:         event,
@@ -5395,6 +5402,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			downstreamAU := options.OnAttributedUsage
 			options.OnAttributedUsage = func(au agent.AttributedUsage) {
 				usageEvents = append(usageEvents, au.Usage)
+				turnVisibleOutputTokens += au.Usage.VisibleOutputTokens()
 				payload := usage.AttributedUsagePayload(au)
 				sessionEvents = append(sessionEvents, pendingSessionEvent{
 					Type:    sessions.EventUsage,
@@ -5482,7 +5490,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				"content": result.FinalAnswer,
 			},
 		})
-		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, turnTools: toolCalls, turnElapsed: elapsed, ttft: ttft, memoryStatus: memStatus, memoryCount: memCount, memoryByType: memByType}
+		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, turnTools: toolCalls, turnElapsed: elapsed, ttft: ttft, turnVisibleOutputTokens: turnVisibleOutputTokens, memoryStatus: memStatus, memoryCount: memCount, memoryByType: memByType}
 	}
 }
 

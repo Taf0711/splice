@@ -550,12 +550,16 @@ func promptCacheKeyDisabled() bool {
 }
 
 // openAIReasoningEffort normalizes a requested effort to a value the OpenAI chat
-// completions API accepts, or "" to omit the field. "none" (and anything else)
-// is dropped rather than risking a 400 on an unrecognized enum.
+// completions API accepts, or "" to omit the field. OpenAI has no warning channel
+// on this adapter, so clamp xhigh and max to high instead of silently dropping
+// the request. "none" (and anything else) is dropped rather than risking a 400
+// on an unrecognized enum.
 func openAIReasoningEffort(requested string) string {
 	switch strings.ToLower(strings.TrimSpace(requested)) {
 	case "minimal", "low", "medium", "high":
 		return strings.ToLower(strings.TrimSpace(requested))
+	case "xhigh", "max":
+		return "high"
 	default:
 		return ""
 	}

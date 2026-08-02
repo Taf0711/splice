@@ -95,6 +95,9 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 	}
 
 	applyOverrides(&cfg, options.Overrides)
+	for _, issue := range validateReasoningEfforts(cfg.Providers) {
+		return ResolvedConfig{}, fmt.Errorf("invalid %s: %s", issue.FieldPath, issue.Message)
+	}
 
 	if !cfg.Tools.deferThresholdSet && cfg.Tools.DeferThreshold == 0 {
 		cfg.Tools.DeferThreshold = defaultDeferThreshold

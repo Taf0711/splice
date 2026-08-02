@@ -560,18 +560,25 @@ func (m model) modelText(args string) string {
 }
 
 // avgTurnLatencyText reports the session's rolling average turn wall-time for
-// /context — the "is it slow?" signal a user otherwise can only feel. "n/a" until
+// /context, the "is it slow?" signal a user otherwise can only feel. "n/a" until
 // a turn has completed.
 func (m model) avgTurnLatencyText() string {
 	if m.turnLatencyCount == 0 {
 		return "n/a"
 	}
 	avgSeconds := m.turnLatencySum.Seconds() / float64(m.turnLatencyCount)
+	clauses := []string{}
 	if m.turnTTFTCount > 0 {
 		ttftSeconds := m.turnTTFTSum.Seconds() / float64(m.turnTTFTCount)
-		return fmt.Sprintf("%.1fs avg (%.1fs to first token, %d turns)", avgSeconds, ttftSeconds, m.turnLatencyCount)
+		clauses = append(clauses, fmt.Sprintf("%.1fs to first token", ttftSeconds))
+		generation := m.turnLatencySum - m.turnTTFTSum
+		if m.turnVisibleOutputTokens > 0 && m.turnTTFTCount == m.turnLatencyCount && generation > 0 {
+			throughput := float64(m.turnVisibleOutputTokens) / generation.Seconds()
+			clauses = append(clauses, fmt.Sprintf("%.1f TPS avg across turns", throughput))
+		}
 	}
-	return fmt.Sprintf("%.1fs avg (%d turns)", avgSeconds, m.turnLatencyCount)
+	clauses = append(clauses, fmt.Sprintf("%d turns", m.turnLatencyCount))
+	return fmt.Sprintf("%.1fs avg (%s)", avgSeconds, strings.Join(clauses, ", "))
 }
 
 func (m model) contextText() string {

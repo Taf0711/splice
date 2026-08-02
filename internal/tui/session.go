@@ -76,6 +76,7 @@ func (m model) startNewSession() model {
 	m.turnLatencyCount = 0
 	m.turnTTFTSum = 0
 	m.turnTTFTCount = 0
+	m.turnVisibleOutputTokens = 0
 
 	// Staged input belongs to the previous conversation. Attachments and a queued
 	// message are only consumed at prompt-submit, so without clearing them here the

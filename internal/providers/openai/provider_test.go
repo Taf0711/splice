@@ -881,6 +881,30 @@ func TestStreamCompletionSendsReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestOpenAIReasoningEffortMapping(t *testing.T) {
+	// xhigh and max previously carried no effort field, so the model silently
+	// ran at its default instead of honoring the request as far as OpenAI allows.
+	tests := []struct {
+		requested string
+		want      string
+	}{
+		{requested: "xhigh", want: "high"},
+		{requested: "max", want: "high"},
+		{requested: "minimal", want: "minimal"},
+		{requested: "low", want: "low"},
+		{requested: "medium", want: "medium"},
+		{requested: "high", want: "high"},
+		{requested: "bogus", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.requested, func(t *testing.T) {
+			if got := openAIReasoningEffort(tc.requested); got != tc.want {
+				t.Fatalf("openAIReasoningEffort(%q) = %q, want %q", tc.requested, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestStreamCompletionOmitsReasoningEffortWhenUnsetOrInvalid(t *testing.T) {
 	for _, effort := range []string{"", "none", "bogus"} {
 		var gotBody map[string]any

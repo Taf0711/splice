@@ -122,3 +122,26 @@ func TestValidateFileValidConfigHasNoIssues(t *testing.T) {
 		t.Fatalf("expected no issues for valid config, got %#v", issues)
 	}
 }
+
+func TestValidateFileReasoningEffortEnum(t *testing.T) {
+	for _, effort := range []string{"xhigh", "max"} {
+		t.Run(effort, func(t *testing.T) {
+			path := writeValidateFixture(t, `{
+				"activeProvider": "main",
+				"providers": [{"name": "main", "provider_kind": "openai", "model": "gpt-4.1", "reasoning_effort": "`+effort+`"}]
+			}`)
+			if _, issues := ValidateFile(path); len(issues) != 0 {
+				t.Fatalf("%s must be accepted, got %#v", effort, issues)
+			}
+		})
+	}
+
+	path := writeValidateFixture(t, `{
+		"activeProvider": "main",
+		"providers": [{"name": "main", "provider_kind": "openai", "model": "gpt-4.1", "reasoning_effort": "hgih"}]
+	}`)
+	_, issues := ValidateFile(path)
+	if len(issues) == 0 || !strings.Contains(issues[0].Message, "reasoning_effort must be") {
+		t.Fatalf("unknown effort should be rejected, got %#v", issues)
+	}
+}
