@@ -176,6 +176,14 @@ func (r *searchRequest) Validate() error {
 	if r.Query == "" {
 		return fmt.Errorf("query is required")
 	}
+	return r.validateCommon()
+}
+
+func (r *searchRequest) ValidateRecent() error {
+	return r.validateCommon()
+}
+
+func (r *searchRequest) validateCommon() error {
 	if r.RequestingAgent == "" {
 		return fmt.Errorf("requesting_agent is required")
 	}

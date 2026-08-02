@@ -346,41 +346,8 @@ func (s *Store) Search(ctx context.Context, q *Query) ([]*Observation, bool, err
 	if ftsQ == "" {
 		return nil, false, nil
 	}
-
-	// Build scope IN placeholders.
-	scopeHolders := make([]string, len(q.Scopes))
 	args := []any{ftsQ}
-	for i, sc := range q.Scopes {
-		scopeHolders[i] = "?"
-		args = append(args, sc)
-	}
-
-	// Optionally filter by memory_type.
-	memTypeClause := ""
-	if len(q.MemoryTypes) > 0 {
-		holders := make([]string, len(q.MemoryTypes))
-		for i, mt := range q.MemoryTypes {
-			holders[i] = "?"
-			args = append(args, mt)
-		}
-		memTypeClause = fmt.Sprintf("AND o.memory_type IN (%s)", strings.Join(holders, ", "))
-	}
-
-	projectClause := "AND o.project_path IS NULL"
-	if q.ProjectPath != "" {
-		projectClause = "AND (o.project_path = ? OR o.project_path IS NULL)"
-		args = append(args, q.ProjectPath)
-	}
-
-	var visParts []string
-	if q.IncludePrivate {
-		visParts = append(visParts, "o.owner_agent = ?")
-		args = append(args, q.RequestingAgent)
-	}
-	if q.IncludeShareable {
-		visParts = append(visParts, "o.visibility = 'shareable'")
-	}
-	visClause := "AND (" + strings.Join(visParts, " OR ") + ")"
+	scopeClause, memTypeClause, projectClause, visClause := buildFilterClauses(q, &args)
 
 	args = append(args, limit+1) // LIMIT+1 to detect truncation
 
@@ -401,13 +368,13 @@ func (s *Store) Search(ctx context.Context, q *Query) ([]*Observation, bool, err
 			WHERE observations_fts MATCH ?
 		) AS fts ON fts.rowid = o.id
 		WHERE o.deleted_at IS NULL
-		  AND o.scope IN (%s)
+		  %s
 		  %s
 		  %s
 		  %s
 		ORDER BY fts.rank
 		LIMIT ?
-	`, strings.Join(scopeHolders, ", "), memTypeClause, projectClause, visClause), args...)
+	`, scopeClause, memTypeClause, projectClause, visClause), args...)
 	if err != nil {
 		return nil, false, fmt.Errorf("search: query: %w", err)
 	}
@@ -430,6 +397,99 @@ func (s *Store) Search(ctx context.Context, q *Query) ([]*Observation, bool, err
 		results = results[:limit]
 	}
 	return results, truncated, nil
+}
+
+// Recent returns the most recently updated observations matching q's filters.
+// It does not inspect the full-text index, so an empty QueryText is valid.
+func (s *Store) Recent(ctx context.Context, q *Query) ([]*Observation, bool, error) {
+	if len(q.Scopes) == 0 {
+		return nil, false, nil
+	}
+	if !q.IncludePrivate && !q.IncludeShareable {
+		return nil, false, nil
+	}
+	limit := q.Limit
+	if limit <= 0 {
+		limit = 8
+	}
+
+	args := make([]any, 0, len(q.Scopes)+len(q.MemoryTypes)+2)
+	scopeClause, memTypeClause, projectClause, visClause := buildFilterClauses(q, &args)
+	args = append(args, limit+1)
+
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT o.id, o.project_path, o.scope, o.owner_agent, o.visibility,
+		       o.memory_type, o.title, o.content, o.topic_key, o.normalized_hash,
+		       o.source_run_id, o.source_stage, o.source_branch, o.source_commit,
+		       o.pinned, o.confidence, o.revision_count, o.duplicate_count,
+		       o.review_after, o.created_at, o.updated_at, o.deleted_at
+		FROM observations AS o
+		WHERE o.deleted_at IS NULL
+		  %s
+		  %s
+		  %s
+		  %s
+		ORDER BY o.updated_at DESC, o.created_at DESC, o.id DESC
+		LIMIT ?
+	`, scopeClause, memTypeClause, projectClause, visClause), args...)
+	if err != nil {
+		return nil, false, fmt.Errorf("recent: query: %w", err)
+	}
+	defer rows.Close()
+
+	var results []*Observation
+	for rows.Next() {
+		obs, err := scanObs(rows)
+		if err != nil {
+			return nil, false, fmt.Errorf("recent: scan: %w", err)
+		}
+		results = append(results, obs)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	truncated := len(results) > limit
+	if truncated {
+		results = results[:limit]
+	}
+	return results, truncated, nil
+}
+
+// buildFilterClauses appends the arguments for the shared scope, type,
+// project-isolation, and visibility predicates in placeholder order.
+func buildFilterClauses(q *Query, args *[]any) (scopeClause, memTypeClause, projectClause, visClause string) {
+	scopeHolders := make([]string, len(q.Scopes))
+	for i, sc := range q.Scopes {
+		scopeHolders[i] = "?"
+		*args = append(*args, sc)
+	}
+	scopeClause = fmt.Sprintf("AND o.scope IN (%s)", strings.Join(scopeHolders, ", "))
+
+	if len(q.MemoryTypes) > 0 {
+		holders := make([]string, len(q.MemoryTypes))
+		for i, mt := range q.MemoryTypes {
+			holders[i] = "?"
+			*args = append(*args, mt)
+		}
+		memTypeClause = fmt.Sprintf("AND o.memory_type IN (%s)", strings.Join(holders, ", "))
+	}
+
+	projectClause = "AND o.project_path IS NULL"
+	if q.ProjectPath != "" {
+		projectClause = "AND (o.project_path = ? OR o.project_path IS NULL)"
+		*args = append(*args, q.ProjectPath)
+	}
+
+	var visParts []string
+	if q.IncludePrivate {
+		visParts = append(visParts, "o.owner_agent = ?")
+		*args = append(*args, q.RequestingAgent)
+	}
+	if q.IncludeShareable {
+		visParts = append(visParts, "o.visibility = 'shareable'")
+	}
+	visClause = "AND (" + strings.Join(visParts, " OR ") + ")"
+	return scopeClause, memTypeClause, projectClause, visClause
 }
 
 // MarkReviewed clears the review_after field on the given observation.

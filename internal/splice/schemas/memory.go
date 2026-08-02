@@ -96,6 +96,22 @@ func (m MemoryQuery) Validate() error {
 	return nil
 }
 
+// ValidateRecent checks a recent-listing request. Recent listings do not need
+// a full-text query, but they use the same filters as a search.
+func (m MemoryQuery) ValidateRecent() error {
+	if m.RequestingAgent == "" {
+		return errors.New("requesting_agent is required")
+	}
+	for _, scope := range m.Scopes {
+		switch scope {
+		case "project", "global", "personal":
+		default:
+			return errors.New("scopes must be project, global, or personal")
+		}
+	}
+	return nil
+}
+
 // MemoryBundle is bounded memory context injected into a stage's HarnessStageInput.
 type MemoryBundle struct {
 	RequestingAgent string              `json:"requesting_agent"`

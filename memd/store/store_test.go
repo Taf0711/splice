@@ -437,6 +437,107 @@ func TestSearch_NoProjectContext(t *testing.T) {
 	}
 }
 
+// TestSearch_ProjectPathRequiredForScopedRows pins the project isolation
+// clause used by the TUI regression: a project path returns the row, while a
+// missing path does not.
+func TestSearch_ProjectPathRequiredForScopedRows(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+
+	obs := baseObs("tui", "workspace-only memory", "the project workspace path is required")
+	obs.ProjectPath = ns("/workspace/project")
+	if _, err := s.UpsertObservation(ctx, obs); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	withPath, _, err := s.Search(ctx, &store.Query{
+		ProjectPath:      "/workspace/project",
+		RequestingAgent:  "tui",
+		QueryText:        "workspace-only memory",
+		Scopes:           []string{"project", "global"},
+		IncludePrivate:   true,
+		IncludeShareable: true,
+		Limit:            10,
+	})
+	if err != nil {
+		t.Fatalf("search with project path: %v", err)
+	}
+	if len(withPath) != 1 {
+		t.Fatalf("search with project path returned %d rows, want 1", len(withPath))
+	}
+	withoutPath, _, err := s.Search(ctx, &store.Query{
+		RequestingAgent:  "tui",
+		QueryText:        "workspace-only memory",
+		Scopes:           []string{"project", "global"},
+		IncludePrivate:   true,
+		IncludeShareable: true,
+		Limit:            10,
+	})
+	if err != nil {
+		t.Fatalf("search without project path: %v", err)
+	}
+	if len(withoutPath) != 0 {
+		t.Fatalf("search without project path returned %d rows, want 0", len(withoutPath))
+	}
+}
+
+func TestRecentOrderingAndProjectIsolation(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+
+	aOld := baseObs("tui", "project A old", "older project A memory")
+	aOld.ProjectPath = ns("/workspace/project-a")
+	aOldStored, err := s.UpsertObservation(ctx, aOld)
+	if err != nil {
+		t.Fatalf("insert A old: %v", err)
+	}
+	aNew := baseObs("tui", "project A new", "newer project A memory")
+	aNew.ProjectPath = ns("/workspace/project-a")
+	aNewStored, err := s.UpsertObservation(ctx, aNew)
+	if err != nil {
+		t.Fatalf("insert A new: %v", err)
+	}
+	b := baseObs("tui", "project B", "project B memory")
+	b.ProjectPath = ns("/workspace/project-b")
+	if _, err := s.UpsertObservation(ctx, b); err != nil {
+		t.Fatalf("insert B: %v", err)
+	}
+	global := baseObs("tui", "global", "global memory")
+	global.Scope = "global"
+	globalStored, err := s.UpsertObservation(ctx, global)
+	if err != nil {
+		t.Fatalf("insert global: %v", err)
+	}
+	if _, err := s.DB().ExecContext(ctx, `UPDATE observations SET updated_at = CASE id WHEN ? THEN 10 WHEN ? THEN 30 WHEN ? THEN 20 ELSE updated_at END`, aOldStored.ID, aNewStored.ID, globalStored.ID); err != nil {
+		t.Fatalf("set recency: %v", err)
+	}
+
+	results, truncated, err := s.Recent(ctx, &store.Query{
+		ProjectPath:      "/workspace/project-a",
+		RequestingAgent:  "tui",
+		Scopes:           []string{"project", "global"},
+		IncludePrivate:   true,
+		IncludeShareable: true,
+		Limit:            10,
+	})
+	if err != nil {
+		t.Fatalf("recent: %v", err)
+	}
+	if truncated {
+		t.Fatal("recent unexpectedly truncated")
+	}
+	if len(results) != 3 {
+		t.Fatalf("recent returned %d rows, want project A rows plus global", len(results))
+	}
+	if results[0].ID != aNewStored.ID || results[1].ID != globalStored.ID || results[2].ID != aOldStored.ID {
+		t.Fatalf("recent order = [%d, %d, %d], want %d, %d, %d", results[0].ID, results[1].ID, results[2].ID, aNewStored.ID, globalStored.ID, aOldStored.ID)
+	}
+	for _, result := range results {
+		if result.ProjectPath.Valid && result.ProjectPath.String == "/workspace/project-b" {
+			t.Fatal("recent returned a row from project B")
+		}
+	}
+}
+
 // TestSearch_IncludePrivateFalse verifies that IncludePrivate=false excludes
 // the requesting agent's own private rows but keeps its shareable rows
 // (F-MR2).
