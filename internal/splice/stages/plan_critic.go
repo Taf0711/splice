@@ -27,7 +27,11 @@ func (PlanCritic) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 	if options.Plan == nil {
 		return schemas.HarnessStageOutput{}, fmt.Errorf("plan critic requires options.plan")
 	}
-	critiqueInput := schemas.PlanCriticInput{Plan: *options.Plan}
+	critiqueInput := schemas.PlanCriticInput{
+		Plan:           *options.Plan,
+		PipelineStages: input.PipelineStages,
+		NextStage:      input.NextStage,
+	}
 	if err := critiqueInput.Validate(); err != nil {
 		return schemas.HarnessStageOutput{}, fmt.Errorf("plan critic input: %w", err)
 	}

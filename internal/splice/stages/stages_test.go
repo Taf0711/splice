@@ -445,6 +445,131 @@ func TestCodeWriterRunIncludesMemoryInPayload(t *testing.T) {
 	}
 }
 
+// TestCodeWriterPayloadCarriesPipelineRoster pins the roster in the marshalled model payload.
+func TestCodeWriterPayloadCarriesPipelineRoster(t *testing.T) {
+	output := schemas.CodeWriterOutput{Files: []schemas.FileChange{}, Language: "go", Intent: "no changes", Confidence: 0.9}
+	args, _ := json.Marshal(output)
+	provider := &requestCapturingProvider{events: toolCallEvent("submit_code", string(args))}
+	input := newHarnessInput("write code")
+	input.PipelineStages = []string{"code_writer", "test_generator", "test_runner"}
+	input.NextStage = "test_generator"
+
+	if _, err := (CodeWriter{}).Run(context.Background(), input, provider, StageOptions{WorkDir: t.TempDir(), Language: "go"}); err != nil {
+		t.Fatalf("stage run: %v", err)
+	}
+	payload := modelUserPayload(t, provider.request)
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(payload), &fields); err != nil {
+		t.Fatalf("unmarshal model payload: %v", err)
+	}
+	var roster []string
+	if raw, ok := fields["pipeline_stages"]; !ok {
+		t.Fatalf("payload missing \"pipeline_stages\" key: %s", payload)
+	} else if err := json.Unmarshal(raw, &roster); err != nil {
+		t.Fatalf("unmarshal pipeline_stages: %v", err)
+	}
+	if !reflect.DeepEqual(roster, input.PipelineStages) {
+		t.Fatalf("pipeline_stages = %#v, want %#v", roster, input.PipelineStages)
+	}
+	var next string
+	if raw, ok := fields["next_stage"]; !ok {
+		t.Fatalf("payload missing \"next_stage\" key: %s", payload)
+	} else if err := json.Unmarshal(raw, &next); err != nil {
+		t.Fatalf("unmarshal next_stage: %v", err)
+	}
+	if next != input.NextStage {
+		t.Fatalf("next_stage = %q, want %q", next, input.NextStage)
+	}
+}
+
+// TestLastPipelineStageOmitsNextStage pins omitempty for the last roster stage.
+func TestLastPipelineStageOmitsNextStage(t *testing.T) {
+	output := schemas.CodeWriterOutput{Files: []schemas.FileChange{}, Language: "go", Intent: "no changes", Confidence: 0.9}
+	args, _ := json.Marshal(output)
+	provider := &requestCapturingProvider{events: toolCallEvent("submit_code", string(args))}
+	input := newHarnessInput("write code")
+	input.PipelineStages = []string{"code_writer"}
+
+	if _, err := (CodeWriter{}).Run(context.Background(), input, provider, StageOptions{WorkDir: t.TempDir(), Language: "go"}); err != nil {
+		t.Fatalf("stage run: %v", err)
+	}
+	payload := modelUserPayload(t, provider.request)
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(payload), &fields); err != nil {
+		t.Fatalf("unmarshal model payload: %v", err)
+	}
+	if _, ok := fields["next_stage"]; ok {
+		t.Fatalf("payload should omit empty next_stage: %s", payload)
+	}
+}
+
+// TestSelectRelevantContextIncludesAndOrdersPriorSummaries pins live prior summaries and deterministic ordering.
+func TestSelectRelevantContextIncludesAndOrdersPriorSummaries(t *testing.T) {
+	prior := map[string]string{
+		"static_analyzer":  "static summary",
+		"code_writer":      "code summary",
+		"security_auditor": "security summary",
+	}
+	roster := []string{"code_writer", "static_analyzer"}
+	want := []string{"static context", "code_writer: code summary", "static_analyzer: static summary", "security_auditor: security summary"}
+	for i := 0; i < 20; i++ {
+		got := selectRelevantContext([]string{"static context"}, prior, nil, roster)
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("iteration %d: context = %#v, want %#v", i, got, want)
+		}
+	}
+	keyOrder := selectRelevantContext(nil, map[string]string{"z": "z summary", "a": "a summary"}, nil, nil)
+	if wantKeys := []string{"a: a summary", "z: z summary"}; !reflect.DeepEqual(keyOrder, wantKeys) {
+		t.Fatalf("key fallback order = %#v, want %#v", keyOrder, wantKeys)
+	}
+}
+
+// TestTestGeneratorPayloadDoesNotDuplicateCodeWriterSummary pins the existing single summary edge.
+func TestTestGeneratorPayloadDoesNotDuplicateCodeWriterSummary(t *testing.T) {
+	output := schemas.TestGeneratorOutput{Files: []schemas.FileChange{}, Language: "go", Intent: "no changes", Confidence: 0.9}
+	args, _ := json.Marshal(output)
+	provider := &requestCapturingProvider{events: toolCallEvent("submit_tests", string(args))}
+	input := newHarnessInput("write tests")
+	input.PriorSummaries = map[string]string{"code_writer": "implemented the fix"}
+
+	if _, err := (TestGenerator{}).Run(context.Background(), input, provider, StageOptions{WorkDir: t.TempDir(), Language: "go"}); err != nil {
+		t.Fatalf("stage run: %v", err)
+	}
+	payload := modelUserPayload(t, provider.request)
+	if count := strings.Count(payload, "code_writer: implemented the fix"); count != 1 {
+		t.Fatalf("code_writer summary count = %d, want 1 in payload %s", count, payload)
+	}
+}
+
+// TestPlanCriticPayloadOmitsRosterWithoutPipeline pins design-phase absence of roster fields.
+func TestPlanCriticPayloadOmitsRosterWithoutPipeline(t *testing.T) {
+	plan := schemas.DesignPlan{
+		Source: "conversation", Epic: "add feature", Requirements: []string{"it works"},
+		InScope: []string{"code"}, Tasks: []schemas.Task{{ID: "t1", Title: "write code", Intent: "impl"}},
+	}
+	critique := schemas.PlanCritique{Critiques: []schemas.Critique{}, CrossCuttingConcerns: []string{}, OverallAssessment: "sound"}
+	args, _ := json.Marshal(critique)
+	provider := &requestCapturingProvider{events: toolCallEvent("submit_critique", string(args))}
+	if _, err := (PlanCritic{}).Run(context.Background(), newHarnessInput("review plan"), provider, StageOptions{Plan: &plan}); err != nil {
+		t.Fatalf("stage run: %v", err)
+	}
+	payload := modelUserPayload(t, provider.request)
+	if strings.Contains(payload, "pipeline_stages") || strings.Contains(payload, "next_stage") {
+		t.Fatalf("design-phase payload should omit roster fields: %s", payload)
+	}
+}
+
+func modelUserPayload(t *testing.T, request zeroruntime.CompletionRequest) string {
+	t.Helper()
+	for _, message := range request.Messages {
+		if message.Role == zeroruntime.MessageRoleUser {
+			return message.Content
+		}
+	}
+	t.Fatalf("model request has no user payload: %#v", request.Messages)
+	return ""
+}
+
 func TestCodeWriterRunOmitsMemoryFieldWhenNil(t *testing.T) {
 	workDir := t.TempDir()
 	output := schemas.CodeWriterOutput{

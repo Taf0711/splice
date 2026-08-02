@@ -45,9 +45,11 @@ func (CodeWriter) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 		Intent:          input.RequestIntent,
 		Language:        options.language("python"),
 		TargetPaths:     options.TargetPaths,
-		RelevantContext: selectRelevantContext(options.RelevantContext, input.PriorSummaries, input.Context),
+		RelevantContext: selectRelevantContext(options.RelevantContext, input.PriorSummaries, input.Context, input.PipelineStages),
 		RevisionContext: input.RevisionContext,
 		Memory:          selectMemory(input.MemoryBundle),
+		PipelineStages:  input.PipelineStages,
+		NextStage:       input.NextStage,
 	}
 	if err := cwInput.Validate(); err != nil {
 		return schemas.HarnessStageOutput{}, fmt.Errorf("code writer input: %w", err)

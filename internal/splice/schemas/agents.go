@@ -94,6 +94,8 @@ type CodeWriterInput struct {
 	RelevantContext []string         `json:"relevant_context,omitempty"`
 	RevisionContext *string          `json:"revision_context,omitempty"`
 	Memory          []SelectedMemory `json:"memory,omitempty"`
+	PipelineStages  []string         `json:"pipeline_stages,omitempty"`
+	NextStage       string           `json:"next_stage,omitempty"`
 }
 
 // Validate checks the code writer input.
@@ -168,6 +170,8 @@ type TestGeneratorInput struct {
 	RelevantContext []string         `json:"relevant_context,omitempty"`
 	RevisionContext *string          `json:"revision_context,omitempty"`
 	Memory          []SelectedMemory `json:"memory,omitempty"`
+	PipelineStages  []string         `json:"pipeline_stages,omitempty"`
+	NextStage       string           `json:"next_stage,omitempty"`
 }
 
 // Validate checks the test generator input.

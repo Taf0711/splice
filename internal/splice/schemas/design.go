@@ -309,6 +309,8 @@ func (d DesignPlan) Validate() error {
 type PlanCriticInput struct {
 	Plan            DesignPlan `json:"plan"`
 	RelevantContext []string   `json:"relevant_context,omitempty"`
+	PipelineStages  []string   `json:"pipeline_stages,omitempty"`
+	NextStage       string     `json:"next_stage,omitempty"`
 }
 
 // Validate checks the plan critic input.

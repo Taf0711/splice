@@ -145,7 +145,7 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 	}, nil
 }
 
-func testCommand(workDir string, languages ...string) ([]string, error) {
+func testCommand(workDir string, language string) ([]string, error) {
 	if workDir == "" {
 		return nil, fmt.Errorf("no work_dir and no command provided")
 	}
@@ -160,15 +160,13 @@ func testCommand(workDir string, languages ...string) ([]string, error) {
 		}
 	}
 	// Keep defaults to runners with a clear workspace convention.
-	if len(languages) > 0 {
-		switch strings.ToLower(strings.TrimSpace(languages[0])) {
-		case "go", "golang":
-			if _, statErr := os.Stat(filepath.Join(workDir, "go.mod")); statErr == nil {
-				return []string{"go", "test", "./..."}, nil
-			}
-		case "python", "python3":
-			return []string{"python", "-m", "pytest"}, nil
+	switch strings.ToLower(strings.TrimSpace(language)) {
+	case "go", "golang":
+		if _, statErr := os.Stat(filepath.Join(workDir, "go.mod")); statErr == nil {
+			return []string{"go", "test", "./..."}, nil
 		}
+	case "python", "python3":
+		return []string{"python", "-m", "pytest"}, nil
 	}
 	return nil, nil
 }

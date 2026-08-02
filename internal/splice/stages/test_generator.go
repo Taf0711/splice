@@ -50,6 +50,8 @@ func (TestGenerator) Run(ctx context.Context, input schemas.HarnessStageInput, p
 		RelevantContext: relevantContext,
 		RevisionContext: input.RevisionContext,
 		Memory:          selectMemory(input.MemoryBundle),
+		PipelineStages:  input.PipelineStages,
+		NextStage:       input.NextStage,
 	}
 	if err := tgInput.Validate(); err != nil {
 		return schemas.HarnessStageOutput{}, fmt.Errorf("test generator input: %w", err)
