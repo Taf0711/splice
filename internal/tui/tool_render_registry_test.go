@@ -139,3 +139,43 @@ func TestToolBodyRegistryTrimsRegisteredNames(t *testing.T) {
 		t.Fatalf("grep body = %q, want trimmed registered renderer", got)
 	}
 }
+
+// The escape stripping first landed in genericCardBody only, which left the
+// specialized renderers — bash, exec, grep, diff — still handing a hostile
+// command's or file's raw bytes to the terminal. Every card dispatches through
+// registry.render, so this pins the whole set at that one boundary.
+func TestRegistryRenderSanitizesEveryToolRenderer(t *testing.T) {
+	registry := newDefaultToolBodyRegistry()
+	opts := cardRenderOptions{bodyCap: cardBodyMaxLines}
+
+	for _, tt := range []struct {
+		name   string
+		hint   string
+		detail string
+	}{
+		{name: "bash", hint: "ls", detail: "stdout:\nsafe\x1b[2Jtail\nexit_code: 0"},
+		{name: "exec_command", hint: "ls", detail: "stdout:\nsafe\x1b[2Jtail\nexit_code: 0"},
+		{name: "grep", detail: "internal/x.go:1: safe\x1b[2Jtail"},
+		{name: "read_file", detail: "safe\x1b[2Jtail"},
+		{name: "unknown_tool", detail: "safe\x1b[2Jtail"},
+		{name: "bash_osc8", hint: "ls", detail: "stdout:\n\x1b]8;;http://evil\x07click\x1b]8;;\x07\nexit_code: 0"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			body := registry.render(toolBodyRequest{
+				name:   tt.name,
+				hint:   tt.hint,
+				detail: tt.detail,
+				width:  96,
+				opts:   opts,
+			})
+			got := plainRender(t, strings.Join(append(append([]string{}, body.lines...), body.headTag, body.footer), "\n"))
+			if strings.Contains(got, "\x1b[2J") || strings.Contains(got, "\x1b]8;") {
+				t.Fatalf("%s body still carries an escape sequence: %q", tt.name, got)
+			}
+			// The escape must not survive as visible text either.
+			if strings.Contains(got, "[2J") || strings.Contains(got, "]8;;") {
+				t.Fatalf("%s body leaked the escape payload as text: %q", tt.name, got)
+			}
+		})
+	}
+}

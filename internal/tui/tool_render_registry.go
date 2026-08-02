@@ -145,6 +145,7 @@ func (registry *toolBodyRegistry) register(name string, renderer toolBodyRendere
 }
 
 func (registry *toolBodyRegistry) render(req toolBodyRequest) cardBody {
+	req.opts.width = req.width
 	req.detail = normalizeToolCardDetail(req.detail)
 	if strings.TrimSpace(req.detail) == "" {
 		return cardBody{}
@@ -169,7 +170,12 @@ func normalizeToolCardDetail(detail string) string {
 	// Terminal tab stops are unknowable from here and break the width math
 	// (lipgloss measures \t as one cell, the terminal expands it further), so
 	// card bodies render tabs as a fixed indent.
-	return strings.ReplaceAll(detail, "\t", "    ")
+	detail = strings.ReplaceAll(detail, "\t", "    ")
+	// Every tool card renders through this one normalization, so the escape
+	// stripping belongs here rather than in each body renderer. Sanitizing only
+	// the generic renderer left the specialized ones — bash, exec, grep, diff —
+	// still handing a hostile file's or command's raw bytes to the terminal.
+	return sanitizeTerminalOutput(detail, true)
 }
 
 type diffFirstToolBodyRenderer struct {
