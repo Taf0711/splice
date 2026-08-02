@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -23,11 +25,16 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 	var cmd []string
 	cmd = append([]string(nil), options.Command...)
 	if len(cmd) == 0 {
-		detected, err := testCommand(options.WorkDir)
+		detected, err := testCommand(options.WorkDir, options.Language)
 		if err != nil {
 			return schemas.HarnessStageOutput{}, fmt.Errorf("detect test command: %w", err)
 		}
 		cmd = detected
+	}
+	if len(cmd) == 0 {
+		output := skippedTestOutput(options.Language)
+		options.report(output.Detail)
+		return output, nil
 	}
 
 	timeout := 120
@@ -138,20 +145,57 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 	}, nil
 }
 
-func testCommand(workDir string) ([]string, error) {
+func testCommand(workDir string, languages ...string) ([]string, error) {
 	if workDir == "" {
 		return nil, fmt.Errorf("no work_dir and no command provided")
 	}
 	checks, err := testrunner.Detect(workDir)
-	if err != nil || len(checks) == 0 {
-		return []string{"go", "test", "./..."}, nil
+	if err != nil {
+		return nil, nil
 	}
+	// Detect returns checks in a stable order, so the first runnable test check is deterministic.
 	for _, c := range checks {
-		if len(c.Command) > 0 {
+		if c.Kind == testrunner.KindTest && len(c.Command) > 0 {
 			return c.Command, nil
 		}
 	}
-	return nil, fmt.Errorf("no runnable test command detected")
+	// Keep defaults to runners with a clear workspace convention.
+	if len(languages) > 0 {
+		switch strings.ToLower(strings.TrimSpace(languages[0])) {
+		case "go", "golang":
+			if _, statErr := os.Stat(filepath.Join(workDir, "go.mod")); statErr == nil {
+				return []string{"go", "test", "./..."}, nil
+			}
+		case "python", "python3":
+			return []string{"python", "-m", "pytest"}, nil
+		}
+	}
+	return nil, nil
+}
+
+func skippedTestOutput(language string) schemas.HarnessStageOutput {
+	reason := "No test command could be detected; verification could not run."
+	if language != "" {
+		reason = fmt.Sprintf("No test command could be detected for language %q; verification could not run.", language)
+	}
+	results := schemas.TestRunResults{
+		Command: []string{"<no test command detected>"},
+		Tests: []schemas.TestCaseResult{{
+			Name:    "suite",
+			Status:  "skipped",
+			Message: reason,
+		}},
+	}
+	return schemas.HarnessStageOutput{
+		Summary:    "Verification skipped: no test command could be detected.",
+		Detail:     reason,
+		Confidence: 0.0,
+		Data: map[string]any{
+			"test_results":      results,
+			"test_command":      nil,
+			"known_limitations": []string{reason},
+		},
+	}
 }
 
 func runCommand(ctx context.Context, command []string, cwd string, timeoutSeconds int) schemas.TestRunResults {
