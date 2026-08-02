@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -685,6 +686,174 @@ func TestApproveCommandEmitsResultMessage(t *testing.T) {
 	msg := execCmd(cmd)
 	if _, ok := msg.(planExecutionResultMsg); !ok {
 		t.Fatalf("expected planExecutionResultMsg, got %T", msg)
+	}
+}
+
+func approvePlanEvents() []zeroruntime.StreamEvent {
+	args, _ := json.Marshal(schemas.CodeWriterOutput{
+		Files:      []schemas.FileChange{{Path: "hello.go", Content: "package hello\n", ChangeType: "create"}},
+		Language:   "go",
+		Intent:     "create hello.go",
+		Confidence: 0.9,
+	})
+	return []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventText, Content: "stage text"},
+		{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "submit", ToolName: "submit_code"},
+		{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "submit", ArgumentsFragment: string(args)},
+		{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "submit"},
+		{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 10, OutputTokens: 5}},
+		{Type: zeroruntime.StreamEventDone},
+	}
+}
+
+// TestApproveAskModeSurfacesPermissionRegression covers the reported bug:
+// /approve used to fail every gated tool in ask mode because its permission
+// callback was nil instead of surfacing a TUI prompt.
+func TestApproveAskModeSurfacesPermissionRegression(t *testing.T) {
+	var prompts int
+	provider := &fakeProvider{events: approvePlanEvents()}
+	store := testSessionStore(t)
+	root := t.TempDir()
+	m := newDesignModeTestModel(root, provider, store)
+	m.runtimeMessageSink = func(msg tea.Msg) {
+		if prompt, ok := msg.(permissionRequestMsg); ok {
+			prompts++
+			prompt.decide(agent.PermissionDecision{Action: agent.PermissionDecisionAllow})
+		}
+	}
+	sess, err := store.Create(sessions.CreateInput{SessionID: "approve-session", Cwd: root})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	m.activeSession = sess
+	tier := schemas.TierTrivial
+	m.pendingPlan = &schemas.DesignPlan{Epic: "Approve callbacks", Requirements: []string{"write the file"}, InScope: []string{"hello.go"}, Source: "authored", Tasks: []schemas.Task{{ID: "t1", Title: "Write hello", Intent: "Create hello.go", EstimatedTier: &tier}}}
+
+	_, cmd := m.handleApproveCommand()
+	if cmd == nil {
+		t.Fatal("expected /approve command")
+	}
+	msg := execCmd(cmd)
+	result, ok := msg.(planExecutionResultMsg)
+	if !ok {
+		t.Fatalf("expected planExecutionResultMsg, got %T", msg)
+	}
+	if result.err != nil {
+		t.Fatalf("approved plan failed: %v", result.err)
+	}
+	if prompts != 1 {
+		t.Fatalf("permission prompts = %d, want 1", prompts)
+	}
+}
+
+func TestApprovePlanStreamsTextAndToolCall(t *testing.T) {
+	var messages []tea.Msg
+	provider := &fakeProvider{events: approvePlanEvents()}
+	store := testSessionStore(t)
+	root := t.TempDir()
+	m := newDesignModeTestModel(root, provider, store)
+	m.runtimeMessageSink = func(msg tea.Msg) {
+		messages = append(messages, msg)
+		if prompt, ok := msg.(permissionRequestMsg); ok {
+			prompt.decide(agent.PermissionDecision{Action: agent.PermissionDecisionAllow})
+		}
+	}
+	sess, err := store.Create(sessions.CreateInput{SessionID: "approve-session", Cwd: root})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	m.activeSession = sess
+	tier := schemas.TierTrivial
+	m.pendingPlan = &schemas.DesignPlan{Epic: "Approve callbacks", Requirements: []string{"write the file"}, InScope: []string{"hello.go"}, Source: "authored", Tasks: []schemas.Task{{ID: "t1", Title: "Write hello", Intent: "Create hello.go", EstimatedTier: &tier}}}
+	started, cmd := m.handleApproveCommand()
+	msg := execCmd(cmd)
+	for _, live := range messages {
+		updated, _ := started.Update(live)
+		started = updated.(model)
+	}
+	if !transcriptContains(started.transcript, "stage text") {
+		t.Fatalf("expected stage text in transcript, got %#v", started.transcript)
+	}
+	foundTool := false
+	for _, live := range messages {
+		if _, ok := live.(agentRowMsg); ok {
+			foundTool = true
+			break
+		}
+		if _, ok := live.(toolCallStreamStartMsg); ok {
+			foundTool = true
+			break
+		}
+	}
+	if !foundTool {
+		t.Fatalf("expected tool call card or stream message, got %#v", messages)
+	}
+	if _, ok := msg.(planExecutionResultMsg); !ok {
+		t.Fatalf("expected planExecutionResultMsg, got %T", msg)
+	}
+}
+
+func TestApprovePlanPersistsAttributedUsage(t *testing.T) {
+	provider := &fakeProvider{events: approvePlanEvents()}
+	store := testSessionStore(t)
+	root := t.TempDir()
+	m := newDesignModeTestModel(root, provider, store)
+	m.runtimeMessageSink = func(msg tea.Msg) {
+		if prompt, ok := msg.(permissionRequestMsg); ok {
+			prompt.decide(agent.PermissionDecision{Action: agent.PermissionDecisionAllow})
+		}
+	}
+	sess, err := store.Create(sessions.CreateInput{SessionID: "approve-session", Cwd: root})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	m.activeSession = sess
+	tier := schemas.TierTrivial
+	m.pendingPlan = &schemas.DesignPlan{Epic: "Approve callbacks", Requirements: []string{"write the file"}, InScope: []string{"hello.go"}, Source: "authored", Tasks: []schemas.Task{{ID: "t1", Title: "Write hello", Intent: "Create hello.go", EstimatedTier: &tier}}}
+	_, cmd := m.handleApproveCommand()
+	if msg := execCmd(cmd); msg == nil {
+		t.Fatal("expected plan result")
+	}
+	events, err := store.ReadEvents(m.activeSession.SessionID)
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	if !eventTypesContain(events, sessions.EventUsage) {
+		t.Fatalf("expected usage event, got %v", eventTypes(events))
+	}
+}
+
+func TestApprovePlanCancellationDuringPermissionPromptDoesNotHang(t *testing.T) {
+	permissionSeen := make(chan struct{})
+	provider := &fakeProvider{events: approvePlanEvents()}
+	store := testSessionStore(t)
+	root := t.TempDir()
+	m := newDesignModeTestModel(root, provider, store)
+	m.runtimeMessageSink = func(msg tea.Msg) {
+		if _, ok := msg.(permissionRequestMsg); ok {
+			close(permissionSeen)
+		}
+	}
+	sess, err := store.Create(sessions.CreateInput{SessionID: "approve-session", Cwd: root})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	m.activeSession = sess
+	tier := schemas.TierTrivial
+	m.pendingPlan = &schemas.DesignPlan{Epic: "Approve callbacks", Requirements: []string{"write the file"}, InScope: []string{"hello.go"}, Source: "authored", Tasks: []schemas.Task{{ID: "t1", Title: "Write hello", Intent: "Create hello.go", EstimatedTier: &tier}}}
+	started, cmd := m.handleApproveCommand()
+	resultCh := make(chan tea.Msg, 1)
+	go func() { resultCh <- execCmd(cmd) }()
+	select {
+	case <-permissionSeen:
+	case <-time.After(2 * time.Second):
+		t.Fatal("permission prompt did not surface")
+	}
+	started.runCancel()
+	select {
+	case <-resultCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("approve run hung after cancellation")
 	}
 }
 
