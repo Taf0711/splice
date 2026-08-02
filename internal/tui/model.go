@@ -2307,6 +2307,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pendingPlan = &msg.plan
 				m.pendingCritique = nil
 				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: formatDesignPlan(msg.plan)})
+				if warning := designCoverageWarning(msg.plan); warning != "" {
+					m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: warning})
+				}
 				if msg.critique.Validate() == nil {
 					m.pendingCritique = &msg.critique
 					m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: formatPlanCritique(msg.critique)})
@@ -2334,6 +2337,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pendingPlan = &msg.plan
 		m.pendingCritique = &msg.critique
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: formatDesignPlan(msg.plan)})
+		if warning := designCoverageWarning(msg.plan); warning != "" {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: warning})
+		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: formatPlanCritique(msg.critique)})
 		if msg.critique.MustFixBeforeExecution {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Critic flagged must-fix issues. /approve is blocked. Revise and re-run /crystallize."})

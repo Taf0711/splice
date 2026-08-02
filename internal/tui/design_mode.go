@@ -517,6 +517,44 @@ type planExecutionResultMsg struct {
 	sessionEvents []pendingSessionEvent
 }
 
+// designCoverageWarning reports plan fields that the conversation did not
+// settle. Empty optional fields can be correct, so this note never blocks
+// review or approval.
+func designCoverageWarning(plan schemas.DesignPlan) string {
+	var unsettled []string
+	if len(plan.OutOfScope) == 0 {
+		unsettled = append(unsettled, "out of scope")
+	}
+	if strings.TrimSpace(plan.SystemDesign) == "" {
+		unsettled = append(unsettled, "system design")
+	}
+	for _, task := range plan.Tasks {
+		if len(task.AcceptanceFacts) == 0 {
+			unsettled = append(unsettled, fmt.Sprintf("acceptance facts for task %q", task.Title))
+			continue
+		}
+		for _, fact := range task.AcceptanceFacts {
+			if fact.AutomatedVerification {
+				continue
+			}
+			if fact.VerificationCommand == nil || strings.TrimSpace(*fact.VerificationCommand) == "" {
+				unsettled = append(unsettled, fmt.Sprintf("acceptance fact %q on task %q has no automated verification command", fact.Statement, task.Title))
+			}
+		}
+	}
+	if len(unsettled) == 0 {
+		return ""
+	}
+	// A plan of this size can carry a dozen unsettled criteria whose statements
+	// run to a sentence each, and the note is read at a glance. Name the first
+	// few and count the rest.
+	const maxNamed = 3
+	if extra := len(unsettled) - maxNamed; extra > 0 {
+		unsettled = append(unsettled[:maxNamed:maxNamed], fmt.Sprintf("and %d more", extra))
+	}
+	return "Design coverage note: the conversation did not settle these: " + strings.Join(unsettled, "; ") + "."
+}
+
 func formatDesignPlan(plan schemas.DesignPlan) string {
 	var b strings.Builder
 	b.WriteString("Plan: " + plan.Epic + "\n")
