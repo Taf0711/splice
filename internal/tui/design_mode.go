@@ -20,6 +20,8 @@ import (
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
+const designModeNotice = "Planning mode: the agent can read and search files, but it cannot edit files or run commands in this phase. Use /crystallize, then /approve, to create and execute a plan; use /exec <prompt> as a direct-run shortcut."
+
 // enterDesignMode sets designMode, ensures an active session, records the
 // design_mode_entered lifecycle event, and appends the supplied orientation
 // notice. The caller decides whether the notice is shown (long notice once per

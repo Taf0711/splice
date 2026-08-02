@@ -111,7 +111,7 @@ func (m model) startNewSession() model {
 	// A fresh session starts in planning (design) mode. Reset the notice gate so
 	// the orientation fires for this new epoch, then enter design mode cleanly.
 	m.designNoticeShown = false
-	m = m.enterDesignMode("Planning mode. Describe what you want to build; Splice will crystallize a plan. Type /exec <prompt> to run a prompt directly through the pipeline.")
+	m = m.enterDesignMode(designModeNotice)
 	m.designNoticeShown = true
 	// Scrollback above can't be un-printed; a faint divider marks the boundary and
 	// the flush frontier restarts for the fresh transcript (mirrors /clear, /resume).

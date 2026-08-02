@@ -140,6 +140,7 @@ type model struct {
 	selfCorrectTests   bool
 	reasoningEffort    modelregistry.ReasoningEffort
 	responseStyle      string
+	asciiEnabled       bool
 	keyBindings        keyBindings
 	themeMode          themeMode // palette preference: auto (default), dark, light
 	hasDarkBg          bool      // last terminal background-detection result (auto mode)
@@ -798,6 +799,7 @@ func newModel(ctx context.Context, options Options) model {
 	if permissionMode == "" {
 		permissionMode = agent.PermissionModeAuto
 	}
+	asciiEnabled := spliceASCIIEnabled(os.Getenv)
 
 	input := textinput.New()
 	input.Prompt = "∞ "
@@ -858,6 +860,7 @@ func newModel(ctx context.Context, options Options) model {
 		sessionCompactor:            options.SessionCompactor,
 		runtimeMessageSink:          options.RuntimeMessageSink,
 		permissionMode:              permissionMode,
+		asciiEnabled:                asciiEnabled,
 		reasoningEffort:             options.ReasoningEffort,
 		responseStyle:               defaultedResponseStyle(options.ResponseStyle),
 		keyBindings:                 resolvedKeyBindings,
@@ -2619,7 +2622,7 @@ func (m model) View() tea.View {
 		content = m.detailedTranscriptView()
 	}
 
-	view := tea.NewView(content)
+	view := tea.NewView(foldASCII(content, m.asciiEnabled))
 	view.AltScreen = m.altScreen
 	// Paint the whole frame with the active theme's surface. Splice never paints the
 	// terminal's own canvas, so without this a theme's text falls on the terminal
@@ -4591,7 +4594,7 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 	// side-effect-free while still recording the design epoch for resume and
 	// showing the notice once.
 	if m.designMode && !m.designNoticeShown {
-		m = m.enterDesignMode("Planning mode. Describe what you want to build; Splice will crystallize a plan. Type /exec <prompt> to run a prompt directly through the pipeline.")
+		m = m.enterDesignMode(designModeNotice)
 		m.designNoticeShown = true
 	}
 	// A leading "@specialist <task>" is expanded into an explicit Task-delegation
