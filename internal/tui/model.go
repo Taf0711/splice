@@ -2352,17 +2352,21 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.runCancel = nil
 		m.activeRunID = 0
+		// Refresh before the failure branch returns. A run that fails still
+		// appended events — the approval, the tasks that did start, and each
+		// stage's usage — and leaving those on disk only makes the live session
+		// disagree with its own log for exactly the run the user needs to inspect.
+		if msg.store != nil && msg.sessionID != "" {
+			if events, err := msg.store.ReadEvents(msg.sessionID); err == nil {
+				m.sessionEvents = events
+			}
+		}
 		if msg.err != nil {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Plan execution failed: " + msg.err.Error()})
 			return m, nil
 		}
 		m.designMode = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendAssistant, text: msg.result.FinalAnswer})
-		if msg.store != nil && msg.sessionID != "" {
-			if events, err := msg.store.ReadEvents(msg.sessionID); err == nil {
-				m.sessionEvents = events
-			}
-		}
 		m.pendingPlan = nil
 		m.pendingCritique = nil
 		return m, nil

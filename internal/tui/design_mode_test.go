@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -686,6 +687,47 @@ func TestApproveCommandEmitsResultMessage(t *testing.T) {
 	msg := execCmd(cmd)
 	if _, ok := msg.(planExecutionResultMsg); !ok {
 		t.Fatalf("expected planExecutionResultMsg, got %T", msg)
+	}
+}
+
+// This test pins the failure path to refreshing session events. A failed plan
+// run still appended the approval, any tasks that started, and each stage's
+// usage; returning early on the error left the live session disagreeing with
+// its own log for exactly the run a user needs to inspect.
+func TestFailedPlanExecutionStillRefreshesSessionEvents(t *testing.T) {
+	store := testSessionStore(t)
+	m := newDesignModeTestModel(t.TempDir(), &fakeProvider{}, store)
+	sess, err := store.Create(sessions.CreateInput{SessionID: "failed-plan-session", Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	m.activeSession = sess
+	m.activeRunID = 7
+	m.pending = true
+
+	// An event the run appended that the in-memory model has not seen yet.
+	if _, err := store.AppendEvent(sess.SessionID, sessions.AppendEventInput{
+		Type:    sessions.EventPlanApproved,
+		Payload: splicerun.PlanApprovedPayload{PlanID: "plan-failed"},
+	}); err != nil {
+		t.Fatalf("append plan approved: %v", err)
+	}
+
+	next, _ := m.Update(planExecutionResultMsg{
+		runID:     7,
+		err:       errors.New("task step-1 stopped with status failed"),
+		store:     store,
+		sessionID: sess.SessionID,
+	})
+	updated, ok := next.(model)
+	if !ok {
+		t.Fatalf("Update returned %T, want model", next)
+	}
+	if len(updated.sessionEvents) == 0 {
+		t.Fatal("failed plan execution left session events stale (none loaded)")
+	}
+	if !transcriptContains(updated.transcript, "Plan execution failed") {
+		t.Fatalf("expected the failure to be reported, got %#v", updated.transcript)
 	}
 }
 
