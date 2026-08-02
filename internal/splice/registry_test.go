@@ -16,7 +16,7 @@ func TestBuildStageRegistryRegistersAllStages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildStageRegistry: %v", err)
 	}
-	for _, name := range []string{"code_writer", "test_generator", "test_runner", "static_analyzer", "security_auditor"} {
+	for _, name := range []string{"code_writer", "test_generator", "test_runner", "acceptance_verifier", "static_analyzer", "security_auditor"} {
 		if _, ok := registry[name]; !ok {
 			t.Errorf("stage %q missing from registry", name)
 		}

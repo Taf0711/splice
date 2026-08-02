@@ -320,6 +320,7 @@ type ExecutionPlan struct {
 	RequestIntent          string           `json:"request_intent"`
 	Stages                 []ExecutionStage `json:"stages"`
 	TokenBudget            TokenBudget      `json:"token_budget"`
+	AcceptanceFacts        []AcceptanceFact `json:"acceptance_facts,omitempty"`
 	RequiredKnowledgeFiles []string         `json:"required_knowledge_files,omitempty"`
 }
 
@@ -338,6 +339,11 @@ func (e ExecutionPlan) Validate() error {
 	}
 	if len(e.Stages) == 0 {
 		return errors.New("at least one stage is required")
+	}
+	for i, fact := range e.AcceptanceFacts {
+		if err := fact.Validate(); err != nil {
+			return fmt.Errorf("acceptance_facts[%d]: %w", i, err)
+		}
 	}
 	stageNames := make(map[string]struct{}, len(e.Stages))
 	for i, stage := range e.Stages {
@@ -462,6 +468,7 @@ type HarnessStageInput struct {
 	Sequence        int               `json:"sequence"`
 	PlanTier        PipelineTier      `json:"plan_tier"`
 	RequestIntent   string            `json:"request_intent"`
+	AcceptanceFacts []AcceptanceFact  `json:"acceptance_facts,omitempty"`
 	PriorSummaries  map[string]string `json:"prior_summaries,omitempty"`
 	RevisionContext *string           `json:"revision_context,omitempty"`
 	Context         *ContextBundle    `json:"context,omitempty"`
@@ -490,6 +497,11 @@ func (h HarnessStageInput) Validate() error {
 	}
 	if h.RequestIntent == "" {
 		return errors.New("request_intent is required")
+	}
+	for i, fact := range h.AcceptanceFacts {
+		if err := fact.Validate(); err != nil {
+			return fmt.Errorf("acceptance_facts[%d]: %w", i, err)
+		}
 	}
 	switch h.PlanTier {
 	case TierTrivial, TierLight, TierStandard, TierSubstantial, TierArchitectural:

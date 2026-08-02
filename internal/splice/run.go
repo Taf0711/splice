@@ -473,13 +473,14 @@ func runIterationLoop(
 }
 
 // isModelFreeStage reports whether a pipeline stage runs deterministically
-// without a provider. F14a: static analysis, security audit, and test execution
+// without a provider. F14a: static analysis, security audit, test execution,
+// and acceptance verification
 // are model-free. Every other stage (including unknown/custom stage names) keeps
 // the current model-backed default so test and extension seams do not silently
 // lose their provider.
 func isModelFreeStage(name string) bool {
 	switch name {
-	case "static_analyzer", "security_auditor", "test_runner":
+	case "static_analyzer", "security_auditor", "test_runner", "acceptance_verifier":
 		return true
 	default:
 		return false
@@ -544,6 +545,7 @@ func runPass(
 			Sequence:        seq + 1,
 			PlanTier:        plan.Tier,
 			RequestIntent:   plan.RequestIntent,
+			AcceptanceFacts: append([]schemas.AcceptanceFact(nil), plan.AcceptanceFacts...),
 			PriorSummaries:  maps.Clone(priorSummaries),
 			RevisionContext: revisionContext,
 			PipelineStages:  stageNames,
@@ -741,7 +743,7 @@ func passSucceeded(records []schemas.StageRecord, state schemas.IterationState) 
 			return false
 		}
 	}
-	if state.TestsFailing > 0 || state.TestsErrored > 0 {
+	if state.TestsFailing > 0 || state.TestsErrored > 0 || state.AcceptanceFactsFailing > 0 {
 		return false
 	}
 	if state.LintIssuesBySeverity[schemas.SeverityCritical] > 0 || state.LintIssuesBySeverity[schemas.SeverityHigh] > 0 {

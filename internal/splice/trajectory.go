@@ -18,6 +18,8 @@ func ComputeScore(state schemas.IterationState) float64 {
 		state.TestsPassing*10 -
 			state.TestsFailing*8 -
 			state.TestsErrored*12 -
+			state.AcceptanceFactsFailing*12 +
+			state.AcceptanceFactsPassing*10 -
 			state.LintIssuesBySeverity[schemas.SeverityHigh]*3 -
 			state.LintIssuesBySeverity[schemas.SeverityMedium]*1 -
 			state.SecurityIssuesBySeverity[schemas.SeverityCritical]*50 -
@@ -122,6 +124,10 @@ func ComputeIterationState(iteration int, stageOutputs []schemas.HarnessStageOut
 	if err != nil {
 		return schemas.IterationState{}, fmt.Errorf("code_writer_output: %w", err)
 	}
+	acceptanceResults, err := typedPayloads[[]schemas.TestCaseResult](stageOutputs, "acceptance_results")
+	if err != nil {
+		return schemas.IterationState{}, fmt.Errorf("acceptance_results: %w", err)
+	}
 
 	linesAdded, linesRemoved := countDiffLines(changeSummary.DiffText)
 
@@ -136,6 +142,8 @@ func ComputeIterationState(iteration int, stageOutputs []schemas.HarnessStageOut
 		TestsPassing:             countTests(testResults, "passed"),
 		TestsFailing:             countTests(testResults, "failed"),
 		TestsErrored:             countTests(testResults, "errored"),
+		AcceptanceFactsPassing:   countAcceptanceResults(acceptanceResults, "passed"),
+		AcceptanceFactsFailing:   countAcceptanceResults(acceptanceResults, "failed", "errored"),
 		LintIssuesBySeverity:     countBySeverity(staticOutputs),
 		SecurityIssuesBySeverity: countBySeverity(securityOutputs),
 		TypeErrors:               0,
@@ -148,6 +156,22 @@ func ComputeIterationState(iteration int, stageOutputs []schemas.HarnessStageOut
 		LinesAdded:               linesAdded,
 		LinesRemoved:             linesRemoved,
 	}, nil
+}
+
+func countAcceptanceResults(results [][]schemas.TestCaseResult, statuses ...string) int {
+	wanted := make(map[string]struct{}, len(statuses))
+	for _, status := range statuses {
+		wanted[status] = struct{}{}
+	}
+	count := 0
+	for _, cases := range results {
+		for _, tc := range cases {
+			if _, ok := wanted[tc.Status]; ok {
+				count++
+			}
+		}
+	}
+	return count
 }
 
 func detectOscillation(hashes []string) bool {

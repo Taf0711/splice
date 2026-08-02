@@ -83,6 +83,26 @@ func TestComputeIterationStateSplitsFailedAndErroredTests(t *testing.T) {
 	}
 }
 
+func TestAcceptanceResultsUseAcceptanceCounters(t *testing.T) {
+	results := []schemas.TestCaseResult{
+		{Name: "passes", Status: "passed"},
+		{Name: "fails", Status: "failed"},
+		{Name: "hangs", Status: "errored"},
+		{Name: "not automated", Status: "skipped"},
+	}
+	output := harnessOutput("acceptance checks", 0.5, map[string]interface{}{"acceptance_results": results})
+	state, err := ComputeIterationState(1, []schemas.HarnessStageOutput{output}, nil, schemas.ChangeSummary{}, Ptr(0.0))
+	if err != nil {
+		t.Fatalf("ComputeIterationState: %v", err)
+	}
+	if state.AcceptanceFactsPassing != 1 || state.AcceptanceFactsFailing != 2 {
+		t.Fatalf("acceptance counters = passing %d failing %d, want 1 and 2", state.AcceptanceFactsPassing, state.AcceptanceFactsFailing)
+	}
+	if state.TestsPassing != 0 || state.TestsFailing != 0 || state.TestsErrored != 0 {
+		t.Fatalf("acceptance results leaked into test counters: %+v", state)
+	}
+}
+
 func TestComputeIterationStateGroupsLintIssuesBySeverity(t *testing.T) {
 	line := 1
 	fp := schemas.VerificationFingerprint("go_syntax", "GO_SYNTAX", "a.go", &line, "a")

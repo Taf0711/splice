@@ -324,12 +324,12 @@ func TestTUIPipelineEndToEndFeature(t *testing.T) {
 	}
 
 	view := plainRender(t, m.View())
-	for _, want := range []string{"PIPELINE", "code_writer", "static_analyzer", "test_runner", "completed", "3 stages"} {
+	for _, want := range []string{"PIPELINE", "code_writer", "static_analyzer", "test_runner", "acceptance_verifier", "completed", "4 stages"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("final TUI view missing %q:\n%s", want, view)
 		}
 	}
-	for _, stage := range []string{"code_writer", "static_analyzer", "test_runner"} {
+	for _, stage := range []string{"code_writer", "static_analyzer", "test_runner", "acceptance_verifier"} {
 		foundCompleted := false
 		for _, row := range m.pipeline.stages {
 			if row.name == stage && row.status == pipelineStageCompleted {
@@ -356,7 +356,7 @@ func TestTUIPipelineEndToEndFeature(t *testing.T) {
 			break
 		}
 	}
-	if storedResult.Status != "completed" || len(storedResult.Stages) != 3 {
+	if storedResult.Status != "completed" || len(storedResult.Stages) != 4 {
 		t.Fatalf("stored pipeline result = %#v", storedResult)
 	}
 	if len(response.usageEvents) != 1 {

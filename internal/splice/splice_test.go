@@ -64,10 +64,10 @@ func TestStageNamesForTier(t *testing.T) {
 		want int
 	}{
 		{schemas.TierTrivial, 1},
-		{schemas.TierLight, 3},
-		{schemas.TierStandard, 4},
-		{schemas.TierSubstantial, 5},
-		{schemas.TierArchitectural, 5},
+		{schemas.TierLight, 4},
+		{schemas.TierStandard, 5},
+		{schemas.TierSubstantial, 6},
+		{schemas.TierArchitectural, 6},
 	}
 	for _, tc := range cases {
 		names, err := StageNamesForTier(tc.tier)
@@ -91,8 +91,8 @@ func TestBudgetForTier(t *testing.T) {
 	if budget.OverflowPolicy != "abort" {
 		t.Fatalf("expected abort policy, got %q", budget.OverflowPolicy)
 	}
-	if len(budget.PerStage) != 4 {
-		t.Fatalf("expected 4 stages, got %d", len(budget.PerStage))
+	if len(budget.PerStage) != 5 {
+		t.Fatalf("expected 5 stages, got %d", len(budget.PerStage))
 	}
 	names, err := StageNamesForTier(schemas.TierStandard)
 	if err != nil {
@@ -103,7 +103,7 @@ func TestBudgetForTier(t *testing.T) {
 			t.Fatalf("missing budget for stage %q", name)
 		}
 	}
-	for _, name := range []string{"static_analyzer", "test_runner"} {
+	for _, name := range []string{"static_analyzer", "test_runner", "acceptance_verifier"} {
 		stageBudget := budget.PerStage[name]
 		if stageBudget.InputMax != 0 || stageBudget.OutputMax != 0 || stageBudget.ModelTier != "" {
 			t.Fatalf("deterministic stage %q budget = %+v, want zero token budget", name, stageBudget)
@@ -122,7 +122,7 @@ func TestBudgetForTier(t *testing.T) {
 	if err != nil {
 		t.Fatalf("substantial budget: %v", err)
 	}
-	for _, name := range []string{"static_analyzer", "security_auditor", "test_runner"} {
+	for _, name := range []string{"static_analyzer", "security_auditor", "test_runner", "acceptance_verifier"} {
 		stageBudget := substantial.PerStage[name]
 		if stageBudget.InputMax != 0 || stageBudget.OutputMax != 0 || stageBudget.ModelTier != "" {
 			t.Fatalf("deterministic stage %q budget = %+v, want zero token budget", name, stageBudget)
@@ -146,6 +146,33 @@ func TestBuildExecutionPlan(t *testing.T) {
 	}
 	if plan.Tier == "" {
 		t.Fatal("tier must not be empty")
+	}
+}
+
+func TestBuildExecutionPlanForTaskFloorsAutomatedAcceptanceAtLight(t *testing.T) {
+	command := "test -f result"
+	task := schemas.Task{
+		ID:     "task-1",
+		Title:  "small change",
+		Intent: "Fix typo",
+		AcceptanceFacts: []schemas.AcceptanceFact{{
+			Statement:             "the result exists",
+			AutomatedVerification: true,
+			VerificationCommand:   &command,
+		}},
+	}
+	plan, facts, err := BuildExecutionPlanForTaskWithFacts(task)
+	if err != nil {
+		t.Fatalf("BuildExecutionPlanForTaskWithFacts: %v", err)
+	}
+	if plan.Tier == schemas.TierTrivial || plan.Tier != schemas.TierLight {
+		t.Fatalf("tier = %q, want light floor", plan.Tier)
+	}
+	if len(plan.AcceptanceFacts) != 1 || len(facts) != 1 || facts[0] != "the result exists" {
+		t.Fatalf("plan facts=%+v prose=%v", plan.AcceptanceFacts, facts)
+	}
+	if plan.RequestIntent != task.Intent {
+		t.Fatalf("request intent = %q, want original task intent", plan.RequestIntent)
 	}
 }
 

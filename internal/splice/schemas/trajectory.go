@@ -27,6 +27,8 @@ type IterationState struct {
 	TestsPassing             int              `json:"tests_passing"`
 	TestsFailing             int              `json:"tests_failing"`
 	TestsErrored             int              `json:"tests_errored"`
+	AcceptanceFactsPassing   int              `json:"acceptance_facts_passing"`
+	AcceptanceFactsFailing   int              `json:"acceptance_facts_failing"`
 	LintIssuesBySeverity     map[Severity]int `json:"lint_issues_by_severity,omitempty"`
 	SecurityIssuesBySeverity map[Severity]int `json:"security_issues_by_severity,omitempty"`
 	TypeErrors               int              `json:"type_errors"`
@@ -53,6 +55,9 @@ func (i IterationState) Validate() error {
 	}
 	if i.TestsPassing < 0 || i.TestsFailing < 0 || i.TestsErrored < 0 {
 		return errors.New("test counts must be non-negative")
+	}
+	if i.AcceptanceFactsPassing < 0 || i.AcceptanceFactsFailing < 0 {
+		return errors.New("acceptance fact counts must be non-negative")
 	}
 	if i.TypeErrors < 0 || i.CodeSizeBytes < 0 {
 		return errors.New("type_errors and code_size_bytes must be non-negative")
