@@ -55,6 +55,7 @@ func Run(ctx context.Context, options Options) int {
 		programOpts = append(programOpts, tea.WithColorProfile(colorprofile.Ascii))
 	}
 	initialModel := newModel(ctx, options)
+	initialModel = initialModel.openLaunchSessionPicker()
 	if initialModel.wantsMouseCapture() {
 		initialModel.mouseCapture = true
 	}
