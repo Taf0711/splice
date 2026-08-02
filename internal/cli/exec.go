@@ -405,10 +405,8 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	//      core-tool INSTANCE (tool_search holds the *Registry* and resolves
 	//      names lazily; --list-tools and filter validation use names only).
 	// A new wrapper that snapshots a core tool before this line would silently
-	// ship nil-scope enforcement — add it below this re-registration instead.
-	for _, tool := range tools.WithoutEmptyBackedTools(tools.CoreToolsScoped(workspaceRoot, execScope)) {
-		registry.Register(tool)
-	}
+	// ship nil-scope enforcement. Add it below this re-registration instead.
+	registerExecCoreTools(registry, workspaceRoot, execScope)
 	sandboxEngine, err := buildExecSandboxEngine(workspaceRoot, resolved, deps, execScope)
 	if err != nil {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "sandbox_error", err.Error())
@@ -963,6 +961,21 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		return exitCrash
 	}
 	return exitSuccess
+}
+
+func registerExecCoreTools(registry *tools.Registry, workspaceRoot string, scope tools.PathScope) {
+	for _, tool := range tools.WithoutEmptyBackedTools(tools.CoreToolsScoped(workspaceRoot, scope)) {
+		// The skill tool is directory-backed, not PathScope-backed. Keep the
+		// plugin-aware instance registered during activation so core re-registration
+		// cannot discard plugin skill roots. Other core tools must still replace
+		// their bootstrap instances to receive the run scope.
+		if tool.Name() == tools.SkillToolName {
+			if _, exists := registry.Get(tool.Name()); exists {
+				continue
+			}
+		}
+		registry.Register(tool)
+	}
 }
 
 // deferredEligibleCount returns the number of registered tools that are
