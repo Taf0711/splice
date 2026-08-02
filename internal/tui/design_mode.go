@@ -587,6 +587,35 @@ func formatDesignPlan(plan schemas.DesignPlan) string {
 				b.WriteString(": " + t.Intent)
 			}
 			b.WriteString("\n")
+			if len(t.AcceptanceFacts) == 0 {
+				continue
+			}
+			b.WriteString("   Acceptance facts:\n")
+			// A criterion carrying a command will be executed, so it is always
+			// shown: eliding one would hide shell the user is about to approve.
+			// Only the criteria nobody automated are capped, and those run
+			// nothing.
+			const maxRenderedManualFacts = 3
+			manual := 0
+			for _, fact := range t.AcceptanceFacts {
+				command := ""
+				if fact.AutomatedVerification && fact.VerificationCommand != nil {
+					command = strings.TrimSpace(*fact.VerificationCommand)
+				}
+				if command == "" {
+					manual++
+					if manual > maxRenderedManualFacts {
+						continue
+					}
+					b.WriteString("   - " + fact.Statement + "\n")
+					continue
+				}
+				b.WriteString("   - " + fact.Statement + "\n")
+				b.WriteString("     Automated verification command: " + command + "\n")
+			}
+			if extra := manual - maxRenderedManualFacts; extra > 0 {
+				b.WriteString(fmt.Sprintf("   ... and %d more acceptance facts with no command\n", extra))
+			}
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
