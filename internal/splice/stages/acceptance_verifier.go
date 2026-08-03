@@ -87,6 +87,14 @@ func (AcceptanceVerifier) Run(ctx context.Context, input schemas.HarnessStageInp
 			timedOut = true
 		}
 		cancel()
+		// The deadline branch above leaves the tool call still running. Now that
+		// its context is cancelled, wait for it to unwind before starting the
+		// next fact, so one criterion's command never overlaps another's:
+		// RunTool passes through the permission gate and the command ledger, and
+		// neither expects to be entered twice at once.
+		if timedOut {
+			<-outcomes
+		}
 		durationMs := int(time.Since(start).Milliseconds())
 
 		result := schemas.TestCaseResult{Name: fact.Statement, DurationMs: durationMs}
