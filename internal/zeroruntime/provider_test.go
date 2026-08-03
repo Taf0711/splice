@@ -308,7 +308,7 @@ func TestCollectStreamMergesMixedUsageSnapshots(t *testing.T) {
 
 func TestCollectStreamMergesWebSearchRequestUsage(t *testing.T) {
 	events := make(chan StreamEvent, 3)
-	events <- StreamEvent{Type: StreamEventUsage, Usage: Usage{InputTokens: 6, WebSearchRequests: 2}}
+	events <- StreamEvent{Type: StreamEventUsage, Usage: Usage{InputTokens: 6, WebSearchRequests: 2, WebSearchEngine: "parallel"}}
 	events <- StreamEvent{Type: StreamEventUsage, Usage: Usage{OutputTokens: 3, WebSearchRequests: 3}}
 	events <- StreamEvent{Type: StreamEventDone}
 	close(events)
@@ -316,6 +316,9 @@ func TestCollectStreamMergesWebSearchRequestUsage(t *testing.T) {
 	collected := CollectStream(context.Background(), events)
 	if collected.Usage.WebSearchRequests != 3 {
 		t.Fatalf("web search requests = %d, want latest count 3", collected.Usage.WebSearchRequests)
+	}
+	if collected.Usage.WebSearchEngine != "parallel" {
+		t.Fatalf("web search engine = %q, want parallel", collected.Usage.WebSearchEngine)
 	}
 }
 

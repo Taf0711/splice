@@ -56,6 +56,7 @@ type historicalUsagePayload struct {
 	CacheWriteTokens  int      `json:"cacheWriteTokens"`
 	ReasoningTokens   int      `json:"reasoningTokens"`
 	WebSearchRequests int      `json:"webSearchRequests"`
+	WebSearchEngine   string   `json:"webSearchEngine"`
 	Model             string   `json:"model"`
 	CostUSD           *float64 `json:"costUsd"`
 	CostStatus        string   `json:"costStatus"`
@@ -149,8 +150,10 @@ func classifyUsageCoverage(events []sessions.Event, meta []sessions.Metadata, re
 				CacheWriteTokens:  payload.CacheWriteTokens,
 				ReasoningTokens:   payload.ReasoningTokens,
 				WebSearchRequests: payload.WebSearchRequests,
+				WebSearchEngine:   payload.WebSearchEngine,
 			}); err != nil {
-				if payload.WebSearchRequests > 0 && model.Cost.WebSearchPerRequest == 0 {
+				_, searchPriced, searchRateErr := modelregistry.WebSearchPricingRate(model, payload.WebSearchEngine)
+				if payload.WebSearchRequests > 0 && (searchRateErr != nil || !searchPriced) {
 					coverage.UnpricedCount++
 				} else {
 					coverage.ErrorCount++

@@ -248,6 +248,10 @@ func mergeUsageSnapshot(left Usage, right Usage) Usage {
 	if right.WebSearchRequests != 0 {
 		webSearchRequests = right.WebSearchRequests
 	}
+	webSearchEngine := left.WebSearchEngine
+	if strings.TrimSpace(right.WebSearchEngine) != "" {
+		webSearchEngine = right.WebSearchEngine
+	}
 
 	usage, err := NormalizeUsage(TokenUsage{
 		InputTokens:       inputTokens,
@@ -256,6 +260,7 @@ func mergeUsageSnapshot(left Usage, right Usage) Usage {
 		CacheWriteTokens:  cacheWriteTokens,
 		ReasoningTokens:   reasoningTokens,
 		WebSearchRequests: webSearchRequests,
+		WebSearchEngine:   webSearchEngine,
 	})
 	if err != nil {
 		return right

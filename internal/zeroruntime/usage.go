@@ -1,6 +1,9 @@
 package zeroruntime
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // NormalizeUsage converts provider token aliases into the shared runtime shape.
 func NormalizeUsage(input TokenUsage) (Usage, error) {
@@ -53,6 +56,7 @@ func NormalizeUsage(input TokenUsage) (Usage, error) {
 		CacheWriteTokens:  cacheWriteTokens,
 		ReasoningTokens:   reasoningTokens,
 		WebSearchRequests: webSearchRequests,
+		WebSearchEngine:   strings.TrimSpace(input.WebSearchEngine),
 	}, nil
 }
 

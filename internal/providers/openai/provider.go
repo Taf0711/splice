@@ -258,6 +258,7 @@ func (provider *Provider) streamWithServerTool(ctx context.Context, body []byte,
 		state.closeOpen(ctx, events)
 		if searches := state.webSearchRequestCount(); searches > 0 && (!state.usageSeen || state.usageReportedSearches != searches) {
 			state.lastUsage.WebSearchRequests = searches
+			state.lastUsage.WebSearchEngine = provider.webSearchEngine
 			sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: state.lastUsage, ReportedCostUSD: state.lastReportedCostUSD})
 		}
 		sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone, FinishReason: state.finishReason})
@@ -331,12 +332,18 @@ func (provider *Provider) emitChunk(
 	}
 
 	if chunk.Usage != nil {
+		searches := state.webSearchRequestCount()
+		searchEngine := ""
+		if searches > 0 {
+			searchEngine = provider.webSearchEngine
+		}
 		state.lastUsage = zeroruntime.Usage{
 			PromptTokens:      chunk.Usage.PromptTokens,
 			CompletionTokens:  chunk.Usage.CompletionTokens,
 			CachedInputTokens: chunk.Usage.PromptTokensDetails.CachedTokens,
 			ReasoningTokens:   chunk.Usage.CompletionTokensDetails.ReasoningTokens,
-			WebSearchRequests: state.webSearchRequestCount(),
+			WebSearchRequests: searches,
+			WebSearchEngine:   searchEngine,
 		}
 		state.usageSeen = true
 		state.usageReportedSearches = state.lastUsage.WebSearchRequests

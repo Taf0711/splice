@@ -1602,4 +1602,36 @@ func TestOpenRouterWebSearchAnnotationBatches(t *testing.T) {
 	if usage.WebSearchRequests != 2 {
 		t.Fatalf("web search requests = %d, want 2", usage.WebSearchRequests)
 	}
+	if usage.WebSearchEngine != defaultWebSearchEngine {
+		t.Fatalf("web search engine = %q, want %q", usage.WebSearchEngine, defaultWebSearchEngine)
+	}
+}
+
+func TestOpenRouterWebSearchUsageReportsConfiguredEngine(t *testing.T) {
+	t.Setenv("SPLICE_WEBSEARCH_ENGINE", "exa")
+	provider, err := New(Options{Model: "test", BaseURL: "https://openrouter.ai/v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := newToolState(false)
+	state.serverToolEnabled = true
+	events := make(chan zeroruntime.StreamEvent, 8)
+	for _, payload := range []string{
+		`{"choices":[{"delta":{"annotations":[{"type":"url_citation","url":"https://one.example"}]}}]}`,
+		`{"choices":[{"delta":{}}],"usage":{"prompt_tokens":1}}`,
+	} {
+		if !provider.emitPayload(context.Background(), payload, state, events) {
+			t.Fatal("emitPayload returned false")
+		}
+	}
+	for len(events) > 0 {
+		event := <-events
+		if event.Type == zeroruntime.StreamEventUsage {
+			if event.Usage.WebSearchEngine != "exa" {
+				t.Fatalf("web search engine = %q, want exa", event.Usage.WebSearchEngine)
+			}
+			return
+		}
+	}
+	t.Fatal("provider emitted no usage event")
 }

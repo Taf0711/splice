@@ -59,6 +59,7 @@ func (ledger *requestLedger) recordingOptions(options agent.Options) agent.Optio
 				CompletionTokens:  attributed.Usage.CompletionTokens,
 				ReasoningTokens:   attributed.Usage.ReasoningTokens,
 				WebSearchRequests: attributed.Usage.WebSearchRequests,
+				WebSearchEngine:   attributed.Usage.WebSearchEngine,
 			})
 			if err != nil {
 				attributed.Usage = zeroruntime.Usage{}

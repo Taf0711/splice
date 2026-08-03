@@ -138,6 +138,9 @@ type TokenUsage struct {
 	// WebSearchRequests counts provider-executed web searches in this stream.
 	// Providers bill these per search, not per token.
 	WebSearchRequests int
+	// WebSearchEngine identifies the provider search engine used for the requests.
+	// An empty value means that the provider did not report an engine.
+	WebSearchEngine string
 }
 
 // Usage records normalized token accounting reported by a provider.
@@ -160,6 +163,9 @@ type Usage struct {
 	// WebSearchRequests counts provider-executed web searches in this stream.
 	// Providers bill these per search, not per token.
 	WebSearchRequests int
+	// WebSearchEngine identifies the provider search engine used for the requests.
+	// An empty value means that the provider did not report an engine.
+	WebSearchEngine string
 }
 
 // TotalTokens returns prompt plus completion tokens.

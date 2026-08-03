@@ -29,6 +29,7 @@ type usageEventPayload struct {
 	CacheWriteTokens  int    `json:"cacheWriteTokens,omitempty"`
 	ReasoningTokens   int    `json:"reasoningTokens,omitempty"`
 	WebSearchRequests int    `json:"webSearchRequests,omitempty"`
+	WebSearchEngine   string `json:"webSearchEngine,omitempty"`
 	Model             string `json:"model,omitempty"`
 	// Provider, Stage and Iteration are written by AttributedUsagePayload but
 	// were absent here, so Go silently discarded them on decode and the report
@@ -69,6 +70,9 @@ func EventUsagePayload(u zeroruntime.Usage) map[string]any {
 	}
 	if u.WebSearchRequests > 0 {
 		payload["webSearchRequests"] = u.WebSearchRequests
+		if u.WebSearchEngine != "" {
+			payload["webSearchEngine"] = u.WebSearchEngine
+		}
 	}
 	return payload
 }
@@ -98,6 +102,9 @@ func AttributedUsagePayload(au agent.AttributedUsage) map[string]any {
 	}
 	if au.Usage.WebSearchRequests > 0 {
 		payload["webSearchRequests"] = au.Usage.WebSearchRequests
+		if au.Usage.WebSearchEngine != "" {
+			payload["webSearchEngine"] = au.Usage.WebSearchEngine
+		}
 	}
 	if au.Cost.Status != "" {
 		payload["costStatus"] = au.Cost.Status
@@ -275,6 +282,7 @@ func BuildReport(events []sessions.Event, meta []sessions.Metadata, registry *mo
 			CacheWriteTokens:  payload.CacheWriteTokens,
 			ReasoningTokens:   payload.ReasoningTokens,
 			WebSearchRequests: payload.WebSearchRequests,
+			WebSearchEngine:   payload.WebSearchEngine,
 		})
 		if err != nil {
 			continue
