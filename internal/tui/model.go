@@ -74,6 +74,8 @@ const dragEdgeScrollStep = 1
 type model struct {
 	ctx                         context.Context
 	cwd                         string
+	trusted                     bool
+	trustStore                  *config.TrustStore
 	appVersion                  string
 	userCommands                []usercommands.Command // file-sourced /commands (.splice/commands)
 	loadSkills                  func() []skills.Skill  // lazy installed-skills loader for /skills + /<skill-name>
@@ -829,6 +831,8 @@ func newModel(ctx context.Context, options Options) model {
 	m := model{
 		ctx:                         ctx,
 		cwd:                         cwd,
+		trusted:                     options.Trusted,
+		trustStore:                  options.TrustStore,
 		appVersion:                  strings.TrimSpace(options.Version),
 		swarmDoneAt:                 map[string]time.Time{},
 		userCommands:                loadedUserCommands,
@@ -4324,6 +4328,9 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		return m, nil
 	case commandContext:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.contextText()})
+		return m, nil
+	case commandTrust:
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.trustText()})
 		return m, nil
 	case commandConfig:
 		if arg := strings.ToLower(strings.TrimSpace(command.text)); arg != "" {

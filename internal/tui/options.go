@@ -94,6 +94,9 @@ type Options struct {
 	// (handled in app.go: .splice/commands, plugin skill roots, etc.).
 	// AGENTS.md / CLAUDE.md / .cursorrules and user-scope config are still loaded.
 	Trusted bool
+	// TrustStore is the store resolved by the CLI for this workspace. The TUI
+	// uses it for /trust so the command writes the same store as startup.
+	TrustStore *config.TrustStore
 }
 
 type MCPCommandResult struct {

@@ -624,6 +624,31 @@ func (m model) contextText() string {
 	})
 }
 
+func (m model) trustText() string {
+	if m.trusted {
+		return "Workspace is already trusted. No changes made."
+	}
+
+	store := m.trustStore
+	if store == nil {
+		path, err := config.DefaultTrustStorePath()
+		if err != nil {
+			return "Failed to save workspace trust decision: " + err.Error()
+		}
+		store, err = config.LoadTrustStore(path)
+		if err != nil {
+			return "Failed to save workspace trust decision: " + err.Error()
+		}
+	}
+	if err := store.SetTrusted(m.cwd, true); err != nil {
+		return "Failed to save workspace trust decision: " + err.Error()
+	}
+	if err := store.Save(); err != nil {
+		return "Failed to save workspace trust decision: " + err.Error()
+	}
+	return "Workspace trust decision saved. Restart Splice for the change to take effect. This session stays untrusted. Project commands, hooks, MCP servers, and plugins stay disabled until you restart."
+}
+
 func (m model) registeredTools() []tools.Tool {
 	if m.registry == nil {
 		return nil

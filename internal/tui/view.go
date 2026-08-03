@@ -203,6 +203,9 @@ func (m model) statusLine(width int) string {
 		permText, permStyle := m.permissionModeLabel()
 		left += zeroTheme.muted.Render(" · ") + permStyle.Render(permText)
 	}
+	if !m.trusted {
+		left += zeroTheme.muted.Render(" · ") + zeroTheme.amber.Render("! untrusted")
+	}
 
 	if tier == tierTiny {
 		if m.exitConfirmActive {
