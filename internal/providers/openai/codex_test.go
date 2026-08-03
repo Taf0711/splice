@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -271,85 +272,132 @@ func TestCodexProviderAccountResolverIsUsedWhenAccountIDEmpty(t *testing.T) {
 	}
 }
 
-func TestCodexProviderResolverIsConsultedOnEveryRequest(t *testing.T) {
-	// The factory wires the AccountResolver from the OAuth store so a refresh
-	// that updates the stored token's Account field takes effect on the next
-	// outgoing request — not just the first. This test asserts the resolver
-	// runs once per request (and that the second request picks up the
-	// account id the resolver starts returning on call #2).
-	var hits atomic.Int32
-	var rec1, rec2 codexRequest
-	mux := http.NewServeMux()
-	mux.HandleFunc("/responses", func(w http.ResponseWriter, r *http.Request) {
-		n := hits.Add(1)
-		var rec *codexRequest
-		if n == 1 {
-			rec = &rec1
-		} else {
-			rec = &rec2
-		}
-		rec.path = r.URL.Path
-		rec.originator = r.Header.Get(codexOriginatorHeader)
-		rec.accountID = r.Header.Get(codexAccountHeader)
-		if n == 1 {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-2\",\"status\":\"completed\"}}\n\n"))
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	resolverCalls := atomic.Int32{}
+func TestCodexProviderMemoizesSuccessfulAccountResolution(t *testing.T) {
+	// Regression: before this memo, every request was spawning a keychain subprocess.
+	var resolverCalls atomic.Int32
 	provider, err := NewCodexProvider(CodexOptions{
-		Options: Options{
-			BaseURL: srv.URL,
-			Model:   "gpt-5",
-			// Wire an OAuth resolver so the openai provider's 401-retry
-			// path runs. The Codex resolver (AccountResolver) is what
-			// this test actually exercises.
-			OAuthResolver: func(_ context.Context, _ bool) (string, string, bool, error) {
-				return "Authorization", "Bearer oauth-tok", true, nil
-			},
-		},
-		// Static AccountID intentionally empty so the resolver is the
-		// source. The first call returns ok=false (no account); the second
-		// call (after the 401 refresh) returns the new id.
+		Options: Options{APIKey: "sk-test", Model: "gpt-5"},
 		AccountResolver: func(_ context.Context) (string, bool, error) {
-			n := resolverCalls.Add(1)
-			if n == 1 {
-				return "", false, nil
-			}
-			return "acc-from-store", true, nil
+			resolverCalls.Add(1)
+			return "acc-resolved", true, nil
 		},
 	})
 	if err != nil {
 		t.Fatalf("NewCodexProvider: %v", err)
 	}
 
-	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
-		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+	for i := 0; i < 16; i++ {
+		req, err := http.NewRequest(http.MethodPost, "http://example.test/responses", nil)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		provider.injectCodexHeaders(req)
+		if got := req.Header.Get(codexAccountHeader); got != "acc-resolved" {
+			t.Fatalf("request %d account id = %q, want acc-resolved", i, got)
+		}
+	}
+	if got := resolverCalls.Load(); got != 1 {
+		t.Fatalf("resolver called %d times, want 1", got)
+	}
+}
+
+func TestCodexProviderRetriesEmptyAccountResolution(t *testing.T) {
+	var resolverCalls atomic.Int32
+	provider, err := NewCodexProvider(CodexOptions{
+		Options: Options{APIKey: "sk-test", Model: "gpt-5"},
+		AccountResolver: func(_ context.Context) (string, bool, error) {
+			if resolverCalls.Add(1) == 1 {
+				return "", false, nil
+			}
+			return "acc-recovered", true, nil
+		},
 	})
 	if err != nil {
-		t.Fatalf("StreamCompletion: %v", err)
+		t.Fatalf("NewCodexProvider: %v", err)
 	}
-	drainCodexEvents(t, stream)
 
-	if hits.Load() != 2 {
-		t.Fatalf("server hit %d times, want 2 (initial + retry)", hits.Load())
+	first, err := http.NewRequest(http.MethodPost, "http://example.test/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequest first: %v", err)
 	}
-	if resolverCalls.Load() != 2 {
-		t.Fatalf("resolver called %d times, want 2 (once per request, including the 401 retry)", resolverCalls.Load())
+	provider.injectCodexHeaders(first)
+	if got := first.Header.Get(codexAccountHeader); got != "" {
+		t.Fatalf("first account id = %q, want empty", got)
 	}
-	if rec1.accountID != "" {
-		t.Fatalf("first attempt account id = %q, want empty (resolver returned ok=false on call 1)", rec1.accountID)
+
+	second, err := http.NewRequest(http.MethodPost, "http://example.test/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequest second: %v", err)
 	}
-	if rec2.accountID != "acc-from-store" {
-		t.Fatalf("retry account id = %q, want acc-from-store (resolver must re-run on every request)", rec2.accountID)
+	provider.injectCodexHeaders(second)
+	if got := second.Header.Get(codexAccountHeader); got != "acc-recovered" {
+		t.Fatalf("second account id = %q, want acc-recovered", got)
+	}
+	if got := resolverCalls.Load(); got != 2 {
+		t.Fatalf("resolver called %d times, want 2 after an empty lookup", got)
+	}
+}
+
+func TestCodexProviderConcurrentAccountResolutionIsOnce(t *testing.T) {
+	var resolverCalls atomic.Int32
+	provider, err := NewCodexProvider(CodexOptions{
+		Options: Options{APIKey: "sk-test", Model: "gpt-5"},
+		AccountResolver: func(_ context.Context) (string, bool, error) {
+			resolverCalls.Add(1)
+			time.Sleep(time.Millisecond)
+			return "acc-concurrent", true, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewCodexProvider: %v", err)
+	}
+
+	const requests = 32
+	var wg sync.WaitGroup
+	for i := 0; i < requests; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req, err := http.NewRequest(http.MethodPost, "http://example.test/responses", nil)
+			if err != nil {
+				t.Errorf("NewRequest: %v", err)
+				return
+			}
+			provider.injectCodexHeaders(req)
+			if got := req.Header.Get(codexAccountHeader); got != "acc-concurrent" {
+				t.Errorf("account id = %q, want acc-concurrent", got)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := resolverCalls.Load(); got != 1 {
+		t.Fatalf("resolver called %d times, want 1", got)
+	}
+}
+
+func TestCodexProviderStaticAccountIDShortCircuitsResolver(t *testing.T) {
+	var resolverCalls atomic.Int32
+	provider, err := NewCodexProvider(CodexOptions{
+		Options:   Options{APIKey: "sk-test", Model: "gpt-5"},
+		AccountID: "acc-static",
+		AccountResolver: func(_ context.Context) (string, bool, error) {
+			resolverCalls.Add(1)
+			return "acc-resolved", true, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewCodexProvider: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, "http://example.test/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	provider.injectCodexHeaders(req)
+	if got := req.Header.Get(codexAccountHeader); got != "acc-static" {
+		t.Fatalf("account id = %q, want acc-static", got)
+	}
+	if got := resolverCalls.Load(); got != 0 {
+		t.Fatalf("resolver called %d times, want 0", got)
 	}
 }
 

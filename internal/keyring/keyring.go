@@ -64,6 +64,11 @@ func (k *Keyring) Set(service, account, secret string) error {
 	switch k.goos {
 	case "darwin":
 		// -U updates the item if it already exists rather than failing.
+		// `security` takes the secret as an argument, so it is visible in the
+		// process list while this call runs. The tool offers no stdin form, and
+		// the alternative (a temporary file) trades a short argv window for a
+		// secret on disk. The window is accepted; the Linux path below has a
+		// stdin form and uses it.
 		_, err := k.exec(nil, "security", "add-generic-password", "-U", "-s", service, "-a", account, "-w", secret)
 		return wrap("set", err)
 	case "linux":
