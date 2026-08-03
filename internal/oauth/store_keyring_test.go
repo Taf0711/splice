@@ -83,13 +83,13 @@ func TestNewStoreStorageSelection(t *testing.T) {
 	if !strings.HasPrefix(s.FilePath(), "keyring:") {
 		t.Fatalf("env did not select keyring backend: %q", s.FilePath())
 	}
-	// Default is the file backend.
-	fileStore, err := NewStore(StoreOptions{FilePath: t.TempDir() + "/oauth-tokens.json"})
+	// Explicit file storage remains the plaintext opt-out.
+	fileStore, err := NewStore(StoreOptions{Storage: "file", FilePath: t.TempDir() + "/oauth-tokens.json"})
 	if err != nil {
 		t.Fatalf("NewStore(file): %v", err)
 	}
 	if strings.HasPrefix(fileStore.FilePath(), "keyring:") {
-		t.Fatalf("default backend should be file, got %q", fileStore.FilePath())
+		t.Fatalf("explicit file backend should not use keyring, got %q", fileStore.FilePath())
 	}
 }
 

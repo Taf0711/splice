@@ -24,8 +24,8 @@ const (
 // per-user random secret persisted (0600) beside the token file. The on-disk
 // blob is nonce || ciphertext; GCM provides confidentiality AND tamper
 // detection, so a corrupted/forged file fails closed on open. This is the
-// opt-in "encrypted-file" storage backend; the default backend writes the
-// 0600 plaintext JSON unchanged.
+// "encrypted-file" storage backend; plaintext is available only through the
+// explicit "file" storage opt-out.
 type aesGCMCrypter struct {
 	secretPath string
 }

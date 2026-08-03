@@ -145,6 +145,7 @@ func TestMCPCommandRendersConfiguredStateWithoutAgentRun(t *testing.T) {
 
 	tokenStore, err := internalmcp.NewTokenStore(internalmcp.TokenStoreOptions{
 		FilePath: filepath.Join(t.TempDir(), "mcp-oauth.json"),
+		Storage:  "file",
 		Now:      func() time.Time { return time.Date(2026, 6, 13, 10, 0, 0, 0, time.UTC) },
 	})
 	if err != nil {

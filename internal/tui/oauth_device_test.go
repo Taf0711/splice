@@ -15,6 +15,7 @@ func seedOAuthToken(t *testing.T, providerID, access string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "tok.json")
 	t.Setenv("SPLICE_OAUTH_TOKENS_PATH", path)
+	t.Setenv("SPLICE_OAUTH_STORAGE", "file")
 	store, err := oauth.NewStore(oauth.StoreOptions{FilePath: path})
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)

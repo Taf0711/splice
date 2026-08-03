@@ -21,6 +21,7 @@ import (
 	"github.com/Taf0711/splice/internal/localcontrol"
 	"github.com/Taf0711/splice/internal/mcp"
 	"github.com/Taf0711/splice/internal/modelregistry"
+	"github.com/Taf0711/splice/internal/oauth"
 	"github.com/Taf0711/splice/internal/observability"
 	"github.com/Taf0711/splice/internal/plugins"
 	"github.com/Taf0711/splice/internal/providerhealth"
@@ -55,9 +56,13 @@ var (
 )
 
 type appDeps struct {
-	getwd                 func() (string, error)
-	stdin                 io.Reader
-	userConfigPath        func() (string, error)
+	getwd          func() (string, error)
+	stdin          io.Reader
+	userConfigPath func() (string, error)
+	// migrateOAuth runs the explicit OAuth plaintext migration at process startup.
+	// It is intentionally not filled for partial test dependencies, which keeps
+	// tests from touching the user's keychain or config directory.
+	migrateOAuth          func()
 	resolveConfig         func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error)
 	resolveMCPConfig      func(workspaceRoot string) (config.MCPConfig, error)
 	resolveMCPConfigTrust func(workspaceRoot string, projectTrusted bool) (config.MCPConfig, error)
@@ -124,9 +129,20 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 
 func defaultAppDeps() appDeps {
 	return appDeps{
-		getwd:                os.Getwd,
-		stdin:                os.Stdin,
-		userConfigPath:       config.DefaultUserConfigPath,
+		getwd:          os.Getwd,
+		stdin:          os.Stdin,
+		userConfigPath: config.DefaultUserConfigPath,
+		migrateOAuth: func() {
+			path, err := oauth.ResolveStorePath(nil)
+			if err != nil {
+				return
+			}
+			store, err := oauth.NewStore(oauth.StoreOptions{})
+			if err != nil {
+				return
+			}
+			_, _ = oauth.MigratePlaintextProviderTokens(path, store)
+		},
 		exportActiveProvider: config.SetActiveProviderEnv,
 		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
 			options, err := config.DefaultResolveOptions(workspaceRoot)
@@ -669,6 +685,9 @@ func runInteractiveTUIWithSetup(stdout io.Writer, stderr io.Writer, deps appDeps
 	// the inline key in place and this run still uses the already-resolved key.
 	if store, storeErr := config.ProviderKeyStoreAt(filepath.Dir(userConfigPath)); storeErr == nil {
 		_, _ = config.MigratePlaintextProviderKeys(userConfigPath, store)
+	}
+	if deps.migrateOAuth != nil {
+		deps.migrateOAuth()
 	}
 	doctorUserConfigPath := ""
 	projectConfigPath := ""

@@ -11,7 +11,7 @@ import (
 func TestTokenStoreRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mcp-oauth-tokens.json")
-	store, err := NewTokenStore(TokenStoreOptions{FilePath: path})
+	store, err := NewTokenStore(TokenStoreOptions{FilePath: path, Storage: "file"})
 	if err != nil {
 		t.Fatalf("NewTokenStore() error = %v", err)
 	}
@@ -49,7 +49,7 @@ func TestTokenStoreFileIs0600(t *testing.T) {
 	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mcp-oauth-tokens.json")
-	store, err := NewTokenStore(TokenStoreOptions{FilePath: path})
+	store, err := NewTokenStore(TokenStoreOptions{FilePath: path, Storage: "file"})
 	if err != nil {
 		t.Fatalf("NewTokenStore() error = %v", err)
 	}
@@ -68,7 +68,7 @@ func TestTokenStoreFileIs0600(t *testing.T) {
 func TestTokenStoreDelete(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mcp-oauth-tokens.json")
-	store, err := NewTokenStore(TokenStoreOptions{FilePath: path})
+	store, err := NewTokenStore(TokenStoreOptions{FilePath: path, Storage: "file"})
 	if err != nil {
 		t.Fatalf("NewTokenStore() error = %v", err)
 	}
@@ -103,7 +103,7 @@ func TestTokenStoreDelete(t *testing.T) {
 func TestTokenStoreLoadMissingIsNotError(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mcp-oauth-tokens.json")
-	store, err := NewTokenStore(TokenStoreOptions{FilePath: path})
+	store, err := NewTokenStore(TokenStoreOptions{FilePath: path, Storage: "file"})
 	if err != nil {
 		t.Fatalf("NewTokenStore() error = %v", err)
 	}
@@ -119,7 +119,7 @@ func TestTokenStoreLoadMissingIsNotError(t *testing.T) {
 func TestTokenStoreStatusReportsPresenceWithoutToken(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mcp-oauth-tokens.json")
-	store, err := NewTokenStore(TokenStoreOptions{FilePath: path})
+	store, err := NewTokenStore(TokenStoreOptions{FilePath: path, Storage: "file"})
 	if err != nil {
 		t.Fatalf("NewTokenStore() error = %v", err)
 	}
@@ -167,7 +167,7 @@ func TestTokenStoreMigratesLegacyFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store, err := NewTokenStore(TokenStoreOptions{FilePath: unified, LegacyPath: legacy})
+	store, err := NewTokenStore(TokenStoreOptions{FilePath: unified, LegacyPath: legacy, Storage: "file"})
 	if err != nil {
 		t.Fatalf("NewTokenStore: %v", err)
 	}
@@ -198,7 +198,7 @@ func TestTokenStoreMigratesLegacyFile(t *testing.T) {
 	}
 
 	// Idempotent: a second construction (legacy now absent) keeps the token.
-	store2, err := NewTokenStore(TokenStoreOptions{FilePath: unified, LegacyPath: legacy})
+	store2, err := NewTokenStore(TokenStoreOptions{FilePath: unified, LegacyPath: legacy, Storage: "file"})
 	if err != nil {
 		t.Fatalf("NewTokenStore#2: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestTokenStoreMigrationPreservesNewerUnified(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Pre-seed the unified store with a newer token (no migration: FilePath set, no LegacyPath).
-	pre, err := NewTokenStore(TokenStoreOptions{FilePath: unified})
+	pre, err := NewTokenStore(TokenStoreOptions{FilePath: unified, Storage: "file"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +223,7 @@ func TestTokenStoreMigrationPreservesNewerUnified(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Migrating must not overwrite the newer unified entry.
-	store, err := NewTokenStore(TokenStoreOptions{FilePath: unified, LegacyPath: legacy})
+	store, err := NewTokenStore(TokenStoreOptions{FilePath: unified, LegacyPath: legacy, Storage: "file"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +237,7 @@ func TestTokenStoreNamespacedFromProvider(t *testing.T) {
 	// An MCP token and a provider login of the same name coexist in one file.
 	dir := t.TempDir()
 	unified := filepath.Join(dir, "oauth-tokens.json")
-	mcpStore, err := NewTokenStore(TokenStoreOptions{FilePath: unified})
+	mcpStore, err := NewTokenStore(TokenStoreOptions{FilePath: unified, Storage: "file"})
 	if err != nil {
 		t.Fatal(err)
 	}

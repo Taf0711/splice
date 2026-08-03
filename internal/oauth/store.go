@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"sort"
@@ -78,9 +79,10 @@ type StoreOptions struct {
 	FilePath string
 	Env      map[string]string
 	Now      func() time.Time
-	// Storage selects the backend: "" / "file" => a 0600 JSON file (default);
-	// "encrypted-file" => an AES-256-GCM encrypted file; "keyring" => the OS
-	// keyring. When empty it falls back to SPLICE_OAUTH_STORAGE.
+	// Storage selects the backend: "" uses the platform auto policy, "file" is
+	// the plaintext opt-out, "encrypted-file" is an AES-256-GCM file, and
+	// "keyring" uses the OS keyring. When empty it falls back to
+	// SPLICE_OAUTH_STORAGE.
 	Storage string
 	// Encrypted is a legacy alias for Storage=="encrypted-file" (AES-256-GCM at
 	// rest). Ignored when Storage is set.
@@ -88,6 +90,9 @@ type StoreOptions struct {
 	// Keyring is the client used when Storage=="keyring"; nil => keyring.New().
 	// Injected by tests to avoid touching a real keychain.
 	Keyring KeyringClient
+	// GOOS overrides the platform used by the auto policy. An empty value uses
+	// runtime.GOOS. It exists so tests can exercise each platform deterministically.
+	GOOS string
 }
 
 // KeyringClient is the minimal OS-keyring surface the store needs. *keyring.Keyring
@@ -109,10 +114,12 @@ const (
 // cross-process lock, or the OS keyring). When crypter is non-nil the file blob
 // is AES-256-GCM ciphertext at rest.
 type Store struct {
-	blob    blobStore
-	crypter *aesGCMCrypter // nil => plaintext blob
-	now     func() time.Time
-	mu      sync.Mutex
+	blob       blobStore
+	crypter    *aesGCMCrypter // nil => plaintext blob
+	now        func() time.Time
+	backend    string
+	legacyPath string // legacy plaintext path for protected backends
+	mu         sync.Mutex
 }
 
 type storeFile struct {
@@ -150,8 +157,9 @@ func ResolveStorePath(env map[string]string) (string, error) {
 	return filepath.Join(configHome, "splice", "oauth-tokens.json"), nil
 }
 
-// NewStore builds a token store with the configured backend (file by default,
-// or the OS keyring when Storage/SPLICE_OAUTH_STORAGE selects it).
+// NewStore builds a token store with the configured backend. Empty storage uses
+// the same policy as credstore: keyring on macOS when available, encrypted file
+// elsewhere. The plaintext file remains an explicit opt-out.
 func NewStore(options StoreOptions) (*Store, error) {
 	now := options.Now
 	if now == nil {
@@ -164,13 +172,28 @@ func NewStore(options StoreOptions) (*Store, error) {
 	if storage == "" && options.Encrypted {
 		storage = "encrypted-file" // legacy alias
 	}
+	kr := options.Keyring
+	if kr == nil {
+		kr = keyring.New()
+	}
+	goos := strings.TrimSpace(options.GOOS)
+	if goos == "" {
+		goos = runtime.GOOS
+	}
+	if storage == "" {
+		if goos == "darwin" && keyringAvailable(kr) {
+			storage = "keyring"
+		} else {
+			storage = "encrypted-file"
+		}
+	}
 	switch storage {
-	case "", "file":
+	case "file":
 		path, err := resolveStoreFilePath(options)
 		if err != nil {
 			return nil, err
 		}
-		return &Store{blob: fileBlob{path: path}, now: now}, nil
+		return &Store{blob: fileBlob{path: path}, now: now, backend: "file"}, nil
 	case "encrypted-file":
 		path, err := resolveStoreFilePath(options)
 		if err != nil {
@@ -178,27 +201,52 @@ func NewStore(options StoreOptions) (*Store, error) {
 		}
 		// The file blob holds AES-256-GCM ciphertext; the per-user secret lives in
 		// a sibling ".secret" file (see encrypt.go).
-		return &Store{blob: fileBlob{path: path}, crypter: newAESGCMCrypter(path + ".secret"), now: now}, nil
+		return &Store{
+			blob:       fileBlob{path: path},
+			crypter:    newAESGCMCrypter(path + ".secret"),
+			now:        now,
+			backend:    "encrypted-file",
+			legacyPath: path,
+		}, nil
 	case "keyring":
-		kr := options.Keyring
-		if kr == nil {
-			osKeyring := keyring.New()
-			if !osKeyring.Available() {
-				return nil, fmt.Errorf("oauth: keyring storage requested but not available on %s; use file storage", runtime.GOOS)
-			}
-			kr = osKeyring
+		if !keyringAvailable(kr) {
+			return nil, fmt.Errorf("oauth: keyring storage requested but not available on %s; use file storage", goos)
 		}
 		// Serialize the keyring's read-modify-write across processes with a lock
 		// file beside where the file backend would live. Best-effort: if no config
 		// location resolves, fall back to in-process serialization only.
 		lockPath := ""
-		if storePath, perr := ResolveStorePath(options.Env); perr == nil {
+		if storePath, perr := resolveStoreFilePath(options); perr == nil {
 			lockPath = filepath.Join(filepath.Dir(storePath), "oauth-keyring.lockfile")
 		}
-		return &Store{blob: keyringBlob{kr: kr, service: keyringService, account: keyringAccount, lockPath: lockPath}, now: now}, nil
+		legacyPath, err := resolveStoreFilePath(options)
+		if err != nil {
+			return nil, err
+		}
+		return &Store{
+			blob:       keyringBlob{kr: kr, service: keyringService, account: keyringAccount, lockPath: lockPath},
+			now:        now,
+			backend:    "keyring",
+			legacyPath: legacyPath,
+		}, nil
 	default:
 		return nil, fmt.Errorf("oauth: unknown storage %q (want \"file\", \"encrypted-file\", or \"keyring\")", storage)
 	}
+}
+
+// Backend reports the resolved backend ("keyring", "encrypted-file", or
+// "file").
+func (s *Store) Backend() string { return s.backend }
+
+// keyringAvailable preserves the injectable OAuth test seam while following
+// credstore's availability check when the client exposes it.
+func keyringAvailable(kr KeyringClient) bool {
+	if available, ok := kr.(interface{ Available() bool }); ok {
+		return available.Available()
+	}
+	// Injected clients predate the optional availability method. They are used
+	// only when the caller has supplied the fake and therefore are usable.
+	return true
 }
 
 // resolveStoreFilePath resolves the absolute file path for the file backend.
@@ -319,31 +367,146 @@ func (s *Store) readState() (storeFile, error) {
 		return storeFile{}, err
 	}
 	if !ok {
+		if s.legacyPath != "" {
+			if state, found, err := s.readLegacyFile(); err != nil {
+				return storeFile{}, err
+			} else if found {
+				return state, nil
+			}
+		}
 		return emptyStoreFile(), nil
 	}
 	if s.crypter != nil {
 		// Encrypted backend: the blob is AES-256-GCM ciphertext, not JSON.
+		var err error
 		data, err = s.crypter.open(data)
 		if err != nil {
+			// A legacy plaintext file can still serve reads while startup waits
+			// for a protected-backend migration to succeed. This branch is read-only.
+			if s.legacyPath != "" {
+				if state, decodeErr := decodeStoreState(data, s.legacyPath); decodeErr == nil {
+					return state, nil
+				}
+			}
 			return storeFile{}, fmt.Errorf("oauth: decrypt token store at %s: %w", s.blob.location(), err)
 		}
 	}
+	return decodeStoreState(data, s.blob.location())
+}
+
+func (s *Store) readLegacyFile() (storeFile, bool, error) {
+	data, err := os.ReadFile(s.legacyPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return storeFile{}, false, nil
+		}
+		return storeFile{}, false, fmt.Errorf("oauth: read legacy token store %s: %w", s.legacyPath, err)
+	}
+	state, err := decodeStoreState(data, s.legacyPath)
+	if err != nil {
+		return storeFile{}, false, err
+	}
+	return state, true, nil
+}
+
+func decodeStoreState(data []byte, location string) (storeFile, error) {
 	var state storeFile
 	if err := json.Unmarshal(data, &state); err != nil {
-		return storeFile{}, fmt.Errorf("oauth: invalid token store at %s: %w", s.blob.location(), err)
+		return storeFile{}, fmt.Errorf("oauth: invalid token store at %s: %w", location, err)
 	}
 	if state.SchemaVersion != storeSchemaVersion {
-		return storeFile{}, fmt.Errorf("oauth: invalid token store at %s: unsupported schemaVersion", s.blob.location())
+		return storeFile{}, fmt.Errorf("oauth: invalid token store at %s: unsupported schemaVersion", location)
 	}
 	if state.Tokens == nil {
 		state.Tokens = map[string]Token{}
 	}
 	for key := range state.Tokens {
 		if err := ValidateKey(key); err != nil {
-			return storeFile{}, fmt.Errorf("oauth: invalid token store at %s: %w", s.blob.location(), err)
+			return storeFile{}, fmt.Errorf("oauth: invalid token store at %s: %w", location, err)
 		}
 	}
 	return state, nil
+}
+
+// MigratePlaintextProviderTokens copies a legacy plaintext token store into the
+// resolved protected backend. It removes the source only after a verified write.
+// A backend failure leaves the plaintext untouched and returns a no-op so the
+// caller can keep the user logged in and retry on a later startup.
+func MigratePlaintextProviderTokens(path string, store *Store) (int, error) {
+	path = strings.TrimSpace(path)
+	if path == "" || store == nil || store.backend == "file" {
+		return 0, nil
+	}
+	if !filepath.IsAbs(path) {
+		var err error
+		path, err = filepath.Abs(path)
+		if err != nil {
+			return 0, fmt.Errorf("oauth: resolve legacy token store %q: %w", path, err)
+		}
+	}
+	path = filepath.Clean(path)
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	migrated := false
+	err := store.blob.withLock(store.now, func() error {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return fmt.Errorf("oauth: read legacy token store %s: %w", path, err)
+		}
+		state, err := decodeStoreState(data, path)
+		if err != nil {
+			return err
+		}
+		if err := store.writeAndVerify(state); err != nil {
+			// Keep the source authoritative when the protected backend is unavailable.
+			return nil
+		}
+		if store.backend == "keyring" || filepath.Clean(store.blob.location()) != path {
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("oauth: remove migrated plaintext token store %s: %w", path, err)
+			}
+		}
+		migrated = true
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	if migrated {
+		return 1, nil
+	}
+	return 0, nil
+}
+
+func (s *Store) writeAndVerify(state storeFile) error {
+	if err := s.writeState(state); err != nil {
+		return err
+	}
+	data, ok, err := s.blob.read()
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("oauth: token store write did not produce a readable backend record")
+	}
+	if s.crypter != nil {
+		data, err = s.crypter.open(data)
+		if err != nil {
+			return err
+		}
+	}
+	got, err := decodeStoreState(data, s.blob.location())
+	if err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(got, state) {
+		return errors.New("oauth: token store write verification mismatch")
+	}
+	return nil
 }
 
 func (s *Store) writeState(state storeFile) error {

@@ -29,8 +29,8 @@ splice auth status
 When a login exists for a provider, the **OpenAI and Anthropic** providers send
 `Authorization: Bearer <fresh-token>` (auto-refreshed; one refresh-and-retry on a
 `401`) instead of the API key. With no login they use the API key exactly as
-before. Tokens are stored 0600 (or the OS keyring with
-`SPLICE_OAUTH_STORAGE=keyring`) and never logged. See `splice auth --help`.
+before. Tokens use the macOS keyring by default. Other platforms use an
+encrypted file. Set `SPLICE_OAUTH_STORAGE=file` to opt out. See `splice auth --help`.
 
 ### In the setup wizard (`/provider`)
 

@@ -307,7 +307,7 @@ func TestRunNoArgsLaunchesTUIWithMCPState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPermissionStore() error = %v", err)
 	}
-	tokenStore, err := mcp.NewTokenStore(mcp.TokenStoreOptions{FilePath: filepath.Join(t.TempDir(), "mcp-oauth.json")})
+	tokenStore, err := mcp.NewTokenStore(mcp.TokenStoreOptions{FilePath: filepath.Join(t.TempDir(), "mcp-oauth.json"), Storage: "file"})
 	if err != nil {
 		t.Fatalf("NewTokenStore() error = %v", err)
 	}
@@ -416,7 +416,7 @@ func TestTUIMCPCommandUsesLastGoodConfigOnRefreshError(t *testing.T) {
 			return mcp.NewPermissionStore(mcp.StoreOptions{FilePath: filepath.Join(t.TempDir(), "mcp-permissions.json")})
 		},
 		newMCPTokenStore: func() (*mcp.TokenStore, error) {
-			return mcp.NewTokenStore(mcp.TokenStoreOptions{FilePath: filepath.Join(t.TempDir(), "mcp-oauth.json")})
+			return mcp.NewTokenStore(mcp.TokenStoreOptions{FilePath: filepath.Join(t.TempDir(), "mcp-oauth.json"), Storage: "file"})
 		},
 		registerMCPTools: func(ctx context.Context, registry *tools.Registry, cfg config.MCPConfig, options mcp.RegisterOptions) (mcpToolRuntime, error) {
 			return closeFunc(func() error { return nil }), nil
@@ -452,7 +452,7 @@ func TestRunNoArgsClosesPartialMCPRuntimeWhenRegistrationFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPermissionStore() error = %v", err)
 	}
-	tokenStore, err := mcp.NewTokenStore(mcp.TokenStoreOptions{FilePath: filepath.Join(t.TempDir(), "mcp-oauth.json")})
+	tokenStore, err := mcp.NewTokenStore(mcp.TokenStoreOptions{FilePath: filepath.Join(t.TempDir(), "mcp-oauth.json"), Storage: "file"})
 	if err != nil {
 		t.Fatalf("NewTokenStore() error = %v", err)
 	}

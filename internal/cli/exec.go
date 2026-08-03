@@ -149,6 +149,9 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		}
 		return exitSuccess
 	}
+	if deps.migrateOAuth != nil {
+		deps.migrateOAuth()
+	}
 
 	// Refresh the models.dev pricing/limits cache in the background when stale;
 	// the overlay is read at registry construction from the cache file, so this

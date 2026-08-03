@@ -57,7 +57,7 @@ func TestRefreshSchedulerRefreshesBeforeExpiry(t *testing.T) {
 	}))
 	defer server.Close()
 
-	store, err := NewStore(StoreOptions{FilePath: filepath.Join(t.TempDir(), "tok.json")})
+	store, err := NewStore(StoreOptions{Storage: "file", FilePath: filepath.Join(t.TempDir(), "tok.json")})
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}

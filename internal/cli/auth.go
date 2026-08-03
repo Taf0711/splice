@@ -28,6 +28,9 @@ func runAuth(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		}
 		return exitSuccess
 	}
+	if deps.migrateOAuth != nil {
+		deps.migrateOAuth()
+	}
 	switch args[0] {
 	case "login":
 		return runAuthLogin(args[1:], stdout, stderr, deps)
@@ -252,15 +255,16 @@ func validateAuthFlags(sub string, a authArgs) error {
 	return nil
 }
 
-// newAuthManager builds an oauth.Manager backed by the file store, printing the
+// newAuthManager builds an oauth.Manager backed by the OAuth store, printing the
 // authorization URL / device code to stdout. The store path honors
 // SPLICE_OAUTH_TOKENS_PATH (env), so callers/tests can redirect it. Setting
 // SPLICE_OAUTH_STORAGE=encrypted-file selects the AES-256-GCM encrypted-at-rest
 // backend (a per-user secret is created beside the token file).
 func newAuthManager(deps appDeps, out io.Writer) (*oauth.Manager, error) {
 	// Validate SPLICE_OAUTH_STORAGE up front: a mistyped value must fail fast rather
-	// than silently change the backend. Empty = default (plaintext 0600 file);
-	// "encrypted-file" = AES-256-GCM; "keyring" = the OS keyring.
+	// than silently change the backend. Empty selects the platform auto policy;
+	// "file" = plaintext 0600 file; "encrypted-file" = AES-256-GCM;
+	// "keyring" = the OS keyring.
 	storage := strings.ToLower(strings.TrimSpace(os.Getenv("SPLICE_OAUTH_STORAGE")))
 	switch storage {
 	case "", "file", "encrypted-file", "keyring":
@@ -514,11 +518,10 @@ Any preset field is overridable via the env vars below. For a custom provider na
   SPLICE_OAUTH_<NAME>_SCOPES          SPLICE_OAUTH_<NAME>_FLOW (loopback|device)
 Endpoint URLs must be https (loopback exempt).
 
-Storage: tokens are written 0600 under $XDG_CONFIG_HOME/splice (override with
-SPLICE_OAUTH_TOKENS_PATH). Set SPLICE_OAUTH_STORAGE=encrypted-file to encrypt them at
-rest with AES-256-GCM (a per-user secret beside the file), or
-SPLICE_OAUTH_STORAGE=keyring to use the OS keyring (macOS Keychain / Linux
-secret-tool). MCP server tokens share the same store.
+Storage: macOS uses the OS keyring by default. Other platforms use an encrypted
+file under $XDG_CONFIG_HOME/splice (override with SPLICE_OAUTH_TOKENS_PATH).
+Set SPLICE_OAUTH_STORAGE=file for a 0600 plaintext file. MCP server tokens share
+the same store.
 
 Flags:
       --device   Use the device-code flow (headless/SSH; no browser)
