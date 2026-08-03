@@ -169,15 +169,15 @@ func findToolCall(collected *zeroruntime.CollectedStream, name string) *zerorunt
 }
 
 // usageFromCollected converts the provider stream's normalized Usage into a
-// typed StageUsage for the orchestrator ledger. Returns nil when no real
-// usage was reported (both input and output are zero), so nil-memory runs
-// stay byte-identical and the StageRecord keeps zero fields.
+// typed StageUsage for the orchestrator ledger. Returns nil when no token or
+// web-search usage was reported, so nil-memory runs stay byte-identical and
+// the StageRecord keeps zero fields.
 func usageFromCollected(collected *zeroruntime.CollectedStream) *schemas.StageUsage {
 	if collected == nil {
 		return nil
 	}
 	u := collected.Usage
-	if u.InputTokens == 0 && u.OutputTokens == 0 {
+	if u.InputTokens == 0 && u.OutputTokens == 0 && u.WebSearchRequests == 0 {
 		return nil
 	}
 	return &schemas.StageUsage{
@@ -186,5 +186,7 @@ func usageFromCollected(collected *zeroruntime.CollectedStream) *schemas.StageUs
 		CachedInputTokens: u.CachedInputTokens,
 		CacheWriteTokens:  u.CacheWriteTokens,
 		ReasoningTokens:   u.ReasoningTokens,
+		WebSearchRequests: u.WebSearchRequests,
+		WebSearchEngine:   u.WebSearchEngine,
 	}
 }

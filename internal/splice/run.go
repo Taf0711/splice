@@ -690,6 +690,8 @@ func applyStageUsage(record *schemas.StageRecord, usage *schemas.StageUsage) {
 	record.TokensCached = usage.CachedInputTokens
 	record.TokensCacheWrite = usage.CacheWriteTokens
 	record.TokensReasoning = usage.ReasoningTokens
+	record.WebSearchRequests = usage.WebSearchRequests
+	record.WebSearchEngine = usage.WebSearchEngine
 }
 
 func runStageWithContext(

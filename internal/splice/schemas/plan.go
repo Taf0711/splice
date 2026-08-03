@@ -407,22 +407,24 @@ func detectCycle(deps map[string][]string) string {
 
 // StageRecord is a persistable summary of an executed stage.
 type StageRecord struct {
-	Name             string      `json:"name"`
-	Status           StageStatus `json:"status"`
-	Iteration        int         `json:"iteration"`
-	Provider         *string     `json:"provider,omitempty"`
-	Model            *string     `json:"model,omitempty"`
-	Confidence       *float64    `json:"confidence,omitempty"`
-	OutputSummary    *string     `json:"output_summary,omitempty"`
-	Activity         *string     `json:"activity,omitempty"`
-	TokensInput      int         `json:"tokens_input"`
-	TokensOutput     int         `json:"tokens_output"`
-	TokensCached     int         `json:"tokens_cached"`
-	TokensCacheWrite int         `json:"tokens_cache_write"`
-	TokensReasoning  int         `json:"tokens_reasoning"`
-	CostUSD          float64     `json:"cost_usd"`
-	LatencyMs        int         `json:"latency_ms"`
-	CommitSHA        *string     `json:"commit_sha,omitempty"`
+	Name              string      `json:"name"`
+	Status            StageStatus `json:"status"`
+	Iteration         int         `json:"iteration"`
+	Provider          *string     `json:"provider,omitempty"`
+	Model             *string     `json:"model,omitempty"`
+	Confidence        *float64    `json:"confidence,omitempty"`
+	OutputSummary     *string     `json:"output_summary,omitempty"`
+	Activity          *string     `json:"activity,omitempty"`
+	TokensInput       int         `json:"tokens_input"`
+	TokensOutput      int         `json:"tokens_output"`
+	TokensCached      int         `json:"tokens_cached"`
+	TokensCacheWrite  int         `json:"tokens_cache_write"`
+	TokensReasoning   int         `json:"tokens_reasoning"`
+	WebSearchRequests int         `json:"web_search_requests"`
+	WebSearchEngine   string      `json:"web_search_engine,omitempty"`
+	CostUSD           float64     `json:"cost_usd"`
+	LatencyMs         int         `json:"latency_ms"`
+	CommitSHA         *string     `json:"commit_sha,omitempty"`
 }
 
 // Validate checks the stage record.
@@ -445,6 +447,9 @@ func (s StageRecord) Validate() error {
 	}
 	if s.TokensInput < 0 || s.TokensOutput < 0 || s.TokensCached < 0 || s.TokensCacheWrite < 0 || s.TokensReasoning < 0 {
 		return errors.New("token counts must be non-negative")
+	}
+	if s.WebSearchRequests < 0 {
+		return errors.New("web search requests must be non-negative")
 	}
 	if s.TokensCached > s.TokensInput || s.TokensCacheWrite > s.TokensInput-s.TokensCached {
 		return errors.New("cached and cache-write tokens must be disjoint input subsets")
@@ -522,13 +527,16 @@ func (h HarnessStageInput) Validate() error {
 }
 
 // StageUsage is the typed token ledger a stage reports to the orchestrator.
-// The orchestrator copies it into StageRecord and sums it into PipelineResult.
+// The orchestrator copies it into StageRecord. Token values also contribute to
+// PipelineResult totals.
 type StageUsage struct {
-	InputTokens       int `json:"input_tokens"`
-	OutputTokens      int `json:"output_tokens"`
-	CachedInputTokens int `json:"cached_input_tokens"`
-	CacheWriteTokens  int `json:"cache_write_tokens"`
-	ReasoningTokens   int `json:"reasoning_tokens"`
+	InputTokens       int    `json:"input_tokens"`
+	OutputTokens      int    `json:"output_tokens"`
+	CachedInputTokens int    `json:"cached_input_tokens"`
+	CacheWriteTokens  int    `json:"cache_write_tokens"`
+	ReasoningTokens   int    `json:"reasoning_tokens"`
+	WebSearchRequests int    `json:"web_search_requests"`
+	WebSearchEngine   string `json:"web_search_engine,omitempty"`
 }
 
 // HarnessStageOutput is minimal typed output returned by harness agents.
