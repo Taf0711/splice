@@ -197,17 +197,35 @@ func gitScopedFiles(ctx context.Context, workspace, language string, options Sta
 		return nil, err
 	}
 	var paths []string
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		for _, ext := range extensions {
-			if strings.HasSuffix(line, ext) {
-				p := filepath.Join(workspace, line)
-				if _, err := os.Stat(p); err == nil {
-					paths = append(paths, p)
+	seen := make(map[string]struct{})
+	appendPaths := func(output []byte) {
+		for _, line := range strings.Split(string(output), "\n") {
+			line = strings.TrimSpace(line)
+			for _, ext := range extensions {
+				if strings.HasSuffix(line, ext) {
+					p := filepath.Join(workspace, line)
+					if _, err := os.Stat(p); err == nil {
+						if _, ok := seen[p]; !ok {
+							seen[p] = struct{}{}
+							paths = append(paths, p)
+						}
+					}
+					break
 				}
-				break
 			}
 		}
 	}
+	appendPaths(out)
+
+	untrackedCommand := []string{"git", "ls-files", "--others", "--exclude-standard"}
+	untrackedOut, untrackedErr := runRecordedOutput(ctx, options, "splice.shell", map[string]any{
+		"command": untrackedCommand,
+		"cwd":     workspace,
+		"purpose": "untracked file discovery",
+	}, workspace, untrackedCommand)
+	if untrackedErr == nil {
+		appendPaths(untrackedOut)
+	}
+
 	return paths, nil
 }
