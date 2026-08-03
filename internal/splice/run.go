@@ -83,22 +83,24 @@ func (ledger *requestLedger) recordingOptions(options agent.Options) agent.Optio
 		}
 
 		record := schemas.PipelineUsageRecord{
-			Sequence:       attributed.Sequence,
-			Provider:       attributed.ProviderName,
-			Model:          attributed.Model,
-			Stage:          attributed.Stage,
-			Iteration:      attributed.Iteration,
-			UsageReported:  attributed.UsageReported,
-			InputTokens:    attributed.Usage.EffectiveInputTokens(),
-			OutputTokens:   attributed.Usage.EffectiveOutputTokens(),
-			CachedTokens:   attributed.Usage.CachedInputTokens,
-			CacheWrite:     attributed.Usage.CacheWriteTokens,
-			Reasoning:      attributed.Usage.ReasoningTokens,
-			CostStatus:     attributed.Cost.Status,
-			CostProvenance: attributed.Cost.Provenance,
-			PricingSource:  attributed.Cost.PricingSource,
-			PricingAsOf:    attributed.Cost.PricingAsOf,
-			UnpricedReason: attributed.Cost.UnpricedReason,
+			Sequence:          attributed.Sequence,
+			Provider:          attributed.ProviderName,
+			Model:             attributed.Model,
+			Stage:             attributed.Stage,
+			Iteration:         attributed.Iteration,
+			UsageReported:     attributed.UsageReported,
+			InputTokens:       attributed.Usage.EffectiveInputTokens(),
+			OutputTokens:      attributed.Usage.EffectiveOutputTokens(),
+			CachedTokens:      attributed.Usage.CachedInputTokens,
+			CacheWrite:        attributed.Usage.CacheWriteTokens,
+			Reasoning:         attributed.Usage.ReasoningTokens,
+			WebSearchRequests: attributed.Usage.WebSearchRequests,
+			WebSearchEngine:   attributed.Usage.WebSearchEngine,
+			CostStatus:        attributed.Cost.Status,
+			CostProvenance:    attributed.Cost.Provenance,
+			PricingSource:     attributed.Cost.PricingSource,
+			PricingAsOf:       attributed.Cost.PricingAsOf,
+			UnpricedReason:    attributed.Cost.UnpricedReason,
 		}
 		if attributed.Cost.CostUSD != nil {
 			cost := *attributed.Cost.CostUSD
@@ -1520,12 +1522,22 @@ func mergeStageUsage(a, b *schemas.StageUsage) *schemas.StageUsage {
 	if b == nil {
 		return a
 	}
+	engine := a.WebSearchEngine
+	if engine == "" {
+		engine = b.WebSearchEngine
+	} else if b.WebSearchEngine != "" && b.WebSearchEngine != engine {
+		// Keep the first non-empty engine when both sides agree. Mark a mismatch
+		// as "mixed" so pricing cannot silently use either engine's rate.
+		engine = "mixed"
+	}
 	return &schemas.StageUsage{
 		InputTokens:       a.InputTokens + b.InputTokens,
 		OutputTokens:      a.OutputTokens + b.OutputTokens,
 		CachedInputTokens: a.CachedInputTokens + b.CachedInputTokens,
 		CacheWriteTokens:  a.CacheWriteTokens + b.CacheWriteTokens,
 		ReasoningTokens:   a.ReasoningTokens + b.ReasoningTokens,
+		WebSearchRequests: a.WebSearchRequests + b.WebSearchRequests,
+		WebSearchEngine:   engine,
 	}
 }
 

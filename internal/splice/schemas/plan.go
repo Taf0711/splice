@@ -579,23 +579,25 @@ const (
 
 // PipelineUsageRecord is one provider request priced at the orchestrator ledger.
 type PipelineUsageRecord struct {
-	Sequence       int      `json:"sequence"`
-	Provider       string   `json:"provider,omitempty"`
-	Model          string   `json:"model,omitempty"`
-	Stage          string   `json:"stage"`
-	Iteration      int      `json:"iteration"`
-	UsageReported  bool     `json:"usage_reported"`
-	InputTokens    int      `json:"input_tokens"`
-	OutputTokens   int      `json:"output_tokens"`
-	CachedTokens   int      `json:"cached_input_tokens"`
-	CacheWrite     int      `json:"cache_write_tokens"`
-	Reasoning      int      `json:"reasoning_tokens"`
-	CostUSD        *float64 `json:"cost_usd,omitempty"`
-	CostStatus     string   `json:"cost_status"`
-	CostProvenance string   `json:"cost_provenance,omitempty"`
-	PricingSource  string   `json:"pricing_source,omitempty"`
-	PricingAsOf    string   `json:"pricing_as_of,omitempty"`
-	UnpricedReason string   `json:"unpriced_reason,omitempty"`
+	Sequence          int      `json:"sequence"`
+	Provider          string   `json:"provider,omitempty"`
+	Model             string   `json:"model,omitempty"`
+	Stage             string   `json:"stage"`
+	Iteration         int      `json:"iteration"`
+	UsageReported     bool     `json:"usage_reported"`
+	InputTokens       int      `json:"input_tokens"`
+	OutputTokens      int      `json:"output_tokens"`
+	CachedTokens      int      `json:"cached_input_tokens"`
+	CacheWrite        int      `json:"cache_write_tokens"`
+	Reasoning         int      `json:"reasoning_tokens"`
+	WebSearchRequests int      `json:"web_search_requests"`
+	WebSearchEngine   string   `json:"web_search_engine,omitempty"`
+	CostUSD           *float64 `json:"cost_usd,omitempty"`
+	CostStatus        string   `json:"cost_status"`
+	CostProvenance    string   `json:"cost_provenance,omitempty"`
+	PricingSource     string   `json:"pricing_source,omitempty"`
+	PricingAsOf       string   `json:"pricing_as_of,omitempty"`
+	UnpricedReason    string   `json:"unpriced_reason,omitempty"`
 }
 
 // Validate checks the pipeline usage record.
@@ -612,6 +614,9 @@ func (r PipelineUsageRecord) Validate() error {
 	if r.InputTokens < 0 || r.OutputTokens < 0 || r.CachedTokens < 0 || r.CacheWrite < 0 || r.Reasoning < 0 {
 		return errors.New("token counts must be non-negative")
 	}
+	if r.WebSearchRequests < 0 {
+		return errors.New("web search requests must be non-negative")
+	}
 	if r.CachedTokens > r.InputTokens {
 		return fmt.Errorf("cached input tokens %d exceeds input tokens %d", r.CachedTokens, r.InputTokens)
 	}
@@ -622,8 +627,8 @@ func (r PipelineUsageRecord) Validate() error {
 		return fmt.Errorf("reasoning tokens %d exceeds output tokens %d", r.Reasoning, r.OutputTokens)
 	}
 	if !r.UsageReported {
-		if r.InputTokens != 0 || r.OutputTokens != 0 || r.CachedTokens != 0 || r.CacheWrite != 0 || r.Reasoning != 0 {
-			return errors.New("usage_reported false requires zero token counts")
+		if r.InputTokens != 0 || r.OutputTokens != 0 || r.CachedTokens != 0 || r.CacheWrite != 0 || r.Reasoning != 0 || r.WebSearchRequests != 0 {
+			return errors.New("usage_reported false requires zero usage counts")
 		}
 		if r.CostStatus != CostStatusUnpriced {
 			return errors.New("usage_reported false requires unpriced cost status")
