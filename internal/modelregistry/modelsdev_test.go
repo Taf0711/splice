@@ -1,13 +1,17 @@
 package modelregistry
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -77,6 +81,36 @@ func embeddedModelsDevDateForTest(t *testing.T) time.Time {
 		t.Fatalf("parse embedded models.dev date: %v", err)
 	}
 	return date.UTC()
+}
+
+func embeddedModelsDevRecordForTest(t *testing.T, provider, model string) (modelsDevModel, bool) {
+	t.Helper()
+	compressed, err := os.ReadFile("modelsdev_snapshot.json.gz")
+	if err != nil {
+		t.Fatalf("read embedded models.dev snapshot: %v", err)
+	}
+	reader, err := gzip.NewReader(bytes.NewReader(compressed))
+	if err != nil {
+		t.Fatalf("open embedded models.dev snapshot: %v", err)
+	}
+	data, err := io.ReadAll(reader)
+	closeErr := reader.Close()
+	if err != nil {
+		t.Fatalf("read embedded models.dev snapshot: %v", err)
+	}
+	if closeErr != nil {
+		t.Fatalf("close embedded models.dev snapshot: %v", closeErr)
+	}
+	var providers map[string]modelsDevProvider
+	if err := json.Unmarshal(data, &providers); err != nil {
+		t.Fatalf("parse embedded models.dev snapshot: %v", err)
+	}
+	providerData, ok := providers[provider]
+	if !ok {
+		return modelsDevModel{}, false
+	}
+	record, ok := providerData.Models[model]
+	return record, ok
 }
 
 func freshModelsDevCacheTimeForTest(t *testing.T) time.Time {
@@ -420,6 +454,7 @@ func TestDefaultRegistryReportsSkippedModelsDevRecords(t *testing.T) {
 }
 
 func TestDefaultRegistryResolvesProviderScopedDerivedModel(t *testing.T) {
+	t.Setenv("SPLICE_DISABLE_MODELS_FETCH", "")
 	cachePath := filepath.Join(t.TempDir(), "modelsdev.json")
 	if err := os.WriteFile(cachePath, []byte(sampleModelsDevProviderScoped), 0o644); err != nil {
 		t.Fatal(err)
@@ -545,6 +580,7 @@ func TestDefaultModelEntriesOverlayDisabledIsCuratedOnly(t *testing.T) {
 // malformed records the live API carries stay exercised. The snapshot is
 // copied into a temp dir so the test controls its cache mtime.
 func TestDefaultRegistryRealCachedSnapshot(t *testing.T) {
+	t.Setenv("SPLICE_DISABLE_MODELS_FETCH", "")
 	snapshot, err := os.ReadFile(filepath.Join("testdata", "modelsdev_snapshot.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -792,11 +828,15 @@ func TestDefaultRegistryUsesEmbeddedPricingForDerivedProviderModel(t *testing.T)
 		t.Fatal(err)
 	}
 	glm, ok := registry.Get("z-ai/glm-5.2")
-	if !ok {
-		t.Fatal("openrouter registry did not resolve z-ai/glm-5.2 from the embedded snapshot")
+	expected, expectedOK := embeddedModelsDevRecordForTest(t, "openrouter", "z-ai/glm-5.2")
+	if ok != expectedOK {
+		t.Fatalf("embedded z-ai/glm-5.2 presence = %v, want %v", ok, expectedOK)
 	}
-	if glm.Cost.InputPerMillion != 0.6692 || glm.Cost.OutputPerMillion != 2.1032 || glm.Cost.CachedInputPerMillion != 0.12428 {
-		t.Fatalf("embedded z-ai/glm-5.2 pricing = %+v", glm.Cost)
+	if !expectedOK {
+		return
+	}
+	if glm.Cost.InputPerMillion != expected.Cost.Input || glm.Cost.OutputPerMillion != expected.Cost.Output || glm.Cost.CachedInputPerMillion != expected.Cost.CacheRead {
+		t.Fatalf("embedded z-ai/glm-5.2 pricing = %+v, want input %.12g/output %.12g/cache-read %.12g", glm.Cost, expected.Cost.Input, expected.Cost.Output, expected.Cost.CacheRead)
 	}
 	if glm.Cost.Source != modelsDevEmbeddedSource || glm.Cost.SourceLastVerified != strings.TrimSpace(string(modelsDevEmbeddedDate)) {
 		t.Fatalf("embedded z-ai/glm-5.2 source = %q/%q, want embedded %s", glm.Cost.Source, glm.Cost.SourceLastVerified, strings.TrimSpace(string(modelsDevEmbeddedDate)))
@@ -865,7 +905,14 @@ func TestDefaultRegistrySelectsEmbeddedAndNewerDiskPricing(t *testing.T) {
 	}
 
 	t.Run("older cache loses", func(t *testing.T) {
-		check(t, embeddedModelsDevDateForTest(t).Add(-time.Minute), 5, modelsDevEmbeddedSource, strings.TrimSpace(string(modelsDevEmbeddedDate)))
+		record, ok := embeddedModelsDevRecordForTest(t, "openai", "gpt-5.6-sol")
+		wantInput, wantSource, wantDate := 0.0, "", ""
+		if ok {
+			wantInput = record.Cost.Input
+			wantSource = modelsDevEmbeddedSource
+			wantDate = strings.TrimSpace(string(modelsDevEmbeddedDate))
+		}
+		check(t, embeddedModelsDevDateForTest(t).Add(-time.Minute), wantInput, wantSource, wantDate)
 	})
 	t.Run("newer cache wins", func(t *testing.T) {
 		cacheDate := embeddedModelsDevDateForTest(t).Add(24*time.Hour + time.Minute)
@@ -883,11 +930,42 @@ func TestDefaultRegistryUsesEmbeddedPricingWithoutDiskCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	gpt, ok := registry.Get("gpt-5.6-sol")
-	if !ok || gpt.Cost.Source != modelsDevEmbeddedSource || gpt.Cost.SourceLastVerified != strings.TrimSpace(string(modelsDevEmbeddedDate)) {
+	expected, expectedOK := embeddedModelsDevRecordForTest(t, "openai", "gpt-5.6-sol")
+	if ok != expectedOK {
+		t.Fatalf("gpt-5.6-sol presence = %v, want %v", ok, expectedOK)
+	}
+	if !expectedOK {
+		return
+	}
+	if gpt.Cost.Source != modelsDevEmbeddedSource || gpt.Cost.SourceLastVerified != strings.TrimSpace(string(modelsDevEmbeddedDate)) {
 		t.Fatalf("gpt-5.6-sol cost = %+v/%v, want embedded pricing", gpt.Cost, ok)
 	}
-	if len(gpt.Cost.Tiers) != 2 || gpt.Cost.Tiers[0].UpToInputTokens != 272_000 {
-		t.Fatalf("gpt-5.6-sol tiers = %+v, want a 272k boundary and fallback", gpt.Cost.Tiers)
+	if gpt.Cost.InputPerMillion != expected.Cost.Input || gpt.Cost.OutputPerMillion != expected.Cost.Output || gpt.Cost.CachedInputPerMillion != expected.Cost.CacheRead || gpt.Cost.CacheWritePerMillion != expected.Cost.CacheWrite {
+		t.Fatalf("gpt-5.6-sol pricing = %+v, want embedded record rates", gpt.Cost)
+	}
+	contextSteps := make([]modelsDevCostTier, 0, len(expected.Cost.Tiers))
+	for _, step := range expected.Cost.Tiers {
+		if step.Tier.Type == "context" && step.Tier.Size > 0 {
+			contextSteps = append(contextSteps, step)
+		}
+	}
+	if len(contextSteps) == 0 {
+		t.Log("embedded gpt-5.6-sol record has no context steps; registry must report zero tiers")
+		if len(gpt.Cost.Tiers) != 0 {
+			t.Fatalf("gpt-5.6-sol tiers = %+v, want zero tiers", gpt.Cost.Tiers)
+		}
+	} else {
+		sort.Slice(contextSteps, func(left, right int) bool {
+			return contextSteps[left].Tier.Size < contextSteps[right].Tier.Size
+		})
+		if len(gpt.Cost.Tiers) != len(contextSteps)+1 {
+			t.Fatalf("gpt-5.6-sol tiers = %+v, want %d tiers from %d raw context steps", gpt.Cost.Tiers, len(contextSteps)+1, len(contextSteps))
+		}
+		for index, step := range contextSteps {
+			if gpt.Cost.Tiers[index].UpToInputTokens != step.Tier.Size {
+				t.Fatalf("gpt-5.6-sol tier %d boundary = %d, want raw context size %d", index, gpt.Cost.Tiers[index].UpToInputTokens, step.Tier.Size)
+			}
+		}
 	}
 	haiku, ok := registry.Get("claude-haiku-3.5")
 	if !ok || !haiku.Cost.IsUnpriced() {

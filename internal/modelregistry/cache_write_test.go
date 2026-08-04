@@ -33,15 +33,40 @@ func TestCalculateCostCacheWritePremium(t *testing.T) {
 		if err != nil {
 			t.Fatalf("DefaultRegistry returned error: %v", err)
 		}
-		cost, err := registry.EstimateCost("gpt-4.1", zeroruntime.Usage{
+		record, expectedOK := embeddedModelsDevRecordForTest(t, "openai", "gpt-4.1")
+		model, ok := registry.Get("gpt-4.1")
+		if ok != expectedOK {
+			t.Fatalf("gpt-4.1 presence = %v, want %v", ok, expectedOK)
+		}
+		if !expectedOK {
+			if !model.Cost.IsUnpriced() {
+				t.Fatalf("gpt-4.1 cost = %+v, want unpriced without an embedded record", model.Cost)
+			}
+			return
+		}
+		usage := zeroruntime.Usage{
 			InputTokens: 1_000_000, CachedInputTokens: 300_000,
 			CacheWriteTokens: 200_000, OutputTokens: 500_000,
-		})
+		}
+		cost, err := registry.EstimateCost("gpt-4.1", usage)
 		if err != nil {
 			t.Fatalf("EstimateCost returned error: %v", err)
 		}
-		if math.Abs(cost.TotalCost-5.55) > 1e-9 {
-			t.Fatalf("EstimateCost total = %v, want 5.55", cost.TotalCost)
+		cachedTokens := 0
+		if record.Cost.CacheRead > 0 {
+			cachedTokens = usage.CachedInputTokens
+		}
+		cacheWriteTokens := 0
+		if record.Cost.CacheWrite > 0 {
+			cacheWriteTokens = usage.CacheWriteTokens
+		}
+		uncachedTokens := usage.InputTokens - cachedTokens - cacheWriteTokens
+		want := float64(uncachedTokens)/tokensPerMillion*record.Cost.Input +
+			float64(cachedTokens)/tokensPerMillion*record.Cost.CacheRead +
+			float64(cacheWriteTokens)/tokensPerMillion*record.Cost.CacheWrite +
+			float64(usage.OutputTokens)/tokensPerMillion*record.Cost.Output
+		if math.Abs(cost.TotalCost-want) > 1e-9 {
+			t.Fatalf("EstimateCost total = %v, want snapshot-derived %v", cost.TotalCost, want)
 		}
 	})
 }

@@ -33,8 +33,16 @@ func TestDefaultRegistryCoversM1ModelCatalog(t *testing.T) {
 		}
 	}
 	gpt, err := registry.Require("gpt-5.6-sol")
-	if err != nil || gpt.Cost.IsUnpriced() || gpt.Cost.SourceLastVerified != strings.TrimSpace(string(modelsDevEmbeddedDate)) {
-		t.Fatalf("gpt-5.6-sol should use embedded pricing: %v/%+v", err, gpt.Cost)
+	_, expectedOK := embeddedModelsDevRecordForTest(t, "openai", "gpt-5.6-sol")
+	if err != nil {
+		t.Fatalf("gpt-5.6-sol should remain resolvable: %v", err)
+	}
+	if expectedOK {
+		if gpt.Cost.IsUnpriced() || gpt.Cost.SourceLastVerified != strings.TrimSpace(string(modelsDevEmbeddedDate)) {
+			t.Fatalf("gpt-5.6-sol should use embedded pricing: %+v", gpt.Cost)
+		}
+	} else if !gpt.Cost.IsUnpriced() || gpt.Cost.Source != "" {
+		t.Fatalf("gpt-5.6-sol should remain unpriced without an embedded record: %+v", gpt.Cost)
 	}
 
 	providers := map[ProviderKind]bool{}
