@@ -59,6 +59,27 @@ You can inspect blocked scripts with `bun pm untrusted`. On Bun versions without
 node node_modules/@taf0711/splice/scripts/postinstall.mjs
 ```
 
+## One-line install
+
+Use the Bash installer on Linux or macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Taf0711/splice/main/scripts/install.sh | bash
+wget -qO- https://raw.githubusercontent.com/Taf0711/splice/main/scripts/install.sh | bash
+```
+
+Use the plain PowerShell form on Windows:
+
+```powershell
+irm https://raw.githubusercontent.com/Taf0711/splice/main/scripts/install.ps1 | iex
+```
+
+Use the PowerShell argument form to set a version:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Taf0711/splice/main/scripts/install.ps1))) -Version 0.1.3
+```
+
 ## Versioned install: GitHub Releases
 
 Release archives and checksums are published on
@@ -81,9 +102,8 @@ splice-v<version>-macos-<arch>.tar.gz
 splice-v<version>-windows-<arch>.zip
 ```
 
-The release archive includes the platform helpers needed by the sandbox. Keep
-`splice` and its helper binaries together when copying them to a directory on
-`PATH`.
+A published release archive contains only the `splice` binary and the
+`splice-memd` sidecar. It does not contain sandbox helper binaries.
 
 The install script reads these variables. Each one also has an equivalent flag:
 

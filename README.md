@@ -37,6 +37,27 @@ The first launch opens setup for a provider and model. See
 [Install](docs/INSTALL.md) for source builds, platform notes, and the optional
 memory sidecar.
 
+## One-line install
+
+Use the Bash installer on Linux or macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Taf0711/splice/main/scripts/install.sh | bash
+wget -qO- https://raw.githubusercontent.com/Taf0711/splice/main/scripts/install.sh | bash
+```
+
+Use the plain PowerShell form on Windows:
+
+```powershell
+irm https://raw.githubusercontent.com/Taf0711/splice/main/scripts/install.ps1 | iex
+```
+
+Use the PowerShell argument form to set a version:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Taf0711/splice/main/scripts/install.ps1))) -Version 0.1.3
+```
+
 ## Why Splice exists
 
 Most coding agents have one long conversation responsible for understanding,
