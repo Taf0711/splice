@@ -33,7 +33,7 @@ func TestDefaultRegistryCoversM1ModelCatalog(t *testing.T) {
 		}
 	}
 	gpt, err := registry.Require("gpt-5.6-sol")
-	if err != nil || gpt.Cost.IsUnpriced() || gpt.Cost.SourceLastVerified != "2026-07-27" {
+	if err != nil || gpt.Cost.IsUnpriced() || gpt.Cost.SourceLastVerified != strings.TrimSpace(string(modelsDevEmbeddedDate)) {
 		t.Fatalf("gpt-5.6-sol should use embedded pricing: %v/%+v", err, gpt.Cost)
 	}
 
