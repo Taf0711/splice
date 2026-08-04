@@ -38,9 +38,7 @@ func TestWriteAndVerifyReleaseChecksums(t *testing.T) {
 	dir := t.TempDir()
 	archiveName := "splice-v0.1.0-linux-x64.tar.gz"
 	archivePath := filepath.Join(dir, archiveName)
-	if err := os.WriteFile(archivePath, []byte("splice archive bytes"), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
+	writeTestTarGz(t, archivePath, []string{"splice", "splice-memd"})
 
 	written, err := WriteSHA256Checksum(archivePath)
 	if err != nil {

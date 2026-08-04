@@ -116,6 +116,14 @@ func runVerify(args []string, stdout io.Writer, stderr io.Writer) int {
 		}
 		return 0
 	}
+	if options.ArchivePath != "" {
+		if err := release.VerifyArchiveContents(options.ArchivePath, options.GOOS); err != nil {
+			_, _ = fmt.Fprintln(stderr, "[splice] Release archive content verification failed: "+err.Error())
+			return 1
+		}
+		_, _ = fmt.Fprintf(stdout, "Verified archive contents (%s)\n", filepath.Base(options.ArchivePath))
+		return 0
+	}
 	results, err := release.VerifyReleaseChecksums(options)
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, "[splice] Release checksum verification failed: "+err.Error())
@@ -288,17 +296,37 @@ func parseVerifyArgs(args []string) (release.VerifyOptions, bool, error) {
 			}
 			return options, true, nil
 		case "--dir":
+			if options.ArchivePath != "" {
+				return options, false, fmt.Errorf("--dir cannot be combined with --archive")
+			}
 			value, next, err := readOptionValue(args, inlineValue, index, flag)
 			if err != nil {
 				return options, false, err
 			}
 			options.ReleaseDir = value
 			index = next
+		case "--archive":
+			value, next, err := readOptionValue(args, inlineValue, index, flag)
+			if err != nil {
+				return options, false, err
+			}
+			if options.ReleaseDir != "" {
+				return options, false, fmt.Errorf("--archive cannot be combined with --dir")
+			}
+			options.ArchivePath = value
+			index = next
+		case "--goos":
+			value, next, err := readOptionValue(args, inlineValue, index, flag)
+			if err != nil {
+				return options, false, err
+			}
+			options.GOOS = value
+			index = next
 		default:
 			if strings.HasPrefix(arg, "-") {
 				return options, false, fmt.Errorf("unknown verify flag %q", arg)
 			}
-			if options.ReleaseDir != "" {
+			if options.ReleaseDir != "" || options.ArchivePath != "" {
 				return options, false, fmt.Errorf("unexpected argument: %s", arg)
 			}
 			options.ReleaseDir = arg
@@ -337,7 +365,7 @@ Commands:
   build      Build the Go-native splice binary
   package    Build and package the current platform release archive
   smoke      Verify the built splice binary prints the package version
-  verify     Verify release archive checksums
+  verify     Verify release archive checksums or contents
 `)
 	return err
 }
@@ -400,11 +428,14 @@ Flags:
 func writeVerifyHelp(w io.Writer) error {
 	_, err := fmt.Fprint(w, `Usage:
   splice-release verify [--dir <path>]
+  splice-release verify --archive <path> --goos <goos>
 
-Verifies that every release archive has a matching .sha256 file and digest.
+Verifies release archive checksums and required archive contents.
 
 Flags:
-      --dir <path>  Release directory to verify (default: dist/release)
+      --dir <path>      Release directory to verify (default: dist/release)
+      --archive <path>  Archive file to verify without a checksum file
+      --goos <goos>     Archive target platform for --archive
   -h, --help        Show this help
 `)
 	return err

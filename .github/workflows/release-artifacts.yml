@@ -144,6 +144,12 @@ jobs:
             echo "path=${ARCHIVE_NAME}.tar.gz" >> $GITHUB_OUTPUT
           fi
 
+      - name: Verify archive contents
+        run: |
+          go run ./cmd/splice-release verify \
+            --archive "${{ steps.archive.outputs.path }}" \
+            --goos "${{ matrix.goos }}"
+
       - name: Generate SHA-256 checksum
         id: checksum
         run: |

@@ -40,7 +40,9 @@ type ParsedChecksum struct {
 }
 
 type VerifyOptions struct {
-	ReleaseDir string
+	ReleaseDir  string
+	ArchivePath string
+	GOOS        string
 }
 
 type PackageOptions struct {
@@ -269,6 +271,21 @@ func ZeroArtifactName(goos string) string {
 		return "splice.exe"
 	}
 	return "splice"
+}
+
+func MemdArtifactName(goos string) string {
+	if goos == "windows" {
+		return "splice-memd.exe"
+	}
+	return "splice-memd"
+}
+
+func RequiredArchiveEntries(goos string) ([]string, error) {
+	goos = strings.TrimSpace(goos)
+	if _, err := ReleasePlatform(goos); err != nil {
+		return nil, err
+	}
+	return []string{ZeroArtifactName(goos), MemdArtifactName(goos)}, nil
 }
 
 func LinuxSandboxHelperArtifactName(goos string) string {
@@ -520,9 +537,128 @@ func VerifyReleaseChecksums(options VerifyOptions) ([]VerifiedChecksum, error) {
 		if result.ArchiveName != archiveName {
 			return nil, fmt.Errorf("checksum file %s references %s, expected %s", checksumName, result.ArchiveName, archiveName)
 		}
+		goos, err := releaseGOOSFromArchiveName(archiveName)
+		if err != nil {
+			return nil, err
+		}
+		if err := VerifyArchiveContents(result.ArchivePath, goos); err != nil {
+			return nil, err
+		}
 		verified = append(verified, result)
 	}
 	return verified, nil
+}
+
+func VerifyArchiveContents(archivePath string, goos string) error {
+	archivePath = strings.TrimSpace(archivePath)
+	if archivePath == "" {
+		return errors.New("archive path is required")
+	}
+	expected, err := RequiredArchiveEntries(goos)
+	if err != nil {
+		return err
+	}
+	actual, err := readArchiveEntries(archivePath)
+	if err != nil {
+		return err
+	}
+	actualSet := make(map[string]struct{}, len(actual))
+	for _, name := range actual {
+		actualSet[name] = struct{}{}
+	}
+	for _, name := range expected {
+		if _, ok := actualSet[name]; !ok {
+			return fmt.Errorf("archive %s missing required entry %q; actual entries: %v", filepath.Base(archivePath), name, actual)
+		}
+	}
+	return nil
+}
+
+func readArchiveEntries(archivePath string) ([]string, error) {
+	var names []string
+	var err error
+	switch {
+	case strings.HasSuffix(strings.ToLower(archivePath), ".zip"):
+		names, err = readZipArchiveEntries(archivePath)
+	case strings.HasSuffix(strings.ToLower(archivePath), ".tar.gz"):
+		names, err = readTarGzArchiveEntries(archivePath)
+	default:
+		return nil, fmt.Errorf("unsupported release archive format: %s", filepath.Base(archivePath))
+	}
+	if err != nil {
+		return nil, err
+	}
+	unique := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		unique[normalizeArchiveEntryName(name)] = struct{}{}
+	}
+	normalized := make([]string, 0, len(unique))
+	for name := range unique {
+		normalized = append(normalized, name)
+	}
+	sort.Strings(normalized)
+	return normalized, nil
+}
+
+func readZipArchiveEntries(archivePath string) ([]string, error) {
+	reader, err := zip.OpenReader(archivePath)
+	if err != nil {
+		return nil, fmt.Errorf("read zip archive %s: %w", filepath.Base(archivePath), err)
+	}
+	defer func() { _ = reader.Close() }()
+	names := make([]string, 0, len(reader.File))
+	for _, entry := range reader.File {
+		names = append(names, entry.Name)
+	}
+	return names, nil
+}
+
+func readTarGzArchiveEntries(archivePath string) ([]string, error) {
+	file, err := os.Open(archivePath)
+	if err != nil {
+		return nil, fmt.Errorf("read tar.gz archive %s: %w", filepath.Base(archivePath), err)
+	}
+	defer func() { _ = file.Close() }()
+	gzipReader, err := gzip.NewReader(file)
+	if err != nil {
+		return nil, fmt.Errorf("read tar.gz archive %s: %w", filepath.Base(archivePath), err)
+	}
+	defer func() { _ = gzipReader.Close() }()
+	tarReader := tar.NewReader(gzipReader)
+	names := []string{}
+	for {
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read tar.gz archive %s: %w", filepath.Base(archivePath), err)
+		}
+		names = append(names, header.Name)
+	}
+	return names, nil
+}
+
+func normalizeArchiveEntryName(name string) string {
+	name = strings.ReplaceAll(name, "\\", "/")
+	for strings.HasPrefix(name, "./") {
+		name = strings.TrimPrefix(name, "./")
+	}
+	return name
+}
+
+func releaseGOOSFromArchiveName(archiveName string) (string, error) {
+	name := filepath.Base(archiveName)
+	switch {
+	case strings.Contains(name, "-windows-"):
+		return "windows", nil
+	case strings.Contains(name, "-linux-"):
+		return "linux", nil
+	case strings.Contains(name, "-macos-"):
+		return "darwin", nil
+	default:
+		return "", fmt.Errorf("cannot determine release platform from archive name: %s", name)
+	}
 }
 
 func resolveRootDir(rootDir string) (string, error) {
