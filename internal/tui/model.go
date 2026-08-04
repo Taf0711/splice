@@ -2250,13 +2250,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m, titleCmd = m.maybeAutoTitleActiveSession()
 			// Post-turn recap (gated on the recaps preference): one short sentence
 			// summarizing the turn's final answer, shown as a "※ recap:" footnote.
-			var finalAnswer string
-			for _, row := range msg.rows {
-				if row.kind == rowAssistant && row.final {
-					finalAnswer = row.text
-				}
-			}
-			m, recapCmd = m.maybeRecapTurn(msg.runID, finalAnswer)
+			m, recapCmd = m.maybeRecapTurn(msg.runID, msg.rows)
 		}
 		// End-of-turn git sweep: catch file mutations the tool stream couldn't
 		// report (bash scaffolding, subagent edits) so the FILES sidebar is

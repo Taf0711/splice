@@ -23,36 +23,86 @@ func TestHandleConfigCommandReportsPersistError(t *testing.T) {
 }
 
 // TestMaybeRecapTurnGating: a recap fires only when enabled, a provider exists,
-// and there's a final answer — and at most once per run.
+// and the turn passes the work and answer gates, at most once per run.
 func TestMaybeRecapTurnGating(t *testing.T) {
 	withProvider := func() model {
 		return model{recapsEnabled: true, provider: &fakeProvider{}}
 	}
+	qualifyingRows := recapTurnRows(strings.Repeat("a", recapMinAnswerChars), 1)
 
 	// Disabled -> no cmd.
-	if _, cmd := (model{recapsEnabled: false, provider: &fakeProvider{}}).maybeRecapTurn(1, "did X"); cmd != nil {
+	if _, cmd := (model{recapsEnabled: false, provider: &fakeProvider{}}).maybeRecapTurn(1, qualifyingRows); cmd != nil {
 		t.Error("recaps disabled: want no cmd")
 	}
 	// No provider -> no cmd.
-	if _, cmd := (model{recapsEnabled: true}).maybeRecapTurn(1, "did X"); cmd != nil {
+	if _, cmd := (model{recapsEnabled: true}).maybeRecapTurn(1, qualifyingRows); cmd != nil {
 		t.Error("no provider: want no cmd")
 	}
 	// Empty answer -> no cmd.
-	if _, cmd := withProvider().maybeRecapTurn(1, "   "); cmd != nil {
+	if _, cmd := withProvider().maybeRecapTurn(1, recapTurnRows("   ", 1)); cmd != nil {
 		t.Error("empty answer: want no cmd")
 	}
 	// Enabled + provider + answer -> a cmd, and the per-run gate is set.
-	m, cmd := withProvider().maybeRecapTurn(7, "Built the website")
+	m, cmd := withProvider().maybeRecapTurn(7, qualifyingRows)
 	if cmd == nil {
-		t.Fatal("enabled run with an answer should dispatch a recap cmd")
+		t.Fatal("enabled qualifying run should dispatch a recap cmd")
 	}
 	if !m.recappedRuns[7] {
 		t.Error("the per-run gate should be set")
 	}
 	// Second call for the same run -> no cmd (already recapped).
-	if _, cmd2 := m.maybeRecapTurn(7, "Built the website"); cmd2 != nil {
+	if _, cmd2 := m.maybeRecapTurn(7, qualifyingRows); cmd2 != nil {
 		t.Error("a second recap for the same run must not fire")
 	}
+}
+
+// TestMaybeRecapTurnLongAnswerWithToolCallRecaps ensures the gate must not
+// suppress the case recaps exist for: real work with a long final answer.
+func TestMaybeRecapTurnLongAnswerWithToolCallRecaps(t *testing.T) {
+	rows := recapTurnRows(strings.Repeat("a", recapMinAnswerChars), 1)
+	if _, cmd := (model{recapsEnabled: true, provider: &fakeProvider{}}).maybeRecapTurn(1, rows); cmd == nil {
+		t.Error("a long answer after a tool call should dispatch a recap cmd")
+	}
+}
+
+func TestMaybeRecapTurnShortAnswerWithToolCallDoesNotRecap(t *testing.T) {
+	rows := recapTurnRows(strings.Repeat("a", recapMinAnswerChars-1), 1)
+	if _, cmd := (model{recapsEnabled: true, provider: &fakeProvider{}}).maybeRecapTurn(1, rows); cmd != nil {
+		t.Error("a short answer after a tool call must not dispatch a recap cmd")
+	}
+}
+
+func TestMaybeRecapTurnLongAnswerWithoutToolCallDoesNotRecap(t *testing.T) {
+	rows := recapTurnRows(strings.Repeat("a", recapMinAnswerChars), 0)
+	if _, cmd := (model{recapsEnabled: true, provider: &fakeProvider{}}).maybeRecapTurn(1, rows); cmd != nil {
+		t.Error("a long answer without a tool call must not dispatch a recap cmd")
+	}
+}
+
+func TestMaybeRecapTurnFailsBothGatesDoesNotRecap(t *testing.T) {
+	rows := recapTurnRows(strings.Repeat("a", recapMinAnswerChars-1), 0)
+	if _, cmd := (model{recapsEnabled: true, provider: &fakeProvider{}}).maybeRecapTurn(1, rows); cmd != nil {
+		t.Error("a short answer without a tool call must not dispatch a recap cmd")
+	}
+}
+
+func TestMaybeRecapTurnPerRunGuardPreventsDoubleFire(t *testing.T) {
+	rows := recapTurnRows(strings.Repeat("a", recapMinAnswerChars), 1)
+	m, first := (model{recapsEnabled: true, provider: &fakeProvider{}}).maybeRecapTurn(1, rows)
+	if first == nil {
+		t.Fatal("a qualifying turn should dispatch a recap cmd")
+	}
+	if _, second := m.maybeRecapTurn(1, rows); second != nil {
+		t.Error("the per-run guard must prevent a second recap cmd")
+	}
+}
+
+func recapTurnRows(answer string, toolCalls int) []transcriptRow {
+	rows := make([]transcriptRow, 0, toolCalls+1)
+	for i := 0; i < toolCalls; i++ {
+		rows = append(rows, transcriptRow{kind: rowToolCall, id: "call"})
+	}
+	return append(rows, transcriptRow{kind: rowAssistant, final: true, text: answer})
 }
 
 // TestHandleRecapGenerated: a successful recap appends a "※ recap:" row; a
