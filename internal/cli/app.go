@@ -252,6 +252,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	// subcommand; the "__" prefix is unreachable by normal invocation.
 	if len(args) > 0 {
 		switch args[0] {
+		case sandbox.LinuxSandboxSubcommand:
+			return sandbox.RunLinuxSandboxHelper(args[1:], stderr)
 		case sandbox.WindowsCommandRunnerSubcommand:
 			return sandbox.RunWindowsSandboxCommandRunner(args[1:], stderr)
 		case sandbox.WindowsSandboxSetupSubcommand:

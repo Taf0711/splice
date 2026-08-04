@@ -189,6 +189,7 @@ func linuxSandboxHelperCommandPlan(execRequest SandboxExecutionRequest, policy P
 	helper := LinuxSandboxHelperCommand{}
 	if execRequest.Backend.Name == BackendLinuxBwrap && execRequest.Backend.Executable != "" {
 		helper.Name = execRequest.Backend.Executable
+		helper.ArgsPrefix = execRequest.Backend.ExecutableArgsPrefix
 	} else {
 		resolved, err := linuxSandboxHelperCommand()
 		if err != nil {

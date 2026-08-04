@@ -16,6 +16,10 @@ import (
 
 const LinuxSandboxHelperName = "splice-linux-sandbox"
 
+// LinuxSandboxSubcommand is the hidden CLI token used when the running splice
+// binary acts as its own Linux sandbox helper.
+const LinuxSandboxSubcommand = "__linux-sandbox"
+
 const linuxSandboxBackendEnv = BackendLinuxBwrap
 
 type LinuxSandboxCommandArgsOptions struct {
@@ -347,14 +351,8 @@ func pathExists(path string) bool {
 }
 
 func findLinuxSandboxHelperCommand() (LinuxSandboxHelperCommand, error) {
-	if exe, err := os.Executable(); err == nil {
-		candidate := filepath.Join(filepath.Dir(exe), LinuxSandboxHelperName)
-		if executableRegularFile(candidate) {
-			return LinuxSandboxHelperCommand{Name: candidate}, nil
-		}
-	}
-	if path, err := exec.LookPath(LinuxSandboxHelperName); err == nil && path != "" {
-		return LinuxSandboxHelperCommand{Name: path}, nil
+	if helper := resolveLinuxSandboxHelper(lookupExecutable); helper.Name != "" {
+		return helper, nil
 	}
 	if root := linuxSandboxRepoRoot(); root != "" {
 		mainPath := filepath.Join(root, "cmd", LinuxSandboxHelperName, "main.go")
@@ -369,6 +367,30 @@ func findLinuxSandboxHelperCommand() (LinuxSandboxHelperCommand, error) {
 		}
 	}
 	return LinuxSandboxHelperCommand{}, errors.New("splice-linux-sandbox helper is not available")
+}
+
+// resolveLinuxSandboxHelper resolves a helper in three tiers: (1) a standalone
+// helper adjacent to the running binary, (2) the same name on PATH, and (3)
+// the running splice binary with the hidden Linux helper subcommand. The
+// checkout-only go run tier remains in findLinuxSandboxHelperCommand as a
+// final fallback when the running binary cannot be resolved.
+func resolveLinuxSandboxHelper(lookup func(string) (string, error)) LinuxSandboxHelperCommand {
+	if lookup == nil {
+		lookup = lookupExecutable
+	}
+	if exe, err := osExecutable(); err == nil {
+		candidate := filepath.Join(filepath.Dir(exe), LinuxSandboxHelperName)
+		if executableRegularFile(candidate) {
+			return LinuxSandboxHelperCommand{Name: candidate}
+		}
+	}
+	if path, err := lookup(LinuxSandboxHelperName); err == nil && path != "" {
+		return LinuxSandboxHelperCommand{Name: path}
+	}
+	if exe, err := osExecutable(); err == nil && strings.TrimSpace(exe) != "" {
+		return LinuxSandboxHelperCommand{Name: exe, ArgsPrefix: []string{LinuxSandboxSubcommand}}
+	}
+	return LinuxSandboxHelperCommand{}
 }
 
 func executableRegularFile(path string) bool {

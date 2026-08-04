@@ -37,6 +37,9 @@ func TestSelectBackendChoosesPlatformAdapterWithFallback(t *testing.T) {
 	})
 
 	t.Run("linux helper missing falls back explicitly", func(t *testing.T) {
+		restore := osExecutable
+		osExecutable = func() (string, error) { return "", errors.New("missing running binary") }
+		defer func() { osExecutable = restore }()
 		backend := SelectBackend(BackendOptions{
 			GOOS: "linux",
 			LookupExecutable: func(name string) (string, error) {

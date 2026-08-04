@@ -18,10 +18,9 @@ type Backend struct {
 	NativeIsolation bool        `json:"nativeIsolation"`
 	Executable      string      `json:"executable,omitempty"`
 	// ExecutableArgsPrefix is prepended to a wrapped command's args before the
-	// sandbox arguments. Non-empty only for the Windows self-dispatch helper,
-	// where Executable is the running splice binary and this carries the hidden
-	// subcommand token (e.g. "__windows-command-runner"). nil for every other
-	// backend, so their serialized form is unchanged.
+	// sandbox arguments. It is non-empty for self-dispatch helpers, where
+	// Executable is the running splice binary and this carries the hidden
+	// subcommand token.
 	ExecutableArgsPrefix []string `json:"executableArgsPrefix,omitempty"`
 	Message              string   `json:"message,omitempty"`
 }
