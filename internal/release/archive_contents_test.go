@@ -38,7 +38,7 @@ func TestVerifyArchiveContentsRequiredEntries(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			archivePath := filepath.Join(t.TempDir(), tt.archive)
 			tt.write(t, archivePath, tt.entries)
-			if err := VerifyArchiveContents(archivePath, tt.goos); err != nil {
+			if err := VerifyArchiveContents(archivePath); err != nil {
 				t.Fatalf("VerifyArchiveContents returned error: %v", err)
 			}
 		})
@@ -50,7 +50,7 @@ func TestVerifyArchiveContentsMissingSidecar(t *testing.T) {
 	archivePath := filepath.Join(t.TempDir(), "splice-v0.1.0-linux-x64.tar.gz")
 	writeTestTarGz(t, archivePath, []string{"splice"})
 
-	err := VerifyArchiveContents(archivePath, "linux")
+	err := VerifyArchiveContents(archivePath)
 	if err == nil {
 		t.Fatal("VerifyArchiveContents returned nil, want missing sidecar error")
 	}
@@ -66,7 +66,7 @@ func TestVerifyArchiveContentsMissingMainBinary(t *testing.T) {
 	archivePath := filepath.Join(t.TempDir(), "splice-v0.1.0-linux-x64.tar.gz")
 	writeTestTarGz(t, archivePath, []string{"splice-memd"})
 
-	err := VerifyArchiveContents(archivePath, "linux")
+	err := VerifyArchiveContents(archivePath)
 	if err == nil {
 		t.Fatal("VerifyArchiveContents returned nil, want missing main binary error")
 	}
@@ -82,7 +82,7 @@ func TestVerifyArchiveContentsAllowsExtraEntries(t *testing.T) {
 	archivePath := filepath.Join(t.TempDir(), "splice-v0.1.0-windows-x64.zip")
 	writeTestZip(t, archivePath, []string{"splice.exe", "splice-memd.exe", "README.txt", "helpers/tool"})
 
-	if err := VerifyArchiveContents(archivePath, "windows"); err != nil {
+	if err := VerifyArchiveContents(archivePath); err != nil {
 		t.Fatalf("VerifyArchiveContents returned error: %v", err)
 	}
 }

@@ -375,10 +375,8 @@ func findLinuxSandboxHelperCommand() (LinuxSandboxHelperCommand, error) {
 // checkout-only go run tier remains in findLinuxSandboxHelperCommand as a
 // final fallback when the running binary cannot be resolved.
 func resolveLinuxSandboxHelper(lookup func(string) (string, error)) LinuxSandboxHelperCommand {
-	if lookup == nil {
-		lookup = lookupExecutable
-	}
-	if exe, err := osExecutable(); err == nil {
+	exe, exeErr := osExecutable()
+	if exeErr == nil {
 		candidate := filepath.Join(filepath.Dir(exe), LinuxSandboxHelperName)
 		if executableRegularFile(candidate) {
 			return LinuxSandboxHelperCommand{Name: candidate}
@@ -387,7 +385,7 @@ func resolveLinuxSandboxHelper(lookup func(string) (string, error)) LinuxSandbox
 	if path, err := lookup(LinuxSandboxHelperName); err == nil && path != "" {
 		return LinuxSandboxHelperCommand{Name: path}
 	}
-	if exe, err := osExecutable(); err == nil && strings.TrimSpace(exe) != "" {
+	if exeErr == nil && strings.TrimSpace(exe) != "" {
 		return LinuxSandboxHelperCommand{Name: exe, ArgsPrefix: []string{LinuxSandboxSubcommand}}
 	}
 	return LinuxSandboxHelperCommand{}

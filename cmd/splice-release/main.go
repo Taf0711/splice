@@ -117,7 +117,7 @@ func runVerify(args []string, stdout io.Writer, stderr io.Writer) int {
 		return 0
 	}
 	if options.ArchivePath != "" {
-		if err := release.VerifyArchiveContents(options.ArchivePath, options.GOOS); err != nil {
+		if err := release.VerifyArchiveContents(options.ArchivePath); err != nil {
 			_, _ = fmt.Fprintln(stderr, "[splice] Release archive content verification failed: "+err.Error())
 			return 1
 		}
@@ -296,9 +296,6 @@ func parseVerifyArgs(args []string) (release.VerifyOptions, bool, error) {
 			}
 			return options, true, nil
 		case "--dir":
-			if options.ArchivePath != "" {
-				return options, false, fmt.Errorf("--dir cannot be combined with --archive")
-			}
 			value, next, err := readOptionValue(args, inlineValue, index, flag)
 			if err != nil {
 				return options, false, err
@@ -310,17 +307,7 @@ func parseVerifyArgs(args []string) (release.VerifyOptions, bool, error) {
 			if err != nil {
 				return options, false, err
 			}
-			if options.ReleaseDir != "" {
-				return options, false, fmt.Errorf("--archive cannot be combined with --dir")
-			}
 			options.ArchivePath = value
-			index = next
-		case "--goos":
-			value, next, err := readOptionValue(args, inlineValue, index, flag)
-			if err != nil {
-				return options, false, err
-			}
-			options.GOOS = value
 			index = next
 		default:
 			if strings.HasPrefix(arg, "-") {
@@ -331,6 +318,9 @@ func parseVerifyArgs(args []string) (release.VerifyOptions, bool, error) {
 			}
 			options.ReleaseDir = arg
 		}
+	}
+	if options.ReleaseDir != "" && options.ArchivePath != "" {
+		return options, false, fmt.Errorf("--dir cannot be combined with --archive")
 	}
 	return options, false, nil
 }
@@ -428,14 +418,13 @@ Flags:
 func writeVerifyHelp(w io.Writer) error {
 	_, err := fmt.Fprint(w, `Usage:
   splice-release verify [--dir <path>]
-  splice-release verify --archive <path> --goos <goos>
+  splice-release verify --archive <path>
 
 Verifies release archive checksums and required archive contents.
 
 Flags:
       --dir <path>      Release directory to verify (default: dist/release)
       --archive <path>  Archive file to verify without a checksum file
-      --goos <goos>     Archive target platform for --archive
   -h, --help        Show this help
 `)
 	return err

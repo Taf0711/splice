@@ -20,8 +20,6 @@ const (
 	// recapMaxAnswerChars bounds how much of the final answer feeds the recap
 	// prompt. The gist is enough, and it keeps the call cheap.
 	recapMaxAnswerChars = 1600
-	// recapMinToolCalls requires real work in the turn before adding a recap.
-	recapMinToolCalls = 1
 	// recapMinAnswerChars avoids recaps that merely restate short answers; one
 	// recap sentence is 80 to 120 characters, so shorter answers need no compression.
 	recapMinAnswerChars = 600
@@ -108,7 +106,7 @@ func (m model) maybeRecapTurn(runID int, rows []transcriptRow) (model, tea.Cmd) 
 			finalAnswer = row.text
 		}
 	}
-	if !m.recapsEnabled || m.provider == nil || toolCalls < recapMinToolCalls ||
+	if !m.recapsEnabled || m.provider == nil || toolCalls == 0 ||
 		utf8.RuneCountInString(strings.TrimSpace(finalAnswer)) < recapMinAnswerChars {
 		return m, nil
 	}
