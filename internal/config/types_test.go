@@ -16,6 +16,16 @@ func TestSandboxAdditionalReadRootsJSON(t *testing.T) {
 	}
 }
 
+func TestSandboxAllowReadJSON(t *testing.T) {
+	var cfg FileConfig
+	if err := json.Unmarshal([]byte(`{"sandbox":{"allowRead":["~/.ssh"]}}`), &cfg); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if want := []string{"~/.ssh"}; !reflect.DeepEqual(cfg.Sandbox.AllowRead, want) {
+		t.Fatalf("AllowRead = %v, want %v", cfg.Sandbox.AllowRead, want)
+	}
+}
+
 func TestToolsConfigJSONRoundTrip(t *testing.T) {
 	var cfg FileConfig
 	if err := json.Unmarshal([]byte(`{"tools":{"deferThreshold":25}}`), &cfg); err != nil {

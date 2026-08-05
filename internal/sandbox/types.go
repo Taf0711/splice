@@ -3,6 +3,7 @@ package sandbox
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -258,5 +259,45 @@ func DefaultPolicy() Policy {
 		Mode:             ModeEnforce,
 		Network:          NetworkDeny,
 		EnforceWorkspace: true,
+		DenyRead:         defaultDenyReadPaths(),
 	}
+}
+
+// defaultDenyReadPaths lists credential directories that a sandboxed command
+// must not read by default. The entries use the same home/config resolution as
+// the token stores, and policy path handling drops entries that do not exist.
+func defaultDenyReadPaths() []string {
+	paths := []string{
+		"~/.ssh",
+		"~/.aws",
+		"~/.azure",
+		"~/.gnupg",
+		"~/.kube",
+		"~/.docker",
+		filepath.Join("~", "Library", "Application Support", "gh"),
+		filepath.Join("~", "AppData", "Roaming", "GitHub CLI"),
+	}
+
+	configHome := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME"))
+	defaultConfigHome := ""
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		defaultConfigHome = filepath.Join(home, ".config")
+	}
+	if configHome == "" {
+		configHome = defaultConfigHome
+	} else if !filepath.IsAbs(configHome) {
+		if absolute, err := filepath.Abs(configHome); err == nil {
+			configHome = absolute
+		}
+	}
+	if configHome != "" {
+		configPath := func(name string) string {
+			if configHome == defaultConfigHome && defaultConfigHome != "" {
+				return "~/.config/" + name
+			}
+			return filepath.Join(configHome, name)
+		}
+		paths = append(paths, configPath("gcloud"), configPath("gh"), configPath("containers"), configPath("splice"))
+	}
+	return paths
 }

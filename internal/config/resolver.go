@@ -215,6 +215,7 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 	}
 	dst.Sandbox.AdditionalWriteRoots = unionStrings(dst.Sandbox.AdditionalWriteRoots, src.Sandbox.AdditionalWriteRoots)
 	dst.Sandbox.AdditionalReadRoots = unionStrings(dst.Sandbox.AdditionalReadRoots, src.Sandbox.AdditionalReadRoots)
+	dst.Sandbox.AllowRead = unionStrings(dst.Sandbox.AllowRead, src.Sandbox.AllowRead)
 	if src.Sandbox.BlockUnixSockets {
 		dst.Sandbox.BlockUnixSockets = true
 	}
@@ -266,7 +267,7 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 		mergeProvider(dst, provider)
 	}
 	mergeMCPConfig(&dst.MCP, src.MCP)
-	// Sandbox.AdditionalWriteRoots and AdditionalReadRoots are intentionally NOT
+	// Sandbox.AdditionalWriteRoots, AdditionalReadRoots, and AllowRead are intentionally NOT
 	// merged from project config: a cloned repo's .splice/config.json must not
 	// be able to grant itself write or read access outside the workspace. Global
 	// config and CLI flags are the only config sources for these roots.
@@ -691,6 +692,7 @@ func applyOverrides(cfg *FileConfig, overrides Overrides) {
 	if overrides.Sandbox.MonitorDenials {
 		cfg.Sandbox.MonitorDenials = true
 	}
+	cfg.Sandbox.AllowRead = unionStrings(cfg.Sandbox.AllowRead, overrides.Sandbox.AllowRead)
 	if mode := strings.TrimSpace(overrides.Notify.Mode); mode != "" {
 		cfg.Notify.Mode = mode
 	}

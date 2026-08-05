@@ -177,6 +177,14 @@ func agentNativeBackendStub() sandbox.Backend {
 	}
 }
 
+// unsandboxedRetryPolicy keeps these tests focused on escalation behavior.
+// Credential-deny defaults intentionally forbid an unsandboxed retry.
+func unsandboxedRetryPolicy() sandbox.Policy {
+	policy := sandbox.DefaultPolicy()
+	policy.DenyRead = nil
+	return policy
+}
+
 type sandboxNamespaceLimitedRetryTool struct {
 	calls []map[string]any
 }
@@ -241,7 +249,7 @@ func TestRunRetriesShellUnsandboxedAfterSandboxNamespaceLimitedOutput(t *testing
 		Autonomy:       "medium",
 		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
 			WorkspaceRoot: root,
-			Policy:        sandbox.DefaultPolicy(),
+			Policy:        unsandboxedRetryPolicy(),
 			Backend:       agentNativeBackendStub(),
 		}),
 		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
@@ -482,7 +490,7 @@ func TestRunRetriesShellUnsandboxedAfterSandboxDeniedExit(t *testing.T) {
 		Autonomy:       "medium",
 		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
 			WorkspaceRoot: root,
-			Policy:        sandbox.DefaultPolicy(),
+			Policy:        unsandboxedRetryPolicy(),
 			Backend:       agentNativeBackendStub(),
 		}),
 		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
@@ -1921,7 +1929,7 @@ func TestRunCommandPrefixApprovalBypassesSandboxForMatchingShellCalls(t *testing
 		Autonomy:       "medium",
 		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
 			WorkspaceRoot: root,
-			Policy:        sandbox.DefaultPolicy(),
+			Policy:        unsandboxedRetryPolicy(),
 			Backend:       sandbox.Backend{Name: sandbox.BackendUnavailable, Message: "native sandbox unavailable"},
 		}),
 		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
@@ -1986,7 +1994,7 @@ func TestRunCommandPrefixApprovalCoversSegmentedShellWithSafeTail(t *testing.T) 
 		Autonomy:       "medium",
 		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
 			WorkspaceRoot: root,
-			Policy:        sandbox.DefaultPolicy(),
+			Policy:        unsandboxedRetryPolicy(),
 			Backend:       sandbox.Backend{Name: sandbox.BackendUnavailable, Message: "native sandbox unavailable"},
 		}),
 		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {

@@ -216,6 +216,22 @@ splice sandbox policy
 splice sandbox grants list
 ```
 
+The sandbox denies common credential directories by default. This includes SSH,
+cloud, GPG, Kubernetes, container registry, GitHub CLI, and Splice token data.
+To re-enable a nested path, add it to the global user config under `sandbox.allowRead`:
+
+```json
+{
+  "sandbox": {
+    "allowRead": ["~/.ssh"]
+  }
+}
+```
+
+The setting applies only to global user config and CLI overrides. Project config
+cannot re-enable access to a user's credential directory. Network approval does
+not restore a denied SSH key, so SSH-based Git commands also need this override.
+
 For a first headless run:
 
 ```bash

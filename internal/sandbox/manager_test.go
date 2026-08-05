@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -52,6 +53,74 @@ func TestPermissionProfileFromPolicyBuildsWorkspaceWriteProfile(t *testing.T) {
 	}
 	if !profile.RequiresPlatformSandbox() {
 		t.Fatal("workspace-write profile must require a platform sandbox")
+	}
+}
+
+func TestDefaultPolicyDenyReadCredentialPaths(t *testing.T) {
+	// DenyRead was consumed everywhere and populated nowhere, so every sandboxed
+	// command could read the user's credentials.
+	policy := DefaultPolicy()
+	want := []string{"~/.ssh", "~/.aws", "~/.azure", "~/.gnupg", "~/.kube", "~/.docker"}
+	for _, entry := range want {
+		if !stringSliceContains(policy.DenyRead, entry) {
+			t.Fatalf("DefaultPolicy().DenyRead = %#v, missing %q", policy.DenyRead, entry)
+		}
+	}
+	for _, suffix := range []string{"/gcloud", "/gh", "/containers", "/splice"} {
+		found := false
+		for _, entry := range policy.DenyRead {
+			if strings.HasSuffix(filepath.ToSlash(entry), suffix) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("DefaultPolicy().DenyRead = %#v, missing config path suffix %q", policy.DenyRead, suffix)
+		}
+	}
+}
+
+func TestDefaultPolicyDeniesSpliceOAuthDirectory(t *testing.T) {
+	policy := DefaultPolicy()
+	for _, entry := range policy.DenyRead {
+		if strings.HasSuffix(filepath.ToSlash(entry), "/splice") {
+			return
+		}
+	}
+	t.Fatalf("DefaultPolicy().DenyRead = %#v, missing Splice token directory", policy.DenyRead)
+}
+
+func TestAllowReadReincludesNestedDeniedPath(t *testing.T) {
+	root := t.TempDir()
+	denied := filepath.Join(root, "credentials")
+	allowed := filepath.Join(denied, "public")
+	if err := os.MkdirAll(allowed, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	policy := Policy{DenyRead: []string{denied}, AllowRead: []string{allowed}}
+	if readDenied(policy, root, filepath.Join(allowed, "token.txt")) {
+		t.Fatal("nested AllowRead path remains denied")
+	}
+	if !readDenied(policy, root, filepath.Join(denied, "private.txt")) {
+		t.Fatal("sibling under denied root was re-included")
+	}
+}
+
+func TestPermissionProfileCarriesDenyRead(t *testing.T) {
+	workspace := t.TempDir()
+	secret := filepath.Join(workspace, "secret")
+	if err := os.Mkdir(secret, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	profile := PermissionProfileFromPolicy(workspace, Policy{
+		Mode:             ModeEnforce,
+		Network:          NetworkDeny,
+		EnforceWorkspace: true,
+		DenyRead:         []string{secret},
+	}, nil)
+	want := normalizeProfilePath(secret)
+	if len(profile.FileSystem.DenyRead) != 1 || profile.FileSystem.DenyRead[0] != want {
+		t.Fatalf("profile DenyRead = %#v, want [%q]", profile.FileSystem.DenyRead, want)
 	}
 }
 

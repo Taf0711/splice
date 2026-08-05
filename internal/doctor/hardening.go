@@ -120,6 +120,7 @@ func windowsSandboxSetupCheck(goos string, backend sandbox.Backend, workspaceRoo
 
 func doctorSandboxPolicy(cfg config.SandboxConfig) sandbox.Policy {
 	policy := sandbox.DefaultPolicy()
+	policy.AllowRead = append([]string{}, cfg.AllowRead...)
 	switch sandbox.NetworkMode(cfg.Network) {
 	case sandbox.NetworkAllow, sandbox.NetworkDeny:
 		policy.Network = sandbox.NetworkMode(cfg.Network)

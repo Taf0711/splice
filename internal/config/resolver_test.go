@@ -1787,6 +1787,20 @@ func TestMergeProjectConfigIgnoresAdditionalReadRoots(t *testing.T) {
 	}
 }
 
+func TestMergeProjectConfigIgnoresAllowReadButGlobalConfigHonorsIt(t *testing.T) {
+	dst := FileConfig{}
+	mergeConfig(&dst, FileConfig{Sandbox: SandboxConfig{AllowRead: []string{"~/.ssh"}}})
+	if !reflect.DeepEqual(dst.Sandbox.AllowRead, []string{"~/.ssh"}) {
+		t.Fatalf("global AllowRead = %v, want global entry", dst.Sandbox.AllowRead)
+	}
+	if err := mergeProjectConfig(&dst, FileConfig{Sandbox: SandboxConfig{AllowRead: []string{"/repo/sneaky"}}}); err != nil {
+		t.Fatalf("mergeProjectConfig: %v", err)
+	}
+	if !reflect.DeepEqual(dst.Sandbox.AllowRead, []string{"~/.ssh"}) {
+		t.Fatalf("project AllowRead was honored: %v", dst.Sandbox.AllowRead)
+	}
+}
+
 func TestResolveRejectsNegativeMaxTurns(t *testing.T) {
 	path := writeConfig(t, `{"maxTurns": -5}`)
 

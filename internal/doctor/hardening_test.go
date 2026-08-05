@@ -21,6 +21,13 @@ func validProvider() config.ProviderProfile {
 	}
 }
 
+func TestDoctorSandboxPolicyMapsAllowRead(t *testing.T) {
+	policy := doctorSandboxPolicy(config.SandboxConfig{AllowRead: []string{"~/.ssh"}})
+	if len(policy.AllowRead) != 1 || policy.AllowRead[0] != "~/.ssh" {
+		t.Fatalf("AllowRead policy = %#v, want configured path", policy.AllowRead)
+	}
+}
+
 // stubLookup returns a lookup function that resolves only the named binaries.
 func stubLookup(present ...string) func(string) (string, error) {
 	set := map[string]bool{}

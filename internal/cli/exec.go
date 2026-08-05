@@ -1077,6 +1077,9 @@ func buildExecSandboxEngine(workspaceRoot string, resolved config.ResolvedConfig
 // applyConfiguredSandboxPolicy overlays every config-sourced sandbox knob onto
 // the default policy.
 func applyConfiguredSandboxPolicy(policy sandbox.Policy, cfg config.SandboxConfig) sandbox.Policy {
+	if len(cfg.AllowRead) > 0 {
+		policy.AllowRead = append([]string{}, cfg.AllowRead...)
+	}
 	if network := strings.TrimSpace(cfg.Network); network != "" {
 		switch sandbox.NetworkMode(network) {
 		case sandbox.NetworkAllow, sandbox.NetworkDeny:

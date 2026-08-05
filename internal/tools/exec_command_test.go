@@ -109,12 +109,14 @@ func TestExecCommandReturnsSessionAndWriteStdinPollsCompletion(t *testing.T) {
 
 func TestExecCommandRequireEscalatedBypassesNativeSandboxAfterApproval(t *testing.T) {
 	root := t.TempDir()
+	policy := sandbox.DefaultPolicy()
+	policy.DenyRead = nil
 	manager := newExecSessionManager()
 	registry := NewRegistry()
 	registry.Register(NewScopedExecCommandTool(root, nil, manager))
 	engine := sandbox.NewEngine(sandbox.EngineOptions{
 		WorkspaceRoot: root,
-		Policy:        sandbox.DefaultPolicy(),
+		Policy:        policy,
 		Backend: sandbox.Backend{
 			Name:            sandbox.BackendLinuxBwrap,
 			Available:       true,
