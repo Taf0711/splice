@@ -105,10 +105,12 @@ func (c Critique) Validate() error {
 
 // PlanCritique is the review output of a concrete DesignPlan.
 type PlanCritique struct {
-	Critiques              []Critique `json:"critiques,omitempty"`
-	CrossCuttingConcerns   []string   `json:"cross_cutting_concerns,omitempty"`
-	MustFixBeforeExecution bool       `json:"must_fix_before_execution"`
-	OverallAssessment      string     `json:"overall_assessment"`
+	Critiques            []Critique `json:"critiques,omitempty"`
+	CrossCuttingConcerns []string   `json:"cross_cutting_concerns,omitempty"`
+	// MustFixBeforeExecution must be true exactly when a critique has high or
+	// critical severity. Medium, low, info, and empty critique sets cannot block.
+	MustFixBeforeExecution bool   `json:"must_fix_before_execution"`
+	OverallAssessment      string `json:"overall_assessment"`
 }
 
 // Validate checks the plan critique.
@@ -116,6 +118,25 @@ func (p PlanCritique) Validate() error {
 	if p.OverallAssessment == "" {
 		return errors.New("overall_assessment is required")
 	}
+	if err := p.ValidateStructure(); err != nil {
+		return err
+	}
+	qualifies := false
+	for _, c := range p.Critiques {
+		if c.Severity == SeverityHigh || c.Severity == SeverityCritical {
+			qualifies = true
+			break
+		}
+	}
+	if p.MustFixBeforeExecution != qualifies {
+		return fmt.Errorf("must_fix_before_execution=%t does not match highest critique severity; high or critical severity requires true and lower or empty severity requires false", p.MustFixBeforeExecution)
+	}
+	return nil
+}
+
+// ValidateStructure checks persisted critique fields without applying the
+// current severity-to-blocking rule. It keeps older session history readable.
+func (p PlanCritique) ValidateStructure() error {
 	for i, c := range p.Critiques {
 		if err := c.Validate(); err != nil {
 			return fmt.Errorf("critiques[%d]: %w", i, err)
@@ -307,15 +328,30 @@ func (d DesignPlan) Validate() error {
 
 // PlanCriticInput is the input to the adversarial plan critic.
 type PlanCriticInput struct {
-	Plan            DesignPlan `json:"plan"`
-	RelevantContext []string   `json:"relevant_context,omitempty"`
-	PipelineStages  []string   `json:"pipeline_stages,omitempty"`
-	NextStage       string     `json:"next_stage,omitempty"`
+	Plan             DesignPlan    `json:"plan"`
+	PreviousPlan     *DesignPlan   `json:"previous_plan,omitempty"`
+	PreviousCritique *PlanCritique `json:"previous_critique,omitempty"`
+	RelevantContext  []string      `json:"relevant_context,omitempty"`
+	PipelineStages   []string      `json:"pipeline_stages,omitempty"`
+	NextStage        string        `json:"next_stage,omitempty"`
 }
 
 // Validate checks the plan critic input.
 func (p PlanCriticInput) Validate() error {
-	return p.Plan.Validate()
+	if err := p.Plan.Validate(); err != nil {
+		return err
+	}
+	if p.PreviousPlan != nil {
+		if err := p.PreviousPlan.Validate(); err != nil {
+			return fmt.Errorf("previous_plan: %w", err)
+		}
+	}
+	if p.PreviousCritique != nil {
+		if err := p.PreviousCritique.ValidateStructure(); err != nil {
+			return fmt.Errorf("previous_critique: %w", err)
+		}
+	}
+	return nil
 }
 
 // ConversationMessage is one turn of the free-form design conversation.

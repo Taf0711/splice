@@ -49,6 +49,10 @@ type StageOptions struct {
 	TimeoutSeconds int
 	// Plan is used by the plan_critic stage.
 	Plan *schemas.DesignPlan
+	// PreviousPlan is the plan from the prior crystallization, when available.
+	PreviousPlan *schemas.DesignPlan
+	// PreviousCritique is the prior plan review, when available.
+	PreviousCritique *schemas.PlanCritique
 }
 
 // ToolResult is the minimal deterministic-adapter result a stage needs.

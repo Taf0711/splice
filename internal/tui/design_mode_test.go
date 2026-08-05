@@ -425,9 +425,13 @@ func TestCrystallizeResultMsgOutcomes(t *testing.T) {
 			notWantTranscript: []string{"Plan is ready."},
 		},
 		{
-			name:              "critique persistence failure keeps must-fix critique",
-			plan:              validPlan,
-			critique:          schemas.PlanCritique{OverallAssessment: "Needs work", MustFixBeforeExecution: true},
+			name: "critique persistence failure keeps must-fix critique",
+			plan: validPlan,
+			critique: schemas.PlanCritique{
+				Critiques:              []schemas.Critique{{Category: "correctness", Severity: schemas.SeverityHigh, Issue: "unsafe"}},
+				OverallAssessment:      "Needs work",
+				MustFixBeforeExecution: true,
+			},
 			err:               fmt.Errorf("persist critique_recorded: disk full"),
 			wantPlan:          true,
 			wantCritique:      true,
@@ -581,6 +585,7 @@ func TestApproveAfterCritiquePersistenceFailureBlocksMustFixPlan(t *testing.T) {
 			Source:       "conversation",
 		},
 		critique: schemas.PlanCritique{
+			Critiques:              []schemas.Critique{{Category: "correctness", Severity: schemas.SeverityHigh, Issue: "unsafe"}},
 			OverallAssessment:      "Needs work",
 			MustFixBeforeExecution: true,
 		},
@@ -611,6 +616,7 @@ func TestCrystallizeResultMsgMustFixBlocksApprove(t *testing.T) {
 
 	plan := schemas.DesignPlan{Epic: "Build it"}
 	critique := schemas.PlanCritique{
+		Critiques:              []schemas.Critique{{Category: "correctness", Severity: schemas.SeverityHigh, Issue: "unsafe"}},
 		OverallAssessment:      "Needs work",
 		MustFixBeforeExecution: true,
 	}
@@ -657,6 +663,7 @@ func TestApproveCommandMustFixBlocks(t *testing.T) {
 	m := newDesignModeTestModel(t.TempDir(), &fakeProvider{}, testSessionStore(t))
 	m.pendingPlan = &schemas.DesignPlan{Epic: "Build it"}
 	m.pendingCritique = &schemas.PlanCritique{
+		Critiques:              []schemas.Critique{{Category: "correctness", Severity: schemas.SeverityHigh, Issue: "unsafe"}},
 		OverallAssessment:      "Needs work",
 		MustFixBeforeExecution: true,
 	}

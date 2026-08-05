@@ -340,6 +340,23 @@ func TestCrystallizeAndCritique_RevisionIncrements(t *testing.T) {
 	if _, _, err := wf.CrystallizeAndCritique(ctx, events, provider2, nil, nil, "", nil); err != nil {
 		t.Fatalf("second CrystallizeAndCritique: %v", err)
 	}
+	var criticPayload string
+	for _, message := range provider2.request.Messages {
+		if message.Role == zeroruntime.MessageRoleUser {
+			criticPayload = message.Content
+			break
+		}
+	}
+	var criticInput schemas.PlanCriticInput
+	if err := json.Unmarshal([]byte(criticPayload), &criticInput); err != nil {
+		t.Fatalf("unmarshal second critic payload: %v", err)
+	}
+	if criticInput.PreviousCritique == nil || criticInput.PreviousCritique.OverallAssessment != "fine" {
+		t.Fatalf("second critic payload lost prior critique: %#v", criticInput.PreviousCritique)
+	}
+	if criticInput.PreviousPlan == nil || criticInput.PreviousPlan.Epic != "do it" {
+		t.Fatalf("second critic payload lost prior plan: %#v", criticInput.PreviousPlan)
+	}
 
 	saved, err := store.ReadEvents("test-session")
 	if err != nil {

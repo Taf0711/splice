@@ -96,8 +96,14 @@ func (w *DesignWorkflow) CrystallizeAndCritique(
 	}
 
 	revision := 1
-	if state, err := ReconstructDesignState(events); err == nil && state.Revision.PlanID == w.planID {
-		revision = state.Revision.Revision + 1
+	var previousPlan *schemas.DesignPlan
+	var previousCritique *schemas.PlanCritique
+	if state, err := ReconstructDesignState(events); err == nil {
+		if state.Revision.PlanID == w.planID {
+			revision = state.Revision.Revision + 1
+		}
+		previousPlan = state.Plan
+		previousCritique = state.Critique
 	}
 
 	planJSON, err := json.Marshal(plan)
@@ -118,10 +124,12 @@ func (w *DesignWorkflow) CrystallizeAndCritique(
 		criticStream = streamFactory("plan_critic", criticSelection)
 	}
 	criticOpts := stages.StageOptions{
-		WorkDir: workDir,
-		Stream:  criticStream,
-		Images:  images,
-		Plan:    &plan,
+		WorkDir:          workDir,
+		Stream:           criticStream,
+		Images:           images,
+		Plan:             &plan,
+		PreviousPlan:     previousPlan,
+		PreviousCritique: previousCritique,
 	}
 	criticOpts.ModelOverride = criticSelection.Model
 	criticOpts.ReasoningEffort = criticSelection.ReasoningEffort

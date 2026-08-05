@@ -559,6 +559,42 @@ func TestPlanCriticPayloadOmitsRosterWithoutPipeline(t *testing.T) {
 	}
 }
 
+func TestPlanCriticPayloadCarriesPreviousCritique(t *testing.T) {
+	plan := schemas.DesignPlan{
+		Source:       "conversation",
+		Epic:         "add feature",
+		Requirements: []string{"it works"},
+		InScope:      []string{"code"},
+		Tasks:        []schemas.Task{{ID: "t1", Title: "write code", Intent: "impl"}},
+	}
+	previousPlan := plan
+	previousPlan.Epic = "previous feature"
+	previousCritique := schemas.PlanCritique{
+		Critiques:         []schemas.Critique{{Category: "correctness", Severity: schemas.SeverityMedium, Issue: "the old issue"}},
+		OverallAssessment: "address this issue",
+	}
+	args, _ := json.Marshal(schemas.PlanCritique{OverallAssessment: "new review"})
+	provider := &requestCapturingProvider{events: toolCallEvent("submit_critique", string(args))}
+	if _, err := (PlanCritic{}).Run(context.Background(), newHarnessInput("review plan"), provider, StageOptions{
+		Plan:             &plan,
+		PreviousPlan:     &previousPlan,
+		PreviousCritique: &previousCritique,
+	}); err != nil {
+		t.Fatalf("stage run: %v", err)
+	}
+	payload := modelUserPayload(t, provider.request)
+	var input schemas.PlanCriticInput
+	if err := json.Unmarshal([]byte(payload), &input); err != nil {
+		t.Fatalf("unmarshal plan critic payload: %v", err)
+	}
+	if input.PreviousCritique == nil || input.PreviousCritique.Critiques[0].Issue != "the old issue" {
+		t.Fatalf("previous critique missing from payload: %#v", input.PreviousCritique)
+	}
+	if input.PreviousPlan == nil || input.PreviousPlan.Epic != "previous feature" {
+		t.Fatalf("previous plan missing from payload: %#v", input.PreviousPlan)
+	}
+}
+
 func modelUserPayload(t *testing.T, request zeroruntime.CompletionRequest) string {
 	t.Helper()
 	for _, message := range request.Messages {
