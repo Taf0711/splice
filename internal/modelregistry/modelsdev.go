@@ -390,7 +390,7 @@ type modelsDevSource struct {
 // EnableModelsDevOverlay opts the process into provider-scoped derived entries
 // and applying a newer disk cache. The embedded snapshot remains the baseline
 // with or without this setting.
-// SPLICE_DISABLE_MODELS_FETCH disables only the disk cache and network fetch.
+// SPLICE_DISABLE_MODELS_FETCH disables the background network fetch only.
 func EnableModelsDevOverlay() {
 	modelsDevEnabled.Store(true)
 }
@@ -446,7 +446,7 @@ func cachedModelsDevSnapshotInfo() modelsDevSource {
 			modelsDevSelected = selected
 			return
 		}
-		if !modelsDevEnabled.Load() || strings.TrimSpace(os.Getenv("SPLICE_DISABLE_MODELS_FETCH")) != "" {
+		if !modelsDevEnabled.Load() {
 			modelsDevSelected = selected
 			return
 		}

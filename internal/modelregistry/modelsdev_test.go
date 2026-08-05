@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
@@ -18,6 +19,12 @@ import (
 
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
 
 const sampleModelsDev = `{
   "anthropic": {
@@ -454,7 +461,6 @@ func TestDefaultRegistryReportsSkippedModelsDevRecords(t *testing.T) {
 }
 
 func TestDefaultRegistryResolvesProviderScopedDerivedModel(t *testing.T) {
-	t.Setenv("SPLICE_DISABLE_MODELS_FETCH", "")
 	cachePath := filepath.Join(t.TempDir(), "modelsdev.json")
 	if err := os.WriteFile(cachePath, []byte(sampleModelsDevProviderScoped), 0o644); err != nil {
 		t.Fatal(err)
@@ -580,7 +586,6 @@ func TestDefaultModelEntriesOverlayDisabledIsCuratedOnly(t *testing.T) {
 // malformed records the live API carries stay exercised. The snapshot is
 // copied into a temp dir so the test controls its cache mtime.
 func TestDefaultRegistryRealCachedSnapshot(t *testing.T) {
-	t.Setenv("SPLICE_DISABLE_MODELS_FETCH", "")
 	snapshot, err := os.ReadFile(filepath.Join("testdata", "modelsdev_snapshot.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -715,6 +720,26 @@ func TestRefreshModelsDevCacheDisabledByEnv(t *testing.T) {
 	}
 }
 
+func TestRefreshModelsDevCacheDisabledByEnvDoesNotCallHTTP(t *testing.T) {
+	var hits int
+	originalTransport := http.DefaultTransport
+	http.DefaultTransport = roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		hits++
+		return nil, fmt.Errorf("unexpected models.dev fetch")
+	})
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	t.Setenv("SPLICE_MODELS_CACHE_PATH", filepath.Join(t.TempDir(), "modelsdev.json"))
+	t.Setenv("SPLICE_MODELS_URL", "https://models.dev.invalid/api.json")
+	t.Setenv("SPLICE_DISABLE_MODELS_FETCH", "1")
+
+	if err := RefreshModelsDevCache(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if hits != 0 {
+		t.Fatalf("disabled models.dev fetch made %d HTTP calls, want 0", hits)
+	}
+}
+
 func TestCachedModelsDevProvidersUsesEmbeddedForOlderCache(t *testing.T) {
 	cachePath := filepath.Join(t.TempDir(), "modelsdev.json")
 	if err := os.WriteFile(cachePath, []byte(sampleModelsDev), 0o644); err != nil {
@@ -843,8 +868,12 @@ func TestDefaultRegistryUsesEmbeddedPricingForDerivedProviderModel(t *testing.T)
 	}
 }
 
+// TestDefaultRegistryUsesNewerCachePricingForDerivedProviderModel verifies
+// that the fetch flag does not disable a newer on-disk cache.
 func TestDefaultRegistryUsesNewerCachePricingForDerivedProviderModel(t *testing.T) {
-	t.Setenv("SPLICE_DISABLE_MODELS_FETCH", "")
+	// SPLICE_DISABLE_MODELS_FETCH used to disable the cache as well as the
+	// network, so cache tests silently read the embedded snapshot under CI.
+	t.Setenv("SPLICE_DISABLE_MODELS_FETCH", "1")
 	cachePath := filepath.Join(t.TempDir(), "modelsdev.json")
 	cache := []byte(`{"openrouter":{"models":{"z-ai/glm-5.2":{"limit":{"context":999999,"output":65536},"cost":{"input":9,"output":10,"cache_read":1}}}}}`)
 	if err := os.WriteFile(cachePath, cache, 0o644); err != nil {
