@@ -7,8 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+* **stages:** a plan's acceptance criteria now run. A criterion carrying a command was reaching the code writer as prose and nothing ever executed it, so a run could report success on code that compiled, passed its tests, and did not do what was asked. A verification stage runs each criterion that has a command and reports one result each. A criterion nobody automated is recorded as skipped, not failed.
+* **tui:** an untrusted workspace is now marked in the footer, and `/trust` records the decision. Previously a user who declined trust, or who was defaulted to untrusted, had no way to see it and no way to change it without editing a file. The decision takes effect on restart, because the session already decided at startup whether to load project commands, hooks, MCP servers, and plugins.
+
 ### Security
 
+* **auth:** OAuth tokens are protected at rest. They defaulted to a plaintext file while API keys defaulted to the keychain or an encrypted file, so the stronger secret had the weaker protection. Tokens now resolve the same policy API keys use, and existing tokens move across at startup. Set `SPLICE_OAUTH_STORAGE=file` to keep plaintext. Migration keeps the plaintext copy until the protected write is read back and verified, so a locked keychain leaves the login working.
 * **sandbox:** credential directories are read-denied by default: SSH, cloud, GPG, Kubernetes, container registry, GitHub CLI, and Splice's own token store. The sandbox previously granted read access across the filesystem, so any sandboxed command could read these. Add `sandbox.allowRead` to the global user config to re-include a path. Project config cannot grant it.
 
 ### Fixed
