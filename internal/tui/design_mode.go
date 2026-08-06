@@ -761,22 +761,23 @@ func designConversationRegistry(registry *tools.Registry) *tools.Registry {
 	if registry == nil {
 		return filtered
 	}
-	allowed := map[string]bool{
-		"read_file":              true,
-		"list_directory":         true,
-		"grep":                   true,
-		"ask_user":               true,
-		"read_minified_file":     true,
-		"glob":                   true,
-		"lsp_navigate":           true,
-		"skill":                  true,
-		"web_fetch":              true,
-		tools.ToolSearchToolName: true,
-	}
+	// Read-only tools are selected from their safety metadata so new read-only
+	// tools enter design mode without a second hand-maintained name map.
 	for _, tool := range registry.All() {
-		if allowed[tool.Name()] {
+		if tool.Safety().SideEffect == tools.SideEffectRead {
 			filtered.Register(tool)
 		}
+	}
+	// These tools are safe design-mode additions, but are not core read tools.
+	for _, name := range []string{"skill", "web_fetch", tools.ToolSearchToolName} {
+		if tool, ok := registry.Get(name); ok {
+			filtered.Register(tool)
+		}
+	}
+	// request_permissions has no side effect until the runtime handles it. Keep
+	// it available so the design agent can ask for access when a user decides.
+	if tool, ok := registry.Get(tools.RequestPermissionsToolName); ok {
+		filtered.Register(tool)
 	}
 	return filtered
 }

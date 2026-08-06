@@ -124,7 +124,7 @@ func TestDesignConversationRegistryIsReadOnly(t *testing.T) {
 
 	for _, name := range []string{
 		"read_file", "list_directory", "grep", "ask_user", "read_minified_file",
-		"glob", "lsp_navigate", "skill", "web_fetch", tools.ToolSearchToolName,
+		"glob", "lsp_navigate", "request_permissions", "skill", "web_fetch", tools.ToolSearchToolName,
 	} {
 		if _, ok := filtered.Get(name); !ok {
 			t.Fatalf("expected %s to be in design conversation registry", name)
@@ -137,12 +137,46 @@ func TestDesignConversationRegistryIsReadOnly(t *testing.T) {
 	}
 }
 
-type designRegistryTestTool struct{ name string }
+func TestDesignConversationRegistryIncludesEveryCoreReadOnlyTool(t *testing.T) {
+	// Regression: this list was hand-maintained, so a new read-only tool silently
+	// missed design mode until somebody edited design_mode.go.
+	registry := tools.NewRegistry()
+	for _, tool := range tools.CoreTools(t.TempDir()) {
+		registry.Register(tool)
+	}
+	registry.Register(tools.NewToolSearchTool(registry))
+	filtered := designConversationRegistry(registry)
+
+	for _, tool := range tools.CoreReadOnlyToolsScoped(t.TempDir(), nil) {
+		if _, ok := filtered.Get(tool.Name()); !ok {
+			t.Fatalf("core read-only tool %q missing from design conversation registry", tool.Name())
+		}
+	}
+}
+
+func TestDesignConversationRegistryIncludesNewReadOnlyToolAutomatically(t *testing.T) {
+	registry := tools.NewRegistry()
+	fake := designRegistryTestTool{name: "future_read_only", safety: tools.Safety{
+		SideEffect: tools.SideEffectRead,
+		Permission: tools.PermissionAllow,
+	}}
+	registry.Register(fake)
+
+	filtered := designConversationRegistry(registry)
+	if _, ok := filtered.Get(fake.Name()); !ok {
+		t.Fatal("new read-only tool was not included in design conversation registry")
+	}
+}
+
+type designRegistryTestTool struct {
+	name   string
+	safety tools.Safety
+}
 
 func (tool designRegistryTestTool) Name() string             { return tool.name }
 func (tool designRegistryTestTool) Description() string      { return "test tool" }
 func (tool designRegistryTestTool) Parameters() tools.Schema { return tools.Schema{} }
-func (tool designRegistryTestTool) Safety() tools.Safety     { return tools.Safety{} }
+func (tool designRegistryTestTool) Safety() tools.Safety     { return tool.safety }
 func (tool designRegistryTestTool) Run(context.Context, map[string]any) tools.Result {
 	return tools.Result{}
 }
