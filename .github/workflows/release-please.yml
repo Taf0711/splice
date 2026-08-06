@@ -4,6 +4,10 @@ on:
   push:
     branches:
       - main
+  # Manual trigger. A dropped or delayed push event leaves no run to re-run,
+  # and this workflow is the only way a release gets cut, so it must be
+  # startable by hand.
+  workflow_dispatch:
 
 # Release Please opens and keeps a release PR up to date from conventional
 # commits. Merging that PR cuts a GitHub Release with an auto-generated
