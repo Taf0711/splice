@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4](https://github.com/Taf0711/splice/compare/v0.1.3...v0.1.4) (2026-08-06)
+
+### Added
+
+* **cli:** Splice tells you when a newer release exists. A run checks at most once a day and prints one line naming the command that suits how you installed it. The check never delays or fails a run. Only a terminal sees it: piped output, `splice exec` in protocol mode, and the interactive TUI carry no notice. `SPLICE_DISABLE_UPDATE_NOTICE` turns the notice off and leaves `splice update` working; `SPLICE_DISABLE_UPDATES` turns off both. `splice --update` checks and reports; installing stays `splice update --apply`.
+* **stages:** a plan's acceptance criteria now run. A criterion carrying a command was reaching the code writer as prose and nothing ever executed it, so a run could report success on code that compiled, passed its tests, and did not do what was asked. A verification stage runs each criterion that has a command and reports one result each. A criterion nobody automated is recorded as skipped, not failed.
+* **tui:** an untrusted workspace is now marked in the footer, and `/trust` records the decision. Previously a user who declined trust, or who was defaulted to untrusted, had no way to see it and no way to change it without editing a file. The decision takes effect on restart, because the session already decided at startup whether to load project commands, hooks, MCP servers, and plugins.
+
+### Security
+
+* **auth:** OAuth tokens are protected at rest. They defaulted to a plaintext file while API keys defaulted to the keychain or an encrypted file, so the stronger secret had the weaker protection. Tokens now resolve the same policy API keys use, and existing tokens move across at startup. Set `SPLICE_OAUTH_STORAGE=file` to keep plaintext. Migration keeps the plaintext copy until the protected write is read back and verified, so a locked keychain leaves the login working.
+* **sandbox:** credential directories are read-denied by default: SSH, cloud, GPG, Kubernetes, container registry, GitHub CLI, and Splice's own token store. The sandbox previously granted read access across the filesystem, so any sandboxed command could read these. Add `sandbox.allowRead` to the global user config to re-include a path. Project config cannot grant it.
+
+### Fixed
+
+* **stages:** the security audit stage failed on any machine with `gosec`, `bandit`, or a SARIF scanner installed. The scanners write log lines to stderr and their report to stdout, and Splice read both together, so the report could not be parsed. The stage failed, the writer retried, and the run ended before its test stages. Substantial and architectural runs were affected.
+* **sandbox:** a sandboxed `go` build could not write its build cache, because the cache sits outside the sandbox. One stage passed and the next failed on a cache entry that was never written. Splice now points `GOCACHE` at a directory the sandbox can write. An explicit `GOCACHE` still wins.
+* **stages:** a pipeline run could fail to finish even when every stage ran. The test generator was told what the code writer did in prose, not which files it produced, so it wrote tests against names that did not exist and the run failed on undefined symbols. On a retry it could not rewrite the test file it had written itself. It now receives the writer's actual paths, and a retry replaces its own earlier file.
+* **design:** the plan critic could block a plan indefinitely. It never saw its own earlier critiques, so each revision drew new objections, and a medium-severity concern could stop execution. It now sees the previous plan and critique, only high and critical severity blocks, and it reads what the design conversation established rather than guessing.
+
+### Changed
+
+* **sandbox (Linux):** the sandbox now enforces. It located its helper on `$PATH` only, and no release archive ships that helper, so enforcement degraded to unconfined without saying so. Commands that ran before may now run confined wherever `bwrap` is installed.
+* **sandbox:** SSH-based Git inside the sandbox needs `~/.ssh` in `sandbox.allowRead`. Approving network access does not restore a denied key.
+
+### Miscellaneous Chores
+
+* **release:** cut 0.1.4 ([d3b5e44](https://github.com/Taf0711/splice/commit/d3b5e44d4687b7dbfa9908ad5c21db8b8a1bc484))
+
 ## [0.1.3](https://github.com/Taf0711/splice/compare/v0.1.2...v0.1.3) (2026-07-30)
 
 
@@ -63,31 +92,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Miscellaneous Chores
 
 * **release:** cut 0.1.3 ([ad495db](https://github.com/Taf0711/splice/commit/ad495db473dd21af4f65815903fb0ba1a28d7811))
-
-## [Unreleased]
-
-### Added
-
-* **cli:** Splice tells you when a newer release exists. A run checks at most once a day and prints one line naming the command that suits how you installed it. The check never delays or fails a run. Only a terminal sees it: piped output, `splice exec` in protocol mode, and the interactive TUI carry no notice. `SPLICE_DISABLE_UPDATE_NOTICE` turns the notice off and leaves `splice update` working; `SPLICE_DISABLE_UPDATES` turns off both. `splice --update` checks and reports; installing stays `splice update --apply`.
-* **stages:** a plan's acceptance criteria now run. A criterion carrying a command was reaching the code writer as prose and nothing ever executed it, so a run could report success on code that compiled, passed its tests, and did not do what was asked. A verification stage runs each criterion that has a command and reports one result each. A criterion nobody automated is recorded as skipped, not failed.
-* **tui:** an untrusted workspace is now marked in the footer, and `/trust` records the decision. Previously a user who declined trust, or who was defaulted to untrusted, had no way to see it and no way to change it without editing a file. The decision takes effect on restart, because the session already decided at startup whether to load project commands, hooks, MCP servers, and plugins.
-
-### Security
-
-* **auth:** OAuth tokens are protected at rest. They defaulted to a plaintext file while API keys defaulted to the keychain or an encrypted file, so the stronger secret had the weaker protection. Tokens now resolve the same policy API keys use, and existing tokens move across at startup. Set `SPLICE_OAUTH_STORAGE=file` to keep plaintext. Migration keeps the plaintext copy until the protected write is read back and verified, so a locked keychain leaves the login working.
-* **sandbox:** credential directories are read-denied by default: SSH, cloud, GPG, Kubernetes, container registry, GitHub CLI, and Splice's own token store. The sandbox previously granted read access across the filesystem, so any sandboxed command could read these. Add `sandbox.allowRead` to the global user config to re-include a path. Project config cannot grant it.
-
-### Fixed
-
-* **stages:** the security audit stage failed on any machine with `gosec`, `bandit`, or a SARIF scanner installed. The scanners write log lines to stderr and their report to stdout, and Splice read both together, so the report could not be parsed. The stage failed, the writer retried, and the run ended before its test stages. Substantial and architectural runs were affected.
-* **sandbox:** a sandboxed `go` build could not write its build cache, because the cache sits outside the sandbox. One stage passed and the next failed on a cache entry that was never written. Splice now points `GOCACHE` at a directory the sandbox can write. An explicit `GOCACHE` still wins.
-* **stages:** a pipeline run could fail to finish even when every stage ran. The test generator was told what the code writer did in prose, not which files it produced, so it wrote tests against names that did not exist and the run failed on undefined symbols. On a retry it could not rewrite the test file it had written itself. It now receives the writer's actual paths, and a retry replaces its own earlier file.
-* **design:** the plan critic could block a plan indefinitely. It never saw its own earlier critiques, so each revision drew new objections, and a medium-severity concern could stop execution. It now sees the previous plan and critique, only high and critical severity blocks, and it reads what the design conversation established rather than guessing.
-
-### Changed
-
-* **sandbox (Linux):** the sandbox now enforces. It located its helper on `$PATH` only, and no release archive ships that helper, so enforcement degraded to unconfined without saying so. Commands that ran before may now run confined wherever `bwrap` is installed.
-* **sandbox:** SSH-based Git inside the sandbox needs `~/.ssh` in `sandbox.allowRead`. Approving network access does not restore a denied key.
 
 ## [0.1.2](https://github.com/Taf0711/splice/compare/v0.1.1...v0.1.2) (2026-07-20)
 
