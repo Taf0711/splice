@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 * **sandbox:** credential directories are read-denied by default: SSH, cloud, GPG, Kubernetes, container registry, GitHub CLI, and Splice's own token store. The sandbox previously granted read access across the filesystem, so any sandboxed command could read these. Add `sandbox.allowRead` to the global user config to re-include a path. Project config cannot grant it.
 
+### Fixed
+
+* **stages:** the security audit stage failed on any machine with `gosec`, `bandit`, or a SARIF scanner installed. The scanners write log lines to stderr and their report to stdout, and Splice read both together, so the report could not be parsed. The stage failed, the writer retried, and the run ended before its test stages. Substantial and architectural runs were affected.
+* **sandbox:** a sandboxed `go` build could not write its build cache, because the cache sits outside the sandbox. One stage passed and the next failed on a cache entry that was never written. Splice now points `GOCACHE` at a directory the sandbox can write. An explicit `GOCACHE` still wins.
+* **design:** the plan critic could block a plan indefinitely. It never saw its own earlier critiques, so each revision drew new objections, and a medium-severity concern could stop execution. It now sees the previous plan and critique, only high and critical severity blocks, and it reads what the design conversation established rather than guessing.
+
 ### Changed
 
 * **sandbox (Linux):** the sandbox now enforces. It located its helper on `$PATH` only, and no release archive ships that helper, so enforcement degraded to unconfined without saying so. Commands that ran before may now run confined wherever `bwrap` is installed.
