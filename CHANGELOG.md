@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+* **cli:** Splice tells you when a newer release exists. A run checks at most once a day and prints one line naming the command that suits how you installed it. The check never delays or fails a run. Only a terminal sees it: piped output, `splice exec` in protocol mode, and the interactive TUI carry no notice. `SPLICE_DISABLE_UPDATE_NOTICE` turns the notice off and leaves `splice update` working; `SPLICE_DISABLE_UPDATES` turns off both. `splice --update` checks and reports; installing stays `splice update --apply`.
 * **stages:** a plan's acceptance criteria now run. A criterion carrying a command was reaching the code writer as prose and nothing ever executed it, so a run could report success on code that compiled, passed its tests, and did not do what was asked. A verification stage runs each criterion that has a command and reports one result each. A criterion nobody automated is recorded as skipped, not failed.
 * **tui:** an untrusted workspace is now marked in the footer, and `/trust` records the decision. Previously a user who declined trust, or who was defaulted to untrusted, had no way to see it and no way to change it without editing a file. The decision takes effect on restart, because the session already decided at startup whether to load project commands, hooks, MCP servers, and plugins.
 
