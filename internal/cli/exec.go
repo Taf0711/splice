@@ -152,6 +152,11 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if deps.migrateOAuth != nil {
 		deps.migrateOAuth()
 	}
+	var noticeTask *updateNoticeTask
+	if stderrIsInteractiveTerminal(stderr) {
+		noticeTask = startUpdateNotice(deps)
+	}
+	defer finishUpdateNotice(noticeTask, stderr)
 
 	// Refresh the models.dev pricing/limits cache in the background when stale;
 	// the overlay is read at registry construction from the cache file, so this

@@ -381,6 +381,11 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 			return 1
 		}
 		return 0
+	case "--update":
+		// --update is a safe shorthand for the explicit, non-mutating check.
+		// Applying an update remains a deliberate `splice update --apply` action.
+		updateArgs := append([]string{"--check"}, args[1:]...)
+		return runUpdate(updateArgs, stdout, stderr, deps)
 	case "-p", "--prompt":
 		if len(args) < 2 {
 			return writePromptRequired(stderr)
@@ -638,6 +643,8 @@ func runInteractiveTUI(stdout io.Writer, stderr io.Writer, deps appDeps, permiss
 }
 
 func runInteractiveTUIWithSetup(stdout io.Writer, stderr io.Writer, deps appDeps, permissionMode agent.PermissionMode, addDirs []string, theme string, forceSetup bool) int {
+	// Do not start the update notice on the interactive path. The TUI uses the
+	// alternate screen, so a later stderr write would corrupt its display.
 	// Refresh the models.dev pricing/limits cache in the background when stale;
 	// the overlay is read at registry construction from the cache file, so this
 	// benefits the next run and never blocks or fails this one.
@@ -942,6 +949,63 @@ func runInteractiveTUIWithSetup(stdout io.Writer, stderr io.Writer, deps appDeps
 			},
 		},
 	})
+}
+
+const updateNoticeWait = time.Second
+
+type updateNoticeTask struct {
+	result <-chan string
+	cancel context.CancelFunc
+}
+
+func startUpdateNotice(deps appDeps) *updateNoticeTask {
+	if update.NoticeDisabled() {
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan string, 1)
+	go func() {
+		defer close(result)
+		executablePath, err := deps.resolveExecutable()
+		if err != nil {
+			return
+		}
+		notice, err := update.CachedNotice(ctx, update.NoticeOptions{
+			Check:          deps.checkUpdate,
+			Options:        update.Options{CurrentVersion: version},
+			ExecutablePath: executablePath,
+		})
+		if err != nil || notice == "" {
+			return
+		}
+		result <- notice
+	}()
+	return &updateNoticeTask{result: result, cancel: cancel}
+}
+
+func stderrIsInteractiveTerminal(stderr io.Writer) bool {
+	file, ok := stderr.(*os.File)
+	if !ok {
+		return false
+	}
+	return term.IsTerminal(file.Fd())
+}
+
+func finishUpdateNotice(task *updateNoticeTask, stderr io.Writer) {
+	if task == nil {
+		return
+	}
+	defer task.cancel()
+	timer := time.NewTimer(updateNoticeWait)
+	defer timer.Stop()
+	select {
+	case notice := <-task.result:
+		if notice != "" && stderr != nil {
+			_, _ = fmt.Fprintln(stderr, notice)
+		}
+	case <-timer.C:
+		return
+	}
 }
 
 func tuiSandboxSetupCommand(backend sandbox.Backend, deps appDeps) func(context.Context) tui.SandboxSetupCommandResult {
@@ -1253,6 +1317,7 @@ Commands:
 Flags:
   -h, --help                     Show this help
   -v, --version                  Print version
+      --update                   Check for an update (same as splice update --check)
   -p, --prompt                   Run a one-shot prompt
       --add-dir <path>           Allow writes in an extra directory (repeatable)
       --skip-permissions-unsafe  Launch the interactive shell in unsafe mode (enables the ! shell escape)

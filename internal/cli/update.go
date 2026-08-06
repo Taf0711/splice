@@ -43,6 +43,9 @@ func runUpdateCommand(args []string, stdout io.Writer, stderr io.Writer, deps ap
 		}
 		return exitSuccess
 	}
+	if update.UpdatesDisabled() {
+		return exitSuccess
+	}
 	if options.check && options.apply {
 		return writeUsageError(stderr, "Pass only one of --check or --apply.")
 	}
@@ -194,6 +197,7 @@ func parseUpdateTarget(value string) (string, error) {
 
 func writeUpdateHelp(w io.Writer) error {
 	_, err := fmt.Fprint(w, `Usage:
+  splice --update [flags]   Check for an update (same as splice update --check)
   splice update --check [flags]
   splice update --apply [flags]
   splice upgrade [flags]
