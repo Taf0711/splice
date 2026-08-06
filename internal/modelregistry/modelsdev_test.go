@@ -289,17 +289,39 @@ func TestApplyModelsDevOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	entries := applyModelsDevOverrides(DefaultModelEntries(), providers)
+	entries := DefaultModelEntries()
+	var untouchedBaseline ModelEntry
+	foundUntouched := false
+	for _, entry := range entries {
+		mentioned := false
+		for _, slug := range modelsDevSlugs(entry.Provider) {
+			if models, ok := providers[slug]; ok {
+				if _, ok := models[strings.TrimSpace(entry.APIModel)]; ok {
+					mentioned = true
+					break
+				}
+			}
+		}
+		if !mentioned {
+			untouchedBaseline = entry
+			foundUntouched = true
+			break
+		}
+	}
+	if !foundUntouched {
+		t.Fatal("synthetic models.dev sample mentions every curated baseline model; cannot test non-destructive overlay")
+	}
+	entries = applyModelsDevOverrides(entries, providers)
 
-	var sonnet, geminiPro, opus ModelEntry
+	var sonnet, geminiPro, untouched ModelEntry
 	for _, entry := range entries {
 		switch entry.ID {
 		case "claude-sonnet-4.5":
 			sonnet = entry
 		case "gemini-2.5-pro":
 			geminiPro = entry
-		case "claude-opus-4.1":
-			opus = entry
+		case untouchedBaseline.ID:
+			untouched = entry
 		}
 	}
 
@@ -325,9 +347,9 @@ func TestApplyModelsDevOverrides(t *testing.T) {
 		t.Fatalf("tiered cost boundary mismatch: %+v", geminiPro.Cost.Tiers)
 	}
 
-	// Model absent from the sample: the embedded baseline remains in place.
-	if opus.ContextLimits.ContextWindow != 200_000 || opus.Cost.IsUnpriced() || opus.Cost.Source != modelsDevEmbeddedSource {
-		t.Fatalf("opus must be untouched: %+v %+v", opus.ContextLimits, opus.Cost)
+	// Model absent from the sample: the baseline remains in place.
+	if !reflect.DeepEqual(untouched, untouchedBaseline) {
+		t.Fatalf("unmentioned model %q was overwritten: before=%+v after=%+v", untouchedBaseline.ID, untouchedBaseline, untouched)
 	}
 }
 
