@@ -31,6 +31,7 @@ func (PlanCritic) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 		Plan:             *options.Plan,
 		PreviousPlan:     options.PreviousPlan,
 		PreviousCritique: options.PreviousCritique,
+		RelevantContext:  options.RelevantContext,
 		PipelineStages:   input.PipelineStages,
 		NextStage:        input.NextStage,
 	}

@@ -21,3 +21,10 @@ func TestPlanCriticPromptCalibratesSeverity(t *testing.T) {
 		}
 	}
 }
+
+func TestPlanCriticPromptMarksContextConfirmedFactsVerified(t *testing.T) {
+	const contextVerifiedRule = "A fact confirmed in that context is verified."
+	if !strings.Contains(planCriticSystemPrompt, contextVerifiedRule) {
+		t.Fatalf("plan critic prompt must contain context verification phrase %q", contextVerifiedRule)
+	}
+}

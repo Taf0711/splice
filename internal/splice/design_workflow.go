@@ -4,12 +4,21 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/sessions"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/splice/stages"
 	"github.com/Taf0711/splice/internal/zeroruntime"
+)
+
+const (
+	// planCriticRelevantContextMaxChars bounds design-history context so the
+	// critic sees recent workspace findings without allowing the transcript to
+	// expand its input and recreate the finding ratchet.
+	planCriticRelevantContextMaxChars = 8000
 )
 
 // DesignWorkflow orchestrates crystallization and critique for one design
@@ -130,6 +139,7 @@ func (w *DesignWorkflow) CrystallizeAndCritique(
 		Plan:             &plan,
 		PreviousPlan:     previousPlan,
 		PreviousCritique: previousCritique,
+		RelevantContext:  planCriticRelevantContext(history),
 	}
 	criticOpts.ModelOverride = criticSelection.Model
 	criticOpts.ReasoningEffort = criticSelection.ReasoningEffort
@@ -167,6 +177,49 @@ func (w *DesignWorkflow) CrystallizeAndCritique(
 	}
 
 	return plan, critique, nil
+}
+
+// planCriticRelevantContext converts the design conversation into bounded,
+// role-labelled context. It keeps the newest exchanges when the budget is
+// exceeded because they contain the latest workspace findings.
+func planCriticRelevantContext(history []schemas.ConversationMessage) []string {
+	if len(history) == 0 {
+		return nil
+	}
+
+	entries := make([]string, 0, len(history))
+	for _, message := range history {
+		entries = append(entries, fmt.Sprintf("%s: %s", message.Role, message.Content))
+	}
+
+	selected := make([]string, 0, len(entries))
+	remaining := planCriticRelevantContextMaxChars
+	for i := len(entries) - 1; i >= 0 && remaining > 0; i-- {
+		entry := entries[i]
+		entryChars := utf8.RuneCountInString(entry)
+		if entryChars > remaining {
+			entry = suffixRunes(entry, remaining)
+			entryChars = remaining
+		}
+		selected = append(selected, entry)
+		remaining -= entryChars
+	}
+
+	for i, j := 0, len(selected)-1; i < j; i, j = i+1, j-1 {
+		selected[i], selected[j] = selected[j], selected[i]
+	}
+	return selected
+}
+
+func suffixRunes(value string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	runes := []rune(strings.TrimSpace(value))
+	if len(runes) <= max {
+		return string(runes)
+	}
+	return string(runes[len(runes)-max:])
 }
 
 func (w *DesignWorkflow) resolveProvider(
