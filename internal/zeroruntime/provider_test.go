@@ -554,6 +554,62 @@ func TestCollectStreamWithOptionsReportsFinalUsageStateOnce(t *testing.T) {
 	}
 }
 
+func TestCollectStreamWithOptionsUsageResultSupersedesLegacyUsage(t *testing.T) {
+	// Regression: both callbacks used to fire, so a caller setting both would
+	// have billed every request twice.
+	events := make(chan StreamEvent, 2)
+	events <- StreamEvent{Type: StreamEventUsage, Usage: Usage{InputTokens: 7, OutputTokens: 3}}
+	events <- StreamEvent{Type: StreamEventDone}
+	close(events)
+
+	resultCalls := 0
+	legacyCalls := 0
+	CollectStreamWithOptions(context.Background(), events, CollectOptions{
+		OnUsageResult: func(Usage, bool, *float64) { resultCalls++ },
+		OnUsage:       func(Usage) { legacyCalls++ },
+	})
+	if resultCalls != 1 {
+		t.Fatalf("OnUsageResult calls = %d, want 1", resultCalls)
+	}
+	if legacyCalls != 0 {
+		t.Fatalf("OnUsage calls = %d, want 0 when OnUsageResult is set", legacyCalls)
+	}
+}
+
+func TestCollectStreamWithOptionsLegacyUsageFiresWhenUsageIsSeen(t *testing.T) {
+	events := make(chan StreamEvent, 2)
+	events <- StreamEvent{Type: StreamEventUsage, Usage: Usage{InputTokens: 5}}
+	events <- StreamEvent{Type: StreamEventDone}
+	close(events)
+
+	calls := 0
+	CollectStreamWithOptions(context.Background(), events, CollectOptions{
+		OnUsage: func(Usage) { calls++ },
+	})
+	if calls != 1 {
+		t.Fatalf("OnUsage calls = %d, want 1", calls)
+	}
+}
+
+func TestCollectStreamWithOptionsUsageResultFiresWithoutUsage(t *testing.T) {
+	events := make(chan StreamEvent, 1)
+	events <- StreamEvent{Type: StreamEventDone}
+	close(events)
+
+	calls := 0
+	CollectStreamWithOptions(context.Background(), events, CollectOptions{
+		OnUsageResult: func(_ Usage, reported bool, _ *float64) {
+			calls++
+			if reported {
+				t.Fatal("OnUsageResult reported usage when no usage event was seen")
+			}
+		},
+	})
+	if calls != 1 {
+		t.Fatalf("OnUsageResult calls = %d, want 1", calls)
+	}
+}
+
 func TestCollectStreamWithOptionsReportsMalformedUsageOnce(t *testing.T) {
 	events := make(chan StreamEvent, 2)
 	events <- StreamEvent{Type: StreamEventUsageError, Error: "reasoning exceeds output"}

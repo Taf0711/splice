@@ -44,12 +44,14 @@ func (collected CollectedStream) Truncated() bool {
 type CollectOptions struct {
 	OnText      func(string)
 	OnReasoning func(string)
-	OnUsage     func(Usage)
+	// OnUsage is the legacy usage callback; OnUsageResult supersedes it when set.
+	OnUsage func(Usage)
 	// OnUsageResult fires exactly once when the provider stream finishes. The bool
 	// is true iff at least one StreamEventUsage event was seen during the stream.
 	// Legacy OnUsage only fires when usage was seen; OnUsageResult fires always,
 	// giving callers a clean "stream ended" signal with or without usage. The
-	// *float64 is the provider-reported cost (nil if none was reported).
+	// *float64 is the provider-reported cost (nil if none was reported); it
+	// supersedes OnUsage when set.
 	OnUsageResult func(Usage, bool, *float64)
 	// OnUsageError replaces OnUsageResult when a provider reports malformed usage.
 	OnUsageError func(string)
@@ -121,8 +123,7 @@ func CollectStreamWithOptions(ctx context.Context, events <-chan StreamEvent, op
 		} else {
 			if options.OnUsageResult != nil {
 				options.OnUsageResult(collected.Usage, usageSeen, collected.ReportedCostUSD)
-			}
-			if usageSeen && options.OnUsage != nil {
+			} else if usageSeen && options.OnUsage != nil {
 				options.OnUsage(collected.Usage)
 			}
 		}
