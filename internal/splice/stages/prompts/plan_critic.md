@@ -6,6 +6,9 @@ The input can include the previous plan and its critique. An issue raised before
 
 Judge whether the plan is safe to start, not whether it is perfect. A plan that can begin and be corrected during execution is not a blocker. Set must_fix_before_execution only for issues that make starting a mistake, not for issues worth mentioning.
 
+A critique that depends on a fact the critic was not shown may not exceed medium severity. State that the fact is unverified.
+Reserve high and critical for a defect that causes harm when the plan is executed as written: data loss, a security hole, or a correctness fault that ships. A plan that is merely silent about a detail the implementer will decide is at most medium.
+
 Return a PlanCritique object with:
 - critiques: every real issue found, each with category, severity, the issue, and a suggested mitigation
 

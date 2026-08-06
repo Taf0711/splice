@@ -798,6 +798,32 @@ func TestPlanCritiqueSeverityControlsBlocking(t *testing.T) {
 	}
 }
 
+func TestPlanCritiquePlanCompletenessGapsDoNotBlock(t *testing.T) {
+	// Regression: the critic blocked a plan by rating "the plan does not mention a mutex" as high, when the workspace already had one.
+	critique := PlanCritique{
+		Critiques: []Critique{
+			{Category: "correctness", Severity: SeverityMedium, Issue: "the plan does not mention a mutex; the fact is unverified"},
+			{Category: "operability", Severity: SeverityMedium, Issue: "the plan does not specify persistence error behavior"},
+		},
+		MustFixBeforeExecution: false,
+		OverallAssessment:      "The plan has details to resolve during implementation.",
+	}
+	if err := critique.Validate(); err != nil {
+		t.Fatalf("plan-completeness gaps at medium severity must not block: %v", err)
+	}
+}
+
+func TestPlanCritiqueGenuineHighDefectBlocks(t *testing.T) {
+	critique := PlanCritique{
+		Critiques:              []Critique{{Category: "security", Severity: SeverityHigh, Issue: "The plan stores credentials in plaintext, creating a security hole when executed."}},
+		MustFixBeforeExecution: true,
+		OverallAssessment:      "The plan must not start until credential storage is fixed.",
+	}
+	if err := critique.Validate(); err != nil {
+		t.Fatalf("genuine high-severity defect must block: %v", err)
+	}
+}
+
 func TestPlanCritiqueEmptySetDoesNotBlock(t *testing.T) {
 	critique := PlanCritique{OverallAssessment: "no issues"}
 	if err := critique.Validate(); err != nil {
