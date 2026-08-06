@@ -55,7 +55,7 @@ irm https://raw.githubusercontent.com/Taf0711/splice/main/scripts/install.ps1 | 
 Use the PowerShell argument form to set a version:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Taf0711/splice/main/scripts/install.ps1))) -Version 0.1.3
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Taf0711/splice/main/scripts/install.ps1))) -Version 0.1.4
 ```
 
 ## Why Splice exists

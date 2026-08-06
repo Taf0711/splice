@@ -77,7 +77,7 @@ irm https://raw.githubusercontent.com/Taf0711/splice/main/scripts/install.ps1 | 
 Use the PowerShell argument form to set a version:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Taf0711/splice/main/scripts/install.ps1))) -Version 0.1.3
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Taf0711/splice/main/scripts/install.ps1))) -Version 0.1.4
 ```
 
 ## Versioned install: GitHub Releases
@@ -113,7 +113,7 @@ The install script reads these variables. Each one also has an equivalent flag:
 | `SPLICE_INSTALL_DIR` | `--install-dir` | installs to a directory you choose |
 
 ```bash
-SPLICE_VERSION=0.1.3 scripts/install.sh
+SPLICE_VERSION=0.1.4 scripts/install.sh
 SPLICE_INSTALL_DIR="$HOME/bin" scripts/install.sh
 ```
 
