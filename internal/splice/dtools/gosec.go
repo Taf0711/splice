@@ -86,7 +86,7 @@ func (t gosecTool) Run(ctx context.Context, args map[string]any) tools.Result {
 	cmd := exec.CommandContext(ctx, gosecPath, cmdArgs...)
 	cmd.Dir = t.workspaceRoot
 
-	out, err := cmd.CombinedOutput()
+	out, err := cmd.Output()
 	if ctx.Err() != nil {
 		return tools.Result{
 			Status: tools.StatusError,
@@ -94,7 +94,8 @@ func (t gosecTool) Run(ctx context.Context, args map[string]any) tools.Result {
 		}
 	}
 	if err != nil {
-		if _, isExit := err.(*exec.ExitError); !isExit {
+		exitErr, isExit := err.(*exec.ExitError)
+		if !isExit {
 			return tools.Result{
 				Status: tools.StatusError,
 				Output: "Gosec is not installed or not available: " + err.Error(),
@@ -102,6 +103,12 @@ func (t gosecTool) Run(ctx context.Context, args map[string]any) tools.Result {
 		}
 		// Gosec ran and exited non-zero, usually because it found issues.
 		// The JSON output is still useful to the caller.
+		if len(out) == 0 {
+			return tools.Result{
+				Status: tools.StatusError,
+				Output: string(exitErr.Stderr),
+			}
+		}
 	}
 
 	return tools.Result{

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -33,9 +34,30 @@ func (s scannerToolSpec) validArgs(path string) map[string]any {
 	return map[string]any{"paths": []any{path}}
 }
 
+func (s scannerToolSpec) structuredOutput() string {
+	switch s.name {
+	case "bandit":
+		return `{"results":[]}`
+	case "gosec":
+		return `{"Issues":[]}`
+	case "sarif":
+		return `{"runs":[]}`
+	default:
+		return `{}`
+	}
+}
+
 func writeScannerScript(t *testing.T, dir, name, output string) {
+	writeScannerScriptWithOutput(t, dir, name, output, "", 7)
+}
+
+func writeScannerScriptWithOutput(t *testing.T, dir, name, stdout, stderr string, exitCode int) {
 	t.Helper()
-	script := "#!/bin/sh\nprintf '%s' '" + output + "'\nexit 7\n"
+	script := "#!/bin/sh\n"
+	if stderr != "" {
+		script += "printf '%s' '" + stderr + "' >&2\n"
+	}
+	script += "printf '%s' '" + stdout + "'\nexit " + strconv.Itoa(exitCode) + "\n"
 	path := filepath.Join(dir, name)
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("write scanner %s: %v", name, err)
@@ -107,7 +129,7 @@ func TestScannerMissingFromPath(t *testing.T) {
 	}
 }
 
-// This pins that scanner findings keep their output even when the process exits non-zero.
+// This pins that scanner findings keep their valid document even when the process exits non-zero.
 func TestScannerReturnsNonZeroOutput(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-script scanner requires a Unix-like platform")
@@ -119,7 +141,7 @@ func TestScannerReturnsNonZeroOutput(t *testing.T) {
 			workspace := t.TempDir()
 			writeWorkspaceFile(t, workspace, spec.path)
 			binDir := t.TempDir()
-			want := "finding output from " + spec.name
+			want := spec.structuredOutput()
 			writeScannerScript(t, binDir, spec.scanner, want)
 			t.Setenv("PATH", binDir)
 
@@ -133,6 +155,68 @@ func TestScannerReturnsNonZeroOutput(t *testing.T) {
 			}
 			if result.Output != want {
 				t.Fatalf("result output = %q, want %q", result.Output, want)
+			}
+		})
+	}
+}
+
+// Regression: combined output put scanner log lines ahead of the JSON, so the
+// security stage failed to parse it and the pipeline never reached its test stages.
+func TestScannerReturnsOnlyStructuredStdout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script scanner requires a Unix-like platform")
+	}
+
+	for _, spec := range scannerToolSpecs() {
+		spec := spec
+		t.Run(spec.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			writeWorkspaceFile(t, workspace, spec.path)
+			binDir := t.TempDir()
+			want := spec.structuredOutput()
+			writeScannerScriptWithOutput(t, binDir, spec.scanner, want, "[scanner] Including rules: default", 0)
+			t.Setenv("PATH", binDir)
+
+			args := spec.validArgs(spec.path)
+			if spec.name == "sarif" {
+				args["paths"] = []any{}
+			}
+			result := spec.new(workspace).Run(context.Background(), args)
+			if result.Status != tools.StatusOK {
+				t.Fatalf("result status = %s, want %s (output: %q)", result.Status, tools.StatusOK, result.Output)
+			}
+			if result.Output != want {
+				t.Fatalf("result output = %q, want JSON %q without stderr log noise", result.Output, want)
+			}
+		})
+	}
+}
+
+func TestScannerFailureSurfacesStderr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script scanner requires a Unix-like platform")
+	}
+
+	for _, spec := range scannerToolSpecs() {
+		spec := spec
+		t.Run(spec.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			writeWorkspaceFile(t, workspace, spec.path)
+			binDir := t.TempDir()
+			wantErr := "scanner failed from " + spec.name
+			writeScannerScriptWithOutput(t, binDir, spec.scanner, "", wantErr, 9)
+			t.Setenv("PATH", binDir)
+
+			args := spec.validArgs(spec.path)
+			if spec.name == "sarif" {
+				args["paths"] = []any{}
+			}
+			result := spec.new(workspace).Run(context.Background(), args)
+			if result.Status != tools.StatusError {
+				t.Fatalf("result status = %s, want %s (output: %q)", result.Status, tools.StatusError, result.Output)
+			}
+			if result.Output != wantErr {
+				t.Fatalf("result output = %q, want scanner stderr %q", result.Output, wantErr)
 			}
 		})
 	}
