@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -172,7 +173,11 @@ func buildPlatformCommandPlan(execRequest SandboxExecutionRequest, policy Policy
 		}
 	case BackendMacOSSeatbelt:
 		if backend.Available && backend.Executable != "" {
-			return withSandboxExecutionMetadata(seatbeltCommandPlan(execRequest, policy, backend), execRequest), nil
+			plan, err := seatbeltCommandPlan(execRequest, policy, backend)
+			if err != nil {
+				return CommandPlan{}, err
+			}
+			return withSandboxExecutionMetadata(plan, execRequest), nil
 		}
 	case BackendWindowsRestrictedToken:
 		if backend.Available && backend.Executable != "" {
@@ -208,7 +213,10 @@ func linuxSandboxHelperCommandPlan(execRequest SandboxExecutionRequest, policy P
 	if err != nil {
 		return CommandPlan{}, err
 	}
-	env := sandboxEnvironmentForCommand(spec.Env, policy, BackendLinuxBwrap)
+	env, err := sandboxEnvironmentForCommandChecked(spec.Env, policy, BackendLinuxBwrap, execRequest.WorkspaceRoot)
+	if err != nil {
+		return CommandPlan{}, err
+	}
 	planDir := spec.Dir
 	if helper.Dir != "" {
 		planDir = helper.Dir
@@ -304,11 +312,16 @@ func (engine *Engine) resolveCommandDir(dir string, policy Policy) (string, stri
 	return workspaceRoot, commandDir, nil
 }
 
-func seatbeltCommandPlan(execRequest SandboxExecutionRequest, policy Policy, backend Backend) CommandPlan {
-	return seatbeltCommandPlanWithProfile(execRequest.Command, execRequest.WorkspaceRoot, execRequest.PermissionProfile, policy, backend)
+func seatbeltCommandPlan(execRequest SandboxExecutionRequest, policy Policy, backend Backend) (CommandPlan, error) {
+	return seatbeltCommandPlanWithProfileChecked(execRequest.Command, execRequest.WorkspaceRoot, execRequest.PermissionProfile, policy, backend)
 }
 
 func seatbeltCommandPlanWithProfile(spec CommandSpec, workspaceRoot string, profile PermissionProfile, policy Policy, backend Backend) CommandPlan {
+	plan, _ := seatbeltCommandPlanWithProfileChecked(spec, workspaceRoot, profile, policy, backend)
+	return plan
+}
+
+func seatbeltCommandPlanWithProfileChecked(spec CommandSpec, workspaceRoot string, profile PermissionProfile, policy Policy, backend Backend) (CommandPlan, error) {
 	denialTag := ""
 	if policy.MonitorDenials {
 		denialTag = nextSandboxDenialTag()
@@ -319,7 +332,10 @@ func seatbeltCommandPlanWithProfile(spec CommandSpec, workspaceRoot string, prof
 	if envBackend == "" {
 		envBackend = BackendMacOSSeatbelt
 	}
-	env := sandboxEnvironmentForCommand(spec.Env, policy, envBackend)
+	env, err := sandboxEnvironmentForCommandChecked(spec.Env, policy, envBackend, workspaceRoot)
+	if err != nil {
+		return CommandPlan{}, err
+	}
 	plan := CommandPlan{
 		Backend:           backend,
 		TargetBackend:     backend.TargetBackend(),
@@ -337,7 +353,7 @@ func seatbeltCommandPlanWithProfile(spec CommandSpec, workspaceRoot string, prof
 	// The plan's monitor tag MUST equal the one embedded in the profile above so the
 	// monitor matches exactly this run's denials.
 	plan.MonitorTag = denialTag
-	return plan
+	return plan, nil
 }
 
 func seatbeltCompatibilityPermissionProfile(writeRoots []string, policy Policy) PermissionProfile {
@@ -362,11 +378,26 @@ func seatbeltCompatibilityPermissionProfile(writeRoots []string, policy Policy) 
 	}
 }
 
-func sandboxEnvironment(policy Policy, backend BackendName, _ string) []string {
-	return sandboxEnvironmentForCommand(nil, policy, backend)
+func sandboxEnvironment(policy Policy, backend BackendName, workspaceRoot string) []string {
+	return sandboxEnvironmentForCommandWithRoot(nil, policy, backend, workspaceRoot)
 }
 
+// sandboxEnvironmentForCommand keeps the original no-error helper used by
+// package tests and compatibility callers. Production command plans use the
+// checked variant below so cache setup failures stop the command clearly.
 func sandboxEnvironmentForCommand(specEnv []string, policy Policy, backend BackendName) []string {
+	return sandboxEnvironmentForCommandWithRoot(specEnv, policy, backend, "")
+}
+
+func sandboxEnvironmentForCommandWithRoot(specEnv []string, policy Policy, backend BackendName, workspaceRoot string) []string {
+	env, err := sandboxEnvironmentForCommandChecked(specEnv, policy, backend, workspaceRoot)
+	if err != nil {
+		return cloneStrings(specEnv)
+	}
+	return env
+}
+
+func sandboxEnvironmentForCommandChecked(specEnv []string, policy Policy, backend BackendName, workspaceRoot string) ([]string, error) {
 	env := cloneStrings(specEnv)
 	if specEnv == nil {
 		// Preserve the caller environment for sandboxed commands. Scrub
@@ -392,7 +423,72 @@ func sandboxEnvironmentForCommand(specEnv []string, policy Policy, backend Backe
 	if runtime.GOOS == "windows" {
 		overrides = append(overrides, "COMSPEC="+envListValue(env, "COMSPEC", "cmd.exe"))
 	}
-	return upsertEnvList(env, overrides...)
+	env, err := withSandboxGoCache(env, policy, backend, workspaceRoot)
+	if err != nil {
+		return nil, err
+	}
+	return upsertEnvList(env, overrides...), nil
+}
+
+func sandboxGoCacheBackend(backend BackendName) bool {
+	switch backend {
+	case BackendLinuxBwrap, BackendMacOSSeatbelt, BackendWindowsRestrictedToken, BackendWindowsElevated:
+		return true
+	default:
+		return false
+	}
+}
+
+func sandboxGoCacheDir(workspaceRoot string) (string, error) {
+	cacheDir, err := sandboxGoCachePath(workspaceRoot)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+		return "", fmt.Errorf("create sandbox Go cache directory %q: %w", cacheDir, err)
+	}
+	return cacheDir, nil
+}
+
+func withSandboxGoCache(env []string, policy Policy, backend BackendName, workspaceRoot string) ([]string, error) {
+	if policy.Mode == ModeDisabled || !sandboxGoCacheBackend(backend) || strings.TrimSpace(envListValue(env, "GOCACHE", "")) != "" {
+		return env, nil
+	}
+	cacheDir, err := sandboxGoCacheDir(workspaceRoot)
+	if err != nil {
+		return nil, err
+	}
+	return upsertEnvList(env, "GOCACHE="+cacheDir), nil
+}
+
+func sandboxGoCachePath(workspaceRoot string) (string, error) {
+	tempRoot := normalizeProfilePath(os.TempDir())
+	if tempRoot == "" {
+		return "", errors.New("create sandbox Go cache: the system temp directory is unavailable")
+	}
+	covered := false
+	for _, writeRoot := range defaultTempWriteRoots() {
+		if pathWithinRoot(writeRoot, tempRoot) {
+			covered = true
+			break
+		}
+	}
+	if !covered {
+		return "", fmt.Errorf("create sandbox Go cache: temp directory %q is outside sandbox write roots", tempRoot)
+	}
+	if strings.TrimSpace(workspaceRoot) == "" {
+		var err error
+		workspaceRoot, err = os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("create sandbox Go cache: resolve workspace: %w", err)
+		}
+	}
+	workspaceRoot = normalizeProfilePath(workspaceRoot)
+	if workspaceRoot == "" {
+		return "", errors.New("create sandbox Go cache: workspace path is unavailable")
+	}
+	digest := sha256.Sum256([]byte(workspaceRoot))
+	return filepath.Join(tempRoot, "splice", "gocache", fmt.Sprintf("%x", digest[:])), nil
 }
 
 func cloneStrings(values []string) []string {
