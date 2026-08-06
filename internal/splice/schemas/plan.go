@@ -475,9 +475,12 @@ type HarnessStageInput struct {
 	RequestIntent   string            `json:"request_intent"`
 	AcceptanceFacts []AcceptanceFact  `json:"acceptance_facts,omitempty"`
 	PriorSummaries  map[string]string `json:"prior_summaries,omitempty"`
-	RevisionContext *string           `json:"revision_context,omitempty"`
-	Context         *ContextBundle    `json:"context,omitempty"`
-	MemoryBundle    *MemoryBundle     `json:"memory_bundle,omitempty"`
+	// PriorChangedFiles carries structured paths from completed earlier stages.
+	// It complements PriorSummaries, which remains the prose hand-off channel.
+	PriorChangedFiles map[string][]string `json:"prior_changed_files,omitempty"`
+	RevisionContext   *string             `json:"revision_context,omitempty"`
+	Context           *ContextBundle      `json:"context,omitempty"`
+	MemoryBundle      *MemoryBundle       `json:"memory_bundle,omitempty"`
 	// PipelineStages is the full ordered roster of stage names for this run,
 	// so a stage can see what will (and will not) run after it. Empty outside
 	// a tier pipeline (e.g. design-phase stages), where no roster applies.

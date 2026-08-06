@@ -138,6 +138,12 @@ func (s *capturingStage) Run(ctx context.Context, input schemas.HarnessStageInpu
 	}, nil
 }
 
+type stageFunc func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error)
+
+func (f stageFunc) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options stages.StageOptions) (schemas.HarnessStageOutput, error) {
+	return f(ctx, input, provider, options)
+}
+
 type outputStage struct {
 	output schemas.HarnessStageOutput
 }
@@ -361,6 +367,50 @@ func TestRunPassPopulatesPipelineRoster(t *testing.T) {
 	last := inputs[len(inputs)-1]
 	if last.StageName != "test_runner" || last.NextStage != "" {
 		t.Fatalf("last stage input = %+v, want empty next_stage", last)
+	}
+}
+
+func TestRunPassCarriesWriterChangedPathsToTestGenerator(t *testing.T) {
+	workDir := t.TempDir()
+	var testInput schemas.HarnessStageInput
+	codeOut := schemas.CodeWriterOutput{
+		Files: []schemas.FileChange{
+			{Path: "storage.go", Content: "package storage\n", ChangeType: "create"},
+		},
+		Language: "go", Intent: "write storage", Confidence: 1,
+	}
+	registry := stageRegistry{
+		"code_writer": outputStage{output: schemas.HarnessStageOutput{
+			Summary: "implemented storage", Confidence: 1,
+			Data: map[string]any{"code_writer_output": codeOut},
+		}},
+		"test_generator": stageFunc(func(_ context.Context, input schemas.HarnessStageInput, _ zeroruntime.Provider, _ stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			testInput = input
+			return schemas.HarnessStageOutput{Summary: "generated tests", Confidence: 1}, nil
+		}),
+	}
+	plan := schemas.ExecutionPlan{
+		Tier: schemas.TierStandard, RequestIntent: "write storage tests",
+		Stages: []schemas.ExecutionStage{{Name: "code_writer"}, {Name: "test_generator"}},
+	}
+	_, _, completed, err := runPass(context.Background(), "run-writer-paths", 1, plan, registry, runFakeProvider{}, agent.Options{}, workDir, nil, nil, nil)
+	if err != nil || !completed {
+		t.Fatalf("runPass: completed=%v err=%v", completed, err)
+	}
+	if got := testInput.PriorChangedFiles["code_writer"]; len(got) != 1 || got[0] != "storage.go" {
+		t.Fatalf("test generator prior changed files = %v, want [storage.go]", got)
+	}
+}
+
+func TestBuildRevisionContextCarriesPriorOutputFiles(t *testing.T) {
+	output := schemas.HarnessStageOutput{Data: map[string]any{
+		"test_generator_output": schemas.TestGeneratorOutput{
+			Files: []schemas.FileChange{{Path: "storage_test.go", ChangeType: "modify"}},
+		},
+	}}
+	got := buildRevisionContext("revise tests", nil, nil, []schemas.HarnessStageOutput{output}, "retry")
+	if !strings.Contains(got, "storage_test.go") || !strings.Contains(got, "overwrite: true") {
+		t.Fatalf("revision context did not surface prior file and overwrite guidance: %q", got)
 	}
 }
 

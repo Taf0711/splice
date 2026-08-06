@@ -541,6 +541,102 @@ func TestTestGeneratorPayloadDoesNotDuplicateCodeWriterSummary(t *testing.T) {
 	}
 }
 
+// Regression: the stage received only a prose summary, so it wrote tests for
+// symbols that did not exist and the run never went green.
+func TestTestGeneratorPayloadCarriesWriterChangedPaths(t *testing.T) {
+	output := schemas.TestGeneratorOutput{Files: []schemas.FileChange{}, Language: "go", Intent: "no changes", Confidence: 0.9}
+	args, _ := json.Marshal(output)
+	provider := &requestCapturingProvider{events: toolCallEvent("submit_tests", string(args))}
+	input := newHarnessInput("write tests for the implementation")
+	input.PriorSummaries = map[string]string{"code_writer": "implemented storage"}
+	input.PriorChangedFiles = map[string][]string{"code_writer": {"storage.go", "storage_session.go"}}
+
+	if _, err := (TestGenerator{}).Run(context.Background(), input, provider, StageOptions{WorkDir: t.TempDir(), Language: "go"}); err != nil {
+		t.Fatalf("stage run: %v", err)
+	}
+	var payload schemas.TestGeneratorInput
+	if err := json.Unmarshal([]byte(modelUserPayload(t, provider.request)), &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if !reflect.DeepEqual(payload.WriterChangedPaths, []string{"storage.go", "storage_session.go"}) {
+		t.Fatalf("writer_changed_paths = %v, want actual writer paths", payload.WriterChangedPaths)
+	}
+	if !slices.Contains(payload.RelevantContext, "code_writer: implemented storage") {
+		t.Fatalf("writer summary missing from relevant context: %v", payload.RelevantContext)
+	}
+}
+
+func TestTestGeneratorPayloadBoundsWriterChangedPaths(t *testing.T) {
+	output := schemas.TestGeneratorOutput{Files: []schemas.FileChange{}, Language: "go", Intent: "no changes", Confidence: 0.9}
+	args, _ := json.Marshal(output)
+	provider := &requestCapturingProvider{events: toolCallEvent("submit_tests", string(args))}
+	paths := make([]string, maxWriterChangedPaths+25)
+	for i := range paths {
+		paths[i] = fmt.Sprintf("generated_%02d.go", i)
+	}
+	input := newHarnessInput("write tests")
+	input.PriorChangedFiles = map[string][]string{"code_writer": paths}
+
+	if _, err := (TestGenerator{}).Run(context.Background(), input, provider, StageOptions{WorkDir: t.TempDir(), Language: "go"}); err != nil {
+		t.Fatalf("stage run: %v", err)
+	}
+	var payload schemas.TestGeneratorInput
+	if err := json.Unmarshal([]byte(modelUserPayload(t, provider.request)), &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if got := len(payload.WriterChangedPaths); got != maxWriterChangedPaths {
+		t.Fatalf("writer_changed_paths length = %d, want cap %d", got, maxWriterChangedPaths)
+	}
+	if payload.WriterChangedPaths[maxWriterChangedPaths-1] != paths[maxWriterChangedPaths-1] {
+		t.Fatalf("writer_changed_paths was not bounded to the first paths: %v", payload.WriterChangedPaths)
+	}
+}
+
+// Regression: the stage's own output blocked its retry.
+func TestTestGeneratorRetryCanRewritePriorFile(t *testing.T) {
+	workDir := t.TempDir()
+	first := schemas.TestGeneratorOutput{
+		Files:      []schemas.FileChange{{Path: "storage_test.go", Content: "package storage\n", ChangeType: "create"}},
+		Language:   "go",
+		Intent:     "create storage tests",
+		Confidence: 0.9,
+	}
+	firstArgs, _ := json.Marshal(first)
+	firstProvider := &requestCapturingProvider{events: toolCallEvent("submit_tests", string(firstArgs))}
+	if _, err := (TestGenerator{}).Run(context.Background(), newHarnessInput("write storage tests"), firstProvider, StageOptions{WorkDir: workDir, Language: "go"}); err != nil {
+		t.Fatalf("first stage run: %v", err)
+	}
+
+	revision := "Files written by the prior iteration: storage_test.go"
+	second := first
+	second.Files[0] = schemas.FileChange{Path: "storage_test.go", Content: "package storage\n\n// revised\n", ChangeType: "modify"}
+	secondArgs, _ := json.Marshal(second)
+	secondProvider := &requestCapturingProvider{events: toolCallEvent("submit_tests", string(secondArgs))}
+	input := newHarnessInput("revise storage tests")
+	input.RevisionContext = &revision
+	if _, err := (TestGenerator{}).Run(context.Background(), input, secondProvider, StageOptions{WorkDir: workDir, Language: "go"}); err != nil {
+		t.Fatalf("retry stage run: %v", err)
+	}
+	content, err := os.ReadFile(filepath.Join(workDir, "storage_test.go"))
+	if err != nil {
+		t.Fatalf("read rewritten test file: %v", err)
+	}
+	if !strings.Contains(string(content), "revised") {
+		t.Fatalf("retry did not rewrite prior file: %q", content)
+	}
+	if !strings.Contains(secondProvider.request.Messages[0].Content, "overwrite: true") {
+		t.Fatalf("retry system prompt did not explain deliberate overwrite: %q", secondProvider.request.Messages[0].Content)
+	}
+	payload := modelUserPayload(t, secondProvider.request)
+	var typedPayload schemas.TestGeneratorInput
+	if err := json.Unmarshal([]byte(payload), &typedPayload); err != nil {
+		t.Fatalf("unmarshal retry payload: %v", err)
+	}
+	if typedPayload.RevisionContext == nil || !strings.Contains(*typedPayload.RevisionContext, "storage_test.go") {
+		t.Fatalf("retry payload revision_context omitted prior file path: %q", payload)
+	}
+}
+
 // TestPlanCriticPayloadOmitsRosterWithoutPipeline pins design-phase absence of roster fields.
 func TestPlanCriticPayloadOmitsRosterWithoutPipeline(t *testing.T) {
 	plan := schemas.DesignPlan{

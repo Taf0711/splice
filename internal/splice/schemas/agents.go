@@ -164,14 +164,15 @@ func (s StepBackAnalysis) Validate() error {
 
 // TestGeneratorInput is the minimum input required by the test generator.
 type TestGeneratorInput struct {
-	Intent          string           `json:"intent"`
-	Language        string           `json:"language"`
-	TargetPaths     []string         `json:"target_paths,omitempty"`
-	RelevantContext []string         `json:"relevant_context,omitempty"`
-	RevisionContext *string          `json:"revision_context,omitempty"`
-	Memory          []SelectedMemory `json:"memory,omitempty"`
-	PipelineStages  []string         `json:"pipeline_stages,omitempty"`
-	NextStage       string           `json:"next_stage,omitempty"`
+	Intent             string           `json:"intent"`
+	Language           string           `json:"language"`
+	TargetPaths        []string         `json:"target_paths,omitempty"`
+	WriterChangedPaths []string         `json:"writer_changed_paths,omitempty"`
+	RelevantContext    []string         `json:"relevant_context,omitempty"`
+	RevisionContext    *string          `json:"revision_context,omitempty"`
+	Memory             []SelectedMemory `json:"memory,omitempty"`
+	PipelineStages     []string         `json:"pipeline_stages,omitempty"`
+	NextStage          string           `json:"next_stage,omitempty"`
 }
 
 // Validate checks the test generator input.

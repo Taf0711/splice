@@ -314,7 +314,7 @@ func runIterationLoop(
 		if !completed {
 			if i < maxIterations {
 				failed := findFailed(passRecords)
-				rc := buildRevisionContext(plan.RequestIntent, history, passRecords, fmt.Sprintf("Recovery: stage failure in iteration %d: %s", i, DerefString(failed.OutputSummary)))
+				rc := buildRevisionContext(plan.RequestIntent, history, passRecords, passOutputs, fmt.Sprintf("Recovery: stage failure in iteration %d: %s", i, DerefString(failed.OutputSummary)))
 				revisionContext = &rc
 				continue
 			}
@@ -355,7 +355,7 @@ func runIterationLoop(
 
 		decision := EvaluateTrajectory(history, maxIterations, &tokenBudget)
 		if decision.Action == schemas.ActionContinue {
-			rc := buildRevisionContext(plan.RequestIntent, history, passRecords, "")
+			rc := buildRevisionContext(plan.RequestIntent, history, passRecords, passOutputs, "")
 			revisionContext = &rc
 			continue
 		}
@@ -375,7 +375,7 @@ func runIterationLoop(
 				return finishWithReason(runID, plan, allRecords, "failed", fmt.Sprintf("restore to iteration %d: %v", target.iter, restoreErr))
 			}
 			emitProgress(options, fmt.Sprintf("[recovery] rejected iteration %d (score=%.1f), restored iteration %d (score=%.1f)\n", i, current.score, target.iter, target.score))
-			rc := buildRevisionContext(plan.RequestIntent, history, passRecords, fmt.Sprintf("Rollback: restored iteration %d at score %.1f. %s", target.iter, target.score, decision.Reason))
+			rc := buildRevisionContext(plan.RequestIntent, history, passRecords, passOutputs, fmt.Sprintf("Rollback: restored iteration %d at score %.1f. %s", target.iter, target.score, decision.Reason))
 			revisionContext = &rc
 			continue
 		}
@@ -424,7 +424,7 @@ func runIterationLoop(
 					emitProgress(options, "[escalation] no EscalationModelResolver configured (continuing without escalation)\n")
 				}
 			}
-			rc := buildRevisionContext(plan.RequestIntent, history, passRecords, fmt.Sprintf("Recovery: %s — %s", decision.Action, decision.Reason))
+			rc := buildRevisionContext(plan.RequestIntent, history, passRecords, passOutputs, fmt.Sprintf("Recovery: %s — %s", decision.Action, decision.Reason))
 			revisionContext = &rc
 			continue
 		}
@@ -504,6 +504,7 @@ func runPass(
 	mem MemoryStore,
 ) ([]schemas.StageRecord, []schemas.HarnessStageOutput, bool, error) {
 	priorSummaries := map[string]string{}
+	priorChangedFiles := map[string][]string{}
 	records := []schemas.StageRecord{}
 	outputs := []schemas.HarnessStageOutput{}
 
@@ -543,16 +544,17 @@ func runPass(
 		}
 
 		input := schemas.HarnessStageInput{
-			RunID:           runID,
-			StageName:       stageName,
-			Sequence:        seq + 1,
-			PlanTier:        plan.Tier,
-			RequestIntent:   plan.RequestIntent,
-			AcceptanceFacts: append([]schemas.AcceptanceFact(nil), plan.AcceptanceFacts...),
-			PriorSummaries:  maps.Clone(priorSummaries),
-			RevisionContext: revisionContext,
-			PipelineStages:  stageNames,
-			NextStage:       nextStage,
+			RunID:             runID,
+			StageName:         stageName,
+			Sequence:          seq + 1,
+			PlanTier:          plan.Tier,
+			RequestIntent:     plan.RequestIntent,
+			AcceptanceFacts:   append([]schemas.AcceptanceFact(nil), plan.AcceptanceFacts...),
+			PriorSummaries:    maps.Clone(priorSummaries),
+			PriorChangedFiles: cloneChangedFiles(priorChangedFiles),
+			RevisionContext:   revisionContext,
+			PipelineStages:    stageNames,
+			NextStage:         nextStage,
 		}
 
 		if mem != nil {
@@ -657,6 +659,7 @@ func runPass(
 			})
 		}
 		priorSummaries[stageName] = *record.OutputSummary
+		priorChangedFiles[stageName] = append([]string(nil), stageChangedFiles(output)...)
 		outputs = append(outputs, output)
 	}
 
@@ -784,7 +787,7 @@ func findFailed(records []schemas.StageRecord) schemas.StageRecord {
 	return records[len(records)-1]
 }
 
-func buildRevisionContext(intent string, history []schemas.IterationState, records []schemas.StageRecord, note string) string {
+func buildRevisionContext(intent string, history []schemas.IterationState, records []schemas.StageRecord, outputs []schemas.HarnessStageOutput, note string) string {
 	lines := []string{fmt.Sprintf("Original intent: %s", intent), "", "Iteration history:"}
 	for _, state := range history {
 		lines = append(lines, fmt.Sprintf("  iter %d: tests_passing=%d tests_failing=%d tests_errored=%d score=%.1f",
@@ -802,10 +805,46 @@ func buildRevisionContext(intent string, history []schemas.IterationState, recor
 			lines = append(lines, fmt.Sprintf("  %s: %s", r.Name, DerefString(r.OutputSummary)))
 		}
 	}
+	changedFiles := make([]string, 0)
+	for _, output := range outputs {
+		changedFiles = append(changedFiles, stageChangedFiles(output)...)
+	}
+	if len(changedFiles) > 0 {
+		changedFiles = uniqueStrings(changedFiles)
+		if len(changedFiles) > 50 {
+			changedFiles = changedFiles[:50]
+		}
+		lines = append(lines, "", "Files written by the prior iteration (use change_type modify and overwrite: true when editing them):")
+		lines = append(lines, "  "+strings.Join(changedFiles, ", "))
+	}
 	if note != "" {
 		lines = append(lines, "", note)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func cloneChangedFiles(input map[string][]string) map[string][]string {
+	if len(input) == 0 {
+		return nil
+	}
+	clone := make(map[string][]string, len(input))
+	for stage, paths := range input {
+		clone[stage] = append([]string(nil), paths...)
+	}
+	return clone
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 func buildStepBackReport(intent string, history []schemas.IterationState, passOutputs []schemas.HarnessStageOutput, decision schemas.TrajectoryDecision) stages.StepBackReport {

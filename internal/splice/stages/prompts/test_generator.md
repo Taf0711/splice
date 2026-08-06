@@ -26,3 +26,9 @@ every run.
 You write tests for the test runner stage to execute after you, so their result
 is unknown to you. Describe what each test checks, and state in
 `known_limitations` any test you are unsure will run in this project.
+
+Use `writer_changed_paths` as the authoritative list of files produced by the
+code writer. Target the symbols and files that the writer actually produced.
+Do not invent names that are not in those files. If a prior iteration already
+wrote a test file, return `change_type: "modify"`; the pipeline applies that
+change with `overwrite: true`.

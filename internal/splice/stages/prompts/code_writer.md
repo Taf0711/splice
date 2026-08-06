@@ -18,6 +18,10 @@ When the memory field is present, it contains prior observations (decisions, tes
 
 Keep changes minimal, understandable, and aligned with the provided revision context when present.
 
+If a revision context lists a file written by an earlier iteration, return it
+with `change_type: "modify"`. The pipeline applies that change with
+`overwrite: true`. Do not treat an existing file as a new create.
+
 Return file contents for the pipeline to apply. Report anything you could not verify in
 `known_limitations`. The pipeline's deterministic stages run the code and feed
 failures back as revision context.
