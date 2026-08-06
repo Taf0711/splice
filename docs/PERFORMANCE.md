@@ -66,8 +66,6 @@ Supported environment variables:
 - `SPLICE_PERF_FIRST_OUTPUT_WARN_MS`
 - `SPLICE_PERF_HARNESS_END_RSS_WARN_MB`
 
-These environment variables retain the upstream SPLICE_ prefix; a rename to SPLICE_ is planned.
-
 ## CI Behavior
 
 > **Note:** The `Performance Smoke` job described below is **not yet present** in

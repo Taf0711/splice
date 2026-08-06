@@ -57,6 +57,9 @@ type commandPicker struct {
 	allItems []pickerItem
 	query    string
 	selected int
+	// planBearing is true when the picker contains at least one reconstructed
+	// plan. It lets launch gating reuse the picker build without rereading events.
+	planBearing bool
 }
 
 func (p *commandPicker) move(delta int) {

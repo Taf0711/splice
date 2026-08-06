@@ -49,8 +49,11 @@ type TokenStatus struct {
 type TokenStoreOptions struct {
 	FilePath   string
 	LegacyPath string
-	Env        map[string]string
-	Now        func() time.Time
+	// Storage forwards the OAuth backend selector. Empty uses oauth's platform
+	// auto policy; "file" selects the explicit plaintext opt-out.
+	Storage string
+	Env     map[string]string
+	Now     func() time.Time
 }
 
 // TokenStore persists MCP OAuth tokens in the unified oauth store
@@ -110,6 +113,7 @@ func NewTokenStore(options TokenStoreOptions) (*TokenStore, error) {
 	}
 	unified, err := oauth.NewStore(oauth.StoreOptions{
 		FilePath: options.FilePath,
+		Storage:  options.Storage,
 		Env:      options.Env,
 		Now:      now,
 	})

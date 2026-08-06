@@ -16,6 +16,8 @@ var testGeneratorSystemPrompt string
 
 const testGeneratorToolName = "submit_tests"
 
+const maxWriterChangedPaths = 50
+
 // TestGenerator is the test generation pipeline stage.
 type TestGenerator struct{}
 
@@ -43,13 +45,20 @@ func (TestGenerator) Run(ctx context.Context, input schemas.HarnessStageInput, p
 	if prior := input.PriorSummaries["code_writer"]; prior != "" {
 		relevantContext = append(relevantContext, "code_writer: "+prior)
 	}
+	writerChangedPaths := append([]string(nil), input.PriorChangedFiles["code_writer"]...)
+	if len(writerChangedPaths) > maxWriterChangedPaths {
+		writerChangedPaths = writerChangedPaths[:maxWriterChangedPaths]
+	}
 	tgInput := schemas.TestGeneratorInput{
-		Intent:          input.RequestIntent,
-		Language:        options.language("python"),
-		TargetPaths:     options.TargetPaths,
-		RelevantContext: relevantContext,
-		RevisionContext: input.RevisionContext,
-		Memory:          selectMemory(input.MemoryBundle),
+		Intent:             input.RequestIntent,
+		Language:           options.language("python"),
+		TargetPaths:        options.TargetPaths,
+		WriterChangedPaths: writerChangedPaths,
+		RelevantContext:    relevantContext,
+		RevisionContext:    input.RevisionContext,
+		Memory:             selectMemory(input.MemoryBundle),
+		PipelineStages:     input.PipelineStages,
+		NextStage:          input.NextStage,
 	}
 	if err := tgInput.Validate(); err != nil {
 		return schemas.HarnessStageOutput{}, fmt.Errorf("test generator input: %w", err)
@@ -60,7 +69,7 @@ func (TestGenerator) Run(ctx context.Context, input schemas.HarnessStageInput, p
 	collected, err := callValidatedToolUse(ctx, provider, options.model("medium"), options.ReasoningEffort, composeSystemPrompt(testGeneratorSystemPrompt), string(payload), options.Images, testGeneratorToolDefinition(), &options.Stream, func(collected *zeroruntime.CollectedStream) error {
 		_, err := parseTestGeneratorOutput(collected)
 		return err
-	})
+	}, options.PromptCacheKey)
 	if err != nil {
 		return schemas.HarnessStageOutput{}, withCollectedUsage(err, collected)
 	}

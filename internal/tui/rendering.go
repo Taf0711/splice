@@ -166,11 +166,13 @@ func (rc rowContext) skip(row transcriptRow) bool {
 }
 
 // cardRenderOptions carries per-render knobs for tool cards: the body-line cap
-// (small for the live region, generous for the permanent scrollback flush) and
-// the workspace root used to absolutize paths for OSC 8 file hyperlinks.
+// (small for the live region, generous for the permanent scrollback flush), the
+// card width used to cap generic body lines, and the workspace root used to
+// absolutize paths for OSC 8 file hyperlinks.
 type cardRenderOptions struct {
 	bodyCap  int
 	cwd      string
+	width    int
 	expanded bool
 	// fileSelected marks a tool-result card whose mutation touched the file
 	// selected in the FILES sidebar; the card border tints accent so the
@@ -1866,6 +1868,7 @@ func toolCard(head string, glyph string, body []string, footer string, _ lipglos
 
 // toolCardBody delegates result-shape selection to the tool body registry.
 func toolCardBody(name string, hint string, arg string, detail string, width int, opts cardRenderOptions, failed bool) cardBody {
+	opts.width = width
 	return defaultToolBodyRegistry.render(toolBodyRequest{
 		name:   name,
 		hint:   hint,
@@ -1889,9 +1892,12 @@ func capCardLines(lines []string, cap int) []string {
 }
 
 func genericCardBody(detail string, opts cardRenderOptions) cardBody {
-	raw := strings.Split(detail, "\n")
+	raw := strings.Split(sanitizeTerminalOutput(detail, true), "\n")
 	lines := make([]string, 0, len(raw))
 	for _, line := range raw {
+		if opts.width > 0 {
+			line = truncateDisplayWidth(line, opts.width)
+		}
 		lines = append(lines, zeroTheme.muted.Render(line))
 	}
 	return cardBody{lines: capCardLines(lines, opts.bodyCap)}

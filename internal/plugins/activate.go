@@ -330,6 +330,7 @@ func mergeSkills(defaultDir string, pluginRoots []string, keepContent bool) ([]s
 type skillTool struct {
 	defaultDir  string
 	pluginRoots []string
+	names       []string
 }
 
 // NewSkillTool builds the plugin-aware skill tool. defaultDir is the standard
@@ -338,15 +339,25 @@ type skillTool struct {
 // deduplicating by name (default dir wins a clash) and listing all available
 // skills when an unknown name is requested.
 func NewSkillTool(defaultDir string, pluginRoots []string) tools.Tool {
-	return skillTool{defaultDir: defaultDir, pluginRoots: append([]string{}, pluginRoots...)}
+	merged, _ := MergedSkills(defaultDir, pluginRoots)
+	names := make([]string, 0, len(merged))
+	for _, skill := range merged {
+		if name := strings.TrimSpace(skill.Name); name != "" {
+			names = append(names, name)
+		}
+	}
+	return skillTool{defaultDir: defaultDir, pluginRoots: append([]string{}, pluginRoots...), names: names}
 }
 
 func (tool skillTool) Name() string { return "skill" }
 
 func (tool skillTool) Description() string {
-	return "Load a named Splice skill and return its instructions as the tool output. " +
-		"Skills are reusable, on-demand instruction sets (including any contributed by plugins). " +
-		"Call this when a relevant skill exists; an unknown name returns the list of available skills."
+	description := "Load a named Splice skill and return its instructions as the tool output. " +
+		"Skills are reusable, on-demand instruction sets (including any contributed by plugins)."
+	if len(tool.names) > 0 {
+		description += " Available skills: " + strings.Join(tool.names, ", ") + "."
+	}
+	return description
 }
 
 func (tool skillTool) Parameters() tools.Schema {

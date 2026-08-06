@@ -11,7 +11,7 @@ import (
 func newTestStore(t *testing.T) (*Store, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "oauth-tokens.json")
-	s, err := NewStore(StoreOptions{FilePath: path})
+	s, err := NewStore(StoreOptions{Storage: "file", FilePath: path})
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}

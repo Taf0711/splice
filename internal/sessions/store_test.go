@@ -381,6 +381,7 @@ func TestListAndLatestResumableExcludeSubRuns(t *testing.T) {
 	mk(SessionKindSpecImpl, "spec-impl-1")
 	newestResumable := mk("", "conversation-2") // newest standalone conversation
 	mk(SessionKindChild, "child-2")             // newer overall, but a sub-run
+	mk(SessionKindEphemeral, "plain-exec-1")    // newest overall, but a throwaway one-shot exec run
 
 	resumable, err := store.ListResumable()
 	if err != nil {
@@ -680,6 +681,50 @@ func TestPrepareExecPersistsSpecialistMetadataForNewSession(t *testing.T) {
 	}
 	if loaded == nil || loaded.Tag != "specialist" || loaded.Depth != 2 {
 		t.Fatalf("loaded specialist metadata = %#v", loaded)
+	}
+}
+
+// TestPrepareExecEphemeralOptionTagsNewSessionOnly covers the seam a plain
+// `splice exec "prompt"` now uses to record usage: PrepareExecOptions.Ephemeral
+// tags a fresh session SessionKindEphemeral, but must never override an
+// explicit CallingSessionID child session (a specialist sub-run is never a
+// throwaway one-shot even without other session flags) and must have no effect
+// when resuming or forking an existing session (those already have a real
+// identity).
+func TestPrepareExecEphemeralOptionTagsNewSessionOnly(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: fixedClock("2026-06-04T14:45:00Z")})
+
+	plain, err := PrepareExec(PrepareExecOptions{Store: store, Ephemeral: true})
+	if err != nil {
+		t.Fatalf("PrepareExec (plain) returned error: %v", err)
+	}
+	if plain.Session.SessionKind != SessionKindEphemeral {
+		t.Fatalf("plain session kind = %q, want %q", plain.Session.SessionKind, SessionKindEphemeral)
+	}
+
+	parent, err := store.Create(CreateInput{SessionID: "parent"})
+	if err != nil {
+		t.Fatalf("Create parent returned error: %v", err)
+	}
+	child, err := PrepareExec(PrepareExecOptions{
+		Store:            store,
+		SessionID:        "child",
+		CallingSessionID: parent.SessionID,
+		Ephemeral:        true, // a caller that forgets to clear this must not demote a real child session
+	})
+	if err != nil {
+		t.Fatalf("PrepareExec (child) returned error: %v", err)
+	}
+	if child.Session.SessionKind != SessionKindChild {
+		t.Fatalf("child session kind = %q, want %q (Ephemeral must not override an explicit calling session)", child.Session.SessionKind, SessionKindChild)
+	}
+
+	resumed, err := PrepareExec(PrepareExecOptions{Store: store, Resume: plain.Session.SessionID, Ephemeral: true})
+	if err != nil {
+		t.Fatalf("PrepareExec (resume) returned error: %v", err)
+	}
+	if resumed.Session.SessionKind != SessionKindEphemeral {
+		t.Fatalf("resumed session kind = %q, want it unchanged from the original ephemeral session", resumed.Session.SessionKind)
 	}
 }
 

@@ -38,6 +38,7 @@ func (b *syncBuffer) String() string {
 func TestRunMCPOAuthStatusReportsPresenceWithoutToken(t *testing.T) {
 	store, err := mcp.NewTokenStore(mcp.TokenStoreOptions{
 		FilePath: filepath.Join(t.TempDir(), "mcp-oauth-tokens.json"),
+		Storage:  "file",
 	})
 	if err != nil {
 		t.Fatalf("NewTokenStore() error = %v", err)
@@ -78,6 +79,7 @@ func TestRunMCPOAuthStatusReportsPresenceWithoutToken(t *testing.T) {
 func TestRunMCPOAuthLogout(t *testing.T) {
 	store, err := mcp.NewTokenStore(mcp.TokenStoreOptions{
 		FilePath: filepath.Join(t.TempDir(), "mcp-oauth-tokens.json"),
+		Storage:  "file",
 	})
 	if err != nil {
 		t.Fatalf("NewTokenStore() error = %v", err)
@@ -113,6 +115,7 @@ func TestRunMCPOAuthLoginStoresTokens(t *testing.T) {
 
 	store, err := mcp.NewTokenStore(mcp.TokenStoreOptions{
 		FilePath: filepath.Join(t.TempDir(), "mcp-oauth-tokens.json"),
+		Storage:  "file",
 	})
 	if err != nil {
 		t.Fatalf("NewTokenStore() error = %v", err)
@@ -187,6 +190,7 @@ func TestRunMCPOAuthLoginRejectsNonOAuthServer(t *testing.T) {
 	cwd := t.TempDir()
 	store, err := mcp.NewTokenStore(mcp.TokenStoreOptions{
 		FilePath: filepath.Join(t.TempDir(), "mcp-oauth-tokens.json"),
+		Storage:  "file",
 	})
 	if err != nil {
 		t.Fatalf("NewTokenStore() error = %v", err)

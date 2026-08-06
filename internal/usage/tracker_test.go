@@ -57,7 +57,7 @@ func TestTrackerMarksUnpricedWebSearchRequests(t *testing.T) {
 	}
 	record, err := tracker.Record(RecordInput{
 		ModelID: "gpt-4.1",
-		Usage:   zeroruntime.Usage{InputTokens: 1, WebSearchRequests: 3},
+		Usage:   zeroruntime.Usage{InputTokens: 1, WebSearchRequests: 3, WebSearchEngine: "unknown"},
 	})
 	if err != nil {
 		t.Fatalf("Record returned error: %v", err)
@@ -67,6 +67,32 @@ func TestTrackerMarksUnpricedWebSearchRequests(t *testing.T) {
 	}
 	if record.Usage.WebSearchRequests != 3 {
 		t.Fatalf("web search requests = %d, want 3", record.Usage.WebSearchRequests)
+	}
+}
+
+func TestTrackerKeepsWholeRequestUnpricedWhenSearchRateUnknown(t *testing.T) {
+	tracker, err := NewTracker(TrackerOptions{Registry: mustTestPricedRegistry(t)})
+	if err != nil {
+		t.Fatalf("NewTracker returned error: %v", err)
+	}
+	record, err := tracker.Record(RecordInput{
+		ModelID: "gpt-4.1",
+		Usage: zeroruntime.Usage{
+			InputTokens: 1_000, OutputTokens: 100,
+			WebSearchRequests: 1, WebSearchEngine: "unknown",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Record returned error: %v", err)
+	}
+	if record.Cost == nil || record.Cost.CostStatus != CostStatusUnpriced {
+		t.Fatalf("cost = %#v, want whole request unpriced", record.Cost)
+	}
+	if record.Cost.CostUSD != nil || record.Cost.TotalCost != 0 {
+		t.Fatalf("unpriced request retained a readable partial total: %#v", record.Cost)
+	}
+	if record.Usage.InputTokens != 1_000 || record.Usage.OutputTokens != 100 || record.Usage.WebSearchRequests != 1 {
+		t.Fatalf("usage was not retained: %#v", record.Usage)
 	}
 }
 

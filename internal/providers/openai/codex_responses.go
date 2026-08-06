@@ -214,9 +214,9 @@ func (p *CodexProvider) buildResponsesRequest(request zeroruntime.CompletionRequ
 		return nil, errors.New("codex provider: model is required")
 	}
 	req := &responsesRequest{
-		Model:           p.inner.model,
-		Stream:          true,
-		MaxOutputTokens: p.inner.maxTokens,
+		Model:  p.inner.model,
+		Stream: true,
+		// The Codex backend rejects this parameter with the detail message "Unsupported parameter: max_output_tokens".
 	}
 	instructions := []string{}
 	for _, msg := range request.Messages {

@@ -30,10 +30,31 @@ func TestApplyReturnsNoopWhenUpToDate(t *testing.T) {
 	}
 }
 
+func TestOptionalBinariesIncludeMemdForEveryPlatform(t *testing.T) {
+	tests := []struct {
+		goos string
+		want string
+	}{
+		{goos: "windows", want: "splice-memd.exe"},
+		{goos: "linux", want: "splice-memd"},
+		{goos: "darwin", want: "splice-memd"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.goos, func(t *testing.T) {
+			for _, name := range optionalBinariesForGOOS(tt.goos) {
+				if name == tt.want {
+					return
+				}
+			}
+			t.Fatalf("optional binaries for %s do not contain %q: %v", tt.goos, tt.want, optionalBinariesForGOOS(tt.goos))
+		})
+	}
+}
+
 func TestApplyStandaloneUpdateReplacesBinary(t *testing.T) {
 	binaryName := "splice"
-	// macOS ships no optional helper binaries (matching scripts/postinstall.mjs),
-	// so there's nothing to refresh there; only linux/windows have one to check.
+	// macOS has no sandbox helper binaries, so only linux and Windows have one
+	// to check here. The platform list test covers the memd sidecar.
 	optionalName := ""
 	switch runtime.GOOS {
 	case "windows":
@@ -155,7 +176,7 @@ func TestApplyStandaloneUpdateWarnsWhenHelperRefreshFails(t *testing.T) {
 		binaryName = "splice.exe"
 		optionalName = "splice-windows-command-runner.exe"
 	} else if runtime.GOOS == "darwin" {
-		t.Skip("macOS ships no optional helper binaries to refresh")
+		t.Skip("macOS has no sandbox helper binary to refresh")
 	}
 
 	installDir := t.TempDir()

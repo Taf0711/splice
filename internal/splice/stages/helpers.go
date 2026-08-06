@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"sort"
 	"strings"
 
 	"github.com/Taf0711/splice/internal/splice/schemas"
@@ -69,12 +70,40 @@ func candidatePaths(intent string) []string {
 	return seen
 }
 
-func selectRelevantContext(static []string, prior map[string]string, context *schemas.ContextBundle) []string {
+func selectRelevantContext(static []string, prior map[string]string, context *schemas.ContextBundle, roster []string) []string {
 	selected := append([]string(nil), static...)
-	for _, stage := range []string{"requirements", "spec_writer"} {
-		if summary, ok := prior[stage]; ok && summary != "" {
-			selected = append(selected, fmt.Sprintf("%s: %s", stage, summary))
+	keys := make([]string, 0, len(prior))
+	for stage, summary := range prior {
+		if summary != "" {
+			keys = append(keys, stage)
 		}
+	}
+	if len(roster) > 0 {
+		rosterIndex := make(map[string]int, len(roster))
+		for i, stage := range roster {
+			if _, exists := rosterIndex[stage]; !exists {
+				rosterIndex[stage] = i
+			}
+		}
+		sort.SliceStable(keys, func(i, j int) bool {
+			a, aok := rosterIndex[keys[i]]
+			b, bok := rosterIndex[keys[j]]
+			switch {
+			case aok && bok:
+				return a < b
+			case aok:
+				return true
+			case bok:
+				return false
+			default:
+				return keys[i] < keys[j]
+			}
+		})
+	} else {
+		sort.Strings(keys)
+	}
+	for _, stage := range keys {
+		selected = append(selected, fmt.Sprintf("%s: %s", stage, prior[stage]))
 	}
 	if context != nil {
 		selected = append(selected, formatContextBundle(context)...)

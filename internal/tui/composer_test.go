@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 )
 
@@ -126,6 +127,61 @@ func TestSanitizeComposerPastePreservesNewlines(t *testing.T) {
 
 	if got != want {
 		t.Fatalf("sanitized paste = %q, want %q", got, want)
+	}
+}
+
+func TestComposerVisualLineLayout(t *testing.T) {
+	input := textinput.New()
+	input.Prompt = ""
+	tests := []struct {
+		name       string
+		text       string
+		width      int
+		cursor     int
+		wantLines  []string
+		wantCursor int
+	}{
+		{
+			name:       "wraps at three columns",
+			text:       "abcd",
+			width:      3,
+			cursor:     4,
+			wantLines:  []string{"abc", "d"},
+			wantCursor: 1,
+		},
+		{
+			name:       "uses display width for CJK and emoji",
+			text:       "界🙂a",
+			width:      3,
+			cursor:     3,
+			wantLines:  []string{"界", "🙂", "a"},
+			wantCursor: 2,
+		},
+		{
+			name:       "keeps four-line cursor window",
+			text:       "a\nb\nc\nd\ne",
+			width:      8,
+			cursor:     9,
+			wantLines:  []string{"b", "c", "d", "e"},
+			wantCursor: 3,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			state := composerState{text: test.text, cursor: test.cursor}
+			segments, cursorLine := composerVisibleVisualLines(input, state, test.width)
+			gotLines := make([]string, len(segments))
+			runes := []rune(state.text)
+			for index, segment := range segments {
+				gotLines[index] = string(runes[segment.start:segment.end])
+			}
+			if strings.Join(gotLines, "\n") != strings.Join(test.wantLines, "\n") {
+				t.Fatalf("visual lines = %q, want %q", gotLines, test.wantLines)
+			}
+			if cursorLine != test.wantCursor {
+				t.Fatalf("cursor line = %d, want %d", cursorLine, test.wantCursor)
+			}
+		})
 	}
 }
 

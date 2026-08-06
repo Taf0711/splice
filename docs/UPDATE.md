@@ -39,8 +39,6 @@ Endpoint resolution order:
 3. `--repo`
 4. `https://api.github.com/repos/Taf0711/splice/releases/latest`
 
-These environment variables retain the upstream SPLICE_ prefix; a rename to SPLICE_ is planned.
-
 Installer scripts download the matching release asset for the local platform and
 verify its `.sha256` file. If Splice is already installed, run `splice update --check`
 before reinstalling.

@@ -59,6 +59,27 @@ You can inspect blocked scripts with `bun pm untrusted`. On Bun versions without
 node node_modules/@taf0711/splice/scripts/postinstall.mjs
 ```
 
+## One-line install
+
+Use the Bash installer on Linux or macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Taf0711/splice/main/scripts/install.sh | bash
+wget -qO- https://raw.githubusercontent.com/Taf0711/splice/main/scripts/install.sh | bash
+```
+
+Use the plain PowerShell form on Windows:
+
+```powershell
+irm https://raw.githubusercontent.com/Taf0711/splice/main/scripts/install.ps1 | iex
+```
+
+Use the PowerShell argument form to set a version:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Taf0711/splice/main/scripts/install.ps1))) -Version 0.1.4
+```
+
 ## Versioned install: GitHub Releases
 
 Release archives and checksums are published on
@@ -81,9 +102,8 @@ splice-v<version>-macos-<arch>.tar.gz
 splice-v<version>-windows-<arch>.zip
 ```
 
-The release archive includes the platform helpers needed by the sandbox. Keep
-`splice` and its helper binaries together when copying them to a directory on
-`PATH`.
+A published release archive contains only the `splice` binary and the
+`splice-memd` sidecar. It does not contain sandbox helper binaries.
 
 The install script reads these variables. Each one also has an equivalent flag:
 
@@ -93,7 +113,7 @@ The install script reads these variables. Each one also has an equivalent flag:
 | `SPLICE_INSTALL_DIR` | `--install-dir` | installs to a directory you choose |
 
 ```bash
-SPLICE_VERSION=0.1.3 scripts/install.sh
+SPLICE_VERSION=0.1.4 scripts/install.sh
 SPLICE_INSTALL_DIR="$HOME/bin" scripts/install.sh
 ```
 
@@ -195,6 +215,22 @@ To inspect permissions before allowing a run:
 splice sandbox policy
 splice sandbox grants list
 ```
+
+The sandbox denies common credential directories by default. This includes SSH,
+cloud, GPG, Kubernetes, container registry, GitHub CLI, and Splice token data.
+To re-enable a nested path, add it to the global user config under `sandbox.allowRead`:
+
+```json
+{
+  "sandbox": {
+    "allowRead": ["~/.ssh"]
+  }
+}
+```
+
+The setting applies only to global user config and CLI overrides. Project config
+cannot re-enable access to a user's credential directory. Network approval does
+not restore a denied SSH key, so SSH-based Git commands also need this override.
 
 For a first headless run:
 

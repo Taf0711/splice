@@ -41,12 +41,18 @@ type StageOptions struct {
 	// ReasoningEffort is the per-stage reasoning effort (minimal/low/medium/high).
 	// Empty means "let the provider decide".
 	ReasoningEffort string
+	// PromptCacheKey groups requests that share a system-prompt prefix so the provider can reuse its cached prefix. Empty disables the hint.
+	PromptCacheKey string
 	// Command is an explicit command for deterministic stages like test_runner.
 	Command []string
 	// TimeoutSeconds bounds deterministic subprocess execution.
 	TimeoutSeconds int
 	// Plan is used by the plan_critic stage.
 	Plan *schemas.DesignPlan
+	// PreviousPlan is the plan from the prior crystallization, when available.
+	PreviousPlan *schemas.DesignPlan
+	// PreviousCritique is the prior plan review, when available.
+	PreviousCritique *schemas.PlanCritique
 }
 
 // ToolResult is the minimal deterministic-adapter result a stage needs.

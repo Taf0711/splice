@@ -543,11 +543,31 @@ func normalizeSandboxPolicyGoldenTempRoots(t *testing.T, gotBytes []byte, worksp
 	fileSystem, _ := profile["fileSystem"].(map[string]any)
 	fileSystem["readRoots"] = filterJSONStringRoots(fileSystem["readRoots"], tempRoots)
 	fileSystem["writeRoots"] = filterJSONWriteRoots(fileSystem["writeRoots"], tempRoots)
+	normalizeSandboxPolicyGoldenDenyRead(value)
 	normalized, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		t.Fatalf("encode normalized policy JSON: %v", err)
 	}
 	return append(normalized, '\n')
+}
+
+// normalizeSandboxPolicyGoldenDenyRead removes credential deny-list content
+// from the baseline golden. The policy entries are portable tilde paths, but
+// the permission profile expands them and drops missing directories. Dedicated
+// sandbox tests cover the deny-list content and semantics.
+func normalizeSandboxPolicyGoldenDenyRead(value any) {
+	root, _ := value.(map[string]any)
+	deletePolicyDenyRead := func(policy any) {
+		if policyMap, ok := policy.(map[string]any); ok {
+			delete(policyMap, "denyRead")
+		}
+	}
+	deletePolicyDenyRead(root["policy"])
+	plan, _ := root["plan"].(map[string]any)
+	deletePolicyDenyRead(plan["policy"])
+	profile, _ := plan["permissionProfile"].(map[string]any)
+	fileSystem, _ := profile["fileSystem"].(map[string]any)
+	delete(fileSystem, "denyRead")
 }
 
 func filterJSONStringRoots(value any, excluded map[string]struct{}) any {
@@ -957,6 +977,15 @@ func TestApplyConfiguredSandboxPolicyDiagnosticsFlags(t *testing.T) {
 	})
 	if !got.BlockUnixSockets || !got.MonitorDenials {
 		t.Fatalf("diagnostic config not applied to policy: %#v", got)
+	}
+}
+
+func TestApplyConfiguredSandboxPolicyAllowRead(t *testing.T) {
+	got := applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), config.SandboxConfig{
+		AllowRead: []string{"~/.ssh/id_ed25519"},
+	})
+	if len(got.AllowRead) != 1 || got.AllowRead[0] != "~/.ssh/id_ed25519" {
+		t.Fatalf("AllowRead policy = %#v, want configured path", got.AllowRead)
 	}
 }
 

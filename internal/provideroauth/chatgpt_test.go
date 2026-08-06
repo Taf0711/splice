@@ -454,7 +454,7 @@ func TestChatGPTLoginMissingAuthorizationEndpointErrors(t *testing.T) {
 // the Token round-trips IDToken + Account through Save/Load.
 func TestChatGPTTokenRoundTripsIDToken(t *testing.T) {
 	path := t.TempDir() + "/tok.json"
-	store, err := oauth.NewStore(oauth.StoreOptions{FilePath: path})
+	store, err := oauth.NewStore(oauth.StoreOptions{Storage: "file", FilePath: path})
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}

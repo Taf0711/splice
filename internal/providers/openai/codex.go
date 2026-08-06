@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Taf0711/splice/internal/zeroruntime"
@@ -24,9 +25,8 @@ const (
 )
 
 // CodexAccountResolver returns the `chatgpt_account_id` claim for the bearer
-// that is about to be sent on a request. It is invoked once per request
-// (including the 401-refresh retry) so the value can be re-derived from the
-// live OAuth token rather than cached at construction time.
+// that is about to be sent on a request. The Codex provider invokes it until
+// it gets a non-empty account id, then memoizes that successful result.
 //
 // ok=false means "no account id known" — the Codex provider simply omits the
 // header in that case (the request will 401, but that's recoverable: the user
@@ -49,16 +49,13 @@ type CodexOptions struct {
 	// / "splice" branded value is recommended.
 	UserAgent string
 	// AccountID is a static `chatgpt-account-id` that bypasses the resolver.
-	// Leave empty in production wiring so the AccountResolver is consulted on
-	// every request — that path reads the live OAuth token from the store and
-	// survives a refresh that rotates the bearer (and its account claim).
+	// Leave empty in production wiring so the AccountResolver can resolve the
+	// account lazily on the first request.
 	// The field exists for tests that want a pinned value without standing up
 	// a resolver.
 	AccountID string
-	// AccountResolver, when set, returns the account id dynamically per
-	// request (including the 401-refresh retry). The factory wires this so a
-	// refresh that updates the stored token's Account field takes effect on
-	// the next outgoing request without restarting the agent.
+	// AccountResolver, when set, returns the account id lazily. The provider
+	// memoizes a successful non-empty result for its lifetime.
 	//
 	// ok=false means "no account id known" — the Codex provider simply omits
 	// the header in that case (the request will 401, but that's recoverable:
@@ -86,6 +83,9 @@ type CodexProvider struct {
 	userAgent      string
 	accountID      string
 	accountResolve CodexAccountResolver
+	accountMu      sync.Mutex
+	accountMemo    string
+	accountMemoSet bool
 }
 
 // NewCodexProvider builds a CodexProvider. It is a thin wrapper over the
@@ -181,16 +181,25 @@ func (p *CodexProvider) injectCodexHeaders(req *http.Request) {
 }
 
 // resolveAccount returns the account id to inject, preferring the static
-// AccountID (set at construction from the OAuth token) and falling back to the
-// per-request AccountResolver. ok=false means "omit the header".
+// AccountID and falling back to a success-only memoized resolver. Failed or
+// empty resolutions are not memoized, so a later login can recover in place.
 func (p *CodexProvider) resolveAccount(ctx context.Context) (string, bool, error) {
 	if p.accountID != "" {
 		return p.accountID, true, nil
 	}
 	if p.accountResolve != nil {
+		p.accountMu.Lock()
+		defer p.accountMu.Unlock()
+		if p.accountMemoSet {
+			return p.accountMemo, true, nil
+		}
 		account, ok, err := p.accountResolve(ctx)
 		if err != nil {
 			return "", false, err
+		}
+		if ok && account != "" {
+			p.accountMemo = account
+			p.accountMemoSet = true
 		}
 		return account, ok, nil
 	}

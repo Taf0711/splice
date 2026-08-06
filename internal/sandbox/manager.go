@@ -174,11 +174,13 @@ func selectPlatformBackend(goos string, lookup func(string) (string, error)) Bac
 	}
 	switch goos {
 	case "linux":
-		if helper, err := lookup(LinuxSandboxHelperName); err == nil && helper != "" {
+		if helper := resolveLinuxSandboxHelper(lookup); helper.Name != "" {
 			if _, bwrapErr := lookup("bwrap"); bwrapErr != nil {
 				return unavailableBackend(goos, "bubblewrap is not installed")
 			}
-			return nativeBackend(goos, BackendLinuxBwrap, helper, "Linux sandbox helper available")
+			backend := nativeBackend(goos, BackendLinuxBwrap, helper.Name, "Linux sandbox helper available")
+			backend.ExecutableArgsPrefix = helper.ArgsPrefix
+			return backend
 		}
 		if info := detectWSL(); info.IsWSL {
 			return wslBackend(goos, info)

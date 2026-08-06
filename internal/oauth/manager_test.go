@@ -37,7 +37,7 @@ func newFakeProvider(t *testing.T, tokenJSON string) *fakeProvider {
 
 func managerFor(t *testing.T, env map[string]string, openBrowser func(string) error) *Manager {
 	t.Helper()
-	store, err := NewStore(StoreOptions{FilePath: filepath.Join(t.TempDir(), "tok.json")})
+	store, err := NewStore(StoreOptions{Storage: "file", FilePath: filepath.Join(t.TempDir(), "tok.json")})
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
@@ -56,7 +56,7 @@ func managerFor(t *testing.T, env map[string]string, openBrowser func(string) er
 // preset provider resolves; without it (and no Env) the env stays nil so callers
 // and tests remain hermetic.
 func TestNewManagerAllowPresetsForcesOptIn(t *testing.T) {
-	store, err := NewStore(StoreOptions{FilePath: filepath.Join(t.TempDir(), "tok.json")})
+	store, err := NewStore(StoreOptions{Storage: "file", FilePath: filepath.Join(t.TempDir(), "tok.json")})
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}

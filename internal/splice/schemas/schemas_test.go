@@ -231,6 +231,23 @@ func TestDesignPlanTaskGraphIntegrity(t *testing.T) {
 	}
 }
 
+func TestDesignPlanTerseRequestValidates(t *testing.T) {
+	// A short request establishes no boundaries and needs no design note. The
+	// crystallizer is told not to invent scope, so a plan that honestly leaves
+	// out_of_scope and system_design empty must validate. Requiring them made
+	// the model choose between its instructions and a passing schema.
+	plan := DesignPlan{
+		Epic:         "fix the failing test in ./pkg",
+		Requirements: []string{"the test in ./pkg passes"},
+		InScope:      []string{"./pkg"},
+		Tasks:        []Task{{ID: "t1", Title: "Fix test", Intent: "make the failing test pass"}},
+		Source:       "conversation",
+	}
+	if err := plan.Validate(); err != nil {
+		t.Fatalf("terse plan must validate, got %v", err)
+	}
+}
+
 func TestDesignPlanDuplicateTaskID(t *testing.T) {
 	plan := DesignPlan{
 		Epic:         "epic",
@@ -721,6 +738,7 @@ func TestJSONRoundTrip(t *testing.T) {
 			ExecutionPlan{Tier: TierLight, RequestIntent: "x", Stages: []ExecutionStage{{Name: "s", Budget: budget}}, TokenBudget: TokenBudget{TotalInputBudget: 1000, TotalOutputBudget: 1000, PerStage: map[string]StageBudget{"s": budget}, Reserve: 100, OverflowPolicy: "abort"}},
 			StageRecord{Name: "s", Status: StageCompleted},
 			HarnessStageInput{RunID: "r1", StageName: "s", Sequence: 1, PlanTier: TierLight, RequestIntent: "x"},
+			HarnessStageInput{RunID: "r1", StageName: "s", Sequence: 1, PlanTier: TierLight, RequestIntent: "x", PipelineStages: []string{"s", "t"}, NextStage: "t"},
 			HarnessStageOutput{Summary: "s", Confidence: 0.9, Data: map[string]interface{}{"k": "v", "n": 2.0}},
 			PipelineResult{RunID: "r1", Status: "completed", Tier: TierLight, Stages: []StageRecord{{Name: "s", Status: StageCompleted}}, FinalOutput: map[string]interface{}{"k": "v", "n": 3.0}, CostCoverage: CostCoverageNotApplicable},
 		}
@@ -747,6 +765,106 @@ func TestJSONRoundTrip(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestPlanCritiqueSeverityControlsBlocking(t *testing.T) {
+	tests := []struct {
+		name      string
+		severity  Severity
+		mustFix   bool
+		wantValid bool
+	}{
+		// The critic blocked a plan repeatedly, each time on a new non-blocking
+		// issue, so the plan could never be approved.
+		{name: "medium does not block", severity: SeverityMedium, mustFix: false, wantValid: true},
+		{name: "medium cannot claim must-fix", severity: SeverityMedium, mustFix: true, wantValid: false},
+		{name: "high blocks", severity: SeverityHigh, mustFix: true, wantValid: true},
+		{name: "critical blocks", severity: SeverityCritical, mustFix: true, wantValid: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			critique := PlanCritique{
+				Critiques:              []Critique{{Category: "correctness", Severity: tt.severity, Issue: "issue"}},
+				MustFixBeforeExecution: tt.mustFix,
+				OverallAssessment:      "assessment",
+			}
+			if got := critique.Validate() == nil; got != tt.wantValid {
+				t.Fatalf("Validate success = %t, want %t", got, tt.wantValid)
+			}
+			if critique.MustFixBeforeExecution != tt.mustFix {
+				t.Fatalf("must_fix_before_execution = %t, want %t", critique.MustFixBeforeExecution, tt.mustFix)
+			}
+		})
+	}
+}
+
+func TestPlanCritiquePlanCompletenessGapsDoNotBlock(t *testing.T) {
+	// Regression: the critic blocked a plan by rating "the plan does not mention a mutex" as high, when the workspace already had one.
+	critique := PlanCritique{
+		Critiques: []Critique{
+			{Category: "correctness", Severity: SeverityMedium, Issue: "the plan does not mention a mutex; the fact is unverified"},
+			{Category: "operability", Severity: SeverityMedium, Issue: "the plan does not specify persistence error behavior"},
+		},
+		MustFixBeforeExecution: false,
+		OverallAssessment:      "The plan has details to resolve during implementation.",
+	}
+	if err := critique.Validate(); err != nil {
+		t.Fatalf("plan-completeness gaps at medium severity must not block: %v", err)
+	}
+}
+
+func TestPlanCritiqueGenuineHighDefectBlocks(t *testing.T) {
+	critique := PlanCritique{
+		Critiques:              []Critique{{Category: "security", Severity: SeverityHigh, Issue: "The plan stores credentials in plaintext, creating a security hole when executed."}},
+		MustFixBeforeExecution: true,
+		OverallAssessment:      "The plan must not start until credential storage is fixed.",
+	}
+	if err := critique.Validate(); err != nil {
+		t.Fatalf("genuine high-severity defect must block: %v", err)
+	}
+}
+
+func TestPlanCritiqueEmptySetDoesNotBlock(t *testing.T) {
+	critique := PlanCritique{OverallAssessment: "no issues"}
+	if err := critique.Validate(); err != nil {
+		t.Fatalf("empty critique set: %v", err)
+	}
+	if critique.MustFixBeforeExecution {
+		t.Fatal("empty critique set must not block execution")
+	}
+}
+
+func TestPlanCritiqueRejectsMustFixWithoutQualifyingSeverity(t *testing.T) {
+	critique := PlanCritique{
+		Critiques:              []Critique{{Category: "correctness", Severity: SeverityMedium, Issue: "issue"}},
+		MustFixBeforeExecution: true,
+		OverallAssessment:      "assessment",
+	}
+	if err := critique.Validate(); err == nil || !strings.Contains(err.Error(), "must_fix_before_execution") {
+		t.Fatalf("expected inconsistent blocking flag error, got %v", err)
+	}
+}
+
+func TestPlanCriticInputAllowsLegacyPreviousCritique(t *testing.T) {
+	// A session persisted before the severity rule must still load, because the
+	// rule describes new output and not history.
+	input := PlanCriticInput{
+		Plan: DesignPlan{
+			Epic:         "current plan",
+			Requirements: []string{"the system must work"},
+			InScope:      []string{"core flow"},
+			Tasks:        []Task{{ID: "t1", Title: "build it", Intent: "implement the core flow"}},
+			Source:       "authored",
+		},
+		PreviousCritique: &PlanCritique{
+			Critiques:              []Critique{{Category: "correctness", Severity: SeverityMedium, Issue: "legacy issue"}},
+			MustFixBeforeExecution: true,
+			OverallAssessment:      "legacy assessment",
+		},
+	}
+	if err := input.Validate(); err != nil {
+		t.Fatalf("legacy previous critique should validate: %v", err)
+	}
 }
 
 func roundTripAndValidate(t *testing.T, v interface{ Validate() error }) error {

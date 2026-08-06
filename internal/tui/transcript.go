@@ -482,7 +482,7 @@ func permissionDisplayReason(reason string) string {
 }
 
 func truncateTUIOutput(output string, limit int) string {
-	output = strings.TrimSpace(strings.ReplaceAll(output, "\r\n", "\n"))
+	output = strings.TrimSpace(sanitizeTerminalOutput(output, true))
 	output = strings.ReplaceAll(output, "\n", " ")
 	if limit <= 0 || len(output) <= limit {
 		return output

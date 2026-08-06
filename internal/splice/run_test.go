@@ -138,6 +138,12 @@ func (s *capturingStage) Run(ctx context.Context, input schemas.HarnessStageInpu
 	}, nil
 }
 
+type stageFunc func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error)
+
+func (f stageFunc) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options stages.StageOptions) (schemas.HarnessStageOutput, error) {
+	return f(ctx, input, provider, options)
+}
+
 type outputStage struct {
 	output schemas.HarnessStageOutput
 }
@@ -170,7 +176,7 @@ func (s *contextRequestStage) Run(ctx context.Context, input schemas.HarnessStag
 		symbol := "foo"
 		usage := schemas.StageUsage{InputTokens: 4, OutputTokens: 3, CachedInputTokens: 1, CacheWriteTokens: 1, ReasoningTokens: 1}
 		if options.Stream.OnUsageResult != nil {
-			options.Stream.OnUsageResult(zeroruntime.Usage{InputTokens: 4, OutputTokens: 3, CachedInputTokens: 1, CacheWriteTokens: 1, ReasoningTokens: 1}, true)
+			options.Stream.OnUsageResult(zeroruntime.Usage{InputTokens: 4, OutputTokens: 3, CachedInputTokens: 1, CacheWriteTokens: 1, ReasoningTokens: 1}, true, nil)
 		}
 		return schemas.HarnessStageOutput{
 			Summary:    "needs context",
@@ -189,7 +195,7 @@ func (s *contextRequestStage) Run(ctx context.Context, input schemas.HarnessStag
 	}
 	usage := schemas.StageUsage{InputTokens: 6, OutputTokens: 5, CachedInputTokens: 2, CacheWriteTokens: 1, ReasoningTokens: 2}
 	if options.Stream.OnUsageResult != nil {
-		options.Stream.OnUsageResult(zeroruntime.Usage{InputTokens: 6, OutputTokens: 5, CachedInputTokens: 2, CacheWriteTokens: 1, ReasoningTokens: 2}, true)
+		options.Stream.OnUsageResult(zeroruntime.Usage{InputTokens: 6, OutputTokens: 5, CachedInputTokens: 2, CacheWriteTokens: 1, ReasoningTokens: 2}, true, nil)
 	}
 	return schemas.HarnessStageOutput{
 		Summary:    "context handled",
@@ -320,6 +326,116 @@ func TestRunPassInjectsMemoryBundleAndSkipsRetrievalErrors(t *testing.T) {
 	}
 	if len(nilInputs) != 1 || nilInputs[0].MemoryBundle != nil {
 		t.Fatalf("expected nil retriever to leave memory unset, got %#v", nilInputs)
+	}
+}
+
+func TestRunPassPopulatesPipelineRoster(t *testing.T) {
+	workDir := t.TempDir()
+	stageNames := []string{"code_writer", "test_generator", "static_analyzer", "test_runner"}
+	registry := stageRegistry{}
+	var inputs []schemas.HarnessStageInput
+	for _, name := range stageNames {
+		registry[name] = &capturingStage{inputs: &inputs}
+	}
+	plan := schemas.ExecutionPlan{Tier: schemas.TierStandard, RequestIntent: "standard tier roster"}
+	for _, name := range stageNames {
+		plan.Stages = append(plan.Stages, schemas.ExecutionStage{Name: name})
+	}
+
+	_, _, completed, err := runPass(context.Background(), "run-roster-standard", 1, plan, registry, runFakeProvider{}, agent.Options{}, workDir, nil, nil, nil)
+	if err != nil || !completed {
+		t.Fatalf("runPass: completed=%v err=%v", completed, err)
+	}
+	if len(inputs) != len(stageNames) {
+		t.Fatalf("captured %d inputs, want %d", len(inputs), len(stageNames))
+	}
+	for i, in := range inputs {
+		if strings.Join(in.PipelineStages, ",") != strings.Join(stageNames, ",") {
+			t.Fatalf("stage %q pipeline_stages = %v, want %v", in.StageName, in.PipelineStages, stageNames)
+		}
+		wantNext := ""
+		if i+1 < len(stageNames) {
+			wantNext = stageNames[i+1]
+		}
+		if in.NextStage != wantNext {
+			t.Fatalf("stage %q next_stage = %q, want %q", in.StageName, in.NextStage, wantNext)
+		}
+	}
+	if inputs[0].StageName != "code_writer" || inputs[0].NextStage != "test_generator" {
+		t.Fatalf("code_writer input = %+v, want next_stage test_generator", inputs[0])
+	}
+	last := inputs[len(inputs)-1]
+	if last.StageName != "test_runner" || last.NextStage != "" {
+		t.Fatalf("last stage input = %+v, want empty next_stage", last)
+	}
+}
+
+func TestRunPassCarriesWriterChangedPathsToTestGenerator(t *testing.T) {
+	workDir := t.TempDir()
+	var testInput schemas.HarnessStageInput
+	codeOut := schemas.CodeWriterOutput{
+		Files: []schemas.FileChange{
+			{Path: "storage.go", Content: "package storage\n", ChangeType: "create"},
+		},
+		Language: "go", Intent: "write storage", Confidence: 1,
+	}
+	registry := stageRegistry{
+		"code_writer": outputStage{output: schemas.HarnessStageOutput{
+			Summary: "implemented storage", Confidence: 1,
+			Data: map[string]any{"code_writer_output": codeOut},
+		}},
+		"test_generator": stageFunc(func(_ context.Context, input schemas.HarnessStageInput, _ zeroruntime.Provider, _ stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			testInput = input
+			return schemas.HarnessStageOutput{Summary: "generated tests", Confidence: 1}, nil
+		}),
+	}
+	plan := schemas.ExecutionPlan{
+		Tier: schemas.TierStandard, RequestIntent: "write storage tests",
+		Stages: []schemas.ExecutionStage{{Name: "code_writer"}, {Name: "test_generator"}},
+	}
+	_, _, completed, err := runPass(context.Background(), "run-writer-paths", 1, plan, registry, runFakeProvider{}, agent.Options{}, workDir, nil, nil, nil)
+	if err != nil || !completed {
+		t.Fatalf("runPass: completed=%v err=%v", completed, err)
+	}
+	if got := testInput.PriorChangedFiles["code_writer"]; len(got) != 1 || got[0] != "storage.go" {
+		t.Fatalf("test generator prior changed files = %v, want [storage.go]", got)
+	}
+}
+
+func TestBuildRevisionContextCarriesPriorOutputFiles(t *testing.T) {
+	output := schemas.HarnessStageOutput{Data: map[string]any{
+		"test_generator_output": schemas.TestGeneratorOutput{
+			Files: []schemas.FileChange{{Path: "storage_test.go", ChangeType: "modify"}},
+		},
+	}}
+	got := buildRevisionContext("revise tests", nil, nil, []schemas.HarnessStageOutput{output}, "retry")
+	if !strings.Contains(got, "storage_test.go") || !strings.Contains(got, "overwrite: true") {
+		t.Fatalf("revision context did not surface prior file and overwrite guidance: %q", got)
+	}
+}
+
+func TestRunPassPopulatesPipelineRosterTrivialTier(t *testing.T) {
+	workDir := t.TempDir()
+	var inputs []schemas.HarnessStageInput
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierTrivial,
+		RequestIntent: "trivial tier roster",
+		Stages:        []schemas.ExecutionStage{{Name: "code_writer"}},
+	}
+	registry := stageRegistry{"code_writer": &capturingStage{inputs: &inputs}}
+
+	_, _, completed, err := runPass(context.Background(), "run-roster-trivial", 1, plan, registry, runFakeProvider{}, agent.Options{}, workDir, nil, nil, nil)
+	if err != nil || !completed {
+		t.Fatalf("runPass: completed=%v err=%v", completed, err)
+	}
+	if len(inputs) != 1 {
+		t.Fatalf("captured %d inputs, want 1", len(inputs))
+	}
+	if got := inputs[0].PipelineStages; len(got) != 1 || got[0] != "code_writer" {
+		t.Fatalf("pipeline_stages = %v, want [code_writer]", got)
+	}
+	if inputs[0].NextStage != "" {
+		t.Fatalf("next_stage = %q, want empty for the only stage", inputs[0].NextStage)
 	}
 }
 
@@ -1341,6 +1457,36 @@ func (meteredFailingStage) Run(context.Context, schemas.HarnessStageInput, zeror
 	return schemas.HarnessStageOutput{}, meteredStageFailure{usage: &schemas.StageUsage{InputTokens: 12, OutputTokens: 7, CachedInputTokens: 3}}
 }
 
+type terminalDetailStage struct{}
+
+func (terminalDetailStage) Run(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+	return schemas.HarnessStageOutput{}, errors.New(`provider request error: {"detail":"Unsupported parameter: max_output_tokens"}`)
+}
+
+func TestRunTerminalStageFailureIncludesOutputSummary(t *testing.T) {
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		RequestIntent: "test terminal stage failure detail",
+		Stages:        []schemas.ExecutionStage{{Name: "terminal_failure"}},
+	}
+	result, err := runIterationLoop(context.Background(), "run-terminal-failure", plan, stageRegistry{
+		"terminal_failure": terminalDetailStage{},
+	}, runFakeProvider{}, agent.Options{MaxTurns: 1}, t.TempDir(), nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	if result.Status != "failed" {
+		t.Fatalf("pipeline status = %q, want failed", result.Status)
+	}
+	if result.AbortReason == nil {
+		t.Fatalf("abort reason = %#v, want terminal stage detail", result.AbortReason)
+	}
+	reason := *result.AbortReason
+	if !strings.HasPrefix(reason, "stage failed in iteration 1: ") || !strings.Contains(reason, `provider request error: {"detail":"Unsupported parameter: max_output_tokens"}`) {
+		t.Fatalf("abort reason = %q, want terminal stage detail", reason)
+	}
+}
+
 func TestRunPassRecordsUsageFromFailedTypedOutput(t *testing.T) {
 	plan := schemas.ExecutionPlan{
 		Tier:          schemas.TierLight,
@@ -2176,6 +2322,101 @@ func TestRequestLedgerRejectsMalformedUsageBeforePricing(t *testing.T) {
 	})
 	if estimatorCalls != 0 || got.Cost.Status != agent.CostStatusError || len(ledger.records) != 1 || ledger.records[0].InputTokens != 0 || ledger.records[0].CostStatus != schemas.CostStatusError {
 		t.Fatalf("estimator calls=%d attributed=%+v records=%+v", estimatorCalls, got, ledger.records)
+	}
+}
+
+// TestRequestLedgerUsesReportedCostOverEstimate proves that a provider-reported
+// cost (AttributedUsage.ReportedCostUSD, e.g. from OpenRouter's usage.cost)
+// wins over the registry estimate: the estimator is never invoked, the final
+// Cost carries the exact reported value with Provenance=CostProvenanceReported,
+// and that provenance survives into the persisted pipeline usage record.
+func TestRequestLedgerUsesReportedCostOverEstimate(t *testing.T) {
+	ledger := newRequestLedger()
+	estimatorCalls := 0
+	var captured agent.AttributedUsage
+	reported := 0.00054
+	options := ledger.recordingOptions(agent.Options{
+		EstimateUsageCost: func(string, agent.Usage, bool) agent.UsageCostEstimate {
+			estimatorCalls++
+			// A deliberately different value: if this ever leaks into the
+			// result, the test fails on the wrong number rather than silently.
+			wrong := 99.0
+			return agent.UsageCostEstimate{
+				CostUSD: &wrong, Status: agent.CostStatusPriced,
+				Provenance:    agent.CostProvenanceRuntimeEstimate,
+				PricingSource: "registry", PricingAsOf: "2026-01-01",
+			}
+		},
+		OnAttributedUsage: func(usage agent.AttributedUsage) { captured = usage },
+	})
+	options.OnAttributedUsage(agent.AttributedUsage{
+		Usage:           zeroruntime.Usage{InputTokens: 100, OutputTokens: 50},
+		UsageReported:   true,
+		Stage:           "code_writer",
+		Iteration:       1,
+		ReportedCostUSD: &reported,
+	})
+
+	if estimatorCalls != 0 {
+		t.Fatalf("estimator calls = %d, want 0 (reported cost must bypass the registry estimate)", estimatorCalls)
+	}
+	if captured.Cost.CostUSD == nil || *captured.Cost.CostUSD != reported {
+		t.Fatalf("Cost.CostUSD = %v, want %v", captured.Cost.CostUSD, reported)
+	}
+	if captured.Cost.Status != agent.CostStatusPriced {
+		t.Fatalf("Cost.Status = %s, want priced", captured.Cost.Status)
+	}
+	if captured.Cost.Provenance != agent.CostProvenanceReported {
+		t.Fatalf("Cost.Provenance = %s, want %s", captured.Cost.Provenance, agent.CostProvenanceReported)
+	}
+	if len(ledger.records) != 1 {
+		t.Fatalf("records = %d, want 1", len(ledger.records))
+	}
+	rec := ledger.records[0]
+	if rec.CostUSD == nil || *rec.CostUSD != reported {
+		t.Fatalf("record CostUSD = %v, want %v", rec.CostUSD, reported)
+	}
+	if rec.CostProvenance != agent.CostProvenanceReported {
+		t.Fatalf("record CostProvenance = %s, want %s", rec.CostProvenance, agent.CostProvenanceReported)
+	}
+}
+
+// TestRequestLedgerFallsBackToEstimateWithoutReportedCost proves the inverse:
+// when ReportedCostUSD is nil (every non-OpenRouter provider, and OpenRouter
+// responses that omit "cost"), behavior is unchanged from before this
+// feature — the registry estimator runs and its value is used verbatim.
+func TestRequestLedgerFallsBackToEstimateWithoutReportedCost(t *testing.T) {
+	ledger := newRequestLedger()
+	estimatorCalls := 0
+	estimated := 0.42
+	var captured agent.AttributedUsage
+	options := ledger.recordingOptions(agent.Options{
+		EstimateUsageCost: func(string, agent.Usage, bool) agent.UsageCostEstimate {
+			estimatorCalls++
+			return agent.UsageCostEstimate{
+				CostUSD: &estimated, Status: agent.CostStatusPriced,
+				Provenance:    agent.CostProvenanceRuntimeEstimate,
+				PricingSource: "registry", PricingAsOf: "2026-01-01",
+			}
+		},
+		OnAttributedUsage: func(usage agent.AttributedUsage) { captured = usage },
+	})
+	options.OnAttributedUsage(agent.AttributedUsage{
+		Usage:         zeroruntime.Usage{InputTokens: 100, OutputTokens: 50},
+		UsageReported: true,
+		Stage:         "code_writer",
+		Iteration:     1,
+		// ReportedCostUSD deliberately left nil.
+	})
+
+	if estimatorCalls != 1 {
+		t.Fatalf("estimator calls = %d, want 1", estimatorCalls)
+	}
+	if captured.Cost.CostUSD == nil || *captured.Cost.CostUSD != estimated {
+		t.Fatalf("Cost.CostUSD = %v, want %v", captured.Cost.CostUSD, estimated)
+	}
+	if captured.Cost.Provenance != agent.CostProvenanceRuntimeEstimate {
+		t.Fatalf("Cost.Provenance = %s, want %s", captured.Cost.Provenance, agent.CostProvenanceRuntimeEstimate)
 	}
 }
 

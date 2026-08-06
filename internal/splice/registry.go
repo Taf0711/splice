@@ -20,9 +20,10 @@ type stageRegistry map[string]stages.Stage
 // buildStageRegistry creates a registry of Splice pipeline stages from agent options.
 func buildStageRegistry(options agent.Options, workDir string) (stageRegistry, error) {
 	r := stageRegistry{
-		"code_writer":    stages.CodeWriter{},
-		"test_generator": stages.TestGenerator{},
-		"test_runner":    stages.TestRunner{},
+		"code_writer":         stages.CodeWriter{},
+		"test_generator":      stages.TestGenerator{},
+		"test_runner":         stages.TestRunner{},
+		"acceptance_verifier": stages.AcceptanceVerifier{},
 	}
 	analyzer, err := stages.NewStaticAnalyzer(stages.DefaultQualityChecks()...)
 	if err != nil {
@@ -52,25 +53,36 @@ func buildStageRegistry(options agent.Options, workDir string) (stageRegistry, e
 // iteration and selection provide attribution context for usage callbacks.
 func stageOptions(name string, iteration int, selection agent.ModelSelection, options agent.Options, workDir string, runner ToolRunner) stages.StageOptions {
 	language := detectLanguage(workDir)
-	var onUsageResult func(zeroruntime.Usage, bool)
+	promptCacheKey := ""
+	if options.SessionID != "" {
+		promptCacheKey = options.SessionID + ":" + name
+	}
+	var onUsageResult func(zeroruntime.Usage, bool, *float64)
 	var onUsageError func(string)
 	var onLegacyUsage func(zeroruntime.Usage)
 	if options.OnAttributedUsage != nil {
-		emitAttributed := func(usage zeroruntime.Usage, reported bool, usageError string) {
+		emitAttributed := func(usage zeroruntime.Usage, reported bool, usageError string, reportedCostUSD *float64) {
 			options.OnAttributedUsage(agent.AttributedUsage{
-				Usage:         usage,
-				UsageReported: reported,
-				UsageError:    usageError,
-				ProviderName:  selection.ProviderName,
-				Model:         selection.Model,
-				Stage:         name,
-				Iteration:     iteration,
+				Usage:           usage,
+				UsageReported:   reported,
+				UsageError:      usageError,
+				ProviderName:    selection.ProviderName,
+				Model:           selection.Model,
+				Stage:           name,
+				Iteration:       iteration,
+				ReportedCostUSD: reportedCostUSD,
 			})
 		}
-		onUsageResult = func(usage zeroruntime.Usage, reported bool) { emitAttributed(usage, reported, "") }
-		onUsageError = func(reason string) { emitAttributed(zeroruntime.Usage{}, true, reason) }
+		onUsageResult = func(usage zeroruntime.Usage, reported bool, reportedCostUSD *float64) {
+			emitAttributed(usage, reported, "", reportedCostUSD)
+		}
+		onUsageError = func(reason string) { emitAttributed(zeroruntime.Usage{}, true, reason, nil) }
 	} else {
 		onLegacyUsage = options.OnUsage
+	}
+	timeoutSeconds := 120
+	if name == "acceptance_verifier" {
+		timeoutSeconds = 30
 	}
 	return stages.StageOptions{
 		WorkDir:        workDir,
@@ -90,7 +102,8 @@ func stageOptions(name string, iteration int, selection agent.ModelSelection, op
 		Images:         append([]zeroruntime.ImageBlock(nil), options.Images...),
 		RecordCommand:  makeRecordedCommandCallback(options),
 		ModelOverride:  options.Model,
-		TimeoutSeconds: 120,
+		PromptCacheKey: promptCacheKey,
+		TimeoutSeconds: timeoutSeconds,
 	}
 }
 

@@ -45,9 +45,11 @@ func (CodeWriter) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 		Intent:          input.RequestIntent,
 		Language:        options.language("python"),
 		TargetPaths:     options.TargetPaths,
-		RelevantContext: selectRelevantContext(options.RelevantContext, input.PriorSummaries, input.Context),
+		RelevantContext: selectRelevantContext(options.RelevantContext, input.PriorSummaries, input.Context, input.PipelineStages),
 		RevisionContext: input.RevisionContext,
 		Memory:          selectMemory(input.MemoryBundle),
+		PipelineStages:  input.PipelineStages,
+		NextStage:       input.NextStage,
 	}
 	if err := cwInput.Validate(); err != nil {
 		return schemas.HarnessStageOutput{}, fmt.Errorf("code writer input: %w", err)
@@ -61,7 +63,7 @@ func (CodeWriter) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 	collected, err := callValidatedToolUse(ctx, provider, options.model("medium"), options.ReasoningEffort, composeSystemPrompt(codeWriterSystemPrompt), string(payload), options.Images, submitCodeToolDefinition(), &options.Stream, func(collected *zeroruntime.CollectedStream) error {
 		_, err := parseCodeWriterOutput(collected)
 		return err
-	})
+	}, options.PromptCacheKey)
 	if err != nil {
 		return schemas.HarnessStageOutput{}, withCollectedUsage(err, collected)
 	}

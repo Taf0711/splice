@@ -233,10 +233,6 @@ func ToolContent(block ContentBlock) ToolCallContent {
 	return ToolCallContent{Type: "content", Content: &block}
 }
 
-func ToolDiff(path, oldText, newText string) ToolCallContent {
-	return ToolCallContent{Type: "diff", Path: path, OldText: oldText, NewText: newText}
-}
-
 type ToolCallLocation struct {
 	Path string `json:"path"`
 	Line *int   `json:"line,omitempty"`

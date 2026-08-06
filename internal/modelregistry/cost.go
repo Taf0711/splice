@@ -11,6 +11,22 @@ import (
 
 const tokensPerMillion = 1_000_000
 
+// OpenRouter web search rates, in USD per request, verified against the
+// published engine pricing table. Engines with provider-specific or BYOK
+// billing are intentionally absent and remain unpriced. Source:
+// https://openrouter.ai/docs/guides/features/server-tools/web-search
+//
+// Each rate covers a request of up to ten results, after which the published
+// price adds $0.001 per further result. Splice asks for five by default, so the
+// flat rate holds. A caller that raises SPLICE_WEBSEARCH_MAX_RESULTS above ten
+// is charged more than this table reports. Pricing that accurately needs the
+// result count the provider returned, which the usage does not carry.
+var webSearchRates = map[string]float64{
+	"parallel":   0.001,
+	"exa":        0.005,
+	"perplexity": 0.005,
+}
+
 type CostBreakdown struct {
 	ModelID           string
 	Provider          ProviderKind
@@ -103,7 +119,13 @@ func CalculateCost(model ModelEntry, usage zeroruntime.Usage) (CostBreakdown, er
 	cachedInputCost := costForTokens(cachedInputTokens, cachedRate)
 	cacheWriteCost := costForTokens(cacheWriteTokens, cacheWriteRate)
 	outputCost := costForTokens(outputTokens, outputRate)
-	webSearchCost := float64(webSearchRequests) * model.Cost.WebSearchPerRequest
+	webSearchRate := 0.0
+	webSearchPriced := webSearchRequests == 0
+	var webSearchRateErr error
+	if webSearchRequests > 0 {
+		webSearchRate, webSearchPriced, webSearchRateErr = WebSearchPricingRate(model, usage.WebSearchEngine)
+	}
+	webSearchCost := float64(webSearchRequests) * webSearchRate
 
 	breakdown := CostBreakdown{
 		ModelID:           model.ID,
@@ -127,14 +149,34 @@ func CalculateCost(model ModelEntry, usage zeroruntime.Usage) (CostBreakdown, er
 		breakdown.PricingTier = &tierCopy
 	}
 	if webSearchRequests > 0 {
-		if !validRate(model.Cost.WebSearchPerRequest) {
-			return breakdown, fmt.Errorf("invalid model web search pricing rate")
+		if webSearchRateErr != nil {
+			return breakdown, webSearchRateErr
 		}
-		if model.Cost.WebSearchPerRequest == 0 {
-			return breakdown, fmt.Errorf("web search pricing is unavailable for %d provider-executed requests", webSearchRequests)
+		if !webSearchPriced {
+			return breakdown, fmt.Errorf("web search pricing is unavailable for engine %q and %d provider-executed requests", strings.TrimSpace(usage.WebSearchEngine), webSearchRequests)
 		}
 	}
 	return breakdown, nil
+}
+
+// WebSearchPricingRate resolves the USD rate for provider-executed searches.
+// A known engine rate takes precedence over the model field. Native search is
+// provider-billed, so it may use the model rate when that rate is valid. An
+// unknown or unset engine is never priced from the model field.
+func WebSearchPricingRate(model ModelEntry, engine string) (float64, bool, error) {
+	engine = strings.ToLower(strings.TrimSpace(engine))
+	if rate, ok := webSearchRates[engine]; ok {
+		return rate, true, nil
+	}
+	if engine == "native" {
+		if !validRate(model.Cost.WebSearchPerRequest) {
+			return 0, false, fmt.Errorf("invalid model web search pricing rate")
+		}
+		if model.Cost.WebSearchPerRequest > 0 {
+			return model.Cost.WebSearchPerRequest, true, nil
+		}
+	}
+	return 0, false, nil
 }
 
 func FormatCostUSD(cost float64) (string, error) {

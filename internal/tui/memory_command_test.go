@@ -1,6 +1,9 @@
 package tui
 
 import (
+	"context"
+	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -80,6 +83,93 @@ func TestHandleMemoryCommandParsesSubcommands(t *testing.T) {
 	nm, _ = m.handleMemoryCommand("invalid")
 	if !transcriptContains(nm.transcript, "Usage:") {
 		t.Fatalf("expected usage error in transcript, got %#v", nm.transcript)
+	}
+}
+
+type capturedMemoryClient struct {
+	searchQuery *schemas.MemoryQuery
+	recentQuery *schemas.MemoryQuery
+	recentErr   error
+}
+
+func (c *capturedMemoryClient) Search(_ context.Context, query schemas.MemoryQuery) (schemas.MemoryBundle, error) {
+	c.searchQuery = &query
+	return schemas.MemoryBundle{RequestingAgent: query.RequestingAgent}, nil
+}
+
+func (c *capturedMemoryClient) Recent(_ context.Context, query schemas.MemoryQuery) (schemas.MemoryBundle, error) {
+	c.recentQuery = &query
+	return schemas.MemoryBundle{RequestingAgent: query.RequestingAgent}, c.recentErr
+}
+
+func (c *capturedMemoryClient) Stats(context.Context) (memd.MemoryStats, error) {
+	return memd.MemoryStats{}, nil
+}
+
+// Regression for /memory search returning zero results when the TUI omitted
+// scopes and the project path from its MemoryQuery.
+func TestHandleMemorySearchSendsScopesAndProjectPath(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	client := &capturedMemoryClient{}
+	previous := tuiResolveMemoryCommand
+	tuiResolveMemoryCommand = func(context.Context) (memoryCommandClient, error) { return client, nil }
+	t.Cleanup(func() { tuiResolveMemoryCommand = previous })
+
+	m := model{ctx: context.Background(), cwd: workspace}
+	_, cmd := m.handleMemorySearch("needle")
+	msg, ok := cmd().(memoryResultMsg)
+	if !ok || msg.isError {
+		t.Fatalf("unexpected command result: %#v", msg)
+	}
+	if len(client.searchQuery.Scopes) == 0 {
+		t.Fatal("scopes is empty")
+	}
+	if client.searchQuery.ProjectPath == nil || *client.searchQuery.ProjectPath != workspace {
+		t.Fatalf("project path = %#v, want %q", client.searchQuery.ProjectPath, workspace)
+	}
+}
+
+func TestHandleMemoryRecentSendsListingQuery(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	client := &capturedMemoryClient{}
+	previous := tuiResolveMemoryCommand
+	tuiResolveMemoryCommand = func(context.Context) (memoryCommandClient, error) { return client, nil }
+	t.Cleanup(func() { tuiResolveMemoryCommand = previous })
+
+	m := model{ctx: context.Background(), cwd: workspace}
+	_, cmd := m.handleMemoryRecent()
+	msg, ok := cmd().(memoryResultMsg)
+	if !ok || msg.isError {
+		t.Fatalf("unexpected command result: %#v", msg)
+	}
+	if client.recentQuery.Query == "*" {
+		t.Fatal("recent must not send the FTS match-all query \"*\"")
+	}
+	if len(client.recentQuery.Scopes) == 0 {
+		t.Fatal("scopes is empty")
+	}
+	if client.recentQuery.ProjectPath == nil || *client.recentQuery.ProjectPath != workspace {
+		t.Fatalf("project path = %#v, want %q", client.recentQuery.ProjectPath, workspace)
+	}
+}
+
+func TestHandleMemoryRecentDegradesForOldDaemon(t *testing.T) {
+	client := &capturedMemoryClient{recentErr: fmt.Errorf("%w: update splice-memd", memd.ErrRecentUnsupported)}
+	previous := tuiResolveMemoryCommand
+	tuiResolveMemoryCommand = func(context.Context) (memoryCommandClient, error) { return client, nil }
+	t.Cleanup(func() { tuiResolveMemoryCommand = previous })
+
+	m := model{ctx: context.Background(), cwd: t.TempDir()}
+	_, cmd := m.handleMemoryRecent()
+	msg, ok := cmd().(memoryResultMsg)
+	if !ok {
+		t.Fatalf("unexpected command message type: %#v", cmd())
+	}
+	if !msg.isError || !strings.Contains(msg.text, "out of date") {
+		t.Fatalf("expected out-of-date degradation, got %#v", msg)
+	}
+	if strings.Contains(msg.text, "unexpected status") || strings.Contains(msg.text, "404") {
+		t.Fatalf("degradation exposed raw HTTP error: %q", msg.text)
 	}
 }
 

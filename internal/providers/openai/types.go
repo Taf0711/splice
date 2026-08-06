@@ -144,6 +144,12 @@ type usage struct {
 	CompletionTokens        int                    `json:"completion_tokens"`
 	PromptTokensDetails     promptTokenDetails     `json:"prompt_tokens_details"`
 	CompletionTokensDetails completionTokenDetails `json:"completion_tokens_details"`
+	// Cost is OpenRouter's exact billed charge for this request in USD. Absent
+	// (nil) on every other OpenAI-compatible backend. Only trusted when the
+	// request went to openrouter.ai (see Provider.isOpenRouter) — the field
+	// name is an OpenRouter extension, not part of the OpenAI schema, so an
+	// unrelated proxy reusing it could mean something else entirely.
+	Cost *float64 `json:"cost,omitempty"`
 }
 
 type promptTokenDetails struct {

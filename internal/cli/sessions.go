@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/Taf0711/splice/internal/redaction"
 	"github.com/Taf0711/splice/internal/sessions"
@@ -12,6 +13,8 @@ import (
 
 type sessionCommandOptions struct {
 	json           bool
+	olderThan      int
+	olderThanSet   bool
 	kind           sessions.SessionKind
 	sequence       int
 	eventID        string
@@ -72,6 +75,16 @@ func runSessions(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 			return writeExecUsageError(stderr, "sessions compact-plan requires a session id")
 		}
 		return runSessionsCompactPlan(store, remaining[0], options, stdout, stderr)
+	case "prune-plan":
+		if len(remaining) != 0 {
+			return writeExecUsageError(stderr, "sessions prune-plan does not accept positional arguments")
+		}
+		return runSessionsPrunePlan(store, options, deps.now(), stdout, stderr)
+	case "prune":
+		if len(remaining) != 0 {
+			return writeExecUsageError(stderr, "sessions prune does not accept positional arguments")
+		}
+		return runSessionsPrune(store, options, deps.now(), stdout, stderr)
 	default:
 		return writeExecUsageError(stderr, fmt.Sprintf("unknown sessions command %q", command))
 	}
@@ -89,6 +102,16 @@ func parseSessionsArgs(args []string) (string, []string, sessionCommandOptions, 
 			return command, remaining, options, true, nil
 		case "--json":
 			options.json = true
+		case "--older-than":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return command, remaining, options, false, err
+			}
+			days, err := parsePositiveOrZeroInt(value, "--older-than")
+			if err != nil {
+				return command, remaining, options, false, err
+			}
+			options.olderThan, options.olderThanSet, index = days, true, next
 		case "--exclude-target":
 			options.excludeTarget = true
 		case "--kind":
@@ -110,6 +133,13 @@ func parseSessionsArgs(args []string) (string, []string, sessionCommandOptions, 
 					return command, remaining, options, false, err
 				}
 				options.kind = kind
+				continue
+			case strings.HasPrefix(arg, "--older-than="):
+				days, err := parsePositiveOrZeroInt(strings.TrimSpace(strings.TrimPrefix(arg, "--older-than=")), "--older-than")
+				if err != nil {
+					return command, remaining, options, false, err
+				}
+				options.olderThan, options.olderThanSet = days, true
 				continue
 			case arg == "--sequence":
 				value, next, err := nextFlagValue(args, index, arg)
@@ -216,16 +246,16 @@ func parseNonEmptySessionsFlag(flag string, value string) (string, error) {
 func parseSessionKindFlag(value string) (sessions.SessionKind, error) {
 	kind := sessions.SessionKind(strings.ToLower(strings.TrimSpace(value)))
 	switch kind {
-	case sessions.SessionKindFork, sessions.SessionKindChild, sessions.SessionKindSpecDraft, sessions.SessionKindSpecImpl:
+	case sessions.SessionKindFork, sessions.SessionKindChild, sessions.SessionKindSpecDraft, sessions.SessionKindSpecImpl, sessions.SessionKindEphemeral:
 		return kind, nil
 	default:
-		return "", execUsageError{fmt.Sprintf("invalid --kind %q. Expected fork, child, spec-draft, or spec-impl.", value)}
+		return "", execUsageError{fmt.Sprintf("invalid --kind %q. Expected fork, child, spec-draft, spec-impl, or ephemeral.", value)}
 	}
 }
 
 func isSessionsCommand(command string) bool {
 	switch command {
-	case "list", "children", "lineage", "tree", "rewind-plan", "rewind", "compact-plan":
+	case "list", "children", "lineage", "tree", "rewind-plan", "rewind", "compact-plan", "prune-plan", "prune":
 		return true
 	default:
 		return false
@@ -243,6 +273,12 @@ func validateSessionCommandFlags(command string, options sessionCommandOptions) 
 	hasCompactionFlag := options.preserveLast > 0 || options.maxPromptChars > 0
 	if hasCompactionFlag && command != "compact-plan" {
 		return execUsageError{"--preserve-last and --max-prompt-chars are only valid for sessions compact-plan"}
+	}
+	if options.olderThanSet && command != "prune-plan" && command != "prune" {
+		return execUsageError{"--older-than is only valid for sessions prune-plan and prune"}
+	}
+	if (command == "prune-plan" || command == "prune") && !options.olderThanSet {
+		return execUsageError{"sessions prune requires --older-than <days>"}
 	}
 	return nil
 }
@@ -265,9 +301,19 @@ func runSessionsList(store *sessions.Store, options sessionCommandOptions, stdou
 	return exitSuccess
 }
 
+// filterSessionsByKind applies an explicit --kind filter, or — when none is
+// given — hides ephemeral one-shot exec sessions (plain `splice exec` runs with
+// no session flags; see SessionKindEphemeral) so they don't flood the default
+// listing. Pass --kind ephemeral to see them.
 func filterSessionsByKind(items []sessions.Metadata, kind sessions.SessionKind) []sessions.Metadata {
 	if kind == "" {
-		return items
+		filtered := make([]sessions.Metadata, 0, len(items))
+		for _, item := range items {
+			if item.SessionKind != sessions.SessionKindEphemeral {
+				filtered = append(filtered, item)
+			}
+		}
+		return filtered
 	}
 	filtered := make([]sessions.Metadata, 0, len(items))
 	for _, item := range items {
@@ -418,6 +464,60 @@ func runSessionsCompactPlan(store *sessions.Store, sessionID string, options ses
 	return exitSuccess
 }
 
+func resolveActiveSessionID(store *sessions.Store) (string, error) {
+	active, err := store.LatestResumable()
+	if err != nil || active == nil {
+		return "", err
+	}
+	return active.SessionID, nil
+}
+
+func runSessionsPrunePlan(store *sessions.Store, options sessionCommandOptions, now time.Time, stdout io.Writer, stderr io.Writer) int {
+	activeID, err := resolveActiveSessionID(store)
+	if err != nil {
+		return writeSessionCommandError(stderr, err)
+	}
+	plan, err := store.PlanPrune(sessions.PruneOptions{OlderThanDays: options.olderThan, Now: now, ActiveSessionID: activeID})
+	if err != nil {
+		return writeSessionCommandError(stderr, err)
+	}
+	if options.json {
+		if err := writePrettyJSON(stdout, redaction.RedactValue(plan, redaction.Options{})); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if _, err := fmt.Fprintln(stdout, formatPrunePlan(plan)); err != nil {
+		return exitCrash
+	}
+	return exitSuccess
+}
+
+func runSessionsPrune(store *sessions.Store, options sessionCommandOptions, now time.Time, stdout io.Writer, stderr io.Writer) int {
+	activeID, err := resolveActiveSessionID(store)
+	if err != nil {
+		return writeSessionCommandError(stderr, err)
+	}
+	plan, err := store.PlanPrune(sessions.PruneOptions{OlderThanDays: options.olderThan, Now: now, ActiveSessionID: activeID})
+	if err != nil {
+		return writeSessionCommandError(stderr, err)
+	}
+	result, err := store.Prune(plan)
+	if err != nil {
+		return writeSessionCommandError(stderr, err)
+	}
+	if options.json {
+		if err := writePrettyJSON(stdout, redaction.RedactValue(result, redaction.Options{})); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if _, err := fmt.Fprintln(stdout, formatPruneResult(result)); err != nil {
+		return exitCrash
+	}
+	return exitSuccess
+}
+
 func writeSessionCommandError(stderr io.Writer, err error) int {
 	message := strings.TrimPrefix(err.Error(), "splice session")
 	if message != err.Error() {
@@ -449,6 +549,42 @@ func formatCompactionPlan(plan sessions.CompactionPlan) string {
 	}
 	if plan.Truncated {
 		lines = append(lines, "truncated: true")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatPrunePlan(plan sessions.PrunePlan) string {
+	lines := []string{
+		"Splice session prune plan",
+		fmt.Sprintf("would remove: %d session(s)", len(plan.Selected)),
+		fmt.Sprintf("total size: %d bytes", plan.TotalSize),
+	}
+	if plan.Oldest != "" {
+		lines = append(lines, "oldest: "+plan.Oldest, "newest: "+plan.Newest)
+	}
+	for _, item := range plan.Selected {
+		lines = append(lines, "  remove: "+redact(item.SessionID)+" ("+item.UpdatedAt+")")
+	}
+	for _, item := range plan.Kept {
+		lines = append(lines, "  keep: "+redact(item.SessionID)+" ("+item.Reason+")")
+	}
+	for _, item := range plan.Skipped {
+		lines = append(lines, "  skip: "+redact(item.SessionID)+" ("+item.Reason+")")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatPruneResult(result sessions.PruneResult) string {
+	lines := []string{
+		"Splice sessions pruned",
+		fmt.Sprintf("removed: %d session(s)", len(result.Removed)),
+		fmt.Sprintf("total size: %d bytes", result.TotalSize),
+	}
+	for _, item := range result.Removed {
+		lines = append(lines, "  removed: "+redact(item.SessionID))
+	}
+	for _, item := range result.Skipped {
+		lines = append(lines, "  skip: "+redact(item.SessionID)+" ("+item.Reason+")")
 	}
 	return strings.Join(lines, "\n")
 }
@@ -532,15 +668,19 @@ Commands:
   rewind-plan <id>      Preview events kept and dropped by a rewind
   rewind <id>           Restore workspace files and truncate the log to a checkpoint
   compact-plan <id>     Preview events compacted and preserved by compaction
+  prune-plan            Preview old sessions selected for removal
+  prune                  Remove old sessions selected by --older-than
 
 Flags:
       --json            Print JSON output
-      --kind <kind>     Filter list by fork, child, spec-draft, or spec-impl
+      --kind <kind>     Filter list by fork, child, spec-draft, spec-impl, or
+                        ephemeral (ephemeral sessions are hidden by default)
       --sequence <n>    Rewind target sequence (rewind-plan, rewind)
       --event <id>      Rewind target event id (rewind-plan, rewind)
       --exclude-target  Drop the target event (rewind-plan, rewind)
       --preserve-last <n> Keep recent events in compact-plan
       --max-prompt-chars <n> Limit compact-plan summary prompt
+      --older-than <days> Select sessions older than this many days (prune-plan, prune)
   -h, --help            Show this help
 `)
 	return err

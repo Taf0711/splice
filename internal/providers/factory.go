@@ -259,10 +259,9 @@ func isCodexCatalog(profile config.ProviderProfile, _ resolvedProfile) bool {
 
 // newCodexProvider builds a Codex-flavored openai provider for the chatgpt
 // catalog. The Codex headers (`originator`, `chatgpt-account-id`) are
-// injected by the CodexProvider wrapper. The `chatgpt-account-id` is read from
-// the stored OAuth token's Account field on every request so a refresh that
-// rotates the token (and its account claim) takes effect immediately — a static
-// AccountID captured at construction would go stale on the first refresh.
+// injected by the CodexProvider wrapper. The account resolver reads the stored
+// OAuth token lazily, and the provider memoizes its first successful result.
+// A refresh rotates the bearer while preserving the account identity.
 //
 // The *login* the header reads from is options.OAuthLoginKey — the SAME key the
 // bearer resolver bound, resolved ONCE by the caller. The bearer resolver
@@ -305,10 +304,10 @@ func newCodexProvider(profile config.ProviderProfile, resolved resolvedProfile, 
 }
 
 // codexAccountForKey reads the chatgpt_account_id from the token currently
-// stored under key. Called per-request (via the resolver) so a refresh that
-// rotates the token — saved back in place under the same key — takes effect
-// immediately without restarting the agent. Returns "" when key is empty (no
-// OAuth login), or the token is absent or carries no account claim.
+// stored under key. The Codex provider memoizes a successful result, because a
+// token refresh rotates the bearer while the account id identifies the same
+// logged-in account. Returns "" when key is empty (no OAuth login), or the
+// token is absent or carries no account claim.
 func codexAccountForKey(key string) string {
 	if key == "" {
 		return ""

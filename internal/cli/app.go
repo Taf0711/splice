@@ -21,6 +21,7 @@ import (
 	"github.com/Taf0711/splice/internal/localcontrol"
 	"github.com/Taf0711/splice/internal/mcp"
 	"github.com/Taf0711/splice/internal/modelregistry"
+	"github.com/Taf0711/splice/internal/oauth"
 	"github.com/Taf0711/splice/internal/observability"
 	"github.com/Taf0711/splice/internal/plugins"
 	"github.com/Taf0711/splice/internal/providerhealth"
@@ -41,6 +42,7 @@ import (
 	"github.com/Taf0711/splice/internal/worktrees"
 	"github.com/Taf0711/splice/internal/zerogit"
 	"github.com/Taf0711/splice/internal/zeroruntime"
+	"github.com/charmbracelet/x/term"
 )
 
 var version = "dev"
@@ -54,9 +56,13 @@ var (
 )
 
 type appDeps struct {
-	getwd                 func() (string, error)
-	stdin                 io.Reader
-	userConfigPath        func() (string, error)
+	getwd          func() (string, error)
+	stdin          io.Reader
+	userConfigPath func() (string, error)
+	// migrateOAuth runs the explicit OAuth plaintext migration at process startup.
+	// It is intentionally not filled for partial test dependencies, which keeps
+	// tests from touching the user's keychain or config directory.
+	migrateOAuth          func()
 	resolveConfig         func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error)
 	resolveMCPConfig      func(workspaceRoot string) (config.MCPConfig, error)
 	resolveMCPConfigTrust func(workspaceRoot string, projectTrusted bool) (config.MCPConfig, error)
@@ -117,14 +123,26 @@ func (noopMCPRuntime) Skipped() []mcp.SkippedServer {
 // Run executes the minimal Go CLI surface. It returns an exit code so tests can
 // exercise command behavior without terminating the test process.
 func Run(args []string, stdout io.Writer, stderr io.Writer) int {
+	warnObsoleteEnvVars(os.Getenv, stderr)
 	return runWithDeps(args, stdout, stderr, defaultAppDeps())
 }
 
 func defaultAppDeps() appDeps {
 	return appDeps{
-		getwd:                os.Getwd,
-		stdin:                os.Stdin,
-		userConfigPath:       config.DefaultUserConfigPath,
+		getwd:          os.Getwd,
+		stdin:          os.Stdin,
+		userConfigPath: config.DefaultUserConfigPath,
+		migrateOAuth: func() {
+			path, err := oauth.ResolveStorePath(nil)
+			if err != nil {
+				return
+			}
+			store, err := oauth.NewStore(oauth.StoreOptions{})
+			if err != nil {
+				return
+			}
+			_, _ = oauth.MigratePlaintextProviderTokens(path, store)
+		},
 		exportActiveProvider: config.SetActiveProviderEnv,
 		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
 			options, err := config.DefaultResolveOptions(workspaceRoot)
@@ -234,6 +252,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	// subcommand; the "__" prefix is unreachable by normal invocation.
 	if len(args) > 0 {
 		switch args[0] {
+		case sandbox.LinuxSandboxSubcommand:
+			return sandbox.RunLinuxSandboxHelper(args[1:], stderr)
 		case sandbox.WindowsCommandRunnerSubcommand:
 			return sandbox.RunWindowsSandboxCommandRunner(args[1:], stderr)
 		case sandbox.WindowsSandboxSetupSubcommand:
@@ -281,7 +301,7 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	}
 
 	if len(args) == 0 {
-		return runInteractiveTUI(stderr, deps, agent.PermissionModeAsk, addDirs, theme)
+		return runInteractiveTUI(stdout, stderr, deps, agent.PermissionModeAsk, addDirs, theme)
 	}
 
 	// --add-dir grants an extra write root, and only the interactive TUI and
@@ -342,7 +362,7 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 				return writeAppError(stderr, "--skip-permissions-unsafe launches the interactive TUI and takes no prompt or subcommand; for a one-shot unsafe run use `splice exec --skip-permissions-unsafe -p \"...\"`", 1)
 			}
 		}
-		return runInteractiveTUI(stderr, deps, agent.PermissionModeUnsafe, append(append([]string{}, addDirs...), moreDirs...), skipTheme)
+		return runInteractiveTUI(stdout, stderr, deps, agent.PermissionModeUnsafe, append(append([]string{}, addDirs...), moreDirs...), skipTheme)
 	case "-h", "--help", "help":
 		if err := writeHelp(stdout); err != nil {
 			return 1
@@ -361,6 +381,11 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 			return 1
 		}
 		return 0
+	case "--update":
+		// --update is a safe shorthand for the explicit, non-mutating check.
+		// Applying an update remains a deliberate `splice update --apply` action.
+		updateArgs := append([]string{"--check"}, args[1:]...)
+		return runUpdate(updateArgs, stdout, stderr, deps)
 	case "-p", "--prompt":
 		if len(args) < 2 {
 			return writePromptRequired(stderr)
@@ -613,11 +638,13 @@ func fillAppDeps(deps appDeps) appDeps {
 	return deps
 }
 
-func runInteractiveTUI(stderr io.Writer, deps appDeps, permissionMode agent.PermissionMode, addDirs []string, theme string) int {
-	return runInteractiveTUIWithSetup(stderr, deps, permissionMode, addDirs, theme, false)
+func runInteractiveTUI(stdout io.Writer, stderr io.Writer, deps appDeps, permissionMode agent.PermissionMode, addDirs []string, theme string) int {
+	return runInteractiveTUIWithSetup(stdout, stderr, deps, permissionMode, addDirs, theme, false)
 }
 
-func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode agent.PermissionMode, addDirs []string, theme string, forceSetup bool) int {
+func runInteractiveTUIWithSetup(stdout io.Writer, stderr io.Writer, deps appDeps, permissionMode agent.PermissionMode, addDirs []string, theme string, forceSetup bool) int {
+	// Do not start the update notice on the interactive path. The TUI uses the
+	// alternate screen, so a later stderr write would corrupt its display.
 	// Refresh the models.dev pricing/limits cache in the background when stale;
 	// the overlay is read at registry construction from the cache file, so this
 	// benefits the next run and never blocks or fails this one.
@@ -668,6 +695,9 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	if store, storeErr := config.ProviderKeyStoreAt(filepath.Dir(userConfigPath)); storeErr == nil {
 		_, _ = config.MigratePlaintextProviderKeys(userConfigPath, store)
 	}
+	if deps.migrateOAuth != nil {
+		deps.migrateOAuth()
+	}
 	doctorUserConfigPath := ""
 	projectConfigPath := ""
 	if resolveOptions, optErr := config.DefaultResolveOptions(workspaceRoot); optErr == nil {
@@ -702,11 +732,32 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	if setting == "" {
 		setting = "ask"
 	}
-	trusted, persist, store, err := resolveWorkspaceTrust(workspaceRoot, setting, rootTrust, rootNoTrust)
+	trusted, decision, persist, store, err := resolveWorkspaceTrust(workspaceRoot, setting, rootTrust, rootNoTrust)
 	if err != nil {
 		fmt.Fprintf(stderr, "warning: failed to resolve workspace trust: %s\n", err)
 		trusted = false
+		decision = config.TrustUndecided
 		persist = false
+	}
+	if shouldPromptWorkspaceTrust(decision, resolved.DefaultProjectTrust, rootTrust, rootNoTrust, envTrustWorkspaceSet(), term.IsTerminal(os.Stdin.Fd())) {
+		answer, decided, promptErr := tui.PromptWorkspaceTrust(context.Background(), deps.stdin, stdout)
+		if promptErr != nil {
+			fmt.Fprintf(stderr, "warning: workspace trust prompt failed: %s\n", promptErr)
+		} else if decided {
+			trusted = answer
+			if store != nil {
+				if setErr := store.SetTrusted(workspaceRoot, answer); setErr != nil {
+					fmt.Fprintf(stderr, "warning: failed to persist trust decision: %s\n", setErr)
+				} else if saveErr := store.Save(); saveErr != nil {
+					fmt.Fprintf(stderr, "warning: failed to persist trust decision: %s\n", saveErr)
+				}
+			}
+			if trusted {
+				decision = config.TrustTrusted
+			} else {
+				decision = config.TrustDeclined
+			}
+		}
 	}
 	if persist && store != nil {
 		_ = store.SetTrusted(workspaceRoot, trusted)
@@ -714,7 +765,9 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			fmt.Fprintf(stderr, "warning: failed to persist trust decision: %s\n", saveErr)
 		}
 	}
-	if !trusted && projectConfigExists(workspaceRoot) {
+	// The interactive app warns even when no project config exists. This makes
+	// the degraded trust state visible before a project adds MCP, hooks, or plugins.
+	if !trusted {
 		fmt.Fprintf(stderr, "workspace %s is not trusted; skipped project MCP servers, hooks, plugins. Run with --trust or set defaultProjectTrust=always to load them.\n", workspaceRoot)
 	}
 
@@ -812,6 +865,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	return deps.runTUI(context.Background(), tui.Options{
 		Cwd:                  workspaceRoot,
 		Trusted:              trusted,
+		TrustStore:           store,
 		Version:              version,
 		Theme:                theme,
 		SavedTheme:           resolved.Preferences.Theme,
@@ -897,6 +951,63 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	})
 }
 
+const updateNoticeWait = time.Second
+
+type updateNoticeTask struct {
+	result <-chan string
+	cancel context.CancelFunc
+}
+
+func startUpdateNotice(deps appDeps) *updateNoticeTask {
+	if update.NoticeDisabled() {
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan string, 1)
+	go func() {
+		defer close(result)
+		executablePath, err := deps.resolveExecutable()
+		if err != nil {
+			return
+		}
+		notice, err := update.CachedNotice(ctx, update.NoticeOptions{
+			Check:          deps.checkUpdate,
+			Options:        update.Options{CurrentVersion: version},
+			ExecutablePath: executablePath,
+		})
+		if err != nil || notice == "" {
+			return
+		}
+		result <- notice
+	}()
+	return &updateNoticeTask{result: result, cancel: cancel}
+}
+
+func stderrIsInteractiveTerminal(stderr io.Writer) bool {
+	file, ok := stderr.(*os.File)
+	if !ok {
+		return false
+	}
+	return term.IsTerminal(file.Fd())
+}
+
+func finishUpdateNotice(task *updateNoticeTask, stderr io.Writer) {
+	if task == nil {
+		return
+	}
+	defer task.cancel()
+	timer := time.NewTimer(updateNoticeWait)
+	defer timer.Stop()
+	select {
+	case notice := <-task.result:
+		if notice != "" && stderr != nil {
+			_, _ = fmt.Fprintln(stderr, notice)
+		}
+	case <-timer.C:
+		return
+	}
+}
+
 func tuiSandboxSetupCommand(backend sandbox.Backend, deps appDeps) func(context.Context) tui.SandboxSetupCommandResult {
 	if backend.Platform != "windows" || backend.Name != sandbox.BackendWindowsRestrictedToken || !backend.Available || backend.Executable == "" {
 		return nil
@@ -964,7 +1075,7 @@ func newCoreRegistry(workspaceRoot string) *tools.Registry {
 
 func newCoreRegistryScoped(workspaceRoot string, scope tools.PathScope) *tools.Registry {
 	registry := tools.NewRegistry()
-	for _, tool := range tools.CoreToolsScoped(workspaceRoot, scope) {
+	for _, tool := range tools.WithoutEmptyBackedTools(tools.CoreToolsScoped(workspaceRoot, scope)) {
 		registry.Register(tool)
 	}
 	registerLocalControlTools(registry, workspaceRoot, config.LocalControlConfig{})
@@ -1058,8 +1169,12 @@ func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, max
 	if err != nil {
 		return nil, err
 	}
+	loaded, err := specialist.Load(specialist.LoadOptions{Paths: paths})
+	if err != nil {
+		return nil, err
+	}
 	executor := specialist.Executor{Paths: paths}
-	runtime, err := specialist.RegisterTools(registry, executor)
+	runtime, err := specialist.RegisterTools(registry, executor, loaded.Specialists)
 	if err != nil {
 		return nil, err
 	}
@@ -1077,7 +1192,7 @@ func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, max
 		return nil, err
 	}
 	swarm.RegisterTools(registry, sw)
-	return &agentToolRuntime{specialist: runtime, swarm: sw, specialists: specialistSummaries(paths)}, nil
+	return &agentToolRuntime{specialist: runtime, swarm: sw, specialists: specialistInfosFromManifests(loaded.Specialists)}, nil
 }
 
 // specialistSummaries loads the available specialists (built-ins + user/project
@@ -1089,8 +1204,12 @@ func specialistSummaries(paths specialist.Paths) []agent.SpecialistInfo {
 	if err != nil {
 		return nil
 	}
-	summaries := make([]agent.SpecialistInfo, 0, len(result.Specialists))
-	for _, manifest := range result.Specialists {
+	return specialistInfosFromManifests(result.Specialists)
+}
+
+func specialistInfosFromManifests(manifests []specialist.Manifest) []agent.SpecialistInfo {
+	summaries := make([]agent.SpecialistInfo, 0, len(manifests))
+	for _, manifest := range manifests {
 		name := strings.TrimSpace(manifest.Metadata.Name)
 		if name == "" {
 			continue
@@ -1198,6 +1317,7 @@ Commands:
 Flags:
   -h, --help                     Show this help
   -v, --version                  Print version
+      --update                   Check for an update (same as splice update --check)
   -p, --prompt                   Run a one-shot prompt
       --add-dir <path>           Allow writes in an extra directory (repeatable)
       --skip-permissions-unsafe  Launch the interactive shell in unsafe mode (enables the ! shell escape)

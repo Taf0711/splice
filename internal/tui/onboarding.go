@@ -1209,7 +1209,7 @@ func (m model) exitSetupToChat() (tea.Model, tea.Cmd) {
 	if m.designNoticeShown {
 		m = m.enterDesignMode("")
 	} else {
-		m = m.enterDesignMode("Planning mode. Describe what you want to build; Splice will crystallize a plan. Type /exec <prompt> to run a prompt directly through the pipeline.")
+		m = m.enterDesignMode(designModeNotice)
 		m.designNoticeShown = true
 	}
 	return m, nil

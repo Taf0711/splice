@@ -193,8 +193,8 @@ webhook after the run. Splice also has a built-in webhook notifier sink
 "finished / needs input / verify failed after N retries" to Slack or any generic
 webhook:
 
-- Configure the destination with the `SPLICE_SLACK_WEBHOOK_URL` environment variable
-  (or settings). A blank URL disables the sink.
+- Configure the destination with the `SPLICE_NOTIFY_WEBHOOK_URL` environment
+  variable. A blank URL disables the sink.
 - The sink POSTs a JSON body `{ "text", "type", "message", "summary?", "links?" }`.
   The `text` field is what Slack renders; the structured fields carry the
   machine-readable detail.

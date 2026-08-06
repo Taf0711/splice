@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -197,6 +199,7 @@ func TestRunSessionsValidatesArgs(t *testing.T) {
 		{name: "rewind flag on list", args: []string{"sessions", "list", "--sequence", "2"}, wantStderr: "only valid for sessions rewind-plan"},
 		{name: "compaction flag on tree", args: []string{"sessions", "tree", "root", "--preserve-last", "2"}, wantStderr: "only valid for sessions compact-plan"},
 		{name: "empty event flag", args: []string{"sessions", "list", "--event="}, wantStderr: "--event requires a value"},
+		{name: "prune requires selection", args: []string{"sessions", "prune"}, wantStderr: "sessions prune requires --older-than"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			stdout.Reset()
@@ -213,6 +216,79 @@ func TestRunSessionsValidatesArgs(t *testing.T) {
 				t.Fatalf("%v stderr = %q, want %q", test.args, stderr.String(), test.wantStderr)
 			}
 		})
+	}
+}
+
+func TestRunSessionsPrunePlanAndPrune(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir(), Now: func() time.Time { return now }})
+	old, err := store.Create(sessions.CreateInput{SessionID: "old_cli"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, err := store.Create(sessions.CreateInput{SessionID: "active_cli"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	setSessionUpdatedAtCLI(t, store, old.SessionID, "2026-06-01T00:00:00Z")
+	setSessionUpdatedAtCLI(t, store, active.SessionID, "2026-06-01T00:00:00Z")
+
+	var stdout, stderr bytes.Buffer
+	deps := appDeps{newSessionStore: func() *sessions.Store { return store }, now: func() time.Time { return now }}
+	if got := runWithDeps([]string{"sessions", "prune-plan", "--older-than", "7"}, &stdout, &stderr, deps); got != exitSuccess {
+		t.Fatalf("prune-plan exit=%d stderr=%q", got, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "remove: "+old.SessionID) || !strings.Contains(stdout.String(), "skip: "+active.SessionID+" (active)") {
+		t.Fatalf("mixed prune-plan output=%q", stdout.String())
+	}
+	// Regression: prune-plan is a preview and must leave selected directories intact.
+	if _, err := os.Stat(filepath.Join(store.RootDir, old.SessionID)); err != nil {
+		t.Fatalf("prune-plan removed selected directory: %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if got := runWithDeps([]string{"sessions", "prune", "--older-than=7"}, &stdout, &stderr, deps); got != exitSuccess {
+		t.Fatalf("prune exit=%d stderr=%q", got, stderr.String())
+	}
+	if got, err := store.Get(old.SessionID); err != nil || got != nil {
+		t.Fatalf("old session after prune=%#v err=%v", got, err)
+	}
+	if got, err := store.Get(active.SessionID); err != nil || got == nil {
+		t.Fatalf("active session after prune=%#v err=%v", got, err)
+	}
+}
+
+func setSessionUpdatedAtCLI(t *testing.T, store *sessions.Store, id, updated string) {
+	t.Helper()
+	session, err := store.Get(id)
+	if err != nil || session == nil {
+		t.Fatalf("get %s: %v", id, err)
+	}
+	session.UpdatedAt = updated
+	data, err := json.MarshalIndent(session, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store.RootDir, id, sessions.MetadataFile), append(data, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFormatPrunePlanMixedSelection(t *testing.T) {
+	plan := sessions.PrunePlan{
+		Selected: []sessions.PruneItem{{SessionID: "old", UpdatedAt: "2026-06-01T00:00:00Z"}},
+		Kept:     []sessions.PruneItem{{SessionID: "recent", Reason: "not-old-enough"}},
+		Skipped: []sessions.PruneItem{
+			{SessionID: "active", Reason: "active"},
+			{SessionID: "parent", Reason: "has-descendants"},
+		},
+		TotalSize: 128,
+		Oldest:    "2026-06-01T00:00:00Z",
+		Newest:    "2026-06-01T00:00:00Z",
+	}
+	want := "Splice session prune plan\nwould remove: 1 session(s)\ntotal size: 128 bytes\noldest: 2026-06-01T00:00:00Z\nnewest: 2026-06-01T00:00:00Z\n  remove: old (2026-06-01T00:00:00Z)\n  keep: recent (not-old-enough)\n  skip: active (active)\n  skip: parent (has-descendants)"
+	if got := formatPrunePlan(plan); got != want {
+		t.Fatalf("mixed prune-plan output = %q, want %q", got, want)
 	}
 }
 
@@ -258,6 +334,60 @@ func TestRunSessionsListFiltersByKind(t *testing.T) {
 	})
 	if exitCode != exitUsage || !strings.Contains(stderr.String(), "--kind is only valid for sessions list") {
 		t.Fatalf("expected --kind validation error, exit=%d stderr=%q", exitCode, stderr.String())
+	}
+}
+
+// TestRunSessionsListExcludesEphemeralByDefault covers the other half of the
+// "plain exec records no usage" fix: a plain `splice exec` run now creates a
+// real session (SessionKindEphemeral, see exec_test.go's
+// TestRunExecPlainRunRecordsUsageInEphemeralSession), so the default `splice
+// sessions list` must keep hiding it — otherwise every scripted/CI exec call
+// would flood the list an interactive user actually cares about. --kind
+// ephemeral opts back in.
+func TestRunSessionsListExcludesEphemeralByDefault(t *testing.T) {
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir(), Now: sequenceClockCLI([]time.Time{
+		time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC),
+		time.Date(2026, 7, 30, 12, 0, 1, 0, time.UTC),
+	})})
+	if _, err := store.Create(sessions.CreateInput{SessionID: "regular", Title: "Regular"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(sessions.CreateInput{
+		SessionID:   "oneshot",
+		SessionKind: sessions.SessionKindEphemeral,
+		Title:       "hello from a script",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"sessions", "list"}, &stdout, &stderr, appDeps{
+		newSessionStore: func() *sessions.Store {
+			return store
+		},
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("sessions list exit = %d, stderr = %q", exitCode, stderr.String())
+	}
+	output := stdout.String()
+	if !strings.Contains(output, "regular") || strings.Contains(output, "oneshot") {
+		t.Fatalf("default sessions list = %q, want regular but not the ephemeral oneshot", output)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runWithDeps([]string{"sessions", "list", "--kind", "ephemeral"}, &stdout, &stderr, appDeps{
+		newSessionStore: func() *sessions.Store {
+			return store
+		},
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("sessions list --kind ephemeral exit = %d, stderr = %q", exitCode, stderr.String())
+	}
+	output = stdout.String()
+	if strings.Contains(output, "regular") || !strings.Contains(output, "oneshot") {
+		t.Fatalf("sessions list --kind ephemeral = %q, want oneshot but not regular", output)
 	}
 }
 

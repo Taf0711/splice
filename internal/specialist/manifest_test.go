@@ -394,6 +394,12 @@ func TestKnownToolNamesMatchCoreRegistry(t *testing.T) {
 	}
 	sort.Strings(got)
 	sort.Strings(want)
+	// skill is optional: CoreTools omits it when the startup skills roster is
+	// empty, while specialist validation must still accept the tool when skills
+	// are installed.
+	if !contains(want, "skill") {
+		got = removeString(got, "skill")
+	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("knownToolNames drifted from core registry\ngot:  %#v\nwant: %#v", got, want)
 	}
@@ -404,6 +410,16 @@ func TestKnownToolNamesMatchCoreRegistry(t *testing.T) {
 			}
 		}
 	}
+}
+
+func removeString(values []string, target string) []string {
+	result := values[:0]
+	for _, value := range values {
+		if value != target {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func TestFormatListUsesSpecialistTerminology(t *testing.T) {

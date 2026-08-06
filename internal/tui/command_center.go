@@ -270,6 +270,13 @@ func (m model) resumeText() string {
 			}},
 		})
 	}
+	workspaceSessions := sessions[:0]
+	for _, session := range sessions {
+		if sessionMatchesWorkspace(session.Cwd, m.cwd) {
+			workspaceSessions = append(workspaceSessions, session)
+		}
+	}
+	sessions = workspaceSessions
 	if len(sessions) == 0 {
 		return renderCommandOutput(commandOutput{
 			Title:  "Sessions",

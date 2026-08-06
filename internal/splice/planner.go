@@ -70,6 +70,13 @@ func BuildExecutionPlanForTaskWithFacts(task schemas.Task) (schemas.ExecutionPla
 		computed := ClassifyRequest(task.Intent)
 		tier = &computed
 	}
+	for _, fact := range task.AcceptanceFacts {
+		if fact.AutomatedVerification && *tier == schemas.TierTrivial {
+			computed := schemas.TierLight
+			tier = &computed
+			break
+		}
+	}
 	stages, budget, err := stagesForTier(*tier)
 	if err != nil {
 		return schemas.ExecutionPlan{}, nil, err
@@ -79,10 +86,11 @@ func BuildExecutionPlanForTaskWithFacts(task schemas.Task) (schemas.ExecutionPla
 		acceptanceFacts = append(acceptanceFacts, fact.Statement)
 	}
 	return schemas.ExecutionPlan{
-		Tier:          *tier,
-		RequestIntent: task.Intent,
-		Stages:        stages,
-		TokenBudget:   budget,
+		Tier:            *tier,
+		RequestIntent:   task.Intent,
+		Stages:          stages,
+		TokenBudget:     budget,
+		AcceptanceFacts: append([]schemas.AcceptanceFact(nil), task.AcceptanceFacts...),
 	}, acceptanceFacts, nil
 }
 

@@ -59,13 +59,20 @@ func (ledger *requestLedger) recordingOptions(options agent.Options) agent.Optio
 				CompletionTokens:  attributed.Usage.CompletionTokens,
 				ReasoningTokens:   attributed.Usage.ReasoningTokens,
 				WebSearchRequests: attributed.Usage.WebSearchRequests,
+				WebSearchEngine:   attributed.Usage.WebSearchEngine,
 			})
 			if err != nil {
 				attributed.Usage = zeroruntime.Usage{}
 				attributed.Cost = costError(err.Error())
 			} else {
 				attributed.Usage = normalized
-				attributed.Cost = estimateUsageCost(options.EstimateUsageCost, attributed)
+				if attributed.ReportedCostUSD != nil {
+					// The provider told us the exact charge; trust it over the
+					// registry estimate instead of computing one we'd discard.
+					attributed.Cost = reportedUsageCost(*attributed.ReportedCostUSD)
+				} else {
+					attributed.Cost = estimateUsageCost(options.EstimateUsageCost, attributed)
+				}
 			}
 		} else {
 			attributed.Usage = zeroruntime.Usage{}
@@ -76,22 +83,24 @@ func (ledger *requestLedger) recordingOptions(options agent.Options) agent.Optio
 		}
 
 		record := schemas.PipelineUsageRecord{
-			Sequence:       attributed.Sequence,
-			Provider:       attributed.ProviderName,
-			Model:          attributed.Model,
-			Stage:          attributed.Stage,
-			Iteration:      attributed.Iteration,
-			UsageReported:  attributed.UsageReported,
-			InputTokens:    attributed.Usage.EffectiveInputTokens(),
-			OutputTokens:   attributed.Usage.EffectiveOutputTokens(),
-			CachedTokens:   attributed.Usage.CachedInputTokens,
-			CacheWrite:     attributed.Usage.CacheWriteTokens,
-			Reasoning:      attributed.Usage.ReasoningTokens,
-			CostStatus:     attributed.Cost.Status,
-			CostProvenance: attributed.Cost.Provenance,
-			PricingSource:  attributed.Cost.PricingSource,
-			PricingAsOf:    attributed.Cost.PricingAsOf,
-			UnpricedReason: attributed.Cost.UnpricedReason,
+			Sequence:          attributed.Sequence,
+			Provider:          attributed.ProviderName,
+			Model:             attributed.Model,
+			Stage:             attributed.Stage,
+			Iteration:         attributed.Iteration,
+			UsageReported:     attributed.UsageReported,
+			InputTokens:       attributed.Usage.EffectiveInputTokens(),
+			OutputTokens:      attributed.Usage.EffectiveOutputTokens(),
+			CachedTokens:      attributed.Usage.CachedInputTokens,
+			CacheWrite:        attributed.Usage.CacheWriteTokens,
+			Reasoning:         attributed.Usage.ReasoningTokens,
+			WebSearchRequests: attributed.Usage.WebSearchRequests,
+			WebSearchEngine:   attributed.Usage.WebSearchEngine,
+			CostStatus:        attributed.Cost.Status,
+			CostProvenance:    attributed.Cost.Provenance,
+			PricingSource:     attributed.Cost.PricingSource,
+			PricingAsOf:       attributed.Cost.PricingAsOf,
+			UnpricedReason:    attributed.Cost.UnpricedReason,
 		}
 		if attributed.Cost.CostUSD != nil {
 			cost := *attributed.Cost.CostUSD
@@ -121,6 +130,22 @@ func estimateUsageCost(estimator func(string, agent.Usage, bool) agent.UsageCost
 
 func costError(reason string) agent.UsageCostEstimate {
 	return agent.UsageCostEstimate{Status: agent.CostStatusError, UnpricedReason: reason}
+}
+
+// reportedUsageCost builds a priced UsageCostEstimate from a provider-reported
+// exact charge (currently only OpenRouter's usage.cost). PricingSource and
+// PricingAsOf are non-registry sentinels rather than empty: validateUsageCostEstimate
+// requires both non-empty for any priced estimate, and "as of a rate table
+// verified on some date" would misdescribe a live, per-request billed figure.
+func reportedUsageCost(costUSD float64) agent.UsageCostEstimate {
+	cost := costUSD
+	return agent.UsageCostEstimate{
+		CostUSD:       &cost,
+		Status:        agent.CostStatusPriced,
+		Provenance:    agent.CostProvenanceReported,
+		PricingSource: "openrouter",
+		PricingAsOf:   "live",
+	}
 }
 
 func validateUsageCostEstimate(estimate agent.UsageCostEstimate) error {
@@ -289,11 +314,16 @@ func runIterationLoop(
 		if !completed {
 			if i < maxIterations {
 				failed := findFailed(passRecords)
-				rc := buildRevisionContext(plan.RequestIntent, history, passRecords, fmt.Sprintf("Recovery: stage failure in iteration %d: %s", i, DerefString(failed.OutputSummary)))
+				rc := buildRevisionContext(plan.RequestIntent, history, passRecords, passOutputs, fmt.Sprintf("Recovery: stage failure in iteration %d: %s", i, DerefString(failed.OutputSummary)))
 				revisionContext = &rc
 				continue
 			}
-			return finishWithReason(runID, plan, allRecords, "failed", fmt.Sprintf("stage failed in iteration %d", i))
+			failed := findFailed(passRecords)
+			reason := fmt.Sprintf("stage failed in iteration %d", i)
+			if detail := DerefString(failed.OutputSummary); detail != "" {
+				reason += ": " + detail
+			}
+			return finishWithReason(runID, plan, allRecords, "failed", reason)
 		}
 
 		changeSummary := summarizeWorkspaceChanges(ctx, workDir)
@@ -325,7 +355,7 @@ func runIterationLoop(
 
 		decision := EvaluateTrajectory(history, maxIterations, &tokenBudget)
 		if decision.Action == schemas.ActionContinue {
-			rc := buildRevisionContext(plan.RequestIntent, history, passRecords, "")
+			rc := buildRevisionContext(plan.RequestIntent, history, passRecords, passOutputs, "")
 			revisionContext = &rc
 			continue
 		}
@@ -345,7 +375,7 @@ func runIterationLoop(
 				return finishWithReason(runID, plan, allRecords, "failed", fmt.Sprintf("restore to iteration %d: %v", target.iter, restoreErr))
 			}
 			emitProgress(options, fmt.Sprintf("[recovery] rejected iteration %d (score=%.1f), restored iteration %d (score=%.1f)\n", i, current.score, target.iter, target.score))
-			rc := buildRevisionContext(plan.RequestIntent, history, passRecords, fmt.Sprintf("Rollback: restored iteration %d at score %.1f. %s", target.iter, target.score, decision.Reason))
+			rc := buildRevisionContext(plan.RequestIntent, history, passRecords, passOutputs, fmt.Sprintf("Rollback: restored iteration %d at score %.1f. %s", target.iter, target.score, decision.Reason))
 			revisionContext = &rc
 			continue
 		}
@@ -394,7 +424,7 @@ func runIterationLoop(
 					emitProgress(options, "[escalation] no EscalationModelResolver configured (continuing without escalation)\n")
 				}
 			}
-			rc := buildRevisionContext(plan.RequestIntent, history, passRecords, fmt.Sprintf("Recovery: %s — %s", decision.Action, decision.Reason))
+			rc := buildRevisionContext(plan.RequestIntent, history, passRecords, passOutputs, fmt.Sprintf("Recovery: %s — %s", decision.Action, decision.Reason))
 			revisionContext = &rc
 			continue
 		}
@@ -446,13 +476,14 @@ func runIterationLoop(
 }
 
 // isModelFreeStage reports whether a pipeline stage runs deterministically
-// without a provider. F14a: static analysis, security audit, and test execution
+// without a provider. F14a: static analysis, security audit, test execution,
+// and acceptance verification
 // are model-free. Every other stage (including unknown/custom stage names) keeps
 // the current model-backed default so test and extension seams do not silently
 // lose their provider.
 func isModelFreeStage(name string) bool {
 	switch name {
-	case "static_analyzer", "security_auditor", "test_runner":
+	case "static_analyzer", "security_auditor", "test_runner", "acceptance_verifier":
 		return true
 	default:
 		return false
@@ -473,8 +504,14 @@ func runPass(
 	mem MemoryStore,
 ) ([]schemas.StageRecord, []schemas.HarnessStageOutput, bool, error) {
 	priorSummaries := map[string]string{}
+	priorChangedFiles := map[string][]string{}
 	records := []schemas.StageRecord{}
 	outputs := []schemas.HarnessStageOutput{}
+
+	stageNames := make([]string, len(plan.Stages))
+	for i, stage := range plan.Stages {
+		stageNames[i] = stage.Name
+	}
 
 	for seq, stage := range plan.Stages {
 		stageName := stage.Name
@@ -501,14 +538,23 @@ func runPass(
 			return records, outputs, false, nil
 		}
 
+		var nextStage string
+		if seq+1 < len(stageNames) {
+			nextStage = stageNames[seq+1]
+		}
+
 		input := schemas.HarnessStageInput{
-			RunID:           runID,
-			StageName:       stageName,
-			Sequence:        seq + 1,
-			PlanTier:        plan.Tier,
-			RequestIntent:   plan.RequestIntent,
-			PriorSummaries:  maps.Clone(priorSummaries),
-			RevisionContext: revisionContext,
+			RunID:             runID,
+			StageName:         stageName,
+			Sequence:          seq + 1,
+			PlanTier:          plan.Tier,
+			RequestIntent:     plan.RequestIntent,
+			AcceptanceFacts:   append([]schemas.AcceptanceFact(nil), plan.AcceptanceFacts...),
+			PriorSummaries:    maps.Clone(priorSummaries),
+			PriorChangedFiles: cloneChangedFiles(priorChangedFiles),
+			RevisionContext:   revisionContext,
+			PipelineStages:    stageNames,
+			NextStage:         nextStage,
 		}
 
 		if mem != nil {
@@ -613,6 +659,7 @@ func runPass(
 			})
 		}
 		priorSummaries[stageName] = *record.OutputSummary
+		priorChangedFiles[stageName] = append([]string(nil), stageChangedFiles(output)...)
 		outputs = append(outputs, output)
 	}
 
@@ -648,6 +695,8 @@ func applyStageUsage(record *schemas.StageRecord, usage *schemas.StageUsage) {
 	record.TokensCached = usage.CachedInputTokens
 	record.TokensCacheWrite = usage.CacheWriteTokens
 	record.TokensReasoning = usage.ReasoningTokens
+	record.WebSearchRequests = usage.WebSearchRequests
+	record.WebSearchEngine = usage.WebSearchEngine
 }
 
 func runStageWithContext(
@@ -702,7 +751,7 @@ func passSucceeded(records []schemas.StageRecord, state schemas.IterationState) 
 			return false
 		}
 	}
-	if state.TestsFailing > 0 || state.TestsErrored > 0 {
+	if state.TestsFailing > 0 || state.TestsErrored > 0 || state.AcceptanceFactsFailing > 0 {
 		return false
 	}
 	if state.LintIssuesBySeverity[schemas.SeverityCritical] > 0 || state.LintIssuesBySeverity[schemas.SeverityHigh] > 0 {
@@ -738,7 +787,7 @@ func findFailed(records []schemas.StageRecord) schemas.StageRecord {
 	return records[len(records)-1]
 }
 
-func buildRevisionContext(intent string, history []schemas.IterationState, records []schemas.StageRecord, note string) string {
+func buildRevisionContext(intent string, history []schemas.IterationState, records []schemas.StageRecord, outputs []schemas.HarnessStageOutput, note string) string {
 	lines := []string{fmt.Sprintf("Original intent: %s", intent), "", "Iteration history:"}
 	for _, state := range history {
 		lines = append(lines, fmt.Sprintf("  iter %d: tests_passing=%d tests_failing=%d tests_errored=%d score=%.1f",
@@ -756,10 +805,46 @@ func buildRevisionContext(intent string, history []schemas.IterationState, recor
 			lines = append(lines, fmt.Sprintf("  %s: %s", r.Name, DerefString(r.OutputSummary)))
 		}
 	}
+	changedFiles := make([]string, 0)
+	for _, output := range outputs {
+		changedFiles = append(changedFiles, stageChangedFiles(output)...)
+	}
+	if len(changedFiles) > 0 {
+		changedFiles = uniqueStrings(changedFiles)
+		if len(changedFiles) > 50 {
+			changedFiles = changedFiles[:50]
+		}
+		lines = append(lines, "", "Files written by the prior iteration (use change_type modify and overwrite: true when editing them):")
+		lines = append(lines, "  "+strings.Join(changedFiles, ", "))
+	}
 	if note != "" {
 		lines = append(lines, "", note)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func cloneChangedFiles(input map[string][]string) map[string][]string {
+	if len(input) == 0 {
+		return nil
+	}
+	clone := make(map[string][]string, len(input))
+	for stage, paths := range input {
+		clone[stage] = append([]string(nil), paths...)
+	}
+	return clone
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 func buildStepBackReport(intent string, history []schemas.IterationState, passOutputs []schemas.HarnessStageOutput, decision schemas.TrajectoryDecision) stages.StepBackReport {
@@ -1476,12 +1561,22 @@ func mergeStageUsage(a, b *schemas.StageUsage) *schemas.StageUsage {
 	if b == nil {
 		return a
 	}
+	engine := a.WebSearchEngine
+	if engine == "" {
+		engine = b.WebSearchEngine
+	} else if b.WebSearchEngine != "" && b.WebSearchEngine != engine {
+		// Keep the first non-empty engine when both sides agree. Mark a mismatch
+		// as "mixed" so pricing cannot silently use either engine's rate.
+		engine = "mixed"
+	}
 	return &schemas.StageUsage{
 		InputTokens:       a.InputTokens + b.InputTokens,
 		OutputTokens:      a.OutputTokens + b.OutputTokens,
 		CachedInputTokens: a.CachedInputTokens + b.CachedInputTokens,
 		CacheWriteTokens:  a.CacheWriteTokens + b.CacheWriteTokens,
 		ReasoningTokens:   a.ReasoningTokens + b.ReasoningTokens,
+		WebSearchRequests: a.WebSearchRequests + b.WebSearchRequests,
+		WebSearchEngine:   engine,
 	}
 }
 

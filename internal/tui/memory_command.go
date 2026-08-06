@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -18,6 +19,20 @@ import (
 type memoryResultMsg struct {
 	text    string
 	isError bool
+}
+
+type memoryCommandClient interface {
+	Search(context.Context, schemas.MemoryQuery) (schemas.MemoryBundle, error)
+	Recent(context.Context, schemas.MemoryQuery) (schemas.MemoryBundle, error)
+	Stats(context.Context) (memd.MemoryStats, error)
+}
+
+var tuiResolveMemoryCommand = func(ctx context.Context) (memoryCommandClient, error) {
+	client, err := tuiResolveMemory(ctx)
+	if client == nil {
+		return nil, err
+	}
+	return client, err
 }
 
 // handleMemoryCommand handles /memory, /memory search <query>, /memory recent.
@@ -45,8 +60,8 @@ func (m model) handleMemoryCommand(text string) (model, tea.Cmd) {
 // resolveMemdOrError resolves the sidecar client, returning an error
 // memoryResultMsg when resolution fails or the binary is absent. Shared by
 // all three /memory subcommands.
-func resolveMemdOrError(ctx context.Context) (*memd.Client, memoryResultMsg) {
-	client, err := memd.Resolve(ctx)
+func resolveMemdOrError(ctx context.Context) (memoryCommandClient, memoryResultMsg) {
+	client, err := tuiResolveMemoryCommand(ctx)
 	if err != nil {
 		return nil, memoryResultMsg{text: "Memory sidecar error: " + err.Error(), isError: true}
 	}
@@ -82,9 +97,12 @@ func (m model) handleMemorySearch(query string) (model, tea.Cmd) {
 		if client == nil {
 			return errMsg
 		}
+		projectPath := m.cwd
 		bundle, err := client.Search(runCtx, schemas.MemoryQuery{
 			RequestingAgent: "tui",
 			Query:           query,
+			ProjectPath:     &projectPath,
+			Scopes:          []string{"project", "global"},
 			Limit:           10,
 		})
 		if err != nil {
@@ -107,12 +125,17 @@ func (m model) handleMemoryRecent() (model, tea.Cmd) {
 		if client == nil {
 			return errMsg
 		}
-		bundle, err := client.Search(runCtx, schemas.MemoryQuery{
+		projectPath := m.cwd
+		bundle, err := client.Recent(runCtx, schemas.MemoryQuery{
 			RequestingAgent: "tui",
-			Query:           "*",
+			ProjectPath:     &projectPath,
+			Scopes:          []string{"project", "global"},
 			Limit:           10,
 		})
 		if err != nil {
+			if errors.Is(err, memd.ErrRecentUnsupported) {
+				return memoryResultMsg{text: "Memory daemon is out of date. Update splice-memd to use /memory recent.", isError: true}
+			}
 			return memoryResultMsg{text: "Memory search error: " + err.Error(), isError: true}
 		}
 		return memoryResultMsg{text: formatMemoryList(

@@ -8,7 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mattn/go-runewidth"
+
 	"github.com/Taf0711/splice/internal/sessions"
+	"github.com/Taf0711/splice/internal/usage"
 	"github.com/Taf0711/splice/internal/zerogit"
 )
 
@@ -51,6 +54,107 @@ func TestRunUsageTextReport(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Fatalf("usage report missing %q in:\n%s", want, output)
 		}
+	}
+}
+
+// TestFormatReportWorkUnitsSortsByCost pins the most expensive work unit first.
+func TestFormatReportWorkUnitsSortsByCost(t *testing.T) {
+	report := usage.Report{
+		WorkUnits: []usage.WorkUnit{
+			{Stage: "cheap", Model: "cheap-model", Provider: "provider", Requests: 1, TotalTokens: 100, TotalCost: 0.25},
+			{Stage: "expensive", Model: "expensive-model", Provider: "provider", Requests: 1, TotalTokens: 100, TotalCost: 1.25},
+			{Stage: "middle", Model: "middle-model", Provider: "provider", Requests: 1, TotalTokens: 100, TotalCost: 0.75},
+		},
+	}
+
+	output := FormatReport(report, 0, 0)
+	if !strings.Contains(output, "work units:\n") {
+		t.Fatalf("expected work-unit section, got:\n%s", output)
+	}
+	first := strings.Index(output, "expensive-model")
+	second := strings.Index(output, "middle-model")
+	third := strings.Index(output, "cheap-model")
+	if first < 0 || second < 0 || third < 0 || first >= second || second >= third {
+		t.Fatalf("work units are not sorted by cost: %d, %d, %d\n%s", first, second, third, output)
+	}
+}
+
+// TestFormatReportWorkUnitsRowsAreEqualWidth pins every work-unit row to the
+// header width. A model id longer than its column widened the cell instead of
+// clipping it, which pushed every later column right on that row only.
+func TestFormatReportWorkUnitsRowsAreEqualWidth(t *testing.T) {
+	report := usage.Report{
+		WorkUnits: []usage.WorkUnit{
+			{Stage: "code_writer", Model: "my-custom-vision-less-model", Provider: "echo", TotalCost: 3},
+			{Stage: "", Model: "deepseek/deepseek-v4-flash", Provider: "", TotalCost: 2},
+			{Stage: "", Model: "moonshotai/kimi-k2.7-code", Provider: "openrouter", TotalCost: 1},
+			{Stage: "code_writer", Model: "z-ai/glm-5.2", Provider: "openrouter", TotalCost: 0.5},
+		},
+	}
+
+	output := FormatReport(report, 0, 0)
+	lines := strings.Split(output, "\n")
+	start := -1
+	for index, line := range lines {
+		if strings.HasPrefix(line, "stage ") {
+			start = index
+			break
+		}
+	}
+	if start < 0 {
+		t.Fatalf("no work-unit header in output:\n%s", output)
+	}
+	want := runewidth.StringWidth(lines[start])
+	if want > 80 {
+		t.Fatalf("work-unit table is %d columns wide, want <= 80", want)
+	}
+	for _, line := range lines[start+1 : start+1+len(report.WorkUnits)] {
+		if got := runewidth.StringWidth(line); got != want {
+			t.Fatalf("row width = %d, want %d (header)\nrow:    %q\nheader: %q", got, want, line, lines[start])
+		}
+	}
+	if !strings.Contains(output, "...") {
+		t.Fatalf("an over-long model id was not truncated:\n%s", output)
+	}
+}
+
+// TestFormatReportWorkUnitsTieSortIsStable pins model then stage tie ordering.
+func TestFormatReportWorkUnitsTieSortIsStable(t *testing.T) {
+	report := usage.Report{
+		WorkUnits: []usage.WorkUnit{
+			{Stage: "z-stage", Model: "same-model", Provider: "provider", TotalCost: 1},
+			{Stage: "a-stage", Model: "same-model", Provider: "provider", TotalCost: 1},
+			{Stage: "other-stage", Model: "a-model", Provider: "provider", TotalCost: 1},
+		},
+	}
+
+	output := FormatReport(report, 0, 0)
+	if first, second, third := strings.Index(output, "a-model"), strings.Index(output, "a-stage"), strings.Index(output, "z-stage"); first < 0 || second < 0 || third < 0 || first >= second || second >= third {
+		t.Fatalf("work-unit ties are not sorted by model then stage:\n%s", output)
+	}
+}
+
+// TestFormatReportWorkUnitsUsesPlaceholders pins readable empty stage/provider values.
+func TestFormatReportWorkUnitsUsesPlaceholders(t *testing.T) {
+	report := usage.Report{WorkUnits: []usage.WorkUnit{{Model: "legacy-model", Requests: 1, TotalTokens: 100}}}
+	output := FormatReport(report, 0, 0)
+	var row string
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(line, "legacy-model") {
+			row = line
+			break
+		}
+	}
+	if fields := strings.Fields(row); len(fields) < 3 || fields[0] != "-" || fields[2] != "-" {
+		t.Fatalf("expected empty stage/provider placeholders, got row %q", row)
+	}
+}
+
+// TestFormatReportWithoutWorkUnitsOmitsSection pins the empty-slice output.
+func TestFormatReportWithoutWorkUnitsOmitsSection(t *testing.T) {
+	output := FormatReport(usage.Report{}, 0, 0)
+	if strings.Contains(output, "work units:") {
+		t.Fatalf("empty work units should not render a section:\n%s", output)
 	}
 }
 

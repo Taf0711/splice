@@ -22,6 +22,8 @@ func Run(ctx context.Context, options Options) int {
 		fmt.Fprintln(os.Stderr, "splice: the interactive shell needs a terminal (stdin is not a TTY). For non-interactive use, run: splice exec \"<prompt>\"")
 		return 2
 	}
+	restoreConsole := setupConsoleUTF8()
+	defer restoreConsole()
 
 	externalSink := options.RuntimeMessageSink
 	var program *tea.Program
@@ -53,6 +55,7 @@ func Run(ctx context.Context, options Options) int {
 		programOpts = append(programOpts, tea.WithColorProfile(colorprofile.Ascii))
 	}
 	initialModel := newModel(ctx, options)
+	initialModel = initialModel.openLaunchSessionPicker()
 	if initialModel.wantsMouseCapture() {
 		initialModel.mouseCapture = true
 	}

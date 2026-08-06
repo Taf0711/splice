@@ -90,7 +90,7 @@ func (t banditTool) Run(ctx context.Context, args map[string]any) tools.Result {
 	cmd := exec.CommandContext(ctx, python, cmdArgs...)
 	cmd.Dir = t.workspaceRoot
 
-	out, err := cmd.CombinedOutput()
+	out, err := cmd.Output()
 	if ctx.Err() != nil {
 		return tools.Result{
 			Status: tools.StatusError,
@@ -98,13 +98,15 @@ func (t banditTool) Run(ctx context.Context, args map[string]any) tools.Result {
 		}
 	}
 	if err != nil {
-		if _, isExit := err.(*exec.ExitError); !isExit {
+		exitErr, isExit := err.(*exec.ExitError)
+		if !isExit {
 			return tools.Result{
 				Status: tools.StatusError,
 				Output: "Bandit is not installed or not available: " + err.Error(),
 			}
 		}
-		if strings.Contains(string(out), "No module named") || strings.Contains(string(out), "ModuleNotFoundError") {
+		stderr := string(exitErr.Stderr)
+		if strings.Contains(stderr, "No module named") || strings.Contains(stderr, "ModuleNotFoundError") {
 			return tools.Result{
 				Status: tools.StatusError,
 				Output: "Bandit is not installed or not available: bandit module not found",
@@ -112,6 +114,12 @@ func (t banditTool) Run(ctx context.Context, args map[string]any) tools.Result {
 		}
 		// Bandit ran and exited non-zero, usually because it found issues.
 		// The JSON output is still useful to the caller.
+		if len(out) == 0 {
+			return tools.Result{
+				Status: tools.StatusError,
+				Output: stderr,
+			}
+		}
 	}
 
 	return tools.Result{

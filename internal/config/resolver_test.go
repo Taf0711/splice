@@ -93,6 +93,28 @@ func TestResolveSelectsActiveProviderProfile(t *testing.T) {
 	}
 }
 
+func TestResolveValidatesReasoningEffortEnum(t *testing.T) {
+	for _, effort := range []string{"xhigh", "max"} {
+		t.Run(effort, func(t *testing.T) {
+			path := writeConfig(t, `{
+				"activeProvider": "main",
+				"providers": [{"name": "main", "provider_kind": "openai", "model": "gpt-test", "reasoning_effort": "`+effort+`"}]
+			}`)
+			if _, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}}); err != nil {
+				t.Fatalf("Resolve() rejected %s: %v", effort, err)
+			}
+		})
+	}
+
+	path := writeConfig(t, `{
+		"activeProvider": "main",
+		"providers": [{"name": "main", "provider_kind": "openai", "model": "gpt-test", "reasoning_effort": "hgih"}]
+	}`)
+	if _, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}}); err == nil || !strings.Contains(err.Error(), "reasoning_effort must be") {
+		t.Fatalf("Resolve() should reject an unknown effort, got %v", err)
+	}
+}
+
 func TestResolveLoadsFavoriteModelsFromUserConfigOnly(t *testing.T) {
 	userPath := writeConfig(t, `{
 		"activeProvider": "user",
@@ -1762,6 +1784,20 @@ func TestMergeProjectConfigIgnoresAdditionalReadRoots(t *testing.T) {
 	}
 	if !reflect.DeepEqual(dst.Sandbox.AdditionalReadRoots, []string{"/global/one"}) {
 		t.Fatalf("AdditionalReadRoots=%v: project config must NOT be able to add read roots", dst.Sandbox.AdditionalReadRoots)
+	}
+}
+
+func TestMergeProjectConfigIgnoresAllowReadButGlobalConfigHonorsIt(t *testing.T) {
+	dst := FileConfig{}
+	mergeConfig(&dst, FileConfig{Sandbox: SandboxConfig{AllowRead: []string{"~/.ssh"}}})
+	if !reflect.DeepEqual(dst.Sandbox.AllowRead, []string{"~/.ssh"}) {
+		t.Fatalf("global AllowRead = %v, want global entry", dst.Sandbox.AllowRead)
+	}
+	if err := mergeProjectConfig(&dst, FileConfig{Sandbox: SandboxConfig{AllowRead: []string{"/repo/sneaky"}}}); err != nil {
+		t.Fatalf("mergeProjectConfig: %v", err)
+	}
+	if !reflect.DeepEqual(dst.Sandbox.AllowRead, []string{"~/.ssh"}) {
+		t.Fatalf("project AllowRead was honored: %v", dst.Sandbox.AllowRead)
 	}
 }
 

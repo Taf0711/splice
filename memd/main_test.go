@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net"
@@ -118,6 +119,44 @@ func TestUpsertAndSearchRoundTrip(t *testing.T) {
 	obsList := searchResp["observations"].([]any)
 	if len(obsList) == 0 {
 		t.Fatal("search: expected at least 1 observation, got 0")
+	}
+}
+
+func TestRecentRoute(t *testing.T) {
+	srv := newTestServer(t)
+	obs := &store.Observation{
+		ProjectPath: sql.NullString{String: "/workspace", Valid: true},
+		Scope:       "project",
+		OwnerAgent:  "tui",
+		Visibility:  "private",
+		MemoryType:  "note",
+		Title:       "recent note",
+		Content:     "listed without FTS",
+	}
+	if _, err := srv.store.UpsertObservation(context.Background(), obs); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	body, _ := json.Marshal(searchRequest{
+		ProjectPath:     "/workspace",
+		RequestingAgent: "tui",
+		Scopes:          []string{"project", "global"},
+		Limit:           10,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/recent", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.handleRecent(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("recent: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode recent response: %v", err)
+	}
+	if resp["ok"] != true {
+		t.Fatalf("recent: expected ok=true, got %v", resp)
+	}
+	if len(resp["observations"].([]any)) != 1 {
+		t.Fatalf("recent: expected one observation, got %v", resp["observations"])
 	}
 }
 

@@ -141,6 +141,7 @@ const optionalBinaries =
     : platform === 'linux'
       ? ['splice-linux-sandbox', 'splice-seccomp']
       : [];
+optionalBinaries.push(platform === 'windows' ? 'splice-memd.exe' : 'splice-memd');
 
 if (process.env.SPLICE_INSTALL_DRY_RUN === '1') {
   process.stdout.write(

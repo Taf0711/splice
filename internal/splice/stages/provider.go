@@ -13,11 +13,21 @@ import (
 //go:embed prompts/pipeline_meta.md
 var pipelineMetaPrompt string
 
-// composeSystemPrompt prepends the pipeline-level meta prompt to a stage's
-// own system prompt so every model understands its place in the multi-model
-// system and the typed input/output contract.
+//go:embed prompts/splice_overview.md
+var spliceOverviewPrompt string
+
+// SpliceOverviewPrompt is the phase-level framing shared by every model-backed
+// agent, including the design conversation. It deliberately excludes the
+// execution-phase typed input/output contract, which does not apply to a
+// free-form conversation with real read tools.
+func SpliceOverviewPrompt() string {
+	return spliceOverviewPrompt
+}
+
+// composeSystemPrompt builds an execution-phase stage's system prompt: the
+// shared overview, then the pipeline contract, then the stage's own prompt.
 func composeSystemPrompt(stagePrompt string) string {
-	return pipelineMetaPrompt + "\n\n" + stagePrompt
+	return spliceOverviewPrompt + "\n\n" + pipelineMetaPrompt + "\n\n" + stagePrompt
 }
 
 const maxTypedToolAttempts = 3
@@ -64,7 +74,7 @@ func withCollectedUsage(err error, collected *zeroruntime.CollectedStream) error
 
 // callToolUse runs a single-turn tool-use completion and returns the collected stream.
 // If callbacks are provided, text and tool-call events are forwarded.
-func callToolUse(ctx context.Context, provider zeroruntime.Provider, model, reasoningEffort, systemPrompt, userPrompt string, images []zeroruntime.ImageBlock, tool zeroruntime.ToolDefinition, callbacks *zeroruntime.CollectOptions) (*zeroruntime.CollectedStream, error) {
+func callToolUse(ctx context.Context, provider zeroruntime.Provider, model, reasoningEffort, systemPrompt, userPrompt string, images []zeroruntime.ImageBlock, tool zeroruntime.ToolDefinition, callbacks *zeroruntime.CollectOptions, promptCacheKey string) (*zeroruntime.CollectedStream, error) {
 	messages := []zeroruntime.Message{
 		{Role: zeroruntime.MessageRoleSystem, Content: systemPrompt},
 		{Role: zeroruntime.MessageRoleUser, Content: userPrompt, Images: images},
@@ -73,6 +83,7 @@ func callToolUse(ctx context.Context, provider zeroruntime.Provider, model, reas
 		Messages:        messages,
 		Tools:           []zeroruntime.ToolDefinition{tool},
 		ReasoningEffort: reasoningEffort,
+		PromptCacheKey:  promptCacheKey,
 		// Force the model to call this stage's single typed tool so a prose
 		// answer cannot strand the typed-output retry loop. Empty keeps auto
 		// behavior; callToolUse always passes exactly one tool, so forcing its
@@ -98,7 +109,7 @@ func callToolUse(ctx context.Context, provider zeroruntime.Provider, model, reas
 // stream, and cancellation errors return immediately. The original typed input
 // is repeated with bounded corrective feedback because local OpenAI-compatible
 // models often recover when the required tool and JSON defect are explicit.
-func callValidatedToolUse(ctx context.Context, provider zeroruntime.Provider, model, reasoningEffort, systemPrompt, userPrompt string, images []zeroruntime.ImageBlock, tool zeroruntime.ToolDefinition, callbacks *zeroruntime.CollectOptions, validate func(*zeroruntime.CollectedStream) error) (*zeroruntime.CollectedStream, error) {
+func callValidatedToolUse(ctx context.Context, provider zeroruntime.Provider, model, reasoningEffort, systemPrompt, userPrompt string, images []zeroruntime.ImageBlock, tool zeroruntime.ToolDefinition, callbacks *zeroruntime.CollectOptions, validate func(*zeroruntime.CollectedStream) error, promptCacheKey string) (*zeroruntime.CollectedStream, error) {
 	var total zeroruntime.Usage
 	attemptPrompt := userPrompt
 	var lastErr error
@@ -106,7 +117,7 @@ func callValidatedToolUse(ctx context.Context, provider zeroruntime.Provider, mo
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		collected, err := callToolUse(ctx, provider, model, reasoningEffort, systemPrompt, attemptPrompt, images, tool, callbacks)
+		collected, err := callToolUse(ctx, provider, model, reasoningEffort, systemPrompt, attemptPrompt, images, tool, callbacks, promptCacheKey)
 		if err != nil {
 			return collected, err
 		}
@@ -158,15 +169,15 @@ func findToolCall(collected *zeroruntime.CollectedStream, name string) *zerorunt
 }
 
 // usageFromCollected converts the provider stream's normalized Usage into a
-// typed StageUsage for the orchestrator ledger. Returns nil when no real
-// usage was reported (both input and output are zero), so nil-memory runs
-// stay byte-identical and the StageRecord keeps zero fields.
+// typed StageUsage for the orchestrator ledger. Returns nil when no token or
+// web-search usage was reported, so nil-memory runs stay byte-identical and
+// the StageRecord keeps zero fields.
 func usageFromCollected(collected *zeroruntime.CollectedStream) *schemas.StageUsage {
 	if collected == nil {
 		return nil
 	}
 	u := collected.Usage
-	if u.InputTokens == 0 && u.OutputTokens == 0 {
+	if u.InputTokens == 0 && u.OutputTokens == 0 && u.WebSearchRequests == 0 {
 		return nil
 	}
 	return &schemas.StageUsage{
@@ -175,5 +186,7 @@ func usageFromCollected(collected *zeroruntime.CollectedStream) *schemas.StageUs
 		CachedInputTokens: u.CachedInputTokens,
 		CacheWriteTokens:  u.CacheWriteTokens,
 		ReasoningTokens:   u.ReasoningTokens,
+		WebSearchRequests: u.WebSearchRequests,
+		WebSearchEngine:   u.WebSearchEngine,
 	}
 }

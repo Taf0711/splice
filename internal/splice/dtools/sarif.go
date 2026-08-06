@@ -116,7 +116,7 @@ func (t sarifTool) Run(ctx context.Context, args map[string]any) tools.Result {
 	cmd := exec.CommandContext(ctx, scannerPath, cmdArgs...)
 	cmd.Dir = t.workspaceRoot
 
-	out, err := cmd.CombinedOutput()
+	out, err := cmd.Output()
 	if ctx.Err() != nil {
 		return tools.Result{
 			Status: tools.StatusError,
@@ -124,13 +124,20 @@ func (t sarifTool) Run(ctx context.Context, args map[string]any) tools.Result {
 		}
 	}
 	if err != nil {
-		if _, isExit := err.(*exec.ExitError); !isExit {
+		exitErr, isExit := err.(*exec.ExitError)
+		if !isExit {
 			return tools.Result{
 				Status: tools.StatusError,
 				Output: "SARIF scanner is not installed or not available: " + err.Error(),
 			}
 		}
 		// Scanner produced output with a non-zero exit (common with findings).
+		if len(out) == 0 {
+			return tools.Result{
+				Status: tools.StatusError,
+				Output: string(exitErr.Stderr),
+			}
+		}
 	}
 
 	return tools.Result{

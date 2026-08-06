@@ -62,6 +62,28 @@ function Find-ZeroExtractedFile {
   throw "Release archive did not contain exactly one $FileName"
 }
 
+function Find-ZeroOptionalExtractedFile {
+  param(
+    [string]$Root,
+    [string]$FileName
+  )
+
+  $candidate = Join-Path $Root $FileName
+  if (Test-Path $candidate -PathType Leaf) {
+    return $candidate
+  }
+
+  $matches = @(Get-ChildItem -Path $Root -Filter $FileName -File -Recurse)
+  if ($matches.Count -eq 0) {
+    return $null
+  }
+  if ($matches.Count -eq 1) {
+    return $matches[0].FullName
+  }
+
+  throw "Release archive contained multiple $FileName files"
+}
+
 function Test-ZeroPathContainsDir {
   param(
     [string]$PathValue,
@@ -142,13 +164,22 @@ try {
 
   New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
   $requiredFiles = @(
-    "splice.exe",
-    "splice-windows-command-runner.exe",
-    "splice-windows-sandbox-setup.exe"
+    "splice.exe"
   )
   foreach ($fileName in $requiredFiles) {
     $sourcePath = Find-ZeroExtractedFile -Root $extractDir -FileName $fileName
     Copy-Item -Path $sourcePath -Destination (Join-Path $InstallDir $fileName) -Force
+  }
+  $optionalFiles = @(
+    "splice-memd.exe",
+    "splice-windows-command-runner.exe",
+    "splice-windows-sandbox-setup.exe"
+  )
+  foreach ($fileName in $optionalFiles) {
+    $sourcePath = Find-ZeroOptionalExtractedFile -Root $extractDir -FileName $fileName
+    if ($null -ne $sourcePath) {
+      Copy-Item -Path $sourcePath -Destination (Join-Path $InstallDir $fileName) -Force
+    }
   }
   $helpersPath = Find-ZeroOptionalExtractedDirectory -Root $extractDir -DirectoryName "helpers"
   if ($null -ne $helpersPath) {

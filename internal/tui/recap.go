@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -17,8 +18,11 @@ const (
 	// wedge the background command.
 	recapTimeout = 30 * time.Second
 	// recapMaxAnswerChars bounds how much of the final answer feeds the recap
-	// prompt — the gist is enough, and it keeps the call cheap.
+	// prompt. The gist is enough, and it keeps the call cheap.
 	recapMaxAnswerChars = 1600
+	// recapMinAnswerChars avoids recaps that merely restate short answers; one
+	// recap sentence is 80 to 120 characters, so shorter answers need no compression.
+	recapMinAnswerChars = 600
 )
 
 const recapSystemPrompt = "You write ONE short, plain-English sentence summarizing what the assistant just did this turn, for a transcript footnote. " +
@@ -87,11 +91,23 @@ func (m model) generateRecapCmd(runID int, answer string) tea.Cmd {
 	}
 }
 
-// maybeRecapTurn fires a one-shot recap generation after a successful turn, when
-// recaps are enabled, a provider exists, and there is a final answer. It is a
-// no-op otherwise, and the per-run gate prevents a double-fire for the same turn.
-func (m model) maybeRecapTurn(runID int, answer string) (model, tea.Cmd) {
-	if !m.recapsEnabled || m.provider == nil || strings.TrimSpace(answer) == "" {
+// maybeRecapTurn fires a one-shot recap generation after a successful turn when
+// recaps are enabled, a provider exists, the turn did real work, and the final
+// answer is long enough to benefit from compression. It is a no-op otherwise,
+// and the per-run gate prevents a double-fire for the same turn.
+func (m model) maybeRecapTurn(runID int, rows []transcriptRow) (model, tea.Cmd) {
+	var finalAnswer string
+	toolCalls := 0
+	for _, row := range rows {
+		if row.kind == rowToolCall {
+			toolCalls++
+		}
+		if row.kind == rowAssistant && row.final {
+			finalAnswer = row.text
+		}
+	}
+	if !m.recapsEnabled || m.provider == nil || toolCalls == 0 ||
+		utf8.RuneCountInString(strings.TrimSpace(finalAnswer)) < recapMinAnswerChars {
 		return m, nil
 	}
 	if m.recappedRuns[runID] {
@@ -101,7 +117,7 @@ func (m model) maybeRecapTurn(runID int, answer string) (model, tea.Cmd) {
 		m.recappedRuns = map[int]bool{}
 	}
 	m.recappedRuns[runID] = true
-	return m, m.generateRecapCmd(runID, answer)
+	return m, m.generateRecapCmd(runID, finalAnswer)
 }
 
 // handleRecapGenerated appends the finished recap as a footnote row. A failed or

@@ -355,7 +355,9 @@ type compactionState struct {
 	// onUsage forwards the summarizer call's token usage for accounting/budgeting.
 	// OnText is deliberately NOT forwarded (compaction stays invisible to the user),
 	// but its token COST must still be counted so usage reports and budgets include it.
-	onUsage func(Usage)
+	onUsage           func(Usage)
+	onCompactionUsage func(Usage, string)
+	model             func() string
 
 	// calibrationRatio scales the raw byte/4 token estimate toward the provider's
 	// real prompt-token count. ApproxTextTokens over-counts code-heavy content by
@@ -408,12 +410,14 @@ func newCompactionState(options Options) *compactionState {
 		threshold = reserveThreshold
 	}
 	return &compactionState{
-		enabled:          options.ContextWindow > 0,
-		threshold:        threshold,
-		preserveLast:     options.CompactionPreserveLast,
-		reserveTokens:    options.CompactionReserveTokens,
-		keepRecentTokens: options.CompactionKeepRecentTokens,
-		onUsage:          options.OnUsage,
+		enabled:           options.ContextWindow > 0,
+		threshold:         threshold,
+		preserveLast:      options.CompactionPreserveLast,
+		reserveTokens:     options.CompactionReserveTokens,
+		keepRecentTokens:  options.CompactionKeepRecentTokens,
+		onUsage:           options.OnUsage,
+		onCompactionUsage: options.OnCompactionUsage,
+		model:             func() string { return options.Model },
 	}
 }
 
@@ -461,7 +465,7 @@ func (state *compactionState) maybeCompact(
 	compacted, err := Compact(messages, CompactionOptions{
 		PreserveLast:     state.preserveLast,
 		KeepRecentTokens: state.keepRecentTokens,
-		Summarize:        summarizeClosure(ctx, provider, state.onUsage),
+		Summarize:        summarizeClosure(ctx, provider, state.compactionUsage),
 	})
 	if err != nil {
 		// Summarizer failed: keep the original history. The reactive path (or a
@@ -506,7 +510,7 @@ func (state *compactionState) recover(
 	result, compactErr := Compact(messages, CompactionOptions{
 		PreserveLast:     state.preserveLast,
 		KeepRecentTokens: state.keepRecentTokens,
-		Summarize:        summarizeClosure(ctx, provider, state.onUsage),
+		Summarize:        summarizeClosure(ctx, provider, state.compactionUsage),
 	})
 	if compactErr != nil {
 		// A genuine compaction attempt was made (and failed): the budget is spent
@@ -538,6 +542,23 @@ func (state *compactionState) recover(
 func summarizeClosure(ctx context.Context, provider Provider, onUsage func(Usage)) func([]zeroruntime.Message) (string, error) {
 	return func(toSummarize []zeroruntime.Message) (string, error) {
 		return summarizeWithFallback(ctx, provider, toSummarize, onUsage)
+	}
+}
+
+// compactionUsage selects the labelled sink when available and otherwise keeps
+// the legacy bare usage callback. The model is read for each provider usage
+// event, so a mid-run escalation cannot leave a stale model label.
+func (state *compactionState) compactionUsage(u Usage) {
+	if state.onCompactionUsage != nil {
+		model := ""
+		if state.model != nil {
+			model = state.model()
+		}
+		state.onCompactionUsage(u, model)
+		return
+	}
+	if state.onUsage != nil {
+		state.onUsage(u)
 	}
 }
 

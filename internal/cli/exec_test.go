@@ -23,8 +23,30 @@ import (
 	"github.com/Taf0711/splice/internal/sessions"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/tools"
+	"github.com/Taf0711/splice/internal/usage"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
+
+// TestMain sandboxes the Splice session store's default location for every test
+// in this package. Since exec.go started preparing a session for EVERY exec run
+// (including a plain `splice exec "prompt"` with no session flags, tagged
+// ephemeral — see execSessionHasExplicitReason/SessionKindEphemeral), a test
+// that never sets XDG_DATA_HOME itself — most of this file, which never needed
+// to touch sessions before — would otherwise create real session directories
+// under the developer's actual $XDG_DATA_HOME/splice/sessions (sessions.NewStore
+// falls back to it when nothing overrides it) on every `go test`. Point the
+// default at a disposable temp dir up front; individual tests that need their
+// own isolated store still call t.Setenv, which layers correctly on top of this.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "splice-cli-test-sessions-")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("XDG_DATA_HOME", dir)
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
 
 // TestPipelineNeverReadsContextWindow guards the invariant that exec.go:604's
 // pipeline runOptions leaves ContextWindow unset (compaction is inert under
@@ -400,6 +422,80 @@ func TestRunExecPersistsCallingSessionChildMetadata(t *testing.T) {
 		child.Tag != "specialist" ||
 		child.Depth != 1 {
 		t.Fatalf("unexpected child metadata: %#v", child)
+	}
+}
+
+// TestRunExecPlainRunRecordsUsageInEphemeralSession is the core regression test
+// for the "plain exec records no usage at all" bug: a bare `splice exec
+// "prompt"` with none of --resume/--fork/--output-format stream-json/
+// --init-session-id must still create a session (tagged SessionKindEphemeral,
+// not shown in `splice sessions`' default listing — see TestRunSessionsList
+// ExcludesEphemeralByDefault in sessions_test.go) and persist a usage event that
+// usage.BuildReport can read back — previously prepared.Store was nil for this
+// path, so every append (usage, messages, tool calls) silently no-opped.
+func TestRunExecPlainRunRecordsUsageInEphemeralSession(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	cwd := t.TempDir()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"exec", "hello"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return newExecStageAwareProvider(execStageProviderOptions{
+				Usage: zeroruntime.Usage{InputTokens: 11, OutputTokens: 13},
+			}), nil
+		},
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("exitCode = %d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "session not recorded") {
+		t.Fatalf("unexpected session-recording warning: %s", stderr.String())
+	}
+
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: filepath.Join(dataHome, "splice", "sessions")})
+	items, err := store.List()
+	if err != nil {
+		t.Fatalf("List returned error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected exactly one session for a plain exec run, got %d: %#v", len(items), items)
+	}
+	session := items[0]
+	if session.SessionKind != sessions.SessionKindEphemeral {
+		t.Fatalf("session kind = %q, want %q", session.SessionKind, sessions.SessionKindEphemeral)
+	}
+
+	events, err := store.ReadEvents(session.SessionID)
+	if err != nil {
+		t.Fatalf("ReadEvents returned error: %v", err)
+	}
+	sawUsage := false
+	for _, event := range events {
+		if event.Type == sessions.EventUsage {
+			sawUsage = true
+		}
+	}
+	if !sawUsage {
+		t.Fatalf("expected at least one usage event, got events = %#v", events)
+	}
+
+	// The acceptance bar: usage.BuildReport (the same aggregator `splice usage`
+	// runs) must be able to read these events back into non-zero totals. A nil
+	// registry is fine here — BuildReport treats it as "skip cost, keep tokens".
+	report, err := usage.BuildReport(events, items, nil, 0)
+	if err != nil {
+		t.Fatalf("BuildReport returned error: %v", err)
+	}
+	if report.Total.InputTokens <= 0 || report.Total.OutputTokens <= 0 || report.Total.Requests <= 0 {
+		t.Fatalf("report.Total = %#v, want positive input/output/requests", report.Total)
 	}
 }
 

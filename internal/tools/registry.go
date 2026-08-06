@@ -5,6 +5,7 @@ import (
 
 	"github.com/Taf0711/splice/internal/redaction"
 	"github.com/Taf0711/splice/internal/sandbox"
+	"github.com/Taf0711/splice/internal/skills"
 	"github.com/Taf0711/splice/internal/streamjson"
 )
 
@@ -252,7 +253,7 @@ func CoreReadOnlyTools(workspaceRoot string) []Tool {
 	return CoreReadOnlyToolsScoped(workspaceRoot, nil)
 }
 func CoreReadOnlyToolsScoped(workspaceRoot string, scope PathScope) []Tool {
-	return []Tool{
+	toolset := []Tool{
 		NewScopedReadFileTool(workspaceRoot, scope),
 		NewScopedReadMinifiedFileTool(workspaceRoot, scope),
 		NewScopedListDirectoryTool(workspaceRoot, scope),
@@ -263,15 +264,46 @@ func CoreReadOnlyToolsScoped(workspaceRoot string, scope PathScope) []Tool {
 		// workspace, and degrades to a clear "unavailable" when no server is
 		// installed for the file type.
 		NewScopedLSPNavigateTool(workspaceRoot, scope),
-		// skill reads reusable instruction files from the skills dir (it resolves
-		// skills.DefaultDir itself); read-only, so it is safe in the core/MCP set.
-		NewSkillTool(""),
 		NewAskUserTool(),
 		NewRequestPermissionsTool(),
+		// skill reads reusable instruction files from the skills dir (it resolves
+		// skills.DefaultDir itself); read-only, so it is safe in the core/MCP set.
+		// An empty skills directory is filtered out at the registration site by
+		// WithoutEmptyBackedTools, not here: this constructor stays a pure
+		// function of its arguments so tests do not depend on the host's home
+		// directory.
+		NewSkillTool(""),
 	}
+	return toolset
 }
 
-func CoreWriteTools(workspaceRoot string) []Tool { return CoreWriteToolsScoped(workspaceRoot, nil) }
+// SkillToolName is the registered name of the skill tool.
+const SkillToolName = "skill"
+
+// WithoutEmptyBackedTools drops tools whose backing set is empty, so the model
+// is never shown a capability that cannot work. A skill tool with no installed
+// skills answers every call with an error, which costs the model a turn to
+// discover. Call this at the registration site, where reading the host's
+// filesystem is expected; the Core*Tools constructors stay pure.
+func WithoutEmptyBackedTools(toolset []Tool) []Tool {
+	if skillsInstalled() {
+		return toolset
+	}
+	filtered := make([]Tool, 0, len(toolset))
+	for _, tool := range toolset {
+		if tool.Name() == SkillToolName {
+			continue
+		}
+		filtered = append(filtered, tool)
+	}
+	return filtered
+}
+
+func skillsInstalled() bool {
+	listed, err := skills.List(skills.DefaultDir(nil))
+	return err == nil && len(listed) > 0
+}
+
 func CoreWriteToolsScoped(workspaceRoot string, scope PathScope) []Tool {
 	return []Tool{
 		NewScopedWriteFileTool(workspaceRoot, scope),
@@ -282,7 +314,6 @@ func CoreWriteToolsScoped(workspaceRoot string, scope PathScope) []Tool {
 	}
 }
 
-func CoreShellTools(workspaceRoot string) []Tool { return CoreShellToolsScoped(workspaceRoot, nil) }
 func CoreShellToolsScoped(workspaceRoot string, scope PathScope) []Tool {
 	execManager := newExecSessionManager()
 	return []Tool{

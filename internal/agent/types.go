@@ -52,6 +52,12 @@ type AttributedUsage struct {
 	Stage         string
 	Iteration     int
 	Cost          UsageCostEstimate
+	// ReportedCostUSD is a provider-reported exact billed charge for this
+	// request (e.g. OpenRouter's usage.cost), when the provider supplied one.
+	// nil means no reported cost; Cost is then the usual registry estimate.
+	// It lives here rather than on Usage because Usage is rebuilt from plain
+	// numeric literals at several call sites that would silently drop it.
+	ReportedCostUSD *float64
 }
 
 // ModelSelection is one resolved provider route for a pipeline stage.
@@ -358,6 +364,10 @@ type Options struct {
 	OnAskUser           func(context.Context, AskUserRequest) (AskUserResponse, error)
 	OnToolResult        func(ToolResult)
 	OnUsage             func(Usage)
+	// OnCompactionUsage, when set, receives summarizer usage with the active
+	// model. It replaces OnUsage for compaction calls so callers can persist a
+	// stage label. When nil, compaction uses OnUsage unchanged.
+	OnCompactionUsage func(Usage, string)
 	// OnAttributedUsage, when set, is called exactly once per provider stream
 	// with the usage attributed to its provider, model, stage, and iteration.
 	// When set, the legacy OnUsage callback is NOT called (no double emit).

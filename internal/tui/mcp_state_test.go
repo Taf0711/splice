@@ -169,6 +169,7 @@ func TestBuildMCPViewStateSummarizesOAuthTokens(t *testing.T) {
 	}}
 	store, err := mcp.NewTokenStore(mcp.TokenStoreOptions{
 		FilePath: t.TempDir() + "/tokens.json",
+		Storage:  "file",
 		Now:      func() time.Time { return now },
 	})
 	if err != nil {
@@ -236,7 +237,7 @@ func TestBuildMCPViewStateToleratesUnreadableStores(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPermissionStore() error = %v", err)
 	}
-	tokenStore, err := mcp.NewTokenStore(mcp.TokenStoreOptions{FilePath: t.TempDir() + "/tokens.json"})
+	tokenStore, err := mcp.NewTokenStore(mcp.TokenStoreOptions{FilePath: t.TempDir() + "/tokens.json", Storage: "file"})
 	if err != nil {
 		t.Fatalf("NewTokenStore() error = %v", err)
 	}

@@ -320,6 +320,7 @@ type ExecutionPlan struct {
 	RequestIntent          string           `json:"request_intent"`
 	Stages                 []ExecutionStage `json:"stages"`
 	TokenBudget            TokenBudget      `json:"token_budget"`
+	AcceptanceFacts        []AcceptanceFact `json:"acceptance_facts,omitempty"`
 	RequiredKnowledgeFiles []string         `json:"required_knowledge_files,omitempty"`
 }
 
@@ -338,6 +339,11 @@ func (e ExecutionPlan) Validate() error {
 	}
 	if len(e.Stages) == 0 {
 		return errors.New("at least one stage is required")
+	}
+	for i, fact := range e.AcceptanceFacts {
+		if err := fact.Validate(); err != nil {
+			return fmt.Errorf("acceptance_facts[%d]: %w", i, err)
+		}
 	}
 	stageNames := make(map[string]struct{}, len(e.Stages))
 	for i, stage := range e.Stages {
@@ -401,22 +407,24 @@ func detectCycle(deps map[string][]string) string {
 
 // StageRecord is a persistable summary of an executed stage.
 type StageRecord struct {
-	Name             string      `json:"name"`
-	Status           StageStatus `json:"status"`
-	Iteration        int         `json:"iteration"`
-	Provider         *string     `json:"provider,omitempty"`
-	Model            *string     `json:"model,omitempty"`
-	Confidence       *float64    `json:"confidence,omitempty"`
-	OutputSummary    *string     `json:"output_summary,omitempty"`
-	Activity         *string     `json:"activity,omitempty"`
-	TokensInput      int         `json:"tokens_input"`
-	TokensOutput     int         `json:"tokens_output"`
-	TokensCached     int         `json:"tokens_cached"`
-	TokensCacheWrite int         `json:"tokens_cache_write"`
-	TokensReasoning  int         `json:"tokens_reasoning"`
-	CostUSD          float64     `json:"cost_usd"`
-	LatencyMs        int         `json:"latency_ms"`
-	CommitSHA        *string     `json:"commit_sha,omitempty"`
+	Name              string      `json:"name"`
+	Status            StageStatus `json:"status"`
+	Iteration         int         `json:"iteration"`
+	Provider          *string     `json:"provider,omitempty"`
+	Model             *string     `json:"model,omitempty"`
+	Confidence        *float64    `json:"confidence,omitempty"`
+	OutputSummary     *string     `json:"output_summary,omitempty"`
+	Activity          *string     `json:"activity,omitempty"`
+	TokensInput       int         `json:"tokens_input"`
+	TokensOutput      int         `json:"tokens_output"`
+	TokensCached      int         `json:"tokens_cached"`
+	TokensCacheWrite  int         `json:"tokens_cache_write"`
+	TokensReasoning   int         `json:"tokens_reasoning"`
+	WebSearchRequests int         `json:"web_search_requests"`
+	WebSearchEngine   string      `json:"web_search_engine,omitempty"`
+	CostUSD           float64     `json:"cost_usd"`
+	LatencyMs         int         `json:"latency_ms"`
+	CommitSHA         *string     `json:"commit_sha,omitempty"`
 }
 
 // Validate checks the stage record.
@@ -440,6 +448,9 @@ func (s StageRecord) Validate() error {
 	if s.TokensInput < 0 || s.TokensOutput < 0 || s.TokensCached < 0 || s.TokensCacheWrite < 0 || s.TokensReasoning < 0 {
 		return errors.New("token counts must be non-negative")
 	}
+	if s.WebSearchRequests < 0 {
+		return errors.New("web search requests must be non-negative")
+	}
 	if s.TokensCached > s.TokensInput || s.TokensCacheWrite > s.TokensInput-s.TokensCached {
 		return errors.New("cached and cache-write tokens must be disjoint input subsets")
 	}
@@ -462,10 +473,23 @@ type HarnessStageInput struct {
 	Sequence        int               `json:"sequence"`
 	PlanTier        PipelineTier      `json:"plan_tier"`
 	RequestIntent   string            `json:"request_intent"`
+	AcceptanceFacts []AcceptanceFact  `json:"acceptance_facts,omitempty"`
 	PriorSummaries  map[string]string `json:"prior_summaries,omitempty"`
-	RevisionContext *string           `json:"revision_context,omitempty"`
-	Context         *ContextBundle    `json:"context,omitempty"`
-	MemoryBundle    *MemoryBundle     `json:"memory_bundle,omitempty"`
+	// PriorChangedFiles carries structured paths from completed earlier stages.
+	// It complements PriorSummaries, which remains the prose hand-off channel.
+	PriorChangedFiles map[string][]string `json:"prior_changed_files,omitempty"`
+	RevisionContext   *string             `json:"revision_context,omitempty"`
+	Context           *ContextBundle      `json:"context,omitempty"`
+	MemoryBundle      *MemoryBundle       `json:"memory_bundle,omitempty"`
+	// PipelineStages is the full ordered roster of stage names for this run,
+	// so a stage can see what will (and will not) run after it. Empty outside
+	// a tier pipeline (e.g. design-phase stages), where no roster applies.
+	PipelineStages []string `json:"pipeline_stages,omitempty"`
+	// NextStage is the stage that consumes this stage's output, derivable as
+	// PipelineStages[Sequence] (0-indexed) — included directly so the common
+	// case needs no lookup. Empty when this is the last stage, or when
+	// PipelineStages is empty.
+	NextStage string `json:"next_stage,omitempty"`
 }
 
 // Validate checks the harness stage input.
@@ -481,6 +505,11 @@ func (h HarnessStageInput) Validate() error {
 	}
 	if h.RequestIntent == "" {
 		return errors.New("request_intent is required")
+	}
+	for i, fact := range h.AcceptanceFacts {
+		if err := fact.Validate(); err != nil {
+			return fmt.Errorf("acceptance_facts[%d]: %w", i, err)
+		}
 	}
 	switch h.PlanTier {
 	case TierTrivial, TierLight, TierStandard, TierSubstantial, TierArchitectural:
@@ -501,13 +530,16 @@ func (h HarnessStageInput) Validate() error {
 }
 
 // StageUsage is the typed token ledger a stage reports to the orchestrator.
-// The orchestrator copies it into StageRecord and sums it into PipelineResult.
+// The orchestrator copies it into StageRecord. Token values also contribute to
+// PipelineResult totals.
 type StageUsage struct {
-	InputTokens       int `json:"input_tokens"`
-	OutputTokens      int `json:"output_tokens"`
-	CachedInputTokens int `json:"cached_input_tokens"`
-	CacheWriteTokens  int `json:"cache_write_tokens"`
-	ReasoningTokens   int `json:"reasoning_tokens"`
+	InputTokens       int    `json:"input_tokens"`
+	OutputTokens      int    `json:"output_tokens"`
+	CachedInputTokens int    `json:"cached_input_tokens"`
+	CacheWriteTokens  int    `json:"cache_write_tokens"`
+	ReasoningTokens   int    `json:"reasoning_tokens"`
+	WebSearchRequests int    `json:"web_search_requests"`
+	WebSearchEngine   string `json:"web_search_engine,omitempty"`
 }
 
 // HarnessStageOutput is minimal typed output returned by harness agents.
@@ -550,23 +582,25 @@ const (
 
 // PipelineUsageRecord is one provider request priced at the orchestrator ledger.
 type PipelineUsageRecord struct {
-	Sequence       int      `json:"sequence"`
-	Provider       string   `json:"provider,omitempty"`
-	Model          string   `json:"model,omitempty"`
-	Stage          string   `json:"stage"`
-	Iteration      int      `json:"iteration"`
-	UsageReported  bool     `json:"usage_reported"`
-	InputTokens    int      `json:"input_tokens"`
-	OutputTokens   int      `json:"output_tokens"`
-	CachedTokens   int      `json:"cached_input_tokens"`
-	CacheWrite     int      `json:"cache_write_tokens"`
-	Reasoning      int      `json:"reasoning_tokens"`
-	CostUSD        *float64 `json:"cost_usd,omitempty"`
-	CostStatus     string   `json:"cost_status"`
-	CostProvenance string   `json:"cost_provenance,omitempty"`
-	PricingSource  string   `json:"pricing_source,omitempty"`
-	PricingAsOf    string   `json:"pricing_as_of,omitempty"`
-	UnpricedReason string   `json:"unpriced_reason,omitempty"`
+	Sequence          int      `json:"sequence"`
+	Provider          string   `json:"provider,omitempty"`
+	Model             string   `json:"model,omitempty"`
+	Stage             string   `json:"stage"`
+	Iteration         int      `json:"iteration"`
+	UsageReported     bool     `json:"usage_reported"`
+	InputTokens       int      `json:"input_tokens"`
+	OutputTokens      int      `json:"output_tokens"`
+	CachedTokens      int      `json:"cached_input_tokens"`
+	CacheWrite        int      `json:"cache_write_tokens"`
+	Reasoning         int      `json:"reasoning_tokens"`
+	WebSearchRequests int      `json:"web_search_requests"`
+	WebSearchEngine   string   `json:"web_search_engine,omitempty"`
+	CostUSD           *float64 `json:"cost_usd,omitempty"`
+	CostStatus        string   `json:"cost_status"`
+	CostProvenance    string   `json:"cost_provenance,omitempty"`
+	PricingSource     string   `json:"pricing_source,omitempty"`
+	PricingAsOf       string   `json:"pricing_as_of,omitempty"`
+	UnpricedReason    string   `json:"unpriced_reason,omitempty"`
 }
 
 // Validate checks the pipeline usage record.
@@ -583,6 +617,9 @@ func (r PipelineUsageRecord) Validate() error {
 	if r.InputTokens < 0 || r.OutputTokens < 0 || r.CachedTokens < 0 || r.CacheWrite < 0 || r.Reasoning < 0 {
 		return errors.New("token counts must be non-negative")
 	}
+	if r.WebSearchRequests < 0 {
+		return errors.New("web search requests must be non-negative")
+	}
 	if r.CachedTokens > r.InputTokens {
 		return fmt.Errorf("cached input tokens %d exceeds input tokens %d", r.CachedTokens, r.InputTokens)
 	}
@@ -593,8 +630,8 @@ func (r PipelineUsageRecord) Validate() error {
 		return fmt.Errorf("reasoning tokens %d exceeds output tokens %d", r.Reasoning, r.OutputTokens)
 	}
 	if !r.UsageReported {
-		if r.InputTokens != 0 || r.OutputTokens != 0 || r.CachedTokens != 0 || r.CacheWrite != 0 || r.Reasoning != 0 {
-			return errors.New("usage_reported false requires zero token counts")
+		if r.InputTokens != 0 || r.OutputTokens != 0 || r.CachedTokens != 0 || r.CacheWrite != 0 || r.Reasoning != 0 || r.WebSearchRequests != 0 {
+			return errors.New("usage_reported false requires zero usage counts")
 		}
 		if r.CostStatus != CostStatusUnpriced {
 			return errors.New("usage_reported false requires unpriced cost status")

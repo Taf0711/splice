@@ -74,6 +74,8 @@ const dragEdgeScrollStep = 1
 type model struct {
 	ctx                         context.Context
 	cwd                         string
+	trusted                     bool
+	trustStore                  *config.TrustStore
 	appVersion                  string
 	userCommands                []usercommands.Command // file-sourced /commands (.splice/commands)
 	loadSkills                  func() []skills.Skill  // lazy installed-skills loader for /skills + /<skill-name>
@@ -140,6 +142,7 @@ type model struct {
 	selfCorrectTests   bool
 	reasoningEffort    modelregistry.ReasoningEffort
 	responseStyle      string
+	asciiEnabled       bool
 	keyBindings        keyBindings
 	themeMode          themeMode // palette preference: auto (default), dark, light
 	hasDarkBg          bool      // last terminal background-detection result (auto mode)
@@ -156,20 +159,22 @@ type model struct {
 	// turnLatencySum / turnLatencyCount accumulate completed-run wall time so
 	// /context can show a rolling average turn latency (the "is it slow?" signal).
 	// Reset by /new.
-	turnLatencySum        time.Duration
-	turnLatencyCount      int
-	turnTTFTSum           time.Duration
-	turnTTFTCount         int
-	transcript            []transcriptRow
-	transcriptDetailed    bool
-	helpOverlay           bool // the `?` keyboard-shortcut overlay is open
-	transcriptBodyHeights *transcriptBodyHeightCache
-	input                 textinput.Model
-	composer              composerState
-	composerActive        bool
-	composerCursorVisible bool
-	composerPastePreviews []composerPastePreview
-	composerSelection     composerSelectionState
+	// turnVisibleOutputTokens supports the generation-time throughput clause.
+	turnLatencySum          time.Duration
+	turnLatencyCount        int
+	turnTTFTSum             time.Duration
+	turnTTFTCount           int
+	turnVisibleOutputTokens int
+	transcript              []transcriptRow
+	transcriptDetailed      bool
+	helpOverlay             bool // the `?` keyboard-shortcut overlay is open
+	transcriptBodyHeights   *transcriptBodyHeightCache
+	input                   textinput.Model
+	composer                composerState
+	composerActive          bool
+	composerCursorVisible   bool
+	composerPastePreviews   []composerPastePreview
+	composerSelection       composerSelectionState
 	// plan holds the sticky plan panel state (steps, expansion, timings)
 	// synced from the update_plan tool. See plan_panel.go.
 	plan                planPanelState
@@ -540,7 +545,8 @@ type agentResponseMsg struct {
 	turnElapsed time.Duration
 	// ttft is time-to-first-token for the turn (0 when nothing streamed — a
 	// tool-only or errored turn). Set only on the success path.
-	ttft time.Duration
+	ttft                    time.Duration
+	turnVisibleOutputTokens int
 	// Memory sidecar state captured by the run goroutine and applied on the
 	// main thread so the status line can show whether memory is active.
 	memoryStatus string
@@ -798,6 +804,7 @@ func newModel(ctx context.Context, options Options) model {
 	if permissionMode == "" {
 		permissionMode = agent.PermissionModeAuto
 	}
+	asciiEnabled := spliceASCIIEnabled(os.Getenv)
 
 	input := textinput.New()
 	input.Prompt = "∞ "
@@ -824,6 +831,8 @@ func newModel(ctx context.Context, options Options) model {
 	m := model{
 		ctx:                         ctx,
 		cwd:                         cwd,
+		trusted:                     options.Trusted,
+		trustStore:                  options.TrustStore,
 		appVersion:                  strings.TrimSpace(options.Version),
 		swarmDoneAt:                 map[string]time.Time{},
 		userCommands:                loadedUserCommands,
@@ -858,6 +867,7 @@ func newModel(ctx context.Context, options Options) model {
 		sessionCompactor:            options.SessionCompactor,
 		runtimeMessageSink:          options.RuntimeMessageSink,
 		permissionMode:              permissionMode,
+		asciiEnabled:                asciiEnabled,
 		reasoningEffort:             options.ReasoningEffort,
 		responseStyle:               defaultedResponseStyle(options.ResponseStyle),
 		keyBindings:                 resolvedKeyBindings,
@@ -2221,6 +2231,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.turnLatencySum += msg.turnElapsed
 			m.turnLatencyCount++
 		}
+		m.turnVisibleOutputTokens += msg.turnVisibleOutputTokens
 		if msg.ttft > 0 {
 			m.turnTTFTSum += msg.ttft
 			m.turnTTFTCount++
@@ -2239,13 +2250,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m, titleCmd = m.maybeAutoTitleActiveSession()
 			// Post-turn recap (gated on the recaps preference): one short sentence
 			// summarizing the turn's final answer, shown as a "※ recap:" footnote.
-			var finalAnswer string
-			for _, row := range msg.rows {
-				if row.kind == rowAssistant && row.final {
-					finalAnswer = row.text
-				}
-			}
-			m, recapCmd = m.maybeRecapTurn(msg.runID, finalAnswer)
+			m, recapCmd = m.maybeRecapTurn(msg.runID, msg.rows)
 		}
 		// End-of-turn git sweep: catch file mutations the tool stream couldn't
 		// report (bash scaffolding, subagent edits) so the FILES sidebar is
@@ -2300,6 +2305,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pendingPlan = &msg.plan
 				m.pendingCritique = nil
 				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: formatDesignPlan(msg.plan)})
+				if warning := designCoverageWarning(msg.plan); warning != "" {
+					m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: warning})
+				}
 				if msg.critique.Validate() == nil {
 					m.pendingCritique = &msg.critique
 					m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: formatPlanCritique(msg.critique)})
@@ -2327,6 +2335,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pendingPlan = &msg.plan
 		m.pendingCritique = &msg.critique
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: formatDesignPlan(msg.plan)})
+		if warning := designCoverageWarning(msg.plan); warning != "" {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: warning})
+		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: formatPlanCritique(msg.critique)})
 		if msg.critique.MustFixBeforeExecution {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Critic flagged must-fix issues. /approve is blocked. Revise and re-run /crystallize."})
@@ -2349,17 +2360,21 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.runCancel = nil
 		m.activeRunID = 0
+		// Refresh before the failure branch returns. A run that fails still
+		// appended events — the approval, the tasks that did start, and each
+		// stage's usage — and leaving those on disk only makes the live session
+		// disagree with its own log for exactly the run the user needs to inspect.
+		if msg.store != nil && msg.sessionID != "" {
+			if events, err := msg.store.ReadEvents(msg.sessionID); err == nil {
+				m.sessionEvents = events
+			}
+		}
 		if msg.err != nil {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Plan execution failed: " + msg.err.Error()})
 			return m, nil
 		}
 		m.designMode = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendAssistant, text: msg.result.FinalAnswer})
-		if msg.store != nil && msg.sessionID != "" {
-			if events, err := msg.store.ReadEvents(msg.sessionID); err == nil {
-				m.sessionEvents = events
-			}
-		}
 		m.pendingPlan = nil
 		m.pendingCritique = nil
 		return m, nil
@@ -2619,7 +2634,7 @@ func (m model) View() tea.View {
 		content = m.detailedTranscriptView()
 	}
 
-	view := tea.NewView(content)
+	view := tea.NewView(foldASCII(content, m.asciiEnabled))
 	view.AltScreen = m.altScreen
 	// Paint the whole frame with the active theme's surface. Splice never paints the
 	// terminal's own canvas, so without this a theme's text falls on the terminal
@@ -4308,6 +4323,9 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	case commandContext:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.contextText()})
 		return m, nil
+	case commandTrust:
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.trustText()})
+		return m, nil
 	case commandConfig:
 		if arg := strings.ToLower(strings.TrimSpace(command.text)); arg != "" {
 			var text string
@@ -4591,7 +4609,7 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 	// side-effect-free while still recording the design epoch for resume and
 	// showing the notice once.
 	if m.designMode && !m.designNoticeShown {
-		m = m.enterDesignMode("Planning mode. Describe what you want to build; Splice will crystallize a plan. Type /exec <prompt> to run a prompt directly through the pipeline.")
+		m = m.enterDesignMode(designModeNotice)
 		m.designNoticeShown = true
 	}
 	// A leading "@specialist <task>" is expanded into an explicit Task-delegation
@@ -4862,6 +4880,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		toolCalls := 0
 		rows := []transcriptRow{}
 		usageEvents := []zeroruntime.Usage{}
+		turnVisibleOutputTokens := 0
 		sessionEvents := []pendingSessionEvent{}
 		usageModelID := m.modelName
 		var specReview *pendingSpecReviewPrompt
@@ -5328,6 +5347,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		if runOptions.runKind == tuiRunPipeline {
 			options.OnUsage = func(event zeroruntime.Usage) {
 				usageEvents = append(usageEvents, event)
+				turnVisibleOutputTokens += event.VisibleOutputTokens()
 				sessionEvents = append(sessionEvents, pendingSessionEvent{
 					Type:    sessions.EventUsage,
 					Payload: usage.EventUsagePayload(event),
@@ -5341,6 +5361,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			estimator := usage.NewCostEstimator(&m.modelCatalog)
 			options.OnUsage = func(event zeroruntime.Usage) {
 				usageEvents = append(usageEvents, event)
+				turnVisibleOutputTokens += event.VisibleOutputTokens()
 				cost := estimator(usageModelID, event, true)
 				attributed := agent.AttributedUsage{
 					Usage:         event,
@@ -5358,6 +5379,26 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 					onUsage(event)
 				}
 			}
+			options.OnCompactionUsage = func(event zeroruntime.Usage, modelID string) {
+				usageEvents = append(usageEvents, event)
+				cost := estimator(modelID, event, true)
+				attributed := agent.AttributedUsage{
+					Usage:         event,
+					UsageReported: true,
+					ProviderName:  m.providerName,
+					Model:         modelID,
+					Stage:         "compaction",
+					Cost:          cost,
+				}
+				sessionEvents = append(sessionEvents, pendingSessionEvent{
+					Type:    sessions.EventUsage,
+					Payload: usage.AttributedUsagePayload(attributed),
+				})
+				m.sendAgentUsage(runID, modelID, event, &cost)
+				if onUsage != nil {
+					onUsage(event)
+				}
+			}
 		}
 
 		// Pipeline runs persist request attribution and use routed model prices.
@@ -5368,6 +5409,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			downstreamAU := options.OnAttributedUsage
 			options.OnAttributedUsage = func(au agent.AttributedUsage) {
 				usageEvents = append(usageEvents, au.Usage)
+				turnVisibleOutputTokens += au.Usage.VisibleOutputTokens()
 				payload := usage.AttributedUsagePayload(au)
 				sessionEvents = append(sessionEvents, pendingSessionEvent{
 					Type:    sessions.EventUsage,
@@ -5455,7 +5497,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				"content": result.FinalAnswer,
 			},
 		})
-		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, turnTools: toolCalls, turnElapsed: elapsed, ttft: ttft, memoryStatus: memStatus, memoryCount: memCount, memoryByType: memByType}
+		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, turnTools: toolCalls, turnElapsed: elapsed, ttft: ttft, turnVisibleOutputTokens: turnVisibleOutputTokens, memoryStatus: memStatus, memoryCount: memCount, memoryByType: memByType}
 	}
 }
 

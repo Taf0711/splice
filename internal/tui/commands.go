@@ -21,6 +21,7 @@ const (
 	commandProvider
 	commandModel
 	commandContext
+	commandTrust
 	commandConfig
 	commandDebug
 	commandDoctor
@@ -160,6 +161,13 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupSession,
 		description: "Show current workspace and runtime context.",
 		kind:        commandContext,
+	},
+	{
+		name:        "/trust",
+		usage:       "/trust",
+		group:       commandGroupSession,
+		description: "Trust this workspace on the next run.",
+		kind:        commandTrust,
 	},
 	{
 		name:        "/image",

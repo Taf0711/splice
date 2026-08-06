@@ -42,7 +42,10 @@ func thinkingBudgetForEffort(effort string) int {
 		return 4096
 	case "medium":
 		return 10000
-	case "high":
+	// xhigh and max are real enum members that this provider family is the
+	// reason for. They fell to the default below, which returns no budget at
+	// all — asking for the most thinking switched thinking off.
+	case "high", "xhigh", "max":
 		return 24000
 	default:
 		return 0

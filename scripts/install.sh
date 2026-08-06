@@ -226,6 +226,7 @@ cp "$binary_path" "$SPLICE_INSTALL_DIR/splice"
 chmod 755 "$SPLICE_INSTALL_DIR/splice"
 copy_optional_file "splice-linux-sandbox"
 copy_optional_file "splice-seccomp"
+copy_optional_file "splice-memd"
 copy_optional_dir "helpers"
 
 echo "Installed $SPLICE_INSTALL_DIR/splice"

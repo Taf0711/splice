@@ -163,10 +163,6 @@ func (provider *Provider) StreamCompletion(
 	return events, nil
 }
 
-func (provider *Provider) stream(ctx context.Context, body []byte, events chan<- zeroruntime.StreamEvent) {
-	provider.streamWithServerTool(ctx, body, false, events)
-}
-
 func (provider *Provider) streamWithServerTool(ctx context.Context, body []byte, serverToolEnabled bool, events chan<- zeroruntime.StreamEvent) {
 	endpoint := provider.endpoint
 
@@ -262,7 +258,8 @@ func (provider *Provider) streamWithServerTool(ctx context.Context, body []byte,
 		state.closeOpen(ctx, events)
 		if searches := state.webSearchRequestCount(); searches > 0 && (!state.usageSeen || state.usageReportedSearches != searches) {
 			state.lastUsage.WebSearchRequests = searches
-			sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: state.lastUsage})
+			state.lastUsage.WebSearchEngine = provider.webSearchEngine
+			sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: state.lastUsage, ReportedCostUSD: state.lastReportedCostUSD})
 		}
 		sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone, FinishReason: state.finishReason})
 	}
@@ -335,18 +332,32 @@ func (provider *Provider) emitChunk(
 	}
 
 	if chunk.Usage != nil {
+		searches := state.webSearchRequestCount()
+		searchEngine := ""
+		if searches > 0 {
+			searchEngine = provider.webSearchEngine
+		}
 		state.lastUsage = zeroruntime.Usage{
 			PromptTokens:      chunk.Usage.PromptTokens,
 			CompletionTokens:  chunk.Usage.CompletionTokens,
 			CachedInputTokens: chunk.Usage.PromptTokensDetails.CachedTokens,
 			ReasoningTokens:   chunk.Usage.CompletionTokensDetails.ReasoningTokens,
-			WebSearchRequests: state.webSearchRequestCount(),
+			WebSearchRequests: searches,
+			WebSearchEngine:   searchEngine,
 		}
 		state.usageSeen = true
 		state.usageReportedSearches = state.lastUsage.WebSearchRequests
+		// Only OpenRouter's "cost" field is trusted (see the field comment in
+		// types.go); every other provider leaves lastReportedCostUSD nil, so
+		// cost estimation is byte-identical to before this change.
+		if provider.isOpenRouter() && chunk.Usage.Cost != nil {
+			reported := *chunk.Usage.Cost
+			state.lastReportedCostUSD = &reported
+		}
 		sendEvent(ctx, events, zeroruntime.StreamEvent{
-			Type:  zeroruntime.StreamEventUsage,
-			Usage: state.lastUsage,
+			Type:            zeroruntime.StreamEventUsage,
+			Usage:           state.lastUsage,
+			ReportedCostUSD: state.lastReportedCostUSD,
 		})
 	}
 }
@@ -546,12 +557,16 @@ func promptCacheKeyDisabled() bool {
 }
 
 // openAIReasoningEffort normalizes a requested effort to a value the OpenAI chat
-// completions API accepts, or "" to omit the field. "none" (and anything else)
-// is dropped rather than risking a 400 on an unrecognized enum.
+// completions API accepts, or "" to omit the field. OpenAI has no warning channel
+// on this adapter, so clamp xhigh and max to high instead of silently dropping
+// the request. "none" (and anything else) is dropped rather than risking a 400
+// on an unrecognized enum.
 func openAIReasoningEffort(requested string) string {
 	switch strings.ToLower(strings.TrimSpace(requested)) {
 	case "minimal", "low", "medium", "high":
 		return strings.ToLower(strings.TrimSpace(requested))
+	case "xhigh", "max":
+		return "high"
 	default:
 		return ""
 	}

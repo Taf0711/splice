@@ -12,6 +12,7 @@ import (
 
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/config"
+	"github.com/Taf0711/splice/internal/notify"
 	"github.com/Taf0711/splice/internal/sessions"
 	splicerun "github.com/Taf0711/splice/internal/splice"
 	"github.com/Taf0711/splice/internal/splice/schemas"
@@ -19,6 +20,8 @@ import (
 	"github.com/Taf0711/splice/internal/usage"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
+
+const designModeNotice = "Planning mode: the agent can read and search files, but it cannot edit files or run commands in this phase. Use /crystallize, then /approve, to create and execute a plan; use /exec <prompt> as a direct-run shortcut."
 
 // enterDesignMode sets designMode, ensures an active session, records the
 // design_mode_entered lifecycle event, and appends the supplied orientation
@@ -104,6 +107,223 @@ func (m model) handleApproveCommand() (model, tea.Cmd) {
 	options.Model = m.modelName
 	options.ReasoningEffort = string(m.reasoningEffort)
 
+	// The approved plan runs through the same callback seam as a normal TUI
+	// pipeline run. Keep the accumulated events with the result so the update
+	// path can persist them together with the completed plan.
+	sessionEvents := []pendingSessionEvent{}
+	estimator := usage.NewCostEstimator(&m.modelCatalog)
+	callSeq := map[string]int{}
+
+	onText := options.OnText
+	options.OnText = func(delta string) {
+		m.sendAgentText(runID, delta)
+		if onText != nil {
+			onText(delta)
+		}
+	}
+	onReasoning := options.OnReasoning
+	options.OnReasoning = func(delta string) {
+		m.sendAgentReasoning(runID, delta)
+		if onReasoning != nil {
+			onReasoning(delta)
+		}
+	}
+	options.OnToolCallStart = func(id, name string) {
+		m.sendToolCallStreamStart(runID, id, name)
+	}
+	options.OnToolCallDelta = func(id, fragment string) {
+		m.sendToolCallStreamDelta(runID, id, fragment)
+	}
+
+	// Keep this guard and cancellation branch aligned with runAgentWithOptions.
+	// The buffered channel lets a late UI decision be discarded without blocking
+	// the callback after the run context is cancelled.
+	onPermissionRequest := options.OnPermissionRequest
+	options.OnPermissionRequest = func(ctx context.Context, request agent.PermissionRequest) (agent.PermissionDecision, error) {
+		if onPermissionRequest != nil {
+			return onPermissionRequest(ctx, request)
+		}
+		if m.runtimeMessageSink == nil {
+			return agent.PermissionDecision{Action: agent.PermissionDecisionDeny, Reason: "permission prompt unavailable"}, nil
+		}
+		if m.notifier != nil {
+			m.notifier.Notify(notify.AwaitingInput, notify.DefaultMessage(notify.AwaitingInput))
+		}
+		decisionCh := make(chan agent.PermissionDecision, 1)
+		m.sendPermissionRequest(runID, request, func(decision agent.PermissionDecision) {
+			select {
+			case decisionCh <- decision:
+			default:
+			}
+		})
+		sessionEvents = append(sessionEvents, pendingSessionEvent{
+			Type:    sessions.EventPermissionRequest,
+			Payload: request,
+		})
+		select {
+		case decision := <-decisionCh:
+			if strings.TrimSpace(decision.Reason) == "" {
+				decision.Reason = permissionDecisionReason(permissionDecision(decision.Action))
+			}
+			return decision, nil
+		case <-ctx.Done():
+			return agent.PermissionDecision{Action: agent.PermissionDecisionDeny, Reason: ctx.Err().Error()}, ctx.Err()
+		}
+	}
+
+	onAskUser := options.OnAskUser
+	options.OnAskUser = func(ctx context.Context, request agent.AskUserRequest) (agent.AskUserResponse, error) {
+		if onAskUser != nil {
+			return onAskUser(ctx, request)
+		}
+		if m.runtimeMessageSink == nil {
+			return agent.AskUserResponse{}, fmt.Errorf("ask_user prompt unavailable")
+		}
+		if m.notifier != nil && len(request.Questions) > 0 {
+			m.notifier.Notify(notify.AwaitingInput, notify.DefaultMessage(notify.AwaitingInput))
+		}
+		answerCh := make(chan []string, 1)
+		m.sendAskUserRequest(runID, request, func(answers []string) {
+			select {
+			case answerCh <- answers:
+			default:
+			}
+		})
+		sessionEvents = append(sessionEvents, pendingSessionEvent{
+			Type:    sessions.EventMessage,
+			Payload: askUserSessionPayload(request),
+		})
+		select {
+		case answers := <-answerCh:
+			sessionEvents = append(sessionEvents, pendingSessionEvent{
+				Type: sessions.EventMessage,
+				Payload: map[string]any{
+					"role":       "ask_user_answers",
+					"toolCallId": request.ToolCallID,
+					"answers":    answers,
+				},
+			})
+			return agent.AskUserResponse{Answers: answers}, nil
+		case <-ctx.Done():
+			return agent.AskUserResponse{}, ctx.Err()
+		}
+	}
+
+	onToolCall := options.OnToolCall
+	options.OnToolCall = func(call agent.ToolCall) {
+		callSeq[call.ID]++
+		row := transcriptRow{
+			kind:   rowToolCall,
+			id:     effectiveToolRowID(call.ID, callSeq[call.ID]),
+			text:   "tool call: " + call.Name,
+			tool:   call.Name,
+			detail: argHint(call.Arguments),
+			arg:    argHintSecondary(call.Arguments),
+			runID:  runID,
+		}
+		if !toolCardSuppressedInTranscript(call.Name) {
+			m.sendAgentRow(runID, row)
+		}
+		sessionEvents = append(sessionEvents, pendingSessionEvent{
+			Type: sessions.EventToolCall,
+			Payload: map[string]any{
+				"id":        call.ID,
+				"name":      call.Name,
+				"arguments": call.Arguments,
+			},
+		})
+		if store != nil && sessionID != "" {
+			var args map[string]any
+			if call.Arguments != "" {
+				_ = json.Unmarshal([]byte(call.Arguments), &args)
+			}
+			if targets := tools.MutationTargets(cwd, call.Name, args); len(targets) > 0 {
+				if payload, ok := store.SnapshotForCheckpoint(sessionID, cwd, call.Name, targets); ok {
+					sessionEvents = append(sessionEvents, pendingSessionEvent{
+						Type:    sessions.EventSessionCheckpoint,
+						Payload: payload,
+					})
+				}
+			}
+		}
+		if onToolCall != nil {
+			onToolCall(call)
+		}
+	}
+
+	onToolResult := options.OnToolResult
+	options.OnToolResult = func(result agent.ToolResult) {
+		row := transcriptRow{
+			kind:         rowToolResult,
+			id:           effectiveToolRowID(result.ToolCallID, callSeq[result.ToolCallID]),
+			text:         toolResultRowText(result),
+			tool:         result.Name,
+			status:       result.Status,
+			detail:       toolResultDetail(result),
+			runID:        runID,
+			changedFiles: result.ChangedFiles,
+		}
+		if !toolCardSuppressedInTranscript(result.Name) {
+			m.sendAgentRow(runID, row)
+		}
+		payload := map[string]any{
+			"toolCallId": result.ToolCallID,
+			"name":       result.Name,
+			"status":     string(result.Status),
+			"output":     result.Output,
+		}
+		if result.Redacted {
+			payload["redacted"] = true
+		}
+		if len(result.Meta) > 0 {
+			payload["meta"] = result.Meta
+		}
+		if len(result.ChangedFiles) > 0 {
+			payload["changedFiles"] = result.ChangedFiles
+		}
+		sessionEvents = append(sessionEvents, pendingSessionEvent{
+			Type:    sessions.EventToolResult,
+			Payload: payload,
+		})
+		if onToolResult != nil {
+			onToolResult(result)
+		}
+	}
+
+	onPermission := options.OnPermission
+	options.OnPermission = func(event agent.PermissionEvent) {
+		if permissionEventIsNoteworthy(event) {
+			row := permissionTranscriptRow(event)
+			row.runID = runID
+			m.sendAgentRow(runID, row)
+		}
+		sessionEvents = append(sessionEvents, pendingSessionEvent{
+			Type:    tuiPermissionEventType(event),
+			Payload: event,
+		})
+		if onPermission != nil {
+			onPermission(event)
+		}
+	}
+
+	options.EstimateUsageCost = estimator
+	onAttributedUsage := options.OnAttributedUsage
+	options.OnAttributedUsage = func(attributed agent.AttributedUsage) {
+		cost := attributed.Cost
+		if cost.Status == "" {
+			cost = estimator(attributed.Model, attributed.Usage, attributed.UsageReported)
+			attributed.Cost = cost
+		}
+		sessionEvents = append(sessionEvents, pendingSessionEvent{
+			Type:    sessions.EventUsage,
+			Payload: usage.AttributedUsagePayload(attributed),
+		})
+		m.sendAgentUsage(runID, attributed.Model, attributed.Usage, &cost)
+		if onAttributedUsage != nil {
+			onAttributedUsage(attributed)
+		}
+	}
+
 	// Resolve memory (best-effort, same as the normal pipeline path).
 	memClient, _ := tuiResolveMemory(runCtx)
 	var mem splicerun.MemoryStore
@@ -122,32 +342,27 @@ func (m model) handleApproveCommand() (model, tea.Cmd) {
 		})
 	}
 
-	// Build the start callback: persists task_started before the task dispatches,
-	// so a run interrupted mid-task reconstructs as "running" on resume rather
-	// than as absent (indistinguishable from a task that never began).
+	// Build the start callback: records task_started before the task dispatches,
+	// so the accumulated event order matches execution when it is persisted.
 	onTaskStart := func(task schemas.Task, taskRunID string) {
-		if store != nil && sessionID != "" {
-			_, _ = store.AppendEvent(sessionID, sessions.AppendEventInput{
-				Type:    sessions.EventTaskStarted,
-				Payload: splicerun.TaskStartedPayload{TaskID: task.ID, RunID: taskRunID},
-			})
-		}
+		sessionEvents = append(sessionEvents, pendingSessionEvent{
+			Type:    sessions.EventTaskStarted,
+			Payload: splicerun.TaskStartedPayload{TaskID: task.ID, RunID: taskRunID},
+		})
 	}
 
-	// Build the lifecycle callback: persists task events and emits progress.
+	// Build the lifecycle callback: records task events in execution order.
 	onTaskLifecycle := func(task schemas.Task, taskRunID string, pipelineResult schemas.PipelineResult) {
-		if store != nil && sessionID != "" {
-			if pipelineResult.Status == "completed" {
-				_, _ = store.AppendEvent(sessionID, sessions.AppendEventInput{
-					Type:    sessions.EventTaskCompleted,
-					Payload: splicerun.TaskCompletedPayload{TaskID: task.ID, RunID: taskRunID},
-				})
-			} else {
-				_, _ = store.AppendEvent(sessionID, sessions.AppendEventInput{
-					Type:    sessions.EventTaskFailed,
-					Payload: splicerun.TaskFailedPayload{TaskID: task.ID, RunID: taskRunID},
-				})
-			}
+		if pipelineResult.Status == "completed" {
+			sessionEvents = append(sessionEvents, pendingSessionEvent{
+				Type:    sessions.EventTaskCompleted,
+				Payload: splicerun.TaskCompletedPayload{TaskID: task.ID, RunID: taskRunID},
+			})
+		} else {
+			sessionEvents = append(sessionEvents, pendingSessionEvent{
+				Type:    sessions.EventTaskFailed,
+				Payload: splicerun.TaskFailedPayload{TaskID: task.ID, RunID: taskRunID},
+			})
 		}
 	}
 
@@ -158,7 +373,22 @@ func (m model) handleApproveCommand() (model, tea.Cmd) {
 				OnTaskStart:     onTaskStart,
 				OnTaskLifecycle: onTaskLifecycle,
 			})
-			return planExecutionResultMsg{runID: runID, result: result, err: err, store: store, sessionID: sessionID}
+			if store != nil && sessionID != "" {
+				inputs := make([]sessions.AppendEventInput, 0, len(sessionEvents))
+				for _, event := range flushableSessionEvents(sessionEvents) {
+					inputs = append(inputs, sessions.AppendEventInput{Type: event.Type, Payload: event.Payload})
+				}
+				if len(inputs) > 0 {
+					if _, appendErr := store.AppendEvents(sessionID, inputs); appendErr != nil {
+						if err != nil {
+							err = fmt.Errorf("%w; persist approve events: %v", err, appendErr)
+						} else {
+							err = fmt.Errorf("persist approve events: %w", appendErr)
+						}
+					}
+				}
+			}
+			return planExecutionResultMsg{runID: runID, result: result, err: err, store: store, sessionID: sessionID, sessionEvents: sessionEvents}
 		},
 		m.spinner.Tick,
 	)
@@ -279,11 +509,50 @@ type crystallizeResultMsg struct {
 }
 
 type planExecutionResultMsg struct {
-	runID     int
-	result    agent.Result
-	err       error
-	store     *sessions.Store
-	sessionID string
+	runID         int
+	result        agent.Result
+	err           error
+	store         *sessions.Store
+	sessionID     string
+	sessionEvents []pendingSessionEvent
+}
+
+// designCoverageWarning reports plan fields that the conversation did not
+// settle. Empty optional fields can be correct, so this note never blocks
+// review or approval.
+func designCoverageWarning(plan schemas.DesignPlan) string {
+	var unsettled []string
+	if len(plan.OutOfScope) == 0 {
+		unsettled = append(unsettled, "out of scope")
+	}
+	if strings.TrimSpace(plan.SystemDesign) == "" {
+		unsettled = append(unsettled, "system design")
+	}
+	for _, task := range plan.Tasks {
+		if len(task.AcceptanceFacts) == 0 {
+			unsettled = append(unsettled, fmt.Sprintf("acceptance facts for task %q", task.Title))
+			continue
+		}
+		for _, fact := range task.AcceptanceFacts {
+			if fact.AutomatedVerification {
+				continue
+			}
+			if fact.VerificationCommand == nil || strings.TrimSpace(*fact.VerificationCommand) == "" {
+				unsettled = append(unsettled, fmt.Sprintf("acceptance fact %q on task %q has no automated verification command", fact.Statement, task.Title))
+			}
+		}
+	}
+	if len(unsettled) == 0 {
+		return ""
+	}
+	// A plan of this size can carry a dozen unsettled criteria whose statements
+	// run to a sentence each, and the note is read at a glance. Name the first
+	// few and count the rest.
+	const maxNamed = 3
+	if extra := len(unsettled) - maxNamed; extra > 0 {
+		unsettled = append(unsettled[:maxNamed:maxNamed], fmt.Sprintf("and %d more", extra))
+	}
+	return "Design coverage note: the conversation did not settle these: " + strings.Join(unsettled, "; ") + "."
 }
 
 func formatDesignPlan(plan schemas.DesignPlan) string {
@@ -318,6 +587,35 @@ func formatDesignPlan(plan schemas.DesignPlan) string {
 				b.WriteString(": " + t.Intent)
 			}
 			b.WriteString("\n")
+			if len(t.AcceptanceFacts) == 0 {
+				continue
+			}
+			b.WriteString("   Acceptance facts:\n")
+			// A criterion carrying a command will be executed, so it is always
+			// shown: eliding one would hide shell the user is about to approve.
+			// Only the criteria nobody automated are capped, and those run
+			// nothing.
+			const maxRenderedManualFacts = 3
+			manual := 0
+			for _, fact := range t.AcceptanceFacts {
+				command := ""
+				if fact.AutomatedVerification && fact.VerificationCommand != nil {
+					command = strings.TrimSpace(*fact.VerificationCommand)
+				}
+				if command == "" {
+					manual++
+					if manual > maxRenderedManualFacts {
+						continue
+					}
+					b.WriteString("   - " + fact.Statement + "\n")
+					continue
+				}
+				b.WriteString("   - " + fact.Statement + "\n")
+				b.WriteString("     Automated verification command: " + command + "\n")
+			}
+			if extra := manual - maxRenderedManualFacts; extra > 0 {
+				b.WriteString(fmt.Sprintf("   ... and %d more acceptance facts with no command\n", extra))
+			}
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
@@ -463,22 +761,23 @@ func designConversationRegistry(registry *tools.Registry) *tools.Registry {
 	if registry == nil {
 		return filtered
 	}
-	allowed := map[string]bool{
-		"read_file":              true,
-		"list_directory":         true,
-		"grep":                   true,
-		"ask_user":               true,
-		"read_minified_file":     true,
-		"glob":                   true,
-		"lsp_navigate":           true,
-		"skill":                  true,
-		"web_fetch":              true,
-		tools.ToolSearchToolName: true,
-	}
+	// Read-only tools are selected from their safety metadata so new read-only
+	// tools enter design mode without a second hand-maintained name map.
 	for _, tool := range registry.All() {
-		if allowed[tool.Name()] {
+		if tool.Safety().SideEffect == tools.SideEffectRead {
 			filtered.Register(tool)
 		}
+	}
+	// These tools are safe design-mode additions, but are not core read tools.
+	for _, name := range []string{"skill", "web_fetch", tools.ToolSearchToolName} {
+		if tool, ok := registry.Get(name); ok {
+			filtered.Register(tool)
+		}
+	}
+	// request_permissions has no side effect until the runtime handles it. Keep
+	// it available so the design agent can ask for access when a user decides.
+	if tool, ok := registry.Get(tools.RequestPermissionsToolName); ok {
+		filtered.Register(tool)
 	}
 	return filtered
 }

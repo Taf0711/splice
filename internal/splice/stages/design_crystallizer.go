@@ -29,7 +29,7 @@ func (DesignCrystallizer) Crystallize(ctx context.Context, provider zeroruntime.
 		return schemas.DesignPlan{}, fmt.Errorf("crystallize input: %w", err)
 	}
 	payload, _ := json.MarshalIndent(input, "", "  ")
-	collected, err := callValidatedToolUse(ctx, provider, opts.model("medium"), opts.ReasoningEffort, composeSystemPrompt(designCrystallizeSystemPrompt), string(payload), opts.Images, designPlanToolDefinition(), &opts.Stream, parseDesignPlan)
+	collected, err := callValidatedToolUse(ctx, provider, opts.model("medium"), opts.ReasoningEffort, composeSystemPrompt(designCrystallizeSystemPrompt), string(payload), opts.Images, designPlanToolDefinition(), &opts.Stream, parseDesignPlan, opts.PromptCacheKey)
 	if err != nil {
 		return schemas.DesignPlan{}, err
 	}
@@ -98,7 +98,10 @@ func designPlanToolDefinition() zeroruntime.ToolDefinition {
 				"recommended_tier":       map[string]any{"type": "string"},
 				"recommended_model_tier": map[string]any{"type": "string"},
 			},
-			"required": []string{"epic", "requirements", "in_scope", "out_of_scope", "system_design", "tasks"},
+			// out_of_scope and system_design are omitted deliberately: a short
+			// request establishes neither, and the prompt forbids inventing
+			// scope. Keeping them required here contradicted that instruction.
+			"required": []string{"epic", "requirements", "in_scope", "tasks"},
 		},
 	}
 }

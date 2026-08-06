@@ -11,11 +11,18 @@ import (
 const TaskToolName = "Task"
 
 type TaskTool struct {
-	executor Executor
+	executor        Executor
+	specialistNames []string
 }
 
 func NewTaskTool(executor Executor) *TaskTool {
 	return &TaskTool{executor: executor}
+}
+
+// NewTaskToolWithSpecialists creates a Task tool whose schema names the
+// specialists available in this startup roster.
+func NewTaskToolWithSpecialists(executor Executor, names []string) *TaskTool {
+	return &TaskTool{executor: executor, specialistNames: append([]string(nil), names...)}
 }
 
 func (tool *TaskTool) Name() string {
@@ -32,7 +39,7 @@ func (tool *TaskTool) Parameters() tools.Schema {
 		Properties: map[string]tools.PropertySchema{
 			"name": {
 				Type:        "string",
-				Description: "Specialist name to invoke, such as worker, explorer, or code-review.",
+				Description: specialistNameDescription(tool.specialistNames),
 			},
 			"prompt": {
 				Type:        "string",
@@ -55,6 +62,13 @@ func (tool *TaskTool) Parameters() tools.Schema {
 		Required:             []string{"prompt"},
 		AdditionalProperties: false,
 	}
+}
+
+func specialistNameDescription(names []string) string {
+	if len(names) == 0 {
+		return "Specialist name to invoke."
+	}
+	return "Specialist name to invoke. Available specialists: " + strings.Join(names, ", ") + "."
 }
 
 func (tool *TaskTool) Safety() tools.Safety {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -12,6 +13,8 @@ import (
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/sessions"
+	splicerun "github.com/Taf0711/splice/internal/splice"
+	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/tools"
 	"github.com/Taf0711/splice/internal/usage"
 )
@@ -73,6 +76,7 @@ func (m model) startNewSession() model {
 	m.turnLatencyCount = 0
 	m.turnTTFTSum = 0
 	m.turnTTFTCount = 0
+	m.turnVisibleOutputTokens = 0
 
 	// Staged input belongs to the previous conversation. Attachments and a queued
 	// message are only consumed at prompt-submit, so without clearing them here the
@@ -111,7 +115,7 @@ func (m model) startNewSession() model {
 	// A fresh session starts in planning (design) mode. Reset the notice gate so
 	// the orientation fires for this new epoch, then enter design mode cleanly.
 	m.designNoticeShown = false
-	m = m.enterDesignMode("Planning mode. Describe what you want to build; Splice will crystallize a plan. Type /exec <prompt> to run a prompt directly through the pipeline.")
+	m = m.enterDesignMode(designModeNotice)
 	m.designNoticeShown = true
 	// Scrollback above can't be un-printed; a faint divider marks the boundary and
 	// the flush frontier restarts for the fresh transcript (mirrors /clear, /resume).
@@ -377,6 +381,7 @@ func (m model) newSessionPicker() *commandPicker {
 	}
 	now := m.now()
 	items := make([]pickerItem, 0, len(metas))
+	planBearing := false
 	for _, meta := range metas {
 		// Workspace-scoped: hide sessions from other project directories so /resume
 		// lists this workspace's history, not every project's. Checked BEFORE the
@@ -393,7 +398,13 @@ func (m model) newSessionPicker() *commandPicker {
 		// Skip empty/failed runs (no assistant output, no tool calls) — e.g. the
 		// same prompt retried while the model wasn't responding. They have nothing
 		// to resume and otherwise flood the list with identical rows. Still on disk.
-		if !m.sessionHasResumableContent(meta.SessionID) {
+		events, readErr := m.sessionStore.ReadEvents(meta.SessionID)
+		if readErr != nil {
+			// Preserve the existing fail-open behavior when the event log cannot be
+			// read. There is no state to render, so this is a plain no-plan row.
+			events = nil
+		}
+		if readErr == nil && !eventsHaveResumableContent(events) {
 			continue
 		}
 		// Lead with the timestamp so same-titled sessions (e.g. the same first
@@ -402,6 +413,18 @@ func (m model) newSessionPicker() *commandPicker {
 		label := displayValue(meta.Title, "untitled")
 		if when := sessionWhen(meta.UpdatedAt, now); when != "" {
 			label = when + "  " + label
+		}
+		status := ""
+		if readErr == nil {
+			if state, stateErr := splicerun.ReconstructDesignState(events); stateErr == nil {
+				status = sessionPlanStatus(state)
+				if status != "" {
+					planBearing = true
+				}
+			}
+		}
+		if status != "" {
+			label += "  [" + status + "]"
 		}
 		items = append(items, pickerItem{
 			Label: label,
@@ -413,12 +436,58 @@ func (m model) newSessionPicker() *commandPicker {
 		return nil // every resumable session was an empty/failed run
 	}
 	return &commandPicker{
-		kind:     pickerSession,
-		title:    "Resume a session",
-		items:    items,
-		allItems: append([]pickerItem{}, items...),
-		selected: 0,
+		kind:        pickerSession,
+		title:       "Resume a session",
+		items:       items,
+		allItems:    append([]pickerItem{}, items...),
+		selected:    0,
+		planBearing: planBearing,
 	}
+}
+
+// sessionPlanStatus returns the user-facing plan phase and, when available,
+// task completion. ReconstructDesignState supplies both the task list and the
+// persisted outcomes, so the fraction does not require an invented denominator.
+func sessionPlanStatus(state splicerun.DesignState) string {
+	if state.Plan == nil {
+		return ""
+	}
+	phase := map[schemas.DesignPhase]string{
+		schemas.DesignPhaseConversation: "drafting",
+		schemas.DesignPhaseReview:       "crystallized",
+		schemas.DesignPhaseExecuting:    "approved",
+		schemas.DesignPhaseCompleted:    "done",
+	}[state.Phase]
+	if phase == "" {
+		return ""
+	}
+	if len(state.Plan.Tasks) == 0 {
+		return phase
+	}
+	completed := 0
+	for _, task := range state.Plan.Tasks {
+		if outcome, ok := state.TaskOutcomes[task.ID]; ok && outcome.Status == "completed" {
+			completed++
+		}
+	}
+	return fmt.Sprintf("%s · %d/%d steps", phase, completed, len(state.Plan.Tasks))
+}
+
+// openLaunchSessionPicker opens the plan picker for a fresh interactive TUI.
+// The existing picker build performs all cheap workspace and metadata filters,
+// then reads each surviving session once and shares those events with both
+// resumable-content and design-state derivation.
+func (m model) openLaunchSessionPicker() model {
+	if m.setup.visible || m.activeSession.SessionID != "" || os.Getenv("SPLICE_NO_RESUME_PROMPT") == "1" {
+		return m
+	}
+	picker := m.newSessionPicker()
+	if picker == nil || !picker.planBearing {
+		return m
+	}
+	picker.title = "Continue where you left off"
+	m.picker = picker
+	return m
 }
 
 // sessionHasResumableContent reports whether a session has anything worth

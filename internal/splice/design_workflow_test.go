@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/sessions"
@@ -107,6 +109,73 @@ func TestCrystallizeAndCritique_Success(t *testing.T) {
 	}
 	if saved[1].Type != sessions.EventCritiqueRecorded {
 		t.Errorf("event[1] type = %q, want critique_recorded", saved[1].Type)
+	}
+}
+
+// Regression: the critic was the only stage with no workspace context and
+// blocked a plan over a mutex the workspace already had.
+func TestCrystallizeAndCritique_PassesConversationContextToCriticPayload(t *testing.T) {
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+	if _, err := store.Create(sessions.CreateInput{SessionID: "test-session", Cwd: t.TempDir()}); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	events := []sessions.Event{
+		{Type: sessions.EventDesignModeEntered},
+		{Type: sessions.EventMessage, Payload: mustMarshal(t, map[string]string{"role": "user", "content": "inspect the read path"})},
+		{Type: sessions.EventMessage, Payload: mustMarshal(t, map[string]string{"role": "assistant", "content": "The workspace uses sync.RWMutex with RLock on the read path."})},
+	}
+	planArgs, _ := json.Marshal(validDesignPlan("inspect the read path"))
+	critiqueArgs, _ := json.Marshal(validCritique("reviewed"))
+	provider := &fakeWorkflowProvider{events: concatEvents(
+		workflowToolCall("plan", "submit_design_plan", string(planArgs)),
+		workflowToolCall("critique", "submit_critique", string(critiqueArgs)),
+		workflowDone(),
+	)}
+
+	wf := NewDesignWorkflow(store, "test-session", "plan-1")
+	if _, _, err := wf.CrystallizeAndCritique(context.Background(), events, provider, nil, nil, "", nil); err != nil {
+		t.Fatalf("CrystallizeAndCritique: %v", err)
+	}
+
+	var payload string
+	for _, message := range provider.request.Messages {
+		if message.Role == zeroruntime.MessageRoleUser {
+			payload = message.Content
+		}
+	}
+	var input schemas.PlanCriticInput
+	if err := json.Unmarshal([]byte(payload), &input); err != nil {
+		t.Fatalf("unmarshal critic payload: %v", err)
+	}
+	joined := strings.Join(input.RelevantContext, "\n")
+	if !strings.Contains(joined, "user: inspect the read path") ||
+		!strings.Contains(joined, "assistant: The workspace uses sync.RWMutex with RLock on the read path.") {
+		t.Fatalf("critic payload lost conversation context: %#v", input.RelevantContext)
+	}
+}
+
+func TestPlanCriticRelevantContextTruncatesOldestMaterial(t *testing.T) {
+	history := []schemas.ConversationMessage{
+		{Role: "user", Content: "oldest material"},
+		{Role: "assistant", Content: strings.Repeat("middle material ", 600)},
+		{Role: "user", Content: "newest workspace finding"},
+	}
+	got := planCriticRelevantContext(history)
+	joined := strings.Join(got, "\n")
+	if strings.Contains(joined, "oldest material") {
+		t.Fatalf("oldest context survived truncation: %q", joined)
+	}
+	if !strings.Contains(joined, "newest workspace finding") {
+		t.Fatalf("most recent context was lost: %q", joined)
+	}
+	if chars := utf8.RuneCountInString(joined); chars > planCriticRelevantContextMaxChars+len(got)-1 {
+		t.Fatalf("context chars = %d, budget = %d", chars, planCriticRelevantContextMaxChars)
+	}
+}
+
+func TestPlanCriticRelevantContextEmptyConversation(t *testing.T) {
+	if got := planCriticRelevantContext(nil); got != nil {
+		t.Fatalf("empty conversation context = %#v, want nil", got)
 	}
 }
 
@@ -340,6 +409,23 @@ func TestCrystallizeAndCritique_RevisionIncrements(t *testing.T) {
 	if _, _, err := wf.CrystallizeAndCritique(ctx, events, provider2, nil, nil, "", nil); err != nil {
 		t.Fatalf("second CrystallizeAndCritique: %v", err)
 	}
+	var criticPayload string
+	for _, message := range provider2.request.Messages {
+		if message.Role == zeroruntime.MessageRoleUser {
+			criticPayload = message.Content
+			break
+		}
+	}
+	var criticInput schemas.PlanCriticInput
+	if err := json.Unmarshal([]byte(criticPayload), &criticInput); err != nil {
+		t.Fatalf("unmarshal second critic payload: %v", err)
+	}
+	if criticInput.PreviousCritique == nil || criticInput.PreviousCritique.OverallAssessment != "fine" {
+		t.Fatalf("second critic payload lost prior critique: %#v", criticInput.PreviousCritique)
+	}
+	if criticInput.PreviousPlan == nil || criticInput.PreviousPlan.Epic != "do it" {
+		t.Fatalf("second critic payload lost prior plan: %#v", criticInput.PreviousPlan)
+	}
 
 	saved, err := store.ReadEvents("test-session")
 	if err != nil {
@@ -446,6 +532,26 @@ func TestCrystallizeAndCritique_ResolverErrorFallsBack(t *testing.T) {
 	}
 	if len(defaultProvider.request.Messages) == 0 {
 		t.Errorf("default provider was not used when resolver errored")
+	}
+}
+
+// TestPlanCriticInputLeavesPipelineFieldsEmpty proves plan_critic's
+// HarnessStageInput (constructed in design_workflow.go, outside any tier
+// pipeline) carries no PipelineStages/NextStage roster, and that leaving
+// them empty still validates.
+func TestPlanCriticInputLeavesPipelineFieldsEmpty(t *testing.T) {
+	criticInput := schemas.HarnessStageInput{
+		RunID:         "plan-1",
+		StageName:     "plan_critic",
+		Sequence:      1,
+		PlanTier:      schemas.TierArchitectural,
+		RequestIntent: "build a thing",
+	}
+	if len(criticInput.PipelineStages) != 0 || criticInput.NextStage != "" {
+		t.Fatalf("expected empty pipeline roster, got PipelineStages=%#v NextStage=%q", criticInput.PipelineStages, criticInput.NextStage)
+	}
+	if err := criticInput.Validate(); err != nil {
+		t.Fatalf("plan_critic input with empty pipeline fields should validate: %v", err)
 	}
 }
 

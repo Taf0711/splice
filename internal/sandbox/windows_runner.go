@@ -326,7 +326,10 @@ func windowsRestrictedTokenCommandPlan(execRequest SandboxExecutionRequest, poli
 	if err != nil {
 		return CommandPlan{}, err
 	}
-	childEnv := windowsSandboxChildEnv(spec.Env, policy, execRequest.WorkspaceRoot)
+	childEnv, err := windowsSandboxChildEnv(spec.Env, policy, execRequest.WorkspaceRoot)
+	if err != nil {
+		return CommandPlan{}, err
+	}
 	// The unelevated enforcement tier maps to the runner's unelevated level: same
 	// restricted token, but the runner applies the workspace ACLs itself instead
 	// of requiring the elevated setup marker.
@@ -367,7 +370,7 @@ func windowsRestrictedTokenCommandPlan(execRequest SandboxExecutionRequest, poli
 	}, execRequest), nil
 }
 
-func windowsSandboxChildEnv(specEnv []string, policy Policy, workspaceRoot string) []string {
+func windowsSandboxChildEnv(specEnv []string, policy Policy, workspaceRoot string) ([]string, error) {
 	var env []string
 	if specEnv != nil {
 		env = cloneStrings(specEnv)
@@ -385,7 +388,11 @@ func windowsSandboxChildEnv(specEnv []string, policy Policy, workspaceRoot strin
 		"SystemRoot="+firstEnv("SystemRoot", `C:\Windows`),
 		"WINDIR="+firstEnv("WINDIR", `C:\Windows`),
 	)
-	return env
+	env, err := withSandboxGoCache(env, policy, BackendWindowsRestrictedToken, workspaceRoot)
+	if err != nil {
+		return nil, err
+	}
+	return env, nil
 }
 
 func upsertEnvList(env []string, values ...string) []string {

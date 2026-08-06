@@ -18,6 +18,7 @@ type Normalized struct {
 	OutputTokens      int
 	ReasoningTokens   int
 	WebSearchRequests int
+	WebSearchEngine   string
 	TotalTokens       int
 }
 
@@ -214,7 +215,8 @@ func (tracker *Tracker) Record(input RecordInput) (Record, error) {
 	record.Provider = model.Provider
 	cost, err := modelregistry.CalculateCost(model, runtimeUsage)
 	if err != nil {
-		if model.Cost.IsUnpriced() || (runtimeUsage.WebSearchRequests > 0 && model.Cost.WebSearchPerRequest == 0) {
+		_, searchPriced, searchRateErr := modelregistry.WebSearchPricingRate(model, runtimeUsage.WebSearchEngine)
+		if model.Cost.IsUnpriced() || (runtimeUsage.WebSearchRequests > 0 && (searchRateErr != nil || !searchPriced)) {
 			record.Cost = unpricedCost(fmt.Sprintf("price unavailable for model %q: %v", record.ModelID, err))
 			copyCostMetadata(&record, record.Cost)
 			tracker.records = append(tracker.records, record)
@@ -311,6 +313,7 @@ func Normalize(usage zeroruntime.Usage) (Normalized, zeroruntime.Usage, error) {
 		OutputTokens:      outputTokens,
 		ReasoningTokens:   reasoningTokens,
 		WebSearchRequests: webSearchRequests,
+		WebSearchEngine:   strings.TrimSpace(usage.WebSearchEngine),
 		TotalTokens:       inputTokens + outputTokens,
 	}
 	return normalized, zeroruntime.Usage{
@@ -322,6 +325,7 @@ func Normalize(usage zeroruntime.Usage) (Normalized, zeroruntime.Usage, error) {
 		CompletionTokens:  outputTokens,
 		ReasoningTokens:   reasoningTokens,
 		WebSearchRequests: webSearchRequests,
+		WebSearchEngine:   strings.TrimSpace(usage.WebSearchEngine),
 	}, nil
 }
 

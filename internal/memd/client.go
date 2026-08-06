@@ -1,6 +1,6 @@
 // Package memd is the HTTP client for the splice-memd memory sidecar.
 //
-// The sidecar (built from the memd/ module in this repo) serves five JSON
+// The sidecar (built from the memd/ module in this repo) serves six JSON
 // endpoints over a Unix domain socket. This package speaks that protocol and
 // never imports the sidecar module; the wire contract is the only coupling.
 // The structured-memory architecture is documented alongside the sidecar.
@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -27,6 +28,20 @@ const (
 	requestTimeout = 2 * time.Second
 	spawnDeadline  = 3 * time.Second
 )
+
+// ErrRecentUnsupported indicates that the running daemon predates the recent
+// listing route. Callers can present an update instruction instead of a raw
+// HTTP error.
+var ErrRecentUnsupported = errors.New("memory daemon does not support recent listings")
+
+type statusError struct {
+	status int
+	body   string
+}
+
+func (e *statusError) Error() string {
+	return fmt.Sprintf("unexpected status %d: %s", e.status, e.body)
+}
 
 // Client talks to a splice-memd daemon over its Unix socket.
 type Client struct {
@@ -148,6 +163,34 @@ func (c *Client) Search(ctx context.Context, query schemas.MemoryQuery) (schemas
 	}, nil
 }
 
+// Recent lists recent observations without using the full-text index.
+func (c *Client) Recent(ctx context.Context, query schemas.MemoryQuery) (schemas.MemoryBundle, error) {
+	if err := query.ValidateRecent(); err != nil {
+		return schemas.MemoryBundle{}, fmt.Errorf("memd recent: %w", err)
+	}
+	var resp struct {
+		OK           bool                        `json:"ok"`
+		Observations []schemas.MemoryObservation `json:"observations"`
+		Truncated    bool                        `json:"truncated"`
+		Error        string                      `json:"error,omitempty"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/recent", query, &resp); err != nil {
+		var statusErr *statusError
+		if errors.As(err, &statusErr) && (statusErr.status == http.StatusNotFound || statusErr.status == http.StatusMethodNotAllowed || statusErr.status == http.StatusNotImplemented) {
+			return schemas.MemoryBundle{}, fmt.Errorf("%w: update splice-memd", ErrRecentUnsupported)
+		}
+		return schemas.MemoryBundle{}, err
+	}
+	if !resp.OK {
+		return schemas.MemoryBundle{}, fmt.Errorf("memd recent: %s", resp.Error)
+	}
+	return schemas.MemoryBundle{
+		RequestingAgent: query.RequestingAgent,
+		Observations:    resp.Observations,
+		Truncated:       resp.Truncated,
+	}, nil
+}
+
 // MarkReviewed marks one observation reviewed by ID.
 func (c *Client) MarkReviewed(ctx context.Context, id int64) error {
 	req := map[string]int64{"id": id}
@@ -218,7 +261,7 @@ func (c *Client) do(ctx context.Context, method string, path string, body any, o
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("memd %s: unexpected status %d: %s", path, resp.StatusCode, string(bytes.TrimSpace(bodyBytes)))
+		return fmt.Errorf("memd %s: %w", path, &statusError{status: resp.StatusCode, body: string(bytes.TrimSpace(bodyBytes))})
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {

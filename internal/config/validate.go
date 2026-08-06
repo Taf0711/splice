@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
+
+	"github.com/Taf0711/splice/internal/modelregistry"
 )
 
 // Issue is a single structured problem found while validating a config file.
@@ -50,9 +53,25 @@ func ValidateBytes(data []byte) (FileConfig, []Issue) {
 }
 
 func validateSemantics(cfg FileConfig) []Issue {
+	issues := validateReasoningEfforts(cfg.Providers)
 	if _, _, err := normalizeProviders(cfg.Providers, cfg.ActiveProvider); err != nil {
 		// normalizeProviders already redacts secrets via providerError.
-		return []Issue{{FieldPath: "providers", Message: err.Error()}}
+		issues = append(issues, Issue{FieldPath: "providers", Message: err.Error()})
 	}
-	return nil
+	return issues
+}
+
+func validateReasoningEfforts(providers []ProviderProfile) []Issue {
+	var issues []Issue
+	for index, profile := range providers {
+		effort := strings.TrimSpace(profile.ReasoningEffort)
+		if effort == "" || modelregistry.ValidReasoningEffort(modelregistry.ReasoningEffort(effort)) {
+			continue
+		}
+		issues = append(issues, Issue{
+			FieldPath: fmt.Sprintf("providers[%d].reasoningEffort", index),
+			Message:   fmt.Sprintf("reasoning_effort must be none, minimal, low, medium, high, xhigh, or max, got %q", effort),
+		})
+	}
+	return issues
 }

@@ -3,6 +3,7 @@ package memd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -220,6 +221,48 @@ func TestSearch(t *testing.T) {
 			t.Fatalf("expected include_private=false, got true")
 		}
 	})
+}
+
+func TestRecent(t *testing.T) {
+	var got schemas.MemoryQuery
+	c := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/recent" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":           true,
+			"observations": []schemas.MemoryObservation{},
+			"truncated":    false,
+		})
+	}))
+	workspace := "/workspace"
+	if _, err := c.Recent(context.Background(), schemas.MemoryQuery{
+		RequestingAgent: "tui",
+		ProjectPath:     &workspace,
+		Scopes:          []string{"project", "global"},
+		Limit:           10,
+	}); err != nil {
+		t.Fatalf("recent: %v", err)
+	}
+	if got.Query == "*" {
+		t.Fatal("recent request must not use the FTS match-all query")
+	}
+}
+
+func TestRecentUnsupported(t *testing.T) {
+	c := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "route not found", http.StatusNotFound)
+	}))
+	_, err := c.Recent(context.Background(), schemas.MemoryQuery{RequestingAgent: "tui", Scopes: []string{"project"}})
+	if !errors.Is(err, ErrRecentUnsupported) {
+		t.Fatalf("expected ErrRecentUnsupported, got %v", err)
+	}
+	if strings.Contains(err.Error(), "unexpected status") || strings.Contains(err.Error(), "404") {
+		t.Fatalf("unsupported error exposed raw status: %v", err)
+	}
 }
 
 func TestMarkReviewed(t *testing.T) {

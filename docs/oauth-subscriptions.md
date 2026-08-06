@@ -17,8 +17,6 @@ For any OAuth 2.0 / OIDC provider that returns a normal access token usable as
 `Authorization: Bearer …` on its API, configure it with `SPLICE_OAUTH_<NAME>_*`
 env vars and log in:
 
-> These environment variables retain the upstream SPLICE_ prefix; a rename to SPLICE_ is planned.
-
 ```sh
 export SPLICE_OAUTH_ACME_CLIENT_ID=…
 export SPLICE_OAUTH_ACME_AUTHORIZE_URL=https://acme.example/oauth/authorize
@@ -31,8 +29,8 @@ splice auth status
 When a login exists for a provider, the **OpenAI and Anthropic** providers send
 `Authorization: Bearer <fresh-token>` (auto-refreshed; one refresh-and-retry on a
 `401`) instead of the API key. With no login they use the API key exactly as
-before. Tokens are stored 0600 (or the OS keyring with
-`SPLICE_OAUTH_STORAGE=keyring`) and never logged. See `splice auth --help`.
+before. Tokens use the macOS keyring by default. Other platforms use an
+encrypted file. Set `SPLICE_OAUTH_STORAGE=file` to opt out. See `splice auth --help`.
 
 ### In the setup wizard (`/provider`)
 

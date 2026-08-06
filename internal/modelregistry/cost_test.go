@@ -41,12 +41,100 @@ func TestCalculateCostAddsWebSearchRequests(t *testing.T) {
 			InputPerMillion: 2, OutputPerMillion: 8, WebSearchPerRequest: 0.01,
 		},
 	}
-	breakdown, err := CalculateCost(model, zeroruntime.Usage{WebSearchRequests: 3})
+	breakdown, err := CalculateCost(model, zeroruntime.Usage{WebSearchRequests: 3, WebSearchEngine: "native"})
 	if err != nil {
 		t.Fatalf("CalculateCost returned error: %v", err)
 	}
 	assertClose(t, breakdown.WebSearchCost, 0.03)
 	assertClose(t, breakdown.TotalCost, 0.03)
+}
+
+func TestCalculateCostPricesKnownEngineSearches(t *testing.T) {
+	// Regression: a searching turn previously lost its entire cost when the
+	// model search rate was unset, including its token cost.
+	model := ModelEntry{
+		ID:       "search-model",
+		Provider: ProviderOpenAI,
+		Cost: ModelCost{
+			Currency: "USD", Unit: "per_1m_tokens",
+			InputPerMillion: 2, OutputPerMillion: 8,
+			WebSearchPerRequest: 0.123, // engine pricing must take precedence
+		},
+	}
+	breakdown, err := CalculateCost(model, zeroruntime.Usage{
+		InputTokens: 1_000_000, OutputTokens: 1,
+		WebSearchRequests: 2, WebSearchEngine: "parallel",
+	})
+	if err != nil {
+		t.Fatalf("CalculateCost returned error: %v", err)
+	}
+	assertClose(t, breakdown.WebSearchCost, 0.002)
+	assertClose(t, breakdown.TotalCost, 2.002008)
+}
+
+func TestCalculateCostKnownEnginesHaveDifferentRates(t *testing.T) {
+	model := ModelEntry{
+		ID:       "search-model",
+		Provider: ProviderOpenAI,
+		Cost: ModelCost{
+			Currency: "USD", Unit: "per_1m_tokens",
+			InputPerMillion: 2, OutputPerMillion: 8,
+			WebSearchPerRequest: 0.123,
+		},
+	}
+	parallel, err := CalculateCost(model, zeroruntime.Usage{WebSearchRequests: 1, WebSearchEngine: "parallel"})
+	if err != nil {
+		t.Fatalf("parallel CalculateCost returned error: %v", err)
+	}
+	exa, err := CalculateCost(model, zeroruntime.Usage{WebSearchRequests: 1, WebSearchEngine: "exa"})
+	if err != nil {
+		t.Fatalf("exa CalculateCost returned error: %v", err)
+	}
+	assertClose(t, parallel.WebSearchCost, 0.001)
+	assertClose(t, exa.WebSearchCost, 0.005)
+	if parallel.TotalCost == exa.TotalCost {
+		t.Fatalf("parallel and exa costs are equal: %v", parallel.TotalCost)
+	}
+}
+
+func TestCalculateCostUnknownOrUnsetEngineIsUnpriced(t *testing.T) {
+	model := ModelEntry{
+		ID:       "search-model",
+		Provider: ProviderOpenAI,
+		Cost: ModelCost{
+			Currency: "USD", Unit: "per_1m_tokens",
+			InputPerMillion: 2, OutputPerMillion: 8,
+			WebSearchPerRequest: 0.123,
+		},
+	}
+	for _, engine := range []string{"unknown", ""} {
+		t.Run(engine, func(t *testing.T) {
+			breakdown, err := CalculateCost(model, zeroruntime.Usage{WebSearchRequests: 1, WebSearchEngine: engine})
+			if err == nil {
+				t.Fatal("CalculateCost silently priced an unknown search engine")
+			}
+			if breakdown.WebSearchCost != 0 {
+				t.Fatalf("unknown engine search cost = %v, want zero while unpriced", breakdown.WebSearchCost)
+			}
+		})
+	}
+}
+
+func TestCalculateCostZeroSearchesIgnoresEngine(t *testing.T) {
+	model := ModelEntry{
+		ID:       "search-model",
+		Provider: ProviderOpenAI,
+		Cost:     ModelCost{Currency: "USD", Unit: "per_1m_tokens", InputPerMillion: 2, OutputPerMillion: 8},
+	}
+	withoutEngine, err := CalculateCost(model, zeroruntime.Usage{InputTokens: 100, OutputTokens: 20})
+	if err != nil {
+		t.Fatalf("without engine CalculateCost returned error: %v", err)
+	}
+	withEngine, err := CalculateCost(model, zeroruntime.Usage{InputTokens: 100, OutputTokens: 20, WebSearchEngine: "exa"})
+	if err != nil {
+		t.Fatalf("with engine CalculateCost returned error: %v", err)
+	}
+	assertClose(t, withEngine.TotalCost, withoutEngine.TotalCost)
 }
 
 func TestCalculateCostReportsUnpricedWebSearchRequests(t *testing.T) {

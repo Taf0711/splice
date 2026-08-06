@@ -84,6 +84,10 @@ type SandboxConfig struct {
 	// and CLI flags only — deliberately not project config, so a cloned repo
 	// cannot grant itself read access to the user's home directory.
 	AdditionalReadRoots []string `json:"additionalReadRoots,omitempty"`
+	// AllowRead lists subtrees that the sandbox may re-include inside its
+	// default credential deny roots. Honored from global user config and CLI
+	// overrides only. Project config cannot use this field to read user secrets.
+	AllowRead []string `json:"allowRead,omitempty"`
 	// BlockUnixSockets, when true, asks the Linux sandbox helper to install a
 	// best-effort seccomp filter that denies AF_UNIX socket creation inside the
 	// sandboxed command. Off by default; ignored on non-Linux backends.

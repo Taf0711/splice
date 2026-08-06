@@ -307,7 +307,7 @@ func TestRunNoArgsLaunchesTUIWithMCPState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPermissionStore() error = %v", err)
 	}
-	tokenStore, err := mcp.NewTokenStore(mcp.TokenStoreOptions{FilePath: filepath.Join(t.TempDir(), "mcp-oauth.json")})
+	tokenStore, err := mcp.NewTokenStore(mcp.TokenStoreOptions{FilePath: filepath.Join(t.TempDir(), "mcp-oauth.json"), Storage: "file"})
 	if err != nil {
 		t.Fatalf("NewTokenStore() error = %v", err)
 	}
@@ -416,7 +416,7 @@ func TestTUIMCPCommandUsesLastGoodConfigOnRefreshError(t *testing.T) {
 			return mcp.NewPermissionStore(mcp.StoreOptions{FilePath: filepath.Join(t.TempDir(), "mcp-permissions.json")})
 		},
 		newMCPTokenStore: func() (*mcp.TokenStore, error) {
-			return mcp.NewTokenStore(mcp.TokenStoreOptions{FilePath: filepath.Join(t.TempDir(), "mcp-oauth.json")})
+			return mcp.NewTokenStore(mcp.TokenStoreOptions{FilePath: filepath.Join(t.TempDir(), "mcp-oauth.json"), Storage: "file"})
 		},
 		registerMCPTools: func(ctx context.Context, registry *tools.Registry, cfg config.MCPConfig, options mcp.RegisterOptions) (mcpToolRuntime, error) {
 			return closeFunc(func() error { return nil }), nil
@@ -452,7 +452,7 @@ func TestRunNoArgsClosesPartialMCPRuntimeWhenRegistrationFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPermissionStore() error = %v", err)
 	}
-	tokenStore, err := mcp.NewTokenStore(mcp.TokenStoreOptions{FilePath: filepath.Join(t.TempDir(), "mcp-oauth.json")})
+	tokenStore, err := mcp.NewTokenStore(mcp.TokenStoreOptions{FilePath: filepath.Join(t.TempDir(), "mcp-oauth.json"), Storage: "file"})
 	if err != nil {
 		t.Fatalf("NewTokenStore() error = %v", err)
 	}
@@ -622,8 +622,8 @@ func TestRunNoArgsLaunchesTUIWithResolvedProviderMetadata(t *testing.T) {
 	if stdout.Len() != 0 {
 		t.Fatalf("expected empty stdout, got %q", stdout.String())
 	}
-	if stderr.Len() != 0 {
-		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	if !strings.Contains(stderr.String(), "is not trusted") {
+		t.Fatalf("expected untrusted warning, got %q", stderr.String())
 	}
 	assertCoreRegistry(t, launchedOptions.Registry)
 	assertAgentOptions(t, launchedOptions, 5, agent.PermissionModeAsk)
@@ -1030,8 +1030,11 @@ func TestRunSetupNoArgsForcesSetupTUI(t *testing.T) {
 	if launchedOptions.Setup.Required {
 		t.Fatalf("Setup.Required = true, want false for credentialed provider")
 	}
-	if stdout.Len() != 0 || stderr.Len() != 0 {
-		t.Fatalf("expected no output, stdout=%q stderr=%q", stdout.String(), stderr.String())
+	if stdout.Len() != 0 {
+		t.Fatalf("expected no stdout, got %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "is not trusted") {
+		t.Fatalf("expected untrusted warning, stderr=%q", stderr.String())
 	}
 }
 
@@ -1830,6 +1833,32 @@ func TestTUIStartupSkipsProjectScopeWhenUntrusted(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "is not trusted") {
 		t.Fatalf("stderr = %q, want untrusted warning", stderr.String())
+	}
+}
+
+func TestTUIStartupWarnsWhenUntrustedWithoutProjectConfig(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cwd := t.TempDir()
+	setCLIUserConfigRoot(t)
+
+	exitCode := runWithDeps([]string{"--no-trust"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{MaxTurns: 8}, nil
+		},
+		registerMCPTools: func(_ context.Context, _ *tools.Registry, _ config.MCPConfig, _ mcp.RegisterOptions) (mcpToolRuntime, error) {
+			return noopMCPRuntime{}, nil
+		},
+		loadPlugins: func(plugins.LoadOptions) (plugins.LoadResult, error) { return plugins.LoadResult{}, nil },
+		loadHooks:   func(hooks.LoadOptions) (hooks.LoadResult, error) { return hooks.LoadResult{}, nil },
+		runTUI:      func(context.Context, tui.Options) int { return 0 },
+	})
+
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, stderr = %q", exitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "is not trusted") {
+		t.Fatalf("stderr = %q, want untrusted warning without .splice/", stderr.String())
 	}
 }
 

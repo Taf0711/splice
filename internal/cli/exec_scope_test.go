@@ -139,9 +139,7 @@ func TestExecScopeReRegistrationSwapsCoreToolsByName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewScope: %v", err)
 	}
-	for _, tool := range tools.CoreToolsScoped(root, scope) {
-		registry.Register(tool)
-	}
+	registerExecCoreTools(registry, root, scope)
 
 	allowed := registry.RunWithOptions(context.Background(), "write_file", map[string]any{
 		"path":    inside,

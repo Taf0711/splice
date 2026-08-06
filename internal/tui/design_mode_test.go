@@ -3,9 +3,11 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -122,7 +124,7 @@ func TestDesignConversationRegistryIsReadOnly(t *testing.T) {
 
 	for _, name := range []string{
 		"read_file", "list_directory", "grep", "ask_user", "read_minified_file",
-		"glob", "lsp_navigate", "skill", "web_fetch", tools.ToolSearchToolName,
+		"glob", "lsp_navigate", "request_permissions", "skill", "web_fetch", tools.ToolSearchToolName,
 	} {
 		if _, ok := filtered.Get(name); !ok {
 			t.Fatalf("expected %s to be in design conversation registry", name)
@@ -135,12 +137,46 @@ func TestDesignConversationRegistryIsReadOnly(t *testing.T) {
 	}
 }
 
-type designRegistryTestTool struct{ name string }
+func TestDesignConversationRegistryIncludesEveryCoreReadOnlyTool(t *testing.T) {
+	// Regression: this list was hand-maintained, so a new read-only tool silently
+	// missed design mode until somebody edited design_mode.go.
+	registry := tools.NewRegistry()
+	for _, tool := range tools.CoreTools(t.TempDir()) {
+		registry.Register(tool)
+	}
+	registry.Register(tools.NewToolSearchTool(registry))
+	filtered := designConversationRegistry(registry)
+
+	for _, tool := range tools.CoreReadOnlyToolsScoped(t.TempDir(), nil) {
+		if _, ok := filtered.Get(tool.Name()); !ok {
+			t.Fatalf("core read-only tool %q missing from design conversation registry", tool.Name())
+		}
+	}
+}
+
+func TestDesignConversationRegistryIncludesNewReadOnlyToolAutomatically(t *testing.T) {
+	registry := tools.NewRegistry()
+	fake := designRegistryTestTool{name: "future_read_only", safety: tools.Safety{
+		SideEffect: tools.SideEffectRead,
+		Permission: tools.PermissionAllow,
+	}}
+	registry.Register(fake)
+
+	filtered := designConversationRegistry(registry)
+	if _, ok := filtered.Get(fake.Name()); !ok {
+		t.Fatal("new read-only tool was not included in design conversation registry")
+	}
+}
+
+type designRegistryTestTool struct {
+	name   string
+	safety tools.Safety
+}
 
 func (tool designRegistryTestTool) Name() string             { return tool.name }
 func (tool designRegistryTestTool) Description() string      { return "test tool" }
 func (tool designRegistryTestTool) Parameters() tools.Schema { return tools.Schema{} }
-func (tool designRegistryTestTool) Safety() tools.Safety     { return tools.Safety{} }
+func (tool designRegistryTestTool) Safety() tools.Safety     { return tool.safety }
 func (tool designRegistryTestTool) Run(context.Context, map[string]any) tools.Result {
 	return tools.Result{}
 }
@@ -423,9 +459,13 @@ func TestCrystallizeResultMsgOutcomes(t *testing.T) {
 			notWantTranscript: []string{"Plan is ready."},
 		},
 		{
-			name:              "critique persistence failure keeps must-fix critique",
-			plan:              validPlan,
-			critique:          schemas.PlanCritique{OverallAssessment: "Needs work", MustFixBeforeExecution: true},
+			name: "critique persistence failure keeps must-fix critique",
+			plan: validPlan,
+			critique: schemas.PlanCritique{
+				Critiques:              []schemas.Critique{{Category: "correctness", Severity: schemas.SeverityHigh, Issue: "unsafe"}},
+				OverallAssessment:      "Needs work",
+				MustFixBeforeExecution: true,
+			},
 			err:               fmt.Errorf("persist critique_recorded: disk full"),
 			wantPlan:          true,
 			wantCritique:      true,
@@ -579,6 +619,7 @@ func TestApproveAfterCritiquePersistenceFailureBlocksMustFixPlan(t *testing.T) {
 			Source:       "conversation",
 		},
 		critique: schemas.PlanCritique{
+			Critiques:              []schemas.Critique{{Category: "correctness", Severity: schemas.SeverityHigh, Issue: "unsafe"}},
 			OverallAssessment:      "Needs work",
 			MustFixBeforeExecution: true,
 		},
@@ -609,6 +650,7 @@ func TestCrystallizeResultMsgMustFixBlocksApprove(t *testing.T) {
 
 	plan := schemas.DesignPlan{Epic: "Build it"}
 	critique := schemas.PlanCritique{
+		Critiques:              []schemas.Critique{{Category: "correctness", Severity: schemas.SeverityHigh, Issue: "unsafe"}},
 		OverallAssessment:      "Needs work",
 		MustFixBeforeExecution: true,
 	}
@@ -655,6 +697,7 @@ func TestApproveCommandMustFixBlocks(t *testing.T) {
 	m := newDesignModeTestModel(t.TempDir(), &fakeProvider{}, testSessionStore(t))
 	m.pendingPlan = &schemas.DesignPlan{Epic: "Build it"}
 	m.pendingCritique = &schemas.PlanCritique{
+		Critiques:              []schemas.Critique{{Category: "correctness", Severity: schemas.SeverityHigh, Issue: "unsafe"}},
 		OverallAssessment:      "Needs work",
 		MustFixBeforeExecution: true,
 	}
@@ -685,6 +728,215 @@ func TestApproveCommandEmitsResultMessage(t *testing.T) {
 	msg := execCmd(cmd)
 	if _, ok := msg.(planExecutionResultMsg); !ok {
 		t.Fatalf("expected planExecutionResultMsg, got %T", msg)
+	}
+}
+
+// This test pins the failure path to refreshing session events. A failed plan
+// run still appended the approval, any tasks that started, and each stage's
+// usage; returning early on the error left the live session disagreeing with
+// its own log for exactly the run a user needs to inspect.
+func TestFailedPlanExecutionStillRefreshesSessionEvents(t *testing.T) {
+	store := testSessionStore(t)
+	m := newDesignModeTestModel(t.TempDir(), &fakeProvider{}, store)
+	sess, err := store.Create(sessions.CreateInput{SessionID: "failed-plan-session", Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	m.activeSession = sess
+	m.activeRunID = 7
+	m.pending = true
+
+	// An event the run appended that the in-memory model has not seen yet.
+	if _, err := store.AppendEvent(sess.SessionID, sessions.AppendEventInput{
+		Type:    sessions.EventPlanApproved,
+		Payload: splicerun.PlanApprovedPayload{PlanID: "plan-failed"},
+	}); err != nil {
+		t.Fatalf("append plan approved: %v", err)
+	}
+
+	next, _ := m.Update(planExecutionResultMsg{
+		runID:     7,
+		err:       errors.New("task step-1 stopped with status failed"),
+		store:     store,
+		sessionID: sess.SessionID,
+	})
+	updated, ok := next.(model)
+	if !ok {
+		t.Fatalf("Update returned %T, want model", next)
+	}
+	if len(updated.sessionEvents) == 0 {
+		t.Fatal("failed plan execution left session events stale (none loaded)")
+	}
+	if !transcriptContains(updated.transcript, "Plan execution failed") {
+		t.Fatalf("expected the failure to be reported, got %#v", updated.transcript)
+	}
+}
+
+func approvePlanEvents() []zeroruntime.StreamEvent {
+	args, _ := json.Marshal(schemas.CodeWriterOutput{
+		Files:      []schemas.FileChange{{Path: "hello.go", Content: "package hello\n", ChangeType: "create"}},
+		Language:   "go",
+		Intent:     "create hello.go",
+		Confidence: 0.9,
+	})
+	return []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventText, Content: "stage text"},
+		{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "submit", ToolName: "submit_code"},
+		{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "submit", ArgumentsFragment: string(args)},
+		{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "submit"},
+		{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 10, OutputTokens: 5}},
+		{Type: zeroruntime.StreamEventDone},
+	}
+}
+
+// TestApproveAskModeSurfacesPermissionRegression covers the reported bug:
+// /approve used to fail every gated tool in ask mode because its permission
+// callback was nil instead of surfacing a TUI prompt.
+func TestApproveAskModeSurfacesPermissionRegression(t *testing.T) {
+	var prompts int
+	provider := &fakeProvider{events: approvePlanEvents()}
+	store := testSessionStore(t)
+	root := t.TempDir()
+	m := newDesignModeTestModel(root, provider, store)
+	m.runtimeMessageSink = func(msg tea.Msg) {
+		if prompt, ok := msg.(permissionRequestMsg); ok {
+			prompts++
+			prompt.decide(agent.PermissionDecision{Action: agent.PermissionDecisionAllow})
+		}
+	}
+	sess, err := store.Create(sessions.CreateInput{SessionID: "approve-session", Cwd: root})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	m.activeSession = sess
+	tier := schemas.TierTrivial
+	m.pendingPlan = &schemas.DesignPlan{Epic: "Approve callbacks", Requirements: []string{"write the file"}, InScope: []string{"hello.go"}, Source: "authored", Tasks: []schemas.Task{{ID: "t1", Title: "Write hello", Intent: "Create hello.go", EstimatedTier: &tier}}}
+
+	_, cmd := m.handleApproveCommand()
+	if cmd == nil {
+		t.Fatal("expected /approve command")
+	}
+	msg := execCmd(cmd)
+	result, ok := msg.(planExecutionResultMsg)
+	if !ok {
+		t.Fatalf("expected planExecutionResultMsg, got %T", msg)
+	}
+	if result.err != nil {
+		t.Fatalf("approved plan failed: %v", result.err)
+	}
+	if prompts != 1 {
+		t.Fatalf("permission prompts = %d, want 1", prompts)
+	}
+}
+
+func TestApprovePlanStreamsTextAndToolCall(t *testing.T) {
+	var messages []tea.Msg
+	provider := &fakeProvider{events: approvePlanEvents()}
+	store := testSessionStore(t)
+	root := t.TempDir()
+	m := newDesignModeTestModel(root, provider, store)
+	m.runtimeMessageSink = func(msg tea.Msg) {
+		messages = append(messages, msg)
+		if prompt, ok := msg.(permissionRequestMsg); ok {
+			prompt.decide(agent.PermissionDecision{Action: agent.PermissionDecisionAllow})
+		}
+	}
+	sess, err := store.Create(sessions.CreateInput{SessionID: "approve-session", Cwd: root})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	m.activeSession = sess
+	tier := schemas.TierTrivial
+	m.pendingPlan = &schemas.DesignPlan{Epic: "Approve callbacks", Requirements: []string{"write the file"}, InScope: []string{"hello.go"}, Source: "authored", Tasks: []schemas.Task{{ID: "t1", Title: "Write hello", Intent: "Create hello.go", EstimatedTier: &tier}}}
+	started, cmd := m.handleApproveCommand()
+	msg := execCmd(cmd)
+	for _, live := range messages {
+		updated, _ := started.Update(live)
+		started = updated.(model)
+	}
+	if !transcriptContains(started.transcript, "stage text") {
+		t.Fatalf("expected stage text in transcript, got %#v", started.transcript)
+	}
+	foundTool := false
+	for _, live := range messages {
+		if _, ok := live.(agentRowMsg); ok {
+			foundTool = true
+			break
+		}
+		if _, ok := live.(toolCallStreamStartMsg); ok {
+			foundTool = true
+			break
+		}
+	}
+	if !foundTool {
+		t.Fatalf("expected tool call card or stream message, got %#v", messages)
+	}
+	if _, ok := msg.(planExecutionResultMsg); !ok {
+		t.Fatalf("expected planExecutionResultMsg, got %T", msg)
+	}
+}
+
+func TestApprovePlanPersistsAttributedUsage(t *testing.T) {
+	provider := &fakeProvider{events: approvePlanEvents()}
+	store := testSessionStore(t)
+	root := t.TempDir()
+	m := newDesignModeTestModel(root, provider, store)
+	m.runtimeMessageSink = func(msg tea.Msg) {
+		if prompt, ok := msg.(permissionRequestMsg); ok {
+			prompt.decide(agent.PermissionDecision{Action: agent.PermissionDecisionAllow})
+		}
+	}
+	sess, err := store.Create(sessions.CreateInput{SessionID: "approve-session", Cwd: root})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	m.activeSession = sess
+	tier := schemas.TierTrivial
+	m.pendingPlan = &schemas.DesignPlan{Epic: "Approve callbacks", Requirements: []string{"write the file"}, InScope: []string{"hello.go"}, Source: "authored", Tasks: []schemas.Task{{ID: "t1", Title: "Write hello", Intent: "Create hello.go", EstimatedTier: &tier}}}
+	_, cmd := m.handleApproveCommand()
+	if msg := execCmd(cmd); msg == nil {
+		t.Fatal("expected plan result")
+	}
+	events, err := store.ReadEvents(m.activeSession.SessionID)
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	if !eventTypesContain(events, sessions.EventUsage) {
+		t.Fatalf("expected usage event, got %v", eventTypes(events))
+	}
+}
+
+func TestApprovePlanCancellationDuringPermissionPromptDoesNotHang(t *testing.T) {
+	permissionSeen := make(chan struct{})
+	provider := &fakeProvider{events: approvePlanEvents()}
+	store := testSessionStore(t)
+	root := t.TempDir()
+	m := newDesignModeTestModel(root, provider, store)
+	m.runtimeMessageSink = func(msg tea.Msg) {
+		if _, ok := msg.(permissionRequestMsg); ok {
+			close(permissionSeen)
+		}
+	}
+	sess, err := store.Create(sessions.CreateInput{SessionID: "approve-session", Cwd: root})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	m.activeSession = sess
+	tier := schemas.TierTrivial
+	m.pendingPlan = &schemas.DesignPlan{Epic: "Approve callbacks", Requirements: []string{"write the file"}, InScope: []string{"hello.go"}, Source: "authored", Tasks: []schemas.Task{{ID: "t1", Title: "Write hello", Intent: "Create hello.go", EstimatedTier: &tier}}}
+	started, cmd := m.handleApproveCommand()
+	resultCh := make(chan tea.Msg, 1)
+	go func() { resultCh <- execCmd(cmd) }()
+	select {
+	case <-permissionSeen:
+	case <-time.After(2 * time.Second):
+		t.Fatal("permission prompt did not surface")
+	}
+	started.runCancel()
+	select {
+	case <-resultCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("approve run hung after cancellation")
 	}
 }
 

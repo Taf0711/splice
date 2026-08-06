@@ -14,6 +14,7 @@ func withAuthStore(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "oauth-tokens.json")
 	t.Setenv("SPLICE_OAUTH_TOKENS_PATH", path)
+	t.Setenv("SPLICE_OAUTH_STORAGE", "file")
 	return path
 }
 

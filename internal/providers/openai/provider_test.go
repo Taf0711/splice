@@ -207,6 +207,65 @@ func TestStreamCompletionEmitsTextUsageAndDone(t *testing.T) {
 	}
 }
 
+// TestStreamCompletionEmitsReportedCostFromOpenRouter proves that when the
+// request goes to openrouter.ai and the usage chunk carries OpenRouter's
+// "cost" extension field, the provider surfaces it on the StreamEventUsage
+// event so the pipeline can use the exact billed charge instead of estimating
+// from the pricing registry. BaseURL is set to openrouter.ai (for the host
+// gate) while Endpoint overrides the actual request destination to the local
+// test server.
+func TestStreamCompletionEmitsReportedCostFromOpenRouter(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, `{"choices":[{"delta":{"content":"hi"}}],"usage":{"prompt_tokens":12,"completion_tokens":5,"cost":0.00054,"cost_details":{"upstream_inference_cost":0.00054}}}`)
+		writeSSE(w, `[DONE]`)
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{
+		Model:    "test",
+		BaseURL:  "https://openrouter.ai/api/v1",
+		Endpoint: server.URL + "/chat/completions",
+	})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	events := collectProviderEvents(t, provider)
+	usageEvents := eventsOfType(events, zeroruntime.StreamEventUsage)
+	if len(usageEvents) != 1 {
+		t.Fatalf("usage events = %d, want 1: %#v", len(usageEvents), events)
+	}
+	got := usageEvents[0].ReportedCostUSD
+	if got == nil || *got != 0.00054 {
+		t.Fatalf("ReportedCostUSD = %v, want 0.00054", got)
+	}
+	// Token accounting must be unaffected by the new field.
+	if usageEvents[0].Usage.PromptTokens != 12 || usageEvents[0].Usage.CompletionTokens != 5 {
+		t.Fatalf("unexpected usage: %#v", usageEvents[0].Usage)
+	}
+}
+
+// TestStreamCompletionOmitsReportedCostForNonOpenRouterHost proves the host
+// gate: even if a non-OpenRouter OpenAI-compatible backend happens to send a
+// field literally named "cost" (same key, unknown semantics/units), the
+// provider must not surface it as a trusted reported cost. Behavior for every
+// non-OpenRouter provider must stay byte-identical to before this change.
+func TestStreamCompletionOmitsReportedCostForNonOpenRouterHost(t *testing.T) {
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, `{"choices":[{"delta":{"content":"hi"}}],"usage":{"prompt_tokens":12,"completion_tokens":5,"cost":0.00054}}`)
+		writeSSE(w, `[DONE]`)
+	})
+
+	events := collectProviderEvents(t, provider)
+	usageEvents := eventsOfType(events, zeroruntime.StreamEventUsage)
+	if len(usageEvents) != 1 {
+		t.Fatalf("usage events = %d, want 1: %#v", len(usageEvents), events)
+	}
+	if usageEvents[0].ReportedCostUSD != nil {
+		t.Fatalf("ReportedCostUSD = %v, want nil for a non-OpenRouter host", *usageEvents[0].ReportedCostUSD)
+	}
+}
+
 func TestStreamCompletionEmitsReasoningContentDeltas(t *testing.T) {
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"choices":[{"delta":{"reasoning_content":"Thinking. "}}]}`)
@@ -819,6 +878,30 @@ func TestStreamCompletionSendsReasoningEffort(t *testing.T) {
 
 	if got := gotBody["reasoning_effort"]; got != "high" {
 		t.Fatalf("reasoning_effort = %#v, want \"high\"", got)
+	}
+}
+
+func TestOpenAIReasoningEffortMapping(t *testing.T) {
+	// xhigh and max previously carried no effort field, so the model silently
+	// ran at its default instead of honoring the request as far as OpenAI allows.
+	tests := []struct {
+		requested string
+		want      string
+	}{
+		{requested: "xhigh", want: "high"},
+		{requested: "max", want: "high"},
+		{requested: "minimal", want: "minimal"},
+		{requested: "low", want: "low"},
+		{requested: "medium", want: "medium"},
+		{requested: "high", want: "high"},
+		{requested: "bogus", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.requested, func(t *testing.T) {
+			if got := openAIReasoningEffort(tc.requested); got != tc.want {
+				t.Fatalf("openAIReasoningEffort(%q) = %q, want %q", tc.requested, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -1519,4 +1602,36 @@ func TestOpenRouterWebSearchAnnotationBatches(t *testing.T) {
 	if usage.WebSearchRequests != 2 {
 		t.Fatalf("web search requests = %d, want 2", usage.WebSearchRequests)
 	}
+	if usage.WebSearchEngine != defaultWebSearchEngine {
+		t.Fatalf("web search engine = %q, want %q", usage.WebSearchEngine, defaultWebSearchEngine)
+	}
+}
+
+func TestOpenRouterWebSearchUsageReportsConfiguredEngine(t *testing.T) {
+	t.Setenv("SPLICE_WEBSEARCH_ENGINE", "exa")
+	provider, err := New(Options{Model: "test", BaseURL: "https://openrouter.ai/v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := newToolState(false)
+	state.serverToolEnabled = true
+	events := make(chan zeroruntime.StreamEvent, 8)
+	for _, payload := range []string{
+		`{"choices":[{"delta":{"annotations":[{"type":"url_citation","url":"https://one.example"}]}}]}`,
+		`{"choices":[{"delta":{}}],"usage":{"prompt_tokens":1}}`,
+	} {
+		if !provider.emitPayload(context.Background(), payload, state, events) {
+			t.Fatal("emitPayload returned false")
+		}
+	}
+	for len(events) > 0 {
+		event := <-events
+		if event.Type == zeroruntime.StreamEventUsage {
+			if event.Usage.WebSearchEngine != "exa" {
+				t.Fatalf("web search engine = %q, want exa", event.Usage.WebSearchEngine)
+			}
+			return
+		}
+	}
+	t.Fatal("provider emitted no usage event")
 }

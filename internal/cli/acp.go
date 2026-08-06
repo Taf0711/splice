@@ -39,6 +39,9 @@ func runACP(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int
 			return writeExecUsageError(stderr, fmt.Sprintf("unknown acp flag %q", arg))
 		}
 	}
+	if deps.migrateOAuth != nil {
+		deps.migrateOAuth()
+	}
 
 	conn := acp.NewConn(deps.stdin, stdout)
 	acp.NewAgent(conn, acp.Deps{

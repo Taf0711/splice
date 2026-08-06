@@ -425,9 +425,9 @@ func newOAuthStoreForTest(t *testing.T) (*oauth.Store, error) {
 // FIXED key — the key the caller (cli.oauthLoginForProfile) already bound for the
 // bearer token, passed through providers.Options.OAuthLoginKey. The account is
 // therefore always read from the same login that issued the bearer (no second,
-// independent selection). It re-reads per call, so an in-place token refresh (new
-// account claim under the SAME key) is picked up; an empty key (no OAuth login)
-// or a missing/account-less token yields "".
+// independent selection). It re-reads on each direct call; the Codex provider
+// memoizes a successful result after the first request. An empty key (no OAuth
+// login) or a missing/account-less token yields "".
 func TestCodexAccountForKey(t *testing.T) {
 	store, err := newOAuthStoreForTest(t)
 	if err != nil {
@@ -458,11 +458,11 @@ func TestCodexAccountForKey(t *testing.T) {
 		t.Fatalf("account for unknown key = %q, want empty", got)
 	}
 
-	// An in-place refresh under the bound key IS reflected per request.
+	// The low-level helper sees a replacement token when called again.
 	if err := store.Save(oauth.ProviderKey("chatgpt"), oauth.Token{AccessToken: "tok-refreshed", Account: "acc-rotated"}); err != nil {
 		t.Fatalf("refresh chatgpt: %v", err)
 	}
 	if got := codexAccountForKey(oauth.ProviderKey("chatgpt")); got != "acc-rotated" {
-		t.Fatalf("account = %q, want acc-rotated (in-place refresh must be picked up)", got)
+		t.Fatalf("account = %q, want acc-rotated (replacement token must be read)", got)
 	}
 }

@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"sort"
 	"strings"
 	"time"
+
+	"github.com/mattn/go-runewidth"
 
 	"github.com/Taf0711/splice/internal/config"
 	"github.com/Taf0711/splice/internal/modelregistry"
@@ -53,6 +56,7 @@ type historicalUsagePayload struct {
 	CacheWriteTokens  int      `json:"cacheWriteTokens"`
 	ReasoningTokens   int      `json:"reasoningTokens"`
 	WebSearchRequests int      `json:"webSearchRequests"`
+	WebSearchEngine   string   `json:"webSearchEngine"`
 	Model             string   `json:"model"`
 	CostUSD           *float64 `json:"costUsd"`
 	CostStatus        string   `json:"costStatus"`
@@ -146,8 +150,10 @@ func classifyUsageCoverage(events []sessions.Event, meta []sessions.Metadata, re
 				CacheWriteTokens:  payload.CacheWriteTokens,
 				ReasoningTokens:   payload.ReasoningTokens,
 				WebSearchRequests: payload.WebSearchRequests,
+				WebSearchEngine:   payload.WebSearchEngine,
 			}); err != nil {
-				if payload.WebSearchRequests > 0 && model.Cost.WebSearchPerRequest == 0 {
+				_, searchPriced, searchRateErr := modelregistry.WebSearchPricingRate(model, payload.WebSearchEngine)
+				if payload.WebSearchRequests > 0 && (searchRateErr != nil || !searchPriced) {
 					coverage.UnpricedCount++
 				} else {
 					coverage.ErrorCount++
@@ -374,6 +380,37 @@ func FormatReport(report usage.Report, insertions int, deletions int, coverage .
 	}
 	builder.WriteString(fmt.Sprintf("\n%-12s %10d %14s %14s\n",
 		"total", report.Total.Requests, groupThousands(report.Total.TotalTokens), formatUSD(report.Total.TotalCost)))
+	if len(report.WorkUnits) > 0 {
+		workUnits := append([]usage.WorkUnit(nil), report.WorkUnits...)
+		sort.SliceStable(workUnits, func(left int, right int) bool {
+			if workUnits[left].TotalCost != workUnits[right].TotalCost {
+				return workUnits[left].TotalCost > workUnits[right].TotalCost
+			}
+			if workUnits[left].Model != workUnits[right].Model {
+				return workUnits[left].Model < workUnits[right].Model
+			}
+			if workUnits[left].Stage != workUnits[right].Stage {
+				return workUnits[left].Stage < workUnits[right].Stage
+			}
+			return workUnits[left].Provider < workUnits[right].Provider
+		})
+		displayWorkUnitValue := func(value string) string {
+			if strings.TrimSpace(value) == "" {
+				return "-"
+			}
+			return value
+		}
+		builder.WriteString("\nwork units:\n")
+		builder.WriteString(fmt.Sprintf("%-14s %-21s %-10s %8s %12s %10s\n",
+			"stage", "model", "provider", "requests", "tokens", "est. cost"))
+		for _, unit := range workUnits {
+			builder.WriteString(fmt.Sprintf("%-14s %-21s %-10s %8d %12s %10s\n",
+				fitCell(displayWorkUnitValue(unit.Stage), 14),
+				fitCell(displayWorkUnitValue(unit.Model), 21),
+				fitCell(displayWorkUnitValue(unit.Provider), 10),
+				unit.Requests, groupThousands(unit.TotalTokens), formatUSD(unit.TotalCost)))
+		}
+	}
 	if len(coverage) > 0 {
 		metrics := coverage[0]
 		builder.WriteString(fmt.Sprintf("\npricing: %s (persisted %d, reconstructed %d, unpriced %d, errors %d)\n",
@@ -422,6 +459,17 @@ func formatUSD(value float64) string {
 		return "$0.0000"
 	}
 	return formatted
+}
+
+// fitCell caps a table cell at width display columns, marking a shortened value
+// with a trailing "...". Padding verbs widen a cell that is too long instead of
+// clipping it, which shifts every later column on that row and shears the table;
+// model ids like "deepseek/deepseek-v4-flash" are long enough to do it.
+func fitCell(value string, width int) string {
+	if runewidth.StringWidth(value) <= width {
+		return value
+	}
+	return runewidth.Truncate(value, width, "...")
 }
 
 // groupThousands renders an integer with comma thousands separators, preserving

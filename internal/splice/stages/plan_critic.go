@@ -27,12 +27,19 @@ func (PlanCritic) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 	if options.Plan == nil {
 		return schemas.HarnessStageOutput{}, fmt.Errorf("plan critic requires options.plan")
 	}
-	critiqueInput := schemas.PlanCriticInput{Plan: *options.Plan}
+	critiqueInput := schemas.PlanCriticInput{
+		Plan:             *options.Plan,
+		PreviousPlan:     options.PreviousPlan,
+		PreviousCritique: options.PreviousCritique,
+		RelevantContext:  options.RelevantContext,
+		PipelineStages:   input.PipelineStages,
+		NextStage:        input.NextStage,
+	}
 	if err := critiqueInput.Validate(); err != nil {
 		return schemas.HarnessStageOutput{}, fmt.Errorf("plan critic input: %w", err)
 	}
 	payload, _ := json.MarshalIndent(critiqueInput, "", "  ")
-	collected, err := callValidatedToolUse(ctx, provider, options.model("reasoning"), options.ReasoningEffort, composeSystemPrompt(planCriticSystemPrompt), string(payload), options.Images, planCriticToolDefinition(), &options.Stream, parsePlanCritique)
+	collected, err := callValidatedToolUse(ctx, provider, options.model("reasoning"), options.ReasoningEffort, composeSystemPrompt(planCriticSystemPrompt), string(payload), options.Images, planCriticToolDefinition(), &options.Stream, parsePlanCritique, options.PromptCacheKey)
 	if err != nil {
 		return schemas.HarnessStageOutput{}, err
 	}

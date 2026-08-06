@@ -40,7 +40,8 @@ type ParsedChecksum struct {
 }
 
 type VerifyOptions struct {
-	ReleaseDir string
+	ReleaseDir  string
+	ArchivePath string
 }
 
 type PackageOptions struct {
@@ -269,6 +270,21 @@ func ZeroArtifactName(goos string) string {
 		return "splice.exe"
 	}
 	return "splice"
+}
+
+func memdArtifactName(goos string) string {
+	if goos == "windows" {
+		return "splice-memd.exe"
+	}
+	return "splice-memd"
+}
+
+func requiredArchiveEntries(goos string) ([]string, error) {
+	goos = strings.TrimSpace(goos)
+	if _, err := ReleasePlatform(goos); err != nil {
+		return nil, err
+	}
+	return []string{ZeroArtifactName(goos), memdArtifactName(goos)}, nil
 }
 
 func LinuxSandboxHelperArtifactName(goos string) string {
@@ -520,9 +536,120 @@ func VerifyReleaseChecksums(options VerifyOptions) ([]VerifiedChecksum, error) {
 		if result.ArchiveName != archiveName {
 			return nil, fmt.Errorf("checksum file %s references %s, expected %s", checksumName, result.ArchiveName, archiveName)
 		}
+		if err := VerifyArchiveContents(result.ArchivePath); err != nil {
+			return nil, err
+		}
 		verified = append(verified, result)
 	}
 	return verified, nil
+}
+
+func VerifyArchiveContents(archivePath string) error {
+	archivePath = strings.TrimSpace(archivePath)
+	if archivePath == "" {
+		return errors.New("archive path is required")
+	}
+	goos, err := releaseGOOSFromArchiveName(archivePath)
+	if err != nil {
+		return err
+	}
+	expected, err := requiredArchiveEntries(goos)
+	if err != nil {
+		return err
+	}
+	actualSet, err := readArchiveEntries(archivePath)
+	if err != nil {
+		return err
+	}
+	for _, name := range expected {
+		if _, ok := actualSet[name]; !ok {
+			actual := make([]string, 0, len(actualSet))
+			for actualName := range actualSet {
+				actual = append(actual, actualName)
+			}
+			sort.Strings(actual)
+			return fmt.Errorf("archive %s missing required entry %q; actual entries: %v", filepath.Base(archivePath), name, actual)
+		}
+	}
+	return nil
+}
+
+func readArchiveEntries(archivePath string) (map[string]struct{}, error) {
+	var names []string
+	var err error
+	switch {
+	case strings.HasSuffix(strings.ToLower(archivePath), ".zip"):
+		names, err = readZipArchiveEntries(archivePath)
+	case strings.HasSuffix(strings.ToLower(archivePath), ".tar.gz"):
+		names, err = readTarGzArchiveEntries(archivePath)
+	default:
+		return nil, fmt.Errorf("unsupported release archive format: %s", filepath.Base(archivePath))
+	}
+	if err != nil {
+		return nil, err
+	}
+	entries := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		entries[normalizeArchiveEntryName(name)] = struct{}{}
+	}
+	return entries, nil
+}
+
+func readZipArchiveEntries(archivePath string) ([]string, error) {
+	reader, err := zip.OpenReader(archivePath)
+	if err != nil {
+		return nil, fmt.Errorf("read zip archive %s: %w", filepath.Base(archivePath), err)
+	}
+	defer func() { _ = reader.Close() }()
+	names := make([]string, 0, len(reader.File))
+	for _, entry := range reader.File {
+		names = append(names, entry.Name)
+	}
+	return names, nil
+}
+
+func readTarGzArchiveEntries(archivePath string) ([]string, error) {
+	file, err := os.Open(archivePath)
+	if err != nil {
+		return nil, fmt.Errorf("read tar.gz archive %s: %w", filepath.Base(archivePath), err)
+	}
+	defer func() { _ = file.Close() }()
+	gzipReader, err := gzip.NewReader(file)
+	if err != nil {
+		return nil, fmt.Errorf("read tar.gz archive %s: %w", filepath.Base(archivePath), err)
+	}
+	defer func() { _ = gzipReader.Close() }()
+	tarReader := tar.NewReader(gzipReader)
+	names := []string{}
+	for {
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read tar.gz archive %s: %w", filepath.Base(archivePath), err)
+		}
+		names = append(names, header.Name)
+	}
+	return names, nil
+}
+
+func normalizeArchiveEntryName(name string) string {
+	return strings.TrimPrefix(name, "./")
+}
+
+func releaseGOOSFromArchiveName(archiveName string) (string, error) {
+	name := filepath.Base(archiveName)
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		platform, err := ReleasePlatform(goos)
+		if err != nil {
+			return "", err
+		}
+		if strings.Contains(name, "-"+platform+"-") {
+			return goos, nil
+		}
+	}
+	return "", fmt.Errorf("cannot determine release platform from archive name: %s", name)
 }
 
 func resolveRootDir(rootDir string) (string, error) {

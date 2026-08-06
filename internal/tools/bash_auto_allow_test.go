@@ -23,6 +23,9 @@ func nativeBackendStub() sandbox.Backend {
 
 func sandboxedBashPolicy() sandbox.Policy {
 	policy := sandbox.DefaultPolicy()
+	// These gate tests exercise escalation mechanics. Keep read denials explicit
+	// in the dedicated preservation test below.
+	policy.DenyRead = nil
 	// Network deny so no proxy is started for these gate-only tests.
 	return policy
 }

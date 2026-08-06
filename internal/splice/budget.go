@@ -45,6 +45,12 @@ func stageBudgets(tier schemas.PipelineTier) map[string]schemas.StageBudget {
 			ModelTier: "",
 			Skippable: true,
 		},
+		"acceptance_verifier": {
+			InputMax:  0,
+			OutputMax: 0,
+			ModelTier: "",
+			Skippable: true,
+		},
 	}
 }
 
@@ -82,11 +88,11 @@ func StageNamesForTier(tier schemas.PipelineTier) ([]string, error) {
 	case schemas.TierTrivial:
 		return []string{"code_writer"}, nil
 	case schemas.TierLight:
-		return []string{"code_writer", "static_analyzer", "test_runner"}, nil
+		return []string{"code_writer", "static_analyzer", "test_runner", "acceptance_verifier"}, nil
 	case schemas.TierStandard:
-		return []string{"code_writer", "test_generator", "static_analyzer", "test_runner"}, nil
+		return []string{"code_writer", "test_generator", "static_analyzer", "test_runner", "acceptance_verifier"}, nil
 	case schemas.TierSubstantial, schemas.TierArchitectural:
-		return []string{"code_writer", "test_generator", "static_analyzer", "security_auditor", "test_runner"}, nil
+		return []string{"code_writer", "test_generator", "static_analyzer", "security_auditor", "test_runner", "acceptance_verifier"}, nil
 	default:
 		return nil, fmt.Errorf("unknown pipeline tier %q", tier)
 	}

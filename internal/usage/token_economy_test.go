@@ -64,6 +64,39 @@ func TestEventUsageRoundTripPreservesCacheAndReasoningCost(t *testing.T) {
 	}
 }
 
+func TestEventUsageRoundTripPreservesWebSearchEngineCost(t *testing.T) {
+	registry, err := testPricedRegistry(t)
+	if err != nil {
+		t.Fatalf("DefaultRegistry: %v", err)
+	}
+	model, err := registry.Require("gpt-4.1")
+	if err != nil {
+		t.Fatalf("Require: %v", err)
+	}
+	live := zeroruntime.Usage{
+		InputTokens: 1_000, OutputTokens: 200,
+		WebSearchRequests: 2, WebSearchEngine: "parallel",
+	}
+	liveCost, err := modelregistry.CalculateCost(model, live)
+	if err != nil {
+		t.Fatalf("CalculateCost: %v", err)
+	}
+	raw, err := json.Marshal(EventUsagePayload(live))
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	report, err := BuildReport(
+		[]sessions.Event{{SessionID: "s1", Sequence: 1, Type: sessions.EventUsage, CreatedAt: "2026-06-19T10:00:00Z", Payload: raw}},
+		[]sessions.Metadata{{SessionID: "s1", ModelID: "gpt-4.1"}}, &registry, 0,
+	)
+	if err != nil {
+		t.Fatalf("BuildReport: %v", err)
+	}
+	if math.Abs(report.Total.TotalCost-liveCost.TotalCost) > 1e-9 {
+		t.Fatalf("reconstructed cost = %v, live = %v (search engine lost in persistence)", report.Total.TotalCost, liveCost.TotalCost)
+	}
+}
+
 // Splice cache/reasoning fields are omitted so non-cache turns stay compact and
 // decode identically to the pre-feature payload.
 func TestEventUsagePayloadOmitsZeroFields(t *testing.T) {

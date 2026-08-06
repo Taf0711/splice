@@ -220,10 +220,6 @@ func applyModelsDevOverridesWithStats(entries []ModelEntry, providers map[string
 	return applyModelsDevOverridesWithSource(entries, providers, modelsDevCachedSource, time.Now().UTC(), providerProfile...)
 }
 
-func applyModelsDevOverridesWithStatsAt(entries []ModelEntry, providers map[string]map[string]modelsDevModel, cacheModTime time.Time, providerProfile ...string) ([]ModelEntry, int) {
-	return applyModelsDevOverridesWithSource(entries, providers, modelsDevCachedSource, cacheModTime, providerProfile...)
-}
-
 func applyModelsDevOverridesWithSource(entries []ModelEntry, providers map[string]map[string]modelsDevModel, source string, sourceModTime time.Time, providerProfile ...string) ([]ModelEntry, int) {
 	if len(providers) == 0 {
 		return entries, 0
@@ -394,7 +390,7 @@ type modelsDevSource struct {
 // EnableModelsDevOverlay opts the process into provider-scoped derived entries
 // and applying a newer disk cache. The embedded snapshot remains the baseline
 // with or without this setting.
-// SPLICE_DISABLE_MODELS_FETCH disables only the disk cache and network fetch.
+// SPLICE_DISABLE_MODELS_FETCH disables the background network fetch only.
 func EnableModelsDevOverlay() {
 	modelsDevEnabled.Store(true)
 }
@@ -443,11 +439,6 @@ func cachedModelsDevProviders() map[string]map[string]modelsDevModel {
 	return cachedModelsDevSnapshotInfo().providers
 }
 
-func cachedModelsDevSnapshot() (map[string]map[string]modelsDevModel, time.Time) {
-	snapshot := cachedModelsDevSnapshotInfo()
-	return snapshot.providers, snapshot.modTime
-}
-
 func cachedModelsDevSnapshotInfo() modelsDevSource {
 	modelsDevOnce.Do(func() {
 		selected := embeddedModelsDevSnapshot()
@@ -455,7 +446,7 @@ func cachedModelsDevSnapshotInfo() modelsDevSource {
 			modelsDevSelected = selected
 			return
 		}
-		if !modelsDevEnabled.Load() || strings.TrimSpace(os.Getenv("SPLICE_DISABLE_MODELS_FETCH")) != "" {
+		if !modelsDevEnabled.Load() {
 			modelsDevSelected = selected
 			return
 		}

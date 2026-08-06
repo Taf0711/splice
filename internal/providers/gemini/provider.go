@@ -30,7 +30,9 @@ func thinkingBudgetForEffort(effort string) int {
 		return 4096
 	case "medium":
 		return 8192
-	case "high":
+	// xhigh and max clamp to the top budget rather than falling through to the
+	// default, which returns none: asking for the most thinking switched it off.
+	case "high", "xhigh", "max":
 		return 24576
 	default:
 		return 0

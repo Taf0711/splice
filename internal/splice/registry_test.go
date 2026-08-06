@@ -16,7 +16,7 @@ func TestBuildStageRegistryRegistersAllStages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildStageRegistry: %v", err)
 	}
-	for _, name := range []string{"code_writer", "test_generator", "test_runner", "static_analyzer", "security_auditor"} {
+	for _, name := range []string{"code_writer", "test_generator", "test_runner", "acceptance_verifier", "static_analyzer", "security_auditor"} {
 		if _, ok := registry[name]; !ok {
 			t.Errorf("stage %q missing from registry", name)
 		}
@@ -112,6 +112,18 @@ func TestStageOptionsEmitsMissingUsageAndPreservesLegacyFallback(t *testing.T) {
 	zeroruntime.CollectStreamWithOptions(context.Background(), withUsage, legacyOptions.Stream)
 	if legacyCalls != 1 {
 		t.Fatalf("legacy usage calls = %d, want 1", legacyCalls)
+	}
+}
+
+func TestStageOptionsPromptCacheKey(t *testing.T) {
+	selection := agent.ModelSelection{ProviderName: "primary", Model: "model-a"}
+	withSession := stageOptions("code_writer", 1, selection, agent.Options{SessionID: "session-1"}, t.TempDir(), nil)
+	if got, want := withSession.PromptCacheKey, "session-1:code_writer"; got != want {
+		t.Fatalf("PromptCacheKey = %q, want %q", got, want)
+	}
+	withoutSession := stageOptions("code_writer", 1, selection, agent.Options{}, t.TempDir(), nil)
+	if withoutSession.PromptCacheKey != "" {
+		t.Fatalf("PromptCacheKey = %q, want empty", withoutSession.PromptCacheKey)
 	}
 }
 

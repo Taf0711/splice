@@ -14,10 +14,169 @@ import (
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/sessions"
+	splicerun "github.com/Taf0711/splice/internal/splice"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/tools"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
+
+func appendPickerPlan(t *testing.T, store *sessions.Store, sessionID string, planID string) {
+	t.Helper()
+	if _, err := store.AppendEvent(sessionID, sessions.AppendEventInput{
+		Type:    sessions.EventMessage,
+		Payload: map[string]any{"role": "assistant", "content": "plan ready"},
+	}); err != nil {
+		t.Fatalf("append assistant event: %v", err)
+	}
+	planJSON, err := json.Marshal(schemas.DesignPlan{
+		Source:       "conversation",
+		Epic:         "picker plan",
+		Requirements: []string{"show status"},
+		InScope:      []string{"picker"},
+		Tasks:        []schemas.Task{{ID: "step-1", Title: "Step one", Intent: "show status"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal plan: %v", err)
+	}
+	if _, err := store.AppendEvent(sessionID, sessions.AppendEventInput{
+		Type:    sessions.EventPlanCrystallized,
+		Payload: splicerun.PlanCrystallizedPayload{PlanID: planID, Revision: 1, Plan: planJSON},
+	}); err != nil {
+		t.Fatalf("append plan event: %v", err)
+	}
+}
+
+// This test pins launch scoping to the current workspace, not global history.
+func TestLaunchPickerScopesPlansToWorkspace(t *testing.T) {
+	store := testSessionStore(t)
+	foreign, err := store.Create(sessions.CreateInput{Title: "Foreign plan", Cwd: filepath.Join(t.TempDir(), "other")})
+	if err != nil {
+		t.Fatalf("create foreign session: %v", err)
+	}
+	appendPickerPlan(t, store, foreign.SessionID, "foreign-plan")
+
+	m := newModel(context.Background(), Options{Cwd: filepath.Join(t.TempDir(), "workspace"), SessionStore: store})
+	next := m.openLaunchSessionPicker()
+	if next.picker != nil {
+		t.Fatalf("launch picker opened for a plan in another workspace: %#v", next.picker.items)
+	}
+}
+
+// This test pins the launch picker's suppression guards. The picker opens
+// before the composer, so a case that should stay quiet but does not is a
+// papercut on every single launch in that workspace.
+func TestLaunchPickerStaysClosedWhenSuppressed(t *testing.T) {
+	workspace := t.TempDir()
+	newModelWithPlan := func(t *testing.T) model {
+		t.Helper()
+		store := testSessionStore(t)
+		session, err := store.Create(sessions.CreateInput{Title: "Workspace plan", Cwd: workspace})
+		if err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		appendPickerPlan(t, store, session.SessionID, "workspace-plan")
+		return newModel(context.Background(), Options{Cwd: workspace, SessionStore: store})
+	}
+
+	// Control: without a guard the picker must open, otherwise the cases below
+	// would pass for the wrong reason.
+	if newModelWithPlan(t).openLaunchSessionPicker().picker == nil {
+		t.Fatal("control: launch picker did not open for a workspace plan")
+	}
+
+	for _, test := range []struct {
+		name    string
+		arrange func(model) model
+	}{
+		{name: "setup wizard visible", arrange: func(m model) model { m.setup.visible = true; return m }},
+		{name: "session already targeted", arrange: func(m model) model {
+			m.activeSession.SessionID = "already-resumed"
+			return m
+		}},
+		{name: "suppressed by env", arrange: func(m model) model {
+			t.Setenv("SPLICE_NO_RESUME_PROMPT", "1")
+			return m
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := test.arrange(newModelWithPlan(t))
+			if next := m.openLaunchSessionPicker(); next.picker != nil {
+				t.Fatalf("launch picker opened despite %s: %#v", test.name, next.picker.items)
+			}
+		})
+	}
+}
+
+// This test pins a workspace plan to the launch picker and exposes its phase.
+func TestLaunchPickerShowsPlanStatus(t *testing.T) {
+	store := testSessionStore(t)
+	workspace := t.TempDir()
+	session, err := store.Create(sessions.CreateInput{Title: "Workspace plan", Cwd: workspace})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	appendPickerPlan(t, store, session.SessionID, "workspace-plan")
+
+	m := newModel(context.Background(), Options{Cwd: workspace, SessionStore: store})
+	next := m.openLaunchSessionPicker()
+	if next.picker == nil || !next.picker.planBearing {
+		t.Fatalf("expected launch picker for workspace plan, got %#v", next.picker)
+	}
+	if next.picker.title != "Continue where you left off" {
+		t.Fatalf("launch picker title = %q", next.picker.title)
+	}
+	if !strings.Contains(next.picker.items[0].Label, "crystallized") || !strings.Contains(next.picker.items[0].Label, "0/1 steps") {
+		t.Fatalf("plan status missing from picker row: %#v", next.picker.items[0])
+	}
+
+	updated, _ := next.Update(testKey(tea.KeyEsc))
+	cleared := updated.(model)
+	if cleared.picker != nil || !cleared.designMode || !cleared.input.Focused() {
+		t.Fatalf("Esc did not return to a fresh design-mode session: picker=%v design=%v focused=%v", cleared.picker != nil, cleared.designMode, cleared.input.Focused())
+	}
+}
+
+// This test pins plain rows for no-plan and malformed lifecycle logs.
+func TestSessionPickerMalformedAndNoPlanRowsStayPlain(t *testing.T) {
+	store := testSessionStore(t)
+	workspace := t.TempDir()
+	plain, err := store.Create(sessions.CreateInput{Title: "Plain chat", Cwd: workspace})
+	if err != nil {
+		t.Fatalf("create plain session: %v", err)
+	}
+	if _, err := store.AppendEvent(plain.SessionID, sessions.AppendEventInput{
+		Type:    sessions.EventMessage,
+		Payload: map[string]any{"role": "assistant", "content": "chat"},
+	}); err != nil {
+		t.Fatalf("append plain event: %v", err)
+	}
+	malformed, err := store.Create(sessions.CreateInput{Title: "Malformed plan", Cwd: workspace})
+	if err != nil {
+		t.Fatalf("create malformed session: %v", err)
+	}
+	if _, err := store.AppendEvent(malformed.SessionID, sessions.AppendEventInput{
+		Type:    sessions.EventMessage,
+		Payload: map[string]any{"role": "assistant", "content": "chat"},
+	}); err != nil {
+		t.Fatalf("append malformed assistant event: %v", err)
+	}
+	if _, err := store.AppendEvent(malformed.SessionID, sessions.AppendEventInput{
+		Type:    sessions.EventPlanCrystallized,
+		Payload: map[string]any{"plan_id": "bad", "plan": "not-json"},
+	}); err != nil {
+		t.Fatalf("append malformed plan event: %v", err)
+	}
+
+	picker := newModel(context.Background(), Options{Cwd: workspace, SessionStore: store}).newSessionPicker()
+	if picker == nil || len(picker.items) != 2 {
+		t.Fatalf("expected two plain rows, got %#v", picker)
+	}
+	for _, item := range picker.items {
+		if strings.Contains(item.Label, "drafting") || strings.Contains(item.Label, "crystallized") || strings.Contains(item.Label, "approved") || strings.Contains(item.Label, "done") {
+			t.Fatalf("plain row has unexpected plan status: %#v", item)
+		}
+	}
+}
 
 type scriptedProvider struct {
 	scripts  [][]zeroruntime.StreamEvent
