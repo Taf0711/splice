@@ -84,6 +84,9 @@ func CachedNotice(ctx context.Context, options NoticeOptions) (string, error) {
 		check = Check
 	}
 	result, checkErr := check(ctx, options.Options)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return "", ctxErr
+	}
 	cacheErr := writeNoticeCache(path, noticeCache{Result: func() *Result {
 		if checkErr != nil {
 			return nil

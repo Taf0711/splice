@@ -78,6 +78,29 @@ func TestFormatNoticeNamesInstallCommand(t *testing.T) {
 	}
 }
 
+func TestCachedNoticeCanceledCheckDoesNotWriteCache(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "update-check.json")
+	ctx, cancel := context.WithCancel(context.Background())
+	notice, err := CachedNotice(ctx, NoticeOptions{
+		CachePath: cachePath,
+		Check: func(_ context.Context, _ Options) (Result, error) {
+			// Cancel the context during the check, as a slow upstream check that
+			// ignores cancellation would, then return a valid update result.
+			cancel()
+			return Result{CurrentVersion: "1.0.0", LatestVersion: "1.1.0", UpdateAvailable: true}, nil
+		},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("CachedNotice() error = %v, want %v", err, context.Canceled)
+	}
+	if notice != "" {
+		t.Fatalf("notice = %q, want empty", notice)
+	}
+	if _, statErr := os.Stat(cachePath); !os.IsNotExist(statErr) {
+		t.Fatalf("cache file exists (stat err = %v), want no cache file written", statErr)
+	}
+}
+
 func TestCachedNoticeDetectsNpmInstall(t *testing.T) {
 	dir := t.TempDir()
 	executable := filepath.Join(dir, "splice")
