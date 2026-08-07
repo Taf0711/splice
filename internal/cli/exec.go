@@ -1461,8 +1461,7 @@ func forwardedReasoningEffort(registry modelregistry.Registry, modelID string, r
 
 // reasoningEffortNotice resolves the requested --reasoning-effort against the
 // selected model's supported efforts via EffectiveReasoningEffort and returns a
-// short advisory when the requested value is unsupported (and was coerced to the
-// model default).
+// short advisory when the requested value is unsupported and was clamped.
 func reasoningEffortNotice(registry modelregistry.Registry, modelID string, requested string) string {
 	trimmed := strings.TrimSpace(modelID)
 	if trimmed == "" {

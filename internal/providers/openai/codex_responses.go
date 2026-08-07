@@ -257,9 +257,10 @@ func (p *CodexProvider) buildResponsesRequest(request zeroruntime.CompletionRequ
 	}
 	// Codex / o-series reasoning models take the effort tier nested under
 	// `reasoning` on the Responses API (the chat-completions `reasoning_effort`
-	// moved here). Reuse the chat normalizer so only API-accepted values are sent
-	// and an empty or unsupported effort simply omits the field — without this the
-	// caller's chosen effort was silently dropped for every Codex model.
+	// moved here). It shares the chat normalizer, so the same forwarding caveat
+	// applies: an empty effort omits the field, and an unknown model forwards
+	// the requested value as-is. Without this the caller's chosen effort was
+	// silently dropped for every Codex model.
 	if effort := openAIReasoningEffort(request.ReasoningEffort); effort != "" {
 		// Summary "auto" makes the backend stream reasoning_summary_text deltas so a
 		// long thinking phase shows live progress instead of looking hung.

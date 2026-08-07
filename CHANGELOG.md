@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+* **reasoning:** a request for `xhigh` or `max` could give less thinking than `high`, including the least. An unsupported tier now steps to the nearest supported tier. Supported tiers now come from the models.dev snapshot when available.
 * **stages:** the security audit stage failed on any machine with `gosec`, `bandit`, or a SARIF scanner installed. The scanners write log lines to stderr and their report to stdout, and Splice read both together, so the report could not be parsed. The stage failed, the writer retried, and the run ended before its test stages. Substantial and architectural runs were affected.
 * **sandbox:** a sandboxed `go` build could not write its build cache, because the cache sits outside the sandbox. One stage passed and the next failed on a cache entry that was never written. Splice now points `GOCACHE` at a directory the sandbox can write. An explicit `GOCACHE` still wins.
 * **stages:** a pipeline run could fail to finish even when every stage ran. The test generator was told what the code writer did in prose, not which files it produced, so it wrote tests against names that did not exist and the run failed on undefined symbols. On a retry it could not rewrite the test file it had written itself. It now receives the writer's actual paths, and a retry replaces its own earlier file.

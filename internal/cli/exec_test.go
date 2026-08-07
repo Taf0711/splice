@@ -1036,11 +1036,10 @@ func TestReasoningEffortNoticeCoercesUnsupportedEffort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DefaultRegistry: %v", err)
 	}
-	// claude-sonnet-4.5 supports low/medium/high with a medium default; xhigh is
-	// unsupported and should be coerced to the model default.
+	// claude-sonnet-4.5 supports low/medium/high; xhigh should clamp to high.
 	notice := reasoningEffortNotice(registry, "claude-sonnet-4.5", "xhigh")
-	if !strings.Contains(notice, "not supported") || !strings.Contains(notice, "medium") {
-		t.Fatalf("expected coercion notice to default medium, got %q", notice)
+	if !strings.Contains(notice, "not supported") || !strings.Contains(notice, "high") {
+		t.Fatalf("expected coercion notice to nearest supported high, got %q", notice)
 	}
 	if got := reasoningEffortNotice(registry, "claude-sonnet-4.5", "high"); got != "" {
 		t.Fatalf("expected no notice for a supported effort, got %q", got)
@@ -1063,7 +1062,7 @@ func TestForwardedReasoningEffortGating(t *testing.T) {
 	}{
 		{"empty request", "claude-sonnet-4.5", "", ""},
 		{"supported reasoning model", "claude-sonnet-4.5", "high", "high"},
-		{"unsupported effort coerced to default", "claude-sonnet-4.5", "xhigh", "medium"},
+		{"unsupported effort clamped to nearest tier", "claude-sonnet-4.5", "xhigh", "high"},
 		{"known non-reasoning model suppressed", "gpt-4.1", "high", ""},
 		{"unknown model forwards as-is", "custom-endpoint-model", "high", "high"},
 	}
