@@ -45,7 +45,7 @@ func TestMain(m *testing.M) {
 
 func TestPipelinePanelApplyStageMarker(t *testing.T) {
 	var state pipelinePanelState
-	marker := "\x00STAGE{\"name\":\"code_writer\",\"status\":\"running\",\"detail\":\"\",\"progress\":0,\"changedFiles\":[]}\x00"
+	marker := "\x00STAGE{\"name\":\"code_writer\",\"status\":\"running\",\"detail\":\"\",\"provider\":\"openrouter\",\"model\":\"coder\",\"progress\":0,\"changedFiles\":[]}\x00"
 	if !state.applyStageMarker(marker) {
 		t.Fatal("applyStageMarker returned false for stage marker")
 	}
@@ -53,8 +53,13 @@ func TestPipelinePanelApplyStageMarker(t *testing.T) {
 		t.Fatalf("stages = %d, want 1", len(state.stages))
 	}
 	stage := state.stages[0]
-	if stage.name != "code_writer" || stage.status != pipelineStageRunning {
-		t.Fatalf("stage = %#v, want code_writer running", stage)
+	if stage.name != "code_writer" || stage.status != pipelineStageRunning || stage.provider != "openrouter" || stage.model != "coder" {
+		t.Fatalf("stage = %#v, want code_writer running on openrouter/coder", stage)
+	}
+	state.applyStageMarker("\x00STAGE{\"name\":\"code_writer\",\"status\":\"completed\",\"detail\":\"done\",\"progress\":100,\"changedFiles\":null}\x00")
+	stage = state.stages[0]
+	if stage.provider != "openrouter" || stage.model != "coder" {
+		t.Fatalf("completed marker cleared route: %#v", stage)
 	}
 }
 
@@ -70,15 +75,85 @@ func TestPipelinePanelRenderSectionGlyphs(t *testing.T) {
 		active: true,
 		stages: []pipelineStageRow{
 			{name: "planner", status: pipelineStageCompleted},
-			{name: "code_writer", status: pipelineStageRunning, detail: "writing", progress: 50},
+			{name: "code_writer", status: pipelineStageRunning, detail: "writing", provider: "openrouter", model: "coder", progress: 50},
 			{name: "verifier", status: pipelineStagePending},
 		},
 	}
 	plain := plainRender(t, strings.Join(state.renderSection(40, 0), "\n"))
-	for _, want := range []string{"✓", "◜", "○"} {
+	for _, want := range []string{"✓", "◜", "○", "openrouter/coder"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("renderSection missing %q in %q", want, plain)
 		}
+	}
+}
+
+func TestPipelineMarkerForLatestCompletedRunIsAccepted(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.runID = 2
+	m.activeRunID = 0
+	marker := "\x00STAGE{\"name\":\"code_writer\",\"status\":\"completed\",\"detail\":\"\",\"progress\":100,\"changedFiles\":null}\x00"
+
+	updated, _ := m.Update(pipelineStageMarkerMsg{runID: 2, line: marker})
+	m = updated.(model)
+	if len(m.pipeline.stages) != 1 || m.pipeline.stages[0].status != pipelineStageCompleted {
+		t.Fatalf("latest run marker was not applied: %#v", m.pipeline.stages)
+	}
+	updated, _ = m.Update(pipelineStageMarkerMsg{runID: 1, line: strings.Replace(marker, "code_writer", "old_stage", 1)})
+	m = updated.(model)
+	if len(m.pipeline.stages) != 1 {
+		t.Fatalf("old run marker was applied: %#v", m.pipeline.stages)
+	}
+
+	cancelled := newModel(context.Background(), Options{})
+	cancelled.runID = 2
+	cancelled.activeRunID = 2
+	cancelled.pending = true
+	cancelled.pipeline = pipelinePanelState{
+		active:       true,
+		stages:       []pipelineStageRow{{name: "code_writer", status: pipelineStageRunning}},
+		changedFiles: []string{"stale.go"},
+	}
+	cancelled.cancelRun()
+	if cancelled.lastCancelledRunID != 2 {
+		t.Fatalf("lastCancelledRunID = %d, want 2", cancelled.lastCancelledRunID)
+	}
+	if cancelled.pipeline.active || len(cancelled.pipeline.stages) != 0 || len(cancelled.pipeline.changedFiles) != 0 {
+		t.Fatalf("cancelled pipeline was not cleared: %#v", cancelled.pipeline)
+	}
+	updated, _ = cancelled.Update(pipelineStageMarkerMsg{runID: 2, line: marker})
+	cancelled = updated.(model)
+	if len(cancelled.pipeline.stages) != 0 {
+		t.Fatalf("cancelled run marker was applied: %#v", cancelled.pipeline.stages)
+	}
+}
+
+func TestPipelineResetMarkerStartsNextPipeline(t *testing.T) {
+	state := pipelinePanelState{
+		active: true,
+		stages: []pipelineStageRow{
+			{name: "code_writer", status: pipelineStageCompleted},
+			{name: "security_auditor", status: pipelineStageCompleted},
+		},
+		changedFiles: []string{"old.go"},
+	}
+	state.applyStageMarker("\x00STAGE{\"name\":\"code_writer\",\"status\":\"reset\",\"detail\":\"\",\"progress\":0,\"changedFiles\":null}\x00")
+	state.applyStageMarker("\x00STAGE{\"name\":\"test_runner\",\"status\":\"pending\",\"detail\":\"\",\"progress\":0,\"changedFiles\":null}\x00")
+	if len(state.stages) != 2 || state.stages[0].name != "code_writer" || state.stages[0].status != pipelineStagePending || state.stages[1].name != "test_runner" {
+		t.Fatalf("next pipeline state = %#v", state.stages)
+	}
+	if len(state.changedFiles) != 0 {
+		t.Fatalf("next pipeline kept changed files: %v", state.changedFiles)
+	}
+}
+
+func TestPipelinePanelRendersModelFreeStageAsLocal(t *testing.T) {
+	state := pipelinePanelState{
+		active: true,
+		stages: []pipelineStageRow{{name: "test_runner", status: pipelineStageRunning, model: "local"}},
+	}
+	plain := plainRender(t, strings.Join(state.renderSection(40, 0), "\n"))
+	if !strings.Contains(plain, "model: local") {
+		t.Fatalf("model-free route missing from %q", plain)
 	}
 }
 
@@ -94,6 +169,18 @@ func TestPipelineStageGlyphAdvancesWithPhase(t *testing.T) {
 	}
 	if g, _ := pipelineStageGlyphAndStyle(pipelineStagePending, 3); !strings.Contains(g, "○") {
 		t.Errorf("pending glyph = %q, want ○", g)
+	}
+	if g, _ := pipelineStageGlyphAndStyle(pipelineStageIncomplete, 3); !strings.Contains(g, "!") {
+		t.Errorf("incomplete glyph = %q, want !", g)
+	}
+}
+
+func TestPipelinePanelIncompleteIsTerminal(t *testing.T) {
+	var state pipelinePanelState
+	state.applyStageMarker("\x00STAGE{\"name\":\"acceptance_verifier\",\"status\":\"incomplete\",\"detail\":\"missing check\",\"progress\":0,\"changedFiles\":null}\x00")
+	done, total, allDone := state.counts()
+	if len(state.stages) != 1 || state.stages[0].status != pipelineStageIncomplete || done != 1 || total != 1 || !allDone {
+		t.Fatalf("incomplete state=%#v counts=%d/%d allDone=%v", state.stages, done, total, allDone)
 	}
 }
 

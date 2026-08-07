@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -871,8 +873,66 @@ func TestApprovePlanStreamsTextAndToolCall(t *testing.T) {
 	if !foundTool {
 		t.Fatalf("expected tool call card or stream message, got %#v", messages)
 	}
+	if len(started.pipeline.stages) != 1 || started.pipeline.stages[0].name != "code_writer" || started.pipeline.stages[0].status != pipelineStageCompleted || started.pipeline.stages[0].provider != "openai" || started.pipeline.stages[0].model != "gpt-4.1" {
+		t.Fatalf("approved plan pipeline state = %#v, want completed code_writer on openai/gpt-4.1", started.pipeline.stages)
+	}
+	if strings.Contains(started.streamingReasoning, stageMarkerBegin) {
+		t.Fatalf("stage marker leaked into reasoning: %q", started.streamingReasoning)
+	}
 	if _, ok := msg.(planExecutionResultMsg); !ok {
 		t.Fatalf("expected planExecutionResultMsg, got %T", msg)
+	}
+}
+
+func TestApprovePlanReloadsStageModelRouting(t *testing.T) {
+	primary := &fakeProvider{}
+	routed := &fakeProvider{events: approvePlanEvents()}
+	store := testSessionStore(t)
+	root := t.TempDir()
+	m := newDesignModeTestModel(root, primary, store)
+	primaryProfile := config.ProviderProfile{Name: "primary", ProviderKind: config.ProviderKindOpenAI, Model: "primary-model"}
+	routedProfile := config.ProviderProfile{Name: "routed", ProviderKind: config.ProviderKindOpenAI, Model: "routed-model"}
+	m.providerName = primaryProfile.Name
+	m.modelName = primaryProfile.Model
+	m.providerProfile = primaryProfile
+	m.savedProviders = []config.ProviderProfile{primaryProfile, routedProfile}
+	m.agentOptions.StageModelResolver = func(string) (agent.ModelSelection, error) {
+		return agent.ModelSelection{Provider: primary, ProviderName: primaryProfile.Name, Model: primaryProfile.Model}, nil
+	}
+	m.userConfigPath = filepath.Join(root, "config.json")
+	m.newProvider = func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+		if profile.Name != routedProfile.Name || profile.Model != routedProfile.Model {
+			return nil, fmt.Errorf("unexpected routed profile %s/%s", profile.Name, profile.Model)
+		}
+		return routed, nil
+	}
+	stageConfig := `{"default":{"provider_profile":"routed","model":"routed-model"}}`
+	if err := os.WriteFile(stageModelConfigPath(m.userConfigPath), []byte(stageConfig), 0o600); err != nil {
+		t.Fatalf("write stage config: %v", err)
+	}
+	m.runtimeMessageSink = func(msg tea.Msg) {
+		if prompt, ok := msg.(permissionRequestMsg); ok {
+			prompt.decide(agent.PermissionDecision{Action: agent.PermissionDecisionAllow})
+		}
+	}
+	sess, err := store.Create(sessions.CreateInput{SessionID: "approve-routed", Cwd: root})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	m.activeSession = sess
+	tier := schemas.TierTrivial
+	m.pendingPlan = &schemas.DesignPlan{Epic: "Route approval", Requirements: []string{"write the file"}, InScope: []string{"hello.go"}, Source: "authored", Tasks: []schemas.Task{{ID: "t1", Title: "Write hello", Intent: "Create hello.go", EstimatedTier: &tier}}}
+
+	_, cmd := m.handleApproveCommand()
+	result, ok := execCmd(cmd).(planExecutionResultMsg)
+	if !ok {
+		t.Fatal("expected planExecutionResultMsg")
+	}
+	if result.err != nil {
+		t.Fatalf("approved routed plan failed: %v", result.err)
+	}
+	if len(primary.requests) != 0 || len(routed.requests) != 1 {
+		t.Fatalf("provider requests primary=%d routed=%d, want 0/1", len(primary.requests), len(routed.requests))
 	}
 }
 

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 	"unicode"
@@ -235,6 +234,9 @@ type model struct {
 	runCancel       context.CancelFunc
 	runID           int
 	activeRunID     int
+
+	// lastCancelledRunID rejects queued pipeline markers after cancellation.
+	lastCancelledRunID int
 	// flushRunIDs holds the ids of runs cancelled while still in flight, mapped
 	// to the session they were recording into AT CANCEL TIME. Each cancelled
 	// agent goroutine keeps running to completion and returns its accumulated
@@ -448,6 +450,7 @@ type model struct {
 	modelPickerLoading           bool
 	modelPickerLoadingProviderID string
 	modelPickerLoadError         string
+	modelPickerDiscoveryGen      int
 	// modelPickerLiveByProvider holds live-discovered models per provider (keyed by
 	// catalog descriptor ID), so /model shows each provider's real current models —
 	// the same list the provider-setup wizard discovers — not the static catalog.
@@ -1019,7 +1022,7 @@ func (m model) Init() tea.Cmd {
 	// registry. Async: never blocks startup; if discovery is unavailable the gauge
 	// just shows the used-token count until the window is otherwise learned.
 	if descriptor, ok := m.activeProviderDescriptor(); ok {
-		if cmd := m.modelPickerProviderDiscoveryCmd(descriptor, m.providerProfile); cmd != nil {
+		if cmd := m.modelPickerProviderDiscoveryCmd(descriptor, m.providerProfile, m.modelPickerDiscoveryGen); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 		// The generic discovery above has no source for a local Ollama model's
@@ -2411,7 +2414,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.plan.updateFromItems(msg.items, m.now())
 		return m, nil
 	case pipelineStageMarkerMsg:
-		if msg.runID != m.activeRunID {
+		if msg.runID != m.activeRunID && (msg.runID != m.runID || msg.runID == m.lastCancelledRunID) {
 			return m, nil
 		}
 		m.pipeline.applyStageMarker(msg.line)
@@ -4304,7 +4307,7 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m.populateStageModelWizardModels(wiz)
 		m.stageModelWizard = wiz
 		m.clearSuggestions()
-		return m, nil
+		return m, m.modelPickerDiscoveryCmds()
 	case commandModel:
 		if strings.TrimSpace(command.text) == "" {
 			if m.pending {
@@ -4817,6 +4820,7 @@ func (m *model) cancelRun() {
 		m.flushRunIDs[m.activeRunID] = m.activeSession.SessionID
 	}
 	if m.pending {
+		m.pipeline.clear()
 		// A cancelled run must terminate visibly in the transcript: first the
 		// partial streamed answer (if any), then the cancellation marker — the
 		// session log gets the same marker below.
@@ -4834,6 +4838,9 @@ func (m *model) cancelRun() {
 		}); err == nil {
 			*m = next
 		}
+	}
+	if m.activeRunID != 0 {
+		m.lastCancelledRunID = m.activeRunID
 	}
 	m.pending = false
 	m.runCancel = nil
@@ -4869,6 +4876,32 @@ func selfCorrectAutonomyForMode(mode agent.PermissionMode) string {
 	default: // ask, etc. — report the failure without starting an auto-fix round
 		return "low"
 	}
+}
+
+func (m model) buildStageModelResolvers() (agent.StageModelResolver, agent.EscalationModelResolver, error) {
+	if strings.TrimSpace(m.userConfigPath) == "" {
+		return nil, nil, nil
+	}
+	stageConfig, err := schemas.LoadStageModelConfig(stageModelConfigPath(m.userConfigPath))
+	if err != nil {
+		return nil, nil, err
+	}
+	profiles := append([]config.ProviderProfile(nil), m.savedProviders...)
+	activePresent := false
+	for _, profile := range profiles {
+		if profile.Name == m.providerProfile.Name {
+			activePresent = true
+			break
+		}
+	}
+	if !activePresent && config.HasProviderProfile(m.providerProfile) {
+		profiles = append(profiles, m.providerProfile)
+	}
+	stageResolver, escalationResolver := splicerun.BuildStageModelResolvers(stageConfig, profiles, m.newProvider, splicerun.TierResolverConfig{
+		PrimaryProfile: m.providerProfile,
+		Registry:       &m.modelCatalog,
+	})
+	return stageResolver, escalationResolver, nil
 }
 
 func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt string, images []zeroruntime.ImageBlock, runOptions tuiAgentRunOptions) tea.Cmd {
@@ -4908,8 +4941,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		if runOptions.runKind == tuiRunPipeline && strings.TrimSpace(m.userConfigPath) != "" {
 			options.StageModelResolver = nil
 			options.EscalationModelResolver = nil
-			stageConfigPath := filepath.Join(filepath.Dir(m.userConfigPath), "stage-models.json")
-			stageConfig, err := schemas.LoadStageModelConfig(stageConfigPath)
+			stageResolver, escalationResolver, err := m.buildStageModelResolvers()
 			if err != nil {
 				warning := "stage routing config ignored: " + err.Error()
 				rows = append(rows, transcriptRow{kind: rowSystem, text: warning, runID: runID})
@@ -4921,23 +4953,8 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 					},
 				})
 			} else {
-				profiles := append([]config.ProviderProfile(nil), m.savedProviders...)
-				activePresent := false
-				for _, profile := range profiles {
-					if profile.Name == m.providerProfile.Name {
-						activePresent = true
-						break
-					}
-				}
-				if !activePresent && config.HasProviderProfile(m.providerProfile) {
-					profiles = append(profiles, m.providerProfile)
-				}
-				tierResolverConfig := splicerun.TierResolverConfig{
-					PrimaryProfile: m.providerProfile,
-					Registry:       &m.modelCatalog,
-				}
-				options.StageModelResolver, options.EscalationModelResolver = splicerun.BuildStageModelResolvers(stageConfig, profiles, m.newProvider, tierResolverConfig)
-				m.stageModelResolver = options.StageModelResolver
+				options.StageModelResolver = stageResolver
+				options.EscalationModelResolver = escalationResolver
 			}
 		}
 		if m.captureRunImages != nil {

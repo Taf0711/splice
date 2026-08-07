@@ -1413,7 +1413,7 @@ func TestEmitStageEventProducesMarker(t *testing.T) {
 	var got []string
 	options := agent.Options{OnReasoning: func(s string) { got = append(got, s) }}
 
-	emitStageEvent(options, "code_writer", "running", "writing files", 50, []string{"main.go"})
+	emitStageEvent(options, "code_writer", "running", "writing files", 50, []string{"main.go"}, agent.ModelSelection{ProviderName: "openrouter", Model: "coder"})
 
 	if len(got) != 1 {
 		t.Fatalf("expected 1 reasoning call, got %d", len(got))
@@ -1435,6 +1435,9 @@ func TestEmitStageEventProducesMarker(t *testing.T) {
 	}
 	if event["progress"] != float64(50) {
 		t.Fatalf("progress = %v, want 50", event["progress"])
+	}
+	if event["provider"] != "openrouter" || event["model"] != "coder" {
+		t.Fatalf("route = %v/%v, want openrouter/coder", event["provider"], event["model"])
 	}
 }
 
@@ -1517,13 +1520,15 @@ func TestRunPassEmitsStageEvents(t *testing.T) {
 	plan := schemas.ExecutionPlan{
 		Tier:          schemas.TierLight,
 		RequestIntent: intent,
-		Stages:        []schemas.ExecutionStage{{Name: "memory_stage"}},
+		Stages:        []schemas.ExecutionStage{{Name: "memory_stage"}, {Name: "second_stage"}},
 	}
 	var reasoning []string
 	var inputs []schemas.HarnessStageInput
 	retriever := &stubStore{}
+	stage := &capturingStage{inputs: &inputs}
 	_, _, completed, err := runPass(context.Background(), "run-stage-test", 1, plan, stageRegistry{
-		"memory_stage": &capturingStage{inputs: &inputs},
+		"memory_stage": stage,
+		"second_stage": stage,
 	}, runFakeProvider{}, agent.Options{OnReasoning: func(s string) { reasoning = append(reasoning, s) }}, workDir, nil, nil, retriever)
 	if err != nil || !completed {
 		t.Fatalf("runPass failed: err=%v completed=%v", err, completed)
@@ -1535,17 +1540,32 @@ func TestRunPassEmitsStageEvents(t *testing.T) {
 			markers = append(markers, line)
 		}
 	}
-	if len(markers) < 2 {
-		t.Fatalf("expected at least 2 stage markers (running + completed), got %d: %v", len(markers), markers)
+	if len(markers) < 6 {
+		t.Fatalf("expected stage markers for two pending, running, and completed stages, got %d: %v", len(markers), markers)
 	}
-	// First marker should be "running", last should be "completed".
 	first := strings.TrimSuffix(strings.TrimPrefix(markers[0], stageEventMarkerBegin), stageEventMarkerEnd)
 	var firstEvent map[string]any
 	if err := json.Unmarshal([]byte(first), &firstEvent); err != nil {
 		t.Fatalf("parse first marker: %v", err)
 	}
-	if firstEvent["status"] != "running" {
-		t.Fatalf("first marker status = %v, want running", firstEvent["status"])
+	if firstEvent["status"] != "reset" {
+		t.Fatalf("first marker status = %v, want reset", firstEvent["status"])
+	}
+	second := strings.TrimSuffix(strings.TrimPrefix(markers[1], stageEventMarkerBegin), stageEventMarkerEnd)
+	var secondEvent map[string]any
+	if err := json.Unmarshal([]byte(second), &secondEvent); err != nil {
+		t.Fatalf("parse second marker: %v", err)
+	}
+	if secondEvent["status"] != "pending" || secondEvent["name"] != "second_stage" {
+		t.Fatalf("second marker = %#v, want second_stage pending", secondEvent)
+	}
+	third := strings.TrimSuffix(strings.TrimPrefix(markers[2], stageEventMarkerBegin), stageEventMarkerEnd)
+	var thirdEvent map[string]any
+	if err := json.Unmarshal([]byte(third), &thirdEvent); err != nil {
+		t.Fatalf("parse third marker: %v", err)
+	}
+	if thirdEvent["status"] != "running" || thirdEvent["name"] != "memory_stage" {
+		t.Fatalf("third marker = %#v, want memory_stage running", thirdEvent)
 	}
 	last := strings.TrimSuffix(strings.TrimPrefix(markers[len(markers)-1], stageEventMarkerBegin), stageEventMarkerEnd)
 	var lastEvent map[string]any
@@ -1557,6 +1577,37 @@ func TestRunPassEmitsStageEvents(t *testing.T) {
 	}
 	if lastEvent["progress"] != float64(100) {
 		t.Fatalf("completed progress = %v, want 100", lastEvent["progress"])
+	}
+}
+
+func TestRunPassEmitsFailedEventForUnavailableStage(t *testing.T) {
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierTrivial,
+		RequestIntent: "test unavailable stage",
+		Stages:        []schemas.ExecutionStage{{Name: "missing_stage"}, {Name: "later_stage"}},
+	}
+	var reasoning []string
+	records, _, completed, err := runPass(context.Background(), "run-missing-stage", 1, plan, stageRegistry{}, runFakeProvider{}, agent.Options{
+		OnReasoning: func(s string) { reasoning = append(reasoning, s) },
+	}, t.TempDir(), nil, nil, nil)
+	if err != nil || completed || len(records) != 1 || records[0].Status != schemas.StageFailed {
+		t.Fatalf("runPass records=%#v completed=%v err=%v", records, completed, err)
+	}
+	failedJSON := strings.TrimSuffix(strings.TrimPrefix(reasoning[len(reasoning)-2], stageEventMarkerBegin), stageEventMarkerEnd)
+	var failedEvent map[string]any
+	if err := json.Unmarshal([]byte(failedJSON), &failedEvent); err != nil {
+		t.Fatalf("parse failed marker: %v", err)
+	}
+	if failedEvent["name"] != "missing_stage" || failedEvent["status"] != "failed" {
+		t.Fatalf("failed marker = %#v, want missing_stage failed", failedEvent)
+	}
+	skippedJSON := strings.TrimSuffix(strings.TrimPrefix(reasoning[len(reasoning)-1], stageEventMarkerBegin), stageEventMarkerEnd)
+	var skippedEvent map[string]any
+	if err := json.Unmarshal([]byte(skippedJSON), &skippedEvent); err != nil {
+		t.Fatalf("parse skipped marker: %v", err)
+	}
+	if skippedEvent["name"] != "later_stage" || skippedEvent["status"] != "skipped" {
+		t.Fatalf("skipped marker = %#v, want later_stage skipped", skippedEvent)
 	}
 }
 
