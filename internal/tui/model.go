@@ -4304,7 +4304,10 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m.populateStageModelWizardModels(wiz)
 		m.stageModelWizard = wiz
 		m.clearSuggestions()
-		return m, nil
+		// Live-discover every usable provider's real models in the background. The
+		// wizard shows immediately from the saved/static options and each provider's
+		// model list refreshes in place as discovery returns, mirroring /model.
+		return m, m.modelPickerDiscoveryCmds()
 	case commandModel:
 		if strings.TrimSpace(command.text) == "" {
 			if m.pending {

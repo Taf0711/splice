@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Taf0711/splice/internal/config"
+	"github.com/Taf0711/splice/internal/providermodeldiscovery"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
@@ -488,8 +489,8 @@ func TestStageModelWizardEndToEndFeature(t *testing.T) {
 
 	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
-	if cmd != nil {
-		t.Fatal("/stages should open without starting an agent command")
+	if cmd == nil {
+		t.Fatal("/stages with a saved provider should start live model discovery")
 	}
 	if m.stageModelWizard == nil {
 		t.Fatal("/stages did not open the wizard")
@@ -544,6 +545,85 @@ func TestStageModelWizardEndToEndFeature(t *testing.T) {
 	if loaded.Default.ProviderProfile != "openai" || loaded.Default.Model != "beta-mini" {
 		t.Fatalf("saved default = %+v", loaded.Default)
 	}
+}
+
+func TestStageModelWizardMergesLiveDiscoveredModels(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	profile := config.ProviderProfile{Name: "openai", CatalogID: "openai", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4.1"}
+	m := newModel(context.Background(), Options{
+		UserConfigPath:  configPath,
+		ProviderName:    profile.Name,
+		ModelName:       profile.Model,
+		ProviderProfile: profile,
+		SavedProviders:  []config.ProviderProfile{profile},
+		DiscoverProviderModels: func(ctx context.Context, p config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+			return []providermodeldiscovery.Model{
+				{ID: "live-alpha", Description: "Live Alpha"},
+				{ID: "live-beta", Description: "Live Beta"},
+			}, nil
+		},
+	})
+	m.input.SetValue("/stages")
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	m = updated.(model)
+	if cmd == nil {
+		t.Fatal("/stages with a saved provider should start live model discovery")
+	}
+	if m.stageModelWizard == nil {
+		t.Fatal("/stages did not open the stage wizard")
+	}
+
+	// Before discovery lands, the picker shows the immediate fallback options.
+	if !containsStageOption(m.stageModelWizard.currentModelOptions(), "gpt-4.1") {
+		t.Fatalf("fallback options before discovery = %+v, want saved model gpt-4.1", m.stageModelWizard.modelOptionsByProvider["openai"])
+	}
+
+	// Deliver the live discovery result into the open wizard.
+	updated, _ = m.Update(cmd())
+	m = updated.(model)
+
+	opts := m.stageModelWizard.modelOptionsByProvider["openai"]
+	if !containsStageOption(opts, "live-alpha") || !containsStageOption(opts, "live-beta") {
+		t.Fatalf("wizard options after discovery = %+v, want live-alpha/live-beta", opts)
+	}
+	if !containsStageOption(opts, "gpt-4.1") {
+		t.Fatalf("wizard options lost the saved model after discovery: %+v", opts)
+	}
+
+	// Both user-visible edit targets (escalation and code_writer) read their model
+	// options from the same modelOptionsByProvider source. If either splits to a
+	// separate data source later, this assertion catches the regression.
+	for _, target := range []struct {
+		name          string
+		overviewIndex int
+	}{
+		{name: "escalation", overviewIndex: 1},
+		{name: "code_writer", overviewIndex: 2},
+	} {
+		m.stageModelWizard.overviewCursor = target.overviewIndex
+		m.stageModelWizard.advance()      // overview -> edit target
+		m.stageModelWizard.moveEditRow(1) // model row
+		m.stageModelWizard.activateEditRow()
+		if m.stageModelWizard.picker != stageModelPickerModel {
+			t.Fatalf("%s edit did not open the model picker", target.name)
+		}
+		modelOptions := m.stageModelWizard.pickerOptions()
+		if !containsStageOption(modelOptions, "live-alpha") || !containsStageOption(modelOptions, "live-beta") {
+			t.Fatalf("%s model options = %+v, want live models", target.name, modelOptions)
+		}
+		m.stageModelWizard.retreat() // back to overview for the next target
+	}
+}
+
+func containsStageOption(options []stageModelOption, value string) bool {
+	for _, option := range options {
+		if option.value == value {
+			return true
+		}
+	}
+	return false
 }
 
 func stripStageWizardANSI(lines []string) []string {
