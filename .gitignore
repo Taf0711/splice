@@ -65,3 +65,6 @@ splice-linux-sandbox
 
 # pi-subagents artifacts
 .pi-subagents/
+
+# graphify knowledge-graph output (graph.json is tens of MB, rebuildable)
+graphify-out/
