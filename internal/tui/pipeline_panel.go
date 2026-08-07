@@ -17,6 +17,7 @@ const (
 	pipelineStagePending pipelineStageStatus = iota
 	pipelineStageRunning
 	pipelineStageCompleted
+	pipelineStageIncomplete
 	pipelineStageFailed
 	pipelineStageSkipped
 )
@@ -25,6 +26,8 @@ type pipelineStageRow struct {
 	name     string
 	status   pipelineStageStatus
 	detail   string
+	provider string
+	model    string
 	progress int // 0-100
 }
 
@@ -38,6 +41,8 @@ type pipelineStageMarkerPayload struct {
 	Name         string   `json:"name"`
 	Status       string   `json:"status"`
 	Detail       string   `json:"detail"`
+	Provider     string   `json:"provider"`
+	Model        string   `json:"model"`
 	Progress     int      `json:"progress"`
 	ChangedFiles []string `json:"changedFiles"`
 }
@@ -58,6 +63,11 @@ func (s *pipelinePanelState) applyStageMarker(line string) bool {
 		return true
 	}
 
+	if strings.EqualFold(strings.TrimSpace(payload.Status), "reset") {
+		s.stages = nil
+		s.changedFiles = nil
+		payload.Status = "pending"
+	}
 	status := pipelineStageStatusFromString(payload.Status)
 	progress := payload.Progress
 	if progress < 0 {
@@ -80,6 +90,12 @@ func (s *pipelinePanelState) applyStageMarker(line string) bool {
 	}
 	s.stages[idx].status = status
 	s.stages[idx].detail = payload.Detail
+	if payload.Provider != "" {
+		s.stages[idx].provider = payload.Provider
+	}
+	if payload.Model != "" {
+		s.stages[idx].model = payload.Model
+	}
 	s.stages[idx].progress = progress
 	s.active = true
 	if payload.ChangedFiles != nil {
@@ -94,6 +110,8 @@ func pipelineStageStatusFromString(status string) pipelineStageStatus {
 		return pipelineStageRunning
 	case "completed":
 		return pipelineStageCompleted
+	case "incomplete":
+		return pipelineStageIncomplete
 	case "failed":
 		return pipelineStageFailed
 	case "skipped":
@@ -152,7 +170,16 @@ func (s pipelinePanelState) renderSection(width int, phase int) []string {
 		lines = append(lines, "")
 		lines = append(lines, zeroTheme.muted.Bold(true).Render("CURRENT"))
 		lines = append(lines, " "+zeroTheme.faint.Render("stage: ")+zeroTheme.ink.Render(truncateStep(current.name, maxInt(4, width-8))))
-		lines = append(lines, " "+zeroTheme.faint.Render("action: ")+zeroTheme.muted.Render(truncateStep(current.detail, maxInt(4, width-9))))
+		model := current.model
+		if current.provider != "" {
+			model = current.provider + "/" + model
+		}
+		if model != "" {
+			lines = append(lines, " "+zeroTheme.faint.Render("model: ")+zeroTheme.muted.Render(truncateStep(model, maxInt(4, width-9))))
+		}
+		if current.detail != "" {
+			lines = append(lines, " "+zeroTheme.faint.Render("action: ")+zeroTheme.muted.Render(truncateStep(current.detail, maxInt(4, width-9))))
+		}
 		if current.progress > 0 {
 			lines = append(lines, " "+renderPipelineProgressBar(current.progress, width))
 		}
@@ -168,7 +195,7 @@ func (s pipelinePanelState) counts() (done int, total int, allDone bool) {
 	allDone = true
 	for _, stage := range s.stages {
 		switch stage.status {
-		case pipelineStageCompleted, pipelineStageFailed, pipelineStageSkipped:
+		case pipelineStageCompleted, pipelineStageIncomplete, pipelineStageFailed, pipelineStageSkipped:
 			done++
 		default:
 			allDone = false
@@ -188,6 +215,8 @@ func pipelineStageGlyphAndStyle(status pipelineStageStatus, phase int) (string, 
 		return zeroTheme.green.Render("✓"), zeroTheme.muted
 	case pipelineStageRunning:
 		return zeroTheme.amber.Render(arcFrames[phase%len(arcFrames)]), zeroTheme.ink
+	case pipelineStageIncomplete:
+		return zeroTheme.amber.Render("!"), zeroTheme.muted
 	case pipelineStageFailed:
 		return zeroTheme.red.Render("✗"), zeroTheme.red
 	case pipelineStageSkipped:

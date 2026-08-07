@@ -364,7 +364,9 @@ func (m model) openModelPicker() (model, tea.Cmd) {
 // modelPickerDiscoveryCmds dispatches a live model-discovery command for each
 // usable provider (deduped by catalog descriptor), so /model shows the same real
 // models the provider-setup wizard discovers.
-func (m model) modelPickerDiscoveryCmds() tea.Cmd {
+func (m *model) modelPickerDiscoveryCmds() tea.Cmd {
+	m.modelPickerDiscoveryGen++
+	generation := m.modelPickerDiscoveryGen
 	cmds := []tea.Cmd{}
 	seen := map[string]bool{}
 	for _, profile := range m.modelPickerProviders() {
@@ -373,7 +375,7 @@ func (m model) modelPickerDiscoveryCmds() tea.Cmd {
 			continue
 		}
 		seen[descriptor.ID] = true
-		if cmd := m.modelPickerProviderDiscoveryCmd(descriptor, profile); cmd != nil {
+		if cmd := m.modelPickerProviderDiscoveryCmd(descriptor, profile, generation); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 	}
@@ -386,7 +388,7 @@ func (m model) modelPickerDiscoveryCmds() tea.Cmd {
 // modelPickerProviderDiscoveryCmd discovers one provider's live models, resolving
 // its credential the same way the wizard does: a stored/inline/env key, or a stored
 // OAuth bearer for token-login providers (e.g. xAI).
-func (m model) modelPickerProviderDiscoveryCmd(descriptor providercatalog.Descriptor, profile config.ProviderProfile) tea.Cmd {
+func (m model) modelPickerProviderDiscoveryCmd(descriptor providercatalog.Descriptor, profile config.ProviderProfile, generation int) tea.Cmd {
 	authed := profile
 	if store, err := config.ProviderKeyStore(); err == nil {
 		authed = config.ApplyStoredAPIKey(authed, store)
@@ -413,7 +415,7 @@ func (m model) modelPickerProviderDiscoveryCmd(descriptor providercatalog.Descri
 			}
 		}
 		models, err := discover(ctx, providerWizardDiscoveryProfile(descriptor, k))
-		return modelPickerModelsDiscoveredMsg{providerID: providerID, models: models, err: err}
+		return modelPickerModelsDiscoveredMsg{providerID: providerID, generation: generation, models: models, err: err}
 	}
 }
 
@@ -664,6 +666,7 @@ func genericProviderCatalogID(id string) bool {
 
 type modelPickerModelsDiscoveredMsg struct {
 	providerID string
+	generation int
 	models     []providermodeldiscovery.Model
 	err        error
 }
@@ -751,6 +754,9 @@ func profileMatchesProviderBaseURL(profile config.ProviderProfile, provider prov
 }
 
 func (m model) applyModelPickerModelsDiscovered(msg modelPickerModelsDiscoveredMsg) model {
+	if msg.generation != m.modelPickerDiscoveryGen {
+		return m
+	}
 	m.modelPickerLoading = false
 	m.modelPickerLoadingProviderID = ""
 	if descriptor, ok := providercatalog.Get(msg.providerID); ok && descriptor.Local {
@@ -772,6 +778,7 @@ func (m model) applyModelPickerModelsDiscovered(msg modelPickerModelsDiscoveredM
 		m.modelPickerLiveByProvider = map[string][]providermodeldiscovery.Model{}
 	}
 	m.modelPickerLiveByProvider[msg.providerID] = append([]providermodeldiscovery.Model{}, msg.models...)
+	m.populateStageModelWizardModels(m.stageModelWizard)
 	// Rebuild the open picker so this provider's section shows its live models,
 	// preserving the current query + selection.
 	if m.picker != nil && m.picker.kind == pickerModel {

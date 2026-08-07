@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Taf0711/splice/internal/config"
+	"github.com/Taf0711/splice/internal/providermodeldiscovery"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
@@ -484,15 +485,34 @@ func TestStageModelWizardEndToEndFeature(t *testing.T) {
 	})
 	m.width = 110
 	m.height = 36
+	m.discoverProviderModels = func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+		return []providermodeldiscovery.Model{
+			{ID: "alpha-model", Description: "Alpha Model"},
+			{ID: "beta-mini", Description: "Beta Mini"},
+		}, nil
+	}
 	m.input.SetValue("/stages")
 
 	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
-	if cmd != nil {
-		t.Fatal("/stages should open without starting an agent command")
+	if cmd == nil {
+		t.Fatal("/stages did not start live model discovery")
 	}
 	if m.stageModelWizard == nil {
 		t.Fatal("/stages did not open the wizard")
+	}
+	updated, _ = m.Update(execCmd(cmd))
+	m = updated.(model)
+	options := m.stageModelWizard.modelOptionsByProvider["openai"]
+	foundLiveModel := false
+	for _, option := range options {
+		if option.value == "alpha-model" {
+			foundLiveModel = true
+			break
+		}
+	}
+	if !foundLiveModel {
+		t.Fatalf("live models were not added to stage options: %+v", options)
 	}
 	assertContains(t, plainRender(t, m.View()), "Per-stage model routing")
 

@@ -106,6 +106,17 @@ func (m model) handleApproveCommand() (model, tea.Cmd) {
 	options.ProviderName = m.providerName
 	options.Model = m.modelName
 	options.ReasoningEffort = string(m.reasoningEffort)
+	if strings.TrimSpace(m.userConfigPath) != "" {
+		options.StageModelResolver = nil
+		options.EscalationModelResolver = nil
+		stageResolver, escalationResolver, routeErr := m.buildStageModelResolvers()
+		if routeErr != nil {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "stage routing config ignored: " + routeErr.Error()})
+		} else {
+			options.StageModelResolver = stageResolver
+			options.EscalationModelResolver = escalationResolver
+		}
+	}
 
 	// The approved plan runs through the same callback seam as a normal TUI
 	// pipeline run. Keep the accumulated events with the result so the update
@@ -123,6 +134,10 @@ func (m model) handleApproveCommand() (model, tea.Cmd) {
 	}
 	onReasoning := options.OnReasoning
 	options.OnReasoning = func(delta string) {
+		if m.pipeline.applyStageMarker(delta) {
+			m.sendPipelineStageMarker(runID, delta)
+			return
+		}
 		m.sendAgentReasoning(runID, delta)
 		if onReasoning != nil {
 			onReasoning(delta)

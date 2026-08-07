@@ -177,11 +177,51 @@ func TestModelPickerShowsLoadingUntilDiscoveryCompletes(t *testing.T) {
 	// When the provider's discovery returns, its section shows the live models.
 	updated, _ = m.Update(modelPickerModelsDiscoveredMsg{
 		providerID: "ollama-cloud",
+		generation: m.modelPickerDiscoveryGen,
 		models:     []providermodeldiscovery.Model{{ID: "live-cloud-a", Description: "Live Cloud A"}},
 	})
 	m = updated.(model)
 	loaded := plainRender(t, m.pickerOverlay(100))
 	assertContains(t, loaded, "Live Cloud A")
+}
+
+func TestModelPickerIgnoresStaleDiscoveryGeneration(t *testing.T) {
+	profile := config.ProviderProfile{
+		Name:         "ollama-cloud",
+		CatalogID:    "ollama-cloud",
+		ProviderKind: config.ProviderKindOpenAICompatible,
+		BaseURL:      "https://ollama.com/v1",
+		Model:        "minimax-m3",
+	}
+	m := newModel(context.Background(), Options{ProviderProfile: profile, SavedProviders: []config.ProviderProfile{profile}})
+	wizard, err := newStageModelWizard(filepath.Join(t.TempDir(), "config.json"), []config.ProviderProfile{profile}, profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.stageModelWizard = wizard
+	m.modelPickerDiscoveryGen = 2
+
+	updated, _ := m.Update(modelPickerModelsDiscoveredMsg{
+		providerID: "ollama-cloud",
+		generation: 1,
+		models:     []providermodeldiscovery.Model{{ID: "stale-model"}},
+	})
+	m = updated.(model)
+	if len(m.modelPickerLiveByProvider) != 0 {
+		t.Fatalf("stale discovery updated cache: %#v", m.modelPickerLiveByProvider)
+	}
+	if options := m.stageModelWizard.modelOptionsByProvider[profile.Name]; containsStageModelOption(options, "stale-model") {
+		t.Fatalf("stale discovery updated stage wizard: %#v", options)
+	}
+}
+
+func containsStageModelOption(options []stageModelOption, value string) bool {
+	for _, option := range options {
+		if option.value == value {
+			return true
+		}
+	}
+	return false
 }
 
 func TestModelPickerMetadataOmitsCredentialEnv(t *testing.T) {
@@ -250,7 +290,7 @@ func TestModelPickerFallsBackWhenDiscoveryFails(t *testing.T) {
 		t.Fatal("expected opening the model picker to start discovery")
 	}
 	// A failed discovery leaves the static catalog list in place — no crash, no block.
-	updated, _ = m.Update(modelPickerModelsDiscoveredMsg{providerID: "ollama-cloud", models: nil, err: errors.New("offline")})
+	updated, _ = m.Update(modelPickerModelsDiscoveredMsg{providerID: "ollama-cloud", generation: m.modelPickerDiscoveryGen, models: nil, err: errors.New("offline")})
 	m = updated.(model)
 	view := plainRender(t, m.pickerOverlay(100))
 	assertNotContains(t, view, "Checking available models...")
@@ -277,7 +317,7 @@ func TestLocalModelPickerShowsActionableRuntimeFailures(t *testing.T) {
 	updated, _ := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 
-	updated, _ = m.Update(modelPickerModelsDiscoveredMsg{providerID: "ollama", err: errors.New("connection refused")})
+	updated, _ = m.Update(modelPickerModelsDiscoveredMsg{providerID: "ollama", generation: m.modelPickerDiscoveryGen, err: errors.New("connection refused")})
 	m = updated.(model)
 	view := plainRender(t, m.pickerOverlay(100))
 	assertContains(t, view, "Ollama Local is unavailable")
@@ -285,7 +325,7 @@ func TestLocalModelPickerShowsActionableRuntimeFailures(t *testing.T) {
 		t.Fatalf("local runtime error = %q", m.modelPickerLoadError)
 	}
 
-	updated, _ = m.Update(modelPickerModelsDiscoveredMsg{providerID: "ollama", models: nil})
+	updated, _ = m.Update(modelPickerModelsDiscoveredMsg{providerID: "ollama", generation: m.modelPickerDiscoveryGen, models: nil})
 	m = updated.(model)
 	view = plainRender(t, m.pickerOverlay(100))
 	assertContains(t, view, "Ollama Local reported no models")
@@ -1010,8 +1050,30 @@ func TestSwitchProviderModelWarmsDiscoveryForTheNewProvider(t *testing.T) {
 	if next.modelName != "kimi-k2.7-code:cloud" || next.providerName != "ollama" {
 		t.Fatalf("model/provider not switched: modelName=%q providerName=%q", next.modelName, next.providerName)
 	}
+	if next.modelPickerDiscoveryGen != m.modelPickerDiscoveryGen+1 {
+		t.Fatalf("discovery generation = %d, want %d", next.modelPickerDiscoveryGen, m.modelPickerDiscoveryGen+1)
+	}
 	if cmd == nil {
 		t.Fatal("switching to ollama should warm both the generic and ollama-specific discovery commands")
+	}
+}
+
+func TestSwitchProviderModelInvalidatesDiscoveryWithoutDescriptor(t *testing.T) {
+	custom := config.ProviderProfile{Name: "private", ProviderKind: config.ProviderKind("private"), APIKey: "secret", Model: "private-model"}
+	m := newModel(context.Background(), Options{
+		ProviderName:    "openai",
+		ModelName:       "gpt-5.1",
+		Provider:        &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{Name: "openai", CatalogID: "openai", Model: "gpt-5.1"},
+		SavedProviders:  []config.ProviderProfile{custom},
+		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &fakeProvider{}, nil
+		},
+	})
+
+	next, _, _ := m.switchProviderModel("private", "private-model")
+	if next.modelPickerDiscoveryGen != m.modelPickerDiscoveryGen+1 {
+		t.Fatalf("discovery generation = %d, want %d", next.modelPickerDiscoveryGen, m.modelPickerDiscoveryGen+1)
 	}
 }
 

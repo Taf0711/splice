@@ -555,8 +555,9 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 	// for the provider active at launch — otherwise the context-usage gauge has
 	// no window for this provider until /model happens to be opened separately.
 	var cmds []tea.Cmd
+	m.modelPickerDiscoveryGen++
 	if hasDescriptor {
-		if cmd := m.modelPickerProviderDiscoveryCmd(descriptor, target); cmd != nil {
+		if cmd := m.modelPickerProviderDiscoveryCmd(descriptor, target, m.modelPickerDiscoveryGen); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 		if cmd := m.ollamaContextWindowDiscoveryCmd(descriptor, target.BaseURL, target.Model); cmd != nil {

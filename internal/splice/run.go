@@ -512,6 +512,19 @@ func runPass(
 	for i, stage := range plan.Stages {
 		stageNames[i] = stage.Name
 	}
+	for i, stageName := range stageNames {
+		status := "pending"
+		if i == 0 {
+			status = "reset"
+		}
+		emitStageEvent(options, stageName, status, "", 0, nil)
+	}
+	markLaterStagesSkipped := func(seq int, failedStage string) {
+		detail := fmt.Sprintf("Not run after %s failed", failedStage)
+		for _, stageName := range stageNames[seq+1:] {
+			emitStageEvent(options, stageName, "skipped", detail, 0, nil)
+		}
+	}
 
 	for seq, stage := range plan.Stages {
 		stageName := stage.Name
@@ -535,6 +548,8 @@ func runPass(
 				Iteration:     iteration,
 				OutputSummary: &summary,
 			})
+			emitStageEvent(options, stageName, "failed", summary, 0, nil)
+			markLaterStagesSkipped(seq, stageName)
 			return records, outputs, false, nil
 		}
 
@@ -568,11 +583,13 @@ func runPass(
 		}
 
 		if err := input.Validate(); err != nil {
+			summary := fmt.Sprintf("invalid stage input: %v", err)
+			emitStageEvent(options, stageName, "failed", summary, 0, nil)
+			markLaterStagesSkipped(seq, stageName)
 			return records, outputs, false, fmt.Errorf("stage %s input: %w", stageName, err)
 		}
 
 		emitProgress(options, fmt.Sprintf("[%s] stage started\n", stageName))
-		emitStageEvent(options, stageName, "running", "", 0, nil)
 
 		// Model-free stages skip provider resolution and attribution.
 		modelFree := isModelFreeStage(stageName)
@@ -592,6 +609,9 @@ func runPass(
 		}
 		if modelFree {
 			selection = agent.ModelSelection{}
+			emitStageEvent(options, stageName, "running", "", 0, nil, agent.ModelSelection{Model: "local"})
+		} else {
+			emitStageEvent(options, stageName, "running", "", 0, nil, selection)
 		}
 
 		start := time.Now()
@@ -625,9 +645,16 @@ func runPass(
 			record.OutputSummary = &summary
 			records = append(records, record)
 			emitStageEvent(options, stageName, "failed", summary, 0, nil)
+			markLaterStagesSkipped(seq, stageName)
 			return records, outputs, false, nil
 		}
 		if output.ContextRequest != nil {
+			record.Status = schemas.StageFailed
+			summary := "stage requested context twice"
+			record.OutputSummary = &summary
+			records = append(records, record)
+			emitStageEvent(options, stageName, "failed", summary, 0, nil)
+			markLaterStagesSkipped(seq, stageName)
 			return records, outputs, false, fmt.Errorf("stage %s requested context twice", stageName)
 		}
 		if err := output.Validate(); err != nil {
@@ -637,6 +664,7 @@ func runPass(
 			record.OutputSummary = &failSummary
 			records = append(records, record)
 			emitStageEvent(options, stageName, "failed", failSummary, 0, nil)
+			markLaterStagesSkipped(seq, stageName)
 			return records, outputs, false, nil
 		}
 		record.Status = schemas.StageCompleted
@@ -1266,19 +1294,24 @@ const (
 // emitStageEvent sends a structured stage lifecycle event through the
 // OnReasoning callback as a null-delimited marker. The TUI parses it to update
 // its PIPELINE sidebar; headless consumers ignore it (it looks like a short
-// binary-prefixed line). status is one of: started, running, completed,
-// failed, skipped, retry.
-func emitStageEvent(options agent.Options, stageName, status, detail string, progress int, changedFiles []string) {
+// binary-prefixed line). A status is reset, pending, running, completed,
+// incomplete, failed, or skipped. Reset starts a new plan with its first stage.
+func emitStageEvent(options agent.Options, stageName, status, detail string, progress int, changedFiles []string, selections ...agent.ModelSelection) {
 	if options.OnReasoning == nil {
 		return
 	}
-	payload, err := json.Marshal(map[string]any{
+	payloadFields := map[string]any{
 		"name":         stageName,
 		"status":       status,
 		"detail":       detail,
 		"progress":     progress,
 		"changedFiles": changedFiles,
-	})
+	}
+	if len(selections) > 0 {
+		payloadFields["provider"] = selections[0].ProviderName
+		payloadFields["model"] = selections[0].Model
+	}
+	payload, err := json.Marshal(payloadFields)
 	if err != nil {
 		return
 	}
