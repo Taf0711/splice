@@ -529,37 +529,44 @@ func TestCodexProviderForwardsReasoningEffort(t *testing.T) {
 	// A reasoning effort must reach the Responses backend nested under
 	// `reasoning.effort` (where the chat-completions `reasoning_effort` moved).
 	// Without this the user's chosen effort is silently dropped for Codex models.
-	var rec codexRequest
-	srv := newCodexTestServer(t, &rec)
-	defer srv.Close()
+	// xhigh, max, and none are covered here because they were only recently
+	// accepted and are otherwise untested on this transport.
+	cases := []string{"high", "xhigh", "max", "none"}
+	for _, effort := range cases {
+		t.Run(effort, func(t *testing.T) {
+			var rec codexRequest
+			srv := newCodexTestServer(t, &rec)
+			defer srv.Close()
 
-	provider, err := NewCodexProvider(CodexOptions{
-		Options:   Options{APIKey: "sk-test", BaseURL: srv.URL, Model: "gpt-5-codex"},
-		AccountID: "acc-x",
-	})
-	if err != nil {
-		t.Fatalf("NewCodexProvider: %v", err)
-	}
-	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
-		Messages:        []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
-		ReasoningEffort: "high",
-	})
-	if err != nil {
-		t.Fatalf("StreamCompletion: %v", err)
-	}
-	drainCodexEvents(t, stream)
+			provider, err := NewCodexProvider(CodexOptions{
+				Options:   Options{APIKey: "sk-test", BaseURL: srv.URL, Model: "gpt-5-codex"},
+				AccountID: "acc-x",
+			})
+			if err != nil {
+				t.Fatalf("NewCodexProvider: %v", err)
+			}
+			stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+				Messages:        []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+				ReasoningEffort: effort,
+			})
+			if err != nil {
+				t.Fatalf("StreamCompletion: %v", err)
+			}
+			drainCodexEvents(t, stream)
 
-	reasoning, ok := rec.body["reasoning"].(map[string]any)
-	if !ok {
-		t.Fatalf("body.reasoning = %#v, want an object carrying the effort", rec.body["reasoning"])
-	}
-	if reasoning["effort"] != "high" {
-		t.Fatalf("body.reasoning.effort = %#v, want high", reasoning["effort"])
-	}
-	// A reasoning summary must be requested so the backend streams
-	// reasoning_summary_text deltas — otherwise a long think shows no live output.
-	if reasoning["summary"] != "auto" {
-		t.Fatalf("body.reasoning.summary = %#v, want auto", reasoning["summary"])
+			reasoning, ok := rec.body["reasoning"].(map[string]any)
+			if !ok {
+				t.Fatalf("body.reasoning = %#v, want an object carrying the effort", rec.body["reasoning"])
+			}
+			if reasoning["effort"] != effort {
+				t.Fatalf("body.reasoning.effort = %#v, want %s", reasoning["effort"], effort)
+			}
+			// A reasoning summary must be requested so the backend streams
+			// reasoning_summary_text deltas, otherwise a long think shows no live output.
+			if reasoning["summary"] != "auto" {
+				t.Fatalf("body.reasoning.summary = %#v, want auto", reasoning["summary"])
+			}
+		})
 	}
 }
 

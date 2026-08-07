@@ -120,10 +120,15 @@ func decorateModelDepth(entries []ModelEntry) {
 			upgradeTarget: "gemini-2.5-flash",
 		},
 		"gpt-5.6-luna": {
+			defaultEffort: ReasoningEffortMedium,
 			upgradeTarget: "gpt-5.6-terra",
 		},
 		"gpt-5.6-terra": {
+			defaultEffort: ReasoningEffortMedium,
 			upgradeTarget: "gpt-5.6-sol",
+		},
+		"gpt-5.6-sol": {
+			defaultEffort: ReasoningEffortMedium,
 		},
 		"gpt-4.1-mini": {
 			upgradeTarget: "gpt-4.1",

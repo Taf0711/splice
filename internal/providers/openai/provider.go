@@ -556,17 +556,17 @@ func promptCacheKeyDisabled() bool {
 	return value != "" && value != "0" && !strings.EqualFold(value, "false")
 }
 
-// openAIReasoningEffort normalizes a requested effort to a value the OpenAI chat
-// completions API accepts, or "" to omit the field. OpenAI has no warning channel
-// on this adapter, so clamp xhigh and max to high instead of silently dropping
-// the request. "none" (and anything else) is dropped rather than risking a 400
-// on an unrecognized enum.
+// openAIReasoningEffort normalizes a reasoning effort for the OpenAI chat
+// completions API and the Responses API, or "" to omit the field. It accepts
+// the seven named tiers (none, minimal, low, medium, high, xhigh, max) and
+// returns the lowercased value. The resolver clamps to a supported tier for
+// known models; for unknown models (custom endpoints) the requested value is
+// forwarded as-is, so an endpoint that does not accept that tier can reject
+// the request.
 func openAIReasoningEffort(requested string) string {
 	switch strings.ToLower(strings.TrimSpace(requested)) {
-	case "minimal", "low", "medium", "high":
+	case "none", "minimal", "low", "medium", "high", "xhigh", "max":
 		return strings.ToLower(strings.TrimSpace(requested))
-	case "xhigh", "max":
-		return "high"
 	default:
 		return ""
 	}

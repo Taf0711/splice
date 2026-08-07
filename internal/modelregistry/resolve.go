@@ -45,27 +45,72 @@ func (registry Registry) ResolveWithFallback(input string) (ModelEntry, string, 
 	return model, "", true
 }
 
+// effortLadder orders every tier from least to most thinking. clampEffort walks
+// it outward from the request: up first (a request for more thinking prefers
+// the next tier up), then down, so an unsupported tier never silently becomes
+// the weakest one.
+var effortLadder = []ReasoningEffort{
+	ReasoningEffortNone, ReasoningEffortMinimal, ReasoningEffortLow,
+	ReasoningEffortMedium, ReasoningEffortHigh, ReasoningEffortXHigh, ReasoningEffortMax,
+}
+
+func clampEffort(efforts []ReasoningEffort, requested ReasoningEffort) ReasoningEffort {
+	for _, effort := range efforts {
+		if effort == requested {
+			return effort
+		}
+	}
+	requestedIndex := -1
+	for index, effort := range effortLadder {
+		if effort == requested {
+			requestedIndex = index
+			break
+		}
+	}
+	if requestedIndex < 0 {
+		return ""
+	}
+	for index := requestedIndex + 1; index < len(effortLadder); index++ {
+		for _, effort := range efforts {
+			if effort == effortLadder[index] {
+				return effort
+			}
+		}
+	}
+	for index := requestedIndex - 1; index >= 0; index-- {
+		for _, effort := range efforts {
+			if effort == effortLadder[index] {
+				return effort
+			}
+		}
+	}
+	return ""
+}
+
 // EffectiveReasoningEffort returns the effort to use for a model: the requested
-// value if the model supports it, otherwise the model's default (or first
-// supported, or none). It resolves the supported set through
+// value if the model supports it, otherwise the nearest supported tier. It
+// resolves the supported set through
 // effectiveReasoningEfforts so it sees the same name-based fallback the /effort
 // picker uses — the two must never disagree about which tiers a model supports.
 func EffectiveReasoningEffort(model ModelEntry, requested ReasoningEffort) ReasoningEffort {
 	efforts := effectiveReasoningEfforts(model)
+	if len(efforts) == 0 {
+		return ReasoningEffortNone
+	}
 	if requested != "" {
-		for _, effort := range efforts {
-			if effort == requested {
-				return requested
-			}
+		if effort := clampEffort(efforts, requested); effort != "" {
+			return effort
 		}
 	}
 	if model.DefaultReasoningEffort != "" {
-		return model.DefaultReasoningEffort
+		if effort := clampEffort(efforts, model.DefaultReasoningEffort); effort != "" {
+			return effort
+		}
 	}
-	if len(efforts) > 0 {
-		return efforts[0]
+	if effort := clampEffort(efforts, ReasoningEffortMedium); effort != "" {
+		return effort
 	}
-	return ReasoningEffortNone
+	return efforts[0]
 }
 
 // effectiveReasoningEfforts returns a model's supported reasoning efforts, falling
