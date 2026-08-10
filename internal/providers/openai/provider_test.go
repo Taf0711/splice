@@ -430,7 +430,8 @@ func TestStreamCompletionTracksMultipleToolCallsByIndex(t *testing.T) {
 	}
 }
 
-func TestStreamCompletionClassifiesHTTPErrorsAndRedactsToken(t *testing.T) {
+func TestEmitHTTPErrorClassifiesAndRedactsToken(t *testing.T) {
+	provider := &Provider{apiKey: "sk-secret"}
 	cases := []struct {
 		name       string
 		status     int
@@ -446,14 +447,15 @@ func TestStreamCompletionClassifiesHTTPErrorsAndRedactsToken(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			provider := newTestProviderWithKey(t, "sk-secret", func(w http.ResponseWriter, r *http.Request) {
-				http.Error(w, tc.body, tc.status)
-			})
-			stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{})
-			if err != nil {
-				t.Fatalf("StreamCompletion returned setup error: %v", err)
-			}
-			events := readAll(stream)
+			recorder := httptest.NewRecorder()
+			http.Error(recorder, tc.body, tc.status)
+			response := recorder.Result()
+			eventCh := make(chan zeroruntime.StreamEvent, 1)
+			provider.emitHTTPError(context.Background(), response, eventCh)
+			_ = response.Body.Close()
+			close(eventCh)
+
+			events := readAll(eventCh)
 			if len(events) != 1 || events[0].Type != zeroruntime.StreamEventError {
 				t.Fatalf("events = %#v, want one error", events)
 			}
@@ -467,6 +469,17 @@ func TestStreamCompletionClassifiesHTTPErrorsAndRedactsToken(t *testing.T) {
 				t.Fatalf("error leaked token: %q", events[0].Error)
 			}
 		})
+	}
+}
+
+func TestStreamCompletionEmitsHTTPError(t *testing.T) {
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":{"message":"bad request"}}`, http.StatusBadRequest)
+	})
+
+	events := collectProviderEvents(t, provider)
+	if len(events) != 1 || events[0].Type != zeroruntime.StreamEventError || !strings.HasPrefix(events[0].Error, "provider request error:") {
+		t.Fatalf("events = %#v, want one provider request error", events)
 	}
 }
 
