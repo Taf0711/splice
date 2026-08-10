@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0](https://github.com/Taf0711/splice/compare/v0.1.4...v0.2.0) (2026-08-10)
+
+
+### Features
+
+* **design:** add agent-requested transitions and revision context ([3a1421f](https://github.com/Taf0711/splice/commit/3a1421f8479a8c6cb4681518690fc05d920702d4))
+
+
+### Bug Fixes
+
+* **memory:** retrieve context only for consuming stages ([4f63d05](https://github.com/Taf0711/splice/commit/4f63d05a2ba59a1241ca32daa5cd31a5b5416b8f))
+* **reasoning:** honor model-supported effort tiers ([1fe01ea](https://github.com/Taf0711/splice/commit/1fe01eab3990ca3075eb0c2c984554f3ae535f9e))
+* **tui:** refresh stage model picker inventory ([9f8324a](https://github.com/Taf0711/splice/commit/9f8324a66a0520d034a2f835d5040063a9b10515))
+* **tui:** stabilize sidebar layout and scope swarm state to each run ([935e247](https://github.com/Taf0711/splice/commit/935e247f42578394a7dc21ed2a966e18f13c4e97))
+* **update:** stop canceled notices before cache writes ([5276f95](https://github.com/Taf0711/splice/commit/5276f957af81217e61fcabf36d191feaf9db8090))
+
 ## [Unreleased]
 
 ### Added
