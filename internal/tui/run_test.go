@@ -1,10 +1,15 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
+
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/colorprofile"
 )
 
 func TestUseAltScreenForInteractiveChat(t *testing.T) {
@@ -13,6 +18,37 @@ func TestUseAltScreenForInteractiveChat(t *testing.T) {
 	}
 	if !useAltScreen(Options{Setup: SetupOptions{Visible: true}}) {
 		t.Fatal("setup takeover should also use the alternate screen")
+	}
+}
+
+func TestProgramDecodesInputRendersAndQuits(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	var output bytes.Buffer
+	program := tea.NewProgram(
+		newModel(ctx, Options{AltScreen: true, Version: "test"}),
+		tea.WithContext(ctx),
+		tea.WithInput(strings.NewReader("/exit\r")),
+		tea.WithOutput(&output),
+		tea.WithWindowSize(80, 24),
+		tea.WithColorProfile(colorprofile.Ascii),
+		tea.WithoutSignals(),
+	)
+
+	final, err := program.Run()
+	if err != nil {
+		t.Fatalf("run Bubble Tea program: %v", err)
+	}
+	model, ok := final.(model)
+	if !ok {
+		t.Fatalf("final model type = %T, want tui.model", final)
+	}
+	if !model.exiting {
+		t.Fatal("/exit input did not reach the main TUI model")
+	}
+	if !strings.Contains(output.String(), emptyStateTagline) {
+		t.Fatalf("rendered output does not contain %q: %q", emptyStateTagline, output.String())
 	}
 }
 

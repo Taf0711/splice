@@ -1,6 +1,6 @@
 # Splice build/test/lint targets.
 .DEFAULT_GOAL := build
-.PHONY: build build-all test test-race test-memd check vet fmt fmt-check lint tidy clean help install-memd
+.PHONY: build build-all test test-race test-cli-tui test-memd check vet fmt fmt-check lint tidy clean help install-memd
 
 # Remove the old binary before each build. A failed build then leaves no stale binary that a person can run by accident.
 build:
@@ -18,6 +18,10 @@ test:
 # Faster, no race detector.
 test-quick:
 	go test ./...
+
+# Test the CLI and TUI seams with the race detector.
+test-cli-tui:
+	go test -race -count=1 ./internal/cli ./internal/tui
 
 # Test the memd sidecar (separate Go module; root go test does not see it).
 test-memd:
@@ -57,4 +61,4 @@ clean:
 	go clean ./...
 
 help:
-	@echo "Targets: build (default), build-all, check, test, test-quick, test-memd, vet, fmt, fmt-check, lint, tidy, install-memd, clean"
+	@echo "Targets: build (default), build-all, check, test, test-quick, test-cli-tui, test-memd, vet, fmt, fmt-check, lint, tidy, install-memd, clean"
