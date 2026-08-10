@@ -305,6 +305,46 @@ func TestValidatedToolUseDoesNotRetryCancellation(t *testing.T) {
 	}
 }
 
+func TestValidatedToolUseForcedChoiceFallbackIsBoundedAndNarrow(t *testing.T) {
+	t.Run("repeated rejection aborts after one fallback", func(t *testing.T) {
+		provider := &retryScriptProvider{scripts: [][]zeroruntime.StreamEvent{
+			{{Type: zeroruntime.StreamEventError, Error: "provider request error: Provider returned error"}},
+			{{Type: zeroruntime.StreamEventError, Error: "provider request error: Provider returned error"}},
+		}}
+		_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(), nil, func(*zeroruntime.CollectedStream) error { return nil }, "")
+		if err == nil || !strings.Contains(err.Error(), "provider request error: Provider returned error") {
+			t.Fatalf("repeated rejection error = %v", err)
+		}
+		if len(provider.requests) != 2 {
+			t.Fatalf("provider calls = %d, want exactly 2 (no loop)", len(provider.requests))
+		}
+	})
+	t.Run("different request rejection is not retried", func(t *testing.T) {
+		provider := &retryScriptProvider{scripts: [][]zeroruntime.StreamEvent{
+			{{Type: zeroruntime.StreamEventError, Error: "provider request error: model does not exist"}},
+		}}
+		_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(), nil, func(*zeroruntime.CollectedStream) error { return nil }, "")
+		if err == nil || !strings.Contains(err.Error(), "model does not exist") {
+			t.Fatalf("request error = %v", err)
+		}
+		if len(provider.requests) != 1 {
+			t.Fatalf("request error calls = %d, want 1", len(provider.requests))
+		}
+	})
+	t.Run("auth rejection is not retried", func(t *testing.T) {
+		provider := &retryScriptProvider{scripts: [][]zeroruntime.StreamEvent{
+			{{Type: zeroruntime.StreamEventError, Error: "auth error: your API key is missing or invalid"}},
+		}}
+		_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(), nil, func(*zeroruntime.CollectedStream) error { return nil }, "")
+		if err == nil || !strings.Contains(err.Error(), "auth error:") {
+			t.Fatalf("auth error = %v", err)
+		}
+		if len(provider.requests) != 1 {
+			t.Fatalf("auth error calls = %d, want 1", len(provider.requests))
+		}
+	})
+}
+
 func TestValidatedToolUseExhaustionIsActionableAndMetered(t *testing.T) {
 	missing := []zeroruntime.StreamEvent{
 		{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 4, OutputTokens: 3, CachedInputTokens: 1, CacheWriteTokens: 1, ReasoningTokens: 1}},
@@ -1531,6 +1571,36 @@ func TestDesignCrystallizer(t *testing.T) {
 	assertPipelineMetaPrompt(t, provider.request)
 }
 
+// The design conversation can use auto tool calls on models whose OpenRouter
+// endpoint rejects forced tool_choice requests. Crystallization must retry once
+// in auto mode and keep its typed plan validation.
+func TestDesignCrystallizerFallsBackWhenForcedToolChoiceIsRejected(t *testing.T) {
+	plan := schemas.DesignPlan{
+		Epic:         "feature",
+		Requirements: []string{"works"},
+		InScope:      []string{"code"},
+		Tasks:        []schemas.Task{{ID: "t1", Title: "task one", Intent: "do it"}},
+	}
+	args, _ := json.Marshal(plan)
+	toolName := designPlanToolDefinition().Name
+	provider := &retryScriptProvider{scripts: [][]zeroruntime.StreamEvent{
+		{{Type: zeroruntime.StreamEventError, Error: "provider request error: Provider returned error"}},
+		toolCallEvent(toolName, string(args)),
+	}}
+	input := schemas.DesignConversationInput{History: []schemas.ConversationMessage{{Role: "user", Content: "Do it."}}}
+
+	got, err := (DesignCrystallizer{}).Crystallize(context.Background(), provider, StageOptions{}, input)
+	if err != nil {
+		t.Fatalf("crystallize: %v", err)
+	}
+	if got.Epic != plan.Epic || got.Source != "conversation" {
+		t.Fatalf("plan = %#v", got)
+	}
+	if len(provider.requests) != 2 || provider.requests[0].ToolChoice != toolName || provider.requests[1].ToolChoice != "" {
+		t.Fatalf("requests = %#v, want forced then auto", provider.requests)
+	}
+}
+
 func TestDesignCrystallizerSetsSourceBeforeValidation(t *testing.T) {
 	plan := schemas.DesignPlan{
 		Source:       "", // empty; Validate would reject this if not set first
@@ -2092,7 +2162,7 @@ func TestCallToolUseForcesToolChoice(t *testing.T) {
 	provider := &requestCapturingProvider{}
 	tool := zeroruntime.ToolDefinition{Name: "submit_design_plan", Parameters: map[string]any{"type": "object"}}
 
-	_, err := callToolUse(context.Background(), provider, "model-test", "", "system", "user", nil, tool, nil, "")
+	_, err := callToolUse(context.Background(), provider, "model-test", "", "system", "user", nil, tool, nil, "", true)
 	if err != nil {
 		t.Fatalf("callToolUse: %v", err)
 	}
@@ -2117,7 +2187,7 @@ func TestCallToolUsePromptCacheKey(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			provider := &requestCapturingProvider{}
 			tool := zeroruntime.ToolDefinition{Name: "submit_code", Parameters: map[string]any{"type": "object"}}
-			if _, err := callToolUse(context.Background(), provider, "model-test", "", "system", "user", nil, tool, nil, tt.key); err != nil {
+			if _, err := callToolUse(context.Background(), provider, "model-test", "", "system", "user", nil, tool, nil, tt.key, true); err != nil {
 				t.Fatalf("callToolUse: %v", err)
 			}
 			if got := provider.request.PromptCacheKey; got != tt.want {
