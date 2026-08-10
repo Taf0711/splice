@@ -1,44 +1,38 @@
 # Install Splice
 
-Splice runs locally and is available in three forms. Pick the path that matches
-how you want to use it:
+Choose npm for the shortest setup. Use a release archive for a managed install.
+Build from source when you work on Splice itself.
 
-| Path | Best for | What you get |
+| Method | Requirement | Result |
 |---|---|---|
-| npm | Most users | A platform binary and the `splice` command |
-| GitHub Releases | Managed or offline installs | A versioned archive |
-| Source | Contributors and local development | A build from this checkout |
+| npm | Node.js 24 or newer | The `splice` command and a platform binary |
+| Install script | `curl` or PowerShell | The latest verified release in a selected directory |
+| Release archive | Archive and checksum access | A fixed release without npm |
+| Source | Go 1.25 or newer | A build from the current checkout |
 
-Splice is built on [Zero's Engine](https://github.com/gitlawb/zero), but the
-commands and binaries below are Splice's (`splice`, not `zero`).
-
-## Fast path: npm
-
-Requirements:
-
-- Node.js 18 or newer
-- network access to npm and GitHub Releases
-- Linux, macOS, or Windows on x64 or arm64
+## Install with npm
 
 ```bash
 npm install -g @taf0711/splice
+splice --version
 splice
 ```
 
-The npm package installs a small wrapper and downloads the matching Splice
-release binary during `postinstall`. The first launch opens the provider setup
-wizard. To check the installation without starting a session:
+The package downloads the release archive that matches its package version. It
+checks the SHA-256 digest before it installs the binary.
 
-```bash
-splice --version
-splice doctor
-```
+The npm package supports these native targets:
 
-### Bun
+- Linux x64 and arm64
+- macOS x64 and arm64
+- Windows x64
 
-Bun does not run dependency lifecycle scripts unless a package is trusted. If
-the wrapper is installed but no native binary is found, trust the package and
-rerun the installer:
+The npm installer skips Windows arm64. Use the Windows install script for the
+native arm64 archive, or use the x64 package through system emulation.
+
+### Use Bun
+
+Bun can block package lifecycle scripts until you trust the package.
 
 ```bash
 bun add -g @taf0711/splice
@@ -52,49 +46,69 @@ bun add @taf0711/splice
 bun pm trust @taf0711/splice
 ```
 
-You can inspect blocked scripts with `bun pm untrusted`. On Bun versions without
-`bun pm trust`, run the wrapper installer directly after installing:
+Use `bun pm untrusted` to inspect blocked scripts. If your Bun version has no
+trust command, run the package installer after the package install:
 
 ```bash
 node node_modules/@taf0711/splice/scripts/postinstall.mjs
 ```
 
-## One-line install
+## Use the install scripts
 
-Use the Bash installer on Linux or macOS:
+On Linux or macOS:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Taf0711/splice/main/scripts/install.sh | bash
+```
+
+You can use `wget` instead:
+
+```bash
 wget -qO- https://raw.githubusercontent.com/Taf0711/splice/main/scripts/install.sh | bash
 ```
 
-Use the plain PowerShell form on Windows:
+On Windows:
 
 ```powershell
 irm https://raw.githubusercontent.com/Taf0711/splice/main/scripts/install.ps1 | iex
 ```
 
-Use the PowerShell argument form to set a version:
+The scripts install the latest release by default. Download the script first
+when you need flags or a fixed version.
 
-```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Taf0711/splice/main/scripts/install.ps1))) -Version 0.1.4
+```bash
+./scripts/install.sh --version vX.Y.Z --install-dir "$HOME/bin"
 ```
 
-## Versioned install: GitHub Releases
+```powershell
+./scripts/install.ps1 -Version vX.Y.Z -InstallDir "$HOME\bin"
+```
 
-Release archives and checksums are published on
-[GitHub Releases](https://github.com/Taf0711/splice/releases). Download the
-archive for your operating system and architecture, unpack it, and put the
-binaries on `PATH`.
+The Bash script supports these variables:
 
-Supported release targets:
+| Variable | Purpose |
+|---|---|
+| `SPLICE_VERSION` | Select a release tag or version. |
+| `SPLICE_INSTALL_DIR` | Select the destination directory. |
+| `SPLICE_REPO` | Select another release repository. |
+| `SPLICE_GITHUB_API` | Select another GitHub API base URL. |
+| `SPLICE_GITHUB_BASE_URL` | Select another GitHub download base URL. |
 
-- Linux: x64, arm64
-- macOS: x64, arm64
-- Windows: x64, arm64
+The default destination is `~/.local/bin` on Linux and macOS. Add the selected
+directory to `PATH` when the installer asks you to do so.
 
-Verify the matching `.sha256` file before installing a binary. Archive names
-follow this pattern:
+## Use a release archive
+
+Download a release and its matching `.sha256` file from
+[GitHub Releases](https://github.com/Taf0711/splice/releases).
+
+Published targets:
+
+- Linux x64 and arm64
+- macOS x64 and arm64
+- Windows x64 and arm64
+
+Archive names use this format:
 
 ```text
 splice-v<version>-linux-<arch>.tar.gz
@@ -102,48 +116,30 @@ splice-v<version>-macos-<arch>.tar.gz
 splice-v<version>-windows-<arch>.zip
 ```
 
-A published release archive contains only the `splice` binary and the
-`splice-memd` sidecar. It does not contain sandbox helper binaries.
+Each published archive contains the main binary and the `splice-memd` sidecar.
+The current release archives do not include separate sandbox helper binaries.
 
-The install script reads these variables. Each one also has an equivalent flag:
-
-| Variable | Flag | Effect |
-|---|---|---|
-| `SPLICE_VERSION` | `--version` | installs a specific version instead of the latest |
-| `SPLICE_INSTALL_DIR` | `--install-dir` | installs to a directory you choose |
-
-```bash
-SPLICE_VERSION=0.1.4 scripts/install.sh
-SPLICE_INSTALL_DIR="$HOME/bin" scripts/install.sh
-```
-
-To install from a GitHub Enterprise instance, set these variables:
-
-| Variable | Effect |
-|---|---|
-| `SPLICE_GITHUB_API` | base URL for the GitHub API, for example `https://github.example.com/api/v3` |
-| `SPLICE_GITHUB_BASE_URL` | base URL for the GitHub instance, for example `https://github.example.com` |
+Verify the checksum before you copy either binary to `PATH`.
 
 ## Build from source
-
-Source builds require Go 1.25 or newer.
 
 ```bash
 git clone https://github.com/Taf0711/splice.git
 cd splice
 go build -o splice ./cmd/splice
+./splice --version
 ./splice
 ```
 
-To run without creating a binary:
+You can also run the source tree without a persistent binary:
 
 ```bash
 go run ./cmd/splice
 ```
 
-### Linux helpers
+### Build Linux helpers
 
-Build the native sandbox helper beside the main binary:
+A source build can place the native Linux helpers beside `splice`:
 
 ```bash
 go build -o splice ./cmd/splice
@@ -151,14 +147,12 @@ go build -o splice-linux-sandbox ./cmd/splice-linux-sandbox
 go build -o splice-seccomp ./cmd/splice-seccomp
 ```
 
-`splice-seccomp` is an optional compatibility wrapper. Native Linux sandboxing
-also requires [Bubblewrap](https://github.com/containers/bubblewrap) to be
-installed. macOS uses the system sandbox and does not need an extra helper.
+Install [Bubblewrap](https://github.com/containers/bubblewrap) for the Linux
+sandbox backend. `splice-seccomp` is an optional compatibility helper.
 
-### Windows helpers
+macOS uses the system sandbox and needs no separate helper.
 
-The main `splice.exe` can run source builds through its built-in dispatch path.
-For a release-style layout, build the standalone helpers beside it:
+### Build Windows helpers
 
 ```powershell
 go build -o splice.exe ./cmd/splice
@@ -166,37 +160,35 @@ go build -o splice-windows-command-runner.exe ./cmd/splice-windows-command-runne
 go build -o splice-windows-sandbox-setup.exe ./cmd/splice-windows-sandbox-setup
 ```
 
-### Optional memory sidecar
+Keep the helper binaries beside `splice.exe` for a release-style source layout.
 
-The pipeline can use `splice-memd` to persist useful observations between
-sessions. It is optional. Without it, Splice still runs normally.
+## Install the memory sidecar
+
+Release archives include `splice-memd`. A source checkout can install it from
+its separate Go module:
 
 ```bash
 make install-memd
 ```
 
-That command installs the sidecar from the separate `memd/` Go module. Splice
-finds it on `PATH` or beside the main binary. To select an explicit binary:
+Splice finds the sidecar beside the main binary or on `PATH`. Select another
+binary only when necessary:
 
 ```bash
 export SPLICE_MEMD_BIN=/path/to/splice-memd
 ```
 
-The sidecar stores a SQLite database and listens on a Unix socket. Defaults are:
-
-- macOS: `~/Library/Application Support/splice/`
-- Linux: `~/.local/share/splice/` or `$XDG_DATA_HOME/splice/`
-
-Override either location when needed:
+The sidecar stores a local SQLite database and uses a Unix socket. The default
+data location follows the local Splice data directory.
 
 ```bash
 export SPLICE_MEMD_SOCKET=/path/to/mem.sock
 export SPLICE_MEMD_DB=/path/to/mem.db
 ```
 
-## After installation
+The sidecar is optional. A run can continue when memory is unavailable.
 
-Configure a provider:
+## Complete setup
 
 ```bash
 splice setup
@@ -205,34 +197,17 @@ splice models list
 splice doctor
 ```
 
-Or use a local model through Ollama or LM Studio. Model-backed pipeline stages
-need tool-calling support. Splice reports invalid typed responses instead of
-silently changing providers.
+Use Ollama or LM Studio for a local model. Select a model with tool-call support
+for typed pipeline stages.
 
-To inspect permissions before allowing a run:
+Inspect safety policy before the first automated run:
 
 ```bash
 splice sandbox policy
 splice sandbox grants list
 ```
 
-The sandbox denies common credential directories by default. This includes SSH,
-cloud, GPG, Kubernetes, container registry, GitHub CLI, and Splice token data.
-To re-enable a nested path, add it to the global user config under `sandbox.allowRead`:
-
-```json
-{
-  "sandbox": {
-    "allowRead": ["~/.ssh"]
-  }
-}
-```
-
-The setting applies only to global user config and CLI overrides. Project config
-cannot re-enable access to a user's credential directory. Network approval does
-not restore a denied SSH key, so SSH-based Git commands also need this override.
-
-For a first headless run:
+Then run:
 
 ```bash
 splice exec "summarize this repository"
@@ -240,50 +215,43 @@ splice exec "summarize this repository"
 
 ## Platform notes
 
-### Termux on Android
+Android is not a release target. A Termux source build can work, but the project
+does not support it as a release platform.
 
-Android is not a published binary target. A source build can work in Termux,
-but it is an unsupported platform and may require `proot` for DNS resolution.
-For supported installations, use Linux, macOS, or Windows as listed above.
+The GitHub Action supports Linux and macOS runners. It rejects Windows runners.
+The standalone CLI supports the Windows release targets above.
 
-### Custom install directories
+## Fix common install problems
 
-For a source build, copy the binary and its helpers to any directory on `PATH`.
-`~/.local/bin` is a common choice on Linux and macOS. On Windows, use a
-PowerShell profile or a system PATH entry for the directory containing
-`splice.exe`.
+### The npm wrapper cannot find a native binary
 
-## Updating
+The package lifecycle script did not complete. Reinstall the package and confirm
+that the process can reach GitHub Releases.
 
-Check for an update from the installed binary:
+For Bun, trust the package as shown above. For Windows arm64, use the PowerShell
+installer or the x64 package.
+
+### A local model returns an invalid stage result
+
+Select a model with tool-call support. Run `splice doctor`, update the model
+profile, and retry.
+
+### The Linux sandbox is unavailable
+
+Install Bubblewrap. For a source layout, build the Linux helper and keep it
+beside `splice`.
+
+Inspect the selected backend with:
+
+```bash
+splice sandbox policy
+```
+
+## Update an installation
 
 ```bash
 splice update --check
+splice upgrade
 ```
 
-Then install the newer npm package or download the matching release archive.
-Source builds update by pulling the repository and rebuilding:
-
-```bash
-git pull
-go build -o splice ./cmd/splice
-```
-
-## Troubleshooting
-
-### `No native binary found next to the npm wrapper`
-
-The package lifecycle script did not run. With Bun, trust the package as shown
-above. With npm, reinstall the package and check that the install process can
-reach GitHub Releases.
-
-### A local model returns invalid stage output
-
-The selected model must support tool calling. Run `splice doctor`, choose a model
-with tool-call support, and retry. Splice allows corrective retries, then stops
-with the invalid field in the error.
-
-### Linux sandbox is unavailable
-
-Build `splice-linux-sandbox`, install Bubblewrap, and keep the helper beside
-`splice` on `PATH`. Inspect the active policy with `splice sandbox policy`.
+Read [Update Splice](UPDATE.md) before you use a custom release endpoint.

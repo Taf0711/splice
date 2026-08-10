@@ -186,10 +186,12 @@ go run ./cmd/splice-release build --goos linux --goarch amd64
 ## Documentation
 
 - `README.md`: project overview.
-- `docs/STREAM_JSON_PROTOCOL.md`: the stream-JSON event contract for headless
-  clients, including pipeline, plan-mode, and merge-back events.
-- `docs/` (INSTALL, UPDATE, oauth-subscriptions, GITHUB_ACTION, SPECIALISTS,
-  BENCHMARK, PERFORMANCE, AGENT_EVALS, NPM_WRAPPER_SMOKE): operational docs.
+- `docs/README.md`: public documentation index.
+- `docs/COMMANDS.md` and `docs/CONFIGURATION.md`: command and configuration guides.
+- `docs/PIPELINE.md`: stage, trajectory, recovery, and usage behavior.
+- `docs/STREAM_JSON_PROTOCOL.md`: the JSONL contract for headless clients.
+- `docs/DESIGN_TRANSITIONS.md` and `docs/DESIGN_REVISION_CONTEXT.md`: design lifecycle behavior.
+- `docs/` also contains install, update, extension, automation, benchmark, and release guides.
 
 ## Contributing
 

@@ -1,222 +1,160 @@
-# OAuth logins & using ChatGPT / Claude subscriptions
+# OAuth and provider login
 
-Splice supports two distinct things people mean by "log in with OAuth":
+Splice supports API keys, selected OAuth logins, local model servers, and
+compatible custom endpoints.
 
-1. **OAuth login for a provider/gateway** that issues a *standard* bearer token —
-   fully built in (`splice auth login …`). Splice attaches the token to model calls
-   automatically.
-2. **Using a ChatGPT or Claude *subscription*** (Plus / Pro / Max) instead of a
-   pay-per-token API key — only possible through a **local proxy**, for the
-   reasons documented below. Splice ships a convenience preset and this recipe.
+Use an API key when the provider documents that path for third-party clients.
+A consumer chat subscription is not always an API credential.
 
----
+## Inspect login state
 
-## 1. OAuth login for a provider or gateway (built in)
-
-For any OAuth 2.0 / OIDC provider that returns a normal access token usable as
-`Authorization: Bearer …` on its API, configure it with `SPLICE_OAUTH_<NAME>_*`
-env vars and log in:
-
-```sh
-export SPLICE_OAUTH_ACME_CLIENT_ID=…
-export SPLICE_OAUTH_ACME_AUTHORIZE_URL=https://acme.example/oauth/authorize
-export SPLICE_OAUTH_ACME_TOKEN_URL=https://acme.example/oauth/token
-export SPLICE_OAUTH_ACME_SCOPES="openid profile"
-splice auth login acme            # browser (loopback); --device for headless
+```bash
 splice auth status
+splice auth status <provider>
 ```
 
-When a login exists for a provider, the **OpenAI and Anthropic** providers send
-`Authorization: Bearer <fresh-token>` (auto-refreshed; one refresh-and-retry on a
-`401`) instead of the API key. With no login they use the API key exactly as
-before. Tokens use the macOS keyring by default. Other platforms use an
-encrypted file. Set `SPLICE_OAUTH_STORAGE=file` to opt out. See `splice auth --help`.
+The status command reports login presence and expiry. It never prints the token.
 
-### In the setup wizard (`/provider`)
+Use these commands to manage a login:
 
-Running `/provider` opens a **"How do you want to connect?"** chooser:
+```bash
+splice auth login <provider>
+splice auth login <provider> --device
+splice auth refresh <provider>
+splice auth logout <provider>
+```
+
+## OpenRouter
+
+OpenRouter supports a browser flow that creates an API key for Splice.
+
+```bash
+splice auth openrouter
+```
+
+You can also select OpenRouter in the setup flow. Splice stores the created key
+with the provider profile.
+
+## ChatGPT
+
+Splice includes a browser login for supported ChatGPT accounts:
+
+```bash
+splice auth chatgpt
+```
+
+This route uses the provider's Codex service rather than the standard OpenAI API.
+Provider access rules can change. Run `splice auth status chatgpt` and
+`splice doctor` when the route stops.
+
+Use `OPENAI_API_KEY` with the normal OpenAI provider when you need the standard
+OpenAI API and its documented billing path.
+
+## xAI
+
+The xAI preset needs an OAuth client identity. It is disabled by default.
+
+Enable the built-in preset only when your account and provider terms permit it:
+
+```bash
+export SPLICE_OAUTH_ALLOW_PRESETS=1
+splice auth login xai
+```
+
+You can also supply your own OAuth application settings through
+`SPLICE_OAUTH_XAI_*` variables.
+
+## Hugging Face
+
+Register a public OAuth application with Hugging Face. Then set its client ID
+and start the login:
+
+```bash
+export SPLICE_OAUTH_HUGGINGFACE_CLIENT_ID=YOUR_CLIENT_ID
+splice auth login huggingface
+```
+
+Use `--device` for a headless host when the provider supports device login.
+
+## Custom OAuth or OIDC
+
+For a custom provider named `acme`, set its OAuth values and start the login:
+
+```bash
+export SPLICE_OAUTH_ACME_CLIENT_ID=YOUR_CLIENT_ID
+export SPLICE_OAUTH_ACME_AUTHORIZE_URL=https://provider.example/authorize
+export SPLICE_OAUTH_ACME_TOKEN_URL=https://provider.example/token
+export SPLICE_OAUTH_ACME_SCOPES="openid profile"
+splice auth login acme
+```
+
+Available variable groups include:
 
 ```text
-❯ Sign in with OAuth                 One-click browser login (OpenRouter, xAI, ChatGPT, Hugging Face)
-  Paste an API key / browse providers  Any of 20+ providers, local, or a proxy
+SPLICE_OAUTH_<NAME>_CLIENT_ID
+SPLICE_OAUTH_<NAME>_CLIENT_SECRET
+SPLICE_OAUTH_<NAME>_AUTHORIZE_URL
+SPLICE_OAUTH_<NAME>_TOKEN_URL
+SPLICE_OAUTH_<NAME>_DEVICE_URL
+SPLICE_OAUTH_<NAME>_ISSUER_URL
+SPLICE_OAUTH_<NAME>_SCOPES
+SPLICE_OAUTH_<NAME>_FLOW
 ```
 
-Pick **Sign in with OAuth** → the list of providers that do real OAuth → choose one:
+Use HTTPS endpoints. Loopback callback addresses are the only local exception.
 
-```text
-❯ OpenRouter      browser sign-in · creates a key
-  xAI (Grok)      browser or device code
-  ChatGPT         browser (Codex backend, ChatGPT Plus/Pro)
-  Hugging Face    browser or device code
+Splice can refresh a supported bearer token and retry one unauthorized request.
+Without a login, the provider profile uses its configured API key.
+
+## Headless login
+
+Use device login when the provider offers it:
+
+```bash
+splice auth login <provider> --device
 ```
 
-- **OpenRouter / xAI / ChatGPT / Hugging Face** are real OAuth: your browser
-  opens to approve → done (no key to paste). OpenRouter mints a key; xAI /
-  ChatGPT / Hugging Face store a refreshable bearer. Hugging Face requires a
-  one-time OAuth-app registration (no secret needed for "public" apps); the
-  preset pre-fills scopes, endpoints, and the OIDC issuer. The same chooser
-  appears in first-run onboarding. (xAI uses an opt-in preset — set
-  `SPLICE_OAUTH_ALLOW_PRESETS=1` or your own `SPLICE_OAUTH_XAI_*`; see below.)
-- **Device code (headless / SSH):** for a provider that supports it (xAI,
-  Hugging Face), press **d** on the list to get a code to enter on another
-  device instead of opening a browser. On an SSH session or headless Linux box
-  (no `DISPLAY`) device code is used automatically; set `SPLICE_OAUTH_DEVICE=1`
-  to force it anywhere. The CLI equivalent is
-  `splice auth login <name> --device`.
-- **ChatGPT / Claude are intentionally not in this list for the proxy path** —
-  use the dedicated `chatgpt-proxy` / `custom-anthropic-compatible` preset
-  (see §2) for subscription-via-proxy. ChatGPT *is* a first-class OAuth
-  provider in this version (routes to the Codex backend) — see "Built-in OAuth
-  providers" below.
+Splice can select device login automatically on a host without a browser. Set
+`SPLICE_OAUTH_DEVICE=1` to request this mode for the process.
 
-### Built-in OAuth providers
+## Token storage
 
-- **OpenRouter (no env needed)** — `splice auth openrouter` opens a browser, you
-  approve, and it **mints an OpenRouter API key** (public PKCE flow, no client_id).
-  In the interactive setup wizard, pick **OpenRouter** and press **ctrl+o** at the
-  key step to do the same inline ("Log in with OAuth"). The minted key is saved to
-  the provider profile and used normally.
-- **xAI (Grok) — opt-in preset** — xAI's flow needs an OAuth `client_id`. Splice
-  ships a built-in preset for the public Grok-CLI client, but to keep third-party
-  client identities out of the default credential path it is **off by default**.
-  Enable it with `export SPLICE_OAUTH_ALLOW_PRESETS=1`, then `splice auth login xai`
-  (browser, or `--device` for headless) works one-click; the token is used directly
-  on `api.x.ai/v1`. Without the opt-in, set `SPLICE_OAUTH_XAI_CLIENT_ID` (and
-  endpoints, or an issuer) yourself via `SPLICE_OAUTH_XAI_*`. Either way the preset is
-  fully overridable by `SPLICE_OAUTH_XAI_*` (env wins), and it requires a
-  SuperGrok / X Premium+ subscription; the client_id is an undocumented public
-  Grok-CLI client that may change without notice.
-- **ChatGPT (Codex) — opt-in preset** — `splice auth chatgpt` opens a browser, you
-  approve with your ChatGPT Plus/Pro/Business/Enterprise account, and the bearer is
-  stored. The bearer routes to `https://chatgpt.com/backend-api/codex/responses`
-  (the same endpoint the openai/codex CLI uses), with `originator: codex_cli_rs` and
-  the `chatgpt-account-id` claim injected as headers on every request. The
-  `chatgpt-account-id` is extracted from the OIDC ID token and stored alongside the
-  bearer; if the claim is missing (older ChatGPT accounts, or a rotated
-  authorization server), the Codex backend will 401 and `splice auth status chatgpt`
-  will show the warning. Like xAI, the preset uses the publicly-shipped Codex CLI
-  client identity (`app_EMoamEEZ73f0CkXaXp7hrann`) and is opt-in via
-  `SPLICE_OAUTH_ALLOW_PRESETS=1`. As of mid-2026 the Codex backend is
-  Cloudflare-gated: requests from a non-Codex client can still be challenged, and
-  the `chatgpt-proxy` route in §2 is the conservative fallback.
-- **Hugging Face — opt-in preset, BYO client_id** — `splice auth login huggingface`
-  (or `--device` for headless) opens a Hugging Face OAuth flow. The bearer works on
-  the OpenAI-compatible router at `https://router.huggingface.co/v1` for hundreds
-  of OSS models (Llama, Qwen, DeepSeek, Mistral, etc.). HF does not ship a
-  globally-known client_id, so the preset ships endpoints + scopes + the OIDC
-  issuer pre-filled; you must register a "public" OAuth app (no secret) at
-  <https://huggingface.co/settings/applications/new> and set the resulting
-  `client_id` via `SPLICE_OAUTH_HUGGINGFACE_CLIENT_ID`. Enable the preset with
-  `SPLICE_OAUTH_ALLOW_PRESETS=1` (or omit it — the BYO client_id path uses
-  `client_credentials = none` and doesn't need the opt-in). Free tier has strict
-  rate limits; Pro removes them.
+macOS uses the system keyring by default. Other platforms use an encrypted local
+file under the Splice configuration directory.
 
-Any field of a preset is overridable via `SPLICE_OAUTH_<NAME>_*`. For a fully custom
-OAuth/OIDC provider, set those env vars (see `splice auth --help`) and
-`splice auth login <name>`.
+Set this variable to choose another token path:
 
----
-
-## 2. ChatGPT / Claude subscriptions — why a proxy is required
-
-We researched this carefully. As of mid-2026, a **subscription** OAuth token does
-**not** work as a drop-in bearer against the standard APIs:
-
-- **OpenAI (ChatGPT):** a "Sign in with ChatGPT" token only works against
-  ChatGPT's own backend (`chatgpt.com/backend-api/codex/responses`, the Responses
-  API), **not** `api.openai.com`. That backend is **Cloudflare bot-protected** —
-  non-browser / headless clients get `cf-mitigated: challenge` → `403`. It also
-  requires mimicking the official Codex client (originator + account-id header).
-  **First-class path (this version):** `splice auth chatgpt` does exactly that
-  mimicking (`originator: codex_cli_rs`, `chatgpt-account-id: <claim>`) and
-  routes requests to the Codex backend, no proxy required — see §1. The
-  `chatgpt-proxy` route below is the conservative fallback when Cloudflare
-  challenges become an issue, and is the only path that works without a
-  browser-based ChatGPT OAuth login.
-- **Anthropic (Claude):** the Messages API **rejects** subscription OAuth tokens
-  for third-party use unless the request spoofs the Claude Code identity
-  (`anthropic-beta: oauth-2025-04-20`, `claude-cli` UA, and a verbatim
-  *"You are Claude Code…"* system prompt) — and **even then** tool-using requests
-  on Max plans are routed to a disabled billing lane and `400`. Anthropic's policy
-  **prohibits** subscription-token use outside Claude Code / claude.ai, and the
-  timeline hardened through 2026: a **Feb 19 2026** docs update spelled out that
-  Free/Pro/Max OAuth tokens may not be used in third-party tools or the Agent SDK,
-  then on **April 4 2026** enforcement landed and subscription OAuth tokens
-  **stopped working in third-party harnesses** (starting with OpenClaw, then the
-  rest). As of mid-2026 the only supported ways to drive Claude from a third-party
-  tool are a standard **API key** or pay-as-you-go **"Extra Usage"** billing —
-  both per-token, not the flat subscription. The request to allow subscription use
-  (claude-code #37205) was closed *"not planned."*
-
-So Splice does **not** call those backends directly or spoof those clients — that
-would be fragile, account-risky, and (for Anthropic) against the vendor's terms.
-The robust, supported pattern is a **local proxy** that holds your subscription
-session and exposes a clean OpenAI- or Anthropic-compatible endpoint on
-`127.0.0.1`. The proxy absorbs the Cloudflare / client-spoofing surface; Splice
-just points at it.
-
-### ChatGPT via a local proxy
-
-Run a local ChatGPT OAuth proxy that exposes an OpenAI-compatible endpoint (these
-typically listen on `127.0.0.1:10531/v1`). Then use the built-in **`chatgpt-proxy`**
-preset (no API key — the proxy authenticates):
-
-```jsonc
-// ~/.config/splice/config.json (or ./.splice/config.json)
-{
-  "activeProvider": "chatgpt",
-  "providers": [
-    {
-      "name": "chatgpt",
-      "catalogID": "chatgpt-proxy",     // OpenAI-compatible, local, no key
-      "baseURL": "http://localhost:10531/v1", // override for your proxy's port
-      "model": "gpt-5.5"                 // whatever model your proxy serves
-    }
-  ]
-}
+```bash
+export SPLICE_OAUTH_TOKENS_PATH=/secure/path/oauth-tokens.json
 ```
 
-```sh
-splice exec --prompt "say hi"   # routes through the proxy → your ChatGPT plan
-```
+Set `SPLICE_OAUTH_STORAGE=file` only when you accept a plaintext file with mode
+`0600`.
 
-### Claude via a local proxy
+MCP OAuth tokens use the same credential system. You can select a separate MCP
+token path with `SPLICE_MCP_OAUTH_TOKENS_PATH`.
 
-There is no single canonical Claude OAuth-proxy port, so use the generic
-**`custom-anthropic-compatible`** entry pointed at your proxy's Anthropic-compatible
-endpoint:
+## Subscription limits
 
-```jsonc
-{
-  "activeProvider": "claude",
-  "providers": [
-    {
-      "name": "claude",
-      "catalogID": "custom-anthropic-compatible",
-      "baseURL": "http://localhost:<port>",  // your Claude proxy
-      "apiKey": "unused-by-proxy",
-      "model": "claude-sonnet-4.5"
-    }
-  ]
-}
-```
+A ChatGPT or Claude web subscription does not automatically grant standard API
+access. Use only a login path that the provider permits for third-party tools.
 
----
+Splice does not support direct Claude subscription login. Use an Anthropic API
+key for the Anthropic provider.
 
-## 3. Supported alternatives (no proxy)
+Splice can connect to a local OpenAI-compatible or Anthropic-compatible proxy.
+The proxy remains a separate trust boundary. Review its source, storage,
+network behavior, and vendor terms before use.
 
-- **API key (recommended, simplest):** set `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`
-  (or per-profile `apiKey`) and use the `openai` / `anthropic` catalog providers.
-  Bills as API usage.
-- **Anthropic subscription automation, sanctioned:** spawn the real `claude` CLI
-  (e.g. `claude -p …`) as a subprocess — the only path Anthropic recognizes as a
-  first-class subscription session.
+Point a custom provider profile at a loopback URL when you operate such a proxy.
+Do not expose an unauthenticated proxy on a public network.
 
----
+## Recommended choices
 
-## Notes
+- Use a provider API key for the most stable setup.
+- Use the built-in OpenRouter login when you want an OpenRouter key.
+- Use the ChatGPT command only for its supported Codex route.
+- Use your own OAuth application for a custom provider.
+- Use a local model when repository data must stay off a cloud provider.
 
-- The `chatgpt-proxy` base URL / port and model are defaults you override for your
-  setup; they are not an endorsement of any specific proxy implementation.
-- Subscription-via-proxy depends on third-party tools and undocumented vendor
-  backends; it can break without notice. The API-key path is the stable one.
+Read [Configuration](CONFIGURATION.md) for profile and policy precedence.

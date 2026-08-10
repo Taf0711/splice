@@ -1,44 +1,95 @@
-# Update Flow
+# Update Splice
 
-`splice update --check` checks the latest GitHub release and compares it with the
-local CLI version.
+Check the latest release without a file change:
 
 ```bash
 splice update --check
+```
+
+Install the latest release:
+
+```bash
+splice update --apply
+```
+
+`splice upgrade` is the short form for the install operation:
+
+```bash
+splice upgrade
+```
+
+The install path downloads the matching archive, verifies its SHA-256 digest,
+and replaces the installed release files.
+
+## Check options
+
+```bash
 splice update --check --json
 splice update --check --repo Taf0711/splice
 splice update --check --target windows-x64
 ```
 
-The command is intentionally check-only:
-
-- It does not replace the running binary.
-- It exits with code `0` when the check succeeds, even when an update is
-  available.
-- It exits with code `1` when the release check cannot be completed.
-- `--json` prints the same result in a machine-readable format for scripts and
-  CI.
-
-Useful flags:
-
 | Flag | Purpose |
 |---|---|
-| `--repo <owner/repo>` | Check another GitHub repository. |
-| `--endpoint <url|owner/repo>` | Check a specific release API URL or repository slug. |
-| `--timeout <duration>` | Override the default release check timeout. |
-| `--target <platform-arch>` | Validate release metadata for another supported target. |
+| `--json` | Print a machine-readable result. |
+| `--repo <owner/repo>` | Select another release repository. |
+| `--endpoint <url|owner/repo>` | Select a release API URL or repository. |
+| `--timeout <duration>` | Set the release request timeout. |
+| `--target <platform-arch>` | Check assets for another release target. |
 
-Supported targets are `linux-x64`, `linux-arm64`, `macos-x64`, `macos-arm64`,
-`windows-x64`, and `windows-arm64`. Without `--target`, Splice checks the current
-platform.
+`--target` works only with `--check`. It does not install a foreign-platform
+binary.
 
-Endpoint resolution order:
+Supported target names are:
+
+```text
+linux-x64
+linux-arm64
+macos-x64
+macos-arm64
+windows-x64
+windows-arm64
+```
+
+A successful check returns exit code `0`, even when a newer release exists. A
+check error returns a nonzero code.
+
+## Release endpoint order
+
+Splice selects release metadata in this order:
 
 1. `--endpoint`
 2. `SPLICE_UPDATE_RELEASE_URL`
 3. `--repo`
-4. `https://api.github.com/repos/Taf0711/splice/releases/latest`
+4. The official Splice GitHub release endpoint
 
-Installer scripts download the matching release asset for the local platform and
-verify its `.sha256` file. If Splice is already installed, run `splice update --check`
-before reinstalling.
+Use a custom endpoint only when you trust its archive and checksum source.
+
+## Disable update checks
+
+Set `SPLICE_DISABLE_UPDATE_NOTICE=1` to hide the automatic notice. Manual update
+commands remain available.
+
+Set `SPLICE_DISABLE_UPDATES=1` to disable update checks and install commands for
+the process.
+
+## Package manager installs
+
+Splice detects an npm-managed installation. In that case, `splice upgrade` runs
+the global npm update for `@taf0711/splice@latest`.
+
+For an install-script or archive layout, Splice downloads, verifies, and replaces
+the release files directly.
+
+You can also update an npm package yourself:
+
+```bash
+npm install -g @taf0711/splice@latest
+```
+
+For a source build, update the checkout and rebuild:
+
+```bash
+git pull
+go build -o splice ./cmd/splice
+```

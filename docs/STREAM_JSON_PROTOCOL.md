@@ -1,171 +1,267 @@
-# Splice Stream-JSON Protocol
+# Stream-JSON protocol
 
-Splice stream-json is a line-delimited protocol for headless clients such as
-editor extensions and automation wrappers.
+Splice uses JSON Lines for headless clients. Each nonempty line contains one JSON
+object.
 
-Every line is one JSON object. Empty input lines are ignored. Output events are
-redacted before they are written to stdout.
-
-## Execution model
-
-Headless `splice exec` runs Splice's deterministic stage pipeline: the request
-is planned into stages (plan critic, code writer, test generator, test runner,
-static analyzer, security auditor, step back, with the set depending on the plan tier), and the
-pipeline iterates until the pass succeeds, fails, or a budget is exhausted.
-This shapes the event stream:
-
-- `reasoning` events carry pipeline lifecycle and progress (iteration starts,
-  `[stage] …` activity lines) in addition to any model reasoning deltas. Stage
-  lifecycle events (started/running/completed/failed/skipped) are embedded
-  inside the `reasoning.delta` JSON string field: the delta contains a payload
-  starting with `\x00STAGE` and ending with `\x00` with `name`, `status`,
-  `detail`, `progress` (0-100), and `changedFiles`. The TUI parses these from
-  the delta field to drive its PIPELINE sidebar; other consumers can ignore them.
-- Each LLM-backed stage produces its structured output as a streamed tool
-  call: one `tool_call_start`, then `tool_call_delta` fragments. These ids
-  never receive a `tool_result`; they are schema envelopes, not executions.
-- `tool_call` / `tool_result` pairs are reserved for real tool executions the
-  pipeline performs (reads, greps, file writes, shell and test commands).
-- `usage` is emitted once per stage LLM call, so expect several per run. The
-  event carries `promptTokens` (effective input), `completionTokens`
-  (effective output), and `totalTokens`. When the provider reports them,
-  `cachedInputTokens`, `cacheWriteTokens`, and `reasoningTokens` are also
-  set (all optional, `omitempty`).
-- A usage event can identify the request route with `provider`, `model`, and
-  `apiModel`. It can also include `stage`, `iteration`, `usageSequence`, and
-  `usageReported` for request identity and order.
-- A usage event can include `costUsd`, `costStatus`, `costEstimated`,
-  `costProvenance`, `pricingSource`, `pricingAsOf`, and `unpricedReason`.
-  Eval reports treat all cost values as estimates. An unknown price stays
-  unknown.
-- Near the end of the run, `text` carries a short human-readable summary and
-  `final` carries the machine-readable pipeline result: a JSON object with
-  `runId`, `status` (`completed` | `failed` | `aborted`), `tier`, per-stage
-  records, and `abortReason` when applicable.
-
-The configured max-turns limit caps pipeline iterations (one "turn" = one full
-stage pass). Interrupted runs (SIGINT, context cancellation) still emit their
-terminal `error`/`run_end` events.
-
-When `splice exec --plan <path.json>` executes a design plan, each task runs as
-an independent pipeline run. Per-task progress lines are emitted as `reasoning`
-events, per-task pipeline stage events keep the same shape described above, and
-the final answer is the `DesignPlanResult` JSON with completed, failed, and
-skipped task ids.
-
-When `splice exec --worktree --merge-back` succeeds, the merge-back outcome is
-reported with existing event types: a `text` event for a merged or no-changes
-result, a `warning` event for a skipped (dirty source tree) or conflicted
-merge, and an `error` event with code `merge_back_failed` (followed by a
-`run_end` with status `error`) when the merge itself errors. The worktree
-branch named in the message survives in every non-merged case.
-
-## Version
-
-Current schema version: `2`
-
-Every input and output event must include:
+Use schema version `2` for all input and output events.
 
 ```json
-{ "schemaVersion": 2, "type": "..." }
+{"schemaVersion":2,"type":"..."}
 ```
 
-Output events also include `runId`.
+Output events also include `runId`. Splice redacts output fields before it writes
+them to standard output.
 
-## Input Events
+## Start a stream run
 
-`splice exec --input-format stream-json` accepts these JSONL events from stdin or
-`--file`.
+```bash
+splice exec \
+  --input-format stream-json \
+  --output-format stream-json < request.jsonl
+```
+
+Use `--output-format stream-json` with ordinary text input when only the output
+needs JSON Lines.
+
+## Input events
+
+The input parser accepts `message` and `prompt` events.
 
 ```json
-{ "schemaVersion": 2, "type": "message", "role": "user", "content": "Inspect this repo." }
-{ "schemaVersion": 2, "type": "prompt", "content": "Return only blockers." }
+{"schemaVersion":2,"type":"message","role":"user","content":"Inspect this repository."}
+{"schemaVersion":2,"type":"prompt","content":"Report only blockers."}
 ```
 
-Splice combines accepted input event content in order, separated by blank lines.
-Unknown fields are rejected so protocol clients catch drift early.
+Splice joins accepted content in input order with a blank line between items. At
+least one event must contain prompt text.
 
-Schema version `2` renamed sandbox permission metadata from `violation` to
-`block`. Clients should read the optional `block` object on permission and tool
-events when present.
+Unknown input fields fail validation. A client can therefore detect protocol
+drift instead of losing data silently.
 
-## Output Events
+### Image input
 
-`splice exec --output-format stream-json` emits schema-versioned JSONL events.
+A `message` event can include images. Each image contains a MIME type and
+standard base64 data without a data-URL prefix.
 
 ```json
-{ "schemaVersion": 2, "type": "run_start", "runId": "run_20260603_abc123", "sessionId": "splice_20260603100000_abc123", "cwd": "/repo", "provider": "openai", "model": "gpt-4.1", "apiModel": "gpt-4.1" }
-{ "schemaVersion": 2, "type": "reasoning", "runId": "run_20260603_abc123", "delta": "Thinking..." }
-{ "schemaVersion": 2, "type": "text", "runId": "run_20260603_abc123", "delta": "..." }
-{ "schemaVersion": 2, "type": "tool_call_start", "runId": "run_20260603_abc123", "id": "call_0", "name": "submit_code" }
-{ "schemaVersion": 2, "type": "tool_call_delta", "runId": "run_20260603_abc123", "id": "call_0", "delta": "{\"files\":[{\"path\":" }
-{ "schemaVersion": 2, "type": "tool_call", "runId": "run_20260603_abc123", "id": "call_1", "name": "read_file", "args": { "path": "README.md" }, "sideEffect": "read" }
-{ "schemaVersion": 2, "type": "permission_request", "runId": "run_20260603_abc123", "id": "call_2", "name": "write_file", "action": "prompt", "permission": "prompt", "permissionMode": "ask", "sideEffect": "write", "reason": "Creates or overwrites files." }
-{ "schemaVersion": 2, "type": "permission_decision", "runId": "run_20260603_abc123", "id": "call_2", "name": "write_file", "action": "allow", "permission": "prompt", "permissionGranted": true, "decisionReason": "approved in TUI" }
-{ "schemaVersion": 2, "type": "tool_result", "runId": "run_20260603_abc123", "id": "call_1", "status": "ok", "output": "...", "truncated": false }
-{ "schemaVersion": 2, "type": "usage", "runId": "run_20260603_abc123", "promptTokens": 12, "completionTokens": 8, "totalTokens": 20 }
-
-With cache and reasoning (optional fields present when the provider reports them):
-
-{ "schemaVersion": 2, "type": "usage", "runId": "run_20260603_abc123", "promptTokens": 12000, "completionTokens": 500, "totalTokens": 12500, "cachedInputTokens": 11000, "cacheWriteTokens": 500, "reasoningTokens": 200 }
-{ "schemaVersion": 2, "type": "final", "runId": "run_20260603_abc123", "text": "..." }
-{ "schemaVersion": 2, "type": "run_end", "runId": "run_20260603_abc123", "status": "success", "exitCode": 0 }
+{"schemaVersion":2,"type":"message","role":"user","content":"Explain this screenshot.","images":[{"mediaType":"image/png","data":"<base64>"}]}
 ```
 
-The usage identity and price fields can appear together:
+Each decoded image has a 10 MiB limit. Unsupported media types and invalid base64
+return a protocol error.
+
+## Output event types
+
+A stream can emit these events:
+
+```text
+run_start
+reasoning
+text
+tool_call_start
+tool_call_delta
+tool_call
+tool_result
+permission_request
+permission_decision
+permission
+usage
+checkpoint
+restore
+warning
+error
+final
+run_end
+```
+
+Clients must ignore output event types they do not recognize. Additive event
+types do not require a schema version change.
+
+## Run lifecycle
+
+A normal stream begins with `run_start` and ends with `run_end`.
 
 ```json
-{ "schemaVersion": 2, "type": "usage", "runId": "run_20260603_abc123", "provider": "openai", "model": "gpt-4.1", "apiModel": "gpt-4.1-2026", "stage": "code_writer", "iteration": 2, "usageSequence": 5, "usageReported": true, "promptTokens": 1200, "completionTokens": 500, "costUsd": 0.0123, "costStatus": "priced", "costEstimated": true, "costProvenance": "runtime_estimate", "pricingSource": "https://platform.openai.com/docs/pricing/", "pricingAsOf": "2026-07-27" }
+{"schemaVersion":2,"type":"run_start","runId":"run_20260810_abc123","sessionId":"session_abc123","cwd":"/repo","provider":"openai","model":"example-model","apiModel":"provider-model-name"}
+{"schemaVersion":2,"type":"run_end","runId":"run_20260810_abc123","status":"success","exitCode":0}
 ```
 
-The `provider` and `model` fields show the route for that request. The
-`apiModel` field shows the provider model name when it differs. The `stage`,
-`iteration`, and `usageSequence` fields locate the request in the run.
-`costProvenance`, `pricingSource`, and `pricingAsOf` explain the cost estimate.
-If a price is not available, the event can set `costStatus` to `unpriced` and
-include `unpricedReason` without a `costUsd` value.
+The terminal `run_end.exitCode` is authoritative. An error event normally
+precedes a non-successful `run_end`.
 
-`reasoning` events carry live model reasoning/status deltas and pipeline
-progress lines. They are liveness/progress events only: they are not folded
-into `text` or the final answer.
+An interrupted run still attempts to emit its terminal events.
 
-`tool_call_start` announces a streamed structured stage output; each
-`tool_call_delta` carries only its new fragment (`delta`), never cumulative
-arguments. Concatenate deltas per `id` to reconstruct the full arguments.
-Both are additive output types within schema version `2`; clients should
-ignore output event types they do not recognize.
+## Pipeline progress
 
-Permission events may include structured sandbox metadata:
+Headless `splice exec` runs the typed execution pipeline. Scheduled stages can
+include:
+
+- code writer;
+- test generator;
+- static analyzer;
+- security auditor;
+- test runner; and
+- acceptance verifier.
+
+The selected request tier determines the stage set. Design critique and
+step-back analysis are orchestration operations, not scheduled execution stages.
+
+`reasoning` events carry status text, pipeline progress, and model-provided
+reasoning text when a provider returns it.
 
 ```json
-{ "schemaVersion": 2, "type": "permission_request", "runId": "run_20260603_abc123", "id": "call_3", "name": "bash", "action": "prompt", "permission": "prompt", "permissionMode": "ask", "sideEffect": "shell", "reason": "network access requires approval", "risk": { "level": "critical", "categories": ["network"] }, "block": { "code": "network", "toolName": "bash", "action": "prompt", "risk": { "level": "critical", "categories": ["network"] }, "reason": "network access requires approval", "recoverable": true } }
+{"schemaVersion":2,"type":"reasoning","runId":"run_20260810_abc123","delta":"Starting pipeline iteration 1\n"}
 ```
 
-Errors are part of the protocol and are followed by `run_end`.
+Reasoning events are progress data. Splice does not append them to the final
+answer.
 
-`checkpoint` events capture file snapshots before pipeline stage writes. Each
-event carries the checkpoint `sequence` number, the `tool` that triggered it,
-and the list of `files` captured:
+### Stage markers
+
+Stage lifecycle markers are embedded in `reasoning.delta`. A marker starts with
+`\x00STAGE` and ends with `\x00`.
+
+The marker payload contains:
+
+| Field | Meaning |
+|---|---|
+| `name` | Stage name |
+| `status` | `running`, `completed`, `failed`, `skipped`, or `incomplete` |
+| `detail` | A short status summary |
+| `progress` | Integer progress from 0 through 100 |
+| `changedFiles` | Paths reported by the stage |
+
+The TUI uses these markers for its pipeline panel. Other consumers can ignore
+them.
+
+## Structured stage output
+
+A model-backed stage returns typed data through a streamed tool-call envelope.
 
 ```json
-{ "schemaVersion": 2, "type": "checkpoint", "runId": "run_20260603_abc123", "checkpoint": { "sequence": 1, "tool": "submit_code", "files": ["README.md"] } }
+{"schemaVersion":2,"type":"tool_call_start","runId":"run_20260810_abc123","id":"call_0","name":"submit_code"}
+{"schemaVersion":2,"type":"tool_call_delta","runId":"run_20260810_abc123","id":"call_0","delta":"{\"files\":["}
 ```
 
-`restore` events (currently reserved for future use) will report when file
-checkpoints are rolled back. The shape mirrors `checkpoint` with an additional
-`filesRestored` and `filesDeleted` count.
+Concatenate `tool_call_delta.delta` values by `id` to reconstruct the complete
+arguments.
 
-`permission` (bare, without `_request` or `_decision` suffix) is emitted as a
-fallback for permission events that do not fit the prompt/allow/deny/cancel
-action categories. Its payload matches `permission_request` and
-`permission_decision` with the same structured fields.
+These envelopes describe typed stage output. They do not execute a tool, so they
+do not receive a `tool_result` event.
 
-Headless `exec` has no interactive permission responder. If a prompt-gated tool
-is not pre-approved, Splice may emit `permission_request` followed by a denied
-`tool_result`; interactive surfaces emit `permission_decision` when the user
-allows, denies, or always-allows the request.
+## Tool execution
+
+Real tool executions use a `tool_call` and `tool_result` pair.
 
 ```json
-{ "schemaVersion": 2, "type": "error", "runId": "run_20260603_abc123", "code": "provider_error", "message": "...", "recoverable": false }
-{ "schemaVersion": 2, "type": "run_end", "runId": "run_20260603_abc123", "status": "error", "exitCode": 3 }
+{"schemaVersion":2,"type":"tool_call","runId":"run_20260810_abc123","id":"call_1","name":"read_file","args":{"path":"README.md"},"sideEffect":"read"}
+{"schemaVersion":2,"type":"tool_result","runId":"run_20260810_abc123","id":"call_1","status":"ok","output":"...","truncated":false}
 ```
+
+A tool result can also include `changedFiles`, a compact `display` object, and
+redaction or truncation flags.
+
+## Permissions
+
+A prompt-gated tool can emit a permission request.
+
+```json
+{"schemaVersion":2,"type":"permission_request","runId":"run_20260810_abc123","id":"call_2","name":"write_file","action":"prompt","permission":"prompt","permissionMode":"ask","sideEffect":"write","reason":"Creates or overwrites files."}
+```
+
+An interactive surface can emit the decision:
+
+```json
+{"schemaVersion":2,"type":"permission_decision","runId":"run_20260810_abc123","id":"call_2","name":"write_file","action":"allow","permissionGranted":true,"decisionReason":"approved in TUI"}
+```
+
+Headless `exec` has no interactive permission responder. A tool that lacks prior
+approval can emit a request followed by a denied result.
+
+A permission event can include `risk`, `block`, grant details, and an autonomy
+value. Schema version `2` renamed the old sandbox `violation` field to `block`.
+
+The bare `permission` event is a fallback for a permission action that does not
+fit the request or decision categories.
+
+## Usage and cost
+
+Splice emits one usage event for each model request when usage attribution is
+available.
+
+```json
+{"schemaVersion":2,"type":"usage","runId":"run_20260810_abc123","provider":"openai","model":"example-model","stage":"code_writer","iteration":1,"usageSequence":1,"usageReported":true,"promptTokens":1200,"completionTokens":500,"totalTokens":1700}
+```
+
+Optional token fields are:
+
+- `cachedInputTokens`;
+- `cacheWriteTokens`; and
+- `reasoningTokens`.
+
+Optional cost fields are:
+
+- `costUsd`;
+- `costStatus`;
+- `costEstimated`;
+- `costProvenance`;
+- `pricingSource`;
+- `pricingAsOf`; and
+- `unpricedReason`.
+
+The `provider` and `model` fields identify the selected route. `apiModel` is a
+`run_start` field and does not appear on usage events.
+
+An unavailable price produces `costStatus: "unpriced"` and no `costUsd`. Clients
+must not convert an unknown cost to zero.
+
+## Checkpoints
+
+A checkpoint event reports file snapshots captured before a write.
+
+```json
+{"schemaVersion":2,"type":"checkpoint","runId":"run_20260810_abc123","checkpoint":{"sequence":1,"tool":"submit_code","files":["README.md"]}}
+```
+
+`restore` is reserved for a future file-checkpoint restore event. Its checkpoint
+object can include `filesRestored`, `filesDeleted`, and skipped paths.
+
+Trajectory worktree recovery is separate from this reserved event.
+
+## Final result
+
+Near the end of a pipeline run, `text` contains a short human summary. `final`
+contains the serialized final result in its `text` field.
+
+```json
+{"schemaVersion":2,"type":"final","runId":"run_20260810_abc123","text":"{\"run_id\":\"run-abc\",\"status\":\"completed\",\"tier\":\"light\",\"stages\":[]}"}
+```
+
+The event is a JSON object, but `final.text` is itself a JSON string for pipeline
+and design-plan results. Decode `text` when the client needs result fields.
+
+A pipeline result can contain `run_id`, `status`, `tier`, stage records, usage
+totals, and `abort_reason`.
+
+A design-plan run returns a design-plan result with completed, failed, and
+skipped task IDs. Each task runs as an independent pipeline run.
+
+## Worktree merge result
+
+With `--worktree --merge-back`, Splice uses existing event types:
+
+- `text` for a merge or a no-change result;
+- `warning` for a dirty-source skip or a merge conflict; and
+- `error` with code `merge_back_failed` for a merge operation error.
+
+The worktree branch remains available when Splice does not merge it.
+
+## Errors
+
+```json
+{"schemaVersion":2,"type":"error","runId":"run_20260810_abc123","code":"provider_error","message":"...","recoverable":false}
+{"schemaVersion":2,"type":"run_end","runId":"run_20260810_abc123","status":"error","exitCode":3}
+```
+
+Clients should display the error message, retain the run ID, and use the final
+exit code for automation decisions.

@@ -1,29 +1,35 @@
-# Splice docs
+# Splice documentation
 
-Splice is a local-first coding agent built on [Zero's Engine](https://github.com/gitlawb/zero).
-The docs focus on what Splice adds: a deterministic pipeline, typed stage
-contracts, controlled execution, and local memory.
+Splice has two main surfaces. The TUI supports a design conversation and live
+control. `splice exec` provides a typed pipeline for scripts and automation.
 
 ## Start here
 
 - [Install Splice](INSTALL.md)
+- [Configuration](CONFIGURATION.md)
+- [Command guide](COMMANDS.md)
 - [Update Splice](UPDATE.md)
-- [Security model and reporting](../SECURITY.md)
-- [Contributing](../CONTRIBUTING.md)
+- [Security model](../SECURITY.md)
 
-## Run it
+## Understand a run
 
+- [Pipeline behavior](PIPELINE.md)
+- [Design transitions](DESIGN_TRANSITIONS.md)
+- [Design revision context](DESIGN_REVISION_CONTEXT.md)
 - [Stream-JSON protocol](STREAM_JSON_PROTOCOL.md)
-- [GitHub Action](GITHUB_ACTION.md)
 - [Specialists](SPECIALISTS.md)
-- [OAuth logins and subscriptions](oauth-subscriptions.md)
 
-## Measure it
+## Use automation
 
-- [Benchmarks](BENCHMARK.md)
-- [Performance](PERFORMANCE.md)
-- [Agent evaluations](AGENT_EVALS.md)
+- [GitHub Action](GITHUB_ACTION.md)
+- [Task benchmark](BENCHMARK.md)
+- [Performance checks](PERFORMANCE.md)
+- [Offline agent evaluations](AGENT_EVALS.md)
 
-## Maintain it
+## Maintain a release
 
 - [npm wrapper smoke checklist](NPM_WRAPPER_SMOKE.md)
+- [Contribution policy](../CONTRIBUTING.md)
+
+Use `splice --help` for the current command list. Use
+`splice <command> --help` for exact flags.

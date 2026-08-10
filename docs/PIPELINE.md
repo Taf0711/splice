@@ -1,164 +1,269 @@
-# Splice Pipeline Specification
+# Pipeline behavior
 
-Splice's distinguishing layer is a deterministic, orchestrator-mediated,
-two-phase pipeline in `internal/splice/`. This document specifies the pipeline
-flow and each stage's contract. The typed structs live in
-`internal/splice/schemas/` and every input/output has a `Validate()` method.
+Splice has a chat-first design surface and a typed execution surface. The
+orchestrator connects them and owns every transition.
 
-## The two-phase model
+This document describes public run behavior. It does not publish hidden prompts,
+provider credentials, or private model reasoning.
 
-1. **Design phase.** A free-form design conversation (`design_conversation`)
-   helps the user think through a change. On `/crystallize` the
-   `design_crystallize` agent turns the conversation into a typed `DesignPlan`.
-   On `/approve` the plan hands to the execution phase.
-2. **Execution phase.** An orchestrator (`splicerun.Run` in
-   `internal/splice/run.go`) classifies the request into a tier, builds a typed
-   `ExecutionPlan`, and runs the tier's stages under a deterministic trajectory
-   monitor.
+## Two phases
 
-The orchestrator is the foreman. It classifies, plans, routes, and decides what
-each stage needs. Stages never pass data directly to each other; summaries flow
-forward from prior stages, not raw outputs. The user's verbose original request
-never propagates past the orchestrator (`DistillRequestIntent`).
+### Design phase
 
-## Pipeline flow
+A new TUI session starts in design mode. The user can discuss scope, constraints,
+and acceptance conditions before any code change.
 
-1. **Classify.** `ClassifyRequest` (deterministic) assigns one of the tiers:
-   `trivial`, `light`, `substantial`, or `architectural`. (The `standard` tier
-   exists in the schema but the current classifier does not produce it.)
-2. **Plan.** `BuildExecutionPlan` turns the tier into a typed `ExecutionPlan`
-   with a per-stage token budget. Unknown tiers fail loudly.
-3. **Fulfill context.** Before a stage runs, its `ContextRequest` is fulfilled
-   deterministically through Zero's tool registry (read_file, list_directory,
-   grep).
-4. **Run stages.** Each stage is a typed Go function in
-   `internal/splice/stages/`. Model-backed stages call the configured provider;
-   deterministic stages run local tools and make no provider calls.
-5. **Monitor trajectory.** `ComputeIterationState` builds a state vector from
-   stage outputs; `EvaluateTrajectory` scores it and decides continue,
-   escalate, rollback, step back, or surface to user.
-6. **Iterate or abort.** The orchestrator acts on the decision. Critical/high
-   lint or security findings, or failing/errored tests, block completion.
+`/crystallize` converts the current design state into a typed plan. A critic
+checks the plan before approval. `/approve` starts the approved task graph.
 
-## Stages by tier
+The design agent can request the same transitions only after an explicit user
+request. See [Design transitions](DESIGN_TRANSITIONS.md).
 
-| Tier | Stages |
+### Execution phase
+
+`splice exec` enters the execution phase directly. `splice exec --plan` executes
+a saved design plan in task order.
+
+The orchestrator performs these steps:
+
+1. Classify the request.
+2. Build and validate an execution plan.
+3. Give each stage a bounded input.
+4. Run model-backed or local stages.
+5. Measure the completed pass.
+6. Finish, revise, recover, ask the user, or stop.
+
+Stages do not send raw results directly to another stage. The orchestrator passes
+small summaries, changed-file data, and approved context.
+
+## Request tiers
+
+The current classifier selects four tiers:
+
+| Tier | Intended request size |
 |---|---|
-| `trivial` | code_writer |
-| `light` | code_writer, static_analyzer, test_runner |
-| `standard` | code_writer, test_generator, static_analyzer, test_runner |
-| `substantial` | code_writer, test_generator, static_analyzer, security_auditor, test_runner |
-| `architectural` | (same as substantial) |
+| `trivial` | A small and direct code change |
+| `light` | A focused change that needs local checks |
+| `substantial` | A multi-part change that needs tests and security checks |
+| `architectural` | A broad change with architectural risk |
 
-The design-phase stages (`design_conversation`, `design_crystallize`,
-`plan_critic`) run before execution and are not tier-scheduled. `step_back` is
-orchestrator-level (not a registered stage) and fires only on a trajectory
-plateau.
+The schema retains `standard` for saved-plan compatibility. The current
+classifier does not select it.
 
-## Stage contracts
+Classification uses deterministic request signals. Unknown tiers return an
+error instead of a default plan.
 
-Each model-backed stage receives `pipeline_meta.md` prepended to its own prompt
-(`composeSystemPrompt`). Each stage's input/output is a typed struct with a
-`Validate()` method.
+## Stage sets
 
-### code_writer (model-backed, medium tier)
-
-- **Role:** write or modify the code for the distilled intent.
-- **Input (`CodeWriterInput`):** `intent`, `language`, `target_paths`,
-  `relevant_context`, `revision_context`, `memory`.
-- **Output (`CodeWriterOutput`):** `files` (a list of `FileChange`),
-  `language`, `intent`, `dependencies`, `known_limitations`, `confidence`.
-- **Tool:** `submit_code` returns the typed output. Missing/invalid output
-  retries up to twice with corrective feedback.
-
-### test_generator (model-backed, medium tier)
-
-- **Role:** write tests for the code writer's changes.
-- **Input (`TestGeneratorInput`):** `intent`, `language`, `target_paths`,
-  `relevant_context`, `revision_context`, `memory`. The code writer's summary is
-  injected into `relevant_context` by the orchestrator.
-- **Output (`TestGeneratorOutput`):** test `files` and metadata, validated.
-
-### static_analyzer (deterministic, model-free)
-
-- **Role:** fast local quality checks (Go parser, go/format, py_compile, Ruff,
-  node --check, tsc) with no provider call.
-- **Output:** a typed `VerificationReport` (`passed`, `findings`, `incomplete`,
-  or `not_applicable`). High/critical findings block completion.
-
-### security_auditor (deterministic, model-free)
-
-- **Role:** local security floor (Bandit for Python, gosec for Go, SARIF for
-  JS/TS, trivy for secrets and dependencies) with no provider call.
-- **Output:** a typed `VerificationReport`. High/critical security findings
-  block completion.
-
-### test_runner (deterministic, model-free)
-
-- **Role:** run the project's test suite through the safety substrate (the
-  registered `bash` tool), honoring permission mode and sandbox.
-- **Output (`TestRunResults`):** per-test status (passed/failed/errored) plus
-  the discovered command, persisted to memory as a `test_command` observation.
-
-### design_conversation (model-backed, design phase)
-
-- **Role:** free-form design conversation before any code is written. Read-only.
-- **Prompt:** `design_conversation.md`. Uses `ask_user` with suggested options
-  and a recommended choice for clarifying questions.
-
-### design_crystallize (model-backed, medium tier)
-
-- **Role:** turn the design conversation into a typed `DesignPlan` via the
-  `submit_design_plan` tool.
-- **Input (`DesignConversationInput`):** the conversation history.
-- **Output (`DesignPlan`):** epic, requirements, and tasks with acceptance
-  facts.
-
-### plan_critic (model-backed, reasoning tier)
-
-- **Role:** adversarial review of the crystallized `DesignPlan` before approval.
-- **Input (`PlanCriticInput`):** the `DesignPlan`.
-- **Output (`PlanCritique`):** issues with severities and suggested mitigations,
-  via the `submit_critique` tool.
-
-### step_back (model-backed, orchestrator-level)
-
-- **Role:** fresh analysis on a trajectory plateau (three iterations without
-  improvement). Not a registered stage.
-- **Input (`StepBackReport`):** distilled intent, recent scores, failing tests,
-  changed files, plateau reason.
-- **Output (`StepBackAnalysis`):** hypothesized root cause and a recommended
-  approach, fed back to the next code writer iteration.
-
-## Options that do not apply under `splice exec`
-
-`splice exec` runs the deterministic pipeline (`splicerun.Run` or
-`splicerun.RunDesignPlan`), not the interactive agent loop
-(`agent.Run`). Some run options and flags only affect the agent loop.
-The pipeline ignores them. This table names each one and the reason.
-
-| Option or flag | Effect under `splice exec` |
+| Tier | Stage order |
 |---|---|
-| Specialist delegation | None. The pipeline does not use the Task tool. |
-| Skills | None. The pipeline does not load skills at run time. |
-| MCP tool deferral | None. The pipeline has no deferred-tool registry concept. |
-| `--allow-escalation` | None. No `splice exec` path (default or `--spec`) wires mid-run model escalation into a run today. Only the interactive TUI does. |
-| `--self-correct` | None. No `splice exec` path wires the post-edit verify-and-correct loop into a run today. Only the interactive TUI does. |
-| File diagnostics between turns | None. The pipeline does not run an LSP diagnostics pass between stages. |
-| Compaction config (the `compaction` block in `config.json`) | None under the default `splice exec` run. The pipeline never reads the context window setting that compaction depends on. `splice exec --spec` and the interactive TUI both honor compaction, because both run the agent loop. |
+| `trivial` | code writer |
+| `light` | code writer, static analyzer, test runner, acceptance verifier |
+| `standard` | code writer, test generator, static analyzer, test runner, acceptance verifier |
+| `substantial` | code writer, test generator, static analyzer, security auditor, test runner, acceptance verifier |
+| `architectural` | Same stage set as `substantial` |
 
-None of this is a bug. The pipeline is a fixed, typed sequence of stages
-(see "Stage contracts" above), by design with no delegation, no skill
-loading, and no mid-run recovery loop.
+A stage can be absent when its plan marks it as optional and no implementation
+is available. A required missing stage fails the pass.
 
-This table exists so a flag or config setting with no effect is not
-mistaken for a wiring failure.
+## Stage responsibilities
 
-## Token and cost accounting
+### Code writer
 
-Each model-backed stage reports a typed `StageUsage` (input, output, cached,
-cache-write, and cost) that the orchestrator records in its `StageRecord` and
-sums into the `PipelineResult` totals. `StageRecord` also carries per-stage
-latency. The `final` stream-JSON event carries the full `PipelineResult` JSON.
-Note: `StageUsage.CostUSD` is zero until a pricing source is wired for the stage
-provider.
+The code writer receives the distilled intent, approved context, prior summaries,
+and revision guidance. It returns typed file changes and a confidence value.
+
+Splice validates the response before it writes files. Invalid typed output gets
+a bounded corrective retry. A repeated invalid result stops the stage.
+
+### Test generator
+
+The test generator receives the intent and the code-writer summary. It returns
+typed test file changes.
+
+Only the `standard`, `substantial`, and `architectural` plans include this stage.
+
+### Static analyzer
+
+The static analyzer uses local checks. It can parse or format Go, compile Python
+syntax, check JavaScript syntax, and call configured TypeScript or lint tools.
+
+The stage makes no model request. It reports passed, failed, incomplete, or not
+applicable verification.
+
+### Security auditor
+
+The security auditor uses available local security tools. Supported checks can
+include Bandit, gosec, SARIF input, and Trivy.
+
+The stage makes no model request. A missing optional tool produces explicit
+incomplete or not-applicable evidence.
+
+### Test runner
+
+The test runner detects and executes the repository test command through the
+registered shell tool. Sandbox and permission rules still apply.
+
+The result records each known test as passed, failed, or errored.
+
+### Acceptance verifier
+
+Each acceptance fact can include a verification command. This stage executes the
+commands through the same safety layer.
+
+A failed or errored acceptance fact blocks completion.
+
+## Context and local memory
+
+The original request is distilled before later stages receive it. A stage can
+request a bounded file read, directory list, or search result through the tool
+registry.
+
+The optional memory sidecar supplies a small project memory bundle only to the
+code writer and test generator. Other stages do not query it.
+
+Memory writes are fail-soft. A memory error appears in progress output but does
+not replace a valid pipeline result.
+
+## Pass success
+
+After a complete pass, Splice builds an iteration state. A pass succeeds when:
+
+- no stage failed;
+- no test failed or returned an error;
+- no acceptance fact failed or returned an error;
+- no high or critical lint finding exists; and
+- no high or critical security finding exists.
+
+An incomplete verification stage is recorded in the result. The current success
+gate does not treat incomplete verification as a failure by itself.
+
+When a stage fails before the pass completes, Splice records the failure and
+provides revision context for the next allowed pass. That failed pass does not
+create a trajectory state.
+
+## Trajectory state
+
+For each complete but unsuccessful pass, Splice records:
+
+- test and acceptance counts;
+- lint and security findings by severity;
+- stage confidence;
+- token use;
+- changed paths and diff line counts;
+- generated code size;
+- incomplete verification count; and
+- a stable hash of the code-writer result.
+
+The state hash identifies repeated proposed code. It is not a hash of the full
+workspace.
+
+## Quality score
+
+Splice uses this score to compare completed passes:
+
+| Signal | Score change |
+|---|---:|
+| Passed test | `+10` |
+| Failed test | `-8` |
+| Errored test | `-12` |
+| Passed acceptance fact | `+10` |
+| Failed or errored acceptance fact | `-12` |
+| High lint finding | `-3` |
+| Medium lint finding | `-1` |
+| Critical security finding | `-50` |
+| High security finding | `-20` |
+| Type error | `-2` |
+
+Other state fields remain evidence but do not change this score.
+
+## Decision order
+
+The monitor evaluates rules in this order:
+
+1. Stop at the iteration limit.
+2. Stop at the token budget.
+3. Detect an `A, B, A, B` hash oscillation.
+4. Detect any repeated current hash.
+5. Request rollback when the third or later score is below the first score.
+6. Request step-back analysis after three passes without score improvement.
+7. Ask the user when confidence falls across three passes.
+8. Continue with revised context.
+
+A successful pass finishes before these rules run. Therefore, success on the
+last allowed pass still completes the request.
+
+## Decision effects
+
+### Continue
+
+The next pass receives the original intent, score history, last failures, and a
+bounded changed-file list.
+
+### Escalate
+
+A cycle or oscillation can select the configured escalation model. Splice makes
+this change at most once per run.
+
+If no escalation model exists, Splice keeps the current model and adds recovery
+context.
+
+### Roll back
+
+Rollback needs an isolated worktree. Splice captures a workspace snapshot before
+the first pass and after each complete pass.
+
+It restores the highest-scored prior snapshot. A score tie selects the latest
+eligible snapshot. Without worktree recovery, a rollback decision aborts.
+
+### Step back
+
+A three-pass plateau starts one fresh analysis request. That request receives the
+recent scores, failing test names, changed files, and the plateau reason.
+
+Its typed root-cause proposal becomes revision context for the next pass. It does
+not appear as a scheduled pipeline stage.
+
+### Ask the user
+
+A three-pass confidence decline asks the interactive user to continue with new
+guidance or abort. A headless run has no callback and aborts.
+
+This branch does not restore a workspace snapshot before it asks the user.
+
+### Stop
+
+The run stops after the hard iteration or token limit. The loop also checks a
+wall-time limit before each pass.
+
+The defaults are five passes and 600 seconds. `--max-turns` replaces the pass
+limit when it is positive.
+
+## Interactive feature boundary
+
+The deterministic pipeline does not run the complete interactive agent loop.
+These interactive features do not apply to the fixed stage sequence:
+
+| Feature or flag | Effect in the deterministic pipeline |
+|---|---|
+| Specialist delegation | No effect. Pipeline stages do not use the specialist task tool. |
+| Skills | No run-time skill load for a stage. |
+| MCP deferred tools | No deferred MCP schema load for a stage. |
+| `--self-correct` | No effect. The pipeline uses its trajectory loop instead. |
+| `--allow-escalation` | No direct effect. Pipeline escalation comes from stage-model configuration. |
+| Between-turn file diagnostics | No effect between fixed stages. |
+| Agent-loop compaction | No effect in a direct pipeline run. |
+
+The TUI agent loop and specification draft flow can use these features outside
+the fixed pipeline.
+
+## Usage and cost records
+
+Each model request can report input, output, cached, cache-write, and reasoning
+tokens. The result keeps per-stage latency and request attribution.
+
+Splice uses a provider-reported cost when available. Otherwise, it can use a
+known price record. An unknown cost remains unknown and never becomes zero.
+
+The stream `final` event contains the serialized pipeline result in its `text`
+field. See [Stream-JSON protocol](STREAM_JSON_PROTOCOL.md).

@@ -1,107 +1,99 @@
-# Design Transitions
+# Design transitions
 
-This document describes how a design plan is crystallized and approved. The
-user can run the commands. The design agent can also call tools that queue the
-same transitions.
+A design session separates discussion from execution. The user keeps control of
+the transitions that can create or execute a plan.
 
 ## State flow
 
-A design session moves through these phases.
-
 ```text
-design_mode_entered
-    -> conversation
-    -> plan_crystallized (crystallize_design or /crystallize)
-    -> critique_recorded
-    -> plan_approved (approve_design or /approve)
-    -> execution
+design session
+  -> conversation
+  -> crystallized plan
+  -> plan critique
+  -> approved plan
+  -> execution
 ```
 
-## Dual entry points
+Use `/design` to enter design mode. Use `/crystallize` to create a typed plan.
+Use `/approve` only after the current plan passes review.
 
-Each transition has two ways to start.
+## Manual and agent requests
 
-| Transition | Manual | Agent tool | Permission |
-|------------|--------|------------|------------|
-| Crystallize | `/crystallize` | `crystallize_design` | Allow |
-| Approve | `/approve` | `approve_design` | Allow |
+The design agent can request crystallization or approval through host transition
+tools. The manual and agent paths use the same controller.
 
-Both paths converge on one typed controller. The controller validates the
-design state and begins the run. The manual command and the agent tool share
-the same checks, critic, sandbox, and permission gates.
+| Transition | Manual command | Agent request |
+|---|---|---|
+| Create a plan | `/crystallize` | `crystallize_design` |
+| Approve a plan | `/approve` | `approve_design` |
 
-The tools only queue a host transition. They do not run the crystallizer,
-critic, or executor. That is why their permission is Allow.
+An agent request queues a host transition. It does not bypass plan validation,
+critique, persistence, sandbox policy, or user permissions.
 
-## Authorization rule
+## User authorization
 
-The design agent may call a transition tool only when the current user
-explicitly asked for that transition.
+The design agent can request a transition only after the user explicitly asks
+for that transition.
 
-The tool description and the design conversation prompt state this rule. The
-agent must not decide on its own to crystallize or approve.
+The agent must not decide by itself that a conversation is complete. It also
+must not approve a plan only because the critique has no blocker.
 
-## approve_design exposure
+## Approval availability
 
-The `approve_design` tool is exposed only when both are true.
+Splice exposes approval to the design agent only when:
 
-- A current plan exists.
-- The current critique does not block execution.
+- a current plan exists; and
+- the current critique has no required fix.
 
-The `crystallize_design` tool is always exposed in design mode.
+The user command follows the same checks.
 
 ## One transition per turn
 
-One design turn can queue one transition.
+A design turn can queue one transition. A second request in the same turn
+returns an error and does not replace the first request.
 
-A second transition tool call in the same turn returns a useful error. It does
-not replace the first request.
+Splice starts the transition only after the design turn completes successfully.
+A failed or canceled turn does not start it.
 
-The transition begins after the design turn finishes successfully. A failed
-design turn does not run the transition.
+## Create and approve in one request
 
-This design has no nested provider run and no session race.
+The crystallization request can set `approve_if_ready` after the user asks for
+both operations.
 
-## approve_if_ready rule
+Splice approves only when:
 
-`crystallize_design` accepts an optional `approve_if_ready` boolean.
+- the design turn completed;
+- the plan passed typed validation;
+- the critique passed typed validation;
+- the critique has no required fix; and
+- lifecycle state was saved.
 
-Approval is scheduled only when all are true.
+Any failure stops the sequence at that point.
 
-- The design turn succeeded.
-- The crystallizer produced a valid plan.
-- The critic produced a valid critique.
-- No critique requires a fix.
+## Revision identity
 
-A must-fix critique, a crystallizer error, a critic error, and a persistence
-error all stop the flow at the point of failure. Approval is not scheduled.
+A revised plan keeps the current plan family ID. Its revision number increases.
+Approval refers to the current saved revision.
 
-## Source audit
+This behavior keeps review history connected across several crystallization
+attempts.
 
-Each lifecycle event records who requested the transition.
+## Audit fields
 
-- `plan_crystallized` carries `source`.
-- `critique_recorded` carries `source`.
-- `plan_approved` carries `source`.
+Design lifecycle events record whether the user command or design agent
+requested the transition. Older sessions without this field remain readable.
 
-The value is `manual` or `agent`. The field is optional for backward
-compatibility. Older sessions decode without the field.
+The transcript labels the request source so the user can distinguish a command
+from an agent request.
 
-The plan agent is labeled as an agent request in the transcript. A manual
-command is labeled as a user slash command.
+## Failure behavior
 
-## Plan revision reuse
+Splice rejects these operations with a named error:
 
-The controller reuses the current plan family ID across re-crystallizations.
-The Revision counter increments instead of restarting.
+- a malformed transition request;
+- a transition during an active run;
+- approval without a current plan;
+- approval with a required critique fix; and
+- approval without a saved current revision.
 
-Approval persists the current reconstructed PlanID. It does not create a new
-unrelated ID. Approval fails loudly when no persisted current revision exists.
-
-## Failure rules
-
-- A malformed transition request returns a named error and does nothing.
-- A transition during an active run is rejected.
-- An approval with no current plan is rejected.
-- An approval with a must-fix critique is rejected.
-- Approval with no persisted current revision fails loudly.
+A rejected transition does not silently create another plan or start execution.

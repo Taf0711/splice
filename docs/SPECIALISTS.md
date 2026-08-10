@@ -1,21 +1,26 @@
-# Splice Specialists
+# Specialists
 
-Specialists are named sub-agents that Splice can delegate focused work to through
-the `Task` tool. A specialist is a markdown manifest with YAML-style
-frontmatter plus a system prompt body.
+A specialist is a named agent profile for focused interactive work. The profile
+selects a prompt, model override, reasoning effort, and tool set.
 
-Specialists can be built in, user-scoped, or project-scoped:
+Specialists belong to the interactive agent loop. The deterministic execution
+pipeline does not delegate its fixed stages to specialists.
 
-| Scope | Path | Notes |
-| --- | --- | --- |
-| Built-in | compiled into Splice | `worker`, `explorer`, and `code-review` ship with the binary. |
-| User | `~/.config/splice/specialists/*.md` | Available across local workspaces. |
-| Project | `.splice/specialists/*.md` | Shared with the current repository when committed. |
+## Profile scopes
 
-Project specialists override user and built-in specialists with the same name.
-User specialists override built-ins.
+| Scope | Location | Priority |
+|---|---|---:|
+| Built-in | Compiled into Splice | 1 |
+| User | `~/.config/splice/specialists/*.md` | 2 |
+| Project | `.splice/specialists/*.md` | 3 |
 
-## CLI Management
+A higher-priority profile replaces a profile with the same name. Splice includes
+`worker`, `explorer`, and `code-review` profiles.
+
+Review a project specialist before you trust the repository. Its prompt and tool
+selection are repository input.
+
+## Manage profiles
 
 ```bash
 splice specialist list
@@ -24,19 +29,21 @@ splice specialist path
 
 splice specialist create api-review \
   --project \
-  --description "Reviews API changes" \
+  --description "Review API changes" \
   --tools read-only,plan \
-  --prompt "Review API changes for compatibility and missing tests."
+  --prompt "Report compatibility breaks and missing tests."
 
 splice specialist edit api-review --project
 splice specialist delete api-review --project
 ```
 
-Use `--json` with `list`, `show`, `path`, `create`, or `delete` when scripting.
-`create --force` replaces an existing manifest, but refuses symlink overwrites.
-`edit` also refuses symlink manifests before opening `$VISUAL` or `$EDITOR`.
+Use `--json` with commands that support scripted output. `create --force` can
+replace a regular profile file. It does not replace a symbolic link.
 
-## Manifest Format
+`edit` also rejects symbolic-link profiles before it opens `$VISUAL` or
+`$EDITOR`.
+
+## Manifest format
 
 ```markdown
 ---
@@ -47,111 +54,67 @@ tools:
   - plan
 ---
 
-Review API changes for behavior regressions, compatibility breaks, and missing
-tests. Report concrete findings with file paths.
+Review API changes. Report behavior regressions, compatibility breaks, and
+missing tests with file paths.
 ```
 
-Supported frontmatter keys:
+Supported frontmatter:
 
 | Key | Purpose |
-| --- | --- |
-| `name` | Lowercase specialist id. Use letters, numbers, and dashes. |
-| `description` | Short summary shown in listings and task metadata. |
-| `extends` | Optional base specialist to inherit prompt/model/tools from. |
-| `model` | Optional model override. Empty means inherit the parent model. |
-| `reasoningEffort` | Optional reasoning effort override. |
-| `tools` | Array of tool categories or tool ids. |
+|---|---|
+| `name` | Lowercase ID with letters, numbers, and dashes |
+| `description` | Short list and task description |
+| `extends` | Optional parent profile |
+| `model` | Optional model override |
+| `reasoningEffort` | Optional reasoning effort override |
+| `tools` | Tool categories or tool IDs |
 
-If the body is empty and `description` is set, Splice uses the description as the
-system prompt and reports a warning in `splice specialist show`.
+When a body is empty, Splice can use the description as the prompt and report a
+warning.
 
-## Tool Selection
-
-Known categories:
+## Tool categories
 
 | Category | Tools |
-| --- | --- |
-| `read-only` | `read_file`, `list_directory`, `grep`, `glob` |
-| `edit` | read-only tools plus `write_file`, `edit_file`, `apply_patch` |
-| `execute` | read-only tools plus `bash` |
-| `plan` | `update_plan` |
+|---|---|
+| `read-only` | File read, directory list, search, and glob tools |
+| `edit` | Read-only tools plus file edit tools |
+| `execute` | Read-only tools plus the shell tool |
+| `plan` | Plan update tool |
 
-Specialist manifests cannot enable `Task`, `TaskOutput`, `TaskStop`, or
-`GenerateSpecialist`, so child specialists cannot spawn more specialists or
-author new ones.
+A child specialist cannot start another specialist or create a new specialist
+profile. This rule bounds delegation depth at the tool boundary.
 
-## Agent Tools
+## Interactive task tools
 
-Splice registers these tools for top-level agent runs:
+The top-level interactive agent can:
 
-| Tool | Purpose |
-| --- | --- |
-| `Task` | Launch a specialist sub-agent for a focused prompt. |
-| `TaskOutput` | Read or block on a background specialist task's output. |
-| `TaskStop` | Stop a running background specialist task. |
-| `GenerateSpecialist` | Create a project-local specialist manifest from a description. |
+- start a specialist;
+- read or wait for background output;
+- stop a background task; and
+- create a project specialist from a description.
 
-`GenerateSpecialist` is project-scoped only. It writes to
-`.splice/specialists`, not the user specialist directory.
+A background task returns a task ID. The same ID identifies its child session.
+Use it to inspect, stop, or resume that task.
 
-Example LLM-facing `Task` payload:
+## Background state
 
-```json
-{
-  "name": "explorer",
-  "description": "Find session storage code",
-  "prompt": "Find the files that create, load, and list sessions."
-}
-```
+Splice stores background task state under the local Splice data directory. Each
+task has an event stream and a metadata file.
 
-Background task payload:
+The metadata contains status, process identity, parent session, and timestamps.
+A new process can therefore read a completed task after the original TUI exits.
 
-```json
-{
-  "name": "worker",
-  "description": "Audit release docs",
-  "prompt": "Check the release docs for stale TypeScript references.",
-  "run_in_background": true
-}
-```
+If Splice starts and finds a stale task marked as active, it changes that task to
+an error state. It also clears the old process ID.
 
-The returned `task_id` is also the child session id. Use it with
-`TaskOutput`, `TaskStop`, or `Task` resume.
+## Cancel and timeout behavior
 
-## Background State
+On Linux and macOS, each specialist process has its own process group. A cancel
+or timeout stops the group.
 
-Background specialist output is stored under:
+On Windows, Splice stops only the direct child process. A process started by that
+child can remain active. A two-second output wait prevents the Splice process
+from waiting forever on an inherited pipe.
 
-```text
-${XDG_DATA_HOME:-~/.local/share}/splice/background/
-```
-
-Each task has:
-
-- `<task_id>.ndjson` for the child process stream output
-- `<task_id>.json` for task metadata such as status, PID, parent session, and
-  timestamps
-
-Persisted metadata lets a new background manager instance read completed task
-output or stop a still-running task by id.
-
-If Splice is restarted while a background task is still marked `running`, the new
-manager marks that task `error` and clears its PID. This avoids sending
-`TaskStop` to a stale PID that may now belong to an unrelated process.
-
-## Process Lifecycle On Cancel Or Timeout
-
-On Linux and macOS, a specialist child process starts its own process group.
-Cancel or timeout sends the kill signal to the whole group, so any process the
-child spawned dies with it.
-
-Windows has no equivalent to a POSIX process group. Cancel or timeout there
-kills only the direct child process. A grandchild process the specialist
-spawned (for example a build tool or a shell it started) can survive the
-kill and keep running.
-
-A `WaitDelay` of two seconds stops Splice itself from hanging if a leaked
-grandchild still holds the child's output pipe open. It does not stop the
-grandchild from running. This is a known limitation of the Windows build,
-tracked as a future fix (process termination through a Windows Job Object).
-It has no effect on Linux or macOS builds.
+This Windows limit does not apply to Linux or macOS. Check the child processes
+manually after a Windows timeout when the specialist started external tools.

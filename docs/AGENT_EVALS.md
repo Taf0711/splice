@@ -1,17 +1,15 @@
-# Offline Agent Evals
+# Offline agent evaluations
 
-Splice agent evals are maintainer fixtures for checking coding-agent behavior
-without calling a live model. They describe a task, the files the agent is
-expected to change, the commands that should verify the result, and the scoring
-rules an offline harness can apply to a captured run.
+Splice agent evaluations are maintainer fixtures for code-agent behavior without
+a live model call. They define a task and the files an agent should change.
+They also define verification commands and score rules for a captured run.
 
-These fixtures are intentionally local-first. They do not prove provider quality
-or live model execution by themselves; they give tests and CLI workflows a
-stable sample suite to validate, run against copied workspaces, and score from
-saved outputs. The eval harness is local and offline-testable. It only makes
-live model calls when the supplied agent command does.
+These local fixtures do not prove provider quality or live model execution.
+They give tests and CLI workflows a stable suite for copied workspaces and saved
+output. The evaluation harness supports offline tests. It makes live model calls
+only when the selected agent command does.
 
-## Suite Format
+## Suite format
 
 Sample suites live under `internal/agenteval/testdata/`. Tiny fixture
 workspaces live under `internal/agenteval/testdata/fixtures/`.
@@ -40,11 +38,10 @@ Task fields used by the sample suite:
 - `verificationCommands`: commands a maintainer or harness can run after the
   agent output is applied.
 
-The scoring contract matches command results by `verificationCommands[].id`,
-compares changed files against `expectedChangedFiles`, rejects any
-`forbiddenChangedFiles`, checks the materialized workspace with `contextChecks`,
-and can require agent trace events during benchmark runs. The loader rejects
-unknown JSON fields so suite changes fail fast.
+The score contract matches command results by `verificationCommands[].id` and
+compares changed files against `expectedChangedFiles`. It rejects any
+`forbiddenChangedFiles` and checks the workspace with `contextChecks`.
+It can also require agent trace events. The loader rejects unknown JSON fields.
 
 Example richer task rubric:
 
@@ -63,12 +60,12 @@ Example richer task rubric:
 
 ## Modes
 
-### Validate Mode
+### Validate mode
 
-`splice eval` defaults to `validate` mode. In validate mode, the command performs
-schema and contract checks only: it parses the suite, rejects invalid task
-definitions, and reports the number of tasks and checks. It does not copy
-fixtures, invoke an agent, score a workspace, or execute verification commands.
+`splice eval` defaults to `validate` mode. This mode performs schema and contract
+checks only. It parses the suite, rejects invalid task definitions, and reports
+the task and check counts. It does not copy fixtures, invoke an agent, score a
+workspace, or execute verification commands.
 
 ```bash
 go run ./cmd/splice eval --suite internal/agenteval/testdata/sample_suite.json
@@ -80,16 +77,18 @@ Use JSON output when another local tool needs the validation summary:
 go run ./cmd/splice eval --suite internal/agenteval/testdata/sample_suite.json --json
 ```
 
-### Run Mode
+### Run mode
 
-`splice eval run` scores one already-mutated Git workspace. It does not copy
-fixtures or invoke an agent; point it at a Git worktree where a fixture has
-already been copied, initialized, and attempted by an agent or deterministic
-local script. The runner executes each `verificationCommands` entry, collects
-changed files with `git status --porcelain`, and emits the task-success report
-contract below. `--workspace` is required: it must point at the prepared fixture
-worktree, never the current directory, so the suite's verification commands
-(`go test`, `git`, ...) don't run against your real repo.
+`splice eval run` scores one modified Git workspace. It does not copy fixtures
+or invoke an agent. Use a Git worktree with a prepared fixture and an agent
+attempt. A deterministic local script can make the attempt.
+
+The runner executes each `verificationCommands` entry. It collects changed files
+with `git status --porcelain` and emits the task-success report.
+
+`--workspace` is required. It must identify the prepared fixture worktree, not
+the current directory. This rule protects the source repository from fixture
+verification commands.
 
 ```bash
 go run ./cmd/splice eval run \
@@ -109,12 +108,11 @@ go run ./cmd/splice eval run \
   --json
 ```
 
-### Bench Mode
+### Bench mode
 
-`splice eval bench` runs the full benchmark harness for one task or a suite. Bench
-mode copies each task fixture into `--work-root`, initializes a clean Git
-baseline, runs an agent in that workspace, then scores the result with the same
-scorer used by run mode.
+`splice eval bench` runs the full benchmark harness for one task or suite. It
+copies each fixture into `--work-root` and creates a clean Git baseline.
+It then runs an agent and uses the same score rules as run mode.
 
 Omit `--agent-command` to use the built-in pipeline runner. The runner resolves
 the current Splice executable and starts this argv:
@@ -192,19 +190,19 @@ The same wrapper can emit JSONL trace events to stdout for future trace scoring:
 Those events are required by adding keys such as `tool:read_file` and
 `verify:go-test` to `requiredTraceEvents`.
 
-For deterministic offline testing, point `--agent-command` at a local script
-that edits the copied workspace without calling a model:
+For an offline test, point `--agent-command` at your own local script. The
+script can edit the copied workspace without a model call:
 
 ```bash
 go run ./cmd/splice eval bench \
   --suite internal/agenteval/testdata/sample_suite.json \
   --task document-stream-json-verify-events \
   --work-root /tmp/splice-evals \
-  --agent-command ./scripts/fake-agent --workspace {workspace} --task {task_id} --prompt {prompt}
+  --agent-command /path/to/offline-agent --workspace {workspace} --task {task_id} --prompt {prompt}
 ```
 
-Bound a benchmark run with `--timeout` (a Go duration) so a wedged or
-interactive agent cannot block the harness forever. The timeout applies per
+Set `--timeout` to a Go duration so a stalled or interactive agent cannot block
+the harness forever. The timeout applies per
 task and cancels materialization, the agent process, and scoring:
 
 ```bash
@@ -213,14 +211,13 @@ go run ./cmd/splice eval bench \
   --task document-stream-json-verify-events \
   --work-root /tmp/splice-evals \
   --timeout 5m \
-  --agent-command ./scripts/fake-agent --workspace {workspace} --prompt {prompt}
+  --agent-command /path/to/offline-agent --workspace {workspace} --prompt {prompt}
 ```
 
-Use `--report-dir` to persist the CLI report artifact. The file is always named
-`agent-eval-report.json`; with bench mode it records the suite status, task
-counts, pass/fail totals, failures, and the nested benchmark report with each
-task/model run. Use `--keep-workspaces` when you also need to inspect the
-materialized workspaces after the run:
+Use `--report-dir` to save the CLI report. The file name is always
+`agent-eval-report.json`. Bench mode records suite status, task counts, failures,
+and each task and model run. Use `--keep-workspaces` to inspect workspaces after
+the run:
 
 ```bash
 go run ./cmd/splice eval bench \
@@ -230,13 +227,15 @@ go run ./cmd/splice eval bench \
   --keep-workspaces \
   --report-dir /tmp/splice-eval-report \
   --json \
-  --agent-command ./scripts/fake-agent --workspace {workspace} --task {task_id} --prompt {prompt}
+  --agent-command /path/to/offline-agent --workspace {workspace} --task {task_id} --prompt {prompt}
 ```
 
-**Scoring caveat:** changed-file scoring inspects the workspace with
-`git status --porcelain` against the baseline commit. An agent that *commits*
+## Changed-file score limit
+
+The changed-file score inspects the workspace with `git status --porcelain`
+against the baseline commit. An agent that *commits*
 its own changes (or otherwise leaves a clean working tree) defeats this check.
-the committed edits no longer appear as changed files, so `expectedChangedFiles`
+The committed edits no longer appear as changed files, so `expectedChangedFiles`
 will not match. Agents under bench should leave their edits uncommitted.
 
 Run the package tests when changing the suite schema or scorer:
@@ -301,7 +300,7 @@ The `runner` value is `splice_pipeline` or `external_command`. The
 When the top-level cost is unknown, `estimatedCostUSD` is an empty CSV cell.
 Inside `stageBreakdown`, an unknown cost uses `cost=unknown`.
 
-### External-agent CSV migration
+### External agent CSV migration
 
 An external agent remains valid with `--agent-command`:
 
@@ -321,7 +320,7 @@ new: requestedModel, estimatedCostUSD, modelsUsed, costCoverage
 Read an empty `estimatedCostUSD` cell as unknown. Do not convert it to zero.
 Split `modelsUsed` on commas. Use `costCoverage` before you use a cost value.
 
-## Score Interpretation
+## Score interpretation
 
 Scores are offline quality signals, not pass/fail release gates by default. The
 statuses below are produced when a harness supplies captured command results and
