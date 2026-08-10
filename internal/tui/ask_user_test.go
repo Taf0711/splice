@@ -2,9 +2,11 @@ package tui
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/Taf0711/splice/internal/agent"
 )
@@ -415,5 +417,265 @@ func TestAskUserEmptyRequestResolvesImmediately(t *testing.T) {
 	}
 	if len(answers) != 1 {
 		t.Fatalf("an empty request should resolve immediately, got %#v", answers)
+	}
+}
+
+// --- free-text and confirm containment -------------------------------------
+
+// longAskUserAnswer is a prose answer long enough to wrap on every card width
+// under test. The expected wrapped chunks below are hand-derived from the width
+// budget: card inner width (width-4) minus the free-text prefix and cursor, or
+// minus the confirm summary's title prefix.
+func longAskUserAnswer() string {
+	return "the quick brown fox jumps over the lazy dog and keeps running through the forest toward the distant hills"
+}
+
+func askUserFreeTextModel(t *testing.T, width int, request agent.AskUserRequest, input string) (model, *[][]string) {
+	t.Helper()
+	var answers [][]string
+	next := newAskUserModel(t, request, &answers)
+	next.width = width
+	next.height = 30
+	next.input.SetValue(input)
+	return next, &answers
+}
+
+// assertRenderedLinesFit fails if any rendered line is wider than width. It
+// strips styling first so the check measures display cells, not ANSI bytes.
+func assertRenderedLinesFit(t *testing.T, view any, width int) {
+	t.Helper()
+	for i, line := range strings.Split(plainRender(t, view), "\n") {
+		if got := lipgloss.Width(plainRender(t, line)); got > width {
+			t.Fatalf("line %d width %d > %d: %q", i, got, width, plainRender(t, line))
+		}
+	}
+}
+
+// assertAnswerWordsVisible proves the wrapped display did not lose or reorder
+// any word of the submitted answer (truncation would fail this check).
+func assertAnswerWordsVisible(t *testing.T, view any, answer string) {
+	t.Helper()
+	words := strings.Fields(answer)
+	plain := strings.ReplaceAll(plainRender(t, view), "▌", "") // the trailing cursor merges with the last token
+	idx := 0
+	for _, line := range strings.Split(plain, "\n") {
+		for _, token := range strings.Fields(line) {
+			if idx < len(words) && token == words[idx] {
+				idx++
+			}
+		}
+	}
+	if idx < len(words) {
+		t.Fatalf("answer not fully visible (%d/%d words): %q", idx, len(words), plain)
+	}
+}
+
+// askUserCardInteriors returns the questionnaire card's content cells: each
+// rendered line with the border chrome ("│ ... │") and right padding removed.
+// Leading spaces survive so assertions can prove continuation alignment.
+func askUserCardInteriors(t *testing.T, view any) map[string]bool {
+	t.Helper()
+	set := map[string]bool{}
+	for _, line := range strings.Split(plainRender(t, view), "\n") {
+		line = strings.TrimPrefix(line, "│ ")
+		line = strings.TrimSuffix(line, " │")
+		if s := strings.TrimRight(line, " "); s != "" {
+			set[s] = true
+		}
+	}
+	return set
+}
+
+func TestAskUserFreeTextWrapsInsideCard(t *testing.T) {
+	request := agent.AskUserRequest{
+		ToolCallID: "c",
+		Questions:  []agent.AskUserQuestion{{Question: "Describe the behavior"}},
+	}
+	answer := longAskUserAnswer()
+	cases := []struct {
+		name      string
+		width     int
+		firstLine string // the hand-derived first wrapped chunk after "❯ "
+		rest      string // the continuation chunk ("" when the answer fits one line)
+	}{
+		{"narrow", 60, "the quick brown fox jumps over the lazy dog and keeps", "running through the forest toward the distant hills"},
+		{"compact", 80, "the quick brown fox jumps over the lazy dog and keeps running through the", "forest toward the distant hills"},
+		{"full", 120, answer, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			next, answers := askUserFreeTextModel(t, tc.width, request, answer)
+			view := next.footerView(tc.width)
+			assertRenderedLinesFit(t, view, tc.width)
+
+			interiors := askUserCardInteriors(t, view)
+			if tc.rest != "" {
+				// Continuation lines align under the first answer character ("❯ "
+				// is two cells) and the cursor stays inside on the last line.
+				if !interiors["❯ "+tc.firstLine] {
+					t.Fatalf("first answer line missing %q: %v", "❯ "+tc.firstLine, interiors)
+				}
+				if !interiors["  "+tc.rest+"▌"] {
+					t.Fatalf("wrapped continuation missing %q: %v", "  "+tc.rest+"▌", interiors)
+				}
+			} else if !interiors["❯ "+answer+"▌"] {
+				t.Fatalf("single-line answer missing %q: %v", "❯ "+answer+"▌", interiors)
+			}
+			assertAnswerWordsVisible(t, view, answer)
+
+			// The wrapped display must not change the submitted answer.
+			updated, _ := next.Update(testKey(tea.KeyEnter))
+			next = updated.(model)
+			if len(*answers) != 1 || (*answers)[0][0] != answer {
+				t.Fatalf("expected the exact answer %q, got %#v", answer, *answers)
+			}
+		})
+	}
+}
+
+func TestAskUserFreeTextWrapsInsideCardAtModelWidth(t *testing.T) {
+	// The same containment must hold through the full rendered View, not only
+	// the footer region that owns the questionnaire.
+	request := agent.AskUserRequest{
+		ToolCallID: "c",
+		Questions:  []agent.AskUserQuestion{{Question: "Describe the behavior"}},
+	}
+	next, _ := askUserFreeTextModel(t, 80, request, longAskUserAnswer())
+	assertRenderedLinesFit(t, next.View(), 80)
+}
+
+func TestAskUserFreeTextHardSplitsLongUnbrokenInput(t *testing.T) {
+	request := agent.AskUserRequest{
+		ToolCallID: "c",
+		Questions:  []agent.AskUserQuestion{{Question: "Paste the key"}},
+	}
+	input := strings.Repeat("a", 200)
+	next, answers := askUserFreeTextModel(t, 60, request, input)
+	view := next.footerView(60)
+	assertRenderedLinesFit(t, view, 60)
+	interiors := askUserCardInteriors(t, view)
+	if !interiors["❯ "+strings.Repeat("a", 53)] {
+		t.Fatalf("first wrapped line should hold 53 cells of the run: %v", interiors)
+	}
+	if !interiors["  "+strings.Repeat("a", 53)] {
+		t.Fatalf("continuation line should hold 53 cells with a 2-cell indent: %v", interiors)
+	}
+	if !interiors["  "+strings.Repeat("a", 41)+"▌"] {
+		t.Fatalf("cursor must stay on the final split chunk: %v", interiors)
+	}
+	updated, _ := next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+	if len(*answers) != 1 || (*answers)[0][0] != input {
+		t.Fatalf("hard-splitting the display must not change the answer, got %#v", *answers)
+	}
+}
+
+func TestAskUserFreeTextWrapsWideUnicodeByDisplayWidth(t *testing.T) {
+	request := agent.AskUserRequest{
+		ToolCallID: "c",
+		Questions:  []agent.AskUserQuestion{{Question: "Paste the text"}},
+	}
+	input := strings.Repeat("絵", 60) // 60 double-width runes = 120 cells
+	next, _ := askUserFreeTextModel(t, 60, request, input)
+	view := next.footerView(60)
+	assertRenderedLinesFit(t, view, 60)
+	interiors := askUserCardInteriors(t, view)
+	// 26 double-width runes (52 cells) fit the 53-cell budget; 27 would be 54.
+	if !interiors["❯ "+strings.Repeat("絵", 26)] {
+		t.Fatalf("expected 26 double-width runes on the first line: %v", interiors)
+	}
+	if !interiors["  "+strings.Repeat("絵", 26)] {
+		t.Fatalf("expected 26 double-width runes on the continuation line: %v", interiors)
+	}
+	if !interiors["  "+strings.Repeat("絵", 8)+"▌"] {
+		t.Fatalf("final partial line or cursor missing: %v", interiors)
+	}
+}
+
+func TestAskUserFreeTextPreservesExistingSubmitTrim(t *testing.T) {
+	request := agent.AskUserRequest{
+		ToolCallID: "c",
+		Questions:  []agent.AskUserQuestion{{Question: "Name it"}},
+	}
+	next, answers := askUserFreeTextModel(t, 80, request, "  padded answer  ")
+	assertRenderedLinesFit(t, next.footerView(80), 80)
+	assertAnswerWordsVisible(t, next.View(), "padded answer")
+
+	updated, _ := next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+	if len(*answers) != 1 || (*answers)[0][0] != "padded answer" {
+		t.Fatalf("expected the existing trimmed answer, got %#v", *answers)
+	}
+}
+
+func TestAskUserConfirmAnswersWrapInsideCard(t *testing.T) {
+	request := agent.AskUserRequest{
+		ToolCallID: "c",
+		Questions: []agent.AskUserQuestion{
+			{Question: "Question one?", Header: "FW"},
+			{Question: "Question two?", Options: []string{"Yes", "No"}},
+		},
+	}
+	answer := longAskUserAnswer()
+	cases := []struct {
+		name          string
+		width         int
+		wantInteriors []string // hand-derived summary lines inside the card, including alignment
+	}{
+		{"narrow", 60, []string{
+			"  FW: the quick brown fox jumps over the lazy dog and",
+			"      keeps running through the forest toward the",
+			"      distant hills",
+			"  Question two?: Yes",
+		}},
+		{"compact", 80, []string{
+			"  FW: the quick brown fox jumps over the lazy dog and keeps running through",
+			"      the forest toward the distant hills",
+			"  Question two?: Yes",
+		}},
+		{"full", 120, []string{
+			"  FW: " + answer,
+			"  Question two?: Yes",
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var answers [][]string
+			next := newAskUserModel(t, request, &answers)
+			next.width = tc.width
+			next.height = 30
+			next.input.SetValue(answer)
+			updated, _ := next.Update(testKey(tea.KeyEnter)) // Q1 free text -> Q2 picker
+			next = updated.(model)
+			updated, _ = next.Update(testKey(tea.KeyEnter)) // Q2 picker -> Confirm tab
+			next = updated.(model)
+			if !next.pendingAskUser.onConfirmTab() {
+				t.Fatalf("expected the Confirm tab, got %#v", next.pendingAskUser)
+			}
+			view := next.footerView(tc.width)
+			assertRenderedLinesFit(t, view, tc.width)
+
+			interiors := askUserCardInteriors(t, view)
+			if !interiors["Review and submit:"] {
+				t.Fatalf("review header missing: %v", interiors)
+			}
+			// The "  FW: " summary prefix is 6 cells; continuations align under
+			// the first answer character.
+			for _, want := range tc.wantInteriors {
+				if !interiors[want] {
+					t.Fatalf("confirm summary missing %q: %v", want, interiors)
+				}
+			}
+
+			// Confirm submits the exact answers.
+			updated, _ = next.Update(testKey(tea.KeyEnter))
+			next = updated.(model)
+			if next.pendingAskUser != nil {
+				t.Fatalf("Confirm should submit, still pending: %#v", next.pendingAskUser)
+			}
+			if len(answers) != 1 || len(answers[0]) != 2 || answers[0][0] != answer || answers[0][1] != "Yes" {
+				t.Fatalf("expected [%q Yes], got %#v", answer, answers)
+			}
+		})
 	}
 }

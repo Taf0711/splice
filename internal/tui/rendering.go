@@ -1292,17 +1292,29 @@ func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width
 		lines = append(lines, strings.Join(tabs, " "))
 	}
 
-	// Confirm tab: a review of the collected answers.
+	// Confirm tab: a review of the collected answers. Long answers wrap under the
+	// same width rule as free text: the summary prefix keeps its cells, and
+	// continuation lines align under the first answer character.
 	if active == confirm {
 		lines = append(lines, "")
 		lines = append(lines, fill(zeroTheme.ink).Render("Review and submit:"))
+		innerWidth := maxInt(1, width-4) // styledBlockFill reserves 2 border cells per side
 		for index, question := range questions {
 			answer := strings.TrimSpace(prompt.states[index].answer)
-			rendered := fill(zeroTheme.ink).Render(answer)
+			prefix := "  " + fill(zeroTheme.muted).Render(askUserTabTitle(question, index)+": ")
 			if answer == "" {
-				rendered = fill(zeroTheme.faint).Render("(no answer)")
+				lines = append(lines, prefix+fill(zeroTheme.faint).Render("(no answer)"))
+				continue
 			}
-			lines = append(lines, "  "+fill(zeroTheme.muted).Render(askUserTabTitle(question, index)+": ")+rendered)
+			prefixWidth := lipgloss.Width(prefix)
+			chunks := wrapPlainText(answer, maxInt(1, innerWidth-prefixWidth))
+			for chunkIndex, chunk := range chunks {
+				if chunkIndex == 0 {
+					lines = append(lines, prefix+fill(zeroTheme.ink).Render(chunk))
+				} else {
+					lines = append(lines, strings.Repeat(" ", prefixWidth)+fill(zeroTheme.ink).Render(chunk))
+				}
+			}
 		}
 		lines = append(lines, "")
 		lines = append(lines, fill(zeroTheme.faint).Render("⇆ tab · enter submit · esc dismiss"))
@@ -1353,7 +1365,20 @@ func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width
 	if question.MultiSelect && len(question.Options) > 0 {
 		lines = append(lines, fill(zeroTheme.muted).Render("suggested: "+strings.Join(question.Options, ", ")))
 	}
-	lines = append(lines, zeroTheme.userPrompt.Render("❯ ")+fill(zeroTheme.ink).Render(input)+fill(zeroTheme.accent).Render("▌"))
+	// Wrap the visible answer instead of truncating it to one line. answerBudget
+	// reserves the card borders/padding (4), the "❯ " prefix (2), and the trailing
+	// cursor (1). Continuation lines indent 2 cells so they align under the first
+	// answer character, and the cursor stays inside the card on the final line.
+	answerBudget := maxInt(1, width-7)
+	chunks := wrapPlainText(input, answerBudget)
+	for chunkIndex, chunk := range chunks {
+		if chunkIndex == 0 {
+			lines = append(lines, zeroTheme.userPrompt.Render("❯ ")+fill(zeroTheme.ink).Render(chunk))
+		} else {
+			lines = append(lines, "  "+fill(zeroTheme.ink).Render(chunk))
+		}
+	}
+	lines[len(lines)-1] += fill(zeroTheme.accent).Render("▌")
 	footer := "enter submit · esc dismiss"
 	switch {
 	case !question.MultiSelect && len(question.Options) > 0:
