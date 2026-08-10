@@ -92,6 +92,21 @@ almost certainly wrong.
   behavior is the contract (`internal/worktrees/worktrees_test.go`).
 - **Prefer extending existing abstractions over inventing new ones.**
 
+## Release Approval
+
+A general release request does not approve a version.
+
+Before any release action:
+
+1. Show the owner the exact proposed version and explain how you derived it.
+2. Get explicit owner approval for that exact version.
+
+Release actions include release pull request merges, tags, GitHub releases,
+package publications, and public announcements.
+
+Do not infer product version intent from Release Please, conventional commits,
+or Semantic Versioning defaults. If the version is not explicit, stop and ask.
+
 ## Upstream Discipline
 
 Splice is a fork of Zero. Changes to inherited Zero code (`internal/agent`,
