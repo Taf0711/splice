@@ -253,8 +253,8 @@ type model struct {
 	liveUsageCounts map[int]int
 	// swarmSessionMap maps a swarm task id to its member's durable child session
 	// id (carried up by swarm_collect's Meta), so the AGENTS sidebar rows can drill
-	// into a member's conversation. Persists across turns; only completed members
-	// have an entry.
+	// into a member's conversation. It is scoped to the current run because task
+	// IDs can repeat.
 	swarmSessionMap   map[string]string
 	pendingPermission *pendingPermissionPrompt
 	pendingAskUser    *pendingAskUserPrompt
@@ -2002,7 +2002,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastStreamActivity = m.now()
 		// Size the composer so long input scrolls horizontally with the cursor
 		// visible instead of being clipped invisibly past the right edge.
-		m.input.SetWidth(maxInt(20, chatWidth(msg.Width)-14))
+		m.input.SetWidth(maxInt(20, m.chatColumnWidth()-14))
 		// The title bar prints once into native scrollback when the inline
 		// renderer is active. In alt-screen mode it stays pinned inside View.
 		if !m.altScreen && !m.headerPrinted && msg.Width > 0 {
@@ -2568,9 +2568,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case swarmSessionsMsg:
-		// Merge completed swarm members' session ids so their AGENTS sidebar rows
-		// become drill-in clickable. Session ids are durable facts, so this is not
-		// gated on the active run.
+		// Merge completed swarm members' session IDs for the current or most
+		// recently completed run. Ignore a late result after a newer run starts,
+		// because swarm task IDs can repeat across runs.
+		if msg.runID != m.sidebarAgentRunID() {
+			return m, nil
+		}
 		if m.swarmSessionMap == nil {
 			m.swarmSessionMap = map[string]string{}
 		}
@@ -4745,6 +4748,10 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	m.stepExplanation = nil
 	m.planDetailOpen = false
 	m.planDetailGen++ // invalidate any in-flight step-explanation from the prior run
+	// Swarm task IDs can repeat. Scope their cached completion/session state to
+	// this run so a reused subagent-1 cannot inherit the prior row and disappear.
+	m.swarmDoneAt = map[string]time.Time{}
+	m.swarmSessionMap = map[string]string{}
 	// A new run clears the sidebar's content (plan/agents), so the user's Ctrl+B
 	// hide was for the OLD context — reset it so the new run's sidebar isn't
 	// suppressed by a stale preference.

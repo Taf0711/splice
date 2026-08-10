@@ -1006,9 +1006,8 @@ func mouseTestModel() model {
 	return m
 }
 
-// withSidebarContent gives the model an active plan so the two-column sidebar
-// stays put (an empty panel now auto-hides), for tests that depend on the
-// narrower chat-column geometry.
+// withSidebarContent gives tests a plan when they need clickable plan rows in
+// the two-column sidebar.
 func withSidebarContent(m model) model {
 	m.plan.steps = []planStep{{content: "wire it up", status: "in_progress"}}
 	return m

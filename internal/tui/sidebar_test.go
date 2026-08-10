@@ -172,9 +172,8 @@ func sidebarTestModel() model {
 	// Real conversation content so the home-screen gate doesn't suppress the
 	// sidebar (it stays single-column until the transcript has non-welcome rows).
 	m.transcript = append(m.transcript, transcriptRow{kind: rowToolCall, tool: "read_file", detail: "main.go"})
-	// A plan gives the sidebar content so it isn't auto-hidden as empty (the panel
-	// only claims a column when there are agents or an active plan). Tests that
-	// exercise specific agent/plan states set their own and override this.
+	// A seed plan gives the PLAN section something to render. Tests that exercise
+	// specific agent/plan states set their own and override this.
 	m.plan.steps = []planStep{{content: "wire it up", status: "in_progress"}}
 	return m
 }
@@ -252,6 +251,16 @@ func TestSidebarToggleHidesAndShows(t *testing.T) {
 	}
 }
 
+func TestWindowResizeUsesSidebarChatWidthForComposer(t *testing.T) {
+	m := sidebarTestModel()
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	next := updated.(model)
+	want := maxInt(20, next.chatColumnWidth()-14)
+	if got := next.input.Width(); got != want {
+		t.Fatalf("composer width after sidebar resize = %d, want %d", got, want)
+	}
+}
+
 func TestChatColumnWidthLeavesRoomForSidebar(t *testing.T) {
 	m := sidebarTestModel()
 	chatW := m.chatColumnWidth()
@@ -295,6 +304,26 @@ func TestRenderContextSidebarDimensions(t *testing.T) {
 	}
 }
 
+func TestSidebarStaysVisibleAcrossTransientContentChanges(t *testing.T) {
+	m := sidebarTestModel()
+	if !m.sidebarActive() {
+		t.Fatal("expected sidebar active when the model has a plan")
+	}
+
+	m = m.beginRun(func() {})
+	if !m.sidebarActive() {
+		t.Fatal("beginRun should not hide the sidebar before new run content arrives")
+	}
+	if got, want := m.chatColumnWidth(), chatWidth(m.width-sidebarWidth(m.width)-3); got != want {
+		t.Fatalf("empty sidebar chat width = %d, want stable two-column width %d", got, want)
+	}
+
+	m.specialists.start("explorer", "look around", "sess-x", time.Now())
+	if !m.sidebarActive() {
+		t.Fatal("sidebar should remain active once an agent spawns")
+	}
+}
+
 func TestSidebarUsesPendingDesignPlanWhenRuntimePlanIsEmpty(t *testing.T) {
 	m := sidebarTestModel()
 	m.plan.clear()
@@ -320,34 +349,6 @@ func TestSidebarUsesPendingDesignPlanWhenRuntimePlanIsEmpty(t *testing.T) {
 	plain = stripSidebar(m.sidebarPlanLines(sidebarWidth(m.width)))
 	if !strings.Contains(plain, "Run the active task") || strings.Contains(plain, "Inspect the sidebar") {
 		t.Fatalf("runtime plan should replace the design-plan fallback:\n%s", plain)
-	}
-}
-
-// TestSidebarAutoHidesWhenEmpty: with no agents and no active plan the panel
-// auto-hides and the chat reclaims the full width; adding a plan or an agent
-// brings it back.
-func TestSidebarAutoHidesWhenEmpty(t *testing.T) {
-	m := sidebarTestModel() // has a plan -> sidebar active
-	if !m.sidebarActive() {
-		t.Fatal("expected sidebar active when the model has a plan")
-	}
-
-	// Clear the only content (the plan) -> empty -> auto-hidden.
-	m.plan.steps = nil
-	if m.sidebarHasContent() {
-		t.Fatal("model should have no sidebar content after clearing the plan")
-	}
-	if m.sidebarActive() {
-		t.Error("sidebar should auto-hide with no agents and no active plan")
-	}
-	if got, want := m.chatColumnWidth(), chatWidth(m.width); got != want {
-		t.Errorf("empty sidebar: chat width = %d, want full %d", got, want)
-	}
-
-	// A spawned agent brings the panel back.
-	m.specialists.start("explorer", "look around", "sess-x", time.Now())
-	if !m.sidebarHasContent() || !m.sidebarActive() {
-		t.Error("sidebar should return once an agent spawns")
 	}
 }
 
@@ -449,13 +450,48 @@ func TestSwarmAgentDropsOnOwnCompletionEvenMidRun(t *testing.T) {
 	}
 }
 
+func TestSwarmAgentLingersAfterActiveRunIDClears(t *testing.T) {
+	base := time.Date(2026, 6, 24, 12, 0, 0, 0, time.UTC)
+	m := sidebarTestModel()
+	m.now = func() time.Time { return base }
+	m.runID = 7
+	m.activeRunID = 7
+	m.pending = true
+	m.transcript = append(m.transcript,
+		transcriptRow{kind: rowToolCall, tool: "swarm_spawn", detail: "review sidebar", runID: 7},
+		transcriptRow{kind: rowToolResult, tool: "swarm_spawn", detail: "Spawned subagent as task subagent-1 on team default.", runID: 7},
+		transcriptRow{kind: rowToolResult, tool: "swarm_collect", detail: "- subagent-1 [done] review sidebar", runID: 7},
+	)
+	m.swarmDoneAt = map[string]time.Time{"subagent-1": base.Add(-sidebarAgentLinger / 2)}
+	if got := len(m.swarmSpawnedAgents()); got != 1 {
+		t.Fatalf("precondition: expected one finishing member, got %d", got)
+	}
+
+	m.pending = false
+	m.activeRunID = 0
+	if got := len(m.swarmSpawnedAgents()); got != 1 {
+		t.Fatalf("clearing activeRunID should not bypass the member linger, got %d", got)
+	}
+	updated, _ := m.Update(swarmSessionsMsg{runID: 7, sessions: map[string]string{"subagent-1": "session-7"}})
+	agents := updated.(model).swarmSpawnedAgents()
+	if len(agents) != 1 || agents[0].sessionID != "session-7" {
+		t.Fatalf("completed current-run member lost its late session link: %+v", agents)
+	}
+}
+
 // Members AND statuses from a previous run must not bleed into a later run, even
 // when task ids repeat — both the spawn rows and the swarm_status/collect rows
 // are scoped to the active run.
 func TestSwarmAgentsScopedToActiveRun(t *testing.T) {
 	m := sidebarTestModel()
-	m.pending = true
-	m.activeRunID = 2
+	m.runID = 1
+	m.activeRunID = 1
+	m.swarmDoneAt["subagent-1"] = time.Now().Add(-2 * sidebarAgentLinger)
+	m.swarmSessionMap["subagent-1"] = "old-session"
+	m = m.beginRun(func() {}) // starts run 2 and clears run-scoped swarm caches
+	if len(m.swarmDoneAt) != 0 || len(m.swarmSessionMap) != 0 {
+		t.Fatal("beginRun kept stale swarm cache entries")
+	}
 	m.transcript = append(m.transcript,
 		// Old run (runID 1): the SAME task id, and a stale "done" status for it.
 		transcriptRow{kind: rowToolCall, tool: "swarm_spawn", detail: "old task", runID: 1},
@@ -472,6 +508,13 @@ func TestSwarmAgentsScopedToActiveRun(t *testing.T) {
 	// The stale prior-run "done" status must NOT mark the current member finished.
 	if agents[0].finishing || agents[0].state == "done" {
 		t.Fatalf("stale prior-run status must not affect the current member: %+v", agents[0])
+	}
+	if agents[0].sessionID != "" {
+		t.Fatalf("reused task ID inherited stale session %q", agents[0].sessionID)
+	}
+	updated, _ := m.Update(swarmSessionsMsg{runID: 1, sessions: map[string]string{"subagent-1": "late-old-session"}})
+	if got := updated.(model).swarmSessionMap["subagent-1"]; got != "" {
+		t.Fatalf("late prior-run session contaminated current member: %q", got)
 	}
 }
 
@@ -656,25 +699,19 @@ func TestTwoColumnTranscriptViewWidth(t *testing.T) {
 	}
 }
 
-// TestSidebarHasContentWithPipeline: sidebarHasContent must return true when
-// the PIPELINE panel is non-empty, even without agents or a plan (AR12c/A-13).
-func TestSidebarHasContentWithPipeline(t *testing.T) {
+func TestSidebarRendersPipelineWithoutPlanOrAgents(t *testing.T) {
 	m := sidebarTestModel()
-	// Clear the plan so the only content source is the pipeline.
 	m.plan.steps = nil
-	if m.sidebarHasContent() {
-		t.Fatal("expected no sidebar content without plan or pipeline")
-	}
-	// Apply a stage marker to populate the pipeline state.
 	marker := "\x00STAGE{\"name\":\"code_writer\",\"status\":\"running\",\"detail\":\"\",\"progress\":0,\"changedFiles\":null}\x00"
 	if !m.pipeline.applyStageMarker(marker) {
 		t.Fatal("applyStageMarker returned false")
 	}
-	if !m.sidebarHasContent() {
-		t.Fatal("sidebarShouldHaveContent: pipeline is non-empty")
-	}
 	if !m.sidebarActive() {
-		t.Fatal("sidebarActive: pipeline content should activate the sidebar")
+		t.Fatal("the stable sidebar should remain active with pipeline content")
+	}
+	plain := stripSidebar(m.renderContextSidebar(sidebarWidth(m.width), m.height))
+	if !strings.Contains(plain, "PIPELINE") || !strings.Contains(plain, "code_writer") {
+		t.Fatalf("pipeline missing from sidebar:\n%s", plain)
 	}
 }
 
