@@ -62,6 +62,17 @@ func validCritique(assessment string) schemas.PlanCritique {
 	}
 }
 
+func TestCrystallizeAndCritiqueRejectsInvalidTransitionSource(t *testing.T) {
+	wf := NewDesignWorkflow(nil, "session", "plan-1").WithSource("bogus")
+	_, _, err := wf.CrystallizeAndCritique(context.Background(), []sessions.Event{
+		{Type: sessions.EventDesignModeEntered},
+		{Type: sessions.EventMessage, Payload: mustMarshal(t, map[string]string{"role": "user", "content": "build it"})},
+	}, &fakeWorkflowProvider{}, nil, nil, "", nil)
+	if err == nil || !strings.Contains(err.Error(), "crystallize transition: invalid design transition source") {
+		t.Fatalf("expected invalid source error, got %v", err)
+	}
+}
+
 func TestCrystallizeAndCritique_Success(t *testing.T) {
 	ctx := context.Background()
 	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
@@ -176,6 +187,80 @@ func TestPlanCriticRelevantContextTruncatesOldestMaterial(t *testing.T) {
 func TestPlanCriticRelevantContextEmptyConversation(t *testing.T) {
 	if got := planCriticRelevantContext(nil); got != nil {
 		t.Fatalf("empty conversation context = %#v, want nil", got)
+	}
+}
+
+func TestCrystallizeAndCritique_ReCrystallizeInputHasCurrentPlanAndCritique(t *testing.T) {
+	ctx := context.Background()
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+	if _, err := store.Create(sessions.CreateInput{SessionID: "test-session", Cwd: t.TempDir()}); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	for _, ev := range []sessions.AppendEventInput{
+		{Type: sessions.EventDesignModeEntered, Payload: nil},
+		{Type: sessions.EventMessage, Payload: map[string]string{"role": "user", "content": "first pass"}},
+	} {
+		if _, err := store.AppendEvent("test-session", ev); err != nil {
+			t.Fatalf("append initial event: %v", err)
+		}
+	}
+	events, err := store.ReadEvents("test-session")
+	if err != nil {
+		t.Fatalf("ReadEvents: %v", err)
+	}
+	plan1Args, _ := json.Marshal(validDesignPlan("first pass"))
+	critique1Args, _ := json.Marshal(validCritique("first critique"))
+	first := &fakeWorkflowProvider{events: concatEvents(
+		workflowToolCall("c1", "submit_design_plan", string(plan1Args)),
+		workflowToolCall("c2", "submit_critique", string(critique1Args)),
+		workflowDone(),
+	)}
+	wf := NewDesignWorkflow(store, "test-session", "plan-1")
+	if _, _, err := wf.CrystallizeAndCritique(ctx, events, first, nil, nil, "", nil); err != nil {
+		t.Fatalf("first CrystallizeAndCritique: %v", err)
+	}
+
+	reloaded, err := store.ReadEvents("test-session")
+	if err != nil {
+		t.Fatalf("ReadEvents: %v", err)
+	}
+	plan2Args, _ := json.Marshal(validDesignPlan("second pass"))
+	critique2Args, _ := json.Marshal(validCritique("second critique"))
+	crystallizerProvider := &fakeWorkflowProvider{events: concatEvents(
+		workflowToolCall("c3", "submit_design_plan", string(plan2Args)),
+		workflowDone(),
+	)}
+	criticProvider := &fakeWorkflowProvider{events: concatEvents(
+		workflowToolCall("c4", "submit_critique", string(critique2Args)),
+		workflowDone(),
+	)}
+	resolver := func(stage string) (agent.ModelSelection, error) {
+		if stage == "design_crystallize" {
+			return agent.ModelSelection{Provider: crystallizerProvider, ProviderName: "a", Model: "m"}, nil
+		}
+		return agent.ModelSelection{Provider: criticProvider, ProviderName: "b", Model: "m"}, nil
+	}
+	wf2 := NewDesignWorkflow(store, "test-session", "plan-1")
+	if _, _, err := wf2.CrystallizeAndCritique(ctx, reloaded, &fakeWorkflowProvider{}, resolver, nil, "", nil); err != nil {
+		t.Fatalf("second CrystallizeAndCritique: %v", err)
+	}
+
+	var payload string
+	for _, message := range crystallizerProvider.request.Messages {
+		if message.Role == zeroruntime.MessageRoleUser {
+			payload = message.Content
+			break
+		}
+	}
+	var input schemas.DesignConversationInput
+	if err := json.Unmarshal([]byte(payload), &input); err != nil {
+		t.Fatalf("unmarshal second crystallizer payload: %v", err)
+	}
+	if input.CurrentPlan == nil || input.CurrentPlan.Epic != "first pass" {
+		t.Fatalf("second crystallizer lost current plan: %#v", input.CurrentPlan)
+	}
+	if input.CurrentCritique == nil || input.CurrentCritique.OverallAssessment != "first critique" {
+		t.Fatalf("second crystallizer lost current critique: %#v", input.CurrentCritique)
 	}
 }
 

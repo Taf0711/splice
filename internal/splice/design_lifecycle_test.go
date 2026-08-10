@@ -381,6 +381,20 @@ func TestReconstructMissingPlanID(t *testing.T) {
 	}
 }
 
+func TestReconstructRejectsInvalidTransitionSource(t *testing.T) {
+	planJSON, _ := json.Marshal(validPlan())
+	critiqueJSON, _ := json.Marshal(validCritique("reviewed"))
+	for _, event := range []sessions.Event{
+		designEvent(1, sessions.EventPlanCrystallized, PlanCrystallizedPayload{PlanID: "plan-1", Revision: 1, Plan: planJSON, Source: "bogus"}),
+		designEvent(1, sessions.EventCritiqueRecorded, CritiqueRecordedPayload{PlanID: "plan-1", Revision: 1, Critique: critiqueJSON, Source: "bogus"}),
+		designEvent(1, sessions.EventPlanApproved, PlanApprovedPayload{PlanID: "plan-1", Source: "bogus"}),
+	} {
+		if _, err := ReconstructDesignState([]sessions.Event{event}); err == nil {
+			t.Fatalf("expected invalid source error for %s", event.Type)
+		}
+	}
+}
+
 func TestReconstructMissingTaskID(t *testing.T) {
 	events := []sessions.Event{
 		designEvent(1, sessions.EventTaskStarted, TaskStartedPayload{

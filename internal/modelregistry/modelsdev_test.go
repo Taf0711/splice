@@ -1026,3 +1026,79 @@ func TestDefaultRegistryUsesEmbeddedPricingWithoutDiskCache(t *testing.T) {
 		t.Fatalf("unpriced Claude Haiku cost must validate: %v", err)
 	}
 }
+
+// Anthropic models support two thinking modes: legacy extended thinking
+// (thinking:{type:"enabled",budget_tokens:N}) and adaptive thinking
+// (thinking:{type:"adaptive"} plus output_config.effort). Splice's Anthropic
+// transport only sends the legacy mode. A model that exposes only adaptive
+// thinking rejects budget_tokens with an HTTP 400, so any such model in the
+// catalog breaks every reasoning request. This tripwire fails when a catalog
+// model in the models.dev snapshot no longer accepts budget_tokens.
+
+// anthropicModelAcceptsBudgetTokens reports whether a models.dev record exposes
+// at least one reasoning option of type budget_tokens, which is the only
+// thinking mode Splice's Anthropic transport can send today.
+func anthropicModelAcceptsBudgetTokens(record modelsDevModel) bool {
+	for _, option := range record.ReasoningOptions {
+		if option.Type == "budget_tokens" {
+			return true
+		}
+	}
+	return false
+}
+
+func TestAnthropicCatalogModelsAcceptBudgetTokens(t *testing.T) {
+	registry, err := DefaultRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := registry.ListByProvider(ProviderAnthropic)
+	if len(entries) == 0 {
+		t.Fatal("no anthropic catalog entries found; lookup returned nothing")
+	}
+	anthropic := cachedModelsDevProviders()["anthropic"]
+	for _, entry := range entries {
+		t.Run(entry.ID, func(t *testing.T) {
+			if len(registry.ReasoningEfforts(entry.ID)) == 0 {
+				return // never enables thinking
+			}
+			record, ok := anthropic[strings.TrimSpace(entry.APIModel)]
+			if !ok {
+				t.Logf("model %q (%s) absent from the models.dev snapshot; cannot judge", entry.ID, entry.APIModel)
+				return
+			}
+			if len(record.ReasoningOptions) == 0 {
+				return // no data to judge
+			}
+			if !anthropicModelAcceptsBudgetTokens(record) {
+				types := make([]string, 0, len(record.ReasoningOptions))
+				for _, option := range record.ReasoningOptions {
+					types = append(types, option.Type)
+				}
+				t.Errorf("model %q (API %q) exposes reasoning options %v, none of which is budget_tokens. Splice's Anthropic transport only sends thinking:{type:\"enabled\",budget_tokens}, which this model rejects with an HTTP 400. Adaptive thinking plus output_config.effort must be implemented before this model can ship.", entry.ID, entry.APIModel, types)
+			}
+		})
+	}
+}
+
+func TestAnthropicAcceptsBudgetTokensHelper(t *testing.T) {
+	newRecord := func(types ...string) modelsDevModel {
+		var record modelsDevModel
+		for _, typ := range types {
+			record.ReasoningOptions = append(record.ReasoningOptions, struct {
+				Type   string   `json:"type"`
+				Values []string `json:"values"`
+			}{Type: typ})
+		}
+		return record
+	}
+	if !anthropicModelAcceptsBudgetTokens(newRecord("budget_tokens")) {
+		t.Error("budget_tokens record must be accepted")
+	}
+	if anthropicModelAcceptsBudgetTokens(newRecord("effort")) {
+		t.Error("effort-only record must be reported as unsupported")
+	}
+	if !anthropicModelAcceptsBudgetTokens(newRecord("effort", "budget_tokens")) {
+		t.Error("record that includes budget_tokens must be accepted")
+	}
+}

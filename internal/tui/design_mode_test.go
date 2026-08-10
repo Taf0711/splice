@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	spinner "charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Taf0711/splice/internal/agent"
@@ -21,9 +22,645 @@ import (
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
+func designToolCall(id, name, args string) []zeroruntime.StreamEvent {
+	return []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: id, ToolName: name},
+		{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: id, ArgumentsFragment: args},
+		{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: id},
+	}
+}
+
+func designTextAnswer(text string) []zeroruntime.StreamEvent {
+	return []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventText, Content: text},
+		{Type: zeroruntime.StreamEventDone},
+	}
+}
+
+func tuiDesignPlan() schemas.DesignPlan {
+	return schemas.DesignPlan{
+		Source:       "conversation",
+		Epic:         "Build the feature",
+		Requirements: []string{"must work"},
+		InScope:      []string{"core"},
+		OutOfScope:   []string{"enterprise"},
+		SystemDesign: "use go structs",
+		Tasks:        []schemas.Task{{ID: "t1", Title: "Build core", Intent: "Build the core flow"}},
+	}
+}
+
+func tuiCleanCritique() schemas.PlanCritique {
+	return schemas.PlanCritique{OverallAssessment: "ready", MustFixBeforeExecution: false}
+}
+
+// disableAutoTitle stops the agent-response title generation from making an
+// extra provider call that would consume a staged scripted-provider turn.
+func disableAutoTitle(m model) model {
+	if m.activeSession.SessionID == "" {
+		return m
+	}
+	if m.titledSessions == nil {
+		m.titledSessions = map[string]bool{}
+	}
+	m.titledSessions[m.activeSession.SessionID] = true
+	return m
+}
+
+// collectRunMsgs runs a possibly-batched command to completion and returns
+// every substantive message it produced, excluding spinner ticks.
+func collectRunMsgs(cmd tea.Cmd) []tea.Msg {
+	if cmd == nil {
+		return nil
+	}
+	var out []tea.Msg
+	switch msg := cmd().(type) {
+	case tea.BatchMsg:
+		for _, sub := range msg {
+			out = append(out, collectRunMsgs(sub)...)
+		}
+	case spinner.TickMsg:
+	default:
+		if msg != nil {
+			out = append(out, msg)
+		}
+	}
+	return out
+}
+
+func TestDesignTransitionToolExposure(t *testing.T) {
+	if _, ok := designConversationRegistry(nil).Get(string(splicerun.DesignTransitionApprove)); ok {
+		t.Fatal("base registry unexpectedly exposes approve_design")
+	}
+	reg := tools.NewRegistry()
+	designTransitionRegistry(reg, false, splicerun.NewDesignTransitionRecorder())
+	if _, ok := reg.Get(string(splicerun.DesignTransitionCrystallize)); !ok {
+		t.Fatal("crystallize_design not exposed")
+	}
+	if _, ok := reg.Get(string(splicerun.DesignTransitionApprove)); ok {
+		t.Fatal("approve_design exposed without a plan or with a must-fix critique")
+	}
+	regOK := tools.NewRegistry()
+	designTransitionRegistry(regOK, true, splicerun.NewDesignTransitionRecorder())
+	if _, ok := regOK.Get(string(splicerun.DesignTransitionApprove)); !ok {
+		t.Fatal("approve_design not exposed with a ready plan")
+	}
+}
+
+func TestDesignAgentCrystallizeSchedulesAndPersistsSourceAgent(t *testing.T) {
+	store := testSessionStore(t)
+	planArgs, _ := json.Marshal(tuiDesignPlan())
+	critiqueArgs, _ := json.Marshal(tuiCleanCritique())
+	provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{
+		designToolCall("call-cry", "crystallize_design", `{}`),
+		designTextAnswer("crystallizing now"),
+		designToolCall("call-plan", "submit_design_plan", string(planArgs)),
+		designToolCall("call-crit", "submit_critique", string(critiqueArgs)),
+	}}
+	m := newDesignModeTestModel(t.TempDir(), provider, store)
+	var err error
+	m, err = m.ensureActiveSession("design")
+	if err != nil {
+		t.Fatalf("ensureActiveSession: %v", err)
+	}
+	m.designNoticeShown = true
+	m, _ = m.appendSessionEvent(sessions.EventDesignModeEntered, nil)
+	m, _ = m.appendSessionEvent(sessions.EventMessage, map[string]any{"role": "user", "content": "Design the feature"})
+	m = disableAutoTitle(m)
+
+	m.input.SetValue("crystallize the design, please")
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected design turn")
+	}
+	respMsg := execCmd(cmd)
+	updated, transitionCmd := next.Update(respMsg)
+	next = updated.(model)
+	if transitionCmd == nil {
+		t.Fatal("expected the design turn to schedule the crystallization transition")
+	}
+	var crystallize *crystallizeResultMsg
+	for _, msg := range collectRunMsgs(transitionCmd) {
+		if c, ok := msg.(crystallizeResultMsg); ok {
+			crystallize = &c
+			break
+		}
+	}
+	if crystallize == nil {
+		t.Fatal("no crystallizeResultMsg in transition")
+	}
+	if crystallize.err != nil {
+		t.Fatalf("crystallize: %v", crystallize.err)
+	}
+	if crystallize.source != splicerun.DesignTransitionSourceAgent {
+		t.Fatalf("crystallize source = %q, want agent", crystallize.source)
+	}
+	if !transcriptContains(next.transcript, "The design agent requested crystallization.") {
+		t.Fatalf("expected agent request label, got %#v", next.transcript)
+	}
+	events, err := store.ReadEvents(m.activeSession.SessionID)
+	if err != nil {
+		t.Fatalf("ReadEvents: %v", err)
+	}
+	var planSource, critSource splicerun.DesignTransitionSource
+	for _, ev := range events {
+		switch ev.Type {
+		case sessions.EventPlanCrystallized:
+			var p splicerun.PlanCrystallizedPayload
+			if err := json.Unmarshal(ev.Payload, &p); err != nil {
+				t.Fatalf("unmarshal plan_crystallized: %v", err)
+			}
+			planSource = p.Source
+		case sessions.EventCritiqueRecorded:
+			var c splicerun.CritiqueRecordedPayload
+			if err := json.Unmarshal(ev.Payload, &c); err != nil {
+				t.Fatalf("unmarshal critique_recorded: %v", err)
+			}
+			critSource = c.Source
+		}
+	}
+	if planSource != splicerun.DesignTransitionSourceAgent || critSource != splicerun.DesignTransitionSourceAgent {
+		t.Fatalf("persisted source = plan:%q critique:%q, want agent/agent", planSource, critSource)
+	}
+}
+
+func TestDesignAgentApproveSchedulesPlanExecution(t *testing.T) {
+	store := testSessionStore(t)
+	provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{
+		designToolCall("call-ap", "approve_design", `{}`),
+		designTextAnswer("approving the plan"),
+	}}
+	m := newDesignModeTestModel(t.TempDir(), provider, store)
+	var err error
+	m, err = m.ensureActiveSession("design")
+	if err != nil {
+		t.Fatalf("ensureActiveSession: %v", err)
+	}
+	m.designNoticeShown = true
+	m.width = 100
+	m.height = 30
+	m.altScreen = true
+	m.headerPrinted = true
+	m, _ = m.appendSessionEvent(sessions.EventDesignModeEntered, nil)
+	m, _ = m.appendSessionEvent(sessions.EventMessage, map[string]any{"role": "user", "content": "Design the feature"})
+	plan := tuiDesignPlan()
+	planJSON, _ := json.Marshal(plan)
+	critiqueJSON, _ := json.Marshal(tuiCleanCritique())
+	m, _ = m.appendSessionEvent(sessions.EventPlanCrystallized, splicerun.PlanCrystallizedPayload{PlanID: "plan-1", Revision: 1, Plan: planJSON})
+	m, _ = m.appendSessionEvent(sessions.EventCritiqueRecorded, splicerun.CritiqueRecordedPayload{PlanID: "plan-1", Revision: 1, Critique: critiqueJSON})
+	m = m.reconstructDesignState()
+	m.pendingPlan = &plan
+	m = disableAutoTitle(m)
+
+	m.input.SetValue("approve the plan")
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected design turn")
+	}
+	respMsg := execCmd(cmd)
+	updated, transitionCmd := next.Update(respMsg)
+	next = updated.(model)
+	if transitionCmd == nil {
+		t.Fatal("expected the design turn to schedule the approval transition")
+	}
+	if !next.pending {
+		t.Fatal("expected approval run to start (pending)")
+	}
+	if !next.sidebarActive() {
+		t.Fatal("approval transition made the design-plan sidebar disappear")
+	}
+	if plain := stripSidebar(next.sidebarPlanLines(sidebarWidth(next.width))); !strings.Contains(plain, "Build core") {
+		t.Fatalf("approved design task missing from sidebar:\n%s", plain)
+	}
+	if !transcriptContains(next.transcript, "The design agent requested plan approval.") {
+		t.Fatalf("expected agent approval label, got %#v", next.transcript)
+	}
+	events, err := store.ReadEvents(m.activeSession.SessionID)
+	if err != nil {
+		t.Fatalf("ReadEvents: %v", err)
+	}
+	var approved splicerun.PlanApprovedPayload
+	for _, event := range events {
+		if event.Type == sessions.EventPlanApproved {
+			if err := json.Unmarshal(event.Payload, &approved); err != nil {
+				t.Fatalf("unmarshal plan_approved: %v", err)
+			}
+		}
+	}
+	if approved.PlanID != "plan-1" || approved.Source != splicerun.DesignTransitionSourceAgent {
+		t.Fatalf("plan_approved = %#v, want plan-1 from agent", approved)
+	}
+}
+
+func TestDesignAgentApproveIfReadyStartsApprovalOnCleanCritique(t *testing.T) {
+	store := testSessionStore(t)
+	planArgs, _ := json.Marshal(tuiDesignPlan())
+	critiqueArgs, _ := json.Marshal(tuiCleanCritique())
+	provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{
+		designToolCall("call-cry", "crystallize_design", `{"approve_if_ready":true}`),
+		designTextAnswer("crystallizing now"),
+		designToolCall("call-plan", "submit_design_plan", string(planArgs)),
+		designToolCall("call-crit", "submit_critique", string(critiqueArgs)),
+	}}
+	m := newDesignModeTestModel(t.TempDir(), provider, store)
+	var err error
+	m, err = m.ensureActiveSession("design")
+	if err != nil {
+		t.Fatalf("ensureActiveSession: %v", err)
+	}
+	m.designNoticeShown = true
+	m, _ = m.appendSessionEvent(sessions.EventDesignModeEntered, nil)
+	m, _ = m.appendSessionEvent(sessions.EventMessage, map[string]any{"role": "user", "content": "Design the feature"})
+	m = disableAutoTitle(m)
+
+	m.input.SetValue("crystallize and approve when ready")
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	respMsg := execCmd(cmd)
+	updated, transitionCmd := next.Update(respMsg)
+	next = updated.(model)
+	var crystallize *crystallizeResultMsg
+	for _, msg := range collectRunMsgs(transitionCmd) {
+		if c, ok := msg.(crystallizeResultMsg); ok {
+			crystallize = &c
+			break
+		}
+	}
+	if crystallize == nil {
+		t.Fatal("no crystallizeResultMsg in transition")
+	}
+	if crystallize.err != nil {
+		t.Fatalf("crystallize: %v", crystallize.err)
+	}
+	if !crystallize.approveIfReady {
+		t.Fatal("approve_if_ready not carried on the crystallize result")
+	}
+	updated, approveCmd := next.Update(*crystallize)
+	next = updated.(model)
+	if approveCmd == nil {
+		t.Fatal("expected a clean must-fix-free crystallize to schedule approval")
+	}
+	if !next.pending {
+		t.Fatal("expected approval run started after clean crystallize")
+	}
+}
+
+func TestDesignAgentApproveIfReadyStaysIdleOnMustFix(t *testing.T) {
+	store := testSessionStore(t)
+	planArgs, _ := json.Marshal(tuiDesignPlan())
+	blocking := schemas.PlanCritique{
+		OverallAssessment: "needs work",
+		Critiques: []schemas.Critique{{
+			Category: "correctness", Severity: schemas.SeverityHigh, Issue: "unsafe",
+		}},
+		MustFixBeforeExecution: true,
+	}
+	critiqueArgs, _ := json.Marshal(blocking)
+	provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{
+		designToolCall("call-cry", "crystallize_design", `{"approve_if_ready":true}`),
+		designTextAnswer("crystallizing now"),
+		designToolCall("call-plan", "submit_design_plan", string(planArgs)),
+		designToolCall("call-crit", "submit_critique", string(critiqueArgs)),
+	}}
+	m := newDesignModeTestModel(t.TempDir(), provider, store)
+	var err error
+	m, err = m.ensureActiveSession("design")
+	if err != nil {
+		t.Fatalf("ensureActiveSession: %v", err)
+	}
+	m.designNoticeShown = true
+	m, _ = m.appendSessionEvent(sessions.EventDesignModeEntered, nil)
+	m, _ = m.appendSessionEvent(sessions.EventMessage, map[string]any{"role": "user", "content": "Design the feature"})
+	m = disableAutoTitle(m)
+
+	m.input.SetValue("crystallize and approve when ready")
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	respMsg := execCmd(cmd)
+	updated, transitionCmd := next.Update(respMsg)
+	next = updated.(model)
+	var crystallize *crystallizeResultMsg
+	for _, msg := range collectRunMsgs(transitionCmd) {
+		if c, ok := msg.(crystallizeResultMsg); ok {
+			crystallize = &c
+			break
+		}
+	}
+	if crystallize == nil || crystallize.err != nil {
+		t.Fatalf("crystallize failed: %#v", crystallize)
+	}
+	updated, approveCmd := next.Update(*crystallize)
+	next = updated.(model)
+	if approveCmd != nil {
+		t.Fatal("must-fix critique must not auto-approve")
+	}
+	if next.pending {
+		t.Fatal("must-fix critique must not start an approval run")
+	}
+}
+
+func TestManualCrystallizeReusesPlanIDIncrementsRevisionSourceManual(t *testing.T) {
+	store := testSessionStore(t)
+	planArgs, _ := json.Marshal(tuiDesignPlan())
+	critiqueArgs, _ := json.Marshal(tuiCleanCritique())
+	provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{
+		designToolCall("call-plan", "submit_design_plan", string(planArgs)),
+		designToolCall("call-crit", "submit_critique", string(critiqueArgs)),
+	}}
+	m := newDesignModeTestModel(t.TempDir(), provider, store)
+	var err error
+	m, err = m.ensureActiveSession("design")
+	if err != nil {
+		t.Fatalf("ensureActiveSession: %v", err)
+	}
+	m.designNoticeShown = true
+	m, _ = m.appendSessionEvent(sessions.EventDesignModeEntered, nil)
+	m, _ = m.appendSessionEvent(sessions.EventMessage, map[string]any{"role": "user", "content": "Design the feature"})
+	priorPlanJSON, _ := json.Marshal(tuiDesignPlan())
+	m, _ = m.appendSessionEvent(sessions.EventPlanCrystallized, splicerun.PlanCrystallizedPayload{PlanID: "plan-1", Revision: 1, Plan: priorPlanJSON})
+	if got, err := m.currentPlanID(); err != nil || got != "plan-1" {
+		t.Fatalf("currentPlanID = %q, %v, want plan-1", got, err)
+	}
+	_, cmd := m.handleCrystallizeCommand()
+	msg := execCmd(cmd)
+	crystallize, ok := msg.(crystallizeResultMsg)
+	if !ok {
+		t.Fatalf("expected crystallizeResultMsg, got %T", msg)
+	}
+	if crystallize.err != nil {
+		t.Fatalf("crystallize: %v", crystallize.err)
+	}
+	if crystallize.source != splicerun.DesignTransitionSourceManual {
+		t.Fatalf("source = %q, want manual", crystallize.source)
+	}
+	events, err := store.ReadEvents(m.activeSession.SessionID)
+	if err != nil {
+		t.Fatalf("ReadEvents: %v", err)
+	}
+	var lastPlanID string
+	var lastRevision int
+	var lastSource splicerun.DesignTransitionSource
+	for _, ev := range events {
+		if ev.Type == sessions.EventPlanCrystallized {
+			var p splicerun.PlanCrystallizedPayload
+			if err := json.Unmarshal(ev.Payload, &p); err != nil {
+				t.Fatalf("unmarshal plan_crystallized: %v", err)
+			}
+			lastPlanID = p.PlanID
+			lastRevision = p.Revision
+			lastSource = p.Source
+		}
+	}
+	if lastPlanID != "plan-1" {
+		t.Fatalf("PlanID = %q, want plan-1 reused across crystallizations", lastPlanID)
+	}
+	if lastRevision != 2 {
+		t.Fatalf("Revision = %d, want 2 (incremented)", lastRevision)
+	}
+	if lastSource != splicerun.DesignTransitionSourceManual {
+		t.Fatalf("source = %q, want manual", lastSource)
+	}
+}
+
+func TestDesignConversationSeesMustFixCritique(t *testing.T) {
+	for _, tt := range []struct {
+		name              string
+		persistedCritique bool
+	}{
+		{name: "persisted lifecycle state", persistedCritique: true},
+		{name: "live overlay after persistence failure"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store := testSessionStore(t)
+			provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{{
+				{Type: zeroruntime.StreamEventText, Content: "revising"},
+				{Type: zeroruntime.StreamEventDone},
+			}}}
+			m := newDesignModeTestModel(t.TempDir(), provider, store)
+			var err error
+			m, err = m.ensureActiveSession("design")
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.designNoticeShown = true
+			m, _ = m.appendSessionEvent(sessions.EventDesignModeEntered, nil)
+			m, _ = m.appendSessionEvent(sessions.EventMessage, map[string]any{"role": "user", "content": "Design the deployment"})
+			m, _ = m.appendSessionEvent(sessions.EventMessage, map[string]any{"role": "assistant", "content": "Here is the design."})
+
+			plan := schemas.DesignPlan{
+				Source: "conversation", Epic: "Deploy safely", Requirements: []string{"safe rollback"},
+				InScope: []string{"deployment"}, Tasks: []schemas.Task{{
+					ID: "t1", Title: "Deploy", Intent: "deploy safely",
+					AcceptanceFacts: []schemas.AcceptanceFact{
+						{Statement: "first fact"}, {Statement: "second fact"},
+						{Statement: "third fact"}, {Statement: "FOURTH ACCEPTANCE FACT"},
+					},
+				}},
+			}
+			critique := schemas.PlanCritique{
+				OverallAssessment: "Needs revision",
+				Critiques: []schemas.Critique{{
+					Category: "correctness", Severity: schemas.SeverityHigh,
+					Issue: "MISSING ROLLBACK STRATEGY", SuggestedMitigation: "ADD CANARY ROLLBACK",
+				}},
+				MustFixBeforeExecution: true,
+			}
+			planJSON, _ := json.Marshal(plan)
+			m, _ = m.appendSessionEvent(sessions.EventPlanCrystallized, splicerun.PlanCrystallizedPayload{PlanID: "plan-1", Revision: 1, Plan: planJSON})
+			if tt.persistedCritique {
+				critiqueJSON, _ := json.Marshal(critique)
+				m, _ = m.appendSessionEvent(sessions.EventCritiqueRecorded, splicerun.CritiqueRecordedPayload{PlanID: "plan-1", Revision: 1, Critique: critiqueJSON})
+			}
+			m = m.reconstructDesignState()
+			if !tt.persistedCritique {
+				m.pendingCritique = &critique
+			}
+
+			m.input.SetValue("Revise the plan using the critique")
+			updated, cmd := m.Update(testKey(tea.KeyEnter))
+			next := updated.(model)
+			if cmd == nil {
+				t.Fatal("expected design run after prompt")
+			}
+			_, _ = next.Update(execCmd(cmd))
+			if len(provider.requests) != 1 {
+				t.Fatalf("requests = %d, want 1", len(provider.requests))
+			}
+			messages := provider.requests[0].Messages
+			if len(messages) == 0 || messages[0].Role != zeroruntime.MessageRoleSystem {
+				t.Fatalf("first message = %#v, want system context", messages)
+			}
+			system := messages[0].Content
+			for _, want := range []string{"MISSING ROLLBACK STRATEGY", "ADD CANARY ROLLBACK", "FOURTH ACCEPTANCE FACT"} {
+				if !strings.Contains(system, want) {
+					t.Fatalf("design system context lost %q:\n%s", want, system)
+				}
+			}
+			for _, message := range messages[1:] {
+				if strings.Contains(message.Content, "MISSING ROLLBACK STRATEGY") {
+					t.Fatalf("workflow state leaked into %s message", message.Role)
+				}
+			}
+		})
+	}
+}
+
+func TestResumedDesignConversationKeepsCritiqueContext(t *testing.T) {
+	store := testSessionStore(t)
+	session, err := store.Create(sessions.CreateInput{Title: "resumed design", Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := schemas.DesignPlan{
+		Source: "conversation", Epic: "Resume safely", Requirements: []string{"keep context"},
+		InScope: []string{"resume"}, Tasks: []schemas.Task{{ID: "t1", Title: "Resume", Intent: "keep the critique"}},
+	}
+	critique := schemas.PlanCritique{
+		OverallAssessment: "Needs revision",
+		Critiques: []schemas.Critique{{
+			Category: "correctness", Severity: schemas.SeverityHigh,
+			Issue: "RESUMED CRITIQUE ISSUE", SuggestedMitigation: "RESUMED CRITIQUE MITIGATION",
+		}},
+		MustFixBeforeExecution: true,
+	}
+	planJSON, _ := json.Marshal(plan)
+	critiqueJSON, _ := json.Marshal(critique)
+	for _, event := range []sessions.AppendEventInput{
+		{Type: sessions.EventDesignModeEntered},
+		{Type: sessions.EventMessage, Payload: map[string]any{"role": "user", "content": "Design resume behavior"}},
+		{Type: sessions.EventPlanCrystallized, Payload: splicerun.PlanCrystallizedPayload{PlanID: "plan-1", Revision: 1, Plan: planJSON}},
+		{Type: sessions.EventCritiqueRecorded, Payload: splicerun.CritiqueRecordedPayload{PlanID: "plan-1", Revision: 1, Critique: critiqueJSON}},
+	} {
+		if _, err := store.AppendEvent(session.SessionID, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{{
+		{Type: zeroruntime.StreamEventText, Content: "revising"},
+		{Type: zeroruntime.StreamEventDone},
+	}}}
+	m := newDesignModeTestModel(t.TempDir(), provider, store)
+	m.input.SetValue("/resume " + session.SessionID)
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	m = updated.(model)
+	if m.pendingPlan == nil || m.pendingCritique == nil {
+		t.Fatalf("resume lost design state: plan=%#v critique=%#v", m.pendingPlan, m.pendingCritique)
+	}
+
+	m.input.SetValue("Revise the resumed plan")
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected resumed design run")
+	}
+	_, _ = next.Update(execCmd(cmd))
+	if len(provider.requests) != 1 {
+		t.Fatalf("provider requests = %d, want 1", len(provider.requests))
+	}
+	system := provider.requests[0].Messages[0].Content
+	for _, want := range []string{"RESUMED CRITIQUE ISSUE", "RESUMED CRITIQUE MITIGATION"} {
+		if !strings.Contains(system, want) {
+			t.Fatalf("resumed design context lost %q:\n%s", want, system)
+		}
+	}
+	events, err := store.ReadEvents(session.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countSessionEvents(events, sessions.EventDesignModeEntered); got != 1 {
+		t.Fatalf("first resumed prompt created a new design epoch: count=%d", got)
+	}
+}
+
+func TestResumedDesignSessionExposesApproveDesignFromReconstructedState(t *testing.T) {
+	// A resumed session with a persisted plan and a clean critique must expose
+	// approve_design to the design agent on the first prompt after resume, and a
+	// resumed must-fix critique must keep it hidden. Availability is derived from
+	// the state reconstructed from lifecycle events, not an in-memory value that
+	// /resume reset.
+	cases := []struct {
+		name     string
+		critique schemas.PlanCritique
+		exposed  bool
+	}{
+		{name: "clean critique exposes approve", critique: schemas.PlanCritique{OverallAssessment: "ready"}, exposed: true},
+		{name: "must-fix critique hides approve", critique: schemas.PlanCritique{OverallAssessment: "needs fixes", MustFixBeforeExecution: true}, exposed: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := testSessionStore(t)
+			session, err := store.Create(sessions.CreateInput{Title: "resumed approve", Cwd: t.TempDir()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			planJSON, _ := json.Marshal(tuiDesignPlan())
+			critiqueJSON, _ := json.Marshal(tc.critique)
+			for _, event := range []sessions.AppendEventInput{
+				{Type: sessions.EventDesignModeEntered},
+				{Type: sessions.EventMessage, Payload: map[string]any{"role": "user", "content": "Design the feature"}},
+				{Type: sessions.EventPlanCrystallized, Payload: splicerun.PlanCrystallizedPayload{PlanID: "plan-1", Revision: 1, Plan: planJSON}},
+				{Type: sessions.EventCritiqueRecorded, Payload: splicerun.CritiqueRecordedPayload{PlanID: "plan-1", Revision: 1, Critique: critiqueJSON}},
+			} {
+				if _, err := store.AppendEvent(session.SessionID, event); err != nil {
+					t.Fatal(err)
+				}
+			}
+			provider := &fakeProvider{events: []zeroruntime.StreamEvent{{Type: zeroruntime.StreamEventDone}}}
+			m := newDesignModeTestModel(t.TempDir(), provider, store)
+			m.input.SetValue("/resume " + session.SessionID)
+			updated, _ := m.Update(testKey(tea.KeyEnter))
+			m = updated.(model)
+
+			var captured agent.Options
+			m.captureRunOptions = func(options agent.Options) { captured = options }
+			m.input.SetValue("continue the design")
+			updated, cmd := m.Update(testKey(tea.KeyEnter))
+			next := updated.(model)
+			if cmd == nil {
+				t.Fatal("expected resumed design run")
+			}
+			_, _ = next.Update(execCmd(cmd))
+			if _, ok := captured.Registry.Get(string(splicerun.DesignTransitionApprove)); ok != tc.exposed {
+				t.Fatalf("approve_design exposed = %v, want %v", ok, tc.exposed)
+			}
+		})
+	}
+}
+
+func TestDesignConversationRejectsMalformedLifecycleState(t *testing.T) {
+	store := testSessionStore(t)
+	provider := &scriptedProvider{}
+	m := newDesignModeTestModel(t.TempDir(), provider, store)
+	var err error
+	m, err = m.ensureActiveSession("design")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.designMode = true
+	m.designNoticeShown = true
+	m, _ = m.appendSessionEvent(sessions.EventDesignModeEntered, nil)
+	m, _ = m.appendSessionEvent(sessions.EventPlanCrystallized, map[string]any{"plan_id": "plan-1"})
+	m.input.SetValue("continue")
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("malformed design state started an agent run")
+	}
+	if len(provider.requests) != 0 {
+		t.Fatalf("provider requests = %d, want 0", len(provider.requests))
+	}
+	if !transcriptContains(next.transcript, "Design context error: assemble design context:") {
+		t.Fatalf("missing named design context error: %#v", next.transcript)
+	}
+}
+
 func TestDesignCommandEntersDesignMode(t *testing.T) {
 	store := testSessionStore(t)
 	m := newDesignModeTestModel(t.TempDir(), &fakeProvider{}, store)
+	m.pendingPlan = &schemas.DesignPlan{Epic: "stale plan"}
+	m.pendingCritique = &schemas.PlanCritique{OverallAssessment: "stale critique"}
 	m.input.SetValue("/design")
 
 	updated, cmd := m.Update(testKey(tea.KeyEnter))
@@ -33,6 +670,9 @@ func TestDesignCommandEntersDesignMode(t *testing.T) {
 	}
 	if !next.designMode {
 		t.Fatalf("expected designMode to be true, got false")
+	}
+	if next.pendingPlan != nil || next.pendingCritique != nil {
+		t.Fatalf("new design epoch kept stale state: plan=%#v critique=%#v", next.pendingPlan, next.pendingCritique)
 	}
 	if !transcriptContains(next.transcript, "Design conversation") {
 		t.Fatalf("expected design welcome in transcript, got %#v", next.transcript)
@@ -378,6 +1018,10 @@ func TestCrystallizeResultMsgDisplaysPlan(t *testing.T) {
 	}
 	m.activeSession = sess
 	m.activeRunID = 42
+	m.width = 100
+	m.height = 30
+	m.altScreen = true
+	m.headerPrinted = true
 
 	plan := schemas.DesignPlan{
 		Epic:         "Build a feature",
@@ -410,6 +1054,12 @@ func TestCrystallizeResultMsgDisplaysPlan(t *testing.T) {
 	}
 	if !transcriptContains(next.transcript, critique.OverallAssessment) {
 		t.Fatalf("expected critique assessment in transcript, got %#v", next.transcript)
+	}
+	if !next.sidebarActive() {
+		t.Fatal("crystallized plan did not activate the context sidebar")
+	}
+	if plain := stripSidebar(next.sidebarPlanLines(sidebarWidth(next.width))); !strings.Contains(plain, "Implement it") {
+		t.Fatalf("crystallized task missing from sidebar:\n%s", plain)
 	}
 }
 
@@ -720,6 +1370,7 @@ func TestApproveCommandEmitsResultMessage(t *testing.T) {
 	}
 	m.activeSession = sess
 	m.pendingPlan = &schemas.DesignPlan{Epic: "Build it", Source: "authored"}
+	m = persistPlanForApproval(t, m)
 
 	_, cmd := m.handleApproveCommand()
 	if cmd == nil {
@@ -728,6 +1379,42 @@ func TestApproveCommandEmitsResultMessage(t *testing.T) {
 	msg := execCmd(cmd)
 	if _, ok := msg.(planExecutionResultMsg); !ok {
 		t.Fatalf("expected planExecutionResultMsg, got %T", msg)
+	}
+	events, err := store.ReadEvents(sess.SessionID)
+	if err != nil {
+		t.Fatalf("ReadEvents: %v", err)
+	}
+	var approved splicerun.PlanApprovedPayload
+	for _, ev := range events {
+		if ev.Type == sessions.EventPlanApproved {
+			if err := json.Unmarshal(ev.Payload, &approved); err != nil {
+				t.Fatalf("unmarshal plan_approved: %v", err)
+			}
+		}
+	}
+	if approved.PlanID != "plan-1" {
+		t.Fatalf("plan_approved PlanID = %q, want plan-1 (persisted revision reused)", approved.PlanID)
+	}
+	if approved.Source != splicerun.DesignTransitionSourceManual {
+		t.Fatalf("plan_approved source = %q, want manual", approved.Source)
+	}
+}
+
+func TestApproveCommandStopsWhenAuditPersistenceFails(t *testing.T) {
+	store := testSessionStore(t)
+	m := newDesignModeTestModel(t.TempDir(), &fakeProvider{}, store)
+	m.activeSession = sessions.Metadata{SessionID: "missing-session"}
+	m.pendingPlan = &schemas.DesignPlan{Epic: "Build it", Source: "authored"}
+	planJSON, _ := json.Marshal(*m.pendingPlan)
+	payload, _ := json.Marshal(splicerun.PlanCrystallizedPayload{PlanID: "plan-1", Revision: 1, Plan: planJSON})
+	m.sessionEvents = []sessions.Event{{Type: sessions.EventPlanCrystallized, Payload: payload}}
+
+	updated, cmd := m.handleApproveCommand()
+	if cmd != nil || updated.pending {
+		t.Fatal("approval execution started after plan_approved persistence failed")
+	}
+	if !transcriptContains(updated.transcript, "persist plan_approved") {
+		t.Fatalf("missing persistence error: %#v", updated.transcript)
 	}
 }
 
@@ -772,6 +1459,22 @@ func TestFailedPlanExecutionStillRefreshesSessionEvents(t *testing.T) {
 	}
 }
 
+// persistPlanForApproval appends a plan_crystallized event to the model's
+// session events so approval has a persisted current revision to record on the
+// plan_approved event.
+func persistPlanForApproval(t *testing.T, m model) model {
+	t.Helper()
+	planJSON, err := json.Marshal(*m.pendingPlan)
+	if err != nil {
+		t.Fatalf("marshal plan: %v", err)
+	}
+	m, err = m.appendSessionEvent(sessions.EventPlanCrystallized, splicerun.PlanCrystallizedPayload{PlanID: "plan-1", Revision: 1, Plan: planJSON})
+	if err != nil {
+		t.Fatalf("append plan_crystallized: %v", err)
+	}
+	return m
+}
+
 func approvePlanEvents() []zeroruntime.StreamEvent {
 	args, _ := json.Marshal(schemas.CodeWriterOutput{
 		Files:      []schemas.FileChange{{Path: "hello.go", Content: "package hello\n", ChangeType: "create"}},
@@ -811,6 +1514,7 @@ func TestApproveAskModeSurfacesPermissionRegression(t *testing.T) {
 	m.activeSession = sess
 	tier := schemas.TierTrivial
 	m.pendingPlan = &schemas.DesignPlan{Epic: "Approve callbacks", Requirements: []string{"write the file"}, InScope: []string{"hello.go"}, Source: "authored", Tasks: []schemas.Task{{ID: "t1", Title: "Write hello", Intent: "Create hello.go", EstimatedTier: &tier}}}
+	m = persistPlanForApproval(t, m)
 
 	_, cmd := m.handleApproveCommand()
 	if cmd == nil {
@@ -848,6 +1552,7 @@ func TestApprovePlanStreamsTextAndToolCall(t *testing.T) {
 	m.activeSession = sess
 	tier := schemas.TierTrivial
 	m.pendingPlan = &schemas.DesignPlan{Epic: "Approve callbacks", Requirements: []string{"write the file"}, InScope: []string{"hello.go"}, Source: "authored", Tasks: []schemas.Task{{ID: "t1", Title: "Write hello", Intent: "Create hello.go", EstimatedTier: &tier}}}
+	m = persistPlanForApproval(t, m)
 	started, cmd := m.handleApproveCommand()
 	msg := execCmd(cmd)
 	for _, live := range messages {
@@ -893,6 +1598,7 @@ func TestApprovePlanPersistsAttributedUsage(t *testing.T) {
 	m.activeSession = sess
 	tier := schemas.TierTrivial
 	m.pendingPlan = &schemas.DesignPlan{Epic: "Approve callbacks", Requirements: []string{"write the file"}, InScope: []string{"hello.go"}, Source: "authored", Tasks: []schemas.Task{{ID: "t1", Title: "Write hello", Intent: "Create hello.go", EstimatedTier: &tier}}}
+	m = persistPlanForApproval(t, m)
 	_, cmd := m.handleApproveCommand()
 	if msg := execCmd(cmd); msg == nil {
 		t.Fatal("expected plan result")
@@ -924,6 +1630,7 @@ func TestApprovePlanCancellationDuringPermissionPromptDoesNotHang(t *testing.T) 
 	m.activeSession = sess
 	tier := schemas.TierTrivial
 	m.pendingPlan = &schemas.DesignPlan{Epic: "Approve callbacks", Requirements: []string{"write the file"}, InScope: []string{"hello.go"}, Source: "authored", Tasks: []schemas.Task{{ID: "t1", Title: "Write hello", Intent: "Create hello.go", EstimatedTier: &tier}}}
+	m = persistPlanForApproval(t, m)
 	started, cmd := m.handleApproveCommand()
 	resultCh := make(chan tea.Msg, 1)
 	go func() { resultCh <- execCmd(cmd) }()

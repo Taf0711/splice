@@ -72,12 +72,73 @@ func TestEffectiveReasoningEffort(t *testing.T) {
 	if got := EffectiveReasoningEffort(m, ReasoningEffortHigh); got != ReasoningEffortHigh {
 		t.Errorf("supported effort = %q; want high", got)
 	}
-	if got := EffectiveReasoningEffort(m, ReasoningEffortXHigh); got != ReasoningEffortLow {
-		t.Errorf("unsupported effort should fall back to default low, got %q", got)
+	if got := EffectiveReasoningEffort(m, ReasoningEffortXHigh); got != ReasoningEffortHigh {
+		t.Errorf("unsupported effort should clamp to nearest supported high, got %q", got)
 	}
 	if got := EffectiveReasoningEffort(m, ""); got != ReasoningEffortLow {
 		t.Errorf("empty effort should use default low, got %q", got)
 	}
+}
+
+func TestDefaultRegistryReasoningEffortTiers(t *testing.T) {
+	registry, err := DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry: %v", err)
+	}
+	luna, err := registry.Require("gpt-5.6-luna")
+	if err != nil {
+		t.Fatalf("Require gpt-5.6-luna: %v", err)
+	}
+	sonnet, err := registry.Require("claude-sonnet-4.5")
+	if err != nil {
+		t.Fatalf("Require claude-sonnet-4.5: %v", err)
+	}
+	gemini, err := registry.Require("gemini-2.5-pro")
+	if err != nil {
+		t.Fatalf("Require gemini-2.5-pro: %v", err)
+	}
+	gpt41, err := registry.Require("gpt-4.1")
+	if err != nil {
+		t.Fatalf("Require gpt-4.1: %v", err)
+	}
+
+	cases := []struct {
+		name      string
+		model     ModelEntry
+		requested ReasoningEffort
+		want      ReasoningEffort
+	}{
+		{"luna xhigh", luna, ReasoningEffortXHigh, ReasoningEffortXHigh},
+		{"luna max", luna, ReasoningEffortMax, ReasoningEffortMax},
+		{"luna default", luna, "", ReasoningEffortMedium},
+		{"sonnet xhigh", sonnet, ReasoningEffortXHigh, ReasoningEffortHigh},
+		{"gemini max", gemini, ReasoningEffortMax, ReasoningEffortHigh},
+		{"gpt-4.1 high", gpt41, ReasoningEffortHigh, ReasoningEffortNone},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := EffectiveReasoningEffort(tc.model, tc.requested); got != tc.want {
+				t.Fatalf("EffectiveReasoningEffort(%q, %q) = %q, want %q", tc.model.ID, tc.requested, got, tc.want)
+			}
+		})
+	}
+
+	efforts := registry.ReasoningEfforts("gpt-5.6-luna")
+	if !containsReasoningEffort(efforts, ReasoningEffortXHigh) || !containsReasoningEffort(efforts, ReasoningEffortMax) {
+		t.Fatalf("gpt-5.6-luna efforts = %v, want xhigh and max", efforts)
+	}
+	if containsReasoningEffort(efforts, ReasoningEffortMinimal) {
+		t.Fatalf("gpt-5.6-luna efforts = %v, must not contain minimal", efforts)
+	}
+}
+
+func containsReasoningEffort(efforts []ReasoningEffort, want ReasoningEffort) bool {
+	for _, effort := range efforts {
+		if effort == want {
+			return true
+		}
+	}
+	return false
 }
 
 // TestEffectiveReasoningEffortUsesNameFallback pins that the run-time resolver
@@ -96,9 +157,9 @@ func TestEffectiveReasoningEffortUsesNameFallback(t *testing.T) {
 		t.Errorf("minimal (via name fallback) = %q; want minimal", got)
 	}
 	// xhigh is outside the inferred set and there is no declared default, so it
-	// coerces to the first inferred tier rather than to "none".
-	if got := EffectiveReasoningEffort(gpt5, ReasoningEffortXHigh); got != ReasoningEffortMinimal {
-		t.Errorf("unsupported effort on a fallback model = %q; want minimal (first inferred)", got)
+	// clamps downward to the nearest inferred tier.
+	if got := EffectiveReasoningEffort(gpt5, ReasoningEffortXHigh); got != ReasoningEffortHigh {
+		t.Errorf("unsupported effort on a fallback model = %q; want high", got)
 	}
 
 	// Non-reasoning model: name matches nothing, stays "none".

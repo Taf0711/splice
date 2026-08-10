@@ -110,11 +110,15 @@ type stubStore struct {
 	bundle   schemas.MemoryBundle
 	err      error
 	gotQuery *schemas.MemoryQuery
-	upserts  *[]schemas.MemoryObservation
+	// queries logs every Search in call order, so tests can assert exactly which
+	// stages triggered retrieval.
+	queries []schemas.MemoryQuery
+	upserts *[]schemas.MemoryObservation
 }
 
 func (s *stubStore) Search(ctx context.Context, q schemas.MemoryQuery) (schemas.MemoryBundle, error) {
 	s.gotQuery = &q
+	s.queries = append(s.queries, q)
 	return s.bundle, s.err
 }
 
@@ -245,13 +249,13 @@ func TestRunPassInjectsMemoryBundleAndSkipsRetrievalErrors(t *testing.T) {
 	plan := schemas.ExecutionPlan{
 		Tier:          schemas.TierLight,
 		RequestIntent: intent,
-		Stages:        []schemas.ExecutionStage{{Name: "memory_stage"}},
+		Stages:        []schemas.ExecutionStage{{Name: "code_writer"}},
 	}
 	bundle := schemas.MemoryBundle{
-		RequestingAgent: "memory_stage",
+		RequestingAgent: "code_writer",
 		Observations: []schemas.MemoryObservation{{
 			Scope:      "project",
-			OwnerAgent: "memory_stage",
+			OwnerAgent: "code_writer",
 			Visibility: "shareable",
 			MemoryType: "decision",
 			Title:      "Use cached context",
@@ -262,7 +266,7 @@ func TestRunPassInjectsMemoryBundleAndSkipsRetrievalErrors(t *testing.T) {
 	var inputs []schemas.HarnessStageInput
 
 	records, outputs, completed, err := runPass(context.Background(), "run-memory", 1, plan, stageRegistry{
-		"memory_stage": &capturingStage{inputs: &inputs},
+		"code_writer": &capturingStage{inputs: &inputs},
 	}, runFakeProvider{}, agent.Options{}, workDir, nil, nil, retriever)
 	if err != nil {
 		t.Fatalf("runPass with memory: %v", err)
@@ -279,8 +283,8 @@ func TestRunPassInjectsMemoryBundleAndSkipsRetrievalErrors(t *testing.T) {
 	if retriever.gotQuery == nil {
 		t.Fatal("expected memory query")
 	}
-	if retriever.gotQuery.RequestingAgent != "memory_stage" {
-		t.Fatalf("requesting agent = %q, want stage name", retriever.gotQuery.RequestingAgent)
+	if retriever.gotQuery.RequestingAgent != "code_writer" {
+		t.Fatalf("requesting agent = %q, want code_writer", retriever.gotQuery.RequestingAgent)
 	}
 	if retriever.gotQuery.ProjectPath == nil || *retriever.gotQuery.ProjectPath != workDir {
 		t.Fatalf("project path = %#v, want %q", retriever.gotQuery.ProjectPath, workDir)
@@ -305,7 +309,7 @@ func TestRunPassInjectsMemoryBundleAndSkipsRetrievalErrors(t *testing.T) {
 	var errorInputs []schemas.HarnessStageInput
 	var progress []string
 	_, _, completed, err = runPass(context.Background(), "run-memory-error", 1, plan, stageRegistry{
-		"memory_stage": &capturingStage{inputs: &errorInputs},
+		"code_writer": &capturingStage{inputs: &errorInputs},
 	}, runFakeProvider{}, agent.Options{OnReasoning: func(text string) { progress = append(progress, text) }}, workDir, nil, nil, errorRetriever)
 	if err != nil || !completed {
 		t.Fatalf("memory retrieval error should not fail run: completed=%v err=%v", completed, err)
@@ -313,19 +317,74 @@ func TestRunPassInjectsMemoryBundleAndSkipsRetrievalErrors(t *testing.T) {
 	if len(errorInputs) != 1 || errorInputs[0].MemoryBundle != nil {
 		t.Fatalf("expected no memory bundle after retrieval error, got %#v", errorInputs)
 	}
-	if !strings.Contains(strings.Join(progress, ""), "[memory_stage] memory retrieval skipped: sidecar down") {
+	if !strings.Contains(strings.Join(progress, ""), "[code_writer] memory retrieval skipped: sidecar down") {
 		t.Fatalf("expected memory skip progress, got %q", strings.Join(progress, ""))
 	}
 
 	var nilInputs []schemas.HarnessStageInput
 	_, _, completed, err = runPass(context.Background(), "run-memory-nil", 1, plan, stageRegistry{
-		"memory_stage": &capturingStage{inputs: &nilInputs},
+		"code_writer": &capturingStage{inputs: &nilInputs},
 	}, runFakeProvider{}, agent.Options{}, workDir, nil, nil, nil)
 	if err != nil || !completed {
 		t.Fatalf("nil retriever should complete: completed=%v err=%v", completed, err)
 	}
 	if len(nilInputs) != 1 || nilInputs[0].MemoryBundle != nil {
 		t.Fatalf("expected nil retriever to leave memory unset, got %#v", nilInputs)
+	}
+}
+
+// TestRunPassSearchesOnlyMemoryConsumingStages: the orchestrator must call
+// MemoryStore.Search only for stages that consume HarnessStageInput.MemoryBundle
+// (code_writer and test_generator). Every other stage must receive no
+// MemoryBundle and trigger no search, even when a memory store is live.
+func TestRunPassSearchesOnlyMemoryConsumingStages(t *testing.T) {
+	workDir := t.TempDir()
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierStandard,
+		RequestIntent: "implement the feature",
+		Stages: []schemas.ExecutionStage{
+			{Name: "code_writer"},
+			{Name: "static_analyzer"},
+			{Name: "test_generator"},
+			{Name: "test_runner"},
+			{Name: "custom_stage"},
+		},
+	}
+	retriever := &stubStore{}
+	inputNames := []string{"code_writer", "static_analyzer", "test_generator", "test_runner", "custom_stage"}
+	registry := stageRegistry{}
+	var inputs []schemas.HarnessStageInput
+	for _, name := range inputNames {
+		registry[name] = &capturingStage{inputs: &inputs}
+	}
+
+	_, _, completed, err := runPass(context.Background(), "run-memory-consumers", 1, plan, registry, runFakeProvider{}, agent.Options{}, workDir, nil, nil, retriever)
+	if err != nil || !completed {
+		t.Fatalf("runPass: completed=%v err=%v", completed, err)
+	}
+	if got := len(retriever.queries); got != 2 {
+		t.Fatalf("memory searches = %d, want exactly 2 (code_writer, test_generator); queries=%#v", got, retriever.queries)
+	}
+	if got := retriever.queries[0].RequestingAgent; got != "code_writer" {
+		t.Fatalf("first search requesting agent = %q, want code_writer", got)
+	}
+	if got := retriever.queries[1].RequestingAgent; got != "test_generator" {
+		t.Fatalf("second search requesting agent = %q, want test_generator", got)
+	}
+	if len(inputs) != len(inputNames) {
+		t.Fatalf("captured inputs = %d, want %d", len(inputs), len(inputNames))
+	}
+	for _, input := range inputs {
+		switch input.StageName {
+		case "code_writer", "test_generator":
+			if input.MemoryBundle == nil {
+				t.Fatalf("consuming stage %s received no memory bundle", input.StageName)
+			}
+		default:
+			if input.MemoryBundle != nil {
+				t.Fatalf("non-consuming stage %s received a memory bundle: %#v", input.StageName, input.MemoryBundle)
+			}
+		}
 	}
 }
 

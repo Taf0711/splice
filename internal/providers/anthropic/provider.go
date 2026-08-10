@@ -56,6 +56,11 @@ func thinkingBudgetForEffort(effort string) int {
 // budget is requested, max_tokens is raised if needed so the budget plus a
 // minimum response both fit (Anthropic rejects budget >= max_tokens). enabled is
 // false when no thinking was requested, leaving the request unchanged.
+//
+// The raise has no upper ceiling. A budget above a model's MaxOutputTokens minus
+// minResponseTokens produces a max_tokens the Anthropic API rejects with a 400.
+// TestThinkingBudgetFitsCatalogMaxOutputTokens guards that against the real
+// catalog.
 func resolveThinking(effort string, maxTokens int) (budget int, effectiveMax int, enabled bool) {
 	budget = thinkingBudgetForEffort(effort)
 	if budget <= 0 {

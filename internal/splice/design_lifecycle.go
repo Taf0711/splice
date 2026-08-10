@@ -15,23 +15,29 @@ import (
 //
 // The full lifecycle contract is documented with ReconstructDesignState.
 
-// PlanCrystallizedPayload records one crystallized plan revision.
+// PlanCrystallizedPayload records one crystallized plan revision. Source
+// records whether the user or the design agent requested it.
 type PlanCrystallizedPayload struct {
-	PlanID   string          `json:"plan_id"`
-	Revision int             `json:"revision"`
-	Plan     json.RawMessage `json:"plan"` // encoded schemas.DesignPlan
+	PlanID   string                 `json:"plan_id"`
+	Revision int                    `json:"revision"`
+	Plan     json.RawMessage        `json:"plan"` // encoded schemas.DesignPlan
+	Source   DesignTransitionSource `json:"source,omitempty"`
 }
 
-// CritiqueRecordedPayload records a critique against a plan revision.
+// CritiqueRecordedPayload records a critique against a plan revision. Source
+// records whether the user or the design agent requested the crystallization.
 type CritiqueRecordedPayload struct {
-	PlanID   string          `json:"plan_id"`
-	Revision int             `json:"revision"`
-	Critique json.RawMessage `json:"critique"` // encoded schemas.PlanCritique
+	PlanID   string                 `json:"plan_id"`
+	Revision int                    `json:"revision"`
+	Critique json.RawMessage        `json:"critique"` // encoded schemas.PlanCritique
+	Source   DesignTransitionSource `json:"source,omitempty"`
 }
 
-// PlanApprovedPayload marks the transition from review to execution.
+// PlanApprovedPayload marks the transition from review to execution. Source
+// records whether the user or the design agent requested approval.
 type PlanApprovedPayload struct {
-	PlanID string `json:"plan_id"`
+	PlanID string                 `json:"plan_id"`
+	Source DesignTransitionSource `json:"source,omitempty"`
 }
 
 // TaskStartedPayload records that a task has begun executing.
@@ -100,6 +106,11 @@ func ReconstructDesignState(events []sessions.Event) (DesignState, error) {
 			if len(p.Plan) == 0 {
 				return DesignState{}, fmt.Errorf("design_mode plan_crystallized seq %d: plan is required", event.Sequence)
 			}
+			if p.Source != "" {
+				if err := p.Source.Validate(); err != nil {
+					return DesignState{}, fmt.Errorf("design_mode plan_crystallized seq %d: %w", event.Sequence, err)
+				}
+			}
 			var plan schemas.DesignPlan
 			if err := json.Unmarshal(p.Plan, &plan); err != nil {
 				return DesignState{}, fmt.Errorf("design_mode plan_crystallized seq %d: decode plan: %w", event.Sequence, err)
@@ -120,6 +131,11 @@ func ReconstructDesignState(events []sessions.Event) (DesignState, error) {
 			if len(c.Critique) == 0 {
 				return DesignState{}, fmt.Errorf("design_mode critique_recorded seq %d: critique is required", event.Sequence)
 			}
+			if c.Source != "" {
+				if err := c.Source.Validate(); err != nil {
+					return DesignState{}, fmt.Errorf("design_mode critique_recorded seq %d: %w", event.Sequence, err)
+				}
+			}
 			var critique schemas.PlanCritique
 			if err := json.Unmarshal(c.Critique, &critique); err != nil {
 				return DesignState{}, fmt.Errorf("design_mode critique_recorded seq %d: decode critique: %w", event.Sequence, err)
@@ -132,6 +148,11 @@ func ReconstructDesignState(events []sessions.Event) (DesignState, error) {
 			}
 			if a.PlanID == "" {
 				return DesignState{}, fmt.Errorf("design_mode plan_approved seq %d: plan_id is required", event.Sequence)
+			}
+			if a.Source != "" {
+				if err := a.Source.Validate(); err != nil {
+					return DesignState{}, fmt.Errorf("design_mode plan_approved seq %d: %w", event.Sequence, err)
+				}
 			}
 			state.Phase = schemas.DesignPhaseExecuting
 			state.TaskOutcomes = map[string]schemas.TaskRunStatus{}

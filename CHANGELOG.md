@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+* **design:** the design agent can now request to crystallize the plan or approve it for execution. Revisions keep the current plan and critique context. The approve transition stays available after a resume when no critique requires a fix. Splice records who requested each transition.
+
+### Fixed
+
+* **tui:** `/stages` now refreshes model lists from each saved provider. The escalation and stage pickers previously showed only the short static catalog.
+* **reasoning:** a request for `xhigh` or `max` could give less thinking than `high`, including the least. An unsupported tier now steps to the nearest supported tier. Supported tiers now come from the models.dev snapshot when available.
+* **tui:** the sidebar layout stays stable during brief content changes. The composer width follows the chat column, and swarm rows stay with their run.
+
+### Changed
+
+* **memory:** only code_writer and test_generator query memory now. Other stages skip the sidecar search, so they do not pull in results that do not apply.
+
 ## [0.1.4](https://github.com/Taf0711/splice/compare/v0.1.3...v0.1.4) (2026-08-06)
 
 ### Added

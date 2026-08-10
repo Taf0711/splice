@@ -300,18 +300,14 @@ func TestSidebarFileLinesOverflowExcludesLiveRow(t *testing.T) {
 	}
 }
 
-// TestSidebarHasContentForLiveWrite: the sidebar counts an in-flight first
-// write as content, so the FILES pulse is visible before any result row lands.
-func TestSidebarHasContentForLiveWrite(t *testing.T) {
+func TestSidebarShowsLiveWriteBeforeResult(t *testing.T) {
 	m := sidebarTestModel()
-	m.plan.steps = nil // drop the helper's seeded plan: no agents/plan/files now
-	if m.sidebarHasContent() {
-		t.Fatal("session without agents/plan/files should have no sidebar content")
-	}
+	m.plan.steps = nil
 	m.streamCallName = "write_file"
 	m.streamCallDecoder = newStreamingDecoder()
 	m.streamCallDecoder.feed(`{"path":"web/new.css","content":"body{}`)
-	if !m.sidebarHasContent() {
-		t.Fatal("a live in-flight write must count as sidebar content")
+	lines, _ := m.sidebarFileLines(sidebarWidth(m.width))
+	if plain := plainRender(t, lines); !strings.Contains(plain, "new.css") {
+		t.Fatalf("live write missing before its result row:\n%s", plain)
 	}
 }

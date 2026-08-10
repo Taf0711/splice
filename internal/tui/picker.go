@@ -772,6 +772,11 @@ func (m model) applyModelPickerModelsDiscovered(msg modelPickerModelsDiscoveredM
 		m.modelPickerLiveByProvider = map[string][]providermodeldiscovery.Model{}
 	}
 	m.modelPickerLiveByProvider[msg.providerID] = append([]providermodeldiscovery.Model{}, msg.models...)
+	// If the stage model wizard is open, merge the freshly discovered live models
+	// into its option source so the provider's model pickers show them; an empty/
+	// errored result is filtered before this point, so modelPickerLiveByProvider is
+	// non-empty and mergeModelOptions deduplicates against existing options.
+	m.populateStageModelWizardModels(m.stageModelWizard)
 	// Rebuild the open picker so this provider's section shows its live models,
 	// preserving the current query + selection.
 	if m.picker != nil && m.picker.kind == pickerModel {

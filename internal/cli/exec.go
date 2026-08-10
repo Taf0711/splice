@@ -17,7 +17,6 @@ import (
 	"github.com/Taf0711/splice/internal/errhint"
 	"github.com/Taf0711/splice/internal/imageinput"
 	"github.com/Taf0711/splice/internal/lsp"
-	"github.com/Taf0711/splice/internal/memd"
 	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/notify"
 	"github.com/Taf0711/splice/internal/providercatalog"
@@ -803,7 +802,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			sessionRecorder.append(sessions.EventUsage, payload)
 		},
 	}
-	resolvedMemClient, mErr := memd.Resolve(runCtx)
+	resolvedMemClient, mErr := deps.resolveMemory(runCtx)
 	var memClient splicerun.MemoryStore
 	if mErr != nil {
 		writer.warning(fmt.Sprintf("memory sidecar unavailable; running without memory injection: %v", mErr))
@@ -1461,8 +1460,7 @@ func forwardedReasoningEffort(registry modelregistry.Registry, modelID string, r
 
 // reasoningEffortNotice resolves the requested --reasoning-effort against the
 // selected model's supported efforts via EffectiveReasoningEffort and returns a
-// short advisory when the requested value is unsupported (and was coerced to the
-// model default).
+// short advisory when the requested value is unsupported and was clamped.
 func reasoningEffortNotice(registry modelregistry.Registry, modelID string, requested string) string {
 	trimmed := strings.TrimSpace(modelID)
 	if trimmed == "" {

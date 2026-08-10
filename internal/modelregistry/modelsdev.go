@@ -62,6 +62,10 @@ type modelsDevModel struct {
 		CacheWrite float64             `json:"cache_write"`
 		Tiers      []modelsDevCostTier `json:"tiers"`
 	} `json:"cost"`
+	ReasoningOptions []struct {
+		Type   string   `json:"type"`
+		Values []string `json:"values"`
+	} `json:"reasoning_options"`
 }
 
 type modelsDevCostTier struct {
@@ -73,6 +77,26 @@ type modelsDevCostTier struct {
 		Type string `json:"type"`
 		Size int    `json:"size"`
 	} `json:"tier"`
+}
+
+func modelsDevReasoningEfforts(record modelsDevModel) []ReasoningEffort {
+	for _, option := range record.ReasoningOptions {
+		if option.Type != "effort" {
+			continue
+		}
+		efforts := make([]ReasoningEffort, 0, len(option.Values))
+		for _, value := range option.Values {
+			effort := ReasoningEffort(value)
+			if ValidReasoningEffort(effort) {
+				efforts = append(efforts, effort)
+			}
+		}
+		if len(efforts) == 0 {
+			return nil
+		}
+		return efforts
+	}
+	return nil
 }
 
 // modelsDevCostTiers converts models.dev context steps to registry tiers.
@@ -242,6 +266,11 @@ func applyModelsDevOverridesWithSource(entries []ModelEntry, providers map[strin
 			}
 		}
 		if !found {
+			if entry.DefaultReasoningEffort != "" && len(entry.ReasoningEfforts) == 0 {
+				// A newer disk snapshot can omit a curated model. Keep its
+				// name-based fallback so the curated default remains valid.
+				entry.ReasoningEfforts = reasoningEffortsForModelName(entry.APIModel)
+			}
 			continue
 		}
 		if source != modelsDevEmbeddedSource {
@@ -266,6 +295,16 @@ func applyModelsDevOverridesWithSource(entries []ModelEntry, providers map[strin
 			entry.Cost.Tiers = modelsDevCostTiers(record)
 			entry.Cost.Source = source
 			entry.Cost.SourceLastVerified = verifiedDate
+		}
+		if efforts := modelsDevReasoningEfforts(record); efforts != nil {
+			entry.ReasoningEfforts = efforts
+			if entry.DefaultReasoningEffort != "" {
+				entry.DefaultReasoningEffort = clampEffort(efforts, entry.DefaultReasoningEffort)
+			}
+		} else if entry.DefaultReasoningEffort != "" && len(entry.ReasoningEfforts) == 0 {
+			// A newer disk snapshot can omit a curated model. Keep its
+			// name-based fallback so the curated default remains valid.
+			entry.ReasoningEfforts = reasoningEffortsForModelName(entry.APIModel)
 		}
 	}
 
@@ -335,6 +374,7 @@ func applyModelsDevOverridesWithSource(entries []ModelEntry, providers map[strin
 			Description:       fmt.Sprintf("Model from the %s models.dev provider.", providerKey),
 			ModelsDevProvider: providerKey,
 		}
+		candidate.ReasoningEfforts = modelsDevReasoningEfforts(record)
 		if err := candidate.Validate(); err != nil {
 			skipped++
 			continue

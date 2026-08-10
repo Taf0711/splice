@@ -1,12 +1,7 @@
 // sidebar.go renders the right-hand context sidebar for the two-column chat
-// layout (alt-screen managed mode only). The sidebar surfaces three sections —
-// the spawned AGENTS and their live working detail, the live PLAN (the same data
-// the pinned plan panel reads), and a token/context readout at the bottom — so
-// the chat column stays focused on the conversation. It is a set of pure
-// helpers: the layout in
-// transcriptView renders the chat at a reduced width via the existing scroll
-// engine, builds a sidebar block of the same height here, and joins the two
-// columns row-by-row through joinColumns.
+// layout in managed mode. It shows agents, plans, pipeline stages, memory,
+// changed files, recent activity, and token context. The helpers keep rendering
+// pure: transcriptView builds both columns and joinColumns combines them.
 package tui
 
 import (
@@ -22,9 +17,8 @@ import (
 	"github.com/Taf0711/splice/internal/tools"
 )
 
-// sidebar geometry. The sidebar takes ~30% of the width, clamped so it never
-// crowds the chat on a narrow terminal nor sprawls on a wide one. A 1-cell
-// divider sits between the two columns.
+// Sidebar geometry. The sidebar takes about 30% of the width. A padded divider
+// separates it from the chat.
 const (
 	sidebarMinWidth  = 26
 	sidebarMaxWidth  = 40
@@ -48,12 +42,7 @@ func (m model) sidebarActive() bool {
 }
 
 // sidebarToggleAllowed reports whether the toggle-sidebar keybinding should
-// respond. Unlike sidebarAvailable it OMITS the content check
-// (sidebarHasContent) so the user can toggle their show/hide preference even
-// when the sidebar auto-hid due to having nothing to show. The content gate
-// is still applied at render time (sidebarActive chains sidebarAvailable), so
-// toggling on when there's no content just records the preference for when
-// content arrives — the sidebar stays hidden until then.
+// respond. It ignores sidebarHidden so the same key can restore the column.
 func (m model) sidebarToggleAllowed() bool {
 	if !m.altScreen || m.height <= 0 || m.subchat.active {
 		return false
@@ -107,40 +96,10 @@ func (m model) sidebarAvailable() bool {
 	if m.transcriptEmpty() {
 		return false
 	}
-	// Auto-hide when the panel has nothing to show (no sub-agents and no active
-	// plan): a fixed-width column of mostly empty space is wasted, so reclaim it
-	// for the full-width chat. The panel returns the moment an agent spawns or a
-	// plan starts. (Ctrl+B still force-hides it when there IS content.)
-	if !m.sidebarHasContent() {
-		return false
-	}
+	// Keep the layout stable across transient content changes. A run start clears
+	// live plan and agent state before the first new event arrives; content-based
+	// auto-hide made the whole column disappear and reappear during that gap.
 	return true
-}
-
-// sidebarHasContent reports whether the context sidebar has anything worth a
-// column: at least one agent (a specialist delegation or a swarm member) or a
-// non-empty plan. Used to auto-hide the panel — and reclaim its width for the
-// chat — during plain idle stretches with neither.
-func (m model) sidebarHasContent() bool {
-	if len(m.sidebarSpecialists()) > 0 || len(m.swarmSpawnedAgents()) > 0 {
-		return true
-	}
-	if len(m.touchedFiles()) > 0 || m.liveEditingPath() != "" {
-		// A live in-flight write counts before its result row exists, so the
-		// FILES pulse for the session's first mutation isn't hidden.
-		return true
-	}
-	if !m.plan.isEmpty() {
-		return true
-	}
-	// PIPELINE sidebar: show during pipeline runs even without agents, plans,
-	// or files (AR12c/A-13).
-	if !m.pipeline.isEmpty() {
-		return true
-	}
-	// Memory sidebar: show when the sidecar is active so the section doesn't
-	// auto-hide during a memory-active idle stretch.
-	return m.memoryStatus == "active"
 }
 
 // chatColumnWidth is the chat's render width: the full chat width normally, and
@@ -244,6 +203,16 @@ type swarmAgent struct {
 	finishedAt time.Time // when first seen finished (splice until the spinner tick stamps it)
 }
 
+// sidebarAgentRunID keeps the latest run addressable during the finished-agent
+// linger. activeRunID becomes zero as soon as the response settles, while runID
+// remains the ID of that completed turn until the next turn starts.
+func (m model) sidebarAgentRunID() int {
+	if m.activeRunID != 0 {
+		return m.activeRunID
+	}
+	return m.runID
+}
+
 // swarmSpawnedAgents derives the swarm/team members from the transcript's
 // swarm_spawn rows — the swarm roster lives in the CLI runtime, not the TUI
 // model, so members are recovered from the tool stream. Each member pairs a
@@ -259,10 +228,12 @@ func (m model) swarmSpawnedAgents() []swarmAgent {
 	// row, to be paired with the next swarm_spawn result row.
 	pendingTask := ""
 	havePending := false
+	runID := m.sidebarAgentRunID()
 	for _, row := range m.transcript {
-		// Scope to the current run's spawns so finished members from an earlier
-		// turn don't reappear when a later run keeps members visible (below).
-		if row.tool != "swarm_spawn" || row.runID != m.activeRunID {
+		// Scope to the current or most recently completed run. This keeps the
+		// finish linger visible after activeRunID resets, without reviving agents
+		// when the next run gets a new ID.
+		if row.tool != "swarm_spawn" || row.runID != runID {
 			continue
 		}
 		switch row.kind {
@@ -336,13 +307,13 @@ var swarmStatusRe = regexp.MustCompile(`(?m)^\s*[-–—]?\s*(\S+)\s+\[([a-zA-Z]
 // is what lets a swarm_collect that runs while members are still working keep the
 // AGENTS panel populated instead of clearing it.
 //
-// Scoped to the active run, exactly like the spawn rows in swarmSpawnedAgents: a
-// prior run's status/collect (whose task ids can repeat) must not mark a current
-// member done/failed and drop or fade it.
+// Scoped to the current or most recently completed run, exactly like the spawn
+// rows in swarmSpawnedAgents. A prior run's status must not affect a new member.
 func (m model) swarmMemberStatus() map[string]string {
 	status := map[string]string{}
+	runID := m.sidebarAgentRunID()
 	for _, row := range m.transcript {
-		if row.kind != rowToolResult || row.runID != m.activeRunID {
+		if row.kind != rowToolResult || row.runID != runID {
 			continue
 		}
 		if row.tool != "swarm_status" && row.tool != "swarm_collect" {
@@ -759,9 +730,34 @@ func sidebarPlaceholder(text string, width int) string {
 	return " " + zeroTheme.faint.Render(truncateRunes(text, maxInt(1, width-1)))
 }
 
+// sidebarPlanState returns the live runtime plan, or the reviewed design plan
+// while no runtime plan is available. beginRun clears the runtime plan, but it
+// must not make an approved design plan disappear before execution reports its
+// first update_plan result.
+func (m model) sidebarPlanState() planPanelState {
+	if !m.plan.isEmpty() {
+		return m.plan
+	}
+	if m.pendingPlan == nil || len(m.pendingPlan.Tasks) == 0 {
+		return planPanelState{}
+	}
+	state := planPanelState{steps: make([]planStep, 0, len(m.pendingPlan.Tasks))}
+	for _, task := range m.pendingPlan.Tasks {
+		content := strings.TrimSpace(task.Title)
+		if content == "" {
+			content = strings.TrimSpace(task.Intent)
+		}
+		if content == "" {
+			content = task.ID
+		}
+		state.steps = append(state.steps, planStep{content: content, status: "pending"})
+	}
+	return state
+}
+
 // sidebarPlanHeader renders the PLAN section header with the done/total count.
 func (m model) sidebarPlanHeader(width int) string {
-	state := m.plan
+	state := m.sidebarPlanState()
 	if state.isEmpty() {
 		return sidebarHeader("PLAN", width)
 	}
@@ -782,10 +778,10 @@ func (m model) sidebarPlanHeader(width int) string {
 
 // sidebarPlanLines renders the plan step list for the sidebar using the same
 // status glyphs as the pinned panel (✓ done, • in-progress, ○ pending, ✗
-// failed), reading m.plan directly so it stays in sync. Returns nil for an
-// empty plan (the caller then shows a placeholder).
+// failed). It prefers the live runtime plan and falls back to the reviewed
+// design plan. Returns nil when neither has steps.
 func (m model) sidebarPlanLines(width int) []string {
-	state := m.plan
+	state := m.sidebarPlanState()
 	if state.isEmpty() {
 		return nil
 	}

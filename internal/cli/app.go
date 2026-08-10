@@ -20,6 +20,7 @@ import (
 	"github.com/Taf0711/splice/internal/hooks"
 	"github.com/Taf0711/splice/internal/localcontrol"
 	"github.com/Taf0711/splice/internal/mcp"
+	"github.com/Taf0711/splice/internal/memd"
 	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/oauth"
 	"github.com/Taf0711/splice/internal/observability"
@@ -90,6 +91,7 @@ type appDeps struct {
 	registerMCPTools       func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error)
 	prepareWorktree        func(context.Context, worktrees.Options) (worktrees.Result, error)
 	mergeBackWorktree      func(context.Context, worktrees.MergeBackOptions) (worktrees.MergeBackResult, error)
+	resolveMemory          func(context.Context) (*memd.Client, error)
 	detectVerifyPlan       func(string) (verify.Plan, error)
 	runVerify              func(context.Context, verify.Plan, verify.RunOptions) verify.Report
 	runSelfVerify          func(context.Context, verify.Plan, selfverify.Options) selfverify.Report
@@ -206,6 +208,7 @@ func defaultAppDeps() appDeps {
 		},
 		prepareWorktree:   worktrees.Prepare,
 		mergeBackWorktree: worktrees.MergeBack,
+		resolveMemory:     memd.Resolve,
 		detectVerifyPlan:  verify.DetectPlan,
 		runVerify:         verify.Run,
 		runSelfVerify:     selfverify.Run,
@@ -575,6 +578,13 @@ func fillAppDeps(deps appDeps) appDeps {
 	}
 	if deps.registerMCPTools == nil {
 		deps.registerMCPTools = defaults.registerMCPTools
+	}
+	if deps.resolveMemory == nil {
+		// Memory stays DISABLED for partial deps (the ordinary shape tests use):
+		// without an explicit resolver, an exec run must never spawn the
+		// production splice-memd daemon or reach user memory. Production goes
+		// through defaultAppDeps, which sets memd.Resolve before this fill.
+		deps.resolveMemory = func(context.Context) (*memd.Client, error) { return nil, nil }
 	}
 	if deps.prepareWorktree == nil {
 		deps.prepareWorktree = defaults.prepareWorktree

@@ -557,7 +557,7 @@ func runPass(
 			NextStage:         nextStage,
 		}
 
-		if mem != nil {
+		if mem != nil && stageConsumesMemory(stageName) {
 			bundle, mErr := mem.Search(ctx, newMemoryQuery(stageName, plan.RequestIntent, workDir))
 			if mErr != nil {
 				emitProgress(options, fmt.Sprintf("[%s] memory retrieval skipped: %v\n", stageName, mErr))
