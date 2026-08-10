@@ -10,6 +10,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/Taf0711/splice/internal/sessions"
+	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/tools"
 )
 
@@ -291,6 +292,34 @@ func TestRenderContextSidebarDimensions(t *testing.T) {
 	}
 	if !strings.Contains(plain, "tokens") {
 		t.Fatalf("sidebar missing token floor:\n%s", plain)
+	}
+}
+
+func TestSidebarUsesPendingDesignPlanWhenRuntimePlanIsEmpty(t *testing.T) {
+	m := sidebarTestModel()
+	m.plan.clear()
+	m.pendingPlan = &schemas.DesignPlan{Tasks: []schemas.Task{
+		{ID: "inspect", Title: "Inspect the sidebar", Intent: "Trace sidebar state"},
+		{ID: "fix", Title: "Keep it visible", Intent: "Fix the shared visibility seam"},
+	}}
+
+	if !m.sidebarActive() {
+		t.Fatal("a pending design plan should keep the sidebar active")
+	}
+	plain := stripSidebar(m.sidebarPlanLines(sidebarWidth(m.width)))
+	if !strings.Contains(plain, "Inspect the sidebar") || !strings.Contains(plain, "Keep it visible") {
+		t.Fatalf("pending design tasks missing from sidebar:\n%s", plain)
+	}
+
+	m = m.beginRun(func() {})
+	if !m.sidebarActive() {
+		t.Fatal("beginRun should not make the pending design plan sidebar disappear")
+	}
+
+	m.plan.steps = []planStep{{content: "Run the active task", status: "in_progress"}}
+	plain = stripSidebar(m.sidebarPlanLines(sidebarWidth(m.width)))
+	if !strings.Contains(plain, "Run the active task") || strings.Contains(plain, "Inspect the sidebar") {
+		t.Fatalf("runtime plan should replace the design-plan fallback:\n%s", plain)
 	}
 }
 

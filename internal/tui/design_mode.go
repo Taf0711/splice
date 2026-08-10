@@ -38,8 +38,12 @@ func (m model) enterDesignMode(notice string) model {
 	}
 	m, err = m.appendSessionEvent(sessions.EventDesignModeEntered, nil)
 	if err != nil {
+		m.designMode = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "session record error: " + err.Error()})
+		return m
 	}
+	m.pendingPlan = nil
+	m.pendingCritique = nil
 	if notice != "" {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: notice})
 	}
@@ -67,6 +71,13 @@ func (m model) handleExecCommand(text string) (model, tea.Cmd) {
 }
 
 func (m model) handleApproveCommand() (model, tea.Cmd) {
+	return m.startApproval(splicerun.DesignTransitionSourceManual)
+}
+
+// startApproval validates the approval preconditions, then begins the plan
+// execution run. source distinguishes a manual /approve from an agent-requested
+// approval for the transcript and the persisted lifecycle audit.
+func (m model) startApproval(source splicerun.DesignTransitionSource) (model, tea.Cmd) {
 	if m.pending {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot approve while a run is active."})
 		return m, nil
@@ -83,8 +94,36 @@ func (m model) handleApproveCommand() (model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "No provider configured."})
 		return m, nil
 	}
-
-	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: "/approve"})
+	if err := source.Validate(); err != nil {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot approve: " + err.Error()})
+		return m, nil
+	}
+	// Reuse the persisted current revision PlanID so approval records the plan
+	// the user reviewed. Fail loudly when no revision has been persisted.
+	planID, err := m.currentPlanID()
+	if err != nil {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot approve: " + err.Error()})
+		return m, nil
+	}
+	if planID == "" {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot approve: no persisted current design plan revision."})
+		return m, nil
+	}
+	if m.sessionStore == nil || m.activeSession.SessionID == "" {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot approve: no active session store."})
+		return m, nil
+	}
+	updated, err := m.appendSessionEvent(sessions.EventPlanApproved, splicerun.PlanApprovedPayload{PlanID: planID, Source: source})
+	if err != nil {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot approve: persist plan_approved: " + err.Error()})
+		return m, nil
+	}
+	m = updated
+	if source == splicerun.DesignTransitionSourceAgent {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "The design agent requested plan approval."})
+	} else {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: "/approve"})
+	}
 	runCtx, cancel := context.WithCancel(m.ctx)
 	m = m.beginRun(cancel)
 
@@ -331,17 +370,6 @@ func (m model) handleApproveCommand() (model, tea.Cmd) {
 		mem = memClient
 	}
 
-	// Generate a unique plan revision ID before persisting the approval event.
-	planID := "plan-" + strconv.FormatInt(m.now().UnixNano(), 16)
-
-	// Persist plan_approved event before execution.
-	if store != nil && sessionID != "" {
-		_, _ = store.AppendEvent(sessionID, sessions.AppendEventInput{
-			Type:    sessions.EventPlanApproved,
-			Payload: splicerun.PlanApprovedPayload{PlanID: planID},
-		})
-	}
-
 	// Build the start callback: records task_started before the task dispatches,
 	// so the accumulated event order matches execution when it is persisted.
 	onTaskStart := func(task schemas.Task, taskRunID string) {
@@ -394,7 +422,48 @@ func (m model) handleApproveCommand() (model, tea.Cmd) {
 	)
 }
 
+// currentPlanID returns the persisted PlanID of the current reconstructed
+// design revision, or "" when no revision has been persisted. Reusing it
+// across re-crystallizations keeps the Revision counter monotonic and lets
+// approval record the exact plan the user reviewed.
+func (m model) currentPlanID() (string, error) {
+	state, err := splicerun.ReconstructDesignState(m.sessionEvents)
+	if err != nil {
+		return "", fmt.Errorf("reconstruct current design plan: %w", err)
+	}
+	return state.Revision.PlanID, nil
+}
+
+// startDesignTransition dispatches a queued design-agent transition to the
+// same typed controllers the manual commands use. It is called from the
+// agentResponseMsg update path after the design turn succeeds and pending
+// clears, so the transition never nests inside the agent run.
+func (m model) startDesignTransition(req splicerun.DesignTransitionRequest) (model, tea.Cmd) {
+	if err := req.Validate(); err != nil {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Design transition error: " + err.Error()})
+		return m, nil
+	}
+	switch req.Action {
+	case splicerun.DesignTransitionCrystallize:
+		return m.startCrystallization(req.Source, req.ApproveIfReady)
+	case splicerun.DesignTransitionApprove:
+		return m.startApproval(req.Source)
+	default:
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Unknown design transition action: " + string(req.Action)})
+		return m, nil
+	}
+}
+
 func (m model) handleCrystallizeCommand() (model, tea.Cmd) {
+	return m.startCrystallization(splicerun.DesignTransitionSourceManual, false)
+}
+
+// startCrystallization validates the crystallization preconditions, then
+// begins the crystallization and critique run. source distinguishes a manual
+// /crystallize from an agent-requested one for the transcript and the
+// persisted lifecycle audit. approveIfReady schedules a follow-up approval
+// only after a clean, successful critique with no must-fix issue.
+func (m model) startCrystallization(source splicerun.DesignTransitionSource, approveIfReady bool) (model, tea.Cmd) {
 	if m.pending {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot crystallize while a run is active."})
 		return m, nil
@@ -412,7 +481,25 @@ func (m model) handleCrystallizeCommand() (model, tea.Cmd) {
 		return m, nil
 	}
 
-	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: "/crystallize"})
+	if err := source.Validate(); err != nil {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot crystallize: " + err.Error()})
+		return m, nil
+	}
+	// Reuse the current reconstructed PlanID across re-crystallizations so the
+	// Revision counter increments instead of restarting at 1 every time.
+	planID, err := m.currentPlanID()
+	if err != nil {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot crystallize: " + err.Error()})
+		return m, nil
+	}
+	if planID == "" {
+		planID = "plan-" + strconv.FormatInt(m.now().UnixNano(), 16)
+	}
+	if source == splicerun.DesignTransitionSourceAgent {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "The design agent requested crystallization."})
+	} else {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: "/crystallize"})
+	}
 	runCtx, cancel := context.WithCancel(m.ctx)
 	m = m.beginRun(cancel)
 
@@ -424,8 +511,6 @@ func (m model) handleCrystallizeCommand() (model, tea.Cmd) {
 	provider := m.provider
 	cwd := m.cwd
 	runID := m.activeRunID
-
-	planID := "plan-" + strconv.FormatInt(m.now().UnixNano(), 16)
 
 	resolver := m.stageModelResolver
 	if resolver == nil {
@@ -457,7 +542,7 @@ func (m model) handleCrystallizeCommand() (model, tea.Cmd) {
 
 	return m, tea.Batch(
 		func() tea.Msg {
-			wf := splicerun.NewDesignWorkflow(store, sessionID, planID).WithPrimarySelection(m.providerName, m.modelName, string(m.reasoningEffort))
+			wf := splicerun.NewDesignWorkflow(store, sessionID, planID).WithPrimarySelection(m.providerName, m.modelName, string(m.reasoningEffort)).WithLiveState(m.pendingPlan, m.pendingCritique).WithSource(source)
 			// Both design stages run sequentially inside this one goroutine. The
 			// callback appends therefore need no mutex.
 			sessionEvents := []pendingSessionEvent{}
@@ -492,7 +577,7 @@ func (m model) handleCrystallizeCommand() (model, tea.Cmd) {
 				}
 			})
 			plan, critique, err := wf.CrystallizeAndCritique(runCtx, events, provider, resolver, streamFactory, cwd, nil)
-			return crystallizeResultMsg{runID: runID, plan: plan, critique: critique, err: err, store: store, sessionID: sessionID, sessionEvents: sessionEvents}
+			return crystallizeResultMsg{runID: runID, plan: plan, critique: critique, err: err, store: store, sessionID: sessionID, sessionEvents: sessionEvents, source: source, approveIfReady: approveIfReady}
 		},
 		m.spinner.Tick,
 	)
@@ -506,6 +591,10 @@ type crystallizeResultMsg struct {
 	store         *sessions.Store
 	sessionID     string
 	sessionEvents []pendingSessionEvent
+	// source and approveIfReady carry the transition context so the update path
+	// can label the lifecycle events and auto-approve a clean critique.
+	source         splicerun.DesignTransitionSource
+	approveIfReady bool
 }
 
 type planExecutionResultMsg struct {
@@ -720,19 +809,14 @@ func (m model) reconstructDesignState() model {
 	return m
 }
 
-// designPriorMessages builds real user/assistant messages from the session's
-// design epoch for the live design-conversation agent. It replaces the
-// truncated text block that sessionPrompt produces. It excludes the current
-// turn's user message (the last event, just appended by launchPrompt) so
-// agent.Run can seed it as the final user turn. Returns nil for the first
-// turn of an epoch (byte-identical to pre-existing seeding).
-func designPriorMessages(events []sessions.Event) []zeroruntime.Message {
+// designConversationContext builds real user and assistant messages from the
+// current design epoch. It also returns the complete typed plan and critique
+// for injection into the system prompt. The final current-user event is not a
+// prior message because agent.Run adds it as the last turn.
+func designConversationContext(events []sessions.Event, livePlan *schemas.DesignPlan, liveCritique *schemas.PlanCritique) ([]zeroruntime.Message, string, error) {
 	if len(events) == 0 {
-		return nil
+		return nil, "", nil
 	}
-	// Drop the trailing current-user message (launchPrompt appends it just
-	// before calling runAgentWithOptions). If the last event is not a user
-	// message, keep the events as-is; this path is defensive.
 	prior := events
 	if last := events[len(events)-1]; last.Type == sessions.EventMessage {
 		var msg struct {
@@ -742,18 +826,54 @@ func designPriorMessages(events []sessions.Event) []zeroruntime.Message {
 			prior = events[:len(events)-1]
 		}
 	}
-	conv := splicerun.MapDesignHistory(prior)
-	if len(conv) == 0 {
-		return nil
+	ctx, err := splicerun.AssembleDesignContext(prior, livePlan, liveCritique)
+	if err != nil {
+		return nil, "", err
 	}
-	out := make([]zeroruntime.Message, 0, len(conv))
-	for _, m := range conv {
-		out = append(out, zeroruntime.Message{
-			Role:    zeroruntime.MessageRole(m.Role),
-			Content: m.Content,
+	messages := make([]zeroruntime.Message, 0, len(ctx.History))
+	for _, message := range ctx.History {
+		messages = append(messages, zeroruntime.Message{
+			Role:    zeroruntime.MessageRole(message.Role),
+			Content: message.Content,
 		})
 	}
-	return out
+	state, err := workflowStateMessage(ctx.CurrentPlan, ctx.CurrentCritique)
+	if err != nil {
+		return nil, "", err
+	}
+	return messages, state, nil
+}
+
+// workflowStateMessage serializes the complete current plan and critique for
+// the live design agent. JSON keeps this model-facing form independent from
+// the shorter display format used by the TUI.
+func workflowStateMessage(plan *schemas.DesignPlan, critique *schemas.PlanCritique) (string, error) {
+	if plan == nil && critique == nil {
+		return "", nil
+	}
+	state := struct {
+		CurrentPlan     *schemas.DesignPlan   `json:"current_plan,omitempty"`
+		CurrentCritique *schemas.PlanCritique `json:"current_critique,omitempty"`
+	}{
+		CurrentPlan:     plan,
+		CurrentCritique: critique,
+	}
+	payload, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal design revision context: %w", err)
+	}
+	return "<design_revision_context>\nPreserve settled plan fields and address every critique.\n" + string(payload) + "\n</design_revision_context>", nil
+}
+
+// designTransitionRegistry registers the design-tool transition tools on a
+// freshly-built design registry. approve_design is exposed only when
+// approveAvailable is true; crystallize_design is always exposed. Both share
+// one per-turn recorder so the design agent queues at most one transition.
+func designTransitionRegistry(registry *tools.Registry, approveAvailable bool, transition *splicerun.DesignTransitionRecorder) {
+	if approveAvailable {
+		registry.Register(splicerun.NewApproveDesignTool(transition))
+	}
+	registry.Register(splicerun.NewCrystallizeDesignTool(transition))
 }
 
 func designConversationRegistry(registry *tools.Registry) *tools.Registry {

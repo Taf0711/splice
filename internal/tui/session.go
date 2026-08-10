@@ -245,8 +245,11 @@ func (m model) handleResumeCommand(args string) (model, string) {
 		m.modelName = session.ModelID
 	}
 	// Reconstruct design state from the resumed session's lifecycle events so
-	// design mode, pending plan, and critique survive across sessions.
+	// design mode, pending plan, and critique survive across sessions. The
+	// session already owns a design epoch, so the first resumed prompt must not
+	// enter a fresh epoch and discard that state.
 	m = m.reconstructDesignState()
+	m.designNoticeShown = true
 	loopsCleared := 0
 	if session.SessionID != previousID {
 		m, loopsCleared = m.clearLoopsForSessionSwitch()

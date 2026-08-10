@@ -373,9 +373,15 @@ func (c ConversationMessage) Validate() error {
 	return nil
 }
 
-// DesignConversationInput is input to the design conversation agent.
+// DesignConversationInput is input to the design conversation agent and the
+// design crystallizer. History is the current epoch conversation. CurrentPlan
+// and CurrentCritique are the latest crystallized plan and its review; on a
+// revision they carry the state the agent is revising so re-crystallization
+// does not start from a blank plan.
 type DesignConversationInput struct {
-	History []ConversationMessage `json:"history"`
+	History         []ConversationMessage `json:"history"`
+	CurrentPlan     *DesignPlan           `json:"current_plan,omitempty"`
+	CurrentCritique *PlanCritique         `json:"current_critique,omitempty"`
 }
 
 // Validate checks the design conversation input.
@@ -386,6 +392,18 @@ func (d DesignConversationInput) Validate() error {
 	for i, m := range d.History {
 		if err := m.Validate(); err != nil {
 			return fmt.Errorf("history[%d]: %w", i, err)
+		}
+	}
+	if d.CurrentPlan != nil {
+		if err := d.CurrentPlan.Validate(); err != nil {
+			return fmt.Errorf("current_plan: %w", err)
+		}
+	}
+	if d.CurrentCritique != nil {
+		// ValidateStructure keeps older persisted critiques readable even when
+		// the current severity-to-blocking rule changed.
+		if err := d.CurrentCritique.ValidateStructure(); err != nil {
+			return fmt.Errorf("current_critique: %w", err)
 		}
 	}
 	return nil

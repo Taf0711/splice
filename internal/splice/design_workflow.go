@@ -29,6 +29,9 @@ type DesignWorkflow struct {
 	sessionID        string
 	planID           string
 	primarySelection agent.ModelSelection
+	livePlan         *schemas.DesignPlan
+	liveCritique     *schemas.PlanCritique
+	source           DesignTransitionSource
 }
 
 // StageStreamFactory returns the stream callbacks for one design stage. It is
@@ -37,14 +40,14 @@ type DesignWorkflow struct {
 // disables the stream for that stage.
 type StageStreamFactory func(stageName string, selection agent.ModelSelection) zeroruntime.CollectOptions
 
-// NewDesignWorkflow creates a workflow bound to a session store + session ID.
-// planID identifies this plan revision family within the session. The TUI
-// generates a unique planID per crystallization (e.g. "plan-<timestamp>").
+// NewDesignWorkflow creates a workflow bound to a session store and session ID.
+// planID identifies one revision family. The TUI reuses it for later revisions.
 func NewDesignWorkflow(store *sessions.Store, sessionID, planID string) *DesignWorkflow {
 	return &DesignWorkflow{
 		store:     store,
 		sessionID: sessionID,
 		planID:    planID,
+		source:    DesignTransitionSourceManual,
 	}
 }
 
@@ -53,6 +56,26 @@ func (w *DesignWorkflow) WithPrimarySelection(providerName, model, effort string
 	w.primarySelection.ProviderName = providerName
 	w.primarySelection.Model = model
 	w.primarySelection.ReasoningEffort = effort
+	return w
+}
+
+// WithSource records who requested this crystallization for the lifecycle
+// audit. Empty defaults to manual to keep existing callers unchanged.
+func (w *DesignWorkflow) WithSource(source DesignTransitionSource) *DesignWorkflow {
+	w.source = source
+	if w.source == "" {
+		w.source = DesignTransitionSourceManual
+	}
+	return w
+}
+
+// WithLiveState sets in-memory plan and critique overlays for this workflow.
+// The TUI uses them to pass plan or critique state that failed to persist, so
+// a re-crystallization still sees the work the user is revising. When nil,
+// only persisted lifecycle events supply the plan and critique.
+func (w *DesignWorkflow) WithLiveState(plan *schemas.DesignPlan, critique *schemas.PlanCritique) *DesignWorkflow {
+	w.livePlan = plan
+	w.liveCritique = critique
 	return w
 }
 
@@ -76,12 +99,26 @@ func (w *DesignWorkflow) CrystallizeAndCritique(
 	workDir string,
 	images []zeroruntime.ImageBlock,
 ) (schemas.DesignPlan, schemas.PlanCritique, error) {
-	history := MapDesignHistory(events)
-	if len(history) == 0 {
+	if err := w.source.Validate(); err != nil {
+		return schemas.DesignPlan{}, schemas.PlanCritique{}, fmt.Errorf("crystallize transition: %w", err)
+	}
+	// Assemble the context once: epoch history, the latest persisted plan and
+	// critique, plus the live overlays. The workflow consumes both the history
+	// and the reconstructed state from one pass so the critic does not replay
+	// the lifecycle events a second time.
+	designCtx, err := AssembleDesignContext(events, w.livePlan, w.liveCritique)
+	if err != nil {
+		return schemas.DesignPlan{}, schemas.PlanCritique{}, err
+	}
+	if len(designCtx.History) == 0 {
 		return schemas.DesignPlan{}, schemas.PlanCritique{}, fmt.Errorf("crystallize requires at least one conversation message")
 	}
 
-	input := schemas.DesignConversationInput{History: history}
+	input := schemas.DesignConversationInput{
+		History:         designCtx.History,
+		CurrentPlan:     designCtx.CurrentPlan,
+		CurrentCritique: designCtx.CurrentCritique,
+	}
 	if err := input.Validate(); err != nil {
 		return schemas.DesignPlan{}, schemas.PlanCritique{}, fmt.Errorf("crystallize input: %w", err)
 	}
@@ -105,14 +142,10 @@ func (w *DesignWorkflow) CrystallizeAndCritique(
 	}
 
 	revision := 1
-	var previousPlan *schemas.DesignPlan
-	var previousCritique *schemas.PlanCritique
-	if state, err := ReconstructDesignState(events); err == nil {
-		if state.Revision.PlanID == w.planID {
-			revision = state.Revision.Revision + 1
-		}
-		previousPlan = state.Plan
-		previousCritique = state.Critique
+	previousPlan := designCtx.CurrentPlan
+	previousCritique := designCtx.CurrentCritique
+	if designCtx.State.Revision.PlanID == w.planID {
+		revision = designCtx.State.Revision.Revision + 1
 	}
 
 	planJSON, err := json.Marshal(plan)
@@ -122,7 +155,7 @@ func (w *DesignWorkflow) CrystallizeAndCritique(
 
 	if _, err := w.store.AppendEvent(w.sessionID, sessions.AppendEventInput{
 		Type:    sessions.EventPlanCrystallized,
-		Payload: PlanCrystallizedPayload{PlanID: w.planID, Revision: revision, Plan: planJSON},
+		Payload: PlanCrystallizedPayload{PlanID: w.planID, Revision: revision, Plan: planJSON, Source: w.source},
 	}); err != nil {
 		return schemas.DesignPlan{}, schemas.PlanCritique{}, fmt.Errorf("persist plan_crystallized: %w", err)
 	}
@@ -139,7 +172,7 @@ func (w *DesignWorkflow) CrystallizeAndCritique(
 		Plan:             &plan,
 		PreviousPlan:     previousPlan,
 		PreviousCritique: previousCritique,
-		RelevantContext:  planCriticRelevantContext(history),
+		RelevantContext:  planCriticRelevantContext(designCtx.History),
 	}
 	criticOpts.ModelOverride = criticSelection.Model
 	criticOpts.ReasoningEffort = criticSelection.ReasoningEffort
@@ -171,7 +204,7 @@ func (w *DesignWorkflow) CrystallizeAndCritique(
 
 	if _, err := w.store.AppendEvent(w.sessionID, sessions.AppendEventInput{
 		Type:    sessions.EventCritiqueRecorded,
-		Payload: CritiqueRecordedPayload{PlanID: w.planID, Revision: revision, Critique: critiqueJSON},
+		Payload: CritiqueRecordedPayload{PlanID: w.planID, Revision: revision, Critique: critiqueJSON, Source: w.source},
 	}); err != nil {
 		return plan, critique, fmt.Errorf("persist critique_recorded: %w", err)
 	}

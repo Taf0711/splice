@@ -552,6 +552,9 @@ type agentResponseMsg struct {
 	memoryStatus string
 	memoryCount  int
 	memoryByType map[string]int
+	// designTransition is a transition the design agent queued this turn. It is
+	// run only when the turn succeeded (msg.err == nil), after pending clears.
+	designTransition *splicerun.DesignTransitionRequest
 }
 
 type agentRowMsg struct {
@@ -737,6 +740,9 @@ type tuiAgentRunOptions struct {
 	runKind        tuiRunKind
 	priorMessages  []zeroruntime.Message
 	serverTools    []zeroruntime.ServerTool
+	// transition is the per-turn recorder for the design-transition tools. It
+	// is set only for design-conversation runs, and only they drain it.
+	transition *splicerun.DesignTransitionRecorder
 }
 
 func newModel(ctx context.Context, options Options) model {
@@ -2274,8 +2280,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// other loops remain.
 			m, loopTickCmd = m.ensureLoopTick()
 		}
+		// Run a queued design transition after the turn settles and before any
+		// user queued message. The transition starts a new run (pending becomes
+		// true), so launchQueuedMessageIfReady waits for it to finish first.
+		var transitionCmd tea.Cmd
+		if msg.err == nil && msg.designTransition != nil {
+			m, transitionCmd = m.startDesignTransition(*msg.designTransition)
+		}
 		next, queuedCmd := m.launchQueuedMessageIfReady()
-		return next, tea.Batch(titleCmd, recapCmd, sweepCmd, queuedCmd, loopTickCmd)
+		return next, tea.Batch(titleCmd, recapCmd, sweepCmd, queuedCmd, loopTickCmd, transitionCmd)
 	case memoryResultMsg:
 		if msg.isError {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: msg.text})
@@ -2348,6 +2361,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if events, err := msg.store.ReadEvents(msg.sessionID); err == nil {
 				m.sessionEvents = events
 			}
+		}
+		// An agent-requested crystallization with approve_if_ready starts the
+		// approval after a clean, must-fix-free critique. It is never reached on
+		// crystallizer error, critic error, persistence error, or must-fix.
+		if msg.approveIfReady && !msg.critique.MustFixBeforeExecution {
+			return m.startApproval(msg.source)
 		}
 		return m, nil
 	case planExecutionResultMsg:
@@ -4669,21 +4688,37 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 	}
 	m.pendingImages = nil
 	m.pendingImageLabels = nil
+	var designPrior []zeroruntime.Message
+	designSystemPrompt := ""
+	if m.designMode {
+		var state string
+		designPrior, state, err = designConversationContext(m.sessionEvents, m.pendingPlan, m.pendingCritique)
+		if err != nil {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Design context error: " + err.Error()})
+			return m, nil
+		}
+		designSystemPrompt = stages.DesignConversationPrompt()
+		if state != "" {
+			designSystemPrompt += "\n\n" + state
+		}
+	}
 	runCtx, cancel := context.WithCancel(m.ctx)
 	m = m.beginRun(cancel)
 	if m.designMode {
 		designRegistry := designConversationRegistry(m.registry)
-		// The design-conversation agent gets the raw current prompt plus real
-		// prior turns (full content, not the truncated sessionPrompt block).
-		// designPriorMessages excludes the trailing current-user event that
-		// launchPrompt just appended, so agent.Run seeds it as the final turn.
-		prior := designPriorMessages(m.sessionEvents)
+		// A fresh recorder per turn lets the design agent queue at most one
+		// transition. approve_design is exposed only when a plan exists and no
+		// must-fix critique blocks execution.
+		transition := splicerun.NewDesignTransitionRecorder()
+		approveAvailable := m.pendingPlan != nil && (m.pendingCritique == nil || !m.pendingCritique.MustFixBeforeExecution)
+		designTransitionRegistry(designRegistry, approveAvailable, transition)
 		return m, tea.Batch(m.runAgentWithOptions(m.activeRunID, runCtx, rawPrompt, turnImages, tuiAgentRunOptions{
 			registry:      designRegistry,
-			systemPrompt:  stages.DesignConversationPrompt(),
+			systemPrompt:  designSystemPrompt,
 			runKind:       tuiRunDesignConversation,
-			priorMessages: prior,
+			priorMessages: designPrior,
 			serverTools:   []zeroruntime.ServerTool{{Kind: zeroruntime.ServerToolWebSearch}},
+			transition:    transition,
 		}), m.spinner.Tick)
 	}
 	return m, tea.Batch(m.runAgent(m.activeRunID, runCtx, prompt, turnImages), m.spinner.Tick)
@@ -5500,7 +5535,13 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				"content": result.FinalAnswer,
 			},
 		})
-		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, turnTools: toolCalls, turnElapsed: elapsed, ttft: ttft, turnVisibleOutputTokens: turnVisibleOutputTokens, memoryStatus: memStatus, memoryCount: memCount, memoryByType: memByType}
+		// A design-conversation turn drains its transition recorder so the update
+		// path can run the queued transition after the turn succeeds.
+		var designTransition *splicerun.DesignTransitionRequest
+		if runOptions.runKind == tuiRunDesignConversation && runOptions.transition != nil {
+			designTransition = runOptions.transition.Take()
+		}
+		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, turnTools: toolCalls, turnElapsed: elapsed, ttft: ttft, turnVisibleOutputTokens: turnVisibleOutputTokens, memoryStatus: memStatus, memoryCount: memCount, memoryByType: memByType, designTransition: designTransition}
 	}
 }
 

@@ -130,7 +130,7 @@ func (m model) sidebarHasContent() bool {
 		// FILES pulse for the session's first mutation isn't hidden.
 		return true
 	}
-	if !m.plan.isEmpty() {
+	if !m.sidebarPlanState().isEmpty() {
 		return true
 	}
 	// PIPELINE sidebar: show during pipeline runs even without agents, plans,
@@ -759,9 +759,34 @@ func sidebarPlaceholder(text string, width int) string {
 	return " " + zeroTheme.faint.Render(truncateRunes(text, maxInt(1, width-1)))
 }
 
+// sidebarPlanState returns the live runtime plan, or the reviewed design plan
+// while no runtime plan is available. beginRun clears the runtime plan, but it
+// must not make an approved design plan disappear before execution reports its
+// first update_plan result.
+func (m model) sidebarPlanState() planPanelState {
+	if !m.plan.isEmpty() {
+		return m.plan
+	}
+	if m.pendingPlan == nil || len(m.pendingPlan.Tasks) == 0 {
+		return planPanelState{}
+	}
+	state := planPanelState{steps: make([]planStep, 0, len(m.pendingPlan.Tasks))}
+	for _, task := range m.pendingPlan.Tasks {
+		content := strings.TrimSpace(task.Title)
+		if content == "" {
+			content = strings.TrimSpace(task.Intent)
+		}
+		if content == "" {
+			content = task.ID
+		}
+		state.steps = append(state.steps, planStep{content: content, status: "pending"})
+	}
+	return state
+}
+
 // sidebarPlanHeader renders the PLAN section header with the done/total count.
 func (m model) sidebarPlanHeader(width int) string {
-	state := m.plan
+	state := m.sidebarPlanState()
 	if state.isEmpty() {
 		return sidebarHeader("PLAN", width)
 	}
@@ -782,10 +807,10 @@ func (m model) sidebarPlanHeader(width int) string {
 
 // sidebarPlanLines renders the plan step list for the sidebar using the same
 // status glyphs as the pinned panel (✓ done, • in-progress, ○ pending, ✗
-// failed), reading m.plan directly so it stays in sync. Returns nil for an
-// empty plan (the caller then shows a placeholder).
+// failed). It prefers the live runtime plan and falls back to the reviewed
+// design plan. Returns nil when neither has steps.
 func (m model) sidebarPlanLines(width int) []string {
-	state := m.plan
+	state := m.sidebarPlanState()
 	if state.isEmpty() {
 		return nil
 	}
