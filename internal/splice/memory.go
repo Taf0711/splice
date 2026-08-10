@@ -17,6 +17,20 @@ type MemoryStore interface {
 	Upsert(ctx context.Context, obs schemas.MemoryObservation) (schemas.MemoryObservation, error)
 }
 
+// stageConsumesMemory reports whether a pipeline stage reads
+// HarnessStageInput.MemoryBundle. Only the two writer stages consume memory
+// today; every other stage, including unknown or custom stage names, gets no
+// MemoryBundle and triggers no search. MemoryType is an open string with no
+// approved stage taxonomy, so the filter is by consumer only.
+func stageConsumesMemory(stageName string) bool {
+	switch stageName {
+	case "code_writer", "test_generator":
+		return true
+	default:
+		return false
+	}
+}
+
 // newMemoryQuery builds the bounded search the orchestrator issues for a stage:
 // owner_agent is the stage name, the query is the first 200 runes of the
 // distilled request intent, and project_path is the working dir. Include flags

@@ -18,6 +18,7 @@ import (
 	"github.com/Taf0711/splice/internal/config"
 	"github.com/Taf0711/splice/internal/hooks"
 	"github.com/Taf0711/splice/internal/mcp"
+	"github.com/Taf0711/splice/internal/memd"
 	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/plugins"
 	"github.com/Taf0711/splice/internal/sessions"
@@ -235,6 +236,55 @@ func TestRunExecMaxTurnsReachesConfigOverrides(t *testing.T) {
 	}
 	if gotMaxTurns != 7 {
 		t.Fatalf("overrides.MaxTurns = %d, want 7", gotMaxTurns)
+	}
+}
+
+// TestFillAppDepsDisablesMemoryResolverByDefault guards the isolation seam: a
+// partial appDeps (the ordinary shape tests use) must get a DISABLED memory
+// resolver, so an exec run can never spawn the production splice-memd daemon or
+// touch user memory unless the test injects a resolver explicitly.
+func TestFillAppDepsDisablesMemoryResolverByDefault(t *testing.T) {
+	deps := fillAppDeps(appDeps{})
+	client, err := deps.resolveMemory(context.Background())
+	if err != nil {
+		t.Fatalf("resolveMemory error = %v, want nil (memory disabled)", err)
+	}
+	if client != nil {
+		t.Fatalf("resolveMemory client = %#v, want nil (memory disabled)", client)
+	}
+}
+
+// TestRunExecUsesInjectedMemoryResolver proves the exec pipeline honors an
+// explicitly injected memory resolver: without this seam, every successful exec
+// run would dial the production memd socket (and spawn the daemon on a miss).
+func TestRunExecUsesInjectedMemoryResolver(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	cwd := t.TempDir()
+
+	var called bool
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"exec", "hello"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return newExecStageAwareProvider(execStageProviderOptions{}), nil
+		},
+		resolveMemory: func(context.Context) (*memd.Client, error) {
+			called = true
+			return nil, nil
+		},
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("exitCode = %d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
+	}
+	if !called {
+		t.Fatal("exec run did not call the injected memory resolver")
 	}
 }
 

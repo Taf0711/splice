@@ -17,7 +17,6 @@ import (
 	"github.com/Taf0711/splice/internal/errhint"
 	"github.com/Taf0711/splice/internal/imageinput"
 	"github.com/Taf0711/splice/internal/lsp"
-	"github.com/Taf0711/splice/internal/memd"
 	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/notify"
 	"github.com/Taf0711/splice/internal/providercatalog"
@@ -803,7 +802,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			sessionRecorder.append(sessions.EventUsage, payload)
 		},
 	}
-	resolvedMemClient, mErr := memd.Resolve(runCtx)
+	resolvedMemClient, mErr := deps.resolveMemory(runCtx)
 	var memClient splicerun.MemoryStore
 	if mErr != nil {
 		writer.warning(fmt.Sprintf("memory sidecar unavailable; running without memory injection: %v", mErr))

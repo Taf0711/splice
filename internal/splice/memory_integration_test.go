@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -62,22 +63,63 @@ func TestRealMemdSidecarMemoryRetrieval(t *testing.T) {
 	os.Remove(socketPath)
 	t.Cleanup(func() { os.Remove(socketPath) })
 
-	// Set SPLICE_MEMD_DB to a path in a temp dir so the daemon creates its
-	// data directory there rather than in the socket's parent directory.
-	dbDir := t.TempDir()
-	dbPath := filepath.Join(dbDir, "memory.db")
-
-	t.Setenv("SPLICE_MEMD_BIN", binPath)
+	// Set SPLICE_MEMD_SOCKET / SPLICE_MEMD_DB so the client and the test-owned
+	// daemon process agree on where to bind and store. The DB lives in a temp
+	// dir so the daemon creates its data directory there, never under the
+	// socket's parent. (SPLICE_MEMD_BIN is deliberately NOT set: the client no
+	// longer spawns the daemon here; the test starts its own process below and
+	// must be its owner.)
+	dbPath := filepath.Join(t.TempDir(), "memory.db")
 	t.Setenv("SPLICE_MEMD_SOCKET", socketPath)
 	t.Setenv("SPLICE_MEMD_DB", dbPath)
 
-	// 3. Spawn the daemon through memd.Resolve.
-	client, err := memd.Resolve(ctx)
-	if err != nil {
-		t.Fatalf("memd.Resolve: %v", err)
+	// 3. Start the daemon directly as a test-owned child process. Do NOT go
+	// through memd.Resolve: it would spawn (or attach to) a daemon the test
+	// does not own and cannot stop, leaking splice-memd processes across runs.
+	// Cleanup signals SIGTERM (the sidecar shuts down gracefully on it), waits
+	// bounded, and only force-kills a daemon that refuses to exit.
+	daemon := exec.CommandContext(ctx, binPath, "--serve")
+	daemon.Env = append(os.Environ(), "SPLICE_MEMD_SOCKET="+socketPath, "SPLICE_MEMD_DB="+dbPath)
+	if err := daemon.Start(); err != nil {
+		t.Fatalf("start splice-memd: %v", err)
 	}
-	if client == nil {
-		t.Skip("memd.Resolve returned nil (no binary resolved)")
+	daemonDone := make(chan error, 1)
+	go func() { daemonDone <- daemon.Wait() }()
+	t.Cleanup(func() {
+		if daemon.Process != nil {
+			daemon.Process.Signal(syscall.SIGTERM) //nolint:errcheck
+		}
+		select {
+		case err := <-daemonDone:
+			_ = err
+		case <-time.After(5 * time.Second):
+			if daemon.Process != nil {
+				daemon.Process.Kill() //nolint:errcheck
+			}
+			select {
+			case err := <-daemonDone:
+				_ = err
+			case <-time.After(5 * time.Second):
+				t.Error("splice-memd daemon did not exit after SIGKILL")
+			}
+		}
+	})
+
+	client := memd.NewClient(socketPath)
+	healthDeadline := time.Now().Add(10 * time.Second)
+	var healthErr error
+	for {
+		if healthErr = client.Health(ctx); healthErr == nil {
+			break
+		}
+		if time.Now().After(healthDeadline) {
+			t.Fatalf("splice-memd did not become healthy: %v", healthErr)
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("waiting for splice-memd health: %v", ctx.Err())
+		case <-time.After(50 * time.Millisecond):
+		}
 	}
 
 	// 4. Upsert a test observation through the real HTTP handler + SQLite store.
@@ -105,11 +147,11 @@ func TestRealMemdSidecarMemoryRetrieval(t *testing.T) {
 		plan := schemas.ExecutionPlan{
 			Tier:          schemas.TierLight,
 			RequestIntent: intent,
-			Stages:        []schemas.ExecutionStage{{Name: "memory_stage"}},
+			Stages:        []schemas.ExecutionStage{{Name: "code_writer"}},
 		}
 		var inputs []schemas.HarnessStageInput
 		_, _, completed, err := runPass(ctx, "real-memd-test", 1, plan, stageRegistry{
-			"memory_stage": &capturingStage{inputs: &inputs},
+			"code_writer": &capturingStage{inputs: &inputs},
 		}, runFakeProvider{}, agent.Options{}, workDir, nil, nil, client)
 		if err != nil {
 			t.Fatalf("runPass: %v", err)
@@ -121,8 +163,8 @@ func TestRealMemdSidecarMemoryRetrieval(t *testing.T) {
 			t.Fatalf("expected captured input with memory bundle, got %#v", inputs)
 		}
 		bundle := inputs[0].MemoryBundle
-		if bundle.RequestingAgent != "memory_stage" {
-			t.Fatalf("requesting agent = %q, want memory_stage", bundle.RequestingAgent)
+		if bundle.RequestingAgent != "code_writer" {
+			t.Fatalf("requesting agent = %q, want code_writer", bundle.RequestingAgent)
 		}
 		if len(bundle.Observations) < 1 {
 			t.Fatalf("expected at least 1 observation in bundle, got %d", len(bundle.Observations))
