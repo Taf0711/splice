@@ -270,6 +270,7 @@ type model struct {
 	pendingPermission *pendingPermissionPrompt
 	pendingAskUser    *pendingAskUserPrompt
 	pendingSpecReview *pendingSpecReviewPrompt
+	herdr             agentLifecycleReporter
 	width             int
 	height            int
 	// hidePinnedPlan suppresses the pinned plan panel above the composer. Set on
@@ -2082,6 +2083,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			request: msg.request,
 			decide:  msg.decide,
 		}
+		m.reportAgentLifecycle(herdrBlocked)
 		return m, nil
 	case askUserRequestMsg:
 		if msg.runID != m.activeRunID {
@@ -2104,6 +2106,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			answer:  msg.answer,
 			states:  newAskUserStates(msg.request.Questions),
 		}
+		m.reportAgentLifecycle(herdrBlocked)
 		m.clearComposer()
 		m.clearSuggestions()
 		return m, nil
@@ -2281,6 +2284,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.specReview != nil {
 			m = m.activateSpecReview(*msg.specReview)
 		}
+		if m.pendingSpecReview == nil {
+			m.reportAgentLifecycle(herdrIdle)
+		}
 		if m.notifier != nil {
 			m.notifier.Notify(notify.Completion, notify.DefaultMessage(notify.Completion))
 		}
@@ -2344,6 +2350,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.runCancel = nil
 		m.activeRunID = 0
+		m.reportAgentLifecycle(herdrIdle)
 		var flushRows []transcriptRow
 		events := flushableSessionEvents(msg.sessionEvents)
 		m, flushRows = m.appendSessionEvents(events)
@@ -2417,6 +2424,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.runCancel = nil
 		m.activeRunID = 0
+		m.reportAgentLifecycle(herdrIdle)
 		// Refresh before the failure branch returns. A run that fails still
 		// appended events — the approval, the tasks that did start, and each
 		// stage's usage — and leaving those on disk only makes the live session
@@ -4122,6 +4130,7 @@ func (m model) resolvePermission(decision permissionDecision) (tea.Model, tea.Cm
 		})
 	}
 	m.pendingPermission = nil
+	m.reportAgentLifecycle(herdrWorking)
 	return m, nil
 }
 
@@ -4839,6 +4848,7 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	m.liveToolCallID = ""
 	m.liveToolOutput = ""
 	m.spinnerTicking = true
+	m.reportAgentLifecycle(herdrWorking)
 	return m
 }
 
@@ -4977,6 +4987,7 @@ func (m *model) cancelRun() {
 	// first agentTextMsg will seed a fresh lineAges slice and restart
 	// the tick.
 	m.resetStreamingFade()
+	m.reportAgentLifecycle(herdrIdle)
 }
 
 func (m model) runAgent(runID int, runCtx context.Context, prompt string, images []zeroruntime.ImageBlock) tea.Cmd {

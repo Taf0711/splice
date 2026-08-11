@@ -240,6 +240,7 @@ func (m model) submitAskUser() (tea.Model, tea.Cmd) {
 		pending.answer(answers)
 	}
 	m.pendingAskUser = nil
+	m.reportAgentLifecycle(herdrWorking)
 	m.clearComposer()
 	m.clearSuggestions()
 	return m, nil

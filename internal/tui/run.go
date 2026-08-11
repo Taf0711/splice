@@ -25,6 +25,12 @@ func Run(ctx context.Context, options Options) int {
 	restoreConsole := setupConsoleUTF8()
 	defer restoreConsole()
 
+	reporter := newHerdrReporter(os.Getenv, nil, nil)
+	if reporter != nil {
+		reporter.Report(herdrIdle)
+		defer reporter.Close()
+	}
+
 	externalSink := options.RuntimeMessageSink
 	var program *tea.Program
 	forward := func(msg tea.Msg) {
@@ -55,6 +61,7 @@ func Run(ctx context.Context, options Options) int {
 		programOpts = append(programOpts, tea.WithColorProfile(colorprofile.Ascii))
 	}
 	initialModel := newModel(ctx, options)
+	initialModel.herdr = reporter
 	initialModel = initialModel.openLaunchSessionPicker()
 	if initialModel.wantsMouseCapture() {
 		initialModel.mouseCapture = true

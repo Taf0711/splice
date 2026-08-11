@@ -125,6 +125,7 @@ func (m model) activateSpecReview(review pendingSpecReviewPrompt) model {
 		m.sessionEvents = append(m.sessionEvents, event)
 	}
 	m.pendingSpecReview = &review
+	m.reportAgentLifecycle(herdrBlocked)
 	m.clearSuggestions()
 	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: specReviewSummary(review)})
 	return m
@@ -233,12 +234,14 @@ func (m model) rejectSpecReview(reason string) (tea.Model, tea.Cmd) {
 		m.sessionEvents = append(m.sessionEvents, event)
 	}
 	m.pendingSpecReview = nil
+	m.reportAgentLifecycle(herdrIdle)
 	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Spec rejected. Use /spec <task> to draft again."})
 	return m.launchQueuedMessageIfReady()
 }
 
 func (m model) cancelSpecReview() (tea.Model, tea.Cmd) {
 	m.pendingSpecReview = nil
+	m.reportAgentLifecycle(herdrIdle)
 	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Spec review canceled. The draft remains saved."})
 	return m.launchQueuedMessageIfReady()
 }
