@@ -1258,8 +1258,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.seq != m.edgeScrollSeq || m.edgeScrollDelta == 0 || !m.transcriptSelection.active {
 			return m, nil // stale, or the chain was stopped since this tick was scheduled
 		}
-		m = m.dragToEdgeScroll(m.edgeScrollDelta, m.edgeScrollMouseX)
-		return m, dragEdgeScrollTickCmd(m.edgeScrollSeq)
+		var clear tea.Cmd
+		m, clear = m.dragToEdgeScroll(m.edgeScrollDelta, m.edgeScrollMouseX)
+		return m, tea.Batch(clear, dragEdgeScrollTickCmd(m.edgeScrollSeq))
 	case providerWizardOAuthMsg:
 		return m.applyProviderWizardOAuth(msg)
 	case providerWizardDeviceCodeMsg:
@@ -1614,10 +1615,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case keyIs(msg, tea.KeyPgUp):
 			m = m.clearHover()
-			return m.scrollChat(m.chatPageScrollLines()), nil
+			return m.scrollChat(m.chatPageScrollLines())
 		case keyIs(msg, tea.KeyPgDown):
 			m = m.clearHover()
-			return m.scrollChat(-m.chatPageScrollLines()), nil
+			return m.scrollChat(-m.chatPageScrollLines())
 		case keyShift(msg) && keyIs(msg, tea.KeyUp):
 			// Shift+Up scrolls the transcript up one line. Must be checked before
 			// plain KeyUp so shifted arrows aren't consumed by the composer-path.
@@ -1656,7 +1657,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break // let the input handle multiline navigation
 			}
 			m = m.clearHover()
-			return m.scrollChat(1), nil
+			return m.scrollChat(1)
 		case keyShift(msg) && keyIs(msg, tea.KeyDown):
 			// Shift+Down scrolls the transcript down one line. Must be checked
 			// before plain KeyDown so shifted arrows aren't consumed.
@@ -1695,11 +1696,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break // let the input handle multiline navigation
 			}
 			m = m.clearHover()
-			return m.scrollChat(-1), nil
+			return m.scrollChat(-1)
 		case keyIs(msg, tea.KeyDown):
 			if m.transcriptDetailed {
 				m = m.clearHover()
-				return m.scrollChat(-1), nil
+				return m.scrollChat(-1)
 			}
 			if m.pendingPermission != nil {
 				return m.movePermissionCursor(1), nil
@@ -1745,7 +1746,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.transcriptDetailed {
 				m = m.clearHover()
-				return m.scrollChat(1), nil
+				return m.scrollChat(1)
 			}
 			if m.pendingPermission != nil {
 				return m.movePermissionCursor(-1), nil
@@ -1802,7 +1803,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break // let the input handle its own Ctrl+U (delete-to-bol)
 			}
 			m = m.clearHover()
-			return m.scrollChat(m.chatPageScrollLines()), nil
+			return m.scrollChat(m.chatPageScrollLines())
 		case keyCtrl(msg, 'd'):
 			// Ctrl+D scrolls down half a page, or moves the cursor down in
 			// permission/ask-user prompts. Falls through to the active modal
@@ -1823,7 +1824,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break // let the input handle its own Ctrl+D (delete-next-char)
 			}
 			m = m.clearHover()
-			return m.scrollChat(-m.chatPageScrollLines()), nil
+			return m.scrollChat(-m.chatPageScrollLines())
 		}
 		if m.transcriptDetailed {
 			return m, nil
@@ -2249,6 +2250,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// text the user already watched — keep the partial answer instead of
 			// letting it vanish from history.
 			if row, ok := reasoningTranscriptRow("", msg.runID, m.streamingReasoning); ok {
+				row.expanded = true
 				m.transcript = appendTranscriptRow(m.transcript, row)
 			}
 			if text := strings.TrimRight(m.streamingTextString(), "\n"); strings.TrimSpace(text) != "" {
@@ -2570,7 +2572,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.row.kind == rowReasoning {
 			m.streamingReasoning = ""
-			m.streamingReasoningExpanded = false
+			m.streamingReasoningExpanded = true
 		}
 		// A tool call ends the current streamed text segment. The segment is the
 		// assistant's working narration ("Let me check X…") — append it as a
@@ -2578,9 +2580,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// vanishing when the tool card replaces the interim block.
 		if msg.row.kind == rowToolCall {
 			if row, ok := reasoningTranscriptRow("", msg.runID, m.streamingReasoning); ok {
+				row.expanded = true
 				m.transcript = appendTranscriptRow(m.transcript, row)
 				m.streamingReasoning = ""
-				m.streamingReasoningExpanded = false
+				m.streamingReasoningExpanded = true
 			}
 			if text := strings.TrimRight(m.streamingTextString(), "\n"); strings.TrimSpace(text) != "" {
 				m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowAssistant, text: text})
@@ -3272,19 +3275,37 @@ func viewLines(value string) []string {
 	return strings.Split(strings.TrimSuffix(value, "\n"), "\n")
 }
 
-func (m model) scrollChat(delta int) model {
+// scrollChat applies a scroll delta to the chat transcript. When the scroll
+// offset actually changes it returns a ClearScreen command to force Bubble Tea
+// to redraw the whole frame instead of relying on terminal scroll-optimization,
+// which leaves visual artifacts in alternate-screen mode. When the offset does
+// not move (e.g. already at the top or bottom of the transcript) no command is
+// returned, so we do not pay for a full redraw on every wheel event.
+// clearScreenCmd returns a Bubble Tea command that yields the internal
+// clear-screen message, so the full frame is redrawn. Unlike tea.ClearScreen,
+// which is a Msg value the event loop intercepts, this is the Cmd form that a
+// model Update can return.
+func clearScreenCmd() tea.Cmd {
+	return func() tea.Msg { return tea.ClearScreen() }
+}
+
+func (m model) scrollChat(delta int) (model, tea.Cmd) {
 	if !m.altScreen || delta == 0 {
-		return m
+		return m, nil
 	}
 	viewport, ok := m.chatTranscriptViewport()
 	if !ok {
-		return m
+		return m, nil
 	}
+	before := m.chatScrollOffset
 	m.chatScrollOffset = viewport.scroll(delta).offset
 	if m.chatScrollOffset == 0 {
 		m.chatBodyLines = 0
 	}
-	return m
+	if m.chatScrollOffset == before {
+		return m, nil
+	}
+	return m, clearScreenCmd()
 }
 
 func (m model) chatScrollMetrics() (int, int) {
@@ -4848,6 +4869,11 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	m.liveToolCallID = ""
 	m.liveToolOutput = ""
 	m.spinnerTicking = true
+	// Provider-returned reasoning is live narration the user asked to see
+	// continuously: default it to expanded for the run. The user may still
+	// collapse it via the toggle; each new run (and the run-end path) re-seeds
+	// to the expanded default.
+	m.streamingReasoningExpanded = true
 	m.reportAgentLifecycle(herdrWorking)
 	return m
 }
@@ -4957,6 +4983,7 @@ func (m *model) cancelRun() {
 		// partial streamed answer (if any), then the cancellation marker — the
 		// session log gets the same marker below.
 		if row, ok := reasoningTranscriptRow("", m.activeRunID, m.streamingReasoning); ok {
+			row.expanded = true
 			m.transcript = appendTranscriptRow(m.transcript, row)
 		}
 		if text := strings.TrimRight(m.streamingTextString(), "\n"); strings.TrimSpace(text) != "" {
@@ -5147,6 +5174,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		var reasoningLast time.Time
 		flushReasoning := func(closedAt time.Time) {
 			if row, ok := reasoningTranscriptRow(fmt.Sprintf("reasoning_%d", reasoningSeq+1), runID, reasoningText); ok {
+				row.expanded = true
 				if !reasoningStarted.IsZero() {
 					if closedAt.IsZero() {
 						closedAt = reasoningLast

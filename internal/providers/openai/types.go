@@ -3,13 +3,14 @@ package openai
 import "encoding/json"
 
 type chatCompletionRequest struct {
-	Model               string           `json:"model"`
-	Messages            []chatMessage    `json:"messages"`
-	Tools               []toolDefinition `json:"tools,omitempty"`
-	MaxCompletionTokens int              `json:"max_completion_tokens,omitempty"`
-	ReasoningEffort     string           `json:"reasoning_effort,omitempty"`
-	Stream              bool             `json:"stream"`
-	StreamOptions       *streamOptions   `json:"stream_options,omitempty"`
+	Model               string            `json:"model"`
+	Messages            []chatMessage     `json:"messages"`
+	Tools               []toolDefinition  `json:"tools,omitempty"`
+	MaxCompletionTokens int               `json:"max_completion_tokens,omitempty"`
+	ReasoningEffort     string            `json:"reasoning_effort,omitempty"`
+	Reasoning           *reasoningOptions `json:"reasoning,omitempty"`
+	Stream              bool              `json:"stream"`
+	StreamOptions       *streamOptions    `json:"stream_options,omitempty"`
 	// PromptCacheKey asks the backend to route the request to a replica that
 	// already holds this conversation's prefix in its prompt cache (the OpenAI
 	// `prompt_cache_key` parameter). Omitted when the caller carries no session
@@ -29,6 +30,10 @@ type streamOptions struct {
 	IncludeUsage bool `json:"include_usage"`
 }
 
+type reasoningOptions struct {
+	Effort string `json:"effort"`
+}
+
 type chatMessage struct {
 	Role string `json:"role"`
 	// Content has no omitempty: strict OpenAI-compatible servers (e.g. some
@@ -36,9 +41,10 @@ type chatMessage struct {
 	// or null with "invalid message content type: <nil>". mapMessage always sets
 	// this (to "" when there's no text), so a contentless message serializes as
 	// `"content":""` rather than being dropped.
-	Content    any               `json:"content"`
-	ToolCalls  []requestToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string            `json:"tool_call_id,omitempty"`
+	Content          any               `json:"content"`
+	ToolCalls        []requestToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string            `json:"tool_call_id,omitempty"`
+	ReasoningDetails []json.RawMessage `json:"reasoning_details,omitempty"`
 }
 
 // contentPart is one element of an OpenAI multimodal `content` array. A part is
@@ -104,15 +110,42 @@ type streamChoice struct {
 }
 
 type streamMessage struct {
-	Annotations []streamAnnotation `json:"annotations"`
+	Annotations      []streamAnnotation `json:"annotations"`
+	ReasoningDetails []reasoningDetail  `json:"reasoning_details"`
 }
 
 type streamDelta struct {
 	Content          string                `json:"content"`
 	ReasoningContent string                `json:"reasoning_content"`
 	Reasoning        string                `json:"reasoning"`
+	ReasoningDetails []reasoningDetail     `json:"reasoning_details"`
 	ToolCalls        []streamToolCallDelta `json:"tool_calls"`
 	Annotations      []streamAnnotation    `json:"annotations"`
+}
+
+// reasoningDetail is one OpenRouter structured reasoning entry. Raw preserves
+// signatures and opaque fields so tool-call continuations can replay it exactly.
+type reasoningDetail struct {
+	ID        *string         `json:"id"`
+	Type      string          `json:"type"`
+	Format    string          `json:"format"`
+	Index     *int            `json:"index"`
+	Text      string          `json:"text"`
+	Summary   string          `json:"summary"`
+	Signature string          `json:"signature"`
+	Data      string          `json:"data"`
+	Raw       json.RawMessage `json:"-"`
+}
+
+func (detail *reasoningDetail) UnmarshalJSON(data []byte) error {
+	type wire reasoningDetail
+	var decoded wire
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*detail = reasoningDetail(decoded)
+	detail.Raw = append(detail.Raw[:0], data...)
+	return nil
 }
 
 type streamToolCallDelta struct {

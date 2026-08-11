@@ -1536,6 +1536,54 @@ func TestBeginRunResetsSidebarHidden(t *testing.T) {
 	}
 }
 
+// TestBeginRunSeedsReasoningExpanded: provider-returned narration is supposed to
+// stay fully visible during a run, so beginRun must seed the streaming reasoning
+// block to its expanded state instead of leaving the collapsed tail default.
+func TestBeginRunSeedsReasoningExpanded(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.streamingReasoningExpanded = false
+	m = m.beginRun(nil)
+	if !m.streamingReasoningExpanded {
+		t.Fatal("beginRun should seed streamingReasoningExpanded to true (narration visible during run)")
+	}
+}
+
+// TestToolCallPreservesReasoningAndNarration: when a tool call row arrives it
+// ends the current streamed segment. The in-flight reasoning AND assistant
+// narration must be retained as committed transcript rows instead of vanishing
+// when the tool card replaces the interim block.
+func TestToolCallPreservesReasoningAndNarration(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.activeRunID = 3
+	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: "do it"})
+	// Simulate live streaming state: reasoning and narration both in flight.
+	m.streamingReasoning = "I should check the file. "
+	m.streamingText = []byte("Let me read it.")
+
+	updated, _ := m.Update(agentRowMsg{
+		runID: 3,
+		row:   transcriptRow{kind: rowToolCall, id: "call_1", tool: "read_file", runID: 3},
+	})
+	next := updated.(model)
+
+	reasoning, ok := findTranscriptRow(next.transcript, rowReasoning)
+	if !ok || !strings.Contains(reasoning.text, "I should check the file.") {
+		t.Fatalf("in-flight reasoning must be retained before the tool call, got %#v", next.transcript)
+	}
+	if !reasoning.expanded {
+		t.Fatal("provider-returned reasoning must stay expanded after the tool call")
+	}
+	if !transcriptContains(next.transcript, "Let me read it.") {
+		t.Fatalf("in-flight assistant narration must be retained before the tool call, got %#v", next.transcript)
+	}
+	if len(next.streamingReasoning) != 0 || len(next.streamingText) != 0 {
+		t.Errorf("streamed segment should clear after being committed, reasoning=%q text=%q", next.streamingReasoning, next.streamingText)
+	}
+	if !next.streamingReasoningExpanded {
+		t.Fatal("the next reasoning segment in the same run must remain expanded")
+	}
+}
+
 func TestStaleAgentResponseAfterCancelIsIgnored(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.pending = false

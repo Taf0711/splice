@@ -261,7 +261,11 @@ func (provider *Provider) streamWithServerTool(ctx context.Context, body []byte,
 			state.lastUsage.WebSearchEngine = provider.webSearchEngine
 			sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: state.lastUsage, ReportedCostUSD: state.lastReportedCostUSD})
 		}
-		sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone, FinishReason: state.finishReason})
+		sendEvent(ctx, events, zeroruntime.StreamEvent{
+			Type:            zeroruntime.StreamEventDone,
+			FinishReason:    state.finishReason,
+			ReasoningBlocks: append([]zeroruntime.ReasoningBlock(nil), state.reasoningBlocks...),
+		})
 	}
 }
 
@@ -302,15 +306,27 @@ func (provider *Provider) emitChunk(
 ) {
 	for _, choice := range chunk.Choices {
 		annotations := choice.Delta.Annotations
+		structuredReasoning := false
 		if choice.Message != nil {
 			annotations = append(annotations, choice.Message.Annotations...)
+			for _, detail := range choice.Message.ReasoningDetails {
+				structuredReasoning = provider.emitReasoningDetail(ctx, detail, state, events) || structuredReasoning
+			}
 		}
 		state.emitAnnotationBatch(ctx, events, annotations)
-		if reasoning := choice.Delta.reasoningText(); reasoning != "" {
-			sendEvent(ctx, events, zeroruntime.StreamEvent{
-				Type:    zeroruntime.StreamEventReasoning,
-				Content: reasoning,
-			})
+		for _, detail := range choice.Delta.ReasoningDetails {
+			structuredReasoning = provider.emitReasoningDetail(ctx, detail, state, events) || structuredReasoning
+		}
+		// Some compatible APIs send both the legacy reasoning string and modern
+		// structured details. Prefer readable structured details to avoid showing
+		// the same provider-returned narration twice.
+		if !structuredReasoning {
+			if reasoning := choice.Delta.reasoningText(); reasoning != "" {
+				sendEvent(ctx, events, zeroruntime.StreamEvent{
+					Type:    zeroruntime.StreamEventReasoning,
+					Content: reasoning,
+				})
+			}
 		}
 		if choice.Delta.Content != "" {
 			state.emitContent(ctx, events, choice.Delta.Content)
@@ -367,6 +383,33 @@ func (delta streamDelta) reasoningText() string {
 		return delta.ReasoningContent
 	}
 	return delta.Reasoning
+}
+
+// emitReasoningDetail preserves one OpenRouter reasoning artifact and surfaces
+// only its provider-returned readable text or summary. It returns true when it
+// emitted readable content, which lets the caller suppress duplicate aliases.
+func (provider *Provider) emitReasoningDetail(ctx context.Context, detail reasoningDetail, state *toolState, events chan<- zeroruntime.StreamEvent) bool {
+	content := ""
+	switch detail.Type {
+	case "reasoning.text":
+		content = detail.Text
+	case "reasoning.summary":
+		content = detail.Summary
+	}
+	if provider.isOpenRouter() && len(detail.Raw) > 0 {
+		state.reasoningBlocks = append(state.reasoningBlocks, zeroruntime.ReasoningBlock{
+			Provider:  "openrouter",
+			Type:      detail.Type,
+			Text:      content,
+			Signature: detail.Signature,
+			Data:      string(detail.Raw),
+		})
+	}
+	if content == "" {
+		return false
+	}
+	sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventReasoning, Content: content})
+	return true
 }
 
 // mapFinishReason maps OpenAI's finish_reason onto the runtime's normalized
@@ -446,7 +489,16 @@ func (provider *Provider) openAIRequest(request zeroruntime.CompletionRequest) c
 			strings.TrimSpace(message.Content) == "" && len(message.ToolCalls) == 0 {
 			continue
 		}
-		messages = append(messages, mapMessage(message))
+		mappedMessage := mapMessage(message)
+		if provider.isOpenRouter() {
+			for _, block := range message.Reasoning {
+				if block.Provider != "openrouter" || !json.Valid([]byte(block.Data)) {
+					continue
+				}
+				mappedMessage.ReasoningDetails = append(mappedMessage.ReasoningDetails, json.RawMessage(block.Data))
+			}
+		}
+		messages = append(messages, mappedMessage)
 	}
 
 	mapped := chatCompletionRequest{
@@ -464,7 +516,11 @@ func (provider *Provider) openAIRequest(request zeroruntime.CompletionRequest) c
 	// the model's capabilities, so an empty value (the default for non-reasoning
 	// models) is simply omitted. Only forward the values the API accepts.
 	if effort := openAIReasoningEffort(request.ReasoningEffort); effort != "" {
-		mapped.ReasoningEffort = effort
+		if provider.isOpenRouter() {
+			mapped.Reasoning = &reasoningOptions{Effort: effort}
+		} else {
+			mapped.ReasoningEffort = effort
+		}
 	}
 	// prompt_cache_key is a documented OpenAI parameter; compatible servers
 	// ignore unknown fields, but a strict endpoint that rejects it can be

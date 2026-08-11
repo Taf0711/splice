@@ -147,8 +147,8 @@ func CollectStreamWithOptions(ctx context.Context, events <-chan StreamEvent, op
 			if event.FinishReason != "" {
 				collected.FinishReason = event.FinishReason
 			}
-			// Reasoning blocks (Anthropic thinking) can ride on any terminal event;
-			// accumulate them regardless of type so they survive for replay.
+			// Structured reasoning blocks can ride on any terminal event. Accumulate
+			// them regardless of type so they survive for replay.
 			if len(event.ReasoningBlocks) > 0 {
 				collected.ReasoningBlocks = append(collected.ReasoningBlocks, event.ReasoningBlocks...)
 			}

@@ -38,6 +38,9 @@ type toolState struct {
 	// OpenRouter responses that omit it), so cost falls back to the registry
 	// estimate exactly as before.
 	lastReportedCostUSD *float64
+	// reasoningBlocks holds OpenRouter reasoning_details exactly as received so
+	// the agent loop can replay them with tool results on the next request.
+	reasoningBlocks []zeroruntime.ReasoningBlock
 }
 
 type pendingToolCall struct {

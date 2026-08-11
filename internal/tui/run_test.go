@@ -79,3 +79,44 @@ func TestRunRejectsNonTTYStdin(t *testing.T) {
 		t.Fatal("Run blocked on non-TTY stdin instead of failing fast")
 	}
 }
+
+func TestWriteTranscriptScrollbackRendersSettledChat(t *testing.T) {
+	m := newModel(context.Background(), Options{AltScreen: true})
+	m.width = 90
+	m.transcript = appendRow(m.transcript, rowUser, "build me a widget")
+	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
+		kind: rowReasoning, text: "I will check the files first.", expanded: true,
+	})
+	m.transcript = appendRow(m.transcript, rowAssistant, "Here is the widget.")
+
+	var buf bytes.Buffer
+	if !m.writeTranscriptScrollback(&buf) {
+		t.Fatal("a chat with content should report that it wrote scrollback")
+	}
+	out := buf.String()
+	for _, want := range []string{"build me a widget", "I will check the files first.", "Here is the widget."} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("scrollback dump missing %q, got:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(out, "Thought") {
+		t.Fatalf("scrollback dump should include the reasoning row's Thought header, got:\n%s", out)
+	}
+}
+
+func TestWriteTranscriptScrollbackSkipsEmptyAndSetup(t *testing.T) {
+	// Empty transcript (setup / launch picker before any chat) writes nothing.
+	empty := newModel(context.Background(), Options{AltScreen: true})
+	empty.width = 90
+	if empty.writeTranscriptScrollback(&bytes.Buffer{}) {
+		t.Fatal("an empty transcript should not dump scrollback")
+	}
+
+	// A welcome-only transcript (no real rows) also writes nothing.
+	welcome := newModel(context.Background(), Options{AltScreen: true})
+	welcome.width = 90
+	welcome.transcript = appendRow(welcome.transcript, rowWelcome, "welcome")
+	if welcome.writeTranscriptScrollback(&bytes.Buffer{}) {
+		t.Fatal("a welcome-only transcript should not dump scrollback")
+	}
+}

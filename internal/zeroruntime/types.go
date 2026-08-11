@@ -82,16 +82,15 @@ type ToolCall struct {
 }
 
 // ReasoningBlock is a provider-emitted reasoning artifact that must be replayed
-// verbatim on later turns or the provider rejects the (tool-using) conversation:
-// Anthropic requires thinking / redacted_thinking blocks be passed back with
-// their signatures. Only the adapter named by Provider interprets a block; other
-// adapters ignore foreign blocks, so a mid-run provider switch is safe.
+// verbatim on later turns or the provider can reject the tool-use conversation.
+// Only the adapter named by Provider interprets a block. Other adapters ignore
+// foreign blocks, so a mid-run provider switch is safe.
 type ReasoningBlock struct {
-	Provider  string // adapter that produced and can replay this block ("anthropic", "gemini")
-	Type      string // provider block type ("thinking", "redacted_thinking")
+	Provider  string // adapter that produced and can replay this block
+	Type      string // provider block type, such as "thinking" or "reasoning.text"
 	Text      string // human-readable reasoning text (empty for redacted/opaque blocks)
 	Signature string // cryptographic signature the provider requires on replay
-	Data      string // opaque provider payload (e.g. Anthropic redacted_thinking data)
+	Data      string // opaque provider payload or exact structured block JSON
 }
 
 // ServerToolBlock is one provider-executed tool block preserved for verbatim
@@ -218,9 +217,8 @@ type StreamEvent struct {
 	// the token cap, or FinishReasonContentFilter when it was filtered). It is
 	// empty for a normal completion. Providers set it on the terminal/done event.
 	FinishReason string
-	// ReasoningBlocks carries completed reasoning artifacts (Anthropic thinking /
-	// redacted_thinking blocks) that must be preserved for replay. Providers attach
-	// them to the terminal/done event; the collector accumulates them.
+	// ReasoningBlocks carries completed structured reasoning artifacts that must
+	// be preserved for replay. Providers attach them to the terminal/done event.
 	ReasoningBlocks []ReasoningBlock
 	// ServerToolBlocks carries completed provider-executed tool artifacts that
 	// must be preserved for replay. Providers attach them to a terminal event.

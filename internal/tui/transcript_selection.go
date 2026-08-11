@@ -1256,8 +1256,8 @@ func (m model) transcriptEdgeScrollDelta(msg tea.MouseMsg) (int, bool) {
 // drag while the mouse holds past the edge. Takes a plain column rather than a
 // tea.MouseMsg because the smooth-glide tick chain (dragEdgeScrollTickMsg) calls
 // this repeatedly with no real mouse event of its own — see edgeScrollMouseX.
-func (m model) dragToEdgeScroll(delta int, x int) model {
-	m = m.scrollChat(delta)
+func (m model) dragToEdgeScroll(delta int, x int) (model, tea.Cmd) {
+	m, cmd := m.scrollChat(delta)
 	_, window, layout := m.transcriptHitTestLayout()
 	target := window.start
 	if delta < 0 {
@@ -1266,7 +1266,7 @@ func (m model) dragToEdgeScroll(delta int, x int) model {
 	if line, ok := nearestTranscriptSelectableAt(layout, target); ok {
 		m.transcriptSelection.cursor = transcriptSelectionPointForMouse(line, x)
 	}
-	return m
+	return m, cmd
 }
 
 // dragEdgeScrollTickCmd schedules the next step of the smooth-glide edge-scroll,
@@ -1293,11 +1293,12 @@ func (m model) startEdgeScroll(direction int, x int) (model, tea.Cmd) {
 		m.edgeScrollMouseX = x
 		return m, nil
 	}
-	m = m.dragToEdgeScroll(step, x)
+	next, clear := m.dragToEdgeScroll(step, x)
+	m = next
 	m.edgeScrollDelta = step
 	m.edgeScrollMouseX = x
 	m.edgeScrollSeq++
-	return m, dragEdgeScrollTickCmd(m.edgeScrollSeq)
+	return m, tea.Batch(clear, dragEdgeScrollTickCmd(m.edgeScrollSeq))
 }
 
 // stopEdgeScroll ends the smooth-glide tick chain (the drag moved back into the
@@ -1429,17 +1430,17 @@ func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd,
 			m = m.stopEdgeScroll() // off to the side (e.g. over the sidebar), not an edge case
 			return m, nil, true
 		}
+		var cmd tea.Cmd
 		if m.reducedMotion {
 			// No animated glide: a single, larger step per raw motion event,
 			// matching the app's reduced-motion convention elsewhere.
-			m = m.dragToEdgeScroll(delta, mouseX(msg))
-			return m, nil, true
+			m, cmd = m.dragToEdgeScroll(delta, mouseX(msg))
+			return m, cmd, true
 		}
 		direction := 1
 		if delta < 0 {
 			direction = -1
 		}
-		var cmd tea.Cmd
 		m, cmd = m.startEdgeScroll(direction, mouseX(msg))
 		return m, cmd, true
 	case mouseRelease(msg):

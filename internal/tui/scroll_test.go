@@ -22,8 +22,11 @@ func TestMouseWheelScrollsChatWithoutRecallingInputHistory(t *testing.T) {
 
 	updated, cmd := m.Update(testMouseWheel(tea.MouseWheelUp, 0, 0))
 	m = updated.(model)
-	if cmd != nil {
-		t.Fatal("mouse wheel should not return a command")
+	if cmd == nil {
+		t.Fatal("mouse wheel that moves the scroll offset should return a clear-screen command")
+	}
+	if got := cmd(); got != tea.ClearScreen() {
+		t.Fatalf("scroll command yielded %#v, want clear-screen message %#v", got, tea.ClearScreen())
 	}
 	if got := m.input.Value(); got != "" {
 		t.Fatalf("mouse wheel should not recall input history, got %q", got)
@@ -172,13 +175,13 @@ func TestScrollChatClampsOffsetAtTranscriptTop(t *testing.T) {
 		t.Fatalf("test transcript should be scrollable, maxOffset=%d", maxOffset)
 	}
 
-	m = m.scrollChat(maxOffset + 100)
+	m, _ = m.scrollChat(maxOffset + 100)
 	if m.chatScrollOffset != maxOffset {
 		t.Fatalf("scroll beyond top offset = %d, want %d", m.chatScrollOffset, maxOffset)
 	}
 
 	m.chatScrollOffset = maxOffset + 100 // Simulate an offset saved before clamping existed.
-	m = m.scrollChat(-chatWheelScrollLines)
+	m, _ = m.scrollChat(-chatWheelScrollLines)
 	if want := maxOffset - chatWheelScrollLines; m.chatScrollOffset != want {
 		t.Fatalf("scroll down from inflated offset = %d, want %d", m.chatScrollOffset, want)
 	}
@@ -190,7 +193,7 @@ func TestScrollChatDoesNotAccumulateWhenTranscriptFits(t *testing.T) {
 	m.height = 20
 	m.transcript = appendRow(m.transcript, rowAssistant, "short")
 
-	m = m.scrollChat(100)
+	m, _ = m.scrollChat(100)
 	if m.chatScrollOffset != 0 {
 		t.Fatalf("non-scrollable transcript offset = %d, want 0", m.chatScrollOffset)
 	}
@@ -231,8 +234,16 @@ func TestMouseWheelOnClippedFooterStatusDoesNotMoveComposerCursor(t *testing.T) 
 
 	updated, cmd := m.Update(testMouseWheel(tea.MouseWheelUp, 0, m.height-1))
 	next := updated.(model)
-	if cmd != nil {
-		t.Fatal("mouse wheel on clipped footer should not return a command")
+	// The wheel falls through to chat scroll here (the clipped footer is not
+	// over the composer), which moves the scroll offset, so a clear-screen
+	// command is legitimately returned. Assert it is the clear-screen message
+	// rather than no command: the point of this test is that the composer
+	// cursor must not move.
+	if cmd == nil {
+		t.Fatal("wheel that moves the scroll offset should return a clear-screen command")
+	}
+	if got := cmd(); got != tea.ClearScreen() {
+		t.Fatalf("wheel command yielded %#v, want clear-screen message %#v", got, tea.ClearScreen())
 	}
 	if got := next.currentComposerState().cursor; got != startCursor {
 		t.Fatalf("composer cursor = %d, want unchanged end cursor %d", got, startCursor)
@@ -259,7 +270,7 @@ func TestAltScreenTranscriptScrollKeepsFooterFixed(t *testing.T) {
 		t.Fatalf("bottom view should keep title bar fixed, got:\n%s", bottom)
 	}
 
-	m = m.scrollChat(80)
+	m, _ = m.scrollChat(80)
 	scrolled := plainRender(t, m.View())
 	if !strings.Contains(scrolled, "message A") {
 		t.Fatalf("scrolled view should reveal older history, got:\n%s", scrolled)
@@ -331,5 +342,64 @@ func TestPageKeysScrollAltScreenTranscript(t *testing.T) {
 	m = updated.(model)
 	if m.chatScrollOffset != 0 {
 		t.Fatalf("page down should return to bottom, got offset %d", m.chatScrollOffset)
+	}
+}
+
+func TestScrollChatEmitsClearScreenOnlyWhenOffsetChanges(t *testing.T) {
+	// Keyboard path via the shared scrollChat seam. A scroll that actually
+	// moves the offset returns the clear-screen message; a no-op scroll (already
+	// at the top, or a zero delta) returns no command.
+	scrollable := newModel(context.Background(), Options{AltScreen: true})
+	scrollable.width = 90
+	scrollable.height = 14
+	for index := 0; index < 60; index++ {
+		scrollable.transcript = appendRow(scrollable.transcript, rowAssistant, "message "+string(rune('A'+index%26)))
+	}
+
+	m, cmd := scrollable.scrollChat(5)
+	if cmd == nil {
+		t.Fatal("scroll that changes the offset should return a clear-screen command")
+	}
+	if got := cmd(); got != tea.ClearScreen() {
+		t.Fatalf("keyboard scroll cmd yielded %#v, want clear-screen message %#v", got, tea.ClearScreen())
+	}
+	if m.chatScrollOffset == 0 {
+		t.Fatal("keyboard scroll should move the offset")
+	}
+
+	// A second scroll that can no longer move the offset (reach the top) must
+	// return no command. Offset counts lines below the fold, so ascent ends at
+	// the transcript top.
+	_, maxOffset := m.chatScrollMetrics()
+	m, _ = m.scrollChat(maxOffset) // clamp at the top
+	if m.chatScrollOffset == 0 {
+		t.Fatal("test model should be scrolled to the transcript top")
+	}
+	if _, cmd = m.scrollChat(5); cmd != nil {
+		t.Fatalf("scroll that does not change the offset should return no command, got %v", cmd)
+	}
+
+	// A zero delta never scrolls, so it must not return a command.
+	if _, cmd = scrollable.scrollChat(0); cmd != nil {
+		t.Fatalf("zero-delta scroll should return no command, got %v", cmd)
+	}
+
+	// Mouse path shares the same seam through scrollChatExtendingSelection.
+	mouseModel := newModel(context.Background(), Options{AltScreen: true})
+	mouseModel.width = 90
+	mouseModel.height = 14
+	for index := 0; index < 60; index++ {
+		mouseModel.transcript = appendRow(mouseModel.transcript, rowAssistant, "message "+string(rune('A'+index%26)))
+	}
+	mouseMsg := testMouseWheel(tea.MouseWheelUp, 0, 0)
+	next, cmd := mouseModel.scrollChatExtendingSelection(chatWheelScrollLines, mouseMsg)
+	if cmd == nil {
+		t.Fatal("mouse scroll that changes the offset should return a clear-screen command")
+	}
+	if got := cmd(); got != tea.ClearScreen() {
+		t.Fatalf("mouse scroll cmd yielded %#v, want clear-screen message %#v", got, tea.ClearScreen())
+	}
+	if next.chatScrollOffset == 0 {
+		t.Fatal("mouse scroll should move the offset")
 	}
 }
