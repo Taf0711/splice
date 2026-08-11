@@ -173,6 +173,16 @@ func (m model) startApproval(source splicerun.DesignTransitionSource) (model, te
 	options.OnToolCallDelta = func(id, fragment string) {
 		m.sendToolCallStreamDelta(runID, id, fragment)
 	}
+	onToolOutput := options.OnToolOutput
+	options.OnToolOutput = func(snapshot tools.OutputSnapshot) {
+		if m.runtimeMessageSink != nil {
+			id := effectiveToolRowID(snapshot.ToolCallID, callSeq[snapshot.ToolCallID])
+			m.runtimeMessageSink(toolOutputSnapshotMsg{runID: runID, id: id, snapshot: snapshot.Output})
+		}
+		if onToolOutput != nil {
+			onToolOutput(snapshot)
+		}
+	}
 
 	// Keep this guard and cancellation branch aligned with runAgentWithOptions.
 	// The buffered channel lets a late UI decision be discarded without blocking

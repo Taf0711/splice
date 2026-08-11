@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/tools"
@@ -178,6 +179,10 @@ type cardRenderOptions struct {
 	// selected in the FILES sidebar; the card border tints accent so the
 	// selection reads in the transcript.
 	fileSelected bool
+	// detailKey is the label of the global full-transcript keybinding (Ctrl+O
+	// by default), advertised on collapsed tool-card footers so the keyboard
+	// route to the complete redacted output is discoverable.
+	detailKey string
 }
 
 // flushCardBodyMaxLines is the body cap for cards flushed to scrollback. The
@@ -191,7 +196,7 @@ func (m model) renderRow(row transcriptRow, width int, rc rowContext) string {
 }
 
 func (m model) renderRowDetailed(row transcriptRow, width int, rc rowContext) string {
-	opts := cardRenderOptions{bodyCap: 0, cwd: m.cwd}
+	opts := cardRenderOptions{bodyCap: 0, cwd: m.cwd, detailKey: labelOr(m.keyBindings.toggleDetailed, "Ctrl+O")}
 	if defaultRenderCache != nil {
 		if key, stable := m.renderRowCacheKey(row, width, rc, opts, false); key != "" {
 			return defaultRenderCache.render(key, stable, func() string {
@@ -206,7 +211,7 @@ func (m model) renderRowDetailed(row transcriptRow, width int, rc rowContext) st
 // false: tight body caps, spinner-capable) or for its one-time scrollback
 // flush (flush == true: deep body caps so edited code stays reviewable).
 func (m model) renderRowMode(row transcriptRow, width int, rc rowContext, flush bool) string {
-	opts := cardRenderOptions{bodyCap: cardBodyMaxLines, cwd: m.cwd}
+	opts := cardRenderOptions{bodyCap: cardBodyMaxLines, cwd: m.cwd, detailKey: labelOr(m.keyBindings.toggleDetailed, "Ctrl+O")}
 	if flush {
 		opts.bodyCap = flushCardBodyMaxLines
 	}
@@ -1409,9 +1414,13 @@ type cardBody struct {
 // result yet: spinner glyph while ITS run is live, a static placeholder for
 // orphans (cancelled/errored turns, rehydrated history) — keying off the
 // global pending flag alone would re-animate dead cards on every later run.
+// The live card also shows the per-call elapsed time (driven by the spinner
+// tick, no second timer) and, for shell tools, the exact command wrapped in
+// the body — never a middle-truncated one-line target.
 func (m model) renderRunningToolCard(row transcriptRow, width int, rc rowContext, opts cardRenderOptions) string {
+	live := m.pending && row.runID != 0 && row.runID == m.activeRunID
 	glyph := zeroTheme.faintest.Render("…")
-	if m.pending && row.runID != 0 && row.runID == m.activeRunID {
+	if live {
 		glyph = zeroTheme.accent.Render(m.spinnerGlyph())
 	}
 	// The call row carries its own argHints; rc.hints/args only matter for
@@ -1424,10 +1433,31 @@ func (m model) renderRunningToolCard(row transcriptRow, width int, rc rowContext
 	if arg == "" {
 		arg = rc.args[rcKey(row.runID, row.id)]
 	}
-	// Running cards keep the normal name color; the accent spinner glyph at the
-	// front already marks them live (and orphaned dead cards must not look active).
-	head := toolCardHead(toolRowName(row), hint, arg, "", "", "", true, zeroTheme.ink, rc.auto[rcKey(row.runID, row.id)], width, opts)
-	return toolCard(head, glyph, nil, "", zeroTheme.cardRun, width)
+	// Per-call elapsed clock: the shared spinner tick re-renders the live card,
+	// so the number advances without scheduling its own timer. Only the active
+	// call of the active run ticks; orphans stay static.
+	headTag := ""
+	if live && row.id == m.activeToolID && !m.activeToolStart.IsZero() {
+		headTag = zeroTheme.faint.Render(formatWorkingElapsed(m.now().Sub(m.activeToolStart)))
+	}
+	headTarget := hint
+	if isShellCommandTool(row.tool) {
+		// The exact command is shown wrapped in the body below; never collapse it
+		// into a middle-truncated one-line head target.
+		headTarget = ""
+		arg = ""
+	}
+	head := toolCardHead(toolRowName(row), headTarget, arg, headTag, "", "", true, zeroTheme.ink, rc.auto[rcKey(row.runID, row.id)], width, opts)
+	var body []string
+	if isShellCommandTool(row.tool) && hint != "" {
+		body = wrappedShellCommandLines(hint, width)
+		// Live bounded shell output renders under the running command: the newest
+		// few visual lines, swapped in as snapshots arrive and cleared with the call.
+		if live && row.id == m.activeToolID && m.liveToolOutput != "" {
+			body = append(body, liveOutputLines(m.liveToolOutput, liveShellOutputLines, width)...)
+		}
+	}
+	return toolCard(head, glyph, body, "", zeroTheme.cardRun, width)
 }
 
 func renderToolResultCard(row transcriptRow, width int, rc rowContext, opts cardRenderOptions) string {
@@ -1453,37 +1483,126 @@ func renderToolResultCard(row transcriptRow, width int, rc rowContext, opts card
 		headTarget = ""
 		headArg = ""
 	}
+	if isShellCommandTool(name) {
+		// The exact command is the first line of the card body; a
+		// middle-truncated copy in the head would only repeat it worse.
+		headTarget = ""
+		headArg = ""
+	}
 	// A successful call whose only output is a one-line confirmation ("Created
 	// examples/calc.go (45 bytes).", "Successfully created directory …") restates
 	// what the head already shows (action + target + status dot), so drop the body and let
 	// the card collapse to a single line — matching the reference agents' density.
 	// Only for clean OK results: errors and anything multi-line keep their body.
 	if !failed && opts.bodyCap > 0 && !toolCardAlwaysExpands(name) && looksLikeRedundantConfirmation(row.detail) {
-		head := toolCardHead(name, headTarget, headArg, "", row.detail, row.text, false, nameStyle, rc.auto[key], width, opts)
+		head := toolCardHead(name, headTarget, headArg, toolResultHeadTag(row, ""), row.detail, row.text, false, nameStyle, rc.auto[key], width, opts)
 		return toolCard(head, glyph, nil, "", borderStyle, width)
 	}
 	// Collapse long, noisy output (web-search/MCP/read dumps) by default so the
-	// transcript stays scannable; the model still received the full output. Click
+	// transcript stays scannable; the model still received the full output. The
+	// collapsed card keeps a bounded 3-line preview plus an accurate hidden-line
+	// count and advertises both disclosure routes (mouse click + Ctrl+O). Click
 	// the card to expand (▸ → ▾) while it is live; collapsed rows flush to
 	// scrollback clean. Skipped for: the uncapped detailed view (opts.bodyCap==0),
-	// diff tools whose body must stay reviewable, and short output.
-	collapsedFooter := ""
-	if opts.bodyCap > 0 && !toolCardAlwaysExpands(name) && !(!failed && (isExploreTool(name) || isLocalControlTool(name))) {
-		collapsedFooter = collapsedToolFooter(row.detail)
-	}
-	if collapsedFooter != "" && !row.expanded {
-		head := toolCardHead(name, headTarget, headArg, "", row.detail, row.text, false, nameStyle, rc.auto[key], width, opts)
-		return toolCard(head, glyph, nil, collapsedFooter, borderStyle, width)
+	// diff tools whose body must stay reviewable, short output, explore/local
+	// summaries, and FAILED results — an error is never hidden behind a click.
+	if collapsedResultCard(name, failed, opts, row.detail) && !row.expanded {
+		bodyOpts := opts
+		bodyOpts.expanded = false
+		bodyOpts.bodyCap = 0 // render the real body so the preview and its hidden count are accurate
+		body := toolCardBody(name, rc.hints[key], rc.args[key], row.detail, width, bodyOpts, failed)
+		preview, hidden := previewCardLines(body.lines, collapsedPreviewLines)
+		footer := collapsedPreviewFooter(hidden, opts.detailKey)
+		if isShellCommandTool(name) {
+			commandLines := len(wrappedShellCommandLines(rc.hints[key], width))
+			preview, hidden = shellResultPreview(body.lines, commandLines, liveShellOutputLines)
+			footer = collapsedShellFooter(hidden, opts.detailKey)
+		}
+		head := toolCardHead(name, headTarget, headArg, toolResultHeadTag(row, body.headTag), row.detail, row.text, false, nameStyle, rc.auto[key], width, opts)
+		return toolCard(head, glyph, preview, footer, borderStyle, width)
 	}
 	bodyOpts := opts
 	bodyOpts.expanded = row.expanded
 	body := toolCardBody(name, rc.hints[key], rc.args[key], row.detail, width, bodyOpts, failed)
-	head := toolCardHead(name, headTarget, headArg, body.headTag, row.detail, row.text, false, nameStyle, rc.auto[key], width, opts)
+	head := toolCardHead(name, headTarget, headArg, toolResultHeadTag(row, body.headTag), row.detail, row.text, false, nameStyle, rc.auto[key], width, opts)
 	footer := body.footer
-	if collapsedFooter != "" && row.expanded && footer == "" {
+	if collapsedResultCard(name, failed, opts, row.detail) && row.expanded && footer == "" {
 		footer = "▾ collapse"
 	}
 	return toolCard(head, glyph, body.lines, footer, borderStyle, width)
+}
+
+func toolResultHeadTag(row transcriptRow, tag string) string {
+	if row.toolElapsed <= 0 {
+		return tag
+	}
+	elapsed := zeroTheme.faint.Render(formatWorkingElapsed(row.toolElapsed))
+	if tag == "" {
+		return elapsed
+	}
+	return tag + "  " + elapsed
+}
+
+// collapsedResultCard reports whether a result card would collapse long output
+// by default: capped view, successful result (an error is never hidden), not a
+// diff-render tool, not an explore/local-control summary, and output longer
+// than the live body cap.
+func collapsedResultCard(name string, failed bool, opts cardRenderOptions, detail string) bool {
+	if opts.bodyCap <= 0 || failed || toolCardAlwaysExpands(name) || isExploreTool(name) || isLocalControlTool(name) {
+		return false
+	}
+	return collapsedToolFooter(detail) != ""
+}
+
+// collapsedPreviewLines is how many useful body lines a collapsed result card
+// previews before the hidden-count footer.
+const collapsedPreviewLines = 3
+
+// previewCardLines keeps the first `cap` non-blank lines of a rendered card
+// body and reports how many body lines stay hidden (the count for the "… N
+// more lines" trailer), with the same semantics as capCardLines: hidden counts
+// every body line not shown, leading blanks included.
+func previewCardLines(lines []string, cap int) ([]string, int) {
+	if cap < 1 {
+		return nil, len(lines)
+	}
+	start := 0
+	for start < len(lines) && strings.TrimSpace(ansi.Strip(lines[start])) == "" {
+		start++
+	}
+	shown := cap
+	if remaining := len(lines) - start; remaining < shown {
+		shown = remaining
+	}
+	preview := make([]string, shown)
+	copy(preview, lines[start:start+shown])
+	return preview, len(lines) - start - shown
+}
+
+// collapsedPreviewFooter summarizes what a collapsed card still hides behind
+// its preview. Both disclosure routes are advertised: the mouse click (the
+// transcript selection toggles the row) and the global full-transcript key.
+func collapsedPreviewFooter(hidden int, detailKey string) string {
+	if hidden > 0 {
+		return zeroTheme.faint.Render(fmt.Sprintf("… %d more lines · click to expand · %s full output", hidden, detailKey))
+	}
+	return zeroTheme.faint.Render(fmt.Sprintf("click to expand · %s full output", detailKey))
+}
+
+func shellResultPreview(lines []string, commandLines, outputLines int) ([]string, int) {
+	commandLines = min(max(0, commandLines), len(lines))
+	output := lines[commandLines:]
+	shown := min(max(0, outputLines), len(output))
+	preview := append([]string(nil), lines[:commandLines]...)
+	preview = append(preview, output[len(output)-shown:]...)
+	return preview, len(output) - shown
+}
+
+func collapsedShellFooter(hidden int, detailKey string) string {
+	if hidden > 0 {
+		return zeroTheme.faint.Render(fmt.Sprintf("… %d earlier lines · click to expand · %s full output", hidden, detailKey))
+	}
+	return collapsedPreviewFooter(0, detailKey)
 }
 
 // confirmationVerbPattern matches a single-line success confirmation that only
@@ -2378,6 +2497,63 @@ func artifactCapturedPath(detail string) string {
 	return ""
 }
 
+// isShellCommandTool reports whether a tool runs a shell command whose exact
+// text must stay visible (bash, exec_command). The command is rendered wrapped
+// in the card body — never middle-truncated into a one-line head target.
+func isShellCommandTool(name string) bool {
+	switch name {
+	case "bash", "exec_command":
+		return true
+	}
+	return false
+}
+
+// wrappedShellCommandLines renders the exact command with a "$ " prompt and
+// wraps it to the card width. Continuation lines align under the command text
+// (4 cells: the two-space indent plus the "$ " prompt), so a long command is
+// fully readable at any terminal width. Empty commands render nothing.
+func wrappedShellCommandLines(command string, width int) []string {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return nil
+	}
+	measure := maxInt(8, width-4) // "  $ " prompt occupies 4 cells
+	lines := []string{}
+	for _, line := range strings.Split(strings.TrimRight(command, "\n"), "\n") {
+		segments := splitPreservingWidth(line, measure)
+		for index, segment := range segments {
+			if index == 0 {
+				lines = append(lines, zeroTheme.faint.Render("  $ ")+zeroTheme.ink.Render(segment))
+			} else {
+				lines = append(lines, "    "+zeroTheme.ink.Render(segment))
+			}
+		}
+	}
+	return lines
+}
+
+// liveShellOutputLines is how many newest visual lines of live shell output
+// render beneath the running command.
+const liveShellOutputLines = 5
+
+// liveOutputLines returns the newest up to cap visual lines of live shell
+// output, each wrapped to width, styled muted. Blank/partial lines at the tail
+// are normal (a command mid-write); the newest content stays on screen.
+func liveOutputLines(text string, cap int, width int) []string {
+	const prefix = "  │ "
+	measure := maxInt(8, width-lipgloss.Width(prefix))
+	var wrapped []string
+	for _, line := range strings.Split(text, "\n") {
+		for _, segment := range wrapPlainText(line, measure) {
+			wrapped = append(wrapped, zeroTheme.faint.Render(prefix)+zeroTheme.muted.Render(segment))
+		}
+	}
+	if len(wrapped) > cap {
+		wrapped = wrapped[len(wrapped)-cap:]
+	}
+	return wrapped
+}
+
 func bashCardBody(command string, detail string, width int, opts cardRenderOptions) cardBody {
 	footer := ""
 	output := []commandOutputLine{}
@@ -2401,7 +2577,8 @@ func bashCardBody(command string, detail string, width int, opts cardRenderOptio
 			output = append(output, commandOutputLine{text: line, style: style})
 		}
 	}
-	lines := renderCommandOutputLines(output, width, opts)
+	lines := wrappedShellCommandLines(command, width)
+	lines = append(lines, renderCommandOutputLines(output, width, opts)...)
 	return cardBody{lines: capCardLines(lines, opts.bodyCap), footer: footer}
 }
 
@@ -2438,7 +2615,8 @@ func execCommandCardBody(command string, detail string, width int, opts cardRend
 			output = append(output, commandOutputLine{text: line, style: style})
 		}
 	}
-	lines := renderCommandOutputLines(output, width, opts)
+	lines := wrappedShellCommandLines(command, width)
+	lines = append(lines, renderCommandOutputLines(output, width, opts)...)
 	return cardBody{lines: capCardLines(lines, opts.bodyCap), footer: footer}
 }
 

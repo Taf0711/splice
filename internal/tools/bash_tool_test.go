@@ -57,6 +57,10 @@ func runBashToolHelper(command string) {
 	case "sleep":
 		time.Sleep(250 * time.Millisecond)
 		fmt.Println("woke up")
+	case "output-sleep":
+		fmt.Println("started")
+		time.Sleep(250 * time.Millisecond)
+		fmt.Println("finished")
 	case "long-sleep":
 		time.Sleep(5 * time.Second)
 		fmt.Println("long sleep finished")

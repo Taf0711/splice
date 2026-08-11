@@ -1185,6 +1185,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		EnabledTools:  options.EnabledTools,
 		DisabledTools: options.DisabledTools,
 		Progress:      progressCallback,
+		OnToolOutput:  options.OnToolOutput,
 		// The sandbox decision (if any) is returned synchronously on the Result and
 		// used here for permission event building.
 	})
@@ -1487,6 +1488,7 @@ func runToolForNetworkRetry(ctx context.Context, registry *tools.Registry, name 
 		EnabledTools:      options.EnabledTools,
 		DisabledTools:     options.DisabledTools,
 		Progress:          progressCallback,
+		OnToolOutput:      options.OnToolOutput,
 	})
 }
 
@@ -1515,6 +1517,7 @@ func runToolForUnsandboxedRetry(ctx context.Context, registry *tools.Registry, n
 		EnabledTools:      options.EnabledTools,
 		DisabledTools:     options.DisabledTools,
 		Progress:          progressCallback,
+		OnToolOutput:      options.OnToolOutput,
 	})
 }
 

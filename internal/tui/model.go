@@ -218,7 +218,18 @@ type model struct {
 	// renders the live elapsed time from it so a long or stalled turn never looks
 	// like a frozen terminal (for ANY provider, not just slow ones). Splice = idle.
 	turnStartedAt time.Time
-	queuedMessage string
+	// activeToolName/ID/Start track the tool call in flight for the active run.
+	// They are set when the call row lands in the transcript (agentRowMsg) and
+	// cleared when its result row lands, the run ends (success, failure,
+	// timeout), or the run is cancelled — so a stale tool can never animate an
+	// orphaned card or mislabel the working line. They drive the working line's
+	// "running <tool>" phase label and the running card's per-call elapsed
+	// clock; the existing spinner tick (~80ms) re-renders, so no second timer is
+	// needed. Only meaningful while pending and for the active run.
+	activeToolID    string
+	activeToolName  string
+	activeToolStart time.Time
+	queuedMessage   string
 	// loops holds the session's active /loop definitions (see loop.go). activeLoopID
 	// tags the in-flight run when it is a loop iteration (empty = a user turn), so the
 	// completion seam knows whether to advance a loop. loopSeq invalidates a stale
@@ -374,6 +385,13 @@ type model struct {
 	streamCallName    string
 	streamCallDecoder *streamingDecoder
 
+	// Ephemeral snapshot of the currently-running shell tool's bounded live
+	// output, keyed to the active tool call. Set by toolOutputSnapshotMsg while
+	// a bash/exec_command call runs and cleared when the call/run ends. Never
+	// appended to the transcript or session events.
+	liveToolCallID string
+	liveToolOutput string
+
 	// Slash-command autocomplete (purely additive UI state). suggestions is the
 	// live match list for the current "/token"; suggestionIdx is the highlighted
 	// row. commandPaletteOpen keeps a splice-match command search active so invalid
@@ -518,6 +536,15 @@ type toolCallStreamDeltaMsg struct {
 	runID    int
 	id       string
 	fragment string
+}
+
+// toolOutputSnapshotMsg carries a bounded snapshot of a running shell tool's
+// live output from the agent goroutine to the update loop. It is ephemeral
+// model state: it is never appended to the transcript or session events.
+type toolOutputSnapshotMsg struct {
+	runID    int
+	id       string
+	snapshot string
 }
 
 type agentReasoningMsg struct {
@@ -1895,6 +1922,14 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.turnStreamedRunes += utf8.RuneCountInString(msg.fragment)
 		m.lastStreamActivity = m.now()
 		return m, nil
+	case toolOutputSnapshotMsg:
+		if msg.runID != m.activeRunID || msg.id != m.activeToolID {
+			return m, nil
+		}
+		m.liveToolCallID = msg.id
+		m.liveToolOutput = msg.snapshot
+		m.lastStreamActivity = m.now()
+		return m, nil
 	case agentTextMsg:
 		if msg.runID != m.activeRunID {
 			return m, nil
@@ -2151,6 +2186,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.clearStreamingToolCall() // active run finished — drop any lingering "writing" block
+		m.clearActiveTool()        // and any in-flight tool label/elapsed clock
 		m.pending = false
 		m = m.disarmCancelConfirmation() // the run finished on its own — nothing left to confirm cancelling
 		// Fully reset the fade state at stream end. The next render
@@ -2301,6 +2337,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.clearStreamingToolCall()
+		m.clearActiveTool()
 		m.pending = false
 		if m.runCancel != nil {
 			m.runCancel()
@@ -2374,6 +2411,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.pending = false
+		m.clearActiveTool()
 		if m.runCancel != nil {
 			m.runCancel()
 		}
@@ -2547,6 +2585,20 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// The tool call has finalized into its card — drop the live "writing"
 			// preview so it doesn't linger or duplicate beneath the card.
 			m.clearStreamingToolCall()
+			// The call is now in flight: stamp the active-tool state so the
+			// working line names it and the running card's elapsed clock runs.
+			m.activeToolID = msg.row.id
+			m.activeToolName = msg.row.tool
+			m.activeToolStart = m.now()
+		}
+		// The call's result row arrived: the in-flight tool is done (success,
+		// failure, or a rejected/denied call all produce a result row), so the
+		// working line must stop naming it and the card stops ticking.
+		if msg.row.kind == rowToolResult && msg.row.id == m.activeToolID {
+			if !m.activeToolStart.IsZero() {
+				msg.row.toolElapsed = m.now().Sub(m.activeToolStart)
+			}
+			m.clearActiveTool()
 		}
 		// Collapse a repeated swarm status/collect card so re-checks don't flood
 		// the chat with identical blocks.
@@ -3404,14 +3456,35 @@ func (m model) spinnerGlyph() string {
 }
 
 // workingActivity labels what the agent is doing right now for the working
-// status line: "writing" while the final answer streams, otherwise "thinking"
-// (reasoning, waiting on the model, or a tool in flight). Cheap and robust — no
-// transcript scan — so it can't misreport on a long, output-less step.
+// status line: "running <tool>" while a tool call is in flight, "writing"
+// while the final answer streams, otherwise "thinking" (reasoning or waiting
+// on the model). Cheap and robust — reads the active-tool state stamped when
+// the call row landed, no transcript scan — so it can't misreport on a long,
+// output-less step.
 func (m model) workingActivity() string {
+	// Streaming text and an in-flight tool never co-occur (a tool-call row
+	// clears streamingText when the call starts), so text wins when both are
+	// somehow set: the answer is what the user is visibly seeing.
 	if strings.TrimSpace(m.streamingTextString()) != "" {
 		return "writing"
 	}
+	if m.activeToolName != "" && m.activeToolID != "" && m.pending && m.activeRunID != 0 {
+		return "running " + activeToolWorkingLabel(m.activeToolName)
+	}
 	return "thinking"
+}
+
+// activeToolWorkingLabel names the in-flight tool for the working line. The
+// raw tool name is used for built-ins ("running bash", "running grep", "running
+// write_file") so the line reads precisely; MCP tools use their cleaned label
+// ("running web search") instead of exposing the mcp_ plumbing name.
+func activeToolWorkingLabel(name string) string {
+	if strings.HasPrefix(name, "mcp_") {
+		if label := toolDisplayName(name); label != "" {
+			return label
+		}
+	}
+	return name
 }
 
 // toolCardSuppressedInTranscript reports tools whose transcript card is redundant
@@ -4758,6 +4831,13 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	m.sidebarHidden = false
 	m.turnStartedAt = m.now()
 	m.turnStreamedRunes = 0
+	// A fresh run must not inherit the previous run's tool label/elapsed clock
+	// (defensive: the run-end and cancel paths already cleared it).
+	m.activeToolID = ""
+	m.activeToolName = ""
+	m.activeToolStart = time.Time{}
+	m.liveToolCallID = ""
+	m.liveToolOutput = ""
 	m.spinnerTicking = true
 	return m
 }
@@ -4834,6 +4914,7 @@ func (m *model) cancelRun() {
 		m.runCancel()
 	}
 	m.clearStreamingToolCall() // a cancelled file-write must not linger into the next run
+	m.clearActiveTool()        // and the cancelled run's tool must not linger either
 	// A cancelled loop iteration bypasses the agentResponseMsg completion seam (its
 	// late message is drained through flushRunIDs, not advanceLoop), so clear the
 	// loop tag here and re-arm the interrupted loop for its next cadence. Otherwise
@@ -5102,6 +5183,16 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		}
 		options.OnToolCallDelta = func(id, fragment string) {
 			m.sendToolCallStreamDelta(runID, id, fragment)
+		}
+		onToolOutput := options.OnToolOutput
+		options.OnToolOutput = func(snapshot tools.OutputSnapshot) {
+			if m.runtimeMessageSink != nil {
+				id := effectiveToolRowID(snapshot.ToolCallID, callSeq[snapshot.ToolCallID])
+				m.runtimeMessageSink(toolOutputSnapshotMsg{runID: runID, id: id, snapshot: snapshot.Output})
+			}
+			if onToolOutput != nil {
+				onToolOutput(snapshot)
+			}
 		}
 		onPermissionRequest := options.OnPermissionRequest
 		options.OnPermissionRequest = func(ctx context.Context, request agent.PermissionRequest) (agent.PermissionDecision, error) {
@@ -5658,6 +5749,20 @@ func (m *model) clearStreamingToolCall() {
 	m.streamCallID = ""
 	m.streamCallName = ""
 	m.streamCallDecoder = nil
+}
+
+// clearActiveTool drops the in-flight tool tracking. Called when the tool's
+// result row lands, the run ends (success, failure, timeout), or the run is
+// cancelled, so a stale tool can never animate a card or label the working
+// line after it finished.
+func (m *model) clearActiveTool() {
+	m.activeToolID = ""
+	m.activeToolName = ""
+	m.activeToolStart = time.Time{}
+	// The active tool's ephemeral live output ends with it (success, failure,
+	// rejection, cancellation, timeout, or run completion).
+	m.liveToolCallID = ""
+	m.liveToolOutput = ""
 }
 
 func (m model) sendAgentReasoning(runID int, delta string) {

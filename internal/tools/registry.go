@@ -41,6 +41,9 @@ type RunOptions struct {
 	// tool-call progress in the specialist card. nil is a no-op (the default
 	// for every non-Task tool).
 	Progress func(streamjson.Event)
+	// OnToolOutput receives bounded snapshots from shell tools. The registry
+	// redacts each snapshot before this callback runs. nil is a no-op.
+	OnToolOutput func(OutputSnapshot)
 	// Diagnostics, when set, returns a formatted language-diagnostics block for
 	// a file a mutating tool just wrote ("" when clean or no server available).
 	// edit_file/write_file append it to their output so the model sees an error
@@ -145,6 +148,19 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 	if rejecter, ok := tool.(PrePermissionRejecter); ok {
 		if res, rejected := rejecter.RejectBeforePermission(args); rejected {
 			return res
+		}
+	}
+
+	// Scrub live output at the same registry boundary as final tool results.
+	if options.OnToolOutput != nil {
+		surface := options.OnToolOutput
+		options.OnToolOutput = func(snapshot OutputSnapshot) {
+			snapshot.Output = completeOutputLines(snapshot.Output)
+			if snapshot.Output == "" {
+				return
+			}
+			snapshot.Output = redaction.RedactString(snapshot.Output, redaction.Options{})
+			surface(snapshot)
 		}
 	}
 

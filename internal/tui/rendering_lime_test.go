@@ -1041,18 +1041,20 @@ func TestBashCardBodyKeepsSingleLineOutputCompact(t *testing.T) {
 	}
 }
 
-func TestToolCardHeadCollapsesMultilineCommand(t *testing.T) {
+func TestToolCardShowsExactMultilineCommandWrapped(t *testing.T) {
 	m := limeTestModel()
 	command := "node -e \"\nconst fs = require('fs')\nconsole.log('ok')\n\""
 	detail := "stdout:\nJS syntax: OK\nexit_code: 0"
 	row := transcriptRow{kind: rowToolResult, id: "call_1", tool: "bash", status: tools.StatusOK, detail: detail}
 	rc := buildRowContext([]transcriptRow{{kind: rowToolCall, id: "call_1", tool: "bash", detail: command}})
 	got := plainRender(t, m.renderRow(row, 120, rc))
-	if strings.Contains(got, "\nconst fs") || strings.Contains(got, "\n\"") {
-		t.Fatalf("multi-line command should not break the card header, got:\n%s", got)
+	// The exact command is rendered on wrapped "$ " lines in the body; the head
+	// must not middle-truncate it into a one-line summary.
+	if !strings.Contains(got, "$ node -e \"") || !strings.Contains(got, "const fs = require") || !strings.Contains(got, "console.log('ok')") {
+		t.Fatalf("exact command must appear on wrapped lines, got:\n%s", got)
 	}
-	if !strings.Contains(got, "Ran node -e") || !strings.Contains(got, "const fs = require") {
-		t.Fatalf("multi-line command summary should stay visible on one line, got:\n%s", got)
+	if strings.Contains(got, "…") {
+		t.Fatalf("the command must not be truncated, got:\n%s", got)
 	}
 }
 

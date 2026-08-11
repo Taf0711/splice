@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	zeroSandbox "github.com/Taf0711/splice/internal/sandbox"
@@ -60,14 +61,21 @@ func NewScopedBashTool(workspaceRoot string, scope PathScope) Tool {
 }
 
 func (tool bashTool) Run(ctx context.Context, args map[string]any) Result {
-	return tool.run(ctx, args, nil)
+	return tool.run(ctx, args, RunOptions{})
 }
 
 func (tool bashTool) RunWithSandbox(ctx context.Context, args map[string]any, engine *zeroSandbox.Engine) Result {
-	return tool.run(ctx, args, engine)
+	return tool.run(ctx, args, RunOptions{Sandbox: engine})
 }
 
-func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroSandbox.Engine) Result {
+// RunWithOptions lets the registry pass live-output and tool-call context to
+// bash while still honoring the sandbox. Called when RunOptions are present.
+func (tool bashTool) RunWithOptions(ctx context.Context, args map[string]any, options RunOptions) Result {
+	return tool.run(ctx, args, options)
+}
+
+func (tool bashTool) run(ctx context.Context, args map[string]any, options RunOptions) Result {
+	engine := options.Sandbox
 	commandText, err := aliasedStringArg(args, []string{"command", "cmd", "script", "shell"}, "", true, false)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for bash: " + err.Error())
@@ -133,8 +141,13 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 	// streams, and the true size is counted for the truncation marker.
 	stdout := newBoundedBuffer(bashCaptureBudgetBytes, bashCaptureBudgetBytes)
 	stderr := newBoundedBuffer(bashCaptureBudgetBytes, bashCaptureBudgetBytes)
-	command.Stdout = stdout
-	command.Stderr = stderr
+	var snapshotEmit func(string)
+	if options.OnToolOutput != nil {
+		snapshotEmit = func(output string) {
+			options.OnToolOutput(OutputSnapshot{ToolCallID: options.ToolCallID, Output: output})
+		}
+	}
+	command.Stdout, command.Stderr = newShellSnapshotWriters(stdout, stderr, snapshotEmit)
 
 	// Kill the shell as a process group on timeout and bound the post-kill I/O
 	// wait, so a backgrounded child cannot outlive the command or hang Run().
@@ -491,9 +504,9 @@ func sectionWithCaptureGap(text string, total int) string {
 // a command emitting unbounded output (`cat huge.log`, `yes`) cannot grow Splice's
 // memory: the middle is discarded as it arrives instead of buffered whole and then
 // truncated. total records the full size for the truncation marker even though the
-// middle is never held. Not safe for concurrent writes; exec drives Stdout and
-// Stderr from separate goroutines, so each stream gets its own buffer.
+// middle is never held. The mutex permits live reads while exec writes the stream.
 type boundedBuffer struct {
+	mu      sync.Mutex
 	head    []byte
 	headCap int
 	tail    []byte
@@ -506,6 +519,8 @@ func newBoundedBuffer(headCap, tailCap int) *boundedBuffer {
 }
 
 func (b *boundedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	n := len(p)
 	b.total += n
 	// Fill the head until it reaches headCap; the head is written once and frozen.
@@ -533,6 +548,8 @@ func (b *boundedBuffer) Write(p []byte) (int, error) {
 // between head and tail lands in the middle, which the display budget trims away;
 // callers that need the true size read total separately.
 func (b *boundedBuffer) retained() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if len(b.tail) > b.tailCap {
 		// Not yet compacted since the last overflow; expose only the last tailCap.
 		return string(b.head) + string(b.tail[len(b.tail)-b.tailCap:])

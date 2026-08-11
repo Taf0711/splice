@@ -473,11 +473,18 @@ func NewScopedExecCommandTool(workspaceRoot string, scope PathScope, manager *ex
 }
 
 func (tool execCommandTool) Run(ctx context.Context, args map[string]any) Result {
-	return tool.run(ctx, args, nil)
+	return tool.run(ctx, args, RunOptions{})
 }
 
 func (tool execCommandTool) RunWithSandbox(ctx context.Context, args map[string]any, engine *zeroSandbox.Engine) Result {
-	return tool.run(ctx, args, engine)
+	return tool.run(ctx, args, RunOptions{Sandbox: engine})
+}
+
+// RunWithOptions lets the registry pass live-output and tool-call context to
+// exec_command while still honoring the sandbox. Called when RunOptions are
+// present.
+func (tool execCommandTool) RunWithOptions(ctx context.Context, args map[string]any, options RunOptions) Result {
+	return tool.run(ctx, args, options)
 }
 
 func (tool execCommandTool) ExecSessions() []ExecSessionSnapshot {
@@ -492,7 +499,9 @@ func (tool execCommandTool) StopAllExecSessions() []int {
 	return tool.manager.stopAll()
 }
 
-func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine *zeroSandbox.Engine) Result {
+func (tool execCommandTool) run(ctx context.Context, args map[string]any, options RunOptions) Result {
+	engine := options.Sandbox
+
 	commandText, err := aliasedStringArg(args, []string{"cmd", "command", "script", "shell"}, "", true, false)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for exec_command: " + err.Error())
@@ -536,6 +545,40 @@ func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine
 	session, err := tool.startSession(commandText, absoluteCwd, relativeCwd, ttyRequested, engine, sandboxPermissions)
 	if err != nil {
 		return errorResult("Error starting exec_command: " + err.Error())
+	}
+	// Poll the existing bounded recent buffer while this call is active. The
+	// worker stops before run returns, so a background session cannot send stale
+	// snapshots after its result row.
+	if options.OnToolOutput != nil {
+		done := make(chan struct{})
+		stopped := make(chan struct{})
+		defer func() {
+			close(done)
+			<-stopped
+		}()
+		go func() {
+			defer close(stopped)
+			ticker := time.NewTicker(minOutputSnapshotInterval)
+			defer ticker.Stop()
+			last := ""
+			emit := func() {
+				output := session.output.recentString()
+				if output == "" || output == last {
+					return
+				}
+				last = output
+				options.OnToolOutput(OutputSnapshot{ToolCallID: options.ToolCallID, Output: output})
+			}
+			emit()
+			for {
+				select {
+				case <-done:
+					return
+				case <-ticker.C:
+					emit()
+				}
+			}
+		}()
 	}
 	output, outputTruncated := session.collect(ctx, time.Duration(yieldTimeMS)*time.Millisecond)
 	if ctx != nil && ctx.Err() != nil && !session.doneClosed() {

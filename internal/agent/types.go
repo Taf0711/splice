@@ -381,6 +381,8 @@ type Options struct {
 	// specialist child process emits while running. The toolCallID identifies
 	// which Task tool call the progress belongs to. nil is a no-op.
 	OnToolProgress func(toolCallID string, event streamjson.Event)
+	// OnToolOutput receives bounded, redacted snapshots from running shell tools.
+	OnToolOutput func(tools.OutputSnapshot)
 	// OnContext, when set, is called once per turn with the per-category context
 	// budget of the request about to be sent, so a surface (TUI/CLI) can show
 	// context utilization. Opt-in like the other callbacks; nil is a no-op.
