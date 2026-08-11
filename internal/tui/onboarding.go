@@ -832,6 +832,7 @@ func (m model) completeSetup() (tea.Model, tea.Cmd) {
 	}
 	if result.Provider.Name != "" {
 		m.providerProfile = result.Provider
+		m.savedProviders = upsertSavedProvider(m.savedProviders, result.Provider)
 		m.rebuildModelCatalog()
 		m.providerName = result.Provider.Name
 		m.modelName = result.Provider.Model

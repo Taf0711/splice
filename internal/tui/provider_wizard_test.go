@@ -1441,11 +1441,61 @@ func TestApplyProviderWizardExportsActiveProviderEnv(t *testing.T) {
 	}
 }
 
+// A provider added in the live wizard must be available to /stages without a restart.
+func TestApplyProviderWizardRefreshesSavedProvidersForStages(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	oldProfile := config.ProviderProfile{Name: "old", CatalogID: "openai", Model: "old-model"}
+	m := newModel(context.Background(), Options{
+		UserConfigPath:  configPath,
+		ProviderName:    oldProfile.Name,
+		ModelName:       oldProfile.Model,
+		ProviderProfile: oldProfile,
+		SavedProviders:  []config.ProviderProfile{oldProfile},
+		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &fakeProvider{}, nil
+		},
+	})
+	m.providerWizard = &providerWizardState{
+		step:        providerWizardStepModel,
+		profileName: "stage-provider",
+		providers: []providercatalog.Descriptor{{
+			ID:                  "openrouter",
+			Name:                "OpenRouter",
+			Transport:           providercatalog.TransportOpenAICompatible,
+			DefaultBaseURL:      "https://openrouter.ai/api/v1",
+			DefaultModel:        "openai/gpt-4.1",
+			SupportedAPIFormats: []providercatalog.APIFormat{providercatalog.APIFormatOpenAIChatCompletions},
+		}},
+		models: []providerWizardModel{{ID: "openai/gpt-4.1"}},
+	}
+
+	next, _ := m.applyProviderWizard()
+	wizard, err := newStageModelWizard(next.userConfigPath, next.savedProviders, next.providerProfile)
+	if err != nil {
+		t.Fatalf("newStageModelWizard: %v", err)
+	}
+	for _, profile := range wizard.providers {
+		if profile.Name == "stage-provider" {
+			return
+		}
+	}
+	t.Fatalf("stage provider missing after sign-in: saved=%+v stage providers=%+v", next.savedProviders, wizard.providers)
+}
+
+func TestUpsertSavedProviderReplacesStaleProfile(t *testing.T) {
+	old := []config.ProviderProfile{{Name: "Same", Model: "old-model", BaseURL: "https://old.example/v1"}}
+	updated := upsertSavedProvider(old, config.ProviderProfile{Name: "same", Model: "new-model", BaseURL: "https://new.example/v1"})
+	if len(updated) != 1 || updated[0].Model != "new-model" || updated[0].BaseURL != "https://new.example/v1" {
+		t.Fatalf("updated profiles = %+v, want one current profile", updated)
+	}
+	if old[0].Model != "old-model" {
+		t.Fatalf("input slice was mutated: %+v", old)
+	}
+}
+
 // On a config PERSIST failure, applyProviderWizard must leave live state fully
-// unchanged — the chat must NOT already be running on the new provider while the
-// status line and the SPLICE_PROVIDER export (which pins spawned children) still
-// point at the old one. Build and persist are staged into locals; nothing is
-// committed unless both succeed.
+// unchanged. The chat must not run on the new provider while the status line and
+// SPLICE_PROVIDER still point at the old one. Commit only after build and persist succeed.
 func TestApplyProviderWizardPersistFailureLeavesLiveStateUnchanged(t *testing.T) {
 	t.Setenv("SPLICE_CRED_STORAGE", "encrypted-file") // never touch the real OS keychain: apiKey is secured before the persist fails
 	t.Setenv(config.ActiveProviderEnv, "old-provider")

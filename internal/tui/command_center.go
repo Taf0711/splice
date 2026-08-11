@@ -458,6 +458,7 @@ func (m model) handleModelCommand(args string) (model, string) {
 	persisted, persistErr := m.persistSelectedModel(nextProfile)
 
 	m.providerProfile = nextProfile
+	m.savedProviders = upsertSavedProvider(m.savedProviders, nextProfile)
 	m.rebuildModelCatalog()
 	m.provider = nextProvider
 	m.providerName = displayValue(nextProfile.Name, string(metadata.ProviderKind))
@@ -542,6 +543,7 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 	}
 	m.provider = next
 	m.providerProfile = target
+	m.savedProviders = upsertSavedProvider(m.savedProviders, target)
 	m.rebuildModelCatalog()
 	m.providerName = target.Name
 	m.modelName = target.Model
