@@ -338,7 +338,10 @@ type Options struct {
 	Registry                   *tools.Registry
 	PermissionMode             PermissionMode
 	Autonomy                   string
-	Sandbox                    *sandbox.Engine
+	// TrustedWorkspace lets the sandbox auto-allow file mutations that stay in
+	// the trusted workspace. It does not grant shell, network, or external access.
+	TrustedWorkspace bool
+	Sandbox          *sandbox.Engine
 	// FileTracker records per-session file read/write versions so the write tools
 	// can detect a file changed on disk outside Splice since it was last read. nil
 	// disables the check. Created once per session and threaded into every tool run.

@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -624,29 +625,40 @@ func (m model) contextText() string {
 	})
 }
 
-func (m model) trustText() string {
-	if m.trusted {
-		return "Workspace is already trusted. No changes made."
+// applyTrustPickerChoice saves the selected action and updates the live trust
+// indicator. Project resources keep the startup decision until the next launch.
+func (m model) applyTrustPickerChoice(item pickerItem) (model, string, bool) {
+	target := m.cwd
+	trusted := item.Value != trustActionDecline
+	if item.Value == trustActionParent {
+		target = filepath.Dir(m.cwd)
+	} else if item.Value != trustActionCurrent && item.Value != trustActionDecline {
+		return m, "Unknown trust choice.", false
 	}
 
-	store := m.trustStore
-	if store == nil {
-		path, err := config.DefaultTrustStorePath()
-		if err != nil {
-			return "Failed to save workspace trust decision: " + err.Error()
+	if m.trustStore == nil {
+		return m, "Failed to save workspace trust decision: trust store unavailable.", false
+	}
+	if err := m.trustStore.SetTrusted(target, trusted); err != nil {
+		return m, "Failed to save workspace trust decision: " + err.Error(), false
+	}
+	if item.Value == trustActionParent {
+		// An earlier decline for this folder is more specific than parent trust.
+		// Replace it so the parent choice also applies to this folder next time.
+		if err := m.trustStore.SetTrusted(m.cwd, true); err != nil {
+			return m, "Failed to save workspace trust decision: " + err.Error(), false
 		}
-		store, err = config.LoadTrustStore(path)
-		if err != nil {
-			return "Failed to save workspace trust decision: " + err.Error()
-		}
 	}
-	if err := store.SetTrusted(m.cwd, true); err != nil {
-		return "Failed to save workspace trust decision: " + err.Error()
+	if err := m.trustStore.Save(); err != nil {
+		return m, "Failed to save workspace trust decision: " + err.Error(), false
 	}
-	if err := store.Save(); err != nil {
-		return "Failed to save workspace trust decision: " + err.Error()
+
+	m.trusted = trusted
+	m.agentOptions.TrustedWorkspace = trusted
+	if !trusted {
+		return m, "Workspace trust declined. This session stays untrusted.", true
 	}
-	return "Workspace trust decision saved. Restart Splice for the change to take effect. This session stays untrusted. Project commands, hooks, MCP servers, and plugins stay disabled until you restart."
+	return m, "Workspace trust saved. Project resources load on the next launch.", true
 }
 
 func (m model) registeredTools() []tools.Tool {

@@ -1,9 +1,12 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"testing"
 
 	"github.com/Taf0711/splice/internal/config"
+	"github.com/Taf0711/splice/internal/tui"
 )
 
 func TestResolveWorkspaceTrustFreshAskReturnsUndecided(t *testing.T) {
@@ -23,6 +26,36 @@ func TestResolveWorkspaceTrustFreshAskReturnsUndecided(t *testing.T) {
 	}
 	if store == nil {
 		t.Fatal("store = nil, want loaded trust store")
+	}
+}
+
+func TestInteractiveTrustPromptRunsInsideMainTUI(t *testing.T) {
+	setCLIUserConfigRoot(t)
+	t.Setenv("SPLICE_TRUST_WORKSPACE", "")
+	var got tui.Options
+	launched := false
+	var stdout, stderr bytes.Buffer
+	exit := runWithDeps(nil, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return t.TempDir(), nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{MaxTurns: 3}, nil
+		},
+		runTUI: func(_ context.Context, options tui.Options) int {
+			launched = true
+			got = options
+			return 0
+		},
+	})
+	if exit != 0 || !launched {
+		t.Fatalf("exit = %d, launched = %v, stderr = %q", exit, launched, stderr.String())
+	}
+	// An explicitly empty environment value counts as a decision source. Clear it
+	// and check the predicate separately because test stdin is not a terminal.
+	if got.TrustPrompt {
+		t.Fatal("TrustPrompt = true with an explicit environment value")
+	}
+	if !shouldPromptWorkspaceTrust(config.TrustUndecided, "ask", false, false, false, true) {
+		t.Fatal("interactive undecided trust did not request the main TUI prompt")
 	}
 }
 

@@ -97,6 +97,9 @@ type Options struct {
 	// TrustStore is the store resolved by the CLI for this workspace. The TUI
 	// uses it for /trust so the command writes the same store as startup.
 	TrustStore *config.TrustStore
+	// TrustPrompt reports that workspace trust is undecided. The main TUI shows
+	// a required trust menu before it opens the chat surface.
+	TrustPrompt bool
 }
 
 type MCPCommandResult struct {

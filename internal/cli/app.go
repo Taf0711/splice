@@ -749,26 +749,9 @@ func runInteractiveTUIWithSetup(stdout io.Writer, stderr io.Writer, deps appDeps
 		decision = config.TrustUndecided
 		persist = false
 	}
-	if shouldPromptWorkspaceTrust(decision, resolved.DefaultProjectTrust, rootTrust, rootNoTrust, envTrustWorkspaceSet(), term.IsTerminal(os.Stdin.Fd())) {
-		answer, decided, promptErr := tui.PromptWorkspaceTrust(context.Background(), deps.stdin, stdout)
-		if promptErr != nil {
-			fmt.Fprintf(stderr, "warning: workspace trust prompt failed: %s\n", promptErr)
-		} else if decided {
-			trusted = answer
-			if store != nil {
-				if setErr := store.SetTrusted(workspaceRoot, answer); setErr != nil {
-					fmt.Fprintf(stderr, "warning: failed to persist trust decision: %s\n", setErr)
-				} else if saveErr := store.Save(); saveErr != nil {
-					fmt.Fprintf(stderr, "warning: failed to persist trust decision: %s\n", saveErr)
-				}
-			}
-			if trusted {
-				decision = config.TrustTrusted
-			} else {
-				decision = config.TrustDeclined
-			}
-		}
-	}
+	// Let the main TUI collect an undecided trust choice. Explicit settings,
+	// flags, environment values, and saved decisions still resolve before launch.
+	trustPrompt := shouldPromptWorkspaceTrust(decision, resolved.DefaultProjectTrust, rootTrust, rootNoTrust, envTrustWorkspaceSet(), term.IsTerminal(os.Stdin.Fd()))
 	if persist && store != nil {
 		_ = store.SetTrusted(workspaceRoot, trusted)
 		if saveErr := store.Save(); saveErr != nil {
@@ -876,6 +859,7 @@ func runInteractiveTUIWithSetup(stdout io.Writer, stderr io.Writer, deps appDeps
 		Cwd:                  workspaceRoot,
 		Trusted:              trusted,
 		TrustStore:           store,
+		TrustPrompt:          trustPrompt,
 		Version:              version,
 		Theme:                theme,
 		SavedTheme:           resolved.Preferences.Theme,
@@ -926,6 +910,7 @@ func runInteractiveTUIWithSetup(stdout io.Writer, stderr io.Writer, deps appDeps
 		SandboxSetupCommand: tuiSandboxSetupCommand(sandboxBackend, deps),
 		AgentOptions: agent.Options{
 			MaxTurns:                   resolved.MaxTurns,
+			TrustedWorkspace:           trusted,
 			Registry:                   registry,
 			PermissionMode:             permissionMode,
 			Autonomy:                   "low",

@@ -225,11 +225,12 @@ func TestEngineAutoAllowsWorkspaceFileMutationTools(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			decision := engine.Evaluate(context.Background(), Request{
-				ToolName:       tc.name,
-				SideEffect:     SideEffectWrite,
-				Permission:     PermissionPrompt,
-				PermissionMode: PermissionModeAsk,
-				Args:           tc.args,
+				ToolName:         tc.name,
+				SideEffect:       SideEffectWrite,
+				Permission:       PermissionPrompt,
+				PermissionMode:   PermissionModeAsk,
+				TrustedWorkspace: true,
+				Args:             tc.args,
 			})
 			if decision.Action != ActionAllow || !decision.AutoAllowed || decision.GrantMatched {
 				t.Fatalf("workspace mutation decision = %#v, want auto allow without grant", decision)
@@ -238,14 +239,52 @@ func TestEngineAutoAllowsWorkspaceFileMutationTools(t *testing.T) {
 	}
 
 	outside := engine.Evaluate(context.Background(), Request{
+		ToolName:         "write_file",
+		SideEffect:       SideEffectWrite,
+		Permission:       PermissionPrompt,
+		PermissionMode:   PermissionModeAsk,
+		TrustedWorkspace: true,
+		Args:             map[string]any{"path": outsideDefaultTempPath(root, "escape.txt")},
+	})
+	if outside.Action != ActionPrompt || outside.Block == nil || outside.Block.Code != BlockOutsideWorkspace || !outside.Block.Recoverable {
+		t.Fatalf("outside workspace mutation decision = %#v, want recoverable prompt", outside)
+	}
+}
+
+func TestEngineDoesNotAutoAllowTrustedWorkspaceShellOrNetwork(t *testing.T) {
+	root := t.TempDir()
+	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy()})
+	for _, request := range []Request{
+		{
+			ToolName: "bash", SideEffect: SideEffectShell, Permission: PermissionPrompt,
+			PermissionMode: PermissionModeAsk, TrustedWorkspace: true,
+			Args: map[string]any{"command": "printf ok"},
+		},
+		{
+			ToolName: "http", SideEffect: SideEffectNetwork, Permission: PermissionPrompt,
+			PermissionMode: PermissionModeAsk, TrustedWorkspace: true,
+			Args: map[string]any{"url": "https://example.com"},
+		},
+	} {
+		decision := engine.Evaluate(context.Background(), request)
+		if decision.AutoAllowed {
+			t.Fatalf("trusted workspace auto-allowed %s", request.SideEffect)
+		}
+	}
+}
+
+func TestEngineDoesNotAutoAllowUntrustedWorkspaceWrites(t *testing.T) {
+	root := t.TempDir()
+	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy()})
+	decision := engine.Evaluate(context.Background(), Request{
 		ToolName:       "write_file",
 		SideEffect:     SideEffectWrite,
 		Permission:     PermissionPrompt,
 		PermissionMode: PermissionModeAsk,
-		Args:           map[string]any{"path": outsideDefaultTempPath(root, "escape.txt")},
+		Args:           map[string]any{"path": "notes.txt"},
 	})
-	if outside.Action != ActionPrompt || outside.Block == nil || outside.Block.Code != BlockOutsideWorkspace || !outside.Block.Recoverable {
-		t.Fatalf("outside workspace mutation decision = %#v, want recoverable prompt", outside)
+	if decision.Action != ActionPrompt || decision.AutoAllowed {
+		t.Fatalf("untrusted workspace decision = %#v, want prompt", decision)
 	}
 }
 
@@ -263,11 +302,12 @@ func TestEngineDoesNotAutoAllowProtectedMetadataWrites(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			decision := engine.Evaluate(context.Background(), Request{
-				ToolName:       strings.Fields(tc.name)[0],
-				SideEffect:     SideEffectWrite,
-				Permission:     PermissionPrompt,
-				PermissionMode: PermissionModeAsk,
-				Args:           tc.args,
+				ToolName:         strings.Fields(tc.name)[0],
+				SideEffect:       SideEffectWrite,
+				Permission:       PermissionPrompt,
+				PermissionMode:   PermissionModeAsk,
+				TrustedWorkspace: true,
+				Args:             tc.args,
 			})
 			if decision.Action != ActionPrompt || decision.AutoAllowed {
 				t.Fatalf("protected metadata decision = %#v, want prompt without auto-allow", decision)
@@ -411,10 +451,11 @@ func TestEngineDeniesAutoAllowedSymlinkEscape(t *testing.T) {
 	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy()})
 
 	decision := engine.Evaluate(context.Background(), Request{
-		ToolName:       "apply_patch",
-		SideEffect:     SideEffectWrite,
-		Permission:     PermissionPrompt,
-		PermissionMode: PermissionModeAsk,
+		ToolName:         "apply_patch",
+		SideEffect:       SideEffectWrite,
+		Permission:       PermissionPrompt,
+		PermissionMode:   PermissionModeAsk,
+		TrustedWorkspace: true,
 		Args: map[string]any{
 			"patch": "--- /dev/null\n+++ b/linked/escape.txt\n@@ -0,0 +1 @@\n+escape\n",
 		},

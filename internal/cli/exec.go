@@ -683,6 +683,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		Registry:          registry,
 		PermissionMode:    permissionMode,
 		Autonomy:          options.autonomy,
+		TrustedWorkspace:  trusted,
 		// SelfCorrect is agent-loop only: the deterministic pipeline does not run
 		// the post-edit verify-and-correct loop, so it is inert under `splice exec`.
 		SelfCorrect: selfCorrector,

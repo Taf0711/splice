@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -26,6 +27,15 @@ const (
 	pickerSession
 	pickerTheme
 	pickerSkill
+	pickerTrust
+)
+
+// trustAction values identify the trust menu rows. They are stable keys the
+// picker passes to applyTrustPickerChoice.
+const (
+	trustActionCurrent = "trust-current"
+	trustActionParent  = "trust-parent"
+	trustActionDecline = "decline"
 )
 
 // pickerItem is one selectable row: Label is shown, Value is passed to the
@@ -929,6 +939,35 @@ func (m model) newThemePicker() *commandPicker {
 	// allItems lets the query filter restore rows on Backspace (one-way narrowing
 	// otherwise, since applyQuery falls back to the current items without it).
 	return &commandPicker{kind: pickerTheme, title: "select theme", items: items, allItems: append([]pickerItem{}, items...), selected: selected}
+}
+
+// trustStateLabel renders the effective trust state for the menu title.
+func (m model) trustStateLabel() string {
+	switch {
+	case m.trusted:
+		return "trusted"
+	case m.trustPromptRequired:
+		return "not decided"
+	default:
+		return "untrusted"
+	}
+}
+
+// newTrustPicker builds the live trust menu: show the current state and path in
+// the title and offer trust-current, trust-parent, and decline actions. It is
+// used both by the required first-run menu and by a later /trust invocation.
+func (m model) newTrustPicker() *commandPicker {
+	items := []pickerItem{
+		{Label: "Trust this folder", Value: trustActionCurrent, Meta: m.cwd},
+		{Label: "Trust parent folder", Value: trustActionParent, Meta: filepath.Dir(m.cwd)},
+		{Label: "Do not trust this folder", Value: trustActionDecline, Meta: "keep this session untrusted"},
+	}
+	selected := len(items) - 1
+	if m.trusted {
+		selected = 0
+	}
+	title := "Trust :: " + m.trustStateLabel() + " :: " + m.cwd
+	return &commandPicker{kind: pickerTrust, title: title, items: items, allItems: append([]pickerItem{}, items...), selected: selected}
 }
 
 // pickerMoved advances the open picker's cursor by delta and live-previews the new

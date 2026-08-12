@@ -1169,7 +1169,22 @@ func newAgentToolRunner(options agent.Options, cwd string) ToolRunner {
 			permission = permissioner.PermissionForArgs(args)
 		}
 		permissionGranted := false
-		if permission == tools.PermissionPrompt {
+		if options.Sandbox != nil {
+			decision := options.Sandbox.Evaluate(ctx, sandbox.Request{
+				WorkspaceRoot:    cwd,
+				ToolName:         name,
+				SideEffect:       sandbox.SideEffect(tool.Safety().SideEffect),
+				Permission:       sandbox.Permission(permission),
+				PermissionMode:   sandbox.PermissionMode(options.PermissionMode),
+				TrustedWorkspace: options.TrustedWorkspace,
+				Args:             args,
+				Reason:           tool.Safety().Reason,
+			})
+			if decision.Action == sandbox.ActionAllow && decision.AutoAllowed {
+				permissionGranted = true
+			}
+		}
+		if permission == tools.PermissionPrompt && !permissionGranted {
 			request := agent.PermissionRequest{
 				ToolCallID:         call.ID,
 				ToolName:           name,
@@ -1220,6 +1235,7 @@ func newAgentToolRunner(options agent.Options, cwd string) ToolRunner {
 			Sandbox:           options.Sandbox,
 			PermissionMode:    string(options.PermissionMode),
 			Autonomy:          options.Autonomy,
+			TrustedWorkspace:  options.TrustedWorkspace,
 			FileTracker:       options.FileTracker,
 			Cwd:               cwd,
 			ToolCallID:        call.ID,

@@ -166,7 +166,7 @@ var commandDefinitions = []commandDefinition{
 		name:        "/trust",
 		usage:       "/trust",
 		group:       commandGroupSession,
-		description: "Trust this workspace on the next run.",
+		description: "Manage trust for this folder or its parent.",
 		kind:        commandTrust,
 	},
 	{

@@ -202,6 +202,7 @@ type Request struct {
 	Permission        Permission     `json:"permission"`
 	PermissionGranted bool           `json:"permissionGranted,omitempty"`
 	PermissionMode    PermissionMode `json:"permissionMode"`
+	TrustedWorkspace  bool           `json:"trustedWorkspace,omitempty"`
 	Args              map[string]any `json:"args,omitempty"`
 	Reason            string         `json:"reason,omitempty"`
 }
@@ -214,11 +215,11 @@ type Decision struct {
 	Grant        *Grant `json:"grant,omitempty"`
 	Block        *Block `json:"block,omitempty"`
 	// AutoAllowed marks an allow that the sandbox itself authorized without a user
-	// prompt or persistent grant, such as a workspace-write file mutation or an
-	// opted-in sandboxed shell command. Enforcement points treat it like a
-	// grant-authorized allow so a prompt tool runs without a separately-recorded
-	// PermissionGranted.
+	// prompt or persistent grant. Enforcement points treat it like a grant-backed
+	// allow, so a prompt tool runs without a separate approval record.
 	AutoAllowed bool `json:"autoAllowed,omitempty"`
+	// ProfileMatched marks an allow covered by a request_permissions profile.
+	ProfileMatched bool `json:"profileMatched,omitempty"`
 }
 
 type Risk struct {

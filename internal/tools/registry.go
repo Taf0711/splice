@@ -17,6 +17,7 @@ type RunOptions struct {
 	PermissionGranted bool
 	PermissionMode    string
 	Autonomy          string
+	TrustedWorkspace  bool
 	Sandbox           *sandbox.Engine
 	ToolCallID        string
 	SessionID         string
@@ -174,6 +175,7 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 			Permission:        sandbox.Permission(permission),
 			PermissionGranted: options.PermissionGranted,
 			PermissionMode:    sandbox.PermissionMode(options.PermissionMode),
+			TrustedWorkspace:  options.TrustedWorkspace,
 			Args:              args,
 			Reason:            tool.Safety().Reason,
 		})
@@ -191,7 +193,7 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 		// A persistent grant OR a sandbox auto-allow authorizes a prompt tool to run
 		// without a separately-recorded PermissionGranted; the sandbox is the safety
 		// boundary.
-		sandboxGrantAuthorized = d.Action == sandbox.ActionAllow && (d.GrantMatched || d.AutoAllowed)
+		sandboxGrantAuthorized = d.Action == sandbox.ActionAllow && (d.GrantMatched || d.AutoAllowed || d.ProfileMatched)
 	}
 
 	switch permission {

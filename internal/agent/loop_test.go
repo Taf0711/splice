@@ -1480,7 +1480,7 @@ func TestRunRequestsPromptToolPermissionBeforeExecution(t *testing.T) {
 	}
 }
 
-func TestRunAllowsWorkspaceWriteWithoutPromptWhenSandboxPolicyPermits(t *testing.T) {
+func TestRunAllowsTrustedWorkspaceWriteWithoutPromptWhenSandboxPolicyPermits(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewWriteFileTool(root))
@@ -1488,9 +1488,10 @@ func TestRunAllowsWorkspaceWriteWithoutPromptWhenSandboxPolicyPermits(t *testing
 	var permissionEvents []PermissionEvent
 
 	result, err := Run(context.Background(), "write notes", provider, Options{
-		Registry:       registry,
-		PermissionMode: PermissionModeAsk,
-		Autonomy:       "medium",
+		Registry:         registry,
+		PermissionMode:   PermissionModeAsk,
+		Autonomy:         "medium",
+		TrustedWorkspace: true,
 		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
 			WorkspaceRoot: root,
 			Policy:        sandbox.DefaultPolicy(),

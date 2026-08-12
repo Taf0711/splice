@@ -476,6 +476,14 @@ func sessionPlanStatus(state splicerun.DesignState) string {
 	return fmt.Sprintf("%s · %d/%d steps", phase, completed, len(state.Plan.Tasks))
 }
 
+// openTrustPromptIfRequired opens the required trust menu before the chat.
+func (m model) openTrustPromptIfRequired() model {
+	if m.trustPromptRequired {
+		m.picker = m.newTrustPicker()
+	}
+	return m
+}
+
 // openLaunchSessionPicker opens the plan picker for a fresh interactive TUI.
 // The existing picker build performs all cheap workspace and metadata filters,
 // then reads each surviving session once and shares those events with both

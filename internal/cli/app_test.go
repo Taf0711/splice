@@ -1637,6 +1637,9 @@ func assertAgentOptions(t *testing.T, options tui.Options, maxTurns int, permiss
 	if options.PermissionMode != permissionMode {
 		t.Fatalf("PermissionMode = %q, want %q", options.PermissionMode, permissionMode)
 	}
+	if options.AgentOptions.TrustedWorkspace != options.Trusted {
+		t.Fatalf("AgentOptions.TrustedWorkspace = %v, Trusted = %v", options.AgentOptions.TrustedWorkspace, options.Trusted)
+	}
 }
 
 func TestRunThemeFlagPopulatesTUIOptions(t *testing.T) {

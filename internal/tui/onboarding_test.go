@@ -2200,6 +2200,37 @@ func TestCompleteSetupLandsInDesignMode(t *testing.T) {
 	}
 }
 
+func TestCompleteSetupOpensRequiredTrustMenu(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		TrustPrompt: true,
+		Setup: SetupOptions{
+			Visible:  true,
+			Required: true,
+			Providers: []SetupProviderOption{
+				{ID: "ollama", Name: "Ollama Local", DefaultModel: "llama3.1", Local: true},
+			},
+			Save: func(selection SetupSelection) (SetupResult, error) {
+				return SetupResult{Provider: config.ProviderProfile{
+					Name: selection.CatalogID, CatalogID: selection.CatalogID, Model: selection.Model,
+				}}, nil
+			},
+		},
+	})
+	m.width = 100
+	m.height = 30
+	for m.setup.stage != setupStageReady {
+		m = pressSetupContinue(m)
+	}
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	got := updated.(model)
+	if got.setup.visible {
+		t.Fatal("setup should hide after completion")
+	}
+	if got.picker == nil || got.picker.kind != pickerTrust {
+		t.Fatalf("setup completion did not open trust menu: %#v", got.picker)
+	}
+}
+
 func indexOfString(slice []string, s string) int {
 	for i, v := range slice {
 		if v == s {

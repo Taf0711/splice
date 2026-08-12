@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/splice/stages"
 	"github.com/Taf0711/splice/internal/tools"
@@ -862,6 +863,89 @@ func TestRunHonorsPermissionModeAsk(t *testing.T) {
 	}
 	if permissionEvents[1].Action != agent.PermissionActionDeny {
 		t.Fatalf("second permission event action = %s, want deny", permissionEvents[1].Action)
+	}
+}
+
+func TestTrustedWorkspaceReadAndWriteDoNotPromptInAskMode(t *testing.T) {
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "a.go"), []byte("package x\n"), 0644); err != nil {
+		t.Fatalf("write source file: %v", err)
+	}
+
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool(workDir))
+	registry.Register(tools.NewListDirectoryTool(workDir))
+	registry.Register(tools.NewGrepTool(workDir))
+	registry.Register(tools.NewWriteFileTool(workDir))
+
+	readRequests := 0
+	writeRequests := 0
+	runner := newAgentToolRunner(agent.Options{
+		Cwd:              workDir,
+		Registry:         registry,
+		PermissionMode:   agent.PermissionModeAsk,
+		TrustedWorkspace: true,
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: workDir,
+			Policy:        sandbox.DefaultPolicy(),
+		}),
+		OnPermissionRequest: func(ctx context.Context, req agent.PermissionRequest) (agent.PermissionDecision, error) {
+			switch req.ToolName {
+			case "read_file":
+				readRequests++
+			case "write_file":
+				writeRequests++
+			}
+			return agent.PermissionDecision{Action: agent.PermissionDecisionDeny}, nil
+		},
+	}, workDir)
+
+	// Deterministic pipeline reads (read_file, list_directory) run inside the
+	// workspace and declare PermissionAllow, so they must not reach the
+	// permission request callback even in Ask mode.
+	for _, call := range []struct {
+		name string
+		args map[string]any
+	}{
+		{"read_file", map[string]any{"path": filepath.Join(workDir, "a.go")}},
+		{"list_directory", map[string]any{"path": workDir}},
+	} {
+		res, err := runner.RunTool(context.Background(), call.name, call.args)
+		if err != nil {
+			t.Fatalf("%s error = %v", call.name, err)
+		}
+		if !res.OK {
+			t.Fatalf("%s failed: %s", call.name, res.Output)
+		}
+	}
+	if readRequests != 0 {
+		t.Fatalf("trusted in-workspace reads triggered %d permission requests, want 0", readRequests)
+	}
+
+	// Trust auto-allows an in-workspace file mutation. The registry and sandbox
+	// still run the call and keep the path inside the workspace.
+	if res, err := runner.RunTool(context.Background(), "write_file", map[string]any{"path": "b.go", "content": "package x\n"}); err != nil || !res.OK {
+		t.Fatalf("trusted write_file failed: result=%#v err=%v", res, err)
+	}
+	if writeRequests != 0 {
+		t.Fatalf("trusted write_file triggered %d permission requests, want 0", writeRequests)
+	}
+
+	// An external path still prompts and is denied by the callback.
+	outParent, err := os.MkdirTemp(".", ".splice-trust-outside-")
+	if err != nil {
+		t.Fatalf("create external directory: %v", err)
+	}
+	defer os.RemoveAll(outParent)
+	outside, err := filepath.Abs(filepath.Join(outParent, "outside.go"))
+	if err != nil {
+		t.Fatalf("resolve external path: %v", err)
+	}
+	if res, _ := runner.RunTool(context.Background(), "write_file", map[string]any{"path": outside, "content": "package x\n"}); res.OK {
+		t.Fatal("external write_file unexpectedly succeeded")
+	}
+	if writeRequests != 1 {
+		t.Fatalf("external write_file triggered %d permission requests, want 1", writeRequests)
 	}
 }
 

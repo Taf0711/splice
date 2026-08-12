@@ -63,7 +63,12 @@ func Run(ctx context.Context, options Options) int {
 	}
 	initialModel := newModel(ctx, options)
 	initialModel.herdr = reporter
-	initialModel = initialModel.openLaunchSessionPicker()
+	if !initialModel.setup.visible {
+		initialModel = initialModel.openTrustPromptIfRequired()
+		if initialModel.picker == nil {
+			initialModel = initialModel.openLaunchSessionPicker()
+		}
+	}
 	if initialModel.wantsMouseCapture() {
 		initialModel.mouseCapture = true
 	}

@@ -398,6 +398,9 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	if workspaceWriteAutoAllowed(policy, request, scope) {
 		return Decision{Action: ActionAllow, Risk: risk, Reason: "workspace write is allowed", AutoAllowed: true}
 	}
+	if engine.writePermissionProfileMatches(request) {
+		return Decision{Action: ActionAllow, Risk: risk, Reason: "permission profile allows this write", ProfileMatched: true}
+	}
 	// An unparseable / obfuscated shell command must NOT be auto-allowed, even
 	// when the native sandbox is active. It falls through to the normal
 	// prompt/deny path so the user reviews it.
@@ -472,8 +475,46 @@ func (engine *Engine) lookupSessionGrant(toolName string, reqScope string) Grant
 	return engine.sessionGrants.lookup(toolName, reqScope)
 }
 
+func (engine *Engine) writePermissionProfileMatches(request Request) bool {
+	if engine == nil || request.SideEffect != SideEffectWrite {
+		return false
+	}
+	paths := requestPaths(request)
+	if len(paths) == 0 {
+		return false
+	}
+	for _, profile := range append(engine.sessionProfiles.list(), engine.turnProfiles.list()...) {
+		if profile.FileSystem == nil {
+			continue
+		}
+		matched := true
+		for _, path := range paths {
+			absolute := path
+			if !filepath.IsAbs(absolute) {
+				absolute = filepath.Join(request.WorkspaceRoot, absolute)
+			}
+			covered := false
+			for _, allowed := range profile.FileSystem.Write {
+				root := permissionRoot(allowed)
+				if pathWithinRoot(root, absolute) {
+					covered = true
+					break
+				}
+			}
+			if !covered {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
+}
+
 func workspaceWriteAutoAllowed(policy Policy, request Request, scope *Scope) bool {
-	if !policy.EnforceWorkspace || request.WorkspaceRoot == "" || request.SideEffect != SideEffectWrite {
+	if !request.TrustedWorkspace || !policy.EnforceWorkspace || request.WorkspaceRoot == "" || request.SideEffect != SideEffectWrite {
 		return false
 	}
 	paths := requestPaths(request)

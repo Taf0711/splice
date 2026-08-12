@@ -1201,6 +1201,9 @@ func (m *model) deleteSetupModelQueryRune() {
 
 func (m model) exitSetupToChat() (tea.Model, tea.Cmd) {
 	m.setup.visible = false
+	if m.trustPromptRequired {
+		m = m.openTrustPromptIfRequired()
+	}
 	m.headerPrinted = false
 	m.flushQueue = nil
 	m.printInFlight = false

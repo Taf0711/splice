@@ -76,6 +76,7 @@ type model struct {
 	cwd                         string
 	trusted                     bool
 	trustStore                  *config.TrustStore
+	trustPromptRequired         bool
 	appVersion                  string
 	userCommands                []usercommands.Command // file-sourced /commands (.splice/commands)
 	loadSkills                  func() []skills.Skill  // lazy installed-skills loader for /skills + /<skill-name>
@@ -873,12 +874,14 @@ func newModel(ctx context.Context, options Options) model {
 	notifier.SetFocused(true)
 
 	resolvedKeyBindings, keyBindingWarnings := sanitizeKeyBindings(resolveKeyBindings(options.KeyBindings))
+	options.AgentOptions.TrustedWorkspace = options.Trusted
 
 	m := model{
 		ctx:                         ctx,
 		cwd:                         cwd,
 		trusted:                     options.Trusted,
 		trustStore:                  options.TrustStore,
+		trustPromptRequired:         options.TrustPrompt,
 		appVersion:                  strings.TrimSpace(options.Version),
 		swarmDoneAt:                 map[string]time.Time{},
 		userCommands:                loadedUserCommands,
@@ -1305,7 +1308,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.PasteMsg:
 		return m.routePaste(msg.Content)
 	case tea.KeyPressMsg:
-		if m.setup.visible {
+		if m.trustPromptRequired && m.picker != nil && m.picker.kind == pickerTrust {
+			if keyCtrl(msg, 'c') || keyIs(msg, tea.KeyEsc) {
+				return m, nil
+			}
+		} else if m.setup.visible {
 			return m.handleSetupKey(msg)
 		}
 		m.transcriptSelection = transcriptSelectionState{}
@@ -1428,6 +1435,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// A live theme preview was applied while navigating; restore the
 					// committed palette since Esc dismisses without choosing.
 					m.restoreCommittedTheme()
+				}
+				if m.picker.kind == pickerTrust && m.trustPromptRequired {
+					// The mandatory first-run trust menu cannot be dismissed without a
+					// choice, so Esc is ignored and the user stays on the menu.
+					return m, nil
 				}
 				m.picker = nil
 				return m, nil
@@ -4281,6 +4293,21 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 			// text /theme dispatch (M17).
 			return m, tea.RequestBackgroundColor
 		}
+	case pickerTrust:
+		// Apply trust current / parent / decline, then continue. A first-run
+		// required choice hands off to the normal launch session picker.
+		var trustNote string
+		var saved bool
+		m, trustNote, saved = m.applyTrustPickerChoice(item)
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: trustNote})
+		if m.trustPromptRequired {
+			if !saved {
+				m.picker = m.newTrustPicker()
+				return m, nil
+			}
+			m.trustPromptRequired = false
+			m = m.openLaunchSessionPicker()
+		}
 	}
 	return m, cmd
 }
@@ -4491,7 +4518,10 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.contextText()})
 		return m, nil
 	case commandTrust:
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.trustText()})
+		// Bare /trust opens the live trust menu (trust current, trust parent,
+		// decline). A later invocation is cancellable with Esc, unlike the
+		// required first-run menu.
+		m.picker = m.newTrustPicker()
 		return m, nil
 	case commandConfig:
 		if arg := strings.ToLower(strings.TrimSpace(command.text)); arg != "" {

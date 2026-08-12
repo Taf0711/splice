@@ -3,7 +3,6 @@ package cli
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"path/filepath"
 	"slices"
@@ -361,7 +360,7 @@ func TestRunExecStreamJSONOutputsRunEndAndRecordsSession(t *testing.T) {
 	}
 }
 
-func TestRunExecStreamJSONEmitsAndRecordsPermissionEvents(t *testing.T) {
+func TestRunExecStreamJSONSkipsPermissionEventsForTrustedWrites(t *testing.T) {
 	dataHome := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", dataHome)
 	cwd := t.TempDir()
@@ -401,22 +400,8 @@ func TestRunExecStreamJSONEmitsAndRecordsPermissionEvents(t *testing.T) {
 	if slices.Contains(eventTypes, "permission_request") {
 		t.Fatalf("workspace write should not request permission in %v; output %q", eventTypes, stdout.String())
 	}
-	permissionEvent := findJSONEvent(t, events, "permission_decision")
-	if permissionEvent["id"] == "" || permissionEvent["name"] != "write_file" || permissionEvent["action"] != "allow" {
-		t.Fatalf("unexpected permission event: %#v", permissionEvent)
-	}
-	if permissionEvent["permission"] != "prompt" || permissionEvent["permissionMode"] != "auto" || permissionEvent["sideEffect"] != "write" {
-		t.Fatalf("unexpected permission metadata: %#v", permissionEvent)
-	}
-	if permissionEvent["permissionGranted"] == true {
-		t.Fatalf("workspace allow should not be recorded as user-granted permission: %#v", permissionEvent)
-	}
-	if permissionEvent["reason"] == "" {
-		t.Fatalf("expected permission reason: %#v", permissionEvent)
-	}
-	risk, ok := permissionEvent["risk"].(map[string]any)
-	if !ok || risk["level"] == "" {
-		t.Fatalf("expected permission risk payload, got %#v", permissionEvent)
+	if slices.Contains(eventTypes, "permission_decision") {
+		t.Fatalf("trusted workspace write should not emit a permission decision in %v", eventTypes)
 	}
 
 	sessionID, ok := events[0]["sessionId"].(string)
@@ -430,13 +415,10 @@ func TestRunExecStreamJSONEmitsAndRecordsPermissionEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadEvents returned error: %v", err)
 	}
-	permissionRecord := findSessionEvent(t, recorded, sessions.EventPermissionDecision)
-	var payload map[string]any
-	if err := json.Unmarshal(permissionRecord.Payload, &payload); err != nil {
-		t.Fatalf("decode permission payload: %v", err)
-	}
-	if payload["toolCallId"] == "" || payload["name"] != "write_file" || payload["action"] != "allow" {
-		t.Fatalf("unexpected recorded permission payload: %#v", payload)
+	for _, event := range recorded {
+		if event.Type == sessions.EventPermissionRequest || event.Type == sessions.EventPermissionDecision {
+			t.Fatalf("trusted workspace write recorded permission event: %#v", event)
+		}
 	}
 
 	stdout.Reset()
@@ -469,12 +451,8 @@ func TestRunExecStreamJSONEmitsAndRecordsPermissionEvents(t *testing.T) {
 		t.Fatalf("approved exec wrote stderr = %q", stderr.String())
 	}
 	approvedEvents := decodeJSONLines(t, stdout.String())
-	approvedPermissionEvent := findJSONEvent(t, approvedEvents, "permission_decision")
-	if approvedPermissionEvent["id"] == "" || approvedPermissionEvent["action"] != "allow" {
-		t.Fatalf("unexpected approved permission event: %#v", approvedPermissionEvent)
-	}
-	if approvedPermissionEvent["permissionGranted"] != true {
-		t.Fatalf("approved permission event did not preserve permissionGranted: %#v", approvedPermissionEvent)
+	if types := jsonEventTypes(approvedEvents); slices.Contains(types, "permission_request") || slices.Contains(types, "permission_decision") {
+		t.Fatalf("unsafe workspace writes should not emit permission events: %v", types)
 	}
 	approvedSessionID, ok := approvedEvents[0]["sessionId"].(string)
 	if !ok || approvedSessionID == "" {
@@ -484,13 +462,10 @@ func TestRunExecStreamJSONEmitsAndRecordsPermissionEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadEvents approved session returned error: %v", err)
 	}
-	approvedPermissionRecord := findSessionEvent(t, approvedRecorded, sessions.EventPermissionDecision)
-	payload = map[string]any{}
-	if err := json.Unmarshal(approvedPermissionRecord.Payload, &payload); err != nil {
-		t.Fatalf("decode approved permission payload: %v", err)
-	}
-	if payload["permissionGranted"] != true {
-		t.Fatalf("approved recorded permission payload did not preserve permissionGranted: %#v", payload)
+	for _, event := range approvedRecorded {
+		if event.Type == sessions.EventPermissionRequest || event.Type == sessions.EventPermissionDecision {
+			t.Fatalf("unsafe workspace write recorded permission event: %#v", event)
+		}
 	}
 }
 

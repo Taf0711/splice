@@ -976,6 +976,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 	decisionReason := ""
 	var decisionAction PermissionDecisionAction
 	var decisionCommandPrefix []string
+	var preflightDecision *sandbox.Decision
 	var permissionCleanups []func()
 	defer func() {
 		for i := len(permissionCleanups) - 1; i >= 0; i-- {
@@ -998,7 +999,6 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		}
 	}
 
-	var preflightDecision *sandbox.Decision
 	if toolFound && options.Sandbox != nil {
 		decision := options.Sandbox.Evaluate(ctx, sandboxRequest(call.Name, tool, args, permissionGranted, permissionMode, options))
 		preflightDecision = &decision
@@ -1164,6 +1164,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		PermissionGranted: permissionGranted,
 		PermissionMode:    string(permissionMode),
 		Autonomy:          options.Autonomy,
+		TrustedWorkspace:  options.TrustedWorkspace,
 		Sandbox:           options.Sandbox,
 		ToolCallID:        call.ID,
 		SessionID:         options.SessionID,
@@ -1804,6 +1805,7 @@ func sandboxRequest(toolName string, tool tools.Tool, args map[string]any, permi
 		Permission:        sandbox.Permission(safety.Permission),
 		PermissionGranted: permissionGranted,
 		PermissionMode:    sandbox.PermissionMode(permissionMode),
+		TrustedWorkspace:  options.TrustedWorkspace,
 		Args:              args,
 		Reason:            safety.Reason,
 	}
@@ -1823,6 +1825,9 @@ func effectivePermission(tool tools.Tool, args map[string]any) tools.Permission 
 func shouldRequestPermission(tool tools.Tool, args map[string]any, permissionGranted bool, decision *sandbox.Decision) bool {
 	if decision != nil && decision.Action == sandbox.ActionPrompt {
 		return true
+	}
+	if decision != nil && decision.Action == sandbox.ActionAllow && (decision.AutoAllowed || decision.GrantMatched || decision.ProfileMatched) && !shellCommandAdditionalPermissionsRequested(args) {
+		return false
 	}
 	if tool.Safety().Permission != tools.PermissionPrompt {
 		return false
