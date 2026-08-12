@@ -261,9 +261,14 @@ func (cfg *ToolsConfig) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+type AuthConfig struct {
+	Storage string `json:"storage,omitempty"`
+}
+
 type FileConfig struct {
 	ActiveProvider      string             `json:"activeProvider,omitempty"`
 	Providers           []ProviderProfile  `json:"providers,omitempty"`
+	Auth                AuthConfig         `json:"auth,omitempty"`
 	MaxTurns            int                `json:"maxTurns,omitempty"`
 	MCP                 MCPConfig          `json:"mcp,omitempty"`
 	Sandbox             SandboxConfig      `json:"sandbox,omitempty"`
@@ -281,6 +286,7 @@ func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 	type rawConfig struct {
 		ActiveProvider      string              `json:"activeProvider,omitempty"`
 		Providers           []ProviderProfile   `json:"providers,omitempty"`
+		Auth                *AuthConfig         `json:"auth,omitempty"`
 		MaxTurns            int                 `json:"maxTurns,omitempty"`
 		MCP                 MCPConfig           `json:"mcp,omitempty"`
 		Sandbox             SandboxConfig       `json:"sandbox,omitempty"`
@@ -306,6 +312,9 @@ func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 		KeyBindings:         cfg.KeyBindings,
 		Compaction:          cfg.Compaction,
 		DefaultProjectTrust: cfg.DefaultProjectTrust,
+	}
+	if strings.TrimSpace(cfg.Auth.Storage) != "" {
+		raw.Auth = &cfg.Auth
 	}
 	if !cfg.LocalControl.Empty() {
 		raw.LocalControl = &cfg.LocalControl
@@ -338,6 +347,7 @@ type ResolvedConfig struct {
 	ActiveProvider      string
 	Providers           []ProviderProfile
 	Provider            ProviderProfile
+	Auth                AuthConfig
 	MaxTurns            int
 	Compaction          CompactionConfig
 	MCP                 MCPConfig
@@ -387,6 +397,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	type rawConfig struct {
 		ActiveProvider      string                     `json:"activeProvider"`
 		Providers           []ProviderProfile          `json:"providers"`
+		Auth                AuthConfig                 `json:"auth"`
 		MaxTurns            int                        `json:"maxTurns"`
 		MCP                 MCPConfig                  `json:"mcp"`
 		Sandbox             SandboxConfig              `json:"sandbox"`
@@ -408,6 +419,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	}
 	cfg.ActiveProvider = raw.ActiveProvider
 	cfg.Providers = raw.Providers
+	cfg.Auth.Storage = strings.ToLower(strings.TrimSpace(raw.Auth.Storage))
 	// A negative maxTurns is unambiguously invalid; without this it would be
 	// silently dropped by the `MaxTurns > 0` merge gates and fall back to the
 	// default, hiding a misconfiguration. (0 is left as-is: with omitempty it is

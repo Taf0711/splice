@@ -5,10 +5,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/config"
+	"github.com/Taf0711/splice/internal/credstore"
 	"github.com/Taf0711/splice/internal/tools"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
@@ -36,14 +38,20 @@ func TestApplyStoredProviderKeyAtFillsFromCredstore(t *testing.T) {
 	configPath := seedStoredProviderKey(t, "echo", "sk-stored-test")
 	ucp := func() (string, error) { return configPath, nil }
 
-	stored := applyStoredProviderKeyAt(config.ProviderProfile{Name: "echo", APIKeyStored: true}, ucp)
+	stored, err := applyStoredProviderKeyAt(config.ProviderProfile{Name: "echo", APIKeyStored: true}, ucp)
+	if err != nil {
+		t.Fatalf("applyStoredProviderKeyAt: %v", err)
+	}
 	if stored.APIKey != "sk-stored-test" {
 		t.Fatalf("APIKey = %q, want the stored key", stored.APIKey)
 	}
 
 	// A profile that did NOT opt into stored-key auth must be left unchanged —
 	// a stale store entry must not silently reactivate credentials.
-	plain := applyStoredProviderKeyAt(config.ProviderProfile{Name: "echo"}, ucp)
+	plain, err := applyStoredProviderKeyAt(config.ProviderProfile{Name: "echo"}, ucp)
+	if err != nil {
+		t.Fatalf("applyStoredProviderKeyAt plain: %v", err)
+	}
 	if plain.APIKey != "" {
 		t.Fatalf("non-stored profile APIKey = %q, want empty", plain.APIKey)
 	}
@@ -54,6 +62,59 @@ func TestApplyStoredProviderKeyAtFillsFromCredstore(t *testing.T) {
 // escalation switcher) gets the stored key applied. Passing the raw resolved
 // profile previously sent unauthenticated requests for apiKeyStored profiles,
 // the default onboarding outcome. Testing the wrap covers all those surfaces.
+type failingCredentialKeyring struct {
+	cause error
+}
+
+func (f failingCredentialKeyring) Available() bool { return true }
+func (f failingCredentialKeyring) Set(string, string, string) error {
+	return nil
+}
+func (f failingCredentialKeyring) Get(string, string) (string, bool, error) {
+	return "", false, f.cause
+}
+func (f failingCredentialKeyring) Delete(string, string) (bool, error) {
+	return false, nil
+}
+
+func TestMockedKeyringReadErrorIsWrapped(t *testing.T) {
+	cause := errors.New("keychain locked")
+	store, err := credstore.New(credstore.Options{Storage: "keyring", Keyring: failingCredentialKeyring{cause: cause}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = config.ApplyStoredAPIKey(config.ProviderProfile{Name: "echo", APIKeyStored: true}, store)
+	if !errors.Is(err, cause) || !strings.Contains(err.Error(), "keyring backend") {
+		t.Fatalf("error = %v, want wrapped keyring read failure", err)
+	}
+}
+
+func TestFillAppDepsSurfacesStoredKeyReadError(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"auth":{"storage":"file"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "credentials.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	deps := fillAppDeps(appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			called = true
+			return nil, nil
+		},
+	})
+	_, err := deps.newProvider(config.ProviderProfile{Name: "echo", APIKeyStored: true})
+	if err == nil || !strings.Contains(err.Error(), "file backend") {
+		t.Fatalf("error = %v, want selected backend read error", err)
+	}
+	if called {
+		t.Fatal("provider constructor ran after credential read failed")
+	}
+}
+
 func TestFillAppDepsWrapsNewProviderWithStoredKey(t *testing.T) {
 	configPath := seedStoredProviderKey(t, "echo", "sk-stored-wrap")
 

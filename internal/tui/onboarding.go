@@ -1041,9 +1041,11 @@ func (m model) setupModelDiscoveryCmd(gen uint64) tea.Cmd {
 		defer cancel()
 		apiKey := pastedKey
 		if needOAuthToken {
-			if resolved := oauthStoredToken(ctx, providerID); resolved != "" {
-				apiKey = resolved
+			resolved, err := oauthStoredToken(ctx, providerID)
+			if err != nil {
+				return setupModelsDiscoveredMsg{providerID: providerID, gen: gen, redactionSecrets: baseSecrets, err: err}
 			}
+			apiKey = resolved
 		}
 		profile := providerWizardDiscoveryProfile(provider, apiKey)
 		secrets := append(append([]string{}, baseSecrets...), apiKey, profile.APIKey)

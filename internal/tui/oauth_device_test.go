@@ -28,12 +28,12 @@ func seedOAuthToken(t *testing.T, providerID, access string) {
 func TestOAuthStoredTokenReadsStoredLogin(t *testing.T) {
 	seedOAuthToken(t, "xai", "live-grok-token")
 
-	if got := oauthStoredToken(context.Background(), "xai"); got != "live-grok-token" {
-		t.Fatalf("oauthStoredToken(xai) = %q, want live-grok-token", got)
+	if got, err := oauthStoredToken(context.Background(), "xai"); err != nil || got != "live-grok-token" {
+		t.Fatalf("oauthStoredToken(xai) = %q,%v, want live-grok-token,nil", got, err)
 	}
-	// No login for another provider → empty (no error, no panic).
-	if got := oauthStoredToken(context.Background(), "openrouter"); got != "" {
-		t.Fatalf("oauthStoredToken(openrouter) = %q, want empty", got)
+	// No login for another provider returns an empty token without an error.
+	if got, err := oauthStoredToken(context.Background(), "openrouter"); err != nil || got != "" {
+		t.Fatalf("oauthStoredToken(openrouter) = %q,%v, want empty,nil", got, err)
 	}
 }
 

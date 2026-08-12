@@ -437,7 +437,10 @@ func (m model) handleModelCommand(args string) (model, string) {
 	nextProfile.Model = target.modelID
 	// Reload the credential: a stored-key provider's profile carries an empty APIKey
 	// (the resolver is pure), so without this the rebuilt provider would send no key.
-	nextProfile = m.profileWithCredential(nextProfile)
+	nextProfile, err = m.profileWithCredential(nextProfile)
+	if err != nil {
+		return m, "Model\n" + err.Error()
+	}
 	metadata, err := providers.ResolveRuntimeMetadata(nextProfile, providers.Options{})
 	if err != nil {
 		return m, "Model\n" + err.Error()
@@ -528,7 +531,10 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 	if !ok {
 		return m, "Model\nunknown provider " + strconv.Quote(providerName), nil
 	}
-	target = m.profileWithCredential(target)
+	target, err := m.profileWithCredential(target)
+	if err != nil {
+		return m, "Model\n" + err.Error(), nil
+	}
 	target.Model = strings.TrimSpace(modelID)
 	descriptor, hasDescriptor := m.descriptorForProfile(target)
 	// Gate on the resolved credential, not the APIKeyStored marker: if the stored key
@@ -578,21 +584,28 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 // (no secret I/O), so a stored-key profile carries an empty APIKey until this runs —
 // every place that rebuilds the provider (model switch, provider switch) must call
 // this or the request goes out with no key.
-func (m model) profileWithCredential(profile config.ProviderProfile) config.ProviderProfile {
-	if strings.TrimSpace(profile.APIKey) == "" {
-		if store, err := config.ProviderKeyStore(); err == nil {
-			profile = config.ApplyStoredAPIKey(profile, store)
+func (m model) profileWithCredential(profile config.ProviderProfile) (config.ProviderProfile, error) {
+	if strings.TrimSpace(profile.APIKey) == "" && profile.APIKeyStored {
+		store, err := config.ProviderKeyStore()
+		if err != nil {
+			return profile, fmt.Errorf("open API key store: %w", err)
+		}
+		profile, err = config.ApplyStoredAPIKey(profile, store)
+		if err != nil {
+			return profile, err
 		}
 	}
 	if strings.TrimSpace(profile.APIKey) == "" && strings.TrimSpace(profile.APIKeyEnv) != "" {
 		profile.APIKey = strings.TrimSpace(os.Getenv(profile.APIKeyEnv))
 	}
 	if descriptor, ok := m.descriptorForProfile(profile); ok && strings.TrimSpace(profile.APIKey) == "" && descriptor.OAuth && !descriptor.OAuthMintsKey {
-		if token := oauthStoredToken(m.ctx, descriptor.ID); token != "" {
-			profile.APIKey = token
+		token, err := oauthStoredToken(m.ctx, descriptor.ID)
+		if err != nil {
+			return profile, err
 		}
+		profile.APIKey = token
 	}
-	return profile
+	return profile, nil
 }
 
 func (m model) savedProviderByName(name string) (config.ProviderProfile, bool) {

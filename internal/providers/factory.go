@@ -273,7 +273,10 @@ func isCodexCatalog(profile config.ProviderProfile, _ resolvedProfile) bool {
 func newCodexProvider(profile config.ProviderProfile, resolved resolvedProfile, options Options) (zeroruntime.Provider, error) {
 	accountKey := options.OAuthLoginKey
 	resolver := openai.CodexAccountResolver(func(ctx context.Context) (string, bool, error) {
-		account := codexAccountForKey(accountKey)
+		account, err := codexAccountForKey(accountKey)
+		if err != nil {
+			return "", false, err
+		}
 		if account == "" {
 			return "", false, nil
 		}
@@ -308,17 +311,20 @@ func newCodexProvider(profile config.ProviderProfile, resolved resolvedProfile, 
 // token refresh rotates the bearer while the account id identifies the same
 // logged-in account. Returns "" when key is empty (no OAuth login), or the
 // token is absent or carries no account claim.
-func codexAccountForKey(key string) string {
+func codexAccountForKey(key string) (string, error) {
 	if key == "" {
-		return ""
+		return "", nil
 	}
 	store, err := oauth.NewStore(oauth.StoreOptions{})
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("open OAuth backend for Codex account: %w", err)
 	}
 	token, ok, err := store.Load(key)
-	if err != nil || !ok {
-		return ""
+	if err != nil {
+		return "", fmt.Errorf("read Codex account from the %s backend: %w", store.Backend(), err)
 	}
-	return strings.TrimSpace(token.Account)
+	if !ok {
+		return "", nil
+	}
+	return strings.TrimSpace(token.Account), nil
 }

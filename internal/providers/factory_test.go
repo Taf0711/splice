@@ -442,27 +442,27 @@ func TestCodexAccountForKey(t *testing.T) {
 		t.Fatalf("Save codex: %v", err)
 	}
 
-	if got := codexAccountForKey(oauth.ProviderKey("chatgpt")); got != "acc-catalog-7" {
-		t.Fatalf("account = %q, want acc-catalog-7", got)
+	if got, err := codexAccountForKey(oauth.ProviderKey("chatgpt")); err != nil || got != "acc-catalog-7" {
+		t.Fatalf("account = %q,%v, want acc-catalog-7,nil", got, err)
 	}
 	// The bound key's token has no account → "", NOT the other login's account.
-	if got := codexAccountForKey(oauth.ProviderKey("codex")); got != "" {
-		t.Fatalf("account = %q, want empty (must not cross to another login's account)", got)
+	if got, err := codexAccountForKey(oauth.ProviderKey("codex")); err != nil || got != "" {
+		t.Fatalf("account = %q,%v, want empty,nil (must not cross to another login's account)", got, err)
 	}
 	// Empty key (no OAuth login) → header omitted.
-	if got := codexAccountForKey(""); got != "" {
-		t.Fatalf("account for empty key = %q, want empty", got)
+	if got, err := codexAccountForKey(""); err != nil || got != "" {
+		t.Fatalf("account for empty key = %q,%v, want empty,nil", got, err)
 	}
 	// Unknown key → "".
-	if got := codexAccountForKey(oauth.ProviderKey("nope")); got != "" {
-		t.Fatalf("account for unknown key = %q, want empty", got)
+	if got, err := codexAccountForKey(oauth.ProviderKey("nope")); err != nil || got != "" {
+		t.Fatalf("account for unknown key = %q,%v, want empty,nil", got, err)
 	}
 
 	// The low-level helper sees a replacement token when called again.
 	if err := store.Save(oauth.ProviderKey("chatgpt"), oauth.Token{AccessToken: "tok-refreshed", Account: "acc-rotated"}); err != nil {
 		t.Fatalf("refresh chatgpt: %v", err)
 	}
-	if got := codexAccountForKey(oauth.ProviderKey("chatgpt")); got != "acc-rotated" {
-		t.Fatalf("account = %q, want acc-rotated (replacement token must be read)", got)
+	if got, err := codexAccountForKey(oauth.ProviderKey("chatgpt")); err != nil || got != "acc-rotated" {
+		t.Fatalf("account = %q,%v, want acc-rotated,nil (replacement token must be read)", got, err)
 	}
 }

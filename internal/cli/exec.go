@@ -1388,36 +1388,37 @@ func modelContextWindow(registry modelregistry.Registry, modelID string) int {
 // live provider discovery (so an uncatalogued proxy/custom model gets its real
 // window instead of the generic fallback), else the positive FallbackContextWindow.
 // Discovery runs only on a registry miss (catalogued models pay no latency), is
-// bounded by a short timeout, and degrades to the fallback on any error — so a
-// headless run is never blocked or failed by it.
-func resolveAgentContextWindow(ctx context.Context, registry modelregistry.Registry, profile config.ProviderProfile, compaction config.CompactionConfig) int {
+// bounded by a short timeout. Discovery errors degrade to the fallback. A
+// selected credential-backend read error fails loudly.
+func resolveAgentContextWindow(ctx context.Context, registry modelregistry.Registry, profile config.ProviderProfile, compaction config.CompactionConfig) (int, error) {
 	if entry, ok := registry.Resolve(profile.Model); ok && entry.ContextLimits.ContextWindow > 0 {
 		window := entry.ContextLimits.ContextWindow
 		if compaction.StayInCheapestPricingTierOrDefault() {
 			window = modelregistry.CheapestPricingTierContextWindow(entry)
 		}
-		return window
+		return window, nil
 	}
-	if window := discoveredModelContextWindow(ctx, profile); window > 0 {
-		return window
+	window, err := discoveredModelContextWindow(ctx, profile)
+	if err != nil {
+		return 0, err
 	}
-	return modelregistry.AgentContextWindow(0)
+	if window > 0 {
+		return window, nil
+	}
+	return modelregistry.AgentContextWindow(0), nil
 }
 
 // discoveredModelContextWindow queries the provider's live model list for the
-// active model's context window. Returns 0 when the provider isn't catalogued, the
-// credential can't be resolved, discovery fails, or the model reports no window.
-func discoveredModelContextWindow(ctx context.Context, profile config.ProviderProfile) int {
+// active model's context window. It returns zero for discovery misses and errors.
+// A selected credential-backend read error is returned.
+func discoveredModelContextWindow(ctx context.Context, profile config.ProviderProfile) (int, error) {
 	descriptor, ok := providercatalog.Get(strings.TrimSpace(profile.CatalogID))
 	if !ok {
-		return 0
+		return 0, nil
 	}
-	// Authenticate discovery with the resolved key (inline, then stored, then env).
-	authed := profile
-	if strings.TrimSpace(authed.APIKey) == "" {
-		if store, err := config.ProviderKeyStore(); err == nil {
-			authed = config.ApplyStoredAPIKey(authed, store)
-		}
+	authed, err := discoveryCredentialProfile(profile)
+	if err != nil {
+		return 0, err
 	}
 	if strings.TrimSpace(authed.APIKey) == "" && strings.TrimSpace(authed.APIKeyEnv) != "" {
 		authed.APIKey = strings.TrimSpace(os.Getenv(authed.APIKeyEnv))
@@ -1426,15 +1427,15 @@ func discoveredModelContextWindow(ctx context.Context, profile config.ProviderPr
 	defer cancel()
 	models, err := providermodeldiscovery.DiscoverCatalog(dctx, descriptor, authed, providermodeldiscovery.Options{})
 	if err != nil {
-		return 0
+		return 0, nil
 	}
 	target := strings.TrimSpace(profile.Model)
 	for _, model := range models {
 		if strings.EqualFold(strings.TrimSpace(model.ID), target) && model.ContextWindow > 0 {
-			return model.ContextWindow
+			return model.ContextWindow, nil
 		}
 	}
-	return 0
+	return 0, nil
 }
 
 // forwardedReasoningEffort returns the effort to send on the provider request.

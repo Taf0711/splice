@@ -164,7 +164,10 @@ func defaultAppDeps() appDeps {
 			// Resolve the OAuth login ONCE: the bearer resolver and the login key it
 			// bound must describe the same login (the key is passed on to the Codex
 			// account-header resolver so it never re-selects independently).
-			resolver, loginKey := oauthLoginForProfile(profile)
+			resolver, loginKey, err := oauthLoginForProfile(profile)
+			if err != nil {
+				return nil, err
+			}
 			return providers.New(profile, providers.Options{
 				UserAgent:     userAgent(),
 				OAuthResolver: resolver,
@@ -643,7 +646,11 @@ func fillAppDeps(deps appDeps) appDeps {
 	baseNewProvider := deps.newProvider
 	userConfigPath := deps.userConfigPath
 	deps.newProvider = func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
-		return baseNewProvider(applyStoredProviderKeyAt(profile, userConfigPath))
+		profile, err := applyStoredProviderKeyAt(profile, userConfigPath)
+		if err != nil {
+			return nil, err
+		}
+		return baseNewProvider(profile)
 	}
 	return deps
 }
@@ -686,7 +693,11 @@ func runInteractiveTUIWithSetup(stdout io.Writer, stderr io.Writer, deps appDeps
 		// carries the already-normalized list — prefer falling back to one of those
 		// over wiping everything and forcing the user to re-enter credentials they
 		// already saved.
-		if usable, ok := firstUsableProvider(resolved.Providers); errors.Is(err, config.ErrNoActiveProvider) && ok {
+		usable, ok, credentialErr := firstUsableProvider(resolved.Providers)
+		if credentialErr != nil {
+			return writeAppError(stderr, credentialErr.Error(), 1)
+		}
+		if errors.Is(err, config.ErrNoActiveProvider) && ok {
 			resolved.Provider = usable
 			resolved.ActiveProvider = usable.Name
 		} else {
@@ -715,14 +726,21 @@ func runInteractiveTUIWithSetup(stdout io.Writer, stderr io.Writer, deps appDeps
 		projectConfigPath = resolveOptions.ProjectConfigPath
 	}
 
-	needsSetup := setupRequired(resolved)
+	needsSetup, err := setupRequired(resolved)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), 1)
+	}
 	if needsSetup && !forceSetup {
 		// The active provider lacks a usable credential, but if another saved
 		// provider already has one, fall back to it instead of forcing onboarding
 		// again. Saved logins persist across launches; switch the active provider
 		// any time with `splice provider use <name>`. Onboarding only runs when no
 		// configured provider is usable (a genuinely fresh setup).
-		if usable, ok := firstUsableProvider(resolved.Providers); ok {
+		usable, ok, credentialErr := firstUsableProvider(resolved.Providers)
+		if credentialErr != nil {
+			return writeAppError(stderr, credentialErr.Error(), 1)
+		}
+		if ok {
 			resolved.Provider = usable
 			resolved.ActiveProvider = usable.Name
 			needsSetup = false
@@ -854,6 +872,10 @@ func runInteractiveTUIWithSetup(stdout io.Writer, stderr io.Writer, deps appDeps
 		Backend:       sandboxBackend,
 		Scope:         scope,
 	})
+	savedProviders, err := usableSavedProviders(resolved.Providers)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), 1)
+	}
 	lastKnownMCPConfig := mcpConfig
 	return deps.runTUI(context.Background(), tui.Options{
 		Cwd:                  workspaceRoot,
@@ -875,7 +897,7 @@ func runInteractiveTUIWithSetup(stdout io.Writer, stderr io.Writer, deps appDeps
 			return ""
 		}(),
 		ProviderProfile:     resolved.Provider,
-		SavedProviders:      usableSavedProviders(resolved.Providers),
+		SavedProviders:      savedProviders,
 		FavoriteModels:      resolved.Preferences.FavoriteModels,
 		RecapsEnabled:       resolved.Preferences.RecapsEnabled(),
 		Compaction:          resolved.Compaction,
@@ -1052,16 +1074,19 @@ func buildProvider(resolved config.ResolvedConfig, deps appDeps) (zeroruntime.Pr
 // deps.newProvider wrapper in fillAppDeps so EVERY surface that builds a runtime
 // provider (headless exec, the ACP builder, exec's mid-run escalation switcher,
 // and any future caller) is covered without a per-site invariant to forget.
-func applyStoredProviderKeyAt(profile config.ProviderProfile, userConfigPath func() (string, error)) config.ProviderProfile {
-	if userConfigPath == nil {
-		return profile
+func applyStoredProviderKeyAt(profile config.ProviderProfile, userConfigPath func() (string, error)) (config.ProviderProfile, error) {
+	if userConfigPath == nil || !profile.APIKeyStored || strings.TrimSpace(profile.APIKey) != "" {
+		return profile, nil
 	}
-	if path, perr := userConfigPath(); perr == nil {
-		if store, err := config.ProviderKeyStoreAt(filepath.Dir(path)); err == nil {
-			profile = config.ApplyStoredAPIKey(profile, store)
-		}
+	path, err := userConfigPath()
+	if err != nil {
+		return profile, fmt.Errorf("resolve user config path for stored API key: %w", err)
 	}
-	return profile
+	store, err := config.ProviderKeyStoreAt(filepath.Dir(path))
+	if err != nil {
+		return profile, fmt.Errorf("open API key store: %w", err)
+	}
+	return config.ApplyStoredAPIKey(profile, store)
 }
 
 func newCoreRegistry(workspaceRoot string) *tools.Registry {

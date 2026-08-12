@@ -109,11 +109,11 @@ func TestResolveAgentContextWindowCheapestPricingTier(t *testing.T) {
 	}
 	profile := config.ProviderProfile{Model: entry.ID}
 
-	if got := resolveAgentContextWindow(context.Background(), registry, profile, config.CompactionConfig{}); got != 272_000 {
-		t.Fatalf("default context window = %d, want 272000", got)
+	if got, err := resolveAgentContextWindow(context.Background(), registry, profile, config.CompactionConfig{}); err != nil || got != 272_000 {
+		t.Fatalf("default context window = %d,%v, want 272000,nil", got, err)
 	}
-	if got := resolveAgentContextWindow(context.Background(), registry, profile, config.CompactionConfig{StayInCheapestPricingTier: ptrBool(false)}); got != 1_050_000 {
-		t.Fatalf("disabled cap context window = %d, want 1050000", got)
+	if got, err := resolveAgentContextWindow(context.Background(), registry, profile, config.CompactionConfig{StayInCheapestPricingTier: ptrBool(false)}); err != nil || got != 1_050_000 {
+		t.Fatalf("disabled cap context window = %d,%v, want 1050000,nil", got, err)
 	}
 
 	entry.Cost.Tiers = nil
@@ -121,8 +121,32 @@ func TestResolveAgentContextWindowCheapestPricingTier(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRegistry() without tiers error = %v", err)
 	}
-	if got := resolveAgentContextWindow(context.Background(), registry, profile, config.CompactionConfig{}); got != 1_050_000 {
-		t.Fatalf("no-tier context window = %d, want 1050000", got)
+	if got, err := resolveAgentContextWindow(context.Background(), registry, profile, config.CompactionConfig{}); err != nil || got != 1_050_000 {
+		t.Fatalf("no-tier context window = %d,%v, want 1050000,nil", got, err)
+	}
+}
+
+func TestDiscoveredModelContextWindowSurfacesStoredKeyReadError(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", root)
+	dir := filepath.Join(root, "splice")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"auth":{"storage":"file"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "credentials.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := discoveredModelContextWindow(context.Background(), config.ProviderProfile{
+		Name:         "xai",
+		CatalogID:    "xai",
+		Model:        "uncatalogued-model",
+		APIKeyStored: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "file backend") {
+		t.Fatalf("error = %v, want stored-key backend read error", err)
 	}
 }
 

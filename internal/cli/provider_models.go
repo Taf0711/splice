@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Taf0711/splice/internal/config"
+	"github.com/Taf0711/splice/internal/credstore"
 	"github.com/Taf0711/splice/internal/providermodeldiscovery"
 )
 
@@ -46,7 +47,11 @@ func runProvidersModels(args []string, stdout io.Writer, stderr io.Writer, deps 
 
 	ctx, stop := signalContext()
 	defer stop()
-	models, err := deps.discoverProviderModels(ctx, discoveryCredentialProfile(profile))
+	authed, err := discoveryCredentialProfile(profile)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitProvider)
+	}
+	models, err := deps.discoverProviderModels(ctx, authed)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitProvider)
 	}
@@ -106,17 +111,26 @@ func runProvidersModels(args []string, stdout io.Writer, stderr io.Writer, deps 
 // runtime does — inline, then the stored credential, then the configured env var —
 // so a `providers models` probe authenticates exactly like a real request. Mirrors
 // discoveredModelContextWindow's credential resolution.
-func discoveryCredentialProfile(profile config.ProviderProfile) config.ProviderProfile {
+func discoveryCredentialProfile(profile config.ProviderProfile) (config.ProviderProfile, error) {
+	return discoveryCredentialProfileWithStore(profile, config.ProviderKeyStore)
+}
+
+func discoveryCredentialProfileWithStore(profile config.ProviderProfile, open func() (*credstore.Store, error)) (config.ProviderProfile, error) {
 	authed := profile
-	if strings.TrimSpace(authed.APIKey) == "" {
-		if store, err := config.ProviderKeyStore(); err == nil {
-			authed = config.ApplyStoredAPIKey(authed, store)
+	if strings.TrimSpace(authed.APIKey) == "" && authed.APIKeyStored {
+		store, err := open()
+		if err != nil {
+			return profile, fmt.Errorf("open API key store: %w", err)
+		}
+		authed, err = config.ApplyStoredAPIKey(authed, store)
+		if err != nil {
+			return profile, err
 		}
 	}
 	if strings.TrimSpace(authed.APIKey) == "" && strings.TrimSpace(authed.APIKeyEnv) != "" {
 		authed.APIKey = strings.TrimSpace(os.Getenv(authed.APIKeyEnv))
 	}
-	return authed
+	return authed, nil
 }
 
 // defaultDiscoverProviderModels is the production discovery hook: a live probe of

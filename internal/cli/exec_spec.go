@@ -108,9 +108,13 @@ func runExecSpecDraft(run execSpecDraftRun) int {
 	var draftInfo execSpecDraftInfo
 	runCtx, stopSignals := signalContext()
 	defer stopSignals()
+	resolvedContextWindow, err := resolveAgentContextWindow(runCtx, run.modelRegistry, run.resolved.Provider, run.resolved.Compaction)
+	if err != nil {
+		return writeExecSpecDraftProviderError(&writer, run.options.outputFormat, err.Error())
+	}
 	contextWindow, compactionReserve, compactionKeepRecent := specDraftCompactionOptions(
 		run.resolved.Compaction,
-		resolveAgentContextWindow(runCtx, run.modelRegistry, run.resolved.Provider, run.resolved.Compaction),
+		resolvedContextWindow,
 	)
 	result, err := agent.Run(runCtx, run.prompt, run.provider, agent.Options{
 		MaxTurns:                   run.resolved.MaxTurns,

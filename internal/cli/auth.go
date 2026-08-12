@@ -86,6 +86,14 @@ func runAuthOpenRouter(args []string, stdout io.Writer, stderr io.Writer, _ appD
 // for ChatGPT Plus/Pro/Business/Enterprise subscribers; a successful login
 // makes the agent use the chatgpt catalog entry with the OAuth bearer.
 func runAuthChatGPT(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	storage, err := resolveCLIAuthStorage(deps, "")
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	return runAuthChatGPTWithStorage(args, stdout, stderr, deps, storage, "")
+}
+
+func runAuthChatGPTWithStorage(args []string, stdout io.Writer, stderr io.Writer, deps appDeps, storage, persistStorage string) int {
 	for _, a := range args {
 		if a == "-h" || a == "--help" || a == "help" {
 			_ = writeAuthHelp(stdout)
@@ -127,49 +135,34 @@ func runAuthChatGPT(args []string, stdout io.Writer, stderr io.Writer, deps appD
 	// We bypass Manager.Login because the account-id extraction happens
 	// inside provideroauth.ChatGPTLogin; the manager would not pick up
 	// the customized Token.Account field.
-	store, err := oauth.NewStore(oauth.StoreOptions{Now: deps.now})
+	store, err := oauth.NewStore(oauth.StoreOptions{Now: deps.now, Storage: storage})
 	if err != nil {
-		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+		return writeAppError(stderr, redaction.ErrorMessage(fmt.Errorf("open OAuth %s backend: %w", displayAuthBackend(storage), err), redaction.Options{}), exitCrash)
 	}
 	if err := store.Save(oauth.ProviderKey("chatgpt"), token); err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
-	statuses, err := oauthFormatChatGPTStatus(token)
+	if err := persistCLIAuthStorage(deps, persistStorage); err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	statuses, err := store.Status("provider:chatgpt")
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
-	if _, err := fmt.Fprint(stdout, statuses); err != nil {
+	formatted := oauth.FormatStatuses(statuses)
+	if len(statuses) == 0 {
+		formatted = "ChatGPT login complete."
+		if strings.TrimSpace(token.Account) != "" {
+			formatted += "\nChatGPT account id: " + token.Account
+		}
+	}
+	if _, err := fmt.Fprint(stdout, formatted); err != nil {
 		return exitCrash
 	}
 	if _, err := fmt.Fprint(stdout, "\nUse it with splice, e.g.:\n  splice --provider chatgpt --model gpt-5.5\n"); err != nil {
 		return exitCrash
 	}
 	return exitSuccess
-}
-
-// oauthFormatChatGPTStatus formats the saved ChatGPT token into the same
-// shape `splice auth status` prints, so the user sees a consistent view.
-func oauthFormatChatGPTStatus(token oauth.Token) (string, error) {
-	store, err := oauth.NewStore(oauth.StoreOptions{})
-	if err != nil {
-		return "", err
-	}
-	statuses, err := store.Status("provider:chatgpt")
-	if err != nil {
-		return "", err
-	}
-	if len(statuses) == 0 {
-		// Fallback: the token was just saved but the status query came up
-		// empty (e.g. an OS keyring backend that doesn't enumerate). The
-		// user still has a successful login; tell them what was saved
-		// without the formatted status block.
-		accountLine := ""
-		if strings.TrimSpace(token.Account) != "" {
-			accountLine = fmt.Sprintf("ChatGPT account id: %s\n", token.Account)
-		}
-		return fmt.Sprintf("ChatGPT login complete.\n%s", accountLine), nil
-	}
-	return oauth.FormatStatuses(statuses), nil
 }
 
 // authArgs is the parsed form of an auth subcommand's arguments.
@@ -179,6 +172,7 @@ type authArgs struct {
 	device     bool
 	watch      bool
 	scopes     []string
+	storage    string
 	help       bool
 }
 
@@ -215,6 +209,17 @@ func parseAuthArgs(sub string, args []string) (authArgs, error) {
 			if err := addScope(strings.TrimPrefix(arg, "--scope=")); err != nil {
 				return authArgs{}, err
 			}
+		case arg == "--storage":
+			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" {
+				return authArgs{}, fmt.Errorf("--storage requires a value")
+			}
+			i++
+			parsed.storage = args[i]
+		case strings.HasPrefix(arg, "--storage="):
+			parsed.storage = strings.TrimPrefix(arg, "--storage=")
+			if strings.TrimSpace(parsed.storage) == "" {
+				return authArgs{}, fmt.Errorf("--storage requires a value")
+			}
 		case strings.HasPrefix(arg, "-"):
 			return authArgs{}, fmt.Errorf("unknown flag %q", arg)
 		default:
@@ -234,7 +239,7 @@ func parseAuthArgs(sub string, args []string) (authArgs, error) {
 // invocation fails fast instead of silently ignoring a flag.
 func validateAuthFlags(sub string, a authArgs) error {
 	allowed := map[string]map[string]bool{
-		"login":   {"device": true, "scope": true},
+		"login":   {"device": true, "scope": true, "storage": true},
 		"logout":  {"json": true},
 		"status":  {"json": true},
 		"refresh": {"watch": true},
@@ -252,33 +257,34 @@ func validateAuthFlags(sub string, a authArgs) error {
 	if len(a.scopes) > 0 && !allowed["scope"] {
 		return bad("--scope")
 	}
+	if strings.TrimSpace(a.storage) != "" && !allowed["storage"] {
+		return bad("--storage")
+	}
+	if strings.TrimSpace(a.storage) != "" {
+		if _, err := config.ValidateAuthStorage(a.storage); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
-// newAuthManager builds an oauth.Manager backed by the OAuth store, printing the
-// authorization URL / device code to stdout. The store path honors
-// SPLICE_OAUTH_TOKENS_PATH (env), so callers/tests can redirect it. Setting
-// SPLICE_OAUTH_STORAGE=encrypted-file selects the AES-256-GCM encrypted-at-rest
-// backend (a per-user secret is created beside the token file).
-func newAuthManager(deps appDeps, out io.Writer) (*oauth.Manager, error) {
-	// Validate SPLICE_OAUTH_STORAGE up front: a mistyped value must fail fast rather
-	// than silently change the backend. Empty selects the platform auto policy;
-	// "file" = plaintext 0600 file; "encrypted-file" = AES-256-GCM;
-	// "keyring" = the OS keyring.
-	storage := strings.ToLower(strings.TrimSpace(os.Getenv("SPLICE_OAUTH_STORAGE")))
-	switch storage {
-	case "", "file", "encrypted-file", "keyring":
-	default:
-		return nil, fmt.Errorf("invalid SPLICE_OAUTH_STORAGE %q (supported: file, encrypted-file, keyring)", storage)
-	}
-	store, err := oauth.NewStore(oauth.StoreOptions{
-		Now:     deps.now,
-		Storage: storage,
-	})
+// newAuthManager builds an OAuth manager and reports its active backend. User
+// auth.storage has priority over SPLICE_OAUTH_STORAGE. An empty selector keeps
+// automatic backend selection.
+func newAuthManager(deps appDeps, out io.Writer) (*oauth.Manager, string, error) {
+	storage, err := resolveCLIAuthStorage(deps, "")
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return oauth.NewManager(oauth.ManagerOptions{
+	return newAuthManagerWithStorage(deps, out, storage)
+}
+
+func newAuthManagerWithStorage(deps appDeps, out io.Writer, storage string) (*oauth.Manager, string, error) {
+	store, err := oauth.NewStore(oauth.StoreOptions{Now: deps.now, Storage: storage})
+	if err != nil {
+		return nil, "", fmt.Errorf("open OAuth %s backend: %w", displayAuthBackend(storage), err)
+	}
+	manager, err := oauth.NewManager(oauth.ManagerOptions{
 		Store:      store,
 		HTTPClient: &http.Client{Timeout: 30 * time.Second},
 		Now:        deps.now,
@@ -291,6 +297,41 @@ func newAuthManager(deps appDeps, out io.Writer) (*oauth.Manager, error) {
 		// without the operator exporting SPLICE_OAUTH_ALLOW_PRESETS first.
 		AllowPresets: true,
 	})
+	if err != nil {
+		return nil, "", fmt.Errorf("create OAuth manager: %w", err)
+	}
+	return manager, store.Backend(), nil
+}
+
+func resolveCLIAuthStorage(deps appDeps, selected string) (string, error) {
+	if strings.TrimSpace(selected) != "" {
+		return config.ValidateAuthStorage(selected)
+	}
+	if deps.userConfigPath == nil {
+		return config.ResolveAuthStorageAt("", config.OAuthStorageEnv)
+	}
+	path, err := deps.userConfigPath()
+	if err != nil {
+		return "", fmt.Errorf("resolve user config path: %w", err)
+	}
+	return config.ResolveAuthStorageAt(path, config.OAuthStorageEnv)
+}
+
+func persistCLIAuthStorage(deps appDeps, storage string) error {
+	if strings.TrimSpace(storage) == "" {
+		return nil
+	}
+	if deps.userConfigPath == nil {
+		return fmt.Errorf("resolve user config path: unavailable")
+	}
+	path, err := deps.userConfigPath()
+	if err != nil {
+		return fmt.Errorf("resolve user config path: %w", err)
+	}
+	if _, err := config.SetAuthStorage(path, storage); err != nil {
+		return fmt.Errorf("save auth.storage: %w", err)
+	}
+	return nil
 }
 
 func runAuthLogin(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
@@ -303,9 +344,13 @@ func runAuthLogin(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		return exitSuccess
 	}
 	if len(parsed.positional) != 1 {
-		return writeExecUsageError(stderr, "usage: splice auth login <provider> [--device] [--scope <scope>]")
+		return writeExecUsageError(stderr, "usage: splice auth login <provider> [--device] [--scope <scope>] [--storage <keyring|encrypted-file|file>]")
 	}
 	provider := parsed.positional[0]
+	storage, err := resolveCLIAuthStorage(deps, parsed.storage)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
 	// ChatGPT (Codex) requires a fixed redirect_uri (http://localhost:1455/
 	// auth/callback) and mandatory authorize params (id_token_add_organizations,
 	// codex_cli_simplified_flow, originator) that the generic loopback flow
@@ -318,9 +363,9 @@ func runAuthLogin(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		if len(parsed.scopes) > 0 {
 			return writeExecUsageError(stderr, "ChatGPT login does not support --scope (the required scopes are fixed by the Codex client registration)")
 		}
-		return runAuthChatGPT(nil, stdout, stderr, deps)
+		return runAuthChatGPTWithStorage(nil, stdout, stderr, deps, storage, parsed.storage)
 	}
-	manager, err := newAuthManager(deps, stdout)
+	manager, _, err := newAuthManagerWithStorage(deps, stdout, storage)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
@@ -330,6 +375,9 @@ func runAuthLogin(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		ExtraScopes: parsed.scopes,
 	})
 	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	if err := persistCLIAuthStorage(deps, parsed.storage); err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
 	if _, err := fmt.Fprintf(stdout, "Logged in to %s.\n%s\n", parsed.positional[0], oauth.FormatStatuses([]oauth.Status{status})); err != nil {
@@ -351,7 +399,7 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 		return writeExecUsageError(stderr, "usage: splice auth logout <provider>")
 	}
 	provider := parsed.positional[0]
-	manager, err := newAuthManager(deps, stdout)
+	manager, _, err := newAuthManager(deps, stdout)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
@@ -404,7 +452,7 @@ func runAuthStatus(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	if len(parsed.positional) > 1 {
 		return writeExecUsageError(stderr, "usage: splice auth status [provider]")
 	}
-	manager, err := newAuthManager(deps, stdout)
+	manager, backend, err := newAuthManager(deps, stdout)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
@@ -417,14 +465,15 @@ func runAuthStatus(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	}
 	if parsed.json {
 		payload := struct {
-			Logins []oauth.Status `json:"logins"`
-		}{Logins: statuses}
+			Storage string         `json:"storage"`
+			Logins  []oauth.Status `json:"logins"`
+		}{Storage: backend, Logins: statuses}
 		if err := writePrettyJSON(stdout, payload); err != nil {
 			return exitCrash
 		}
 		return exitSuccess
 	}
-	if _, err := fmt.Fprintln(stdout, oauth.FormatStatuses(statuses)); err != nil {
+	if _, err := fmt.Fprintf(stdout, "Storage: %s\n%s\n", backend, oauth.FormatStatuses(statuses)); err != nil {
 		return exitCrash
 	}
 	return exitSuccess
@@ -443,7 +492,7 @@ func runAuthRefresh(args []string, stdout io.Writer, stderr io.Writer, deps appD
 		return writeExecUsageError(stderr, "usage: splice auth refresh <provider>")
 	}
 	provider := parsed.positional[0]
-	manager, err := newAuthManager(deps, stdout)
+	manager, _, err := newAuthManager(deps, stdout)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
@@ -498,7 +547,8 @@ func writeAuthHelp(w io.Writer) error {
   splice auth <command>
 
 Commands:
-  login <provider> [--device] [--scope <scope>]   Log in to a provider via OAuth
+  login <provider> [--device] [--scope <scope>] [--storage <backend>]
+                                                    Log in to a provider via OAuth
   logout <provider>                               Delete a provider's stored login
   status [provider]                               Show login presence/expiry (never the token)
   refresh <provider> [--watch]                    Force a token refresh (--watch keeps it fresh)
@@ -519,13 +569,16 @@ Any preset field is overridable via the env vars below. For a custom provider na
 Endpoint URLs must be https (loopback exempt).
 
 Storage: macOS uses the OS keyring by default. Other platforms use an encrypted
-file under $XDG_CONFIG_HOME/splice (override with SPLICE_OAUTH_TOKENS_PATH).
-Set SPLICE_OAUTH_STORAGE=file for a 0600 plaintext file. MCP server tokens share
-the same store.
+file under $XDG_CONFIG_HOME/splice. Use --storage on login to save auth.storage.
+SPLICE_OAUTH_STORAGE selects OAuth storage when auth.storage is not set.
+SPLICE_CRED_STORAGE does the same for API keys. The backends are keyring,
+encrypted-file, and file. The file backend is plaintext with 0600 permissions.
+MCP server tokens share the OAuth store.
 
 Flags:
       --device   Use the device-code flow (headless/SSH; no browser)
       --scope    Add an OAuth scope (repeatable)
+      --storage  Select keyring, encrypted-file, or file (login only)
       --watch    Keep the token fresh in the foreground (refresh only)
       --json     Print result as JSON (status/logout)
   -h, --help     Show this help

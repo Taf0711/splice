@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -27,20 +28,25 @@ import (
 // the profile having no own configured credential) come from the shared
 // ProviderProfile.OAuthLoginCandidates so the runtime resolver, the Codex account
 // resolver, and the onboarding presence check never diverge.
-func oauthLoginForProfile(profile config.ProviderProfile) (providerio.TokenResolver, string) {
+func oauthLoginForProfile(profile config.ProviderProfile) (providerio.TokenResolver, string, error) {
 	candidates := profile.OAuthLoginCandidates()
 	if len(candidates) == 0 {
-		return nil, ""
+		return nil, "", nil
 	}
-	store, err := oauth.NewStore(oauth.StoreOptions{})
+	storage, err := config.ResolveAuthStorage(config.OAuthStorageEnv)
 	if err != nil {
-		return nil, ""
+		return nil, "", fmt.Errorf("resolve OAuth storage: %w", err)
 	}
-	_, key, ok := oauth.FirstStored(store, candidates)
+	store, err := oauth.NewStore(oauth.StoreOptions{Storage: storage})
+	if err != nil {
+		return nil, "", fmt.Errorf("open OAuth %s backend (run `splice auth login --storage encrypted-file` or export %s=encrypted-file): %w", displayAuthBackend(storage), config.OAuthStorageEnv, err)
+	}
+	_, key, ok, err := oauth.FirstStored(store, candidates)
+	if err != nil {
+		return nil, "", fmt.Errorf("read OAuth login from the %s backend (run `splice auth login --storage encrypted-file` or export %s=encrypted-file): %w", store.Backend(), config.OAuthStorageEnv, err)
+	}
 	if !ok {
-		// No login under any candidate (or unreadable/invalid keys) → API-key
-		// auth, no resolver.
-		return nil, ""
+		return nil, "", nil
 	}
 	manager, err := oauth.NewManager(oauth.ManagerOptions{
 		Store:      store,
@@ -50,7 +56,7 @@ func oauthLoginForProfile(profile config.ProviderProfile) (providerio.TokenResol
 		AllowPresets: true,
 	})
 	if err != nil {
-		return nil, ""
+		return nil, "", fmt.Errorf("create OAuth manager: %w", err)
 	}
 	resolver := func(ctx context.Context, forceRefresh bool) (string, string, bool, error) {
 		var token string
@@ -69,5 +75,12 @@ func oauthLoginForProfile(profile config.ProviderProfile) (providerio.TokenResol
 		}
 		return "Authorization", "Bearer " + token, true, nil
 	}
-	return resolver, key
+	return resolver, key, nil
+}
+
+func displayAuthBackend(storage string) string {
+	if storage == "" {
+		return "automatic"
+	}
+	return storage
 }

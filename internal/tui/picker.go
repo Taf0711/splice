@@ -398,8 +398,14 @@ func (m model) modelPickerDiscoveryCmds() tea.Cmd {
 // OAuth bearer for token-login providers (e.g. xAI).
 func (m model) modelPickerProviderDiscoveryCmd(descriptor providercatalog.Descriptor, profile config.ProviderProfile) tea.Cmd {
 	authed := profile
-	if store, err := config.ProviderKeyStore(); err == nil {
-		authed = config.ApplyStoredAPIKey(authed, store)
+	var credentialErr error
+	if authed.APIKeyStored {
+		store, err := config.ProviderKeyStore()
+		if err != nil {
+			credentialErr = fmt.Errorf("open API key store: %w", err)
+		} else {
+			authed, credentialErr = config.ApplyStoredAPIKey(authed, store)
+		}
 	}
 	key := strings.TrimSpace(authed.APIKey)
 	if key == "" && strings.TrimSpace(authed.APIKeyEnv) != "" {
@@ -414,13 +420,18 @@ func (m model) modelPickerProviderDiscoveryCmd(descriptor providercatalog.Descri
 	}
 	providerID := descriptor.ID
 	return func() tea.Msg {
+		if credentialErr != nil {
+			return modelPickerModelsDiscoveredMsg{providerID: providerID, err: credentialErr}
+		}
 		ctx, cancel := context.WithTimeout(m.ctx, 8*time.Second)
 		defer cancel()
 		k := key
 		if needOAuth {
-			if resolved := oauthStoredToken(ctx, providerID); resolved != "" {
-				k = resolved
+			resolved, err := oauthStoredToken(ctx, providerID)
+			if err != nil {
+				return modelPickerModelsDiscoveredMsg{providerID: providerID, err: err}
 			}
+			k = resolved
 		}
 		models, err := discover(ctx, providerWizardDiscoveryProfile(descriptor, k))
 		return modelPickerModelsDiscoveredMsg{providerID: providerID, models: models, err: err}

@@ -122,6 +122,16 @@ Splice can select device login automatically on a host without a browser. Set
 macOS uses the system keyring by default. Other platforms use an encrypted local
 file under the Splice configuration directory.
 
+Select a backend and save it in the user configuration after a successful login:
+
+```bash
+splice auth login <provider> --storage encrypted-file
+```
+
+Valid values are `keyring`, `encrypted-file`, and `file`. The saved
+`auth.storage` value has priority over `SPLICE_OAUTH_STORAGE`. Splice does not
+read another backend when the selected backend fails.
+
 Set this variable to choose another token path:
 
 ```bash

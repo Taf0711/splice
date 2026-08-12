@@ -138,11 +138,24 @@ surface.
 
 Read [Update Splice](UPDATE.md) before you use a custom endpoint.
 
-## OAuth storage
+## Authentication storage
 
-Use `splice auth status` to inspect login presence and expiry. The command never
-prints the token.
+Use `splice auth status` to inspect the active backend. The command never prints
+a token.
 
 macOS uses the system keyring by default. Other platforms use an encrypted local
-file. Read [OAuth and provider login](oauth-subscriptions.md) for the supported
-flows and storage controls.
+file. Select a backend during a successful login:
+
+```bash
+splice auth login <provider> --storage encrypted-file
+```
+
+This command saves `auth.storage` in the user `config.json` file. A project file
+cannot set this value. Valid values are `keyring`, `encrypted-file`, and `file`.
+The `file` value stores plaintext credentials with `0600` permissions.
+
+When `auth.storage` is not set, `SPLICE_CRED_STORAGE` selects API key storage.
+`SPLICE_OAUTH_STORAGE` selects OAuth storage. Automatic selection is last.
+Splice does not read another backend when the selected backend fails.
+
+Read [OAuth and provider login](oauth-subscriptions.md) for the supported flows.

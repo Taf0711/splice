@@ -1,13 +1,43 @@
 package cli
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Taf0711/splice/internal/config"
 	"github.com/Taf0711/splice/internal/oauth"
 )
+
+func TestOAuthLoginForProfileSurfacesSelectedBackendReadError(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"auth":{"storage":"file"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", filepath.Dir(dir))
+	t.Setenv("SPLICE_OAUTH_TOKENS_PATH", filepath.Join(dir, "oauth.json"))
+	if err := os.WriteFile(filepath.Join(dir, "oauth.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// ResolveAuthStorage uses the default user config path. Place the config there.
+	defaultPath, err := config.DefaultUserConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(defaultPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(defaultPath, []byte(`{"auth":{"storage":"file"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = oauthLoginForProfile(config.ProviderProfile{Name: "xai", CatalogID: "xai"})
+	if err == nil || !strings.Contains(err.Error(), "file backend") || !strings.Contains(err.Error(), "SPLICE_OAUTH_STORAGE") {
+		t.Fatalf("error = %v, want selected backend and recovery hint", err)
+	}
+}
 
 func TestProviderHasOAuthLogin(t *testing.T) {
 	xai := config.ProviderProfile{Name: "xai", CatalogID: "xai"}
@@ -36,13 +66,13 @@ func TestSetupRequiredRecognizesOAuthLogin(t *testing.T) {
 
 	// xai has no inline key (env-only) but IS logged in via OAuth → no setup.
 	loggedIn := config.ResolvedConfig{Provider: config.ProviderProfile{Name: "xai", CatalogID: "xai", APIKeyEnv: "XAI_API_KEY"}}
-	if setupRequired(loggedIn) {
+	if required, err := setupRequired(loggedIn); err != nil || required {
 		t.Fatal("a provider with a stored OAuth login must not require onboarding")
 	}
 
 	// A keyless provider with no OAuth login still requires setup.
 	noLogin := config.ResolvedConfig{Provider: config.ProviderProfile{Name: "openai", CatalogID: "openai", APIKeyEnv: "OPENAI_API_KEY"}}
-	if !setupRequired(noLogin) {
+	if required, err := setupRequired(noLogin); err != nil || !required {
 		t.Fatal("a keyless provider with no OAuth login must require onboarding")
 	}
 }
@@ -66,22 +96,22 @@ func TestOAuthResolverForProfileFallsBackToCatalogID(t *testing.T) {
 	// A renamed profile resolves the catalog-ID login, and the returned key MUST be
 	// that login's key — the same key the Codex account-header resolver reads from,
 	// so bearer and account can never come from different logins.
-	if resolver, key := oauthLoginForProfile(config.ProviderProfile{Name: "codex", CatalogID: "chatgpt"}); resolver == nil {
+	if resolver, key, err := oauthLoginForProfile(config.ProviderProfile{Name: "codex", CatalogID: "chatgpt"}); err != nil || resolver == nil {
 		t.Fatal("renamed profile with a catalog-ID login must get a resolver (unauthenticated-children regression)")
 	} else if key != oauth.ProviderKey("chatgpt") {
 		t.Fatalf("bound key = %q, want the chatgpt login key (bearer/account must share it)", key)
 	}
 	// Name differs from catalog ID only in CASE: the exact-case store key is
 	// "provider:chatgpt", so "chatgpt" must survive as a distinct candidate.
-	if resolver, key := oauthLoginForProfile(config.ProviderProfile{Name: "ChatGPT", CatalogID: "chatgpt"}); resolver == nil {
+	if resolver, key, err := oauthLoginForProfile(config.ProviderProfile{Name: "ChatGPT", CatalogID: "chatgpt"}); err != nil || resolver == nil {
 		t.Fatal("case-variant profile name must still resolve the catalog-ID login (case-insensitive dedupe regression)")
 	} else if key != oauth.ProviderKey("chatgpt") {
 		t.Fatalf("case-variant bound key = %q, want the chatgpt login key", key)
 	}
-	if resolver, _ := oauthLoginForProfile(config.ProviderProfile{Name: "chatgpt", CatalogID: "chatgpt"}); resolver == nil {
+	if resolver, _, err := oauthLoginForProfile(config.ProviderProfile{Name: "chatgpt", CatalogID: "chatgpt"}); err != nil || resolver == nil {
 		t.Fatal("catalog-named profile must get a resolver")
 	}
-	if resolver, key := oauthLoginForProfile(config.ProviderProfile{Name: "openai", CatalogID: "openai"}); resolver != nil || key != "" {
+	if resolver, key, err := oauthLoginForProfile(config.ProviderProfile{Name: "openai", CatalogID: "openai"}); err != nil || resolver != nil || key != "" {
 		t.Fatalf("a profile with no stored login must get no resolver and an empty key, got key=%q", key)
 	}
 }
@@ -107,12 +137,12 @@ func TestOAuthResolverForProfileDoesNotOverrideExplicitKey(t *testing.T) {
 	// Work profile: same catalog, its OWN resolved API key, deliberately NOT the
 	// personal OAuth account. It must keep using its key (no resolver attached).
 	work := config.ProviderProfile{Name: "anthropic-work", CatalogID: "anthropic", APIKey: "sk-work-key"}
-	if resolver, key := oauthLoginForProfile(work); resolver != nil || key != "" {
+	if resolver, key, err := oauthLoginForProfile(work); err != nil || resolver != nil || key != "" {
 		t.Fatalf("a profile with its own API key must not get a catalog-shared OAuth resolver (cross-profile override), got key=%q", key)
 	}
 	// A raw auth-header credential must be protected the same way.
 	header := config.ProviderProfile{Name: "anthropic-hdr", CatalogID: "anthropic", AuthHeaderValue: "Bearer byo"}
-	if resolver, _ := oauthLoginForProfile(header); resolver != nil {
+	if resolver, _, err := oauthLoginForProfile(header); err != nil || resolver != nil {
 		t.Fatal("a profile with its own auth header must not get a catalog-shared OAuth resolver")
 	}
 	// A same-NAME login must not override an explicit key either (the name
@@ -120,12 +150,12 @@ func TestOAuthResolverForProfileDoesNotOverrideExplicitKey(t *testing.T) {
 	if err := store.Save(oauth.ProviderKey("anthropic-work"), oauth.Token{AccessToken: "name-tok", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
 		t.Fatalf("seed name token: %v", err)
 	}
-	if resolver, _ := oauthLoginForProfile(work); resolver != nil {
+	if resolver, _, err := oauthLoginForProfile(work); err != nil || resolver != nil {
 		t.Fatal("a profile with its own API key must not get an OAuth resolver even from a same-name login")
 	}
 	// Sanity: a keyless sibling on the same catalog DOES resolve the shared login.
 	keyless := config.ProviderProfile{Name: "anthropic-oauth", CatalogID: "anthropic"}
-	if resolver, key := oauthLoginForProfile(keyless); resolver == nil {
+	if resolver, key, err := oauthLoginForProfile(keyless); err != nil || resolver == nil {
 		t.Fatal("a keyless profile should still resolve the catalog-shared login")
 	} else if key != oauth.ProviderKey("anthropic") {
 		t.Fatalf("keyless sibling bound key = %q, want the catalog login key", key)

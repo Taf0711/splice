@@ -2,6 +2,11 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -38,8 +43,25 @@ func TestRunAuthStatusEmpty(t *testing.T) {
 	if code := runWithDeps([]string{"auth", "status"}, &stdout, &stderr, appDeps{}); code != exitSuccess {
 		t.Fatalf("exit = %d stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "No OAuth provider logins are stored.") {
+	if !strings.Contains(stdout.String(), "Storage: file") || !strings.Contains(stdout.String(), "No OAuth provider logins are stored.") {
 		t.Fatalf("status output = %q", stdout.String())
+	}
+}
+
+func TestRunAuthStatusJSONReportsStorage(t *testing.T) {
+	withAuthStore(t)
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"auth", "status", "--json"}, &stdout, &stderr, appDeps{}); code != exitSuccess {
+		t.Fatalf("exit = %d stderr=%s", code, stderr.String())
+	}
+	var payload struct {
+		Storage string `json:"storage"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Storage != "file" {
+		t.Fatalf("storage = %q, want file", payload.Storage)
 	}
 }
 
@@ -75,6 +97,66 @@ func TestRunAuthLogoutNothing(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "No stored credential for demo") {
 		t.Fatalf("logout output = %q", stdout.String())
+	}
+}
+
+func TestRunAuthLoginStoragePersistsAfterSuccess(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/device", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"device_code":"dc","user_code":"U-1","verification_uri":"https://example.test/device","expires_in":600,"interval":1}`)
+	})
+	mux.HandleFunc("/token", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"access_token":"at","refresh_token":"rt","token_type":"Bearer","expires_in":3600}`)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	t.Setenv("SPLICE_OAUTH_TOKENS_PATH", filepath.Join(dir, "tokens.json"))
+	t.Setenv("SPLICE_OAUTH_DEMO_CLIENT_ID", "client")
+	t.Setenv("SPLICE_OAUTH_DEMO_AUTHORIZE_URL", "https://example.test/authorize")
+	t.Setenv("SPLICE_OAUTH_DEMO_TOKEN_URL", server.URL+"/token")
+	t.Setenv("SPLICE_OAUTH_DEMO_DEVICE_URL", server.URL+"/device")
+	deps := appDeps{userConfigPath: func() (string, error) { return configPath, nil }}
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"auth", "login", "demo", "--device", "--storage", "file"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("exit = %d stderr=%s", code, stderr.String())
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"storage": "file"`) {
+		t.Fatalf("config = %s", data)
+	}
+}
+
+func TestRunAuthLoginStorageValidationDoesNotPersist(t *testing.T) {
+	withAuthStore(t)
+	path := filepath.Join(t.TempDir(), "config.json")
+	var stdout, stderr bytes.Buffer
+	deps := appDeps{userConfigPath: func() (string, error) { return path, nil }}
+	if code := runWithDeps([]string{"auth", "login", "demo", "--storage", "bogus"}, &stdout, &stderr, deps); code == exitSuccess {
+		t.Fatal("invalid storage should fail")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("failed login persisted config: %v", err)
+	}
+}
+
+func TestPersistCLIAuthStorageAfterSuccess(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	deps := appDeps{userConfigPath: func() (string, error) { return path, nil }}
+	if err := persistCLIAuthStorage(deps, "encrypted-file"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"storage": "encrypted-file"`) {
+		t.Fatalf("config = %s", data)
 	}
 }
 

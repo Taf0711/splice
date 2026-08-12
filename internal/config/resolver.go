@@ -73,6 +73,10 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 			return ResolvedConfig{}, err
 		}
 		mergeConfig(&cfg, fileConfig)
+		cfg.Auth = fileConfig.Auth
+	}
+	if _, err := ValidateAuthStorage(cfg.Auth.Storage); err != nil {
+		return ResolvedConfig{}, err
 	}
 	if options.ProjectConfigPath != "" {
 		fileConfig, err := loadConfigFile(options.ProjectConfigPath)
@@ -145,13 +149,14 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		// normalized (but active-less) profile list — keep it so a caller can fall
 		// back to an already-configured usable provider instead of treating this
 		// like a config with nothing set up at all.
-		return ResolvedConfig{Providers: providers, DefaultProjectTrust: cfg.DefaultProjectTrust}, err
+		return ResolvedConfig{Providers: providers, Auth: cfg.Auth, DefaultProjectTrust: cfg.DefaultProjectTrust}, err
 	}
 
 	return ResolvedConfig{
 		ActiveProvider:      active.Name,
 		Providers:           providers,
 		Provider:            active,
+		Auth:                cfg.Auth,
 		MaxTurns:            cfg.MaxTurns,
 		Compaction:          cfg.Compaction,
 		MCP:                 cfg.MCP,
