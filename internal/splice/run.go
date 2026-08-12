@@ -265,6 +265,7 @@ func runIterationLoop(
 	allRecords := []schemas.StageRecord{}
 	wallStart := time.Now()
 	var revisionContext *string
+	var priorFailure string
 
 	// escalated tracks whether the escalation model resolver has been called
 	// for this run. Escalation fires at most once (AR10c).
@@ -312,19 +313,28 @@ func runIterationLoop(
 		allRecords = append(allRecords, passRecords...)
 
 		if !completed {
-			if i < maxIterations {
-				failed := findFailed(passRecords)
+			failed := findFailed(passRecords)
+			failure := failed.Name + "\x00" + DerefString(failed.OutputSummary)
+			if failure == priorFailure {
+				reason := fmt.Sprintf("repeated unchanged stage failure in iterations %d and %d: %s", i-1, i, failed.Name)
+				if detail := DerefString(failed.OutputSummary); detail != "" {
+					reason += ": " + detail
+				}
+				return finishWithReason(runID, plan, allRecords, "failed", reason)
+			}
+			priorFailure = failure
+			if i < maxIterations && i < defaultMaxIterations {
 				rc := buildRevisionContext(plan.RequestIntent, history, passRecords, passOutputs, fmt.Sprintf("Recovery: stage failure in iteration %d: %s", i, DerefString(failed.OutputSummary)))
 				revisionContext = &rc
 				continue
 			}
-			failed := findFailed(passRecords)
 			reason := fmt.Sprintf("stage failed in iteration %d", i)
 			if detail := DerefString(failed.OutputSummary); detail != "" {
 				reason += ": " + detail
 			}
 			return finishWithReason(runID, plan, allRecords, "failed", reason)
 		}
+		priorFailure = ""
 
 		changeSummary := summarizeWorkspaceChanges(ctx, workDir)
 		state, err := ComputeIterationState(i, passOutputs, passRecords, changeSummary, nil)

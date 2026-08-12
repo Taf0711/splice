@@ -1546,6 +1546,96 @@ func TestRunTerminalStageFailureIncludesOutputSummary(t *testing.T) {
 	}
 }
 
+type repeatedContextFailureStage struct {
+	calls int
+	err   error
+}
+
+func (stage *repeatedContextFailureStage) Run(_ context.Context, input schemas.HarnessStageInput, _ zeroruntime.Provider, _ stages.StageOptions) (schemas.HarnessStageOutput, error) {
+	stage.calls++
+	if input.Context == nil {
+		return schemas.HarnessStageOutput{
+			Summary:    "inspect files",
+			Confidence: 0.5,
+			ContextRequest: &schemas.ContextRequest{
+				Reason:  "inspect files",
+				Queries: []schemas.ContextQuery{{QueryType: schemas.ContextListFiles, MaxResults: 100, MaxChars: 1000}},
+			},
+		}, nil
+	}
+	return schemas.HarnessStageOutput{}, stage.err
+}
+
+func TestRunIterationLoopStopsRepeatedIdenticalStageFailure(t *testing.T) {
+	stage := &repeatedContextFailureStage{err: errors.New("stream error: auth error: invalid API key")}
+	toolCalls := 0
+	runner := ToolRunnerFunc(func(context.Context, string, map[string]any) (ToolResult, error) {
+		toolCalls++
+		return ToolResult{OK: true, Output: "Contents of .:\nmain.go"}, nil
+	})
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		RequestIntent: "reproduce repeated stage failure",
+		Stages:        []schemas.ExecutionStage{{Name: "code_writer"}},
+	}
+
+	result, err := runIterationLoop(context.Background(), "run-repeated-failure", plan, stageRegistry{
+		"code_writer": stage,
+	}, runFakeProvider{}, agent.Options{MaxTurns: 50}, t.TempDir(), runner, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	if result.Status != "failed" {
+		t.Fatalf("status = %q, want failed", result.Status)
+	}
+	if stage.calls != 4 || toolCalls != 2 {
+		t.Fatalf("stage calls = %d, tool calls = %d; want 4/2 before abort", stage.calls, toolCalls)
+	}
+	if reason := DerefString(result.AbortReason); !strings.Contains(reason, "repeated unchanged stage failure") {
+		t.Fatalf("abort reason = %q, want repeated failure", reason)
+	}
+}
+
+type changingFailureStage struct{ calls int }
+
+func (stage *changingFailureStage) Run(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+	stage.calls++
+	return schemas.HarnessStageOutput{}, fmt.Errorf("failure %d", stage.calls)
+}
+
+func TestRunIterationLoopCapsChangingStageFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		maxTurns int
+		want     int
+	}{
+		{name: "failure cap below max turns", maxTurns: 50, want: defaultMaxIterations},
+		{name: "max turns below failure cap", maxTurns: 3, want: 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stage := &changingFailureStage{}
+			plan := schemas.ExecutionPlan{
+				Tier:          schemas.TierLight,
+				RequestIntent: "bound changing stage failures",
+				Stages:        []schemas.ExecutionStage{{Name: "code_writer"}},
+			}
+
+			result, err := runIterationLoop(context.Background(), "run-changing-failure", plan, stageRegistry{
+				"code_writer": stage,
+			}, runFakeProvider{}, agent.Options{MaxTurns: tc.maxTurns}, t.TempDir(), nil, nil, nil)
+			if err != nil {
+				t.Fatalf("runIterationLoop: %v", err)
+			}
+			if result.Status != "failed" {
+				t.Fatalf("status = %q, want failed", result.Status)
+			}
+			if stage.calls != tc.want {
+				t.Fatalf("changing failing stage calls = %d, want %d", stage.calls, tc.want)
+			}
+		})
+	}
+}
+
 func TestRunPassRecordsUsageFromFailedTypedOutput(t *testing.T) {
 	plan := schemas.ExecutionPlan{
 		Tier:          schemas.TierLight,
