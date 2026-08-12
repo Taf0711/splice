@@ -74,9 +74,8 @@ func (m model) handleApproveCommand() (model, tea.Cmd) {
 	return m.startApproval(splicerun.DesignTransitionSourceManual)
 }
 
-// startApproval validates the approval preconditions, then begins the plan
-// execution run. source distinguishes a manual /approve from an agent-requested
-// approval for the transcript and the persisted lifecycle audit.
+// startApproval validates the approval preconditions. Manual approval starts
+// execution. Agent-requested approval stops at an explicit user prompt.
 func (m model) startApproval(source splicerun.DesignTransitionSource) (model, tea.Cmd) {
 	if m.pending {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot approve while a run is active."})
@@ -113,9 +112,54 @@ func (m model) startApproval(source splicerun.DesignTransitionSource) (model, te
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot approve: no active session store."})
 		return m, nil
 	}
+	if source == splicerun.DesignTransitionSourceAgent {
+		return m.requestDesignApproval(planID)
+	}
+	return m.startApprovalConfirmed(source, planID)
+}
+
+// requestDesignApproval stops an agent-requested transition at a user prompt.
+// The plan runner stays inactive until resolvePermission receives Allow.
+func (m model) requestDesignApproval(planID string) (model, tea.Cmd) {
+	if m.pendingPermission != nil {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot approve: another permission request is active."})
+		return m, nil
+	}
+	request := agent.PermissionRequest{
+		ToolCallID:         fmt.Sprintf("design-approval-%d", m.runID),
+		ToolName:           "approve_design",
+		Action:             agent.PermissionActionPrompt,
+		Permission:         "execute_design_plan",
+		PermissionMode:     agent.PermissionModeAsk,
+		SideEffect:         string(tools.SideEffectWrite),
+		Reason:             "The design agent requested execution of this plan.",
+		Scope:              planID,
+		Args:               map[string]any{"plan_id": planID},
+		AvailableDecisions: []agent.PermissionDecisionAction{agent.PermissionDecisionAllow, agent.PermissionDecisionDeny},
+	}
+	updated, err := m.appendSessionEvent(sessions.EventPermissionRequest, request)
+	if err != nil {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot approve: persist user confirmation request: " + err.Error()})
+		return m, nil
+	}
+	m = updated
+	row := permissionTranscriptRow(permissionEventFromRequest(request))
+	m.transcript = appendTranscriptRow(m.transcript, row)
+	m.pendingPermission = &pendingPermissionPrompt{
+		request:        request,
+		designApproval: &designApprovalPrompt{planID: planID},
+	}
+	m.reportAgentLifecycle(herdrBlocked)
+	return m, nil
+}
+
+// startApprovalConfirmed records approval and starts the write-capable plan
+// runner. Call it only after manual approval or the explicit confirmation gate.
+func (m model) startApprovalConfirmed(source splicerun.DesignTransitionSource, planID string) (model, tea.Cmd) {
 	updated, err := m.appendSessionEvent(sessions.EventPlanApproved, splicerun.PlanApprovedPayload{PlanID: planID, Source: source})
 	if err != nil {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot approve: persist plan_approved: " + err.Error()})
+		m.reportAgentLifecycle(herdrIdle)
 		return m, nil
 	}
 	m = updated
@@ -847,28 +891,34 @@ func designConversationContext(events []sessions.Event, livePlan *schemas.Design
 			Content: message.Content,
 		})
 	}
-	state, err := workflowStateMessage(ctx.CurrentPlan, ctx.CurrentCritique)
+	state := ctx.State
+	state.Plan = ctx.CurrentPlan
+	state.Critique = ctx.CurrentCritique
+	stateMessage, err := workflowStateMessage(state)
 	if err != nil {
 		return nil, "", err
 	}
-	return messages, state, nil
+	return messages, stateMessage, nil
 }
 
-// workflowStateMessage serializes the complete current plan and critique for
-// the live design agent. JSON keeps this model-facing form independent from
-// the shorter display format used by the TUI.
-func workflowStateMessage(plan *schemas.DesignPlan, critique *schemas.PlanCritique) (string, error) {
-	if plan == nil && critique == nil {
+// workflowStateMessage serializes the current design state for the live design
+// agent. It includes execution outcomes so later turns know which tasks ran.
+func workflowStateMessage(state splicerun.DesignState) (string, error) {
+	if state.Plan == nil && state.Critique == nil && len(state.TaskOutcomes) == 0 {
 		return "", nil
 	}
-	state := struct {
-		CurrentPlan     *schemas.DesignPlan   `json:"current_plan,omitempty"`
-		CurrentCritique *schemas.PlanCritique `json:"current_critique,omitempty"`
+	modelState := struct {
+		Phase           schemas.DesignPhase              `json:"phase,omitempty"`
+		CurrentPlan     *schemas.DesignPlan              `json:"current_plan,omitempty"`
+		CurrentCritique *schemas.PlanCritique            `json:"current_critique,omitempty"`
+		TaskOutcomes    map[string]schemas.TaskRunStatus `json:"task_outcomes,omitempty"`
 	}{
-		CurrentPlan:     plan,
-		CurrentCritique: critique,
+		Phase:           state.Phase,
+		CurrentPlan:     state.Plan,
+		CurrentCritique: state.Critique,
+		TaskOutcomes:    state.TaskOutcomes,
 	}
-	payload, err := json.MarshalIndent(state, "", "  ")
+	payload, err := json.MarshalIndent(modelState, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("marshal design revision context: %w", err)
 	}

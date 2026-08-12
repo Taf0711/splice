@@ -721,6 +721,18 @@ type pendingPermissionPrompt struct {
 	// resting approval choice. Moved by ↑/↓/Tab; confirmed by Enter or a click.
 	// Hotkeys resolve the matching request-provided option directly.
 	cursor int
+	// designApproval, when non-nil, marks this prompt as the hard confirmation
+	// gate before an agent-requested plan execution runs. Resolution with
+	// Allow starts the confirmed execution; any other choice leaves the app
+	// idle (no plan_approved event and no run). See startApproval.
+	designApproval *designApprovalPrompt
+}
+
+// designApprovalPrompt carries the context needed to start plan execution
+// once the user confirms an agent-requested approval. It points at the planID
+// whose plan_approved event the confirmed run will record.
+type designApprovalPrompt struct {
+	planID string
 }
 
 // askUserRequestMsg is the TUI-loop equivalent of permissionRequestMsg: the
@@ -4151,6 +4163,33 @@ func (m model) resolvePermission(decision permissionDecision) (tea.Model, tea.Cm
 		})
 	}
 	m.pendingPermission = nil
+	if pending.designApproval != nil {
+		event := permissionEventFromRequest(pending.request)
+		event.DecisionAction = decision
+		event.DecisionReason = permissionDecisionReason(decision)
+		switch decision {
+		case permissionDecisionAllow:
+			event.Action = agent.PermissionActionAllow
+			event.PermissionGranted = true
+		case permissionDecisionCancel:
+			event.Action = agent.PermissionActionCancel
+		default:
+			event.Action = agent.PermissionActionDeny
+		}
+		updated, err := m.appendSessionEvent(sessions.EventPermissionDecision, event)
+		if err != nil {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot approve: persist user confirmation: " + err.Error()})
+			m.reportAgentLifecycle(herdrIdle)
+			return m, nil
+		}
+		m = updated
+		m.transcript = appendTranscriptRow(m.transcript, permissionTranscriptRow(event))
+		if decision == permissionDecisionAllow {
+			return m.startApprovalConfirmed(splicerun.DesignTransitionSourceAgent, pending.designApproval.planID)
+		}
+		m.reportAgentLifecycle(herdrIdle)
+		return m, nil
+	}
 	m.reportAgentLifecycle(herdrWorking)
 	return m, nil
 }

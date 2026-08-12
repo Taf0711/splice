@@ -184,7 +184,7 @@ func TestDesignAgentCrystallizeSchedulesAndPersistsSourceAgent(t *testing.T) {
 	}
 }
 
-func TestDesignAgentApproveSchedulesPlanExecution(t *testing.T) {
+func TestDesignAgentApproveRequestsUserConfirmation(t *testing.T) {
 	store := testSessionStore(t)
 	provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{
 		designToolCall("call-ap", "approve_design", `{}`),
@@ -221,39 +221,30 @@ func TestDesignAgentApproveSchedulesPlanExecution(t *testing.T) {
 	respMsg := execCmd(cmd)
 	updated, transitionCmd := next.Update(respMsg)
 	next = updated.(model)
-	if transitionCmd == nil {
-		t.Fatal("expected the design turn to schedule the approval transition")
+	if transitionCmd != nil || next.pending {
+		t.Fatal("agent-requested approval started execution before user confirmation")
 	}
-	if !next.pending {
-		t.Fatal("expected approval run to start (pending)")
+	if next.pendingPermission == nil || next.pendingPermission.request.ToolName != "approve_design" {
+		t.Fatal("agent-requested approval did not show the confirmation prompt")
 	}
 	if !next.sidebarActive() {
-		t.Fatal("approval transition made the design-plan sidebar disappear")
+		t.Fatal("approval confirmation made the design-plan sidebar disappear")
 	}
 	if plain := stripSidebar(next.sidebarPlanLines(sidebarWidth(next.width))); !strings.Contains(plain, "Build core") {
-		t.Fatalf("approved design task missing from sidebar:\n%s", plain)
+		t.Fatalf("design task missing from sidebar during confirmation:\n%s", plain)
 	}
-	if !transcriptContains(next.transcript, "The design agent requested plan approval.") {
-		t.Fatalf("expected agent approval label, got %#v", next.transcript)
+
+	deniedModel, deniedCmd := next.resolvePermission(permissionDecisionDeny)
+	denied := deniedModel.(model)
+	if deniedCmd != nil || denied.pending {
+		t.Fatal("denying agent-requested approval started plan execution")
 	}
-	events, err := store.ReadEvents(m.activeSession.SessionID)
-	if err != nil {
-		t.Fatalf("ReadEvents: %v", err)
-	}
-	var approved splicerun.PlanApprovedPayload
-	for _, event := range events {
-		if event.Type == sessions.EventPlanApproved {
-			if err := json.Unmarshal(event.Payload, &approved); err != nil {
-				t.Fatalf("unmarshal plan_approved: %v", err)
-			}
-		}
-	}
-	if approved.PlanID != "plan-1" || approved.Source != splicerun.DesignTransitionSourceAgent {
-		t.Fatalf("plan_approved = %#v, want plan-1 from agent", approved)
+	if eventTypesContain(denied.sessionEvents, sessions.EventPlanApproved) {
+		t.Fatal("denied agent-requested approval persisted plan_approved")
 	}
 }
 
-func TestDesignAgentApproveIfReadyStartsApprovalOnCleanCritique(t *testing.T) {
+func TestDesignAgentApproveIfReadyRequestsUserConfirmation(t *testing.T) {
 	store := testSessionStore(t)
 	planArgs, _ := json.Marshal(tuiDesignPlan())
 	critiqueArgs, _ := json.Marshal(tuiCleanCritique())
@@ -298,11 +289,28 @@ func TestDesignAgentApproveIfReadyStartsApprovalOnCleanCritique(t *testing.T) {
 	}
 	updated, approveCmd := next.Update(*crystallize)
 	next = updated.(model)
-	if approveCmd == nil {
-		t.Fatal("expected a clean must-fix-free crystallize to schedule approval")
+	if approveCmd != nil || next.pending {
+		t.Fatal("approve_if_ready started execution before user confirmation")
 	}
-	if !next.pending {
-		t.Fatal("expected approval run started after clean crystallize")
+	if next.pendingPermission == nil {
+		t.Fatal("approve_if_ready did not show the confirmation prompt")
+	}
+
+	approvedModel, runCmd := next.resolvePermission(permissionDecisionAllow)
+	approved := approvedModel.(model)
+	if runCmd == nil || !approved.pending {
+		t.Fatal("explicit user confirmation did not start plan execution")
+	}
+	var payload splicerun.PlanApprovedPayload
+	for _, event := range approved.sessionEvents {
+		if event.Type == sessions.EventPlanApproved {
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("unmarshal plan_approved: %v", err)
+			}
+		}
+	}
+	if payload.PlanID == "" || payload.Source != splicerun.DesignTransitionSourceAgent {
+		t.Fatalf("plan_approved = %#v, want agent source", payload)
 	}
 }
 
@@ -357,6 +365,46 @@ func TestDesignAgentApproveIfReadyStaysIdleOnMustFix(t *testing.T) {
 	}
 	if next.pending {
 		t.Fatal("must-fix critique must not start an approval run")
+	}
+}
+
+func TestDesignConversationContextIncludesExecutionState(t *testing.T) {
+	store := testSessionStore(t)
+	m := newDesignModeTestModel(t.TempDir(), &fakeProvider{}, store)
+	var err error
+	m, err = m.ensureActiveSession("design")
+	if err != nil {
+		t.Fatalf("ensureActiveSession: %v", err)
+	}
+	plan := tuiDesignPlan()
+	planJSON, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatalf("marshal plan: %v", err)
+	}
+	for _, event := range []struct {
+		typ     sessions.EventType
+		payload any
+	}{
+		{sessions.EventDesignModeEntered, nil},
+		{sessions.EventPlanCrystallized, splicerun.PlanCrystallizedPayload{PlanID: "plan-1", Revision: 1, Plan: planJSON}},
+		{sessions.EventPlanApproved, splicerun.PlanApprovedPayload{PlanID: "plan-1", Source: splicerun.DesignTransitionSourceAgent}},
+		{sessions.EventTaskStarted, splicerun.TaskStartedPayload{TaskID: "t1", RunID: "run-1"}},
+		{sessions.EventTaskCompleted, splicerun.TaskCompletedPayload{TaskID: "t1", RunID: "run-1"}},
+	} {
+		m, err = m.appendSessionEvent(event.typ, event.payload)
+		if err != nil {
+			t.Fatalf("append %s: %v", event.typ, err)
+		}
+	}
+
+	_, state, err := designConversationContext(m.sessionEvents, nil, nil)
+	if err != nil {
+		t.Fatalf("designConversationContext: %v", err)
+	}
+	for _, want := range []string{`"phase": "completed"`, `"task_outcomes"`, `"t1"`, `"status": "completed"`} {
+		if !strings.Contains(state, want) {
+			t.Fatalf("design execution state missing %q:\n%s", want, state)
+		}
 	}
 }
 
