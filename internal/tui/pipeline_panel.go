@@ -19,6 +19,7 @@ const (
 	pipelineStageCompleted
 	pipelineStageFailed
 	pipelineStageSkipped
+	pipelineStageIncomplete
 )
 
 type pipelineStageRow struct {
@@ -98,6 +99,8 @@ func pipelineStageStatusFromString(status string) pipelineStageStatus {
 		return pipelineStageFailed
 	case "skipped":
 		return pipelineStageSkipped
+	case "incomplete":
+		return pipelineStageIncomplete
 	default:
 		return pipelineStagePending
 	}
@@ -168,7 +171,7 @@ func (s pipelinePanelState) counts() (done int, total int, allDone bool) {
 	allDone = true
 	for _, stage := range s.stages {
 		switch stage.status {
-		case pipelineStageCompleted, pipelineStageFailed, pipelineStageSkipped:
+		case pipelineStageCompleted, pipelineStageFailed, pipelineStageSkipped, pipelineStageIncomplete:
 			done++
 		default:
 			allDone = false
@@ -192,6 +195,8 @@ func pipelineStageGlyphAndStyle(status pipelineStageStatus, phase int) (string, 
 		return zeroTheme.red.Render("✗"), zeroTheme.red
 	case pipelineStageSkipped:
 		return zeroTheme.amber.Render("↩"), zeroTheme.muted
+	case pipelineStageIncomplete:
+		return zeroTheme.amber.Render("◐"), zeroTheme.muted
 	default:
 		return zeroTheme.faint.Render("○"), zeroTheme.faint
 	}

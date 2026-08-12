@@ -738,6 +738,12 @@ func (m model) sidebarPlanState() planPanelState {
 	if !m.plan.isEmpty() {
 		return m.plan
 	}
+	// The reviewed plan is an idle fallback, not live execution state. Hide it
+	// during a run until update_plan supplies real statuses, so PLAN never stays
+	// frozen at 0/N while PIPELINE advances.
+	if m.activeRunID != 0 {
+		return planPanelState{}
+	}
 	if m.pendingPlan == nil || len(m.pendingPlan.Tasks) == 0 {
 		return planPanelState{}
 	}

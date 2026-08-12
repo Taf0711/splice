@@ -669,6 +669,23 @@ func TestSidebarPlanReflectsState(t *testing.T) {
 	}
 }
 
+func TestSidebarPlanFallbackIsHiddenWhileRunIsActive(t *testing.T) {
+	m := sidebarTestModel()
+	m.plan.clear()
+	m.pendingPlan = &schemas.DesignPlan{Tasks: []schemas.Task{{ID: "task-1", Title: "Reviewed task"}}}
+
+	if state := m.sidebarPlanState(); state.isEmpty() {
+		t.Fatal("idle review must show the reviewed design plan")
+	}
+	m.activeRunID = 7
+	if state := m.sidebarPlanState(); !state.isEmpty() {
+		t.Fatalf("active run showed a frozen design-plan fallback: %#v", state.steps)
+	}
+	if lines := m.sidebarPlanLines(40); len(lines) != 0 {
+		t.Fatalf("active run showed fallback plan lines: %#v", lines)
+	}
+}
+
 func TestJoinColumnsAligns(t *testing.T) {
 	chat := []string{"hello", "world", "third row that is longer"}
 	sidebar := []string{"A", "B"}

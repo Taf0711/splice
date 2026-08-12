@@ -58,6 +58,31 @@ func TestPipelinePanelApplyStageMarker(t *testing.T) {
 	}
 }
 
+func TestPipelinePanelMapsEveryEmittedStageStatus(t *testing.T) {
+	cases := []struct {
+		status string
+		want   pipelineStageStatus
+	}{
+		{status: "skipped", want: pipelineStageSkipped},
+		{status: "running", want: pipelineStageRunning},
+		{status: "failed", want: pipelineStageFailed},
+		{status: "incomplete", want: pipelineStageIncomplete},
+		{status: "completed", want: pipelineStageCompleted},
+	}
+	for _, tc := range cases {
+		t.Run(tc.status, func(t *testing.T) {
+			var state pipelinePanelState
+			marker := fmt.Sprintf("\x00STAGE{\"name\":\"stage\",\"status\":%q}\x00", tc.status)
+			if !state.applyStageMarker(marker) {
+				t.Fatal("applyStageMarker returned false")
+			}
+			if got := state.stages[0].status; got != tc.want {
+				t.Fatalf("status %q mapped to %v, want %v", tc.status, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestPipelinePanelApplyStageMarkerIgnoresNormalText(t *testing.T) {
 	var state pipelinePanelState
 	if state.applyStageMarker("ordinary reasoning") {
@@ -82,6 +107,41 @@ func TestPipelinePanelRenderSectionGlyphs(t *testing.T) {
 	}
 }
 
+func TestPipelinePanelIncompleteIsTerminalAndNeverCurrent(t *testing.T) {
+	state := pipelinePanelState{
+		active: true,
+		stages: []pipelineStageRow{{name: "acceptance_verifier", status: pipelineStageIncomplete, detail: "partial"}},
+	}
+	done, total, allDone := state.counts()
+	if done != 1 || total != 1 || !allDone {
+		t.Fatalf("counts = %d/%d allDone=%v, want 1/1 true", done, total, allDone)
+	}
+	plain := plainRender(t, strings.Join(state.renderSection(40, 0), "\n"))
+	if !strings.Contains(plain, "◐") {
+		t.Fatalf("incomplete stage missing partial glyph: %q", plain)
+	}
+	if strings.Contains(plain, "CURRENT") {
+		t.Fatalf("incomplete stage rendered as current: %q", plain)
+	}
+}
+
+func TestPipelinePanelHeaderCompletesWhenEveryStageIsTerminal(t *testing.T) {
+	state := pipelinePanelState{
+		active: true,
+		stages: []pipelineStageRow{
+			{name: "skipped", status: pipelineStageSkipped},
+			{name: "failed", status: pipelineStageFailed},
+			{name: "incomplete", status: pipelineStageIncomplete},
+			{name: "completed", status: pipelineStageCompleted},
+		},
+	}
+	got := state.headerLine(40)
+	want := sidebarHeaderWithCount("PIPELINE", "4/4", zeroTheme.green, 40)
+	if got != want {
+		t.Fatalf("terminal pipeline header = %q, want %q", got, want)
+	}
+}
+
 func TestPipelineStageGlyphAdvancesWithPhase(t *testing.T) {
 	for phase, want := range map[int]string{0: "◜", 1: "◠", 2: "◝", 5: "◟", 6: "◜"} {
 		g, _ := pipelineStageGlyphAndStyle(pipelineStageRunning, phase)
@@ -94,6 +154,9 @@ func TestPipelineStageGlyphAdvancesWithPhase(t *testing.T) {
 	}
 	if g, _ := pipelineStageGlyphAndStyle(pipelineStagePending, 3); !strings.Contains(g, "○") {
 		t.Errorf("pending glyph = %q, want ○", g)
+	}
+	if g, _ := pipelineStageGlyphAndStyle(pipelineStageIncomplete, 3); g != zeroTheme.amber.Render("◐") {
+		t.Errorf("incomplete glyph = %q, want amber partial glyph", g)
 	}
 }
 
