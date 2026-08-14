@@ -205,11 +205,20 @@ func resolveProfile(profile config.ProviderProfile, options Options) (resolvedPr
 		} else if providerKind != modelProvider {
 			return resolvedProfile{}, fmt.Errorf("splice model %s belongs to %s, not %s", entry.ID, entry.Provider, providerKind)
 		}
+		// Defensive rule: a max-output cap at or above the total context window is
+		// unusable on the wire (input + tools + output must fit the context, so
+		// the provider rejects such a request). Zero means omit the cap and let
+		// the provider apply a context-safe default; normal registry ceilings are
+		// forwarded unchanged.
+		maxOutputTokens := entry.ContextLimits.MaxOutputTokens
+		if maxOutputTokens >= entry.ContextLimits.ContextWindow {
+			maxOutputTokens = 0
+		}
 		return resolvedProfile{
 			providerKind:    providerKind,
 			apiModel:        entry.APIModel,
 			baseURL:         baseURL,
-			maxOutputTokens: entry.ContextLimits.MaxOutputTokens,
+			maxOutputTokens: maxOutputTokens,
 		}, nil
 	}
 

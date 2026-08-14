@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Taf0711/splice/internal/config"
+	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/oauth"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
@@ -232,6 +233,69 @@ func TestNewCreatesGeminiProviderFromFactoryOptions(t *testing.T) {
 	generationConfig := body["generationConfig"].(map[string]any)
 	if generationConfig["maxOutputTokens"] != float64(65536) {
 		t.Fatalf("maxOutputTokens = %#v, want registry output ceiling", generationConfig["maxOutputTokens"])
+	}
+}
+
+func TestNewOmitsMaxTokensWhenRegistryCapEqualsContextWindow(t *testing.T) {
+	// Regression: models.dev reports Kimi K3 with contextWindow == maxOutputTokens
+	// (both 1_048_576). Forwarding that verbatim puts max_completion_tokens on the
+	// wire at the full context size, which OpenRouter rejects: input + tools +
+	// output must fit the context window. The factory must omit the unusable cap
+	// so the provider applies its own context-safe default.
+	registry, err := modelregistry.NewRegistry([]modelregistry.ModelEntry{{
+		ID:           "test/kimi-k3",
+		DisplayName:  "Test Kimi K3",
+		APIModel:     "test/kimi-k3",
+		Provider:     modelregistry.ProviderOpenAI,
+		APIProviders: []modelregistry.ProviderKind{modelregistry.ProviderOpenAI, modelregistry.ProviderOpenAICompatible},
+		ContextLimits: modelregistry.ContextLimits{
+			ContextWindow:   1_048_576,
+			MaxOutputTokens: 1_048_576,
+		},
+		Capabilities: modelregistry.ModelCapabilities{modelregistry.ModelCapabilityChat},
+		Status:       modelregistry.ModelStatusActive,
+		Aliases:      []string{"test:kimi-k3"},
+		Cost:         modelregistry.ModelCost{Currency: "USD", Unit: "per_1m_tokens"},
+	}})
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+
+	transport := &captureTransport{
+		responseBody: "data: [DONE]\n\n",
+	}
+	provider, err := New(config.ProviderProfile{
+		Name:         "openrouter",
+		ProviderKind: config.ProviderKindOpenAICompatible,
+		BaseURL:      "https://openrouter.example/api/v1",
+		APIKey:       "sk-or",
+		Model:        "test/kimi-k3",
+	}, Options{
+		HTTPClient:    &http.Client{Transport: transport},
+		ModelRegistry: &registry,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion() error = %v", err)
+	}
+	for range stream {
+	}
+
+	if transport.request == nil {
+		t.Fatal("HTTP client was not used")
+	}
+	var body map[string]any
+	if err := json.NewDecoder(transport.body()).Decode(&body); err != nil {
+		t.Fatalf("decode request body: %v", err)
+	}
+	if value, ok := body["max_completion_tokens"]; ok {
+		t.Fatalf("max_completion_tokens = %#v, want omitted (registry cap equals the context window, unusable on the wire)", value)
 	}
 }
 
