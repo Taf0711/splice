@@ -271,13 +271,8 @@ func runIterationLoop(
 	// for this run. Escalation fires at most once (AR10c).
 	escalated := false
 
-	// agent.Options.MaxTurns bounds model turns in agent.Run. In the deterministic
-	// pipeline, one full pipeline pass is the closest equivalent turn, so use it as
-	// the iteration cap when the caller supplies it.
+	// MaxTurns applies to agent.Run, not deterministic pipeline passes.
 	maxIterations := defaultMaxIterations
-	if options.MaxTurns > 0 {
-		maxIterations = options.MaxTurns
-	}
 
 	// snapshots holds references to captured workspace states for rollback.
 	// It is always seeded with iteration 0 (captured before the first pass)
@@ -323,7 +318,7 @@ func runIterationLoop(
 				return finishWithReason(runID, plan, allRecords, "failed", reason)
 			}
 			priorFailure = failure
-			if i < maxIterations && i < defaultMaxIterations {
+			if i < maxIterations {
 				rc := buildRevisionContext(plan.RequestIntent, history, passRecords, passOutputs, fmt.Sprintf("Recovery: stage failure in iteration %d: %s", i, DerefString(failed.OutputSummary)))
 				revisionContext = &rc
 				continue

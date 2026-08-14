@@ -76,7 +76,7 @@ func (runFailingProvider) StreamCompletion(ctx context.Context, request zerorunt
 	case "submit_code":
 		out := schemas.CodeWriterOutput{
 			Files: []schemas.FileChange{
-				{Path: "main.go", Content: "package main\n\nfunc Hello() string { return \"wrong\" }\n", ChangeType: "create"},
+				{Path: "main.go", Content: "package main\n\nfunc Hello() string { return \"wrong\" }\n", ChangeType: "modify"},
 			},
 			Language:   "go",
 			Intent:     "add broken Hello function",
@@ -87,7 +87,7 @@ func (runFailingProvider) StreamCompletion(ctx context.Context, request zerorunt
 	case "submit_tests":
 		out := schemas.TestGeneratorOutput{
 			Files: []schemas.FileChange{
-				{Path: "main_test.go", Content: "package main\n\nimport \"testing\"\n\nfunc TestHello(t *testing.T) {\n\tif Hello() != \"hello\" {\n\t\tt.Fatal(\"wrong greeting\")\n\t}\n}\n", ChangeType: "create"},
+				{Path: "main_test.go", Content: "package main\n\nimport \"testing\"\n\nfunc TestHello(t *testing.T) {\n\tif Hello() != \"hello\" {\n\t\tt.Fatal(\"wrong greeting\")\n\t}\n}\n", ChangeType: "modify"},
 			},
 			Language:   "go",
 			Intent:     "add Hello test",
@@ -1391,7 +1391,7 @@ func TestRunStreamsStageToolArguments(t *testing.T) {
 	}
 }
 
-func TestRunHonorsMaxTurnsAsIterationCap(t *testing.T) {
+func TestRunMaxTurnsDoesNotCapPipelineIterations(t *testing.T) {
 	workDir, registry := newRunTestWorkspace(t)
 
 	result, err := Run(context.Background(), "add a security service with tests", runFailingProvider{}, agent.Options{
@@ -1404,7 +1404,7 @@ func TestRunHonorsMaxTurnsAsIterationCap(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	if !result.Incomplete {
-		t.Fatal("expected incomplete result when MaxTurns caps a failing run")
+		t.Fatal("expected incomplete result for a run that never succeeds")
 	}
 	var pipeline schemas.PipelineResult
 	if err := json.Unmarshal([]byte(result.FinalAnswer), &pipeline); err != nil {
@@ -1413,10 +1413,14 @@ func TestRunHonorsMaxTurnsAsIterationCap(t *testing.T) {
 	if pipeline.Status != "aborted" {
 		t.Fatalf("pipeline status = %s, want aborted", pipeline.Status)
 	}
+	maxIteration := 0
 	for _, record := range pipeline.Stages {
-		if record.Iteration > 1 {
-			t.Fatalf("found iteration %d despite MaxTurns=1", record.Iteration)
+		if record.Iteration > maxIteration {
+			maxIteration = record.Iteration
 		}
+	}
+	if maxIteration != defaultMaxIterations {
+		t.Fatalf("max pipeline iteration = %d, want %d despite MaxTurns=1", maxIteration, defaultMaxIterations)
 	}
 	if pipeline.AbortReason == nil || !strings.Contains(*pipeline.AbortReason, "Maximum iteration count reached") {
 		t.Fatalf("unexpected abort reason: %#v", pipeline.AbortReason)
@@ -1625,8 +1629,11 @@ func TestRunTerminalStageFailureIncludesOutputSummary(t *testing.T) {
 		t.Fatalf("abort reason = %#v, want terminal stage detail", result.AbortReason)
 	}
 	reason := *result.AbortReason
-	if !strings.HasPrefix(reason, "stage failed in iteration 1: ") || !strings.Contains(reason, `provider request error: {"detail":"Unsupported parameter: max_output_tokens"}`) {
-		t.Fatalf("abort reason = %q, want terminal stage detail", reason)
+	// MaxTurns=1 no longer suppresses stage-failure recovery, so the identical
+	// terminal failure is retried once and then reported as repeated. The
+	// terminal detail must still be preserved in the abort reason.
+	if !strings.Contains(reason, "repeated unchanged stage failure") || !strings.Contains(reason, `provider request error: {"detail":"Unsupported parameter: max_output_tokens"}`) {
+		t.Fatalf("abort reason = %q, want repeated unchanged stage failure with terminal detail", reason)
 	}
 }
 
@@ -1691,10 +1698,9 @@ func TestRunIterationLoopCapsChangingStageFailures(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		maxTurns int
-		want     int
 	}{
-		{name: "failure cap below max turns", maxTurns: 50, want: defaultMaxIterations},
-		{name: "max turns below failure cap", maxTurns: 3, want: 3},
+		{name: "max turns below pipeline cap", maxTurns: 3},
+		{name: "max turns above pipeline cap", maxTurns: 50},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stage := &changingFailureStage{}
@@ -1713,8 +1719,8 @@ func TestRunIterationLoopCapsChangingStageFailures(t *testing.T) {
 			if result.Status != "failed" {
 				t.Fatalf("status = %q, want failed", result.Status)
 			}
-			if stage.calls != tc.want {
-				t.Fatalf("changing failing stage calls = %d, want %d", stage.calls, tc.want)
+			if stage.calls != defaultMaxIterations {
+				t.Fatalf("changing failing stage calls = %d, want %d", stage.calls, defaultMaxIterations)
 			}
 		})
 	}
@@ -2167,8 +2173,8 @@ func TestRunEscalationNilResolverNonFatal(t *testing.T) {
 	if result.Status != "aborted" {
 		t.Fatalf("expected aborted after cycle with max iterations, got status=%q", result.Status)
 	}
-	if cs.calls != 3 {
-		t.Fatalf("stage calls = %d, want 3", cs.calls)
+	if cs.calls != defaultMaxIterations {
+		t.Fatalf("stage calls = %d, want %d at the default pipeline cap", cs.calls, defaultMaxIterations)
 	}
 }
 
@@ -2210,8 +2216,8 @@ func TestRunEscalationErrorResolverNonFatal(t *testing.T) {
 	if result.Status != "aborted" {
 		t.Fatalf("expected aborted after cycle with max iterations, got status=%q", result.Status)
 	}
-	if cs.calls != 3 {
-		t.Fatalf("stage calls = %d, want 3", cs.calls)
+	if cs.calls != defaultMaxIterations {
+		t.Fatalf("stage calls = %d, want %d at the default pipeline cap", cs.calls, defaultMaxIterations)
 	}
 }
 

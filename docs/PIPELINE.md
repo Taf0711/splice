@@ -236,8 +236,8 @@ This branch does not restore a workspace snapshot before it asks the user.
 The run stops after the hard iteration or token limit. The loop also checks a
 wall-time limit before each pass.
 
-The defaults are five passes and 600 seconds. `--max-turns` replaces the pass
-limit when it is positive.
+The defaults are five passes and 600 seconds. `--max-turns` does not change the
+pipeline pass limit.
 
 ## Interactive feature boundary
 
