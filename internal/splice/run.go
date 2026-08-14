@@ -29,6 +29,8 @@ const (
 	defaultMaxWallSeconds = 600
 )
 
+var errWallTimeExceeded = errors.New("wall time exceeded")
+
 type requestLedger struct {
 	records []schemas.PipelineUsageRecord
 }
@@ -263,7 +265,7 @@ func runIterationLoop(
 
 	history := []schemas.IterationState{}
 	allRecords := []schemas.StageRecord{}
-	wallStart := time.Now()
+	wallDeadline := time.Now().Add(time.Duration(maxWallSeconds) * time.Second)
 	var revisionContext *string
 	var priorFailure string
 
@@ -293,15 +295,22 @@ func runIterationLoop(
 	emitProgress(options, fmt.Sprintf("Starting pipeline run %s (tier %s)\n", runID, plan.Tier))
 
 	for i := 1; i <= maxIterations; i++ {
-		if time.Since(wallStart).Seconds() > float64(maxWallSeconds) {
+		if ctx.Err() != nil {
+			return schemas.PipelineResult{}, context.Canceled
+		}
+		if time.Now().After(wallDeadline) {
 			return finishWithReason(runID, plan, allRecords, "aborted", "wall time exceeded")
 		}
 
 		emitProgress(options, fmt.Sprintf("Starting pipeline iteration %d\n", i))
-		passRecords, passOutputs, completed, err := runPass(ctx, runID, i, plan, registry, provider, options, workDir, runner, revisionContext, mem)
+		passRecords, passOutputs, completed, err := runPass(ctx, runID, i, plan, registry, provider, options, workDir, runner, wallDeadline, revisionContext, mem)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 				return schemas.PipelineResult{}, context.Canceled
+			}
+			if errors.Is(err, errWallTimeExceeded) {
+				allRecords = append(allRecords, passRecords...)
+				return finishWithReason(runID, plan, allRecords, "aborted", "wall time exceeded")
 			}
 			return finishWithReason(runID, plan, allRecords, "failed", err.Error())
 		}
@@ -505,6 +514,7 @@ func runPass(
 	options agent.Options,
 	workDir string,
 	runner ToolRunner,
+	wallDeadline time.Time,
 	revisionContext *string,
 	mem MemoryStore,
 ) ([]schemas.StageRecord, []schemas.HarnessStageOutput, bool, error) {
@@ -519,6 +529,12 @@ func runPass(
 	}
 
 	for seq, stage := range plan.Stages {
+		if ctx.Err() != nil {
+			return records, outputs, false, context.Canceled
+		}
+		if !wallDeadline.IsZero() && time.Now().After(wallDeadline) {
+			return records, outputs, false, errWallTimeExceeded
+		}
 		stageName := stage.Name
 		agentStage, ok := registry[stageName]
 		if !ok {
