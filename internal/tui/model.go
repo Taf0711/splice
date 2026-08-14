@@ -748,9 +748,10 @@ type askUserRequestMsg struct {
 // pendingAskUserPrompt tracks an in-progress questionnaire rendered in the composer
 // region as a row of tabs — one per question plus a trailing Confirm tab. Questions
 // are answered in any order (Tab switches); the answer callback is invoked exactly
-// once when the user submits on the Confirm tab or dismisses (Esc). active is the
-// current tab (0..N-1 = questions, N = Confirm); states holds the per-question
-// picker/free-text state and committed answer. See ask_user_prompt.go.
+// once when the user submits on the Confirm tab. Esc while the questionnaire is
+// active cancels the whole run without invoking the callback (see cancelRun).
+// active is the current tab (0..N-1 = questions, N = Confirm); states holds the
+// per-question picker/free-text state and committed answer. See ask_user_prompt.go.
 type pendingAskUserPrompt struct {
 	request agent.AskUserRequest
 	answer  func([]string)
@@ -1396,12 +1397,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.transcriptDetailed = false
 				return m, nil
 			}
-			// Esc on an ask-user prompt: from the "type my own" free-text it steps
-			// back to the selector for that question; otherwise it cancels the
-			// questionnaire (not the run), delivering whatever answers were collected
-			// so the agent loop unblocks and degrades to its best-assumption path.
+			// Esc on an ask-user prompt cancels the whole active run immediately. It
+			// must not submit partial/empty answers and must not leave the agent
+			// running: cancelRun releases the run context (which unblocks the loop's
+			// OnAskUser), clears the questionnaire and run state, and writes the
+			// standard "Run cancelled." marker.
 			if m.pendingAskUser != nil {
-				return m.escapeAskUser()
+				m.clearComposer()
+				m.cancelRun()
+				return m, nil
 			}
 			if m.pendingSpecReview != nil {
 				return m.cancelSpecReview()

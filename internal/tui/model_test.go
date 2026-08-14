@@ -1371,12 +1371,12 @@ func TestEscCancelConfirmationDisarmsOnInterveningKey(t *testing.T) {
 	}
 }
 
-// TestEscCancelConfirmationDisarmsWhenStolenByAskUser: a mid-turn ask_user
-// prompt lands between the two Esc presses. The user's second Esc denies the
-// questionnaire (an earlier branch in the Esc handler), not a confirm, so it
-// must not leave cancelConfirmActive armed for a later, unrelated Esc to
-// silently cancel the run.
-func TestEscCancelConfirmationDisarmsWhenStolenByAskUser(t *testing.T) {
+// TestEscCancelConfirmationStolenByAskUserCancelsRun: a mid-turn ask_user prompt
+// lands between the two Esc presses. The second Esc is consumed by the ask-user
+// branch, which now cancels the whole run immediately (the questionnaire is not a
+// dismiss-and-keep-running surface); the run-cancel path clears the stale cancel
+// confirmation along with the run state.
+func TestEscCancelConfirmationStolenByAskUserCancelsRun(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	cancelled := false
 	m.pending = true
@@ -1398,20 +1398,14 @@ func TestEscCancelConfirmationDisarmsWhenStolenByAskUser(t *testing.T) {
 
 	updated, _ = next.Update(testKey(tea.KeyEsc))
 	next = updated.(model)
-	if cancelled {
-		t.Fatal("an Esc consumed by the ask-user prompt must not cancel the run")
+	if !cancelled {
+		t.Fatal("an Esc on the ask-user prompt must cancel the run")
+	}
+	if next.pending || next.pendingAskUser != nil {
+		t.Fatalf("cancelling must clear run and questionnaire, pending=%v prompt=%#v", next.pending, next.pendingAskUser)
 	}
 	if next.cancelConfirmActive {
-		t.Fatal("an Esc consumed by the ask-user prompt must disarm the stale cancel confirmation")
-	}
-
-	updated, _ = next.Update(testKey(tea.KeyEsc))
-	next = updated.(model)
-	if cancelled {
-		t.Fatal("the next Esc should arm a fresh confirmation, not immediately cancel")
-	}
-	if !next.cancelConfirmActive {
-		t.Fatal("the next Esc should arm a fresh confirmation")
+		t.Fatal("cancelling must clear the stale cancel confirmation")
 	}
 }
 

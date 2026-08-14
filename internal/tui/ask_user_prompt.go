@@ -207,24 +207,6 @@ func (m model) advanceAskUserTab() model {
 	return m.askUserSwitchTab(m.pendingAskUser.active + 1)
 }
 
-// escapeAskUser handles Esc: from a single-select "type your own" it steps back to
-// that question's picker; otherwise it dismisses the questionnaire, delivering
-// whatever has been answered so the agent loop unblocks (unanswered stay empty).
-func (m model) escapeAskUser() (tea.Model, tea.Cmd) {
-	pending := m.pendingAskUser
-	if pending == nil {
-		return m, nil
-	}
-	if question, state, ok := pending.activeQuestion(); ok && state.typing && !question.MultiSelect && len(question.Options) > 0 {
-		state.typing = false
-		state.typed = ""
-		state.cursor = clampAskUserCursor(state.cursor, askUserSelectableCount(question))
-		m.input.SetValue("")
-		return m, nil
-	}
-	return m.submitAskUser()
-}
-
 // submitAskUser delivers the committed answers (one per question, "" for any left
 // unanswered) through the loop's answer channel and restores the composer.
 func (m model) submitAskUser() (tea.Model, tea.Cmd) {

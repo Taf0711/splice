@@ -2,13 +2,17 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/tools"
+	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
 // testAskUserRequest is a two-question request used by model_test.go too.
@@ -166,9 +170,13 @@ func TestAskUserMultiSelectIsFreeTextWithSuggestions(t *testing.T) {
 	}
 }
 
-func TestAskUserTypeMyOwnEscReturnsToPicker(t *testing.T) {
+// TestAskUserTypeMyOwnEscCancelsRun: Esc from the "type your own" free-text is
+// not a back-step to the picker; it cancels the whole run immediately.
+func TestAskUserTypeMyOwnEscCancelsRun(t *testing.T) {
 	var answers [][]string
+	cancelled := false
 	next := newAskUserModel(t, askUserSingle([]string{"Postgres", "SQLite", "MySQL"}, "SQLite"), &answers)
+	next.runCancel = func() { cancelled = true }
 
 	for i := 0; i < 2; i++ { // to type-your-own
 		updated, _ := next.Update(testKey(tea.KeyDown))
@@ -178,24 +186,22 @@ func TestAskUserTypeMyOwnEscReturnsToPicker(t *testing.T) {
 	next = updated.(model)
 	next.input.SetValue("scratch")
 
-	updated, _ = next.Update(testKey(tea.KeyEsc)) // back to picker
+	updated, _ = next.Update(testKey(tea.KeyEsc))
 	next = updated.(model)
-	if next.pendingAskUser == nil {
-		t.Fatal("Esc from type-your-own must not dismiss the prompt")
+	if !cancelled {
+		t.Fatal("Esc from type-your-own must cancel the run")
 	}
-	if next.pendingAskUser.states[0].typing {
-		t.Fatal("Esc from type-your-own must return to the picker")
+	if next.pending || next.pendingAskUser != nil {
+		t.Fatalf("Esc must clear the run and questionnaire, pending=%v prompt=%#v", next.pending, next.pendingAskUser)
+	}
+	if next.composerValue() != "" {
+		t.Fatalf("Esc must clear the questionnaire answer, got %q", next.composerValue())
 	}
 	if len(answers) != 0 {
-		t.Fatalf("Esc back to the picker must not deliver answers, got %#v", answers)
+		t.Fatalf("Esc must not submit answers, got %#v", answers)
 	}
-	// Pick a real option from the picker.
-	updated, _ = next.Update(testKey(tea.KeyUp)) // 3 -> 2 (MySQL)
-	next = updated.(model)
-	updated, _ = next.Update(testKey(tea.KeyEnter))
-	next = updated.(model)
-	if len(answers) != 1 || answers[0][0] != "MySQL" {
-		t.Fatalf("expected [MySQL] after returning to picker, got %#v", answers)
+	if !transcriptContains(next.transcript, "Run cancelled.") {
+		t.Fatalf("Esc must append the Run cancelled marker: %#v", next.transcript)
 	}
 }
 
@@ -281,23 +287,135 @@ func TestAskUserTabSwitchesQuestions(t *testing.T) {
 	}
 }
 
-func TestAskUserEscDismissDeliversPartialAnswers(t *testing.T) {
+// TestAskUserEscCancelsRunDoesNotSubmitPartialAnswers: Esc on a mid-questionnaire
+// picker cancels the whole run; committed answers are never delivered.
+func TestAskUserEscCancelsRunDoesNotSubmitPartialAnswers(t *testing.T) {
 	var answers [][]string
+	cancelled := false
 	next := newAskUserModel(t, askUserTwoQuestions(), &answers)
+	next.runCancel = func() { cancelled = true }
 
-	// Answer Q1, advance to Q2, then Esc (Q2 is a picker, so Esc dismisses).
+	// Answer Q1, advance to Q2, then Esc (Q2 is a picker, so Esc cancels the run).
 	updated, _ := next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	updated, _ = next.Update(testKey(tea.KeyEsc))
 	next = updated.(model)
+	if !cancelled {
+		t.Fatal("Esc on a picker must cancel the run")
+	}
 	if next.pendingAskUser != nil {
-		t.Fatalf("Esc on a picker should dismiss, still pending: %#v", next.pendingAskUser)
+		t.Fatalf("Esc must clear the questionnaire, still pending: %#v", next.pendingAskUser)
 	}
-	if len(answers) != 1 || len(answers[0]) != 2 || answers[0][0] != "React" || answers[0][1] != "" {
-		t.Fatalf("expected partial [React, \"\"], got %#v", answers)
+	if len(answers) != 0 {
+		t.Fatalf("Esc must not deliver partial answers, got %#v", answers)
 	}
-	if !next.pending {
-		t.Fatal("dismiss cancels only the questionnaire; the run keeps running")
+	if next.pending {
+		t.Fatal("Esc must cancel the run, not keep it running")
+	}
+	if !transcriptContains(next.transcript, "Run cancelled.") {
+		t.Fatalf("Esc must append the Run cancelled marker: %#v", next.transcript)
+	}
+}
+
+// TestAskUserEscCancelsActiveRun: one Esc on an active questionnaire cancels the
+// whole run immediately. It must invoke the existing runCancel path (clearing
+// pending / pendingAskUser / active run state), never invoke the answer callback,
+// and append the standard "Run cancelled." transcript marker.
+func TestAskUserEscCancelsActiveRun(t *testing.T) {
+	var answers [][]string
+	cancelled := false
+	next := newAskUserModel(t, askUserTwoQuestions(), &answers)
+	next.runCancel = func() { cancelled = true }
+
+	updated, _ := next.Update(testKey(tea.KeyEsc))
+	next = updated.(model)
+
+	if !cancelled {
+		t.Fatal("Esc on an ask-user prompt must cancel the active run")
+	}
+	if next.pending {
+		t.Fatal("Esc must clear the pending run state")
+	}
+	if next.pendingAskUser != nil {
+		t.Fatalf("Esc must clear the questionnaire, still pending: %#v", next.pendingAskUser)
+	}
+	if next.activeRunID != 0 || next.runCancel != nil {
+		t.Fatalf("Esc must clear the active run state, got id=%d cancel=%v", next.activeRunID, next.runCancel)
+	}
+	if len(answers) != 0 {
+		t.Fatalf("Esc must not submit answers, got %#v", answers)
+	}
+	if !transcriptContains(next.transcript, "Run cancelled.") {
+		t.Fatalf("Esc must append the Run cancelled marker: %#v", next.transcript)
+	}
+}
+
+func TestAskUserEscUnblocksAgentRun(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewAskUserTool())
+	provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{{
+		{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "ask_user"},
+		{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"questions":[{"question":"Proceed?"}]}`},
+		{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+		{Type: zeroruntime.StreamEventDone},
+	}}}
+	messages := make(chan tea.Msg, 16)
+	runCtx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	m := newModel(context.Background(), Options{
+		Provider:     provider,
+		ProviderName: "test",
+		ModelName:    "test",
+		Registry:     registry,
+	})
+	m.pending = true
+	m.activeRunID = 7
+	m.runCancel = cancel
+	m.runtimeMessageSink = func(msg tea.Msg) { messages <- msg }
+
+	done := make(chan tea.Msg, 1)
+	go func() {
+		done <- m.runAgentWithOptions(7, runCtx, "ask", nil, tuiAgentRunOptions{runKind: tuiRunDesignConversation})()
+	}()
+
+	var request askUserRequestMsg
+	for request.answer == nil {
+		select {
+		case msg := <-messages:
+			if next, ok := msg.(askUserRequestMsg); ok {
+				request = next
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("agent did not request ask_user input")
+		}
+	}
+	answerCalled := false
+	request.answer = func([]string) { answerCalled = true }
+	updated, _ := m.Update(request)
+	next := updated.(model)
+	updated, _ = next.Update(testKey(tea.KeyEsc))
+	next = updated.(model)
+
+	select {
+	case msg := <-done:
+		response, ok := msg.(agentResponseMsg)
+		if !ok {
+			t.Fatalf("run result = %#v, want agentResponseMsg", msg)
+		}
+		if !errors.Is(response.err, context.Canceled) {
+			t.Fatalf("run error = %v, want context.Canceled", response.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Esc did not unblock the agent run")
+	}
+	if answerCalled {
+		t.Fatal("Esc must not invoke the ask_user answer callback")
+	}
+	if provider.calls != 1 {
+		t.Fatalf("provider calls = %d, want no turn after cancellation", provider.calls)
+	}
+	if next.pending || next.pendingAskUser != nil {
+		t.Fatalf("Esc must clear run and questionnaire state, pending=%v prompt=%#v", next.pending, next.pendingAskUser)
 	}
 }
 
@@ -313,7 +431,7 @@ func TestAskUserMultiQuestionShowsTabsAndOptions(t *testing.T) {
 		},
 	}, &answers)
 	view := next.View()
-	for _, want := range []string{"Framework", "TypeScript", "Confirm", "Which framework?", "React", "Vue"} {
+	for _, want := range []string{"Framework", "TypeScript", "Confirm", "Which framework?", "React", "Vue", "esc cancel run"} {
 		assertContains(t, view, want)
 	}
 }

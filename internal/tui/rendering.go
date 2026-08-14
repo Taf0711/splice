@@ -1322,7 +1322,7 @@ func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width
 			}
 		}
 		lines = append(lines, "")
-		lines = append(lines, fill(zeroTheme.faint).Render("⇆ tab · enter submit · esc dismiss"))
+		lines = append(lines, fill(zeroTheme.faint).Render("⇆ tab · enter submit · esc cancel run"))
 		return styledBlockFill(width, lines, zeroTheme.lineStrong, lipgloss.NewStyle())
 	}
 
@@ -1358,9 +1358,9 @@ func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width
 			lines = append(lines, "  "+fill(zeroTheme.muted).Render(typeOwn))
 		}
 		lines = append(lines, "")
-		footer := "↑↓ select · enter confirm · esc dismiss"
+		footer := "↑↓ select · enter confirm · esc cancel run"
 		if multi {
-			footer = "⇆ tab · ↑↓ select · enter confirm · esc dismiss"
+			footer = "⇆ tab · ↑↓ select · enter confirm · esc cancel run"
 		}
 		lines = append(lines, fill(zeroTheme.faint).Render(footer))
 		return styledBlockFill(width, lines, zeroTheme.lineStrong, lipgloss.NewStyle())
@@ -1384,12 +1384,9 @@ func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width
 		}
 	}
 	lines[len(lines)-1] += fill(zeroTheme.accent).Render("▌")
-	footer := "enter submit · esc dismiss"
-	switch {
-	case !question.MultiSelect && len(question.Options) > 0:
-		footer = "enter submit · esc back to options"
-	case multi:
-		footer = "⇆ tab · enter submit · esc dismiss"
+	footer := "enter submit · esc cancel run"
+	if multi {
+		footer = "⇆ tab · enter submit · esc cancel run"
 	}
 	lines = append(lines, fill(zeroTheme.faint).Render(footer))
 	return styledBlockFill(width, lines, zeroTheme.lineStrong, lipgloss.NewStyle())
