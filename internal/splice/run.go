@@ -298,7 +298,7 @@ func runIterationLoop(
 		if ctx.Err() != nil {
 			return schemas.PipelineResult{}, context.Canceled
 		}
-		if time.Now().After(wallDeadline) {
+		if !time.Now().Before(wallDeadline) {
 			return finishWithReason(runID, plan, allRecords, "aborted", "wall time exceeded")
 		}
 
@@ -532,7 +532,7 @@ func runPass(
 		if ctx.Err() != nil {
 			return records, outputs, false, context.Canceled
 		}
-		if !wallDeadline.IsZero() && time.Now().After(wallDeadline) {
+		if !wallDeadline.IsZero() && !time.Now().Before(wallDeadline) {
 			return records, outputs, false, errWallTimeExceeded
 		}
 		stageName := stage.Name
@@ -615,11 +615,27 @@ func runPass(
 			selection = agent.ModelSelection{}
 		}
 
+		// The stage deadline cannot exceed the pipeline wall deadline.
+		stageCtx := ctx
+		var cancelStage context.CancelFunc
+		if !wallDeadline.IsZero() {
+			stageCtx, cancelStage = context.WithDeadline(ctx, wallDeadline)
+		}
+
 		start := time.Now()
-		output, err := runStageWithContext(ctx, input, agentStage, iteration, selection, options, workDir, runner, mem)
+		output, err := runStageWithContext(stageCtx, input, agentStage, iteration, selection, options, workDir, runner, mem)
+		if cancelStage != nil {
+			cancelStage()
+		}
 		latencyMs := int(time.Since(start).Milliseconds())
 		emitProgress(options, fmt.Sprintf("[%s] stage finished\n", stageName))
-		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+		if ctx.Err() != nil {
+			return records, outputs, false, context.Canceled
+		}
+		if !wallDeadline.IsZero() && !time.Now().Before(wallDeadline) {
+			return records, outputs, false, errWallTimeExceeded
+		}
+		if errors.Is(err, context.Canceled) {
 			return records, outputs, false, context.Canceled
 		}
 

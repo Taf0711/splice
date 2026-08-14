@@ -522,6 +522,35 @@ func TestRunPassSkipsStagesAfterWallDeadline(t *testing.T) {
 	}
 }
 
+func TestRunPassStageCrossingWallDeadlineAborts(t *testing.T) {
+	started := false
+	stage := stageFunc(func(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options stages.StageOptions) (schemas.HarnessStageOutput, error) {
+		started = true
+		<-ctx.Done()
+		return schemas.HarnessStageOutput{}, context.Canceled
+	})
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		RequestIntent: "wall deadline crossing",
+		Stages:        []schemas.ExecutionStage{{Name: "blocker"}},
+	}
+	parentCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, _, _, err := runPass(parentCtx, "run-wall-cross", 1, plan, stageRegistry{
+		"blocker": stage,
+	}, runFakeProvider{}, agent.Options{}, t.TempDir(), nil, time.Now().Add(50*time.Millisecond), nil, nil)
+	if !started {
+		t.Fatal("stage did not start")
+	}
+	if parentCtx.Err() != nil {
+		t.Fatalf("parent context ended: %v", parentCtx.Err())
+	}
+	if !errors.Is(err, errWallTimeExceeded) {
+		t.Fatalf("err = %#v, want errWallTimeExceeded", err)
+	}
+}
+
 // captureRequestProvider records the last CompletionRequest and always returns the
 // provided submit_code tool call with no file changes.
 type captureRequestProvider struct {

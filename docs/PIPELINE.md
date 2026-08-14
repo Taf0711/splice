@@ -234,7 +234,7 @@ This branch does not restore a workspace snapshot before it asks the user.
 ### Stop
 
 The run stops after the hard iteration or token limit. The loop also checks a
-wall-time limit before each pass and stage.
+wall-time limit before each pass and stage. The limit bounds an active stage.
 
 The defaults are five passes and 600 seconds. `--max-turns` does not change the
 pipeline pass limit.
