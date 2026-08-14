@@ -71,11 +71,22 @@ Run `splice changes --help` before a command that changes Git state.
 | `splice sessions` | List lineage, preview rewind, rewind, compact, or prune. |
 | `splice search` | Search local session events. `splice find` is an alias. |
 | `splice spec` | Review and decide on saved specification drafts. |
-| `splice worktrees` | Prepare an isolated Git worktree. |
+| `splice worktrees` | Prepare or prune isolated Git worktrees. |
 | `splice usage` | Report token use and available cost estimates. |
 
 A plain one-shot run can use an ephemeral session. Ephemeral sessions do not
 appear in the default session list.
+
+`splice worktrees prepare` creates or reuses an isolated Git worktree.
+It locks the worktree and removes other worktrees that satisfy the prune rules.
+
+An `exec` run unlocks its worktree when the run stops. After manual work, use
+`git worktree unlock <path>` before reuse or removal.
+
+`splice worktrees prune` removes an unlocked and clean managed worktree only
+when its HEAD commit remains reachable from source HEAD or a `splice/*` branch.
+It reports all skipped managed worktrees and keeps them. Ignored files also
+keep a worktree in place.
 
 ## Manage extensions
 

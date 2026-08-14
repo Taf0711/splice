@@ -191,6 +191,8 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	runCtx, stopSignals := signalContext()
 	defer stopSignals()
 	var preparedWorktree worktrees.Result
+	worktreeLocked := false
+	unlockWarningWritten := false
 	if options.worktree {
 		preparedWorktree, err = deps.prepareWorktree(runCtx, worktrees.Options{
 			Cwd:     workspaceRoot,
@@ -201,8 +203,32 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		if err != nil {
 			return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 		}
+		worktreeLocked = preparedWorktree.Locked
 		workspaceRoot = preparedWorktree.Path
 	}
+	unlockPreparedWorktree := func(ctx context.Context) error {
+		if !worktreeLocked {
+			return nil
+		}
+		err := deps.unlockWorktree(ctx, worktrees.UnlockOptions{
+			RepoRoot: preparedWorktree.RepoRoot,
+			Path:     preparedWorktree.Path,
+		})
+		if err == nil {
+			worktreeLocked = false
+		}
+		return err
+	}
+	defer func() {
+		if !worktreeLocked {
+			return
+		}
+		unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := unlockPreparedWorktree(unlockCtx); err != nil && !unlockWarningWritten {
+			fmt.Fprintf(stderr, "[splice] WARNING: worktree remains locked at %s: %s\n", redactCLIString(preparedWorktree.Path), redactCLIString(err.Error()))
+		}
+	}()
 
 	registry := newCoreRegistry(workspaceRoot)
 	// Register the escalate_model tool only when the run opted into mid-run
@@ -920,6 +946,13 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			WorktreePath: preparedWorktree.Path,
 			Name:         preparedWorktree.Name,
 		})
+		unlockCtx, cancelUnlock := context.WithTimeout(context.Background(), 5*time.Second)
+		unlockErr := unlockPreparedWorktree(unlockCtx)
+		cancelUnlock()
+		if unlockErr != nil {
+			unlockWarningWritten = true
+			writer.warning(fmt.Sprintf("worktree unlock failed; %s remains locked: %s", redactCLIString(preparedWorktree.Path), redactCLIString(unlockErr.Error())))
+		}
 		if mergeErr != nil {
 			// The run succeeded and its work survives on the worktree branch, but
 			// the user asked for a merge that did not happen: fail loud.

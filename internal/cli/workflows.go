@@ -63,6 +63,9 @@ func runWorktrees(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		}
 		return exitSuccess
 	}
+	if command == "prune" {
+		return runWorktreesPrune(args, stdout, stderr, deps)
+	}
 	if command != "prepare" {
 		return writeExecUsageError(stderr, fmt.Sprintf("unknown worktrees command %q", command))
 	}
@@ -97,6 +100,41 @@ func runWorktrees(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		return exitSuccess
 	}
 	if _, err := fmt.Fprintln(stdout, formatWorktreeResult(safeResult)); err != nil {
+		return exitCrash
+	}
+	return exitSuccess
+}
+
+func runWorktreesPrune(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	options, help, err := parsePruneCommandArgs(args)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	if help {
+		if err := writeWorktreesHelp(stdout); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	workspaceRoot, err := resolveWorkspaceRoot(options.cwd, deps)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	result, err := deps.pruneWorktrees(context.Background(), worktrees.PruneOptions{
+		Cwd:     workspaceRoot,
+		BaseDir: options.baseDir,
+	})
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	safeResult := redactPruneResult(result)
+	if options.json {
+		if err := writePrettyJSON(stdout, safeResult); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if _, err := fmt.Fprintln(stdout, formatWorktreePruneResult(safeResult)); err != nil {
 		return exitCrash
 	}
 	return exitSuccess
@@ -345,6 +383,42 @@ func setWorktreeName(options *worktreeCommandOptions, value string) error {
 	return nil
 }
 
+func parsePruneCommandArgs(args []string) (worktreeCommandOptions, bool, error) {
+	options := worktreeCommandOptions{}
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		switch {
+		case arg == "-h" || arg == "--help" || arg == "help":
+			return options, true, nil
+		case arg == "--json":
+			options.json = true
+		case arg == "--dir":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.baseDir = value
+			index = next
+		case strings.HasPrefix(arg, "--dir="):
+			options.baseDir = strings.TrimSpace(strings.TrimPrefix(arg, "--dir="))
+		case arg == "-C" || arg == "--cwd":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.cwd = value
+			index = next
+		case strings.HasPrefix(arg, "--cwd="):
+			options.cwd = strings.TrimSpace(strings.TrimPrefix(arg, "--cwd="))
+		case strings.HasPrefix(arg, "-"):
+			return options, false, execUsageError{fmt.Sprintf("unknown worktrees prune flag %q", arg)}
+		default:
+			return options, false, execUsageError{"no positional arguments allowed"}
+		}
+	}
+	return options, false, nil
+}
+
 func parseVerifyCommandArgs(args []string) (verifyCommandOptions, bool, error) {
 	options := verifyCommandOptions{}
 	for index := 0; index < len(args); index++ {
@@ -564,6 +638,23 @@ func redactWorktreeResult(result worktrees.Result) worktrees.Result {
 	result.RepoRoot = redactCLIString(result.RepoRoot)
 	result.SourceBranch = redactCLIString(result.SourceBranch)
 	result.SourceCommit = redactCLIString(result.SourceCommit)
+	if result.Prune != nil {
+		pruned := redactPruneResult(*result.Prune)
+		result.Prune = &pruned
+	}
+	return result
+}
+
+func redactPruneResult(result worktrees.PruneResult) worktrees.PruneResult {
+	result.Removed = append([]string{}, result.Removed...)
+	for index := range result.Removed {
+		result.Removed[index] = redactCLIString(result.Removed[index])
+	}
+	result.Skipped = append([]worktrees.PruneSkip{}, result.Skipped...)
+	for index := range result.Skipped {
+		result.Skipped[index].Path = redactCLIString(result.Skipped[index].Path)
+		result.Skipped[index].Reason = redactCLIString(result.Skipped[index].Reason)
+	}
 	return result
 }
 
@@ -656,6 +747,40 @@ func formatWorktreeResult(result worktrees.Result) string {
 	}
 	if result.Reused {
 		lines = append(lines, "reused: true")
+	}
+	if result.Locked {
+		lines = append(lines, "locked: true")
+	}
+	if result.Prune != nil {
+		lines = append(lines, pruneResultTextLines(*result.Prune)...)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func pruneResultTextLines(result worktrees.PruneResult) []string {
+	return append([]string{"pruned:"}, pruneResultEntries(result)...)
+}
+
+func pruneResultEntries(result worktrees.PruneResult) []string {
+	lines := []string{}
+	for _, path := range result.Removed {
+		lines = append(lines, "  removed: "+path)
+	}
+	for _, skip := range result.Skipped {
+		lines = append(lines, "  skipped: "+skip.Path+" ("+skip.Reason+")")
+	}
+	if len(lines) == 0 {
+		return []string{"  (none)"}
+	}
+	return lines
+}
+
+func formatWorktreePruneResult(result worktrees.PruneResult) string {
+	lines := []string{"Splice worktrees pruned"}
+	if result.IsEmpty() {
+		lines = append(lines, "  (none)")
+	} else {
+		lines = append(lines, pruneResultEntries(result)...)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -786,11 +911,22 @@ func formatCommitResult(result zerogit.CommitResult) string {
 func writeWorktreesHelp(w io.Writer) error {
 	_, err := fmt.Fprint(w, `Usage:
   splice worktrees prepare [flags] [name]
+  splice worktrees prune [flags]
 
-Prepares an isolated git worktree for a Splice task.
+Prepares or prunes isolated git worktrees for Splice tasks.
 
-Flags:
+Commands:
+  prepare   Create or reuse and lock a worktree
+  prune     Remove safe managed worktrees and report skipped ones
+
+Flags for prepare:
       --name <name>       Worktree name; defaults to a timestamped task name
+      --dir <path>        Base directory for Splice worktrees
+  -C, --cwd <path>        Source repository directory
+      --json              Print JSON output
+  -h, --help              Show this help
+
+Flags for prune:
       --dir <path>        Base directory for Splice worktrees
   -C, --cwd <path>        Source repository directory
       --json              Print JSON output

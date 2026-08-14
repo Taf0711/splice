@@ -154,6 +154,161 @@ func TestRunWorktreesPrepareRejectsDuplicateNames(t *testing.T) {
 	}
 }
 
+func TestRunWorktreesPruneTextAndJSON(t *testing.T) {
+	cwd := t.TempDir()
+	base := t.TempDir()
+	removedPath := filepath.Join(base, "splice-worktree-abc", "removed-one")
+	keptPath := filepath.Join(base, "splice-worktree-abc", "kept")
+
+	for _, tc := range []struct {
+		args []string
+		json bool
+	}{
+		{args: []string{"worktrees", "prune", "--dir", base}},
+		{args: []string{"worktrees", "prune", "--dir=" + base, "--json"}, json: true},
+	} {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
+			var pruneOptions worktrees.PruneOptions
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			exitCode := runWithDeps(tc.args, &stdout, &stderr, appDeps{
+				getwd: func() (string, error) { return cwd, nil },
+				pruneWorktrees: func(ctx context.Context, options worktrees.PruneOptions) (worktrees.PruneResult, error) {
+					pruneOptions = options
+					return worktrees.PruneResult{
+						Removed: []string{removedPath},
+						Skipped: []worktrees.PruneSkip{{Path: keptPath, Reason: "locked"}},
+					}, nil
+				},
+			})
+
+			if exitCode != exitSuccess {
+				t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+			}
+			if pruneOptions.Cwd != cwd || pruneOptions.BaseDir != base {
+				t.Fatalf("unexpected prune options: %#v", pruneOptions)
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("expected empty stderr, got %q", stderr.String())
+			}
+			if tc.json {
+				var decoded worktrees.PruneResult
+				if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
+					t.Fatalf("decode prune JSON: %v\n%s", err, stdout.String())
+				}
+				if len(decoded.Removed) != 1 || decoded.Removed[0] != removedPath {
+					t.Fatalf("unexpected removed list: %v", decoded.Removed)
+				}
+				if len(decoded.Skipped) != 1 || decoded.Skipped[0].Path != keptPath || decoded.Skipped[0].Reason != "locked" {
+					t.Fatalf("unexpected skipped list: %v", decoded.Skipped)
+				}
+			} else {
+				if !strings.Contains(stdout.String(), "removed: "+removedPath) {
+					t.Fatalf("expected removed path in output, got %q", stdout.String())
+				}
+				if !strings.Contains(stdout.String(), "skipped: "+keptPath+" (locked)") {
+					t.Fatalf("expected skipped path and reason in output, got %q", stdout.String())
+				}
+			}
+		})
+	}
+}
+
+func TestRunWorktreesPruneWiresCwdFlag(t *testing.T) {
+	target := t.TempDir()
+	var pruneOptions worktrees.PruneOptions
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"worktrees", "prune", "-C", target}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return t.TempDir(), nil },
+		pruneWorktrees: func(ctx context.Context, options worktrees.PruneOptions) (worktrees.PruneResult, error) {
+			pruneOptions = options
+			return worktrees.PruneResult{}, nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if pruneOptions.Cwd != target {
+		t.Fatalf("Cwd = %q, want %q", pruneOptions.Cwd, target)
+	}
+}
+
+func TestRunWorktreesPruneRedactsPathsAndReasons(t *testing.T) {
+	secret := "sk-proj-abcdefghijklmnopqrstuvwxyz"
+	cwd := filepath.Join(t.TempDir(), secret, "repo")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	removedPath := filepath.Join(t.TempDir(), secret, "removed")
+	keptPath := filepath.Join(t.TempDir(), secret, "kept")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"worktrees", "prune"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		pruneWorktrees: func(context.Context, worktrees.PruneOptions) (worktrees.PruneResult, error) {
+			return worktrees.PruneResult{
+				Removed: []string{removedPath},
+				Skipped: []worktrees.PruneSkip{{Path: keptPath, Reason: "remove: " + secret}},
+			}, nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if strings.Contains(stdout.String(), secret) {
+		t.Fatalf("prune output leaked secret: %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), redaction.RedactedSecret) {
+		t.Fatalf("expected redaction marker in prune output, got %q", stdout.String())
+	}
+}
+
+func TestRunWorktreesPruneRejectsPositionalArgs(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"worktrees", "prune", "extra"}, &stdout, &stderr, appDeps{
+		pruneWorktrees: func(context.Context, worktrees.PruneOptions) (worktrees.PruneResult, error) {
+			t.Fatal("pruneWorktrees should not be called for invalid flags")
+			return worktrees.PruneResult{}, nil
+		},
+	})
+
+	if exitCode != exitUsage {
+		t.Fatalf("expected usage exit %d, got %d", exitUsage, exitCode)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout, got %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "no positional arguments") {
+		t.Fatalf("expected positional rejection error, got %q", stderr.String())
+	}
+}
+
+func TestRunWorktreesPruneTopLevelErrorFailsLoud(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"worktrees", "prune"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return t.TempDir(), nil },
+		pruneWorktrees: func(context.Context, worktrees.PruneOptions) (worktrees.PruneResult, error) {
+			return worktrees.PruneResult{}, errors.New("not a git repository")
+		},
+	})
+
+	if exitCode != exitUsage {
+		t.Fatalf("expected usage exit %d, got %d", exitUsage, exitCode)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout, got %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "not a git repository") {
+		t.Fatalf("expected top-level prune error on stderr, got %q", stderr.String())
+	}
+}
+
 func TestRunVerifyTextAndJSON(t *testing.T) {
 	cwd := t.TempDir()
 	plan := verify.Plan{Root: cwd, Checks: []verify.Check{{ID: "go.test", Name: "Go tests", Command: []string{"go", "test", "./..."}}}}
@@ -695,6 +850,7 @@ func TestRunExecWorktreeMergeBackOnSuccess(t *testing.T) {
 	worktreeDir := t.TempDir()
 	initTestGitWorktree(t, root, worktreeDir)
 	var mergeOptions worktrees.MergeBackOptions
+	var unlockOptions worktrees.UnlockOptions
 	var removedOptions worktrees.RemoveOptions
 
 	var stdout bytes.Buffer
@@ -702,7 +858,7 @@ func TestRunExecWorktreeMergeBackOnSuccess(t *testing.T) {
 	exitCode := runWithDeps([]string{"exec", "--worktree", "task-a", "--merge-back", "hello"}, &stdout, &stderr, appDeps{
 		getwd: func() (string, error) { return root, nil },
 		prepareWorktree: func(ctx context.Context, options worktrees.Options) (worktrees.Result, error) {
-			return worktrees.Result{Name: "task-a", Path: worktreeDir, RepoRoot: root, SourceBranch: "main", SourceCommit: "abc1234"}, nil
+			return worktrees.Result{Name: "task-a", Path: worktreeDir, RepoRoot: root, SourceBranch: "main", SourceCommit: "abc1234", Locked: true}, nil
 		},
 		mergeBackWorktree: func(ctx context.Context, options worktrees.MergeBackOptions) (worktrees.MergeBackResult, error) {
 			mergeOptions = options
@@ -713,7 +869,14 @@ func TestRunExecWorktreeMergeBackOnSuccess(t *testing.T) {
 				Message:   "merged splice/task-a (commit fedcba9876)",
 			}, nil
 		},
+		unlockWorktree: func(ctx context.Context, options worktrees.UnlockOptions) error {
+			unlockOptions = options
+			return nil
+		},
 		removeWorktree: func(ctx context.Context, options worktrees.RemoveOptions) error {
+			if unlockOptions.Path == "" {
+				t.Fatal("removeWorktree called before unlockWorktree")
+			}
 			removedOptions = options
 			return nil
 		},
@@ -730,6 +893,9 @@ func TestRunExecWorktreeMergeBackOnSuccess(t *testing.T) {
 	}
 	if mergeOptions.RepoRoot != root || mergeOptions.WorktreePath != worktreeDir || mergeOptions.Name != "task-a" {
 		t.Fatalf("unexpected merge-back options: %#v", mergeOptions)
+	}
+	if unlockOptions.RepoRoot != root || unlockOptions.Path != worktreeDir {
+		t.Fatalf("unexpected unlock options: %#v", unlockOptions)
 	}
 	if removedOptions.RepoRoot != root || removedOptions.Path != worktreeDir {
 		t.Fatalf("unexpected cleanup options: %#v", removedOptions)

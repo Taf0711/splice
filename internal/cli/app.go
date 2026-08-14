@@ -92,6 +92,8 @@ type appDeps struct {
 	prepareWorktree        func(context.Context, worktrees.Options) (worktrees.Result, error)
 	mergeBackWorktree      func(context.Context, worktrees.MergeBackOptions) (worktrees.MergeBackResult, error)
 	removeWorktree         func(context.Context, worktrees.RemoveOptions) error
+	unlockWorktree         func(context.Context, worktrees.UnlockOptions) error
+	pruneWorktrees         func(context.Context, worktrees.PruneOptions) (worktrees.PruneResult, error)
 	resolveMemory          func(context.Context) (*memd.Client, error)
 	detectVerifyPlan       func(string) (verify.Plan, error)
 	runVerify              func(context.Context, verify.Plan, verify.RunOptions) verify.Report
@@ -213,6 +215,8 @@ func defaultAppDeps() appDeps {
 		prepareWorktree:   worktrees.Prepare,
 		mergeBackWorktree: worktrees.MergeBack,
 		removeWorktree:    worktrees.Remove,
+		unlockWorktree:    worktrees.Unlock,
+		pruneWorktrees:    worktrees.Prune,
 		resolveMemory:     memd.Resolve,
 		detectVerifyPlan:  verify.DetectPlan,
 		runVerify:         verify.Run,
@@ -599,6 +603,12 @@ func fillAppDeps(deps appDeps) appDeps {
 	}
 	if deps.removeWorktree == nil {
 		deps.removeWorktree = defaults.removeWorktree
+	}
+	if deps.unlockWorktree == nil {
+		deps.unlockWorktree = defaults.unlockWorktree
+	}
+	if deps.pruneWorktrees == nil {
+		deps.pruneWorktrees = defaults.pruneWorktrees
 	}
 	if deps.detectVerifyPlan == nil {
 		deps.detectVerifyPlan = defaults.detectVerifyPlan
@@ -1327,7 +1337,7 @@ Commands:
   auth       Log in to model providers via OAuth
   sandbox    Inspect sandbox policy and persistent grants
   update     Check for Splice CLI updates
-  worktrees  Prepare isolated git worktrees
+  worktrees  Prepare or prune isolated git worktrees
   verify     Detect and run local verification checks
   eval       Validate offline agent eval suites
   changes    Inspect and commit local git changes

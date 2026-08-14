@@ -48,7 +48,7 @@ func TestDefaultRunGitSeparatesStdoutAndStderr(t *testing.T) {
 
 func TestPrepareCreatesDetachedGitWorktree(t *testing.T) {
 	root := t.TempDir()
-	base := t.TempDir()
+	base := resolvedPath(t, t.TempDir())
 	runner := &fakeRunner{
 		results: []CommandResult{
 			{Stdout: root + "\n"},
@@ -78,14 +78,18 @@ func TestPrepareCreatesDetachedGitWorktree(t *testing.T) {
 	if !strings.HasPrefix(result.Path, filepath.Join(base, "splice-worktree-")) {
 		t.Fatalf("Path = %q, want under base %q", result.Path, base)
 	}
-	if got := runner.commandLine(3); got != "git worktree add --detach "+result.Path+" HEAD" {
-		t.Fatalf("git worktree command = %q", got)
+	if !result.Locked {
+		t.Fatal("Locked = false, want true")
+	}
+	wantCommand := "git worktree add --detach --lock --reason " + activeWorktreeLockReason + " " + result.Path + " HEAD"
+	if got := runner.commandLine(3); got != wantCommand {
+		t.Fatalf("git worktree command = %q, want %q", got, wantCommand)
 	}
 }
 
 func TestPrepareReusesExistingGitWorktree(t *testing.T) {
 	root := t.TempDir()
-	base := t.TempDir()
+	base := resolvedPath(t, t.TempDir())
 	sourceGit := filepath.Join(root, ".git")
 	if err := os.MkdirAll(sourceGit, 0o700); err != nil {
 		t.Fatal(err)
@@ -101,6 +105,10 @@ func TestPrepareReusesExistingGitWorktree(t *testing.T) {
 			{Stdout: "abc1234\n"},
 			{Stdout: sourceGit + "\n"},
 			{Stdout: sourceGit + "\n"},
+			{},
+			{Stdout: "headsha1\n"},
+			{},
+			{},
 		},
 	}
 
@@ -114,20 +122,20 @@ func TestPrepareReusesExistingGitWorktree(t *testing.T) {
 		t.Fatalf("Prepare returned error: %v", err)
 	}
 
-	if !result.Reused {
-		t.Fatalf("Reused = false, want true")
+	if !result.Reused || !result.Locked {
+		t.Fatalf("expected reused and locked result, got %#v", result)
 	}
 	if result.Path != existing {
 		t.Fatalf("Path = %q, want existing %q", result.Path, existing)
 	}
-	if len(runner.calls) != 5 {
+	if len(runner.calls) != 9 {
 		t.Fatalf("expected metadata git calls only, got %#v", runner.calls)
 	}
 }
 
 func TestPrepareRejectsExistingWorktreeFromDifferentRepo(t *testing.T) {
 	root := t.TempDir()
-	base := t.TempDir()
+	base := resolvedPath(t, t.TempDir())
 	sourceGit := filepath.Join(root, ".git")
 	otherGit := filepath.Join(t.TempDir(), ".git")
 	for _, dir := range []string{sourceGit, otherGit} {
@@ -162,7 +170,7 @@ func TestPrepareRejectsExistingWorktreeFromDifferentRepo(t *testing.T) {
 
 func TestPrepareValidatesNameAndExistingDirectory(t *testing.T) {
 	root := t.TempDir()
-	base := t.TempDir()
+	base := resolvedPath(t, t.TempDir())
 	runner := &fakeRunner{
 		results: []CommandResult{
 			{Stdout: root + "\n"},
@@ -184,6 +192,16 @@ func TestPrepareValidatesNameAndExistingDirectory(t *testing.T) {
 	}
 	if _, err := Prepare(context.Background(), Options{Cwd: root, Name: "blocked", BaseDir: base, RunGit: runner.Run}); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("expected non-empty directory error, got %v", err)
+	}
+}
+
+func TestInspectTargetRejectsSymlink(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "target")
+	if err := os.Symlink(t.TempDir(), target); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := inspectTarget(target); err == nil || !strings.Contains(err.Error(), "not a real directory") {
+		t.Fatalf("expected symlink rejection, got %v", err)
 	}
 }
 
@@ -406,6 +424,220 @@ func TestRemoveDirtyWorktreeFailsAndPreservesData(t *testing.T) {
 	}
 }
 
+func TestRemoveNonzeroGitExitFails(t *testing.T) {
+	runner := &fakeRunner{results: []CommandResult{{}, {ExitCode: 128, Stderr: "remove blocked"}}}
+	err := Remove(context.Background(), RemoveOptions{
+		RepoRoot: t.TempDir(),
+		Path:     t.TempDir(),
+		RunGit:   runner.Run,
+	})
+	if err == nil || !strings.Contains(err.Error(), "remove blocked") {
+		t.Fatalf("expected nonzero remove failure, got %v", err)
+	}
+}
+
+func TestRemoveIgnoredFileFailsAndPreservesData(t *testing.T) {
+	root, worktree := newMergeBackFixture(t)
+	if err := os.WriteFile(filepath.Join(root, ".git", "info", "exclude"), []byte("ignored.txt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ignored := filepath.Join(worktree, "ignored.txt")
+	if err := os.WriteFile(ignored, []byte("local data\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Remove(context.Background(), RemoveOptions{RepoRoot: root, Path: worktree}); err == nil || !strings.Contains(err.Error(), "ignored files remain") {
+		t.Fatalf("expected ignored-file refusal, got %v", err)
+	}
+	if data, err := os.ReadFile(ignored); err != nil || string(data) != "local data\n" {
+		t.Fatalf("ignored data was lost: %q, %v", data, err)
+	}
+}
+
+// addPruneWorktree registers a detached worktree under path and configures a
+// committer identity inside it so the test can make commits there.
+func addPruneWorktree(t *testing.T, root, path string) string {
+	t.Helper()
+	mustGit(t, root, "worktree", "add", "--detach", path, "HEAD")
+	mustGit(t, path, "config", "user.name", "splice-test")
+	mustGit(t, path, "config", "user.email", "splice-test@local")
+	return path
+}
+
+func TestPruneRemovesOnlySafeManagedWorktrees(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	root := resolvedPath(t, t.TempDir())
+	base := resolvedPath(t, t.TempDir())
+	mustGit(t, root, "init", "-b", "main")
+	mustGit(t, root, "config", "user.name", "splice-test")
+	mustGit(t, root, "config", "user.email", "splice-test@local")
+	if err := os.WriteFile(filepath.Join(root, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, root, "add", "-A")
+	mustGit(t, root, "commit", "-m", "base")
+
+	repoDir := filepath.Join(base, "splice-worktree-"+repoKey(root))
+	if err := os.MkdirAll(repoDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// Clean and reachable from source HEAD: removed.
+	safeSource := addPruneWorktree(t, root, filepath.Join(repoDir, "safe-source"))
+
+	// Clean and reachable from a surviving splice branch: removed.
+	spliceWT := addPruneWorktree(t, root, filepath.Join(repoDir, "splice-done"))
+	if err := os.WriteFile(filepath.Join(spliceWT, "splice.txt"), []byte("work\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, spliceWT, "add", "-A")
+	mustGit(t, spliceWT, "commit", "-m", "splice work")
+	spliceHead := strings.TrimSpace(mustGit(t, spliceWT, "rev-parse", "HEAD"))
+	mustGit(t, root, "branch", "-f", "splice/done", spliceHead)
+
+	// Dirty: kept and reported.
+	dirty := addPruneWorktree(t, root, filepath.Join(repoDir, "dirty"))
+	if err := os.WriteFile(filepath.Join(dirty, "uncommitted.txt"), []byte("dirty\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Clean but unreachable from source or splice branches: kept and reported.
+	unreachable := addPruneWorktree(t, root, filepath.Join(repoDir, "unreachable"))
+	if err := os.WriteFile(filepath.Join(unreachable, "lost.txt"), []byte("lost\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, unreachable, "add", "-A")
+	mustGit(t, unreachable, "commit", "-m", "orphan work")
+
+	// Locked: kept and reported.
+	locked := addPruneWorktree(t, root, filepath.Join(repoDir, "locked"))
+	mustGit(t, root, "worktree", "lock", locked)
+
+	// Clean but outside the managed directory: ignored entirely.
+	outside := addPruneWorktree(t, root, filepath.Join(t.TempDir(), "outside"))
+
+	result, err := Prune(context.Background(), PruneOptions{Cwd: root, BaseDir: base})
+	if err != nil {
+		t.Fatalf("Prune returned error: %v", err)
+	}
+
+	removed := make(map[string]bool, len(result.Removed))
+	for _, path := range result.Removed {
+		removed[filepath.Clean(path)] = true
+	}
+	if !removed[filepath.Clean(safeSource)] || !removed[filepath.Clean(spliceWT)] {
+		t.Fatalf("removed = %v, want %q and %q", result.Removed, safeSource, spliceWT)
+	}
+	if len(result.Removed) != 2 {
+		t.Fatalf("removed = %v, want exactly 2 entries", result.Removed)
+	}
+
+	skipped := make(map[string]string, len(result.Skipped))
+	for _, skip := range result.Skipped {
+		skipped[filepath.Clean(skip.Path)] = skip.Reason
+	}
+	for path, wantReason := range map[string]string{
+		dirty:       "not saved",
+		unreachable: "not reachable",
+		locked:      "locked",
+	} {
+		reason, ok := skipped[filepath.Clean(path)]
+		if !ok || !strings.Contains(reason, wantReason) {
+			t.Fatalf("skipped[%q] = %q, want reason containing %q", path, reason, wantReason)
+		}
+	}
+	if _, ok := skipped[filepath.Clean(outside)]; ok {
+		t.Fatal("outside-managed worktree appeared in the skipped report")
+	}
+
+	for _, path := range []string{safeSource, spliceWT} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("removed worktree %q still exists: %v", path, err)
+		}
+	}
+	for _, path := range []string{dirty, unreachable, locked, outside} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("kept worktree %q is missing: %v", path, err)
+		}
+	}
+	if listed := mustGit(t, root, "worktree", "list", "--porcelain"); strings.Contains(listed, safeSource) || strings.Contains(listed, spliceWT) {
+		t.Fatalf("removed worktrees are still registered: %q", listed)
+	}
+	if branch := mustGit(t, root, "branch", "--list", "splice/done"); strings.TrimSpace(branch) == "" {
+		t.Fatal("splice/done branch was deleted")
+	}
+}
+
+func TestPrepareSweepsStaleManagedWorktreesButKeepsRequestedTarget(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	root := resolvedPath(t, t.TempDir())
+	base := resolvedPath(t, t.TempDir())
+	mustGit(t, root, "init", "-b", "main")
+	mustGit(t, root, "config", "user.name", "splice-test")
+	mustGit(t, root, "config", "user.email", "splice-test@local")
+	if err := os.WriteFile(filepath.Join(root, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, root, "add", "-A")
+	mustGit(t, root, "commit", "-m", "base")
+
+	repoDir := filepath.Join(base, "splice-worktree-"+repoKey(root))
+	if err := os.MkdirAll(repoDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale := addPruneWorktree(t, root, filepath.Join(repoDir, "stale"))
+	target := addPruneWorktree(t, root, filepath.Join(repoDir, "target"))
+
+	result, err := Prepare(context.Background(), Options{Cwd: root, Name: "target", BaseDir: base})
+	if err != nil {
+		t.Fatalf("Prepare returned error: %v", err)
+	}
+	if !result.Reused || !result.Locked {
+		t.Fatalf("expected reused and locked result, got %#v", result)
+	}
+	if result.Prune == nil {
+		t.Fatal("expected a non-nil prune sweep report on Prepare")
+	}
+	removed := make(map[string]bool, len(result.Prune.Removed))
+	for _, path := range result.Prune.Removed {
+		removed[filepath.Clean(path)] = true
+	}
+	if !removed[filepath.Clean(stale)] {
+		t.Fatalf("sweep removed = %v, want %q", result.Prune.Removed, stale)
+	}
+	if removed[filepath.Clean(target)] {
+		t.Fatalf("sweep removed the requested target %q", target)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale worktree %q still exists after sweep: %v", stale, err)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("requested target %q was removed: %v", target, err)
+	}
+
+	activeSweep, err := Prune(context.Background(), PruneOptions{Cwd: root, BaseDir: base})
+	if err != nil {
+		t.Fatalf("Prune active target: %v", err)
+	}
+	if len(activeSweep.Skipped) != 1 || filepath.Clean(activeSweep.Skipped[0].Path) != filepath.Clean(target) || activeSweep.Skipped[0].Reason != "locked" {
+		t.Fatalf("active sweep = %#v, want locked target", activeSweep)
+	}
+	if err := Unlock(context.Background(), UnlockOptions{RepoRoot: root, Path: target}); err != nil {
+		t.Fatalf("Unlock target: %v", err)
+	}
+	releasedSweep, err := Prune(context.Background(), PruneOptions{Cwd: root, BaseDir: base})
+	if err != nil {
+		t.Fatalf("Prune released target: %v", err)
+	}
+	if len(releasedSweep.Removed) != 1 || filepath.Clean(releasedSweep.Removed[0]) != filepath.Clean(target) {
+		t.Fatalf("released sweep = %#v, want removed target", releasedSweep)
+	}
+}
+
 // newMergeBackFixture creates a real git repo with one commit, a shared file,
 // and a detached worktree, both with committer identity configured.
 func newMergeBackFixture(t *testing.T) (string, string) {
@@ -428,6 +660,15 @@ func newMergeBackFixture(t *testing.T) (string, string) {
 	mustGit(t, worktree, "config", "user.name", "splice-test")
 	mustGit(t, worktree, "config", "user.email", "splice-test@local")
 	return root, worktree
+}
+
+func resolvedPath(t *testing.T, path string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("resolve path %q: %v", path, err)
+	}
+	return resolved
 }
 
 func mustGit(t *testing.T, dir string, args ...string) string {

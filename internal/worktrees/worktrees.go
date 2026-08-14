@@ -30,15 +30,19 @@ type Options struct {
 }
 
 type Result struct {
-	Name         string `json:"name"`
-	Path         string `json:"path"`
-	RepoRoot     string `json:"repoRoot"`
-	SourceBranch string `json:"sourceBranch,omitempty"`
-	SourceCommit string `json:"sourceCommit,omitempty"`
-	Reused       bool   `json:"reused"`
+	Name         string       `json:"name"`
+	Path         string       `json:"path"`
+	RepoRoot     string       `json:"repoRoot"`
+	SourceBranch string       `json:"sourceBranch,omitempty"`
+	SourceCommit string       `json:"sourceCommit,omitempty"`
+	Reused       bool         `json:"reused"`
+	Locked       bool         `json:"locked,omitempty"`
+	Prune        *PruneResult `json:"prune,omitempty"`
 }
 
 var worktreeNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$`)
+
+const activeWorktreeLockReason = "Splice active worktree"
 
 func Prepare(ctx context.Context, options Options) (Result, error) {
 	cwd, err := resolveCwd(options.Cwd)
@@ -80,6 +84,13 @@ func Prepare(ctx context.Context, options Options) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("resolve worktree dir: %w", err)
 	}
+	if err := os.MkdirAll(baseDir, 0o700); err != nil {
+		return Result{}, fmt.Errorf("create worktree base directory: %w", err)
+	}
+	baseDir, err = filepath.EvalSymlinks(baseDir)
+	if err != nil {
+		return Result{}, fmt.Errorf("resolve worktree base directory: %w", err)
+	}
 
 	repoDir := filepath.Join(baseDir, "splice-worktree-"+repoKey(repoRoot))
 	target := filepath.Join(repoDir, name)
@@ -102,13 +113,31 @@ func Prepare(ctx context.Context, options Options) (Result, error) {
 		if !sameRepo {
 			return Result{}, fmt.Errorf("worktree path already exists for a different git repository: %s", target)
 		}
+		if err := lockWorktree(ctx, runGit, repoRoot, target); err != nil {
+			return Result{}, fmt.Errorf("lock existing worktree: %w", err)
+		}
+		result.Locked = true
+	}
+	pruneResult, err := pruneRepo(ctx, runGit, repoRoot, baseDir, []string{target})
+	if err != nil {
+		if result.Locked {
+			if unlockErr := unlockWorktree(ctx, runGit, repoRoot, target); unlockErr != nil {
+				return Result{}, fmt.Errorf("prune worktrees: %w; unlock existing worktree: %v", err, unlockErr)
+			}
+		}
+		return Result{}, fmt.Errorf("prune worktrees: %w", err)
+	}
+	if !pruneResult.IsEmpty() {
+		result.Prune = &pruneResult
+	}
+	if reused {
 		result.Reused = true
 		return result, nil
 	}
 	if err := os.MkdirAll(repoDir, 0o700); err != nil {
 		return Result{}, fmt.Errorf("create worktree directory: %w", err)
 	}
-	commandResult, err := runGit(ctx, repoRoot, "worktree", "add", "--detach", target, "HEAD")
+	commandResult, err := runGit(ctx, repoRoot, "worktree", "add", "--detach", "--lock", "--reason", activeWorktreeLockReason, target, "HEAD")
 	if err != nil {
 		return Result{}, fmt.Errorf("create git worktree: %w", err)
 	}
@@ -119,6 +148,7 @@ func Prepare(ctx context.Context, options Options) (Result, error) {
 		}
 		return Result{}, fmt.Errorf("create git worktree: %s", message)
 	}
+	result.Locked = true
 	return result, nil
 }
 
@@ -200,11 +230,11 @@ func MergeBack(ctx context.Context, options MergeBackOptions) (MergeBackResult, 
 	// The worktree has nothing to merge when its HEAD is already reachable from
 	// the source HEAD. Plain SHA equality is not enough: the user may have made
 	// unrelated commits in the source repo while the run was in flight.
-	ancestorCheck, err := runGit(ctx, options.RepoRoot, "merge-base", "--is-ancestor", worktreeHead, "HEAD")
+	ancestor, err := isAncestor(ctx, runGit, options.RepoRoot, worktreeHead, "HEAD")
 	if err != nil {
 		return MergeBackResult{}, fmt.Errorf("check worktree ancestry: %w", err)
 	}
-	if ancestorCheck.ExitCode == 0 {
+	if ancestor {
 		return MergeBackResult{
 			Status:  MergeBackNoChanges,
 			Message: "worktree has no changes to merge",
@@ -271,10 +301,9 @@ type RemoveOptions struct {
 	RunGit GitRunner
 }
 
-// Remove unregisters and deletes an isolated worktree whose work is already
-// safe in source history. It runs git worktree remove without --force, so a
-// dirty worktree is refused and its data is preserved. Splice recovery refs
-// and merge-back branches (splice/<name>) are not touched.
+// Remove unregisters and deletes an isolated worktree whose work is in source
+// history. It refuses tracked, untracked, or ignored files. It does not use
+// force or change recovery refs and splice/* branches.
 func Remove(ctx context.Context, options RemoveOptions) error {
 	runGit := options.RunGit
 	if runGit == nil {
@@ -286,10 +315,301 @@ func Remove(ctx context.Context, options RemoveOptions) error {
 	if strings.TrimSpace(options.Path) == "" {
 		return fmt.Errorf("remove worktree: path is required")
 	}
+	status, err := gitOutput(ctx, runGit, options.Path, "status", "--porcelain", "--untracked-files=all", "--ignored=matching")
+	if err != nil {
+		return fmt.Errorf("inspect worktree %q before removal: %w", options.Path, err)
+	}
+	if strings.TrimSpace(status) != "" {
+		return fmt.Errorf("remove worktree %q: tracked, untracked, or ignored files remain", options.Path)
+	}
 	if _, err := gitOutput(ctx, runGit, options.RepoRoot, "worktree", "remove", options.Path); err != nil {
 		return fmt.Errorf("remove worktree %q: %w", options.Path, err)
 	}
 	return nil
+}
+
+// UnlockOptions configures Unlock.
+type UnlockOptions struct {
+	RepoRoot string
+	Path     string
+	RunGit   GitRunner
+}
+
+// Unlock releases the active-use lock that Prepare creates.
+func Unlock(ctx context.Context, options UnlockOptions) error {
+	runGit := options.RunGit
+	if runGit == nil {
+		runGit = defaultRunGit
+	}
+	return unlockWorktree(ctx, runGit, options.RepoRoot, options.Path)
+}
+
+func lockWorktree(ctx context.Context, runGit GitRunner, repoRoot, path string) error {
+	if _, err := gitOutput(ctx, runGit, repoRoot, "worktree", "lock", "--reason", activeWorktreeLockReason, path); err != nil {
+		return fmt.Errorf("lock worktree %q: %w", path, err)
+	}
+	return nil
+}
+
+func unlockWorktree(ctx context.Context, runGit GitRunner, repoRoot, path string) error {
+	if strings.TrimSpace(repoRoot) == "" || strings.TrimSpace(path) == "" {
+		return fmt.Errorf("unlock worktree: repo root and path are required")
+	}
+	if _, err := gitOutput(ctx, runGit, repoRoot, "worktree", "unlock", path); err != nil {
+		return fmt.Errorf("unlock worktree %q: %w", path, err)
+	}
+	return nil
+}
+
+// PruneSkip reports a managed worktree left in place and why.
+type PruneSkip struct {
+	Path   string `json:"path"`
+	Reason string `json:"reason"`
+}
+
+// PruneResult reports the managed worktrees the sweep removed and those it
+// left in place with a reason.
+type PruneResult struct {
+	Removed []string    `json:"removed"`
+	Skipped []PruneSkip `json:"skipped"`
+}
+
+// IsEmpty reports whether the sweep has nothing to report.
+func (r PruneResult) IsEmpty() bool {
+	return len(r.Removed) == 0 && len(r.Skipped) == 0
+}
+
+// PruneOptions configures Prune.
+type PruneOptions struct {
+	// Cwd is a directory inside the source repository to scan.
+	Cwd string
+	// BaseDir is the base directory for Splice worktrees. An empty value
+	// resolves the platform default.
+	BaseDir string
+	RunGit  GitRunner
+}
+
+// Prune removes only unlocked, clean Splice worktrees from the managed
+// directory. The HEAD must remain reachable from source HEAD or a splice/*
+// branch. Prune reports all other managed worktrees and keeps them.
+func Prune(ctx context.Context, options PruneOptions) (PruneResult, error) {
+	cwd, err := resolveCwd(options.Cwd)
+	if err != nil {
+		return PruneResult{}, err
+	}
+	runGit := options.RunGit
+	if runGit == nil {
+		runGit = defaultRunGit
+	}
+
+	repoRoot, err := gitOutput(ctx, runGit, cwd, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return PruneResult{}, fmt.Errorf("not a git repository: %w", err)
+	}
+	repoRoot = filepath.Clean(repoRoot)
+
+	baseDir := strings.TrimSpace(options.BaseDir)
+	if baseDir == "" {
+		baseDir, err = DefaultBaseDir(nil)
+		if err != nil {
+			return PruneResult{}, err
+		}
+	}
+	baseDir, err = filepath.Abs(baseDir)
+	if err != nil {
+		return PruneResult{}, fmt.Errorf("resolve worktree dir: %w", err)
+	}
+	baseDir, err = filepath.EvalSymlinks(baseDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return PruneResult{}, nil
+		}
+		return PruneResult{}, fmt.Errorf("resolve worktree base directory: %w", err)
+	}
+	return pruneRepo(ctx, runGit, repoRoot, baseDir, nil)
+}
+
+func pruneRepo(ctx context.Context, runGit GitRunner, repoRoot, baseDir string, exclude []string) (PruneResult, error) {
+	repoDir, err := filepath.Abs(filepath.Join(baseDir, "splice-worktree-"+repoKey(repoRoot)))
+	if err != nil {
+		return PruneResult{}, fmt.Errorf("resolve managed dir: %w", err)
+	}
+	info, err := os.Lstat(repoDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return PruneResult{}, nil
+		}
+		return PruneResult{}, fmt.Errorf("inspect managed dir: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return PruneResult{}, fmt.Errorf("managed dir must be a real directory: %s", repoDir)
+	}
+
+	sourceHead, err := gitOutput(ctx, runGit, repoRoot, "rev-parse", "HEAD")
+	if err != nil {
+		return PruneResult{}, fmt.Errorf("resolve source HEAD: %w", err)
+	}
+	sourceHead = strings.TrimSpace(sourceHead)
+
+	spliceRefs, err := listSpliceRefs(ctx, runGit, repoRoot)
+	if err != nil {
+		return PruneResult{}, fmt.Errorf("list splice refs: %w", err)
+	}
+
+	worktreeList, err := gitOutput(ctx, runGit, repoRoot, "worktree", "list", "--porcelain")
+	if err != nil {
+		return PruneResult{}, fmt.Errorf("list worktrees: %w", err)
+	}
+
+	excludeSet := make(map[string]struct{}, len(exclude))
+	for _, path := range exclude {
+		excludeSet[filepath.Clean(path)] = struct{}{}
+	}
+
+	result := PruneResult{}
+	for _, entry := range parseWorktreeList(worktreeList) {
+		path := filepath.Clean(entry.Path)
+		if path == repoRoot {
+			continue
+		}
+		if _, excluded := excludeSet[path]; excluded {
+			continue
+		}
+		if filepath.Dir(path) != repoDir {
+			continue
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			result.Skipped = append(result.Skipped, PruneSkip{Path: entry.Path, Reason: fmt.Sprintf("inspect path: %v", err)})
+			continue
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			result.Skipped = append(result.Skipped, PruneSkip{Path: entry.Path, Reason: "path is not a real directory"})
+			continue
+		}
+
+		if entry.Locked {
+			result.Skipped = append(result.Skipped, PruneSkip{Path: entry.Path, Reason: "locked"})
+			continue
+		}
+
+		status, err := gitOutput(ctx, runGit, entry.Path, "status", "--porcelain", "--untracked-files=all", "--ignored=matching")
+		if err != nil {
+			result.Skipped = append(result.Skipped, PruneSkip{Path: entry.Path, Reason: fmt.Sprintf("inspect: %v", err)})
+			continue
+		}
+		if strings.TrimSpace(status) != "" {
+			result.Skipped = append(result.Skipped, PruneSkip{Path: entry.Path, Reason: "files not saved in Git"})
+			continue
+		}
+
+		head, err := gitOutput(ctx, runGit, entry.Path, "rev-parse", "HEAD")
+		if err != nil {
+			result.Skipped = append(result.Skipped, PruneSkip{Path: entry.Path, Reason: fmt.Sprintf("resolve HEAD: %v", err)})
+			continue
+		}
+		head = strings.TrimSpace(head)
+
+		reachable, err := isReachable(ctx, runGit, repoRoot, head, sourceHead, spliceRefs)
+		if err != nil {
+			result.Skipped = append(result.Skipped, PruneSkip{Path: entry.Path, Reason: fmt.Sprintf("ancestry: %v", err)})
+			continue
+		}
+		if !reachable {
+			result.Skipped = append(result.Skipped, PruneSkip{Path: entry.Path, Reason: "not reachable from source HEAD or splice refs"})
+			continue
+		}
+
+		if err := Remove(ctx, RemoveOptions{RepoRoot: repoRoot, Path: entry.Path, RunGit: runGit}); err != nil {
+			result.Skipped = append(result.Skipped, PruneSkip{Path: entry.Path, Reason: fmt.Sprintf("remove: %v", err)})
+			continue
+		}
+		result.Removed = append(result.Removed, entry.Path)
+	}
+
+	return result, nil
+}
+
+type worktreeListEntry struct {
+	Path   string
+	Locked bool
+}
+
+func parseWorktreeList(output string) []worktreeListEntry {
+	var entries []worktreeListEntry
+	var current *worktreeListEntry
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			if current != nil {
+				entries = append(entries, *current)
+				current = nil
+			}
+			continue
+		}
+		if strings.HasPrefix(line, "worktree ") {
+			current = &worktreeListEntry{Path: strings.TrimSpace(strings.TrimPrefix(line, "worktree "))}
+			continue
+		}
+		if current == nil {
+			continue
+		}
+		if strings.HasPrefix(line, "locked") {
+			current.Locked = true
+		}
+	}
+	if current != nil {
+		entries = append(entries, *current)
+	}
+	return entries
+}
+
+func listSpliceRefs(ctx context.Context, runGit GitRunner, repoRoot string) ([]string, error) {
+	out, err := gitOutput(ctx, runGit, repoRoot, "for-each-ref", "--format=%(refname)", "refs/heads/splice/")
+	if err != nil {
+		return nil, err
+	}
+	var refs []string
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			refs = append(refs, line)
+		}
+	}
+	return refs, nil
+}
+
+func isReachable(ctx context.Context, runGit GitRunner, repoRoot, worktreeHead, sourceHead string, spliceRefs []string) (bool, error) {
+	refs := append([]string{sourceHead}, spliceRefs...)
+	for _, ref := range refs {
+		if strings.TrimSpace(ref) == "" {
+			continue
+		}
+		reachable, err := isAncestor(ctx, runGit, repoRoot, worktreeHead, ref)
+		if err != nil {
+			return false, err
+		}
+		if reachable {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func isAncestor(ctx context.Context, runGit GitRunner, repoRoot, ancestor, descendant string) (bool, error) {
+	result, err := runGit(ctx, repoRoot, "merge-base", "--is-ancestor", ancestor, descendant)
+	if err != nil {
+		return false, err
+	}
+	switch result.ExitCode {
+	case 0:
+		return true, nil
+	case 1:
+		return false, nil
+	default:
+		_, err := commandOutput(result, nil)
+		return false, err
+	}
 }
 
 func DefaultBaseDir(env map[string]string) (string, error) {
@@ -343,15 +663,15 @@ func validateName(name string) error {
 }
 
 func inspectTarget(target string) (bool, error) {
-	info, err := os.Stat(target)
+	info, err := os.Lstat(target)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, nil
 		}
 		return false, fmt.Errorf("inspect worktree path: %w", err)
 	}
-	if !info.IsDir() {
-		return false, fmt.Errorf("worktree path already exists and is not a directory: %s", target)
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return false, fmt.Errorf("worktree path already exists and is not a real directory: %s", target)
 	}
 	if _, err := os.Stat(filepath.Join(target, ".git")); err == nil {
 		return true, nil
