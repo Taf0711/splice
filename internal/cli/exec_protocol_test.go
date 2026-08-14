@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"slices"
@@ -396,12 +397,8 @@ func TestRunExecStreamJSONSkipsPermissionEventsForTrustedWrites(t *testing.T) {
 	}
 
 	events := decodeJSONLines(t, stdout.String())
-	eventTypes := jsonEventTypes(events)
-	if slices.Contains(eventTypes, "permission_request") {
-		t.Fatalf("workspace write should not request permission in %v; output %q", eventTypes, stdout.String())
-	}
-	if slices.Contains(eventTypes, "permission_decision") {
-		t.Fatalf("trusted workspace write should not emit a permission decision in %v", eventTypes)
+	if hasWritePermissionEvent(events) {
+		t.Fatalf("trusted workspace write should not emit a permission event in %v; output %q", jsonEventTypes(events), stdout.String())
 	}
 
 	sessionID, ok := events[0]["sessionId"].(string)
@@ -415,10 +412,8 @@ func TestRunExecStreamJSONSkipsPermissionEventsForTrustedWrites(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadEvents returned error: %v", err)
 	}
-	for _, event := range recorded {
-		if event.Type == sessions.EventPermissionRequest || event.Type == sessions.EventPermissionDecision {
-			t.Fatalf("trusted workspace write recorded permission event: %#v", event)
-		}
+	if hasRecordedWritePermissionEvent(t, recorded) {
+		t.Fatalf("trusted workspace write recorded a permission event")
 	}
 
 	stdout.Reset()
@@ -451,8 +446,8 @@ func TestRunExecStreamJSONSkipsPermissionEventsForTrustedWrites(t *testing.T) {
 		t.Fatalf("approved exec wrote stderr = %q", stderr.String())
 	}
 	approvedEvents := decodeJSONLines(t, stdout.String())
-	if types := jsonEventTypes(approvedEvents); slices.Contains(types, "permission_request") || slices.Contains(types, "permission_decision") {
-		t.Fatalf("unsafe workspace writes should not emit permission events: %v", types)
+	if hasWritePermissionEvent(approvedEvents) {
+		t.Fatalf("unsafe workspace writes should not emit a permission event: %v", jsonEventTypes(approvedEvents))
 	}
 	approvedSessionID, ok := approvedEvents[0]["sessionId"].(string)
 	if !ok || approvedSessionID == "" {
@@ -462,11 +457,52 @@ func TestRunExecStreamJSONSkipsPermissionEventsForTrustedWrites(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadEvents approved session returned error: %v", err)
 	}
-	for _, event := range approvedRecorded {
-		if event.Type == sessions.EventPermissionRequest || event.Type == sessions.EventPermissionDecision {
-			t.Fatalf("unsafe workspace write recorded permission event: %#v", event)
+	if hasRecordedWritePermissionEvent(t, approvedRecorded) {
+		t.Fatalf("unsafe workspace write recorded a permission event")
+	}
+}
+
+// writePermissionEvent reports whether a permission event (a stream-json
+// event or a recorded session payload) belongs to a workspace write: the
+// write_file tool or the write side effect. Prompt-gated audit decisions for
+// unrelated tools (the deterministic test_runner's bash call in auto mode,
+// sideEffect shell) are not workspace writes and are intentionally ignored.
+func writePermissionEvent(event map[string]any) bool {
+	name, _ := event["name"].(string)
+	sideEffect, _ := event["sideEffect"].(string)
+	return name == "write_file" || sideEffect == "write"
+}
+
+// hasWritePermissionEvent reports whether any stream-json event is a
+// permission_request or permission_decision for a workspace write.
+func hasWritePermissionEvent(events []map[string]any) bool {
+	for _, event := range events {
+		if eventType, _ := event["type"].(string); eventType == "permission_request" || eventType == "permission_decision" {
+			if writePermissionEvent(event) {
+				return true
+			}
 		}
 	}
+	return false
+}
+
+// hasRecordedWritePermissionEvent reports whether any recorded session event
+// is a permission_request or permission_decision for a workspace write.
+func hasRecordedWritePermissionEvent(t *testing.T, events []sessions.Event) bool {
+	t.Helper()
+	for _, event := range events {
+		if event.Type != sessions.EventPermissionRequest && event.Type != sessions.EventPermissionDecision {
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("permission event payload is not JSON: %#v: %v", event, err)
+		}
+		if writePermissionEvent(payload) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestRunExecStreamJSONRunStartUsesResolvedAPIModel(t *testing.T) {
