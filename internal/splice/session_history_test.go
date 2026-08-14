@@ -78,18 +78,41 @@ func TestMapDesignHistory_ExcludesMessagesBeforeLastEntry(t *testing.T) {
 	}
 }
 
-func TestMapDesignHistory_SkipsAskUserAndSystem(t *testing.T) {
+func TestMapDesignHistory_KeepsAskUserQandA(t *testing.T) {
 	events := []sessions.Event{
 		designModeEnteredEvent(),
 		messageEvent("user", "hi"),
-		messageEvent("ask_user", "what?"),
-		messageEvent("ask_user_answers", "ok"),
+		{Type: sessions.EventMessage, Payload: json.RawMessage(`{"role":"ask_user","header":"Scope","questions":[{"question":"How big?","options":["small","large"],"multiSelect":true}]}`)},
+		{Type: sessions.EventMessage, Payload: json.RawMessage(`{"role":"ask_user_answers","answers":["large"]}`)},
 		messageEvent("system", "you are helpful"),
 		messageEvent("assistant", "hello"),
 	}
 	want := []schemas.ConversationMessage{
 		{Role: "user", Content: "hi"},
+		{Role: "assistant", Content: "Scope Q: How big? (options: small, large)"},
+		{Role: "user", Content: "Answers: large"},
 		{Role: "assistant", Content: "hello"},
+	}
+	got := MapDesignHistory(events)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("MapDesignHistory() = %+v, want %+v", got, want)
+	}
+}
+
+func TestMapDesignHistory_AskUserEmptyAnswersKept(t *testing.T) {
+	// A backed-out question submits with an empty answer; it must still be
+	// remembered (as "no answer") so the next design turn knows the question was
+	// asked rather than re-asking it from the beginning.
+	events := []sessions.Event{
+		designModeEnteredEvent(),
+		{Type: sessions.EventMessage, Payload: json.RawMessage(`{"role":"ask_user","questions":[{"question":"Which approach?","options":["a","b"]}]}`)},
+		{Type: sessions.EventMessage, Payload: json.RawMessage(`{"role":"ask_user_answers","answers":[""]}`)},
+		messageEvent("user", "actually pick b"),
+	}
+	want := []schemas.ConversationMessage{
+		{Role: "assistant", Content: "Q: Which approach? (options: a, b)"},
+		{Role: "user", Content: "Answers: (no answer)"},
+		{Role: "user", Content: "actually pick b"},
 	}
 	got := MapDesignHistory(events)
 	if !reflect.DeepEqual(got, want) {
