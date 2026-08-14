@@ -294,7 +294,9 @@ func aggregateConfidence(outputs []schemas.HarnessStageOutput) float64 {
 func tokensConsumed(records []schemas.StageRecord) int {
 	total := 0
 	for _, record := range records {
-		total += record.TokensInput + record.TokensOutput + record.TokensCached
+		// TokensCached and TokensCacheWrite are subsets of TokensInput; TokensReasoning
+		// is a subset of TokensOutput. Summing the subsets would double-count.
+		total += record.TokensInput + record.TokensOutput
 	}
 	return total
 }

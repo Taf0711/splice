@@ -196,8 +196,8 @@ func TestComputeIterationStateUsesWeakestConfidenceAndSumsTokens(t *testing.T) {
 		harnessOutput("b", 0.4, nil),
 	}
 	records := []schemas.StageRecord{
-		{Name: "a", Status: schemas.StageCompleted, TokensInput: 10, TokensOutput: 20, TokensCached: 5},
-		{Name: "b", Status: schemas.StageCompleted, TokensInput: 1, TokensOutput: 2, TokensCached: 0},
+		{Name: "a", Status: schemas.StageCompleted, TokensInput: 10, TokensOutput: 20, TokensCached: 3, TokensCacheWrite: 2, TokensReasoning: 5},
+		{Name: "b", Status: schemas.StageCompleted, TokensInput: 1, TokensOutput: 2, TokensCached: 0, TokensCacheWrite: 0, TokensReasoning: 1},
 	}
 	state, err := ComputeIterationState(0, outputs, records, schemas.ChangeSummary{}, nil)
 	if err != nil {
@@ -206,8 +206,12 @@ func TestComputeIterationStateUsesWeakestConfidenceAndSumsTokens(t *testing.T) {
 	if state.Confidence != 0.4 {
 		t.Fatalf("expected confidence 0.4, got %v", state.Confidence)
 	}
-	if state.TokensConsumed != 38 {
-		t.Fatalf("expected tokens 38, got %d", state.TokensConsumed)
+	// TokensCached and TokensCacheWrite are input subsets; TokensReasoning is an
+	// output subset. tokensConsumed must count only total input + total output,
+	// never the cached, cache-write, or reasoning subsets (they overlap input
+	// and output and would be double-counted).
+	if state.TokensConsumed != 33 {
+		t.Fatalf("expected tokens 33, got %d", state.TokensConsumed)
 	}
 }
 
