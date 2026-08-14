@@ -262,6 +262,36 @@ func MergeBack(ctx context.Context, options MergeBackOptions) (MergeBackResult, 
 	}, nil
 }
 
+// RemoveOptions configures Remove.
+type RemoveOptions struct {
+	// RepoRoot is the source repository the worktree belongs to.
+	RepoRoot string
+	// Path is the isolated worktree directory to remove.
+	Path   string
+	RunGit GitRunner
+}
+
+// Remove unregisters and deletes an isolated worktree whose work is already
+// safe in source history. It runs git worktree remove without --force, so a
+// dirty worktree is refused and its data is preserved. Splice recovery refs
+// and merge-back branches (splice/<name>) are not touched.
+func Remove(ctx context.Context, options RemoveOptions) error {
+	runGit := options.RunGit
+	if runGit == nil {
+		runGit = defaultRunGit
+	}
+	if strings.TrimSpace(options.RepoRoot) == "" {
+		return fmt.Errorf("remove worktree %q: repo root is required", options.Path)
+	}
+	if strings.TrimSpace(options.Path) == "" {
+		return fmt.Errorf("remove worktree: path is required")
+	}
+	if _, err := gitOutput(ctx, runGit, options.RepoRoot, "worktree", "remove", options.Path); err != nil {
+		return fmt.Errorf("remove worktree %q: %w", options.Path, err)
+	}
+	return nil
+}
+
 func DefaultBaseDir(env map[string]string) (string, error) {
 	if runtime.GOOS == "windows" {
 		if localAppData := strings.TrimSpace(envValue(env, "LOCALAPPDATA")); localAppData != "" {

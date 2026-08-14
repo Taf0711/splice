@@ -91,6 +91,7 @@ type appDeps struct {
 	registerMCPTools       func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error)
 	prepareWorktree        func(context.Context, worktrees.Options) (worktrees.Result, error)
 	mergeBackWorktree      func(context.Context, worktrees.MergeBackOptions) (worktrees.MergeBackResult, error)
+	removeWorktree         func(context.Context, worktrees.RemoveOptions) error
 	resolveMemory          func(context.Context) (*memd.Client, error)
 	detectVerifyPlan       func(string) (verify.Plan, error)
 	runVerify              func(context.Context, verify.Plan, verify.RunOptions) verify.Report
@@ -211,6 +212,7 @@ func defaultAppDeps() appDeps {
 		},
 		prepareWorktree:   worktrees.Prepare,
 		mergeBackWorktree: worktrees.MergeBack,
+		removeWorktree:    worktrees.Remove,
 		resolveMemory:     memd.Resolve,
 		detectVerifyPlan:  verify.DetectPlan,
 		runVerify:         verify.Run,
@@ -594,6 +596,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	}
 	if deps.mergeBackWorktree == nil {
 		deps.mergeBackWorktree = defaults.mergeBackWorktree
+	}
+	if deps.removeWorktree == nil {
+		deps.removeWorktree = defaults.removeWorktree
 	}
 	if deps.detectVerifyPlan == nil {
 		deps.detectVerifyPlan = defaults.detectVerifyPlan
@@ -1518,7 +1523,7 @@ Flags:
   -C, --cwd <path>                   Set the workspace directory
   -w, --worktree [name]              Run from an isolated git worktree
       --worktree-dir <path>          Base directory for created worktrees
-      --merge-back                   Merge worktree changes into the source repo on success (requires --worktree)
+      --merge-back                   Merge changes and remove the worktree on success (requires --worktree)
   -i, --input-format text|stream-json
                                     Select prompt input format
   -o, --output-format text|json|stream-json

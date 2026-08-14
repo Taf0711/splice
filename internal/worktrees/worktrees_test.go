@@ -365,6 +365,47 @@ func TestMergeBackRejectsInvalidName(t *testing.T) {
 	}
 }
 
+func TestRemoveCleanWorktreeUnregistersAndDeletes(t *testing.T) {
+	root, worktree := newMergeBackFixture(t)
+
+	if err := Remove(context.Background(), RemoveOptions{
+		RepoRoot: root,
+		Path:     worktree,
+	}); err != nil {
+		t.Fatalf("Remove returned error: %v", err)
+	}
+	if _, err := os.Stat(worktree); !os.IsNotExist(err) {
+		t.Fatalf("worktree directory still exists after removal: %v", err)
+	}
+	if listed := mustGit(t, root, "worktree", "list", "--porcelain"); strings.Contains(listed, worktree) {
+		t.Fatalf("worktree still registered after removal: %q", listed)
+	}
+}
+
+func TestRemoveDirtyWorktreeFailsAndPreservesData(t *testing.T) {
+	root, worktree := newMergeBackFixture(t)
+	if err := os.WriteFile(filepath.Join(worktree, "dirty.txt"), []byte("uncommitted work\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := Remove(context.Background(), RemoveOptions{
+		RepoRoot: root,
+		Path:     worktree,
+	})
+	if err == nil {
+		t.Fatal("expected removal of a dirty worktree to fail without --force")
+	}
+	if !strings.Contains(err.Error(), worktree) {
+		t.Fatalf("error must name the worktree path, got %v", err)
+	}
+	if data, statErr := os.ReadFile(filepath.Join(worktree, "dirty.txt")); statErr != nil || string(data) != "uncommitted work\n" {
+		t.Fatalf("dirty worktree data was lost: %q, %v", data, statErr)
+	}
+	if listed := mustGit(t, root, "worktree", "list", "--porcelain"); !strings.Contains(listed, worktree) {
+		t.Fatal("worktree was unregistered despite failed removal")
+	}
+}
+
 // newMergeBackFixture creates a real git repo with one commit, a shared file,
 // and a detached worktree, both with committer identity configured.
 func newMergeBackFixture(t *testing.T) (string, string) {

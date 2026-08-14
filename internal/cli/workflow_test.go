@@ -695,6 +695,7 @@ func TestRunExecWorktreeMergeBackOnSuccess(t *testing.T) {
 	worktreeDir := t.TempDir()
 	initTestGitWorktree(t, root, worktreeDir)
 	var mergeOptions worktrees.MergeBackOptions
+	var removedOptions worktrees.RemoveOptions
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -712,6 +713,10 @@ func TestRunExecWorktreeMergeBackOnSuccess(t *testing.T) {
 				Message:   "merged splice/task-a (commit fedcba9876)",
 			}, nil
 		},
+		removeWorktree: func(ctx context.Context, options worktrees.RemoveOptions) error {
+			removedOptions = options
+			return nil
+		},
 		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
 			return execResolvedConfig(), nil
 		},
@@ -726,8 +731,75 @@ func TestRunExecWorktreeMergeBackOnSuccess(t *testing.T) {
 	if mergeOptions.RepoRoot != root || mergeOptions.WorktreePath != worktreeDir || mergeOptions.Name != "task-a" {
 		t.Fatalf("unexpected merge-back options: %#v", mergeOptions)
 	}
+	if removedOptions.RepoRoot != root || removedOptions.Path != worktreeDir {
+		t.Fatalf("unexpected cleanup options: %#v", removedOptions)
+	}
 	if !strings.Contains(stdout.String(), "merged splice/task-a") {
 		t.Fatalf("expected merge-back message in output, got %q", stdout.String())
+	}
+}
+
+func TestRunExecWorktreeMergeBackCleanupPolicy(t *testing.T) {
+	cases := []struct {
+		name          string
+		status        worktrees.MergeBackStatus
+		mergeErr      error
+		removeErr     error
+		wantExit      int
+		wantRemoved   bool
+		wantCleanWarn bool
+	}{
+		{name: "no changes removes worktree", status: worktrees.MergeBackNoChanges, wantExit: exitSuccess, wantRemoved: true},
+		{name: "skipped dirty keeps worktree", status: worktrees.MergeBackSkippedDirty, wantExit: exitIncomplete},
+		{name: "conflict keeps worktree", status: worktrees.MergeBackConflict, wantExit: exitIncomplete},
+		{name: "merge error keeps worktree", mergeErr: errors.New("git exploded"), wantExit: exitCrash},
+		{name: "removal error warns and keeps success", status: worktrees.MergeBackMerged, removeErr: errors.New("git exploded"), wantExit: exitSuccess, wantRemoved: true, wantCleanWarn: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			worktreeDir := t.TempDir()
+			initTestGitWorktree(t, root, worktreeDir)
+			var removedOptions worktrees.RemoveOptions
+
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			exitCode := runWithDeps([]string{"exec", "--worktree", "task-a", "--merge-back", "hello"}, &stdout, &stderr, appDeps{
+				getwd: func() (string, error) { return root, nil },
+				prepareWorktree: func(context.Context, worktrees.Options) (worktrees.Result, error) {
+					return worktrees.Result{Name: "task-a", Path: worktreeDir, RepoRoot: root}, nil
+				},
+				mergeBackWorktree: func(context.Context, worktrees.MergeBackOptions) (worktrees.MergeBackResult, error) {
+					if tc.mergeErr != nil {
+						return worktrees.MergeBackResult{}, tc.mergeErr
+					}
+					return worktrees.MergeBackResult{Status: tc.status, Branch: "splice/task-a", Message: "status " + string(tc.status)}, nil
+				},
+				removeWorktree: func(ctx context.Context, options worktrees.RemoveOptions) error {
+					removedOptions = options
+					return tc.removeErr
+				},
+				resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+					return execResolvedConfig(), nil
+				},
+				newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+					return newExecStageAwareProvider(execStageProviderOptions{}), nil
+				},
+			})
+
+			if exitCode != tc.wantExit {
+				t.Fatalf("exit = %d, want %d: %s", exitCode, tc.wantExit, stderr.String())
+			}
+			removed := removedOptions.Path != ""
+			if removed != tc.wantRemoved {
+				t.Fatalf("worktree removal called = %v, want %v (options %#v)", removed, tc.wantRemoved, removedOptions)
+			}
+			if tc.wantCleanWarn {
+				if !strings.Contains(stderr.String(), "worktree cleanup failed") || !strings.Contains(stderr.String(), worktreeDir) {
+					t.Fatalf("expected cleanup warning naming the path on stderr, got %q", stderr.String())
+				}
+			}
+		})
 	}
 }
 

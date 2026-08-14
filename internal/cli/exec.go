@@ -956,6 +956,13 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		switch mergeResult.Status {
 		case worktrees.MergeBackMerged, worktrees.MergeBackNoChanges:
 			writer.text("[splice] merge-back: " + mergeResult.Message + "\n")
+			// The work is in source history, so only cleanup can fail here.
+			if cleanupErr := deps.removeWorktree(runCtx, worktrees.RemoveOptions{
+				RepoRoot: preparedWorktree.RepoRoot,
+				Path:     preparedWorktree.Path,
+			}); cleanupErr != nil {
+				writer.warning(fmt.Sprintf("worktree cleanup failed; %s left in place: %v", preparedWorktree.Path, cleanupErr))
+			}
 		default:
 			writer.warning("merge-back " + string(mergeResult.Status) + ": " + mergeResult.Message)
 		}

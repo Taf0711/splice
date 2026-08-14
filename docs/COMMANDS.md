@@ -31,6 +31,9 @@ splice exec --worktree --merge-back "apply and merge a checked change"
 splice exec --output-format stream-json "run the checks"
 ```
 
+`--merge-back` removes the worktree after a merge or when there are no changes.
+It leaves the worktree after a conflict, a skipped merge, or a failed run.
+
 Use `--auto low` for conservative automation. Review the policy before you use
 `medium`, `high`, or `--skip-permissions-unsafe`.
 
