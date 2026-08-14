@@ -166,7 +166,36 @@ func (m model) renderRowCacheKey(row transcriptRow, width int, rc rowContext, op
 	appendRenderCacheField(&b, strconv.FormatBool(rc.auto[key]))
 	appendRenderCacheField(&b, permissionCacheFingerprint(row.permission))
 	appendRenderCacheField(&b, askUserCacheFingerprint(row.askUser))
+	// Specialist cards carry their identity in specialistInfo, not in the generic
+	// row fields (id/text/tool/detail are empty for these rows). Without this
+	// fingerprint two completed specialists in the same runID would collide on
+	// one cache key and render each other's card.
+	if row.kind == rowSpecialist && row.specialistInfo != nil {
+		appendRenderCacheField(&b, specialistCacheFingerprint(row.specialistInfo))
+	}
 	return b.String(), stable
+}
+
+// specialistCacheFingerprint serializes the fields that change a specialist
+// card's rendered output: identity, lifecycle, counts, and the retained tool
+// tail (names and details). Deterministic and bounded, so completed cards
+// cache correctly without ever colliding with a different specialist.
+func specialistCacheFingerprint(info *specialistInfo) string {
+	var b strings.Builder
+	appendRenderCacheField(&b, info.childSessionID)
+	appendRenderCacheField(&b, info.name)
+	appendRenderCacheField(&b, info.description)
+	appendRenderCacheField(&b, strconv.Itoa(int(info.status)))
+	appendRenderCacheField(&b, strconv.Itoa(info.toolCount))
+	appendRenderCacheField(&b, strconv.Itoa(info.tokenCount))
+	appendRenderCacheField(&b, info.currentTool)
+	appendRenderCacheField(&b, info.currentDetail)
+	appendRenderCacheField(&b, info.errorMsg)
+	for _, call := range info.toolCalls {
+		appendRenderCacheField(&b, call.name)
+		appendRenderCacheField(&b, call.detail)
+	}
+	return b.String()
 }
 
 func appendRenderCacheField(b *strings.Builder, value string) {

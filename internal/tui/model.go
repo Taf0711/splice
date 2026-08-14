@@ -2588,6 +2588,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// permanent "0 tool calls" (M18). The tracker is still keyed by the tool-call
 		// id at this point (reconciled to the session id only on completion).
 		m.specialists.incrementToolCount(msg.toolCallID)
+		m.specialists.addToolCall(msg.toolCallID, msg.toolName, msg.detail)
 		m.specialists.setCurrentTool(msg.toolCallID, msg.toolName, msg.detail)
 		return m, nil
 	case agentRowMsg:

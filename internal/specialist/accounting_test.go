@@ -74,6 +74,9 @@ func TestExecutorRecordsForegroundLifecycleAndUsageRollup(t *testing.T) {
 	requirePayloadString(t, startPayload, "toolCallId", "call_1")
 	requirePayloadString(t, startPayload, "mode", "foreground")
 	requirePayloadBool(t, startPayload, "background", false)
+	// The start event must persist the running status; without it a resumed
+	// transcript would rehydrate the card as error.
+	requirePayloadString(t, startPayload, "status", "running")
 
 	usagePayload := eventPayload(t, events[1])
 	requirePayloadString(t, usagePayload, "source", "specialist")

@@ -930,7 +930,10 @@ func firstNonEmptyString(values ...string) string {
 
 // specialistInfoFromPayload builds a specialistInfo from a specialist_start or
 // specialist_stop session event payload. Returns nil if the payload lacks a
-// childSessionId (the minimum required field).
+// childSessionId (the minimum required field). It restores the count and a
+// bounded tool-name tail persisted on the stop event so the transcript card
+// survives a resume (the per-call detail is not replayed; the child session
+// holds the full drill-in).
 func specialistInfoFromPayload(payload map[string]any) *specialistInfo {
 	childSessionID := payloadString(payload, "childSessionId")
 	if childSessionID == "" {
@@ -955,5 +958,29 @@ func specialistInfoFromPayload(payload map[string]any) *specialistInfo {
 	if errMsg := payloadString(payload, "error"); errMsg != "" {
 		info.errorMsg = errMsg
 	}
+	if count, ok := payloadInt(payload, "toolCount"); ok {
+		info.toolCount = count
+	}
+	for _, name := range payloadStringSlice(payload, "tools") {
+		info.toolCalls = append(info.toolCalls, specialistToolCall{name: name})
+	}
+	// toolCount is the true call count; the persisted tool list is the distinct
+	// names tail. When these disagree (repeated tool calls), the card's fold
+	// count already derives from toolCount-len(toolCalls), so it reads correctly.
 	return info
+}
+
+// payloadInt returns an int value for the key. ok is false when the value is
+// missing or not a JSON number.
+func payloadInt(payload map[string]any, key string) (int, bool) {
+	switch typed := payload[key].(type) {
+	case float64:
+		return int(typed), true
+	case int:
+		return typed, true
+	case int64:
+		return int(typed), true
+	default:
+		return 0, false
+	}
 }

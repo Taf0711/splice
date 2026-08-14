@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Taf0711/splice/internal/streamjson"
 )
 
 func TestSpecialistTrackerStartAndComplete(t *testing.T) {
@@ -372,5 +374,155 @@ func TestRenderSpecialistCardWithProgress(t *testing.T) {
 	}
 	if !strings.Contains(plain, "internal/tui/model.go") {
 		t.Errorf("card should contain progress detail, got:\n%s", plain)
+	}
+}
+
+func TestSpecialistTrackerAddToolCallList(t *testing.T) {
+	var tracker specialistTracker
+	now := time.Now()
+
+	tracker.start("design", "plan the feature", "s1", now)
+	tracker.addToolCall("s1", "read_file", "internal/splice/run.go")
+	tracker.addToolCall("s1", "web_search", "how does zero handle tool registry")
+	tracker.addToolCall("s1", "write_file", "internal/splice/plan.go")
+
+	info, _ := tracker.getBySessionID("s1")
+	if len(info.toolCalls) != 3 {
+		t.Fatalf("toolCalls len = %d, want 3", len(info.toolCalls))
+	}
+	if info.toolCalls[0].name != "read_file" || info.toolCalls[0].detail != "internal/splice/run.go" {
+		t.Errorf("toolCalls[0] = %+v", info.toolCalls[0])
+	}
+	if info.toolCalls[1].name != "web_search" || info.toolCalls[1].detail != "how does zero handle tool registry" {
+		t.Errorf("toolCalls[1] = %+v", info.toolCalls[1])
+	}
+	// Order preserved.
+	if info.toolCalls[2].name != "write_file" {
+		t.Errorf("toolCalls[2].name = %q, want write_file", info.toolCalls[2].name)
+	}
+}
+
+func TestSpecialistCardListsEveryToolCall(t *testing.T) {
+	m := transcriptViewTestModel()
+	m.width = 100
+	info := specialistInfo{
+		name:      "design",
+		status:    specialistCompleted,
+		toolCount: 2,
+		toolCalls: []specialistToolCall{
+			{name: "web_search", detail: "deepseek v4 pricing"},
+			{name: "write_file", detail: "docs/pricing.md"},
+		},
+	}
+	got := plainRender(t, m.renderSpecialistCard(info, 60))
+	for _, want := range []string{"↳ web_search deepseek v4 pricing", "↳ write_file docs/pricing.md"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("card missing %q; got:\n%s", want, got)
+		}
+	}
+}
+
+func TestToolCallSummaryWebSearchQuery(t *testing.T) {
+	for _, name := range []string{"web_search", "websearch", "search_web", "web-search"} {
+		got := toolCallSummary(streamjson.Event{Name: name, Args: map[string]any{"query": "splice tool registry"}})
+		if !strings.Contains(got, "splice tool registry") {
+			t.Errorf("%s summary = %q, want the query", name, got)
+		}
+	}
+}
+
+func TestAddToolCallSanitizesAndBounds(t *testing.T) {
+	var tracker specialistTracker
+	now := time.Now()
+	tracker.start("design", "task", "s1", now)
+
+	// A child detail with a terminal escape, OSC, and newline must be reduced
+	// to a single clean line before it reaches the transcript.
+	dirty := "\x1b[31mred\x1b[0m OSC \x1b]8;;http://x\x07link\x1b]8;;\x07\nline two"
+	tracker.addToolCall("s1", "web_search", dirty)
+	info, _ := tracker.getBySessionID("s1")
+	if len(info.toolCalls) != 1 {
+		t.Fatalf("toolCalls len = %d, want 1", len(info.toolCalls))
+	}
+	got := info.toolCalls[0].detail
+	if strings.ContainsAny(got, "\x1b\n\x07\r") {
+		t.Fatalf("detail still carries terminal controls/newlines: %q", got)
+	}
+	if strings.Contains(got, "line") && strings.Contains(got, "two") && !strings.Contains(got, "line two") {
+		// Newline was dropped, so the following text joins the same line; that is
+		// the sanitizer's safe single-line contract (no injected rows), not a bug.
+		t.Logf("newline collapsed into one line: %q", got)
+	}
+
+	// More than specialistToolCap calls: only the newest 8 are retained, and
+	// toolCount keeps the true total for the fold count. Production increments
+	// toolCount alongside addToolCall in the same progress message.
+	for i := 0; i < 12; i++ {
+		tracker.addToolCall("s1", "bash", "step")
+		tracker.incrementToolCount("s1")
+	}
+	info, _ = tracker.getBySessionID("s1")
+	if len(info.toolCalls) != specialistToolCap {
+		t.Fatalf("retained toolCalls = %d, want %d", len(info.toolCalls), specialistToolCap)
+	}
+	if info.toolCount != 12 {
+		t.Fatalf("toolCount = %d, want 12 (all 12 calls counted)", info.toolCount)
+	}
+	if info.toolCalls[specialistToolCap-1].detail != "step" {
+		t.Fatalf("newest call not retained as the tail")
+	}
+	// The dirty call from earlier was dropped by the cap (it is the oldest).
+	if info.toolCalls[0].detail != "step" {
+		t.Fatalf("oldest retained call should be a step call, got %q", info.toolCalls[0].detail)
+	}
+}
+
+func TestSearchArgSummaryPluralAndURL(t *testing.T) {
+	cases := []struct {
+		name string
+		args map[string]any
+		want string
+	}{
+		{"web_search plural queries", map[string]any{"queries": []any{"go 1.25", "splice"}}, "go 1.25, splice"},
+		{"fetch_content url", map[string]any{"url": "https://example.com/doc"}, "https://example.com/doc"},
+		{"fetch_content urls array", map[string]any{"urls": []string{"https://a.com"}}, "https://a.com"},
+		{"singular query", map[string]any{"query": "deepseek pricing"}, "deepseek pricing"},
+		{"no query", map[string]any{"path": "/tmp/x"}, ""},
+	}
+	for _, tc := range cases {
+		got, ok := searchArgSummary(tc.args)
+		if tc.want == "" {
+			if ok {
+				t.Errorf("%s: got %q, want none", tc.name, got)
+			}
+			continue
+		}
+		if !ok || got != tc.want {
+			t.Errorf("%s: got %q ok=%v, want %q", tc.name, got, ok, tc.want)
+		}
+	}
+}
+
+func TestIsSearchToolNameTokenBased(t *testing.T) {
+	positives := []string{"web_search", "websearch", "fetch_content", "search_web", "query_planner", "webfetch"}
+	negatives := []string{"webhook_dispatch", "submit_findings", "findings_report", "update", "bash"}
+	for _, name := range positives {
+		if !isSearchToolName(name) {
+			t.Errorf("%s should be a search/fetch tool name", name)
+		}
+	}
+	for _, name := range negatives {
+		if isSearchToolName(name) {
+			t.Errorf("%s must NOT be treated as a search tool (substring false positive)", name)
+		}
+	}
+}
+
+func TestToolCallSummaryNegativeNameMatching(t *testing.T) {
+	// A non-search tool whose args happen to carry a "q" must not surface it as
+	// a search purpose.
+	got := toolCallSummary(streamjson.Event{Name: "webhook_dispatch", Args: map[string]any{"q": "https://hooks.example.com/x"}})
+	if got != "" {
+		t.Errorf("webhook_dispatch summary = %q, want empty", got)
 	}
 }

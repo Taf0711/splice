@@ -27,6 +27,19 @@ const (
 	specialistError
 )
 
+// specialistToolCap is the number of per-call lines the transcript card shows
+// and the tracker retains (newest kept). Shared by the tracker (memory bound)
+// and the renderer (visual bound); the full list lives in the subchat drill-in.
+const specialistToolCap = 8
+
+// specialistToolCall is one visible tool call a specialist made: the tool
+// name plus a short "for what" detail (the resolved argument hint, e.g. a
+// file path or a search query).
+type specialistToolCall struct {
+	name   string
+	detail string
+}
+
 // specialistInfo is the rendered view of one specialist invocation.
 type specialistInfo struct {
 	name           string
@@ -41,6 +54,7 @@ type specialistInfo struct {
 	tokenCount     int // total tokens consumed
 	currentTool    string
 	currentDetail  string
+	toolCalls      []specialistToolCall // every tool call, in order; verbose listing
 }
 
 // specialistTracker holds the live state for every specialist the parent agent
@@ -112,7 +126,10 @@ func (t *specialistTracker) addTokens(childSessionID string, tokens int) {
 
 // setCurrentTool updates the live tool-call progress for the specialist with
 // childSessionID. Used by specialistProgressMsg to show ↳ toolName detail.
+// The detail is sanitized so child-provided terminal controls or newlines
+// cannot leak into the sidebar line.
 func (t *specialistTracker) setCurrentTool(childSessionID, toolName, detail string) {
+	detail = sanitizeToolCallDetail(detail)
 	for index := range t.specialists {
 		if t.specialists[index].childSessionID == childSessionID {
 			t.specialists[index].currentTool = toolName
@@ -120,6 +137,36 @@ func (t *specialistTracker) setCurrentTool(childSessionID, toolName, detail stri
 			return
 		}
 	}
+}
+
+// addToolCall appends one tool call (name + purpose) to the specialist's
+// running list. Each progress message is one tool call, so the list grows in
+// execution order and the transcript card can show every tool the specialist
+// ran, not just the latest. The list keeps only the newest specialistToolCap
+// entries so a long child run cannot grow memory without bound; the dropped
+// earlier count is derived from toolCount at render time. The detail is
+// sanitized before storage so raw child arguments cannot inject terminal
+// sequences or unruled lines into the transcript.
+func (t *specialistTracker) addToolCall(childSessionID, toolName, detail string) {
+	detail = sanitizeToolCallDetail(detail)
+	for index := range t.specialists {
+		if t.specialists[index].childSessionID == childSessionID {
+			toolCalls := append(t.specialists[index].toolCalls, specialistToolCall{name: toolName, detail: detail})
+			if len(toolCalls) > specialistToolCap {
+				toolCalls = toolCalls[len(toolCalls)-specialistToolCap:]
+			}
+			t.specialists[index].toolCalls = toolCalls
+			return
+		}
+	}
+}
+
+// sanitizeToolCallDetail strips terminal control sequences and newlines from
+// a child-provided tool detail and bounds its length, so one line of the
+// transcript or sidebar cannot carry escape injection or grow unbounded.
+func sanitizeToolCallDetail(detail string) string {
+	cleaned := strings.TrimSpace(sanitizeTerminalOutput(detail, false))
+	return truncateRunes(cleaned, 120)
 }
 
 // clear resets the tracker to an empty state.
@@ -329,13 +376,30 @@ func (m model) renderSpecialistCard(info specialistInfo, width int) string {
 
 	lines := []string{header, body}
 
-	// Live tool-call progress while running.
-	if info.status == specialistRunning && info.currentTool != "" {
-		progressLine := fmt.Sprintf("  ↳ %s", info.currentTool)
-		if info.currentDetail != "" {
-			progressLine += " " + info.currentDetail
+	// Verbose per-call listing: every tool the specialist ran, in order, each with
+	// its purpose (resolved arg hint). While running the trailing entry is the
+	// in-flight call; after completion it is the last one it made. The list means
+	// a specialist's web search (or any tool) stays visible in the transcript
+	// instead of flashing past and being lost. The tracker retains only the
+	// newest specialistToolCap entries (memory bound), so the fold count is
+	// derived from toolCount; the full list lives in the subchat drill-in.
+	calls := info.toolCalls
+	if len(calls) == 0 && info.status == specialistRunning && info.currentTool != "" {
+		// A running specialist whose first progress msg has not landed yet still
+		// reports currentTool; render it so the card is not empty.
+		calls = []specialistToolCall{{name: info.currentTool, detail: info.currentDetail}}
+	}
+	if hidden := info.toolCount - len(info.toolCalls); hidden > 0 {
+		// Calls dropped from the retained tail (bounded retention): fold them
+		// into a count line so the card stays compact on long runs.
+		lines = append(lines, zeroTheme.faint.Render(fmt.Sprintf("  · · · +%d earlier", hidden)))
+	}
+	for _, tc := range calls {
+		line := "  ↳ " + tc.name
+		if strings.TrimSpace(tc.detail) != "" {
+			line += " " + zeroTheme.faint.Render(tc.detail)
 		}
-		lines = append(lines, zeroTheme.muted.Render(progressLine))
+		lines = append(lines, zeroTheme.muted.Render(line))
 	}
 
 	// Optional error detail line.
@@ -425,7 +489,110 @@ func toolCallSummary(event streamjson.Event) string {
 	case "update_plan":
 		return "plan"
 	}
+	// Search and fetch tools (MCP-loaded web_search, fetch_content, ...) carry
+	// the purpose under a query/queries or url/urls key. Unknown names fall
+	// through here so the summary shows what the search was FOR instead of
+	// nothing. Name matching is whole-token (isSearchToolName), so unrelated
+	// tools like webhook_dispatch or submit_findings never surface a stray arg.
+	if isSearchToolName(event.Name) {
+		if q, ok := searchArgSummary(args); ok {
+			return truncateRunes(q, 40)
+		}
+	}
 	return ""
+}
+
+// searchNameTokens is the set of whole name tokens that mark a tool as a
+// search/fetch tool whose query or url is worth surfacing as the purpose.
+type searchTokenSet map[string]bool
+
+var searchNameTokens = searchTokenSet{
+	"web": true, "search": true, "fetch": true, "query": true,
+	"find": true, "browse": true, "scrape": true, "url": true,
+}
+
+// isSearchToolName reports whether a tool name looks like a search/fetch tool.
+// Matching is token-based: the name is split on separators and each token is
+// compared exactly, so "web_search" matches but "webhook_dispatch" and
+// "submit_findings" do not (the false positives of substring matching).
+// Separator-less compounds ("websearch", "webfetch") match by prefix.
+func isSearchToolName(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	if lower == "" {
+		return false
+	}
+	if strings.HasPrefix(lower, "websearch") || strings.HasPrefix(lower, "webfetch") {
+		return true
+	}
+	for _, token := range strings.FieldsFunc(lower, func(r rune) bool {
+		return r == '_' || r == '-' || r == ' ' || r == '.' || r == '/'
+	}) {
+		if searchNameTokens[token] {
+			return true
+		}
+	}
+	return false
+}
+
+// searchArgSummary returns the first query/url-like argument (singular or
+// plural) as the "what it was for" detail for search/fetch tools. Handles the
+// real schemas: query/q/search/search_query/terms (strings), queries (array of
+// strings), and url/urls (string or array). ok is false when none is present.
+func searchArgSummary(args map[string]any) (string, bool) {
+	if value, ok := firstSearchString(args, "query", "q", "search", "search_query", "terms"); ok {
+		return value, true
+	}
+	if value, ok := firstSearchString(args, "url", "urls"); ok {
+		return value, true
+	}
+	if value, ok := joinStringSlice(args["queries"]); ok {
+		return value, true
+	}
+	return "", false
+}
+
+// firstSearchString returns the first non-empty string value for the given
+// keys, including a single-element []string/[]any array form.
+func firstSearchString(args map[string]any, keys ...string) (string, bool) {
+	for _, key := range keys {
+		if value, ok := args[key]; ok {
+			if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
+				return text, true
+			}
+			if joined, ok := joinStringSlice(value); ok {
+				return joined, true
+			}
+		}
+	}
+	return "", false
+}
+
+// joinStringSlice joins a []string or []any-of-strings value into a single
+// comma-separated purpose. ok is false for nil/empty or non-string slices.
+func joinStringSlice(value any) (string, bool) {
+	var parts []string
+	switch typed := value.(type) {
+	case []string:
+		parts = typed
+	case []any:
+		for _, item := range typed {
+			if text, ok := item.(string); ok {
+				parts = append(parts, text)
+			}
+		}
+	default:
+		return "", false
+	}
+	filtered := parts[:0:0]
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			filtered = append(filtered, trimmed)
+		}
+	}
+	if len(filtered) == 0 {
+		return "", false
+	}
+	return strings.Join(filtered, ", "), true
 }
 
 func toolCallIntArg(args map[string]any, key string) int {
