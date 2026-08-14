@@ -20,6 +20,19 @@ import (
 // does not exist.
 var ErrNotFound = errors.New("store: observation not found")
 
+// sqliteCoder is implemented by modernc.org/sqlite's error type.
+type sqliteCoder interface{ Code() int }
+
+// sqliteBusy is SQLITE_BUSY, returned when a competing connection holds the
+// lock a statement needs.
+const sqliteBusy = 5
+
+// isBusyLocked reports whether err is a wrapped SQLITE_BUSY error.
+func isBusyLocked(err error) bool {
+	var coded sqliteCoder
+	return errors.As(err, &coded) && coded.Code()&0xff == sqliteBusy
+}
+
 // dedupeWindow is the rolling window for normalized-hash exact-dup detection.
 const dedupeWindow = int64(3600) // seconds
 
@@ -77,9 +90,32 @@ func New(path string) (*Store, error) {
 	// Single writer; WAL allows concurrent reads without blocking, and
 	// busy_timeout lets a second process back off instead of failing instantly.
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("store.New: pragma: %w", err)
+	// Set busy_timeout before switching to WAL: the WAL switch takes an
+	// exclusive lock that a concurrent cold opener may hold, and without a
+	// timeout in place first the competing opener fails immediately with
+	// SQLITE_BUSY instead of waiting for the lock to free. All three pragmas
+	// run on the same connection in one Exec so the timeout is in effect on
+	// the connection that performs the WAL switch.
+	//
+	// modernc's WAL switch does not engage the busy handler (it returns
+	// SQLITE_BUSY immediately when another connection holds the lock), so a
+	// short bounded retry on the busy code covers the concurrent cold-start
+	// case the timeout alone cannot. Non-busy errors fail immediately.
+	const (
+		walPragma   = "PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;"
+		walRetries  = 10
+		walRetryGap = 25 * time.Millisecond
+	)
+	var pragmaErr error
+	for attempt := 0; attempt <= walRetries; attempt++ {
+		if _, pragmaErr = db.Exec(walPragma); pragmaErr == nil {
+			break
+		}
+		if !isBusyLocked(pragmaErr) || attempt == walRetries {
+			db.Close()
+			return nil, fmt.Errorf("store.New: pragma: %w", pragmaErr)
+		}
+		time.Sleep(walRetryGap)
 	}
 	if err := migrateDB(db); err != nil {
 		db.Close()

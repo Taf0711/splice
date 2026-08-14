@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/Taf0711/splice/memd/store"
@@ -828,5 +829,47 @@ func TestMarkReviewed_NotFound(t *testing.T) {
 	err := s.MarkReviewed(ctx, 424242)
 	if !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("MarkReviewed on missing id: err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestConcurrentOpen verifies that several simultaneous store.New calls against
+// one fresh database all succeed. A single Exec that switched to WAL before
+// setting busy_timeout let a concurrent cold opener fail immediately with
+// SQLITE_BUSY; the timeout must be installed on the connection first so openers
+// back off instead of failing. Launched behind a barrier so all openers contend
+// for the same fresh file at once, and repeated over several rounds.
+func TestConcurrentOpen(t *testing.T) {
+	const (
+		openers = 4
+		rounds  = 8
+	)
+
+	for round := 0; round < rounds; round++ {
+		dbPath := filepath.Join(t.TempDir(), "concurrent.db")
+
+		start := make(chan struct{})
+		results := make(chan error, openers)
+		var wg sync.WaitGroup
+		for i := 0; i < openers; i++ {
+			wg.Add(1)
+			go func(path string) {
+				defer wg.Done()
+				<-start
+				s, err := store.New(path)
+				if err == nil {
+					s.Close()
+				}
+				results <- err
+			}(dbPath)
+		}
+		close(start)
+		wg.Wait()
+		close(results)
+
+		for err := range results {
+			if err != nil {
+				t.Fatalf("round %d: concurrent store.New failed: %v", round, err)
+			}
+		}
 	}
 }
