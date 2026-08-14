@@ -29,6 +29,16 @@ func UpsertProvider(path string, profile ProviderProfile, setActive bool) (FileC
 	}
 
 	mergeProvider(&cfg, profile)
+	// Only a credential write can promote this marker. The general profile merge
+	// also handles project config, which must not reactivate a stale stored key.
+	if profile.APIKeyStored {
+		for index := range cfg.Providers {
+			if cfg.Providers[index].Name == profile.Name {
+				cfg.Providers[index].APIKeyStored = true
+				break
+			}
+		}
+	}
 	if setActive || strings.TrimSpace(cfg.ActiveProvider) == "" {
 		cfg.ActiveProvider = profile.Name
 	}
