@@ -623,7 +623,7 @@ func runPass(
 		}
 
 		start := time.Now()
-		output, err := runStageWithContext(stageCtx, input, agentStage, iteration, selection, options, workDir, runner, mem)
+		output, err := runStageWithContext(stageCtx, input, agentStage, iteration, selection, options, workDir, runner, mem, stage.Budget.OutputMax)
 		if cancelStage != nil {
 			cancelStage()
 		}
@@ -746,8 +746,14 @@ func runStageWithContext(
 	workDir string,
 	runner ToolRunner,
 	mem MemoryStore,
+	outputMax int,
 ) (schemas.HarnessStageOutput, error) {
 	stageOpts := stageOptions(input.StageName, iteration, selection, options, workDir, runner)
+	if outputMax > 0 {
+		// The stage's output budget caps every LLM request this stage makes. Zero
+		// keeps the provider default (no per-request override).
+		stageOpts.MaxOutputTokens = outputMax
+	}
 	stageOpts.ModelOverride = selection.Model
 	stageOpts.ReasoningEffort = selection.ReasoningEffort
 	output, err := stage.Run(ctx, input, selection.Provider, stageOpts)

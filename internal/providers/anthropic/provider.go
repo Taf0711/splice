@@ -54,14 +54,12 @@ func thinkingBudgetForEffort(effort string) int {
 
 // resolveThinking returns the thinking budget and the max_tokens to send. When a
 // budget is requested, max_tokens is raised if needed so the budget plus a
-// minimum response both fit (Anthropic rejects budget >= max_tokens). enabled is
-// false when no thinking was requested, leaving the request unchanged.
-//
-// The raise has no upper ceiling. A budget above a model's MaxOutputTokens minus
-// minResponseTokens produces a max_tokens the Anthropic API rejects with a 400.
-// TestThinkingBudgetFitsCatalogMaxOutputTokens guards that against the real
-// catalog.
-func resolveThinking(effort string, maxTokens int) (budget int, effectiveMax int, enabled bool) {
+// minimum response both fit (Anthropic rejects budget >= max_tokens). capped
+// marks a request-level output cap (a pipeline stage budget): the cap is the
+// absolute wire bound, so the budget is shrunk (or thinking disabled) instead
+// of raising max_tokens above it. enabled is false when no thinking was
+// requested, leaving the request unchanged.
+func resolveThinking(effort string, maxTokens int, capped bool) (budget int, effectiveMax int, enabled bool) {
 	budget = thinkingBudgetForEffort(effort)
 	if budget <= 0 {
 		return 0, maxTokens, false
@@ -71,7 +69,17 @@ func resolveThinking(effort string, maxTokens int) (budget int, effectiveMax int
 		effectiveMax = defaultMaxTokens
 	}
 	if effectiveMax < budget+minResponseTokens {
-		effectiveMax = budget + minResponseTokens
+		if capped {
+			// The request cap is the absolute wire bound. Keep max_tokens at the
+			// cap and shrink the thinking budget to fit, or disable thinking when
+			// the cap cannot hold the minimum budget plus a response.
+			budget = effectiveMax - minResponseTokens
+			if budget < minThinkingBudget {
+				return 0, effectiveMax, false
+			}
+		} else {
+			effectiveMax = budget + minResponseTokens
+		}
 	}
 	return budget, effectiveMax, true
 }
@@ -379,15 +387,18 @@ func (provider *Provider) anthropicRequest(request zeroruntime.CompletionRequest
 
 	mapped := messagesRequest{
 		Model:     provider.model,
-		MaxTokens: provider.maxTokens,
+		MaxTokens: providerio.WireMaxOutputTokens(request.MaxOutputTokens, provider.maxTokens),
 		Messages:  messages,
 		Stream:    true,
 	}
 	// Extended thinking: enable when a reasoning effort was requested. The budget
-	// is counted against max_tokens, so raise max_tokens to leave room for the
-	// response. Temperature is intentionally left unset (Anthropic requires the
-	// default when thinking is on).
-	if budget, effectiveMax, enabled := resolveThinking(request.ReasoningEffort, provider.maxTokens); enabled {
+	// is counted against max_tokens, so max_tokens normally gets raised to leave
+	// room for the response. A request-level output cap (a pipeline stage budget)
+	// is the absolute wire bound: thinking never raises max_tokens above it, and
+	// the budget shrinks (or thinking disables) to fit. Temperature is
+	// intentionally left unset (Anthropic requires the default when thinking is
+	// on).
+	if budget, effectiveMax, enabled := resolveThinking(request.ReasoningEffort, mapped.MaxTokens, request.MaxOutputTokens > 0); enabled {
 		mapped.MaxTokens = effectiveMax
 		mapped.Thinking = &thinkingConfig{Type: "enabled", BudgetTokens: budget}
 	}

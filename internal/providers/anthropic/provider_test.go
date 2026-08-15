@@ -655,3 +655,98 @@ func TestAnthropicRequestOmitsToolChoiceWhenEmpty(t *testing.T) {
 		t.Fatalf("keyless request must omit tool_choice: %s", data)
 	}
 }
+
+// TestStreamCompletionCapsMaxTokensAtRequestCap pins that a per-request output
+// cap (a pipeline stage budget) is the absolute wire bound: max_tokens is the
+// tighter of the cap and the provider default.
+func TestStreamCompletionCapsMaxTokensAtRequestCap(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		writeSSEEvent(w, "message_stop", `{"type":"message_stop"}`)
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{BaseURL: server.URL + "/", Model: "claude-test", MaxTokens: 64_000})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages:        []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+		MaxOutputTokens: 8192,
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion returned error: %v", err)
+	}
+	drain(stream)
+
+	if mt, _ := gotBody["max_tokens"].(float64); int(mt) != 8192 {
+		t.Fatalf("max_tokens = %#v, want request cap 8192", gotBody["max_tokens"])
+	}
+}
+
+// TestStreamCompletionThinkingNeverExceedsRequestCap pins the conflict
+// resolution: when the request cap cannot hold the requested thinking budget
+// plus the reserved response, the budget shrinks (and thinking disables when
+// even the minimum budget does not fit) instead of raising max_tokens above
+// the cap.
+func TestStreamCompletionThinkingNeverExceedsRequestCap(t *testing.T) {
+	tests := []struct {
+		name        string
+		requestCap  int
+		effort      string
+		wantMax     int
+		wantBudget  int
+		wantNoThink bool
+	}{
+		{name: "fits unchanged", requestCap: 64_000, effort: "high", wantMax: 64_000, wantBudget: 24000},
+		{name: "budget shrinks to fit", requestCap: 8192, effort: "high", wantMax: 8192, wantBudget: 8192 - minResponseTokens},
+		{name: "cap below minimum budget and response disables thinking", requestCap: minThinkingBudget + minResponseTokens - 1, effort: "high", wantMax: minThinkingBudget + minResponseTokens - 1, wantNoThink: true},
+		{name: "cap at minimum budget only disables thinking", requestCap: minThinkingBudget, effort: "high", wantMax: minThinkingBudget, wantNoThink: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotBody map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+					t.Fatalf("decode request body: %v", err)
+				}
+				writeSSEEvent(w, "message_stop", `{"type":"message_stop"}`)
+			}))
+			defer server.Close()
+
+			provider, err := New(Options{BaseURL: server.URL + "/", Model: "claude-test", MaxTokens: 64_000})
+			if err != nil {
+				t.Fatalf("New returned error: %v", err)
+			}
+			stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+				Messages:        []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+				ReasoningEffort: tt.effort,
+				MaxOutputTokens: tt.requestCap,
+			})
+			if err != nil {
+				t.Fatalf("StreamCompletion returned error: %v", err)
+			}
+			drain(stream)
+
+			if mt, _ := gotBody["max_tokens"].(float64); int(mt) != tt.wantMax {
+				t.Fatalf("max_tokens = %#v, want %d (never above the request cap)", gotBody["max_tokens"], tt.wantMax)
+			}
+			thinking, ok := gotBody["thinking"].(map[string]any)
+			if tt.wantNoThink {
+				if ok {
+					t.Fatalf("thinking = %#v, want disabled under a too-small cap", gotBody["thinking"])
+				}
+				return
+			}
+			if !ok {
+				t.Fatalf("thinking missing from request: %#v", gotBody)
+			}
+			if budget, _ := thinking["budget_tokens"].(float64); int(budget) != tt.wantBudget {
+				t.Fatalf("thinking.budget_tokens = %#v, want %d", thinking["budget_tokens"], tt.wantBudget)
+			}
+		})
+	}
+}

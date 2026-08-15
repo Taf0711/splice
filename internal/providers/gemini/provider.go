@@ -341,7 +341,7 @@ func (provider *Provider) geminiRequest(request zeroruntime.CompletionRequest) (
 	mapped := generateContentRequest{
 		SystemInstruction: systemInstruction,
 		Contents:          contents,
-		GenerationConfig:  generationConfig{MaxOutputTokens: provider.maxTokens},
+		GenerationConfig:  generationConfig{MaxOutputTokens: providerio.WireMaxOutputTokens(request.MaxOutputTokens, provider.maxTokens)},
 	}
 	// Thinking: enable a budget when a reasoning effort was requested. Omitted
 	// otherwise so default requests are unchanged.

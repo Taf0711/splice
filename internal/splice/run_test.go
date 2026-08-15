@@ -231,7 +231,7 @@ func TestRunStageWithContextFailurePreservesBothAttemptsUsage(t *testing.T) {
 	_, err := runStageWithContext(context.Background(), schemas.HarnessStageInput{
 		RunID:     "run-context-failure",
 		StageName: "context_stage",
-	}, stage, 1, agent.ModelSelection{Provider: runFakeProvider{}}, agent.Options{}, t.TempDir(), nil, nil)
+	}, stage, 1, agent.ModelSelection{Provider: runFakeProvider{}}, agent.Options{}, t.TempDir(), nil, nil, 0)
 	if err == nil {
 		t.Fatal("runStageWithContext returned nil error")
 	}
@@ -783,7 +783,7 @@ func TestRunStageWithContextPersistsToolDegradationObservation(t *testing.T) {
 		StageName: stageName,
 	}, stage, 1, selection, agent.Options{OnAttributedUsage: func(usage agent.AttributedUsage) {
 		attributed = append(attributed, usage)
-	}}, workDir, nil, store)
+	}}, workDir, nil, store, 0)
 	if err != nil {
 		t.Fatalf("runStageWithContext: %v", err)
 	}
@@ -2977,5 +2977,58 @@ func TestRequestLedgerDerivesCoverageStates(t *testing.T) {
 				tc.checkCounts(t, result)
 			}
 		})
+	}
+}
+
+// TestRunPassThreadsStageOutputBudgetToCompletionRequest proves an
+// ExecutionStage output budget lands as the CompletionRequest output cap.
+func TestRunPassThreadsStageOutputBudgetToCompletionRequest(t *testing.T) {
+	workDir := t.TempDir()
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		RequestIntent: "write code",
+		Stages: []schemas.ExecutionStage{{
+			Name:   "code_writer",
+			Budget: schemas.StageBudget{InputMax: 1000, OutputMax: 8192, ModelTier: "medium"},
+		}},
+	}
+	provider := &captureRequestProvider{}
+	fakeRunner := ToolRunnerFunc(func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
+		return ToolResult{OK: true, Output: ""}, nil
+	})
+
+	_, _, completed, err := runPass(context.Background(), "run-budget-8192", 1, plan, stageRegistry{
+		"code_writer": stages.CodeWriter{},
+	}, provider, agent.Options{}, workDir, fakeRunner, time.Time{}, nil, nil)
+	if err != nil || !completed {
+		t.Fatalf("runPass: completed=%v err=%v", completed, err)
+	}
+	if provider.request.MaxOutputTokens != 8192 {
+		t.Fatalf("request.MaxOutputTokens = %d, want stage budget 8192", provider.request.MaxOutputTokens)
+	}
+}
+
+// TestRunPassZeroOutputBudgetSendsNoOverride proves OutputMax=0 (model-free
+// stages, or a stage without a budget) leaves the request cap at zero.
+func TestRunPassZeroOutputBudgetSendsNoOverride(t *testing.T) {
+	workDir := t.TempDir()
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		RequestIntent: "write code",
+		Stages:        []schemas.ExecutionStage{{Name: "code_writer"}},
+	}
+	provider := &captureRequestProvider{}
+	fakeRunner := ToolRunnerFunc(func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
+		return ToolResult{OK: true, Output: ""}, nil
+	})
+
+	_, _, completed, err := runPass(context.Background(), "run-budget-zero", 1, plan, stageRegistry{
+		"code_writer": stages.CodeWriter{},
+	}, provider, agent.Options{}, workDir, fakeRunner, time.Time{}, nil, nil)
+	if err != nil || !completed {
+		t.Fatalf("runPass: completed=%v err=%v", completed, err)
+	}
+	if provider.request.MaxOutputTokens != 0 {
+		t.Fatalf("request.MaxOutputTokens = %d, want 0 (no override)", provider.request.MaxOutputTokens)
 	}
 }

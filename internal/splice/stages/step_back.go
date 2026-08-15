@@ -39,7 +39,7 @@ func StepBack(ctx context.Context, provider zeroruntime.Provider, opts StageOpti
 	// The fallback is a tier label, matching the other stages. It is only used
 	// for attribution when no model override is set, so it must never name a
 	// specific model the user may not have configured.
-	collected, err := callValidatedToolUse(ctx, provider, opts.model("reasoning"), opts.ReasoningEffort, composeSystemPrompt(stepBackSystemPrompt), string(payload), opts.Images, stepBackToolDefinition(), &opts.Stream, parseStepBackAnalysis, opts.PromptCacheKey)
+	collected, err := callValidatedToolUse(ctx, provider, opts.model("reasoning"), opts.ReasoningEffort, composeSystemPrompt(stepBackSystemPrompt), string(payload), opts.Images, stepBackToolDefinition(), opts.MaxOutputTokens, &opts.Stream, parseStepBackAnalysis, opts.PromptCacheKey)
 	if err != nil {
 		return schemas.StepBackAnalysis{}, err
 	}

@@ -60,7 +60,7 @@ func (CodeWriter) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 	if err != nil {
 		return schemas.HarnessStageOutput{}, err
 	}
-	collected, err := callValidatedToolUse(ctx, provider, options.model("medium"), options.ReasoningEffort, composeSystemPrompt(codeWriterSystemPrompt), string(payload), options.Images, submitCodeToolDefinition(), &options.Stream, func(collected *zeroruntime.CollectedStream) error {
+	collected, err := callValidatedToolUse(ctx, provider, options.model("medium"), options.ReasoningEffort, composeSystemPrompt(codeWriterSystemPrompt), string(payload), options.Images, submitCodeToolDefinition(), options.MaxOutputTokens, &options.Stream, func(collected *zeroruntime.CollectedStream) error {
 		_, err := parseCodeWriterOutput(collected)
 		return err
 	}, options.PromptCacheKey)

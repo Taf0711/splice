@@ -511,3 +511,21 @@ func PositiveOrDefault(value int, fallback int, label string) (int, error) {
 	}
 	return value, nil
 }
+
+// WireMaxOutputTokens combines a per-request output cap with the provider's
+// configured default into the value to send on the wire. The tighter of the
+// two applies when both are positive; a zero value on either side leaves the
+// other in charge; zero on both means the adapter omits the cap so the
+// provider applies its own context-safe default.
+func WireMaxOutputTokens(requestCap, configured int) int {
+	switch {
+	case requestCap > 0 && configured > 0:
+		return min(requestCap, configured)
+	case requestCap > 0:
+		return requestCap
+	case configured > 0:
+		return configured
+	default:
+		return 0
+	}
+}

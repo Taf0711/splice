@@ -80,7 +80,7 @@ func withCollectedUsage(err error, collected *zeroruntime.CollectedStream) error
 // tool (ToolChoice: tool.Name) so a prose answer cannot strand the typed-output
 // retry loop. When false the request keeps auto tool-calling behavior. Some
 // OpenAI-compatible endpoints reject the forced shape but accept auto calls.
-func callToolUse(ctx context.Context, provider zeroruntime.Provider, model, reasoningEffort, systemPrompt, userPrompt string, images []zeroruntime.ImageBlock, tool zeroruntime.ToolDefinition, callbacks *zeroruntime.CollectOptions, promptCacheKey string, forceChoice bool) (*zeroruntime.CollectedStream, error) {
+func callToolUse(ctx context.Context, provider zeroruntime.Provider, model, reasoningEffort, systemPrompt, userPrompt string, images []zeroruntime.ImageBlock, tool zeroruntime.ToolDefinition, maxOutputTokens int, callbacks *zeroruntime.CollectOptions, promptCacheKey string, forceChoice bool) (*zeroruntime.CollectedStream, error) {
 	messages := []zeroruntime.Message{
 		{Role: zeroruntime.MessageRoleSystem, Content: systemPrompt},
 		{Role: zeroruntime.MessageRoleUser, Content: userPrompt, Images: images},
@@ -90,6 +90,7 @@ func callToolUse(ctx context.Context, provider zeroruntime.Provider, model, reas
 		Tools:           []zeroruntime.ToolDefinition{tool},
 		ReasoningEffort: reasoningEffort,
 		PromptCacheKey:  promptCacheKey,
+		MaxOutputTokens: maxOutputTokens,
 	}
 	if forceChoice {
 		// Force the model to call this stage's single typed tool so a prose
@@ -116,7 +117,7 @@ func callToolUse(ctx context.Context, provider zeroruntime.Provider, model, reas
 // callValidatedToolUse retries typed-output contract failures. The observed
 // OpenRouter request error gets one compatibility retry with auto tool calling.
 // All other provider, transport, and cancellation errors return immediately.
-func callValidatedToolUse(ctx context.Context, provider zeroruntime.Provider, model, reasoningEffort, systemPrompt, userPrompt string, images []zeroruntime.ImageBlock, tool zeroruntime.ToolDefinition, callbacks *zeroruntime.CollectOptions, validate func(*zeroruntime.CollectedStream) error, promptCacheKey string) (*zeroruntime.CollectedStream, error) {
+func callValidatedToolUse(ctx context.Context, provider zeroruntime.Provider, model, reasoningEffort, systemPrompt, userPrompt string, images []zeroruntime.ImageBlock, tool zeroruntime.ToolDefinition, maxOutputTokens int, callbacks *zeroruntime.CollectOptions, validate func(*zeroruntime.CollectedStream) error, promptCacheKey string) (*zeroruntime.CollectedStream, error) {
 	var total zeroruntime.Usage
 	attemptPrompt := userPrompt
 	var lastErr error
@@ -125,7 +126,7 @@ func callValidatedToolUse(ctx context.Context, provider zeroruntime.Provider, mo
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		collected, err := callToolUse(ctx, provider, model, reasoningEffort, systemPrompt, attemptPrompt, images, tool, callbacks, promptCacheKey, forceChoice)
+		collected, err := callToolUse(ctx, provider, model, reasoningEffort, systemPrompt, attemptPrompt, images, tool, maxOutputTokens, callbacks, promptCacheKey, forceChoice)
 		if err != nil {
 			if forceChoice && shouldRetryWithAutoToolChoice(err) {
 				forceChoice = false

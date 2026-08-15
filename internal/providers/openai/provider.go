@@ -509,8 +509,8 @@ func (provider *Provider) openAIRequest(request zeroruntime.CompletionRequest) c
 		// which silently zeroes token accounting.
 		StreamOptions: &streamOptions{IncludeUsage: true},
 	}
-	if provider.maxTokens > 0 {
-		mapped.MaxCompletionTokens = provider.maxTokens
+	if cap := providerio.WireMaxOutputTokens(request.MaxOutputTokens, provider.maxTokens); cap > 0 {
+		mapped.MaxCompletionTokens = cap
 	}
 	// reasoning_effort is only valid for reasoning models; callers gate it against
 	// the model's capabilities, so an empty value (the default for non-reasoning

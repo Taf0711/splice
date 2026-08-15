@@ -39,7 +39,7 @@ func (PlanCritic) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 		return schemas.HarnessStageOutput{}, fmt.Errorf("plan critic input: %w", err)
 	}
 	payload, _ := json.MarshalIndent(critiqueInput, "", "  ")
-	collected, err := callValidatedToolUse(ctx, provider, options.model("reasoning"), options.ReasoningEffort, composeSystemPrompt(planCriticSystemPrompt), string(payload), options.Images, planCriticToolDefinition(), &options.Stream, parsePlanCritique, options.PromptCacheKey)
+	collected, err := callValidatedToolUse(ctx, provider, options.model("reasoning"), options.ReasoningEffort, composeSystemPrompt(planCriticSystemPrompt), string(payload), options.Images, planCriticToolDefinition(), options.MaxOutputTokens, &options.Stream, parsePlanCritique, options.PromptCacheKey)
 	if err != nil {
 		return schemas.HarnessStageOutput{}, err
 	}

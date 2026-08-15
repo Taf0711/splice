@@ -41,6 +41,9 @@ type StageOptions struct {
 	// ReasoningEffort is the per-stage reasoning effort (minimal/low/medium/high).
 	// Empty means "let the provider decide".
 	ReasoningEffort string
+	// MaxOutputTokens caps output tokens for this stage's LLM requests. Zero
+	// means no per-request override; the provider default applies.
+	MaxOutputTokens int
 	// PromptCacheKey groups requests that share a system-prompt prefix so the provider can reuse its cached prefix. Empty disables the hint.
 	PromptCacheKey string
 	// Command is an explicit command for deterministic stages like test_runner.

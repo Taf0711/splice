@@ -1786,3 +1786,61 @@ func TestOpenRouterWebSearchUsageReportsConfiguredEngine(t *testing.T) {
 	}
 	t.Fatal("provider emitted no usage event")
 }
+
+// TestStreamCompletionCombinesRequestOutputCap pins the wire rule for the
+// per-request output cap: the tighter of the request cap and the configured
+// default wins, a lone non-zero side wins, and zero on both omits the field.
+func TestStreamCompletionCombinesRequestOutputCap(t *testing.T) {
+	tests := []struct {
+		name       string
+		requestCap int
+		configured int
+		want       int
+		omit       bool
+	}{
+		{name: "request cap tighter", requestCap: 512, configured: 1234, want: 512},
+		{name: "configured default tighter", requestCap: 8192, configured: 1234, want: 1234},
+		{name: "request alone when default zero", requestCap: 512, configured: 0, want: 512},
+		{name: "default alone when request zero", requestCap: 0, configured: 1234, want: 1234},
+		{name: "omitted when both zero", configured: 0, omit: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotBody map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+					t.Fatalf("decode request body: %v", err)
+				}
+				writeSSE(w, `[DONE]`)
+			}))
+			defer server.Close()
+
+			provider, err := New(Options{BaseURL: server.URL + "/", Model: "gpt-test", MaxTokens: tt.configured})
+			if err != nil {
+				t.Fatalf("New returned error: %v", err)
+			}
+			stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+				Messages:        []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+				MaxOutputTokens: tt.requestCap,
+			})
+			if err != nil {
+				t.Fatalf("StreamCompletion returned error: %v", err)
+			}
+			drain(stream)
+
+			got, ok := gotBody["max_completion_tokens"]
+			if tt.omit {
+				if ok {
+					t.Fatalf("max_completion_tokens = %#v, want omitted", got)
+				}
+				return
+			}
+			if !ok {
+				t.Fatalf("max_completion_tokens missing from request: %#v", gotBody)
+			}
+			if n, _ := got.(float64); int(n) != tt.want {
+				t.Fatalf("max_completion_tokens = %#v, want %d", got, tt.want)
+			}
+		})
+	}
+}

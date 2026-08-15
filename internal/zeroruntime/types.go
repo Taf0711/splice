@@ -255,6 +255,11 @@ type CompletionRequest struct {
 	// re-billing the full prefix each turn. Providers without an equivalent
 	// ignore it.
 	PromptCacheKey string
+	// MaxOutputTokens caps this request's response output tokens. Zero means no
+	// per-request override: the provider uses its configured default cap.
+	// Adapters combine it with the provider default on the wire, keeping the
+	// tighter of the two when both are positive.
+	MaxOutputTokens int
 	// ToolChoice, when non-empty, is the name of the single tool the model MUST
 	// call this request (forced tool use). Adapters map it to their native
 	// forcing mechanism (OpenAI tool_choice function, Anthropic tool_choice

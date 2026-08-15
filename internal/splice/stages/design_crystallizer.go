@@ -29,7 +29,7 @@ func (DesignCrystallizer) Crystallize(ctx context.Context, provider zeroruntime.
 		return schemas.DesignPlan{}, fmt.Errorf("crystallize input: %w", err)
 	}
 	payload, _ := json.MarshalIndent(input, "", "  ")
-	collected, err := callValidatedToolUse(ctx, provider, opts.model("medium"), opts.ReasoningEffort, composeSystemPrompt(designCrystallizeSystemPrompt), string(payload), opts.Images, designPlanToolDefinition(), &opts.Stream, parseDesignPlan, opts.PromptCacheKey)
+	collected, err := callValidatedToolUse(ctx, provider, opts.model("medium"), opts.ReasoningEffort, composeSystemPrompt(designCrystallizeSystemPrompt), string(payload), opts.Images, designPlanToolDefinition(), opts.MaxOutputTokens, &opts.Stream, parseDesignPlan, opts.PromptCacheKey)
 	if err != nil {
 		return schemas.DesignPlan{}, err
 	}

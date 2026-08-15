@@ -371,3 +371,27 @@ func TestHTTPClientReturnsStallHardenedSharedClient(t *testing.T) {
 		t.Fatal("an explicit client must be returned unchanged")
 	}
 }
+
+// TestWireMaxOutputTokens pins the four precedence cases of combining a
+// per-request output cap with the provider's configured default.
+func TestWireMaxOutputTokens(t *testing.T) {
+	tests := []struct {
+		name       string
+		requestCap int
+		configured int
+		want       int
+	}{
+		{name: "both positive takes the min", requestCap: 8192, configured: 4096, want: 4096},
+		{name: "both positive request tighter", requestCap: 512, configured: 4096, want: 512},
+		{name: "request alone when default zero", requestCap: 8192, configured: 0, want: 8192},
+		{name: "default alone when request zero", requestCap: 0, configured: 64000, want: 64000},
+		{name: "zero when both zero", requestCap: 0, configured: 0, want: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := WireMaxOutputTokens(tt.requestCap, tt.configured); got != tt.want {
+				t.Fatalf("WireMaxOutputTokens(%d, %d) = %d, want %d", tt.requestCap, tt.configured, got, tt.want)
+			}
+		})
+	}
+}
