@@ -80,14 +80,16 @@ type RunDesignPlanOptions struct {
 
 // RunDesignPlan executes each task in a design plan as an independent pipeline run.
 func RunDesignPlan(ctx context.Context, plan schemas.DesignPlan, provider agent.Provider, options agent.Options, mem MemoryStore, rec WorkspaceRecovery) (agent.Result, error) {
+	cfg := PipelineConfigFromAgentOptions(options)
 	return RunDesignPlanWithResume(ctx, plan, provider, options, mem, rec, RunDesignPlanOptions{
-		PlanID: options.SessionID,
+		PlanID: cfg.SessionID,
 	})
 }
 
 // RunDesignPlanWithResume executes a design plan with resume support, per-task
 // callbacks, acceptance fact propagation, and a unique plan revision ID.
 func RunDesignPlanWithResume(ctx context.Context, plan schemas.DesignPlan, provider agent.Provider, options agent.Options, mem MemoryStore, rec WorkspaceRecovery, runOpts RunDesignPlanOptions) (agent.Result, error) {
+	cfg := PipelineConfigFromAgentOptions(options)
 	if err := plan.Validate(); err != nil {
 		return agent.Result{}, fmt.Errorf("validate plan: %w", err)
 	}
@@ -106,7 +108,7 @@ func RunDesignPlanWithResume(ctx context.Context, plan schemas.DesignPlan, provi
 			Status:         "failed",
 			SkippedTaskIDs: taskIDs(plan.Tasks),
 		}
-		return designPlanAgentResult(options, result, err.Error())
+		return designPlanAgentResult(cfg, result, err.Error())
 	}
 
 	completedSet := make(map[string]bool, len(runOpts.CompletedTaskIDs))
@@ -131,7 +133,7 @@ func RunDesignPlanWithResume(ctx context.Context, plan schemas.DesignPlan, provi
 			continue
 		}
 
-		emitProgress(options, fmt.Sprintf("Starting task %d/%d %s: %s\n", nextTaskNumber, totalTasks, task.ID, task.Title))
+		emitProgress(cfg, fmt.Sprintf("Starting task %d/%d %s: %s\n", nextTaskNumber, totalTasks, task.ID, task.Title))
 		nextTaskNumber++
 
 		if runOpts.OnTaskStart != nil {
@@ -150,7 +152,7 @@ func RunDesignPlanWithResume(ctx context.Context, plan schemas.DesignPlan, provi
 			taskPlan.RequestIntent = task.Intent + "\n\nAcceptance criteria:\n- " + strings.Join(acceptanceFacts, "\n- ")
 		}
 
-		pipelineResult, err := runExecutionPlan(ctx, runID, taskPlan, provider, options, mem, rec)
+		pipelineResult, err := runExecutionPlan(ctx, runID, taskPlan, provider, cfg, mem, rec)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return agent.Result{}, context.Canceled
@@ -185,7 +187,7 @@ func RunDesignPlanWithResume(ctx context.Context, plan schemas.DesignPlan, provi
 		if pipelineResult.AbortReason != nil && strings.TrimSpace(*pipelineResult.AbortReason) != "" {
 			reason += ": " + strings.TrimSpace(*pipelineResult.AbortReason)
 		}
-		return designPlanAgentResult(options, result, reason)
+		return designPlanAgentResult(cfg, result, reason)
 	}
 
 	result := schemas.DesignPlanResult{
@@ -193,7 +195,7 @@ func RunDesignPlanWithResume(ctx context.Context, plan schemas.DesignPlan, provi
 		Status:         "completed",
 		CompletedTasks: completedOutcomes,
 	}
-	return designPlanAgentResult(options, result, "")
+	return designPlanAgentResult(cfg, result, "")
 }
 
 func taskIDs(tasks []schemas.Task) []string {
@@ -204,7 +206,7 @@ func taskIDs(tasks []schemas.Task) []string {
 	return ids
 }
 
-func designPlanAgentResult(options agent.Options, result schemas.DesignPlanResult, reason string) (agent.Result, error) {
+func designPlanAgentResult(options PipelineRunConfig, result schemas.DesignPlanResult, reason string) (agent.Result, error) {
 	if err := result.Validate(); err != nil {
 		return agent.Result{}, fmt.Errorf("validate design plan result: %w", err)
 	}

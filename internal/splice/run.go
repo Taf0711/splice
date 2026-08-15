@@ -42,7 +42,7 @@ func (ledger *requestLedger) append(record schemas.PipelineUsageRecord) {
 	ledger.records = append(ledger.records, record)
 }
 
-func (ledger *requestLedger) recordingOptions(options agent.Options) agent.Options {
+func (ledger *requestLedger) recordingOptions(options PipelineRunConfig) PipelineRunConfig {
 	recorded := options
 	downstreamAttributed := options.OnAttributedUsage
 	downstreamLegacy := options.OnUsage
@@ -192,13 +192,14 @@ func Run(ctx context.Context, prompt string, provider agent.Provider, options ag
 		return agent.Result{}, fmt.Errorf("validate plan: %w", err)
 	}
 
-	result, err := runExecutionPlan(ctx, runID, plan, provider, options, mem, rec)
+	cfg := PipelineConfigFromAgentOptions(options)
+	result, err := runExecutionPlan(ctx, runID, plan, provider, cfg, mem, rec)
 	if err != nil {
 		return agent.Result{}, err
 	}
 
 	finalAnswer, _ := json.MarshalIndent(result, "", "  ")
-	emitText(options, completionSummary(result))
+	emitText(cfg, completionSummary(result))
 	return agent.Result{
 		FinalAnswer:      string(finalAnswer),
 		Incomplete:       result.Status != "completed",
@@ -206,7 +207,7 @@ func Run(ctx context.Context, prompt string, provider agent.Provider, options ag
 	}, nil
 }
 
-func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionPlan, provider agent.Provider, options agent.Options, mem MemoryStore, rec WorkspaceRecovery) (schemas.PipelineResult, error) {
+func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionPlan, provider agent.Provider, options PipelineRunConfig, mem MemoryStore, rec WorkspaceRecovery) (schemas.PipelineResult, error) {
 	workDir := options.Cwd
 	if workDir == "" {
 		workDir = "."
@@ -254,7 +255,7 @@ func runIterationLoop(
 	plan schemas.ExecutionPlan,
 	registry stageRegistry,
 	provider agent.Provider,
-	options agent.Options,
+	options PipelineRunConfig,
 	workDir string,
 	runner ToolRunner,
 	mem MemoryStore,
@@ -511,7 +512,7 @@ func runPass(
 	plan schemas.ExecutionPlan,
 	registry stageRegistry,
 	provider agent.Provider,
-	options agent.Options,
+	options PipelineRunConfig,
 	workDir string,
 	runner ToolRunner,
 	wallDeadline time.Time,
@@ -742,7 +743,7 @@ func runStageWithContext(
 	stage stages.Stage,
 	iteration int,
 	selection agent.ModelSelection,
-	options agent.Options,
+	options PipelineRunConfig,
 	workDir string,
 	runner ToolRunner,
 	mem MemoryStore,
@@ -1168,7 +1169,7 @@ func skipSummaryDirComponent(rel string) bool {
 	return false
 }
 
-func newAgentToolRunner(options agent.Options, cwd string) ToolRunner {
+func newAgentToolRunner(options PipelineRunConfig, cwd string) ToolRunner {
 	if options.Registry == nil {
 		return ToolRunnerFunc(func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
 			call := toolCallFor(name, args)
@@ -1306,7 +1307,7 @@ func sandboxRisk(sideEffect tools.SideEffect) sandbox.Risk {
 	return sandbox.Risk{Level: level}
 }
 
-func emitProgress(options agent.Options, text string) {
+func emitProgress(options PipelineRunConfig, text string) {
 	if options.OnReasoning != nil {
 		options.OnReasoning(text)
 	}
@@ -1327,7 +1328,7 @@ const (
 // its PIPELINE sidebar; headless consumers ignore it (it looks like a short
 // binary-prefixed line). status is one of: started, running, completed,
 // failed, skipped, retry.
-func emitStageEvent(options agent.Options, stageName, status, detail string, progress int, changedFiles []string) {
+func emitStageEvent(options PipelineRunConfig, stageName, status, detail string, progress int, changedFiles []string) {
 	if options.OnReasoning == nil {
 		return
 	}
@@ -1376,7 +1377,7 @@ func stageChangedFiles(output schemas.HarnessStageOutput) []string {
 	return uniq
 }
 
-func emitText(options agent.Options, text string) {
+func emitText(options PipelineRunConfig, text string) {
 	if options.OnText != nil {
 		options.OnText(text)
 	}
@@ -1401,13 +1402,13 @@ func newToolCallID(name string) string {
 	return "call_" + safeName + "_" + hex.EncodeToString(b)
 }
 
-func emitToolCall(options agent.Options, call agent.ToolCall) {
+func emitToolCall(options PipelineRunConfig, call agent.ToolCall) {
 	if options.OnToolCall != nil {
 		options.OnToolCall(call)
 	}
 }
 
-func emitToolResult(options agent.Options, call agent.ToolCall, result ToolResult) {
+func emitToolResult(options PipelineRunConfig, call agent.ToolCall, result ToolResult) {
 	if options.OnToolResult == nil {
 		return
 	}
@@ -1431,7 +1432,7 @@ func emitToolResult(options agent.Options, call agent.ToolCall, result ToolResul
 	})
 }
 
-func emitPermissionPrompt(options agent.Options, request agent.PermissionRequest) {
+func emitPermissionPrompt(options PipelineRunConfig, request agent.PermissionRequest) {
 	if options.OnPermission == nil {
 		return
 	}
@@ -1450,7 +1451,7 @@ func emitPermissionPrompt(options agent.Options, request agent.PermissionRequest
 	})
 }
 
-func emitPermissionDecision(options agent.Options, request agent.PermissionRequest, action agent.PermissionDecisionAction, reason string, granted bool) {
+func emitPermissionDecision(options PipelineRunConfig, request agent.PermissionRequest, action agent.PermissionDecisionAction, reason string, granted bool) {
 	if options.OnPermission == nil {
 		return
 	}

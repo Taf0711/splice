@@ -12,7 +12,7 @@ import (
 )
 
 func TestBuildStageRegistryRegistersAllStages(t *testing.T) {
-	registry, err := buildStageRegistry(agent.Options{}, t.TempDir())
+	registry, err := buildStageRegistry(PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir())
 	if err != nil {
 		t.Fatalf("buildStageRegistry: %v", err)
 	}
@@ -25,7 +25,7 @@ func TestBuildStageRegistryRegistersAllStages(t *testing.T) {
 
 func TestBuildStageRegistryRegistersDeterministicToolsExactlyOnce(t *testing.T) {
 	toolRegistry := tools.NewRegistry()
-	options := agent.Options{Registry: toolRegistry}
+	options := PipelineConfigFromAgentOptions(agent.Options{Registry: toolRegistry})
 	workDir := t.TempDir()
 
 	if _, err := buildStageRegistry(options, workDir); err != nil {
@@ -50,12 +50,12 @@ func TestStageOptionsEmitsAttributedUsageWithoutLegacyDuplicate(t *testing.T) {
 	var attributed []agent.AttributedUsage
 	legacyCalls := 0
 	selection := agent.ModelSelection{ProviderName: "routed", Model: "model-a"}
-	options := stageOptions("code_writer", 2, selection, agent.Options{
+	options := stageOptions("code_writer", 2, selection, PipelineConfigFromAgentOptions(agent.Options{
 		OnUsage: func(agent.Usage) { legacyCalls++ },
 		OnAttributedUsage: func(usage agent.AttributedUsage) {
 			attributed = append(attributed, usage)
 		},
-	}, t.TempDir(), nil)
+	}), t.TempDir(), nil)
 
 	events := make(chan zeroruntime.StreamEvent, 2)
 	events <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 4, OutputTokens: 2}}
@@ -75,9 +75,9 @@ func TestStageOptionsEmitsAttributedUsageWithoutLegacyDuplicate(t *testing.T) {
 func TestStageOptionsEmitsMissingUsageAndPreservesLegacyFallback(t *testing.T) {
 	selection := agent.ModelSelection{ProviderName: "primary", Model: "model-a"}
 	var missing agent.AttributedUsage
-	attributedOptions := stageOptions("test_generator", 3, selection, agent.Options{
+	attributedOptions := stageOptions("test_generator", 3, selection, PipelineConfigFromAgentOptions(agent.Options{
 		OnAttributedUsage: func(usage agent.AttributedUsage) { missing = usage },
-	}, t.TempDir(), nil)
+	}), t.TempDir(), nil)
 
 	noUsage := make(chan zeroruntime.StreamEvent, 1)
 	noUsage <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
@@ -97,14 +97,14 @@ func TestStageOptionsEmitsMissingUsageAndPreservesLegacyFallback(t *testing.T) {
 	}
 
 	legacyCalls := 0
-	legacyOptions := stageOptions("code_writer", 1, selection, agent.Options{
+	legacyOptions := stageOptions("code_writer", 1, selection, PipelineConfigFromAgentOptions(agent.Options{
 		OnUsage: func(usage agent.Usage) {
 			legacyCalls++
 			if usage.InputTokens != 2 {
 				t.Fatalf("legacy usage = %+v", usage)
 			}
 		},
-	}, t.TempDir(), nil)
+	}), t.TempDir(), nil)
 	withUsage := make(chan zeroruntime.StreamEvent, 2)
 	withUsage <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 2}}
 	withUsage <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
@@ -117,11 +117,11 @@ func TestStageOptionsEmitsMissingUsageAndPreservesLegacyFallback(t *testing.T) {
 
 func TestStageOptionsPromptCacheKey(t *testing.T) {
 	selection := agent.ModelSelection{ProviderName: "primary", Model: "model-a"}
-	withSession := stageOptions("code_writer", 1, selection, agent.Options{SessionID: "session-1"}, t.TempDir(), nil)
+	withSession := stageOptions("code_writer", 1, selection, PipelineConfigFromAgentOptions(agent.Options{SessionID: "session-1"}), t.TempDir(), nil)
 	if got, want := withSession.PromptCacheKey, "session-1:code_writer"; got != want {
 		t.Fatalf("PromptCacheKey = %q, want %q", got, want)
 	}
-	withoutSession := stageOptions("code_writer", 1, selection, agent.Options{}, t.TempDir(), nil)
+	withoutSession := stageOptions("code_writer", 1, selection, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil)
 	if withoutSession.PromptCacheKey != "" {
 		t.Fatalf("PromptCacheKey = %q, want empty", withoutSession.PromptCacheKey)
 	}

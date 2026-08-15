@@ -18,7 +18,7 @@ import (
 type stageRegistry map[string]stages.Stage
 
 // buildStageRegistry creates a registry of Splice pipeline stages from agent options.
-func buildStageRegistry(options agent.Options, workDir string) (stageRegistry, error) {
+func buildStageRegistry(options PipelineRunConfig, workDir string) (stageRegistry, error) {
 	r := stageRegistry{
 		"code_writer":         stages.CodeWriter{},
 		"test_generator":      stages.TestGenerator{},
@@ -51,7 +51,7 @@ func buildStageRegistry(options agent.Options, workDir string) (stageRegistry, e
 
 // stageOptions builds StageOptions for a named stage.
 // iteration and selection provide attribution context for usage callbacks.
-func stageOptions(name string, iteration int, selection agent.ModelSelection, options agent.Options, workDir string, runner ToolRunner) stages.StageOptions {
+func stageOptions(name string, iteration int, selection agent.ModelSelection, options PipelineRunConfig, workDir string, runner ToolRunner) stages.StageOptions {
 	language := detectLanguage(workDir)
 	promptCacheKey := ""
 	if options.SessionID != "" {
@@ -107,7 +107,7 @@ func stageOptions(name string, iteration int, selection agent.ModelSelection, op
 	}
 }
 
-func makeReportCallback(options agent.Options, stageName string) func(string) {
+func makeReportCallback(options PipelineRunConfig, stageName string) func(string) {
 	return func(message string) {
 		if options.OnReasoning != nil {
 			options.OnReasoning(fmt.Sprintf("[%s] %s\n", stageName, message))
@@ -115,7 +115,7 @@ func makeReportCallback(options agent.Options, stageName string) func(string) {
 	}
 }
 
-func makeRecordedCommandCallback(options agent.Options) func(context.Context, string, map[string]any, func(context.Context) (stages.ToolResult, error)) (stages.ToolResult, error) {
+func makeRecordedCommandCallback(options PipelineRunConfig) func(context.Context, string, map[string]any, func(context.Context) (stages.ToolResult, error)) (stages.ToolResult, error) {
 	return func(ctx context.Context, name string, args map[string]any, run func(context.Context) (stages.ToolResult, error)) (stages.ToolResult, error) {
 		call := toolCallFor(name, args)
 		emitToolCall(options, call)

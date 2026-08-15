@@ -152,7 +152,7 @@ func TestRealMemdSidecarMemoryRetrieval(t *testing.T) {
 		var inputs []schemas.HarnessStageInput
 		_, _, completed, err := runPass(ctx, "real-memd-test", 1, plan, stageRegistry{
 			"code_writer": &capturingStage{inputs: &inputs},
-		}, runFakeProvider{}, agent.Options{}, workDir, nil, time.Time{}, nil, client)
+		}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir, nil, time.Time{}, nil, client)
 		if err != nil {
 			t.Fatalf("runPass: %v", err)
 		}
@@ -198,7 +198,7 @@ func TestRealMemdSidecarMemoryRetrieval(t *testing.T) {
 
 		_, _, completed, err := runPass(ctx, "real-memd-select", 1, plan, stageRegistry{
 			"code_writer": stages.CodeWriter{},
-		}, cwProvider, agent.Options{}, workDir, fakeRunner, time.Time{}, nil, client)
+		}, cwProvider, PipelineConfigFromAgentOptions(agent.Options{}), workDir, fakeRunner, time.Time{}, nil, client)
 		if err != nil {
 			t.Fatalf("runPass: %v", err)
 		}
