@@ -67,8 +67,10 @@ func TestPipelineNeverReadsContextWindow(t *testing.T) {
 		if readErr != nil {
 			return readErr
 		}
-		if strings.Contains(string(data), "ContextWindow") {
-			t.Errorf("%s references ContextWindow; internal/splice must not read it directly under the exec.go:604 pipeline path without updating that comment", path)
+		// A field read is ".ContextWindow". A classification map key such as
+		// "ContextWindow" is not a read and must not trip this guard.
+		if strings.Contains(string(data), ".ContextWindow") {
+			t.Errorf("%s reads ContextWindow; internal/splice must not read it directly under the exec.go:604 pipeline path without updating that comment", path)
 		}
 		return nil
 	})

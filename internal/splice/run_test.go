@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/hooks"
 	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/splice/stages"
@@ -3030,5 +3031,134 @@ func TestRunPassZeroOutputBudgetSendsNoOverride(t *testing.T) {
 	}
 	if provider.request.MaxOutputTokens != 0 {
 		t.Fatalf("request.MaxOutputTokens = %d, want 0 (no override)", provider.request.MaxOutputTokens)
+	}
+}
+
+func TestPipelineDisablesBashContextFulfillment(t *testing.T) {
+	workDir, registry := newRunTestWorkspace(t)
+	var results []agent.ToolResult
+	runner := newAgentToolRunner(PipelineConfigFromAgentOptions(agent.Options{
+		Cwd:           workDir,
+		Registry:      registry,
+		DisabledTools: []string{"bash"},
+		OnToolResult: func(result agent.ToolResult) {
+			results = append(results, result)
+		},
+	}), workDir)
+
+	res, err := runner.RunTool(context.Background(), "bash", map[string]any{"command": "echo hi"})
+	if err != nil {
+		t.Fatalf("RunTool error: %v", err)
+	}
+	if res.OK {
+		t.Fatal("disabled bash unexpectedly succeeded")
+	}
+	if res.DenialReason != agent.DenialFiltered {
+		t.Fatalf("DenialReason = %q, want %q; output=%q", res.DenialReason, agent.DenialFiltered, res.Output)
+	}
+	if !strings.Contains(res.Output, `Tool "bash" is not enabled`) {
+		t.Fatalf("output = %q, want filter denial", res.Output)
+	}
+	if len(results) != 1 || results[0].DenialReason != agent.DenialFiltered || results[0].Name != "bash" {
+		t.Fatalf("OnToolResult missing attributed bash filter denial: %+v", results)
+	}
+
+	py := filepath.Join(workDir, "broken.py")
+	if err := os.WriteFile(py, []byte("def broken(\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	analyzer, err := stages.NewStaticAnalyzer(stages.DefaultQualityChecks()...)
+	if err != nil {
+		t.Fatalf("analyzer: %v", err)
+	}
+	output, err := analyzer.Run(context.Background(), schemas.HarnessStageInput{
+		RunID:         "run-sd12-bash",
+		StageName:     "static_analyzer",
+		Sequence:      1,
+		PlanTier:      schemas.TierStandard,
+		RequestIntent: "check python",
+	}, nil, stages.StageOptions{
+		WorkDir:  workDir,
+		Language: "python",
+		RunTool: func(ctx context.Context, name string, args map[string]any) (stages.ToolResult, error) {
+			res, err := runner.RunTool(ctx, name, args)
+			return stages.ToolResult{OK: res.OK, Output: res.Output, Truncated: res.Truncated, Meta: res.Meta}, err
+		},
+	})
+	if err != nil {
+		t.Fatalf("static analyzer: %v", err)
+	}
+	report, ok := output.Data["static_analyzer_output"].(schemas.VerificationReport)
+	if !ok {
+		t.Fatalf("missing report, got %T", output.Data["static_analyzer_output"])
+	}
+	if report.Status == schemas.VerificationPassed {
+		t.Fatal("quality check passed despite disabled bash")
+	}
+	found := false
+	for _, f := range report.Findings {
+		if f.RuleID == "PY_COMPILE" {
+			found = true
+			if !strings.Contains(f.Message, `Tool "bash" is not enabled`) && !strings.Contains(f.Message, "not enabled for this run") {
+				t.Fatalf("PY_COMPILE message = %q, want bash filter denial", f.Message)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected PY_COMPILE finding from disabled bash, got status=%q summary=%q findings=%+v", report.Status, report.Summary, report.Findings)
+	}
+}
+
+func TestPipelineBeforeToolHookFires(t *testing.T) {
+	workDir, registry := newRunTestWorkspace(t)
+	source := filepath.Join(workDir, "a.go")
+	if err := os.WriteFile(source, []byte("package x\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	audit, err := hooks.NewAuditStore(hooks.AuditStoreOptions{
+		AuditPath: filepath.Join(t.TempDir(), "hooks-audit.jsonl"),
+	})
+	if err != nil {
+		t.Fatalf("audit store: %v", err)
+	}
+	dispatcher := hooks.NewDispatcher(hooks.DispatcherOptions{
+		Config: hooks.Config{
+			Enabled: true,
+			Hooks: []hooks.Definition{{
+				ID:      "sd12-before-read",
+				Event:   hooks.EventBeforeTool,
+				Matcher: "read_file",
+				Command: "true",
+				Enabled: true,
+			}},
+		},
+		Audit: audit,
+		Cwd:   workDir,
+	})
+	runner := newAgentToolRunner(PipelineConfigFromAgentOptions(agent.Options{
+		Cwd:      workDir,
+		Registry: registry,
+		Hooks:    dispatcher,
+	}), workDir)
+	res, err := runner.RunTool(context.Background(), "read_file", map[string]any{"path": source})
+	if err != nil {
+		t.Fatalf("RunTool error: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("read_file failed: %s", res.Output)
+	}
+	events, err := audit.ReadEvents()
+	if err != nil {
+		t.Fatalf("read audit: %v", err)
+	}
+	started := false
+	for _, event := range events {
+		if event.HookID == "sd12-before-read" && event.Event == hooks.EventBeforeTool {
+			started = true
+			break
+		}
+	}
+	if !started {
+		t.Fatalf("beforeTool hook did not fire; audit=%+v", events)
 	}
 }

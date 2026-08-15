@@ -3,6 +3,7 @@ package splice
 import (
 	"context"
 
+	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/tools"
 )
 
@@ -18,6 +19,7 @@ type ToolResult struct {
 	// receive faithful tool_result payloads without parsing tool output.
 	ChangedFiles []string
 	Display      tools.Display
+	DenialReason agent.DenialCategory
 }
 
 // ToolRunner runs a tool by name for deterministic context fulfillment.

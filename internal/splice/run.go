@@ -1187,6 +1187,17 @@ func newAgentToolRunner(options PipelineRunConfig, cwd string) ToolRunner {
 	return ToolRunnerFunc(func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
 		call := toolCallFor(name, args)
 		emitToolCall(options, call)
+		if denied, blocked := agent.DeniedByToolFilters(name, options.EnabledTools, options.DisabledTools); blocked {
+			res := ToolResult{
+				OK:           false,
+				Output:       denied.Output,
+				Meta:         map[string]string{"denial_reason": string(denied.DenialReason)},
+				Status:       denied.Status,
+				DenialReason: denied.DenialReason,
+			}
+			emitToolResult(options, call, res)
+			return res, nil
+		}
 		tool, ok := options.Registry.Get(name)
 		if !ok {
 			res := ToolResult{
@@ -1265,18 +1276,28 @@ func newAgentToolRunner(options PipelineRunConfig, cwd string) ToolRunner {
 				permissionGranted = true
 			}
 		}
-		res := options.Registry.RunWithOptions(ctx, name, args, tools.RunOptions{
-			Sandbox:           options.Sandbox,
-			PermissionMode:    string(options.PermissionMode),
-			Autonomy:          options.Autonomy,
-			TrustedWorkspace:  options.TrustedWorkspace,
-			FileTracker:       options.FileTracker,
-			Cwd:               cwd,
-			ToolCallID:        call.ID,
-			SessionID:         options.SessionID,
-			Model:             options.Model,
-			PermissionGranted: permissionGranted,
-		})
+		agentOpts := options.agentOptions()
+		if outcome, blocked := agent.RunBeforeToolHooks(ctx, agentOpts, call, args); blocked {
+			blockedResult := agent.HookBlockedResult(call, outcome)
+			res := ToolResult{
+				OK:           false,
+				Output:       blockedResult.Output,
+				Meta:         map[string]string{"denial_reason": string(blockedResult.DenialReason)},
+				Status:       blockedResult.Status,
+				DenialReason: blockedResult.DenialReason,
+			}
+			emitToolResult(options, call, res)
+			return res, nil
+		}
+		// Keep the pipeline's auto/spec-draft grant semantics. The shared helper
+		// only builds tools.RunOptions; it does not replace this prompt flow.
+		res := options.Registry.RunWithOptions(ctx, name, args, agent.NewToolRunOptions(agentOpts, call, cwd, permissionGranted))
+		feedback := agent.RunAfterToolHooks(ctx, agentOpts, call, args, res)
+		if feedback != "" {
+			combined, redacted := agent.AppendHookFeedback(res.Output, feedback)
+			res.Output = combined
+			res.Redacted = res.Redacted || redacted
+		}
 		meta := res.Meta
 		if meta == nil {
 			meta = map[string]string{}
@@ -1429,6 +1450,7 @@ func emitToolResult(options PipelineRunConfig, call agent.ToolCall, result ToolR
 		Redacted:     result.Redacted,
 		ChangedFiles: result.ChangedFiles,
 		Display:      result.Display,
+		DenialReason: result.DenialReason,
 	})
 }
 
