@@ -661,6 +661,23 @@ func TestSearchValidationRejection(t *testing.T) {
 	}
 }
 
+func TestSearchRejectsNULQuery(t *testing.T) {
+	srv := newTestServer(t)
+	body, _ := json.Marshal(searchRequest{
+		Query:           "hello\x00world",
+		RequestingAgent: "agent-1",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/search", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.handleSearch(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte("control character")) {
+		t.Fatalf("response should mention control character, got: %s", w.Body.String())
+	}
+}
+
 // TestMarkReviewedValidationRejection verifies the server returns 400 for a
 // request with id=0.
 func TestMarkReviewedValidationRejection(t *testing.T) {

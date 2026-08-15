@@ -176,6 +176,11 @@ func (r *searchRequest) Validate() error {
 	if r.Query == "" {
 		return fmt.Errorf("query is required")
 	}
+	for _, ch := range r.Query {
+		if ch < 0x20 && ch != '\t' && ch != '\n' {
+			return fmt.Errorf("query contains a control character")
+		}
+	}
 	return r.validateCommon()
 }
 
