@@ -3,6 +3,7 @@ package splice
 import (
 	"crypto/sha256"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -382,6 +383,67 @@ func TestComputeIterationStateReturnsErrorOnMalformedPayload(t *testing.T) {
 	}
 	if _, err := ComputeIterationState(1, []schemas.HarnessStageOutput{output}, nil, schemas.ChangeSummary{}, nil); err != nil && !strings.Contains(err.Error(), "test_results") {
 		t.Fatalf("expected error to name key test_results, got %v", err)
+	}
+}
+
+func TestEvaluateTrajectoryCycleWithIdenticalVerificationFailures(t *testing.T) {
+	history := []schemas.IterationState{
+		iterState(withHash("a"), withTests(0, 2, 1)),
+		iterState(withHash("b"), withTests(0, 2, 1)),
+		iterState(withHash("a"), withTests(0, 2, 1)),
+	}
+	decision := EvaluateTrajectory(history, 5, nil)
+	if decision.Action != schemas.ActionEscalateCycleDetected {
+		t.Fatalf("expected cycle detected, got %q", decision.Action)
+	}
+	wantReason := "Current state hash was seen before. The identical state came with identical verification failures, so the environment or verifier may be stuck."
+	if decision.Reason != wantReason {
+		t.Fatalf("expected reason %q, got %q", wantReason, decision.Reason)
+	}
+	sig := "tests_failing=2,tests_errored=1,acceptance_facts_failing=0,lint_high_critical=0,security_high_critical=0"
+	wantEvidence := []string{
+		"state_hash=a",
+		"verification_failure_signature_current=" + sig,
+		"verification_failure_signature_previous=" + sig,
+	}
+	if !slices.Equal(decision.Evidence, wantEvidence) {
+		t.Fatalf("expected evidence %v, got %v", wantEvidence, decision.Evidence)
+	}
+}
+
+func TestEvaluateTrajectoryCycleWithChangingVerificationFailures(t *testing.T) {
+	history := []schemas.IterationState{
+		// First occurrence of hash "a"; its signature is not part of the comparison.
+		iterState(withHash("a"), withTests(0, 1, 0)),
+		// Immediately previous state: high+critical lint and security counts aggregate.
+		iterState(withHash("b"), withTests(1, 1, 0),
+			withSeverity(
+				map[schemas.Severity]int{schemas.SeverityHigh: 1, schemas.SeverityMedium: 50},
+				map[schemas.Severity]int{schemas.SeverityHigh: 1},
+			)),
+		// Current state: same hash as the first, different failure signature.
+		iterState(withHash("a"), withTests(0, 2, 1),
+			withSeverity(
+				map[schemas.Severity]int{schemas.SeverityCritical: 1, schemas.SeverityHigh: 2},
+				map[schemas.Severity]int{schemas.SeverityCritical: 1, schemas.SeverityHigh: 1},
+			)),
+	}
+	history[2].AcceptanceFactsFailing = 1
+	decision := EvaluateTrajectory(history, 5, nil)
+	if decision.Action != schemas.ActionEscalateCycleDetected {
+		t.Fatalf("expected cycle detected, got %q", decision.Action)
+	}
+	wantReason := "Current state hash was seen before. The identical state came with changing verification failures, so model thrash is more likely."
+	if decision.Reason != wantReason {
+		t.Fatalf("expected reason %q, got %q", wantReason, decision.Reason)
+	}
+	wantEvidence := []string{
+		"state_hash=a",
+		"verification_failure_signature_current=tests_failing=2,tests_errored=1,acceptance_facts_failing=1,lint_high_critical=3,security_high_critical=2",
+		"verification_failure_signature_previous=tests_failing=1,tests_errored=0,acceptance_facts_failing=0,lint_high_critical=1,security_high_critical=1",
+	}
+	if !slices.Equal(decision.Evidence, wantEvidence) {
+		t.Fatalf("expected evidence %v, got %v", wantEvidence, decision.Evidence)
 	}
 }
 

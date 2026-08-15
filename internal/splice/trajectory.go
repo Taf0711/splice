@@ -79,8 +79,18 @@ func EvaluateTrajectory(history []schemas.IterationState, maxIterations int, tok
 	}
 
 	if slices.Contains(stateHashes[:len(stateHashes)-1], stateHashes[len(stateHashes)-1]) {
-		return decision(schemas.ActionEscalateCycleDetected, "Current state hash was seen before.",
-			[]string{fmt.Sprintf("state_hash=%s", stateHashes[len(stateHashes)-1])})
+		prevSig := verificationFailureSignature(history[len(history)-2])
+		curSig := verificationFailureSignature(history[len(history)-1])
+		reason := "Current state hash was seen before. The identical state came with changing verification failures, so model thrash is more likely."
+		if curSig == prevSig {
+			reason = "Current state hash was seen before. The identical state came with identical verification failures, so the environment or verifier may be stuck."
+		}
+		return decision(schemas.ActionEscalateCycleDetected, reason,
+			[]string{
+				fmt.Sprintf("state_hash=%s", stateHashes[len(stateHashes)-1]),
+				fmt.Sprintf("verification_failure_signature_current=%s", curSig),
+				fmt.Sprintf("verification_failure_signature_previous=%s", prevSig),
+			})
 	}
 
 	if len(history) >= 3 && currentScore != nil && initialScore != nil && *currentScore < *initialScore {
@@ -172,6 +182,19 @@ func countAcceptanceResults(results [][]schemas.TestCaseResult, statuses ...stri
 		}
 	}
 	return count
+}
+
+// verificationFailureSignature is a compact fingerprint of the verification
+// failures in an iteration state. It covers failing and errored tests,
+// failing acceptance facts, and high-plus-critical lint and security findings.
+func verificationFailureSignature(state schemas.IterationState) string {
+	return fmt.Sprintf("tests_failing=%d,tests_errored=%d,acceptance_facts_failing=%d,lint_high_critical=%d,security_high_critical=%d",
+		state.TestsFailing,
+		state.TestsErrored,
+		state.AcceptanceFactsFailing,
+		state.LintIssuesBySeverity[schemas.SeverityCritical]+state.LintIssuesBySeverity[schemas.SeverityHigh],
+		state.SecurityIssuesBySeverity[schemas.SeverityCritical]+state.SecurityIssuesBySeverity[schemas.SeverityHigh],
+	)
 }
 
 func detectOscillation(hashes []string) bool {
