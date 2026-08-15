@@ -98,6 +98,28 @@ func registryRunTool(t *testing.T, workDir string) func(context.Context, string,
 	}
 }
 
+const bashCommandMustBeString = "Error: Invalid arguments for bash: command must be a string"
+
+// schemaEnforcingBashRunTool rejects a non-string bash command the same way
+// the real bash tool does, then calls next. Quality-check tests use this so a
+// []string command cannot hide behind a permissive mock.
+func schemaEnforcingBashRunTool(next func(context.Context, string, map[string]any) (ToolResult, error)) func(context.Context, string, map[string]any) (ToolResult, error) {
+	return func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
+		if name == "bash" {
+			if _, ok := args["command"].(string); !ok {
+				return ToolResult{OK: false, Output: bashCommandMustBeString}, nil
+			}
+		}
+		if next == nil {
+			if name == "bash" {
+				return ToolResult{OK: true}, nil
+			}
+			return ToolResult{OK: false, Output: name + " is not installed or not available"}, nil
+		}
+		return next(ctx, name, args)
+	}
+}
+
 func TestSelectMemoryNilForNilBundle(t *testing.T) {
 	if got := selectMemory(nil); got != nil {
 		t.Fatalf("expected nil for nil bundle, got %#v", got)
@@ -1899,17 +1921,15 @@ func TestPythonBatchedCompile(t *testing.T) {
 	}
 
 	var calls int
-	var lastCommand []string
-	runTool := func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
+	var lastCommand string
+	runTool := schemaEnforcingBashRunTool(func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
 		if name == "bash" {
 			calls++
-			if cmd, ok := args["command"].([]string); ok {
-				lastCommand = cmd
-			}
+			lastCommand = args["command"].(string)
 			return ToolResult{OK: false, Output: "SyntaxError: invalid syntax"}, nil
 		}
 		return ToolResult{OK: false, Output: name + " is not installed or not available"}, nil
-	}
+	})
 
 	paths := []string{filepath.Join(workDir, "a.py"), filepath.Join(workDir, "b.py"), filepath.Join(workDir, "c.py"), bad}
 	res, err := (pythonSyntaxCheck{}).Run(context.Background(), VerificationCheckRequest{
@@ -1924,19 +1944,117 @@ func TestPythonBatchedCompile(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("expected exactly 1 py_compile call, got %d", calls)
 	}
-	if len(lastCommand) < 4 || lastCommand[0] != "python" || lastCommand[1] != "-m" || lastCommand[2] != "py_compile" {
-		t.Fatalf("unexpected command %v", lastCommand)
+	if !strings.Contains(lastCommand, "'python'") || !strings.Contains(lastCommand, "'-m'") || !strings.Contains(lastCommand, "'py_compile'") {
+		t.Fatalf("unexpected command %q", lastCommand)
 	}
 	for _, f := range files {
-		if !slices.Contains(lastCommand, filepath.Join(workDir, f)) {
-			t.Fatalf("command missing %s: %v", f, lastCommand)
+		if !strings.Contains(lastCommand, "'"+filepath.Join(workDir, f)+"'") {
+			t.Fatalf("command missing %s: %q", f, lastCommand)
 		}
 	}
-	if !slices.Contains(lastCommand, bad) {
-		t.Fatalf("command missing bad.py: %v", lastCommand)
+	if !strings.Contains(lastCommand, "'"+bad+"'") {
+		t.Fatalf("command missing bad.py: %q", lastCommand)
 	}
 	if len(res.Findings) == 0 {
 		t.Fatalf("expected at least one finding, got %+v", res.Findings)
+	}
+}
+
+func TestSchemaEnforcingBashRunToolRejectsArrayCommand(t *testing.T) {
+	runTool := schemaEnforcingBashRunTool(func(context.Context, string, map[string]any) (ToolResult, error) {
+		t.Fatal("next must not run for a non-string command")
+		return ToolResult{}, nil
+	})
+	res, err := runTool(context.Background(), "bash", map[string]any{
+		"command": []string{"python", "-m", "py_compile", "a.py"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.OK {
+		t.Fatal("expected rejected array command")
+	}
+	if res.Output != bashCommandMustBeString {
+		t.Fatalf("output = %q, want %q", res.Output, bashCommandMustBeString)
+	}
+}
+
+func TestPythonRuffPassUsesStringCommand(t *testing.T) {
+	workDir := t.TempDir()
+	py := filepath.Join(workDir, "a.py")
+	if err := os.WriteFile(py, []byte("print('ok')\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "ruff.toml"), []byte("[lint]\n"), 0o644); err != nil {
+		t.Fatalf("write ruff config: %v", err)
+	}
+	var commands []string
+	runTool := schemaEnforcingBashRunTool(func(_ context.Context, name string, args map[string]any) (ToolResult, error) {
+		if name != "bash" {
+			return ToolResult{OK: false, Output: name + " is not installed or not available"}, nil
+		}
+		command := args["command"].(string)
+		commands = append(commands, command)
+		if strings.Contains(command, "'ruff'") {
+			return ToolResult{OK: true, Output: `{"results":[]}`}, nil
+		}
+		return ToolResult{OK: true}, nil
+	})
+	res, err := (pythonSyntaxCheck{}).Run(context.Background(), VerificationCheckRequest{
+		WorkDir:  workDir,
+		Language: "python",
+		Paths:    []string{py},
+		RunTool:  runTool,
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.ToolRun.Status != schemas.VerificationPassed {
+		t.Fatalf("status = %q, want passed; findings=%+v", res.ToolRun.Status, res.Findings)
+	}
+	if len(commands) != 2 {
+		t.Fatalf("expected py_compile then ruff, got %v", commands)
+	}
+	if !strings.Contains(commands[1], "'ruff'") || !strings.Contains(commands[1], "'check'") {
+		t.Fatalf("unexpected ruff command %q", commands[1])
+	}
+}
+
+func TestPythonSyntaxCheckRealBashTool(t *testing.T) {
+	workDir := t.TempDir()
+	bad := filepath.Join(workDir, "bad.py")
+	if err := os.WriteFile(bad, []byte("def broken(\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewBashTool(workDir))
+	runTool := func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
+		res := registry.RunWithOptions(ctx, name, args, tools.RunOptions{PermissionGranted: true})
+		return ToolResult{OK: res.Status == tools.StatusOK, Output: res.Output}, nil
+	}
+	res, err := (pythonSyntaxCheck{}).Run(context.Background(), VerificationCheckRequest{
+		WorkDir:  workDir,
+		Language: "python",
+		Paths:    []string{bad},
+		RunTool:  runTool,
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if strings.Contains(res.ToolRun.Summary, bashCommandMustBeString) || strings.Contains(res.ToolRun.Summary, "command must be a string") {
+		t.Fatalf("real bash tool rejected the command: %s", res.ToolRun.Summary)
+	}
+	if res.ToolRun.Status != schemas.VerificationFindings {
+		t.Fatalf("status = %q summary=%q, want findings", res.ToolRun.Status, res.ToolRun.Summary)
+	}
+	found := false
+	for _, f := range res.Findings {
+		if f.RuleID == "PY_COMPILE" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected PY_COMPILE finding, got %+v summary=%q output-like=%q", res.Findings, res.ToolRun.Summary, res.ToolRun.Summary)
 	}
 }
 
@@ -1948,12 +2066,12 @@ func TestJSSyntaxCheck(t *testing.T) {
 		if err := os.WriteFile(bad, []byte("const x = ;\n"), 0o644); err != nil {
 			t.Fatalf("write: %v", err)
 		}
-		runTool := func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
+		runTool := schemaEnforcingBashRunTool(func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
 			if name == "bash" {
 				return ToolResult{OK: false, Output: "SyntaxError: Unexpected token"}, nil
 			}
 			return ToolResult{}, fmt.Errorf("unexpected %s", name)
-		}
+		})
 		res, err := (jsSyntaxCheck{}).Run(context.Background(), VerificationCheckRequest{
 			WorkDir:  workDir,
 			Language: "javascript",
@@ -1986,12 +2104,12 @@ func TestJSSyntaxCheck(t *testing.T) {
 		if err := os.WriteFile(f, []byte("const x = 1;\n"), 0o644); err != nil {
 			t.Fatalf("write: %v", err)
 		}
-		runTool := func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
+		runTool := schemaEnforcingBashRunTool(func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
 			if name == "bash" {
 				return ToolResult{OK: false, Output: "bash: node: command not found"}, nil
 			}
 			return ToolResult{}, fmt.Errorf("unexpected %s", name)
-		}
+		})
 		res, err := (jsSyntaxCheck{}).Run(context.Background(), VerificationCheckRequest{
 			WorkDir:  workDir,
 			Language: "javascript",
@@ -2042,12 +2160,12 @@ func TestTSTypeCheck(t *testing.T) {
 		if err := os.WriteFile(tsFile, []byte("const x: number = y;\n"), 0o644); err != nil {
 			t.Fatalf("write: %v", err)
 		}
-		runTool := func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
+		runTool := schemaEnforcingBashRunTool(func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
 			if name == "bash" {
 				return ToolResult{OK: true, Output: "index.ts(1,20): error TS2304: Cannot find name 'y'.\n"}, nil
 			}
 			return ToolResult{}, fmt.Errorf("unexpected %s", name)
-		}
+		})
 		res, err := (tsTypeCheck{}).Run(context.Background(), VerificationCheckRequest{
 			WorkDir:  workDir,
 			Language: "typescript",

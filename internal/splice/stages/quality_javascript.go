@@ -57,7 +57,7 @@ func (c jsSyntaxCheck) Run(ctx context.Context, req VerificationCheckRequest) (V
 		var runErr error
 		if req.RunTool != nil {
 			res, terr := req.RunTool(runCtx, "bash", map[string]any{
-				"command": command,
+				"command": shellJoin(command),
 				"cwd":     req.WorkDir,
 			})
 			if terr != nil {

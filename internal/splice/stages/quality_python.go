@@ -70,7 +70,7 @@ func (c pythonSyntaxCheck) Run(ctx context.Context, req VerificationCheckRequest
 	compileOK := true
 	if req.RunTool != nil {
 		res, terr := req.RunTool(runCtx, "bash", map[string]any{
-			"command": command,
+			"command": shellJoin(command),
 			"cwd":     req.WorkDir,
 		})
 		if terr != nil {
@@ -208,7 +208,7 @@ func runRuff(ctx context.Context, req VerificationCheckRequest, pyPaths []string
 	var out []byte
 	if req.RunTool != nil {
 		res, terr := req.RunTool(ctx, "bash", map[string]any{
-			"command": command,
+			"command": shellJoin(command),
 			"cwd":     req.WorkDir,
 		})
 		if terr != nil {
