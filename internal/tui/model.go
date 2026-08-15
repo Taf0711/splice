@@ -5383,6 +5383,36 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			}
 		}
 
+		onSurfaceToUser := options.OnSurfaceToUser
+		options.OnSurfaceToUser = func(ctx context.Context, req agent.SurfaceToUserRequest) (agent.SurfaceToUserDecision, error) {
+			if onSurfaceToUser != nil {
+				return onSurfaceToUser(ctx, req)
+			}
+			if m.runtimeMessageSink == nil {
+				return agent.SurfaceToUserDecision{Action: agent.SurfaceToUserAbort, Message: "interactive surface unavailable"}, nil
+			}
+			if m.notifier != nil {
+				m.notifier.Notify(notify.AwaitingInput, notify.DefaultMessage(notify.AwaitingInput))
+			}
+			askRequest := surfaceToUserAskRequest(req)
+			sessionEvents = append(sessionEvents, pendingSessionEvent{
+				Type:    sessions.EventMessage,
+				Payload: askUserSessionPayload(askRequest),
+			})
+			decision, answers := m.awaitSurfaceToUser(ctx, runID, askRequest)
+			if answers != nil {
+				sessionEvents = append(sessionEvents, pendingSessionEvent{
+					Type: sessions.EventMessage,
+					Payload: map[string]any{
+						"role":       "ask_user_answers",
+						"toolCallId": askRequest.ToolCallID,
+						"answers":    answers,
+					},
+				})
+			}
+			return decision, nil
+		}
+
 		onReasoning := options.OnReasoning
 		options.OnReasoning = func(delta string) {
 			if m.pipeline.applyStageMarker(delta) {

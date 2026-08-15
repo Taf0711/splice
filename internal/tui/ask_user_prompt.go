@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"context"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -226,6 +228,75 @@ func (m model) submitAskUser() (tea.Model, tea.Cmd) {
 	m.clearComposer()
 	m.clearSuggestions()
 	return m, nil
+}
+
+// surfaceToUserAskRequest builds the single open-ended ask_user prompt shown when
+// the trajectory monitor fires ActionSurfaceToUser. It surfaces the observed
+// reason, evidence, and recent confidences so the user can guide the next
+// iteration, and reuses the existing questionnaire rendering and Esc behavior.
+func surfaceToUserAskRequest(req agent.SurfaceToUserRequest) agent.AskUserRequest {
+	header := strings.TrimSpace(req.Reason)
+	if header == "" {
+		header = "The pipeline paused and needs your guidance."
+	}
+	parts := make([]string, 0, 2)
+	if len(req.RecentConfidences) > 0 {
+		parts = append(parts, "Recent confidences: "+formatConfidences(req.RecentConfidences)+".")
+	}
+	if len(req.Evidence) > 0 {
+		parts = append(parts, "Evidence: "+strings.Join(req.Evidence, ", ")+".")
+	}
+	question := "How should the agent continue?"
+	if len(parts) > 0 {
+		question += " " + strings.Join(parts, " ")
+	}
+	question += " Type your guidance, or press Esc to cancel the run."
+	return agent.AskUserRequest{
+		ToolCallID: fmt.Sprintf("surface_to_user:%s:%d", req.RunID, req.Iteration),
+		Header:     header,
+		Questions:  []agent.AskUserQuestion{{Question: question}},
+	}
+}
+
+func (m model) awaitSurfaceToUser(ctx context.Context, runID int, request agent.AskUserRequest) (agent.SurfaceToUserDecision, []string) {
+	if m.runtimeMessageSink == nil {
+		return agent.SurfaceToUserDecision{Action: agent.SurfaceToUserAbort, Message: "interactive surface unavailable"}, nil
+	}
+	answerCh := make(chan []string, 1)
+	m.sendAskUserRequest(runID, request, func(answers []string) {
+		select {
+		case answerCh <- answers:
+		default:
+		}
+	})
+	select {
+	case answers := <-answerCh:
+		return surfaceToUserFromAnswers(answers), answers
+	case <-ctx.Done():
+		return agent.SurfaceToUserDecision{Action: agent.SurfaceToUserAbort}, nil
+	}
+}
+
+func formatConfidences(values []float64) string {
+	parts := make([]string, len(values))
+	for index, value := range values {
+		parts[index] = strconv.FormatFloat(value, 'g', -1, 64)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// surfaceToUserFromAnswers maps the user's questionnaire answer to the trajectory
+// decision: non-empty trimmed guidance continues with the guidance as the next
+// revision context; an empty answer aborts.
+func surfaceToUserFromAnswers(answers []string) agent.SurfaceToUserDecision {
+	guidance := ""
+	if len(answers) > 0 {
+		guidance = strings.TrimSpace(answers[0])
+	}
+	if guidance == "" {
+		return agent.SurfaceToUserDecision{Action: agent.SurfaceToUserAbort}
+	}
+	return agent.SurfaceToUserDecision{Action: agent.SurfaceToUserContinue, Message: guidance}
 }
 
 // askUserTabTitle is the short tab label for a question: its Header if set, else a

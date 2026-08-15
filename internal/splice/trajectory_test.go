@@ -353,6 +353,11 @@ func TestEvaluateTrajectorySurfacesStrictConfidenceCollapse(t *testing.T) {
 	if decision.Action != schemas.ActionSurfaceToUser {
 		t.Fatalf("expected surface to user, got %q", decision.Action)
 	}
+	// The reason states only the observed condition. It must not claim a
+	// rollback or retry that the trajectory monitor does not perform.
+	if decision.Reason != "Confidence is strictly decreasing across the last three iterations." {
+		t.Fatalf("expected exact reason string, got %q", decision.Reason)
+	}
 }
 
 func TestEvaluateTrajectoryContinuesWhenScoresImprove(t *testing.T) {

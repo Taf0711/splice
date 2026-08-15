@@ -99,7 +99,7 @@ func EvaluateTrajectory(history []schemas.IterationState, maxIterations int, tok
 	}
 	if len(recentConfidences) == 3 && strictlyDecreasing(recentConfidences) {
 		return decision(schemas.ActionSurfaceToUser,
-			"Confidence is strictly decreasing across the last three iterations. Rolling back to best snapshot and retrying with revised context.",
+			"Confidence is strictly decreasing across the last three iterations.",
 			[]string{fmt.Sprintf("recent_confidences=%v", recentConfidences)})
 	}
 

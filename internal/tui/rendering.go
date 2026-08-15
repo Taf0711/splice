@@ -1329,7 +1329,9 @@ func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width
 	question := questions[active]
 	state := prompt.states[active]
 	lines = append(lines, "")
-	lines = append(lines, fill(zeroTheme.ink).Render(question.Question))
+	for _, line := range wrapPlainText(question.Question, maxInt(1, width-4)) {
+		lines = append(lines, fill(zeroTheme.ink).Render(line))
+	}
 
 	if len(question.Options) > 0 && !state.typing {
 		// Picker: numbered options (with optional descriptions) + a trailing "type

@@ -2281,11 +2281,13 @@ func TestRunEscalationErrorResolverNonFatal(t *testing.T) {
 // Confidence = max(0.1, 0.9 - 0.2*(calls-1)). Pass count increments to create
 // improving scores: iter1=0 pass, iter2=1 pass, iter3+=2 pass.
 type surfaceToUserStage struct {
-	calls int
+	calls               int
+	lastRevisionContext *string
 }
 
 func (s *surfaceToUserStage) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options stages.StageOptions) (schemas.HarnessStageOutput, error) {
 	s.calls++
+	s.lastRevisionContext = input.RevisionContext
 	confidence := 0.9 - 0.2*float64(s.calls-1)
 	if confidence < 0.1 {
 		confidence = 0.1
@@ -2419,6 +2421,12 @@ func TestSurfaceToUserContinue(t *testing.T) {
 	}
 	if stage.calls != 5 {
 		t.Fatalf("stage calls = %d, want 5 (continue callback allows remaining iterations)", stage.calls)
+	}
+	if stage.lastRevisionContext == nil {
+		t.Fatal("expected the user guidance in the next iteration revision context, got nil")
+	}
+	if *stage.lastRevisionContext != "try a different approach: focus on edge cases" {
+		t.Fatalf("next iteration revision context = %q, want the user guidance", *stage.lastRevisionContext)
 	}
 	if gotRequest.Reason == "" {
 		t.Fatalf("expected non-empty reason in request, got %+v", gotRequest)

@@ -419,6 +419,98 @@ func TestAskUserEscUnblocksAgentRun(t *testing.T) {
 	}
 }
 
+func TestSurfaceToUserPromptShowsTrajectoryEvidence(t *testing.T) {
+	request := surfaceToUserAskRequest(agent.SurfaceToUserRequest{
+		RunID:             "run-7",
+		Iteration:         3,
+		Reason:            "Confidence is strictly decreasing across the last three iterations.",
+		Evidence:          []string{"recent_confidences=[0.9 0.7 0.5]", "tests_failing=2"},
+		RecentConfidences: []float64{0.9, 0.7, 0.5},
+	})
+	if request.ToolCallID != "surface_to_user:run-7:3" {
+		t.Fatalf("ToolCallID = %q, want run-scoped trajectory prompt ID", request.ToolCallID)
+	}
+	var answers [][]string
+	next := newAskUserModel(t, request, &answers)
+	view := next.View()
+	for _, want := range []string{
+		"Confidence is strictly decreasing across the last three iterations.",
+		"Recent confidences: 0.9, 0.7, 0.5.",
+		"recent_confidences=[0.9 0.7 0.5]",
+		"tests_failing=2",
+		"How should the agent continue?",
+		"esc cancel run",
+	} {
+		assertContains(t, view, want)
+	}
+}
+
+func TestAwaitSurfaceToUserMapsGuidanceAndCancellation(t *testing.T) {
+	tests := []struct {
+		name        string
+		answers     []string
+		cancel      bool
+		wantAction  agent.SurfaceToUserAction
+		wantMessage string
+		wantAnswers bool
+	}{
+		{name: "guidance continues", answers: []string{"  focus on the failing test  "}, wantAction: agent.SurfaceToUserContinue, wantMessage: "focus on the failing test", wantAnswers: true},
+		{name: "empty aborts", answers: []string{"   "}, wantAction: agent.SurfaceToUserAbort, wantAnswers: true},
+		{name: "cancellation aborts without submission", cancel: true, wantAction: agent.SurfaceToUserAbort},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			messages := make(chan tea.Msg, 1)
+			m := newModel(context.Background(), Options{})
+			m.runtimeMessageSink = func(msg tea.Msg) { messages <- msg }
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+
+			type result struct {
+				decision agent.SurfaceToUserDecision
+				answers  []string
+			}
+			done := make(chan result, 1)
+			go func() {
+				decision, answers := m.awaitSurfaceToUser(ctx, 7, agent.AskUserRequest{
+					ToolCallID: "surface_to_user:run-7:3",
+					Questions:  []agent.AskUserQuestion{{Question: "How should the agent continue?"}},
+				})
+				done <- result{decision: decision, answers: answers}
+			}()
+
+			var prompt askUserRequestMsg
+			select {
+			case msg := <-messages:
+				var ok bool
+				prompt, ok = msg.(askUserRequestMsg)
+				if !ok {
+					t.Fatalf("prompt message = %T, want askUserRequestMsg", msg)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("surface_to_user prompt was not sent")
+			}
+			if tt.cancel {
+				cancel()
+			} else {
+				prompt.answer(tt.answers)
+			}
+
+			select {
+			case got := <-done:
+				if got.decision.Action != tt.wantAction || got.decision.Message != tt.wantMessage {
+					t.Fatalf("decision = %+v, want action=%q message=%q", got.decision, tt.wantAction, tt.wantMessage)
+				}
+				if (got.answers != nil) != tt.wantAnswers {
+					t.Fatalf("answers = %#v, want submitted=%v", got.answers, tt.wantAnswers)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("surface_to_user callback did not unblock")
+			}
+		})
+	}
+}
+
 // --- rendering -------------------------------------------------------------
 
 func TestAskUserMultiQuestionShowsTabsAndOptions(t *testing.T) {
