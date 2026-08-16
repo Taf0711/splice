@@ -4,7 +4,7 @@
 # stay on the real path. Reject pins splice/<name> then removes the worktree.
 # If VHS hangs on GIF encode, record an .mp4 and convert with ffmpeg.
 
-Output docs/assets/tui-worktree-reject.gif
+Output tw3-rec.mp4
 Set Shell "bash"
 Set FontSize 14
 Set Width 1000
@@ -17,16 +17,20 @@ Set Theme {"name":"splice","black":"#141414","red":"#ef6b6b","green":"#7dcea0","
 Hide
 Type `scripts/tui-worktree-reject-setup.sh`
 Enter
-Sleep 7s
+Sleep 10s
 Show
 
+# No Escape: the command palette closes itself once the argument space is
+# typed, and Escape on a bare slash input clears the composer.
 Type `/exec fix the failing test`
-Sleep 400ms
-Escape
-Sleep 200ms
+Sleep 600ms
 Enter
-Sleep 16s
+Sleep 20s
 Up
-Sleep 800ms
+Sleep 500ms
 Enter
-Sleep 4s
+Sleep 8s
+Ctrl+C
+Sleep 400ms
+Ctrl+C
+Sleep 800ms
