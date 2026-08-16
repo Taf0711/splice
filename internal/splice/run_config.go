@@ -48,6 +48,7 @@ type PipelineRunConfig struct {
 	StageModelResolver      agent.StageModelResolver
 	EscalationModelResolver agent.EscalationModelResolver
 	OnSurfaceToUser         func(ctx context.Context, req agent.SurfaceToUserRequest) (agent.SurfaceToUserDecision, error)
+	OnStageEvent            func(agent.StageEvent)
 }
 
 // PipelineConfigFromAgentOptions copies the fields the pipeline consumes.
@@ -88,6 +89,7 @@ func PipelineConfigFromAgentOptions(options agent.Options) PipelineRunConfig {
 		StageModelResolver:      options.StageModelResolver,
 		EscalationModelResolver: options.EscalationModelResolver,
 		OnSurfaceToUser:         options.OnSurfaceToUser,
+		OnStageEvent:            options.OnStageEvent,
 	}
 }
 

@@ -5,12 +5,47 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/tools"
 )
 
 // escalate_model is a control-only tool (SideEffectNone). The stream-json tool
 // call must report sideEffect "none", not "unknown", so automation sees the
 // promised value.
+func TestStreamJSONStageEventIsTyped(t *testing.T) {
+	var stdout bytes.Buffer
+	writer := execEventWriter{
+		stdout:       &stdout,
+		format:       execOutputStreamJSON,
+		runID:        "run_test",
+		streamedText: &strings.Builder{},
+	}
+	writer.stage(agent.StageEvent{
+		Name:         "code_writer",
+		Status:       "completed",
+		Detail:       "wrote main.go",
+		Progress:     100,
+		ChangedFiles: []string{"main.go"},
+	})
+	if writer.err != nil {
+		t.Fatalf("writer: %v", writer.err)
+	}
+	events := decodeJSONLines(t, stdout.String())
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	event := events[0]
+	if event["type"] != "stage" || event["name"] != "code_writer" || event["status"] != "completed" {
+		t.Fatalf("unexpected stage event: %#v", event)
+	}
+	if event["reason"] != "wrote main.go" {
+		t.Fatalf("detail = %#v", event["reason"])
+	}
+	if event["progress"] != float64(100) {
+		t.Fatalf("progress = %#v", event["progress"])
+	}
+}
+
 func TestStreamJSONSideEffectReportsNoneForControlTool(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewEscalateModelTool())

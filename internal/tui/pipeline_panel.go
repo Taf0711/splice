@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/Taf0711/splice/internal/agent"
 )
 
 const (
@@ -43,7 +45,19 @@ type pipelineStageMarkerPayload struct {
 	ChangedFiles []string `json:"changedFiles"`
 }
 
+// applyStageEvent updates the panel from a typed stage event.
+func (s *pipelinePanelState) applyStageEvent(event agent.StageEvent) {
+	s.applyStagePayload(pipelineStageMarkerPayload{
+		Name:         event.Name,
+		Status:       event.Status,
+		Detail:       event.Detail,
+		Progress:     event.Progress,
+		ChangedFiles: event.ChangedFiles,
+	})
+}
+
 // applyStageMarker consumes a structured stage marker from the reasoning stream.
+// Live runs prefer applyStageEvent. This path remains for resume and old sessions.
 func (s *pipelinePanelState) applyStageMarker(line string) bool {
 	if !strings.HasPrefix(line, stageMarkerBegin) {
 		return false
@@ -58,7 +72,11 @@ func (s *pipelinePanelState) applyStageMarker(line string) bool {
 	if err := json.Unmarshal([]byte(payloadText), &payload); err != nil || strings.TrimSpace(payload.Name) == "" {
 		return true
 	}
+	s.applyStagePayload(payload)
+	return true
+}
 
+func (s *pipelinePanelState) applyStagePayload(payload pipelineStageMarkerPayload) {
 	status := pipelineStageStatusFromString(payload.Status)
 	progress := payload.Progress
 	if progress < 0 {
@@ -86,7 +104,6 @@ func (s *pipelinePanelState) applyStageMarker(line string) bool {
 	if payload.ChangedFiles != nil {
 		s.changedFiles = append([]string(nil), payload.ChangedFiles...)
 	}
-	return true
 }
 
 func pipelineStageStatusFromString(status string) pipelineStageStatus {

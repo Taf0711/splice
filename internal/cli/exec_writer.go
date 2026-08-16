@@ -80,6 +80,32 @@ func (writer *execEventWriter) text(delta string) {
 	writer.writeStdout(delta)
 }
 
+func (writer *execEventWriter) stage(event agent.StageEvent) {
+	if writer.format == execOutputJSON {
+		writer.writeJSON(map[string]any{
+			"type":          "stage",
+			"name":          event.Name,
+			"status":        event.Status,
+			"detail":        event.Detail,
+			"progress":      event.Progress,
+			"changed_files": event.ChangedFiles,
+		})
+		return
+	}
+	if writer.format == execOutputStreamJSON {
+		progress := event.Progress
+		writer.writeStreamJSON(streamjson.Event{
+			Type:         streamjson.EventStage,
+			RunID:        writer.runID,
+			Name:         event.Name,
+			Status:       event.Status,
+			Reason:       event.Detail,
+			Progress:     &progress,
+			ChangedFiles: append([]string(nil), event.ChangedFiles...),
+		})
+	}
+}
+
 func (writer *execEventWriter) reasoning(delta string) {
 	if writer.format == execOutputJSON {
 		writer.writeJSON(map[string]any{"type": "reasoning", "delta": delta})

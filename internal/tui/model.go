@@ -605,6 +605,11 @@ type pipelineStageMarkerMsg struct {
 	line  string
 }
 
+type pipelineStageEventMsg struct {
+	runID int
+	event agent.StageEvent
+}
+
 // planStepExplanationMsg carries the model's fresh, plain-English write-up of a
 // clicked plan step back to the live model (the one-shot request runs on a
 // goroutine via a tea.Cmd, so it can't mutate m directly). text is the written
@@ -2504,6 +2509,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.plan.updateFromItems(msg.items, m.now())
+		return m, nil
+	case pipelineStageEventMsg:
+		if msg.runID != m.activeRunID {
+			return m, nil
+		}
+		m.pipeline.applyStageEvent(msg.event)
 		return m, nil
 	case pipelineStageMarkerMsg:
 		if msg.runID != m.activeRunID {
@@ -5413,10 +5424,18 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			return decision, nil
 		}
 
+		onStageEvent := options.OnStageEvent
+		options.OnStageEvent = func(event agent.StageEvent) {
+			m.sendPipelineStageEvent(runID, event)
+			if onStageEvent != nil {
+				onStageEvent(event)
+			}
+		}
 		onReasoning := options.OnReasoning
 		options.OnReasoning = func(delta string) {
-			if m.pipeline.applyStageMarker(delta) {
-				m.sendPipelineStageMarker(runID, delta)
+			// Live runs update the panel through OnStageEvent. Swallow the
+			// deprecated marker so it is not treated as reasoning text.
+			if strings.HasPrefix(delta, "\x00STAGE") {
 				return
 			}
 			now := m.now()
@@ -5915,11 +5934,11 @@ func (m model) sendAgentReasoning(runID int, delta string) {
 	m.runtimeMessageSink(agentReasoningMsg{runID: runID, delta: delta})
 }
 
-func (m model) sendPipelineStageMarker(runID int, line string) {
+func (m model) sendPipelineStageEvent(runID int, event agent.StageEvent) {
 	if m.runtimeMessageSink == nil {
 		return
 	}
-	m.runtimeMessageSink(pipelineStageMarkerMsg{runID: runID, line: line})
+	m.runtimeMessageSink(pipelineStageEventMsg{runID: runID, event: event})
 }
 
 func (m model) sendAgentUsage(runID int, modelID string, event zeroruntime.Usage, costs ...*agent.UsageCostEstimate) {

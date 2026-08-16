@@ -66,6 +66,7 @@ permission_request
 permission_decision
 permission
 usage
+stage
 checkpoint
 restore
 warning
@@ -116,23 +117,28 @@ reasoning text when a provider returns it.
 Reasoning events are progress data. Splice does not append them to the final
 answer.
 
-### Stage markers
+### Stage events
 
-Stage lifecycle markers are embedded in `reasoning.delta`. A marker starts with
-`\x00STAGE` and ends with `\x00`.
+A `stage` event is the documented stage lifecycle contract.
 
-The marker payload contains:
+```json
+{"schemaVersion":2,"type":"stage","runId":"run_20260810_abc123","name":"code_writer","status":"completed","reason":"wrote main.go","progress":100,"changedFiles":["main.go"]}
+```
 
 | Field | Meaning |
 |---|---|
 | `name` | Stage name |
 | `status` | `running`, `completed`, `failed`, `skipped`, or `incomplete` |
-| `detail` | A short status summary |
+| `reason` | A short status summary |
 | `progress` | Integer progress from 0 through 100 |
 | `changedFiles` | Paths reported by the stage |
 
-The TUI uses these markers for its pipeline panel. Other consumers can ignore
-them.
+### Deprecated stage markers
+
+Older runs also embed a stage marker in `reasoning.delta`. A marker starts with
+`\x00STAGE` and ends with `\x00`. The TUI still accepts these markers so a
+resumed session can rebuild the pipeline panel. New clients should use the
+`stage` event.
 
 ## Structured stage output
 

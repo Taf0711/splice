@@ -1330,21 +1330,29 @@ const (
 	stageEventMarkerEnd   = "\x00"
 )
 
-// emitStageEvent sends a structured stage lifecycle event through the
-// OnReasoning callback as a null-delimited marker. The TUI parses it to update
-// its PIPELINE sidebar; headless consumers ignore it (it looks like a short
-// binary-prefixed line). status is one of: started, running, completed,
-// failed, skipped, retry.
+// emitStageEvent sends a typed stage lifecycle event. It also writes the
+// deprecated NUL marker on OnReasoning for one release. status is one of:
+// running, completed, failed, skipped, incomplete.
 func emitStageEvent(options PipelineRunConfig, stageName, status, detail string, progress int, changedFiles []string) {
+	event := agent.StageEvent{
+		Name:         stageName,
+		Status:       status,
+		Detail:       detail,
+		Progress:     progress,
+		ChangedFiles: append([]string(nil), changedFiles...),
+	}
+	if options.OnStageEvent != nil {
+		options.OnStageEvent(event)
+	}
 	if options.OnReasoning == nil {
 		return
 	}
 	payload, err := json.Marshal(map[string]any{
-		"name":         stageName,
-		"status":       status,
-		"detail":       detail,
-		"progress":     progress,
-		"changedFiles": changedFiles,
+		"name":         event.Name,
+		"status":       event.Status,
+		"detail":       event.Detail,
+		"progress":     event.Progress,
+		"changedFiles": event.ChangedFiles,
 	})
 	if err != nil {
 		return

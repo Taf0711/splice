@@ -1627,14 +1627,27 @@ func TestSummarizeWorkspaceChangesGitAware(t *testing.T) {
 	}
 }
 
-func TestEmitStageEventProducesMarker(t *testing.T) {
+func TestEmitStageEventProducesTypedEventAndMarker(t *testing.T) {
 	var got []string
-	options := PipelineConfigFromAgentOptions(agent.Options{OnReasoning: func(s string) { got = append(got, s) }})
+	var events []agent.StageEvent
+	options := PipelineConfigFromAgentOptions(agent.Options{
+		OnReasoning:  func(s string) { got = append(got, s) },
+		OnStageEvent: func(event agent.StageEvent) { events = append(events, event) },
+	})
 
 	emitStageEvent(options, "code_writer", "running", "writing files", 50, []string{"main.go"})
 
+	if len(events) != 1 {
+		t.Fatalf("expected 1 typed stage event, got %d", len(events))
+	}
+	if events[0].Name != "code_writer" || events[0].Status != "running" || events[0].Progress != 50 {
+		t.Fatalf("typed event = %+v", events[0])
+	}
+	if len(events[0].ChangedFiles) != 1 || events[0].ChangedFiles[0] != "main.go" {
+		t.Fatalf("changed files = %v", events[0].ChangedFiles)
+	}
 	if len(got) != 1 {
-		t.Fatalf("expected 1 reasoning call, got %d", len(got))
+		t.Fatalf("expected 1 reasoning marker, got %d", len(got))
 	}
 	line := got[0]
 	if !strings.HasPrefix(line, stageEventMarkerBegin) || !strings.HasSuffix(line, stageEventMarkerEnd) {

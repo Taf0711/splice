@@ -265,6 +265,15 @@ type SurfaceToUserDecision struct {
 	Message string              `json:"message,omitempty"`
 }
 
+// StageEvent is a typed pipeline stage lifecycle event.
+type StageEvent struct {
+	Name         string
+	Status       string
+	Detail       string
+	Progress     int
+	ChangedFiles []string
+}
+
 type Options struct {
 	MaxTurns int
 	// DeferThreshold activates deferred MCP-tool loading: when the number of
@@ -432,6 +441,10 @@ type Options struct {
 	// with a clear message rather than silently retrying. Splice addition
 	// (AR10d).
 	OnSurfaceToUser func(ctx context.Context, req SurfaceToUserRequest) (SurfaceToUserDecision, error)
+
+	// OnStageEvent receives typed pipeline stage lifecycle events. The
+	// deprecated NUL marker on OnReasoning remains for one release.
+	OnStageEvent func(StageEvent)
 
 	// RequireCompletionSignal gates run completion for HEADLESS exec. Without it,
 	// any assistant turn that produces text but no tool call is accepted as the

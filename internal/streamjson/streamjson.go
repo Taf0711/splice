@@ -32,6 +32,7 @@ const (
 	EventCheckpoint         EventType = "checkpoint"
 	EventRestore            EventType = "restore"
 	EventUsage              EventType = "usage"
+	EventStage              EventType = "stage"
 	EventFinal              EventType = "final"
 	EventWarning            EventType = "warning"
 	EventError              EventType = "error"
@@ -87,6 +88,7 @@ type Event struct {
 	GrantMatched      bool              `json:"grantMatched,omitempty"`
 	Grant             *sandbox.Grant    `json:"grant,omitempty"`
 	Status            string            `json:"status,omitempty"`
+	Progress          *int              `json:"progress,omitempty"`
 	Output            string            `json:"output,omitempty"`
 	Truncated         *bool             `json:"truncated,omitempty"`
 	Redacted          *bool             `json:"redacted,omitempty"`

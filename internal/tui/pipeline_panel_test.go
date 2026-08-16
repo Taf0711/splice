@@ -43,6 +43,27 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+func TestPipelinePanelApplyStageEvent(t *testing.T) {
+	var state pipelinePanelState
+	state.applyStageEvent(agent.StageEvent{
+		Name:         "code_writer",
+		Status:       "running",
+		Detail:       "writing files",
+		Progress:     50,
+		ChangedFiles: []string{"main.go"},
+	})
+	if len(state.stages) != 1 {
+		t.Fatalf("stages = %d, want 1", len(state.stages))
+	}
+	stage := state.stages[0]
+	if stage.name != "code_writer" || stage.status != pipelineStageRunning || stage.progress != 50 {
+		t.Fatalf("stage = %#v", stage)
+	}
+	if len(state.changedFiles) != 1 || state.changedFiles[0] != "main.go" {
+		t.Fatalf("changed files = %v", state.changedFiles)
+	}
+}
+
 func TestPipelinePanelApplyStageMarker(t *testing.T) {
 	var state pipelinePanelState
 	marker := "\x00STAGE{\"name\":\"code_writer\",\"status\":\"running\",\"detail\":\"\",\"progress\":0,\"changedFiles\":[]}\x00"

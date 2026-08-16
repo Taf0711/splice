@@ -728,6 +728,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		DisabledTools:           options.disabledTools,
 		OnText:                  writer.text,
 		OnReasoning:             writer.reasoning,
+		OnStageEvent:            writer.stage,
 		OnToolCall: func(call agent.ToolCall) {
 			writer.toolCall(call, registry)
 			sessionRecorder.append(sessions.EventToolCall, map[string]any{
