@@ -1927,7 +1927,7 @@ func TestStepBackIntegration(t *testing.T) {
 		TokenBudget: schemas.TokenBudget{
 			TotalInputBudget:  100000,
 			TotalOutputBudget: 100000,
-			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000, ModelTier: "small"}},
+			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000}},
 			OverflowPolicy:    "abort",
 		},
 	}
@@ -2122,7 +2122,7 @@ func TestRunEscalatesOnCycle(t *testing.T) {
 		TokenBudget: schemas.TokenBudget{
 			TotalInputBudget:  100000,
 			TotalOutputBudget: 100000,
-			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000, ModelTier: "small"}},
+			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000}},
 			OverflowPolicy:    "abort",
 		},
 	}
@@ -2200,7 +2200,7 @@ func TestRunEscalationNilResolverNonFatal(t *testing.T) {
 		TokenBudget: schemas.TokenBudget{
 			TotalInputBudget:  100000,
 			TotalOutputBudget: 100000,
-			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000, ModelTier: "small"}},
+			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000}},
 			OverflowPolicy:    "abort",
 		},
 	}
@@ -2240,7 +2240,7 @@ func TestRunEscalationErrorResolverNonFatal(t *testing.T) {
 		TokenBudget: schemas.TokenBudget{
 			TotalInputBudget:  100000,
 			TotalOutputBudget: 100000,
-			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000, ModelTier: "small"}},
+			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000}},
 			OverflowPolicy:    "abort",
 		},
 	}
@@ -2342,7 +2342,7 @@ func TestSurfaceToUserNilCallbackAborts(t *testing.T) {
 		TokenBudget: schemas.TokenBudget{
 			TotalInputBudget:  100000,
 			TotalOutputBudget: 100000,
-			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000, ModelTier: "small"}},
+			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000}},
 			OverflowPolicy:    "abort",
 		},
 	}
@@ -2383,7 +2383,7 @@ func TestSurfaceToUserContinue(t *testing.T) {
 		TokenBudget: schemas.TokenBudget{
 			TotalInputBudget:  100000,
 			TotalOutputBudget: 100000,
-			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000, ModelTier: "small"}},
+			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000}},
 			OverflowPolicy:    "abort",
 		},
 	}
@@ -2446,7 +2446,7 @@ func TestSurfaceToUserAbort(t *testing.T) {
 		TokenBudget: schemas.TokenBudget{
 			TotalInputBudget:  100000,
 			TotalOutputBudget: 100000,
-			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000, ModelTier: "small"}},
+			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000}},
 			OverflowPolicy:    "abort",
 		},
 	}
@@ -2497,7 +2497,7 @@ func TestSurfaceToUserCallbackError(t *testing.T) {
 		TokenBudget: schemas.TokenBudget{
 			TotalInputBudget:  100000,
 			TotalOutputBudget: 100000,
-			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000, ModelTier: "small"}},
+			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000}},
 			OverflowPolicy:    "abort",
 		},
 	}
@@ -2543,7 +2543,7 @@ func TestSurfaceToUserCancellation(t *testing.T) {
 		TokenBudget: schemas.TokenBudget{
 			TotalInputBudget:  100000,
 			TotalOutputBudget: 100000,
-			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000, ModelTier: "small"}},
+			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000}},
 			OverflowPolicy:    "abort",
 		},
 	}
@@ -2990,7 +2990,7 @@ func TestRunPassThreadsStageOutputBudgetToCompletionRequest(t *testing.T) {
 		RequestIntent: "write code",
 		Stages: []schemas.ExecutionStage{{
 			Name:   "code_writer",
-			Budget: schemas.StageBudget{InputMax: 1000, OutputMax: 8192, ModelTier: "medium"},
+			Budget: schemas.StageBudget{InputMax: 1000, OutputMax: 8192},
 		}},
 	}
 	provider := &captureRequestProvider{}

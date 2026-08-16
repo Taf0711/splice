@@ -115,13 +115,10 @@ func TestStageBudgetValidation(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "deterministic zero", budget: StageBudget{}},
-		{name: "model backed", budget: StageBudget{InputMax: 1, OutputMax: 1, ModelTier: "nano"}},
-		{name: "zero with tier", budget: StageBudget{ModelTier: "nano"}, wantErr: true},
-		{name: "zero input", budget: StageBudget{OutputMax: 1, ModelTier: "nano"}, wantErr: true},
-		{name: "zero output", budget: StageBudget{InputMax: 1, ModelTier: "nano"}, wantErr: true},
+		{name: "model backed", budget: StageBudget{InputMax: 1, OutputMax: 1}},
+		{name: "zero input", budget: StageBudget{OutputMax: 1}, wantErr: true},
+		{name: "zero output", budget: StageBudget{InputMax: 1}, wantErr: true},
 		{name: "negative", budget: StageBudget{InputMax: -1, OutputMax: -1}, wantErr: true},
-		{name: "positive without tier", budget: StageBudget{InputMax: 1, OutputMax: 1}, wantErr: true},
-		{name: "invalid tier", budget: StageBudget{InputMax: 1, OutputMax: 1, ModelTier: "fast"}, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -137,7 +134,7 @@ func TestStageBudgetValidation(t *testing.T) {
 }
 
 func TestExecutionPlanDAGIntegrity(t *testing.T) {
-	budget := StageBudget{InputMax: 100, OutputMax: 100, ModelTier: "small"}
+	budget := StageBudget{InputMax: 100, OutputMax: 100}
 	plan := ExecutionPlan{
 		Tier:          TierStandard,
 		RequestIntent: "do it",
@@ -162,7 +159,7 @@ func TestExecutionPlanDAGIntegrity(t *testing.T) {
 }
 
 func TestExecutionPlanRejectsDependencyCycle(t *testing.T) {
-	budget := StageBudget{InputMax: 100, OutputMax: 100, ModelTier: "small"}
+	budget := StageBudget{InputMax: 100, OutputMax: 100}
 	plan := ExecutionPlan{
 		Tier:          TierStandard,
 		RequestIntent: "do it",
@@ -194,7 +191,7 @@ func TestExecutionPlanRejectsDependencyCycle(t *testing.T) {
 }
 
 func TestExecutionPlanDuplicateStageName(t *testing.T) {
-	budget := StageBudget{InputMax: 1, OutputMax: 1, ModelTier: "nano"}
+	budget := StageBudget{InputMax: 1, OutputMax: 1}
 	plan := ExecutionPlan{
 		Tier:          TierLight,
 		RequestIntent: "x",
@@ -724,7 +721,7 @@ func TestJSONRoundTrip(t *testing.T) {
 		path := "x.go"
 		pattern := "foo"
 		symbol := "bar"
-		budget := StageBudget{InputMax: 100, OutputMax: 100, ModelTier: "nano"}
+		budget := StageBudget{InputMax: 100, OutputMax: 100}
 		cases := []interface{ Validate() error }{
 			ComplexityClassifierInput{Request: "fix typo"},
 			ComplexityClassifierOutput{Tier: TierTrivial, Rationale: "r", Confidence: 0.8, DesignIntensity: DesignNone},
@@ -732,7 +729,7 @@ func TestJSONRoundTrip(t *testing.T) {
 			ContextRequest{Reason: "r", Queries: []ContextQuery{{QueryType: ContextListFiles, MaxResults: 5, MaxChars: 100}}},
 			ContextItem{Query: ContextQuery{QueryType: ContextListFiles, MaxResults: 5, MaxChars: 100}, Summary: "s", Payload: map[string]interface{}{"text": "hello", "count": 1.0}},
 			ContextBundle{Request: ContextRequest{Reason: "r", Queries: []ContextQuery{{QueryType: ContextListFiles, MaxResults: 5, MaxChars: 100}}}, Items: []ContextItem{{Query: ContextQuery{QueryType: ContextListFiles, MaxResults: 5, MaxChars: 100}, Summary: "s"}}},
-			StageBudget{InputMax: 100, OutputMax: 100, ModelTier: "small"},
+			StageBudget{InputMax: 100, OutputMax: 100},
 			TokenBudget{TotalInputBudget: 1000, TotalOutputBudget: 1000, PerStage: map[string]StageBudget{"s": budget}, Reserve: 100, OverflowPolicy: "abort"},
 			ExecutionStage{Name: "s", Budget: budget},
 			ExecutionPlan{Tier: TierLight, RequestIntent: "x", Stages: []ExecutionStage{{Name: "s", Budget: budget}}, TokenBudget: TokenBudget{TotalInputBudget: 1000, TotalOutputBudget: 1000, PerStage: map[string]StageBudget{"s": budget}, Reserve: 100, OverflowPolicy: "abort"}},

@@ -227,41 +227,30 @@ func (c ContextBundle) Validate() error {
 
 // StageBudget is a token budget for a single stage.
 type StageBudget struct {
-	InputMax  int    `json:"input_max"`
-	OutputMax int    `json:"output_max"`
-	ModelTier string `json:"model_tier"`
-	Skippable bool   `json:"skippable"`
+	InputMax  int  `json:"input_max"`
+	OutputMax int  `json:"output_max"`
+	Skippable bool `json:"skippable"`
 }
 
 // Validate checks the stage budget.
 //
 // F14a: a stage budget is valid in exactly one of two shapes:
 //
-//   - Deterministic zero budget: InputMax == 0, OutputMax == 0, and an empty
-//     ModelTier. Used by model-free stages (static analysis, security audit,
-//     test execution) so plan totals stop reserving fictional model tokens.
-//   - Model-backed budget: both InputMax and OutputMax are > 0, and ModelTier
-//     names a currently valid model tier.
+//   - Deterministic zero budget: InputMax == 0 and OutputMax == 0. Used by
+//     model-free stages (static analysis, security audit, test execution) so
+//     plan totals stop reserving fictional model tokens.
+//   - Model-backed budget: both InputMax and OutputMax are > 0.
 //
-// Mixed or partial-zero forms (one value zero and the other positive), or any
-// zero value paired with a non-empty model tier, are invalid because they
-// would reserve tokens for a stage that cannot spend them, or spend tokens on
-// a stage that claims to be deterministic.
+// Mixed or partial-zero forms (one value zero and the other positive) are
+// invalid because they would reserve tokens for a stage that cannot spend
+// them, or spend tokens on a stage that claims to be deterministic.
 func (s StageBudget) Validate() error {
 	isZero := s.InputMax == 0 && s.OutputMax == 0
 	if isZero {
-		if s.ModelTier != "" {
-			return errors.New("deterministic zero budget must not specify a model_tier")
-		}
 		return nil
 	}
 	if s.InputMax <= 0 || s.OutputMax <= 0 {
 		return errors.New("input_max and output_max must both be > 0 for a model-backed budget")
-	}
-	switch s.ModelTier {
-	case "nano", "small", "medium", "large", "reasoning":
-	default:
-		return fmt.Errorf("invalid model_tier %q", s.ModelTier)
 	}
 	return nil
 }

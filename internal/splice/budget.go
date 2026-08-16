@@ -19,36 +19,30 @@ func stageBudgets(tier schemas.PipelineTier) map[string]schemas.StageBudget {
 		"code_writer": {
 			InputMax:  codeWriterInput,
 			OutputMax: codeWriterOutput,
-			ModelTier: "medium",
 		},
 		"test_generator": {
 			InputMax:  3_000,
 			OutputMax: 8_192,
-			ModelTier: "medium",
 			Skippable: true,
 		},
 		"static_analyzer": {
 			InputMax:  0,
 			OutputMax: 0,
-			ModelTier: "",
 			Skippable: true,
 		},
 		"security_auditor": {
 			InputMax:  0,
 			OutputMax: 0,
-			ModelTier: "",
 			Skippable: true,
 		},
 		"test_runner": {
 			InputMax:  0,
 			OutputMax: 0,
-			ModelTier: "",
 			Skippable: true,
 		},
 		"acceptance_verifier": {
 			InputMax:  0,
 			OutputMax: 0,
-			ModelTier: "",
 			Skippable: true,
 		},
 	}

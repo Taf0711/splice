@@ -105,7 +105,7 @@ func TestBudgetForTier(t *testing.T) {
 	}
 	for _, name := range []string{"static_analyzer", "test_runner", "acceptance_verifier"} {
 		stageBudget := budget.PerStage[name]
-		if stageBudget.InputMax != 0 || stageBudget.OutputMax != 0 || stageBudget.ModelTier != "" {
+		if stageBudget.InputMax != 0 || stageBudget.OutputMax != 0 {
 			t.Fatalf("deterministic stage %q budget = %+v, want zero token budget", name, stageBudget)
 		}
 	}
@@ -124,7 +124,7 @@ func TestBudgetForTier(t *testing.T) {
 	}
 	for _, name := range []string{"static_analyzer", "security_auditor", "test_runner", "acceptance_verifier"} {
 		stageBudget := substantial.PerStage[name]
-		if stageBudget.InputMax != 0 || stageBudget.OutputMax != 0 || stageBudget.ModelTier != "" {
+		if stageBudget.InputMax != 0 || stageBudget.OutputMax != 0 {
 			t.Fatalf("deterministic stage %q budget = %+v, want zero token budget", name, stageBudget)
 		}
 	}
