@@ -159,7 +159,7 @@ func TestPipelinePanelHeaderCompletesWhenEveryStageIsTerminal(t *testing.T) {
 			{name: "completed", status: pipelineStageCompleted},
 		},
 	}
-	got := state.headerLine(40)
+	got := state.headerLineWithChip(40, "")
 	want := sidebarHeaderWithCount("PIPELINE", "4/4", zeroTheme.green, 40)
 	if got != want {
 		t.Fatalf("terminal pipeline header = %q, want %q", got, want)
@@ -657,7 +657,7 @@ func TestTUIWorktreeReviewDecisions(t *testing.T) {
 				}
 				return worktrees.MergeBackResult{Status: worktrees.MergeBackMerged, Message: "merged splice/tui-sess-1"}, nil
 			}
-			tuiPreserveWorktree = func(_ context.Context, options worktrees.PreserveOptions) (string, error) {
+			tuiPreserveWorktree = func(_ context.Context, options worktrees.MergeBackOptions) (string, error) {
 				pinned = true
 				if options.WorktreePath != wt.Path || options.Name != wt.Name {
 					t.Fatalf("preserve options = %#v", options)
@@ -841,7 +841,7 @@ func TestTUIWorktreeRejectReasonMapsThrough(t *testing.T) {
 		tuiRemoveWorktree = origRemove
 		tuiUnlockWorktree = origUnlock
 	}()
-	tuiPreserveWorktree = func(_ context.Context, options worktrees.PreserveOptions) (string, error) {
+	tuiPreserveWorktree = func(_ context.Context, options worktrees.MergeBackOptions) (string, error) {
 		return "splice/" + options.Name, nil
 	}
 	tuiRemoveWorktree = func(context.Context, worktrees.RemoveOptions) error { return nil }
@@ -891,7 +891,7 @@ func TestTUIWorktreeRejectEscYieldsUnspecified(t *testing.T) {
 		tuiUnlockWorktree = origUnlock
 	}()
 	removed := false
-	tuiPreserveWorktree = func(_ context.Context, options worktrees.PreserveOptions) (string, error) {
+	tuiPreserveWorktree = func(_ context.Context, options worktrees.MergeBackOptions) (string, error) {
 		return "splice/" + options.Name, nil
 	}
 	tuiRemoveWorktree = func(context.Context, worktrees.RemoveOptions) error {

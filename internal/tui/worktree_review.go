@@ -73,9 +73,9 @@ func parseWorktreeReviewDecision(answers []string) string {
 		return worktreeReviewKeep
 	}
 	switch strings.ToLower(strings.TrimSpace(answers[0])) {
-	case strings.ToLower(worktreeReviewAccept), "merge":
+	case strings.ToLower(worktreeReviewAccept):
 		return worktreeReviewAccept
-	case strings.ToLower(worktreeReviewReject), "discard":
+	case strings.ToLower(worktreeReviewReject):
 		return worktreeReviewReject
 	default:
 		return worktreeReviewKeep
@@ -139,13 +139,13 @@ func (m model) maybeOfferWorktreeReview(wt *worktrees.Result, dirty bool) (model
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: worktreeReviewDirtyNotice + " Keep the worktree and merge manually: git merge --no-ff splice/" + wt.Name})
 	}
 	req := worktreeReviewAskRequest(*wt, dirty)
-	copy := *wt
+	snapshot := *wt
 	m.transcript = appendTranscriptRow(m.transcript, askUserTranscriptRow(req))
 	m.pendingAskUser = &pendingAskUserPrompt{
 		request:   req,
 		states:    newAskUserStates(req.Questions),
 		keepOnEsc: true,
-		worktree:  &copy,
+		worktree:  &snapshot,
 		dirtyMain: dirty,
 	}
 	m.reportAgentLifecycle(herdrBlocked)
@@ -155,13 +155,13 @@ func (m model) maybeOfferWorktreeReview(wt *worktrees.Result, dirty bool) (model
 }
 
 func applyWorktreeReview(wt worktrees.Result, decision string, dirtyOffered bool, reason string) worktreeReviewResultMsg {
-	msg := applyWorktreeReviewResult(wt, decision, dirtyOffered)
+	msg := runWorktreeReview(wt, decision, dirtyOffered)
 	msg.decision = decision
 	msg.reason = reason
 	return msg
 }
 
-func applyWorktreeReviewResult(wt worktrees.Result, decision string, dirtyOffered bool) worktreeReviewResultMsg {
+func runWorktreeReview(wt worktrees.Result, decision string, dirtyOffered bool) worktreeReviewResultMsg {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	unlock := func() error {
@@ -205,7 +205,7 @@ func applyWorktreeReviewResult(wt worktrees.Result, decision string, dirtyOffere
 		}
 		return worktreeReviewResultMsg{notice: result.Message}
 	case worktreeReviewReject:
-		branch, err := tuiPreserveWorktree(ctx, worktrees.PreserveOptions{
+		branch, err := tuiPreserveWorktree(ctx, worktrees.MergeBackOptions{
 			RepoRoot:     wt.RepoRoot,
 			WorktreePath: wt.Path,
 			Name:         wt.Name,

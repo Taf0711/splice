@@ -447,7 +447,7 @@ func TestPreserveThenForceRemoveKeepsBranch(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(worktree, "feature.txt"), []byte("new feature\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	branch, err := Preserve(context.Background(), PreserveOptions{
+	branch, err := Preserve(context.Background(), MergeBackOptions{
 		RepoRoot:     root,
 		WorktreePath: worktree,
 		Name:         "task-reject",

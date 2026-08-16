@@ -324,19 +324,10 @@ func Remove(ctx context.Context, options RemoveOptions) error {
 	return nil
 }
 
-// PreserveOptions configures Preserve.
-type PreserveOptions struct {
-	RepoRoot      string
-	WorktreePath  string
-	Name          string
-	CommitMessage string
-	RunGit        GitRunner
-}
-
 // Preserve commits the worktree's changes and pins splice/<name> to that commit.
 // It does not merge into the source checkout. Callers use it before discarding
 // a worktree so the run's work survives on the branch.
-func Preserve(ctx context.Context, options PreserveOptions) (string, error) {
+func Preserve(ctx context.Context, options MergeBackOptions) (string, error) {
 	runGit := options.RunGit
 	if runGit == nil {
 		runGit = defaultRunGit
@@ -344,12 +335,7 @@ func Preserve(ctx context.Context, options PreserveOptions) (string, error) {
 	if err := validateName(options.Name); err != nil {
 		return "", err
 	}
-	if err := commitWorktreeChanges(ctx, runGit, MergeBackOptions{
-		RepoRoot:      options.RepoRoot,
-		WorktreePath:  options.WorktreePath,
-		Name:          options.Name,
-		CommitMessage: options.CommitMessage,
-	}); err != nil {
+	if err := commitWorktreeChanges(ctx, runGit, options); err != nil {
 		return "", err
 	}
 	return pinWorktreeBranch(ctx, runGit, options.WorktreePath, options.Name)

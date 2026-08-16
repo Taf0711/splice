@@ -141,10 +141,6 @@ func (s pipelinePanelState) isEmpty() bool {
 	return !s.active || len(s.stages) == 0
 }
 
-func (s pipelinePanelState) headerLine(width int) string {
-	return s.headerLineWithChip(width, "")
-}
-
 func (s pipelinePanelState) headerLineWithChip(width int, chip string) string {
 	label := "PIPELINE"
 	if strings.TrimSpace(chip) != "" {

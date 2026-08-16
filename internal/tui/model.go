@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -5232,17 +5233,10 @@ func (m model) bindPipelineWorktree(ctx context.Context, options *agent.Options)
 	return prepared, "", nil
 }
 
+var tuiWorktreeNameClean = regexp.MustCompile(`[^A-Za-z0-9._-]`)
+
 func sanitizeTUIWorktreeName(value string) string {
-	var b strings.Builder
-	for _, r := range value {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
-			b.WriteRune(r)
-		default:
-			b.WriteByte('-')
-		}
-	}
-	out := strings.Trim(b.String(), "-._")
+	out := strings.Trim(tuiWorktreeNameClean.ReplaceAllString(value, "-"), "-._")
 	if out == "" {
 		return "session"
 	}
