@@ -499,10 +499,12 @@ func TestTUIPipelineRunUsesPreparedWorktree(t *testing.T) {
 		return nil
 	}
 	var gotCwd string
+	var gotRecovery splicerun.WorkspaceRecovery
 	tuiSpliceRun = func(_ context.Context, _ string, _ agent.Provider, options agent.Options, _ splicerun.MemoryStore, recovery splicerun.WorkspaceRecovery) (agent.Result, error) {
-		if recovery != nil {
-			t.Fatal("TW1 must not pass recovery")
+		if recovery == nil {
+			t.Fatal("worktree run must pass iteration recovery")
 		}
+		gotRecovery = recovery
 		gotCwd = options.Cwd
 		return agent.Result{FinalAnswer: `{"status":"completed"}`}, nil
 	}
@@ -517,6 +519,12 @@ func TestTUIPipelineRunUsesPreparedWorktree(t *testing.T) {
 	}
 	if gotCwd != preparedPath {
 		t.Fatalf("pipeline cwd = %q, want %q", gotCwd, preparedPath)
+	}
+	if gotRecovery == nil {
+		t.Fatal("expected iteration recovery for a worktree run")
+	}
+	if _, ok := gotRecovery.(*worktrees.IterationRecovery); !ok {
+		t.Fatalf("recovery = %T, want *worktrees.IterationRecovery", gotRecovery)
 	}
 	if resp.worktree == nil || resp.worktree.Path != preparedPath {
 		t.Fatalf("response worktree = %#v", resp.worktree)

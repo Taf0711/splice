@@ -5874,8 +5874,14 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				}
 			}
 			m.pipeline.reset()
-			// TW1 prepares the isolated tree only. Recovery stays nil until a later item.
-			result, err = tuiSpliceRun(runCtx, prompt, m.provider, options, mem, nil)
+			// Worktree runs get iteration recovery so a rollback trajectory decision
+			// restores the best snapshot instead of aborting. Live-checkout fallback
+			// keeps nil, so rollback still aborts with the isolated-worktree reason.
+			var recovery splicerun.WorkspaceRecovery
+			if preparedWorktree.Path != "" {
+				recovery = worktrees.NewIterationRecovery(preparedWorktree)
+			}
+			result, err = tuiSpliceRun(runCtx, prompt, m.provider, options, mem, recovery)
 			var preparedPtr *worktrees.Result
 			if preparedWorktree.Path != "" {
 				copy := preparedWorktree
