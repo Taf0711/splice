@@ -23,8 +23,7 @@ func ComputeScore(state schemas.IterationState) float64 {
 			state.LintIssuesBySeverity[schemas.SeverityHigh]*3 -
 			state.LintIssuesBySeverity[schemas.SeverityMedium]*1 -
 			state.SecurityIssuesBySeverity[schemas.SeverityCritical]*50 -
-			state.SecurityIssuesBySeverity[schemas.SeverityHigh]*20 -
-			state.TypeErrors*2,
+			state.SecurityIssuesBySeverity[schemas.SeverityHigh]*20,
 	)
 }
 
@@ -182,27 +181,81 @@ func ruleConfidence(rc trajectoryRuleContext) *schemas.TrajectoryDecision {
 	return &decision
 }
 
+type iterationSignals struct {
+	testResults       []schemas.TestRunResults
+	staticOutputs     []schemas.VerificationReport
+	securityOutputs   []schemas.VerificationReport
+	codeWriterOutputs []schemas.CodeWriterOutput
+	acceptanceResults [][]schemas.TestCaseResult
+}
+
+type trajectoryExtractor func(outputs []schemas.HarnessStageOutput, dest *iterationSignals) error
+
+// trajectoryExtractors maps a stage output key to the parser that feeds the
+// monitor. A new trajectory-relevant stage must add exactly one entry here.
+var trajectoryExtractors = map[string]trajectoryExtractor{
+	"test_results": func(outputs []schemas.HarnessStageOutput, dest *iterationSignals) error {
+		values, err := typedPayloads[schemas.TestRunResults](outputs, "test_results")
+		if err != nil {
+			return err
+		}
+		dest.testResults = values
+		return nil
+	},
+	"static_analyzer_output": func(outputs []schemas.HarnessStageOutput, dest *iterationSignals) error {
+		values, err := typedPayloads[schemas.VerificationReport](outputs, "static_analyzer_output")
+		if err != nil {
+			return err
+		}
+		dest.staticOutputs = values
+		return nil
+	},
+	"security_auditor_output": func(outputs []schemas.HarnessStageOutput, dest *iterationSignals) error {
+		values, err := typedPayloads[schemas.VerificationReport](outputs, "security_auditor_output")
+		if err != nil {
+			return err
+		}
+		dest.securityOutputs = values
+		return nil
+	},
+	"code_writer_output": func(outputs []schemas.HarnessStageOutput, dest *iterationSignals) error {
+		values, err := typedPayloads[schemas.CodeWriterOutput](outputs, "code_writer_output")
+		if err != nil {
+			return err
+		}
+		dest.codeWriterOutputs = values
+		return nil
+	},
+	"acceptance_results": func(outputs []schemas.HarnessStageOutput, dest *iterationSignals) error {
+		values, err := typedPayloads[[]schemas.TestCaseResult](outputs, "acceptance_results")
+		if err != nil {
+			return err
+		}
+		dest.acceptanceResults = values
+		return nil
+	},
+}
+
+func extractIterationSignals(outputs []schemas.HarnessStageOutput) (iterationSignals, error) {
+	var dest iterationSignals
+	keys := make([]string, 0, len(trajectoryExtractors))
+	for key := range trajectoryExtractors {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if err := trajectoryExtractors[key](outputs, &dest); err != nil {
+			return iterationSignals{}, fmt.Errorf("%s: %w", key, err)
+		}
+	}
+	return dest, nil
+}
+
 // ComputeIterationState computes the deterministic state vector for one pipeline pass.
 func ComputeIterationState(iteration int, stageOutputs []schemas.HarnessStageOutput, stageRecords []schemas.StageRecord, changeSummary schemas.ChangeSummary, timestamp *float64) (schemas.IterationState, error) {
-	testResults, err := typedPayloads[schemas.TestRunResults](stageOutputs, "test_results")
+	signals, err := extractIterationSignals(stageOutputs)
 	if err != nil {
-		return schemas.IterationState{}, fmt.Errorf("test_results: %w", err)
-	}
-	staticOutputs, err := typedPayloads[schemas.VerificationReport](stageOutputs, "static_analyzer_output")
-	if err != nil {
-		return schemas.IterationState{}, fmt.Errorf("static_analyzer_output: %w", err)
-	}
-	securityOutputs, err := typedPayloads[schemas.VerificationReport](stageOutputs, "security_auditor_output")
-	if err != nil {
-		return schemas.IterationState{}, fmt.Errorf("security_auditor_output: %w", err)
-	}
-	codeWriterOutputs, err := typedPayloads[schemas.CodeWriterOutput](stageOutputs, "code_writer_output")
-	if err != nil {
-		return schemas.IterationState{}, fmt.Errorf("code_writer_output: %w", err)
-	}
-	acceptanceResults, err := typedPayloads[[]schemas.TestCaseResult](stageOutputs, "acceptance_results")
-	if err != nil {
-		return schemas.IterationState{}, fmt.Errorf("acceptance_results: %w", err)
+		return schemas.IterationState{}, err
 	}
 
 	linesAdded, linesRemoved := countDiffLines(changeSummary.DiffText)
@@ -215,16 +268,15 @@ func ComputeIterationState(iteration int, stageOutputs []schemas.HarnessStageOut
 	return schemas.IterationState{
 		Iteration:                iteration,
 		Timestamp:                float64(ts),
-		TestsPassing:             countTests(testResults, "passed"),
-		TestsFailing:             countTests(testResults, "failed"),
-		TestsErrored:             countTests(testResults, "errored"),
-		AcceptanceFactsPassing:   countAcceptanceResults(acceptanceResults, "passed"),
-		AcceptanceFactsFailing:   countAcceptanceResults(acceptanceResults, "failed", "errored"),
-		LintIssuesBySeverity:     countBySeverity(staticOutputs),
-		SecurityIssuesBySeverity: countBySeverity(securityOutputs),
-		TypeErrors:               0,
-		CodeSizeBytes:            codeSizeBytes(codeWriterOutputs),
-		StateHash:                stateHash(codeWriterOutputs),
+		TestsPassing:             countTests(signals.testResults, "passed"),
+		TestsFailing:             countTests(signals.testResults, "failed"),
+		TestsErrored:             countTests(signals.testResults, "errored"),
+		AcceptanceFactsPassing:   countAcceptanceResults(signals.acceptanceResults, "passed"),
+		AcceptanceFactsFailing:   countAcceptanceResults(signals.acceptanceResults, "failed", "errored"),
+		LintIssuesBySeverity:     countBySeverity(signals.staticOutputs),
+		SecurityIssuesBySeverity: countBySeverity(signals.securityOutputs),
+		CodeSizeBytes:            codeSizeBytes(signals.codeWriterOutputs),
+		StateHash:                stateHash(signals.codeWriterOutputs),
 		Confidence:               aggregateConfidence(stageOutputs),
 		TokensConsumed:           tokensConsumed(stageRecords),
 		VerificationIncomplete:   countStageStatus(stageRecords, schemas.StageIncomplete),

@@ -31,7 +31,6 @@ type IterationState struct {
 	AcceptanceFactsFailing   int              `json:"acceptance_facts_failing"`
 	LintIssuesBySeverity     map[Severity]int `json:"lint_issues_by_severity,omitempty"`
 	SecurityIssuesBySeverity map[Severity]int `json:"security_issues_by_severity,omitempty"`
-	TypeErrors               int              `json:"type_errors"`
 	CodeSizeBytes            int              `json:"code_size_bytes"`
 	VerificationIncomplete   int              `json:"verification_incomplete"`
 	StateHash                string           `json:"state_hash"`
@@ -59,8 +58,8 @@ func (i IterationState) Validate() error {
 	if i.AcceptanceFactsPassing < 0 || i.AcceptanceFactsFailing < 0 {
 		return errors.New("acceptance fact counts must be non-negative")
 	}
-	if i.TypeErrors < 0 || i.CodeSizeBytes < 0 {
-		return errors.New("type_errors and code_size_bytes must be non-negative")
+	if i.CodeSizeBytes < 0 {
+		return errors.New("code_size_bytes must be non-negative")
 	}
 	if i.VerificationIncomplete < 0 {
 		return errors.New("verification_incomplete must be non-negative")

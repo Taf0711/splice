@@ -173,7 +173,6 @@ Splice uses this score to compare completed passes:
 | Medium lint finding | `-1` |
 | Critical security finding | `-50` |
 | High security finding | `-20` |
-| Type error | `-2` |
 
 Other state fields remain evidence but do not change this score.
 

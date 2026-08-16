@@ -253,15 +253,74 @@ func TestComputeScorePlateausForEquivalentState(t *testing.T) {
 	}
 }
 
-func TestComputeScoreRegressesWhenErrorsSecurityAndTypeIssuesIncrease(t *testing.T) {
+// trajectoryRelevantOutputKeys maps a registry stage to the output key the
+// monitor consumes. trajectoryIrrelevantStages must list every other registry
+// stage. A new stage that is in neither map fails CI.
+var trajectoryRelevantOutputKeys = map[string]string{
+	"code_writer":         "code_writer_output",
+	"test_runner":         "test_results",
+	"static_analyzer":     "static_analyzer_output",
+	"security_auditor":    "security_auditor_output",
+	"acceptance_verifier": "acceptance_results",
+}
+
+var trajectoryIrrelevantStages = map[string]struct{}{
+	"test_generator": {},
+}
+
+func TestTrajectoryExtractorsCoverRegistryStages(t *testing.T) {
+	registry, err := buildStageRegistry(PipelineRunConfig{}, t.TempDir())
+	if err != nil {
+		t.Fatalf("buildStageRegistry: %v", err)
+	}
+	for name := range registry {
+		key, relevant := trajectoryRelevantOutputKeys[name]
+		_, irrelevant := trajectoryIrrelevantStages[name]
+		switch {
+		case relevant && irrelevant:
+			t.Errorf("stage %s is listed as both trajectory-relevant and irrelevant", name)
+		case relevant:
+			if _, ok := trajectoryExtractors[key]; !ok {
+				t.Errorf("stage %s produces %s but trajectoryExtractors has no parser for that key", name, key)
+			}
+		case irrelevant:
+			continue
+		default:
+			t.Errorf("unclassified stage %s. Add it to trajectoryRelevantOutputKeys with an extractor, or to trajectoryIrrelevantStages.", name)
+		}
+	}
+	claimed := make(map[string]string, len(trajectoryRelevantOutputKeys))
+	for stage, key := range trajectoryRelevantOutputKeys {
+		if other, ok := claimed[key]; ok {
+			t.Errorf("extractor key %s is claimed by both %s and %s", key, other, stage)
+		}
+		claimed[key] = stage
+	}
+	for key := range trajectoryExtractors {
+		if _, ok := claimed[key]; !ok {
+			t.Errorf("trajectoryExtractors has %s, but no registry stage claims that key", key)
+		}
+	}
+	for name := range trajectoryRelevantOutputKeys {
+		if _, ok := registry[name]; !ok {
+			t.Errorf("trajectoryRelevantOutputKeys lists %s, but the registry has no such stage", name)
+		}
+	}
+	for name := range trajectoryIrrelevantStages {
+		if _, ok := registry[name]; !ok {
+			t.Errorf("trajectoryIrrelevantStages lists %s, but the registry has no such stage", name)
+		}
+	}
+}
+
+func TestComputeScoreRegressesWhenErrorsAndSecurityIssuesIncrease(t *testing.T) {
 	before := iterState(withTests(4, 0, 0))
 	after := iterState(withTests(4, 1, 1), withSeverity(nil, map[schemas.Severity]int{schemas.SeverityCritical: 1, schemas.SeverityHigh: 1}))
-	after.TypeErrors = 3
 	if ComputeScore(after) >= ComputeScore(before) {
 		t.Fatal("expected score to regress")
 	}
-	if got := ComputeScore(after); got != -56 {
-		t.Fatalf("expected -56, got %v", got)
+	if got := ComputeScore(after); got != -50 {
+		t.Fatalf("expected -50, got %v", got)
 	}
 }
 
