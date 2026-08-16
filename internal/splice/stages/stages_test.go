@@ -1864,6 +1864,45 @@ func TestCrystallizeToolSchemaUsesIntentAndStatement(t *testing.T) {
 	}
 }
 
+func TestDesignCrystallizerDropsVestigialTierFields(t *testing.T) {
+	raw := `{
+		"epic": "feature",
+		"requirements": ["works"],
+		"in_scope": ["code"],
+		"out_of_scope": ["docs"],
+		"system_design": "keep it simple",
+		"recommended_tier": "substantial",
+		"recommended_model_tier": "large",
+		"tasks": [{
+			"id": "t1",
+			"title": "task one",
+			"intent": "do it",
+			"estimated_tier": "architectural"
+		}]
+	}`
+	provider := &requestCapturingProvider{events: toolCallEvent("submit_design_plan", raw)}
+	input := schemas.DesignConversationInput{
+		History: []schemas.ConversationMessage{{Role: "user", Content: "Do it."}},
+	}
+	got, err := (DesignCrystallizer{}).Crystallize(context.Background(), provider, StageOptions{}, input)
+	if err != nil {
+		t.Fatalf("crystallize: %v", err)
+	}
+	schemaJSON, err := json.Marshal(provider.request.Tools[0].Parameters)
+	if err != nil {
+		t.Fatalf("marshal tool parameters: %v", err)
+	}
+	schemaStr := string(schemaJSON)
+	for _, field := range []string{"recommended_tier", "recommended_model_tier", "estimated_tier"} {
+		if strings.Contains(schemaStr, "\""+field+"\"") {
+			t.Fatalf("tool schema still contains %s: %s", field, schemaStr)
+		}
+	}
+	if len(got.Tasks) != 1 || got.Tasks[0].ID != "t1" {
+		t.Fatalf("unexpected plan tasks: %+v", got.Tasks)
+	}
+}
+
 // TestGoFormatFinding verifies the in-process Go profile reports files that
 // are not gofmt-clean via GO_FORMAT (low severity) without spawning a process.
 func TestGoFormatFinding(t *testing.T) {

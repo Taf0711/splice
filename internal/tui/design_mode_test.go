@@ -1560,8 +1560,7 @@ func TestApproveAskModeSurfacesPermissionRegression(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 	m.activeSession = sess
-	tier := schemas.TierTrivial
-	m.pendingPlan = &schemas.DesignPlan{Epic: "Approve callbacks", Requirements: []string{"write the file"}, InScope: []string{"hello.go"}, Source: "authored", Tasks: []schemas.Task{{ID: "t1", Title: "Write hello", Intent: "Create hello.go", EstimatedTier: &tier}}}
+	m.pendingPlan = &schemas.DesignPlan{Epic: "Approve callbacks", Requirements: []string{"write the file"}, InScope: []string{"hello.go"}, Source: "authored", Tasks: []schemas.Task{{ID: "t1", Title: "Write hello", Intent: "Create hello.go"}}}
 	m = persistPlanForApproval(t, m)
 
 	_, cmd := m.handleApproveCommand()
@@ -1598,8 +1597,7 @@ func TestApprovePlanStreamsTextAndToolCall(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 	m.activeSession = sess
-	tier := schemas.TierTrivial
-	m.pendingPlan = &schemas.DesignPlan{Epic: "Approve callbacks", Requirements: []string{"write the file"}, InScope: []string{"hello.go"}, Source: "authored", Tasks: []schemas.Task{{ID: "t1", Title: "Write hello", Intent: "Create hello.go", EstimatedTier: &tier}}}
+	m.pendingPlan = &schemas.DesignPlan{Epic: "Approve callbacks", Requirements: []string{"write the file"}, InScope: []string{"hello.go"}, Source: "authored", Tasks: []schemas.Task{{ID: "t1", Title: "Write hello", Intent: "Create hello.go"}}}
 	m = persistPlanForApproval(t, m)
 	started, cmd := m.handleApproveCommand()
 	msg := execCmd(cmd)
@@ -1644,8 +1642,7 @@ func TestApprovePlanPersistsAttributedUsage(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 	m.activeSession = sess
-	tier := schemas.TierTrivial
-	m.pendingPlan = &schemas.DesignPlan{Epic: "Approve callbacks", Requirements: []string{"write the file"}, InScope: []string{"hello.go"}, Source: "authored", Tasks: []schemas.Task{{ID: "t1", Title: "Write hello", Intent: "Create hello.go", EstimatedTier: &tier}}}
+	m.pendingPlan = &schemas.DesignPlan{Epic: "Approve callbacks", Requirements: []string{"write the file"}, InScope: []string{"hello.go"}, Source: "authored", Tasks: []schemas.Task{{ID: "t1", Title: "Write hello", Intent: "Create hello.go"}}}
 	m = persistPlanForApproval(t, m)
 	_, cmd := m.handleApproveCommand()
 	if msg := execCmd(cmd); msg == nil {
@@ -1676,8 +1673,7 @@ func TestApprovePlanCancellationDuringPermissionPromptDoesNotHang(t *testing.T) 
 		t.Fatalf("create session: %v", err)
 	}
 	m.activeSession = sess
-	tier := schemas.TierTrivial
-	m.pendingPlan = &schemas.DesignPlan{Epic: "Approve callbacks", Requirements: []string{"write the file"}, InScope: []string{"hello.go"}, Source: "authored", Tasks: []schemas.Task{{ID: "t1", Title: "Write hello", Intent: "Create hello.go", EstimatedTier: &tier}}}
+	m.pendingPlan = &schemas.DesignPlan{Epic: "Approve callbacks", Requirements: []string{"write the file"}, InScope: []string{"hello.go"}, Source: "authored", Tasks: []schemas.Task{{ID: "t1", Title: "Write hello", Intent: "Create hello.go"}}}
 	m = persistPlanForApproval(t, m)
 	started, cmd := m.handleApproveCommand()
 	resultCh := make(chan tea.Msg, 1)

@@ -285,13 +285,11 @@ func designStageIntent(request zeroruntime.CompletionRequest) string {
 }
 
 func designTask(id string, title string, dependsOn []string) schemas.Task {
-	tier := schemas.TierTrivial
 	return schemas.Task{
-		ID:            id,
-		Title:         title,
-		Intent:        "Implement " + title,
-		DependsOn:     append([]string(nil), dependsOn...),
-		EstimatedTier: &tier,
+		ID:        id,
+		Title:     title,
+		Intent:    "Implement " + title,
+		DependsOn: append([]string(nil), dependsOn...),
 	}
 }
 

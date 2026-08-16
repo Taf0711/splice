@@ -64,19 +64,14 @@ func BuildExecutionPlanForTask(task schemas.Task) (schemas.ExecutionPlan, error)
 // BuildExecutionPlanForTaskWithFacts builds a plan for a design task and
 // extracts acceptance fact statements for context injection.
 func BuildExecutionPlanForTaskWithFacts(task schemas.Task) (schemas.ExecutionPlan, []string, error) {
-	tier := task.EstimatedTier
-	if tier == nil || *tier == "" {
-		computed := ClassifyRequest(task.Intent)
-		tier = &computed
-	}
+	tier := ClassifyRequest(task.Intent)
 	for _, fact := range task.AcceptanceFacts {
-		if fact.AutomatedVerification && *tier == schemas.TierTrivial {
-			computed := schemas.TierLight
-			tier = &computed
+		if fact.AutomatedVerification && tier == schemas.TierTrivial {
+			tier = schemas.TierLight
 			break
 		}
 	}
-	stages, budget, err := stagesForTier(*tier)
+	stages, budget, err := stagesForTier(tier)
 	if err != nil {
 		return schemas.ExecutionPlan{}, nil, err
 	}
@@ -85,7 +80,7 @@ func BuildExecutionPlanForTaskWithFacts(task schemas.Task) (schemas.ExecutionPla
 		acceptanceFacts = append(acceptanceFacts, fact.Statement)
 	}
 	return schemas.ExecutionPlan{
-		Tier:            *tier,
+		Tier:            tier,
 		RequestIntent:   task.Intent,
 		Stages:          stages,
 		TokenBudget:     budget,

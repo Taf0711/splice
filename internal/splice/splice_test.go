@@ -1,6 +1,7 @@
 package splice
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -177,8 +178,7 @@ func TestBuildExecutionPlanForTaskFloorsAutomatedAcceptanceAtLight(t *testing.T)
 }
 
 func TestBuildExecutionPlanForTask(t *testing.T) {
-	tier := schemas.TierStandard
-	task := schemas.Task{ID: "t1", Title: "T", Intent: "add search", EstimatedTier: &tier}
+	task := schemas.Task{ID: "t1", Title: "T", Intent: "add search"}
 	plan, err := BuildExecutionPlanForTask(task)
 	if err != nil {
 		t.Fatalf("build plan for task: %v", err)
@@ -186,13 +186,23 @@ func TestBuildExecutionPlanForTask(t *testing.T) {
 	if plan.RequestIntent != task.Intent {
 		t.Fatalf("intent mismatch: %q vs %q", plan.RequestIntent, task.Intent)
 	}
-	if plan.Tier != schemas.TierStandard {
-		t.Fatalf("expected standard tier, got %q", plan.Tier)
+	if plan.Tier != schemas.TierLight {
+		t.Fatalf("expected classifier light tier, got %q", plan.Tier)
 	}
-	bogus := schemas.PipelineTier("bogus")
-	task2 := schemas.Task{ID: "t2", Title: "T2", Intent: "do it", EstimatedTier: &bogus}
-	if _, err := BuildExecutionPlanForTask(task2); err == nil {
-		t.Fatal("expected error for bogus tier")
+}
+
+func TestBuildExecutionPlanForTaskIgnoresPersistedEstimatedTier(t *testing.T) {
+	raw := `{"id":"t1","title":"task one","intent":"do it","estimated_tier":"architectural"}`
+	var task schemas.Task
+	if err := json.Unmarshal([]byte(raw), &task); err != nil {
+		t.Fatalf("unmarshal persisted task: %v", err)
+	}
+	plan, err := BuildExecutionPlanForTask(task)
+	if err != nil {
+		t.Fatalf("build plan for task: %v", err)
+	}
+	if plan.Tier != schemas.TierLight {
+		t.Fatalf("tier = %q, want classifier light; persisted estimated_tier must be ignored", plan.Tier)
 	}
 }
 

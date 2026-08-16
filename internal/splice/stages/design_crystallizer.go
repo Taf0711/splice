@@ -95,8 +95,6 @@ func designPlanToolDefinition() zeroruntime.ToolDefinition {
 						"required": []string{"id", "title", "intent"},
 					},
 				},
-				"recommended_tier":       map[string]any{"type": "string"},
-				"recommended_model_tier": map[string]any{"type": "string"},
 			},
 			// out_of_scope and system_design are omitted deliberately: a short
 			// request establishes neither, and the prompt forbids inventing

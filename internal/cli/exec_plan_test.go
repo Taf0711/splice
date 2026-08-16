@@ -245,13 +245,11 @@ func writeExecPlanFile(t *testing.T, cwd string, plan schemas.DesignPlan) string
 }
 
 func cliDesignTask(id string, title string, dependsOn []string) schemas.Task {
-	tier := schemas.TierTrivial
 	return schemas.Task{
-		ID:            id,
-		Title:         title,
-		Intent:        "Implement " + title,
-		DependsOn:     append([]string(nil), dependsOn...),
-		EstimatedTier: &tier,
+		ID:        id,
+		Title:     title,
+		Intent:    "Implement " + title,
+		DependsOn: append([]string(nil), dependsOn...),
 	}
 }
 

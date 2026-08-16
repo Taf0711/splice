@@ -596,9 +596,8 @@ func TestJSONRoundTrip(t *testing.T) {
 	})
 
 	t.Run("design", func(t *testing.T) {
-		tier := TierStandard
 		ver := "go test ./..."
-		task := Task{ID: "t1", Title: "T", Intent: "do it", AcceptanceFacts: []AcceptanceFact{{Statement: "works", AutomatedVerification: true, VerificationCommand: &ver}}, EstimatedTier: &tier}
+		task := Task{ID: "t1", Title: "T", Intent: "do it", AcceptanceFacts: []AcceptanceFact{{Statement: "works", AutomatedVerification: true, VerificationCommand: &ver}}}
 		cases := []interface{ Validate() error }{
 			AcceptanceFact{Statement: "ok"},
 			task,
