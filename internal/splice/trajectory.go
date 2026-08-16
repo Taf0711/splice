@@ -28,95 +28,158 @@ func ComputeScore(state schemas.IterationState) float64 {
 	)
 }
 
+type trajectoryRule struct {
+	name     string
+	evaluate func(trajectoryRuleContext) *schemas.TrajectoryDecision
+}
+
+type trajectoryRuleContext struct {
+	history           []schemas.IterationState
+	maxIterations     int
+	tokenBudget       *int
+	currentScore      *float64
+	initialScore      *float64
+	tokensConsumed    int
+	stateHashes       []string
+	recentConfidences []float64
+}
+
+func (rc trajectoryRuleContext) decision(action schemas.TrajectoryAction, reason string, evidence []string) schemas.TrajectoryDecision {
+	return schemas.TrajectoryDecision{
+		Action:         action,
+		Reason:         reason,
+		IterationCount: len(rc.history),
+		CurrentScore:   rc.currentScore,
+		InitialScore:   rc.initialScore,
+		Evidence:       evidence,
+	}
+}
+
+// trajectoryRules is the ordered policy table. First non-nil decision wins.
+var trajectoryRules = []trajectoryRule{
+	{name: "iteration_limit", evaluate: ruleIterationLimit},
+	{name: "token_budget", evaluate: ruleTokenBudget},
+	{name: "oscillation", evaluate: ruleOscillation},
+	{name: "cycle", evaluate: ruleCycle},
+	{name: "rollback", evaluate: ruleRollback},
+	{name: "step_back", evaluate: ruleStepBack},
+	{name: "confidence", evaluate: ruleConfidence},
+}
+
 // EvaluateTrajectory evaluates trajectory rules over an iteration-state history.
 func EvaluateTrajectory(history []schemas.IterationState, maxIterations int, tokenBudget *int) schemas.TrajectoryDecision {
-	var currentScore, initialScore *float64
-	if len(history) > 0 {
-		s := ComputeScore(history[len(history)-1])
-		currentScore = &s
-	}
-	if len(history) > 0 {
-		s := ComputeScore(history[0])
-		initialScore = &s
-	}
-
-	decision := func(action schemas.TrajectoryAction, reason string, evidence []string) schemas.TrajectoryDecision {
-		return schemas.TrajectoryDecision{
-			Action:         action,
-			Reason:         reason,
-			IterationCount: len(history),
-			CurrentScore:   currentScore,
-			InitialScore:   initialScore,
-			Evidence:       evidence,
-		}
-	}
-
+	rc := newTrajectoryRuleContext(history, maxIterations, tokenBudget)
 	if len(history) == 0 {
-		return decision(schemas.ActionContinue, "No iteration history to evaluate.", nil)
+		return rc.decision(schemas.ActionContinue, "No iteration history to evaluate.", nil)
 	}
-
-	if len(history) >= maxIterations {
-		return decision(schemas.ActionAbortHardLimit, "Maximum iteration count reached.",
-			[]string{fmt.Sprintf("iterations=%d", len(history)), fmt.Sprintf("max_iterations=%d", maxIterations)})
-	}
-
-	tokensConsumed := 0
-	for _, state := range history {
-		tokensConsumed += state.TokensConsumed
-	}
-	if tokenBudget != nil && tokensConsumed >= *tokenBudget {
-		return decision(schemas.ActionAbortBudget, "Token budget reached.",
-			[]string{fmt.Sprintf("tokens_consumed=%d", tokensConsumed), fmt.Sprintf("token_budget=%d", *tokenBudget)})
-	}
-
-	stateHashes := make([]string, len(history))
-	for i, state := range history {
-		stateHashes[i] = state.StateHash
-	}
-	if detectOscillation(stateHashes) {
-		return decision(schemas.ActionEscalateOscillation, "State hashes show a repeated oscillation pattern.",
-			[]string{fmt.Sprintf("recent_hashes=%v", recentItems(stateHashes, 4))})
-	}
-
-	if slices.Contains(stateHashes[:len(stateHashes)-1], stateHashes[len(stateHashes)-1]) {
-		prevSig := verificationFailureSignature(history[len(history)-2])
-		curSig := verificationFailureSignature(history[len(history)-1])
-		reason := "Current state hash was seen before. The identical state came with changing verification failures, so model thrash is more likely."
-		switch {
-		case curSig == emptyVerificationFailureSignature && prevSig == emptyVerificationFailureSignature:
-			reason = "Current state hash was seen before. Neither iteration reported verification failures, so this is likely a no-op pass or model thrash against a non-verifying gate."
-		case curSig == prevSig:
-			reason = "Current state hash was seen before. The identical state came with identical verification failures, so the environment or verifier may be stuck."
+	for _, rule := range trajectoryRules {
+		if decision := rule.evaluate(rc); decision != nil {
+			return *decision
 		}
-		return decision(schemas.ActionEscalateCycleDetected, reason,
-			[]string{
-				fmt.Sprintf("state_hash=%s", stateHashes[len(stateHashes)-1]),
-				fmt.Sprintf("verification_failure_signature_current=%s", curSig),
-				fmt.Sprintf("verification_failure_signature_previous=%s", prevSig),
-			})
 	}
+	return rc.decision(schemas.ActionContinue, "Trajectory remains within safe bounds.", nil)
+}
 
-	if len(history) >= 3 && currentScore != nil && initialScore != nil && *currentScore < *initialScore {
-		return decision(schemas.ActionRollback, "Current score regressed below the initial score.",
-			[]string{fmt.Sprintf("initial_score=%v", *initialScore), fmt.Sprintf("current_score=%v", *currentScore)})
+func newTrajectoryRuleContext(history []schemas.IterationState, maxIterations int, tokenBudget *int) trajectoryRuleContext {
+	rc := trajectoryRuleContext{
+		history:       history,
+		maxIterations: maxIterations,
+		tokenBudget:   tokenBudget,
+		stateHashes:   make([]string, len(history)),
 	}
+	if len(history) > 0 {
+		current := ComputeScore(history[len(history)-1])
+		initial := ComputeScore(history[0])
+		rc.currentScore = &current
+		rc.initialScore = &initial
+	}
+	for i, state := range history {
+		rc.tokensConsumed += state.TokensConsumed
+		rc.stateHashes[i] = state.StateHash
+	}
+	start := max(0, len(history)-3)
+	rc.recentConfidences = make([]float64, 0, len(history)-start)
+	for _, state := range history[start:] {
+		rc.recentConfidences = append(rc.recentConfidences, state.Confidence)
+	}
+	return rc
+}
 
-	if len(history) >= 3 && !scoreImproving(history[len(history)-3:]) {
-		return decision(schemas.ActionStepBack, "Score has not improved across the last three iterations.",
-			[]string{fmt.Sprintf("recent_scores=%v", scores(history[len(history)-3:]))})
+func ruleIterationLimit(rc trajectoryRuleContext) *schemas.TrajectoryDecision {
+	if len(rc.history) < rc.maxIterations {
+		return nil
 	}
+	decision := rc.decision(schemas.ActionAbortHardLimit, "Maximum iteration count reached.",
+		[]string{fmt.Sprintf("iterations=%d", len(rc.history)), fmt.Sprintf("max_iterations=%d", rc.maxIterations)})
+	return &decision
+}
 
-	recentConfidences := make([]float64, 0, 3)
-	for _, state := range history[max(0, len(history)-3):] {
-		recentConfidences = append(recentConfidences, state.Confidence)
+func ruleTokenBudget(rc trajectoryRuleContext) *schemas.TrajectoryDecision {
+	if rc.tokenBudget == nil || rc.tokensConsumed < *rc.tokenBudget {
+		return nil
 	}
-	if len(recentConfidences) == 3 && strictlyDecreasing(recentConfidences) {
-		return decision(schemas.ActionSurfaceToUser,
-			"Confidence is strictly decreasing across the last three iterations.",
-			[]string{fmt.Sprintf("recent_confidences=%v", recentConfidences)})
-	}
+	decision := rc.decision(schemas.ActionAbortBudget, "Token budget reached.",
+		[]string{fmt.Sprintf("tokens_consumed=%d", rc.tokensConsumed), fmt.Sprintf("token_budget=%d", *rc.tokenBudget)})
+	return &decision
+}
 
-	return decision(schemas.ActionContinue, "Trajectory remains within safe bounds.", nil)
+func ruleOscillation(rc trajectoryRuleContext) *schemas.TrajectoryDecision {
+	if !detectOscillation(rc.stateHashes) {
+		return nil
+	}
+	decision := rc.decision(schemas.ActionEscalateOscillation, "State hashes show a repeated oscillation pattern.",
+		[]string{fmt.Sprintf("recent_hashes=%v", recentItems(rc.stateHashes, 4))})
+	return &decision
+}
+
+func ruleCycle(rc trajectoryRuleContext) *schemas.TrajectoryDecision {
+	if len(rc.stateHashes) == 0 || !slices.Contains(rc.stateHashes[:len(rc.stateHashes)-1], rc.stateHashes[len(rc.stateHashes)-1]) {
+		return nil
+	}
+	prevSig := verificationFailureSignature(rc.history[len(rc.history)-2])
+	curSig := verificationFailureSignature(rc.history[len(rc.history)-1])
+	reason := "Current state hash was seen before. The identical state came with changing verification failures, so model thrash is more likely."
+	switch {
+	case curSig == emptyVerificationFailureSignature && prevSig == emptyVerificationFailureSignature:
+		reason = "Current state hash was seen before. Neither iteration reported verification failures, so this is likely a no-op pass or model thrash against a non-verifying gate."
+	case curSig == prevSig:
+		reason = "Current state hash was seen before. The identical state came with identical verification failures, so the environment or verifier may be stuck."
+	}
+	decision := rc.decision(schemas.ActionEscalateCycleDetected, reason,
+		[]string{
+			fmt.Sprintf("state_hash=%s", rc.stateHashes[len(rc.stateHashes)-1]),
+			fmt.Sprintf("verification_failure_signature_current=%s", curSig),
+			fmt.Sprintf("verification_failure_signature_previous=%s", prevSig),
+		})
+	return &decision
+}
+
+func ruleRollback(rc trajectoryRuleContext) *schemas.TrajectoryDecision {
+	if len(rc.history) < 3 || rc.currentScore == nil || rc.initialScore == nil || *rc.currentScore >= *rc.initialScore {
+		return nil
+	}
+	decision := rc.decision(schemas.ActionRollback, "Current score regressed below the initial score.",
+		[]string{fmt.Sprintf("initial_score=%v", *rc.initialScore), fmt.Sprintf("current_score=%v", *rc.currentScore)})
+	return &decision
+}
+
+func ruleStepBack(rc trajectoryRuleContext) *schemas.TrajectoryDecision {
+	if len(rc.history) < 3 || scoreImproving(rc.history[len(rc.history)-3:]) {
+		return nil
+	}
+	decision := rc.decision(schemas.ActionStepBack, "Score has not improved across the last three iterations.",
+		[]string{fmt.Sprintf("recent_scores=%v", scores(rc.history[len(rc.history)-3:]))})
+	return &decision
+}
+
+func ruleConfidence(rc trajectoryRuleContext) *schemas.TrajectoryDecision {
+	if len(rc.recentConfidences) != 3 || !strictlyDecreasing(rc.recentConfidences) {
+		return nil
+	}
+	decision := rc.decision(schemas.ActionSurfaceToUser,
+		"Confidence is strictly decreasing across the last three iterations.",
+		[]string{fmt.Sprintf("recent_confidences=%v", rc.recentConfidences)})
+	return &decision
 }
 
 // ComputeIterationState computes the deterministic state vector for one pipeline pass.

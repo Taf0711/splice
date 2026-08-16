@@ -265,6 +265,25 @@ func TestComputeScoreRegressesWhenErrorsSecurityAndTypeIssuesIncrease(t *testing
 	}
 }
 
+func TestTrajectoryRuleOrder(t *testing.T) {
+	want := []string{
+		"iteration_limit",
+		"token_budget",
+		"oscillation",
+		"cycle",
+		"rollback",
+		"step_back",
+		"confidence",
+	}
+	got := make([]string, len(trajectoryRules))
+	for i, rule := range trajectoryRules {
+		got[i] = rule.name
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("rule order = %v, want %v", got, want)
+	}
+}
+
 func TestEvaluateTrajectoryContinuesForEmptyHistory(t *testing.T) {
 	decision := EvaluateTrajectory(nil, 5, nil)
 	if decision.Action != schemas.ActionContinue {
