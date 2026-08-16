@@ -154,16 +154,35 @@ func (m model) titlePRSegment() string {
 func (m model) titleModelSegment() string {
 	provider := strings.TrimSpace(m.providerDisplayName())
 	model := strings.TrimSpace(m.modelName)
+	var body string
 	switch {
 	case provider == "" && model == "":
-		return zeroTheme.muted.Render("no provider")
+		body = "no provider"
 	case model == "":
-		return zeroTheme.ink.Render(provider)
+		body = provider
 	case provider == "":
-		return zeroTheme.ink.Render(model)
+		body = model
 	default:
-		return zeroTheme.ink.Render(provider + "/" + model)
+		body = provider + "/" + model
 	}
+	if chip := m.worktreeChip(); chip != "" {
+		body += " " + chip
+	}
+	if provider == "" && model == "" {
+		return zeroTheme.muted.Render(body)
+	}
+	return zeroTheme.ink.Render(body)
+}
+
+func (m model) worktreeChip() string {
+	if m.activeWorktree == nil {
+		return ""
+	}
+	name := strings.TrimSpace(m.activeWorktree.Name)
+	if name == "" {
+		return ""
+	}
+	return "wt:" + name
 }
 
 func (m model) composerDividerLine(width int) string {

@@ -40,6 +40,7 @@ import (
 	"github.com/Taf0711/splice/internal/tools"
 	"github.com/Taf0711/splice/internal/usage"
 	"github.com/Taf0711/splice/internal/usercommands"
+	"github.com/Taf0711/splice/internal/worktrees"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
@@ -49,6 +50,12 @@ const defaultResponseStyle = "concise"
 var (
 	tuiSpliceRun     = splicerun.Run
 	tuiResolveMemory = memd.Resolve
+	// tuiPrepareWorktree and tuiUnlockWorktree are the exec Prepare/Unlock
+	// path. Tests replace them. disableTUIWorktreesForTest keeps the existing
+	// TUI suite on the live checkout.
+	tuiPrepareWorktree         = worktrees.Prepare
+	tuiUnlockWorktree          = worktrees.Unlock
+	disableTUIWorktreesForTest = false
 )
 
 const chatWheelScrollLines = 5
@@ -186,6 +193,9 @@ type model struct {
 	memoryCount         int            // observation count when active
 	memoryByType        map[string]int // by-type breakdown when active
 	memoryNoticed       bool           // whether the transition notice has been emitted
+	worktrees           config.WorktreesConfig
+	activeWorktree      *worktrees.Result
+	worktreeNotice      string
 	pendingPlan         *schemas.DesignPlan
 	pendingCritique     *schemas.PlanCritique
 	planPanelPersistent bool // CP3: pin the crystallized DesignPlan above the chat during design mode
@@ -578,9 +588,11 @@ type agentResponseMsg struct {
 	turnVisibleOutputTokens int
 	// Memory sidecar state captured by the run goroutine and applied on the
 	// main thread so the status line can show whether memory is active.
-	memoryStatus string
-	memoryCount  int
-	memoryByType map[string]int
+	memoryStatus   string
+	memoryCount    int
+	memoryByType   map[string]int
+	worktree       *worktrees.Result
+	worktreeNotice string
 	// designTransition is a transition the design agent queued this turn. It is
 	// run only when the turn succeeded (msg.err == nil), after pending clears.
 	designTransition *splicerun.DesignTransitionRequest
@@ -905,6 +917,7 @@ func newModel(ctx context.Context, options Options) model {
 		favoriteModels:              favoriteModelSet(options.FavoriteModels),
 		recapsEnabled:               options.RecapsEnabled,
 		compaction:                  options.Compaction,
+		worktrees:                   options.Worktrees,
 		provider:                    options.Provider,
 		newProvider:                 options.NewProvider,
 		probeProviderHealth:         options.ProbeProviderHealth,
@@ -2222,6 +2235,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.memoryNoticed = true
 			}
 		}
+		m.activeWorktree = msg.worktree
+		if notice := strings.TrimSpace(msg.worktreeNotice); notice != "" {
+			m.worktreeNotice = notice
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: notice})
+		}
 		m.clearStreamingToolCall() // active run finished — drop any lingering "writing" block
 		m.clearActiveTool()        // and any in-flight tool label/elapsed clock
 		m.pending = false
@@ -2451,6 +2469,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case planExecutionResultMsg:
 		if msg.runID != m.activeRunID {
 			return m, nil
+		}
+		m.activeWorktree = msg.worktree
+		if notice := strings.TrimSpace(msg.worktreeNotice); notice != "" {
+			m.worktreeNotice = notice
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: notice})
 		}
 		m.pending = false
 		m.clearActiveTool()
@@ -5120,6 +5143,69 @@ func selfCorrectAutonomyForMode(mode agent.PermissionMode) string {
 	}
 }
 
+const tuiWorktreeFallbackNotice = "Worktree unavailable; running in the live checkout. Rollback is unavailable."
+
+func (m model) bindPipelineWorktree(ctx context.Context, options *agent.Options) (worktrees.Result, string, error) {
+	if options == nil {
+		return worktrees.Result{}, "", fmt.Errorf("pipeline worktree bind requires agent options")
+	}
+	if disableTUIWorktreesForTest || !m.worktrees.EnabledOrDefault() {
+		notice := ""
+		if !disableTUIWorktreesForTest && !m.worktrees.EnabledOrDefault() {
+			notice = tuiWorktreeFallbackNotice
+		}
+		return worktrees.Result{}, notice, nil
+	}
+	sessionID := strings.TrimSpace(options.SessionID)
+	if sessionID == "" {
+		sessionID = "anon"
+	}
+	name := "tui-" + sanitizeTUIWorktreeName(sessionID) + "-" + fmt.Sprintf("%d", m.activeRunID)
+	prepared, err := tuiPrepareWorktree(ctx, worktrees.Options{
+		Cwd:     m.cwd,
+		Name:    name,
+		BaseDir: strings.TrimSpace(m.worktrees.Directory),
+	})
+	if err != nil {
+		return worktrees.Result{}, tuiWorktreeFallbackNotice, nil
+	}
+	if prepared.Path == "" {
+		return worktrees.Result{}, tuiWorktreeFallbackNotice, nil
+	}
+	options.Cwd = prepared.Path
+	reg := tools.NewRegistry()
+	if options.Registry != nil {
+		for _, tool := range options.Registry.All() {
+			reg.Register(tool)
+		}
+	}
+	for _, tool := range tools.CoreTools(prepared.Path) {
+		reg.Register(tool)
+	}
+	options.Registry = reg
+	return prepared, "", nil
+}
+
+func sanitizeTUIWorktreeName(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-._")
+	if out == "" {
+		return "session"
+	}
+	if len(out) > 40 {
+		return out[:40]
+	}
+	return out
+}
+
 func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt string, images []zeroruntime.ImageBlock, runOptions tuiAgentRunOptions) tea.Cmd {
 	return func() tea.Msg {
 		started := m.now()
@@ -5208,6 +5294,27 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			// Compaction explicitly disabled: ContextWindow 0 makes the loop's
 			// maybeCompact and recover strict no-ops.
 			options.ContextWindow = 0
+		}
+		var preparedWorktree worktrees.Result
+		var worktreeNotice string
+		if runOptions.runKind == tuiRunPipeline {
+			prepared, notice, bindErr := m.bindPipelineWorktree(runCtx, &options)
+			if bindErr != nil {
+				sessionEvents = append(sessionEvents, pendingSessionEvent{
+					Type:    sessions.EventError,
+					Payload: map[string]any{"message": bindErr.Error()},
+				})
+				return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: bindErr, turnTools: toolCalls, turnElapsed: m.now().Sub(started), worktreeNotice: notice}
+			}
+			preparedWorktree = prepared
+			worktreeNotice = notice
+			if prepared.Locked {
+				defer func() {
+					unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					_ = tuiUnlockWorktree(unlockCtx, worktrees.UnlockOptions{RepoRoot: prepared.RepoRoot, Path: prepared.Path})
+				}()
+			}
 		}
 		if m.captureRunOptions != nil {
 			m.captureRunOptions(options)
@@ -5742,10 +5849,46 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				}
 			}
 			m.pipeline.reset()
-			// The TUI runs in the user's live checkout. It never receives the
-			// destructive WorkspaceRecovery capability; a rollback decision aborts
-			// honestly instead of resetting this workspace.
+			// TW1 prepares the isolated tree only. Recovery stays nil until TW2.
 			result, err = tuiSpliceRun(runCtx, prompt, m.provider, options, mem, nil)
+			var preparedPtr *worktrees.Result
+			if preparedWorktree.Path != "" {
+				copy := preparedWorktree
+				preparedPtr = &copy
+			}
+			if err != nil {
+				flushReasoning(m.now())
+				sessionEvents = append(sessionEvents, pendingSessionEvent{
+					Type:    sessions.EventError,
+					Payload: map[string]any{"message": err.Error()},
+				})
+				return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, turnTools: toolCalls, turnElapsed: m.now().Sub(started), memoryStatus: memStatus, memoryCount: memCount, memoryByType: memByType, worktree: preparedPtr, worktreeNotice: worktreeNotice}
+			}
+			flushReasoning(m.now())
+			elapsed := m.now().Sub(started)
+			ttft := time.Duration(0)
+			if !firstTokenAt.IsZero() {
+				ttft = firstTokenAt.Sub(started)
+			}
+			displayAnswer := formatPipelineFinalAnswer(result.FinalAnswer)
+			rows = append(rows, transcriptRow{
+				kind:        rowAssistant,
+				text:        displayAnswer,
+				final:       true,
+				turnTools:   toolCalls,
+				turnElapsed: elapsed,
+			})
+			if truncation := result.TruncationNotice(); truncation != "" {
+				rows = append(rows, transcriptRow{kind: rowSystem, text: truncation})
+			}
+			sessionEvents = append(sessionEvents, pendingSessionEvent{
+				Type: sessions.EventMessage,
+				Payload: map[string]any{
+					"role":    "assistant",
+					"content": result.FinalAnswer,
+				},
+			})
+			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, turnTools: toolCalls, turnElapsed: elapsed, ttft: ttft, turnVisibleOutputTokens: turnVisibleOutputTokens, memoryStatus: memStatus, memoryCount: memCount, memoryByType: memByType, worktree: preparedPtr, worktreeNotice: worktreeNotice}
 		}
 		if err != nil {
 			flushReasoning(m.now())

@@ -67,6 +67,26 @@ func TestToolsConfigPresentOnOverridesAndResolved(t *testing.T) {
 
 func ptrBool(v bool) *bool { return &v }
 
+func TestWorktreesConfigDefaultsToOn(t *testing.T) {
+	var cfg FileConfig
+	if err := json.Unmarshal([]byte(`{}`), &cfg); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if !cfg.Worktrees.EnabledOrDefault() {
+		t.Fatal("expected worktrees enabled by default")
+	}
+	var explicit FileConfig
+	if err := json.Unmarshal([]byte(`{"worktrees":{"enabled":false,"directory":"/tmp/wt"}}`), &explicit); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if explicit.Worktrees.EnabledOrDefault() {
+		t.Fatal("expected worktrees disabled")
+	}
+	if explicit.Worktrees.Directory != "/tmp/wt" {
+		t.Fatalf("Directory = %q, want /tmp/wt", explicit.Worktrees.Directory)
+	}
+}
+
 func TestCompactionConfigDefaults(t *testing.T) {
 	var cfg FileConfig
 	if err := json.Unmarshal([]byte(`{}`), &cfg); err != nil {

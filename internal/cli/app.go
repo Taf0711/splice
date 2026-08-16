@@ -970,6 +970,7 @@ func runInteractiveTUIWithSetup(stdout io.Writer, stderr io.Writer, deps appDeps
 		}),
 		PermissionMode: permissionMode,
 		Notify:         resolved.Notify,
+		Worktrees:      resolved.Worktrees,
 		KeyBindings:    resolved.KeyBindings,
 		Setup: tui.SetupOptions{
 			Visible:    setupVisible,

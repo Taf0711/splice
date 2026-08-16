@@ -18,6 +18,7 @@ import (
 	splicerun "github.com/Taf0711/splice/internal/splice"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/tools"
+	"github.com/Taf0711/splice/internal/worktrees"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
@@ -38,6 +39,7 @@ func TestMain(m *testing.M) {
 		return agent.Run(ctx, prompt, provider, options)
 	}
 	tuiResolveMemory = func(context.Context) (*memd.Client, error) { return nil, nil }
+	disableTUIWorktreesForTest = true
 	code := m.Run()
 	_ = os.RemoveAll(dataDir)
 	os.Exit(code)
@@ -455,6 +457,139 @@ func TestTUIPipelineEndToEndFeature(t *testing.T) {
 	}
 	if usagePayload["model"] != "qwen-local" || usagePayload["provider"] != "local" || usagePayload["usageSequence"] != 1 || usagePayload["costStatus"] != agent.CostStatusUnpriced {
 		t.Fatalf("attributed TUI usage payload = %#v", usagePayload)
+	}
+}
+
+func TestTUIPipelineRunUsesPreparedWorktree(t *testing.T) {
+	origDisable := disableTUIWorktreesForTest
+	origPrepare := tuiPrepareWorktree
+	origUnlock := tuiUnlockWorktree
+	origRun := tuiSpliceRun
+	defer func() {
+		disableTUIWorktreesForTest = origDisable
+		tuiPrepareWorktree = origPrepare
+		tuiUnlockWorktree = origUnlock
+		tuiSpliceRun = origRun
+	}()
+	disableTUIWorktreesForTest = false
+
+	workDir := t.TempDir()
+	preparedPath := filepath.Join(workDir, "wt")
+	if err := os.Mkdir(preparedPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	locked := false
+	unlocked := false
+	tuiPrepareWorktree = func(_ context.Context, options worktrees.Options) (worktrees.Result, error) {
+		if options.Cwd != workDir {
+			t.Fatalf("prepare cwd = %q, want %q", options.Cwd, workDir)
+		}
+		if !strings.HasPrefix(options.Name, "tui-") {
+			t.Fatalf("prepare name = %q, want tui- prefix", options.Name)
+		}
+		locked = true
+		return worktrees.Result{Name: options.Name, Path: preparedPath, RepoRoot: workDir, Locked: true}, nil
+	}
+	tuiUnlockWorktree = func(context.Context, worktrees.UnlockOptions) error {
+		if !locked {
+			t.Fatal("unlock before lock")
+		}
+		unlocked = true
+		return nil
+	}
+	var gotCwd string
+	tuiSpliceRun = func(_ context.Context, _ string, _ agent.Provider, options agent.Options, _ splicerun.MemoryStore, recovery splicerun.WorkspaceRecovery) (agent.Result, error) {
+		if recovery != nil {
+			t.Fatal("TW1 must not pass recovery")
+		}
+		gotCwd = options.Cwd
+		return agent.Result{FinalAnswer: `{"status":"completed"}`}, nil
+	}
+
+	m := newModel(context.Background(), Options{Cwd: workDir, Worktrees: config.WorktreesConfig{}})
+	m.activeRunID = 7
+	m.activeSession.SessionID = "sess1"
+	msg := m.runAgentWithOptions(7, context.Background(), "do work", nil, tuiAgentRunOptions{})()
+	resp := msg.(agentResponseMsg)
+	if resp.err != nil {
+		t.Fatalf("run: %v", resp.err)
+	}
+	if gotCwd != preparedPath {
+		t.Fatalf("pipeline cwd = %q, want %q", gotCwd, preparedPath)
+	}
+	if resp.worktree == nil || resp.worktree.Path != preparedPath {
+		t.Fatalf("response worktree = %#v", resp.worktree)
+	}
+	if !unlocked {
+		t.Fatal("expected unlock after the run")
+	}
+}
+
+func TestTUIPipelineRunFallsBackWhenPrepareFails(t *testing.T) {
+	origDisable := disableTUIWorktreesForTest
+	origPrepare := tuiPrepareWorktree
+	origRun := tuiSpliceRun
+	defer func() {
+		disableTUIWorktreesForTest = origDisable
+		tuiPrepareWorktree = origPrepare
+		tuiSpliceRun = origRun
+	}()
+	disableTUIWorktreesForTest = false
+
+	workDir := t.TempDir()
+	tuiPrepareWorktree = func(context.Context, worktrees.Options) (worktrees.Result, error) {
+		return worktrees.Result{}, fmt.Errorf("not a git repository")
+	}
+	var gotCwd string
+	tuiSpliceRun = func(_ context.Context, _ string, _ agent.Provider, options agent.Options, _ splicerun.MemoryStore, recovery splicerun.WorkspaceRecovery) (agent.Result, error) {
+		if recovery != nil {
+			t.Fatal("fallback must not pass recovery")
+		}
+		gotCwd = options.Cwd
+		return agent.Result{FinalAnswer: `{"status":"completed"}`}, nil
+	}
+
+	m := newModel(context.Background(), Options{Cwd: workDir})
+	msg := m.runAgentWithOptions(1, context.Background(), "do work", nil, tuiAgentRunOptions{})()
+	resp := msg.(agentResponseMsg)
+	if resp.err != nil {
+		t.Fatalf("run: %v", resp.err)
+	}
+	if gotCwd != workDir {
+		t.Fatalf("fallback cwd = %q, want live checkout %q", gotCwd, workDir)
+	}
+	if resp.worktreeNotice != tuiWorktreeFallbackNotice {
+		t.Fatalf("notice = %q", resp.worktreeNotice)
+	}
+}
+
+func TestTUIDesignAndSpecRunsSkipWorktreePrepare(t *testing.T) {
+	origDisable := disableTUIWorktreesForTest
+	origPrepare := tuiPrepareWorktree
+	defer func() {
+		disableTUIWorktreesForTest = origDisable
+		tuiPrepareWorktree = origPrepare
+	}()
+	disableTUIWorktreesForTest = false
+	called := false
+	tuiPrepareWorktree = func(context.Context, worktrees.Options) (worktrees.Result, error) {
+		called = true
+		return worktrees.Result{}, fmt.Errorf("should not prepare")
+	}
+	m := newModel(context.Background(), Options{Cwd: t.TempDir()})
+	_ = m.runAgentWithOptions(1, context.Background(), "plan", nil, tuiAgentRunOptions{runKind: tuiRunDesignConversation})()
+	_ = m.runAgentWithOptions(2, context.Background(), "spec", nil, tuiAgentRunOptions{runKind: tuiRunSpecDraft})()
+	if called {
+		t.Fatal("design and spec-draft runs must not prepare a worktree")
+	}
+}
+
+func TestWorktreeChipRendersNearModel(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-4.1"})
+	m.activeWorktree = &worktrees.Result{Name: "tui-sess-1"}
+	got := m.titleModelSegment()
+	if !strings.Contains(got, "wt:tui-sess-1") {
+		t.Fatalf("model segment = %q, want worktree chip", got)
 	}
 }
 

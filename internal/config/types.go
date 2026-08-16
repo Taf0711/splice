@@ -236,6 +236,19 @@ type SwarmConfig struct {
 	MaxTeamSize int `json:"maxTeamSize,omitempty"`
 }
 
+// WorktreesConfig controls isolated TUI pipeline worktrees.
+type WorktreesConfig struct {
+	// Enabled gates TUI pipeline isolation. nil defaults to on.
+	Enabled *bool `json:"enabled,omitempty"`
+	// Directory is the base directory for created worktrees.
+	Directory string `json:"directory,omitempty"`
+}
+
+// EnabledOrDefault reports whether TUI pipeline worktrees are on.
+func (c WorktreesConfig) EnabledOrDefault() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
 // ToolsOverride builds a ToolsConfig that explicitly overrides the deferred-tool
 // threshold (including to 0, which disables deferral). Use this for programmatic
 // Overrides — a bare ToolsConfig{DeferThreshold: 0} is indistinguishable from
@@ -279,6 +292,7 @@ type FileConfig struct {
 	KeyBindings         KeyBindingsConfig  `json:"keybindings,omitempty"`
 	LocalControl        LocalControlConfig `json:"localControl,omitempty"`
 	Compaction          CompactionConfig   `json:"compaction,omitempty"`
+	Worktrees           WorktreesConfig    `json:"worktrees,omitempty"`
 	DefaultProjectTrust string             `json:"defaultProjectTrust,omitempty"`
 }
 
@@ -297,6 +311,7 @@ func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 		KeyBindings         KeyBindingsConfig   `json:"keybindings,omitempty"`
 		LocalControl        *LocalControlConfig `json:"localControl,omitempty"`
 		Compaction          CompactionConfig    `json:"compaction,omitempty"`
+		Worktrees           WorktreesConfig     `json:"worktrees,omitempty"`
 		DefaultProjectTrust string              `json:"defaultProjectTrust,omitempty"`
 	}
 	raw := rawConfig{
@@ -311,6 +326,7 @@ func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 		Preferences:         cfg.Preferences,
 		KeyBindings:         cfg.KeyBindings,
 		Compaction:          cfg.Compaction,
+		Worktrees:           cfg.Worktrees,
 		DefaultProjectTrust: cfg.DefaultProjectTrust,
 	}
 	if strings.TrimSpace(cfg.Auth.Storage) != "" {
@@ -341,6 +357,7 @@ type Overrides struct {
 	Tools          ToolsConfig
 	KeyBindings    KeyBindingsConfig
 	LocalControl   LocalControlConfig
+	Worktrees      WorktreesConfig
 }
 
 type ResolvedConfig struct {
@@ -358,6 +375,7 @@ type ResolvedConfig struct {
 	Preferences         PreferencesConfig
 	KeyBindings         KeyBindingsConfig
 	LocalControl        LocalControlConfig
+	Worktrees           WorktreesConfig
 	DefaultProjectTrust string
 }
 
@@ -408,6 +426,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 		KeyBindings         KeyBindingsConfig          `json:"keybindings"`
 		LocalControl        LocalControlConfig         `json:"localControl"`
 		Compaction          CompactionConfig           `json:"compaction"`
+		Worktrees           WorktreesConfig            `json:"worktrees"`
 		DefaultProjectTrust string                     `json:"defaultProjectTrust"`
 		MCPServers          map[string]MCPServerConfig `json:"mcpServers"`
 		MCPServersSnake     map[string]MCPServerConfig `json:"mcp_servers"`
@@ -438,6 +457,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	cfg.KeyBindings = raw.KeyBindings
 	cfg.LocalControl = raw.LocalControl
 	cfg.Compaction = raw.Compaction
+	cfg.Worktrees = raw.Worktrees
 	cfg.DefaultProjectTrust = raw.DefaultProjectTrust
 	if cfg.MCP.Servers == nil && (len(raw.MCPServers) > 0 || len(raw.MCPServersSnake) > 0) {
 		cfg.MCP.Servers = map[string]MCPServerConfig{}

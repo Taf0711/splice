@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/tools"
 	"github.com/Taf0711/splice/internal/usage"
+	"github.com/Taf0711/splice/internal/worktrees"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
@@ -450,6 +452,22 @@ func (m model) startApprovalConfirmed(source splicerun.DesignTransitionSource, p
 
 	return m, tea.Batch(
 		func() tea.Msg {
+			prepared, notice, bindErr := m.bindPipelineWorktree(runCtx, &options)
+			if bindErr != nil {
+				return planExecutionResultMsg{runID: runID, err: bindErr, store: store, sessionID: sessionID, sessionEvents: sessionEvents, worktreeNotice: notice}
+			}
+			if prepared.Locked {
+				defer func() {
+					unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					_ = tuiUnlockWorktree(unlockCtx, worktrees.UnlockOptions{RepoRoot: prepared.RepoRoot, Path: prepared.Path})
+				}()
+			}
+			var preparedPtr *worktrees.Result
+			if prepared.Path != "" {
+				copy := prepared
+				preparedPtr = &copy
+			}
 			result, err := splicerun.RunDesignPlanWithResume(runCtx, plan, provider, options, mem, nil, splicerun.RunDesignPlanOptions{
 				PlanID:          planID,
 				OnTaskStart:     onTaskStart,
@@ -470,7 +488,7 @@ func (m model) startApprovalConfirmed(source splicerun.DesignTransitionSource, p
 					}
 				}
 			}
-			return planExecutionResultMsg{runID: runID, result: result, err: err, store: store, sessionID: sessionID, sessionEvents: sessionEvents}
+			return planExecutionResultMsg{runID: runID, result: result, err: err, store: store, sessionID: sessionID, sessionEvents: sessionEvents, worktree: preparedPtr, worktreeNotice: notice}
 		},
 		m.spinner.Tick,
 	)
@@ -652,12 +670,14 @@ type crystallizeResultMsg struct {
 }
 
 type planExecutionResultMsg struct {
-	runID         int
-	result        agent.Result
-	err           error
-	store         *sessions.Store
-	sessionID     string
-	sessionEvents []pendingSessionEvent
+	runID          int
+	result         agent.Result
+	err            error
+	store          *sessions.Store
+	sessionID      string
+	sessionEvents  []pendingSessionEvent
+	worktree       *worktrees.Result
+	worktreeNotice string
 }
 
 // designCoverageWarning reports plan fields that the conversation did not

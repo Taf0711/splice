@@ -604,7 +604,7 @@ func (m model) renderContextSidebar(width, height int) []string {
 	// PIPELINE section (pipeline stages).
 	if !m.pipeline.isEmpty() {
 		add("")
-		add(m.pipeline.headerLine(width))
+		add(m.pipeline.headerLineWithChip(width, m.worktreeChip()))
 		lines = append(lines, m.pipeline.renderSection(width, m.spinnerPhase)...)
 	}
 

@@ -167,6 +167,7 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		Preferences:         cfg.Preferences,
 		KeyBindings:         cfg.KeyBindings,
 		LocalControl:        cfg.LocalControl,
+		Worktrees:           cfg.Worktrees,
 		DefaultProjectTrust: cfg.DefaultProjectTrust,
 	}, nil
 }
@@ -254,6 +255,7 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 	}
 	mergeCompactionConfig(&dst.Compaction, src.Compaction)
 	mergeLocalControlConfig(&dst.LocalControl, src.LocalControl)
+	mergeWorktreesConfig(&dst.Worktrees, src.Worktrees)
 	mergeKeyBindings(&dst.KeyBindings, src.KeyBindings)
 }
 
@@ -308,6 +310,7 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 		dst.Swarm.MaxTeamSize = src.Swarm.MaxTeamSize
 	}
 	mergeCompactionConfig(&dst.Compaction, src.Compaction)
+	mergeWorktreesConfig(&dst.Worktrees, src.Worktrees)
 	mergeKeyBindings(&dst.KeyBindings, src.KeyBindings)
 	// Local control is intentionally user-config/override only. A cloned project
 	// must not be able to make browser, desktop, or terminal automation tools
@@ -709,6 +712,7 @@ func applyOverrides(cfg *FileConfig, overrides Overrides) {
 		cfg.Tools.deferThresholdSet = true
 	}
 	mergeLocalControlConfig(&cfg.LocalControl, overrides.LocalControl)
+	mergeWorktreesConfig(&cfg.Worktrees, overrides.Worktrees)
 	mergeKeyBindings(&cfg.KeyBindings, overrides.KeyBindings)
 	for _, provider := range overrides.Providers {
 		mergeProvider(cfg, provider)
@@ -772,6 +776,15 @@ func mergeCompactionConfig(dst *CompactionConfig, src CompactionConfig) {
 	}
 	if src.KeepRecentTokens != 0 {
 		dst.KeepRecentTokens = src.KeepRecentTokens
+	}
+}
+
+func mergeWorktreesConfig(dst *WorktreesConfig, src WorktreesConfig) {
+	if src.Enabled != nil {
+		dst.Enabled = src.Enabled
+	}
+	if strings.TrimSpace(src.Directory) != "" {
+		dst.Directory = strings.TrimSpace(src.Directory)
 	}
 }
 

@@ -92,6 +92,20 @@ or write roots, restore protected credential paths, or enable network access.
 Use `--add-dir <path>` for a specific extra write root. Use the user
 configuration for persistent personal grants.
 
+## Worktrees
+
+TUI pipeline runs use an isolated Git worktree by default. Set this in user or
+project `config.json`:
+
+```json
+{"worktrees":{"enabled":true,"directory":"/path/to/worktrees"}}
+```
+
+`enabled` defaults to on. `directory` selects the base directory for created
+worktrees. When worktrees are off, or create fails, the TUI runs in the live
+checkout and reports that rollback is unavailable. Design and spec-draft runs
+stay in the live checkout.
+
 ## Sessions and local data
 
 Splice stores session events on the local machine. Use these commands to inspect

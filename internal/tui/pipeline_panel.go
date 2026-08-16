@@ -142,15 +142,23 @@ func (s pipelinePanelState) isEmpty() bool {
 }
 
 func (s pipelinePanelState) headerLine(width int) string {
+	return s.headerLineWithChip(width, "")
+}
+
+func (s pipelinePanelState) headerLineWithChip(width int, chip string) string {
+	label := "PIPELINE"
+	if strings.TrimSpace(chip) != "" {
+		label = "PIPELINE " + chip
+	}
 	if s.isEmpty() {
-		return sidebarHeader("PIPELINE", width)
+		return sidebarHeader(label, width)
 	}
 	done, total, allDone := s.counts()
 	style := zeroTheme.amber
 	if allDone {
 		style = zeroTheme.green
 	}
-	return sidebarHeaderWithCount("PIPELINE", fmt.Sprintf("%d/%d", done, total), style, width)
+	return sidebarHeaderWithCount(label, fmt.Sprintf("%d/%d", done, total), style, width)
 }
 
 func (s pipelinePanelState) renderSection(width int, phase int) []string {

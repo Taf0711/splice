@@ -77,6 +77,9 @@ type Options struct {
 	// with the built-in ratio/message-count defaults.
 	Compaction config.CompactionConfig
 
+	// Worktrees controls isolated TUI pipeline worktrees. Unset defaults to on.
+	Worktrees config.WorktreesConfig
+
 	// KeyBindings configures remappable TUI keybindings. An empty/splice
 	// KeyBindingsConfig means "use built-in defaults" for each action.
 	KeyBindings config.KeyBindingsConfig
