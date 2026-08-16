@@ -617,13 +617,14 @@ func TestTUIWorktreeReviewDecisions(t *testing.T) {
 	wt := worktrees.Result{Name: "tui-sess-1", Path: "/tmp/wt", RepoRoot: "/tmp/repo", Locked: true}
 
 	tests := []struct {
-		name       string
-		answer     string
-		wantKept   bool
-		wantMerge  bool
-		wantPin    bool
-		wantForce  bool
-		wantNotice string
+		name         string
+		answer       string
+		reasonAnswer string
+		wantKept     bool
+		wantMerge    bool
+		wantPin      bool
+		wantForce    bool
+		wantNotice   string
 	}{
 		{
 			name:       "accept",
@@ -632,11 +633,12 @@ func TestTUIWorktreeReviewDecisions(t *testing.T) {
 			wantNotice: "merged splice/tui-sess-1",
 		},
 		{
-			name:       "reject",
-			answer:     worktreeReviewReject,
-			wantPin:    true,
-			wantForce:  true,
-			wantNotice: "Worktree removed. Work remains on branch splice/tui-sess-1 if you change your mind.",
+			name:         "reject",
+			answer:       worktreeReviewReject,
+			reasonAnswer: worktreeRejectStillFailing,
+			wantPin:      true,
+			wantForce:    true,
+			wantNotice:   "Worktree removed. Work remains on branch splice/tui-sess-1 if you change your mind.",
 		},
 		{
 			name:       "keep",
@@ -680,6 +682,17 @@ func TestTUIWorktreeReviewDecisions(t *testing.T) {
 			next.pendingAskUser.states[0].answer = tt.answer
 			submittedModel, cmd := next.submitAskUser()
 			submitted := submittedModel.(model)
+			if tt.reasonAnswer != "" {
+				// Reject asks for a reason before the removal runs.
+				if submitted.pendingAskUser == nil || submitted.pendingAskUser.reviewDecision != worktreeReviewReject {
+					t.Fatal("expected reject-reason prompt after Reject")
+				}
+				submitted.pendingAskUser.states[0].answer = tt.reasonAnswer
+				var cmd2 tea.Cmd
+				submittedModel, cmd2 = submitted.submitAskUser()
+				submitted = submittedModel.(model)
+				cmd = cmd2
+			}
 			if submitted.pendingAskUser != nil {
 				t.Fatal("review prompt still pending after submit")
 			}
@@ -816,6 +829,109 @@ func TestTUIDemoUnsetLeavesReplayOff(t *testing.T) {
 	t.Setenv("SPLICE_TUI_DEMO", tuiDemoWorktreeReject)
 	if !tuiDemoReplayActive() {
 		t.Fatal("exact worktree-reject must activate the demo replay")
+	}
+}
+
+func TestTUIWorktreeRejectReasonMapsThrough(t *testing.T) {
+	origPreserve := tuiPreserveWorktree
+	origRemove := tuiRemoveWorktree
+	origUnlock := tuiUnlockWorktree
+	defer func() {
+		tuiPreserveWorktree = origPreserve
+		tuiRemoveWorktree = origRemove
+		tuiUnlockWorktree = origUnlock
+	}()
+	tuiPreserveWorktree = func(_ context.Context, options worktrees.PreserveOptions) (string, error) {
+		return "splice/" + options.Name, nil
+	}
+	tuiRemoveWorktree = func(context.Context, worktrees.RemoveOptions) error { return nil }
+	tuiUnlockWorktree = func(context.Context, worktrees.UnlockOptions) error { return nil }
+
+	wt := worktrees.Result{Name: "tui-sess-1", Path: "/tmp/wt", RepoRoot: "/tmp/repo", Locked: true}
+	cases := []struct {
+		answer string
+		want   string
+	}{
+		{answer: worktreeRejectWrongApproach, want: worktreeRejectWrongApproach},
+		{answer: worktreeRejectStillFailing, want: worktreeRejectStillFailing},
+		{answer: worktreeRejectChangedMind, want: worktreeRejectChangedMind},
+		{answer: worktreeRejectOther, want: worktreeRejectOther},
+	}
+	for _, tc := range cases {
+		m := newModel(context.Background(), Options{})
+		m, _ = m.maybeOfferWorktreeReview(&wt, false)
+		m.pendingAskUser.states[0].answer = worktreeReviewReject
+		m2, _ := m.submitAskUser()
+		m = m2.(model)
+		if m.pendingAskUser == nil || m.pendingAskUser.reviewDecision != worktreeReviewReject {
+			t.Fatalf("reason %q: expected reject-reason prompt", tc.answer)
+		}
+		m.pendingAskUser.states[0].answer = tc.answer
+		_, cmd := m.submitAskUser()
+		msg := cmd().(worktreeReviewResultMsg)
+		if msg.decision != worktreeReviewReject {
+			t.Fatalf("reason %q: decision = %q", tc.answer, msg.decision)
+		}
+		if msg.reason != tc.want {
+			t.Fatalf("reason %q: got %q", tc.answer, msg.reason)
+		}
+		if msg.kept != nil {
+			t.Fatalf("reason %q: reject must remove the worktree", tc.answer)
+		}
+	}
+}
+
+func TestTUIWorktreeRejectEscYieldsUnspecified(t *testing.T) {
+	origPreserve := tuiPreserveWorktree
+	origRemove := tuiRemoveWorktree
+	origUnlock := tuiUnlockWorktree
+	defer func() {
+		tuiPreserveWorktree = origPreserve
+		tuiRemoveWorktree = origRemove
+		tuiUnlockWorktree = origUnlock
+	}()
+	removed := false
+	tuiPreserveWorktree = func(_ context.Context, options worktrees.PreserveOptions) (string, error) {
+		return "splice/" + options.Name, nil
+	}
+	tuiRemoveWorktree = func(context.Context, worktrees.RemoveOptions) error {
+		removed = true
+		return nil
+	}
+	tuiUnlockWorktree = func(context.Context, worktrees.UnlockOptions) error { return nil }
+
+	wt := worktrees.Result{Name: "tui-sess-1", Path: "/tmp/wt", RepoRoot: "/tmp/repo", Locked: true}
+	m := newModel(context.Background(), Options{})
+	m, _ = m.maybeOfferWorktreeReview(&wt, false)
+	m.pendingAskUser.states[0].answer = worktreeReviewReject
+	m2, _ := m.submitAskUser()
+	m = m2.(model)
+	// Esc on the reason prompt means unspecified and still removes.
+	updated, cmd := m.Update(testKey(tea.KeyEsc))
+	next := updated.(model)
+	if next.pendingAskUser != nil {
+		t.Fatal("esc should dismiss the reason prompt")
+	}
+	msg := cmd().(worktreeReviewResultMsg)
+	if msg.reason != worktreeRejectUnspecified {
+		t.Fatalf("reason = %q, want unspecified", msg.reason)
+	}
+	if !removed {
+		t.Fatal("esc with no reason must still remove the worktree")
+	}
+}
+
+func TestTUIWorktreeReviewAcceptKeepSkipReasonPrompt(t *testing.T) {
+	wt := worktrees.Result{Name: "tui-sess-1", Path: "/tmp/wt", RepoRoot: "/tmp/repo", Locked: true}
+	for _, answer := range []string{worktreeReviewAccept, worktreeReviewKeep} {
+		m := newModel(context.Background(), Options{})
+		m, _ = m.maybeOfferWorktreeReview(&wt, false)
+		m.pendingAskUser.states[0].answer = answer
+		submittedModel, _ := m.submitAskUser()
+		submitted := submittedModel.(model)
+		if submitted.pendingAskUser != nil {
+			t.Fatalf("%s must not show the reject-reason prompt", answer)
+		}
 	}
 }
 

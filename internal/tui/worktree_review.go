@@ -19,9 +19,19 @@ const (
 	worktreeReviewDirtyNotice = "Main checkout has uncommitted changes; merge-back is unavailable."
 )
 
+const (
+	worktreeRejectWrongApproach = "wrong_approach"
+	worktreeRejectStillFailing  = "still_failing"
+	worktreeRejectChangedMind   = "changed_mind"
+	worktreeRejectOther         = "other"
+	worktreeRejectUnspecified   = "unspecified"
+)
+
 type worktreeReviewResultMsg struct {
-	notice string
-	kept   *worktrees.Result
+	notice   string
+	kept     *worktrees.Result
+	decision string
+	reason   string
 }
 
 func inspectSourceDirty(wt worktrees.Result) bool {
@@ -72,6 +82,54 @@ func parseWorktreeReviewDecision(answers []string) string {
 	}
 }
 
+func worktreeRejectReasonAskRequest() agent.AskUserRequest {
+	return agent.AskUserRequest{
+		ToolCallID: "worktree_reject_reason:" + worktreeReviewReject,
+		Header:     "Worktree reject",
+		Questions: []agent.AskUserQuestion{{
+			Question: "Why are you rejecting?",
+			Header:   "Reason",
+			Options: []string{
+				worktreeRejectWrongApproach,
+				worktreeRejectStillFailing,
+				worktreeRejectChangedMind,
+				worktreeRejectOther,
+			},
+			Recommended: worktreeRejectOther,
+		}},
+	}
+}
+
+func parseWorktreeRejectReason(answers []string) string {
+	if len(answers) == 0 {
+		return worktreeRejectUnspecified
+	}
+	reason := strings.TrimSpace(answers[0])
+	if reason == "" {
+		return worktreeRejectUnspecified
+	}
+	return reason
+}
+
+// offerWorktreeRejectReason shows the one follow-up question after the user picks
+// Reject, before the worktree is removed. The answer (or Esc/empty) feeds the
+// reject reason recorded on the review decision's session event.
+func (m model) offerWorktreeRejectReason(wt worktrees.Result) (model, tea.Cmd) {
+	req := worktreeRejectReasonAskRequest()
+	m.transcript = appendTranscriptRow(m.transcript, askUserTranscriptRow(req))
+	m.pendingAskUser = &pendingAskUserPrompt{
+		request:        req,
+		states:         newAskUserStates(req.Questions),
+		keepOnEsc:      true,
+		worktree:       &wt,
+		reviewDecision: worktreeReviewReject,
+	}
+	m.reportAgentLifecycle(herdrBlocked)
+	m.clearComposer()
+	m.clearSuggestions()
+	return m, nil
+}
+
 func (m model) maybeOfferWorktreeReview(wt *worktrees.Result, dirty bool) (model, tea.Cmd) {
 	if wt == nil || strings.TrimSpace(wt.Path) == "" {
 		return m, nil
@@ -96,7 +154,14 @@ func (m model) maybeOfferWorktreeReview(wt *worktrees.Result, dirty bool) (model
 	return m, nil
 }
 
-func applyWorktreeReview(wt worktrees.Result, decision string, dirtyOffered bool) worktreeReviewResultMsg {
+func applyWorktreeReview(wt worktrees.Result, decision string, dirtyOffered bool, reason string) worktreeReviewResultMsg {
+	msg := applyWorktreeReviewResult(wt, decision, dirtyOffered)
+	msg.decision = decision
+	msg.reason = reason
+	return msg
+}
+
+func applyWorktreeReviewResult(wt worktrees.Result, decision string, dirtyOffered bool) worktreeReviewResultMsg {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	unlock := func() error {

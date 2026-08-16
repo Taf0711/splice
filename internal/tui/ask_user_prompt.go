@@ -235,9 +235,20 @@ func (m model) submitAskUser() (tea.Model, tea.Cmd) {
 	m.clearComposer()
 	m.clearSuggestions()
 	if review != nil {
-		decision := parseWorktreeReviewDecision(answers)
+		if pending.reviewDecision == "" {
+			// Decision prompt. Reject asks for a reason before the removal runs.
+			decision := parseWorktreeReviewDecision(answers)
+			if decision == worktreeReviewReject {
+				return m.offerWorktreeRejectReason(*review)
+			}
+			return m, func() tea.Msg {
+				return applyWorktreeReview(*review, decision, dirtyMain, "")
+			}
+		}
+		// Reject-reason prompt: the decision is already Reject; capture the reason.
+		reason := parseWorktreeRejectReason(answers)
 		return m, func() tea.Msg {
-			return applyWorktreeReview(*review, decision, dirtyMain)
+			return applyWorktreeReview(*review, worktreeReviewReject, dirtyMain, reason)
 		}
 	}
 	return m, nil

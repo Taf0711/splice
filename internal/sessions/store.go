@@ -51,6 +51,7 @@ const (
 	EventTaskStarted        EventType = "task_started"
 	EventTaskCompleted      EventType = "task_completed"
 	EventTaskFailed         EventType = "task_failed"
+	EventWorktreeReview     EventType = "worktree_review"
 )
 
 type SessionKind string

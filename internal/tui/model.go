@@ -785,6 +785,9 @@ type pendingAskUserPrompt struct {
 	keepOnEsc bool
 	worktree  *worktrees.Result
 	dirtyMain bool
+	// reviewDecision is empty on the review decision prompt; it is
+	// worktreeReviewReject on the follow-up reject-reason prompt.
+	reviewDecision string
 }
 
 type pendingSpecReviewPrompt struct {
@@ -2528,6 +2531,17 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: notice})
 		}
 		m.activeWorktree = msg.kept
+		// Record the decision and reject reason on a session event so a later
+		// trace consumer can lift them into the run_outcome. Best-effort: a
+		// review trace write never fails the turn.
+		if msg.decision != "" {
+			if next, err := m.appendSessionEvent(sessions.EventWorktreeReview, map[string]any{
+				"decision": msg.decision,
+				"reason":   msg.reason,
+			}); err == nil {
+				m = next
+			}
+		}
 		m.reportAgentLifecycle(herdrIdle)
 		return m, nil
 	case sessionTitleGeneratedMsg:
