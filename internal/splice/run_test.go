@@ -134,7 +134,10 @@ func (s *stubStore) Upsert(ctx context.Context, obs schemas.MemoryObservation) (
 
 type capturingStage struct {
 	inputs *[]schemas.HarnessStageInput
+	caps   stages.Capabilities
 }
+
+func (s *capturingStage) Capabilities() stages.Capabilities { return s.caps }
 
 func (s *capturingStage) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options stages.StageOptions) (schemas.HarnessStageOutput, error) {
 	*s.inputs = append(*s.inputs, input)
@@ -147,6 +150,8 @@ func (s *capturingStage) Run(ctx context.Context, input schemas.HarnessStageInpu
 
 type stageFunc func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error)
 
+func (stageFunc) Capabilities() stages.Capabilities { return stages.Capabilities{} }
+
 func (f stageFunc) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options stages.StageOptions) (schemas.HarnessStageOutput, error) {
 	return f(ctx, input, provider, options)
 }
@@ -154,6 +159,8 @@ func (f stageFunc) Run(ctx context.Context, input schemas.HarnessStageInput, pro
 type outputStage struct {
 	output schemas.HarnessStageOutput
 }
+
+func (outputStage) Capabilities() stages.Capabilities { return stages.Capabilities{} }
 
 func (s outputStage) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options stages.StageOptions) (schemas.HarnessStageOutput, error) {
 	return s.output, nil
@@ -166,7 +173,10 @@ type capturedStageCall struct {
 
 type stageCallCapturer struct {
 	calls map[string]capturedStageCall
+	caps  stages.Capabilities
 }
+
+func (s *stageCallCapturer) Capabilities() stages.Capabilities { return s.caps }
 
 func (s *stageCallCapturer) Run(_ context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options stages.StageOptions) (schemas.HarnessStageOutput, error) {
 	s.calls[input.StageName] = capturedStageCall{provider: provider, options: options}
@@ -176,6 +186,8 @@ func (s *stageCallCapturer) Run(_ context.Context, input schemas.HarnessStageInp
 type contextRequestStage struct {
 	inputs *[]schemas.HarnessStageInput
 }
+
+func (*contextRequestStage) Capabilities() stages.Capabilities { return stages.Capabilities{} }
 
 func (s *contextRequestStage) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options stages.StageOptions) (schemas.HarnessStageOutput, error) {
 	*s.inputs = append(*s.inputs, input)
@@ -213,6 +225,8 @@ func (s *contextRequestStage) Run(ctx context.Context, input schemas.HarnessStag
 }
 
 type contextRetryFailureStage struct{ calls int }
+
+func (*contextRetryFailureStage) Capabilities() stages.Capabilities { return stages.Capabilities{} }
 
 func (s *contextRetryFailureStage) Run(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
 	s.calls++
@@ -269,7 +283,7 @@ func TestRunPassInjectsMemoryBundleAndSkipsRetrievalErrors(t *testing.T) {
 	var inputs []schemas.HarnessStageInput
 
 	records, outputs, completed, err := runPass(context.Background(), "run-memory", 1, plan, stageRegistry{
-		"code_writer": &capturingStage{inputs: &inputs},
+		"code_writer": &capturingStage{inputs: &inputs, caps: stages.Capabilities{ConsumesMemory: true, PullContext: true}},
 	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir, nil, time.Time{}, nil, retriever)
 	if err != nil {
 		t.Fatalf("runPass with memory: %v", err)
@@ -312,7 +326,7 @@ func TestRunPassInjectsMemoryBundleAndSkipsRetrievalErrors(t *testing.T) {
 	var errorInputs []schemas.HarnessStageInput
 	var progress []string
 	_, _, completed, err = runPass(context.Background(), "run-memory-error", 1, plan, stageRegistry{
-		"code_writer": &capturingStage{inputs: &errorInputs},
+		"code_writer": &capturingStage{inputs: &errorInputs, caps: stages.Capabilities{ConsumesMemory: true, PullContext: true}},
 	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{OnReasoning: func(text string) { progress = append(progress, text) }}), workDir, nil, time.Time{}, nil, errorRetriever)
 	if err != nil || !completed {
 		t.Fatalf("memory retrieval error should not fail run: completed=%v err=%v", completed, err)
@@ -326,7 +340,7 @@ func TestRunPassInjectsMemoryBundleAndSkipsRetrievalErrors(t *testing.T) {
 
 	var nilInputs []schemas.HarnessStageInput
 	_, _, completed, err = runPass(context.Background(), "run-memory-nil", 1, plan, stageRegistry{
-		"code_writer": &capturingStage{inputs: &nilInputs},
+		"code_writer": &capturingStage{inputs: &nilInputs, caps: stages.Capabilities{ConsumesMemory: true, PullContext: true}},
 	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir, nil, time.Time{}, nil, nil)
 	if err != nil || !completed {
 		t.Fatalf("nil retriever should complete: completed=%v err=%v", completed, err)
@@ -358,7 +372,11 @@ func TestRunPassSearchesOnlyMemoryConsumingStages(t *testing.T) {
 	registry := stageRegistry{}
 	var inputs []schemas.HarnessStageInput
 	for _, name := range inputNames {
-		registry[name] = &capturingStage{inputs: &inputs}
+		stage := &capturingStage{inputs: &inputs}
+		if name == "code_writer" || name == "test_generator" {
+			stage.caps = stages.Capabilities{ConsumesMemory: true, PullContext: true}
+		}
+		registry[name] = stage
 	}
 
 	_, _, completed, err := runPass(context.Background(), "run-memory-consumers", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir, nil, time.Time{}, nil, retriever)
@@ -1204,7 +1222,7 @@ func TestRunRejectsInvalidStageOutput(t *testing.T) {
 
 func TestRunPassModelFreeStageCapabilities(t *testing.T) {
 	workDir := t.TempDir()
-	capturer := &stageCallCapturer{calls: map[string]capturedStageCall{}}
+	capturer := &stageCallCapturer{calls: map[string]capturedStageCall{}, caps: stages.Capabilities{ModelFree: true}}
 	registry := stageRegistry{}
 	modelFreeNames := []string{"static_analyzer", "security_auditor", "test_runner"}
 	plan := schemas.ExecutionPlan{Tier: schemas.TierSubstantial, RequestIntent: "verify deterministically"}
@@ -1653,11 +1671,15 @@ func (failure meteredStageFailure) StageUsage() *schemas.StageUsage { return fai
 
 type meteredFailingStage struct{}
 
+func (meteredFailingStage) Capabilities() stages.Capabilities { return stages.Capabilities{} }
+
 func (meteredFailingStage) Run(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
 	return schemas.HarnessStageOutput{}, meteredStageFailure{usage: &schemas.StageUsage{InputTokens: 12, OutputTokens: 7, CachedInputTokens: 3}}
 }
 
 type terminalDetailStage struct{}
+
+func (terminalDetailStage) Capabilities() stages.Capabilities { return stages.Capabilities{} }
 
 func (terminalDetailStage) Run(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
 	return schemas.HarnessStageOutput{}, errors.New(`provider request error: {"detail":"Unsupported parameter: max_output_tokens"}`)
@@ -1694,6 +1716,8 @@ type repeatedContextFailureStage struct {
 	calls int
 	err   error
 }
+
+func (*repeatedContextFailureStage) Capabilities() stages.Capabilities { return stages.Capabilities{} }
 
 func (stage *repeatedContextFailureStage) Run(_ context.Context, input schemas.HarnessStageInput, _ zeroruntime.Provider, _ stages.StageOptions) (schemas.HarnessStageOutput, error) {
 	stage.calls++
@@ -1741,6 +1765,8 @@ func TestRunIterationLoopStopsRepeatedIdenticalStageFailure(t *testing.T) {
 }
 
 type changingFailureStage struct{ calls int }
+
+func (*changingFailureStage) Capabilities() stages.Capabilities { return stages.Capabilities{} }
 
 func (stage *changingFailureStage) Run(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
 	stage.calls++
@@ -1984,6 +2010,8 @@ type plateauStage struct {
 	calls int
 }
 
+func (*plateauStage) Capabilities() stages.Capabilities { return stages.Capabilities{} }
+
 func (s *plateauStage) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options stages.StageOptions) (schemas.HarnessStageOutput, error) {
 	s.calls++
 	return schemas.HarnessStageOutput{
@@ -2058,6 +2086,8 @@ type cycleStage struct {
 	calls     int
 	providers []agent.Provider
 }
+
+func (*cycleStage) Capabilities() stages.Capabilities { return stages.Capabilities{} }
 
 func (s *cycleStage) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options stages.StageOptions) (schemas.HarnessStageOutput, error) {
 	s.calls++
@@ -2285,6 +2315,8 @@ type surfaceToUserStage struct {
 	calls               int
 	lastRevisionContext *string
 }
+
+func (*surfaceToUserStage) Capabilities() stages.Capabilities { return stages.Capabilities{} }
 
 func (s *surfaceToUserStage) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options stages.StageOptions) (schemas.HarnessStageOutput, error) {
 	s.calls++

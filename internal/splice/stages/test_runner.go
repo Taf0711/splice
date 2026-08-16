@@ -21,6 +21,10 @@ type TestRunner struct{}
 
 var _ Stage = TestRunner{}
 
+func (TestRunner) Capabilities() Capabilities {
+	return Capabilities{ModelFree: true}
+}
+
 func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options StageOptions) (schemas.HarnessStageOutput, error) {
 	var cmd []string
 	cmd = append([]string(nil), options.Command...)

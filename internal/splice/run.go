@@ -402,7 +402,7 @@ func runIterationLoop(
 				Model:           options.Model,
 				ReasoningEffort: options.ReasoningEffort,
 			}
-			stageOpts := stageOptions("step_back", i, sbSelection, options, workDir, runner)
+			stageOpts := stageOptions("step_back", i, sbSelection, options, workDir, runner, stages.Capabilities{})
 			analysis, sbErr := stages.StepBack(ctx, provider, stageOpts, report)
 			if sbErr != nil {
 				if errors.Is(sbErr, context.Canceled) || ctx.Err() != nil {
@@ -490,21 +490,6 @@ func runIterationLoop(
 	return finishWithReason(runID, plan, allRecords, "aborted", fmt.Sprintf("reached max iterations (%d) without success", maxIterations))
 }
 
-// isModelFreeStage reports whether a pipeline stage runs deterministically
-// without a provider. F14a: static analysis, security audit, test execution,
-// and acceptance verification
-// are model-free. Every other stage (including unknown/custom stage names) keeps
-// the current model-backed default so test and extension seams do not silently
-// lose their provider.
-func isModelFreeStage(name string) bool {
-	switch name {
-	case "static_analyzer", "security_auditor", "test_runner", "acceptance_verifier":
-		return true
-	default:
-		return false
-	}
-}
-
 func runPass(
 	ctx context.Context,
 	runID string,
@@ -579,7 +564,8 @@ func runPass(
 			NextStage:         nextStage,
 		}
 
-		if mem != nil && stageConsumesMemory(stageName) {
+		caps := agentStage.Capabilities()
+		if mem != nil && caps.ConsumesMemory {
 			bundle, mErr := mem.Search(ctx, newMemoryQuery(stageName, plan.RequestIntent, workDir))
 			if mErr != nil {
 				emitProgress(options, fmt.Sprintf("[%s] memory retrieval skipped: %v\n", stageName, mErr))
@@ -597,7 +583,7 @@ func runPass(
 		emitStageEvent(options, stageName, "running", "", 0, nil)
 
 		// Model-free stages skip provider resolution and attribution.
-		modelFree := isModelFreeStage(stageName)
+		modelFree := caps.ModelFree
 		selection := agent.ModelSelection{
 			Provider:        provider,
 			ProviderName:    options.ProviderName,
@@ -749,7 +735,7 @@ func runStageWithContext(
 	mem MemoryStore,
 	outputMax int,
 ) (schemas.HarnessStageOutput, error) {
-	stageOpts := stageOptions(input.StageName, iteration, selection, options, workDir, runner)
+	stageOpts := stageOptions(input.StageName, iteration, selection, options, workDir, runner, stage.Capabilities())
 	if outputMax > 0 {
 		// The stage's output budget caps every LLM request this stage makes. Zero
 		// keeps the provider default (no per-request override).

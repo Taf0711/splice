@@ -7,9 +7,19 @@ import (
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
+// Capabilities is the declared runtime contract for one stage. TimeoutSeconds
+// 0 means the default 120s bound for deterministic subprocesses.
+type Capabilities struct {
+	ModelFree      bool
+	ConsumesMemory bool
+	PullContext    bool
+	TimeoutSeconds int
+}
+
 // Stage is one deterministic or LLM-backed pipeline step.
 type Stage interface {
 	Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options StageOptions) (schemas.HarnessStageOutput, error)
+	Capabilities() Capabilities
 }
 
 // StageOptions carries cross-stage dependencies and configuration.

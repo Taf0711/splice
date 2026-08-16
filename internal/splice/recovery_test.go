@@ -88,6 +88,8 @@ type trajectoryRecoveryStage struct {
 	restoreWasLate bool
 }
 
+func (*trajectoryRecoveryStage) Capabilities() stages.Capabilities { return stages.Capabilities{} }
+
 func (s *trajectoryRecoveryStage) Run(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
 	s.calls++
 	if s.calls == 4 && (s.recovery == nil || !s.recovery.restored()) {

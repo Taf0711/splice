@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/splice/stages"
 	"github.com/Taf0711/splice/internal/tools"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
@@ -19,6 +20,45 @@ func TestBuildStageRegistryRegistersAllStages(t *testing.T) {
 	for _, name := range []string{"code_writer", "test_generator", "test_runner", "acceptance_verifier", "static_analyzer", "security_auditor"} {
 		if _, ok := registry[name]; !ok {
 			t.Errorf("stage %q missing from registry", name)
+		}
+	}
+}
+
+func TestStageCapabilitiesMatchLegacySwitches(t *testing.T) {
+	registry, err := buildStageRegistry(PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir())
+	if err != nil {
+		t.Fatalf("buildStageRegistry: %v", err)
+	}
+	legacyModelFree := map[string]bool{
+		"static_analyzer": true, "security_auditor": true, "test_runner": true, "acceptance_verifier": true,
+	}
+	legacyMemory := map[string]bool{
+		"code_writer": true, "test_generator": true,
+	}
+	legacyPull := map[string]bool{
+		"code_writer": true, "test_generator": true,
+	}
+	legacyTimeout := map[string]int{
+		"acceptance_verifier": 30,
+	}
+	for _, name := range []string{"code_writer", "test_generator", "test_runner", "acceptance_verifier", "static_analyzer", "security_auditor"} {
+		stage, ok := registry[name]
+		if !ok {
+			t.Fatalf("stage %q missing", name)
+		}
+		got := stage.Capabilities()
+		if got.ModelFree != legacyModelFree[name] {
+			t.Errorf("%s.ModelFree = %v, want %v", name, got.ModelFree, legacyModelFree[name])
+		}
+		if got.ConsumesMemory != legacyMemory[name] {
+			t.Errorf("%s.ConsumesMemory = %v, want %v", name, got.ConsumesMemory, legacyMemory[name])
+		}
+		if got.PullContext != legacyPull[name] {
+			t.Errorf("%s.PullContext = %v, want %v", name, got.PullContext, legacyPull[name])
+		}
+		wantTimeout := legacyTimeout[name]
+		if got.TimeoutSeconds != wantTimeout {
+			t.Errorf("%s.TimeoutSeconds = %d, want %d", name, got.TimeoutSeconds, wantTimeout)
 		}
 	}
 }
@@ -55,7 +95,7 @@ func TestStageOptionsEmitsAttributedUsageWithoutLegacyDuplicate(t *testing.T) {
 		OnAttributedUsage: func(usage agent.AttributedUsage) {
 			attributed = append(attributed, usage)
 		},
-	}), t.TempDir(), nil)
+	}), t.TempDir(), nil, stages.CodeWriter{}.Capabilities())
 
 	events := make(chan zeroruntime.StreamEvent, 2)
 	events <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 4, OutputTokens: 2}}
@@ -77,7 +117,7 @@ func TestStageOptionsEmitsMissingUsageAndPreservesLegacyFallback(t *testing.T) {
 	var missing agent.AttributedUsage
 	attributedOptions := stageOptions("test_generator", 3, selection, PipelineConfigFromAgentOptions(agent.Options{
 		OnAttributedUsage: func(usage agent.AttributedUsage) { missing = usage },
-	}), t.TempDir(), nil)
+	}), t.TempDir(), nil, stages.TestGenerator{}.Capabilities())
 
 	noUsage := make(chan zeroruntime.StreamEvent, 1)
 	noUsage <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
@@ -104,7 +144,7 @@ func TestStageOptionsEmitsMissingUsageAndPreservesLegacyFallback(t *testing.T) {
 				t.Fatalf("legacy usage = %+v", usage)
 			}
 		},
-	}), t.TempDir(), nil)
+	}), t.TempDir(), nil, stages.CodeWriter{}.Capabilities())
 	withUsage := make(chan zeroruntime.StreamEvent, 2)
 	withUsage <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 2}}
 	withUsage <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
@@ -117,11 +157,11 @@ func TestStageOptionsEmitsMissingUsageAndPreservesLegacyFallback(t *testing.T) {
 
 func TestStageOptionsPromptCacheKey(t *testing.T) {
 	selection := agent.ModelSelection{ProviderName: "primary", Model: "model-a"}
-	withSession := stageOptions("code_writer", 1, selection, PipelineConfigFromAgentOptions(agent.Options{SessionID: "session-1"}), t.TempDir(), nil)
+	withSession := stageOptions("code_writer", 1, selection, PipelineConfigFromAgentOptions(agent.Options{SessionID: "session-1"}), t.TempDir(), nil, stages.CodeWriter{}.Capabilities())
 	if got, want := withSession.PromptCacheKey, "session-1:code_writer"; got != want {
 		t.Fatalf("PromptCacheKey = %q, want %q", got, want)
 	}
-	withoutSession := stageOptions("code_writer", 1, selection, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil)
+	withoutSession := stageOptions("code_writer", 1, selection, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, stages.CodeWriter{}.Capabilities())
 	if withoutSession.PromptCacheKey != "" {
 		t.Fatalf("PromptCacheKey = %q, want empty", withoutSession.PromptCacheKey)
 	}

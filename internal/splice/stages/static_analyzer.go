@@ -44,6 +44,10 @@ type StaticAnalyzer struct {
 
 var _ Stage = (*StaticAnalyzer)(nil)
 
+func (*StaticAnalyzer) Capabilities() Capabilities {
+	return Capabilities{ModelFree: true}
+}
+
 // NewStaticAnalyzer constructs a static analyzer from one or more
 // deterministic verification checks. Returns a named error if no checks are
 // provided, so a misconfigured registry fails loudly instead of silently

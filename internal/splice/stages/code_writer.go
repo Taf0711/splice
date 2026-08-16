@@ -23,6 +23,10 @@ type CodeWriter struct{}
 
 var _ Stage = CodeWriter{}
 
+func (CodeWriter) Capabilities() Capabilities {
+	return Capabilities{ConsumesMemory: true, PullContext: true}
+}
+
 func (CodeWriter) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options StageOptions) (schemas.HarnessStageOutput, error) {
 	if input.Context == nil {
 		req := options.contextRequest(input.RequestIntent)

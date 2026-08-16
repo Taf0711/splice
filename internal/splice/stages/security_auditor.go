@@ -28,6 +28,10 @@ var _ Stage = (*SecurityAuditor)(nil)
 // NewSecurityAuditor constructs a security auditor from one or more
 // deterministic verification checks. Returns a named error if no checks are
 // provided.
+func (*SecurityAuditor) Capabilities() Capabilities {
+	return Capabilities{ModelFree: true}
+}
+
 func NewSecurityAuditor(checks ...VerificationCheck) (*SecurityAuditor, error) {
 	if len(checks) == 0 {
 		return nil, fmt.Errorf("security auditor requires at least one verification check")

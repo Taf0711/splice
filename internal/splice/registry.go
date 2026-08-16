@@ -51,7 +51,7 @@ func buildStageRegistry(options PipelineRunConfig, workDir string) (stageRegistr
 
 // stageOptions builds StageOptions for a named stage.
 // iteration and selection provide attribution context for usage callbacks.
-func stageOptions(name string, iteration int, selection agent.ModelSelection, options PipelineRunConfig, workDir string, runner ToolRunner) stages.StageOptions {
+func stageOptions(name string, iteration int, selection agent.ModelSelection, options PipelineRunConfig, workDir string, runner ToolRunner, caps stages.Capabilities) stages.StageOptions {
 	language := detectLanguage(workDir)
 	promptCacheKey := ""
 	if options.SessionID != "" {
@@ -80,14 +80,14 @@ func stageOptions(name string, iteration int, selection agent.ModelSelection, op
 	} else {
 		onLegacyUsage = options.OnUsage
 	}
-	timeoutSeconds := 120
-	if name == "acceptance_verifier" {
-		timeoutSeconds = 30
+	timeoutSeconds := caps.TimeoutSeconds
+	if timeoutSeconds == 0 {
+		timeoutSeconds = 120
 	}
 	return stages.StageOptions{
 		WorkDir:        workDir,
 		Language:       language,
-		PullContext:    name == "code_writer" || name == "test_generator",
+		PullContext:    caps.PullContext,
 		RunTool:        adaptToolRunner(runner),
 		ReportActivity: makeReportCallback(options, name),
 		Stream: zeroruntime.CollectOptions{
