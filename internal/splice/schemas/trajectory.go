@@ -13,6 +13,7 @@ const (
 	ActionAbortHardLimit        TrajectoryAction = "abort_hard_limit"
 	ActionAbortBudget           TrajectoryAction = "abort_budget"
 	ActionAbortWallTime         TrajectoryAction = "abort_wall_time"
+	ActionAbortNoProgress       TrajectoryAction = "abort_no_progress"
 	ActionEscalateCycleDetected TrajectoryAction = "escalate_cycle_detected"
 	ActionEscalateOscillation   TrajectoryAction = "escalate_oscillation"
 	ActionRollback              TrajectoryAction = "rollback"
@@ -156,7 +157,7 @@ type TrajectoryDecision struct {
 // Validate checks the trajectory decision.
 func (t TrajectoryDecision) Validate() error {
 	switch t.Action {
-	case ActionContinue, ActionAbortHardLimit, ActionAbortBudget, ActionAbortWallTime,
+	case ActionContinue, ActionAbortHardLimit, ActionAbortBudget, ActionAbortWallTime, ActionAbortNoProgress,
 		ActionEscalateCycleDetected, ActionEscalateOscillation, ActionRollback, ActionStepBack, ActionSurfaceToUser:
 	default:
 		return fmt.Errorf("invalid action %q", t.Action)

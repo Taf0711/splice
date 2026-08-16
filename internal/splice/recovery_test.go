@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -90,8 +92,13 @@ type trajectoryRecoveryStage struct {
 
 func (*trajectoryRecoveryStage) Capabilities() stages.Capabilities { return stages.Capabilities{} }
 
-func (s *trajectoryRecoveryStage) Run(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+func (s *trajectoryRecoveryStage) Run(_ context.Context, _ schemas.HarnessStageInput, _ zeroruntime.Provider, options stages.StageOptions) (schemas.HarnessStageOutput, error) {
 	s.calls++
+	if options.WorkDir != "" {
+		if err := os.WriteFile(filepath.Join(options.WorkDir, fmt.Sprintf("state-%d.txt", s.calls)), []byte("state\n"), 0o644); err != nil {
+			return schemas.HarnessStageOutput{}, err
+		}
+	}
 	if s.calls == 4 && (s.recovery == nil || !s.recovery.restored()) {
 		s.restoreWasLate = true
 	}

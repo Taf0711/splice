@@ -60,6 +60,7 @@ var trajectoryRules = []trajectoryRule{
 	{name: "token_budget", evaluate: ruleTokenBudget},
 	{name: "oscillation", evaluate: ruleOscillation},
 	{name: "cycle", evaluate: ruleCycle},
+	{name: "no_progress", evaluate: ruleNoProgress},
 	{name: "rollback", evaluate: ruleRollback},
 	{name: "step_back", evaluate: ruleStepBack},
 	{name: "confidence", evaluate: ruleConfidence},
@@ -169,6 +170,48 @@ func ruleStepBack(rc trajectoryRuleContext) *schemas.TrajectoryDecision {
 	decision := rc.decision(schemas.ActionStepBack, "Score has not improved across the last three iterations.",
 		[]string{fmt.Sprintf("recent_scores=%v", scores(rc.history[len(rc.history)-3:]))})
 	return &decision
+}
+
+func ruleNoProgress(rc trajectoryRuleContext) *schemas.TrajectoryDecision {
+	n := trailingNoProgressCount(rc.history)
+	if n < 3 {
+		return nil
+	}
+	evidence := []string{
+		fmt.Sprintf("no_progress_iterations=%d", n),
+		"files_changed=0",
+		"lines_changed=0",
+	}
+	if noProgressAlreadyFired(rc.history) {
+		decision := rc.decision(schemas.ActionAbortNoProgress, "The last three iterations produced no workspace change after a prior no-progress step-back.", evidence)
+		return &decision
+	}
+	decision := rc.decision(schemas.ActionStepBack, "The last three iterations produced no workspace change.", evidence)
+	return &decision
+}
+
+func noProgressAlreadyFired(history []schemas.IterationState) bool {
+	for i := 3; i < len(history); i++ {
+		if trailingNoProgressCount(history[:i]) >= 3 {
+			return true
+		}
+	}
+	return false
+}
+
+func trailingNoProgressCount(history []schemas.IterationState) int {
+	n := 0
+	for i := len(history) - 1; i >= 0; i-- {
+		if hasWorkspaceProgress(history[i]) {
+			break
+		}
+		n++
+	}
+	return n
+}
+
+func hasWorkspaceProgress(state schemas.IterationState) bool {
+	return len(state.FilesChanged) > 0 || state.LinesAdded+state.LinesRemoved > 0
 }
 
 func ruleConfidence(rc trajectoryRuleContext) *schemas.TrajectoryDecision {

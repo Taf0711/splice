@@ -2014,6 +2014,11 @@ func (*plateauStage) Capabilities() stages.Capabilities { return stages.Capabili
 
 func (s *plateauStage) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options stages.StageOptions) (schemas.HarnessStageOutput, error) {
 	s.calls++
+	if options.WorkDir != "" {
+		if err := os.WriteFile(filepath.Join(options.WorkDir, fmt.Sprintf("plateau-%d.go", s.calls)), []byte("package x\n"), 0o644); err != nil {
+			return schemas.HarnessStageOutput{}, err
+		}
+	}
 	return schemas.HarnessStageOutput{
 		Summary:    "plateau output",
 		Confidence: 0.7,
@@ -2321,6 +2326,11 @@ func (*surfaceToUserStage) Capabilities() stages.Capabilities { return stages.Ca
 func (s *surfaceToUserStage) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options stages.StageOptions) (schemas.HarnessStageOutput, error) {
 	s.calls++
 	s.lastRevisionContext = input.RevisionContext
+	if options.WorkDir != "" {
+		if err := os.WriteFile(filepath.Join(options.WorkDir, fmt.Sprintf("call-%d.go", s.calls)), []byte("package x\n"), 0o644); err != nil {
+			return schemas.HarnessStageOutput{}, err
+		}
+	}
 	confidence := 0.9 - 0.2*float64(s.calls-1)
 	if confidence < 0.1 {
 		confidence = 0.1
@@ -2363,6 +2373,85 @@ func (s *surfaceToUserStage) Run(ctx context.Context, input schemas.HarnessStage
 			},
 		},
 	}, nil
+}
+
+type noProgressStage struct {
+	calls int
+}
+
+func (*noProgressStage) Capabilities() stages.Capabilities { return stages.Capabilities{} }
+
+func (s *noProgressStage) Run(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+	s.calls++
+	return schemas.HarnessStageOutput{
+		Summary:    fmt.Sprintf("thrash output %d", s.calls),
+		Confidence: 0.8,
+		Data: map[string]any{
+			"code_writer_output": schemas.CodeWriterOutput{
+				Files:      []schemas.FileChange{{Path: "main.go", Content: fmt.Sprintf("package main\n// %d\n", s.calls), ChangeType: "create"}},
+				Language:   "go",
+				Intent:     "create",
+				Confidence: 0.8,
+			},
+			"test_results": schemas.TestRunResults{
+				Command: []string{"go", "test"},
+				Tests: []schemas.TestCaseResult{
+					{Name: "TestA", Status: "passed", DurationMs: 1},
+					{Name: "TestB", Status: "failed", DurationMs: 2, Message: "not working"},
+				},
+				ExitCode: 1,
+			},
+		},
+	}, nil
+}
+
+func TestNoProgressBrakeStepsBackOnceThenAborts(t *testing.T) {
+	workDir := t.TempDir()
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		RequestIntent: "no progress thrash",
+		Stages:        []schemas.ExecutionStage{{Name: "code_writer"}},
+		TokenBudget: schemas.TokenBudget{
+			TotalInputBudget:  100000,
+			TotalOutputBudget: 100000,
+			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000}},
+			OverflowPolicy:    "abort",
+		},
+	}
+	stage := &noProgressStage{}
+	provider := &stepBackRunFakeProvider{analysis: schemas.StepBackAnalysis{
+		HypothesizedRootCause: "no workspace change",
+		Evidence:              []string{"empty diff"},
+		RecommendedApproach:   "stop thrashing",
+		Confidence:            0.8,
+	}}
+	result, err := runIterationLoop(
+		context.Background(),
+		"no-progress-run",
+		plan,
+		stageRegistry{"code_writer": stage},
+		provider,
+		PipelineConfigFromAgentOptions(agent.Options{Cwd: workDir, MaxTurns: 5}),
+		workDir,
+		nil,
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	if result.Status != "aborted" {
+		t.Fatalf("expected aborted, got status=%q abort_reason=%v", result.Status, DerefString(result.AbortReason))
+	}
+	if result.AbortReason == nil || !strings.Contains(*result.AbortReason, "abort_no_progress") {
+		t.Fatalf("expected abort_no_progress, got %q", DerefString(result.AbortReason))
+	}
+	if provider.stepBackCallCount != 1 {
+		t.Fatalf("step-back count = %d, want 1", provider.stepBackCallCount)
+	}
+	if stage.calls != 4 {
+		t.Fatalf("stage calls = %d, want 4 (step-back at 3, abort at 4)", stage.calls)
+	}
 }
 
 func TestSurfaceToUserNilCallbackAborts(t *testing.T) {

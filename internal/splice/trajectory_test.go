@@ -51,6 +51,13 @@ func withTokens(n int) func(*schemas.IterationState) {
 	}
 }
 
+func withProgress(files ...string) func(*schemas.IterationState) {
+	return func(s *schemas.IterationState) {
+		s.FilesChanged = append([]string(nil), files...)
+		s.LinesAdded = 1
+	}
+}
+
 func withSeverity(lint, sec map[schemas.Severity]int) func(*schemas.IterationState) {
 	return func(s *schemas.IterationState) {
 		s.LintIssuesBySeverity = lint
@@ -330,6 +337,7 @@ func TestTrajectoryRuleOrder(t *testing.T) {
 		"token_budget",
 		"oscillation",
 		"cycle",
+		"no_progress",
 		"rollback",
 		"step_back",
 		"confidence",
@@ -397,9 +405,9 @@ func TestEvaluateTrajectoryDetectsOscillation(t *testing.T) {
 
 func TestEvaluateTrajectoryRollsBackWhenScoreRegressesBelowInitial(t *testing.T) {
 	history := []schemas.IterationState{
-		iterState(withTests(4, 0, 0), withHash("a")),
-		iterState(withTests(3, 0, 0), withHash("b")),
-		iterState(withTests(2, 0, 0), withHash("c")),
+		iterState(withTests(4, 0, 0), withHash("a"), withProgress("a.go")),
+		iterState(withTests(3, 0, 0), withHash("b"), withProgress("b.go")),
+		iterState(withTests(2, 0, 0), withHash("c"), withProgress("c.go")),
 	}
 	decision := EvaluateTrajectory(history, 5, nil)
 	if decision.Action != schemas.ActionRollback {
@@ -412,9 +420,9 @@ func TestEvaluateTrajectoryRollsBackWhenScoreRegressesBelowInitial(t *testing.T)
 
 func TestEvaluateTrajectoryStepsBackWhenScorePlateaus(t *testing.T) {
 	history := []schemas.IterationState{
-		iterState(withTests(1, 0, 0), withHash("a")),
-		iterState(withTests(1, 0, 0), withHash("b")),
-		iterState(withTests(1, 0, 0), withHash("c")),
+		iterState(withTests(1, 0, 0), withHash("a"), withProgress("a.go")),
+		iterState(withTests(1, 0, 0), withHash("b"), withProgress("b.go")),
+		iterState(withTests(1, 0, 0), withHash("c"), withProgress("c.go")),
 	}
 	decision := EvaluateTrajectory(history, 5, nil)
 	if decision.Action != schemas.ActionStepBack {
@@ -422,11 +430,60 @@ func TestEvaluateTrajectoryStepsBackWhenScorePlateaus(t *testing.T) {
 	}
 }
 
+func TestEvaluateTrajectoryStepsBackOnNoWorkspaceProgress(t *testing.T) {
+	history := []schemas.IterationState{
+		iterState(withTests(1, 0, 0), withHash("a")),
+		iterState(withTests(2, 0, 0), withHash("b")),
+		iterState(withTests(3, 0, 0), withHash("c")),
+	}
+	decision := EvaluateTrajectory(history, 5, nil)
+	if decision.Action != schemas.ActionStepBack {
+		t.Fatalf("expected step back, got %q", decision.Action)
+	}
+	wantReason := "The last three iterations produced no workspace change."
+	if decision.Reason != wantReason {
+		t.Fatalf("expected reason %q, got %q", wantReason, decision.Reason)
+	}
+	wantEvidence := []string{"no_progress_iterations=3", "files_changed=0", "lines_changed=0"}
+	if !slices.Equal(decision.Evidence, wantEvidence) {
+		t.Fatalf("expected evidence %v, got %v", wantEvidence, decision.Evidence)
+	}
+}
+
+func TestEvaluateTrajectoryAbortsAfterRepeatedNoWorkspaceProgress(t *testing.T) {
+	history := []schemas.IterationState{
+		iterState(withTests(1, 0, 0), withHash("a")),
+		iterState(withTests(2, 0, 0), withHash("b")),
+		iterState(withTests(3, 0, 0), withHash("c")),
+		iterState(withTests(4, 0, 0), withHash("d")),
+	}
+	decision := EvaluateTrajectory(history, 5, nil)
+	if decision.Action != schemas.ActionAbortNoProgress {
+		t.Fatalf("expected abort no progress, got %q", decision.Action)
+	}
+	wantReason := "The last three iterations produced no workspace change after a prior no-progress step-back."
+	if decision.Reason != wantReason {
+		t.Fatalf("expected reason %q, got %q", wantReason, decision.Reason)
+	}
+}
+
+func TestEvaluateTrajectoryIgnoresNoProgressWhenFilesChange(t *testing.T) {
+	history := []schemas.IterationState{
+		iterState(withTests(1, 0, 0), withHash("a"), withProgress("a.go")),
+		iterState(withTests(2, 0, 0), withHash("b"), withProgress("b.go")),
+		iterState(withTests(3, 0, 0), withHash("c"), withProgress("c.go")),
+	}
+	decision := EvaluateTrajectory(history, 5, nil)
+	if decision.Action != schemas.ActionContinue {
+		t.Fatalf("expected continue, got %q", decision.Action)
+	}
+}
+
 func TestEvaluateTrajectorySurfacesStrictConfidenceCollapse(t *testing.T) {
 	history := []schemas.IterationState{
-		iterState(withTests(1, 0, 0), withHash("a"), withConfidence(0.9)),
-		iterState(withTests(2, 0, 0), withHash("b"), withConfidence(0.6)),
-		iterState(withTests(3, 0, 0), withHash("c"), withConfidence(0.0)),
+		iterState(withTests(1, 0, 0), withHash("a"), withConfidence(0.9), withProgress("a.go")),
+		iterState(withTests(2, 0, 0), withHash("b"), withConfidence(0.6), withProgress("b.go")),
+		iterState(withTests(3, 0, 0), withHash("c"), withConfidence(0.0), withProgress("c.go")),
 	}
 	decision := EvaluateTrajectory(history, 5, nil)
 	if decision.Action != schemas.ActionSurfaceToUser {
@@ -441,9 +498,9 @@ func TestEvaluateTrajectorySurfacesStrictConfidenceCollapse(t *testing.T) {
 
 func TestEvaluateTrajectoryContinuesWhenScoresImprove(t *testing.T) {
 	history := []schemas.IterationState{
-		iterState(withTests(1, 0, 0), withHash("a"), withConfidence(0.7)),
-		iterState(withTests(2, 0, 0), withHash("b"), withConfidence(0.8)),
-		iterState(withTests(3, 0, 0), withHash("c"), withConfidence(0.9)),
+		iterState(withTests(1, 0, 0), withHash("a"), withConfidence(0.7), withProgress("a.go")),
+		iterState(withTests(2, 0, 0), withHash("b"), withConfidence(0.8), withProgress("b.go")),
+		iterState(withTests(3, 0, 0), withHash("c"), withConfidence(0.9), withProgress("c.go")),
 	}
 	decision := EvaluateTrajectory(history, 5, nil)
 	if decision.Action != schemas.ActionContinue {

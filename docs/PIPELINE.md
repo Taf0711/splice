@@ -184,10 +184,11 @@ The monitor evaluates rules in this order:
 2. Stop at the token budget.
 3. Detect an `A, B, A, B` hash oscillation.
 4. Detect any repeated current hash.
-5. Request rollback when the third or later score is below the first score.
-6. Request step-back analysis after three passes without score improvement.
-7. Ask the user when confidence falls across three passes.
-8. Continue with revised context.
+5. Request step-back analysis after three passes with no workspace change.
+6. Request rollback when the third or later score is below the first score.
+7. Request step-back analysis after three passes without score improvement.
+8. Ask the user when confidence falls across three passes.
+9. Continue with revised context.
 
 A successful pass finishes before these rules run. Therefore, success on the
 last allowed pass still completes the request.
@@ -223,6 +224,9 @@ recent scores, failing test names, changed files, and the plateau reason.
 Its typed root-cause proposal becomes revision context for the next pass. It does
 not appear as a scheduled pipeline stage.
 
+Three passes with no changed files and no added or removed lines also start one
+step-back request. A later three-pass stretch with no workspace change aborts.
+
 ### Ask the user
 
 A three-pass confidence decline asks the interactive user to continue with new
@@ -232,7 +236,8 @@ This branch does not restore a workspace snapshot before it asks the user.
 
 ### Stop
 
-The run stops after the hard iteration or token limit. The loop also checks a
+The run stops after the hard iteration or token limit. It also stops after a
+second three-pass stretch with no workspace change. The loop also checks a
 wall-time limit before each pass and stage. The limit bounds an active stage.
 
 The defaults are five passes and 600 seconds. `--max-turns` does not change the
