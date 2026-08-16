@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/worktrees"
 )
 
 // ask_user_prompt.go drives the interactive ask-user questionnaire that renders in
@@ -223,10 +224,22 @@ func (m model) submitAskUser() (tea.Model, tea.Cmd) {
 	if pending.answer != nil {
 		pending.answer(answers)
 	}
+	var review *worktrees.Result
+	dirtyMain := pending.dirtyMain
+	if pending.worktree != nil {
+		copy := *pending.worktree
+		review = &copy
+	}
 	m.pendingAskUser = nil
 	m.reportAgentLifecycle(herdrWorking)
 	m.clearComposer()
 	m.clearSuggestions()
+	if review != nil {
+		decision := parseWorktreeReviewDecision(answers)
+		return m, func() tea.Msg {
+			return applyWorktreeReview(*review, decision, dirtyMain)
+		}
+	}
 	return m, nil
 }
 

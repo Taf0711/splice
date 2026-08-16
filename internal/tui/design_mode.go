@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -456,13 +455,6 @@ func (m model) startApprovalConfirmed(source splicerun.DesignTransitionSource, p
 			if bindErr != nil {
 				return planExecutionResultMsg{runID: runID, err: bindErr, store: store, sessionID: sessionID, sessionEvents: sessionEvents, worktreeNotice: notice}
 			}
-			if prepared.Locked {
-				defer func() {
-					unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-					defer cancel()
-					_ = tuiUnlockWorktree(unlockCtx, worktrees.UnlockOptions{RepoRoot: prepared.RepoRoot, Path: prepared.Path})
-				}()
-			}
 			var preparedPtr *worktrees.Result
 			if prepared.Path != "" {
 				copy := prepared
@@ -488,7 +480,7 @@ func (m model) startApprovalConfirmed(source splicerun.DesignTransitionSource, p
 					}
 				}
 			}
-			return planExecutionResultMsg{runID: runID, result: result, err: err, store: store, sessionID: sessionID, sessionEvents: sessionEvents, worktree: preparedPtr, worktreeNotice: notice}
+			return planExecutionResultMsg{runID: runID, result: result, err: err, store: store, sessionID: sessionID, sessionEvents: sessionEvents, worktree: preparedPtr, worktreeNotice: notice, sourceDirty: inspectSourceDirty(prepared)}
 		},
 		m.spinner.Tick,
 	)
@@ -678,6 +670,7 @@ type planExecutionResultMsg struct {
 	sessionEvents  []pendingSessionEvent
 	worktree       *worktrees.Result
 	worktreeNotice string
+	sourceDirty    bool
 }
 
 // designCoverageWarning reports plan fields that the conversation did not

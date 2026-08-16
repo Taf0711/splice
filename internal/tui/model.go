@@ -55,6 +55,10 @@ var (
 	// TUI suite on the live checkout.
 	tuiPrepareWorktree         = worktrees.Prepare
 	tuiUnlockWorktree          = worktrees.Unlock
+	tuiMergeBackWorktree       = worktrees.MergeBack
+	tuiPreserveWorktree        = worktrees.Preserve
+	tuiRemoveWorktree          = worktrees.Remove
+	tuiSourceDirty             = worktrees.SourceDirty
 	disableTUIWorktreesForTest = false
 )
 
@@ -593,6 +597,7 @@ type agentResponseMsg struct {
 	memoryByType   map[string]int
 	worktree       *worktrees.Result
 	worktreeNotice string
+	sourceDirty    bool
 	// designTransition is a transition the design agent queued this turn. It is
 	// run only when the turn succeeded (msg.err == nil), after pending clears.
 	designTransition *splicerun.DesignTransitionRequest
@@ -766,14 +771,18 @@ type askUserRequestMsg struct {
 // region as a row of tabs — one per question plus a trailing Confirm tab. Questions
 // are answered in any order (Tab switches); the answer callback is invoked exactly
 // once when the user submits on the Confirm tab. Esc while the questionnaire is
-// active cancels the whole run without invoking the callback (see cancelRun).
+// active cancels the whole run without invoking the callback (see cancelRun),
+// unless keepOnEsc is set (worktree review: Esc means keep).
 // active is the current tab (0..N-1 = questions, N = Confirm); states holds the
 // per-question picker/free-text state and committed answer. See ask_user_prompt.go.
 type pendingAskUserPrompt struct {
-	request agent.AskUserRequest
-	answer  func([]string)
-	active  int
-	states  []askUserAnswerState
+	request   agent.AskUserRequest
+	answer    func([]string)
+	active    int
+	states    []askUserAnswerState
+	keepOnEsc bool
+	worktree  *worktrees.Result
+	dirtyMain bool
 }
 
 type pendingSpecReviewPrompt struct {
@@ -1136,6 +1145,7 @@ func (m model) quit() (tea.Model, tea.Cmd) {
 	m.stopPRWatcher()
 	m.stopAllBackgroundTerminalSessions()
 	m.shutdownLSPManager()
+	unlockPreparedWorktree(m.activeWorktree)
 	return m, tea.Quit
 }
 
@@ -1419,8 +1429,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// must not submit partial/empty answers and must not leave the agent
 			// running: cancelRun releases the run context (which unblocks the loop's
 			// OnAskUser), clears the questionnaire and run state, and writes the
-			// standard "Run cancelled." marker.
+			// standard "Run cancelled." marker. Worktree review is post-run: Esc
+			// means keep, so invoke the answer callback with no answers instead.
 			if m.pendingAskUser != nil {
+				if m.pendingAskUser.keepOnEsc {
+					return m.submitAskUser()
+				}
 				m.clearComposer()
 				m.cancelRun()
 				return m, nil
@@ -2169,6 +2183,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(fireCmd, m.scheduleLoopTick())
 	case agentResponseMsg:
 		if msg.runID != m.activeRunID {
+			// A cancelled or superseded run still owns a locked worktree until we
+			// release it. Review is not offered on this path.
+			unlockPreparedWorktree(msg.worktree)
 			// A run cancelled while in flight still finishes in its goroutine and
 			// returns its accumulated session events here. Persist ONLY those events
 			// (notably the EventSessionCheckpoint payloads captured before each
@@ -2382,8 +2399,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil && msg.designTransition != nil {
 			m, transitionCmd = m.startDesignTransition(*msg.designTransition)
 		}
+		var reviewCmd tea.Cmd
+		m, reviewCmd = m.maybeOfferWorktreeReview(msg.worktree, msg.sourceDirty)
 		next, queuedCmd := m.launchQueuedMessageIfReady()
-		return next, tea.Batch(titleCmd, recapCmd, sweepCmd, queuedCmd, loopTickCmd, transitionCmd)
+		return next, tea.Batch(titleCmd, recapCmd, sweepCmd, queuedCmd, loopTickCmd, transitionCmd, reviewCmd)
 	case memoryResultMsg:
 		if msg.isError {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: msg.text})
@@ -2468,6 +2487,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case planExecutionResultMsg:
 		if msg.runID != m.activeRunID {
+			unlockPreparedWorktree(msg.worktree)
 			return m, nil
 		}
 		m.activeWorktree = msg.worktree
@@ -2494,12 +2514,19 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Plan execution failed: " + msg.err.Error()})
-			return m, nil
+			return m.maybeOfferWorktreeReview(msg.worktree, msg.sourceDirty)
 		}
 		m.designMode = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendAssistant, text: msg.result.FinalAnswer})
 		m.pendingPlan = nil
 		m.pendingCritique = nil
+		return m.maybeOfferWorktreeReview(msg.worktree, msg.sourceDirty)
+	case worktreeReviewResultMsg:
+		if notice := strings.TrimSpace(msg.notice); notice != "" {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: notice})
+		}
+		m.activeWorktree = msg.kept
+		m.reportAgentLifecycle(herdrIdle)
 		return m, nil
 	case sessionTitleGeneratedMsg:
 		return m.handleSessionTitleGenerated(msg)
@@ -5112,6 +5139,9 @@ func (m *model) cancelRun() {
 	m.cancelConfirmActive = false // whatever path got here, there's nothing left to confirm cancelling
 	m.plan.frozenAt = m.now()     // freeze the plan clock while idle (no run in flight)
 	m.pendingPermission = nil
+	if m.pendingAskUser != nil {
+		unlockPreparedWorktree(m.pendingAskUser.worktree)
+	}
 	m.pendingAskUser = nil
 	// The interim block renders streamingText live; a cancelled run's partial
 	// answer must not leak into (and concatenate with) the next turn's stream.
@@ -5308,13 +5338,6 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			}
 			preparedWorktree = prepared
 			worktreeNotice = notice
-			if prepared.Locked {
-				defer func() {
-					unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-					defer cancel()
-					_ = tuiUnlockWorktree(unlockCtx, worktrees.UnlockOptions{RepoRoot: prepared.RepoRoot, Path: prepared.Path})
-				}()
-			}
 		}
 		if m.captureRunOptions != nil {
 			m.captureRunOptions(options)
@@ -5849,20 +5872,21 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				}
 			}
 			m.pipeline.reset()
-			// TW1 prepares the isolated tree only. Recovery stays nil until TW2.
+			// TW1 prepares the isolated tree only. Recovery stays nil until a later item.
 			result, err = tuiSpliceRun(runCtx, prompt, m.provider, options, mem, nil)
 			var preparedPtr *worktrees.Result
 			if preparedWorktree.Path != "" {
 				copy := preparedWorktree
 				preparedPtr = &copy
 			}
+			sourceDirty := inspectSourceDirty(preparedWorktree)
 			if err != nil {
 				flushReasoning(m.now())
 				sessionEvents = append(sessionEvents, pendingSessionEvent{
 					Type:    sessions.EventError,
 					Payload: map[string]any{"message": err.Error()},
 				})
-				return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, turnTools: toolCalls, turnElapsed: m.now().Sub(started), memoryStatus: memStatus, memoryCount: memCount, memoryByType: memByType, worktree: preparedPtr, worktreeNotice: worktreeNotice}
+				return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, turnTools: toolCalls, turnElapsed: m.now().Sub(started), memoryStatus: memStatus, memoryCount: memCount, memoryByType: memByType, worktree: preparedPtr, worktreeNotice: worktreeNotice, sourceDirty: sourceDirty}
 			}
 			flushReasoning(m.now())
 			elapsed := m.now().Sub(started)
@@ -5888,7 +5912,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 					"content": result.FinalAnswer,
 				},
 			})
-			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, turnTools: toolCalls, turnElapsed: elapsed, ttft: ttft, turnVisibleOutputTokens: turnVisibleOutputTokens, memoryStatus: memStatus, memoryCount: memCount, memoryByType: memByType, worktree: preparedPtr, worktreeNotice: worktreeNotice}
+			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, turnTools: toolCalls, turnElapsed: elapsed, ttft: ttft, turnVisibleOutputTokens: turnVisibleOutputTokens, memoryStatus: memStatus, memoryCount: memCount, memoryByType: memByType, worktree: preparedPtr, worktreeNotice: worktreeNotice, sourceDirty: sourceDirty}
 		}
 		if err != nil {
 			flushReasoning(m.now())

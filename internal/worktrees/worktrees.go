@@ -204,23 +204,9 @@ func MergeBack(ctx context.Context, options MergeBackOptions) (MergeBackResult, 
 	if err := validateName(options.Name); err != nil {
 		return MergeBackResult{}, err
 	}
-	branch := "splice/" + options.Name
 
-	status, err := gitOutput(ctx, runGit, options.WorktreePath, "status", "--porcelain", "--untracked-files=all")
-	if err != nil {
-		return MergeBackResult{}, fmt.Errorf("inspect worktree status: %w", err)
-	}
-	if strings.TrimSpace(status) != "" {
-		if _, err := gitOutput(ctx, runGit, options.WorktreePath, "add", "-A"); err != nil {
-			return MergeBackResult{}, fmt.Errorf("stage worktree changes: %w", err)
-		}
-		message := strings.TrimSpace(options.CommitMessage)
-		if message == "" {
-			message = "splice: worktree " + options.Name
-		}
-		if _, err := gitOutput(ctx, runGit, options.WorktreePath, "commit", "-m", message); err != nil {
-			return MergeBackResult{}, fmt.Errorf("commit worktree changes: %w", err)
-		}
+	if err := commitWorktreeChanges(ctx, runGit, options); err != nil {
+		return MergeBackResult{}, err
 	}
 
 	worktreeHead, err := gitOutput(ctx, runGit, options.WorktreePath, "rev-parse", "HEAD")
@@ -241,10 +227,9 @@ func MergeBack(ctx context.Context, options MergeBackOptions) (MergeBackResult, 
 		}, nil
 	}
 
-	// Pin the recovery branch to the worktree commit. -f moves it on reuse: the
-	// branch is namespaced to this worktree and always means its latest state.
-	if _, err := gitOutput(ctx, runGit, options.WorktreePath, "branch", "-f", branch, "HEAD"); err != nil {
-		return MergeBackResult{}, fmt.Errorf("pin worktree branch: %w", err)
+	branch, err := pinWorktreeBranch(ctx, runGit, options.WorktreePath, options.Name)
+	if err != nil {
+		return MergeBackResult{}, err
 	}
 
 	sourceStatus, err := gitOutput(ctx, runGit, options.RepoRoot, "status", "--porcelain", "--untracked-files=all")
@@ -297,13 +282,17 @@ type RemoveOptions struct {
 	// RepoRoot is the source repository the worktree belongs to.
 	RepoRoot string
 	// Path is the isolated worktree directory to remove.
-	Path   string
+	Path string
+	// Force skips the clean-tree check and passes --force to git worktree remove.
+	// Use it only when the caller is discarding the worktree (reject), not when
+	// the work has already landed in source history.
+	Force  bool
 	RunGit GitRunner
 }
 
 // Remove unregisters and deletes an isolated worktree whose work is in source
-// history. It refuses tracked, untracked, or ignored files. It does not use
-// force or change recovery refs and splice/* branches.
+// history. Without Force it refuses tracked, untracked, or ignored files. It
+// does not change recovery refs and splice/* branches.
 func Remove(ctx context.Context, options RemoveOptions) error {
 	runGit := options.RunGit
 	if runGit == nil {
@@ -315,17 +304,99 @@ func Remove(ctx context.Context, options RemoveOptions) error {
 	if strings.TrimSpace(options.Path) == "" {
 		return fmt.Errorf("remove worktree: path is required")
 	}
-	status, err := gitOutput(ctx, runGit, options.Path, "status", "--porcelain", "--untracked-files=all", "--ignored=matching")
-	if err != nil {
-		return fmt.Errorf("inspect worktree %q before removal: %w", options.Path, err)
+	if !options.Force {
+		status, err := gitOutput(ctx, runGit, options.Path, "status", "--porcelain", "--untracked-files=all", "--ignored=matching")
+		if err != nil {
+			return fmt.Errorf("inspect worktree %q before removal: %w", options.Path, err)
+		}
+		if strings.TrimSpace(status) != "" {
+			return fmt.Errorf("remove worktree %q: tracked, untracked, or ignored files remain", options.Path)
+		}
 	}
-	if strings.TrimSpace(status) != "" {
-		return fmt.Errorf("remove worktree %q: tracked, untracked, or ignored files remain", options.Path)
+	args := []string{"worktree", "remove"}
+	if options.Force {
+		args = append(args, "--force")
 	}
-	if _, err := gitOutput(ctx, runGit, options.RepoRoot, "worktree", "remove", options.Path); err != nil {
+	args = append(args, options.Path)
+	if _, err := gitOutput(ctx, runGit, options.RepoRoot, args...); err != nil {
 		return fmt.Errorf("remove worktree %q: %w", options.Path, err)
 	}
 	return nil
+}
+
+// PreserveOptions configures Preserve.
+type PreserveOptions struct {
+	RepoRoot      string
+	WorktreePath  string
+	Name          string
+	CommitMessage string
+	RunGit        GitRunner
+}
+
+// Preserve commits the worktree's changes and pins splice/<name> to that commit.
+// It does not merge into the source checkout. Callers use it before discarding
+// a worktree so the run's work survives on the branch.
+func Preserve(ctx context.Context, options PreserveOptions) (string, error) {
+	runGit := options.RunGit
+	if runGit == nil {
+		runGit = defaultRunGit
+	}
+	if err := validateName(options.Name); err != nil {
+		return "", err
+	}
+	if err := commitWorktreeChanges(ctx, runGit, MergeBackOptions{
+		RepoRoot:      options.RepoRoot,
+		WorktreePath:  options.WorktreePath,
+		Name:          options.Name,
+		CommitMessage: options.CommitMessage,
+	}); err != nil {
+		return "", err
+	}
+	return pinWorktreeBranch(ctx, runGit, options.WorktreePath, options.Name)
+}
+
+func commitWorktreeChanges(ctx context.Context, runGit GitRunner, options MergeBackOptions) error {
+	status, err := gitOutput(ctx, runGit, options.WorktreePath, "status", "--porcelain", "--untracked-files=all")
+	if err != nil {
+		return fmt.Errorf("inspect worktree status: %w", err)
+	}
+	if strings.TrimSpace(status) == "" {
+		return nil
+	}
+	if _, err := gitOutput(ctx, runGit, options.WorktreePath, "add", "-A"); err != nil {
+		return fmt.Errorf("stage worktree changes: %w", err)
+	}
+	message := strings.TrimSpace(options.CommitMessage)
+	if message == "" {
+		message = "splice: worktree " + options.Name
+	}
+	if _, err := gitOutput(ctx, runGit, options.WorktreePath, "commit", "-m", message); err != nil {
+		return fmt.Errorf("commit worktree changes: %w", err)
+	}
+	return nil
+}
+
+func pinWorktreeBranch(ctx context.Context, runGit GitRunner, worktreePath, name string) (string, error) {
+	branch := "splice/" + name
+	if _, err := gitOutput(ctx, runGit, worktreePath, "branch", "-f", branch, "HEAD"); err != nil {
+		return "", fmt.Errorf("pin worktree branch: %w", err)
+	}
+	return branch, nil
+}
+
+// SourceDirty reports whether repoRoot has uncommitted tracked or untracked files.
+func SourceDirty(ctx context.Context, repoRoot string, runGit GitRunner) (bool, error) {
+	if runGit == nil {
+		runGit = defaultRunGit
+	}
+	if strings.TrimSpace(repoRoot) == "" {
+		return false, fmt.Errorf("inspect source status: repo root is required")
+	}
+	status, err := gitOutput(ctx, runGit, repoRoot, "status", "--porcelain", "--untracked-files=all")
+	if err != nil {
+		return false, fmt.Errorf("inspect source status %q: %w", repoRoot, err)
+	}
+	return strings.TrimSpace(status) != "", nil
 }
 
 // UnlockOptions configures Unlock.

@@ -520,8 +520,8 @@ func TestTUIPipelineRunUsesPreparedWorktree(t *testing.T) {
 	if resp.worktree == nil || resp.worktree.Path != preparedPath {
 		t.Fatalf("response worktree = %#v", resp.worktree)
 	}
-	if !unlocked {
-		t.Fatal("expected unlock after the run")
+	if unlocked {
+		t.Fatal("lock must stay held until the worktree review")
 	}
 }
 
@@ -590,6 +590,227 @@ func TestWorktreeChipRendersNearModel(t *testing.T) {
 	got := m.titleModelSegment()
 	if !strings.Contains(got, "wt:tui-sess-1") {
 		t.Fatalf("model segment = %q, want worktree chip", got)
+	}
+}
+
+func TestTUIWorktreeReviewDecisions(t *testing.T) {
+	origMerge := tuiMergeBackWorktree
+	origPreserve := tuiPreserveWorktree
+	origRemove := tuiRemoveWorktree
+	origUnlock := tuiUnlockWorktree
+	defer func() {
+		tuiMergeBackWorktree = origMerge
+		tuiPreserveWorktree = origPreserve
+		tuiRemoveWorktree = origRemove
+		tuiUnlockWorktree = origUnlock
+	}()
+
+	wt := worktrees.Result{Name: "tui-sess-1", Path: "/tmp/wt", RepoRoot: "/tmp/repo", Locked: true}
+
+	tests := []struct {
+		name       string
+		answer     string
+		wantKept   bool
+		wantMerge  bool
+		wantPin    bool
+		wantForce  bool
+		wantNotice string
+	}{
+		{
+			name:       "accept",
+			answer:     worktreeReviewAccept,
+			wantMerge:  true,
+			wantNotice: "merged splice/tui-sess-1",
+		},
+		{
+			name:       "reject",
+			answer:     worktreeReviewReject,
+			wantPin:    true,
+			wantForce:  true,
+			wantNotice: "Worktree removed. Work remains on branch splice/tui-sess-1 if you change your mind.",
+		},
+		{
+			name:       "keep",
+			answer:     worktreeReviewKeep,
+			wantKept:   true,
+			wantNotice: "Worktree kept at /tmp/wt",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			merged, pinned, removed, unlocked, force := false, false, false, false, false
+			tuiMergeBackWorktree = func(_ context.Context, options worktrees.MergeBackOptions) (worktrees.MergeBackResult, error) {
+				merged = true
+				if options.WorktreePath != wt.Path || options.RepoRoot != wt.RepoRoot {
+					t.Fatalf("merge options = %#v", options)
+				}
+				return worktrees.MergeBackResult{Status: worktrees.MergeBackMerged, Message: "merged splice/tui-sess-1"}, nil
+			}
+			tuiPreserveWorktree = func(_ context.Context, options worktrees.PreserveOptions) (string, error) {
+				pinned = true
+				if options.WorktreePath != wt.Path || options.Name != wt.Name {
+					t.Fatalf("preserve options = %#v", options)
+				}
+				return "splice/" + options.Name, nil
+			}
+			tuiRemoveWorktree = func(_ context.Context, options worktrees.RemoveOptions) error {
+				removed = true
+				force = options.Force
+				return nil
+			}
+			tuiUnlockWorktree = func(context.Context, worktrees.UnlockOptions) error {
+				unlocked = true
+				return nil
+			}
+
+			m := newModel(context.Background(), Options{})
+			next, _ := m.maybeOfferWorktreeReview(&wt, false)
+			if next.pendingAskUser == nil || !next.pendingAskUser.keepOnEsc {
+				t.Fatal("expected keep-on-esc worktree review prompt")
+			}
+			next.pendingAskUser.states[0].answer = tt.answer
+			submittedModel, cmd := next.submitAskUser()
+			submitted := submittedModel.(model)
+			if submitted.pendingAskUser != nil {
+				t.Fatal("review prompt still pending after submit")
+			}
+			if cmd == nil {
+				t.Fatal("expected review command")
+			}
+			msg := cmd().(worktreeReviewResultMsg)
+			if !strings.Contains(msg.notice, tt.wantNotice) {
+				t.Fatalf("notice = %q, want %q", msg.notice, tt.wantNotice)
+			}
+			if (msg.kept != nil) != tt.wantKept {
+				t.Fatalf("kept = %#v, wantKept %v", msg.kept, tt.wantKept)
+			}
+			if merged != tt.wantMerge {
+				t.Fatalf("merged = %v, want %v", merged, tt.wantMerge)
+			}
+			if pinned != tt.wantPin {
+				t.Fatalf("pinned = %v, want %v", pinned, tt.wantPin)
+			}
+			if !unlocked {
+				t.Fatal("lock must be released on every decision")
+			}
+			if tt.wantKept {
+				if removed {
+					t.Fatal("keep must not remove the worktree")
+				}
+			} else if !removed {
+				t.Fatal("expected worktree removal")
+			}
+			if force != tt.wantForce {
+				t.Fatalf("force = %v, want %v", force, tt.wantForce)
+			}
+		})
+	}
+}
+
+func TestTUIWorktreeReviewDirtyMainRefusesAccept(t *testing.T) {
+	origMerge := tuiMergeBackWorktree
+	origRemove := tuiRemoveWorktree
+	origUnlock := tuiUnlockWorktree
+	defer func() {
+		tuiMergeBackWorktree = origMerge
+		tuiRemoveWorktree = origRemove
+		tuiUnlockWorktree = origUnlock
+	}()
+	merged := false
+	tuiMergeBackWorktree = func(context.Context, worktrees.MergeBackOptions) (worktrees.MergeBackResult, error) {
+		merged = true
+		return worktrees.MergeBackResult{}, nil
+	}
+	unlocked := false
+	tuiUnlockWorktree = func(context.Context, worktrees.UnlockOptions) error {
+		unlocked = true
+		return nil
+	}
+	tuiRemoveWorktree = func(context.Context, worktrees.RemoveOptions) error {
+		t.Fatal("dirty-main refusal must not remove the worktree")
+		return nil
+	}
+
+	wt := worktrees.Result{Name: "tui-sess-1", Path: "/tmp/wt", RepoRoot: "/tmp/repo", Locked: true}
+	m := newModel(context.Background(), Options{})
+	next, _ := m.maybeOfferWorktreeReview(&wt, true)
+	if next.pendingAskUser == nil {
+		t.Fatal("expected review prompt")
+	}
+	for _, option := range next.pendingAskUser.request.Questions[0].Options {
+		if option == worktreeReviewAccept {
+			t.Fatal("accept must not be offered when the main checkout is dirty")
+		}
+	}
+	if !transcriptContains(next.transcript, worktreeReviewDirtyNotice) {
+		t.Fatal("expected dirty-main notice")
+	}
+	// A typed accept still refuses merge and keeps the worktree.
+	next.pendingAskUser.states[0].answer = worktreeReviewAccept
+	_, cmd := next.submitAskUser()
+	msg := cmd().(worktreeReviewResultMsg)
+	if merged {
+		t.Fatal("dirty-main accept must not call merge-back")
+	}
+	if !unlocked {
+		t.Fatal("lock must be released after dirty-main refusal")
+	}
+	if msg.kept == nil || !strings.Contains(msg.notice, worktreeReviewDirtyNotice) {
+		t.Fatalf("refusal result = %#v", msg)
+	}
+}
+
+func TestTUIWorktreeReviewEscKeepsAndUnlocks(t *testing.T) {
+	origUnlock := tuiUnlockWorktree
+	origRemove := tuiRemoveWorktree
+	defer func() {
+		tuiUnlockWorktree = origUnlock
+		tuiRemoveWorktree = origRemove
+	}()
+	unlocked := false
+	tuiUnlockWorktree = func(context.Context, worktrees.UnlockOptions) error {
+		unlocked = true
+		return nil
+	}
+	tuiRemoveWorktree = func(context.Context, worktrees.RemoveOptions) error {
+		t.Fatal("esc keep must not remove the worktree")
+		return nil
+	}
+
+	wt := worktrees.Result{Name: "tui-sess-1", Path: "/tmp/wt", RepoRoot: "/tmp/repo", Locked: true}
+	m := newModel(context.Background(), Options{})
+	m, _ = m.maybeOfferWorktreeReview(&wt, false)
+	updated, cmd := m.Update(testKey(tea.KeyEsc))
+	next := updated.(model)
+	if next.pendingAskUser != nil {
+		t.Fatal("esc should dismiss the review prompt")
+	}
+	if cmd == nil {
+		t.Fatal("expected keep command")
+	}
+	msg := cmd().(worktreeReviewResultMsg)
+	if msg.kept == nil || !strings.Contains(msg.notice, "Worktree kept at /tmp/wt") {
+		t.Fatalf("esc result = %#v", msg)
+	}
+	if !unlocked {
+		t.Fatal("esc keep must release the lock")
+	}
+}
+
+func TestTUICancelledRunUnlocksWorktree(t *testing.T) {
+	origUnlock := tuiUnlockWorktree
+	defer func() { tuiUnlockWorktree = origUnlock }()
+	unlocked := false
+	tuiUnlockWorktree = func(context.Context, worktrees.UnlockOptions) error {
+		unlocked = true
+		return nil
+	}
+	m := newModel(context.Background(), Options{})
+	m.activeRunID = 2
+	wt := &worktrees.Result{Name: "tui-old", Path: "/tmp/wt", RepoRoot: "/tmp/repo", Locked: true}
+	_, _ = m.Update(agentResponseMsg{runID: 1, worktree: wt})
+	if !unlocked {
+		t.Fatal("cancelled run must release the worktree lock")
 	}
 }
 

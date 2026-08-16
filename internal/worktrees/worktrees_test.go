@@ -424,6 +424,82 @@ func TestRemoveDirtyWorktreeFailsAndPreservesData(t *testing.T) {
 	}
 }
 
+func TestRemoveForceDeletesDirtyWorktree(t *testing.T) {
+	root, worktree := newMergeBackFixture(t)
+	if err := os.WriteFile(filepath.Join(worktree, "dirty.txt"), []byte("uncommitted work\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Remove(context.Background(), RemoveOptions{
+		RepoRoot: root,
+		Path:     worktree,
+		Force:    true,
+	}); err != nil {
+		t.Fatalf("forced Remove returned error: %v", err)
+	}
+	if _, err := os.Stat(worktree); !os.IsNotExist(err) {
+		t.Fatalf("worktree directory still exists after forced removal: %v", err)
+	}
+}
+
+func TestPreserveThenForceRemoveKeepsBranch(t *testing.T) {
+	root, worktree := newMergeBackFixture(t)
+	head := mustGit(t, root, "rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(worktree, "feature.txt"), []byte("new feature\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	branch, err := Preserve(context.Background(), PreserveOptions{
+		RepoRoot:     root,
+		WorktreePath: worktree,
+		Name:         "task-reject",
+	})
+	if err != nil {
+		t.Fatalf("Preserve returned error: %v", err)
+	}
+	if branch != "splice/task-reject" {
+		t.Fatalf("branch = %q", branch)
+	}
+	if err := Remove(context.Background(), RemoveOptions{
+		RepoRoot: root,
+		Path:     worktree,
+		Force:    true,
+	}); err != nil {
+		t.Fatalf("forced Remove returned error: %v", err)
+	}
+	if listed := mustGit(t, root, "worktree", "list", "--porcelain"); strings.Contains(listed, worktree) {
+		t.Fatalf("worktree still registered after reject: %q", listed)
+	}
+	if _, err := os.Stat(filepath.Join(root, "feature.txt")); !os.IsNotExist(err) {
+		t.Fatal("reject must leave the main checkout untouched")
+	}
+	if after := mustGit(t, root, "rev-parse", "HEAD"); after != head {
+		t.Fatalf("main HEAD moved on reject: %s -> %s", head, after)
+	}
+	if content := mustGit(t, root, "show", branch+":feature.txt"); content != "new feature\n" {
+		t.Fatalf("preserved branch missing work: %q", content)
+	}
+}
+
+func TestSourceDirtyReportsUncommittedFiles(t *testing.T) {
+	root, _ := newMergeBackFixture(t)
+	dirty, err := SourceDirty(context.Background(), root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dirty {
+		t.Fatal("clean source reported dirty")
+	}
+	if err := os.WriteFile(filepath.Join(root, "extra.txt"), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dirty, err = SourceDirty(context.Background(), root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dirty {
+		t.Fatal("dirty source reported clean")
+	}
+}
+
 func TestRemoveNonzeroGitExitFails(t *testing.T) {
 	runner := &fakeRunner{results: []CommandResult{{}, {ExitCode: 128, Stderr: "remove blocked"}}}
 	err := Remove(context.Background(), RemoveOptions{
