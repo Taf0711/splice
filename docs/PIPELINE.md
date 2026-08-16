@@ -253,9 +253,16 @@ These interactive features do not apply to the fixed stage sequence:
 | `--allow-escalation` | No direct effect. Pipeline escalation comes from stage-model configuration. |
 | Between-turn file diagnostics | No effect between fixed stages. |
 | Agent-loop compaction | No effect in a direct pipeline run. |
+| Tool filters and hooks | The pipeline tool runner honors `EnabledTools`, `DisabledTools`, and beforeTool or afterTool hooks. Read-only context lookup does not apply those filters. |
 
 The TUI agent loop and specification draft flow can use these features outside
 the fixed pipeline.
+
+## Stage output caps
+
+A model-backed stage sends its `OutputMax` budget as the request output cap.
+The provider uses the smaller positive value from that cap and its configured
+default. A zero budget keeps the provider default.
 
 ## Usage and cost records
 

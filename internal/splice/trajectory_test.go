@@ -447,6 +447,30 @@ func TestEvaluateTrajectoryCycleWithChangingVerificationFailures(t *testing.T) {
 	}
 }
 
+func TestEvaluateTrajectoryCycleWithAllZeroVerificationFailures(t *testing.T) {
+	history := []schemas.IterationState{
+		iterState(withHash("a")),
+		iterState(withHash("b")),
+		iterState(withHash("a")),
+	}
+	decision := EvaluateTrajectory(history, 5, nil)
+	if decision.Action != schemas.ActionEscalateCycleDetected {
+		t.Fatalf("expected cycle detected, got %q", decision.Action)
+	}
+	wantReason := "Current state hash was seen before. Neither iteration reported verification failures, so this is likely a no-op pass or model thrash against a non-verifying gate."
+	if decision.Reason != wantReason {
+		t.Fatalf("expected reason %q, got %q", wantReason, decision.Reason)
+	}
+	wantEvidence := []string{
+		"state_hash=a",
+		"verification_failure_signature_current=" + emptyVerificationFailureSignature,
+		"verification_failure_signature_previous=" + emptyVerificationFailureSignature,
+	}
+	if !slices.Equal(decision.Evidence, wantEvidence) {
+		t.Fatalf("expected evidence %v, got %v", wantEvidence, decision.Evidence)
+	}
+}
+
 func TestEvaluateTrajectoryEscalatesOnRepeatedEmptyHash(t *testing.T) {
 	history := []schemas.IterationState{
 		iterState(withHash("")),

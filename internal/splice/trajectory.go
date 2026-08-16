@@ -82,7 +82,10 @@ func EvaluateTrajectory(history []schemas.IterationState, maxIterations int, tok
 		prevSig := verificationFailureSignature(history[len(history)-2])
 		curSig := verificationFailureSignature(history[len(history)-1])
 		reason := "Current state hash was seen before. The identical state came with changing verification failures, so model thrash is more likely."
-		if curSig == prevSig {
+		switch {
+		case curSig == emptyVerificationFailureSignature && prevSig == emptyVerificationFailureSignature:
+			reason = "Current state hash was seen before. Neither iteration reported verification failures, so this is likely a no-op pass or model thrash against a non-verifying gate."
+		case curSig == prevSig:
 			reason = "Current state hash was seen before. The identical state came with identical verification failures, so the environment or verifier may be stuck."
 		}
 		return decision(schemas.ActionEscalateCycleDetected, reason,
@@ -187,6 +190,8 @@ func countAcceptanceResults(results [][]schemas.TestCaseResult, statuses ...stri
 // verificationFailureSignature is a compact fingerprint of the verification
 // failures in an iteration state. It covers failing and errored tests,
 // failing acceptance facts, and high-plus-critical lint and security findings.
+const emptyVerificationFailureSignature = "tests_failing=0,tests_errored=0,acceptance_facts_failing=0,lint_high_critical=0,security_high_critical=0"
+
 func verificationFailureSignature(state schemas.IterationState) string {
 	return fmt.Sprintf("tests_failing=%d,tests_errored=%d,acceptance_facts_failing=%d,lint_high_critical=%d,security_high_critical=%d",
 		state.TestsFailing,

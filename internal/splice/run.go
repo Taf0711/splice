@@ -1258,8 +1258,8 @@ func newAgentToolRunner(options PipelineRunConfig, cwd string) ToolRunner {
 				emitPermissionDecision(options, request, agent.PermissionDecisionAllow, "unsafe permissions mode allowed prompt-gated tool", true)
 			default:
 				// auto and spec-draft grant mutating tools automatically.
-				emitPermissionDecision(options, request, agent.PermissionDecisionAllow, "permission mode allowed prompt-gated tool", false)
 				permissionGranted = true
+				emitPermissionDecision(options, request, agent.PermissionDecisionAllow, "permission mode allowed prompt-gated tool", true)
 			}
 		}
 		agentOpts := options.agentOptions()

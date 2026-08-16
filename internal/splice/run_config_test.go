@@ -1,11 +1,16 @@
 package splice
 
 import (
+	"context"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/hooks"
+	"github.com/Taf0711/splice/internal/sandbox"
+	"github.com/Taf0711/splice/internal/streamjson"
+	"github.com/Taf0711/splice/internal/tools"
 )
 
 func TestPipelineRunConfigClassifiesEveryAgentOption(t *testing.T) {
@@ -45,6 +50,60 @@ func TestPipelineRunConfigClassifiesEveryAgentOption(t *testing.T) {
 		if _, ok := optsType.FieldByName(name); !ok {
 			t.Errorf("PipelineConfigFromAgentOptions copies %s, but agent.Options has no such field. Remove the stale copy.", name)
 		}
+	}
+}
+
+// pipelineAgentOptionsRequiredFields must remain on the reverse copy that
+// hooks, filters, and tools.RunOptions consume. Add a newly consumed field
+// here and in agentOptions() or this test fails.
+var pipelineAgentOptionsRequiredFields = []string{
+	"SessionID", "Model", "ReasoningEffort", "Cwd", "Registry",
+	"PermissionMode", "Autonomy", "TrustedWorkspace", "Sandbox", "FileTracker",
+	"Hooks", "EnabledTools", "DisabledTools", "OnToolProgress", "OnToolOutput",
+	"FileDiagnostics",
+}
+
+func TestPipelineAgentOptionsCopiesConsumedPolicyFields(t *testing.T) {
+	cfg := populatedPipelineRunConfig(t)
+	got := cfg.agentOptions()
+	gotVal := reflect.ValueOf(got)
+	cfgVal := reflect.ValueOf(cfg)
+	consumed := pipelineConsumedAgentOptionNames()
+	for _, name := range pipelineAgentOptionsRequiredFields {
+		if _, ok := consumed[name]; !ok {
+			t.Errorf("required reverse field %s is not consumed by PipelineConfigFromAgentOptions. Add it to PipelineRunConfig.", name)
+			continue
+		}
+		field := gotVal.FieldByName(name)
+		if !field.IsValid() {
+			t.Errorf("agentOptions() does not copy agent.Options.%s. Add it to PipelineRunConfig.agentOptions so hooks and filters keep the field.", name)
+			continue
+		}
+		if field.IsZero() && !cfgVal.FieldByName(name).IsZero() {
+			t.Errorf("agentOptions() dropped %s. Copy it from PipelineRunConfig.", name)
+		}
+	}
+}
+
+func populatedPipelineRunConfig(t *testing.T) PipelineRunConfig {
+	t.Helper()
+	return PipelineRunConfig{
+		SessionID:        "session-1",
+		Model:            "model-1",
+		ReasoningEffort:  "high",
+		Cwd:              t.TempDir(),
+		Registry:         tools.NewRegistry(),
+		PermissionMode:   agent.PermissionModeAsk,
+		Autonomy:         "supervised",
+		TrustedWorkspace: true,
+		Sandbox:          sandbox.NewEngine(sandbox.EngineOptions{}),
+		FileTracker:      tools.NewFileTracker(),
+		Hooks:            hooks.NewDispatcher(hooks.DispatcherOptions{}),
+		EnabledTools:     []string{"read_file"},
+		DisabledTools:    []string{"bash"},
+		OnToolProgress:   func(string, streamjson.Event) {},
+		OnToolOutput:     func(tools.OutputSnapshot) {},
+		FileDiagnostics:  func(context.Context, string) string { return "" },
 	}
 }
 

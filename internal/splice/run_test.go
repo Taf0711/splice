@@ -3194,3 +3194,35 @@ func TestPipelineBeforeToolHookFires(t *testing.T) {
 		t.Fatalf("beforeTool hook did not fire; audit=%+v", events)
 	}
 }
+
+func TestPipelineAutoGrantPermissionEventIsGranted(t *testing.T) {
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "a.go"), []byte("package x\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewWriteFileTool(workDir))
+	var events []agent.PermissionEvent
+	runner := newAgentToolRunner(PipelineConfigFromAgentOptions(agent.Options{
+		Cwd:            workDir,
+		Registry:       registry,
+		PermissionMode: agent.PermissionModeAuto,
+		OnPermission: func(event agent.PermissionEvent) {
+			events = append(events, event)
+		},
+	}), workDir)
+	res, err := runner.RunTool(context.Background(), "write_file", map[string]any{"path": "b.go", "content": "package x\n"})
+	if err != nil {
+		t.Fatalf("RunTool: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("write_file failed: %s", res.Output)
+	}
+	if len(events) == 0 {
+		t.Fatal("expected an auto-grant permission event")
+	}
+	last := events[len(events)-1]
+	if last.Action != agent.PermissionActionAllow || !last.PermissionGranted {
+		t.Fatalf("auto-grant event = action=%s granted=%v, want allow/true", last.Action, last.PermissionGranted)
+	}
+}

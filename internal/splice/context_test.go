@@ -318,6 +318,18 @@ func TestFulfillContextRequestValidatesRequest(t *testing.T) {
 	}
 }
 
+func TestRegistryToolRunnerDoesNotApplyPipelineFilters(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool(root))
+	runner := NewRegistryToolRunner(registry)
+	// Read-only context fulfillment must not inherit SD12 DisabledTools.
+	_, err := runner.RunTool(context.Background(), "read_file", map[string]any{"path": "missing.go"})
+	if err != nil {
+		t.Fatalf("RunTool: %v", err)
+	}
+}
+
 func TestFulfillContextRequestAgainstRealRegistry(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(root+"/main.go", []byte("package main\n\nfunc main() {}\n"), 0644); err != nil {

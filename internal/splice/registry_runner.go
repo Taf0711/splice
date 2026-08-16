@@ -35,6 +35,8 @@ func (f ToolRunnerFunc) RunTool(ctx context.Context, name string, args map[strin
 }
 
 // RegistryToolRunner adapts Zero's tools.Registry to the ToolRunner interface.
+// It is the read-only context-fulfillment runner. It does not apply SD12 tool
+// filters or hooks. newAgentToolRunner owns those for pipeline tool calls.
 type RegistryToolRunner struct {
 	registry *tools.Registry
 }
