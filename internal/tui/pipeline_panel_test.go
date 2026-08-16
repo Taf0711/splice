@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -794,6 +795,99 @@ func TestTUIWorktreeReviewEscKeepsAndUnlocks(t *testing.T) {
 	}
 	if !unlocked {
 		t.Fatal("esc keep must release the lock")
+	}
+}
+
+func TestTUIDemoUnsetLeavesReplayOff(t *testing.T) {
+	for _, env := range []string{"", "off", "other"} {
+		t.Setenv("SPLICE_TUI_DEMO", env)
+		if tuiDemoReplayActive() {
+			t.Fatalf("env %q must not activate the demo replay", env)
+		}
+	}
+	t.Setenv("SPLICE_TUI_DEMO", tuiDemoWorktreeReject)
+	if !tuiDemoReplayActive() {
+		t.Fatal("exact worktree-reject must activate the demo replay")
+	}
+}
+
+func TestTUIDemoPipelineRunOffersReview(t *testing.T) {
+	t.Setenv("SPLICE_TUI_DEMO", tuiDemoWorktreeReject)
+	origPause := demoStepPause
+	origRun := tuiSpliceRun
+	origDisable := disableTUIWorktreesForTest
+	demoStepPause = 0
+	tuiSpliceRun = tuiSpliceRunOrDemo
+	disableTUIWorktreesForTest = false
+	defer func() {
+		demoStepPause = origPause
+		tuiSpliceRun = origRun
+		disableTUIWorktreesForTest = origDisable
+	}()
+
+	repo := t.TempDir()
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=demo", "GIT_AUTHOR_EMAIL=demo@local", "GIT_COMMITTER_NAME=demo", "GIT_COMMITTER_EMAIL=demo@local")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit("init")
+	runGit("config", "user.email", "demo@local")
+	runGit("config", "user.name", "demo")
+	if err := os.WriteFile(filepath.Join(repo, "add.go"), []byte("package add\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", ".")
+	runGit("commit", "-m", "seed")
+
+	m := newModel(context.Background(), Options{Cwd: repo, Provider: &fakeProvider{}})
+	m.activeRunID = 1
+	msg := m.runAgentWithOptions(1, context.Background(), "fix the failing test", nil, tuiAgentRunOptions{})()
+	resp, ok := msg.(agentResponseMsg)
+	if !ok {
+		t.Fatalf("got %T", msg)
+	}
+	if resp.err != nil {
+		t.Fatalf("run: %v", resp.err)
+	}
+	if resp.worktree == nil || resp.worktree.Path == "" {
+		t.Fatalf("expected prepared worktree, notice=%q", resp.worktreeNotice)
+	}
+	updated, _ := m.Update(resp)
+	next := updated.(model)
+	if next.pendingAskUser == nil || !next.pendingAskUser.keepOnEsc {
+		t.Fatal("expected worktree review after demo pipeline run")
+	}
+}
+
+func TestTUIDemoReplayEmitsStepBack(t *testing.T) {
+	t.Setenv("SPLICE_TUI_DEMO", tuiDemoWorktreeReject)
+	origPause := demoStepPause
+	demoStepPause = 0
+	defer func() { demoStepPause = origPause }()
+	var events []agent.StageEvent
+	result, err := replayWorktreeRejectDemo(context.Background(), agent.Options{
+		OnStageEvent: func(event agent.StageEvent) { events = append(events, event) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer == "" {
+		t.Fatal("expected a final answer")
+	}
+	skipped := false
+	for _, event := range events {
+		if event.Status == "skipped" {
+			skipped = true
+		}
+	}
+	if !skipped {
+		t.Fatal("demo replay must emit a skipped step-back event")
 	}
 }
 

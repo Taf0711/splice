@@ -48,7 +48,9 @@ const tuiToolOutputLimit = 240
 const defaultResponseStyle = "concise"
 
 var (
-	tuiSpliceRun     = splicerun.Run
+	// tuiSpliceRun is the pipeline runner. Tests replace it. SPLICE_TUI_DEMO=worktree-reject
+	// swaps only this function (see tuiSpliceRunOrDemo) for scripts/tui-worktree-reject.tape.
+	tuiSpliceRun     = tuiSpliceRunOrDemo
 	tuiResolveMemory = memd.Resolve
 	// tuiPrepareWorktree and tuiUnlockWorktree are the exec Prepare/Unlock
 	// path. Tests replace them. disableTUIWorktreesForTest keeps the existing
