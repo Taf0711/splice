@@ -290,9 +290,8 @@ func (t TokenBudget) Validate() error {
 
 // ExecutionStage is one planned pipeline stage.
 type ExecutionStage struct {
-	Name      string      `json:"name"`
-	DependsOn []string    `json:"depends_on,omitempty"`
-	Budget    StageBudget `json:"budget"`
+	Name   string      `json:"name"`
+	Budget StageBudget `json:"budget"`
 }
 
 // Validate checks the execution stage.
@@ -313,7 +312,7 @@ type ExecutionPlan struct {
 	RequiredKnowledgeFiles []string         `json:"required_knowledge_files,omitempty"`
 }
 
-// Validate checks the execution plan and stage DAG integrity.
+// Validate checks the execution plan.
 func (e ExecutionPlan) Validate() error {
 	if err := e.TokenBudget.Validate(); err != nil {
 		return err
@@ -344,54 +343,7 @@ func (e ExecutionPlan) Validate() error {
 		}
 		stageNames[stage.Name] = struct{}{}
 	}
-	deps := make(map[string][]string, len(e.Stages))
-	for i, stage := range e.Stages {
-		for _, dep := range stage.DependsOn {
-			if _, exists := stageNames[dep]; !exists {
-				return fmt.Errorf("stages[%d] depends_on unknown stage %q", i, dep)
-			}
-			deps[stage.Name] = append(deps[stage.Name], dep)
-		}
-	}
-	if cycle := detectCycle(deps); cycle != "" {
-		return fmt.Errorf("stage dependency cycle detected involving %q", cycle)
-	}
 	return nil
-}
-
-// detectCycle performs a DFS over the dependency graph and returns the name of
-// the first stage that participates in a cycle, or "" if the graph is a DAG.
-const (
-	cycleStateUnvisited = 0
-	cycleStateVisiting  = 1
-	cycleStateVisited   = 2
-)
-
-func detectCycle(deps map[string][]string) string {
-	state := make(map[string]int, len(deps))
-	var visit func(name string) string
-	visit = func(name string) string {
-		if state[name] == cycleStateVisiting {
-			return name
-		}
-		if state[name] == cycleStateVisited {
-			return ""
-		}
-		state[name] = cycleStateVisiting
-		for _, dep := range deps[name] {
-			if found := visit(dep); found != "" {
-				return found
-			}
-		}
-		state[name] = cycleStateVisited
-		return ""
-	}
-	for name := range deps {
-		if found := visit(name); found != "" {
-			return found
-		}
-	}
-	return ""
 }
 
 // StageRecord is a persistable summary of an executed stage.

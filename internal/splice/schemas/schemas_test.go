@@ -133,63 +133,6 @@ func TestStageBudgetValidation(t *testing.T) {
 	}
 }
 
-func TestExecutionPlanDAGIntegrity(t *testing.T) {
-	budget := StageBudget{InputMax: 100, OutputMax: 100}
-	plan := ExecutionPlan{
-		Tier:          TierStandard,
-		RequestIntent: "do it",
-		Stages: []ExecutionStage{
-			{Name: "write", Budget: budget},
-			{Name: "test", DependsOn: []string{"write", "missing"}, Budget: budget},
-		},
-		TokenBudget: TokenBudget{
-			TotalInputBudget:  1000,
-			TotalOutputBudget: 1000,
-			PerStage:          map[string]StageBudget{"write": budget, "test": budget},
-			OverflowPolicy:    "abort",
-		},
-	}
-	if err := plan.Validate(); err == nil || !strings.Contains(err.Error(), "depends_on unknown") {
-		t.Fatalf("expected DAG error, got %v", err)
-	}
-	plan.Stages[1].DependsOn = []string{"write"}
-	if err := plan.Validate(); err != nil {
-		t.Fatalf("valid plan: %v", err)
-	}
-}
-
-func TestExecutionPlanRejectsDependencyCycle(t *testing.T) {
-	budget := StageBudget{InputMax: 100, OutputMax: 100}
-	plan := ExecutionPlan{
-		Tier:          TierStandard,
-		RequestIntent: "do it",
-		Stages: []ExecutionStage{
-			{Name: "a", DependsOn: []string{"b"}, Budget: budget},
-			{Name: "b", DependsOn: []string{"a"}, Budget: budget},
-		},
-		TokenBudget: TokenBudget{
-			TotalInputBudget:  1000,
-			TotalOutputBudget: 1000,
-			PerStage:          map[string]StageBudget{"a": budget, "b": budget},
-			OverflowPolicy:    "abort",
-		},
-	}
-	if err := plan.Validate(); err == nil || !strings.Contains(err.Error(), "cycle") {
-		t.Fatalf("expected cycle error, got %v", err)
-	}
-
-	// Self-dependency is a trivial cycle.
-	plan2 := ExecutionPlan{
-		Tier:          TierLight,
-		RequestIntent: "x",
-		Stages:        []ExecutionStage{{Name: "a", DependsOn: []string{"a"}, Budget: budget}},
-		TokenBudget:   TokenBudget{TotalInputBudget: 10, TotalOutputBudget: 10, PerStage: map[string]StageBudget{"a": budget}, OverflowPolicy: "abort"},
-	}
-	if err := plan2.Validate(); err == nil || !strings.Contains(err.Error(), "cycle") {
-		t.Fatalf("expected self-cycle error, got %v", err)
-	}
-}
-
 func TestExecutionPlanDuplicateStageName(t *testing.T) {
 	budget := StageBudget{InputMax: 1, OutputMax: 1}
 	plan := ExecutionPlan{

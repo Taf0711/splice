@@ -29,9 +29,8 @@ func stagesForTier(tier schemas.PipelineTier) ([]schemas.ExecutionStage, schemas
 	stages := make([]schemas.ExecutionStage, 0, len(budget.PerStage))
 	for _, name := range names {
 		stages = append(stages, schemas.ExecutionStage{
-			Name:      name,
-			Budget:    budget.PerStage[name],
-			DependsOn: nil,
+			Name:   name,
+			Budget: budget.PerStage[name],
 		})
 	}
 	return stages, budget, nil
