@@ -309,8 +309,13 @@ type Options struct {
 	// ServerTools asks the provider to run these tools itself during inference.
 	// A provider that does not support a kind ignores it, so a run can always
 	// ask. Empty keeps the request unchanged.
-	ServerTools  []zeroruntime.ServerTool
-	Cwd          string
+	ServerTools []zeroruntime.ServerTool
+	Cwd         string
+	// ProjectRoot is the stable repository root used for memory identity. The
+	// pipeline keeps memory keyed to the repo root while tools execute in Cwd
+	// (which may be a per-run worktree path). Empty means memory derives from
+	// Cwd exactly as before. Splice addition (MD1).
+	ProjectRoot  string
 	SystemPrompt string
 	// ResponseStyle is the operator-selected reply style from the TUI /style
 	// command (e.g. "concise", "explanatory", "review"). It is rendered into the

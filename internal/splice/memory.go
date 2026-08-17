@@ -17,12 +17,23 @@ type MemoryStore interface {
 	Upsert(ctx context.Context, obs schemas.MemoryObservation) (schemas.MemoryObservation, error)
 }
 
+// memoryProjectRoot returns the stable repository root used for memory
+// identity. It is the caller-provided ProjectRoot when set (worktree runs),
+// otherwise the working directory argument (already absolute in the real
+// flow). Both paths are absolute.
+func memoryProjectRoot(options PipelineRunConfig, workDir string) string {
+	if options.ProjectRoot == "" {
+		return workDir
+	}
+	return options.ProjectRoot
+}
+
 // newMemoryQuery builds the bounded search the orchestrator issues for a stage:
 // owner_agent is the stage name, the query is the first 200 runes of the
-// distilled request intent, and project_path is the working dir. Include flags
-// are left nil so the sidecar
+// distilled request intent, and project_path is the stable repo root. Include
+// flags are left nil so the sidecar
 // applies its default-true.
-func newMemoryQuery(stageName, intent, workDir string) schemas.MemoryQuery {
+func newMemoryQuery(stageName, intent, projectRoot string) schemas.MemoryQuery {
 	q := []rune(intent)
 	if len(q) > 200 {
 		q = q[:200]
@@ -30,7 +41,7 @@ func newMemoryQuery(stageName, intent, workDir string) schemas.MemoryQuery {
 	return schemas.MemoryQuery{
 		RequestingAgent: stageName,
 		Query:           string(q),
-		ProjectPath:     &workDir,
+		ProjectPath:     &projectRoot,
 		Scopes:          []string{"project", "global"},
 		Limit:           5,
 	}
@@ -49,14 +60,14 @@ func persistObservation(ctx context.Context, store MemoryStore, obs schemas.Memo
 	}
 }
 
-func buildConfigObservation(runID, workDir string, plan schemas.ExecutionPlan) schemas.MemoryObservation {
+func buildConfigObservation(runID, projectRoot string, plan schemas.ExecutionPlan) schemas.MemoryObservation {
 	stageNames := make([]string, 0, len(plan.Stages))
 	for _, stage := range plan.Stages {
 		stageNames = append(stageNames, stage.Name)
 	}
 	topic := "run_config"
 	return schemas.MemoryObservation{
-		ProjectPath: &workDir,
+		ProjectPath: &projectRoot,
 		Scope:       "project",
 		OwnerAgent:  "orchestrator",
 		Visibility:  "shareable",
@@ -72,7 +83,7 @@ func buildConfigObservation(runID, workDir string, plan schemas.ExecutionPlan) s
 
 // extractWriteObservations returns the deterministic observations to persist
 // after a stage completes.
-func extractWriteObservations(stageName, runID, workDir string, output schemas.HarnessStageOutput) []schemas.MemoryObservation {
+func extractWriteObservations(stageName, runID, projectRoot string, output schemas.HarnessStageOutput) []schemas.MemoryObservation {
 	var obs []schemas.MemoryObservation
 	if stageName == "test_runner" {
 		if cmdRaw, ok := output.Data["test_command"]; ok {
@@ -94,7 +105,7 @@ func extractWriteObservations(stageName, runID, workDir string, output schemas.H
 			if cmdStr != "" {
 				topic := "test_command"
 				obs = append(obs, schemas.MemoryObservation{
-					ProjectPath: &workDir,
+					ProjectPath: &projectRoot,
 					Scope:       "project",
 					OwnerAgent:  "orchestrator",
 					Visibility:  "shareable",
@@ -112,7 +123,7 @@ func extractWriteObservations(stageName, runID, workDir string, output schemas.H
 	return obs
 }
 
-func extractDegradationObservations(stageName, runID, workDir string, bundle schemas.ContextBundle) []schemas.MemoryObservation {
+func extractDegradationObservations(stageName, runID, projectRoot string, bundle schemas.ContextBundle) []schemas.MemoryObservation {
 	obs := make([]schemas.MemoryObservation, 0)
 	for _, item := range bundle.Items {
 		if item.Error == nil {
@@ -120,7 +131,7 @@ func extractDegradationObservations(stageName, runID, workDir string, bundle sch
 		}
 		topic := fmt.Sprintf("tool_degradation:%s", string(item.Query.QueryType))
 		obs = append(obs, schemas.MemoryObservation{
-			ProjectPath: &workDir,
+			ProjectPath: &projectRoot,
 			Scope:       "project",
 			OwnerAgent:  stageName,
 			Visibility:  "private",

@@ -5348,6 +5348,11 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			}
 			preparedWorktree = prepared
 			worktreeNotice = notice
+			if preparedWorktree.Path != "" {
+				// Memory identity is the stable repo root, not the per-run
+				// worktree path. Tools keep executing in options.Cwd (the worktree).
+				options.ProjectRoot = preparedWorktree.RepoRoot
+			}
 		}
 		if m.captureRunOptions != nil {
 			m.captureRunOptions(options)

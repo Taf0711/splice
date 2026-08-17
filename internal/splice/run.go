@@ -217,6 +217,11 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 		return schemas.PipelineResult{}, fmt.Errorf("resolve work dir: %w", err)
 	}
 
+	// Memory identity is the stable repo root (options.ProjectRoot for worktree
+	// runs), never the per-run worktree path. Tool execution and workspace
+	// summaries keep working in absWorkDir.
+	projectRoot := memoryProjectRoot(options, absWorkDir)
+
 	runner := newAgentToolRunner(options, absWorkDir)
 
 	registry, err := buildStageRegistry(options, absWorkDir)
@@ -228,7 +233,7 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 	ledgerOpts := ledger.recordingOptions(options)
 
 	if mem != nil {
-		obs := buildConfigObservation(runID, absWorkDir, plan)
+		obs := buildConfigObservation(runID, projectRoot, plan)
 		persistObservation(ctx, mem, obs, func(msg string) {
 			emitProgress(options, fmt.Sprintf("[orchestrator] %s", msg))
 		})
@@ -566,7 +571,7 @@ func runPass(
 
 		caps := agentStage.Capabilities()
 		if mem != nil && caps.ConsumesMemory {
-			bundle, mErr := mem.Search(ctx, newMemoryQuery(stageName, plan.RequestIntent, workDir))
+			bundle, mErr := mem.Search(ctx, newMemoryQuery(stageName, plan.RequestIntent, memoryProjectRoot(options, workDir)))
 			if mErr != nil {
 				emitProgress(options, fmt.Sprintf("[%s] memory retrieval skipped: %v\n", stageName, mErr))
 			} else {
@@ -677,7 +682,7 @@ func runPass(
 		} else {
 			emitStageEvent(options, stageName, "completed", summary, 100, stageChangedFiles(output))
 		}
-		for _, obs := range extractWriteObservations(stageName, runID, workDir, output) {
+		for _, obs := range extractWriteObservations(stageName, runID, memoryProjectRoot(options, workDir), output) {
 			persistObservation(ctx, mem, obs, func(msg string) {
 				emitProgress(options, fmt.Sprintf("[%s] %s", stageName, msg))
 			})
@@ -757,7 +762,7 @@ func runStageWithContext(
 	}
 	input.Context = &bundle
 	if mem != nil {
-		for _, obs := range extractDegradationObservations(input.StageName, input.RunID, workDir, bundle) {
+		for _, obs := range extractDegradationObservations(input.StageName, input.RunID, memoryProjectRoot(options, workDir), bundle) {
 			persistObservation(ctx, mem, obs, func(msg string) {
 				emitProgress(options, fmt.Sprintf("[%s] %s", input.StageName, msg))
 			})

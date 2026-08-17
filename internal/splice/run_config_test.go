@@ -85,6 +85,21 @@ func TestPipelineAgentOptionsCopiesConsumedPolicyFields(t *testing.T) {
 	}
 }
 
+// TestPipelineAgentOptionsDoesNotReverseCopyProjectRoot pins that ProjectRoot is
+// pipeline-internal: it keys memory identity and must not leak into the
+// agent.Options that hooks, filters, and tools.RunOptions consume (they execute
+// in Cwd, the worktree). If this ever fails, someone added ProjectRoot to
+// agentOptions(); reconsider before widening the reverse copy.
+func TestPipelineAgentOptionsDoesNotReverseCopyProjectRoot(t *testing.T) {
+	cfg := populatedPipelineRunConfig(t)
+	if cfg.ProjectRoot == "" {
+		t.Fatal("sentinel must set a non-empty ProjectRoot to make the pin meaningful")
+	}
+	if got := cfg.agentOptions().ProjectRoot; got != "" {
+		t.Errorf("agentOptions() reverse-copied ProjectRoot %q; it must stay pipeline-internal", got)
+	}
+}
+
 func populatedPipelineRunConfig(t *testing.T) PipelineRunConfig {
 	t.Helper()
 	return PipelineRunConfig{
@@ -92,6 +107,7 @@ func populatedPipelineRunConfig(t *testing.T) PipelineRunConfig {
 		Model:            "model-1",
 		ReasoningEffort:  "high",
 		Cwd:              t.TempDir(),
+		ProjectRoot:      "/repo/root",
 		Registry:         tools.NewRegistry(),
 		PermissionMode:   agent.PermissionModeAsk,
 		Autonomy:         "supervised",

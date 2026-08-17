@@ -841,6 +841,10 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	}
 
 	recovery := iterationRecoveryForWorktree(options.worktree, preparedWorktree)
+	if preparedWorktree.Path != "" {
+		// Memory identity is the stable repo root, not the per-run worktree path.
+		runOptions.ProjectRoot = preparedWorktree.RepoRoot
+	}
 	var result agent.Result
 	if options.planPath != "" {
 		result, err = splicerun.RunDesignPlan(runCtx, designPlan, provider, runOptions, memClient, recovery)
