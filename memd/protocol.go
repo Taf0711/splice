@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/Taf0711/splice/memd/store"
 )
@@ -223,4 +225,100 @@ type statsResponse struct {
 type genericResponse struct {
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
+}
+
+// traceUpsertRequest is the JSON body for POST /trace/upsert. Only the indexed
+// columns are decoded; the full body is stored verbatim as the payload so the
+// sidecar never drops unknown fields from a newer schema.
+type traceUpsertRequest struct {
+	RunID     string `json:"run_id"`
+	SessionID string `json:"session_id"`
+	RepoRoot  string `json:"repo_root"`
+	Tier      string `json:"tier"`
+	Outcome   struct {
+		Status string `json:"status"`
+	} `json:"outcome"`
+}
+
+func (r *traceUpsertRequest) Validate() error {
+	if r.RunID == "" {
+		return fmt.Errorf("run_id is required")
+	}
+	if r.RepoRoot == "" {
+		return fmt.Errorf("repo_root is required")
+	}
+	if r.Tier == "" {
+		return fmt.Errorf("tier is required")
+	}
+	switch r.Outcome.Status {
+	case "completed", "aborted", "failed":
+	default:
+		return fmt.Errorf("outcome.status must be completed, aborted, or failed, got %q", r.Outcome.Status)
+	}
+	return nil
+}
+
+// traceUpsertResponse is the JSON body for POST /trace/upsert. inserted is
+// false when a trace with the same run_id already exists (write-once).
+type traceUpsertResponse struct {
+	OK       bool `json:"ok"`
+	Inserted bool `json:"inserted"`
+}
+
+// verdictUpsertRequest is the JSON body for POST /trace/verdict. decided_at is
+// the RFC3339 timestamp from VerdictRecord; the store column is unix seconds.
+type verdictUpsertRequest struct {
+	RunID     string    `json:"run_id"`
+	Verdict   string    `json:"verdict"`
+	Reason    string    `json:"reject_reason"`
+	DecidedAt time.Time `json:"decided_at"`
+}
+
+func (r *verdictUpsertRequest) Validate() error {
+	if r.RunID == "" {
+		return fmt.Errorf("run_id is required")
+	}
+	if r.Verdict != "kept" && r.Verdict != "rejected" {
+		return fmt.Errorf("verdict must be kept or rejected, got %q", r.Verdict)
+	}
+	if r.DecidedAt.IsZero() {
+		return fmt.Errorf("decided_at is required")
+	}
+	return nil
+}
+
+// traceQueryRequest is the JSON body for POST /trace/query. Empty fields are
+// ignored; since is unix seconds.
+type traceQueryRequest struct {
+	RepoRoot string `json:"repo_root"`
+	Tier     string `json:"tier"`
+	Status   string `json:"status"`
+	Since    int64  `json:"since"`
+	Limit    int    `json:"limit"`
+}
+
+// verdictResponse is the latest verdict joined into a trace query result.
+type verdictResponse struct {
+	DecidedAt int64           `json:"decided_at"`
+	Verdict   string          `json:"verdict"`
+	Reason    string          `json:"reason,omitempty"`
+	Payload   json.RawMessage `json:"payload"`
+}
+
+// traceResponse is one row returned by POST /trace/query.
+type traceResponse struct {
+	RunID     string           `json:"run_id"`
+	SessionID string           `json:"session_id,omitempty"`
+	RepoRoot  string           `json:"repo_root"`
+	Tier      string           `json:"tier"`
+	Status    string           `json:"status"`
+	CreatedAt int64            `json:"created_at"`
+	Payload   json.RawMessage  `json:"payload"`
+	Verdict   *verdictResponse `json:"verdict,omitempty"`
+}
+
+// traceQueryResponse is the JSON body returned by POST /trace/query.
+type traceQueryResponse struct {
+	OK     bool            `json:"ok"`
+	Traces []traceResponse `json:"traces"`
 }

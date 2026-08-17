@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -40,6 +41,9 @@ func newServer(store *store.Store, socketPath string) *server {
 	mux.HandleFunc("/recent", s.handleRecent)
 	mux.HandleFunc("/mark_reviewed", s.handleMarkReviewed)
 	mux.HandleFunc("/stats", s.handleStats)
+	mux.HandleFunc("/trace/upsert", s.handleTraceUpsert)
+	mux.HandleFunc("/trace/verdict", s.handleTraceVerdict)
+	mux.HandleFunc("/trace/query", s.handleTraceQuery)
 	s.httpServer = &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -346,6 +350,128 @@ func (s *server) handleStats(w http.ResponseWriter, r *http.Request) {
 		ByType:      byType,
 		DBSizeBytes: pageCount * pageSize,
 	})
+}
+
+// handleTraceUpsert stores a run outcome trace. run_traces is write-once: a
+// duplicate run_id is an idempotent no-op (inserted=false), never an update.
+// The full body is stored verbatim as the payload so unknown fields from a
+// newer schema survive a round trip.
+func (s *server) handleTraceUpsert(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<20)
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "read body: "+err.Error())
+		return
+	}
+	var req traceUpsertRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "validation: "+err.Error())
+		return
+	}
+	inserted, err := s.store.UpsertTrace(r.Context(), &store.TraceRow{
+		RunID:     req.RunID,
+		SessionID: req.SessionID,
+		RepoRoot:  req.RepoRoot,
+		Tier:      req.Tier,
+		Status:    req.Outcome.Status,
+		Payload:   raw,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, traceUpsertResponse{OK: true, Inserted: inserted})
+}
+
+// handleTraceVerdict appends a verdict for a run. Verdicts are append-only;
+// the latest row wins at query time.
+func (s *server) handleTraceVerdict(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "read body: "+err.Error())
+		return
+	}
+	var req verdictUpsertRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "validation: "+err.Error())
+		return
+	}
+	if err := s.store.UpsertVerdict(r.Context(), &store.VerdictRow{
+		RunID:     req.RunID,
+		DecidedAt: req.DecidedAt.Unix(),
+		Verdict:   req.Verdict,
+		Reason:    req.Reason,
+		Payload:   raw,
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, genericResponse{OK: true})
+}
+
+// handleTraceQuery returns traces matching the filter, each joined with its
+// latest verdict.
+func (s *server) handleTraceQuery(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var req traceQueryRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	results, err := s.store.QueryTraces(r.Context(), store.TraceFilter{
+		RepoRoot: req.RepoRoot,
+		Tier:     req.Tier,
+		Status:   req.Status,
+		Since:    req.Since,
+		Limit:    req.Limit,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out := make([]traceResponse, 0, len(results))
+	for _, row := range results {
+		tr := traceResponse{
+			RunID:     row.Trace.RunID,
+			SessionID: row.Trace.SessionID,
+			RepoRoot:  row.Trace.RepoRoot,
+			Tier:      row.Trace.Tier,
+			Status:    row.Trace.Status,
+			CreatedAt: row.Trace.CreatedAt,
+			Payload:   json.RawMessage(row.Trace.Payload),
+		}
+		if row.Verdict != nil {
+			tr.Verdict = &verdictResponse{
+				DecidedAt: row.Verdict.DecidedAt,
+				Verdict:   row.Verdict.Verdict,
+				Reason:    row.Verdict.Reason,
+				Payload:   json.RawMessage(row.Verdict.Payload),
+			}
+		}
+		out = append(out, tr)
+	}
+	writeJSON(w, http.StatusOK, traceQueryResponse{OK: true, Traces: out})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

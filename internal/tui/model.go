@@ -2543,7 +2543,21 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m = next
 			}
 		}
+		// Accept/reject write a post-run verdict record; keep/Esc write nothing
+		// (unknown verdict). The verdict keys on the same run ID the pipeline
+		// used, which is the session ID for TUI runs.
+		var verdictCmd tea.Cmd
+		if v := verdictForReview(msg.decision, msg.reason); v != nil && m.activeSession.SessionID != "" {
+			v.RunID = m.activeSession.SessionID
+			v.DecidedAt = m.now()
+			verdictCmd = m.writeVerdictCmd(*v)
+		}
 		m.reportAgentLifecycle(herdrIdle)
+		return m, verdictCmd
+	case verdictWriteMsg:
+		if msg.err != nil {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Verdict write skipped: " + msg.err.Error()})
+		}
 		return m, nil
 	case sessionTitleGeneratedMsg:
 		return m.handleSessionTitleGenerated(msg)

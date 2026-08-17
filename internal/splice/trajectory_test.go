@@ -265,15 +265,14 @@ func TestComputeScorePlateausForEquivalentState(t *testing.T) {
 // stage. A new stage that is in neither map fails CI.
 var trajectoryRelevantOutputKeys = map[string]string{
 	"code_writer":         "code_writer_output",
+	"test_generator":      "test_generator_output",
 	"test_runner":         "test_results",
 	"static_analyzer":     "static_analyzer_output",
 	"security_auditor":    "security_auditor_output",
 	"acceptance_verifier": "acceptance_results",
 }
 
-var trajectoryIrrelevantStages = map[string]struct{}{
-	"test_generator": {},
-}
+var trajectoryIrrelevantStages = map[string]struct{}{}
 
 func TestTrajectoryExtractorsCoverRegistryStages(t *testing.T) {
 	registry, err := buildStageRegistry(PipelineRunConfig{}, t.TempDir())

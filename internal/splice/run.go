@@ -222,6 +222,24 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 	// summaries keep working in absWorkDir.
 	projectRoot := memoryProjectRoot(options, absWorkDir)
 
+	// A trace store is the memory client asserting the TraceStore interface; a
+	// nil MemoryStore (memory off) means tracing is off too.
+	var tracer TraceStore
+	var tr *runTraceAccumulator
+	if t, ok := mem.(TraceStore); ok && t != nil {
+		tracer = t
+	}
+	if tracer != nil {
+		tr = newRunTraceAccumulator(tracer, runID, options.SessionID, projectRoot, plan, mem != nil)
+		upstreamPermission := options.OnPermission
+		options.OnPermission = func(event agent.PermissionEvent) {
+			tr.recordPermission(event)
+			if upstreamPermission != nil {
+				upstreamPermission(event)
+			}
+		}
+	}
+
 	runner := newAgentToolRunner(options, absWorkDir)
 
 	registry, err := buildStageRegistry(options, absWorkDir)
@@ -239,7 +257,7 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 		})
 	}
 
-	result, err := runIterationLoop(ctx, runID, plan, registry, provider, ledgerOpts, absWorkDir, runner, mem, rec)
+	result, err := runIterationLoop(ctx, runID, plan, registry, provider, ledgerOpts, absWorkDir, runner, mem, rec, tr)
 	if err != nil {
 		return schemas.PipelineResult{}, err
 	}
@@ -250,6 +268,20 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 
 	if err := result.Validate(); err != nil {
 		return schemas.PipelineResult{}, fmt.Errorf("validate pipeline result: %w", err)
+	}
+
+	// Trace write happens after the ledger and result validation so the stored
+	// stage records carry the authoritative token totals. A validate failure is
+	// a schema bug (fail loudly); a store write failure is a warning and never
+	// fails the run.
+	if tr != nil {
+		trace, buildErr := tr.buildRunOutcome(result)
+		if buildErr != nil {
+			return schemas.PipelineResult{}, fmt.Errorf("build run outcome: %w", buildErr)
+		}
+		if writeErr := tracer.UpsertTrace(ctx, trace); writeErr != nil {
+			emitProgress(options, fmt.Sprintf("[trace] write skipped: %v", writeErr))
+		}
 	}
 	return result, nil
 }
@@ -265,6 +297,7 @@ func runIterationLoop(
 	runner ToolRunner,
 	mem MemoryStore,
 	rec WorkspaceRecovery,
+	tr *runTraceAccumulator,
 ) (schemas.PipelineResult, error) {
 	maxWallSeconds := defaultMaxWallSeconds
 	tokenBudget := plan.TokenBudget.TotalInputBudget + plan.TokenBudget.TotalOutputBudget
@@ -309,7 +342,7 @@ func runIterationLoop(
 		}
 
 		emitProgress(options, fmt.Sprintf("Starting pipeline iteration %d\n", i))
-		passRecords, passOutputs, completed, err := runPass(ctx, runID, i, plan, registry, provider, options, workDir, runner, wallDeadline, revisionContext, mem)
+		passRecords, passOutputs, completed, err := runPass(ctx, runID, i, plan, registry, provider, options, workDir, runner, wallDeadline, revisionContext, mem, tr)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 				return schemas.PipelineResult{}, context.Canceled
@@ -352,6 +385,9 @@ func runIterationLoop(
 			return finishWithReason(runID, plan, allRecords, "failed", fmt.Sprintf("compute iteration state: %v", err))
 		}
 		history = append(history, state)
+		if tr != nil {
+			tr.recordHistory(state)
+		}
 
 		// Capture the workspace state after each completed iteration so
 		// rollback has a valid snapshot to restore. Errors (including
@@ -508,6 +544,7 @@ func runPass(
 	wallDeadline time.Time,
 	revisionContext *string,
 	mem MemoryStore,
+	tr *runTraceAccumulator,
 ) ([]schemas.StageRecord, []schemas.HarnessStageOutput, bool, error) {
 	priorSummaries := map[string]string{}
 	priorChangedFiles := map[string][]string{}
@@ -570,6 +607,9 @@ func runPass(
 		}
 
 		caps := agentStage.Capabilities()
+		if tr != nil {
+			tr.noteStage(stageName, iteration)
+		}
 		if mem != nil && caps.ConsumesMemory {
 			bundle, mErr := mem.Search(ctx, newMemoryQuery(stageName, plan.RequestIntent, memoryProjectRoot(options, workDir)))
 			if mErr != nil {
@@ -577,11 +617,22 @@ func runPass(
 			} else {
 				bundle.RequestingAgent = stageName
 				input.MemoryBundle = &bundle
+				if tr != nil {
+					tr.recordMemory(stageName, iteration, bundle)
+				}
 			}
 		}
 
 		if err := input.Validate(); err != nil {
 			return records, outputs, false, fmt.Errorf("stage %s input: %w", stageName, err)
+		}
+
+		// Record the stage-boundary payload size for the trace. Best-effort: a
+		// marshal failure never stops the run and just leaves the field zero.
+		if tr != nil {
+			if encoded, encErr := json.Marshal(input); encErr == nil {
+				tr.recordEdge(stageName, iteration, len(encoded))
+			}
 		}
 
 		emitProgress(options, fmt.Sprintf("[%s] stage started\n", stageName))
@@ -615,7 +666,7 @@ func runPass(
 		}
 
 		start := time.Now()
-		output, err := runStageWithContext(stageCtx, input, agentStage, iteration, selection, options, workDir, runner, mem, stage.Budget.OutputMax)
+		output, err := runStageWithContext(stageCtx, input, agentStage, iteration, selection, options, workDir, runner, mem, stage.Budget.OutputMax, tr)
 		if cancelStage != nil {
 			cancelStage()
 		}
@@ -739,6 +790,7 @@ func runStageWithContext(
 	runner ToolRunner,
 	mem MemoryStore,
 	outputMax int,
+	tr *runTraceAccumulator,
 ) (schemas.HarnessStageOutput, error) {
 	stageOpts := stageOptions(input.StageName, iteration, selection, options, workDir, runner, stage.Capabilities())
 	if outputMax > 0 {
@@ -761,6 +813,9 @@ func runStageWithContext(
 		return schemas.HarnessStageOutput{}, withStageUsage(fmt.Errorf("fulfill context: %w", err), output.Usage)
 	}
 	input.Context = &bundle
+	if tr != nil {
+		tr.recordContext(input.StageName, iteration, bundle)
+	}
 	if mem != nil {
 		for _, obs := range extractDegradationObservations(input.StageName, input.RunID, memoryProjectRoot(options, workDir), bundle) {
 			persistObservation(ctx, mem, obs, func(msg string) {

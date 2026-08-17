@@ -218,7 +218,7 @@ func TestRunIterationLoopRestoresBestSnapshotBeforeNextPass(t *testing.T) {
 		t.TempDir(),
 		nil,
 		nil,
-		recovery,
+		recovery, nil,
 	)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
@@ -257,7 +257,7 @@ func TestRunIterationLoopStopsWhenRestoreFails(t *testing.T) {
 		t.TempDir(),
 		nil,
 		nil,
-		recovery,
+		recovery, nil,
 	)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
@@ -282,7 +282,7 @@ func TestRunIterationLoopAbortsRollbackWithoutRecovery(t *testing.T) {
 		t.TempDir(),
 		nil,
 		nil,
-		nil,
+		nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)

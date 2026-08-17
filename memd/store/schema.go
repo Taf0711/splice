@@ -84,4 +84,29 @@ CREATE TRIGGER IF NOT EXISTS obs_fts_update AFTER UPDATE ON observations BEGIN
         new.project_path, new.owner_agent, new.visibility
     );
 END;
+
+CREATE TABLE IF NOT EXISTS run_traces (
+    run_id      TEXT PRIMARY KEY,
+    session_id  TEXT,
+    repo_root   TEXT NOT NULL,
+    tier        TEXT NOT NULL,
+    status      TEXT NOT NULL,
+    created_at  INTEGER NOT NULL,
+    payload     TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_traces_repo_root ON run_traces(repo_root, created_at);
+CREATE INDEX IF NOT EXISTS idx_traces_tier      ON run_traces(tier, created_at);
+CREATE INDEX IF NOT EXISTS idx_traces_status    ON run_traces(status, created_at);
+
+CREATE TABLE IF NOT EXISTS verdicts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id      TEXT NOT NULL,
+    decided_at  INTEGER NOT NULL,
+    verdict     TEXT NOT NULL,
+    reason      TEXT,
+    payload     TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_verdicts_run ON verdicts(run_id, decided_at);
 `

@@ -43,7 +43,7 @@ func TestMemoryIdentityUsesProjectRoot(t *testing.T) {
 		options := PipelineConfigFromAgentOptions(agent.Options{})
 		options.ProjectRoot = repoRoot
 
-		_, _, completed, err := runPass(context.Background(), "run-id", 1, plan, registry, runFakeProvider{}, options, workDir, nil, time.Time{}, nil, store)
+		_, _, completed, err := runPass(context.Background(), "run-id", 1, plan, registry, runFakeProvider{}, options, workDir, nil, time.Time{}, nil, store, nil)
 		if err != nil || !completed {
 			t.Fatalf("workDir %q: runPass completed=%v err=%v", workDir, completed, err)
 		}
@@ -91,7 +91,7 @@ func TestMemoryIdentityFallbackUsesWorkDir(t *testing.T) {
 	// ProjectRoot is deliberately empty here.
 	options := PipelineConfigFromAgentOptions(agent.Options{})
 
-	_, _, completed, err := runPass(context.Background(), "run-id", 1, plan, registry, runFakeProvider{}, options, workDir, nil, time.Time{}, nil, store)
+	_, _, completed, err := runPass(context.Background(), "run-id", 1, plan, registry, runFakeProvider{}, options, workDir, nil, time.Time{}, nil, store, nil)
 	if err != nil || !completed {
 		t.Fatalf("runPass completed=%v err=%v", completed, err)
 	}
@@ -116,7 +116,7 @@ func TestMemoryIdentityDegradationObservationUsesProjectRoot(t *testing.T) {
 	_, err := runStageWithContext(context.Background(), schemas.HarnessStageInput{
 		RunID:     "run-degraded",
 		StageName: "context_stage",
-	}, stage, 1, selection, options, workDir, nil, store, 0)
+	}, stage, 1, selection, options, workDir, nil, store, 0, nil)
 	if err != nil {
 		t.Fatalf("runStageWithContext: %v", err)
 	}

@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/worktrees"
 )
 
@@ -109,6 +110,50 @@ func parseWorktreeRejectReason(answers []string) string {
 		return worktreeRejectUnspecified
 	}
 	return reason
+}
+
+// verdictForReview maps a worktree review decision to a post-run verdict.
+// accept = kept; reject = rejected with the Q1 reason; keep/Esc = nil (no
+// record, so the effective verdict stays unknown).
+func verdictForReview(decision, reason string) *schemas.VerdictRecord {
+	switch decision {
+	case worktreeReviewAccept:
+		return &schemas.VerdictRecord{Verdict: schemas.VerdictKept}
+	case worktreeReviewReject:
+		return &schemas.VerdictRecord{Verdict: schemas.VerdictRejected, RejectReason: reason}
+	default:
+		return nil
+	}
+}
+
+// tuiUpsertVerdict writes a post-run verdict through the trace sidecar. It is
+// a seam so tests can replace it; the default resolves the memd client, which
+// implements TraceStore. A nil client (memory/tracing off) skips silently.
+var tuiUpsertVerdict = func(ctx context.Context, verdict schemas.VerdictRecord) error {
+	client, err := tuiResolveMemory(ctx)
+	if err != nil {
+		return err
+	}
+	if client == nil {
+		return nil
+	}
+	return client.UpsertVerdict(ctx, verdict)
+}
+
+// verdictWriteMsg surfaces a best-effort verdict write failure as a warning.
+type verdictWriteMsg struct{ err error }
+
+// writeVerdictCmd runs tuiUpsertVerdict off the UI loop and reports failures
+// as a warning row.
+func (m model) writeVerdictCmd(verdict schemas.VerdictRecord) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tuiUpsertVerdict(ctx, verdict); err != nil {
+			return verdictWriteMsg{err: err}
+		}
+		return verdictWriteMsg{}
+	}
 }
 
 // offerWorktreeRejectReason shows the one follow-up question after the user picks

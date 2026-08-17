@@ -237,6 +237,115 @@ func (c *Client) Stats(ctx context.Context) (MemoryStats, error) {
 	}, nil
 }
 
+// TraceQueryFilter is the client-side filter for QueryTraces. Zero-valued
+// fields are ignored.
+type TraceQueryFilter struct {
+	RepoRoot string
+	Tier     string
+	Status   string
+	Since    int64
+	Limit    int
+}
+
+// TraceQueryResult is one trace joined with its latest verdict. Verdict is nil
+// when none has been recorded (unknown).
+type TraceQueryResult struct {
+	Trace   schemas.RunOutcome
+	Verdict *schemas.VerdictRecord
+}
+
+// UpsertTrace stores a run outcome trace. run_traces is write-once: a duplicate
+// run_id is an idempotent no-op on the sidecar, never an update.
+func (c *Client) UpsertTrace(ctx context.Context, trace schemas.RunOutcome) error {
+	if err := trace.Validate(); err != nil {
+		return fmt.Errorf("memd trace upsert: %w", err)
+	}
+	var resp struct {
+		OK       bool   `json:"ok"`
+		Inserted bool   `json:"inserted"`
+		Error    string `json:"error,omitempty"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/trace/upsert", trace, &resp); err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("memd trace upsert: %s", resp.Error)
+	}
+	return nil
+}
+
+// UpsertVerdict appends a verdict for a run. Verdicts are append-only; the
+// latest row wins at query time.
+func (c *Client) UpsertVerdict(ctx context.Context, verdict schemas.VerdictRecord) error {
+	if err := verdict.Validate(); err != nil {
+		return fmt.Errorf("memd verdict upsert: %w", err)
+	}
+	var resp struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error,omitempty"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/trace/verdict", verdict, &resp); err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("memd verdict upsert: %s", resp.Error)
+	}
+	return nil
+}
+
+// QueryTraces returns traces matching the filter, each joined with its latest
+// verdict, ordered newest first.
+func (c *Client) QueryTraces(ctx context.Context, filter TraceQueryFilter) ([]TraceQueryResult, error) {
+	var resp struct {
+		OK     bool `json:"ok"`
+		Traces []struct {
+			RunID     string          `json:"run_id"`
+			SessionID string          `json:"session_id"`
+			RepoRoot  string          `json:"repo_root"`
+			Tier      string          `json:"tier"`
+			Status    string          `json:"status"`
+			CreatedAt int64           `json:"created_at"`
+			Payload   json.RawMessage `json:"payload"`
+			Verdict   *struct {
+				DecidedAt int64           `json:"decided_at"`
+				Verdict   string          `json:"verdict"`
+				Reason    string          `json:"reason"`
+				Payload   json.RawMessage `json:"payload"`
+			} `json:"verdict"`
+		} `json:"traces"`
+		Error string `json:"error,omitempty"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/trace/query", map[string]any{
+		"repo_root": filter.RepoRoot,
+		"tier":      filter.Tier,
+		"status":    filter.Status,
+		"since":     filter.Since,
+		"limit":     filter.Limit,
+	}, &resp); err != nil {
+		return nil, err
+	}
+	if !resp.OK {
+		return nil, fmt.Errorf("memd trace query: %s", resp.Error)
+	}
+	out := make([]TraceQueryResult, 0, len(resp.Traces))
+	for _, tr := range resp.Traces {
+		var trace schemas.RunOutcome
+		if err := json.Unmarshal(tr.Payload, &trace); err != nil {
+			return nil, fmt.Errorf("memd trace query: decode trace %s: %w", tr.RunID, err)
+		}
+		result := TraceQueryResult{Trace: trace}
+		if tr.Verdict != nil {
+			var verdict schemas.VerdictRecord
+			if err := json.Unmarshal(tr.Verdict.Payload, &verdict); err != nil {
+				return nil, fmt.Errorf("memd trace query: decode verdict %s: %w", tr.RunID, err)
+			}
+			result.Verdict = &verdict
+		}
+		out = append(out, result)
+	}
+	return out, nil
+}
+
 func (c *Client) do(ctx context.Context, method string, path string, body any, out any) error {
 	var reader io.Reader
 	if body != nil {

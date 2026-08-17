@@ -21,6 +21,24 @@ const (
 	ActionSurfaceToUser         TrajectoryAction = "surface_to_user"
 )
 
+// TestCounts splits test results into authored (written this run by the
+// test generator) and preexisting (everything else). The pass/fail formula
+// uses the aggregate counts; the split is additive and feeds LN3's
+// authored-test discount.
+type TestCounts struct {
+	Pass    int `json:"pass"`
+	Fail    int `json:"fail"`
+	Errored int `json:"errored"`
+}
+
+// Validate checks the test counts.
+func (t TestCounts) Validate() error {
+	if t.Pass < 0 || t.Fail < 0 || t.Errored < 0 {
+		return errors.New("test counts must be non-negative")
+	}
+	return nil
+}
+
 // IterationState is a deterministic snapshot of where the code stands after one pipeline pass.
 type IterationState struct {
 	Iteration                int              `json:"iteration"`
@@ -28,6 +46,8 @@ type IterationState struct {
 	TestsPassing             int              `json:"tests_passing"`
 	TestsFailing             int              `json:"tests_failing"`
 	TestsErrored             int              `json:"tests_errored"`
+	Preexisting              TestCounts       `json:"preexisting,omitempty"`
+	Authored                 TestCounts       `json:"authored,omitempty"`
 	AcceptanceFactsPassing   int              `json:"acceptance_facts_passing"`
 	AcceptanceFactsFailing   int              `json:"acceptance_facts_failing"`
 	LintIssuesBySeverity     map[Severity]int `json:"lint_issues_by_severity,omitempty"`
@@ -55,6 +75,12 @@ func (i IterationState) Validate() error {
 	}
 	if i.TestsPassing < 0 || i.TestsFailing < 0 || i.TestsErrored < 0 {
 		return errors.New("test counts must be non-negative")
+	}
+	if err := i.Preexisting.Validate(); err != nil {
+		return fmt.Errorf("preexisting: %w", err)
+	}
+	if err := i.Authored.Validate(); err != nil {
+		return fmt.Errorf("authored: %w", err)
 	}
 	if i.AcceptanceFactsPassing < 0 || i.AcceptanceFactsFailing < 0 {
 		return errors.New("acceptance fact counts must be non-negative")

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -229,6 +230,7 @@ type iterationSignals struct {
 	staticOutputs     []schemas.VerificationReport
 	securityOutputs   []schemas.VerificationReport
 	codeWriterOutputs []schemas.CodeWriterOutput
+	testGenOutputs    []schemas.TestGeneratorOutput
 	acceptanceResults [][]schemas.TestCaseResult
 }
 
@@ -267,6 +269,14 @@ var trajectoryExtractors = map[string]trajectoryExtractor{
 			return err
 		}
 		dest.codeWriterOutputs = values
+		return nil
+	},
+	"test_generator_output": func(outputs []schemas.HarnessStageOutput, dest *iterationSignals) error {
+		values, err := typedPayloads[schemas.TestGeneratorOutput](outputs, "test_generator_output")
+		if err != nil {
+			return err
+		}
+		dest.testGenOutputs = values
 		return nil
 	},
 	"acceptance_results": func(outputs []schemas.HarnessStageOutput, dest *iterationSignals) error {
@@ -308,12 +318,16 @@ func ComputeIterationState(iteration int, stageOutputs []schemas.HarnessStageOut
 		ts = *timestamp
 	}
 
+	preexisting, authored := splitTestCounts(signals.testResults, authoredTestFiles(signals.testGenOutputs))
+
 	return schemas.IterationState{
 		Iteration:                iteration,
 		Timestamp:                float64(ts),
 		TestsPassing:             countTests(signals.testResults, "passed"),
 		TestsFailing:             countTests(signals.testResults, "failed"),
 		TestsErrored:             countTests(signals.testResults, "errored"),
+		Preexisting:              preexisting,
+		Authored:                 authored,
 		AcceptanceFactsPassing:   countAcceptanceResults(signals.acceptanceResults, "passed"),
 		AcceptanceFactsFailing:   countAcceptanceResults(signals.acceptanceResults, "failed", "errored"),
 		LintIssuesBySeverity:     countBySeverity(signals.staticOutputs),
@@ -406,6 +420,71 @@ func countTests(results []schemas.TestRunResults, status string) int {
 	}
 	return count
 }
+
+// authoredTestFiles flattens the test generator's written files. These are the
+// only files whose tests count as authored this run.
+func authoredTestFiles(outputs []schemas.TestGeneratorOutput) []schemas.FileChange {
+	var files []schemas.FileChange
+	for _, output := range outputs {
+		files = append(files, output.Files...)
+	}
+	return files
+}
+
+// splitTestCounts partitions test results into preexisting and authored. A
+// test is authored when its top-level name is declared as a function in one of
+// the files the test generator wrote this run; everything else is preexisting.
+// The aggregate pass/fail/errored totals are unchanged; this is additive.
+func splitTestCounts(results []schemas.TestRunResults, authoredFiles []schemas.FileChange) (preexisting, authored schemas.TestCounts) {
+	authoredNames := authoredFuncNames(authoredFiles)
+	for _, result := range results {
+		for _, tc := range result.Tests {
+			name := topLevelTestName(tc.Name)
+			counts := &preexisting
+			if _, ok := authoredNames[name]; ok {
+				counts = &authored
+			}
+			switch tc.Status {
+			case "passed":
+				counts.Pass++
+			case "failed":
+				counts.Fail++
+			case "errored":
+				counts.Errored++
+			}
+		}
+	}
+	return preexisting, authored
+}
+
+// authoredFuncNames returns the set of function names declared in the given
+// files, so a test runner result can be matched back to the file that declared
+// it. Matching is declaration-based (func Name( ... )), which is deterministic
+// and framework-agnostic for Go-style test functions.
+func authoredFuncNames(files []schemas.FileChange) map[string]struct{} {
+	names := make(map[string]struct{})
+	for _, file := range files {
+		for _, match := range funcDeclRe.FindAllStringSubmatch(file.Content, -1) {
+			if len(match) >= 2 {
+				names[match[1]] = struct{}{}
+			}
+		}
+	}
+	return names
+}
+
+// topLevelTestName strips a subtest suffix (Go's TestXxx/subtest) so a
+// subtest result attributes to its declaring function.
+func topLevelTestName(name string) string {
+	if i := strings.Index(name, "/"); i >= 0 {
+		return name[:i]
+	}
+	return name
+}
+
+// funcDeclRe matches a top-level function declaration name like
+// "func TestAdd(t *testing.T)". It does not match methods or non-func uses.
+var funcDeclRe = regexp.MustCompile(`func\s+(\w+)\s*\(`)
 
 func countBySeverity(outputs []schemas.VerificationReport) map[schemas.Severity]int {
 	counts := make(map[schemas.Severity]int)

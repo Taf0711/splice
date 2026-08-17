@@ -1001,6 +1001,19 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			}); cleanupErr != nil {
 				writer.warning(fmt.Sprintf("worktree cleanup failed; %s left in place: %v", preparedWorktree.Path, cleanupErr))
 			}
+			// A real merge writes a kept verdict with the merge SHA and branch.
+			// no_changes writes nothing (unknown verdict).
+			if v := verdictForMergeStatus(mergeResult.Status, mergeResult.CommitSHA, mergeResult.Branch); v != nil && runOptions.SessionID != "" {
+				if tracer, ok := memClient.(splicerun.TraceStore); ok && tracer != nil {
+					v.RunID = runOptions.SessionID
+					v.DecidedAt = time.Now()
+					vctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					if vErr := tracer.UpsertVerdict(vctx, *v); vErr != nil {
+						writer.warning(fmt.Sprintf("verdict write skipped: %v", vErr))
+					}
+					cancel()
+				}
+			}
 		default:
 			writer.warning("merge-back " + string(mergeResult.Status) + ": " + mergeResult.Message)
 		}
@@ -1153,6 +1166,20 @@ func iterationRecoveryForWorktree(enabled bool, prepared worktrees.Result) splic
 		return nil
 	}
 	return worktrees.NewIterationRecovery(prepared)
+}
+
+// verdictForMergeStatus maps a merge-back result to a post-run verdict. Only a
+// real merge is kept; no_changes, conflict, and skipped_dirty write nothing
+// (unknown verdict).
+func verdictForMergeStatus(status worktrees.MergeBackStatus, sha, branch string) *schemas.VerdictRecord {
+	if status == worktrees.MergeBackMerged {
+		return &schemas.VerdictRecord{
+			Verdict:        schemas.VerdictKept,
+			MergeCommitSHA: sha,
+			MergeBranch:    branch,
+		}
+	}
+	return nil
 }
 
 func resolveWorkspaceRoot(cwd string, deps appDeps) (string, error) {
