@@ -1549,6 +1549,8 @@ Flags:
       --depth <number>               Set specialist nesting depth metadata
       --session-title <text>         Set the created session title
       --init-session-id <id>         Create a new exec session with this id
+      --memory <on|off>              Enable or disable the memory sidecar (default on; off = a deliberate cold run).
+                                    A real run consumes real provider tokens and may cost money.
       --skip-permissions-unsafe      Allow prompt-gated tools without approval
       --allow-escalation             Let the agent escalate to a stronger model mid-run via escalate_model
                                     (interactive TUI only; see docs/PIPELINE.md)

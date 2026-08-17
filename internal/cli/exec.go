@@ -127,6 +127,10 @@ type execOptions struct {
 	// additional write roots for this run. Unioned with
 	// config.SandboxConfig.AdditionalWriteRoots at scope construction time.
 	addDirs []string
+	// memoryMode is the explicit memory-sidecar control: "on" (default) or
+	// "off". "off" means a deliberate cold run (memory disabled), distinct
+	// from "unavailable" (tried and failed).
+	memoryMode string
 }
 
 type execUsageError struct {
@@ -832,16 +836,23 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	}
 	resolvedMemClient, mErr := deps.resolveMemory(runCtx)
 	var memClient splicerun.MemoryStore
-	switch {
-	case mErr != nil:
-		writer.warning(fmt.Sprintf("memory sidecar unavailable; running without memory injection: %v", mErr))
-		runOptions.MemoryStatus = "unavailable"
-	case resolvedMemClient == nil:
-		writer.warning("memory sidecar not found; running without memory injection")
+	if options.memoryMode == "off" {
+		// --memory=off is a deliberate cold run: no sidecar resolution, and the
+		// run records "off" rather than "unavailable".
+		memClient = nil
 		runOptions.MemoryStatus = "off"
-	default:
-		memClient = resolvedMemClient
-		runOptions.MemoryStatus = "active"
+	} else {
+		switch {
+		case mErr != nil:
+			writer.warning(fmt.Sprintf("memory sidecar unavailable; running without memory injection: %v", mErr))
+			runOptions.MemoryStatus = "unavailable"
+		case resolvedMemClient == nil:
+			writer.warning("memory sidecar not found; running without memory injection")
+			runOptions.MemoryStatus = "off"
+		default:
+			memClient = resolvedMemClient
+			runOptions.MemoryStatus = "active"
+		}
 	}
 
 	recovery := iterationRecoveryForWorktree(options.worktree, preparedWorktree)

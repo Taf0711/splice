@@ -10,7 +10,7 @@ import (
 )
 
 func parseExecArgs(args []string) (execOptions, bool, error) {
-	options := execOptions{inputFormat: execInputText, outputFormat: execOutputText, autonomy: "low"}
+	options := execOptions{inputFormat: execInputText, outputFormat: execOutputText, autonomy: "low", memoryMode: "on"}
 	if len(args) == 0 {
 		return options, false, execUsageError{"Prompt required. Use `splice exec \"prompt\"` or `splice exec --file prompt.txt`."}
 	}
@@ -24,6 +24,23 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 			options.skipPermissionsUnsafe = true
 		case arg == "--list-tools":
 			options.listTools = true
+		case arg == "--memory":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			if err := setExecMemoryMode(&options, value); err != nil {
+				return options, false, err
+			}
+			index = next
+		case strings.HasPrefix(arg, "--memory="):
+			value, err := requiredInlineFlagValue(arg, "--memory")
+			if err != nil {
+				return options, false, err
+			}
+			if err := setExecMemoryMode(&options, value); err != nil {
+				return options, false, err
+			}
 		case arg == "--allow-escalation":
 			options.allowEscalation = true
 		case arg == "--trust":
@@ -549,5 +566,15 @@ func parseExecInputFormat(value string) (execInputFormat, error) {
 		return execInputStreamJSON, nil
 	default:
 		return "", execUsageError{fmt.Sprintf("Invalid input format %q. Expected text or stream-json.", value)}
+	}
+}
+
+func setExecMemoryMode(options *execOptions, value string) error {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "on", "off":
+		options.memoryMode = strings.ToLower(strings.TrimSpace(value))
+		return nil
+	default:
+		return execUsageError{fmt.Sprintf("--memory must be on or off, got %q", value)}
 	}
 }
