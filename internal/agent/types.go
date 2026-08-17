@@ -315,7 +315,12 @@ type Options struct {
 	// pipeline keeps memory keyed to the repo root while tools execute in Cwd
 	// (which may be a per-run worktree path). Empty means memory derives from
 	// Cwd exactly as before. Splice addition (MD1).
-	ProjectRoot  string
+	ProjectRoot string
+	// MemoryStatus is the run's resolved memory sidecar status: "active" (a
+	// client resolved), "off" (disabled or not configured), or "unavailable"
+	// (a daemon was expected but unreachable). Empty derives from the
+	// MemoryStore argument (nil = off, non-nil = active). Splice addition (Q4).
+	MemoryStatus string
 	SystemPrompt string
 	// ResponseStyle is the operator-selected reply style from the TUI /style
 	// command (e.g. "concise", "explanatory", "review"). It is rendered into the

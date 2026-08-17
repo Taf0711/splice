@@ -22,6 +22,7 @@ type PipelineRunConfig struct {
 	ReasoningEffort         string
 	Cwd                     string
 	ProjectRoot             string
+	MemoryStatus            string
 	Images                  []zeroruntime.ImageBlock
 	Registry                *tools.Registry
 	PermissionMode          agent.PermissionMode
@@ -64,6 +65,7 @@ func PipelineConfigFromAgentOptions(options agent.Options) PipelineRunConfig {
 		ReasoningEffort:         options.ReasoningEffort,
 		Cwd:                     options.Cwd,
 		ProjectRoot:             options.ProjectRoot,
+		MemoryStatus:            options.MemoryStatus,
 		Images:                  options.Images,
 		Registry:                options.Registry,
 		PermissionMode:          options.PermissionMode,

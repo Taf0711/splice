@@ -223,6 +223,18 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 	// summaries keep working in absWorkDir.
 	projectRoot := memoryProjectRoot(options, absWorkDir)
 
+	// Memory status is active / off / unavailable. The caller's resolved status
+	// wins; an empty value derives from the MemoryStore (nil = off, non-nil =
+	// active) for backward compatibility.
+	memoryStatus := options.MemoryStatus
+	if memoryStatus == "" {
+		if mem != nil {
+			memoryStatus = "active"
+		} else {
+			memoryStatus = "off"
+		}
+	}
+
 	registry, err := buildStageRegistry(options, absWorkDir)
 	if err != nil {
 		return schemas.PipelineResult{}, fmt.Errorf("build stage registry: %w", err)
@@ -251,10 +263,6 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 			}
 			toolFingerprint = learn.Hash(stages.VerificationToolIdentities()...)
 			topologyHash = learn.Hash(stageNames...)
-			memoryStatus := "off"
-			if mem != nil {
-				memoryStatus = "active"
-			}
 			calibrated := 0
 			for i := range plan.Stages {
 				stage := &plan.Stages[i]
@@ -289,7 +297,7 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 
 	var tr *runTraceAccumulator
 	if tracer != nil {
-		tr = newRunTraceAccumulator(tracer, runID, options.SessionID, projectRoot, plan, mem != nil)
+		tr = newRunTraceAccumulator(tracer, runID, options.SessionID, projectRoot, plan, memoryStatus)
 		tr.toolFingerprint = toolFingerprint
 		tr.topologyHash = topologyHash
 		tr.stagePromptHash = stagePromptHashes
@@ -684,6 +692,11 @@ func runPass(
 			bundle, mErr := mem.Search(ctx, newMemoryQuery(stageName, plan.RequestIntent, memoryProjectRoot(options, workDir)))
 			if mErr != nil {
 				emitProgress(options, fmt.Sprintf("[%s] memory retrieval skipped: %v\n", stageName, mErr))
+				// A mid-run retrieval failure degrades the run's memory status to
+				// unavailable (a warm run that failed must not record as cold).
+				if tr != nil {
+					tr.noteMemorySearchFailed()
+				}
 			} else {
 				bundle.RequestingAgent = stageName
 				// PC3: append kept-run exemplars. Best-effort and silent on

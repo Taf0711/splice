@@ -33,7 +33,10 @@ type runTraceAccumulator struct {
 	sessionID   string
 	projectRoot string
 	plan        schemas.ExecutionPlan
-	memoryOn    bool
+	// memoryStatus is active / off / unavailable. It starts at the run's
+	// resolved status and degrades to unavailable when a mid-run retrieval
+	// fails (a deliberately-disabled run stays off).
+	memoryStatus string
 
 	stages        map[stageKey]schemas.InputMeta
 	stageOrder    []stageKey
@@ -52,15 +55,15 @@ type runTraceAccumulator struct {
 	budgetProvenance map[string]string
 }
 
-func newRunTraceAccumulator(store TraceStore, runID, sessionID, projectRoot string, plan schemas.ExecutionPlan, memoryOn bool) *runTraceAccumulator {
+func newRunTraceAccumulator(store TraceStore, runID, sessionID, projectRoot string, plan schemas.ExecutionPlan, memoryStatus string) *runTraceAccumulator {
 	return &runTraceAccumulator{
-		store:       store,
-		runID:       runID,
-		sessionID:   sessionID,
-		projectRoot: projectRoot,
-		plan:        plan,
-		memoryOn:    memoryOn,
-		stages:      make(map[stageKey]schemas.InputMeta),
+		store:        store,
+		runID:        runID,
+		sessionID:    sessionID,
+		projectRoot:  projectRoot,
+		plan:         plan,
+		memoryStatus: memoryStatus,
+		stages:       make(map[stageKey]schemas.InputMeta),
 	}
 }
 
@@ -103,6 +106,15 @@ func (tr *runTraceAccumulator) recordEdge(stage string, iteration int, bytes int
 	tr.stages[key] = meta
 }
 
+// noteMemorySearchFailed degrades the run's memory status to unavailable when
+// a mid-run retrieval failed. A deliberately-disabled run stays off.
+func (tr *runTraceAccumulator) noteMemorySearchFailed() {
+	if tr == nil || tr.memoryStatus == "off" {
+		return
+	}
+	tr.memoryStatus = "unavailable"
+}
+
 // recordPermission records a permission tap. Only interactive decisions
 // (PermissionModeAsk with a real allow/deny choice) count; auto-grants in
 // unsafe/auto modes are not taps.
@@ -138,9 +150,9 @@ func (tr *runTraceAccumulator) buildRunOutcome(result schemas.PipelineResult) (s
 		})
 	}
 
-	memoryStatus := "off"
-	if tr.memoryOn {
-		memoryStatus = "active"
+	memoryStatus := tr.memoryStatus
+	if memoryStatus == "" {
+		memoryStatus = "off"
 	}
 
 	outcome := schemas.OutcomeRecord{

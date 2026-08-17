@@ -178,7 +178,7 @@ func TestBuildRunOutcomeCoversEveryField(t *testing.T) {
 		TokenBudget:   schemas.TokenBudget{TotalInputBudget: 1000, TotalOutputBudget: 1000, OverflowPolicy: "abort"},
 	}
 
-	tr := newRunTraceAccumulator(&traceMemoryStore{}, "run-1", "sess-1", "/repo", plan, true)
+	tr := newRunTraceAccumulator(&traceMemoryStore{}, "run-1", "sess-1", "/repo", plan, "active")
 	tr.recordHistory(schemas.IterationState{
 		Iteration: 1, Timestamp: 1, TestsPassing: 1, StateHash: "abc",
 		Confidence: 0.9, Preexisting: schemas.TestCounts{Pass: 1},

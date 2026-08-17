@@ -5889,12 +5889,19 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			result, err = agent.Run(runCtx, prompt, m.provider, options)
 		} else {
 			memClient, mErr := tuiResolveMemory(runCtx)
-			if mErr != nil || memClient == nil {
-				// Memory is never load-bearing; degrade silently.
+			switch {
+			case mErr != nil:
+				// A daemon was expected but unreachable: unavailable, not off.
+				memStatus = "unavailable"
+				options.MemoryStatus = "unavailable"
+			case memClient == nil:
+				// Memory disabled or not configured: a deliberate cold run.
 				memStatus = "off"
-			} else {
+				options.MemoryStatus = "off"
+			default:
 				mem = memClient
 				memStatus = "active"
+				options.MemoryStatus = "active"
 				if stats, sErr := memClient.Stats(runCtx); sErr == nil {
 					memCount = stats.Total
 					memByType = stats.ByType

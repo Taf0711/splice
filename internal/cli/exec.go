@@ -832,12 +832,16 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	}
 	resolvedMemClient, mErr := deps.resolveMemory(runCtx)
 	var memClient splicerun.MemoryStore
-	if mErr != nil {
+	switch {
+	case mErr != nil:
 		writer.warning(fmt.Sprintf("memory sidecar unavailable; running without memory injection: %v", mErr))
-	} else if resolvedMemClient == nil {
+		runOptions.MemoryStatus = "unavailable"
+	case resolvedMemClient == nil:
 		writer.warning("memory sidecar not found; running without memory injection")
-	} else {
+		runOptions.MemoryStatus = "off"
+	default:
 		memClient = resolvedMemClient
+		runOptions.MemoryStatus = "active"
 	}
 
 	recovery := iterationRecoveryForWorktree(options.worktree, preparedWorktree)

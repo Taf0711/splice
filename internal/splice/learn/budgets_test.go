@@ -178,6 +178,23 @@ func TestFitBudgetMemoryStatusSplit(t *testing.T) {
 	}
 }
 
+func TestFitBudgetUnavailableDoesNotMatchActive(t *testing.T) {
+	key := testKey()
+	// A degraded (unavailable) corpus must not calibrate an active-status fit:
+	// the warm arm is not polluted by runs whose retrieval failed.
+	q := &fakeQuerier{completed: corpus(key, "unavailable", 5000, 8000, Floor, "completed")}
+	fit, err := FitBudget(context.Background(), q, key, "active", staticDefault())
+	if err != nil {
+		t.Fatalf("FitBudget: %v", err)
+	}
+	if fit.Calibrated {
+		t.Fatalf("calibrated = true, want active fit to reject an unavailable corpus")
+	}
+	if !strings.Contains(fit.Provenance, "0/20") {
+		t.Fatalf("provenance = %q, want 0/20 refusal", fit.Provenance)
+	}
+}
+
 func TestFitBudgetLegacyBucketNeverFits(t *testing.T) {
 	key := testKey()
 	// Legacy traces have empty key fields: they must never match a full key.
