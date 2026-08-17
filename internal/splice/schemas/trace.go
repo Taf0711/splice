@@ -64,12 +64,13 @@ type InputMeta struct {
 	ContextChars     int `json:"context_chars"`
 	MemoryItems      int `json:"memory_items"`
 	MemoryChars      int `json:"memory_chars"`
+	ExemplarItems    int `json:"exemplar_items"`
 	EdgePayloadBytes int `json:"edge_payload_bytes"`
 }
 
 // Validate checks the input metadata.
 func (m InputMeta) Validate() error {
-	if m.ContextItems < 0 || m.ContextChars < 0 || m.MemoryItems < 0 || m.MemoryChars < 0 || m.EdgePayloadBytes < 0 {
+	if m.ContextItems < 0 || m.ContextChars < 0 || m.MemoryItems < 0 || m.MemoryChars < 0 || m.ExemplarItems < 0 || m.EdgePayloadBytes < 0 {
 		return errors.New("input metadata counts must be non-negative")
 	}
 	return nil
@@ -266,13 +267,17 @@ type TraceQueryFilter struct {
 	RepoRoot string `json:"repo_root"`
 	Tier     string `json:"tier"`
 	Status   string `json:"status"`
+	Verdict  string `json:"verdict"`
+	Query    string `json:"query"`
 	Since    int64  `json:"since"`
 	Limit    int    `json:"limit"`
 }
 
 // TraceQueryResult is one trace joined with its latest verdict. Verdict is nil
-// when none has been recorded (unknown).
+// when none has been recorded (unknown). Rank is the FTS bm25 score when a
+// Query filter was supplied (more negative = more relevant), else 0.
 type TraceQueryResult struct {
 	Trace   RunOutcome     `json:"trace"`
 	Verdict *VerdictRecord `json:"verdict,omitempty"`
+	Rank    float64        `json:"rank,omitempty"`
 }

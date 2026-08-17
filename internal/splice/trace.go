@@ -77,6 +77,7 @@ func (tr *runTraceAccumulator) recordMemory(stage string, iteration int, bundle 
 	key := stageKey{stage, iteration}
 	meta := tr.stages[key]
 	meta.MemoryItems = len(bundle.Observations)
+	meta.ExemplarItems = len(bundle.Exemplars)
 	for _, obs := range bundle.Observations {
 		meta.MemoryChars += len(obs.Title) + len(obs.Content)
 	}

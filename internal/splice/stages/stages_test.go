@@ -153,6 +153,32 @@ func TestSelectMemoryTruncatesContentOver500Runes(t *testing.T) {
 	}
 }
 
+func TestSelectMemoryRendersExemplars(t *testing.T) {
+	bundle := &schemas.MemoryBundle{
+		RequestingAgent: "x",
+		Observations: []schemas.MemoryObservation{{
+			Title: "note", Content: "body", MemoryType: "note", Scope: "project",
+		}},
+		Exemplars: []schemas.Exemplar{
+			{RunID: "run-1", Content: "intent: add a Hello function"},
+		},
+	}
+	got := selectMemory(bundle)
+	if len(got) != 2 {
+		t.Fatalf("expected 1 observation + 1 exemplar = 2 items, got %d", len(got))
+	}
+	exemplar := got[1]
+	if exemplar.MemoryType != "exemplar" {
+		t.Fatalf("memory_type = %q, want exemplar", exemplar.MemoryType)
+	}
+	if exemplar.RunID != "run-1" {
+		t.Fatalf("run_id = %q, want run-1", exemplar.RunID)
+	}
+	if exemplar.Content != "intent: add a Hello function" {
+		t.Fatalf("content = %q", exemplar.Content)
+	}
+}
+
 // requestCapturingProvider records the CompletionRequest passed to StreamCompletion.
 type requestCapturingProvider struct {
 	request zeroruntime.CompletionRequest

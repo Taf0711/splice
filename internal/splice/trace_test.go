@@ -186,6 +186,7 @@ func TestBuildRunOutcomeCoversEveryField(t *testing.T) {
 	tr.recordMemory("code_writer", 1, schemas.MemoryBundle{
 		RequestingAgent: "code_writer",
 		Observations:    []schemas.MemoryObservation{{OwnerAgent: "orchestrator", Title: "t", Content: "c", MemoryType: "run_config", Scope: "project", Visibility: "shareable"}},
+		Exemplars:       []schemas.Exemplar{{RunID: "run-ex", Content: "exemplar"}},
 	})
 	tr.recordContext("code_writer", 1, schemas.ContextBundle{
 		Request: schemas.ContextRequest{Reason: "inspect", Queries: []schemas.ContextQuery{{QueryType: schemas.ContextListFiles, MaxResults: 1, MaxChars: 100}}},
@@ -229,5 +230,8 @@ func TestBuildRunOutcomeCoversEveryField(t *testing.T) {
 	}
 	if trace.Stages[0].PromptHash != "prompthash" {
 		t.Errorf("TracedStage.PromptHash = %q, want prompthash", trace.Stages[0].PromptHash)
+	}
+	if trace.Stages[0].InputMeta.ExemplarItems != 1 {
+		t.Errorf("TracedStage.InputMeta.ExemplarItems = %d, want 1", trace.Stages[0].InputMeta.ExemplarItems)
 	}
 }

@@ -235,6 +235,7 @@ type traceUpsertRequest struct {
 	SessionID string `json:"session_id"`
 	RepoRoot  string `json:"repo_root"`
 	Tier      string `json:"tier"`
+	Intent    string `json:"intent"`
 	Outcome   struct {
 		Status string `json:"status"`
 	} `json:"outcome"`
@@ -293,6 +294,8 @@ type traceQueryRequest struct {
 	RepoRoot string `json:"repo_root"`
 	Tier     string `json:"tier"`
 	Status   string `json:"status"`
+	Verdict  string `json:"verdict"`
+	Query    string `json:"query"`
 	Since    int64  `json:"since"`
 	Limit    int    `json:"limit"`
 }
@@ -313,6 +316,7 @@ type traceResponse struct {
 	Tier      string           `json:"tier"`
 	Status    string           `json:"status"`
 	CreatedAt int64            `json:"created_at"`
+	Rank      float64          `json:"rank,omitempty"`
 	Payload   json.RawMessage  `json:"payload"`
 	Verdict   *verdictResponse `json:"verdict,omitempty"`
 }

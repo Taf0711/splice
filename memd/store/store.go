@@ -144,6 +144,12 @@ func migrateDB(db *sql.DB) error {
 			return fmt.Errorf("migrate: drop stale fts: %w", err)
 		}
 	}
+	// run_traces predates the intent column. Add it before the FTS table is
+	// created so content='run_traces' can resolve the column. Existing rows keep
+	// NULL intent and never match the index (no backfill).
+	if err := addTraceIntentColumn(db); err != nil {
+		return fmt.Errorf("migrate: trace intent column: %w", err)
+	}
 	// The schema is split into statements so errors can name the failing DDL
 	// fragment; splitSQL keeps trigger bodies (BEGIN...END) intact.
 	for _, stmt := range splitSQL(ddl) {
@@ -159,6 +165,43 @@ func migrateDB(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+// addTraceIntentColumn adds the intent column to a run_traces table created
+// before the column existed. A fresh database has no run_traces table yet (the
+// DDL creates it with the column), so it is a no-op there. Existing rows keep
+// NULL intent and never match the FTS index (no backfill).
+func addTraceIntentColumn(db *sql.DB) error {
+	var name string
+	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'run_traces'`).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	rows, err := db.Query(`PRAGMA table_info(run_traces)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var colName, colType string
+		var notNull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &colName, &colType, &notNull, &dflt, &pk); err != nil {
+			return err
+		}
+		if colName == "intent" {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.Exec(`ALTER TABLE run_traces ADD COLUMN intent TEXT`)
+	return err
 }
 
 // ftsNeedsRebuild reports whether an existing observations_fts table predates

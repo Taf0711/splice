@@ -79,11 +79,14 @@ func (r FileChangeApplyResult) Validate() error {
 }
 
 // SelectedMemory is one bounded observation injected into a stage input.
+// RunID is set only for exemplar items so an audit can trace one back to its
+// source run; ordinary memory observations leave it empty.
 type SelectedMemory struct {
 	Title      string `json:"title"`
 	Content    string `json:"content"`
 	MemoryType string `json:"memory_type"`
 	Scope      string `json:"scope"`
+	RunID      string `json:"run_id,omitempty"`
 }
 
 // CodeWriterInput is the minimum input required by the code writer.

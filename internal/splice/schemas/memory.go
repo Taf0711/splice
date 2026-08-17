@@ -112,10 +112,31 @@ func (m MemoryQuery) ValidateRecent() error {
 	return nil
 }
 
+// Exemplar is one distilled kept-run example injected into a memory bundle.
+// Content carries only the approved, bounded fields (intent, tier, stage
+// sequence, iterations, changed files, tokens); raw prompts, transcripts, and
+// stage output bodies never appear.
+type Exemplar struct {
+	RunID   string `json:"run_id"`
+	Content string `json:"content"`
+}
+
+// Validate checks the exemplar.
+func (e Exemplar) Validate() error {
+	if e.RunID == "" {
+		return errors.New("run_id is required")
+	}
+	if e.Content == "" {
+		return errors.New("content is required")
+	}
+	return nil
+}
+
 // MemoryBundle is bounded memory context injected into a stage's HarnessStageInput.
 type MemoryBundle struct {
 	RequestingAgent string              `json:"requesting_agent"`
 	Observations    []MemoryObservation `json:"observations,omitempty"`
+	Exemplars       []Exemplar          `json:"exemplars,omitempty"`
 	Truncated       bool                `json:"truncated"`
 }
 
@@ -127,6 +148,11 @@ func (m MemoryBundle) Validate() error {
 	for i, obs := range m.Observations {
 		if err := obs.Validate(); err != nil {
 			return fmt.Errorf("observations[%d]: %w", i, err)
+		}
+	}
+	for i, exemplar := range m.Exemplars {
+		if err := exemplar.Validate(); err != nil {
+			return fmt.Errorf("exemplars[%d]: %w", i, err)
 		}
 	}
 	return nil

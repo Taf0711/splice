@@ -91,6 +91,7 @@ CREATE TABLE IF NOT EXISTS run_traces (
     repo_root   TEXT NOT NULL,
     tier        TEXT NOT NULL,
     status      TEXT NOT NULL,
+    intent      TEXT,
     created_at  INTEGER NOT NULL,
     payload     TEXT NOT NULL
 );
@@ -98,6 +99,18 @@ CREATE TABLE IF NOT EXISTS run_traces (
 CREATE INDEX IF NOT EXISTS idx_traces_repo_root ON run_traces(repo_root, created_at);
 CREATE INDEX IF NOT EXISTS idx_traces_tier      ON run_traces(tier, created_at);
 CREATE INDEX IF NOT EXISTS idx_traces_status    ON run_traces(status, created_at);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS run_traces_fts USING fts5(
+    intent,
+    tier UNINDEXED,
+    content='run_traces',
+    content_rowid='rowid'
+);
+
+CREATE TRIGGER IF NOT EXISTS traces_fts_insert AFTER INSERT ON run_traces BEGIN
+    INSERT INTO run_traces_fts(rowid, intent, tier)
+    VALUES (new.rowid, new.intent, new.tier);
+END;
 
 CREATE TABLE IF NOT EXISTS verdicts (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -382,6 +382,7 @@ func (s *server) handleTraceUpsert(w http.ResponseWriter, r *http.Request) {
 		RepoRoot:  req.RepoRoot,
 		Tier:      req.Tier,
 		Status:    req.Outcome.Status,
+		Intent:    req.Intent,
 		Payload:   raw,
 	})
 	if err != nil {
@@ -443,6 +444,8 @@ func (s *server) handleTraceQuery(w http.ResponseWriter, r *http.Request) {
 		RepoRoot: req.RepoRoot,
 		Tier:     req.Tier,
 		Status:   req.Status,
+		Verdict:  req.Verdict,
+		Query:    req.Query,
 		Since:    req.Since,
 		Limit:    req.Limit,
 	})
@@ -459,6 +462,7 @@ func (s *server) handleTraceQuery(w http.ResponseWriter, r *http.Request) {
 			Tier:      row.Trace.Tier,
 			Status:    row.Trace.Status,
 			CreatedAt: row.Trace.CreatedAt,
+			Rank:      row.Rank,
 			Payload:   json.RawMessage(row.Trace.Payload),
 		}
 		if row.Verdict != nil {

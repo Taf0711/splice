@@ -133,14 +133,15 @@ func formatContextBundle(bundle *schemas.ContextBundle) []string {
 
 // selectMemory maps a MemoryBundle into a bounded list of SelectedMemory for stage
 // input. It returns nil when bundle is nil or empty, so omitempty keeps the JSON
-// field absent when no memory was retrieved.
+// field absent when no memory was retrieved. Exemplars are appended with
+// memory_type "exemplar" and their source run_id in provenance.
 func selectMemory(bundle *schemas.MemoryBundle) []schemas.SelectedMemory {
-	if bundle == nil || len(bundle.Observations) == 0 {
+	if bundle == nil || (len(bundle.Observations) == 0 && len(bundle.Exemplars) == 0) {
 		return nil
 	}
 	const maxObservations = 5
 	const maxRunes = 500
-	selected := make([]schemas.SelectedMemory, 0, min(len(bundle.Observations), maxObservations))
+	selected := make([]schemas.SelectedMemory, 0, min(len(bundle.Observations), maxObservations)+len(bundle.Exemplars))
 	for i, obs := range bundle.Observations {
 		if i >= maxObservations {
 			break
@@ -155,6 +156,15 @@ func selectMemory(bundle *schemas.MemoryBundle) []schemas.SelectedMemory {
 			Content:    content,
 			MemoryType: obs.MemoryType,
 			Scope:      obs.Scope,
+		})
+	}
+	for _, exemplar := range bundle.Exemplars {
+		selected = append(selected, schemas.SelectedMemory{
+			Title:      "exemplar run " + exemplar.RunID,
+			Content:    exemplar.Content,
+			MemoryType: "exemplar",
+			Scope:      "exemplar",
+			RunID:      exemplar.RunID,
 		})
 	}
 	return selected

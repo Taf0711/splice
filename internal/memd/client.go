@@ -288,6 +288,7 @@ func (c *Client) QueryTraces(ctx context.Context, filter schemas.TraceQueryFilte
 			Tier      string          `json:"tier"`
 			Status    string          `json:"status"`
 			CreatedAt int64           `json:"created_at"`
+			Rank      float64         `json:"rank"`
 			Payload   json.RawMessage `json:"payload"`
 			Verdict   *struct {
 				DecidedAt int64           `json:"decided_at"`
@@ -302,6 +303,8 @@ func (c *Client) QueryTraces(ctx context.Context, filter schemas.TraceQueryFilte
 		"repo_root": filter.RepoRoot,
 		"tier":      filter.Tier,
 		"status":    filter.Status,
+		"verdict":   filter.Verdict,
+		"query":     filter.Query,
 		"since":     filter.Since,
 		"limit":     filter.Limit,
 	}, &resp); err != nil {
@@ -316,7 +319,7 @@ func (c *Client) QueryTraces(ctx context.Context, filter schemas.TraceQueryFilte
 		if err := json.Unmarshal(tr.Payload, &trace); err != nil {
 			return nil, fmt.Errorf("memd trace query: decode trace %s: %w", tr.RunID, err)
 		}
-		result := schemas.TraceQueryResult{Trace: trace}
+		result := schemas.TraceQueryResult{Trace: trace, Rank: tr.Rank}
 		if tr.Verdict != nil {
 			var verdict schemas.VerdictRecord
 			if err := json.Unmarshal(tr.Verdict.Payload, &verdict); err != nil {

@@ -686,6 +686,13 @@ func runPass(
 				emitProgress(options, fmt.Sprintf("[%s] memory retrieval skipped: %v\n", stageName, mErr))
 			} else {
 				bundle.RequestingAgent = stageName
+				// PC3: append kept-run exemplars. Best-effort and silent on
+				// failure; an empty exemplar set is correct, not a bug.
+				if querier, ok := mem.(learn.TraceQuerier); ok && querier != nil {
+					if exemplars, eErr := retrieveExemplars(ctx, querier, memoryProjectRoot(options, workDir), plan.RequestIntent); eErr == nil {
+						bundle.Exemplars = exemplars
+					}
+				}
 				input.MemoryBundle = &bundle
 				if tr != nil {
 					tr.recordMemory(stageName, iteration, bundle)
