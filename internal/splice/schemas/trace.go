@@ -97,6 +97,9 @@ type TracedStage struct {
 	StageRecord
 	InputMeta InputMeta `json:"input_meta"`
 	Cache     Cache     `json:"cache"`
+	// PromptHash is the short sha256 of the stage's embedded prompt file. It is
+	// empty on traces written before this field existed (the legacy bucket).
+	PromptHash string `json:"prompt_hash,omitempty"`
 }
 
 // Validate checks the traced stage.
@@ -169,6 +172,15 @@ type RunOutcome struct {
 	Outcome       OutcomeRecord        `json:"outcome"`
 	Memory        MemoryRecord         `json:"memory"`
 	Interventions []InterventionRecord `json:"interventions,omitempty"`
+	// ToolFingerprint is the short sha256 of the deterministic verification-tool
+	// identities. TopologyHash is the short sha256 of the compiled plan's
+	// stage/edge structure (not code version). Both are empty on legacy traces.
+	ToolFingerprint string `json:"tool_fingerprint,omitempty"`
+	TopologyHash    string `json:"topology_hash,omitempty"`
+	// BudgetProvenance records the per-stage budget provenance string applied at
+	// run start (calibrated / default / refusal). Written at trace time so the
+	// applied budgets always carry their origin.
+	BudgetProvenance map[string]string `json:"budget_provenance,omitempty"`
 }
 
 // Validate checks the run outcome. It is strict: a malformed trace is a
@@ -246,4 +258,21 @@ func (v VerdictRecord) Validate() error {
 		return errors.New("decided_at is required")
 	}
 	return nil
+}
+
+// TraceQueryFilter is the client-side filter for querying stored traces.
+// Zero-valued fields are ignored.
+type TraceQueryFilter struct {
+	RepoRoot string `json:"repo_root"`
+	Tier     string `json:"tier"`
+	Status   string `json:"status"`
+	Since    int64  `json:"since"`
+	Limit    int    `json:"limit"`
+}
+
+// TraceQueryResult is one trace joined with its latest verdict. Verdict is nil
+// when none has been recorded (unknown).
+type TraceQueryResult struct {
+	Trace   RunOutcome     `json:"trace"`
+	Verdict *VerdictRecord `json:"verdict,omitempty"`
 }

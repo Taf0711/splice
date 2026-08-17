@@ -18,6 +18,7 @@ import (
 
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/sandbox"
+	"github.com/Taf0711/splice/internal/splice/learn"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/splice/stages"
 	"github.com/Taf0711/splice/internal/tools"
@@ -222,15 +223,77 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 	// summaries keep working in absWorkDir.
 	projectRoot := memoryProjectRoot(options, absWorkDir)
 
+	registry, err := buildStageRegistry(options, absWorkDir)
+	if err != nil {
+		return schemas.PipelineResult{}, fmt.Errorf("build stage registry: %w", err)
+	}
+
 	// A trace store is the memory client asserting the TraceStore interface; a
 	// nil MemoryStore (memory off) means tracing is off too.
 	var tracer TraceStore
-	var tr *runTraceAccumulator
 	if t, ok := mem.(TraceStore); ok && t != nil {
 		tracer = t
 	}
+
+	// LN2: learned budgets. Calibrated fits override the static per-stage
+	// budgets before the iteration loop, and the fitted plan is embedded in the
+	// trace so applied budgets are always recorded. Only LLM-backed stages have
+	// a token budget; deterministic stages keep their zero budget untouched.
+	budgetProvenance := map[string]string{}
+	toolFingerprint := ""
+	topologyHash := ""
+	stagePromptHashes := map[string]string{}
+	if tracer != nil {
+		if querier, ok := mem.(learn.TraceQuerier); ok && querier != nil {
+			stageNames := make([]string, len(plan.Stages))
+			for i, s := range plan.Stages {
+				stageNames[i] = s.Name
+			}
+			toolFingerprint = learn.Hash(stages.VerificationToolIdentities()...)
+			topologyHash = learn.Hash(stageNames...)
+			memoryStatus := "off"
+			if mem != nil {
+				memoryStatus = "active"
+			}
+			calibrated := 0
+			for i := range plan.Stages {
+				stage := &plan.Stages[i]
+				if registry[stage.Name].Capabilities().ModelFree {
+					continue
+				}
+				promptHash := learn.Hash(stages.StagePrompt(stage.Name))
+				stagePromptHashes[stage.Name] = promptHash
+				key := learn.BucketKey{
+					RepoRoot:        projectRoot,
+					Stage:           stage.Name,
+					PromptHash:      promptHash,
+					Model:           resolvedModelForStage(options, stage.Name),
+					ToolFingerprint: toolFingerprint,
+					TopologyHash:    topologyHash,
+				}
+				fit, ferr := learn.FitBudget(ctx, querier, key, memoryStatus, stage.Budget)
+				if ferr != nil {
+					budgetProvenance[stage.Name] = "fit error: " + ferr.Error()
+					continue
+				}
+				budgetProvenance[stage.Name] = fit.Provenance
+				if fit.Calibrated {
+					stage.Budget.InputMax = fit.InputMax
+					stage.Budget.OutputMax = fit.OutputMax
+					calibrated++
+				}
+			}
+			emitProgress(options, fmt.Sprintf("budgets: %d/%d stages calibrated\n", calibrated, len(plan.Stages)))
+		}
+	}
+
+	var tr *runTraceAccumulator
 	if tracer != nil {
 		tr = newRunTraceAccumulator(tracer, runID, options.SessionID, projectRoot, plan, mem != nil)
+		tr.toolFingerprint = toolFingerprint
+		tr.topologyHash = topologyHash
+		tr.stagePromptHash = stagePromptHashes
+		tr.budgetProvenance = budgetProvenance
 		upstreamPermission := options.OnPermission
 		options.OnPermission = func(event agent.PermissionEvent) {
 			tr.recordPermission(event)
@@ -241,11 +304,6 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 	}
 
 	runner := newAgentToolRunner(options, absWorkDir)
-
-	registry, err := buildStageRegistry(options, absWorkDir)
-	if err != nil {
-		return schemas.PipelineResult{}, fmt.Errorf("build stage registry: %w", err)
-	}
 
 	ledger := newRequestLedger()
 	ledgerOpts := ledger.recordingOptions(options)
@@ -284,6 +342,18 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 		}
 	}
 	return result, nil
+}
+
+// resolvedModelForStage returns the model string a stage will use, mirroring
+// the resolution in runPass: the per-stage resolver when set, else the default
+// run model. It is used at run start to compute the LN2 bucket key.
+func resolvedModelForStage(options PipelineRunConfig, stageName string) string {
+	if options.StageModelResolver != nil {
+		if resolved, err := options.StageModelResolver(stageName); err == nil && resolved.Provider != nil && resolved.Model != "" {
+			return resolved.Model
+		}
+	}
+	return options.Model
 }
 
 func runIterationLoop(

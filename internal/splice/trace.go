@@ -43,6 +43,13 @@ type runTraceAccumulator struct {
 	currentStage  string
 	currentIter   int
 	history       []schemas.IterationState
+
+	// LN2 bucket-key identities and provenance, computed at run start and
+	// written into the trace so applied budgets always carry their origin.
+	toolFingerprint  string
+	topologyHash     string
+	stagePromptHash  map[string]string
+	budgetProvenance map[string]string
 }
 
 func newRunTraceAccumulator(store TraceStore, runID, sessionID, projectRoot string, plan schemas.ExecutionPlan, memoryOn bool) *runTraceAccumulator {
@@ -126,6 +133,7 @@ func (tr *runTraceAccumulator) buildRunOutcome(result schemas.PipelineResult) (s
 		stages = append(stages, schemas.TracedStage{
 			StageRecord: rec,
 			InputMeta:   meta,
+			PromptHash:  tr.stagePromptHash[rec.Name],
 		})
 	}
 
@@ -158,7 +166,10 @@ func (tr *runTraceAccumulator) buildRunOutcome(result schemas.PipelineResult) (s
 			Items:  tr.memoryItems,
 			Chars:  tr.memoryChars,
 		},
-		Interventions: tr.interventions,
+		Interventions:    tr.interventions,
+		ToolFingerprint:  tr.toolFingerprint,
+		TopologyHash:     tr.topologyHash,
+		BudgetProvenance: tr.budgetProvenance,
 	}
 	if err := trace.Validate(); err != nil {
 		return schemas.RunOutcome{}, fmt.Errorf("invalid run outcome for run %s: %w", tr.runID, err)

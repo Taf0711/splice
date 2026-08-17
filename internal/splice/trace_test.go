@@ -196,6 +196,11 @@ func TestBuildRunOutcomeCoversEveryField(t *testing.T) {
 		Type: schemas.InterventionPermissionTap, Weight: 1, Stage: "code_writer",
 		Iteration: 1, Summary: "bash: run tests", Choice: "allow",
 	})
+	// LN2 bucket-key identities and provenance.
+	tr.toolFingerprint = "toolfp"
+	tr.topologyHash = "topohash"
+	tr.stagePromptHash = map[string]string{"code_writer": "prompthash"}
+	tr.budgetProvenance = map[string]string{"code_writer": "calibrated from 25 runs, p80"}
 
 	result := schemas.PipelineResult{
 		RunID:  "run-1",
@@ -215,5 +220,14 @@ func TestBuildRunOutcomeCoversEveryField(t *testing.T) {
 		if field.IsZero() {
 			t.Errorf("RunOutcome.%s is zero; the trace writer does not populate it", v.Type().Field(i).Name)
 		}
+	}
+	// The per-stage prompt hash must also be written, not just the run-level
+	// key fields. (Cache is legitimately zero in v1, so TracedStage is not
+	// reflected field-by-field the way RunOutcome is.)
+	if len(trace.Stages) == 0 {
+		t.Fatal("expected at least one traced stage")
+	}
+	if trace.Stages[0].PromptHash != "prompthash" {
+		t.Errorf("TracedStage.PromptHash = %q, want prompthash", trace.Stages[0].PromptHash)
 	}
 }

@@ -237,23 +237,6 @@ func (c *Client) Stats(ctx context.Context) (MemoryStats, error) {
 	}, nil
 }
 
-// TraceQueryFilter is the client-side filter for QueryTraces. Zero-valued
-// fields are ignored.
-type TraceQueryFilter struct {
-	RepoRoot string
-	Tier     string
-	Status   string
-	Since    int64
-	Limit    int
-}
-
-// TraceQueryResult is one trace joined with its latest verdict. Verdict is nil
-// when none has been recorded (unknown).
-type TraceQueryResult struct {
-	Trace   schemas.RunOutcome
-	Verdict *schemas.VerdictRecord
-}
-
 // UpsertTrace stores a run outcome trace. run_traces is write-once: a duplicate
 // run_id is an idempotent no-op on the sidecar, never an update.
 func (c *Client) UpsertTrace(ctx context.Context, trace schemas.RunOutcome) error {
@@ -295,7 +278,7 @@ func (c *Client) UpsertVerdict(ctx context.Context, verdict schemas.VerdictRecor
 
 // QueryTraces returns traces matching the filter, each joined with its latest
 // verdict, ordered newest first.
-func (c *Client) QueryTraces(ctx context.Context, filter TraceQueryFilter) ([]TraceQueryResult, error) {
+func (c *Client) QueryTraces(ctx context.Context, filter schemas.TraceQueryFilter) ([]schemas.TraceQueryResult, error) {
 	var resp struct {
 		OK     bool `json:"ok"`
 		Traces []struct {
@@ -327,13 +310,13 @@ func (c *Client) QueryTraces(ctx context.Context, filter TraceQueryFilter) ([]Tr
 	if !resp.OK {
 		return nil, fmt.Errorf("memd trace query: %s", resp.Error)
 	}
-	out := make([]TraceQueryResult, 0, len(resp.Traces))
+	out := make([]schemas.TraceQueryResult, 0, len(resp.Traces))
 	for _, tr := range resp.Traces {
 		var trace schemas.RunOutcome
 		if err := json.Unmarshal(tr.Payload, &trace); err != nil {
 			return nil, fmt.Errorf("memd trace query: decode trace %s: %w", tr.RunID, err)
 		}
-		result := TraceQueryResult{Trace: trace}
+		result := schemas.TraceQueryResult{Trace: trace}
 		if tr.Verdict != nil {
 			var verdict schemas.VerdictRecord
 			if err := json.Unmarshal(tr.Verdict.Payload, &verdict); err != nil {
