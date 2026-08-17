@@ -92,6 +92,32 @@ almost certainly wrong.
   behavior is the contract (`internal/worktrees/worktrees_test.go`).
 - **Prefer extending existing abstractions over inventing new ones.**
 
+## Regression Discipline
+
+The pipeline and learning logic is deterministic code over typed structs.
+Test it that way. Every feature lands with a regression net that pins its
+failure modes, not only its happy path.
+
+- **Test the guards harder than the features.** A broken feature fails
+  loudly. A broken guard fails silently and looks like success. Floor
+  refusals, rollback triggers, invalidation rules, permission floors, and
+  gate protections get the most adversarial fixtures.
+- **Fabricate corpora for learning logic.** Fitters, bucket keys, verdict
+  mapping, and floors are pure functions over typed structs. Build fake trace
+  corpora in table tests. No provider, no model, milliseconds.
+- **Pin invariants as property tests.** Append-only stores, self-contained
+  traces, key invalidation, and per-consumer filtering get dedicated tests
+  that fail on any violation.
+- **Pair producers with consumers.** When a schema field, event, or rule
+  table has a writer and a reader, add a pairing test that fails CI when one
+  side drifts (see `TestTrajectoryRuleOrder` and
+  `TestTrajectoryExtractorsCoverRegistryStages`).
+- **Mock at the provider seam for integration.** Full runs use the mocked
+  provider (`execStageAwareProvider`, `stages_test.go`) to prove the wiring:
+  runs write complete traces, floors flip provenance, guards fire.
+- **Slow behavioral checks stay out of CI.** The eval harness and live-model
+  smokes run on a release cadence, not per commit.
+
 ## Release Approval
 
 A general release request does not approve a version.
