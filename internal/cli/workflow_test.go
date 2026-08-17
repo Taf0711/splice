@@ -969,6 +969,45 @@ func TestRunExecWorktreeMergeBackCleanupPolicy(t *testing.T) {
 	}
 }
 
+func TestRunExecWorktreeMergeBackWarnsWhenVerdictSkippedNoSession(t *testing.T) {
+	root := t.TempDir()
+	worktreeDir := t.TempDir()
+	initTestGitWorktree(t, root, worktreeDir)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"exec", "--worktree", "task-a", "--merge-back", "hello"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return root, nil },
+		prepareWorktree: func(context.Context, worktrees.Options) (worktrees.Result, error) {
+			return worktrees.Result{Name: "task-a", Path: worktreeDir, RepoRoot: root, SourceBranch: "main", SourceCommit: "abc1234", Locked: true}, nil
+		},
+		mergeBackWorktree: func(context.Context, worktrees.MergeBackOptions) (worktrees.MergeBackResult, error) {
+			return worktrees.MergeBackResult{
+				Status:    worktrees.MergeBackMerged,
+				Branch:    "splice/task-a",
+				CommitSHA: "fedcba9876",
+				Message:   "merged splice/task-a",
+			}, nil
+		},
+		unlockWorktree: func(context.Context, worktrees.UnlockOptions) error { return nil },
+		removeWorktree: func(context.Context, worktrees.RemoveOptions) error { return nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return newExecStageAwareProvider(execStageProviderOptions{}), nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	// A merge happened, but the run has no session ID to key the verdict on.
+	// The skip must fail loud, not silently drop the verdict.
+	if !strings.Contains(stderr.String(), "verdict not recorded: run has no session id") {
+		t.Fatalf("expected verdict-skip warning in stderr, got %q", stderr.String())
+	}
+}
+
 func TestRunExecWorktreeMergeBackSkippedDirtyExitsIncomplete(t *testing.T) {
 	root := t.TempDir()
 	worktreeDir := t.TempDir()

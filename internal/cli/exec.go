@@ -1003,8 +1003,12 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			}
 			// A real merge writes a kept verdict with the merge SHA and branch.
 			// no_changes writes nothing (unknown verdict).
-			if v := verdictForMergeStatus(mergeResult.Status, mergeResult.CommitSHA, mergeResult.Branch); v != nil && runOptions.SessionID != "" {
-				if tracer, ok := memClient.(splicerun.TraceStore); ok && tracer != nil {
+			if v := verdictForMergeStatus(mergeResult.Status, mergeResult.CommitSHA, mergeResult.Branch); v != nil {
+				if runOptions.SessionID == "" {
+					// Fail loud: the merge happened, but there is no session ID to
+					// key the verdict on, so it is not recorded.
+					writer.warning("verdict not recorded: run has no session id")
+				} else if tracer, ok := memClient.(splicerun.TraceStore); ok && tracer != nil {
 					v.RunID = runOptions.SessionID
 					v.DecidedAt = time.Now()
 					vctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
