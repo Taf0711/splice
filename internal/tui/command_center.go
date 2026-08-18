@@ -272,7 +272,7 @@ func (m model) resumeText() string {
 	}
 	workspaceSessions := sessions[:0]
 	for _, session := range sessions {
-		if sessionMatchesWorkspace(session.Cwd, m.cwd) {
+		if sessionWorkspaceMatch(session, m.cwd) {
 			workspaceSessions = append(workspaceSessions, session)
 		}
 	}

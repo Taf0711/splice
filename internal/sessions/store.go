@@ -83,6 +83,7 @@ type Metadata struct {
 	SessionKind         SessionKind `json:"sessionKind,omitempty"`
 	Title               string      `json:"title,omitempty"`
 	Cwd                 string      `json:"cwd,omitempty"`
+	OriginCwd           string      `json:"originCwd,omitempty"`
 	ModelID             string      `json:"modelId,omitempty"`
 	Provider            string      `json:"provider,omitempty"`
 	Tag                 string      `json:"tag,omitempty"`
@@ -115,6 +116,7 @@ type CreateInput struct {
 	SessionKind         SessionKind
 	Title               string
 	Cwd                 string
+	OriginCwd           string
 	ModelID             string
 	Provider            string
 	Tag                 string
@@ -269,6 +271,7 @@ func (store *Store) Create(input CreateInput) (Metadata, error) {
 		SessionKind:         input.SessionKind,
 		Title:               strings.TrimSpace(input.Title),
 		Cwd:                 strings.TrimSpace(input.Cwd),
+		OriginCwd:           strings.TrimSpace(input.OriginCwd),
 		ModelID:             strings.TrimSpace(input.ModelID),
 		Provider:            strings.TrimSpace(input.Provider),
 		Tag:                 strings.TrimSpace(input.Tag),
@@ -437,6 +440,7 @@ func (store *Store) Fork(parentSessionID string, input ForkInput) (Metadata, err
 		SessionKind:        SessionKindFork,
 		Title:              title,
 		Cwd:                firstNonEmpty(input.Cwd, parent.Cwd),
+		OriginCwd:          parent.OriginCwd,
 		ModelID:            firstNonEmpty(input.ModelID, parent.ModelID),
 		Provider:           firstNonEmpty(input.Provider, parent.Provider),
 		ParentSessionID:    parent.SessionID,

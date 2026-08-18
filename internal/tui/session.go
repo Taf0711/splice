@@ -390,8 +390,9 @@ func (m model) newSessionPicker() *commandPicker {
 		// lists this workspace's history, not every project's. Checked BEFORE the
 		// per-session event read below, so a large global history doesn't pay 50
 		// full file reads to build one workspace's list. Sessions with no recorded
-		// Cwd (older runs) stay visible rather than vanishing.
-		if !sessionMatchesWorkspace(meta.Cwd, m.cwd) {
+		// Cwd (older runs) stay visible rather than vanishing. Worktree sessions
+		// match through their origin repo too (TW4).
+		if !sessionWorkspaceMatch(meta, m.cwd) {
 			continue
 		}
 		// A splice-event session has nothing to resume — skip it without a file read.
@@ -428,6 +429,9 @@ func (m model) newSessionPicker() *commandPicker {
 		}
 		if status != "" {
 			label += "  [" + status + "]"
+		}
+		if isWorktreeSession(meta) {
+			label = "wt: " + label
 		}
 		items = append(items, pickerItem{
 			Label: label,
@@ -517,7 +521,7 @@ func (m model) latestResumableInWorkspace() (*sessions.Metadata, error) {
 		return nil, err
 	}
 	for i := range metas {
-		if !sessionMatchesWorkspace(metas[i].Cwd, m.cwd) {
+		if !sessionWorkspaceMatch(metas[i], m.cwd) {
 			continue
 		}
 		if metas[i].EventCount == 0 {
@@ -549,6 +553,32 @@ func sessionMatchesWorkspace(sessionCwd, workspaceCwd string) bool {
 		return strings.EqualFold(a, b)
 	}
 	return a == b
+}
+
+// sessionWorkspaceMatch reports whether a session belongs to the current
+// workspace, accepting either its execution Cwd or its OriginCwd (the source
+// repo a worktree session was launched from). A worktree session therefore
+// matches both its worktree checkout and its source repo, so /resume is
+// scoped to either. Sessions with neither path recorded stay visible.
+func sessionWorkspaceMatch(meta sessions.Metadata, workspaceCwd string) bool {
+	if sessionMatchesWorkspace(meta.Cwd, workspaceCwd) {
+		return true
+	}
+	// Only fall back to the origin repo when one is recorded. An empty
+	// OriginCwd means no source repo was captured; treating it as a match
+	// would make every plain session visible in every workspace (the empty-path
+	// leniency in sessionMatchesWorkspace is for fully-unplaced sessions).
+	if strings.TrimSpace(meta.OriginCwd) == "" {
+		return false
+	}
+	return sessionMatchesWorkspace(meta.OriginCwd, workspaceCwd)
+}
+
+// isWorktreeSession reports whether a session was launched from a source repo
+// into a worktree: it has an origin repo that differs from its execution Cwd.
+func isWorktreeSession(meta sessions.Metadata) bool {
+	origin := strings.TrimSpace(meta.OriginCwd)
+	return origin != "" && origin != strings.TrimSpace(meta.Cwd)
 }
 
 func (m model) sessionHasResumableContent(sessionID string) bool {

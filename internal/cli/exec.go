@@ -197,6 +197,11 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	var preparedWorktree worktrees.Result
 	worktreeLocked := false
 	unlockWarningWritten := false
+	// sessionOriginCwd is the source repo root this run was launched from. For
+	// a worktree run it records the pre-swap workspace so the session stays
+	// discoverable from the source repo's /resume picker (TW4). Empty for live
+	// checkout runs.
+	sessionOriginCwd := ""
 	if options.worktree {
 		preparedWorktree, err = deps.prepareWorktree(runCtx, worktrees.Options{
 			Cwd:     workspaceRoot,
@@ -208,6 +213,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 		}
 		worktreeLocked = preparedWorktree.Locked
+		sessionOriginCwd = workspaceRoot
 		workspaceRoot = preparedWorktree.Path
 	}
 	unlockPreparedWorktree := func(ctx context.Context) error {
@@ -545,6 +551,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		SessionID:        options.initSessionID,
 		Title:            sessionTitle,
 		Cwd:              workspaceRoot,
+		OriginCwd:        sessionOriginCwd,
 		ModelID:          resolved.Provider.Model,
 		Provider:         runMetadata.Provider,
 		Tag:              options.tag,

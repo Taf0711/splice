@@ -29,6 +29,7 @@ type PrepareExecOptions struct {
 	SessionID        string
 	Title            string
 	Cwd              string
+	OriginCwd        string
 	ModelID          string
 	Provider         string
 	Tag              string
@@ -125,6 +126,7 @@ func PrepareExec(options PrepareExecOptions) (PreparedExec, error) {
 		SessionID: options.SessionID,
 		Title:     options.Title,
 		Cwd:       options.Cwd,
+		OriginCwd: options.OriginCwd,
 		ModelID:   options.ModelID,
 		Provider:  options.Provider,
 		Tag:       options.Tag,
