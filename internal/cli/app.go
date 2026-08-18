@@ -1529,6 +1529,7 @@ Flags:
       --enabled-tools <tools>        Only expose these comma or space separated tools
       --disabled-tools <tools>       Hide these comma or space separated tools
       --list-tools                   List model-visible tools and exit
+      --inherit-worktree-trust       Let a worktree inherit trust from its trusted source repo (spike; off by default)
       --profile <profile>            Accept legacy model profile selection
   -r, --reasoning-effort <effort>    Accept legacy reasoning effort selection
   -C, --cwd <path>                   Set the workspace directory

@@ -5,6 +5,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -134,6 +135,13 @@ func Prepare(ctx context.Context, options Options) (Result, error) {
 		result.Reused = true
 		return result, nil
 	}
+	// Parse and validate the optional seed manifest before creating the
+	// worktree, so a bad seed (absolute path, "..", or a missing entry) fails
+	// loudly before anything is created. A missing manifest is a no-op.
+	seedEntries, err := parseWorktreeSeed(repoRoot)
+	if err != nil {
+		return Result{}, err
+	}
 	if err := os.MkdirAll(repoDir, 0o700); err != nil {
 		return Result{}, fmt.Errorf("create worktree directory: %w", err)
 	}
@@ -149,7 +157,158 @@ func Prepare(ctx context.Context, options Options) (Result, error) {
 		return Result{}, fmt.Errorf("create git worktree: %s", message)
 	}
 	result.Locked = true
+	if err := applyWorktreeSeed(repoRoot, target, seedEntries); err != nil {
+		return Result{}, err
+	}
 	return result, nil
+}
+
+// worktreeSeedFile is the optional seed manifest inside the source repo root.
+// A missing file is a no-op; no default path is invented.
+const worktreeSeedFile = ".splice/worktree-seed"
+
+// worktreeSeedEntry is one parsed seed line: a repo-root-relative path with a
+// copy (Symlink false) or symlink (Symlink true) mode.
+type worktreeSeedEntry struct {
+	RelPath string
+	Symlink bool
+}
+
+// parseWorktreeSeed reads and validates the optional seed manifest from the
+// source repo root. A missing file returns a nil slice (no-op). Entries are
+// one per line; "#" comments and blank lines are ignored, and a "symlink: "
+// prefix selects symlink mode. Absolute paths and any ".." after cleaning are
+// rejected, and a listed entry that does not exist in the source repo is a
+// named error (typos must not silently no-op).
+func parseWorktreeSeed(repoRoot string) ([]worktreeSeedEntry, error) {
+	seedPath := filepath.Join(repoRoot, worktreeSeedFile)
+	data, err := os.ReadFile(seedPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read worktree seed %s: %w", seedPath, err)
+	}
+	entries := []worktreeSeedEntry{}
+	for lineNum, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		symlink := false
+		if rest, ok := strings.CutPrefix(line, "symlink: "); ok {
+			symlink = true
+			line = strings.TrimSpace(rest)
+		}
+		rel, err := validateWorktreeSeedEntry(repoRoot, seedPath, lineNum+1, line)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, worktreeSeedEntry{RelPath: rel, Symlink: symlink})
+	}
+	return entries, nil
+}
+
+// validateWorktreeSeedEntry checks one entry and returns its cleaned
+// repo-root-relative path. It rejects absolute paths, paths that escape the
+// repo root via "..", and the repo root itself, and requires the entry to
+// exist in the source repo.
+func validateWorktreeSeedEntry(repoRoot, seedPath string, lineNum int, entry string) (string, error) {
+	raw := strings.TrimSpace(entry)
+	if raw == "" {
+		return "", fmt.Errorf("worktree seed %s line %d: empty entry", seedPath, lineNum)
+	}
+	clean := filepath.Clean(raw)
+	if filepath.IsAbs(clean) || clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("worktree seed %s line %d: path %q escapes the repository", seedPath, lineNum, raw)
+	}
+	if _, err := os.Lstat(filepath.Join(repoRoot, clean)); err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("worktree seed %s line %d: %q does not exist in the source repository", seedPath, lineNum, raw)
+		}
+		return "", fmt.Errorf("worktree seed %s line %d: inspect %q: %w", seedPath, lineNum, raw, err)
+	}
+	return clean, nil
+}
+
+// applyWorktreeSeed seeds the freshly created worktree from the validated
+// entries: copies land as real files or directories, symlinks point back at
+// the absolute source path under the repo root.
+func applyWorktreeSeed(repoRoot, target string, entries []worktreeSeedEntry) error {
+	for _, entry := range entries {
+		src := filepath.Join(repoRoot, entry.RelPath)
+		dst := filepath.Join(target, entry.RelPath)
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return fmt.Errorf("worktree seed parent dir for %q: %w", entry.RelPath, err)
+		}
+		if entry.Symlink {
+			if err := os.Symlink(src, dst); err != nil {
+				return fmt.Errorf("worktree seed symlink %q: %w", entry.RelPath, err)
+			}
+			continue
+		}
+		if err := copySeedPath(src, dst); err != nil {
+			return fmt.Errorf("worktree seed copy %q: %w", entry.RelPath, err)
+		}
+	}
+	return nil
+}
+
+// copySeedPath copies a file or directory tree from src to dst, preserving
+// symlinks encountered inside a copied directory.
+func copySeedPath(src, dst string) error {
+	info, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		link, err := os.Readlink(src)
+		if err != nil {
+			return err
+		}
+		return os.Symlink(link, dst)
+	}
+	if !info.IsDir() {
+		return copySeedFile(src, dst)
+	}
+	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			link, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(link, target)
+		}
+		return copySeedFile(path, target)
+	})
+}
+
+func copySeedFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 // MergeBackStatus classifies the outcome of a merge-back attempt.
@@ -757,6 +916,16 @@ func sameGitCommonDir(ctx context.Context, runGit GitRunner, sourceDir string, t
 		return false, err
 	}
 	return sourceCommonDir == targetCommonDir, nil
+}
+
+// SameRepo reports whether two directories belong to the same git repository,
+// proven by their resolved git common directory. The trust-inheritance spike
+// uses it to prove a worktree was prepared from a trusted source repo.
+func SameRepo(ctx context.Context, runGit GitRunner, sourceDir, targetDir string) (bool, error) {
+	if runGit == nil {
+		runGit = defaultRunGit
+	}
+	return sameGitCommonDir(ctx, runGit, sourceDir, targetDir)
 }
 
 func gitCommonDir(ctx context.Context, runGit GitRunner, dir string) (string, error) {

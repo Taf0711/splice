@@ -25,6 +25,23 @@ func resolveWorkspaceTrust(workspaceRoot string, setting string, trustFlag, noTr
 	return decision == config.TrustTrusted, decision, persist, store, nil
 }
 
+// worktreeTrustInherit is the pure core of the trust-inheritance spike. When
+// inherit is set and sameRepo proves the worktree belongs to its source repo,
+// the source repo's recorded trust decision (no flags, no env) becomes the
+// worktree's. It never widens trust beyond what the source repo already has:
+// a declined or undecided source, a missing store, or a non-matching repo
+// inherits nothing, so the fail-closed re-prompt path stays the default.
+func worktreeTrustInherit(sourceRepoRoot string, store *config.TrustStore, setting string, inherit, sameRepo bool) (trusted bool, decision config.TrustDecision) {
+	if !inherit || !sameRepo || store == nil {
+		return false, config.TrustUndecided
+	}
+	decision, _ = config.ResolveTrust(sourceRepoRoot, store, setting, false, false, "")
+	if decision == config.TrustTrusted {
+		return true, decision
+	}
+	return false, config.TrustUndecided
+}
+
 // shouldPromptWorkspaceTrust reports whether the interactive first-run trust
 // prompt is allowed to run. Keep this predicate separate so every security gate
 // is explicit and easy to test.

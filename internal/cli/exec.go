@@ -131,6 +131,10 @@ type execOptions struct {
 	// "off". "off" means a deliberate cold run (memory disabled), distinct
 	// from "unavailable" (tried and failed).
 	memoryMode string
+	// inheritWorktreeTrust, when set, lets a worktree prepared from a trusted
+	// source repo inherit that trust (proven via the git common dir). Off by
+	// default; a spike, no full trust-inheritance UX yet.
+	inheritWorktreeTrust bool
 }
 
 type execUsageError struct {
@@ -291,6 +295,17 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		_ = store.SetTrusted(workspaceRoot, trusted)
 		if saveErr := store.Save(); saveErr != nil {
 			fmt.Fprintf(stderr, "warning: failed to persist trust decision: %s\n", saveErr)
+		}
+	}
+	// Worktree trust inheritance (spike, off by default): a worktree prepared
+	// from a trusted source repo inherits that trust when the flag is set and
+	// the git common dir proves they share a repository. Fail-closed: an
+	// untrusted source or a failed proof leaves the worktree untrusted.
+	if !trusted && options.inheritWorktreeTrust && preparedWorktree.Path != "" {
+		if sameRepo, repoErr := worktrees.SameRepo(runCtx, nil, preparedWorktree.RepoRoot, preparedWorktree.Path); repoErr == nil {
+			if inherited, _ := worktreeTrustInherit(preparedWorktree.RepoRoot, store, trustSetting, true, sameRepo); inherited {
+				trusted = true
+			}
 		}
 	}
 	if !trusted && projectConfigExists(workspaceRoot) {

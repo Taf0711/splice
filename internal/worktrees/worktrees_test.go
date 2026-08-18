@@ -87,6 +87,109 @@ func TestPrepareCreatesDetachedGitWorktree(t *testing.T) {
 	}
 }
 
+func TestPrepareSeedsWorktreeFromManifest(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	root := resolvedPath(t, t.TempDir())
+	base := resolvedPath(t, t.TempDir())
+	mustGit(t, root, "init", "-b", "main")
+	mustGit(t, root, "config", "user.name", "splice-test")
+	mustGit(t, root, "config", "user.email", "splice-test@local")
+	// A tracked file so the repo has a commit; the seed fixtures stay untracked
+	// (like gitignored .env / node_modules), so the fresh worktree lacks them.
+	if err := os.WriteFile(filepath.Join(root, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, root, "add", "-A")
+	mustGit(t, root, "commit", "-m", "base")
+	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("KEY=value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	nodeModules := filepath.Join(root, "node_modules")
+	if err := os.MkdirAll(nodeModules, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nodeModules, "pkg.txt"), []byte("dep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	seedDir := filepath.Join(root, ".splice")
+	if err := os.MkdirAll(seedDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := "# .splice/worktree-seed\n.env\nsymlink: node_modules\n"
+	if err := os.WriteFile(filepath.Join(seedDir, "worktree-seed"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Prepare(context.Background(), Options{Cwd: root, Name: "seeded", BaseDir: base, Now: fixedTime("2026-06-05T10:30:00Z")})
+	if err != nil {
+		t.Fatalf("Prepare returned error: %v", err)
+	}
+
+	envPath := filepath.Join(result.Path, ".env")
+	data, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("read seeded .env: %v", err)
+	}
+	if string(data) != "KEY=value\n" {
+		t.Fatalf("seeded .env content = %q, want KEY=value\n", string(data))
+	}
+	if info, err := os.Lstat(envPath); err != nil || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf(".env should be a real file, got %v", info)
+	}
+
+	link, err := os.Readlink(filepath.Join(result.Path, "node_modules"))
+	if err != nil {
+		t.Fatalf("read node_modules symlink: %v", err)
+	}
+	if link != nodeModules {
+		t.Fatalf("node_modules symlink = %q, want %q", link, nodeModules)
+	}
+}
+
+func TestPrepareSeedRejectsEscapingAndMissingEntries(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	root := resolvedPath(t, t.TempDir())
+	base := resolvedPath(t, t.TempDir())
+	mustGit(t, root, "init", "-b", "main")
+	mustGit(t, root, "config", "user.name", "splice-test")
+	mustGit(t, root, "config", "user.email", "splice-test@local")
+	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, root, "add", "-A")
+	mustGit(t, root, "commit", "-m", "base")
+	seedDir := filepath.Join(root, ".splice")
+	if err := os.MkdirAll(seedDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name     string
+		manifest string
+		wantErr  string
+	}{
+		{"escape via parent", "../secret\n", "escapes the repository"},
+		{"absolute path", filepath.Join(root, ".env") + "\n", "escapes the repository"},
+		{"missing entry", "does-not-exist\n", "does not exist in the source repository"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(filepath.Join(seedDir, "worktree-seed"), []byte(tc.manifest), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Prepare(context.Background(), Options{Cwd: root, Name: "bad-" + strings.ReplaceAll(tc.name, " ", "-"), BaseDir: base, Now: fixedTime("2026-06-05T10:30:00Z")})
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Prepare error = %v, want containing %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestPrepareReusesExistingGitWorktree(t *testing.T) {
 	root := t.TempDir()
 	base := resolvedPath(t, t.TempDir())
