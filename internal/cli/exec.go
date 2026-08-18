@@ -694,6 +694,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		SessionTitle:     sessionTitle,
 		ProviderName:     resolved.Provider.Name,
 		Model:            resolved.Provider.Model,
+		ModelRegistry:    modelRegistry,
 		// ModelSwitcher is agent-loop only: mid-run model escalation is not wired
 		// into the deterministic pipeline, so it is inert under `splice exec`.
 		ModelSwitcher:   modelSwitcher,

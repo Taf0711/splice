@@ -5289,6 +5289,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		options.SessionID = m.activeSession.SessionID
 		options.ProviderName = m.providerName
 		options.Model = m.modelName
+		options.ModelRegistry = m.modelCatalog
 		options.ReasoningEffort = string(m.reasoningEffort)
 		options.ResponseStyle = m.responseStyle
 		options.Cwd = m.cwd

@@ -235,6 +235,18 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 		}
 	}
 
+	// Preflight: diagnose substrate interference (permission mode, hooks,
+	// provider capability) before any stage runs. Advisory only: each issue is
+	// emitted as a warning and the run continues. User machinery is
+	// authoritative, exactly as before.
+	for _, issue := range Preflight(plan, options) {
+		label := issue.Stage
+		if label == "" {
+			label = "preflight"
+		}
+		emitProgress(options, fmt.Sprintf("[%s] %s\n", label, issue.Message))
+	}
+
 	registry, err := buildStageRegistry(options, absWorkDir)
 	if err != nil {
 		return schemas.PipelineResult{}, fmt.Errorf("build stage registry: %w", err)

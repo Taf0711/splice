@@ -108,6 +108,16 @@ func blocksOn(event Event) bool {
 	return event == EventBeforeTool
 }
 
+// Config returns the dispatcher's hook configuration. The pipeline preflight
+// uses it to statically warn about hooks that intercept splice.* stage tools
+// before a run starts. A nil dispatcher returns an empty config.
+func (dispatcher *Dispatcher) Config() Config {
+	if dispatcher == nil {
+		return Config{}
+	}
+	return dispatcher.config
+}
+
 // Dispatch runs every enabled hook configured for the input event (and matcher,
 // for tool events). It returns once all hooks have run, or early if a blocking
 // hook vetoes the action.

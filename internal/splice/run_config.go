@@ -5,6 +5,7 @@ import (
 
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/hooks"
+	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/streamjson"
 	"github.com/Taf0711/splice/internal/tools"
@@ -51,6 +52,7 @@ type PipelineRunConfig struct {
 	EscalationModelResolver agent.EscalationModelResolver
 	OnSurfaceToUser         func(ctx context.Context, req agent.SurfaceToUserRequest) (agent.SurfaceToUserDecision, error)
 	OnStageEvent            func(agent.StageEvent)
+	ModelRegistry           modelregistry.Registry
 }
 
 // PipelineConfigFromAgentOptions copies the fields the pipeline consumes.
@@ -94,6 +96,7 @@ func PipelineConfigFromAgentOptions(options agent.Options) PipelineRunConfig {
 		EscalationModelResolver: options.EscalationModelResolver,
 		OnSurfaceToUser:         options.OnSurfaceToUser,
 		OnStageEvent:            options.OnStageEvent,
+		ModelRegistry:           options.ModelRegistry,
 	}
 }
 

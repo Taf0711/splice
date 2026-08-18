@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/Taf0711/splice/internal/hooks"
+	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/streamjson"
 	"github.com/Taf0711/splice/internal/tools"
@@ -399,6 +400,12 @@ type Options struct {
 	// the pipeline ledger boundary. The pipeline owns sequence assignment and
 	// calls this exactly once per provider stream. Nil disables pipeline pricing.
 	EstimateUsageCost func(model string, usage Usage, reported bool) UsageCostEstimate
+	// ModelRegistry is the static model catalog used for preflight provider
+	// capability checks (e.g. tool-calling support). It is a zero Registry when
+	// unset; preflight treats that as "not statically knowable" and skips the
+	// check rather than probing live. Built once by the caller (exec/TUI) and
+	// reused. Splice addition.
+	ModelRegistry modelregistry.Registry
 	// OnToolProgress, when set, is called with each stream-json event a
 	// specialist child process emits while running. The toolCallID identifies
 	// which Task tool call the progress belongs to. nil is a no-op.
