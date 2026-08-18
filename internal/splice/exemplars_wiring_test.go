@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Taf0711/splice/internal/agent"
@@ -96,4 +97,56 @@ func TestRunInjectsExemplars(t *testing.T) {
 		t.Fatalf("ExemplarItems = %d, want 3 (three kept exemplars injected)", exemplarItems)
 	}
 	_ = abs
+}
+
+// runExemplarProgress runs a one-shot through the pipeline with the given
+// fabricated kept-run corpus and returns the collected reasoning (progress)
+// lines.
+func runExemplarProgress(t *testing.T, corpus []schemas.TraceQueryResult) []string {
+	t.Helper()
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "go.mod"), []byte("module example\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	registry := tools.NewRegistry()
+	for _, tool := range tools.CoreTools(workDir) {
+		registry.Register(tool)
+	}
+	abs, _ := filepath.Abs(workDir)
+	for i := range corpus {
+		corpus[i].Trace.RepoRoot = abs
+	}
+	store := &exemplarStore{corpus: corpus}
+	var reasoning []string
+	_, err := Run(context.Background(), "add a Hello function and tests", runFakeProvider{}, agent.Options{
+		Cwd:            workDir,
+		Registry:       registry,
+		PermissionMode: agent.PermissionModeAuto,
+		Model:          "model-x",
+		OnReasoning:    func(s string) { reasoning = append(reasoning, s) },
+	}, store, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	return reasoning
+}
+
+func TestRunEmitsExemplarProgressLine(t *testing.T) {
+	corpus := []schemas.TraceQueryResult{
+		{Trace: exemplarTrace("kept-1", "add a Hello function and tests", 1000, 2000, []string{"main.go"}), Rank: -8},
+		{Trace: exemplarTrace("kept-2", "add a Hello function and tests", 1000, 2000, []string{"main.go"}), Rank: -7},
+	}
+	reasoning := runExemplarProgress(t, corpus)
+	joined := strings.Join(reasoning, "")
+	if !strings.Contains(joined, "exemplars: 2 from kept runs") {
+		t.Fatalf("progress lines missing exemplar count:\n%s", joined)
+	}
+}
+
+func TestRunSilentWhenNoExemplars(t *testing.T) {
+	reasoning := runExemplarProgress(t, nil)
+	joined := strings.Join(reasoning, "")
+	if strings.Contains(joined, "exemplars:") {
+		t.Fatalf("progress lines must stay silent with zero exemplars:\n%s", joined)
+	}
 }

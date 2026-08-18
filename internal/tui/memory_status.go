@@ -15,6 +15,8 @@ func (m model) memoryStatusSegment() string {
 		return fmt.Sprintf("🧵 %d", m.memoryCount)
 	case "off":
 		return "🧵 off"
+	case "unavailable":
+		return "🧵 unavailable"
 	default:
 		return ""
 	}

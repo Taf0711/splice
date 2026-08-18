@@ -2248,15 +2248,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.memoryCount = msg.memoryCount
 			m.memoryByType = msg.memoryByType
 		}
-		// Emit a one-time transition notice.
-		if !m.memoryNoticed {
-			if m.memoryStatus == "active" {
-				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: fmt.Sprintf("Memory sidecar active: %d observations stored.", m.memoryCount)})
-				m.memoryNoticed = true
-			} else if m.memoryStatus == "off" && prevStatus == "active" {
-				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Memory sidecar unavailable; running without memory injection."})
-				m.memoryNoticed = true
-			}
+		// Emit a one-time transition notice. The initial active notice fires once
+		// per session; a later transition INTO off or unavailable fires its own
+		// row regardless, because memory was working and has now stopped.
+		if !m.memoryNoticed && m.memoryStatus == "active" {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: fmt.Sprintf("Memory sidecar active: %d observations stored.", m.memoryCount)})
+			m.memoryNoticed = true
+		} else if m.memoryStatus == "off" && prevStatus == "active" {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Memory sidecar unavailable; running without memory injection."})
+		} else if m.memoryStatus == "unavailable" && prevStatus == "active" {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Memory retrieval failing; running without memory injection."})
 		}
 		m.activeWorktree = msg.worktree
 		if notice := strings.TrimSpace(msg.worktreeNotice); notice != "" {

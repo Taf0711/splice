@@ -704,6 +704,9 @@ func runPass(
 				if querier, ok := mem.(learn.TraceQuerier); ok && querier != nil {
 					if exemplars, eErr := retrieveExemplars(ctx, querier, memoryProjectRoot(options, workDir), plan.RequestIntent); eErr == nil {
 						bundle.Exemplars = exemplars
+						if len(exemplars) > 0 {
+							emitProgress(options, fmt.Sprintf("exemplars: %d from kept runs\n", len(exemplars)))
+						}
 					}
 				}
 				input.MemoryBundle = &bundle
