@@ -38,6 +38,21 @@ func messages(issues []Issue) []string {
 	return out
 }
 
+// TestStageSpliceToolsKeysAreRealStages pins the preflight stage-tool map to
+// the stage registry: a rename or deletion leaves a stale key and fails CI.
+// (Additions are not caught; see the comment on stageSpliceTools.)
+func TestStageSpliceToolsKeysAreRealStages(t *testing.T) {
+	registry, err := buildStageRegistry(PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir())
+	if err != nil {
+		t.Fatalf("buildStageRegistry: %v", err)
+	}
+	for stageName := range stageSpliceTools {
+		if _, ok := registry[stageName]; !ok {
+			t.Errorf("stageSpliceTools key %q is not a registered stage; a rename or deletion left a stale preflight entry", stageName)
+		}
+	}
+}
+
 func TestPreflightPermissionModeAskPrompts(t *testing.T) {
 	options := PipelineRunConfig{
 		PermissionMode: agent.PermissionModeAsk,

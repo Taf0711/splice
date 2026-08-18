@@ -26,6 +26,13 @@ type Issue struct {
 // These are the pipeline's own shell/test identities: static_analyzer and
 // security_auditor run shell commands (splice.shell), test_runner runs the
 // test command (splice.test). A stage absent here needs no splice tool.
+//
+// Pairing coverage: TestStageSpliceToolsKeysAreRealStages pins that every key
+// here is a real stage, so renames and deletions fail CI. Additions are NOT
+// statically caught: a new stage that starts invoking splice.shell without
+// being added to this map is silent. If that gap ever matters, declare tool
+// requirements on stages.Capabilities and derive this map from them instead
+// of maintaining it by hand.
 var stageSpliceTools = map[string][]string{
 	"static_analyzer":  {"splice.shell"},
 	"security_auditor": {"splice.shell"},
