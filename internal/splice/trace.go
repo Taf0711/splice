@@ -41,6 +41,7 @@ type runTraceAccumulator struct {
 	stages        map[stageKey]schemas.InputMeta
 	stageOrder    []stageKey
 	interventions []schemas.InterventionRecord
+	interactions  []schemas.InteractionRecord
 	memoryItems   int
 	memoryChars   int
 	currentStage  string
@@ -119,6 +120,15 @@ func (tr *runTraceAccumulator) noteMemorySearchFailed() {
 		return
 	}
 	tr.memoryStatus = "unavailable"
+}
+
+// recordInteraction appends a repair-loop interaction record so the trace
+// carries the message lifecycle, not just the TUI events.
+func (tr *runTraceAccumulator) recordInteraction(rec schemas.InteractionRecord) {
+	if tr == nil {
+		return
+	}
+	tr.interactions = append(tr.interactions, rec)
 }
 
 // noteTraceWriteFailed marks the trace as partial after a mid-run incremental
@@ -237,6 +247,7 @@ func (tr *runTraceAccumulator) buildOutcome(stageRecords []schemas.StageRecord, 
 			Chars:  tr.memoryChars,
 		},
 		Interventions:    tr.interventions,
+		Interactions:     tr.interactions,
 		ToolFingerprint:  tr.toolFingerprint,
 		TopologyHash:     tr.topologyHash,
 		BudgetProvenance: tr.budgetProvenance,

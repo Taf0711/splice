@@ -867,8 +867,11 @@ func runPass(
 		if stageName == "test_runner" && record.Status == schemas.StageCompleted {
 			if results, ok := output.Data["test_results"].(schemas.TestRunResults); ok && results.Failed() > 0 {
 				if _, hasWriter := priorSummaries["code_writer"]; hasWriter {
-					if _, rerr := attemptLocalRepair(ctx, runID, iteration, plan, registry, provider, options, workDir, runner, mem, tr, wallDeadline, &records, &outputs, &priorSummaries, &priorChangedFiles, output); rerr != nil {
+					if _, interaction, rerr := attemptLocalRepair(ctx, runID, iteration, plan, registry, provider, options, workDir, runner, mem, tr, wallDeadline, &records, &outputs, &priorSummaries, &priorChangedFiles, output); rerr != nil {
 						return records, outputs, false, rerr
+					} else if interaction != nil && tr != nil {
+						tr.recordInteraction(*interaction)
+						tr.persistPartial(ctx)
 					}
 				}
 			}

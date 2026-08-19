@@ -3517,3 +3517,119 @@ func TestRunPassNoRepairWhenTestResultsAbsent(t *testing.T) {
 		t.Fatalf("code_writer calls = %d, want 1 (no repair when test_results absent)", writerCalls)
 	}
 }
+
+// repairTraceRegistry builds a code_writer + test_runner registry whose
+// test_runner status flips to passed on its second call, exercising one
+// successful repair.
+func repairTraceRegistry(writerCalls, testCalls *int) stageRegistry {
+	return stageRegistry{
+		"code_writer": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			*writerCalls++
+			return repairCodeWriterOutput(), nil
+		}),
+		"test_runner": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			*testCalls++
+			status := "failed"
+			if *testCalls >= 2 {
+				status = "passed"
+			}
+			return repairTestResults(status), nil
+		}),
+	}
+}
+
+func TestRunRepairPersistsInteraction(t *testing.T) {
+	plan := repairTestPlan()
+	store := &recordingTraceStore{}
+	tr := newRunTraceAccumulator(store, "run-interaction", "sess-1", "/repo", plan, "active")
+	var writerCalls, testCalls int
+
+	records, _, completed, err := runPass(context.Background(), "run-interaction", 1, plan, repairTraceRegistry(&writerCalls, &testCalls), runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, tr)
+	if err != nil || !completed {
+		t.Fatalf("runPass: completed=%v err=%v", completed, err)
+	}
+
+	outcome, err := tr.buildOutcome(records, "completed", "")
+	if err != nil {
+		t.Fatalf("buildOutcome: %v", err)
+	}
+	if len(outcome.Interactions) != 1 {
+		t.Fatalf("Interactions = %d, want 1", len(outcome.Interactions))
+	}
+	interaction := outcome.Interactions[0]
+	if interaction.Message.Kind != schemas.MessageKindRevisionRequest {
+		t.Fatalf("Interaction.Message.Kind = %q, want revision_request", interaction.Message.Kind)
+	}
+	if !interaction.Resolved {
+		t.Fatal("Interaction.Resolved = false, want true")
+	}
+	if interaction.Repairs < 1 {
+		t.Fatalf("Interaction.Repairs = %d, want >= 1", interaction.Repairs)
+	}
+	if err := outcome.Validate(); err != nil {
+		t.Fatalf("outcome invalid: %v", err)
+	}
+}
+
+func TestRunNoRepairLeavesInteractionsEmpty(t *testing.T) {
+	plan := repairTestPlan()
+	store := &recordingTraceStore{}
+	tr := newRunTraceAccumulator(store, "run-nointeraction", "sess-1", "/repo", plan, "active")
+	var writerCalls int
+	registry := stageRegistry{
+		"code_writer": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			writerCalls++
+			return repairCodeWriterOutput(), nil
+		}),
+		"test_runner": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			return repairTestResults("passed"), nil
+		}),
+	}
+
+	records, _, _, err := runPass(context.Background(), "run-nointeraction", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, tr)
+	if err != nil {
+		t.Fatalf("runPass: %v", err)
+	}
+	outcome, err := tr.buildOutcome(records, "completed", "")
+	if err != nil {
+		t.Fatalf("buildOutcome: %v", err)
+	}
+	if len(outcome.Interactions) != 0 {
+		t.Fatalf("Interactions = %d, want 0", len(outcome.Interactions))
+	}
+	if err := outcome.Validate(); err != nil {
+		t.Fatalf("outcome invalid: %v", err)
+	}
+}
+
+func TestRunRepairExhaustedInteractionUnresolved(t *testing.T) {
+	plan := repairTestPlan()
+	store := &recordingTraceStore{}
+	tr := newRunTraceAccumulator(store, "run-exhausted", "sess-1", "/repo", plan, "active")
+	registry := stageRegistry{
+		"code_writer": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			return repairCodeWriterOutput(), nil
+		}),
+		"test_runner": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			return repairTestResults("failed"), nil // always failing
+		}),
+	}
+
+	records, _, completed, err := runPass(context.Background(), "run-exhausted", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, tr)
+	if err != nil || !completed {
+		t.Fatalf("runPass: completed=%v err=%v", completed, err)
+	}
+	outcome, err := tr.buildOutcome(records, "completed", "")
+	if err != nil {
+		t.Fatalf("buildOutcome: %v", err)
+	}
+	if len(outcome.Interactions) != 1 {
+		t.Fatalf("Interactions = %d, want 1", len(outcome.Interactions))
+	}
+	if outcome.Interactions[0].Resolved {
+		t.Fatal("Resolved = true, want false (exhausted)")
+	}
+	if outcome.Interactions[0].Repairs != maxLocalRepairs {
+		t.Fatalf("Repairs = %d, want %d", outcome.Interactions[0].Repairs, maxLocalRepairs)
+	}
+}

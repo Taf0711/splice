@@ -71,6 +71,41 @@ func TestOutcomeRecordAcceptsRunning(t *testing.T) {
 	}
 }
 
+func TestInteractionRecordValidate(t *testing.T) {
+	valid := InteractionRecord{
+		Message: StageMessage{
+			ID: "m", RunID: "run-1", From: "test_runner", To: "code_writer",
+			Kind:    MessageKindRevisionRequest,
+			Payload: RevisionRequest{FailingEvidence: []string{"TestFail failed"}},
+		},
+		Iteration: 1, Repairs: 1, Resolved: true, LatencyMs: 0,
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid interaction rejected: %v", err)
+	}
+
+	cases := []struct {
+		name    string
+		mutate  func(*InteractionRecord)
+		wantErr string
+	}{
+		{"bad kind", func(r *InteractionRecord) { r.Message.Kind = MessageKind("bogus") }, "kind"},
+		{"empty evidence", func(r *InteractionRecord) { r.Message.Payload.FailingEvidence = nil }, "evidence"},
+		{"zero iteration", func(r *InteractionRecord) { r.Iteration = 0 }, "iteration"},
+		{"zero repairs", func(r *InteractionRecord) { r.Repairs = 0 }, "repairs"},
+		{"negative latency", func(r *InteractionRecord) { r.LatencyMs = -1 }, "latency_ms"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := valid
+			tc.mutate(&r)
+			if err := r.Validate(); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Validate() = %v, want containing %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestRunOutcomeValidateRejectsInvalid(t *testing.T) {
 	cases := []struct {
 		name    string

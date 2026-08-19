@@ -45,33 +45,37 @@ func attemptLocalRepair(
 	priorSummaries *map[string]string,
 	priorChangedFiles *map[string][]string,
 	testOutput schemas.HarnessStageOutput,
-) (repaired bool, err error) {
+) (repaired bool, interaction *schemas.InteractionRecord, err error) {
 	stageNames := make([]string, len(plan.Stages))
 	for i, s := range plan.Stages {
 		stageNames[i] = s.Name
 	}
 	codeWriterStage, ok := registry["code_writer"]
 	if !ok {
-		return false, fmt.Errorf("repair: code_writer stage not registered")
+		return false, nil, fmt.Errorf("repair: code_writer stage not registered")
 	}
 	testRunnerStage, ok := registry["test_runner"]
 	if !ok {
-		return false, fmt.Errorf("repair: test_runner stage not registered")
+		return false, nil, fmt.Errorf("repair: test_runner stage not registered")
 	}
 
 	currentOutput := testOutput
+	attempts := 0
+	totalLatency := 0
+	var lastMessage schemas.StageMessage
+
 	for repairN := 1; repairN <= maxLocalRepairs; repairN++ {
 		if ctx.Err() != nil {
-			return false, context.Canceled
+			return false, nil, context.Canceled
 		}
 		if !wallDeadline.IsZero() && !time.Now().Before(wallDeadline) {
-			return false, errWallTimeExceeded
+			return false, nil, errWallTimeExceeded
 		}
 
 		results, ok := currentOutput.Data["test_results"].(schemas.TestRunResults)
 		if !ok || results.Failed() == 0 {
 			// Payload absent or nothing failing: nothing to repair.
-			return false, nil
+			break
 		}
 		evidence, names := extractFailingTests(results)
 
@@ -92,16 +96,20 @@ func attemptLocalRepair(
 			},
 		}
 		if err := message.Validate(); err != nil {
-			return false, fmt.Errorf("repair: build revision message: %w", err)
+			return false, nil, fmt.Errorf("repair: build revision message: %w", err)
 		}
+		lastMessage = message
+		attempts++
 
 		emitStageEvent(options, "test_runner", "message", fmt.Sprintf("revision_request -> code_writer: %d failing tests", len(names)), 0, nil)
 
 		// Re-enter code_writer with the focused revision context.
 		writerInput := repairStageInput(runID, "code_writer", plan, stageNames, *priorSummaries, *priorChangedFiles, &revisionContext)
+		writerStart := time.Now()
 		writerOutput, werr := runRepairStage(ctx, wallDeadline, writerInput, codeWriterStage, iteration, repairSelection(options, provider, "code_writer", false), options, workDir, runner, mem, stageOutputMax(plan, "code_writer"), tr)
+		totalLatency += int(time.Since(writerStart).Milliseconds())
 		if werr != nil {
-			return false, fmt.Errorf("repair: code_writer re-entry: %w", werr)
+			return false, nil, fmt.Errorf("repair: code_writer re-entry: %w", werr)
 		}
 		mergedWriter := mergeRepairRecord(records, iteration, "code_writer", writerOutput, false)
 		if tr != nil {
@@ -112,9 +120,11 @@ func attemptLocalRepair(
 
 		// Re-run test_runner (model-free: zero usage and zero selection).
 		testInput := repairStageInput(runID, "test_runner", plan, stageNames, *priorSummaries, *priorChangedFiles, nil)
+		testStart := time.Now()
 		newTestOutput, terr := runRepairStage(ctx, wallDeadline, testInput, testRunnerStage, iteration, agent.ModelSelection{}, options, workDir, runner, mem, stageOutputMax(plan, "test_runner"), tr)
+		totalLatency += int(time.Since(testStart).Milliseconds())
 		if terr != nil {
-			return false, fmt.Errorf("repair: test_runner re-run: %w", terr)
+			return false, nil, fmt.Errorf("repair: test_runner re-run: %w", terr)
 		}
 		mergedRunner := mergeRepairRecord(records, iteration, "test_runner", newTestOutput, true)
 		if tr != nil {
@@ -128,13 +138,29 @@ func attemptLocalRepair(
 			emitStageEvent(options, "test_runner", "repaired", "revision resolved: tests pass", 100, nil)
 			(*priorSummaries)["code_writer"] = *mergedWriter.OutputSummary
 			(*priorSummaries)["test_runner"] = *mergedRunner.OutputSummary
-			return true, nil
+			return true, &schemas.InteractionRecord{
+				Message:   lastMessage,
+				Iteration: iteration,
+				Repairs:   attempts,
+				Resolved:  true,
+				LatencyMs: totalLatency,
+			}, nil
 		}
 	}
 
+	if attempts == 0 {
+		// No repair ran (gate closed, no failing tests, or payload absent).
+		return false, nil, nil
+	}
 	// Exhausted: the test_runner record already reflects the latest failing
 	// result via the merge above; the pass continues normally.
-	return false, nil
+	return false, &schemas.InteractionRecord{
+		Message:   lastMessage,
+		Iteration: iteration,
+		Repairs:   attempts,
+		Resolved:  false,
+		LatencyMs: totalLatency,
+	}, nil
 }
 
 // extractFailingTests returns the "Name: Message" evidence strings (message

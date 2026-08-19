@@ -165,6 +165,34 @@ func (i InterventionRecord) Validate() error {
 	return nil
 }
 
+// InteractionRecord persists the repair-loop message lifecycle: one revision
+// request message plus its resolution. One record per repair sequence (not per
+// attempt); Message carries the final attempt's revision content.
+type InteractionRecord struct {
+	Message   StageMessage `json:"message"`
+	Iteration int          `json:"iteration"`
+	Repairs   int          `json:"repairs"`
+	Resolved  bool         `json:"resolved"`
+	LatencyMs int          `json:"latency_ms"`
+}
+
+// Validate checks the interaction record.
+func (i InteractionRecord) Validate() error {
+	if err := i.Message.Validate(); err != nil {
+		return fmt.Errorf("interaction message: %w", err)
+	}
+	if i.Iteration < 1 {
+		return fmt.Errorf("interaction iteration must be >= 1, got %d", i.Iteration)
+	}
+	if i.Repairs < 1 {
+		return fmt.Errorf("interaction repairs must be >= 1, got %d", i.Repairs)
+	}
+	if i.LatencyMs < 0 {
+		return fmt.Errorf("interaction latency_ms must be non-negative, got %d", i.LatencyMs)
+	}
+	return nil
+}
+
 // RunOutcome is a self-contained trace of one pipeline run. The embedded plan
 // and stage records make the trace reconstructable with zero external
 // references. Traces are append-only; nothing updates or backfills a trace.
@@ -181,6 +209,7 @@ type RunOutcome struct {
 	Outcome       OutcomeRecord        `json:"outcome"`
 	Memory        MemoryRecord         `json:"memory"`
 	Interventions []InterventionRecord `json:"interventions,omitempty"`
+	Interactions  []InteractionRecord  `json:"interactions,omitempty"`
 	// ToolFingerprint is the short sha256 of the deterministic verification-tool
 	// identities. TopologyHash is the short sha256 of the compiled plan's
 	// stage/edge structure (not code version). Both are empty on legacy traces.
@@ -245,6 +274,14 @@ func (r RunOutcome) Validate() error {
 	for i, iv := range r.Interventions {
 		if err := iv.Validate(); err != nil {
 			return fmt.Errorf("interventions[%d]: %w", i, err)
+		}
+	}
+	if len(r.Interactions) > 20 {
+		return fmt.Errorf("interactions has %d records; max 20", len(r.Interactions))
+	}
+	for i, interaction := range r.Interactions {
+		if err := interaction.Validate(); err != nil {
+			return fmt.Errorf("interactions[%d]: %w", i, err)
 		}
 	}
 	return nil

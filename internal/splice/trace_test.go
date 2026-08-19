@@ -155,6 +155,40 @@ func TestReplaceStageRecord(t *testing.T) {
 	}
 }
 
+func TestBuildOutcomePartialCarriesInteractions(t *testing.T) {
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		RequestIntent: "x",
+		Stages:        []schemas.ExecutionStage{{Name: "code_writer", Budget: schemas.StageBudget{InputMax: 1, OutputMax: 1}}},
+		TokenBudget:   schemas.TokenBudget{TotalInputBudget: 1, TotalOutputBudget: 1, OverflowPolicy: "abort"},
+	}
+	tr := newRunTraceAccumulator(&recordingTraceStore{}, "run-1", "sess-1", "/repo", plan, "active")
+	tr.recordInteraction(schemas.InteractionRecord{
+		Message: schemas.StageMessage{
+			ID: "run-1-r1", RunID: "run-1", From: "test_runner", To: "code_writer",
+			Kind:    schemas.MessageKindRevisionRequest,
+			Payload: schemas.RevisionRequest{FailingEvidence: []string{"TestFail failed"}, Instruction: "fix"},
+		},
+		Iteration: 1, Repairs: 1, Resolved: true, LatencyMs: 5,
+	})
+
+	// The partial build (the path persistPartial uses, status "running") must
+	// carry the interaction so a mid-run write reflects the repair lifecycle.
+	outcome, err := tr.buildOutcome(nil, "running", "")
+	if err != nil {
+		t.Fatalf("buildOutcome partial: %v", err)
+	}
+	if len(outcome.Interactions) != 1 {
+		t.Fatalf("partial Interactions = %d, want 1", len(outcome.Interactions))
+	}
+	if !outcome.Interactions[0].Resolved {
+		t.Fatal("partial interaction Resolved = false, want true")
+	}
+	if err := outcome.Validate(); err != nil {
+		t.Fatalf("partial outcome invalid: %v", err)
+	}
+}
+
 func TestSplitTestCounts(t *testing.T) {
 	authored := []schemas.FileChange{
 		{Path: "add_test.go", ChangeType: "create", Content: "package add\n\nfunc TestAdd(t *testing.T) {}\n"},
@@ -320,6 +354,15 @@ func TestBuildRunOutcomeCoversEveryField(t *testing.T) {
 	tr.topologyHash = "topohash"
 	tr.stagePromptHash = map[string]string{"code_writer": "prompthash"}
 	tr.budgetProvenance = map[string]string{"code_writer": "calibrated from 25 runs, p80"}
+	tr.recordInteraction(schemas.InteractionRecord{
+		Message: schemas.StageMessage{
+			ID: "run-1-r1", RunID: "run-1", From: "test_runner", To: "code_writer",
+			Kind:     schemas.MessageKindRevisionRequest,
+			Evidence: []string{"TestAdd"},
+			Payload:  schemas.RevisionRequest{FailingEvidence: []string{"TestAdd: assertion failed"}, Instruction: "fix"},
+		},
+		Iteration: 1, Repairs: 1, Resolved: true, LatencyMs: 5,
+	})
 
 	result := schemas.PipelineResult{
 		RunID:  "run-1",
