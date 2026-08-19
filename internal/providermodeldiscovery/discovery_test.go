@@ -353,6 +353,9 @@ func TestDiscoverOllamaCapabilitiesParsesCapabilitiesAndTemplate(t *testing.T) {
 	if !caps.Reasoning {
 		t.Fatal("Reasoning = false, want true (capabilities contains thinking)")
 	}
+	if !caps.Reported {
+		t.Fatal("Reported = false, want true (capabilities array present and non-empty)")
+	}
 	if caps.Template == "" {
 		t.Fatal("Template = empty, want the model template")
 	}
@@ -377,6 +380,31 @@ func TestDiscoverOllamaCapabilitiesMissingFieldsAreUnknown(t *testing.T) {
 	}
 	if caps.ToolCall || caps.Vision || caps.Reasoning {
 		t.Fatalf("missing capabilities should be unknown (false), got %#v", caps)
+	}
+	if caps.Reported {
+		t.Fatal("Reported = true, want false when the capabilities array is absent")
+	}
+}
+
+func TestDiscoverOllamaCapabilitiesReportedWithoutTools(t *testing.T) {
+	// The regression guard: a present capability list that omits "tools" is a
+	// real negative (Reported true, ToolCall false), distinct from an absent
+	// array (Reported false), which means unknown.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"capabilities": ["completion"]}`))
+	}))
+	defer server.Close()
+
+	caps, err := DiscoverOllamaCapabilities(context.Background(), server.URL+"/v1", "embed-model", Options{HTTPClient: server.Client()})
+	if err != nil {
+		t.Fatalf("DiscoverOllamaCapabilities returned error: %v", err)
+	}
+	if !caps.Reported {
+		t.Fatal("Reported = false, want true (capabilities array present and non-empty)")
+	}
+	if caps.ToolCall {
+		t.Fatal("ToolCall = true, want false (list present but omits tools)")
 	}
 }
 

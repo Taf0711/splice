@@ -185,6 +185,35 @@ func TestPreflightProviderCapabilityWarnsNoToolCalling(t *testing.T) {
 	}
 }
 
+func TestPreflightProviderCapabilityPairsWithProbeNegative(t *testing.T) {
+	// Producer/consumer pairing: the LL4 surgical negative overlay (removing
+	// tool-calling only when the daemon reported a capability list that omitted
+	// it) is what makes preflightProviderCapability's warn fire. Before the
+	// overlay the entry carries tool-calling (catalog default), so preflight is
+	// silent; after the overlay the same model warns.
+	registry, err := modelregistry.NewRegistry([]modelregistry.ModelEntry{
+		testModelEntry("local-model", modelregistry.ModelCapabilityChat, modelregistry.ModelCapabilityToolCalling),
+	})
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+
+	// Unknown/probed-absent-with-tools case: entry unchanged, preflight silent.
+	options := PipelineRunConfig{Model: "local-model", ModelRegistry: registry}
+	if issues := Preflight(preflightPlan(), options); len(issues) != 0 {
+		t.Fatalf("unchanged tool-calling entry should be silent, got %#v", issues)
+	}
+
+	// Probed-absent case: daemon reported a capability list without tools, so
+	// the wiring removes tool-calling, and preflight now warns.
+	registry.RemoveCapability("local-model", modelregistry.ModelCapabilityToolCalling)
+	options = PipelineRunConfig{Model: "local-model", ModelRegistry: registry}
+	issues := Preflight(preflightPlan(), options)
+	if len(issues) != 1 || issues[0].Message != "model may not support tool calling" {
+		t.Fatalf("after removal, issues = %#v, want the tool-calling warn", issues)
+	}
+}
+
 func TestPreflightProviderCapabilitySkipsUnknown(t *testing.T) {
 	registry, err := modelregistry.NewRegistry([]modelregistry.ModelEntry{
 		testModelEntry("no-tools", modelregistry.ModelCapabilityChat),

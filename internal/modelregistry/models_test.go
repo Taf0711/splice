@@ -378,6 +378,40 @@ func TestRegistryOverlayCapabilities(t *testing.T) {
 	}
 }
 
+func TestRegistryRemoveCapability(t *testing.T) {
+	entry := validModelEntry()
+	entry.Capabilities = []ModelCapability{ModelCapabilityChat, ModelCapabilityToolCalling, ModelCapabilityVision}
+	registry, err := NewRegistry([]ModelEntry{entry})
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+
+	registry.RemoveCapability("gpt-4.1-mini", ModelCapabilityToolCalling)
+	got, ok := registry.Get("gpt-4.1-mini")
+	if !ok || got.Supports(ModelCapabilityToolCalling) {
+		t.Fatalf("tool calling still present after removal: %#v", got.Capabilities)
+	}
+	// Only the named capability is removed.
+	if !got.Supports(ModelCapabilityChat) || !got.Supports(ModelCapabilityVision) {
+		t.Fatalf("removal dropped unrelated capabilities: %#v", got.Capabilities)
+	}
+	// Visible via alias.
+	byAlias, _ := registry.Get("openai:gpt-4.1-mini")
+	if byAlias.Supports(ModelCapabilityToolCalling) {
+		t.Fatalf("alias still reports tool calling: %#v", byAlias.Capabilities)
+	}
+	// Idempotent: removing an absent capability is a no-op.
+	registry.RemoveCapability("gpt-4.1-mini", ModelCapabilityToolCalling)
+	if got, _ := registry.Get("gpt-4.1-mini"); got.Supports(ModelCapabilityToolCalling) {
+		t.Fatal("removal should be idempotent")
+	}
+	// Unknown model no-op, never a panic and never creates an entry.
+	registry.RemoveCapability("does-not-exist", ModelCapabilityToolCalling)
+	if _, ok := registry.Get("does-not-exist"); ok {
+		t.Fatal("removal must not create an entry for an unknown model")
+	}
+}
+
 func TestRegistryOverlayReasoningEfforts(t *testing.T) {
 	registry, err := NewRegistry([]ModelEntry{validModelEntry()})
 	if err != nil {

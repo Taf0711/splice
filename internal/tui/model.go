@@ -109,6 +109,7 @@ type model struct {
 	probeProviderHealth         func(context.Context, providerhealth.Options) providerhealth.Result
 	discoverProviderModels      func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
 	discoverOllamaContextWindow func(ctx context.Context, baseURL string, model string) (int, error)
+	discoverOllamaCapabilities  func(ctx context.Context, baseURL string, model string) (providermodeldiscovery.OllamaCapabilities, error)
 	registry                    *tools.Registry
 	// lspManager is created once per session and reused across prompts so gopls (and
 	// other language servers) stay warm — a fresh manager per run would cold-start
@@ -938,6 +939,7 @@ func newModel(ctx context.Context, options Options) model {
 		probeProviderHealth:         options.ProbeProviderHealth,
 		discoverProviderModels:      options.DiscoverProviderModels,
 		discoverOllamaContextWindow: options.DiscoverOllamaContextWindow,
+		discoverOllamaCapabilities:  options.DiscoverOllamaCapabilities,
 		registry:                    registry,
 		sessionStore:                sessionStore,
 		sandboxStore:                sandboxStore,
@@ -1110,6 +1112,11 @@ func (m model) Init() tea.Cmd {
 		// native /api/show separately so the gauge works for custom/local
 		// Ollama models too, not just ones in the curated catalog.
 		if cmd := m.ollamaContextWindowDiscoveryCmd(descriptor, m.providerProfile.BaseURL, m.modelName); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		// The same /api/show probe also carries the declared capability list,
+		// which drives the surgical negative tool-calling overlay (LL4).
+		if cmd := m.ollamaCapabilitiesDiscoveryCmd(descriptor, m.providerProfile.BaseURL, m.modelName); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 	}
@@ -2814,6 +2821,14 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.ollamaContextWindowByModel = map[string]int{}
 			}
 			m.ollamaContextWindowByModel[msg.modelName] = msg.contextWindow
+		}
+		return m, nil
+	case ollamaCapabilitiesDiscoveredMsg:
+		// Surgical negative overlay: remove tool-calling only when the daemon
+		// reported a capability list that omitted it. Reported false (older
+		// Ollama / custom Modelfile) means unknown, so the entry is untouched.
+		if msg.err == nil && msg.caps.Reported && !msg.caps.ToolCall {
+			m.modelCatalog.RemoveCapability(msg.modelName, modelregistry.ModelCapabilityToolCalling)
 		}
 		return m, nil
 	case mcpCommandResultMsg:

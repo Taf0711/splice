@@ -37,6 +37,7 @@ type Options struct {
 	ProbeProviderHealth         func(context.Context, providerhealth.Options) providerhealth.Result
 	DiscoverProviderModels      func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
 	DiscoverOllamaContextWindow func(ctx context.Context, baseURL string, model string) (int, error)
+	DiscoverOllamaCapabilities  func(ctx context.Context, baseURL string, model string) (providermodeldiscovery.OllamaCapabilities, error)
 	RuntimeMessageSink          func(tea.Msg)
 	Registry                    *tools.Registry
 	SessionStore                *sessions.Store

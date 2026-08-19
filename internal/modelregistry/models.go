@@ -467,6 +467,40 @@ func (registry Registry) OverlayCapabilities(modelID string, capabilities ...Mod
 	}
 }
 
+// RemoveCapability removes a single capability from a registered model's entry.
+// It is the surgical negative counterpart to OverlayCapabilities: unknown model
+// ids are a no-op, only the named capability is removed, and the re-registration
+// under id/api-model/aliases keeps Get/Resolve/ResolveWithFallback consistent.
+// Idempotent: removing an absent capability is a no-op.
+func (registry Registry) RemoveCapability(modelID string, capability ModelCapability) {
+	key := normalizePattern(strings.TrimSpace(modelID))
+	if key == "" {
+		return
+	}
+	entry, ok := registry.entries[key]
+	if !ok {
+		return
+	}
+	kept := make([]ModelCapability, 0, len(entry.Capabilities))
+	removed := false
+	for _, existing := range entry.Capabilities {
+		if existing == capability {
+			removed = true
+			continue
+		}
+		kept = append(kept, existing)
+	}
+	if !removed {
+		return
+	}
+	entry.Capabilities = kept
+	_ = registry.register(entry.ID, entry)
+	_ = registry.register(entry.APIModel, entry)
+	for _, alias := range entry.Aliases {
+		_ = registry.register(alias, entry)
+	}
+}
+
 // OverlayReasoningEfforts records live-probed reasoning-effort support on a
 // registered model, adding only the efforts the entry does not already
 // declare. Unknown model ids are a no-op (fail closed); existing efforts are

@@ -847,6 +847,60 @@ func modelregistryForInstalledTest(t *testing.T) modelregistry.Registry {
 	return registry
 }
 
+// TestOllamaCapabilitiesMsgRemovesToolCallingOnlyWhenReported exercises the
+// LL4 surgical negative overlay through the TUI handler: tool-calling is
+// removed only when the daemon reported a capability list that omitted it.
+func TestOllamaCapabilitiesMsgRemovesToolCallingOnlyWhenReported(t *testing.T) {
+	withToolCall := func(t *testing.T) model {
+		t.Helper()
+		entry := modelregistry.ModelEntry{
+			ID: "local-model", DisplayName: "Local", APIModel: "local-model",
+			Provider:      modelregistry.ProviderOpenAI,
+			ContextLimits: modelregistry.ContextLimits{ContextWindow: 8192, MaxOutputTokens: 4096},
+			Capabilities:  []modelregistry.ModelCapability{modelregistry.ModelCapabilityChat, modelregistry.ModelCapabilityToolCalling},
+			Cost: modelregistry.ModelCost{
+				Currency: "USD", Unit: "per_1m_tokens",
+				InputPerMillion: 0.1, OutputPerMillion: 0.1,
+				Source: "test", SourceLastVerified: "2026-01-01",
+			},
+			Status:  modelregistry.ModelStatusActive,
+			Aliases: []string{"local-model"},
+		}
+		registry, err := modelregistry.NewRegistry([]modelregistry.ModelEntry{entry})
+		if err != nil {
+			t.Fatalf("NewRegistry: %v", err)
+		}
+		m := newModel(context.Background(), Options{})
+		m.modelCatalog = registry
+		return m
+	}
+	keepToolCall := func(m model) bool {
+		entry, ok := m.modelCatalog.Get("local-model")
+		return ok && entry.Supports(modelregistry.ModelCapabilityToolCalling)
+	}
+
+	// Unknown case: Reported false must keep tool-calling (the regression guard).
+	m := withToolCall(t)
+	updated, _ := m.Update(ollamaCapabilitiesDiscoveredMsg{modelName: "local-model", caps: providermodeldiscovery.OllamaCapabilities{Reported: false, ToolCall: false}})
+	if !keepToolCall(updated.(model)) {
+		t.Fatal("Reported false (unknown) must keep tool-calling")
+	}
+
+	// Present array with tools: Reported true and ToolCall true keeps it.
+	m = withToolCall(t)
+	updated, _ = m.Update(ollamaCapabilitiesDiscoveredMsg{modelName: "local-model", caps: providermodeldiscovery.OllamaCapabilities{Reported: true, ToolCall: true}})
+	if !keepToolCall(updated.(model)) {
+		t.Fatal("Reported true with tools must keep tool-calling")
+	}
+
+	// Probed-absent: Reported true without tools removes it.
+	m = withToolCall(t)
+	updated, _ = m.Update(ollamaCapabilitiesDiscoveredMsg{modelName: "local-model", caps: providermodeldiscovery.OllamaCapabilities{Reported: true, ToolCall: false}})
+	if keepToolCall(updated.(model)) {
+		t.Fatal("Reported true without tools must remove tool-calling")
+	}
+}
+
 func TestProviderWizardUsesLiveDiscoveredModels(t *testing.T) {
 	var captured config.ProviderProfile
 	m := newModel(context.Background(), Options{

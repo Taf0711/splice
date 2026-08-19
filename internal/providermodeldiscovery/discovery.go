@@ -112,6 +112,11 @@ type OllamaCapabilities struct {
 	Vision    bool
 	Reasoning bool
 	Template  string
+	// Reported is true only when the /api/show response carried a non-empty
+	// capabilities array. False means the array was absent (older Ollama or a
+	// custom Modelfile), so the zero-valued booleans mean "unknown", not a
+	// negative: callers must not remove capability on Reported == false.
+	Reported bool
 }
 
 // ModelCapabilities maps the probed capabilities to the modelregistry
@@ -255,7 +260,7 @@ func parseOllamaCapabilities(body []byte) (OllamaCapabilities, error) {
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return OllamaCapabilities{}, fmt.Errorf("decode ollama show response: %w", err)
 	}
-	caps := OllamaCapabilities{Template: payload.Template}
+	caps := OllamaCapabilities{Template: payload.Template, Reported: len(payload.Capabilities) > 0}
 	for _, capability := range payload.Capabilities {
 		switch strings.ToLower(strings.TrimSpace(capability)) {
 		case "tools", "tool_calling", "tool-calling":

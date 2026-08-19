@@ -729,6 +729,44 @@ func (m model) ollamaContextWindowDiscoveryCmd(descriptor providercatalog.Descri
 	}
 }
 
+// ollamaCapabilitiesDiscoveredMsg carries the result of an async /api/show
+// capability probe against a local Ollama daemon (see
+// ollamaCapabilitiesDiscoveryCmd). A non-nil err (or Reported false) means the
+// probe found nothing authoritative and the registry is left untouched.
+type ollamaCapabilitiesDiscoveredMsg struct {
+	modelName string
+	caps      providermodeldiscovery.OllamaCapabilities
+	err       error
+}
+
+// ollamaCapabilitiesDiscoveryCmd probes a local Ollama daemon's native
+// /api/show endpoint for modelName's declared capabilities and applies the
+// surgical negative overlay: tool-calling is removed from the model's registry
+// entry only when the daemon reported a capability list that omitted it.
+// Scoped to the local Ollama provider only (catalog ID "ollama").
+func (m model) ollamaCapabilitiesDiscoveryCmd(descriptor providercatalog.Descriptor, baseURL string, modelName string) tea.Cmd {
+	if descriptor.ID != "ollama" {
+		return nil
+	}
+	modelName = strings.TrimSpace(modelName)
+	baseURL = strings.TrimSpace(baseURL)
+	if modelName == "" || baseURL == "" {
+		return nil
+	}
+	discover := m.discoverOllamaCapabilities
+	if discover == nil {
+		discover = func(ctx context.Context, baseURL string, model string) (providermodeldiscovery.OllamaCapabilities, error) {
+			return providermodeldiscovery.DiscoverOllamaCapabilities(ctx, baseURL, model, providermodeldiscovery.Options{})
+		}
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.ctx, 8*time.Second)
+		defer cancel()
+		caps, err := discover(ctx, baseURL, modelName)
+		return ollamaCapabilitiesDiscoveredMsg{modelName: modelName, caps: caps, err: err}
+	}
+}
+
 func (m model) normalizeProfileForProvider(provider providercatalog.Descriptor) config.ProviderProfile {
 	profile := m.providerProfile
 	normalizeIdentity := profileMatchesProviderBaseURL(profile, provider) ||

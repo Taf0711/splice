@@ -385,6 +385,13 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			if caps.Reasoning {
 				modelRegistry.OverlayReasoningEfforts(resolved.Provider.Model)
 			}
+			// Surgical negative: remove tool-calling only when the daemon actually
+			// reported a capability list that omitted it. A missing capabilities
+			// array (Reported false) leaves the entry untouched, so older Ollama
+			// or custom Modelfiles never lose a working setup.
+			if caps.Reported && !caps.ToolCall {
+				modelRegistry.RemoveCapability(resolved.Provider.Model, modelregistry.ModelCapabilityToolCalling)
+			}
 		}
 	}
 	if err := validateExecToolFilters(options, registry); err != nil {
