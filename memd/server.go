@@ -352,10 +352,10 @@ func (s *server) handleStats(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleTraceUpsert stores a run outcome trace. run_traces is write-once: a
-// duplicate run_id is an idempotent no-op (inserted=false), never an update.
-// The full body is stored verbatim as the payload so unknown fields from a
-// newer schema survive a round trip.
+// handleTraceUpsert stores a run outcome trace. A later write replaces the
+// indexed columns and payload, except a "running" partial write never clobbers
+// a settled row. The full body is stored verbatim as the payload so unknown
+// fields from a newer schema survive a round trip.
 func (s *server) handleTraceUpsert(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")

@@ -20,29 +20,38 @@ func tracePayload(runID, repoRoot string) []byte {
 	return []byte(`{"schema_version":"1","run_id":"` + runID + `","repo_root":"` + repoRoot + `","tier":"light","outcome":{"status":"completed"},"plan":{"tier":"light","request_intent":"x","stages":[{"name":"code_writer","budget":{"input_max":1,"output_max":1}}],"token_budget":{"total_input_budget":1,"total_output_budget":1}}}`)
 }
 
-// TestUpsertTraceWriteOnce pins the append-only write-once contract: a second
-// upsert of the same run_id leaves the first payload byte-identical and never
-// updates the row.
-func TestUpsertTraceWriteOnce(t *testing.T) {
+// TestUpsertTraceUpdatesAndGuardsSettledRows pins the true-upsert contract: a
+// later write replaces the row, except a "running" partial write never clobbers
+// a settled (completed/aborted/failed) row.
+func TestUpsertTraceUpdatesAndGuardsSettledRows(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
-	payload := tracePayload("run-1", "/repo")
 
+	// A partial write lands first with status running.
 	inserted, err := s.UpsertTrace(ctx, &TraceRow{
 		RunID: "run-1", SessionID: "sess-1", RepoRoot: "/repo", Tier: "light",
-		Status: "completed", CreatedAt: 1000, Payload: payload,
+		Status: "running", CreatedAt: 1000, Payload: []byte(`{"partial":true}`),
 	})
 	if err != nil || !inserted {
-		t.Fatalf("first upsert inserted=%v err=%v", inserted, err)
+		t.Fatalf("partial upsert inserted=%v err=%v", inserted, err)
 	}
 
-	// Second write with different content must be a no-op, never an update.
+	// The final write replaces the row (running -> completed).
 	inserted, err = s.UpsertTrace(ctx, &TraceRow{
 		RunID: "run-1", SessionID: "sess-1", RepoRoot: "/repo", Tier: "light",
-		Status: "failed", CreatedAt: 2000, Payload: []byte(`{"status":"different"}`),
+		Status: "completed", CreatedAt: 2000, Payload: []byte(`{"final":true}`),
+	})
+	if err != nil || !inserted {
+		t.Fatalf("final upsert inserted=%v err=%v", inserted, err)
+	}
+
+	// A late partial write must not clobber the settled row.
+	inserted, err = s.UpsertTrace(ctx, &TraceRow{
+		RunID: "run-1", RepoRoot: "/repo", Tier: "light",
+		Status: "running", CreatedAt: 3000, Payload: []byte(`{"late":true}`),
 	})
 	if err != nil || inserted {
-		t.Fatalf("second upsert inserted=%v err=%v, want no-op", inserted, err)
+		t.Fatalf("late running upsert inserted=%v err=%v, want guarded no-op", inserted, err)
 	}
 
 	rows, err := s.QueryTraces(ctx, TraceFilter{RepoRoot: "/repo"})
@@ -52,11 +61,33 @@ func TestUpsertTraceWriteOnce(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("rows = %d, want 1", len(rows))
 	}
-	if string(rows[0].Trace.Payload) != string(payload) {
-		t.Fatalf("payload changed after duplicate upsert:\n got %s\nwant %s", rows[0].Trace.Payload, payload)
-	}
 	if rows[0].Trace.Status != "completed" {
-		t.Fatalf("status = %q, want completed (first write wins)", rows[0].Trace.Status)
+		t.Fatalf("status = %q, want completed (settled row preserved)", rows[0].Trace.Status)
+	}
+	if string(rows[0].Trace.Payload) != `{"final":true}` {
+		t.Fatalf("payload = %s, want final payload preserved", rows[0].Trace.Payload)
+	}
+}
+
+// TestQueryTracesStatusFilterExcludesRunning pins that a partial "running" row
+// is invisible to the learning queries, which filter completed and aborted only.
+func TestQueryTracesStatusFilterExcludesRunning(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if _, err := s.UpsertTrace(ctx, &TraceRow{RunID: "run-running", RepoRoot: "/repo", Tier: "light", Status: "running", Payload: []byte(`{"run_id":"run-running"}`)}); err != nil {
+		t.Fatalf("UpsertTrace running: %v", err)
+	}
+	if _, err := s.UpsertTrace(ctx, &TraceRow{RunID: "run-done", RepoRoot: "/repo", Tier: "light", Status: "completed", Payload: []byte(`{"run_id":"run-done"}`)}); err != nil {
+		t.Fatalf("UpsertTrace completed: %v", err)
+	}
+
+	completed, err := s.QueryTraces(ctx, TraceFilter{RepoRoot: "/repo", Status: "completed"})
+	if err != nil {
+		t.Fatalf("QueryTraces completed: %v", err)
+	}
+	if len(completed) != 1 || completed[0].Trace.RunID != "run-done" {
+		t.Fatalf("completed rows = %#v, want only run-done (running row excluded)", completed)
 	}
 }
 

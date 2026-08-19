@@ -2,6 +2,7 @@ package splice
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -33,6 +34,93 @@ func (s *traceMemoryStore) UpsertTrace(_ context.Context, trace schemas.RunOutco
 }
 
 func (s *traceMemoryStore) UpsertVerdict(context.Context, schemas.VerdictRecord) error { return nil }
+
+// recordingTraceStore records every trace write in order, so partial and final
+// writes can be asserted separately.
+type recordingTraceStore struct {
+	traces []schemas.RunOutcome
+}
+
+func (s *recordingTraceStore) UpsertTrace(_ context.Context, trace schemas.RunOutcome) error {
+	s.traces = append(s.traces, trace)
+	return nil
+}
+
+func (s *recordingTraceStore) UpsertVerdict(context.Context, schemas.VerdictRecord) error { return nil }
+
+// failingTraceStore fails every trace write, exercising the degraded path.
+type failingTraceStore struct{}
+
+func (s *failingTraceStore) UpsertTrace(context.Context, schemas.RunOutcome) error {
+	return errors.New("trace write failed")
+}
+
+func (s *failingTraceStore) UpsertVerdict(context.Context, schemas.VerdictRecord) error { return nil }
+
+// TestPersistPartialWritesRunningTrace pins the incremental write: after a
+// stage completion, a partial trace with status "running" is written and
+// carries the stage completed so far.
+func TestPersistPartialWritesRunningTrace(t *testing.T) {
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		RequestIntent: "add a Hello function",
+		Stages:        []schemas.ExecutionStage{{Name: "code_writer", Budget: schemas.StageBudget{InputMax: 100, OutputMax: 100}}},
+		TokenBudget:   schemas.TokenBudget{TotalInputBudget: 1000, TotalOutputBudget: 1000, OverflowPolicy: "abort"},
+	}
+	store := &recordingTraceStore{}
+	tr := newRunTraceAccumulator(store, "run-1", "sess-1", "/repo", plan, "active")
+	tr.recordStageCompletion(schemas.StageRecord{Name: "code_writer", Status: schemas.StageCompleted, Iteration: 1})
+	tr.persistPartial(context.Background())
+
+	if len(store.traces) != 1 {
+		t.Fatalf("partial writes = %d, want 1", len(store.traces))
+	}
+	partial := store.traces[0]
+	if partial.Outcome.Status != "running" {
+		t.Fatalf("partial status = %q, want running", partial.Outcome.Status)
+	}
+	if len(partial.Stages) != 1 || partial.Stages[0].Name != "code_writer" {
+		t.Fatalf("partial stages = %#v, want code_writer", partial.Stages)
+	}
+	if partial.EventsStatus != schemas.TraceEventsComplete {
+		t.Fatalf("partial events_status = %q, want complete", partial.EventsStatus)
+	}
+	if err := partial.Validate(); err != nil {
+		t.Fatalf("partial trace invalid: %v", err)
+	}
+}
+
+// TestPersistPartialDegradesOnWriteFailure pins the degraded contract: a
+// mid-run write failure never aborts the run, and the final trace records
+// EventsStatus partial so consumers know events were lost.
+func TestPersistPartialDegradesOnWriteFailure(t *testing.T) {
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		RequestIntent: "add a Hello function",
+		Stages:        []schemas.ExecutionStage{{Name: "code_writer", Budget: schemas.StageBudget{InputMax: 100, OutputMax: 100}}},
+		TokenBudget:   schemas.TokenBudget{TotalInputBudget: 1000, TotalOutputBudget: 1000, OverflowPolicy: "abort"},
+	}
+	tr := newRunTraceAccumulator(&failingTraceStore{}, "run-1", "sess-1", "/repo", plan, "active")
+	tr.recordStageCompletion(schemas.StageRecord{Name: "code_writer", Status: schemas.StageCompleted, Iteration: 1})
+	tr.persistPartial(context.Background())
+	if !tr.eventsPartial {
+		t.Fatal("eventsPartial = false, want true after a partial write failure")
+	}
+
+	result := schemas.PipelineResult{
+		RunID:  "run-1",
+		Status: "completed",
+		Tier:   plan.Tier,
+		Stages: []schemas.StageRecord{{Name: "code_writer", Status: schemas.StageCompleted, Iteration: 1}},
+	}
+	trace, err := tr.buildRunOutcome(result)
+	if err != nil {
+		t.Fatalf("buildRunOutcome: %v", err)
+	}
+	if trace.EventsStatus != schemas.TraceEventsPartial {
+		t.Fatalf("final events_status = %q, want partial", trace.EventsStatus)
+	}
+}
 
 // TestSplitTestCounts pins the Q2 test split: a test declared in a file the
 // test generator wrote this run is authored; everything else is preexisting.

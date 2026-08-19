@@ -477,6 +477,7 @@ func runIterationLoop(
 		history = append(history, state)
 		if tr != nil {
 			tr.recordHistory(state)
+			tr.persistPartial(ctx)
 		}
 
 		// Capture the workspace state after each completed iteration so
@@ -809,6 +810,10 @@ func runPass(
 			summary := fmt.Sprintf("%T: %v", err, err)
 			record.OutputSummary = &summary
 			records = append(records, record)
+			if tr != nil {
+				tr.recordStageCompletion(record)
+				tr.persistPartial(ctx)
+			}
 			emitStageEvent(options, stageName, "failed", summary, 0, nil)
 			return records, outputs, false, nil
 		}
@@ -821,6 +826,10 @@ func runPass(
 			failSummary := fmt.Sprintf("invalid stage output: %v", err)
 			record.OutputSummary = &failSummary
 			records = append(records, record)
+			if tr != nil {
+				tr.recordStageCompletion(record)
+				tr.persistPartial(ctx)
+			}
 			emitStageEvent(options, stageName, "failed", failSummary, 0, nil)
 			return records, outputs, false, nil
 		}
@@ -833,6 +842,10 @@ func runPass(
 		summary := SummarizeStageOutput(stageName, output)
 		record.OutputSummary = &summary
 		records = append(records, record)
+		if tr != nil {
+			tr.recordStageCompletion(record)
+			tr.persistPartial(ctx)
+		}
 		if record.Status == schemas.StageIncomplete {
 			emitStageEvent(options, stageName, "incomplete", summary, 0, nil)
 		} else {

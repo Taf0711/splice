@@ -252,15 +252,16 @@ func (r *traceUpsertRequest) Validate() error {
 		return fmt.Errorf("tier is required")
 	}
 	switch r.Outcome.Status {
-	case "completed", "aborted", "failed":
+	case "running", "completed", "aborted", "failed":
 	default:
-		return fmt.Errorf("outcome.status must be completed, aborted, or failed, got %q", r.Outcome.Status)
+		return fmt.Errorf("outcome.status must be running, completed, aborted, or failed, got %q", r.Outcome.Status)
 	}
 	return nil
 }
 
 // traceUpsertResponse is the JSON body for POST /trace/upsert. inserted is
-// false when a trace with the same run_id already exists (write-once).
+// false when a "running" partial write was rejected by the settled-row guard
+// (the existing row already reached completed/aborted/failed).
 type traceUpsertResponse struct {
 	OK       bool `json:"ok"`
 	Inserted bool `json:"inserted"`

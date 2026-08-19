@@ -51,8 +51,10 @@ type TraceWithVerdict struct {
 	Rank    float64
 }
 
-// UpsertTrace inserts a trace. run_traces is write-once: a duplicate run_id is
-// an idempotent no-op, never an update, so the first payload is authoritative.
+// UpsertTrace inserts or updates a trace. A later write replaces the payload
+// and indexed columns, except a "running" partial write never clobbers a
+// settled row (completed / aborted / failed): a late partial write must not
+// undo a run that already landed its final state.
 func (s *Store) UpsertTrace(ctx context.Context, row *TraceRow) (inserted bool, err error) {
 	if row.RunID == "" {
 		return false, errors.New("trace run_id is required")
@@ -63,7 +65,15 @@ func (s *Store) UpsertTrace(ctx context.Context, row *TraceRow) (inserted bool, 
 	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO run_traces (run_id, session_id, repo_root, tier, status, intent, created_at, payload)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(run_id) DO NOTHING
+		ON CONFLICT(run_id) DO UPDATE SET
+			session_id = excluded.session_id,
+			repo_root = excluded.repo_root,
+			tier = excluded.tier,
+			status = excluded.status,
+			intent = excluded.intent,
+			created_at = excluded.created_at,
+			payload = excluded.payload
+		WHERE excluded.status != 'running' OR run_traces.status NOT IN ('completed', 'aborted', 'failed')
 	`, row.RunID, nullIfEmpty(row.SessionID), row.RepoRoot, row.Tier, row.Status,
 		nullIfEmpty(row.Intent), row.CreatedAt, row.Payload)
 	if err != nil {

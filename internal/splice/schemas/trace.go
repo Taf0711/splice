@@ -18,9 +18,17 @@ const (
 	VerdictRejected = "rejected"
 )
 
+// TraceEventsStatus vocabulary. A complete trace has every incremental write
+// landed; a partial trace lost some events to a mid-run write failure but the
+// run itself completed. The empty value (absent, legacy traces) means complete.
+const (
+	TraceEventsComplete = "complete"
+	TraceEventsPartial  = "partial"
+)
+
 // OutcomeRecord is the terminal state of a run.
 type OutcomeRecord struct {
-	Status       string   `json:"status"` // completed / aborted / failed
+	Status       string   `json:"status"` // running / completed / aborted / failed
 	AbortReason  string   `json:"abort_reason,omitempty"`
 	ChangedFiles []string `json:"changed_files,omitempty"`
 }
@@ -28,7 +36,7 @@ type OutcomeRecord struct {
 // Validate checks the outcome record.
 func (o OutcomeRecord) Validate() error {
 	switch o.Status {
-	case "completed", "aborted", "failed":
+	case "running", "completed", "aborted", "failed":
 	default:
 		return fmt.Errorf("invalid outcome status %q", o.Status)
 	}
@@ -182,6 +190,11 @@ type RunOutcome struct {
 	// run start (calibrated / default / refusal). Written at trace time so the
 	// applied budgets always carry their origin.
 	BudgetProvenance map[string]string `json:"budget_provenance,omitempty"`
+	// EventsStatus records whether the trace is complete or partial. The empty
+	// value means complete (legacy traces predate incremental writes);
+	// TraceEventsPartial means a mid-run incremental write failed and some
+	// events are missing from this trace. The run itself still completed.
+	EventsStatus string `json:"events_status,omitempty"`
 }
 
 // Validate checks the run outcome. It is strict: a malformed trace is a
@@ -223,6 +236,11 @@ func (r RunOutcome) Validate() error {
 	}
 	if err := r.Memory.Validate(); err != nil {
 		return err
+	}
+	switch r.EventsStatus {
+	case "", TraceEventsComplete, TraceEventsPartial:
+	default:
+		return fmt.Errorf("invalid events_status %q", r.EventsStatus)
 	}
 	for i, iv := range r.Interventions {
 		if err := iv.Validate(); err != nil {

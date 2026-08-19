@@ -58,6 +58,19 @@ func TestRunOutcomeValidateRoundTrip(t *testing.T) {
 	}
 }
 
+func TestOutcomeRecordAcceptsRunning(t *testing.T) {
+	// Incremental trace writes use status "running"; it must validate as a
+	// valid in-progress state alongside the settled states.
+	for _, status := range []string{"running", "completed", "aborted", "failed"} {
+		if err := (OutcomeRecord{Status: status}).Validate(); err != nil {
+			t.Fatalf("status %q rejected: %v", status, err)
+		}
+	}
+	if err := (OutcomeRecord{Status: "weird"}).Validate(); err == nil {
+		t.Fatal("unknown status accepted")
+	}
+}
+
 func TestRunOutcomeValidateRejectsInvalid(t *testing.T) {
 	cases := []struct {
 		name    string

@@ -46,6 +46,12 @@ type runTraceAccumulator struct {
 	currentStage  string
 	currentIter   int
 	history       []schemas.IterationState
+	// completedStages holds every StageRecord the run has produced so far, so a
+	// partial trace can be built mid-run. eventsPartial is set when an
+	// incremental write failed; the final trace records it so consumers know the
+	// trace may miss events.
+	completedStages []schemas.StageRecord
+	eventsPartial   bool
 
 	// LN2 bucket-key identities and provenance, computed at run start and
 	// written into the trace so applied budgets always carry their origin.
@@ -115,6 +121,42 @@ func (tr *runTraceAccumulator) noteMemorySearchFailed() {
 	tr.memoryStatus = "unavailable"
 }
 
+// noteTraceWriteFailed marks the trace as partial after a mid-run incremental
+// write failure. The run itself continues; only the trace's completeness is
+// degraded.
+func (tr *runTraceAccumulator) noteTraceWriteFailed() {
+	if tr == nil {
+		return
+	}
+	tr.eventsPartial = true
+}
+
+// recordStageCompletion appends a finished stage record so a partial trace can
+// include it. The caller persists separately via persistPartial.
+func (tr *runTraceAccumulator) recordStageCompletion(rec schemas.StageRecord) {
+	if tr == nil {
+		return
+	}
+	tr.completedStages = append(tr.completedStages, rec)
+}
+
+// persistPartial writes a partial trace with status "running" reflecting the
+// stages and iterations completed so far. Best-effort: a build or write failure
+// marks the trace partial and never aborts the run.
+func (tr *runTraceAccumulator) persistPartial(ctx context.Context) {
+	if tr == nil || tr.store == nil {
+		return
+	}
+	trace, err := tr.buildOutcome(tr.completedStages, "running", "")
+	if err != nil {
+		tr.noteTraceWriteFailed()
+		return
+	}
+	if err := tr.store.UpsertTrace(ctx, trace); err != nil {
+		tr.noteTraceWriteFailed()
+	}
+}
+
 // recordPermission records a permission tap. Only interactive decisions
 // (PermissionModeAsk with a real allow/deny choice) count; auto-grants in
 // unsafe/auto modes are not taps.
@@ -136,12 +178,11 @@ func (tr *runTraceAccumulator) recordPermission(event agent.PermissionEvent) {
 	})
 }
 
-// buildRunOutcome assembles and validates the trace from the final pipeline
-// result and the accumulated per-stage metadata. It returns an error on
-// schema-validation failure (a malformed trace is a bug, not a write failure).
-func (tr *runTraceAccumulator) buildRunOutcome(result schemas.PipelineResult) (schemas.RunOutcome, error) {
-	stages := make([]schemas.TracedStage, 0, len(result.Stages))
-	for _, rec := range result.Stages {
+// buildOutcome assembles and validates a trace from the given stage records
+// and status. It is shared by the final write and the mid-run partial writes.
+func (tr *runTraceAccumulator) buildOutcome(stageRecords []schemas.StageRecord, status, abortReason string) (schemas.RunOutcome, error) {
+	stages := make([]schemas.TracedStage, 0, len(stageRecords))
+	for _, rec := range stageRecords {
 		meta := tr.stages[stageKey{rec.Name, rec.Iteration}]
 		stages = append(stages, schemas.TracedStage{
 			StageRecord: rec,
@@ -156,11 +197,11 @@ func (tr *runTraceAccumulator) buildRunOutcome(result schemas.PipelineResult) (s
 	}
 
 	outcome := schemas.OutcomeRecord{
-		Status:       result.Status,
+		Status:       status,
 		ChangedFiles: changedFilesUnion(tr.history),
 	}
-	if result.AbortReason != nil {
-		outcome.AbortReason = *result.AbortReason
+	if abortReason != "" {
+		outcome.AbortReason = abortReason
 	}
 
 	trace := schemas.RunOutcome{
@@ -184,10 +225,22 @@ func (tr *runTraceAccumulator) buildRunOutcome(result schemas.PipelineResult) (s
 		TopologyHash:     tr.topologyHash,
 		BudgetProvenance: tr.budgetProvenance,
 	}
+	if tr.eventsPartial {
+		trace.EventsStatus = schemas.TraceEventsPartial
+	} else {
+		trace.EventsStatus = schemas.TraceEventsComplete
+	}
 	if err := trace.Validate(); err != nil {
 		return schemas.RunOutcome{}, fmt.Errorf("invalid run outcome for run %s: %w", tr.runID, err)
 	}
 	return trace, nil
+}
+
+// buildRunOutcome assembles and validates the final trace from the pipeline
+// result and the accumulated per-stage metadata. It returns an error on
+// schema-validation failure (a malformed trace is a bug, not a write failure).
+func (tr *runTraceAccumulator) buildRunOutcome(result schemas.PipelineResult) (schemas.RunOutcome, error) {
+	return tr.buildOutcome(result.Stages, result.Status, abortReason(result))
 }
 
 // changedFilesUnion returns the sorted unique set of files changed across all
