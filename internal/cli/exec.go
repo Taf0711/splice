@@ -374,6 +374,15 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", err.Error())
 	}
 	registerLocalControlTools(registry, workspaceRoot, resolved.LocalControl)
+	// LL1: overlay live-probed capabilities (tool-calling, vision) onto a local
+	// Ollama model's catalog entry so the pipeline preflight and model pickers
+	// see them. Best-effort and Ollama-only: a probe failure or an unknown model
+	// leaves the entry unchanged (fail closed). Never probes a cloud provider.
+	if strings.TrimSpace(resolved.Provider.CatalogID) == "ollama" && strings.TrimSpace(resolved.Provider.Model) != "" {
+		if caps, capsErr := providermodeldiscovery.DiscoverOllamaCapabilities(runCtx, resolved.Provider.BaseURL, resolved.Provider.Model, providermodeldiscovery.Options{}); capsErr == nil {
+			modelRegistry.OverlayCapabilities(resolved.Provider.Model, caps.ModelCapabilities()...)
+		}
+	}
 	if err := validateExecToolFilters(options, registry); err != nil {
 		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 	}

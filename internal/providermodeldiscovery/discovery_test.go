@@ -326,3 +326,90 @@ func TestDiscoverOllamaContextWindowErrorsWhenShowOmitsContextLength(t *testing.
 		t.Fatal("expected an error when no *.context_length key is present")
 	}
 }
+
+func TestDiscoverOllamaCapabilitiesParsesCapabilitiesAndTemplate(t *testing.T) {
+	var gotPath, gotMethod string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"template": "{{ .System }} {{ .Prompt }}",
+			"capabilities": ["completion", "tools", "vision"]
+		}`))
+	}))
+	defer server.Close()
+
+	caps, err := DiscoverOllamaCapabilities(context.Background(), server.URL+"/v1", "llama3.2", Options{HTTPClient: server.Client()})
+	if err != nil {
+		t.Fatalf("DiscoverOllamaCapabilities returned error: %v", err)
+	}
+	if !caps.ToolCall {
+		t.Fatal("ToolCall = false, want true (capabilities contains tools)")
+	}
+	if !caps.Vision {
+		t.Fatal("Vision = false, want true (capabilities contains vision)")
+	}
+	if caps.Template == "" {
+		t.Fatal("Template = empty, want the model template")
+	}
+	if gotPath != "/api/show" {
+		t.Fatalf("requested path = %q, want /api/show", gotPath)
+	}
+	if gotMethod != http.MethodPost {
+		t.Fatalf("method = %q, want POST", gotMethod)
+	}
+}
+
+func TestDiscoverOllamaCapabilitiesMissingFieldsAreUnknown(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model_info": {"general.architecture": "llama"}}`))
+	}))
+	defer server.Close()
+
+	caps, err := DiscoverOllamaCapabilities(context.Background(), server.URL+"/v1", "llama3.2", Options{HTTPClient: server.Client()})
+	if err != nil {
+		t.Fatalf("missing capabilities should not be a hard failure: %v", err)
+	}
+	if caps.ToolCall || caps.Vision {
+		t.Fatalf("missing capabilities should be unknown (false), got %#v", caps)
+	}
+}
+
+func TestDiscoverOllamaTagsFetchesInstalledList(t *testing.T) {
+	var gotPath, gotMethod string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"models": [
+				{"name": "qwen2.5:14b", "modified_at": "2026-08-01T00:00:00Z", "size": 9000000000},
+				{"name": "llama3.2", "modified_at": "2026-07-20T00:00:00Z", "size": 2000000000},
+				{"name": ""}
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	tags, err := DiscoverOllamaTags(context.Background(), server.URL+"/v1", Options{HTTPClient: server.Client()})
+	if err != nil {
+		t.Fatalf("DiscoverOllamaTags returned error: %v", err)
+	}
+	if gotPath != "/api/tags" {
+		t.Fatalf("requested path = %q, want /api/tags", gotPath)
+	}
+	if gotMethod != http.MethodGet {
+		t.Fatalf("method = %q, want GET", gotMethod)
+	}
+	if len(tags) != 2 {
+		t.Fatalf("tags = %#v, want 2 entries (empty name skipped)", tags)
+	}
+	if tags[0].Name != "llama3.2" || tags[1].Name != "qwen2.5:14b" {
+		t.Fatalf("tags not sorted: %#v", tags)
+	}
+	if tags[1].Size != 9000000000 || tags[1].Modified != "2026-08-01T00:00:00Z" {
+		t.Fatalf("tag metadata wrong: %#v", tags[1])
+	}
+}

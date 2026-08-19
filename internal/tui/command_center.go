@@ -660,6 +660,12 @@ func (m model) resolveModelSwitchTarget(registry modelregistry.Registry, args st
 	if provider, ok := m.activeProviderDescriptor(); ok {
 		for _, model := range m.modelPickerLiveByProvider[provider.ID] {
 			if strings.EqualFold(model.ID, strings.TrimSpace(args)) {
+				// An installed local model with a live-probed capability entry (LL1
+				// overlay) switches to the full registry entry, not a bare id, so the
+				// target carries capability, context window, and reasoning efforts.
+				if entry, ok := registry.Get(model.ID); ok && entry.Supports(modelregistry.ModelCapabilityToolCalling) {
+					return modelSwitchTarget{modelID: entry.ID, entry: &entry, reasoningEfforts: entry.ReasoningEfforts}, true
+				}
 				return modelSwitchTarget{modelID: model.ID}, true
 			}
 		}

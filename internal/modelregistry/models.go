@@ -427,6 +427,46 @@ func (registry Registry) Get(pattern string) (ModelEntry, bool) {
 	return cloneModelEntry(entry), true
 }
 
+// OverlayCapabilities records live-probed capabilities on a registered model,
+// adding only the capabilities the entry does not already declare. Unknown
+// model ids are a no-op (fail closed: an unknown capability keeps the current
+// behavior). The mutation is in place so a later Get(model) and
+// entry.Supports(...) see the overlay, for example the pipeline preflight's
+// tool-calling check after local Ollama capability discovery.
+func (registry Registry) OverlayCapabilities(modelID string, capabilities ...ModelCapability) {
+	key := normalizePattern(strings.TrimSpace(modelID))
+	if key == "" {
+		return
+	}
+	entry, ok := registry.entries[key]
+	if !ok {
+		return
+	}
+	existing := make(map[ModelCapability]bool, len(entry.Capabilities))
+	for _, capability := range entry.Capabilities {
+		existing[capability] = true
+	}
+	changed := false
+	for _, capability := range capabilities {
+		if strings.TrimSpace(string(capability)) == "" || existing[capability] {
+			continue
+		}
+		entry.Capabilities = append(entry.Capabilities, capability)
+		existing[capability] = true
+		changed = true
+	}
+	if !changed {
+		return
+	}
+	// Re-register under every key the entry was registered under, so Get,
+	// Resolve, and ResolveWithFallback all see the overlay.
+	_ = registry.register(entry.ID, entry)
+	_ = registry.register(entry.APIModel, entry)
+	for _, alias := range entry.Aliases {
+		_ = registry.register(alias, entry)
+	}
+}
+
 func (registry Registry) register(pattern string, entry ModelEntry) error {
 	normalized := normalizePattern(pattern)
 	if normalized == "" {

@@ -804,6 +804,49 @@ func TestProviderWizardUsesAPIKeyEnvForCurrentSessionWithoutPersistingSecret(t *
 	}
 }
 
+func TestProviderWizardModelsFromDiscoveryUsesRegistryCapability(t *testing.T) {
+	registry := modelregistryForInstalledTest(t)
+
+	// A /v1/models listing carries no tool-calling; the registry overlay is the
+	// source of truth for an installed local model.
+	models := providerWizardModelsFromDiscovery([]providermodeldiscovery.Model{{ID: "local-model"}}, registry)
+	if len(models) != 1 || models[0].ToolCall {
+		t.Fatalf("without overlay, tool call should be false: %#v", models)
+	}
+
+	registry.OverlayCapabilities("local-model", modelregistry.ModelCapabilityToolCalling)
+	models = providerWizardModelsFromDiscovery([]providermodeldiscovery.Model{{ID: "local-model"}}, registry)
+	if len(models) != 1 || !models[0].ToolCall {
+		t.Fatalf("with overlay, tool call should be true: %#v", models)
+	}
+
+	// Empty probed list yields empty models, keeping the default-model flow.
+	if got := providerWizardModelsFromDiscovery(nil, registry); len(got) != 0 {
+		t.Fatalf("empty discovery should yield empty models: %#v", got)
+	}
+}
+
+func modelregistryForInstalledTest(t *testing.T) modelregistry.Registry {
+	t.Helper()
+	registry, err := modelregistry.NewRegistry([]modelregistry.ModelEntry{{
+		ID: "local-model", DisplayName: "Local", APIModel: "local-model",
+		Provider:      modelregistry.ProviderOpenAI,
+		ContextLimits: modelregistry.ContextLimits{ContextWindow: 8192, MaxOutputTokens: 4096},
+		Capabilities:  []modelregistry.ModelCapability{modelregistry.ModelCapabilityChat},
+		Cost: modelregistry.ModelCost{
+			Currency: "USD", Unit: "per_1m_tokens",
+			InputPerMillion: 0.1, OutputPerMillion: 0.1,
+			Source: "test", SourceLastVerified: "2026-01-01",
+		},
+		Status:  modelregistry.ModelStatusActive,
+		Aliases: []string{"local-model"},
+	}})
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	return registry
+}
+
 func TestProviderWizardUsesLiveDiscoveredModels(t *testing.T) {
 	var captured config.ProviderProfile
 	m := newModel(context.Background(), Options{

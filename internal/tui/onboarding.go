@@ -1068,7 +1068,7 @@ func (m model) applySetupModelsDiscovered(msg setupModelsDiscoveredMsg) model {
 		}
 		return m
 	}
-	models := providerWizardModelsFromDiscovery(msg.models)
+	models := providerWizardModelsFromDiscovery(msg.models, m.modelCatalog)
 	if len(models) == 0 {
 		m.setup.modelErr = "models endpoint returned no model ids"
 		m.setup.modelSrc = "fallback"

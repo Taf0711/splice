@@ -335,6 +335,49 @@ func TestRegistryDetectsDuplicateModelIDs(t *testing.T) {
 	}
 }
 
+func TestRegistryOverlayCapabilities(t *testing.T) {
+	registry, err := NewRegistry([]ModelEntry{validModelEntry()})
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+
+	// Tool-calling is not declared on the fixture.
+	if entry, ok := registry.Get("gpt-4.1-mini"); !ok || entry.Supports(ModelCapabilityToolCalling) {
+		t.Fatalf("fixture unexpectedly supports tool calling: %#v", entry)
+	}
+
+	registry.OverlayCapabilities("gpt-4.1-mini", ModelCapabilityToolCalling)
+
+	entry, ok := registry.Get("gpt-4.1-mini")
+	if !ok || !entry.Supports(ModelCapabilityToolCalling) {
+		t.Fatalf("Get after overlay = %#v, want tool calling present", entry)
+	}
+	// The overlay must be visible through the alias too (re-registered).
+	byAlias, ok := registry.Get("openai:gpt-4.1-mini")
+	if !ok || !byAlias.Supports(ModelCapabilityToolCalling) {
+		t.Fatalf("alias Get after overlay = %#v, want tool calling present", byAlias)
+	}
+
+	// Idempotent: overlaying an already-present capability must not duplicate it.
+	registry.OverlayCapabilities("gpt-4.1-mini", ModelCapabilityToolCalling)
+	entry, _ = registry.Get("gpt-4.1-mini")
+	count := 0
+	for _, capability := range entry.Capabilities {
+		if capability == ModelCapabilityToolCalling {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("tool calling appears %d times, want exactly 1: %#v", count, entry.Capabilities)
+	}
+
+	// Unknown model is a no-op (fail closed), never a panic.
+	registry.OverlayCapabilities("does-not-exist", ModelCapabilityToolCalling)
+	if _, ok := registry.Get("does-not-exist"); ok {
+		t.Fatal("overlaying an unknown model must not create an entry")
+	}
+}
+
 func validModelEntry() ModelEntry {
 	return ModelEntry{
 		ID:          "gpt-4.1-mini",

@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Taf0711/splice/internal/config"
+	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/providercatalog"
 	"github.com/Taf0711/splice/internal/providermodeldiscovery"
 	"github.com/Taf0711/splice/internal/redaction"
@@ -125,7 +126,7 @@ func (m model) applyProviderModelsDiscovered(msg providerModelsDiscoveredMsg) mo
 		wizard.refreshModels()
 		return m
 	}
-	models := providerWizardModelsFromDiscovery(msg.models)
+	models := providerWizardModelsFromDiscovery(msg.models, m.modelCatalog)
 	if len(models) == 0 {
 		wizard.modelLoadError = "models endpoint returned no model ids"
 		wizard.modelSource = "fallback"
@@ -142,18 +143,25 @@ func (m model) applyProviderModelsDiscovered(msg providerModelsDiscoveredMsg) mo
 	return m
 }
 
-func providerWizardModelsFromDiscovery(models []providermodeldiscovery.Model) []providerWizardModel {
+func providerWizardModelsFromDiscovery(models []providermodeldiscovery.Model, registry modelregistry.Registry) []providerWizardModel {
 	result := make([]providerWizardModel, 0, len(models))
 	for _, model := range models {
 		id := strings.TrimSpace(model.ID)
 		if id == "" {
 			continue
 		}
+		toolCall := model.ToolCall
+		// A local model listed via /v1/models carries no capability metadata; a
+		// live-probed registry overlay (LL1 /api/show) is the source of truth
+		// for tool-calling, so prefer it when present.
+		if entry, ok := registry.Get(id); ok && entry.Supports(modelregistry.ModelCapabilityToolCalling) {
+			toolCall = true
+		}
 		result = append(result, providerWizardModel{
 			ID:          id,
 			Description: firstProviderDisplayValue(model.Description, "live model"),
-			Meta:        providerWizardModelMeta(model.ContextWindow, model.ToolCall, model.Reasoning, model.InputCost, model.OutputCost, model.Tags),
-			ToolCall:    model.ToolCall,
+			Meta:        providerWizardModelMeta(model.ContextWindow, toolCall, model.Reasoning, model.InputCost, model.OutputCost, model.Tags),
+			ToolCall:    toolCall,
 		})
 	}
 	return result

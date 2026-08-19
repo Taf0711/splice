@@ -105,6 +105,26 @@ func TestDetectLocalRuntimesIgnoresServerErrors(t *testing.T) {
 	}
 }
 
+func TestDetectedLocalRuntimeInstalledModelIDs(t *testing.T) {
+	runtime := DetectedLocalRuntime{
+		LocalRuntime: LocalRuntime{CatalogID: "ollama"},
+		Models:       []string{"llama3.1", "qwen2.5:14b"},
+	}
+	ids := runtime.InstalledModelIDs()
+	if len(ids) != 2 || ids[0] != "llama3.1" || ids[1] != "qwen2.5:14b" {
+		t.Fatalf("InstalledModelIDs() = %#v", ids)
+	}
+	// A defensive copy: mutating the result must not corrupt the runtime's list.
+	ids[0] = "changed"
+	if runtime.Models[0] != "llama3.1" {
+		t.Fatalf("InstalledModelIDs returned an aliased slice: %#v", runtime.Models)
+	}
+	// Empty probed list surfaces nil, keeping the catalog default flow.
+	if got := (DetectedLocalRuntime{}).InstalledModelIDs(); len(got) != 0 {
+		t.Fatalf("empty runtime should surface no models: %#v", got)
+	}
+}
+
 func TestLocalRuntimeActionOffersNoKeySetup(t *testing.T) {
 	runtime := DetectedLocalRuntime{LocalRuntime: LocalRuntime{
 		CatalogID: "ollama",

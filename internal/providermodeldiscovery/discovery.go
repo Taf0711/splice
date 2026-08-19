@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Taf0711/splice/internal/config"
+	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/providercatalog"
 	"github.com/Taf0711/splice/internal/providermodelcatalog"
 	"github.com/Taf0711/splice/internal/providers/providerio"
@@ -96,23 +97,109 @@ func Discover(ctx context.Context, profile config.ProviderProfile, options Optio
 // http://localhost:11434/v1) — Ollama Cloud's hosted API is a different
 // service and isn't assumed to expose the same endpoint.
 func DiscoverOllamaContextWindow(ctx context.Context, baseURL string, model string, options Options) (int, error) {
+	body, err := fetchOllamaShow(ctx, baseURL, model, options)
+	if err != nil {
+		return 0, err
+	}
+	return parseOllamaShowContextWindow(body)
+}
+
+// OllamaCapabilities is the best-effort capability read from Ollama's native
+// /api/show response. Missing fields are unknown (false/empty), never a
+// negative and never a hard failure.
+type OllamaCapabilities struct {
+	ToolCall bool
+	Vision   bool
+	Template string
+}
+
+// ModelCapabilities maps the probed capabilities to the modelregistry
+// capability set for the registry overlay. Unknown (false) capabilities map to
+// nothing, so an unprobed model overlays no capability (fail closed).
+func (caps OllamaCapabilities) ModelCapabilities() []modelregistry.ModelCapability {
+	result := make([]modelregistry.ModelCapability, 0, 2)
+	if caps.ToolCall {
+		result = append(result, modelregistry.ModelCapabilityToolCalling)
+	}
+	if caps.Vision {
+		result = append(result, modelregistry.ModelCapabilityVision)
+	}
+	return result
+}
+
+// DiscoverOllamaCapabilities asks a local Ollama daemon for a model's declared
+// capabilities (tool-calling, vision) and its prompt template via /api/show.
+// Ollama-only; never probe a cloud provider. A missing capabilities array is
+// "unknown" (all false), not an error; only a transport or decode failure is
+// returned.
+func DiscoverOllamaCapabilities(ctx context.Context, baseURL string, model string, options Options) (OllamaCapabilities, error) {
+	body, err := fetchOllamaShow(ctx, baseURL, model, options)
+	if err != nil {
+		return OllamaCapabilities{}, err
+	}
+	return parseOllamaCapabilities(body)
+}
+
+// OllamaTag is one installed local model from Ollama's /api/tags listing.
+type OllamaTag struct {
+	Name     string
+	Modified string
+	Size     int64
+}
+
+// DiscoverOllamaTags asks a local Ollama daemon for its installed model list
+// via the native /api/tags endpoint. Ollama-only; never probe a cloud provider.
+func DiscoverOllamaTags(ctx context.Context, baseURL string, options Options) ([]OllamaTag, error) {
+	endpoint, err := ollamaTagsEndpoint(baseURL)
+	if err != nil {
+		return nil, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Accept", "application/json")
+
+	client := options.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: 10 * time.Second}
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, fmt.Errorf("ollama tags endpoint returned %s: %s", response.Status, strings.TrimSpace(string(body)))
+	}
+	return parseOllamaTags(body)
+}
+
+// fetchOllamaShow POSTs /api/show for a model and returns the raw response
+// body on a 2xx. Shared by the context-window and capability probes.
+func fetchOllamaShow(ctx context.Context, baseURL string, model string, options Options) ([]byte, error) {
 	model = strings.TrimSpace(model)
 	if model == "" {
-		return 0, fmt.Errorf("model name is required")
+		return nil, fmt.Errorf("model name is required")
 	}
 	endpoint, err := ollamaShowEndpoint(baseURL)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	payload, err := json.Marshal(struct {
 		Model string `json:"model"`
 	}{Model: model})
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(payload)))
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
@@ -123,18 +210,84 @@ func DiscoverOllamaContextWindow(ctx context.Context, baseURL string, model stri
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	defer response.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return 0, fmt.Errorf("ollama show endpoint returned %s: %s", response.Status, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("ollama show endpoint returned %s: %s", response.Status, strings.TrimSpace(string(body)))
 	}
-	return parseOllamaShowContextWindow(body)
+	return body, nil
+}
+
+// ollamaTagsEndpoint derives the native Ollama API root from the
+// OpenAI-compatible base URL (".../v1") and appends /api/tags.
+func ollamaTagsEndpoint(baseURL string) (string, error) {
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		return "", fmt.Errorf("provider base URL is required for ollama model discovery")
+	}
+	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("invalid provider base URL %q", baseURL)
+	}
+	path := strings.TrimRight(parsed.Path, "/")
+	path = strings.TrimSuffix(path, "/v1")
+	parsed.Path = strings.TrimRight(path, "/") + "/api/tags"
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String(), nil
+}
+
+// parseOllamaCapabilities extracts tool-calling and vision from an /api/show
+// response's capabilities array, plus the raw prompt template. A missing or
+// empty capabilities array is "unknown" (all false), never an error.
+func parseOllamaCapabilities(body []byte) (OllamaCapabilities, error) {
+	var payload struct {
+		Capabilities []string `json:"capabilities"`
+		Template     string   `json:"template"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return OllamaCapabilities{}, fmt.Errorf("decode ollama show response: %w", err)
+	}
+	caps := OllamaCapabilities{Template: payload.Template}
+	for _, capability := range payload.Capabilities {
+		switch strings.ToLower(strings.TrimSpace(capability)) {
+		case "tools", "tool_calling", "tool-calling":
+			caps.ToolCall = true
+		case "vision":
+			caps.Vision = true
+		}
+	}
+	return caps, nil
+}
+
+// parseOllamaTags extracts the installed model list from an /api/tags response.
+func parseOllamaTags(body []byte) ([]OllamaTag, error) {
+	var payload struct {
+		Models []struct {
+			Name       string `json:"name"`
+			ModifiedAt string `json:"modified_at"`
+			Size       int64  `json:"size"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("decode ollama tags response: %w", err)
+	}
+	tags := make([]OllamaTag, 0, len(payload.Models))
+	for _, item := range payload.Models {
+		name := strings.TrimSpace(item.Name)
+		if name == "" {
+			continue
+		}
+		tags = append(tags, OllamaTag{Name: name, Modified: strings.TrimSpace(item.ModifiedAt), Size: item.Size})
+	}
+	sort.SliceStable(tags, func(i, j int) bool { return tags[i].Name < tags[j].Name })
+	return tags, nil
 }
 
 // ollamaShowEndpoint derives the native Ollama API root from the
