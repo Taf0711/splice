@@ -490,6 +490,7 @@ type HarnessStageOutput struct {
 	Confidence     float64                `json:"confidence"`
 	Data           map[string]interface{} `json:"data,omitempty"`
 	ContextRequest *ContextRequest        `json:"context_request,omitempty"`
+	Messages       []StageMessage         `json:"messages,omitempty"`
 	Usage          *StageUsage            `json:"-"`
 }
 
@@ -504,6 +505,14 @@ func (h HarnessStageOutput) Validate() error {
 	if h.ContextRequest != nil {
 		if err := h.ContextRequest.Validate(); err != nil {
 			return err
+		}
+	}
+	if len(h.Messages) > 4 {
+		return fmt.Errorf("stage output has %d messages; max 4", len(h.Messages))
+	}
+	for i, message := range h.Messages {
+		if err := message.Validate(); err != nil {
+			return fmt.Errorf("messages[%d]: %w", i, err)
 		}
 	}
 	return nil
