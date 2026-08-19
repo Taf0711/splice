@@ -1151,6 +1151,23 @@ func TestForwardedReasoningEffortGating(t *testing.T) {
 	}
 }
 
+func TestForwardedReasoningEffortAfterLocalOverlay(t *testing.T) {
+	registry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry: %v", err)
+	}
+	// gpt-4.1 is a non-reasoning model: no efforts, so the effort is suppressed.
+	if got := forwardedReasoningEffort(registry, "gpt-4.1", "high"); got != "" {
+		t.Fatalf("before overlay, forwardedReasoningEffort = %q, want suppressed (empty)", got)
+	}
+	// A probed local reasoning model overlays the standard low/medium/high set,
+	// after which the requested tier forwards through to the request.
+	registry.OverlayReasoningEfforts("gpt-4.1")
+	if got := forwardedReasoningEffort(registry, "gpt-4.1", "high"); got != "high" {
+		t.Fatalf("after overlay, forwardedReasoningEffort = %q, want high", got)
+	}
+}
+
 func TestRunExecJSONUnsafeOutputsWarningEvent(t *testing.T) {
 	exitCode, stdout, stderr := runExecWithEcho(t, []string{"exec", "--skip-permissions-unsafe", "-o", "json", "hello"})
 

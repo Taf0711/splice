@@ -108,9 +108,10 @@ func DiscoverOllamaContextWindow(ctx context.Context, baseURL string, model stri
 // /api/show response. Missing fields are unknown (false/empty), never a
 // negative and never a hard failure.
 type OllamaCapabilities struct {
-	ToolCall bool
-	Vision   bool
-	Template string
+	ToolCall  bool
+	Vision    bool
+	Reasoning bool
+	Template  string
 }
 
 // ModelCapabilities maps the probed capabilities to the modelregistry
@@ -261,6 +262,8 @@ func parseOllamaCapabilities(body []byte) (OllamaCapabilities, error) {
 			caps.ToolCall = true
 		case "vision":
 			caps.Vision = true
+		case "thinking":
+			caps.Reasoning = true
 		}
 	}
 	return caps, nil

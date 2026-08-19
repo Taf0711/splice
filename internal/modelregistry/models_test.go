@@ -378,6 +378,68 @@ func TestRegistryOverlayCapabilities(t *testing.T) {
 	}
 }
 
+func TestRegistryOverlayReasoningEfforts(t *testing.T) {
+	registry, err := NewRegistry([]ModelEntry{validModelEntry()})
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+
+	// The fixture declares no reasoning efforts.
+	if entry, _ := registry.Get("gpt-4.1-mini"); len(entry.ReasoningEfforts) != 0 {
+		t.Fatalf("fixture unexpectedly declares reasoning efforts: %#v", entry.ReasoningEfforts)
+	}
+
+	registry.OverlayReasoningEfforts("gpt-4.1-mini")
+
+	entry, ok := registry.Get("gpt-4.1-mini")
+	if !ok {
+		t.Fatal("Get after overlay failed")
+	}
+	if got := reasoningEffortIDs(entry.ReasoningEfforts); got != "low,medium,high" {
+		t.Fatalf("ReasoningEfforts = %q, want low,medium,high", got)
+	}
+	// EffectiveReasoningEffort must resolve to a real tier for the overlaid model.
+	if got := EffectiveReasoningEffort(entry, ReasoningEffortHigh); got != ReasoningEffortHigh {
+		t.Fatalf("EffectiveReasoningEffort(high) = %q, want high", got)
+	}
+
+	// Idempotent: overlaying again must not duplicate efforts.
+	registry.OverlayReasoningEfforts("gpt-4.1-mini")
+	entry, _ = registry.Get("gpt-4.1-mini")
+	if got := reasoningEffortIDs(entry.ReasoningEfforts); got != "low,medium,high" {
+		t.Fatalf("after second overlay, ReasoningEfforts = %q, want low,medium,high", got)
+	}
+
+	// Unknown model is a no-op (fail closed), never a panic.
+	registry.OverlayReasoningEfforts("does-not-exist")
+	if _, ok := registry.Get("does-not-exist"); ok {
+		t.Fatal("overlaying an unknown model must not create an entry")
+	}
+}
+
+func TestOverlayReasoningEffortsNeverRemovesExisting(t *testing.T) {
+	entry := validModelEntry()
+	entry.ReasoningEfforts = []ReasoningEffort{ReasoningEffortLow, ReasoningEffortXHigh}
+	registry, err := NewRegistry([]ModelEntry{entry})
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	registry.OverlayReasoningEfforts("gpt-4.1-mini")
+	got, _ := registry.Get("gpt-4.1-mini")
+	// The existing low and xhigh stay; medium and high are added, no removal.
+	if !containsReasoningEffort(got.ReasoningEfforts, ReasoningEffortLow) || !containsReasoningEffort(got.ReasoningEfforts, ReasoningEffortXHigh) {
+		t.Fatalf("existing efforts were removed: %#v", got.ReasoningEfforts)
+	}
+}
+
+func reasoningEffortIDs(efforts []ReasoningEffort) string {
+	ids := make([]string, len(efforts))
+	for i, effort := range efforts {
+		ids[i] = string(effort)
+	}
+	return strings.Join(ids, ",")
+}
+
 func validModelEntry() ModelEntry {
 	return ModelEntry{
 		ID:          "gpt-4.1-mini",

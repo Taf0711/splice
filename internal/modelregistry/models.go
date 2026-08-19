@@ -467,6 +467,46 @@ func (registry Registry) OverlayCapabilities(modelID string, capabilities ...Mod
 	}
 }
 
+// OverlayReasoningEfforts records live-probed reasoning-effort support on a
+// registered model, adding only the efforts the entry does not already
+// declare. Unknown model ids are a no-op (fail closed); existing efforts are
+// never removed. With no efforts supplied, the canonical low/medium/high set
+// (standardReasoningEfforts) is added, matching the TUI/config/registry tiers.
+func (registry Registry) OverlayReasoningEfforts(modelID string, efforts ...ReasoningEffort) {
+	key := normalizePattern(strings.TrimSpace(modelID))
+	if key == "" {
+		return
+	}
+	entry, ok := registry.entries[key]
+	if !ok {
+		return
+	}
+	if len(efforts) == 0 {
+		efforts = standardReasoningEfforts()
+	}
+	existing := make(map[ReasoningEffort]bool, len(entry.ReasoningEfforts))
+	for _, effort := range entry.ReasoningEfforts {
+		existing[effort] = true
+	}
+	changed := false
+	for _, effort := range efforts {
+		if strings.TrimSpace(string(effort)) == "" || existing[effort] {
+			continue
+		}
+		entry.ReasoningEfforts = append(entry.ReasoningEfforts, effort)
+		existing[effort] = true
+		changed = true
+	}
+	if !changed {
+		return
+	}
+	_ = registry.register(entry.ID, entry)
+	_ = registry.register(entry.APIModel, entry)
+	for _, alias := range entry.Aliases {
+		_ = registry.register(alias, entry)
+	}
+}
+
 func (registry Registry) register(pattern string, entry ModelEntry) error {
 	normalized := normalizePattern(pattern)
 	if normalized == "" {

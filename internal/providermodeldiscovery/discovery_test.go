@@ -335,7 +335,7 @@ func TestDiscoverOllamaCapabilitiesParsesCapabilitiesAndTemplate(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 			"template": "{{ .System }} {{ .Prompt }}",
-			"capabilities": ["completion", "tools", "vision"]
+			"capabilities": ["completion", "tools", "vision", "thinking"]
 		}`))
 	}))
 	defer server.Close()
@@ -349,6 +349,9 @@ func TestDiscoverOllamaCapabilitiesParsesCapabilitiesAndTemplate(t *testing.T) {
 	}
 	if !caps.Vision {
 		t.Fatal("Vision = false, want true (capabilities contains vision)")
+	}
+	if !caps.Reasoning {
+		t.Fatal("Reasoning = false, want true (capabilities contains thinking)")
 	}
 	if caps.Template == "" {
 		t.Fatal("Template = empty, want the model template")
@@ -372,7 +375,7 @@ func TestDiscoverOllamaCapabilitiesMissingFieldsAreUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("missing capabilities should not be a hard failure: %v", err)
 	}
-	if caps.ToolCall || caps.Vision {
+	if caps.ToolCall || caps.Vision || caps.Reasoning {
 		t.Fatalf("missing capabilities should be unknown (false), got %#v", caps)
 	}
 }

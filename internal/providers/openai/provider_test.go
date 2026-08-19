@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
@@ -969,6 +970,50 @@ func TestStreamCompletionSendsMaxCompletionTokens(t *testing.T) {
 	}
 	if n, _ := got.(float64); int(n) != 1234 {
 		t.Fatalf("max_completion_tokens = %#v, want 1234", got)
+	}
+}
+
+func TestStreamCompletionCarriesReasoningEffortFromPopulatedEntry(t *testing.T) {
+	// A probed local reasoning model's entry carries the standard low/medium/high
+	// efforts; EffectiveReasoningEffort resolves the requested tier, and the
+	// OpenAI-compat request forwards it as reasoning_effort.
+	entry := modelregistry.ModelEntry{
+		ID:       "local-reasoner",
+		APIModel: "local-reasoner",
+		ReasoningEfforts: []modelregistry.ReasoningEffort{
+			modelregistry.ReasoningEffortLow,
+			modelregistry.ReasoningEffortMedium,
+			modelregistry.ReasoningEffortHigh,
+		},
+	}
+	effort := modelregistry.EffectiveReasoningEffort(entry, modelregistry.ReasoningEffortHigh)
+	if effort != modelregistry.ReasoningEffortHigh {
+		t.Fatalf("EffectiveReasoningEffort = %q, want high", effort)
+	}
+
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		writeSSE(w, `[DONE]`)
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{BaseURL: server.URL + "/", Model: "local-reasoner"})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages:        []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+		ReasoningEffort: string(effort),
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion returned error: %v", err)
+	}
+	drain(stream)
+	if got := gotBody["reasoning_effort"]; got != "high" {
+		t.Fatalf("reasoning_effort = %#v, want \"high\"", got)
 	}
 }
 
