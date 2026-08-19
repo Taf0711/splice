@@ -203,6 +203,124 @@ func TestPipelinePanelResetClearLifecycle(t *testing.T) {
 	}
 }
 
+func TestPipelinePanelMessageDoesNotResetStage(t *testing.T) {
+	var state pipelinePanelState
+	state.applyStageMarker("\x00STAGE{\"name\":\"test_runner\",\"status\":\"completed\",\"detail\":\"tests passed\",\"progress\":100}\x00")
+	before := state.stages[0]
+
+	state.applyStageEvent(agent.StageEvent{
+		Name:   "test_runner",
+		Status: "message",
+		Detail: "revision_request -> code_writer: 2 failing tests",
+	})
+
+	if len(state.stages) != 1 {
+		t.Fatalf("stages = %d, want 1 (message must not create a stage row)", len(state.stages))
+	}
+	if after := state.stages[0]; after != before {
+		t.Fatalf("test_runner stage row changed after message: before=%#v after=%#v", before, after)
+	}
+	if len(state.messages) != 1 {
+		t.Fatalf("messages = %d, want 1", len(state.messages))
+	}
+	msg := state.messages[0]
+	if msg.from != "test_runner" || msg.to != "code_writer" || msg.resolved {
+		t.Fatalf("message = %#v, want from=test_runner to=code_writer resolved=false", msg)
+	}
+}
+
+func TestPipelinePanelRepairedResolvesLatestUnresolved(t *testing.T) {
+	var state pipelinePanelState
+	state.applyStageEvent(agent.StageEvent{Name: "test_runner", Status: "message", Detail: "revision_request -> code_writer: 1 test"})
+	state.applyStageEvent(agent.StageEvent{Name: "test_runner", Status: "message", Detail: "revision_request -> code_writer: 2 tests"})
+
+	state.applyStageEvent(agent.StageEvent{Name: "test_runner", Status: "repaired", Detail: "revision resolved: tests pass"})
+
+	if len(state.messages) != 2 {
+		t.Fatalf("messages = %d, want 2", len(state.messages))
+	}
+	if state.messages[0].resolved {
+		t.Fatal("first message should stay unresolved")
+	}
+	if !state.messages[1].resolved {
+		t.Fatal("latest message should be resolved")
+	}
+}
+
+func TestPipelinePanelRenderMessagesCapsAtLastThree(t *testing.T) {
+	var state pipelinePanelState
+	state.active = true
+	state.stages = []pipelineStageRow{{name: "test_runner", status: pipelineStageCompleted}}
+	for i := 0; i < 4; i++ {
+		state.applyStageEvent(agent.StageEvent{
+			Name:   "test_runner",
+			Status: "message",
+			Detail: fmt.Sprintf("revision_request -> code_writer: test %d", i),
+		})
+	}
+	plain := plainRender(t, strings.Join(state.renderSection(80, 0), "\n"))
+	if strings.Contains(plain, "test 0") {
+		t.Fatalf("oldest message not hidden: %q", plain)
+	}
+	for _, want := range []string{"test 1", "test 2", "test 3"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("render missing %q in %q", want, plain)
+		}
+	}
+	if !strings.Contains(plain, "MESSAGES") {
+		t.Fatalf("render missing MESSAGES header: %q", plain)
+	}
+}
+
+func TestPipelinePanelResetClearMessages(t *testing.T) {
+	var state pipelinePanelState
+	state.applyStageEvent(agent.StageEvent{Name: "test_runner", Status: "message", Detail: "revision_request -> code_writer: 1 test"})
+	if len(state.messages) != 1 {
+		t.Fatalf("messages = %d, want 1", len(state.messages))
+	}
+	state.reset()
+	if len(state.messages) != 0 {
+		t.Fatalf("reset messages = %d, want 0", len(state.messages))
+	}
+	state.applyStageEvent(agent.StageEvent{Name: "test_runner", Status: "message", Detail: "revision_request -> code_writer: 1 test"})
+	state.clear()
+	if len(state.messages) != 0 {
+		t.Fatalf("clear messages = %d, want 0", len(state.messages))
+	}
+}
+
+func TestParseMessageTo(t *testing.T) {
+	cases := []struct{ detail, want string }{
+		{"revision_request -> code_writer: 2 failing tests", "code_writer"},
+		{"revision_request -> code_writer 2 tests", "code_writer"},
+		{"revision_request -> code_writer", "code_writer"},
+		{"no arrow here", ""},
+		{"revision_request -> ", ""},
+	}
+	for _, tc := range cases {
+		if got := parseMessageTo(tc.detail); got != tc.want {
+			t.Fatalf("parseMessageTo(%q) = %q, want %q", tc.detail, got, tc.want)
+		}
+	}
+}
+
+func TestPipelinePanelMessageViaLegacyMarker(t *testing.T) {
+	var state pipelinePanelState
+	marker := "\x00STAGE{\"name\":\"test_runner\",\"status\":\"message\",\"detail\":\"revision_request -> code_writer: 1 test\"}\x00"
+	if !state.applyStageMarker(marker) {
+		t.Fatal("applyStageMarker returned false")
+	}
+	if len(state.messages) != 1 {
+		t.Fatalf("messages = %d, want 1", len(state.messages))
+	}
+	if state.messages[0].to != "code_writer" {
+		t.Fatalf("message.to = %q, want code_writer", state.messages[0].to)
+	}
+	if len(state.stages) != 0 {
+		t.Fatalf("stages = %d, want 0 (message must not create a stage row)", len(state.stages))
+	}
+}
+
 type tuiRoutingTestProvider struct {
 	model string
 }

@@ -31,10 +31,20 @@ type pipelineStageRow struct {
 	progress int // 0-100
 }
 
+// pipelineMessageRow is one repair-loop message surfaced in the panel (DM4).
+// resolved flips true when the matching "repaired" event lands.
+type pipelineMessageRow struct {
+	from     string
+	to       string
+	detail   string
+	resolved bool
+}
+
 type pipelinePanelState struct {
 	stages       []pipelineStageRow
 	active       bool // true when a pipeline run is in progress
 	changedFiles []string
+	messages     []pipelineMessageRow
 }
 
 type pipelineStageMarkerPayload struct {
@@ -77,6 +87,30 @@ func (s *pipelinePanelState) applyStageMarker(line string) bool {
 }
 
 func (s *pipelinePanelState) applyStagePayload(payload pipelineStageMarkerPayload) {
+	switch strings.ToLower(strings.TrimSpace(payload.Status)) {
+	case "message":
+		// A repair-loop message is a panel note, not a stage transition. It must
+		// not touch stage rows (which would otherwise reset test_runner to
+		// pending) and must not change the active flag.
+		s.messages = append(s.messages, pipelineMessageRow{
+			from:     payload.Name,
+			to:       parseMessageTo(payload.Detail),
+			detail:   payload.Detail,
+			resolved: false,
+		})
+		return
+	case "repaired":
+		// Resolve only the latest unresolved message, matching the repair loop's
+		// message/repaired pairing.
+		for i := len(s.messages) - 1; i >= 0; i-- {
+			if !s.messages[i].resolved {
+				s.messages[i].resolved = true
+				break
+			}
+		}
+		return
+	}
+
 	status := pipelineStageStatusFromString(payload.Status)
 	progress := payload.Progress
 	if progress < 0 {
@@ -106,6 +140,25 @@ func (s *pipelinePanelState) applyStagePayload(payload pipelineStageMarkerPayloa
 	}
 }
 
+// parseMessageTo extracts the "to" token from a message detail such as
+// "revision_request -> code_writer: 2 failing tests": the token after "-> " up
+// to the next ":" or " ". A missing "-> " falls back to "".
+func parseMessageTo(detail string) string {
+	idx := strings.Index(detail, "-> ")
+	if idx < 0 {
+		return ""
+	}
+	rest := detail[idx+len("-> "):]
+	end := len(rest)
+	for i, r := range rest {
+		if r == ':' || r == ' ' {
+			end = i
+			break
+		}
+	}
+	return strings.TrimSpace(rest[:end])
+}
+
 func pipelineStageStatusFromString(status string) pipelineStageStatus {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "running":
@@ -128,6 +181,7 @@ func (s *pipelinePanelState) reset() {
 	s.stages = nil
 	s.active = true
 	s.changedFiles = nil
+	s.messages = nil
 }
 
 // clear removes all pipeline state and hides the panel.
@@ -135,6 +189,7 @@ func (s *pipelinePanelState) clear() {
 	s.stages = nil
 	s.active = false
 	s.changedFiles = nil
+	s.messages = nil
 }
 
 func (s pipelinePanelState) isEmpty() bool {
@@ -179,6 +234,22 @@ func (s pipelinePanelState) renderSection(width int, phase int) []string {
 		lines = append(lines, " "+zeroTheme.faint.Render("action: ")+zeroTheme.muted.Render(truncateStep(current.detail, maxInt(4, width-9))))
 		if current.progress > 0 {
 			lines = append(lines, " "+renderPipelineProgressBar(current.progress, width))
+		}
+	}
+	if len(s.messages) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, zeroTheme.muted.Bold(true).Render("MESSAGES"))
+		start := 0
+		if len(s.messages) > 3 {
+			start = len(s.messages) - 3
+		}
+		for _, msg := range s.messages[start:] {
+			glyph := zeroTheme.amber.Render("…")
+			if msg.resolved {
+				glyph = zeroTheme.green.Render("✓")
+			}
+			body := msg.from + " -> " + msg.to + ": " + msg.detail
+			lines = append(lines, " "+glyph+" "+zeroTheme.muted.Render(truncateStep(body, room)))
 		}
 	}
 	return lines
