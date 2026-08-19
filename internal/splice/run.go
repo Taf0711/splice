@@ -859,6 +859,20 @@ func runPass(
 		priorSummaries[stageName] = *record.OutputSummary
 		priorChangedFiles[stageName] = append([]string(nil), stageChangedFiles(output)...)
 		outputs = append(outputs, output)
+
+		// DM2: when the test runner completes with failing tests, route a focused
+		// revision request back to code_writer and re-run the tests. The repair
+		// loop is bounded (maxLocalRepairs) and only fires when a code_writer
+		// summary exists to re-enter.
+		if stageName == "test_runner" && record.Status == schemas.StageCompleted {
+			if results, ok := output.Data["test_results"].(schemas.TestRunResults); ok && results.Failed() > 0 {
+				if _, hasWriter := priorSummaries["code_writer"]; hasWriter {
+					if _, rerr := attemptLocalRepair(ctx, runID, iteration, plan, registry, provider, options, workDir, runner, mem, tr, wallDeadline, &records, &outputs, &priorSummaries, &priorChangedFiles, output); rerr != nil {
+						return records, outputs, false, rerr
+					}
+				}
+			}
+		}
 	}
 
 	return records, outputs, true, nil

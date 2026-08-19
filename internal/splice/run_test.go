@@ -3328,3 +3328,192 @@ func TestPipelineAutoGrantPermissionEventIsGranted(t *testing.T) {
 		t.Fatalf("auto-grant event = action=%s granted=%v, want allow/true", last.Action, last.PermissionGranted)
 	}
 }
+
+// repairTestPlan is a two-stage plan (code_writer, test_runner) with a valid
+// token budget so the repair loop can re-enter code_writer.
+func repairTestPlan() schemas.ExecutionPlan {
+	return schemas.ExecutionPlan{
+		Tier:          schemas.TierStandard,
+		RequestIntent: "implement the feature",
+		Stages: []schemas.ExecutionStage{
+			{Name: "code_writer", Budget: schemas.StageBudget{InputMax: 1000, OutputMax: 1000}},
+			{Name: "test_runner", Budget: schemas.StageBudget{}},
+		},
+		TokenBudget: schemas.TokenBudget{TotalInputBudget: 10000, TotalOutputBudget: 10000, OverflowPolicy: "abort"},
+	}
+}
+
+func repairCodeWriterOutput() schemas.HarnessStageOutput {
+	return schemas.HarnessStageOutput{
+		Summary:    "wrote implementation",
+		Confidence: 0.9,
+		Usage:      &schemas.StageUsage{InputTokens: 100, OutputTokens: 50},
+		Data:       map[string]any{"code_writer_output": schemas.CodeWriterOutput{Files: []schemas.FileChange{{Path: "main.go", ChangeType: "create"}}}},
+	}
+}
+
+func repairTestResults(status string) schemas.HarnessStageOutput {
+	return schemas.HarnessStageOutput{
+		Summary:    "tests run",
+		Confidence: 0.8,
+		Data: map[string]any{"test_results": schemas.TestRunResults{
+			Command: []string{"go", "test"},
+			Tests:   []schemas.TestCaseResult{{Name: "TestAdd", Status: status, Message: "assertion failed"}},
+		}},
+	}
+}
+
+func TestRunPassRepairsFailingTests(t *testing.T) {
+	plan := repairTestPlan()
+	writerCalls := 0
+	testCalls := 0
+	registry := stageRegistry{
+		"code_writer": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			writerCalls++
+			return repairCodeWriterOutput(), nil
+		}),
+		"test_runner": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			testCalls++
+			status := "failed"
+			if testCalls >= 2 {
+				status = "passed"
+			}
+			return repairTestResults(status), nil
+		}),
+	}
+
+	records, _, completed, err := runPass(context.Background(), "run-repair", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, nil)
+	if err != nil || !completed {
+		t.Fatalf("runPass: completed=%v err=%v", completed, err)
+	}
+	if writerCalls != 2 || testCalls != 2 {
+		t.Fatalf("calls = code_writer %d test_runner %d, want 2/2", writerCalls, testCalls)
+	}
+
+	// The landmine: a SECOND code_writer record for the iteration makes
+	// applyRequestLedger error. The repair must merge, never append.
+	var writerRecords, runnerRecords int
+	for _, rec := range records {
+		switch rec.Name {
+		case "code_writer":
+			writerRecords++
+			if rec.TokensInput != 200 || rec.TokensOutput != 100 {
+				t.Fatalf("merged code_writer usage = %d/%d, want 200/100", rec.TokensInput, rec.TokensOutput)
+			}
+		case "test_runner":
+			runnerRecords++
+		}
+	}
+	if writerRecords != 1 || runnerRecords != 1 {
+		t.Fatalf("records = %#v, want exactly one code_writer and one test_runner record", records)
+	}
+}
+
+func TestRunPassRepairRevisionContextNamesFailingTest(t *testing.T) {
+	plan := repairTestPlan()
+	var writerInputs []schemas.HarnessStageInput
+	testCalls := 0
+	registry := stageRegistry{
+		"code_writer": stageFunc(func(_ context.Context, input schemas.HarnessStageInput, _ zeroruntime.Provider, _ stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			writerInputs = append(writerInputs, input)
+			return repairCodeWriterOutput(), nil
+		}),
+		"test_runner": stageFunc(func(_ context.Context, _ schemas.HarnessStageInput, _ zeroruntime.Provider, _ stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			testCalls++
+			status := "failed"
+			if testCalls >= 2 {
+				status = "passed"
+			}
+			return repairTestResults(status), nil
+		}),
+	}
+
+	if _, _, _, err := runPass(context.Background(), "run-repair-ctx", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, nil); err != nil {
+		t.Fatalf("runPass: %v", err)
+	}
+	if len(writerInputs) != 2 {
+		t.Fatalf("code_writer inputs = %d, want 2 (initial + repair)", len(writerInputs))
+	}
+	rev := writerInputs[1].RevisionContext
+	if rev == nil || !strings.Contains(*rev, "TestAdd") {
+		t.Fatalf("repair RevisionContext = %#v, want it to name the failing test", rev)
+	}
+}
+
+func TestRunPassRepairCapsAtTwo(t *testing.T) {
+	plan := repairTestPlan()
+	writerCalls := 0
+	testCalls := 0
+	registry := stageRegistry{
+		"code_writer": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			writerCalls++
+			return repairCodeWriterOutput(), nil
+		}),
+		"test_runner": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			testCalls++
+			return repairTestResults("failed"), nil // always failing
+		}),
+	}
+
+	records, _, completed, err := runPass(context.Background(), "run-repair-cap", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, nil)
+	if err != nil || !completed {
+		t.Fatalf("runPass: completed=%v err=%v", completed, err)
+	}
+	if writerCalls != 3 || testCalls != 3 {
+		t.Fatalf("calls = code_writer %d test_runner %d, want 3/3 (initial + 2 capped repairs)", writerCalls, testCalls)
+	}
+	var writerRecords, runnerRecords int
+	for _, rec := range records {
+		switch rec.Name {
+		case "code_writer":
+			writerRecords++
+		case "test_runner":
+			runnerRecords++
+		}
+	}
+	if writerRecords != 1 || runnerRecords != 1 {
+		t.Fatalf("records = %#v, want one record each after capped repairs", records)
+	}
+}
+
+func TestRunPassNoRepairWhenTestsPass(t *testing.T) {
+	plan := repairTestPlan()
+	writerCalls := 0
+	registry := stageRegistry{
+		"code_writer": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			writerCalls++
+			return repairCodeWriterOutput(), nil
+		}),
+		"test_runner": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			return repairTestResults("passed"), nil
+		}),
+	}
+
+	if _, _, _, err := runPass(context.Background(), "run-repair-pass", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, nil); err != nil {
+		t.Fatalf("runPass: %v", err)
+	}
+	if writerCalls != 1 {
+		t.Fatalf("code_writer calls = %d, want 1 (no repair when tests pass)", writerCalls)
+	}
+}
+
+func TestRunPassNoRepairWhenTestResultsAbsent(t *testing.T) {
+	plan := repairTestPlan()
+	writerCalls := 0
+	registry := stageRegistry{
+		"code_writer": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			writerCalls++
+			return repairCodeWriterOutput(), nil
+		}),
+		"test_runner": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			return schemas.HarnessStageOutput{Summary: "no test results", Confidence: 1}, nil
+		}),
+	}
+
+	if _, _, _, err := runPass(context.Background(), "run-repair-absent", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, nil); err != nil {
+		t.Fatalf("runPass: %v", err)
+	}
+	if writerCalls != 1 {
+		t.Fatalf("code_writer calls = %d, want 1 (no repair when test_results absent)", writerCalls)
+	}
+}

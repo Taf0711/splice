@@ -140,6 +140,22 @@ func (tr *runTraceAccumulator) recordStageCompletion(rec schemas.StageRecord) {
 	tr.completedStages = append(tr.completedStages, rec)
 }
 
+// replaceStageRecord replaces the completed-stage record matching {Name,
+// Iteration}, or appends when absent. Re-invocations (the repair loop) merge
+// into one record per iteration, so the trace keeps a single record too.
+func (tr *runTraceAccumulator) replaceStageRecord(rec schemas.StageRecord) {
+	if tr == nil {
+		return
+	}
+	for i, existing := range tr.completedStages {
+		if existing.Name == rec.Name && existing.Iteration == rec.Iteration {
+			tr.completedStages[i] = rec
+			return
+		}
+	}
+	tr.completedStages = append(tr.completedStages, rec)
+}
+
 // persistPartial writes a partial trace with status "running" reflecting the
 // stages and iterations completed so far. Best-effort: a build or write failure
 // marks the trace partial and never aborts the run.

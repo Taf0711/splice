@@ -125,6 +125,36 @@ func TestPersistPartialDegradesOnWriteFailure(t *testing.T) {
 // TestSplitTestCounts pins the Q2 test split: a test declared in a file the
 // test generator wrote this run is authored; everything else is preexisting.
 // The aggregate totals are unchanged by the split.
+func TestReplaceStageRecord(t *testing.T) {
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		RequestIntent: "x",
+		Stages:        []schemas.ExecutionStage{{Name: "code_writer", Budget: schemas.StageBudget{InputMax: 1, OutputMax: 1}}},
+		TokenBudget:   schemas.TokenBudget{TotalInputBudget: 1, TotalOutputBudget: 1, OverflowPolicy: "abort"},
+	}
+	tr := newRunTraceAccumulator(&traceMemoryStore{}, "run-1", "sess-1", "/repo", plan, "active")
+	tr.recordStageCompletion(schemas.StageRecord{Name: "code_writer", Iteration: 1, Status: schemas.StageCompleted})
+	tr.recordStageCompletion(schemas.StageRecord{Name: "test_runner", Iteration: 1, Status: schemas.StageCompleted})
+
+	// Replace on match, preserving order.
+	tr.replaceStageRecord(schemas.StageRecord{Name: "code_writer", Iteration: 1, Status: schemas.StageCompleted, TokensInput: 200})
+	if len(tr.completedStages) != 2 {
+		t.Fatalf("completedStages = %d, want 2 (replaced, not appended)", len(tr.completedStages))
+	}
+	if tr.completedStages[0].TokensInput != 200 || tr.completedStages[0].Name != "code_writer" {
+		t.Fatalf("code_writer record not replaced in place: %#v", tr.completedStages)
+	}
+	if tr.completedStages[1].Name != "test_runner" {
+		t.Fatalf("order not preserved: %#v", tr.completedStages)
+	}
+
+	// Append on absence.
+	tr.replaceStageRecord(schemas.StageRecord{Name: "static_analyzer", Iteration: 1, Status: schemas.StageCompleted})
+	if len(tr.completedStages) != 3 || tr.completedStages[2].Name != "static_analyzer" {
+		t.Fatalf("append on absence failed: %#v", tr.completedStages)
+	}
+}
+
 func TestSplitTestCounts(t *testing.T) {
 	authored := []schemas.FileChange{
 		{Path: "add_test.go", ChangeType: "create", Content: "package add\n\nfunc TestAdd(t *testing.T) {}\n"},
