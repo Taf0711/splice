@@ -197,26 +197,11 @@ func (m model) startApprovalConfirmed(source splicerun.DesignTransitionSource, p
 	sessionEvents := []pendingSessionEvent{}
 	estimator := usage.NewCostEstimator(&m.modelCatalog)
 	callSeq := map[string]int{}
-
-	onText := options.OnText
-	options.OnText = func(delta string) {
-		m.sendAgentText(runID, delta)
-		if onText != nil {
-			onText(delta)
-		}
-	}
 	onReasoning := options.OnReasoning
 	options.OnReasoning = func(delta string) {
-		m.sendAgentReasoning(runID, delta)
 		if onReasoning != nil {
 			onReasoning(delta)
 		}
-	}
-	options.OnToolCallStart = func(id, name string) {
-		m.sendToolCallStreamStart(runID, id, name)
-	}
-	options.OnToolCallDelta = func(id, fragment string) {
-		m.sendToolCallStreamDelta(runID, id, fragment)
 	}
 	onToolOutput := options.OnToolOutput
 	options.OnToolOutput = func(snapshot tools.OutputSnapshot) {
@@ -399,6 +384,7 @@ func (m model) startApprovalConfirmed(source splicerun.DesignTransitionSource, p
 			onPermission(event)
 		}
 	}
+	options = (runtimeWiring{runID: runID, send: m.runtimeMessageSink}).decorate(options)
 
 	options.EstimateUsageCost = estimator
 	onAttributedUsage := options.OnAttributedUsage
@@ -459,6 +445,9 @@ func (m model) startApprovalConfirmed(source splicerun.DesignTransitionSource, p
 			if prepared.Path != "" {
 				copy := prepared
 				preparedPtr = &copy
+			}
+			if m.captureRunOptions != nil {
+				m.captureRunOptions(options)
 			}
 			result, err := splicerun.RunDesignPlanWithResume(runCtx, plan, provider, options, mem, nil, splicerun.RunDesignPlanOptions{
 				PlanID:          planID,

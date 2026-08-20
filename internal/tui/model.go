@@ -5385,10 +5385,6 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				options.ProjectRoot = preparedWorktree.RepoRoot
 			}
 		}
-		if m.captureRunOptions != nil {
-			m.captureRunOptions(options)
-		}
-
 		// Post-edit self-correction is on by default in the TUI but kept FAST: it
 		// runs LSP diagnostics over the changed files only — cheap, change-scoped,
 		// and a no-op when no language server is installed. The project test plan
@@ -5463,27 +5459,16 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			reasoningLast = time.Time{}
 		}
 
-		onText := options.OnText
-		options.OnText = func(delta string) {
+		beforeText := func(string) {
 			if firstTokenAt.IsZero() {
 				firstTokenAt = m.now()
 			}
 			if strings.TrimSpace(reasoningText) != "" {
 				flushReasoning(m.now())
 			}
-			m.sendAgentText(runID, delta)
-			if onText != nil {
-				onText(delta)
-			}
 		}
 		// Stream a tool call's arguments live so a long write_file/edit shows the
 		// code being written instead of a frozen spinner (see streamingToolCallView).
-		options.OnToolCallStart = func(id, name string) {
-			m.sendToolCallStreamStart(runID, id, name)
-		}
-		options.OnToolCallDelta = func(id, fragment string) {
-			m.sendToolCallStreamDelta(runID, id, fragment)
-		}
 		onToolOutput := options.OnToolOutput
 		options.OnToolOutput = func(snapshot tools.OutputSnapshot) {
 			if m.runtimeMessageSink != nil {
@@ -5602,18 +5587,12 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 
 		onStageEvent := options.OnStageEvent
 		options.OnStageEvent = func(event agent.StageEvent) {
-			m.sendPipelineStageEvent(runID, event)
 			if onStageEvent != nil {
 				onStageEvent(event)
 			}
 		}
 		onReasoning := options.OnReasoning
 		options.OnReasoning = func(delta string) {
-			// Live runs update the panel through OnStageEvent. Swallow the
-			// deprecated marker so it is not treated as reasoning text.
-			if strings.HasPrefix(delta, "\x00STAGE") {
-				return
-			}
 			now := m.now()
 			if firstTokenAt.IsZero() && strings.TrimSpace(delta) != "" {
 				firstTokenAt = now
@@ -5625,7 +5604,6 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				reasoningLast = now
 			}
 			reasoningText += delta
-			m.sendAgentReasoning(runID, delta)
 			if onReasoning != nil {
 				onReasoning(delta)
 			}
@@ -5894,6 +5872,10 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 					downstreamAU(au)
 				}
 			}
+		}
+		options = (runtimeWiring{runID: runID, send: m.runtimeMessageSink, beforeText: beforeText}).decorate(options)
+		if m.captureRunOptions != nil {
+			m.captureRunOptions(options)
 		}
 
 		var result agent.Result
