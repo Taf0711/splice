@@ -24,6 +24,19 @@ func TestBuildStageRegistryRegistersAllStages(t *testing.T) {
 	}
 }
 
+func TestEveryStageDeclaresDescription(t *testing.T) {
+	registry, err := buildStageRegistry(PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir())
+	if err != nil {
+		t.Fatalf("buildStageRegistry: %v", err)
+	}
+	for name, stage := range registry {
+		description := stage.Capabilities().Description
+		if description == "" || len([]rune(description)) > 40 {
+			t.Errorf("stage %q has invalid description %q", name, description)
+		}
+	}
+}
+
 func TestStageCapabilitiesMatchLegacySwitches(t *testing.T) {
 	registry, err := buildStageRegistry(PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir())
 	if err != nil {

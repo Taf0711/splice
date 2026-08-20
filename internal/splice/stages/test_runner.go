@@ -22,7 +22,7 @@ type TestRunner struct{}
 var _ Stage = TestRunner{}
 
 func (TestRunner) Capabilities() Capabilities {
-	return Capabilities{ModelFree: true}
+	return Capabilities{ModelFree: true, Description: "running tests"}
 }
 
 func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options StageOptions) (schemas.HarnessStageOutput, error) {

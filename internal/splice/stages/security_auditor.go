@@ -29,7 +29,7 @@ var _ Stage = (*SecurityAuditor)(nil)
 // deterministic verification checks. Returns a named error if no checks are
 // provided.
 func (*SecurityAuditor) Capabilities() Capabilities {
-	return Capabilities{ModelFree: true}
+	return Capabilities{ModelFree: true, Description: "auditing security"}
 }
 
 func NewSecurityAuditor(checks ...VerificationCheck) (*SecurityAuditor, error) {

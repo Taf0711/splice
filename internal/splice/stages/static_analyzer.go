@@ -45,7 +45,7 @@ type StaticAnalyzer struct {
 var _ Stage = (*StaticAnalyzer)(nil)
 
 func (*StaticAnalyzer) Capabilities() Capabilities {
-	return Capabilities{ModelFree: true}
+	return Capabilities{ModelFree: true, Description: "checking code quality"}
 }
 
 // NewStaticAnalyzer constructs a static analyzer from one or more

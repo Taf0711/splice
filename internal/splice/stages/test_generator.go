@@ -24,7 +24,7 @@ type TestGenerator struct{}
 var _ Stage = TestGenerator{}
 
 func (TestGenerator) Capabilities() Capabilities {
-	return Capabilities{ConsumesMemory: true, PullContext: true}
+	return Capabilities{ConsumesMemory: true, PullContext: true, Description: "generating tests"}
 }
 
 func (TestGenerator) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options StageOptions) (schemas.HarnessStageOutput, error) {

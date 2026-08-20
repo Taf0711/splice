@@ -1891,6 +1891,126 @@ func TestRunPassEmitsStageEvents(t *testing.T) {
 	}
 }
 
+func TestRunningStageEventCarriesDescription(t *testing.T) {
+	const description = "checking the stage detail"
+	var events []agent.StageEvent
+	var inputs []schemas.HarnessStageInput
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		RequestIntent: "test stage detail",
+		Stages:        []schemas.ExecutionStage{{Name: "described_stage"}},
+	}
+	_, _, completed, err := runPass(context.Background(), "run-stage-detail", 1, plan, stageRegistry{
+		"described_stage": &capturingStage{inputs: &inputs, caps: stages.Capabilities{Description: description}},
+	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{
+		OnStageEvent: func(event agent.StageEvent) { events = append(events, event) },
+	}), t.TempDir(), nil, time.Time{}, nil, nil, nil)
+	if err != nil || !completed {
+		t.Fatalf("runPass failed: err=%v completed=%v", err, completed)
+	}
+	if len(events) < 2 {
+		t.Fatalf("events = %d, want running and completed", len(events))
+	}
+	running := events[0]
+	if running.Status != "running" || running.Detail != description || running.Progress != 0 {
+		t.Fatalf("running event = %+v, want detail %q and progress 0", running, description)
+	}
+}
+
+func TestRunningStageEventOmitsEmptyDescription(t *testing.T) {
+	var events []agent.StageEvent
+	var inputs []schemas.HarnessStageInput
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		RequestIntent: "test empty stage detail",
+		Stages:        []schemas.ExecutionStage{{Name: "empty_description_stage"}},
+	}
+	_, _, completed, err := runPass(context.Background(), "run-empty-stage-detail", 1, plan, stageRegistry{
+		"empty_description_stage": &capturingStage{inputs: &inputs},
+	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{
+		OnStageEvent: func(event agent.StageEvent) { events = append(events, event) },
+	}), t.TempDir(), nil, time.Time{}, nil, nil, nil)
+	if err != nil || !completed {
+		t.Fatalf("runPass failed: err=%v completed=%v", err, completed)
+	}
+	if len(events) < 2 {
+		t.Fatalf("events = %d, want running and completed", len(events))
+	}
+	running := events[0]
+	if running.Status != "running" || running.Detail != "" || running.Progress != 0 {
+		t.Fatalf("running event = %+v, want empty detail and progress 0", running)
+	}
+}
+
+func TestModelBackedStageEventNamesModel(t *testing.T) {
+	t.Run("model-backed", func(t *testing.T) {
+		const description = "writing code changes"
+		const model = "claude-opus-5"
+		var events []agent.StageEvent
+		var inputs []schemas.HarnessStageInput
+		plan := schemas.ExecutionPlan{
+			Tier:          schemas.TierLight,
+			RequestIntent: "test resolved model detail",
+			Stages:        []schemas.ExecutionStage{{Name: "model_stage"}},
+		}
+		_, _, completed, err := runPass(context.Background(), "run-model-stage-detail", 1, plan, stageRegistry{
+			"model_stage": &capturingStage{inputs: &inputs, caps: stages.Capabilities{Description: description}},
+		}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{
+			StageModelResolver: func(string) (agent.ModelSelection, error) {
+				return agent.ModelSelection{Provider: &namedProvider{name: "resolved-provider"}, ProviderName: "resolved-provider", Model: model}, nil
+			},
+			OnStageEvent: func(event agent.StageEvent) { events = append(events, event) },
+		}), t.TempDir(), nil, time.Time{}, nil, nil, nil)
+		if err != nil || !completed {
+			t.Fatalf("runPass failed: err=%v completed=%v", err, completed)
+		}
+		if len(events) < 3 {
+			t.Fatalf("events = %d, want two running events and completed", len(events))
+		}
+		if events[0].Status != "running" || events[0].Detail != description || events[0].Progress != 0 {
+			t.Fatalf("initial running event = %+v", events[0])
+		}
+		if events[1].Status != "running" || events[1].Detail != description+" · "+model || events[1].Progress != 0 {
+			t.Fatalf("resolved running event = %+v", events[1])
+		}
+	})
+
+	t.Run("model-free", func(t *testing.T) {
+		var events []agent.StageEvent
+		var inputs []schemas.HarnessStageInput
+		resolverCalls := 0
+		plan := schemas.ExecutionPlan{
+			Tier:          schemas.TierLight,
+			RequestIntent: "test model-free stage detail",
+			Stages:        []schemas.ExecutionStage{{Name: "model_free_stage"}},
+		}
+		_, _, completed, err := runPass(context.Background(), "run-model-free-stage-detail", 1, plan, stageRegistry{
+			"model_free_stage": &capturingStage{inputs: &inputs, caps: stages.Capabilities{ModelFree: true, Description: "running local checks"}},
+		}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{
+			StageModelResolver: func(string) (agent.ModelSelection, error) {
+				resolverCalls++
+				return agent.ModelSelection{Provider: &namedProvider{name: "unexpected"}, Model: "unexpected-model"}, nil
+			},
+			OnStageEvent: func(event agent.StageEvent) { events = append(events, event) },
+		}), t.TempDir(), nil, time.Time{}, nil, nil, nil)
+		if err != nil || !completed {
+			t.Fatalf("runPass failed: err=%v completed=%v", err, completed)
+		}
+		if resolverCalls != 0 {
+			t.Fatalf("resolver calls = %d, want 0", resolverCalls)
+		}
+		runningCount := 0
+		for _, event := range events {
+			if event.Status == "running" {
+				runningCount++
+			}
+		}
+		if runningCount != 1 {
+			t.Fatalf("running event count = %d, want 1: %+v", runningCount, events)
+		}
+	})
+}
+
 func TestRunPassEmitsStageEventsWithChangedFiles(t *testing.T) {
 	workDir := t.TempDir()
 	intent := "test task"

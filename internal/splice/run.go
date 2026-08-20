@@ -742,7 +742,7 @@ func runPass(
 		}
 
 		emitProgress(options, fmt.Sprintf("[%s] stage started\n", stageName))
-		emitStageEvent(options, stageName, "running", "", 0, nil)
+		emitStageEvent(options, stageName, "running", caps.Description, 0, nil)
 
 		// Model-free stages skip provider resolution and attribution.
 		modelFree := caps.ModelFree
@@ -758,6 +758,9 @@ func runPass(
 				emitProgress(options, fmt.Sprintf("[%s] stage model resolution failed: %v\n", stageName, rerr))
 			} else if resolved.Provider != nil {
 				selection = resolved
+				if resolved.Model != "" {
+					emitStageEvent(options, stageName, "running", caps.Description+" · "+resolved.Model, 0, nil)
+				}
 			}
 		}
 		if modelFree {

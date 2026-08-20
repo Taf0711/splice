@@ -21,7 +21,7 @@ type PlanCritic struct{}
 var _ Stage = PlanCritic{}
 
 func (PlanCritic) Capabilities() Capabilities {
-	return Capabilities{}
+	return Capabilities{Description: "reviewing the plan"}
 }
 
 func (PlanCritic) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options StageOptions) (schemas.HarnessStageOutput, error) {

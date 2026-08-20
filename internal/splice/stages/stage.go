@@ -14,6 +14,10 @@ type Capabilities struct {
 	ConsumesMemory bool
 	PullContext    bool
 	TimeoutSeconds int
+	// Description is a short present-tense phrase naming what this stage does,
+	// shown as the live action in the pipeline panel. Example: "writing code
+	// changes". Keep it under 40 characters and do not end it with a period.
+	Description string
 }
 
 // Stage is one deterministic or LLM-backed pipeline step.

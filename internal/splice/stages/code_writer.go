@@ -24,7 +24,7 @@ type CodeWriter struct{}
 var _ Stage = CodeWriter{}
 
 func (CodeWriter) Capabilities() Capabilities {
-	return Capabilities{ConsumesMemory: true, PullContext: true}
+	return Capabilities{ConsumesMemory: true, PullContext: true, Description: "writing code changes"}
 }
 
 func (CodeWriter) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options StageOptions) (schemas.HarnessStageOutput, error) {
