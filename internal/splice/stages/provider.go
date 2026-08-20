@@ -134,7 +134,13 @@ func callValidatedToolUse(ctx context.Context, provider zeroruntime.Provider, mo
 			}
 			return collected, err
 		}
-		addUsage(&total, collected.Usage)
+		// Sum the value the request ledger records, not the raw stream usage. The
+		// ledger normalizes each attempt via NormalizeUsage and zeroes
+		// un-normalizable reports (e.g. reasoning > output, which a provider that
+		// reports completion excluding reasoning produces); summing the raw usage
+		// here would count an attempt the ledger zeroed, and the stage total would
+		// then diverge from the ledger and abort the run at applyRequestLedger.
+		addUsage(&total, normalizedAttemptUsage(collected.Usage))
 		if err := validate(collected); err == nil {
 			collected.Usage = total
 			return collected, nil
@@ -169,11 +175,40 @@ func shouldRetryWithAutoToolChoice(err error) bool {
 	return strings.HasSuffix(message, "provider request error: Provider returned error")
 }
 
+// normalizedAttemptUsage converts one attempt's collected usage into the exact
+// value the request ledger records: NormalizeUsage over the canonical fields,
+// zeroed when it fails. The request ledger (recordingOptions) applies the same
+// policy, so summing this value keeps the stage total and the ledger equal by
+// construction. Summing the raw stream usage instead would count an attempt the
+// ledger zeroed and abort the run at applyRequestLedger.
+func normalizedAttemptUsage(usage zeroruntime.Usage) zeroruntime.Usage {
+	normalized, err := zeroruntime.NormalizeUsage(zeroruntime.TokenUsage{
+		InputTokens:       usage.InputTokens,
+		PromptTokens:      usage.PromptTokens,
+		OutputTokens:      usage.OutputTokens,
+		CompletionTokens:  usage.CompletionTokens,
+		ReasoningTokens:   usage.ReasoningTokens,
+		CachedInputTokens: usage.CachedInputTokens,
+		CacheWriteTokens:  usage.CacheWriteTokens,
+		WebSearchRequests: usage.WebSearchRequests,
+		WebSearchEngine:   usage.WebSearchEngine,
+	})
+	if err != nil {
+		return zeroruntime.Usage{}
+	}
+	return normalized
+}
+
 func addUsage(total *zeroruntime.Usage, current zeroruntime.Usage) {
-	total.InputTokens += current.InputTokens
-	total.OutputTokens += current.OutputTokens
-	total.PromptTokens += current.PromptTokens
-	total.CompletionTokens += current.CompletionTokens
+	// Sum the EFFECTIVE canonical fields only. Input/Output are the normalized
+	// aliases of Prompt/Completion (NormalizeUsage sets both), so summing both
+	// pairs would double-count; and when an attempt's usage survives un-normalized
+	// (mergeUsageSnapshot's fallback on a reasoning>output report), only the raw
+	// Prompt/Completion fields are set, so the effective accessors are the only
+	// source that is always right. This keeps the summed total byte-consistent
+	// with the per-stream ledger, which also sums Effective* fields.
+	total.InputTokens += current.EffectiveInputTokens()
+	total.OutputTokens += current.EffectiveOutputTokens()
 	total.CachedInputTokens += current.CachedInputTokens
 	total.CacheWriteTokens += current.CacheWriteTokens
 	total.ReasoningTokens += current.ReasoningTokens

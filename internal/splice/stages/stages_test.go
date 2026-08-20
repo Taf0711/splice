@@ -304,6 +304,44 @@ func TestValidatedToolUseRetriesSchemaInvalidArguments(t *testing.T) {
 	}
 }
 
+// TestValidatedToolUseUsageMatchesStreamCallbacks pins the retry accounting:
+// the accumulated stage usage (usageFromCollected over the summed total) must
+// equal the per-stream usage-callback sum (the ledger's view). A validation
+// retry (fail once, then succeed) must not diverge, or applyRequestLedger trips.
+func TestValidatedToolUseUsageMatchesStreamCallbacks(t *testing.T) {
+	valid := schemas.CodeWriterOutput{Files: []schemas.FileChange{}, Language: "go", Intent: "no changes", Confidence: 0.9}
+	validArgs, _ := json.Marshal(valid)
+	provider := &retryScriptProvider{scripts: [][]zeroruntime.StreamEvent{
+		{
+			{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 4, OutputTokens: 3, ReasoningTokens: 1}},
+			{Type: zeroruntime.StreamEventDone},
+		},
+		append([]zeroruntime.StreamEvent{{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 5, OutputTokens: 4, ReasoningTokens: 2}}}, toolCallEvent(codeWriterToolName, string(validArgs))...),
+	}}
+
+	var ledgerIn, ledgerOut, ledgerReasoning int
+	callbacks := &zeroruntime.CollectOptions{
+		OnUsageResult: func(u zeroruntime.Usage, _ bool, _ *float64) {
+			ledgerIn += u.EffectiveInputTokens()
+			ledgerOut += u.EffectiveOutputTokens()
+			ledgerReasoning += u.ReasoningTokens
+		},
+	}
+
+	collected, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(), 0, callbacks, func(c *zeroruntime.CollectedStream) error {
+		_, e := parseCodeWriterOutput(c)
+		return e
+	}, "")
+	if err != nil {
+		t.Fatalf("callValidatedToolUse: %v", err)
+	}
+
+	usage := usageFromCollected(collected)
+	if usage.InputTokens != ledgerIn || usage.OutputTokens != ledgerOut || usage.ReasoningTokens != ledgerReasoning {
+		t.Fatalf("stage usage %+v diverges from stream-callback sum {in:%d out:%d reasoning:%d}", usage, ledgerIn, ledgerOut, ledgerReasoning)
+	}
+}
+
 func TestCodeWriterDoesNotRetryApplicationFailure(t *testing.T) {
 	output := schemas.CodeWriterOutput{
 		Files:      []schemas.FileChange{{Path: "main.go", Content: "package main\n", ChangeType: "create"}},
