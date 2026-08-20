@@ -22,6 +22,23 @@ import (
 
 var errAlreadyRunning = errors.New("splice-memd already running")
 
+type idleTracker struct {
+	timeout      time.Duration
+	lastActivity time.Time
+}
+
+func newIdleTracker(timeout time.Duration, now time.Time) *idleTracker {
+	return &idleTracker{
+		timeout:      timeout,
+		lastActivity: now,
+	}
+}
+
+func (t *idleTracker) expired(now time.Time) bool {
+	// A non-positive timeout disables idle expiration.
+	return t.timeout > 0 && now.Sub(t.lastActivity) >= t.timeout
+}
+
 // server holds the HTTP server, the store, and the Unix socket path.
 type server struct {
 	store      *store.Store

@@ -714,3 +714,54 @@ func TestUpsertOversizedBody(t *testing.T) {
 		t.Fatalf("expected 4xx for oversized body, got %d: %s", w.Code, w.Body.String())
 	}
 }
+
+// --- idle shutdown (P1) ---
+
+// TestIdleTrackerExpiresOnlyAfterTimeout pins the idle rule at its boundary.
+// Expected values are stated against the rule (expired when the gap since the
+// last activity reaches the timeout), not recomputed from the implementation.
+func TestIdleTrackerExpiresOnlyAfterTimeout(t *testing.T) {
+	base := time.Date(2026, 8, 20, 15, 4, 0, 0, time.UTC)
+	const timeout = 15 * time.Minute
+
+	cases := []struct {
+		name    string
+		elapsed time.Duration
+		want    bool
+	}{
+		{"no time passed", 0, false},
+		{"one minute in", time.Minute, false},
+		{"one second short of the timeout", 14*time.Minute + 59*time.Second, false},
+		{"exactly at the timeout", 15 * time.Minute, true},
+		{"well past the timeout", 30 * time.Minute, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tracker := newIdleTracker(timeout, base)
+			if got := tracker.expired(base.Add(tc.elapsed)); got != tc.want {
+				t.Fatalf("expired after %s = %v, want %v", tc.elapsed, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestIdleTrackerDisabledNeverExpires pins the disabled path. A non-positive
+// timeout means idle shutdown is off, so the tracker must never report expiry.
+// Without this the >= boundary makes a zero timeout expire instantly, which
+// would stop the daemon the moment a watchdog first checked it.
+func TestIdleTrackerDisabledNeverExpires(t *testing.T) {
+	base := time.Date(2026, 8, 20, 15, 4, 0, 0, time.UTC)
+
+	for _, timeout := range []time.Duration{0, -time.Minute} {
+		t.Run(timeout.String(), func(t *testing.T) {
+			tracker := newIdleTracker(timeout, base)
+			if tracker.expired(base) {
+				t.Fatalf("expired at the base instant with timeout %s, want never", timeout)
+			}
+			if tracker.expired(base.Add(24 * time.Hour)) {
+				t.Fatalf("expired after 24h with timeout %s, want never", timeout)
+			}
+		})
+	}
+}
