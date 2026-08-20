@@ -759,7 +759,11 @@ func runPass(
 			} else if resolved.Provider != nil {
 				selection = resolved
 				if resolved.Model != "" {
-					emitStageEvent(options, stageName, "running", caps.Description+" · "+resolved.Model, 0, nil)
+					detail := resolved.Model
+					if caps.Description != "" {
+						detail = caps.Description + " · " + resolved.Model
+					}
+					emitStageEvent(options, stageName, "running", detail, 0, nil)
 				}
 			}
 		}

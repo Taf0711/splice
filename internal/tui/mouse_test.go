@@ -49,6 +49,30 @@ func TestMouseClickSelectsThenAppliesCommandSuggestionRow(t *testing.T) {
 	}
 }
 
+func TestSuggestionClickTargetsWithSidebarActive(t *testing.T) {
+	m := mouseTestModel()
+	m.transcript = append(m.transcript, transcriptRow{kind: rowToolCall, tool: "read_file", detail: "main.go"})
+	m = typeRunes(t, m, "/")
+	if !m.suggestionsActive() {
+		t.Fatalf("expected command suggestions, got %#v", m.suggestions)
+	}
+	if len(m.suggestions) < 2 {
+		t.Fatalf("expected at least two command suggestions, got %#v", m.suggestions)
+	}
+	if !m.sidebarAvailable() {
+		t.Fatal("sidebar should remain available while the suggestion palette is open")
+	}
+
+	width := chatWidth(m.width - sidebarWidth(m.width) - 3)
+	top := m.overlayMouseTop(len(viewLines(m.suggestionOverlay(width))), width)
+	click := testMouseClick(tea.MouseLeft, 1, top+4)
+	updated, _ := m.Update(click)
+	next := updated.(model)
+	if next.suggestionIdx != 1 {
+		t.Fatalf("suggestion index after clicking the second row = %d, want 1", next.suggestionIdx)
+	}
+}
+
 func TestMouseClickSelectsThenAppliesPickerRow(t *testing.T) {
 	m := mouseTestModel()
 	m.modelName = "claude-sonnet-4.5"

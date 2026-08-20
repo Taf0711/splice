@@ -2009,6 +2009,34 @@ func TestModelBackedStageEventNamesModel(t *testing.T) {
 			t.Fatalf("running event count = %d, want 1: %+v", runningCount, events)
 		}
 	})
+
+	t.Run("model-backed-empty-description", func(t *testing.T) {
+		const model = "claude-opus-5"
+		var events []agent.StageEvent
+		var inputs []schemas.HarnessStageInput
+		plan := schemas.ExecutionPlan{
+			Tier:          schemas.TierLight,
+			RequestIntent: "test empty resolved model detail",
+			Stages:        []schemas.ExecutionStage{{Name: "empty_model_stage"}},
+		}
+		_, _, completed, err := runPass(context.Background(), "run-empty-model-stage-detail", 1, plan, stageRegistry{
+			"empty_model_stage": &capturingStage{inputs: &inputs, caps: stages.Capabilities{}},
+		}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{
+			StageModelResolver: func(string) (agent.ModelSelection, error) {
+				return agent.ModelSelection{Provider: &namedProvider{name: "resolved-provider"}, Model: model}, nil
+			},
+			OnStageEvent: func(event agent.StageEvent) { events = append(events, event) },
+		}), t.TempDir(), nil, time.Time{}, nil, nil, nil)
+		if err != nil || !completed {
+			t.Fatalf("runPass failed: err=%v completed=%v", err, completed)
+		}
+		if len(events) < 3 {
+			t.Fatalf("events = %d, want two running events and completed", len(events))
+		}
+		if events[1].Detail != model {
+			t.Fatalf("resolved running detail = %q, want %q", events[1].Detail, model)
+		}
+	})
 }
 
 func TestRunPassEmitsStageEventsWithChangedFiles(t *testing.T) {

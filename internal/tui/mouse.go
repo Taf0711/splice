@@ -326,7 +326,7 @@ func (m *model) selectSuggestionAtMouse(msg tea.MouseMsg) (mouseSelectionTarget,
 	if !m.suggestionsActive() || len(m.suggestions) == 0 {
 		return mouseSelectionTarget{}, false
 	}
-	width := chatWidth(m.width)
+	width := m.chatColumnWidth()
 	hit, ok := m.overlayMouseHit(msg, m.suggestionOverlay(width), width)
 	if !ok {
 		return mouseSelectionTarget{}, false

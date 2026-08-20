@@ -67,7 +67,7 @@ func (m model) handleExecCommand(text string) (model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Execution mode. Type a prompt to run it through the pipeline, or /design to return to design conversation."})
 		return m, nil
 	}
-	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: "/exec " + text})
+	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Execution mode."})
 	return m.launchPrompt(text)
 }
 

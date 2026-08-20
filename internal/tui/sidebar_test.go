@@ -8,7 +8,9 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
+	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/sessions"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/tools"
@@ -222,6 +224,25 @@ func TestSidebarActiveGating(t *testing.T) {
 	sub.subchat.active = true
 	if sub.sidebarActive() {
 		t.Fatalf("sidebar should be inactive during subchat drill-in")
+	}
+}
+
+func TestSidebarSurvivesSuggestionPalette(t *testing.T) {
+	m := sidebarTestModel()
+	m.pipeline.reset()
+	m.pipeline.applyStageEvent(agent.StageEvent{Name: "code_writer", Status: "running"})
+	m = typeRunes(t, m, "/")
+	if !m.suggestionsActive() {
+		t.Fatalf("expected command suggestions, got %#v", m.suggestions)
+	}
+	if !m.sidebarAvailable() {
+		t.Fatal("sidebar should remain available during an active pipeline run")
+	}
+	if !m.sidebarToggleAllowed() {
+		t.Fatal("sidebar toggle should remain allowed while the suggestion palette is open")
+	}
+	if plain := ansi.Strip(m.transcriptView()); !strings.Contains(plain, "PIPELINE") {
+		t.Fatalf("rendered sidebar should contain PIPELINE while suggestions are open:\n%s", plain)
 	}
 }
 

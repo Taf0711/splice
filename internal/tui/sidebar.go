@@ -54,7 +54,7 @@ func (m model) sidebarToggleAllowed() bool {
 		return false
 	}
 	if m.setup.visible || m.providerWizard != nil || m.stageModelWizard != nil || m.mcpAddWizard != nil ||
-		m.mcpManager != nil || m.picker != nil || m.suggestionsActive() {
+		m.mcpManager != nil || m.picker != nil {
 		return false
 	}
 	// Home/welcome screen: stay single-column until there's real conversation.
@@ -83,12 +83,11 @@ func (m model) sidebarAvailable() bool {
 	if widthTier(m.width) < tierMedium {
 		return false
 	}
-	// Full-screen overlays (setup, wizards, pickers, the empty-state suggestion
-	// list) take over the chat column and render at full width; suppress the
-	// second column while any is active so their geometry and mouse hit-testing
-	// stay full-width as before.
+	// Full-screen overlays (setup, wizards, and pickers) take over the chat
+	// column and render at full width; suppress the second column while any is
+	// active so their geometry and mouse hit-testing stay full-width as before.
 	if m.setup.visible || m.helpOverlay || m.providerWizard != nil || m.stageModelWizard != nil || m.mcpAddWizard != nil ||
-		m.mcpManager != nil || m.picker != nil || m.suggestionsActive() {
+		m.mcpManager != nil || m.picker != nil {
 		return false
 	}
 	// Home/welcome screen: stay single-column until there's real conversation, so

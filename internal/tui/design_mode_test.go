@@ -775,6 +775,35 @@ func TestExecCommandLeavesDesignMode(t *testing.T) {
 	}
 }
 
+func TestExecCommandAppendsSinglePromptRow(t *testing.T) {
+	m := newDesignModeTestModel(t.TempDir(), &fakeProvider{}, testSessionStore(t))
+	m.designMode = true
+
+	updated, _ := m.handleExecCommand("implement the plan")
+	userRows := 0
+	promptRows := 0
+	systemRows := 0
+	for _, row := range updated.transcript {
+		switch row.kind {
+		case rowUser:
+			userRows++
+			if row.text == "implement the plan" {
+				promptRows++
+			}
+		case rowSystem:
+			if row.text == "Execution mode." {
+				systemRows++
+			}
+		}
+	}
+	if userRows != 1 || promptRows != 1 {
+		t.Fatalf("expected one user row carrying the prompt, got userRows=%d promptRows=%d: %#v", userRows, promptRows, updated.transcript)
+	}
+	if systemRows != 1 {
+		t.Fatalf("expected one execution mode notice, got %d: %#v", systemRows, updated.transcript)
+	}
+}
+
 func TestExecCommandRunsPrompt(t *testing.T) {
 	store := testSessionStore(t)
 	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
