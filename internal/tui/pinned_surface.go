@@ -45,3 +45,53 @@ func (e pinnedSurfaceEnvelope) planBudget(cap int) int {
 	}
 	return e.available
 }
+
+// pinnedSurfaceClaim is one surface's request against the shared envelope.
+// Surfaces declare claims; the allocator, not the footer, decides who renders
+// at how many lines. Adding a surface means adding a claim, not new inline
+// budget math in the footer.
+type pinnedSurfaceClaim struct {
+	// name identifies the surface. It is the grant's key in the allocator
+	// result.
+	name string
+	// lines is how many lines the surface wants.
+	lines int
+	// exact makes the claim all-or-nothing: a strip renders whole or not at
+	// all. An exact claim that does not fit is skipped and leaves its space
+	// for later claims. A flexible claim takes what remains, up to lines.
+	exact bool
+}
+
+// pinnedSurfaceGrant is the allocator's decision for one claim.
+type pinnedSurfaceGrant struct {
+	name  string
+	lines int
+}
+
+// allocatePinnedSurfaces divides the envelope among claims in slice order.
+// Order is priority: earlier claims pick first. An exact claim is granted
+// only when its full request fits the remaining space; otherwise it is
+// skipped and the space stays available for later claims. A flexible claim
+// is granted the remaining space up to its request. Zero available grants
+// nothing. The result has one grant per claim, in claim order.
+func allocatePinnedSurfaces(e pinnedSurfaceEnvelope, claims []pinnedSurfaceClaim) []pinnedSurfaceGrant {
+	grants := make([]pinnedSurfaceGrant, 0, len(claims))
+	remaining := e.available
+	for _, claim := range claims {
+		grant := 0
+		if remaining > 0 && claim.lines > 0 {
+			if claim.exact {
+				if claim.lines <= remaining {
+					grant = claim.lines
+				}
+			} else if claim.lines < remaining {
+				grant = claim.lines
+			} else {
+				grant = remaining
+			}
+		}
+		remaining -= grant
+		grants = append(grants, pinnedSurfaceGrant{name: claim.name, lines: grant})
+	}
+	return grants
+}

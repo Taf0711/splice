@@ -3081,35 +3081,51 @@ func (m model) footerView(width int) string {
 			strip = m.pipeline.presentation().renderStripWithChip(width, m.spinnerPhase, m.worktreeChip())
 		}
 
-		// When the terminal height is known, the envelope budgets the plan
-		// against the fixed chrome plus one minimum transcript row, clamping to
-		// the historical one-third cap. The strip takes its share first when it
-		// fits; when it does not, the plan gets the full envelope (so a short
-		// terminal drops the strip rather than starving the plan). When height
-		// is unknown (headless), fall back to the historical plan cap.
-		budget := m.pinnedPlanMaxHeight()
-		var stripBudget int
+		// Pinned surfaces declare claims against the shared envelope and the
+		// allocator divides it: the strip is an exact claim (renders whole or
+		// not at all, and a skipped strip leaves its space to the plan), the
+		// plan is flexible (takes what remains). When the terminal height is
+		// known, the plan claims the whole envelope so the allocator hands it
+		// exactly the space the strip did not take. When height is unknown
+		// (headless), there is no envelope: both surfaces render at their
+		// declared heights, preserving the historical cap path.
+		claims := make([]pinnedSurfaceClaim, 0, 2)
+		if strip != nil {
+			claims = append(claims, pinnedSurfaceClaim{name: "pipeline-strip", lines: len(strip), exact: true})
+		}
 		if m.height > 0 {
 			envelope := computePinnedSurfaceEnvelope(m.height, headerLines, chromeLines)
-			if strip != nil && len(strip) <= envelope.available {
-				stripBudget = len(strip)
+			claims = append(claims, pinnedSurfaceClaim{name: "plan", lines: envelope.available})
+			for _, grant := range allocatePinnedSurfaces(envelope, claims) {
+				switch grant.name {
+				case "pipeline-strip":
+					if grant.lines > 0 {
+						for _, line := range strip {
+							footer.WriteString(line)
+							footer.WriteString("\n")
+						}
+					}
+				case "plan":
+					if grant.lines > 0 {
+						if plan := m.renderPinnedPlanPanel(width, grant.lines); plan != "" {
+							footer.WriteString(plan)
+							footer.WriteString("\n")
+						}
+					}
+				}
 			}
-			budget = envelope.planBudget(maxInt(0, envelope.available-stripBudget))
-		} else if strip != nil {
-			// Headless/unmeasured: no envelope, but preserve the strip above the
-			// plan using the historical cap path (the plan renders too).
-			stripBudget = len(strip)
-		}
-		if strip != nil && stripBudget > 0 {
-			for _, line := range strip {
-				footer.WriteString(line)
-				footer.WriteString("\n")
+		} else {
+			if strip != nil {
+				for _, line := range strip {
+					footer.WriteString(line)
+					footer.WriteString("\n")
+				}
 			}
-		}
-		if budget > 0 {
-			if plan := m.renderPinnedPlanPanel(width, budget); plan != "" {
-				footer.WriteString(plan)
-				footer.WriteString("\n")
+			if budget := m.pinnedPlanMaxHeight(); budget > 0 {
+				if plan := m.renderPinnedPlanPanel(width, budget); plan != "" {
+					footer.WriteString(plan)
+					footer.WriteString("\n")
+				}
 			}
 		}
 	}

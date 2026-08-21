@@ -132,3 +132,119 @@ func TestShortTerminalNeverTopClipsPlanSilently(t *testing.T) {
 		})
 	}
 }
+
+// TestAllocatePinnedSurfacesExactSkipLeavesSpace pins the strip rule: a strip
+// taller than the remaining envelope is skipped whole, and the plan still
+// receives everything left instead of being starved by a partial strip.
+func TestAllocatePinnedSurfacesExactSkipLeavesSpace(t *testing.T) {
+	env := pinnedSurfaceEnvelope{available: 6}
+	grants := allocatePinnedSurfaces(env, []pinnedSurfaceClaim{
+		{name: "pipeline-strip", lines: 8, exact: true},
+		{name: "plan", lines: 6},
+	})
+	if grants[0].lines != 0 {
+		t.Fatalf("strip grant = %d, want 0 (does not fit)", grants[0].lines)
+	}
+	if grants[1].lines != 6 {
+		t.Fatalf("plan grant = %d, want full 6 (skip must not starve later claims)", grants[1].lines)
+	}
+}
+
+// TestAllocatePinnedSurfacesFlexibleTakesRemaining pins the plan rule: a
+// flexible claim takes what remains after earlier claims, capped by its own
+// request.
+func TestAllocatePinnedSurfacesFlexibleTakesRemaining(t *testing.T) {
+	env := pinnedSurfaceEnvelope{available: 10}
+	grants := allocatePinnedSurfaces(env, []pinnedSurfaceClaim{
+		{name: "pipeline-strip", lines: 3, exact: true},
+		{name: "plan", lines: 10},
+	})
+	if grants[0].lines != 3 || grants[1].lines != 7 {
+		t.Fatalf("grants = %d/%d, want strip 3 then plan 7", grants[0].lines, grants[1].lines)
+	}
+	// A flexible claim smaller than the remainder stops at its request.
+	grants = allocatePinnedSurfaces(env, []pinnedSurfaceClaim{
+		{name: "a", lines: 2, exact: true},
+		{name: "b", lines: 4},
+	})
+	if grants[1].lines != 4 {
+		t.Fatalf("flexible grant = %d, want request 4", grants[1].lines)
+	}
+}
+
+// TestAllocatePinnedSurfacesZeroEnvelopeGrantsNothing pins the short-height
+// guard: zero available renders no surface rather than clipping from the top.
+func TestAllocatePinnedSurfacesZeroEnvelopeGrantsNothing(t *testing.T) {
+	env := pinnedSurfaceEnvelope{}
+	grants := allocatePinnedSurfaces(env, []pinnedSurfaceClaim{
+		{name: "pipeline-strip", lines: 2, exact: true},
+		{name: "plan", lines: 9},
+	})
+	for _, grant := range grants {
+		if grant.lines != 0 {
+			t.Fatalf("grant %s = %d, want 0 at zero envelope", grant.name, grant.lines)
+		}
+	}
+}
+
+// TestAllocatePinnedSurfacesOrderIsPriorityAndExtends pins the modular seam:
+// order decides priority, and a third surface joins by appending a claim —
+// no footer math changes required.
+func TestAllocatePinnedSurfacesOrderIsPriorityAndExtends(t *testing.T) {
+	env := pinnedSurfaceEnvelope{available: 5}
+	grants := allocatePinnedSurfaces(env, []pinnedSurfaceClaim{
+		{name: "first", lines: 4, exact: true},
+		{name: "second", lines: 4, exact: true},
+		{name: "third", lines: 2},
+	})
+	if grants[0].lines != 4 || grants[1].lines != 0 || grants[2].lines != 1 {
+		t.Fatalf("grants = %v, want first 4, second skipped, third remainder 1", grants)
+	}
+}
+
+// TestFooterPinnedAllocationMatchesLegacyFormula is the equivalence property
+// for the TP6 refactor: across a grid of heights, chrome and header sizes,
+// and strip lengths, the allocator must hand out exactly the budgets the
+// previous inline footer math computed. Any drift here is a visible-output
+// regression.
+func TestFooterPinnedAllocationMatchesLegacyFormula(t *testing.T) {
+	legacyBudgets := func(total, headerLines, chromeLines, stripLen int) (stripBudget, planBudget int) {
+		if total <= 0 {
+			return 0, 0
+		}
+		envelope := computePinnedSurfaceEnvelope(total, headerLines, chromeLines)
+		if stripLen > 0 && stripLen <= envelope.available {
+			stripBudget = stripLen
+		}
+		return stripBudget, envelope.planBudget(maxInt(0, envelope.available-stripBudget))
+	}
+	for total := 1; total <= 40; total++ {
+		for headerLines := 0; headerLines <= 4; headerLines++ {
+			for chromeLines := 0; chromeLines <= 8; chromeLines++ {
+				for stripLen := 0; stripLen <= 8; stripLen++ {
+					wantStrip, wantPlan := legacyBudgets(total, headerLines, chromeLines, stripLen)
+					envelope := computePinnedSurfaceEnvelope(total, headerLines, chromeLines)
+					var claims []pinnedSurfaceClaim
+					if stripLen > 0 {
+						claims = append(claims, pinnedSurfaceClaim{name: "pipeline-strip", lines: stripLen, exact: true})
+					}
+					claims = append(claims, pinnedSurfaceClaim{name: "plan", lines: envelope.available})
+					grants := allocatePinnedSurfaces(envelope, claims)
+					gotStrip, gotPlan := 0, 0
+					for _, grant := range grants {
+						switch grant.name {
+						case "pipeline-strip":
+							gotStrip = grant.lines
+						case "plan":
+							gotPlan = grant.lines
+						}
+					}
+					if gotStrip != wantStrip || gotPlan != wantPlan {
+						t.Fatalf("total=%d hdr=%d chrome=%d strip=%d: allocator=(%d,%d) legacy=(%d,%d)",
+							total, headerLines, chromeLines, stripLen, gotStrip, gotPlan, wantStrip, wantPlan)
+					}
+				}
+			}
+		}
+	}
+}
