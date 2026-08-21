@@ -153,6 +153,16 @@ func (w runtimeWiring) decorate(options agent.Options) agent.Options {
 			return agent.SurfaceToUserDecision{Action: agent.SurfaceToUserAbort, Message: ctx.Err().Error()}, ctx.Err()
 		}
 	}
+	priorPipelinePlan := options.OnPipelinePlan
+	options.OnPipelinePlan = func(event agent.PipelinePlanEvent) {
+		if w.send != nil {
+			copied := agent.PipelinePlanEvent{Stages: append([]string(nil), event.Stages...)}
+			w.send(pipelinePlanMsg{runID: w.runID, event: copied})
+		}
+		if priorPipelinePlan != nil {
+			priorPipelinePlan(event)
+		}
+	}
 	priorStageEvent := options.OnStageEvent
 	options.OnStageEvent = func(event agent.StageEvent) {
 		if w.send != nil {

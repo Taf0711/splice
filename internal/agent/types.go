@@ -266,6 +266,11 @@ type SurfaceToUserDecision struct {
 	Message string              `json:"message,omitempty"`
 }
 
+// PipelinePlanEvent announces the ordered stage roster for one pipeline plan.
+type PipelinePlanEvent struct {
+	Stages []string
+}
+
 // StageEvent is a typed pipeline stage lifecycle event.
 type StageEvent struct {
 	Name         string
@@ -458,6 +463,9 @@ type Options struct {
 	// with a clear message rather than silently retrying. Splice addition
 	// (AR10d).
 	OnSurfaceToUser func(ctx context.Context, req SurfaceToUserRequest) (SurfaceToUserDecision, error)
+
+	// OnPipelinePlan receives the ordered stage roster before stage execution.
+	OnPipelinePlan func(PipelinePlanEvent)
 
 	// OnStageEvent receives typed pipeline stage lifecycle events. The
 	// deprecated NUL marker on OnReasoning remains for one release.

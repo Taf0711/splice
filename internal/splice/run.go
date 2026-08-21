@@ -251,6 +251,7 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 	if err != nil {
 		return schemas.PipelineResult{}, fmt.Errorf("build stage registry: %w", err)
 	}
+	emitPipelinePlan(options, plan)
 
 	// A trace store is the memory client asserting the TraceStore interface; a
 	// nil MemoryStore (memory off) means tracing is off too.
@@ -1523,14 +1524,24 @@ func emitProgress(options PipelineRunConfig, text string) {
 }
 
 // stageEventMarkerBegin and stageEventMarkerEnd delimit a structured stage event
-// embedded in the OnReasoning stream. The TUI detects and parses these markers
-// to drive its PIPELINE sidebar without a dedicated agent.Options callback
-// (which is upstream Zero code we do not modify). The payload between the
-// markers is a compact JSON object.
+// in the OnReasoning stream. Stored sessions can use these markers to rebuild
+// the pipeline panel. The payload is a compact JSON object.
 const (
 	stageEventMarkerBegin = "\x00STAGE"
 	stageEventMarkerEnd   = "\x00"
 )
+
+// emitPipelinePlan announces the complete ordered roster before stage execution.
+func emitPipelinePlan(options PipelineRunConfig, plan schemas.ExecutionPlan) {
+	if options.OnPipelinePlan == nil {
+		return
+	}
+	stages := make([]string, len(plan.Stages))
+	for i, stage := range plan.Stages {
+		stages[i] = stage.Name
+	}
+	options.OnPipelinePlan(agent.PipelinePlanEvent{Stages: stages})
+}
 
 // emitStageEvent sends a typed stage lifecycle event. It also writes the
 // deprecated NUL marker on OnReasoning for one release. status is one of:

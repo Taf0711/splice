@@ -601,10 +601,11 @@ func (m model) renderContextSidebar(width, height int) []string {
 	}
 
 	// PIPELINE section (pipeline stages).
-	if !m.pipeline.isEmpty() {
+	pipeline := m.pipeline.presentation()
+	if pipeline.active && pipeline.total > 0 {
 		add("")
-		add(m.pipeline.headerLineWithChip(width, m.worktreeChip()))
-		lines = append(lines, m.pipeline.renderSection(width, m.spinnerPhase)...)
+		add(pipeline.headerLineWithChip(width, m.worktreeChip()))
+		lines = append(lines, pipeline.renderSection(width, m.spinnerPhase)...)
 	}
 
 	// MEMORY section: compact observation count when the sidecar is active.

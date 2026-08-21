@@ -80,6 +80,23 @@ func (writer *execEventWriter) text(delta string) {
 	writer.writeStdout(delta)
 }
 
+func (writer *execEventWriter) pipelinePlan(event agent.PipelinePlanEvent) {
+	if writer.format == execOutputJSON {
+		writer.writeJSON(map[string]any{
+			"type":   "pipeline_plan",
+			"stages": append([]string(nil), event.Stages...),
+		})
+		return
+	}
+	if writer.format == execOutputStreamJSON {
+		writer.writeStreamJSON(streamjson.Event{
+			Type:   streamjson.EventPipelinePlan,
+			RunID:  writer.runID,
+			Stages: append([]string(nil), event.Stages...),
+		})
+	}
+}
+
 func (writer *execEventWriter) stage(event agent.StageEvent) {
 	if writer.format == execOutputJSON {
 		writer.writeJSON(map[string]any{

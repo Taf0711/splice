@@ -32,6 +32,7 @@ const (
 	EventCheckpoint         EventType = "checkpoint"
 	EventRestore            EventType = "restore"
 	EventUsage              EventType = "usage"
+	EventPipelinePlan       EventType = "pipeline_plan"
 	EventStage              EventType = "stage"
 	EventFinal              EventType = "final"
 	EventWarning            EventType = "warning"
@@ -93,6 +94,7 @@ type Event struct {
 	Truncated         *bool             `json:"truncated,omitempty"`
 	Redacted          *bool             `json:"redacted,omitempty"`
 	ChangedFiles      []string          `json:"changedFiles,omitempty"`
+	Stages            []string          `json:"stages,omitempty"`
 	Display           *Display          `json:"display,omitempty"`
 	Checkpoint        *CheckpointInfo   `json:"checkpoint,omitempty"`
 	Meta              map[string]string `json:"meta,omitempty"`

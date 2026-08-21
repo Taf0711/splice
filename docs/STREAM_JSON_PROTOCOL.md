@@ -66,6 +66,7 @@ permission_request
 permission_decision
 permission
 usage
+pipeline_plan
 stage
 checkpoint
 restore
@@ -116,6 +117,18 @@ reasoning text when a provider returns it.
 
 Reasoning events are progress data. Splice does not append them to the final
 answer.
+
+### Pipeline plan events
+
+A `pipeline_plan` event lists the complete stage roster before execution.
+The list order matches the execution plan.
+
+```json
+{"schemaVersion":2,"type":"pipeline_plan","runId":"run_20260810_abc123","stages":["code_writer","test_runner","acceptance_verifier"]}
+```
+
+A client can use this roster to calculate stable pipeline progress. Do not
+estimate progress from the stages seen so far.
 
 ### Stage events
 

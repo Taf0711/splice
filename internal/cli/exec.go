@@ -775,6 +775,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		DisabledTools:           options.disabledTools,
 		OnText:                  writer.text,
 		OnReasoning:             writer.reasoning,
+		OnPipelinePlan:          writer.pipelinePlan,
 		OnStageEvent:            writer.stage,
 		OnToolCall: func(call agent.ToolCall) {
 			writer.toolCall(call, registry)

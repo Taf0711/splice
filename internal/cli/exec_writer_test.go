@@ -12,6 +12,32 @@ import (
 // escalate_model is a control-only tool (SideEffectNone). The stream-json tool
 // call must report sideEffect "none", not "unknown", so automation sees the
 // promised value.
+func TestStreamJSONPipelinePlanCarriesOrderedStageRoster(t *testing.T) {
+	var stdout bytes.Buffer
+	writer := execEventWriter{
+		stdout:       &stdout,
+		format:       execOutputStreamJSON,
+		runID:        "run_test",
+		streamedText: &strings.Builder{},
+	}
+	writer.pipelinePlan(agent.PipelinePlanEvent{Stages: []string{"code_writer", "test_runner"}})
+	if writer.err != nil {
+		t.Fatalf("writer: %v", writer.err)
+	}
+	events := decodeJSONLines(t, stdout.String())
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	event := events[0]
+	if event["type"] != "pipeline_plan" {
+		t.Fatalf("type = %#v, want pipeline_plan", event["type"])
+	}
+	stages, ok := event["stages"].([]any)
+	if !ok || len(stages) != 2 || stages[0] != "code_writer" || stages[1] != "test_runner" {
+		t.Fatalf("stages = %#v, want ordered roster", event["stages"])
+	}
+}
+
 func TestStreamJSONStageEventIsTyped(t *testing.T) {
 	var stdout bytes.Buffer
 	writer := execEventWriter{

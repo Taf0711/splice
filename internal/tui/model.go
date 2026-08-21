@@ -626,6 +626,11 @@ type pipelineStageMarkerMsg struct {
 	line  string
 }
 
+type pipelinePlanMsg struct {
+	runID int
+	event agent.PipelinePlanEvent
+}
+
 type pipelineStageEventMsg struct {
 	runID int
 	event agent.StageEvent
@@ -2599,6 +2604,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.plan.updateFromItems(msg.items, m.now())
 		return m, nil
+	case pipelinePlanMsg:
+		if msg.runID != m.activeRunID {
+			return m, nil
+		}
+		m.pipeline.applyPlan(msg.event)
+		return m, nil
 	case pipelineStageEventMsg:
 		if msg.runID != m.activeRunID {
 			return m, nil
@@ -3047,44 +3058,91 @@ func (m model) footerView(width int) string {
 		footer.WriteString(m.statusLine(width))
 		return footer.String()
 	}
-	// Pinned plan panel: sits directly above the composer so it stays visible
-	// while the transcript scrolls underneath (a streaming turn no longer pushes
-	// the plan off-screen). Budgeted to at most a third of the screen height; a
-	// taller plan collapses to a one-line summary so the composer always stays
-	// on screen. Skipped in the subchat drill-in: m.plan belongs to the PARENT
-	// run, not the subagent/swarm child session being viewed there, so pinning it
-	// above that composer would show unrelated state.
+	// The pinned surface (today the plan panel, later also a pipeline strip)
+	// sits directly above the composer so it stays visible while the transcript
+	// scrolls underneath. Its height comes from the shared pinned-surface
+	// envelope, which reserves the fixed chrome (idle hint, queued preview,
+	// composer, status) and a minimum transcript row, so a short terminal
+	// collapses the plan instead of silently clipping it from the top. Skips the
+	// subchat drill-in: m.plan belongs to the PARENT run, not the child session
+	// viewed there, so pinning it above that composer would show unrelated state.
+	chrome := m.footerChrome(width)
+	chromeLines := len(viewLines(chrome))
 	if !m.subchat.active {
-		if plan := m.renderPinnedPlanPanel(width, m.pinnedPlanMaxHeight()); plan != "" {
-			footer.WriteString(plan)
-			footer.WriteString("\n")
+		header := m.normalTranscriptHeader(width)
+		headerLines := len(viewLines(header))
+		// The pinned pipeline strip renders only when the wide sidebar cannot
+		// host the PIPELINE section. Mirror the eager plan-panel rule: gate on
+		// sidebarAvailable (not sidebarActive) so a Ctrl+B hide hides the
+		// pipeline and the sidebar does not render the same roster twice, and
+		// hide within the two-column chat-column copy.
+		var strip []string
+		if !m.hidePinnedPlan && !m.sidebarAvailable() && !m.pipeline.isEmpty() {
+			strip = m.pipeline.presentation().renderStripWithChip(width, m.spinnerPhase, m.worktreeChip())
+		}
+
+		// When the terminal height is known, the envelope budgets the plan
+		// against the fixed chrome plus one minimum transcript row, clamping to
+		// the historical one-third cap. The strip takes its share first when it
+		// fits; when it does not, the plan gets the full envelope (so a short
+		// terminal drops the strip rather than starving the plan). When height
+		// is unknown (headless), fall back to the historical plan cap.
+		budget := m.pinnedPlanMaxHeight()
+		var stripBudget int
+		if m.height > 0 {
+			envelope := computePinnedSurfaceEnvelope(m.height, headerLines, chromeLines)
+			if strip != nil && len(strip) <= envelope.available {
+				stripBudget = len(strip)
+			}
+			budget = envelope.planBudget(maxInt(0, envelope.available-stripBudget))
+		} else if strip != nil {
+			// Headless/unmeasured: no envelope, but preserve the strip above the
+			// plan using the historical cap path (the plan renders too).
+			stripBudget = len(strip)
+		}
+		if strip != nil && stripBudget > 0 {
+			for _, line := range strip {
+				footer.WriteString(line)
+				footer.WriteString("\n")
+			}
+		}
+		if budget > 0 {
+			if plan := m.renderPinnedPlanPanel(width, budget); plan != "" {
+				footer.WriteString(plan)
+				footer.WriteString("\n")
+			}
 		}
 	}
-	// The row above the composer: transient copy feedback takes priority; otherwise
-	// a faint idle affordance — discoverable key hints on the left, a jump-to-bottom
-	// cue on the right when scrolled up. Always one line (blank when nothing shows),
-	// so the footer height is unchanged.
-	if copyStatus := strings.TrimSpace(m.copyStatus); copyStatus != "" {
-		footer.WriteString(rightAlignedLine(zeroTheme.ink.Render(copyStatus), width))
-	} else if left, right := m.composerIdleHint(), m.jumpToBottomHint(); left != "" || right != "" {
-		footer.WriteString(fitStyledLine(joinHeaderLine("  "+left, right, width), width))
-	}
-	footer.WriteString("\n")
-	// A message typed while a run is active is queued for the next turn; show its
-	// preview directly ABOVE the input box (not below), so it reads as "waiting to
-	// send" sitting on top of what you're currently typing.
-	if queued := renderQueuedMessagePreview(m.queuedMessage, width); queued != "" {
-		footer.WriteString(queued)
-		footer.WriteString("\n")
-	}
-	footer.WriteString(m.composerBox(width))
-	if hint := m.composerDescriptionHint(width); hint != "" {
-		footer.WriteString("\n")
-		footer.WriteString(hint)
-	}
-	footer.WriteString("\n")
-	footer.WriteString(m.statusLine(width))
+	footer.WriteString(chrome)
 	return footer.String()
+}
+
+// footerChrome renders the fixed rows that sit below the pinned surface: the
+// idle/copy hint row, the queued-message preview, the composer box, the
+// slash-command description hint, and the status line. It is the byte-wise
+// tail of footerView, extracted so the pinned-surface envelope can measure the
+// chrome height before deciding how much room the plan (and later the pipeline
+// strip) may take.
+func (m model) footerChrome(width int) string {
+	var chrome strings.Builder
+	if copyStatus := strings.TrimSpace(m.copyStatus); copyStatus != "" {
+		chrome.WriteString(rightAlignedLine(zeroTheme.ink.Render(copyStatus), width))
+	} else if left, right := m.composerIdleHint(), m.jumpToBottomHint(); left != "" || right != "" {
+		chrome.WriteString(fitStyledLine(joinHeaderLine("  "+left, right, width), width))
+	}
+	chrome.WriteString("\n")
+	if queued := renderQueuedMessagePreview(m.queuedMessage, width); queued != "" {
+		chrome.WriteString(queued)
+		chrome.WriteString("\n")
+	}
+	chrome.WriteString(m.composerBox(width))
+	if hint := m.composerDescriptionHint(width); hint != "" {
+		chrome.WriteString("\n")
+		chrome.WriteString(hint)
+	}
+	chrome.WriteString("\n")
+	chrome.WriteString(m.statusLine(width))
+	return chrome.String()
 }
 
 // composerIdleHint returns a faint one-line key-shortcut hint shown above the

@@ -51,6 +51,7 @@ type PipelineRunConfig struct {
 	StageModelResolver      agent.StageModelResolver
 	EscalationModelResolver agent.EscalationModelResolver
 	OnSurfaceToUser         func(ctx context.Context, req agent.SurfaceToUserRequest) (agent.SurfaceToUserDecision, error)
+	OnPipelinePlan          func(agent.PipelinePlanEvent)
 	OnStageEvent            func(agent.StageEvent)
 	ModelRegistry           modelregistry.Registry
 }
@@ -95,6 +96,7 @@ func PipelineConfigFromAgentOptions(options agent.Options) PipelineRunConfig {
 		StageModelResolver:      options.StageModelResolver,
 		EscalationModelResolver: options.EscalationModelResolver,
 		OnSurfaceToUser:         options.OnSurfaceToUser,
+		OnPipelinePlan:          options.OnPipelinePlan,
 		OnStageEvent:            options.OnStageEvent,
 		ModelRegistry:           options.ModelRegistry,
 	}

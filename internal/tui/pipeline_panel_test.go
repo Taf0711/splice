@@ -46,6 +46,52 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+func TestPipelinePlanSeedsStableStageRoster(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.activeRunID = 3
+	updated, _ := m.Update(pipelinePlanMsg{
+		runID: 3,
+		event: agent.PipelinePlanEvent{Stages: []string{"code_writer", "test_runner", "acceptance_verifier"}},
+	})
+	m = updated.(model)
+
+	if len(m.pipeline.stages) != 3 {
+		t.Fatalf("stages = %d, want 3", len(m.pipeline.stages))
+	}
+	for i, want := range []string{"code_writer", "test_runner", "acceptance_verifier"} {
+		if got := m.pipeline.stages[i]; got.name != want || got.status != pipelineStagePending {
+			t.Fatalf("stage %d = %#v, want pending %q", i, got, want)
+		}
+	}
+
+	updated, _ = m.Update(pipelineStageEventMsg{
+		runID: 3,
+		event: agent.StageEvent{Name: "code_writer", Status: "running", Detail: "writing code changes"},
+	})
+	m = updated.(model)
+	if len(m.pipeline.stages) != 3 || m.pipeline.stages[0].status != pipelineStageRunning {
+		t.Fatalf("stage event changed roster: %#v", m.pipeline.stages)
+	}
+}
+
+func TestPipelinePresentationComputesOverallProgress(t *testing.T) {
+	var state pipelinePanelState
+	state.applyPlan(agent.PipelinePlanEvent{Stages: []string{"code_writer", "test_runner", "acceptance_verifier"}})
+	state.applyStageEvent(agent.StageEvent{Name: "code_writer", Status: "completed", Progress: 100})
+	state.applyStageEvent(agent.StageEvent{Name: "test_runner", Status: "running", Progress: 50})
+
+	presentation := state.presentation()
+	if presentation.done != 1 || presentation.total != 3 {
+		t.Fatalf("counts = %d/%d, want 1/3", presentation.done, presentation.total)
+	}
+	if presentation.progress != 50 {
+		t.Fatalf("progress = %d, want 50", presentation.progress)
+	}
+	if presentation.current == nil || presentation.current.name != "test_runner" {
+		t.Fatalf("current = %#v, want test_runner", presentation.current)
+	}
+}
+
 func TestPipelinePanelApplyStageEvent(t *testing.T) {
 	var state pipelinePanelState
 	state.applyStageEvent(agent.StageEvent{
@@ -131,6 +177,24 @@ func TestPipelinePanelRenderSectionGlyphs(t *testing.T) {
 	}
 }
 
+func TestPipelinePanelAlwaysShowsOverallProgress(t *testing.T) {
+	var state pipelinePanelState
+	state.applyPlan(agent.PipelinePlanEvent{Stages: []string{"code_writer", "test_runner", "acceptance_verifier"}})
+	state.applyStageEvent(agent.StageEvent{Name: "code_writer", Status: "running", Progress: 0})
+
+	plain := plainRender(t, strings.Join(state.renderSection(40, 0), "\n"))
+	if !strings.Contains(plain, "0%") {
+		t.Fatalf("running pipeline hid indeterminate progress: %q", plain)
+	}
+
+	state.applyStageEvent(agent.StageEvent{Name: "code_writer", Status: "completed", Progress: 100})
+	state.applyStageEvent(agent.StageEvent{Name: "test_runner", Status: "running", Progress: 50})
+	plain = plainRender(t, strings.Join(state.renderSection(40, 0), "\n"))
+	if !strings.Contains(plain, "50%") {
+		t.Fatalf("aggregate pipeline progress missing: %q", plain)
+	}
+}
+
 func TestPipelinePanelIncompleteIsTerminalAndNeverCurrent(t *testing.T) {
 	state := pipelinePanelState{
 		active: true,
@@ -149,7 +213,7 @@ func TestPipelinePanelIncompleteIsTerminalAndNeverCurrent(t *testing.T) {
 	}
 }
 
-func TestPipelinePanelHeaderCompletesWhenEveryStageIsTerminal(t *testing.T) {
+func TestPipelinePanelHeaderReportsFailedTerminalRosterInRed(t *testing.T) {
 	state := pipelinePanelState{
 		active: true,
 		stages: []pipelineStageRow{
@@ -160,9 +224,9 @@ func TestPipelinePanelHeaderCompletesWhenEveryStageIsTerminal(t *testing.T) {
 		},
 	}
 	got := state.headerLineWithChip(40, "")
-	want := sidebarHeaderWithCount("PIPELINE", "4/4", zeroTheme.green, 40)
+	want := sidebarHeaderWithCount("PIPELINE", "4/4", zeroTheme.red, 40)
 	if got != want {
-		t.Fatalf("terminal pipeline header = %q, want %q", got, want)
+		t.Fatalf("failed pipeline header = %q, want %q", got, want)
 	}
 }
 

@@ -17,6 +17,8 @@ control. `splice exec` provides a typed pipeline for scripts and automation.
 - [Design transitions](DESIGN_TRANSITIONS.md)
 - [Design revision context](DESIGN_REVISION_CONTEXT.md)
 - [Stream-JSON protocol](STREAM_JSON_PROTOCOL.md)
+- [Harness interface contract](HARNESS_INTERFACE.md)
+- [Pi harness integration](PI_HARNESS.md)
 - [Specialists](SPECIALISTS.md)
 
 ## Use automation

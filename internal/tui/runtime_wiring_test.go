@@ -77,6 +77,7 @@ func TestRunPathsFollowCallbackPolicies(t *testing.T) {
 		"OnToolOutput":        {class: "shared-live", execNonNil: true, approveNonNil: true},
 		"OnContext":           {class: "intentionally-nil", execNonNil: false, approveNonNil: false},
 		"OnSurfaceToUser":     {class: "shared-live", execNonNil: true, approveNonNil: true},
+		"OnPipelinePlan":      {class: "shared-live", execNonNil: true, approveNonNil: true},
 		"OnStageEvent":        {class: "shared-live", execNonNil: true, approveNonNil: true},
 	}
 
@@ -143,6 +144,22 @@ func TestApprovePathFeedsPipelinePanel(t *testing.T) {
 	}
 	if result, ok := resultMsg.(planExecutionResultMsg); ok && result.err != nil {
 		t.Fatalf("approve run failed: %v", result.err)
+	}
+	planAt, stageAt := -1, -1
+	for i, msg := range messages {
+		switch msg.(type) {
+		case pipelinePlanMsg:
+			if planAt == -1 {
+				planAt = i
+			}
+		case pipelineStageEventMsg:
+			if stageAt == -1 {
+				stageAt = i
+			}
+		}
+	}
+	if planAt < 0 || stageAt < 0 || planAt >= stageAt {
+		t.Fatalf("runtime message order: plan=%d stage=%d, want plan before stage", planAt, stageAt)
 	}
 	for _, msg := range messages {
 		updated, _ := started.Update(msg)
@@ -278,6 +295,23 @@ func TestDecorateDoesNotManufactureUnownedCallbacks(t *testing.T) {
 	}
 }
 
+func TestDecorateTransportsPipelinePlan(t *testing.T) {
+	var messages []tea.Msg
+	decorated := (runtimeWiring{runID: 7, send: func(msg tea.Msg) { messages = append(messages, msg) }}).decorate(agent.Options{})
+	decorated.OnPipelinePlan(agent.PipelinePlanEvent{Stages: []string{"code_writer", "test_runner"}})
+
+	if len(messages) != 1 {
+		t.Fatalf("messages = %d, want 1", len(messages))
+	}
+	msg, ok := messages[0].(pipelinePlanMsg)
+	if !ok {
+		t.Fatalf("message = %T, want pipelinePlanMsg", messages[0])
+	}
+	if msg.runID != 7 || !reflect.DeepEqual(msg.event.Stages, []string{"code_writer", "test_runner"}) {
+		t.Fatalf("pipeline plan message = %#v", msg)
+	}
+}
+
 func TestDecorateCallsPriorCallbacksOnce(t *testing.T) {
 	calls := map[string]int{}
 	increment := func(name string) { calls[name]++ }
@@ -301,7 +335,8 @@ func TestDecorateCallsPriorCallbacksOnce(t *testing.T) {
 			increment("surface")
 			return agent.SurfaceToUserDecision{Action: agent.SurfaceToUserContinue}, nil
 		},
-		OnStageEvent: func(agent.StageEvent) { increment("stage") },
+		OnPipelinePlan: func(agent.PipelinePlanEvent) { increment("pipeline-plan") },
+		OnStageEvent:   func(agent.StageEvent) { increment("stage") },
 	}
 	decorated := (runtimeWiring{runID: 11, send: func(tea.Msg) {}, beforeText: func(string) { increment("before-text") }}).decorate(options)
 	decorated.OnText("text")
@@ -318,9 +353,10 @@ func TestDecorateCallsPriorCallbacksOnce(t *testing.T) {
 	if _, err := decorated.OnSurfaceToUser(context.Background(), agent.SurfaceToUserRequest{}); err != nil {
 		t.Fatalf("surface callback: %v", err)
 	}
+	decorated.OnPipelinePlan(agent.PipelinePlanEvent{Stages: []string{"code_writer"}})
 	decorated.OnStageEvent(agent.StageEvent{Name: "code_writer", Status: "running"})
 
-	for _, name := range []string{"before-text", "text", "reasoning", "tool-start", "tool-delta", "permission-request", "ask-user", "tool-output", "surface", "stage"} {
+	for _, name := range []string{"before-text", "text", "reasoning", "tool-start", "tool-delta", "permission-request", "ask-user", "tool-output", "surface", "pipeline-plan", "stage"} {
 		if calls[name] != 1 {
 			t.Errorf("%s calls = %d, want 1", name, calls[name])
 		}

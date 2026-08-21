@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1624,6 +1625,31 @@ func TestSummarizeWorkspaceChangesGitAware(t *testing.T) {
 	}
 	if len(summary.DiffText) > defaultMaxDiffBytes {
 		t.Fatalf("diff length %d exceeds cap", len(summary.DiffText))
+	}
+}
+
+func TestEmitPipelinePlanProducesTypedStageRoster(t *testing.T) {
+	var events []agent.PipelinePlanEvent
+	options := PipelineConfigFromAgentOptions(agent.Options{
+		OnPipelinePlan: func(event agent.PipelinePlanEvent) { events = append(events, event) },
+	})
+	plan := schemas.ExecutionPlan{
+		Tier: schemas.TierStandard,
+		Stages: []schemas.ExecutionStage{
+			{Name: "code_writer"},
+			{Name: "test_runner"},
+			{Name: "acceptance_verifier"},
+		},
+	}
+
+	emitPipelinePlan(options, plan)
+
+	if len(events) != 1 {
+		t.Fatalf("pipeline plan events = %d, want 1", len(events))
+	}
+	want := []string{"code_writer", "test_runner", "acceptance_verifier"}
+	if !slices.Equal(events[0].Stages, want) {
+		t.Fatalf("planned stages = %v, want %v", events[0].Stages, want)
 	}
 }
 
