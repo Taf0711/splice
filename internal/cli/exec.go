@@ -23,6 +23,7 @@ import (
 	"github.com/Taf0711/splice/internal/providermodeldiscovery"
 	"github.com/Taf0711/splice/internal/providers"
 	"github.com/Taf0711/splice/internal/sandbox"
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
 	"github.com/Taf0711/splice/internal/sessions"
 	"github.com/Taf0711/splice/internal/specmode"
 	splicerun "github.com/Taf0711/splice/internal/splice"
@@ -629,6 +630,14 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if writer.err != nil {
 		return exitCrash
 	}
+	// Default spawn audit: every deterministic pipeline subprocess becomes a
+	// visible line (stderr, plus warning events in stream-json mode) without
+	// any host opting in. The previous sink is restored on the way out so
+	// in-process callers keep whatever they installed.
+	previousSink := procrun.SetAuditSink(func(record procrun.AuditRecord) {
+		writer.spawnAudit(formatSpawnAudit(record))
+	})
+	defer procrun.SetAuditSink(previousSink)
 	// Surface the unsafe-permissions warning whenever the run resolves to unsafe
 	// mode, covering BOTH --skip-permissions-unsafe and --auto high (which also
 	// resolves to PermissionModeUnsafe). Previously only the explicit flag path
@@ -1636,6 +1645,16 @@ func resolveExecRunMetadata(profile config.ProviderProfile) (execRunMetadata, er
 		Model:    strings.TrimSpace(profile.Model),
 		APIModel: apiModel,
 	}, nil
+}
+
+// formatSpawnAudit renders one spawn audit record as a compact single line:
+// profile, binary, argv, working directory, and the engine decision.
+func formatSpawnAudit(record procrun.AuditRecord) string {
+	detail := fmt.Sprintf("%s %s %s dir=%s", record.ProfileID, record.Name, strings.Join(record.Args, " "), record.Dir)
+	if record.Decision.Rejected {
+		return "[spawn-refused] " + detail + " reason=" + record.Decision.Reason
+	}
+	return fmt.Sprintf("[spawn] %s backend=%s wrapped=%t", detail, record.Decision.Backend, record.Decision.Wrapped)
 }
 
 func writeExecStreamJSONFinal(stdout io.Writer, cwd string, metadata execRunMetadata, permissionMode agent.PermissionMode, text string, exitCode int) int {

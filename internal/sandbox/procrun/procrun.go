@@ -112,13 +112,15 @@ var (
 	auditSink func(AuditRecord)
 )
 
-// SetAuditSink installs the process-wide audit receiver. Pass nil to remove
-// the current sink. The runner invokes the sink synchronously; receivers must
-// not block.
-func SetAuditSink(sink func(AuditRecord)) {
+// SetAuditSink installs the process-wide audit receiver and returns the sink
+// it replaced (nil when none was installed). Pass nil to remove the current
+// sink. The runner invokes the sink synchronously; receivers must not block.
+func SetAuditSink(sink func(AuditRecord)) func(AuditRecord) {
 	auditMu.Lock()
 	defer auditMu.Unlock()
+	previous := auditSink
 	auditSink = sink
+	return previous
 }
 
 func emitAudit(record AuditRecord) {

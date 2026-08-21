@@ -275,3 +275,87 @@ func TestPipelineStripChipRendersAndTruncates(t *testing.T) {
 		t.Fatalf("chip must be absent by default: %q", plain)
 	}
 }
+
+func plainRenderStrip(t *testing.T, rendered []string) []string {
+	t.Helper()
+	out := make([]string, 0, len(rendered))
+	for _, line := range rendered {
+		out = append(out, ansiPattern.ReplaceAllString(line, ""))
+	}
+	return out
+}
+
+// TestPipelineStripRenderWidthsAreStableAcrossProgress is the TP7 jitter pin:
+// as truthful progress moves 0 -> 50 -> 100 and the done counter climbs, the
+// rendered strip keeps one constant display width per line, so nothing to the
+// right of the strip reflows mid-run.
+func TestPipelineStripRenderWidthsAreStableAcrossProgress(t *testing.T) {
+	rows := []pipelineStageRow{
+		{name: "code_writer", status: pipelineStageCompleted},
+		{name: "static_analyzer", status: pipelineStagePending},
+		{name: "test_runner", status: pipelineStagePending},
+	}
+	var wantWidths []int
+	for _, progress := range []int{0, 45, 100} {
+		state := stateWith(rows)
+		state.stages[1].status = pipelineStageRunning
+		state.stages[1].progress = progress
+		state.stages[0].progress = 100
+		p := state.presentation()
+		lines := plainRenderStrip(t, p.renderStripWithChip(80, 0, ""))
+		widths := make([]int, len(lines))
+		for i, line := range lines {
+			widths[i] = lipgloss.Width(line)
+		}
+		if wantWidths == nil {
+			wantWidths = widths
+			continue
+		}
+		for i := range widths {
+			if widths[i] != wantWidths[i] {
+				t.Fatalf("progress %d: line %d width = %d, want stable %d (lines: %q)", progress, i, widths[i], wantWidths[i], lines)
+			}
+		}
+	}
+	// The padded counter keeps its width as done climbs (00/3 -> 03/3).
+	p := stateWith([]pipelineStageRow{
+		{name: "code_writer", status: pipelineStageCompleted, progress: 100},
+		{name: "test_runner", status: pipelineStageCompleted, progress: 100},
+		{name: "acceptance_verifier", status: pipelineStageCompleted, progress: 100},
+	}).presentation()
+	header := plainRenderStrip(t, p.renderStripWithChip(80, 0, ""))[0]
+	if !strings.Contains(header, "3/3") {
+		t.Fatalf("done header = %q, want padded 3/3", header)
+	}
+}
+
+// TestPipelineStripDegradesWithoutColorAcrossWidthTiers is the responsive +
+// NO_COLOR coverage pin: with all styling stripped (the no-color profile's
+// visible content), the strip still degrades coherently from full (three
+// lines: header, labels, bar) through narrow (header only or header+label)
+// to tiny (header only), and never emits a line wider than its cell budget.
+func TestPipelineStripDegradesWithoutColorAcrossWidthTiers(t *testing.T) {
+	state := stateWith([]pipelineStageRow{
+		{name: "code_writer", status: pipelineStageCompleted, progress: 100},
+		{name: "test_runner", status: pipelineStageRunning, progress: 40},
+	})
+	for _, tc := range []struct {
+		width     int
+		wantLines int
+	}{
+		{width: 120, wantLines: 3}, // full tier
+		{width: 80, wantLines: 3},  // medium tier
+		{width: 60, wantLines: 1},  // narrow tier
+		{width: 12, wantLines: 1},  // tiny tier
+	} {
+		lines := plainRenderStrip(t, state.presentation().renderStripWithChip(tc.width, 0, ""))
+		if len(lines) != tc.wantLines {
+			t.Fatalf("width %d: lines = %d (%q), want %d", tc.width, len(lines), lines, tc.wantLines)
+		}
+		for _, line := range lines {
+			if w := lipgloss.Width(line); w > tc.width {
+				t.Fatalf("width %d: rendered line width %d overflows the cell: %q", tc.width, w, line)
+			}
+		}
+	}
+}

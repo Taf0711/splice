@@ -21,6 +21,7 @@ import (
 	"github.com/Taf0711/splice/internal/memd"
 	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/plugins"
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
 	"github.com/Taf0711/splice/internal/sessions"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/tools"
@@ -2365,4 +2366,47 @@ func TestExecListToolsLoadsProjectScopeWhenTrusted(t *testing.T) {
 	if strings.Contains(stderr.String(), "is not trusted") {
 		t.Fatalf("stderr = %q, want no untrusted warning", stderr.String())
 	}
+}
+
+// TestFormatSpawnAuditAndSinkRestore pins the default spawn-audit surfacing:
+// accepted spawns render one compact [spawn] line carrying profile, argv, and
+// the engine decision; refusals render [spawn-refused] with the reason; and
+// installing the exec sink returns the previously installed sink so
+// in-process callers keep their own wiring.
+func TestFormatSpawnAuditAndSinkRestore(t *testing.T) {
+	accepted := procrun.AuditRecord{
+		ProfileID: procrun.ProfileSpliceStage,
+		Name:      "go",
+		Args:      []string{"test", "./..."},
+		Dir:       "/workspace",
+		Decision:  procrun.Decision{Backend: "macos-seatbelt", Wrapped: true},
+	}
+	line := formatSpawnAudit(accepted)
+	for _, want := range []string{"[spawn]", "splice.stage", "go test ./...", "dir=/workspace", "backend=macos-seatbelt", "wrapped=true"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("spawn line %q missing %q", line, want)
+		}
+	}
+	refused := formatSpawnAudit(procrun.AuditRecord{
+		ProfileID: procrun.ProfileSpliceDTools,
+		Name:      "evil",
+		Decision:  procrun.Decision{Rejected: true, Reason: `binary "evil" is not in the splice.dtools profile allowlist`},
+	})
+	if !strings.Contains(refused, "[spawn-refused]") || !strings.Contains(refused, "not in the") {
+		t.Fatalf("refusal line = %q, want refused marker and reason", refused)
+	}
+
+	previous := procrun.SetAuditSink(func(procrun.AuditRecord) {
+		t.Error("pre-existing sink must not fire while the exec sink is installed")
+	})
+	var seen int
+	procrun.SetAuditSink(func(procrun.AuditRecord) { seen++ })
+	if seen != 0 {
+		t.Fatal("sink fired before any spawn")
+	}
+	restored := procrun.SetAuditSink(previous)
+	if restored == nil {
+		t.Fatal("restore should have returned the exec-installed sink")
+	}
+	procrun.SetAuditSink(nil)
 }

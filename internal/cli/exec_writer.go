@@ -55,6 +55,21 @@ func (writer *execEventWriter) runStart(cwd string, metadata execRunMetadata, pe
 	}
 }
 
+// spawnAudit surfaces one procrun spawn audit record so the chokepoint is
+// observable in headless output by default: warning events ride the stdout
+// protocol in stream-json and json modes (stderr stays machine-clean), and
+// text mode gets a compact stderr line.
+func (writer *execEventWriter) spawnAudit(message string) {
+	switch writer.format {
+	case execOutputStreamJSON:
+		writer.writeStreamJSON(streamjson.Event{Type: streamjson.EventWarning, RunID: writer.runID, Message: message})
+	case execOutputJSON:
+		writer.writeJSON(map[string]any{"type": "warning", "message": message})
+	default:
+		writer.writeStderr(message + "\n")
+	}
+}
+
 func (writer *execEventWriter) warning(message string) {
 	if writer.format == execOutputJSON {
 		writer.writeJSON(map[string]any{"type": "warning", "message": message})

@@ -2836,3 +2836,35 @@ func TestOverlayViewportLinesCompositesAndPreservesBackdropText(t *testing.T) {
 		t.Fatalf("overlaid row should keep backdrop margin text alongside the panel, got %q", panelRow)
 	}
 }
+
+// TestStatusLineSurfacesCancelAffordanceWhilePending pins the TP7 footer-hint
+// work: an active run advertises the existing esc-cancel affordance before the
+// first Esc press, the armed confirmation replaces it with the stronger amber
+// instruction, and the idle status carries neither.
+func TestStatusLineSurfacesCancelAffordanceWhilePending(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	idle := plainRender(t, m.statusLine(96))
+	if strings.Contains(idle, "esc cancel") {
+		t.Fatalf("idle status must not advertise cancel, got %q", idle)
+	}
+
+	m.pending = true
+	m.activeRunID = 1
+	m.runCancel = func() {}
+	pending := plainRender(t, m.statusLine(96))
+	if !strings.Contains(pending, "esc cancel") {
+		t.Fatalf("pending status must advertise the cancel affordance, got %q", pending)
+	}
+	if strings.Contains(pending, escCancelConfirmText) {
+		t.Fatalf("pending status must not pre-arm the confirmation, got %q", pending)
+	}
+
+	m.cancelConfirmActive = true
+	confirm := plainRender(t, m.statusLine(96))
+	if !strings.Contains(confirm, escCancelConfirmText) {
+		t.Fatalf("armed status must show the confirm instruction, got %q", confirm)
+	}
+	if strings.Contains(confirm, "esc cancel") {
+		t.Fatalf("armed status must replace the hint, got %q", confirm)
+	}
+}

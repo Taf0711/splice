@@ -249,6 +249,12 @@ func (m model) statusLine(width int) string {
 			}
 		}
 	}
+	// While a run is in flight, surface the existing Esc-cancel affordance so
+	// it is discoverable before the first Esc press. The confirm state replaces
+	// this segment with its amber instruction above.
+	if m.pending && !m.exitConfirmActive && !m.cancelConfirmActive {
+		left += zeroTheme.muted.Render(" · ") + zeroTheme.faint.Render("esc cancel")
+	}
 	if m.exitConfirmActive {
 		left = prefix + zeroTheme.amber.Render("●") + " " + zeroTheme.amber.Render(ctrlCExitConfirmText)
 	} else if m.cancelConfirmActive {

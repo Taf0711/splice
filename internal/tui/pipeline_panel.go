@@ -333,7 +333,10 @@ func (p pipelinePresentation) renderStripWithChip(width int, phase int, chip str
 	if strings.TrimSpace(chip) != "" {
 		label += " " + chip
 	}
-	count := fmt.Sprintf("%d/%d", p.done, p.total)
+	// Zero-pad the done counter to the total's digit width so the header never
+	// reflows mid-run (0/10 -> 10/10 keeps one stable display width).
+	totalWidth := len(fmt.Sprint(p.total))
+	count := fmt.Sprintf("%0*d/%d", totalWidth, p.done, p.total)
 	header := label + " " + count
 
 	lines := make([]string, 0, 3)
@@ -555,5 +558,6 @@ func renderPipelineProgressBar(progress, width int) string {
 		filled = barWidth
 	}
 	bar := zeroTheme.amber.Render(strings.Repeat("█", filled)) + zeroTheme.faint.Render(strings.Repeat("░", barWidth-filled))
-	return bar + " " + zeroTheme.faint.Render(fmt.Sprintf("%d%%", progress))
+	// Right-aligned percent: 0% -> 100% keeps one stable display width.
+	return bar + " " + zeroTheme.faint.Render(fmt.Sprintf("%3d%%", progress))
 }

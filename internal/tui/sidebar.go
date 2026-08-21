@@ -919,7 +919,7 @@ func (m model) sidebarTokenLine(width int) string {
 	// truncates around it rather than overflowing.
 	chip := ""
 	if pct, _, _, style, ok := m.contextFillPercent(); ok {
-		chip = zeroTheme.faint.Render(" · ") + style.Render(fmt.Sprintf("%d%%", pct))
+		chip = zeroTheme.faint.Render(" · ") + style.Render(fmt.Sprintf("%3d%%", pct))
 	}
 	budget := maxInt(1, width-1-lipgloss.Width(chip))
 	return " " + zeroTheme.faint.Render(truncateRunes(label, budget)) + chip
