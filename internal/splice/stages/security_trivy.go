@@ -96,11 +96,15 @@ func (c trivyCheck) runTrivy(ctx context.Context, req VerificationCheckRequest) 
 	if err != nil {
 		return nil, fmt.Errorf("Trivy is not installed or not available: %w", err)
 	}
-	cmdArgs := append(append([]string{}, trivyScanner.args...), ".")
+	command := append([]string{scannerPath}, trivyScanner.args...)
+	command = append(command, ".")
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, scannerPath, cmdArgs...)
-	cmd.Dir = req.WorkDir
+	cmd, plan, cerr := PrepareStageCommand(ctx, req.Sandbox, req.WorkDir, command)
+	if cerr != nil {
+		return nil, fmt.Errorf("Trivy is not installed or not available: %w", cerr)
+	}
+	defer plan.Cleanup()
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {
 		return nil, ctx.Err()

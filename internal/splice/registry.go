@@ -86,6 +86,7 @@ func stageOptions(name string, iteration int, selection agent.ModelSelection, op
 	}
 	return stages.StageOptions{
 		WorkDir:        workDir,
+		Sandbox:        options.StageSandbox,
 		Language:       language,
 		PullContext:    caps.PullContext,
 		RunTool:        adaptToolRunner(runner),

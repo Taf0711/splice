@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -71,9 +70,12 @@ func (c gosecCheck) Run(ctx context.Context, req VerificationCheckRequest) (Veri
 		}
 		out = []byte(res.Output)
 	} else {
-		args := append([]string{"-fmt", "json"}, goPaths...)
-		cmd := exec.CommandContext(ctx, "gosec", args...)
-		cmd.Dir = req.WorkDir
+		command := append([]string{"gosec", "-fmt", "json"}, goPaths...)
+		cmd, plan, cerr := PrepareStageCommand(ctx, req.Sandbox, req.WorkDir, command)
+		if cerr != nil {
+			return VerificationCheckResult{}, fmt.Errorf("gosec tool refused: %w", cerr)
+		}
+		defer plan.Cleanup()
 		out, err = cmd.CombinedOutput()
 		if err != nil && !strings.Contains(string(out), `"Issues"`) {
 			// gosec not installed: exec.ErrNotFound produces no output, so check

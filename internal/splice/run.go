@@ -18,6 +18,7 @@ import (
 
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/sandbox"
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
 	"github.com/Taf0711/splice/internal/splice/learn"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/splice/stages"
@@ -325,6 +326,12 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 	}
 
 	runner := newAgentToolRunner(options, absWorkDir)
+
+	// Deterministic stage subprocesses run under their own enforce-mode
+	// engine: workspace-scoped filesystem, network denied. This is separate
+	// from options.Sandbox, which keeps the interactive user policy for
+	// model-driven tool calls.
+	options.StageSandbox = procrun.NewStageEngine(absWorkDir)
 
 	ledger := newRequestLedger()
 	ledgerOpts := ledger.recordingOptions(options)
@@ -1179,12 +1186,27 @@ func gitChangeSummary(ctx context.Context, workDir string) (schemas.ChangeSummar
 		return schemas.ChangeSummary{}, false
 	}
 
-	statusOut, err := exec.CommandContext(ctx, "git", "-C", workDir, "status", "--porcelain", "--untracked-files=all").Output()
+	// Both git reads run under the stage profile: fixed allowlist, workspace
+	// scope, network denied. The engine is local because this helper only
+	// knows its own workspace root.
+	engine := procrun.NewStageEngine(workDir)
+
+	statusCmd, plan, cerr := stages.PrepareStageCommand(ctx, engine, workDir, []string{"git", "-C", workDir, "status", "--porcelain", "--untracked-files=all"})
+	if cerr != nil {
+		return schemas.ChangeSummary{}, false
+	}
+	defer plan.Cleanup()
+	statusOut, err := statusCmd.Output()
 	if err != nil {
 		return schemas.ChangeSummary{}, false
 	}
 
-	diffOut, err := exec.CommandContext(ctx, "git", "-C", workDir, "diff", "HEAD", "--no-color").Output()
+	diffCmd, diffPlan, cerr := stages.PrepareStageCommand(ctx, engine, workDir, []string{"git", "-C", workDir, "diff", "HEAD", "--no-color"})
+	if cerr != nil {
+		return schemas.ChangeSummary{}, false
+	}
+	defer diffPlan.Cleanup()
+	diffOut, err := diffCmd.Output()
 	if err != nil {
 		return schemas.ChangeSummary{}, false
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/tools"
 )
 
@@ -39,6 +40,9 @@ func (f ToolRunnerFunc) RunTool(ctx context.Context, name string, args map[strin
 // filters or hooks. newAgentToolRunner owns those for pipeline tool calls.
 type RegistryToolRunner struct {
 	registry *tools.Registry
+	// sandbox, when set, rides on every RunOptions so registry tools that
+	// spawn processes inherit the caller's engine instead of running bare.
+	sandbox *sandbox.Engine
 }
 
 // NewRegistryToolRunner wraps a tools.Registry. The passed registry should
@@ -47,12 +51,20 @@ func NewRegistryToolRunner(registry *tools.Registry) RegistryToolRunner {
 	return RegistryToolRunner{registry: registry}
 }
 
+// NewRegistryToolRunnerWithSandbox behaves like NewRegistryToolRunner and
+// attaches sandbox to every tool execution's RunOptions. A deterministic
+// pipeline passes its procrun.NewStageEngine result here so no registry tool
+// can spawn a process outside the stage policy.
+func NewRegistryToolRunnerWithSandbox(registry *tools.Registry, sandbox *sandbox.Engine) RegistryToolRunner {
+	return RegistryToolRunner{registry: registry, sandbox: sandbox}
+}
+
 // RunTool implements ToolRunner.
 func (r RegistryToolRunner) RunTool(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
 	if _, ok := r.registry.Get(name); !ok {
 		return ToolResult{}, errToolNotFound{tool: name}
 	}
-	res := r.registry.RunWithOptions(ctx, name, args, tools.RunOptions{})
+	res := r.registry.RunWithOptions(ctx, name, args, tools.RunOptions{Sandbox: r.sandbox})
 	meta := res.Meta
 	if meta == nil {
 		meta = map[string]string{}

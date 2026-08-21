@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Taf0711/splice/internal/sandbox"
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
 )
 
 func TestIndependentExecCommandConstructorsShareDefaultManager(t *testing.T) {
@@ -924,4 +925,51 @@ func TestExecSessionPruneDoesNotRaceTouch(t *testing.T) {
 	}
 	close(stop)
 	writer.Wait()
+}
+
+// TestExecCommandEmitsProcrunAuditLine pins the exec_command side of the
+// procrun seam: a session spawn emits one structured record naming the
+// tools.exec_command profile, so every child process from this tool is
+// attributable.
+func TestExecCommandEmitsProcrunAuditLine(t *testing.T) {
+	root := t.TempDir()
+	var records []procrun.AuditRecord
+	procrun.SetAuditSink(func(record procrun.AuditRecord) {
+		records = append(records, record)
+	})
+	t.Cleanup(func() { procrun.SetAuditSink(nil) })
+
+	manager := newExecSessionManager()
+	execTool := NewScopedExecCommandTool(root, nil, manager)
+	writeTool := NewWriteStdinTool(manager)
+
+	start := execTool.Run(context.Background(), map[string]any{
+		"cmd":           helperCommand("sleep"),
+		"yield_time_ms": 10,
+	})
+	if start.Status != StatusOK {
+		t.Fatalf("exec_command start status = %s: %s", start.Status, start.Output)
+	}
+	sessionID, err := strconv.Atoi(start.Meta["session_id"])
+	if err != nil {
+		t.Fatalf("session_id is not numeric: %v", err)
+	}
+	poll := writeTool.Run(context.Background(), map[string]any{
+		"session_id":    sessionID,
+		"yield_time_ms": 30000,
+	})
+	if poll.Status != StatusOK {
+		t.Fatalf("poll status = %s: %s", poll.Status, poll.Output)
+	}
+
+	if len(records) != 1 {
+		t.Fatalf("audit records = %d, want exactly 1", len(records))
+	}
+	record := records[0]
+	if record.ProfileID != procrun.ProfileToolsExecCommand {
+		t.Fatalf("profile = %q, want %q", record.ProfileID, procrun.ProfileToolsExecCommand)
+	}
+	if record.Decision.Rejected || record.Name == "" {
+		t.Fatalf("decision = %+v, want an accepted spawn of a real binary", record.Decision)
+	}
 }

@@ -2,6 +2,7 @@ package stages
 
 import (
 	"context"
+	"github.com/Taf0711/splice/internal/sandbox"
 	"sort"
 	"strconv"
 
@@ -25,6 +26,9 @@ type VerificationCheckRequest struct {
 	Paths    []string
 	Scope    string
 	RunTool  func(context.Context, string, map[string]any) (ToolResult, error)
+	// Sandbox is the stage sandbox engine for the check's subprocesses. Nil
+	// skips OS-level confinement; the binary allowlist still applies.
+	Sandbox *sandbox.Engine
 }
 
 // VerificationCheckResult is one check's self-reported tool run plus findings.

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	zeroSandbox "github.com/Taf0711/splice/internal/sandbox"
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
 	"github.com/Taf0711/splice/internal/secrets"
 )
 
@@ -123,7 +123,7 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, options RunOp
 	if commandEngine == nil && sandboxPermissions == SandboxPermissionsRequireEscalated {
 		meta["sandbox_permissions"] = string(SandboxPermissionsRequireEscalated)
 	}
-	command, plan, err := buildBashCommand(commandCtx, commandText, absoluteCwd, commandEngine)
+	command, plan, err := buildBashCommand(commandCtx, commandText, absoluteCwd, commandEngine, procrun.ProfileToolsBash)
 	if err != nil {
 		meta["exit_code"] = "-1"
 		return Result{
@@ -264,43 +264,31 @@ func shellIssueBlockResult(issue shellIssue) Result {
 }
 
 // buildBashCommand returns the exec.Cmd and the sandbox plan for running
-// commandText. On Windows, when the command is not wrapped by the sandbox
-// engine (plan.Wrapped == false), it also overrides the child's raw command
-// line so commandText reaches cmd.exe unescaped; see
+// commandText. All process creation for the bash and exec_command tools goes
+// through the procrun runner, which builds the plan via the engine and emits
+// one audit record per spawn attempt. On Windows, when the command is not
+// wrapped by the sandbox engine (plan.Wrapped == false), it also overrides
+// the child's raw command line so commandText reaches cmd.exe unescaped; see
 // zeroSandbox.WindowsShellCommandLine for why that matters. The wrapped case
 // gets the same treatment inside the sandboxed runner process itself
 // (internal/sandbox/windows_process_windows.go), since that command line is
 // built there, not here.
-func buildBashCommand(ctx context.Context, commandText string, absoluteCwd string, engine *zeroSandbox.Engine) (*exec.Cmd, zeroSandbox.CommandPlan, error) {
+func buildBashCommand(ctx context.Context, commandText string, absoluteCwd string, engine *zeroSandbox.Engine, profileID string) (*exec.Cmd, zeroSandbox.CommandPlan, error) {
 	spec := zeroSandbox.CommandSpec{
 		Name: shellExecutable(),
 		Args: shellArguments(commandText),
 		Dir:  absoluteCwd,
 	}
-	if engine != nil {
-		command, plan, err := engine.CommandContext(ctx, spec)
-		if err == nil {
-			applyWindowsShellCommandLine(command, commandText, plan.Wrapped)
-		}
-		return command, plan, err
+	prepared, err := procrun.Prepare(ctx, procrun.Request{
+		ProfileID: profileID,
+		Spec:      spec,
+		Engine:    engine,
+	})
+	if err != nil {
+		return nil, zeroSandbox.CommandPlan{}, err
 	}
-	plan := zeroSandbox.CommandPlan{
-		Backend: zeroSandbox.Backend{
-			Name:    zeroSandbox.BackendUnavailable,
-			Message: "sandbox engine not provided",
-		},
-		Wrapped: false,
-		Name:    spec.Name,
-		Args:    spec.Args,
-		Dir:     spec.Dir,
-	}
-	command := exec.CommandContext(ctx, spec.Name, spec.Args...)
-	command.Dir = spec.Dir
-	// Escalated (non-sandboxed) commands inherit the process env by default.
-	// Scrub credential-bearing variables so the child cannot exfiltrate keys.
-	command.Env = secrets.ScrubChildEnv(os.Environ())
-	applyWindowsShellCommandLine(command, commandText, plan.Wrapped)
-	return command, plan, nil
+	applyWindowsShellCommandLine(prepared.Cmd, commandText, prepared.Plan.Wrapped)
+	return prepared.Cmd, prepared.Plan, nil
 }
 
 func addSandboxMeta(meta map[string]string, plan zeroSandbox.CommandPlan) {

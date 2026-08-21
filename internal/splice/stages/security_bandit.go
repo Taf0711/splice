@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -70,9 +69,12 @@ func (c banditCheck) Run(ctx context.Context, req VerificationCheckRequest) (Ver
 		}
 		out = []byte(res.Output)
 	} else {
-		args := append([]string{"-m", "bandit", "-f", "json"}, pyPaths...)
-		cmd := exec.CommandContext(ctx, "python", args...)
-		cmd.Dir = req.WorkDir
+		command := append([]string{"python", "-m", "bandit", "-f", "json"}, pyPaths...)
+		cmd, plan, cerr := PrepareStageCommand(ctx, req.Sandbox, req.WorkDir, command)
+		if cerr != nil {
+			return VerificationCheckResult{}, fmt.Errorf("bandit tool refused: %w", cerr)
+		}
+		defer plan.Cleanup()
 		out, err = cmd.CombinedOutput()
 		if err != nil && !strings.Contains(string(out), `"results"`) {
 			outLower := strings.ToLower(string(out))

@@ -3,6 +3,7 @@ package stages
 import (
 	"context"
 
+	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
@@ -30,6 +31,11 @@ type Stage interface {
 type StageOptions struct {
 	// WorkDir is the workspace root where file changes are applied.
 	WorkDir string
+	// Sandbox is the stage sandbox engine for deterministic subprocesses: an
+	// enforce-mode engine that scopes the filesystem to the workspace and
+	// denies network. Nil skips OS-level confinement; the binary allowlist at
+	// the procrun chokepoint still applies.
+	Sandbox *sandbox.Engine
 	// Language is the dominant project language.
 	Language string
 	// TargetPaths are optional explicit files this stage should focus on.

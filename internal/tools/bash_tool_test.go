@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/Taf0711/splice/internal/sandbox"
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
+	"github.com/Taf0711/splice/internal/secrets"
 )
 
 func TestMain(m *testing.M) {
@@ -605,7 +607,7 @@ func TestBashToolBuildsWrappedSandboxExecCommand(t *testing.T) {
 		},
 	})
 
-	command, plan, err := buildBashCommand(context.Background(), "pwd", root, engine)
+	command, plan, err := buildBashCommand(context.Background(), "pwd", root, engine, procrun.ProfileToolsBash)
 	if err != nil {
 		t.Fatalf("buildBashCommand: %v", err)
 	}
@@ -803,5 +805,74 @@ func TestAppendSandboxBlocks(t *testing.T) {
 	}
 	if block := appendSandboxBlocks("", []string{"deny x"}); strings.HasPrefix(block, "\n") {
 		t.Fatalf("empty stderr must not yield a leading newline: %q", block)
+	}
+}
+
+// TestBuildBashCommandDirectPathParity pins the migrated helper against the
+// legacy construction it replaced: with no engine, the plan names the
+// unavailable backend, the command inherits a scrubbed environment, and the
+// argv/directory match the spec exactly.
+func TestBuildBashCommandDirectPathParity(t *testing.T) {
+	dir := t.TempDir()
+	command, plan, err := buildBashCommand(context.Background(), "echo hi", dir, nil, procrun.ProfileToolsBash)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if plan.Backend.Name != sandbox.BackendUnavailable || plan.Wrapped {
+		t.Fatalf("plan = %+v, want unavailable unwrapped backend", plan.Backend)
+	}
+	if plan.Dir != dir || plan.Name != shellExecutable() {
+		t.Fatalf("plan identity = %q %q, want %q %q", plan.Name, plan.Dir, shellExecutable(), dir)
+	}
+	if command.Dir != dir {
+		t.Fatalf("cmd dir = %q, want %q", command.Dir, dir)
+	}
+	wantEnv := secrets.ScrubChildEnv(os.Environ())
+	if len(command.Env) != len(wantEnv) {
+		t.Fatalf("env length = %d, want %d (scrubbed inheritance)", len(command.Env), len(wantEnv))
+	}
+	for i := range wantEnv {
+		if command.Env[i] != wantEnv[i] {
+			t.Fatalf("env[%d] drift", i)
+		}
+	}
+}
+
+// TestBashToolEmitsProcrunAuditLine pins the audit seam end to end: one bash
+// tool run emits exactly one structured record naming the tools.bash profile,
+// the spawned argv, and the engine decision.
+func TestBashToolEmitsProcrunAuditLine(t *testing.T) {
+	root := t.TempDir()
+	var records []procrun.AuditRecord
+	procrun.SetAuditSink(func(record procrun.AuditRecord) {
+		records = append(records, record)
+	})
+	t.Cleanup(func() { procrun.SetAuditSink(nil) })
+
+	result := NewBashTool(root).Run(context.Background(), map[string]any{
+		"command": "true",
+	})
+	if result.Status != StatusOK {
+		t.Fatalf("expected ok, got %s: %s", result.Status, result.Output)
+	}
+	if len(records) != 1 {
+		t.Fatalf("audit records = %d, want exactly 1", len(records))
+	}
+	record := records[0]
+	if record.ProfileID != procrun.ProfileToolsBash {
+		t.Fatalf("profile = %q, want %q", record.ProfileID, procrun.ProfileToolsBash)
+	}
+	if record.Name != shellExecutable() {
+		t.Fatalf("audit name = %q, want shell %q", record.Name, shellExecutable())
+	}
+	if record.Dir != root {
+		// The runner records the resolved working directory: scoped paths are
+		// canonicalized (symlinks evaluated) before the engine sees them.
+		if resolved, err := filepath.EvalSymlinks(root); err != nil || record.Dir != resolved {
+			t.Fatalf("audit dir = %q, want resolved workspace %q (%v)", record.Dir, root, err)
+		}
+	}
+	if record.Decision.Rejected {
+		t.Fatalf("decision = %+v, want accepted", record.Decision)
 	}
 }

@@ -76,8 +76,11 @@ func (c jsSyntaxCheck) Run(ctx context.Context, req VerificationCheckRequest) (V
 				}
 			}
 		} else {
-			cmd := exec.CommandContext(runCtx, command[0], command[1:]...)
-			cmd.Dir = req.WorkDir
+			cmd, plan, cerr := PrepareStageCommand(runCtx, req.Sandbox, req.WorkDir, command)
+			if cerr != nil {
+				return jsIncomplete(fmt.Sprintf("JavaScript syntax check refused: %v", cerr))
+			}
+			defer plan.Cleanup()
 			out, runErr = cmd.CombinedOutput()
 			if runErr != nil {
 				if errors.Is(runErr, exec.ErrNotFound) ||

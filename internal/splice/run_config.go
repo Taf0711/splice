@@ -17,19 +17,24 @@ import (
 // agent.Options and convert here so inherited Zero types stay free of
 // Splice-specific methods.
 type PipelineRunConfig struct {
-	SessionID               string
-	ProviderName            string
-	Model                   string
-	ReasoningEffort         string
-	Cwd                     string
-	ProjectRoot             string
-	MemoryStatus            string
-	Images                  []zeroruntime.ImageBlock
-	Registry                *tools.Registry
-	PermissionMode          agent.PermissionMode
-	Autonomy                string
-	TrustedWorkspace        bool
-	Sandbox                 *sandbox.Engine
+	SessionID        string
+	ProviderName     string
+	Model            string
+	ReasoningEffort  string
+	Cwd              string
+	ProjectRoot      string
+	MemoryStatus     string
+	Images           []zeroruntime.ImageBlock
+	Registry         *tools.Registry
+	PermissionMode   agent.PermissionMode
+	Autonomy         string
+	TrustedWorkspace bool
+	Sandbox          *sandbox.Engine
+	// StageSandbox is the enforce-mode engine for deterministic stage
+	// subprocesses: workspace-scoped filesystem, network denied. It is
+	// distinct from Sandbox, which keeps the interactive user policy for
+	// model-driven tool calls.
+	StageSandbox            *sandbox.Engine
 	FileTracker             *tools.FileTracker
 	Hooks                   *hooks.Dispatcher
 	EnabledTools            []string

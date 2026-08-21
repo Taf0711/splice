@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	zeroSandbox "github.com/Taf0711/splice/internal/sandbox"
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
 )
 
 const (
@@ -609,7 +610,7 @@ func (tool execCommandTool) startSession(commandText string, absoluteCwd string,
 	id := tool.manager.allocateID()
 	commandCtx, cancel := context.WithCancel(context.Background())
 	commandEngine := commandEngineForSandboxPermissions(engine, sandboxPermissions)
-	command, plan, err := buildBashCommand(commandCtx, commandText, absoluteCwd, commandEngine)
+	command, plan, err := buildBashCommand(commandCtx, commandText, absoluteCwd, commandEngine, procrun.ProfileToolsExecCommand)
 	if err != nil {
 		cancel()
 		return nil, err

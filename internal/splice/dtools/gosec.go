@@ -4,17 +4,20 @@ import (
 	"context"
 	"os/exec"
 
+	"github.com/Taf0711/splice/internal/sandbox"
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
 	"github.com/Taf0711/splice/internal/tools"
 )
 
 // gosecTool runs Gosec security analysis on Go files.
 type gosecTool struct {
 	workspaceRoot string
+	sandbox       *sandbox.Engine
 }
 
 // NewGosecTool returns a Tool that runs Gosec security analysis on Go files.
 func NewGosecTool(workspaceRoot string) tools.Tool {
-	return gosecTool{workspaceRoot: workspaceRoot}
+	return gosecTool{workspaceRoot: workspaceRoot, sandbox: procrun.NewStageEngine(workspaceRoot)}
 }
 
 func (t gosecTool) Name() string {
@@ -82,9 +85,21 @@ func (t gosecTool) Run(ctx context.Context, args map[string]any) tools.Result {
 		}
 	}
 
-	cmdArgs := append([]string{"-fmt", "json"}, resolvedPaths...)
-	cmd := exec.CommandContext(ctx, gosecPath, cmdArgs...)
-	cmd.Dir = t.workspaceRoot
+	command := append([]string{gosecPath, "-fmt", "json"}, resolvedPaths...)
+	prepared, cerr := procrun.Prepare(ctx, procrun.Request{
+		ProfileID:       procrun.ProfileSpliceDTools,
+		AllowedBinaries: procrun.StageBinaries,
+		Engine:          t.sandbox,
+		Spec:            sandbox.CommandSpec{Name: command[0], Args: command[1:], Dir: t.workspaceRoot},
+	})
+	if cerr != nil {
+		return tools.Result{
+			Status: tools.StatusError,
+			Output: "Gosec is not installed or not available: " + cerr.Error(),
+		}
+	}
+	defer prepared.Plan.Cleanup()
+	cmd := prepared.Cmd
 
 	out, err := cmd.Output()
 	if ctx.Err() != nil {

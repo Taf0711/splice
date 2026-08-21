@@ -79,8 +79,11 @@ func (c pythonSyntaxCheck) Run(ctx context.Context, req VerificationCheckRequest
 		compileOut = res.Output
 		compileOK = res.OK
 	} else {
-		cmd := exec.CommandContext(runCtx, command[0], command[1:]...)
-		cmd.Dir = req.WorkDir
+		cmd, plan, cerr := PrepareStageCommand(runCtx, req.Sandbox, req.WorkDir, command)
+		if cerr != nil {
+			return pythonIncomplete(fmt.Sprintf("Python syntax check refused: %v", cerr))
+		}
+		defer plan.Cleanup()
 		out, err := cmd.CombinedOutput()
 		compileOut = string(out)
 		compileOK = err == nil
@@ -225,8 +228,13 @@ func runRuff(ctx context.Context, req VerificationCheckRequest, pyPaths []string
 			return nil, false, nil
 		}
 	} else {
-		cmd := exec.CommandContext(ctx, command[0], command[1:]...)
-		cmd.Dir = req.WorkDir
+		cmd, plan, cerr := PrepareStageCommand(ctx, req.Sandbox, req.WorkDir, command)
+		if cerr != nil {
+			// Ruff is an optional pass: a refused binary degrades to
+			// unavailable exactly like a missing one.
+			return nil, false, nil
+		}
+		defer plan.Cleanup()
 		combined, rerr := cmd.CombinedOutput()
 		out = combined
 		if rerr != nil {

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/testrunner"
 	"github.com/Taf0711/splice/internal/zeroruntime"
@@ -80,7 +81,7 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 			"timeout_seconds": timeout,
 		}
 		recorded, err := options.RecordCommand(ctx, "splice.test", args, func(runCtx context.Context) (ToolResult, error) {
-			results = runCommand(runCtx, cmd, options.WorkDir, timeout)
+			results = runCommand(runCtx, options.Sandbox, cmd, options.WorkDir, timeout)
 			payload, marshalErr := json.Marshal(results)
 			if marshalErr != nil {
 				return ToolResult{OK: false, Output: marshalErr.Error()}, nil
@@ -97,7 +98,7 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 			}
 		}
 	} else {
-		results = runCommand(ctx, cmd, options.WorkDir, timeout)
+		results = runCommand(ctx, options.Sandbox, cmd, options.WorkDir, timeout)
 	}
 
 	var summary string
@@ -200,7 +201,7 @@ func skippedTestOutput(language string) schemas.HarnessStageOutput {
 	}
 }
 
-func runCommand(ctx context.Context, command []string, cwd string, timeoutSeconds int) schemas.TestRunResults {
+func runCommand(ctx context.Context, sandboxEngine *sandbox.Engine, command []string, cwd string, timeoutSeconds int) schemas.TestRunResults {
 	if timeoutSeconds <= 0 {
 		timeoutSeconds = 120
 	}
@@ -208,10 +209,21 @@ func runCommand(ctx context.Context, command []string, cwd string, timeoutSecond
 	inner, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(inner, command[0], command[1:]...)
-	if cwd != "" {
-		cmd.Dir = cwd
+	dir := cwd
+	if dir == "" {
+		// Preserve the historical default: inherit the process working
+		// directory when the caller passes no explicit one.
+		dir, _ = os.Getwd()
 	}
+	cmd, plan, cerr := PrepareStageCommand(inner, sandboxEngine, dir, command)
+	if cerr != nil {
+		return schemas.TestRunResults{
+			Command:  command,
+			ExitCode: 1,
+			Stderr:   cerr.Error(),
+		}
+	}
+	defer plan.Cleanup()
 	stdout, stderr := &limitedWriter{limit: 200_000}, &limitedWriter{limit: 200_000}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr

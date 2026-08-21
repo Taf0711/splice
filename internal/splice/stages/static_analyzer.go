@@ -95,6 +95,7 @@ func (s *StaticAnalyzer) Run(ctx context.Context, input schemas.HarnessStageInpu
 			Paths:    paths,
 			Scope:    "quality",
 			RunTool:  options.RunTool,
+			Sandbox:  options.Sandbox,
 		})
 		if rerr != nil {
 			return schemas.HarnessStageOutput{}, fmt.Errorf("verification check %s: %w", check.Name(), rerr)

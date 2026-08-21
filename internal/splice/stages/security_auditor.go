@@ -77,6 +77,7 @@ func (s *SecurityAuditor) Run(ctx context.Context, input schemas.HarnessStageInp
 			Paths:    paths,
 			Scope:    "security",
 			RunTool:  options.RunTool,
+			Sandbox:  options.Sandbox,
 		})
 		if rerr != nil {
 			return schemas.HarnessStageOutput{}, fmt.Errorf("verification check %s: %w", check.Name(), rerr)
