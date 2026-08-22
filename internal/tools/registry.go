@@ -175,7 +175,15 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 	sandboxGrantAuthorized := false
 	var sandboxDecision *sandbox.Decision
 	if options.Sandbox != nil {
+		// Evaluate against the working directory of THIS execution, not only
+		// the engine's construction-time root. A pipeline run that binds a
+		// worktree after startup (TUI /exec) keeps its engine rooted at the
+		// session workspace; without this, every run-worktree path is refused
+		// as outside_workspace even though the run legitimately executes
+		// there. RunOptions.Cwd is harness-controlled, so this cannot widen
+		// what a model can reach.
 		d := options.Sandbox.Evaluate(ctx, sandbox.Request{
+			WorkspaceRoot:     options.Cwd,
 			ToolName:          name,
 			SideEffect:        sandbox.SideEffect(tool.Safety().SideEffect),
 			Permission:        sandbox.Permission(permission),

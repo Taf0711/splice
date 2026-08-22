@@ -3826,3 +3826,68 @@ func TestBuildRevisionContextCarriesFailureEvidence(t *testing.T) {
 		}
 	}
 }
+
+// TestPipelineToolScopeFollowsRunWorktree pins the TUI /exec worktree fix:
+// a pipeline run bound to a worktree after startup keeps the sandbox engine
+// rooted at the session workspace, but stage tool execution must evaluate
+// against the run worktree. Commands inside the worktree succeed; a write
+// outside BOTH the session root and the worktree is still refused.
+func TestPipelineToolScopeFollowsRunWorktree(t *testing.T) {
+	sessionRoot := t.TempDir()
+	worktree := t.TempDir()
+	outsideBoth := t.TempDir()
+
+	engine := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot: sessionRoot,
+		Policy:        sandbox.DefaultPolicy(),
+	})
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewBashTool(worktree))
+
+	runner := newAgentToolRunner(PipelineConfigFromAgentOptions(agent.Options{
+		Cwd:            worktree,
+		Registry:       registry,
+		Sandbox:        engine,
+		PermissionMode: agent.PermissionModeAuto,
+	}), worktree)
+
+	res, err := runner.RunTool(context.Background(), "bash", map[string]any{"command": "echo run > marker.txt && cat marker.txt"})
+	if err != nil {
+		t.Fatalf("RunTool error: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("worktree bash refused: %s", res.Output)
+	}
+	if _, err := os.Stat(filepath.Join(worktree, "marker.txt")); err != nil {
+		t.Fatalf("marker missing from worktree: %v", err)
+	}
+
+	// Stage tool calls carry the run directory in the cwd argument; that is
+	// the exact shape the demo captures showed being refused pre-fix.
+	res, err = runner.RunTool(context.Background(), "bash", map[string]any{"command": "echo run > marker2.txt", "cwd": worktree})
+	if err != nil {
+		t.Fatalf("RunTool error: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("bash scoped to the run worktree refused: %s", res.Output)
+	}
+	if _, err := os.Stat(filepath.Join(worktree, "marker2.txt")); err != nil {
+		t.Fatalf("marker2 missing from worktree: %v", err)
+	}
+
+	res, err = runner.RunTool(context.Background(), "bash", map[string]any{"command": "echo x > escape.txt", "cwd": outsideBoth})
+	if err != nil {
+		t.Fatalf("RunTool error: %v", err)
+	}
+	if res.OK {
+		t.Fatal("write outside both roots unexpectedly succeeded")
+	}
+	// Either the tool-scoped path guard or the sandbox decision must refuse;
+	// both name the boundary instead of silently succeeding.
+	if !strings.Contains(res.Output, "outside_workspace") && !strings.Contains(res.Output, "must stay inside the workspace") {
+		t.Fatalf("output = %q, want an out-of-workspace refusal", res.Output)
+	}
+	if _, err := os.Stat(filepath.Join(outsideBoth, "escape.txt")); err == nil {
+		t.Fatal("escape file was created despite sandbox block")
+	}
+}
