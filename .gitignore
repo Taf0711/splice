@@ -71,3 +71,8 @@ splice-linux-sandbox
 
 # graphify knowledge-graph output (graph.json is tens of MB, rebuildable)
 graphify-out/
+
+# Demo capture workspace (vhs output, frames, video) - local only, never pushed
+/demo-work/
+/demo-repair-loop.tape
+/DEMO-RUNBOOK.md
