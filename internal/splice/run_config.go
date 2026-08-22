@@ -34,31 +34,36 @@ type PipelineRunConfig struct {
 	// subprocesses: workspace-scoped filesystem, network denied. It is
 	// distinct from Sandbox, which keeps the interactive user policy for
 	// model-driven tool calls.
-	StageSandbox            *sandbox.Engine
-	FileTracker             *tools.FileTracker
-	Hooks                   *hooks.Dispatcher
-	EnabledTools            []string
-	DisabledTools           []string
-	OnText                  func(string)
-	OnReasoning             func(string)
-	OnToolCall              func(agent.ToolCall)
-	OnToolCallStart         func(id, name string)
-	OnToolCallDelta         func(id, fragment string)
-	OnPermissionRequest     func(context.Context, agent.PermissionRequest) (agent.PermissionDecision, error)
-	OnPermission            func(agent.PermissionEvent)
-	OnToolResult            func(agent.ToolResult)
-	OnUsage                 func(agent.Usage)
-	OnAttributedUsage       func(agent.AttributedUsage)
-	EstimateUsageCost       func(model string, usage agent.Usage, reported bool) agent.UsageCostEstimate
-	OnToolProgress          func(toolCallID string, event streamjson.Event)
-	OnToolOutput            func(tools.OutputSnapshot)
-	FileDiagnostics         func(ctx context.Context, absPath string) string
-	StageModelResolver      agent.StageModelResolver
-	EscalationModelResolver agent.EscalationModelResolver
-	OnSurfaceToUser         func(ctx context.Context, req agent.SurfaceToUserRequest) (agent.SurfaceToUserDecision, error)
-	OnPipelinePlan          func(agent.PipelinePlanEvent)
-	OnStageEvent            func(agent.StageEvent)
-	ModelRegistry           modelregistry.Registry
+	StageSandbox *sandbox.Engine
+	// StageRequireReadBeforeWrite turns on the strict read-before-write guard
+	// for this run's write_file and edit_file calls: an existing path with no
+	// session baseline is refused so a blind rewrite becomes a loud,
+	// recoverable failure. Stage runs enable it; interactive sessions do not.
+	StageRequireReadBeforeWrite bool
+	FileTracker                 *tools.FileTracker
+	Hooks                       *hooks.Dispatcher
+	EnabledTools                []string
+	DisabledTools               []string
+	OnText                      func(string)
+	OnReasoning                 func(string)
+	OnToolCall                  func(agent.ToolCall)
+	OnToolCallStart             func(id, name string)
+	OnToolCallDelta             func(id, fragment string)
+	OnPermissionRequest         func(context.Context, agent.PermissionRequest) (agent.PermissionDecision, error)
+	OnPermission                func(agent.PermissionEvent)
+	OnToolResult                func(agent.ToolResult)
+	OnUsage                     func(agent.Usage)
+	OnAttributedUsage           func(agent.AttributedUsage)
+	EstimateUsageCost           func(model string, usage agent.Usage, reported bool) agent.UsageCostEstimate
+	OnToolProgress              func(toolCallID string, event streamjson.Event)
+	OnToolOutput                func(tools.OutputSnapshot)
+	FileDiagnostics             func(ctx context.Context, absPath string) string
+	StageModelResolver          agent.StageModelResolver
+	EscalationModelResolver     agent.EscalationModelResolver
+	OnSurfaceToUser             func(ctx context.Context, req agent.SurfaceToUserRequest) (agent.SurfaceToUserDecision, error)
+	OnPipelinePlan              func(agent.PipelinePlanEvent)
+	OnStageEvent                func(agent.StageEvent)
+	ModelRegistry               modelregistry.Registry
 }
 
 // PipelineConfigFromAgentOptions copies the fields the pipeline consumes.

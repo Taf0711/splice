@@ -71,6 +71,13 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	if err != nil {
 		return errorResult("Error reading " + relativePath + ": " + err.Error())
 	}
+	// Read-before-write guard (strict stage mode): refuse to edit a file the
+	// model never read in this session, same as write_file.
+	if options.RequireReadBeforeWrite {
+		if _, tracked := options.FileTracker.Version(absolutePath); !tracked {
+			return errorResult(unreadOverwriteMessage(relativePath))
+		}
+	}
 	// Refuse to edit a file that changed on disk outside Splice since it was last
 	// read: the model's old_string was formed against a stale view, so applying it
 	// now could silently corrupt the newer content.

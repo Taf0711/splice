@@ -78,6 +78,15 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	// stale view. Only read current bytes when there is a baseline to compare,
 	// so a first-touch create/overwrite stays a single write with no extra read.
 	if existed {
+		// Read-before-write guard: with the strict stage flag set, an existing
+		// path with no session baseline means the model never read the file in
+		// this run. Refuse loudly so the repair loop can feed the correction
+		// back instead of letting a blind overwrite drop live symbols.
+		if options.RequireReadBeforeWrite {
+			if _, tracked := options.FileTracker.Version(absolutePath); !tracked {
+				return errorResult(unreadOverwriteMessage(relativePath))
+			}
+		}
 		if _, tracked := options.FileTracker.Version(absolutePath); tracked {
 			// Fail CLOSED: if the tracked file can't be re-read to verify it, refuse
 			// the overwrite rather than clobbering a file whose current state is

@@ -19,12 +19,18 @@ type RunOptions struct {
 	Autonomy          string
 	TrustedWorkspace  bool
 	Sandbox           *sandbox.Engine
-	ToolCallID        string
-	SessionID         string
-	Model             string
-	ReasoningEffort   string
-	Depth             int
-	Cwd               string
+	// RequireReadBeforeWrite, when true, makes write_file and edit_file refuse
+	// to modify an existing path that this session has no recorded baseline
+	// for (the model never read it via read_file). Deterministic pipeline
+	// stages set it so a blind full-content rewrite becomes a loud, recoverable
+	// failure instead of silent data loss. Interactive sessions leave it false.
+	RequireReadBeforeWrite bool
+	ToolCallID             string
+	SessionID              string
+	Model                  string
+	ReasoningEffort        string
+	Depth                  int
+	Cwd                    string
 	// FileTracker, when set, records the version of each file read or written this
 	// session so write_file/edit_file can refuse to clobber a file that changed on
 	// disk outside Splice since it was last read. nil disables the feature entirely

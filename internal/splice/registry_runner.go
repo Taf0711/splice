@@ -64,7 +64,7 @@ func (r RegistryToolRunner) RunTool(ctx context.Context, name string, args map[s
 	if _, ok := r.registry.Get(name); !ok {
 		return ToolResult{}, errToolNotFound{tool: name}
 	}
-	res := r.registry.RunWithOptions(ctx, name, args, tools.RunOptions{Sandbox: r.sandbox})
+	res := r.registry.RunWithOptions(ctx, name, args, tools.RunOptions{Sandbox: r.sandbox, RequireReadBeforeWrite: true})
 	meta := res.Meta
 	if meta == nil {
 		meta = map[string]string{}

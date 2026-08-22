@@ -332,6 +332,10 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 	// from options.Sandbox, which keeps the interactive user policy for
 	// model-driven tool calls.
 	options.StageSandbox = procrun.NewStageEngine(absWorkDir)
+	// Strict read-before-write for every write_file/edit_file in this run: a
+	// model that skips the read now gets a loud, repairable error instead of
+	// silently overwriting live symbols.
+	options.StageRequireReadBeforeWrite = true
 
 	ledger := newRequestLedger()
 	ledgerOpts := ledger.recordingOptions(options)
@@ -1502,7 +1506,11 @@ func newAgentToolRunner(options PipelineRunConfig, cwd string) ToolRunner {
 		}
 		// Keep the pipeline's auto/spec-draft grant semantics. The shared helper
 		// only builds tools.RunOptions; it does not replace this prompt flow.
-		res := options.Registry.RunWithOptions(ctx, name, args, agent.NewToolRunOptions(agentOpts, call, cwd, permissionGranted))
+		runOptions := agent.NewToolRunOptions(agentOpts, call, cwd, permissionGranted)
+		if options.StageRequireReadBeforeWrite {
+			runOptions.RequireReadBeforeWrite = true
+		}
+		res := options.Registry.RunWithOptions(ctx, name, args, runOptions)
 		feedback := agent.RunAfterToolHooks(ctx, agentOpts, call, args, res)
 		if feedback != "" {
 			combined, redacted := agent.AppendHookFeedback(res.Output, feedback)

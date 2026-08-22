@@ -844,3 +844,95 @@ func TestDeleteFileToolRunsWithPermissionGrant(t *testing.T) {
 func gitApplyUnavailable(output string) bool {
 	return strings.Contains(output, "executable file not found")
 }
+
+// TestRequireReadBeforeWriteGuard pins the strict stage guard: an existing
+// unread path is refused with an actionable message, reading it first unlocks
+// the write, genuinely new paths stay creatable, and interactive sessions
+// (flag off) keep the historical blind-overwrite semantics.
+func TestRequireReadBeforeWriteGuard(t *testing.T) {
+	root := t.TempDir()
+	existing := filepath.Join(root, "users.go")
+	original := "package users\n\nfunc New() *Service { return &Service{} }\n"
+	if err := os.WriteFile(existing, []byte(original), 0o644); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+
+	tracker := NewFileTracker()
+	write := func(args map[string]any) Result {
+		return optioned(NewWriteFileTool(root)).RunWithOptions(context.Background(), args, RunOptions{
+			FileTracker:            tracker,
+			RequireReadBeforeWrite: true,
+		})
+	}
+	read := func() Result {
+		return optioned(NewReadFileTool(root)).RunWithOptions(context.Background(), map[string]any{"path": "users.go"}, RunOptions{
+			FileTracker: tracker,
+		})
+	}
+
+	invented := "package users\n\ntype User struct{ ID int }\nfunc AddUser(u User) {}\n"
+
+	// 1. Existing unread path -> loud refusal naming the recovery step.
+	res := write(map[string]any{"path": "users.go", "content": invented, "overwrite": true})
+	if res.Status != StatusError {
+		t.Fatalf("blind overwrite status = %s, want error", res.Status)
+	}
+	for _, want := range []string{"users.go", "has not been read this session", "read_file"} {
+		if !strings.Contains(res.Output, want) {
+			t.Fatalf("refusal output %q missing %q", res.Output, want)
+		}
+	}
+	if got, _ := os.ReadFile(existing); string(got) != original {
+		t.Fatal("refused write must not have touched the file on disk")
+	}
+
+	// 2. After read_file the baseline exists -> the same write is allowed.
+	if r := read(); r.Status != StatusOK {
+		t.Fatalf("read_file status = %s: %s", r.Status, r.Output)
+	}
+	res = write(map[string]any{"path": "users.go", "content": invented, "overwrite": true})
+	if res.Status != StatusOK {
+		t.Fatalf("write after read status = %s: %s", res.Status, res.Output)
+	}
+
+	// 3. A genuinely new path stays creatable under the strict flag.
+	res = write(map[string]any{"path": "brand_new.go", "content": "package users\n"})
+	if res.Status != StatusOK {
+		t.Fatalf("create of new path status = %s: %s", res.Status, res.Output)
+	}
+
+	// 4. Flag off (interactive default) keeps the historical behavior.
+	interactive := optioned(NewWriteFileTool(root)).RunWithOptions(context.Background(), map[string]any{
+		"path": "users.go", "content": "package users\n\n// rewritten blind\n", "overwrite": true,
+	}, RunOptions{FileTracker: tracker})
+	if interactive.Status != StatusOK {
+		t.Fatalf("interactive overwrite status = %s: %s", interactive.Status, interactive.Output)
+	}
+}
+
+// TestEditFileRequireReadBeforeWriteGuard pins the same rule for edit_file.
+func TestEditFileRequireReadBeforeWriteGuard(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.go"), []byte("func Old() {}\n"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	tracker := NewFileTracker()
+	res := optioned(NewEditFileTool(root)).RunWithOptions(context.Background(), map[string]any{
+		"path": "a.go", "old_string": "Old", "new_string": "New",
+	}, RunOptions{FileTracker: tracker, RequireReadBeforeWrite: true})
+	if res.Status != StatusError || !strings.Contains(res.Output, "has not been read this session") {
+		t.Fatalf("unread edit result = %+v, want refusal naming the unread session", res)
+	}
+}
+
+// optioned adapts a Tool to the OptionedTool interface for direct RunWithOptions calls.
+func optioned(tool Tool) interface {
+	RunWithOptions(ctx context.Context, args map[string]any, options RunOptions) Result
+} {
+	if o, ok := tool.(interface {
+		RunWithOptions(ctx context.Context, args map[string]any, options RunOptions) Result
+	}); ok {
+		return o
+	}
+	panic("tool does not implement RunWithOptions")
+}
