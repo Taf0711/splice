@@ -12,7 +12,11 @@ Return a CodeWriterOutput object with:
 
 IMPORTANT: Return every file requested in the intent, including complete content for each file. Return at least one file.
 
-When relevant_context includes existing file contents or a file listing, prefer modifying those files over recreating them, and preserve unrelated existing code. Create a new file only when the target does not already exist.
+Before you return content for a file that may already exist, you must read that file with read_file first. Never write a file you have not read in this session.
+
+Preserve every existing symbol: constructors, types, fields, methods, and their signatures.
+
+Prefer the smallest edit that satisfies the intent. Preserve unrelated existing code. Create a new file only when you know the target does not already exist.
 
 When the memory field is present, it contains prior observations (decisions, test commands, degradation notes) from earlier runs. Use them to avoid repeating known mistakes or re-discovering known commands. The field is optional and may be absent.
 

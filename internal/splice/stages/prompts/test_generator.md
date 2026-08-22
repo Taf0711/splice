@@ -15,7 +15,9 @@ Return a TestGeneratorOutput object with:
 - known_limitations: any uncertainty or intentionally incomplete test coverage
 - confidence: a number from 0.0 to 1.0
 
-Prefer modifying existing test files over creating new ones when relevant_context includes them. Write focused unit tests that cover happy paths, edge cases, and the failure modes most likely to arise from the implementation intent. Use the project's existing test framework (detected from relevant_context). Default to pytest for Python.
+Before you return content for a test file that may already exist, you must read that file with read_file first. Never write a file you have not read in this session.
+
+Preserve every existing test, helper, and symbol in that file. Prefer modifying an existing test file over creating a new one. Write focused unit tests. Cover happy paths, edge cases, and the most likely failure modes. Use the project's existing test framework. Default to pytest for Python when no framework is detected.
 
 When the memory field is present, it contains prior observations (decisions, test commands, degradation notes) from earlier runs. Use them to avoid repeating known mistakes or re-discovering known commands. The field is optional and may be absent.
 
