@@ -128,6 +128,11 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 			Message:    fmt.Sprintf("exit code %d", results.ExitCode),
 		}}
 		summary = fmt.Sprintf("Test command failed with exit code %d.", results.ExitCode)
+		if evidence := failingEvidenceExcerpt(results.Stdout + "\n" + results.Stderr); evidence != "" {
+			// Surface bounded failure evidence into the revision context: a
+			// re-entered writer that only sees "exit code 1" guesses blind.
+			summary += "\nFailing evidence:\n" + evidence
+		}
 		confidence = 0.8
 	}
 
@@ -312,4 +317,81 @@ func testResultsFromToolResult(res ToolResult, cmd []string, timeoutSeconds, dur
 		Stderr:     "",
 		DurationMs: durationMs,
 	}, nil
+}
+
+// maxFailureEvidenceChars bounds the whole excerpt so prompts stay small.
+// maxFailureBlocks caps how many distinct failures appear, and
+// maxContinuationLinesPerMarker caps the assertion lines that follow each
+// failure marker. maxFailureEvidenceTailBias is prepended when earlier
+// failures were dropped for space, so the writer knows the list is partial.
+const (
+	maxFailureEvidenceChars        = 800
+	maxFailureBlocks               = 8
+	maxContinuationLinesPerMarker  = 4
+	failureEvidenceTruncatedNotice = "... earlier failures omitted; see full command output."
+)
+
+// failureMarkerPrefixes are the line prefixes runtimes print to announce a
+// failed test: Go ("--- FAIL:"), pytest ("FAILED", "E   assertion"), and
+// generic runners ("FAIL.").
+var failureMarkerPrefixes = []string{"--- FAIL:", "FAILED ", "FAIL.", "E   "}
+
+func isFailureMarkerLine(line string) bool {
+	for _, prefix := range failureMarkerPrefixes {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// isEvidenceContinuation reports whether line belongs to the failure block
+// above it: indented output, diff lines, or runtime assertion detail.
+func isEvidenceContinuation(line string) bool {
+	if line == "" || !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") &&
+		!strings.HasPrefix(line, "+ ") && !strings.HasPrefix(line, "- ") {
+		return false
+	}
+	return true
+}
+
+// failingEvidenceExcerpt extracts the failing-test markers plus their
+// following assertion lines from captured runner output. Selection is
+// tail-biased because Go prints failures near the end of the run, and the
+// whole excerpt is hard-capped so prompts stay small. Empty output yields an
+// empty excerpt.
+func failingEvidenceExcerpt(output string) string {
+	output = strings.ReplaceAll(output, "\r\n", "\n")
+	lines := strings.Split(output, "\n")
+	var blocks []string
+	for i := 0; i < len(lines); {
+		if !isFailureMarkerLine(lines[i]) {
+			i++
+			continue
+		}
+		block := []string{lines[i]}
+		j := i + 1
+		for j < len(lines) && len(block) <= maxContinuationLinesPerMarker &&
+			!isFailureMarkerLine(lines[j]) && isEvidenceContinuation(lines[j]) {
+			block = append(block, lines[j])
+			j++
+		}
+		blocks = append(blocks, strings.Join(block, "\n"))
+		i = j
+	}
+	var kept []string
+	used := 0
+	for idx := len(blocks) - 1; idx >= 0 && len(kept) < maxFailureBlocks; idx-- {
+		cost := len(blocks[idx]) + 1
+		if used+cost > maxFailureEvidenceChars {
+			continue
+		}
+		used += cost
+		kept = append([]string{blocks[idx]}, kept...)
+	}
+	if len(kept) < len(blocks) {
+		// Any dropped block means the writer sees partial evidence; say so.
+		kept = append([]string{failureEvidenceTruncatedNotice}, kept...)
+	}
+	return strings.Join(kept, "\n")
 }

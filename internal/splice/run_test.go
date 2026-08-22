@@ -3807,3 +3807,22 @@ func TestRunRepairExhaustedInteractionUnresolved(t *testing.T) {
 		t.Fatalf("Repairs = %d, want %d", outcome.Interactions[0].Repairs, maxLocalRepairs)
 	}
 }
+
+// TestBuildRevisionContextCarriesFailureEvidence pins the repair-loop
+// transport: a failed test_runner record's OutputSummary — which now embeds
+// the bounded failing-evidence excerpt — must reach the revision context the
+// re-entered code_writer receives, verbatim.
+func TestBuildRevisionContextCarriesFailureEvidence(t *testing.T) {
+	summary := "Test command failed with exit code 1.\nFailing evidence:\n--- FAIL: TestAuditTombstone (0.00s)\n    audit_test.go:20: last audit action = \"delete\", want tombstone"
+	records := []schemas.StageRecord{{
+		Name:          "test_runner",
+		Status:        schemas.StageFailed,
+		OutputSummary: &summary,
+	}}
+	got := buildRevisionContext("fix the service", nil, records, nil, "")
+	for _, want := range []string{"--- FAIL: TestAuditTombstone", `last audit action = "delete", want tombstone`, "test_runner:"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("revision context missing %q:\n%s", want, got)
+		}
+	}
+}
