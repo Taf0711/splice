@@ -64,6 +64,70 @@ func NewEngine(options EngineOptions) *Engine {
 // Scope returns the engine's shared write scope (nil when the engine was
 // built without a workspace root and no explicit Scope option). The TUI uses
 // it for /add-dir.
+// ReRooted returns an engine identical to the receiver except that its
+// workspace scope is rooted at workspaceRoot. The previous workspace root
+// leaves the scope; every other granted root carries over (write roots via
+// NewScope extras, read-only roots via AddRead), as do policy, grant store,
+// session grant state, and the execution backend. Callers use this to run a
+// pipeline inside a bound worktree while keeping --add-dir style grants and
+// the caller's policy intact. A nil engine stays nil, and a root that already
+// matches returns the receiver unchanged.
+func (engine *Engine) ReRooted(workspaceRoot string) *Engine {
+	if engine == nil {
+		return nil
+	}
+	rooted := strings.TrimSpace(workspaceRoot)
+	if rooted == "" || rooted == engine.workspaceRoot {
+		return engine
+	}
+	var extras, readExtras []string
+	if engine.scope != nil {
+		readSet := map[string]bool{}
+		for _, root := range engine.scope.readRoots {
+			readSet[root] = true
+		}
+		for _, root := range engine.scope.extraRoots {
+			if root != "" {
+				extras = append(extras, root)
+			}
+		}
+		for root := range readSet {
+			if root != "" && root != engine.workspaceRoot {
+				readExtras = append(readExtras, root)
+			}
+		}
+	}
+	clone := &Engine{
+		workspaceRoot:   rooted,
+		policy:          engine.policy,
+		store:           engine.store,
+		backend:         engine.backend,
+		sessionGrants:   engine.sessionGrants,
+		sessionProfiles: engine.sessionProfiles,
+		turnProfiles:    engine.turnProfiles,
+		commandPrefixes: engine.commandPrefixes,
+	}
+	clone.scope = newScopeBestEffort(rooted)
+	for _, extra := range extras {
+		_, _ = clone.scope.Add(extra)
+	}
+	for _, readExtra := range readExtras {
+		_, _ = clone.scope.AddRead(readExtra)
+	}
+	return clone
+}
+
+// WorkspaceRoot returns the construction-time workspace root. Callers use it
+// to pin which engine instance reached a tool boundary, for example in
+// regression tests that assert a pipeline run's plan preparation used the
+// run-scoped stage engine rather than the session engine.
+func (engine *Engine) WorkspaceRoot() string {
+	if engine == nil {
+		return ""
+	}
+	return engine.workspaceRoot
+}
+
 func (engine *Engine) Scope() *Scope {
 	if engine == nil {
 		return nil

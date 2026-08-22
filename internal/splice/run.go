@@ -325,13 +325,14 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 		}
 	}
 
-	runner := newAgentToolRunner(options, absWorkDir)
-
 	// Deterministic stage subprocesses run under their own enforce-mode
 	// engine: workspace-scoped filesystem, network denied. This is separate
 	// from options.Sandbox, which keeps the interactive user policy for
-	// model-driven tool calls.
+	// model-driven tool calls. Set BEFORE the tool runner is built so the
+	// runner's captured config carries it.
 	options.StageSandbox = procrun.NewStageEngine(absWorkDir)
+
+	runner := newAgentToolRunner(options, absWorkDir)
 	// Strict read-before-write for every write_file/edit_file in this run: a
 	// model that skips the read now gets a loud, repairable error instead of
 	// silently overwriting live symbols.
@@ -1509,6 +1510,19 @@ func newAgentToolRunner(options PipelineRunConfig, cwd string) ToolRunner {
 		runOptions := agent.NewToolRunOptions(agentOpts, call, cwd, permissionGranted)
 		if options.StageRequireReadBeforeWrite {
 			runOptions.RequireReadBeforeWrite = true
+		}
+		if options.StageRequireReadBeforeWrite {
+			runOptions.RequireReadBeforeWrite = true
+		}
+		if runOptions.Sandbox != nil {
+			// Stage tools execute under the caller's engine re-rooted to this
+			// run's working directory. A worktree bound after startup (TUI
+			// /exec) leaves the session engine rooted at the session
+			// workspace, and plan preparation inside process-spawning tools
+			// would refuse the run directory as outside_workspace. Re-rooting
+			// keeps the caller's policy, add-dir grants, grant store, and
+			// backend; only the workspace root moves.
+			runOptions.Sandbox = runOptions.Sandbox.ReRooted(cwd)
 		}
 		res := options.Registry.RunWithOptions(ctx, name, args, runOptions)
 		feedback := agent.RunAfterToolHooks(ctx, agentOpts, call, args, res)

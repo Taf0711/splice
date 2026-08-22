@@ -3827,6 +3827,124 @@ func TestBuildRevisionContextCarriesFailureEvidence(t *testing.T) {
 	}
 }
 
+// engineRootProbeTool records the workspace root and granted write roots of
+// whatever engine reaches RunWithOptions, so tests can pin the engine
+// instance at the tool boundary.
+type engineRootProbeTool struct {
+	recordedRoot  *string
+	recordedRoots *[]string
+}
+
+func (t engineRootProbeTool) Name() string        { return "engine_root_probe" }
+func (t engineRootProbeTool) Description() string { return "records the sandbox engine root" }
+func (t engineRootProbeTool) Parameters() tools.Schema {
+	return tools.Schema{Type: "object"}
+}
+func (t engineRootProbeTool) Safety() tools.Safety {
+	return tools.Safety{Permission: tools.PermissionAllow}
+}
+func (t engineRootProbeTool) Run(ctx context.Context, args map[string]any) tools.Result {
+	return tools.Result{Status: tools.StatusOK}
+}
+func (t engineRootProbeTool) RunWithOptions(ctx context.Context, args map[string]any, options tools.RunOptions) tools.Result {
+	if options.Sandbox != nil {
+		*t.recordedRoot = options.Sandbox.WorkspaceRoot()
+		*t.recordedRoots = options.Sandbox.Scope().Roots()
+	} else {
+		*t.recordedRoot = ""
+		*t.recordedRoots = nil
+	}
+	return tools.Result{Status: tools.StatusOK}
+}
+
+// TestPipelineStageToolsUseRunScopedEngine pins the plan-preparation half of
+// the /exec worktree fix: the engine handed to stage tool execution must be
+// rooted at the run workdir, not the session workspace. A session-rooted
+// engine reaching procrun.Prepare refuses the worktree cwd before any command
+// runs. Add-dir style grants on the caller engine must survive the re-root.
+func TestPipelineStageToolsUseRunScopedEngine(t *testing.T) {
+	base := t.TempDir()
+	sessionRoot := filepath.Join(base, "session")
+	worktree := filepath.Join(base, "worktree")
+	for _, dir := range []string{sessionRoot, worktree} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	sessionEngine := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot: sessionRoot,
+		Policy:        sandbox.DefaultPolicy(),
+	})
+
+	// Grant an add-dir style extra write root on the session engine; the
+	// re-rooted engine must carry it so --add-dir grants survive worktree
+	// binding. The grant must live outside the default temp write roots:
+	// every t.TempDir path sits under one on macOS, and Scope.Add silently
+	// treats covered roots as already granted.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("user home unavailable: %v", err)
+	}
+	extraRoot, err := os.MkdirTemp(filepath.Join(home, ".cache"), "splice-reroot-test-")
+	if err != nil {
+		t.Skipf("home cache dir unavailable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(extraRoot) })
+	if _, err := sessionEngine.Scope().Add(extraRoot); err != nil {
+		t.Fatalf("scope add: %v", err)
+	}
+
+	var recordedRoot string
+	var recordedRoots []string
+	registry := tools.NewRegistry()
+	registry.Register(engineRootProbeTool{recordedRoot: &recordedRoot, recordedRoots: &recordedRoots})
+
+	config := PipelineConfigFromAgentOptions(agent.Options{
+		Cwd:            worktree,
+		Registry:       registry,
+		Sandbox:        sessionEngine,
+		PermissionMode: agent.PermissionModeAuto,
+	})
+	runner := newAgentToolRunner(config, worktree)
+
+	res, err := runner.RunTool(context.Background(), "engine_root_probe", map[string]any{})
+	if err != nil {
+		t.Fatalf("RunTool error: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("probe failed: %+v", res)
+	}
+	if recordedRoot != worktree {
+		t.Fatalf("stage tool engine root = %q, want run workdir %q", recordedRoot, worktree)
+	}
+
+	// Add-dir style grants survive the re-root: the extra root stays in the
+	// granted write roots alongside the new run directory.
+	// Scope grants are symlink-resolved on Add; compare against resolved paths.
+	resolvedWorktree, err := filepath.EvalSymlinks(worktree)
+	if err != nil {
+		t.Fatalf("resolve worktree: %v", err)
+	}
+	resolvedExtra, err := filepath.EvalSymlinks(extraRoot)
+	if err != nil {
+		t.Fatalf("resolve extra root: %v", err)
+	}
+	foundExtra := false
+	foundWorktree := false
+	for _, root := range recordedRoots {
+		switch root {
+		case resolvedExtra:
+			foundExtra = true
+		case resolvedWorktree:
+			foundWorktree = true
+		}
+	}
+	if !foundExtra || !foundWorktree {
+		t.Fatalf("re-rooted scope roots = %v, want both %q and %q", recordedRoots, worktree, extraRoot)
+	}
+}
+
 // TestPipelineToolScopeFollowsRunWorktree pins the TUI /exec worktree fix:
 // a pipeline run bound to a worktree after startup keeps the sandbox engine
 // rooted at the session workspace, but stage tool execution must evaluate
