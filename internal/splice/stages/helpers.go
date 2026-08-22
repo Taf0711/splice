@@ -3,6 +3,8 @@ package stages
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
@@ -13,6 +15,12 @@ import (
 
 const defaultListMaxResults = 100
 const maxDefaultReadQueries = 3
+
+// maxFallbackSourceFiles bounds the production-source fallback so a large
+// workspace cannot flood the context bundle. Each file still honors the same
+// per-read MaxChars budget the explicit-path queries use.
+const maxFallbackSourceFiles = 8
+const fallbackSourceMaxChars = 5000
 
 var candidatePathPattern = regexp.MustCompile(`[A-Za-z0-9_./-]+\.(?:py|pyi|ts|tsx|js|jsx|go|rs|java|rb|md|toml|cfg|ini|json|yaml|yml|txt|sh)\b`)
 
@@ -28,22 +36,31 @@ func (o StageOptions) contextRequest(intent string) *schemas.ContextRequest {
 		return o.OverrideContextRequest
 	}
 	if o.PullContext {
-		req := defaultContextRequest(intent)
+		req := defaultContextRequest(intent, o.WorkDir, o.Language)
 		return &req
 	}
 	return nil
 }
 
-func defaultContextRequest(intent string) schemas.ContextRequest {
+func defaultContextRequest(intent string, workDir string, language string) schemas.ContextRequest {
 	queries := []schemas.ContextQuery{
 		{QueryType: schemas.ContextListFiles, MaxResults: defaultListMaxResults, MaxChars: 10000},
 	}
-	for _, path := range candidatePaths(intent) {
+	readPaths := candidatePaths(intent)
+	if len(readPaths) == 0 {
+		// The task text names no path. Fall back to the workspace's production
+		// source files for the detected language so the writer sees real
+		// contents instead of inventing them from a directory listing alone.
+		// Test files stay excluded: verification owns them, and a repair-loop
+		// fixture may plant a trap test the writer must not see.
+		readPaths = productionSourcePaths(workDir, language)
+	}
+	for _, path := range readPaths {
 		queries = append(queries, schemas.ContextQuery{
 			QueryType:  schemas.ContextReadFile,
 			Path:       &path,
 			MaxResults: 10,
-			MaxChars:   5000,
+			MaxChars:   fallbackSourceMaxChars,
 		})
 	}
 	return schemas.ContextRequest{
@@ -51,6 +68,71 @@ func defaultContextRequest(intent string) schemas.ContextRequest {
 			"instead of overwriting it."),
 		Queries: queries,
 	}
+}
+
+// productionSourcePaths lists up to maxFallbackSourceFiles workspace-relative
+// production source paths for the detected language. Test files are excluded,
+// hidden and dependency directories are skipped, and the result is sorted for
+// deterministic context bundles.
+func productionSourcePaths(workDir string, language string) []string {
+	extensions := languageExtensions[strings.ToLower(strings.TrimSpace(language))]
+	if len(extensions) == 0 || strings.TrimSpace(workDir) == "" {
+		return nil
+	}
+	root, err := filepath.Abs(workDir)
+	if err != nil {
+		return nil
+	}
+	var paths []string
+	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil // best effort: an unreadable entry never blocks context
+		}
+		if entry.IsDir() {
+			name := entry.Name()
+			if path != root && (defaultIgnoreDirs[name] || strings.HasPrefix(name, ".")) {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !slices.Contains(extensions, filepath.Ext(path)) {
+			return nil
+		}
+		if isTestFileName(entry.Name()) {
+			return nil
+		}
+		relative, relErr := filepath.Rel(root, path)
+		if relErr != nil || relative == "." || relative == ".." {
+			return nil
+		}
+		if !slices.Contains(paths, relative) {
+			paths = append(paths, relative)
+		}
+		if len(paths) >= maxFallbackSourceFiles {
+			return fs.SkipAll
+		}
+		return nil
+	})
+	sort.Strings(paths)
+	return paths
+}
+
+// isTestFileName reports whether name is a test file for the languages Splice
+// supports. The patterns cover Go, Python, and JavaScript/TypeScript naming
+// conventions plus spec files.
+func isTestFileName(name string) bool {
+	base := strings.ToLower(name)
+	patterns := []string{
+		"*_test.go", "test_*.py", "*_test.py",
+		"*.test.ts", "*.test.tsx", "*.test.js", "*.test.jsx",
+		"*.spec.ts", "*.spec.tsx", "*.spec.js", "*.spec.jsx",
+	}
+	for _, pattern := range patterns {
+		if matched, _ := filepath.Match(pattern, base); matched {
+			return true
+		}
+	}
+	return false
 }
 
 func candidatePaths(intent string) []string {
