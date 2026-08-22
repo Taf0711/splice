@@ -453,7 +453,10 @@ type model struct {
 	// (quit the app vs. cancel the current run) that are armed by different
 	// keys — Ctrl+C and Esc respectively.
 	cancelConfirmActive bool
-	cancelConfirmSeq    int
+	// execDirectPending arms CLI-parity behavior for the next launched prompt
+	// (set by /exec, consumed by launchPrompt).
+	execDirectPending bool
+	cancelConfirmSeq  int
 	// edgeScrollDelta drives the smooth-glide auto-scroll while a drag holds past
 	// the transcript's top/bottom edge: 0 when idle, else the signed per-tick step
 	// (matches transcriptEdgeScrollDelta's sign convention). A self-scheduling
@@ -816,10 +819,13 @@ const (
 type tuiAgentRunOptions struct {
 	registry       *tools.Registry
 	permissionMode agent.PermissionMode
-	systemPrompt   string
-	runKind        tuiRunKind
-	priorMessages  []zeroruntime.Message
-	serverTools    []zeroruntime.ServerTool
+	// execDirect marks a run launched through /exec so it matches headless
+	// `splice exec` semantics instead of inheriting conversation state.
+	execDirect    bool
+	systemPrompt  string
+	runKind       tuiRunKind
+	priorMessages []zeroruntime.Message
+	serverTools   []zeroruntime.ServerTool
 	// transition is the per-turn recorder for the design-transition tools. It
 	// is set only for design-conversation runs, and only they drain it.
 	transition *splicerun.DesignTransitionRecorder
@@ -4975,6 +4981,9 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 	// attachments too: launchPrompt clears the pending queues below, so /retry
 	// re-stages these to resend an identical vision/PDF-backed request rather than
 	// a degraded text-only one.
+	if m.execDirectPending {
+		defer func() { m.execDirectPending = false }()
+	}
 	m.lastPrompt = prompt
 	m.lastImages = m.pendingImages
 	m.lastImageLabels = m.pendingImageLabels
@@ -5083,7 +5092,9 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 			transition:    transition,
 		}), m.spinner.Tick)
 	}
-	return m, tea.Batch(m.runAgent(m.activeRunID, runCtx, prompt, turnImages), m.spinner.Tick)
+	runOpts := tuiAgentRunOptions{execDirect: m.execDirectPending}
+	m.execDirectPending = false
+	return m, tea.Batch(m.runAgentWithOptions(m.activeRunID, runCtx, prompt, turnImages, runOpts), m.spinner.Tick)
 }
 
 // beginRun stamps the shared run-start state for a new agent turn: a fresh run
@@ -5154,6 +5165,9 @@ func (m model) launchQueuedMessageIfReady() (model, tea.Cmd) {
 	}
 	prompt := m.queuedMessage
 	m.queuedMessage = ""
+	// Deliver queued input visibly: a silent submit looks identical to the
+	// user typing something new, which hides why the next run's prompt differs.
+	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Delivered queued input: " + prompt})
 	return m.launchPrompt(prompt)
 }
 
@@ -5371,6 +5385,22 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		options.PermissionMode = m.permissionMode
 		if runOptions.permissionMode != "" {
 			options.PermissionMode = runOptions.permissionMode
+		}
+		if runOptions.execDirect {
+			// CLI-exec parity: a direct /exec pipeline runs under auto
+			// permission mode. State the deviation from the session selector
+			// instead of switching silently.
+			previous := options.PermissionMode
+			options.PermissionMode = agent.PermissionModeAuto
+			notice := "/exec: pipeline runs under auto permission mode"
+			if previous != agent.PermissionModeAuto {
+				notice += fmt.Sprintf(" (session mode %s deferred)", previous)
+			}
+			rows = append(rows, transcriptRow{kind: rowSystem, text: notice, runID: runID})
+			sessionEvents = append(sessionEvents, pendingSessionEvent{
+				Type:    sessions.EventMessage,
+				Payload: map[string]any{"role": "system", "content": notice},
+			})
 		}
 		if runOptions.systemPrompt != "" {
 			options.SystemPrompt = runOptions.systemPrompt
@@ -5962,6 +5992,15 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			result, err = agent.Run(runCtx, prompt, m.provider, options)
 		} else {
 			memClient, mErr := tuiResolveMemory(runCtx)
+			if runOptions.execDirect && os.Getenv("SPLICE_EXEC_MEMORY") == "off" {
+				// Cold demo runs: /exec honors SPLICE_EXEC_MEMORY=off so a
+				// fixture workspace is not steered by stored observations.
+				memStatus = "off"
+				options.MemoryStatus = "off"
+				memClient = nil
+				mErr = nil
+				rows = append(rows, transcriptRow{kind: rowSystem, text: "/exec: memory off (SPLICE_EXEC_MEMORY=off).", runID: runID})
+			}
 			switch {
 			case mErr != nil:
 				// A daemon was expected but unreachable: unavailable, not off.

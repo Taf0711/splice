@@ -63,6 +63,9 @@ func (m model) handleDesignCommand() (model, tea.Cmd) {
 func (m model) handleExecCommand(text string) (model, tea.Cmd) {
 	text = strings.TrimSpace(text)
 	m.designMode = false
+	// /exec means CLI-exec parity: the pipeline runs under auto permission
+	// mode regardless of the conversation-mode selector.
+	m.execDirectPending = true
 	if text == "" {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Execution mode. Type a prompt to run it through the pipeline, or /design to return to design conversation."})
 		return m, nil

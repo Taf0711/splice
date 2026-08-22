@@ -2868,3 +2868,33 @@ func TestStatusLineSurfacesCancelAffordanceWhilePending(t *testing.T) {
 		t.Fatalf("armed status must replace the hint, got %q", confirm)
 	}
 }
+
+// TestHandleExecCommandArmsCliParity pins F1 wiring: /exec arms the
+// CLI-parity flag consumed by the launched pipeline run.
+func TestHandleExecCommandArmsCliParity(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	next, _ := m.handleExecCommand("implement the stubbed DeleteUser flow")
+	if !next.execDirectPending {
+		t.Fatal("/exec must arm the exec-direct flag")
+	}
+	if next.designMode {
+		t.Fatal("/exec must leave design mode")
+	}
+}
+
+// TestLaunchQueuedMessageEchoesDelivery pins F2: delivering input queued while
+// busy appends a visible system line quoting what was delivered, so the next
+// run's prompt provenance is never silent.
+func TestLaunchQueuedMessageEchoesDelivery(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.provider = &fakeProvider{}
+	m.queuedMessage = "fix the users service"
+
+	next, _ := m.launchQueuedMessageIfReady()
+	if next.queuedMessage != "" {
+		t.Fatal("queued message must be consumed")
+	}
+	if !transcriptContains(next.transcript, "Delivered queued input: fix the users service") {
+		t.Fatalf("transcript lacks the delivery echo")
+	}
+}

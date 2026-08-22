@@ -17,6 +17,13 @@ design session
 Use `/design` to enter design mode. Use `/crystallize` to create a typed plan.
 Use `/approve` only after the current plan passes review.
 
+## Direct execution
+
+Use `/exec <prompt>` to run one prompt through the pipeline without a plan.
+The run matches `splice exec` semantics: it uses auto permission mode, and the
+transcript states that choice. Set `SPLICE_EXEC_MEMORY=off` before launch for
+a cold run with no memory injection.
+
 ## Manual and agent requests
 
 The design agent can request crystallization or approval through host transition
