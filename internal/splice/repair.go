@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -118,7 +119,11 @@ func attemptLocalRepair(
 		}
 		*outputs = append(*outputs, writerOutput)
 
-		// Re-run test_runner (model-free: zero usage and zero selection).
+		// Re-run test_runner (model-free: zero usage and zero selection). The
+		// re-entry itself already emits running/completed through
+		// runStageWithContext; this labeled note is what makes the stream show
+		// WHY a second test_runner run exists mid-iteration.
+		emitStageEvent(options, "test_runner", "message", fmt.Sprintf("repair re-entry %d: re-running tests", attempts), 0, nil)
 		testInput := repairStageInput(runID, "test_runner", plan, stageNames, *priorSummaries, *priorChangedFiles, nil)
 		testStart := time.Now()
 		newTestOutput, terr := runRepairStage(ctx, wallDeadline, testInput, testRunnerStage, iteration, agent.ModelSelection{}, options, workDir, runner, mem, stageOutputMax(plan, "test_runner"), tr)
@@ -130,6 +135,16 @@ func attemptLocalRepair(
 		if tr != nil {
 			tr.replaceStageRecord(mergedRunner)
 			tr.persistPartial(ctx)
+		}
+		// Outputs follow the same replace semantics as the merged records
+		// above: keep exactly one test_results payload for this iteration.
+		// typedPayloads counts every payload in passOutputs, so an appended
+		// stale pre-repair suite would keep TestsFailing above zero forever
+		// and abort a fully repaired pass on budget.
+		for idx := len(*outputs) - 1; idx >= 0; idx-- {
+			if _, hasResults := (*outputs)[idx].Data["test_results"]; hasResults {
+				*outputs = slices.Delete(*outputs, idx, idx+1)
+			}
 		}
 		*outputs = append(*outputs, newTestOutput)
 		currentOutput = newTestOutput
@@ -153,7 +168,9 @@ func attemptLocalRepair(
 		return false, nil, nil
 	}
 	// Exhausted: the test_runner record already reflects the latest failing
-	// result via the merge above; the pass continues normally.
+	// result via the merge above; the pass continues normally. Distinguish
+	// "still failing after N repairs" from "no repair attempted" in streams.
+	emitStageEvent(options, "test_runner", "message", fmt.Sprintf("repair_exhausted: still failing after %d repair(s)", attempts), 0, nil)
 	return false, &schemas.InteractionRecord{
 		Message:   lastMessage,
 		Iteration: iteration,
