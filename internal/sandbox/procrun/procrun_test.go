@@ -134,3 +134,39 @@ func TestPrepareRejectedEngineDecisionAuditsTheRefusal(t *testing.T) {
 		t.Fatalf("decision = %+v, want rejected with reason", records[0].Decision)
 	}
 }
+
+// TestPrepareDirectPathHonorsExplicitEnv pins the explicit-environment seam:
+// a non-nil Spec.Env travels verbatim, while a nil Spec.Env keeps the scrubbed
+// process inheritance. The hooks dispatcher relies on the verbatim case to run
+// hook commands with the scrubbed env plus its own extra entries, and the
+// direct path must emit an audit record for the spawn either way.
+func TestPrepareDirectPathHonorsExplicitEnv(t *testing.T) {
+	read := collectAudit(t)
+	spec := sandbox.CommandSpec{
+		Name: "/bin/sh",
+		Args: []string{"-c", "exit 0"},
+		Env:  []string{"PARITY_A=1", "PARITY_B=2"},
+	}
+	prepared, err := Prepare(context.Background(), Request{ProfileID: ProfileHooksDispatch, Spec: spec})
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if len(prepared.Cmd.Env) != len(spec.Env) {
+		t.Fatalf("env = %v, want verbatim %v", prepared.Cmd.Env, spec.Env)
+	}
+	for i := range spec.Env {
+		if prepared.Cmd.Env[i] != spec.Env[i] {
+			t.Fatalf("env[%d] = %q, want %q", i, prepared.Cmd.Env[i], spec.Env[i])
+		}
+	}
+	records := read()
+	if len(records) != 1 {
+		t.Fatalf("audit records = %d, want 1", len(records))
+	}
+	if records[0].ProfileID != ProfileHooksDispatch || records[0].Name != spec.Name {
+		t.Fatalf("record = %+v, want profile %s for %q", records[0], ProfileHooksDispatch, spec.Name)
+	}
+	if records[0].Decision.Rejected {
+		t.Fatalf("decision = %+v, want a non-rejected spawn", records[0].Decision)
+	}
+}

@@ -335,7 +335,10 @@ func extractTextWithPoppler(data []byte) (string, bool) {
 
 	// "-layout" keeps the visual column layout; the trailing "- -" reads the PDF
 	// from stdin and writes UTF-8 text to stdout.
-	cmd := exec.CommandContext(ctx, "pdftotext", "-layout", "-enc", "UTF-8", "-", "-")
+	cmd, err := prepareImageInputCommand(ctx, "pdftotext", "-layout", "-enc", "UTF-8", "-", "-")
+	if err != nil {
+		return "", false
+	}
 	cmd.Stdin = bytes.NewReader(data)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -371,7 +374,10 @@ func rasterizeWithPoppler(data []byte, maxPages int) ([]zeroruntime.ImageBlock, 
 	prefix := filepath.Join(dir, "page")
 	// -png: PNG output; -r 150: 150 DPI (legible without huge files);
 	// -f 1 / -l N: render only the first N pages so context can't blow up.
-	cmd := exec.CommandContext(ctx, "pdftoppm", "-png", "-r", "150", "-f", "1", "-l", fmt.Sprintf("%d", maxPages), "-", prefix)
+	cmd, err := prepareImageInputCommand(ctx, "pdftoppm", "-png", "-r", "150", "-f", "1", "-l", fmt.Sprintf("%d", maxPages), "-", prefix)
+	if err != nil {
+		return nil, fmt.Errorf("pdftoppm failed: %w", err)
+	}
 	cmd.Stdin = bytes.NewReader(data)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

@@ -2,10 +2,10 @@ package imageinput
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"runtime"
 	"strings"
 
@@ -57,7 +57,11 @@ func readClipboardImageBytes() ([]byte, error) {
 func readClipboardImageWindows() ([]byte, error) {
 	// Check if the clipboard contains an image.
 	check := `Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; [System.Windows.Forms.Clipboard]::ContainsImage()`
-	out, err := exec.Command("powershell", "-NoProfile", "-Command", check).Output()
+	cmd, err := prepareImageInputCommand(context.Background(), "powershell", "-NoProfile", "-Command", check)
+	if err != nil {
+		return nil, nil // clipboard not available, treat as no image
+	}
+	out, err := cmd.Output()
 	if err != nil {
 		return nil, nil // clipboard not available, treat as no image
 	}
@@ -76,7 +80,10 @@ func readClipboardImageWindows() ([]byte, error) {
 	tmpFile.Close()
 	defer os.Remove(tmpPath)
 	script := `Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $img = [System.Windows.Forms.Clipboard]::GetImage(); if ($img -ne $null) { $img.Save('` + tmpPath + `', [System.Drawing.Imaging.ImageFormat]::Png) }`
-	cmd := exec.Command("powershell", "-NoProfile", "-Command", script)
+	cmd, err = prepareImageInputCommand(context.Background(), "powershell", "-NoProfile", "-Command", script)
+	if err != nil {
+		return nil, nil
+	}
 	if err := cmd.Run(); err != nil {
 		return nil, nil
 	}
@@ -92,7 +99,11 @@ func readClipboardImageWindows() ([]byte, error) {
 func readClipboardImageDarwin() ([]byte, error) {
 	// Check clipboard info for image classes.
 	check := `osascript -e 'clipboard info'`
-	out, err := exec.Command("sh", "-c", check).Output()
+	cmd, err := prepareImageInputCommand(context.Background(), "sh", "-c", check)
+	if err != nil {
+		return nil, nil
+	}
+	out, err := cmd.Output()
 	if err != nil {
 		return nil, nil
 	}
@@ -102,13 +113,17 @@ func readClipboardImageDarwin() ([]byte, error) {
 	}
 	// Write clipboard image to a temp file via AppleScript, then read it.
 	// Using pngpaste if available, falling back to a Python one-liner.
-	cmd := exec.Command("sh", "-c", `pngpaste - 2>/dev/null || python3 -c "
+	darwinScript := `pngpaste - 2>/dev/null || python3 -c "
 import AppKit, sys
 pb = AppKit.NSPasteboard.generalPasteboard()
 data = pb.dataForType_(AppKit.NSPasteboardTypePNG)
 if data:
     sys.stdout.buffer.write(data.bytes())
-"`)
+"`
+	cmd, err = prepareImageInputCommand(context.Background(), "sh", "-c", darwinScript)
+	if err != nil {
+		return nil, nil
+	}
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	if err := cmd.Run(); err != nil {
@@ -153,7 +168,10 @@ func readClipboardImageLinux() ([]byte, error) {
 // tool is missing); a missing tool surfaces as the command error, treated as
 // "no image" by the callers.
 func runClipboardStdout(name string, args ...string) ([]byte, error) {
-	cmd := exec.Command(name, args...)
+	cmd, err := prepareImageInputCommand(context.Background(), name, args...)
+	if err != nil {
+		return nil, err
+	}
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	if err := cmd.Run(); err != nil {

@@ -30,6 +30,8 @@ const (
 	ProfileToolsExecCommand = "tools.exec_command"
 	ProfileSpliceStage      = "splice.stage"
 	ProfileSpliceDTools     = "splice.dtools"
+	ProfileHooksDispatch    = "hooks.dispatch"
+	ProfileImageInput       = "tui.imageinput"
 )
 
 // StageBinaries is the fixed-binary allowlist for deterministic pipeline
@@ -178,9 +180,16 @@ func Prepare(ctx context.Context, req Request) (Prepared, error) {
 	}
 	command := exec.CommandContext(ctx, req.Spec.Name, req.Spec.Args...)
 	command.Dir = req.Spec.Dir
-	// Escalated (non-sandboxed) commands inherit the process env by default.
-	// Scrub credential-bearing variables so the child cannot exfiltrate keys.
-	command.Env = secrets.ScrubChildEnv(os.Environ())
+	if req.Spec.Env != nil {
+		// An explicit environment travels verbatim. Callers that need the
+		// process environment apply their own rules first (see the hooks
+		// dispatcher, which scrubs and then appends hook-specific entries).
+		command.Env = req.Spec.Env
+	} else {
+		// Escalated (non-sandboxed) commands inherit the process env by default.
+		// Scrub credential-bearing variables so the child cannot exfiltrate keys.
+		command.Env = secrets.ScrubChildEnv(os.Environ())
+	}
 	emitAudit(base)
 	return Prepared{Cmd: command, Plan: plan, Audit: base}, nil
 }

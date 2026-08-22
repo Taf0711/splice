@@ -1,12 +1,18 @@
 package hooks
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
 )
 
 func beforeToolConfig(hooks ...Definition) Config {
@@ -183,6 +189,108 @@ func TestExecCommandRunnerCapturesExitAndStdin(t *testing.T) {
 	}
 	if !strings.Contains(result.Stderr, "payload-123") {
 		t.Fatalf("stderr = %q, want stdin echoed", result.Stderr)
+	}
+}
+
+// legacyDirectExecRunner replicates the pre-migration execCommandRunner body
+// (direct exec.CommandContext, explicit env assignment) so the parity table
+// compares migrated outcomes against the real old behavior, not a model of it.
+func legacyDirectExecRunner(ctx context.Context, command string, args []string, stdin []byte, cwd string, env []string) commandResult {
+	cmd := exec.CommandContext(ctx, command, args...)
+	cmd.Dir = cwd
+	cmd.Env = env
+	if len(stdin) > 0 {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	result := commandResult{Stdout: stdout.String(), Stderr: stderr.String()}
+	if err == nil {
+		return result
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		result.ExitCode = exitErr.ExitCode()
+		return result
+	}
+	// Could not launch (binary missing, timeout, etc.).
+	result.ExitCode = -1
+	result.Err = err
+	return result
+}
+
+// TestExecCommandRunnerParityWithDirectExec pins the procrun migration: for
+// every outcome class the migrated runner must match the legacy direct-exec
+// runner exactly: same stdout/stderr capture, same exit-code reporting // Err reserved for launch failures, and identical argv/dir/env/stdin handling.
+func TestExecCommandRunnerParityWithDirectExec(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses /bin/sh")
+	}
+	cases := []struct {
+		name  string
+		run   string
+		stdin []byte
+		env   []string
+	}{
+		{name: "clean exit", run: "exit 0"},
+		{name: "nonzero exit is not a launch failure", run: "echo out-4; echo err-4 1>&2; exit 4"},
+		{name: "stdin piping", run: "cat", stdin: []byte("payload-123")},
+		{name: "env passthrough", run: `printf %s "$PARITY_VAR"`, env: []string{"PARITY_VAR=parity-ok"}},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			dir := t.TempDir()
+			args := []string{"-c", testCase.run}
+			got := execCommandRunner(context.Background(), "/bin/sh", args, testCase.stdin, dir, testCase.env)
+			want := legacyDirectExecRunner(context.Background(), "/bin/sh", args, testCase.stdin, dir, testCase.env)
+			if got.ExitCode != want.ExitCode || got.Stdout != want.Stdout || got.Stderr != want.Stderr ||
+				(got.Err == nil) != (want.Err == nil) {
+				t.Fatalf("parity drift:\n got  %+v\n want %+v", got, want)
+			}
+		})
+	}
+	// The launch-failure class must agree too: both runners report a missing
+	// binary as Err with ExitCode -1, never as a non-splice exit.
+	dir := t.TempDir()
+	got := execCommandRunner(context.Background(), "definitely-not-a-real-binary-zzz", nil, nil, dir, nil)
+	want := legacyDirectExecRunner(context.Background(), "definitely-not-a-real-binary-zzz", nil, nil, dir, nil)
+	if got.ExitCode != want.ExitCode || got.Err == nil || got.Stdout != want.Stdout || got.Stderr != want.Stderr {
+		t.Fatalf("launch-failure drift:\n got  %+v\n want %+v", got, want)
+	}
+}
+
+// TestExecCommandRunnerEmitsProcrunAuditRecord pins the pairing contract: every
+// hook spawn emits one audit record under the hooks.dispatch profile carrying
+// the binary name, argv, and directory.
+func TestExecCommandRunnerEmitsProcrunAuditRecord(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses /bin/sh")
+	}
+	var records []procrun.AuditRecord
+	previous := procrun.SetAuditSink(func(record procrun.AuditRecord) {
+		records = append(records, record)
+	})
+	t.Cleanup(func() { procrun.SetAuditSink(previous) })
+
+	dir := t.TempDir()
+	result := execCommandRunner(context.Background(), "/bin/sh", []string{"-c", "exit 0"}, nil, dir, os.Environ())
+	if result.Err != nil || result.ExitCode != 0 {
+		t.Fatalf("result = %+v, want a clean run", result)
+	}
+	if len(records) != 1 {
+		t.Fatalf("audit records = %d, want 1 per spawn", len(records))
+	}
+	record := records[0]
+	if record.ProfileID != procrun.ProfileHooksDispatch {
+		t.Fatalf("profile = %q, want %q", record.ProfileID, procrun.ProfileHooksDispatch)
+	}
+	if record.Name != "/bin/sh" || len(record.Args) != 2 || record.Args[0] != "-c" || record.Dir != dir {
+		t.Fatalf("record identity = %+v, want the spawned argv and dir", record)
+	}
+	if record.Decision.Rejected {
+		t.Fatalf("decision = %+v, want a non-rejected spawn", record.Decision)
 	}
 }
 

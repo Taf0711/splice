@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Taf0711/splice/internal/sandbox"
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
 	"github.com/Taf0711/splice/internal/secrets"
 )
 
@@ -263,17 +265,33 @@ func (dispatcher *Dispatcher) recordCompleted(hook Definition, input DispatchInp
 // execCommandRunner runs a hook command directly (no shell), feeding the JSON
 // payload on stdin and capturing stdout/stderr. A non-splice exit is reported via
 // ExitCode (not Err); Err is reserved for commands that could not be launched.
+// The command goes through the procrun chokepoint so every hook spawn emits an
+// audit record. The engine is nil: hook commands stay unsandboxed because users
+// configure them, and the environment is the scrubbed process env plus the
+// dispatcher extras, exactly as before the runner routed through procrun.
 func execCommandRunner(ctx context.Context, command string, args []string, stdin []byte, cwd string, env []string) commandResult {
-	cmd := exec.CommandContext(ctx, command, args...)
-	cmd.Dir = cwd
-	cmd.Env = env
+	prepared, err := procrun.Prepare(ctx, procrun.Request{
+		ProfileID: procrun.ProfileHooksDispatch,
+		Spec: sandbox.CommandSpec{
+			Name: command,
+			Args: args,
+			Dir:  cwd,
+			Env:  env,
+		},
+	})
+	if err != nil {
+		// Unreachable with a nil engine and no allowlist, but a refusal must
+		// not look like a clean non-splice exit.
+		return commandResult{ExitCode: -1, Err: err}
+	}
+	cmd := prepared.Cmd
 	if len(stdin) > 0 {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
+	err = cmd.Run()
 	result := commandResult{Stdout: stdout.String(), Stderr: stderr.String()}
 	if err == nil {
 		return result
