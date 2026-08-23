@@ -167,18 +167,17 @@ func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
 		runCmd.Dir = in.Cwd
 		out, runErr := runCmd.CombinedOutput()
 		if runErr != nil {
-			// The child failed (non-zero exit or cancellation). Its transcript
-			// still carries real spend: sum the stream-json usage records so a
-			// failed run's partial tokens count toward its arm's cost.
-			return eval.RunOutput{Success: false, Tokens: sumStreamJSONTokens(out)}, fmt.Errorf("exec run %s: %v: %s", in.SessionID, runErr, out)
+			// The transcript's usage records are a real measurement even when
+			// the run itself failed.
+			return eval.RunOutput{Success: false, Tokens: sumStreamJSONTokens(out), TelemetryFound: true}, fmt.Errorf("exec run %s: %v: %s", in.SessionID, runErr, out)
 		}
 
 		checkCmd := exec.CommandContext(ctx, "/bin/sh", "-c", in.Check)
 		checkCmd.Dir = in.Cwd
 		success := checkCmd.Run() == nil
 
-		tokens, interventions := collectTrace(ctx, deps, in.Cwd, in.SessionID)
-		return eval.RunOutput{Success: success, Tokens: tokens, Interventions: interventions}, nil
+		tokens, interventions, found := collectTrace(ctx, deps, in.Cwd, in.SessionID)
+		return eval.RunOutput{Success: success, Tokens: tokens, Interventions: interventions, TelemetryFound: found}, nil
 	}
 }
 
@@ -203,17 +202,35 @@ func sumStreamJSONTokens(out []byte) int {
 }
 
 // collectTrace resolves the trace for a deterministic session id and returns
-// its total tokens and weighted interventions. Best-effort: a missing trace
-// yields zeros and never fails the run.
-func collectTrace(ctx context.Context, deps appDeps, repoRoot, sessionID string) (tokens, interventions int) {
+// its total tokens and weighted interventions plus whether a matching trace
+// was found at all. Best-effort: a missing trace yields zeros and never fails
+// the run, but the found flag lets the report tell absent data from zero.
+func collectTrace(ctx context.Context, deps appDeps, repoRoot, sessionID string) (tokens, interventions int, found bool) {
 	client, err := deps.resolveMemory(ctx)
 	if err != nil || client == nil {
-		return 0, 0
+		return 0, 0, false
 	}
-	results, err := client.QueryTraces(ctx, schemas.TraceQueryFilter{RepoRoot: repoRoot, Limit: 1000})
+	results, err := client.QueryTraces(ctx, schemas.TraceQueryFilter{RepoRoot: resolveRepoRoot(repoRoot), Limit: 1000})
 	if err != nil {
-		return 0, 0
+		return 0, 0, false
 	}
+	return matchTraceTokens(results, sessionID)
+}
+
+// resolveRepoRoot canonicalizes a repository path before it becomes a trace
+// lookup key. macOS serves temp dirs through /var symlinks to /private/var,
+// so an unresolved query path matches no stored trace and telemetry dies
+// silently. Resolution failures fall back to the raw path.
+func resolveRepoRoot(path string) string {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return path
+	}
+	return resolved
+}
+
+// matchTraceTokens sums the first trace matching the session id.
+func matchTraceTokens(results []schemas.TraceQueryResult, sessionID string) (tokens, interventions int, found bool) {
 	for _, result := range results {
 		if result.Trace.RunID != sessionID && result.Trace.SessionID != sessionID {
 			continue
@@ -224,7 +241,7 @@ func collectTrace(ctx context.Context, deps appDeps, repoRoot, sessionID string)
 		for _, intervention := range result.Trace.Interventions {
 			interventions += intervention.Weight
 		}
-		return tokens, interventions
+		return tokens, interventions, true
 	}
-	return 0, 0
+	return 0, 0, false
 }

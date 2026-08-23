@@ -25,6 +25,10 @@ type RunOutput struct {
 	Success       bool
 	Tokens        int // total tokens (input+output) from the trace
 	Interventions int // weighted intervention sum from the trace
+	// TelemetryFound records whether the tokens came from a matching usage
+	// trace. False with Success=true means the token count is absent data,
+	// not a measured zero, and the report must say so.
+	TelemetryFound bool
 }
 
 // RunFunc runs one headless exec invocation in an arm copy and returns its
@@ -106,6 +110,8 @@ func (h *Harness) Run(ctx context.Context, taskset TaskSet, model, provider stri
 			WarmInterventions: warmOut.Interventions,
 			ColdError:         coldError,
 			WarmError:         warmError,
+			ColdTelemetry:     coldOut.TelemetryFound,
+			WarmTelemetry:     warmOut.TelemetryFound,
 		}
 		pairs = append(pairs, pair)
 

@@ -212,3 +212,37 @@ func TestHarnessPairLogAppendsAcrossInterruption(t *testing.T) {
 		t.Fatalf("line after seed = (%q, %v), want pair one appended", lines[1], err)
 	}
 }
+
+// TestHarnessMissingTelemetryWarnsNotSilentZeros pins the telemetry contract:
+// a successful run with no matching trace must surface in the markdown report
+// as absent data naming the task, and a found trace must stay quiet.
+func TestHarnessMissingTelemetryWarnsNotSilentZeros(t *testing.T) {
+	taskset := TaskSet{Name: "ts", Tasks: []Task{
+		{Name: "traced", Prompt: "p", Check: "true"},
+		{Name: "blind", Prompt: "p", Check: "true"},
+	}}
+	h := &Harness{
+		Exec: func(_ context.Context, in RunInput) (RunOutput, error) {
+			return RunOutput{Success: true, Tokens: 100, TelemetryFound: strings.HasSuffix(in.SessionID, "-traced")}, nil
+		},
+		Now: func() time.Time { return time.Unix(0, 0) },
+	}
+	report, err := h.Run(context.Background(), taskset, "", "")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	md := report.RenderMarkdown()
+	if !strings.Contains(md, "TELEMETRY WARNING") || !strings.Contains(md, "blind (cold)") || !strings.Contains(md, "blind (warm)") {
+		t.Fatalf("markdown must name the telemetry-blind tasks:\n%s", md)
+	}
+	if strings.Contains(md, "traced (cold)") || strings.Contains(md, "traced (warm)") {
+		t.Fatalf("traced runs must not appear in the warning:\n%s", md)
+	}
+	jsonData, err := report.WriteJSON()
+	if err != nil {
+		t.Fatalf("WriteJSON: %v", err)
+	}
+	if !strings.Contains(string(jsonData), `"cold_telemetry": false`) {
+		t.Fatalf("json must carry explicit telemetry flags:\n%s", jsonData)
+	}
+}

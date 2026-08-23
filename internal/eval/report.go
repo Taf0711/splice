@@ -18,6 +18,11 @@ type TaskPair struct {
 	WarmTokens        int    `json:"warm_tokens"`
 	ColdInterventions int    `json:"cold_interventions,omitempty"`
 	WarmInterventions int    `json:"warm_interventions,omitempty"`
+	// ColdTelemetry and WarmTelemetry record whether a matching usage trace
+	// was found for that arm's run. False next to a success means the token
+	// count is absent data, not a measured zero.
+	ColdTelemetry bool `json:"cold_telemetry"`
+	WarmTelemetry bool `json:"warm_telemetry"`
 	// ColdError and WarmError carry a verbatim exec failure for that arm.
 	// A failed exec counts as arm failure with whatever partial tokens were
 	// reported, so an abort biases no gate in anyone's favor.
@@ -86,6 +91,21 @@ func (r Report) RenderMarkdown() string {
 	fmt.Fprintf(&b, "| task | cold success | warm success | cold tokens | warm tokens |\n| --- | --- | --- | --- | --- |\n")
 	for _, task := range r.Tasks {
 		fmt.Fprintf(&b, "| %s | %t | %t | %d | %d |\n", task.Name, task.ColdSuccess, task.WarmSuccess, task.ColdTokens, task.WarmTokens)
+	}
+
+	var missingTelemetry []string
+	for _, task := range r.Tasks {
+		if task.ColdSuccess && !task.ColdTelemetry {
+			missingTelemetry = append(missingTelemetry, task.Name+" (cold)")
+		}
+		if task.WarmSuccess && !task.WarmTelemetry {
+			missingTelemetry = append(missingTelemetry, task.Name+" (warm)")
+		}
+	}
+	if len(missingTelemetry) > 0 {
+		fmt.Fprintf(&b, "\n> **TELEMETRY WARNING:** no usage trace was found for %s. "+
+			"Their token counts are absent data, not measured zeros, so cost numbers are unreliable.\n",
+			strings.Join(missingTelemetry, ", "))
 	}
 
 	fmt.Fprintf(&b, "\n## Arms\n\n")
