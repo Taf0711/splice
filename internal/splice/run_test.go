@@ -269,15 +269,18 @@ func TestRunPassInjectsMemoryBundleAndSkipsRetrievalErrors(t *testing.T) {
 		RequestIntent: intent,
 		Stages:        []schemas.ExecutionStage{{Name: "code_writer"}},
 	}
+	project := workDir
 	bundle := schemas.MemoryBundle{
 		RequestingAgent: "code_writer",
 		Observations: []schemas.MemoryObservation{{
-			Scope:      "project",
-			OwnerAgent: "code_writer",
-			Visibility: "shareable",
-			MemoryType: "decision",
-			Title:      "Use cached context",
-			Content:    "Prefer the previously selected implementation path.",
+			ID:          11,
+			ProjectPath: &project,
+			Scope:       "project",
+			OwnerAgent:  "code_writer",
+			Visibility:  "shareable",
+			MemoryType:  "decision",
+			Title:       "Use cached context",
+			Content:     "Prefer the previously selected implementation path.",
 		}},
 	}
 	retriever := &stubStore{bundle: bundle}
@@ -399,8 +402,13 @@ func TestRunPassSearchesOnlyMemoryConsumingStages(t *testing.T) {
 	for _, input := range inputs {
 		switch input.StageName {
 		case "code_writer", "test_generator":
-			if input.MemoryBundle == nil {
-				t.Fatalf("consuming stage %s received no memory bundle", input.StageName)
+			// Zero eligible items after deterministic admission means no
+			// delivered memory: the bundle stays absent rather than empty.
+			if input.MemoryBundle != nil && len(input.MemoryBundle.Observations)+len(input.MemoryBundle.Exemplars) == 0 {
+				t.Fatalf("consuming stage %s received an empty memory bundle; want none", input.StageName)
+			}
+			if retriever.queries[0].RequestingAgent == "" {
+				t.Fatal("expected at least one memory query")
 			}
 		default:
 			if input.MemoryBundle != nil {
@@ -608,15 +616,18 @@ func TestRunPassInjectsSelectedMemoryIntoConsumingStage(t *testing.T) {
 		RequestIntent: intent,
 		Stages:        []schemas.ExecutionStage{{Name: "code_writer"}},
 	}
+	project := workDir
 	bundle := schemas.MemoryBundle{
 		RequestingAgent: "code_writer",
 		Observations: []schemas.MemoryObservation{{
-			Scope:      "project",
-			OwnerAgent: "orchestrator",
-			Visibility: "shareable",
-			MemoryType: "decision",
-			Title:      "Use gofmt",
-			Content:    "Run gofmt on all generated files.",
+			ID:          7,
+			ProjectPath: &project,
+			Scope:       "project",
+			OwnerAgent:  "orchestrator",
+			Visibility:  "shareable",
+			MemoryType:  "decision",
+			Title:       "Use gofmt",
+			Content:     "Run gofmt on all generated files.",
 		}},
 	}
 	store := &stubStore{bundle: bundle}

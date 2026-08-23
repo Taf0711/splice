@@ -718,46 +718,25 @@ func runPass(
 		if tr != nil {
 			tr.noteStage(stageName, iteration)
 		}
-		if mem != nil && caps.ConsumesMemory {
-			bundle, mErr := mem.Search(ctx, newMemoryQuery(stageName, plan.RequestIntent, memoryProjectRoot(options, workDir)))
-			if mErr != nil {
-				emitProgress(options, fmt.Sprintf("[%s] memory retrieval skipped: %v\n", stageName, mErr))
-				// A mid-run retrieval failure degrades the run's memory status to
-				// unavailable (a warm run that failed must not record as cold).
-				if tr != nil {
-					tr.noteMemorySearchFailed()
-				}
-			} else {
-				bundle.RequestingAgent = stageName
-				// PC3: append kept-run exemplars. Best-effort and silent on
-				// failure; an empty exemplar set is correct, not a bug.
-				if querier, ok := mem.(learn.TraceQuerier); ok && querier != nil {
-					if exemplars, eErr := retrieveExemplars(ctx, querier, memoryProjectRoot(options, workDir), plan.RequestIntent); eErr == nil {
-						bundle.Exemplars = exemplars
-						if len(exemplars) > 0 {
-							emitProgress(options, fmt.Sprintf("exemplars: %d from kept runs\n", len(exemplars)))
-						}
-					}
-				}
-				input.MemoryBundle = &bundle
-				if tr != nil {
-					tr.recordMemory(stageName, iteration, bundle)
-				}
-			}
-		}
-
-		// Staging refinement (owner-approved): a composed stage input over the
-		// stage's allowance compacts deterministically - weakest provenance
-		// dropped first, distilled intent and acceptance facts never touched -
-		// so oversized context degrades gracefully instead of pre-charging the
-		// run's token budget toward an abort.
-		compactedInput, _, cerr := compactStageInput(stageName, stage.Budget, plan.Tier, input, func(msg string) {
-			emitProgress(options, msg+"\n")
+		// Single composition path shared with repair re-entry: retrieval,
+		// deterministic admission, compaction, then post-compaction trace
+		// accounting of delivered memory.
+		preparedInput, perr := prepareStageInput(ctx, stageInputPreparation{
+			Input:     input,
+			Stage:     agentStage,
+			Budget:    stage.Budget,
+			Tier:      plan.Tier,
+			Iteration: iteration,
+			WorkDir:   workDir,
+			Options:   options,
+			Memory:    mem,
+			Trace:     tr,
+			NowUnix:   time.Now().Unix(),
 		})
-		if cerr != nil {
-			return records, outputs, false, fmt.Errorf("stage %s: %w", stageName, cerr)
+		if perr != nil {
+			return records, outputs, false, perr
 		}
-		input = compactedInput
+		input = preparedInput
 
 		if err := input.Validate(); err != nil {
 			return records, outputs, false, fmt.Errorf("stage %s input: %w", stageName, err)
@@ -875,6 +854,9 @@ func runPass(
 			record.Status = schemas.StageIncomplete
 		}
 		record.Confidence = &output.Confidence
+		if output.MemoryReview != nil {
+			record.MemoryReviews = []schemas.MemoryReview{*output.MemoryReview}
+		}
 		applyStageUsage(&record, output.Usage)
 		summary := SummarizeStageOutput(stageName, output)
 		record.OutputSummary = &summary

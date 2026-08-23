@@ -107,7 +107,7 @@ func attemptLocalRepair(
 		// Re-enter code_writer with the focused revision context.
 		writerInput := repairStageInput(runID, "code_writer", plan, stageNames, *priorSummaries, *priorChangedFiles, &revisionContext)
 		writerStart := time.Now()
-		writerOutput, werr := runRepairStage(ctx, wallDeadline, writerInput, codeWriterStage, iteration, repairSelection(options, provider, "code_writer", false), options, workDir, runner, mem, stageOutputMax(plan, "code_writer"), tr)
+		writerOutput, werr := runRepairStage(ctx, wallDeadline, writerInput, codeWriterStage, iteration, repairSelection(options, provider, "code_writer", false), options, workDir, runner, mem, stageBudgetByName(plan, "code_writer"), plan.Tier, tr)
 		totalLatency += int(time.Since(writerStart).Milliseconds())
 		if werr != nil {
 			return false, nil, fmt.Errorf("repair: code_writer re-entry: %w", werr)
@@ -126,7 +126,7 @@ func attemptLocalRepair(
 		emitStageEvent(options, "test_runner", "message", fmt.Sprintf("repair re-entry %d: re-running tests", attempts), 0, nil)
 		testInput := repairStageInput(runID, "test_runner", plan, stageNames, *priorSummaries, *priorChangedFiles, nil)
 		testStart := time.Now()
-		newTestOutput, terr := runRepairStage(ctx, wallDeadline, testInput, testRunnerStage, iteration, agent.ModelSelection{}, options, workDir, runner, mem, stageOutputMax(plan, "test_runner"), tr)
+		newTestOutput, terr := runRepairStage(ctx, wallDeadline, testInput, testRunnerStage, iteration, agent.ModelSelection{}, options, workDir, runner, mem, stageBudgetByName(plan, "test_runner"), plan.Tier, tr)
 		totalLatency += int(time.Since(testStart).Milliseconds())
 		if terr != nil {
 			return false, nil, fmt.Errorf("repair: test_runner re-run: %w", terr)
@@ -250,9 +250,29 @@ func repairSelection(options PipelineRunConfig, provider agent.Provider, stageNa
 	return selection
 }
 
-// runRepairStage runs a stage under the pass wall deadline, mirroring the pass
-// loop's deadline scoping.
-func runRepairStage(ctx context.Context, wallDeadline time.Time, input schemas.HarnessStageInput, stage stages.Stage, iteration int, selection agent.ModelSelection, options PipelineRunConfig, workDir string, runner ToolRunner, mem MemoryStore, outputMax int, tr *runTraceAccumulator) (schemas.HarnessStageOutput, error) {
+// runRepairStage runs a stage under the pass wall deadline, mirroring the
+// pass loop's deadline scoping. Re-entry composes its input through the same
+// preparation module as the normal pass, so repair retrieves current memory,
+// applies admission and compaction, and records post-compaction counts; it
+// receives the full stage budget, not only OutputMax.
+func runRepairStage(ctx context.Context, wallDeadline time.Time, input schemas.HarnessStageInput, stage stages.Stage, iteration int, selection agent.ModelSelection, options PipelineRunConfig, workDir string, runner ToolRunner, mem MemoryStore, budget schemas.StageBudget, tier schemas.PipelineTier, tr *runTraceAccumulator) (schemas.HarnessStageOutput, error) {
+	prepared, err := prepareStageInput(ctx, stageInputPreparation{
+		Input:     input,
+		Stage:     stage,
+		Budget:    budget,
+		Tier:      tier,
+		Iteration: iteration,
+		WorkDir:   workDir,
+		Options:   options,
+		Memory:    mem,
+		Trace:     tr,
+		NowUnix:   time.Now().Unix(),
+	})
+	if err != nil {
+		return schemas.HarnessStageOutput{}, err
+	}
+	input = prepared
+
 	stageCtx := ctx
 	var cancel context.CancelFunc
 	if !wallDeadline.IsZero() {
@@ -261,7 +281,18 @@ func runRepairStage(ctx context.Context, wallDeadline time.Time, input schemas.H
 	if cancel != nil {
 		defer cancel()
 	}
-	return runStageWithContext(stageCtx, input, stage, iteration, selection, options, workDir, runner, mem, outputMax, tr)
+	return runStageWithContext(stageCtx, input, stage, iteration, selection, options, workDir, runner, mem, budget.OutputMax, tr)
+}
+
+// stageBudgetByName returns the full stage budget for a named plan stage, or
+// the zero budget when the stage is absent.
+func stageBudgetByName(plan schemas.ExecutionPlan, stageName string) schemas.StageBudget {
+	for _, s := range plan.Stages {
+		if s.Name == stageName {
+			return s.Budget
+		}
+	}
+	return schemas.StageBudget{}
 }
 
 // stageOutputMax returns the output token cap for a named stage, or 0 for the
@@ -284,6 +315,11 @@ func mergeRepairRecord(records *[]schemas.StageRecord, iteration int, stageName 
 		rec := &(*records)[i]
 		if rec.Name != stageName || rec.Iteration != iteration {
 			continue
+		}
+		// Invocation-ordered reviews: a re-entry appends its own review and
+		// never replaces the initial invocation's record.
+		if output.MemoryReview != nil {
+			rec.MemoryReviews = append(rec.MemoryReviews, *output.MemoryReview)
 		}
 		if !modelFree {
 			existing := &schemas.StageUsage{

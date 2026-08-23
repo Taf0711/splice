@@ -11,11 +11,16 @@
 package splice
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 
+	"github.com/Taf0711/splice/internal/splice/learn"
+	"github.com/Taf0711/splice/internal/splice/memoryreason"
 	"github.com/Taf0711/splice/internal/splice/schemas"
+	"github.com/Taf0711/splice/internal/splice/stages"
 )
 
 // bytesPerTokenEstimate converts measured JSON bytes to an approximate token
@@ -170,4 +175,104 @@ func stageOrder(pipelineStages []string) []string {
 		}
 	}
 	return out
+}
+
+// stageInputPreparation carries everything one stage invocation needs to
+// build its final composed input: the draft input, the stage (for capability
+// checks), its budget, and the run's memory/trace seams.
+type stageInputPreparation struct {
+	Input     schemas.HarnessStageInput
+	Stage     stages.Stage
+	Budget    schemas.StageBudget
+	Tier      schemas.PipelineTier
+	Iteration int
+	WorkDir   string
+	Options   PipelineRunConfig
+	Memory    MemoryStore
+	Trace     *runTraceAccumulator
+	NowUnix   int64
+}
+
+// prepareStageInput is the single composition path for both the normal pass
+// and repair re-entry. It retrieves memory for consuming stages, applies the
+// deterministic admission policy, compacts over-budget inputs, and records
+// post-compaction delivered-memory counts on the trace. Admission runs before
+// compaction so rejected items never consume allowance, and trace accounting
+// runs after compaction so it describes delivered memory rather than
+// retrieved memory.
+func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.HarnessStageInput, error) {
+	input := p.Input
+	caps := p.Stage.Capabilities()
+	if p.Memory != nil && caps.ConsumesMemory {
+		root := memoryProjectRoot(p.Options, p.WorkDir)
+		bundle, mErr := p.Memory.Search(ctx, newMemoryQuery(input.StageName, input.RequestIntent, root))
+		if mErr != nil {
+			emitProgress(p.Options, fmt.Sprintf("[%s] memory retrieval skipped: %v\n", input.StageName, mErr))
+			// A mid-run retrieval failure degrades the run's memory status to
+			// unavailable (a warm run that failed must not record as cold).
+			if p.Trace != nil {
+				p.Trace.noteMemorySearchFailed()
+			}
+		} else {
+			bundle.RequestingAgent = input.StageName
+			// PC3: append kept-run exemplars. Best-effort and silent on
+			// failure; an empty exemplar set is correct, not a bug.
+			if querier, ok := p.Memory.(learn.TraceQuerier); ok && querier != nil {
+				if exemplars, eErr := retrieveExemplars(ctx, querier, root, input.RequestIntent); eErr == nil {
+					bundle.Exemplars = exemplars
+					if len(exemplars) > 0 {
+						emitProgress(p.Options, fmt.Sprintf("exemplars: %d from kept runs\n", len(exemplars)))
+					}
+				}
+			}
+			admitted := memoryreason.Admit(&bundle, root, p.NowUnix)
+			input.MemoryBundle = admitted.Bundle
+			emitProgress(p.Options, admissionProgressLine(input.StageName, admitted))
+		}
+	}
+
+	compactedInput, _, cerr := compactStageInput(input.StageName, p.Budget, p.Tier, input, func(msg string) {
+		emitProgress(p.Options, msg+"\n")
+	})
+	if cerr != nil {
+		return input, fmt.Errorf("stage %s: %w", input.StageName, cerr)
+	}
+	input = compactedInput
+
+	// Post-compaction trace accounting: counts describe delivered memory.
+	if p.Trace != nil && input.MemoryBundle != nil {
+		p.Trace.recordMemory(input.StageName, p.Iteration, *input.MemoryBundle)
+	}
+	return input, nil
+}
+
+// admissionProgressLine renders the aggregate admission note. Only counts are
+// reported; excluded content and IDs never reach progress or traces.
+func admissionProgressLine(stageName string, result memoryreason.AdmissionResult) string {
+	supplied := 0
+	if result.Bundle != nil {
+		supplied = len(result.Bundle.Observations) + len(result.Bundle.Exemplars)
+	}
+	line := fmt.Sprintf("memory admission: %s supplied %d", stageName, supplied)
+	c := result.Rejected
+	var parts []string
+	if c.Invalid > 0 {
+		parts = append(parts, fmt.Sprintf("%d invalid", c.Invalid))
+	}
+	if c.ReviewDue > 0 {
+		parts = append(parts, fmt.Sprintf("%d review-due", c.ReviewDue))
+	}
+	if c.WrongProject > 0 {
+		parts = append(parts, fmt.Sprintf("%d wrong-project", c.WrongProject))
+	}
+	if c.Duplicate > 0 {
+		parts = append(parts, fmt.Sprintf("%d duplicate", c.Duplicate))
+	}
+	if c.OverLimit > 0 {
+		parts = append(parts, fmt.Sprintf("%d over-limit", c.OverLimit))
+	}
+	if len(parts) > 0 {
+		line += "; excluded " + strings.Join(parts, ", ")
+	}
+	return line + "\n"
 }
