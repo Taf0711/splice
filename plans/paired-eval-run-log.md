@@ -149,3 +149,28 @@ makes failures shorter and occasionally turns failures into successes.
 Single model, single machine, N=12, one run: treat the 43.2% as directional
 until repeated. Output budget is now the binding constraint for the top-end
 tasks in BOTH arms; any further raise is a separate calibrated decision.
+
+## Cycle 5 addendum — run 7 success comparison QUARANTINED
+
+Forensic replay of the six both-arms failures invalidated run 7 as a
+success-rate claim:
+
+- Two probes (delete-session-endpoint, conflict-on-recreate) shipped an
+  unused "errors" import and could not compile; their tasks failed
+  unconditionally. All four run-7 sessions of those tasks PASS on
+  deterministic replay once the dead import is dropped. Probes fixed in the
+  source taskset with a before/after validation record (README).
+- One arm directory was shared across all 12 tasks per run, so later tasks
+  inherited earlier tasks' edits. token-auth-middleware ran last, fought
+  mutated session.go state in both arms to abort, and passes clean-room
+  replay. Fixed: harness now materializes fresh copies per pair and removes
+  them after persistence (5cf449e).
+
+Status of numbers: the COST cycle instrumentation was sound and the
+per-success medians stand as directional cost data, but the success
+comparison and the 43.2% figure are quarantined pending the next clean
+paired run. Clean-room replay predicts +2 certain conversions from the
+probe fixes plus high-confidence conversion of token-auth after isolation.
+Item 3 of the forensics proposals (current-file context for revision/
+testgen) is deferred behind the reasoning-memory contract workflow's seam
+decision.
