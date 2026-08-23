@@ -2245,7 +2245,7 @@ func (m model) setupProgressText() string {
 			break
 		}
 	}
-	return zeroTheme.faint.Render(fmt.Sprintf("%d/%d", position+1, len(stages)))
+	return zeroTheme.faint.Render(formatDoneTotal(position+1, len(stages)))
 }
 
 func padSetupLine(line string, width int) string {

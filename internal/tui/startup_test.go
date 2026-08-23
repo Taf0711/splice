@@ -108,3 +108,21 @@ func assertRenderedLineWidths(t *testing.T, block string, width int) {
 		}
 	}
 }
+
+func TestFormatDoneTotalPadsToTotalDigitWidth(t *testing.T) {
+	cases := []struct {
+		done, total int
+		want        string
+	}{
+		{0, 3, "0/3"},
+		{3, 3, "3/3"},
+		{9, 10, "09/10"},
+		{10, 10, "10/10"},
+		{99, 100, "099/100"},
+	}
+	for _, tc := range cases {
+		if got := formatDoneTotal(tc.done, tc.total); got != tc.want {
+			t.Errorf("formatDoneTotal(%d, %d) = %q, want %q", tc.done, tc.total, got, tc.want)
+		}
+	}
+}
