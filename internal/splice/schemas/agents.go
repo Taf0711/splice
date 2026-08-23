@@ -3,6 +3,8 @@ package schemas
 import (
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 )
 
 // Severity levels used by deterministic and LLM stages.
@@ -78,15 +80,145 @@ func (r FileChangeApplyResult) Validate() error {
 	return nil
 }
 
+// Memory reasoning contract. The model must consider every delivered memory
+// item and return an enum-only apply/reject declaration per stable ID.
+// Disposition bookkeeping is observability: it is parsed and reconciled
+// separately from core file/test validity so malformed bookkeeping can never
+// discard substantive output or trigger a provider retry.
+const (
+	MemoryActionApplied    = "applied"
+	MemoryActionRejected   = "rejected"
+	MemoryActionUnreported = "unreported" // orchestrator-synthesized only
+
+	MemoryReasonRelevant            = "relevant"
+	MemoryReasonIrrelevant          = "irrelevant"
+	MemoryReasonStaleOrIncompatible = "stale_or_incompatible"
+	MemoryReasonContradicted        = "contradicted"
+	MemoryReasonMissing             = "missing" // synthesized only
+)
+
+// MemoryDisposition is one model claim (or one normalized orchestrator entry)
+// about a single delivered memory item.
+type MemoryDisposition struct {
+	MemoryID string `json:"memory_id"`
+	Action   string `json:"action"`
+	Reason   string `json:"reason"`
+}
+
+// Validate checks the action/reason pairing. unreported/missing entries are
+// synthesized by the orchestrator; the model-facing tool schema never offers
+// that combination.
+func (m MemoryDisposition) Validate() error {
+	if m.MemoryID == "" {
+		return errors.New("memory_id is required")
+	}
+	switch m.Action {
+	case MemoryActionApplied:
+		if m.Reason != MemoryReasonRelevant {
+			return fmt.Errorf("action applied requires reason %q, got %q", MemoryReasonRelevant, m.Reason)
+		}
+	case MemoryActionRejected:
+		switch m.Reason {
+		case MemoryReasonIrrelevant, MemoryReasonStaleOrIncompatible, MemoryReasonContradicted:
+		default:
+			return fmt.Errorf("action rejected requires reason irrelevant, stale_or_incompatible, or contradicted, got %q", m.Reason)
+		}
+	case MemoryActionUnreported:
+		if m.Reason != MemoryReasonMissing {
+			return fmt.Errorf("action unreported requires reason %q, got %q", MemoryReasonMissing, m.Reason)
+		}
+	default:
+		return fmt.Errorf("invalid action %q", m.Action)
+	}
+	return nil
+}
+
+// MemoryReview is the complete normalized review for exactly one stage
+// invocation. Items appear in delivered input order. InvalidClaims counts
+// malformed, unknown-ID, and duplicate model claims plus parse issues.
+type MemoryReview struct {
+	Items         []MemoryDisposition `json:"items"`
+	InvalidClaims int                 `json:"invalid_claims"`
+}
+
+// Validate enforces uniqueness, item validity, and non-emptiness: a non-nil
+// review with zero items would falsely record that a review happened.
+func (r MemoryReview) Validate() error {
+	if len(r.Items) == 0 {
+		return errors.New("review with zero items is invalid; use a nil review when no memory was delivered")
+	}
+	if r.InvalidClaims < 0 {
+		return errors.New("invalid_claims must be non-negative")
+	}
+	seen := make(map[string]bool, len(r.Items))
+	for i, item := range r.Items {
+		if err := item.Validate(); err != nil {
+			return fmt.Errorf("items[%d]: %w", i, err)
+		}
+		if seen[item.MemoryID] {
+			return fmt.Errorf("items[%d]: duplicate memory id %q", i, item.MemoryID)
+		}
+		seen[item.MemoryID] = true
+	}
+	return nil
+}
+
 // SelectedMemory is one bounded observation injected into a stage input.
 // RunID is set only for exemplar items so an audit can trace one back to its
 // source run; ordinary memory observations leave it empty.
 type SelectedMemory struct {
-	Title      string `json:"title"`
-	Content    string `json:"content"`
-	MemoryType string `json:"memory_type"`
-	Scope      string `json:"scope"`
-	RunID      string `json:"run_id,omitempty"`
+	// ID is the stable audit key the model must echo in its disposition:
+	// "observation:<positive decimal id>" or "exemplar:<run id>".
+	ID           string `json:"id"`
+	Title        string `json:"title"`
+	Content      string `json:"content"`
+	MemoryType   string `json:"memory_type"`
+	Scope        string `json:"scope"`
+	RunID        string `json:"run_id,omitempty"`
+	SourceStage  string `json:"source_stage,omitempty"`
+	SourceCommit string `json:"source_commit,omitempty"`
+}
+
+// SelectedMemory scope values. The first four come from memory observations;
+// exemplars use their own dedicated scope.
+const (
+	MemoryScopeProject  = "project"
+	MemoryScopeGlobal   = "global"
+	MemoryScopePersonal = "personal"
+	MemoryScopeExemplar = "exemplar"
+)
+
+// Validate checks one selected memory item, including its stable-ID shape.
+func (s SelectedMemory) Validate() error {
+	if s.ID == "" {
+		return errors.New("id is required")
+	}
+	if s.Title == "" {
+		return errors.New("title is required")
+	}
+	if s.Content == "" {
+		return errors.New("content is required")
+	}
+	if s.MemoryType == "" {
+		return errors.New("memory_type is required")
+	}
+	switch s.Scope {
+	case MemoryScopeProject, MemoryScopeGlobal, MemoryScopePersonal:
+		if !strings.HasPrefix(s.ID, "observation:") {
+			return fmt.Errorf("scope %s requires an observation:<id> stable id, got %q", s.Scope, s.ID)
+		}
+		num := strings.TrimPrefix(s.ID, "observation:")
+		if n, err := strconv.ParseUint(num, 10, 64); err != nil || num == "0" || num == "" || strings.HasPrefix(num, "0") || n == 0 {
+			return fmt.Errorf("observation stable id must be a positive decimal without leading zeros, got %q", s.ID)
+		}
+	case MemoryScopeExemplar:
+		if !strings.HasPrefix(s.ID, "exemplar:") || s.RunID == "" || s.ID != "exemplar:"+s.RunID {
+			return fmt.Errorf("scope exemplar requires id exemplar:<non-empty run_id> with matching run_id, got %q", s.ID)
+		}
+	default:
+		return fmt.Errorf("invalid scope %q", s.Scope)
+	}
+	return nil
 }
 
 // CodeWriterInput is the minimum input required by the code writer.
@@ -112,6 +244,23 @@ func (c CodeWriterInput) Validate() error {
 	return nil
 }
 
+// validateSelectedMemoryItems checks every delivered item and rejects
+// duplicate stable IDs loudly before a provider call: a model cannot give a
+// meaningful per-item disposition when two items share one id.
+func validateSelectedMemoryItems(items []SelectedMemory) error {
+	seen := make(map[string]bool, len(items))
+	for i, item := range items {
+		if err := item.Validate(); err != nil {
+			return fmt.Errorf("items[%d]: %w", i, err)
+		}
+		if seen[item.ID] {
+			return fmt.Errorf("items[%d]: duplicate memory id %q", i, item.ID)
+		}
+		seen[item.ID] = true
+	}
+	return nil
+}
+
 // CodeWriterOutput is code writer output validated before any downstream stage receives it.
 type CodeWriterOutput struct {
 	Files            []FileChange `json:"files"`
@@ -120,6 +269,10 @@ type CodeWriterOutput struct {
 	Dependencies     []string     `json:"dependencies,omitempty"`
 	KnownLimitations []string     `json:"known_limitations,omitempty"`
 	Confidence       float64      `json:"confidence"`
+	// MemoryDisposition carries raw model claims. It is decoded separately
+	// from core output and is intentionally NOT validated here: malformed
+	// bookkeeping must never invalidate files.
+	MemoryDisposition []MemoryDisposition `json:"memory_disposition,omitempty"`
 }
 
 // Validate checks the code writer output and embedded file changes.
@@ -196,6 +349,8 @@ type TestGeneratorOutput struct {
 	Intent           string       `json:"intent"`
 	KnownLimitations []string     `json:"known_limitations,omitempty"`
 	Confidence       float64      `json:"confidence"`
+	// See CodeWriterOutput.MemoryDisposition: observability only.
+	MemoryDisposition []MemoryDisposition `json:"memory_disposition,omitempty"`
 }
 
 // Validate checks the test generator output.

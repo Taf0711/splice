@@ -366,12 +366,21 @@ type StageRecord struct {
 	CostUSD           float64     `json:"cost_usd"`
 	LatencyMs         int         `json:"latency_ms"`
 	CommitSHA         *string     `json:"commit_sha,omitempty"`
+	// MemoryReviews is invocation-ordered. Repair re-entry appends another
+	// review to the same {stage, iteration} record. Legacy traces without the
+	// field remain valid: it is optional and additive.
+	MemoryReviews []MemoryReview `json:"memory_reviews,omitempty"`
 }
 
 // Validate checks the stage record.
 func (s StageRecord) Validate() error {
 	if s.Name == "" {
 		return errors.New("name is required")
+	}
+	for i := range s.MemoryReviews {
+		if err := s.MemoryReviews[i].Validate(); err != nil {
+			return fmt.Errorf("memory_reviews[%d]: %w", i, err)
+		}
 	}
 	switch s.Status {
 	case StagePending, StageRunning, StageCompleted, StageFailed, StageSkipped, StageIncomplete:
@@ -491,7 +500,10 @@ type HarnessStageOutput struct {
 	Data           map[string]interface{} `json:"data,omitempty"`
 	ContextRequest *ContextRequest        `json:"context_request,omitempty"`
 	Messages       []StageMessage         `json:"messages,omitempty"`
-	Usage          *StageUsage            `json:"-"`
+	// MemoryReview is the normalized per-invocation memory review. Nil when no
+	// memory was delivered; never an empty review.
+	MemoryReview *MemoryReview `json:"memory_review,omitempty"`
+	Usage        *StageUsage   `json:"-"`
 }
 
 // Validate checks the harness stage output.
@@ -501,6 +513,11 @@ func (h HarnessStageOutput) Validate() error {
 	}
 	if err := validateConfidence(h.Confidence); err != nil {
 		return err
+	}
+	if h.MemoryReview != nil {
+		if err := h.MemoryReview.Validate(); err != nil {
+			return fmt.Errorf("memory_review: %w", err)
+		}
 	}
 	if h.ContextRequest != nil {
 		if err := h.ContextRequest.Validate(); err != nil {
