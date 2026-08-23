@@ -100,3 +100,25 @@ func TestMatchTraceTokens(t *testing.T) {
 		t.Fatalf("no match = (%d, %d, %v), want absent-data zeros", tokens, interventions, found)
 	}
 }
+
+// TestRepoRootQueryCandidatesPinsBothForms pins the trace-join lookup order:
+// the raw stored form is tried first, and the symlink-resolved form is added
+// only when it differs, so a join works whichever side recorded which form.
+func TestRepoRootQueryCandidatesPinsBothForms(t *testing.T) {
+	target := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	raw := link
+	if got := repoRootQueryCandidates(raw); len(got) != 2 || got[0] != raw || got[1] == raw {
+		t.Fatalf("candidates for a symlinked path = %v, want [raw, resolved]", got)
+	}
+	resolved := target
+	if got := repoRootQueryCandidates(resolved); len(got) != 2 || got[0] != resolved {
+		t.Fatalf("candidates for a resolved path = %v, want resolved first plus its /var alias", got)
+	}
+	if got := repoRootQueryCandidates("/no/such/path-zzz"); len(got) != 1 || got[0] != "/no/such/path-zzz" {
+		t.Fatalf("unresolvable path must yield exactly itself, got %v", got)
+	}
+}

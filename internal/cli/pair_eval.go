@@ -210,11 +210,31 @@ func collectTrace(ctx context.Context, deps appDeps, repoRoot, sessionID string)
 	if err != nil || client == nil {
 		return 0, 0, false
 	}
-	results, err := client.QueryTraces(ctx, schemas.TraceQueryFilter{RepoRoot: resolveRepoRoot(repoRoot), Limit: 1000})
-	if err != nil {
-		return 0, 0, false
+	// The stored repo_root is whatever string exec recorded verbatim (the raw
+	// temp-dir path on macOS), so the raw form is tried first. The symlink-
+	// resolved form covers callers whose cwd arrived pre-resolved.
+	for _, candidate := range repoRootQueryCandidates(repoRoot) {
+		results, err := client.QueryTraces(ctx, schemas.TraceQueryFilter{RepoRoot: candidate, Limit: 1000})
+		if err != nil {
+			return 0, 0, false
+		}
+		if tokens, interventions, found := matchTraceTokens(results, sessionID); found {
+			return tokens, interventions, true
+		}
 	}
-	return matchTraceTokens(results, sessionID)
+	return 0, 0, false
+}
+
+// repoRootQueryCandidates lists the lookup keys for one repo path, most
+// likely first: the path as given, then its symlink-resolved form when that
+// differs. macOS temp dirs live behind /var -> /private/var, and either side
+// of the join may hold either form.
+func repoRootQueryCandidates(path string) []string {
+	candidates := []string{path}
+	if resolved := resolveRepoRoot(path); resolved != path {
+		candidates = append(candidates, resolved)
+	}
+	return candidates
 }
 
 // resolveRepoRoot canonicalizes a repository path before it becomes a trace
