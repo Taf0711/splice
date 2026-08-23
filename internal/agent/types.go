@@ -282,6 +282,11 @@ type StageEvent struct {
 
 type Options struct {
 	MaxTurns int
+	// TraceWriteWarn, when non-nil, is called at most once per pipeline run
+	// when a run-trace persistence attempt fails. The headless exec surface
+	// wires it to its warning event so stale sidecars self-announce; other
+	// callers leave it nil.
+	TraceWriteWarn func(msg string)
 	// DeferThreshold activates deferred MCP-tool loading: when the number of
 	// deferred-eligible visible tools is >= this value (and it is > 0), their
 	// full schemas are withheld and advertised as compact lines via tool_search.

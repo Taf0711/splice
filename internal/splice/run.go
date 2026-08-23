@@ -311,7 +311,7 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 
 	var tr *runTraceAccumulator
 	if tracer != nil {
-		tr = newRunTraceAccumulator(tracer, runID, options.SessionID, projectRoot, plan, memoryStatus)
+		tr = newRunTraceAccumulator(tracer, runID, options.SessionID, projectRoot, plan, memoryStatus, options.TraceWriteWarn)
 		tr.toolFingerprint = toolFingerprint
 		tr.topologyHash = topologyHash
 		tr.stagePromptHash = stagePromptHashes
@@ -371,6 +371,7 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 			return schemas.PipelineResult{}, fmt.Errorf("build run outcome: %w", buildErr)
 		}
 		if writeErr := tracer.UpsertTrace(ctx, trace); writeErr != nil {
+			tr.noteTraceWriteFailed()
 			emitProgress(options, fmt.Sprintf("[trace] write skipped: %v", writeErr))
 		}
 	}

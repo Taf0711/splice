@@ -3715,7 +3715,7 @@ func repairTraceRegistry(writerCalls, testCalls *int) stageRegistry {
 func TestRunRepairPersistsInteraction(t *testing.T) {
 	plan := repairTestPlan()
 	store := &recordingTraceStore{}
-	tr := newRunTraceAccumulator(store, "run-interaction", "sess-1", "/repo", plan, "active")
+	tr := newRunTraceAccumulator(store, "run-interaction", "sess-1", "/repo", plan, "active", nil)
 	var writerCalls, testCalls int
 
 	records, _, completed, err := runPass(context.Background(), "run-interaction", 1, plan, repairTraceRegistry(&writerCalls, &testCalls), runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, tr)
@@ -3748,7 +3748,7 @@ func TestRunRepairPersistsInteraction(t *testing.T) {
 func TestRunNoRepairLeavesInteractionsEmpty(t *testing.T) {
 	plan := repairTestPlan()
 	store := &recordingTraceStore{}
-	tr := newRunTraceAccumulator(store, "run-nointeraction", "sess-1", "/repo", plan, "active")
+	tr := newRunTraceAccumulator(store, "run-nointeraction", "sess-1", "/repo", plan, "active", nil)
 	var writerCalls int
 	registry := stageRegistry{
 		"code_writer": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
@@ -3779,7 +3779,7 @@ func TestRunNoRepairLeavesInteractionsEmpty(t *testing.T) {
 func TestRunRepairExhaustedInteractionUnresolved(t *testing.T) {
 	plan := repairTestPlan()
 	store := &recordingTraceStore{}
-	tr := newRunTraceAccumulator(store, "run-exhausted", "sess-1", "/repo", plan, "active")
+	tr := newRunTraceAccumulator(store, "run-exhausted", "sess-1", "/repo", plan, "active", nil)
 	registry := stageRegistry{
 		"code_writer": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
 			return repairCodeWriterOutput(), nil
@@ -4007,5 +4007,19 @@ func TestPipelineToolScopeFollowsRunWorktree(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(outsideBoth, "escape.txt")); err == nil {
 		t.Fatal("escape file was created despite sandbox block")
+	}
+}
+
+// TestPipelineConfigMapsTraceWriteWarn pins the seam wiring: the exec surface
+// sets Options.TraceWriteWarn and the pipeline config must carry it through so
+// the accumulator can warn exactly once on telemetry loss.
+func TestPipelineConfigMapsTraceWriteWarn(t *testing.T) {
+	fn := func(msg string) {}
+	cfg := PipelineConfigFromAgentOptions(agent.Options{TraceWriteWarn: fn})
+	if cfg.TraceWriteWarn == nil {
+		t.Fatal("TraceWriteWarn lost the callback in config mapping")
+	}
+	if cfg2 := PipelineConfigFromAgentOptions(agent.Options{}); cfg2.TraceWriteWarn != nil {
+		t.Fatal("nil TraceWriteWarn must map to nil TraceWriteWarn")
 	}
 }

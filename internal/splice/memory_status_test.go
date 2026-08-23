@@ -41,7 +41,7 @@ func statusAccumulator(status string) *runTraceAccumulator {
 		Stages:        []schemas.ExecutionStage{{Name: "code_writer", Budget: schemas.StageBudget{InputMax: 100, OutputMax: 100}}},
 		TokenBudget:   schemas.TokenBudget{TotalInputBudget: 1000, TotalOutputBudget: 1000, OverflowPolicy: "abort"},
 	}
-	tr := newRunTraceAccumulator(&traceMemoryStore{}, "run-1", "sess-1", "/repo", plan, status)
+	tr := newRunTraceAccumulator(&traceMemoryStore{}, "run-1", "sess-1", "/repo", plan, status, nil)
 	tr.recordHistory(schemas.IterationState{Iteration: 1, StateHash: "h", Confidence: 0.9, TestsPassing: 1})
 	return tr
 }

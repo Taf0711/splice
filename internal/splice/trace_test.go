@@ -68,7 +68,7 @@ func TestPersistPartialWritesRunningTrace(t *testing.T) {
 		TokenBudget:   schemas.TokenBudget{TotalInputBudget: 1000, TotalOutputBudget: 1000, OverflowPolicy: "abort"},
 	}
 	store := &recordingTraceStore{}
-	tr := newRunTraceAccumulator(store, "run-1", "sess-1", "/repo", plan, "active")
+	tr := newRunTraceAccumulator(store, "run-1", "sess-1", "/repo", plan, "active", nil)
 	tr.recordStageCompletion(schemas.StageRecord{Name: "code_writer", Status: schemas.StageCompleted, Iteration: 1})
 	tr.persistPartial(context.Background())
 
@@ -100,7 +100,7 @@ func TestPersistPartialDegradesOnWriteFailure(t *testing.T) {
 		Stages:        []schemas.ExecutionStage{{Name: "code_writer", Budget: schemas.StageBudget{InputMax: 100, OutputMax: 100}}},
 		TokenBudget:   schemas.TokenBudget{TotalInputBudget: 1000, TotalOutputBudget: 1000, OverflowPolicy: "abort"},
 	}
-	tr := newRunTraceAccumulator(&failingTraceStore{}, "run-1", "sess-1", "/repo", plan, "active")
+	tr := newRunTraceAccumulator(&failingTraceStore{}, "run-1", "sess-1", "/repo", plan, "active", nil)
 	tr.recordStageCompletion(schemas.StageRecord{Name: "code_writer", Status: schemas.StageCompleted, Iteration: 1})
 	tr.persistPartial(context.Background())
 	if !tr.eventsPartial {
@@ -132,7 +132,7 @@ func TestReplaceStageRecord(t *testing.T) {
 		Stages:        []schemas.ExecutionStage{{Name: "code_writer", Budget: schemas.StageBudget{InputMax: 1, OutputMax: 1}}},
 		TokenBudget:   schemas.TokenBudget{TotalInputBudget: 1, TotalOutputBudget: 1, OverflowPolicy: "abort"},
 	}
-	tr := newRunTraceAccumulator(&traceMemoryStore{}, "run-1", "sess-1", "/repo", plan, "active")
+	tr := newRunTraceAccumulator(&traceMemoryStore{}, "run-1", "sess-1", "/repo", plan, "active", nil)
 	tr.recordStageCompletion(schemas.StageRecord{Name: "code_writer", Iteration: 1, Status: schemas.StageCompleted})
 	tr.recordStageCompletion(schemas.StageRecord{Name: "test_runner", Iteration: 1, Status: schemas.StageCompleted})
 
@@ -162,7 +162,7 @@ func TestBuildOutcomePartialCarriesInteractions(t *testing.T) {
 		Stages:        []schemas.ExecutionStage{{Name: "code_writer", Budget: schemas.StageBudget{InputMax: 1, OutputMax: 1}}},
 		TokenBudget:   schemas.TokenBudget{TotalInputBudget: 1, TotalOutputBudget: 1, OverflowPolicy: "abort"},
 	}
-	tr := newRunTraceAccumulator(&recordingTraceStore{}, "run-1", "sess-1", "/repo", plan, "active")
+	tr := newRunTraceAccumulator(&recordingTraceStore{}, "run-1", "sess-1", "/repo", plan, "active", nil)
 	tr.recordInteraction(schemas.InteractionRecord{
 		Message: schemas.StageMessage{
 			ID: "run-1-r1", RunID: "run-1", From: "test_runner", To: "code_writer",
@@ -330,7 +330,7 @@ func TestBuildRunOutcomeCoversEveryField(t *testing.T) {
 		TokenBudget:   schemas.TokenBudget{TotalInputBudget: 1000, TotalOutputBudget: 1000, OverflowPolicy: "abort"},
 	}
 
-	tr := newRunTraceAccumulator(&traceMemoryStore{}, "run-1", "sess-1", "/repo", plan, "active")
+	tr := newRunTraceAccumulator(&traceMemoryStore{}, "run-1", "sess-1", "/repo", plan, "active", nil)
 	tr.recordHistory(schemas.IterationState{
 		Iteration: 1, Timestamp: 1, TestsPassing: 1, StateHash: "abc",
 		Confidence: 0.9, Preexisting: schemas.TestCounts{Pass: 1},
@@ -395,4 +395,36 @@ func TestBuildRunOutcomeCoversEveryField(t *testing.T) {
 	if trace.Stages[0].InputMeta.ExemplarItems != 1 {
 		t.Errorf("TracedStage.InputMeta.ExemplarItems = %d, want 1", trace.Stages[0].InputMeta.ExemplarItems)
 	}
+}
+
+// TestTraceWriteFailureWarnsOncePinsWarnSemantics pins the telemetry-loss
+// contract: every failed persistence attempt marks the trace partial, but the
+// caller's warning callback fires exactly once across all attempts, and a
+// healthy store never fires it at all.
+func TestTraceWriteFailureWarnsOnce(t *testing.T) {
+	plan, err := BuildExecutionPlan("add a helper")
+	if err != nil {
+		t.Fatalf("build plan: %v", err)
+	}
+	warnings := 0
+	tr := newRunTraceAccumulator(&failingTraceStore{}, "run-1", "sess-1", "/repo", plan, "active", func(msg string) {
+		warnings++
+	})
+
+	tr.persistPartial(context.Background())
+	tr.persistPartial(context.Background())
+	tr.noteTraceWriteFailed()
+
+	if warnings != 1 {
+		t.Fatalf("warnings = %d, want exactly 1 across all failed attempts", warnings)
+	}
+	if !tr.eventsPartial {
+		t.Fatal("trace must be marked partial after write failures")
+	}
+
+	quiet := newRunTraceAccumulator(&traceMemoryStore{}, "run-2", "sess-2", "/repo", plan, "active", func(msg string) {
+		t.Errorf("healthy store fired the warning: %q", msg)
+	})
+	quiet.recordStageCompletion(schemas.StageRecord{Name: "code_writer", Status: schemas.StageCompleted, TokensInput: 10, TokensOutput: 5})
+	quiet.persistPartial(context.Background())
 }

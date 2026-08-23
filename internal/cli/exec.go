@@ -754,6 +754,9 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		// from ~/.config/splice/stage-models.json (AR11b). nil keeps pre-AR11
 		// behavior: every stage uses the default provider.
 		StageModelResolver: stageModelResolver,
+		// TraceWriteWarn surfaces trace-persistence loss on the exec output
+		// seam exactly once per run, so a stale sidecar announces itself.
+		TraceWriteWarn: writer.warning,
 		// EscalationModelResolver resolves an escalation provider/model/effort
 		// from ~/.config/splice/stage-models.json "escalation" entry (AR10c).
 		// nil/empty keeps pre-AR10c behavior: escalation is skipped.

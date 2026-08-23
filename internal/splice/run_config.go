@@ -17,7 +17,12 @@ import (
 // agent.Options and convert here so inherited Zero types stay free of
 // Splice-specific methods.
 type PipelineRunConfig struct {
-	SessionID        string
+	SessionID string
+	// TraceWriteWarn is invoked at most once when a trace persistence
+	// attempt fails, so telemetry loss can reach the caller's output seam.
+	// Same name as agent.Options.TraceWriteWarn: PipelineConfigFromAgentOptions
+	// copies it, and the option-classification test keys on that name match.
+	TraceWriteWarn   func(msg string)
 	ProviderName     string
 	Model            string
 	ReasoningEffort  string
@@ -73,6 +78,7 @@ type PipelineRunConfig struct {
 func PipelineConfigFromAgentOptions(options agent.Options) PipelineRunConfig {
 	return PipelineRunConfig{
 		SessionID:               options.SessionID,
+		TraceWriteWarn:          options.TraceWriteWarn,
 		ProviderName:            options.ProviderName,
 		Model:                   options.Model,
 		ReasoningEffort:         options.ReasoningEffort,

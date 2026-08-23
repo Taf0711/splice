@@ -53,6 +53,10 @@ type runTraceAccumulator struct {
 	// trace may miss events.
 	completedStages []schemas.StageRecord
 	eventsPartial   bool
+	// warnWriteFailure is the caller's output seam for telemetry loss;
+	// warnedWriteFailure enforces warn-exactly-once across all write attempts.
+	warnWriteFailure   func(msg string)
+	warnedWriteFailure bool
 
 	// LN2 bucket-key identities and provenance, computed at run start and
 	// written into the trace so applied budgets always carry their origin.
@@ -62,15 +66,16 @@ type runTraceAccumulator struct {
 	budgetProvenance map[string]string
 }
 
-func newRunTraceAccumulator(store TraceStore, runID, sessionID, projectRoot string, plan schemas.ExecutionPlan, memoryStatus string) *runTraceAccumulator {
+func newRunTraceAccumulator(store TraceStore, runID, sessionID, projectRoot string, plan schemas.ExecutionPlan, memoryStatus string, warnWriteFailure func(msg string)) *runTraceAccumulator {
 	return &runTraceAccumulator{
-		store:        store,
-		runID:        runID,
-		sessionID:    sessionID,
-		projectRoot:  projectRoot,
-		plan:         plan,
-		memoryStatus: memoryStatus,
-		stages:       make(map[stageKey]schemas.InputMeta),
+		store:            store,
+		runID:            runID,
+		sessionID:        sessionID,
+		projectRoot:      projectRoot,
+		plan:             plan,
+		memoryStatus:     memoryStatus,
+		warnWriteFailure: warnWriteFailure,
+		stages:           make(map[stageKey]schemas.InputMeta),
 	}
 }
 
@@ -133,12 +138,18 @@ func (tr *runTraceAccumulator) recordInteraction(rec schemas.InteractionRecord) 
 
 // noteTraceWriteFailed marks the trace as partial after a mid-run incremental
 // write failure. The run itself continues; only the trace's completeness is
-// degraded.
+// degraded. The first failure also fires the caller's warning callback exactly
+// once so telemetry loss self-announces instead of surfacing later as silent
+// zeros.
 func (tr *runTraceAccumulator) noteTraceWriteFailed() {
 	if tr == nil {
 		return
 	}
 	tr.eventsPartial = true
+	if tr.warnWriteFailure != nil && !tr.warnedWriteFailure {
+		tr.warnedWriteFailure = true
+		tr.warnWriteFailure("run trace could not be persisted; token telemetry for this session will be missing")
+	}
 }
 
 // recordStageCompletion appends a finished stage record so a partial trace can
