@@ -1,6 +1,10 @@
 package tui
 
-import "testing"
+import (
+	"fmt"
+	"strings"
+	"testing"
+)
 
 func TestTranscriptBodyItemsRepresentEmptyState(t *testing.T) {
 	m := mouseTestModel()
@@ -201,5 +205,59 @@ func countingTranscriptBodyItem(key string, lines []string, renders *int) transc
 			(*renders)++
 			return transcriptBodyRenderedItem{lines: append([]string(nil), lines...)}
 		},
+	}
+}
+
+// A long session must not thrash the height cache. The entry cap used to be
+// 512: a transcript whose body-item count crossed it evicted entries every
+// frame, so every streaming/spinner frame re-rendered the whole transcript
+// during measurement. Pin the long-session invariant: measuring more items
+// than the old cap leaves every height retrievable, so the second measure
+// renders nothing.
+func TestMeasureTranscriptBodyItemsLongSessionDoesNotThrash(t *testing.T) {
+	const rowCount = 600 // above the old 512-entry default cap
+	cache := newTranscriptBodyHeightCache(defaultTranscriptBodyHeightCacheMaxEntries)
+	renders := 0
+	makeItems := func() []transcriptBodyItem {
+		items := make([]transcriptBodyItem, 0, rowCount)
+		for index := 0; index < rowCount; index++ {
+			key := fmt.Sprintf("long-session-row-%d", index)
+			items = append(items, countingTranscriptBodyItem(key, []string{"line"}, &renders))
+		}
+		return items
+	}
+
+	measureTranscriptBodyItems(makeItems(), cache) // warm: one render per item
+	before := renders
+	measureTranscriptBodyItems(makeItems(), cache) // steady state: all cached
+	if renders != before {
+		t.Fatalf("renders = %d after warm measure %d, want no re-renders on the second pass (cache thrash)", renders, before)
+	}
+	for index := 0; index < rowCount; index++ {
+		key := fmt.Sprintf("long-session-row-%d", index)
+		if _, ok := cache.get(key); !ok {
+			t.Fatalf("height for %q evicted after one measure of %d items", key, rowCount)
+		}
+	}
+}
+
+// The character budget bounds worst-case memory independently of the entry
+// count: keys embed row text, so unbounded retention would let a few huge
+// transcripts grow the cache without limit.
+func TestTranscriptBodyHeightCacheEvictsByCharacterBudget(t *testing.T) {
+	cache := newTranscriptBodyHeightCacheWithBudget(128, 100)
+	first, second, third := strings.Repeat("a", 40), strings.Repeat("b", 40), strings.Repeat("c", 30)
+	cache.set(first, 1)
+	cache.set(second, 2)
+	cache.set(third, 3) // pushes retained key bytes over the budget
+
+	if _, ok := cache.get(first); ok {
+		t.Fatalf("oldest entry retained after exceeding the character budget")
+	}
+	if _, ok := cache.get(second); !ok {
+		t.Fatalf("second entry evicted; want only the oldest dropped")
+	}
+	if _, ok := cache.get(third); !ok {
+		t.Fatalf("newest entry evicted; want only the oldest dropped")
 	}
 }
