@@ -20,6 +20,9 @@ func TestHarnessArmOrderingAndSessionID(t *testing.T) {
 	var calls []RunInput
 	h := &Harness{
 		Exec: func(_ context.Context, in RunInput) (RunOutput, error) {
+			if _, err := os.Stat(in.Cwd); err != nil {
+				t.Errorf("cwd for %s missing during the run: %v", in.SessionID, err)
+			}
 			calls = append(calls, in)
 			return RunOutput{Success: true, Tokens: 100, Interventions: 1}, nil
 		},
@@ -53,15 +56,13 @@ func TestHarnessArmOrderingAndSessionID(t *testing.T) {
 		t.Fatalf("session ids = %q, %q", calls[2].SessionID, calls[3].SessionID)
 	}
 
-	// Warm runs share one copy across tasks; cold shares a different copy.
-	if calls[1].Cwd != calls[3].Cwd {
-		t.Fatalf("warm arm must share one copy: %q vs %q", calls[1].Cwd, calls[3].Cwd)
-	}
-	if calls[0].Cwd != calls[2].Cwd {
-		t.Fatalf("cold arm must share one copy: %q vs %q", calls[0].Cwd, calls[2].Cwd)
-	}
-	if calls[0].Cwd == calls[1].Cwd {
-		t.Fatalf("cold and warm arms must be distinct copies")
+	// Every pair gets fresh copies: no cwd repeats anywhere in the run.
+	seen := map[string]string{}
+	for _, c := range calls {
+		if prev, ok := seen[c.Cwd]; ok {
+			t.Fatalf("cwd %q reused by %s and %s", c.Cwd, prev, c.SessionID)
+		}
+		seen[c.Cwd] = c.SessionID
 	}
 
 	if report.Pairs != 2 || report.Cold.Successes != 2 || report.Warm.Successes != 2 {
@@ -244,5 +245,66 @@ func TestHarnessMissingTelemetryWarnsNotSilentZeros(t *testing.T) {
 	}
 	if !strings.Contains(string(jsonData), `"cold_telemetry": false`) {
 		t.Fatalf("json must carry explicit telemetry flags:\n%s", jsonData)
+	}
+}
+
+// TestHarnessPerTaskIsolationPinsPristineStart reproduces the run-7
+// contamination failure: a task that mutates its workspace must never leak
+// those edits into any later task's copy, in either arm. Task "a" rewrites
+// session.go; task "b" must read back the pristine fixture bytes in both
+// arms. It also pins cleanup: every pair's dirs are gone once Run returns.
+func TestHarnessPerTaskIsolationPinsPristineStart(t *testing.T) {
+	root := t.TempDir()
+	fixture := filepath.Join(root, "fixture")
+	if err := os.MkdirAll(fixture, 0o755); err != nil {
+		t.Fatalf("mkdir fixture: %v", err)
+	}
+	pristine := "package main\n\n// pristine sentinel\n"
+	if err := os.WriteFile(filepath.Join(fixture, "session.go"), []byte(pristine), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	taskset := TaskSet{Name: filepath.Base(root), Dir: root, Tasks: []Task{
+		{Name: "a", Prompt: "mutate", Check: "true"},
+		{Name: "b", Prompt: "verify", Check: "true"},
+	}}
+
+	var bReads []string
+	var allCwds []string
+	h := &Harness{
+		Exec: func(_ context.Context, in RunInput) (RunOutput, error) {
+			allCwds = append(allCwds, in.Cwd)
+			path := filepath.Join(in.Cwd, "session.go")
+			switch {
+			case strings.HasSuffix(in.SessionID, "-a"):
+				// Task a mutates its own copy only.
+				if err := os.WriteFile(path, []byte("package main // mutated by a\n"), 0o644); err != nil {
+					t.Errorf("task a write: %v", err)
+				}
+			case strings.HasSuffix(in.SessionID, "-b"):
+				got, err := os.ReadFile(path)
+				if err != nil {
+					t.Errorf("task b read: %v", err)
+				} else if string(got) != pristine {
+					t.Errorf("task %s saw contaminated fixture: %q", in.SessionID, got)
+				}
+				bReads = append(bReads, string(got))
+			}
+			return RunOutput{Success: true}, nil
+		},
+		Now: func() time.Time { return time.Unix(0, 0) },
+	}
+	if _, err := h.Run(context.Background(), taskset, "", ""); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(bReads) != 2 {
+		t.Fatalf("task b ran %d times, want 2", len(bReads))
+	}
+
+	// Cleanup after persistence: every materialized copy is gone once Run
+	// returns.
+	for _, cwd := range allCwds {
+		if _, err := os.Stat(cwd); !os.IsNotExist(err) {
+			t.Fatalf("arm copy %s survived the run", cwd)
+		}
 	}
 }

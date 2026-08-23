@@ -46,9 +46,11 @@ type Harness struct {
 	PairLogPath string
 }
 
-// Run materializes a fresh cold and warm arm copy, runs every task in both
-// arms (warm in order against one shared copy so memory accrues), aggregates,
-// decides, and returns the report. It never mutates the fixture source dir.
+// Run materializes a fresh cold and warm arm copy PER TASK, runs every task
+// in both arms (each pair starts from the pristine fixture; no task observes
+// files written by an earlier task), aggregates, decides, and returns the
+// report. It never mutates the fixture source dir. A pair's copies are
+// removed only after that pair's result is persisted.
 func (h *Harness) Run(ctx context.Context, taskset TaskSet, model, provider string) (Report, error) {
 	if h.Exec == nil {
 		return Report{}, fmt.Errorf("harness has no Run function")
@@ -58,20 +60,27 @@ func (h *Harness) Run(ctx context.Context, taskset TaskSet, model, provider stri
 		now = time.Now
 	}
 
-	coldDir, err := materializeArm(taskset)
-	if err != nil {
-		return Report{}, fmt.Errorf("materialize cold arm: %w", err)
-	}
-	defer os.RemoveAll(coldDir) //nolint:errcheck
-	warmDir, err := materializeArm(taskset)
-	if err != nil {
-		return Report{}, fmt.Errorf("materialize warm arm: %w", err)
-	}
-	defer os.RemoveAll(warmDir) //nolint:errcheck
-
 	var cold, warm ArmStats
 	pairs := make([]TaskPair, 0, len(taskset.Tasks))
 	for _, task := range taskset.Tasks {
+		// Fresh copies per pair: a shared arm dir let task N's leftover edits
+		// leak into tasks N+1..N (run-7 forensics), so later tasks fought a
+		// mutated dependency they never saw.
+		coldDir, err := materializeArm(taskset)
+		if err != nil {
+			return Report{}, fmt.Errorf("materialize cold arm for %s: %w", task.Name, err)
+		}
+		warmDir, err := materializeArm(taskset)
+		if err != nil {
+			os.RemoveAll(coldDir) //nolint:errcheck
+			return Report{}, fmt.Errorf("materialize warm arm for %s: %w", task.Name, err)
+		}
+		cleanupArm := func() {
+			os.RemoveAll(coldDir) //nolint:errcheck
+			os.RemoveAll(warmDir) //nolint:errcheck
+		}
+		defer cleanupArm()
+
 		coldOut, coldErr := h.Exec(ctx, RunInput{SessionID: sessionID(taskset, "cold", task), Memory: "off", Prompt: task.Prompt, Cwd: coldDir, Check: task.Check})
 		warmOut, warmErr := h.Exec(ctx, RunInput{SessionID: sessionID(taskset, "warm", task), Memory: "on", Prompt: task.Prompt, Cwd: warmDir, Check: task.Check})
 		if ctx.Err() != nil {
@@ -118,6 +127,10 @@ func (h *Harness) Run(ctx context.Context, taskset TaskSet, model, provider stri
 		if err := appendPairLog(h.PairLogPath, pair); err != nil {
 			return Report{}, fmt.Errorf("persist pair %s: %w", task.Name, err)
 		}
+		// The pair's result is durable: release its copies now. The deferred
+		// cleanupArm above only covers early-return paths between here and
+		// materialization; RemoveAll on a missing path is a no-op.
+		cleanupArm()
 	}
 
 	decision := Decide(DecisionInput{Pairs: len(taskset.Tasks), Cold: cold, Warm: warm})
