@@ -70,7 +70,7 @@ func (TestGenerator) Run(ctx context.Context, input schemas.HarnessStageInput, p
 
 	options.report("generating tests")
 	payload, _ := json.MarshalIndent(tgInput, "", "  ")
-	collected, err := callValidatedToolUse(ctx, provider, options.model("medium"), options.ReasoningEffort, composeSystemPrompt(testGeneratorSystemPrompt), string(payload), options.Images, testGeneratorToolDefinition(), options.MaxOutputTokens, &options.Stream, func(collected *zeroruntime.CollectedStream) error {
+	collected, err := callValidatedToolUse(ctx, provider, options.model("medium"), options.ReasoningEffort, composeSystemPrompt(testGeneratorSystemPrompt), string(payload), options.Images, testGeneratorToolDefinition(len(tgInput.Memory) > 0), options.MaxOutputTokens, &options.Stream, func(collected *zeroruntime.CollectedStream) error {
 		_, err := parseTestGeneratorOutput(collected)
 		return err
 	}, options.PromptCacheKey)
@@ -81,6 +81,12 @@ func (TestGenerator) Run(ctx context.Context, input schemas.HarnessStageInput, p
 	if err != nil {
 		return schemas.HarnessStageOutput{}, withCollectedUsage(err, collected)
 	}
+	claims, claimIssues := parseDispositionClaims(testGeneratorToolName, collected)
+	memoryReview, reviewNote := reconcileMemoryReview(tgInput.Memory, claims, claimIssues)
+	if reviewNote != "" {
+		options.report(reviewNote)
+	}
+	output.MemoryDisposition = claims
 
 	changedPaths := make([]string, len(output.Files))
 	for i, f := range output.Files {
@@ -109,11 +115,12 @@ func (TestGenerator) Run(ctx context.Context, input schemas.HarnessStageInput, p
 	}
 
 	return schemas.HarnessStageOutput{
-		Summary:    output.Intent,
-		Detail:     strings.Join(changedPaths, ", "),
-		Confidence: output.Confidence,
-		Data:       data,
-		Usage:      usageFromCollected(collected),
+		Summary:      output.Intent,
+		Detail:       strings.Join(changedPaths, ", "),
+		Confidence:   output.Confidence,
+		MemoryReview: memoryReview,
+		Data:         data,
+		Usage:        usageFromCollected(collected),
 	}, nil
 }
 
@@ -122,8 +129,12 @@ func parseTestGeneratorOutput(collected *zeroruntime.CollectedStream) (schemas.T
 	if tc == nil {
 		return schemas.TestGeneratorOutput{}, fmt.Errorf("model did not call %s", testGeneratorToolName)
 	}
+	stripped, err := stripDispositionClaims(tc.Arguments)
+	if err != nil {
+		return schemas.TestGeneratorOutput{}, fmt.Errorf("parse %s args: %w", testGeneratorToolName, err)
+	}
 	var output schemas.TestGeneratorOutput
-	if err := json.Unmarshal([]byte(tc.Arguments), &output); err != nil {
+	if err := json.Unmarshal([]byte(stripped), &output); err != nil {
 		return schemas.TestGeneratorOutput{}, fmt.Errorf("parse %s args: %w", testGeneratorToolName, err)
 	}
 	if err := output.Validate(); err != nil {
@@ -132,8 +143,8 @@ func parseTestGeneratorOutput(collected *zeroruntime.CollectedStream) (schemas.T
 	return output, nil
 }
 
-func testGeneratorToolDefinition() zeroruntime.ToolDefinition {
-	return zeroruntime.ToolDefinition{
+func testGeneratorToolDefinition(hasMemory bool) zeroruntime.ToolDefinition {
+	definition := zeroruntime.ToolDefinition{
 		Name:        testGeneratorToolName,
 		Description: "Submit the complete TestGeneratorOutput for the requested tests.",
 		Parameters: map[string]any{
@@ -148,4 +159,6 @@ func testGeneratorToolDefinition() zeroruntime.ToolDefinition {
 			"required": []string{"files", "language", "intent", "confidence"},
 		},
 	}
+	applyMemoryDefinition(definition.Parameters, hasMemory)
+	return definition
 }

@@ -16,6 +16,7 @@ import (
 
 	"github.com/Taf0711/splice/internal/config"
 	"github.com/Taf0711/splice/internal/providers"
+	"github.com/Taf0711/splice/internal/splice/memoryreason"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/tools"
 	"github.com/Taf0711/splice/internal/zeroruntime"
@@ -131,16 +132,23 @@ func TestSelectMemoryNilForNilBundle(t *testing.T) {
 
 func TestSelectMemoryTruncatesContentOver500Runes(t *testing.T) {
 	long := strings.Repeat("界", 501)
+	project := "/repo"
 	bundle := &schemas.MemoryBundle{
 		RequestingAgent: "x",
 		Observations: []schemas.MemoryObservation{{
-			Title:      "long note",
-			Content:    long,
-			MemoryType: "note",
-			Scope:      "project",
+			ID:          9,
+			ProjectPath: &project,
+			Scope:       "project",
+			OwnerAgent:  "splice",
+			Visibility:  "shareable",
+			Title:       "long note",
+			Content:     long,
+			MemoryType:  "note",
 		}},
 	}
-	got := selectMemory(bundle)
+	// Truncation is an admission concern now: admit, then select.
+	admitted := memoryreason.Admit(bundle, "/repo", 0)
+	got := selectMemory(admitted.Bundle)
 	if len(got) != 1 {
 		t.Fatalf("expected 1 selected observation, got %d", len(got))
 	}
@@ -262,7 +270,7 @@ func TestValidatedToolUseRetriesContractFailuresAndAccumulatesUsage(t *testing.T
 		append([]zeroruntime.StreamEvent{{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 6, OutputTokens: 5, CachedInputTokens: 2, CacheWriteTokens: 1, ReasoningTokens: 3}}}, toolCallEvent(codeWriterToolName, string(validArgs))...),
 	}}
 
-	collected, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(), 0, nil, func(collected *zeroruntime.CollectedStream) error {
+	collected, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(false), 0, nil, func(collected *zeroruntime.CollectedStream) error {
 		_, err := parseCodeWriterOutput(collected)
 		return err
 	}, "")
@@ -292,7 +300,7 @@ func TestValidatedToolUseRetriesSchemaInvalidArguments(t *testing.T) {
 		toolCallEvent(codeWriterToolName, invalid),
 		toolCallEvent(codeWriterToolName, string(validArgs)),
 	}}
-	_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(), 0, nil, func(collected *zeroruntime.CollectedStream) error {
+	_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(false), 0, nil, func(collected *zeroruntime.CollectedStream) error {
 		_, err := parseCodeWriterOutput(collected)
 		return err
 	}, "")
@@ -328,7 +336,7 @@ func TestValidatedToolUseUsageMatchesStreamCallbacks(t *testing.T) {
 		},
 	}
 
-	collected, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(), 0, callbacks, func(c *zeroruntime.CollectedStream) error {
+	collected, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(false), 0, callbacks, func(c *zeroruntime.CollectedStream) error {
 		_, e := parseCodeWriterOutput(c)
 		return e
 	}, "")
@@ -369,7 +377,7 @@ func TestCodeWriterDoesNotRetryApplicationFailure(t *testing.T) {
 
 func TestValidatedToolUseDoesNotRetryTransportErrors(t *testing.T) {
 	provider := &retryScriptProvider{errs: []error{errors.New("connection refused")}}
-	_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(), 0, nil, func(*zeroruntime.CollectedStream) error { return nil }, "")
+	_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(false), 0, nil, func(*zeroruntime.CollectedStream) error { return nil }, "")
 	if err == nil || !strings.Contains(err.Error(), "connection refused") {
 		t.Fatalf("transport error = %v", err)
 	}
@@ -382,7 +390,7 @@ func TestValidatedToolUseDoesNotRetryCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	provider := &retryScriptProvider{}
-	_, err := callValidatedToolUse(ctx, provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(), 0, nil, func(*zeroruntime.CollectedStream) error { return errors.New("invalid") }, "")
+	_, err := callValidatedToolUse(ctx, provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(false), 0, nil, func(*zeroruntime.CollectedStream) error { return errors.New("invalid") }, "")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancellation error = %v", err)
 	}
@@ -397,7 +405,7 @@ func TestValidatedToolUseForcedChoiceFallbackIsBoundedAndNarrow(t *testing.T) {
 			{{Type: zeroruntime.StreamEventError, Error: "provider request error: Provider returned error"}},
 			{{Type: zeroruntime.StreamEventError, Error: "provider request error: Provider returned error"}},
 		}}
-		_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(), 0, nil, func(*zeroruntime.CollectedStream) error { return nil }, "")
+		_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(false), 0, nil, func(*zeroruntime.CollectedStream) error { return nil }, "")
 		if err == nil || !strings.Contains(err.Error(), "provider request error: Provider returned error") {
 			t.Fatalf("repeated rejection error = %v", err)
 		}
@@ -409,7 +417,7 @@ func TestValidatedToolUseForcedChoiceFallbackIsBoundedAndNarrow(t *testing.T) {
 		provider := &retryScriptProvider{scripts: [][]zeroruntime.StreamEvent{
 			{{Type: zeroruntime.StreamEventError, Error: "provider request error: model does not exist"}},
 		}}
-		_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(), 0, nil, func(*zeroruntime.CollectedStream) error { return nil }, "")
+		_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(false), 0, nil, func(*zeroruntime.CollectedStream) error { return nil }, "")
 		if err == nil || !strings.Contains(err.Error(), "model does not exist") {
 			t.Fatalf("request error = %v", err)
 		}
@@ -421,7 +429,7 @@ func TestValidatedToolUseForcedChoiceFallbackIsBoundedAndNarrow(t *testing.T) {
 		provider := &retryScriptProvider{scripts: [][]zeroruntime.StreamEvent{
 			{{Type: zeroruntime.StreamEventError, Error: "auth error: your API key is missing or invalid"}},
 		}}
-		_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(), 0, nil, func(*zeroruntime.CollectedStream) error { return nil }, "")
+		_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(false), 0, nil, func(*zeroruntime.CollectedStream) error { return nil }, "")
 		if err == nil || !strings.Contains(err.Error(), "auth error:") {
 			t.Fatalf("auth error = %v", err)
 		}
@@ -437,7 +445,7 @@ func TestValidatedToolUseExhaustionIsActionableAndMetered(t *testing.T) {
 		{Type: zeroruntime.StreamEventDone},
 	}
 	provider := &retryScriptProvider{scripts: [][]zeroruntime.StreamEvent{missing, missing, missing}}
-	_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(), 0, nil, func(collected *zeroruntime.CollectedStream) error {
+	_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(false), 0, nil, func(collected *zeroruntime.CollectedStream) error {
 		_, err := parseCodeWriterOutput(collected)
 		return err
 	}, "")
@@ -2448,7 +2456,7 @@ func TestValidatedToolUseRetainsOutputCapOnEveryAttempt(t *testing.T) {
 		append([]zeroruntime.StreamEvent{}, toolCallEvent(codeWriterToolName, `{`)...),
 		toolCallEvent(codeWriterToolName, string(validArgs)),
 	}}
-	_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(), 8192, nil, func(collected *zeroruntime.CollectedStream) error {
+	_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(false), 8192, nil, func(collected *zeroruntime.CollectedStream) error {
 		_, err := parseCodeWriterOutput(collected)
 		return err
 	}, "")

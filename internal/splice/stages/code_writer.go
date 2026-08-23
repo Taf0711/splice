@@ -64,7 +64,7 @@ func (CodeWriter) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 	if err != nil {
 		return schemas.HarnessStageOutput{}, err
 	}
-	collected, err := callValidatedToolUse(ctx, provider, options.model("medium"), options.ReasoningEffort, composeSystemPrompt(codeWriterSystemPrompt), string(payload), options.Images, submitCodeToolDefinition(), options.MaxOutputTokens, &options.Stream, func(collected *zeroruntime.CollectedStream) error {
+	collected, err := callValidatedToolUse(ctx, provider, options.model("medium"), options.ReasoningEffort, composeSystemPrompt(codeWriterSystemPrompt), string(payload), options.Images, submitCodeToolDefinition(len(cwInput.Memory) > 0), options.MaxOutputTokens, &options.Stream, func(collected *zeroruntime.CollectedStream) error {
 		_, err := parseCodeWriterOutput(collected)
 		return err
 	}, options.PromptCacheKey)
@@ -75,6 +75,15 @@ func (CodeWriter) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 	if err != nil {
 		return schemas.HarnessStageOutput{}, withCollectedUsage(err, collected)
 	}
+	// Disposition bookkeeping is reconciled separately from core output:
+	// malformed claims already could not fail validation, and they never
+	// discard the files above.
+	claims, claimIssues := parseDispositionClaims(codeWriterToolName, collected)
+	memoryReview, reviewNote := reconcileMemoryReview(cwInput.Memory, claims, claimIssues)
+	if reviewNote != "" {
+		options.report(reviewNote)
+	}
+	output.MemoryDisposition = claims
 
 	changedPaths := make([]string, len(output.Files))
 	for i, f := range output.Files {
@@ -104,11 +113,12 @@ func (CodeWriter) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 	}
 
 	return schemas.HarnessStageOutput{
-		Summary:    output.Intent,
-		Detail:     strings.Join(changedPaths, ", "),
-		Confidence: output.Confidence,
-		Data:       data,
-		Usage:      usageFromCollected(collected),
+		Summary:      output.Intent,
+		Detail:       strings.Join(changedPaths, ", "),
+		Confidence:   output.Confidence,
+		MemoryReview: memoryReview,
+		Data:         data,
+		Usage:        usageFromCollected(collected),
 	}, nil
 }
 
@@ -117,8 +127,12 @@ func parseCodeWriterOutput(collected *zeroruntime.CollectedStream) (schemas.Code
 	if tc == nil {
 		return schemas.CodeWriterOutput{}, fmt.Errorf("model did not call %s", codeWriterToolName)
 	}
+	stripped, err := stripDispositionClaims(tc.Arguments)
+	if err != nil {
+		return schemas.CodeWriterOutput{}, fmt.Errorf("parse %s args: %w", codeWriterToolName, err)
+	}
 	var output schemas.CodeWriterOutput
-	if err := json.Unmarshal([]byte(tc.Arguments), &output); err != nil {
+	if err := json.Unmarshal([]byte(stripped), &output); err != nil {
 		return schemas.CodeWriterOutput{}, fmt.Errorf("parse %s args: %w", codeWriterToolName, err)
 	}
 	if err := output.Validate(); err != nil {
@@ -127,8 +141,8 @@ func parseCodeWriterOutput(collected *zeroruntime.CollectedStream) (schemas.Code
 	return output, nil
 }
 
-func submitCodeToolDefinition() zeroruntime.ToolDefinition {
-	return zeroruntime.ToolDefinition{
+func submitCodeToolDefinition(hasMemory bool) zeroruntime.ToolDefinition {
+	definition := zeroruntime.ToolDefinition{
 		Name:        codeWriterToolName,
 		Description: "Submit the complete CodeWriterOutput for the requested implementation.",
 		Parameters: map[string]any{
@@ -144,6 +158,8 @@ func submitCodeToolDefinition() zeroruntime.ToolDefinition {
 			"required": []string{"files", "language", "intent", "confidence"},
 		},
 	}
+	applyMemoryDefinition(definition.Parameters, hasMemory)
+	return definition
 }
 
 func applyFileChanges(ctx context.Context, workDir string, files []schemas.FileChange, runTool func(context.Context, string, map[string]any) (ToolResult, error)) (schemas.FileChangeApplyResult, error) {

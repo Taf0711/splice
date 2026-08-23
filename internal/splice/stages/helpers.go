@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Taf0711/splice/internal/splice/memoryreason"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
@@ -213,43 +214,13 @@ func formatContextBundle(bundle *schemas.ContextBundle) []string {
 	return formatted
 }
 
-// selectMemory maps a MemoryBundle into a bounded list of SelectedMemory for stage
-// input. It returns nil when bundle is nil or empty, so omitempty keeps the JSON
-// field absent when no memory was retrieved. Exemplars are appended with
-// memory_type "exemplar" and their source run_id in provenance.
+// selectMemory maps an admitted MemoryBundle into bounded SelectedMemory
+// items carrying stable audit ids. It returns nil when bundle is nil or
+// empty, so omitempty keeps the JSON field absent when no memory was
+// delivered. Admission policy lives in the memoryreason module; this wrapper
+// only converts types.
 func selectMemory(bundle *schemas.MemoryBundle) []schemas.SelectedMemory {
-	if bundle == nil || (len(bundle.Observations) == 0 && len(bundle.Exemplars) == 0) {
-		return nil
-	}
-	const maxObservations = 5
-	const maxRunes = 500
-	selected := make([]schemas.SelectedMemory, 0, min(len(bundle.Observations), maxObservations)+len(bundle.Exemplars))
-	for i, obs := range bundle.Observations {
-		if i >= maxObservations {
-			break
-		}
-		content := obs.Content
-		runes := []rune(content)
-		if len(runes) > maxRunes {
-			content = string(runes[:maxRunes]) + "..."
-		}
-		selected = append(selected, schemas.SelectedMemory{
-			Title:      obs.Title,
-			Content:    content,
-			MemoryType: obs.MemoryType,
-			Scope:      obs.Scope,
-		})
-	}
-	for _, exemplar := range bundle.Exemplars {
-		selected = append(selected, schemas.SelectedMemory{
-			Title:      "exemplar run " + exemplar.RunID,
-			Content:    exemplar.Content,
-			MemoryType: "exemplar",
-			Scope:      "exemplar",
-			RunID:      exemplar.RunID,
-		})
-	}
-	return selected
+	return memoryreason.Select(bundle)
 }
 
 func formatPathList(paths []string, max int) string {

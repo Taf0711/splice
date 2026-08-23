@@ -3,10 +3,12 @@ package stages
 import (
 	"context"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/Taf0711/splice/internal/splice/memoryreason"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
@@ -244,5 +246,99 @@ func usageFromCollected(collected *zeroruntime.CollectedStream) *schemas.StageUs
 		ReasoningTokens:   u.ReasoningTokens,
 		WebSearchRequests: u.WebSearchRequests,
 		WebSearchEngine:   u.WebSearchEngine,
+	}
+}
+
+var memoryDispositionSchema = map[string]any{
+	"type": "array",
+	"items": map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"memory_id": map[string]any{"type": "string"},
+			"action":    map[string]any{"type": "string", "enum": []string{schemas.MemoryActionApplied, schemas.MemoryActionRejected}},
+			"reason":    map[string]any{"type": "string", "enum": []string{schemas.MemoryReasonRelevant, schemas.MemoryReasonIrrelevant, schemas.MemoryReasonStaleOrIncompatible, schemas.MemoryReasonContradicted}},
+		},
+		"required": []string{"memory_id", "action", "reason"},
+	},
+}
+
+// applyMemoryDefinition adds the disposition property and, when memory was
+// delivered, makes it required so the warm consideration contract is
+// enforced by the tool schema itself. Cold definitions keep it optional so
+// the cold schema stays small.
+func applyMemoryDefinition(params map[string]any, hasMemory bool) {
+	props := params["properties"].(map[string]any)
+	props["memory_disposition"] = memoryDispositionSchema
+	if hasMemory {
+		params["required"] = append(params["required"].([]string), "memory_disposition")
+	}
+}
+
+// stripDispositionClaims removes the memory_disposition property from a tool
+// call's arguments before core decoding, so malformed bookkeeping JSON can
+// never fail typed-output validation and trigger a provider retry.
+func stripDispositionClaims(args string) (string, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(args), &fields); err != nil {
+		return "", err
+	}
+	delete(fields, "memory_disposition")
+	stripped, err := json.Marshal(fields)
+	if err != nil {
+		return "", err
+	}
+	return string(stripped), nil
+}
+
+// parseDispositionClaims decodes memory_disposition as raw claims plus an
+// issue count: a missing array, wrong shape, or malformed item each counts as
+// one issue and never invalidates the substantive output.
+func parseDispositionClaims(toolName string, collected *zeroruntime.CollectedStream) ([]schemas.MemoryDisposition, int) {
+	tc := findToolCall(collected, toolName)
+	if tc == nil {
+		return nil, 0
+	}
+	var fields struct {
+		MemoryDisposition []json.RawMessage `json:"memory_disposition"`
+	}
+	if err := json.Unmarshal([]byte(tc.Arguments), &fields); err != nil {
+		return nil, 1
+	}
+	claims := make([]schemas.MemoryDisposition, 0, len(fields.MemoryDisposition))
+	issues := 0
+	for _, raw := range fields.MemoryDisposition {
+		var claim schemas.MemoryDisposition
+		if err := json.Unmarshal(raw, &claim); err != nil || claim.MemoryID == "" {
+			issues++
+			continue
+		}
+		claims = append(claims, claim)
+	}
+	return claims, issues
+}
+
+// reconcileMemoryReview normalizes model claims into the complete per-
+// invocation review and renders at most one progress note when bookkeeping
+// was incomplete. It returns a nil review when no memory was delivered.
+func reconcileMemoryReview(delivered []schemas.SelectedMemory, claims []schemas.MemoryDisposition, parseIssues int) (*schemas.MemoryReview, string) {
+	review := memoryreason.Reconcile(delivered, claims, parseIssues)
+	if review == nil {
+		return nil, ""
+	}
+	unreported := 0
+	for _, item := range review.Items {
+		if item.Action == schemas.MemoryActionUnreported {
+			unreported++
+		}
+	}
+	switch {
+	case review.InvalidClaims > 0 && unreported > 0:
+		return review, fmt.Sprintf("memory dispositions: %d invalid claim(s); %d delivered item(s) unreported", review.InvalidClaims, unreported)
+	case review.InvalidClaims > 0:
+		return review, fmt.Sprintf("memory dispositions: %d invalid claim(s)", review.InvalidClaims)
+	case unreported > 0:
+		return review, fmt.Sprintf("memory dispositions: %d delivered item(s) unreported", unreported)
+	default:
+		return review, ""
 	}
 }
