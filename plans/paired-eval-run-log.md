@@ -69,6 +69,14 @@ observations (11 run_config, 10 test_command) and no trace activity across
 three eval cycles; `~/.local/share/splice/sessions/eval-*` session dirs exist
 because session storage is separate from memd and worked throughout.
 
+Blast radius beyond the eval: budget calibration starves too. `learn.FitBudget`
+(called per stage from `internal/splice/run.go`) reads its calibration corpus
+through `QueryTraces`, so with no traces persisting since Aug 19 every run has
+calibrated 0/N stages against live data and fallen back to static defaults.
+Run 3's own transcript shows `budgets: 0/4 stages calibrated`. The stale
+sidecar did not just hide eval telemetry; it froze LN2 learning input for 17
+days. The operational fix (rebuild + restart) restores both.
+
 ## Fix state
 
 - Shipped: 9dcd56c (fault tolerance + incremental pair log), e54e1f4 (symlink
