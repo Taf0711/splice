@@ -140,13 +140,13 @@ func TestCompactionIsDeterministic(t *testing.T) {
 }
 
 // TestOutputOverflowStillAborts pins behavior (3): output overflow stays fatal.
-// The trajectory token-budget rule aborts on consumed >= budget regardless of
-// whether the spend came from generation or input, so an output-only overrun
-// must produce ActionAbortBudget.
+// The trajectory token-budget rule gates on generated tokens, so an
+// output-side overrun produces ActionAbortBudget even though input volume no
+// longer participates in the gate.
 func TestOutputOverflowStillAborts(t *testing.T) {
 	budget := 100
 	history := []schemas.IterationState{
-		{Iteration: 1, TokensConsumed: budget},
+		{Iteration: 1, TokensConsumed: budget, TokensGenerated: budget},
 	}
 	decision := EvaluateTrajectory(history, 10, &budget)
 	if decision.Action != schemas.ActionAbortBudget {

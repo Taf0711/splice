@@ -57,9 +57,13 @@ type IterationState struct {
 	StateHash                string           `json:"state_hash"`
 	Confidence               float64          `json:"confidence"`
 	TokensConsumed           int              `json:"tokens_consumed"`
-	FilesChanged             []string         `json:"files_changed,omitempty"`
-	LinesAdded               int              `json:"lines_added"`
-	LinesRemoved             int              `json:"lines_removed"`
+	// TokensGenerated is the output-side spend (completion + reasoning) for
+	// the iteration. Trajectory budget gating keys on this field: input
+	// volume is bounded per call by stage-input compaction, not by abort.
+	TokensGenerated int      `json:"tokens_generated"`
+	FilesChanged    []string `json:"files_changed,omitempty"`
+	LinesAdded      int      `json:"lines_added"`
+	LinesRemoved    int      `json:"lines_removed"`
 }
 
 // Validate checks the iteration state.

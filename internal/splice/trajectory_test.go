@@ -51,6 +51,12 @@ func withTokens(n int) func(*schemas.IterationState) {
 	}
 }
 
+func withGeneration(n int) func(*schemas.IterationState) {
+	return func(s *schemas.IterationState) {
+		s.TokensGenerated = n
+	}
+}
+
 func withProgress(files ...string) func(*schemas.IterationState) {
 	return func(s *schemas.IterationState) {
 		s.FilesChanged = append([]string(nil), files...)
@@ -369,11 +375,44 @@ func TestEvaluateTrajectoryAbortsAtHardIterationLimit(t *testing.T) {
 }
 
 func TestEvaluateTrajectoryAbortsAtTokenBudget(t *testing.T) {
-	history := []schemas.IterationState{iterState(withTokens(10), withHash("a")), iterState(withTokens(10), withHash("b"))}
+	history := []schemas.IterationState{iterState(withGeneration(10), withHash("a")), iterState(withGeneration(10), withHash("b"))}
 	budget := 20
 	decision := EvaluateTrajectory(history, 5, &budget)
 	if decision.Action != schemas.ActionAbortBudget {
 		t.Fatalf("expected abort budget, got %q", decision.Action)
+	}
+}
+
+// TestTrajectoryBudgetIgnoresInputVolume pins the generation-only gate: high
+// cumulative input-inclusive consumption with low generation must NOT abort.
+func TestTrajectoryBudgetIgnoresInputVolume(t *testing.T) {
+	history := []schemas.IterationState{
+		iterState(func(s *schemas.IterationState) { s.TokensConsumed = 50000 }, withHash("a")),
+	}
+	budget := 20
+	decision := EvaluateTrajectory(history, 5, &budget)
+	if decision.Action == schemas.ActionAbortBudget {
+		t.Fatalf("input-only spend must not abort: %+v", decision)
+	}
+}
+
+// TestIterationStateStillReportsInputTotals pins the reporting contract: the
+// projection keeps filling TokensConsumed (input-inclusive) alongside the new
+// generation field, so telemetry keeps seeing real total burn.
+func TestIterationStateStillReportsInputTotals(t *testing.T) {
+	records := []schemas.StageRecord{
+		{Name: "code_writer", Status: schemas.StageCompleted, TokensInput: 3000, TokensOutput: 700},
+		{Name: "test_runner", Status: schemas.StageCompleted, TokensInput: 2000, TokensOutput: 100},
+	}
+	state, err := ComputeIterationState(1, nil, records, schemas.ChangeSummary{}, nil)
+	if err != nil {
+		t.Fatalf("build state: %v", err)
+	}
+	if state.TokensConsumed != 5800 {
+		t.Fatalf("input-inclusive total = %d, want 5800", state.TokensConsumed)
+	}
+	if state.TokensGenerated != 800 {
+		t.Fatalf("generation total = %d, want 800", state.TokensGenerated)
 	}
 }
 

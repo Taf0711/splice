@@ -404,7 +404,10 @@ func runIterationLoop(
 	tr *runTraceAccumulator,
 ) (schemas.PipelineResult, error) {
 	maxWallSeconds := defaultMaxWallSeconds
-	tokenBudget := plan.TokenBudget.TotalInputBudget + plan.TokenBudget.TotalOutputBudget
+	// Generation-only gate: input volume is bounded per call by compaction
+	// and never aborts; the trajectory rule compares generated tokens against
+	// TotalOutputBudget (reserve included).
+	tokenBudget := plan.TokenBudget.TotalOutputBudget
 
 	history := []schemas.IterationState{}
 	allRecords := []schemas.StageRecord{}

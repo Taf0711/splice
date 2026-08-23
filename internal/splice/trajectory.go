@@ -40,6 +40,7 @@ type trajectoryRuleContext struct {
 	currentScore      *float64
 	initialScore      *float64
 	tokensConsumed    int
+	tokensGenerated   int
 	stateHashes       []string
 	recentConfidences []float64
 }
@@ -96,6 +97,7 @@ func newTrajectoryRuleContext(history []schemas.IterationState, maxIterations in
 	}
 	for i, state := range history {
 		rc.tokensConsumed += state.TokensConsumed
+		rc.tokensGenerated += state.TokensGenerated
 		rc.stateHashes[i] = state.StateHash
 	}
 	start := max(0, len(history)-3)
@@ -115,12 +117,18 @@ func ruleIterationLimit(rc trajectoryRuleContext) *schemas.TrajectoryDecision {
 	return &decision
 }
 
+// ruleTokenBudget gates on GENERATION ONLY. Input volume is bounded per call
+// by stage-input compaction (stage_input.go) and never triggers an abort:
+// memory-injected runs legitimately re-charge input on every consuming stage,
+// so a cumulative-input gate would veto them regardless of behavior. Output
+// overflow stays fatal as runaway-generation protection.
 func ruleTokenBudget(rc trajectoryRuleContext) *schemas.TrajectoryDecision {
-	if rc.tokenBudget == nil || rc.tokensConsumed < *rc.tokenBudget {
+	if rc.tokenBudget == nil || rc.tokensGenerated < *rc.tokenBudget {
 		return nil
 	}
 	decision := rc.decision(schemas.ActionAbortBudget, "Token budget reached.",
-		[]string{fmt.Sprintf("tokens_consumed=%d", rc.tokensConsumed), fmt.Sprintf("token_budget=%d", *rc.tokenBudget)})
+		[]string{fmt.Sprintf("tokens_generated=%d", rc.tokensGenerated), fmt.Sprintf("output_budget=%d", *rc.tokenBudget),
+			fmt.Sprintf("tokens_consumed_input_inclusive=%d", rc.tokensConsumed)})
 	return &decision
 }
 
@@ -336,6 +344,7 @@ func ComputeIterationState(iteration int, stageOutputs []schemas.HarnessStageOut
 		StateHash:                stateHash(signals.codeWriterOutputs),
 		Confidence:               aggregateConfidence(stageOutputs),
 		TokensConsumed:           tokensConsumed(stageRecords),
+		TokensGenerated:          tokensGenerated(stageRecords),
 		VerificationIncomplete:   countStageStatus(stageRecords, schemas.StageIncomplete),
 		FilesChanged:             sortedPaths(changeSummary.ChangedFiles),
 		LinesAdded:               linesAdded,
@@ -562,6 +571,17 @@ func tokensConsumed(records []schemas.StageRecord) int {
 		// TokensCached and TokensCacheWrite are subsets of TokensInput; TokensReasoning
 		// is a subset of TokensOutput. Summing the subsets would double-count.
 		total += record.TokensInput + record.TokensOutput
+	}
+	return total
+}
+
+// tokensGenerated sums output-side spend only (completion plus reasoning;
+// reasoning is already a subset of TokensOutput). The trajectory budget gates
+// on this, not on input-inclusive consumption.
+func tokensGenerated(records []schemas.StageRecord) int {
+	total := 0
+	for _, record := range records {
+		total += record.TokensOutput
 	}
 	return total
 }
