@@ -166,17 +166,25 @@ func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
 		runCmd := exec.CommandContext(ctx, exe, args...)
 		runCmd.Dir = in.Cwd
 		out, runErr := runCmd.CombinedOutput()
+
+		// Cold arms (--memory off) never create a trace by design: no sidecar
+		// client means no tracer. When the trace join finds nothing, fall back
+		// to the run's own stream-json usage records so both arms carry real
+		// measured cost and the comparison stays symmetric.
+		tokens, interventions, found := collectTrace(ctx, deps, in.Cwd, in.SessionID)
+		if !found {
+			tokens = sumStreamJSONTokens(out)
+			found = tokens > 0
+		}
+
 		if runErr != nil {
-			// The transcript's usage records are a real measurement even when
-			// the run itself failed.
-			return eval.RunOutput{Success: false, Tokens: sumStreamJSONTokens(out), TelemetryFound: true}, fmt.Errorf("exec run %s: %v: %s", in.SessionID, runErr, out)
+			return eval.RunOutput{Success: false, Tokens: tokens, TelemetryFound: found}, fmt.Errorf("exec run %s: %v: %s", in.SessionID, runErr, out)
 		}
 
 		checkCmd := exec.CommandContext(ctx, "/bin/sh", "-c", in.Check)
 		checkCmd.Dir = in.Cwd
 		success := checkCmd.Run() == nil
 
-		tokens, interventions, found := collectTrace(ctx, deps, in.Cwd, in.SessionID)
 		return eval.RunOutput{Success: success, Tokens: tokens, Interventions: interventions, TelemetryFound: found}, nil
 	}
 }
