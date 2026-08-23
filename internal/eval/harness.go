@@ -2,6 +2,7 @@ package eval
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -35,6 +36,10 @@ type RunFunc func(ctx context.Context, in RunInput) (RunOutput, error)
 type Harness struct {
 	Exec RunFunc
 	Now  func() time.Time
+	// PairLogPath optionally names a JSONL file that receives one line per
+	// completed pair, appended as the pair finishes. A later crash then
+	// preserves earlier work. Empty disables persistence.
+	PairLogPath string
 }
 
 // Run materializes a fresh cold and warm arm copy, runs every task in both
@@ -63,13 +68,25 @@ func (h *Harness) Run(ctx context.Context, taskset TaskSet, model, provider stri
 	var cold, warm ArmStats
 	pairs := make([]TaskPair, 0, len(taskset.Tasks))
 	for _, task := range taskset.Tasks {
-		coldOut, err := h.Exec(ctx, RunInput{SessionID: sessionID(taskset, "cold", task), Memory: "off", Prompt: task.Prompt, Cwd: coldDir, Check: task.Check})
-		if err != nil {
-			return Report{}, fmt.Errorf("cold task %s: %w", task.Name, err)
+		coldOut, coldErr := h.Exec(ctx, RunInput{SessionID: sessionID(taskset, "cold", task), Memory: "off", Prompt: task.Prompt, Cwd: coldDir, Check: task.Check})
+		warmOut, warmErr := h.Exec(ctx, RunInput{SessionID: sessionID(taskset, "warm", task), Memory: "on", Prompt: task.Prompt, Cwd: warmDir, Check: task.Check})
+		if ctx.Err() != nil {
+			return Report{}, fmt.Errorf("harness interrupted: %w", ctx.Err())
 		}
-		warmOut, err := h.Exec(ctx, RunInput{SessionID: sessionID(taskset, "warm", task), Memory: "on", Prompt: task.Prompt, Cwd: warmDir, Check: task.Check})
-		if err != nil {
-			return Report{}, fmt.Errorf("warm task %s: %w", task.Name, err)
+
+		// An exec failure is an outcome of that arm's run, not a harness
+		// crash: the arm takes the failure, keeps whatever partial tokens the
+		// seam reported, and the eval continues so one bad run cannot discard
+		// every other pair's result.
+		coldError := ""
+		if coldErr != nil {
+			coldError = coldErr.Error()
+			coldOut.Success = false
+		}
+		warmError := ""
+		if warmErr != nil {
+			warmError = warmErr.Error()
+			warmOut.Success = false
 		}
 
 		cold.Successes += boolToInt(coldOut.Success)
@@ -79,7 +96,7 @@ func (h *Harness) Run(ctx context.Context, taskset TaskSet, model, provider stri
 		warm.Tokens += warmOut.Tokens
 		warm.WeightedInterventions += warmOut.Interventions
 
-		pairs = append(pairs, TaskPair{
+		pair := TaskPair{
 			Name:              task.Name,
 			ColdSuccess:       coldOut.Success,
 			WarmSuccess:       warmOut.Success,
@@ -87,7 +104,14 @@ func (h *Harness) Run(ctx context.Context, taskset TaskSet, model, provider stri
 			WarmTokens:        warmOut.Tokens,
 			ColdInterventions: coldOut.Interventions,
 			WarmInterventions: warmOut.Interventions,
-		})
+			ColdError:         coldError,
+			WarmError:         warmError,
+		}
+		pairs = append(pairs, pair)
+
+		if err := appendPairLog(h.PairLogPath, pair); err != nil {
+			return Report{}, fmt.Errorf("persist pair %s: %w", task.Name, err)
+		}
 	}
 
 	decision := Decide(DecisionInput{Pairs: len(taskset.Tasks), Cold: cold, Warm: warm})
@@ -180,4 +204,29 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// appendPairLog appends one pair as a JSON line, creating the file on first
+// use. Append mode is the contract: an interrupted run must never truncate
+// pairs an earlier attempt already persisted.
+func appendPairLog(path string, pair TaskPair) error {
+	if path == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer file.Close() //nolint:errcheck
+	line, err := json.Marshal(pair)
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(append(line, '\n')); err != nil {
+		return err
+	}
+	return file.Sync()
 }

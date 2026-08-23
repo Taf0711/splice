@@ -18,6 +18,11 @@ type TaskPair struct {
 	WarmTokens        int    `json:"warm_tokens"`
 	ColdInterventions int    `json:"cold_interventions,omitempty"`
 	WarmInterventions int    `json:"warm_interventions,omitempty"`
+	// ColdError and WarmError carry a verbatim exec failure for that arm.
+	// A failed exec counts as arm failure with whatever partial tokens were
+	// reported, so an abort biases no gate in anyone's favor.
+	ColdError string `json:"cold_error,omitempty"`
+	WarmError string `json:"warm_error,omitempty"`
 }
 
 // Report is the paired-eval result. It carries counts, ratios, and named
@@ -87,6 +92,25 @@ func (r Report) RenderMarkdown() string {
 	fmt.Fprintf(&b, "cold: %d successes, %d tokens, %d weighted interventions\n", r.Cold.Successes, r.Cold.Tokens, r.Cold.WeightedInterventions)
 	fmt.Fprintf(&b, "warm: %d successes, %d tokens, %d weighted interventions\n", r.Warm.Successes, r.Warm.Tokens, r.Warm.WeightedInterventions)
 
+	var failed []TaskPair
+	for _, task := range r.Tasks {
+		if task.ColdError != "" || task.WarmError != "" {
+			failed = append(failed, task)
+		}
+	}
+	if len(failed) > 0 {
+		fmt.Fprintf(&b, "\n## Run Errors\n\n")
+		fmt.Fprintf(&b, "Exec failures count as arm failures with their partial tokens.\n\n")
+		for _, task := range failed {
+			if task.ColdError != "" {
+				fmt.Fprintf(&b, "- %s (cold): %s\n", task.Name, singleLine(task.ColdError))
+			}
+			if task.WarmError != "" {
+				fmt.Fprintf(&b, "- %s (warm): %s\n", task.Name, singleLine(task.WarmError))
+			}
+		}
+	}
+
 	fmt.Fprintf(&b, "\n## Constants\n\n")
 	fmt.Fprintf(&b, "pair floor: %d\n", r.Constants.PairFloor)
 	fmt.Fprintf(&b, "cost margin: %.2f\n", r.Constants.CostMargin)
@@ -99,4 +123,16 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// singleLine flattens a captured exec transcript to one report line so a
+// multi-thousand-token stream-json dump cannot blow up the markdown table
+// layout. The full text still travels in pe-report.json.
+func singleLine(s string) string {
+	flat := strings.Join(strings.Fields(s), " ")
+	const max = 400
+	if len(flat) > max {
+		return flat[:max] + " ... [truncated; see pe-report.json]"
+	}
+	return flat
 }

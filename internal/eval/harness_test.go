@@ -2,6 +2,11 @@ package eval
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -92,5 +97,118 @@ func TestHarnessCheckSuccessMapping(t *testing.T) {
 	}
 	if !report.Tasks[0].ColdSuccess || report.Tasks[1].ColdSuccess {
 		t.Fatalf("cold success mapping wrong: %#v", report.Tasks)
+	}
+}
+
+// TestHarnessExecErrorMarksArmFailedAndCompletes pins the survival contract: a
+// failed exec must not abort the eval. The failing arm takes Success=false,
+// keeps its verbatim error, and its partial tokens still count as cost; every
+// other pair completes and the report is produced.
+func TestHarnessExecErrorMarksArmFailedAndCompletes(t *testing.T) {
+	taskset := TaskSet{Name: "ts", Tasks: []Task{
+		{Name: "before", Prompt: "p", Check: "true"},
+		{Name: "boom", Prompt: "p", Check: "true"},
+		{Name: "after", Prompt: "p", Check: "true"},
+	}}
+	h := &Harness{
+		Exec: func(_ context.Context, in RunInput) (RunOutput, error) {
+			if in.Memory == "off" && in.SessionID == "eval-ts-cold-boom" {
+				return RunOutput{Success: false, Tokens: 250}, fmt.Errorf("exec run %s: exit status 4: abort_budget", in.SessionID)
+			}
+			return RunOutput{Success: true, Tokens: 100}, nil
+		},
+		Now: func() time.Time { return time.Unix(0, 0) },
+	}
+	report, err := h.Run(context.Background(), taskset, "", "")
+	if err != nil {
+		t.Fatalf("Run returned an error for a per-run failure: %v", err)
+	}
+	if len(report.Tasks) != 3 {
+		t.Fatalf("pairs = %d, want all 3 tasks to complete", len(report.Tasks))
+	}
+	boom := report.Tasks[1]
+	if boom.ColdSuccess || boom.WarmSuccess != true {
+		t.Fatalf("boom pair = %+v, want cold failed and warm untouched-successful", boom)
+	}
+	if boom.ColdTokens != 250 {
+		t.Fatalf("cold tokens = %d, want partial spend counted", boom.ColdTokens)
+	}
+	if !strings.Contains(boom.ColdError, "abort_budget") {
+		t.Fatalf("cold error = %q, want the verbatim failure text", boom.ColdError)
+	}
+	if boom.WarmError != "" {
+		t.Fatalf("warm error = %q, want empty on a healthy arm run", boom.WarmError)
+	}
+	if report.Cold.Successes != 2 || report.Warm.Successes != 3 {
+		t.Fatalf("arm successes cold=%d warm=%d, want 2/3", report.Cold.Successes, report.Warm.Successes)
+	}
+}
+
+// TestHarnessErrorsSurviveReportRenderers pins that exec failures reach both
+// renderers: pe-report.json carries the full text, pe-report.md carries the
+// task with a bounded line.
+func TestHarnessErrorsSurviveReportRenderers(t *testing.T) {
+	report := Report{Contract: ReportContractVersion, Timestamp: "t", Pairs: 1,
+		Tasks: []TaskPair{{Name: "boom", ColdError: "exec run eval-x: exit status 4: abort_budget: Token budget reached."}}}
+	jsonData, err := report.WriteJSON()
+	if err != nil {
+		t.Fatalf("WriteJSON: %v", err)
+	}
+	if !strings.Contains(string(jsonData), "abort_budget") {
+		t.Fatal("pe-report.json lost the error text")
+	}
+	md := report.RenderMarkdown()
+	if !strings.Contains(md, "## Run Errors") || !strings.Contains(md, "boom (cold)") {
+		t.Fatalf("pe-report.md missing the errors section:\n%s", md)
+	}
+}
+
+// TestHarnessPairLogAppendsAcrossInterruption pins incremental persistence:
+// pairs land as JSONL lines as they finish, an interruption preserves both the
+// previous file contents and the new completed pairs, and nothing truncates.
+func TestHarnessPairLogAppendsAcrossInterruption(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "out", "pe-pairs.jsonl")
+	oldPair := TaskPair{Name: "old"}
+	oldLine, _ := json.Marshal(oldPair)
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(logPath, append(oldLine, '\n'), 0o644); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+
+	taskset := TaskSet{Name: "ts", Tasks: []Task{
+		{Name: "one", Prompt: "p", Check: "true"},
+		{Name: "two", Prompt: "p", Check: "true"},
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	h := &Harness{
+		PairLogPath: logPath,
+		Exec: func(callCtx context.Context, in RunInput) (RunOutput, error) {
+			if strings.HasSuffix(in.SessionID, "-two") {
+				cancel() // simulated crash mid-eval
+			}
+			return RunOutput{Success: true}, callCtx.Err()
+		},
+		Now: func() time.Time { return time.Unix(0, 0) },
+	}
+	if _, err := h.Run(ctx, taskset, "", ""); err == nil {
+		t.Fatal("Run must surface the interruption")
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read pair log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("pair log lines = %d, want the seeded line plus new pairs:\n%s", len(lines), data)
+	}
+	if !strings.Contains(string(data), "old") {
+		t.Fatalf("previous contents were truncated: %s", data)
+	}
+	var firstNew TaskPair
+	if err := json.Unmarshal([]byte(lines[1]), &firstNew); err != nil || firstNew.Name != "one" {
+		t.Fatalf("line after seed = (%q, %v), want pair one appended", lines[1], err)
 	}
 }

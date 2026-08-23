@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -87,6 +88,14 @@ func runPairEvalCommand(args []string, stdout io.Writer, stderr io.Writer, deps 
 	defer stop()
 
 	harness := &eval.Harness{Exec: pairEvalRunFunc(deps, options.Model)}
+	if options.OutDir != "" {
+		// Create the out dir before the first pair so incremental persistence
+		// has somewhere to append from the start.
+		if err := os.MkdirAll(options.OutDir, 0o755); err != nil {
+			return writeAppError(stderr, "failed to create report dir: "+err.Error(), exitCrash)
+		}
+		harness.PairLogPath = filepath.Join(options.OutDir, "pe-pairs.jsonl")
+	}
 	report, err := harness.Run(ctx, taskset, options.Model, "")
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
@@ -156,8 +165,12 @@ func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
 
 		runCmd := exec.CommandContext(ctx, exe, args...)
 		runCmd.Dir = in.Cwd
-		if out, runErr := runCmd.CombinedOutput(); runErr != nil {
-			return eval.RunOutput{}, fmt.Errorf("exec run %s: %v: %s", in.SessionID, runErr, out)
+		out, runErr := runCmd.CombinedOutput()
+		if runErr != nil {
+			// The child failed (non-zero exit or cancellation). Its transcript
+			// still carries real spend: sum the stream-json usage records so a
+			// failed run's partial tokens count toward its arm's cost.
+			return eval.RunOutput{Success: false, Tokens: sumStreamJSONTokens(out)}, fmt.Errorf("exec run %s: %v: %s", in.SessionID, runErr, out)
 		}
 
 		checkCmd := exec.CommandContext(ctx, "/bin/sh", "-c", in.Check)
@@ -167,6 +180,26 @@ func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
 		tokens, interventions := collectTrace(ctx, deps, in.Cwd, in.SessionID)
 		return eval.RunOutput{Success: success, Tokens: tokens, Interventions: interventions}, nil
 	}
+}
+
+// sumStreamJSONTokens sums totalTokens across stream-json usage records in a
+// captured exec transcript. It is best-effort: unparseable lines are skipped,
+// and an empty transcript yields zero.
+func sumStreamJSONTokens(out []byte) int {
+	total := 0
+	for _, line := range strings.Split(string(out), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.Contains(trimmed, "\"type\":\"usage\"") {
+			continue
+		}
+		var record struct {
+			TotalTokens int `json:"totalTokens"`
+		}
+		if json.Unmarshal([]byte(trimmed), &record) == nil {
+			total += record.TotalTokens
+		}
+	}
+	return total
 }
 
 // collectTrace resolves the trace for a deterministic session id and returns
