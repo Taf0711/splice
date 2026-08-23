@@ -1229,3 +1229,23 @@ func TestPipelineMemoryStoreNilPath(t *testing.T) {
 		t.Fatal("nil *memd.Client must not become a non-nil MemoryStore interface")
 	}
 }
+
+// The sidebar header's done/total count must keep one stable display width
+// across the 9->10 crossing (zero-padded), like the strip header — a raw
+// %d/%d counter shifts the header text when done gains a digit.
+func TestPipelineSidebarHeaderCountStableAcrossPowerOfTen(t *testing.T) {
+	stages := make([]string, 10)
+	for index := range stages {
+		stages[index] = fmt.Sprintf("stage_%d", index)
+	}
+	var state pipelinePanelState
+	state.applyPlan(agent.PipelinePlanEvent{Stages: stages})
+	for index := 0; index < 9; index++ {
+		state.applyStageEvent(agent.StageEvent{Name: stages[index], Status: "completed", Progress: 100})
+	}
+
+	header := state.headerLineWithChip(60, "")
+	if got := plainRender(t, header); !strings.Contains(got, "09/10") {
+		t.Fatalf("sidebar header = %q, want zero-padded 09/10 counter", got)
+	}
+}

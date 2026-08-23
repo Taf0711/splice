@@ -294,7 +294,7 @@ func (p pipelinePresentation) headerLineWithChip(width int, chip string) string 
 	case p.allDone:
 		style = zeroTheme.green
 	}
-	return sidebarHeaderWithCount(label, fmt.Sprintf("%d/%d", p.done, p.total), style, width)
+	return sidebarHeaderWithCount(label, formatDoneTotal(p.done, p.total), style, width)
 }
 
 func (s pipelinePanelState) renderSection(width int, phase int) []string {
@@ -335,8 +335,7 @@ func (p pipelinePresentation) renderStripWithChip(width int, phase int, chip str
 	}
 	// Zero-pad the done counter to the total's digit width so the header never
 	// reflows mid-run (0/10 -> 10/10 keeps one stable display width).
-	totalWidth := len(fmt.Sprint(p.total))
-	count := fmt.Sprintf("%0*d/%d", totalWidth, p.done, p.total)
+	count := formatDoneTotal(p.done, p.total)
 	header := label + " " + count
 
 	lines := make([]string, 0, 3)

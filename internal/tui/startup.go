@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"unicode/utf8"
 
@@ -254,6 +255,14 @@ func middleTruncate(value string, limit int) string {
 	front := keep / 2
 	back := keep - front
 	return string(runes[:front]) + "…" + string(runes[len(runes)-back:])
+}
+
+// formatDoneTotal renders a done/total progress counter zero-padded to the
+// total's digit width. A raw %d/%d counter reflows the line when done crosses a
+// power of ten (9/10 -> 10/10), shifting anything rendered after it; padding
+// keeps one stable display width for the counter's whole life.
+func formatDoneTotal(done int, total int) string {
+	return fmt.Sprintf("%0*d/%d", len(fmt.Sprint(total)), done, total)
 }
 
 func joinHeaderLine(left string, right string, width int) string {

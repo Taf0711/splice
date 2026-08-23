@@ -2239,3 +2239,28 @@ func indexOfString(slice []string, s string) int {
 	}
 	return -1
 }
+
+// The setup stage counter must keep one stable display width across the 9->10
+// crossing: the non-OAuth path with a custom-endpoint provider has exactly ten
+// stages, so "9/10" -> "10/10" happens on a real journey and a raw %d/%d
+// counter would reflow the centered progress line.
+func TestSetupProgressTextStableAcrossPowerOfTen(t *testing.T) {
+	m := newModel(t.Context(), Options{ModelName: "gpt-4"})
+	m.setup.oauthMode = false
+	custom := SetupProviderOption{ID: "custom-openai-compatible", Name: "Custom"}
+	m.setup.providers = []SetupProviderOption{custom}
+	m.setup.selected = 0
+
+	stages := m.setupStages()
+	if len(stages) != 10 {
+		t.Fatalf("setup stages = %d, want the ten-stage non-OAuth path for this test", len(stages))
+	}
+	m.setup.stage = stages[8]
+	if got := plainRender(t, m.setupProgressText()); !strings.Contains(got, "09/10") {
+		t.Fatalf("stage 9 progress = %q, want zero-padded 09/10", got)
+	}
+	m.setup.stage = stages[9]
+	if got := plainRender(t, m.setupProgressText()); !strings.Contains(got, "10/10") {
+		t.Fatalf("final stage progress = %q, want 10/10 at stable width", got)
+	}
+}

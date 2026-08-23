@@ -3795,7 +3795,7 @@ func (m model) workingPlanLine() string {
 			done++
 		}
 	}
-	text := fmt.Sprintf("· plan %d/%d", done, total)
+	text := "· plan " + formatDoneTotal(done, total)
 	if current := truncateStep(currentStepContent(m.plan.steps), 48); current != "" {
 		text += " · " + current
 	}
