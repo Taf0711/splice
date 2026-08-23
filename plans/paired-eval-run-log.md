@@ -90,3 +90,34 @@ days. The operational fix (rebuild + restart) restores both.
      self-announcing.
   2. Optional capability probe: client checks an endpoint or version field at
      startup and marks memory "degraded/no-trace-support".
+
+## Cycle 4 (run 4/5/6 series) — staging refinement landed; warm arm hits the cumulative wall
+
+Owner approved the staging slice, landed as 904c570: per-stage composed-input
+compaction at composition time (deterministic drop order, required content
+never touched, loud failure when required content alone overflows), and the
+light-tier code_writer raise 4000/8192 -> 20000/8192 derived from run-3
+transcripts. Two more instrument defects surfaced and were fixed mid-series:
+
+- 66bb4b9: with a working sidecar, traces store the RAW temp-dir path while
+  e54e1f4 queried only the resolved form — join missed in the opposite
+  direction. Lookup now tries raw first, then resolved.
+- 4f553e0: cold arms never write traces BY DESIGN (--memory off leaves the
+  memory client nil and the tracer is wired FROM that client). The runner now
+  falls back to summing captured stream-json usage records when the trace
+  join finds nothing, so both arms carry measured cost.
+
+Run 6 (dev @ 4f553e0, -run6 ids, gpt-5.6-sol): full telemetry both arms for
+the first time. Cold 8/12 succeeded (per-success cost measured, median ~5.5k
+tokens). Warm 0/12 — every run aborted on `abort_budget`, burning 526,734
+tokens total. Mechanical verdict "regression"; substantive reading: the
+light-tier budget counts CUMULATIVE input+output across all stage calls,
+while memory cost recurs on every consuming stage call. Compaction bounds
+each call's input; it cannot bound the sum over calls, so any multi-call
+warm run crosses the ~30.2k wall regardless of per-call trimming. The
+remaining levers are product decisions: what the trajectory rule counts
+(e.g. output-only vs total) or materially larger totals.
+
+Instrument state after cycle 4: telemetry complete and symmetric, checks
+deterministic, harness fault-tolerant with incremental persistence. The eval
+mechanics are sound; the budget policy is the open owner question.
