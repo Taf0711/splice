@@ -46,11 +46,11 @@ type Harness struct {
 	PairLogPath string
 }
 
-// Run materializes a fresh cold and warm arm copy PER TASK, runs every task
-// in both arms (each pair starts from the pristine fixture; no task observes
-// files written by an earlier task), aggregates, decides, and returns the
-// report. It never mutates the fixture source dir. A pair's copies are
-// removed only after that pair's result is persisted.
+// Run materializes one stable arm root per arm and resets both to pristine
+// fixture bytes before every task pair: the stable path preserves warm-memory
+// project identity while the byte reset keeps every pair independent. It
+// never mutates the fixture source dir and removes both roots when it
+// returns.
 func (h *Harness) Run(ctx context.Context, taskset TaskSet, model, provider string) (Report, error) {
 	if h.Exec == nil {
 		return Report{}, fmt.Errorf("harness has no Run function")
@@ -60,26 +60,33 @@ func (h *Harness) Run(ctx context.Context, taskset TaskSet, model, provider stri
 		now = time.Now
 	}
 
+	// One stable root per arm for the whole run: the stable path is the
+	// memory project identity (memoryProjectRoot falls back to the work dir),
+	// so per-task temp dirs would make every warm task a different project.
+	coldDir, err := materializeArm(taskset)
+	if err != nil {
+		return Report{}, fmt.Errorf("materialize cold arm: %w", err)
+	}
+	defer os.RemoveAll(coldDir) //nolint:errcheck
+	warmDir, err := materializeArm(taskset)
+	if err != nil {
+		os.RemoveAll(coldDir) //nolint:errcheck
+		return Report{}, fmt.Errorf("materialize warm arm: %w", err)
+	}
+	defer os.RemoveAll(warmDir) //nolint:errcheck
+
 	var cold, warm ArmStats
 	pairs := make([]TaskPair, 0, len(taskset.Tasks))
 	for _, task := range taskset.Tasks {
-		// Fresh copies per pair: a shared arm dir let task N's leftover edits
-		// leak into tasks N+1..N (run-7 forensics), so later tasks fought a
-		// mutated dependency they never saw.
-		coldDir, err := materializeArm(taskset)
-		if err != nil {
-			return Report{}, fmt.Errorf("materialize cold arm for %s: %w", task.Name, err)
+		// Reset both roots to pristine fixture bytes before every pair: task N's
+		// leftover edits must never leak into tasks N+1..N (run-7 forensics),
+		// while the stable paths keep warm-memory project identity constant.
+		if err := resetArm(coldDir, taskset); err != nil {
+			return Report{}, fmt.Errorf("reset cold arm for %s: %w", task.Name, err)
 		}
-		warmDir, err := materializeArm(taskset)
-		if err != nil {
-			os.RemoveAll(coldDir) //nolint:errcheck
-			return Report{}, fmt.Errorf("materialize warm arm for %s: %w", task.Name, err)
+		if err := resetArm(warmDir, taskset); err != nil {
+			return Report{}, fmt.Errorf("reset warm arm for %s: %w", task.Name, err)
 		}
-		cleanupArm := func() {
-			os.RemoveAll(coldDir) //nolint:errcheck
-			os.RemoveAll(warmDir) //nolint:errcheck
-		}
-		defer cleanupArm()
 
 		coldOut, coldErr := h.Exec(ctx, RunInput{SessionID: sessionID(taskset, "cold", task), Memory: "off", Prompt: task.Prompt, Cwd: coldDir, Check: task.Check})
 		warmOut, warmErr := h.Exec(ctx, RunInput{SessionID: sessionID(taskset, "warm", task), Memory: "on", Prompt: task.Prompt, Cwd: warmDir, Check: task.Check})
@@ -127,10 +134,6 @@ func (h *Harness) Run(ctx context.Context, taskset TaskSet, model, provider stri
 		if err := appendPairLog(h.PairLogPath, pair); err != nil {
 			return Report{}, fmt.Errorf("persist pair %s: %w", task.Name, err)
 		}
-		// The pair's result is durable: release its copies now. The deferred
-		// cleanupArm above only covers early-return paths between here and
-		// materialization; RemoveAll on a missing path is a no-op.
-		cleanupArm()
 	}
 
 	decision := Decide(DecisionInput{Pairs: len(taskset.Tasks), Cold: cold, Warm: warm})
@@ -157,30 +160,54 @@ func sessionID(taskset TaskSet, arm string, task Task) string {
 	return "eval-" + taskset.Name + "-" + arm + "-" + task.Name
 }
 
-// materializeArm copies the fixture into a fresh temp dir and runs setup.sh
-// once per copy. The source fixture is never mutated.
+// materializeArm creates a fresh arm root and populates it from the fixture.
 func materializeArm(taskset TaskSet) (string, error) {
 	dir, err := os.MkdirTemp("", "splice-eval-arm-")
 	if err != nil {
 		return "", err
 	}
+	if err := populateArm(dir, taskset); err != nil {
+		os.RemoveAll(dir) //nolint:errcheck
+		return "", err
+	}
+	return dir, nil
+}
+
+// resetArm restores an existing arm root to pristine fixture bytes without
+// changing its path: the path is the memory project identity, so reset must
+// swap contents in place. It empties the directory, re-copies the fixture,
+// and re-runs setup.sh when present.
+func resetArm(dir string, taskset TaskSet) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if err := os.RemoveAll(filepath.Join(dir, entry.Name())); err != nil {
+			return err
+		}
+	}
+	return populateArm(dir, taskset)
+}
+
+// populateArm copies the fixture into dir and runs setup.sh once. The source
+// fixture is never mutated.
+func populateArm(dir string, taskset TaskSet) error {
 	fixture := taskset.FixtureDir()
 	if info, err := os.Stat(fixture); err == nil && info.IsDir() {
 		if err := copyDir(fixture, dir); err != nil {
-			os.RemoveAll(dir) //nolint:errcheck
-			return "", err
+			return fmt.Errorf("copy fixture: %w", err)
 		}
 		setup := filepath.Join(dir, "setup.sh")
 		if info, err := os.Stat(setup); err == nil && !info.IsDir() {
 			cmd := exec.Command("/bin/sh", setup)
 			cmd.Dir = dir
 			if out, err := cmd.CombinedOutput(); err != nil {
-				os.RemoveAll(dir) //nolint:errcheck
-				return "", fmt.Errorf("fixture setup.sh: %v: %s", err, out)
+				return fmt.Errorf("fixture setup.sh: %v: %s", err, out)
 			}
 		}
 	}
-	return dir, nil
+	return nil
 }
 
 // copyDir recursively copies src into dst (dst must exist).

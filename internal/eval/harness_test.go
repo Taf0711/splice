@@ -56,13 +56,20 @@ func TestHarnessArmOrderingAndSessionID(t *testing.T) {
 		t.Fatalf("session ids = %q, %q", calls[2].SessionID, calls[3].SessionID)
 	}
 
-	// Every pair gets fresh copies: no cwd repeats anywhere in the run.
-	seen := map[string]string{}
+	// Stable arm identity: every cold task shares one root, every warm task
+	// shares another, and the roots stay distinct for the whole run. The
+	// stable path is the memory project identity, so it must not vary by task.
 	for _, c := range calls {
-		if prev, ok := seen[c.Cwd]; ok {
-			t.Fatalf("cwd %q reused by %s and %s", c.Cwd, prev, c.SessionID)
+		want := calls[0].Cwd
+		if c.Memory == "on" {
+			want = calls[1].Cwd
 		}
-		seen[c.Cwd] = c.SessionID
+		if c.Cwd != want {
+			t.Fatalf("%s cwd = %q, want stable %q", c.SessionID, c.Cwd, want)
+		}
+	}
+	if calls[0].Cwd == calls[1].Cwd {
+		t.Fatalf("cold and warm arms must be distinct roots")
 	}
 
 	if report.Pairs != 2 || report.Cold.Successes != 2 || report.Warm.Successes != 2 {
@@ -250,9 +257,11 @@ func TestHarnessMissingTelemetryWarnsNotSilentZeros(t *testing.T) {
 
 // TestHarnessPerTaskIsolationPinsPristineStart reproduces the run-7
 // contamination failure: a task that mutates its workspace must never leak
-// those edits into any later task's copy, in either arm. Task "a" rewrites
-// session.go; task "b" must read back the pristine fixture bytes in both
-// arms. It also pins cleanup: every pair's dirs are gone once Run returns.
+// those edits into any later task's view, in either arm, even though the arm
+// ROOT stays stable for memory identity. Task "a" rewrites session.go and
+// drops a marker; task "b" must read back pristine fixture bytes and see
+// setup.sh rerun after the reset. Roots exist during tasks and are gone once
+// Run returns.
 func TestHarnessPerTaskIsolationPinsPristineStart(t *testing.T) {
 	root := t.TempDir()
 	fixture := filepath.Join(root, "fixture")
@@ -262,6 +271,11 @@ func TestHarnessPerTaskIsolationPinsPristineStart(t *testing.T) {
 	pristine := "package main\n\n// pristine sentinel\n"
 	if err := os.WriteFile(filepath.Join(fixture, "session.go"), []byte(pristine), 0o644); err != nil {
 		t.Fatalf("write fixture: %v", err)
+	}
+	// setup.sh drops a fresh marker on every (re)population.
+	setup := "#!/bin/sh\ndate +%s%N > setup_marker\n"
+	if err := os.WriteFile(filepath.Join(fixture, "setup.sh"), []byte(setup), 0o755); err != nil {
+		t.Fatalf("write setup.sh: %v", err)
 	}
 	taskset := TaskSet{Name: filepath.Base(root), Dir: root, Tasks: []Task{
 		{Name: "a", Prompt: "mutate", Check: "true"},
@@ -287,6 +301,14 @@ func TestHarnessPerTaskIsolationPinsPristineStart(t *testing.T) {
 				} else if string(got) != pristine {
 					t.Errorf("task %s saw contaminated fixture: %q", in.SessionID, got)
 				}
+				// The reset wiped task a's marker and setup.sh reran: a stale
+				// copy without a fresh marker would fail here.
+				marker, err := os.ReadFile(filepath.Join(in.Cwd, "setup_marker"))
+				if err != nil {
+					t.Errorf("task %s: setup.sh did not rerun after reset: %v", in.SessionID, err)
+				} else if len(marker) == 0 {
+					t.Errorf("task %s: empty setup marker", in.SessionID)
+				}
 				bReads = append(bReads, string(got))
 			}
 			return RunOutput{Success: true}, nil
@@ -300,8 +322,7 @@ func TestHarnessPerTaskIsolationPinsPristineStart(t *testing.T) {
 		t.Fatalf("task b ran %d times, want 2", len(bReads))
 	}
 
-	// Cleanup after persistence: every materialized copy is gone once Run
-	// returns.
+	// Cleanup after Run: both stable roots are gone.
 	for _, cwd := range allCwds {
 		if _, err := os.Stat(cwd); !os.IsNotExist(err) {
 			t.Fatalf("arm copy %s survived the run", cwd)
