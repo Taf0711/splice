@@ -121,3 +121,31 @@ remaining levers are product decisions: what the trajectory rule counts
 Instrument state after cycle 4: telemetry complete and symmetric, checks
 deterministic, harness fault-tolerant with incremental persistence. The eval
 mechanics are sound; the budget policy is the open owner question.
+
+## Cycle 5 (run 7) — CONCLUSIVE: warm wins 43.2% fewer tokens
+
+Owner chose option (a): trajectory budgets gate GENERATION ONLY
+(71ba623). IterationState gained TokensGenerated (completion+reasoning);
+ruleTokenBudget compares it against TotalOutputBudget. Input volume never
+aborts: compaction bounds it per call, iteration caps bound call count,
+TokensConsumed stays in state and evidence lines so reporting keeps real
+total burn. Pins: input-only spend cannot abort; output crossing still
+yields ActionAbortBudget; projection keeps reporting input-inclusive totals.
+
+Result (-run7 ids, gpt-5.6-sol, 12 pairs, full telemetry):
+
+- Harness verdict: conclusive, warm wins 43.2% fewer tokens at equal
+  success (warm 6/12 vs cold 5/12; totals 136,519 vs 200,237).
+- Per-success median cost is near-parity: cold 5,119 vs warm 5,303
+  (+3.6%); the aggregate win comes from warm succeeding session-json-tags
+  (5,541 vs a 34,159-token cold abort) and failing cheaper on
+  snapshot-persistence (23,607 vs 56,449).
+- Abort count fell from 12 to 4, and every remaining abort is an honest
+  output-budget trip on the hardest tasks (token-auth-middleware trips in
+  both arms), not a wall.
+
+Reading: memory does not make light-tier tasks cheaper per success; it
+makes failures shorter and occasionally turns failures into successes.
+Single model, single machine, N=12, one run: treat the 43.2% as directional
+until repeated. Output budget is now the binding constraint for the top-end
+tasks in BOTH arms; any further raise is a separate calibrated decision.
