@@ -7,8 +7,18 @@ import (
 )
 
 // stageBudgets holds per-stage baseline budgets.
+//
+// Light-tier derivation (run 3 measured data, splice-eval-taskset-run3):
+// cold successes show prompt-in median 3.7k / p90 4.2k tokens per stage call;
+// warm runs that aborted showed prompt-in median 18.3k / p90 23.7k because
+// memory injection inflates composed input roughly 5x. InputMax 20000 sits
+// above the warm p90 so a legitimate memory payload survives compaction
+// instead of being stripped to nothing, while compaction (stage_input.go)
+// still trims runaway bundles deterministically. OutputMax stays at 8192:
+// successful-run output p90 is ~4.8k, so 8192 already carries ~1.7x headroom,
+// and output overflow remains the runaway-generation tripwire.
 func stageBudgets(tier schemas.PipelineTier) map[string]schemas.StageBudget {
-	codeWriterInput := 4_000
+	codeWriterInput := 20_000
 	codeWriterOutput := 8_192
 	if tier == schemas.TierTrivial {
 		codeWriterInput = 2_000

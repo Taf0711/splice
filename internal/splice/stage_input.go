@@ -1,0 +1,173 @@
+// stage_input.go enforces per-stage input budgets at composition time. When a
+// composed HarnessStageInput exceeds its stage's input allowance, optional
+// payload is dropped in a fixed priority order — weakest provenance first —
+// before the stage runs, so an over-large context degrades gracefully instead
+// of pre-charging the run's token budget toward an abort.
+//
+// Determinism contract: the same composed input always produces the same
+// compacted output. Drops happen one element at a time in a fixed order and
+// the measurement is re-run after every drop.
+
+package splice
+
+import (
+	"encoding/json"
+	"fmt"
+	"sort"
+
+	"github.com/Taf0711/splice/internal/splice/schemas"
+)
+
+// bytesPerTokenEstimate converts measured JSON bytes to an approximate token
+// count. The budget arithmetic is token-based; exact tokenization is neither
+// available nor needed for a bound, but the estimate must stay deterministic,
+// which a fixed ratio guarantees.
+const bytesPerTokenEstimate = 4
+
+// estimateStageInputTokens measures one composed stage input deterministically
+// as ceil(marshaled bytes / bytesPerTokenEstimate). A marshal failure returns
+// zero: the struct marshals by construction, and a zero estimate never
+// triggers compaction on its own.
+func estimateStageInputTokens(input schemas.HarnessStageInput) int {
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		return 0
+	}
+	return (len(encoded) + bytesPerTokenEstimate - 1) / bytesPerTokenEstimate
+}
+
+// inputAllowanceTokens is the per-stage input ceiling: the stage's own input
+// budget plus the tier reserve, mirroring how TotalInputBudget folds reserve
+// into its allowance.
+func inputAllowanceTokens(budget schemas.StageBudget, tier schemas.PipelineTier) int {
+	return budget.InputMax + reserveForTier(tier)
+}
+
+// compactStageInput trims optional payload from input until its estimated
+// token size fits the stage allowance. Drop order, weakest value first:
+//
+//  1. memory exemplars, last (lowest-rank) first;
+//  2. memory observations, last first;
+//  3. prior-stage summaries, oldest stage first;
+//  4. prior changed-file lists, oldest stage first;
+//  5. revision context.
+//
+// RequestIntent and AcceptanceFacts are required content and are never
+// dropped or truncated; if even the stripped input exceeds the allowance, the
+// caller gets a loud error naming the stage and both sizes rather than a
+// silently truncated prompt. The returned bool reports whether anything was
+// dropped, and note receives one deterministic summary line per drop step.
+func compactStageInput(stageName string, budget schemas.StageBudget, tier schemas.PipelineTier, input schemas.HarnessStageInput, note func(string)) (schemas.HarnessStageInput, bool, error) {
+	allowance := inputAllowanceTokens(budget, tier)
+	before := estimateStageInputTokens(input)
+	if before <= allowance {
+		return input, false, nil
+	}
+
+	dropExemplars := func() bool {
+		if input.MemoryBundle == nil || len(input.MemoryBundle.Exemplars) == 0 {
+			return false
+		}
+		last := len(input.MemoryBundle.Exemplars) - 1
+		input.MemoryBundle.Exemplars = input.MemoryBundle.Exemplars[:last]
+		return true
+	}
+	dropObservation := func() bool {
+		if input.MemoryBundle == nil || len(input.MemoryBundle.Observations) == 0 {
+			return false
+		}
+		last := len(input.MemoryBundle.Observations) - 1
+		input.MemoryBundle.Observations = input.MemoryBundle.Observations[:last]
+		return true
+	}
+	oldestSummaryStage := func() string {
+		stages := make([]string, 0, len(input.PriorSummaries))
+		for name := range input.PriorSummaries {
+			stages = append(stages, name)
+		}
+		if len(stages) == 0 {
+			return ""
+		}
+		sort.Strings(stages) // plan.Stages order equals execution order; lexical fallback keeps determinism when names tie
+		for _, seqName := range stageOrder(input.PipelineStages) {
+			for _, name := range stages {
+				if name == seqName {
+					return name
+				}
+			}
+		}
+		return stages[0]
+	}
+	dropOldestSummary := func() (string, bool) {
+		name := oldestSummaryStage()
+		if name == "" {
+			return "", false
+		}
+		delete(input.PriorSummaries, name)
+		return name, true
+	}
+	dropOldestChangedFiles := func() (string, bool) {
+		name := oldestSummaryStage()
+		if name == "" {
+			return "", false
+		}
+		delete(input.PriorChangedFiles, name)
+		return name, true
+	}
+	dropRevisionContext := func() bool {
+		if input.RevisionContext == nil {
+			return false
+		}
+		input.RevisionContext = nil
+		return true
+	}
+
+	compacted := false
+	after := before
+	for estimateStageInputTokens(input) > allowance {
+		switch {
+		case dropExemplars():
+			compacted = true
+			note(fmt.Sprintf("input compact: %s dropped one exemplar", stageName))
+		case dropObservation():
+			compacted = true
+			note(fmt.Sprintf("input compact: %s dropped one memory observation", stageName))
+		default:
+			if name, ok := dropOldestSummary(); ok {
+				compacted = true
+				note(fmt.Sprintf("input compact: %s dropped prior summary for %s", stageName, name))
+				continue
+			}
+			if name, ok := dropOldestChangedFiles(); ok {
+				compacted = true
+				note(fmt.Sprintf("input compact: %s dropped changed files for %s", stageName, name))
+				continue
+			}
+			if dropRevisionContext() {
+				compacted = true
+				note(fmt.Sprintf("input compact: %s dropped revision context", stageName))
+				continue
+			}
+			return input, compacted, fmt.Errorf(
+				"stage %s input overflow: estimated %d tokens exceed the %d-token allowance after dropping all optional payload; distilled intent and acceptance facts are never truncated",
+				stageName, estimateStageInputTokens(input), allowance)
+		}
+	}
+	after = estimateStageInputTokens(input)
+	if compacted && note != nil {
+		note(fmt.Sprintf("input compact: %s settled at ~%d tokens (was ~%d, allowance %d)", stageName, after, before, allowance))
+	}
+	return input, compacted, nil
+}
+
+// stageOrder returns the pipeline roster minus empty entries, preserving run
+// order so "oldest summary" means the earliest executed stage.
+func stageOrder(pipelineStages []string) []string {
+	out := make([]string, 0, len(pipelineStages))
+	for _, name := range pipelineStages {
+		if name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}

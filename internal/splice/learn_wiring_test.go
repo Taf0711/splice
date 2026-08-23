@@ -137,8 +137,11 @@ func TestRunAppliesLearnedBudgetsAboveFloor(t *testing.T) {
 			fitted = s.Budget
 		}
 	}
-	if fitted.InputMax != 6000 || fitted.OutputMax != 9000 {
-		t.Fatalf("embedded plan budget = %d/%d, want 6000/9000", fitted.InputMax, fitted.OutputMax)
+	// Corpus p80 input (6000) sits below half of the new 20000-token base, so
+	// the [0.5x, 2.0x] sanity clamp raises it to 10000; output 9000 > 8192
+	// passes unclamped.
+	if fitted.InputMax != 10000 || fitted.OutputMax != 9000 {
+		t.Fatalf("embedded plan budget = %d/%d, want 10000/9000 (input clamped to 0.5x of the 20000 base; output adopts the larger fit)", fitted.InputMax, fitted.OutputMax)
 	}
 	if trace.ToolFingerprint == "" || trace.TopologyHash == "" {
 		t.Fatalf("trace key fields empty: fingerprint=%q topology=%q", trace.ToolFingerprint, trace.TopologyHash)
@@ -159,7 +162,7 @@ func TestRunKeepsDefaultsBelowFloor(t *testing.T) {
 			budget = s.Budget
 		}
 	}
-	if budget.InputMax != 4000 || budget.OutputMax != 8192 {
-		t.Fatalf("embedded plan budget = %d/%d, want static default 4000/8192", budget.InputMax, budget.OutputMax)
+	if budget.InputMax != 20000 || budget.OutputMax != 8192 {
+		t.Fatalf("embedded plan budget = %d/%d, want static default 20000/8192", budget.InputMax, budget.OutputMax)
 	}
 }

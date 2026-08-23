@@ -743,6 +743,19 @@ func runPass(
 			}
 		}
 
+		// Staging refinement (owner-approved): a composed stage input over the
+		// stage's allowance compacts deterministically - weakest provenance
+		// dropped first, distilled intent and acceptance facts never touched -
+		// so oversized context degrades gracefully instead of pre-charging the
+		// run's token budget toward an abort.
+		compactedInput, _, cerr := compactStageInput(stageName, stage.Budget, plan.Tier, input, func(msg string) {
+			emitProgress(options, msg+"\n")
+		})
+		if cerr != nil {
+			return records, outputs, false, fmt.Errorf("stage %s: %w", stageName, cerr)
+		}
+		input = compactedInput
+
 		if err := input.Validate(); err != nil {
 			return records, outputs, false, fmt.Errorf("stage %s input: %w", stageName, err)
 		}
