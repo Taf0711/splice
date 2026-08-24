@@ -75,6 +75,9 @@ func (s MemorySnapshot) Validate(holdoutTaskIDs []string) error {
 			return fmt.Errorf("%s must be a sha256 hex digest", name)
 		}
 	}
+	if !s.Rekeyed && len(s.IDMap) > 0 {
+		return fmt.Errorf("id_map is present but snapshot is not marked rekeyed")
+	}
 	if s.Rekeyed && len(s.IDMap) == 0 {
 		return fmt.Errorf("rekeyed snapshot requires id_map")
 	}

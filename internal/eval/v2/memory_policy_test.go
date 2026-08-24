@@ -65,6 +65,12 @@ func TestMemorySnapshotAdversarialValidation(t *testing.T) {
 		})
 	}
 	badMap := base
+	badMap.IDMap = map[string]string{"old": "observation:one"}
+	if err := badMap.Validate(nil); err == nil || !strings.Contains(err.Error(), "not marked rekeyed") {
+		t.Fatalf("unmarked IDMap accepted: %v", err)
+	}
+	badMap = base
+	badMap.Rekeyed = true
 	badMap.IDMap = map[string]string{"old": "observation:one", "old-2": "observation:one"}
 	if err := badMap.Validate(nil); err == nil || !strings.Contains(err.Error(), "bijective") {
 		t.Fatalf("non-bijective IDMap accepted: %v", err)
