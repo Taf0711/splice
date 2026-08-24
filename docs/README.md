@@ -28,6 +28,11 @@ control. `splice exec` provides a typed pipeline for scripts and automation.
 - [Performance checks](PERFORMANCE.md)
 - [Offline agent evaluations](AGENT_EVALS.md)
 
+## Planned
+
+- [Knowledge-to-Contract layer](KNOWLEDGE_CONTRACTS.md): design brief for
+  turning project rules into deterministic, enforceable runtime contracts.
+
 ## Maintain a release
 
 - [npm wrapper smoke checklist](NPM_WRAPPER_SMOKE.md)
