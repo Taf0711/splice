@@ -25,6 +25,8 @@ func TestScanBuildsDeterministicWorkspaceSummary(t *testing.T) {
 	writeFile(t, root, "coverage/out.txt", "ignored")
 	writeFile(t, root, ".next/cache.js", "ignored")
 	writeFile(t, root, ".cache/blob", "ignored")
+	writeFile(t, root, ".pi/subagents/output.md", "ignored")
+	writeFile(t, root, ".pi-subagents/artifacts/transcript.jsonl", "ignored")
 
 	got, err := Scan(root, Options{MaxDepth: DefaultMaxDepth})
 	if err != nil {
@@ -135,7 +137,7 @@ func TestScanHonorsTraversalCaps(t *testing.T) {
 }
 
 func TestHelpersClassifySharedWorkspaceRules(t *testing.T) {
-	for _, name := range []string{".git", ".splice", ".cache", ".next", "node_modules", "vendor", "dist", "build", "coverage", ".worktrees"} {
+	for _, name := range []string{".git", ".splice", ".cache", ".next", ".pi", ".pi-subagents", "node_modules", "vendor", "dist", "build", "coverage", ".worktrees"} {
 		if !ShouldSkipDir(name) {
 			t.Fatalf("ShouldSkipDir(%q)=false want true", name)
 		}

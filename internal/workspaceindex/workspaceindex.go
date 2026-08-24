@@ -168,7 +168,7 @@ func HandleWalkError(cleanRoot string, current string, entry fs.DirEntry, walkEr
 
 func ShouldSkipDir(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case ".cache", ".git", ".next", ".worktrees", ".splice", "build", "coverage", "dist", "node_modules", "vendor":
+	case ".cache", ".git", ".next", ".pi", ".pi-subagents", ".worktrees", ".splice", "build", "coverage", "dist", "node_modules", "vendor":
 		return true
 	default:
 		return false
