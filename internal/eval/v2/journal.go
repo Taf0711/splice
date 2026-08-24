@@ -133,21 +133,31 @@ func DecodeTrialJournal(data []byte) (TrialJournal, error) {
 	return journal, nil
 }
 
-// MissingTrials returns scheduled identities absent from the journal in
-// canonical key order. It is the resume primitive for the future runner.
-func MissingTrials(j Journal, s Schedule) []TrialKey {
-	persisted := make(map[TrialKey]bool, len(j.Entries))
+// IncompleteTrials returns every scheduled identity whose latest journal
+// status is not completed. Scheduled and started entries reappear after a
+// crash so the future runner can choose retry or reconciliation explicitly.
+func IncompleteTrials(j Journal, s Schedule) []TrialKey {
+	completed := make(map[TrialKey]bool, len(j.Entries))
 	for _, entry := range j.Entries {
-		persisted[entry.Key] = true
-	}
-	missing := make([]TrialKey, 0, len(s.Trials))
-	for _, trial := range s.Trials {
-		if !persisted[trial.Key] {
-			missing = append(missing, trial.Key)
+		if entry.Status == string(JournalStatusCompleted) {
+			completed[entry.Key] = true
 		}
 	}
-	sort.Slice(missing, func(i, k int) bool {
-		return missing[i].String() < missing[k].String()
+	incomplete := make([]TrialKey, 0, len(s.Trials))
+	for _, trial := range s.Trials {
+		if !completed[trial.Key] {
+			incomplete = append(incomplete, trial.Key)
+		}
+	}
+	sort.Slice(incomplete, func(i, k int) bool {
+		return incomplete[i].String() < incomplete[k].String()
 	})
-	return missing
+	return incomplete
+}
+
+// MissingTrials is retained for compatibility. New resume callers must use
+// IncompleteTrials so crash-boundary states are not treated as completed.
+// Deprecated: use IncompleteTrials.
+func MissingTrials(j Journal, s Schedule) []TrialKey {
+	return IncompleteTrials(j, s)
 }

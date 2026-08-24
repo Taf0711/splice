@@ -828,9 +828,9 @@ func TestTrialJournalResumeAndCodec(t *testing.T) {
 			t.Fatalf("append scheduled entry %d: %v", i, err)
 		}
 	}
-	missingBefore := MissingTrials(journal, schedule)
-	if len(missingBefore) != len(schedule.Trials)-3 {
-		t.Fatalf("missing count = %d, want %d", len(missingBefore), len(schedule.Trials)-3)
+	incompleteBefore := IncompleteTrials(journal, schedule)
+	if len(incompleteBefore) != len(schedule.Trials) {
+		t.Fatalf("incomplete count after scheduled crash = %d, want %d", len(incompleteBefore), len(schedule.Trials))
 	}
 	if err := journal.Append(JournalEntry{Key: schedule.Trials[0].Key, PersistedAt: "2026-08-24T00:01:00Z", Status: "started"}); err != nil {
 		t.Fatalf("status advance failed: %v", err)
@@ -840,6 +840,9 @@ func TestTrialJournalResumeAndCodec(t *testing.T) {
 	}
 	if err := journal.Append(JournalEntry{Key: schedule.Trials[0].Key, PersistedAt: "2026-08-24T00:03:00Z", Status: "started"}); err != nil {
 		t.Fatalf("replayed status failed: %v", err)
+	}
+	if incomplete := IncompleteTrials(journal, schedule); len(incomplete) != len(schedule.Trials) {
+		t.Fatalf("incomplete count after started crash = %d, want %d", len(incomplete), len(schedule.Trials))
 	}
 
 	encoded, err := journal.Encode()
@@ -867,8 +870,8 @@ func TestTrialJournalResumeAndCodec(t *testing.T) {
 			t.Fatalf("append completed entry %s: %v", trial.Key.String(), err)
 		}
 	}
-	if missing := MissingTrials(journal, schedule); len(missing) != 0 {
-		t.Fatalf("completed journal has %d missing trials", len(missing))
+	if incomplete := IncompleteTrials(journal, schedule); len(incomplete) != 0 {
+		t.Fatalf("completed journal has %d incomplete trials", len(incomplete))
 	}
 	if err := journal.Validate(); err != nil {
 		t.Fatalf("completed journal failed validation: %v", err)
