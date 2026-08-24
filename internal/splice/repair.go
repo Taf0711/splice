@@ -347,6 +347,9 @@ func mergeRepairRecord(records *[]schemas.StageRecord, iteration int, stageName 
 		OutputSummary: &summary,
 		Confidence:    &output.Confidence,
 	}
+	if output.MemoryReview != nil {
+		rec.MemoryReviews = []schemas.MemoryReview{*output.MemoryReview}
+	}
 	if !modelFree {
 		applyStageUsage(&rec, output.Usage)
 	}

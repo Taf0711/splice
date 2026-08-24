@@ -298,15 +298,21 @@ func parseDispositionClaims(toolName string, collected *zeroruntime.CollectedStr
 	if tc == nil {
 		return nil, 0
 	}
-	var fields struct {
-		MemoryDisposition []json.RawMessage `json:"memory_disposition"`
-	}
+	var fields map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(tc.Arguments), &fields); err != nil {
 		return nil, 1
 	}
-	claims := make([]schemas.MemoryDisposition, 0, len(fields.MemoryDisposition))
+	rawDisposition, ok := fields["memory_disposition"]
+	if !ok || string(rawDisposition) == "null" {
+		return nil, 1
+	}
+	var rawClaims []json.RawMessage
+	if err := json.Unmarshal(rawDisposition, &rawClaims); err != nil {
+		return nil, 1
+	}
+	claims := make([]schemas.MemoryDisposition, 0, len(rawClaims))
 	issues := 0
-	for _, raw := range fields.MemoryDisposition {
+	for _, raw := range rawClaims {
 		var claim schemas.MemoryDisposition
 		if err := json.Unmarshal(raw, &claim); err != nil || claim.MemoryID == "" {
 			issues++

@@ -241,6 +241,9 @@ func (c CodeWriterInput) Validate() error {
 	if c.Language == "" {
 		return errors.New("language is required")
 	}
+	if err := validateSelectedMemoryItems(c.Memory); err != nil {
+		return fmt.Errorf("memory: %w", err)
+	}
 	return nil
 }
 
@@ -338,6 +341,9 @@ func (t TestGeneratorInput) Validate() error {
 	}
 	if t.Language == "" {
 		return errors.New("language is required")
+	}
+	if err := validateSelectedMemoryItems(t.Memory); err != nil {
+		return fmt.Errorf("memory: %w", err)
 	}
 	return nil
 }

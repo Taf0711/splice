@@ -85,23 +85,33 @@ func compactStageInput(stageName string, budget schemas.StageBudget, tier schema
 		input.MemoryBundle.Observations = input.MemoryBundle.Observations[:last]
 		return true
 	}
-	oldestSummaryStage := func() string {
-		stages := make([]string, 0, len(input.PriorSummaries))
-		for name := range input.PriorSummaries {
-			stages = append(stages, name)
-		}
-		if len(stages) == 0 {
+	oldestStage := func(names []string) string {
+		if len(names) == 0 {
 			return ""
 		}
-		sort.Strings(stages) // plan.Stages order equals execution order; lexical fallback keeps determinism when names tie
+		sort.Strings(names) // lexical fallback keeps determinism for keys outside the plan roster
 		for _, seqName := range stageOrder(input.PipelineStages) {
-			for _, name := range stages {
+			for _, name := range names {
 				if name == seqName {
 					return name
 				}
 			}
 		}
-		return stages[0]
+		return names[0]
+	}
+	oldestSummaryStage := func() string {
+		names := make([]string, 0, len(input.PriorSummaries))
+		for name := range input.PriorSummaries {
+			names = append(names, name)
+		}
+		return oldestStage(names)
+	}
+	oldestChangedFilesStage := func() string {
+		names := make([]string, 0, len(input.PriorChangedFiles))
+		for name := range input.PriorChangedFiles {
+			names = append(names, name)
+		}
+		return oldestStage(names)
 	}
 	dropOldestSummary := func() (string, bool) {
 		name := oldestSummaryStage()
@@ -112,7 +122,7 @@ func compactStageInput(stageName string, budget schemas.StageBudget, tier schema
 		return name, true
 	}
 	dropOldestChangedFiles := func() (string, bool) {
-		name := oldestSummaryStage()
+		name := oldestChangedFilesStage()
 		if name == "" {
 			return "", false
 		}

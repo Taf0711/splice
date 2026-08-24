@@ -41,6 +41,39 @@ func TestCodeWriterOutputValidation(t *testing.T) {
 	}
 }
 
+func TestReasoningStageInputsValidateSelectedMemory(t *testing.T) {
+	item := SelectedMemory{
+		ID: "observation:1", Title: "lesson", Content: "use table tests",
+		MemoryType: "lesson", Scope: MemoryScopeGlobal,
+	}
+	tests := []struct {
+		name     string
+		validate func([]SelectedMemory) error
+	}{
+		{name: "code writer", validate: func(memory []SelectedMemory) error {
+			return (CodeWriterInput{Intent: "add x", Language: "go", Memory: memory}).Validate()
+		}},
+		{name: "test generator", validate: func(memory []SelectedMemory) error {
+			return (TestGeneratorInput{Intent: "test x", Language: "go", Memory: memory}).Validate()
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.validate([]SelectedMemory{item}); err != nil {
+				t.Fatalf("valid memory: %v", err)
+			}
+			if err := tt.validate([]SelectedMemory{item, item}); err == nil || !strings.Contains(err.Error(), "duplicate memory id") {
+				t.Fatalf("duplicate memory error = %v", err)
+			}
+			invalid := item
+			invalid.ID = "observation:0"
+			if err := tt.validate([]SelectedMemory{invalid}); err == nil || !strings.Contains(err.Error(), "positive decimal") {
+				t.Fatalf("invalid memory id error = %v", err)
+			}
+		})
+	}
+}
+
 func TestVerificationReportValidation(t *testing.T) {
 	line := 5
 	fp := VerificationFingerprint("go_syntax", "GO_SYNTAX", "a.go", &line, "bad")

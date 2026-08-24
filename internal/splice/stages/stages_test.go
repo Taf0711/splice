@@ -546,6 +546,7 @@ func TestCodeWriterRunIncludesMemoryInPayload(t *testing.T) {
 	bundle := &schemas.MemoryBundle{
 		RequestingAgent: "code_writer",
 		Observations: []schemas.MemoryObservation{{
+			ID:         1,
 			Title:      "Use gofmt",
 			Content:    "Run gofmt on all generated files.",
 			MemoryType: "decision",

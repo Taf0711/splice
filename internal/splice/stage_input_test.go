@@ -139,6 +139,28 @@ func TestCompactionIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestCompactionDropsChangedFilesWithoutMatchingSummary(t *testing.T) {
+	input := compactTestInput()
+	input.PipelineStages = []string{"code_writer", "test_runner"}
+	input.PriorChangedFiles = map[string][]string{
+		"test_runner": {strings.Repeat("very-long-path", 2000)},
+	}
+
+	var notes []string
+	got, compacted, err := compactStageInput("code_writer", schemas.StageBudget{InputMax: 1, OutputMax: 1}, schemas.TierTrivial, input, func(msg string) {
+		notes = append(notes, msg)
+	})
+	if err != nil {
+		t.Fatalf("changed files are optional and must be droppable without a summary: %v", err)
+	}
+	if !compacted || len(got.PriorChangedFiles) != 0 {
+		t.Fatalf("compacted=%v changed_files=%v, want changed files dropped", compacted, got.PriorChangedFiles)
+	}
+	if !strings.Contains(strings.Join(notes, "\n"), "dropped changed files for test_runner") {
+		t.Fatalf("notes = %v, want changed-files drop", notes)
+	}
+}
+
 // TestOutputOverflowStillAborts pins behavior (3): output overflow stays fatal.
 // The trajectory token-budget rule gates on generated tokens, so an
 // output-side overrun produces ActionAbortBudget even though input volume no

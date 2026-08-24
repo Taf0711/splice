@@ -7,6 +7,7 @@ package memoryreason
 
 import (
 	"path/filepath"
+	"strconv"
 
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
@@ -32,11 +33,6 @@ type AdmissionCounts struct {
 	OverLimit    int
 }
 
-// Total returns the number of excluded items.
-func (c AdmissionCounts) Total() int {
-	return c.Invalid + c.ReviewDue + c.WrongProject + c.Duplicate + c.OverLimit
-}
-
 // AdmissionResult contains only prompt-eligible evidence in incoming order.
 type AdmissionResult struct {
 	Bundle   *schemas.MemoryBundle
@@ -48,7 +44,7 @@ func StableID(obs schemas.MemoryObservation) string {
 	if obs.ID <= 0 {
 		return ""
 	}
-	return "observation:" + itoa(obs.ID)
+	return "observation:" + strconv.FormatInt(obs.ID, 10)
 }
 
 // Admit applies deterministic metadata policy to a retrieved bundle and
@@ -212,20 +208,4 @@ func truncateRunes(s string, max int) string {
 		return s
 	}
 	return string(runes[:max]) + "..."
-}
-
-// itoa avoids strconv import churn in this tiny package while staying exact
-// for positive decimal ids.
-func itoa(n int64) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[i:])
 }

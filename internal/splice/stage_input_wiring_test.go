@@ -139,6 +139,17 @@ func TestMergeRepairRecordAppendsInvocationReviews(t *testing.T) {
 	}
 }
 
+func TestMergeRepairRecordKeepsReviewWhenInitialRecordIsMissing(t *testing.T) {
+	review := &schemas.MemoryReview{Items: []schemas.MemoryDisposition{
+		{MemoryID: "observation:1", Action: schemas.MemoryActionApplied, Reason: schemas.MemoryReasonRelevant},
+	}}
+	var records []schemas.StageRecord
+	merged := mergeRepairRecord(&records, 1, "code_writer", schemas.HarnessStageOutput{MemoryReview: review}, false)
+	if len(merged.MemoryReviews) != 1 || merged.MemoryReviews[0].Items[0].MemoryID != "observation:1" {
+		t.Fatalf("fallback record lost invocation review: %+v", merged.MemoryReviews)
+	}
+}
+
 // TestRegistryMemoryConsumerPairing pins the producer/consumer seam over the
 // real registry: every registered stage that declares ConsumesMemory must be
 // one of the stages wired through prepareStageInput with review tracing. A
@@ -190,6 +201,69 @@ func (p *memoryScriptedProvider) StreamCompletion(ctx context.Context, request z
 	}
 	close(ch)
 	return ch, nil
+}
+
+type memoryRepairTestRunner struct{ calls int }
+
+func (*memoryRepairTestRunner) Capabilities() stages.Capabilities {
+	return stages.Capabilities{ModelFree: true}
+}
+
+func (s *memoryRepairTestRunner) Run(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+	s.calls++
+	status := "failed"
+	if s.calls > 1 {
+		status = "passed"
+	}
+	return repairTestResults(status), nil
+}
+
+func TestRepairReentryRetrievesAndTracesEachMemoryInvocation(t *testing.T) {
+	workDir := t.TempDir()
+	observation := obsWithID(8, workDir, "use the repository helper")
+	store := &stubStore{bundle: schemas.MemoryBundle{
+		RequestingAgent: "code_writer",
+		Observations:    []schemas.MemoryObservation{observation},
+	}}
+	provider := &memoryScriptedProvider{claims: []schemas.MemoryDisposition{{
+		MemoryID: "observation:8", Action: schemas.MemoryActionApplied, Reason: schemas.MemoryReasonRelevant,
+	}}}
+	fakeRunner := ToolRunnerFunc(func(context.Context, string, map[string]any) (ToolResult, error) {
+		return ToolResult{OK: true}, nil
+	})
+	plan := repairTestPlan()
+	tr := newRunTraceAccumulator(nil, "repair-memory", "session", workDir, plan, "active", nil)
+	testRunner := &memoryRepairTestRunner{}
+
+	records, _, completed, err := runPass(context.Background(), "repair-memory", 1, plan,
+		stageRegistry{"code_writer": stages.CodeWriter{}, "test_runner": testRunner},
+		provider, PipelineConfigFromAgentOptions(agent.Options{}), workDir, fakeRunner, time.Time{}, nil, store, tr)
+	if err != nil || !completed {
+		t.Fatalf("completed=%v err=%v records=%+v", completed, err, records)
+	}
+	if len(store.queries) != 2 {
+		t.Fatalf("memory searches = %d, want initial writer plus repair writer", len(store.queries))
+	}
+	var writer schemas.StageRecord
+	for _, record := range records {
+		if record.Name == "code_writer" {
+			writer = record
+			break
+		}
+	}
+	if len(writer.MemoryReviews) != 2 {
+		t.Fatalf("writer reviews = %+v, want initial plus repair", writer.MemoryReviews)
+	}
+	for i, review := range writer.MemoryReviews {
+		if len(review.Items) != 1 || review.Items[0].MemoryID != "observation:8" {
+			t.Fatalf("review %d = %+v", i, review)
+		}
+	}
+	meta := tr.stages[stageKey{"code_writer", 1}]
+	wantChars := 2 * (len(observation.Title) + len(observation.Content))
+	if meta.MemoryItems != 2 || meta.MemoryChars != wantChars || tr.memoryItems != 2 || tr.memoryChars != wantChars {
+		t.Fatalf("memory counters: meta=%+v total_items=%d total_chars=%d, want two invocations and %d chars", meta, tr.memoryItems, tr.memoryChars, wantChars)
+	}
 }
 
 // TestWarmRunTracesNormalizedMemoryReview is the mock-provider integration:
@@ -273,8 +347,8 @@ func TestWarmRunWithoutDispositionsStillSucceeds(t *testing.T) {
 		t.Fatalf("completed=%v records=%#v err=%v", completed, records, err)
 	}
 	reviews := records[0].MemoryReviews
-	if len(reviews) != 1 || len(reviews[0].Items) != 1 {
-		t.Fatalf("reviews = %+v", reviews)
+	if len(reviews) != 1 || len(reviews[0].Items) != 1 || reviews[0].InvalidClaims != 1 {
+		t.Fatalf("reviews = %+v, want one missing-array issue and one synthesized item", reviews)
 	}
 	item := reviews[0].Items[0]
 	if item.MemoryID != "observation:4" || item.Action != schemas.MemoryActionUnreported || item.Reason != schemas.MemoryReasonMissing {

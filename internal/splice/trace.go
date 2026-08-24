@@ -91,14 +91,16 @@ func (tr *runTraceAccumulator) recordHistory(state schemas.IterationState) {
 func (tr *runTraceAccumulator) recordMemory(stage string, iteration int, bundle schemas.MemoryBundle) {
 	key := stageKey{stage, iteration}
 	meta := tr.stages[key]
-	meta.MemoryItems = len(bundle.Observations)
-	meta.ExemplarItems = len(bundle.Exemplars)
+	meta.MemoryItems += len(bundle.Observations)
+	meta.ExemplarItems += len(bundle.Exemplars)
+	invocationChars := 0
 	for _, obs := range bundle.Observations {
-		meta.MemoryChars += len(obs.Title) + len(obs.Content)
+		invocationChars += len(obs.Title) + len(obs.Content)
 	}
+	meta.MemoryChars += invocationChars
 	tr.stages[key] = meta
 	tr.memoryItems += len(bundle.Observations)
-	tr.memoryChars += meta.MemoryChars
+	tr.memoryChars += invocationChars
 }
 
 func (tr *runTraceAccumulator) recordContext(stage string, iteration int, bundle schemas.ContextBundle) {
