@@ -101,10 +101,23 @@ func TestSelectionAuditValidationAndStableHash(t *testing.T) {
 	if err := audit.ValidateFor([]TaskSpec{{ID: "task-a"}, {ID: "task-b"}}); err != nil {
 		t.Fatalf("ValidateFor: %v", err)
 	}
-	hashOne := AuditSHA256(audit)
+	if err := audit.CompleteFor([]TaskSpec{{ID: "task-a"}, {ID: "task-b"}, {ID: "task-c"}}); err == nil || !strings.Contains(err.Error(), "task set") {
+		t.Fatalf("incomplete audit task set accepted: %v", err)
+	}
+	hashOne, err := AuditSHA256(audit)
+	if err != nil {
+		t.Fatalf("AuditSHA256: %v", err)
+	}
 	reordered := SelectionAudit{Tasks: []SelectionAuditEntry{audit.Tasks[1], audit.Tasks[0]}}
-	if hashOne != AuditSHA256(reordered) {
-		t.Fatalf("audit hash changed with task order: %s != %s", hashOne, AuditSHA256(reordered))
+	hashTwo, err := AuditSHA256(reordered)
+	if err != nil {
+		t.Fatalf("AuditSHA256 reordered: %v", err)
+	}
+	if hashOne != hashTwo {
+		t.Fatalf("audit hash changed with task order: %s != %s", hashOne, hashTwo)
+	}
+	if _, err := AuditSHA256(SelectionAudit{Tasks: []SelectionAuditEntry{{TaskID: ""}}}); err == nil {
+		t.Fatal("invalid audit hash unexpectedly succeeded")
 	}
 	badMiss := audit
 	badMiss.Tasks = append([]SelectionAuditEntry(nil), audit.Tasks...)

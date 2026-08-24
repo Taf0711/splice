@@ -46,14 +46,23 @@ func (a SelectionAudit) Validate() error {
 	return nil
 }
 
-// ValidateFor checks audit task IDs against the locked manifest task set.
-func (a SelectionAudit) ValidateFor(tasks []TaskSpec) error {
+// CompleteFor requires the audit task set to equal the manifest task set.
+func (a SelectionAudit) CompleteFor(tasks []TaskSpec) error {
 	if err := a.Validate(); err != nil {
 		return err
 	}
 	known := make(map[string]bool, len(tasks))
 	for _, task := range tasks {
+		if task.ID == "" {
+			return fmt.Errorf("manifest task set contains an empty task ID")
+		}
+		if known[task.ID] {
+			return fmt.Errorf("manifest task set contains duplicate task ID %q", task.ID)
+		}
 		known[task.ID] = true
+	}
+	if len(a.Tasks) != len(known) {
+		return fmt.Errorf("selection audit task set has %d entries, manifest has %d", len(a.Tasks), len(known))
 	}
 	for _, entry := range a.Tasks {
 		if !known[entry.TaskID] {
@@ -63,14 +72,22 @@ func (a SelectionAudit) ValidateFor(tasks []TaskSpec) error {
 	return nil
 }
 
-// AuditSHA256 returns the SHA-256 hash over canonical audit JSON.
-func AuditSHA256(a SelectionAudit) string {
+// ValidateFor checks audit task IDs against the locked manifest task set.
+func (a SelectionAudit) ValidateFor(tasks []TaskSpec) error {
+	return a.CompleteFor(tasks)
+}
+
+// AuditSHA256 returns the SHA-256 hash over canonical valid audit JSON.
+func AuditSHA256(a SelectionAudit) (string, error) {
+	if err := a.Validate(); err != nil {
+		return "", fmt.Errorf("selection audit: %w", err)
+	}
 	data, err := json.Marshal(a.canonical())
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("encode selection audit: %w", err)
 	}
 	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // Encode returns canonical immutable audit JSON.
