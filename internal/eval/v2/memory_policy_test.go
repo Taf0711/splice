@@ -49,9 +49,12 @@ func TestMemorySnapshotAdversarialValidation(t *testing.T) {
 	}{
 		{"duplicate delivered ID", func(s *MemorySnapshot) { s.Items[1].DeliveredID = s.Items[0].DeliveredID }, "duplicate delivered_id"},
 		{"bad content hash", func(s *MemorySnapshot) { s.Items[0].ContentSHA256 = "bad" }, "content_sha256"},
-		{"holdout leakage", func(s *MemorySnapshot) { s.Items[0].SourceTaskID = "holdout-task" }, "holdout"},
+		{"holdout leakage", func(s *MemorySnapshot) {
+			s.Items[0].SourceTaskID = "holdout-task"
+			s.Items[0].Provenance.SourceTaskID = "holdout-task"
+		}, "holdout"},
 		{"bad pool tag", func(s *MemorySnapshot) { s.Items[0].PoolMembership = []string{"hidden"} }, "pool_membership"},
-		{"hidden answer provenance", func(s *MemorySnapshot) { s.Items[0].Provenance = "reference_solution: secret" }, "hidden-answer"},
+		{"mismatched provenance", func(s *MemorySnapshot) { s.Items[0].Provenance.SourceTaskID = "other-task" }, "does not match"},
 		{"rekeyed without map", func(s *MemorySnapshot) { s.Rekeyed = true; s.IDMap = nil }, "rekeyed"},
 	}
 	for _, tc := range cases {
@@ -192,8 +195,8 @@ func testMemorySnapshot(t *testing.T) MemorySnapshot {
 	snapshot := MemorySnapshot{
 		ManifestJSONSHA256: hash, CorpusProvenanceSHA256: hash, AdmissionPolicySHA256: hash, SelectorSHA256: hash,
 		Items: []SnapshotItem{
-			{DeliveredID: "observation:one", ContentSHA256: hash, Kind: SnapshotKindObservation, SourceTaskID: "task-a", RepositoryClass: "go", CreatedAtRFC3339: "2026-08-24T12:00:00Z", FreshnessLabel: FreshnessCurrent, Provenance: "source=task-a", PoolMembership: []string{"relevant"}},
-			{DeliveredID: "exemplar:two", ContentSHA256: hash, Kind: SnapshotKindExemplar, SourceTaskID: "task-b", RepositoryClass: "go", CreatedAtRFC3339: "2026-08-24T12:00:01Z", FreshnessLabel: FreshnessStale, Provenance: "source=task-b", PoolMembership: []string{"placebo"}},
+			{DeliveredID: "observation:one", ContentSHA256: hash, Kind: SnapshotKindObservation, SourceTaskID: "task-a", RepositoryClass: "go", CreatedAtRFC3339: "2026-08-24T12:00:00Z", FreshnessLabel: FreshnessCurrent, Provenance: Provenance{SourceTaskID: "task-a", RepositoryClass: "go", SourceCommitSHA256: hash, AdmissionRecordSHA256: hash}, PoolMembership: []string{"relevant"}},
+			{DeliveredID: "exemplar:two", ContentSHA256: hash, Kind: SnapshotKindExemplar, SourceTaskID: "task-b", RepositoryClass: "go", CreatedAtRFC3339: "2026-08-24T12:00:01Z", FreshnessLabel: FreshnessStale, Provenance: Provenance{SourceTaskID: "task-b", RepositoryClass: "go", SourceCommitSHA256: hash, AdmissionRecordSHA256: hash}, PoolMembership: []string{"placebo"}},
 		},
 	}
 	snapshot.SnapshotSHA256 = SnapshotHash(snapshot)

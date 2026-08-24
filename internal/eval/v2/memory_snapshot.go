@@ -27,6 +27,29 @@ const (
 	FreshnessConflict FreshnessLabel = "conflict"
 )
 
+// Provenance is structured admission metadata. It has no free-form content
+// field, so hidden answers cannot enter through an opaque provenance string.
+type Provenance struct {
+	SourceTaskID          string `json:"source_task_id"`
+	RepositoryClass       string `json:"repository_class"`
+	SourceCommitSHA256    string `json:"source_commit_sha256"`
+	AdmissionRecordSHA256 string `json:"admission_record_sha256"`
+}
+
+// Validate checks structural provenance metadata.
+func (p Provenance) Validate() error {
+	if p.SourceTaskID == "" || p.RepositoryClass == "" {
+		return fmt.Errorf("provenance needs source_task_id and repository_class")
+	}
+	if !validHash(p.SourceCommitSHA256) {
+		return fmt.Errorf("provenance source_commit_sha256 must be a sha256 hex digest")
+	}
+	if !validHash(p.AdmissionRecordSHA256) {
+		return fmt.Errorf("provenance admission_record_sha256 must be a sha256 hex digest")
+	}
+	return nil
+}
+
 // SnapshotItem is one immutable delivered memory item. Provenance is metadata
 // only; the actual corpus content arrives in a later corpus checkpoint.
 type SnapshotItem struct {
@@ -37,7 +60,7 @@ type SnapshotItem struct {
 	RepositoryClass  string         `json:"repository_class"`
 	CreatedAtRFC3339 string         `json:"created_at_rfc3339"`
 	FreshnessLabel   FreshnessLabel `json:"freshness_label"`
-	Provenance       string         `json:"provenance"`
+	Provenance       Provenance     `json:"provenance"`
 	PoolMembership   []string       `json:"pool_membership"`
 }
 
@@ -130,6 +153,12 @@ func (i SnapshotItem) Validate() error {
 	if i.SourceTaskID == "" || i.RepositoryClass == "" {
 		return fmt.Errorf("source_task_id and repository_class are required")
 	}
+	if err := i.Provenance.Validate(); err != nil {
+		return fmt.Errorf("provenance: %w", err)
+	}
+	if i.Provenance.SourceTaskID != i.SourceTaskID || i.Provenance.RepositoryClass != i.RepositoryClass {
+		return fmt.Errorf("provenance source identity does not match snapshot item")
+	}
 	if _, err := time.Parse(time.RFC3339, i.CreatedAtRFC3339); err != nil {
 		return fmt.Errorf("created_at_rfc3339 must be RFC3339: %w", err)
 	}
@@ -152,12 +181,6 @@ func (i SnapshotItem) Validate() error {
 			return fmt.Errorf("duplicate pool_membership %q", pool)
 		}
 		seenPools[pool] = true
-	}
-	provenance := strings.ToLower(i.Provenance)
-	for _, forbidden := range []string{"answer", "solution", "reference_solution", "golden"} {
-		if strings.Contains(provenance, forbidden) {
-			return fmt.Errorf("provenance contains hidden-answer marker %q", forbidden)
-		}
 	}
 	return nil
 }
