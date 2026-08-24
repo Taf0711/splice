@@ -1,7 +1,9 @@
 package v2
 
 import (
+	"encoding/json"
 	"math"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -734,5 +736,173 @@ func TestManifestTaskHashPairing(t *testing.T) {
 	err := m.ValidateLocked()
 	if err == nil || !strings.Contains(err.Error(), "no entry for task task-b") {
 		t.Fatalf("err = %v, want missing task-b pairing", err)
+	}
+}
+
+func TestGenerateSchedule(t *testing.T) {
+	p := validProtocol()
+	tasks := []string{"task-a", "task-b", "task-c", "task-d"}
+
+	first, err := GenerateSchedule(p, tasks)
+	if err != nil {
+		t.Fatalf("GenerateSchedule returned error: %v", err)
+	}
+	if err := first.CompleteFor(p, tasks); err != nil {
+		t.Fatalf("generated schedule is incomplete: %v", err)
+	}
+	second, err := GenerateSchedule(p, tasks)
+	if err != nil {
+		t.Fatalf("repeat GenerateSchedule returned error: %v", err)
+	}
+	if !reflect.DeepEqual(first, second) {
+		t.Fatal("equal inputs produced different schedules")
+	}
+
+	for repetition := 1; repetition <= p.Repetitions; repetition++ {
+		blocks := make(map[int]map[string]bool)
+		for _, trial := range first.Trials {
+			if trial.Key.RepetitionID != repetition {
+				continue
+			}
+			if blocks[trial.Key.EnvironmentBlock] == nil {
+				blocks[trial.Key.EnvironmentBlock] = make(map[string]bool)
+			}
+			if blocks[trial.Key.EnvironmentBlock][trial.Key.Arm] {
+				t.Fatalf("repetition %d block %d repeats arm %q", repetition, trial.Key.EnvironmentBlock, trial.Key.Arm)
+			}
+			blocks[trial.Key.EnvironmentBlock][trial.Key.Arm] = true
+		}
+		for block, arms := range blocks {
+			if len(arms) != len(p.Arms) {
+				t.Fatalf("repetition %d block %d has %d arms, want %d", repetition, block, len(arms), len(p.Arms))
+			}
+		}
+	}
+
+	changedSeed := p
+	changedSeed.Seed++
+	third, err := GenerateSchedule(changedSeed, tasks)
+	if err != nil {
+		t.Fatalf("changed-seed GenerateSchedule returned error: %v", err)
+	}
+	if reflect.DeepEqual(first, third) {
+		t.Fatal("changed seed produced the same schedule")
+	}
+	changedOrder, err := GenerateSchedule(p, []string{"task-d", "task-b", "task-c", "task-a"})
+	if err != nil {
+		t.Fatalf("changed-order GenerateSchedule returned error: %v", err)
+	}
+	if reflect.DeepEqual(first, changedOrder) {
+		t.Fatal("changed task order produced the same schedule")
+	}
+}
+
+func TestGenerateScheduleRejectsTaskIDs(t *testing.T) {
+	p := validProtocol()
+	for _, tc := range []struct {
+		name    string
+		taskIDs []string
+		want    string
+	}{
+		{name: "empty", taskIDs: []string{"task-a", ""}, want: "empty"},
+		{name: "duplicate", taskIDs: []string{"task-a", "task-a"}, want: "duplicates"},
+		{name: "arm collision", taskIDs: []string{ArmEmptyControl}, want: "collides"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := GenerateSchedule(p, tc.taskIDs); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestTrialJournalResumeAndCodec(t *testing.T) {
+	p := validProtocol()
+	schedule, err := GenerateSchedule(p, []string{"task-a", "task-b"})
+	if err != nil {
+		t.Fatalf("GenerateSchedule returned error: %v", err)
+	}
+	var journal TrialJournal
+	for i, trial := range schedule.Trials[:3] {
+		if err := journal.Append(JournalEntry{Key: trial.Key, PersistedAt: "2026-08-24T00:00:00Z", Status: "scheduled"}); err != nil {
+			t.Fatalf("append scheduled entry %d: %v", i, err)
+		}
+	}
+	missingBefore := MissingTrials(journal, schedule)
+	if len(missingBefore) != len(schedule.Trials)-3 {
+		t.Fatalf("missing count = %d, want %d", len(missingBefore), len(schedule.Trials)-3)
+	}
+	if err := journal.Append(JournalEntry{Key: schedule.Trials[0].Key, PersistedAt: "2026-08-24T00:01:00Z", Status: "started"}); err != nil {
+		t.Fatalf("status advance failed: %v", err)
+	}
+	if err := journal.Append(JournalEntry{Key: schedule.Trials[0].Key, PersistedAt: "2026-08-24T00:02:00Z", Status: "scheduled"}); err == nil || !strings.Contains(err.Error(), "regression") {
+		t.Fatalf("status regression error = %v", err)
+	}
+	if err := journal.Append(JournalEntry{Key: schedule.Trials[0].Key, PersistedAt: "2026-08-24T00:03:00Z", Status: "started"}); err != nil {
+		t.Fatalf("replayed status failed: %v", err)
+	}
+
+	encoded, err := journal.Encode()
+	if err != nil {
+		t.Fatalf("journal Encode returned error: %v", err)
+	}
+	decoded, err := DecodeTrialJournal(encoded)
+	if err != nil {
+		t.Fatalf("DecodeTrialJournal returned error: %v", err)
+	}
+	reencoded, err := decoded.Encode()
+	if err != nil {
+		t.Fatalf("re-encoding journal returned error: %v", err)
+	}
+	if string(encoded) != string(reencoded) {
+		t.Fatalf("journal round trip changed bytes:\n%s\n%s", encoded, reencoded)
+	}
+	var generic any
+	if err := json.Unmarshal(encoded, &generic); err != nil {
+		t.Fatalf("encoded journal is not JSON: %v", err)
+	}
+
+	for _, trial := range schedule.Trials {
+		if err := journal.Append(JournalEntry{Key: trial.Key, PersistedAt: "2026-08-24T00:04:00Z", Status: "completed"}); err != nil {
+			t.Fatalf("append completed entry %s: %v", trial.Key.String(), err)
+		}
+	}
+	if missing := MissingTrials(journal, schedule); len(missing) != 0 {
+		t.Fatalf("completed journal has %d missing trials", len(missing))
+	}
+	if err := journal.Validate(); err != nil {
+		t.Fatalf("completed journal failed validation: %v", err)
+	}
+}
+
+func TestTrialJournalRejectsInvalidEntries(t *testing.T) {
+	p := validProtocol()
+	schedule, err := GenerateSchedule(p, []string{"task-a"})
+	if err != nil {
+		t.Fatalf("GenerateSchedule returned error: %v", err)
+	}
+	key := schedule.Trials[0].Key
+	for _, tc := range []struct {
+		name  string
+		entry JournalEntry
+		want  string
+	}{
+		{name: "unknown status", entry: JournalEntry{Key: key, PersistedAt: "2026-08-24T00:00:00Z", Status: "paused"}, want: "unknown status"},
+		{name: "bad timestamp", entry: JournalEntry{Key: key, PersistedAt: "tomorrow", Status: "scheduled"}, want: "RFC3339"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var journal TrialJournal
+			if err := journal.Append(tc.entry); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
+
+	duplicate := TrialJournal{Entries: []JournalEntry{
+		{Key: key, PersistedAt: "2026-08-24T00:00:00Z", Status: "scheduled"},
+		{Key: key, PersistedAt: "2026-08-24T00:01:00Z", Status: "started"},
+	}}
+	if err := duplicate.Validate(); err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("duplicate journal entries accepted: %v", err)
 	}
 }
