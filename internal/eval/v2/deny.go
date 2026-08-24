@@ -62,7 +62,10 @@ func BuildDenyRuleSet(m Manifest, workspaceRoot string, hiddenRoots []string) (D
 }
 
 // Check rejects direct reads, shell-mediated reads, search/glob reach, and
-// symlink-resolved escapes. The error names the rule, tool class, and raw path.
+// symlink-resolved escapes. The tool-class labels in its errors are policy
+// primitives for preflight reporting; they do not claim that real-path probe
+// wiring or sandbox enforcement exists at this schema checkpoint.
+// The error names the rule, tool class, and raw path.
 func (d DenyRuleSet) Check(path string, resolution []string) error {
 	if strings.TrimSpace(d.WorkspaceRoot) == "" {
 		return fmt.Errorf("deny rule workspace_root is required")
