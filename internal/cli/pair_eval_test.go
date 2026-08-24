@@ -115,8 +115,14 @@ func TestRepoRootQueryCandidatesPinsBothForms(t *testing.T) {
 		t.Fatalf("candidates for a symlinked path = %v, want [raw, resolved]", got)
 	}
 	resolved := target
-	if got := repoRootQueryCandidates(resolved); len(got) != 2 || got[0] != resolved {
-		t.Fatalf("candidates for a resolved path = %v, want resolved first plus its /var alias", got)
+	got := repoRootQueryCandidates(resolved)
+	canonical := resolveRepoRoot(resolved)
+	if canonical == resolved {
+		if len(got) != 1 || got[0] != resolved {
+			t.Fatalf("candidates for a canonical path = %v, want only itself", got)
+		}
+	} else if len(got) != 2 || got[0] != resolved || got[1] != canonical {
+		t.Fatalf("candidates for an aliased path = %v, want raw then canonical %q", got, canonical)
 	}
 	if got := repoRootQueryCandidates("/no/such/path-zzz"); len(got) != 1 || got[0] != "/no/such/path-zzz" {
 		t.Fatalf("unresolvable path must yield exactly itself, got %v", got)
