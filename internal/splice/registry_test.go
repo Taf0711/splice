@@ -76,6 +76,21 @@ func TestStageCapabilitiesMatchLegacySwitches(t *testing.T) {
 	}
 }
 
+func TestStageOptionsUsesLongDefaultTimeoutForDeterministicCommands(t *testing.T) {
+	options := stageOptions(
+		"test_runner",
+		1,
+		agent.ModelSelection{},
+		PipelineConfigFromAgentOptions(agent.Options{}),
+		t.TempDir(),
+		nil,
+		stages.Capabilities{},
+	)
+	if options.TimeoutSeconds != stages.DefaultTimeoutSeconds {
+		t.Fatalf("TimeoutSeconds = %d, want %d", options.TimeoutSeconds, stages.DefaultTimeoutSeconds)
+	}
+}
+
 func TestBuildStageRegistryRegistersDeterministicToolsExactlyOnce(t *testing.T) {
 	toolRegistry := tools.NewRegistry()
 	options := PipelineConfigFromAgentOptions(agent.Options{Registry: toolRegistry})

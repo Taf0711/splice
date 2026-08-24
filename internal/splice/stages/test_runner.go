@@ -42,7 +42,7 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 		return output, nil
 	}
 
-	timeout := 120
+	timeout := DefaultTimeoutSeconds
 	if options.TimeoutSeconds > 0 {
 		timeout = options.TimeoutSeconds
 	}

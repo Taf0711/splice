@@ -8,8 +8,11 @@ import (
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
+// DefaultTimeoutSeconds is the default bound for deterministic subprocesses.
+const DefaultTimeoutSeconds = 600
+
 // Capabilities is the declared runtime contract for one stage. TimeoutSeconds
-// 0 means the default 120s bound for deterministic subprocesses.
+// 0 means the DefaultTimeoutSeconds bound for deterministic subprocesses.
 type Capabilities struct {
 	ModelFree      bool
 	ConsumesMemory bool

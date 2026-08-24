@@ -82,7 +82,7 @@ func stageOptions(name string, iteration int, selection agent.ModelSelection, op
 	}
 	timeoutSeconds := caps.TimeoutSeconds
 	if timeoutSeconds == 0 {
-		timeoutSeconds = 120
+		timeoutSeconds = stages.DefaultTimeoutSeconds
 	}
 	return stages.StageOptions{
 		WorkDir:        workDir,
