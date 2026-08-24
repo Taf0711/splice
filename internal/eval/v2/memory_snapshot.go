@@ -208,6 +208,9 @@ type ImportedSnapshot struct {
 // returns a value with no exported mutation path. The workspace path is empty
 // until a future runner materializes the read-only file.
 func ImportSnapshot(data []byte, m Manifest) (ImportedSnapshot, error) {
+	if err := m.ValidateLocked(); err != nil {
+		return ImportedSnapshot{}, fmt.Errorf("locked manifest: %w", err)
+	}
 	var snapshot MemorySnapshot
 	if err := json.Unmarshal(data, &snapshot); err != nil {
 		return ImportedSnapshot{}, fmt.Errorf("decode memory snapshot: %w", err)
@@ -217,6 +220,9 @@ func ImportSnapshot(data []byte, m Manifest) (ImportedSnapshot, error) {
 	}
 	if snapshot.SnapshotSHA256 == "" || snapshot.SnapshotSHA256 != SnapshotHash(snapshot) {
 		return ImportedSnapshot{}, fmt.Errorf("snapshot_sha256 %q does not match recomputed snapshot hash %q", snapshot.SnapshotSHA256, SnapshotHash(snapshot))
+	}
+	if snapshot.SnapshotSHA256 != m.SnapshotSHA256 {
+		return ImportedSnapshot{}, fmt.Errorf("snapshot hash %q does not match manifest %q", snapshot.SnapshotSHA256, m.SnapshotSHA256)
 	}
 	if snapshot.CorpusProvenanceSHA256 != m.CorpusProvenanceSHA256 {
 		return ImportedSnapshot{}, fmt.Errorf("snapshot corpus provenance %q does not match manifest %q", snapshot.CorpusProvenanceSHA256, m.CorpusProvenanceSHA256)

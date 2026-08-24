@@ -25,6 +25,7 @@ func TestMemorySnapshotRoundTripCanonicalAndImport(t *testing.T) {
 	}
 	manifest := validManifest()
 	manifest.CorpusProvenanceSHA256 = snapshot.CorpusProvenanceSHA256
+	manifest.SnapshotSHA256 = snapshot.SnapshotSHA256
 	imported, err := ImportSnapshot(data, manifest)
 	if err != nil {
 		t.Fatalf("ImportSnapshot: %v", err)
@@ -78,6 +79,11 @@ func TestMemorySnapshotAdversarialValidation(t *testing.T) {
 	manifest.CorpusProvenanceSHA256 = base.CorpusProvenanceSHA256
 	if _, err := ImportSnapshot(data, manifest); err == nil || !strings.Contains(err.Error(), "snapshot_sha256") {
 		t.Fatalf("bad snapshot hash accepted: %v", err)
+	}
+	manifest = validManifest()
+	manifest.CorpusProvenanceSHA256 = base.CorpusProvenanceSHA256
+	if _, err := ImportSnapshot(mustEncodeSnapshot(t, base), manifest); err == nil || !strings.Contains(err.Error(), "does not match manifest") {
+		t.Fatalf("manifest snapshot hash mismatch accepted: %v", err)
 	}
 }
 
@@ -173,4 +179,13 @@ func testMemorySnapshot(t *testing.T) MemorySnapshot {
 	}
 	snapshot.SnapshotSHA256 = SnapshotHash(snapshot)
 	return snapshot
+}
+
+func mustEncodeSnapshot(t *testing.T, snapshot MemorySnapshot) []byte {
+	t.Helper()
+	data, err := snapshot.Encode(nil)
+	if err != nil {
+		t.Fatalf("encode snapshot: %v", err)
+	}
+	return data
 }
