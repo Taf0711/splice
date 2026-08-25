@@ -309,15 +309,27 @@ func appendReadOnlyLinuxPathArgs(args []string, path string) []string {
 	if path == "" {
 		return args
 	}
-	if pathExists(path) {
-		return append(args, "--ro-bind", path, path)
+	if !pathExists(path) {
+		// Nothing exists to hide, so there is no mask to apply. Do not
+		// synthesize a mountpoint: under --ro-bind / / the root is read
+		// only, so bubblewrap cannot create one (bwrap: Can't mkdir ...:
+		// Read-only file system). A synthesized empty directory would also
+		// change command behavior, for example git reading a fake empty .git
+		// instead of reporting that no repository exists.
+		return args
 	}
-	return append(args, "--perms", "555", "--tmpfs", path, "--remount-ro", path)
+	return append(args, "--ro-bind", path, path)
 }
 
 func appendUnreadableLinuxPathArgs(args []string, path string) []string {
 	path = strings.TrimSpace(path)
 	if path == "" {
+		return args
+	}
+	if !pathExists(path) {
+		// Nothing exists to hide, so there is no mask to apply. See
+		// appendReadOnlyLinuxPathArgs for why a synthesized mountpoint is
+		// wrong under a read only root.
 		return args
 	}
 	if info, err := os.Stat(path); err == nil && !info.IsDir() {
