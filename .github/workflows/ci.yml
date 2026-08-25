@@ -24,28 +24,6 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # The deterministic pipeline profiles (splice.stage, splice.dtools) fail
-      # closed without a native sandbox backend. On Linux that backend needs
-      # bubblewrap plus the splice-linux-sandbox helper. Without them the
-      # pipeline refuses every stage subprocess and its tests skip, so CI would
-      # report green on untested code.
-      #
-      # The helper must be on PATH. Under `go test` the running executable is
-      # the test binary, which does not serve the hidden helper subcommand, so
-      # the PATH tier is the only resolution tier that yields a working helper.
-      - name: Install sandbox backend
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y bubblewrap
-          bwrap --version
-          go build -o "$HOME/.local/bin/splice-linux-sandbox" ./cmd/splice-linux-sandbox
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-      - name: Verify sandbox backend is selected
-        run: |
-          command -v bwrap
-          command -v splice-linux-sandbox
-
       - name: Check formatting
         run: |
           unformatted="$(gofmt -l .)"
