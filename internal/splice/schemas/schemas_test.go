@@ -860,3 +860,33 @@ func roundTripAndValidate(t *testing.T, v interface{ Validate() error }) error {
 	}
 	return nil
 }
+
+// TestChangeSummaryRejectsDegradedReasonWithoutRepo is the T4 schema pin: a
+// summary cannot set DegradedReason while IsRepo is false, because that
+// combination never occurs in the pipeline.
+func TestChangeSummaryRejectsDegradedReasonWithoutRepo(t *testing.T) {
+	valid := ChangeSummary{IsRepo: true, DegradedReason: "git read refused: procrun: refused splice.stage spawn"}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("repository summary with DegradedReason must validate: %v", err)
+	}
+	invalid := ChangeSummary{IsRepo: false, DegradedReason: "git read refused"}
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("DegradedReason without IsRepo must be rejected")
+	}
+}
+
+// TestChangeSummaryOldJSONStillDecodes pins the additive contract: JSON from
+// before the DegradedReason field still decodes and validates.
+func TestChangeSummaryOldJSONStillDecodes(t *testing.T) {
+	raw := `{"is_repo": true, "changed_files": [{"path": "a.go", "status": "modified"}], "diff_text": "x", "truncated": false}`
+	var summary ChangeSummary
+	if err := json.Unmarshal([]byte(raw), &summary); err != nil {
+		t.Fatalf("old JSON must decode: %v", err)
+	}
+	if !summary.IsRepo || summary.DegradedReason != "" {
+		t.Fatalf("decoded = %+v, want is_repo true and empty degraded_reason", summary)
+	}
+	if err := summary.Validate(); err != nil {
+		t.Fatalf("decoded old JSON must validate: %v", err)
+	}
+}

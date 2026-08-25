@@ -1594,6 +1594,12 @@ func TestSummarizeWorkspaceChangesGitAware(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
+	// Git-derived output requires the deterministic stage spawn to run, which
+	// needs a host native sandbox backend.
+	backend := sandbox.SelectBackend(sandbox.BackendOptions{})
+	if !backend.Available {
+		t.Skipf("host native sandbox backend unavailable: %s", backend.Message)
+	}
 	workDir := t.TempDir()
 	run := func(args ...string) {
 		cmd := exec.Command(args[0], args[1:]...)
@@ -1621,6 +1627,9 @@ func TestSummarizeWorkspaceChangesGitAware(t *testing.T) {
 	if !summary.IsRepo {
 		t.Fatal("expected IsRepo=true")
 	}
+	if summary.DegradedReason != "" {
+		t.Fatalf("DegradedReason = %q, want empty on the git happy path", summary.DegradedReason)
+	}
 	paths := make(map[string]string)
 	for _, f := range summary.ChangedFiles {
 		paths[f.Path] = f.Status
@@ -1636,6 +1645,91 @@ func TestSummarizeWorkspaceChangesGitAware(t *testing.T) {
 	}
 	if len(summary.DiffText) > defaultMaxDiffBytes {
 		t.Fatalf("diff length %d exceeds cap", len(summary.DiffText))
+	}
+}
+
+// noBackendPath builds a PATH directory that hides every native sandbox
+// backend executable while keeping the tools the test needs. It returns the
+// directory path and sets PATH for the caller's test.
+func noBackendPath(t *testing.T) string {
+	t.Helper()
+	binDir := t.TempDir()
+	for _, name := range []string{"git", "sh", "env", "uname", "python3"} {
+		resolved, err := exec.LookPath(name)
+		if err != nil {
+			t.Skipf("%s unavailable: %v", name, err)
+		}
+		if err := os.Symlink(resolved, filepath.Join(binDir, name)); err != nil {
+			t.Skipf("cannot symlink %s into the no-backend PATH: %v", name, err)
+		}
+	}
+	t.Setenv("PATH", binDir)
+	return binDir
+}
+
+// TestSummarizeWorkspaceChangesRepositoryWithoutConfinement is the T1 pin: a
+// real repository must stay a repository when the Git read is refused. The
+// summary walks the tree instead, reports IsRepo true, and names the cause in
+// DegradedReason.
+func TestSummarizeWorkspaceChangesRepositoryWithoutConfinement(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	workDir := t.TempDir()
+	run := func(args ...string) {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = workDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %s", args, out)
+		}
+	}
+	run("git", "init")
+	run("git", "config", "user.email", "test@splice.local")
+	run("git", "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(workDir, "main.go"), []byte("package main\n"), 0644); err != nil {
+		t.Fatalf("write main.go: %v", err)
+	}
+	run("git", "add", "main.go")
+	run("git", "commit", "-m", "initial")
+	if err := os.WriteFile(filepath.Join(workDir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644); err != nil {
+		t.Fatalf("modify main.go: %v", err)
+	}
+	noBackendPath(t)
+
+	summary := summarizeWorkspaceChanges(context.Background(), workDir)
+	if !summary.IsRepo {
+		t.Fatal("a repository must stay a repository without confinement: IsRepo=false")
+	}
+	if summary.DegradedReason == "" {
+		t.Fatal("DegradedReason must be non-empty when the Git read could not run")
+	}
+	if !strings.Contains(summary.DegradedReason, "git") {
+		t.Fatalf("DegradedReason must name the cause, got %q", summary.DegradedReason)
+	}
+	if len(summary.ChangedFiles) == 0 {
+		t.Fatal("changed-file list must still be populated from the walk")
+	}
+	if err := summary.Validate(); err != nil {
+		t.Fatalf("degraded repository summary must validate: %v", err)
+	}
+}
+
+// TestSummarizeWorkspaceChangesPlainDirectoryUnchanged is the T2 pin: a plain
+// directory keeps IsRepo false and an empty DegradedReason.
+func TestSummarizeWorkspaceChangesPlainDirectoryUnchanged(t *testing.T) {
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "a.txt"), []byte("hello\n"), 0644); err != nil {
+		t.Fatalf("write a.txt: %v", err)
+	}
+	summary := summarizeWorkspaceChanges(context.Background(), workDir)
+	if summary.IsRepo {
+		t.Fatal("plain directory must not be a repository")
+	}
+	if summary.DegradedReason != "" {
+		t.Fatalf("DegradedReason = %q, want empty for a non-repository", summary.DegradedReason)
+	}
+	if err := summary.Validate(); err != nil {
+		t.Fatalf("plain directory summary must validate: %v", err)
 	}
 }
 

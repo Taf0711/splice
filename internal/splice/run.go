@@ -1176,18 +1176,30 @@ var skipSummaryDirs = map[string]bool{
 // filesystem walk. The diff text and changed-file list are capped so a very
 // large workspace cannot produce an unbounded trajectory input.
 func summarizeWorkspaceChanges(ctx context.Context, workDir string) schemas.ChangeSummary {
-	if summary, ok := gitChangeSummary(ctx, workDir); ok {
+	summary, err := gitChangeSummary(ctx, workDir)
+	if err == nil {
 		return summary
 	}
-	return walkChangeSummary(workDir)
+	walked := walkChangeSummary(workDir)
+	if errors.Is(err, errNotGitRepository) {
+		return walked
+	}
+	walked.IsRepo = true
+	walked.DegradedReason = err.Error()
+	return walked
 }
 
-func gitChangeSummary(ctx context.Context, workDir string) (schemas.ChangeSummary, bool) {
+// errNotGitRepository marks a directory that is not a Git repository, so
+// summarizeWorkspaceChanges can distinguish that case from a repository
+// whose Git read could not run.
+var errNotGitRepository = errors.New("not a git repository")
+
+func gitChangeSummary(ctx context.Context, workDir string) (schemas.ChangeSummary, error) {
 	if _, err := os.Stat(filepath.Join(workDir, ".git")); err != nil {
-		return schemas.ChangeSummary{}, false
+		return schemas.ChangeSummary{}, errNotGitRepository
 	}
 	if _, err := exec.LookPath("git"); err != nil {
-		return schemas.ChangeSummary{}, false
+		return schemas.ChangeSummary{}, fmt.Errorf("git binary not found: %w", err)
 	}
 
 	// Both git reads run under the stage profile: fixed allowlist, workspace
@@ -1197,22 +1209,22 @@ func gitChangeSummary(ctx context.Context, workDir string) (schemas.ChangeSummar
 
 	statusCmd, plan, cerr := stages.PrepareStageCommand(ctx, engine, workDir, []string{"git", "-C", workDir, "status", "--porcelain", "--untracked-files=all"})
 	if cerr != nil {
-		return schemas.ChangeSummary{}, false
+		return schemas.ChangeSummary{}, fmt.Errorf("git read refused: %w", cerr)
 	}
 	defer plan.Cleanup()
 	statusOut, err := statusCmd.Output()
 	if err != nil {
-		return schemas.ChangeSummary{}, false
+		return schemas.ChangeSummary{}, fmt.Errorf("git status failed: %w", err)
 	}
 
 	diffCmd, diffPlan, cerr := stages.PrepareStageCommand(ctx, engine, workDir, []string{"git", "-C", workDir, "diff", "HEAD", "--no-color"})
 	if cerr != nil {
-		return schemas.ChangeSummary{}, false
+		return schemas.ChangeSummary{}, fmt.Errorf("git read refused: %w", cerr)
 	}
 	defer diffPlan.Cleanup()
 	diffOut, err := diffCmd.Output()
 	if err != nil {
-		return schemas.ChangeSummary{}, false
+		return schemas.ChangeSummary{}, fmt.Errorf("git diff failed: %w", err)
 	}
 
 	truncated := false
@@ -1289,7 +1301,7 @@ func gitChangeSummary(ctx context.Context, workDir string) (schemas.ChangeSummar
 		ChangedFiles: files,
 		DiffText:     diffText,
 		Truncated:    truncated,
-	}, true
+	}, nil
 }
 
 func gitStatusToChangeStatus(code string) string {
