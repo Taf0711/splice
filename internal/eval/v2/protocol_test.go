@@ -54,26 +54,28 @@ func validSafetyProtocol() Protocol {
 
 func validTask(id string) TaskSpec {
 	task := TaskSpec{
-		ID:                      id,
-		Sealed:                  true,
-		RepositoryClass:         "go-core",
-		Language:                "go",
-		Family:                  "pipeline",
-		Tier:                    "light",
-		Difficulty:              "medium",
-		MemoryCompetency:        "api-conventions",
-		PromptSHA256:            testHash,
-		FixtureArchiveSHA256:    testHash,
-		BaselineCommandSHA256:   testHash,
-		SetupSHA256:             testHash,
-		CheckSHA256:             testHash,
-		ReferenceSolutionSHA256: strings.Repeat("b", 64),
-		ExpectedChangedFiles:    []string{"main.go"},
-		ForbiddenChangedFiles:   []string{"go.mod"},
-		NetworkPolicy:           "offline",
-		Author:                  "curator",
-		Auditor:                 "auditor",
-		ApprovalDate:            "2026-08-24T00:00:00Z",
+		ID:                        id,
+		Sealed:                    true,
+		RepositoryClass:           "go-core",
+		Language:                  "go",
+		Family:                    "pipeline",
+		Tier:                      "light",
+		Difficulty:                "medium",
+		MemoryCompetency:          "api-conventions",
+		PromptSHA256:              testHash,
+		FixtureArchiveSHA256:      testHash,
+		BaselineCommandSHA256:     testHash,
+		SetupSHA256:               testHash,
+		CheckSHA256:               testHash,
+		ReferenceSolutionSHA256:   strings.Repeat("b", 64),
+		IndependentSolutionSHA256: strings.Repeat("c", 64),
+		MutationProbeSHA256:       strings.Repeat("d", 64),
+		ExpectedChangedFiles:      []string{"main.go"},
+		ForbiddenChangedFiles:     []string{"go.mod"},
+		NetworkPolicy:             "offline",
+		Author:                    "curator",
+		Auditor:                   "auditor",
+		ApprovalDate:              "2026-08-24T00:00:00Z",
 	}
 	task.ContextChecks.RequiredFiles = []string{"README.md"}
 	return task
@@ -97,6 +99,8 @@ func validSchedule(p Protocol, taskIDs []string) Schedule {
 func validManifest() Manifest {
 	p := validProtocol()
 	tasks := []TaskSpec{validTask("task-a"), validTask("task-b")}
+	taskHashA, _ := CanonicalTaskHash(tasks[0])
+	taskHashB, _ := CanonicalTaskHash(tasks[1])
 	return Manifest{
 		Protocol:          p,
 		SourceCommit:      "f6c2bf7",
@@ -113,7 +117,7 @@ func validManifest() Manifest {
 			{Stage: "code_writer", Provider: "openrouter", Model: "gpt-5.6-sol"},
 			{Stage: "test_generator", Provider: "openrouter", Model: "gpt-5.6-sol"},
 		},
-		TaskHashes:             []NamedHash{{Name: "task-a", SHA256: testHash}, {Name: "task-b", SHA256: testHash}},
+		TaskHashes:             []NamedHash{{Name: "task-a", SHA256: taskHashA}, {Name: "task-b", SHA256: taskHashB}},
 		FixtureSHA256:          testHash,
 		SnapshotSHA256:         testHash,
 		SelectionAuditSHA256:   testHash,
@@ -328,6 +332,11 @@ func TestTaskSetValidation(t *testing.T) {
 		task := validTask("t1")
 		task.Sealed = false
 		task.Author, task.Auditor, task.ApprovalDate = "", "", ""
+		// An unsealed candidate may also omit all three solution hashes
+		// together (DG1); leave none of them half-present.
+		task.ReferenceSolutionSHA256 = ""
+		task.IndependentSolutionSHA256 = ""
+		task.MutationProbeSHA256 = ""
 		if err := (TaskSet{Tasks: []TaskSpec{task}}).Validate(); err != nil {
 			t.Fatalf("candidate rejected: %v", err)
 		}

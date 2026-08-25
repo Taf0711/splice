@@ -228,6 +228,22 @@ func (m Manifest) ValidateLocked() error {
 		}
 		taskIDs = append(taskIDs, task.ID)
 	}
+	// DE1: locked task hashes must prove contents, not just syntax. Recompute
+	// each task's canonical hash from its spec and compare against the
+	// manifest entry; a stale or forged hash names the offending task.
+	recomputed := make(map[string]string, len(m.Tasks))
+	for _, task := range m.Tasks {
+		hash, err := CanonicalTaskHash(task)
+		if err != nil {
+			return fmt.Errorf("recompute task hash for %s: %w", task.ID, err)
+		}
+		recomputed[task.ID] = hash
+	}
+	for i, h := range m.TaskHashes {
+		if want := recomputed[h.Name]; want != "" && h.SHA256 != want {
+			return fmt.Errorf("task_hashes[%d] for task %s does not match its content: recomputed %s", i, h.Name, want)
+		}
+	}
 	if err := m.Schedule.CompleteFor(m.Protocol, taskIDs); err != nil {
 		return err
 	}

@@ -1,6 +1,9 @@
 package v2
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"path"
 	"strings"
@@ -22,13 +25,22 @@ type TaskSpec struct {
 	Difficulty       string `json:"difficulty"`
 	MemoryCompetency string `json:"memory_competency"`
 
-	// Integrity hashes. All are required once sealed.
+	// Integrity hashes. The base hashes are required for every task. The
+	// three solution hashes are required once sealed; an unsealed candidate
+	// may omit all three together.
 	PromptSHA256            string `json:"prompt_sha256"`
 	FixtureArchiveSHA256    string `json:"fixture_archive_sha256"`
 	BaselineCommandSHA256   string `json:"baseline_command_sha256"`
 	SetupSHA256             string `json:"setup_sha256"`
 	CheckSHA256             string `json:"check_sha256"`
 	ReferenceSolutionSHA256 string `json:"reference_solution_sha256"`
+	// IndependentSolutionSHA256 is a second, independently authored solution
+	// proving the check is solvable another way. It must differ from the
+	// reference solution: a check satisfied by one canonical solution only is
+	// brittle and does not prove general solvability.
+	IndependentSolutionSHA256 string `json:"independent_solution_sha256"`
+	// MutationProbeSHA256 hashes the mutation probe artifact for the task.
+	MutationProbeSHA256 string `json:"mutation_probe_sha256"`
 
 	// Change expectations, reusing the AGENT_EVALS vocabulary.
 	ExpectedChangedFiles  []string `json:"expected_changed_files"`
@@ -75,16 +87,50 @@ func (t TaskSpec) Validate() error {
 	if !ValidNetworkPolicy(t.NetworkPolicy) {
 		return fmt.Errorf("task %s: invalid network_policy %q", t.ID, t.NetworkPolicy)
 	}
-	hashes := []struct{ name, value string }{
+	// Base hashes: required for every task (sealed or unsealed).
+	baseHashes := []struct{ name, value string }{
 		{"prompt_sha256", t.PromptSHA256},
 		{"fixture_archive_sha256", t.FixtureArchiveSHA256},
 		{"baseline_command_sha256", t.BaselineCommandSHA256},
 		{"setup_sha256", t.SetupSHA256},
 		{"check_sha256", t.CheckSHA256},
-		{"reference_solution_sha256", t.ReferenceSolutionSHA256},
 	}
-	for _, h := range hashes {
+	for _, h := range baseHashes {
 		if !validHash(h.value) {
+			return fmt.Errorf("task %s: %s must be a sha256 hex digest, got %q", t.ID, h.name, h.value)
+		}
+	}
+	// Solution hashes: reference, independent, mutation probe. A sealed task
+	// must carry all three. An unsealed candidate may omit all three together,
+	// but partial presence is inconsistent.
+	solutionHashes := []struct {
+		name  string
+		value string
+	}{
+		{"reference_solution_sha256", t.ReferenceSolutionSHA256},
+		{"independent_solution_sha256", t.IndependentSolutionSHA256},
+		{"mutation_probe_sha256", t.MutationProbeSHA256},
+	}
+	present := 0
+	for _, h := range solutionHashes {
+		if h.value != "" {
+			present++
+		}
+	}
+	if t.Sealed && present != 3 {
+		missing := make([]string, 0, 3)
+		for _, h := range solutionHashes {
+			if h.value == "" {
+				missing = append(missing, h.name)
+			}
+		}
+		return fmt.Errorf("task %s: sealed tasks need all three solution hashes (reference, independent, mutation probe); missing: %s", t.ID, strings.Join(missing, ", "))
+	}
+	if !t.Sealed && present > 0 && present < 3 {
+		return fmt.Errorf("task %s: solution hashes must be all present or all omitted, got %d of 3", t.ID, present)
+	}
+	for _, h := range solutionHashes {
+		if h.value != "" && !validHash(h.value) {
 			return fmt.Errorf("task %s: %s must be a sha256 hex digest, got %q", t.ID, h.name, h.value)
 		}
 	}
@@ -110,6 +156,17 @@ func (t TaskSpec) Validate() error {
 		return fmt.Errorf("task %s: context file %q is both required and forbidden", t.ID, overlap)
 	}
 	if t.Sealed {
+		// DF1: sealed tasks require complete QA evidence collections.
+		if len(t.ForbiddenChangedFiles) == 0 {
+			return fmt.Errorf("task %s: sealed tasks need a non-empty forbidden_changed_files set", t.ID)
+		}
+		if len(t.ContextChecks.RequiredFiles) == 0 {
+			return fmt.Errorf("task %s: sealed tasks need a non-empty context_checks.required_files set", t.ID)
+		}
+		// The authority spec requires independent and reference hashes to differ.
+		if t.IndependentSolutionSHA256 != "" && t.IndependentSolutionSHA256 == t.ReferenceSolutionSHA256 {
+			return fmt.Errorf("task %s: independent and reference solution hashes must differ", t.ID)
+		}
 		if t.Author == "" || t.Auditor == "" || t.ApprovalDate == "" {
 			return fmt.Errorf("task %s: sealed tasks need author, auditor, and approval_date", t.ID)
 		}
@@ -208,4 +265,28 @@ func sharedFile(left, right []string) string {
 		}
 	}
 	return ""
+}
+
+// CanonicalTaskHash returns the SHA-256 of the canonical JSON encoding of a
+// task spec. The canonical form is the JSON encoding with map keys sorted, so
+// field order and whitespace never affect task identity. It is the single
+// content-identity function for candidate registration, acceptance, and
+// manifest locking: every consumer that needs a task's content hash uses this
+// helper, never a private re-implementation.
+func CanonicalTaskHash(task TaskSpec) (string, error) {
+	encoded, err := json.Marshal(task)
+	if err != nil {
+		return "", err
+	}
+	var object map[string]any
+	if err := json.Unmarshal(encoded, &object); err != nil {
+		return "", err
+	}
+	// json.Marshal sorts map keys, so this re-encode is the canonical form.
+	canonical, err := json.Marshal(object)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(canonical)
+	return hex.EncodeToString(sum[:]), nil
 }
