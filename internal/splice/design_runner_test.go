@@ -11,6 +11,7 @@ import (
 
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/splice/schemas"
+	"github.com/Taf0711/splice/internal/tools"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
@@ -114,6 +115,7 @@ func TestRunDesignPlanHappyPath(t *testing.T) {
 		PermissionMode: agent.PermissionModeAuto,
 		SessionID:      "plan-happy",
 		MaxTurns:       1,
+		FileTracker:    tools.NewFileTracker(),
 		OnReasoning:    func(text string) { reasoning = append(reasoning, text) },
 	}, nil, nil)
 	if err != nil {
@@ -308,6 +310,7 @@ func TestRunDesignPlanWithResume_SkipsCompletedTasks(t *testing.T) {
 		PermissionMode: agent.PermissionModeAuto,
 		SessionID:      "plan-resume",
 		MaxTurns:       1,
+		FileTracker:    tools.NewFileTracker(),
 		OnReasoning:    func(text string) { reasoning = append(reasoning, text) },
 	}, nil, nil, RunDesignPlanOptions{
 		PlanID:           "plan-resume",
@@ -368,6 +371,7 @@ func TestRunDesignPlanWithResume_CallbackFires(t *testing.T) {
 		PermissionMode: agent.PermissionModeAuto,
 		SessionID:      "plan-callback",
 		MaxTurns:       1,
+		FileTracker:    tools.NewFileTracker(),
 	}, nil, nil, RunDesignPlanOptions{
 		PlanID:          "plan-callback",
 		OnTaskLifecycle: callback,

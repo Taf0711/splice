@@ -1482,6 +1482,7 @@ func TestRunMaxTurnsDoesNotCapPipelineIterations(t *testing.T) {
 		Registry:       registry,
 		PermissionMode: agent.PermissionModeAuto,
 		MaxTurns:       1,
+		FileTracker:    tools.NewFileTracker(),
 	}, nil, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)

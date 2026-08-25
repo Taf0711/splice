@@ -325,18 +325,10 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 		}
 	}
 
-	// Deterministic stage subprocesses run under their own enforce-mode
-	// engine: workspace-scoped filesystem, network denied. This is separate
-	// from options.Sandbox, which keeps the interactive user policy for
-	// model-driven tool calls. Set BEFORE the tool runner is built so the
-	// runner's captured config carries it.
-	options.StageSandbox = procrun.NewStageEngine(absWorkDir)
-
-	runner := newAgentToolRunner(options, absWorkDir)
-	// Strict read-before-write for every write_file/edit_file in this run: a
-	// model that skips the read now gets a loud, repairable error instead of
-	// silently overwriting live symbols.
-	options.StageRequireReadBeforeWrite = true
+	// The stage sandbox engine and the strict read-before-write flag are set
+	// in buildStageToolRunner before the tool runner is built, so the
+	// runner's captured config carries them.
+	options, runner := buildStageToolRunner(options, absWorkDir)
 
 	ledger := newRequestLedger()
 	ledgerOpts := ledger.recordingOptions(options)
@@ -1396,6 +1388,31 @@ func skipSummaryDirComponent(rel string) bool {
 	return false
 }
 
+// buildStageToolRunner prepares the runner options for a pipeline run and
+// builds the agent tool runner from them. The stage sandbox engine and the
+// strict read-before-write flag must be final before the runner is built:
+// newAgentToolRunner captures options by value.
+func buildStageToolRunner(options PipelineRunConfig, absWorkDir string) (PipelineRunConfig, ToolRunner) {
+	// Deterministic stage subprocesses run under their own enforce-mode
+	// engine: workspace-scoped filesystem, network denied. This is separate
+	// from options.Sandbox, which keeps the interactive user policy for
+	// model-driven tool calls. Set BEFORE the tool runner is built so the
+	// runner's captured config carries it.
+	options.StageSandbox = procrun.NewStageEngine(absWorkDir)
+
+	// Strict read-before-write for every write_file/edit_file in this run: a
+	// model that skips the read now gets a loud, repairable error instead of
+	// silently overwriting live symbols. Set BEFORE the tool runner is built
+	// so the runner's captured config carries it.
+	options.StageRequireReadBeforeWrite = true
+
+	return options, newAgentToolRunner(options, absWorkDir)
+}
+
+// newAgentToolRunner builds the agent tool runner for a pipeline run. It
+// captures options by value, so every field a run depends on must be final
+// before this call. Mutating the caller's struct afterwards changes nothing
+// the runner will ever read.
 func newAgentToolRunner(options PipelineRunConfig, cwd string) ToolRunner {
 	if options.Registry == nil {
 		return ToolRunnerFunc(func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
@@ -1519,9 +1536,6 @@ func newAgentToolRunner(options PipelineRunConfig, cwd string) ToolRunner {
 		// Keep the pipeline's auto/spec-draft grant semantics. The shared helper
 		// only builds tools.RunOptions; it does not replace this prompt flow.
 		runOptions := agent.NewToolRunOptions(agentOpts, call, cwd, permissionGranted)
-		if options.StageRequireReadBeforeWrite {
-			runOptions.RequireReadBeforeWrite = true
-		}
 		if options.StageRequireReadBeforeWrite {
 			runOptions.RequireReadBeforeWrite = true
 		}
