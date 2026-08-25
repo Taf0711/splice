@@ -135,11 +135,29 @@ or Semantic Versioning defaults. If the version is not explicit, stop and ask.
 
 ## Upstream Discipline
 
-Splice is a fork of Zero. Changes to inherited Zero code (`internal/agent`,
-`internal/tui`, `internal/tools`, and the rest) should stay minimal, because
-every divergence is a future merge conflict.
-New Splice behavior belongs in `internal/splice/`, `internal/memd/`,
-`internal/worktrees/` extensions, or thin seams in `internal/cli/`.
+Splice is a fork of Zero. Splice now owns the product. The old rule to keep
+inherited Zero code minimal is discarded. Upstream merges are not a product
+goal, and the cost of a manual port is lower than the cost of an
+architectural compromise.
+
+New rule: preserve useful functionality. Optimize the implementation for
+the Splice product, architecture, and maintainability. Splice may move files,
+split large modules, replace inherited flows, delete inherited UI that no
+longer fits, and redesign the workspace. Behavior must stay correct and
+tested.
+
+Functional parity, not source parity, is the standard. Before you remove or
+replace inherited behavior, check the functional parity checklist in the
+strategy document. Keep every item or record an explicit decision to drop it.
+
+New pipeline behavior still belongs in `internal/splice/`, `internal/memd/`,
+`internal/worktrees/` extensions, or thin seams in `internal/cli/`, because
+those seams keep the pipeline testable. This rule now protects architecture,
+not upstream merges.
+
+Authority for release order is `SPLICE_TUI_RELEASE_PRIORITY_REVISED.md`
+(P0 runtime truth through P6). When this file and that document disagree,
+that document wins.
 
 The memd sidecar is a **separate Go module** (`memd/`, module
 `github.com/Taf0711/splice/memd`). The root workflow's `go test ./...` does not
