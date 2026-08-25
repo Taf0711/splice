@@ -24,6 +24,45 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # The deterministic pipeline profiles (splice.stage, splice.dtools) fail
+      # closed without native platform confinement. On Linux that needs
+      # bubblewrap and the splice-linux-sandbox helper. Without them every
+      # stage subprocess is refused and its tests skip, so CI reports green on
+      # code it never ran.
+      #
+      # Ubuntu 24.04 sets kernel.apparmor_restrict_unprivileged_userns=1, which
+      # blocks the unprivileged user namespace that bwrap --unshare-user needs.
+      # The symptom is "bwrap: loopback: Failed RTM_NEWADDR: Operation not
+      # permitted". Clearing the sysctl restores unprivileged namespaces.
+      #
+      # The helper must be on PATH: under `go test` the running executable is
+      # the test binary, which does not serve the hidden helper subcommand, so
+      # the PATH tier is the only one that yields a working helper.
+      - name: Install sandbox backend
+        run: |
+          set -euo pipefail
+          . /etc/os-release && echo "runner image: $PRETTY_NAME (kernel $(uname -r))"
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          bwrap --version
+          echo "apparmor_restrict_unprivileged_userns before: $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 'not present')"
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          go build -o "$HOME/.local/bin/splice-linux-sandbox" ./cmd/splice-linux-sandbox
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # Prove the backend actually confines before trusting the suite. The
+      # network-namespace check is the exact operation that failed on 24.04, so
+      # a regression here is loud instead of silently downgrading to skips.
+      - name: Verify sandbox enforcement
+        run: |
+          set -euo pipefail
+          command -v bwrap
+          command -v splice-linux-sandbox
+          bwrap --unshare-user --unshare-net --ro-bind / / -- /bin/true
+          echo "bwrap unshare-net OK"
+
       - name: Check formatting
         run: |
           unformatted="$(gofmt -l .)"
