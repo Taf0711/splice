@@ -16,6 +16,8 @@ import (
 
 	"github.com/Taf0711/splice/internal/config"
 	"github.com/Taf0711/splice/internal/providers"
+	"github.com/Taf0711/splice/internal/sandbox"
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
 	"github.com/Taf0711/splice/internal/splice/memoryreason"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/tools"
@@ -1121,9 +1123,16 @@ func TestTestGeneratorWritesTests(t *testing.T) {
 }
 
 func TestTestRunnerPassesAndFails(t *testing.T) {
+	// The runner executes stage commands under the deterministic profile,
+	// which fails closed without native platform confinement.
+	backend := sandbox.SelectBackend(sandbox.BackendOptions{})
+	if !backend.Available {
+		t.Skipf("host native sandbox backend unavailable: %s", backend.Message)
+	}
 	stage := TestRunner{}
+	workDir := t.TempDir()
 
-	pass, err := stage.Run(context.Background(), newHarnessInput("run tests"), &fakeProvider{}, StageOptions{Command: []string{"true"}, TimeoutSeconds: 5})
+	pass, err := stage.Run(context.Background(), newHarnessInput("run tests"), &fakeProvider{}, StageOptions{Command: []string{"true"}, TimeoutSeconds: 5, WorkDir: workDir, Sandbox: procrun.NewStageEngine(workDir)})
 	if err != nil {
 		t.Fatalf("pass run: %v", err)
 	}
@@ -1137,7 +1146,7 @@ func TestTestRunnerPassesAndFails(t *testing.T) {
 		t.Fatalf("expected test_command in output data, got %#v", pass.Data)
 	}
 
-	fail, err := stage.Run(context.Background(), newHarnessInput("run tests"), &fakeProvider{}, StageOptions{Command: []string{"false"}, TimeoutSeconds: 5})
+	fail, err := stage.Run(context.Background(), newHarnessInput("run tests"), &fakeProvider{}, StageOptions{Command: []string{"false"}, TimeoutSeconds: 5, WorkDir: workDir, Sandbox: procrun.NewStageEngine(workDir)})
 	if err != nil {
 		t.Fatalf("fail run: %v", err)
 	}

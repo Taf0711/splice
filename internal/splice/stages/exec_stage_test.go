@@ -44,11 +44,44 @@ func TestPrepareStageCommandRejectsTamperedBinary(t *testing.T) {
 	}
 }
 
+// TestStageAllowlistRemainsFirstRefusal is the T5 regression pin: a forbidden
+// binary is refused by the allowlist even when the engine is nil, before any
+// sandbox fail-closed rule can fire, and exactly one audit record is emitted.
+func TestStageAllowlistRemainsFirstRefusal(t *testing.T) {
+	var audits []procrun.AuditRecord
+	procrun.SetAuditSink(func(record procrun.AuditRecord) {
+		audits = append(audits, record)
+	})
+	t.Cleanup(func() { procrun.SetAuditSink(nil) })
+
+	workDir := t.TempDir()
+	_, _, err := PrepareStageCommand(context.Background(), nil, workDir,
+		[]string{"not-a-stage-binary-77", "--flag"})
+	if err == nil {
+		t.Fatal("forbidden binary must be refused")
+	}
+	if !strings.Contains(err.Error(), "allowlist") {
+		t.Fatalf("first refusal must be the allowlist error, got %q", err.Error())
+	}
+	if len(audits) != 1 || !audits[0].Decision.Rejected {
+		t.Fatalf("audit = %+v, want exactly one rejected record", audits)
+	}
+	if !strings.Contains(audits[0].Decision.Reason, "allowlist") {
+		t.Fatalf("audit reason must be the allowlist refusal: %q", audits[0].Decision.Reason)
+	}
+}
+
 // TestPoisonedManifestRunsUnderNetworkDenyPlan is the T1.4 fix pin: a manifest
 // can make an allowed runner execute arbitrary script content (the poisoning
 // premise, proven here by a written marker file), while every such spawn
 // carries the network-deny workspace-scoped engine plan (the mitigation).
+// It requires a host native sandbox backend; without one the deterministic
+// stage profile fails closed and the test skips.
 func TestPoisonedManifestRunsUnderNetworkDenyPlan(t *testing.T) {
+	backend := sandbox.SelectBackend(sandbox.BackendOptions{})
+	if !backend.Available {
+		t.Skipf("host native sandbox backend unavailable: %s", backend.Message)
+	}
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skipf("python3 unavailable: %v", err)
 	}

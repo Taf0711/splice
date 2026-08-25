@@ -8,6 +8,10 @@
 // that the runner enforces before any plan is built, and deterministic
 // pipeline callers attach an enforce-mode engine that scopes the filesystem
 // to the workspace and denies network.
+//
+// Deterministic pipeline profiles (splice.stage, splice.dtools) fail closed:
+// a spawn without native platform confinement is refused before any command
+// is built, and the refusal is audited once.
 package procrun
 
 import (
@@ -46,9 +50,12 @@ var StageBinaries = []string{
 
 // NewStageEngine returns an enforce-mode sandbox engine for deterministic
 // pipeline subprocesses: the filesystem is scoped to workspaceRoot and the
-// network is denied. Platform backends degrade per their own rules; the
-// policy metadata travels on every plan either way.
+// network is denied. The engine selects the host native backend with the
+// standard sandbox selection interface; a deterministic spawn whose plan
+// cannot reach native platform confinement is refused by Prepare, never run
+// unwrapped.
 func NewStageEngine(workspaceRoot string) *sandbox.Engine {
+	backend := sandbox.SelectBackend(sandbox.BackendOptions{})
 	return sandbox.NewEngine(sandbox.EngineOptions{
 		WorkspaceRoot: workspaceRoot,
 		Policy: sandbox.Policy{
@@ -56,6 +63,7 @@ func NewStageEngine(workspaceRoot string) *sandbox.Engine {
 			Network:          sandbox.NetworkDeny,
 			EnforceWorkspace: true,
 		},
+		Backend: backend,
 	})
 }
 
@@ -69,7 +77,9 @@ type Request struct {
 	Spec sandbox.CommandSpec
 	// Engine is the zeroSandbox engine for this call. Nil means the command
 	// runs unsandboxed: an approved escalation or a mode where no engine
-	// applies. The runner still audits it.
+	// applies. The runner still audits it. A deterministic profile
+	// (splice.stage or splice.dtools) with a nil engine is refused: those
+	// spawns require native platform confinement.
 	Engine *sandbox.Engine
 	// AllowedBinaries restricts Spec.Name to these base names. Nil means
 	// unrestricted: the tools profiles gate through permission and sandbox
@@ -135,8 +145,9 @@ func emitAudit(record AuditRecord) {
 }
 
 // Prepare builds the plan and command for req and emits one audit record.
-// It returns an error when the binary violates the request's allowlist or the
-// engine refuses the command; the record emitted in those cases carries
+// It returns an error when the binary violates the request's allowlist, when
+// a deterministic profile cannot get native platform confinement, or when
+// the engine refuses the command; the record emitted in those cases carries
 // Rejected with the reason, so a refused spawn is never silent.
 func Prepare(ctx context.Context, req Request) (Prepared, error) {
 	base := AuditRecord{
@@ -145,11 +156,22 @@ func Prepare(ctx context.Context, req Request) (Prepared, error) {
 		Args:      append([]string(nil), req.Spec.Args...),
 		Dir:       req.Spec.Dir,
 	}
+	// The fixed-binary allowlist is the first deterministic refusal: a
+	// forbidden binary is refused here, before any engine or fail-closed
+	// check, so the sandbox never starts and no second audit appears.
 	if len(req.AllowedBinaries) > 0 && !binaryAllowed(req.Spec.Name, req.AllowedBinaries) {
 		base.Decision.Rejected = true
 		base.Decision.Reason = fmt.Sprintf("binary %q is not in the %s profile allowlist", req.Spec.Name, req.ProfileID)
 		emitAudit(base)
 		return Prepared{}, fmt.Errorf("procrun: refused %s spawn: binary %q is not in the profile allowlist", req.ProfileID, req.Spec.Name)
+	}
+	// A deterministic profile must have a sandbox engine. Refuse before any
+	// process object exists so an unwrapped stage spawn is impossible.
+	if deterministicProfile(req.ProfileID) && req.Engine == nil {
+		reason := fmt.Sprintf("deterministic profile %s requires a sandbox engine", req.ProfileID)
+		base.Decision = Decision{Rejected: true, Reason: reason}
+		emitAudit(base)
+		return Prepared{}, fmt.Errorf("procrun: refused %s spawn: %s", req.ProfileID, reason)
 	}
 	if req.Engine != nil {
 		command, plan, err := req.Engine.CommandContext(ctx, req.Spec)
@@ -160,6 +182,25 @@ func Prepare(ctx context.Context, req Request) (Prepared, error) {
 			record.Decision.Reason = err.Error()
 			emitAudit(record)
 			return Prepared{}, err
+		}
+		// The deterministic guard asserts confinement positively: a
+		// deterministic spawn is accepted only when the plan is wrapped and
+		// natively enforced. It deliberately does not trust
+		// plan.RequiresPlatformSandbox as the trigger, because the bypass
+		// conditions control that field: an inherited SPLICE_SANDBOXED marker
+		// (with SPLICE_SANDBOX_BACKEND set) or a disabled policy mode flips
+		// the manager to SandboxPreferenceForbid and zeroes it. An inherited
+		// marker does not prove the current spawn is confined, so a
+		// deterministic spawn under one is refused. No environment variable
+		// and no policy mode can make a deterministic spawn run without a
+		// wrapped native plan.
+		if deterministicProfile(req.ProfileID) &&
+			(!plan.Wrapped || plan.EnforcementLevel != sandbox.EnforcementNative) {
+			reason := deterministicRefusalReason(req.ProfileID, plan)
+			record.Decision.Rejected = true
+			record.Decision.Reason = reason
+			emitAudit(record)
+			return Prepared{}, fmt.Errorf("procrun: refused %s spawn: %s", req.ProfileID, reason)
 		}
 		emitAudit(record)
 		return Prepared{Cmd: command, Plan: plan, Audit: record}, nil
@@ -201,6 +242,22 @@ func decisionFromPlan(plan sandbox.CommandPlan) Decision {
 		Wrapped:          plan.Wrapped,
 		EnforcementLevel: string(plan.EnforcementLevel),
 	}
+}
+
+// deterministicProfile reports whether a profile id is a deterministic
+// pipeline profile. These spawns require native platform confinement and are
+// refused when it is unavailable.
+func deterministicProfile(profileID string) bool {
+	return profileID == ProfileSpliceStage || profileID == ProfileSpliceDTools
+}
+
+// deterministicRefusalReason names the profile, backend, wrapped state, and
+// enforcement level of a refused deterministic spawn. The same text travels
+// on the returned error and the audit decision.
+func deterministicRefusalReason(profileID string, plan sandbox.CommandPlan) string {
+	return fmt.Sprintf(
+		"deterministic profile %s requires native platform confinement: backend=%s wrapped=%t enforcement=%s",
+		profileID, plan.Backend.Name, plan.Wrapped, plan.EnforcementLevel)
 }
 
 // binaryAllowed matches the command's base name against the allowlist. Stage
