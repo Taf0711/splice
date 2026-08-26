@@ -6,6 +6,7 @@ import (
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/hooks"
 	"github.com/Taf0711/splice/internal/modelregistry"
+	"github.com/Taf0711/splice/internal/presentation"
 	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/streamjson"
 	"github.com/Taf0711/splice/internal/tools"
@@ -68,7 +69,11 @@ type PipelineRunConfig struct {
 	OnSurfaceToUser             func(ctx context.Context, req agent.SurfaceToUserRequest) (agent.SurfaceToUserDecision, error)
 	OnPipelinePlan              func(agent.PipelinePlanEvent)
 	OnStageEvent                func(agent.StageEvent)
-	ModelRegistry               modelregistry.Registry
+	// OnPresentationState receives a presentation.State snapshot after each
+	// significant pipeline transition when emission is enabled. Nil disables
+	// emission: no accumulator is created and no snapshots are produced.
+	OnPresentationState func(presentation.State)
+	ModelRegistry       modelregistry.Registry
 }
 
 // PipelineConfigFromAgentOptions copies the fields the pipeline consumes.
@@ -114,6 +119,7 @@ func PipelineConfigFromAgentOptions(options agent.Options) PipelineRunConfig {
 		OnSurfaceToUser:         options.OnSurfaceToUser,
 		OnPipelinePlan:          options.OnPipelinePlan,
 		OnStageEvent:            options.OnStageEvent,
+		OnPresentationState:     options.OnPresentationState,
 		ModelRegistry:           options.ModelRegistry,
 	}
 }

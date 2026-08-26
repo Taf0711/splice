@@ -789,6 +789,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		OnReasoning:             writer.reasoning,
 		OnPipelinePlan:          writer.pipelinePlan,
 		OnStageEvent:            writer.stage,
+		OnPresentationState:     writer.presentationState,
 		OnToolCall: func(call agent.ToolCall) {
 			writer.toolCall(call, registry)
 			sessionRecorder.append(sessions.EventToolCall, map[string]any{

@@ -5,6 +5,7 @@ import (
 
 	"github.com/Taf0711/splice/internal/hooks"
 	"github.com/Taf0711/splice/internal/modelregistry"
+	"github.com/Taf0711/splice/internal/presentation"
 	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/streamjson"
 	"github.com/Taf0711/splice/internal/tools"
@@ -475,6 +476,13 @@ type Options struct {
 	// OnStageEvent receives typed pipeline stage lifecycle events. The
 	// deprecated NUL marker on OnReasoning remains for one release.
 	OnStageEvent func(StageEvent)
+
+	// OnPresentationState receives a presentation.State snapshot after each
+	// significant pipeline transition (plan computed, stage transition,
+	// intervention recorded, run end) when presentation emission is enabled.
+	// Nil disables emission entirely: no accumulator is created and no
+	// snapshots are produced.
+	OnPresentationState func(presentation.State)
 
 	// RequireCompletionSignal gates run completion for HEADLESS exec. Without it,
 	// any assistant turn that produces text but no tool call is accepted as the

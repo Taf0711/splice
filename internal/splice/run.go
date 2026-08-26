@@ -20,6 +20,7 @@ import (
 	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/sandbox/procrun"
 	"github.com/Taf0711/splice/internal/splice/learn"
+	"github.com/Taf0711/splice/internal/splice/presentrun"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/splice/stages"
 	"github.com/Taf0711/splice/internal/tools"
@@ -252,6 +253,12 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 	if err != nil {
 		return schemas.PipelineResult{}, fmt.Errorf("build stage registry: %w", err)
 	}
+
+	// Presentation emission: when a consumer is wired, create the snapshot
+	// accumulator and wrap the event callbacks so every plan and stage event
+	// flows through it. The accumulator is observability, not control flow: a
+	// refused event is counted and logged, never allowed to abort the run.
+	options, acc := wirePresentation(options, plan)
 	emitPipelinePlan(options, plan)
 
 	// A trace store is the memory client asserting the TraceStore interface; a
@@ -340,7 +347,10 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 		})
 	}
 
-	result, err := runIterationLoop(ctx, runID, plan, registry, provider, ledgerOpts, absWorkDir, runner, mem, rec, tr)
+	result, err := runIterationLoop(ctx, runID, plan, registry, provider, ledgerOpts, absWorkDir, runner, mem, rec, tr, acc)
+	if err == nil {
+		finishPresentation(acc, options, result)
+	}
 	if err != nil {
 		return schemas.PipelineResult{}, err
 	}
@@ -394,6 +404,7 @@ func runIterationLoop(
 	mem MemoryStore,
 	rec WorkspaceRecovery,
 	tr *runTraceAccumulator,
+	acc *presentrun.Accumulator,
 ) (schemas.PipelineResult, error) {
 	maxWallSeconds := defaultMaxWallSeconds
 	// Generation-only gate: input volume is bounded per call by compaction
@@ -510,6 +521,15 @@ func runIterationLoop(
 		}
 
 		decision := EvaluateTrajectory(history, maxIterations, &tokenBudget)
+		if acc != nil && presentrun.IsTrajectoryIntervention(decision.Action) {
+			failed := findFailed(passRecords)
+			if adapted, ok := presentrun.AdaptTrajectoryDecision(decision.Action, decision.Reason, failed.Name); ok {
+				acc.Apply(adapted)
+				options.OnPresentationState(acc.Snapshot())
+			} else {
+				acc.Skip()
+			}
+		}
 		if decision.Action == schemas.ActionContinue {
 			rc := buildRevisionContext(plan.RequestIntent, history, passRecords, passOutputs, "")
 			revisionContext = &rc
@@ -1386,6 +1406,49 @@ func skipSummaryDirComponent(rel string) bool {
 		}
 	}
 	return false
+}
+
+// wirePresentation sets up the presentation snapshot accumulator and wraps
+// the plan and stage event callbacks so every event flows through it. It
+// returns the wrapped options and the accumulator. When OnPresentationState
+// is nil it returns the options unchanged and a nil accumulator, so disabled
+// emission adds zero work on the hot path.
+func wirePresentation(options PipelineRunConfig, plan schemas.ExecutionPlan) (PipelineRunConfig, *presentrun.Accumulator) {
+	if options.OnPresentationState == nil {
+		return options, nil
+	}
+	acc := presentrun.New(func(msg string) { emitProgress(options, msg) })
+	priorStage := options.OnStageEvent
+	options.OnStageEvent = func(event agent.StageEvent) {
+		acc.Apply(presentrun.AdaptStageEvent(event))
+		options.OnPresentationState(acc.Snapshot())
+		if priorStage != nil {
+			priorStage(event)
+		}
+	}
+	priorPlan := options.OnPipelinePlan
+	options.OnPipelinePlan = func(event agent.PipelinePlanEvent) {
+		acc.Apply(presentrun.AdaptPlanEvent(plan.RequestIntent, event.Stages))
+		options.OnPresentationState(acc.Snapshot())
+		if priorPlan != nil {
+			priorPlan(event)
+		}
+	}
+	return options, acc
+}
+
+// finishPresentation feeds the terminal run event and emits the final
+// snapshot. Aborted and failed runs both project as "failed".
+func finishPresentation(acc *presentrun.Accumulator, options PipelineRunConfig, result schemas.PipelineResult) {
+	if acc == nil {
+		return
+	}
+	status := "completed"
+	if result.Status != "completed" {
+		status = "failed"
+	}
+	acc.Apply(presentrun.AdaptRunEvent(status, abortReason(result)))
+	options.OnPresentationState(acc.Snapshot())
 }
 
 // buildStageToolRunner prepares the runner options for a pipeline run and

@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/presentation"
 	"github.com/Taf0711/splice/internal/sessions"
 	"github.com/Taf0711/splice/internal/streamjson"
 	"github.com/Taf0711/splice/internal/tools"
@@ -29,6 +30,11 @@ type execEventWriter struct {
 	sessionID    string
 	streamedText *strings.Builder
 	err          error
+	// lastPresentationState retains the most recent presentation snapshot.
+	// State lives behind the Go callback, not on the wire, so this never
+	// affects stream-json output. P1.2 will render from the snapshots; for
+	// now the writer only proves the plumbing.
+	lastPresentationState presentation.State
 }
 
 func (writer *execEventWriter) runStart(cwd string, metadata execRunMetadata, permissionMode agent.PermissionMode) {
@@ -136,6 +142,14 @@ func (writer *execEventWriter) stage(event agent.StageEvent) {
 			ChangedFiles: append([]string(nil), event.ChangedFiles...),
 		})
 	}
+}
+
+// presentationState receives presentation.State snapshots after significant
+// transitions. State lives behind this Go callback, not on the wire, so the
+// stream-json output is unchanged. P1.2 renders from the snapshots; for now
+// the writer only retains the latest one so tests can prove the plumbing.
+func (writer *execEventWriter) presentationState(state presentation.State) {
+	writer.lastPresentationState = state
 }
 
 func (writer *execEventWriter) reasoning(delta string) {
