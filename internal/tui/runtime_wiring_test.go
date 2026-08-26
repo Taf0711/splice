@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/presentation"
 	"github.com/Taf0711/splice/internal/sessions"
 	splicerun "github.com/Taf0711/splice/internal/splice"
 	"github.com/Taf0711/splice/internal/splice/schemas"
@@ -77,13 +78,15 @@ func TestRunPathsFollowCallbackPolicies(t *testing.T) {
 		"OnToolOutput":        {class: "shared-live", execNonNil: true, approveNonNil: true},
 		"OnContext":           {class: "intentionally-nil", execNonNil: false, approveNonNil: false},
 		"OnSurfaceToUser":     {class: "shared-live", execNonNil: true, approveNonNil: true},
-		"OnPipelinePlan":      {class: "shared-live", execNonNil: true, approveNonNil: true},
-		"OnStageEvent":        {class: "shared-live", execNonNil: true, approveNonNil: true},
-		// OnPresentationState is exec-path-only for now: the CLI wires it to
-		// the presentation accumulator (P1.1). The TUI joins in P1.2 when it
-		// renders from presentation state, at which point this becomes
-		// shared-live.
-		"OnPresentationState": {class: "path-specific", execNonNil: true, approveNonNil: false},
+		// OnPipelinePlan and OnStageEvent are intentionally-nil since P1.2:
+		// the TUI no longer derives pipeline panel content from raw events,
+		// so neither TUI path needs them. The runtime still emits them for
+		// any other consumer; the TUI projects from OnPresentationState.
+		"OnPipelinePlan": {class: "intentionally-nil", execNonNil: false, approveNonNil: false},
+		"OnStageEvent":   {class: "intentionally-nil", execNonNil: false, approveNonNil: false},
+		// OnPresentationState is shared-live since P1.2: both the exec CLI
+		// and the TUI render from presentation state snapshots.
+		"OnPresentationState": {class: "shared-live", execNonNil: true, approveNonNil: true},
 	}
 
 	execValue := reflect.ValueOf(execOptions)
@@ -115,6 +118,18 @@ func TestRunPathsFollowCallbackPolicies(t *testing.T) {
 }
 
 func TestApprovePathFeedsPipelinePanel(t *testing.T) {
+	originalRun := tuiSpliceRun
+	defer func() { tuiSpliceRun = originalRun }()
+	// The approve path forwards presentation snapshots to the TUI: the run
+	// stub fires OnPresentationState, decorate transports it as a
+	// presentationStateMsg, and the panel projects from the state.
+	tuiSpliceRun = func(_ context.Context, _ string, _ agent.Provider, options agent.Options, _ splicerun.MemoryStore, _ splicerun.WorkspaceRecovery) (agent.Result, error) {
+		if options.OnPresentationState != nil {
+			options.OnPresentationState(approveProjectionState())
+		}
+		return agent.Result{FinalAnswer: "done"}, nil
+	}
+
 	root := t.TempDir()
 	store := testSessionStore(t)
 	provider := &fakeProvider{events: approvePlanEvents()}
@@ -150,21 +165,16 @@ func TestApprovePathFeedsPipelinePanel(t *testing.T) {
 	if result, ok := resultMsg.(planExecutionResultMsg); ok && result.err != nil {
 		t.Fatalf("approve run failed: %v", result.err)
 	}
-	planAt, stageAt := -1, -1
+	var stateAt = -1
 	for i, msg := range messages {
-		switch msg.(type) {
-		case pipelinePlanMsg:
-			if planAt == -1 {
-				planAt = i
-			}
-		case pipelineStageEventMsg:
-			if stageAt == -1 {
-				stageAt = i
+		if _, ok := msg.(presentationStateMsg); ok {
+			if stateAt == -1 {
+				stateAt = i
 			}
 		}
 	}
-	if planAt < 0 || stageAt < 0 || planAt >= stageAt {
-		t.Fatalf("runtime message order: plan=%d stage=%d, want plan before stage", planAt, stageAt)
+	if stateAt < 0 {
+		t.Fatalf("no presentationStateMsg received; messages=%T", messages)
 	}
 	for _, msg := range messages {
 		updated, _ := started.Update(msg)
@@ -300,20 +310,20 @@ func TestDecorateDoesNotManufactureUnownedCallbacks(t *testing.T) {
 	}
 }
 
-func TestDecorateTransportsPipelinePlan(t *testing.T) {
+func TestDecorateTransportsPresentationState(t *testing.T) {
 	var messages []tea.Msg
 	decorated := (runtimeWiring{runID: 7, send: func(msg tea.Msg) { messages = append(messages, msg) }}).decorate(agent.Options{})
-	decorated.OnPipelinePlan(agent.PipelinePlanEvent{Stages: []string{"code_writer", "test_runner"}})
+	decorated.OnPresentationState(approveProjectionState())
 
 	if len(messages) != 1 {
 		t.Fatalf("messages = %d, want 1", len(messages))
 	}
-	msg, ok := messages[0].(pipelinePlanMsg)
+	msg, ok := messages[0].(presentationStateMsg)
 	if !ok {
-		t.Fatalf("message = %T, want pipelinePlanMsg", messages[0])
+		t.Fatalf("message = %T, want presentationStateMsg", messages[0])
 	}
-	if msg.runID != 7 || !reflect.DeepEqual(msg.event.Stages, []string{"code_writer", "test_runner"}) {
-		t.Fatalf("pipeline plan message = %#v", msg)
+	if msg.runID != 7 || len(msg.state.Nodes) == 0 {
+		t.Fatalf("presentation state message = %#v", msg)
 	}
 }
 
@@ -340,8 +350,7 @@ func TestDecorateCallsPriorCallbacksOnce(t *testing.T) {
 			increment("surface")
 			return agent.SurfaceToUserDecision{Action: agent.SurfaceToUserContinue}, nil
 		},
-		OnPipelinePlan: func(agent.PipelinePlanEvent) { increment("pipeline-plan") },
-		OnStageEvent:   func(agent.StageEvent) { increment("stage") },
+		OnPresentationState: func(presentation.State) { increment("presentation-state") },
 	}
 	decorated := (runtimeWiring{runID: 11, send: func(tea.Msg) {}, beforeText: func(string) { increment("before-text") }}).decorate(options)
 	decorated.OnText("text")
@@ -358,10 +367,9 @@ func TestDecorateCallsPriorCallbacksOnce(t *testing.T) {
 	if _, err := decorated.OnSurfaceToUser(context.Background(), agent.SurfaceToUserRequest{}); err != nil {
 		t.Fatalf("surface callback: %v", err)
 	}
-	decorated.OnPipelinePlan(agent.PipelinePlanEvent{Stages: []string{"code_writer"}})
-	decorated.OnStageEvent(agent.StageEvent{Name: "code_writer", Status: "running"})
+	decorated.OnPresentationState(approveProjectionState())
 
-	for _, name := range []string{"before-text", "text", "reasoning", "tool-start", "tool-delta", "permission-request", "ask-user", "tool-output", "surface", "pipeline-plan", "stage"} {
+	for _, name := range []string{"before-text", "text", "reasoning", "tool-start", "tool-delta", "permission-request", "ask-user", "tool-output", "surface", "presentation-state"} {
 		if calls[name] != 1 {
 			t.Errorf("%s calls = %d, want 1", name, calls[name])
 		}

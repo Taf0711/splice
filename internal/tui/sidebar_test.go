@@ -10,7 +10,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/presentation"
 	"github.com/Taf0711/splice/internal/sessions"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/tools"
@@ -230,7 +230,11 @@ func TestSidebarActiveGating(t *testing.T) {
 func TestSidebarSurvivesSuggestionPalette(t *testing.T) {
 	m := sidebarTestModel()
 	m.pipeline.reset()
-	m.pipeline.applyStageEvent(agent.StageEvent{Name: "code_writer", Status: "running"})
+	m.pipeline.applyState(presentation.State{
+		SchemaVersion: presentation.PresentationSchemaVersionV1,
+		Lifecycle:     presentation.LifecycleExecute,
+		Nodes:         []presentation.ExecutionNode{{ID: "code_writer", Label: "code_writer", Kind: presentation.NodeKindWrite, Status: presentation.NodeStatusRunning}},
+	})
 	m = typeRunes(t, m, "/")
 	if !m.suggestionsActive() {
 		t.Fatalf("expected command suggestions, got %#v", m.suggestions)
@@ -740,10 +744,11 @@ func TestTwoColumnTranscriptViewWidth(t *testing.T) {
 func TestSidebarRendersPipelineWithoutPlanOrAgents(t *testing.T) {
 	m := sidebarTestModel()
 	m.plan.steps = nil
-	marker := "\x00STAGE{\"name\":\"code_writer\",\"status\":\"running\",\"detail\":\"\",\"progress\":0,\"changedFiles\":null}\x00"
-	if !m.pipeline.applyStageMarker(marker) {
-		t.Fatal("applyStageMarker returned false")
-	}
+	m.pipeline.applyState(presentation.State{
+		SchemaVersion: presentation.PresentationSchemaVersionV1,
+		Lifecycle:     presentation.LifecycleExecute,
+		Nodes:         []presentation.ExecutionNode{{ID: "code_writer", Label: "code_writer", Kind: presentation.NodeKindWrite, Status: presentation.NodeStatusRunning}},
+	})
 	if !m.sidebarActive() {
 		t.Fatal("the stable sidebar should remain active with pipeline content")
 	}

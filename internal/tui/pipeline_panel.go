@@ -1,13 +1,12 @@
 package tui
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 
 	"charm.land/lipgloss/v2"
 
-	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/presentation"
 )
 
 const (
@@ -106,151 +105,79 @@ func (s pipelinePanelState) presentation() pipelinePresentation {
 	return p
 }
 
-type pipelineStageMarkerPayload struct {
-	Name         string   `json:"name"`
-	Status       string   `json:"status"`
-	Detail       string   `json:"detail"`
-	Progress     int      `json:"progress"`
-	ChangedFiles []string `json:"changedFiles"`
-}
-
-// applyPlan replaces the panel with the ordered roster for a new pipeline plan.
-func (s *pipelinePanelState) applyPlan(event agent.PipelinePlanEvent) {
-	s.stages = make([]pipelineStageRow, len(event.Stages))
-	for i, name := range event.Stages {
-		s.stages[i] = pipelineStageRow{name: name, status: pipelineStagePending}
-	}
-	s.active = true
-	s.changedFiles = nil
+// applyState rebuilds the panel from a presentation.State snapshot. After
+// the P1.2 projection switch this is the ONLY source of pipeline view state:
+// the TUI derives nothing from raw pipeline events anymore.
+func (s *pipelinePanelState) applyState(state presentation.State) {
+	s.stages = nil
 	s.messages = nil
-}
-
-// applyStageEvent updates the panel from a typed stage event.
-func (s *pipelinePanelState) applyStageEvent(event agent.StageEvent) {
-	s.applyStagePayload(pipelineStageMarkerPayload{
-		Name:         event.Name,
-		Status:       event.Status,
-		Detail:       event.Detail,
-		Progress:     event.Progress,
-		ChangedFiles: event.ChangedFiles,
-	})
-}
-
-// applyStageMarker consumes a structured stage marker from the reasoning stream.
-// Live runs prefer applyStageEvent. This path remains for resume and old sessions.
-func (s *pipelinePanelState) applyStageMarker(line string) bool {
-	if !strings.HasPrefix(line, stageMarkerBegin) {
-		return false
-	}
-
-	payloadText := strings.TrimPrefix(line, stageMarkerBegin)
-	if idx := strings.Index(payloadText, stageMarkerEnd); idx >= 0 {
-		payloadText = payloadText[:idx]
-	}
-
-	var payload pipelineStageMarkerPayload
-	if err := json.Unmarshal([]byte(payloadText), &payload); err != nil || strings.TrimSpace(payload.Name) == "" {
-		return true
-	}
-	s.applyStagePayload(payload)
-	return true
-}
-
-func (s *pipelinePanelState) applyStagePayload(payload pipelineStageMarkerPayload) {
-	switch strings.ToLower(strings.TrimSpace(payload.Status)) {
-	case "message":
-		// A repair-loop message is a panel note, not a stage transition. It must
-		// not touch stage rows (which would otherwise reset test_runner to
-		// pending) and must not change the active flag.
-		s.messages = append(s.messages, pipelineMessageRow{
-			from:     payload.Name,
-			to:       parseMessageTo(payload.Detail),
-			detail:   payload.Detail,
-			resolved: false,
-		})
-		return
-	case "repaired":
-		// Resolve only the latest unresolved message, matching the repair loop's
-		// message/repaired pairing.
-		for i := len(s.messages) - 1; i >= 0; i-- {
-			if !s.messages[i].resolved {
-				s.messages[i].resolved = true
-				break
-			}
-		}
-		return
-	}
-
-	status := pipelineStageStatusFromString(payload.Status)
-	progress := payload.Progress
-	if progress < 0 {
-		progress = 0
-	}
-	if progress > 100 {
-		progress = 100
-	}
-
-	idx := -1
-	for i := range s.stages {
-		if s.stages[i].name == payload.Name {
-			idx = i
-			break
-		}
-	}
-	if idx == -1 {
-		s.stages = append(s.stages, pipelineStageRow{name: payload.Name, status: pipelineStagePending})
-		idx = len(s.stages) - 1
-	}
-	// Mark a real repair re-entry: a stage that already reached a terminal
-	// status is being run again (the repair loop revisits test_runner and
-	// code_writer). A fresh pending->running transition is not a re-entry.
-	existed := s.stages[idx]
-	if status == pipelineStageRunning && existed.status != pipelineStagePending {
-		s.stages[idx].reentered = true
-	}
-	s.stages[idx].status = status
-	s.stages[idx].detail = payload.Detail
-	s.stages[idx].progress = progress
+	s.changedFiles = nil
 	s.active = true
-	if payload.ChangedFiles != nil {
-		s.changedFiles = append([]string(nil), payload.ChangedFiles...)
-	}
-}
-
-// parseMessageTo extracts the "to" token from a message detail such as
-// "revision_request -> code_writer: 2 failing tests": the token after "-> " up
-// to the next ":" or " ". A missing "-> " falls back to "".
-func parseMessageTo(detail string) string {
-	idx := strings.Index(detail, "-> ")
-	if idx < 0 {
-		return ""
-	}
-	rest := detail[idx+len("-> "):]
-	end := len(rest)
-	for i, r := range rest {
-		if r == ':' || r == ' ' {
-			end = i
-			break
+	for _, node := range state.Nodes {
+		row := pipelineStageRow{
+			name:     node.ID,
+			status:   pipelineStageStatusFromNode(node.Status),
+			progress: int(node.Progress * 100),
 		}
+		// A running node with an intervention against it is a repair
+		// re-entry, not a fresh run: the repair loop re-enters a terminal
+		// stage (test_runner -> code_writer -> test_runner). The roster
+		// keeps exactly the planned stages; the intervention list carries
+		// the repair story.
+		if node.Status == presentation.NodeStatusRunning && hasInterventionForNode(state.Interventions, node.ID) {
+			row.reentered = true
+		}
+		s.stages = append(s.stages, row)
 	}
-	return strings.TrimSpace(rest[:end])
+	for _, intervention := range state.Interventions {
+		row := pipelineMessageRow{
+			from:   intervention.TargetNodeID,
+			detail: intervention.Reason,
+		}
+		switch {
+		case intervention.Kind == presentation.InterventionRollback && intervention.Status == presentation.InterventionProposed:
+			row.resolved = false
+		case intervention.Kind == presentation.InterventionContinue && intervention.Status == presentation.InterventionApplied:
+			row.resolved = true
+		default:
+			continue
+		}
+		s.messages = append(s.messages, row)
+	}
+	for _, file := range state.Files {
+		s.changedFiles = append(s.changedFiles, file.Path)
+	}
 }
 
-func pipelineStageStatusFromString(status string) pipelineStageStatus {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "running":
+// pipelineStageStatusFromNode maps a presentation node status onto the
+// panel's display status. NodeStatusPending covers both pending and skipped
+// stages: the presentation contract normalizes "skipped" to pending, so the
+// panel cannot distinguish them (the skip glyph is a P1.3+ kind concern).
+func pipelineStageStatusFromNode(status presentation.NodeStatus) pipelineStageStatus {
+	switch status {
+	case presentation.NodeStatusRunning:
 		return pipelineStageRunning
-	case "completed":
+	case presentation.NodeStatusComplete:
 		return pipelineStageCompleted
-	case "failed":
+	case presentation.NodeStatusFailed:
 		return pipelineStageFailed
-	case "skipped":
-		return pipelineStageSkipped
-	case "incomplete":
+	case presentation.NodeStatusDegraded:
 		return pipelineStageIncomplete
 	default:
 		return pipelineStagePending
 	}
+}
+
+// hasInterventionForNode reports whether any intervention targets the node.
+// The repair loop's message/repaired pair (rollback proposed, continue
+// applied) both carry the target node id, so either one marks a re-entry.
+func hasInterventionForNode(interventions []presentation.Intervention, nodeID string) bool {
+	for _, intervention := range interventions {
+		if intervention.TargetNodeID == nodeID {
+			return true
+		}
+	}
+	return false
 }
 
 // reset clears stage rows and marks a new pipeline run active.
@@ -426,7 +353,11 @@ func (p pipelinePresentation) renderSection(width int, phase int) []string {
 		lines = append(lines, "")
 		lines = append(lines, zeroTheme.muted.Bold(true).Render("CURRENT"))
 		lines = append(lines, " "+zeroTheme.faint.Render("stage: ")+zeroTheme.ink.Render(truncateStep(p.current.name, maxInt(4, width-8))))
-		lines = append(lines, " "+zeroTheme.faint.Render("action: ")+zeroTheme.muted.Render(truncateStep(p.current.detail, maxInt(4, width-9))))
+		// The presentation contract does not carry a per-node action detail, so
+		// the action line renders only when a detail is available.
+		if strings.TrimSpace(p.current.detail) != "" {
+			lines = append(lines, " "+zeroTheme.faint.Render("action: ")+zeroTheme.muted.Render(truncateStep(p.current.detail, maxInt(4, width-9))))
+		}
 	}
 	if len(p.messages) > 0 {
 		lines = append(lines, "")
@@ -440,7 +371,11 @@ func (p pipelinePresentation) renderSection(width int, phase int) []string {
 			if msg.resolved {
 				glyph = zeroTheme.green.Render("✓")
 			}
-			body := msg.from + " -> " + msg.to + ": " + msg.detail
+			body := msg.from
+			if msg.to != "" {
+				body += " -> " + msg.to
+			}
+			body += ": " + msg.detail
 			lines = append(lines, " "+glyph+" "+zeroTheme.muted.Render(truncateStep(body, room)))
 		}
 	}

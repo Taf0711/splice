@@ -1,0 +1,8 @@
+ ✓ code_writer
+ ◜ test_runner
+ ○ acceptance_verifier
+
+ ████████░░░░░░░░  50%
+
+CURRENT
+ stage: test_runner

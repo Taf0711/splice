@@ -7,7 +7,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/presentation"
 )
 
 // stateWith builds a pipelinePanelState with the given ordered stages.
@@ -64,12 +64,18 @@ func TestPipelineStripStateDerivation(t *testing.T) {
 // "repair" stage name. The roster must stay exactly the planned stages.
 func TestPipelineStripRepairIsReentryNotInventedStage(t *testing.T) {
 	var state pipelinePanelState
-	state.applyPlan(agent.PipelinePlanEvent{Stages: []string{"code_writer", "test_runner", "acceptance_verifier"}})
-	// First pass: code_writer completes, test_runner runs then fails.
-	state.applyStageEvent(agent.StageEvent{Name: "code_writer", Status: "completed", Progress: 100})
-	state.applyStageEvent(agent.StageEvent{Name: "test_runner", Status: "failed", Progress: 100})
-
-	state.applyStageEvent(agent.StageEvent{Name: "test_runner", Status: "running", Detail: "repair retry"})
+	state.applyState(presentation.State{
+		SchemaVersion: presentation.PresentationSchemaVersionV1,
+		Lifecycle:     presentation.LifecycleExecute,
+		Nodes: []presentation.ExecutionNode{
+			{ID: "code_writer", Label: "code_writer", Kind: presentation.NodeKindWrite, Status: presentation.NodeStatusComplete, Progress: 1},
+			{ID: "test_runner", Label: "test_runner", Kind: presentation.NodeKindTest, Status: presentation.NodeStatusRunning, Progress: 0.5},
+			{ID: "acceptance_verifier", Label: "acceptance_verifier", Kind: presentation.NodeKindVerify, Status: presentation.NodeStatusPending},
+		},
+		Interventions: []presentation.Intervention{
+			{Kind: presentation.InterventionRollback, Reason: "revision_request -> code_writer: 2 failing tests", TargetNodeID: "test_runner", Status: presentation.InterventionProposed},
+		},
+	})
 	if len(state.stages) != 3 {
 		t.Fatalf("repair invented a stage: stages = %d, want 3", len(state.stages))
 	}
@@ -164,9 +170,7 @@ func pipelineStripModel(t *testing.T) model {
 	m.height = 30
 	m.altScreen = true
 	m.headerPrinted = true
-	m.pipeline.applyPlan(agent.PipelinePlanEvent{Stages: []string{"code_writer", "test_runner", "acceptance_verifier"}})
-	m.pipeline.applyStageEvent(agent.StageEvent{Name: "code_writer", Status: "completed", Progress: 100})
-	m.pipeline.applyStageEvent(agent.StageEvent{Name: "test_runner", Status: "running", Detail: "writing tests", Progress: 50})
+	m.pipeline.applyState(midRunProjectionState())
 	return m
 }
 
@@ -191,7 +195,7 @@ func TestPipelineStripHiddenWhenSidebarHosts(t *testing.T) {
 	m := mouseTestModel()
 	m.width = 110
 	m.height = 40
-	m.pipeline.applyPlan(agent.PipelinePlanEvent{Stages: []string{"code_writer", "test_runner", "acceptance_verifier"}})
+	m.pipeline.applyState(pendingRosterState("code_writer", "test_runner", "acceptance_verifier"))
 	m.transcript = append(m.transcript, transcriptRow{kind: rowToolCall, tool: "read_file"})
 	if !m.sidebarAvailable() {
 		t.Fatal("precondition: wide terminal should have sidebar available")
@@ -213,7 +217,7 @@ func TestPipelineStripHiddenWhenSidebarHosts(t *testing.T) {
 func TestPipelineStripSuppressedOnCtrlB(t *testing.T) {
 	m := mouseTestModel()
 	m.height = 40
-	m.pipeline.applyPlan(agent.PipelinePlanEvent{Stages: []string{"code_writer", "test_runner"}})
+	m.pipeline.applyState(pendingRosterState("code_writer", "test_runner"))
 	m.transcript = append(m.transcript, transcriptRow{kind: rowToolCall, tool: "read_file"})
 	m.sidebarHidden = true
 	if !m.sidebarAvailable() {

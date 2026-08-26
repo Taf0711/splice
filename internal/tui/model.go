@@ -625,19 +625,13 @@ type planUpdateMsg struct {
 	items []tools.PlanItem
 }
 
-type pipelineStageMarkerMsg struct {
+// presentationStateMsg forwards a presentation.State snapshot from the
+// runtime's OnPresentationState callback to the live model (the callback
+// runs on the agent goroutine and captures model by value, so it cannot
+// mutate m.pipeline directly).
+type presentationStateMsg struct {
 	runID int
-	line  string
-}
-
-type pipelinePlanMsg struct {
-	runID int
-	event agent.PipelinePlanEvent
-}
-
-type pipelineStageEventMsg struct {
-	runID int
-	event agent.StageEvent
+	state presentation.State
 }
 
 // planStepExplanationMsg carries the model's fresh, plain-English write-up of a
@@ -2611,23 +2605,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.plan.updateFromItems(msg.items, m.now())
 		return m, nil
-	case pipelinePlanMsg:
+	case presentationStateMsg:
 		if msg.runID != m.activeRunID {
 			return m, nil
 		}
-		m.pipeline.applyPlan(msg.event)
-		return m, nil
-	case pipelineStageEventMsg:
-		if msg.runID != m.activeRunID {
-			return m, nil
-		}
-		m.pipeline.applyStageEvent(msg.event)
-		return m, nil
-	case pipelineStageMarkerMsg:
-		if msg.runID != m.activeRunID {
-			return m, nil
-		}
-		m.pipeline.applyStageMarker(msg.line)
+		m.pipeline.applyState(msg.state)
 		return m, nil
 	case planStepExplanationMsg:
 		// Drop a result from a previous run: beginRun bumps planDetailGen and clears
@@ -5690,12 +5672,6 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			return decision, nil
 		}
 
-		onStageEvent := options.OnStageEvent
-		options.OnStageEvent = func(event agent.StageEvent) {
-			if onStageEvent != nil {
-				onStageEvent(event)
-			}
-		}
 		onReasoning := options.OnReasoning
 		options.OnReasoning = func(delta string) {
 			now := m.now()
@@ -6267,13 +6243,6 @@ func (m model) sendAgentReasoning(runID int, delta string) {
 		return
 	}
 	m.runtimeMessageSink(agentReasoningMsg{runID: runID, delta: delta})
-}
-
-func (m model) sendPipelineStageEvent(runID int, event agent.StageEvent) {
-	if m.runtimeMessageSink == nil {
-		return
-	}
-	m.runtimeMessageSink(pipelineStageEventMsg{runID: runID, event: event})
 }
 
 func (m model) sendAgentUsage(runID int, modelID string, event zeroruntime.Usage, costs ...*agent.UsageCostEstimate) {

@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/presentation"
 	"github.com/Taf0711/splice/internal/tools"
 )
 
@@ -153,27 +154,19 @@ func (w runtimeWiring) decorate(options agent.Options) agent.Options {
 			return agent.SurfaceToUserDecision{Action: agent.SurfaceToUserAbort, Message: ctx.Err().Error()}, ctx.Err()
 		}
 	}
-	priorPipelinePlan := options.OnPipelinePlan
-	options.OnPipelinePlan = func(event agent.PipelinePlanEvent) {
+	// OnPresentationState forwards the presentation snapshot to the TUI.
+	// The session-log wrapper (set upstream in runAgentWithOptions) runs
+	// after this one, so the TUI renders before the log entry is appended.
+	// OnPipelinePlan and OnStageEvent pass through unwrapped: the TUI no
+	// longer derives panel content from raw pipeline events (P1.2).
+	priorPresentation := options.OnPresentationState
+	options.OnPresentationState = func(state presentation.State) {
 		if w.send != nil {
-			copied := agent.PipelinePlanEvent{Stages: append([]string(nil), event.Stages...)}
-			w.send(pipelinePlanMsg{runID: w.runID, event: copied})
+			w.send(presentationStateMsg{runID: w.runID, state: state})
 		}
-		if priorPipelinePlan != nil {
-			priorPipelinePlan(event)
+		if priorPresentation != nil {
+			priorPresentation(state)
 		}
 	}
-	priorStageEvent := options.OnStageEvent
-	options.OnStageEvent = func(event agent.StageEvent) {
-		if w.send != nil {
-			w.send(pipelineStageEventMsg{runID: w.runID, event: event})
-		}
-		if priorStageEvent != nil {
-			priorStageEvent(event)
-		}
-	}
-	// OnPresentationState stays nil on the TUI path until P1.2, when the TUI
-	// renders from presentation state snapshots. The wiring test pins this
-	// as path-specific so the flip is a deliberate, reviewed change.
 	return options
 }

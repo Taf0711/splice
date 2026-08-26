@@ -15,6 +15,7 @@ import (
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/config"
 	"github.com/Taf0711/splice/internal/memd"
+	"github.com/Taf0711/splice/internal/presentation"
 	"github.com/Taf0711/splice/internal/sessions"
 	splicerun "github.com/Taf0711/splice/internal/splice"
 	"github.com/Taf0711/splice/internal/splice/schemas"
@@ -46,13 +47,11 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-func TestPipelinePlanSeedsStableStageRoster(t *testing.T) {
+func TestPipelineStateSeedsStableStageRoster(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.activeRunID = 3
-	updated, _ := m.Update(pipelinePlanMsg{
-		runID: 3,
-		event: agent.PipelinePlanEvent{Stages: []string{"code_writer", "test_runner", "acceptance_verifier"}},
-	})
+	state := pendingRosterState("code_writer", "test_runner", "acceptance_verifier")
+	updated, _ := m.Update(presentationStateMsg{runID: 3, state: state})
 	m = updated.(model)
 
 	if len(m.pipeline.stages) != 3 {
@@ -64,10 +63,10 @@ func TestPipelinePlanSeedsStableStageRoster(t *testing.T) {
 		}
 	}
 
-	updated, _ = m.Update(pipelineStageEventMsg{
-		runID: 3,
-		event: agent.StageEvent{Name: "code_writer", Status: "running", Detail: "writing code changes"},
-	})
+	// A mid-run snapshot (code_writer now running) must not reorder the roster.
+	running := pendingRosterState("code_writer", "test_runner", "acceptance_verifier")
+	running.Nodes[0].Status = presentation.NodeStatusRunning
+	updated, _ = m.Update(presentationStateMsg{runID: 3, state: running})
 	m = updated.(model)
 	if len(m.pipeline.stages) != 3 || m.pipeline.stages[0].status != pipelineStageRunning {
 		t.Fatalf("stage event changed roster: %#v", m.pipeline.stages)
@@ -76,30 +75,28 @@ func TestPipelinePlanSeedsStableStageRoster(t *testing.T) {
 
 func TestPipelinePresentationComputesOverallProgress(t *testing.T) {
 	var state pipelinePanelState
-	state.applyPlan(agent.PipelinePlanEvent{Stages: []string{"code_writer", "test_runner", "acceptance_verifier"}})
-	state.applyStageEvent(agent.StageEvent{Name: "code_writer", Status: "completed", Progress: 100})
-	state.applyStageEvent(agent.StageEvent{Name: "test_runner", Status: "running", Progress: 50})
-
-	presentation := state.presentation()
-	if presentation.done != 1 || presentation.total != 3 {
-		t.Fatalf("counts = %d/%d, want 1/3", presentation.done, presentation.total)
+	state.applyState(midRunProjectionState())
+	p := state.presentation()
+	if p.done != 1 || p.total != 3 {
+		t.Fatalf("counts = %d/%d, want 1/3", p.done, p.total)
 	}
-	if presentation.progress != 50 {
-		t.Fatalf("progress = %d, want 50", presentation.progress)
+	if p.progress != 50 {
+		t.Fatalf("progress = %d, want 50", p.progress)
 	}
-	if presentation.current == nil || presentation.current.name != "test_runner" {
-		t.Fatalf("current = %#v, want test_runner", presentation.current)
+	if p.current == nil || p.current.name != "test_runner" {
+		t.Fatalf("current = %#v, want test_runner", p.current)
 	}
 }
 
-func TestPipelinePanelApplyStageEvent(t *testing.T) {
+func TestPipelinePanelApplyState(t *testing.T) {
 	var state pipelinePanelState
-	state.applyStageEvent(agent.StageEvent{
-		Name:         "code_writer",
-		Status:       "running",
-		Detail:       "writing files",
-		Progress:     50,
-		ChangedFiles: []string{"main.go"},
+	state.applyState(presentation.State{
+		SchemaVersion: presentation.PresentationSchemaVersionV1,
+		Lifecycle:     presentation.LifecycleExecute,
+		Nodes: []presentation.ExecutionNode{
+			{ID: "code_writer", Label: "code_writer", Kind: presentation.NodeKindWrite, Status: presentation.NodeStatusRunning, Progress: 0.5},
+		},
+		Files: []presentation.FileChangeSummary{{Path: "main.go", Status: "modified"}},
 	})
 	if len(state.stages) != 1 {
 		t.Fatalf("stages = %d, want 1", len(state.stages))
@@ -113,50 +110,29 @@ func TestPipelinePanelApplyStageEvent(t *testing.T) {
 	}
 }
 
-func TestPipelinePanelApplyStageMarker(t *testing.T) {
-	var state pipelinePanelState
-	marker := "\x00STAGE{\"name\":\"code_writer\",\"status\":\"running\",\"detail\":\"\",\"progress\":0,\"changedFiles\":[]}\x00"
-	if !state.applyStageMarker(marker) {
-		t.Fatal("applyStageMarker returned false for stage marker")
-	}
-	if len(state.stages) != 1 {
-		t.Fatalf("stages = %d, want 1", len(state.stages))
-	}
-	stage := state.stages[0]
-	if stage.name != "code_writer" || stage.status != pipelineStageRunning {
-		t.Fatalf("stage = %#v, want code_writer running", stage)
-	}
-}
-
-func TestPipelinePanelMapsEveryEmittedStageStatus(t *testing.T) {
+func TestPipelinePanelMapsEveryPresentationNodeStatus(t *testing.T) {
 	cases := []struct {
-		status string
+		status presentation.NodeStatus
 		want   pipelineStageStatus
 	}{
-		{status: "skipped", want: pipelineStageSkipped},
-		{status: "running", want: pipelineStageRunning},
-		{status: "failed", want: pipelineStageFailed},
-		{status: "incomplete", want: pipelineStageIncomplete},
-		{status: "completed", want: pipelineStageCompleted},
+		{status: presentation.NodeStatusPending, want: pipelineStagePending},
+		{status: presentation.NodeStatusRunning, want: pipelineStageRunning},
+		{status: presentation.NodeStatusComplete, want: pipelineStageCompleted},
+		{status: presentation.NodeStatusFailed, want: pipelineStageFailed},
+		{status: presentation.NodeStatusDegraded, want: pipelineStageIncomplete},
 	}
 	for _, tc := range cases {
-		t.Run(tc.status, func(t *testing.T) {
+		t.Run(string(tc.status), func(t *testing.T) {
 			var state pipelinePanelState
-			marker := fmt.Sprintf("\x00STAGE{\"name\":\"stage\",\"status\":%q}\x00", tc.status)
-			if !state.applyStageMarker(marker) {
-				t.Fatal("applyStageMarker returned false")
-			}
+			state.applyState(presentation.State{
+				SchemaVersion: presentation.PresentationSchemaVersionV1,
+				Lifecycle:     presentation.LifecycleExecute,
+				Nodes:         []presentation.ExecutionNode{{ID: "stage", Label: "stage", Kind: presentation.NodeKindCustom, Status: tc.status}},
+			})
 			if got := state.stages[0].status; got != tc.want {
 				t.Fatalf("status %q mapped to %v, want %v", tc.status, got, tc.want)
 			}
 		})
-	}
-}
-
-func TestPipelinePanelApplyStageMarkerIgnoresNormalText(t *testing.T) {
-	var state pipelinePanelState
-	if state.applyStageMarker("ordinary reasoning") {
-		t.Fatal("applyStageMarker consumed non-marker text")
 	}
 }
 
@@ -179,16 +155,21 @@ func TestPipelinePanelRenderSectionGlyphs(t *testing.T) {
 
 func TestPipelinePanelAlwaysShowsOverallProgress(t *testing.T) {
 	var state pipelinePanelState
-	state.applyPlan(agent.PipelinePlanEvent{Stages: []string{"code_writer", "test_runner", "acceptance_verifier"}})
-	state.applyStageEvent(agent.StageEvent{Name: "code_writer", Status: "running", Progress: 0})
-
+	state.applyState(presentation.State{
+		SchemaVersion: presentation.PresentationSchemaVersionV1,
+		Lifecycle:     presentation.LifecycleExecute,
+		Nodes: []presentation.ExecutionNode{
+			{ID: "code_writer", Label: "code_writer", Kind: presentation.NodeKindWrite, Status: presentation.NodeStatusRunning, Progress: 0},
+			{ID: "test_runner", Label: "test_runner", Kind: presentation.NodeKindTest, Status: presentation.NodeStatusPending},
+			{ID: "acceptance_verifier", Label: "acceptance_verifier", Kind: presentation.NodeKindVerify, Status: presentation.NodeStatusPending},
+		},
+	})
 	plain := plainRender(t, strings.Join(state.renderSection(40, 0), "\n"))
 	if !strings.Contains(plain, "0%") {
 		t.Fatalf("running pipeline hid indeterminate progress: %q", plain)
 	}
 
-	state.applyStageEvent(agent.StageEvent{Name: "code_writer", Status: "completed", Progress: 100})
-	state.applyStageEvent(agent.StageEvent{Name: "test_runner", Status: "running", Progress: 50})
+	state.applyState(midRunProjectionState())
 	plain = plainRender(t, strings.Join(state.renderSection(40, 0), "\n"))
 	if !strings.Contains(plain, "50%") {
 		t.Fatalf("aggregate pipeline progress missing: %q", plain)
@@ -257,9 +238,9 @@ func TestPipelinePanelResetClearLifecycle(t *testing.T) {
 	if !state.isEmpty() {
 		t.Fatal("reset with no stages should be empty for rendering")
 	}
-	state.applyStageMarker("\x00STAGE{\"name\":\"planner\",\"status\":\"completed\",\"detail\":\"done\",\"progress\":100,\"changedFiles\":[\"main.go\"]}\x00")
+	state.applyState(midRunProjectionState())
 	if state.isEmpty() || len(state.changedFiles) != 1 || state.changedFiles[0] != "main.go" {
-		t.Fatalf("marker after reset state = %#v", state)
+		t.Fatalf("applyState after reset state = %#v", state)
 	}
 	state.clear()
 	if state.active || len(state.stages) != 0 || len(state.changedFiles) != 0 || !state.isEmpty() {
@@ -267,47 +248,64 @@ func TestPipelinePanelResetClearLifecycle(t *testing.T) {
 	}
 }
 
-func TestPipelinePanelMessageDoesNotResetStage(t *testing.T) {
+func TestPipelinePanelInterventionDoesNotResetStage(t *testing.T) {
+	// A repair-loop message is a rollback intervention in the state. The
+	// node keeps its running status (the state says running); the
+	// intervention is a panel note, never a stage transition.
 	var state pipelinePanelState
-	state.applyStageMarker("\x00STAGE{\"name\":\"test_runner\",\"status\":\"completed\",\"detail\":\"tests passed\",\"progress\":100}\x00")
-	before := state.stages[0]
-
-	state.applyStageEvent(agent.StageEvent{
-		Name:   "test_runner",
-		Status: "message",
-		Detail: "revision_request -> code_writer: 2 failing tests",
+	state.applyState(presentation.State{
+		SchemaVersion: presentation.PresentationSchemaVersionV1,
+		Lifecycle:     presentation.LifecycleExecute,
+		Nodes: []presentation.ExecutionNode{
+			{ID: "test_runner", Label: "test_runner", Kind: presentation.NodeKindTest, Status: presentation.NodeStatusRunning, Progress: 0.9},
+		},
+		Interventions: []presentation.Intervention{
+			{Kind: presentation.InterventionRollback, Reason: "revision_request -> code_writer: 2 failing tests", TargetNodeID: "test_runner", Status: presentation.InterventionProposed},
+		},
 	})
-
 	if len(state.stages) != 1 {
-		t.Fatalf("stages = %d, want 1 (message must not create a stage row)", len(state.stages))
+		t.Fatalf("stages = %d, want 1", len(state.stages))
 	}
-	if after := state.stages[0]; after != before {
-		t.Fatalf("test_runner stage row changed after message: before=%#v after=%#v", before, after)
+	if got := state.stages[0].status; got != pipelineStageRunning {
+		t.Fatalf("test_runner stage row changed by intervention: %v", got)
 	}
 	if len(state.messages) != 1 {
 		t.Fatalf("messages = %d, want 1", len(state.messages))
 	}
 	msg := state.messages[0]
-	if msg.from != "test_runner" || msg.to != "code_writer" || msg.resolved {
-		t.Fatalf("message = %#v, want from=test_runner to=code_writer resolved=false", msg)
+	if msg.from != "test_runner" || msg.detail != "revision_request -> code_writer: 2 failing tests" || msg.resolved {
+		t.Fatalf("message = %#v, want from=test_runner unresolved with full detail", msg)
 	}
 }
 
-func TestPipelinePanelRepairedResolvesLatestUnresolved(t *testing.T) {
+func TestPipelinePanelInterventionResolution(t *testing.T) {
+	// The repair loop's message/repaired pairing lands in the state as a
+	// proposed rollback followed by an applied continue. The projection
+	// renders rollback as unresolved and continue as resolved.
 	var state pipelinePanelState
-	state.applyStageEvent(agent.StageEvent{Name: "test_runner", Status: "message", Detail: "revision_request -> code_writer: 1 test"})
-	state.applyStageEvent(agent.StageEvent{Name: "test_runner", Status: "message", Detail: "revision_request -> code_writer: 2 tests"})
-
-	state.applyStageEvent(agent.StageEvent{Name: "test_runner", Status: "repaired", Detail: "revision resolved: tests pass"})
-
-	if len(state.messages) != 2 {
-		t.Fatalf("messages = %d, want 2", len(state.messages))
+	state.applyState(presentation.State{
+		SchemaVersion: presentation.PresentationSchemaVersionV1,
+		Lifecycle:     presentation.LifecycleExecute,
+		Nodes: []presentation.ExecutionNode{
+			{ID: "test_runner", Label: "test_runner", Kind: presentation.NodeKindTest, Status: presentation.NodeStatusRunning, Progress: 1},
+		},
+		Interventions: []presentation.Intervention{
+			{Kind: presentation.InterventionRollback, Reason: "revision_request -> code_writer: 1 test", TargetNodeID: "test_runner", Status: presentation.InterventionProposed},
+			{Kind: presentation.InterventionRollback, Reason: "revision_request -> code_writer: 2 tests", TargetNodeID: "test_runner", Status: presentation.InterventionProposed},
+			{Kind: presentation.InterventionContinue, Reason: "revision resolved: tests pass", TargetNodeID: "test_runner", Status: presentation.InterventionApplied},
+		},
+	})
+	if len(state.messages) != 3 {
+		t.Fatalf("messages = %d, want 3", len(state.messages))
 	}
 	if state.messages[0].resolved {
-		t.Fatal("first message should stay unresolved")
+		t.Fatal("first rollback should stay unresolved")
 	}
-	if !state.messages[1].resolved {
-		t.Fatal("latest message should be resolved")
+	if state.messages[1].resolved {
+		t.Fatal("second rollback should stay unresolved")
+	}
+	if !state.messages[2].resolved {
+		t.Fatal("continue intervention should render resolved")
 	}
 }
 
@@ -315,13 +313,21 @@ func TestPipelinePanelRenderMessagesCapsAtLastThree(t *testing.T) {
 	var state pipelinePanelState
 	state.active = true
 	state.stages = []pipelineStageRow{{name: "test_runner", status: pipelineStageCompleted}}
+	interventions := make([]presentation.Intervention, 0, 4)
 	for i := 0; i < 4; i++ {
-		state.applyStageEvent(agent.StageEvent{
-			Name:   "test_runner",
-			Status: "message",
-			Detail: fmt.Sprintf("revision_request -> code_writer: test %d", i),
+		interventions = append(interventions, presentation.Intervention{
+			Kind:         presentation.InterventionRollback,
+			Reason:       fmt.Sprintf("revision_request -> code_writer: test %d", i),
+			TargetNodeID: "test_runner",
+			Status:       presentation.InterventionProposed,
 		})
 	}
+	state.applyState(presentation.State{
+		SchemaVersion: presentation.PresentationSchemaVersionV1,
+		Lifecycle:     presentation.LifecycleExecute,
+		Nodes:         []presentation.ExecutionNode{{ID: "test_runner", Label: "test_runner", Kind: presentation.NodeKindTest, Status: presentation.NodeStatusComplete, Progress: 1}},
+		Interventions: interventions,
+	})
 	plain := plainRender(t, strings.Join(state.renderSection(80, 0), "\n"))
 	if strings.Contains(plain, "test 0") {
 		t.Fatalf("oldest message not hidden: %q", plain)
@@ -338,7 +344,14 @@ func TestPipelinePanelRenderMessagesCapsAtLastThree(t *testing.T) {
 
 func TestPipelinePanelResetClearMessages(t *testing.T) {
 	var state pipelinePanelState
-	state.applyStageEvent(agent.StageEvent{Name: "test_runner", Status: "message", Detail: "revision_request -> code_writer: 1 test"})
+	state.applyState(presentation.State{
+		SchemaVersion: presentation.PresentationSchemaVersionV1,
+		Lifecycle:     presentation.LifecycleExecute,
+		Nodes:         []presentation.ExecutionNode{{ID: "test_runner", Label: "test_runner", Kind: presentation.NodeKindTest, Status: presentation.NodeStatusRunning}},
+		Interventions: []presentation.Intervention{
+			{Kind: presentation.InterventionRollback, Reason: "revision_request -> code_writer: 1 test", TargetNodeID: "test_runner", Status: presentation.InterventionProposed},
+		},
+	})
 	if len(state.messages) != 1 {
 		t.Fatalf("messages = %d, want 1", len(state.messages))
 	}
@@ -346,42 +359,17 @@ func TestPipelinePanelResetClearMessages(t *testing.T) {
 	if len(state.messages) != 0 {
 		t.Fatalf("reset messages = %d, want 0", len(state.messages))
 	}
-	state.applyStageEvent(agent.StageEvent{Name: "test_runner", Status: "message", Detail: "revision_request -> code_writer: 1 test"})
+	state.applyState(presentation.State{
+		SchemaVersion: presentation.PresentationSchemaVersionV1,
+		Lifecycle:     presentation.LifecycleExecute,
+		Nodes:         []presentation.ExecutionNode{{ID: "test_runner", Label: "test_runner", Kind: presentation.NodeKindTest, Status: presentation.NodeStatusRunning}},
+		Interventions: []presentation.Intervention{
+			{Kind: presentation.InterventionRollback, Reason: "revision_request -> code_writer: 1 test", TargetNodeID: "test_runner", Status: presentation.InterventionProposed},
+		},
+	})
 	state.clear()
 	if len(state.messages) != 0 {
 		t.Fatalf("clear messages = %d, want 0", len(state.messages))
-	}
-}
-
-func TestParseMessageTo(t *testing.T) {
-	cases := []struct{ detail, want string }{
-		{"revision_request -> code_writer: 2 failing tests", "code_writer"},
-		{"revision_request -> code_writer 2 tests", "code_writer"},
-		{"revision_request -> code_writer", "code_writer"},
-		{"no arrow here", ""},
-		{"revision_request -> ", ""},
-	}
-	for _, tc := range cases {
-		if got := parseMessageTo(tc.detail); got != tc.want {
-			t.Fatalf("parseMessageTo(%q) = %q, want %q", tc.detail, got, tc.want)
-		}
-	}
-}
-
-func TestPipelinePanelMessageViaLegacyMarker(t *testing.T) {
-	var state pipelinePanelState
-	marker := "\x00STAGE{\"name\":\"test_runner\",\"status\":\"message\",\"detail\":\"revision_request -> code_writer: 1 test\"}\x00"
-	if !state.applyStageMarker(marker) {
-		t.Fatal("applyStageMarker returned false")
-	}
-	if len(state.messages) != 1 {
-		t.Fatalf("messages = %d, want 1", len(state.messages))
-	}
-	if state.messages[0].to != "code_writer" {
-		t.Fatalf("message.to = %q, want code_writer", state.messages[0].to)
-	}
-	if len(state.stages) != 0 {
-		t.Fatalf("stages = %d, want 0 (message must not create a stage row)", len(state.stages))
 	}
 }
 
@@ -1238,11 +1226,13 @@ func TestPipelineSidebarHeaderCountStableAcrossPowerOfTen(t *testing.T) {
 	for index := range stages {
 		stages[index] = fmt.Sprintf("stage_%d", index)
 	}
-	var state pipelinePanelState
-	state.applyPlan(agent.PipelinePlanEvent{Stages: stages})
+	state := pipelinePanelState{}
+	state.applyState(pendingRosterState(stages...))
+	nodes := state.stages
 	for index := 0; index < 9; index++ {
-		state.applyStageEvent(agent.StageEvent{Name: stages[index], Status: "completed", Progress: 100})
+		nodes[index].status = pipelineStageCompleted
 	}
+	state.stages = nodes
 
 	header := state.headerLineWithChip(60, "")
 	if got := plainRender(t, header); !strings.Contains(got, "09/10") {
