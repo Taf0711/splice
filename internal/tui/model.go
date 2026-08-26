@@ -5955,7 +5955,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			}
 			// P1.1: pipeline runs surface presentation snapshots to the
 			// session event log so the run record carries runtime truth.
-			// Rendering from these arrives in P1.2.
+			// Rendering from these landed in P1.2.
 			downstreamPresentation := options.OnPresentationState
 			options.OnPresentationState = func(state presentation.State) {
 				sessionEvents = append(sessionEvents, pendingSessionEvent{

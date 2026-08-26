@@ -633,3 +633,18 @@ func stripStageWizardANSI(lines []string) []string {
 	}
 	return plain
 }
+
+// TestKnownStageModelStagesAreOnlyRoutingTargets is the D3 parity pin: the
+// stage model wizard exposes only model-backed stages as editable routing
+// targets, preserving the invariant that the pipeline panel renders from
+// Kind metadata, not from stage-name conditionals.
+func TestKnownStageModelStagesAreOnlyRoutingTargets(t *testing.T) {
+	stages := knownStageModelStages()
+	names := make([]string, len(stages))
+	for i, s := range stages {
+		names[i] = s.name
+	}
+	if got := strings.Join(names, ","); got != "code_writer,test_generator" {
+		t.Fatalf("knownStageModelStages = %v, want exactly code_writer,test_generator", got)
+	}
+}

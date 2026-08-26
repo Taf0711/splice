@@ -27,6 +27,7 @@ const (
 
 type pipelineStageRow struct {
 	name     string
+	kind     presentation.NodeKind
 	status   pipelineStageStatus
 	detail   string
 	progress int // 0-100
@@ -116,6 +117,7 @@ func (s *pipelinePanelState) applyState(state presentation.State) {
 	for _, node := range state.Nodes {
 		row := pipelineStageRow{
 			name:     node.ID,
+			kind:     node.Kind,
 			status:   pipelineStageStatusFromNode(node.Status),
 			progress: int(node.Progress * 100),
 		}
@@ -178,6 +180,29 @@ func hasInterventionForNode(interventions []presentation.Intervention, nodeID st
 		}
 	}
 	return false
+}
+
+// kindTag abbreviates a node kind to a compact tag shown faintly after the
+// roster label: the first letter of the kind plus, when the kind has an
+// underscore part, the first letter of that part. WRITE -> "w", SECURITY ->
+// "s", TEST -> "t", VERIFY -> "v", CUSTOM -> "c", DATA_TRANSFORM -> "dt".
+// The kind set is open (presentation.NodeKind.Validate accepts any
+// uppercase-safe value), so unknown kinds still render a sensible tag and
+// unknown or empty formats fall back to "?". The tag is metadata, never a
+// status signal: the glyph and color stay owned by NodeStatus.
+func kindTag(kind presentation.NodeKind) string {
+	parts := strings.Split(string(kind), "_")
+	var b strings.Builder
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		b.WriteString(strings.ToLower(part[:1]))
+	}
+	if b.Len() == 0 {
+		return "?"
+	}
+	return b.String()
 }
 
 // reset clears stage rows and marks a new pipeline run active.
@@ -346,7 +371,15 @@ func (p pipelinePresentation) renderSection(width int, phase int) []string {
 	lines := make([]string, 0, len(p.stages)+7)
 	for _, stage := range p.stages {
 		glyph, bodyStyle := pipelineStageGlyphAndStyle(stage.status, phase)
-		lines = append(lines, " "+glyph+" "+bodyStyle.Render(truncateStep(stage.name, room)))
+		line := " " + glyph + " " + bodyStyle.Render(truncateStep(stage.name, room))
+		// The kind tag is metadata shown faintly after the label. It renders
+		// only when the whole row fits; otherwise the row degrades exactly as
+		// P1.2 (name truncated by truncateStep, tag dropped), so narrow widths
+		// need no layout changes.
+		if tag := kindTag(stage.kind); tag != "" && len([]rune(stage.name))+1+len(tag) <= room {
+			line += " " + zeroTheme.faint.Render(tag)
+		}
+		lines = append(lines, line)
 	}
 	lines = append(lines, "", " "+renderPipelineProgressBar(p.progress, width))
 	if p.current != nil {

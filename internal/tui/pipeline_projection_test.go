@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -96,6 +97,23 @@ func completedRunProjectionState() presentation.State {
 	}
 }
 
+// adversarialTopologyState is the D2 fixture: stages the TUI has never heard
+// of, with kinds outside the known constants (valid per the open-set
+// NodeKind.Validate). Rendering must be driven purely by Kind metadata, so
+// this topology renders with zero TUI changes.
+func adversarialTopologyState() presentation.State {
+	return presentation.State{
+		SchemaVersion: presentation.PresentationSchemaVersionV1,
+		Lifecycle:     presentation.LifecycleExecute,
+		Plan:          presentation.Plan{Title: "release pipeline", TaskCount: 3},
+		Nodes: []presentation.ExecutionNode{
+			{ID: "deploy_hook", Label: "deploy_hook", Kind: "DATA_TRANSFORM", Status: presentation.NodeStatusRunning, Progress: 0.5},
+			{ID: "release_gate", Label: "release_gate", Kind: presentation.NodeKindReview, Status: presentation.NodeStatusPending},
+			{ID: "sync_worker", Label: "sync_worker", Kind: "DATA_PIPELINE", Status: presentation.NodeStatusComplete, Progress: 1},
+		},
+	}
+}
+
 // repairProjectionState is the D4 fixture: a repair loop in flight. The node
 // is running again after a failure and the repair story lives in the
 // interventions (proposed rollback, then applied continue). A naive
@@ -171,6 +189,7 @@ func TestPipelineGoldenRenders(t *testing.T) {
 		{"mid_run", midRunProjectionState()},
 		{"failed_node_with_intervention", failedNodeProjectionState()},
 		{"completed_run_with_receipt", completedRunProjectionState()},
+		{"adversarial_topology", adversarialTopologyState()},
 	}
 	for _, fixture := range fixtures {
 		for _, width := range []int{80, 120} {
@@ -213,5 +232,51 @@ func TestProjectionShowsRepairTruthFromState(t *testing.T) {
 	}
 	if p.stripState() != pipelineStripRepair {
 		t.Fatalf("strip state = %d, want repair", p.stripState())
+	}
+}
+
+// TestKindTagPinsKnownAndMadeUpKinds is the D2 table pin: the kind tag is
+// derived from Kind metadata for both known constants and kinds outside the
+// known set, so an unknown topology renders without TUI changes.
+func TestKindTagPinsKnownAndMadeUpKinds(t *testing.T) {
+	cases := []struct {
+		kind presentation.NodeKind
+		want string
+	}{
+		{presentation.NodeKindWrite, "w"},
+		{presentation.NodeKindAnalyze, "a"},
+		{presentation.NodeKindSecurity, "s"},
+		{presentation.NodeKindLint, "l"},
+		{presentation.NodeKindCustom, "c"},
+		{presentation.NodeKindTest, "t"},
+		{presentation.NodeKindVerify, "v"},
+		{presentation.NodeKindReview, "r"},
+		// Kinds outside the known constants (open-set valid):
+		{"DATA_TRANSFORM", "dt"},
+		{"DATA_PIPELINE", "dp"},
+		{"RELEASE_GATE", "rg"},
+		{"MULTI_PART_KIND", "mpk"},
+		// Unknown or empty formats fall back to "?".
+		{"", "?"},
+		{"_", "?"},
+		{"__", "?"},
+	}
+	for _, tc := range cases {
+		if got := kindTag(tc.kind); got != tc.want {
+			t.Fatalf("kindTag(%q) = %q, want %q", tc.kind, got, tc.want)
+		}
+	}
+}
+
+// TestPipelineStageRowCarriesNoModelField is the D3 compile-time pin: the
+// panel state deliberately has no per-stage model field. The stage model
+// wizard is the model-selection surface; adding Model to the row would open
+// a panel model column the state does not carry.
+func TestPipelineStageRowCarriesNoModelField(t *testing.T) {
+	typ := reflect.TypeOf(pipelineStageRow{})
+	for i := 0; i < typ.NumField(); i++ {
+		if typ.Field(i).Name == "Model" {
+			t.Fatal("pipelineStageRow must not carry a model field: per-stage model display belongs to the stage model wizard")
+		}
 	}
 }

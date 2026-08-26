@@ -1,6 +1,6 @@
- ✓ code_writer
- ◜ test_runner
- ○ acceptance_verifier
+ ✓ code_writer w
+ ◜ test_runner t
+ ○ acceptance_verifier v
 
  ████████░░░░░░░░  50%
 
