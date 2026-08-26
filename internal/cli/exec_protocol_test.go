@@ -418,9 +418,15 @@ func TestRunExecStreamJSONSkipsPermissionEventsForTrustedWrites(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
+	// Run 2 uses its own fresh cwd. The two exec invocations share nothing:
+	// the strict read-before-write guard refuses unread overwrites by design,
+	// so a second run against files created by the first would have to either
+	// read them first (modeling a competent model) or isolate its workspace.
+	// A fresh cwd keeps both runs clean without provider changes.
+	cwd2 := t.TempDir()
 	exitCode = runWithDeps([]string{"exec", "--skip-permissions-unsafe", "--output-format", "stream-json", "write approved"}, &stdout, &stderr, appDeps{
 		getwd: func() (string, error) {
-			return cwd, nil
+			return cwd2, nil
 		},
 		resolveConfig: func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
 			return execResolvedConfig(), nil
