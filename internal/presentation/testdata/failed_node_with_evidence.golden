@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "lifecycle": "execute",
+  "plan": {
+    "task_count": 2
+  },
+  "nodes": [
+    {
+      "id": "test_runner",
+      "label": "test_runner",
+      "kind": "TEST",
+      "status": "failed",
+      "progress": 1,
+      "iteration": 1,
+      "cost": {
+        "usd": 0,
+        "tokens": 0
+      },
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost_usd": 0
+      }
+    }
+  ],
+  "interventions": [
+    {
+      "kind": "retry",
+      "reason": "test suite failed twice with the same evidence",
+      "target_node_id": "test_runner",
+      "status": "proposed"
+    }
+  ],
+  "evidence": [
+    {
+      "label": "unit checks",
+      "status": "failed",
+      "passed": 3,
+      "failed": 2,
+      "incomplete": 0,
+      "findings": [
+        "TestHello failed: wrong greeting",
+        "TestShutdown failed: goroutine leak"
+      ],
+      "duration": 4.2
+    }
+  ],
+  "trajectory": {},
+  "files": null,
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cached_tokens": 0,
+    "reasoning_tokens": 0,
+    "cost_usd": 0
+  }
+}

@@ -1,0 +1,173 @@
+{
+  "schema_version": 1,
+  "lifecycle": "execute",
+  "plan": {
+    "title": "hello service",
+    "task_count": 8
+  },
+  "nodes": [
+    {
+      "id": "code_writer",
+      "label": "code_writer",
+      "kind": "WRITE",
+      "status": "running",
+      "progress": 0.4,
+      "iteration": 1,
+      "cost": {
+        "usd": 0,
+        "tokens": 0
+      },
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost_usd": 0
+      }
+    },
+    {
+      "id": "static_analyzer",
+      "label": "static_analyzer",
+      "kind": "ANALYZE",
+      "status": "complete",
+      "progress": 1,
+      "iteration": 1,
+      "cost": {
+        "usd": 0,
+        "tokens": 0
+      },
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost_usd": 0
+      }
+    },
+    {
+      "id": "security_auditor",
+      "label": "security_auditor",
+      "kind": "SECURITY",
+      "status": "pending",
+      "progress": 0,
+      "iteration": 1,
+      "cost": {
+        "usd": 0,
+        "tokens": 0
+      },
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost_usd": 0
+      }
+    },
+    {
+      "id": "linter",
+      "label": "linter",
+      "kind": "LINT",
+      "status": "degraded",
+      "progress": 0.5,
+      "iteration": 2,
+      "cost": {
+        "usd": 0,
+        "tokens": 0
+      },
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost_usd": 0
+      }
+    },
+    {
+      "id": "custom_stage",
+      "label": "custom_stage",
+      "kind": "CUSTOM",
+      "status": "running",
+      "progress": 0.25,
+      "iteration": 1,
+      "cost": {
+        "usd": 0,
+        "tokens": 0
+      },
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost_usd": 0
+      }
+    },
+    {
+      "id": "test_runner",
+      "label": "test_runner",
+      "kind": "TEST",
+      "status": "running",
+      "progress": 0.75,
+      "iteration": 1,
+      "cost": {
+        "usd": 0,
+        "tokens": 0
+      },
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost_usd": 0
+      }
+    },
+    {
+      "id": "acceptance_verifier",
+      "label": "acceptance_verifier",
+      "kind": "VERIFY",
+      "status": "pending",
+      "progress": 0,
+      "iteration": 1,
+      "cost": {
+        "usd": 0,
+        "tokens": 0
+      },
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost_usd": 0
+      }
+    },
+    {
+      "id": "code_reviewer",
+      "label": "code_reviewer",
+      "kind": "REVIEW",
+      "status": "failed",
+      "progress": 0.9,
+      "iteration": 1,
+      "cost": {
+        "usd": 0,
+        "tokens": 0
+      },
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost_usd": 0
+      }
+    }
+  ],
+  "interventions": null,
+  "evidence": null,
+  "trajectory": {},
+  "files": null,
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cached_tokens": 0,
+    "reasoning_tokens": 0,
+    "cost_usd": 0
+  }
+}
