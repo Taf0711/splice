@@ -172,5 +172,8 @@ func (w runtimeWiring) decorate(options agent.Options) agent.Options {
 			priorStageEvent(event)
 		}
 	}
+	// OnPresentationState stays nil on the TUI path until P1.2, when the TUI
+	// renders from presentation state snapshots. The wiring test pins this
+	// as path-specific so the flip is a deliberate, reviewed change.
 	return options
 }

@@ -79,6 +79,11 @@ func TestRunPathsFollowCallbackPolicies(t *testing.T) {
 		"OnSurfaceToUser":     {class: "shared-live", execNonNil: true, approveNonNil: true},
 		"OnPipelinePlan":      {class: "shared-live", execNonNil: true, approveNonNil: true},
 		"OnStageEvent":        {class: "shared-live", execNonNil: true, approveNonNil: true},
+		// OnPresentationState is exec-path-only for now: the CLI wires it to
+		// the presentation accumulator (P1.1). The TUI joins in P1.2 when it
+		// renders from presentation state, at which point this becomes
+		// shared-live.
+		"OnPresentationState": {class: "path-specific", execNonNil: true, approveNonNil: false},
 	}
 
 	execValue := reflect.ValueOf(execOptions)

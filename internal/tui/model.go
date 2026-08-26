@@ -28,6 +28,7 @@ import (
 	"github.com/Taf0711/splice/internal/memd"
 	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/notify"
+	"github.com/Taf0711/splice/internal/presentation"
 	"github.com/Taf0711/splice/internal/providerhealth"
 	"github.com/Taf0711/splice/internal/providermodeldiscovery"
 	"github.com/Taf0711/splice/internal/providers/providerio"
@@ -5974,6 +5975,19 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				m.sendAgentUsage(runID, au.Model, au.Usage, &au.Cost)
 				if downstreamAU != nil {
 					downstreamAU(au)
+				}
+			}
+			// P1.1: pipeline runs surface presentation snapshots to the
+			// session event log so the run record carries runtime truth.
+			// Rendering from these arrives in P1.2.
+			downstreamPresentation := options.OnPresentationState
+			options.OnPresentationState = func(state presentation.State) {
+				sessionEvents = append(sessionEvents, pendingSessionEvent{
+					Type:    sessions.EventMessage,
+					Payload: map[string]any{"presentation_schema_version": state.SchemaVersion, "lifecycle": string(state.Lifecycle)},
+				})
+				if downstreamPresentation != nil {
+					downstreamPresentation(state)
 				}
 			}
 		}
