@@ -129,6 +129,22 @@ func (tr *runTraceAccumulator) noteMemorySearchFailed() {
 	tr.memoryStatus = "unavailable"
 }
 
+// recordMemoryLookup records the retrieval path for one stage invocation
+// (C0.4). mode is "direct" when a fresh cognition fast-path hit was admitted
+// and the broad search was skipped, else "search". direct and stale count the
+// observations classified fresh/stale on the direct path before admission;
+// direct_candidates is their sum (the topic lookup returned them all). The
+// fields are consumer-pending: no reader consumes them yet (pairing rule).
+func (tr *runTraceAccumulator) recordMemoryLookup(stage string, iteration int, mode string, direct, stale int) {
+	key := stageKey{stage, iteration}
+	meta := tr.stages[key]
+	meta.MemoryLookupMode = mode
+	meta.DirectCandidates = direct + stale
+	meta.DirectHits = direct
+	meta.StaleHits = stale
+	tr.stages[key] = meta
+}
+
 // recordInteraction appends a repair-loop interaction record so the trace
 // carries the message lifecycle, not just the TUI events.
 func (tr *runTraceAccumulator) recordInteraction(rec schemas.InteractionRecord) {

@@ -74,12 +74,29 @@ type InputMeta struct {
 	MemoryChars      int `json:"memory_chars"`
 	ExemplarItems    int `json:"exemplar_items"`
 	EdgePayloadBytes int `json:"edge_payload_bytes"`
+	// MemoryLookupMode records which retrieval path produced this stage's
+	// memory bundle: "direct" (a fresh cognition fast-path hit, broad search
+	// skipped) or "search" (the broad search path ran). Empty means memory
+	// was not consumed for this stage. Consumer-pending: no reader consumes
+	// these fields yet (C0.4 pairing rule).
+	MemoryLookupMode string `json:"memory_lookup_mode,omitempty"`
+	DirectCandidates int    `json:"direct_candidates,omitempty"`
+	DirectHits       int    `json:"direct_hits,omitempty"`
+	StaleHits        int    `json:"stale_hits,omitempty"`
 }
 
 // Validate checks the input metadata.
 func (m InputMeta) Validate() error {
 	if m.ContextItems < 0 || m.ContextChars < 0 || m.MemoryItems < 0 || m.MemoryChars < 0 || m.ExemplarItems < 0 || m.EdgePayloadBytes < 0 {
 		return errors.New("input metadata counts must be non-negative")
+	}
+	if m.DirectCandidates < 0 || m.DirectHits < 0 || m.StaleHits < 0 {
+		return errors.New("cognition lookup counts must be non-negative")
+	}
+	switch m.MemoryLookupMode {
+	case "", "direct", "search":
+	default:
+		return fmt.Errorf("invalid memory lookup mode %q", m.MemoryLookupMode)
 	}
 	return nil
 }

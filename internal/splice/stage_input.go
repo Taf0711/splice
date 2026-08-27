@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Taf0711/splice/internal/splice/cognition"
 	"github.com/Taf0711/splice/internal/splice/learn"
 	"github.com/Taf0711/splice/internal/splice/memoryreason"
 	"github.com/Taf0711/splice/internal/splice/schemas"
@@ -210,34 +211,53 @@ type stageInputPreparation struct {
 // compaction so rejected items never consume allowance, and trace accounting
 // runs after compaction so it describes delivered memory rather than
 // retrieved memory.
+//
+// C0 cognition fast path: before the broad Memory.Search, a deterministic
+// direct topic lookup is attempted from structural cognition keys. A fresh,
+// admitted direct hit skips Search AND exemplar retrieval. Every other
+// outcome - no key, no capability, lookup miss/error, stale, unknown, or
+// empty after admission - falls back byte-identically to the existing Search
+// path below.
 func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.HarnessStageInput, error) {
 	input := p.Input
 	caps := p.Stage.Capabilities()
 	if p.Memory != nil && caps.ConsumesMemory {
 		root := memoryProjectRoot(p.Options, p.WorkDir)
-		bundle, mErr := p.Memory.Search(ctx, newMemoryQuery(input.StageName, input.RequestIntent, root))
-		if mErr != nil {
-			emitProgress(p.Options, fmt.Sprintf("[%s] memory retrieval skipped: %v\n", input.StageName, mErr))
-			// A mid-run retrieval failure degrades the run's memory status to
-			// unavailable (a warm run that failed must not record as cold).
+
+		// C0: direct cognition fast path (retrieval only, never control flow).
+		if direct, ok := p.tryDirectCognition(ctx, input, root); ok {
+			input.MemoryBundle = &direct.bundle
 			if p.Trace != nil {
-				p.Trace.noteMemorySearchFailed()
+				p.Trace.recordMemoryLookup(input.StageName, p.Iteration, "direct", direct.fresh, direct.stale)
 			}
 		} else {
-			bundle.RequestingAgent = input.StageName
-			// PC3: append kept-run exemplars. Best-effort and silent on
-			// failure; an empty exemplar set is correct, not a bug.
-			if querier, ok := p.Memory.(learn.TraceQuerier); ok && querier != nil {
-				if exemplars, eErr := retrieveExemplars(ctx, querier, root, input.RequestIntent); eErr == nil {
-					bundle.Exemplars = exemplars
-					if len(exemplars) > 0 {
-						emitProgress(p.Options, fmt.Sprintf("exemplars: %d from kept runs\n", len(exemplars)))
+			bundle, mErr := p.Memory.Search(ctx, newMemoryQuery(input.StageName, input.RequestIntent, root))
+			if mErr != nil {
+				emitProgress(p.Options, fmt.Sprintf("[%s] memory retrieval skipped: %v\n", input.StageName, mErr))
+				// A mid-run retrieval failure degrades the run's memory status to
+				// unavailable (a warm run that failed must not record as cold).
+				if p.Trace != nil {
+					p.Trace.noteMemorySearchFailed()
+				}
+			} else {
+				bundle.RequestingAgent = input.StageName
+				// PC3: append kept-run exemplars. Best-effort and silent on
+				// failure; an empty exemplar set is correct, not a bug.
+				if querier, ok := p.Memory.(learn.TraceQuerier); ok && querier != nil {
+					if exemplars, eErr := retrieveExemplars(ctx, querier, root, input.RequestIntent); eErr == nil {
+						bundle.Exemplars = exemplars
+						if len(exemplars) > 0 {
+							emitProgress(p.Options, fmt.Sprintf("exemplars: %d from kept runs\n", len(exemplars)))
+						}
 					}
 				}
+				admitted := memoryreason.Admit(&bundle, root, p.NowUnix)
+				input.MemoryBundle = admitted.Bundle
+				emitProgress(p.Options, admissionProgressLine(input.StageName, admitted))
 			}
-			admitted := memoryreason.Admit(&bundle, root, p.NowUnix)
-			input.MemoryBundle = admitted.Bundle
-			emitProgress(p.Options, admissionProgressLine(input.StageName, admitted))
+			if p.Trace != nil {
+				p.Trace.recordMemoryLookup(input.StageName, p.Iteration, "search", 0, 0)
+			}
 		}
 	}
 
@@ -254,6 +274,111 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 		p.Trace.recordMemory(input.StageName, p.Iteration, *input.MemoryBundle)
 	}
 	return input, nil
+}
+
+// directCognitionResult is the outcome of one direct fast-path attempt.
+// used is true only when a fresh, admitted bundle was produced; then Search
+// is skipped. fresh and stale count the direct observations classified
+// before admission (direct_candidates = fresh + stale).
+type directCognitionResult struct {
+	bundle schemas.MemoryBundle
+	used   bool
+	fresh  int
+	stale  int
+}
+
+// acceptanceFactCommands extracts the structured verifier commands from the
+// acceptance facts, for strict package-target key derivation.
+func acceptanceFactCommands(facts []schemas.AcceptanceFact) []string {
+	commands := make([]string, 0, len(facts))
+	for _, fact := range facts {
+		if fact.VerificationCommand != nil && strings.TrimSpace(*fact.VerificationCommand) != "" {
+			commands = append(commands, *fact.VerificationCommand)
+		}
+	}
+	return commands
+}
+
+// tryDirectCognition attempts the C0 fast path for one stage invocation:
+//
+//  1. derive structural cognition keys from the stage context;
+//  2. if any keys exist and the store supports direct lookup, query by each
+//     key in deterministic order;
+//  3. classify each returned observation's freshness against its key's
+//     anchor; only fresh observations may proceed;
+//  4. admit the fresh candidates (the SAME memoryreason.Admit as the search
+//     path); if anything is admitted, use it and skip the broad search.
+//
+// Every other outcome returns used=false, so the caller runs the existing
+// Search path byte-identically. The only progress emission on a hit is a
+// single direct-hit line naming the stage and item count; observation content
+// never reaches progress or traces.
+func (p stageInputPreparation) tryDirectCognition(ctx context.Context, input schemas.HarnessStageInput, root string) (directCognitionResult, bool) {
+	keys := cognition.DeriveKeys(cognition.DeriveInput{
+		RequestIntent:        input.RequestIntent,
+		PriorChangedFiles:    input.PriorChangedFiles,
+		VerificationCommands: acceptanceFactCommands(input.AcceptanceFacts),
+	})
+	if len(keys) == 0 {
+		return directCognitionResult{}, false
+	}
+	store, ok := p.Memory.(TopicLookupStore)
+	if !ok || store == nil {
+		return directCognitionResult{}, false
+	}
+
+	for _, key := range keys {
+		candidates, err := store.LookupTopic(ctx, schemas.MemoryTopicQuery{
+			ProjectPath:     root,
+			RequestingAgent: input.StageName,
+			Scope:           "project",
+			TopicKey:        key,
+			Limit:           8,
+		})
+		if err != nil || len(candidates.Observations) == 0 {
+			continue
+		}
+		anchor := cognition.AnchorPathForKey(key)
+		if anchor == "" {
+			// No resolvable anchor: freshness cannot be proved, fail closed.
+			continue
+		}
+		var fresh, stale []schemas.MemoryObservation
+		for _, obs := range candidates.Observations {
+			commit := ""
+			if obs.SourceCommit != nil {
+				commit = *obs.SourceCommit
+			}
+			switch cognition.ClassifyFreshness(ctx, root, commit, anchor) {
+			case cognition.FreshnessFresh:
+				fresh = append(fresh, obs)
+			case cognition.FreshnessStale:
+				stale = append(stale, obs)
+			default:
+				// Unknown freshness fails closed: the observation is not
+				// injected directly.
+			}
+		}
+		if len(fresh) == 0 {
+			continue
+		}
+		bundle := schemas.MemoryBundle{
+			RequestingAgent: input.StageName,
+			Observations:    fresh,
+		}
+		admitted := memoryreason.Admit(&bundle, root, p.NowUnix)
+		if admitted.Bundle == nil || len(admitted.Bundle.Observations) == 0 {
+			continue
+		}
+		emitProgress(p.Options, fmt.Sprintf("[%s] cognition: direct hit, %d item(s)\n", input.StageName, len(admitted.Bundle.Observations)))
+		return directCognitionResult{
+			bundle: *admitted.Bundle,
+			used:   true,
+			fresh:  len(fresh),
+			stale:  len(stale),
+		}, true
+	}
+	return directCognitionResult{}, false
 }
 
 // admissionProgressLine renders the aggregate admission note. Only counts are
