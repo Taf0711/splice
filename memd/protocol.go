@@ -227,6 +227,36 @@ type genericResponse struct {
 	Error string `json:"error,omitempty"`
 }
 
+// lookupTopicRequest is the JSON body for POST /lookup_topic. It is the
+// deterministic direct-lookup counterpart to /search: an exact topic_key
+// match within one project scope, no full-text query.
+type lookupTopicRequest struct {
+	ProjectPath     string `json:"project_path"`
+	RequestingAgent string `json:"requesting_agent"`
+	Scope           string `json:"scope"`
+	TopicKey        string `json:"topic_key"`
+	Limit           int    `json:"limit"`
+}
+
+func (r *lookupTopicRequest) Validate() error {
+	if r.RequestingAgent == "" {
+		return fmt.Errorf("requesting_agent is required")
+	}
+	if r.Scope == "" {
+		return fmt.Errorf("scope is required")
+	}
+	if r.Scope != "project" && r.Scope != "global" {
+		return fmt.Errorf("scope must be 'project' or 'global', got %q", r.Scope)
+	}
+	if r.TopicKey == "" {
+		return fmt.Errorf("topic_key is required")
+	}
+	if r.Limit > 100 {
+		r.Limit = 100
+	}
+	return nil
+}
+
 // traceUpsertRequest is the JSON body for POST /trace/upsert. Only the indexed
 // columns are decoded; the full body is stored verbatim as the payload so the
 // sidecar never drops unknown fields from a newer schema.

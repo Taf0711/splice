@@ -55,6 +55,7 @@ func newServer(store *store.Store, socketPath string) *server {
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/upsert", s.handleUpsert)
 	mux.HandleFunc("/search", s.handleSearch)
+	mux.HandleFunc("/lookup_topic", s.handleLookupTopic)
 	mux.HandleFunc("/recent", s.handleRecent)
 	mux.HandleFunc("/mark_reviewed", s.handleMarkReviewed)
 	mux.HandleFunc("/stats", s.handleStats)
@@ -224,6 +225,44 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		Limit:            req.Limit,
 	}
 	results, truncated, err := s.store.Search(r.Context(), q)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Non-nil so splice hits marshal as [] rather than null (the Python client
+	// iterates the field directly).
+	protocol := make([]protocolObservation, 0, len(results))
+	for _, obs := range results {
+		protocol = append(protocol, toProtocol(obs))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":           true,
+		"observations": protocol,
+		"truncated":    truncated,
+	})
+}
+
+func (s *server) handleLookupTopic(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var req lookupTopicRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "validation: "+err.Error())
+		return
+	}
+
+	if req.Limit <= 0 {
+		req.Limit = 8
+	}
+	results, truncated, err := s.store.LookupTopic(r.Context(), req.ProjectPath, req.RequestingAgent, req.Scope, req.TopicKey, req.Limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

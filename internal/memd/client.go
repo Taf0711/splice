@@ -163,6 +163,33 @@ func (c *Client) Search(ctx context.Context, query schemas.MemoryQuery) (schemas
 	}, nil
 }
 
+// LookupTopic runs a deterministic exact topic-key lookup and returns the
+// matched observations as a bundle. RequestingAgent is set by the caller
+// (the consuming stage), never by the sidecar: the store only filters by
+// visibility. The bundle carries no exemplars.
+func (c *Client) LookupTopic(ctx context.Context, query schemas.MemoryTopicQuery) (schemas.MemoryBundle, error) {
+	if err := query.Validate(); err != nil {
+		return schemas.MemoryBundle{}, fmt.Errorf("memd lookup_topic: %w", err)
+	}
+	var resp struct {
+		OK           bool                        `json:"ok"`
+		Observations []schemas.MemoryObservation `json:"observations"`
+		Truncated    bool                        `json:"truncated"`
+		Error        string                      `json:"error,omitempty"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/lookup_topic", query, &resp); err != nil {
+		return schemas.MemoryBundle{}, err
+	}
+	if !resp.OK {
+		return schemas.MemoryBundle{}, fmt.Errorf("memd lookup_topic: %s", resp.Error)
+	}
+	return schemas.MemoryBundle{
+		RequestingAgent: query.RequestingAgent,
+		Observations:    resp.Observations,
+		Truncated:       resp.Truncated,
+	}, nil
+}
+
 // Recent lists recent observations without using the full-text index.
 func (c *Client) Recent(ctx context.Context, query schemas.MemoryQuery) (schemas.MemoryBundle, error) {
 	if err := query.ValidateRecent(); err != nil {

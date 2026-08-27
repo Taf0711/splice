@@ -112,6 +112,44 @@ func (m MemoryQuery) ValidateRecent() error {
 	return nil
 }
 
+// MemoryTopicQuery is a direct topic-key lookup sent to the memory sidecar.
+// Unlike MemoryQuery it does not use the full-text index: it matches the
+// observations table's topic_key column exactly, within one project scope,
+// so the cognition fast path can retrieve a strongly-addressed observation
+// deterministically. RequestingAgent is set by the CALLER (the consuming
+// stage), never by the store.
+type MemoryTopicQuery struct {
+	ProjectPath     string `json:"project_path"`
+	RequestingAgent string `json:"requesting_agent"`
+	Scope           string `json:"scope"`
+	TopicKey        string `json:"topic_key"`
+	Limit           int    `json:"limit"`
+}
+
+// Validate checks the topic query. The scope is closed to the two scopes the
+// observations table indexes; the topic key must be non-empty; a non-positive
+// limit defaults to 8, matching MemoryQuery.
+func (m MemoryTopicQuery) Validate() error {
+	if m.RequestingAgent == "" {
+		return errors.New("requesting_agent is required")
+	}
+	if m.Scope == "" {
+		return errors.New("scope is required")
+	}
+	switch m.Scope {
+	case "project", "global":
+	default:
+		return errors.New("scope must be project or global")
+	}
+	if m.TopicKey == "" {
+		return errors.New("topic_key is required")
+	}
+	if m.Limit <= 0 {
+		m.Limit = 8
+	}
+	return nil
+}
+
 // Exemplar is one distilled kept-run example injected into a memory bundle.
 // Content carries only the approved, bounded fields (intent, tier, stage
 // sequence, iterations, changed files, tokens); raw prompts, transcripts, and

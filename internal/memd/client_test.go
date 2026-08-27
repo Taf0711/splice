@@ -223,6 +223,63 @@ func TestSearch(t *testing.T) {
 	})
 }
 
+func TestLookupTopic(t *testing.T) {
+	t.Run("ok", func(t *testing.T) {
+		var got schemas.MemoryTopicQuery
+		c := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost || r.URL.Path != "/lookup_topic" {
+				t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			}
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Errorf("decode: %v", err)
+			}
+			obs := validObservation()
+			obs.ID = 9
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok":           true,
+				"observations": []schemas.MemoryObservation{obs},
+				"truncated":    false,
+			})
+		}))
+		bundle, err := c.LookupTopic(context.Background(), schemas.MemoryTopicQuery{
+			ProjectPath:     "/repo",
+			RequestingAgent: "code_writer",
+			Scope:           "project",
+			TopicKey:        "file:internal/auth/session.go",
+			Limit:           3,
+		})
+		if err != nil {
+			t.Fatalf("LookupTopic: %v", err)
+		}
+		if got.RequestingAgent != "code_writer" || got.TopicKey != "file:internal/auth/session.go" || got.Limit != 3 {
+			t.Fatalf("request = %#v", got)
+		}
+		if bundle.RequestingAgent != "code_writer" {
+			t.Fatalf("bundle requesting agent = %q, want code_writer", bundle.RequestingAgent)
+		}
+		if len(bundle.Observations) != 1 || bundle.Observations[0].ID != 9 {
+			t.Fatalf("observations = %#v", bundle.Observations)
+		}
+		if bundle.Truncated {
+			t.Fatal("expected truncated=false")
+		}
+	})
+
+	t.Run("invalid not sent", func(t *testing.T) {
+		hit := false
+		c := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hit = true
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		}))
+		if _, err := c.LookupTopic(context.Background(), schemas.MemoryTopicQuery{RequestingAgent: "a", TopicKey: "", Limit: 5}); err == nil {
+			t.Fatal("expected validation error")
+		}
+		if hit {
+			t.Fatal("handler should not have been hit for invalid query")
+		}
+	})
+}
+
 func TestRecent(t *testing.T) {
 	var got schemas.MemoryQuery
 	c := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

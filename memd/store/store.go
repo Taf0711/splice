@@ -398,6 +398,66 @@ func (s *Store) UpsertObservation(ctx context.Context, obs *Observation) (*Obser
 	return obs, nil
 }
 
+// LookupTopic returns live observations matching an exact topic key within
+// one project scope. It is the deterministic direct-lookup path (C0): no
+// full-text search, no new table, and it uses the existing idx_obs_topic
+// index (topic_key, project_path, scope). Ordering is stable: created_at
+// DESC with id DESC as the tiebreak, so repeated lookups return the same
+// roster. Visibility mirrors Search: the requesting agent's own rows (any
+// visibility) plus shareable rows from any agent; the admission layer above
+// still applies project/duplicate/review policy to whatever this returns.
+// Returns (observations, truncated, error); an empty result is not an error.
+func (s *Store) LookupTopic(ctx context.Context, projectPath, requestingAgent, scope, topicKey string, limit int) ([]*Observation, bool, error) {
+	if scope == "" || topicKey == "" {
+		return nil, false, nil
+	}
+	if limit <= 0 {
+		limit = 8
+	}
+	args := []any{topicKey, scope, requestingAgent, limit + 1}
+	projectClause := "o.project_path IS NULL"
+	if projectPath != "" {
+		projectClause = "(o.project_path = ? OR o.project_path IS NULL)"
+		args = []any{topicKey, scope, projectPath, requestingAgent, limit + 1}
+	}
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT o.id, o.project_path, o.scope, o.owner_agent, o.visibility,
+		       o.memory_type, o.title, o.content, o.topic_key, o.normalized_hash,
+		       o.source_run_id, o.source_stage, o.source_branch, o.source_commit,
+		       o.pinned, o.confidence, o.revision_count, o.duplicate_count,
+		       o.review_after, o.created_at, o.updated_at, o.deleted_at
+		FROM observations AS o
+		WHERE o.topic_key = ?
+		  AND o.scope = ?
+		  AND %s
+		  AND o.deleted_at IS NULL
+		  AND (o.owner_agent = ? OR o.visibility = 'shareable')
+		ORDER BY o.created_at DESC, o.id DESC
+		LIMIT ?
+	`, projectClause), args...)
+	if err != nil {
+		return nil, false, fmt.Errorf("lookup_topic: query: %w", err)
+	}
+	defer rows.Close()
+
+	var results []*Observation
+	for rows.Next() {
+		obs, err := scanObs(rows)
+		if err != nil {
+			return nil, false, fmt.Errorf("lookup_topic: scan: %w", err)
+		}
+		results = append(results, obs)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	truncated := len(results) > limit
+	if truncated {
+		results = results[:limit]
+	}
+	return results, truncated, nil
+}
+
 // Search returns observations matching q using FTS5 BM25, filtered by
 // project, scope, owner, and visibility:
 //
