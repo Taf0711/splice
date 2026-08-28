@@ -116,6 +116,13 @@ func attemptLocalRepair(
 		if tr != nil {
 			tr.replaceStageRecord(mergedWriter)
 			tr.persistPartial(ctx)
+			// C1b: the repair re-entry just applied writer-stage mutations to
+			// the working tree. Bump the freshness cache's worktree
+			// generation explicitly (the writer output's changed-file record
+			// is the mutation evidence), so the next stage input's freshness
+			// classification re-proves everything against the new tree
+			// instead of trusting a memoized set from before the repair.
+			tr.noteSpliceMutation(stageChangedFilesMap(writerOutput))
 		}
 		*outputs = append(*outputs, writerOutput)
 

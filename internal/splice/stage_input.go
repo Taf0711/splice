@@ -224,6 +224,16 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 	if p.Memory != nil && caps.ConsumesMemory {
 		root := memoryProjectRoot(p.Options, p.WorkDir)
 
+		// C1b: a changed prior-changed-file record means a Splice-permitted
+		// mutation (writer or test generator output applied) since the last
+		// invocation. Bump the freshness cache's worktree generation so every
+		// memoized batch set is re-proven by an exact diff. The signature is
+		// computed from the SAME record the stage input carries, so this
+		// costs a sort and a join, never a stat or a spawn.
+		if p.Trace != nil {
+			p.Trace.noteSpliceMutation(input.PriorChangedFiles)
+		}
+
 		// C0: direct cognition fast path (retrieval only, never control flow).
 		if direct, ok := p.tryDirectCognition(ctx, input, root); ok {
 			input.MemoryBundle = &direct.bundle
@@ -305,7 +315,10 @@ func acceptanceFactCommands(facts []schemas.AcceptanceFact) []string {
 //  2. if any keys exist and the store supports direct lookup, query by each
 //     key in deterministic order;
 //  3. classify each returned observation's freshness against its key's
-//     anchor; only fresh observations may proceed;
+//     anchor through the run's batched, memoized freshness cache (C1b): the
+//     cache groups candidates by source commit and issues ONE porcelain
+//     changed-path diff per unique (commit, generation), then classifies
+//     in-process; only fresh observations may proceed;
 //  4. admit the fresh candidates (the SAME memoryreason.Admit as the search
 //     path); if anything is admitted, use it and skip the broad search.
 //
@@ -325,6 +338,10 @@ func (p stageInputPreparation) tryDirectCognition(ctx context.Context, input sch
 	store, ok := p.Memory.(TopicLookupStore)
 	if !ok || store == nil {
 		return directCognitionResult{}, false
+	}
+	var cache *cognition.FreshnessCache
+	if p.Trace != nil {
+		cache = p.Trace.freshnessCache()
 	}
 
 	for _, key := range keys {
@@ -349,7 +366,17 @@ func (p stageInputPreparation) tryDirectCognition(ctx context.Context, input sch
 			if obs.SourceCommit != nil {
 				commit = *obs.SourceCommit
 			}
-			switch cognition.ClassifyFreshness(ctx, root, commit, anchor) {
+			// The run's batched, memoized cache classifies freshness with
+			// one porcelain diff per unique (commit, generation). Callers
+			// without a run trace (nil accumulator) keep the C0 per-key
+			// direct path byte-identically.
+			var state cognition.FreshnessState
+			if cache != nil {
+				state = cache.Classify(ctx, root, commit, anchor)
+			} else {
+				state = cognition.ClassifyFreshness(ctx, root, commit, anchor)
+			}
+			switch state {
 			case cognition.FreshnessFresh:
 				fresh = append(fresh, obs)
 			case cognition.FreshnessStale:
@@ -379,6 +406,17 @@ func (p stageInputPreparation) tryDirectCognition(ctx context.Context, input sch
 		}, true
 	}
 	return directCognitionResult{}, false
+}
+
+// stageChangedFilesMap returns the changed-file record one stage output
+// declares, keyed by stage name. It is the mutation-evidence form used to
+// bump the freshness cache's worktree generation after a Splice-permitted
+// mutation (repair re-entry).
+func stageChangedFilesMap(output schemas.HarnessStageOutput) map[string][]string {
+	if files := stageChangedFiles(output); len(files) > 0 {
+		return map[string][]string{"applied": files}
+	}
+	return nil
 }
 
 // admissionProgressLine renders the aggregate admission note. Only counts are

@@ -4,8 +4,11 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
+	"sync"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/splice/cognition"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
@@ -64,6 +67,20 @@ type runTraceAccumulator struct {
 	topologyHash     string
 	stagePromptHash  map[string]string
 	budgetProvenance map[string]string
+
+	// C1b run-local freshness memo. The cache is created lazily on first use
+	// and lives for exactly one run: the accumulator is constructed fresh per
+	// splicerun.Run, so no Reset is needed at run start (confirmed: run.go
+	// builds the accumulator inside the run loop; it is never reused across
+	// runs). Reset stays available for explicit lifecycle control in tests.
+	freshnessOnce sync.Once
+	freshness     *cognition.FreshnessCache
+	// muSig guards the mutation signature fields (the pass loop and repair
+	// re-entry can interleave; the cache lock must never be held while
+	// reading them).
+	muSig          sync.Mutex
+	mutationSig    string
+	mutationSigSet bool
 }
 
 func newRunTraceAccumulator(store TraceStore, runID, sessionID, projectRoot string, plan schemas.ExecutionPlan, memoryStatus string, warnWriteFailure func(msg string)) *runTraceAccumulator {
@@ -82,6 +99,70 @@ func newRunTraceAccumulator(store TraceStore, runID, sessionID, projectRoot stri
 func (tr *runTraceAccumulator) noteStage(stage string, iteration int) {
 	tr.currentStage = stage
 	tr.currentIter = iteration
+}
+
+// freshnessCache returns the run's C1b freshness memo, creating it on first
+// use. The accumulator is built once per splicerun.Run and never shared
+// across runs, so the cache's lifetime is exactly the run's lifetime and no
+// Reset at run start is required.
+func (tr *runTraceAccumulator) freshnessCache() *cognition.FreshnessCache {
+	if tr == nil {
+		return nil
+	}
+	tr.freshnessOnce.Do(func() {
+		tr.freshness = cognition.NewFreshnessCache()
+	})
+	return tr.freshness
+}
+
+// noteSpliceMutation records a Splice-permitted repository mutation by
+// bumping the freshness cache's worktree generation when the mutation
+// signature changes. The signature is the deterministic join of the
+// changed-file paths the pipeline recorded (writer and test generator
+// stages): a new, different, or grown record means the working tree moved
+// under Splice's own control, so every memoized batch set is invalidated and
+// the next classify re-spawns the exact diff. The generation key makes the
+// memoization exact: same generation means the tree is unchanged in every
+// way the pipeline observed; a new generation means re-prove everything.
+func (tr *runTraceAccumulator) noteSpliceMutation(changedFiles map[string][]string) {
+	cache := tr.freshnessCache()
+	if cache == nil {
+		return
+	}
+	sig := mutationSignature(changedFiles)
+	tr.muSig.Lock()
+	changed := !tr.mutationSigSet || sig != tr.mutationSig
+	tr.mutationSig = sig
+	tr.mutationSigSet = true
+	tr.muSig.Unlock()
+	if changed {
+		cache.BumpGeneration()
+	}
+}
+
+// mutationSignature builds the deterministic mutation signature from the
+// changed-file record: stage names and paths, sorted and joined. An absent
+// record and an empty record are distinct states, but both mean "no paths
+// changed"; the signature only needs to detect DIFFERENT record content.
+func mutationSignature(changedFiles map[string][]string) string {
+	if len(changedFiles) == 0 {
+		return ""
+	}
+	stages := make([]string, 0, len(changedFiles))
+	for stage := range changedFiles {
+		stages = append(stages, stage)
+	}
+	sort.Strings(stages)
+	var b strings.Builder
+	for _, stage := range stages {
+		paths := append([]string(nil), changedFiles[stage]...)
+		sort.Strings(paths)
+		b.WriteString(stage)
+		b.WriteByte('=')
+		b.WriteString(strings.Join(paths, ","))
+		b.WriteByte(';')
+	}
+	return b.String()
 }
 
 func (tr *runTraceAccumulator) recordHistory(state schemas.IterationState) {

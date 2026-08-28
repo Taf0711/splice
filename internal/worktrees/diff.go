@@ -2,6 +2,18 @@ package worktrees
 
 import "context"
 
+// GitCapture runs `git <args>` in dir and returns the full CommandResult
+// (stdout, stderr, exit code). A nil runner uses the default. This is the
+// C1b batched freshness runner (cognition.ChangedPaths): the porcelain
+// changed-path query needs stdout, which DiffQuiet discards, so this sibling
+// keeps the batch on the package's single git exec path.
+func GitCapture(ctx context.Context, runGit GitRunner, dir string, args ...string) (CommandResult, error) {
+	if runGit == nil {
+		runGit = defaultRunGit
+	}
+	return runGit(ctx, dir, args...)
+}
+
 // DiffQuiet runs `git diff --quiet <args>` in dir and returns the exit code.
 // exit 0 means no differences, exit 1 means differences, and any other value
 // is an error (mapped to -1 with the error). A nil runner uses the default.
