@@ -1531,8 +1531,8 @@ func TestFailedPlanExecutionStillRefreshesSessionEvents(t *testing.T) {
 	if len(updated.sessionEvents) == 0 {
 		t.Fatal("failed plan execution left session events stale (none loaded)")
 	}
-	if !transcriptContains(updated.transcript, "Plan execution failed") {
-		t.Fatalf("expected the failure to be reported, got %#v", updated.transcript)
+	if !transcriptContains(updated.transcript, "task step-1 stopped with status failed") {
+		t.Fatalf("expected the failure receipt in transcript, got %#v", updated.transcript)
 	}
 }
 
@@ -2108,8 +2108,8 @@ func TestPlanExecutionResultMsgErrorPreservesDesignState(t *testing.T) {
 	if next.pendingCritique == nil {
 		t.Fatal("pendingCritique should be preserved after execution error")
 	}
-	if !transcriptContains(next.transcript, "Plan execution failed") {
-		t.Fatalf("expected error in transcript, got %#v", next.transcript)
+	if !transcriptContains(next.transcript, "task t1: pipeline failed") {
+		t.Fatalf("expected failure receipt in transcript, got %#v", next.transcript)
 	}
 }
 

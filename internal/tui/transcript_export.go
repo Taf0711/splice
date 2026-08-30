@@ -43,6 +43,24 @@ func (m model) plainTranscriptText() string {
 			prefix = "· "
 		case rowError:
 			prefix = "error: "
+			// Receipt payload rows export their readable form (title,
+			// body, recovery actions), not the internal NUL-tagged marker.
+			if card, ok := parseReceiptTranscriptPayload(row.text); ok {
+				var b strings.Builder
+				b.WriteString(card.title)
+				if card.elapsed != "" {
+					b.WriteString(" (" + card.elapsed + ")")
+				}
+				for _, line := range card.lines {
+					if strings.TrimSpace(line) != "" {
+						b.WriteString("\n  " + line)
+					}
+				}
+				for _, action := range card.actions {
+					b.WriteString("\n[" + action[0] + "] " + action[1])
+				}
+				row.text = b.String()
+			}
 		default:
 			continue
 		}

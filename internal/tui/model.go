@@ -2544,7 +2544,17 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if msg.err != nil {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Plan execution failed: " + msg.err.Error()})
+			// Terminal receipt (GAP-E): a failed or user-cancelled plan
+			// execution renders as a styled result card — failing stage,
+			// full untruncated reason, recovery keys — not a bare error
+			// line (audit finding 3). Cancellation (context canceled from
+			// the user's Ctrl+C) projects the CANCELLED card, which is
+			// distinct from failure by contract.
+			card := failedExecutionCard(msg.err)
+			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
+				kind: rowError,
+				text: receiptTranscriptPayload(card),
+			})
 			return m.maybeOfferWorktreeReview(msg.worktree, msg.sourceDirty)
 		}
 		m.designMode = false

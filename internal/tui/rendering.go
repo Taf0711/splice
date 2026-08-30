@@ -264,6 +264,9 @@ func (m model) renderRowModeUncached(row transcriptRow, width int, rc rowContext
 		}
 		return renderSystemNote(row.text, width)
 	case rowError:
+		if card, ok := parseReceiptTranscriptPayload(row.text); ok {
+			return renderReceiptCard(card, width)
+		}
 		return renderErrorRow(row, width)
 	case rowToolCall:
 		return m.renderRunningToolCard(row, width, rc, opts)
