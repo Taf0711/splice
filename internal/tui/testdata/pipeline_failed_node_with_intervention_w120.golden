@@ -1,7 +1,7 @@
  ✓ code_writer w
  ✗ test_runner t
 
- ████████████████ 100%
+ [################] 100%
 
 MESSAGES
  … test_runner: revision_request -> code_writer: 2 failing tests

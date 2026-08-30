@@ -2,7 +2,7 @@
  ○ release_gate r
  ✓ sync_worker dp
 
- ████████░░░░░░░░  50%
+ [########────────]  50%
 
 CURRENT
  stage: deploy_hook

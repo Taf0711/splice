@@ -521,6 +521,10 @@ type model struct {
 	// launched with. Nil in production; used by tests to assert compaction and
 	// run-config threading without a real provider round-trip.
 	captureRunOptions func(agent.Options)
+	// glyphTier selects the marker/progress rune set (v0.5 §9.1). ASCII is
+	// the production default; NO_COLOR also forces ASCII because color is
+	// the only channel the richer tiers add on top of width safety.
+	glyphTier presentation.GlyphTier
 }
 
 type agentTextMsg struct {
@@ -1006,6 +1010,13 @@ func newModel(ctx context.Context, options Options) model {
 	// sends a turn in design mode; that keeps construction-time model creation
 	// free of side effects while still making the default phase planning-first.
 	m.designMode = true
+	// Glyph tier selection: ASCII is the default (DoD 24). NO_COLOR forces
+	// ASCII as well — when color is off, markers are the only state channel,
+	// so they must be width-exact everywhere.
+	m.glyphTier = presentation.DefaultGlyphTier
+	if noColorRequested(os.Getenv) {
+		m.glyphTier = presentation.GlyphTierASCII
+	}
 	return m
 }
 

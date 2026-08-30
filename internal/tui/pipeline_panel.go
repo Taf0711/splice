@@ -575,6 +575,11 @@ func pipelineStageGlyphAndStyle(status pipelineStageStatus, phase int) (string, 
 	}
 }
 
+// renderPipelineProgressBar renders the aggregate progress bar. The bar body
+// comes from presentation.ProgressBar (bracketed ASCII, width-exact by
+// construction — DoD 24); this wrapper adds the theme styling and the
+// right-aligned percent, which keeps one stable display width from 0% to
+// 100%.
 func renderPipelineProgressBar(progress, width int) string {
 	barWidth := width - 8
 	if barWidth > 16 {
@@ -583,11 +588,8 @@ func renderPipelineProgressBar(progress, width int) string {
 	if barWidth < 4 {
 		barWidth = 4
 	}
-	filled := (progress * barWidth) / 100
-	if filled > barWidth {
-		filled = barWidth
-	}
-	bar := zeroTheme.amber.Render(strings.Repeat("█", filled)) + zeroTheme.faint.Render(strings.Repeat("░", barWidth-filled))
+	bar := presentation.ProgressBar(float64(progress)/100, barWidth)
+	body := zeroTheme.amber.Render(strings.ReplaceAll(bar, "-", "─"))
 	// Right-aligned percent: 0% -> 100% keeps one stable display width.
-	return bar + " " + zeroTheme.faint.Render(fmt.Sprintf("%3d%%", progress))
+	return body + " " + zeroTheme.faint.Render(fmt.Sprintf("%3d%%", progress))
 }

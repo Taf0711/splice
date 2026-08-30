@@ -2,7 +2,7 @@
  ◜ test_runner t
  ○ acceptance_verifier v
 
- ████████░░░░░░░░  50%
+ [########────────]  50%
 
 CURRENT
  stage: test_runner
