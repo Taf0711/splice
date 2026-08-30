@@ -3,6 +3,7 @@ package splice
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/Taf0711/splice/internal/tools"
@@ -199,4 +200,101 @@ func (t *designTransitionTool) Run(_ context.Context, args map[string]any) tools
 		Status: tools.StatusOK,
 		Output: t.name + " queued. " + detail,
 	}
+}
+
+// DecisionRecorder accumulates design decisions pinned by the design agent
+// during one turn (§7.1, P4 E1). The TUI drains it after the turn and
+// appends one decision_pinned session event per decision, so the ledger
+// survives compaction in the raw event log and ReconstructDesignState
+// rebuilds it.
+type DecisionRecorder struct {
+	mu        sync.Mutex
+	decisions []DecisionPinnedPayload
+}
+
+// NewDecisionRecorder creates an empty decision ledger for one design turn.
+func NewDecisionRecorder() *DecisionRecorder {
+	return &DecisionRecorder{}
+}
+
+// Pin records one settled decision. A statement is required; malformed
+// calls return a named error and never silently default.
+func (r *DecisionRecorder) Record(statement, detail string) error {
+	if strings.TrimSpace(statement) == "" {
+		return fmt.Errorf("pin_design_decision ignored: statement is required")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.decisions = append(r.decisions, DecisionPinnedPayload{Statement: statement, Detail: detail})
+	return nil
+}
+
+// Take returns and clears the recorded decisions. It is called exactly once,
+// by the TUI run goroutine, after the agent turn finishes.
+func (r *DecisionRecorder) Take() []DecisionPinnedPayload {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := r.decisions
+	r.decisions = nil
+	return out
+}
+
+// pinDesignDecisionTool lets the design agent pin a settled decision as
+// first-class runtime data. Permission is Allow: it queues a ledger entry
+// the host persists after the turn, like the transition tools.
+type pinDesignDecisionTool struct {
+	recorder *DecisionRecorder
+}
+
+func (t *pinDesignDecisionTool) Name() string { return "pin_design_decision" }
+func (t *pinDesignDecisionTool) Parameters() tools.Schema {
+	return tools.Schema{
+		Type: "object",
+		Properties: map[string]tools.PropertySchema{
+			"statement": {
+				Type:        "string",
+				Description: "The settled decision in one sentence, e.g. 'retry only idempotent methods'.",
+			},
+			"detail": {
+				Type:        "string",
+				Description: "Optional supporting detail (constraints, rejected alternatives).",
+			},
+		},
+		Required:             []string{"statement"},
+		AdditionalProperties: false,
+	}
+}
+
+func (t *pinDesignDecisionTool) Safety() tools.Safety {
+	return tools.Safety{
+		SideEffect: tools.SideEffectLocalControl,
+		Permission: tools.PermissionAllow,
+		Reason:     "Queues a design decision the host persists after the turn.",
+	}
+}
+
+func (t *pinDesignDecisionTool) Run(_ context.Context, args map[string]any) tools.Result {
+	statement, _ := args["statement"].(string)
+	detail, _ := args["detail"].(string)
+	if err := t.recorder.Record(statement, detail); err != nil {
+		return tools.Result{Status: tools.StatusError, Output: "Error: " + err.Error()}
+	}
+	return tools.Result{
+		Status: tools.StatusOK,
+		Output: "decision pinned: " + statement,
+	}
+}
+
+// NewPinDesignDecisionTool builds the pin_design_decision tool. The design
+// agent calls it when a decision settles in conversation; the host persists
+// it as a decision_pinned event after the turn.
+func NewPinDesignDecisionTool(recorder *DecisionRecorder) tools.Tool {
+	return &pinDesignDecisionTool{recorder: recorder}
+}
+
+func (t *pinDesignDecisionTool) Description() string {
+	return "Pin one settled design decision as durable runtime data. " +
+		"Call this when a decision settles in conversation (the user confirmed an approach, " +
+		"a constraint was agreed, or an alternative was explicitly rejected). " +
+		"The pinned decision joins the design ledger and is reused when crystallizing the plan."
 }

@@ -3,6 +3,7 @@ package splice
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/Taf0711/splice/internal/sessions"
 	"github.com/Taf0711/splice/internal/splice/schemas"
@@ -59,6 +60,31 @@ type TaskFailedPayload struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+// DecisionPinnedPayload records one settled design decision (§7.1, P4 E1).
+// Decisions are first-class runtime data: the ledger card projects them,
+// /crystallize completeness is reasoned over them, and the audit trail
+// survives compaction in the raw event log. Revised marks a decision that
+// supersedes an earlier pinned decision (history is never silently
+// rewritten — the card renders the revision).
+type DecisionPinnedPayload struct {
+	Statement string `json:"statement"`
+	Detail    string `json:"detail,omitempty"`
+	Revised   bool   `json:"revised,omitempty"`
+	Epic      string `json:"epic,omitempty"`
+	Timestamp string `json:"ts,omitempty"`
+}
+
+// DecisionPinnedAppender returns the session-append input for one pinned
+// decision, shared by every emitter so the payload shape has one writer.
+func DecisionPinnedAppender(statement, detail, epic string) sessions.AppendEventInput {
+	payload, _ := json.Marshal(DecisionPinnedPayload{
+		Statement: statement,
+		Detail:    detail,
+		Epic:      epic,
+	})
+	return sessions.AppendEventInput{Type: sessions.EventDecisionPinned, Payload: json.RawMessage(payload)}
+}
+
 // DesignState is the reconstructed design workflow state derived from session
 // lifecycle events. It is the authoritative view; no global file backs it.
 // Transient busy states (crystallizing, critic running) are not represented
@@ -68,6 +94,10 @@ type DesignState struct {
 	Revision schemas.PlanRevision
 	Plan     *schemas.DesignPlan
 	Critique *schemas.PlanCritique
+	// Decisions is the pinned-decision ledger in pin order (§7.1). A REVISED
+	// decision keeps its predecessor: the ledger shows both with the
+	// revision marker, never a silent rewrite.
+	Decisions []DecisionPinnedPayload
 	// TaskOutcomes is task_id -> status, including in-flight "running" for a
 	// task_started event with no terminal event after it yet (e.g. a run
 	// interrupted mid-task). schemas.TaskRunOutcome is strictly terminal and
@@ -95,6 +125,17 @@ func ReconstructDesignState(events []sessions.Event) (DesignState, error) {
 				Phase:        schemas.DesignPhaseConversation,
 				TaskOutcomes: map[string]schemas.TaskRunStatus{},
 			}
+		case sessions.EventDecisionPinned:
+			var d DecisionPinnedPayload
+			if err := json.Unmarshal(event.Payload, &d); err != nil {
+				return DesignState{}, fmt.Errorf("design_mode decision_pinned seq %d: %w", event.Sequence, err)
+			}
+			if strings.TrimSpace(d.Statement) == "" {
+				return DesignState{}, fmt.Errorf("design_mode decision_pinned seq %d: statement is required", event.Sequence)
+			}
+			// The ledger is append-only: a revised decision keeps its
+			// predecessor so history is never silently rewritten (§7.1).
+			state.Decisions = append(state.Decisions, d)
 		case sessions.EventPlanCrystallized:
 			var p PlanCrystallizedPayload
 			if err := json.Unmarshal(event.Payload, &p); err != nil {

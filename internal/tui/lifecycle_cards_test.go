@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Taf0711/splice/internal/splice"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
@@ -147,5 +148,42 @@ func TestCrystallizeTranscriptWiresCards(t *testing.T) {
 	// The blocking verdict must also land: approval stays gated (DoD 8).
 	if !strings.Contains(joined, "BLOCKED by required issues") {
 		t.Fatalf("crystallize transcript missing the blocked verdict")
+	}
+}
+
+// TestDecisionsCardRendersLedger pins P4 E1 (§7.1): pinned decisions render
+// as a ledger with settled count, [+]' rows, detail wraps, and the REVISED
+// marker keeping its predecessor visible.
+func TestDecisionsCardRendersLedger(t *testing.T) {
+	decisions := []splice.DecisionPinnedPayload{
+		{Statement: "retry idempotent methods only", Detail: "GET HEAD PUT DELETE | not POST"},
+		{Statement: "preserve caller deadline"},
+	}
+	plain := stripANSI(renderDecisionsCard(decisions, 90))
+	for _, want := range []string{
+		"DECISIONS", "2 settled",
+		"[+]", "retry idempotent methods only", "GET HEAD PUT DELETE",
+		"preserve caller deadline",
+	} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("decisions card missing %q:\n%s", want, plain)
+		}
+	}
+	// Revised decisions render with the marker, keeping history visible.
+	revised := []splice.DecisionPinnedPayload{
+		{Statement: "backoff cap 30s"},
+		{Statement: "backoff cap 5s", Revised: true},
+	}
+	revisedRender := stripANSI(renderDecisionsCard(revised, 90))
+	if !strings.Contains(revisedRender, "[~] REVISED") || !strings.Contains(revisedRender, "backoff cap 5s") {
+		t.Fatalf("revised decision marker missing:\n%s", revisedRender)
+	}
+	if strings.Count(revisedRender, "cap") < 2 {
+		t.Fatalf("revised ledger hid its predecessor:\n%s", revisedRender)
+	}
+	// Empty ledger shows the placeholder, not an empty card.
+	empty := stripANSI(renderDecisionsCard(nil, 90))
+	if !strings.Contains(empty, "DECISIONS") || !strings.Contains(empty, "no decisions pinned yet") {
+		t.Fatalf("empty ledger missing placeholder:\n%s", empty)
 	}
 }

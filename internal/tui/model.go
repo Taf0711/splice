@@ -831,6 +831,10 @@ type tuiAgentRunOptions struct {
 	// transition is the per-turn recorder for the design-transition tools. It
 	// is set only for design-conversation runs, and only they drain it.
 	transition *splicerun.DesignTransitionRecorder
+	// decisions is the per-turn ledger for the pin_design_decision tool
+	// (§7.1). Design-conversation runs drain it into decision_pinned
+	// session events after the turn.
+	decisions *splicerun.DecisionRecorder
 }
 
 func newModel(ctx context.Context, options Options) model {
@@ -5093,6 +5097,11 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 		transition := splicerun.NewDesignTransitionRecorder()
 		approveAvailable := m.pendingPlan != nil && (m.pendingCritique == nil || !m.pendingCritique.MustFixBeforeExecution)
 		designTransitionRegistry(designRegistry, approveAvailable, transition)
+		// The decisions ledger lets the agent pin settled decisions as
+		// first-class runtime data (§7.1); drained into session events
+		// after the turn.
+		decisions := splicerun.NewDecisionRecorder()
+		designRegistry.Register(splicerun.NewPinDesignDecisionTool(decisions))
 		return m, tea.Batch(m.runAgentWithOptions(m.activeRunID, runCtx, rawPrompt, turnImages, tuiAgentRunOptions{
 			registry:      designRegistry,
 			systemPrompt:  designSystemPrompt,
@@ -5100,6 +5109,7 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 			priorMessages: designPrior,
 			serverTools:   []zeroruntime.ServerTool{{Kind: zeroruntime.ServerToolWebSearch}},
 			transition:    transition,
+			decisions:     decisions,
 		}), m.spinner.Tick)
 	}
 	runOpts := tuiAgentRunOptions{execDirect: m.execDirectPending}
@@ -6138,6 +6148,17 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		var designTransition *splicerun.DesignTransitionRequest
 		if runOptions.runKind == tuiRunDesignConversation && runOptions.transition != nil {
 			designTransition = runOptions.transition.Take()
+		}
+		// A design-conversation turn also drains its decisions ledger into
+		// decision_pinned session events (§7.1): the pinned decisions become
+		// durable runtime data that survives compaction and reconstructs.
+		if runOptions.runKind == tuiRunDesignConversation && runOptions.decisions != nil {
+			for _, d := range runOptions.decisions.Take() {
+				sessionEvents = append(sessionEvents, pendingSessionEvent{
+					Type:    sessions.EventDecisionPinned,
+					Payload: d,
+				})
+			}
 		}
 		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, turnTools: toolCalls, turnElapsed: elapsed, ttft: ttft, turnVisibleOutputTokens: turnVisibleOutputTokens, memoryStatus: memStatus, memoryCount: memCount, memoryByType: memByType, designTransition: designTransition}
 	}

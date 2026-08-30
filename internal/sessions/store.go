@@ -45,6 +45,7 @@ const (
 	EventSpecApproved       EventType = "spec_approved"
 	EventSpecRejected       EventType = "spec_rejected"
 	EventDesignModeEntered  EventType = "design_mode_entered"
+	EventDecisionPinned     EventType = "decision_pinned"
 	EventPlanCrystallized   EventType = "plan_crystallized"
 	EventCritiqueRecorded   EventType = "critique_recorded"
 	EventPlanApproved       EventType = "plan_approved"

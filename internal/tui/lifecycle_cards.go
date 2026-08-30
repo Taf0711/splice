@@ -7,14 +7,15 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/Taf0711/splice/internal/presentation"
+	"github.com/Taf0711/splice/internal/splice"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
-// P4 lifecycle cards (GAP-E rest): the implementation-plan card (cell E3)
-// and the typed critique card (cell E4), rendered from pendingPlan /
-// pendingCritique — runtime data the design lane already holds. Contract
-// §7.3/§7.4: approval is an explicit gesture, required critique issues
-// block approval, findings carry location/reason/fix.
+// P4 lifecycle cards (GAP-E): the implementation-plan card (cell E3), the
+// typed critique card (cell E4), the crystallizing card (cell E2), and the
+// design-decisions ledger (cell E1). Contract §7.1–§7.4: decisions are
+// first-class runtime data, approval is an explicit gesture, required
+// critique issues block approval, findings carry reason/fix.
 
 // critiqueCardMarker / planCardMarker tag system rows that carry the P4
 // cards. The tags let the renderer route them to the card renderers while
@@ -67,16 +68,7 @@ func critiqueSeverityClass(severity schemas.Severity) string {
 	}
 }
 
-// renderCritiqueCard renders the typed critique card (§7.4, P4 E4):
-//
-//	CRITIQUE                 2 required · 1 advisory
-//	[!] REQUIRED  correctness
-//	    unbounded retry on 5xx
-//	    -> fix: cap at 3, honor ctx deadline
-//	[~] ADVISORY  complexity
-//	    ...
-//	approval  BLOCKED by required issues   (or: critique clean)
-//	[F] fold required fixes   [R] revise
+// renderCritiqueCard renders the typed critique card (§7.4, P4 E4).
 func renderCritiqueCard(plan schemas.DesignPlan, critique schemas.PlanCritique, width int) string {
 	if width <= 0 {
 		return ""
@@ -118,8 +110,7 @@ func renderCritiqueCard(plan schemas.DesignPlan, critique schemas.PlanCritique, 
 		class := critiqueSeverityClass(c.Severity)
 		var glyph, markerStyle string
 		if class == "REQUIRED" {
-			m := presentation.StatusMarker(presentation.NodeStatusFailed, presentation.GlyphTierASCII)
-			glyph = m.Glyph
+			glyph = presentation.StatusMarker(presentation.NodeStatusFailed, presentation.GlyphTierASCII).Glyph
 			markerStyle = "REQUIRED"
 		} else {
 			glyph = presentation.StatusMarker(presentation.NodeStatusDegraded, presentation.GlyphTierASCII).Glyph
@@ -155,13 +146,9 @@ func renderCritiqueCard(plan schemas.DesignPlan, critique schemas.PlanCritique, 
 	return styledBlock(width, lines, border)
 }
 
-// renderPlanCard renders the implementation-plan card (§7.3, P4 E3):
-//
-//	IMPLEMENTATION PLAN          3 tasks · 7 acceptance checks
-//	critique clean
-//	01  classify retries   policy.go
-//	02  thread deadline    client.go
-//	approval is an explicit gesture: [A] approve   [R] revise
+// renderImplementationPlanCard renders the implementation-plan card
+// (§7.3, P4 E3): numbered tasks with targets, the acceptance-check count,
+// the critique verdict, and the explicit-gesture approve row.
 func renderImplementationPlanCard(plan schemas.DesignPlan, critiqueClean bool, width int) string {
 	if width <= 0 {
 		return ""
@@ -233,6 +220,51 @@ func renderCrystallizingCard(settled, scope bool, drafting bool, taskCount int, 
 		zeroTheme.amber.Render("not a contract yet"),
 		"",
 		zeroTheme.faint.Render(fmt.Sprintf("drafting %d tasks from settled decisions", taskCount)),
+	}
+	return styledBlock(width, lines, zeroTheme.cardRun)
+}
+
+// renderDecisionsCard renders the design-decisions ledger (§7.1, P4 E1):
+//
+//	DECISIONS                3 settled
+//	  [+] retry idempotent methods only
+//	  [~] REVISED  backoff cap 5s (was: cap 30s)
+//
+// Decisions are first-class runtime data projected from
+// DesignState.Decisions. A revised decision renders with the revision
+// marker; history is never silently rewritten.
+func renderDecisionsCard(decisions []splice.DecisionPinnedPayload, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	bodyBudget := width - 6
+	if bodyBudget < 12 {
+		bodyBudget = 12
+	}
+	settled := 0
+	for _, d := range decisions {
+		if !d.Revised {
+			settled++
+		}
+	}
+	lines := []string{
+		zeroTheme.amber.Bold(true).Render("DECISIONS") + "  " +
+			zeroTheme.faint.Render(fmt.Sprintf("%d settled", settled)),
+	}
+	for _, d := range decisions {
+		if d.Revised {
+			lines = append(lines, "  "+zeroTheme.faint.Render("[~] REVISED  "+truncateRunes(d.Statement, bodyBudget-14)))
+			continue
+		}
+		lines = append(lines, "  "+zeroTheme.green.Render("[+]")+" "+zeroTheme.ink.Render(truncateRunes(d.Statement, bodyBudget-6)))
+		if detail := strings.TrimSpace(d.Detail); detail != "" {
+			for _, wrapped := range wrapPlainText(detail, bodyBudget-8) {
+				lines = append(lines, "      "+zeroTheme.faint.Render(wrapped))
+			}
+		}
+	}
+	if len(decisions) == 0 {
+		lines = append(lines, zeroTheme.faint.Render("no decisions pinned yet"))
 	}
 	return styledBlock(width, lines, zeroTheme.cardRun)
 }
