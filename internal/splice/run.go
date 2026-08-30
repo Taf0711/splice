@@ -196,6 +196,12 @@ func Run(ctx context.Context, prompt string, provider agent.Provider, options ag
 	}
 
 	cfg := PipelineConfigFromAgentOptions(options)
+	// Workspace isolation (DoD 26): a run whose Cwd is a worktree path
+	// distinct from the stable repo root is an isolated lane; stage events
+	// stamp that so the sidebar can badge the lane honestly.
+	if cfg.ProjectRoot != "" && cfg.Cwd != cfg.ProjectRoot {
+		cfg.IsolatedWorktree = cfg.Cwd
+	}
 	result, err := runExecutionPlan(ctx, runID, plan, provider, cfg, mem, rec)
 	if err != nil {
 		return agent.Result{}, err
@@ -1692,6 +1698,16 @@ func emitStageEvent(options PipelineRunConfig, stageName, status, detail string,
 		Detail:       detail,
 		Progress:     progress,
 		ChangedFiles: append([]string(nil), changedFiles...),
+	}
+	// Workspace isolation (DoD 26): a run bound to a Splice worktree
+	// stamps every stage event with the isolated badge so the sidebar can
+	// show the lane's isolation honestly. The runtime derives it from its
+	// own config, never from the renderer.
+	if options.IsolatedWorktree != "" {
+		event.Workspace = "isolated"
+		event.WorktreePath = options.IsolatedWorktree
+	} else {
+		event.Workspace = "shared_cwd"
 	}
 	if options.OnStageEvent != nil {
 		options.OnStageEvent(event)

@@ -34,6 +34,9 @@ type Event struct {
 	StageNames       []string
 	Title            string
 	InterventionKind InterventionKind
+	// Workspace isolation state (DoD 26), stamped by the adapter.
+	Workspace    string
+	WorktreePath string
 }
 
 // StreamEventLike is the minimal event contract: anything that can project
@@ -46,13 +49,18 @@ type StreamEventLike interface {
 
 // StageEvent is the presentation projection of a stage lifecycle event. It
 // carries the same data as the runtime's stage event: node name, kind (from
-// the adapter), status, detail, and integer progress.
+// the adapter), status, detail, and integer progress, plus the stage's
+// workspace isolation state (DoD 26).
 type StageEvent struct {
 	ID       string
 	Kind     NodeKind
 	Status   string
 	Detail   string
 	Progress int
+	// Workspace is the stage's isolation state ("isolated"/"shared_cwd"),
+	// stamped by the runtime; empty means unset.
+	Workspace    string
+	WorktreePath string
 }
 
 // PresentationEvent projects the stage event into the normalized form.
@@ -64,6 +72,9 @@ func (e StageEvent) PresentationEvent() Event {
 		Status:   e.Status,
 		Detail:   e.Detail,
 		Progress: e.Progress,
+		// Workspace flows through for DoD 26's isolation badge.
+		Workspace:    e.Workspace,
+		WorktreePath: e.WorktreePath,
 	}
 }
 
@@ -198,6 +209,9 @@ func applyStage(state State, event Event) (State, error) {
 		Kind:     kind,
 		Status:   status,
 		Progress: float64(progress) / 100,
+		// Workspace isolation flows from the runtime event (DoD 26).
+		Workspace:    event.Workspace,
+		WorktreePath: event.WorktreePath,
 	}
 	if idx >= 0 {
 		// Preserve per-node identity across updates. A terminal status may
@@ -207,6 +221,12 @@ func applyStage(state State, event Event) (State, error) {
 		node.Cost = prior.Cost
 		node.Usage = prior.Usage
 		node.Dependencies = prior.Dependencies
+		// Workspace identity persists across re-entries: a lane does not
+		// change isolation mid-run.
+		if node.Workspace == "" {
+			node.Workspace = prior.Workspace
+			node.WorktreePath = prior.WorktreePath
+		}
 		out.Nodes[idx] = node
 	} else {
 		out.Nodes = append(out.Nodes, node)

@@ -36,6 +36,10 @@ type pipelineStageRow struct {
 	// (test_runner -> code_writer re-entry -> test_runner) without inventing a
 	// "repair" stage: it is the same stage being revisited.
 	reentered bool
+	// workspace is the stage's isolation state (DoD 26): "isolated" or
+	// "shared_cwd"; empty means unset (renderer projects shared_cwd).
+	workspace    string
+	worktreePath string
 }
 
 // pipelineMessageRow is one repair-loop message surfaced in the panel (DM4).
@@ -129,10 +133,12 @@ func (s *pipelinePanelState) applyState(state presentation.State) {
 	}
 	for _, node := range state.Nodes {
 		row := pipelineStageRow{
-			name:     node.ID,
-			kind:     node.Kind,
-			status:   pipelineStageStatusFromNode(node.Status),
-			progress: int(node.Progress * 100),
+			name:         node.ID,
+			kind:         node.Kind,
+			status:       pipelineStageStatusFromNode(node.Status),
+			progress:     int(node.Progress * 100),
+			workspace:    node.Workspace,
+			worktreePath: node.WorktreePath,
 		}
 		// A running node with an intervention against it is a repair
 		// re-entry, not a fresh run: the repair loop re-enters a terminal
@@ -447,6 +453,12 @@ func (p pipelinePresentation) renderSection(width int, phase int) []string {
 	for _, stage := range p.stages {
 		glyph, bodyStyle := pipelineStageGlyphAndStyle(stage.status, phase)
 		line := " " + glyph + " " + bodyStyle.Render(truncateStep(stage.name, room))
+		// Isolation badge (DoD 26): "isolated" lanes are badged distinctly
+		// from "shared cwd" so parallel-lane honesty survives the compact
+		// panel. Renders only when the whole row fits, like the kind tag.
+		if badge := workspaceBadge(stage.workspace); badge != "" && len([]rune(stage.name))+1+len(badge) <= room {
+			line += " " + zeroTheme.faint.Render(badge)
+		}
 		// The kind tag is metadata shown faintly after the label. It renders
 		// only when the whole row fits; otherwise the row degrades exactly as
 		// P1.2 (name truncated by truncateStep, tag dropped), so narrow widths
@@ -533,6 +545,19 @@ func (p pipelinePresentation) stripState() pipelineStripState {
 
 func (s pipelinePanelState) stripState() pipelineStripState {
 	return s.presentation().stripState()
+}
+
+// workspaceBadge renders the isolation badge text for a stage row (DoD 26).
+// Unset workspace projects as shared cwd (the honest default: most runs
+// share the authoritative directory); "isolated" badges the worktree lane.
+func workspaceBadge(workspace string) string {
+	switch workspace {
+	case "isolated":
+		return "isolated"
+	default:
+		// "shared_cwd" and unset both project the shared badge.
+		return "shared cwd"
+	}
 }
 
 // compactSectionTabs renders the compact-mode section shortcut row: the

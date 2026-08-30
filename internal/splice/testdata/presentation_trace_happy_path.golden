@@ -44,7 +44,8 @@
           "cached_tokens": 0,
           "reasoning_tokens": 0,
           "cost_usd": 0
-        }
+        },
+        "workspace": "shared_cwd"
       }
     ],
     "interventions": null,
@@ -84,7 +85,8 @@
           "cached_tokens": 0,
           "reasoning_tokens": 0,
           "cost_usd": 0
-        }
+        },
+        "workspace": "shared_cwd"
       }
     ],
     "interventions": null,
@@ -124,7 +126,8 @@
           "cached_tokens": 0,
           "reasoning_tokens": 0,
           "cost_usd": 0
-        }
+        },
+        "workspace": "shared_cwd"
       },
       {
         "id": "static_analyzer",
@@ -143,7 +146,8 @@
           "cached_tokens": 0,
           "reasoning_tokens": 0,
           "cost_usd": 0
-        }
+        },
+        "workspace": "shared_cwd"
       }
     ],
     "interventions": null,
@@ -183,7 +187,8 @@
           "cached_tokens": 0,
           "reasoning_tokens": 0,
           "cost_usd": 0
-        }
+        },
+        "workspace": "shared_cwd"
       },
       {
         "id": "static_analyzer",
@@ -202,7 +207,8 @@
           "cached_tokens": 0,
           "reasoning_tokens": 0,
           "cost_usd": 0
-        }
+        },
+        "workspace": "shared_cwd"
       }
     ],
     "interventions": null,
@@ -242,7 +248,8 @@
           "cached_tokens": 0,
           "reasoning_tokens": 0,
           "cost_usd": 0
-        }
+        },
+        "workspace": "shared_cwd"
       },
       {
         "id": "static_analyzer",
@@ -261,7 +268,8 @@
           "cached_tokens": 0,
           "reasoning_tokens": 0,
           "cost_usd": 0
-        }
+        },
+        "workspace": "shared_cwd"
       },
       {
         "id": "test_runner",
@@ -280,7 +288,8 @@
           "cached_tokens": 0,
           "reasoning_tokens": 0,
           "cost_usd": 0
-        }
+        },
+        "workspace": "shared_cwd"
       }
     ],
     "interventions": null,
@@ -320,7 +329,8 @@
           "cached_tokens": 0,
           "reasoning_tokens": 0,
           "cost_usd": 0
-        }
+        },
+        "workspace": "shared_cwd"
       },
       {
         "id": "static_analyzer",
@@ -339,7 +349,8 @@
           "cached_tokens": 0,
           "reasoning_tokens": 0,
           "cost_usd": 0
-        }
+        },
+        "workspace": "shared_cwd"
       },
       {
         "id": "test_runner",
@@ -358,7 +369,8 @@
           "cached_tokens": 0,
           "reasoning_tokens": 0,
           "cost_usd": 0
-        }
+        },
+        "workspace": "shared_cwd"
       }
     ],
     "interventions": null,
@@ -398,7 +410,8 @@
           "cached_tokens": 0,
           "reasoning_tokens": 0,
           "cost_usd": 0
-        }
+        },
+        "workspace": "shared_cwd"
       },
       {
         "id": "static_analyzer",
@@ -417,7 +430,8 @@
           "cached_tokens": 0,
           "reasoning_tokens": 0,
           "cost_usd": 0
-        }
+        },
+        "workspace": "shared_cwd"
       },
       {
         "id": "test_runner",
@@ -436,7 +450,8 @@
           "cached_tokens": 0,
           "reasoning_tokens": 0,
           "cost_usd": 0
-        }
+        },
+        "workspace": "shared_cwd"
       },
       {
         "id": "acceptance_verifier",
@@ -455,7 +470,8 @@
           "cached_tokens": 0,
           "reasoning_tokens": 0,
           "cost_usd": 0
-        }
+        },
+        "workspace": "shared_cwd"
       }
     ],
     "interventions": null,
@@ -495,7 +511,8 @@
           "cached_tokens": 0,
           "reasoning_tokens": 0,
           "cost_usd": 0
-        }
+        },
+        "workspace": "shared_cwd"
       },
       {
         "id": "static_analyzer",
@@ -514,7 +531,8 @@
           "cached_tokens": 0,
           "reasoning_tokens": 0,
           "cost_usd": 0
-        }
+        },
+        "workspace": "shared_cwd"
       },
       {
         "id": "test_runner",
@@ -533,7 +551,8 @@
           "cached_tokens": 0,
           "reasoning_tokens": 0,
           "cost_usd": 0
-        }
+        },
+        "workspace": "shared_cwd"
       },
       {
         "id": "acceptance_verifier",
@@ -552,7 +571,8 @@
           "cached_tokens": 0,
           "reasoning_tokens": 0,
           "cost_usd": 0
-        }
+        },
+        "workspace": "shared_cwd"
       }
     ],
     "interventions": null,
@@ -592,7 +612,8 @@
           "cached_tokens": 0,
           "reasoning_tokens": 0,
           "cost_usd": 0
-        }
+        },
+        "workspace": "shared_cwd"
       },
       {
         "id": "static_analyzer",
@@ -611,7 +632,8 @@
           "cached_tokens": 0,
           "reasoning_tokens": 0,
           "cost_usd": 0
-        }
+        },
+        "workspace": "shared_cwd"
       },
       {
         "id": "test_runner",
@@ -630,7 +652,8 @@
           "cached_tokens": 0,
           "reasoning_tokens": 0,
           "cost_usd": 0
-        }
+        },
+        "workspace": "shared_cwd"
       },
       {
         "id": "acceptance_verifier",
@@ -649,7 +672,8 @@
           "cached_tokens": 0,
           "reasoning_tokens": 0,
           "cost_usd": 0
-        }
+        },
+        "workspace": "shared_cwd"
       }
     ],
     "interventions": null,

@@ -60,6 +60,11 @@ func AdaptStageEvent(event agent.StageEvent) presentation.StreamEventLike {
 		Status:   event.Status,
 		Detail:   event.Detail,
 		Progress: event.Progress,
+		// Workspace flows through for DoD 26's isolation badge. The
+		// reducer stores it on the node verbatim; the renderer decides
+		// how to badge it.
+		Workspace:    event.Workspace,
+		WorktreePath: event.WorktreePath,
 	}
 }
 

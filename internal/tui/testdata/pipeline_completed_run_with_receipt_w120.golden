@@ -1,5 +1,5 @@
- ✓ code_writer w
- ✓ test_runner t
- ✓ security_auditor s
+ ✓ code_writer shared cwd w
+ ✓ test_runner shared cwd t
+ ✓ security_auditor shared cwd s
 
  [################] 100%

@@ -1,5 +1,5 @@
- ✓ code_writer w
- ✗ test_runner t
+ ✓ code_writer shared cwd w
+ ✗ test_runner shared cwd t
 
  [################] 100%
 

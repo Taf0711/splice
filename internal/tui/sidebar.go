@@ -629,6 +629,13 @@ func (m model) renderContextSidebar(width, height int) []string {
 		lines = append(lines, pipeline.renderSection(width, m.spinnerPhase)...)
 	}
 
+	// TRAJECTORY section (GAP-G): the diagnostic surface, off by default.
+	// Rendered below PIPELINE so it reads as part of the run state.
+	if !m.pipeline.isEmpty() {
+		add("")
+		add(m.renderTrajectorySurface(m.lastState, width))
+	}
+
 	// MEMORY section: compact observation count when the sidecar is active.
 	// Absent when off or unknown so the sidebar stays clean when memory is off
 	// (the status line already covers the off state).

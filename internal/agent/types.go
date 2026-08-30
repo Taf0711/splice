@@ -279,6 +279,12 @@ type StageEvent struct {
 	Detail       string
 	Progress     int
 	ChangedFiles []string
+	// Workspace stamps the stage's isolation state ("isolated" when the
+	// run executes in a Splice worktree, "shared_cwd" otherwise), so the
+	// presentation contract can carry DoD 26's isolation badge. Empty
+	// means unset (the renderer projects shared_cwd).
+	Workspace    string
+	WorktreePath string
 }
 
 type Options struct {

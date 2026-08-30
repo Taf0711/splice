@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Taf0711/splice/internal/presentation"
 	"github.com/Taf0711/splice/internal/splice"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
@@ -185,5 +186,37 @@ func TestDecisionsCardRendersLedger(t *testing.T) {
 	empty := stripANSI(renderDecisionsCard(nil, 90))
 	if !strings.Contains(empty, "DECISIONS") || !strings.Contains(empty, "no decisions pinned yet") {
 		t.Fatalf("empty ledger missing placeholder:\n%s", empty)
+	}
+}
+
+// TestIsolationBadgeOnStageRows pins DoD 26: stage rows carry the
+// isolation badge from the presentation snapshot — isolated lanes badge
+// "isolated", shared lanes badge "shared cwd", and the worktree chip in
+// the pipeline header names the lane's worktree.
+func TestIsolationBadgeOnStageRows(t *testing.T) {
+	state := presentation.State{
+		SchemaVersion: presentation.PresentationSchemaVersionV1,
+		Lifecycle:     presentation.LifecycleExecute,
+		Nodes: []presentation.ExecutionNode{
+			{ID: "code_writer", Label: "code_writer", Kind: presentation.NodeKindWrite, Status: presentation.NodeStatusComplete, Progress: 1, Workspace: "isolated", WorktreePath: "/repo/.splice/wt/a1"},
+			{ID: "static_analyzer", Label: "static_analyzer", Kind: presentation.NodeKindAnalyze, Status: presentation.NodeStatusRunning, Progress: 0.5, Workspace: "shared_cwd"},
+		},
+	}
+	var panel pipelinePanelState
+	panel.applyState(state)
+	plain := stripANSI(strings.Join(panel.renderSection(110, 0), "\n"))
+	if !strings.Contains(plain, "isolated") {
+		t.Fatalf("isolated lane missing its badge:\n%s", plain)
+	}
+	if !strings.Contains(plain, "shared cwd") {
+		t.Fatalf("shared lane missing its badge:\n%s", plain)
+	}
+	// Unset workspace projects as shared cwd (honest default).
+	state.Nodes[1].Workspace = ""
+	panel2 := pipelinePanelState{}
+	panel2.applyState(state)
+	plain2 := stripANSI(strings.Join(panel2.renderSection(110, 0), "\n"))
+	if !strings.Contains(plain2, "shared cwd") {
+		t.Fatalf("unset workspace did not project shared cwd:\n%s", plain2)
 	}
 }
