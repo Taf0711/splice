@@ -525,6 +525,19 @@ type model struct {
 	// the production default; NO_COLOR also forces ASCII because color is
 	// the only channel the richer tiers add on top of width safety.
 	glyphTier presentation.GlyphTier
+	// trajectoryVisible toggles the trajectory inspection surface (§10,
+	// GAP-G). OFF by default (DoD 11): trajectory is an inspectable
+	// surface, not permanent screen furniture. Regression auto-reveals it
+	// (with an explicit notice); Ctrl+T toggles it back.
+	trajectoryVisible bool
+	// trajectoryAutoRevealed is true when the runtime revealed trajectory
+	// because of a regression, so the UI can say "auto-revealed" instead
+	// of pretending the user opened it.
+	trajectoryAutoRevealed bool
+	// lastState holds the most recent presentation snapshot so inspection
+	// surfaces (trajectory) render at render time from the latest runtime
+	// truth.
+	lastState presentation.State
 }
 
 type agentTextMsg struct {
@@ -1619,6 +1632,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.transcriptDetailed {
 				return m, nil
 			}
+			// During an execution run, Ctrl+T toggles the trajectory
+			// surface (§10, GAP-G): a run in flight is when trajectory is
+			// worth inspecting, and the contract names Ctrl+T for it.
+			// Outside a run (design mode, idle) it keeps cycling reasoning
+			// effort — the pre-existing binding, unchanged.
+			if m.pipeline.active && m.noBlockingModal() {
+				m.trajectoryVisible = !m.trajectoryVisible
+				m.trajectoryAutoRevealed = false
+				return m, nil
+			}
 			// Ctrl+T cycles reasoning effort (auto -> low ->
 			// medium -> high -> auto), but only when nothing modal is up — the
 			// same gate shift+tab uses above. Not gated on m.pending: cycling
@@ -2641,6 +2664,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.pipeline.applyState(msg.state)
+		// Regression auto-reveals trajectory with an explicit notice (§10,
+		// GAP-G): the runtime surfaced a critical failure on the diagnostic
+		// surface, and the UI must say so rather than pretend the user
+		// opened it. DoD 12's "auto-revealed | ctrl+t to hide" wording.
+		if msg.state.Health.Effective() == presentation.HealthRegression && !m.trajectoryVisible {
+			m.trajectoryVisible = true
+			m.trajectoryAutoRevealed = true
+		}
+		m.lastState = msg.state
 		return m, nil
 	case planStepExplanationMsg:
 		// Drop a result from a previous run: beginRun bumps planDetailGen and clears
