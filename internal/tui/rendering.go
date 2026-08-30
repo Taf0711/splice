@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/presentation"
 	"github.com/Taf0711/splice/internal/tools"
 )
 
@@ -1258,11 +1259,32 @@ func permissionEventScopeLabel(event *agent.PermissionEvent) string {
 // box: a tab row (one per question + a trailing Confirm tab for multi-question
 // prompts), the active question's picker or free-text field, and a key-hint footer.
 // `input` is the live composer value, echoed in free-text mode.
+// formatGateWait renders a gate's wait duration compactly for the NEEDS YOU
+// header: m:ss with zero-padded fields (00:41, 04:05).
+func formatGateWait(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	seconds := int(d.Seconds())
+	return fmt.Sprintf("%02d:%02d", seconds/60, seconds%60)
+}
+
 func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width int) string {
 	questions := prompt.request.Questions
 	if len(questions) == 0 {
 		return styledBlockFill(width, []string{zeroTheme.badge.Render(" ASK ")}, zeroTheme.lineStrong, lipgloss.NewStyle())
 	}
+	// Gate elevation (P3 cell C / §8, GAP-E): a blocking ask_user is the
+	// contract's NEEDS YOU gate. The card carries the unique blocked
+	// signature — [?] NEEDS YOU header with the wait timer — and the
+	// hard-gate invariant footer: no work running, no tokens burning
+	// while the gate waits.
+	marker := presentation.BlockedMarker(presentation.GlyphTierASCII)
+	waitLabel := marker.Word
+	if !prompt.startedAt.IsZero() {
+		waitLabel += "  blocked " + formatGateWait(time.Since(prompt.startedAt))
+	}
+	gateFooter := marker.Glyph + " " + waitLabel
 	// The questionnaire replaces the composer, so it paints on the terminal canvas
 	// (black) like the composer box — not a gray card. fill is an identity wrapper
 	// so existing fill(style) call sites render bare foregrounds on that canvas.
@@ -1278,6 +1300,9 @@ func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width
 	multi := len(questions) > 1
 
 	var lines []string
+	lines = append(lines, fill(zeroTheme.amber).Render(gateFooter))
+	lines = append(lines, fill(zeroTheme.faint).Render("-- no work running | no tokens burning --"))
+	lines = append(lines, "")
 	if header := strings.TrimSpace(prompt.request.Header); header != "" {
 		lines = append(lines, fill(zeroTheme.ink).Render(header))
 	}

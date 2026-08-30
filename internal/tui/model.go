@@ -797,6 +797,9 @@ type pendingAskUserPrompt struct {
 	// reviewDecision is empty on the review decision prompt; it is
 	// worktreeReviewReject on the follow-up reject-reason prompt.
 	reviewDecision string
+	// startedAt is when the gate opened, for the NEEDS YOU wait timer
+	// (P3 gate signature). Zero means unknown and hides the timer.
+	startedAt time.Time
 }
 
 type pendingSpecReviewPrompt struct {
@@ -2193,9 +2196,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.transcript = appendTranscriptRow(m.transcript, askUserTranscriptRow(msg.request))
 		m.pendingAskUser = &pendingAskUserPrompt{
-			request: msg.request,
-			answer:  msg.answer,
-			states:  newAskUserStates(msg.request.Questions),
+			request:   msg.request,
+			answer:    msg.answer,
+			states:    newAskUserStates(msg.request.Questions),
+			startedAt: m.now(),
 		}
 		m.reportAgentLifecycle(herdrBlocked)
 		m.clearComposer()
