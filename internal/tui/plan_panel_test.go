@@ -184,7 +184,7 @@ func TestPlanPanelRenderEmpty(t *testing.T) {
 
 func TestPlanPanelRenderRunning(t *testing.T) {
 	m := newModel(t.Context(), Options{ModelName: "gpt-4"})
-	m.width = 100
+	m.width = 130
 	base := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
 	m.now = func() time.Time { return base.Add(15 * time.Second) }
 
@@ -236,7 +236,7 @@ func TestPlanPanelClearResetsFrozenAt(t *testing.T) {
 func runningPlanModel(t *testing.T, steps int) model {
 	t.Helper()
 	m := newModel(t.Context(), Options{ModelName: "gpt-4"})
-	m.width = 100
+	m.width = 130
 	base := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
 	m.now = func() time.Time { return base.Add(15 * time.Second) }
 	items := make([]tools.PlanItem, steps)
@@ -277,7 +277,7 @@ func TestPinnedPlanCollapsesToSummaryWhenTooTall(t *testing.T) {
 
 func TestPinnedPlanHiddenWhenEmpty(t *testing.T) {
 	m := newModel(t.Context(), Options{ModelName: "gpt-4"})
-	m.width = 100
+	m.width = 130
 	if got := m.renderPinnedPlanPanel(80, 10); got != "" {
 		t.Fatalf("no plan => empty pinned render, got %q", got)
 	}

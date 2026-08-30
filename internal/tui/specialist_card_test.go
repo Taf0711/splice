@@ -404,7 +404,7 @@ func TestSpecialistTrackerAddToolCallList(t *testing.T) {
 
 func TestSpecialistCardListsEveryToolCall(t *testing.T) {
 	m := transcriptViewTestModel()
-	m.width = 100
+	m.width = 130
 	info := specialistInfo{
 		name:      "design",
 		status:    specialistCompleted,

@@ -197,7 +197,7 @@ func TestDesignAgentApproveRequestsUserConfirmation(t *testing.T) {
 		t.Fatalf("ensureActiveSession: %v", err)
 	}
 	m.designNoticeShown = true
-	m.width = 100
+	m.width = 130
 	m.height = 30
 	m.altScreen = true
 	m.headerPrinted = true
@@ -1095,7 +1095,7 @@ func TestCrystallizeResultMsgDisplaysPlan(t *testing.T) {
 	}
 	m.activeSession = sess
 	m.activeRunID = 42
-	m.width = 100
+	m.width = 130
 	m.height = 30
 	m.altScreen = true
 	m.headerPrinted = true

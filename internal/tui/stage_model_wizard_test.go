@@ -483,7 +483,7 @@ func TestStageModelWizardEndToEndFeature(t *testing.T) {
 		ProviderProfile: profile,
 		SavedProviders:  []config.ProviderProfile{profile},
 	})
-	m.width = 110
+	m.width = 130
 	m.height = 36
 	m.input.SetValue("/stages")
 

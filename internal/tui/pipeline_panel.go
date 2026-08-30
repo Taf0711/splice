@@ -353,9 +353,9 @@ func (p pipelinePresentation) renderStripWithChip(width int, phase int, chip str
 	count := formatDoneTotal(p.done, p.total)
 	header := label + " " + count
 
-	lines := make([]string, 0, 3)
+	lines := make([]string, 0, 4)
 	switch widthTier(width) {
-	case tierFull, tierMedium:
+	case tierFull:
 		// Wide: header with count, then a stage-label run, then a compact bar.
 		lines = append(lines, headColor.Render(truncateDisplayWidth(header, width)))
 		lines = append(lines, " "+p.stripLabels(width-1, phase))
@@ -363,6 +363,18 @@ func (p pipelinePresentation) renderStripWithChip(width int, phase int, chip str
 		if bar != "" {
 			lines = append(lines, " "+bar)
 		}
+	case tierMedium:
+		// Compact (80-119): header, stage-label run, bar, then the section
+		// shortcut row — the sidebar sections become tabs (spec §4.2 rule
+		// "sidebar_sections_become_tabs") because the permanent sidebar is
+		// removed in compact mode (DoD 16).
+		lines = append(lines, headColor.Render(truncateDisplayWidth(header, width)))
+		lines = append(lines, " "+p.stripLabels(width-1, phase))
+		bar := renderPipelineProgressBar(p.progress, width)
+		if bar != "" {
+			lines = append(lines, " "+bar)
+		}
+		lines = append(lines, " "+compactSectionTabs(width))
 	case tierNarrow:
 		// Mid: header plus the current-running label (or first pending).
 		headLabel := p.stripCurrentLabel()
@@ -521,6 +533,23 @@ func (p pipelinePresentation) stripState() pipelineStripState {
 
 func (s pipelinePanelState) stripState() pipelineStripState {
 	return s.presentation().stripState()
+}
+
+// compactSectionTabs renders the compact-mode section shortcut row: the
+// sidebar's permanent sections collapse into keyboard-reachable tabs
+// (spec §4.2). Keys follow the existing bindings: Ctrl+B toggles the
+// sidebar (restoring it on a wide-enough terminal), Ctrl+P toggles the
+// plan panel, ? opens shortcuts. The row fits the width whole (segments
+// are short); if even the row cannot fit it returns empty rather than
+// truncating into noise.
+func compactSectionTabs(width int) string {
+	tabs := zeroTheme.muted.Render("[B]") + zeroTheme.faint.Render(" sidebar ") +
+		zeroTheme.muted.Render("[P]") + zeroTheme.faint.Render(" plan ") +
+		zeroTheme.muted.Render("[?]") + zeroTheme.faint.Render(" shortcuts")
+	if lipgloss.Width(tabs) > width {
+		return ""
+	}
+	return tabs
 }
 
 // pipelineStageLabel abbreviates a stage name for the narrow strip: the first

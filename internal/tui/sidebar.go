@@ -23,6 +23,12 @@ const (
 	sidebarMinWidth  = 26
 	sidebarMaxWidth  = 40
 	sidebarMinColumn = 60 // below this total width the sidebar is suppressed
+	// compactModeMinWidth is the contract's wide/compact boundary (v0.5 spec
+	// layout: wide >= 120, compact 80-119). Between 80 and 119 the sidebar is
+	// suppressed: the compact projection REMOVES the permanent sidebar rather
+	// than crushing it (DoD 16), the pipeline collapses to the strip, and
+	// section access moves to shortcuts. At 120+ the full cockpit renders.
+	compactModeMinWidth = 120
 )
 
 // sidebarWidth returns the sidebar column width for a given total width, or 0
@@ -77,10 +83,12 @@ func (m model) sidebarAvailable() bool {
 	if sidebarWidth(m.width) <= 0 {
 		return false
 	}
-	// Only split once the chat column survives it: require the medium tier (>=80
-	// cols). Between 60-79 the sidebar would starve the chat to ~30 cells, so the
-	// layout commits to two healthy columns or stays cleanly single-column.
-	if widthTier(m.width) < tierMedium {
+	// Only split once the chat column survives it: the contract's compact
+	// projection (80-119) removes the sidebar entirely, so the two-column
+	// cockpit only renders at the wide boundary (>= 120). Between 60-119
+	// the layout commits to the single-column compact mode instead of
+	// squeezing a starving second column.
+	if m.width < compactModeMinWidth {
 		return false
 	}
 	// Full-screen overlays (setup, wizards, and pickers) take over the chat

@@ -167,7 +167,7 @@ func TestSwarmSessionsMsgPopulatesMap(t *testing.T) {
 
 func sidebarTestModel() model {
 	m := newModel(context.Background(), Options{ProviderName: "test-provider", ModelName: "test-model"})
-	m.width = 100
+	m.width = 130
 	m.height = 30
 	m.altScreen = true
 	m.headerPrinted = true

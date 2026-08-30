@@ -361,7 +361,7 @@ func TestInitialRenderShowsLimeChatSurface(t *testing.T) {
 
 func TestEmptyStateCollapsesAfterFirstPrompt(t *testing.T) {
 	m := newModel(context.Background(), Options{})
-	m.width = 100
+	m.width = 130
 	m.height = 30
 	m.input.SetValue("inspect the repo")
 
