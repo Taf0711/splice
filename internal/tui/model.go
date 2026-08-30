@@ -2494,13 +2494,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.pendingPlan = &msg.plan
 		m.pendingCritique = &msg.critique
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: formatDesignPlan(msg.plan)})
+		// P4 lifecycle cards (GAP-E): the plan and its typed critique render
+		// as contract cards instead of flat system notes. The gate logic
+		// below is unchanged — required issues still block /approve.
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: planCardTranscriptText(msg.plan, msg.critique)})
 		if warning := designCoverageWarning(msg.plan); warning != "" {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: warning})
 		}
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: formatPlanCritique(msg.critique)})
 		if msg.critique.MustFixBeforeExecution {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Critic flagged must-fix issues. /approve is blocked. Revise and re-run /crystallize."})
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: critiqueCardTranscriptText(msg.plan, msg.critique)})
 		} else {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan is ready. Type /approve to execute."})
 		}

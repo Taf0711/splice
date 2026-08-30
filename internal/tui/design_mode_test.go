@@ -1126,11 +1126,13 @@ func TestCrystallizeResultMsgDisplaysPlan(t *testing.T) {
 	if next.pendingCritique == nil || next.pendingCritique.OverallAssessment != critique.OverallAssessment {
 		t.Fatalf("expected pendingCritique set, got %#v", next.pendingCritique)
 	}
-	if !transcriptContains(next.transcript, plan.Epic) {
-		t.Fatalf("expected plan epic in transcript, got %#v", next.transcript)
+	// The P4 plan card carries the numbered tasks; the flat epic/assessment
+	// lines were replaced by the card render.
+	if !transcriptContains(next.transcript, "IMPLEMENTATION PLAN") {
+		t.Fatalf("expected the plan card in transcript, got %#v", next.transcript)
 	}
-	if !transcriptContains(next.transcript, critique.OverallAssessment) {
-		t.Fatalf("expected critique assessment in transcript, got %#v", next.transcript)
+	if !transcriptContains(next.transcript, "Implement it") {
+		t.Fatalf("expected plan task title in transcript, got %#v", next.transcript)
 	}
 	if !next.sidebarActive() {
 		t.Fatal("crystallized plan did not activate the context sidebar")
@@ -1227,8 +1229,7 @@ func TestCrystallizeResultMsgOutcomes(t *testing.T) {
 			wantCritique:      true,
 			wantSessionEvents: true,
 			wantTranscript: []string{
-				validPlan.Epic,
-				validCritique.OverallAssessment,
+				"IMPLEMENTATION PLAN",
 				"Plan is ready. Type /approve to execute.",
 			},
 		},
@@ -1386,8 +1387,8 @@ func TestCrystallizeResultMsgMustFixBlocksApprove(t *testing.T) {
 	updated, _ := m.Update(msg)
 	next := updated.(model)
 
-	if !transcriptContains(next.transcript, "/approve is blocked") {
-		t.Fatalf("expected blocked message, got %#v", next.transcript)
+	if !transcriptContains(next.transcript, "BLOCKED by required issues") {
+		t.Fatalf("expected the blocked verdict on the critique card, got %#v", next.transcript)
 	}
 	if transcriptContains(next.transcript, "Plan is ready") {
 		t.Fatalf("did not expect ready message, got %#v", next.transcript)

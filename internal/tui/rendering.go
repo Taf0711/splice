@@ -241,6 +241,11 @@ func (m model) renderRowModeUncached(row transcriptRow, width int, rc rowContext
 		if payload, ok := planCardTranscriptPayload(row.text); ok {
 			return renderPlanCardRow(payload, width)
 		}
+		// P4 lifecycle cards: tagged design-lane cards render through
+		// their contract renderers at the row's width.
+		if card, ok := parseLifecycleCardPayload(row.text); ok {
+			return card(width)
+		}
 		if payload, ok := commandCardTranscriptPayload(row.text); ok {
 			return renderCommandCardRow(payload, width)
 		}
