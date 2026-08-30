@@ -600,11 +600,24 @@ func (m model) renderContextSidebar(width, height int) []string {
 		lines = append(lines, planLines...)
 	}
 
-	// PIPELINE section (pipeline stages).
+	// PIPELINE section (pipeline stages). The header chip carries the
+	// worktree (when isolated) and the phase/health/gate readout from the
+	// same presentation snapshot: `PIPELINE wt:x · executing | regression`.
+	// Budget = width minus the "PIPELINE " prefix (9) and the done/total
+	// count (5, worst case "99/99"), so the chip degrades by dropping
+	// segments instead of being ellipsis-truncated mid-word.
 	pipeline := m.pipeline.presentation()
 	if pipeline.active && pipeline.total > 0 {
 		add("")
-		add(pipeline.headerLineWithChip(width, m.worktreeChip()))
+		budget := width - len("PIPELINE ") - len("99/99")
+		chip := m.worktreeChip()
+		if lifecycle := m.pipeline.lifecycleChip(budget); lifecycle != "" {
+			if chip != "" {
+				chip += " · "
+			}
+			chip += lifecycle
+		}
+		add(pipeline.headerLineWithChip(width, chip))
 		lines = append(lines, pipeline.renderSection(width, m.spinnerPhase)...)
 	}
 

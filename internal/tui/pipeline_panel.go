@@ -52,6 +52,12 @@ type pipelinePanelState struct {
 	active       bool // true when a pipeline run is in progress
 	changedFiles []string
 	messages     []pipelineMessageRow
+	// Lifecycle/health/gate come from the same presentation.State snapshot
+	// (v0.5 phase x health x gate). They are projection inputs, not policy:
+	// the pipeline header chip renders them verbatim.
+	lifecycle string
+	health    string
+	gate      string
 }
 
 // pipelinePresentation is the immutable display model shared by pipeline
@@ -114,6 +120,13 @@ func (s *pipelinePanelState) applyState(state presentation.State) {
 	s.messages = nil
 	s.changedFiles = nil
 	s.active = true
+	s.lifecycle = string(state.Lifecycle)
+	s.health = string(state.Health.Effective())
+	if state.Gate != nil {
+		s.gate = string(state.Gate.Kind)
+	} else {
+		s.gate = ""
+	}
 	for _, node := range state.Nodes {
 		row := pipelineStageRow{
 			name:     node.ID,
@@ -219,10 +232,60 @@ func (s *pipelinePanelState) clear() {
 	s.active = false
 	s.changedFiles = nil
 	s.messages = nil
+	s.lifecycle = ""
+	s.health = ""
+	s.gate = ""
 }
 
 func (s pipelinePanelState) isEmpty() bool {
 	return !s.active || len(s.stages) == 0
+}
+
+// lifecycleChip renders the phase/health/gate readout for the pipeline
+// header, contract form `phase | health | gate` (P8 state chips). Segments
+// drop by priority under width pressure (DoD 18) rather than truncating:
+// a blocking gate preempts health, health preempts nothing (both are
+// alerts), and the phase is the mandatory base. budget is the cell width
+// available after the "PIPELINE " prefix and the done/total count.
+func (s pipelinePanelState) lifecycleChip(budget int) string {
+	if s.lifecycle == "" {
+		return ""
+	}
+	chip := s.lifecycle
+	fits := func(extra string) bool {
+		return budget <= 0 || lipgloss.Width(chip+extra) <= budget
+	}
+	// Priority ladder (DoD 18, DoD 22): gate visibility is never sacrificed
+	// and the phase is the mandatory base, so health is the only segment
+	// that drops under width pressure. Segments drop whole; nothing is
+	// ellipsis-truncated mid-word.
+	if s.gate != "" {
+		full := chip + " | " + s.healthChipText() + " | gate " + s.gate
+		if s.healthText() != "" && lipgloss.Width(full) <= budget {
+			return full
+		}
+		return chip + " | gate " + s.gate
+	}
+	if h := s.healthText(); h != "" && fits(" | "+h) {
+		chip += " | " + h
+	}
+	return chip
+}
+
+// healthText returns the health segment or "" when normal/absent (normal
+// health is noise, not an alert).
+func (s pipelinePanelState) healthText() string {
+	if s.health == "" || s.health == "normal" {
+		return ""
+	}
+	return s.health
+}
+
+func (s pipelinePanelState) healthChipText() string {
+	if h := s.healthText(); h != "" {
+		return h
+	}
+	return "normal"
 }
 
 func (s pipelinePanelState) headerLineWithChip(width int, chip string) string {

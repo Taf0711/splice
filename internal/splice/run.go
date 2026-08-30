@@ -1438,7 +1438,11 @@ func wirePresentation(options PipelineRunConfig, plan schemas.ExecutionPlan) (Pi
 }
 
 // finishPresentation feeds the terminal run event and emits the final
-// snapshot. Aborted and failed runs both project as "failed".
+// snapshot. Receipt kinds (v0.5 receipts contract): "completed" projects
+// VERIFIED-eligible, "failed" projects failed, and an aborted run the USER
+// stopped projects "cancelled" (a distinct receipt: staged work preserved,
+// nothing applied). A run aborted for internal reasons still projects
+// "failed", because cancelled means the user chose to stop.
 func finishPresentation(acc *presentrun.Accumulator, options PipelineRunConfig, result schemas.PipelineResult) {
 	if acc == nil {
 		return
@@ -1446,6 +1450,9 @@ func finishPresentation(acc *presentrun.Accumulator, options PipelineRunConfig, 
 	status := "completed"
 	if result.Status != "completed" {
 		status = "failed"
+		if result.Status == "aborted" && abortReason(result) != "" {
+			status = "cancelled"
+		}
 	}
 	acc.Apply(presentrun.AdaptRunEvent(status, abortReason(result)))
 	options.OnPresentationState(acc.Snapshot())

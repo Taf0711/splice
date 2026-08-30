@@ -1,7 +1,7 @@
 [
   {
     "schema_version": 1,
-    "lifecycle": "execute",
+    "lifecycle": "executing",
     "plan": {
       "title": "add a Hello function and tests",
       "task_count": 4
@@ -21,7 +21,7 @@
   },
   {
     "schema_version": 1,
-    "lifecycle": "execute",
+    "lifecycle": "executing",
     "plan": {
       "title": "add a Hello function and tests",
       "task_count": 4
@@ -61,7 +61,7 @@
   },
   {
     "schema_version": 1,
-    "lifecycle": "execute",
+    "lifecycle": "executing",
     "plan": {
       "title": "add a Hello function and tests",
       "task_count": 4
@@ -101,7 +101,7 @@
   },
   {
     "schema_version": 1,
-    "lifecycle": "execute",
+    "lifecycle": "verifying",
     "plan": {
       "title": "add a Hello function and tests",
       "task_count": 4
@@ -160,7 +160,7 @@
   },
   {
     "schema_version": 1,
-    "lifecycle": "execute",
+    "lifecycle": "executing",
     "plan": {
       "title": "add a Hello function and tests",
       "task_count": 4
@@ -219,7 +219,7 @@
   },
   {
     "schema_version": 1,
-    "lifecycle": "execute",
+    "lifecycle": "executing",
     "plan": {
       "title": "add a Hello function and tests",
       "task_count": 4
@@ -297,7 +297,7 @@
   },
   {
     "schema_version": 1,
-    "lifecycle": "execute",
+    "lifecycle": "executing",
     "plan": {
       "title": "add a Hello function and tests",
       "task_count": 4
@@ -375,7 +375,7 @@
   },
   {
     "schema_version": 1,
-    "lifecycle": "execute",
+    "lifecycle": "verifying",
     "plan": {
       "title": "add a Hello function and tests",
       "task_count": 4
@@ -472,7 +472,7 @@
   },
   {
     "schema_version": 1,
-    "lifecycle": "execute",
+    "lifecycle": "executing",
     "plan": {
       "title": "add a Hello function and tests",
       "task_count": 4
