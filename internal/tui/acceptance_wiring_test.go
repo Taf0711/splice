@@ -458,3 +458,151 @@ func TestAcceptanceHandoffDiffKeyOpensDiffViewport(t *testing.T) {
 		t.Fatal("acceptance: Esc did not close the diff review viewport")
 	}
 }
+
+// ---------- 10. Real terminal key shapes (review finding: Code lowercase) ----------
+
+// reviewRealShiftKey builds shift+letter EXACTLY as ultraviolet's input
+// decoder emits it on a real terminal (decoder.go lowercases Code for every
+// letter and stores the shifted letter in ShiftedCode + ModShift). A test
+// that dispatches with Key{Code:'M'} proves nothing: no terminal can
+// produce that shape.
+func reviewRealShiftKey(letter rune) tea.KeyPressMsg {
+	return tea.KeyPressMsg(tea.Key{
+		Code:        letter + ('a' - 'A'),
+		ShiftedCode: letter,
+		Text:        string(letter),
+		Mod:         tea.ModShift,
+	})
+}
+
+// reviewRealPlainKey builds an unshifted letter as a real terminal emits it.
+func reviewRealPlainKey(letter rune) tea.KeyPressMsg {
+	return tea.KeyPressMsg(tea.Key{Code: letter, Text: string(letter)})
+}
+
+// reviewArmedHandoffModel arms a preserved handoff through the real flow:
+// the run fails, the review picker opens, Enter keeps the worktree, then
+// the handoff is preserved (the disk check is forced true because the test
+// lane paths do not exist).
+func reviewArmedHandoffModel(t *testing.T, lane string) model {
+	t.Helper()
+	m := mouseTestModel()
+	m.activeRunID = 42
+	wt := &worktrees.Result{Name: lane, Path: "/nonexistent/" + lane, RepoRoot: "/nonexistent"}
+	updated, _ := m.Update(planExecutionResultMsg{runID: 42, err: acceptErr("boom"), worktree: wt})
+	next := updated.(model)
+	if next.pendingAskUser == nil {
+		t.Fatal("review probe: review picker did not open after failure")
+	}
+	updatedAfterKeep, _ := next.Update(testKey(tea.KeyEnter))
+	next = updatedAfterKeep.(model)
+	if next.pendingHandoff == nil {
+		t.Fatal("review probe: handoff not armed after keep")
+	}
+	next.pendingHandoff.preserved = true
+	return next
+}
+
+// The advertised [M] must dispatch when pressed as a real terminal emits
+// shift+m. This test fails on the pre-fix code (uppercase-Code matching).
+func TestReviewHandoffShiftMDispatchesMergeOnRealShape(t *testing.T) {
+	origMerge := tuiMergeBackWorktree
+	defer func() { tuiMergeBackWorktree = origMerge }()
+	merged := false
+	tuiMergeBackWorktree = func(_ context.Context, options worktrees.MergeBackOptions) (worktrees.MergeBackResult, error) {
+		merged = true
+		if options.Name != "wt-real-m" {
+			t.Fatalf("review probe: merge ran on the wrong lane: %q", options.Name)
+		}
+		return worktrees.MergeBackResult{}, nil
+	}
+	next := reviewArmedHandoffModel(t, "wt-real-m")
+	updated, _ := next.Update(reviewRealShiftKey('M'))
+	nextModel := updated.(model)
+	if !merged {
+		t.Fatal("review probe: advertised [M] (shift+m, real terminal shape) did not dispatch the merge seam")
+	}
+	if nextModel.pendingHandoff != nil {
+		t.Fatal("review probe: [M] did not resolve the handoff")
+	}
+}
+
+// The advertised [X] must dispatch when pressed as a real terminal emits
+// shift+x, through the same preserve-then-remove seams the review uses.
+func TestReviewHandoffShiftXDispatchesDiscardOnRealShape(t *testing.T) {
+	origRemove := tuiRemoveWorktree
+	origPreserve := tuiPreserveWorktree
+	defer func() {
+		tuiRemoveWorktree = origRemove
+		tuiPreserveWorktree = origPreserve
+	}()
+	removed, preserved := false, false
+	tuiRemoveWorktree = func(_ context.Context, options worktrees.RemoveOptions) error {
+		removed = true
+		if options.Path != "/nonexistent/wt-real-x" {
+			t.Fatalf("review probe: discard ran on the wrong lane: %q", options.Path)
+		}
+		return nil
+	}
+	tuiPreserveWorktree = func(_ context.Context, options worktrees.MergeBackOptions) (string, error) {
+		preserved = true
+		return "splice/wt-real-x", nil
+	}
+	next := reviewArmedHandoffModel(t, "wt-real-x")
+	updated, _ := next.Update(reviewRealShiftKey('X'))
+	nextModel := updated.(model)
+	if !preserved || !removed {
+		t.Fatalf("review probe: [X] did not run preserve-then-remove (preserved=%v removed=%v)", preserved, removed)
+	}
+	if nextModel.pendingHandoff != nil {
+		t.Fatal("review probe: [X] did not resolve the handoff")
+	}
+}
+
+// The advertised [D] must open the diff review when pressed as a real
+// terminal emits shift+d.
+func TestReviewHandoffShiftDOpensDiffOnRealShape(t *testing.T) {
+	next := reviewArmedHandoffModel(t, "wt-real-d")
+	updated, _ := next.Update(reviewRealShiftKey('D'))
+	nextModel := updated.(model)
+	if !nextModel.diffView.active {
+		t.Fatal("review probe: advertised [D] (shift+d, real terminal shape) did not open the diff review")
+	}
+}
+
+// Plain lowercase letters must NOT dispatch: they belong to the composer.
+// The handoff stays armed and no seam fires.
+func TestReviewHandoffPlainLettersDoNotDispatch(t *testing.T) {
+	origMerge := tuiMergeBackWorktree
+	origRemove := tuiRemoveWorktree
+	origPreserve := tuiPreserveWorktree
+	defer func() {
+		tuiMergeBackWorktree = origMerge
+		tuiRemoveWorktree = origRemove
+		tuiPreserveWorktree = origPreserve
+	}()
+	fired := false
+	tuiMergeBackWorktree = func(_ context.Context, _ worktrees.MergeBackOptions) (worktrees.MergeBackResult, error) {
+		fired = true
+		return worktrees.MergeBackResult{}, nil
+	}
+	tuiRemoveWorktree = func(_ context.Context, _ worktrees.RemoveOptions) error {
+		fired = true
+		return nil
+	}
+	tuiPreserveWorktree = func(_ context.Context, _ worktrees.MergeBackOptions) (string, error) {
+		fired = true
+		return "", nil
+	}
+	for _, letter := range []rune{'m', 'x', 'd'} {
+		next := reviewArmedHandoffModel(t, "wt-plain")
+		updated, _ := next.Update(reviewRealPlainKey(letter))
+		nextModel := updated.(model)
+		if fired {
+			t.Fatalf("review probe: plain %q dispatched a runtime action; plain letters belong to the composer", letter)
+		}
+		if nextModel.pendingHandoff == nil {
+			t.Fatalf("review probe: plain %q cleared the handoff", letter)
+		}
+	}
+}

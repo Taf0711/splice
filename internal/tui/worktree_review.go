@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -237,22 +238,46 @@ func tuiWorktreeExists(path string) bool {
 	return err == nil && info.IsDir()
 }
 
-// handleHandoffKey dispatches the handoff card's [M]/[X] keys. Returns
+// handleHandoffKey dispatches the handoff card's [M]/[X]/[D] keys. Returns
 // handled=false for anything else so the main switch keeps processing.
 // The keys map to the same runtime seams the review uses: [M] runs the
 // merge-back, [X] removes the worktree (branch kept), both through a
 // background command so the UI stays responsive.
 func (m model) handleHandoffKey(msg tea.KeyMsg) (bool, tea.Model, tea.Cmd) {
-	// Letter keys arrive as Key.Code ('M'/'X'); keyText is empty for them.
-	code := keyCode(msg)
-	switch code {
-	case 'M':
+	// The advertised keys are CAPITAL letters. ultraviolet lowercases
+	// Key.Code for every letter (shift+m arrives as Code 'm' with
+	// ShiftedCode 'M', Text "M", Mod Shift), so matching Code against 'M'
+	// never fires on a real terminal. Dispatch on the pressed text,
+	// requiring the shifted form, so plain m/x/d still reach the composer.
+	// The uppercase-Code branch covers test seams that build a bare
+	// Key{Code:'M'} with no text.
+	if text := keyText(msg); text != "" {
+		if strings.ToUpper(text) != text {
+			return false, m, nil
+		}
+		switch strings.ToLower(text) {
+		case "m":
+			return m.runHandoffMerge()
+		case "x":
+			return m.runHandoffDiscard()
+		case "d":
+			// [D] review diff (GAP-G): opens the diff review viewport
+			// for the handoff's lane. The diff is runtime truth from
+			// the worktree.
+			next, cmd := m.openDiffReviewForHandoff()
+			return true, next, cmd
+		}
+		return false, m, nil
+	}
+	if !unicode.IsUpper(keyCode(msg)) {
+		return false, m, nil
+	}
+	switch unicode.ToLower(keyCode(msg)) {
+	case 'm':
 		return m.runHandoffMerge()
-	case 'X':
+	case 'x':
 		return m.runHandoffDiscard()
-	case 'D':
-		// [D] review diff (GAP-G): opens the diff review viewport for the
-		// handoff's lane — the diff is runtime truth from the worktree.
+	case 'd':
 		next, cmd := m.openDiffReviewForHandoff()
 		return true, next, cmd
 	}
