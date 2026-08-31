@@ -260,6 +260,13 @@ func (m model) handleHandoffKey(msg tea.KeyMsg) (bool, tea.Model, tea.Cmd) {
 			return m.runHandoffMerge()
 		case "x":
 			return m.runHandoffDiscard()
+		case "o":
+			// [O] open worktree (GAP-F): the card advertises this key, so
+			// it must dispatch — a rendered key with no handler is a dead
+			// affordance (frame j3ZQBu cell 4: "a dead key is never
+			// advertised"). Same editor exec seam as the diff view's [O].
+			next, cmd := m.openWorktreeInEditor(m.pendingHandoff.path)
+			return true, next, cmd
 		case "d":
 			// [D] review diff (GAP-G): opens the diff review viewport
 			// for the handoff's lane. The diff is runtime truth from
@@ -277,11 +284,31 @@ func (m model) handleHandoffKey(msg tea.KeyMsg) (bool, tea.Model, tea.Cmd) {
 		return m.runHandoffMerge()
 	case 'x':
 		return m.runHandoffDiscard()
+	case 'o':
+		next, cmd := m.openWorktreeInEditor(m.pendingHandoff.path)
+		return true, next, cmd
 	case 'd':
 		next, cmd := m.openDiffReviewForHandoff()
 		return true, next, cmd
 	}
 	return false, m, nil
+}
+
+// openWorktreeInEditor opens dir in $EDITOR via the same exec seam the diff
+// view uses, with honest failure notices: a vanished worktree and a missing
+// $EDITOR both say so instead of silently doing nothing.
+func (m model) openWorktreeInEditor(dir string) (tea.Model, tea.Cmd) {
+	if strings.TrimSpace(dir) == "" || !tuiWorktreeExists(dir) {
+		return m.appendSystemNotice("Worktree no longer exists — nothing to open."), nil
+	}
+	editor := strings.TrimSpace(osEditor())
+	if editor == "" {
+		return m.appendSystemNotice("No $EDITOR set — open the worktree manually: cd " + dir), nil
+	}
+	c := execEditor(editor, dir)
+	return m, tea.ExecProcess(c, func(err error) tea.Msg {
+		return diffEditorMsg{err: err}
+	})
 }
 
 // runHandoffMerge merges the pending handoff's worktree back into the main

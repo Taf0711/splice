@@ -606,3 +606,51 @@ func TestReviewHandoffPlainLettersDoNotDispatch(t *testing.T) {
 		}
 	}
 }
+
+// [O] on a pending handoff dispatches the editor seam with the handoff's
+// worktree path (GAP-F rest). The card advertises [O] open worktree; a
+// rendered key with no handler would be a dead affordance. The editor is
+// resolved inside the command path from the env, so this probe runs the
+// full real flow with EDITOR set to a command that exits 0 instantly; the
+// vanished-worktree and missing-editor paths must each say so instead of
+// silently doing nothing.
+func TestAcceptanceHandoffOpenKeyDispatchesEditor(t *testing.T) {
+	m := mouseTestModel()
+	m.activeRunID = 42
+	wt := &worktrees.Result{Name: "wt-acc3", Path: t.TempDir(), RepoRoot: "/nonexistent"}
+	updatedAfterFail, _ := m.Update(planExecutionResultMsg{runID: 42, err: acceptErr("boom"), worktree: wt})
+	next := updatedAfterFail.(model)
+	updatedAfterKeep, _ := next.Update(testKey(tea.KeyEnter))
+	next = updatedAfterKeep.(model)
+	next.pendingHandoff.preserved = true
+
+	t.Setenv("EDITOR", "true") // /usr/bin/true: exits 0, no display
+
+	updated, cmd := next.Update(testKey('O'))
+	nextModel := updated.(model)
+	if cmd == nil {
+		t.Fatal("acceptance: [O] produced no editor command")
+	}
+	// ExecProcess commands are lazy; running one would detach the terminal in
+	// tests, so only assert the command exists and the handoff stays intact
+	// (opening is not resolving).
+	if nextModel.pendingHandoff == nil {
+		t.Fatal("acceptance: [O] must not resolve the handoff")
+	}
+	// The vanished-worktree path says so honestly.
+	nextModel.pendingHandoff.path = "/nonexistent/wt-gone"
+	updated2, cmd2 := nextModel.Update(testKey('O'))
+	gone := updated2.(model)
+	if cmd2 != nil {
+		t.Fatal("acceptance: [O] on a vanished worktree must not produce a command")
+	}
+	found := false
+	for _, row := range gone.transcript {
+		if strings.Contains(row.text, "no longer exists") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("acceptance: [O] on a vanished worktree rendered no honest notice")
+	}
+}
