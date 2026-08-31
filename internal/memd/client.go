@@ -190,6 +190,46 @@ func (c *Client) LookupTopic(ctx context.Context, query schemas.MemoryTopicQuery
 	}, nil
 }
 
+// RankedObservation pairs one observation with its FTS BM25 rank (negative;
+// more negative = more relevant). Ranks are retrieval metadata: they feed the
+// deterministic reranker and traces, never a stage prompt.
+type RankedObservation struct {
+	Observation schemas.MemoryObservation
+	Rank        float64
+}
+
+// SearchRanked runs the same bounded FTS query as Search against a sidecar
+// that exposes /search_ranked, and returns candidates with their BM25 ranks.
+// The rank lets the orchestrator rerank deterministically (report section 28)
+// without re-deriving BM25. An old sidecar without the endpoint surfaces as
+// an error; callers treat that as an ordinary retrieval failure and fall
+// back to Search.
+func (c *Client) SearchRanked(ctx context.Context, query schemas.MemoryQuery) ([]RankedObservation, bool, error) {
+	if err := query.Validate(); err != nil {
+		return nil, false, fmt.Errorf("memd search_ranked: %w", err)
+	}
+	var resp struct {
+		OK           bool `json:"ok"`
+		Observations []struct {
+			Observation schemas.MemoryObservation `json:"observation"`
+			Rank        float64                   `json:"rank"`
+		} `json:"observations"`
+		Truncated bool   `json:"truncated"`
+		Error     string `json:"error,omitempty"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/search_ranked", query, &resp); err != nil {
+		return nil, false, err
+	}
+	if !resp.OK {
+		return nil, false, fmt.Errorf("memd search_ranked: %s", resp.Error)
+	}
+	ranked := make([]RankedObservation, 0, len(resp.Observations))
+	for _, ro := range resp.Observations {
+		ranked = append(ranked, RankedObservation{Observation: ro.Observation, Rank: ro.Rank})
+	}
+	return ranked, resp.Truncated, nil
+}
+
 // Recent lists recent observations without using the full-text index.
 func (c *Client) Recent(ctx context.Context, query schemas.MemoryQuery) (schemas.MemoryBundle, error) {
 	if err := query.ValidateRecent(); err != nil {

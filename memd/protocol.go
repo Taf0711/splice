@@ -37,6 +37,15 @@ type protocolObservation struct {
 	DeletedAt      *int64   `json:"deleted_at"`
 }
 
+// RankedObservation pairs an observation with its FTS BM25 rank (negative;
+// more negative = more relevant). Used by /search_ranked so the orchestrator
+// can rerank deterministically. Ranks are metadata: they never enter a
+// prompt or a trace review.
+type RankedObservation struct {
+	Observation protocolObservation `json:"observation"`
+	Rank        float64             `json:"rank"`
+}
+
 func toProtocol(obs *store.Observation) protocolObservation {
 	var projectPath *string
 	if obs.ProjectPath.Valid {
