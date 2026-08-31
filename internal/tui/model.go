@@ -2588,6 +2588,14 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				kind: rowError,
 				text: receiptTranscriptPayload(card),
 			})
+			// HANDOFF (GAP-F): the lane exited with the worktree preserved.
+			// The card distinguishes lane death from work loss and names
+			// the resume path, before any review picker.
+			outcome := "failed"
+			if card.kind == receiptCancelled {
+				outcome = "cancelled"
+			}
+			m.offerHandoff(msg.worktree, outcome, 0, 0)
 			return m.maybeOfferWorktreeReview(msg.worktree, msg.sourceDirty)
 		}
 		m.designMode = false

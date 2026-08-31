@@ -247,6 +247,10 @@ func (m model) renderRowModeUncached(row transcriptRow, width int, rc rowContext
 		if card, ok := parseLifecycleCardPayload(row.text); ok {
 			return card(width)
 		}
+		// HANDOFF card (GAP-F): an exited lane with preserved work.
+		if h, merge, ok := parseHandoffTranscriptPayload(row.text); ok {
+			return renderHandoffCard(h, merge, width)
+		}
 		if payload, ok := commandCardTranscriptPayload(row.text); ok {
 			return renderCommandCardRow(payload, width)
 		}

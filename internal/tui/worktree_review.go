@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"os"
 	"strings"
 	"time"
 
@@ -197,6 +198,42 @@ func (m model) maybeOfferWorktreeReview(wt *worktrees.Result, dirty bool) (model
 	m.clearComposer()
 	m.clearSuggestions()
 	return m, nil
+}
+
+// offerHandoff appends the HANDOFF card for an exited lane whose work
+// survived (kept worktree, or failure/cancellation before any review).
+// It distinguishes lane death from work loss: preserved is the caller's
+// filesystem check of the worktree path. mergeAvailable mirrors the
+// review's dirty-main gate. Best-effort: the card never fails the turn.
+func (m *model) offerHandoff(wt *worktrees.Result, outcome string, staged, applied int) {
+	if wt == nil || strings.TrimSpace(wt.Path) == "" {
+		return
+	}
+	preserved := tuiWorktreeExists(wt.Path)
+	h := handoffState{
+		lane:      wt.Name,
+		path:      wt.Path,
+		branch:    "splice/" + wt.Name,
+		outcome:   outcome,
+		staged:    staged,
+		applied:   applied,
+		preserved: preserved,
+	}
+	mergeAvailable := preserved && !inspectSourceDirty(*wt)
+	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
+		kind: rowSystem,
+		text: handoffTranscriptPayload(h, mergeAvailable),
+	})
+}
+
+// tuiWorktreeExists reports whether the worktree path still exists on disk
+// (the lane-death vs work-loss check).
+func tuiWorktreeExists(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 func applyWorktreeReview(wt worktrees.Result, decision string, dirtyOffered bool, reason string) worktreeReviewResultMsg {
