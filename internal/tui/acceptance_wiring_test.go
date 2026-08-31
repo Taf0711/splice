@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/presentation"
 	"github.com/Taf0711/splice/internal/splice"
@@ -289,5 +291,102 @@ func TestAcceptanceHandoffOfferedOnFailure(t *testing.T) {
 	}
 	if receiptRows != 1 {
 		t.Fatalf("acceptance: %d receipt rows appended, want 1", receiptRows)
+	}
+}
+
+// ---------- 9. HANDOFF interactive keys (49f75e2 + key wiring) ----------
+
+// Pressing M on a pending preserved handoff dispatches the merge through
+// the SAME seam the review uses (tuiMergeBackWorktree) and clears the
+// handoff. Proven with the test seam swapped, so this is a wiring probe
+// of the real dispatch path.
+func TestAcceptanceHandoffMergeKeyDispatchesMerge(t *testing.T) {
+	origMerge := tuiMergeBackWorktree
+	defer func() { tuiMergeBackWorktree = origMerge }()
+	merged := false
+	tuiMergeBackWorktree = func(_ context.Context, options worktrees.MergeBackOptions) (worktrees.MergeBackResult, error) {
+		merged = true
+		if options.Name != "wt-acc2" {
+			t.Fatalf("acceptance: merge ran on the wrong lane: %q", options.Name)
+		}
+		return worktrees.MergeBackResult{}, nil
+	}
+
+	m := mouseTestModel()
+	m.activeRunID = 42
+	wt := &worktrees.Result{Name: "wt-acc2", Path: "/nonexistent/wt-acc2", RepoRoot: "/nonexistent"}
+	updatedAfterFail, _ := m.Update(planExecutionResultMsg{runID: 42, err: acceptErr("boom"), worktree: wt})
+	// Real flow: the review picker opened with the receipt. Enter submits
+	// the recommended answer (Keep) so the picker resolves and the
+	// worktree is kept — THEN the handoff keys arm (the picker owns input
+	// while it is up).
+	next := updatedAfterFail.(model)
+	if next.pendingAskUser == nil {
+		t.Fatal("acceptance: review picker did not open after failure")
+	}
+	updatedAfterKeep, _ := next.Update(testKey(tea.KeyEnter))
+	next = updatedAfterKeep.(model)
+	if next.pendingAskUser != nil {
+		t.Fatal("acceptance: review picker did not resolve on Keep")
+	}
+	next.pendingHandoff.preserved = true
+
+	updated, cmd := next.Update(testKey('M'))
+	nextModel := updated.(model)
+	if !merged {
+		t.Fatal("acceptance: [M] did not dispatch the merge-back seam")
+	}
+	if nextModel.pendingHandoff != nil {
+		t.Fatal("acceptance: [M] did not resolve the handoff")
+	}
+	if cmd == nil {
+		t.Fatal("acceptance: [M] produced no background command for the review result")
+	}
+}
+
+// Pressing X on a pending handoff dispatches the discard through the same
+// seam the review's Reject uses (worktree removed, branch kept).
+func TestAcceptanceHandoffDiscardKeyDispatchesRemove(t *testing.T) {
+	origRemove := tuiRemoveWorktree
+	defer func() { tuiRemoveWorktree = origRemove }()
+	removed := false
+	tuiRemoveWorktree = func(_ context.Context, options worktrees.RemoveOptions) error {
+		removed = true
+		if options.Path != "/nonexistent/wt-acc3" {
+			t.Fatalf("acceptance: discard ran on the wrong lane: %q", options.Path)
+		}
+		return nil
+	}
+	// [X] goes through the review's Reject path: preserve the branch first,
+	// then remove the worktree. Both seams must be stubbed for a lane whose
+	// paths do not exist in the test environment.
+	preserved := false
+	tuiPreserveWorktree = func(_ context.Context, options worktrees.MergeBackOptions) (string, error) {
+		preserved = true
+		if options.Name != "wt-acc3" {
+			t.Fatalf("acceptance: preserve ran on the wrong lane: %q", options.Name)
+		}
+		return "splice/wt-acc3", nil
+	}
+
+	m := mouseTestModel()
+	m.activeRunID = 43
+	wt := &worktrees.Result{Name: "wt-acc3", Path: "/nonexistent/wt-acc3", RepoRoot: "/nonexistent"}
+	updatedAfterFail, _ := m.Update(planExecutionResultMsg{runID: 43, err: acceptErr("boom"), worktree: wt})
+	next := updatedAfterFail.(model)
+	if next.pendingAskUser == nil {
+		t.Fatal("acceptance: review picker did not open after failure")
+	}
+	updatedAfterKeep, _ := next.Update(testKey(tea.KeyEnter))
+	next = updatedAfterKeep.(model)
+	next.pendingHandoff.preserved = true
+
+	updated, _ := next.Update(testKey('X'))
+	nextModel := updated.(model)
+	if !preserved || !removed {
+		t.Fatalf("acceptance: [X] did not run preserve-then-remove (preserved=%v removed=%v)", preserved, removed)
+	}
+	if nextModel.pendingHandoff != nil {
+		t.Fatal("acceptance: [X] did not resolve the handoff")
 	}
 }

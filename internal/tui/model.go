@@ -538,6 +538,10 @@ type model struct {
 	// surfaces (trajectory) render at render time from the latest runtime
 	// truth.
 	lastState presentation.State
+	// pendingHandoff is the live handoff for the most recently exited lane
+	// (GAP-F): the [M] merge-back and [X] discard keys act on it. Nil when
+	// no handoff is offered or it was resolved.
+	pendingHandoff *handoffState
 }
 
 type agentTextMsg struct {
@@ -1302,6 +1306,19 @@ func batchCommands(cmds ...tea.Cmd) tea.Cmd {
 }
 
 func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// HANDOFF keys (GAP-F, DoD 28): [M] merge back now and [X] discard
+	// lane act on the pending handoff when a lane has exited with
+	// preserved work and no modal owns input. Each dispatches the SAME
+	// runtime seam the worktree review uses (tuiMergeBackWorktree /
+	// tuiRemoveWorktree), so the handoff never mutates files independently
+	// of the tested path. Intercepted before the main switch so plain-key
+	// handlers (composer echo) cannot swallow them.
+	if keyMsg, ok := msg.(tea.KeyMsg); ok && m.pendingHandoff != nil &&
+		m.pendingHandoff.preserved && m.noBlockingModal() {
+		if handled, model, cmd := m.handleHandoffKey(keyMsg); handled {
+			return model, cmd
+		}
+	}
 	switch msg := msg.(type) {
 	case composerBlinkMsg:
 		m.composerCursorVisible = !m.composerCursorVisible
@@ -2627,6 +2644,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			v.RunID = m.activeSession.SessionID
 			v.DecidedAt = m.now()
 			verdictCmd = m.writeVerdictCmd(*v)
+		}
+		// HANDOFF re-arm (GAP-F): a Keep/Reject/Esc decision leaves the
+		// worktree on disk with work preserved. The review picker owned
+		// input while it was up; once it resolves, the handoff card's keys
+		// arm so the user can still merge-back, open, or discard from the
+		// persistent card. An Accept resolved the worktree (merged) — the
+		// handoff stays disarmed.
+		if msg.kept != nil && m.pendingHandoff != nil {
+			m.pendingHandoff.preserved = tuiWorktreeExists(msg.kept.Path)
 		}
 		m.reportAgentLifecycle(herdrIdle)
 		return m, verdictCmd

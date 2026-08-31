@@ -220,6 +220,7 @@ func (m *model) offerHandoff(wt *worktrees.Result, outcome string, staged, appli
 		preserved: preserved,
 	}
 	mergeAvailable := preserved && !inspectSourceDirty(*wt)
+	m.pendingHandoff = &h
 	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
 		kind: rowSystem,
 		text: handoffTranscriptPayload(h, mergeAvailable),
@@ -234,6 +235,71 @@ func tuiWorktreeExists(path string) bool {
 	}
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
+}
+
+// handleHandoffKey dispatches the handoff card's [M]/[X] keys. Returns
+// handled=false for anything else so the main switch keeps processing.
+// The keys map to the same runtime seams the review uses: [M] runs the
+// merge-back, [X] removes the worktree (branch kept), both through a
+// background command so the UI stays responsive.
+func (m model) handleHandoffKey(msg tea.KeyMsg) (bool, tea.Model, tea.Cmd) {
+	// Letter keys arrive as Key.Code ('M'/'X'); keyText is empty for them.
+	code := keyCode(msg)
+	switch code {
+	case 'M':
+		return m.runHandoffMerge()
+	case 'X':
+		return m.runHandoffDiscard()
+	}
+	return false, m, nil
+}
+
+// runHandoffMerge merges the pending handoff's worktree back into the main
+// checkout and clears the handoff. It reuses runWorktreeReview's Accept
+// path so the merge, unlock, and notice handling stay in one tested place.
+func (m model) runHandoffMerge() (bool, tea.Model, tea.Cmd) {
+	wt := m.activeWorktree
+	if wt == nil || wt.Name != m.pendingHandoff.lane {
+		m.pendingHandoff = nil
+		return true, m, nil
+	}
+	msg := applyWorktreeReview(*wt, worktreeReviewAccept, false, "handoff merge-back")
+	// The review clears the handoff on success (kept == nil after a merge).
+	next := m
+	if msg.kept == nil {
+		next.pendingHandoff = nil
+	} else {
+		next.pendingHandoff = nil
+	}
+	next.transcript = appendTranscriptRow(next.transcript, transcriptRow{
+		kind: rowSystem, text: "Handoff resolved: merged from " + m.pendingHandoffBranch(),
+	})
+	return true, next, tea.Batch(func() tea.Msg { return msg })
+}
+
+// runHandoffDiscard removes the pending handoff's worktree (branch kept)
+// and clears the handoff. It reuses the review's Reject path.
+func (m model) runHandoffDiscard() (bool, tea.Model, tea.Cmd) {
+	wt := m.activeWorktree
+	if wt == nil || wt.Name != m.pendingHandoff.lane {
+		m.pendingHandoff = nil
+		return true, m, nil
+	}
+	msg := applyWorktreeReview(*wt, worktreeReviewReject, false, "handoff discard")
+	next := m
+	next.pendingHandoff = nil
+	next.transcript = appendTranscriptRow(next.transcript, transcriptRow{
+		kind: rowSystem, text: "Handoff resolved: discarded lane " + m.pendingHandoff.lane + " (branch kept)",
+	})
+	return true, next, tea.Batch(func() tea.Msg { return msg })
+}
+
+// pendingHandoffBranch returns the branch name for status lines.
+func (m model) pendingHandoffBranch() string {
+	if m.pendingHandoff == nil {
+		return ""
+	}
+	return m.pendingHandoff.branch
 }
 
 func applyWorktreeReview(wt worktrees.Result, decision string, dirtyOffered bool, reason string) worktreeReviewResultMsg {
