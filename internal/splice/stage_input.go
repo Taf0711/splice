@@ -256,15 +256,27 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 				}
 			} else {
 				bundle.RequestingAgent = input.StageName
-				// PC3: append kept-run exemplars. Best-effort and silent on
-				// failure; an empty exemplar set is correct, not a bug.
-				if querier, ok := p.Memory.(learn.TraceQuerier); ok && querier != nil {
-					if exemplars, eErr := retrieveExemplars(ctx, querier, root, input.RequestIntent); eErr == nil {
-						bundle.Exemplars = exemplars
-						if len(exemplars) > 0 {
-							emitProgress(p.Options, fmt.Sprintf("exemplars: %d from kept runs\n", len(exemplars)))
+				// C1c D4: the ablation mode governs which memory classes the
+				// miss path delivers. The default (both) reproduces today's
+				// behavior; other modes exist for the benchmark only.
+				mode, modeErr := resolveExemplarMode()
+				if modeErr != nil {
+					return schemas.HarnessStageInput{}, modeErr
+				}
+				if mode.deliverExemplars() {
+					// PC3: append kept-run exemplars. Best-effort and silent on
+					// failure; an empty exemplar set is correct, not a bug.
+					if querier, ok := p.Memory.(learn.TraceQuerier); ok && querier != nil {
+						if exemplars, eErr := retrieveExemplars(ctx, querier, root, input.RequestIntent); eErr == nil {
+							bundle.Exemplars = exemplars
+							if len(exemplars) > 0 {
+								emitProgress(p.Options, fmt.Sprintf("exemplars: %d from kept runs\n", len(exemplars)))
+							}
 						}
 					}
+				}
+				if !mode.deliverObservations() {
+					bundle.Observations = nil
 				}
 				admitted := memoryreason.Admit(&bundle, root, p.NowUnix)
 				input.MemoryBundle = admitted.Bundle
