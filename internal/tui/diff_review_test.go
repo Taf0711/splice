@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/Taf0711/splice/internal/worktrees"
 )
@@ -157,16 +158,17 @@ func TestDiffReviewRenderShapes(t *testing.T) {
 			t.Errorf("render missing %q", want)
 		}
 	}
-	// No horizontal overflow: every line fits the width.
+	// No horizontal overflow: every line's VISIBLE width fits (ANSI escapes
+	// measure zero, so use lipgloss.Width, not raw rune count).
 	for _, line := range strings.Split(out, "\n") {
-		if len([]rune(line)) > 120 {
+		if lipgloss.Width(line) > 120 {
 			t.Errorf("line overflows 120 cols: %q", line)
 		}
 	}
 	// 80-column render must not overflow either.
 	out80 := m.renderDiffReview(80)
 	for _, line := range strings.Split(out80, "\n") {
-		if len([]rune(line)) > 80 {
+		if lipgloss.Width(line) > 80 {
 			t.Errorf("80-col line overflows: %q", line)
 		}
 	}
@@ -297,5 +299,58 @@ func TestDiffRejectHunkDoesNotEditFiles(t *testing.T) {
 	}
 	if !found {
 		t.Error("reject did not record the intervention notice")
+	}
+}
+
+// The video-derived UX contract (Devin model-picker reference): the header
+// carries position (N files · hunk X of Y) and the keymap lives in a bottom
+// hint bar that drops WHOLE segments under width pressure, never
+// ellipsis-truncating a binding mid-word (DoD 18).
+func TestDiffViewNavBarCarriesPosition(t *testing.T) {
+	m := newDesignModeTestModel(t.TempDir(), &fakeProvider{}, nil)
+	m.diffView = diffViewState{active: true, wt: diffTestWorktree(), base: "main", text: diffReviewTestDiff, files: diffFileStats(diffReviewTestDiff)}
+	nav := m.diffViewNavBar(120)
+	if !strings.Contains(nav, "3 files") || !strings.Contains(nav, "hunk 1 of 3") {
+		t.Errorf("nav missing position readout: %q", nav)
+	}
+	// Keys are NOT in the header anymore.
+	if strings.Contains(nav, "esc close") {
+		t.Errorf("nav should not carry the keymap: %q", nav)
+	}
+}
+
+func TestDiffViewHintBarDropsWholeSegments(t *testing.T) {
+	full := diffViewHintBar(120)
+	for _, want := range []string{"n next file", "a approve", "j reject hunk", "o open", "↑↓ scroll", "esc close"} {
+		if !strings.Contains(full, want) {
+			t.Errorf("full hint bar missing %q: %q", want, full)
+		}
+	}
+	// Narrow: optional segments drop whole, core never drops, nothing truncates.
+	narrow := diffViewHintBar(40)
+	if !strings.Contains(narrow, "esc close") || !strings.Contains(narrow, "↑↓ scroll") {
+		t.Errorf("narrow hint bar lost core keys: %q", narrow)
+	}
+	if strings.Contains(narrow, "…") {
+		t.Errorf("hint bar ellipsis-truncated (DoD 18 violation): %q", narrow)
+	}
+	for _, dropped := range []string{"o open", "j reject hunk"} {
+		if strings.Contains(narrow, dropped) {
+			t.Errorf("narrow bar kept %q but should have dropped it whole: %q", dropped, narrow)
+		}
+	}
+	// Every rendered line fits the width.
+	bar := zeroTheme.faint.Render(narrow)
+	if lipgloss.Width(bar) > 40 {
+		t.Errorf("hint bar overflows width: %q", narrow)
+	}
+}
+
+func TestDiffViewHintBarInRender(t *testing.T) {
+	m := newDesignModeTestModel(t.TempDir(), &fakeProvider{}, nil)
+	m.diffView = diffViewState{active: true, wt: diffTestWorktree(), base: "main", text: diffReviewTestDiff, files: diffFileStats(diffReviewTestDiff)}
+	out := m.renderDiffReview(120)
+	if !strings.Contains(out, "esc close") {
+		t.Errorf("render missing the hint bar: %q", out[len(out)-200:])
 	}
 }

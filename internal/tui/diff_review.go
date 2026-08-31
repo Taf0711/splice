@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/Taf0711/splice/internal/worktrees"
 )
@@ -271,13 +272,63 @@ func (m model) openDiffReviewForHandoff() (model, tea.Cmd) {
 // diffViewNavBar is the one-line nav bar that replaces the title bar while
 // the diff view is active (the same swap fileViewNavBar uses; both route
 // through pinnedTitleBar so frame geometry never desyncs). Header format
-// from Pen frame tOwI1: `DIFF — <lane> vs <base>` with position + keys right.
+// from Pen frame tOwI1 and the Devin-model contract: `DIFF — <lane> vs
+// <base>` with the position readout (`N files · hunk X of Y`) right. Keys
+// live in the hint bar at the bottom of the block, not here — a header that
+// truncates mid-key advertises a binding the user cannot read.
 func (m model) diffViewNavBar(width int) string {
 	dv := m.diffView
 	left := zeroTheme.accent.Render("DIFF — " + dv.wt.Name + " vs " + dv.base)
 	files := len(dv.files)
-	right := zeroTheme.faint.Render(fmt.Sprintf("%d files · n next · a approve · j reject hunk · o open · esc close", files))
+	current, total := diffHunkPosition(dv.text, dv.hunkTop)
+	position := fmt.Sprintf("%d files", files)
+	if total > 0 {
+		position += fmt.Sprintf(" · hunk %d of %d", current, total)
+	}
+	right := zeroTheme.faint.Render(position)
 	return fitStyledLine(joinHeaderLine(left, right, width), width)
+}
+
+// diffHunkPosition counts the @@ hunk headers in the diff text and reports
+// which hunk the current window top sits at (1-based), plus the total.
+// Header-only diffs report 0/0 and the nav omits the position segment.
+func diffHunkPosition(text string, top int) (current, total int) {
+	if strings.TrimSpace(text) == "" {
+		return 0, 0
+	}
+	for i, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, "@@ ") {
+			total++
+			if i <= top {
+				current = total
+			}
+		}
+	}
+	// A window top in the preamble before the first hunk still reads as
+	// hunk 1 — "hunk 0" is meaningless to a user.
+	if total > 0 && current == 0 {
+		current = 1
+	}
+	return current, total
+}
+
+// diffViewHintBar renders the diff block's bottom keymap, dropping whole
+// segments by priority under width pressure (DoD 18; the same pattern
+// modelPickerHintBar uses). optional is ordered least- to most-essential so
+// the loop sheds "open" first and navigation last; scroll and esc never
+// drop. Never ellipsis-truncates: a half-visible key hint is worse than none.
+func diffViewHintBar(width int) string {
+	optional := []string{"o open", "j reject hunk", "a approve", "n next file"}
+	core := []string{"↑↓ scroll", "esc close"}
+	for drop := 0; drop <= len(optional); drop++ {
+		parts := append([]string{core[0]}, optional[drop:]...)
+		parts = append(parts, core[1:]...)
+		bar := strings.Join(parts, "  ·  ")
+		if width <= 0 || lipgloss.Width(bar) <= width {
+			return bar
+		}
+	}
+	return strings.Join(core, "  ·  ")
 }
 
 // diffStatMarker picks the file stat row's marker from its change shape:
@@ -363,7 +414,9 @@ func (m model) renderDiffReview(width int) string {
 	}
 
 	// The hunk body renders raw (ASCII +/- per the contract); the frame's
-	// stat rows carry the emphasis.
+	// stat rows carry the emphasis. The keymap bar sits at the bottom of
+	// the block (the video-derived pattern: header carries position, the
+	// hint bar carries keys) and drops whole segments under pressure.
 	var rows []string
 	rows = append(rows, head...)
 	rows = append(rows, "")
@@ -371,6 +424,7 @@ func (m model) renderDiffReview(width int) string {
 	if more != "" {
 		rows = append(rows, more)
 	}
+	rows = append(rows, zeroTheme.faint.Render(diffViewHintBar(width)))
 	return strings.Join(rows, "\n")
 }
 
