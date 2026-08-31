@@ -241,7 +241,12 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 				p.Trace.recordMemoryLookup(input.StageName, p.Iteration, "direct", direct.fresh, direct.stale)
 			}
 		} else {
-			bundle, mErr := p.Memory.Search(ctx, newMemoryQuery(input.StageName, input.RequestIntent, root))
+			// C1c miss path: rerank candidates deterministically when the
+			// store exposes FTS ranks, then admit under the token budget.
+			// A store without the capability (or a ranked-search error,
+			// including an old sidecar) falls back to plain Search ordering
+			// byte-identically; Admit is order-agnostic.
+			bundle, mErr := p.rerankedMissPath(ctx, input, root)
 			if mErr != nil {
 				emitProgress(p.Options, fmt.Sprintf("[%s] memory retrieval skipped: %v\n", input.StageName, mErr))
 				// A mid-run retrieval failure degrades the run's memory status to

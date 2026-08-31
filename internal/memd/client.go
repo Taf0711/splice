@@ -190,21 +190,13 @@ func (c *Client) LookupTopic(ctx context.Context, query schemas.MemoryTopicQuery
 	}, nil
 }
 
-// RankedObservation pairs one observation with its FTS BM25 rank (negative;
-// more negative = more relevant). Ranks are retrieval metadata: they feed the
-// deterministic reranker and traces, never a stage prompt.
-type RankedObservation struct {
-	Observation schemas.MemoryObservation
-	Rank        float64
-}
-
 // SearchRanked runs the same bounded FTS query as Search against a sidecar
 // that exposes /search_ranked, and returns candidates with their BM25 ranks.
 // The rank lets the orchestrator rerank deterministically (report section 28)
 // without re-deriving BM25. An old sidecar without the endpoint surfaces as
 // an error; callers treat that as an ordinary retrieval failure and fall
 // back to Search.
-func (c *Client) SearchRanked(ctx context.Context, query schemas.MemoryQuery) ([]RankedObservation, bool, error) {
+func (c *Client) SearchRanked(ctx context.Context, query schemas.MemoryQuery) ([]schemas.MemoryRanked, bool, error) {
 	if err := query.Validate(); err != nil {
 		return nil, false, fmt.Errorf("memd search_ranked: %w", err)
 	}
@@ -223,9 +215,9 @@ func (c *Client) SearchRanked(ctx context.Context, query schemas.MemoryQuery) ([
 	if !resp.OK {
 		return nil, false, fmt.Errorf("memd search_ranked: %s", resp.Error)
 	}
-	ranked := make([]RankedObservation, 0, len(resp.Observations))
+	ranked := make([]schemas.MemoryRanked, 0, len(resp.Observations))
 	for _, ro := range resp.Observations {
-		ranked = append(ranked, RankedObservation{Observation: ro.Observation, Rank: ro.Rank})
+		ranked = append(ranked, schemas.MemoryRanked{Observation: ro.Observation, Rank: ro.Rank})
 	}
 	return ranked, resp.Truncated, nil
 }

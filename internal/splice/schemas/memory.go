@@ -178,6 +178,14 @@ type MemoryBundle struct {
 	Truncated       bool                `json:"truncated"`
 }
 
+// MemoryRanked pairs one observation with its retrieval rank (BM25, more
+// negative = more relevant). Ranks are retrieval metadata for ranking and
+// traces: they never enter a stage prompt.
+type MemoryRanked struct {
+	Observation MemoryObservation
+	Rank        float64
+}
+
 // Validate checks the memory bundle.
 func (m MemoryBundle) Validate() error {
 	if m.RequestingAgent == "" {
