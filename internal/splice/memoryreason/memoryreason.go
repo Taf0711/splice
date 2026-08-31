@@ -6,6 +6,7 @@
 package memoryreason
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"strconv"
 
@@ -21,6 +22,22 @@ const (
 	// MaxObservationRunes is the existing content bound, applied after
 	// admission so rejected items never pay the truncation cost.
 	MaxObservationRunes = 500
+
+	// ObservationTokenBudget is the C1c token budget for admitted
+	// observations (report section 29): admit the ranked prefix until the
+	// budget is exhausted instead of always taking a fixed count. Two
+	// excellent memories beat five partially relevant ones.
+	ObservationTokenBudget = 300
+
+	// ExemplarTokenBudget is the C1c token budget for admitted exemplars.
+	// It is sized for exact parity with the historic delivery ceiling (3 x
+	// 400-rune distillates at ~110 measured tokens each), so exemplar
+	// admission changes nothing until the D4 ablation says otherwise.
+	ExemplarTokenBudget = 330
+
+	// bytesPerTokenEstimate mirrors stage_input's estimator so admission
+	// accounting and compaction accounting measure bytes the same way.
+	bytesPerTokenEstimate = 4
 )
 
 // AdmissionCounts aggregates why items were excluded. Counts are metadata:
@@ -31,6 +48,7 @@ type AdmissionCounts struct {
 	WrongProject int
 	Duplicate    int
 	OverLimit    int
+	OverBudget   int
 }
 
 // AdmissionResult contains only prompt-eligible evidence in incoming order.
@@ -59,6 +77,8 @@ func Admit(bundle *schemas.MemoryBundle, projectRoot string, nowUnix int64) Admi
 	admitted := &schemas.MemoryBundle{
 		RequestingAgent: bundle.RequestingAgent,
 	}
+	usedObsTokens := 0
+	usedExTokens := 0
 
 	seenObs := make(map[string]bool, len(bundle.Observations))
 	for _, obs := range bundle.Observations {
@@ -80,12 +100,21 @@ func Admit(bundle *schemas.MemoryBundle, projectRoot string, nowUnix int64) Admi
 			result.Rejected.Duplicate++
 			continue
 		}
-		if len(admitted.Observations) >= MaxObservations {
-			result.Rejected.OverLimit++
+		// Content bound BEFORE budget measurement so admission measures the
+		// bytes a stage would actually receive, and truncation cost is never
+		// paid for rejected items.
+		obs.Content = truncateRunes(obs.Content, MaxObservationRunes)
+		cost := itemTokens(obs)
+		if len(admitted.Observations) >= MaxObservations || usedObsTokens+cost > ObservationTokenBudget {
+			if len(admitted.Observations) >= MaxObservations {
+				result.Rejected.OverLimit++
+			} else {
+				result.Rejected.OverBudget++
+			}
 			continue
 		}
+		usedObsTokens += cost
 		seenObs[id] = true
-		obs.Content = truncateRunes(obs.Content, MaxObservationRunes)
 		admitted.Observations = append(admitted.Observations, obs)
 	}
 
@@ -100,10 +129,16 @@ func Admit(bundle *schemas.MemoryBundle, projectRoot string, nowUnix int64) Admi
 			result.Rejected.Duplicate++
 			continue
 		}
-		if len(admitted.Exemplars) >= MaxExemplars {
-			result.Rejected.OverLimit++
+		cost := exemplarTokens(ex)
+		if len(admitted.Exemplars) >= MaxExemplars || usedExTokens+cost > ExemplarTokenBudget {
+			if len(admitted.Exemplars) >= MaxExemplars {
+				result.Rejected.OverLimit++
+			} else {
+				result.Rejected.OverBudget++
+			}
 			continue
 		}
+		usedExTokens += cost
 		seenEx[id] = true
 		admitted.Exemplars = append(admitted.Exemplars, ex)
 	}
@@ -208,4 +243,27 @@ func truncateRunes(s string, max int) string {
 		return s
 	}
 	return string(runes[:max]) + "..."
+}
+
+// itemTokens estimates the token cost of one admitted observation with the
+// same bytes-per-token ratio the stage-input compactor uses, so admission
+// accounting and compaction accounting measure the same delivery.
+func itemTokens(obs schemas.MemoryObservation) int {
+	encoded, err := json.Marshal(obs)
+	if err != nil {
+		// The struct marshals by construction; treat a marshal failure as
+		// maximum cost so it is never admitted on a broken estimate.
+		return ObservationTokenBudget + 1
+	}
+	return (len(encoded) + bytesPerTokenEstimate - 1) / bytesPerTokenEstimate
+}
+
+// exemplarTokens estimates the token cost of one admitted exemplar the same
+// way.
+func exemplarTokens(ex schemas.Exemplar) int {
+	encoded, err := json.Marshal(ex)
+	if err != nil {
+		return ExemplarTokenBudget + 1
+	}
+	return (len(encoded) + bytesPerTokenEstimate - 1) / bytesPerTokenEstimate
 }
