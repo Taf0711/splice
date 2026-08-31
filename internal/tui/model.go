@@ -542,6 +542,10 @@ type model struct {
 	// (GAP-F): the [M] merge-back and [X] discard keys act on it. Nil when
 	// no handoff is offered or it was resolved.
 	pendingHandoff *handoffState
+	// diffView is the GAP-G diff review surface (§11): when active, the
+	// transcript body swaps to the worktree diff and the title bar swaps to
+	// the diff nav bar. Inactive is the zero value.
+	diffView diffViewState
 }
 
 type agentTextMsg struct {
@@ -1316,6 +1320,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if keyMsg, ok := msg.(tea.KeyMsg); ok && m.pendingHandoff != nil &&
 		m.pendingHandoff.preserved && m.noBlockingModal() {
 		if handled, model, cmd := m.handleHandoffKey(keyMsg); handled {
+			return model, cmd
+		}
+	}
+	// Diff review keys (GAP-G, §11): while the diff viewport is active it
+	// owns n/a/j/o and scrolling, before the main switch (the same
+	// interception point the handoff keys use). Esc/scroll fall through to
+	// the diff handler FIRST so a plain-key handler cannot swallow them;
+	// unhandled keys keep processing (composer stays reachable by Esc out).
+	if keyMsg, ok := msg.(tea.KeyMsg); ok && m.diffView.active {
+		if handled, model, cmd := m.handleDiffReviewKey(keyMsg); handled {
 			return model, cmd
 		}
 	}
@@ -2620,6 +2634,14 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pendingPlan = nil
 		m.pendingCritique = nil
 		return m.maybeOfferWorktreeReview(msg.worktree, msg.sourceDirty)
+	case diffCapturedMsg:
+		m = m.handleDiffCaptured(msg)
+		return m, nil
+	case diffEditorMsg:
+		if msg.err != nil {
+			m = m.appendSystemNotice("Editor exited with an error: " + msg.err.Error())
+		}
+		return m, nil
 	case worktreeReviewResultMsg:
 		if notice := strings.TrimSpace(msg.notice); notice != "" {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: notice})
@@ -3129,6 +3151,11 @@ func (m model) pinnedTitleBar(width int) string {
 	// through here, so the swap never desyncs the viewport geometry.
 	if m.fileView.active {
 		return m.fileViewNavBar(width)
+	}
+	// The diff review (GAP-G) uses the same one-line swap; the diff nav
+	// bar carries the run/base header and the review keys.
+	if m.diffView.active {
+		return m.diffViewNavBar(width)
 	}
 	return m.titleBar(width)
 }

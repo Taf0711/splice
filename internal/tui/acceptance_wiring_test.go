@@ -390,3 +390,71 @@ func TestAcceptanceHandoffDiscardKeyDispatchesRemove(t *testing.T) {
 		t.Fatal("acceptance: [X] did not resolve the handoff")
 	}
 }
+
+// Pressing D on a pending handoff opens the GAP-G diff review viewport for
+// the handoff's lane: the real flow (failure -> receipt -> review picker ->
+// Enter(Keep) -> key) arms the keys, and [D] swaps the transcript body to
+// the diff with a capture command in flight. The diff text comes from the
+// tuiDiffCapture seam (stubbed here); the pane itself never edits files.
+func TestAcceptanceHandoffDiffKeyOpensDiffViewport(t *testing.T) {
+	origCapture := tuiDiffCapture
+	defer func() { tuiDiffCapture = origCapture }()
+	captured := false
+	tuiDiffCapture = func(_ context.Context, wt worktrees.Result) (string, error) {
+		captured = true
+		if wt.Name != "wt-acc2" {
+			t.Fatalf("acceptance: diff captured on the wrong lane: %q", wt.Name)
+		}
+		return "diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n@@ -1,2 +1,3 @@\n ok\n+new\n", nil
+	}
+
+	m := mouseTestModel()
+	m.activeRunID = 42
+	wt := &worktrees.Result{Name: "wt-acc2", Path: "/nonexistent/wt-acc2", RepoRoot: "/nonexistent"}
+	updatedAfterFail, _ := m.Update(planExecutionResultMsg{runID: 42, err: acceptErr("boom"), worktree: wt})
+	next := updatedAfterFail.(model)
+	if next.pendingAskUser == nil {
+		t.Fatal("acceptance: review picker did not open after failure")
+	}
+	updatedAfterKeep, _ := next.Update(testKey(tea.KeyEnter))
+	next = updatedAfterKeep.(model)
+	if next.pendingAskUser != nil {
+		t.Fatal("acceptance: review picker did not resolve on Keep")
+	}
+	next.pendingHandoff.preserved = true
+
+	updated, cmd := next.Update(testKey('D'))
+	nextModel := updated.(model)
+	if !nextModel.diffView.active {
+		t.Fatal("acceptance: [D] did not open the diff review viewport")
+	}
+	if nextModel.diffView.wt.Name != "wt-acc2" {
+		t.Fatalf("acceptance: diff view opened on the wrong lane: %q", nextModel.diffView.wt.Name)
+	}
+	if cmd == nil {
+		t.Fatal("acceptance: [D] produced no capture command")
+	}
+	// Cmds are lazy: run the returned capture command to fire the seam.
+	msg := cmd()
+	if !captured {
+		t.Fatal("acceptance: capture command did not dispatch the diff capture seam")
+	}
+	capMsg, ok := msg.(diffCapturedMsg)
+	if !ok || capMsg.lane != "wt-acc2" || !strings.Contains(capMsg.res, "main.go") {
+		t.Fatalf("acceptance: capture command returned the wrong payload: %+v", msg)
+	}
+	// Land the capture through the real message path and assert the diff
+	// becomes visible render truth (real View path, not a renderer call).
+	updated, _ = nextModel.Update(capMsg)
+	nextModel = updated.(model)
+	plain := plainRender(t, nextModel.View())
+	if !strings.Contains(plain, "main.go") {
+		t.Fatal("acceptance: diff content not visible in the live view after capture")
+	}
+	// Esc closes and returns to the normal transcript.
+	updated, _ = nextModel.Update(testKey(tea.KeyEsc))
+	nextModel = updated.(model)
+	if nextModel.diffView.active {
+		t.Fatal("acceptance: Esc did not close the diff review viewport")
+	}
+}

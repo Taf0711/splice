@@ -224,7 +224,9 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string, detailed bool
 	// Steady-state alt-screen frames (notably the idle cursor blink) can reuse
 	// the settled list directly. Keeping this fast path outside the closure-heavy
 	// builder also prevents the large model receiver from escaping to the heap.
-	if m.altScreen && !detailed && !m.fileView.active && !m.pending && m.pendingSpecReview == nil &&
+	// Drill-in views (file view, diff review) swap the body wholesale, so they
+	// must never hit the settled cache or the swap is invisible.
+	if m.altScreen && !detailed && !m.fileView.active && !m.diffView.active && !m.pending && m.pendingSpecReview == nil &&
 		m.flushedAny && m.flushed == len(m.transcript) &&
 		m.altScreenSettledWidth == width && m.altScreenSettledFrontier == m.flushed {
 		return m.altScreenSettledItems
@@ -238,6 +240,11 @@ func (m model) buildTranscriptBodyItems(width int, emptyOverlay string, detailed
 	// the viewport, scroll engine, renderer, and mouse hit-tests consistent.
 	if m.fileView.active {
 		return m.fileViewBodyItems(width)
+	}
+	// Diff review (GAP-G): the chat column's body swaps to the lane diff.
+	// Same single-source swap point, so the viewport and hit-tests agree.
+	if m.diffView.active {
+		return []transcriptBodyItem{transcriptBlockBodyItem(transcriptBodyItemRow, -1, m.renderDiffReview(width))}
 	}
 	items := []transcriptBodyItem{}
 	// Transcript ROWS render at the full chat width; row/status glyphs provide

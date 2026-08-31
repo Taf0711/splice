@@ -70,11 +70,13 @@ func renderHandoffCard(handoff handoffState, mergeAvailable bool, width int) str
 		if mergeAvailable {
 			lines = append(lines,
 				zeroTheme.muted.Render("[O]")+" "+zeroTheme.ink.Render("open worktree")+"  "+
+					zeroTheme.muted.Render("[D]")+" "+zeroTheme.ink.Render("review diff")+"  "+
 					zeroTheme.muted.Render("[M]")+" "+zeroTheme.ink.Render("merge back now")+"  "+
 					zeroTheme.muted.Render("[X]")+" "+zeroTheme.ink.Render("discard lane"))
 		} else {
 			lines = append(lines,
 				zeroTheme.muted.Render("[O]")+" "+zeroTheme.ink.Render("open worktree")+"  "+
+					zeroTheme.muted.Render("[D]")+" "+zeroTheme.ink.Render("review diff")+"  "+
 					zeroTheme.faint.Render("[M] merge unavailable: main checkout dirty")+"  "+
 					zeroTheme.muted.Render("[X]")+" "+zeroTheme.ink.Render("discard lane"))
 		}

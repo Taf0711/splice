@@ -250,6 +250,11 @@ func (m model) handleHandoffKey(msg tea.KeyMsg) (bool, tea.Model, tea.Cmd) {
 		return m.runHandoffMerge()
 	case 'X':
 		return m.runHandoffDiscard()
+	case 'D':
+		// [D] review diff (GAP-G): opens the diff review viewport for the
+		// handoff's lane — the diff is runtime truth from the worktree.
+		next, cmd := m.openDiffReviewForHandoff()
+		return true, next, cmd
 	}
 	return false, m, nil
 }
