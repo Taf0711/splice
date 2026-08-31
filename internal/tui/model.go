@@ -2666,7 +2666,32 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if notice := strings.TrimSpace(msg.notice); notice != "" {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: notice})
 		}
+		// Capture the lane BEFORE the mutation below nils activeWorktree
+		// (Reject keeps no worktree, so kept is nil). The diff viewport
+		// shows the lane's worktree: any decision that resolved the lane
+		// (merged or removed) leaves that diff pointing at a worktree that
+		// no longer exists — close the view so the UI never renders a diff
+		// of a deleted directory. A Keep leaves the worktree on disk and
+		// the view open.
+		resolvedLane := ""
+		if m.pendingHandoff != nil {
+			resolvedLane = m.pendingHandoff.lane
+		} else if m.activeWorktree != nil {
+			resolvedLane = m.activeWorktree.Name
+		}
 		m.activeWorktree = msg.kept
+		// The diff viewport shows the lane's worktree. Any review decision
+		// that resolved the lane (merged or removed) leaves that diff
+		// pointing at a worktree that no longer exists — close the view so
+		// the UI never renders a diff of a deleted directory. A Keep (kept
+		// != nil) leaves the worktree on disk and the view open. The lane
+		// match goes through the pending handoff (the handoff keys set it)
+		// or the active worktree, so a stale diff for an unrelated lane is
+		// never closed.
+		lane := resolvedLane
+		if lane != "" && msg.kept == nil && m.diffView.active && lane == m.diffView.wt.Name {
+			m = m.exitDiffReview()
+		}
 		// Record the decision and reject reason on a session event so a later
 		// trace consumer can lift them into the run_outcome. Best-effort: a
 		// review trace write never fails the turn.
