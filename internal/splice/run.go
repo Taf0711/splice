@@ -641,7 +641,7 @@ func runIterationLoop(
 			switch userDecision.Action {
 			case agent.SurfaceToUserAbort:
 				msg := "user aborted: " + userDecision.Message
-				return finishWithReason(runID, plan, allRecords, "aborted", msg)
+				return finishWithUserAbort(runID, plan, allRecords, msg)
 			case agent.SurfaceToUserContinue:
 				rc := userDecision.Message
 				revisionContext = &rc
@@ -1445,10 +1445,14 @@ func wirePresentation(options PipelineRunConfig, plan schemas.ExecutionPlan) (Pi
 
 // finishPresentation feeds the terminal run event and emits the final
 // snapshot. Receipt kinds (v0.5 receipts contract): "completed" projects
-// VERIFIED-eligible, "failed" projects failed, and an aborted run the USER
-// stopped projects "cancelled" (a distinct receipt: staged work preserved,
-// nothing applied). A run aborted for internal reasons still projects
-// "failed", because cancelled means the user chose to stop.
+// VERIFIED-eligible, "failed" projects failed, and a run the USER chose to
+// stop projects "cancelled" (a distinct receipt: staged work preserved,
+// nothing applied). The user stop is TYPED on the result (UserAborted),
+// set only at the user-abort decision site. A run aborted for internal
+// reasons (max iterations, wall time, rollback refuse) has UserAborted
+// false and projects "failed", because cancelled means the user chose to
+// stop. User cancels that travel as context.Canceled bypass this function
+// entirely and classify at the TUI error boundary.
 func finishPresentation(acc *presentrun.Accumulator, options PipelineRunConfig, result schemas.PipelineResult) {
 	if acc == nil {
 		return
@@ -1456,7 +1460,7 @@ func finishPresentation(acc *presentrun.Accumulator, options PipelineRunConfig, 
 	status := "completed"
 	if result.Status != "completed" {
 		status = "failed"
-		if result.Status == "aborted" && abortReason(result) != "" {
+		if result.Status == "aborted" && result.UserAborted {
 			status = "cancelled"
 		}
 	}
@@ -1877,6 +1881,22 @@ func finishWithReason(runID string, plan schemas.ExecutionPlan, records []schema
 		Tier:        plan.Tier,
 		Stages:      records,
 		AbortReason: &reason,
+	}, nil
+}
+
+// finishWithUserAbort records an aborted run the USER chose to stop. Only
+// the user-abort decision site may call it: UserAborted is the typed
+// signal the presentation layer keys on to project a CANCELLED receipt
+// (staged work preserved, nothing applied). Internal aborts keep
+// finishWithReason and project FAILED.
+func finishWithUserAbort(runID string, plan schemas.ExecutionPlan, records []schemas.StageRecord, reason string) (schemas.PipelineResult, error) {
+	return schemas.PipelineResult{
+		RunID:       runID,
+		Status:      "aborted",
+		Tier:        plan.Tier,
+		Stages:      records,
+		AbortReason: &reason,
+		UserAborted: true,
 	}, nil
 }
 
