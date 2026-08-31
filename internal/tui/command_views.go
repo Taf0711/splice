@@ -627,7 +627,16 @@ func (m model) contextText() string {
 
 // applyTrustPickerChoice saves the selected action and updates the live trust
 // indicator. Project resources keep the startup decision until the next launch.
+// The [V] view-config row is handled BEFORE the unknown-choice guard: it is an
+// inspection action, not a trust decision — it returns to the menu unchanged.
 func (m model) applyTrustPickerChoice(item pickerItem) (model, string, bool) {
+	if item.Value == trustActionView {
+		// Re-open the trust menu after the editor exits, and append the
+		// evidence card so the summary stays in the transcript.
+		cfg := describeProjectTrustConfig(m.projectConfigPath)
+		m.trustConfigNotice(cfg)
+		return m, "", false
+	}
 	target := m.cwd
 	trusted := item.Value != trustActionDecline
 	if item.Value == trustActionParent {

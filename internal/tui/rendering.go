@@ -251,6 +251,11 @@ func (m model) renderRowModeUncached(row transcriptRow, width int, rc rowContext
 		if h, merge, ok := parseHandoffTranscriptPayload(row.text); ok {
 			return renderHandoffCard(h, merge, width)
 		}
+		// Trust config card (GAP-I): what an untrusted project config
+		// would change, shown before the user decides.
+		if cfg, summary, ok := parseTrustConfigTranscriptPayload(row.text); ok {
+			return renderTrustConfigCard(cfg, summary, width)
+		}
 		if payload, ok := commandCardTranscriptPayload(row.text); ok {
 			return renderCommandCardRow(payload, width)
 		}

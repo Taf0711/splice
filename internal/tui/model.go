@@ -1760,9 +1760,29 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.mcpManager != nil {
 				return m.handleMCPManagerKey(msg)
 			}
+			if m.picker != nil && m.picker.kind == pickerModel && !m.modelPickerIsLoading() {
+				// Tab toggles long context on the highlighted /model row. Rows without
+				// the capability ignore it (and don't advertise it in the hint bar), so
+				// Tab stays inert rather than surprising there.
+				next, _ := m.toggleModelPickerContext()
+				return next, nil
+			}
 			if m.picker == nil && m.suggestionsActive() {
 				m.moveSuggestion(1)
 				return m, nil
+			}
+		case keyIs(msg, tea.KeyLeft) || keyIs(msg, tea.KeyRight):
+			// ←/→ dial the highlighted /model row's reasoning effort in place, so
+			// "this model, thinking harder" is one pass through one surface instead
+			// of /model followed by /effort. Only the model picker claims these keys;
+			// everywhere else they fall through to the composer's cursor movement.
+			if m.picker != nil && m.picker.kind == pickerModel && !m.modelPickerIsLoading() {
+				delta := 1
+				if keyIs(msg, tea.KeyLeft) {
+					delta = -1
+				}
+				next, _ := m.adjustModelPickerEffort(delta)
+				return next, nil
 			}
 		case keyIs(msg, tea.KeyPgUp):
 			m = m.clearHover()
@@ -4564,6 +4584,11 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 			m, text = m.handleModelCommand(item.Value)
 		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		// Enter commits the effort the row was left on as well as the model. The
+		// model switch must land first: handleModelCommand re-derives the supported
+		// effort ring and clears an effort the new model does not accept, so
+		// applying effort before it would be overwritten.
+		m = m.applyPickedModelEffort(item)
 	case pickerEffort:
 		text := ""
 		m, text = m.handleEffortCommand(item.Value)
@@ -4598,6 +4623,22 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		// required choice hands off to the normal launch session picker.
 		var trustNote string
 		var saved bool
+		if item.Value == trustActionView {
+			// [V] view config (GAP-I): hand the config to $EDITOR via the
+			// same exec seam as diff [O], then come back to this menu. Not
+			// a trust decision; the empty note is skipped below. The menu
+			// is re-opened on the RETURNED model (choosePicker nils the
+			// picker on its own copy, so openTrustConfigInViewer's model
+			// is the one to mutate).
+			next, cmd := m.openTrustConfigInViewer(m.projectConfigPath)
+			if nextModel, ok := next.(model); ok {
+				cfg := describeProjectTrustConfig(m.projectConfigPath)
+				nextModel.trustConfigNotice(cfg)
+				nextModel.picker = nextModel.newTrustPicker()
+				next = nextModel
+			}
+			return next, cmd
+		}
 		m, trustNote, saved = m.applyTrustPickerChoice(item)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: trustNote})
 		if m.trustPromptRequired {

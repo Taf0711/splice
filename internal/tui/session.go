@@ -481,7 +481,17 @@ func sessionPlanStatus(state splicerun.DesignState) string {
 }
 
 // openTrustPromptIfRequired opens the required trust menu before the chat.
+// When the workspace has an executable project config (.splice/config.json
+// or hooks.json) and trust is undecided or declined, the UNTRUSTED PROJECT
+// CONFIG card accompanies the menu: the decision deserves the evidence of
+// what the config would change (GAP-I, frame I1). The card never decides —
+// the picker does.
 func (m model) openTrustPromptIfRequired() model {
+	if m.trustPromptRequired || !m.trusted {
+		if cfg := describeProjectTrustConfig(m.projectConfigPath); !cfg.Empty() || cfg.ParseError != "" {
+			m.trustConfigNotice(cfg)
+		}
+	}
 	if m.trustPromptRequired {
 		m.picker = m.newTrustPicker()
 	}

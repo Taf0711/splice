@@ -55,6 +55,66 @@ type pickerItem struct {
 	Remote        bool
 	Local         bool
 	Favorite      bool
+
+	// Efforts is the reasoning-effort ring the model exposes, in ascending order.
+	// It drives the inline ←/→ effort control on the /model picker row: the ring
+	// length varies per model, so the rendered segment count is itself a signal of
+	// how much headroom a model has. Empty for models with no effort controls.
+	Efforts []modelregistry.ReasoningEffort
+	// EffortIndex points into Efforts. effortAuto (-1) means "auto" — Splice's
+	// empty-string effort, i.e. let the provider default apply.
+	EffortIndex int
+	// Cost carries the per-million rates for the price readout. Nil when the model
+	// has no pricing data (custom endpoints, local Ollama tags), which renders as
+	// "pricing unknown" rather than a misleading $0.
+	Cost *pickerCost
+	// Badge marks catalog status (preview/deprecated) for the row's asterisk and
+	// the legend under the list.
+	Badge pickerBadge
+	// LongContext is true when the model advertises the long-context capability,
+	// which enables the Tab toggle line under the list.
+	LongContext   bool
+	LongContextOn bool
+}
+
+// effortAuto is the EffortIndex value meaning "no explicit effort" — it maps to
+// Splice's empty-string reasoningEffort, so the provider default applies. It sits
+// one step below the first real effort so ← from the lowest tier reaches it.
+const effortAuto = -1
+
+// pickerCost is the subset of ModelCost the picker renders: the three rates a
+// user actually compares when choosing a model.
+type pickerCost struct {
+	InputPerMillion       float64
+	CachedInputPerMillion float64
+	OutputPerMillion      float64
+}
+
+// free reports whether every rate is zero, which renders as a single "Free" line
+// instead of the three-column price readout.
+func (c pickerCost) free() bool {
+	return c.InputPerMillion == 0 && c.CachedInputPerMillion == 0 && c.OutputPerMillion == 0
+}
+
+// pickerBadge is a row's catalog-status marker. Splice only badges what the
+// registry can actually back — preview and deprecated status — rather than
+// inventing promotional states it has no source for.
+type pickerBadge int
+
+const (
+	badgeNone pickerBadge = iota
+	badgeBeta
+	badgeDeprecated
+)
+
+func (b pickerBadge) label() string {
+	switch b {
+	case badgeBeta:
+		return "Beta"
+	case badgeDeprecated:
+		return "Deprecated"
+	}
+	return ""
 }
 
 // commandPicker is a generic single-select overlay reused by /model and /effort
@@ -451,6 +511,25 @@ func (m *model) clearModelPickerLoadState() {
 func (m model) assembleModelPickerItems(recent []pickerItem, catalog []pickerItem) []pickerItem {
 	result := []pickerItem{}
 	seen := map[string]bool{}
+	// Enrich once, here, rather than in each of the four constructors: every model
+	// row funnels through this assembler, so the inline effort ring and price
+	// readout reach catalog, provider-catalog, and live-discovered rows alike.
+	activeModel := strings.TrimSpace(m.modelName)
+	enrich := func(items []pickerItem) []pickerItem {
+		out := make([]pickerItem, 0, len(items))
+		for _, item := range items {
+			item = m.enrichModelPickerItem(item)
+			if item.Value == activeModel {
+				// The row for the model already in use opens on the session's live
+				// effort, not the catalog default.
+				item.EffortIndex = m.activeModelEffortIndex(item)
+			}
+			out = append(out, item)
+		}
+		return out
+	}
+	recent = enrich(recent)
+	catalog = enrich(catalog)
 	all := append(append([]pickerItem{}, recent...), catalog...)
 	for _, item := range all {
 		if item.Value == "" || !m.favoriteModels[item.Value] || seen[item.Value] {
@@ -1010,6 +1089,14 @@ func (m model) newTrustPicker() *commandPicker {
 		{Label: "Trust this folder", Value: trustActionCurrent, Meta: m.cwd},
 		{Label: "Trust parent folder", Value: trustActionParent, Meta: filepath.Dir(m.cwd)},
 		{Label: "Do not trust this folder", Value: trustActionDecline, Meta: "keep this session untrusted"},
+	}
+	// [V] view config (GAP-I): when an executable project config exists, the
+	// decision deserves its evidence. The row names what it does; it opens
+	// the config and returns to this menu (it is not a trust decision).
+	if cfg := describeProjectTrustConfig(m.projectConfigPath); !cfg.Empty() || cfg.ParseError != "" {
+		items = append(items[:len(items)-1],
+			pickerItem{Label: "View what the project config would change", Value: trustActionView, Meta: filepath.Base(m.projectConfigPath)},
+			items[len(items)-1])
 	}
 	selected := len(items) - 1
 	if m.trusted {
