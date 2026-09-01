@@ -104,6 +104,10 @@ func (m model) startNewSession() model {
 	m.memoryCount = 0
 	m.memoryByType = nil
 	m.memoryNoticed = false
+	// Run-bound interaction surfaces (pending handoff, diff/file views,
+	// worktree binding, trajectory reveal) belong to the previous session's
+	// run. A kept worktree stays on disk; only the actionable surface resets.
+	m = m.resetRunInteractionState()
 
 	note := "Started a new session."
 	if previousID != "" {
@@ -253,6 +257,11 @@ func (m model) handleResumeCommand(args string) (model, string) {
 	loopsCleared := 0
 	if session.SessionID != previousID {
 		m, loopsCleared = m.clearLoopsForSessionSwitch()
+		// Interaction surfaces (handoff card, diff/file views, worktree
+		// binding) belong to the previous session's run; reset them on a
+		// real switch. A no-op switch (resuming the active session) leaves
+		// them untouched.
+		m = m.resetRunInteractionState()
 	}
 
 	rows := initialTranscript()
