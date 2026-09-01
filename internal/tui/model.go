@@ -2375,9 +2375,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.worktreeNotice = notice
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: notice})
 		}
-		m.clearStreamingToolCall() // active run finished — drop any lingering "writing" block
-		m.clearActiveTool()        // and any in-flight tool label/elapsed clock
-		m.pending = false
+		m.releaseRun()
 		m = m.disarmCancelConfirmation() // the run finished on its own — nothing left to confirm cancelling
 		// Fully reset the fade state at stream end. The next render
 		// emits the final row in solid ink (no settling animation), and
@@ -2387,14 +2385,6 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// carrying over to the next turn (and stops lineAges from
 		// growing indefinitely across many runs).
 		m.resetStreamingFade()
-		// The run is complete: release its context now instead of waiting for the
-		// parent context — every prompt leaked a CancelFunc (and its timer
-		// resources) until app exit otherwise.
-		if m.runCancel != nil {
-			m.runCancel()
-		}
-		m.runCancel = nil
-		m.activeRunID = 0
 		m.plan.frozenAt = m.now() // freeze the plan clock while idle (no run in flight)
 		// A fully successful turn means the task is done. Weaker models often
 		// forget the final update_plan, leaving the panel stuck mid-progress;
@@ -2532,14 +2522,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.runID != m.activeRunID {
 			return m, nil
 		}
-		m.clearStreamingToolCall()
-		m.clearActiveTool()
-		m.pending = false
-		if m.runCancel != nil {
-			m.runCancel()
-		}
-		m.runCancel = nil
-		m.activeRunID = 0
+		m.releaseRun()
 		m.reportAgentLifecycle(herdrIdle)
 		var flushRows []transcriptRow
 		events := flushableSessionEvents(msg.sessionEvents)
@@ -2615,13 +2598,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.worktreeNotice = notice
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: notice})
 		}
-		m.pending = false
-		m.clearActiveTool()
-		if m.runCancel != nil {
-			m.runCancel()
-		}
-		m.runCancel = nil
-		m.activeRunID = 0
+		m.releaseRun()
 		m.reportAgentLifecycle(herdrIdle)
 		// Refresh before the failure branch returns. A run that fails still
 		// appended events — the approval, the tasks that did start, and each
@@ -6467,6 +6444,33 @@ func (m *model) clearActiveTool() {
 	// rejection, cancellation, timeout, or run completion).
 	m.liveToolCallID = ""
 	m.liveToolOutput = ""
+}
+
+// releaseRun is the single run-release invariant for the terminal-run
+// handlers (agentResponseMsg, crystallizeResultMsg, planExecutionResultMsg):
+// every path that ends the active run must clear the transient per-run state
+// in exactly this way, because each piece exists to stop a leak or a stale
+// render:
+//
+//   - clearStreamingToolCall / clearActiveTool: no "writing" block or running
+//     tool survives the run that owned it;
+//   - runCancel released: the run's context CancelFunc is invoked and dropped
+//     now rather than at app exit (every prompt leaked one before this);
+//   - pending false + activeRunID 0: late messages for this run take the
+//     stale-async path (runID != activeRunID), never the live path.
+//
+// Handlers keep their own extras (lifecycle report, session-event flush,
+// plan reconciliation); this covers only the pieces every terminal handler
+// shares. Pointer receiver: runCancel invokes and nils.
+func (m *model) releaseRun() {
+	m.clearStreamingToolCall()
+	m.clearActiveTool()
+	m.pending = false
+	if m.runCancel != nil {
+		m.runCancel()
+	}
+	m.runCancel = nil
+	m.activeRunID = 0
 }
 
 func (m model) sendAgentReasoning(runID int, delta string) {
