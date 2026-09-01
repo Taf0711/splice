@@ -23,6 +23,15 @@ func (m model) resetRunInteractionState() model {
 	// session's run. The worktree itself stays on disk (runtime truth,
 	// resumable via git or /lane resume); only the actionable card resets.
 	m.pendingHandoff = nil
+	// An open ask_user gate belongs to the previous run's conversation.
+	// The runtime goroutine unblocks via ctx cancellation (OnAskUser's
+	// select); the UI must stop advertising the question. No answer is
+	// delivered — a stale answer to a dead run is worse than none.
+	m.pendingAskUser = nil
+	// An open permission prompt likewise belongs to the previous run. Its
+	// decide callback is NOT invoked here (cancellation unblocks the
+	// goroutine via ctx; invoking it would double-resolve).
+	m.pendingPermission = nil
 	// The diff viewport shows the previous lane's worktree diff.
 	if m.diffView.active {
 		m = m.exitDiffReview()
