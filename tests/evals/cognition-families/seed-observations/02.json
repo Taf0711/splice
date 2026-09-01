@@ -1,0 +1,11 @@
+{
+  "title": "sessionTTL is the single source of truth for expiry",
+  "content": "CONFIG RULE: all expiry decisions read the single sessionTTL constant in main.go; no duration literals for session lifetime anywhere else. Introduced when the TTL moved out of main(). Any new sweep/eviction/extension code MUST use sessionTTL, not a new constant.",
+  "owner_agent": "code_writer",
+  "memory_type": "convention",
+  "scope": "project",
+  "visibility": "shareable",
+  "topic_key": "file:internal/auth/session.go",
+  "anchor": "internal/auth/session.go",
+  "family_id": "fam-02-ttl-config-source"
+}

@@ -1,0 +1,11 @@
+{
+  "title": "Explicit JSON tags on all wire structs",
+  "content": "SERIALIZATION CONVENTION: every struct that crosses the HTTP wire gets EXPLICIT JSON field tags in the struct definition, even when the tag matches the Go field name. Established on Session in session.go. New response/view types (AdminSessionView etc.) MUST follow it; relying on default marshaling is a review blocker.",
+  "owner_agent": "code_writer",
+  "memory_type": "convention",
+  "scope": "project",
+  "visibility": "shareable",
+  "topic_key": "file:internal/auth/session.go",
+  "anchor": "internal/auth/session.go",
+  "family_id": "fam-04-json-envelope-convention"
+}

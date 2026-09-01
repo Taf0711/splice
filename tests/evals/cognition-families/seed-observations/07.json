@@ -1,0 +1,11 @@
+{
+  "title": "Store tests are table-driven with controllable clocks",
+  "content": "TEST CONVENTION: Store/session tests are TABLE-DRIVEN (one test function, cases in a slice) and use the store.now func field as the controllable clock. Established in expiry_table_test.go. New handler/store test tables (lookup tables, admin tables) MUST follow the same shape; a pile of separate test functions for related cases is a review blocker.",
+  "owner_agent": "code_writer",
+  "memory_type": "convention",
+  "scope": "project",
+  "visibility": "shareable",
+  "topic_key": "file:internal/auth/session_test.go",
+  "anchor": "internal/auth/session_test.go",
+  "family_id": "fam-07-probe-test-style"
+}

@@ -1,0 +1,11 @@
+{
+  "title": "healthz payload schema is additive-only",
+  "content": "API CONVENTION: the /healthz payload evolves ADDITIVELY. Existing fields (status=\"ok\", sessions=N) never change name or type; new fields are appended. Established when status was added. New fields (uptime_seconds etc.) MUST follow the additive rule; renaming or retyping existing fields is a verifier failure.",
+  "owner_agent": "code_writer",
+  "memory_type": "convention",
+  "scope": "project",
+  "visibility": "shareable",
+  "topic_key": "file:internal/auth/session.go",
+  "anchor": "internal/auth/session.go",
+  "family_id": "fam-09-healthz-schema"
+}

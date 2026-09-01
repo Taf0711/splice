@@ -1,0 +1,11 @@
+{
+  "title": "Lock discipline: Lock mutates, RLock reads, comments state it",
+  "content": "ARCHITECTURE RULE: every Store method carries a comment stating its lock level. Methods that mutate the map (including lazy expiry drops) take s.mu.Lock; pure reads take s.mu.RLock and MUST NOT mutate. New read endpoints (SessionsForUser etc.) follow the same discipline; the verifier runs -race with concurrent access.",
+  "owner_agent": "code_writer",
+  "memory_type": "architecture",
+  "scope": "project",
+  "visibility": "shareable",
+  "topic_key": "file:internal/auth/session.go",
+  "anchor": "internal/auth/session.go",
+  "family_id": "fam-06-race-safety-rule"
+}

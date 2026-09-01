@@ -1,0 +1,11 @@
+{
+  "title": "Password reset must invalidate all user sessions",
+  "content": "INVARIANT: any password reset or forced sign-out MUST delete every live session belonging to that user, not just one. Implemented as ResetPassword(userID) in session.go: it scans the session map and deletes every session whose User matches userID. New admin/force-signout paths MUST reuse this rule. Forgetting invalidation re-opens the account on stolen devices.",
+  "owner_agent": "code_writer",
+  "memory_type": "invariant",
+  "scope": "project",
+  "visibility": "shareable",
+  "topic_key": "file:internal/auth/session.go",
+  "anchor": "internal/auth/session.go",
+  "family_id": "fam-01-password-reset-invalidation"
+}
