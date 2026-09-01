@@ -850,7 +850,7 @@ func (m model) modelPickerOverlay(width int) string {
 		visible = m.picker.items[start : start+maxVisible]
 	}
 
-	lines := make([]string, 0, len(visible)+6)
+	lines := make([]string, 0, len(visible)+12)
 	searchInset := lipgloss.Width("❯ ")
 	searchPrefix := transparentSurface(zeroTheme.ink).Render(strings.Repeat(" ", searchInset))
 	lines = append(lines, fillPaletteLine(searchPrefix+renderModelPickerSearchLine(m.picker.query, maxInt(1, innerWidth-searchInset)), innerWidth, transparentSurface))
@@ -858,6 +858,9 @@ func (m model) modelPickerOverlay(width int) string {
 		lines = append(lines, fillPaletteLine(searchPrefix+zeroTheme.faint.Render(status), innerWidth, transparentSurface))
 	}
 	lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
+	if hint, ok := modelPickerScrollHint("↑ more above", start > 0, innerWidth); ok {
+		lines = append(lines, hint)
+	}
 	lastGroup := ""
 	for index, item := range visible {
 		if item.Group != "" && item.Group != lastGroup {
@@ -866,23 +869,76 @@ func (m model) modelPickerOverlay(width int) string {
 		}
 		lines = append(lines, renderModelPickerRow(innerWidth, start+index == m.picker.selected, item))
 	}
+	if hint, ok := modelPickerScrollHint("↓ more below", start+len(visible) < len(m.picker.items), innerWidth); ok {
+		lines = append(lines, hint)
+	}
 	if len(visible) == 0 {
 		lines = append(lines, fillPaletteLine(searchPrefix+zeroTheme.faint.Render("no matching models"), innerWidth, transparentSurface))
 	}
-	if item, ok := m.picker.current(); ok {
+	item, hasItem := m.picker.current()
+	// The detail block below the list is keyed entirely to the highlighted row —
+	// long-context state, price position, and rates all update as the cursor
+	// moves, which is what makes ←/→ and ↑/↓ feel like they are steering one
+	// readout instead of editing a list.
+	if hasItem {
+		lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
+		if toggle := renderContextToggle(item); toggle != "" {
+			lines = append(lines, fillPaletteLine(searchPrefix+toggle, innerWidth, transparentSurface))
+		}
+		lines = append(lines, m.modelPickerPriceLines(item, innerWidth, searchPrefix)...)
 		if detail := modelPickerItemDetail(item); detail != "" {
-			lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
 			lines = append(lines, fillPaletteLine(searchPrefix+zeroTheme.faint.Render(detail), innerWidth, transparentSurface))
+		}
+		if legend := renderBadgeLegend(visible, item.Badge); legend != "" {
+			lines = append(lines, fillPaletteLine(searchPrefix+legend, innerWidth, transparentSurface))
 		}
 	}
 	lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
-	footer := "↑/↓ move   Enter select   Ctrl+F favorite   Esc close"
-	lines = append(lines, fillPaletteLine(zeroTheme.faint.Render(footer), innerWidth, transparentSurface))
+	lines = append(lines, fillPaletteLine(zeroTheme.faint.Render(modelPickerHintBar(item, hasItem, innerWidth)), innerWidth, transparentSurface))
 	title := strings.TrimSpace(m.picker.title)
 	if title == "" {
 		title = "Choose a model"
 	}
 	return centerRenderedBlock(styledBlockFillTitle(overlayWidth, title, lines, zeroTheme.lineStrong, lipgloss.NewStyle()), width)
+}
+
+// modelPickerPriceLines renders the cost rail and rate columns for the
+// highlighted row. A row the registry has no pricing for says so rather than
+// showing an empty rail, which would read as "free".
+func (m model) modelPickerPriceLines(item pickerItem, innerWidth int, prefix string) []string {
+	if item.Cost == nil {
+		return []string{fillPaletteLine(prefix+zeroTheme.faintest.Render("pricing unknown"), innerWidth, transparentSurface)}
+	}
+	lines := []string{}
+	low, high := costRailBounds(m.picker.allItems)
+	railWidth := minInt(costRailWidth, maxInt(8, innerWidth-lipgloss.Width(prefix)))
+	if low > 0 && high > low && !item.Cost.free() {
+		hover := costRailPosition(item.Cost.blendedRate(), low, high)
+		active, hasActive := m.activeModelRailPosition(low, high)
+		lines = append(lines, fillPaletteLine(prefix+renderCostRail(railWidth, hover, active, hasActive), innerWidth, transparentSurface))
+	}
+	return append(lines, fillPaletteLine(prefix+renderPriceColumns(*item.Cost), innerWidth, transparentSurface))
+}
+
+// activeModelRailPosition locates the model currently in use on the cost rail,
+// so the hollow knob has something to mark. Reports false when the active model
+// is absent from the picker or unpriced.
+func (m model) activeModelRailPosition(low, high float64) (float64, bool) {
+	active := strings.TrimSpace(m.modelName)
+	if active == "" || m.picker == nil {
+		return 0, false
+	}
+	for _, candidate := range m.picker.allItems {
+		if candidate.Value != active || candidate.Cost == nil {
+			continue
+		}
+		rate := candidate.Cost.blendedRate()
+		if rate <= 0 {
+			return 0, false
+		}
+		return costRailPosition(rate, low, high), true
+	}
+	return 0, false
 }
 
 func (m model) modelPickerLoadingOverlay(width int) string {
@@ -926,15 +982,31 @@ func modelPickerOverlayWidth(terminalWidth int, picker *commandPicker) int {
 	}
 	target := lipgloss.Width("Choose a model")
 	target = maxInt(target, lipgloss.Width("  search > model name..."))
-	target = maxInt(target, lipgloss.Width("↑/↓ move   Enter select   Ctrl+F favorite   Esc close"))
 	target = maxInt(target, lipgloss.Width("  Using built-in model list"))
+	// The price rail and the rate columns are fixed-width blocks under the list;
+	// the overlay must be wide enough for them or the readout wraps mid-number.
+	target = maxInt(target, lipgloss.Width("  ")+costRailWidth)
+	target = maxInt(target, lipgloss.Width("  Input  $00.00 / 1M   Cached  $00.00 / 1M   Output  $00.00 / 1M"))
 	if picker != nil {
+		var hinted pickerItem
+		if item, ok := picker.current(); ok {
+			hinted = item
+		}
+		// Ask for the full hint bar's width (0 = uncapped). The overlay is still
+		// clamped to its ceiling afterwards, so this just means "go as wide as
+		// allowed when there are many hints" — the bar itself sheds entries to fit
+		// whatever width it ends up with.
+		target = maxInt(target, lipgloss.Width(modelPickerHintBar(hinted, true, 0)))
 		for _, item := range picker.items {
 			labelWidth := lipgloss.Width(item.Label)
 			if item.Favorite {
 				labelWidth += lipgloss.Width("* ")
 			}
 			target = maxInt(target, lipgloss.Width("❯ ")+labelWidth)
+			// Rows carrying an effort ring reserve the shared effort column plus the
+			// ring itself, so every ring starts at the same x regardless of label
+			// length.
+			target = maxInt(target, modelPickerRowWidth(item))
 			if detail := modelPickerItemDetail(item); detail != "" {
 				target = maxInt(target, lipgloss.Width("  "+detail))
 			}
@@ -970,8 +1042,17 @@ func renderModelPickerRow(width int, selected bool, item pickerItem) string {
 		prefix = "* "
 	}
 	left := marker + surface(zeroTheme.ink).Render(prefix+label)
-	// The provider is shown as a section header above each group, so rows no longer
-	// repeat it as a right-aligned tag (matches a grouped provider+model list).
+	if badge := renderPickerBadge(item.Badge, surface); badge != "" {
+		left += surface(zeroTheme.faintest).Render(" ") + badge
+	}
+	// The effort ring sits in a column to the right of the label, aligned across
+	// rows so the ring lengths (which differ per model) can be compared down the
+	// list. The provider is a section header above each group, so rows do not
+	// repeat it as a right-aligned tag.
+	if ring := renderEffortRing(item, selected, surface); ring != "" {
+		pad := maxInt(1, modelPickerEffortColumn-lipgloss.Width(left))
+		left += surface(zeroTheme.faintest).Render(strings.Repeat(" ", pad)) + ring
+	}
 	return fillPaletteLine(left, width, surface)
 }
 

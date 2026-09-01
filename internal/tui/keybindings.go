@@ -284,6 +284,8 @@ var reservedBindings = []struct {
 	{parseBinding("pgup"), "transcript scroll"},
 	{parseBinding("pgdown"), "transcript scroll"},
 	{parseBinding("ctrl+f"), "favorite model (in the /model picker)"},
+	{parseBinding("left"), "reasoning effort down (in the /model picker)"},
+	{parseBinding("right"), "reasoning effort up (in the /model picker)"},
 	{parseBinding("?"), "help overlay"},
 }
 
