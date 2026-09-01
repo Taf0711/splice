@@ -76,3 +76,6 @@ graphify-out/
 /demo-work/
 /demo-repair-loop.tape
 /DEMO-RUNBOOK.md
+
+# Internal planning docs (specs/plans) - local only, never pushed to release branches
+plans/
