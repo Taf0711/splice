@@ -381,6 +381,14 @@ func (m model) handleCompactCommand(args string) (model, string, tea.Cmd) {
 	if m.compactInFlight {
 		return m, m.compactText(true), nil
 	}
+	// A compaction started mid-run replaces the transcript and session events
+	// when it lands (compactResultMsg / compactActiveSession), which would
+	// swallow the streaming turn's rows and race its final agentResponseMsg.
+	// Same guard class as /new, /retry, and /rewind, which all refuse while
+	// pending; say so instead of silently corrupting the live turn.
+	if m.pending {
+		return m, "Compact\ncannot compact while a run is in progress. Press Esc to cancel it first.", nil
+	}
 	m.compactRequests++
 	m.lastCompactError = ""
 	m.lastCompactResult = nil

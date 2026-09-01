@@ -5325,7 +5325,15 @@ func (m *model) ensureSpinnerTick() tea.Cmd {
 }
 
 func (m model) launchQueuedMessageIfReady() (model, tea.Cmd) {
-	if !m.hasQueuedMessage() || m.pending || m.exiting || m.pendingPermission != nil || m.pendingAskUser != nil || m.pendingSpecReview != nil {
+	// Busy guards mirror loopBusy (loop.go) where it matters: a queued prompt
+	// must not launch while a run streams, while exiting, or during
+	// compaction — compactResultMsg rewrites transcript and session events
+	// wholesale, and a run launched mid-compaction races that rewrite (the
+	// same race /retry's compactInFlight guard exists for). The modal guards
+	// here cover the three gates that own the composer; loopBusy additionally
+	// refuses to LAUNCH a run behind any open modal, a stricter bar a queued
+	// prompt (queued before the modal opened) does not need.
+	if !m.hasQueuedMessage() || m.pending || m.exiting || m.compactInFlight || m.pendingPermission != nil || m.pendingAskUser != nil || m.pendingSpecReview != nil {
 		return m, nil
 	}
 	prompt := m.queuedMessage
