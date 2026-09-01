@@ -60,6 +60,27 @@ func BenchmarkViewTranscriptScaling(b *testing.B) {
 	}
 }
 
+// BenchmarkViewSettledTranscriptScaling measures the steady-state frame: a
+// model that has already rendered once (cache seeded) and re-settled (heights
+// baked into the settled descriptors, as settleTranscript does after any
+// frontier move). This is the number a long session actually pays per frame;
+// BenchmarkViewTranscriptScaling above is the one-time cold-build cost.
+func BenchmarkViewSettledTranscriptScaling(b *testing.B) {
+	for _, rows := range []int{100, 1_000, 10_000} {
+		m := benchTranscriptModel(rows)
+		// Seed heights + bake them, exactly as a real session does: first
+		// View renders every item into the height cache, the re-settle
+		// snapshot bakes them into the descriptors.
+		items := m.transcriptBodyItems(96, "", false)
+		measureTranscriptBodyItems(items, m.transcriptBodyHeights)
+		m.altScreenSettledWidth = 0
+		m.rebuildAltScreenSettledItems(96)
+		b.Run(fmt.Sprintf("rows_%d", rows), func(b *testing.B) {
+			benchView(b, m)
+		})
+	}
+}
+
 // benchNodeState builds a valid presentation.State with n execution nodes
 // in a mix of statuses (the executing-cockpit shape).
 func benchNodeState(n int) presentation.State {

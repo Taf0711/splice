@@ -93,7 +93,13 @@ type transcriptBodyItem struct {
 	rowIndex          int
 	heightCacheKey    string
 	heightCacheStable bool
-	render            func(startBodyY int) transcriptBodyRenderedItem
+	// heightResolved marks height as the measured line count of this exact
+	// descriptor (same key, same inputs). Settled-prefix descriptors carry it
+	// so per-frame measurement is integer arithmetic instead of re-rendering
+	// each item to count its lines.
+	height         int
+	heightResolved bool
+	render         func(startBodyY int) transcriptBodyRenderedItem
 }
 
 type transcriptBodyRenderedItem struct {
@@ -668,6 +674,11 @@ func layoutVisibleTranscriptBodyItems(items []transcriptBodyItem, metrics transc
 }
 
 func transcriptBodyItemHeight(item transcriptBodyItem, cache *transcriptBodyHeightCache) int {
+	// A descriptor that already carries its measured height (settled-prefix
+	// snapshots) needs no cache round-trip and no render.
+	if item.heightResolved {
+		return item.height
+	}
 	if item.heightCacheStable {
 		if height, ok := cache.get(item.heightCacheKey); ok {
 			return height
