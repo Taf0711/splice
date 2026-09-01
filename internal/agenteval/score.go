@@ -37,6 +37,9 @@ type ScoreInput struct {
 	TraceStdout        string
 	Blocked            bool
 	BlockReason        string
+	// Revision pins the evidence provenance (handoff section 31). Nil means
+	// the caller could not prove it, which stays visibly absent.
+	Revision *RevisionStamp
 }
 
 type CommandResult struct {
@@ -65,6 +68,26 @@ type Report struct {
 	ChangedFiles []string `json:"changedFiles"`
 	Results      []Result `json:"results"`
 	Error        string   `json:"error,omitempty"`
+	// Revision stamps the exact evidence inputs (handoff section 31): the
+	// workspace commit the run executed against and the suite revision that
+	// defined the task. Zero values mean the runner could not prove them,
+	// which itself must be visible, not defaulted.
+	// Pointer so an unstamped report omits the field entirely instead of
+	// serializing an empty object (existing consumers must not see shape
+	// drift when the runner cannot prove provenance).
+	Revision *RevisionStamp `json:"revision,omitempty"`
+}
+
+// RevisionStamp pins the raw-evidence provenance of one report.
+type RevisionStamp struct {
+	// WorkspaceCommit is the HEAD commit of the materialized workspace when
+	// the run started (empty when the workspace had no commits).
+	WorkspaceCommit string `json:"workspace_commit,omitempty"`
+	// WorkspaceDirty lists paths differing from that commit at run start.
+	WorkspaceDirty []string `json:"workspace_dirty,omitempty"`
+	// SuiteRevision is a caller-provided suite revision label (e.g. the
+	// suite file's content hash). Empty means the caller did not stamp it.
+	SuiteRevision string `json:"suite_revision,omitempty"`
 }
 
 type Result struct {
@@ -111,6 +134,7 @@ func Score(suite Suite, input ScoreInput) Report {
 		return report
 	}
 	report.TaskID = task.ID
+	report.Revision = input.Revision
 	commandResults := commandResultsByID(input.CommandResults)
 	seenCommands := map[string]bool{}
 	for _, command := range task.VerificationCommands {

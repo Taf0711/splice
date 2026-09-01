@@ -21,6 +21,9 @@ type RunInput struct {
 	TaskID        string
 	WorkspacePath string
 	TraceStdout   string
+	// SuiteRevision stamps the suite definition revision (e.g. a content
+	// hash) into the report. Optional; empty omits the stamp.
+	SuiteRevision string
 	// CommandTimeout bounds each verification command. Non-positive applies
 	// defaultCommandTimeout.
 	CommandTimeout time.Duration
@@ -92,6 +95,7 @@ func (runner Runner) Run(ctx context.Context, suite Suite, input RunInput) Repor
 		ContextCheckResult: contextResult,
 		ContextCheckError:  contextError,
 		TraceStdout:        input.TraceStdout,
+		Revision:           runner.revisionStamp(ctx, input.WorkspacePath, input.SuiteRevision),
 	})
 }
 
@@ -221,4 +225,42 @@ func trimCommand(command []string) []string {
 		}
 	}
 	return trimmed
+}
+
+// stampRevision reads the workspace HEAD commit and dirty-path list, best
+// effort: any failure returns an empty stamp so the report shows unproven
+// provenance instead of a fabricated value.
+func (runner Runner) revisionStamp(ctx context.Context, workspace, suiteRevision string) *RevisionStamp {
+	stamp := runner.stampRevision(ctx, workspace, suiteRevision)
+	if stamp.WorkspaceCommit == "" {
+		// Nothing proven: omit the stamp entirely rather than serialize a
+		// partial object that looks authoritative.
+		return nil
+	}
+	return &stamp
+}
+
+func (runner Runner) stampRevision(ctx context.Context, workspace, suiteRevision string) RevisionStamp {
+	runGit := runner.runGit
+	if runGit == nil {
+		runGit = defaultRunGit
+	}
+	out, err := runGit(ctx, workspace, "rev-parse", "HEAD")
+	if err != nil {
+		return RevisionStamp{SuiteRevision: suiteRevision}
+	}
+	commit := strings.TrimSpace(string(out))
+	if commit == "" {
+		return RevisionStamp{SuiteRevision: suiteRevision}
+	}
+	stamp := RevisionStamp{
+		WorkspaceCommit: commit,
+		SuiteRevision:   suiteRevision,
+	}
+	dirty, err := runGit(ctx, workspace, "status", "--porcelain", "--untracked-files=no")
+	if err != nil {
+		return stamp
+	}
+	stamp.WorkspaceDirty = parseGitStatusPorcelain(dirty)
+	return stamp
 }
