@@ -113,8 +113,10 @@ func TestOfferHandoffAppendsCard(t *testing.T) {
 	m := mouseTestModel()
 	before := len(m.transcript)
 	// A path that does not exist on disk: the work-lost form still renders
-	// (lane death vs work loss), so the row count still grows.
-	m.offerHandoff(&worktrees.Result{Name: "wt-x", Path: "/nonexistent/wt-x"}, "failed", 0, 0)
+	// (lane death vs work loss), so the row count still grows. preserved is
+	// now a caller-supplied input (F1) — false here is exactly the real
+	// value for a nonexistent path.
+	m.offerHandoff(&worktrees.Result{Name: "wt-x", Path: "/nonexistent/wt-x"}, "failed", 0, 0, false, false)
 	if len(m.transcript) != before+1 {
 		t.Fatalf("offerHandoff did not append a row")
 	}
@@ -122,7 +124,7 @@ func TestOfferHandoffAppendsCard(t *testing.T) {
 		t.Fatalf("appended row is not a handoff payload: %q", m.transcript[len(m.transcript)-1].text)
 	}
 	// Nil worktree: no row.
-	m.offerHandoff(nil, "failed", 0, 0)
+	m.offerHandoff(nil, "failed", 0, 0, false, false)
 	if len(m.transcript) != before+1 {
 		t.Fatalf("nil worktree appended a row")
 	}

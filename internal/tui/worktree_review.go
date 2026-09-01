@@ -203,14 +203,14 @@ func (m model) maybeOfferWorktreeReview(wt *worktrees.Result, dirty bool) (model
 
 // offerHandoff appends the HANDOFF card for an exited lane whose work
 // survived (kept worktree, or failure/cancellation before any review).
-// It distinguishes lane death from work loss: preserved is the caller's
-// filesystem check of the worktree path. mergeAvailable mirrors the
-// review's dirty-main gate. Best-effort: the card never fails the turn.
-func (m *model) offerHandoff(wt *worktrees.Result, outcome string, staged, applied int) {
+// It distinguishes lane death from work loss: preserved and mergeAvailable
+// are computed by the CALLER (the run goroutine that produced the result
+// message), never on the UI loop — §14 keeps filesystem and git access off
+// Update(). Best-effort: the card never fails the turn.
+func (m *model) offerHandoff(wt *worktrees.Result, outcome string, staged, applied int, preserved, mergeAvailable bool) {
 	if wt == nil || strings.TrimSpace(wt.Path) == "" {
 		return
 	}
-	preserved := tuiWorktreeExists(wt.Path)
 	h := handoffState{
 		lane:      wt.Name,
 		path:      wt.Path,
@@ -220,7 +220,6 @@ func (m *model) offerHandoff(wt *worktrees.Result, outcome string, staged, appli
 		applied:   applied,
 		preserved: preserved,
 	}
-	mergeAvailable := preserved && !inspectSourceDirty(*wt)
 	m.pendingHandoff = &h
 	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
 		kind: rowSystem,

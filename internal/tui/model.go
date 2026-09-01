@@ -634,6 +634,11 @@ type agentResponseMsg struct {
 	// designTransition is a transition the design agent queued this turn. It is
 	// run only when the turn succeeded (msg.err == nil), after pending clears.
 	designTransition *splicerun.DesignTransitionRequest
+	// worktreePreserved/mergeAvailable for the HANDOFF card, computed in the
+	// run goroutine (off the UI loop) — F1, §14. mergeAvailable mirrors the
+	// review's dirty-main gate: preserved AND source not dirty.
+	worktreePreserved bool
+	mergeAvailable    bool
 }
 
 type agentRowMsg struct {
@@ -2646,7 +2651,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if card.kind == receiptCancelled {
 				outcome = "cancelled"
 			}
-			m.offerHandoff(msg.worktree, outcome, 0, 0)
+			m.offerHandoff(msg.worktree, outcome, 0, 0, msg.worktreePreserved, msg.mergeAvailable)
 			return m.maybeOfferWorktreeReview(msg.worktree, msg.sourceDirty)
 		}
 		m.designMode = false
@@ -2717,7 +2722,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// input while it was up; once it resolves, the handoff card's keys
 		// arm so the user can still merge-back, open, or discard from the
 		// persistent card. An Accept resolved the worktree (merged) — the
-		// handoff stays disarmed.
+		// handoff stays disarmed. The preserved check is a single os.Stat
+		// on a path the review just touched (kept != nil means the review
+		// left it in place); it re-checks on the next render instead of the
+		// UI loop (F1): the card's payload re-validates on offer, and a
+		// vanished worktree renders the WORK LOST form from the payload.
 		if msg.kept != nil && m.pendingHandoff != nil {
 			m.pendingHandoff.preserved = tuiWorktreeExists(msg.kept.Path)
 		}
@@ -6220,13 +6229,19 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				preparedPtr = &copy
 			}
 			sourceDirty := inspectSourceDirty(preparedWorktree)
+			// HANDOFF card inputs (F1): computed HERE, off the UI loop.
+			// preserved = the worktree path still exists (lane death vs
+			// work loss); mergeAvailable = preserved AND source not dirty
+			// (the review's dirty-main gate).
+			wtPreserved := preparedPtr != nil && tuiWorktreeExists(preparedPtr.Path)
+			wtMergeable := wtPreserved && !sourceDirty
 			if err != nil {
 				flushReasoning(m.now())
 				sessionEvents = append(sessionEvents, pendingSessionEvent{
 					Type:    sessions.EventError,
 					Payload: map[string]any{"message": err.Error()},
 				})
-				return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, turnTools: toolCalls, turnElapsed: m.now().Sub(started), memoryStatus: memStatus, memoryCount: memCount, memoryByType: memByType, worktree: preparedPtr, worktreeNotice: worktreeNotice, sourceDirty: sourceDirty}
+				return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, turnTools: toolCalls, turnElapsed: m.now().Sub(started), memoryStatus: memStatus, memoryCount: memCount, memoryByType: memByType, worktree: preparedPtr, worktreeNotice: worktreeNotice, sourceDirty: sourceDirty, worktreePreserved: wtPreserved, mergeAvailable: wtMergeable}
 			}
 			flushReasoning(m.now())
 			elapsed := m.now().Sub(started)
@@ -6252,7 +6267,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 					"content": result.FinalAnswer,
 				},
 			})
-			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, turnTools: toolCalls, turnElapsed: elapsed, ttft: ttft, turnVisibleOutputTokens: turnVisibleOutputTokens, memoryStatus: memStatus, memoryCount: memCount, memoryByType: memByType, worktree: preparedPtr, worktreeNotice: worktreeNotice, sourceDirty: sourceDirty}
+			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, turnTools: toolCalls, turnElapsed: elapsed, ttft: ttft, turnVisibleOutputTokens: turnVisibleOutputTokens, memoryStatus: memStatus, memoryCount: memCount, memoryByType: memByType, worktree: preparedPtr, worktreeNotice: worktreeNotice, sourceDirty: sourceDirty, worktreePreserved: wtPreserved, mergeAvailable: wtMergeable}
 		}
 		if err != nil {
 			flushReasoning(m.now())
