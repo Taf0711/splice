@@ -50,11 +50,15 @@ var sourceExtensions = map[string]bool{
 // joined by '/', ending in a known source extension. Segments start with an
 // alphanumeric or underscore, so './', '../', and hidden-dot segments are
 // excluded by construction. At least one '/' is required.
-var repoPathToken = regexp.MustCompile(`[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)+\.(?:go|py|ts|js|rs|java|c|cc|cpp|h|hpp|sh|md|json|yaml|yml|toml)`)
+// Extension alternation is ordered longest-first so a longer real extension
+// wins over its shorter prefix (.json over .js, .cpp/.cc over .c). The
+// original shortest-first order produced phantom keys like file:x/y.js from
+// x/y.json (found by the E1b eval suite).
+var repoPathToken = regexp.MustCompile(`[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)+\.(?:json|yaml|java|toml|cpp|hpp|yml|go|py|ts|js|rs|cc|c|h|sh|md)`)
 
 // symbolToken matches a repo-relative path immediately followed by #Symbol,
 // e.g. internal/auth/session.go#ResetPassword.
-var symbolToken = regexp.MustCompile(`([A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)+\.(?:go|py|ts|js|rs|java|c|cc|cpp|h|hpp))#([A-Za-z_][A-Za-z0-9_]*)`)
+var symbolToken = regexp.MustCompile(`([A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)+\.(?:java|cpp|hpp|go|py|ts|js|rs|cc|c|h))#([A-Za-z_][A-Za-z0-9_]*)`)
 
 // pkgTarget matches a strict package target in a verification command:
 // ./pkg/... with the pkg path being identifier-like segments. The leading
@@ -86,6 +90,11 @@ func findRepoRelativePaths(text string) []string {
 			continue
 		}
 		path := text[loc[0]:loc[1]]
+		// An IPv4-literal first segment (192.168.0.1/...) is a host route,
+		// not a repo-relative path (found by the E1b eval suite).
+		if isIPLikeFirstSegment(path) {
+			continue
+		}
 		ext := path[strings.LastIndex(path, ".")+1:]
 		if !sourceExtensions[ext] {
 			continue
@@ -93,6 +102,28 @@ func findRepoRelativePaths(text string) []string {
 		paths = append(paths, path)
 	}
 	return paths
+}
+
+// isIPLikeFirstSegment reports whether the path's first segment is a
+// numeric dot-separated blob such as 192.168.0.1. Repo-relative paths do
+// not start with one.
+func isIPLikeFirstSegment(path string) bool {
+	seg := path
+	if i := strings.Index(path, "/"); i >= 0 {
+		seg = path[:i]
+	}
+	digits := true
+	dots := 0
+	for _, r := range seg {
+		switch {
+		case r >= '0' && r <= '9':
+		case r == '.':
+			dots++
+		default:
+			return false
+		}
+	}
+	return digits && dots >= 2
 }
 
 // findSymbols mines strict path#Symbol tokens from prose.
