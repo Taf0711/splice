@@ -62,7 +62,7 @@ func TestRerankedMissPathReorders(t *testing.T) {
 	p := prep(&rankedFakeStore{cands: []schemas.MemoryRanked{generic, relevant}})
 	input := schemas.HarnessStageInput{RequestIntent: "fix InvalidateSession in the session store"}
 
-	bundle, err := p.rerankedMissPath(context.Background(), input, "/repo")
+	bundle, _, err := p.rerankedMissPath(context.Background(), input, "/repo")
 	if err != nil {
 		t.Fatalf("reranked miss path: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestMissPathFallsBackToPlainSearchOrder(t *testing.T) {
 	p := prep(&plainFakeStore{obs: []schemas.MemoryObservation{o1, o2}})
 	input := schemas.HarnessStageInput{RequestIntent: "fix InvalidateSession in the session store"}
 
-	bundle, err := p.rerankedMissPath(context.Background(), input, "/repo")
+	bundle, _, err := p.rerankedMissPath(context.Background(), input, "/repo")
 	if err != nil {
 		t.Fatalf("fallback miss path: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestMissPathRankedErrorFallsBack(t *testing.T) {
 	p := prep(failing)
 	input := schemas.HarnessStageInput{RequestIntent: "anything"}
 
-	bundle, err := p.rerankedMissPath(context.Background(), input, "/repo")
+	bundle, _, err := p.rerankedMissPath(context.Background(), input, "/repo")
 	if err != nil {
 		t.Fatalf("ranked error must fall back, got: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestRerankThenAdmitDeliversTopRelevant(t *testing.T) {
 	p := prep(&rankedFakeStore{cands: []schemas.MemoryRanked{filler, relevant}})
 	input := schemas.HarnessStageInput{RequestIntent: "fix InvalidateSession in the session store"}
 
-	bundle, err := p.rerankedMissPath(context.Background(), input, "/repo")
+	bundle, _, err := p.rerankedMissPath(context.Background(), input, "/repo")
 	if err != nil {
 		t.Fatalf("miss path: %v", err)
 	}

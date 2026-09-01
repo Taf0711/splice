@@ -21,20 +21,22 @@ import (
 // The returned bundle is what memoryreason.Admit receives. Error means
 // retrieval itself failed (the caller degrades memory status); a ranked
 // fallback to Search returning zero results is NOT an error.
-func (p stageInputPreparation) rerankedMissPath(ctx context.Context, input schemas.HarnessStageInput, root string) (schemas.MemoryBundle, error) {
+func (p stageInputPreparation) rerankedMissPath(ctx context.Context, input schemas.HarnessStageInput, root string) (schemas.MemoryBundle, MissPathDetail, error) {
 	query := newMemoryQuery(input.StageName, input.RequestIntent, root)
 	rankedStore, ok := p.Memory.(RankedSearchStore)
 	if !ok || rankedStore == nil {
-		return p.Memory.Search(ctx, query)
+		bundle, err := p.Memory.Search(ctx, query)
+		return bundle, MissPathDetail{FallbackToPlainSearch: 1}, err
 	}
 	candidates, _, err := rankedStore.SearchRanked(ctx, query)
 	if err != nil {
 		// Old sidecar or transient ranked failure: fall back, do not fail
 		// the run's memory on an enhancement.
-		return p.Memory.Search(ctx, query)
+		bundle, err := p.Memory.Search(ctx, query)
+		return bundle, MissPathDetail{FallbackToPlainSearch: 1}, err
 	}
 	if len(candidates) == 0 {
-		return schemas.MemoryBundle{}, nil
+		return schemas.MemoryBundle{}, MissPathDetail{}, nil
 	}
 	// Widen the candidate pool for reranking: FTS candidates are cheap and
 	// the reranker + token budget pick the small final set. The plain path
@@ -67,5 +69,5 @@ func (p stageInputPreparation) rerankedMissPath(ctx context.Context, input schem
 	for _, s := range ordered {
 		bundle.Observations = append(bundle.Observations, s.Observation)
 	}
-	return bundle, nil
+	return bundle, MissPathDetail{KeysGenerated: len(keys)}, nil
 }

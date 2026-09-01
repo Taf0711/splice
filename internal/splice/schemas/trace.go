@@ -83,6 +83,13 @@ type InputMeta struct {
 	DirectCandidates int    `json:"direct_candidates,omitempty"`
 	DirectHits       int    `json:"direct_hits,omitempty"`
 	StaleHits        int    `json:"stale_hits,omitempty"`
+	// C1c/E0 telemetry: the miss-path detail the eval program's metrics
+	// schema requires (handoff section 30, cognition group). Counts only;
+	// no content ever lands here.
+	KeysGenerated      int `json:"keys_generated,omitempty"`
+	LookupMisses       int `json:"lookup_misses,omitempty"`
+	FTSFallback        int `json:"fts_fallback,omitempty"`
+	ExemplarsRetrieved int `json:"exemplars_retrieved,omitempty"`
 }
 
 // Validate checks the input metadata.
@@ -92,6 +99,9 @@ func (m InputMeta) Validate() error {
 	}
 	if m.DirectCandidates < 0 || m.DirectHits < 0 || m.StaleHits < 0 {
 		return errors.New("cognition lookup counts must be non-negative")
+	}
+	if m.KeysGenerated < 0 || m.LookupMisses < 0 || m.FTSFallback < 0 || m.ExemplarsRetrieved < 0 {
+		return errors.New("cognition miss-path counts must be non-negative")
 	}
 	switch m.MemoryLookupMode {
 	case "", "direct", "search":
