@@ -253,6 +253,10 @@ func (m model) handleResumeCommand(args string) (model, string) {
 	// session already owns a design epoch, so the first resumed prompt must not
 	// enter a fresh epoch and discard that state.
 	m = m.reconstructDesignState()
+	// F3 (§15): replay the persisted presentation states through the
+	// accumulator so the pipeline panel, lifecycle, and health reconstruct
+	// from runtime truth without touching the runtime.
+	m = m.replayPresentationState(events)
 	m.designNoticeShown = true
 	loopsCleared := 0
 	if session.SessionID != previousID {

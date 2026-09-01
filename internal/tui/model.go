@@ -6161,11 +6161,20 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			// P1.1: pipeline runs surface presentation snapshots to the
 			// session event log so the run record carries runtime truth.
 			// Rendering from these landed in P1.2.
+			// F3 (§15): the FULL canonical state is persisted, not a stub,
+			// so resume can replay presentation.State through the
+			// accumulator without touching the runtime. The event keeps
+			// its old summary fields for existing consumers.
 			downstreamPresentation := options.OnPresentationState
 			options.OnPresentationState = func(state presentation.State) {
+				stateJSON, jsonErr := json.Marshal(state)
+				payload := map[string]any{"presentation_schema_version": state.SchemaVersion, "lifecycle": string(state.Lifecycle)}
+				if jsonErr == nil {
+					payload["presentation_state"] = json.RawMessage(stateJSON)
+				}
 				sessionEvents = append(sessionEvents, pendingSessionEvent{
 					Type:    sessions.EventMessage,
-					Payload: map[string]any{"presentation_schema_version": state.SchemaVersion, "lifecycle": string(state.Lifecycle)},
+					Payload: payload,
 				})
 				if downstreamPresentation != nil {
 					downstreamPresentation(state)
