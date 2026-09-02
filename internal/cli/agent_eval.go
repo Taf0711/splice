@@ -140,6 +140,29 @@ func runAgentEvalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 		if err := writeAgentEvalReportFile(options.ReportDir, report); err != nil {
 			return writeAppError(stderr, "failed to write eval report: "+err.Error(), exitCrash)
 		}
+		// Section-30 per-attempt log: one ReportRow per rollout attempt,
+		// the machine-readable layer aggregations derive from. Written
+		// beside the human report so a single run directory holds both.
+		if report.Benchmark != nil {
+			for index := range report.Benchmark.Tasks {
+				if report.Benchmark.Tasks[index].RunnerKind == "" {
+					report.Benchmark.Tasks[index].RunnerKind = report.RunnerKind
+				}
+			}
+			attemptsPath := filepath.Join(options.ReportDir, "agent-eval-attempts.jsonl")
+			file, err := os.Create(attemptsPath)
+			if err != nil {
+				return writeAppError(stderr, "failed to write eval attempts log: "+err.Error(), exitCrash)
+			}
+			writeErr := agenteval.WriteAttemptsJSONL(file, *report.Benchmark)
+			closeErr := file.Close()
+			if writeErr != nil {
+				return writeAppError(stderr, "failed to write eval attempts log: "+writeErr.Error(), exitCrash)
+			}
+			if closeErr != nil {
+				return writeAppError(stderr, "failed to write eval attempts log: "+closeErr.Error(), exitCrash)
+			}
+		}
 	}
 	if options.CSVOutput != "" {
 		if report.Benchmark == nil {

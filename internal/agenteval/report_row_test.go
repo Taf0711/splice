@@ -2,6 +2,7 @@ package agenteval
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -168,5 +169,83 @@ func TestRowContractRoundTrip(t *testing.T) {
 	}
 	if back.EstimatedCostUSD == nil || *back.EstimatedCostUSD != 0.5 {
 		t.Fatalf("round-trip lost cost: %v", back.EstimatedCostUSD)
+	}
+}
+
+// Section-30 attempts log: every task attempt folds to exactly one JSONL
+// row, one per line, each declaring the row contract.
+func TestWriteAttemptsJSONLOneRowPerTask(t *testing.T) {
+	report := BenchmarkReport{
+		Contract: BenchmarkContractVersion,
+		SuiteID:  "suite-1",
+		Tasks: []BenchmarkTaskReport{
+			{TaskID: "t1", Model: "m1", Report: passingReport()},
+			{TaskID: "t2", Model: "m1", Report: passingReport()},
+		},
+	}
+	var buf strings.Builder
+	if err := WriteAttemptsJSONL(&buf, report); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 JSONL rows, got %d", len(lines))
+	}
+	for i, line := range lines {
+		if !RowContractMatches([]byte(line)) {
+			t.Fatalf("line %d does not declare the row contract: %s", i+1, line)
+		}
+		var row ReportRow
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			t.Fatalf("line %d is not valid JSON: %v", i+1, err)
+		}
+		if row.TaskID != report.Tasks[i].TaskID {
+			t.Fatalf("line %d task = %q, want %q", i+1, row.TaskID, report.Tasks[i].TaskID)
+		}
+		if row.SuiteID != "suite-1" {
+			t.Fatalf("line %d suite = %q, want suite-1", i+1, row.SuiteID)
+		}
+		if row.Attempt != 1 {
+			t.Fatalf("line %d attempt = %d, want 1", i+1, row.Attempt)
+		}
+	}
+}
+
+// Unknown cost stays unknown: a task with no usage samples must produce a
+// row whose cost field is ABSENT (not zero) and whose usage fields stay
+// absent too (section 30, fake-zero prohibition).
+func TestWriteAttemptsJSONLUnknownCostStaysUnknown(t *testing.T) {
+	report := BenchmarkReport{
+		Contract: BenchmarkContractVersion,
+		SuiteID:  "s",
+		Tasks: []BenchmarkTaskReport{
+			{TaskID: "blocked-task", Model: "m", Report: Report{
+				Contract: ReportContractVersion, SuiteID: "s", TaskID: "blocked-task",
+				Status: StatusBlocked, OK: false,
+			}},
+		},
+	}
+	var buf strings.Builder
+	if err := WriteAttemptsJSONL(&buf, report); err != nil {
+		t.Fatal(err)
+	}
+	line := strings.TrimSpace(buf.String())
+	if strings.Contains(line, "estimated_cost_usd") {
+		t.Fatalf("unknown cost leaked as a field: %s", line)
+	}
+	if strings.Contains(line, "tokens_input") {
+		t.Fatalf("unknown usage leaked as a field: %s", line)
+	}
+	// The blocked run still classifies as infrastructure (section 33):
+	// a benchmark bug must never count as a coding failure.
+	var row ReportRow
+	if err := json.Unmarshal([]byte(line), &row); err != nil {
+		t.Fatal(err)
+	}
+	if row.Taxonomy != TaxonomyInfrastructure {
+		t.Fatalf("blocked run taxonomy = %q, want %q", row.Taxonomy, TaxonomyInfrastructure)
+	}
+	if row.VerifiedSuccess {
+		t.Fatal("blocked run must not claim verified success")
 	}
 }
