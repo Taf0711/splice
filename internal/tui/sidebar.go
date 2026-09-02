@@ -586,98 +586,29 @@ func (m model) renderContextSidebar(width, height int) []string {
 		return nil
 	}
 
+	// GAP-K slice 1: the sections compose through the module registry (slot
+	// order, blank line between, budget-bounded drop-whole). The registry is
+	// the composition contract; the render walk below only finishes the frame:
+	// the token floor, hover highlight, and width normalization.
+	//
+	// Budget accounting (mirrors the old hardcoded walk): the token readout
+	// reserves the bottom row; everything above shares height-1.
+	bodyBudget := height - 1
 	var lines []string
-	add := func(s string) { lines = append(lines, s) }
-
-	// AGENTS section — spawned subagents and their live working detail.
-	add(m.sidebarAgentHeader(width))
-	agentLines := m.sidebarAgentLines(width)
-	if len(agentLines) == 0 {
-		add(sidebarPlaceholder("no agents spawned", width))
-	} else {
-		lines = append(lines, agentLines...)
-	}
-
-	// PLAN section.
-	add("")
-	add(m.sidebarPlanHeader(width))
-	planLines := m.sidebarPlanLines(width)
-	if len(planLines) == 0 {
-		add(sidebarPlaceholder("no active plan", width))
-	} else {
-		lines = append(lines, planLines...)
-	}
-
-	// PIPELINE section (pipeline stages). The header chip carries the
-	// worktree (when isolated) and the phase/health/gate readout from the
-	// same presentation snapshot: `PIPELINE wt:x · executing | regression`.
-	// Budget = width minus the "PIPELINE " prefix (9) and the done/total
-	// count (5, worst case "99/99"), so the chip degrades by dropping
-	// segments instead of being ellipsis-truncated mid-word.
-	pipeline := m.pipeline.presentation()
-	if pipeline.active && pipeline.total > 0 {
-		add("")
-		budget := width - len("PIPELINE ") - len("99/99")
-		chip := m.worktreeChip()
-		if lifecycle := m.pipeline.lifecycleChip(budget); lifecycle != "" {
-			if chip != "" {
-				chip += " · "
-			}
-			chip += lifecycle
-		}
-		add(pipeline.headerLineWithChip(width, chip))
-		lines = append(lines, pipeline.renderSection(width, m.spinnerPhase)...)
-	}
-
-	// TRAJECTORY section (GAP-G): the diagnostic surface, off by default.
-	// Rendered below PIPELINE so it reads as part of the run state.
-	if !m.pipeline.isEmpty() {
-		add("")
-		add(m.renderTrajectorySurface(m.lastState, width))
-	}
-
-	// MEMORY section: compact observation count when the sidecar is active.
-	// Absent when off or unknown so the sidebar stays clean when memory is off
-	// (the status line already covers the off state).
-	if m.memoryStatus == "active" {
-		add("")
-		add(sidebarHeader("🧵 Memory", width))
-		lines = append(lines, m.memorySidebarLines(width)...)
-	}
-
-	// FILES section: the files this session has touched (files_panel.go).
-	// Rendered BELOW the plan steps so it never shifts sidebarPlanSelectables'
-	// click offsets; its own hits (sidebarFileSelectables) account for the
-	// sections above it.
-	add("")
-	add(m.sidebarFilesHeader(width))
-	fileLines, _ := m.sidebarFileLines(width)
-	if len(fileLines) == 0 {
-		add(sidebarPlaceholder("no files touched", width))
-	} else {
-		lines = append(lines, fileLines...)
-	}
-
-	// ACTIVITY section: recent completed work + a live "generating…" pulse. Shown
-	// BELOW the plan steps so it never shifts sidebarPlanSelectables' click offsets,
-	// and budgeted (height-1 minus what's used) so it clips ITSELF from the bottom
-	// rather than letting the end-truncation eat into the plan. Absent when empty.
-	if activityLines := m.sidebarActivityLines(width, maxInt(0, height-1-len(lines))); len(activityLines) > 0 {
-		add("")
-		add(sidebarHeader("ACTIVITY", width))
-		lines = append(lines, activityLines...)
+	if bodyBudget > 0 {
+		lines = m.renderContextModules(width, bodyBudget)
 	}
 
 	// Token readout pinned to the bottom.
 	tokenLine := m.sidebarTokenLine(width)
 	// Reserve the bottom row for tokens; pad the gap so it sits at the floor.
 	for len(lines) < height-1 {
-		add("")
+		lines = append(lines, "")
 	}
 	if len(lines) > height-1 {
 		lines = lines[:height-1]
 	}
-	add(tokenLine)
+	lines = append(lines, tokenLine)
 
 	// Hover highlight: resolved by STABLE IDENTITY (sessionID / stepIndex), not a
 	// cached line offset — see hoveredSidebarLineOffset. A row whose identity no
