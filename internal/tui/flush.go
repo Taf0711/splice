@@ -125,7 +125,11 @@ func (m model) settleTranscript() (model, tea.Cmd) {
 	m.flushedHavePreviousKind = havePreviousKind
 	if m.altScreen {
 		bodyWidth := m.chatColumnWidth()
-		if m.flushed != oldFlushed || m.altScreenSettledWidth != bodyWidth || m.altScreenSettledFrontier != m.flushed {
+		// GAP-L: a verbosity switch changes the VISIBLE row set without
+		// moving the frontier, so the settled snapshot must rebuild even
+		// when frontier/width are unchanged.
+		if m.flushed != oldFlushed || m.altScreenSettledWidth != bodyWidth || m.altScreenSettledFrontier != m.flushed || m.narrationSettledGeneration != m.narrationVerbosityLevel {
+			m.narrationSettledGeneration = m.narrationVerbosityLevel
 			m.rebuildAltScreenSettledItems(bodyWidth)
 		}
 		return m, nil

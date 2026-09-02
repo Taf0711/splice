@@ -231,10 +231,13 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string, detailed bool
 	// the settled list directly. Keeping this fast path outside the closure-heavy
 	// builder also prevents the large model receiver from escaping to the heap.
 	// Drill-in views (file view, diff review) swap the body wholesale, so they
-	// must never hit the settled cache or the swap is invisible.
+	// must never hit the settled cache or the swap is invisible. A verbosity
+	// switch changes the visible row set without moving the frontier, so the
+	// settled generation must match too (GAP-L).
 	if m.altScreen && !detailed && !m.fileView.active && !m.diffView.active && !m.pending && m.pendingSpecReview == nil &&
 		m.flushedAny && m.flushed == len(m.transcript) &&
-		m.altScreenSettledWidth == width && m.altScreenSettledFrontier == m.flushed {
+		m.altScreenSettledWidth == width && m.altScreenSettledFrontier == m.flushed &&
+		m.narrationSettledGeneration == m.narrationVerbosityLevel {
 		return m.altScreenSettledItems
 	}
 	return m.buildTranscriptBodyItems(width, emptyOverlay, detailed)
@@ -313,6 +316,12 @@ func (m model) buildTranscriptBodyItems(width int, emptyOverlay string, detailed
 			// A welcome row carries no Lime visual (the empty state replaced it)
 			// and a resolved tool call collapses into its result's card.
 			if row.kind == rowWelcome || rc.skip(row) {
+				continue
+			}
+			// GAP-L: the narration verbosity is a pure projection over the
+			// recorded rows — quiet hides standalone tool-call rows and
+			// transient system chatter; the recording is untouched.
+			if !m.narrationVisibleRow(row) {
 				continue
 			}
 			if isSuccessfulExploreResult(row) {

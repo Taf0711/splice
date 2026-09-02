@@ -538,6 +538,16 @@ type model struct {
 	// surfaces (trajectory) render at render time from the latest runtime
 	// truth.
 	lastState presentation.State
+	// narrationVerbosity is the live transcript verbosity (GAP-L, DoD 41):
+	// quiet collapses tool activity, detailed (the default) shows everything.
+	// It changes only what is SHOWN — never what is recorded — so switching
+	// is live-safe and resume-safe. Ctrl+N cycles it. Initialized to
+	// verbosityDetailed in newModel (the zero value is quiet).
+	narrationVerbosityLevel narrationVerbosity
+	// narrationSettledGeneration tracks which verbosity the settled snapshot
+	// was built at, so a switch rebuilds it (the visible row set changed
+	// without the frontier moving).
+	narrationSettledGeneration narrationVerbosity
 	// pendingHandoff is the live handoff for the most recently exited lane
 	// (GAP-F): the [M] merge-back and [X] discard keys act on it. Nil when
 	// no handoff is offered or it was resolved.
@@ -1024,6 +1034,9 @@ func newModel(ctx context.Context, options Options) model {
 		applyTheme(m.themeMode, true)
 	}
 	m.reducedMotion = defaultReducedMotion()
+	// GAP-L: the default verbosity is detailed (the zero value is quiet, so
+	// it must be set explicitly at construction).
+	m.narrationVerbosityLevel = verbosityDetailed
 	// The streaming-text fade (a lime→ink glow on freshly streamed lines) is
 	// disabled: it read as a distracting glow rather than a subtle liveness cue.
 	// Streaming text always renders statically at base ink (the disabled path in
@@ -1456,6 +1469,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleCtrlC()
 		case m.keyMatch(m.keyBindings.toggleDetailed, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'o') }):
 			return m.toggleDetailedTranscript(), nil
+		case keyCtrl(msg, 'n') && !m.transcriptDetailed:
+			// GAP-L (DoD 41): cycle the live narration verbosity. A pure
+			// projection change: nothing recorded is dropped, and the height
+			// cache must re-measure because the visible row set changed.
+			m.narrationVerbosityLevel = m.narrationVerbosityLevel.next()
+			m.altScreenSettledWidth = 0
+			return m, nil
 		case m.fileView.active && m.noBlockingModal() && m.composerValue() == "" && (keyText(msg) == "d" || keyText(msg) == "f"):
 			// Mode toggle for the file drill-in, only while the composer is empty
 			// (so mid-sentence typing is never hijacked) and no modal is up (so a

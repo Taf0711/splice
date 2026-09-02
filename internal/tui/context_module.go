@@ -122,7 +122,12 @@ func contextRegistry() []contextModule {
 				return len(m.sidebarActivityLines(80, maxSidebarActivityLines)) > 0
 			},
 			render: func(m model, width int) []string {
-				return m.sidebarActivityLines(width, maxSidebarActivityLines)
+				activity := m.sidebarActivityLines(width, maxSidebarActivityLines)
+				if len(activity) == 0 {
+					return nil
+				}
+				lines := []string{sidebarHeader("ACTIVITY", width)}
+				return append(lines, activity...)
 			},
 		},
 	}

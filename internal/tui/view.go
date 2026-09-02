@@ -216,6 +216,11 @@ func (m model) statusLine(width int) string {
 	// rule; the persistent footer is where users look for "will it run commands?".
 	modeText, modeStyle := m.modeLabel()
 	left := prefix + zeroTheme.accent.Render("●") + " " + modeStyle.Render(modeText)
+	// GAP-L: the narration verbosity segment appears only when non-default
+	// (detailed shows nothing — no noise for the common case).
+	if seg := m.narrationVerbosityLevel.label(); seg != "" {
+		left += zeroTheme.faint.Render(" " + seg)
+	}
 	// During execution the permission mode demotes to a muted suffix so the safety
 	// signal stays visible while commands may fire during test_runner.
 	if m.pending && !m.designMode {
@@ -271,9 +276,6 @@ func (m model) statusLine(width int) string {
 	}
 
 	rightGroups := []string{}
-	// Context-fill gauge: surface it down to the narrow tier (where it matters
-	// most), but skip it when the context sidebar is already showing the % so the
-	// figure isn't duplicated.
 	gaugeShown := false
 	if tier >= tierNarrow && !m.sidebarActive() {
 		if gauge := m.contextWindowSegment(); gauge != "" {
