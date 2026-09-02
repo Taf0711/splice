@@ -40,6 +40,10 @@ func (m model) resetRunInteractionState() model {
 	if m.fileView.active {
 		m = m.exitFileView()
 	}
+	// The detail pane shows the previous run's evidence projection.
+	if m.detailView.active {
+		m = m.exitDetailView()
+	}
 	// The worktree bound to the previous run. unlockPreparedWorktree is NOT
 	// called here: the review/cancel paths already own worktree cleanup, and
 	// a session switch must not unlock a worktree a live run may still hold.

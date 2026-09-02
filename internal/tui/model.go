@@ -309,6 +309,10 @@ type model struct {
 	// active the chat column's body shows the file's diff/content instead of the
 	// transcript, mirroring the subchat drill-in.
 	fileView fileViewState
+	// detailView is the Ctrl+O detail/evidence pane (GAP-G rest, §17): while
+	// active the chat column's body shows the run's evidence projection
+	// (evidence groups, interventions, receipt) re-read from lastState.
+	detailView detailViewState
 	// Git-sweep state (files_git_sweep.go): the startup snapshot of already-dirty
 	// paths (nil until Init's sweep answers), the newly dirty files discovered by
 	// live sweeps (bash/subagent mutations that carry no changedFiles), the
@@ -1483,6 +1487,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleCtrlC()
 		case m.keyMatch(m.keyBindings.toggleDetailed, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'o') }):
 			return m.toggleDetailedTranscript(), nil
+		case keyCtrl(msg, 'g'):
+			// GAP-G rest (§17): the detail/evidence pane toggle. Ctrl+O stays
+			// the detailed-transcript toggle (its pinned contract and tests);
+			// the pane gets its own chord.
+			return m.toggleDetailView(), nil
 		case m.keyMatch(m.keyBindings.toggleNarration, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'n') }) && !m.transcriptDetailed:
 			// GAP-L (DoD 41): cycle the live narration verbosity. A pure
 			// projection change: nothing recorded is dropped, and the height
@@ -1530,6 +1539,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// silently close the drill-in behind it.
 			if m.fileView.active && m.noBlockingModal() {
 				return m.exitFileView(), nil
+			}
+			// Detail pane exits on Esc (same drill-in contract).
+			if m.detailView.active && m.noBlockingModal() {
+				return m.exitDetailView(), nil
 			}
 			if m.mcpCommandCancel != nil {
 				m.cancelMCPCommand()
@@ -3246,6 +3259,10 @@ func (m model) pinnedTitleBar(width int) string {
 	// bar carries the run/base header and the review keys.
 	if m.diffView.active {
 		return m.diffViewNavBar(width)
+	}
+	// The detail pane (GAP-G rest, Ctrl+O) uses the same one-line swap.
+	if m.detailView.active {
+		return m.detailViewNavBar(width)
 	}
 	return m.titleBar(width)
 }

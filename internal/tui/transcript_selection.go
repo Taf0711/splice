@@ -234,7 +234,7 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string, detailed bool
 	// must never hit the settled cache or the swap is invisible. A verbosity
 	// switch changes the visible row set without moving the frontier, so the
 	// settled generation must match too (GAP-L).
-	if m.altScreen && !detailed && !m.fileView.active && !m.diffView.active && !m.pending && m.pendingSpecReview == nil &&
+	if m.altScreen && !detailed && !m.fileView.active && !m.diffView.active && !m.detailView.active && !m.pending && m.pendingSpecReview == nil &&
 		m.flushedAny && m.flushed == len(m.transcript) &&
 		m.altScreenSettledWidth == width && m.altScreenSettledFrontier == m.flushed &&
 		m.narrationSettledGeneration == m.narrationVerbosityLevel {
@@ -254,6 +254,11 @@ func (m model) buildTranscriptBodyItems(width int, emptyOverlay string, detailed
 	// Same single-source swap point, so the viewport and hit-tests agree.
 	if m.diffView.active {
 		return []transcriptBodyItem{transcriptBlockBodyItem(transcriptBodyItemRow, -1, m.renderDiffReview(width))}
+	}
+	// Detail pane (GAP-G rest, Ctrl+O): the chat column's body swaps to the
+	// run's evidence projection. Same single-source swap point.
+	if m.detailView.active {
+		return m.detailViewBodyItems(width)
 	}
 	items := []transcriptBodyItem{}
 	// Transcript ROWS render at the full chat width; row/status glyphs provide
