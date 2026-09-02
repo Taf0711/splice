@@ -2434,6 +2434,23 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for _, row := range sessionRows {
 			m.transcript = appendTranscriptRow(m.transcript, row)
 		}
+		// GAP-L DoD 46: a design turn that pinned decisions refreshes the
+		// ledger card in the live transcript. The ledger re-projects whole
+		// from the reconstructed state (append-only, revised markers kept),
+		// replacing the previous ledger card so the transcript carries the
+		// current ledger, not a stack of stale ones.
+		if msg.err == nil && len(msg.sessionEvents) > 0 {
+			hasPins := false
+			for _, event := range msg.sessionEvents {
+				if event.Type == sessions.EventDecisionPinned {
+					hasPins = true
+					break
+				}
+			}
+			if hasPins {
+				m = m.refreshDecisionsLedgerCard()
+			}
+		}
 		for _, row := range msg.rows {
 			if row.kind == rowReasoning {
 				m.streamingReasoning = ""

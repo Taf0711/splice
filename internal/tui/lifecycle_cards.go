@@ -7,7 +7,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/Taf0711/splice/internal/presentation"
-	"github.com/Taf0711/splice/internal/splice"
+	splicerun "github.com/Taf0711/splice/internal/splice"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
@@ -21,8 +21,9 @@ import (
 // cards. The tags let the renderer route them to the card renderers while
 // /export strips them (same NUL-tag pattern as plan-card rows).
 const (
-	critiqueCardMarker = "\x00critique-card\x00"
-	planCardMarker     = "\x00impl-plan-card\x00"
+	critiqueCardMarker  = "\x00critique-card\x00"
+	planCardMarker      = "\x00impl-plan-card\x00"
+	decisionsCardMarker = "\x00decisions-card\x00"
 )
 
 // planCardTranscriptText renders the implementation-plan card at a reference
@@ -38,6 +39,56 @@ func critiqueCardTranscriptText(plan schemas.DesignPlan, critique schemas.PlanCr
 	return critiqueCardMarker + renderCritiqueCard(plan, critique, 100)
 }
 
+// decisionsCardTranscriptText renders the pinned-decisions ledger card
+// tagged for the system-row path (§7.1, GAP-L DoD 46): decision anchors
+// survive resume through decision_pinned session events, and the rehydrate
+// path re-projects the whole ledger from the reconstructed state. Empty
+// decisions render no card — a ledger section with nothing in it is noise.
+func decisionsCardTranscriptText(decisions []splicerun.DecisionPinnedPayload) string {
+	if len(decisions) == 0 {
+		return ""
+	}
+	return decisionsCardMarker + renderDecisionsCard(decisions, 100)
+}
+
+// refreshDecisionsLedgerCard replaces the transcript's current decisions
+// ledger card with a fresh projection of the reconstructed ledger. The
+// ledger is append-only runtime data (§7.1): each refresh re-renders the
+// WHOLE ledger — settled count, [+]' rows, [~] REVISED markers — so the
+// transcript's latest card always matches the event log. When the ledger
+// reconstructs empty (no pins yet, or the session predates the feature) no
+// card is written.
+func (m model) refreshDecisionsLedgerCard() model {
+	state, err := splicerun.ReconstructDesignState(m.sessionEvents)
+	if err != nil {
+		// Malformed pins fail closed upstream (G2); the renderer just skips.
+		return m
+	}
+	card := decisionsCardTranscriptText(state.Decisions)
+	if card == "" {
+		return m
+	}
+	// Drop any previous ledger card: it is a projection of the same
+	// append-only data at an earlier point, and a stack of them would lie
+	// about which ledger is current. Checkpoints and rewind are unaffected
+	// (they snapshot the whole transcript, not the card).
+	for i := len(m.transcript) - 1; i >= 0; i-- {
+		row := m.transcript[i]
+		if row.kind == rowSystem && strings.HasPrefix(row.text, decisionsCardMarker) {
+			m.transcript = append(m.transcript[:i], m.transcript[i+1:]...)
+			// The replaced row was below the flush frontier only if already
+			// settled; keep the frontier honest by shrinking it when the
+			// removed row was settled.
+			if i < m.flushed {
+				m.flushed--
+			}
+			break
+		}
+	}
+	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, text: card})
+	return m
+}
+
 // parseLifecycleCardPayload detects a tagged P4 card row and returns its
 // width-aware render function. The stored card body was produced at a
 // reference width; re-splitting its lines through styledBlock reflows the
@@ -51,6 +102,9 @@ func parseLifecycleCardPayload(text string) (func(int) string, bool) {
 	case strings.HasPrefix(text, critiqueCardMarker):
 		body := strip(critiqueCardMarker)
 		return func(width int) string { return styledBlock(width, viewLines(body), zeroTheme.cardErr) }, true
+	case strings.HasPrefix(text, decisionsCardMarker):
+		body := strip(decisionsCardMarker)
+		return func(width int) string { return styledBlock(width, viewLines(body), zeroTheme.cardRun) }, true
 	}
 	return nil, false
 }
@@ -233,7 +287,7 @@ func renderCrystallizingCard(settled, scope bool, drafting bool, taskCount int, 
 // Decisions are first-class runtime data projected from
 // DesignState.Decisions. A revised decision renders with the revision
 // marker; history is never silently rewritten.
-func renderDecisionsCard(decisions []splice.DecisionPinnedPayload, width int) string {
+func renderDecisionsCard(decisions []splicerun.DecisionPinnedPayload, width int) string {
 	if width <= 0 {
 		return ""
 	}

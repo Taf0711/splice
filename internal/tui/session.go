@@ -790,6 +790,16 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 			if parentID != "" {
 				rows = append(rows, transcriptRow{kind: rowSystem, text: "forked from session: " + parentID})
 			}
+		case sessions.EventDecisionPinned:
+			// GAP-L DoD 46: the pinned-decisions ledger survives resume. The
+			// raw events carry each pin; the WHOLE ledger re-projects from the
+			// reconstructed state (append-only, revised decisions keep their
+			// predecessor visible) as one card instead of one row per event.
+			if state, stateErr := splicerun.ReconstructDesignState(events); stateErr == nil && len(state.Decisions) > 0 {
+				if card := decisionsCardTranscriptText(state.Decisions); card != "" {
+					rows = append(rows, transcriptRow{kind: rowSystem, text: card})
+				}
+			}
 		case sessions.EventSpecialistStart:
 			info := specialistInfoFromPayload(payload)
 			if info != nil {
