@@ -175,6 +175,9 @@ type KeyBindingsConfig struct {
 	TogglePlan KeyBindingDef `json:"togglePlan,omitempty"`
 	// ToggleSidebar toggles the right context sidebar (default: ctrl+b).
 	ToggleSidebar KeyBindingDef `json:"toggleSidebar,omitempty"`
+	// ToggleNarration cycles the transcript verbosity quiet/normal/detailed
+	// (default: ctrl+n).
+	ToggleNarration KeyBindingDef `json:"toggleNarration,omitempty"`
 }
 
 // LocalControlConfig controls local browser/desktop/terminal automation helpers.

@@ -1469,7 +1469,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleCtrlC()
 		case m.keyMatch(m.keyBindings.toggleDetailed, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'o') }):
 			return m.toggleDetailedTranscript(), nil
-		case keyCtrl(msg, 'n') && !m.transcriptDetailed:
+		case m.keyMatch(m.keyBindings.toggleNarration, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'n') }) && !m.transcriptDetailed:
 			// GAP-L (DoD 41): cycle the live narration verbosity. A pure
 			// projection change: nothing recorded is dropped, and the height
 			// cache must re-measure because the visible row set changed.
