@@ -105,7 +105,16 @@ func Admit(bundle *schemas.MemoryBundle, projectRoot string, nowUnix int64) Admi
 		// paid for rejected items.
 		obs.Content = truncateRunes(obs.Content, MaxObservationRunes)
 		cost := itemTokens(obs)
-		if len(admitted.Observations) >= MaxObservations || usedObsTokens+cost > ObservationTokenBudget {
+		// One bounded observation always fits: a 500-rune CJK note costs
+		// ~375 estimated tokens, which exceeds the 300-token budget. Without
+		// this floor the budget silently defeats the truncation bound and the
+		// most memory-heavy (often most important) note never reaches a stage.
+		// First-fit behavior below the floor is unchanged.
+		budget := ObservationTokenBudget
+		if len(admitted.Observations) == 0 && cost > budget {
+			budget = cost
+		}
+		if len(admitted.Observations) >= MaxObservations || usedObsTokens+cost > budget {
 			if len(admitted.Observations) >= MaxObservations {
 				result.Rejected.OverLimit++
 			} else {

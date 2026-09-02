@@ -41,6 +41,20 @@ type APIKeyGetter interface {
 	Get(provider string) (string, bool, error)
 }
 
+// KeyStoreOpener opens the credential store beside a user config directory and
+// reports the resolved backend name alongside the read surface, so callers (the
+// doctor stored-key check) can diagnose reachability without touching secrets.
+type KeyStoreOpener func(userConfigDir string) (APIKeyGetter, string, error)
+
+// ProviderKeyStoreOpener adapts ProviderKeyStoreAt to KeyStoreOpener.
+func ProviderKeyStoreOpener(userConfigDir string) (APIKeyGetter, string, error) {
+	store, err := ProviderKeyStoreAt(userConfigDir)
+	if err != nil {
+		return nil, "", err
+	}
+	return store, store.Backend(), nil
+}
+
 // APIKeySetter is the write surface of the credential store.
 type APIKeySetter interface {
 	Set(provider, key string) error

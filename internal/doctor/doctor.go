@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -40,6 +41,8 @@ type Report struct {
 	Checks      []Check `json:"checks"`
 }
 
+// Options injects a credential-store opener so the stored-key check is
+// deterministic in tests. Nil means config.ProviderKeyStoreAt on UserConfig.
 type Options struct {
 	Now            func() time.Time
 	Runtime        string
@@ -50,6 +53,10 @@ type Options struct {
 	Sandbox        config.SandboxConfig
 	Connectivity   bool
 	ProviderHealth *providerhealth.Result
+	// OpenKeyStore reads the credential store for the stored-key reachability
+	// check. Nil means config.ProviderKeyStoreAt(dir(UserConfig)). Tests inject
+	// a stub so the check never touches a real keychain.
+	OpenKeyStore func(userConfigDir string) (config.APIKeyGetter, string, error)
 	// GOOS overrides the platform used to resolve the sandbox backend. Empty
 	// means runtime.GOOS. Tests set it to assert platform-specific remedies.
 	GOOS string
@@ -76,6 +83,7 @@ func Run(options Options) Report {
 	checks = append(checks, connectivityCheck(options.Provider, options.Connectivity, modelCheck.Status, options.ProviderHealth))
 	checks = append(checks, sandboxBackendCheck(options.GOOS, options.LookupExecutable, options.WorkspaceRoot, options.Sandbox))
 	checks = append(checks, lspServersCheck(options.LookupExecutable))
+	checks = append(checks, storedKeyReachabilityCheck(options.Provider, options.UserConfig, options.OpenKeyStore))
 
 	report := Report{
 		GeneratedAt: now().UTC().Format(time.RFC3339),
@@ -167,6 +175,51 @@ func providerConfigCheck(profile config.ProviderProfile) Check {
 			details)
 	}
 	return check("provider.config", "Provider config", StatusPass, fmt.Sprintf("Provider config loaded for %s.", providerName(profile)), details)
+}
+
+// storedKeyReachabilityCheck turns the silent stored-key failure mode into a
+// loud diagnosis. A profile with APIKeyStored=true that resolves keyless means
+// the credential store was marked as holding a key but the read found none or
+// failed. That state previously surfaced only as "No API key configured" from
+// the provider.config check, which hides the real cause (for example a login
+// keychain that is not reachable because the process runs under a different
+// HOME). Never prints key material: the read result is presence only.
+func storedKeyReachabilityCheck(profile config.ProviderProfile, userConfig string, open config.KeyStoreOpener) Check {
+	if !profile.APIKeyStored || strings.TrimSpace(profile.APIKey) != "" || strings.TrimSpace(profile.AuthHeaderValue) != "" {
+		// No stored-key promise, or the key already resolved. Nothing to verify.
+		return check("provider.storedkey", "Stored key reachability", StatusPass,
+			"No stored-key check is needed for this provider profile.", nil)
+	}
+	if open == nil {
+		open = config.ProviderKeyStoreOpener
+	}
+	name := strings.TrimSpace(profile.Name)
+	dir := filepath.Dir(strings.TrimSpace(userConfig))
+	if name == "" || dir == "" {
+		return check("provider.storedkey", "Stored key reachability", StatusWarn,
+			"Cannot inspect the credential store: the provider name or user config path is unknown.",
+			map[string]any{"provider": name})
+	}
+	store, backend, err := open(dir)
+	if err != nil {
+		return check("provider.storedkey", "Stored key reachability", StatusWarn,
+			fmt.Sprintf("The credential store for %s could not be opened: %v. Stored-key auth cannot resolve until this is fixed.", name, err),
+			map[string]any{"provider": name, "backend": backend})
+	}
+	_, keyFound, err := store.Get(name)
+	if err != nil {
+		return check("provider.storedkey", "Stored key reachability", StatusWarn,
+			fmt.Sprintf("Reading the stored key for %s from the %s backend failed: %v. The profile is marked as stored-key auth, so runtime lookups will keep failing until the key is reachable or re-entered with `splice auth login`.", name, backend, err),
+			map[string]any{"provider": name, "backend": backend, "storedKeyMarked": true})
+	}
+	if !keyFound {
+		return check("provider.storedkey", "Stored key reachability", StatusWarn,
+			fmt.Sprintf("The profile for %s is marked for stored-key auth, but the %s backend holds no key for it. The key may live in a different user context (check HOME) or was removed. Run `splice auth login` to store it again.", name, backend),
+			map[string]any{"provider": name, "backend": backend, "storedKeyMarked": true, "keyFound": false})
+	}
+	return check("provider.storedkey", "Stored key reachability", StatusPass,
+		fmt.Sprintf("A stored key for %s is present in the %s backend.", name, backend),
+		map[string]any{"provider": name, "backend": backend, "keyFound": true})
 }
 
 // localProviderBaseURL reports whether the configured base_url is a loopback host

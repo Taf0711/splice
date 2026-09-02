@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -431,6 +432,94 @@ func TestProviderConfigCheckCredentialPresence(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestStoredKeyReachabilityCheck(t *testing.T) {
+	markedKeyless := config.ProviderProfile{Name: "main", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4.1", APIKeyStored: true}
+	openOK := func(getErr error, found bool) config.KeyStoreOpener {
+		return func(string) (config.APIKeyGetter, string, error) {
+			return fakeGetter{err: getErr, found: found}, "keyring", nil
+		}
+	}
+	cases := []struct {
+		name       string
+		profile    config.ProviderProfile
+		open       config.KeyStoreOpener
+		userConfig string
+		wantID     string
+		wantStatus Status
+		wantInMsg  string
+	}{
+		{
+			name:       "no stored-key promise skips the check",
+			profile:    config.ProviderProfile{Name: "main", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4.1"},
+			wantID:     "provider.storedkey",
+			wantStatus: StatusPass,
+		},
+		{
+			name:       "key already resolved skips the check",
+			profile:    config.ProviderProfile{Name: "main", APIKeyStored: true, APIKey: "sk-x"},
+			wantID:     "provider.storedkey",
+			wantStatus: StatusPass,
+		},
+		{
+			name:       "marked but backend empty warns with HOME hint",
+			profile:    markedKeyless,
+			open:       openOK(nil, false),
+			userConfig: "/tmp/u/config.json",
+			wantID:     "provider.storedkey",
+			wantStatus: StatusWarn,
+			wantInMsg:  "different user context (check HOME)",
+		},
+		{
+			name:       "backend read error warns with backend name",
+			profile:    markedKeyless,
+			open:       openOK(errors.New("keychain locked"), false),
+			userConfig: "/tmp/u/config.json",
+			wantID:     "provider.storedkey",
+			wantStatus: StatusWarn,
+			wantInMsg:  "keychain locked",
+		},
+		{
+			name:       "key present passes with backend named",
+			profile:    markedKeyless,
+			open:       openOK(nil, true),
+			userConfig: "/tmp/u/config.json",
+			wantID:     "provider.storedkey",
+			wantStatus: StatusPass,
+			wantInMsg:  "keyring",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := storedKeyReachabilityCheck(tc.profile, tc.userConfig, tc.open)
+			if got.ID != tc.wantID {
+				t.Fatalf("check id = %q, want %q", got.ID, tc.wantID)
+			}
+			if got.Status != tc.wantStatus {
+				t.Fatalf("status = %q, want %q (message: %s)", got.Status, tc.wantStatus, got.Message)
+			}
+			if tc.wantInMsg != "" && !strings.Contains(got.Message, tc.wantInMsg) {
+				t.Fatalf("message %q does not contain %q", got.Message, tc.wantInMsg)
+			}
+		})
+	}
+}
+
+// fakeGetter backs storedKeyReachabilityCheck tests; it never holds a real key.
+type fakeGetter struct {
+	err   error
+	found bool
+}
+
+func (f fakeGetter) Get(string) (string, bool, error) {
+	if f.err != nil {
+		return "", false, f.err
+	}
+	if f.found {
+		return "sk-test-only-presence", true, nil
+	}
+	return "", false, nil
 }
 
 func TestFormatDetailValueRendersMapForHumans(t *testing.T) {
