@@ -1,0 +1,11 @@
+{
+  "title": "Store errors map to HTTP via mapStoreError",
+  "content": "ERROR-HANDLING CONVENTION: store errors translate to HTTP status codes through ONE function, mapStoreError in main.go (404 ErrNotFound, 409 ErrConflict, 400 ErrInvalidID, 429 ErrUserAtCap, 500 default). Handlers never hand-code status numbers for store failures. New endpoints MUST call mapStoreError instead of adding inline status decisions.",
+  "owner_agent": "code_writer",
+  "memory_type": "convention",
+  "scope": "project",
+  "visibility": "shareable",
+  "topic_key": "file:internal/auth/session.go",
+  "anchor": "internal/auth/session.go",
+  "family_id": "fam-05-handler-error-mapping"
+}

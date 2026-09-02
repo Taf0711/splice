@@ -19,3 +19,13 @@ import (
 type TopicLookupStore interface {
 	LookupTopic(ctx context.Context, q schemas.MemoryTopicQuery) (schemas.MemoryBundle, error)
 }
+
+// RankedSearchStore is the OPTIONAL capability that enables the C1c miss-path
+// reranker: a MemoryStore whose backing store exposes FTS ranks with its
+// search results. It is deliberately separate from MemoryStore so existing
+// fakes and stores keep working unchanged; at runtime the pipeline type-
+// asserts p.Memory to this interface and falls back to plain Memory.Search
+// ordering when it is absent. *memd.Client satisfies it.
+type RankedSearchStore interface {
+	SearchRanked(ctx context.Context, q schemas.MemoryQuery) ([]schemas.MemoryRanked, bool, error)
+}

@@ -1,0 +1,11 @@
+{
+  "title": "Delete operations are idempotent by contract",
+  "content": "API CONVENTION: all Store delete operations (Delete, DeleteAllForUser, future bulk deletes) are IDEMPOTENT: deleting something already gone is a silent no-op returning zero/nil, never an error. Pinned by TestDeleteIdempotent in session_test.go. New delete-shaped APIs MUST follow this and add their own idempotence test.",
+  "owner_agent": "code_writer",
+  "memory_type": "convention",
+  "scope": "project",
+  "visibility": "shareable",
+  "topic_key": "file:internal/auth/session.go",
+  "anchor": "internal/auth/session.go",
+  "family_id": "fam-03-delete-idempotence"
+}

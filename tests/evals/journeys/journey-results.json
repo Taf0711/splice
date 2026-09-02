@@ -1,0 +1,32 @@
+{
+  "schema": "splice.eval.journey-results.v1",
+  "duration_seconds": 404,
+  "overall": "pass",
+  "journeys": [
+    {
+      "journey": "j1",
+      "status": "pass",
+      "detail": "J1 PASS"
+    },
+    {
+      "journey": "j2",
+      "status": "pass",
+      "detail": "J2 PASS"
+    },
+    {
+      "journey": "j3",
+      "status": "pass",
+      "detail": "J3 PASS"
+    },
+    {
+      "journey": "j4",
+      "status": "pass",
+      "detail": "J4 PASS"
+    },
+    {
+      "journey": "j5",
+      "status": "pass",
+      "detail": "J5 PASS"
+    }
+  ]
+}

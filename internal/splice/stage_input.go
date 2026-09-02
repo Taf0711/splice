@@ -241,7 +241,15 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 				p.Trace.recordMemoryLookup(input.StageName, p.Iteration, "direct", direct.fresh, direct.stale)
 			}
 		} else {
-			bundle, mErr := p.Memory.Search(ctx, newMemoryQuery(input.StageName, input.RequestIntent, root))
+			// C1c miss path: rerank candidates deterministically when the
+			// store exposes FTS ranks, then admit under the token budget.
+			// A store without the capability (or a ranked-search error,
+			// including an old sidecar) falls back to plain Search ordering
+			// byte-identically; Admit is order-agnostic.
+			bundle, missDetail, mErr := p.rerankedMissPath(ctx, input, root)
+			if p.Trace != nil {
+				p.Trace.recordMissPathDetail(input.StageName, p.Iteration, missDetail)
+			}
 			if mErr != nil {
 				emitProgress(p.Options, fmt.Sprintf("[%s] memory retrieval skipped: %v\n", input.StageName, mErr))
 				// A mid-run retrieval failure degrades the run's memory status to
@@ -251,15 +259,33 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 				}
 			} else {
 				bundle.RequestingAgent = input.StageName
-				// PC3: append kept-run exemplars. Best-effort and silent on
-				// failure; an empty exemplar set is correct, not a bug.
-				if querier, ok := p.Memory.(learn.TraceQuerier); ok && querier != nil {
-					if exemplars, eErr := retrieveExemplars(ctx, querier, root, input.RequestIntent); eErr == nil {
-						bundle.Exemplars = exemplars
-						if len(exemplars) > 0 {
-							emitProgress(p.Options, fmt.Sprintf("exemplars: %d from kept runs\n", len(exemplars)))
+				// C1c D4: the ablation mode governs which memory classes the
+				// miss path delivers. The default (both) reproduces today's
+				// behavior; other modes exist for the benchmark only.
+				mode, modeErr := resolveExemplarMode()
+				if modeErr != nil {
+					return schemas.HarnessStageInput{}, modeErr
+				}
+				if mode.deliverExemplars() {
+					// PC3: append kept-run exemplars. Best-effort and silent on
+					// failure; an empty exemplar set is correct, not a bug.
+					if querier, ok := p.Memory.(learn.TraceQuerier); ok && querier != nil {
+						if exemplars, eErr := retrieveExemplars(ctx, querier, root, input.RequestIntent); eErr == nil {
+							bundle.Exemplars = exemplars
+							if p.Trace != nil && len(exemplars) > 0 {
+								key := stageKey{input.StageName, p.Iteration}
+								meta := p.Trace.stages[key]
+								meta.ExemplarsRetrieved = len(exemplars)
+								p.Trace.stages[key] = meta
+							}
+							if len(exemplars) > 0 {
+								emitProgress(p.Options, fmt.Sprintf("exemplars: %d from kept runs\n", len(exemplars)))
+							}
 						}
 					}
+				}
+				if !mode.deliverObservations() {
+					bundle.Observations = nil
 				}
 				admitted := memoryreason.Admit(&bundle, root, p.NowUnix)
 				input.MemoryBundle = admitted.Bundle

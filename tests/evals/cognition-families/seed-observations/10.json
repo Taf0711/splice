@@ -1,0 +1,11 @@
+{
+  "title": "Session ids are validated at every boundary",
+  "content": "SECURITY CONSTRAINT: session ids are validated by ValidSessionID (2..64 chars, ASCII letters/digits/hyphens) at EVERY handler boundary, and the store's Get returns ErrInvalidID for invalid ids. Established on /session. New lookup paths (admin variants etc.) MUST reuse ValidSessionID and ErrInvalidID; hand-rolled validation or skipped checks are a security review blocker.",
+  "owner_agent": "code_writer",
+  "memory_type": "security",
+  "scope": "project",
+  "visibility": "shareable",
+  "topic_key": "file:internal/auth/session.go",
+  "anchor": "internal/auth/session.go",
+  "family_id": "fam-10-id-validation-rule"
+}

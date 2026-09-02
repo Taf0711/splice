@@ -55,6 +55,7 @@ func newServer(store *store.Store, socketPath string) *server {
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/upsert", s.handleUpsert)
 	mux.HandleFunc("/search", s.handleSearch)
+	mux.HandleFunc("/search_ranked", s.handleSearchRanked)
 	mux.HandleFunc("/lookup_topic", s.handleLookupTopic)
 	mux.HandleFunc("/recent", s.handleRecent)
 	mux.HandleFunc("/mark_reviewed", s.handleMarkReviewed)
@@ -239,6 +240,73 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":           true,
 		"observations": protocol,
+		"truncated":    truncated,
+	})
+}
+
+// handleSearchRanked serves /search_ranked: the /search contract plus a
+// per-observation BM25 rank. The wire shape keeps observations and ranks in
+// one array of pairs so a client can never desynchronize the two lists.
+func (s *server) handleSearchRanked(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var req searchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "validation: "+err.Error())
+		return
+	}
+
+	if req.Limit <= 0 {
+		req.Limit = 8
+	}
+	includePrivate := true
+	if req.IncludePrivate != nil {
+		includePrivate = *req.IncludePrivate
+	}
+	includeShareable := true
+	if req.IncludeShareable != nil {
+		includeShareable = *req.IncludeShareable
+	}
+
+	q := &store.Query{
+		ProjectPath:      req.ProjectPath,
+		RequestingAgent:  req.RequestingAgent,
+		QueryText:        req.Query,
+		Scopes:           req.Scopes,
+		IncludePrivate:   includePrivate,
+		IncludeShareable: includeShareable,
+		MemoryTypes:      req.MemoryTypes,
+		Limit:            req.Limit,
+	}
+	results, truncated, ranks, err := s.store.SearchRanked(r.Context(), q)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Non-nil so splice hits marshal as [] rather than null (the Python client
+	// iterates the field directly).
+	ranked := make([]RankedObservation, 0, len(results))
+	for i, obs := range results {
+		rank := 0.0
+		if i < len(ranks) {
+			rank = ranks[i]
+		}
+		ranked = append(ranked, RankedObservation{
+			Observation: toProtocol(obs),
+			Rank:        rank,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":           true,
+		"observations": ranked,
 		"truncated":    truncated,
 	})
 }

@@ -226,6 +226,32 @@ func (tr *runTraceAccumulator) recordMemoryLookup(stage string, iteration int, m
 	tr.stages[key] = meta
 }
 
+// recordMissPathDetail records the C1c miss-path telemetry for one stage
+// invocation: the number of derived cognition keys, how many topic lookups
+// missed, whether the ranked search fell back to plain Search, and how many
+// exemplars the retrieval produced before admission. Counts only; no key
+// text, path, or content lands in the trace.
+func (tr *runTraceAccumulator) recordMissPathDetail(stage string, iteration int, detail MissPathDetail) {
+	if tr == nil {
+		return
+	}
+	key := stageKey{stage, iteration}
+	meta := tr.stages[key]
+	meta.KeysGenerated = detail.KeysGenerated
+	meta.LookupMisses = detail.LookupMisses
+	meta.FTSFallback = detail.FallbackToPlainSearch
+	meta.ExemplarsRetrieved = detail.ExemplarsRetrieved
+	tr.stages[key] = meta
+}
+
+// MissPathDetail is the miss-path telemetry payload for recordMissPathDetail.
+type MissPathDetail struct {
+	KeysGenerated         int
+	LookupMisses          int
+	FallbackToPlainSearch int
+	ExemplarsRetrieved    int
+}
+
 // recordInteraction appends a repair-loop interaction record so the trace
 // carries the message lifecycle, not just the TUI events.
 func (tr *runTraceAccumulator) recordInteraction(rec schemas.InteractionRecord) {

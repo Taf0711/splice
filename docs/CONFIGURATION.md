@@ -128,6 +128,29 @@ export SPLICE_MEMD_DB=/path/to/mem.db
 
 Memory access is fail-soft. A sidecar error does not replace the pipeline result.
 
+## Data directories
+
+Splice stores per-user data under the XDG base directories. The variables are
+read at startup. Create the directories if you pre-seed them.
+
+| Data | Location |
+|---|---|
+| Sessions, cron jobs, skills, hooks, memory socket | `$XDG_DATA_HOME/splice/...`, or `~/.local/share/splice/...` |
+| Worktree state | `$XDG_STATE_HOME/splice/...`, or `~/.local/state/splice/...` |
+| Config, trust decisions | `$XDG_CONFIG_HOME/splice/...`, or `~/.config/splice/...` |
+
+Session history lives under `XDG_DATA_HOME`. Set `XDG_DATA_HOME` (not
+`XDG_STATE_HOME`) when you test with an empty session store. Set both
+variables for a full sandbox.
+
+A tool override does not relocate data. `SPLICE_MEMD_DB` moves the memory
+database only.
+
+On macOS the API keys in the system keyring follow the login keychain, which
+resolves under the real home directory. A test process that overrides `HOME`
+cannot read stored keys. Override `XDG_*` variables instead, or run
+`splice auth login` inside the sandbox.
+
 ## Display and notifications
 
 Common display controls:

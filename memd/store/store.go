@@ -470,11 +470,20 @@ func (s *Store) LookupTopic(ctx context.Context, projectPath, requestingAgent, s
 // Returns (observations, truncated, error) where truncated is true if the
 // result set was capped by the limit.
 func (s *Store) Search(ctx context.Context, q *Query) ([]*Observation, bool, error) {
+	obs, truncated, _, err := s.SearchRanked(ctx, q)
+	return obs, truncated, err
+}
+
+// SearchRanked is Search plus the FTS BM25 rank per result (negative; more
+// negative = more relevant). ranks[i] corresponds to observations[i]. The
+// rank lets the orchestrator rerank candidates deterministically (report
+// section 28) without re-deriving BM25.
+func (s *Store) SearchRanked(ctx context.Context, q *Query) ([]*Observation, bool, []float64, error) {
 	if q.QueryText == "" || len(q.Scopes) == 0 {
-		return nil, false, nil
+		return nil, false, nil, nil
 	}
 	if !q.IncludePrivate && !q.IncludeShareable {
-		return nil, false, nil
+		return nil, false, nil, nil
 	}
 	limit := q.Limit
 	if limit <= 0 {
@@ -483,7 +492,7 @@ func (s *Store) Search(ctx context.Context, q *Query) ([]*Observation, bool, err
 
 	ftsQ := sanitizeFTSQuery(q.QueryText)
 	if ftsQ == "" {
-		return nil, false, nil
+		return nil, false, nil, nil
 	}
 	args := []any{ftsQ}
 	scopeClause, memTypeClause, projectClause, visClause := buildFilterClauses(q, &args)
@@ -499,7 +508,7 @@ func (s *Store) Search(ctx context.Context, q *Query) ([]*Observation, bool, err
 		       o.memory_type, o.title, o.content, o.topic_key, o.normalized_hash,
 		       o.source_run_id, o.source_stage, o.source_branch, o.source_commit,
 		       o.pinned, o.confidence, o.revision_count, o.duplicate_count,
-		       o.review_after, o.created_at, o.updated_at, o.deleted_at
+		       o.review_after, o.created_at, o.updated_at, o.deleted_at, fts.rank
 		FROM observations AS o
 		JOIN (
 			SELECT rowid, rank
@@ -515,27 +524,30 @@ func (s *Store) Search(ctx context.Context, q *Query) ([]*Observation, bool, err
 		LIMIT ?
 	`, scopeClause, memTypeClause, projectClause, visClause), args...)
 	if err != nil {
-		return nil, false, fmt.Errorf("search: query: %w", err)
+		return nil, false, nil, fmt.Errorf("search: query: %w", err)
 	}
 	defer rows.Close()
 
 	var results []*Observation
+	var ranks []float64
 	for rows.Next() {
-		obs, err := scanObs(rows)
+		obs, rank, err := scanObsRanked(rows)
 		if err != nil {
-			return nil, false, fmt.Errorf("search: scan: %w", err)
+			return nil, false, nil, fmt.Errorf("search: scan: %w", err)
 		}
 		results = append(results, obs)
+		ranks = append(ranks, rank)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, false, err
+		return nil, false, nil, err
 	}
 	// Truncated if we got limit+1 rows (the extra row indicates more results).
 	truncated := len(results) > limit
 	if truncated {
 		results = results[:limit]
+		ranks = ranks[:limit]
 	}
-	return results, truncated, nil
+	return results, truncated, ranks, nil
 }
 
 // Recent returns the most recently updated observations matching q's filters.
@@ -668,7 +680,7 @@ type scanner interface {
 }
 
 // scanObs scans one observation row in the fixed column order used by byID and
-// Search. pinned is stored as INTEGER (0/1); we convert to bool here.
+// Search/Recent: 22 columns (pinned stored as INTEGER, converted to bool).
 func scanObs(sc scanner) (*Observation, error) {
 	var obs Observation
 	var pinned int64
@@ -684,6 +696,28 @@ func scanObs(sc scanner) (*Observation, error) {
 	}
 	obs.Pinned = pinned != 0
 	return &obs, nil
+}
+
+// scanObsRanked scans an observation row that carries ONE extra trailing
+// column (the FTS rank) beyond the fixed 22. Rows.Scan consumes every column
+// in a single call, so the extra destination must ride in the same Scan.
+func scanObsRanked(sc scanner) (*Observation, float64, error) {
+	var obs Observation
+	var pinned int64
+	var rank float64
+	err := sc.Scan(
+		&obs.ID, &obs.ProjectPath, &obs.Scope, &obs.OwnerAgent, &obs.Visibility,
+		&obs.MemoryType, &obs.Title, &obs.Content, &obs.TopicKey, &obs.NormalizedHash,
+		&obs.SourceRunID, &obs.SourceStage, &obs.SourceBranch, &obs.SourceCommit,
+		&pinned, &obs.Confidence, &obs.RevisionCount, &obs.DuplicateCount,
+		&obs.ReviewAfter, &obs.CreatedAt, &obs.UpdatedAt, &obs.DeletedAt,
+		&rank,
+	)
+	if err != nil {
+		return nil, 0, err
+	}
+	obs.Pinned = pinned != 0
+	return &obs, rank, nil
 }
 
 // normalizeHash computes a content fingerprint for exact-dup detection. Lower-

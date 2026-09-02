@@ -1,0 +1,11 @@
+{
+  "title": "go.mod toolchain line is pinned and aligned with CI",
+  "content": "DEPENDENCY CONVENTION: go.mod carries the explicit go version line (1.26) and a .go-version file mirrors it for tooling. Any go.mod edit must keep the toolchain pinned to the CI version; platform-specific files (//go:build tags) must not change the toolchain line.",
+  "owner_agent": "code_writer",
+  "memory_type": "convention",
+  "scope": "project",
+  "visibility": "shareable",
+  "topic_key": "file:go.mod",
+  "anchor": "go.mod",
+  "family_id": "fam-08-toolchain-pin"
+}
