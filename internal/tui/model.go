@@ -3128,7 +3128,15 @@ func (m model) transcriptView() string {
 	// not pinned at the top. It appears above the specialist cards like a
 	// chat message, the way todo/plan updates render inline.
 	if m.altScreen && m.height > 0 {
-		return m.scrollableTranscriptItemsView(m.normalTranscriptHeader(width), bodyItems, footer, width, overlayForViewport)
+		// GAP-K slice 2 (owner Tension-3 call): the in-flow evidence band.
+		// During a run, on a wide single-column frame, execution evidence
+		// renders in the transcript flow above the scrolling body — the
+		// header carries it so it stays pinned while the transcript scrolls.
+		header := m.normalTranscriptHeader(width)
+		if band := m.evidenceBandBlock(width); band != "" {
+			header = header + "\n" + band
+		}
+		return m.scrollableTranscriptItemsView(header, bodyItems, footer, width, overlayForViewport)
 	}
 
 	bodyLayout := layoutTranscriptBodyItems(bodyItems)
