@@ -111,6 +111,12 @@ func (m model) handleMCPAddWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	if m.mcpAddWizard == nil {
 		return m, nil
 	}
+	// GAP-H: the confirm step is the STAGED ADD card; its keys ([A]pply,
+	// [D] add disabled, [X] discard, [E] edit command) dispatch before the
+	// wizard's generic typing path so letters never fall through to inputs.
+	if handled, next, cmd := m.handleStagedAddKey(msg); handled {
+		return next, cmd
+	}
 	wizard := m.mcpAddWizard
 	switch {
 	case keyIs(msg, tea.KeyEsc):

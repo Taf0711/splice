@@ -320,7 +320,7 @@ func TestMCPManagerDeleteEditsSearchQuery(t *testing.T) {
 	}
 }
 
-func TestMCPManagerMarketplaceSelectionPrefillsInstallCommand(t *testing.T) {
+func TestMCPManagerMarketplaceSelectionOpensStagedAdd(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.input.SetValue("/mcp")
 
@@ -331,13 +331,23 @@ func TestMCPManagerMarketplaceSelectionPrefillsInstallCommand(t *testing.T) {
 	updated, cmd := next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if cmd != nil {
-		t.Fatal("expected marketplace selection to prefill synchronously")
+		t.Fatal("expected marketplace selection to open the staged wizard synchronously")
 	}
 	if next.mcpManager != nil {
 		t.Fatal("expected marketplace install selection to close manager")
 	}
-	if got, want := next.input.Value(), "/mcp add context7 --url https://mcp.context7.com/mcp"; got != want {
-		t.Fatalf("composer = %q, want %q", got, want)
+	// GAP-H (frame VCeGi): the selection must NOT dump a command into the
+	// composer; it opens the add wizard on the ENDPOINT step with the entry
+	// prefilled (remote URL is still confirmed by the user), then the
+	// staged-add card.
+	if got := next.input.Value(); got != "" {
+		t.Fatalf("composer = %q, want empty (no command dumping)", got)
+	}
+	if next.mcpAddWizard == nil || next.mcpAddWizard.step != mcpAddWizardStepEndpoint {
+		t.Fatalf("expected add wizard on endpoint step, got %+v", next.mcpAddWizard)
+	}
+	if next.mcpAddWizard.serverName != "context7" || next.mcpAddWizard.endpoint != "https://mcp.context7.com/mcp" {
+		t.Fatalf("wizard not prefilled from the marketplace entry: %+v", next.mcpAddWizard)
 	}
 }
 
@@ -663,6 +673,7 @@ func TestMCPAddWizardOpenCancelsStaleManagerResult(t *testing.T) {
 }
 
 func TestMCPAddWizardConfirmRedactsSensitiveSourceAndEndpoint(t *testing.T) {
+	m := newModel(context.Background(), Options{})
 	wizard := newMCPAddWizard("http")
 	wizard.step = mcpAddWizardStepConfirm
 	wizard.serverName = "remote"
@@ -672,7 +683,7 @@ func TestMCPAddWizardConfirmRedactsSensitiveSourceAndEndpoint(t *testing.T) {
 	wizard.sourceURL = "https://docs.example/setup?api_key=docs-secret"
 	wizard.headerKey = "Authorization"
 
-	got := plainRender(t, wizard.render(120))
+	got := plainRender(t, wizard.render(m, 120))
 	for _, leaked := range []string{"user:password", "endpoint-secret", "fragment-secret", "docs-secret"} {
 		if strings.Contains(got, leaked) {
 			t.Fatalf("wizard confirm leaked %q in:\n%s", leaked, got)
