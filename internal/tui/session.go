@@ -654,6 +654,9 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 	// disambiguation the live runner applies — without it, dedup would drop
 	// every tool card after the first occurrence of an id.
 	callSeq := map[string]int{}
+	// GAP-L DoD 43/45: reasoning block ids rebuild across resume. Legacy
+	// payloads (pre-seq) count ordinally; new payloads pin the exact seq.
+	reasoningSeq := 0
 	// Pre-pass: collect the tool-call ids of Task delegations that actually started
 	// a specialist (each renders as a card below). Only those Task tool-call/result
 	// rows are redundant and skipped; a Task that failed before a specialist started
@@ -701,8 +704,17 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 		case sessions.EventReasoning:
 			// Rehydrate reasoning as a collapsed row so thinking survives /resume.
 			// The row shape matches the live path (reasoningTranscriptRow).
+			// The persisted seq rebuilds the same stable block id the live path
+			// minted (reasoning_N, DoD 43/45); legacy payloads without a seq fall
+			// back to ordinal counting over this event stream.
 			if content := payloadString(payload, "content"); content != "" {
-				if row, ok := reasoningTranscriptRow("", 0, content); ok {
+				reasoningSeq++
+				id := fmt.Sprintf("reasoning_%d", reasoningSeq)
+				if raw, ok := payloadInt(payload, "seq"); ok && raw > 0 {
+					id = fmt.Sprintf("reasoning_%d", raw)
+					reasoningSeq = raw
+				}
+				if row, ok := reasoningTranscriptRow(id, 0, content); ok {
 					rows = append(rows, row)
 				}
 			}
