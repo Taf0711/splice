@@ -321,7 +321,7 @@ func TestDiffViewNavBarCarriesPosition(t *testing.T) {
 
 func TestDiffViewHintBarDropsWholeSegments(t *testing.T) {
 	full := diffViewHintBar(120)
-	for _, want := range []string{"n next file", "a approve", "j reject hunk", "o open", "↑↓ scroll", "esc close"} {
+	for _, want := range []string{"^e copy hunk", "n next file", "a approve", "j reject hunk", "o open", "↑↓ scroll", "esc close"} {
 		if !strings.Contains(full, want) {
 			t.Errorf("full hint bar missing %q: %q", want, full)
 		}
@@ -353,4 +353,141 @@ func TestDiffViewHintBarInRender(t *testing.T) {
 	if !strings.Contains(out, "esc close") {
 		t.Errorf("render missing the hint bar: %q", out[len(out)-200:])
 	}
+}
+
+// GAP-G rest (Ctrl+E, OSC52): the copy action targets the hunk under the
+// window top. diffHunks' zeroth entry can hold pre-@@ preamble text — that
+// is NOT a hunk, and copying it would be a lie about what got copied.
+func TestDiffHunkAtWindowTargetsHunkUnderTop(t *testing.T) {
+	m := newDesignModeTestModel(t.TempDir(), &fakeProvider{}, nil)
+	m.diffView = diffViewState{active: true, wt: diffTestWorktree(), text: diffReviewTestDiff, files: diffFileStats(diffReviewTestDiff)}
+
+	// Top at 0 sits on the first file's preamble (diff/index/---/+++ lines
+	// before the first @@): not a hunk, nothing copyable yet.
+	hunk, ok := m.diffHunkAtWindow()
+	if ok {
+		t.Fatalf("preamble position must not report a hunk, got %q", hunk)
+	}
+
+	// Scroll to the first @@ line: the whole first hunk is the target.
+	hunks := diffHunks(diffReviewTestDiff)
+	if !strings.HasPrefix(hunks[0], "diff --git") {
+		t.Fatalf("fixture shape changed: first chunk is %q", firstLine(hunks[0]))
+	}
+	// Find the first @@ offset in the joined body.
+	body := strings.Join(hunks, "\n")
+	lines := strings.Split(body, "\n")
+	at := -1
+	for i, l := range lines {
+		if strings.HasPrefix(l, "@@ ") {
+			at = i
+			break
+		}
+	}
+	m.diffView.hunkTop = at
+	hunk, ok = m.diffHunkAtWindow()
+	if !ok {
+		t.Fatal("top on the first @@ must report the hunk")
+	}
+	if !strings.HasPrefix(hunk, "@@ ") || !strings.Contains(hunk, "func (c *Client) Do") {
+		t.Fatalf("wrong hunk copied: %q", firstLine(hunk))
+	}
+
+	// A mid-hunk top selects the same hunk, not a truncated slice.
+	m.diffView.hunkTop = at + 2
+	hunk2, ok := m.diffHunkAtWindow()
+	if !ok || hunk2 != hunk {
+		t.Fatalf("mid-hunk top changed the copy target: ok=%v", ok)
+	}
+
+	// Scrolling into the second file's @@ selects that hunk.
+	second := -1
+	seen := 0
+	for i, l := range lines {
+		if strings.HasPrefix(l, "@@ ") {
+			seen++
+			if seen == 2 {
+				second = i
+				break
+			}
+		}
+	}
+	m.diffView.hunkTop = second
+	hunk3, ok := m.diffHunkAtWindow()
+	if !ok || !strings.Contains(hunk3, "type Client struct") {
+		t.Fatalf("second hunk not selected: ok=%v hunk=%q", ok, firstLine(hunk3))
+	}
+}
+
+// The [E] key through the REAL update path schedules the clipboard cmd; the
+// result message reports through the shared copy status.
+func TestDiffCopyKeySchedulesClipboardCmd(t *testing.T) {
+	m := newDesignModeTestModel(t.TempDir(), &fakeProvider{}, nil)
+	m.diffView = diffViewState{active: true, wt: diffTestWorktree(), text: diffReviewTestDiff, files: diffFileStats(diffReviewTestDiff)}
+	// Move onto the first real hunk.
+	hunks := diffHunks(diffReviewTestDiff)
+	body := strings.Join(hunks, "\n")
+	lines := strings.Split(body, "\n")
+	for i, l := range lines {
+		if strings.HasPrefix(l, "@@ ") {
+			m.diffView.hunkTop = i
+			break
+		}
+	}
+
+	updated, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: 'e', Mod: tea.ModCtrl}))
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("Ctrl+E did not schedule the copy cmd")
+	}
+	// Execute the cmd — the fake clipboard may fail in tests, but the message
+	// path must handle BOTH outcomes through the shared status readout.
+	msg := cmd()
+	copied, ok := msg.(diffCopiedMsg)
+	if !ok {
+		t.Fatalf("copy cmd produced %T, want diffCopiedMsg", msg)
+	}
+	updated, _ = next.Update(copied)
+	final := updated.(model)
+	if copied.err == nil {
+		if final.copyStatus == "" || !strings.Contains(final.copyStatus, "Copied hunk") {
+			t.Fatalf("success did not report through the copy status: %q", final.copyStatus)
+		}
+	} else if final.copyStatus != "Copy failed" {
+		t.Fatalf("failure did not report Copy failed: %q", final.copyStatus)
+	}
+}
+
+// Nothing viewable -> nothing copyable: the closed/empty/preamble cases say
+// so instead of copying a stale payload.
+func TestDiffCopyRefusesWhenNoHunk(t *testing.T) {
+	m := newDesignModeTestModel(t.TempDir(), &fakeProvider{}, nil)
+	// Closed view.
+	next, cmd := m.copyDiffHunk()
+	if cmd != nil {
+		t.Fatal("closed view must not schedule a copy")
+	}
+	_ = next
+	// Open but sitting on the preamble.
+	m.diffView = diffViewState{active: true, wt: diffTestWorktree(), text: diffReviewTestDiff, files: diffFileStats(diffReviewTestDiff)}
+	nextModel, cmd2 := m.copyDiffHunk()
+	if cmd2 != nil {
+		t.Fatal("preamble position must not schedule a copy")
+	}
+	notices := false
+	for _, row := range nextModel.(model).transcript {
+		if strings.Contains(row.text, "no hunk at the current position") {
+			notices = true
+		}
+	}
+	if !notices {
+		t.Fatal("refusal did not explain itself")
+	}
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
 }

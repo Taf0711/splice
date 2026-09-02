@@ -1387,6 +1387,20 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.copyStatus = ""
 		}
 		return m, nil
+	case diffCopiedMsg:
+		// GAP-G [E]: the hunk copy reports through the same status readout as
+		// the transcript selection copy. Failure keeps the view open for a
+		// retry; success reports the copied size.
+		m.copyStatusSeq++
+		if msg.err != nil {
+			m.copyStatus = "Copy failed"
+		} else {
+			m.copyStatus = fmt.Sprintf("Copied hunk (%d chars)", msg.chars)
+		}
+		seq := m.copyStatusSeq
+		return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
+			return transcriptCopyStatusExpiredMsg{seq: seq}
+		})
 	case exitConfirmExpiredMsg:
 		if msg.seq == m.exitConfirmSeq {
 			m.exitConfirmActive = false

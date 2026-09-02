@@ -18,9 +18,12 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/atotto/clipboard"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Taf0711/splice/internal/worktrees"
 )
@@ -318,7 +321,7 @@ func diffHunkPosition(text string, top int) (current, total int) {
 // the loop sheds "open" first and navigation last; scroll and esc never
 // drop. Never ellipsis-truncates: a half-visible key hint is worse than none.
 func diffViewHintBar(width int) string {
-	optional := []string{"o open", "j reject hunk", "a approve", "n next file"}
+	optional := []string{"^e copy hunk", "o open", "j reject hunk", "a approve", "n next file"}
 	core := []string{"↑↓ scroll", "esc close"}
 	for drop := 0; drop <= len(optional); drop++ {
 		parts := append([]string{core[0]}, optional[drop:]...)
@@ -466,6 +469,9 @@ func (m model) handleDiffReviewKey(msg tea.KeyMsg) (bool, tea.Model, tea.Cmd) {
 				return true, m.rejectDiffHunk(), nil
 			case keyCode(msg) == 'o':
 				return m.openDiffInEditor()
+			case keyCtrl(msg, 'e'):
+				next, cmd := m.copyDiffHunk()
+				return true, next, cmd
 			}
 		}
 		switch {
@@ -550,6 +556,64 @@ func (m model) rejectDiffHunk() model {
 	wt := m.diffView.wt
 	return m.appendSystemNotice("Hunk rejection recorded for lane " + wt.Name +
 		" — the orchestrator decides the intervention (step_back). The diff pane never edits files; use the worktree review to act on the whole lane.")
+}
+
+// diffHunkAtWindow returns the text of the hunk the current window top sits
+// in (the [E] copy target). diffHunks keeps each hunk's @@ header; the
+// window top is a line offset into the joined body, so walk the hunks
+// tracking their line spans. ok is false when nothing is capturable (view
+// closed, empty diff, or a top still in the preamble before the first hunk).
+func (m model) diffHunkAtWindow() (string, bool) {
+	if !m.diffView.active || strings.TrimSpace(m.diffView.text) == "" {
+		return "", false
+	}
+	hunks := diffHunks(m.diffView.text)
+	offset := 0
+	for _, hunk := range hunks {
+		span := len(strings.Split(hunk, "\n"))
+		if m.diffView.hunkTop < offset+span {
+			if !strings.HasPrefix(hunk, "@@ ") {
+				// diffHunks attaches pre-first-@@ preamble text to its zeroth
+				// entry; the preamble is not a hunk, so nothing is selected.
+				return "", false
+			}
+			return hunk, true
+		}
+		offset += span
+	}
+	return "", false
+}
+
+// diffCopiedMsg reports a hunk-copy result. chars mirrors
+// transcriptCopiedMsg; err is set only when neither clipboard path landed.
+type diffCopiedMsg struct {
+	chars int
+	err   error
+}
+
+// copyDiffHunkCmd copies hunk text off the UI loop, reusing the transcript
+// selection's clipboard strategy: native OS clipboard first (works on local
+// terminals with no OSC52 support), OSC52 fallback for remote sessions.
+func copyDiffHunkCmd(text string) tea.Cmd {
+	return func() tea.Msg {
+		if err := clipboard.WriteAll(text); err != nil {
+			if _, oscErr := os.Stdout.WriteString(ansi.SetSystemClipboard(text)); oscErr != nil {
+				return diffCopiedMsg{err: err}
+			}
+		}
+		return diffCopiedMsg{chars: utf8.RuneCountInString(text)}
+	}
+}
+
+// copyDiffHunk is the [E] action: copy the hunk under the window top.
+// Nothing is viewable -> nothing is copyable; say so rather than copying a
+// stale or empty payload.
+func (m model) copyDiffHunk() (tea.Model, tea.Cmd) {
+	hunk, ok := m.diffHunkAtWindow()
+	if !ok {
+		return m.appendSystemNotice("Diff copy: no hunk at the current position."), nil
+	}
+	return m, copyDiffHunkCmd(hunk)
 }
 
 // diffEditorMsg surfaces the editor handoff result. Success is silent (the
