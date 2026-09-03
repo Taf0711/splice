@@ -12,6 +12,11 @@ const ReportContractVersion = "splice.eval.pe.v1"
 // TaskPair is one task's paired outcome.
 type TaskPair struct {
 	Name              string `json:"name"`
+	// Attempt is the 1-based rollout number for this pair. With one rollout
+	// it is always 1; with N rollouts the same task name appears N times,
+	// once per attempt, and aggregations derive per-attempt rows (section
+	// 31: raw first, summaries second).
+	Attempt           int    `json:"attempt,omitempty"`
 	ColdSuccess       bool   `json:"cold_success"`
 	WarmSuccess       bool   `json:"warm_success"`
 	ColdTokens        int    `json:"cold_tokens"`

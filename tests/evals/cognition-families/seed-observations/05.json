@@ -5,7 +5,7 @@
   "memory_type": "convention",
   "scope": "project",
   "visibility": "shareable",
-  "topic_key": "file:internal/auth/session.go",
-  "anchor": "internal/auth/session.go",
+  "topic_key": "file:session.go",
+  "anchor": "session.go",
   "family_id": "fam-05-handler-error-mapping"
 }
