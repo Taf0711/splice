@@ -68,7 +68,11 @@ type Options struct {
 	// SavedTheme is the theme persisted in user config (Preferences.Theme). Applied
 	// at startup below --theme and SPLICE_THEME, so a /theme choice survives restart.
 	SavedTheme string
-	UserAgent  string
+	// SavedLayout is the layout preset persisted in user config
+	// (Preferences.Layout). Applied at startup so a /layout <preset> choice
+	// survives restart. Empty/unknown = built-in defaults.
+	SavedLayout string
+	UserAgent   string
 
 	// Notify configures completion / awaiting-input notifications.
 	Notify config.NotifyConfig

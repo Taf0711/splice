@@ -1041,6 +1041,13 @@ func newModel(ctx context.Context, options Options) model {
 	// GAP-L: the default verbosity is detailed (the zero value is quiet, so
 	// it must be set explicitly at construction).
 	m.narrationVerbosityLevel = verbosityDetailed
+	// GAP-K DoD 36: apply the persisted layout preset. Unknown/empty names
+	// keep the built-in defaults (fail-quiet at startup is correct here: the
+	// preference is a hint, not runtime truth, and a renamed preset must not
+	// brick the TUI).
+	if preset, ok := layoutPresetByName(strings.ToLower(strings.TrimSpace(options.SavedLayout))); ok {
+		m = m.applyLayoutPreset(preset)
+	}
 	// The streaming-text fade (a lime→ink glow on freshly streamed lines) is
 	// disabled: it read as a distracting glow rather than a subtle liveness cue.
 	// Streaming text always renders statically at base ink (the disabled path in
@@ -5028,6 +5035,14 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	case commandExec:
 		return m.handleExecCommand(command.text)
 	case commandLayout:
+		// GAP-K DoD 36: with an argument, /layout applies a named preset
+		// (and persists it); bare /layout keeps the plan-panel toggle.
+		if strings.TrimSpace(command.text) != "" {
+			var text string
+			m, text = m.handleLayoutPresetCommand(command.text)
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+			return m, nil
+		}
 		return m.handleLayoutCommand()
 	case commandInit:
 		return m.handleInitCommand()

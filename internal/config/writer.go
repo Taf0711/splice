@@ -186,6 +186,28 @@ func SetTheme(path string, theme string) (FileConfig, error) {
 	return cfg, nil
 }
 
+// SetLayout persists the TUI layout preset name (Preferences.Layout),
+// mirroring SetTheme. A blank name clears the stored preference.
+func SetLayout(path string, layout string) (FileConfig, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return FileConfig{}, fmt.Errorf("config path is required")
+	}
+	cfg := FileConfig{}
+	if data, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
+	}
+	cfg.Preferences.Layout = strings.TrimSpace(layout)
+	if err := writeConfigFile(path, cfg); err != nil {
+		return FileConfig{}, err
+	}
+	return cfg, nil
+}
+
 func normalizeFavoriteModels(models []string) []string {
 	seen := map[string]bool{}
 	favorites := make([]string, 0, len(models))

@@ -272,9 +272,9 @@ var commandDefinitions = []commandDefinition{
 	},
 	{
 		name:        "/layout",
-		usage:       "/layout",
+		usage:       "/layout [list|preset]",
 		group:       commandGroupSession,
-		description: "Toggle layout options (persistent plan panel).",
+		description: "Show layout state, or apply a preset (default/compact/execution/review/minimal).",
 		kind:        commandLayout,
 	},
 	{
