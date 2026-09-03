@@ -29,7 +29,7 @@ func (m model) evidenceBandVisible() bool {
 	if !m.pending || m.width < evidenceBandMinWidth {
 		return false
 	}
-	if m.sidebarActive() || m.subchat.active || m.fileView.active || m.diffView.active {
+	if m.sidebarActive() || m.subchat.active || m.fileView.active || m.diffView.active || m.detailView.active {
 		return false
 	}
 	if m.setup.visible || m.helpOverlay || m.providerWizard != nil || m.stageModelWizard != nil ||
