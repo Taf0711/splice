@@ -1,5 +1,7 @@
 package tui
 
+import "strings"
+
 // narration.go (P3 GAP-L, contract §2.5/§9.6/§9.7, E2E frames): transcript
 // narration classes and verbosity. The E2E frames say "the transcript already
 // is the record" — so GAP-L is NOT a parallel narration store; it is a
@@ -43,7 +45,14 @@ const (
 
 // classifyNarration derives a row's narration class from its fields. Pure
 // function over the row — the reducer's projection of runtime truth.
+// The decisions ledger card (a rowSystem row carrying the tagged ledger) is
+// NOT system chatter: it is the decision-anchor record (§7.1) and survives
+// every verbosity level — quiet drops transient command output, never the
+// anchors.
 func classifyNarration(row transcriptRow) NarrationClass {
+	if row.kind == rowSystem && strings.HasPrefix(row.text, decisionsCardMarker) {
+		return NarrationAgentDecision
+	}
 	switch row.kind {
 	case rowUser:
 		return NarrationUser
