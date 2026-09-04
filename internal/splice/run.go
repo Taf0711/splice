@@ -396,7 +396,7 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 			result.Status,
 			resultOutcomeChangedFiles(result),
 			pipelineTestCommand(result),
-			headRevision(absWorkDir),
+			headRevision(ctx, absWorkDir),
 			runID,
 		)
 		for _, capture := range captures {
@@ -461,10 +461,16 @@ func pipelineTestCommand(result schemas.PipelineResult) string {
 }
 
 // headRevision returns the current git HEAD sha of the working directory,
-// or "" when unavailable (no repo, git failure). Used as the cognition
-// verified-revision anchor.
-func headRevision(workDir string) string {
-	out, err := exec.Command("git", "-C", workDir, "rev-parse", "HEAD").Output()
+// or "" when unavailable (no repo, git failure). The read routes through
+// the stage sandbox profile like every other deterministic git read.
+func headRevision(ctx context.Context, workDir string) string {
+	engine := procrun.NewStageEngine(workDir)
+	revCmd, plan, cerr := stages.PrepareStageCommand(ctx, engine, workDir, []string{"git", "-C", workDir, "rev-parse", "HEAD"})
+	if cerr != nil {
+		return ""
+	}
+	defer plan.Cleanup()
+	out, err := revCmd.Output()
 	if err != nil {
 		return ""
 	}
