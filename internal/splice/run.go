@@ -394,7 +394,7 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 		captures := captureFromVerifiedRun(
 			projectRoot,
 			result.Status,
-			resultOutcomeChangedFiles(result),
+			worktreeChangedFiles(ctx, absWorkDir),
 			pipelineTestCommand(result),
 			verifiedRevision(ctx, absWorkDir),
 			runID,
@@ -411,32 +411,42 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 	return result, nil
 }
 
-// resultOutcomeChangedFiles returns the changed files for graph capture.
-// StageRecord has no changed-file list; the files arrive on the run's
-// iteration records (files_changed), so the capture is passed them directly
-// by the caller. This helper returns nil and the run seam sources the list
-// from the last iteration state instead.
-func resultOutcomeChangedFiles(result schemas.PipelineResult) []string {
+// worktreeChangedFiles lists the repo-relative files that differ from HEAD
+// (modified, added, or renamed) via one porcelain git status. This is the
+// deterministic changed-file source for graph capture: the verified run's
+// own edits, exactly what a freshness diff will later compare against.
+// Untracked files are included (git status --porcelain default) because the
+// run may have created new files. Empty output on any failure: capture then
+// persists only the procedure node, never wrong file facts.
+func worktreeChangedFiles(ctx context.Context, workDir string) []string {
+	engine := procrun.NewStageEngine(workDir)
+	cmd, plan, cerr := stages.PrepareStageCommand(ctx, engine, workDir,
+		[]string{"git", "-C", workDir, "status", "--porcelain"})
+	if cerr != nil {
+		return nil
+	}
+	defer plan.Cleanup()
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
 	var files []string
-	seen := map[string]struct{}{}
-	for _, stage := range result.Stages {
-		if stage.Name != "code_writer" && stage.Name != "test_generator" {
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if len(line) < 4 {
 			continue
 		}
-		if stage.OutputSummary == nil {
+		path := strings.TrimSpace(line[3:])
+		if path == "" || strings.HasPrefix(path, `"`) {
+			// Quoted paths (special characters) are skipped: a wrong byte
+			// path would poison the anchor index, so we omit rather than
+			// guess the unescaping.
 			continue
 		}
-		for _, part := range strings.Split(*stage.OutputSummary, ",") {
-			file := strings.TrimSpace(part)
-			if file == "" || strings.Contains(file, " ") || strings.Contains(file, "(") {
-				continue
-			}
-			if _, dup := seen[file]; dup {
-				continue
-			}
-			seen[file] = struct{}{}
-			files = append(files, file)
+		if i := strings.Index(path, " -> "); i >= 0 {
+			path = path[i+4:]
 		}
+		files = append(files, path)
 	}
 	return files
 }
