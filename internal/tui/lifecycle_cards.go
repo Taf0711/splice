@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Taf0711/splice/internal/presentation"
 	splicerun "github.com/Taf0711/splice/internal/splice"
@@ -27,20 +28,23 @@ const (
 	decisionsCardMarker = "\x00decisions-card\x00"
 )
 
-// planCardTranscriptText renders the implementation-plan card at a reference
-// width and returns it tagged for the system-row render path.
+// planCardTranscriptText renders the implementation-plan card body at a
+// reference width and returns it tagged for the system-row render path.
+// The stored body is BORDER-FREE: the render path draws exactly one border
+// at the live width (parseLifecycleCardPayload). Storing a bordered block
+// and re-wrapping it drew two nested boxes (the double-border bug).
 func planCardTranscriptText(plan schemas.DesignPlan, critique schemas.PlanCritique) string {
 	clean := !critique.MustFixBeforeExecution
-	return planCardMarker + renderImplementationPlanCard(plan, clean, 100)
+	return planCardMarker + strings.Join(implementationPlanCardBody(plan, clean, 100), "\n")
 }
 
-// critiqueCardTranscriptText renders the typed critique card tagged for the
-// system-row path. Emitted only when required issues block approval.
+// critiqueCardTranscriptText renders the typed critique card body tagged for
+// the system-row path. Emitted only when required issues block approval.
 func critiqueCardTranscriptText(plan schemas.DesignPlan, critique schemas.PlanCritique) string {
-	return critiqueCardMarker + renderCritiqueCard(plan, critique, 100)
+	return critiqueCardMarker + strings.Join(critiqueCardBody(plan, critique, 100), "\n")
 }
 
-// decisionsCardTranscriptText renders the pinned-decisions ledger card
+// decisionsCardTranscriptText renders the pinned-decisions ledger card body
 // tagged for the system-row path (§7.1, GAP-L DoD 46): decision anchors
 // survive resume through decision_pinned session events, and the rehydrate
 // path re-projects the whole ledger from the reconstructed state. Empty
@@ -49,7 +53,7 @@ func decisionsCardTranscriptText(decisions []splicerun.DecisionPinnedPayload) st
 	if len(decisions) == 0 {
 		return ""
 	}
-	return decisionsCardMarker + renderDecisionsCard(decisions, 100)
+	return decisionsCardMarker + strings.Join(decisionsCardBody(decisions, 100), "\n")
 }
 
 // refreshDecisionsLedgerCard replaces the transcript's current decisions
@@ -200,23 +204,72 @@ func formatRunElapsed(d time.Duration) string {
 }
 
 // parseLifecycleCardPayload detects a tagged P4 card row and returns its
-// width-aware render function. The stored card body was produced at a
-// reference width; re-splitting its lines through styledBlock reflows the
-// borders at the current width while preserving the content.
+// width-aware render function. The stored body is border-free (the render
+// path draws exactly one border at the live width). Legacy rows persisted
+// before the border-free storage carry a full styledBlock at reference
+// width; those are re-split and re-bordered ONCE at the current width —
+// never wrapped again on top of their own border (the double-box bug).
 func parseLifecycleCardPayload(text string) (func(int) string, bool) {
 	strip := func(marker string) string { return strings.TrimPrefix(text, marker) }
+	render := func(body string, borderStyle lipgloss.Style) func(int) string {
+		lines := viewLines(body)
+		if strings.HasPrefix(strings.TrimSpace(body), "╭") {
+			// Legacy bordered body: strip the old border cells, keep the
+			// content, and let styledBlock draw the single live-width border.
+			lines = stripBlockBorder(lines)
+		}
+		return func(width int) string { return styledBlock(width, lines, borderStyle) }
+	}
 	switch {
 	case strings.HasPrefix(text, planCardMarker):
-		body := strip(planCardMarker)
-		return func(width int) string { return styledBlock(width, viewLines(body), zeroTheme.cardRun) }, true
+		return render(strip(planCardMarker), zeroTheme.cardRun), true
 	case strings.HasPrefix(text, critiqueCardMarker):
-		body := strip(critiqueCardMarker)
-		return func(width int) string { return styledBlock(width, viewLines(body), zeroTheme.cardErr) }, true
+		return render(strip(critiqueCardMarker), zeroTheme.cardErr), true
 	case strings.HasPrefix(text, decisionsCardMarker):
-		body := strip(decisionsCardMarker)
-		return func(width int) string { return styledBlock(width, viewLines(body), zeroTheme.cardRun) }, true
+		return render(strip(decisionsCardMarker), zeroTheme.cardRun), true
 	}
 	return nil, false
+}
+
+// stripBlockBorder removes the styledBlock frame (╭─╮ / │ · │ / ╰─╯) from a
+// legacy stored card, returning the inner content lines. A line that does
+// not fit the border shape passes through unchanged (fail-visible, never
+// silently dropped content).
+func stripBlockBorder(lines []string) []string {
+	if len(lines) < 2 {
+		return lines
+	}
+	inner := make([]string, 0, len(lines)-2)
+	for _, line := range lines[1 : len(lines)-1] {
+		trimmed := strings.TrimRight(ansi.Strip(line), " ")
+		if strings.HasPrefix(trimmed, "│ ") && strings.HasSuffix(trimmed, " │") {
+			inner = append(inner, strings.TrimSuffix(strings.TrimPrefix(line, "│ "), " │"))
+			continue
+		}
+		// Legacy tiny-tier rule rows (───) collapse to blank separators.
+		if strings.TrimSpace(ansi.Strip(line)) == "" || isAllBoxRule(ansi.Strip(line)) {
+			inner = append(inner, "")
+			continue
+		}
+		inner = append(inner, line)
+	}
+	return inner
+}
+
+// isAllBoxRule reports whether a stripped line is only box-drawing rules.
+func isAllBoxRule(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch r {
+		case '─', '│', '╭', '╮', '╰', '╯', '-', '|':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // critiqueSeverityClass maps a critique severity onto the card's two
@@ -232,10 +285,33 @@ func critiqueSeverityClass(severity schemas.Severity) string {
 	}
 }
 
-// renderCritiqueCard renders the typed critique card (§7.4, P4 E4).
+// renderCritiqueCard renders the typed critique card (§7.4, P4 E4):
+// the critique body inside exactly one border.
 func renderCritiqueCard(plan schemas.DesignPlan, critique schemas.PlanCritique, width int) string {
 	if width <= 0 {
 		return ""
+	}
+	if critiqueHasRequired(critique) {
+		return styledBlock(width, critiqueCardBody(plan, critique, width), zeroTheme.cardErr)
+	}
+	return styledBlock(width, critiqueCardBody(plan, critique, width), zeroTheme.cardRun)
+}
+
+// critiqueHasRequired reports whether the critique carries must-fix issues.
+func critiqueHasRequired(critique schemas.PlanCritique) bool {
+	for _, c := range critique.Critiques {
+		if critiqueSeverityClass(c.Severity) == "REQUIRED" {
+			return true
+		}
+	}
+	return false
+}
+
+// critiqueCardBody renders the critique card content WITHOUT a border —
+// the border belongs to the render path (one border, at the live width).
+func critiqueCardBody(plan schemas.DesignPlan, critique schemas.PlanCritique, width int) []string {
+	if width <= 0 {
+		return nil
 	}
 	bodyBudget := width - 6
 	if bodyBudget < 12 {
@@ -251,48 +327,21 @@ func renderCritiqueCard(plan schemas.DesignPlan, critique schemas.PlanCritique, 
 		}
 	}
 
-	var border lipgloss.Style
-	if required > 0 {
-		border = zeroTheme.cardErr
-	} else {
-		border = zeroTheme.cardRun
-	}
-
 	rev := ""
 	if critique.OverallAssessment != "" {
 		rev = truncateRunes(critique.OverallAssessment, bodyBudget)
 	}
-	titleLine := zeroTheme.amber.Bold(true).Render("CRITIQUE")
-	count := zeroTheme.faint.Render(fmt.Sprintf("%d required · %d advisory", required, advisory))
-	lines := []string{titleLine + "  " + count}
+	titleLine := zeroTheme.amber.Bold(true).Render("CRITIQUE") + "  " +
+		zeroTheme.faint.Render(fmt.Sprintf("%d required · %d advisory", required, advisory))
+	lines := []string{titleLine}
 	if rev != "" {
 		lines = append(lines, "  "+rev)
 	}
 	lines = append(lines, "")
 
 	for _, c := range critique.Critiques {
-		class := critiqueSeverityClass(c.Severity)
-		var glyph, markerStyle string
-		if class == "REQUIRED" {
-			glyph = presentation.StatusMarker(presentation.NodeStatusFailed, presentation.GlyphTierASCII).Glyph
-			markerStyle = "REQUIRED"
-		} else {
-			glyph = presentation.StatusMarker(presentation.NodeStatusDegraded, presentation.GlyphTierASCII).Glyph
-			markerStyle = "ADVISORY"
-		}
-		head := glyph + " " + markerStyle + "  " + c.Category
-		lines = append(lines, zeroTheme.ink.Render(head))
-		for _, wrapped := range wrapPlainText(c.Issue, bodyBudget-2) {
-			lines = append(lines, "    "+wrapped)
-		}
-		if fix := strings.TrimSpace(c.SuggestedMitigation); fix != "" {
-			for _, wrapped := range wrapPlainText("-> fix: "+fix, bodyBudget-2) {
-				lines = append(lines, "    "+zeroTheme.faint.Render(wrapped))
-			}
-		}
-		lines = append(lines, "")
+		lines = append(lines, critiqueFindingLines(c, bodyBudget)...)
 	}
-
 	// Verdict line: the approval gate is runtime truth (DoD 8), not style.
 	if required > 0 {
 		lines = append(lines, zeroTheme.red.Render("approval  BLOCKED by required issues"))
@@ -307,15 +356,51 @@ func renderCritiqueCard(plan schemas.DesignPlan, critique schemas.PlanCritique, 
 			zeroTheme.muted.Render("[A]")+" "+zeroTheme.ink.Render("approve")+"  "+
 				zeroTheme.muted.Render("[R]")+" "+zeroTheme.ink.Render("revise"))
 	}
-	return styledBlock(width, lines, border)
+	return lines
+}
+
+// critiqueFindingLines renders one critique finding: severity-marked header,
+// the issue text, and the optional fix — border-free body lines.
+func critiqueFindingLines(c schemas.Critique, bodyBudget int) []string {
+	class := critiqueSeverityClass(c.Severity)
+	var glyph, markerStyle string
+	if class == "REQUIRED" {
+		glyph = presentation.StatusMarker(presentation.NodeStatusFailed, presentation.GlyphTierASCII).Glyph
+		markerStyle = "REQUIRED"
+	} else {
+		glyph = presentation.StatusMarker(presentation.NodeStatusDegraded, presentation.GlyphTierASCII).Glyph
+		markerStyle = "ADVISORY"
+	}
+	head := glyph + " " + markerStyle + "  " + c.Category
+	lines := []string{zeroTheme.ink.Render(head)}
+	for _, wrapped := range wrapPlainText(c.Issue, bodyBudget-2) {
+		lines = append(lines, "    "+wrapped)
+	}
+	if fix := strings.TrimSpace(c.SuggestedMitigation); fix != "" {
+		for _, wrapped := range wrapPlainText("-> fix: "+fix, bodyBudget-2) {
+			lines = append(lines, "    "+zeroTheme.faint.Render(wrapped))
+		}
+	}
+	lines = append(lines, "")
+	return lines
 }
 
 // renderImplementationPlanCard renders the implementation-plan card
-// (§7.3, P4 E3): numbered tasks with targets, the acceptance-check count,
-// the critique verdict, and the explicit-gesture approve row.
+// (§7.3, P4 E3): the plan body inside exactly one border.
 func renderImplementationPlanCard(plan schemas.DesignPlan, critiqueClean bool, width int) string {
 	if width <= 0 {
 		return ""
+	}
+	return styledBlock(width, implementationPlanCardBody(plan, critiqueClean, width), zeroTheme.cardRun)
+}
+
+// implementationPlanCardBody renders the plan card content WITHOUT a border:
+// numbered tasks with targets, the acceptance-check count, the critique
+// verdict, and the explicit-gesture approve row. The render path owns the
+// border (one border, at the live width — never a stored one).
+func implementationPlanCardBody(plan schemas.DesignPlan, critiqueClean bool, width int) []string {
+	if width <= 0 {
+		return nil
 	}
 	bodyBudget := width - 6
 	if bodyBudget < 12 {
@@ -348,7 +433,7 @@ func renderImplementationPlanCard(plan schemas.DesignPlan, critiqueClean bool, w
 	lines = append(lines,
 		zeroTheme.muted.Render("[A]")+" "+zeroTheme.ink.Render("approve (explicit)")+"  "+
 			zeroTheme.muted.Render("[R]")+" "+zeroTheme.ink.Render("revise"))
-	return styledBlock(width, lines, zeroTheme.cardRun)
+	return lines
 }
 
 // renderCrystallizingCard renders the in-progress card (§7.2, P4 E2):
@@ -389,6 +474,7 @@ func renderCrystallizingCard(settled, scope bool, drafting bool, taskCount int, 
 }
 
 // renderDecisionsCard renders the design-decisions ledger (§7.1, P4 E1):
+// the ledger body inside exactly one border.
 //
 //	DECISIONS                3 settled
 //	  [+] retry idempotent methods only
@@ -400,6 +486,15 @@ func renderCrystallizingCard(settled, scope bool, drafting bool, taskCount int, 
 func renderDecisionsCard(decisions []splicerun.DecisionPinnedPayload, width int) string {
 	if width <= 0 {
 		return ""
+	}
+	return styledBlock(width, decisionsCardBody(decisions, width), zeroTheme.cardRun)
+}
+
+// decisionsCardBody renders the ledger content WITHOUT a border — the
+// border belongs to the render path (one border, at the live width).
+func decisionsCardBody(decisions []splicerun.DecisionPinnedPayload, width int) []string {
+	if width <= 0 {
+		return nil
 	}
 	bodyBudget := width - 6
 	if bodyBudget < 12 {
@@ -430,5 +525,5 @@ func renderDecisionsCard(decisions []splicerun.DecisionPinnedPayload, width int)
 	if len(decisions) == 0 {
 		lines = append(lines, zeroTheme.faint.Render("no decisions pinned yet"))
 	}
-	return styledBlock(width, lines, zeroTheme.cardRun)
+	return lines
 }
