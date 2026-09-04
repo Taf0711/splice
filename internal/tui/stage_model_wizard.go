@@ -20,6 +20,11 @@ import (
 type stageModelWizardStep int
 
 const (
+	// stageModelWizardStepOverview is the ONLY surface: the list IS the editor
+	// (the /model design — pick model and effort in one pass). Enter opens the
+	// model picker for the highlighted row; ←/→ adjusts its effort in place;
+	// s saves; d deletes the row's override. The legacy per-target edit steps
+	// remain as constants for draft state but are no longer rendered.
 	stageModelWizardStepOverview stageModelWizardStep = iota
 	stageModelWizardStepEditDefault
 	stageModelWizardStepEditEscalation
@@ -41,6 +46,10 @@ type stageModelOption struct {
 	label string
 	value string
 	meta  string
+	// ownerProvider is the saved provider profile a model option belongs to,
+	// so picking a model from another provider moves the row's routing there
+	// (the /model OwnerProvider semantics).
+	ownerProvider string
 }
 
 type stageModelEditFields struct {
@@ -64,6 +73,9 @@ type stageModelWizardState struct {
 	err                    string
 	overviewCursor         int
 	confirmDiscard         bool
+	// allModelOptions is the grouped cross-provider list the model picker shows
+	// (the /model semantics); set when the picker opens.
+	allModelOptions []stageModelOption
 }
 
 type stageModelStageRow struct {
@@ -151,9 +163,14 @@ func (m model) populateStageModelWizardModels(wizard *stageModelWizardState) {
 		items := m.savedProviderModelPickerItems(profile, "", "")
 		options := make([]stageModelOption, 0, len(items)+1)
 		for _, item := range items {
-			options = append(options, stageModelOption{label: item.Label, value: item.Value, meta: modelPickerItemDetail(item)})
+			options = append(options, stageModelOption{
+				label:         item.Label,
+				value:         item.Value,
+				meta:          modelPickerItemDetail(item),
+				ownerProvider: item.OwnerProvider,
+			})
 		}
-		options = append(options, stageModelOption{label: profile.Model, value: profile.Model})
+		options = append(options, stageModelOption{label: profile.Model, value: profile.Model, ownerProvider: profile.Name})
 		wizard.mergeModelOptions(profile.Name, options)
 	}
 }
@@ -275,9 +292,184 @@ func (w *stageModelWizardState) advance() {
 	w.err = ""
 	switch w.step {
 	case stageModelWizardStepOverview:
-		w.openEditForCurrentRow()
+		w.openModelPickerForCurrentRow()
 	case stageModelWizardStepEditDefault, stageModelWizardStepEditEscalation, stageModelWizardStepEditStage:
 		w.activateEditRow()
+	}
+}
+
+// currentRoutingTarget resolves the highlighted overview row to its routing
+// target key ("default", "escalation", or a stage name).
+func (w *stageModelWizardState) currentRoutingTarget() string {
+	if w == nil {
+		return ""
+	}
+	return w.overviewRowStageName(w.currentOverviewRow())
+}
+
+// currentEffortIndex reads the highlighted row's effort position from its
+// config entry (default/escalation/stage), so ←/→ adjusts what the row shows.
+func (w *stageModelWizardState) currentEffortIndex() int {
+	if w == nil {
+		return 0
+	}
+	var cfg schemas.StageModelConfig
+	switch target := w.currentRoutingTarget(); target {
+	case "default":
+		cfg = w.config.Default
+	case "escalation":
+		if w.config.Escalation != nil {
+			cfg = *w.config.Escalation
+		}
+	default:
+		cfg, _ = w.config.Resolve(target)
+	}
+	return w.effortIndex(cfg.ReasoningEffort)
+}
+
+// adjustEffort steps the highlighted row's effort ring by delta and writes the
+// result straight into its config entry — the /model inline ring, one pass.
+// Clamped, not wrapped: holding an arrow settles at an end instead of cycling.
+func (w *stageModelWizardState) adjustEffort(delta int) {
+	if w == nil {
+		return
+	}
+	w.err = ""
+	next := clampInt(w.currentEffortIndex()+delta, 0, len(stageModelWizardEffortOpts)-1)
+	if next == w.currentEffortIndex() {
+		return
+	}
+	effort := stageModelWizardEffortOpts[next]
+	switch target := w.currentRoutingTarget(); target {
+	case "default":
+		w.config.Default.ReasoningEffort = effort
+	case "escalation":
+		if w.config.Escalation == nil {
+			// Escalation inherits the default until set; seeding it from the
+			// default keeps the new entry complete and valid.
+			seeded := w.config.Default
+			seeded.ReasoningEffort = effort
+			w.config.Escalation = &seeded
+			return
+		}
+		w.config.Escalation.ReasoningEffort = effort
+	default:
+		cfg, ok := w.config.Stages[target]
+		if !ok {
+			// No override yet: seed from the resolved default so the row's new
+			// entry is complete.
+			cfg, _ = w.config.Resolve(target)
+		}
+		cfg.ReasoningEffort = effort
+		if w.config.Stages == nil {
+			w.config.Stages = map[string]schemas.StageModelConfig{}
+		}
+		w.config.Stages[target] = cfg
+	}
+}
+
+// openModelPickerForCurrentRow opens the model picker against the highlighted
+// row's current provider/model — the /model one-pass flow. The provider
+// picker is no longer a separate screen: the picker groups models by provider
+// and a choice from another provider moves the row's routing there.
+func (w *stageModelWizardState) openModelPickerForCurrentRow() {
+	if w == nil {
+		return
+	}
+	w.err = ""
+	if len(w.providers) == 0 {
+		w.err = "no saved providers; run /provider first"
+		return
+	}
+	target := w.currentRoutingTarget()
+	var cfg schemas.StageModelConfig
+	switch target {
+	case "default":
+		cfg = w.config.Default
+	case "escalation":
+		if w.config.Escalation != nil {
+			cfg = *w.config.Escalation
+		} else {
+			cfg = w.config.Default
+		}
+	default:
+		cfg, _ = w.config.Resolve(target)
+	}
+	w.editTarget = target
+	w.editFields.providerCursor = w.providerIndex(cfg.ProviderProfile)
+	w.editFields.model = cfg.Model
+	// All providers' models in one grouped list (the /model design): picking a
+	// model from another provider moves the row's routing there.
+	w.allModelOptions = w.unionModelOptions()
+	w.picker = stageModelPickerModel
+	w.pickerCursor = optionIndex(w.allModelOptions, cfg.Model)
+	w.pickerQuery = ""
+}
+
+// unionModelOptions merges every provider's model options (deduped by value,
+// first provider wins) into one grouped list.
+func (w *stageModelWizardState) unionModelOptions() []stageModelOption {
+	seen := map[string]bool{}
+	merged := make([]stageModelOption, 0, 32)
+	for _, profile := range w.providers {
+		for _, option := range w.modelOptionsByProvider[strings.TrimSpace(profile.Name)] {
+			if option.value == "" || seen[option.value] {
+				continue
+			}
+			seen[option.value] = true
+			if option.ownerProvider == "" {
+				option.ownerProvider = profile.Name
+			}
+			merged = append(merged, option)
+		}
+	}
+	return merged
+}
+
+// applyModelChoice writes a picked model (and its owning provider) into the
+// highlighted row's config entry — the confirm half of the one-pass flow.
+func (w *stageModelWizardState) applyModelChoice(modelID string, ownerProvider string) {
+	if w == nil {
+		return
+	}
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		w.err = "enter a model name"
+		return
+	}
+	provider := strings.TrimSpace(ownerProvider)
+	if provider == "" {
+		// Fall back to the draft cursor's provider when the option carried no owner.
+		if len(w.providers) > 0 {
+			provider = w.providers[clampInt(w.editFields.providerCursor, 0, len(w.providers)-1)].Name
+		}
+	}
+	if provider == "" {
+		w.err = "no saved providers; run /provider first"
+		return
+	}
+	cfg, _ := w.config.Resolve(w.editTarget)
+	cfg.ProviderProfile = provider
+	cfg.Model = modelID
+	// Keep the row's effort; the ring is adjusted inline on the overview.
+	if w.editFields.model != "" && w.editFields.model != modelID {
+		// A model switch keeps the draft effort as-is; Resolve above preserved it.
+		_ = cfg
+	}
+	switch w.editTarget {
+	case "default":
+		w.config.Default = cfg
+	case "escalation":
+		seeded := cfg
+		w.config.Escalation = &seeded
+	default:
+		if w.config.Stages == nil {
+			w.config.Stages = map[string]schemas.StageModelConfig{}
+		}
+		w.config.Stages[w.editTarget] = cfg
+	}
+	if err := w.config.Validate(); err != nil {
+		w.err = err.Error()
 	}
 }
 
@@ -443,7 +635,7 @@ func (w *stageModelWizardState) pickerOptions() []stageModelOption {
 		}
 		return options
 	case stageModelPickerModel:
-		return filterStageModelOptions(w.currentModelOptions(), w.pickerQuery)
+		return filterStageModelOptions(w.allModelOptions, w.pickerQuery)
 	case stageModelPickerEffort:
 		options := make([]stageModelOption, 0, len(stageModelWizardEffortOpts))
 		for index, effort := range stageModelWizardEffortOpts {
@@ -458,7 +650,7 @@ func (w *stageModelWizardState) pickerOptions() []stageModelOption {
 func filterStageModelOptions(options []stageModelOption, query string) []stageModelOption {
 	items := make([]pickerItem, 0, len(options))
 	for _, option := range options {
-		items = append(items, pickerItem{Label: option.label, Value: option.value, Meta: option.meta})
+		items = append(items, pickerItem{Label: option.label, Value: option.value, Meta: option.meta, OwnerProvider: option.ownerProvider})
 	}
 	picker := commandPicker{
 		items:    append([]pickerItem{}, items...),
@@ -468,7 +660,7 @@ func filterStageModelOptions(options []stageModelOption, query string) []stageMo
 	picker.applyQuery()
 	filtered := make([]stageModelOption, 0, len(picker.items))
 	for _, item := range picker.items {
-		filtered = append(filtered, stageModelOption{label: item.Label, value: item.Value, meta: item.Meta})
+		filtered = append(filtered, stageModelOption{label: item.Label, value: item.Value, meta: item.Meta, ownerProvider: item.OwnerProvider})
 	}
 	return filtered
 }
@@ -516,11 +708,14 @@ func (w *stageModelWizardState) confirmPicker() {
 	}
 	w.pickerCursor = clampInt(w.pickerCursor, 0, len(options)-1)
 	switch w.picker {
+	case stageModelPickerModel:
+		// One-pass /model flow: the choice lands on the highlighted row
+		// immediately (provider from the option's owner), then back to the list.
+		chosen := options[w.pickerCursor]
+		w.applyModelChoice(chosen.value, chosen.ownerProvider)
 	case stageModelPickerProvider:
 		w.editFields.providerCursor = w.pickerCursor
 		w.editFields.model = strings.TrimSpace(w.providers[w.pickerCursor].Model)
-	case stageModelPickerModel:
-		w.editFields.model = options[w.pickerCursor].value
 	case stageModelPickerEffort:
 		w.editFields.effortCursor = w.pickerCursor
 	}
@@ -641,6 +836,41 @@ func (m model) handleStageModelWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		return m, nil
 	}
 
+	// The model picker opens from the overview now (the /model one-pass flow),
+	// so its keys — search typing, Ctrl+U clear, arrows, Enter, Esc — route here.
+	if w := m.stageModelWizard; w.picker != stageModelPickerNone {
+		switch {
+		case keyIs(msg, tea.KeyEsc):
+			w.picker = stageModelPickerNone
+			w.pickerCursor = 0
+			w.pickerQuery = ""
+			w.err = ""
+			return m, nil
+		case keyBackspace(msg):
+			w.deletePickerQueryRune()
+			return m, nil
+		case keyCtrl(msg, 'u'):
+			if w.picker == stageModelPickerModel {
+				w.pickerQuery = ""
+				w.pickerCursor = 0
+			}
+			return m, nil
+		case keyIs(msg, tea.KeyUp):
+			w.movePicker(-1)
+			return m, nil
+		case keyIs(msg, tea.KeyDown), keyIs(msg, tea.KeyTab):
+			w.movePicker(1)
+			return m, nil
+		case keyIs(msg, tea.KeyEnter), keyIs(msg, tea.KeyRight):
+			w.confirmPicker()
+			return m, nil
+		case keyPrintable(msg):
+			w.appendPickerQuery(keyRunes(msg))
+			return m, nil
+		}
+		return m, nil
+	}
+
 	switch m.stageModelWizard.step {
 	case stageModelWizardStepOverview:
 		return m.handleStageModelWizardOverviewKey(msg)
@@ -656,6 +886,15 @@ func (m model) handleStageModelWizardOverviewKey(msg tea.KeyMsg) (model, tea.Cmd
 	}
 	switch {
 	case keyIs(msg, tea.KeyEsc):
+		if m.stageModelWizard.picker != stageModelPickerNone {
+			// Close the model picker first; Esc at the picker is not a quit.
+			w := m.stageModelWizard
+			w.picker = stageModelPickerNone
+			w.pickerCursor = 0
+			w.pickerQuery = ""
+			w.err = ""
+			return m, nil
+		}
 		if m.stageModelWizard.isDirty() {
 			m.stageModelWizard.confirmDiscard = true
 			return m, nil
@@ -666,10 +905,14 @@ func (m model) handleStageModelWizardOverviewKey(msg tea.KeyMsg) (model, tea.Cmd
 		m.stageModelWizard.move(-1)
 	case keyIs(msg, tea.KeyDown), keyIs(msg, tea.KeyTab):
 		m.stageModelWizard.move(1)
+	case keyIs(msg, tea.KeyLeft):
+		m.stageModelWizard.adjustEffort(-1)
+	case keyIs(msg, tea.KeyRight):
+		m.stageModelWizard.adjustEffort(1)
 	case keyIs(msg, tea.KeyBackspace), keyText(msg) == "d", keyText(msg) == "D":
 		m.stageModelWizard.removeCurrentOverride()
 	case keyIs(msg, tea.KeyEnter):
-		m.stageModelWizard.advance()
+		m.stageModelWizard.openModelPickerForCurrentRow()
 	case keyText(msg) == "s" || keyText(msg) == "S":
 		if err := m.stageModelWizard.save(m.userConfigPath); err != nil {
 			m.stageModelWizard.err = redaction.ErrorMessage(err, redaction.Options{})
@@ -744,16 +987,16 @@ func (w *stageModelWizardState) render(width int) string {
 	}
 	if w.confirmDiscard {
 		lines = append(lines, w.renderDiscardConfirm(innerWidth)...)
+	} else if w.picker != stageModelPickerNone {
+		// The model picker is an in-wizard layer above the overview list —
+		// whichever step is live beneath it.
+		lines = append(lines, w.renderPicker(innerWidth)...)
 	} else {
 		switch w.step {
 		case stageModelWizardStepOverview:
 			lines = append(lines, w.renderOverview(innerWidth)...)
 		case stageModelWizardStepEditDefault, stageModelWizardStepEditEscalation, stageModelWizardStepEditStage:
-			if w.picker != stageModelPickerNone {
-				lines = append(lines, w.renderPicker(innerWidth)...)
-			} else {
-				lines = append(lines, w.renderEdit(innerWidth)...)
-			}
+			lines = append(lines, w.renderEdit(innerWidth)...)
 		}
 	}
 
@@ -777,16 +1020,16 @@ func stageModelOverlayWidth(terminalWidth int, w *stageModelWizardState) int {
 	}
 	target := lipgloss.Width(" Stage model routing")
 	if w != nil {
-		for _, row := range w.overviewRows() {
-			target = maxInt(target, lipgloss.Width("❯ ")+lipgloss.Width(row.label)+lipgloss.Width("   ")+lipgloss.Width(row.detail))
-		}
-		if w.step != stageModelWizardStepOverview {
-			for _, line := range w.renderEdit(200) {
-				target = maxInt(target, lipgloss.Width("  "+line))
-			}
+		// Overview rows own a shared effort column plus the ring block; the
+		// overlay must be wide enough that the ring never truncates. The row's
+		// label+summary flows into the column, so the widest row is roughly the
+		// column plus the ring block.
+		ringBlock := lipgloss.Width("← ") + len(stageModelWizardEffortOpts) + lipgloss.Width(" → ") + lipgloss.Width("minimal")
+		for range w.overviewRows() {
+			target = maxInt(target, stageModelEffortColumn+ringBlock)
 		}
 	}
-	target = maxInt(target, lipgloss.Width("↑↓ select  ⏎ edit  s save  d delete  esc close"))
+	target = maxInt(target, lipgloss.Width("↑↓ select  ·  ←→ effort  ·  ⏎ model  ·  esc close"))
 	overlayWidth := maxInt(stageModelWizardMinWidth, target+4)
 	return minInt(overlayWidth, maxInt(4, available))
 }
@@ -812,6 +1055,9 @@ func (w *stageModelWizardState) footerLines(width int) []string {
 	if w.confirmDiscard {
 		return []string{rule, fitStyledLine(zeroTheme.faint.Render("y discard  ·  n/Esc keep editing"), width)}
 	}
+	if w.picker == stageModelPickerModel {
+		return []string{rule, fitStyledLine(zeroTheme.faint.Render("type search  ·  ↑↓ select  ·  ⏎ choose  ·  esc back"), width)}
+	}
 	switch w.step {
 	case stageModelWizardStepOverview:
 		// Ordered least- to most-essential; delete is the convenience.
@@ -819,7 +1065,7 @@ func (w *stageModelWizardState) footerLines(width int) []string {
 		if w.overviewDirty() {
 			optional = append([]string{"s save"}, optional...)
 		}
-		core := []string{"↑↓ select", "⏎ edit", "esc close"}
+		core := []string{"↑↓ select", "←→ effort", "⏎ model", "esc close"}
 		for drop := 0; drop <= len(optional); drop++ {
 			parts := append([]string{"↑↓ select"}, optional[drop:]...)
 			parts = append(parts, core[1:]...)
@@ -958,6 +1204,41 @@ func stageModelConfigSummary(cfg schemas.StageModelConfig) string {
 	return fmt.Sprintf("%s · %s · %s", cfg.ProviderProfile, cfg.Model, effort)
 }
 
+// stageModelEffortSegments draws the inline effort ring at the shared column —
+// the /model renderEffortRing grammar, scaled to the wizard's effort set
+// (auto/minimal/low/medium/high). Shape carries the level; color reinforces it.
+func stageModelEffortRing(index int, selected bool, surface func(lipgloss.Style) lipgloss.Style) string {
+	if index < 0 {
+		index = 0
+	}
+	total := len(stageModelWizardEffortOpts)
+	segments := make([]string, 0, total)
+	for i := 0; i < total; i++ {
+		if i < index {
+			style := zeroTheme.muted
+			if selected {
+				style = zeroTheme.accent
+			}
+			segments = append(segments, surface(style).Render(effortSegmentFilled))
+			continue
+		}
+		segments = append(segments, surface(zeroTheme.faintest).Render(effortSegmentEmpty))
+	}
+	ring := strings.Join(segments, "")
+	label := stageModelWizardEffortLbls[clampInt(index, 0, len(stageModelWizardEffortLbls)-1)]
+	if !selected {
+		// Reserve the arrow gutter so unselected rings share the column.
+		gutter := surface(zeroTheme.faintest).Render(strings.Repeat(" ", lipgloss.Width("← ")))
+		return gutter + ring + surface(zeroTheme.faint).Render(strings.Repeat(" ", lipgloss.Width(" → "))+label)
+	}
+	arrow := surface(zeroTheme.faint)
+	return arrow.Render("← ") + ring + arrow.Render(" → ") + surface(zeroTheme.ink).Render(label)
+}
+
+// stageModelEffortColumn is the shared x where every overview row's ring starts,
+// so ring lengths are comparable down the list (the /model column contract).
+const stageModelEffortColumn = 46
+
 func (w *stageModelWizardState) renderOverviewRow(width int, index int, row stageModelOverviewRow) string {
 	selected := index == w.overviewCursor
 	surface := transparentSurface
@@ -966,10 +1247,35 @@ func (w *stageModelWizardState) renderOverviewRow(width int, index int, row stag
 		surface = zeroTheme.onSel
 		marker = surface(zeroTheme.accent).Render("❯ ")
 	}
-	left := marker + surface(zeroTheme.ink).Render(row.label)
-	right := zeroTheme.faint.Render(row.detail)
-	line := fitStyledLine(left+"   "+right, width)
-	return fillPaletteLine(line, width, surface)
+	left := marker + surface(zeroTheme.ink).Render(row.label) + " " + surface(zeroTheme.faint).Render(row.detail)
+	// Pad to the shared effort column so every ring starts at the same x (the
+	// /model column contract); over-long rows get one space and the ring follows.
+	if gap := stageModelEffortColumn - lipgloss.Width(left); gap > 0 {
+		left += surface(zeroTheme.faintest).Render(strings.Repeat(" ", gap))
+	} else {
+		left += " "
+	}
+	left += stageModelEffortRing(w.currentEffortIndexForRow(row), selected, surface)
+	return fillPaletteLine(left, width, surface)
+}
+
+// currentEffortIndexForRow reads a row's effort position by its label.
+func (w *stageModelWizardState) currentEffortIndexForRow(row stageModelOverviewRow) int {
+	target := w.overviewRowStageName(row)
+	var cfg schemas.StageModelConfig
+	switch target {
+	case "default":
+		cfg = w.config.Default
+	case "escalation":
+		if w.config.Escalation != nil {
+			cfg = *w.config.Escalation
+		} else {
+			return 0
+		}
+	default:
+		cfg, _ = w.config.Resolve(target)
+	}
+	return w.effortIndex(cfg.ReasoningEffort)
 }
 
 func (w *stageModelWizardState) renderEdit(width int) []string {
@@ -1022,7 +1328,7 @@ func (w *stageModelWizardState) renderPicker(width int) []string {
 	case stageModelPickerProvider:
 		heading = "Choose provider"
 	case stageModelPickerModel:
-		heading = "Choose model"
+		heading = "Choose model for " + w.editTarget
 	case stageModelPickerEffort:
 		heading = "Choose reasoning effort"
 	}
@@ -1041,10 +1347,34 @@ func (w *stageModelWizardState) renderPicker(width int) []string {
 	w.pickerCursor = clampInt(w.pickerCursor, 0, len(options)-1)
 	maxVisible := minInt(10, len(options))
 	start := selectableListStart(len(options), maxVisible, w.pickerCursor)
+	if start > 0 {
+		lines = append(lines, zeroTheme.faintest.Render("  ↑ more above"))
+	}
+	lastGroup := ""
 	for offset, option := range options[start : start+maxVisible] {
+		if w.picker == stageModelPickerModel {
+			// Group headers per provider (the /model list): one contiguous
+			// section per owning provider, so cross-provider choices are visible
+			// before they are made.
+			if group := w.optionGroup(option); group != "" && group != lastGroup {
+				lines = append(lines, zeroTheme.accent.Bold(true).Render(group))
+				lastGroup = group
+			}
+		}
 		lines = append(lines, renderStageModelSelectableRow(width, start+offset == w.pickerCursor, option))
 	}
+	if start+maxVisible < len(options) {
+		lines = append(lines, zeroTheme.faintest.Render("  ↓ more below"))
+	}
 	return lines
+}
+
+// optionGroup names the provider section a model option belongs to.
+func (w *stageModelWizardState) optionGroup(option stageModelOption) string {
+	if owner := strings.TrimSpace(option.ownerProvider); owner != "" {
+		return owner
+	}
+	return strings.TrimSpace(option.meta)
 }
 
 func renderStageModelSelectableRow(width int, selected bool, option stageModelOption) string {
