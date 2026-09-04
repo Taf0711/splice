@@ -122,4 +122,60 @@ CREATE TABLE IF NOT EXISTS verdicts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_verdicts_run ON verdicts(run_id, decided_at);
+
+CREATE TABLE IF NOT EXISTS cognition_nodes (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind              TEXT    NOT NULL,
+    claim             TEXT    NOT NULL,
+    scope             TEXT    NOT NULL DEFAULT 'project',
+    project_path      TEXT,
+    status            TEXT    NOT NULL DEFAULT 'active',
+    confidence        REAL,
+    source_run_id     TEXT,
+    created_revision  TEXT,
+    verified_revision TEXT,
+    created_at        INTEGER NOT NULL,
+    verified_at       INTEGER,
+    claim_hash        TEXT    NOT NULL,
+    metadata_json     TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_cog_nodes_claim  ON cognition_nodes(kind, claim_hash, project_path);
+CREATE INDEX IF NOT EXISTS idx_cog_nodes_status ON cognition_nodes(status);
+
+CREATE TABLE IF NOT EXISTS cognition_edges (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    src_id     INTEGER NOT NULL REFERENCES cognition_nodes(id) ON DELETE CASCADE,
+    dst_id     INTEGER NOT NULL REFERENCES cognition_nodes(id) ON DELETE CASCADE,
+    kind       TEXT    NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE(src_id, dst_id, kind)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cog_edges_src ON cognition_edges(src_id);
+CREATE INDEX IF NOT EXISTS idx_cog_edges_dst ON cognition_edges(dst_id);
+
+CREATE TABLE IF NOT EXISTS cognition_anchors (
+    node_id INTEGER NOT NULL REFERENCES cognition_nodes(id) ON DELETE CASCADE,
+    kind    TEXT    NOT NULL,
+    value   TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_cog_anchors_kind_value ON cognition_anchors(kind, value);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cog_anchors_node_kind_value ON cognition_anchors(node_id, kind, value);
+
+CREATE TABLE IF NOT EXISTS cognition_evidence (
+    node_id    INTEGER NOT NULL REFERENCES cognition_nodes(id) ON DELETE CASCADE,
+    kind       TEXT    NOT NULL,
+    ref        TEXT,
+    detail     TEXT,
+    created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_cog_evidence_node ON cognition_evidence(node_id);
+
+CREATE TABLE IF NOT EXISTS cognition_embeddings (
+    node_id INTEGER PRIMARY KEY REFERENCES cognition_nodes(id) ON DELETE CASCADE,
+    vector  BLOB
+);
 `

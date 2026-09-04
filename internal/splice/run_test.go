@@ -3739,8 +3739,11 @@ func TestRunPassRepairCapsAtTwo(t *testing.T) {
 	if err != nil || !completed {
 		t.Fatalf("runPass: completed=%v err=%v", completed, err)
 	}
-	if writerCalls != 3 || testCalls != 3 {
-		t.Fatalf("calls = code_writer %d test_runner %d, want 3/3 (initial + 2 capped repairs)", writerCalls, testCalls)
+	// A3: the scripted writer reapplies the identical failure with no new
+	// evidence each round, so the no-progress guard stops the loop after one
+	// evidence-informed retry instead of consuming both repair slots.
+	if writerCalls != 2 || testCalls != 2 {
+		t.Fatalf("calls = code_writer %d test_runner %d, want 2/2 (initial + 1 guarded repair)", writerCalls, testCalls)
 	}
 	var writerRecords, runnerRecords int
 	for _, rec := range records {
@@ -3909,8 +3912,10 @@ func TestRunRepairExhaustedInteractionUnresolved(t *testing.T) {
 	if outcome.Interactions[0].Resolved {
 		t.Fatal("Resolved = true, want false (exhausted)")
 	}
-	if outcome.Interactions[0].Repairs != maxLocalRepairs {
-		t.Fatalf("Repairs = %d, want %d", outcome.Interactions[0].Repairs, maxLocalRepairs)
+	// A3: the identical failure with no new evidence stops the loop after
+	// one evidence-informed retry.
+	if outcome.Interactions[0].Repairs != 1 {
+		t.Fatalf("Repairs = %d, want 1 (no-progress guard)", outcome.Interactions[0].Repairs)
 	}
 }
 

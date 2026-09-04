@@ -7,6 +7,7 @@ package splice
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -34,18 +35,25 @@ func (s *scriptedTestRunner) Run(_ context.Context, _ schemas.HarnessStageInput,
 	return schemas.HarnessStageOutput{
 		Summary:    summaryFor(failed),
 		Confidence: 1.0,
-		Data:       testResultsPayload(failed),
+		Data:       testResultsPayloadVarying(failed, s.runs),
 	}, nil
 }
 
 func testResultsPayload(failed bool) map[string]any {
+	return testResultsPayloadVarying(failed, 0)
+}
+
+// testResultsPayloadVarying varies the failing test name per run so a
+// genuinely progressing repair produces new failure evidence (the A3 guard
+// requires new evidence to allow the next repair).
+func testResultsPayloadVarying(failed bool, run int) map[string]any {
 	status := "passed"
 	if failed {
 		status = "failed"
 	}
 	name := "TestPasses"
 	if failed {
-		name = "TestStillFails"
+		name = fmt.Sprintf("TestStillFails%d", run)
 	}
 	return map[string]any{
 		"test_results": schemas.TestRunResults{
@@ -155,6 +163,9 @@ func TestExhaustedRepairsKeepExactlyOneFailingPayload(t *testing.T) {
 	if repaired || interaction.Resolved {
 		t.Fatalf("repaired = %v resolved = %v, want exhausted unresolved", repaired, interaction.Resolved)
 	}
+	// The scripted runner varies the failing test name per run, so each
+	// retry sees new evidence and the full repair budget is consumed. The
+	// no-progress stop is pinned separately in repair_progress_test.go.
 	if interaction.Repairs != maxLocalRepairs {
 		t.Fatalf("repairs = %d, want %d", interaction.Repairs, maxLocalRepairs)
 	}
@@ -205,8 +216,13 @@ func TestRepairEmitsLabeledRerunAndExhaustionEvents(t *testing.T) {
 	if !strings.Contains(joined, "repair re-entry") {
 		t.Fatalf("events must label the rerun, got:\n%s", joined)
 	}
+	// The varied-failure runner consumes the full budget: exhaustion must
+	// stay distinguishable from a no-progress stop in streams.
 	if !strings.Contains(joined, "repair_exhausted") {
 		t.Fatalf("events must distinguish exhaustion, got:\n%s", joined)
+	}
+	if strings.Contains(joined, repairNoProgressReason) {
+		t.Fatalf("varying evidence must not trigger the no-progress stop, got:\n%s", joined)
 	}
 }
 
