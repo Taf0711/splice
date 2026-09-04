@@ -6,58 +6,154 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Taf0711/splice/internal/memd"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
-func TestFormatMemoryStats(t *testing.T) {
+// memoryCardText renders a memory card payload through the real styled-card
+// path and strips ANSI, so assertions run against visible text.
+func memoryCardText(t *testing.T, text string) string {
+	t.Helper()
+	payload, ok := commandCardTranscriptPayload(text)
+	if !ok {
+		t.Fatalf("memory result must carry the command-card prefix, got %q", text)
+	}
+	return plainRender(t, renderCommandCardRow(payload, 96))
+}
+
+// timeNowUnixDaysAgo returns a Unix timestamp N days before now, for fixtures.
+func timeNowUnixDaysAgo(days int) int64 {
+	return time.Now().Unix() - int64(days)*86400
+}
+
+func TestRenderMemoryStatsCardCarriesCounts(t *testing.T) {
 	stats := memd.MemoryStats{
 		Total:       5,
 		ByType:      map[string]int{"decision": 3, "test_command": 2},
 		DBSizeBytes: 4096,
 	}
-	out := formatMemoryStats(stats)
-	for _, want := range []string{"5", "decision", "3", "test_command", "2", "KB"} {
+	out := memoryCardText(t, renderMemoryStatsCard(stats))
+	// Header counts ride the summary line; the DB size is humanized.
+	for _, want := range []string{"Memory", "5 observations", "4.0 KB", "decision", "3", "test_command", "2"} {
 		if !strings.Contains(out, want) {
-			t.Fatalf("expected output to contain %q, got:\n%s", want, out)
+			t.Fatalf("stats card missing %q, got:\n%s", want, out)
+		}
+	}
+	// The emoji header is gone: P3 makes emoji a non-token, and the frame
+	// calls out the old 🧵 header by name.
+	if strings.Contains(out, "🧵") {
+		t.Fatalf("stats card must not render the emoji header, got:\n%s", out)
+	}
+	// Footer pointers must appear on the card.
+	for _, want := range []string{"/memory", "/memory recent", "/search <query>"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stats card missing footer pointer %q, got:\n%s", want, out)
 		}
 	}
 }
 
-func TestFormatMemoryList(t *testing.T) {
+func TestRenderMemoryListCardRendersTaggedTwoColumnRows(t *testing.T) {
 	obs := []schemas.MemoryObservation{
 		{Title: "First decision", Content: "Do this", MemoryType: "decision"},
 		{Title: "Second note", Content: "Remember that", MemoryType: "note"},
 	}
-	out := formatMemoryList("🧵 Memory Search: \"query\" — 2 result(s)", "No memories found.", obs)
-	for _, want := range []string{"query", "2 result", "First decision", "Second note", "decision", "note"} {
+	out := memoryCardText(t, renderMemoryListCard("Search", "2 hits", obs))
+	// Each observation is one "[type] title" row: no numbering, no emoji.
+	for _, want := range []string{"[decision] First decision", "[note] Second note", "2 hits", "Do this", "Remember that"} {
 		if !strings.Contains(out, want) {
-			t.Fatalf("expected output to contain %q, got:\n%s", want, out)
+			t.Fatalf("memory card missing %q, got:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "1. [") {
+		t.Fatalf("memory card must drop the numbered list, got:\n%s", out)
+	}
+	if strings.Contains(out, "🧵") {
+		t.Fatalf("memory card must not render the emoji header, got:\n%s", out)
+	}
+}
+
+func TestRenderMemoryListCardTagsCarryTypeTokens(t *testing.T) {
+	// Styled path: the [decision] tag renders amber, [finding] blue, other
+	// types muted. Compare against the theme's token renders directly — a
+	// regression here means the tag lost its semantic colour.
+	obs := []schemas.MemoryObservation{
+		{Title: "One", Content: "c", MemoryType: "decision"},
+		{Title: "Two", Content: "c", MemoryType: "finding"},
+		{Title: "Three", Content: "c", MemoryType: "note"},
+	}
+	payload, _ := commandCardTranscriptPayload(renderMemoryListCard("Search", "3 hits", obs))
+	styled := renderCommandCardRow(payload, 96)
+	for _, tag := range []string{"[decision]", "[finding]", "[note]"} {
+		if !strings.Contains(stripANSI(styled), tag) {
+			t.Fatalf("styled card missing tag %q, got:\n%s", tag, stripANSI(styled))
+		}
+	}
+	for _, want := range []string{
+		zeroTheme.amber.Render("[decision]"),
+		zeroTheme.blue.Render("[finding]"),
+		zeroTheme.muted.Render("[note]"),
+	} {
+		if !strings.Contains(styled, want) {
+			t.Fatalf("tag token styling missing %q in:\n%s", want, stripANSI(styled))
 		}
 	}
 }
 
-func TestFormatMemoryListEmpty(t *testing.T) {
-	out := formatMemoryList("🧵 Memory Search: \"query\" — 0 result(s)", "No memories found.", nil)
-	if !strings.Contains(out, "No memories found") {
-		t.Fatalf("expected empty result text, got:\n%s", out)
+func TestRenderMemoryListCardEmptyStateIsHonest(t *testing.T) {
+	out := memoryCardText(t, renderMemoryListCard("Search", "0 hits", nil))
+	if !strings.Contains(out, "0 hits") {
+		t.Fatalf("empty card must carry the zero-hit count, got:\n%s", out)
+	}
+	if !strings.Contains(out, "no observations match") {
+		t.Fatalf("empty card must render the honest empty line, got:\n%s", out)
 	}
 }
 
-func TestFormatMemoryListRecent(t *testing.T) {
+func TestRenderMemoryListCardDetailCarriesAge(t *testing.T) {
+	// One line per observation: title row, then the content continuation with
+	// the age suffix from the observation timestamp.
 	obs := []schemas.MemoryObservation{
-		{Title: "Alpha", Content: "One", MemoryType: "decision"},
-		{Title: "Beta", Content: "Two", MemoryType: "test_command"},
-		{Title: "Gamma", Content: "Three", MemoryType: "note"},
+		{Title: "Retry policy", Content: "GET HEAD PUT DELETE, never POST", MemoryType: "decision", UpdatedAt: timeNowUnixDaysAgo(4)},
 	}
-	out := formatMemoryList("🧵 Recent Memories — 3", "No memories yet.", obs)
-	if !strings.Contains(out, "3") {
-		t.Fatalf("expected count 3 in output, got:\n%s", out)
+	out := memoryCardText(t, renderMemoryListCard("Search", "1 hit", obs))
+	if !strings.Contains(out, "[decision] Retry policy") {
+		t.Fatalf("expected tagged title row, got:\n%s", out)
 	}
-	for _, title := range []string{"Alpha", "Beta", "Gamma"} {
-		if !strings.Contains(out, title) {
-			t.Fatalf("expected output to contain %q, got:\n%s", title, out)
+	if !strings.Contains(out, "4d ago") {
+		t.Fatalf("expected age suffix on the detail line, got:\n%s", out)
+	}
+}
+
+func TestMemoryObservationAgeWindows(t *testing.T) {
+	cases := []struct {
+		name string
+		days int
+		want string
+	}{
+		{"today", 0, "just now"},
+		{"recent", 4, "4d ago"},
+		{"months", 90, "3mo ago"},
+		{"years", 800, "2y ago"},
+	}
+	for _, tc := range cases {
+		obs := schemas.MemoryObservation{UpdatedAt: timeNowUnixDaysAgo(tc.days)}
+		if got := memoryObservationAge(obs); got != tc.want {
+			t.Fatalf("%s: memoryObservationAge = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+	// No timestamp: no dangling separator.
+	if got := memoryObservationAge(schemas.MemoryObservation{}); got != "" {
+		t.Fatalf("ageless observation must render no age, got %q", got)
+	}
+}
+
+func TestMemoryListSummaryCarriesQueryAndTypes(t *testing.T) {
+	got := memoryListSummary(3, "retry", map[string]int{"decision": 2, "finding": 1})
+	for _, want := range []string{"3 hits", `query "retry"`, "decision 2", "finding 1"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("summary missing %q, got %q", want, got)
 		}
 	}
 }

@@ -7,11 +7,15 @@ package tui
 // no ack ever draws a card (the NUL card markers must never appear).
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/Taf0711/splice/internal/sessions"
+	"github.com/Taf0711/splice/internal/tools"
 )
 
 // ackRowsFromCommand drives a real /command through the composer and returns
@@ -149,5 +153,153 @@ func TestAckRendersInView(t *testing.T) {
 	view := plainRender(t, next.View())
 	if !strings.Contains(view, "nothing to copy yet") {
 		t.Fatalf("copy ack not visible in the real View:\n%s", view[len(view)-800:])
+	}
+}
+
+// /rewind with no session: blocked, the ! marker, and the unblock after the
+// em-dash ("a blocked ack names the unblock, never just the block").
+func TestAckRewindBlockedNoSession(t *testing.T) {
+	m := sizedTestModel(120)
+	rows := ackRows(t, m, "/rewind")
+	assertAckGrammar(t, rows[0], "rewind", true)
+	plain := ansi.Strip(rows[0].text)
+	if !strings.Contains(plain, "no active session") {
+		t.Fatalf("blocked /rewind ack missing the outcome: %q", plain)
+	}
+}
+
+// /rewind while a run is in progress: the frame's exact shape —
+// `! rewind  a run is in progress — esc esc to cancel, then rewind`.
+func TestAckRewindBlockedMidRun(t *testing.T) {
+	m := rewindAckModel(t)
+	m.pending = true
+	rows := ackRows(t, m, "/rewind")
+	assertAckGrammar(t, rows[0], "rewind", true)
+	plain := ansi.Strip(rows[0].text)
+	if !strings.Contains(plain, "a run is in progress") || !strings.Contains(plain, "esc esc to cancel, then rewind") {
+		t.Fatalf("blocked /rewind ack missing outcome or unblock: %q", plain)
+	}
+}
+
+// /rewind while a cancelled run is still flushing: blocked, with the retry
+// unblock.
+func TestAckRewindBlockedFlushing(t *testing.T) {
+	m := rewindAckModel(t)
+	m.flushRunIDs = map[int]string{1: "stale"}
+	rows := ackRows(t, m, "/rewind")
+	assertAckGrammar(t, rows[0], "rewind", true)
+	plain := ansi.Strip(rows[0].text)
+	if !strings.Contains(plain, "still flushing") || !strings.Contains(plain, "retry in a moment") {
+		t.Fatalf("blocked /rewind flush ack missing outcome or unblock: %q", plain)
+	}
+}
+
+// rewindAckModel builds a model with an active session (one checkpoint event
+// logged) so /rewind passes the no-session gate and reaches the busy gates.
+func rewindAckModel(t *testing.T) model {
+	t.Helper()
+	store := testSessionStore(t)
+	session, err := store.Create(sessions.CreateInput{Title: "Rewind blocked", Cwd: t.TempDir(), ModelID: "gpt-4.1", Provider: "openai"})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	appendTestEvent(t, store, session.SessionID, sessions.EventSessionCheckpoint, map[string]any{"tool": "write_file", "files": []any{}})
+
+	m := sizedTestModel(120)
+	m.sessionStore = store
+	m.activeSession = session
+	return m
+}
+
+// A successful /rewind carries the frame's evidence rule IN the ok ack:
+// evidence is invalidated, verification must run again.
+func TestAckRewindOKStatesEvidenceInvalidation(t *testing.T) {
+	store := testSessionStore(t)
+	session, err := store.Create(sessions.CreateInput{Title: "Rewind ack", Cwd: t.TempDir(), ModelID: "gpt-4.1", Provider: "openai"})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	appendTestEvent(t, store, session.SessionID, sessions.EventMessage, map[string]any{"role": "user", "content": "first request"})
+	appendTestEvent(t, store, session.SessionID, sessions.EventSessionCheckpoint, map[string]any{"tool": "write_file", "files": []any{}})
+
+	m := newModel(context.Background(), Options{SessionStore: store})
+	m.input.SetValue("/resume " + session.SessionID)
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	m = updated.(model)
+
+	rows := ackRows(t, m, "/rewind latest")
+	assertAckGrammar(t, rows[0], "rewind", false)
+	plain := ansi.Strip(rows[0].text)
+	if !strings.Contains(plain, "evidence was invalidated") || !strings.Contains(plain, "verification must run again") {
+		t.Fatalf("ok /rewind ack missing the evidence-invalidation warning: %q", plain)
+	}
+}
+
+// /selfcorrect with a bad argument: blocked, and the unblock names the valid
+// arguments (usage).
+func TestAckSelfCorrectUsageBlocked(t *testing.T) {
+	m := sizedTestModel(120)
+	rows := ackRows(t, m, "/selfcorrect banana")
+	assertAckGrammar(t, rows[0], "selfcorrect", true)
+	plain := ansi.Strip(rows[0].text)
+	if !strings.Contains(plain, "banana") || !strings.Contains(plain, "/selfcorrect [status|on|off|tests|full|lsp]") {
+		t.Fatalf("blocked /selfcorrect ack missing arg or usage unblock: %q", plain)
+	}
+}
+
+// /stop with a bogus session id: blocked usage ack with the unblock.
+func TestAckStopBlockedUsage(t *testing.T) {
+	m := stopAckModel(t)
+	rows := ackRows(t, m, "/stop abc")
+	assertAckGrammar(t, rows[0], "stop", true)
+	plain := ansi.Strip(rows[0].text)
+	if !strings.Contains(plain, "invalid session id: abc") || !strings.Contains(plain, "usage: /stop [session_id]") {
+		t.Fatalf("blocked /stop ack missing outcome or usage unblock: %q", plain)
+	}
+}
+
+// /stop with nothing running: ok ack, no card, no ! marker.
+func TestAckStopOKNothingRunning(t *testing.T) {
+	m := stopAckModel(t)
+	rows := ackRows(t, m, "/stop")
+	assertAckGrammar(t, rows[0], "stop", false)
+	plain := ansi.Strip(rows[0].text)
+	if !strings.Contains(plain, "no background terminals running") {
+		t.Fatalf("ok /stop ack missing the nothing-running outcome: %q", plain)
+	}
+}
+
+// stopAckModel registers the fake exec-session tool so /stop reaches its own
+// gates (without a controller the ack is the unavailable refusal).
+func stopAckModel(t *testing.T) model {
+	t.Helper()
+	m := sizedTestModel(120)
+	m.registry = tools.NewRegistry()
+	m.registry.Register(&fakeExecSessionTool{})
+	return m
+}
+
+// /image with a missing file: blocked ack naming the file, with the unblock.
+func TestAckImageBlockedMissingFile(t *testing.T) {
+	root := t.TempDir()
+	m := sizedTestModel(120)
+	m.cwd = root
+	m.modelName = "gpt-4.1" // a vision model, so the refusal is the file, not the gate
+	rows := ackRows(t, m, "/image nope.png")
+	assertAckGrammar(t, rows[0], "image", true)
+	plain := ansi.Strip(rows[0].text)
+	if !strings.Contains(plain, "nope.png") {
+		t.Fatalf("blocked /image ack must name the missing file: %q", plain)
+	}
+}
+
+// /image clear: ok ack.
+func TestAckImageClearOK(t *testing.T) {
+	m := sizedTestModel(120)
+	rows := ackRows(t, m, "/image clear")
+	assertAckGrammar(t, rows[0], "image", false)
+	plain := ansi.Strip(rows[0].text)
+	if !strings.Contains(plain, "cleared pending attachments") {
+		t.Fatalf("ok /image clear ack missing the outcome: %q", plain)
 	}
 }

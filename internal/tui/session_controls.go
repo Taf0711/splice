@@ -303,7 +303,12 @@ func (m model) handleSelfCorrectCommand(args string) (model, string) {
 	case "off", "lsp":
 		m.selfCorrectTests = false
 	default:
-		return m, "Self-correct\nUsage: /selfcorrect [status|on|off|tests|full|lsp]"
+		return m, ackSystemText(ack{
+			verb:    "selfcorrect",
+			blocked: true,
+			outcome: "unknown argument: " + args,
+			unblock: "usage: /selfcorrect [status|on|off|tests|full|lsp]",
+		})
 	}
 	return m, m.selfCorrectText()
 }
@@ -437,25 +442,50 @@ func (m model) runCompact() tea.Cmd {
 // "/rewind <n>" rewinds to a specific event sequence.
 func (m model) handleRewindCommand(args string) (model, string) {
 	if m.sessionStore == nil || m.activeSession.SessionID == "" {
-		return m, "Rewind\nno active session to rewind."
+		return m, ackSystemText(ack{
+			verb:    "rewind",
+			blocked: true,
+			outcome: "no active session to rewind",
+			unblock: "start or resume a session first, then rewind",
+		})
 	}
 	if m.pending {
-		return m, "Rewind\ncannot rewind while a run is in progress."
+		return m, ackSystemText(ack{
+			verb:    "rewind",
+			blocked: true,
+			outcome: "a run is in progress",
+			unblock: "esc esc to cancel, then rewind",
+		})
 	}
 	// A cancelled run's late flush hasn't appended its checkpoint events yet:
 	// ApplyRewind would prune those checkpoint blobs as unreferenced, then the
 	// flush would re-append pre-rewind events after the rewind marker.
 	if len(m.flushRunIDs) > 0 {
-		return m, "Rewind\ncannot rewind while a cancelled run is still flushing — retry in a moment."
+		return m, ackSystemText(ack{
+			verb:    "rewind",
+			blocked: true,
+			outcome: "a cancelled run is still flushing",
+			unblock: "retry in a moment",
+		})
 	}
 	arg := strings.TrimSpace(strings.ToLower(args))
 	target, err := m.resolveRewindTarget(arg)
 	if err != nil {
-		return m, "Rewind\n" + err.Error()
+		return m, ackSystemText(ack{
+			verb:    "rewind",
+			blocked: true,
+			outcome: err.Error(),
+			unblock: "usage: /rewind [latest|<sequence>]",
+		})
 	}
 	report, err := m.sessionStore.ApplyRewind(m.activeSession.SessionID, m.cwd, target)
 	if err != nil {
-		return m, "Rewind\n" + err.Error()
+		return m, ackSystemText(ack{
+			verb:    "rewind",
+			blocked: true,
+			outcome: "rewind failed: " + err.Error(),
+			unblock: "fix the failure, then rewind again",
+		})
 	}
 
 	// ApplyRewind truncated the persisted event log, restored files, and appended a
@@ -471,7 +501,12 @@ func (m model) handleRewindCommand(args string) (model, string) {
 	events, readErr := m.sessionStore.ReadEvents(m.activeSession.SessionID)
 	if readErr != nil {
 		m.sessionEvents = nil // drop stale context so it can't reach the next prompt
-		return m, fmt.Sprintf("Rewind\nrewound to sequence %d, but reloading the session failed (in-memory context cleared): %s", target, readErr.Error())
+		return m, ackSystemText(ack{
+			verb:    "rewind",
+			blocked: true,
+			outcome: ackf("rewound to sequence %d, but reloading the session failed (in-memory context cleared): %s", target, readErr.Error()),
+			unblock: "start a new session, or retry /resume once the store recovers",
+		})
 	}
 	m.sessionEvents = append([]sessions.Event{}, events...)
 	rows := initialTranscript()
@@ -481,12 +516,19 @@ func (m model) handleRewindCommand(args string) (model, string) {
 	// pre-rewind scrollback above it stays, as scrollback cannot be un-printed.
 	m.resetFlushFrontier("· rewound ·")
 
-	summary := fmt.Sprintf("Rewound to sequence %d\n%d file(s) restored, %d deleted, %d skipped.",
-		target, report.FilesRestored, report.FilesDeleted, len(report.Skipped))
+	// One ack line (P15): the rewind facts, then the frame's evidence rule.
+	// A rewind drops the evidence the last verification was judged on, so the
+	// ok ack itself must say verification must run again.
+	outcome := fmt.Sprintf("rewound to sequence %d, %d file(s) restored, %d deleted",
+		target, report.FilesRestored, report.FilesDeleted)
 	if len(report.Skipped) > 0 {
-		summary += "\nskipped (not recoverable): " + strings.Join(report.Skipped, ", ")
+		outcome += ", skipped (not recoverable): " + strings.Join(report.Skipped, ", ")
 	}
-	return m, summary
+	outcome += "; evidence was invalidated, verification must run again"
+	return m, ackSystemText(ack{
+		verb:    "rewind",
+		outcome: outcome,
+	})
 }
 
 // resolveRewindTarget maps a /rewind argument to a keep-through event sequence.
@@ -540,6 +582,7 @@ func (m model) compactText(requested bool) string {
 				"requested: " + boolText(m.compactRequests > 0),
 				"model: " + displayValue(request.ModelName, "none"),
 				"context window: " + compactContextWindowText(request.ContextWindow),
+				"context fill: " + compactContextFillText(request),
 				"auto compaction: model adaptive at ~80% of context window",
 				fmt.Sprintf("estimated transcript: %d tokens", request.EstimatedTokens),
 				fmt.Sprintf("visible transcript rows: %d", request.VisibleTranscriptRows),
@@ -556,7 +599,7 @@ func (m model) compactText(requested bool) string {
 		sections = append(sections, commandSection{
 			Title: "Result",
 			Lines: []string{
-				"compacted: no",
+				"none this session",
 				"error: " + m.lastCompactError,
 			},
 		})
@@ -564,16 +607,26 @@ func (m model) compactText(requested bool) string {
 		sections = append(sections, commandSection{
 			Title: "Result",
 			Lines: []string{
-				"compacted: no",
+				"none this session",
 				"reason: manual compactor unavailable",
 			},
+		})
+	} else {
+		sections = append(sections, commandSection{
+			Title: "Result",
+			Lines: []string{"none this session"},
 		})
 	}
 	return renderCommandOutput(commandOutput{
 		Title:    "Compact",
 		Status:   status,
 		Sections: sections,
-		Hints:    []string{"manual compaction affects this TUI session when a compactor is available"},
+		// The frame's action line: "now" is the action and what it preserves.
+		Hints: []string{
+			"/compact now — summarize now, keep decisions and evidence verbatim",
+			"compaction never drops settled decisions or receipts, only prose",
+			"manual compaction affects this TUI session when a compactor is available",
+		},
 	})
 }
 
@@ -641,7 +694,42 @@ func (m model) compactabilityText(request CompactRequest) string {
 	if request.EstimatedTokens <= 0 {
 		return "compactable: no (empty transcript)"
 	}
+	// The frame's status card names the count ("9 turns older than the last
+	// checkpoint"). The store plan is authoritative; when it is not readable,
+	// fall back to the session-event estimate above the preserve window.
+	if count := m.compactableTurnCount(request); count > 0 {
+		turns := "turns"
+		if count == 1 {
+			turns = "turn"
+		}
+		return fmt.Sprintf("compactable: yes — %d %s older than the last checkpoint", count, turns)
+	}
 	return "compactable: yes"
+}
+
+// compactableTurnCount asks the session store how many events a manual
+// compaction would summarize (events older than the preserve-last checkpoint
+// window). Falls back to the session-event estimate when the store cannot plan.
+func (m model) compactableTurnCount(request CompactRequest) int {
+	if m.sessionCompactor != nil {
+		// An injected compactor owns its event selection; the store plan would
+		// not describe what it summarizes. Fall back to the estimate.
+		if request.SessionEventCount > tuiCompactionPreserveLast {
+			return request.SessionEventCount - tuiCompactionPreserveLast
+		}
+		return 0
+	}
+	if m.sessionStore == nil || strings.TrimSpace(m.activeSession.SessionID) == "" {
+		return 0
+	}
+	plan, err := m.sessionStore.PlanCompaction(m.activeSession.SessionID, sessions.CompactionOptions{
+		PreserveLast:   tuiCompactionPreserveLast,
+		MaxPromptChars: tuiCompactionMaxPromptChars,
+	})
+	if err != nil {
+		return 0
+	}
+	return plan.CompactableCount
 }
 
 func (m model) hasSessionBackedCompactor() bool {
@@ -748,6 +836,20 @@ func compactContextWindowText(window int) string {
 		return "unknown"
 	}
 	return formatContextWindow(window) + " tokens"
+}
+
+// compactContextFillText reports how much of the model's context window the
+// estimated transcript consumes, e.g. "78% of 200k tokens". Empty when the
+// window is unknown or the transcript is empty (nothing to fill).
+func compactContextFillText(request CompactRequest) string {
+	if request.ContextWindow <= 0 || request.EstimatedTokens <= 0 {
+		return "n/a"
+	}
+	percent := request.EstimatedTokens * 100 / request.ContextWindow
+	if percent > 999 {
+		percent = 999
+	}
+	return fmt.Sprintf("%d%% of %s", percent, compactContextWindowText(request.ContextWindow))
 }
 
 func estimateTranscriptTokens(rows []transcriptRow) int {

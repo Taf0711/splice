@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -97,6 +98,8 @@ type model struct {
 	loadSkills                  func() []skills.Skill  // lazy installed-skills loader for /skills + /<skill-name>
 	userConfigPath              string
 	doctorUserConfigPath        string
+	doctorGOOS                  string                       // sandbox-backend check platform override; empty = runtime.GOOS
+	doctorLookupExecutable      func(string) (string, error) // PATH stub for deterministic doctor checks; nil = exec.LookPath
 	projectConfigPath           string
 	gitBranch                   string
 	providerName                string
@@ -940,6 +943,10 @@ func newModel(ctx context.Context, options Options) model {
 	if doctorUserConfigPath == "" {
 		doctorUserConfigPath = options.UserConfigPath
 	}
+	// Deterministic doctor checks: tests can pin the sandbox platform and the
+	// PATH lookups so the sandbox/LSP results do not depend on the host.
+	doctorGOOS := options.DoctorGOOS
+	doctorLookup := options.DoctorLookupExecutable
 
 	permissionMode := options.PermissionMode
 	if permissionMode == "" {
@@ -986,6 +993,8 @@ func newModel(ctx context.Context, options Options) model {
 		composerCursorVisible:       true,
 		userConfigPath:              options.UserConfigPath,
 		doctorUserConfigPath:        doctorUserConfigPath,
+		doctorGOOS:                  doctorGOOS,
+		doctorLookupExecutable:      doctorLookup,
 		projectConfigPath:           options.ProjectConfigPath,
 		savedProviders:              options.SavedProviders,
 		gitBranch:                   gitBranch(cwd),
@@ -1131,6 +1140,13 @@ func (m model) doctorOptions(connectivity bool) doctor.Options {
 		WorkspaceRoot:  m.cwd,
 		Connectivity:   connectivity,
 		ProviderHealth: health,
+		GOOS:           m.doctorGOOS,
+		LookupExecutable: func(name string) (string, error) {
+			if m.doctorLookupExecutable != nil {
+				return m.doctorLookupExecutable(name)
+			}
+			return exec.LookPath(name)
+		},
 	}
 }
 
@@ -4989,7 +5005,15 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	case commandDoctor:
 		return m.startDoctorCommand(command.text)
 	case commandSearch:
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.searchText(command.text)})
+		text := m.searchText(command.text)
+		// The frame's '! /search with no query is an error' rule: an
+		// error-style reply naming the usage must be appended as an error row,
+		// not the calm system note an empty result would produce.
+		kind := actionAppendSystem
+		if strings.HasPrefix(text, "Search\nusage: ") {
+			kind = actionAppendError
+		}
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: kind, text: text})
 		return m, nil
 	case commandResume:
 		if m.pending {

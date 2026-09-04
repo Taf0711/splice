@@ -740,6 +740,10 @@ func renderCommandCardRow(text string, width int) string {
 			lines = append(lines, zeroTheme.accent.Render("actions: ")+zeroTheme.ink.Render(strings.TrimSpace(strings.TrimPrefix(trimmed, "actions:"))))
 		case isCommandCardHintLine(trimmed):
 			lines = append(lines, zeroTheme.faint.Render(line))
+		case isCommandCardTagHeading(strings.TrimSpace(strings.TrimLeft(line, " 	"))):
+			// P14 memory-card row: "[type] title" with the tag carrying the type's
+			// token colour (decision amber, finding blue, everything else muted).
+			lines = append(lines, renderMemoryTagHeading(line[:len(line)-len(strings.TrimLeft(line, " 	"))], strings.TrimSpace(strings.TrimLeft(line, " 	"))))
 		case isIndentedCommandCardRow(line):
 			// A content row (indented): a "/cmd … - description" gets two-tone
 			// styling (bright name, muted description); a "key  value" field or a
@@ -776,6 +780,10 @@ func renderPlanCardRow(text string, width int) string {
 			// "status: …" line entirely for the minimal card.
 		case isCommandCardHintLine(trimmed):
 			lines = append(lines, zeroTheme.faint.Render(line))
+		case isCommandCardTagHeading(strings.TrimSpace(strings.TrimLeft(line, " \t"))):
+			// P14 memory-card row: "[type] title" carries its tag's token colour
+			// here too, so the minimal card stays consistent with the standard one.
+			lines = append(lines, renderMemoryTagHeading(line[:len(line)-len(strings.TrimLeft(line, " \t"))], strings.TrimSpace(strings.TrimLeft(line, " \t"))))
 		case isIndentedCommandCardRow(line):
 			lines = append(lines, styleCommandCardContentRow(line))
 		default:
@@ -832,6 +840,36 @@ func styleCommandCardContentRow(line string) string {
 	// "key   value" field row: the value carries the information, so keep the
 	// whole row in readable ink rather than the old faint grey.
 	return indent + zeroTheme.ink.Render(body)
+}
+
+// isCommandCardTagHeading reports whether a row body starts with a "[tag] "
+// marker: the P14 memory-card observation heading. Tag rows are indented, so
+// the indent check happens in the card renderer's switch ordering.
+func isCommandCardTagHeading(body string) bool {
+	if !strings.HasPrefix(body, "[") {
+		return false
+	}
+	tag, rest, ok := strings.Cut(body, "]")
+	if !ok || tag == "[" {
+		return false
+	}
+	return strings.HasPrefix(rest, " ") || rest == ""
+}
+
+// renderMemoryTagHeading styles one "[tag] title" observation row. The tag
+// carries the type's semantic token: [decision] amber, [finding] blue, every
+// other type muted (P3: colour rides theme tokens, never literals). The title
+// stays ink so it reads at full strength.
+func renderMemoryTagHeading(indent, body string) string {
+	tag, rest, _ := strings.Cut(body, "]")
+	style := zeroTheme.muted
+	switch strings.TrimSpace(strings.TrimPrefix(tag, "[")) {
+	case "decision":
+		style = zeroTheme.amber
+	case "finding":
+		style = zeroTheme.blue
+	}
+	return indent + style.Render(tag+"]") + zeroTheme.ink.Render(rest)
 }
 
 // isCommandCardStatusLine reports whether trimmed is a "status: <state>" line.
