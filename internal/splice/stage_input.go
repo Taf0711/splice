@@ -247,6 +247,19 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 					p.Trace.recordMemory(input.StageName, p.Iteration, direct.bundle)
 				}
 			} else {
+				// Run-local replay guard: a direct hit the stage already
+				// consumed this run is NOT a retrieval miss. The hit still
+				// counts for telemetry (fresh/stale/direct above), the bundle
+				// empties, and because the direct path returned true the
+				// broad search below is skipped — suppression must not push
+				// the same cognition back through FTS redelivery.
+				suppressed := p.Trace.filterAlreadyDelivered(input.StageName, &direct.bundle)
+				if suppressed > 0 {
+					emitProgress(p.Options, fmt.Sprintf("[%s] cognition: %d already-consumed item(s) suppressed on re-entry\n", input.StageName, suppressed))
+				}
+				if direct.bundle.Observations == nil && len(direct.bundle.Observations) == 0 {
+					direct.bundle.Observations = []schemas.MemoryObservation{}
+				}
 				input.MemoryBundle = &direct.bundle
 				if p.Trace != nil {
 					p.Trace.recordMemoryLookup(input.StageName, p.Iteration, "direct", direct.fresh, direct.stale)
@@ -311,6 +324,13 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 					bundle.Exemplars = nil
 					admitted.Bundle = &bundle
 				}
+				// Run-local replay guard: items this stage already consumed
+				// earlier in the run are suppressed from delivery. Retrieval
+				// and admission ran for real (counts and miss-path telemetry
+				// stay honest); only the prompt replay is removed. Genuinely
+				// new cognition stays fully eligible (consumed-set semantics,
+				// not a memory-off switch).
+				p.Trace.filterAlreadyDelivered(input.StageName, admitted.Bundle)
 				input.MemoryBundle = admitted.Bundle
 				emitProgress(p.Options, admissionProgressLine(input.StageName, admitted))
 			}
@@ -331,6 +351,15 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 	// Post-compaction trace accounting: counts describe delivered memory.
 	if p.Trace != nil && input.MemoryBundle != nil {
 		p.Trace.recordMemory(input.StageName, p.Iteration, *input.MemoryBundle)
+	}
+	// Mark consumption AFTER compaction so only model-visible items enter the
+	// run-local consumed set: an item compaction dropped never reached the
+	// model and stays eligible for a later legitimate delivery. The
+	// retrieve-no-prompt mode never reaches this marking (its bundle is
+	// emptied above before the post-compaction accounting sees items), which
+	// keeps "consumed" meaning model-visible cognition, not retrieval activity.
+	if p.Trace != nil {
+		p.Trace.markDelivered(input.StageName, input.MemoryBundle)
 	}
 	return input, nil
 }

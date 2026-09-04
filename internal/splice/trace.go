@@ -9,6 +9,7 @@ import (
 
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/splice/cognition"
+	"github.com/Taf0711/splice/internal/splice/memoryreason"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
@@ -81,6 +82,27 @@ type runTraceAccumulator struct {
 	muSig          sync.Mutex
 	mutationSig    string
 	mutationSigSet bool
+
+	// Run-local cognition replay guard. deliveredMemory records the stable
+	// IDs of cognition items the model ACTUALLY received per consuming stage
+	// (post-admission, post-compaction), keyed (stage, memoryID). Repair
+	// re-entry shares this accumulator, so a stage that has already consumed
+	// an item does not receive it again during the same run: repair should
+	// react to new verifier and failure evidence, not re-read the same prior.
+	// The set lives and dies with the run (the accumulator is built fresh per
+	// splicerun.Run), so a new run starts with an empty consumed set.
+	muDelivered      sync.Mutex
+	deliveredMemory  map[deliveredMemoryKey]struct{}
+	replaySuppressed int
+}
+
+// deliveredMemoryKey identifies one cognition consumption: which stage
+// received which stable memory item. The same item stays deliverable to
+// other memory-consuming stages; only replay to the same stage is
+// suppressed.
+type deliveredMemoryKey struct {
+	StageName string
+	MemoryID  string
 }
 
 func newRunTraceAccumulator(store TraceStore, runID, sessionID, projectRoot string, plan schemas.ExecutionPlan, memoryStatus string, warnWriteFailure func(msg string)) *runTraceAccumulator {
@@ -93,7 +115,93 @@ func newRunTraceAccumulator(store TraceStore, runID, sessionID, projectRoot stri
 		memoryStatus:     memoryStatus,
 		warnWriteFailure: warnWriteFailure,
 		stages:           make(map[stageKey]schemas.InputMeta),
+		deliveredMemory:  make(map[deliveredMemoryKey]struct{}),
 	}
+}
+
+// filterAlreadyDelivered removes every item the given stage has already
+// consumed earlier in this run from the bundle, in place. It is the run-local
+// replay guard: retrieval stays real (telemetry records what was retrieved),
+// but an item the model has already seen is suppressed from prompt delivery.
+// Observations are keyed by memoryreason.StableID (observation:<id>) and
+// exemplars by exemplar:<run_id>; content, rank, and retrieval path never
+// participate in the identity. Returns the number of items suppressed.
+func (tr *runTraceAccumulator) filterAlreadyDelivered(stageName string, bundle *schemas.MemoryBundle) int {
+	if tr == nil || bundle == nil || (len(bundle.Observations) == 0 && len(bundle.Exemplars) == 0) {
+		return 0
+	}
+	tr.muDelivered.Lock()
+	defer tr.muDelivered.Unlock()
+	suppressed := 0
+	kept := bundle.Observations[:0]
+	for _, obs := range bundle.Observations {
+		id := memoryreason.StableID(obs)
+		if id == "" {
+			// No stable identity: keep the item. Replay suppression keys on
+			// stable IDs only; an identity-less item cannot be recognized as
+			// a replay, and dropping it here would silently change delivery.
+			kept = append(kept, obs)
+			continue
+		}
+		key := deliveredMemoryKey{StageName: stageName, MemoryID: id}
+		if _, consumed := tr.deliveredMemory[key]; consumed {
+			suppressed++
+			continue
+		}
+		kept = append(kept, obs)
+	}
+	bundle.Observations = kept
+	keptEx := bundle.Exemplars[:0]
+	for _, ex := range bundle.Exemplars {
+		id := "exemplar:" + ex.RunID
+		key := deliveredMemoryKey{StageName: stageName, MemoryID: id}
+		if _, consumed := tr.deliveredMemory[key]; consumed {
+			suppressed++
+			continue
+		}
+		keptEx = append(keptEx, ex)
+	}
+	bundle.Exemplars = keptEx
+	tr.replaySuppressed += suppressed
+	return suppressed
+}
+
+// markDelivered records the stable IDs of the bundle a stage's invocation
+// FINALIZED as model-visible (after admission, replay filtering, and
+// compaction). Only model-visible items become consumed: an item that
+// admission rejected or compaction dropped never reached the model and
+// stays eligible for a later legitimate delivery.
+func (tr *runTraceAccumulator) markDelivered(stageName string, bundle *schemas.MemoryBundle) {
+	if tr == nil || bundle == nil {
+		return
+	}
+	if len(bundle.Observations) == 0 && len(bundle.Exemplars) == 0 {
+		return
+	}
+	tr.muDelivered.Lock()
+	defer tr.muDelivered.Unlock()
+	for _, obs := range bundle.Observations {
+		id := memoryreason.StableID(obs)
+		if id == "" {
+			continue
+		}
+		tr.deliveredMemory[deliveredMemoryKey{StageName: stageName, MemoryID: id}] = struct{}{}
+	}
+	for _, ex := range bundle.Exemplars {
+		tr.deliveredMemory[deliveredMemoryKey{StageName: stageName, MemoryID: "exemplar:" + ex.RunID}] = struct{}{}
+	}
+}
+
+// replaySuppressedCount reports how many cognition items this run suppressed
+// as replays. Test/debug seam for proving the mechanism fired; not written
+// into traces.
+func (tr *runTraceAccumulator) replaySuppressedCount() int {
+	if tr == nil {
+		return 0
+	}
+	tr.muDelivered.Lock()
+	defer tr.muDelivered.Unlock()
+	return tr.replaySuppressed
 }
 
 func (tr *runTraceAccumulator) noteStage(stage string, iteration int) {
