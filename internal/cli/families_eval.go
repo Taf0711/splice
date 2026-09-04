@@ -107,9 +107,9 @@ func parseFamiliesEvalArgs(args []string) (familiesEvalOptions, bool, error) {
 
 // familyManifest mirrors tests/evals/cognition-families/cognition-families.json.
 type familyManifest struct {
-	Schema   string          `json:"schema"`
-	Fixture  string          `json:"fixture"`
-	Families []familyEntry   `json:"families"`
+	Schema   string        `json:"schema"`
+	Fixture  string        `json:"fixture"`
+	Families []familyEntry `json:"families"`
 }
 
 type familyEntry struct {
@@ -119,27 +119,77 @@ type familyEntry struct {
 	TargetTask    string `json:"target_task"`
 	TopicKey      string `json:"topic_key"`
 	Anchor        string `json:"anchor"`
-	Observation   struct {
-		Title       string `json:"title"`
-		Content     string `json:"content"`
-		OwnerAgent  string `json:"owner_agent"`
-		MemoryType  string `json:"memory_type"`
-		Scope       string `json:"scope"`
-		Visibility  string `json:"visibility"`
+	// TargetCheckFile names the family's external verifier script (relative
+	// to the manifest directory). Splice's own exit code is never the eval
+	// verdict: only this verifier's exit code proves correctness.
+	TargetCheckFile string `json:"target_check_file"`
+	Observation     struct {
+		Title      string `json:"title"`
+		Content    string `json:"content"`
+		OwnerAgent string `json:"owner_agent"`
+		MemoryType string `json:"memory_type"`
+		Scope      string `json:"scope"`
+		Visibility string `json:"visibility"`
 	} `json:"observation"`
 }
 
 // familyPairRow is one per-attempt causal record for the attempts log.
+// Telemetry fields stay absent (omitempty) when the source has no data: an
+// unknown count is absent data, never a fabricated zero.
 type familyPairRow struct {
-	Family     string `json:"family"`
-	Attempt    int    `json:"attempt"`
-	Arm        string `json:"arm"` // cold | warm
-	Success    bool   `json:"success"`
-	Tokens     int    `json:"tokens"`
-	Telemetry  bool   `json:"telemetry_found"`
-	Error      string `json:"error,omitempty"`
-	SessionID  string `json:"session_id"`
+	Family    string `json:"family"`
+	Attempt   int    `json:"attempt"`
+	Arm       string `json:"arm"` // cold | warm
+	Success   bool   `json:"success"`
+	Tokens    int    `json:"tokens"`
+	Telemetry bool   `json:"telemetry_found"`
+	Error     string `json:"error,omitempty"`
+	SessionID string `json:"session_id"`
+
+	// InfraStatus classifies the attempt's outcome: "" (ran to a verdict),
+	// "timeout" (the per-run timeout cancelled the run), or an error class.
+	// A timeout is an infrastructure failure, never a model correctness
+	// failure, so it must stay separable from task failures.
+	InfraStatus string `json:"infra_status,omitempty"`
+	// LatencyMs is the wall-clock time of the exec run itself.
+	LatencyMs int64 `json:"latency_ms,omitempty"`
+
+	// Token split from the trace's stage records. Zero with
+	// TelemetryFound=false means unknown, not free.
+	InputTokens     int `json:"input_tokens,omitempty"`
+	OutputTokens    int `json:"output_tokens,omitempty"`
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+	CachedTokens    int `json:"cached_input_tokens,omitempty"`
+
+	// Work counters: tool calls, discovery searches, file reads (from the
+	// run's stream-json transcript) and pipeline interventions (repairs)
+	// from the trace.
+	ToolCalls      int `json:"tool_calls,omitempty"`
+	SearchCalls    int `json:"search_calls,omitempty"`
+	FileReads      int `json:"file_reads,omitempty"`
+	WebSearchCalls int `json:"web_search_calls,omitempty"`
+	Repairs        int `json:"repair_count,omitempty"`
+
+	// Outcome from the trace: status plus abort reason (abort_budget is the
+	// pathological tail marker).
+	Status      string `json:"trace_status,omitempty"`
+	AbortReason string `json:"abort_reason,omitempty"`
+
+	// Delivered memory: the post-compaction bundle the model actually saw,
+	// summed across the run's stages.
+	MemoryItems   int    `json:"memory_observations_delivered,omitempty"`
+	MemoryChars   int    `json:"memory_chars_delivered,omitempty"`
+	ExemplarItems int    `json:"exemplars_delivered,omitempty"`
+	DirectHits    int    `json:"direct_hits,omitempty"`
+	LookupMode    string `json:"retrieval_mode,omitempty"` // direct | search | ""
 }
+
+// familiesRunTimeout is the deterministic per-run bound: a provider stall
+// cancels the attempt, records an infrastructure failure, and the evaluation
+// continues. 30 minutes covers the observed 0-6 minute healthy pace with
+// head room; the pathological 200-minute stall this fixes must be
+// impossible, not merely rare.
+const familiesRunTimeout = 30 * time.Minute
 
 func runFamiliesEvalCommand(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	options, help, err := parseFamiliesEvalArgs(args)
@@ -164,6 +214,25 @@ func runFamiliesEvalCommand(args []string, stdout io.Writer, stderr io.Writer, d
 	fixtureDir := filepath.Join(options.TasksetDir, "fixture")
 	if info, err := os.Stat(fixtureDir); err != nil || !info.IsDir() {
 		return writeExecUsageError(stderr, fmt.Sprintf("fixture directory not found under %s", options.TasksetDir))
+	}
+	// Fail loud before any spend: every family must carry an external
+	// verifier file. "Splice says success" is never "eval success"; a
+	// missing verifier would silently degrade the run back to exit-0
+	// success, which is the bug this wiring exists to kill.
+	manifestDir := filepath.Dir(options.ManifestPath)
+	verifiers := make(map[string]string, len(manifest.Families))
+	for _, family := range manifest.Families {
+		if family.TargetCheckFile == "" {
+			return writeExecUsageError(stderr, fmt.Sprintf("family %s: no target_check_file; refusing unverified runs", family.ID))
+		}
+		data, err := os.ReadFile(filepath.Join(manifestDir, family.TargetCheckFile))
+		if err != nil {
+			return writeExecUsageError(stderr, fmt.Sprintf("family %s: read target_check_file: %v", family.ID, err))
+		}
+		if strings.TrimSpace(string(data)) == "" {
+			return writeExecUsageError(stderr, fmt.Sprintf("family %s: target_check_file %s is empty", family.ID, family.TargetCheckFile))
+		}
+		verifiers[family.ID] = string(data)
 	}
 
 	ctx, stop := signalContext()
@@ -219,19 +288,40 @@ func runFamiliesEvalCommand(args []string, stdout io.Writer, stderr io.Writer, d
 				memory string
 			}{{"cold", coldDir, "off"}, {"warm", warmDir, "on"}} {
 				// Reset THIS arm to pristine bytes before the attempt. The
-				// warm arm reset must NOT drop the seeded memory: memory
-				// lives in the sidecar DB keyed by project path, not in the
-				// arm directory, so a bytes reset is safe.
+				// reset commits the fixture into the SAME git state every
+				// time (gitCommitAll is idempotent on an unchanged tree), so
+				// the arm's HEAD commit stays stable across attempts and the
+				// seeded observation's SourceCommit keeps classifying FRESH.
 				if err := copyFixtureTree(fixtureDir, arm.dir); err != nil {
 					os.RemoveAll(warmDir)
 					os.RemoveAll(coldDir)
 					return writeAppError(stderr, "reset "+arm.name+" arm: "+err.Error(), exitCrash)
+				}
+				if arm.name == "warm" {
+					// Memory-state isolation: attempt N's run may persist
+					// new observations, exemplars, and traces. Reset the
+					// sidecar state for this project and re-seed the family
+					// observation so every warm attempt starts from the
+					// EXACT same cognition (repo bytes + seeded memory),
+					// never seed + experience(attempts 1..N-1).
+					if resetErr := resetWarmMemory(ctx, warmDir, family); resetErr != nil {
+						os.RemoveAll(warmDir)
+						os.RemoveAll(coldDir)
+						return writeAppError(stderr, fmt.Sprintf("reset warm memory (family %s attempt %d): %v", family.ID, attempt, resetErr), exitCrash)
+					}
 				}
 				// Session ids embed a run-start timestamp: a session store
 				// collision (a previous eval run with the same deterministic
 				// id) fails the exec outright, which is a harness bug, not a
 				// task outcome.
 				sessionID := fmt.Sprintf("eval-fam-%s-%s-r%d-%d", family.ID, arm.name, attempt, time.Now().UnixNano())
+				// Per-run timeout: a provider stall must cancel THIS run,
+				// record an infrastructure failure, and let the evaluation
+				// continue. The deadline context replaces the raw signal
+				// context only for the exec seam; the outer loop keeps
+				// honoring Ctrl-C on the parent.
+				runCtx, cancel := context.WithTimeout(ctx, familiesRunTimeout)
+				started := time.Now()
 				var out eval.RunOutput
 				var runErr error
 				for try := 0; try < 2; try++ {
@@ -243,17 +333,30 @@ func runFamiliesEvalCommand(args []string, stdout io.Writer, stderr io.Writer, d
 					if try > 0 {
 						tryID = fmt.Sprintf("%s-try%d", sessionID, try)
 					}
-					out, runErr = runFunc(ctx, eval.RunInput{
+					out, runErr = runFunc(runCtx, eval.RunInput{
 						SessionID: tryID,
 						Memory:    arm.memory,
 						Prompt:    family.TargetTask,
 						Cwd:       arm.dir,
-						Check:     "true", // success = exec exit 0; the family check runs at analysis time
+						Check:     verifiers[family.ID],
 					})
-					if runErr == nil || !strings.Contains(fmt.Sprint(runErr), "timed out") {
+					if runErr == nil || ctx.Err() != nil {
+						break
+					}
+					// The retry covers provider stream timeouts only. A
+					// deadline expiry (the per-run timeout fired) is final:
+					// retrying inside a dead deadline just burns the
+					// remaining budget twice.
+					if runCtx.Err() != nil {
+						break
+					}
+					if !strings.Contains(fmt.Sprint(runErr), "timed out") {
 						break
 					}
 				}
+				latency := time.Since(started)
+				cancel()
+
 				row := familyPairRow{
 					Family:    family.ID,
 					Attempt:   attempt,
@@ -262,11 +365,27 @@ func runFamiliesEvalCommand(args []string, stdout io.Writer, stderr io.Writer, d
 					Tokens:    out.Tokens,
 					Telemetry: out.TelemetryFound,
 					SessionID: sessionID,
+					LatencyMs: latency.Milliseconds(),
 				}
-				if runErr != nil {
+				if runCtx.Err() == context.DeadlineExceeded {
+					// The timeout is an infrastructure failure, not an agent
+					// correctness failure. Record it as infra and continue;
+					// the later attempts of both arms stay untouched.
+					row.InfraStatus = "timeout"
+					row.Success = false
+					if runErr != nil {
+						row.Error = runErr.Error()
+					}
+				} else if runErr != nil {
 					row.Success = false
 					row.Error = runErr.Error()
 				}
+				if row.Telemetry {
+					collectRunTelemetry(ctx, deps, arm.dir, sessionID, &row)
+				}
+				row.ToolCalls = out.ToolCalls
+				row.SearchCalls = out.SearchCalls
+				row.FileReads = out.FileReads
 				rows = append(rows, row)
 				if ctx.Err() != nil {
 					os.RemoveAll(warmDir)
@@ -294,6 +413,109 @@ func runFamiliesEvalCommand(args []string, stdout io.Writer, stderr io.Writer, d
 	return exitSuccess
 }
 
+// checkFor reads the family target's external verifier (relative to the
+// manifest directory). Startup validation already proved the file exists and
+// is non-empty, so a read failure here is a real race, not a fallback case:
+// it errors instead of silently counting unverified runs as correct.
+func checkFor(manifestDir string, family familyEntry) (string, error) {
+	path := filepath.Join(manifestDir, family.TargetCheckFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read verifier for %s: %w", family.ID, err)
+	}
+	return string(data), nil
+}
+
+// resetWarmMemory restores the warm arm's sidecar state to "seeded only":
+// every observation and trace the previous attempt persisted for this
+// project is hard-deleted, then the family observation is seeded again.
+// Both steps are fail-loud: a skipped reset would silently turn attempt N
+// into attempt N-1 + experience, breaking the causal independence
+// invariant (same treatment every attempt).
+func resetWarmMemory(ctx context.Context, warmDir string, family familyEntry) error {
+	client, err := memd.Resolve(ctx)
+	if err != nil {
+		return fmt.Errorf("resolve sidecar: %w", err)
+	}
+	if client == nil {
+		return fmt.Errorf("memory sidecar unavailable")
+	}
+	counts, err := client.ResetProject(ctx, warmDir)
+	if err != nil {
+		return fmt.Errorf("reset project state: %w", err)
+	}
+	_ = counts // the counts are informational; the invariant is reset-then-seed
+	seeded, err := seedFamilyObservation(ctx, warmDir, family)
+	if err != nil {
+		return fmt.Errorf("re-seed: %w", err)
+	}
+	if !seeded {
+		return fmt.Errorf("memory sidecar dropped between reset and seed")
+	}
+	return nil
+}
+
+// collectRunTelemetry reads the stored trace for one attempt and fills the
+// row's telemetry fields. Counts only land when the trace was found and
+// parsed; absent data stays absent (omitempty), never a fabricated zero.
+func collectRunTelemetry(ctx context.Context, deps appDeps, repoRoot, sessionID string, row *familyPairRow) {
+	client, err := deps.resolveMemory(ctx)
+	if err != nil || client == nil {
+		return
+	}
+	results, err := client.QueryTraces(ctx, schemas.TraceQueryFilter{RepoRoot: repoRoot, Limit: 1000})
+	if err != nil {
+		return
+	}
+	var matched *schemas.TraceQueryResult
+	for i := range results {
+		if results[i].Trace.RunID == sessionID || results[i].Trace.SessionID == sessionID {
+			matched = &results[i]
+			break
+		}
+	}
+	if matched == nil {
+		return
+	}
+	trace := matched.Trace
+	row.InputTokens = 0
+	row.OutputTokens = 0
+	row.ReasoningTokens = 0
+	row.CachedTokens = 0
+	row.ToolCalls = 0
+	row.WebSearchCalls = 0
+	row.MemoryItems = 0
+	row.MemoryChars = 0
+	row.ExemplarItems = 0
+	row.DirectHits = 0
+	modes := map[string]bool{}
+	for _, stage := range trace.Stages {
+		meta := stage.InputMeta
+		row.InputTokens += stage.TokensInput
+		row.OutputTokens += stage.TokensOutput
+		row.ReasoningTokens += stage.TokensReasoning
+		row.CachedTokens += stage.TokensCached
+		row.WebSearchCalls += stage.WebSearchRequests
+		row.MemoryItems += meta.MemoryItems
+		row.MemoryChars += meta.MemoryChars
+		row.ExemplarItems += meta.ExemplarItems
+		row.DirectHits += meta.DirectHits
+		if meta.MemoryLookupMode != "" {
+			modes[meta.MemoryLookupMode] = true
+		}
+	}
+	if len(modes) == 1 {
+		for mode := range modes {
+			row.LookupMode = mode
+		}
+	} else if len(modes) > 1 {
+		row.LookupMode = "mixed"
+	}
+	row.Status = trace.Outcome.Status
+	row.AbortReason = trace.Outcome.AbortReason
+	row.Repairs = len(trace.Interactions)
+}
+
 // seedFamilyObservation upserts the family's observation into memory with
 // ProjectPath anchored to the warm arm. It reports false when memory is off.
 func seedFamilyObservation(ctx context.Context, warmDir string, family familyEntry) (bool, error) {
@@ -306,15 +528,18 @@ func seedFamilyObservation(ctx context.Context, warmDir string, family familyEnt
 	}
 	project := warmDir
 	commit := gitHeadCommit(warmDir)
+	topicKey := family.TopicKey
+	title := family.Observation.Title
+	content := family.Observation.Content
 	obs := schemas.MemoryObservation{
 		ProjectPath: &project,
 		Scope:       family.Observation.Scope,
 		OwnerAgent:  family.Observation.OwnerAgent,
 		Visibility:  family.Observation.Visibility,
 		MemoryType:  family.Observation.MemoryType,
-		Title:       family.Observation.Title,
-		Content:     family.Observation.Content,
-		TopicKey:    &family.TopicKey,
+		Title:       title,
+		Content:     content,
+		TopicKey:    &topicKey,
 	}
 	if commit != "" {
 		obs.SourceCommit = &commit
@@ -337,6 +562,15 @@ func gitHeadCommit(dir string) string {
 
 // copyFixtureTree replaces dir's contents with fixtureSrc's bytes (the
 // pristine-reset invariant: bytes reset, path stable).
+//
+// The git state must be STABLE across resets: the seeded observation's
+// SourceCommit is captured once per family, and the freshness gate proves
+// the anchor unchanged by diffing against it. A reset that produced a new
+// HEAD each attempt would change the freshness classification per attempt
+// (attempts would stop being repetitions of the same treatment). The
+// commit command is therefore deterministic (fixed author, fixed message,
+// fixed dates) and nothing-to-commit (an unchanged tree) is a no-op that
+// leaves the previous HEAD in place.
 func copyFixtureTree(fixtureSrc, dir string) error {
 	if err := os.RemoveAll(dir); err != nil {
 		return err
@@ -365,8 +599,9 @@ func copyFixtureTree(fixtureSrc, dir string) error {
 			return err
 		}
 	}
-	// Keep the arms as git repos at a stable HEAD so the freshness gate has
-	// a commit to diff against.
+	// Re-stage and commit the pristine tree. The commit is deterministic
+	// (fixed identity and dates), so the same tree always yields the same
+	// HEAD and the freshness gate sees one stable commit across attempts.
 	if _, err := gitCommitAll(dir); err != nil {
 		return err
 	}
@@ -395,17 +630,35 @@ func copyDirTree(src, dst string) error {
 }
 
 // gitCommitAll stages everything and commits, returning the HEAD commit.
+//
+// The commit is fully deterministic: fixed author, fixed message, fixed
+// dates. Two commits over the same tree produce the SAME sha, so an eval
+// arm reset to pristine bytes keeps the exact HEAD commit it started with.
+// The freshness gate diffs the seeded observation's SourceCommit against
+// HEAD, and eval cold/warm comparisons require that classification to be
+// identical across attempts; a timestamp-varying commit would change the
+// per-attempt treatment. Nothing-to-commit (the tree already matches) is
+// a no-op that leaves the existing HEAD, which is the same result.
 func gitCommitAll(dir string) (string, error) {
+	env := append(os.Environ(),
+		"GIT_AUTHOR_NAME=eval",
+		"GIT_AUTHOR_EMAIL=eval@splice",
+		"GIT_COMMITTER_NAME=eval",
+		"GIT_COMMITTER_EMAIL=eval@splice",
+		"GIT_AUTHOR_DATE=2026-01-01T00:00:00Z",
+		"GIT_COMMITTER_DATE=2026-01-01T00:00:00Z",
+	)
 	commands := [][]string{
 		{"init", "-q"},
 		{"add", "-A"},
-		{"-c", "user.email=eval@splice", "-c", "user.name=eval", "commit", "-qm", "base"},
+		{"commit", "-qm", "base"},
 	}
 	for _, args := range commands {
 		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = env
 		if out, err := cmd.CombinedOutput(); err != nil {
 			// init can fail with "already exists" on reuse; commit fails on
-			// nothing-to-commit. Both leave a usable repo.
+			// nothing-to-commit. Both leave a usable repo with HEAD intact.
 			_ = out
 			if args[0] == "init" || args[len(args)-1] == "base" {
 				continue

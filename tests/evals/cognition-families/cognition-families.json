@@ -20,7 +20,8 @@
         "anchor": "session.go"
       },
       "target_key_expectation": "file:session.go",
-      "expected_warm_advantage": "The target prompt says 'reusing the SAME invalidation rule'; warm hits the invariant observation and knows to sweep all sessions; cold must re-derive it from the verifier failure."
+      "expected_warm_advantage": "The target prompt says 'reusing the SAME invalidation rule'; warm hits the invariant observation and knows to sweep all sessions; cold must re-derive it from the verifier failure.",
+      "target_check_file": "verifiers/fam-01.sh"
     },
     {
       "id": "fam-02-ttl-config-source",
@@ -40,7 +41,8 @@
         "anchor": "session.go"
       },
       "target_key_expectation": "file:session.go",
-      "expected_warm_advantage": "Warm knows sessionTTL is the single source; cold may introduce a second constant and fail the verifier's single-source check."
+      "expected_warm_advantage": "Warm knows sessionTTL is the single source; cold may introduce a second constant and fail the verifier's single-source check.",
+      "target_check_file": "verifiers/fam-02.sh"
     },
     {
       "id": "fam-03-delete-idempotence",
@@ -60,7 +62,8 @@
         "anchor": "session.go"
       },
       "target_key_expectation": "file:session.go",
-      "expected_warm_advantage": "Warm knows the idempotence contract and the test convention; cold may return an error for the empty case and fail the verifier."
+      "expected_warm_advantage": "Warm knows the idempotence contract and the test convention; cold may return an error for the empty case and fail the verifier.",
+      "target_check_file": "verifiers/fam-03.sh"
     },
     {
       "id": "fam-04-json-envelope-convention",
@@ -80,7 +83,8 @@
         "anchor": "session.go"
       },
       "target_key_expectation": "file:session.go",
-      "expected_warm_advantage": "Warm knows the explicit-tags rule; cold may rely on default marshaling and fail the verifier's tag check."
+      "expected_warm_advantage": "Warm knows the explicit-tags rule; cold may rely on default marshaling and fail the verifier's tag check.",
+      "target_check_file": "verifiers/fam-04.sh"
     },
     {
       "id": "fam-05-handler-error-mapping",
@@ -100,7 +104,8 @@
         "anchor": "session.go"
       },
       "target_key_expectation": "file:session.go",
-      "expected_warm_advantage": "Warm reuses mapStoreError; cold may inline status codes in new handlers and fail the single-source check."
+      "expected_warm_advantage": "Warm reuses mapStoreError; cold may inline status codes in new handlers and fail the single-source check.",
+      "target_check_file": "verifiers/fam-05.sh"
     },
     {
       "id": "fam-06-race-safety-rule",
@@ -120,7 +125,8 @@
         "anchor": "session.go"
       },
       "target_key_expectation": "file:session.go",
-      "expected_warm_advantage": "Warm knows the discipline (RLock, no mutation on reads); cold may drop expired entries inside an RLock read path and fail -race."
+      "expected_warm_advantage": "Warm knows the discipline (RLock, no mutation on reads); cold may drop expired entries inside an RLock read path and fail -race.",
+      "target_check_file": "verifiers/fam-06.sh"
     },
     {
       "id": "fam-07-probe-test-style",
@@ -140,7 +146,8 @@
         "anchor": "session_test.go"
       },
       "target_key_expectation": "file:session_test.go",
-      "expected_warm_advantage": "Warm knows the table-driven + controllable-clock convention; cold may write scattered test functions and fail the verifier's structure check."
+      "expected_warm_advantage": "Warm knows the table-driven + controllable-clock convention; cold may write scattered test functions and fail the verifier's structure check.",
+      "target_check_file": "verifiers/fam-07.sh"
     },
     {
       "id": "fam-08-toolchain-pin",
@@ -161,7 +168,8 @@
       },
       "target_key_expectation": "go.mod",
       "expected_warm_advantage": "Warm knows the toolchain pin convention; cold may bump the go line while adding build-tagged files and fail the verifier's toolchain check.",
-      "derivation_note": "file:go.mod is derived from PriorChangedFiles (structured evidence), not intent mining: the intent path regex needs a slash and go.mod is single-segment."
+      "derivation_note": "file:go.mod is derived from PriorChangedFiles (structured evidence), not intent mining: the intent path regex needs a slash and go.mod is single-segment.",
+      "target_check_file": "verifiers/fam-08.sh"
     },
     {
       "id": "fam-09-healthz-schema",
@@ -181,7 +189,8 @@
         "anchor": "session.go"
       },
       "target_key_expectation": "file:session.go",
-      "expected_warm_advantage": "Warm knows the additive-only rule; cold may retype sessions or rename status and fail the verifier's schema check."
+      "expected_warm_advantage": "Warm knows the additive-only rule; cold may retype sessions or rename status and fail the verifier's schema check.",
+      "target_check_file": "verifiers/fam-09.sh"
     },
     {
       "id": "fam-10-id-validation-rule",
@@ -201,7 +210,8 @@
         "anchor": "session.go"
       },
       "target_key_expectation": "file:session.go",
-      "expected_warm_advantage": "Warm reuses ValidSessionID/ErrInvalidID; cold may hand-roll validation or skip the admin boundary and fail the verifier's security check."
+      "expected_warm_advantage": "Warm reuses ValidSessionID/ErrInvalidID; cold may hand-roll validation or skip the admin boundary and fail the verifier's security check.",
+      "target_check_file": "verifiers/fam-10.sh"
     }
   ]
 }

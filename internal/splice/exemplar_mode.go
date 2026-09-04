@@ -22,6 +22,11 @@ const (
 	ExemplarModeExemplarOnly ExemplarMode = "exemplar-only"
 	// ExemplarModeNone delivers neither on the miss path.
 	ExemplarModeNone ExemplarMode = "none"
+	// ExemplarModeRetrieveNoPrompt runs full retrieval and records what was
+	// retrieved, but delivers NO cognition prose to the model. It measures
+	// control reuse (deterministic downstream effects of retrieval) with
+	// reasoning reuse (prompt text) removed. It is an ablation mode only.
+	ExemplarModeRetrieveNoPrompt ExemplarMode = "retrieve-no-prompt"
 )
 
 const exemplarModeEnv = "SPLICE_EXEMPLAR_MODE"
@@ -35,20 +40,27 @@ func resolveExemplarMode() (ExemplarMode, error) {
 	switch ExemplarMode(raw) {
 	case "":
 		return ExemplarModeBoth, nil
-	case ExemplarModeBoth, ExemplarModeObsOnly, ExemplarModeExemplarOnly, ExemplarModeNone:
+	case ExemplarModeBoth, ExemplarModeObsOnly, ExemplarModeExemplarOnly, ExemplarModeNone, ExemplarModeRetrieveNoPrompt:
 		return ExemplarMode(raw), nil
 	default:
-		return "", fmt.Errorf("%s: invalid exemplar mode %q (want one of both, obs-only, exemplar-only, none)", exemplarModeEnv, raw)
+		return "", fmt.Errorf("%s: invalid exemplar mode %q (want one of both, obs-only, exemplar-only, none, retrieve-no-prompt)", exemplarModeEnv, raw)
 	}
 }
 
 // deliverObservations reports whether the mode includes miss-path
-// observations.
+// observations. retrieve-no-prompt retrieves observations (the retrieval
+// side effects and telemetry stay real) but never delivers them.
 func (m ExemplarMode) deliverObservations() bool {
 	return m == ExemplarModeBoth || m == ExemplarModeObsOnly
 }
 
-// deliverExemplars reports whether the mode includes exemplars.
+// deliverExemplars reports whether the mode retrieves miss-path exemplars.
 func (m ExemplarMode) deliverExemplars() bool {
-	return m == ExemplarModeBoth || m == ExemplarModeExemplarOnly
+	return m == ExemplarModeBoth || m == ExemplarModeExemplarOnly || m == ExemplarModeRetrieveNoPrompt
+}
+
+// deliverToModel reports whether ANY cognition prose may reach the model.
+// retrieve-no-prompt is the only mode that retrieves without delivering.
+func (m ExemplarMode) deliverToModel() bool {
+	return m != ExemplarModeRetrieveNoPrompt
 }

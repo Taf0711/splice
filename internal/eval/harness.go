@@ -29,6 +29,13 @@ type RunOutput struct {
 	// trace. False with Success=true means the token count is absent data,
 	// not a measured zero, and the report must say so.
 	TelemetryFound bool
+	// Work counters parsed from the run's stream-json transcript: total tool
+	// calls, file reads (read-shaped tools), and discovery searches
+	// (grep/glob/search-shaped tools). Zero with no transcript means
+	// unknown, not free.
+	ToolCalls   int
+	FileReads   int
+	SearchCalls int
 }
 
 // RunFunc runs one headless exec invocation in an arm copy and returns its

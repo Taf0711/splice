@@ -236,6 +236,29 @@ type genericResponse struct {
 	Error string `json:"error,omitempty"`
 }
 
+// resetProjectRequest is the JSON body for POST /project/reset. The exact
+// project path (the observation project_path / trace repo_root value) is
+// required: an empty path would silently match nothing, so it fails loud.
+type resetProjectRequest struct {
+	ProjectPath string `json:"project_path"`
+}
+
+func (r *resetProjectRequest) Validate() error {
+	if r.ProjectPath == "" {
+		return fmt.Errorf("project_path is required")
+	}
+	return nil
+}
+
+// resetProjectResponse reports what POST /project/reset removed. Zero counts
+// are meaningful and allowed: the caller decides whether an empty reset is
+// expected, never the server.
+type resetProjectResponse struct {
+	OK           bool  `json:"ok"`
+	Observations int64 `json:"observations"`
+	Traces       int64 `json:"traces"`
+}
+
 // lookupTopicRequest is the JSON body for POST /lookup_topic. It is the
 // deterministic direct-lookup counterpart to /search: an exact topic_key
 // match within one project scope, no full-text query.
