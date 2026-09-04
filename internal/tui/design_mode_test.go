@@ -2296,7 +2296,7 @@ func TestLayoutCommandTogglesPersistentPlanPanel(t *testing.T) {
 	if !next.planPanelPersistent {
 		t.Fatal("/layout should turn the persistent plan panel on")
 	}
-	if !transcriptContains(next.transcript, "Persistent plan panel on.") {
+	if !transcriptContains(next.transcript, "persistent plan panel  on") {
 		t.Fatalf("missing on-notice, transcript: %#v", next.transcript)
 	}
 	// Toggle back off.
@@ -2306,7 +2306,7 @@ func TestLayoutCommandTogglesPersistentPlanPanel(t *testing.T) {
 	if next.planPanelPersistent {
 		t.Fatal("second /layout should turn the persistent plan panel off")
 	}
-	if !transcriptContains(next.transcript, "Persistent plan panel off.") {
+	if !transcriptContains(next.transcript, "persistent plan panel  off") {
 		t.Fatalf("missing off-notice, transcript: %#v", next.transcript)
 	}
 }

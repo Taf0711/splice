@@ -256,14 +256,18 @@ func (m model) handleStyleCommand(args string) (model, string) {
 		return m, m.styleText()
 	}
 	if !responseStyleAllowed(args) {
-		return m, "Style\nUnknown response style: " + args
+		return m, ackSystemText(ack{
+			verb:    "style",
+			blocked: true,
+			outcome: "unknown response style " + args,
+			unblock: "/style lists the valid values",
+		})
 	}
 	m.responseStyle = args
-	return m, strings.Join([]string{
-		"Style",
-		"active style: " + m.responseStyle,
-		"Style preference is stored for this TUI session.",
-	}, "\n")
+	return m, ackSystemText(ack{
+		verb:    "style",
+		outcome: "balanced -> " + m.responseStyle + " (this session)",
+	})
 }
 
 func (m model) styleText() string {
@@ -325,7 +329,10 @@ func (m model) handleTurnsCommand(args string) (model, string) {
 	// Propagate the budget to spawned sub-agents / swarm members (which inherit the
 	// environment) so a delegated task gets the same budget, not config.json's default.
 	config.SetMaxTurnsEnv(n)
-	return m, m.turnsText()
+	return m, ackSystemText(ack{
+		verb:    "turns",
+		outcome: ackf("per-run tool budget -> %d", n),
+	})
 }
 
 func (m model) turnsText() string {

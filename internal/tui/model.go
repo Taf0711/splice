@@ -4840,10 +4840,14 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		}
 		m.loopLeavePrompt = commandEmpty
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionClear})
-		// Clearing wipes the visible transcript only — the session's context is
-		// intact, so the next prompt still replays the full history. Say so, and
-		// point to /new, so "cleared screen" isn't mistaken for "fresh context."
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Transcript cleared. The agent still has the full session context — use /new to start a fresh session."})
+		// P15 ack grammar: one line, verb column, outcome, unblock. Clearing
+		// wipes the visible transcript only — the session's context is intact,
+		// so say so and point to /new rather than let "cleared screen" read as
+		// "fresh context."
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: ackSystemText(ack{
+			verb:    "cleared",
+			outcome: "the agent still has the session — /new starts fresh",
+		})})
 		// Scrollback above can't be un-printed; a faint divider marks where the
 		// cleared surface ended and the frontier restarts for the fresh transcript.
 		m.resetFlushFrontier("· cleared ·")
@@ -5098,7 +5102,12 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		// that sub-agents spawned later in THIS run read, making the run's budget
 		// inconsistent. Require an idle session (the new budget applies next run).
 		if m.pending && strings.TrimSpace(command.text) != "" {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Turns\nFinish or stop the current run before changing the tool-turn budget."})
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: ackSystemText(ack{
+				verb:    "turns",
+				blocked: true,
+				outcome: "a run is in progress",
+				unblock: "finish or stop the run, then set the budget",
+			})})
 			return m, nil
 		}
 		text := ""
@@ -5174,18 +5183,33 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.pending {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Retry\ncannot retry while a run is in progress."})
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: ackSystemText(ack{
+				verb:    "retry",
+				blocked: true,
+				outcome: "a run is in progress",
+				unblock: "esc esc to cancel, then retry",
+			})})
 			return m, nil
 		}
 		if m.compactInFlight {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{
 				kind: actionAppendSystem,
-				text: "Retry\nstatus: warning\nCompaction is running. Retry once it finishes.",
+				text: ackSystemText(ack{
+					verb:    "retry",
+					blocked: true,
+					outcome: "compaction is running",
+					unblock: "retry once it finishes",
+				}),
 			})
 			return m, nil
 		}
 		if strings.TrimSpace(m.lastPrompt) == "" {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Retry\nno previous prompt to resend."})
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: ackSystemText(ack{
+				verb:    "retry",
+				blocked: true,
+				outcome: "no previous prompt in this session",
+				unblock: "send a prompt first, then retry",
+			})})
 			return m, nil
 		}
 		// Re-stage the attachments the last prompt carried so launchPrompt rebuilds
@@ -5198,7 +5222,12 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		return m.launchPrompt(m.lastPrompt)
 	case commandEdit:
 		if strings.TrimSpace(m.lastPrompt) == "" {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Edit\nno previous prompt to recall."})
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: ackSystemText(ack{
+				verb:    "edit",
+				blocked: true,
+				outcome: "no previous prompt to recall",
+				unblock: "send a prompt first, then edit",
+			})})
 			return m, nil
 		}
 		// Re-stage the remembered attachments alongside the recalled text so an
@@ -5214,7 +5243,12 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	case commandCopy:
 		text := m.lastAssistantAnswer()
 		if strings.TrimSpace(text) == "" {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Copy\nno answer to copy yet."})
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: ackSystemText(ack{
+				verb:    "copy",
+				blocked: true,
+				outcome: "nothing to copy yet",
+				unblock: "no answer in this session",
+			})})
 			return m, nil
 		}
 		return m, copyTranscriptSelectionCmd(text)

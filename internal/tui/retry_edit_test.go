@@ -90,7 +90,7 @@ func TestRetryBlockedDuringCompaction(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("/retry during compaction must not return a run command")
 	}
-	if !transcriptContains(next.transcript, "Compaction is running") {
+	if !transcriptContains(next.transcript, "compaction is running") {
 		t.Fatalf("/retry during compaction should warn, got %#v", next.transcript)
 	}
 }

@@ -786,7 +786,10 @@ func (m model) handleLayoutCommand() (model, tea.Cmd) {
 	if m.planPanelPersistent {
 		state = "on"
 	}
-	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Persistent plan panel " + state + "."})
+	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: ackSystemText(ack{
+		verb:    "layout",
+		outcome: "persistent plan panel  " + state,
+	})})
 	return m, nil
 }
 
