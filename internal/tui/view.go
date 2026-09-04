@@ -216,6 +216,17 @@ func (m model) statusLine(width int) string {
 	// rule; the persistent footer is where users look for "will it run commands?".
 	modeText, modeStyle := m.modeLabel()
 	left := prefix + zeroTheme.accent.Render("●") + " " + modeStyle.Render(modeText)
+	// P1.4 delta (frame esBzN): when the presentation layer has observed a
+	// lifecycle phase, the phase chip replaces the static mode chip — color +
+	// word driven by phase, health alerting overrides the color. The
+	// permission suffix still appends below (the safety signal never drops).
+	if chip := m.phaseChipSegment(); chip != "" {
+		left = prefix + chip
+	}
+	// Context trail: breadcrumb of phases visited (grows, never rewinds).
+	if trail := m.contextTrailSegment(); trail != "" {
+		left += zeroTheme.faint.Render("  ") + trail
+	}
 	// GAP-L: the narration verbosity segment appears only when non-default
 	// (detailed shows nothing — no noise for the common case).
 	if seg := m.narrationVerbosityLevel.label(); seg != "" {
@@ -244,6 +255,15 @@ func (m model) statusLine(width int) string {
 	// Non-tiny: append the active reasoning effort (brand lime, omitted on auto).
 	if m.reasoningEffort != "" {
 		left += zeroTheme.muted.Render(" · ") + zeroTheme.accent.Render(string(m.reasoningEffort))
+	}
+	// P1.4 delta: work segment (phase-appropriate counters) and agent
+	// telemetry (only when work is distributed) — both event-driven, both
+	// optional (frame UAYbi / GwrAE).
+	if seg := m.workSegment(); seg != "" {
+		left += zeroTheme.muted.Render(" · ") + seg
+	}
+	if seg := m.agentTelemetrySegment(); seg != "" {
+		left += zeroTheme.muted.Render(" · ") + seg
 	}
 	if tier != tierTiny {
 		if seg := m.memoryStatusSegment(); seg != "" {

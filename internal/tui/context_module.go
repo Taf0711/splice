@@ -15,6 +15,8 @@ type ContextSlot int
 const (
 	ContextSlotAgents ContextSlot = iota
 	ContextSlotPlan
+	ContextSlotDecisions
+	ContextSlotRun
 	ContextSlotPipeline
 	ContextSlotTrajectory
 	ContextSlotMemory
@@ -63,6 +65,30 @@ func contextRegistry() []contextModule {
 				}
 				return append(lines, sidebarPlaceholder("no active plan", width))
 			},
+		},
+		{
+			// P1.4 delta (frame gEVp1, S1): the pinned-decisions ledger wakes
+			// the sidebar during design mode — the same append-only data the
+			// transcript ledger card projects, never invented states. Absent
+			// while zero pins exist (no placeholder; an empty ledger is noise).
+			name: "decisions",
+			slot: ContextSlotDecisions,
+			has: func(m model) bool {
+				decisions, ok := m.designDecisions()
+				return ok && len(decisions) > 0
+			},
+			render: func(m model, width int) []string {
+				return m.sidebarDecisionsLines(width)
+			},
+		},
+		{
+			// P1.4 delta (frame gEVp1, S1): RUN readout (elapsed/tokens/stage)
+			// while a run is live or design mode is active. Event-driven:
+			// absent on an idle non-design session.
+			name:   "run",
+			slot:   ContextSlotRun,
+			has:    func(m model) bool { return m.pending || m.designMode },
+			render: func(m model, width int) []string { return m.sidebarRunLines(width) },
 		},
 		{
 			name: "pipeline",

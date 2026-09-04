@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
 
@@ -87,6 +88,115 @@ func (m model) refreshDecisionsLedgerCard() model {
 	}
 	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, text: card})
 	return m
+}
+
+// designDecisions returns the pinned-decision ledger reconstructed from the
+// session's decision_pinned events — the same append-only data the transcript
+// ledger card projects. ok is false when reconstruction fails (malformed pins
+// fail closed upstream; the renderer just skips) — the sidebar never renders
+// a ledger from invented data.
+func (m model) designDecisions() ([]splicerun.DecisionPinnedPayload, bool) {
+	state, err := splicerun.ReconstructDesignState(m.sessionEvents)
+	if err != nil {
+		return nil, false
+	}
+	return state.Decisions, true
+}
+
+// sidebarDecisionsLines renders the sidebar DECISIONS module (P1.4 delta,
+// frame gEVp1 S1):
+//
+//	DECISIONS  2
+//	  [+] retry idempotent methods
+//	  [~] REVISED  backoff cap 5s
+//
+// Same glyph grammar as the transcript ledger card: [+] settled, [~] REVISED.
+// The mock's "in progress" and open rows need decision states the runtime
+// does not emit yet (DecisionPinnedPayload carries only statement/detail/
+// revised) — they stay deferred-pending-runtime, never invented here.
+func (m model) sidebarDecisionsLines(width int) []string {
+	decisions, ok := m.designDecisions()
+	if !ok || len(decisions) == 0 {
+		return nil
+	}
+	room := maxInt(4, width-6)
+	lines := []string{sidebarHeaderWithCount(
+		"DECISIONS",
+		fmt.Sprintf("%d", len(decisions)),
+		zeroTheme.muted,
+		width,
+	)}
+	for _, d := range decisions {
+		if d.Revised {
+			lines = append(lines, "  "+zeroTheme.faint.Render("[~] REVISED  "+truncateRunes(d.Statement, room-12)))
+			continue
+		}
+		lines = append(lines, "  "+zeroTheme.green.Render("[+]")+" "+zeroTheme.ink.Render(truncateRunes(d.Statement, room)))
+	}
+	return lines
+}
+
+// sidebarRunLines renders the sidebar RUN module (P1.4 delta, frame gEVp1 S1):
+//
+//	RUN
+//	  elapsed   5m 12s
+//	  tokens    18.4K
+//	  stage     design · thinking
+//
+// Present only while a run is live or design mode is active — the module is
+// an event-driven projection, not a permanent fixture (frame esBzN: "every
+// segment is optional and event-driven"). All three values read existing
+// runtime state; nothing is invented.
+func (m model) sidebarRunLines(width int) []string {
+	if !m.pending && !m.designMode {
+		return nil
+	}
+	lines := []string{sidebarHeader("RUN", width)}
+	row := func(label, value string) {
+		if value == "" {
+			return
+		}
+		lines = append(lines, "  "+zeroTheme.faint.Render(label+"   ")+" "+zeroTheme.ink.Render(value))
+	}
+	if m.pending && !m.turnStartedAt.IsZero() {
+		row("elapsed", formatRunElapsed(m.now().Sub(m.turnStartedAt)))
+	}
+	if tokens := m.sidebarTokenText(); tokens != "" {
+		row("tokens", tokens)
+	}
+	row("stage", m.runStageLabel())
+	return lines
+}
+
+// runStageLabel names the current phase in the frame's "stage" vocabulary:
+// design · <activity> while the design turn runs, executing · <activity>
+// while a run executes, plain design when idle-but-active. workingActivity
+// is the canonical activity wording ("thinking"/"writing"/"running <tool>").
+func (m model) runStageLabel() string {
+	if m.designMode {
+		if m.pending {
+			return "design · " + m.workingActivity()
+		}
+		return "design"
+	}
+	if m.pending {
+		pipeline := m.pipeline.presentation()
+		if pipeline.active && pipeline.total > 0 {
+			return "executing · " + m.workingActivity()
+		}
+		return "executing"
+	}
+	return ""
+}
+
+// formatRunElapsed renders elapsed time as the frame does: "5m 12s", "18s".
+func formatRunElapsed(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%.0fs", d.Seconds())
+	}
+	minutes := int(d.Minutes())
+	seconds := int(d.Seconds()) % 60
+	return fmt.Sprintf("%dm %02ds", minutes, seconds)
 }
 
 // parseLifecycleCardPayload detects a tagged P4 card row and returns its

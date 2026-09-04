@@ -46,6 +46,11 @@ func (m model) hasEvidenceContent() bool {
 		switch module.slot {
 		case ContextSlotAgents, ContextSlotPlan, ContextSlotFiles:
 			continue // always-present sections carry no evidence signal
+		case ContextSlotDecisions, ContextSlotRun:
+			// Sidebar/status surfaces, not band evidence: the band renders
+			// only Pipeline/Trajectory/Agents/Memory (renderEvidenceBand), so
+			// these must never make an otherwise-empty band visible.
+			continue
 		}
 		if module.has(m) {
 			return true

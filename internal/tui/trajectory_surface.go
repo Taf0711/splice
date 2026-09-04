@@ -12,7 +12,11 @@ import (
 // when the runtime reports a regression. The renderer projects the
 // snapshot's trajectory data; it never invents progress or policy.
 
-// renderTrajectorySurface renders the trajectory pane.
+// renderTrajectorySurface renders the trajectory pane. P1.4 delta (frame
+// aPZTh, S4): the pass history renders as the frame's inline score trail —
+// `61 ▔▔▔▔ 67 ▔▔ 72` — with restore markers summarized beneath, instead of
+// one line per pass. ASCII tier: the trail glyph is ▔ (fold-table covered);
+// scores render as integers 0-100.
 func (m model) renderTrajectorySurface(state presentation.State, width int) string {
 	if width <= 0 {
 		return ""
@@ -32,20 +36,44 @@ func (m model) renderTrajectorySurface(state presentation.State, width int) stri
 	}
 	lines := []string{header, ""}
 
-	for i, score := range state.Trajectory.PassScores {
-		if score >= 0.999 {
-			glyph := presentation.StatusMarker(presentation.NodeStatusComplete, presentation.GlyphTierASCII).Glyph
-			lines = append(lines, fmt.Sprintf("  pass %d  %s %.0f%%", i+1, glyph, score*100))
-			continue
-		}
-		degradedGlyph := presentation.StatusMarker(presentation.NodeStatusDegraded, presentation.GlyphTierASCII).Glyph
-		lines = append(lines, fmt.Sprintf("  [%s] pass %d  %.0f%%",
-			strings.Trim(degradedGlyph, "[]"), i+1, score*100))
+	if trail := renderTrajectoryTrail(state.Trajectory, bodyBudget); trail != "" {
+		lines = append(lines, "  "+zeroTheme.ink.Render(trail))
+	} else {
+		lines = append(lines, "  "+zeroTheme.faint.Render("no passes scored yet"))
 	}
 	for _, restore := range state.Trajectory.RestoreMarkers {
 		lines = append(lines, "  "+zeroTheme.muted.Render(restoreLabel(restore)))
 	}
 	return styledBlock(width, lines, zeroTheme.cardRun)
+}
+
+// renderTrajectoryTrail composes the inline score trail: each pass renders
+// as `<score> ▔*n` where n scales the score to the segment width, joined by
+// spaces — the frame's `61 ▔▔▔▔ 67 ▔▔ 72`. Empty when no pass has scored.
+func renderTrajectoryTrail(t presentation.Trajectory, budget int) string {
+	if len(t.PassScores) == 0 {
+		return ""
+	}
+	segment := 4 // bars per pass at full score; scales down below
+	if len(t.PassScores) > 4 {
+		segment = 2 // long histories compress so the trail stays one line
+	}
+	var parts []string
+	used := 0
+	for i, score := range t.PassScores {
+		text := fmt.Sprintf("%.0f", score*100)
+		bars := int(score*float64(segment) + 0.5)
+		part := text + " " + strings.Repeat("▔", maxInt(1, bars))
+		if i > 0 && used+1+len(part) > budget {
+			break
+		}
+		if i > 0 {
+			used++
+		}
+		used += len([]rune(part))
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, " ")
 }
 
 // restoreLabel renders one restore marker line.

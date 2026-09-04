@@ -542,6 +542,12 @@ type model struct {
 	// surfaces (trajectory) render at render time from the latest runtime
 	// truth.
 	lastState presentation.State
+	// phaseTrail is the status bar's context trail (P1.4 delta, frame
+	// w0BIJA): the breadcrumb of lifecycle phases visited this session.
+	// Observed on every presentation state change; appended on CHANGE only,
+	// never rewinds; reset on session switch (the new session has its own
+	// story).
+	phaseTrail statusPhaseTrail
 	// narrationVerbosity is the live transcript verbosity (GAP-L, DoD 41):
 	// quiet collapses tool activity, detailed (the default) shows everything.
 	// It changes only what is SHOWN — never what is recorded — so switching
@@ -2830,6 +2836,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.trajectoryVisible = true
 			m.trajectoryAutoRevealed = true
 		}
+		// P1.4 status bar: the context trail observes every lifecycle
+		// transition (append-on-change, never rewinds — frame RRoni).
+		m.phaseTrail.observe(msg.state.Lifecycle)
 		m.lastState = msg.state
 		return m, nil
 	case planStepExplanationMsg:

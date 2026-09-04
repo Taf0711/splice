@@ -77,8 +77,9 @@ func TestRegressionAutoRevealsTrajectory(t *testing.T) {
 	}
 }
 
-// TestTrajectorySurfaceRendersHistory pins the visible content: pass
-// history with scores, restore markers, and the auto-reveal wording.
+// TestTrajectorySurfaceRenders pins the visible content: the P1.4 trail form
+// (`100 ▔▔▔▔ 86 ▔▔▔` — score + scaled bars per pass, one line), restore
+// markers, and the auto-reveal wording.
 func TestTrajectorySurfaceRenders(t *testing.T) {
 	m := mouseTestModel()
 	m.trajectoryVisible = true
@@ -92,9 +93,23 @@ func TestTrajectorySurfaceRenders(t *testing.T) {
 		},
 	}
 	plain := stripANSI(m.renderTrajectorySurface(state, 100))
-	for _, want := range []string{"TRAJECTORY", "auto-revealed on regression", "pass 1", "pass 2", "86%", "restore"} {
+	for _, want := range []string{"TRAJECTORY", "auto-revealed on regression", "100 ▔▔▔▔", "86 ▔▔▔", "restore"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("trajectory surface missing %q:\n%s", want, plain)
 		}
+	}
+}
+
+// No passes yet: the surface says so instead of rendering an empty trail.
+func TestTrajectorySurfaceEmptyTrail(t *testing.T) {
+	m := mouseTestModel()
+	m.trajectoryVisible = true
+	state := presentation.State{
+		SchemaVersion: presentation.PresentationSchemaVersionV1,
+		Lifecycle:     presentation.LifecycleExecute,
+	}
+	plain := stripANSI(m.renderTrajectorySurface(state, 100))
+	if !strings.Contains(plain, "no passes scored yet") {
+		t.Fatalf("empty trajectory missing the honest empty state:\n%s", plain)
 	}
 }

@@ -52,5 +52,8 @@ func (m model) resetRunInteractionState() model {
 	// regression; the new session starts with the §10 default.
 	m.trajectoryVisible = false
 	m.trajectoryAutoRevealed = false
+	// The context trail is per-session (frame RRoni: the trail grows with
+	// THIS session's context switches). The new session starts empty.
+	m.phaseTrail.reset()
 	return m
 }
