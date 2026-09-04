@@ -29,6 +29,13 @@ type RunOutput struct {
 	// trace. False with Success=true means the token count is absent data,
 	// not a measured zero, and the report must say so.
 	TelemetryFound bool
+	// Work counters parsed from the run's stream-json transcript: total tool
+	// calls, file reads (read-shaped tools), and discovery searches
+	// (grep/glob/search-shaped tools). Zero with no transcript means
+	// unknown, not free.
+	ToolCalls   int
+	FileReads   int
+	SearchCalls int
 }
 
 // RunFunc runs one headless exec invocation in an arm copy and returns its
@@ -44,6 +51,10 @@ type Harness struct {
 	// completed pair, appended as the pair finishes. A later crash then
 	// preserves earlier work. Empty disables persistence.
 	PairLogPath string
+	// Rollouts is the number of times each (task, arm) pair runs; at least
+	// three is required for statistical claims (handoff section 34). The
+	// default of one keeps the historical single-shot behavior.
+	Rollouts int
 }
 
 // Run materializes one stable arm root per arm and resets both to pristine
@@ -76,74 +87,91 @@ func (h *Harness) Run(ctx context.Context, taskset TaskSet, model, provider stri
 	defer os.RemoveAll(warmDir) //nolint:errcheck
 
 	var cold, warm ArmStats
+	rollouts := h.Rollouts
+	if rollouts < 1 {
+		rollouts = 1
+	}
 	pairs := make([]TaskPair, 0, len(taskset.Tasks))
 	for _, task := range taskset.Tasks {
-		// Reset both roots to pristine fixture bytes before every pair: task N's
-		// leftover edits must never leak into tasks N+1..N (run-7 forensics),
-		// while the stable paths keep warm-memory project identity constant.
-		if err := resetArm(coldDir, taskset); err != nil {
-			return Report{}, fmt.Errorf("reset cold arm for %s: %w", task.Name, err)
-		}
-		if err := resetArm(warmDir, taskset); err != nil {
-			return Report{}, fmt.Errorf("reset warm arm for %s: %w", task.Name, err)
-		}
+		for attempt := 1; attempt <= rollouts; attempt++ {
+			// Reset both roots to pristine fixture bytes before every attempt:
+			// attempt N's leftover edits must never leak into attempt N+1 or
+			// the next task (run-7 forensics), while the stable paths keep
+			// warm-memory project identity constant.
+			if err := resetArm(coldDir, taskset); err != nil {
+				return Report{}, fmt.Errorf("reset cold arm for %s: %w", task.Name, err)
+			}
+			if err := resetArm(warmDir, taskset); err != nil {
+				return Report{}, fmt.Errorf("reset warm arm for %s: %w", task.Name, err)
+			}
 
-		coldOut, coldErr := h.Exec(ctx, RunInput{SessionID: sessionID(taskset, "cold", task), Memory: "off", Prompt: task.Prompt, Cwd: coldDir, Check: task.Check})
-		warmOut, warmErr := h.Exec(ctx, RunInput{SessionID: sessionID(taskset, "warm", task), Memory: "on", Prompt: task.Prompt, Cwd: warmDir, Check: task.Check})
-		if ctx.Err() != nil {
-			return Report{}, fmt.Errorf("harness interrupted: %w", ctx.Err())
-		}
+			// Session ids keep the historical shape for single-rollout runs
+			// (existing trace joins and tests); multi-rollout runs suffix the
+			// attempt so each rollout gets its own trace lineage.
+			coldSession := sessionID(taskset, "cold", task)
+			warmSession := sessionID(taskset, "warm", task)
+			if rollouts > 1 {
+				coldSession += fmt.Sprintf("-r%d", attempt)
+				warmSession += fmt.Sprintf("-r%d", attempt)
+			}
+			coldOut, coldErr := h.Exec(ctx, RunInput{SessionID: coldSession, Memory: "off", Prompt: task.Prompt, Cwd: coldDir, Check: task.Check})
+			warmOut, warmErr := h.Exec(ctx, RunInput{SessionID: warmSession, Memory: "on", Prompt: task.Prompt, Cwd: warmDir, Check: task.Check})
+			if ctx.Err() != nil {
+				return Report{}, fmt.Errorf("harness interrupted: %w", ctx.Err())
+			}
 
-		// An exec failure is an outcome of that arm's run, not a harness
-		// crash: the arm takes the failure, keeps whatever partial tokens the
-		// seam reported, and the eval continues so one bad run cannot discard
-		// every other pair's result.
-		coldError := ""
-		if coldErr != nil {
-			coldError = coldErr.Error()
-			coldOut.Success = false
-		}
-		warmError := ""
-		if warmErr != nil {
-			warmError = warmErr.Error()
-			warmOut.Success = false
-		}
+			// An exec failure is an outcome of that arm's run, not a harness
+			// crash: the arm takes the failure, keeps whatever partial tokens the
+			// seam reported, and the eval continues so one bad run cannot discard
+			// every other pair's result.
+			coldError := ""
+			if coldErr != nil {
+				coldError = coldErr.Error()
+				coldOut.Success = false
+			}
+			warmError := ""
+			if warmErr != nil {
+				warmError = warmErr.Error()
+				warmOut.Success = false
+			}
 
-		cold.Successes += boolToInt(coldOut.Success)
-		cold.Tokens += coldOut.Tokens
-		cold.WeightedInterventions += coldOut.Interventions
-		warm.Successes += boolToInt(warmOut.Success)
-		warm.Tokens += warmOut.Tokens
-		warm.WeightedInterventions += warmOut.Interventions
+			cold.Successes += boolToInt(coldOut.Success)
+			cold.Tokens += coldOut.Tokens
+			cold.WeightedInterventions += coldOut.Interventions
+			warm.Successes += boolToInt(warmOut.Success)
+			warm.Tokens += warmOut.Tokens
+			warm.WeightedInterventions += warmOut.Interventions
 
-		pair := TaskPair{
-			Name:              task.Name,
-			ColdSuccess:       coldOut.Success,
-			WarmSuccess:       warmOut.Success,
-			ColdTokens:        coldOut.Tokens,
-			WarmTokens:        warmOut.Tokens,
-			ColdInterventions: coldOut.Interventions,
-			WarmInterventions: warmOut.Interventions,
-			ColdError:         coldError,
-			WarmError:         warmError,
-			ColdTelemetry:     coldOut.TelemetryFound,
-			WarmTelemetry:     warmOut.TelemetryFound,
-		}
-		pairs = append(pairs, pair)
+			pair := TaskPair{
+				Name:              task.Name,
+				Attempt:           attempt,
+				ColdSuccess:       coldOut.Success,
+				WarmSuccess:       warmOut.Success,
+				ColdTokens:        coldOut.Tokens,
+				WarmTokens:        warmOut.Tokens,
+				ColdInterventions: coldOut.Interventions,
+				WarmInterventions: warmOut.Interventions,
+				ColdError:         coldError,
+				WarmError:         warmError,
+				ColdTelemetry:     coldOut.TelemetryFound,
+				WarmTelemetry:     warmOut.TelemetryFound,
+			}
+			pairs = append(pairs, pair)
 
-		if err := appendPairLog(h.PairLogPath, pair); err != nil {
-			return Report{}, fmt.Errorf("persist pair %s: %w", task.Name, err)
+			if err := appendPairLog(h.PairLogPath, pair); err != nil {
+				return Report{}, fmt.Errorf("persist pair %s r%d: %w", task.Name, attempt, err)
+			}
 		}
 	}
 
-	decision := Decide(DecisionInput{Pairs: len(taskset.Tasks), Cold: cold, Warm: warm})
+	decision := Decide(DecisionInput{Pairs: len(pairs), Cold: cold, Warm: warm})
 	return Report{
 		Contract:  ReportContractVersion,
 		Taskset:   taskset.Name,
 		Model:     model,
 		Provider:  provider,
 		Timestamp: now().Format(time.RFC3339),
-		Pairs:     len(taskset.Tasks),
+		Pairs:     len(pairs),
 		Cold:      cold,
 		Warm:      warm,
 		Tasks:     pairs,

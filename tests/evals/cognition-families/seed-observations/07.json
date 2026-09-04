@@ -5,7 +5,7 @@
   "memory_type": "convention",
   "scope": "project",
   "visibility": "shareable",
-  "topic_key": "file:internal/auth/session_test.go",
-  "anchor": "internal/auth/session_test.go",
+  "topic_key": "file:session_test.go",
+  "anchor": "session_test.go",
   "family_id": "fam-07-probe-test-style"
 }

@@ -235,10 +235,22 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 		}
 
 		// C0: direct cognition fast path (retrieval only, never control flow).
+		// retrieve-no-prompt keeps the retrieval telemetry honest but strips
+		// the delivery: the miss path below runs and records what it found,
+		// while the bundle never reaches the stage input.
 		if direct, ok := p.tryDirectCognition(ctx, input, root); ok {
-			input.MemoryBundle = &direct.bundle
-			if p.Trace != nil {
-				p.Trace.recordMemoryLookup(input.StageName, p.Iteration, "direct", direct.fresh, direct.stale)
+			if mode, modeErr := resolveExemplarMode(); modeErr != nil {
+				return schemas.HarnessStageInput{}, modeErr
+			} else if !mode.deliverToModel() {
+				if p.Trace != nil {
+					p.Trace.recordMemoryLookup(input.StageName, p.Iteration, "direct", direct.fresh, direct.stale)
+					p.Trace.recordMemory(input.StageName, p.Iteration, direct.bundle)
+				}
+			} else {
+				input.MemoryBundle = &direct.bundle
+				if p.Trace != nil {
+					p.Trace.recordMemoryLookup(input.StageName, p.Iteration, "direct", direct.fresh, direct.stale)
+				}
 			}
 		} else {
 			// C1c miss path: rerank candidates deterministically when the
@@ -288,6 +300,17 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 					bundle.Observations = nil
 				}
 				admitted := memoryreason.Admit(&bundle, root, p.NowUnix)
+				if !mode.deliverToModel() {
+					// retrieve-no-prompt: record what admission WOULD have
+					// delivered, then deliver nothing. The trace keeps the
+					// retrieval truth; the stage input stays cognition-free.
+					if p.Trace != nil && admitted.Bundle != nil {
+						p.Trace.recordMemory(input.StageName, p.Iteration, *admitted.Bundle)
+					}
+					bundle.Observations = nil
+					bundle.Exemplars = nil
+					admitted.Bundle = &bundle
+				}
 				input.MemoryBundle = admitted.Bundle
 				emitProgress(p.Options, admissionProgressLine(input.StageName, admitted))
 			}

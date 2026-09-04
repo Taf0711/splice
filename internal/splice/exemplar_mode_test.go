@@ -27,11 +27,13 @@ func TestResolveExemplarModeNamed(t *testing.T) {
 		want     ExemplarMode
 		obs      bool
 		exemplar bool
+		toModel  bool
 	}{
-		{"both", ExemplarModeBoth, true, true},
-		{"obs-only", ExemplarModeObsOnly, true, false},
-		{"exemplar-only", ExemplarModeExemplarOnly, false, true},
-		{"none", ExemplarModeNone, false, false},
+		{"both", ExemplarModeBoth, true, true, true},
+		{"obs-only", ExemplarModeObsOnly, true, false, true},
+		{"exemplar-only", ExemplarModeExemplarOnly, false, true, true},
+		{"none", ExemplarModeNone, false, false, true},
+		{"retrieve-no-prompt", ExemplarModeRetrieveNoPrompt, false, true, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.raw, func(t *testing.T) {
@@ -48,6 +50,9 @@ func TestResolveExemplarModeNamed(t *testing.T) {
 			}
 			if mode.deliverExemplars() != tc.exemplar {
 				t.Fatalf("deliverExemplars = %v, want %v", mode.deliverExemplars(), tc.exemplar)
+			}
+			if mode.deliverToModel() != tc.toModel {
+				t.Fatalf("deliverToModel = %v, want %v", mode.deliverToModel(), tc.toModel)
 			}
 		})
 	}

@@ -7,126 +7,147 @@
       "category": "state-mutation-rule",
       "precursor_task": "A user reports that after resetting their password through the admin console, the old session on their phone still works. Fix the password reset flow: add a ResetPassword(userID string) error method to Store in session.go that deletes every session belonging to that user (there is no per-user index, so scan). Wire it nowhere else; the method and its correctness are the deliverable. The existing ErrNotFound semantics are unaffected.",
       "target_task": "An administrator needs to force-sign-out a user from the admin console. Add AdminForceSignOut(store *Store, userID string) error in a new file admin.go that invalidates every session held by userID, reusing the SAME invalidation rule the password reset path established. Follow the established convention from the password reset work.",
-      "topic_key": "file:internal/auth/session.go",
-      "anchor": "internal/auth/session.go",
+      "topic_key": "file:session.go",
+      "anchor": "session.go",
       "observation": {
         "title": "Password reset must invalidate all user sessions",
         "content": "INVARIANT: any password reset or forced sign-out MUST delete every live session belonging to that user, not just one. Implemented as ResetPassword(userID) in session.go: it scans the session map and deletes every session whose User matches userID. New admin/force-signout paths MUST reuse this rule. Forgetting invalidation re-opens the account on stolen devices.",
         "owner_agent": "code_writer",
         "memory_type": "invariant",
         "scope": "project",
-        "visibility": "shareable"
+        "visibility": "shareable",
+        "topic_key": "file:session.go",
+        "anchor": "session.go"
       },
-      "target_key_expectation": "file:internal/auth/session.go",
-      "expected_warm_advantage": "The target prompt says 'reusing the SAME invalidation rule'; warm hits the invariant observation and knows to sweep all sessions; cold must re-derive it from the verifier failure."
+      "target_key_expectation": "file:session.go",
+      "expected_warm_advantage": "The target prompt says 'reusing the SAME invalidation rule'; warm hits the invariant observation and knows to sweep all sessions; cold must re-derive it from the verifier failure.",
+      "target_check_file": "verifiers/fam-01.sh"
     },
     {
       "id": "fam-02-ttl-config-source",
       "category": "config-convention",
       "precursor_task": "The session TTL is hard-coded to 30 minutes in main.go. Add a package-level const sessionTTL = 30 * time.Minute and use it everywhere the TTL is needed, so there is one source of truth for the expiry duration.",
       "target_task": "The sweep/eviction logic (any code that removes expired sessions) must use the SAME configured TTL source of truth rather than its own duration literal. Refactor so every expiry decision reads the single sessionTTL constant. Behavior must not change.",
-      "topic_key": "file:internal/auth/session.go",
-      "anchor": "internal/auth/session.go",
+      "topic_key": "file:session.go",
+      "anchor": "session.go",
       "observation": {
         "title": "sessionTTL is the single source of truth for expiry",
         "content": "CONFIG RULE: all expiry decisions read the single sessionTTL constant in main.go; no duration literals for session lifetime anywhere else. Introduced when the TTL moved out of main(). Any new sweep/eviction/extension code MUST use sessionTTL, not a new constant.",
         "owner_agent": "code_writer",
         "memory_type": "convention",
         "scope": "project",
-        "visibility": "shareable"
+        "visibility": "shareable",
+        "topic_key": "file:session.go",
+        "anchor": "session.go"
       },
-      "target_key_expectation": "file:internal/auth/session.go",
-      "expected_warm_advantage": "Warm knows sessionTTL is the single source; cold may introduce a second constant and fail the verifier's single-source check."
+      "target_key_expectation": "file:session.go",
+      "expected_warm_advantage": "Warm knows sessionTTL is the single source; cold may introduce a second constant and fail the verifier's single-source check.",
+      "target_check_file": "verifiers/fam-02.sh"
     },
     {
       "id": "fam-03-delete-idempotence",
       "category": "api-convention",
       "precursor_task": "Delete must be idempotent: deleting an unknown or already-deleted session id must be a silent no-op (no error, no state change). Verify Store.Delete in session.go already behaves this way and add a regression test in session_test.go named TestDeleteIdempotent that pins it (delete twice, delete an unknown id, assert no panic and Len unchanged).",
       "target_task": "Add DeleteAllForUser(userID string) int to Store in session.go that deletes every session of a user and returns the count. It MUST follow the same idempotence contract established for Delete: deleting when the user holds no sessions returns 0 and is not an error. Add TestDeleteAllForUserIdempotent to session_test.go pinning that contract.",
-      "topic_key": "file:internal/auth/session.go",
-      "anchor": "internal/auth/session.go",
+      "topic_key": "file:session.go",
+      "anchor": "session.go",
       "observation": {
         "title": "Delete operations are idempotent by contract",
         "content": "API CONVENTION: all Store delete operations (Delete, DeleteAllForUser, future bulk deletes) are IDEMPOTENT: deleting something already gone is a silent no-op returning zero/nil, never an error. Pinned by TestDeleteIdempotent in session_test.go. New delete-shaped APIs MUST follow this and add their own idempotence test.",
         "owner_agent": "code_writer",
         "memory_type": "convention",
         "scope": "project",
-        "visibility": "shareable"
+        "visibility": "shareable",
+        "topic_key": "file:session.go",
+        "anchor": "session.go"
       },
-      "target_key_expectation": "file:internal/auth/session.go",
-      "expected_warm_advantage": "Warm knows the idempotence contract and the test convention; cold may return an error for the empty case and fail the verifier."
+      "target_key_expectation": "file:session.go",
+      "expected_warm_advantage": "Warm knows the idempotence contract and the test convention; cold may return an error for the empty case and fail the verifier.",
+      "target_check_file": "verifiers/fam-03.sh"
     },
     {
       "id": "fam-04-json-envelope-convention",
       "category": "serialization-format",
       "precursor_task": "The Session struct serializes with Go's default field names. Give Session explicit JSON field tags in session.go: ID stays \"ID\", User stays \"User\", Created and LastSeen become \"Created\" and \"LastSeen\" (unchanged names, now explicit). The wire format must not change.",
       "target_task": "Add an AdminSessionView struct in admin.go (fields ID, User, Created, LastSeen, plus Admin bool) that reuses the SAME explicit JSON tag convention established for Session, and return it from a new adminSessionsHandler. Follow the tag convention from the Session work.",
-      "topic_key": "file:internal/auth/session.go",
-      "anchor": "internal/auth/session.go",
+      "topic_key": "file:session.go",
+      "anchor": "session.go",
       "observation": {
         "title": "Explicit JSON tags on all wire structs",
         "content": "SERIALIZATION CONVENTION: every struct that crosses the HTTP wire gets EXPLICIT JSON field tags in the struct definition, even when the tag matches the Go field name. Established on Session in session.go. New response/view types (AdminSessionView etc.) MUST follow it; relying on default marshaling is a review blocker.",
         "owner_agent": "code_writer",
         "memory_type": "convention",
         "scope": "project",
-        "visibility": "shareable"
+        "visibility": "shareable",
+        "topic_key": "file:session.go",
+        "anchor": "session.go"
       },
-      "target_key_expectation": "file:internal/auth/session.go",
-      "expected_warm_advantage": "Warm knows the explicit-tags rule; cold may rely on default marshaling and fail the verifier's tag check."
+      "target_key_expectation": "file:session.go",
+      "expected_warm_advantage": "Warm knows the explicit-tags rule; cold may rely on default marshaling and fail the verifier's tag check.",
+      "target_check_file": "verifiers/fam-04.sh"
     },
     {
       "id": "fam-05-handler-error-mapping",
       "category": "error-handling-convention",
       "precursor_task": "The /session handler maps store failures to HTTP status codes ad hoc. Codify the mapping table in main.go as a function mapStoreError(err error) int returning: 404 for ErrNotFound, 409 for ErrConflict, 400 for ErrInvalidID, 429 for ErrUserAtCap, and 500 for anything else. Use it from every branch of sessionHandler so status codes have one source of truth. (If a store error type does not exist yet in the fixture, treat this as mapping from the known sentinel errors that do exist: ErrNotFound, and leave TODO markers for the others.)",
       "target_task": "New admin endpoints must map their store errors using the SAME table as the /session handler. Refactor mapStoreError in main.go if needed and use it from any new admin handlers you add. The mapping table must stay the single source of truth for store-error-to-status translation.",
-      "topic_key": "file:internal/auth/session.go",
-      "anchor": "internal/auth/session.go",
+      "topic_key": "file:session.go",
+      "anchor": "session.go",
       "observation": {
         "title": "Store errors map to HTTP via mapStoreError",
         "content": "ERROR-HANDLING CONVENTION: store errors translate to HTTP status codes through ONE function, mapStoreError in main.go (404 ErrNotFound, 409 ErrConflict, 400 ErrInvalidID, 429 ErrUserAtCap, 500 default). Handlers never hand-code status numbers for store failures. New endpoints MUST call mapStoreError instead of adding inline status decisions.",
         "owner_agent": "code_writer",
         "memory_type": "convention",
         "scope": "project",
-        "visibility": "shareable"
+        "visibility": "shareable",
+        "topic_key": "file:session.go",
+        "anchor": "session.go"
       },
-      "target_key_expectation": "file:internal/auth/session.go",
-      "expected_warm_advantage": "Warm reuses mapStoreError; cold may inline status codes in new handlers and fail the single-source check."
+      "target_key_expectation": "file:session.go",
+      "expected_warm_advantage": "Warm reuses mapStoreError; cold may inline status codes in new handlers and fail the single-source check.",
+      "target_check_file": "verifiers/fam-05.sh"
     },
     {
       "id": "fam-06-race-safety-rule",
       "category": "architecture-fact",
       "precursor_task": "Store.Get takes the write lock (s.mu.Lock) although it only reads the map, while it also mutates LastSeen and can delete. Audit the locking: keep Lock for Get (it mutates), ensure Len uses RLock, and add a comment on each method stating which lock it takes and why. No behavior change; the deliverable is the audit comments plus any lock-level correction you find.",
       "target_task": "Add SessionsForUser(user string) []Session to Store in session.go returning that user's live sessions. It must follow the SAME locking discipline the audit established (read paths take RLock and must not mutate; anything that drops expired entries takes Lock). Add the same style of lock comment. The verifier runs under -race with concurrent readers.",
-      "topic_key": "file:internal/auth/session.go",
-      "anchor": "internal/auth/session.go",
+      "topic_key": "file:session.go",
+      "anchor": "session.go",
       "observation": {
         "title": "Lock discipline: Lock mutates, RLock reads, comments state it",
         "content": "ARCHITECTURE RULE: every Store method carries a comment stating its lock level. Methods that mutate the map (including lazy expiry drops) take s.mu.Lock; pure reads take s.mu.RLock and MUST NOT mutate. New read endpoints (SessionsForUser etc.) follow the same discipline; the verifier runs -race with concurrent access.",
         "owner_agent": "code_writer",
         "memory_type": "architecture",
         "scope": "project",
-        "visibility": "shareable"
+        "visibility": "shareable",
+        "topic_key": "file:session.go",
+        "anchor": "session.go"
       },
-      "target_key_expectation": "file:internal/auth/session.go",
-      "expected_warm_advantage": "Warm knows the discipline (RLock, no mutation on reads); cold may drop expired entries inside an RLock read path and fail -race."
+      "target_key_expectation": "file:session.go",
+      "expected_warm_advantage": "Warm knows the discipline (RLock, no mutation on reads); cold may drop expired entries inside an RLock read path and fail -race.",
+      "target_check_file": "verifiers/fam-06.sh"
     },
     {
       "id": "fam-07-probe-test-style",
       "category": "test-convention",
       "precursor_task": "The expiry tests are scattered. Consolidate them: create expiry_table_test.go in package main with a table-driven TestSessionExpiryTable covering fresh-readable, exactly-ttl-live, one-second-past-expired, and expired-dropped cases, all against a controllable store.now clock. All cases must live in ONE table.",
       "target_task": "Add a table-driven TestSessionLookupTable in lookup_table_test.go covering the /session GET handler's status codes through a fresh mux (200 live, 404 missing, 405 wrong method) in the SAME table-driven style the expiry table established. One table, controllable clock, no separate test functions.",
-      "topic_key": "file:internal/auth/session_test.go",
-      "anchor": "internal/auth/session_test.go",
+      "topic_key": "file:session_test.go",
+      "anchor": "session_test.go",
       "observation": {
         "title": "Store tests are table-driven with controllable clocks",
         "content": "TEST CONVENTION: Store/session tests are TABLE-DRIVEN (one test function, cases in a slice) and use the store.now func field as the controllable clock. Established in expiry_table_test.go. New handler/store test tables (lookup tables, admin tables) MUST follow the same shape; a pile of separate test functions for related cases is a review blocker.",
         "owner_agent": "code_writer",
         "memory_type": "convention",
         "scope": "project",
-        "visibility": "shareable"
+        "visibility": "shareable",
+        "topic_key": "file:session_test.go",
+        "anchor": "session_test.go"
       },
-      "target_key_expectation": "file:internal/auth/session_test.go",
-      "expected_warm_advantage": "Warm knows the table-driven + controllable-clock convention; cold may write scattered test functions and fail the verifier's structure check."
+      "target_key_expectation": "file:session_test.go",
+      "expected_warm_advantage": "Warm knows the table-driven + controllable-clock convention; cold may write scattered test functions and fail the verifier's structure check.",
+      "target_check_file": "verifiers/fam-07.sh"
     },
     {
       "id": "fam-08-toolchain-pin",
@@ -147,43 +168,50 @@
       },
       "target_key_expectation": "go.mod",
       "expected_warm_advantage": "Warm knows the toolchain pin convention; cold may bump the go line while adding build-tagged files and fail the verifier's toolchain check.",
-      "derivation_note": "file:go.mod is derived from PriorChangedFiles (structured evidence), not intent mining: the intent path regex needs a slash and go.mod is single-segment."
+      "derivation_note": "file:go.mod is derived from PriorChangedFiles (structured evidence), not intent mining: the intent path regex needs a slash and go.mod is single-segment.",
+      "target_check_file": "verifiers/fam-08.sh"
     },
     {
       "id": "fam-09-healthz-schema",
       "category": "api-convention",
       "precursor_task": "/healthz currently answers {\"sessions\": N}. Give the health payload a stable schema: add a Status field (\"ok\") alongside sessions, so the response is {\"status\":\"ok\",\"sessions\":N}. Keep 200 always.",
       "target_task": "Extend the /healthz payload with an uptime_seconds field (integer seconds since process start, tracked via a package-level start time captured in main). The Status field from the earlier health work must remain exactly \"ok\" and the sessions field unchanged. Same schema-stability rule as before: existing fields never change name or type.",
-      "topic_key": "file:internal/auth/session.go",
-      "anchor": "internal/auth/session.go",
+      "topic_key": "file:session.go",
+      "anchor": "session.go",
       "observation": {
         "title": "healthz payload schema is additive-only",
         "content": "API CONVENTION: the /healthz payload evolves ADDITIVELY. Existing fields (status=\"ok\", sessions=N) never change name or type; new fields are appended. Established when status was added. New fields (uptime_seconds etc.) MUST follow the additive rule; renaming or retyping existing fields is a verifier failure.",
         "owner_agent": "code_writer",
         "memory_type": "convention",
         "scope": "project",
-        "visibility": "shareable"
+        "visibility": "shareable",
+        "topic_key": "file:session.go",
+        "anchor": "session.go"
       },
-      "target_key_expectation": "file:internal/auth/session.go",
-      "expected_warm_advantage": "Warm knows the additive-only rule; cold may retype sessions or rename status and fail the verifier's schema check."
+      "target_key_expectation": "file:session.go",
+      "expected_warm_advantage": "Warm knows the additive-only rule; cold may retype sessions or rename status and fail the verifier's schema check.",
+      "target_check_file": "verifiers/fam-09.sh"
     },
     {
       "id": "fam-10-id-validation-rule",
       "category": "security-constraint",
       "precursor_task": "Session ids arrive raw from query strings. Add ValidSessionID(id string) bool to session.go (2..64 chars, ASCII letters/digits/hyphens only) and enforce it in Store.Get (return a new ErrInvalidID) and in main.go's POST/GET branches (400). Document the rule in a comment on ValidSessionID.",
       "target_task": "The new admin lookup path (GET /admin/session?id=X, a read-only variant answering the same JSON as GET /session) must enforce the SAME id validation rule at its boundary: invalid ids answer 400, and the store-level ErrInvalidID path is reused, not re-implemented. Follow the validation convention from the session id work.",
-      "topic_key": "file:internal/auth/session.go",
-      "anchor": "internal/auth/session.go",
+      "topic_key": "file:session.go",
+      "anchor": "session.go",
       "observation": {
         "title": "Session ids are validated at every boundary",
         "content": "SECURITY CONSTRAINT: session ids are validated by ValidSessionID (2..64 chars, ASCII letters/digits/hyphens) at EVERY handler boundary, and the store's Get returns ErrInvalidID for invalid ids. Established on /session. New lookup paths (admin variants etc.) MUST reuse ValidSessionID and ErrInvalidID; hand-rolled validation or skipped checks are a security review blocker.",
         "owner_agent": "code_writer",
         "memory_type": "security",
         "scope": "project",
-        "visibility": "shareable"
+        "visibility": "shareable",
+        "topic_key": "file:session.go",
+        "anchor": "session.go"
       },
-      "target_key_expectation": "file:internal/auth/session.go",
-      "expected_warm_advantage": "Warm reuses ValidSessionID/ErrInvalidID; cold may hand-roll validation or skip the admin boundary and fail the verifier's security check."
+      "target_key_expectation": "file:session.go",
+      "expected_warm_advantage": "Warm reuses ValidSessionID/ErrInvalidID; cold may hand-roll validation or skip the admin boundary and fail the verifier's security check.",
+      "target_check_file": "verifiers/fam-10.sh"
     }
   ]
 }

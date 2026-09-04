@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/Taf0711/splice/internal/eval"
@@ -19,6 +20,7 @@ type pairEvalOptions struct {
 	TasksetDir string
 	OutDir     string
 	Model      string
+	Rollouts   int
 }
 
 func parsePairEvalArgs(args []string) (pairEvalOptions, bool, error) {
@@ -55,6 +57,24 @@ func parsePairEvalArgs(args []string) (pairEvalOptions, bool, error) {
 			index = next
 		case strings.HasPrefix(arg, "--model="):
 			options.Model = strings.TrimSpace(strings.TrimPrefix(arg, "--model="))
+		case arg == "--rollouts":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			index = next
+			n, parseErr := strconv.Atoi(strings.TrimSpace(value))
+			if parseErr != nil || n < 1 {
+				return options, false, execUsageError{fmt.Sprintf("--rollouts requires an integer >= 1, got %q", value)}
+			}
+			options.Rollouts = n
+		case strings.HasPrefix(arg, "--rollouts="):
+			value := strings.TrimSpace(strings.TrimPrefix(arg, "--rollouts="))
+			n, parseErr := strconv.Atoi(value)
+			if parseErr != nil || n < 1 {
+				return options, false, execUsageError{fmt.Sprintf("--rollouts requires an integer >= 1, got %q", value)}
+			}
+			options.Rollouts = n
 		case strings.HasPrefix(arg, "-"):
 			return options, false, execUsageError{fmt.Sprintf("unknown eval pe flag %q", arg)}
 		default:
@@ -87,7 +107,7 @@ func runPairEvalCommand(args []string, stdout io.Writer, stderr io.Writer, deps 
 	ctx, stop := signalContext()
 	defer stop()
 
-	harness := &eval.Harness{Exec: pairEvalRunFunc(deps, options.Model)}
+	harness := &eval.Harness{Exec: pairEvalRunFunc(deps, options.Model), Rollouts: options.Rollouts}
 	if options.OutDir != "" {
 		// Create the out dir before the first pair so incremental persistence
 		// has somewhere to append from the start.
@@ -115,7 +135,7 @@ func runPairEvalCommand(args []string, stdout io.Writer, stderr io.Writer, deps 
 
 func pairEvalHelp() string {
 	return `Usage:
-  splice eval pe --taskset <dir> [--out <dir>] [--model <id>]
+  splice eval pe --taskset <dir> [--out <dir>] [--model <id>] [--rollouts <n>]
 
 Runs a held-out task set in paired arms (cold = memory off, warm = memory on)
 and applies the lexicographic decision gates. This is the only causal
@@ -125,6 +145,9 @@ Flags:
       --taskset <dir>       Task set directory (tasks/*.json + fixture/)
       --out <dir>           Write pe-report.json and pe-report.md
       --model <id>          Model id for every run
+      --rollouts <n>        Run each (task, arm) n times (>=3 for statistical
+                            claims; default 1). Attempts suffix session ids
+                            with -r<n> and reset arms to pristine bytes.
   -h, --help                Show this help
 `
 }
@@ -176,17 +199,69 @@ func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
 			tokens = sumStreamJSONTokens(out)
 			found = tokens > 0
 		}
+		toolCalls, fileReads, searchCalls := sumStreamJSONWork(out)
 
 		if runErr != nil {
-			return eval.RunOutput{Success: false, Tokens: tokens, TelemetryFound: found}, fmt.Errorf("exec run %s: %v: %s", in.SessionID, runErr, out)
+			return eval.RunOutput{Success: false, Tokens: tokens, TelemetryFound: found,
+					ToolCalls: toolCalls, FileReads: fileReads, SearchCalls: searchCalls},
+				fmt.Errorf("exec run %s: %v: %s", in.SessionID, runErr, out)
 		}
 
 		checkCmd := exec.CommandContext(ctx, "/bin/sh", "-c", in.Check)
 		checkCmd.Dir = in.Cwd
 		success := checkCmd.Run() == nil
 
-		return eval.RunOutput{Success: success, Tokens: tokens, Interventions: interventions, TelemetryFound: found}, nil
+		return eval.RunOutput{Success: success, Tokens: tokens, Interventions: interventions, TelemetryFound: found,
+			ToolCalls: toolCalls, FileReads: fileReads, SearchCalls: searchCalls}, nil
 	}
+}
+
+// sumStreamJSONWork counts the run's work events from a captured exec
+// transcript: every tool_call event, plus file-read and discovery-search
+// classifications by tool name. Read-shaped names count as file reads;
+// grep/glob/search-shaped names count as discovery searches. Unknown names
+// only add to the total, never to a class. Unparseable lines are skipped.
+func sumStreamJSONWork(out []byte) (toolCalls, fileReads, searchCalls int) {
+	for _, line := range strings.Split(string(out), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.Contains(trimmed, "\"type\":\"tool_call\"") {
+			continue
+		}
+		var record struct {
+			Name string `json:"name"`
+		}
+		if json.Unmarshal([]byte(trimmed), &record) != nil || record.Name == "" {
+			continue
+		}
+		toolCalls++
+		switch {
+		case isFileReadTool(record.Name):
+			fileReads++
+		case isSearchTool(record.Name):
+			searchCalls++
+		}
+	}
+	return toolCalls, fileReads, searchCalls
+}
+
+// isFileReadTool reports whether a tool name reads file contents.
+func isFileReadTool(name string) bool {
+	switch strings.ToLower(name) {
+	case "read_file", "read", "view", "cat":
+		return true
+	}
+	return false
+}
+
+// isSearchTool reports whether a tool name searches the repo or the web.
+func isSearchTool(name string) bool {
+	lower := strings.ToLower(name)
+	for _, marker := range []string{"grep", "glob", "search", "find"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // sumStreamJSONTokens sums totalTokens across stream-json usage records in a

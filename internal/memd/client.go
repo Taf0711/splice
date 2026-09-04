@@ -274,6 +274,34 @@ type MemoryStats struct {
 	DBSizeBytes int64          `json:"db_size_bytes"`
 }
 
+// ResetCounts reports what one ResetProject removed. Zero counts are
+// meaningful: they say the project had nothing to remove.
+type ResetCounts struct {
+	Observations int64 `json:"observations"`
+	Traces       int64 `json:"traces"`
+}
+
+// ResetProject hard-deletes every observation and trace stored for the exact
+// project path. Eval-harness isolation primitive: it returns one project's
+// memory state to empty so a fresh seed is the only cognition that project
+// carries. Zero counts are valid and reported, never hidden.
+func (c *Client) ResetProject(ctx context.Context, projectPath string) (ResetCounts, error) {
+	req := map[string]string{"project_path": projectPath}
+	var resp struct {
+		OK           bool   `json:"ok"`
+		Observations int64  `json:"observations"`
+		Traces       int64  `json:"traces"`
+		Error        string `json:"error,omitempty"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/project/reset", req, &resp); err != nil {
+		return ResetCounts{}, err
+	}
+	if !resp.OK {
+		return ResetCounts{}, fmt.Errorf("memd project/reset: %s", resp.Error)
+	}
+	return ResetCounts{Observations: resp.Observations, Traces: resp.Traces}, nil
+}
+
 // Stats fetches aggregate memory statistics from the sidecar.
 func (c *Client) Stats(ctx context.Context) (MemoryStats, error) {
 	var resp struct {

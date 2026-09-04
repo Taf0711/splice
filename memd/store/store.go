@@ -661,6 +661,58 @@ func (s *Store) MarkReviewed(ctx context.Context, id int64) error {
 	return nil
 }
 
+// ResetProject hard-deletes every observation and every run trace whose
+// project path or repo root matches projectPath, including the FTS index
+// rows (the delete triggers keep observations_fts and run_traces_fts in
+// sync). The match is exact: no prefix, no normalization. This is the
+// eval-harness isolation primitive: it restores one project's memory state
+// to empty so a fresh seed is the only cognition the project carries.
+// Counts report what was removed, never a silent zero.
+func (s *Store) ResetProject(ctx context.Context, projectPath string) (ResetCounts, error) {
+	if projectPath == "" {
+		return ResetCounts{}, errors.New("reset project: project_path is required")
+	}
+	var counts ResetCounts
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return counts, fmt.Errorf("reset project: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	obsRes, err := tx.ExecContext(ctx,
+		`DELETE FROM observations WHERE project_path = ?`, projectPath)
+	if err != nil {
+		return counts, fmt.Errorf("reset project: delete observations: %w", err)
+	}
+	observations, err := obsRes.RowsAffected()
+	if err != nil {
+		return counts, fmt.Errorf("reset project: count observations: %w", err)
+	}
+
+	traceRes, err := tx.ExecContext(ctx,
+		`DELETE FROM run_traces WHERE repo_root = ?`, projectPath)
+	if err != nil {
+		return counts, fmt.Errorf("reset project: delete traces: %w", err)
+	}
+	traces, err := traceRes.RowsAffected()
+	if err != nil {
+		return counts, fmt.Errorf("reset project: count traces: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return counts, fmt.Errorf("reset project: commit: %w", err)
+	}
+	counts.Observations = observations
+	counts.Traces = traces
+	return counts, nil
+}
+
+// ResetCounts reports what one ResetProject removed.
+type ResetCounts struct {
+	Observations int64 `json:"observations"`
+	Traces       int64 `json:"traces"`
+}
+
 // byID fetches one observation by primary key. Used after upsert.
 func (s *Store) byID(ctx context.Context, id int64) (*Observation, error) {
 	row := s.db.QueryRowContext(ctx, `

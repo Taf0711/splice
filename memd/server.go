@@ -60,6 +60,7 @@ func newServer(store *store.Store, socketPath string) *server {
 	mux.HandleFunc("/recent", s.handleRecent)
 	mux.HandleFunc("/mark_reviewed", s.handleMarkReviewed)
 	mux.HandleFunc("/stats", s.handleStats)
+	mux.HandleFunc("/project/reset", s.handleProjectReset)
 	mux.HandleFunc("/trace/upsert", s.handleTraceUpsert)
 	mux.HandleFunc("/trace/verdict", s.handleTraceVerdict)
 	mux.HandleFunc("/trace/query", s.handleTraceQuery)
@@ -426,6 +427,37 @@ func (s *server) handleMarkReviewed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, genericResponse{OK: true})
+}
+
+// handleProjectReset hard-deletes one project's observations and traces
+// (POST /project/reset). Eval-harness isolation: the exact project path is
+// the only selector, so a harness can restore a project's memory state to
+// empty without touching any other project's rows. Zero counts are valid.
+func (s *server) handleProjectReset(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var req resetProjectRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "validation: "+err.Error())
+		return
+	}
+	counts, err := s.store.ResetProject(r.Context(), req.ProjectPath)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, resetProjectResponse{
+		OK:           true,
+		Observations: counts.Observations,
+		Traces:       counts.Traces,
+	})
 }
 
 func (s *server) handleStats(w http.ResponseWriter, r *http.Request) {
