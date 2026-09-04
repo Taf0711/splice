@@ -1,0 +1,30 @@
+{
+  "schema": "splice.eval.mvp-families.v1",
+  "fixture": "fixture",
+  "families": [
+    {
+      "id": "mvp-01-session-invalidation",
+      "category": "state-mutation-rule",
+      "precursor_task": "After a successful password reset in the password service, every session that belongs to the affected user must stop working, so a reset also forces old logins out. Extend the session store with a per-user invalidation capability in the session package, and wire it into the password reset flow so the invalidation happens on every successful reset. Preserve all existing session behavior and keep the existing tests passing. Add a regression test for the new invalidation behavior.",
+      "target_task": "An administrator needs to force sign-out a user from the admin console. Add an exported function in the admin package that, given the store and a user id, invalidates every active session that belongs to that user, reusing the repository's existing session invalidation behavior rather than writing its own. Wire it as a POST /admin/signout route on the admin handler that takes user and id as query parameters and returns 200 on success. A user with no sessions is not an error.",
+      "precursor_check_file": "verifiers/mvp-01-a.sh",
+      "target_check_file": "verifiers/mvp-01-b.sh"
+    },
+    {
+      "id": "mvp-02-ttl-source-of-truth",
+      "category": "config-convention",
+      "precursor_task": "The session lifetime is hard-coded as a duration literal where the store is constructed. Introduce a single exported constant in the session package as the one source of truth for the default session lifetime, and make the construction site read it. Behavior must not change and the existing tests must keep passing. Add a test that pins the constant's value.",
+      "target_task": "Sessions need a sweep capability that removes expired sessions on demand. Add an exported method on the session store that deletes every expired session and returns how many it removed. The expiry decision must read the same single configured lifetime source the rest of the repository uses, not its own duration literal. Add tests covering both expired and live sessions.",
+      "precursor_check_file": "verifiers/mvp-02-a.sh",
+      "target_check_file": "verifiers/mvp-02-b.sh"
+    },
+    {
+      "id": "mvp-03-active-session-listing",
+      "category": "api-convention",
+      "precursor_task": "Support needs to see which sessions belong to one user. Add a method on the session store that returns the ids of that user's sessions that are still active, meaning they have not expired under the store's configured lifetime. Deleted sessions must never appear. Add table-driven tests for the new method covering live, expired, and other-user sessions.",
+      "target_task": "The admin console needs a count of how many active sessions one user currently holds. Add a new exported function in the session package that returns that count, reusing the same active-session rule the existing per-user listing established. Add a regression test pinning the count for zero, one, and multiple live sessions, and confirm expired sessions are never counted.",
+      "precursor_check_file": "verifiers/mvp-03-a.sh",
+      "target_check_file": "verifiers/mvp-03-b.sh"
+    }
+  ]
+}

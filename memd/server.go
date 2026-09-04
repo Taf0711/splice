@@ -469,6 +469,7 @@ func (s *server) handleProjectReset(w http.ResponseWriter, r *http.Request) {
 		OK:           true,
 		Observations: counts.Observations,
 		Traces:       counts.Traces,
+		GraphNodes:   counts.GraphNodes,
 	})
 }
 

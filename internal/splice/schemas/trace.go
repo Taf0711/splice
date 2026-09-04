@@ -90,6 +90,20 @@ type InputMeta struct {
 	LookupMisses       int `json:"lookup_misses,omitempty"`
 	FTSFallback        int `json:"fts_fallback,omitempty"`
 	ExemplarsRetrieved int `json:"exemplars_retrieved,omitempty"`
+	// Track C discovery-plan telemetry: what the cognition graph resolved
+	// for this stage invocation and what it could not. DiscoveryReadsAvoided
+	// is the conservative counter: one avoided discovery operation per
+	// question resolved by cognition (the search/read the question would
+	// otherwise have triggered). Never incremented for merely existing
+	// cognition, only for questions the plan actually resolved.
+	DiscoveryQuestions    int `json:"discovery_questions,omitempty"`
+	DiscoveryResolvedTask int `json:"discovery_resolved_by_task,omitempty"`
+	DiscoveryResolvedCog  int `json:"discovery_resolved_by_cognition,omitempty"`
+	DiscoveryUnresolved   int `json:"discovery_unresolved,omitempty"`
+	DiscoveryReadsAvoided int `json:"discovery_reads_avoided,omitempty"`
+	AnchorsValidated      int `json:"anchors_validated,omitempty"`
+	AnchorsFailed         int `json:"anchors_failed,omitempty"`
+	SemanticHits          int `json:"semantic_hits,omitempty"`
 }
 
 // Validate checks the input metadata.
@@ -102,6 +116,11 @@ func (m InputMeta) Validate() error {
 	}
 	if m.KeysGenerated < 0 || m.LookupMisses < 0 || m.FTSFallback < 0 || m.ExemplarsRetrieved < 0 {
 		return errors.New("cognition miss-path counts must be non-negative")
+	}
+	if m.DiscoveryQuestions < 0 || m.DiscoveryResolvedTask < 0 || m.DiscoveryResolvedCog < 0 ||
+		m.DiscoveryUnresolved < 0 || m.DiscoveryReadsAvoided < 0 || m.AnchorsValidated < 0 ||
+		m.AnchorsFailed < 0 || m.SemanticHits < 0 {
+		return errors.New("discovery plan counts must be non-negative")
 	}
 	switch m.MemoryLookupMode {
 	case "", "direct", "search":

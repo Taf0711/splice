@@ -182,6 +182,26 @@ type familyPairRow struct {
 	ExemplarItems int    `json:"exemplars_delivered,omitempty"`
 	DirectHits    int    `json:"direct_hits,omitempty"`
 	LookupMode    string `json:"retrieval_mode,omitempty"` // direct | search | ""
+
+	// Track C discovery-plan telemetry, summed across the run's stages:
+	// what the cognition graph resolved, what freshness admitted, and the
+	// conservatively counted avoided discovery operations.
+	DiscoveryQuestions    int `json:"discovery_questions,omitempty"`
+	DiscoveryResolvedCog  int `json:"discovery_resolved_by_cognition,omitempty"`
+	DiscoveryUnresolved   int `json:"discovery_unresolved,omitempty"`
+	DiscoveryReadsAvoided int `json:"discovery_reads_avoided,omitempty"`
+	AnchorsValidated      int `json:"anchors_validated,omitempty"`
+	AnchorsFailed         int `json:"anchors_failed,omitempty"`
+	SemanticHits          int `json:"semantic_hits,omitempty"`
+	GraphNodesCaptured    int `json:"graph_nodes_captured,omitempty"`
+	// Precursor reports the causal setup outcome for the warm arm of a
+	// Task A -> Task B pair: "success" (Task A verified, cognition
+	// captured), "failed" (Task A did not verify), or "" (not applicable,
+	// e.g. the cold arm). A warm attempt whose precursor failed carries
+	// WarmSetupInvalid=true: its cognition came from nothing legitimate.
+	Precursor      string `json:"precursor,omitempty"`
+	WarmSetupValid bool   `json:"-"`
+	WarmSetupNote  string `json:"warm_setup_note,omitempty"`
 }
 
 // familiesRunTimeout is the deterministic per-run bound: a provider stall
@@ -514,6 +534,16 @@ func collectRunTelemetry(ctx context.Context, deps appDeps, repoRoot, sessionID 
 	row.Status = trace.Outcome.Status
 	row.AbortReason = trace.Outcome.AbortReason
 	row.Repairs = len(trace.Interactions)
+	for _, stage := range trace.Stages {
+		meta := stage.InputMeta
+		row.DiscoveryQuestions += meta.DiscoveryQuestions
+		row.DiscoveryResolvedCog += meta.DiscoveryResolvedCog
+		row.DiscoveryUnresolved += meta.DiscoveryUnresolved
+		row.DiscoveryReadsAvoided += meta.DiscoveryReadsAvoided
+		row.AnchorsValidated += meta.AnchorsValidated
+		row.AnchorsFailed += meta.AnchorsFailed
+		row.SemanticHits += meta.SemanticHits
+	}
 }
 
 // seedFamilyObservation upserts the family's observation into memory with

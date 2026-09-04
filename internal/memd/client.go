@@ -762,10 +762,13 @@ func (c *Client) ContradictGraphNode(ctx context.Context, nodeID, byNodeID int64
 	return nil
 }
 
-// GraphSearchHit pairs a node ID with its semantic similarity score.
+// GraphSearchHit pairs a node ID with its semantic similarity score. Node is
+// the full active node with anchors when the hit resolved to a live row; nil
+// when the index entry is stale.
 type GraphSearchHit struct {
-	NodeID int64   `json:"node_id"`
-	Score  float64 `json:"score"`
+	NodeID int64      `json:"node_id"`
+	Score  float64    `json:"score"`
+	Node   *GraphNode `json:"node,omitempty"`
 }
 
 // SearchGraphSemantically ranks active nodes by cosine similarity to text and

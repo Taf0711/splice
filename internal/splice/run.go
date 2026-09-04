@@ -396,7 +396,7 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 			result.Status,
 			resultOutcomeChangedFiles(result),
 			pipelineTestCommand(result),
-			headRevision(ctx, absWorkDir),
+			verifiedRevision(ctx, absWorkDir),
 			runID,
 		)
 		for _, capture := range captures {
@@ -475,6 +475,35 @@ func headRevision(ctx context.Context, workDir string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// verifiedRevision returns a git revision object naming the CURRENT worktree
+// bytes: `git stash create` records the staged+unstaged state as a commit
+// object WITHOUT touching HEAD, the index, or the working tree (it is the
+// plumbing behind git stash and has no visible side effects beyond an
+// unreferenced commit object). Captured cognition anchors at that snapshot,
+// so a later freshness diff compares against the exact tree the run verified
+// rather than the pre-run HEAD. Empty worktrees (nothing changed) return ""
+// from stash create, and the caller falls back to HEAD so the anchor still
+// names a resolvable revision. Any failure falls back to headRevision; a
+// missing anchor degrades capture to the pre-run base revision, never fails
+// the run.
+func verifiedRevision(ctx context.Context, workDir string) string {
+	engine := procrun.NewStageEngine(workDir)
+	snapCmd, plan, cerr := stages.PrepareStageCommand(ctx, engine, workDir, []string{"git", "-C", workDir, "stash", "create"})
+	if cerr != nil {
+		return headRevision(ctx, workDir)
+	}
+	defer plan.Cleanup()
+	out, err := snapCmd.Output()
+	if err != nil {
+		return headRevision(ctx, workDir)
+	}
+	snapshot := strings.TrimSpace(string(out))
+	if snapshot == "" {
+		return headRevision(ctx, workDir)
+	}
+	return snapshot
 }
 func resolvedModelForStage(options PipelineRunConfig, stageName string) string {
 	if options.StageModelResolver != nil {

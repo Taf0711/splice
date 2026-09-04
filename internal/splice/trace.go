@@ -352,6 +352,29 @@ func (tr *runTraceAccumulator) recordMissPathDetail(stage string, iteration int,
 	tr.stages[key] = meta
 }
 
+// recordDiscoveryPlan records the Track C discovery-plan outcome for one
+// stage invocation: how many questions the plan saw, how many the task
+// itself answered, how many the cognition graph resolved (each counts as one
+// conservatively avoided discovery operation), how many stayed unresolved,
+// and the anchor freshness validation tally. Counts only; no question text
+// or node claims land in the trace.
+func (tr *runTraceAccumulator) recordDiscoveryPlan(stage string, iteration int, plan DiscoveryPlan) {
+	if tr == nil {
+		return
+	}
+	key := stageKey{stage, iteration}
+	meta := tr.stages[key]
+	meta.DiscoveryQuestions = len(plan.ResolvedByTask) + len(plan.ResolvedByCognition) + len(plan.Unresolved)
+	meta.DiscoveryResolvedTask = len(plan.ResolvedByTask)
+	meta.DiscoveryResolvedCog = len(plan.ResolvedByCognition)
+	meta.DiscoveryUnresolved = len(plan.Unresolved)
+	meta.DiscoveryReadsAvoided = len(plan.ResolvedByCognition)
+	meta.AnchorsValidated = plan.AnchorsValidated
+	meta.AnchorsFailed = plan.AnchorsFailed
+	meta.SemanticHits = plan.SemanticHits
+	tr.stages[key] = meta
+}
+
 // MissPathDetail is the miss-path telemetry payload for recordMissPathDetail.
 type MissPathDetail struct {
 	KeysGenerated         int

@@ -294,6 +294,57 @@ const nodeColumns = `id, kind, claim, scope, project_path, status, confidence,
 source_run_id, created_revision, verified_revision, created_at, verified_at,
 claim_hash, metadata_json`
 
+// GetByIDs returns the nodes with the given ids that are ACTIVE and (when
+// projectPath is non-empty) belong to that project, in the same order as the
+// input ids with unresolvable ids skipped. This is the read side of the
+// semantic search pipeline: /graph/search_semantic returns ranked ids, and
+// the server enriches them into full nodes for the wire.
+func (s *Store) GetByIDs(ctx context.Context, ids []int64, projectPath string) ([]Node, error) {
+	out := make([]Node, 0, len(ids))
+	for _, id := range ids {
+		row := s.db.QueryRowContext(ctx,
+			`SELECT `+nodeColumns+`
+			 FROM cognition_nodes n
+			 WHERE n.id = ? AND n.status = ? AND (? = '' OR n.project_path = ?)`,
+			id, NodeStatusActive, projectPath, projectPath)
+		n, err := nodeFromRow(func(dest ...any) error { return row.Scan(dest...) })
+		if err == sql.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("graph: get by id %d: %w", id, err)
+		}
+		out = append(out, n)
+	}
+	return out, nil
+}
+
+// AnchorsFor returns every anchor on the given node ids, grouped by node id.
+func (s *Store) AnchorsFor(ctx context.Context, ids []int64) (map[int64][]Anchor, error) {
+	out := make(map[int64][]Anchor, len(ids))
+	for _, id := range ids {
+		rows, err := s.db.QueryContext(ctx,
+			`SELECT kind, value FROM cognition_anchors WHERE node_id = ? ORDER BY kind, value`, id)
+		if err != nil {
+			return nil, fmt.Errorf("graph: anchors for node %d: %w", id, err)
+		}
+		for rows.Next() {
+			var a Anchor
+			if err := rows.Scan(&a.Kind, &a.Value); err != nil {
+				rows.Close() //nolint:errcheck
+				return nil, fmt.Errorf("graph: anchors scan node %d: %w", id, err)
+			}
+			out[id] = append(out[id], a)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close() //nolint:errcheck
+			return nil, fmt.Errorf("graph: anchors rows node %d: %w", id, err)
+		}
+		rows.Close() //nolint:errcheck
+	}
+	return out, nil
+}
+
 // UpsertNode dedupes by (kind, claim_hash, project_path). A match updates
 // verified_at, verified_revision, and provenance, then returns the existing
 // row with its canonical id. No match inserts a new node. Anchors and edges

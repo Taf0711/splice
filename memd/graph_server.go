@@ -153,9 +153,18 @@ func (s *server) handleGraphExact(w http.ResponseWriter, r *http.Request) {
 		writeGraphError(w, err)
 		return
 	}
+	ids := make([]int64, 0, len(nodes))
+	for _, n := range nodes {
+		ids = append(ids, n.ID)
+	}
+	anchors, aerr := s.store.AnchorsFor(r.Context(), ids)
+	if aerr != nil {
+		writeGraphError(w, aerr)
+		return
+	}
 	out := make([]graphNode, 0, len(nodes))
 	for _, n := range nodes {
-		out = append(out, toGraphNode(n))
+		out = append(out, withAnchors(toGraphNode(n), anchors[n.ID]))
 	}
 	writeJSON(w, http.StatusOK, graphExactResponse{OK: true, Nodes: out})
 }
@@ -268,11 +277,54 @@ func (s *server) handleGraphSearchSemantic(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	ids := make([]int64, 0, len(hits))
+	for _, h := range hits {
+		ids = append(ids, h.NodeID)
+	}
+	byID := map[int64]store.Node{}
+	if len(ids) > 0 {
+		nodes, gerr := s.store.GetByIDs(r.Context(), ids, "")
+		if gerr != nil {
+			writeError(w, http.StatusInternalServerError, gerr.Error())
+			return
+		}
+		for _, n := range nodes {
+			byID[n.ID] = n
+		}
+		anchors, aerr := s.store.AnchorsFor(r.Context(), ids)
+		if aerr != nil {
+			writeError(w, http.StatusInternalServerError, aerr.Error())
+			return
+		}
+		out := make([]graphSearchHit, 0, len(hits))
+		for _, h := range hits {
+			hit := graphSearchHit{NodeID: h.NodeID, Score: h.Score}
+			if n, ok := byID[h.NodeID]; ok {
+				node := withAnchors(toGraphNode(n), anchors[n.ID])
+				hit.Node = &node
+			}
+			out = append(out, hit)
+		}
+		writeJSON(w, http.StatusOK, graphSearchResponse{OK: true, Hits: out})
+		return
+	}
 	out := make([]graphSearchHit, 0, len(hits))
 	for _, h := range hits {
 		out = append(out, graphSearchHit{NodeID: h.NodeID, Score: h.Score})
 	}
 	writeJSON(w, http.StatusOK, graphSearchResponse{OK: true, Hits: out})
+}
+
+// withAnchors attaches the store's anchor rows to a wire node.
+func withAnchors(n graphNode, anchors []store.Anchor) graphNode {
+	if len(anchors) == 0 {
+		return n
+	}
+	n.Anchors = make([]graphAnchor, 0, len(anchors))
+	for _, a := range anchors {
+		n.Anchors = append(n.Anchors, graphAnchor{Kind: a.Kind, Value: a.Value})
+	}
+	return n
 }
 
 // handleGraphCompact merges duplicate nodes and reports what it did.

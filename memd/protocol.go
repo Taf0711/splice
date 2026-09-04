@@ -257,6 +257,7 @@ type resetProjectResponse struct {
 	OK           bool  `json:"ok"`
 	Observations int64 `json:"observations"`
 	Traces       int64 `json:"traces"`
+	GraphNodes   int64 `json:"graph_nodes,omitempty"`
 }
 
 // lookupTopicRequest is the JSON body for POST /lookup_topic. It is the
@@ -604,10 +605,13 @@ func (r *graphSearchRequest) Validate() error {
 	return nil
 }
 
-// graphSearchHit is one semantic search hit in wire form.
+// graphSearchHit is one semantic search hit in wire form. Node is the full
+// active node with its anchors when the hit resolved to a live row; nil when
+// the index entry is stale (deleted or superseded node).
 type graphSearchHit struct {
-	NodeID int64   `json:"node_id"`
-	Score  float64 `json:"score"`
+	NodeID int64      `json:"node_id"`
+	Score  float64    `json:"score"`
+	Node   *graphNode `json:"node,omitempty"`
 }
 
 // graphSearchResponse is the JSON body returned by POST /graph/search_semantic.

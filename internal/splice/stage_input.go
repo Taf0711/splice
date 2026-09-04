@@ -234,11 +234,38 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 			p.Trace.noteSpliceMutation(input.PriorChangedFiles)
 		}
 
+		// Track C: discovery planning over the cognition graph. The plan
+		// resolves structural questions from exact anchors (freshness
+		// validated) or, when no structural keys derive, from semantic entry
+		// nodes plus one bounded hop. Resolved questions deliver their nodes
+		// through the same MemoryBundle channel; the broad search below is
+		// suppressed only when the plan actually resolved something, so the
+		// graph cognition does not stack on top of full FTS redelivery.
+		plan, planNodes := planStageDiscovery(ctx, p, input, root)
+		if p.Trace != nil {
+			p.Trace.recordDiscoveryPlan(input.StageName, p.Iteration, plan)
+		}
+		if len(planNodes) > 0 {
+			graphObs := cognitionBundleFromNodes(planNodes)
+			if mode, modeErr := resolveExemplarMode(); modeErr != nil {
+				return schemas.HarnessStageInput{}, modeErr
+			} else if mode.deliverToModel() {
+				if input.MemoryBundle == nil {
+					input.MemoryBundle = &schemas.MemoryBundle{RequestingAgent: input.StageName}
+				}
+				input.MemoryBundle.Observations = append(input.MemoryBundle.Observations, graphObs...)
+			}
+			emitProgress(p.Options, fmt.Sprintf("[%s] discovery: %d question(s) resolved by cognition, %d node(s)\n",
+				input.StageName, len(plan.ResolvedByCognition), len(planNodes)))
+		}
+		graphResolved := len(plan.ResolvedByCognition)
+
 		// C0: direct cognition fast path (retrieval only, never control flow).
 		// retrieve-no-prompt keeps the retrieval telemetry honest but strips
 		// the delivery: the miss path below runs and records what it found,
 		// while the bundle never reaches the stage input.
-		if direct, ok := p.tryDirectCognition(ctx, input, root); ok {
+		direct, directOK := p.tryDirectCognition(ctx, input, root)
+		if graphResolved == 0 && directOK {
 			if mode, modeErr := resolveExemplarMode(); modeErr != nil {
 				return schemas.HarnessStageInput{}, modeErr
 			} else if !mode.deliverToModel() {
@@ -265,12 +292,15 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 					p.Trace.recordMemoryLookup(input.StageName, p.Iteration, "direct", direct.fresh, direct.stale)
 				}
 			}
-		} else {
+		} else if graphResolved == 0 {
 			// C1c miss path: rerank candidates deterministically when the
 			// store exposes FTS ranks, then admit under the token budget.
 			// A store without the capability (or a ranked-search error,
 			// including an old sidecar) falls back to plain Search ordering
-			// byte-identically; Admit is order-agnostic.
+			// byte-identically; Admit is order-agnostic. When the discovery
+			// plan already resolved a question from the graph, the broad
+			// search is SKIPPED: cognition answered it, re-searching would
+			// duplicate the discovery the graph just eliminated.
 			bundle, missDetail, mErr := p.rerankedMissPath(ctx, input, root)
 			if p.Trace != nil {
 				p.Trace.recordMissPathDetail(input.StageName, p.Iteration, missDetail)
