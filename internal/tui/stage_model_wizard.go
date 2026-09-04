@@ -735,16 +735,10 @@ func (w *stageModelWizardState) render(width int) string {
 	if w == nil {
 		return ""
 	}
-	overlayWidth := stageModelWizardWidth
-	if width > 0 && overlayWidth > width {
-		overlayWidth = maxInt(stageModelWizardMinWidth, width)
-	}
+	overlayWidth := stageModelOverlayWidth(width, w)
 	innerWidth := maxInt(20, overlayWidth-4)
 
-	lines := []string{
-		zeroTheme.faint.Render(w.stepLine()),
-		zeroTheme.line.Render(strings.Repeat("-", innerWidth)),
-	}
+	var lines []string
 	if w.err != "" {
 		lines = append(lines, zeroTheme.red.Render("error: "+w.err), "")
 	}
@@ -763,16 +757,38 @@ func (w *stageModelWizardState) render(width int) string {
 		}
 	}
 
-	lines = append(lines,
-		zeroTheme.line.Render(strings.Repeat("-", innerWidth)),
-		zeroTheme.faint.Render(w.footer()),
-	)
+	lines = append(lines, w.footerLines(innerWidth)...)
 
 	block := styledBlockFillTitle(overlayWidth, "Stage model routing", lines, zeroTheme.lineStrong, lipgloss.NewStyle())
-	if width > overlayWidth {
-		return indentBlock(block, (width-overlayWidth)/2)
+	return centerRenderedBlock(block, width)
+}
+
+// stageModelOverlayWidth sizes the overlay from its content the way the /model
+// picker does: wide enough for the widest row and the hint bar, clamped to the
+// terminal and a ceiling. A fixed 92 regardless of content left either dead
+// space or clipping.
+func stageModelOverlayWidth(terminalWidth int, w *stageModelWizardState) int {
+	if terminalWidth <= 0 {
+		terminalWidth = defaultStartupWidth
 	}
-	return block
+	available := minInt(terminalWidth, stageModelWizardWidth)
+	if terminalWidth < stageModelWizardMinWidth {
+		available = terminalWidth
+	}
+	target := lipgloss.Width(" Stage model routing")
+	if w != nil {
+		for _, row := range w.overviewRows() {
+			target = maxInt(target, lipgloss.Width("❯ ")+lipgloss.Width(row.label)+lipgloss.Width("   ")+lipgloss.Width(row.detail))
+		}
+		if w.step != stageModelWizardStepOverview {
+			for _, line := range w.renderEdit(200) {
+				target = maxInt(target, lipgloss.Width("  "+line))
+			}
+		}
+	}
+	target = maxInt(target, lipgloss.Width("↑↓ select  ⏎ edit  s save  d delete  esc close"))
+	overlayWidth := maxInt(stageModelWizardMinWidth, target+4)
+	return minInt(overlayWidth, maxInt(4, available))
 }
 
 func (w *stageModelWizardState) renderDiscardConfirm(width int) []string {
@@ -783,48 +799,53 @@ func (w *stageModelWizardState) renderDiscardConfirm(width int) []string {
 	}
 }
 
-func (w *stageModelWizardState) stepLine() string {
+// footerLines renders the hint bar the /model way: a theme rule, then keys the
+// CURRENT state actually responds to, shedding from the least-essential end to
+// fit the width. The old static two-part footer ("up/down move Enter edit s
+// save d/Backspace delete Esc close" regardless of state) advertised keys that
+// do not exist on some states and could overflow narrow overlays.
+func (w *stageModelWizardState) footerLines(width int) []string {
+	rule := zeroTheme.line.Render(strings.Repeat("─", maxInt(1, width)))
 	if w == nil {
-		return ""
-	}
-	parts := make([]string, 0, 3)
-	if w.step == stageModelWizardStepOverview || w.confirmDiscard {
-		parts = append(parts, "[overview]")
-	} else {
-		parts = append(parts, "overview")
-	}
-	if w.step == stageModelWizardStepEditDefault {
-		parts = append(parts, "[default]")
-	} else if w.step == stageModelWizardStepEditEscalation {
-		parts = append(parts, "[escalation]")
-	} else if w.step == stageModelWizardStepEditStage {
-		parts = append(parts, "["+w.editTarget+"]")
-	} else {
-		parts = append(parts, "edit")
-	}
-	return strings.Join(parts, "  ")
-}
-
-func (w *stageModelWizardState) footer() string {
-	if w == nil {
-		return ""
+		return []string{rule}
 	}
 	if w.confirmDiscard {
-		return "y discard   n/Esc keep editing"
+		return []string{rule, fitStyledLine(zeroTheme.faint.Render("y discard  ·  n/Esc keep editing"), width)}
 	}
 	switch w.step {
 	case stageModelWizardStepOverview:
-		return "up/down move   Enter edit   s save   d/Backspace delete   Esc close"
+		// Ordered least- to most-essential; delete is the convenience.
+		optional := []string{"d delete"}
+		if w.overviewDirty() {
+			optional = append([]string{"s save"}, optional...)
+		}
+		core := []string{"↑↓ select", "⏎ edit", "esc close"}
+		for drop := 0; drop <= len(optional); drop++ {
+			parts := append([]string{"↑↓ select"}, optional[drop:]...)
+			parts = append(parts, core[1:]...)
+			bar := strings.Join(parts, "  ·  ")
+			if width <= 0 || lipgloss.Width(bar) <= width {
+				return []string{rule, fitStyledLine(zeroTheme.faint.Render(bar), width)}
+			}
+		}
+		return []string{rule, fitStyledLine(zeroTheme.faint.Render(strings.Join(core, "  ·  ")), width)}
 	case stageModelWizardStepEditDefault, stageModelWizardStepEditEscalation, stageModelWizardStepEditStage:
 		if w.picker == stageModelPickerModel {
-			return "type search   Backspace edit   Ctrl+U clear   up/down move   Enter choose   Esc back"
+			return []string{rule, fitStyledLine(zeroTheme.faint.Render("type search  ↑↓ select  ⏎ choose  esc back"), width)}
 		}
 		if w.picker != stageModelPickerNone {
-			return "up/down move   Enter choose   Esc back"
+			return []string{rule, fitStyledLine(zeroTheme.faint.Render("↑↓ select  ⏎ choose  esc back"), width)}
 		}
-		return "up/down move   Enter select   Esc cancel"
+		return []string{rule, fitStyledLine(zeroTheme.faint.Render("↑↓ select  ⏎ open  esc back"), width)}
 	}
-	return "Esc close"
+	return []string{rule, fitStyledLine(zeroTheme.faint.Render("esc close"), width)}
+}
+
+// overviewDirty reports whether an override changed since open, so the save
+// hint only appears when there is something to save — the /model hint-bar
+// rule: name only keys that do something right now.
+func (w *stageModelWizardState) overviewDirty() bool {
+	return w != nil && w.isDirty()
 }
 
 func (w *stageModelWizardState) renderOverview(width int) []string {
@@ -836,14 +857,66 @@ func (w *stageModelWizardState) renderOverview(width int) []string {
 	rows := w.overviewRows()
 	maxVisible := minInt(12, len(rows))
 	start := selectableListStart(len(rows), maxVisible, w.overviewCursor)
+	// Scroll affordances (the /model pattern): a clipped window must say so,
+	// or its edge reads as the end of the list.
+	if start > 0 {
+		lines = append(lines, zeroTheme.faintest.Render("  ↑ more above"))
+	}
 	for offset, row := range rows[start : start+maxVisible] {
 		lines = append(lines, w.renderOverviewRow(width, start+offset, row))
+	}
+	if start+maxVisible < len(rows) {
+		lines = append(lines, zeroTheme.faintest.Render("  ↓ more below"))
+	}
+
+	// Detail block keyed to the highlighted row (the /model pattern): the rule
+	// then the routing facts the row resolves to, so Enter's consequence is
+	// legible before it is committed.
+	if row := w.currentOverviewRow(); row.label != "" {
+		lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", maxInt(1, width))))
+		lines = append(lines, w.overviewDetailLines(row, width)...)
 	}
 
 	if len(w.providers) == 0 {
 		lines = append(lines, "", zeroTheme.red.Render("No saved providers. Run /provider first."))
 	}
 	return lines
+}
+
+// overviewDetailLines describes the highlighted routing target: what it does
+// and what it currently resolves to, so the edit surface is discoverable from
+// the overview without opening it.
+func (w *stageModelWizardState) overviewDetailLines(row stageModelOverviewRow, width int) []string {
+	target := w.overviewRowStageName(row)
+	role := "stage override"
+	switch target {
+	case "default":
+		role = "every stage without its own override"
+	case "escalation":
+		role = "trajectory monitor escalation (cycle or oscillation)"
+	default:
+		if desc := stageDescription(target); desc != "" {
+			role = desc
+		}
+	}
+	lines := []string{
+		fillPaletteLine(zeroTheme.ink.Bold(true).Render(row.label)+"  "+zeroTheme.faint.Render(role), width, transparentSurface),
+	}
+	// Known stages show their description; unknown extension stages say so.
+	if row.removed {
+		lines = append(lines, fillPaletteLine(zeroTheme.faint.Render("override removed — returns to default on save"), width, transparentSurface))
+	}
+	return lines
+}
+
+// stageDescription returns the human description of a known routing target.
+func stageDescription(name string) string {
+	for _, row := range knownStageModelStages() {
+		if row.name == name {
+			return row.description
+		}
+	}
+	return ""
 }
 
 type stageModelOverviewRow struct {
@@ -891,12 +964,12 @@ func (w *stageModelWizardState) renderOverviewRow(width int, index int, row stag
 	marker := surface(zeroTheme.faintest).Render("  ")
 	if selected {
 		surface = zeroTheme.onSel
-		marker = surface(zeroTheme.accent).Render("> ")
+		marker = surface(zeroTheme.accent).Render("❯ ")
 	}
 	left := marker + surface(zeroTheme.ink).Render(row.label)
 	right := zeroTheme.faint.Render(row.detail)
 	line := fitStyledLine(left+"   "+right, width)
-	return line
+	return fillPaletteLine(line, width, surface)
 }
 
 func (w *stageModelWizardState) renderEdit(width int) []string {
@@ -981,9 +1054,9 @@ func renderStageModelSelectableRow(width int, selected bool, option stageModelOp
 		surface = zeroTheme.onSel
 		marker = surface(zeroTheme.accent).Render("❯ ")
 	}
-	line := marker + surface(zeroTheme.ink).Render(option.label)
+	left := marker + surface(zeroTheme.ink).Render(option.label)
 	if meta := strings.TrimSpace(option.meta); meta != "" {
-		line += surface(zeroTheme.faint).Render("   " + meta)
+		left += surface(zeroTheme.faint).Render("   " + meta)
 	}
-	return fitStyledLine(line, width)
+	return fillPaletteLine(left, width, surface)
 }
