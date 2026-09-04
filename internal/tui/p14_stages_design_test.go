@@ -99,7 +99,7 @@ func TestStagesHintBarContextual(t *testing.T) {
 	if strings.Contains(plain, "s save") {
 		t.Fatalf("pristine overview advertised save:\n%s", plain)
 	}
-	if !strings.Contains(plain, "d delete") || !strings.Contains(plain, "⏎ edit") {
+	if !strings.Contains(plain, "d delete") || !strings.Contains(plain, "⏎ model") {
 		t.Fatalf("overview hint bar missing its keys:\n%s", plain)
 	}
 	// Dirty state: save appears.
@@ -111,11 +111,11 @@ func TestStagesHintBarContextual(t *testing.T) {
 		t.Fatalf("dirty overview missing the save hint:\n%s", plain)
 	}
 	// Narrow width sheds to the core keys.
-	plain = stagesPlain(t, wizard.footerLines(30))
+	plain = stagesPlain(t, wizard.footerLines(52))
 	if strings.Contains(plain, "s save") || strings.Contains(plain, "d delete") {
 		t.Fatalf("narrow hint bar did not shed optional keys:\n%s", plain)
 	}
-	if !strings.Contains(plain, "⏎ edit") {
+	if !strings.Contains(plain, "⏎ model") {
 		t.Fatalf("narrow hint bar lost the core keys:\n%s", plain)
 	}
 	// Edit state: no save/delete, says open.
