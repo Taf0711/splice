@@ -108,8 +108,16 @@ func TestPrepareStageInputOneSpawnPerUniqueCommit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepareStageInput re-entry: %v", err)
 	}
-	if prepared2.MemoryBundle == nil || len(prepared2.MemoryBundle.Observations) != 1 {
-		t.Fatalf("re-entry expected 1 observation (single key), got %v", prepared2.MemoryBundle)
+	// Run-local replay guard: the first invocation delivered observation 1 to
+	// code_writer, so the re-entry (repair semantics: same stage, same run)
+	// must SUPPRESS it from prompt delivery even though the direct hit and
+	// its zero-spawn freshness memo still work. Suppression is delivery-level
+	// only — the git spawn count below proves retrieval stayed real.
+	if prepared2.MemoryBundle == nil || len(prepared2.MemoryBundle.Observations) != 0 {
+		t.Fatalf("re-entry expected the already-consumed observation to be suppressed, got %v", prepared2.MemoryBundle)
+	}
+	if got := tr.replaySuppressedCount(); got != 1 {
+		t.Fatalf("replay suppressed count = %d, want 1", got)
 	}
 	if got := runner.spawns; got != 0 {
 		t.Fatalf("git spawns on re-entry = %d, want 0 (memoized)", got)
