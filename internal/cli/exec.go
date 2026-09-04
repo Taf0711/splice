@@ -909,6 +909,10 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		default:
 			memClient = resolvedMemClient
 			runOptions.MemoryStatus = "active"
+			// Graph capture rides the same sidecar client. The wrapper
+			// exposes it to the run seam's verified-run capture path; a
+			// client that lacks graph support still satisfies MemoryStore.
+			memClient = splicerun.NewGraphMemoryStore(resolvedMemClient)
 		}
 	}
 
