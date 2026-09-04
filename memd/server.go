@@ -39,16 +39,20 @@ func (t *idleTracker) expired(now time.Time) bool {
 	return t.timeout > 0 && now.Sub(t.lastActivity) >= t.timeout
 }
 
-// server holds the HTTP server, the store, and the Unix socket path.
+// server holds the HTTP server, the store, the semantic index over the
+// store, and the Unix socket path.
 type server struct {
 	store      *store.Store
+	semantic   *store.SemanticIndex
 	socketPath string
 	httpServer *http.Server
 }
 
 func newServer(store *store.Store, socketPath string) *server {
+	sem := newSemanticIndex(store)
 	s := &server{
 		store:      store,
+		semantic:   sem,
 		socketPath: socketPath,
 	}
 	mux := http.NewServeMux()
@@ -64,6 +68,14 @@ func newServer(store *store.Store, socketPath string) *server {
 	mux.HandleFunc("/trace/upsert", s.handleTraceUpsert)
 	mux.HandleFunc("/trace/verdict", s.handleTraceVerdict)
 	mux.HandleFunc("/trace/query", s.handleTraceQuery)
+	mux.HandleFunc("/graph/upsert", s.handleGraphUpsert)
+	mux.HandleFunc("/graph/exact", s.handleGraphExact)
+	mux.HandleFunc("/graph/neighbors", s.handleGraphNeighbors)
+	mux.HandleFunc("/graph/status", s.handleGraphStatus)
+	mux.HandleFunc("/graph/contradict", s.handleGraphContradict)
+	mux.HandleFunc("/graph/search_semantic", s.handleGraphSearchSemantic)
+	mux.HandleFunc("/graph/compact", s.handleGraphCompact)
+	mux.HandleFunc("/graph/collect", s.handleGraphCollect)
 	s.httpServer = &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,

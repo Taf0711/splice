@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -48,6 +49,13 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 	}
 
 	options.report(fmt.Sprintf("running %s in %s", joinShell(cmd), options.WorkDir))
+	// A1: run Go tests with -json so per-test results exist for repair
+	// evidence and trajectory signals. The suite-entry synthesis below stays
+	// only as a fallback when -json is unavailable or parsing fails.
+	jsonEligible := isGoTestJSONCommand(cmd) || (len(cmd) > 1 && cmd[0] == "go" && cmd[1] == "test")
+	if jsonEligible {
+		cmd = withGoTestJSON(cmd)
+	}
 	var results schemas.TestRunResults
 	if options.RunTool != nil {
 		bashArgs := map[string]any{
@@ -101,14 +109,27 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 		results = runCommand(ctx, options.Sandbox, cmd, options.WorkDir, timeout)
 	}
 
+	// A1: when the command was JSON-eligible, try per-test parsing first.
+	// The suite-entry synthesis below becomes the last-resort fallback when
+	// -json output is unavailable or fails to parse.
+	var parsedGoJSON bool
+	var parsedResults schemas.TestRunResults
+	if jsonEligible {
+		parsedResults, parsedGoJSON = parseGoTestJSON(results.Stdout)
+	}
+
 	var summary string
 	var confidence float64
 	if results.ExitCode == 0 {
-		results.Tests = []schemas.TestCaseResult{{
-			Name:       "suite",
-			Status:     "passed",
-			DurationMs: results.DurationMs,
-		}}
+		if parsedGoJSON && len(parsedResults.Tests) > 0 {
+			results.Tests = parsedResults.Tests
+		} else {
+			results.Tests = []schemas.TestCaseResult{{
+				Name:       "suite",
+				Status:     "passed",
+				DurationMs: results.DurationMs,
+			}}
+		}
 		summary = "Test command passed."
 		confidence = 1.0
 	} else if results.ExitCode == 124 {
@@ -121,14 +142,33 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 		summary = fmt.Sprintf("Test command timed out after %ds.", timeout)
 		confidence = 0.3
 	} else {
-		results.Tests = []schemas.TestCaseResult{{
-			Name:       "suite",
-			Status:     "failed",
-			DurationMs: results.DurationMs,
-			Message:    fmt.Sprintf("exit code %d", results.ExitCode),
-		}}
+		switch {
+		case parsedGoJSON && len(parsedResults.Tests) > 0:
+			// Per-test (or per-compile-error) entries from go test -json.
+			results.Tests = parsedResults.Tests
+		default:
+			results.Tests = []schemas.TestCaseResult{{
+				Name:       "suite",
+				Status:     "failed",
+				DurationMs: results.DurationMs,
+				Message:    fmt.Sprintf("exit code %d", results.ExitCode),
+			}}
+		}
 		summary = fmt.Sprintf("Test command failed with exit code %d.", results.ExitCode)
-		if evidence := failingEvidenceExcerpt(results.Stdout + "\n" + results.Stderr); evidence != "" {
+		evidence := failingEvidenceExcerpt(results.Stdout + "\n" + results.Stderr)
+		if evidence == "" && parsedGoJSON {
+			// The -json stream wraps compiler output in JSON events, so the
+			// raw-line excerpt finds nothing. The parsed compile-error
+			// entries are the evidence; rebuild it from them.
+			var lines []string
+			for _, tc := range results.Tests {
+				if tc.Status == "errored" {
+					lines = append(lines, tc.Name+": "+tc.Message)
+				}
+			}
+			evidence = truncateEvidenceLines(strings.Join(lines, "\n"))
+		}
+		if evidence != "" {
 			// Surface bounded failure evidence into the revision context: a
 			// re-entered writer that only sees "exit code 1" guesses blind.
 			summary += "\nFailing evidence:\n" + evidence
@@ -332,18 +372,30 @@ const (
 )
 
 // failureMarkerPrefixes are the line prefixes runtimes print to announce a
-// failed test: Go ("--- FAIL:"), pytest ("FAILED", "E   assertion"), and
-// generic runners ("FAIL.").
-var failureMarkerPrefixes = []string{"--- FAIL:", "FAILED ", "FAIL.", "E   "}
+// failed test: Go ("--- FAIL:"), pytest ("FAILED", "E   assertion"), generic
+// runners ("FAIL."), and Go build failures ("# pkg" headers plus their
+// file:line: compiler error lines).
+var failureMarkerPrefixes = []string{"--- FAIL:", "FAILED ", "FAIL.", "E   ", "# ", "./"}
 
 func isFailureMarkerLine(line string) bool {
+	// "# pkg" marks a Go build-failure block only when the following lines
+	// carry compiler errors; a bare "#" comment line must not match. The
+	// "./" prefix matches Go compiler error lines (./file.go:12: undefined: X).
 	for _, prefix := range failureMarkerPrefixes {
 		if strings.HasPrefix(line, prefix) {
+			// A line that is exactly "#" or "# comment" is not a build block.
+			if prefix == "# " && !goCompilerErrorLineRe.MatchString(line) {
+				continue
+			}
 			return true
 		}
 	}
 	return false
 }
+
+// goCompilerErrorLineRe matches Go compiler diagnostic lines: file.go:12:34:
+// message or # pkg headers followed by diagnostics.
+var goCompilerErrorLineRe = regexp.MustCompile(`^# \S|\.go:\d+`)
 
 // isEvidenceContinuation reports whether line belongs to the failure block
 // above it: indented output, diff lines, or runtime assertion detail.

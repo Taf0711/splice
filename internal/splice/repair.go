@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -18,9 +19,192 @@ import (
 // cross-pass recovery; this is only the in-pass repair loop.
 const maxLocalRepairs = 2
 
+// repairNoProgressReason is the typed abort reason surfaced when the repair
+// no-progress guard stops the loop.
+const repairNoProgressReason = "repair_no_progress"
+
 // repairInstruction is the fixed re-entry directive carried in the revision
 // request payload.
 const repairInstruction = "The test runner reports failing tests after your implementation. Fix the implementation so these tests pass. Do not rewrite unrelated code."
+
+// repairTestFileInstruction replaces the generic instruction when every
+// failing test attributes to a file the writer authored this run: the failing
+// code is the test file, not the implementation.
+const repairTestFileInstruction = "The tests you wrote fail. Fix the test file, or the implementation if the tests exposed a real defect. Do not rewrite unrelated code."
+
+// repairNoProgressConstraint is appended to the revision context when the
+// guard fired on the final attempt.
+const repairNoProgressConstraint = "No-progress guard: the previous attempts produced the same failure with no new evidence. Do not repeat a change you already made. Read the failing files and change the approach."
+
+// repairProgressState is the per-repair-trajectory no-progress guard state.
+// It lives across attemptLocalRepair's loop (passed by pointer) and tracks
+// failure fingerprints, evidence, attempted approaches, and applied content
+// hashes so a stuck loop is detected deterministically.
+type repairProgressState struct {
+	fingerprints    map[string]struct{}
+	evidenceSeen    map[string]struct{}
+	approaches      []string
+	lastWriteHashes map[string]string
+	stalled         int
+}
+
+func newRepairProgressState() *repairProgressState {
+	return &repairProgressState{
+		fingerprints:    map[string]struct{}{},
+		evidenceSeen:    map[string]struct{}{},
+		lastWriteHashes: map[string]string{},
+	}
+}
+
+// observe records one failing-payload observation and reports the two guard
+// inputs: repeatedNoEvidence is true when this fingerprint was seen before
+// with no new evidence (the directive's stop condition after one
+// evidence-informed retry), and stalled is the consecutive no-progress input
+// count, where a byte-identical repeat write counts even when the evidence
+// text changed. Any real change resets the count.
+func (s *repairProgressState) observe(fingerprintHash string, evidenceHashes []string, writeHashes map[string]string) (repeatedNoEvidence bool, stalledCount int) {
+	newEvidence := false
+	for _, hash := range evidenceHashes {
+		if _, ok := s.evidenceSeen[hash]; !ok {
+			newEvidence = true
+		}
+		s.evidenceSeen[hash] = struct{}{}
+	}
+	_, fingerprintSeen := s.fingerprints[fingerprintHash]
+	s.fingerprints[fingerprintHash] = struct{}{}
+	repeatWrites := len(writeHashes) > 0 && sameStringMap(writeHashes, s.lastWriteHashes)
+	for path, hash := range writeHashes {
+		s.lastWriteHashes[path] = hash
+	}
+
+	if (fingerprintSeen && !newEvidence) || repeatWrites {
+		s.stalled++
+	} else {
+		s.stalled = 0
+	}
+	return fingerprintSeen && !newEvidence, s.stalled
+}
+
+// recordApproach appends one attempted-approach summary (bounded).
+func (s *repairProgressState) recordApproach(summary string) {
+	if summary == "" {
+		return
+	}
+	if len(s.approaches) >= 5 {
+		s.approaches = s.approaches[1:]
+	}
+	s.approaches = append(s.approaches, summary)
+}
+
+func sameStringMap(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for key, av := range a {
+		if bv, ok := b[key]; !ok || bv != av {
+			return false
+		}
+	}
+	return true
+}
+
+// evidenceHashes derives the per-evidence hash list the guard compares.
+func evidenceHashes(evidence []string) []string {
+	hashes := make([]string, 0, len(evidence))
+	for _, item := range evidence {
+		hashes = append(hashes, NewFailureFingerprint(FailureKindTest, "", 0, item, nil, nil).Hash())
+	}
+	return hashes
+}
+
+// writerContentHashes hashes the files a repair re-entry applied, keyed by
+// path, from the writer output payload.
+func writerContentHashes(output schemas.HarnessStageOutput) map[string]string {
+	cwo, ok := output.Data["code_writer_output"].(schemas.CodeWriterOutput)
+	if !ok {
+		return nil
+	}
+	hashes := map[string]string{}
+	for _, file := range cwo.Files {
+		hashes[file.Path] = NewFailureFingerprint(FailureKindCommand, "", 0, file.Content, nil, nil).Hash()
+	}
+	if len(hashes) == 0 {
+		return nil
+	}
+	return hashes
+}
+
+// repairInstructionDirection picks the revision instruction deterministically.
+// When every failing test attributes to a test file the writer authored this
+// run (its own code_writer output), the writer must fix its test file;
+// otherwise the generic implementation instruction applies. Attribution
+// matches the failing test function name against declarations in the
+// authored file contents, then falls back to the file mentions in the
+// diagnostics for compile errors.
+func repairInstructionDirection(failingNames []string, diagnostics string, writerOutput schemas.HarnessStageOutput) string {
+	authoredFiles := writerAuthoredTestFiles(writerOutput)
+	if len(authoredFiles) == 0 || (len(failingNames) == 0 && goFileMentions(diagnostics) == nil) {
+		return repairInstruction
+	}
+	attributed := false
+	for _, name := range failingNames {
+		topLevel := topLevelTestName(name)
+		inAuthored := false
+		for path, content := range authoredFiles {
+			if authoredFileDeclares(content, topLevel) {
+				inAuthored = true
+				_ = path
+				break
+			}
+		}
+		switch {
+		case inAuthored:
+			attributed = true
+		case strings.Contains(diagnostics, name):
+			// The failure names content that is not in the writer's files.
+			return repairInstruction
+		}
+	}
+	// File-mention fallback for compile errors that name no test function.
+	if !attributed {
+		for _, file := range goFileMentions(diagnostics) {
+			if _, ok := authoredFiles[strings.TrimPrefix(file, "./")]; !ok {
+				return repairInstruction
+			}
+			attributed = true
+		}
+	}
+	if attributed {
+		return repairTestFileInstruction
+	}
+	return repairInstruction
+}
+
+// writerAuthoredTestFiles returns the .go test files (path to content) from
+// one code_writer output payload. Files whose declared functions include at
+// least one TestXxx name count as test files.
+func writerAuthoredTestFiles(writerOutput schemas.HarnessStageOutput) map[string]string {
+	cwo, ok := writerOutput.Data["code_writer_output"].(schemas.CodeWriterOutput)
+	if !ok {
+		return nil
+	}
+	files := map[string]string{}
+	for _, file := range cwo.Files {
+		if !strings.HasSuffix(file.Path, "_test.go") {
+			continue
+		}
+		files[strings.TrimPrefix(file.Path, "./")] = file.Content
+	}
+	return files
+}
+
+// authoredFileDeclares reports whether file content declares the given
+// top-level test function (func TestXxx( ... ).
+func authoredFileDeclares(content, testName string) bool {
+	return regexp.MustCompile(`func\s+` + regexp.QuoteMeta(testName) + `\s*\(`).MatchString(content)
+}
+
+// Focused repair payload construction (A5) lives in buildFocusedRevisionContext.
 
 // attemptLocalRepair re-enters code_writer with a focused revision request when
 // test_runner reports failing tests, then re-runs test_runner and merges the
@@ -64,6 +248,8 @@ func attemptLocalRepair(
 	attempts := 0
 	totalLatency := 0
 	var lastMessage schemas.StageMessage
+	progress := newRepairProgressState()
+	var lastWriterOutput schemas.HarnessStageOutput
 
 	for repairN := 1; repairN <= maxLocalRepairs; repairN++ {
 		if ctx.Err() != nil {
@@ -78,10 +264,58 @@ func attemptLocalRepair(
 			// Payload absent or nothing failing: nothing to repair.
 			break
 		}
-		evidence, names := extractFailingTests(results)
 
-		instruction := repairInstruction
-		revisionContext := instruction + "\nFailing tests:\n" + strings.Join(evidence, "\n")
+		// A3: the no-progress guard. Every new failing payload is observed;
+		// the first observation is the baseline, so a repair that reproduces
+		// the identical failure with no new evidence marks a stall on
+		// re-entry and the second consecutive stall stops the loop.
+		evidence, names := extractFailingTests(results)
+		fingerprint := FingerprintFromTestResults(results)
+		fingerprintHash := fingerprint.Hash()
+		var diagnostics strings.Builder
+		for _, tc := range results.Tests {
+			if tc.Status == "failed" || tc.Status == "errored" {
+				diagnostics.WriteString(tc.Name + ": " + tc.Message + "\n")
+			}
+		}
+		if raw := strings.TrimSpace(results.Stdout); raw != "" {
+			diagnostics.WriteString(raw + "\n")
+		}
+
+		repeatedNoEvidence, stalledCount := progress.observe(fingerprintHash, evidenceHashes(evidence), writerContentHashes(lastWriterOutput))
+		// Stop condition: the identical failure with no new evidence after
+		// one evidence-informed retry, or two consecutive no-progress inputs
+		// (repeated fingerprint, byte-identical repeat writes, or both).
+		if repairN > 1 && (repeatedNoEvidence || stalledCount >= 2) {
+			// Same fingerprint and no new evidence after the evidence-informed
+			// retry: stop writing and surface the typed outcome.
+			emitStageEvent(options, "test_runner", "message", fmt.Sprintf("%s: identical failure with no new evidence after %d repair(s); stopping repair loop", repairNoProgressReason, attempts), 0, nil)
+			return false, &schemas.InteractionRecord{
+				Message:   lastMessage,
+				Iteration: iteration,
+				Repairs:   attempts,
+				Resolved:  false,
+				LatencyMs: totalLatency,
+			}, nil
+		}
+
+		// A4: deterministic diagnostic resolution over the workspace.
+		resolverEvidence := ResolveGoDiagnostics(workDir, diagnostics.String())
+
+		// A5: focused payload. Original intent, change summary, exact
+		// failure, fingerprint, resolver evidence, attempted approaches, and
+		// (on the final attempt) the no-progress constraint. No transcript.
+		instruction := repairInstructionDirection(names, diagnostics.String(), lastWriterOutput)
+		revisionContext := buildFocusedRevisionContext(focusedRepairPayload{
+			Intent:           plan.RequestIntent,
+			ChangeSummary:    changeSummaryForStage(*priorSummaries, "code_writer"),
+			FailureText:      strings.Join(evidence, "\n"),
+			Fingerprint:      fingerprint,
+			Evidence:         resolverEvidence,
+			Attempted:        progress.approaches,
+			NoProgressStalls: progress.stalled,
+			FinalAttempt:     repairN == maxLocalRepairs,
+		}, instruction)
 
 		message := schemas.StageMessage{
 			ID:       fmt.Sprintf("%s-r%d", runID, repairN),
@@ -125,6 +359,8 @@ func attemptLocalRepair(
 			tr.noteSpliceMutation(stageChangedFilesMap(writerOutput))
 		}
 		*outputs = append(*outputs, writerOutput)
+		lastWriterOutput = writerOutput
+		progress.recordApproach(DerefString(mergedWriter.OutputSummary))
 
 		// Re-run test_runner (model-free: zero usage and zero selection). The
 		// re-entry itself already emits running/completed through
@@ -156,7 +392,8 @@ func attemptLocalRepair(
 		*outputs = append(*outputs, newTestOutput)
 		currentOutput = newTestOutput
 
-		if newResults, ok := newTestOutput.Data["test_results"].(schemas.TestRunResults); ok && newResults.Failed() == 0 {
+		newResults, resultsOK := newTestOutput.Data["test_results"].(schemas.TestRunResults)
+		if resultsOK && newResults.Failed() == 0 {
 			emitStageEvent(options, "test_runner", "repaired", "revision resolved: tests pass", 100, nil)
 			(*priorSummaries)["code_writer"] = *mergedWriter.OutputSummary
 			(*priorSummaries)["test_runner"] = *mergedRunner.OutputSummary
@@ -168,6 +405,9 @@ func attemptLocalRepair(
 				LatencyMs: totalLatency,
 			}, nil
 		}
+		// The next loop pass observes the new failing payload through the
+		// guard at its top, with this re-entry's applied content hashes as
+		// no-progress evidence (byte-identical repeat writes count).
 	}
 
 	if attempts == 0 {
@@ -205,6 +445,87 @@ func extractFailingTests(results schemas.TestRunResults) (evidence []string, nam
 		names = append(names, tc.Name)
 	}
 	return evidence, names
+}
+
+// focusedRepairPayload is the A5 focused revision payload: everything the
+// re-entered writer needs and nothing else. No transcript.
+type focusedRepairPayload struct {
+	Intent           string
+	ChangeSummary    string
+	FailureText      string
+	Fingerprint      FailureFingerprint
+	Evidence         FocusedEvidence
+	Attempted        []string
+	NoProgressStalls int
+	FinalAttempt     bool
+}
+
+// maxPayloadApproaches bounds how many attempted-approach summaries ride in
+// one payload.
+const maxPayloadApproaches = 3
+
+// buildFocusedRevisionContext renders the focused payload as the revision
+// context string carried into the re-entered code_writer.
+func buildFocusedRevisionContext(payload focusedRepairPayload, instruction string) string {
+	var lines []string
+	lines = append(lines, instruction, "")
+	if payload.Intent != "" {
+		lines = append(lines, "Original intent: "+payload.Intent, "")
+	}
+	if payload.ChangeSummary != "" {
+		lines = append(lines, "Current change summary:", payload.ChangeSummary, "")
+	}
+	lines = append(lines, "Exact failure:", payload.FailureText, "")
+	lines = append(lines, fmt.Sprintf("Failure fingerprint: %s (kind=%s)", payload.Fingerprint.Hash(), payload.Fingerprint.Kind))
+	if len(payload.Fingerprint.Symbols) > 0 {
+		lines = append(lines, "Fingerprint symbols: "+strings.Join(payload.Fingerprint.Symbols, ", "))
+	}
+	if len(payload.Fingerprint.Files) > 0 {
+		lines = append(lines, "Fingerprint files: "+strings.Join(payload.Fingerprint.Files, ", "))
+	}
+	lines = append(lines, "")
+
+	if len(payload.Evidence.Symbols) > 0 {
+		lines = append(lines, "Resolved symbols:")
+		for _, symbol := range payload.Evidence.Symbols {
+			lines = append(lines, "  "+symbol)
+		}
+	}
+	if len(payload.Evidence.Lookups) > 0 {
+		lines = append(lines, "Workspace lookups:")
+		for _, lookup := range payload.Evidence.Lookups {
+			lines = append(lines, "  "+truncateString(lookup, 200))
+		}
+	}
+	if len(payload.Evidence.Files) > 0 {
+		lines = append(lines, "Named files: "+strings.Join(payload.Evidence.Files, ", "))
+	}
+	if len(payload.Evidence.Facts) > 0 {
+		lines = append(lines, "Diagnostic facts:")
+		for _, fact := range payload.Evidence.Facts {
+			lines = append(lines, "  "+truncateString(fact, 200))
+		}
+	}
+	if len(payload.Attempted) > 0 {
+		lines = append(lines, "", "Attempted approaches:")
+		attempted := payload.Attempted
+		if len(attempted) > maxPayloadApproaches {
+			attempted = attempted[len(attempted)-maxPayloadApproaches:]
+		}
+		for _, approach := range attempted {
+			lines = append(lines, "  "+truncateString(approach, 150))
+		}
+	}
+	if payload.FinalAttempt && payload.NoProgressStalls > 0 {
+		lines = append(lines, "", repairNoProgressConstraint)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// changeSummaryForStage returns the prior summary line for one stage, or the
+// empty string when the stage has not run.
+func changeSummaryForStage(priorSummaries map[string]string, stageName string) string {
+	return strings.TrimSpace(priorSummaries[stageName])
 }
 
 // repairStageInput builds a fresh HarnessStageInput mirroring the pass input

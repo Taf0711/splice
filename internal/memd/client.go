@@ -558,3 +558,275 @@ func spawnDaemon(binary string, socketPath string) error {
 	go cmd.Wait() //nolint:errcheck
 	return nil
 }
+
+// ---------------------------------------------------------------------------
+// Cognition graph methods. Each mirrors one /graph/* endpoint on the sidecar.
+// The wire contract is the only coupling: these structs are client-local and
+// never import the memd sidecar module.
+// ---------------------------------------------------------------------------
+
+// GraphAnchor is one typed anchor on a graph node.
+type GraphAnchor struct {
+	Kind  string `json:"kind"`
+	Value string `json:"value"`
+}
+
+// GraphEdgeInput is one directed edge from the upserted node.
+type GraphEdgeInput struct {
+	DstID int64  `json:"dst_id"`
+	Kind  string `json:"kind"`
+}
+
+// GraphNode is the client-side view of one cognition node.
+type GraphNode struct {
+	ID               int64         `json:"id"`
+	Kind             string        `json:"kind"`
+	Claim            string        `json:"claim"`
+	Scope            string        `json:"scope"`
+	ProjectPath      *string       `json:"project_path"`
+	Status           string        `json:"status"`
+	Confidence       *float64      `json:"confidence"`
+	SourceRunID      *string       `json:"source_run_id"`
+	CreatedRevision  *string       `json:"created_revision"`
+	VerifiedRevision *string       `json:"verified_revision"`
+	CreatedAt        int64         `json:"created_at"`
+	VerifiedAt       *int64        `json:"verified_at"`
+	ClaimHash        string        `json:"claim_hash"`
+	MetadataJSON     *string       `json:"metadata_json"`
+	Anchors          []GraphAnchor `json:"anchors,omitempty"`
+}
+
+// GraphUpsertInput is the caller-supplied shape for one graph upsert.
+type GraphUpsertInput struct {
+	Kind             string           `json:"kind"`
+	Claim            string           `json:"claim"`
+	Scope            string           `json:"scope,omitempty"`
+	ProjectPath      string           `json:"project_path,omitempty"`
+	Status           string           `json:"status,omitempty"`
+	Confidence       *float64         `json:"confidence,omitempty"`
+	SourceRunID      string           `json:"source_run_id,omitempty"`
+	CreatedRevision  string           `json:"created_revision,omitempty"`
+	VerifiedRevision string           `json:"verified_revision,omitempty"`
+	Metadata         map[string]any   `json:"metadata,omitempty"`
+	Anchors          []GraphAnchor    `json:"anchors,omitempty"`
+	Edges            []GraphEdgeInput `json:"edges,omitempty"`
+	Evidence         []GraphEvidence  `json:"evidence,omitempty"`
+}
+
+// GraphEvidence is one deterministic support record attached to the node at
+// upsert time.
+type GraphEvidence struct {
+	Kind   string `json:"kind"`
+	Ref    string `json:"ref,omitempty"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// UpsertGraphNode creates or updates one node with anchors and edges, then
+// returns the stored node with its canonical ID.
+func (c *Client) UpsertGraphNode(ctx context.Context, in GraphUpsertInput) (GraphNode, error) {
+	if in.Kind == "" {
+		return GraphNode{}, fmt.Errorf("memd graph upsert: kind is required")
+	}
+	if in.Claim == "" {
+		return GraphNode{}, fmt.Errorf("memd graph upsert: claim is required")
+	}
+	var resp struct {
+		OK    bool      `json:"ok"`
+		Node  GraphNode `json:"node"`
+		Error string    `json:"error,omitempty"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/graph/upsert", in, &resp); err != nil {
+		return GraphNode{}, err
+	}
+	if !resp.OK {
+		return GraphNode{}, fmt.Errorf("memd graph upsert: %s", resp.Error)
+	}
+	return resp.Node, nil
+}
+
+// GetExactNodes returns active nodes carrying all requested anchors. The map
+// key is the anchor kind (file, symbol, package, test, revision); the values
+// are the anchor values to match.
+func (c *Client) GetExactNodes(ctx context.Context, anchors map[string][]string, projectPath string, limit int) ([]GraphNode, error) {
+	if len(anchors) == 0 {
+		return nil, fmt.Errorf("memd graph exact: at least one anchor is required")
+	}
+	req := map[string]any{
+		"anchors":      anchors,
+		"project_path": projectPath,
+		"limit":        limitDefault(limit),
+	}
+	var resp struct {
+		OK    bool        `json:"ok"`
+		Nodes []GraphNode `json:"nodes"`
+		Error string      `json:"error,omitempty"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/graph/exact", req, &resp); err != nil {
+		return nil, err
+	}
+	if !resp.OK {
+		return nil, fmt.Errorf("memd graph exact: %s", resp.Error)
+	}
+	return resp.Nodes, nil
+}
+
+// limitDefault normalizes a non-positive limit to the sidecar default (32).
+func limitDefault(limit int) int {
+	if limit <= 0 {
+		return 32
+	}
+	return limit
+}
+
+// GraphNeighborEdge is one edge returned by the neighbors walk.
+type GraphNeighborEdge struct {
+	SrcID int64  `json:"src_id"`
+	DstID int64  `json:"dst_id"`
+	Kind  string `json:"kind"`
+}
+
+// GetNeighbors walks a bounded BFS from one node, following only the given
+// edge kinds (empty means all kinds), and returns the active nodes and edges
+// it reached.
+func (c *Client) GetNeighbors(ctx context.Context, nodeID int64, kinds []string, depth, limit int) ([]GraphNode, []GraphNeighborEdge, error) {
+	if nodeID < 1 {
+		return nil, nil, fmt.Errorf("memd graph neighbors: node_id must be >= 1, got %d", nodeID)
+	}
+	body := map[string]any{"node_id": nodeID, "kinds": kinds, "depth": depth, "limit": limitDefault(limit)}
+	var resp struct {
+		OK    bool                `json:"ok"`
+		Nodes []GraphNode         `json:"nodes"`
+		Edges []GraphNeighborEdge `json:"edges"`
+		Error string              `json:"error,omitempty"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/graph/neighbors", body, &resp); err != nil {
+		return nil, nil, err
+	}
+	if !resp.OK {
+		return nil, nil, fmt.Errorf("memd graph neighbors: %s", resp.Error)
+	}
+	return resp.Nodes, resp.Edges, nil
+}
+
+// SetGraphNodeStatus moves one node to a new status.
+func (c *Client) SetGraphNodeStatus(ctx context.Context, nodeID int64, status string) error {
+	if nodeID < 1 {
+		return fmt.Errorf("memd graph status: node_id must be >= 1, got %d", nodeID)
+	}
+	if status == "" {
+		return fmt.Errorf("memd graph status: status is required")
+	}
+	req := map[string]any{"node_id": nodeID, "status": status}
+	var resp struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error,omitempty"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/graph/status", req, &resp); err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("memd graph status: %s", resp.Error)
+	}
+	return nil
+}
+
+// ContradictGraphNode marks nodeID contradicted by byNodeID with one evidence
+// row. The sidecar adds the contradicts edge (by -> node) and the evidence.
+func (c *Client) ContradictGraphNode(ctx context.Context, nodeID, byNodeID int64, evidenceKind, ref, detail string) error {
+	if nodeID < 1 {
+		return fmt.Errorf("memd graph contradict: node_id must be >= 1, got %d", nodeID)
+	}
+	if byNodeID < 1 {
+		return fmt.Errorf("memd graph contradict: by_node_id must be >= 1, got %d", byNodeID)
+	}
+	if evidenceKind == "" {
+		return fmt.Errorf("memd graph contradict: evidence kind is required")
+	}
+	req := map[string]any{
+		"node_id":    nodeID,
+		"by_node_id": byNodeID,
+		"kind":       evidenceKind,
+		"ref":        ref,
+		"detail":     detail,
+	}
+	var resp struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error,omitempty"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/graph/contradict", req, &resp); err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("memd graph contradict: %s", resp.Error)
+	}
+	return nil
+}
+
+// GraphSearchHit pairs a node ID with its semantic similarity score.
+type GraphSearchHit struct {
+	NodeID int64   `json:"node_id"`
+	Score  float64 `json:"score"`
+}
+
+// SearchGraphSemantically ranks active nodes by cosine similarity to text and
+// returns the top k hits.
+func (c *Client) SearchGraphSemantically(ctx context.Context, text string, k int) ([]GraphSearchHit, error) {
+	if text == "" {
+		return nil, fmt.Errorf("memd graph search_semantic: text is required")
+	}
+	var resp struct {
+		OK    bool             `json:"ok"`
+		Hits  []GraphSearchHit `json:"hits"`
+		Error string           `json:"error,omitempty"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/graph/search_semantic", map[string]any{"text": text, "k": k}, &resp); err != nil {
+		return nil, err
+	}
+	if !resp.OK {
+		return nil, fmt.Errorf("memd graph search_semantic: %s", resp.Error)
+	}
+	return resp.Hits, nil
+}
+
+// GraphCompactionReport mirrors the sidecar's compaction summary.
+type GraphCompactionReport struct {
+	DuplicateGroups  int   `json:"duplicate_groups"`
+	DuplicatesMerged int   `json:"duplicates_merged"`
+	EdgesRetargeted  int   `json:"edges_retargeted"`
+	AnchorsMerged    int   `json:"anchors_merged"`
+	EvidenceMerged   int   `json:"evidence_merged"`
+	DurationMs       int64 `json:"duration_ms"`
+}
+
+// CompactGraph merges duplicate nodes and returns the report.
+func (c *Client) CompactGraph(ctx context.Context) (GraphCompactionReport, error) {
+	var resp struct {
+		OK     bool                  `json:"ok"`
+		Report GraphCompactionReport `json:"report"`
+		Error  string                `json:"error,omitempty"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/graph/compact", map[string]any{}, &resp); err != nil {
+		return GraphCompactionReport{}, err
+	}
+	if !resp.OK {
+		return GraphCompactionReport{}, fmt.Errorf("memd graph compact: %s", resp.Error)
+	}
+	return resp.Report, nil
+}
+
+// CollectGraph hard-deletes stale unreferenced ephemeral nodes older than
+// olderThanSeconds and returns the count removed.
+func (c *Client) CollectGraph(ctx context.Context, olderThanSeconds int64) (int64, error) {
+	var resp struct {
+		OK        bool   `json:"ok"`
+		Collected int64  `json:"collected"`
+		Error     string `json:"error,omitempty"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/graph/collect", map[string]any{"older_than": olderThanSeconds}, &resp); err != nil {
+		return 0, err
+	}
+	if !resp.OK {
+		return 0, fmt.Errorf("memd graph collect: %s", resp.Error)
+	}
+	return resp.Collected, nil
+}

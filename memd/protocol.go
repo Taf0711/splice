@@ -389,3 +389,254 @@ type traceQueryResponse struct {
 	OK     bool            `json:"ok"`
 	Traces []traceResponse `json:"traces"`
 }
+
+// ---------------------------------------------------------------------------
+// Cognition graph wire types (/graph/*). Field names are snake_case and
+// stable: internal/memd is the only client and the wire contract is the only
+// coupling.
+// ---------------------------------------------------------------------------
+
+// graphAnchor is one anchor on a node, in wire form.
+type graphAnchor struct {
+	Kind  string `json:"kind"`
+	Value string `json:"value"`
+}
+
+// graphEdge is one directed edge from the upserted node, in wire form.
+type graphEdge struct {
+	DstID int64  `json:"dst_id"`
+	Kind  string `json:"kind"`
+}
+
+// graphNode is one cognition node, in wire form. Nullable store fields are
+// pointers so json.Marshal emits null instead of sql.Null* structs.
+type graphNode struct {
+	ID               int64         `json:"id"`
+	Kind             string        `json:"kind"`
+	Claim            string        `json:"claim"`
+	Scope            string        `json:"scope"`
+	ProjectPath      *string       `json:"project_path"`
+	Status           string        `json:"status"`
+	Confidence       *float64      `json:"confidence"`
+	SourceRunID      *string       `json:"source_run_id"`
+	CreatedRevision  *string       `json:"created_revision"`
+	VerifiedRevision *string       `json:"verified_revision"`
+	CreatedAt        int64         `json:"created_at"`
+	VerifiedAt       *int64        `json:"verified_at"`
+	ClaimHash        string        `json:"claim_hash"`
+	MetadataJSON     *string       `json:"metadata_json"`
+	Anchors          []graphAnchor `json:"anchors,omitempty"`
+}
+
+// graphUpsertRequest is the JSON body for POST /graph/upsert. One call
+// carries the node, its anchors, and its outgoing edges.
+type graphUpsertRequest struct {
+	Kind             string          `json:"kind"`
+	Claim            string          `json:"claim"`
+	Scope            string          `json:"scope"`
+	ProjectPath      string          `json:"project_path"`
+	Status           string          `json:"status"`
+	Confidence       *float64        `json:"confidence"`
+	SourceRunID      string          `json:"source_run_id"`
+	CreatedRevision  string          `json:"created_revision"`
+	VerifiedRevision string          `json:"verified_revision"`
+	Metadata         map[string]any  `json:"metadata"`
+	Anchors          []graphAnchor   `json:"anchors"`
+	Edges            []graphEdge     `json:"edges"`
+	Evidence         []graphEvidence `json:"evidence"`
+}
+
+// graphEvidence carries one deterministic support record per node at upsert
+// time; it lands in the cognition_evidence table in the same transaction.
+type graphEvidence struct {
+	Kind   string `json:"kind"`
+	Ref    string `json:"ref,omitempty"`
+	Detail string `json:"detail,omitempty"`
+}
+
+func (r *graphUpsertRequest) Validate() error {
+	if r.Kind == "" {
+		return fmt.Errorf("kind is required")
+	}
+	if r.Claim == "" {
+		return fmt.Errorf("claim is required")
+	}
+	for _, a := range r.Anchors {
+		if a.Kind == "" {
+			return fmt.Errorf("anchor kind is required")
+		}
+		if a.Value == "" {
+			return fmt.Errorf("anchor value is required")
+		}
+	}
+	for _, e := range r.Edges {
+		if e.DstID < 1 {
+			return fmt.Errorf("edge dst_id must be >= 1, got %d", e.DstID)
+		}
+		if e.Kind == "" {
+			return fmt.Errorf("edge kind is required")
+		}
+	}
+	return nil
+}
+
+// graphUpsertResponse is the JSON body returned by POST /graph/upsert.
+type graphUpsertResponse struct {
+	OK   bool      `json:"ok"`
+	Node graphNode `json:"node"`
+}
+
+// graphExactRequest is the JSON body for POST /graph/exact. Anchors is a map
+// of anchor kind to values; a node matches when it carries at least one
+// anchor of every requested kind.
+type graphExactRequest struct {
+	Anchors     map[string][]string `json:"anchors"`
+	ProjectPath string              `json:"project_path"`
+	Status      string              `json:"status"`
+	Limit       int                 `json:"limit"`
+}
+
+func (r *graphExactRequest) Validate() error {
+	if len(r.Anchors) == 0 {
+		return fmt.Errorf("anchors is required")
+	}
+	for kind, values := range r.Anchors {
+		if !store.ValidAnchorKind(kind) {
+			return fmt.Errorf("anchor kind %q is not one of file|symbol|package|test|revision", kind)
+		}
+		if len(values) == 0 {
+			return fmt.Errorf("anchor kind %q has no values", kind)
+		}
+	}
+	if r.Limit < 0 {
+		return fmt.Errorf("limit must be >= 0, got %d", r.Limit)
+	}
+	return nil
+}
+
+// graphExactResponse is the JSON body returned by POST /graph/exact.
+type graphExactResponse struct {
+	OK    bool        `json:"ok"`
+	Nodes []graphNode `json:"nodes"`
+}
+
+// graphNeighborsRequest is the JSON body for POST /graph/neighbors.
+type graphNeighborsRequest struct {
+	NodeID int64    `json:"node_id"`
+	Kinds  []string `json:"kinds"`
+	Depth  int      `json:"depth"`
+	Limit  int      `json:"limit"`
+}
+
+func (r *graphNeighborsRequest) Validate() error {
+	if r.NodeID < 1 {
+		return fmt.Errorf("node_id must be >= 1, got %d", r.NodeID)
+	}
+	if r.Depth < 0 {
+		return fmt.Errorf("depth must be >= 0, got %d", r.Depth)
+	}
+	if r.Limit < 0 {
+		return fmt.Errorf("limit must be >= 0, got %d", r.Limit)
+	}
+	return nil
+}
+
+// graphNeighborsResponse is the JSON body returned by POST /graph/neighbors.
+type graphNeighborsResponse struct {
+	OK    bool        `json:"ok"`
+	Nodes []graphNode `json:"nodes"`
+	Edges []graphEdge `json:"edges"`
+}
+
+// graphStatusRequest is the JSON body for POST /graph/status.
+type graphStatusRequest struct {
+	NodeID int64  `json:"node_id"`
+	Status string `json:"status"`
+}
+
+func (r *graphStatusRequest) Validate() error {
+	if r.NodeID < 1 {
+		return fmt.Errorf("node_id must be >= 1, got %d", r.NodeID)
+	}
+	if r.Status == "" {
+		return fmt.Errorf("status is required")
+	}
+	return nil
+}
+
+// graphContradictRequest is the JSON body for POST /graph/contradict. ByNodeID
+// is the node that supersedes or falsifies NodeID (for example a failure node
+// falsifying a fact node); the contradicts edge points by -> node.
+type graphContradictRequest struct {
+	NodeID   int64  `json:"node_id"`
+	ByNodeID int64  `json:"by_node_id"`
+	Kind     string `json:"kind"`
+	Ref      string `json:"ref"`
+	Detail   string `json:"detail"`
+}
+
+func (r *graphContradictRequest) Validate() error {
+	if r.NodeID < 1 {
+		return fmt.Errorf("node_id must be >= 1, got %d", r.NodeID)
+	}
+	if r.ByNodeID < 1 {
+		return fmt.Errorf("by_node_id must be >= 1, got %d", r.ByNodeID)
+	}
+	if r.Kind == "" {
+		return fmt.Errorf("kind is required")
+	}
+	return nil
+}
+
+// graphSearchRequest is the JSON body for POST /graph/search_semantic.
+type graphSearchRequest struct {
+	Text string `json:"text"`
+	K    int    `json:"k"`
+}
+
+func (r *graphSearchRequest) Validate() error {
+	if r.Text == "" {
+		return fmt.Errorf("text is required")
+	}
+	if r.K < 0 {
+		return fmt.Errorf("k must be >= 0, got %d", r.K)
+	}
+	return nil
+}
+
+// graphSearchHit is one semantic search hit in wire form.
+type graphSearchHit struct {
+	NodeID int64   `json:"node_id"`
+	Score  float64 `json:"score"`
+}
+
+// graphSearchResponse is the JSON body returned by POST /graph/search_semantic.
+type graphSearchResponse struct {
+	OK   bool             `json:"ok"`
+	Hits []graphSearchHit `json:"hits"`
+}
+
+// graphCompactResponse is the JSON body returned by POST /graph/compact.
+type graphCompactResponse struct {
+	OK     bool                   `json:"ok"`
+	Report store.CompactionReport `json:"report"`
+}
+
+// graphCollectRequest is the JSON body for POST /graph/collect. OlderThan
+// is seconds; ephemeral nodes older than that are hard-deleted.
+type graphCollectRequest struct {
+	OlderThan int64 `json:"older_than"`
+}
+
+func (r *graphCollectRequest) Validate() error {
+	if r.OlderThan < 0 {
+		return fmt.Errorf("older_than must be >= 0, got %d", r.OlderThan)
+	}
+	return nil
+}
+
+// graphCollectResponse is the JSON body returned by POST /graph/collect.
+type graphCollectResponse struct {
+	OK        bool  `json:"ok"`
+	Collected int64 `json:"collected"`
+}

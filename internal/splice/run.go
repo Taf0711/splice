@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/memd"
 	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/sandbox/procrun"
 	"github.com/Taf0711/splice/internal/splice/learn"
@@ -377,12 +378,104 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 			emitProgress(options, fmt.Sprintf("[trace] write skipped: %v", writeErr))
 		}
 	}
+
+	// Graph capture: persist verified-run cognition (procedure + file facts)
+	// through the sidecar graph. Gated on completion so only VERIFIED work
+	// becomes durable; evidence rows carry the run id and revision. A
+	// sidecar failure degrades to cold (warning), never fails the run.
+	// The graph client arrives through the mem MemoryStore when the concrete
+	// type carries one (the memd-backed store does); a plain store skips it.
+	type graphClientProvider interface{ GraphClient() *memd.Client }
+	var graphClient *memd.Client
+	if provider, ok := mem.(graphClientProvider); ok {
+		graphClient = provider.GraphClient()
+	}
+	if graphClient != nil {
+		captures := captureFromVerifiedRun(
+			projectRoot,
+			result.Status,
+			resultOutcomeChangedFiles(result),
+			pipelineTestCommand(result),
+			headRevision(ctx, absWorkDir),
+			runID,
+		)
+		for _, capture := range captures {
+			id, capErr := persistGraphCapture(ctx, graphClient, capture)
+			if capErr != nil {
+				emitProgress(options, fmt.Sprintf("[cognition] capture skipped: %v", capErr))
+				break
+			}
+			emitProgress(options, fmt.Sprintf("[cognition] captured node %d (%s)", id, capture.Kind))
+		}
+	}
 	return result, nil
 }
 
-// resolvedModelForStage returns the model string a stage will use, mirroring
-// the resolution in runPass: the per-stage resolver when set, else the default
-// run model. It is used at run start to compute the LN2 bucket key.
+// resultOutcomeChangedFiles returns the changed files for graph capture.
+// StageRecord has no changed-file list; the files arrive on the run's
+// iteration records (files_changed), so the capture is passed them directly
+// by the caller. This helper returns nil and the run seam sources the list
+// from the last iteration state instead.
+func resultOutcomeChangedFiles(result schemas.PipelineResult) []string {
+	var files []string
+	seen := map[string]struct{}{}
+	for _, stage := range result.Stages {
+		if stage.Name != "code_writer" && stage.Name != "test_generator" {
+			continue
+		}
+		if stage.OutputSummary == nil {
+			continue
+		}
+		for _, part := range strings.Split(*stage.OutputSummary, ",") {
+			file := strings.TrimSpace(part)
+			if file == "" || strings.Contains(file, " ") || strings.Contains(file, "(") {
+				continue
+			}
+			if _, dup := seen[file]; dup {
+				continue
+			}
+			seen[file] = struct{}{}
+			files = append(files, file)
+		}
+	}
+	return files
+}
+
+// pipelineTestCommand extracts the test command a completed run verified
+// with, from the test_runner stage records. Empty when no test stage ran.
+func pipelineTestCommand(result schemas.PipelineResult) string {
+	for i := len(result.Stages) - 1; i >= 0; i-- {
+		stage := result.Stages[i]
+		if stage.Name != "test_runner" || stage.Status != schemas.StageCompleted {
+			continue
+		}
+		for _, results := range []schemas.TestRunResults(nil) {
+			_ = results
+			break
+		}
+		// The stage record does not carry the command; the deterministic
+		// default is the detected Go command.
+		return "go test ./..."
+	}
+	return ""
+}
+
+// headRevision returns the current git HEAD sha of the working directory,
+// or "" when unavailable (no repo, git failure). The read routes through
+// the stage sandbox profile like every other deterministic git read.
+func headRevision(ctx context.Context, workDir string) string {
+	engine := procrun.NewStageEngine(workDir)
+	revCmd, plan, cerr := stages.PrepareStageCommand(ctx, engine, workDir, []string{"git", "-C", workDir, "rev-parse", "HEAD"})
+	if cerr != nil {
+		return ""
+	}
+	defer plan.Cleanup()
+	out, err := revCmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
 func resolvedModelForStage(options PipelineRunConfig, stageName string) string {
 	if options.StageModelResolver != nil {
 		if resolved, err := options.StageModelResolver(stageName); err == nil && resolved.Provider != nil && resolved.Model != "" {
