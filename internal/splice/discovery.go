@@ -126,7 +126,7 @@ func planDiscovery(ctx context.Context, client *memd.Client, projectPath, intent
 	// sidecar's local hashed n-gram index; entry nodes expand one bounded
 	// hop so related facts ride along.
 	if len(plan.ResolvedByCognition) == 0 && len(plan.Unresolved) == 0 && intent != "" {
-		hits, err := client.SearchGraphSemantically(ctx, intent, 4)
+		hits, err := client.SearchGraphSemanticallyScoped(ctx, intent, 4, projectPath)
 		if err != nil || len(hits) == 0 {
 			return plan, bundleNodes(fresh)
 		}

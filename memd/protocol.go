@@ -590,9 +590,11 @@ func (r *graphContradictRequest) Validate() error {
 }
 
 // graphSearchRequest is the JSON body for POST /graph/search_semantic.
+// ProjectPath is optional: when set, only nodes of that project rank.
 type graphSearchRequest struct {
-	Text string `json:"text"`
-	K    int    `json:"k"`
+	Text        string `json:"text"`
+	K           int    `json:"k"`
+	ProjectPath string `json:"project_path,omitempty"`
 }
 
 func (r *graphSearchRequest) Validate() error {

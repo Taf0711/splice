@@ -774,6 +774,14 @@ type GraphSearchHit struct {
 // SearchGraphSemantically ranks active nodes by cosine similarity to text and
 // returns the top k hits.
 func (c *Client) SearchGraphSemantically(ctx context.Context, text string, k int) ([]GraphSearchHit, error) {
+	return c.SearchGraphSemanticallyScoped(ctx, text, k, "")
+}
+
+// SearchGraphSemanticallyScoped is SearchGraphSemantically with an optional
+// project scope: when projectPath is non-empty, only that project's nodes
+// rank. Scoped retrieval is what planDiscovery uses: cross-project hits
+// would anchor at another repo's revisions and poison freshness validation.
+func (c *Client) SearchGraphSemanticallyScoped(ctx context.Context, text string, k int, projectPath string) ([]GraphSearchHit, error) {
 	if text == "" {
 		return nil, fmt.Errorf("memd graph search_semantic: text is required")
 	}
@@ -782,7 +790,7 @@ func (c *Client) SearchGraphSemantically(ctx context.Context, text string, k int
 		Hits  []GraphSearchHit `json:"hits"`
 		Error string           `json:"error,omitempty"`
 	}
-	if err := c.do(ctx, http.MethodPost, "/graph/search_semantic", map[string]any{"text": text, "k": k}, &resp); err != nil {
+	if err := c.do(ctx, http.MethodPost, "/graph/search_semantic", map[string]any{"text": text, "k": k, "project_path": projectPath}, &resp); err != nil {
 		return nil, err
 	}
 	if !resp.OK {

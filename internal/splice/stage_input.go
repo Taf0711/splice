@@ -245,6 +245,10 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 		if p.Trace != nil {
 			p.Trace.recordDiscoveryPlan(input.StageName, p.Iteration, plan)
 		}
+		if plan.AnchorsFailed > 0 {
+			emitProgress(p.Options, fmt.Sprintf("[%s] discovery: %d anchor(s) failed freshness validation\n",
+				input.StageName, plan.AnchorsFailed))
+		}
 		if len(planNodes) > 0 {
 			graphObs := cognitionBundleFromNodes(planNodes)
 			if mode, modeErr := resolveExemplarMode(); modeErr != nil {

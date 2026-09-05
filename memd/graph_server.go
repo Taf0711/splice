@@ -272,7 +272,7 @@ func (s *server) handleGraphSearchSemantic(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "validation: "+err.Error())
 		return
 	}
-	hits, err := s.semantic.Search(r.Context(), req.Text, req.K)
+	hits, err := s.semantic.Search(r.Context(), req.Text, req.K, req.ProjectPath)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
