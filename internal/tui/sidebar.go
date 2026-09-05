@@ -63,10 +63,9 @@ func (m model) sidebarToggleAllowed() bool {
 		m.mcpManager != nil || m.picker != nil {
 		return false
 	}
-	// Home/welcome screen: stay single-column until there's real conversation.
-	if m.transcriptEmpty() {
-		return false
-	}
+	// P12 (frame kAYHl): the launch cockpit is two-column, so the toggle
+	// responds from the first frame too. The old welcome-screen exception is
+	// retired with the splash.
 	return true
 }
 
@@ -98,14 +97,11 @@ func (m model) sidebarAvailable() bool {
 		m.mcpManager != nil || m.picker != nil {
 		return false
 	}
-	// Home/welcome screen: stay single-column until there's real conversation, so
-	// the empty home screen isn't split by an (empty) sidebar.
-	if m.transcriptEmpty() {
-		return false
-	}
-	// Keep the layout stable across transient content changes. A run start clears
-	// live plan and agent state before the first new event arrives; content-based
-	// auto-hide made the whole column disappear and reappear during that gap.
+	// P12 (frame kAYHl): the launch screen IS two-column — the sidebar hosts
+	// the launch modules (NEXT/DECISIONS/AGENTS/TOOLS/CONTEXT) from the first
+	// frame, so the cockpit reads as the full surface the owner revised. The
+	// old "stay single-column until real conversation" rule is retired: the
+	// launch cockpit IS real content for the sidebar.
 	return true
 }
 
@@ -596,7 +592,14 @@ func (m model) renderContextSidebar(width, height int) []string {
 	bodyBudget := height - 1
 	var lines []string
 	if bodyBudget > 0 {
-		lines = m.renderContextModules(width, bodyBudget)
+		if m.transcriptEmpty() {
+			// P12 (frame kAYHl): the launch cockpit hosts the launch module
+			// set (NEXT/DECISIONS/AGENTS/TOOLS/CONTEXT) instead of the
+			// run-time modules, which have nothing to project yet.
+			lines = m.launchSidebarModules(width, bodyBudget)
+		} else {
+			lines = m.renderContextModules(width, bodyBudget)
+		}
 	}
 
 	// Token readout pinned to the bottom.

@@ -23,6 +23,10 @@ func bandProbeModel() model {
 	m.altScreen = true
 	m.pending = true
 	m.activeRunID = 9
+	// P12 made the launch screen two-column; these band probes are about the
+	// single-column wide frame, so pin the sidebar collapsed (the Ctrl+B
+	// state) to keep the original geometry.
+	m.sidebarHidden = true
 	m.pipeline.applyState(benchNodeState(4))
 	return m
 }
@@ -33,7 +37,10 @@ func bandProbeModel() model {
 func TestEvidenceBandRendersInLiveViewDuringRun(t *testing.T) {
 	m := bandProbeModel()
 	plain := plainRender(t, m.View())
-	if !strings.Contains(plain, "PIPELINE 2/4") {
+	// The band's pipeline module header is "PIPELINE <lifecycle> ... n/m" with
+	// the counter right-packed to the column edge (headerLineWithChip), so the
+	// count is asserted separately rather than as one contiguous substring.
+	if !strings.Contains(plain, "PIPELINE") || !strings.Contains(plain, "2/4") {
 		t.Fatalf("evidence band missing the pipeline section during a run:\n%s", plain[:minInt(2200, len(plain))])
 	}
 	if !strings.Contains(plain, "[########") {
@@ -73,6 +80,9 @@ func TestEvidenceBandFoldsBackNarrow(t *testing.T) {
 // the band must not render both.
 func TestEvidenceBandAbsentWhenSidebarActive(t *testing.T) {
 	m := bandProbeModel()
+	// The pinned frame carries sidebarHidden=true; this probe asserts the
+	// band/sidebar exclusivity in the two-column layout, so restore it.
+	m.sidebarHidden = false
 	m.width = 160
 	m.transcript = append(m.transcript, transcriptRow{kind: rowUser, text: "hello"})
 	m.flushed = len(m.transcript)

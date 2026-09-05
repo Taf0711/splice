@@ -82,6 +82,10 @@ func TestFooterPinnedPlanUsesEnvelopeBudget(t *testing.T) {
 	m.altScreen = true
 	m.headerPrinted = true
 	m.height = 40
+	// The pinned plan is the plan's home only where the sidebar CANNOT host it
+	// (below the 120-col two-column boundary since P12 made the launch screen
+	// two-column). Pin the frame narrow so the envelope allocator is exercised.
+	m.width = 100
 
 	width := m.chatColumnWidth()
 	footer := plainRender(t, m.footerView(width))

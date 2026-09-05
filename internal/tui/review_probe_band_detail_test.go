@@ -21,6 +21,9 @@ func reviewBandModel(t *testing.T) model {
 	m.width = 140
 	m.altScreen = true
 	m.height = 40
+	// P12 made the launch screen two-column; this probe targets the band's
+	// own visibility rule, so pin the sidebar collapsed (the Ctrl+B state).
+	m.sidebarHidden = true
 	// A streaming run with pipeline state: the band's trigger conditions.
 	m.pending = true
 	m.pipeline.applyState(presentation.State{

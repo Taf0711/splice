@@ -60,33 +60,36 @@ func (m model) hasEvidenceContent() bool {
 }
 
 // renderEvidenceBand builds the in-flow band lines at full transcript width:
-// a rule, the composed evidence modules (execution-relevant slots only, in
-// registry order, drop-whole budgeted), a closing rule. Empty when nothing
-// qualifies.
+// a rule, the composed evidence modules (execution-relevant slots only,
+// drop-whole budgeted), a closing rule. Empty when nothing qualifies.
+//
+// Budget order is EVIDENCE FIRST: pipeline, trajectory, and memory render
+// before the agents section. Agents is always-present (its empty state is a
+// placeholder, not evidence), so under the line cap it drops first — a
+// registry-order walk would let 2 placeholder lines starve the 10-line
+// PIPELINE roster and silently hide run state.
 func (m model) renderEvidenceBand(width int) []string {
 	if width <= 0 {
 		return nil
 	}
 	var lines []string
 	used := 0
-	for _, module := range contextRegistry() {
-		// The rail shows run evidence: pipeline, trajectory, agents, memory.
-		// Files/plan/activity belong to the transcript and token floor
-		// already lives in the status line.
-		switch module.slot {
-		case ContextSlotPipeline, ContextSlotTrajectory, ContextSlotAgents, ContextSlotMemory:
-		default:
-			continue
-		}
-		if !module.has(m) {
-			continue
-		}
+	for _, module := range evidenceBandOrder() {
 		body := module.render(m, width-2)
 		for i, line := range body {
 			body[i] = " " + line
 		}
-		if used+len(body) > evidenceBandMaxLines {
+		remaining := evidenceBandMaxLines - used
+		if remaining <= 0 {
 			break
+		}
+		if len(body) > remaining {
+			// A run roster taller than the remaining budget CLIPS (bounded
+			// band): the header and the leading stages stay, the roster tail
+			// drops. Drop-whole stays reserved for whole sections that never
+			// fit at all; a clipping mid-roster keeps run state visible
+			// instead of erasing the band wholesale.
+			body = body[:remaining]
 		}
 		lines = append(lines, body...)
 		used += len(body)
@@ -103,6 +106,22 @@ func (m model) renderEvidenceBand(width int) []string {
 		out[i] = padStyledLine(line, width)
 	}
 	return out
+}
+
+// evidenceBandOrder returns the band's budget walk: the real evidence modules
+// (pipeline, trajectory, memory) ahead of the always-present agents section,
+// so cap pressure drops the placeholder first, never run state.
+func evidenceBandOrder() []contextModule {
+	var evidence, trailing []contextModule
+	for _, module := range contextRegistry() {
+		switch module.slot {
+		case ContextSlotPipeline, ContextSlotTrajectory, ContextSlotMemory:
+			evidence = append(evidence, module)
+		case ContextSlotAgents:
+			trailing = append(trailing, module)
+		}
+	}
+	return append(evidence, trailing...)
 }
 
 // evidenceBandBlock renders the band as a single string ("" when the band is
