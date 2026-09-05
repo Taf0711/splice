@@ -1121,6 +1121,21 @@ func runStageWithContext(
 	// resolved a question; otherwise the cold path stays byte-identical.
 	// The suppression accounting is returned so the caller's trace records
 	// host omissions, not inferences.
+	if priorScope != nil && priorScope.CognitionResolved && stageOpts.RunTool != nil {
+		// A7 host-side enforcement: the model-facing tool runner is
+		// scoped when cognition resolved the location question. The
+		// context fulfillment path uses the raw runner with explicit
+		// granted paths, so the scoped request is never blocked by its
+		// own scope.
+		scoped := ScopedToolRunner{Inner: runner, Scope: *priorScope}
+		stageOpts.RunTool = func(ctx context.Context, name string, args map[string]any) (stages.ToolResult, error) {
+			res, err := scoped.RunTool(ctx, name, args)
+			if err != nil {
+				return stages.ToolResult{}, err
+			}
+			return stages.ToolResult{OK: res.OK, Output: res.Output, Truncated: res.Truncated, Meta: res.Meta}, nil
+		}
+	}
 	if priorScope != nil && priorScope.CognitionResolved {
 		defaultReq := stages.DefaultContextRequestFor(input.RequestIntent, workDir, detectLanguage(workDir))
 		scoped, sup := ScopedContextRequest(defaultReq, *priorScope,

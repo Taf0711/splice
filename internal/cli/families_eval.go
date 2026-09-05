@@ -186,14 +186,17 @@ type familyPairRow struct {
 	// Track C discovery-plan telemetry, summed across the run's stages:
 	// what the cognition graph resolved, what freshness admitted, and the
 	// conservatively counted avoided discovery operations.
-	DiscoveryQuestions    int `json:"discovery_questions,omitempty"`
-	DiscoveryResolvedCog  int `json:"discovery_resolved_by_cognition,omitempty"`
-	DiscoveryUnresolved   int `json:"discovery_unresolved,omitempty"`
-	DiscoveryReadsAvoided int `json:"discovery_reads_avoided,omitempty"`
-	AnchorsValidated      int `json:"anchors_validated,omitempty"`
-	AnchorsFailed         int `json:"anchors_failed,omitempty"`
-	SemanticHits          int `json:"semantic_hits,omitempty"`
-	GraphNodesCaptured    int `json:"graph_nodes_captured,omitempty"`
+	ScopeFileReadsSuppressed int `json:"file_reads_suppressed,omitempty"`
+	ScopeQueriesSuppressed   int `json:"context_queries_suppressed,omitempty"`
+	ScopeListsSuppressed     int `json:"global_lists_suppressed,omitempty"`
+	DiscoveryQuestions       int `json:"discovery_questions,omitempty"`
+	DiscoveryResolvedCog     int `json:"discovery_resolved_by_cognition,omitempty"`
+	DiscoveryUnresolved      int `json:"discovery_unresolved,omitempty"`
+	DiscoveryReadsAvoided    int `json:"discovery_reads_avoided,omitempty"`
+	AnchorsValidated         int `json:"anchors_validated,omitempty"`
+	AnchorsFailed            int `json:"anchors_failed,omitempty"`
+	SemanticHits             int `json:"semantic_hits,omitempty"`
+	GraphNodesCaptured       int `json:"graph_nodes_captured,omitempty"`
 	// Precursor reports the causal setup outcome for the warm arm of a
 	// Task A -> Task B pair: "success" (Task A verified, cognition
 	// captured), "failed" (Task A did not verify), or "" (not applicable,
@@ -543,6 +546,9 @@ func collectRunTelemetry(ctx context.Context, deps appDeps, repoRoot, sessionID 
 		row.AnchorsValidated += meta.AnchorsValidated
 		row.AnchorsFailed += meta.AnchorsFailed
 		row.SemanticHits += meta.SemanticHits
+		row.ScopeFileReadsSuppressed += meta.FileReadsSuppressed
+		row.ScopeQueriesSuppressed += meta.ContextQueriesSuppressed
+		row.ScopeListsSuppressed += meta.GlobalListsSuppressed
 	}
 }
 

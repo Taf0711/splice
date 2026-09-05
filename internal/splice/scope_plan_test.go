@@ -1,6 +1,8 @@
 package splice
 
 import (
+	"context"
+	"strings"
 	"testing"
 
 	"github.com/Taf0711/splice/internal/memd"
@@ -235,4 +237,52 @@ func TestRecordScopeMetricsRejectsNegative(t *testing.T) {
 func TestRecordScopeMetricsNilAccumulator(t *testing.T) {
 	var tr *runTraceAccumulator
 	tr.RecordScopeMetrics("code_writer", 1, schemas.ScopeMetrics{GlobalListsSuppressed: 1})
+}
+
+func TestScopedToolRunner_EnforcesHostScope(t *testing.T) {
+	scope := StageScopePlan{
+		CognitionResolved: true,
+		KnownFiles:        []string{"internal/session/store.go"},
+		KnownSymbols:      []string{"internal/session/store.go#Store.InvalidateUserSessions"},
+	}
+	inner := &fakeToolRunner{}
+	scoped := ScopedToolRunner{Inner: inner, Scope: scope}
+
+	// Granted read passes through.
+	res, err := scoped.RunTool(context.Background(), "read_file", map[string]any{"path": "internal/session/store.go"})
+	if err != nil || !res.OK {
+		t.Fatalf("granted read must pass: %v %+v", err, res)
+	}
+	// Outside read is suppressed with a directive, not executed.
+	res, err = scoped.RunTool(context.Background(), "read_file", map[string]any{"path": "cmd/server/main.go"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inner.calls != 1 {
+		t.Fatalf("inner runner must NOT see the suppressed read, saw %d calls", inner.calls)
+	}
+	if res.OK && !strings.Contains(res.Output, "Granted files") {
+		t.Fatalf("suppressed read must carry the grant directive, got %q", res.Output)
+	}
+	// Global listing suppressed.
+	res, _ = scoped.RunTool(context.Background(), "list_directory", map[string]any{"path": "."})
+	if inner.calls != 1 {
+		t.Fatalf("global listing must be suppressed, inner saw %d", inner.calls)
+	}
+	if !strings.Contains(res.Output, "granted files") {
+		t.Fatalf("listing suppression must name granted files, got %q", res.Output)
+	}
+	// Symbol-containing file is granted via symbol anchor.
+	if res, err := scoped.RunTool(context.Background(), "read_file", map[string]any{"path": "internal/session/store.go"}); err != nil || !res.OK {
+		t.Fatalf("symbol-covered read must pass: %v", err)
+	}
+}
+
+type fakeToolRunner struct {
+	calls int
+}
+
+func (f *fakeToolRunner) RunTool(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
+	f.calls++
+	return ToolResult{OK: true, Output: "ran"}, nil
 }

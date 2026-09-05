@@ -745,3 +745,54 @@ type ScopeSuppression struct {
 	FileReadsSuppressed      int
 	SearchesSuppressed       int
 }
+
+// ScopedToolRunner wraps the model-facing tool runner with the cognition
+// scope: when cognition resolved the location question, workspace-wide
+// listing and reads/searches outside the granted files return a directive
+// pointing at the granted context instead of executing. This is host-side
+// enforcement (A7): prompting the model to trust cognition is not
+// enforcement. The context FULFILLMENT path bypasses this wrapper - it
+// uses the raw runner with explicit granted paths - so the scoped request
+// itself is never blocked by its own scope.
+type ScopedToolRunner struct {
+	Inner ToolRunner
+	Scope StageScopePlan
+}
+
+// ToolRunner implements the same interface via RunTool.
+func (s ScopedToolRunner) RunTool(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
+	switch name {
+	case "list_directory":
+		if !s.Scope.AllowGlobalList {
+			granted := "cognition-resolved scope; granted files: " + strings.Join(s.Scope.KnownFiles, ", ")
+			return ToolResult{OK: true, Output: "workspace listing suppressed by cognition scope. " + granted}, nil
+		}
+	case "read_file":
+		if path, ok := args["path"].(string); ok && !s.grantsPath(path) {
+			return ToolResult{OK: true, Output: "read outside cognition scope suppressed. Granted files: " +
+				strings.Join(s.Scope.KnownFiles, ", ") +
+				". If this file is genuinely required, the compiler or verifier will surface it; rely on the granted context first."}, nil
+		}
+	case "grep":
+		if !s.Scope.AllowGlobalSearch {
+			return ToolResult{OK: true, Output: "workspace search suppressed by cognition scope. Unresolved questions remain but targeted reads of granted files come first. Granted: " + strings.Join(s.Scope.KnownFiles, ", ")}, nil
+		}
+	}
+	return s.Inner.RunTool(ctx, name, args)
+}
+
+// grantsPath reports whether the path is a granted known file or the
+// containing file of a granted symbol.
+func (s ScopedToolRunner) grantsPath(path string) bool {
+	for _, f := range s.Scope.KnownFiles {
+		if f == path {
+			return true
+		}
+	}
+	for _, sym := range s.Scope.KnownSymbols {
+		if i := strings.Index(sym, "#"); i > 0 && sym[:i] == path {
+			return true
+		}
+	}
+	return false
+}
