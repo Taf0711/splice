@@ -96,6 +96,24 @@ func (m model) dispatchTerminalReceiptKey(key string) (bool, tea.Model, tea.Cmd)
 		case "l":
 			return true, m.openDetailView(), nil
 		}
+	case receiptVerified:
+		switch key {
+		case "o":
+			// [O] open diff (GAP-G seam): the diff source is the run's
+			// worktree. Without one the lane ran in the shared workspace,
+			// so say where the changes live instead of opening nothing.
+			if m.activeWorktree == nil || strings.TrimSpace(m.activeWorktree.Path) == "" {
+				return true, m.appendSystemNotice("No worktree diff to open — this run wrote in the shared workspace."), nil
+			}
+			next, cmd := m.openDiffReview(*m.activeWorktree)
+			return true, next, cmd
+		case "e":
+			text := m.handleExportCommand("")
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+			return true, m, nil
+		case "r":
+			return m.receiptResume()
+		}
 	}
 	return false, m, nil
 }

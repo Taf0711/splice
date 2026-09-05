@@ -2,13 +2,16 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
 
 	"github.com/Taf0711/splice/internal/presentation"
+	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
 // Terminal outcome receipt cards (GAP-E, v0.5 §16 receipts + P2b cell 6):
@@ -260,4 +263,50 @@ func atSuffix(at string) string {
 		return ""
 	}
 	return " at " + at
+}
+
+// verifiedReceiptFromResult builds the VERIFIED card from the persisted
+// plan result the runtime returned on a completed run. The FinalAnswer is
+// the JSON of schemas.DesignPlanResult (design_runner.go), so the evidence
+// lines are runtime truth, not invention. A parse failure returns ok=false:
+// the caller appends nothing and the JSON answer row still carries the
+// data (honest absence — a malformed result never renders as a fake
+// success card).
+func verifiedReceiptFromResult(finalAnswer string, usage presentation.UsageSummary, startedAt time.Time, now time.Time) (receiptCard, bool) {
+	var planResult schemas.DesignPlanResult
+	if err := json.Unmarshal([]byte(finalAnswer), &planResult); err != nil {
+		return receiptCard{}, false
+	}
+	if planResult.Status != "completed" {
+		return receiptCard{}, false
+	}
+	evidence := make([]string, 0, 2)
+	if planResult.PlanID != "" {
+		evidence = append(evidence, "design plan "+planResult.PlanID+" completed")
+	}
+	if n := len(planResult.CompletedTasks); n > 0 {
+		line := fmt.Sprintf("%d task(s) completed", n)
+		ids := make([]string, 0, n)
+		for _, task := range planResult.CompletedTasks {
+			ids = append(ids, task.TaskID)
+		}
+		if len(ids) <= 4 {
+			line += ": " + strings.Join(ids, ", ")
+		} else {
+			line += ": " + strings.Join(ids[:3], ", ") + ", …"
+		}
+		evidence = append(evidence, line)
+	}
+	var usageLine string
+	if usage.InputTokens > 0 || usage.OutputTokens > 0 {
+		usageLine = fmt.Sprintf("%s tok in · %s tok out", formatTokenCount(int(usage.InputTokens)), formatTokenCount(int(usage.OutputTokens)))
+		if usage.CostUSD > 0 {
+			usageLine += fmt.Sprintf(" · $%.2f", usage.CostUSD)
+		}
+	}
+	elapsed := ""
+	if !startedAt.IsZero() {
+		elapsed = formatWorkingElapsed(now.Sub(startedAt))
+	}
+	return verifiedReceiptCard(evidence, "", usageLine, elapsed), true
 }

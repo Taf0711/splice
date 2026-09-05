@@ -2753,6 +2753,25 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendAssistant, text: msg.result.FinalAnswer})
 		m.pendingPlan = nil
 		m.pendingCritique = nil
+		// Terminal receipt (GAP-E, slice A of SPEC_TUI_RECEIPTS_OPEN_WORK):
+		// a run the runtime marked completed projects the VERIFIED card.
+		// The DoD-13 gate is the presentation state's completion receipt —
+		// deterministic runtime truth, not an inference from the error
+		// boundary. Evidence derives from the persisted plan result; a
+		// parse failure appends nothing (the JSON answer above still
+		// carries the data — honest absence, never an invented card).
+		if m.lastState.Completion != nil && m.lastState.Completion.Status == "completed" {
+			if card, ok := verifiedReceiptFromResult(msg.result.FinalAnswer, m.lastState.Usage, m.turnStartedAt, m.now()); ok {
+				m.lastTerminalReceipt = card.kind
+				// rowError is the receipt row channel (rendering.go
+				// routes receipt payloads from error rows); the card
+				// colors by its own kind, so VERIFIED renders green.
+				m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
+					kind: rowError,
+					text: receiptTranscriptPayload(card),
+				})
+			}
+		}
 		return m.maybeOfferWorktreeReview(msg.worktree, msg.sourceDirty)
 	case diffCapturedMsg:
 		m = m.handleDiffCaptured(msg)
