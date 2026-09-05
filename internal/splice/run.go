@@ -391,12 +391,16 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 		graphClient = provider.GraphClient()
 	}
 	if graphClient != nil {
+		snapshot, anchorReason := verifiedRevision(ctx, absWorkDir)
+		if anchorReason != "" {
+			emitProgress(options, fmt.Sprintf("[cognition] anchored at HEAD (%s)", anchorReason))
+		}
 		captures := captureFromVerifiedRun(
 			projectRoot,
 			result.Status,
 			worktreeChangedFiles(ctx, absWorkDir),
 			pipelineTestCommand(result),
-			verifiedRevision(ctx, absWorkDir),
+			snapshot,
 			runID,
 		)
 		for _, capture := range captures {
@@ -498,22 +502,35 @@ func headRevision(ctx context.Context, workDir string) string {
 // names a resolvable revision. Any failure falls back to headRevision; a
 // missing anchor degrades capture to the pre-run base revision, never fails
 // the run.
-func verifiedRevision(ctx context.Context, workDir string) string {
+//
+// The returned reason names WHY a snapshot was unavailable ("snapshot
+// unavailable: <cause>") so the capture progress line can say "anchored at
+// HEAD (snapshot unavailable: ...)" instead of silently anchoring at HEAD.
+// An anchor at HEAD is correct when the caller committed the verified tree
+// before capturing (the eval harness does); it is a degradation, visible in
+// telemetry, when the worktree was dirty and the snapshot failed.
+func verifiedRevision(ctx context.Context, workDir string) (revision string, reason string) {
+	fallback := func(why string) (string, string) {
+		return headRevision(ctx, workDir), why
+	}
 	engine := procrun.NewStageEngine(workDir)
 	snapCmd, plan, cerr := stages.PrepareStageCommand(ctx, engine, workDir, []string{"git", "-C", workDir, "stash", "create"})
 	if cerr != nil {
-		return headRevision(ctx, workDir)
+		return fallback(fmt.Sprintf("snapshot unavailable: %v", cerr))
 	}
 	defer plan.Cleanup()
 	out, err := snapCmd.Output()
 	if err != nil {
-		return headRevision(ctx, workDir)
+		return fallback(fmt.Sprintf("snapshot unavailable: %v", err))
 	}
 	snapshot := strings.TrimSpace(string(out))
 	if snapshot == "" {
-		return headRevision(ctx, workDir)
+		// Nothing to stash: the worktree is clean, so HEAD names the
+		// verified bytes exactly. This is the correct, expected path when
+		// the caller committed the verified tree before capture.
+		return headRevision(ctx, workDir), ""
 	}
-	return snapshot
+	return snapshot, ""
 }
 func resolvedModelForStage(options PipelineRunConfig, stageName string) string {
 	if options.StageModelResolver != nil {

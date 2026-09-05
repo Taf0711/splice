@@ -189,6 +189,9 @@ func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
 		runCmd := exec.CommandContext(ctx, exe, args...)
 		runCmd.Dir = in.Cwd
 		out, runErr := runCmd.CombinedOutput()
+		if in.OutputPath != "" {
+			_ = os.WriteFile(in.OutputPath, out, 0o644) // best-effort debug tee
+		}
 
 		// Cold arms (--memory off) never create a trace by design: no sidecar
 		// client means no tracer. When the trace join finds nothing, fall back

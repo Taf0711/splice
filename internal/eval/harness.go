@@ -18,6 +18,9 @@ type RunInput struct {
 	Prompt    string
 	Cwd       string // the arm's repo copy
 	Check     string // shell command; exit 0 = success
+	// OutputPath optionally names a file the run seam writes the captured
+	// exec transcript to (debugging aid; empty disables the write).
+	OutputPath string `json:"-"`
 }
 
 // RunOutput is one run's outcome.

@@ -445,3 +445,51 @@ func TestSemanticPathRejectsStaleNodes(t *testing.T) {
 		t.Fatalf("freshness accounting wrong: %+v", plan)
 	}
 }
+
+// TestEvalContract_CommittedVerifiedTreeFresh pins the MVP eval contract:
+// after the harness commits the verified Task A tree, captured cognition
+// anchored at HEAD classifies FRESH at Task B start (diff HEAD..worktree
+// is empty), which is what makes the warm arm's retrieval usable.
+func TestEvalContract_CommittedVerifiedTree(t *testing.T) {
+	dir, _ := setupFreshnessRepo(t)
+	fake, client := newFakeSidecar(t)
+
+	// Task A's capture happens with the tree still dirty: stash create is
+	// sandbox-refused, so the anchor degrades to HEAD (pre-Task-A edits).
+	// Simulate: edit the anchored file (Task A's change), anchor at the OLD
+	// HEAD. At that point the anchored file diffs stale.
+	oldHead := gitHead(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, "internal/session/store.go"),
+		[]byte("package session\n// Task A added ActiveSessionsFor here\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fake.add(t, "internal/session/store.go defines Store.ActiveSessionsFor", "active",
+		oldHead,
+		dir, []memd.GraphAnchor{{Kind: "file", Value: "internal/session/store.go"}})
+	plan, nodes := planDiscovery(context.Background(), client, dir, "intent", []string{"file:internal/session/store.go"})
+	if len(nodes) != 0 || plan.AnchorsFailed != 1 {
+		t.Fatalf("dirty-tree anchor must fail closed: %+v nodes=%d", plan, len(nodes))
+	}
+
+	// The eval commits the verified tree (the harness contract).
+	if out, err := exec.Command("git", "-C", dir, "add", "-A").CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v: %s", err, out)
+	}
+	cmd := exec.Command("git", "-C", dir, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "verified")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v: %s", err, out)
+	}
+	// Simulate capture re-anchoring at the new HEAD (the commit made the
+	// worktree clean, so verifiedRevision returns HEAD with no reason).
+	rev, reason := verifiedRevision(context.Background(), dir)
+	if rev != gitHead(t, dir) || reason != "" {
+		t.Fatalf("post-commit anchor = %s reason=%q, want HEAD with no reason", rev[:10], reason)
+	}
+	// Re-capture at the committed revision: now FRESH at Task B start.
+	fake.add(t, "internal/session/store.go defines Store.ActiveSessionsFor", "active",
+		rev, dir, []memd.GraphAnchor{{Kind: "file", Value: "internal/session/store.go"}})
+	plan, nodes = planDiscovery(context.Background(), client, dir, "intent", []string{"file:internal/session/store.go"})
+	if len(plan.ResolvedByCognition) != 1 || len(nodes) != 1 || plan.AnchorsValidated != 1 {
+		t.Fatalf("committed verified tree must classify FRESH: %+v nodes=%d", plan, len(nodes))
+	}
+}

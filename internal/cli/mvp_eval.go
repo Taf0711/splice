@@ -250,11 +250,12 @@ func runMvpEvalCommand(args []string, stdout io.Writer, stderr io.Writer, deps a
 				// validity; the cold arm runs it only so both arms start
 				// Task B from the same repository state.
 				precursorStatus, precursorErr := mvpRunOnce(deps, ctx, runCtxFor(ctx), runFunc, eval.RunInput{
-					SessionID: sessionID + "-taska",
-					Memory:    arm.memory,
-					Prompt:    family.PrecursorTask,
-					Cwd:       arm.dir,
-					Check:     precursorChecks[family.ID],
+					SessionID:  sessionID + "-taska",
+					Memory:     arm.memory,
+					Prompt:     family.PrecursorTask,
+					Cwd:        arm.dir,
+					Check:      precursorChecks[family.ID],
+					OutputPath: mvpDebugPath(options.OutDir, family.ID, attempt, arm.name, "a"),
 				}, &rows, family.ID, attempt, arm.name, "A", options.OutDir)
 
 				// Task B: the target. Runs on Task A's tree in BOTH arms.
@@ -283,15 +284,32 @@ func runMvpEvalCommand(args []string, stdout io.Writer, stderr io.Writer, deps a
 					}
 					continue
 				}
+				// Commit the VERIFIED Task A tree before Task B (identically
+				// in both arms). Captured cognition anchors at the snapshot
+				// revision when the stage sandbox can create one, and at
+				// HEAD otherwise (the stage sandbox correctly refuses the
+				// write-shaped `git stash create`); with the verified tree
+				// committed, HEAD names exactly the verified bytes, so the
+				// freshness diff at Task B start is empty and captured
+				// cognition classifies FRESH. Uncommitted: Task B would see
+				// every anchor stale and the warm arm degrades to cold.
+				if _, commitErr := gitCommitAll(arm.dir); commitErr != nil {
+					os.RemoveAll(warmDir)
+					os.RemoveAll(coldDir)
+					return writeAppError(stderr, fmt.Sprintf(
+						"commit verified task A tree (family %s attempt %d arm %s): %v",
+						family.ID, attempt, arm.name, commitErr), exitCrash)
+				}
 
 				runCtx, cancel := context.WithTimeout(ctx, familiesRunTimeout)
 				started := time.Now()
 				out, runErr := runFunc(runCtx, eval.RunInput{
-					SessionID: sessionID + "-taskb",
-					Memory:    arm.memory,
-					Prompt:    family.TargetTask,
-					Cwd:       arm.dir,
-					Check:     targetChecks[family.ID],
+					SessionID:  sessionID + "-taskb",
+					Memory:     arm.memory,
+					Prompt:     family.TargetTask,
+					Cwd:        arm.dir,
+					Check:      targetChecks[family.ID],
+					OutputPath: mvpDebugPath(options.OutDir, family.ID, attempt, arm.name, "b"),
 				})
 				latency := time.Since(started)
 				cancel()
@@ -334,6 +352,18 @@ func runMvpEvalCommand(args []string, stdout io.Writer, stderr io.Writer, deps a
 	}
 	summarizeMvp(stdout, manifest, rows)
 	return exitSuccess
+}
+
+// mvpDebugPath returns the debug transcript path for one attempt, or "" when
+// SPLICE_MVP_DEBUG is unset.
+func mvpDebugPath(outDir, family string, attempt int, arm, task string) string {
+	if os.Getenv("SPLICE_MVP_DEBUG") == "" || outDir == "" {
+		return ""
+	}
+	if err := os.MkdirAll(filepath.Join(outDir, "debug"), 0o755); err != nil {
+		return ""
+	}
+	return filepath.Join(outDir, "debug", fmt.Sprintf("%s-%s-r%d-%s.log", family, arm, attempt, task))
 }
 
 // runCtxFor returns the parent context (the per-run timeout is applied by the
