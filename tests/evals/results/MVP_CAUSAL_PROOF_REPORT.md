@@ -142,3 +142,40 @@ anchor-defect chain (sandbox refuses stash create, silent HEAD fallback,
 all anchors stale) was found by probe tests with stderr capture and
 fixed with the harness-level commit+reanchor contract rather than
 widening the sandbox. Each fix has a pinning test.
+
+## Addendum: large-fixture round (2026-09-05, later)
+
+A second fixture (32 Go files, 10 packages: billing, audit, notifications,
+webhooks, worker, storage, config, admin, auth, session) was built to make
+discovery the dominant cost. Two families, verifiers validated 10/10
+(base FAIL, goldA PASS, baseB FAIL, goldB PASS, wrongB FAIL).
+
+Results (3 rollouts per arm, GLM-5.3-flash):
+
+- large-01 (dunning levels -> latest-event query): cold 2/3, warm 2/3.
+  Cognition resolved 2 questions with 2 validated anchors on both
+  completing warm attempts. Reads 16 both arms; tokens 7782 cold vs 8134
+  warm (+352). The third warm attempt failed to resolve (0/0); the third
+  cold attempt died on a provider API error.
+- large-02 (retention enforcer -> deficit query): all 6 attempts lost to
+  provider API errors (exec exit 4) before any verifier could run. The
+  gold implementation passes the verifier locally, so the fixture and
+  verifier are sound; the round was infrastructure-limited.
+
+Findings:
+
+1. Discovery elimination is blocked by MODEL BEHAVIOR, not by the
+   cognition system. GLM-5.3-flash reads all 16 fixture files
+   exhaustively whether or not valid cognition names the right files
+   (reads median 16 in both arms, searches 0 in both arms). The
+   suppressed broad FTS search was not an operation this model used.
+2. The mechanism held under scale exactly as designed: capture, commit,
+   reanchor, scoped semantic retrieval, freshness validation, delivery,
+   suppression - every stage fired on the large fixture.
+3. Verdict stays PARTIAL with a sharper boundary: the missing gate (warm
+   tool work < cold) requires a model that trusts validated cognition
+   over exhaustive re-reading, or a policy layer that down-scopes the
+   discovery toolset when a question is cognition-resolved. The next
+   system-level lever is the policy one: when the DiscoveryPlan resolves
+   a question, restrict the stage's tool grants to the named files plus
+   edit tools, making the skip structural instead of advisory.
