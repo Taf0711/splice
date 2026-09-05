@@ -1,8 +1,8 @@
- ✓ code_writer w
- ◜ test_runner t
- ○ acceptance_verifier v
+ ✓ code_writer shared cwd w
+ ◜ test_runner shared cwd t
+ ○ acceptance_verifier shared cwd v
 
- ████████░░░░░░░░  50%
+ [########────────]  50%
 
 CURRENT
  stage: test_runner

@@ -472,7 +472,11 @@ func (m model) startApprovalConfirmed(source splicerun.DesignTransitionSource, p
 					}
 				}
 			}
-			return planExecutionResultMsg{runID: runID, result: result, err: err, store: store, sessionID: sessionID, sessionEvents: sessionEvents, worktree: preparedPtr, worktreeNotice: notice, sourceDirty: inspectSourceDirty(prepared)}
+			// HANDOFF card inputs (F1): computed HERE in the cmd goroutine,
+			// off the UI loop.
+			sourceDirty := inspectSourceDirty(prepared)
+			wtPreserved := preparedPtr != nil && tuiWorktreeExists(preparedPtr.Path)
+			return planExecutionResultMsg{runID: runID, result: result, err: err, store: store, sessionID: sessionID, sessionEvents: sessionEvents, worktree: preparedPtr, worktreeNotice: notice, sourceDirty: sourceDirty, worktreePreserved: wtPreserved, mergeAvailable: wtPreserved && !sourceDirty}
 		},
 		m.spinner.Tick,
 	)
@@ -663,6 +667,10 @@ type planExecutionResultMsg struct {
 	worktree       *worktrees.Result
 	worktreeNotice string
 	sourceDirty    bool
+	// worktreePreserved/mergeAvailable are computed in the producing cmd
+	// (off the UI loop) and consumed by offerHandoff (F1, §14).
+	worktreePreserved bool
+	mergeAvailable    bool
 }
 
 // designCoverageWarning reports plan fields that the conversation did not
@@ -778,7 +786,10 @@ func (m model) handleLayoutCommand() (model, tea.Cmd) {
 	if m.planPanelPersistent {
 		state = "on"
 	}
-	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Persistent plan panel " + state + "."})
+	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: ackSystemText(ack{
+		verb:    "layout",
+		outcome: "persistent plan panel  " + state,
+	})})
 	return m, nil
 }
 

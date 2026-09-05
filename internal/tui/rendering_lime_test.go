@@ -1775,7 +1775,7 @@ func TestModelPickerRowsCarryCapabilityMeta(t *testing.T) {
 
 	m.picker = picker
 	got := plainRender(t, m.pickerOverlay(100))
-	for _, want := range []string{"Choose a model", "Enter select", "Ctrl+F favorite", "❯"} {
+	for _, want := range []string{"Choose a model", "⏎ confirm", "ctrl+f favorite", "❯"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("picker overlay = %q, missing %q", got, want)
 		}

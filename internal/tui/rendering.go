@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/presentation"
 	"github.com/Taf0711/splice/internal/tools"
 )
 
@@ -241,6 +242,20 @@ func (m model) renderRowModeUncached(row transcriptRow, width int, rc rowContext
 		if payload, ok := planCardTranscriptPayload(row.text); ok {
 			return renderPlanCardRow(payload, width)
 		}
+		// P4 lifecycle cards: tagged design-lane cards render through
+		// their contract renderers at the row's width.
+		if card, ok := parseLifecycleCardPayload(row.text); ok {
+			return card(width)
+		}
+		// HANDOFF card (GAP-F): an exited lane with preserved work.
+		if h, merge, ok := parseHandoffTranscriptPayload(row.text); ok {
+			return renderHandoffCard(h, merge, width)
+		}
+		// Trust config card (GAP-I): what an untrusted project config
+		// would change, shown before the user decides.
+		if cfg, summary, ok := parseTrustConfigTranscriptPayload(row.text); ok {
+			return renderTrustConfigCard(cfg, summary, width)
+		}
 		if payload, ok := commandCardTranscriptPayload(row.text); ok {
 			return renderCommandCardRow(payload, width)
 		}
@@ -264,6 +279,9 @@ func (m model) renderRowModeUncached(row transcriptRow, width int, rc rowContext
 		}
 		return renderSystemNote(row.text, width)
 	case rowError:
+		if card, ok := parseReceiptTranscriptPayload(row.text); ok {
+			return renderReceiptCard(card, width)
+		}
 		return renderErrorRow(row, width)
 	case rowToolCall:
 		return m.renderRunningToolCard(row, width, rc, opts)
@@ -722,6 +740,10 @@ func renderCommandCardRow(text string, width int) string {
 			lines = append(lines, zeroTheme.accent.Render("actions: ")+zeroTheme.ink.Render(strings.TrimSpace(strings.TrimPrefix(trimmed, "actions:"))))
 		case isCommandCardHintLine(trimmed):
 			lines = append(lines, zeroTheme.faint.Render(line))
+		case isCommandCardTagHeading(strings.TrimSpace(strings.TrimLeft(line, " 	"))):
+			// P14 memory-card row: "[type] title" with the tag carrying the type's
+			// token colour (decision amber, finding blue, everything else muted).
+			lines = append(lines, renderMemoryTagHeading(line[:len(line)-len(strings.TrimLeft(line, " 	"))], strings.TrimSpace(strings.TrimLeft(line, " 	"))))
 		case isIndentedCommandCardRow(line):
 			// A content row (indented): a "/cmd … - description" gets two-tone
 			// styling (bright name, muted description); a "key  value" field or a
@@ -758,6 +780,10 @@ func renderPlanCardRow(text string, width int) string {
 			// "status: …" line entirely for the minimal card.
 		case isCommandCardHintLine(trimmed):
 			lines = append(lines, zeroTheme.faint.Render(line))
+		case isCommandCardTagHeading(strings.TrimSpace(strings.TrimLeft(line, " \t"))):
+			// P14 memory-card row: "[type] title" carries its tag's token colour
+			// here too, so the minimal card stays consistent with the standard one.
+			lines = append(lines, renderMemoryTagHeading(line[:len(line)-len(strings.TrimLeft(line, " \t"))], strings.TrimSpace(strings.TrimLeft(line, " \t"))))
 		case isIndentedCommandCardRow(line):
 			lines = append(lines, styleCommandCardContentRow(line))
 		default:
@@ -814,6 +840,36 @@ func styleCommandCardContentRow(line string) string {
 	// "key   value" field row: the value carries the information, so keep the
 	// whole row in readable ink rather than the old faint grey.
 	return indent + zeroTheme.ink.Render(body)
+}
+
+// isCommandCardTagHeading reports whether a row body starts with a "[tag] "
+// marker: the P14 memory-card observation heading. Tag rows are indented, so
+// the indent check happens in the card renderer's switch ordering.
+func isCommandCardTagHeading(body string) bool {
+	if !strings.HasPrefix(body, "[") {
+		return false
+	}
+	tag, rest, ok := strings.Cut(body, "]")
+	if !ok || tag == "[" {
+		return false
+	}
+	return strings.HasPrefix(rest, " ") || rest == ""
+}
+
+// renderMemoryTagHeading styles one "[tag] title" observation row. The tag
+// carries the type's semantic token: [decision] amber, [finding] blue, every
+// other type muted (P3: colour rides theme tokens, never literals). The title
+// stays ink so it reads at full strength.
+func renderMemoryTagHeading(indent, body string) string {
+	tag, rest, _ := strings.Cut(body, "]")
+	style := zeroTheme.muted
+	switch strings.TrimSpace(strings.TrimPrefix(tag, "[")) {
+	case "decision":
+		style = zeroTheme.amber
+	case "finding":
+		style = zeroTheme.blue
+	}
+	return indent + style.Render(tag+"]") + zeroTheme.ink.Render(rest)
 }
 
 // isCommandCardStatusLine reports whether trimmed is a "status: <state>" line.
@@ -1250,11 +1306,32 @@ func permissionEventScopeLabel(event *agent.PermissionEvent) string {
 // box: a tab row (one per question + a trailing Confirm tab for multi-question
 // prompts), the active question's picker or free-text field, and a key-hint footer.
 // `input` is the live composer value, echoed in free-text mode.
+// formatGateWait renders a gate's wait duration compactly for the NEEDS YOU
+// header: m:ss with zero-padded fields (00:41, 04:05).
+func formatGateWait(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	seconds := int(d.Seconds())
+	return fmt.Sprintf("%02d:%02d", seconds/60, seconds%60)
+}
+
 func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width int) string {
 	questions := prompt.request.Questions
 	if len(questions) == 0 {
 		return styledBlockFill(width, []string{zeroTheme.badge.Render(" ASK ")}, zeroTheme.lineStrong, lipgloss.NewStyle())
 	}
+	// Gate elevation (P3 cell C / §8, GAP-E): a blocking ask_user is the
+	// contract's NEEDS YOU gate. The card carries the unique blocked
+	// signature — [?] NEEDS YOU header with the wait timer — and the
+	// hard-gate invariant footer: no work running, no tokens burning
+	// while the gate waits.
+	marker := presentation.BlockedMarker(presentation.GlyphTierASCII)
+	waitLabel := marker.Word
+	if !prompt.startedAt.IsZero() {
+		waitLabel += "  blocked " + formatGateWait(time.Since(prompt.startedAt))
+	}
+	gateFooter := marker.Glyph + " " + waitLabel
 	// The questionnaire replaces the composer, so it paints on the terminal canvas
 	// (black) like the composer box — not a gray card. fill is an identity wrapper
 	// so existing fill(style) call sites render bare foregrounds on that canvas.
@@ -1270,6 +1347,9 @@ func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width
 	multi := len(questions) > 1
 
 	var lines []string
+	lines = append(lines, fill(zeroTheme.amber).Render(gateFooter))
+	lines = append(lines, fill(zeroTheme.faint).Render("-- no work running | no tokens burning --"))
+	lines = append(lines, "")
 	if header := strings.TrimSpace(prompt.request.Header); header != "" {
 		lines = append(lines, fill(zeroTheme.ink).Render(header))
 	}

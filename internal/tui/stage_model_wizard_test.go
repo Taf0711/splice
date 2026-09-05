@@ -112,87 +112,29 @@ func TestNewStageModelWizardLoadError(t *testing.T) {
 	}
 }
 
-func TestStageModelWizardEditorNavigationUsesMenuRows(t *testing.T) {
+func TestStageModelWizardOverviewNavigationWraps(t *testing.T) {
 	m := model{stageModelWizard: stageWizardFixture(t)}
-	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEnter))
-	if m.stageModelWizard.step != stageModelWizardStepEditDefault {
-		t.Fatalf("step = %d, want edit default", m.stageModelWizard.step)
-	}
-	if got := m.stageModelWizard.editFields.rowCursor; got != 0 {
-		t.Fatalf("row cursor = %d, want provider row", got)
-	}
-
 	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyDown))
-	if got := m.stageModelWizard.editFields.rowCursor; got != 1 {
-		t.Fatalf("row cursor = %d, want model row", got)
+	if got := m.stageModelWizard.overviewCursor; got != 1 {
+		t.Fatalf("cursor = %d, want 1", got)
 	}
 	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyUp))
 	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyUp))
-	if got := m.stageModelWizard.editFields.rowCursor; got != 4 {
-		t.Fatalf("row cursor = %d, want wrapped cancel row", got)
+	if got := m.stageModelWizard.overviewCursor; got != 3 {
+		t.Fatalf("cursor = %d, want wrapped to 3", got)
 	}
 	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyTab))
-	if got := m.stageModelWizard.editFields.rowCursor; got != 0 {
-		t.Fatalf("row cursor = %d, want Tab to wrap to provider", got)
+	if got := m.stageModelWizard.overviewCursor; got != 0 {
+		t.Fatalf("cursor = %d, want Tab wrap to 0", got)
 	}
 	if m.stageModelWizard.config.Default.ProviderProfile != "anthropic" {
 		t.Fatal("menu navigation mutated config")
 	}
 }
 
-func TestStageModelWizardProviderPickerConfirmAndCancel(t *testing.T) {
-	m := model{stageModelWizard: stageWizardFixture(t)}
-	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEnter)) // overview -> editor
-	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEnter)) // provider picker
-	if m.stageModelWizard.picker != stageModelPickerProvider {
-		t.Fatalf("picker = %d, want provider", m.stageModelWizard.picker)
-	}
-	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyDown))
-	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEsc))
-	if m.stageModelWizard.editFields.providerCursor != 0 {
-		t.Fatal("Esc from provider picker changed draft")
-	}
-
-	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEnter))
-	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyDown))
-	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEnter))
-	if m.stageModelWizard.picker != stageModelPickerNone {
-		t.Fatal("provider picker did not close after confirmation")
-	}
-	if m.stageModelWizard.editFields.providerCursor != 1 || m.stageModelWizard.editFields.model != "gpt-4.1" {
-		t.Fatalf("provider draft = %d/%q, want openai/gpt-4.1", m.stageModelWizard.editFields.providerCursor, m.stageModelWizard.editFields.model)
-	}
-	if m.stageModelWizard.config.Default.ProviderProfile != "anthropic" {
-		t.Fatal("provider confirmation mutated config before Save")
-	}
-}
-
-func TestStageModelWizardModelPickerSearch(t *testing.T) {
+func TestStageModelWizardPickerSearchNoMatch(t *testing.T) {
 	m := model{stageModelWizard: stageWizardFixture(t)}
 	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEnter))
-	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyDown))
-	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEnter))
-	if m.stageModelWizard.picker != stageModelPickerModel {
-		t.Fatalf("picker = %d, want model", m.stageModelWizard.picker)
-	}
-
-	m, _ = m.handleStageModelWizardKey(testKeyText("haiku"))
-	if m.stageModelWizard.pickerQuery != "haiku" {
-		t.Fatalf("query = %q, want haiku", m.stageModelWizard.pickerQuery)
-	}
-	options := m.stageModelWizard.pickerOptions()
-	if len(options) != 1 || options[0].value != "claude-haiku-4" {
-		t.Fatalf("filtered options = %+v", options)
-	}
-	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyBackspace))
-	if m.stageModelWizard.pickerQuery != "haik" {
-		t.Fatalf("query after Backspace = %q", m.stageModelWizard.pickerQuery)
-	}
-	m, _ = m.handleStageModelWizardKey(testKeyCtrl('u'))
-	if m.stageModelWizard.pickerQuery != "" || len(m.stageModelWizard.pickerOptions()) != 2 {
-		t.Fatalf("Ctrl+U did not restore options: query=%q options=%+v", m.stageModelWizard.pickerQuery, m.stageModelWizard.pickerOptions())
-	}
-
 	m, _ = m.handleStageModelWizardKey(testKeyText("missing-model"))
 	if len(m.stageModelWizard.pickerOptions()) != 0 {
 		t.Fatal("expected no matching models")
@@ -201,110 +143,137 @@ func TestStageModelWizardModelPickerSearch(t *testing.T) {
 	if !strings.Contains(view, "search > missing-model") || !strings.Contains(view, "no matching models") {
 		t.Fatalf("no-match view missing search state:\n%s", view)
 	}
-
-	m, _ = m.handleStageModelWizardKey(testKeyCtrl('u'))
-	m, _ = m.handleStageModelWizardKey(testKeyText("haiku"))
-	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEnter))
-	if m.stageModelWizard.editFields.model != "claude-haiku-4" || m.stageModelWizard.pickerQuery != "" {
-		t.Fatalf("confirmed model/query = %q/%q", m.stageModelWizard.editFields.model, m.stageModelWizard.pickerQuery)
+	// Esc closes the picker and keeps the wizard.
+	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEsc))
+	if m.stageModelWizard.picker != stageModelPickerNone || m.stageModelWizard == nil {
+		t.Fatal("Esc did not close the picker into the overview")
 	}
 }
 
 func TestStageModelWizardModelAndEffortPickers(t *testing.T) {
 	m := model{stageModelWizard: stageWizardFixture(t)}
-	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEnter))
-	m.stageModelWizard.editFields.providerCursor = 1
-	m.stageModelWizard.editFields.model = "gpt-4.1"
-
-	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyDown)) // model row
+	// One-pass flow: Enter on the highlighted row opens the model picker;
+	// confirming writes provider+model straight into that row's config.
 	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEnter))
 	if m.stageModelWizard.picker != stageModelPickerModel {
 		t.Fatalf("picker = %d, want model", m.stageModelWizard.picker)
 	}
-	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyDown))
+	if m.stageModelWizard.editTarget != "default" {
+		t.Fatalf("editTarget = %q, want default", m.stageModelWizard.editTarget)
+	}
+	// Search narrows the cross-provider list, then Enter applies.
+	m, _ = m.handleStageModelWizardKey(testKeyText("gpt-4.1"))
 	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEnter))
-	if got := m.stageModelWizard.editFields.model; got != "gpt-4.1-mini" {
-		t.Fatalf("model draft = %q, want gpt-4.1-mini", got)
+	got := m.stageModelWizard.config.Default
+	if got.Model != "gpt-4.1" || got.ProviderProfile != "openai" {
+		t.Fatalf("applied default = %+v, want openai/gpt-4.1", got)
+	}
+	if m.stageModelWizard.picker != stageModelPickerNone {
+		t.Fatal("picker did not close after confirm")
 	}
 
-	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyDown)) // effort row
-	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEnter))
-	if m.stageModelWizard.picker != stageModelPickerEffort {
-		t.Fatalf("picker = %d, want effort", m.stageModelWizard.picker)
+	// Effort adjusts inline: → from auto lands on minimal.
+	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyRight))
+	if got := m.stageModelWizard.config.Default.ReasoningEffort; got != "minimal" {
+		t.Fatalf("effort after → = %q, want minimal", got)
 	}
-	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyDown))
-	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEnter))
-	if got := m.stageModelWizard.editFields.effortCursor; got != 1 {
-		t.Fatalf("effort cursor = %d, want minimal", got)
+	// Clamped at the top: no wrap.
+	for i := 0; i < 10; i++ {
+		m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyRight))
 	}
-	if m.stageModelWizard.config.Default.Model != "claude-sonnet-4" {
-		t.Fatal("picker confirmation mutated config before Save")
+	if got := m.stageModelWizard.config.Default.ReasoningEffort; got != "high" {
+		t.Fatalf("effort after clamp = %q, want high", got)
+	}
+	// ← walks back down.
+	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyLeft))
+	if got := m.stageModelWizard.config.Default.ReasoningEffort; got != "medium" {
+		t.Fatalf("effort after ← = %q, want medium", got)
 	}
 }
 
-func TestStageModelWizardSaveRowIsOnlyApplyAction(t *testing.T) {
+func TestStageModelWizardSaveFromOverview(t *testing.T) {
 	m := model{stageModelWizard: stageWizardFixture(t)}
-	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEnter))
-	m.stageModelWizard.editFields.providerCursor = 1
-	m.stageModelWizard.editFields.model = "gpt-4.1-mini"
-	m.stageModelWizard.editFields.effortCursor = 4
-
-	for range 3 {
-		m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyDown))
+	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEnter)) // open picker
+	m, _ = m.handleStageModelWizardKey(testKeyText("gpt-4.1"))
+	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEnter)) // apply openai/gpt-4.1
+	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyRight)) // effort minimal
+	if !m.stageModelWizard.isDirty() {
+		t.Fatal("edits did not mark the wizard dirty")
 	}
-	if m.stageModelWizard.editFields.rowCursor != 3 {
-		t.Fatal("expected Save changes row")
-	}
-	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEnter))
-	if m.stageModelWizard.step != stageModelWizardStepOverview {
-		t.Fatal("Save changes did not return to overview")
+	dir := t.TempDir()
+	if err := m.stageModelWizard.save(filepath.Join(dir, "config.json")); err != nil {
+		t.Fatalf("save: %v", err)
 	}
 	got := m.stageModelWizard.config.Default
-	if got.ProviderProfile != "openai" || got.Model != "gpt-4.1-mini" || got.ReasoningEffort != "high" {
+	if got.ProviderProfile != "openai" || got.Model != "gpt-4.1" || got.ReasoningEffort != "minimal" {
 		t.Fatalf("saved default = %+v", got)
 	}
 }
 
-func TestStageModelWizardCancelAndEscDiscardDraft(t *testing.T) {
-	for _, cancelWithEsc := range []bool{false, true} {
-		t.Run(map[bool]string{false: "cancel row", true: "escape"}[cancelWithEsc], func(t *testing.T) {
-			m := model{stageModelWizard: stageWizardFixture(t)}
-			m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEnter))
-			m.stageModelWizard.editFields.providerCursor = 1
-			m.stageModelWizard.editFields.model = "gpt-4.1"
-			if cancelWithEsc {
-				m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEsc))
-			} else {
-				m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyUp)) // provider -> cancel
-				m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEnter))
-			}
-			if m.stageModelWizard.step != stageModelWizardStepOverview {
-				t.Fatal("cancel did not return to overview")
-			}
-			if got := m.stageModelWizard.config.Default; got.ProviderProfile != "anthropic" || got.Model != "claude-sonnet-4" {
-				t.Fatalf("cancel mutated config: %+v", got)
-			}
-		})
+func TestStageModelWizardEscClosesPickerThenDiscardGuard(t *testing.T) {
+	m := model{stageModelWizard: stageWizardFixture(t)}
+	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEnter)) // picker opens
+	if m.stageModelWizard.picker != stageModelPickerModel {
+		t.Fatal("expected model picker")
+	}
+	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyDown))
+	// Esc at the picker closes the picker, not the wizard, and keeps the draft.
+	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEsc))
+	if m.stageModelWizard.picker != stageModelPickerNone {
+		t.Fatal("Esc did not close the picker")
+	}
+	if m.stageModelWizard == nil {
+		t.Fatal("Esc at the picker closed the wizard")
+	}
+	if m.stageModelWizard.editTarget != "default" {
+		t.Fatalf("editTarget = %q, want default (draft kept)", m.stageModelWizard.editTarget)
+	}
+	// A pristine Esc closes outright (nothing to discard).
+	m2 := model{stageModelWizard: stageWizardFixture(t)}
+	m2, _ = m2.handleStageModelWizardKey(stageWizardKey(tea.KeyEsc))
+	if m2.stageModelWizard != nil {
+		t.Fatal("pristine Esc did not close the wizard")
+	}
+	// Make a real edit (inline effort), then Esc opens the discard guard.
+	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyRight))
+	if !m.stageModelWizard.isDirty() {
+		t.Fatal("effort adjust did not dirty the wizard")
+	}
+	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEsc))
+	if m.stageModelWizard == nil {
+		t.Fatal("wizard closed without the discard guard despite edits")
+	}
+	if !m.stageModelWizard.confirmDiscard {
+		t.Fatal("dirty Esc did not open the discard guard")
+	}
+	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEsc))
+	if m.stageModelWizard == nil || m.stageModelWizard.confirmDiscard {
+		t.Fatal("n did not keep editing")
+	}
+	// Reopen the guard, then y discards: unsaved changes revert and the wizard closes.
+	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEsc))
+	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEnter))
+	if m.stageModelWizard != nil {
+		t.Fatal("y did not close the wizard")
 	}
 }
 
 func TestStageModelWizardAddAndRemoveStageOverride(t *testing.T) {
-	wizard := stageWizardFixture(t)
-	wizard.overviewCursor = 2
-	wizard.advance()
-	wizard.editFields.providerCursor = 1
-	wizard.editFields.model = "gpt-4.1"
-	wizard.editFields.effortCursor = 3
-	wizard.editFields.rowCursor = 3
-	wizard.advance()
-
-	cfg, ok := wizard.config.Stages["code_writer"]
+	m := model{stageModelWizard: stageWizardFixture(t)}
+	m.stageModelWizard.overviewCursor = 2                            // code_writer
+	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEnter)) // picker for code_writer
+	if m.stageModelWizard.editTarget != "code_writer" {
+		t.Fatalf("editTarget = %q, want code_writer", m.stageModelWizard.editTarget)
+	}
+	m, _ = m.handleStageModelWizardKey(testKeyText("gpt-4.1"))
+	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEnter))
+	cfg, ok := m.stageModelWizard.config.Stages["code_writer"]
 	if !ok || cfg.ProviderProfile != "openai" || cfg.Model != "gpt-4.1" {
 		t.Fatalf("code_writer override = %+v, present=%v", cfg, ok)
 	}
-	wizard.overviewCursor = 2
-	wizard.removeCurrentOverride()
-	if _, ok := wizard.config.Stages["code_writer"]; ok {
+	// d removes the override.
+	m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyBackspace))
+	if _, ok := m.stageModelWizard.config.Stages["code_writer"]; ok {
 		t.Fatal("code_writer override was not removed")
 	}
 }
@@ -458,17 +427,15 @@ func TestStageModelWizardRenderUsesInheritedSelectionMarker(t *testing.T) {
 	}
 }
 
-func TestStageModelWizardEmptyModelCannotSave(t *testing.T) {
+func TestStageModelWizardApplyRejectsEmptyModel(t *testing.T) {
 	wizard := stageWizardFixture(t)
-	wizard.advance()
-	wizard.editFields.model = ""
-	wizard.editFields.rowCursor = 3
-	wizard.advance()
-	if wizard.step != stageModelWizardStepEditDefault || wizard.err == "" {
-		t.Fatalf("empty model save step=%d err=%q", wizard.step, wizard.err)
+	wizard.editTarget = "default"
+	wizard.applyModelChoice("", "openai")
+	if wizard.err == "" {
+		t.Fatal("empty model choice did not set an error")
 	}
 	if wizard.config.Default.Model != "claude-sonnet-4" {
-		t.Fatal("failed save mutated config")
+		t.Fatal("failed apply mutated config")
 	}
 }
 
@@ -483,7 +450,7 @@ func TestStageModelWizardEndToEndFeature(t *testing.T) {
 		ProviderProfile: profile,
 		SavedProviders:  []config.ProviderProfile{profile},
 	})
-	m.width = 110
+	m.width = 130
 	m.height = 36
 	m.input.SetValue("/stages")
 
@@ -498,21 +465,13 @@ func TestStageModelWizardEndToEndFeature(t *testing.T) {
 	assertContains(t, plainRender(t, m.View()), "Per-stage model routing")
 
 	m.stageModelWizard.modelOptionsByProvider["openai"] = []stageModelOption{
-		{label: "Alpha Model", value: "alpha-model"},
-		{label: "Beta Mini", value: "beta-mini"},
+		{label: "Alpha Model", value: "alpha-model", ownerProvider: "openai"},
+		{label: "Beta Mini", value: "beta-mini", ownerProvider: "openai"},
 	}
-	updated, _ = m.Update(testKey(tea.KeyEnter)) // overview -> default editor
-	m = updated.(model)
-	editorView := plainRender(t, m.View())
-	assertContains(t, editorView, "Choose a setting, then press Enter.")
-	assertContains(t, editorView, "❯ Provider")
-
-	updated, _ = m.Update(testKey(tea.KeyDown)) // model row
-	m = updated.(model)
-	updated, _ = m.Update(testKey(tea.KeyEnter)) // model picker
+	updated, _ = m.Update(testKey(tea.KeyEnter)) // open model picker for default
 	m = updated.(model)
 	pickerView := plainRender(t, m.View())
-	assertContains(t, pickerView, "Choose model")
+	assertContains(t, pickerView, "Choose model for default")
 	assertContains(t, pickerView, "search >")
 
 	updated, _ = m.Update(testKeyText("mini"))
@@ -524,15 +483,11 @@ func TestStageModelWizardEndToEndFeature(t *testing.T) {
 
 	updated, _ = m.Update(testKey(tea.KeyEnter)) // confirm beta-mini
 	m = updated.(model)
-	assertContains(t, plainRender(t, m.View()), "beta-mini")
-	updated, _ = m.Update(testKey(tea.KeyDown)) // effort
-	m = updated.(model)
-	updated, _ = m.Update(testKey(tea.KeyDown)) // apply
-	m = updated.(model)
-	updated, _ = m.Update(testKey(tea.KeyEnter)) // apply draft
-	m = updated.(model)
-	assertContains(t, plainRender(t, m.View()), "openai · beta-mini · auto")
+	assertContains(t, plainRender(t, m.View()), "openai · beta-mini")
 
+	// Effort inline, then save: the one-pass surface is complete.
+	updated, _ = m.Update(testKey(tea.KeyRight))
+	m = updated.(model)
 	updated, _ = m.Update(testKeyText("s")) // write stage-models.json and close
 	m = updated.(model)
 	if m.stageModelWizard != nil {
@@ -542,7 +497,7 @@ func TestStageModelWizardEndToEndFeature(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload saved stage config: %v", err)
 	}
-	if loaded.Default.ProviderProfile != "openai" || loaded.Default.Model != "beta-mini" {
+	if loaded.Default.ProviderProfile != "openai" || loaded.Default.Model != "beta-mini" || loaded.Default.ReasoningEffort != "minimal" {
 		t.Fatalf("saved default = %+v", loaded.Default)
 	}
 }
@@ -603,9 +558,7 @@ func TestStageModelWizardMergesLiveDiscoveredModels(t *testing.T) {
 		{name: "code_writer", overviewIndex: 2},
 	} {
 		m.stageModelWizard.overviewCursor = target.overviewIndex
-		m.stageModelWizard.advance()      // overview -> edit target
-		m.stageModelWizard.moveEditRow(1) // model row
-		m.stageModelWizard.activateEditRow()
+		m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEnter)) // open picker for the row
 		if m.stageModelWizard.picker != stageModelPickerModel {
 			t.Fatalf("%s edit did not open the model picker", target.name)
 		}
@@ -613,7 +566,7 @@ func TestStageModelWizardMergesLiveDiscoveredModels(t *testing.T) {
 		if !containsStageOption(modelOptions, "live-alpha") || !containsStageOption(modelOptions, "live-beta") {
 			t.Fatalf("%s model options = %+v, want live models", target.name, modelOptions)
 		}
-		m.stageModelWizard.retreat() // back to overview for the next target
+		m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEsc)) // back to overview
 	}
 }
 

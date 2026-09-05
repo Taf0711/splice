@@ -900,6 +900,7 @@ func runInteractiveTUIWithSetup(stdout io.Writer, stderr io.Writer, deps appDeps
 		Version:              version,
 		Theme:                theme,
 		SavedTheme:           resolved.Preferences.Theme,
+		SavedLayout:          resolved.Preferences.Layout,
 		UserConfigPath:       userConfigPath,
 		DoctorUserConfigPath: doctorUserConfigPath,
 		ProjectConfigPath:    projectConfigPath,

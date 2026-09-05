@@ -184,7 +184,7 @@ func TestPlanPanelRenderEmpty(t *testing.T) {
 
 func TestPlanPanelRenderRunning(t *testing.T) {
 	m := newModel(t.Context(), Options{ModelName: "gpt-4"})
-	m.width = 100
+	m.width = 130
 	base := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
 	m.now = func() time.Time { return base.Add(15 * time.Second) }
 
@@ -236,7 +236,10 @@ func TestPlanPanelClearResetsFrozenAt(t *testing.T) {
 func runningPlanModel(t *testing.T, steps int) model {
 	t.Helper()
 	m := newModel(t.Context(), Options{ModelName: "gpt-4"})
-	m.width = 100
+	m.width = 130
+	// P12 made the launch screen two-column; the pinned-plan tests exercise the
+	// single-column envelope, so pin the sidebar collapsed (the Ctrl+B state).
+	m.sidebarHidden = true
 	base := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
 	m.now = func() time.Time { return base.Add(15 * time.Second) }
 	items := make([]tools.PlanItem, steps)
@@ -277,7 +280,7 @@ func TestPinnedPlanCollapsesToSummaryWhenTooTall(t *testing.T) {
 
 func TestPinnedPlanHiddenWhenEmpty(t *testing.T) {
 	m := newModel(t.Context(), Options{ModelName: "gpt-4"})
-	m.width = 100
+	m.width = 130
 	if got := m.renderPinnedPlanPanel(80, 10); got != "" {
 		t.Fatalf("no plan => empty pinned render, got %q", got)
 	}
@@ -291,6 +294,8 @@ func TestPinnedPlanHiddenWhenSidebarToggledOff(t *testing.T) {
 	m.altScreen = true
 	m.height = 40
 	m.headerPrinted = true
+	// runningPlanModel pins the sidebar collapsed; this probe toggles it itself.
+	m.sidebarHidden = false
 	// Real conversation so the sidebar is available (not gated by the home screen).
 	m.transcript = append(m.transcript, transcriptRow{kind: rowToolCall, tool: "read_file", detail: "main.go"})
 

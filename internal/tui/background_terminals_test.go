@@ -122,8 +122,8 @@ func TestStopBackgroundTerminalsTextRejectsInvalidSessionID(t *testing.T) {
 	m := modelWithFakeExecSessions(&fakeExecSessionTool{}, time.Unix(100, 0))
 
 	text := m.stopBackgroundTerminalsText("abc")
-	if !strings.Contains(text, "Usage: /stop [session_id]") {
-		t.Fatalf("expected usage, got:\n%s", text)
+	if !strings.Contains(text, "invalid session id: abc") || !strings.Contains(text, "usage: /stop [session_id]") {
+		t.Fatalf("expected a blocked usage ack, got:\n%s", text)
 	}
 }
 

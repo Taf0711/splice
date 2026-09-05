@@ -104,6 +104,10 @@ func (m model) startNewSession() model {
 	m.memoryCount = 0
 	m.memoryByType = nil
 	m.memoryNoticed = false
+	// Run-bound interaction surfaces (pending handoff, diff/file views,
+	// worktree binding, trajectory reveal) belong to the previous session's
+	// run. A kept worktree stays on disk; only the actionable surface resets.
+	m = m.resetRunInteractionState()
 
 	note := "Started a new session."
 	if previousID != "" {
@@ -249,10 +253,19 @@ func (m model) handleResumeCommand(args string) (model, string) {
 	// session already owns a design epoch, so the first resumed prompt must not
 	// enter a fresh epoch and discard that state.
 	m = m.reconstructDesignState()
+	// F3 (§15): replay the persisted presentation states through the
+	// accumulator so the pipeline panel, lifecycle, and health reconstruct
+	// from runtime truth without touching the runtime.
+	m = m.replayPresentationState(events)
 	m.designNoticeShown = true
 	loopsCleared := 0
 	if session.SessionID != previousID {
 		m, loopsCleared = m.clearLoopsForSessionSwitch()
+		// Interaction surfaces (handoff card, diff/file views, worktree
+		// binding) belong to the previous session's run; reset them on a
+		// real switch. A no-op switch (resuming the active session) leaves
+		// them untouched.
+		m = m.resetRunInteractionState()
 	}
 
 	rows := initialTranscript()
@@ -481,7 +494,17 @@ func sessionPlanStatus(state splicerun.DesignState) string {
 }
 
 // openTrustPromptIfRequired opens the required trust menu before the chat.
+// When the workspace has an executable project config (.splice/config.json
+// or hooks.json) and trust is undecided or declined, the UNTRUSTED PROJECT
+// CONFIG card accompanies the menu: the decision deserves the evidence of
+// what the config would change (GAP-I, frame I1). The card never decides —
+// the picker does.
 func (m model) openTrustPromptIfRequired() model {
+	if m.trustPromptRequired || !m.trusted {
+		if cfg := describeProjectTrustConfig(m.projectConfigPath); !cfg.Empty() || cfg.ParseError != "" {
+			m.trustConfigNotice(cfg)
+		}
+	}
 	if m.trustPromptRequired {
 		m.picker = m.newTrustPicker()
 	}
@@ -631,6 +654,9 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 	// disambiguation the live runner applies — without it, dedup would drop
 	// every tool card after the first occurrence of an id.
 	callSeq := map[string]int{}
+	// GAP-L DoD 43/45: reasoning block ids rebuild across resume. Legacy
+	// payloads (pre-seq) count ordinally; new payloads pin the exact seq.
+	reasoningSeq := 0
 	// Pre-pass: collect the tool-call ids of Task delegations that actually started
 	// a specialist (each renders as a card below). Only those Task tool-call/result
 	// rows are redundant and skipped; a Task that failed before a specialist started
@@ -678,8 +704,17 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 		case sessions.EventReasoning:
 			// Rehydrate reasoning as a collapsed row so thinking survives /resume.
 			// The row shape matches the live path (reasoningTranscriptRow).
+			// The persisted seq rebuilds the same stable block id the live path
+			// minted (reasoning_N, DoD 43/45); legacy payloads without a seq fall
+			// back to ordinal counting over this event stream.
 			if content := payloadString(payload, "content"); content != "" {
-				if row, ok := reasoningTranscriptRow("", 0, content); ok {
+				reasoningSeq++
+				id := fmt.Sprintf("reasoning_%d", reasoningSeq)
+				if raw, ok := payloadInt(payload, "seq"); ok && raw > 0 {
+					id = fmt.Sprintf("reasoning_%d", raw)
+					reasoningSeq = raw
+				}
+				if row, ok := reasoningTranscriptRow(id, 0, content); ok {
 					rows = append(rows, row)
 				}
 			}
@@ -754,6 +789,16 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 			parentID := payloadString(payload, "parentSessionId")
 			if parentID != "" {
 				rows = append(rows, transcriptRow{kind: rowSystem, text: "forked from session: " + parentID})
+			}
+		case sessions.EventDecisionPinned:
+			// GAP-L DoD 46: the pinned-decisions ledger survives resume. The
+			// raw events carry each pin; the WHOLE ledger re-projects from the
+			// reconstructed state (append-only, revised decisions keep their
+			// predecessor visible) as one card instead of one row per event.
+			if state, stateErr := splicerun.ReconstructDesignState(events); stateErr == nil && len(state.Decisions) > 0 {
+				if card := decisionsCardTranscriptText(state.Decisions); card != "" {
+					rows = append(rows, transcriptRow{kind: rowSystem, text: card})
+				}
 			}
 		case sessions.EventSpecialistStart:
 			info := specialistInfoFromPayload(payload)

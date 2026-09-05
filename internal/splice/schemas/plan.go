@@ -658,10 +658,15 @@ type PipelineResult struct {
 	UnpricedRequestCount  int                    `json:"unpriced_request_count"`
 	ErrorRequestCount     int                    `json:"error_request_count"`
 	AbortReason           *string                `json:"abort_reason,omitempty"`
-	MergeStatus           *string                `json:"merge_status,omitempty"`
-	MergeBranch           *string                `json:"merge_branch,omitempty"`
-	MergeCommitSHA        *string                `json:"merge_commit_sha,omitempty"`
-	MergeMessage          *string                `json:"merge_message,omitempty"`
+	// UserAborted marks an aborted run the USER chose to stop. It is set
+	// only at the site that applies a user abort decision. Every other
+	// aborted run is an internal stop (max iterations, wall time, rollback
+	// refuse) and must project FAILED, not CANCELLED.
+	UserAborted    bool    `json:"user_aborted,omitempty"`
+	MergeStatus    *string `json:"merge_status,omitempty"`
+	MergeBranch    *string `json:"merge_branch,omitempty"`
+	MergeCommitSHA *string `json:"merge_commit_sha,omitempty"`
+	MergeMessage   *string `json:"merge_message,omitempty"`
 }
 
 // Validate checks the pipeline result.

@@ -108,7 +108,7 @@ func TestRippleAdvancesPhaseAcrossFrames(t *testing.T) {
 // styling must change as the shared spinner phase advances.
 func TestWorkingStatusLineRipplesWorkingWord(t *testing.T) {
 	m := newModel(t.Context(), Options{})
-	m.width = 100
+	m.width = 130
 	m.pending = true
 
 	m.spinnerPhase = 0

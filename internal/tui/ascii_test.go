@@ -72,3 +72,29 @@ func TestFoldASCIIIdempotent(t *testing.T) {
 		t.Fatalf("fold is not idempotent: once %q, twice %q", once, twice)
 	}
 }
+
+// TestModelPickerGlyphsFoldWidthExact pins the /model picker's glyph set
+// (Pen frame j3ZQBu cell 3: "the fold table needs 5 new entries") to
+// width-exact ASCII folds. The ring, arrows, hint bar, and cost rail all
+// sit in aligned columns; a 1-cell glyph collapsing to "??" under
+// SPLICE_ASCII=1 would shift every row after it.
+func TestModelPickerGlyphsFoldWidthExact(t *testing.T) {
+	pickerGlyphs := []rune{'■', '□', '←', '↑', '↓', '→', '●', '○', '─', '▌', '❯'}
+	for _, glyph := range pickerGlyphs {
+		folded := foldASCII(string(glyph), true)
+		if got, want := runewidth.StringWidth(folded), runewidth.RuneWidth(glyph); got != want {
+			t.Errorf("picker glyph %q (U+%04X): folded %q width %d, want %d", glyph, glyph, folded, got, want)
+		}
+		for _, b := range []byte(folded) {
+			if b >= 0x80 {
+				t.Fatalf("picker glyph %q folded to non-ASCII 0x%02x", glyph, b)
+			}
+		}
+	}
+	// The effort ring line folds column-stable: same visible width before
+	// and after, so "← ■■□□ → high" stays aligned under the fold.
+	ring := "← ■■□□ → high"
+	if got, want := runewidth.StringWidth(foldASCII(ring, true)), runewidth.StringWidth(ring); got != want {
+		t.Errorf("ring line width changed under fold: %d, want %d", got, want)
+	}
+}

@@ -860,8 +860,13 @@ func TestRewindRefreshesInMemorySessionState(t *testing.T) {
 	eventsBefore := len(m.sessionEvents)
 
 	m, out := m.handleRewindCommand("latest")
-	if !strings.Contains(out, "Rewound") {
+	if !strings.Contains(out, "rewound to sequence") {
 		t.Fatalf("expected a rewind summary, got %q", out)
+	}
+	// P15: the rewind ack must state that evidence was invalidated and that
+	// verification must run again.
+	if !strings.Contains(out, "evidence was invalidated") || !strings.Contains(out, "verification must run again") {
+		t.Fatalf("rewind ack missing the evidence-invalidation warning: %q", out)
 	}
 
 	if len(m.sessionEvents) >= eventsBefore {

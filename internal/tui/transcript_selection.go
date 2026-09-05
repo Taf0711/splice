@@ -93,7 +93,13 @@ type transcriptBodyItem struct {
 	rowIndex          int
 	heightCacheKey    string
 	heightCacheStable bool
-	render            func(startBodyY int) transcriptBodyRenderedItem
+	// heightResolved marks height as the measured line count of this exact
+	// descriptor (same key, same inputs). Settled-prefix descriptors carry it
+	// so per-frame measurement is integer arithmetic instead of re-rendering
+	// each item to count its lines.
+	height         int
+	heightResolved bool
+	render         func(startBodyY int) transcriptBodyRenderedItem
 }
 
 type transcriptBodyRenderedItem struct {
@@ -224,9 +230,14 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string, detailed bool
 	// Steady-state alt-screen frames (notably the idle cursor blink) can reuse
 	// the settled list directly. Keeping this fast path outside the closure-heavy
 	// builder also prevents the large model receiver from escaping to the heap.
-	if m.altScreen && !detailed && !m.fileView.active && !m.pending && m.pendingSpecReview == nil &&
+	// Drill-in views (file view, diff review) swap the body wholesale, so they
+	// must never hit the settled cache or the swap is invisible. A verbosity
+	// switch changes the visible row set without moving the frontier, so the
+	// settled generation must match too (GAP-L).
+	if m.altScreen && !detailed && !m.fileView.active && !m.diffView.active && !m.detailView.active && !m.pending && m.pendingSpecReview == nil &&
 		m.flushedAny && m.flushed == len(m.transcript) &&
-		m.altScreenSettledWidth == width && m.altScreenSettledFrontier == m.flushed {
+		m.altScreenSettledWidth == width && m.altScreenSettledFrontier == m.flushed &&
+		m.narrationSettledGeneration == m.narrationVerbosityLevel {
 		return m.altScreenSettledItems
 	}
 	return m.buildTranscriptBodyItems(width, emptyOverlay, detailed)
@@ -238,6 +249,16 @@ func (m model) buildTranscriptBodyItems(width int, emptyOverlay string, detailed
 	// the viewport, scroll engine, renderer, and mouse hit-tests consistent.
 	if m.fileView.active {
 		return m.fileViewBodyItems(width)
+	}
+	// Diff review (GAP-G): the chat column's body swaps to the lane diff.
+	// Same single-source swap point, so the viewport and hit-tests agree.
+	if m.diffView.active {
+		return []transcriptBodyItem{transcriptBlockBodyItem(transcriptBodyItemRow, -1, m.renderDiffReview(width))}
+	}
+	// Detail pane (GAP-G rest, Ctrl+O): the chat column's body swaps to the
+	// run's evidence projection. Same single-source swap point.
+	if m.detailView.active {
+		return m.detailViewBodyItems(width)
 	}
 	items := []transcriptBodyItem{}
 	// Transcript ROWS render at the full chat width; row/status glyphs provide
@@ -300,6 +321,12 @@ func (m model) buildTranscriptBodyItems(width int, emptyOverlay string, detailed
 			// A welcome row carries no Lime visual (the empty state replaced it)
 			// and a resolved tool call collapses into its result's card.
 			if row.kind == rowWelcome || rc.skip(row) {
+				continue
+			}
+			// GAP-L: the narration verbosity is a pure projection over the
+			// recorded rows — quiet hides standalone tool-call rows and
+			// transient system chatter; the recording is untouched.
+			if !m.narrationVisibleRow(row) {
 				continue
 			}
 			if isSuccessfulExploreResult(row) {
@@ -661,6 +688,11 @@ func layoutVisibleTranscriptBodyItems(items []transcriptBodyItem, metrics transc
 }
 
 func transcriptBodyItemHeight(item transcriptBodyItem, cache *transcriptBodyHeightCache) int {
+	// A descriptor that already carries its measured height (settled-prefix
+	// snapshots) needs no cache round-trip and no render.
+	if item.heightResolved {
+		return item.height
+	}
 	if item.heightCacheStable {
 		if height, ok := cache.get(item.heightCacheKey); ok {
 			return height

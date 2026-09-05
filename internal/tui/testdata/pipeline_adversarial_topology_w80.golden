@@ -1,8 +1,8 @@
- ◜ deploy_hook dt
- ○ release_gate r
- ✓ sync_worker dp
+ ◜ deploy_hook shared cwd dt
+ ○ release_gate shared cwd r
+ ✓ sync_worker shared cwd dp
 
- ████████░░░░░░░░  50%
+ [########────────]  50%
 
 CURRENT
  stage: deploy_hook

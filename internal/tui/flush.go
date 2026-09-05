@@ -125,7 +125,11 @@ func (m model) settleTranscript() (model, tea.Cmd) {
 	m.flushedHavePreviousKind = havePreviousKind
 	if m.altScreen {
 		bodyWidth := m.chatColumnWidth()
-		if m.flushed != oldFlushed || m.altScreenSettledWidth != bodyWidth || m.altScreenSettledFrontier != m.flushed {
+		// GAP-L: a verbosity switch changes the VISIBLE row set without
+		// moving the frontier, so the settled snapshot must rebuild even
+		// when frontier/width are unchanged.
+		if m.flushed != oldFlushed || m.altScreenSettledWidth != bodyWidth || m.altScreenSettledFrontier != m.flushed || m.narrationSettledGeneration != m.narrationVerbosityLevel {
+			m.narrationSettledGeneration = m.narrationVerbosityLevel
 			m.rebuildAltScreenSettledItems(bodyWidth)
 		}
 		return m, nil
@@ -194,8 +198,47 @@ func (m *model) rebuildAltScreenSettledItems(width int) {
 	// append transient rows without copying the entire settled prefix. The cache
 	// length never includes those scratch entries, and the next frame overwrites
 	// them on the single Bubble Tea render goroutine.
+	previous := m.altScreenSettledItems
 	m.altScreenSettledItems = make([]transcriptBodyItem, len(built), len(built)+256)
 	copy(m.altScreenSettledItems, built)
+	m.bakeAltScreenSettledHeights(previous, width)
 	m.altScreenSettledWidth = width
 	m.altScreenSettledFrontier = m.flushed
+}
+
+// bakeAltScreenSettledHeights resolves each settled descriptor's height once,
+// in place. Under the flush-frontier invariant settled rows' visuals never
+// change, so heights inherit index-aligned from the previous snapshot when the
+// descriptor identity (cache key) matches, and only the newly settled tail is
+// measured. After baking, per-frame measureTranscriptBodyItems over the
+// settled prefix is pure integer addition — no cache round-trips, no
+// re-rendering settled cards to count their lines.
+func (m *model) bakeAltScreenSettledHeights(previous []transcriptBodyItem, width int) {
+	items := m.altScreenSettledItems
+	for i := range items {
+		item := &items[i]
+		if !item.heightCacheStable || item.heightCacheKey == "" {
+			continue
+		}
+		if i < len(previous) {
+			old := &previous[i]
+			if old.heightResolved && old.heightCacheKey == item.heightCacheKey {
+				item.height = old.height
+				item.heightResolved = true
+				continue
+			}
+		}
+		if height, ok := m.transcriptBodyHeights.get(item.heightCacheKey); ok {
+			item.height = height
+			item.heightResolved = true
+			continue
+		}
+		// Cache miss (long sessions evict far more entries than the LRU
+		// holds). Resolve here, once: the descriptor keeps the height even
+		// when the cache evicts, and inheritance carries it forward. This
+		// is the same render measureTranscriptBodyItems would do every
+		// frame otherwise.
+		item.height = len(renderTranscriptBodyItem(*item, 0).lines)
+		item.heightResolved = true
+	}
 }

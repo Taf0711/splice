@@ -351,7 +351,9 @@ func TestInitialRenderShowsLimeChatSurface(t *testing.T) {
 	assertContains(t, view, "openai/gpt-4.1")
 	assertContains(t, view, emptyStateTagline)
 	assertNotContains(t, view, "running splice against ")
-	assertNotContains(t, view, " 0 ")
+	// P12: the facts block renders "0 · 0 sources" honestly on a fresh
+	// install; the old "no fake zeros" rule applied to the retired splash.
+	assertContains(t, view, "0 · 0 sources")
 	assertContains(t, view, composerPlaceholder)
 	assertNotContains(t, view, "interactive")
 	if strings.Contains(view, "Welcome to Splice") {
@@ -361,7 +363,7 @@ func TestInitialRenderShowsLimeChatSurface(t *testing.T) {
 
 func TestEmptyStateCollapsesAfterFirstPrompt(t *testing.T) {
 	m := newModel(context.Background(), Options{})
-	m.width = 100
+	m.width = 130
 	m.height = 30
 	m.input.SetValue("inspect the repo")
 
@@ -446,6 +448,34 @@ func TestToolsCommandListsRegisteredTools(t *testing.T) {
 
 	if !transcriptContains(next.transcript, "read_file") {
 		t.Fatalf("expected tools transcript to list read_file, got %#v", next.transcript)
+	}
+}
+
+func TestToolsCommandRendersBUILTINGroupForBuiltinOnlyRegistry(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool("."))
+	m := newModel(context.Background(), Options{Registry: registry})
+	m.input.SetValue("/tools")
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /tools to be handled without starting an agent run")
+	}
+	if got := countTranscriptRows(next.transcript, rowSystem); got != 1 {
+		t.Fatalf("expected exactly one system row for the /tools card, got %d: %#v", got, next.transcript)
+	}
+	text := transcriptText(next.transcript)
+	for _, want := range []string{
+		"Tools",
+		"1 registered",
+		"BUILTIN",
+		"read_file",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected builtin-only /tools card to render BUILTIN group with %q, got:\n%s", want, text)
+		}
 	}
 }
 
@@ -894,7 +924,14 @@ func TestDoctorCommandUsesCurrentProviderProfile(t *testing.T) {
 			t.Fatalf("expected doctor transcript to contain %q, got %#v", want, next.transcript)
 		}
 	}
-	for _, unwanted := range []string{"provider.config", "provider.model", "Generated", "Checks"} {
+	// The frame's five-check card shows passing checks too ("this was
+	// verified"), so provider.config/provider.model render with [pass] glyphs.
+	for _, want := range []string{"[pass] provider.config", "[pass] provider.model"} {
+		if !transcriptContains(next.transcript, want) {
+			t.Fatalf("expected doctor transcript to show %q, got %#v", want, next.transcript)
+		}
+	}
+	for _, unwanted := range []string{"Generated", "Checks"} {
 		if transcriptContains(next.transcript, unwanted) {
 			t.Fatalf("expected doctor transcript to hide %q, got %#v", unwanted, next.transcript)
 		}
@@ -939,6 +976,17 @@ func TestSearchCommandRequiresQuery(t *testing.T) {
 
 	if !transcriptContains(next.transcript, "usage: /search <query>") {
 		t.Fatalf("expected search usage, got %#v", next.transcript)
+	}
+	// The no-query invocation is an ERROR, not an empty result list: the
+	// reply must land in an error-style row, never a calm system note.
+	foundError := false
+	for _, row := range next.transcript {
+		if row.kind == rowError && strings.Contains(row.text, "usage: /search <query>") {
+			foundError = true
+		}
+	}
+	if !foundError {
+		t.Fatalf("no-query /search must append an error row with the usage, got %#v", next.transcript)
 	}
 }
 

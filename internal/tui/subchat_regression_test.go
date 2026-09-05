@@ -40,6 +40,10 @@ func TestFooterHidesPlanPanelDuringSubchat(t *testing.T) {
 	m := runningPlanModel(t, 3)
 	m.altScreen = true
 	m.height = 30
+	// The pinned plan is the plan's home only where the sidebar CANNOT host it
+	// (below the 120-col two-column boundary since P12 made the launch screen
+	// two-column). Pin the frame narrow so the pinned envelope is exercised.
+	m.width = 100
 	width := m.chatColumnWidth()
 
 	withoutSubchat := m.footerView(width)

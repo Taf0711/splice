@@ -36,6 +36,10 @@ type pipelineStageRow struct {
 	// (test_runner -> code_writer re-entry -> test_runner) without inventing a
 	// "repair" stage: it is the same stage being revisited.
 	reentered bool
+	// workspace is the stage's isolation state (DoD 26): "isolated" or
+	// "shared_cwd"; empty means unset (renderer projects shared_cwd).
+	workspace    string
+	worktreePath string
 }
 
 // pipelineMessageRow is one repair-loop message surfaced in the panel (DM4).
@@ -52,6 +56,12 @@ type pipelinePanelState struct {
 	active       bool // true when a pipeline run is in progress
 	changedFiles []string
 	messages     []pipelineMessageRow
+	// Lifecycle/health/gate come from the same presentation.State snapshot
+	// (v0.5 phase x health x gate). They are projection inputs, not policy:
+	// the pipeline header chip renders them verbatim.
+	lifecycle string
+	health    string
+	gate      string
 }
 
 // pipelinePresentation is the immutable display model shared by pipeline
@@ -114,12 +124,21 @@ func (s *pipelinePanelState) applyState(state presentation.State) {
 	s.messages = nil
 	s.changedFiles = nil
 	s.active = true
+	s.lifecycle = string(state.Lifecycle)
+	s.health = string(state.Health.Effective())
+	if state.Gate != nil {
+		s.gate = string(state.Gate.Kind)
+	} else {
+		s.gate = ""
+	}
 	for _, node := range state.Nodes {
 		row := pipelineStageRow{
-			name:     node.ID,
-			kind:     node.Kind,
-			status:   pipelineStageStatusFromNode(node.Status),
-			progress: int(node.Progress * 100),
+			name:         node.ID,
+			kind:         node.Kind,
+			status:       pipelineStageStatusFromNode(node.Status),
+			progress:     int(node.Progress * 100),
+			workspace:    node.Workspace,
+			worktreePath: node.WorktreePath,
 		}
 		// A running node with an intervention against it is a repair
 		// re-entry, not a fresh run: the repair loop re-enters a terminal
@@ -219,10 +238,60 @@ func (s *pipelinePanelState) clear() {
 	s.active = false
 	s.changedFiles = nil
 	s.messages = nil
+	s.lifecycle = ""
+	s.health = ""
+	s.gate = ""
 }
 
 func (s pipelinePanelState) isEmpty() bool {
 	return !s.active || len(s.stages) == 0
+}
+
+// lifecycleChip renders the phase/health/gate readout for the pipeline
+// header, contract form `phase | health | gate` (P8 state chips). Segments
+// drop by priority under width pressure (DoD 18) rather than truncating:
+// a blocking gate preempts health, health preempts nothing (both are
+// alerts), and the phase is the mandatory base. budget is the cell width
+// available after the "PIPELINE " prefix and the done/total count.
+func (s pipelinePanelState) lifecycleChip(budget int) string {
+	if s.lifecycle == "" {
+		return ""
+	}
+	chip := s.lifecycle
+	fits := func(extra string) bool {
+		return budget <= 0 || lipgloss.Width(chip+extra) <= budget
+	}
+	// Priority ladder (DoD 18, DoD 22): gate visibility is never sacrificed
+	// and the phase is the mandatory base, so health is the only segment
+	// that drops under width pressure. Segments drop whole; nothing is
+	// ellipsis-truncated mid-word.
+	if s.gate != "" {
+		full := chip + " | " + s.healthChipText() + " | gate " + s.gate
+		if s.healthText() != "" && lipgloss.Width(full) <= budget {
+			return full
+		}
+		return chip + " | gate " + s.gate
+	}
+	if h := s.healthText(); h != "" && fits(" | "+h) {
+		chip += " | " + h
+	}
+	return chip
+}
+
+// healthText returns the health segment or "" when normal/absent (normal
+// health is noise, not an alert).
+func (s pipelinePanelState) healthText() string {
+	if s.health == "" || s.health == "normal" {
+		return ""
+	}
+	return s.health
+}
+
+func (s pipelinePanelState) healthChipText() string {
+	if h := s.healthText(); h != "" {
+		return h
+	}
+	return "normal"
 }
 
 func (s pipelinePanelState) headerLineWithChip(width int, chip string) string {
@@ -290,9 +359,9 @@ func (p pipelinePresentation) renderStripWithChip(width int, phase int, chip str
 	count := formatDoneTotal(p.done, p.total)
 	header := label + " " + count
 
-	lines := make([]string, 0, 3)
+	lines := make([]string, 0, 4)
 	switch widthTier(width) {
-	case tierFull, tierMedium:
+	case tierFull:
 		// Wide: header with count, then a stage-label run, then a compact bar.
 		lines = append(lines, headColor.Render(truncateDisplayWidth(header, width)))
 		lines = append(lines, " "+p.stripLabels(width-1, phase))
@@ -300,6 +369,18 @@ func (p pipelinePresentation) renderStripWithChip(width int, phase int, chip str
 		if bar != "" {
 			lines = append(lines, " "+bar)
 		}
+	case tierMedium:
+		// Compact (80-119): header, stage-label run, bar, then the section
+		// shortcut row — the sidebar sections become tabs (spec §4.2 rule
+		// "sidebar_sections_become_tabs") because the permanent sidebar is
+		// removed in compact mode (DoD 16).
+		lines = append(lines, headColor.Render(truncateDisplayWidth(header, width)))
+		lines = append(lines, " "+p.stripLabels(width-1, phase))
+		bar := renderPipelineProgressBar(p.progress, width)
+		if bar != "" {
+			lines = append(lines, " "+bar)
+		}
+		lines = append(lines, " "+compactSectionTabs(width))
 	case tierNarrow:
 		// Mid: header plus the current-running label (or first pending).
 		headLabel := p.stripCurrentLabel()
@@ -372,6 +453,12 @@ func (p pipelinePresentation) renderSection(width int, phase int) []string {
 	for _, stage := range p.stages {
 		glyph, bodyStyle := pipelineStageGlyphAndStyle(stage.status, phase)
 		line := " " + glyph + " " + bodyStyle.Render(truncateStep(stage.name, room))
+		// Isolation badge (DoD 26): "isolated" lanes are badged distinctly
+		// from "shared cwd" so parallel-lane honesty survives the compact
+		// panel. Renders only when the whole row fits, like the kind tag.
+		if badge := workspaceBadge(stage.workspace); badge != "" && len([]rune(stage.name))+1+len(badge) <= room {
+			line += " " + zeroTheme.faint.Render(badge)
+		}
 		// The kind tag is metadata shown faintly after the label. It renders
 		// only when the whole row fits; otherwise the row degrades exactly as
 		// P1.2 (name truncated by truncateStep, tag dropped), so narrow widths
@@ -460,6 +547,36 @@ func (s pipelinePanelState) stripState() pipelineStripState {
 	return s.presentation().stripState()
 }
 
+// workspaceBadge renders the isolation badge text for a stage row (DoD 26).
+// Unset workspace projects as shared cwd (the honest default: most runs
+// share the authoritative directory); "isolated" badges the worktree lane.
+func workspaceBadge(workspace string) string {
+	switch workspace {
+	case "isolated":
+		return "isolated"
+	default:
+		// "shared_cwd" and unset both project the shared badge.
+		return "shared cwd"
+	}
+}
+
+// compactSectionTabs renders the compact-mode section shortcut row: the
+// sidebar's permanent sections collapse into keyboard-reachable tabs
+// (spec §4.2). Keys follow the existing bindings: Ctrl+B toggles the
+// sidebar (restoring it on a wide-enough terminal), Ctrl+P toggles the
+// plan panel, ? opens shortcuts. The row fits the width whole (segments
+// are short); if even the row cannot fit it returns empty rather than
+// truncating into noise.
+func compactSectionTabs(width int) string {
+	tabs := zeroTheme.muted.Render("[B]") + zeroTheme.faint.Render(" sidebar ") +
+		zeroTheme.muted.Render("[P]") + zeroTheme.faint.Render(" plan ") +
+		zeroTheme.muted.Render("[?]") + zeroTheme.faint.Render(" shortcuts")
+	if lipgloss.Width(tabs) > width {
+		return ""
+	}
+	return tabs
+}
+
 // pipelineStageLabel abbreviates a stage name for the narrow strip: the first
 // rune of each underscore part (code_writer -> cw, static_analyzer -> sa,
 // test_runner -> tr). A single-part name keeps its first two runes. Missing
@@ -512,6 +629,11 @@ func pipelineStageGlyphAndStyle(status pipelineStageStatus, phase int) (string, 
 	}
 }
 
+// renderPipelineProgressBar renders the aggregate progress bar. The bar body
+// comes from presentation.ProgressBar (bracketed ASCII, width-exact by
+// construction — DoD 24); this wrapper adds the theme styling and the
+// right-aligned percent, which keeps one stable display width from 0% to
+// 100%.
 func renderPipelineProgressBar(progress, width int) string {
 	barWidth := width - 8
 	if barWidth > 16 {
@@ -520,11 +642,8 @@ func renderPipelineProgressBar(progress, width int) string {
 	if barWidth < 4 {
 		barWidth = 4
 	}
-	filled := (progress * barWidth) / 100
-	if filled > barWidth {
-		filled = barWidth
-	}
-	bar := zeroTheme.amber.Render(strings.Repeat("█", filled)) + zeroTheme.faint.Render(strings.Repeat("░", barWidth-filled))
+	bar := presentation.ProgressBar(float64(progress)/100, barWidth)
+	body := zeroTheme.amber.Render(strings.ReplaceAll(bar, "-", "─"))
 	// Right-aligned percent: 0% -> 100% keeps one stable display width.
-	return bar + " " + zeroTheme.faint.Render(fmt.Sprintf("%3d%%", progress))
+	return body + " " + zeroTheme.faint.Render(fmt.Sprintf("%3d%%", progress))
 }
