@@ -253,28 +253,23 @@ func TestScopedToolRunner_EnforcesHostScope(t *testing.T) {
 	if err != nil || !res.OK {
 		t.Fatalf("granted read must pass: %v %+v", err, res)
 	}
-	// Outside read is suppressed with a directive, not executed.
+	// A8: reads outside the granted set stay available (denying reads
+	// broke correctness in the large-01 round); the inner runner sees them.
+	before := inner.calls
 	res, err = scoped.RunTool(context.Background(), "read_file", map[string]any{"path": "cmd/server/main.go"})
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || !res.OK {
+		t.Fatalf("outside read must pass through (A8): %v", err)
 	}
-	if inner.calls != 1 {
-		t.Fatalf("inner runner must NOT see the suppressed read, saw %d calls", inner.calls)
+	if inner.calls != before+1 {
+		t.Fatalf("outside read must execute via inner runner")
 	}
-	if res.OK && !strings.Contains(res.Output, "Granted files") {
-		t.Fatalf("suppressed read must carry the grant directive, got %q", res.Output)
-	}
-	// Global listing suppressed.
+	// Global listing suppressed with the grant directive.
 	res, _ = scoped.RunTool(context.Background(), "list_directory", map[string]any{"path": "."})
-	if inner.calls != 1 {
+	if inner.calls != before+1 {
 		t.Fatalf("global listing must be suppressed, inner saw %d", inner.calls)
 	}
-	if !strings.Contains(res.Output, "granted files") {
-		t.Fatalf("listing suppression must name granted files, got %q", res.Output)
-	}
-	// Symbol-containing file is granted via symbol anchor.
-	if res, err := scoped.RunTool(context.Background(), "read_file", map[string]any{"path": "internal/session/store.go"}); err != nil || !res.OK {
-		t.Fatalf("symbol-covered read must pass: %v", err)
+	if !strings.Contains(res.Output, "cognition graph names the relevant files") {
+		t.Fatalf("listing suppression must name the cognition grant, got %q", res.Output)
 	}
 }
 

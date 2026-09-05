@@ -763,19 +763,16 @@ type ScopedToolRunner struct {
 func (s ScopedToolRunner) RunTool(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
 	switch name {
 	case "list_directory":
+		// The workspace-wide listing is the one operation cognition
+		// PROVABLY makes redundant: the scope already knows where the
+		// verified work lives. Reads and searches stay available: the
+		// model may need files outside the granted set (A8 escape
+		// hatch), and denying reads broke correctness in the large-01
+		// eval round (cold 3/3, warm 0/3 when audit-package reads were
+		// denied). Suppression is scoped to what is provably redundant.
 		if !s.Scope.AllowGlobalList {
-			granted := "cognition-resolved scope; granted files: " + strings.Join(s.Scope.KnownFiles, ", ")
-			return ToolResult{OK: true, Output: "workspace listing suppressed by cognition scope. " + granted}, nil
-		}
-	case "read_file":
-		if path, ok := args["path"].(string); ok && !s.grantsPath(path) {
-			return ToolResult{OK: true, Output: "read outside cognition scope suppressed. Granted files: " +
-				strings.Join(s.Scope.KnownFiles, ", ") +
-				". If this file is genuinely required, the compiler or verifier will surface it; rely on the granted context first."}, nil
-		}
-	case "grep":
-		if !s.Scope.AllowGlobalSearch {
-			return ToolResult{OK: true, Output: "workspace search suppressed by cognition scope. Unresolved questions remain but targeted reads of granted files come first. Granted: " + strings.Join(s.Scope.KnownFiles, ", ")}, nil
+			return ToolResult{OK: true, Output: "workspace listing suppressed by cognition scope. The verified cognition graph names the relevant files: " +
+				strings.Join(s.Scope.KnownFiles, ", ")}, nil
 		}
 	}
 	return s.Inner.RunTool(ctx, name, args)
