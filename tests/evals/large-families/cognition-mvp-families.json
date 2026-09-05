@@ -1,0 +1,22 @@
+{
+  "schema": "splice.eval.mvp-families.v1",
+  "fixture": "fixture",
+  "families": [
+    {
+      "id": "large-01-billing-dunning-notice",
+      "category": "state-mutation-rule",
+      "precursor_task": "The billing service tracks payment reminders per account. Add a method RecordDunningNotice(accountID string) DunningLevel on the billing Service that advances and returns the account's dunning level, keeping the per-account levels in the service. The DunningLevel type and its levels already exist in the billing package. Add a regression test covering level advancement for one account and isolation between accounts.",
+      "target_task": "Operations wants to see the newest payment-reminder event for an account. Add an exported function LatestDunningEvent in the audit package that, given a Trail and an action name, returns the most recent audit event with that action, or nil when none exists. Add a regression test pinning the latest-match rule when several matching events exist and nil when none do.",
+      "precursor_check_file": "verifiers/large-01-a.sh",
+      "target_check_file": "verifiers/large-01-b.sh"
+    },
+    {
+      "id": "large-02-audit-retention-enforcer",
+      "category": "config-convention",
+      "precursor_task": "The audit trail needs bounded memory: add a method EnforceRetention(maxAge time.Duration, maxCount int) int on the audit Trail that drops events older than maxAge and, if the count still exceeds maxCount, keeps only the newest maxCount events, returning how many events remain. Add a regression test covering both the age cutoff and the count cap.",
+      "target_task": "Operations wants a one-number health view of audit hygiene. Add an exported function RetentionDeficit in the audit package that, given a Trail and a retention policy, reports how many events the next enforcement would drop without dropping them. It must reuse the same cutoff and cap rules the enforcement method established. Add a regression test where the deficit is zero and where it is positive.",
+      "precursor_check_file": "verifiers/large-02-a.sh",
+      "target_check_file": "verifiers/large-02-b.sh"
+    }
+  ]
+}
