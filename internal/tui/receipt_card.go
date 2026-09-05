@@ -235,13 +235,17 @@ func failedReceiptCard(stage string, reason string, snapshot string, elapsed str
 
 // cancelledReceiptCard builds the CANCELLED card. Contract invariants:
 // cancelled is NOT failure, staged vs applied is explicit, nothing was
-// applied to the tree, and the resume action is always present.
+// applied to the tree, and the resume action is always present. The staged
+// count renders only when the caller knows one: a staged=0 card says
+// nothing about files rather than asserting a number it never checked.
 func cancelledReceiptCard(at string, staged int, elapsed string) receiptCard {
 	lines := []string{
 		"stopped by you" + atSuffix(at),
-		fmt.Sprintf("%d file(s) staged, not applied", staged),
-		"nothing was written to disk",
 	}
+	if staged > 0 {
+		lines = append(lines, fmt.Sprintf("%d file(s) staged, not applied", staged))
+	}
+	lines = append(lines, "nothing was written to disk")
 	return receiptCard{
 		kind:    receiptCancelled,
 		title:   "CANCELLED",

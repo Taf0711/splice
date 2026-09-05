@@ -565,6 +565,11 @@ type model struct {
 	// (GAP-F): the [M] merge-back and [X] discard keys act on it. Nil when
 	// no handoff is offered or it was resolved.
 	pendingHandoff *handoffState
+	// lastTerminalReceipt remembers which terminal receipt card (GAP-E) is
+	// the live outcome surface, so the advertised [A]/[D]/[R]/[I]/[L] keys
+	// dispatch. Runtime state, not transcript scraping. Cleared when a new
+	// run begins or the session switches — the card stops being live then.
+	lastTerminalReceipt receiptKind
 	// diffView is the GAP-G diff review surface (§11): when active, the
 	// transcript body swaps to the worktree diff and the title bar swaps to
 	// the diff nav bar. Inactive is the zero value.
@@ -1385,6 +1390,18 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// unhandled keys keep processing (composer stays reachable by Esc out).
 	if keyMsg, ok := msg.(tea.KeyMsg); ok && m.diffView.active {
 		if handled, model, cmd := m.handleDiffReviewKey(keyMsg); handled {
+			return model, cmd
+		}
+	}
+	// Receipt and lifecycle-card keys (GAP-E action rows, P4 approve rows):
+	// the terminal receipt cards and the pending plan/critique cards
+	// advertise [A]/[D]/[R]/[I]/[L]/[F] keys. They dispatch when no modal
+	// owns input, the run is released, and an armed handoff did not just
+	// claim the key (the handoff's [D] means review-diff there, not
+	// discard). Plain lowercase letters fall through to the composer.
+	if keyMsg, ok := msg.(tea.KeyMsg); ok && !m.pending && m.noBlockingModal() &&
+		!(m.pendingHandoff != nil && m.pendingHandoff.preserved) {
+		if handled, model, cmd := m.handleReceiptKey(keyMsg); handled {
 			return model, cmd
 		}
 	}
@@ -2714,6 +2731,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// the user's Ctrl+C) projects the CANCELLED card, which is
 			// distinct from failure by contract.
 			card := failedExecutionCard(msg.err)
+			// The receipt is the live outcome surface: its advertised
+			// [A]/[D]/[R]/[I]/[L] keys dispatch through handleReceiptKey until
+			// a new run begins.
+			m.lastTerminalReceipt = card.kind
 			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
 				kind: rowError,
 				text: receiptTranscriptPayload(card),
@@ -5451,6 +5472,9 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	m.stepExplanation = nil
 	m.planDetailOpen = false
 	m.planDetailGen++ // invalidate any in-flight step-explanation from the prior run
+	// The previous run's terminal receipt card is no longer the live
+	// outcome surface; its action keys stop dispatching.
+	m.lastTerminalReceipt = ""
 	// Swarm task IDs can repeat. Scope their cached completion/session state to
 	// this run so a reused subagent-1 cannot inherit the prior row and disappear.
 	m.swarmDoneAt = map[string]time.Time{}
