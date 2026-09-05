@@ -1,6 +1,7 @@
 package splice
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -50,8 +51,10 @@ func TestVerifiedRevisionProbe2(t *testing.T) {
 		t.Fatalf("PrepareStageCommand: %v", cerr)
 	}
 	defer plan.Cleanup()
+	var stderrSink bytes.Buffer
+	revCmd.Stderr = &stderrSink
 	out, err := revCmd.Output()
-	t.Logf("sandboxed stash create: out=%q err=%v", string(out), err)
+	t.Logf("sandboxed stash create: out=%q err=%v stderr=%q", string(out), err, stderrSink.String())
 	if err == nil && strings.TrimSpace(string(out)) != "" {
 		t.Fatalf("sandboxed stash create unexpectedly succeeded (%s): the stage sandbox now allows object writes; re-verify the anchoring story", strings.TrimSpace(string(out)))
 	}

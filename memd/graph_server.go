@@ -327,6 +327,31 @@ func withAnchors(n graphNode, anchors []store.Anchor) graphNode {
 	return n
 }
 
+// handleGraphReanchor advances the verified revision of a project's active
+// nodes (POST /graph/reanchor). See store.Reanchor for the contract.
+func (s *server) handleGraphReanchor(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var req graphReanchorRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "validation: "+err.Error())
+		return
+	}
+	n, err := s.store.Reanchor(r.Context(), req.ProjectPath, req.FromRevision, req.ToRevision)
+	if err != nil {
+		writeGraphError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, graphReanchorResponse{OK: true, Nodes: n})
+}
+
 // handleGraphCompact merges duplicate nodes and reports what it did.
 func (s *server) handleGraphCompact(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {

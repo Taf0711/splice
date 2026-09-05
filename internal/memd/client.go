@@ -799,6 +799,27 @@ func (c *Client) SearchGraphSemanticallyScoped(ctx context.Context, text string,
 	return resp.Hits, nil
 }
 
+// ReanchorGraph advances the verified revision of one project's active
+// nodes. See the /graph/reanchor wire contract.
+func (c *Client) ReanchorGraph(ctx context.Context, projectPath, fromRevision, toRevision string) (int64, error) {
+	if projectPath == "" || fromRevision == "" || toRevision == "" {
+		return 0, fmt.Errorf("memd graph reanchor: project path and both revisions are required")
+	}
+	var resp struct {
+		OK    bool   `json:"ok"`
+		Nodes int64  `json:"nodes"`
+		Error string `json:"error,omitempty"`
+	}
+	body := map[string]any{"project_path": projectPath, "from_revision": fromRevision, "to_revision": toRevision}
+	if err := c.do(ctx, http.MethodPost, "/graph/reanchor", body, &resp); err != nil {
+		return 0, err
+	}
+	if !resp.OK {
+		return 0, fmt.Errorf("memd graph reanchor: %s", resp.Error)
+	}
+	return resp.Nodes, nil
+}
+
 // GraphCompactionReport mirrors the sidecar's compaction summary.
 type GraphCompactionReport struct {
 	DuplicateGroups  int   `json:"duplicate_groups"`

@@ -622,6 +622,26 @@ type graphSearchResponse struct {
 	Hits []graphSearchHit `json:"hits"`
 }
 
+// graphReanchorRequest is the JSON body for POST /graph/reanchor.
+type graphReanchorRequest struct {
+	ProjectPath  string `json:"project_path"`
+	FromRevision string `json:"from_revision"`
+	ToRevision   string `json:"to_revision"`
+}
+
+func (r *graphReanchorRequest) Validate() error {
+	if r.ProjectPath == "" || r.FromRevision == "" || r.ToRevision == "" {
+		return fmt.Errorf("project_path, from_revision, and to_revision are required")
+	}
+	return nil
+}
+
+// graphReanchorResponse is the JSON body returned by POST /graph/reanchor.
+type graphReanchorResponse struct {
+	OK    bool  `json:"ok"`
+	Nodes int64 `json:"nodes"`
+}
+
 // graphCompactResponse is the JSON body returned by POST /graph/compact.
 type graphCompactResponse struct {
 	OK     bool                   `json:"ok"`

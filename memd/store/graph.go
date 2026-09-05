@@ -794,6 +794,43 @@ func (s *Store) getActiveNode(ctx context.Context, id int64) (Node, error) {
 	return n, nil
 }
 
+// Reanchor moves the verified revision of every ACTIVE node of one project
+// from one revision to another. This is the eval-harness re-anchor: a
+// verified run captures cognition against the run-time worktree state,
+// which the stage sandbox cannot snapshot (stash create is a write-shaped
+// operation the read-scoped profile refuses), so nodes anchor at HEAD and
+// the harness commits the verified tree afterward. The commit does not
+// change what the run verified, only the revision naming those bytes, so
+// advancing verified_revision from the pre-verify HEAD to the post-verify
+// commit preserves the freshness contract exactly.
+// Both revisions must be non-empty and differ. Count is informational.
+func (s *Store) Reanchor(ctx context.Context, projectPath, fromRevision, toRevision string) (int64, error) {
+	if strings.TrimSpace(projectPath) == "" {
+		return 0, fmt.Errorf("graph: reanchor needs a project path")
+	}
+	if strings.TrimSpace(fromRevision) == "" || strings.TrimSpace(toRevision) == "" {
+		return 0, fmt.Errorf("graph: reanchor needs both revisions")
+	}
+	if fromRevision == toRevision {
+		return 0, fmt.Errorf("graph: reanchor revisions are identical")
+	}
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE cognition_nodes
+		SET verified_revision = ?, verified_at = ?
+		WHERE project_path = ?
+		  AND status = ?
+		  AND verified_revision = ?
+	`, toRevision, time.Now().Unix(), projectPath, NodeStatusActive, fromRevision)
+	if err != nil {
+		return 0, fmt.Errorf("graph: reanchor %s %s->%s: %w", projectPath, fromRevision[:10], toRevision[:10], err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("graph: reanchor rows: %w", err)
+	}
+	return n, nil
+}
+
 // SetStatus moves a node to a new status.
 func (s *Store) SetStatus(ctx context.Context, nodeID int64, status string) error {
 	if nodeID <= 0 {

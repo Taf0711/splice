@@ -75,6 +75,7 @@ func newServer(store *store.Store, socketPath string) *server {
 	mux.HandleFunc("/graph/contradict", s.handleGraphContradict)
 	mux.HandleFunc("/graph/search_semantic", s.handleGraphSearchSemantic)
 	mux.HandleFunc("/graph/compact", s.handleGraphCompact)
+	mux.HandleFunc("/graph/reanchor", s.handleGraphReanchor)
 	mux.HandleFunc("/graph/collect", s.handleGraphCollect)
 	s.httpServer = &http.Server{
 		Handler:           mux,

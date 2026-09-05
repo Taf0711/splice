@@ -286,19 +286,32 @@ func runMvpEvalCommand(args []string, stdout io.Writer, stderr io.Writer, deps a
 				}
 				// Commit the VERIFIED Task A tree before Task B (identically
 				// in both arms). Captured cognition anchors at the snapshot
-				// revision when the stage sandbox can create one, and at
-				// HEAD otherwise (the stage sandbox correctly refuses the
-				// write-shaped `git stash create`); with the verified tree
-				// committed, HEAD names exactly the verified bytes, so the
-				// freshness diff at Task B start is empty and captured
-				// cognition classifies FRESH. Uncommitted: Task B would see
-				// every anchor stale and the warm arm degrades to cold.
+				// revision when the stage sandbox can create one; the stage
+				// sandbox refuses the write-shaped `git stash create`
+				// (index write), so in-run capture anchors at the pre-verify
+				// HEAD. The harness commits the verified tree, then
+				// reanchors the project's nodes from that pre-verify HEAD
+				// to the post-verify commit: the commit does not change
+				// what the run verified, only the revision naming those
+				// bytes, so the freshness contract is preserved exactly.
+				// Applied identically to both arms; the only warm/cold
+				// difference stays the cognition store.
+				preCommitHead := gitHeadCommit(arm.dir)
 				if _, commitErr := gitCommitAll(arm.dir); commitErr != nil {
 					os.RemoveAll(warmDir)
 					os.RemoveAll(coldDir)
 					return writeAppError(stderr, fmt.Sprintf(
 						"commit verified task A tree (family %s attempt %d arm %s): %v",
 						family.ID, attempt, arm.name, commitErr), exitCrash)
+				}
+				if arm.name == "warm" {
+					if reanchorErr := reanchorVerifiedCognition(ctx, arm.dir, preCommitHead); reanchorErr != nil {
+						os.RemoveAll(warmDir)
+						os.RemoveAll(coldDir)
+						return writeAppError(stderr, fmt.Sprintf(
+							"reanchor captured cognition (family %s attempt %d): %v",
+							family.ID, attempt, reanchorErr), exitCrash)
+					}
 				}
 
 				runCtx, cancel := context.WithTimeout(ctx, familiesRunTimeout)
@@ -445,6 +458,41 @@ func resetArmMemory(ctx context.Context, dir string) error {
 	}
 	return nil
 }
+
+// reanchorVerifiedCognition advances every active node of the arm project
+// from the pre-verify HEAD (the revision captured cognition anchored at:
+// the stage sandbox refuses the write-shaped stash create, so in-run
+// capture anchors at HEAD) to the post-verify HEAD. The commit does not
+// change what the run verified, only the revision naming those bytes, so
+// the freshness contract is preserved exactly. Cold arms capture nothing,
+// so a 0-node reanchor is valid. Fail-loud on sidecar errors: a skipped
+// reanchor silently turns Task B's warm arm cold.
+func reanchorVerifiedCognition(ctx context.Context, armDir, preHead string) error {
+	if preHead == "" {
+		return fmt.Errorf("reanchor: no pre-commit HEAD for %s", armDir)
+	}
+	client, err := memd.Resolve(ctx)
+	if err != nil {
+		return fmt.Errorf("resolve sidecar: %w", err)
+	}
+	if client == nil {
+		return fmt.Errorf("memory sidecar unavailable")
+	}
+	postHead := gitHeadCommit(armDir)
+	if postHead == "" {
+		return fmt.Errorf("reanchor: no post-commit HEAD for %s", armDir)
+	}
+	if postHead == preHead {
+		// Nothing to commit: the anchor already names the verified bytes.
+		return nil
+	}
+	if _, err := client.ReanchorGraph(ctx, armDir, preHead, postHead); err != nil {
+		return fmt.Errorf("reanchor %s -> %s: %w", preHead[:10], postHead[:10], err)
+	}
+	return nil
+}
+
+// truncateForNote bounds an error string for the attempts log.
 
 // truncateForNote bounds an error string for the attempts log.
 func truncateForNote(s string, max int) string {
