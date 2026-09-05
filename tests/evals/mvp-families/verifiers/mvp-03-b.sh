@@ -44,11 +44,8 @@ if [ $rc -ne 0 ]; then exit $rc; fi
 # rule (the per-user listing or the same expiry comparison), not duplicate a
 # divergent definition. Structural: the new function's file references the
 # listing method or shares its expiry expression.
-if ! grep -rq "ActiveSessionsFor" internal/session/count_active.go 2>/dev/null; then
-  # Allow an in-store implementation sharing the same file as the listing.
-  if ! grep -rq "ActiveSessionsFor\|activeSessions" internal/session/*.go; then
-    echo "count does not reuse the established active-session rule" >&2
-    exit 1
-  fi
+if ! grep -rq "ActiveSessionsFor" internal/session/; then
+  echo "count does not reuse the established active-session rule" >&2
+  exit 1
 fi
 exit 0
