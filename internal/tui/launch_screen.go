@@ -127,6 +127,32 @@ func (m model) launchResumeCard() []string {
 	return lines
 }
 
+// launchHealth reports the launch frame's health dimension: degraded when a
+// real MCP server is in a degraded (non-connected, non-disabled) state,
+// normal otherwise. The launch screen has no presentation run state, so the
+// degraded-server count is the only honest health source.
+func (m model) launchHealth() string {
+	if m.launchDegradedServers() > 0 {
+		return "degraded"
+	}
+	return "normal"
+}
+
+// launchContractBand renders the launch contract dimension:
+// "phase idle | health degraded | gate none" (frame kAYHl item 2). The
+// launch screen has run nothing, so phase is idle and gate is none; only
+// health projects live state.
+func (m model) launchContractBand() string {
+	health := m.launchHealth()
+	healthStyle := zeroTheme.ink
+	if health != "normal" {
+		healthStyle = zeroTheme.amber
+	}
+	return zeroTheme.faint.Render("phase ") + zeroTheme.ink.Render("idle") +
+		zeroTheme.faint.Render(" | health ") + healthStyle.Render(health) +
+		zeroTheme.faint.Render(" | gate ") + zeroTheme.ink.Render("none")
+}
+
 // launchStart renders the START block. The /mcp action's text adapts to the
 // degraded-server count (frame: "/mcp  reconnect the degraded server").
 func (m model) launchStart() []string {
@@ -151,7 +177,11 @@ func (m model) launchStart() []string {
 // launchScreenLines assembles the full launch body: wordmark + tagline,
 // facts, resume card (when one exists), START, honest-state line.
 func (m model) launchScreenLines() []string {
-	lines := []string{m.launchWordmark(), "", zeroTheme.muted.Render(emptyStateTagline), ""}
+	// Frame kAYHl, item 2: the contract dimension renders before any run —
+	// "phase idle | health degraded | gate none". Phase is idle (nothing has
+	// run), gate is none (no gate source exists on launch); health projects
+	// the real degraded-server count.
+	lines := []string{m.launchContractBand(), "", m.launchWordmark(), "", zeroTheme.muted.Render(emptyStateTagline), ""}
 	for _, fact := range m.launchFacts() {
 		value := zeroTheme.ink.Render(fact.value)
 		if fact.warn {

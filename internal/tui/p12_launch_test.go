@@ -68,6 +68,49 @@ func TestLaunchMCPActionAdapts(t *testing.T) {
 	assertContains(t, joinedDegraded, "reconnect the degraded server")
 }
 
+// The contract band renders the launch contract dimension under the header
+// (frame item 2): "phase idle | health normal | gate none" on a clean model,
+// with health degraded (amber) when a real MCP server is degraded.
+func TestLaunchContractBand(t *testing.T) {
+	m := launchTestModel(t)
+	joined := strings.Join(stripANSIStrings([]string{m.launchContractBand()}), "\n")
+	assertContains(t, joined, "phase idle")
+	assertContains(t, joined, "health normal")
+	assertContains(t, joined, "gate none")
+
+	degraded := launchTestModel(t)
+	degraded.mcpViewStateCache = MCPViewState{Servers: []MCPServerView{{Name: "firecrawl", State: "degraded"}}}
+	degraded.mcpViewStateReady = true
+	band := strings.Join(stripANSIStrings([]string{degraded.launchContractBand()}), "\n")
+	assertContains(t, band, "health degraded")
+
+	// The band renders in the launch body through the real View path.
+	view := plainRender(t, m.View())
+	assertContains(t, view, "phase idle")
+}
+
+// Health rides the mode label on the idle frame (frame item 8):
+// "design (degraded)" when a server is degraded, plain "design" otherwise.
+func TestLaunchHealthRidesModeLabel(t *testing.T) {
+	m := launchTestModel(t)
+	text, _ := m.modeLabel()
+	if text != "design" {
+		t.Fatalf("modeLabel = %q on a clean model, want \"design\"", text)
+	}
+
+	degraded := launchTestModel(t)
+	degraded.mcpViewStateCache = MCPViewState{Servers: []MCPServerView{{Name: "firecrawl", State: "degraded"}}}
+	degraded.mcpViewStateReady = true
+	text, _ = degraded.modeLabel()
+	if text != "design (degraded)" {
+		t.Fatalf("modeLabel = %q with a degraded server, want \"design (degraded)\"", text)
+	}
+
+	// The degraded label reaches the rendered status line through the real path.
+	joined := strings.Join(stripANSIStrings([]string{degraded.statusLine(100)}), "\n")
+	assertContains(t, joined, "design (degraded)")
+}
+
 // The facts block projects real in-tree counts: an empty registry renders
 // the honest 0 · 0 sources, tests shows the honest default, and no invented
 // test-run figure appears anywhere.

@@ -368,6 +368,12 @@ func nextPermissionMode(mode agent.PermissionMode) agent.PermissionMode {
 
 func (m model) modeLabel() (string, lipgloss.Style) {
 	if m.designMode {
+		// Frame kAYHl item 8: health rides the mode label on the idle frame —
+		// "idle (degraded)". Design mode is the launch frame's mode chip; the
+		// degraded-server state is the only honest launch health source.
+		if health := m.launchHealth(); health != "normal" {
+			return "design (" + health + ")", zeroTheme.accent
+		}
 		return "design", zeroTheme.accent
 	}
 	if m.pending {
