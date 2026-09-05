@@ -144,3 +144,26 @@ func TestLaunchResumeCardAbsentWithoutSessions(t *testing.T) {
 	view := plainRender(t, m.View())
 	assertNotContains(t, view, "LAST SESSION")
 }
+
+// The facts block renders as the frame's two-column grid (repo|branch,
+// model|effort, tools|mcp, skills|tests) with the branch fact from the real
+// git branch. A missing right fact leaves its cell empty.
+func TestLaunchFactsTwoColumnGrid(t *testing.T) {
+	m := launchTestModel(t)
+	m.gitBranch = "feat/tui-workflow-surfaces"
+	rows := launchFactPairs(m.launchFacts())
+	if len(rows) == 0 {
+		t.Fatal("expected fact grid rows")
+	}
+	// Row 0 pairs repo (left) with branch (right).
+	if rows[0][0].key != "repo" {
+		t.Fatalf("grid row 0 left = %q, want repo", rows[0][0].key)
+	}
+	if rows[0][1].key != "branch" || rows[0][1].value != "feat/tui-workflow-surfaces" {
+		t.Fatalf("grid row 0 right = %+v, want branch=feat/tui-workflow-surfaces", rows[0][1])
+	}
+	// The grid renders both columns in one line through the real View path.
+	view := plainRender(t, m.View())
+	assertContains(t, view, "repo")
+	assertContains(t, view, "branch   feat/tui-workflow-surfaces")
+}

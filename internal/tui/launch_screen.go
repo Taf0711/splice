@@ -32,15 +32,21 @@ func (m model) launchWordmark() string {
 		zeroTheme.muted.Render("| design mode")
 }
 
-// launchFacts assembles the facts block. Rows omit rather than pad: an
-// unknown value never renders as a fake number (tests is the honest case —
-// there is no last-run source yet, so the value says so).
+// launchFacts assembles the facts block as the frame's TWO-COLUMN grid
+// (frame kAYHl: repo|branch, model|effort, tools|mcp, skills|tests). The
+// right cell is empty when its fact is absent (no MCP servers configured
+// drops the mcp cell; there is no placeholder). Rows omit rather than pad:
+// an unknown value never renders as a fake number (tests is the honest
+// case — there is no last-run source yet, so the value says so).
 func (m model) launchFacts() []launchFact {
 	facts := []launchFact{
 		{key: "repo", value: shortenPath(m.cwd)},
 		{key: "model", value: displayValue(strings.TrimSpace(m.modelName), "none")},
 		{key: "effort", value: displayValue(strings.TrimSpace(string(m.reasoningEffort)), "auto")},
 		{key: "tools", value: fmt.Sprintf("%d · %d sources", len(m.registeredTools()), m.launchSourceCount())},
+	}
+	if branch := strings.TrimSpace(m.gitBranch); branch != "" {
+		facts = append(facts, launchFact{key: "branch", value: branch})
 	}
 	if degraded := m.launchDegradedServers(); degraded > 0 {
 		facts = append(facts, launchFact{
@@ -56,6 +62,34 @@ func (m model) launchFacts() []launchFact {
 	}
 	facts = append(facts, launchFact{key: "tests", value: "not run this session"})
 	return facts
+}
+
+// launchFactPairs folds the flat fact list into the frame's two-column grid:
+// pairs are (repo,branch), (model,effort), (tools,mcp), (skills,tests) —
+// key order from the frame, left cell first. A missing right fact leaves the
+// right cell empty (no placeholder text).
+func launchFactPairs(facts []launchFact) [][2]launchFact {
+	byKey := make(map[string]launchFact, len(facts))
+	for _, fact := range facts {
+		byKey[fact.key] = fact
+	}
+	left := []string{"repo", "model", "tools", "skills"}
+	right := []string{"branch", "effort", "mcp", "tests"}
+	var rows [][2]launchFact
+	for i, leftKey := range left {
+		var row [2]launchFact
+		if fact, ok := byKey[leftKey]; ok {
+			row[0] = fact
+		}
+		if fact, ok := byKey[right[i]]; ok {
+			row[1] = fact
+		}
+		if row[0].key == "" && row[1].key == "" {
+			continue
+		}
+		rows = append(rows, row)
+	}
+	return rows
 }
 
 // launchSourceCount counts distinct tool sources (builtin + per-MCP server)
@@ -153,6 +187,41 @@ func (m model) launchContractBand() string {
 		zeroTheme.faint.Render(" | gate ") + zeroTheme.ink.Render("none")
 }
 
+// launchFactCell renders one grid cell: the key in a fixed label column, the
+// value truncated to the cell budget with an ellipsis, then padding to padTo
+// total cells (0 = no trailing padding, for the row's last cell). An empty
+// fact renders as nothing.
+func (m model) launchFactCell(fact launchFact, padTo int) string {
+	if fact.key == "" {
+		if padTo > 0 {
+			return strings.Repeat(" ", padTo)
+		}
+		return ""
+	}
+	value := fact.value
+	if padTo > 0 {
+		// The cell budget bounds key + space + value; a value that does not
+		// fit truncates with an ellipsis so the grid's second column stays
+		// aligned (the frame's repo value is short; a long path yields).
+		budget := padTo - len([]rune(fact.key)) - 1
+		if budget > 1 && len([]rune(value)) > budget {
+			value = string([]rune(value)[:budget-1]) + "…"
+		}
+	}
+	valueRendered := zeroTheme.ink.Render(value)
+	if fact.warn {
+		valueRendered = zeroTheme.amber.Render(value)
+	}
+	cell := zeroTheme.muted.Render(fmt.Sprintf("%-8s", fact.key)) + " " + valueRendered
+	if padTo > 0 {
+		plain := len([]rune(fact.key)) + 1 + len([]rune(value))
+		if pad := padTo - plain; pad > 0 {
+			cell += strings.Repeat(" ", pad)
+		}
+	}
+	return cell
+}
+
 // launchStart renders the START block. The /mcp action's text adapts to the
 // degraded-server count (frame: "/mcp  reconnect the degraded server").
 func (m model) launchStart() []string {
@@ -182,13 +251,18 @@ func (m model) launchScreenLines() []string {
 	// run), gate is none (no gate source exists on launch); health projects
 	// the real degraded-server count.
 	lines := []string{m.launchContractBand(), "", m.launchWordmark(), "", zeroTheme.muted.Render(emptyStateTagline), ""}
-	for _, fact := range m.launchFacts() {
-		value := zeroTheme.ink.Render(fact.value)
-		if fact.warn {
-			value = zeroTheme.amber.Render(fact.value)
+	// Facts render as the frame's two-column grid (repo|branch, model|effort,
+	// tools|mcp, skills|tests). Column 2 starts at cell 32 (past the widest
+	// left cell the frame shows); a longer left value truncates with an
+	// ellipsis so the grid stays aligned. A missing fact leaves its cell empty.
+	for _, row := range launchFactPairs(m.launchFacts()) {
+		left, right := row[0], row[1]
+		if left.key == "" && right.key != "" {
+			// A missing left cell promotes the right fact to the left column
+			// so an absent fact never leaves a stranded second column.
+			left, right = right, launchFact{}
 		}
-		lines = append(lines, "  "+zeroTheme.muted.Render(fact.key+"        ")+" "+
-			value)
+		lines = append(lines, "  "+m.launchFactCell(left, 32)+m.launchFactCell(right, 0))
 	}
 	lines = append(lines, "")
 	if resume := m.launchResumeCard(); len(resume) > 0 {
