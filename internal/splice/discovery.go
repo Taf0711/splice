@@ -98,7 +98,7 @@ func planDiscovery(ctx context.Context, client *memd.Client, projectPath, intent
 			plan.Unresolved = append(plan.Unresolved, question)
 			continue
 		}
-		resolved, failed := admitFreshNodes(ctx, projectPath, nodes)
+		resolved, failed, okNodes := admitFreshNodes(ctx, projectPath, nodes)
 		plan.AnchorsValidated += resolved
 		plan.AnchorsFailed += failed
 		if resolved == 0 {
@@ -107,17 +107,11 @@ func planDiscovery(ctx context.Context, client *memd.Client, projectPath, intent
 		}
 		// Cite the first FRESH node: a stale node must never be the
 		// explainability source for a resolved question.
-		cited := memd.GraphNode{}
-		for _, n := range nodes {
-			if n.Status != "active" {
-				continue
+		cited := okNodes[0]
+		for _, n := range okNodes {
+			if _, ok := fresh[n.ID]; !ok {
+				fresh[n.ID] = n
 			}
-			if _, ok := fresh[n.ID]; ok {
-				continue
-			}
-			fresh[n.ID] = n
-			cited = n
-			break
 		}
 		plan.ResolvedByCognition = append(plan.ResolvedByCognition, ResolvedQuestion{
 			Question: question,
@@ -146,14 +140,11 @@ func planDiscovery(ctx context.Context, client *memd.Client, projectPath, intent
 			return plan, bundleNodes(fresh)
 		}
 		plan.SemanticHits = len(entry)
-		resolved, failed := admitFreshNodes(ctx, projectPath, entry)
+		resolved, failed, okNodes := admitFreshNodes(ctx, projectPath, entry)
 		plan.AnchorsValidated += resolved
 		plan.AnchorsFailed += failed
 		kept := 0
-		for _, n := range entry {
-			if n.Status != "active" {
-				continue
-			}
+		for _, n := range okNodes {
 			if _, ok := fresh[n.ID]; !ok {
 				fresh[n.ID] = n
 			}
@@ -166,11 +157,11 @@ func planDiscovery(ctx context.Context, client *memd.Client, projectPath, intent
 			})
 			neighbors, _, nerr := client.GetNeighbors(ctx, n.ID, nil, 1, 4)
 			if nerr == nil {
-				nResolved, nFailed := admitFreshNodes(ctx, projectPath, neighbors)
+				nResolved, nFailed, okNeighbors := admitFreshNodes(ctx, projectPath, neighbors)
 				plan.AnchorsValidated += nResolved
 				plan.AnchorsFailed += nFailed
-				for _, nb := range neighbors {
-					if _, ok := fresh[nb.ID]; !ok && nb.Status == "active" {
+				for _, nb := range okNeighbors {
+					if _, ok := fresh[nb.ID]; !ok {
 						fresh[nb.ID] = nb
 					}
 				}
@@ -226,8 +217,9 @@ func bundleNodes(fresh map[int64]memd.GraphNode) []memd.GraphNode {
 // nodes fail closed: they are excluded by the caller through the fresh set.
 // Freshness is structural: one porcelain diff per unique verified revision
 // through the shared C1b batch machinery, never "repo changed, reject all".
-func admitFreshNodes(ctx context.Context, projectPath string, nodes []memd.GraphNode) (int, int) {
+func admitFreshNodes(ctx context.Context, projectPath string, nodes []memd.GraphNode) (int, int, []memd.GraphNode) {
 	validated, failed := 0, 0
+	var okNodes []memd.GraphNode
 	cache := map[string]map[string]bool{}
 	for _, n := range nodes {
 		if n.Status != "active" {
@@ -272,11 +264,12 @@ func admitFreshNodes(ctx context.Context, projectPath string, nodes []memd.Graph
 		}
 		if anchorFresh {
 			validated++
+			okNodes = append(okNodes, n)
 		} else {
 			failed++
 		}
 	}
-	return validated, failed
+	return validated, failed, okNodes
 }
 
 // nodeFileAnchors returns the file anchor values on one node.

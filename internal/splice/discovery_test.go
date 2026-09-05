@@ -421,3 +421,27 @@ func TestEndToEndCaptureRetrieveApply(t *testing.T) {
 		}
 	}
 }
+
+func TestSemanticPathRejectsStaleNodes(t *testing.T) {
+	dir, rev := setupFreshnessRepo(t)
+	fake, client := newFakeSidecar(t)
+
+	// A's captured node: fresh at capture time.
+	fake.add(t, "internal/session/store.go defines Store.InvalidateUserSessions", "active", rev, dir,
+		[]memd.GraphAnchor{{Kind: "file", Value: "internal/session/store.go"}})
+
+	// B edits the anchored file BEFORE retrieval: the node is now stale and
+	// must not resolve the question, must not deliver, and the anchor must
+	// count as failed.
+	if err := os.WriteFile(filepath.Join(dir, "internal/session/store.go"), []byte("package session\n// B rewrote this\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plan, nodes := planDiscovery(context.Background(), client, dir,
+		"administrator force sign-out should invalidate every active session", nil)
+	if len(plan.ResolvedByCognition) != 0 || len(nodes) != 0 {
+		t.Fatalf("stale node resolved a question: %+v nodes=%d", plan, len(nodes))
+	}
+	if plan.AnchorsFailed != 1 || plan.AnchorsValidated != 0 {
+		t.Fatalf("freshness accounting wrong: %+v", plan)
+	}
+}
