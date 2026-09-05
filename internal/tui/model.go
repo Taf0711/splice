@@ -2729,8 +2729,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// full untruncated reason, recovery keys — not a bare error
 			// line (audit finding 3). Cancellation (context canceled from
 			// the user's Ctrl+C) projects the CANCELLED card, which is
-			// distinct from failure by contract.
+			// distinct from failure by contract, with the lane's real
+			// worktree context (slice B of SPEC_TUI_RECEIPTS_OPEN_WORK).
 			card := failedExecutionCard(msg.err)
+			if card.kind == receiptCancelled {
+				card = cancelledReceiptForWorktree(msg.worktree)
+			}
 			// The receipt is the live outcome surface: its advertised
 			// [A]/[D]/[R]/[I]/[L] keys dispatch through handleReceiptKey until
 			// a new run begins.

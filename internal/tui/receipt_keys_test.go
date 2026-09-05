@@ -376,3 +376,60 @@ func TestVerifiedReceiptGatedOnRuntimeCompletion(t *testing.T) {
 		t.Fatal("verified receipt: card rendered without a runtime completion receipt (DoD 13)")
 	}
 }
+
+// The cancelled card states the lane's real worktree context instead of a
+// disk claim the UI never checked: with a worktree it says the work is
+// preserved in the lane and nothing merged; without one (shared workspace)
+// it says edits may already be on disk. Both keep the action row.
+func TestCancelledReceiptStatesWorktreeTruth(t *testing.T) {
+	m := mouseTestModel()
+	m.sessionStore = testSessionStore(t)
+	m.activeRunID = 11
+	wt := &worktrees.Result{Name: "wt-cancelled", Path: "/nonexistent/wt-cancelled", RepoRoot: "/nonexistent"}
+	updated, _ := m.Update(planExecutionResultMsg{runID: 11, err: context.Canceled, worktree: wt})
+	next := updated.(model)
+	plain := stripANSI(renderReceiptCard(cancelledReceiptForWorktree(wt), 100))
+	for _, want := range []string{
+		"stopped by you",
+		"work preserved in worktree wt-cancelled",
+		"nothing merged into the main checkout",
+		"[A]", "apply staged", "[D]", "discard", "[R]", "resume",
+	} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("cancelled receipt (worktree) missing %q:\n%s", want, plain)
+		}
+	}
+	// The false disk claim is gone for the worktree lane: writes landed in
+	// the lane, and the card no longer needs the shared-workspace hedge.
+	if strings.Contains(plain, "edits may already be on disk") {
+		t.Fatalf("cancelled receipt (worktree) used the shared-workspace copy:\n%s", plain)
+	}
+	// Through the real Update path the card carries the worktree truth.
+	// The worktree review picker overlays the transcript on a cancelled
+	// lane; resolve it (Enter -> keep) so the receipt card is the visible
+	// surface.
+	updated, _ = next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+	view := plainRender(t, next.View())
+	if !strings.Contains(view, "work preserved in worktree wt-cancelled") {
+		t.Fatal("cancelled receipt: live View missing the worktree-preserved line")
+	}
+
+	shared := mouseTestModel()
+	shared.sessionStore = testSessionStore(t)
+	shared.activeRunID = 12
+	updated, _ = shared.Update(planExecutionResultMsg{runID: 12, err: context.Canceled})
+	nextShared := updated.(model)
+	sharedPlain := stripANSI(renderReceiptCard(cancelledReceiptForWorktree(nil), 100))
+	for _, want := range []string{"stopped by you", "shared workspace", "edits may already be on disk"} {
+		if !strings.Contains(sharedPlain, want) {
+			t.Fatalf("cancelled receipt (shared) missing %q:\n%s", want, sharedPlain)
+		}
+	}
+	if strings.Contains(sharedPlain, "nothing was written to disk") {
+		t.Fatalf("cancelled receipt (shared) still claims nothing was written:\n%s", sharedPlain)
+	}
+	if view := plainRender(t, nextShared.View()); !strings.Contains(view, "edits may already be on disk") {
+		t.Fatal("cancelled receipt: live View missing the shared-workspace honesty line")
+	}
+}

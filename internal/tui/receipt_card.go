@@ -12,6 +12,7 @@ import (
 
 	"github.com/Taf0711/splice/internal/presentation"
 	"github.com/Taf0711/splice/internal/splice/schemas"
+	"github.com/Taf0711/splice/internal/worktrees"
 )
 
 // Terminal outcome receipt cards (GAP-E, v0.5 §16 receipts + P2b cell 6):
@@ -89,7 +90,7 @@ func parseReceiptTranscriptPayload(text string) (receiptCard, bool) {
 
 // failedExecutionCard classifies a plan-execution error into the correct
 // receipt card. A user cancel (context canceled up the chain) is NOT a
-// failure: it projects the CANCELLED receipt with staged-not-applied
+// failure: it projects the CANCELLED receipt with the lane's worktree
 // semantics. Everything else is FAILED with the full reason.
 func failedExecutionCard(err error) receiptCard {
 	if err == nil {
@@ -102,6 +103,36 @@ func failedExecutionCard(err error) receiptCard {
 	// truncated); the failing stage is unknown at this boundary, so no
 	// stage row.
 	return failedReceiptCard("", err.Error(), "", "")
+}
+
+// cancelledReceiptForWorktree builds the CANCELLED card from the result
+// message's runtime worktree context, so the body states where the work
+// actually lives instead of asserting a disk fact the UI never checked.
+// The worktree fields are computed in the producing cmd goroutine (F1,
+// §14) — no filesystem access happens here.
+//
+//   - Worktree present: writes landed in the ISOLATED lane; the main
+//     checkout is untouched. That is the truth "nothing merged" states.
+//   - Worktree absent: the lane ran in the SHARED workspace, where stage
+//     tools write directly; claiming "nothing was written to disk" would be
+//     false, so the card says edits may already be on disk.
+//
+// Neither variant asserts a staged file count: the caller has none.
+func cancelledReceiptForWorktree(wt *worktrees.Result) receiptCard {
+	card := cancelledReceiptCard("", 0, "")
+	card.lines = nil
+	if wt != nil && strings.TrimSpace(wt.Path) != "" {
+		card.lines = append(card.lines,
+			"stopped by you",
+			"work preserved in worktree "+wt.Name+" — nothing merged into the main checkout",
+		)
+		return card
+	}
+	card.lines = append(card.lines,
+		"stopped by you",
+		"stopped in the shared workspace — edits may already be on disk",
+	)
+	return card
 }
 
 // receiptCard is the normalized content of one terminal outcome card.
