@@ -239,6 +239,110 @@ func (r *DecisionRecorder) Take() []DecisionPinnedPayload {
 	return out
 }
 
+// OpenQuestionRecorder accumulates open questions raised by the design agent
+// during one turn (§7.1). It mirrors DecisionRecorder: the TUI drains it
+// after the turn and appends one open_question_raised session event per
+// question, so the open set survives compaction and reconstructs.
+type OpenQuestionRecorder struct {
+	mu        sync.Mutex
+	questions []OpenQuestionPayload
+}
+
+// NewOpenQuestionRecorder creates an empty open-question ledger for one
+// design turn.
+func NewOpenQuestionRecorder() *OpenQuestionRecorder {
+	return &OpenQuestionRecorder{}
+}
+
+// Raise records one open question. A question is required; a duplicate of a
+// question already queued this turn returns a named error and queues nothing.
+func (r *OpenQuestionRecorder) Raise(question, detail string) error {
+	if strings.TrimSpace(question) == "" {
+		return fmt.Errorf("raise_open_question ignored: question is required")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, existing := range r.questions {
+		if existing.Question == question {
+			return fmt.Errorf("raise_open_question ignored: %q is already open", question)
+		}
+	}
+	r.questions = append(r.questions, OpenQuestionPayload{Question: question, Detail: detail})
+	return nil
+}
+
+// Take returns and clears the recorded questions. It is called exactly once,
+// by the TUI run goroutine, after the agent turn finishes.
+func (r *OpenQuestionRecorder) Take() []OpenQuestionPayload {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := r.questions
+	r.questions = nil
+	return out
+}
+
+// raiseOpenQuestionTool lets the design agent raise an open question as
+// first-class runtime data. Permission is Allow: it queues a ledger entry
+// the host persists after the turn, like the pin tool.
+type raiseOpenQuestionTool struct {
+	recorder *OpenQuestionRecorder
+}
+
+func (t *raiseOpenQuestionTool) Name() string { return "raise_open_question" }
+
+func (t *raiseOpenQuestionTool) Parameters() tools.Schema {
+	return tools.Schema{
+		Type: "object",
+		Properties: map[string]tools.PropertySchema{
+			"question": {
+				Type:        "string",
+				Description: "The open question in one sentence, e.g. 'are streamed bodies idempotent?'.",
+			},
+			"detail": {
+				Type:        "string",
+				Description: "Optional context: why the answer blocks the design.",
+			},
+		},
+		Required:             []string{"question"},
+		AdditionalProperties: false,
+	}
+}
+
+func (t *raiseOpenQuestionTool) Safety() tools.Safety {
+	return tools.Safety{
+		SideEffect: tools.SideEffectLocalControl,
+		Permission: tools.PermissionAllow,
+		Reason:     "Queues an open design question the host persists after the turn.",
+	}
+}
+
+func (t *raiseOpenQuestionTool) Run(_ context.Context, args map[string]any) tools.Result {
+	question, _ := args["question"].(string)
+	detail, _ := args["detail"].(string)
+	if err := t.recorder.Raise(question, detail); err != nil {
+		return tools.Result{Status: tools.StatusError, Output: "Error: " + err.Error()}
+	}
+	return tools.Result{
+		Status: tools.StatusOK,
+		Output: "open question raised: " + question,
+	}
+}
+
+// NewRaiseOpenQuestionTool builds the raise_open_question tool. The design
+// agent calls it when the design depends on an unanswered decision; the host
+// persists it as an open_question_raised event after the turn.
+func NewRaiseOpenQuestionTool(recorder *OpenQuestionRecorder) tools.Tool {
+	return &raiseOpenQuestionTool{recorder: recorder}
+}
+
+func (t *raiseOpenQuestionTool) Description() string {
+	return "Raise one open design question as durable runtime data. " +
+		"Call this when the design depends on an answer you do not have " +
+		"(the user has not decided, or evidence is missing). " +
+		"The question joins the open set, renders on the resume card, and " +
+		"stays open until a decision settles it or it is withdrawn."
+}
+
 // pinDesignDecisionTool lets the design agent pin a settled decision as
 // first-class runtime data. Permission is Allow: it queues a ledger entry
 // the host persists after the turn, like the transition tools.

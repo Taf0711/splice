@@ -144,9 +144,11 @@ func (m model) launchResumeCard() []string {
 	if stateErr != nil {
 		return nil
 	}
-	// Pins are settled anchors by definition (§7.1); the frame's open row
-	// renders only from a real open-question source, which the ledger does
-	// not carry yet — omit rather than invent.
+	// Settled pins and open questions both come from the same reconstructed
+	// design state (§7.1). The open row renders the QUESTION TEXT (frame:
+	// "[ ] 1 open  are streamed bodies idempotent?"), truncated to the
+	// transcript budget — a bare count would hide the thing the user must
+	// answer first on resume.
 	settled := len(state.Decisions)
 	when := sessionWhen(latest.UpdatedAt, m.now())
 	head := zeroTheme.muted.Bold(true).Render("LAST SESSION") + "  " +
@@ -156,9 +158,28 @@ func (m model) launchResumeCard() []string {
 		lines = append(lines, "  "+zeroTheme.green.Render("[+]")+" "+
 			zeroTheme.ink.Render(fmt.Sprintf("%d decisions settled", settled)))
 	}
+	for i, q := range state.OpenQuestions {
+		prefix := "  " + zeroTheme.faint.Render("[ ]") + " "
+		if i == 0 {
+			prefix += zeroTheme.ink.Render(fmt.Sprintf("%d open  ", len(state.OpenQuestions)))
+		}
+		lines = append(lines, prefix+zeroTheme.ink.Render(truncateOpenQuestion(q.Question)))
+	}
 	lines = append(lines, "  "+zeroTheme.accent.Render("/resume")+" "+
 		zeroTheme.muted.Render("restore decisions, evidence and open questions"))
 	return lines
+}
+
+// truncateOpenQuestion clips a question to the resume-card budget. The card
+// lives in the transcript column; a question longer than the budget yields
+// with an ellipsis rather than pushing the card wide.
+func truncateOpenQuestion(question string) string {
+	const budget = 56
+	runes := []rune(strings.TrimSpace(question))
+	if len(runes) <= budget {
+		return string(runes)
+	}
+	return string(runes[:budget-1]) + "…"
 }
 
 // launchHealth reports the launch frame's health dimension: degraded when a

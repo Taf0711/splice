@@ -92,16 +92,21 @@ func (m model) launchNextModule(width int) []string {
 }
 
 // launchDecisionsModule renders the DECISIONS summary from the reconstructed
-// ledger (settled count; open only when the ledger actually carries an
-// open-question source — pins are settled anchors, so the open row is
-// omitted rather than invented).
+// ledger: the settled count and, when open questions exist, the amber open
+// count (frame kAYHl: "3 settled" / "1 open").
 func (m model) launchDecisionsModule(width int) []string {
-	decisions, ok := m.designDecisions()
-	if !ok || len(decisions) == 0 {
+	decisions, decisionsOK := m.designDecisions()
+	open, openOK := m.designOpenQuestions()
+	if (!decisionsOK || len(decisions) == 0) && (!openOK || len(open) == 0) {
 		return nil
 	}
 	lines := []string{sidebarHeader("DECISIONS", width)}
-	lines = append(lines, "  "+zeroTheme.ink.Render(fmt.Sprintf("%d settled", len(decisions))))
+	if decisionsOK && len(decisions) > 0 {
+		lines = append(lines, "  "+zeroTheme.ink.Render(fmt.Sprintf("%d settled", len(decisions))))
+	}
+	if openOK && len(open) > 0 {
+		lines = append(lines, "  "+zeroTheme.amber.Render(fmt.Sprintf("%d open", len(open))))
+	}
 	return lines
 }
 

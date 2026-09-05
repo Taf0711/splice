@@ -884,6 +884,10 @@ type tuiAgentRunOptions struct {
 	// (§7.1). Design-conversation runs drain it into decision_pinned
 	// session events after the turn.
 	decisions *splicerun.DecisionRecorder
+	// openQuestions is the per-turn ledger for the raise_open_question tool
+	// (§7.1). Design-conversation runs drain it into open_question_raised
+	// session events after the turn.
+	openQuestions *splicerun.OpenQuestionRecorder
 }
 
 func newModel(ctx context.Context, options Options) model {
@@ -5405,6 +5409,11 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 		// after the turn.
 		decisions := splicerun.NewDecisionRecorder()
 		designRegistry.Register(splicerun.NewPinDesignDecisionTool(decisions))
+		// The open-question ledger lets the agent raise unresolved questions
+		// the design depends on (§7.1); drained into session events the same
+		// way, and rendered on the resume card / launch DECISIONS module.
+		openQuestions := splicerun.NewOpenQuestionRecorder()
+		designRegistry.Register(splicerun.NewRaiseOpenQuestionTool(openQuestions))
 		return m, tea.Batch(m.runAgentWithOptions(m.activeRunID, runCtx, rawPrompt, turnImages, tuiAgentRunOptions{
 			registry:      designRegistry,
 			systemPrompt:  designSystemPrompt,
@@ -5413,6 +5422,7 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 			serverTools:   []zeroruntime.ServerTool{{Kind: zeroruntime.ServerToolWebSearch}},
 			transition:    transition,
 			decisions:     decisions,
+			openQuestions: openQuestions,
 		}), m.spinner.Tick)
 	}
 	runOpts := tuiAgentRunOptions{execDirect: m.execDirectPending}
@@ -6488,6 +6498,16 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				sessionEvents = append(sessionEvents, pendingSessionEvent{
 					Type:    sessions.EventDecisionPinned,
 					Payload: d,
+				})
+			}
+		}
+		// And its open questions into open_question_raised session events
+		// (§7.1): the open set becomes durable runtime data the same way.
+		if runOptions.runKind == tuiRunDesignConversation && runOptions.openQuestions != nil {
+			for _, q := range runOptions.openQuestions.Take() {
+				sessionEvents = append(sessionEvents, pendingSessionEvent{
+					Type:    sessions.EventOpenQuestionRaised,
+					Payload: q,
 				})
 			}
 		}

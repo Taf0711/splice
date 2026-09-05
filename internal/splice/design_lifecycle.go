@@ -74,6 +74,72 @@ type DecisionPinnedPayload struct {
 	Timestamp string `json:"ts,omitempty"`
 }
 
+// OpenQuestionPayload records one open design question (§7.1). A question is
+// raised in conversation when the design depends on an unanswered decision.
+// It is first-class runtime data like the pinned decisions: the resume card
+// and the launch DECISIONS module project it, and it survives compaction in
+// the raw event log. Resolution removes it from the open set — the raised
+// events stay in the log (append-only audit), but only UNRESOLVED questions
+// reconstruct.
+type OpenQuestionPayload struct {
+	Question string `json:"question"`
+	Detail   string `json:"detail,omitempty"`
+	// Sequence is stamped at reconstruction from the raising event's sequence
+	// number; a raise and its resolve pair on identical Question text.
+	Sequence int `json:"seq,omitempty"`
+}
+
+// OpenQuestionResolvedPayload marks one open question settled or withdrawn.
+// The Question must match a currently-open question's text exactly; a resolve
+// with no matching open question is a reconstruction error (fail closed, G2).
+type OpenQuestionResolvedPayload struct {
+	Question string `json:"question"`
+	// Resolution names the outcome: "settled" (a decision pinned) or
+	// "withdrawn" (no longer relevant). Empty is invalid.
+	Resolution string `json:"resolution"`
+}
+
+func (p OpenQuestionResolvedPayload) Validate() error {
+	if strings.TrimSpace(p.Question) == "" {
+		return fmt.Errorf("open_question_resolved: question is required")
+	}
+	switch p.Resolution {
+	case "settled", "withdrawn":
+		return nil
+	default:
+		return fmt.Errorf("open_question_resolved: resolution must be settled or withdrawn, got %q", p.Resolution)
+	}
+}
+
+func (p OpenQuestionPayload) Validate() error {
+	if strings.TrimSpace(p.Question) == "" {
+		return fmt.Errorf("open_question payload: question is required")
+	}
+	return nil
+}
+
+// OpenQuestionRaisedAppender returns the session-append input for one raised
+// open question.
+func OpenQuestionRaisedAppender(question, detail string) (sessions.AppendEventInput, error) {
+	payload := OpenQuestionPayload{Question: question, Detail: detail}
+	if err := payload.Validate(); err != nil {
+		return sessions.AppendEventInput{}, err
+	}
+	raw, _ := json.Marshal(payload)
+	return sessions.AppendEventInput{Type: sessions.EventOpenQuestionRaised, Payload: json.RawMessage(raw)}, nil
+}
+
+// OpenQuestionResolvedAppender returns the session-append input for one
+// resolved open question.
+func OpenQuestionResolvedAppender(question, resolution string) (sessions.AppendEventInput, error) {
+	payload := OpenQuestionResolvedPayload{Question: question, Resolution: resolution}
+	if err := payload.Validate(); err != nil {
+		return sessions.AppendEventInput{}, err
+	}
+	raw, _ := json.Marshal(payload)
+	return sessions.AppendEventInput{Type: sessions.EventOpenQuestionResolved, Payload: json.RawMessage(raw)}, nil
+}
+
 // DecisionPinnedAppender returns the session-append input for one pinned
 // decision, shared by every emitter so the payload shape has one writer.
 func DecisionPinnedAppender(statement, detail, epic string) sessions.AppendEventInput {
@@ -98,6 +164,10 @@ type DesignState struct {
 	// decision keeps its predecessor: the ledger shows both with the
 	// revision marker, never a silent rewrite.
 	Decisions []DecisionPinnedPayload
+	// OpenQuestions is the currently-open question set in raise order. A
+	// resolved question leaves the set (the raise event stays in the log);
+	// only a new design-mode epoch clears the audit trail itself.
+	OpenQuestions []OpenQuestionPayload
 	// TaskOutcomes is task_id -> status, including in-flight "running" for a
 	// task_started event with no terminal event after it yet (e.g. a run
 	// interrupted mid-task). schemas.TaskRunOutcome is strictly terminal and
@@ -136,6 +206,43 @@ func ReconstructDesignState(events []sessions.Event) (DesignState, error) {
 			// The ledger is append-only: a revised decision keeps its
 			// predecessor so history is never silently rewritten (§7.1).
 			state.Decisions = append(state.Decisions, d)
+		case sessions.EventOpenQuestionRaised:
+			var q OpenQuestionPayload
+			if err := json.Unmarshal(event.Payload, &q); err != nil {
+				return DesignState{}, fmt.Errorf("design_mode open_question_raised seq %d: %w", event.Sequence, err)
+			}
+			if err := q.Validate(); err != nil {
+				return DesignState{}, fmt.Errorf("design_mode open_question_raised seq %d: %w", event.Sequence, err)
+			}
+			// The open set is keyed by question text: re-raising an identical
+			// question replaces nothing — the first raise stays authoritative
+			// (append-only set, no silent rewrite).
+			for _, existing := range state.OpenQuestions {
+				if existing.Question == q.Question {
+					return DesignState{}, fmt.Errorf("design_mode open_question_raised seq %d: question %q is already open", event.Sequence, q.Question)
+				}
+			}
+			q.Sequence = event.Sequence
+			state.OpenQuestions = append(state.OpenQuestions, q)
+		case sessions.EventOpenQuestionResolved:
+			var r OpenQuestionResolvedPayload
+			if err := json.Unmarshal(event.Payload, &r); err != nil {
+				return DesignState{}, fmt.Errorf("design_mode open_question_resolved seq %d: %w", event.Sequence, err)
+			}
+			if err := r.Validate(); err != nil {
+				return DesignState{}, fmt.Errorf("design_mode open_question_resolved seq %d: %w", event.Sequence, err)
+			}
+			idx := -1
+			for i, existing := range state.OpenQuestions {
+				if existing.Question == r.Question {
+					idx = i
+					break
+				}
+			}
+			if idx < 0 {
+				return DesignState{}, fmt.Errorf("design_mode open_question_resolved seq %d: no open question %q", event.Sequence, r.Question)
+			}
+			state.OpenQuestions = append(state.OpenQuestions[:idx], state.OpenQuestions[idx+1:]...)
 		case sessions.EventPlanCrystallized:
 			var p PlanCrystallizedPayload
 			if err := json.Unmarshal(event.Payload, &p); err != nil {

@@ -107,6 +107,18 @@ func (m model) designDecisions() ([]splicerun.DecisionPinnedPayload, bool) {
 	return state.Decisions, true
 }
 
+// designOpenQuestions returns the currently-open question set reconstructed
+// from the session's open_question_raised/resolved events — the same
+// reconstructed state the resume card projects. ok is false when
+// reconstruction fails (the renderer skips, never invents).
+func (m model) designOpenQuestions() ([]splicerun.OpenQuestionPayload, bool) {
+	state, err := splicerun.ReconstructDesignState(m.sessionEvents)
+	if err != nil {
+		return nil, false
+	}
+	return state.OpenQuestions, true
+}
+
 // sidebarDecisionsLines renders the sidebar DECISIONS module (P1.4 delta,
 // frame gEVp1 S1):
 //
