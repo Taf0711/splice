@@ -78,25 +78,11 @@ func (m model) emptyStateWithOverlay(width int, overlay string) string {
 }
 
 func (m model) emptyStateLines(width int) []string {
-	lines := []string{}
-	for _, glyph := range spliceLockupLines() {
-		lines = append(lines, centerLine(glyph, width))
-	}
-	lines = append(lines, "")
-	lines = append(lines, centerLine(zeroTheme.muted.Render(emptyStateTagline), width))
-	// Orientation: where SPLICE is pointed (cwd · branch · model) so a returning user
-	// sees the context before typing instead of a blank brand screen.
-	if orient := m.emptyStateOrientation(); orient != "" {
-		lines = append(lines, "")
-		lines = append(lines, centerLine(orient, width))
-	}
-	// A couple of example prompts to seed the first message.
-	lines = append(lines, "")
-	lines = append(lines, centerLine(zeroTheme.faint.Render(emptyStateExamples), width))
-	lines = append(lines, "")
-	lines = append(lines, centerLine(zeroTheme.faint.Render("Press ? for keyboard shortcuts · / for commands"), width))
-	// centerLine pads but never truncates; below ~62 cols the lines would exceed
-	// the frame without this fit.
+	// P12 (frame kAYHl): the launch body is the information cockpit —
+	// wordmark, facts, resume card (when one exists), START, honest state —
+	// replacing the centered braid splash. Left-aligned per the frame; the
+	// cockpit reads as a column, not a poster.
+	lines := m.launchScreenLines()
 	for index := range lines {
 		lines[index] = fitStyledLine(lines[index], width)
 	}

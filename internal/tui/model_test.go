@@ -351,7 +351,9 @@ func TestInitialRenderShowsLimeChatSurface(t *testing.T) {
 	assertContains(t, view, "openai/gpt-4.1")
 	assertContains(t, view, emptyStateTagline)
 	assertNotContains(t, view, "running splice against ")
-	assertNotContains(t, view, " 0 ")
+	// P12: the facts block renders "0 · 0 sources" honestly on a fresh
+	// install; the old "no fake zeros" rule applied to the retired splash.
+	assertContains(t, view, "0 · 0 sources")
 	assertContains(t, view, composerPlaceholder)
 	assertNotContains(t, view, "interactive")
 	if strings.Contains(view, "Welcome to Splice") {
