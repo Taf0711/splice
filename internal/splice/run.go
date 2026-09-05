@@ -825,6 +825,10 @@ func runPass(
 		stageNames[i] = stage.Name
 	}
 
+	// priorScope carries the cognition context scope across stage
+	// invocations and repair re-entry within this run.
+	var priorScope *StageScopePlan
+
 	for seq, stage := range plan.Stages {
 		if ctx.Err() != nil {
 			return records, outputs, false, context.Canceled
@@ -882,22 +886,25 @@ func runPass(
 		// Single composition path shared with repair re-entry: retrieval,
 		// deterministic admission, compaction, then post-compaction trace
 		// accounting of delivered memory.
-		preparedInput, perr := prepareStageInput(ctx, stageInputPreparation{
-			Input:     input,
-			Stage:     agentStage,
-			Budget:    stage.Budget,
-			Tier:      plan.Tier,
-			Iteration: iteration,
-			WorkDir:   workDir,
-			Options:   options,
-			Memory:    mem,
-			Trace:     tr,
-			NowUnix:   time.Now().Unix(),
+		preparedInput, stageScope, scopeSup, perr := prepareStageInput(ctx, stageInputPreparation{
+			Input:      input,
+			Stage:      agentStage,
+			Budget:     stage.Budget,
+			Tier:       plan.Tier,
+			Iteration:  iteration,
+			WorkDir:    workDir,
+			Options:    options,
+			Memory:     mem,
+			Trace:      tr,
+			NowUnix:    time.Now().Unix(),
+			PriorScope: priorScope,
 		})
 		if perr != nil {
 			return records, outputs, false, perr
 		}
 		input = preparedInput
+		priorScope = &stageScope
+		_ = scopeSup
 
 		if err := input.Validate(); err != nil {
 			return records, outputs, false, fmt.Errorf("stage %s input: %w", stageName, err)
@@ -949,7 +956,7 @@ func runPass(
 		}
 
 		start := time.Now()
-		output, err := runStageWithContext(stageCtx, input, agentStage, iteration, selection, options, workDir, runner, mem, stage.Budget.OutputMax, tr)
+		output, err := runStageWithContext(stageCtx, input, agentStage, iteration, selection, options, workDir, runner, mem, stage.Budget.OutputMax, tr, priorScope)
 		if cancelStage != nil {
 			cancelStage()
 		}
@@ -1106,8 +1113,23 @@ func runStageWithContext(
 	mem MemoryStore,
 	outputMax int,
 	tr *runTraceAccumulator,
+	priorScope *StageScopePlan,
 ) (schemas.HarnessStageOutput, error) {
 	stageOpts := stageOptions(input.StageName, iteration, selection, options, workDir, runner, stage.Capabilities())
+	// Part A context bridge: fresh cognition narrows the default context
+	// request. The scoped request replaces the default ONLY when the scope
+	// resolved a question; otherwise the cold path stays byte-identical.
+	// The suppression accounting is returned so the caller's trace records
+	// host omissions, not inferences.
+	if priorScope != nil && priorScope.CognitionResolved {
+		defaultReq := stages.DefaultContextRequestFor(input.RequestIntent, workDir, detectLanguage(workDir))
+		scoped, sup := ScopedContextRequest(defaultReq, *priorScope,
+			"Cognition-resolved scope: known files and symbols from the verified cognition graph replace repository-wide discovery.")
+		stageOpts.OverrideContextRequest = &scoped
+		if tr != nil {
+			tr.recordScopeMetrics(input.StageName, iteration, sup, *priorScope)
+		}
+	}
 	if outputMax > 0 {
 		// The stage's output budget caps every LLM request this stage makes. Zero
 		// keeps the provider default (no per-request override).

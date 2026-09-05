@@ -13,7 +13,7 @@ import (
 // store with an explicit plan and returns the prepared input.
 func prepareCognition(t *testing.T, store MemoryStore, plan schemas.ExecutionPlan, stage, intent, root string, iteration int, tr *runTraceAccumulator) schemas.HarnessStageInput {
 	t.Helper()
-	prepared, err := prepareStageInput(context.Background(), stageInputPreparation{
+	prepared, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 		Input:     cognitionInput(stage, intent),
 		Stage:     &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
 		Budget:    stageBudgetByName(plan, stage),

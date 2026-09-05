@@ -65,7 +65,7 @@ func TestPrepareStageInputOneSpawnPerUniqueCommit(t *testing.T) {
 
 	plan := cognitionPlan("code_writer")
 	tr := newRunTraceAccumulator(nil, "run", "session", root, plan, "active", nil)
-	prepared, err := prepareStageInput(context.Background(), stageInputPreparation{
+	prepared, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 		Input:     cognitionInput("code_writer", "fix session invalidation in internal/auth/session.go#ResetPassword"),
 		Stage:     &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
 		Budget:    stageBudgetByName(plan, "code_writer"),
@@ -94,7 +94,7 @@ func TestPrepareStageInputOneSpawnPerUniqueCommit(t *testing.T) {
 	runner.mu.Lock()
 	runner.spawns = 0
 	runner.mu.Unlock()
-	prepared2, err := prepareStageInput(context.Background(), stageInputPreparation{
+	prepared2, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 		Input:     cognitionInput("code_writer", "fix session invalidation in internal/auth/session.go"),
 		Stage:     &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
 		Budget:    stageBudgetByName(plan, "code_writer"),
@@ -146,7 +146,7 @@ func TestPrepareStageInputMutationBumpsGeneration(t *testing.T) {
 
 	// Invocation 1: no prior mutations, memoize the fresh verdict.
 	input1 := cognitionInput("code_writer", "fix session invalidation in internal/auth/session.go")
-	if _, err := prepareStageInput(context.Background(), stageInputPreparation{
+	if _, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 		Input: input1, Stage: &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
 		Budget: stageBudgetByName(plan, "code_writer"), Tier: plan.Tier, Iteration: 1,
 		WorkDir: root, Options: PipelineConfigFromAgentOptions(agent.Options{}),
@@ -163,7 +163,7 @@ func TestPrepareStageInputMutationBumpsGeneration(t *testing.T) {
 	// Splice's control, so the memoized set must be re-proven by a spawn.
 	input2 := cognitionInput("code_writer", "fix session invalidation in internal/auth/session.go")
 	input2.PriorChangedFiles = map[string][]string{"code_writer": {"internal/auth/token.go"}}
-	if _, err := prepareStageInput(context.Background(), stageInputPreparation{
+	if _, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 		Input: input2, Stage: &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
 		Budget: stageBudgetByName(plan, "code_writer"), Tier: plan.Tier, Iteration: 2,
 		WorkDir: root, Options: PipelineConfigFromAgentOptions(agent.Options{}),
@@ -178,7 +178,7 @@ func TestPrepareStageInputMutationBumpsGeneration(t *testing.T) {
 	// The mutation record is unchanged now: memoized, zero spawns.
 	input3 := input2
 	input3.PriorChangedFiles = map[string][]string{"code_writer": {"internal/auth/token.go"}}
-	if _, err := prepareStageInput(context.Background(), stageInputPreparation{
+	if _, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 		Input: input3, Stage: &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
 		Budget: stageBudgetByName(plan, "code_writer"), Tier: plan.Tier, Iteration: 3,
 		WorkDir: root, Options: PipelineConfigFromAgentOptions(agent.Options{}),
@@ -215,7 +215,7 @@ func TestPrepareStageInputRepairReEntryMemoized(t *testing.T) {
 	// itself must carry the structural intent for this fixture.
 	plan.RequestIntent = "fix session invalidation in internal/auth/session.go"
 	writerInput := repairStageInput("run", "code_writer", plan, []string{"code_writer"}, map[string]string{}, map[string][]string{}, &revision)
-	if _, err := prepareStageInput(context.Background(), stageInputPreparation{
+	if _, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 		Input: writerInput, Stage: &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
 		Budget: stageBudgetByName(plan, "code_writer"), Tier: plan.Tier, Iteration: 1,
 		WorkDir: root, Options: PipelineConfigFromAgentOptions(agent.Options{}),
@@ -229,7 +229,7 @@ func TestPrepareStageInputRepairReEntryMemoized(t *testing.T) {
 
 	// Repair re-entry: same anchor, no mutation recorded. Zero spawns.
 	reEntry := repairStageInput("run", "code_writer", plan, []string{"code_writer"}, map[string]string{}, map[string][]string{}, &revision)
-	if _, err := prepareStageInput(context.Background(), stageInputPreparation{
+	if _, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 		Input: reEntry, Stage: &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
 		Budget: stageBudgetByName(plan, "code_writer"), Tier: plan.Tier, Iteration: 1,
 		WorkDir: root, Options: PipelineConfigFromAgentOptions(agent.Options{}),

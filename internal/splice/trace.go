@@ -352,6 +352,51 @@ func (tr *runTraceAccumulator) recordMissPathDetail(stage string, iteration int,
 	tr.stages[key] = meta
 }
 
+// recordScopeMetrics records the Part A context-bridge suppression counts
+// for one stage invocation: the deterministic counterfactual default
+// request size, what the scoped request actually executed, and the
+// operations the host structurally omitted. It also carries the scope
+// plan's privilege booleans via expansion count. Counts only.
+func (tr *runTraceAccumulator) recordScopeMetrics(stage string, iteration int, sup ScopeSuppression, scope StageScopePlan) {
+	if tr == nil {
+		return
+	}
+	key := stageKey{stage, iteration}
+	meta := tr.stages[key]
+	meta.ContextQueriesDefault = sup.ContextQueriesDefault
+	meta.ContextQueriesExecuted = sup.ContextQueriesExecuted
+	meta.ContextQueriesSuppressed = sup.ContextQueriesSuppressed
+	meta.GlobalListsSuppressed = sup.GlobalListsSuppressed
+	meta.FileReadsSuppressed = sup.FileReadsSuppressed
+	meta.SearchesSuppressed = sup.SearchesSuppressed
+	meta.ScopeExpansions = scope.ExpansionBudget
+	tr.stages[key] = meta
+}
+
+// RecordScopeMetrics records the scope-suppression metrics for one stage
+// invocation from a caller-supplied ScopeMetrics payload. It writes ONLY the
+// scope fields on InputMeta: the discovery-plan counters (and the legacy
+// DiscoveryReadsAvoided inferred-savings counter in particular) are never
+// touched here, so observed host omissions stay decoupled from resolved
+// question tallies. Counts only; no query text or paths land in the trace.
+func (tr *runTraceAccumulator) RecordScopeMetrics(stage string, iteration int, m schemas.ScopeMetrics) {
+	if tr == nil {
+		return
+	}
+	if err := m.Validate(); err != nil {
+		return
+	}
+	key := stageKey{stage, iteration}
+	meta := tr.stages[key]
+	meta.ContextQueriesDefault = m.ContextQueriesDefault
+	meta.ContextQueriesExecuted = m.ContextQueriesExecuted
+	meta.ContextQueriesSuppressed = m.ContextQueriesSuppressed
+	meta.GlobalListsSuppressed = m.GlobalListsSuppressed
+	meta.SearchesSuppressed = m.SearchesSuppressed
+	meta.ScopeExpansions = m.ScopeExpansions
+	tr.stages[key] = meta
+}
+
 // recordDiscoveryPlan records the Track C discovery-plan outcome for one
 // stage invocation: how many questions the plan saw, how many the task
 // itself answered, how many the cognition graph resolved (each counts as one
@@ -368,7 +413,9 @@ func (tr *runTraceAccumulator) recordDiscoveryPlan(stage string, iteration int, 
 	meta.DiscoveryResolvedTask = len(plan.ResolvedByTask)
 	meta.DiscoveryResolvedCog = len(plan.ResolvedByCognition)
 	meta.DiscoveryUnresolved = len(plan.Unresolved)
-	meta.DiscoveryReadsAvoided = len(plan.ResolvedByCognition)
+	// DiscoveryReadsAvoided is deliberately NOT set here: a resolved
+	// question is not a suppressed read. Actual suppression is recorded
+	// by recordScopeMetrics from the host decisions in ScopedContextRequest.
 	meta.AnchorsValidated = plan.AnchorsValidated
 	meta.AnchorsFailed = plan.AnchorsFailed
 	meta.SemanticHits = plan.SemanticHits

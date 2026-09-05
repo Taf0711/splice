@@ -91,19 +91,56 @@ type InputMeta struct {
 	FTSFallback        int `json:"fts_fallback,omitempty"`
 	ExemplarsRetrieved int `json:"exemplars_retrieved,omitempty"`
 	// Track C discovery-plan telemetry: what the cognition graph resolved
-	// for this stage invocation and what it could not. DiscoveryReadsAvoided
-	// is the conservative counter: one avoided discovery operation per
-	// question resolved by cognition (the search/read the question would
-	// otherwise have triggered). Never incremented for merely existing
-	// cognition, only for questions the plan actually resolved.
+	// for this stage invocation and what it could not. The question,
+	// resolution, and anchor tallies are observed counts.
 	DiscoveryQuestions    int `json:"discovery_questions,omitempty"`
 	DiscoveryResolvedTask int `json:"discovery_resolved_by_task,omitempty"`
 	DiscoveryResolvedCog  int `json:"discovery_resolved_by_cognition,omitempty"`
 	DiscoveryUnresolved   int `json:"discovery_unresolved,omitempty"`
+	// DiscoveryReadsAvoided is a legacy inferred-savings counter: it
+	// assumed one avoided read per question resolved by cognition. New
+	// runs must leave it zero. Real suppression is observed host behavior
+	// recorded in the scope fields below; the field stays so old traces
+	// still decode.
 	DiscoveryReadsAvoided int `json:"discovery_reads_avoided,omitempty"`
 	AnchorsValidated      int `json:"anchors_validated,omitempty"`
 	AnchorsFailed         int `json:"anchors_failed,omitempty"`
 	SemanticHits          int `json:"semantic_hits,omitempty"`
+	// Scope-suppression accounting: host decisions that actually omitted
+	// repository discovery operations versus the deterministic default
+	// context request. A *_suppressed count is an observed omission the
+	// host made, never an inference. Suppressed memory redelivery (the
+	// already-consumed filter on a bundle) is delivery dedup on the memory
+	// channel and never lands here; these fields cover the repository
+	// discovery channel only. FileReadsSuppressed is set by the Part A
+	// context bridge; the other fields are set by RecordScopeMetrics.
+	FileReadsSuppressed      int `json:"file_reads_suppressed,omitempty"`
+	ContextQueriesDefault    int `json:"context_queries_default,omitempty"`
+	ContextQueriesExecuted   int `json:"context_queries_executed,omitempty"`
+	ContextQueriesSuppressed int `json:"context_queries_suppressed,omitempty"`
+	GlobalListsSuppressed    int `json:"global_lists_suppressed,omitempty"`
+	SearchesSuppressed       int `json:"searches_suppressed,omitempty"`
+	ScopeExpansions          int `json:"scope_expansions,omitempty"`
+}
+
+// ScopeMetrics is the per-stage scope-suppression payload for
+// RecordScopeMetrics. Its fields mirror the scope fields on InputMeta.
+type ScopeMetrics struct {
+	ContextQueriesDefault    int `json:"context_queries_default,omitempty"`
+	ContextQueriesExecuted   int `json:"context_queries_executed,omitempty"`
+	ContextQueriesSuppressed int `json:"context_queries_suppressed,omitempty"`
+	GlobalListsSuppressed    int `json:"global_lists_suppressed,omitempty"`
+	SearchesSuppressed       int `json:"searches_suppressed,omitempty"`
+	ScopeExpansions          int `json:"scope_expansions,omitempty"`
+}
+
+// Validate checks the scope metrics.
+func (m ScopeMetrics) Validate() error {
+	if m.ContextQueriesDefault < 0 || m.ContextQueriesExecuted < 0 || m.ContextQueriesSuppressed < 0 ||
+		m.GlobalListsSuppressed < 0 || m.SearchesSuppressed < 0 || m.ScopeExpansions < 0 {
+		return errors.New("scope metrics counts must be non-negative")
+	}
+	return nil
 }
 
 // Validate checks the input metadata.
@@ -116,6 +153,11 @@ func (m InputMeta) Validate() error {
 	}
 	if m.KeysGenerated < 0 || m.LookupMisses < 0 || m.FTSFallback < 0 || m.ExemplarsRetrieved < 0 {
 		return errors.New("cognition miss-path counts must be non-negative")
+	}
+	if m.FileReadsSuppressed < 0 ||
+		m.ContextQueriesDefault < 0 || m.ContextQueriesExecuted < 0 || m.ContextQueriesSuppressed < 0 ||
+		m.GlobalListsSuppressed < 0 || m.SearchesSuppressed < 0 || m.ScopeExpansions < 0 {
+		return errors.New("context scope counts must be non-negative")
 	}
 	if m.DiscoveryQuestions < 0 || m.DiscoveryResolvedTask < 0 || m.DiscoveryResolvedCog < 0 ||
 		m.DiscoveryUnresolved < 0 || m.DiscoveryReadsAvoided < 0 || m.AnchorsValidated < 0 ||

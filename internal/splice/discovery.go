@@ -533,3 +533,215 @@ func shortRev(rev string) string {
 	}
 	return rev
 }
+
+// scopedReadMaxChars bounds one cognition-scoped file read. Same budget the
+// default fallback reads use, so scoped reads are never smaller than what
+// the cold path would have granted.
+const scopedReadMaxChars = 5000
+
+// StageScopePlan is the host-side bridge from admitted cognition to
+// repository context acquisition. It is deterministic, derived only from
+// freshness-validated cognition and the stage's deterministic context, and
+// it governs TWO channels: what the model knows (MemoryBundle, existing)
+// and what repository discovery the host performs (ContextRequest scoping,
+// new). A zero-value plan means "no cognition privilege": callers must fall
+// back to the ordinary default context request byte-identically.
+type StageScopePlan struct {
+	// CognitionResolved is true only when at least one question was
+	// resolved by a fresh, validated cognition node.
+	CognitionResolved bool
+	// KnownFiles are repo-relative files named by fresh file anchors,
+	// deduplicated and sorted.
+	KnownFiles []string
+	// KnownSymbols are path#Symbol names from fresh symbol anchors,
+	// deduplicated and sorted.
+	KnownSymbols []string
+	// UnresolvedQuestions carries the questions the plan could not answer;
+	// targeted discovery for these stays allowed.
+	UnresolvedQuestions []string
+	// AllowGlobalList permits a workspace-wide file listing. True only when
+	// nothing was resolved by cognition.
+	AllowGlobalList bool
+	// AllowGlobalSearch permits workspace-wide pattern search. True only
+	// when unresolved questions exist that need it; false after a full
+	// cognition resolution so redundant searches are suppressed.
+	AllowGlobalSearch bool
+	// ExpansionBudget is the remaining number of bounded scope expansions
+	// (new deterministic evidence grants one targeted lookup each).
+	ExpansionBudget int
+}
+
+// scopePlanFor derives the scope plan from a DiscoveryPlan and the fresh
+// nodes behind it. planNodes must be exactly the admitted fresh nodes
+// planDiscovery returned; anchors come from those nodes only.
+func scopePlanFor(plan DiscoveryPlan, planNodes []memd.GraphNode, priorScope *StageScopePlan) StageScopePlan {
+	scope := StageScopePlan{
+		ExpansionBudget: 2,
+	}
+	for _, q := range plan.Unresolved {
+		scope.UnresolvedQuestions = append(scope.UnresolvedQuestions, q)
+	}
+	// Repair re-entry inherits the prior scope's granted files so a
+	// re-planning stage does not lose privileges it already earned.
+	if priorScope != nil {
+		scope.KnownFiles = append(scope.KnownFiles, priorScope.KnownFiles...)
+		scope.KnownSymbols = append(scope.KnownSymbols, priorScope.KnownSymbols...)
+		if priorScope.ExpansionBudget < scope.ExpansionBudget {
+			scope.ExpansionBudget = priorScope.ExpansionBudget
+		}
+	}
+	for _, n := range planNodes {
+		if n.Status != "active" {
+			continue
+		}
+		for _, a := range n.Anchors {
+			switch a.Kind {
+			case "file":
+				if a.Value != "" {
+					scope.KnownFiles = append(scope.KnownFiles, a.Value)
+				}
+			case "symbol":
+				if a.Value != "" {
+					scope.KnownSymbols = append(scope.KnownSymbols, a.Value)
+				}
+			}
+		}
+	}
+	sort.Strings(scope.KnownFiles)
+	scope.KnownFiles = dedupeStrings(scope.KnownFiles)
+	sort.Strings(scope.KnownSymbols)
+	scope.KnownSymbols = dedupeStrings(scope.KnownSymbols)
+
+	scope.CognitionResolved = len(plan.ResolvedByCognition) > 0
+	// Privileges: cognition narrows the world. Global listing is only for
+	// runs where cognition resolved nothing. Global search stays available
+	// while unresolved questions remain, and is suppressed once every
+	// derived question was answered by cognition.
+	scope.AllowGlobalList = !scope.CognitionResolved
+	scope.AllowGlobalSearch = len(scope.UnresolvedQuestions) > 0 || !scope.CognitionResolved
+	return scope
+}
+
+// dedupeStrings preserves order while dropping adjacent duplicates; the
+// caller sorts first so the result is fully deduplicated and stable.
+func dedupeStrings(in []string) []string {
+	out := make([]string, 0, len(in))
+	seen := map[string]struct{}{}
+	for _, s := range in {
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
+// ScopedContextRequest builds the cognition-aware ContextRequest. The
+// counterfactual default request is passed in so suppression accounting can
+// compare structurally. Returns the scoped request and the counts of
+// default queries that were structurally suppressed.
+//
+// Hierarchy (directive A5):
+//  1. reads of known files (cognition contract),
+//  2. symbol outlines for known symbols,
+//  3. targeted searches ONLY for unresolved questions,
+//  4. global listing only when nothing was resolved.
+func ScopedContextRequest(defaultReq schemas.ContextRequest, scope StageScopePlan, reason string) (schemas.ContextRequest, ScopeSuppression) {
+	sup := ScopeSuppression{}
+	if !scope.CognitionResolved {
+		// Cold fallback: no cognition privilege, so the scoped request IS
+		// the default request, byte-identical, with zero suppression. This
+		// is the A5 requirement that cold behavior stays unchanged.
+		return defaultReq, sup
+	}
+	queries := make([]schemas.ContextQuery, 0, len(scope.KnownFiles)+len(scope.KnownSymbols)+len(scope.UnresolvedQuestions))
+	for _, f := range scope.KnownFiles {
+		path := f
+		queries = append(queries, schemas.ContextQuery{
+			QueryType:  schemas.ContextReadFile,
+			Path:       &path,
+			MaxResults: 10,
+			MaxChars:   scopedReadMaxChars,
+		})
+	}
+	for _, sym := range scope.KnownSymbols {
+		symbol := sym
+		queries = append(queries, schemas.ContextQuery{
+			QueryType:  schemas.ContextGetSymbol,
+			Symbol:     &symbol,
+			MaxResults: 10,
+			MaxChars:   4000,
+		})
+	}
+	for range scope.UnresolvedQuestions {
+		// One targeted search per unresolved question keeps discovery
+		// possible without reopening the workspace; the question text is
+		// prose, so the search pattern uses the intent's candidate paths
+		// already extracted by the default planner.
+		for _, dq := range defaultReq.Queries {
+			if dq.QueryType == schemas.ContextSearch {
+				clone := dq
+				queries = append(queries, clone)
+				break
+			}
+		}
+	}
+	if scope.AllowGlobalList {
+		for _, dq := range defaultReq.Queries {
+			if dq.QueryType == schemas.ContextListFiles {
+				queries = append(queries, dq)
+				break
+			}
+		}
+	} else {
+		sup.GlobalListsSuppressed = 1
+	}
+	// Suppression accounting: the default request's read queries that name
+	// files already covered by KnownFiles are structurally suppressed, and
+	// the default listing when suppressed above.
+	covered := map[string]bool{}
+	for _, f := range scope.KnownFiles {
+		covered[f] = true
+	}
+	for _, dq := range defaultReq.Queries {
+		switch dq.QueryType {
+		case schemas.ContextReadFile:
+			if dq.Path != nil && covered[*dq.Path] {
+				sup.FileReadsSuppressed++
+			} else if scope.CognitionResolved {
+				// The scoped request deliberately narrows to known files;
+				// default fallback reads for files cognition did not name
+				// are suppressed only when the plan resolved the location
+				// question. This is a structural omission, not an
+				// inferred one: the scoped request never issues them.
+				sup.FileReadsSuppressed++
+			}
+		case schemas.ContextListFiles:
+			if !scope.AllowGlobalList {
+				sup.GlobalListsSuppressed = 1
+			}
+		}
+	}
+	sup.ContextQueriesDefault = len(defaultReq.Queries)
+	sup.ContextQueriesExecuted = len(queries)
+	sup.ContextQueriesSuppressed = sup.ContextQueriesDefault - sup.ContextQueriesExecuted
+	if sup.ContextQueriesSuppressed < 0 {
+		sup.ContextQueriesSuppressed = 0
+	}
+	return schemas.ContextRequest{
+		Reason:  reason,
+		Queries: queries,
+	}, sup
+}
+
+// ScopeSuppression records the host decisions that actually omitted
+// operations versus the deterministic counterfactual default request.
+type ScopeSuppression struct {
+	ContextQueriesDefault    int
+	ContextQueriesExecuted   int
+	ContextQueriesSuppressed int
+	GlobalListsSuppressed    int
+	FileReadsSuppressed      int
+	SearchesSuppressed       int
+}

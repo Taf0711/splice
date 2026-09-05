@@ -318,9 +318,10 @@ func TestPlanDiscoverySemanticFallbackAndSuppression(t *testing.T) {
 }
 
 func TestDiscoveryPlanAccountingIsHonest(t *testing.T) {
-	// The avoided-operations counter derives ONLY from resolved questions:
-	// recordDiscoveryPlan counts len(ResolvedByCognition), never mere
-	// retrieval. Pin the arithmetic.
+	// The avoided-operations counter is retired: recordDiscoveryPlan never
+	// sets DiscoveryReadsAvoided because a resolved question is an observed
+	// resolution, not a suppressed read. Real suppression moves through
+	// RecordScopeMetrics only. Pin the decoupling.
 	plan := DiscoveryPlan{
 		ResolvedByTask:      []string{"a"},
 		ResolvedByCognition: []ResolvedQuestion{{Question: "q", NodeID: 1}, {Question: "r", NodeID: 2}},
@@ -332,9 +333,12 @@ func TestDiscoveryPlanAccountingIsHonest(t *testing.T) {
 	tr.recordDiscoveryPlan("code_writer", 1, plan)
 	meta := tr.stages[stageKey{"code_writer", 1}]
 	if meta.DiscoveryQuestions != 4 || meta.DiscoveryResolvedCog != 2 ||
-		meta.DiscoveryReadsAvoided != 2 || meta.DiscoveryUnresolved != 1 ||
+		meta.DiscoveryUnresolved != 1 ||
 		meta.AnchorsValidated != 2 || meta.AnchorsFailed != 1 {
 		t.Fatalf("discovery telemetry arithmetic wrong: %+v", meta)
+	}
+	if meta.DiscoveryReadsAvoided != 0 {
+		t.Fatalf("DiscoveryReadsAvoided must stay zero from recordDiscoveryPlan, got %d", meta.DiscoveryReadsAvoided)
 	}
 	if err := meta.Validate(); err != nil {
 		t.Fatalf("meta validate: %v", err)

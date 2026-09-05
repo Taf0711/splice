@@ -202,6 +202,10 @@ type stageInputPreparation struct {
 	Memory    MemoryStore
 	Trace     *runTraceAccumulator
 	NowUnix   int64
+	// PriorScope carries the previous invocation scope plan for repair
+	// re-entry, so already-granted files and spent expansion budget
+	// persist across the trajectory. Nil on the first pass.
+	PriorScope *StageScopePlan
 }
 
 // prepareStageInput is the single composition path for both the normal pass
@@ -218,8 +222,12 @@ type stageInputPreparation struct {
 // outcome - no key, no capability, lookup miss/error, stale, unknown, or
 // empty after admission - falls back byte-identically to the existing Search
 // path below.
-func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.HarnessStageInput, error) {
+func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.HarnessStageInput, StageScopePlan, ScopeSuppression, error) {
 	input := p.Input
+	// scope/sup are the Part A context-bridge outputs. Zero value means no
+	// cognition privilege: the caller falls back to the default request.
+	scope := StageScopePlan{}
+	sup := ScopeSuppression{}
 	caps := p.Stage.Capabilities()
 	if p.Memory != nil && caps.ConsumesMemory {
 		root := memoryProjectRoot(p.Options, p.WorkDir)
@@ -245,6 +253,11 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 		if p.Trace != nil {
 			p.Trace.recordDiscoveryPlan(input.StageName, p.Iteration, plan)
 		}
+		// Part A context bridge: admitted cognition becomes a host-side
+		// scope plan that governs context acquisition, not only model
+		// knowledge. PriorScope carries already-granted files across
+		// repair re-entry so privileges are never lost mid-trajectory.
+		scope = scopePlanFor(plan, planNodes, p.PriorScope)
 		if plan.AnchorsFailed > 0 {
 			emitProgress(p.Options, fmt.Sprintf("[%s] discovery: %d anchor(s) failed freshness validation\n",
 				input.StageName, plan.AnchorsFailed))
@@ -252,7 +265,7 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 		if len(planNodes) > 0 {
 			graphObs := cognitionBundleFromNodes(planNodes)
 			if mode, modeErr := resolveExemplarMode(); modeErr != nil {
-				return schemas.HarnessStageInput{}, modeErr
+				return schemas.HarnessStageInput{}, StageScopePlan{}, ScopeSuppression{}, modeErr
 			} else if mode.deliverToModel() {
 				if input.MemoryBundle == nil {
 					input.MemoryBundle = &schemas.MemoryBundle{RequestingAgent: input.StageName}
@@ -271,7 +284,7 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 		direct, directOK := p.tryDirectCognition(ctx, input, root)
 		if graphResolved == 0 && directOK {
 			if mode, modeErr := resolveExemplarMode(); modeErr != nil {
-				return schemas.HarnessStageInput{}, modeErr
+				return schemas.HarnessStageInput{}, StageScopePlan{}, ScopeSuppression{}, modeErr
 			} else if !mode.deliverToModel() {
 				if p.Trace != nil {
 					p.Trace.recordMemoryLookup(input.StageName, p.Iteration, "direct", direct.fresh, direct.stale)
@@ -323,7 +336,7 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 				// behavior; other modes exist for the benchmark only.
 				mode, modeErr := resolveExemplarMode()
 				if modeErr != nil {
-					return schemas.HarnessStageInput{}, modeErr
+					return schemas.HarnessStageInput{}, StageScopePlan{}, ScopeSuppression{}, modeErr
 				}
 				if mode.deliverExemplars() {
 					// PC3: append kept-run exemplars. Best-effort and silent on
@@ -378,7 +391,7 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 		emitProgress(p.Options, msg+"\n")
 	})
 	if cerr != nil {
-		return input, fmt.Errorf("stage %s: %w", input.StageName, cerr)
+		return input, StageScopePlan{}, ScopeSuppression{}, fmt.Errorf("stage %s: %w", input.StageName, cerr)
 	}
 	input = compactedInput
 
@@ -395,7 +408,7 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 	if p.Trace != nil {
 		p.Trace.markDelivered(input.StageName, input.MemoryBundle)
 	}
-	return input, nil
+	return input, scope, sup, nil
 }
 
 // directCognitionResult is the outcome of one direct fast-path attempt.

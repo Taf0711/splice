@@ -43,6 +43,13 @@ func (o StageOptions) contextRequest(intent string) *schemas.ContextRequest {
 	return nil
 }
 
+// DefaultContextRequestFor is the exported counterfactual: the default
+// context request the cold path would issue for this stage. The cognition
+// scope planner uses it for structural suppression accounting only.
+func DefaultContextRequestFor(intent, workDir, language string) schemas.ContextRequest {
+	return defaultContextRequest(intent, workDir, language)
+}
+
 func defaultContextRequest(intent string, workDir string, language string) schemas.ContextRequest {
 	queries := []schemas.ContextQuery{
 		{QueryType: schemas.ContextListFiles, MaxResults: defaultListMaxResults, MaxChars: 10000},

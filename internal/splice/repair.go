@@ -584,7 +584,7 @@ func repairSelection(options PipelineRunConfig, provider agent.Provider, stageNa
 // applies admission and compaction, and records post-compaction counts; it
 // receives the full stage budget, not only OutputMax.
 func runRepairStage(ctx context.Context, wallDeadline time.Time, input schemas.HarnessStageInput, stage stages.Stage, iteration int, selection agent.ModelSelection, options PipelineRunConfig, workDir string, runner ToolRunner, mem MemoryStore, budget schemas.StageBudget, tier schemas.PipelineTier, tr *runTraceAccumulator) (schemas.HarnessStageOutput, error) {
-	prepared, err := prepareStageInput(ctx, stageInputPreparation{
+	prepared, _, _, err := prepareStageInput(ctx, stageInputPreparation{
 		Input:     input,
 		Stage:     stage,
 		Budget:    budget,
@@ -609,7 +609,7 @@ func runRepairStage(ctx context.Context, wallDeadline time.Time, input schemas.H
 	if cancel != nil {
 		defer cancel()
 	}
-	return runStageWithContext(stageCtx, input, stage, iteration, selection, options, workDir, runner, mem, budget.OutputMax, tr)
+	return runStageWithContext(stageCtx, input, stage, iteration, selection, options, workDir, runner, mem, budget.OutputMax, tr, nil)
 }
 
 // stageBudgetByName returns the full stage budget for a named plan stage, or

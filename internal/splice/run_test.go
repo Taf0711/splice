@@ -247,7 +247,7 @@ func TestRunStageWithContextFailurePreservesBothAttemptsUsage(t *testing.T) {
 	_, err := runStageWithContext(context.Background(), schemas.HarnessStageInput{
 		RunID:     "run-context-failure",
 		StageName: "context_stage",
-	}, stage, 1, agent.ModelSelection{Provider: runFakeProvider{}}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, nil, 0, nil)
+	}, stage, 1, agent.ModelSelection{Provider: runFakeProvider{}}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, nil, 0, nil, nil)
 	if err == nil {
 		t.Fatal("runStageWithContext returned nil error")
 	}
@@ -814,7 +814,7 @@ func TestRunStageWithContextPersistsToolDegradationObservation(t *testing.T) {
 		StageName: stageName,
 	}, stage, 1, selection, PipelineConfigFromAgentOptions(agent.Options{OnAttributedUsage: func(usage agent.AttributedUsage) {
 		attributed = append(attributed, usage)
-	}}), workDir, nil, store, 0, nil)
+	}}), workDir, nil, store, 0, nil, nil)
 	if err != nil {
 		t.Fatalf("runStageWithContext: %v", err)
 	}

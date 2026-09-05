@@ -54,7 +54,7 @@ func TestPrepareStageInputTracesPostCompactionDeliveredMemory(t *testing.T) {
 		PlanTier:      plan.Tier,
 		RequestIntent: "intent",
 	}
-	prepared, err := prepareStageInput(context.Background(), stageInputPreparation{
+	prepared, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 		Input:     input,
 		Stage:     &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
 		Budget:    stageBudgetByName(plan, "code_writer"),
@@ -98,7 +98,7 @@ func TestPrepareStageInputAdmissionBeforeCompaction(t *testing.T) {
 	store := &stubStore{bundle: schemas.MemoryBundle{RequestingAgent: "code_writer", Observations: []schemas.MemoryObservation{due, invalid}}}
 
 	plan := schemas.ExecutionPlan{Tier: schemas.TierLight, RequestIntent: "i", Stages: []schemas.ExecutionStage{{Name: "code_writer"}}}
-	prepared, err := prepareStageInput(context.Background(), stageInputPreparation{
+	prepared, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 		Input:     schemas.HarnessStageInput{RunID: "r", StageName: "code_writer", PlanTier: plan.Tier, RequestIntent: "i"},
 		Stage:     &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
 		Budget:    stageBudgetByName(plan, "code_writer"),
