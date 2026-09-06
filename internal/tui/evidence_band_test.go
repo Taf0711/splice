@@ -7,6 +7,8 @@ package tui
 // evidence-only (never furniture), and built from the module registry.
 
 import (
+	"github.com/Taf0711/splice/internal/presentation"
+
 	"strings"
 	"testing"
 
@@ -35,7 +37,13 @@ func bandProbeModel() model {
 // evidence in the live View, between rules, at full transcript width. Stage
 // labels are the compact abbreviations (pipelineStageLabel: s0/cw/tr…).
 func TestEvidenceBandRendersInLiveViewDuringRun(t *testing.T) {
+	// This probe pins the ASCII-tier progress bar; the rich tier's
+	// eighth-block bar is asserted in presentation tests. The pin goes
+	// AFTER model construction: newModel sets the package var from env.
 	m := bandProbeModel()
+	saved := pipelineGlyphTier
+	pipelineGlyphTier = presentation.GlyphTierASCII
+	t.Cleanup(func() { pipelineGlyphTier = saved })
 	plain := plainRender(t, m.View())
 	// The band's pipeline module header is "PIPELINE <lifecycle> ... n/m" with
 	// the counter right-packed to the column edge (headerLineWithChip), so the

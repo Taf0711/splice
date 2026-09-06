@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"github.com/Taf0711/splice/internal/presentation"
+
 	"strings"
 	"testing"
 	"time"
@@ -21,7 +23,7 @@ func TestAskUserGateSignature(t *testing.T) {
 		states:    newAskUserStates(questions),
 		startedAt: time.Now().Add(-41 * time.Second),
 	}
-	plain := stripANSI(renderAskUserQuestionnaire(prompt, "", 100))
+	plain := stripANSI(renderAskUserQuestionnaire(prompt, "", 100, presentation.GlyphTierASCII))
 	for _, want := range []string{
 		"[?]", "NEEDS YOU", "blocked 00:41",
 		"-- no work running | no tokens burning --",
@@ -50,7 +52,7 @@ func TestAskUserGateTimer(t *testing.T) {
 		states:    newAskUserStates([]agent.AskUserQuestion{{Question: "q?"}}),
 		startedAt: time.Time{},
 	}
-	plain := stripANSI(renderAskUserQuestionnaire(prompt, "", 90))
+	plain := stripANSI(renderAskUserQuestionnaire(prompt, "", 90, presentation.GlyphTierASCII))
 	if !strings.Contains(plain, "NEEDS YOU") {
 		t.Fatalf("gate card missing NEEDS YOU:\n%s", plain)
 	}
@@ -77,7 +79,7 @@ func TestAskUserGateElevationBreaksPattern(t *testing.T) {
 		startedAt: time.Now().Add(-12 * time.Second),
 	}
 	prompt.states = newAskUserStates(prompt.request.Questions)
-	plain := stripANSI(renderAskUserQuestionnaire(prompt, "", 90))
+	plain := stripANSI(renderAskUserQuestionnaire(prompt, "", 90, presentation.GlyphTierASCII))
 	// All three elevation channels present (glyph + word + invariant).
 	for _, want := range []string{"[?]", "NEEDS YOU", "no work running", "no tokens burning"} {
 		if !strings.Contains(plain, want) {

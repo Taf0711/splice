@@ -2,6 +2,12 @@ package presentation
 
 import "strings"
 
+// noColorRequested reports whether color output is disabled. It mirrors
+// the TUI's no-color rule without importing the tui package.
+func noColorRequested(getenv func(string) string) bool {
+	return getenv("NO_COLOR") != ""
+}
+
 // GlyphTier is the terminal-safety tier for markers and progress bars
 // (v0.5 §9.1, DoD 24). Production default is ASCII: every marker is
 // exactly 3 cells wide and progress cells are single-width by
@@ -33,6 +39,37 @@ func (t GlyphTier) Validate() error {
 
 // DefaultGlyphTier is the production baseline.
 const DefaultGlyphTier = GlyphTierASCII
+
+// SelectGlyphTier resolves the runtime glyph tier: SPLICE_GLYPH_TIER
+// overrides (ascii | safe_unicode | rich_unicode); otherwise a UTF-8
+// locale upgrades to the rich tier — the Pen visual set (◉ ✓ ✗ ▲ ○ ◆) —
+// and anything else (NO_COLOR, POSIX/C locale) stays ASCII. NO_COLOR
+// always forces ASCII: when color is off, markers are the only state
+// channel and must be width-exact without font assumptions.
+func SelectGlyphTier(getenv func(string) string) GlyphTier {
+	if noColorRequested(getenv) {
+		return GlyphTierASCII
+	}
+	switch getenv("SPLICE_GLYPH_TIER") {
+	case "ascii":
+		return GlyphTierASCII
+	case "safe_unicode", "safe":
+		return GlyphTierSafeUnicode
+	case "rich_unicode", "rich":
+		return GlyphTierRichUnicode
+	}
+	// UTF-8 locale: the terminal is expected to render the contract set.
+	// The set is pinned and width-tested (P3); the rich tier matches the
+	// Pen mock. C/POSIX/unknown stays ASCII.
+	locale := getenv("LANG")
+	if locale == "" {
+		locale = getenv("LC_ALL")
+	}
+	if strings.Contains(strings.ToUpper(locale), "UTF-8") || strings.Contains(strings.ToUpper(locale), "UTF8") {
+		return GlyphTierRichUnicode
+	}
+	return GlyphTierASCII
+}
 
 // ErrUnknownGlyphTier is returned by GlyphTier.Validate for values
 // outside the closed set.
@@ -151,4 +188,46 @@ func ProgressBar(fraction float64, width int) string {
 	b.WriteString(strings.Repeat("-", width-filled))
 	b.WriteByte(']')
 	return b.String()
+}
+
+// progressBlocks renders a fraction [0,1] as a run of eighth-block glyphs
+// (▏▎▍▌▋▊▉█) of the given cell width — the Pen mock's progress language
+// ("▊▊▊▊▋  54%"). Every rune is single-cell (U+258F–U+2588), so the run is
+// width-exact; the caller gates it on the rich tier.
+func progressBlocks(fraction float64, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if fraction < 0 {
+		fraction = 0
+	}
+	if fraction > 1 {
+		fraction = 1
+	}
+	// Total eighths across the bar; whole cells are █, the remainder picks
+	// the partial block.
+	total := int(fraction*float64(width)*8 + 0.5)
+	if total > width*8 {
+		total = width * 8
+	}
+	partial := []rune{'▏', '▎', '▍', '▌', '▋', '▊', '▉'}
+	var b strings.Builder
+	full := total / 8
+	rem := total % 8
+	for i := 0; i < width; i++ {
+		switch {
+		case i < full:
+			b.WriteRune('█')
+		case i == full && rem > 0:
+			b.WriteRune(partial[rem-1])
+		default:
+			b.WriteRune(' ')
+		}
+	}
+	return b.String()
+}
+
+// RichProgressBar renders the Pen mock's eighth-block progress bar.
+func RichProgressBar(fraction float64, width int) string {
+	return progressBlocks(fraction, width)
 }

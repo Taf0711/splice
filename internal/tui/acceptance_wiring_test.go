@@ -85,7 +85,7 @@ func TestAcceptanceCancelledReceiptEndToEnd(t *testing.T) {
 	if state.Health != presentation.HealthCancelled || state.Completion == nil || state.Completion.Status != "cancelled" {
 		t.Fatalf("acceptance: cancelled projection wrong: health=%q completion=%+v", state.Health, state.Completion)
 	}
-	plain := stripANSI(renderReceiptCard(cancelledReceiptCard("", state.Completion.Staged, ""), 80))
+	plain := stripANSI(renderReceiptCard(cancelledReceiptCard("", state.Completion.Staged, ""), 80, presentation.GlyphTierASCII))
 	if !strings.Contains(plain, "CANCELLED") || !strings.Contains(plain, "[R] resume") {
 		t.Fatalf("acceptance: cancelled receipt not renderable with actions:\n%s", plain)
 	}
@@ -179,7 +179,7 @@ func TestAcceptanceFailFailurePreservesReason(t *testing.T) {
 			continue
 		}
 		if card, ok := parseReceiptTranscriptPayload(row.text); ok && card.kind == receiptFailed {
-			rendered := stripANSI(renderReceiptCard(card, 80))
+			rendered := stripANSI(renderReceiptCard(card, 80, presentation.GlyphTierASCII))
 			if !strings.Contains(rendered, "provider disconnected mid-critique") {
 				t.Fatalf("acceptance: failure reason truncated in receipt:\n%s", rendered)
 			}
@@ -247,7 +247,7 @@ func TestAcceptanceGateSignatureViaUpdate(t *testing.T) {
 	if next.pendingAskUser == nil || next.pendingAskUser.startedAt.IsZero() {
 		t.Fatal("acceptance: gate did not open with a start time")
 	}
-	rendered := stripANSI(renderAskUserQuestionnaire(*next.pendingAskUser, "", 90))
+	rendered := stripANSI(renderAskUserQuestionnaire(*next.pendingAskUser, "", 90, presentation.GlyphTierASCII))
 	for _, want := range []string{"[?]", "NEEDS YOU", "no work running | no tokens burning", "Buffer streamed bodies?"} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("acceptance: gate card missing %q:\n%s", want, rendered)

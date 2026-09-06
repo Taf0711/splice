@@ -634,6 +634,12 @@ func pipelineStageGlyphAndStyle(status pipelineStageStatus, phase int) (string, 
 // construction — DoD 24); this wrapper adds the theme styling and the
 // right-aligned percent, which keeps one stable display width from 0% to
 // 100%.
+// pipelineGlyphTier is the process-wide tier (set at newModel from the
+// env-derived selection). The pipeline panel renders through value types
+// without a model receiver, so the tier rides a package var — it is stable
+// per process by construction.
+var pipelineGlyphTier = presentation.GlyphTierASCII
+
 func renderPipelineProgressBar(progress, width int) string {
 	barWidth := width - 8
 	if barWidth > 16 {
@@ -644,6 +650,11 @@ func renderPipelineProgressBar(progress, width int) string {
 	}
 	bar := presentation.ProgressBar(float64(progress)/100, barWidth)
 	body := zeroTheme.amber.Render(strings.ReplaceAll(bar, "-", "─"))
+	if pipelineGlyphTier == presentation.GlyphTierRichUnicode {
+		// The Pen mock's progress language: eighth-block runs, single-cell
+		// exact (▏▎▍▌▋▊▉█).
+		body = zeroTheme.amber.Render(presentation.RichProgressBar(float64(progress)/100, barWidth))
+	}
 	// Right-aligned percent: 0% -> 100% keeps one stable display width.
 	return body + " " + zeroTheme.faint.Render(fmt.Sprintf("%3d%%", progress))
 }

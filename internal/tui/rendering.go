@@ -280,7 +280,7 @@ func (m model) renderRowModeUncached(row transcriptRow, width int, rc rowContext
 		return renderSystemNote(row.text, width)
 	case rowError:
 		if card, ok := parseReceiptTranscriptPayload(row.text); ok {
-			return renderReceiptCard(card, width)
+			return renderReceiptCard(card, width, m.glyphTier)
 		}
 		return renderErrorRow(row, width)
 	case rowToolCall:
@@ -1316,7 +1316,7 @@ func formatGateWait(d time.Duration) string {
 	return fmt.Sprintf("%02d:%02d", seconds/60, seconds%60)
 }
 
-func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width int) string {
+func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width int, tier presentation.GlyphTier) string {
 	questions := prompt.request.Questions
 	if len(questions) == 0 {
 		return styledBlockFill(width, []string{zeroTheme.badge.Render(" ASK ")}, zeroTheme.lineStrong, lipgloss.NewStyle())
@@ -1326,7 +1326,7 @@ func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width
 	// signature — [?] NEEDS YOU header with the wait timer — and the
 	// hard-gate invariant footer: no work running, no tokens burning
 	// while the gate waits.
-	marker := presentation.BlockedMarker(presentation.GlyphTierASCII)
+	marker := presentation.BlockedMarker(tier)
 	waitLabel := marker.Word
 	if !prompt.startedAt.IsZero() {
 		waitLabel += "  blocked " + formatGateWait(time.Since(prompt.startedAt))

@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"github.com/Taf0711/splice/internal/presentation"
+
 	"context"
 	"strings"
 	"testing"
@@ -47,7 +49,7 @@ func TestReceiptCardsRenderActionRow(t *testing.T) {
 	}
 	for _, tc := range cards {
 		t.Run(tc.name, func(t *testing.T) {
-			plain := stripANSI(renderReceiptCard(tc.card, 100))
+			plain := stripANSI(renderReceiptCard(tc.card, 100, presentation.GlyphTierASCII))
 			for _, want := range tc.contains {
 				if !strings.Contains(plain, want) {
 					t.Fatalf("card missing %q:\n%s", want, plain)
@@ -60,7 +62,7 @@ func TestReceiptCardsRenderActionRow(t *testing.T) {
 // TestCancelledReceiptIsNotFailure pins the receipts contract: cancelled
 // keeps its own title/gutter/actions and never reuses failure language.
 func TestCancelledReceiptIsNotFailure(t *testing.T) {
-	plain := stripANSI(renderReceiptCard(cancelledReceiptCard("code_writer", 3, "0m48s"), 100))
+	plain := stripANSI(renderReceiptCard(cancelledReceiptCard("code_writer", 3, "0m48s"), 100, presentation.GlyphTierASCII))
 	if strings.Contains(plain, "FAILED") {
 		t.Fatalf("cancelled card leaked failure language:\n%s", plain)
 	}
@@ -91,7 +93,7 @@ func TestReceiptActionsDropWhole(t *testing.T) {
 func TestFailedReceiptKeepsFullReason(t *testing.T) {
 	reason := "stream error: provider stream disconnected mid-critique after 2 of 5 findings were written to the plan draft"
 	card := failedReceiptCard("critique", reason, "", "2.1s")
-	plain := stripANSI(renderReceiptCard(card, 60))
+	plain := stripANSI(renderReceiptCard(card, 60, presentation.GlyphTierASCII))
 	if !strings.Contains(plain, "provider stream disconnected") {
 		t.Fatalf("failure reason lost under width:\n%s", plain)
 	}
@@ -149,7 +151,7 @@ func TestCancelErrorProjectsCancelledReceipt(t *testing.T) {
 	if card.kind != receiptCancelled {
 		t.Fatalf("canceled error projected %q, want cancelled", card.kind)
 	}
-	plain := stripANSI(renderReceiptCard(card, 80))
+	plain := stripANSI(renderReceiptCard(card, 80, presentation.GlyphTierASCII))
 	if strings.Contains(plain, "FAILED") {
 		t.Fatalf("cancel projected failure language:\n%s", plain)
 	}

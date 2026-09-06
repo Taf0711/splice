@@ -106,7 +106,7 @@ func (m model) renderDetailEvidence(state presentation.State, width int) []strin
 	}
 	lines := []string{zeroTheme.amber.Bold(true).Render("EVIDENCE")}
 	for _, group := range state.Evidence {
-		glyph := presentation.StatusMarker(evidenceStatusToNode(group.Status), presentation.GlyphTierASCII).Glyph
+		glyph := presentation.StatusMarker(evidenceStatusToNode(group.Status), m.glyphTier).Glyph
 		head := fmt.Sprintf("  %s %s", glyph, group.Label)
 		counts := fmt.Sprintf("%d pass · %d fail · %d inc · %.1fs", group.Passed, group.Failed, group.Incomplete, group.Duration)
 		lines = append(lines, head+"  "+zeroTheme.faint.Render(counts))
@@ -133,9 +133,9 @@ func (m model) renderDetailInterventions(state presentation.State, width int) []
 	}
 	lines := []string{zeroTheme.amber.Bold(true).Render("INTERVENTIONS")}
 	for _, iv := range state.Interventions {
-		marker := presentation.StatusMarker(presentation.NodeStatusDegraded, presentation.GlyphTierASCII).Glyph
+		marker := presentation.StatusMarker(presentation.NodeStatusDegraded, m.glyphTier).Glyph
 		if iv.Status == presentation.InterventionApplied {
-			marker = presentation.StatusMarker(presentation.NodeStatusComplete, presentation.GlyphTierASCII).Glyph
+			marker = presentation.StatusMarker(presentation.NodeStatusComplete, m.glyphTier).Glyph
 		}
 		head := fmt.Sprintf("  %s %s → %s", marker, iv.Kind, iv.TargetNodeID)
 		if iv.Status == presentation.InterventionProposed {

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -41,7 +42,8 @@ func planCardTranscriptText(plan schemas.DesignPlan, critique schemas.PlanCritiq
 // critiqueCardTranscriptText renders the typed critique card body tagged for
 // the system-row path. Emitted only when required issues block approval.
 func critiqueCardTranscriptText(plan schemas.DesignPlan, critique schemas.PlanCritique) string {
-	return critiqueCardMarker + strings.Join(critiqueCardBody(plan, critique, 100), "\n")
+	tier := presentation.SelectGlyphTier(os.Getenv)
+	return critiqueCardMarker + strings.Join(critiqueCardBody(plan, critique, 100, tier), "\n")
 }
 
 // decisionsCardTranscriptText renders the pinned-decisions ledger card body
@@ -300,13 +302,19 @@ func critiqueSeverityClass(severity schemas.Severity) string {
 // renderCritiqueCard renders the typed critique card (§7.4, P4 E4):
 // the critique body inside exactly one border.
 func renderCritiqueCard(plan schemas.DesignPlan, critique schemas.PlanCritique, width int) string {
+	return renderCritiqueCardTiered(plan, critique, width, presentation.SelectGlyphTier(os.Getenv))
+}
+
+// renderCritiqueCardTiered is renderCritiqueCard with the tier explicit for
+// callers that hold a model (the tier is stable per process).
+func renderCritiqueCardTiered(plan schemas.DesignPlan, critique schemas.PlanCritique, width int, tier presentation.GlyphTier) string {
 	if width <= 0 {
 		return ""
 	}
 	if critiqueHasRequired(critique) {
-		return styledBlock(width, critiqueCardBody(plan, critique, width), zeroTheme.cardErr)
+		return styledBlock(width, critiqueCardBody(plan, critique, width, tier), zeroTheme.cardErr)
 	}
-	return styledBlock(width, critiqueCardBody(plan, critique, width), zeroTheme.cardRun)
+	return styledBlock(width, critiqueCardBody(plan, critique, width, tier), zeroTheme.cardRun)
 }
 
 // critiqueHasRequired reports whether the critique carries must-fix issues.
@@ -321,7 +329,7 @@ func critiqueHasRequired(critique schemas.PlanCritique) bool {
 
 // critiqueCardBody renders the critique card content WITHOUT a border —
 // the border belongs to the render path (one border, at the live width).
-func critiqueCardBody(plan schemas.DesignPlan, critique schemas.PlanCritique, width int) []string {
+func critiqueCardBody(plan schemas.DesignPlan, critique schemas.PlanCritique, width int, tier presentation.GlyphTier) []string {
 	if width <= 0 {
 		return nil
 	}
@@ -352,7 +360,7 @@ func critiqueCardBody(plan schemas.DesignPlan, critique schemas.PlanCritique, wi
 	lines = append(lines, "")
 
 	for _, c := range critique.Critiques {
-		lines = append(lines, critiqueFindingLines(c, bodyBudget)...)
+		lines = append(lines, critiqueFindingLines(c, bodyBudget, tier)...)
 	}
 	// Verdict line: the approval gate is runtime truth (DoD 8), not style.
 	if required > 0 {
@@ -373,14 +381,14 @@ func critiqueCardBody(plan schemas.DesignPlan, critique schemas.PlanCritique, wi
 
 // critiqueFindingLines renders one critique finding: severity-marked header,
 // the issue text, and the optional fix — border-free body lines.
-func critiqueFindingLines(c schemas.Critique, bodyBudget int) []string {
+func critiqueFindingLines(c schemas.Critique, bodyBudget int, tier presentation.GlyphTier) []string {
 	class := critiqueSeverityClass(c.Severity)
 	var glyph, markerStyle string
 	if class == "REQUIRED" {
-		glyph = presentation.StatusMarker(presentation.NodeStatusFailed, presentation.GlyphTierASCII).Glyph
+		glyph = presentation.StatusMarker(presentation.NodeStatusFailed, tier).Glyph
 		markerStyle = "REQUIRED"
 	} else {
-		glyph = presentation.StatusMarker(presentation.NodeStatusDegraded, presentation.GlyphTierASCII).Glyph
+		glyph = presentation.StatusMarker(presentation.NodeStatusDegraded, tier).Glyph
 		markerStyle = "ADVISORY"
 	}
 	head := glyph + " " + markerStyle + "  " + c.Category
@@ -451,7 +459,7 @@ func implementationPlanCardBody(plan schemas.DesignPlan, critiqueClean bool, wid
 // renderCrystallizingCard renders the in-progress card (§7.2, P4 E2):
 // the five stage markers plus the mandatory "not a contract yet" line.
 // Approval is unavailable in this state (DoD 7).
-func renderCrystallizingCard(settled, scope bool, drafting bool, taskCount int, width int) string {
+func renderCrystallizingCard(settled, scope bool, drafting bool, taskCount int, width int, tier presentation.GlyphTier) string {
 	if width <= 0 {
 		return ""
 	}
@@ -461,13 +469,13 @@ func renderCrystallizingCard(settled, scope bool, drafting bool, taskCount int, 
 	}
 	marker := func(done bool) string {
 		if done {
-			return presentation.StatusMarker(presentation.NodeStatusComplete, presentation.GlyphTierASCII).Glyph
+			return presentation.StatusMarker(presentation.NodeStatusComplete, tier).Glyph
 		}
-		return presentation.StatusMarker(presentation.NodeStatusPending, presentation.GlyphTierASCII).Glyph
+		return presentation.StatusMarker(presentation.NodeStatusPending, tier).Glyph
 	}
 	draftMark := marker(false)
 	if drafting {
-		draftMark = presentation.StatusMarker(presentation.NodeStatusRunning, presentation.GlyphTierASCII).Glyph
+		draftMark = presentation.StatusMarker(presentation.NodeStatusRunning, tier).Glyph
 	}
 	lines := []string{
 		zeroTheme.amber.Bold(true).Render("CRYSTALLIZING"),

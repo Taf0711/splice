@@ -1109,13 +1109,12 @@ func newModel(ctx context.Context, options Options) model {
 	// sends a turn in design mode; that keeps construction-time model creation
 	// free of side effects while still making the default phase planning-first.
 	m.designMode = true
-	// Glyph tier selection: ASCII is the default (DoD 24). NO_COLOR forces
-	// ASCII as well — when color is off, markers are the only state channel,
-	// so they must be width-exact everywhere.
-	m.glyphTier = presentation.DefaultGlyphTier
-	if noColorRequested(os.Getenv) {
-		m.glyphTier = presentation.GlyphTierASCII
-	}
+	// Glyph tier selection: SPLICE_GLYPH_TIER overrides; a UTF-8 locale
+	// upgrades to the Pen rich set (◉ ✓ ✗ ▲ ○ ◆); NO_COLOR forces ASCII —
+	// when color is off, markers are the only state channel, so they must
+	// be width-exact everywhere.
+	m.glyphTier = presentation.SelectGlyphTier(os.Getenv)
+	pipelineGlyphTier = m.glyphTier
 	return m
 }
 
@@ -3383,7 +3382,7 @@ func (m model) footerView(width int) string {
 	// text box becomes the questionnaire): render the tabbed prompt + status line and
 	// skip the plan panel / idle hints / composer for a focused modal.
 	if m.pendingAskUser != nil {
-		footer.WriteString(renderAskUserQuestionnaire(*m.pendingAskUser, m.input.Value(), width))
+		footer.WriteString(renderAskUserQuestionnaire(*m.pendingAskUser, m.input.Value(), width, m.glyphTier))
 		footer.WriteString("\n")
 		footer.WriteString(m.statusLine(width))
 		return footer.String()

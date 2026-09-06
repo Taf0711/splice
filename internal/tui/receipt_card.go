@@ -149,7 +149,7 @@ type receiptCard struct {
 // renderReceiptCard renders the card at the given width. The gutter is the
 // 3-cell ASCII marker (tier contract); the border color matches the
 // outcome. Body lines wrap instead of clipping.
-func renderReceiptCard(card receiptCard, width int) string {
+func renderReceiptCard(card receiptCard, width int, tier presentation.GlyphTier) string {
 	if width <= 0 {
 		return ""
 	}
@@ -158,12 +158,12 @@ func renderReceiptCard(card receiptCard, width int) string {
 	var titleStyle lipgloss.Style
 	switch card.kind {
 	case receiptVerified:
-		marker := presentation.StatusMarker(presentation.NodeStatusComplete, presentation.GlyphTierASCII)
+		marker := presentation.StatusMarker(presentation.NodeStatusComplete, tier)
 		gutter, border, titleStyle = marker.Glyph, zeroTheme.cardRun, zeroTheme.green
 	case receiptCancelled:
 		gutter, border, titleStyle = "[?]", zeroTheme.cardRun, zeroTheme.amber
 	default:
-		marker := presentation.StatusMarker(presentation.NodeStatusFailed, presentation.GlyphTierASCII)
+		marker := presentation.StatusMarker(presentation.NodeStatusFailed, tier)
 		gutter, border, titleStyle = marker.Glyph, zeroTheme.cardErr, zeroTheme.red
 	}
 

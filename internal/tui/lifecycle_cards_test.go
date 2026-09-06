@@ -37,7 +37,7 @@ func testCritiqueBlocking() schemas.PlanCritique {
 // their REQUIRED/ADVISORY class, category, issue, and fix; required issues
 // block approval and the card says so with fold/revise actions.
 func TestCritiqueCardRendersTypedFindings(t *testing.T) {
-	card := renderCritiqueCard(testPlan(), testCritiqueBlocking(), 90)
+	card := renderCritiqueCardTiered(testPlan(), testCritiqueBlocking(), 90, presentation.GlyphTierASCII)
 	plain := stripANSI(card)
 	for _, want := range []string{
 		"CRITIQUE", "1 required · 1 advisory",
@@ -56,7 +56,7 @@ func TestCritiqueCardRendersTypedFindings(t *testing.T) {
 // no blocking language, approval + revise offered.
 func TestCritiqueCardCleanPinsApprovalReady(t *testing.T) {
 	clean := schemas.PlanCritique{}
-	plain := stripANSI(renderCritiqueCard(testPlan(), clean, 90))
+	plain := stripANSI(renderCritiqueCardTiered(testPlan(), clean, 90, presentation.GlyphTierASCII))
 	if strings.Contains(plain, "BLOCKED") {
 		t.Fatalf("clean critique shows BLOCKED:\n%s", plain)
 	}
@@ -85,7 +85,7 @@ func TestPlanCardRendersTasksAndChecks(t *testing.T) {
 // crystallizing card always states "not a contract yet" and carries no
 // approve affordance.
 func TestCrystallizingCardNeverOffersApproval(t *testing.T) {
-	plain := stripANSI(renderCrystallizingCard(true, true, true, 3, 90))
+	plain := stripANSI(renderCrystallizingCard(true, true, true, 3, 90, presentation.GlyphTierASCII))
 	if !strings.Contains(plain, "not a contract yet") {
 		t.Fatalf("crystallizing card missing the not-a-contract line:\n%s", plain)
 	}

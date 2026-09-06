@@ -10,6 +10,8 @@ package tui
 // message path; stale error results never poison a live lane.
 
 import (
+	"github.com/Taf0711/splice/internal/presentation"
+
 	"context"
 	"errors"
 	"strings"
@@ -199,7 +201,7 @@ func TestVerifyCancelledAndFailedStayDistinct(t *testing.T) {
 		out := map[string]string{}
 		for _, row := range rows {
 			if card, ok := parseReceiptTranscriptPayload(row.text); ok {
-				out[string(card.kind)] = stripANSI(renderReceiptCard(card, 90))
+				out[string(card.kind)] = stripANSI(renderReceiptCard(card, 90, presentation.GlyphTierASCII))
 			}
 		}
 		return out

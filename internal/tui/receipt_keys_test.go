@@ -388,7 +388,7 @@ func TestCancelledReceiptStatesWorktreeTruth(t *testing.T) {
 	wt := &worktrees.Result{Name: "wt-cancelled", Path: "/nonexistent/wt-cancelled", RepoRoot: "/nonexistent"}
 	updated, _ := m.Update(planExecutionResultMsg{runID: 11, err: context.Canceled, worktree: wt})
 	next := updated.(model)
-	plain := stripANSI(renderReceiptCard(cancelledReceiptForWorktree(wt), 100))
+	plain := stripANSI(renderReceiptCard(cancelledReceiptForWorktree(wt), 100, presentation.GlyphTierASCII))
 	for _, want := range []string{
 		"stopped by you",
 		"work preserved in worktree wt-cancelled",
@@ -420,7 +420,7 @@ func TestCancelledReceiptStatesWorktreeTruth(t *testing.T) {
 	shared.activeRunID = 12
 	updated, _ = shared.Update(planExecutionResultMsg{runID: 12, err: context.Canceled})
 	nextShared := updated.(model)
-	sharedPlain := stripANSI(renderReceiptCard(cancelledReceiptForWorktree(nil), 100))
+	sharedPlain := stripANSI(renderReceiptCard(cancelledReceiptForWorktree(nil), 100, presentation.GlyphTierASCII))
 	for _, want := range []string{"stopped by you", "shared workspace", "edits may already be on disk"} {
 		if !strings.Contains(sharedPlain, want) {
 			t.Fatalf("cancelled receipt (shared) missing %q:\n%s", want, sharedPlain)
