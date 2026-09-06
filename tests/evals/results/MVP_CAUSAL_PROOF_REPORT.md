@@ -219,3 +219,55 @@ correctness on the harder family requires a model tier that can execute
 the target task at all - the same conclusion the small-fixture round
 reached for mvp-01. The next lever is model tier, not cognition
 architecture.
+
+## Addendum 3: code-review response implementation (2026-09-05)
+
+The external code review identified concrete defects in the eval harness
+and the context-selection rules. All implementable items are landed
+(commits 83ee1ac..01552b0):
+
+1. Attempt artifacts (SPLICE_MVP_DEBUG=1): per attempt the harness
+   preserves the exec transcript, the external verifier output WITH its
+   exit code, the final patch (captured before probe injection), and the
+   tree hash. The artifact path also parses the exit marker so the
+   success decision can never flip a failing verifier to passing.
+2. Explicit task identity: familyPairRow.task (A|B); summarizeMvp
+   selects target rows on the field, reports failed precursors as setup
+   failures separately from target analysis.
+3. Matched-snapshot mode (--matched-snapshots): Task A once per family,
+   verified, tree frozen; both arms materialize from the same commit with
+   a tree-hash assertion before Task B; cognition naturally reconstructed
+   from the verified tree (no hand-authoring) and re-seeded per warm
+   attempt; per-attempt project-state reset.
+4. Resolution authority separated from candidate freshness:
+   DiscoveryPlan.SemanticResolved; semantic candidates prioritize context
+   (prepended reads, zero suppression claimed) but never authorize scope
+   narrowing. Only exact-anchor resolutions do. The billing-on-audit
+   distraction case is pinned by three tests.
+5. Source-qualified delivery identity: graph:<id> vs observation:<id>
+   (the unqualified identity let the replay guard cross-suppress).
+   Content-version digesting deferred with rationale.
+6. Repair scope continuity: priorScope threads into repair;
+   partial scope keeps default reads for unresolved questions.
+7. Capture-set scoped reanchor: POST /graph/capture_set +
+   /graph/reanchor_ids; only the verified run's captured nodes advance;
+   mismatches fail loud with the offending id.
+8. Suppression accounting corrected: retained default reads are no
+   longer counted as suppressed (planned - retained = omitted).
+9. Repair replay semantics: each repair builds a fresh provider request,
+   so the run-local replay suppression is skipped for repair re-entry -
+   still-relevant facts are re-delivered, bounded by admission and
+   compaction. Pinned by TestReplayGuard_RepairReentryRedelivers and the
+   provider-seam wiring test.
+10. Scope ablation knob: SPLICE_SCOPE_MODE=off keeps the model input and
+    host context operations byte-identical to cold while retrieval still
+    runs and is recorded - the retrieval-only arm of the treatment
+    matrix, which retrieve-no-prompt alone could not provide because
+    scope construction changes context acquisition separately.
+
+Known limitations recorded, not fixed: content-version digesting
+(delivery reconciliation follow-up); ScopeExpansions records remaining
+budget rather than performed expansions; the retention-deficit prompt/
+verifier contract ambiguity is fixed by pinning the API shape in the
+prompt ( RetentionDeficit(trail *Trail, maxAge time.Duration,
+maxCount int) int ).
