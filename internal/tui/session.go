@@ -514,10 +514,11 @@ func (m model) openTrustPromptIfRequired() model {
 }
 
 // openLaunchSessionPicker arms the async session scan for a fresh
-// interactive TUI (F1, §14: no store I/O on the UI loop). The picker opens
-// when the sessionsScannedMsg lands (see applySessionsScanned); while the
-// scan runs the launch screen renders without it — honest absence, never a
-// frozen frame.
+// interactive TUI (F1, §14: no store I/O on the UI loop). The scan feeds
+// the launch resume card; the RESUME PICKER no longer auto-opens on launch
+// — a modal popping open over a user who already started typing swallows
+// their input and reads as a dead screen (owner report 2026-09-06). The
+// resume affordances are the LAST SESSION card and /resume.
 func (m model) openLaunchSessionPicker() (model, tea.Cmd) {
 	if m.setup.visible || m.activeSession.SessionID != "" || os.Getenv("SPLICE_NO_RESUME_PROMPT") == "1" {
 		return m, nil
@@ -647,9 +648,13 @@ func (m model) openSessionPicker() (model, bool) {
 		return m, false
 	}
 	if m.sessionScanInFlight {
+		// A scan is already running: mark its landing as resume-wanted so
+		// the picker arms when it lands.
+		m.resumePickerWanted = true
 		return m, true
 	}
 	next, cmd := startSessionScan(m, "Resume a session")
+	next.resumePickerWanted = true
 	resumeScanCmd = cmd
 	return next, cmd != nil
 }

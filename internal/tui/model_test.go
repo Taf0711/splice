@@ -1073,16 +1073,7 @@ func TestResumePickerSelectionHydratesSession(t *testing.T) {
 	}
 
 	m := newModel(context.Background(), Options{SessionStore: store})
-	m.input.SetValue("/resume")
-	updated, cmd := m.Update(testKey(tea.KeyEnter))
-	m = updated.(model)
-	// Land the async scan before asserting the picker is up.
-	if cmd != nil {
-		if msg := cmd(); msg != nil {
-			updated, _ = m.Update(msg)
-			m = updated.(model)
-		}
-	}
+	m = openResumePicker(t, m)
 	if m.picker == nil || m.picker.kind != pickerSession {
 		t.Fatalf("expected the session picker to open, got %#v", m.picker)
 	}

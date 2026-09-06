@@ -67,6 +67,7 @@ func startSessionScan(m model, title string) (model, tea.Cmd) {
 		return m, nil
 	}
 	m.sessionScanInFlight = true
+	m.scanStartKeySeq = m.keySeq
 	store := m.sessionStore
 	cwd := m.cwd
 	return m, func() tea.Msg { return scanSessions(store, cwd, title) }
@@ -169,15 +170,18 @@ func realScanSessions(store SessionLister, cwd string, title string) tea.Msg {
 	return sessionsScannedMsg{Picker: picker, Latest: latest}
 }
 
-// applySessionsScanned arms the picker and/or the launch resume card from
-// the async result. Focus safety: the picker only arms when no other picker
-// is open and the composer is empty (a scan landing mid-typing never steals
-// input). The launch card data arms regardless — it is a passive surface.
+// applySessionsScanned arms the launch card from the async scan result.
+// The picker arms ONLY on an explicit /resume (resumePickerWanted, set by
+// openSessionPicker): the launch never auto-opens a modal over a user who
+// may already be typing — that swallowed their input and read as a dead
+// screen (owner report 2026-09-06).
 func applySessionsScanned(m model, msg sessionsScannedMsg) model {
 	m.sessionScanInFlight = false
 	m.scannedLatest = msg.Latest
-	if msg.Picker != nil && m.picker == nil && m.composerValue() == "" && !m.pending {
+	if msg.Picker != nil && m.resumePickerWanted && m.picker == nil &&
+		m.composerValue() == "" && !m.pending {
 		m.picker = msg.Picker
 	}
+	m.resumePickerWanted = false
 	return m
 }

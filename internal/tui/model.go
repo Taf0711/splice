@@ -574,6 +574,16 @@ type model struct {
 	// no store I/O on the UI loop) is running, so a second /resume or
 	// launch pass never spawns a duplicate scan.
 	sessionScanInFlight bool
+	// keySeq counts processed key presses. The session scan stamps its
+	// start seq; the landing picker arms only if the user has pressed
+	// nothing since — a scan landing after the user started typing never
+	// steals the composer (the typed runes may still be in flight when the
+	// msg processes, so an empty-composer check alone is not enough).
+	keySeq          uint64
+	scanStartKeySeq uint64
+	// resumePickerWanted marks a scan started by an explicit /resume: its
+	// landing arms the picker. Launch scans never do (no auto-open modals).
+	resumePickerWanted bool
 	// scannedLatest holds the newest qualifying workspace session from the
 	// last scan — the launch resume card's data source. Nil until a scan
 	// lands or when nothing qualified (honest absence).
@@ -1517,6 +1527,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.PasteMsg:
 		return m.routePaste(msg.Content)
 	case tea.KeyPressMsg:
+		m.keySeq++
 		if m.trustPromptRequired && m.picker != nil && m.picker.kind == pickerTrust {
 			if keyCtrl(msg, 'c') || keyIs(msg, tea.KeyEsc) {
 				return m, nil

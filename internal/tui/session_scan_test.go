@@ -15,7 +15,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Taf0711/splice/internal/sessions"
-	splicerun "github.com/Taf0711/splice/internal/splice"
 )
 
 // blockingStore wraps a Store whose ListResumable blocks long enough that a
@@ -114,11 +113,18 @@ func TestSessionScanLandingDoesNotStealComposer(t *testing.T) {
 	if next.sessionScanInFlight {
 		t.Fatal("scan: pending flag not cleared on landing")
 	}
-	// An empty composer arms the picker.
+	// Even on an empty composer the picker must not auto-arm.
 	empty := launchTestModel(t)
 	armed := applySessionsScanned(empty, msg)
+	if armed.picker != nil {
+		t.Fatal("scan: picker auto-armed from the scan (must open only via /resume)")
+	}
+	// An explicit /resume intent (resumePickerWanted) DOES arm it.
+	resume := launchTestModel(t)
+	resume.resumePickerWanted = true
+	armed = applySessionsScanned(resume, msg)
 	if armed.picker == nil {
-		t.Fatal("scan: picker did not arm on an empty composer")
+		t.Fatal("scan: /resume-intent picker did not arm")
 	}
 }
 
@@ -151,5 +157,53 @@ func TestResumeScanEndToEnd(t *testing.T) {
 	if !strings.Contains(armed.picker.items[0].Label, "old chat") {
 		t.Fatalf("resume: picker row lost the title: %#v", armed.picker.items[0])
 	}
-	_ = splicerun.DesignState{} // keep the import anchored for future state asserts
+}
+
+// The exact black-screen scenario: the user starts typing while the scan is
+// in flight. The landing picker must NOT arm over the in-flight typing (the
+// typed runes may not have reached the composer yet when the msg processes)
+// — otherwise every keystroke after lands in the picker's query and the
+// body swaps to the picker, looking like a dead screen.
+func TestSessionScanLandingDuringTypingDoesNotArmPicker(t *testing.T) {
+	store := testSessionStore(t)
+	created, err := store.Create(sessions.CreateInput{Title: "chat", Cwd: "/tmp/scan-race"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendEvent(created.SessionID, sessions.AppendEventInput{
+		Type:    sessions.EventMessage,
+		Payload: map[string]any{"role": "assistant", "content": "answer"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(context.Background(), Options{Cwd: "/tmp/scan-race", SessionStore: store})
+	m.width, m.height, m.altScreen = 360, 46, true
+	scanModel, cmd := startSessionScan(m, "Continue where you left off")
+	// The user types while the scan runs: keys processed BEFORE the msg.
+	typed, _ := scanModel.Update(reviewRealPlainKey('h'))
+	typedModel := typed.(model)
+	if typedModel.keySeq == scanModel.scanStartKeySeq {
+		t.Fatal("fixture: key seq did not advance on a keypress")
+	}
+	// The scan lands.
+	updated, _ := typedModel.Update(cmd())
+	landed := updated.(model)
+	if landed.picker != nil {
+		t.Fatal("scan: picker armed over in-flight typing")
+	}
+	if landed.sessionScanInFlight {
+		t.Fatal("scan: pending flag not cleared")
+	}
+	if landed.scannedLatest == nil {
+		t.Fatal("scan: launch card data not armed")
+	}
+	// And the user's next keystrokes reach the COMPOSER, not a picker query.
+	updated, _ = landed.Update(reviewRealPlainKey('i'))
+	final := updated.(model)
+	if final.picker != nil {
+		t.Fatal("scan: picker armed after landing")
+	}
+	if !strings.Contains(final.composerValue(), "i") {
+		t.Fatalf("scan: keystroke lost after landing: %q", final.composerValue())
+	}
 }
