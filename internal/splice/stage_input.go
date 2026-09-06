@@ -206,6 +206,14 @@ type stageInputPreparation struct {
 	// re-entry, so already-granted files and spent expansion budget
 	// persist across the trajectory. Nil on the first pass.
 	PriorScope *StageScopePlan
+	// RepairReentry marks that this preparation serves a repair
+	// invocation: each repair builds a FRESH provider request (a new
+	// system+user message pair, no conversation carry-over), so facts
+	// delivered to the first invocation are not automatically present
+	// and the run-local replay suppression MUST NOT remove them. Still-
+	// relevant facts are re-delivered (bounded by the same admission
+	// and compaction limits); irrelevant ones stay excluded.
+	RepairReentry bool
 }
 
 // prepareStageInput is the single composition path for both the normal pass
@@ -263,14 +271,23 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 				input.StageName, plan.AnchorsFailed))
 		}
 		if len(planNodes) > 0 {
-			graphObs := cognitionBundleFromNodes(planNodes)
+			// Unify admission (review finding): graph observations go
+			// through the SAME memoryreason.Admit as every other source -
+			// relevance and content limits apply, and the admitted subset
+			// is what reaches the bundle. Bypassing admission would give
+			// graph nodes more authority than their evidence supports.
+			graphBundle := schemas.MemoryBundle{
+				RequestingAgent: input.StageName,
+				Observations:    cognitionBundleFromNodes(planNodes),
+			}
+			graphAdmitted := memoryreason.Admit(&graphBundle, root, p.NowUnix)
 			if mode, modeErr := resolveExemplarMode(); modeErr != nil {
 				return schemas.HarnessStageInput{}, StageScopePlan{}, ScopeSuppression{}, modeErr
-			} else if mode.deliverToModel() {
+			} else if mode.deliverToModel() && graphAdmitted.Bundle != nil && len(graphAdmitted.Bundle.Observations) > 0 {
 				if input.MemoryBundle == nil {
 					input.MemoryBundle = &schemas.MemoryBundle{RequestingAgent: input.StageName}
 				}
-				input.MemoryBundle.Observations = append(input.MemoryBundle.Observations, graphObs...)
+				input.MemoryBundle.Observations = append(input.MemoryBundle.Observations, graphAdmitted.Bundle.Observations...)
 			}
 			emitProgress(p.Options, fmt.Sprintf("[%s] discovery: %d question(s) resolved by cognition, %d node(s)\n",
 				input.StageName, len(plan.ResolvedByCognition), len(planNodes)))
@@ -297,9 +314,16 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 				// empties, and because the direct path returned true the
 				// broad search below is skipped — suppression must not push
 				// the same cognition back through FTS redelivery.
-				suppressed := p.Trace.filterAlreadyDelivered(input.StageName, &direct.bundle)
-				if suppressed > 0 {
-					emitProgress(p.Options, fmt.Sprintf("[%s] cognition: %d already-consumed item(s) suppressed on re-entry\n", input.StageName, suppressed))
+				// Repair re-entry: the provider request is fresh, so
+				// previously delivered facts are NOT automatically
+				// present. The run-local replay suppression is skipped so
+				// still-relevant facts are re-delivered (bounded by
+				// admission and compaction).
+				if !p.RepairReentry {
+					suppressed := p.Trace.filterAlreadyDelivered(input.StageName, &direct.bundle)
+					if suppressed > 0 {
+						emitProgress(p.Options, fmt.Sprintf("[%s] cognition: %d already-consumed item(s) suppressed on re-entry\n", input.StageName, suppressed))
+					}
 				}
 				if direct.bundle.Observations == nil && len(direct.bundle.Observations) == 0 {
 					direct.bundle.Observations = []schemas.MemoryObservation{}
@@ -377,7 +401,9 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 				// stay honest); only the prompt replay is removed. Genuinely
 				// new cognition stays fully eligible (consumed-set semantics,
 				// not a memory-off switch).
-				p.Trace.filterAlreadyDelivered(input.StageName, admitted.Bundle)
+				if !p.RepairReentry {
+					p.Trace.filterAlreadyDelivered(input.StageName, admitted.Bundle)
+				}
 				input.MemoryBundle = admitted.Bundle
 				emitProgress(p.Options, admissionProgressLine(input.StageName, admitted))
 			}

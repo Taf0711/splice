@@ -651,6 +651,17 @@ Flags:
       --out <dir>           Write mvp-attempts.jsonl
       --model <id>          Model id for every run
       --rollouts <n>        Rollouts per arm (default 3)
+      --matched-snapshots   Run Task A once per family, freeze the verified
+                            tree and captured cognition, and run Task B
+                            from identical trees in both arms (starting
+                            tree hashes asserted)
   -h, --help                Show this help
+
+Environment (treatment matrix, applies to the exec children):
+  SPLICE_SCOPE_MODE=on|off       off keeps the model input and host context
+                                 operations byte-identical to cold while
+                                 retrieval still runs and is recorded
+                                 (retrieval-only arm)
+  SPLICE_EXEMPLAR_MODE=...       memory-class delivery ablation (C1c)
 `
 }

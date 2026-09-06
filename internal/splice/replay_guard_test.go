@@ -264,3 +264,46 @@ func TestReplayGuard_RunBoundaryReset(t *testing.T) {
 		t.Fatalf("run 2 delivery = %d, want 1 (consumed state must not leak across runs)", len(second.MemoryBundle.Observations))
 	}
 }
+
+// TestReplayGuard_RepairReentryRedelivers (review fix): each repair builds
+// a FRESH provider request (a new system+user message pair), so a fact
+// delivered to the first invocation is not automatically present in the
+// repair request. The run-local replay suppression is skipped for repair
+// re-entry: the still-relevant fact is re-delivered, bounded by the same
+// admission and compaction limits.
+func TestReplayGuard_RepairReentryRedelivers(t *testing.T) {
+	root := t.TempDir()
+	store := &stubStore{bundle: schemas.MemoryBundle{
+		RequestingAgent: "code_writer",
+		Observations:    []schemas.MemoryObservation{obsWithID(42, root, "convention A")},
+	}}
+	plan := cognitionPlan("code_writer")
+	tr := newRunTraceAccumulator(nil, "run-repair", "session", root, plan, "active", nil)
+
+	// First invocation delivers the fact and marks it consumed.
+	first := prepareCognition(t, store, plan, "code_writer", "task", root, 1, tr)
+	if len(first.MemoryBundle.Observations) != 1 {
+		t.Fatalf("first invocation observations = %d, want 1", len(first.MemoryBundle.Observations))
+	}
+
+	// Repair re-entry: the same stage+iteration, marked RepairReentry. The
+	// fact MUST be re-delivered because the repair request is fresh.
+	prepared, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
+		Input:         cognitionInput("code_writer", "task"),
+		Stage:         &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
+		Budget:        stageBudgetByName(plan, "code_writer"),
+		Tier:          plan.Tier,
+		Iteration:     1,
+		WorkDir:       root,
+		Options:       PipelineConfigFromAgentOptions(agent.Options{}),
+		Memory:        store,
+		Trace:         tr,
+		RepairReentry: true,
+	})
+	if err != nil {
+		t.Fatalf("repair prepareStageInput: %v", err)
+	}
+	if len(prepared.MemoryBundle.Observations) != 1 {
+		t.Fatalf("repair re-entry must re-deliver the fact (fresh provider request), got %d observations", len(prepared.MemoryBundle.Observations))
+	}
+}

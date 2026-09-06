@@ -586,16 +586,17 @@ func repairSelection(options PipelineRunConfig, provider agent.Provider, stageNa
 // receives the full stage budget, not only OutputMax.
 func runRepairStage(ctx context.Context, wallDeadline time.Time, input schemas.HarnessStageInput, stage stages.Stage, iteration int, selection agent.ModelSelection, options PipelineRunConfig, workDir string, runner ToolRunner, mem MemoryStore, budget schemas.StageBudget, tier schemas.PipelineTier, tr *runTraceAccumulator, priorScope *StageScopePlan) (schemas.HarnessStageOutput, error) {
 	prepared, _, _, err := prepareStageInput(ctx, stageInputPreparation{
-		Input:     input,
-		Stage:     stage,
-		Budget:    budget,
-		Tier:      tier,
-		Iteration: iteration,
-		WorkDir:   workDir,
-		Options:   options,
-		Memory:    mem,
-		Trace:     tr,
-		NowUnix:   time.Now().Unix(),
+		Input:         input,
+		Stage:         stage,
+		Budget:        budget,
+		Tier:          tier,
+		Iteration:     iteration,
+		WorkDir:       workDir,
+		Options:       options,
+		Memory:        mem,
+		Trace:         tr,
+		NowUnix:       time.Now().Unix(),
+		RepairReentry: true,
 	})
 	if err != nil {
 		return schemas.HarnessStageOutput{}, err
