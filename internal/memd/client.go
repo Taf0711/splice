@@ -820,6 +820,31 @@ func (c *Client) ReanchorGraph(ctx context.Context, projectPath, fromRevision, t
 	return resp.Nodes, nil
 }
 
+// ReanchorGraphByIDs advances EXACTLY the given capture set (the nodes one
+// verified run persisted) from one revision to another. Scoped to the
+// capture set: other runs' nodes of the same project are untouched, and any
+// id that does not match the project/active/from-revision contract fails
+// loud. See the /graph/reanchor_ids wire contract.
+func (c *Client) ReanchorGraphByIDs(ctx context.Context, projectPath string, nodeIDs []int64, fromRevision, toRevision string) (int64, error) {
+	if projectPath == "" || len(nodeIDs) == 0 || fromRevision == "" || toRevision == "" {
+		return 0, fmt.Errorf("memd graph reanchor_ids: project path, node ids, and both revisions are required")
+	}
+	var resp struct {
+		OK    bool   `json:"ok"`
+		Nodes int64  `json:"nodes"`
+		Error string `json:"error,omitempty"`
+	}
+	body := map[string]any{"project_path": projectPath, "node_ids": nodeIDs, "from_revision": fromRevision, "to_revision": toRevision}
+	if err := c.do(ctx, http.MethodPost, "/graph/reanchor_ids", body, &resp); err != nil {
+		return 0, err
+	}
+	if !resp.OK {
+		return 0, fmt.Errorf("memd graph reanchor_ids: %s", resp.Error)
+	}
+	return resp.Nodes, nil
+}
+
+// GraphCompactionReport mirrors the sidecar's compaction summary.
 // GraphCompactionReport mirrors the sidecar's compaction summary.
 type GraphCompactionReport struct {
 	DuplicateGroups  int   `json:"duplicate_groups"`
@@ -861,4 +886,27 @@ func (c *Client) CollectGraph(ctx context.Context, olderThanSeconds int64) (int6
 		return 0, fmt.Errorf("memd graph collect: %s", resp.Error)
 	}
 	return resp.Collected, nil
+}
+
+// CaptureSetIDs returns the ids of a project's active nodes currently
+// anchored at fromRevision - the capture set of the verified run that
+// produced them. The harness uses this to scope a reanchor to exactly the
+// nodes its verified run captured, instead of every node of the project.
+func (c *Client) CaptureSetIDs(ctx context.Context, projectPath, fromRevision string) ([]int64, error) {
+	if projectPath == "" || fromRevision == "" {
+		return nil, fmt.Errorf("memd graph capture set: project path and revision are required")
+	}
+	var resp struct {
+		OK    bool    `json:"ok"`
+		IDs   []int64 `json:"ids"`
+		Error string  `json:"error,omitempty"`
+	}
+	body := map[string]any{"project_path": projectPath, "revision": fromRevision}
+	if err := c.do(ctx, http.MethodPost, "/graph/capture_set", body, &resp); err != nil {
+		return nil, err
+	}
+	if !resp.OK {
+		return nil, fmt.Errorf("memd graph capture_set: %s", resp.Error)
+	}
+	return resp.IDs, nil
 }

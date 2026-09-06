@@ -526,8 +526,21 @@ func reanchorVerifiedCognition(ctx context.Context, armDir, preHead string) erro
 		// Nothing to commit: the anchor already names the verified bytes.
 		return nil
 	}
-	if _, err := client.ReanchorGraph(ctx, armDir, preHead, postHead); err != nil {
-		return fmt.Errorf("reanchor %s -> %s: %w", preHead[:10], postHead[:10], err)
+	// Scope the reanchor to the verified run's CAPTURE SET: only nodes
+	// this run persisted (anchored at the pre-verify HEAD) advance.
+	// Project-wide reanchoring would also advance nodes other runs
+	// captured, which the review flagged as broader provenance than the
+	// evidence supports.
+	captureSet, err := client.CaptureSetIDs(ctx, armDir, preHead)
+	if err != nil {
+		return fmt.Errorf("resolve capture set: %w", err)
+	}
+	if len(captureSet) == 0 {
+		// Nothing captured (cold-equivalent run): nothing to advance.
+		return nil
+	}
+	if _, err := client.ReanchorGraphByIDs(ctx, armDir, captureSet, preHead, postHead); err != nil {
+		return fmt.Errorf("reanchor %d node(s) %s -> %s: %w", len(captureSet), preHead[:10], postHead[:10], err)
 	}
 	return nil
 }

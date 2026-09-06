@@ -352,6 +352,55 @@ func (s *server) handleGraphReanchor(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, graphReanchorResponse{OK: true, Nodes: n})
 }
 
+// handleGraphReanchorIDs advances exactly the given capture set
+// (POST /graph/reanchor_ids). See store.ReanchorByIDs.
+func (s *server) handleGraphReanchorIDs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var req graphReanchorIDsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "validation: "+err.Error())
+		return
+	}
+	n, err := s.store.ReanchorByIDs(r.Context(), req.ProjectPath, req.NodeIDs, req.FromRevision, req.ToRevision)
+	if err != nil {
+		writeGraphError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, graphReanchorResponse{OK: true, Nodes: n})
+}
+
+// handleGraphCaptureSet lists a project's active node ids anchored at a
+// revision (POST /graph/capture_set) - the capture set of one verified run.
+func (s *server) handleGraphCaptureSet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var req struct {
+		ProjectPath string `json:"project_path"`
+		Revision    string `json:"revision"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	ids, err := s.store.CaptureSetIDs(r.Context(), req.ProjectPath, req.Revision)
+	if err != nil {
+		writeGraphError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "ids": ids})
+}
+
 // handleGraphCompact merges duplicate nodes and reports what it did.
 func (s *server) handleGraphCompact(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {

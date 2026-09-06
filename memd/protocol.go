@@ -622,6 +622,27 @@ type graphSearchResponse struct {
 	Hits []graphSearchHit `json:"hits"`
 }
 
+
+// graphReanchorIDsRequest is the JSON body for POST /graph/reanchor_ids.
+type graphReanchorIDsRequest struct {
+	ProjectPath  string  `json:"project_path"`
+	NodeIDs      []int64 `json:"node_ids"`
+	FromRevision string  `json:"from_revision"`
+	ToRevision   string  `json:"to_revision"`
+}
+
+func (r *graphReanchorIDsRequest) Validate() error {
+	if r.ProjectPath == "" || r.FromRevision == "" || r.ToRevision == "" {
+		return fmt.Errorf("project_path, from_revision, and to_revision are required")
+	}
+	if len(r.NodeIDs) == 0 {
+		return fmt.Errorf("at least one node id is required")
+	}
+	return nil
+}
+
+// graphReanchorResponse is reused for /graph/reanchor_ids (same shape).
+
 // graphReanchorRequest is the JSON body for POST /graph/reanchor.
 type graphReanchorRequest struct {
 	ProjectPath  string `json:"project_path"`

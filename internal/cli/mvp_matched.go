@@ -98,12 +98,22 @@ func runMvpMatchedSnapshots(
 			return fmt.Errorf("verified snapshot tree produced no commit")
 		}
 
-		// Reanchor the captured nodes from the pre-verify HEAD to the
-		// snapshot commit.
+		// Reanchor exactly the capture set (the nodes this verified run
+		// persisted) from the pre-verify HEAD to the snapshot commit.
+		// Project-wide reanchoring would advance nodes other runs
+		// captured, which is broader provenance than the evidence
+		// supports.
 		if client, err := memd.Resolve(ctx); err == nil && client != nil {
-			if _, err := client.ReanchorGraph(ctx, snapDir, preHead, snapHead); err != nil {
+			captureSet, cerr := client.CaptureSetIDs(ctx, snapDir, preHead)
+			if cerr != nil {
 				cleanup()
-				return fmt.Errorf("reanchor snapshot cognition: %w", err)
+				return fmt.Errorf("resolve snapshot capture set: %w", cerr)
+			}
+			if len(captureSet) > 0 {
+				if _, err := client.ReanchorGraphByIDs(ctx, snapDir, captureSet, preHead, snapHead); err != nil {
+					cleanup()
+					return fmt.Errorf("reanchor snapshot cognition: %w", err)
+				}
 			}
 		}
 
