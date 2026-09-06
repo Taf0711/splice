@@ -570,6 +570,14 @@ type model struct {
 	// dispatch. Runtime state, not transcript scraping. Cleared when a new
 	// run begins or the session switches — the card stops being live then.
 	lastTerminalReceipt receiptKind
+	// sessionScanInFlight arms while the async session scan (F1 boundary:
+	// no store I/O on the UI loop) is running, so a second /resume or
+	// launch pass never spawns a duplicate scan.
+	sessionScanInFlight bool
+	// scannedLatest holds the newest qualifying workspace session from the
+	// last scan — the launch resume card's data source. Nil until a scan
+	// lands or when nothing qualified (honest absence).
+	scannedLatest *scannedSession
 	// diffView is the GAP-G diff review surface (§11): when active, the
 	// transcript body swaps to the worktree diff and the title bar swaps to
 	// the diff nav bar. Inactive is the zero value.
@@ -1238,6 +1246,11 @@ func (m model) Init() tea.Cmd {
 			})
 			return prWatcherStartedMsg{stop: stop}
 		})
+	}
+	// Async session scan (F1, §14): the resume picker and launch card arm
+	// from the sessionsScannedMsg — never from store I/O on the UI loop.
+	if _, scanCmd := m.openLaunchSessionPicker(); scanCmd != nil {
+		cmds = append(cmds, scanCmd)
 	}
 	return tea.Batch(cmds...)
 }
@@ -3127,6 +3140,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case mcpCommandResultMsg:
 		return m.applyMCPCommandResultMessage(msg), nil
+	case sessionsScannedMsg:
+		// Async session scan landed (F1, §14): arm the resume picker and
+		// launch resume card from the result. No store I/O happened here.
+		return applySessionsScanned(m, msg), nil
+	case initialCmdsBatchMsg:
+		return m, tea.Batch(msg.cmds...)
 	}
 
 	var cmd tea.Cmd
@@ -4814,7 +4833,9 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.trustPromptRequired = false
-			m = m.openLaunchSessionPicker()
+			var scanCmd tea.Cmd
+			m, scanCmd = m.openLaunchSessionPicker()
+			return m, scanCmd
 		}
 	}
 	return m, cmd
@@ -5071,12 +5092,12 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
-		// Bare `/resume` opens an interactive session picker (like /model & /provider);
-		// `/resume <id>` and `/resume latest` still resolve directly. The picker falls
-		// back to the text path when there is nothing to resume.
+		// Bare `/resume` arms the async session scan (F1: no store I/O on
+		// the UI loop); the picker opens when sessionsScannedMsg lands.
+		// `/resume <id>` and `/resume latest` still resolve directly.
 		if strings.TrimSpace(command.text) == "" {
 			if next, ok := m.openSessionPicker(); ok {
-				return next, nil
+				return next, resumeScanCmd
 			}
 		}
 		text := ""

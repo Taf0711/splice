@@ -66,8 +66,8 @@ func TestLaunchDecisionsModuleWakeOnOpenOnly(t *testing.T) {
 }
 
 // The resume card renders the open QUESTION TEXT (frame: "[ ] 1 open
-// are streamed bodies idempotent?") from the reconstructed state of a real
-// session store — the full persistence round trip.
+// are streamed bodies idempotent?") from the async scan's reconstructed
+// state of a real session store — the full persistence round trip.
 func TestLaunchResumeCardCarriesOpenQuestionText(t *testing.T) {
 	store := testSessionStore(t)
 	created, err := store.Create(sessions.CreateInput{Title: "design session", Cwd: "/tmp/oq-probe"})
@@ -83,9 +83,16 @@ func TestLaunchResumeCardCarriesOpenQuestionText(t *testing.T) {
 		t.Fatalf("append: %v", err)
 	}
 
+	// The scan (async, off the UI loop) produces the card's input.
+	msg := scanSessions(store, "/tmp/oq-probe", "Continue where you left off")
+	scanned, ok := msg.(sessionsScannedMsg)
+	if !ok || scanned.Latest == nil {
+		t.Fatalf("scan did not produce a latest session: %#v", msg)
+	}
 	m := launchTestModel(t)
 	m.cwd = "/tmp/oq-probe"
 	m.sessionStore = store
+	m = applySessionsScanned(m, scanned)
 	card := m.launchResumeCard()
 	plain := strings.Join(stripANSIStrings(card), "\n")
 	if !strings.Contains(plain, "[+]") || !strings.Contains(plain, "1 decisions settled") {

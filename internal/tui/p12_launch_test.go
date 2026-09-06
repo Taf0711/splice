@@ -11,6 +11,9 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/Taf0711/splice/internal/sessions"
+	splicerun "github.com/Taf0711/splice/internal/splice"
 )
 
 // stripANSIStrings strips ANSI from a []string of rendered lines.
@@ -44,9 +47,15 @@ func TestLaunchScreenIsCockpitNotSplash(t *testing.T) {
 	assertNotContains(t, view, "▀")
 }
 
-// The START block carries the frame's pointers.
+// The START block carries the frame's pointers. The /resume pointer lives
+// in the resume card, which arms from the async scan's result — seed it
+// (launchTestModel has no session store, so the scan is empty by default).
 func TestLaunchScreenStartBlock(t *testing.T) {
 	m := launchTestModel(t)
+	m.scannedLatest = &scannedSession{
+		Meta:  sessions.Metadata{Title: "seeded"},
+		State: splicerun.DesignState{},
+	}
 	view := plainRender(t, m.View())
 	for _, want := range []string{"/resume", "/model", "/mcp", "/init", "describe a change"} {
 		assertContains(t, view, want)

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/sessions"
@@ -511,21 +513,19 @@ func (m model) openTrustPromptIfRequired() model {
 	return m
 }
 
-// openLaunchSessionPicker opens the plan picker for a fresh interactive TUI.
-// The existing picker build performs all cheap workspace and metadata filters,
-// then reads each surviving session once and shares those events with both
-// resumable-content and design-state derivation.
-func (m model) openLaunchSessionPicker() model {
+// openLaunchSessionPicker arms the async session scan for a fresh
+// interactive TUI (F1, §14: no store I/O on the UI loop). The picker opens
+// when the sessionsScannedMsg lands (see applySessionsScanned); while the
+// scan runs the launch screen renders without it — honest absence, never a
+// frozen frame.
+func (m model) openLaunchSessionPicker() (model, tea.Cmd) {
 	if m.setup.visible || m.activeSession.SessionID != "" || os.Getenv("SPLICE_NO_RESUME_PROMPT") == "1" {
-		return m
+		return m, nil
 	}
-	picker := m.newSessionPicker()
-	if picker == nil || !picker.planBearing {
-		return m
+	if m.sessionScanInFlight {
+		return m, nil
 	}
-	picker.title = "Continue where you left off"
-	m.picker = picker
-	return m
+	return startSessionScan(m, "Continue where you left off")
 }
 
 // sessionHasResumableContent reports whether a session has anything worth
@@ -636,15 +636,22 @@ func eventsHaveResumableContent(events []sessions.Event) bool {
 	return false
 }
 
-// openSessionPicker opens the /resume picker; ok is false when there is nothing to
-// resume (the caller then falls back to the text list / "none" message).
+// openSessionPicker arms the async scan for a bare /resume and returns the
+// scan cmd via resumeScanCmd (a package-level holder for the just-armed
+// cmd — the commandResume switch returns (model, cmd) and needs the cmd to
+// reach the event loop). ok is false only when there is no store at all.
+var resumeScanCmd tea.Cmd
+
 func (m model) openSessionPicker() (model, bool) {
-	picker := m.newSessionPicker()
-	if picker == nil {
+	if m.sessionStore == nil {
 		return m, false
 	}
-	m.picker = picker
-	return m, true
+	if m.sessionScanInFlight {
+		return m, true
+	}
+	next, cmd := startSessionScan(m, "Resume a session")
+	resumeScanCmd = cmd
+	return next, cmd != nil
 }
 
 func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {

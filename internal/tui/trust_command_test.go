@@ -106,8 +106,16 @@ func TestStartupTrustChoiceContinuesToLaunchSessionPicker(t *testing.T) {
 	m.designMode = false
 	next := m.openTrustPromptIfRequired()
 	next = selectTrustItem(t, next, trustActionCurrent)
-	chosen, _ := next.choosePicker()
+	chosen, trustCmd := next.choosePicker()
 	got := chosen.(model)
+	// The launch session scan is async now: the cmd arms it, the picker
+	// opens when the scan lands. Land it synchronously for the assertion.
+	if trustCmd != nil {
+		if msg := trustCmd(); msg != nil {
+			updated, _ := got.Update(msg)
+			got = updated.(model)
+		}
+	}
 	if got.picker == nil || got.picker.kind != pickerSession {
 		t.Fatalf("trust choice did not continue to launch session picker: %#v", got.picker)
 	}

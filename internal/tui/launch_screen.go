@@ -13,9 +13,6 @@ package tui
 import (
 	"fmt"
 	"strings"
-
-	"github.com/Taf0711/splice/internal/sessions"
-	splicerun "github.com/Taf0711/splice/internal/splice"
 )
 
 // launchFact is one key/value row of the facts block.
@@ -109,46 +106,22 @@ func (m model) launchDegradedServers() int {
 	return degraded
 }
 
-// launchResumeCard builds the resume block from the latest resumable
-// session's reconstructed design state: settled decision count and the
-// session identity. Returns nil when there is no resumable session or no
-// session store — the launch screen then simply has no resume card (honest
-// absence, never a placeholder).
+// launchResumeCard builds the resume block from the async session scan's
+// result (sessionsScannedMsg.Latest — F1, §14: no store I/O on the UI
+// loop). Returns nil when no scan has landed or nothing qualified — the
+// launch screen then simply has no resume card (honest absence, never a
+// placeholder, never a synchronous read).
 func (m model) launchResumeCard() []string {
-	if m.sessionStore == nil {
+	if m.scannedLatest == nil {
 		return nil
 	}
-	metas, err := m.sessionStore.ListResumable()
-	if err != nil || len(metas) == 0 {
-		return nil
-	}
-	// Workspace-scoped and content-checked, mirroring newSessionPicker's
-	// filters so the launch card offers THIS repo's last resumable session.
-	var latest *sessions.Metadata
-	for i := range metas {
-		meta := metas[i]
-		if !sessionWorkspaceMatch(meta, m.cwd) || meta.EventCount == 0 {
-			continue
-		}
-		latest = &metas[i]
-		break
-	}
-	if latest == nil {
-		return nil
-	}
-	events, readErr := m.sessionStore.ReadEvents(latest.SessionID)
-	if readErr != nil {
-		return nil // fail-open, same as the picker: no state, no card
-	}
-	state, stateErr := splicerun.ReconstructDesignState(events)
-	if stateErr != nil {
-		return nil
-	}
-	// Settled pins and open questions both come from the same reconstructed
-	// design state (§7.1). The open row renders the QUESTION TEXT (frame:
-	// "[ ] 1 open  are streamed bodies idempotent?"), truncated to the
-	// transcript budget — a bare count would hide the thing the user must
-	// answer first on resume.
+	latest := m.scannedLatest.Meta
+	state := m.scannedLatest.State
+	// Settled pins and open questions both come from the scan's
+	// reconstructed design state (§7.1). The open row renders the QUESTION
+	// TEXT (frame: "[ ] 1 open  are streamed bodies idempotent?"),
+	// truncated to the transcript budget — a bare count would hide the
+	// thing the user must answer first on resume.
 	settled := len(state.Decisions)
 	when := sessionWhen(latest.UpdatedAt, m.now())
 	head := zeroTheme.muted.Bold(true).Render("LAST SESSION") + "  " +

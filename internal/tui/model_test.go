@@ -1012,8 +1012,17 @@ func TestResumeCommandListsRecentSessions(t *testing.T) {
 	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
-	if cmd != nil {
-		t.Fatal("expected /resume to be handled without starting an agent run")
+	if cmd == nil {
+		t.Fatal("expected /resume to arm the async session scan (a cmd), not block on store I/O")
+	}
+	// The scan lands as a message; feed it back through Update exactly as
+	// the runtime does.
+	if msg := cmd(); msg != nil {
+		updated, cmd = next.Update(msg)
+		next = updated.(model)
+		if cmd != nil {
+			t.Fatal("expected the scan landing to be handled without starting an agent run")
+		}
 	}
 	// Bare /resume now opens the interactive session picker (like /model & /provider).
 	if next.picker == nil || next.picker.kind != pickerSession {
@@ -1065,8 +1074,15 @@ func TestResumePickerSelectionHydratesSession(t *testing.T) {
 
 	m := newModel(context.Background(), Options{SessionStore: store})
 	m.input.SetValue("/resume")
-	updated, _ := m.Update(testKey(tea.KeyEnter))
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
+	// Land the async scan before asserting the picker is up.
+	if cmd != nil {
+		if msg := cmd(); msg != nil {
+			updated, _ = m.Update(msg)
+			m = updated.(model)
+		}
+	}
 	if m.picker == nil || m.picker.kind != pickerSession {
 		t.Fatalf("expected the session picker to open, got %#v", m.picker)
 	}
@@ -1076,9 +1092,9 @@ func TestResumePickerSelectionHydratesSession(t *testing.T) {
 		}
 	}
 
-	updated, cmd := m.Update(testKey(tea.KeyEnter)) // choosePicker
+	updated, cmd2 := m.Update(testKey(tea.KeyEnter)) // choosePicker
 	next := updated.(model)
-	if cmd != nil {
+	if cmd2 != nil {
 		t.Fatal("selecting a session to resume should not start an agent run")
 	}
 	if next.picker != nil {

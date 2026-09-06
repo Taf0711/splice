@@ -46,6 +46,20 @@ func appendPickerPlan(t *testing.T, store *sessions.Store, sessionID string, pla
 	}
 }
 
+// runSessionScan executes the scan cmd synchronously and feeds the result
+// back through Update, so tests exercise the same async flow the UI does.
+func runSessionScan(t *testing.T, m model) model {
+	t.Helper()
+	var scanCmd tea.Cmd
+	m, scanCmd = m.openLaunchSessionPicker()
+	if scanCmd == nil {
+		return m
+	}
+	updated, _ := m.Update(scanCmd())
+	next, _ := updated.(model)
+	return next
+}
+
 // This test pins launch scoping to the current workspace, not global history.
 func TestLaunchPickerScopesPlansToWorkspace(t *testing.T) {
 	store := testSessionStore(t)
@@ -56,7 +70,7 @@ func TestLaunchPickerScopesPlansToWorkspace(t *testing.T) {
 	appendPickerPlan(t, store, foreign.SessionID, "foreign-plan")
 
 	m := newModel(context.Background(), Options{Cwd: filepath.Join(t.TempDir(), "workspace"), SessionStore: store})
-	next := m.openLaunchSessionPicker()
+	next := runSessionScan(t, m)
 	if next.picker != nil {
 		t.Fatalf("launch picker opened for a plan in another workspace: %#v", next.picker.items)
 	}
@@ -80,7 +94,7 @@ func TestLaunchPickerStaysClosedWhenSuppressed(t *testing.T) {
 
 	// Control: without a guard the picker must open, otherwise the cases below
 	// would pass for the wrong reason.
-	if newModelWithPlan(t).openLaunchSessionPicker().picker == nil {
+	if runSessionScan(t, newModelWithPlan(t)).picker == nil {
 		t.Fatal("control: launch picker did not open for a workspace plan")
 	}
 
@@ -100,7 +114,7 @@ func TestLaunchPickerStaysClosedWhenSuppressed(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			m := test.arrange(newModelWithPlan(t))
-			if next := m.openLaunchSessionPicker(); next.picker != nil {
+			if next := runSessionScan(t, m); next.picker != nil {
 				t.Fatalf("launch picker opened despite %s: %#v", test.name, next.picker.items)
 			}
 		})
@@ -118,7 +132,7 @@ func TestLaunchPickerShowsPlanStatus(t *testing.T) {
 	appendPickerPlan(t, store, session.SessionID, "workspace-plan")
 
 	m := newModel(context.Background(), Options{Cwd: workspace, SessionStore: store})
-	next := m.openLaunchSessionPicker()
+	next := runSessionScan(t, m)
 	if next.picker == nil || !next.picker.planBearing {
 		t.Fatalf("expected launch picker for workspace plan, got %#v", next.picker)
 	}
