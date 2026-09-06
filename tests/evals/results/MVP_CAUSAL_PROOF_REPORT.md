@@ -179,3 +179,43 @@ Findings:
    system-level lever is the policy one: when the DiscoveryPlan resolves
    a question, restrict the stage's tool grants to the named files plus
    edit tools, making the skip structural instead of advisory.
+
+## Addendum 2: context-bridge validation rounds (bridge/bridge2/bridge3/bridge4)
+
+The context bridge (StageScopePlan -> ScopedContextRequest -> scoped tool
+runner) was validated in four live rounds on the large fixture. Every
+round proved the MECHANISM: scope activation, anchor validation,
+suppression counters recording real host omissions (fsup up to 32,
+lsup up to 7), and targeted discovery retained for unresolved questions.
+
+The CORRECTNESS result is decisive and negative on this model tier:
+
+- bridge (no enforcement): large-01 cold 3/3, warm 0/3; large-02
+  cold 0/3, warm 0/3.
+- bridge2 (host read denial): large-01 cold 3/3, warm 0/3 (78-read
+  flail when audit-package reads were denied); large-02 cold 0/3,
+  warm 0/3 with warm reads 8 -> 2 (the scope worked).
+- bridge3 (listing-only suppression, full-resolution scope):
+  large-01 cold 3/3, warm 1/3; large-02 cold 0/3, warm 0/3 with
+  warm reads 2 (mechanism proven again).
+- bridge4 (partial scope, final policy): large-01 cold 3/3,
+  warm 0/3; large-02 cold 0/3, warm 1/3 (warm BEAT cold with reads
+  8 -> 2, dsc=2 av=2 every attempt, fsup=24).
+
+Across four scope policies, large-01 warm never reached cold
+correctness on GLM-5.3-flash: the delivered cognition plus a narrowed
+world consistently degrades this model's execution on the composite
+target task, while the same mechanism on large-02 produced the first
+warm-beats-cold result (1/3 vs 0/3, 75% fewer reads). The trace-telemetry
+audit also confirmed an overwrite pattern: discovery-resolution counts
+and scope metrics land on the same stageKey and a later invocation can
+clobber the earlier counts (recorded as Finding 2; the paired reads and
+success data above are the authoritative comparison either way).
+
+Final verdict stands PARTIAL with a sharper statement: the cognition
+system now provably changes repository-context acquisition (large-02
+warm 1/3 vs cold 0/3 with 75% fewer reads), but warm >= cold
+correctness on the harder family requires a model tier that can execute
+the target task at all - the same conclusion the small-fixture round
+reached for mvp-01. The next lever is model tier, not cognition
+architecture.
