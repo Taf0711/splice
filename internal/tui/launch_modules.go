@@ -78,10 +78,15 @@ func (m model) launchSidebarModules(width, budget int) []string {
 }
 
 // launchNextModule renders NEXT: "resume, or describe a change" when a
-// resumable session exists, "describe a change" when not.
+// resumable session exists, "describe a change" when not. It projects the
+// async scan's result (scannedLatest) — NEVER a synchronous store read:
+// ListResumable walks every session's metadata file (~120ms for a few
+// thousand sessions on this machine) and the sidebar renders on every
+// frame, so a store read here spun the TUI at single-digit fps (§14: no
+// filesystem access on the render path).
 func (m model) launchNextModule(width int) []string {
 	next := "describe a change"
-	if m.launchHasResumable() {
+	if m.scannedLatest != nil {
 		next = "resume, or describe a change"
 	}
 	lines := []string{sidebarHeader("NEXT", width)}
@@ -95,6 +100,23 @@ func (m model) launchNextModule(width int) []string {
 // ledger: the settled count and, when open questions exist, the amber open
 // count (frame kAYHl: "3 settled" / "1 open").
 func (m model) launchDecisionsModule(width int) []string {
+	// Launch projects the async scan's reconstructed state — per-frame
+	// ReconstructDesignState over the full event log would be another
+	// render-path I/O/CPU tax.
+	if m.scannedLatest != nil {
+		state := m.scannedLatest.State
+		if len(state.Decisions) == 0 && len(state.OpenQuestions) == 0 {
+			return nil
+		}
+		lines := []string{sidebarHeader("DECISIONS", width)}
+		if len(state.Decisions) > 0 {
+			lines = append(lines, "  "+zeroTheme.ink.Render(fmt.Sprintf("%d settled", len(state.Decisions))))
+		}
+		if len(state.OpenQuestions) > 0 {
+			lines = append(lines, "  "+zeroTheme.amber.Render(fmt.Sprintf("%d open", len(state.OpenQuestions))))
+		}
+		return lines
+	}
 	decisions, decisionsOK := m.designDecisions()
 	open, openOK := m.designOpenQuestions()
 	if (!decisionsOK || len(decisions) == 0) && (!openOK || len(open) == 0) {
