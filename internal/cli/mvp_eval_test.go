@@ -74,3 +74,28 @@ func TestSummarizeMvpCountsSetupFailuresSeparately(t *testing.T) {
 		t.Fatalf("warm arm must report zero executed targets:\n%s", text)
 	}
 }
+
+func TestVerifierExitFromMarker(t *testing.T) {
+	if err := verifierExitFromMarker([]byte("ok\nVERIFIER_EXIT=0\n")); err != nil {
+		t.Fatalf("exit 0 rejected: %v", err)
+	}
+	err := verifierExitFromMarker([]byte("FAIL demo/internal\nVERIFIER_EXIT=1\n"))
+	if err == nil || !strings.Contains(err.Error(), "verifier exit 1") {
+		t.Fatalf("exit 1 not detected: %v", err)
+	}
+	if err := verifierExitFromMarker([]byte("no marker here")); err == nil {
+		t.Fatal("missing marker must fail loud")
+	}
+}
+
+func TestArtifactCapturePreservesVerdict(t *testing.T) {
+	// The capture path must not flip a failing verifier to success: the
+	// success decision comes from the parsed marker.
+	out := []byte("build failed\nVERIFIER_EXIT=2\n")
+	if err := verifierExitFromMarker(out); err == nil {
+		t.Fatal("failing verifier must fail")
+	}
+	if got := artifactPath("dir", "session", "patch.diff"); got != filepath.Join("dir", "session-patch.diff") {
+		t.Fatalf("artifactPath = %q", got)
+	}
+}

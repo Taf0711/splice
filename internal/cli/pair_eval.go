@@ -223,6 +223,9 @@ func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
 			combined := exec.CommandContext(ctx, "/bin/sh", "-c", "("+in.Check+") 2>&1; echo VERIFIER_EXIT=$?")
 			combined.Dir = in.Cwd
 			verifierOut, verifierErr = combined.Output()
+			// CombinedOutput succeeds even when the verifier fails; parse
+			// the exit marker so success reflects the verifier verdict.
+			verifierErr = verifierExitFromMarker(verifierOut)
 		} else {
 			verifierErr = checkCmd.Run()
 		}
@@ -369,6 +372,28 @@ func matchTraceTokens(results []schemas.TraceQueryResult, sessionID string) (tok
 		return tokens, interventions, true
 	}
 	return 0, 0, false
+}
+
+// verifierExitFromMarker parses the VERIFIER_EXIT=N marker the artifact
+// capture appends, returning nil for exit 0 and an error otherwise.
+func verifierExitFromMarker(out []byte) error {
+	marker := "VERIFIER_EXIT="
+	idx := strings.LastIndex(string(out), marker)
+	if idx < 0 {
+		return fmt.Errorf("verifier output missing exit marker")
+	}
+	rest := strings.TrimSpace(string(out[idx+len(marker):]))
+	if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
+		rest = rest[:nl]
+	}
+	code, err := strconv.Atoi(rest)
+	if err != nil {
+		return fmt.Errorf("verifier exit marker %q: %w", rest, err)
+	}
+	if code != 0 {
+		return fmt.Errorf("verifier exit %d", code)
+	}
+	return nil
 }
 
 // artifactPath joins an artifact directory and filename, or "" when the
