@@ -622,7 +622,6 @@ type graphSearchResponse struct {
 	Hits []graphSearchHit `json:"hits"`
 }
 
-
 // graphReanchorIDsRequest is the JSON body for POST /graph/reanchor_ids.
 type graphReanchorIDsRequest struct {
 	ProjectPath  string  `json:"project_path"`
