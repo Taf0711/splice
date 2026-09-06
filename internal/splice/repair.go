@@ -611,10 +611,10 @@ func runRepairStage(ctx context.Context, wallDeadline time.Time, input schemas.H
 		defer cancel()
 	}
 	// The run's scope carries into repair so already-granted files persist;
-// runStageWithContext revalidates via the fresh cognition resolved in the
-// repair preparation (partial scope keeps default reads for unresolved
-// questions, so newly needed context is not denied).
-return runStageWithContext(stageCtx, input, stage, iteration, selection, options, workDir, runner, mem, budget.OutputMax, tr, priorScope)
+	// runStageWithContext revalidates via the fresh cognition resolved in the
+	// repair preparation (partial scope keeps default reads for unresolved
+	// questions, so newly needed context is not denied).
+	return runStageWithContext(stageCtx, input, stage, iteration, selection, options, workDir, runner, mem, budget.OutputMax, tr, priorScope)
 }
 
 // stageBudgetByName returns the full stage budget for a named plan stage, or
