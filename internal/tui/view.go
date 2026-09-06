@@ -209,11 +209,11 @@ func (m model) composerDividerLine(width int) string {
 func (m model) statusLine(width int) string {
 	tier := widthTier(width)
 	separator := zeroTheme.line.Render(" │ ")
-	prefix := "status  "
+	prefix := "  "
 
-	// Frame kAYHl/P13 status grammar: "status  <phase (health)> | <model
-	// (effort)> | <N tok> | $x.xx | <elapsed>". The leading "status" label
-	// names the line; the phase chip carries color + word (health override).
+	// Frame kAYHl/P13 status grammar: "<phase (health)> | <model
+	// (effort)> | <N tok> | $x.xx | <elapsed>". The phase chip carries
+	// color + word (health override).
 	modeText, modeStyle := m.modeLabel()
 	left := prefix + modeStyle.Render(modeText)
 	// P1.4 delta (frame esBzN): when the presentation layer has observed a

@@ -1401,10 +1401,10 @@ func TestMalformedToolArgumentResultIsHiddenFromChatSurface(t *testing.T) {
 func TestStatusLineGroups(t *testing.T) {
 	m := limeTestModel()
 	got := plainRender(t, m.statusLine(110))
-	// Status line shows the "status  <phase>" lead (frame kAYHl grammar) plus
-	// the safety segments; the model now lives on the right per the mock.
-	if !strings.Contains(got, "status") || !strings.Contains(got, "auto-approve") {
-		t.Fatalf("status line = %q, missing the status lead or permission mode", got)
+	// Status line shows the phase chip (frame kAYHl grammar, no "status"
+	// word) plus the safety segments; the model lives on the right.
+	if !strings.Contains(got, "auto-approve") {
+		t.Fatalf("status line = %q, missing the permission mode", got)
 	}
 	if strings.Contains(got, "interactive") || strings.Contains(got, "test-provider") {
 		t.Fatalf("status line = %q, should not include surface or provider", got)
