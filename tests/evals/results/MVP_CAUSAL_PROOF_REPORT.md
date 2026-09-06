@@ -271,3 +271,43 @@ budget rather than performed expansions; the retention-deficit prompt/
 verifier contract ambiguity is fixed by pinning the API shape in the
 prompt ( RetentionDeficit(trail *Trail, maxAge time.Duration,
 maxCount int) int ).
+
+## Addendum 4: matched-snapshot diagnostic round (2026-09-05/06)
+
+The matched Task B comparison (review step 2/8) ran with
+--matched-snapshots: Task A once per family, verified tree frozen, both
+arms materialized from the same commit with tree-hash assertions,
+cognition naturally reconstructed from the verified tree and re-seeded
+per warm attempt. Three defects were found and fixed during the smoke:
+the stage-input validator rejected the source-qualified graph identity
+(got "scope project requires an observation:<id> stable id"), the
+validator now accepts graph:<id> and observation:<id> symmetrically.
+
+Results (large fixture, GLM-5.3-flash, 3 rollouts):
+
+- large-02 (retention): cold 3/3 (6095 tok, 8 reads) vs warm 3/3
+  (6289 tok, 8 reads) with resolved_by_cognition=2, anchors_validated=2
+  on EVERY attempt. Correctness identical; warm carries +194 tokens of
+  delivery cost; reads equal because this family's resolution is
+  semantic-only, which by the authority contract does not suppress
+  discovery.
+- large-01 (dunning): the snapshot Task A did not verify on any attempt
+  (the composite task exceeds this model); both arms' targets correctly
+  excluded as setup failures and reported.
+
+Conclusions:
+
+1. The matched design works: identical starting trees (asserted),
+   natural cognition only, clean setup-failure reporting.
+2. On this model, semantic-only resolution delivers knowledge without
+   measurable savings - the delivery costs ~200 tokens and the model
+   reads the same 8 files. The earlier large-02 read reduction (8 -> 2)
+   required exact-anchor resolution; this family does not produce it.
+3. The eval stack correctly separated a model-capability failure
+   (large-01 snapshot) from the mechanism measurement (large-02),
+   which the previous rounds could not do.
+
+Final verdict remains PARTIAL. The remaining lever for the reads gate
+is a family whose Task A produces EXACT-anchor matches for Task B's
+question (Task B's intent must name the anchor path), or a model tier
+that acts on prioritized context.
