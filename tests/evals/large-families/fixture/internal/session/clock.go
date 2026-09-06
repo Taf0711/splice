@@ -4,7 +4,7 @@ import "time"
 
 // Clock abstracts time for tests and scheduling.
 type Clock interface {
-    Now() time.Time
+	Now() time.Time
 }
 
 // SystemClock reads the wall clock.
