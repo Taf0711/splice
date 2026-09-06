@@ -28,6 +28,13 @@ type mvpEvalOptions struct {
 	OutDir       string
 	Model        string
 	Rollouts     int
+	// MatchedSnapshots runs Task A once per family, freezes the verified
+	// tree and the naturally captured cognition, and materializes the same
+	// tree for every Task B attempt in both arms (with a starting-tree
+	// hash assertion). This isolates the memory/context policy effect on
+	// an identical coding task. Off by default: the default mode measures
+	// the full independent A->B workflow per arm.
+	MatchedSnapshots bool
 }
 
 func parseMvpEvalArgs(args []string) (mvpEvalOptions, bool, error) {
@@ -91,6 +98,8 @@ func parseMvpEvalArgs(args []string) (mvpEvalOptions, bool, error) {
 				return options, false, execUsageError{fmt.Sprintf("--rollouts requires an integer >= 1, got %q", value)}
 			}
 			options.Rollouts = n
+		case arg == "--matched-snapshots":
+			options.MatchedSnapshots = true
 		case strings.HasPrefix(arg, "-"):
 			return options, false, execUsageError{fmt.Sprintf("unknown eval mvp flag %q", arg)}
 		default:
@@ -200,6 +209,19 @@ func runMvpEvalCommand(args []string, stdout io.Writer, stderr io.Writer, deps a
 	runFunc := pairEvalRunFunc(deps, options.Model)
 	rows := make([]familyPairRow, 0, len(manifest.Families)*options.Rollouts*2)
 
+	if options.MatchedSnapshots {
+		if err := runMvpMatchedSnapshots(ctx, deps, options, manifest, manifestDir, fixtureDir, runFunc, stderr, &rows); err != nil {
+			return writeAppError(stderr, err.Error(), exitCrash)
+		}
+		if options.OutDir != "" {
+			if err := writeFamiliesRows(options.OutDir, rows); err != nil {
+				return writeAppError(stderr, "failed to write mvp attempts log: "+err.Error(), exitCrash)
+			}
+		}
+		summarizeMvp(stdout, manifest, rows)
+		return exitSuccess
+	}
+
 	for _, family := range manifest.Families {
 		warmDir, err := os.MkdirTemp("", "splice-mvp-warm-")
 		if err != nil {
@@ -250,17 +272,19 @@ func runMvpEvalCommand(args []string, stdout io.Writer, stderr io.Writer, deps a
 				// validity; the cold arm runs it only so both arms start
 				// Task B from the same repository state.
 				precursorStatus, precursorErr := mvpRunOnce(deps, ctx, runCtxFor(ctx), runFunc, eval.RunInput{
-					SessionID:  sessionID + "-taska",
-					Memory:     arm.memory,
-					Prompt:     family.PrecursorTask,
-					Cwd:        arm.dir,
-					Check:      precursorChecks[family.ID],
-					OutputPath: mvpDebugPath(options.OutDir, family.ID, attempt, arm.name, "a"),
+					SessionID:   sessionID + "-taska",
+					Memory:      arm.memory,
+					Prompt:      family.PrecursorTask,
+					Cwd:         arm.dir,
+					Check:       precursorChecks[family.ID],
+					OutputPath:  mvpDebugPath(options.OutDir, family.ID, attempt, arm.name, "a"),
+					ArtifactDir: mvpArtifactDir(options.OutDir, family.ID, attempt, arm.name, "a"),
 				}, &rows, family.ID, attempt, arm.name, "A", options.OutDir)
 
 				// Task B: the target. Runs on Task A's tree in BOTH arms.
 				row := familyPairRow{
 					Family:    family.ID,
+					Task:      "B",
 					Attempt:   attempt,
 					Arm:       arm.name,
 					SessionID: sessionID,
@@ -317,12 +341,13 @@ func runMvpEvalCommand(args []string, stdout io.Writer, stderr io.Writer, deps a
 				runCtx, cancel := context.WithTimeout(ctx, familiesRunTimeout)
 				started := time.Now()
 				out, runErr := runFunc(runCtx, eval.RunInput{
-					SessionID:  sessionID + "-taskb",
-					Memory:     arm.memory,
-					Prompt:     family.TargetTask,
-					Cwd:        arm.dir,
-					Check:      targetChecks[family.ID],
-					OutputPath: mvpDebugPath(options.OutDir, family.ID, attempt, arm.name, "b"),
+					SessionID:   sessionID + "-taskb",
+					Memory:      arm.memory,
+					Prompt:      family.TargetTask,
+					Cwd:         arm.dir,
+					Check:       targetChecks[family.ID],
+					OutputPath:  mvpDebugPath(options.OutDir, family.ID, attempt, arm.name, "b"),
+					ArtifactDir: mvpArtifactDir(options.OutDir, family.ID, attempt, arm.name, "b"),
 				})
 				latency := time.Since(started)
 				cancel()
@@ -367,6 +392,20 @@ func runMvpEvalCommand(args []string, stdout io.Writer, stderr io.Writer, deps a
 	return exitSuccess
 }
 
+// mvpArtifactDir returns the reconstruction-artifact directory for one
+// attempt (exec transcript, verifier output, final patch, tree hash), or ""
+// when SPLICE_MVP_DEBUG is unset. Artifacts make every failed attempt
+// explainable: the JSONL boolean alone cannot distinguish a wrong signature
+// from a failed compile from a behavioral miss.
+func mvpArtifactDir(outDir, family string, attempt int, arm, task string) string {
+	if os.Getenv("SPLICE_MVP_DEBUG") == "" || outDir == "" {
+		return ""
+	}
+	dir := filepath.Join(outDir, "debug", fmt.Sprintf("%s-%s-r%d-%s", family, arm, attempt, task))
+	_ = os.MkdirAll(dir, 0o755)
+	return dir
+}
+
 // mvpDebugPath returns the debug transcript path for one attempt, or "" when
 // SPLICE_MVP_DEBUG is unset.
 func mvpDebugPath(outDir, family string, attempt int, arm, task string) string {
@@ -400,6 +439,7 @@ func mvpRunOnce(deps appDeps, ctx context.Context, runCtx context.Context, runFu
 	latency := time.Since(started)
 	row := familyPairRow{
 		Family:    family,
+		Task:      "A",
 		Attempt:   attempt,
 		Arm:       arm,
 		SessionID: in.SessionID,
@@ -519,8 +559,16 @@ func summarizeMvp(stdout io.Writer, manifest mvpFamilyManifest, rows []familyPai
 			continue
 		}
 		var cold, warm []familyPairRow
+		setupFailed := 0
 		for _, row := range frows {
-			if row.Status != "" && row.InfraStatus == "precursor_failed" {
+			if row.Task != "B" {
+				continue
+			}
+			if row.InfraStatus == "precursor_failed" {
+				// A failed precursor is a real outcome of the full
+				// workflow: report it, exclude only from the conditional
+				// Task B analysis.
+				setupFailed++
 				continue
 			}
 			if row.Arm == "cold" {
@@ -546,6 +594,9 @@ func summarizeMvp(stdout io.Writer, manifest mvpFamilyManifest, rows []familyPai
 			warmCog = append(warmCog, row.DiscoveryResolvedCog)
 		}
 		fmt.Fprintf(stdout, "\n%s\n", family.ID)
+		if setupFailed > 0 {
+			fmt.Fprintf(stdout, "  setup failures excluded from target analysis: %d\n", setupFailed)
+		}
 		fmt.Fprintf(stdout, "  cold: success %d/%d, tokens med %s, searches med %s, reads med %s\n",
 			coldS, len(cold), medStr(coldTok), medStr(coldSearch), medStr(coldReads))
 		fmt.Fprintf(stdout, "  warm: success %d/%d, tokens med %s, searches med %s, reads med %s\n",

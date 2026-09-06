@@ -808,3 +808,22 @@ func (s ScopedToolRunner) grantsPath(path string) bool {
 	}
 	return false
 }
+
+// CaptureFromVerifiedRun is the exported capture entry for eval harnesses
+// and tooling outside the splice package. It reconstructs the deterministic
+// captures of a verified run from its committed tree without a model call.
+func CaptureFromVerifiedRun(projectPath, outcomeStatus string, changedFiles []string, testCommand, revision, runID string) []GraphCapture {
+	return captureFromVerifiedRun(projectPath, outcomeStatus, changedFiles, testCommand, revision, runID)
+}
+
+// PersistGraphCapture is the exported persistence entry for eval harnesses.
+func PersistGraphCapture(ctx context.Context, client *memd.Client, projectPath string, c GraphCapture) (int64, error) {
+	c.Project = projectPath
+	return persistGraphCapture(ctx, client, c)
+}
+
+// WorktreeChangedFiles is the exported changed-file listing for eval
+// harnesses reconstructing a verified run's capture set.
+func WorktreeChangedFiles(ctx context.Context, workDir string) []string {
+	return worktreeChangedFiles(ctx, workDir)
+}

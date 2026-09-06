@@ -138,6 +138,7 @@ type familyEntry struct {
 // unknown count is absent data, never a fabricated zero.
 type familyPairRow struct {
 	Family    string `json:"family"`
+	Task      string `json:"task,omitempty"` // "A" or "B"; explicit, never inferred from session suffixes
 	Attempt   int    `json:"attempt"`
 	Arm       string `json:"arm"` // cold | warm
 	Success   bool   `json:"success"`

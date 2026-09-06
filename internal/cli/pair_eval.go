@@ -212,10 +212,29 @@ func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
 
 		checkCmd := exec.CommandContext(ctx, "/bin/sh", "-c", in.Check)
 		checkCmd.Dir = in.Cwd
-		success := checkCmd.Run() == nil
+		// Preserve the verifier output: a boolean alone cannot distinguish
+		// a wrong signature from a failed compile from a behavioral miss,
+		// and the arm directory is removed after the run. Captured before
+		// the probe files are cleaned by the verifier itself (the probe
+		// scripts write, test, and remove in one shell).
+		verifierOut := []byte{}
+		var verifierErr error
+		if in.ArtifactDir != "" {
+			combined := exec.CommandContext(ctx, "/bin/sh", "-c", "("+in.Check+") 2>&1; echo VERIFIER_EXIT=$?")
+			combined.Dir = in.Cwd
+			verifierOut, verifierErr = combined.Output()
+		} else {
+			verifierErr = checkCmd.Run()
+		}
+		success := verifierErr == nil
 
+		if in.ArtifactDir != "" {
+			writeAttemptArtifacts(in.ArtifactDir, in.SessionID, out, verifierOut, in.Cwd)
+		}
 		return eval.RunOutput{Success: success, Tokens: tokens, Interventions: interventions, TelemetryFound: found,
-			ToolCalls: toolCalls, FileReads: fileReads, SearchCalls: searchCalls}, nil
+			ToolCalls: toolCalls, FileReads: fileReads, SearchCalls: searchCalls,
+			VerifierOutputPath: artifactPath(in.ArtifactDir, in.SessionID, "verifier.txt"),
+			PatchPath:          artifactPath(in.ArtifactDir, in.SessionID, "patch.diff")}, nil
 	}
 }
 
@@ -350,4 +369,40 @@ func matchTraceTokens(results []schemas.TraceQueryResult, sessionID string) (tok
 		return tokens, interventions, true
 	}
 	return 0, 0, false
+}
+
+// artifactPath joins an artifact directory and filename, or "" when the
+// directory is empty.
+func artifactPath(dir, sessionID, name string) string {
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, sessionID+"-"+name)
+}
+
+// writeAttemptArtifacts preserves the reconstruction artifacts for one
+// attempt: the exec transcript (already written by the OutputPath tee when
+// configured), the external verifier output including its exit code, and
+// the final patch (git diff) captured BEFORE the verifier's probe files
+// touch the tree. Best-effort: artifact capture never changes the verdict.
+func writeAttemptArtifacts(dir, sessionID string, execOut []byte, verifierOut []byte, cwd string) {
+	if dir == "" {
+		return
+	}
+	_ = os.MkdirAll(dir, 0o755)
+	if len(execOut) > 0 {
+		_ = os.WriteFile(artifactPath(dir, sessionID, "exec.jsonl"), execOut, 0o644)
+	}
+	if len(verifierOut) > 0 {
+		_ = os.WriteFile(artifactPath(dir, sessionID, "verifier.txt"), verifierOut, 0o644)
+	}
+	if cwd != "" {
+		patch, err := exec.Command("git", "-C", cwd, "diff", "HEAD").Output()
+		if err == nil {
+			_ = os.WriteFile(artifactPath(dir, sessionID, "patch.diff"), patch, 0o644)
+		}
+		if tree, err := exec.Command("git", "-C", cwd, "rev-parse", "HEAD").Output(); err == nil {
+			_ = os.WriteFile(artifactPath(dir, sessionID, "tree.txt"), tree, 0o644)
+		}
+	}
 }

@@ -21,6 +21,13 @@ type RunInput struct {
 	// OutputPath optionally names a file the run seam writes the captured
 	// exec transcript to (debugging aid; empty disables the write).
 	OutputPath string `json:"-"`
+	// ArtifactDir optionally names a directory the run seam fills with
+	// reconstruction artifacts: the exec transcript, the external
+	// verifier output, and the final patch. Empty disables capture.
+	// Artifacts are what make a failed attempt explainable; the JSONL
+	// boolean alone cannot distinguish a wrong signature from a failed
+	// compile from a behavioral miss.
+	ArtifactDir string `json:"-"`
 }
 
 // RunOutput is one run's outcome.
@@ -39,6 +46,9 @@ type RunOutput struct {
 	ToolCalls   int
 	FileReads   int
 	SearchCalls int
+	// Artifact paths for this attempt (empty when ArtifactDir was unset).
+	VerifierOutputPath string
+	PatchPath          string
 }
 
 // RunFunc runs one headless exec invocation in an arm copy and returns its
