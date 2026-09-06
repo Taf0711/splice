@@ -649,11 +649,26 @@ func dedupeStrings(in []string) []string {
 //  4. global listing only when nothing was resolved.
 func ScopedContextRequest(defaultReq schemas.ContextRequest, scope StageScopePlan, reason string) (schemas.ContextRequest, ScopeSuppression) {
 	sup := ScopeSuppression{}
-	if !scope.CognitionResolved {
-		// Cold fallback: no cognition privilege, so the scoped request IS
-		// the default request, byte-identical, with zero suppression. This
-		// is the A5 requirement that cold behavior stays unchanged.
-		return defaultReq, sup
+	if !scope.CognitionResolved || len(scope.UnresolvedQuestions) > 0 {
+		// A4 partial scope: unresolved questions keep the default reads
+		// (targeted discovery remains allowed); only the global listing is
+		// dropped when cognition resolved at least one question. Cold
+		// fallback (nothing resolved) returns the default byte-identically
+		// with zero suppression. Full-resolution scope narrows further.
+		if !scope.CognitionResolved {
+			return defaultReq, sup
+		}
+		partial := defaultReq
+		kept := partial.Queries[:0:0]
+		for _, q := range defaultReq.Queries {
+			if q.QueryType == schemas.ContextListFiles {
+				sup.GlobalListsSuppressed = 1
+				continue
+			}
+			kept = append(kept, q)
+		}
+		partial.Queries = kept
+		return partial, sup
 	}
 	queries := make([]schemas.ContextQuery, 0, len(scope.KnownFiles)+len(scope.KnownSymbols)+len(scope.UnresolvedQuestions))
 	for _, f := range scope.KnownFiles {
