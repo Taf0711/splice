@@ -985,6 +985,11 @@ func newModel(ctx context.Context, options Options) model {
 	asciiEnabled := spliceASCIIEnabled(os.Getenv)
 
 	input := textinput.New()
+	// Pen composer grammar (frames kAYHl / ws5rS / design frames): the
+	// prompt row is a BARE line — "> _" on the launch screen, "❯ <text>"
+	// while typing, "∞ steer this run…" while a run is in flight — never a
+	// bordered box. The glyph swaps at render time (composerVisualLinePrefix
+	// / composerBox); the base prompt is the in-run ∞.
 	input.Prompt = "∞ "
 	input.Placeholder = composerPlaceholder
 	// Bubble's Ctrl+V binding reads the clipboard itself. Keep it disabled so
@@ -4288,6 +4293,18 @@ func (m model) composerLine(width int) string {
 			cursor: composerDisplayCursorForPastePreviews(end, previews),
 		}
 	}
+	// Pen composer grammar: the prompt glyph swaps per state — "❯ " while
+	// typing, "∞ " while a run is in flight, "> " on the launch-idle
+	// screen (frame kAYHl). The textinput prompt drives the per-line
+	// prefix, so set it before rendering.
+	switch {
+	case m.transcriptEmpty():
+		input.Prompt = "> "
+	case m.pending:
+		input.Prompt = "∞ "
+	default:
+		input.Prompt = "❯ "
+	}
 	return renderComposerInput(input, displayState, width, m.composerCursorVisible, displaySelection)
 }
 
@@ -4303,9 +4320,9 @@ func renderComposerInput(input textinput.Model, state composerState, width int, 
 		return ""
 	}
 	if state.text == "" {
-		// Empty box: show a (blinking) cursor before the placeholder so the focused
-		// input always has a visible caret. A plain space when blinked off keeps the
-		// placeholder column stable.
+		// Empty prompt: show a (blinking) cursor before the placeholder so the
+		// focused input always has a visible caret. A plain space when blinked
+		// off keeps the placeholder column stable.
 		cursor := " "
 		if cursorVisible {
 			cursor = composerCursor(" ")
@@ -4427,6 +4444,10 @@ func renderComposerVisualLine(input textinput.Model, state composerState, segmen
 	return line.String()
 }
 
+// composerVisualLinePrefix is the prompt-gutter cell used for wrapping and
+// hit-test width math: input.Prompt (set to the in-run ∞ glyph at model
+// construction, "" in layout tests). The state-aware glyph selection lives
+// in renderComposerInput.
 func composerVisualLinePrefix(input textinput.Model, first bool) string {
 	if first {
 		return zeroTheme.userPrompt.Render(input.Prompt)
@@ -4577,29 +4598,20 @@ func commandArgumentHintForInput(value string) string {
 	return commandRequiredInputHint(command.name)
 }
 
+// composerBox renders the Pen composer: a BARE prompt row, never a bordered
+// box (frames kAYHl "> _", design frames "❯ <text>", in-run "∞ steer this
+// run…"). The model name lives in the status line, not the composer.
+// Attachment chips still render as their own row above the input.
 func (m model) composerBox(width int) string {
 	if width < 8 {
 		return fitStyledLine(m.composerLine(width), width)
 	}
-	innerWidth := maxInt(1, width-4)
-	content := m.composerLine(innerWidth)
-	lines := strings.Split(content, "\n")
-
-	rendered := make([]string, 0, len(lines)+3)
-	rendered = append(rendered, zeroTheme.lineStrong.Render("╭"+strings.Repeat("─", width-2)+"╮"))
-	// Attachment chips ([Image #1] …) render INSIDE the box, above the input line,
-	// instead of as a separate row above the box.
+	lines := strings.Split(m.composerLine(width), "\n")
+	rendered := make([]string, 0, len(lines)+1)
 	if chips := renderAttachmentChips(m.pendingImageLabels, m.pendingDocuments); chips != "" {
-		fitted := fitStyledLine(zeroTheme.muted.Render(chips), innerWidth)
-		pad := strings.Repeat(" ", maxInt(0, innerWidth-lipgloss.Width(fitted)))
-		rendered = append(rendered, zeroTheme.lineStrong.Render("│ ")+fitted+pad+zeroTheme.lineStrong.Render(" │"))
+		rendered = append(rendered, fitStyledLine(zeroTheme.muted.Render(chips), width))
 	}
-	for _, line := range lines {
-		fitted := fitStyledLine(line, innerWidth)
-		pad := strings.Repeat(" ", maxInt(0, innerWidth-lipgloss.Width(fitted)))
-		rendered = append(rendered, zeroTheme.lineStrong.Render("│ ")+fitted+pad+zeroTheme.lineStrong.Render(" │"))
-	}
-	rendered = append(rendered, m.composerDividerLine(width))
+	rendered = append(rendered, lines...)
 	return strings.Join(rendered, "\n")
 }
 

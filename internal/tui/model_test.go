@@ -385,9 +385,10 @@ func TestEmptyStateCollapsesAfterFirstPrompt(t *testing.T) {
 	if strings.Contains(view, emptyStateTagline) {
 		t.Fatalf("empty state should collapse after first prompt, got %q", view)
 	}
-	// Working view shows provider status and the composer divider model fallback.
+	// Working view shows provider status and the bare prompt row (the model
+	// moved to the status line right side per the Pen grammar).
 	assertNotContains(t, view, "interactive")
-	assertContains(t, view, "no model")
+	assertContains(t, view, "❯")
 }
 
 func TestEmptyStateStaysVisibleOnEmptySubmit(t *testing.T) {

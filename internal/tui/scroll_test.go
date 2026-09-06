@@ -209,7 +209,9 @@ func TestMouseWheelOverWrappedComposerMovesComposerCursor(t *testing.T) {
 	m.input.CursorEnd()
 	startCursor := len([]rune(text))
 
-	updated, cmd := m.Update(testMouseWheel(tea.MouseWheelUp, 0, 14))
+	// Bare-row composer (Pen): the wrapped prompt rows start lower without
+	// the old border rows; wheel over the first prompt row.
+	updated, cmd := m.Update(testMouseWheel(tea.MouseWheelUp, 0, 17))
 	next := updated.(model)
 	if cmd != nil {
 		t.Fatal("mouse wheel over composer should not return a command")

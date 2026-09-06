@@ -922,7 +922,9 @@ func TestTranscriptCopyStatusUsesComposerSpacerWithoutFooterGrowth(t *testing.T)
 		t.Fatalf("view should show copy status, got:\n%s", view)
 	}
 	footerLines := viewLines(footer)
-	if len(footerLines) < 2 || !strings.Contains(footerLines[0], "Copied!") || !strings.HasPrefix(footerLines[1], "╭") {
+	// Bare-row composer (Pen): the copy status replaces the spacer directly
+	// above the prompt row.
+	if len(footerLines) < 2 || !strings.Contains(footerLines[0], "Copied!") {
 		t.Fatalf("copy status should replace the spacer directly above composer, got:\n%s", footer)
 	}
 	if strings.Contains(plainRender(t, m.statusLine(80)), "Copied!") {
@@ -1016,11 +1018,12 @@ func composerMousePoint(t *testing.T, m model, column int) (int, int) {
 	if frame.composerRect.height <= 0 {
 		t.Fatalf("expected visible composer rect, frame=%#v", frame)
 	}
-	contentY := 1
+	// Bare-row composer (Pen): one row, no border, prompt glyph leads.
+	contentY := 0
 	if renderAttachmentChips(m.pendingImageLabels, m.pendingDocuments) != "" {
 		contentY++
 	}
-	x := frame.composerRect.x + 2 + lipgloss.Width(composerVisualLinePrefix(m.input, true)) + column
+	x := frame.composerRect.x + lipgloss.Width(composerVisualLinePrefix(m.input, true)) + column
 	y := frame.composerRect.y + contentY
 	return x, y
 }
