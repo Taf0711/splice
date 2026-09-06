@@ -46,8 +46,9 @@ func appendPickerPlan(t *testing.T, store *sessions.Store, sessionID string, pla
 	}
 }
 
-// runSessionScan executes the scan cmd synchronously and feeds the result
-// back through Update, so tests exercise the same async flow the UI does.
+// runSessionScan executes the launch scan synchronously and feeds the
+// result back through Update, so tests exercise the same async flow the
+// UI does. The scan arms the launch resume card; it never opens a picker.
 func runSessionScan(t *testing.T, m model) model {
 	t.Helper()
 	var scanCmd tea.Cmd
@@ -60,7 +61,23 @@ func runSessionScan(t *testing.T, m model) model {
 	return next
 }
 
-// This test pins launch scoping to the current workspace, not global history.
+// openResumePicker arms the /resume scan and lands it synchronously.
+func openResumePicker(t *testing.T, m model) model {
+	t.Helper()
+	m.input.SetValue("/resume")
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("resume: no scan cmd armed")
+	}
+	if msg := cmd(); msg != nil {
+		updated, _ = next.Update(msg)
+		next = updated.(model)
+	}
+	return next
+}
+
+// Launch never auto-opens a picker — the scan only feeds the resume card.
 func TestLaunchPickerScopesPlansToWorkspace(t *testing.T) {
 	store := testSessionStore(t)
 	foreign, err := store.Create(sessions.CreateInput{Title: "Foreign plan", Cwd: filepath.Join(t.TempDir(), "other")})
@@ -72,7 +89,10 @@ func TestLaunchPickerScopesPlansToWorkspace(t *testing.T) {
 	m := newModel(context.Background(), Options{Cwd: filepath.Join(t.TempDir(), "workspace"), SessionStore: store})
 	next := runSessionScan(t, m)
 	if next.picker != nil {
-		t.Fatalf("launch picker opened for a plan in another workspace: %#v", next.picker.items)
+		t.Fatalf("launch scan opened a picker: %#v", next.picker)
+	}
+	if next.scannedLatest != nil {
+		t.Fatalf("launch card armed for a foreign-workspace session: %+v", next.scannedLatest.Meta)
 	}
 }
 
@@ -92,10 +112,10 @@ func TestLaunchPickerStaysClosedWhenSuppressed(t *testing.T) {
 		return newModel(context.Background(), Options{Cwd: workspace, SessionStore: store})
 	}
 
-	// Control: without a guard the picker must open, otherwise the cases below
-	// would pass for the wrong reason.
-	if runSessionScan(t, newModelWithPlan(t)).picker == nil {
-		t.Fatal("control: launch picker did not open for a workspace plan")
+	// Control: the scan must arm the card, and /resume must open the picker —
+	// otherwise the cases below would pass for the wrong reason.
+	if runSessionScan(t, newModelWithPlan(t)).scannedLatest == nil {
+		t.Fatal("control: launch scan did not arm the resume card")
 	}
 
 	for _, test := range []struct {
@@ -115,13 +135,13 @@ func TestLaunchPickerStaysClosedWhenSuppressed(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			m := test.arrange(newModelWithPlan(t))
 			if next := runSessionScan(t, m); next.picker != nil {
-				t.Fatalf("launch picker opened despite %s: %#v", test.name, next.picker.items)
+				t.Fatalf("launch scan opened a picker despite %s: %#v", test.name, next.picker)
 			}
 		})
 	}
 }
 
-// This test pins a workspace plan to the launch picker and exposes its phase.
+// /resume's picker pins the workspace plan and exposes its phase.
 func TestLaunchPickerShowsPlanStatus(t *testing.T) {
 	store := testSessionStore(t)
 	workspace := t.TempDir()
@@ -132,12 +152,12 @@ func TestLaunchPickerShowsPlanStatus(t *testing.T) {
 	appendPickerPlan(t, store, session.SessionID, "workspace-plan")
 
 	m := newModel(context.Background(), Options{Cwd: workspace, SessionStore: store})
-	next := runSessionScan(t, m)
+	next := openResumePicker(t, m)
 	if next.picker == nil || !next.picker.planBearing {
-		t.Fatalf("expected launch picker for workspace plan, got %#v", next.picker)
+		t.Fatalf("expected resume picker for workspace plan, got %#v", next.picker)
 	}
-	if next.picker.title != "Continue where you left off" {
-		t.Fatalf("launch picker title = %q", next.picker.title)
+	if next.picker.title != "Resume a session" {
+		t.Fatalf("resume picker title = %q", next.picker.title)
 	}
 	if !strings.Contains(next.picker.items[0].Label, "crystallized") || !strings.Contains(next.picker.items[0].Label, "0/1 steps") {
 		t.Fatalf("plan status missing from picker row: %#v", next.picker.items[0])

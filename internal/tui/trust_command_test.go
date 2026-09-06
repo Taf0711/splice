@@ -106,13 +106,22 @@ func TestStartupTrustChoiceContinuesToLaunchSessionPicker(t *testing.T) {
 	m.designMode = false
 	next := m.openTrustPromptIfRequired()
 	next = selectTrustItem(t, next, trustActionCurrent)
-	chosen, trustCmd := next.choosePicker()
+	chosen, _ := next.choosePicker()
 	got := chosen.(model)
-	// The launch session scan is async now: the cmd arms it, the picker
-	// opens when the scan lands. Land it synchronously for the assertion.
-	if trustCmd != nil {
-		if msg := trustCmd(); msg != nil {
-			updated, _ := got.Update(msg)
+	// Trust resolves into the launch state: the scan feeds the resume card,
+	// and the picker opens only via /resume (no auto-open modals). A scan
+	// already in flight (armed at Init) means /resume marks the intent and
+	// the picker arms when that scan lands.
+	// The trust flow armed a launch scan whose cmd the choosePicker return
+	// carried; this test dropped it, so emulate the landing (the flag
+	// clears, scannedLatest arms) before the explicit /resume.
+	got.sessionScanInFlight = false
+	got.input.SetValue("/resume")
+	updated, cmd := got.Update(testKey(tea.KeyEnter))
+	got = updated.(model)
+	if cmd != nil {
+		if msg := cmd(); msg != nil {
+			updated, _ = got.Update(msg)
 			got = updated.(model)
 		}
 	}
