@@ -209,13 +209,13 @@ func (m model) composerDividerLine(width int) string {
 func (m model) statusLine(width int) string {
 	tier := widthTier(width)
 	separator := zeroTheme.line.Render(" │ ")
-	prefix := "  "
+	prefix := "status  "
 
-	// Left chip: the safety-relevant run-state — permission mode (auto/ask/unsafe)
-	// in its mode colour. This was previously only on the easy-to-miss composer
-	// rule; the persistent footer is where users look for "will it run commands?".
+	// Frame kAYHl/P13 status grammar: "status  <phase (health)> | <model
+	// (effort)> | <N tok> | $x.xx | <elapsed>". The leading "status" label
+	// names the line; the phase chip carries color + word (health override).
 	modeText, modeStyle := m.modeLabel()
-	left := prefix + zeroTheme.accent.Render("●") + " " + modeStyle.Render(modeText)
+	left := prefix + modeStyle.Render(modeText)
 	// P1.4 delta (frame esBzN): when the presentation layer has observed a
 	// lifecycle phase, the phase chip replaces the static mode chip — color +
 	// word driven by phase, health alerting overrides the color. The
@@ -295,7 +295,17 @@ func (m model) statusLine(width int) string {
 		}
 	}
 
+	// Frame kAYHl/P13 status grammar — the right side reads
+	// "model (effort) | N tok | $x.xx | elapsed" (segments drop under width
+	// pressure; the model and token figures lead).
 	rightGroups := []string{}
+	if model := strings.TrimSpace(m.modelName); model != "" {
+		label := model
+		if m.reasoningEffort != "" {
+			label += " (" + string(m.reasoningEffort) + ")"
+		}
+		rightGroups = append(rightGroups, zeroTheme.muted.Render(label))
+	}
 	gaugeShown := false
 	if tier >= tierNarrow && !m.sidebarActive() {
 		if gauge := m.contextWindowSegment(); gauge != "" {
@@ -313,6 +323,9 @@ func (m model) statusLine(width int) string {
 	}
 	if usage != "" {
 		rightGroups = append(rightGroups, zeroTheme.muted.Render(usage))
+	}
+	if elapsed := m.statusElapsedSegment(); elapsed != "" {
+		rightGroups = append(rightGroups, zeroTheme.muted.Render(elapsed))
 	}
 	right := strings.Join(rightGroups, separator)
 
@@ -425,6 +438,20 @@ func (m model) usageStatusSegment() string {
 	}
 	cost := usage.FormatCostDisplay(summary.CostCoverage, summary.TotalCost, summary.UnpricedCount).Cost
 	return fmt.Sprintf("%s tok · %s", humanCount(tokens), cost)
+}
+
+// statusElapsedSegment renders the session/run clock for the status line
+// (mock grammar's trailing segment): the in-flight run's elapsed, else the
+// time since the session's first activity this sitting. Empty before any
+// activity — a fresh launch shows no fabricated 0s clock.
+func (m model) statusElapsedSegment() string {
+	if m.pending && !m.turnStartedAt.IsZero() {
+		return formatWorkingElapsed(m.now().Sub(m.turnStartedAt))
+	}
+	if m.turnStartedAt.IsZero() {
+		return ""
+	}
+	return formatWorkingElapsed(m.now().Sub(m.turnStartedAt))
 }
 
 // usageCostSegment returns just the session cost, with the token figure dropped.

@@ -3504,19 +3504,18 @@ func (m model) composerIdleHint() string {
 		return ""
 	}
 	sidebarKey := labelOr(m.keyBindings.toggleSidebar, "Ctrl+B")
-	detailKey := labelOr(m.keyBindings.toggleDetailed, "Ctrl+O")
-	mouseKey := labelOr(m.keyBindings.toggleMouse, "Ctrl+E")
 
 	var hint string
 	switch widthTier(m.width) {
 	case tierTiny:
 		return "" // too cramped for a hint
 	case tierNarrow:
-		hint = "? shortcuts"
+		hint = "? shortcuts · / palette"
 	case tierMedium:
-		hint = fmt.Sprintf("? shortcuts · %s sidebar · %s copy", sidebarKey, mouseKey)
+		hint = fmt.Sprintf("? shortcuts · %s sidebar · / palette", sidebarKey)
 	default:
-		hint = fmt.Sprintf("? shortcuts · %s sidebar · %s detail · %s copy · Shift+Tab mode", sidebarKey, detailKey, mouseKey)
+		// Frame kAYHl item 9: the launch hint names the four entry points.
+		hint = fmt.Sprintf("? shortcuts · %s sidebar · / palette · /help index", sidebarKey)
 	}
 	return zeroTheme.faint.Render(hint)
 }
