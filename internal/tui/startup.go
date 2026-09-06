@@ -53,12 +53,10 @@ const emptyStateTagline = "Any model. Every tool. Splice limits."
 // transcript has no real content: the brand glyph and tagline.
 func (m model) emptyState(width int) string {
 	lines := m.emptyStateLines(width)
-
-	// Vertically center within the stream area: the frame around it (title bar,
-	// rules, composer, status line) occupies ~6 terminal rows.
-	height := normalizedStartupHeight(m.height)
-	gap := clamp((height-6-len(lines))/2, 0, 12)
-	return strings.Repeat("\n", gap) + strings.Join(lines, "\n") + strings.Repeat("\n", gap)
+	// The cockpit reads from the top (frame kAYHl): the contract band is the
+	// first row of the body, not a poster floating mid-screen. No vertical
+	// centering — the launch body starts directly under the title bar.
+	return strings.Join(lines, "\n")
 }
 
 func (m model) emptyStateWithOverlay(width int, overlay string) string {
