@@ -281,3 +281,82 @@ func (f *fakeToolRunner) RunTool(ctx context.Context, name string, args map[stri
 	f.calls++
 	return ToolResult{OK: true, Output: "ran"}, nil
 }
+
+func TestSemanticOnlyPlan_PrioritizesWithoutNarrowing(t *testing.T) {
+	// A semantic hit for billing files on an AUDIT task: the candidate
+	// files are prepended for priority, but the default request is fully
+	// retained (no suppression claimed) and the listing stays - the
+	// planner never established what can be omitted.
+	scope := StageScopePlan{
+		CognitionResolved: false, // semantic-only: no authority
+		KnownFiles:        []string{"internal/billing/dunning.go"},
+		ExpansionBudget:   2,
+	}
+	def := scopeTestRequest() // listing + 2 reads
+	req, sup := ScopedContextRequest(def, scope, "semantic-priority")
+	// 1 prepended read + 3 default queries.
+	if len(req.Queries) != 4 {
+		t.Fatalf("semantic-priority queries = %d, want 4", len(req.Queries))
+	}
+	if req.Queries[0].QueryType != schemas.ContextReadFile || *req.Queries[0].Path != "internal/billing/dunning.go" {
+		t.Fatalf("first query must be the prioritized known file, got %+v", req.Queries[0])
+	}
+	if sup.ContextQueriesSuppressed != 0 || sup.FileReadsSuppressed != 0 || sup.GlobalListsSuppressed != 0 {
+		t.Fatalf("semantic-priority must claim zero suppression: %+v", sup)
+	}
+	// Listing retained.
+	if req.Queries[1].QueryType != schemas.ContextListFiles {
+		t.Fatal("semantic-priority must retain the listing")
+	}
+}
+
+func TestSemanticCandidatesForAuditTask_CannotSuppressAuditDiscovery(t *testing.T) {
+	// The billing-distraction case from the review: fresh billing memory
+	// on an audit task must not remove audit discovery. scopePlanFor with
+	// a SemanticResolved plan grants no narrowing authority.
+	plan := DiscoveryPlan{
+		ResolvedByCognition: []ResolvedQuestion{{Question: "resolve architecture", NodeID: 1}},
+		SemanticResolved:    true,
+		SemanticHits:        2,
+		Unresolved:          nil, // empty because the semantic path never enumerated needs
+	}
+	rev, project := "abc123", "/repo"
+	nodes := []memd.GraphNode{{
+		ID: 1, Kind: "fact", Status: "active",
+		ProjectPath: &project, VerifiedRevision: &rev,
+		Anchors: []memd.GraphAnchor{{Kind: "file", Value: "internal/billing/dunning.go"}},
+	}}
+	scope := scopePlanFor(plan, nodes, nil)
+	if scope.CognitionResolved {
+		t.Fatal("semantic-resolved plan must not claim resolution authority")
+	}
+	if !scope.AllowGlobalList || !scope.AllowGlobalSearch {
+		t.Fatalf("audit discovery must remain available: %+v", scope)
+	}
+	// But the billing file IS prioritized in KnownFiles for context.
+	if len(scope.KnownFiles) != 1 || scope.KnownFiles[0] != "internal/billing/dunning.go" {
+		t.Fatalf("KnownFiles = %v, want the billing candidate prioritized", scope.KnownFiles)
+	}
+}
+
+func TestExactAnchorResolution_AuthorizesNarrowing(t *testing.T) {
+	// An exact-anchor resolution (fresh anchor locating the symbol the
+	// question asks about) DOES authorize narrowing: the listing drops.
+	plan := DiscoveryPlan{
+		ResolvedByCognition: []ResolvedQuestion{{Question: "where is EnforceRetention?", NodeID: 1}},
+		SemanticResolved:    false,
+	}
+	rev, project := "abc123", "/repo"
+	nodes := []memd.GraphNode{{
+		ID: 1, Kind: "fact", Status: "active",
+		ProjectPath: &project, VerifiedRevision: &rev,
+		Anchors: []memd.GraphAnchor{{Kind: "file", Value: "internal/audit/log.go"}},
+	}}
+	scope := scopePlanFor(plan, nodes, nil)
+	if !scope.CognitionResolved {
+		t.Fatal("exact-anchor resolution must claim authority")
+	}
+	if scope.AllowGlobalList {
+		t.Fatal("listing must drop under exact-anchor resolution")
+	}
+}

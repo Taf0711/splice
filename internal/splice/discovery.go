@@ -40,6 +40,13 @@ type DiscoveryPlan struct {
 	// SemanticHits counts entry nodes found through the semantic index when
 	// no exact anchor was derivable. Zero unless the semantic path ran.
 	SemanticHits int `json:"semantic_hits,omitempty"`
+	// SemanticResolved marks that ResolvedByCognition came from the
+	// semantic fallback rather than exact anchor matches. Semantic
+	// candidates prioritize context but do NOT authorize scope narrowing:
+	// the planner never enumerated the full set of needs, so a fresh fact
+	// about one package does not answer how another package exposes what
+	// the target requires.
+	SemanticResolved bool `json:"semantic_resolved,omitempty"`
 }
 
 // ResolvedQuestion pairs a resolved question with its cognition source.
@@ -140,6 +147,7 @@ func planDiscovery(ctx context.Context, client *memd.Client, projectPath, intent
 			return plan, bundleNodes(fresh)
 		}
 		plan.SemanticHits = len(entry)
+		plan.SemanticResolved = true
 		resolved, failed, okNodes := admitFreshNodes(ctx, projectPath, entry)
 		plan.AnchorsValidated += resolved
 		plan.AnchorsFailed += failed
@@ -612,11 +620,17 @@ func scopePlanFor(plan DiscoveryPlan, planNodes []memd.GraphNode, priorScope *St
 	sort.Strings(scope.KnownSymbols)
 	scope.KnownSymbols = dedupeStrings(scope.KnownSymbols)
 
-	scope.CognitionResolved = len(plan.ResolvedByCognition) > 0
-	// Privileges: cognition narrows the world. Global listing is only for
-	// runs where cognition resolved nothing. Global search stays available
-	// while unresolved questions remain, and is suppressed once every
-	// derived question was answered by cognition.
+	// Resolution authority: ONLY exact-anchor resolutions (a concrete
+	// question matched to concrete evidence) authorize narrowing. Semantic
+	// candidates deliver as knowledge and prioritize context, but the
+	// planner never enumerated the full set of needs, so an empty
+	// unresolved list from the semantic path must NOT mean complete
+	// coverage. A fresh fact about one package does not answer how another
+	// package stores or exposes what the target needs.
+	scope.CognitionResolved = len(plan.ResolvedByCognition) > 0 && !plan.SemanticResolved
+	// Privileges: global listing survives whenever the resolutions came
+	// from the semantic path (authority not established); global search
+	// survives while unresolved questions remain.
 	scope.AllowGlobalList = !scope.CognitionResolved
 	scope.AllowGlobalSearch = len(scope.UnresolvedQuestions) > 0 || !scope.CognitionResolved
 	return scope
@@ -649,17 +663,36 @@ func dedupeStrings(in []string) []string {
 //  4. global listing only when nothing was resolved.
 func ScopedContextRequest(defaultReq schemas.ContextRequest, scope StageScopePlan, reason string) (schemas.ContextRequest, ScopeSuppression) {
 	sup := ScopeSuppression{}
-	if !scope.CognitionResolved || len(scope.UnresolvedQuestions) > 0 {
-		// A4 partial scope: unresolved questions keep the default reads
-		// (targeted discovery remains allowed); only the global listing is
-		// dropped when cognition resolved at least one question. Cold
-		// fallback (nothing resolved) returns the default byte-identically
-		// with zero suppression. Full-resolution scope narrows further.
-		if !scope.CognitionResolved {
+	if !scope.CognitionResolved {
+		if len(scope.KnownFiles) == 0 {
+			// Cold fallback: no cognition at all. Default byte-identical.
 			return defaultReq, sup
 		}
+		// Semantic-only candidates: PRIORITIZE the known files by
+		// prepending their reads to the FULL default request. No
+		// suppression is claimed - the planner did not establish what can
+		// be omitted. The global listing stays (discovery remains open);
+		// the model simply sees the prioritized files first.
+		prepended := make([]schemas.ContextQuery, 0, len(scope.KnownFiles)+len(defaultReq.Queries))
+		for _, f := range scope.KnownFiles {
+			path := f
+			prepended = append(prepended, schemas.ContextQuery{
+				QueryType:  schemas.ContextReadFile,
+				Path:       &path,
+				MaxResults: 10,
+				MaxChars:   scopedReadMaxChars,
+			})
+		}
+		prepended = append(prepended, defaultReq.Queries...)
+		return schemas.ContextRequest{Reason: reason, Queries: prepended}, sup
+	}
+	if len(scope.UnresolvedQuestions) > 0 {
+		// Exact-anchor resolutions with remaining unresolved questions:
+		// A4 partial scope. Default reads stay (targeted discovery remains
+		// allowed); only the global listing is dropped - the one operation
+		// the resolved cognition provably makes redundant.
 		partial := defaultReq
-		kept := partial.Queries[:0:0]
+		kept := make([]schemas.ContextQuery, 0, len(defaultReq.Queries))
 		for _, q := range defaultReq.Queries {
 			if q.QueryType == schemas.ContextListFiles {
 				sup.GlobalListsSuppressed = 1
