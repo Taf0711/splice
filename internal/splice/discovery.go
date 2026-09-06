@@ -755,14 +755,12 @@ func ScopedContextRequest(defaultReq schemas.ContextRequest, scope StageScopePla
 	for _, dq := range defaultReq.Queries {
 		switch dq.QueryType {
 		case schemas.ContextReadFile:
-			if dq.Path != nil && covered[*dq.Path] {
-				sup.FileReadsSuppressed++
-			} else if scope.CognitionResolved {
-				// The scoped request deliberately narrows to known files;
-				// default fallback reads for files cognition did not name
-				// are suppressed only when the plan resolved the location
-				// question. This is a structural omission, not an
-				// inferred one: the scoped request never issues them.
+			// A default read for a file the scoped request still reads is
+			// RETAINED work, not suppressed work: count only default reads
+			// whose file the scoped request does not issue. This is a
+			// structural omission (the scoped request never issues them),
+			// never an inference.
+			if dq.Path != nil && !covered[*dq.Path] {
 				sup.FileReadsSuppressed++
 			}
 		case schemas.ContextListFiles:

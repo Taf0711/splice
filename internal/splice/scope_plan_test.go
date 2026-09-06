@@ -62,10 +62,11 @@ func TestScopedContextRequest_FreshCognitionSuppressesListingAndDefaults(t *test
 	if sup.GlobalListsSuppressed != 1 {
 		t.Fatalf("global listing must be suppressed, got %+v", sup)
 	}
-	if sup.FileReadsSuppressed != 2 {
-		// main.go dropped (not covered, cognition-resolved) + store.go
-		// folded into the scoped read (covered).
-		t.Fatalf("file reads suppressed = %d, want 2", sup.FileReadsSuppressed)
+	if sup.FileReadsSuppressed != 1 {
+		// Only main.go is omitted (uncovered). The store.go default read
+		// is RETAINED work: the scoped request still reads that exact
+		// file, so counting it as suppressed would inflate savings.
+		t.Fatalf("file reads suppressed = %d, want 1", sup.FileReadsSuppressed)
 	}
 	if sup.ContextQueriesDefault != 3 || sup.ContextQueriesExecuted != 2 || sup.ContextQueriesSuppressed != 1 {
 		t.Fatalf("context query accounting wrong: %+v", sup)
