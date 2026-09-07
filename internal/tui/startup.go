@@ -65,18 +65,26 @@ func (m model) emptyStateWithOverlay(width int, overlay string) string {
 		lines[index] = fitStyledLine(lines[index], width)
 	}
 
-	// The palette replaces the empty-state cockpit while open. Pad the block
-	// to the viewport height so it fills the body, but NEVER exceed the
-	// visible budget: a block taller than the viewport gets scrolled from
-	// its bottom, which showed only blank gap rows (the "blank screen" at
-	// tall terminals).
+	// The palette replaces the empty-state cockpit while open. Center it in
+	// the visible body, but keep the padded block within the viewport
+	// budget: a block taller than the viewport gets scrolled from its
+	// bottom, which showed only blank gap rows (the "blank screen" at tall
+	// terminals).
 	available := normalizedStartupHeight(m.height) - 5
 	if m.titleBarInTranscriptBody() {
 		available -= 2
 	}
-	total := len(lines) + 2 // one gap row above and below, clamped below
-	gap := maxInt(1, minInt(2, (available-total)/2))
-	return strings.Repeat("\n", gap) + strings.Join(lines, "\n") + strings.Repeat("\n", gap)
+	// The transcript viewport is bottom-anchored, so pad BELOW the palette:
+	// the palette sits at the top of the body and the blank remainder trails.
+	// Centering the block (or padding above) let the bottom-anchored window
+	// show only blank tail rows on tall terminals — the blank "/" screen.
+	above := 1
+	if len(lines) >= available {
+		// Degenerate: no room to pad. Render the palette bare.
+		return strings.Join(lines, "\n")
+	}
+	below := available - above - len(lines)
+	return strings.Repeat("\n", above) + strings.Join(lines, "\n") + strings.Repeat("\n", below)
 }
 
 func (m model) emptyStateLines(width int) []string {
