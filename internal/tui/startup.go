@@ -74,15 +74,15 @@ func (m model) emptyStateWithOverlay(width int, overlay string) string {
 	if m.titleBarInTranscriptBody() {
 		available -= 2
 	}
-	// The transcript viewport is bottom-anchored, so pad BELOW the palette:
-	// the palette sits at the top of the body and the blank remainder trails.
-	// Centering the block (or padding above) let the bottom-anchored window
-	// show only blank tail rows on tall terminals — the blank "/" screen.
-	above := 1
 	if len(lines) >= available {
 		// Degenerate: no room to pad. Render the palette bare.
 		return strings.Join(lines, "\n")
 	}
+	// Drop the palette about a third of the way into the body — visually
+	// centered — but keep most of the padding BELOW it: the transcript
+	// viewport is bottom-anchored, so a large top pad made the window show
+	// only blank tail rows on tall terminals (the blank "/" screen).
+	above := minInt(20, maxInt(1, (available-len(lines))/3))
 	below := available - above - len(lines)
 	return strings.Repeat("\n", above) + strings.Join(lines, "\n") + strings.Repeat("\n", below)
 }
