@@ -433,8 +433,10 @@ func TestCommandPaletteStaysOpenForNoMatches(t *testing.T) {
 			t.Fatalf("no-match palette should include %q in %q", want, plain)
 		}
 	}
-	if strings.Contains(plain, "/,") {
-		t.Fatalf("slash query should stay inside palette display, got %q", plain)
+	// The bare prompt row (Pen grammar) keeps the live query visible while
+	// the palette is open — the composer must not look wiped.
+	if !strings.Contains(plain, "> /,") {
+		t.Fatalf("prompt row should show the live slash query, got %q", plain)
 	}
 }
 
@@ -476,8 +478,10 @@ func TestFilePaletteStaysOpenForNoMatches(t *testing.T) {
 			t.Fatalf("no-match file palette should include %q in %q", want, plain)
 		}
 	}
-	if strings.Contains(plain, "@missing") {
-		t.Fatalf("bare @ query should stay inside palette display without @ prefix, got %q", plain)
+	// The bare prompt row (Pen grammar) keeps the live query visible while
+	// the palette is open.
+	if !strings.Contains(plain, "> @missing") {
+		t.Fatalf("prompt row should show the live @ query, got %q", plain)
 	}
 }
 
@@ -558,8 +562,8 @@ func TestFilePaletteDisplaysFilenamesAndPaths(t *testing.T) {
 	m = typeRunes(t, m, "@main")
 
 	plain := plainRender(t, m.View())
-	if strings.Contains(plain, "@main") {
-		t.Fatalf("file palette should not render @ prefixes, got %q", plain)
+	if !strings.Contains(plain, "> @main") {
+		t.Fatalf("prompt row should show the @ query, got %q", plain)
 	}
 	if !strings.Contains(plain, "main.go") || !strings.Contains(plain, "cmd/server") {
 		t.Fatalf("file palette should show filename plus parent path, got %q", plain)

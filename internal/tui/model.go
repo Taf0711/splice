@@ -3340,7 +3340,14 @@ func (m model) twoColumnTranscriptView() string {
 	width := chatW
 
 	suggestionOverlay := m.suggestionOverlay(width)
-	bodyItems := m.transcriptBodyItems(width, "", false)
+	emptyOverlay := ""
+	if m.transcriptEmpty() && !m.pending && suggestionOverlay != "" {
+		// The command/file palette must also ride the launch cockpit in the
+		// two-column layout; dropping it left a blank body and a wiped
+		// composer row whenever the sidebar was visible.
+		emptyOverlay = suggestionOverlay
+	}
+	bodyItems := m.transcriptBodyItems(width, emptyOverlay, false)
 	footer := m.footerView(width)
 	overlayForViewport := suggestionOverlay
 	if m.transcriptEmpty() && !m.pending {
@@ -4262,18 +4269,12 @@ func (m model) appendStreamingCursor(lines []string, width int) []string {
 // composerLine renders the borderless composer.
 func (m model) composerLine(width int) string {
 	input := m.input
-	hideInputForSuggestions := m.suggestionsActive() && (!m.suggestionsAreFiles || fileSuggestionOnlyInput(m.input.Value()))
-	if hideInputForSuggestions {
-		input.SetValue("")
-		input.Placeholder = ""
-		input.CursorEnd()
-	}
+	// The palette owns the screen, but the Pen prompt row still shows the
+	// live query ("> /mod") — wiping it made the composer look broken while
+	// the palette was open.
 	state := composerState{text: input.Value(), cursor: input.Position()}
 	if m.composerActive {
 		state = m.composer
-	}
-	if hideInputForSuggestions {
-		state = composerState{}
 	}
 	argumentHint := commandArgumentHintForInput(input.Value())
 	if argumentHint != "" && input.Position() != len([]rune(input.Value())) {
