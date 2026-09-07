@@ -318,7 +318,7 @@ func TestSuggestionOverlayRenders(t *testing.T) {
 	if strings.Contains(plain, "/model") {
 		t.Fatalf("suggestion overlay should display command names without slash prefixes, got %q", plain)
 	}
-	for _, want := range []string{"╭── Commands", "╰", "search > mo", "↑/↓ move", "Enter run", "Esc close"} {
+	for _, want := range []string{"╭── Commands", "╰", "query  mo", "↑/↓ move", "Enter run", "Esc close"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("suggestion overlay should include %q in %q", want, plain)
 		}
@@ -337,7 +337,7 @@ func TestSuggestionOverlayStaysVisibleWhenTranscriptScrolled(t *testing.T) {
 	m = typeRunes(t, m, "/")
 
 	plain := plainRender(t, m.View())
-	if !strings.Contains(plain, "Commands") || !strings.Contains(plain, "search >") {
+	if !strings.Contains(plain, "Commands") {
 		t.Fatalf("suggestion overlay should stay visible above composer while transcript is scrolled, got %q", plain)
 	}
 	lines := strings.Split(plain, "\n")
@@ -428,7 +428,7 @@ func TestCommandPaletteStaysOpenForNoMatches(t *testing.T) {
 		t.Fatalf("expected no command matches, got %v", suggestionNames(m))
 	}
 	plain := plainRender(t, m.View())
-	for _, want := range []string{"search > ,", "no matching commands"} {
+	for _, want := range []string{"query  ,", "no matching commands"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("no-match palette should include %q in %q", want, plain)
 		}
@@ -473,7 +473,7 @@ func TestFilePaletteStaysOpenForNoMatches(t *testing.T) {
 		t.Fatalf("expected no file matches, got %v", suggestionNames(m))
 	}
 	plain := plainRender(t, m.View())
-	for _, want := range []string{"Files", "search > missing", "no matching files"} {
+	for _, want := range []string{"Files", "query  missing", "no matching files"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("no-match file palette should include %q in %q", want, plain)
 		}

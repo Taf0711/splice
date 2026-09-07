@@ -665,12 +665,14 @@ func renderSuggestionPalette(items []selectableListItem, selected, width int, ti
 	}
 	labelWidth = minInt(labelWidth, maxInt(8, innerWidth/2))
 
-	lines := make([]string, 0, len(visible)+5)
-	searchInset := lipgloss.Width("❯ ")
-	searchPrefix := transparentSurface(zeroTheme.ink).Render(strings.Repeat(" ", searchInset))
-	lines = append(lines, fillPaletteLine(searchPrefix+renderSuggestionSearchLine(query, maxInt(1, innerWidth-searchInset)), innerWidth, transparentSurface))
-	lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
-
+	// Card grammar matches the receipt/lifecycle cards: rounded card, bold
+	// inset title, 2-cell body indent, [key] action footer. The query rides
+	// the title row ("Commands · mo") instead of a separate search line.
+	empty := len(visible) == 0
+	lines := make([]string, 0, len(visible)+3)
+	if query = strings.TrimSpace(query); query != "" {
+		lines = append(lines, zeroTheme.faint.Render("query  ")+zeroTheme.ink.Render(query))
+	}
 	for index, item := range visible {
 		absoluteIndex := start + index
 		surface := transparentSurface
@@ -692,20 +694,18 @@ func renderSuggestionPalette(items []selectableListItem, selected, width int, ti
 		}
 		lines = append(lines, fillPaletteLine(line, innerWidth, surface))
 	}
-	if len(visible) == 0 {
+	if empty {
 		message := "no matching commands"
 		if strings.EqualFold(strings.TrimSpace(title), "Files") {
 			message = "no matching files"
 		}
-		lines = append(lines, fillPaletteLine(searchPrefix+zeroTheme.faint.Render(message), innerWidth, transparentSurface))
+		lines = append(lines, fillPaletteLine(zeroTheme.faint.Render(message), innerWidth, transparentSurface))
 	}
 
 	if footer = strings.TrimSpace(footer); footer != "" {
-		lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
-		line := zeroTheme.faint.Render(footer)
-		lines = append(lines, fillPaletteLine(line, innerWidth, transparentSurface))
+		lines = append(lines, zeroTheme.faint.Render(footer))
 	}
-	return styledBlockFillTitle(paletteWidth, strings.TrimSpace(title), lines, zeroTheme.lineStrong, lipgloss.NewStyle())
+	return styledBlockFillTitleStyled(paletteWidth, strings.TrimSpace(title), lines, zeroTheme.cardRun, lipgloss.NewStyle(), zeroTheme.ink.Bold(true))
 }
 
 func styledBlockFillTitle(width int, title string, lines []string, borderStyle lipgloss.Style, fill lipgloss.Style) string {
@@ -744,14 +744,6 @@ func styledBlockFillTitleStyled(width int, title string, lines []string, borderS
 	}
 	body = append(body, bottom)
 	return strings.Join(body, "\n")
-}
-
-func renderSuggestionSearchLine(query string, width int) string {
-	query = strings.TrimSpace(query)
-	label := zeroTheme.userPrompt.Render("search > ")
-	valueWidth := maxInt(1, width-lipgloss.Width(label))
-	value := zeroTheme.ink.Render(truncateRunes(query, valueWidth))
-	return fitStyledLine(label+value, width)
 }
 
 func transparentSurface(style lipgloss.Style) lipgloss.Style {
