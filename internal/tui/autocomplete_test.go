@@ -325,6 +325,21 @@ func TestSuggestionOverlayRenders(t *testing.T) {
 	}
 }
 
+// Regression: on tall terminals the overlay block was padded to the full
+// startup height, grew taller than the viewport, and the viewport pinned to
+// its blank bottom rows — typing "/" showed an empty body (owner capture,
+// ~100-row window). The palette must stay visible at any height.
+func TestSuggestionOverlayVisibleOnTallTerminal(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.width, m.height = 260, 100
+	m = typeRunes(t, m, "/wwww")
+
+	plain := plainRender(t, m.View())
+	if !strings.Contains(plain, "Commands") || !strings.Contains(plain, "no matching commands") {
+		t.Fatalf("palette must stay visible on a tall terminal, got %q", plain)
+	}
+}
+
 func TestSuggestionOverlayStaysVisibleWhenTranscriptScrolled(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.width, m.height = 96, 32

@@ -65,13 +65,17 @@ func (m model) emptyStateWithOverlay(width int, overlay string) string {
 		lines[index] = fitStyledLine(lines[index], width)
 	}
 
-	// Center the palette in the visible chat area. While the command palette is
-	// open it replaces the empty-state wordmark instead of sitting below it.
+	// The palette replaces the empty-state cockpit while open. Pad the block
+	// to the viewport height so it fills the body, but NEVER exceed the
+	// visible budget: a block taller than the viewport gets scrolled from
+	// its bottom, which showed only blank gap rows (the "blank screen" at
+	// tall terminals).
 	available := normalizedStartupHeight(m.height) - 5
 	if m.titleBarInTranscriptBody() {
 		available -= 2
 	}
-	gap := maxInt(0, (available-len(lines))/2)
+	total := len(lines) + 2 // one gap row above and below, clamped below
+	gap := maxInt(1, minInt(2, (available-total)/2))
 	return strings.Repeat("\n", gap) + strings.Join(lines, "\n") + strings.Repeat("\n", gap)
 }
 
