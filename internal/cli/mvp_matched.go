@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/Taf0711/splice/internal/eval"
@@ -355,12 +356,20 @@ func runMvpMatchedSnapshots(
 	return nil
 }
 
-// armTreatment returns the treatment label for one arm (memory on/off).
+// armTreatment returns the treatment label for one arm. The label records
+// the arm's memory flag AND the ambient SPLICE_TREATMENT when set, because
+// the treatment environment applies process-wide: a warm arm under
+// SPLICE_TREATMENT=cold is realized as retrieval-only, not full, and the
+// row must say so or the analysis attributes the wrong condition.
 func armTreatment(arm string) string {
+	memory := "memory_off"
 	if arm == "warm" {
-		return "memory_on"
+		memory = "memory_on"
 	}
-	return "memory_off"
+	if t := strings.TrimSpace(os.Getenv("SPLICE_TREATMENT")); t != "" {
+		return memory + "+" + t
+	}
+	return memory
 }
 
 // appendRowWithCheckpoint appends one completed or skipped row and
