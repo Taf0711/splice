@@ -40,12 +40,17 @@ carries the treatment). Therefore:
   sidecar unavailable"; building memd from the memd/ module into the
   same bin dir fixed it.
 
-## Scope-only contract realized for the first time
+## Scope-only contract verification
 
-Before bdc3344, scope-only set --memory off, which takes the
-deliberate-cold exec path: nil memory store, no retrieval, no scope
-construction. The treatment degenerated into cold while reporting
-scope-only. After the fix (--memory on + ExemplarModeRetrieveNoPrompt):
+CORRECTION (external planner handoff review, 2026-09-08): the matched
+runner's warm arm passed --memory on from the arm configuration before
+bdc3344 (in.Treatment empty leaves the argv untouched), and the
+ambient-env resolvers produced the same knob values. The realized
+triple on THIS path was identical before the R3 fix. The R3 fix is
+load-bearing only for explicit-treatment launches, which the matched
+runner never uses. The numbers below stand; the earlier "first time"
+framing was wrong. This run verifies the realized contract
+(--memory on + ExemplarModeRetrieveNoPrompt in the typed treatment):
 
 - Warm arm label: memory_on+scope-only (no override suffix).
 - Retrieval ON: resolved_by_cognition=2, anchors validated 2,
