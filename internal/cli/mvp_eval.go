@@ -393,10 +393,18 @@ func runMvpEvalCommand(args []string, stdout io.Writer, stderr io.Writer, deps a
 					row.Success = false
 					row.Error = truncateForNote(runErr.Error(), 300)
 				}
-				if out.ToolCalls > 0 || out.FileReads > 0 || out.SearchCalls > 0 {
-					row.ToolCalls = out.ToolCalls
-					row.FileReads = out.FileReads
-					row.SearchCalls = out.SearchCalls
+				if out.FailureCategory != "" {
+					row.FailureCategory = out.FailureCategory
+				}
+				// A3: stream work counters land UNCONDITIONALLY, before any
+				// telemetry call. Zero with a transcript is a measured zero;
+				// the pointers below record transcript presence so absent
+				// data never masquerades as zero work.
+				row.ToolCalls = out.ToolCalls
+				row.FileReads = out.FileReads
+				row.SearchCalls = out.SearchCalls
+				if out.StreamWorkObserved != nil {
+					row.StreamWorkObserved = out.StreamWorkObserved
 				}
 				if row.Telemetry {
 					collectRunTelemetry(ctx, deps, arm.dir, sessionID+"-taskb", &row)
@@ -550,10 +558,15 @@ func fillAttemptRow(row familyPairRow, out eval.RunOutput, runErr error, latency
 	row.Tokens = out.Tokens
 	row.Telemetry = out.TelemetryFound
 	row.LatencyMs = latency.Milliseconds()
-	if out.ToolCalls > 0 || out.FileReads > 0 || out.SearchCalls > 0 {
-		row.ToolCalls = out.ToolCalls
-		row.FileReads = out.FileReads
-		row.SearchCalls = out.SearchCalls
+	// A3: stream work counters land UNCONDITIONALLY (not gated on being
+	// nonzero), with transcript presence recorded separately. This makes
+	// the call-site order vs collectRunTelemetry irrelevant: telemetry
+	// no longer touches these fields, and zeros are measured zeros.
+	row.ToolCalls = out.ToolCalls
+	row.FileReads = out.FileReads
+	row.SearchCalls = out.SearchCalls
+	if out.StreamWorkObserved != nil {
+		row.StreamWorkObserved = out.StreamWorkObserved
 	}
 	if runErr != nil {
 		row.Success = false

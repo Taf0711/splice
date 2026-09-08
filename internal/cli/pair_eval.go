@@ -296,6 +296,9 @@ func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
 			found = tokens > 0
 		}
 		toolCalls, fileReads, searchCalls := sumStreamJSONWork(out)
+		// A3: record transcript presence so a zero counter downstream is
+		// known to be a measured zero, not missing telemetry.
+		streamObserved := len(out) > 0
 
 		// Capture the agent's proposal FIRST, before any verifier touches
 		// the tree: verifier probes write, rename, and delete files, and a
@@ -335,8 +338,9 @@ func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
 			}
 			return eval.RunOutput{Success: false, Tokens: tokens, TelemetryFound: found,
 					ToolCalls: toolCalls, FileReads: fileReads, SearchCalls: searchCalls,
-					FailureCategory: "agent_noncompletion",
-					ManifestDigest:  proposal.ManifestDigest, ProposedDigest: proposal.ProposedDigest,
+					StreamWorkObserved: boolPtr(streamObserved),
+					FailureCategory:    "agent_noncompletion",
+					ManifestDigest:     proposal.ManifestDigest, ProposedDigest: proposal.ProposedDigest,
 					VerifierOutputPath: artifactPath(in.ArtifactDir, in.SessionID, "verifier.txt"),
 					PatchPath:          artifactPath(in.ArtifactDir, in.SessionID, "patch.diff"),
 					EffectiveTreatment: eff},
@@ -364,6 +368,7 @@ func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
 			PatchPath:          artifactPath(in.ArtifactDir, in.SessionID, "patch.diff"),
 			ManifestDigest:     proposal.ManifestDigest, ProposedDigest: proposal.ProposedDigest,
 			VerifierTimeMs:     verifierElapsed.Milliseconds(),
+			StreamWorkObserved: boolPtr(streamObserved),
 			EffectiveTreatment: eff,
 		}
 		if !success {
@@ -817,6 +822,9 @@ func untrackedDiffSection(path string, content []byte) []byte {
 	}
 	return buf.Bytes()
 }
+
+// boolPtr returns a pointer to b (helper for A1/A3 availability fields).
+func boolPtr(b bool) *bool { return &b }
 
 // probeMemoryStoreAvailability reports whether a usable memory sidecar backs
 // this attempt: "available" when the sidecar resolves and answers a health

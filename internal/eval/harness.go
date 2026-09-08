@@ -78,6 +78,11 @@ type RunOutput struct {
 	ToolCalls   int
 	FileReads   int
 	SearchCalls int
+	// StreamWorkObserved records whether a stream transcript was
+	// actually parsed for this run (A3): a non-nil true with zero
+	// counters is a measured zero; nil or false means no transcript, so
+	// the counters are unknown, never free.
+	StreamWorkObserved *bool
 	// Artifact paths for this attempt (empty when ArtifactDir was unset).
 	VerifierOutputPath string
 	PatchPath          string

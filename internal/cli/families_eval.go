@@ -170,6 +170,11 @@ type familyPairRow struct {
 	FileReads      int `json:"file_reads,omitempty"`
 	WebSearchCalls int `json:"web_search_calls,omitempty"`
 	Repairs        int `json:"repair_count,omitempty"`
+	// A3: StreamWorkObserved distinguishes a measured zero from absent
+	// work telemetry. true means a stream transcript was parsed (zero
+	// counters are real zeros); nil/false means no transcript, so the
+	// counters above are unknown, not free.
+	StreamWorkObserved *bool `json:"stream_work_observed,omitempty"`
 
 	// Outcome from the trace: status plus abort reason (abort_budget is the
 	// pathological tail marker).
@@ -595,11 +600,16 @@ func collectRunTelemetry(ctx context.Context, deps appDeps, repoRoot, sessionID 
 		return
 	}
 	trace := matched.Trace
+	// A3: zero the TRACE-SOURCED fields only. ToolCalls/SearchCalls/
+	// FileReads are stream-work counters (sumStreamJSONWork), never trace
+	// fields; zeroing them here erased the stream counts on every row
+	// that had a trace and kept them on rows without one, which was
+	// arm-asymmetric in practice (cold rows kept tool_calls, warm rows
+	// lost them). This function no longer touches them at all.
 	row.InputTokens = 0
 	row.OutputTokens = 0
 	row.ReasoningTokens = 0
 	row.CachedTokens = 0
-	row.ToolCalls = 0
 	row.WebSearchCalls = 0
 	row.MemoryItems = 0
 	row.MemoryChars = 0
