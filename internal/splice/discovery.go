@@ -724,6 +724,12 @@ func ScopedContextRequest(defaultReq schemas.ContextRequest, scope StageScopePla
 			remaining = append(remaining, q)
 		}
 		combined := append(priority, remaining...)
+		// Measured accounting, not suppression: the semantic branch omits
+		// nothing, but the executed-request size and the counterfactual
+		// default size are still telemetry the analysis needs. Without
+		// these, a semantic-only run records no context totals at all.
+		sup.ContextQueriesDefault = len(defaultReq.Queries)
+		sup.ContextQueriesExecuted = len(combined)
 		return schemas.ContextRequest{Reason: reason, Queries: combined}, sup
 	}
 	if len(scope.UnresolvedQuestions) > 0 {
