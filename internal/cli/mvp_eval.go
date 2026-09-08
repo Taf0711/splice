@@ -575,6 +575,15 @@ func fillAttemptRow(row familyPairRow, out eval.RunOutput, runErr error, latency
 	if out.FailureCategory != "" {
 		row.FailureCategory = out.FailureCategory
 	}
+	// A3: when no sidecar trace was found (cold arms never create one),
+	// the stream-json usage split IS the measured input/output record.
+	// It must reach the row or cold rows lose their token split while
+	// warm rows keep it: another asymmetric-telemetry defect. Values the
+	// transcript did not carry stay absent (unknown, never zero).
+	if !out.TelemetryFound && out.StreamSplitFound {
+		row.InputTokens = out.StreamInputTokens
+		row.OutputTokens = out.StreamOutputTokens
+	}
 	row.ManifestDigest = out.ManifestDigest
 	row.ProposedDigest = out.ProposedDigest
 	row.VerifierTimeMs = out.VerifierTimeMs

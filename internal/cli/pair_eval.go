@@ -299,6 +299,7 @@ func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
 		// A3: record transcript presence so a zero counter downstream is
 		// known to be a measured zero, not missing telemetry.
 		streamObserved := len(out) > 0
+		streamIn, streamOut, splitFound := sumStreamJSONTokenSplit(out)
 
 		// Capture the agent's proposal FIRST, before any verifier touches
 		// the tree: verifier probes write, rename, and delete files, and a
@@ -339,8 +340,9 @@ func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
 			return eval.RunOutput{Success: false, Tokens: tokens, TelemetryFound: found,
 					ToolCalls: toolCalls, FileReads: fileReads, SearchCalls: searchCalls,
 					StreamWorkObserved: boolPtr(streamObserved),
-					FailureCategory:    "agent_noncompletion",
-					ManifestDigest:     proposal.ManifestDigest, ProposedDigest: proposal.ProposedDigest,
+					StreamInputTokens:  streamIn, StreamOutputTokens: streamOut, StreamSplitFound: splitFound,
+					FailureCategory: "agent_noncompletion",
+					ManifestDigest:  proposal.ManifestDigest, ProposedDigest: proposal.ProposedDigest,
 					VerifierOutputPath: artifactPath(in.ArtifactDir, in.SessionID, "verifier.txt"),
 					PatchPath:          artifactPath(in.ArtifactDir, in.SessionID, "patch.diff"),
 					EffectiveTreatment: eff},
@@ -369,6 +371,7 @@ func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
 			ManifestDigest:     proposal.ManifestDigest, ProposedDigest: proposal.ProposedDigest,
 			VerifierTimeMs:     verifierElapsed.Milliseconds(),
 			StreamWorkObserved: boolPtr(streamObserved),
+			StreamInputTokens:  streamIn, StreamOutputTokens: streamOut, StreamSplitFound: splitFound,
 			EffectiveTreatment: eff,
 		}
 		if !success {
@@ -527,6 +530,13 @@ func isSearchTool(name string) bool {
 	return false
 }
 
+// streamJSONUsage is the parsed form of one stream-json usage event.
+type streamJSONUsage struct {
+	PromptTokens     int `json:"promptTokens"`
+	CompletionTokens int `json:"completionTokens"`
+	TotalTokens      int `json:"totalTokens"`
+}
+
 // sumStreamJSONTokens sums totalTokens across stream-json usage records in a
 // captured exec transcript. It is best-effort: unparseable lines are skipped,
 // and an empty transcript yields zero.
@@ -537,14 +547,37 @@ func sumStreamJSONTokens(out []byte) int {
 		if !strings.Contains(trimmed, "\"type\":\"usage\"") {
 			continue
 		}
-		var record struct {
-			TotalTokens int `json:"totalTokens"`
-		}
+		var record streamJSONUsage
 		if json.Unmarshal([]byte(trimmed), &record) == nil {
 			total += record.TotalTokens
 		}
 	}
 	return total
+}
+
+// sumStreamJSONTokenSplit returns the input/output token split across
+// stream-json usage records (A3): cold arms have no sidecar trace, so this
+// transcript is their only measured input/output source. Records carrying
+// only totalTokens (no split) contribute to the total but not the split,
+// and the returned found flag reports whether ANY split-bearing record was
+// seen, so a caller can keep unknown distinct from zero.
+func sumStreamJSONTokenSplit(out []byte) (input, output int, splitFound bool) {
+	for _, line := range strings.Split(string(out), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.Contains(trimmed, "\"type\":\"usage\"") {
+			continue
+		}
+		var record streamJSONUsage
+		if json.Unmarshal([]byte(trimmed), &record) != nil {
+			continue
+		}
+		if record.PromptTokens > 0 || record.CompletionTokens > 0 {
+			input += record.PromptTokens
+			output += record.CompletionTokens
+			splitFound = true
+		}
+	}
+	return input, output, splitFound
 }
 
 // collectTrace resolves the trace for a deterministic session id and returns

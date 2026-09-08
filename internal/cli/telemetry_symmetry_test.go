@@ -109,3 +109,59 @@ func TestStreamCounterSymmetryAcrossArms(t *testing.T) {
 		t.Fatal("both arms must record stream-work presence")
 	}
 }
+
+// TestColdInputOutputRecordedWithoutSidecarTrace pins the A3 cold-arm
+// contract: with no sidecar trace found, the stream-json usage split is
+// the row's measured input/output record; with a sidecar trace, the trace
+// wins. A transcript without split-bearing records leaves the split
+// unknown, never zero.
+func TestColdInputOutputRecordedWithoutSidecarTrace(t *testing.T) {
+	out := eval.RunOutput{
+		Tokens:             1700,
+		TelemetryFound:     false,
+		StreamInputTokens:  1200,
+		StreamOutputTokens: 500,
+		StreamSplitFound:   true,
+	}
+	row := fillAttemptRow(familyPairRow{}, out, nil, 0, harnessProvenanceInfo{}, mvpEvalOptions{}, eval.RunInput{})
+	if row.InputTokens != 1200 || row.OutputTokens != 500 {
+		t.Fatalf("cold row split = (%d, %d), want (1200, 500)", row.InputTokens, row.OutputTokens)
+	}
+	// Warm arm (trace found): the trace is authoritative; the stream
+	// split must not overwrite it.
+	warm := fillAttemptRow(familyPairRow{}, eval.RunOutput{
+		Tokens: 1700, TelemetryFound: true,
+		StreamInputTokens: 1200, StreamOutputTokens: 500, StreamSplitFound: true,
+	}, nil, 0, harnessProvenanceInfo{}, mvpEvalOptions{}, eval.RunInput{})
+	if warm.InputTokens != 0 {
+		// The trace backfill (collectRunTelemetry) owns the split; the
+		// stream split must not have pre-filled it.
+		t.Fatalf("stream split overrode a trace-backed row: input=%d", warm.InputTokens)
+	}
+	// Transcript without any split-bearing record: unknown stays unknown.
+	noSplit := fillAttemptRow(familyPairRow{}, eval.RunOutput{
+		Tokens: 1700, TelemetryFound: false, StreamSplitFound: false,
+	}, nil, 0, harnessProvenanceInfo{}, mvpEvalOptions{}, eval.RunInput{})
+	if noSplit.InputTokens != 0 || noSplit.OutputTokens != 0 {
+		t.Fatal("absent split must stay absent (omitempty drops it), never a fabricated value")
+	}
+}
+
+// TestSumStreamJSONTokenSplit pins the transcript parser: split-bearing
+// records feed the split, totals-only records do not, and malformed lines
+// are skipped.
+func TestSumStreamJSONTokenSplit(t *testing.T) {
+	transcript := `
+{"type":"usage","promptTokens":1200,"completionTokens":500,"totalTokens":1700}
+{"type":"usage","promptTokens":300,"completionTokens":100,"totalTokens":400}
+{"type":"usage","totalTokens":9999}
+not json at all
+`
+	input, output, found := sumStreamJSONTokenSplit([]byte(transcript))
+	if !found {
+		t.Fatal("split-bearing records were present")
+	}
+	if input != 1500 || output != 600 {
+		t.Fatalf("split = (%d, %d), want (1500, 600)", input, output)
+	}
+}

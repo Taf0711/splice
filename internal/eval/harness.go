@@ -106,6 +106,13 @@ type RunOutput struct {
 	ProposedDigest string
 	// VerifierTimeMs is the wall-clock time of the verifier invocation.
 	VerifierTimeMs int64
+	// Stream token split (A3): input/output measured from the run's own
+	// stream-json usage events. SplitFound distinguishes a transcript
+	// with split-bearing usage records (measured values) from one
+	// without (unknown; totals may still exist).
+	StreamInputTokens  int
+	StreamOutputTokens int
+	StreamSplitFound   bool
 	// EffectiveTreatment carries the typed resolution of what this
 	// attempt's treatment actually was (A1). It rides every outcome
 	// path, including failures, so a failed attempt still records the
