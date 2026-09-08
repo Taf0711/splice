@@ -184,6 +184,22 @@ type familyPairRow struct {
 	DirectHits    int    `json:"direct_hits,omitempty"`
 	LookupMode    string `json:"retrieval_mode,omitempty"` // direct | search | ""
 
+	// A1 typed treatment: what the run configuration REQUESTED and what
+	// the child ACTUALLY ran. The effective name is the resolved
+	// treatment; the dimensions are pointers so false is a measured fact
+	// and null is unknown. StoreAvailable is the availability fact that
+	// gates retrieval independently of every environment setting.
+	// NormalizedFromAmbient is set only on the legacy ambient path (a
+	// warm arm under SPLICE_TREATMENT=cold normalizing to
+	// retrieval-only), so an old script's meaning stays visible.
+	RequestedTreatment    string `json:"requested_treatment,omitempty"`
+	EffectiveTreatment    string `json:"effective_treatment,omitempty"`
+	NormalizedFromAmbient string `json:"normalized_from_ambient,omitempty"`
+	EffRetrieval          *bool  `json:"effective_retrieval,omitempty"`
+	EffPromptDelivery     *bool  `json:"effective_prompt_delivery,omitempty"`
+	EffContextPolicy      *bool  `json:"effective_context_policy,omitempty"`
+	StoreAvailable        *bool  `json:"store_available,omitempty"`
+
 	// Track C discovery-plan telemetry, summed across the run's stages:
 	// what the cognition graph resolved, what freshness admitted, and the
 	// conservatively counted avoided discovery operations.

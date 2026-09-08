@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"time"
+
+	"github.com/Taf0711/splice/internal/splice"
 )
 
 // RunInput is one headless exec invocation plus its check command.
@@ -25,6 +27,12 @@ type RunInput struct {
 	// child so concurrent arms never share mutable knob state. Empty
 	// keeps the parent environment as-is (the historical behavior).
 	Treatment string `json:"-"`
+	// EffectiveTreatment is the typed resolution of what this run's
+	// treatment ACTUALLY is: requested vs effective names, the three
+	// causal dimensions, and store availability. Production resolves it
+	// ONCE pre-launch in the run seam; a test may set it directly to
+	// assert what the row would record.
+	EffectiveTreatment *splice.EffectiveTreatmentSpec `json:"-"`
 	// TreatmentEnv carries the resolved treatment environment entries.
 	// Production derives it from Treatment; a test may set it directly
 	// to assert what the child would receive without resolving.
@@ -80,6 +88,12 @@ type RunOutput struct {
 	ProposedDigest string
 	// VerifierTimeMs is the wall-clock time of the verifier invocation.
 	VerifierTimeMs int64
+	// EffectiveTreatment carries the typed resolution of what this
+	// attempt's treatment actually was (A1). It rides every outcome
+	// path, including failures, so a failed attempt still records the
+	// realized condition. nil means the run seam could not resolve it
+	// (never silently rewritten on the row).
+	EffectiveTreatment *splice.EffectiveTreatmentSpec
 }
 
 // RunFunc runs one headless exec invocation in an arm copy and returns its

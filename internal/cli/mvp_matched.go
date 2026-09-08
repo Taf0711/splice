@@ -243,10 +243,11 @@ func runMvpMatchedSnapshots(
 		// ---- Phase 3: Task B attempts on the frozen, identical tree.
 		for attempt := 1; attempt <= options.Rollouts; attempt++ {
 			for _, arm := range []struct {
-				name   string
-				dir    string
-				memory string
-			}{{"cold", coldDir, "off"}, {"warm", warmDir, "on"}} {
+				name      string
+				dir       string
+				memory    string
+				treatment string
+			}{{"cold", coldDir, "off", "cold"}, {"warm", warmDir, "on", "full"}} {
 				// Reset the arm's sidecar state so attempt N's captures
 				// never leak into attempt N+1, then restore the snapshot
 				// cognition for the warm arm.
@@ -315,6 +316,7 @@ func runMvpMatchedSnapshots(
 				_, _, row := mvpRunTracked(deps, ctx, runCtx, runFunc, eval.RunInput{
 					SessionID:   sessionID,
 					Memory:      arm.memory,
+					Treatment:   arm.treatment,
 					Prompt:      family.TargetTask,
 					Cwd:         arm.dir,
 					Check:       targetChecksFor(manifestDir, family),

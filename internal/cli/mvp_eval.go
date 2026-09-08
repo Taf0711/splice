@@ -572,6 +572,19 @@ func fillAttemptRow(row familyPairRow, out eval.RunOutput, runErr error, latency
 	row.SpliceCommit = prov.SpliceCommit
 	row.SpliceDirty = prov.SpliceDirty
 	row.SpliceBinary = prov.SpliceBinary
+	// A1: the typed effective treatment rides every outcome, including
+	// failures, so a failed attempt still records the realized condition.
+	// The legacy armTreatment-style label (row.Treatment) stays for
+	// backward compatibility with existing reports.
+	if out.EffectiveTreatment != nil {
+		row.RequestedTreatment = out.EffectiveTreatment.RequestedTreatment
+		row.EffectiveTreatment = string(out.EffectiveTreatment.Treatment)
+		row.NormalizedFromAmbient = out.EffectiveTreatment.NormalizedFromAmbient
+		row.EffRetrieval = out.EffectiveTreatment.Retrieval
+		row.EffPromptDelivery = out.EffectiveTreatment.PromptDelivery
+		row.EffContextPolicy = out.EffectiveTreatment.ContextPolicy
+		row.StoreAvailable = out.EffectiveTreatment.StoreAvailable
+	}
 	if options.Model != "" {
 		row.ConfiguredModel = options.Model
 	}

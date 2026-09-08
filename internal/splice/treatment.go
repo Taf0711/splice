@@ -2,6 +2,7 @@ package splice
 
 import (
 	"fmt"
+	"strings"
 )
 
 // Typed treatment specification for the cognition diagnostic experiment
@@ -137,4 +138,129 @@ func (t TreatmentSpec) Environment() []string {
 		scopeModeEnv + "=" + string(scope),
 		exemplarModeEnv + "=" + string(t.ExemplarMode),
 	}
+}
+
+// EffectiveTreatmentSpec records what one attempt's treatment ACTUALLY was:
+// the resolved treatment name, its three causal dimensions (each a pointer
+// so false is a measured fact and nil is unknown), and the memory store
+// availability that gates retrieval independently of every environment
+// setting. Requested and effective stay separate: the requested names come
+// from the run configuration, the effective dimensions from the resolved
+// spec plus the store the child will actually see.
+//
+// The three environment settings (SPLICE_TREATMENT, SPLICE_SCOPE_MODE,
+// SPLICE_EXEMPLAR_MODE) alone do not establish retrieval: a warm-labeled
+// arm with no usable memory store realizes retrieval OFF no matter what
+// the knobs say. StoreAvailable carries that fact so a row never claims a
+// realized condition the child could not run.
+type EffectiveTreatmentSpec struct {
+	// Treatment is the resolved treatment name. Empty only when no
+	// treatment name was in play (a legacy ambient invocation).
+	Treatment TreatmentName
+	// Retrieval is whether graph/FTS retrieval actually runs: the exec
+	// --memory flag realized (the arm's memory argument) AND a usable
+	// memory store. nil means the caller could not determine it.
+	Retrieval *bool
+	// PromptDelivery is whether cognition prose reaches the model. nil
+	// means unknown.
+	PromptDelivery *bool
+	// ContextPolicy is whether the scope context policy applies. nil
+	// means unknown.
+	ContextPolicy *bool
+	// StoreAvailable is whether a usable memory store backs this
+	// attempt. nil means the caller could not determine it. It is a
+	// first-class dimension, not part of the treatment name: the same
+	// treatment runs with and without a store, and the difference is
+	// causal.
+	StoreAvailable *bool
+	// RequestedTreatment is the treatment name the run configuration
+	// asked for, before any ambient normalization. It differs from
+	// Treatment only on the legacy ambient path.
+	RequestedTreatment string
+	// NormalizedFromAmbient names the ambient SPLICE_TREATMENT value
+	// this effective spec was normalized from, when the caller resolved
+	// a legacy ambient setting instead of an explicit run-configuration
+	// treatment. Empty for explicit-treatment launches. The label keeps
+	// old scripts' meaning visible instead of silently relabeled.
+	NormalizedFromAmbient string
+}
+
+// boolPtr returns a pointer to b (helper for the three dimension fields).
+func boolPtr(b bool) *bool { return &b }
+
+// ResolveEffectiveTreatment resolves one attempt's typed treatment ONCE,
+// pre-launch, from the arm's memory argument and the ambient
+// SPLICE_TREATMENT value. Two shapes, one code path:
+//
+//   - explicit: ambientTreatment names a resolvable treatment (the run
+//     configuration set it, or the operator did and the historical
+//     semantics map it). The spec's declared dimensions are the effective
+//     dimensions.
+//   - legacy ambient: ambientTreatment is empty or unresolvable. The
+//     treatment name stays empty (never a fabricated name) and the
+//     dimensions fall back to what the arm's memory flag realizes. A
+//     WARM arm under ambient SPLICE_TREATMENT=cold normalizes to
+//     retrieval-only and labels the normalization: that special case is
+//     the historical behavior (bdc3344 R1-R3 era), preserved here rather
+//     than silently changed.
+//
+// storeAvailable feeds retrieval directly: retrieval = memoryFlag &&
+// storeAvailable when both are known. An unknown store leaves retrieval
+// nil (unknown, not false).
+func ResolveEffectiveTreatment(armMemory, ambientTreatment, storeAvailable string) (EffectiveTreatmentSpec, error) {
+	eff := EffectiveTreatmentSpec{}
+	armRetrieval := armMemory == "on"
+
+	ambient := strings.TrimSpace(ambientTreatment)
+	if ambient == "" {
+		// No treatment name anywhere: legacy shape. Dimensions follow
+		// the arm's memory flag; delivery and policy are unknown
+		// because the environment knobs were not pinned.
+		eff.RequestedTreatment = ""
+		if storeKnown := storeAvailable != ""; storeKnown {
+			eff.StoreAvailable = boolPtr(storeAvailable == "available")
+			eff.Retrieval = boolPtr(armRetrieval && *eff.StoreAvailable)
+		}
+		return eff, nil
+	}
+
+	spec, err := ResolveTreatment(ambient)
+	if err != nil {
+		// An unresolvable ambient treatment is a loud configuration
+		// error: spending a live attempt under it would poison the
+		// comparison.
+		return EffectiveTreatmentSpec{}, err
+	}
+	eff.RequestedTreatment = ambient
+	eff.Treatment = spec.Name
+	eff.PromptDelivery = boolPtr(spec.PromptDelivery())
+	eff.ContextPolicy = boolPtr(spec.ContextPolicy())
+	if storeAvailable != "" {
+		eff.StoreAvailable = boolPtr(storeAvailable == "available")
+	}
+	// Historical special case, preserved and labeled: a warm arm under
+	// ambient SPLICE_TREATMENT=cold meant retrieval-only. The declared
+	// treatment's retrieval dimension (cold: off) contradicts the arm's
+	// memory flag (warm: on), and the ARM won (the flag is what the
+	// child actually received). Normalize to retrieval-only so the row
+	// names the realized condition, and mark where the name came from.
+	if spec.Name == TreatmentCold && armRetrieval {
+		normalized, nerr := ResolveTreatment(string(TreatmentRetrievalOnly))
+		if nerr != nil {
+			return EffectiveTreatmentSpec{}, nerr
+		}
+		eff.Treatment = normalized.Name
+		eff.PromptDelivery = boolPtr(normalized.PromptDelivery())
+		eff.ContextPolicy = boolPtr(normalized.ContextPolicy())
+		eff.NormalizedFromAmbient = ambient
+	}
+	// The arm's memory flag realizes retrieval, gated by store
+	// availability when known. This is the actual retrieval fact, not
+	// the treatment's declared dimension.
+	if eff.StoreAvailable != nil {
+		eff.Retrieval = boolPtr(armRetrieval && *eff.StoreAvailable)
+	} else {
+		eff.Retrieval = boolPtr(armRetrieval)
+	}
+	return eff, nil
 }

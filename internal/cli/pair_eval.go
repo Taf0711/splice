@@ -259,6 +259,21 @@ func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
 				return eval.RunOutput{}, terr
 			}
 		}
+		// A1: resolve the typed effective treatment ONCE, pre-launch, so
+		// the row records what the child will actually run: requested vs
+		// effective names, the three causal dimensions, and store
+		// availability. The sidecar health check is the store-availability
+		// probe; an unresolvable sidecar is "unavailable" (a fact), not an
+		// error that blocks the run. A pre-set in.EffectiveTreatment wins
+		// (test seam; production leaves it nil).
+		eff := in.EffectiveTreatment
+		if eff == nil {
+			resolved, rerr := splice.ResolveEffectiveTreatment(in.Memory, in.Treatment, probeMemoryStoreAvailability(ctx, deps))
+			if rerr != nil {
+				return eval.RunOutput{}, rerr
+			}
+			eff = &resolved
+		}
 		args := pairEvalArgv(in, model, spec, haveSpec)
 
 		runCmd := exec.CommandContext(ctx, exe, args...)
@@ -298,7 +313,8 @@ func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
 					FailureCategory: "agent_noncompletion",
 					ManifestDigest:  proposal.ManifestDigest, ProposedDigest: proposal.ProposedDigest,
 					VerifierOutputPath: artifactPath(in.ArtifactDir, in.SessionID, "verifier.txt"),
-					PatchPath:          artifactPath(in.ArtifactDir, in.SessionID, "patch.diff")},
+					PatchPath:          artifactPath(in.ArtifactDir, in.SessionID, "patch.diff"),
+					EffectiveTreatment: eff},
 				fmt.Errorf("exec run %s: %v: %s", in.SessionID, runErr, out)
 		}
 
@@ -322,7 +338,8 @@ func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
 			VerifierOutputPath: artifactPath(in.ArtifactDir, in.SessionID, "verifier.txt"),
 			PatchPath:          artifactPath(in.ArtifactDir, in.SessionID, "patch.diff"),
 			ManifestDigest:     proposal.ManifestDigest, ProposedDigest: proposal.ProposedDigest,
-			VerifierTimeMs: verifierElapsed.Milliseconds(),
+			VerifierTimeMs:     verifierElapsed.Milliseconds(),
+			EffectiveTreatment: eff,
 		}
 		if !success {
 			result.FailureCategory = failureCategory
@@ -748,6 +765,23 @@ func untrackedDiffSection(path string, content []byte) []byte {
 		buf.WriteString("+" + line + "\n")
 	}
 	return buf.Bytes()
+}
+
+// probeMemoryStoreAvailability reports whether a usable memory sidecar backs
+// this attempt: "available" when the sidecar resolves and answers a health
+// check, "unavailable" otherwise. The value feeds the typed effective
+// treatment's StoreAvailable dimension (A1): a warm arm without a store
+// realizes retrieval OFF no matter what the environment knobs say. The
+// empty-string case never occurs (every return names one of the two).
+func probeMemoryStoreAvailability(ctx context.Context, deps appDeps) string {
+	client, err := deps.resolveMemory(ctx)
+	if err != nil || client == nil {
+		return "unavailable"
+	}
+	if herr := client.Health(ctx); herr != nil {
+		return "unavailable"
+	}
+	return "available"
 }
 
 // sha256Hex returns the hex sha256 of data, or "" on no data. An empty
