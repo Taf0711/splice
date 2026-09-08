@@ -345,6 +345,7 @@ func runFamiliesEvalCommand(args []string, stdout io.Writer, stderr io.Writer, d
 	ctx, stop := signalContext()
 	defer stop()
 
+	experimentID := fmt.Sprintf("families-%d", time.Now().UnixNano())
 	runFunc := pairEvalRunFunc(deps, options.Model)
 	rows := make([]familyPairRow, 0, len(manifest.Families)*options.Rollouts*2)
 
@@ -441,11 +442,20 @@ func runFamiliesEvalCommand(args []string, stdout io.Writer, stderr io.Writer, d
 						tryID = fmt.Sprintf("%s-try%d", sessionID, try)
 					}
 					out, runErr = runFunc(runCtx, eval.RunInput{
-						SessionID: tryID,
-						Memory:    arm.memory,
-						Prompt:    family.TargetTask,
-						Cwd:       arm.dir,
-						Check:     verifiers[family.ID],
+						SessionID:       tryID,
+						Memory:          arm.memory,
+						Treatment:       armTreatment(arm.name),
+						ExperimentID:    experimentID,
+						Family:          family.ID,
+						Arm:             arm.name,
+						Task:            "B",
+						Attempt:         attempt,
+						ArmOrder:        try + 1,
+						Check:           verifiers[family.ID],
+						CheckScriptPath: filepath.Join(manifestDir, family.TargetCheckFile),
+						Prompt:          family.TargetTask,
+						Cwd:             arm.dir,
+						ArtifactDir:     mvpArtifactDir(options.OutDir, family.ID, attempt, arm.name, "b"),
 					})
 					if runErr == nil || ctx.Err() != nil {
 						break

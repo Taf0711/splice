@@ -308,6 +308,31 @@ func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
 		}
 
 		if runErr != nil {
+			// A2: write the typed manifest and export the trace on the
+			// agent-failure path too, so failed attempts stay in the
+			// evidence tree with the same schema as completed ones. The
+			// verifier did not run: recorded as not_run.
+			if in.ArtifactDir != "" {
+				exported, reason := exportTraceArtifact(ctx, deps, in.Cwd, in.SessionID, in.ArtifactDir)
+				manifest := buildAttemptManifest(in, eval.RunOutput{
+					Success: false, FailureCategory: "agent_noncompletion",
+					EffectiveTreatment: eff,
+				}, attemptIdentity{
+					ExperimentID:   in.ExperimentID,
+					Family:         in.Family,
+					Arm:            in.Arm,
+					Task:           in.Task,
+					Attempt:        in.Attempt,
+					ArmOrder:       in.ArmOrder,
+					RequestedModel: model,
+				}, false, proposal, false, verifierVerdictNotRun, in.CheckScriptPath)
+				manifest.TraceExported = exported
+				manifest.TraceUnavailable = reason
+				if exported {
+					manifest.TraceArtifact = in.SessionID + "-trace.json"
+				}
+				_ = writeAttemptManifest(in.ArtifactDir, manifest)
+			}
 			return eval.RunOutput{Success: false, Tokens: tokens, TelemetryFound: found,
 					ToolCalls: toolCalls, FileReads: fileReads, SearchCalls: searchCalls,
 					FailureCategory: "agent_noncompletion",
@@ -347,7 +372,29 @@ func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
 		// Evidence completeness is recorded on the result, never folded into
 		// the verdict: an artifact write failure must not convert a real
 		// correctness result into a model failure (or the reverse).
+		// A2: the typed manifest is written LAST (so the artifact
+		// inventory includes everything above) and the sidecar trace is
+		// exported BEFORE any caller ResetProject can delete it.
 		if in.ArtifactDir != "" {
+			exported, reason := exportTraceArtifact(ctx, deps, in.Cwd, in.SessionID, in.ArtifactDir)
+			manifest := buildAttemptManifest(in, result, attemptIdentity{
+				ExperimentID:   in.ExperimentID,
+				Family:         in.Family,
+				Arm:            in.Arm,
+				Task:           in.Task,
+				Attempt:        in.Attempt,
+				ArmOrder:       in.ArmOrder,
+				RequestedModel: model,
+			}, false, proposal, true, verdict, in.CheckScriptPath)
+			manifest.TraceExported = exported
+			manifest.TraceUnavailable = reason
+			if exported {
+				manifest.TraceArtifact = in.SessionID + "-trace.json"
+			}
+			if merr := writeAttemptManifest(in.ArtifactDir, manifest); merr != nil && result.EvidenceStatus == "" {
+				result.EvidenceStatus = "incomplete"
+				result.ArtifactError = truncateForNote(merr.Error(), 300)
+			}
 			if err := writeAttemptEvidence(in.ArtifactDir, in.SessionID, proposal); err != nil {
 				result.EvidenceStatus = "incomplete"
 				result.ArtifactError = truncateForNote(err.Error(), 300)
@@ -379,6 +426,10 @@ const (
 	verifierVerdictReject  verifierVerdict = "reject"  // process exited nonzero
 	verifierVerdictInfra   verifierVerdict = "infra"   // verifier could not run or report
 	verifierVerdictTimeout verifierVerdict = "timeout" // the caller's deadline fired
+	// verifierVerdictNotRun records that the verifier never executed
+	// because the agent did not complete. It is an evidence fact about
+	// the attempt, never a verdict about the task.
+	verifierVerdictNotRun verifierVerdict = "not_run"
 )
 
 // classifyVerifierExit maps a verifier process error to a verdict. The

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -72,12 +73,20 @@ func runMvpMatchedSnapshots(
 		// Fresh timeout per Task A run, cancelled when the run ends.
 		snapCtx, snapCancel := context.WithTimeout(ctx, familiesRunTimeout)
 		snapStatus, snapErr, snapRow := mvpRunOnceTracked(deps, ctx, snapCtx, runFunc, eval.RunInput{
-			SessionID:   snapSession + "-taska",
-			Memory:      "on",
-			Prompt:      family.PrecursorTask,
-			Cwd:         snapDir,
-			Check:       precursorChecksFor(manifestDir, family),
-			ArtifactDir: mvpArtifactDir(options.OutDir, family.ID, 0, "snapshot", "a"),
+			SessionID:       snapSession + "-taska",
+			Memory:          "on",
+			Treatment:       "full",
+			ExperimentID:    experimentID,
+			Family:          family.ID,
+			Arm:             "snapshot",
+			Task:            "A",
+			Attempt:         0,
+			ArmOrder:        1,
+			Prompt:          family.PrecursorTask,
+			Cwd:             snapDir,
+			Check:           precursorChecksFor(manifestDir, family),
+			CheckScriptPath: filepath.Join(manifestDir, family.PrecursorCheckFile),
+			ArtifactDir:     mvpArtifactDir(options.OutDir, family.ID, 0, "snapshot", "a"),
 		}, experimentID, options, prov, family.ID, 0, "snapshot", "A", options.OutDir)
 		snapCancel()
 		appendRowWithCheckpoint(rows, options.OutDir, snapRow)
@@ -314,14 +323,21 @@ func runMvpMatchedSnapshots(
 				// Fresh timeout per Task B attempt, cancelled when it ends.
 				runCtx, cancel := context.WithTimeout(ctx, familiesRunTimeout)
 				_, _, row := mvpRunTracked(deps, ctx, runCtx, runFunc, eval.RunInput{
-					SessionID:   sessionID,
-					Memory:      arm.memory,
-					Treatment:   arm.treatment,
-					Prompt:      family.TargetTask,
-					Cwd:         arm.dir,
-					Check:       targetChecksFor(manifestDir, family),
-					OutputPath:  mvpDebugPath(options.OutDir, family.ID, attempt, arm.name, "b"),
-					ArtifactDir: mvpArtifactDir(options.OutDir, family.ID, attempt, arm.name, "b"),
+					SessionID:       sessionID,
+					Memory:          arm.memory,
+					Treatment:       arm.treatment,
+					ExperimentID:    experimentID,
+					Family:          family.ID,
+					Arm:             arm.name,
+					Task:            "B",
+					Attempt:         attempt,
+					ArmOrder:        1,
+					Prompt:          family.TargetTask,
+					Cwd:             arm.dir,
+					Check:           targetChecksFor(manifestDir, family),
+					CheckScriptPath: filepath.Join(manifestDir, family.TargetCheckFile),
+					OutputPath:      mvpDebugPath(options.OutDir, family.ID, attempt, arm.name, "b"),
+					ArtifactDir:     mvpArtifactDir(options.OutDir, family.ID, attempt, arm.name, "b"),
 				}, options.OutDir)
 				cancel()
 				row.Family = family.ID

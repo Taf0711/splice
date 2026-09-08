@@ -47,6 +47,19 @@ type RunInput struct {
 	// boolean alone cannot distinguish a wrong signature from a failed
 	// compile from a behavioral miss.
 	ArtifactDir string `json:"-"`
+	// Attempt identity fields (A2): they flow into the typed attempt
+	// evidence manifest. Family/Arm/Attempt/ArmOrder/ExperimentID name
+	// the attempt in the experiment grid; CheckScriptPath names the
+	// verifier script FILE backing the check command when one exists
+	// (empty for command-only verifiers), so the manifest can hash the
+	// script's actual bytes separately from the command string.
+	ExperimentID    string `json:"-"`
+	Family          string `json:"-"`
+	Arm             string `json:"-"`
+	Task            string `json:"-"`
+	Attempt         int    `json:"-"`
+	ArmOrder        int    `json:"-"`
+	CheckScriptPath string `json:"-"`
 }
 
 // RunOutput is one run's outcome.

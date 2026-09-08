@@ -221,6 +221,7 @@ func runMvpEvalCommand(args []string, stdout io.Writer, stderr io.Writer, deps a
 	ctx, stop := signalContext()
 	defer stop()
 
+	experimentID := fmt.Sprintf("mvp-%d", time.Now().UnixNano())
 	runFunc := pairEvalRunFunc(deps, options.Model)
 	rows := make([]familyPairRow, 0, len(manifest.Families)*options.Rollouts*2)
 
@@ -288,14 +289,21 @@ func runMvpEvalCommand(args []string, stdout io.Writer, stderr io.Writer, deps a
 				// validity; the cold arm runs it only so both arms start
 				// Task B from the same repository state.
 				precursorStatus, precursorErr := mvpRunOnce(deps, ctx, runCtxFor(ctx), runFunc, eval.RunInput{
-					SessionID:   sessionID + "-taska",
-					Memory:      arm.memory,
-					Treatment:   arm.treatment,
-					Prompt:      family.PrecursorTask,
-					Cwd:         arm.dir,
-					Check:       precursorChecks[family.ID],
-					OutputPath:  mvpDebugPath(options.OutDir, family.ID, attempt, arm.name, "a"),
-					ArtifactDir: mvpArtifactDir(options.OutDir, family.ID, attempt, arm.name, "a"),
+					SessionID:       sessionID + "-taska",
+					Memory:          arm.memory,
+					Treatment:       arm.treatment,
+					ExperimentID:    experimentID,
+					Family:          family.ID,
+					Arm:             arm.name,
+					Task:            "A",
+					Attempt:         attempt,
+					ArmOrder:        1,
+					Check:           precursorChecks[family.ID],
+					CheckScriptPath: filepath.Join(manifestDir, family.PrecursorCheckFile),
+					Prompt:          family.PrecursorTask,
+					Cwd:             arm.dir,
+					OutputPath:      mvpDebugPath(options.OutDir, family.ID, attempt, arm.name, "a"),
+					ArtifactDir:     mvpArtifactDir(options.OutDir, family.ID, attempt, arm.name, "a"),
 				}, &rows, family.ID, attempt, arm.name, "A", options.OutDir)
 
 				// Task B: the target. Runs on Task A's tree in BOTH arms.
@@ -358,14 +366,21 @@ func runMvpEvalCommand(args []string, stdout io.Writer, stderr io.Writer, deps a
 				runCtx, cancel := context.WithTimeout(ctx, familiesRunTimeout)
 				started := time.Now()
 				out, runErr := runFunc(runCtx, eval.RunInput{
-					SessionID:   sessionID + "-taskb",
-					Memory:      arm.memory,
-					Treatment:   arm.treatment,
-					Prompt:      family.TargetTask,
-					Cwd:         arm.dir,
-					Check:       targetChecks[family.ID],
-					OutputPath:  mvpDebugPath(options.OutDir, family.ID, attempt, arm.name, "b"),
-					ArtifactDir: mvpArtifactDir(options.OutDir, family.ID, attempt, arm.name, "b"),
+					SessionID:       sessionID + "-taskb",
+					Memory:          arm.memory,
+					Treatment:       arm.treatment,
+					ExperimentID:    experimentID,
+					Family:          family.ID,
+					Arm:             arm.name,
+					Task:            "B",
+					Attempt:         attempt,
+					ArmOrder:        1,
+					Check:           targetChecks[family.ID],
+					CheckScriptPath: filepath.Join(manifestDir, family.TargetCheckFile),
+					Prompt:          family.TargetTask,
+					Cwd:             arm.dir,
+					OutputPath:      mvpDebugPath(options.OutDir, family.ID, attempt, arm.name, "b"),
+					ArtifactDir:     mvpArtifactDir(options.OutDir, family.ID, attempt, arm.name, "b"),
 				})
 				latency := time.Since(started)
 				cancel()
