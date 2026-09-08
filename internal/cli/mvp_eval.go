@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -135,6 +136,20 @@ type mvpFamilyEntry struct {
 	TargetCheckFile    string `json:"target_check_file"`
 }
 
+// trueValue backs the WarmSetupValid pointer for rows whose precursor
+// verified (the pointer keeps false, true, and absent distinguishable).
+var trueValue = true
+
+// falseValue backs the WarmSetupValid pointer so the serialized field can
+// distinguish false from absent (a plain &false literal would work, but a
+// named variable keeps the intent explicit at every use site).
+var falseValue = false
+
+// reviewAggregatesQuiet silences the per-family medians block in
+// summarizeMvp for tests that only assert on the setup-failure line. The
+// production path leaves it false: the report keeps its full shape.
+var reviewAggregatesQuiet = false
+
 // runMvpEvalCommand executes the paired precursor->target causal loop.
 //
 // Per family, one stable directory per arm keeps the sidecar project
@@ -244,10 +259,11 @@ func runMvpEvalCommand(args []string, stdout io.Writer, stderr io.Writer, deps a
 
 		for attempt := 1; attempt <= options.Rollouts; attempt++ {
 			for _, arm := range []struct {
-				name   string
-				dir    string
-				memory string
-			}{{"cold", coldDir, "off"}, {"warm", warmDir, "on"}} {
+				name      string
+				dir       string
+				memory    string
+				treatment string
+			}{{"cold", coldDir, "off", "cold"}, {"warm", warmDir, "on", "full"}} {
 				// Pristine bytes + pristine sidecar state for THIS arm's
 				// attempt: the attempt measures exactly (Task A treatment ->
 				// Task B outcome), never attempt N-1's leftovers. The reset
@@ -274,6 +290,7 @@ func runMvpEvalCommand(args []string, stdout io.Writer, stderr io.Writer, deps a
 				precursorStatus, precursorErr := mvpRunOnce(deps, ctx, runCtxFor(ctx), runFunc, eval.RunInput{
 					SessionID:   sessionID + "-taska",
 					Memory:      arm.memory,
+					Treatment:   arm.treatment,
 					Prompt:      family.PrecursorTask,
 					Cwd:         arm.dir,
 					Check:       precursorChecks[family.ID],
@@ -294,7 +311,7 @@ func runMvpEvalCommand(args []string, stdout io.Writer, stderr io.Writer, deps a
 					// Task A did not verify: the attempt is infrastructure/
 					// fixture noise, not a causal measurement. Record and
 					// continue; the analysis excludes it.
-					row.WarmSetupValid = false
+					row.WarmSetupValid = &falseValue
 					row.WarmSetupNote = "precursor did not verify; target not run"
 					if precursorErr != nil {
 						row.WarmSetupNote += ": " + truncateForNote(precursorErr.Error(), 200)
@@ -329,7 +346,7 @@ func runMvpEvalCommand(args []string, stdout io.Writer, stderr io.Writer, deps a
 						family.ID, attempt, arm.name, commitErr), exitCrash)
 				}
 				if arm.name == "warm" {
-					if reanchorErr := reanchorVerifiedCognition(ctx, arm.dir, preCommitHead); reanchorErr != nil {
+					if reanchorErr := reanchorVerifiedCognition(ctx, arm.dir, preCommitHead, sessionID+"-taska"); reanchorErr != nil {
 						os.RemoveAll(warmDir)
 						os.RemoveAll(coldDir)
 						return writeAppError(stderr, fmt.Sprintf(
@@ -343,6 +360,7 @@ func runMvpEvalCommand(args []string, stdout io.Writer, stderr io.Writer, deps a
 				out, runErr := runFunc(runCtx, eval.RunInput{
 					SessionID:   sessionID + "-taskb",
 					Memory:      arm.memory,
+					Treatment:   arm.treatment,
 					Prompt:      family.TargetTask,
 					Cwd:         arm.dir,
 					Check:       targetChecks[family.ID],
@@ -431,55 +449,168 @@ func runCtxFor(parent context.Context) context.Context {
 }
 
 // mvpRunOnce runs one headless exec invocation and returns its verifier
-// verdict ("success"/"failed") and error. Task A rows are also appended to
-// the attempts log (task="A") so the causal chain is reconstructable.
+// verdict ("success"/"failed"/"timeout") and error. Task A rows are
+// appended by the caller through the returned row pointer so the causal
+// chain is reconstructable (the caller owns checkpointing).
 func mvpRunOnce(deps appDeps, ctx context.Context, runCtx context.Context, runFunc eval.RunFunc, in eval.RunInput, rows *[]familyPairRow, family string, attempt int, arm, task string, outDir string) (string, error) {
+	_, err, row := mvpRunOnceTracked(deps, ctx, runCtx, runFunc, in, "", mvpEvalOptions{}, harnessProvenance(mvpEvalOptions{}, ""), family, attempt, arm, task, outDir)
+	appendRowWithCheckpoint(rows, outDir, row)
+	if runCtx.Err() == context.DeadlineExceeded {
+		return "timeout", err
+	}
+	if err != nil {
+		return "failed", err
+	}
+	if !row.Success {
+		return "failed", fmt.Errorf("task %s verifier failed for %s attempt %d", task, arm, attempt)
+	}
+	return "success", nil
+}
+
+// mvpRunOnceTracked runs one headless exec invocation for the matched
+// snapshot runner and returns the verdict, the error, and the fully
+// populated row (identity, provenance, timing, evidence, failure class).
+// It measures elapsed agent time on success, failure, and timeout alike.
+func mvpRunOnceTracked(deps appDeps, ctx context.Context, runCtx context.Context, runFunc eval.RunFunc, in eval.RunInput, experimentID string, options mvpEvalOptions, prov harnessProvenanceInfo, family string, attempt int, arm, task string, outDir string) (string, error, familyPairRow) {
 	started := time.Now()
 	out, runErr := runFunc(runCtx, in)
 	latency := time.Since(started)
-	row := familyPairRow{
+	row := fillAttemptRow(familyPairRow{
 		Family:    family,
-		Task:      "A",
+		Task:      task,
 		Attempt:   attempt,
 		Arm:       arm,
 		SessionID: in.SessionID,
+	}, out, runErr, latency, prov, options, in)
+	row.ExperimentID = experimentID
+	row.PipelineRunID = experimentID
+	row.Executed = true
+	row.AgentTimeMs = latency.Milliseconds()
+	if runCtx.Err() == context.DeadlineExceeded {
+		row.InfraStatus = "timeout"
+		row.FailureCategory = "harness_timeout"
+		row.Success = false
+		return "timeout", runErr, row
 	}
-	// Task A rows carry the precursor verdict in Status; task identity rides
-	// the session id suffix (-taska / -taskb).
-	if out.Success {
-		row.Status = "success"
-	} else {
-		row.Status = "failed"
+	if row.Telemetry {
+		collectRunTelemetry(ctx, deps, in.Cwd, in.SessionID, &row)
 	}
+	if runErr != nil {
+		return "failed", runErr, row
+	}
+	if !out.Success {
+		return "failed", fmt.Errorf("task %s verifier failed for %s attempt %d", task, arm, attempt), row
+	}
+	return "success", nil, row
+}
+
+// mvpRunTracked is mvpRunOnceTracked for Task B attempts: same row fill,
+// without the verdict mapping (the caller classifies the attempt).
+func mvpRunTracked(deps appDeps, ctx context.Context, runCtx context.Context, runFunc eval.RunFunc, in eval.RunInput, outDir string) (eval.RunOutput, error, familyPairRow) {
+	started := time.Now()
+	out, runErr := runFunc(runCtx, in)
+	latency := time.Since(started)
+	row := fillAttemptRow(familyPairRow{}, out, runErr, latency, harnessProvenance(mvpEvalOptions{}, ""), mvpEvalOptions{}, in)
+	row.Executed = true
+	row.AgentTimeMs = latency.Milliseconds()
+	if runCtx.Err() == context.DeadlineExceeded {
+		row.InfraStatus = "timeout"
+		row.FailureCategory = "harness_timeout"
+		row.Success = false
+		if runErr != nil {
+			row.Error = truncateForNote(runErr.Error(), 300)
+		}
+	}
+	if row.Telemetry {
+		collectRunTelemetry(ctx, deps, in.Cwd, in.SessionID, &row)
+	}
+	return out, runErr, row
+}
+
+// fillAttemptRow copies the seam output into the row: verdict, spend, work
+// counters, evidence status, digests, timing, and the failure category.
+// Values the seam did not produce stay absent: an unknown is never a zero.
+func fillAttemptRow(row familyPairRow, out eval.RunOutput, runErr error, latency time.Duration, prov harnessProvenanceInfo, options mvpEvalOptions, in eval.RunInput) familyPairRow {
 	row.Success = out.Success
 	row.Tokens = out.Tokens
 	row.Telemetry = out.TelemetryFound
 	row.LatencyMs = latency.Milliseconds()
-	if runErr != nil {
-		row.Error = truncateForNote(runErr.Error(), 300)
-	}
 	if out.ToolCalls > 0 || out.FileReads > 0 || out.SearchCalls > 0 {
 		row.ToolCalls = out.ToolCalls
 		row.FileReads = out.FileReads
 		row.SearchCalls = out.SearchCalls
 	}
-	if row.Telemetry {
-		collectRunTelemetry(ctx, deps, in.Cwd, in.SessionID, &row)
-	}
-	*rows = append(*rows, row)
-	if outDir != "" {
-		_ = writeFamiliesRows(outDir, *rows) // best-effort checkpoint
-	}
-	if runCtx.Err() == context.DeadlineExceeded {
-		return "timeout", runErr
-	}
 	if runErr != nil {
-		return "failed", runErr
+		row.Success = false
+		row.Error = truncateForNote(runErr.Error(), 300)
 	}
-	if !out.Success {
-		return "failed", fmt.Errorf("task %s verifier failed for %s attempt %d", task, arm, attempt)
+	if out.FailureCategory != "" {
+		row.FailureCategory = out.FailureCategory
 	}
-	return "success", nil
+	row.ManifestDigest = out.ManifestDigest
+	row.ProposedDigest = out.ProposedDigest
+	row.VerifierTimeMs = out.VerifierTimeMs
+	row.EvidenceStatus = out.EvidenceStatus
+	row.ArtifactError = out.ArtifactError
+	// Artifact references reach the rows (F5-residual): the verifier
+	// output and patch paths the seam captured are copied verbatim, and
+	// the artifact dir is appended only when the seam paths could not
+	// name it.
+	refs := make([]string, 0, 3)
+	if out.VerifierOutputPath != "" {
+		refs = append(refs, out.VerifierOutputPath)
+	}
+	if out.PatchPath != "" {
+		refs = append(refs, out.PatchPath)
+	}
+	if len(refs) == 0 && in.ArtifactDir != "" {
+		refs = append(refs, in.ArtifactDir)
+	}
+	if len(refs) > 0 {
+		row.ArtifactRefs = refs
+	}
+	row.SpliceCommit = prov.SpliceCommit
+	row.SpliceDirty = prov.SpliceDirty
+	row.SpliceBinary = prov.SpliceBinary
+	if options.Model != "" {
+		row.ConfiguredModel = options.Model
+	}
+	if in.Prompt != "" {
+		row.PromptHash = sha256Hex([]byte(in.Prompt))
+	}
+	if in.Check != "" {
+		row.VerifierHash = sha256Hex([]byte(in.Check))
+	}
+	return row
+}
+
+// harnessProvenanceInfo is the harness-side identity stamped onto every
+// row: which splice build ran, from what commit, and whether the working
+// tree was dirty. Unknown values stay empty, never fake zeros.
+type harnessProvenanceInfo struct {
+	SpliceCommit string
+	SpliceDirty  bool
+	SpliceBinary string
+}
+
+// harnessProvenance resolves the harness identity once per run. The commit
+// and dirty stamp come from git; the binary identity is the resolved
+// executable path (a content-addressed identity would need a build stamp,
+// which this build does not carry). Failures leave the fields empty.
+func harnessProvenance(options mvpEvalOptions, manifestDir string) harnessProvenanceInfo {
+	prov := harnessProvenanceInfo{}
+	if out, err := exec.Command("git", "-C", ".", "rev-parse", "HEAD").Output(); err == nil {
+		prov.SpliceCommit = strings.TrimSpace(string(out))
+	}
+	if out, err := exec.Command("git", "-C", ".", "status", "--porcelain").Output(); err != nil {
+		prov.SpliceDirty = true // unknown counts as dirty, never clean-by-assumption
+	} else {
+		prov.SpliceDirty = len(strings.TrimSpace(string(out))) > 0
+	}
+	if exe, err := os.Executable(); err == nil {
+		prov.SpliceBinary = exe
+	}
+	return prov
 }
 
 // resetArmMemory clears one arm's sidecar state (observations, traces, and
@@ -507,7 +638,11 @@ func resetArmMemory(ctx context.Context, dir string) error {
 // the freshness contract is preserved exactly. Cold arms capture nothing,
 // so a 0-node reanchor is valid. Fail-loud on sidecar errors: a skipped
 // reanchor silently turns Task B's warm arm cold.
-func reanchorVerifiedCognition(ctx context.Context, armDir, preHead string) error {
+//
+// producerRunID qualifies the capture set to the run that persisted the
+// nodes (F9) when it is known; an empty id keeps the project+revision
+// behavior for runs whose producer identity is unavailable.
+func reanchorVerifiedCognition(ctx context.Context, armDir, preHead, producerRunID string) error {
 	if preHead == "" {
 		return fmt.Errorf("reanchor: no pre-commit HEAD for %s", armDir)
 	}
@@ -530,12 +665,19 @@ func reanchorVerifiedCognition(ctx context.Context, armDir, preHead string) erro
 	// this run persisted (anchored at the pre-verify HEAD) advance.
 	// Project-wide reanchoring would also advance nodes other runs
 	// captured, which the review flagged as broader provenance than the
-	// evidence supports.
-	captureSet, err := client.CaptureSetIDs(ctx, armDir, preHead)
+	// evidence supports. The producer-run filter (F9) keeps two runs that
+	// verified the same revision in separate capture sets.
+	captureSet, err := client.CaptureSetIDsForRun(ctx, armDir, preHead, producerRunID)
 	if err != nil {
 		return fmt.Errorf("resolve capture set: %w", err)
 	}
 	if len(captureSet) == 0 {
+		if producerRunID != "" {
+			// The run qualified by id captured nothing retrievable:
+			// record that honestly instead of silently reanchoring a
+			// wider set. Callers decide whether an empty set is fatal.
+			return fmt.Errorf("reanchor: no capture set for run %s at revision %s in %s", producerRunID, preHead[:10], armDir)
+		}
 		// Nothing captured (cold-equivalent run): nothing to advance.
 		return nil
 	}
@@ -573,6 +715,7 @@ func summarizeMvp(stdout io.Writer, manifest mvpFamilyManifest, rows []familyPai
 		}
 		var cold, warm []familyPairRow
 		setupFailed := 0
+		failedSnapshots := map[string]bool{}
 		for _, row := range frows {
 			if row.Task != "B" {
 				continue
@@ -580,8 +723,16 @@ func summarizeMvp(stdout io.Writer, manifest mvpFamilyManifest, rows []familyPai
 			if row.InfraStatus == "precursor_failed" {
 				// A failed precursor is a real outcome of the full
 				// workflow: report it, exclude only from the conditional
-				// Task B analysis.
+				// Task B analysis. One failed snapshot yields ONE setup
+				// failure, not one per skipped target slot, so the count
+				// is over unique snapshots (by snapshot attempt row when
+				// present, otherwise family+attempt).
 				setupFailed++
+				if row.SnapshotID != "" {
+					failedSnapshots[row.SnapshotID] = true
+				} else {
+					failedSnapshots[fmt.Sprintf("%s-r%d", row.Family, row.Attempt)] = true
+				}
 				continue
 			}
 			if row.Arm == "cold" {
@@ -608,18 +759,21 @@ func summarizeMvp(stdout io.Writer, manifest mvpFamilyManifest, rows []familyPai
 		}
 		fmt.Fprintf(stdout, "\n%s\n", family.ID)
 		if setupFailed > 0 {
-			fmt.Fprintf(stdout, "  setup failures excluded from target analysis: %d\n", setupFailed)
+			fmt.Fprintf(stdout, "  setup failures excluded from target analysis: %d (failed snapshots: %d, skipped target slots: %d)\n",
+				setupFailed, len(failedSnapshots), setupFailed)
 		}
-		fmt.Fprintf(stdout, "  cold: success %d/%d, tokens med %s, searches med %s, reads med %s\n",
-			coldS, len(cold), medStr(coldTok), medStr(coldSearch), medStr(coldReads))
-		fmt.Fprintf(stdout, "  warm: success %d/%d, tokens med %s, searches med %s, reads med %s\n",
-			warmS, len(warm), medStr(warmTok), medStr(warmSearch), medStr(warmReads))
-		fmt.Fprintf(stdout, "  cognition: resolved_by_cognition med %s, avoided_ops med %s (per Task B run)\n",
-			medStr(warmCog), medStr(warmAvoid))
-		for _, row := range warm {
-			if row.DiscoveryResolvedCog > 0 {
-				fmt.Fprintf(stdout, "    attempt %d: %d question(s) resolved by cognition, %d anchor(s) validated, semantic hits %d\n",
-					row.Attempt, row.DiscoveryResolvedCog, row.AnchorsValidated, row.SemanticHits)
+		if !reviewAggregatesQuiet {
+			fmt.Fprintf(stdout, "  cold: success %d/%d, tokens med %s, searches med %s, reads med %s\n",
+				coldS, len(cold), medStr(coldTok), medStr(coldSearch), medStr(coldReads))
+			fmt.Fprintf(stdout, "  warm: success %d/%d, tokens med %s, searches med %s, reads med %s\n",
+				warmS, len(warm), medStr(warmTok), medStr(warmSearch), medStr(warmReads))
+			fmt.Fprintf(stdout, "  cognition: resolved_by_cognition med %s, avoided_ops med %s (per Task B run)\n",
+				medStr(warmCog), medStr(warmAvoid))
+			for _, row := range warm {
+				if row.DiscoveryResolvedCog > 0 {
+					fmt.Fprintf(stdout, "    attempt %d: %d question(s) resolved by cognition, %d anchor(s) validated, semantic hits %d\n",
+						row.Attempt, row.DiscoveryResolvedCog, row.AnchorsValidated, row.SemanticHits)
+				}
 			}
 		}
 	}
@@ -658,10 +812,56 @@ Flags:
   -h, --help                Show this help
 
 Environment (treatment matrix, applies to the exec children):
-  SPLICE_SCOPE_MODE=on|off       off keeps the model input and host context
-                                 operations byte-identical to cold while
-                                 retrieval still runs and is recorded
-                                 (retrieval-only arm)
-  SPLICE_EXEMPLAR_MODE=...       memory-class delivery ablation (C1c)
+  SPLICE_SCOPE_MODE=on|off       off keeps the model's context acquisition
+                                 and host context operations identical to
+                                 cold while retrieval still runs and is
+                                 recorded. Memory text delivery is NOT
+                                 affected: scope-off with prompt memory on
+                                 is the delivery-only condition, not cold.
+  SPLICE_EXEMPLAR_MODE=...       memory-class delivery ablation (C1c).
+                                 retrieve-no-prompt retrieves and records
+                                 but delivers no cognition prose.
+  SPLICE_TREATMENT=...           typed shorthand that sets both knobs and
+                                 the memory flag: cold, retrieval-only,
+                                 delivery-only, scope-only, or full.
 `
+}
+
+// precursorChecksFor and targetChecksFor resolve the verifier scripts the
+// same way the main flow does (relative to the manifest directory).
+func precursorChecksFor(manifestDir string, family mvpFamilyEntry) string {
+	data, err := os.ReadFile(filepath.Join(manifestDir, family.PrecursorCheckFile))
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+func targetChecksFor(manifestDir string, family mvpFamilyEntry) string {
+	data, err := os.ReadFile(filepath.Join(manifestDir, family.TargetCheckFile))
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+// materializeFromCommit checks out the snapshot commit's tree into dst and
+// initializes git there with the SAME commit hash (so tree hashes and
+// anchored revisions are comparable across arms). Uses git worktree-free
+// plumbing: clone the snapshot repo at that commit.
+func materializeFromCommit(snapDir, commit, dst string) error {
+	if err := os.RemoveAll(dst); err != nil {
+		return err
+	}
+	if out, err := exec.Command("git", "-C", snapDir, "worktree", "add", "--detach", dst, commit).CombinedOutput(); err != nil {
+		// A worktree may already exist from a previous attempt; remove and
+		// retry once.
+		_ = exec.Command("git", "-C", snapDir, "worktree", "remove", "--force", dst).Run()
+		if out2, err2 := exec.Command("git", "-C", snapDir, "worktree", "add", "--detach", dst, commit).CombinedOutput(); err2 != nil {
+			return fmt.Errorf("worktree add: %v: %s: %s", err2, out, out2)
+		}
+	}
+	// The worktree shares the snapshot repo's object store; the sidecar's
+	// freshness diffs run inside dst and resolve the same commit.
+	return nil
 }

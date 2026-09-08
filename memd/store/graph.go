@@ -834,16 +834,27 @@ func (s *Store) Reanchor(ctx context.Context, projectPath, fromRevision, toRevis
 // CaptureSetIDs returns the ids of a project's active nodes anchored at
 // the given revision - the capture set of the verified run that produced
 // them. Scoped to the project and revision so a reanchor can advance
-// exactly that set.
-func (s *Store) CaptureSetIDs(ctx context.Context, projectPath, revision string) ([]int64, error) {
+// exactly that set. When sourceRunID is non-empty the set is also scoped
+// to the producer run that persisted the nodes, so two runs that verified
+// the same tree keep separate capture sets. An empty sourceRunID keeps
+// the historical project+revision behavior.
+func (s *Store) CaptureSetIDs(ctx context.Context, projectPath, revision, sourceRunID string) ([]int64, error) {
 	if strings.TrimSpace(projectPath) == "" || strings.TrimSpace(revision) == "" {
 		return nil, fmt.Errorf("graph: capture set needs a project path and a revision")
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	query := `
 		SELECT id FROM cognition_nodes
 		WHERE project_path = ? AND status = ? AND verified_revision = ?
+	`
+	args := []any{projectPath, NodeStatusActive, revision}
+	if strings.TrimSpace(sourceRunID) != "" {
+		query += ` AND source_run_id = ?`
+		args = append(args, sourceRunID)
+	}
+	query += `
 		ORDER BY id
-	`, projectPath, NodeStatusActive, revision)
+	`
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("graph: capture set query: %w", err)
 	}
@@ -866,9 +877,12 @@ func (s *Store) CaptureSetIDs(ctx context.Context, projectPath, revision string)
 // IDs (the capture set of one verified run) from one revision to another.
 // Unlike Reanchor, which updates every active node of a project matching
 // the source revision, this operation is scoped to the capture set: nodes
-// captured by other runs of the same project are untouched. Every ID must
-// exist, belong to the project, be active, and currently anchor at
-// fromRevision; any mismatch fails loud with the offending id.
+// captured by other runs of the same project are untouched. The whole
+// operation is one SQL transaction and all-or-nothing: BEFORE any update,
+// the full ID list is validated; duplicates, unknown IDs, nodes outside
+// the project, inactive nodes, and nodes not anchored at fromRevision are
+// each rejected with an error naming the offending input, so no record
+// ever advances partially. A mid-loop SQL error aborts the transaction.
 func (s *Store) ReanchorByIDs(ctx context.Context, projectPath string, nodeIDs []int64, fromRevision, toRevision string) (int64, error) {
 	if strings.TrimSpace(projectPath) == "" {
 		return 0, fmt.Errorf("graph: reanchor by ids needs a project path")
@@ -879,24 +893,94 @@ func (s *Store) ReanchorByIDs(ctx context.Context, projectPath string, nodeIDs [
 	if fromRevision == toRevision {
 		return 0, fmt.Errorf("graph: reanchor revisions are identical")
 	}
-	var advanced int64
+	if len(nodeIDs) == 0 {
+		return 0, fmt.Errorf("graph: reanchor by ids needs at least one node id")
+	}
+	seen := make(map[int64]struct{}, len(nodeIDs))
 	for _, id := range nodeIDs {
-		res, err := s.db.ExecContext(ctx, `
+		if id < 1 {
+			return 0, fmt.Errorf("graph: reanchor by ids: node id must be >= 1, got %d", id)
+		}
+		if _, dup := seen[id]; dup {
+			return 0, fmt.Errorf("graph: reanchor by ids: duplicate node id %d", id)
+		}
+		seen[id] = struct{}{}
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("graph: reanchor by ids begin: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback() //nolint:errcheck
+		}
+	}()
+
+	// Validate every requested ID against the loaded row BEFORE any
+	// update runs. A mismatch fails the whole transaction, so a bad
+	// second ID can never leave the first record advanced.
+	for _, id := range nodeIDs {
+		var (
+			rowProjectPath, rowStatus, rowRevision sql.NullString
+		)
+		err = tx.QueryRowContext(ctx, `
+			SELECT project_path, status, verified_revision
+			FROM cognition_nodes WHERE id = ?
+		`, id).Scan(&rowProjectPath, &rowStatus, &rowRevision)
+		if errors.Is(err, sql.ErrNoRows) {
+			err = fmt.Errorf("graph: reanchor node %d: unknown id", id)
+			return 0, err
+		}
+		if err != nil {
+			err = fmt.Errorf("graph: reanchor node %d load: %w", id, err)
+			return 0, err
+		}
+		if !rowProjectPath.Valid || rowProjectPath.String != projectPath {
+			err = fmt.Errorf("graph: reanchor node %d: project mismatch (belongs to %q, want %q)", id, rowProjectPath.String, projectPath)
+			return 0, err
+		}
+		if rowStatus.String != NodeStatusActive {
+			err = fmt.Errorf("graph: reanchor node %d: status %q is not active", id, rowStatus.String)
+			return 0, err
+		}
+		if !rowRevision.Valid || rowRevision.String != fromRevision {
+			err = fmt.Errorf("graph: reanchor node %d: not anchored at %q (currently %q)", id, fromRevision, rowRevision.String)
+			return 0, err
+		}
+	}
+
+	// Every requested ID validated. Update them inside the transaction.
+	advanced := int64(0)
+	now := time.Now().Unix()
+	for _, id := range nodeIDs {
+		var res sql.Result
+		res, err = tx.ExecContext(ctx, `
 			UPDATE cognition_nodes
 			SET verified_revision = ?, verified_at = ?
 			WHERE id = ? AND project_path = ? AND status = ? AND verified_revision = ?
-		`, toRevision, time.Now().Unix(), id, projectPath, NodeStatusActive, fromRevision)
+		`, toRevision, now, id, projectPath, NodeStatusActive, fromRevision)
 		if err != nil {
-			return advanced, fmt.Errorf("graph: reanchor node %d: %w", id, err)
+			err = fmt.Errorf("graph: reanchor node %d: %w", id, err)
+			return advanced, err
 		}
-		affected, err := res.RowsAffected()
+		var affected int64
+		affected, err = res.RowsAffected()
 		if err != nil {
-			return advanced, fmt.Errorf("graph: reanchor node %d rows: %w", id, err)
+			err = fmt.Errorf("graph: reanchor node %d rows: %w", id, err)
+			return advanced, err
 		}
 		if affected == 0 {
-			return advanced, fmt.Errorf("graph: reanchor node %d: not found in project %s, inactive, or not anchored at %s", id, projectPath, fromRevision[:10])
+			// Impossible after validation; fail loud rather than
+			// report a count the rows do not support.
+			err = fmt.Errorf("graph: reanchor node %d: update matched no rows after validation", id)
+			return advanced, err
 		}
 		advanced++
+	}
+	if err = tx.Commit(); err != nil {
+		err = fmt.Errorf("graph: reanchor by ids commit: %w", err)
+		return 0, err
 	}
 	return advanced, nil
 }

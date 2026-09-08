@@ -259,7 +259,14 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 		// graph cognition does not stack on top of full FTS redelivery.
 		plan, planNodes := planStageDiscovery(ctx, p, input, root)
 		if p.Trace != nil {
-			p.Trace.recordDiscoveryPlan(input.StageName, p.Iteration, plan)
+			// Repair re-entries record their discovery telemetry under
+			// their own invocation ordinal (1+) so the initial pass
+			// record survives instead of being overwritten.
+			ordinal := 0
+			if p.RepairReentry {
+				ordinal = 1
+			}
+			p.Trace.recordDiscoveryPlanOrdinal(input.StageName, p.Iteration, ordinal, plan)
 		}
 		// Part A context bridge: admitted cognition becomes a host-side
 		// scope plan that governs context acquisition, not only model
@@ -369,7 +376,7 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 						if exemplars, eErr := retrieveExemplars(ctx, querier, root, input.RequestIntent); eErr == nil {
 							bundle.Exemplars = exemplars
 							if p.Trace != nil && len(exemplars) > 0 {
-								key := stageKey{input.StageName, p.Iteration}
+								key := stageKeyFor(input.StageName, p.Iteration, 0)
 								meta := p.Trace.stages[key]
 								meta.ExemplarsRetrieved = len(exemplars)
 								p.Trace.stages[key] = meta

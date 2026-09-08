@@ -956,7 +956,7 @@ func runPass(
 		}
 
 		start := time.Now()
-		output, err := runStageWithContext(stageCtx, input, agentStage, iteration, selection, options, workDir, runner, mem, stage.Budget.OutputMax, tr, priorScope)
+		output, err := runStageWithContext(stageCtx, input, agentStage, iteration, selection, options, workDir, runner, mem, stage.Budget.OutputMax, tr, priorScope, 0)
 		if cancelStage != nil {
 			cancelStage()
 		}
@@ -1114,6 +1114,7 @@ func runStageWithContext(
 	outputMax int,
 	tr *runTraceAccumulator,
 	priorScope *StageScopePlan,
+	invocationOrdinal int,
 ) (schemas.HarnessStageOutput, error) {
 	stageOpts := stageOptions(input.StageName, iteration, selection, options, workDir, runner, stage.Capabilities())
 	// Part A context bridge: fresh cognition narrows the default context
@@ -1140,13 +1141,13 @@ func runStageWithContext(
 			return stages.ToolResult{OK: res.OK, Output: res.Output, Truncated: res.Truncated, Meta: res.Meta}, nil
 		}
 	}
-	if scopeOn && priorScope != nil && priorScope.CognitionResolved {
+	if scopeOn && priorScope != nil && (priorScope.CognitionResolved || priorScope.SemanticResolved) {
 		defaultReq := stages.DefaultContextRequestFor(input.RequestIntent, workDir, detectLanguage(workDir))
 		scoped, sup := ScopedContextRequest(defaultReq, *priorScope,
 			"Cognition-resolved scope: known files and symbols from the verified cognition graph replace repository-wide discovery.")
 		stageOpts.OverrideContextRequest = &scoped
 		if tr != nil {
-			tr.recordScopeMetrics(input.StageName, iteration, sup, *priorScope)
+			tr.recordScopeMetricsOrdinal(input.StageName, iteration, invocationOrdinal, sup, *priorScope)
 		}
 	}
 	if outputMax > 0 {

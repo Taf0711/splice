@@ -379,26 +379,34 @@ func (s *server) handleGraphReanchorIDs(w http.ResponseWriter, r *http.Request) 
 
 // handleGraphCaptureSet lists a project's active node ids anchored at a
 // revision (POST /graph/capture_set) - the capture set of one verified run.
+// An optional source_run_id scopes the set to the producer run that
+// persisted the nodes; omitting it preserves the historical
+// project+revision behavior.
 func (s *server) handleGraphCaptureSet(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	var req struct {
-		ProjectPath string `json:"project_path"`
-		Revision    string `json:"revision"`
-	}
+	var req graphCaptureSetRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
-	ids, err := s.store.CaptureSetIDs(r.Context(), req.ProjectPath, req.Revision)
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "validation: "+err.Error())
+		return
+	}
+	sourceRunID := ""
+	if req.SourceRunID != nil {
+		sourceRunID = *req.SourceRunID
+	}
+	ids, err := s.store.CaptureSetIDs(r.Context(), req.ProjectPath, req.Revision, sourceRunID)
 	if err != nil {
 		writeGraphError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "ids": ids})
+	writeJSON(w, http.StatusOK, graphCaptureSetResponse{OK: true, IDs: ids})
 }
 
 // handleGraphCompact merges duplicate nodes and reports what it did.

@@ -311,3 +311,12 @@ Final verdict remains PARTIAL. The remaining lever for the reads gate
 is a family whose Task A produces EXACT-anchor matches for Task B's
 question (Task B's intent must name the anchor path), or a model tier
 that acts on prioritized context.
+
+# Dated correction (2026-09-07)
+
+A matched-run stabilization assignment verified findings F1-F12 against
+commit 0316bcc and landed fixes on this branch. The corrections to the
+interpretations above are recorded in
+MVP_CAUSAL_PROOF_REPORT_CORRECTION_2026_09_07.md in this directory. Prior
+raw results and conclusions are preserved unchanged there; each corrected
+claim links to its regression test.

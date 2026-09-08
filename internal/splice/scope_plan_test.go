@@ -182,7 +182,7 @@ func TestTelemetry_ResolvedQuestionsAreNotSuppressedReads(t *testing.T) {
 	tr.recordDiscoveryPlan("code_writer", 1, DiscoveryPlan{
 		ResolvedByCognition: []ResolvedQuestion{{Question: "q", NodeID: 1}, {Question: "r", NodeID: 2}},
 	})
-	meta := tr.stages[stageKey{"code_writer", 1}]
+	meta := tr.stages[stageKey{"code_writer", 1, 0}]
 	if meta.DiscoveryReadsAvoided != 0 {
 		t.Fatalf("DiscoveryReadsAvoided must stay zero (decoupled from resolved questions), got %d", meta.DiscoveryReadsAvoided)
 	}
@@ -201,7 +201,7 @@ func TestRecordScopeMetricsWritesOnlyScopeFields(t *testing.T) {
 		ResolvedByCognition: []ResolvedQuestion{{Question: "q", NodeID: 1}},
 		AnchorsValidated:    1,
 	})
-	before := tr.stages[stageKey{"code_writer", 1}]
+	before := tr.stages[stageKey{"code_writer", 1, 0}]
 	tr.RecordScopeMetrics("code_writer", 1, schemas.ScopeMetrics{
 		ContextQueriesDefault:    6,
 		ContextQueriesExecuted:   3,
@@ -210,7 +210,7 @@ func TestRecordScopeMetricsWritesOnlyScopeFields(t *testing.T) {
 		SearchesSuppressed:       2,
 		ScopeExpansions:          1,
 	})
-	after := tr.stages[stageKey{"code_writer", 1}]
+	after := tr.stages[stageKey{"code_writer", 1, 0}]
 	if after.ContextQueriesDefault != 6 || after.ContextQueriesExecuted != 3 ||
 		after.ContextQueriesSuppressed != 3 || after.GlobalListsSuppressed != 1 ||
 		after.SearchesSuppressed != 2 || after.ScopeExpansions != 1 {
@@ -230,7 +230,7 @@ func TestRecordScopeMetricsWritesOnlyScopeFields(t *testing.T) {
 func TestRecordScopeMetricsRejectsNegative(t *testing.T) {
 	tr := &runTraceAccumulator{stages: map[stageKey]schemas.InputMeta{}}
 	tr.RecordScopeMetrics("code_writer", 1, schemas.ScopeMetrics{SearchesSuppressed: -1})
-	if meta := tr.stages[stageKey{"code_writer", 1}]; meta != (schemas.InputMeta{}) {
+	if meta := tr.stages[stageKey{"code_writer", 1, 0}]; meta != (schemas.InputMeta{}) {
 		t.Fatalf("invalid metrics must not be recorded, got %+v", meta)
 	}
 }

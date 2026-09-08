@@ -1,8 +1,12 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,8 +14,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Taf0711/splice/internal/eval"
+	"github.com/Taf0711/splice/internal/splice"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
@@ -181,6 +187,16 @@ func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
 			return eval.RunOutput{}, fmt.Errorf("resolve executable: %w", err)
 		}
 		args := []string{"--no-trust", "exec", "--output-format", "stream-json", "--memory", in.Memory, "--init-session-id", in.SessionID}
+		if in.Treatment != "" {
+			// The treatment is the authority for the memory flag when set:
+			// resolving knobs from two sources invites a treatment whose
+			// declared and realized memory dimensions disagree.
+			spec, terr := splice.ResolveTreatment(in.Treatment)
+			if terr != nil {
+				return eval.RunOutput{}, terr
+			}
+			args[6] = spec.PromptMemory
+		}
 		if strings.TrimSpace(model) != "" {
 			args = append(args, "--model", model)
 		}
@@ -188,6 +204,18 @@ func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
 
 		runCmd := exec.CommandContext(ctx, exe, args...)
 		runCmd.Dir = in.Cwd
+		if in.Treatment != "" {
+			// Resolve the treatment's knob environment fresh per child:
+			// ResolveTreatment is pure, so concurrent arms cannot observe
+			// or corrupt each other's settings. The spec was already
+			// resolved for the memory flag above; reusing the same call
+			// shape keeps the two resolution points textually adjacent.
+			spec, terr := splice.ResolveTreatment(in.Treatment)
+			if terr != nil {
+				return eval.RunOutput{}, terr
+			}
+			runCmd.Env = append(os.Environ(), spec.Environment()...)
+		}
 		out, runErr := runCmd.CombinedOutput()
 		if in.OutputPath != "" {
 			_ = os.WriteFile(in.OutputPath, out, 0o644) // best-effort debug tee
@@ -204,41 +232,128 @@ func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
 		}
 		toolCalls, fileReads, searchCalls := sumStreamJSONWork(out)
 
+		// Capture the agent's proposal FIRST, before any verifier touches
+		// the tree: verifier probes write, rename, and delete files, and a
+		// patch taken afterwards shows the verifier's debris instead of the
+		// agent's work. The capture happens on the agent-failure path too,
+		// so a failed run keeps its partial proposal.
+		proposal := captureProposal(in.Cwd)
+		if in.ArtifactDir != "" {
+			writeProposalArtifact(in.ArtifactDir, in.SessionID, out, proposal)
+		}
+
 		if runErr != nil {
 			return eval.RunOutput{Success: false, Tokens: tokens, TelemetryFound: found,
-					ToolCalls: toolCalls, FileReads: fileReads, SearchCalls: searchCalls},
+					ToolCalls: toolCalls, FileReads: fileReads, SearchCalls: searchCalls,
+					FailureCategory: "agent_noncompletion",
+					ManifestDigest:  proposal.ManifestDigest, ProposedDigest: proposal.ProposedDigest,
+					VerifierOutputPath: artifactPath(in.ArtifactDir, in.SessionID, "verifier.txt"),
+					PatchPath:          artifactPath(in.ArtifactDir, in.SessionID, "patch.diff")},
 				fmt.Errorf("exec run %s: %v: %s", in.SessionID, runErr, out)
 		}
 
-		checkCmd := exec.CommandContext(ctx, "/bin/sh", "-c", in.Check)
-		checkCmd.Dir = in.Cwd
-		// Preserve the verifier output: a boolean alone cannot distinguish
-		// a wrong signature from a failed compile from a behavioral miss,
-		// and the arm directory is removed after the run. Captured before
-		// the probe files are cleaned by the verifier itself (the probe
-		// scripts write, test, and remove in one shell).
-		verifierOut := []byte{}
-		var verifierErr error
+		// The verdict comes from ONE direct verifier invocation whose exit
+		// status is the authority. Output text (including any VERIFIER_EXIT=
+		// marker the transcript contains) never overrides the process exit.
+		verifierStart := time.Now()
+		verifierOut, verdict, verdictErr := runVerifier(ctx, in)
+		verifierElapsed := time.Since(verifierStart)
 		if in.ArtifactDir != "" {
-			combined := exec.CommandContext(ctx, "/bin/sh", "-c", "("+in.Check+") 2>&1; echo VERIFIER_EXIT=$?")
-			combined.Dir = in.Cwd
-			verifierOut, verifierErr = combined.Output()
-			// CombinedOutput succeeds even when the verifier fails; parse
-			// the exit marker so success reflects the verifier verdict.
-			verifierErr = verifierExitFromMarker(verifierOut)
-		} else {
-			verifierErr = checkCmd.Run()
+			writeVerifierArtifact(in.ArtifactDir, in.SessionID, verifierOut)
 		}
-		success := verifierErr == nil
+		success := verdictErr == nil && verdict == verifierVerdictPass
+		failureCategory := ""
+		if !success {
+			failureCategory = classifyVerifierFailure(ctx, verdictErr, verdict)
+		}
 
-		if in.ArtifactDir != "" {
-			writeAttemptArtifacts(in.ArtifactDir, in.SessionID, out, verifierOut, in.Cwd)
-		}
-		return eval.RunOutput{Success: success, Tokens: tokens, Interventions: interventions, TelemetryFound: found,
-			ToolCalls: toolCalls, FileReads: fileReads, SearchCalls: searchCalls,
+		result := eval.RunOutput{Success: success, Tokens: tokens, Interventions: interventions,
+			TelemetryFound: found, ToolCalls: toolCalls, FileReads: fileReads, SearchCalls: searchCalls,
 			VerifierOutputPath: artifactPath(in.ArtifactDir, in.SessionID, "verifier.txt"),
-			PatchPath:          artifactPath(in.ArtifactDir, in.SessionID, "patch.diff")}, nil
+			PatchPath:          artifactPath(in.ArtifactDir, in.SessionID, "patch.diff"),
+			ManifestDigest:     proposal.ManifestDigest, ProposedDigest: proposal.ProposedDigest,
+			VerifierTimeMs: verifierElapsed.Milliseconds(),
+		}
+		if !success {
+			result.FailureCategory = failureCategory
+		}
+		// Evidence completeness is recorded on the result, never folded into
+		// the verdict: an artifact write failure must not convert a real
+		// correctness result into a model failure (or the reverse).
+		if in.ArtifactDir != "" {
+			if err := writeAttemptEvidence(in.ArtifactDir, in.SessionID, proposal); err != nil {
+				result.EvidenceStatus = "incomplete"
+				result.ArtifactError = truncateForNote(err.Error(), 300)
+			}
+		}
+		return result, nil
 	}
+}
+
+// runVerifier runs the check command once and classifies the outcome from
+// the process exit status alone. Captured output is returned for the
+// evidence record; nothing in the output text can flip the verdict.
+func runVerifier(ctx context.Context, in eval.RunInput) (output []byte, verdict verifierVerdict, err error) {
+	if strings.TrimSpace(in.Check) == "" {
+		return nil, verifierVerdictInfra, fmt.Errorf("verifier command for %s is empty", in.SessionID)
+	}
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", in.Check)
+	cmd.Dir = in.Cwd
+	out, runErr := cmd.Output()
+	verdict, err = classifyVerifierExit(ctx, runErr)
+	return out, verdict, err
+}
+
+// verifierVerdict is the classification of one verifier invocation.
+type verifierVerdict string
+
+const (
+	verifierVerdictPass    verifierVerdict = "pass"    // process exited 0
+	verifierVerdictReject  verifierVerdict = "reject"  // process exited nonzero
+	verifierVerdictInfra   verifierVerdict = "infra"   // verifier could not run or report
+	verifierVerdictTimeout verifierVerdict = "timeout" // the caller's deadline fired
+)
+
+// classifyVerifierExit maps a verifier process error to a verdict. The
+// process exit status is authoritative: exit 0 passes, any other exit is a
+// rejection, and only a failure to LAUNCH the verifier or a caller deadline
+// is an infrastructure/timeout class.
+func classifyVerifierExit(ctx context.Context, runErr error) (verifierVerdict, error) {
+	if runErr == nil {
+		return verifierVerdictPass, nil
+	}
+	if ctx.Err() != nil {
+		return verifierVerdictTimeout, fmt.Errorf("verifier interrupted by context: %w", runErr)
+	}
+	var exitErr *exec.ExitError
+	if errors.As(runErr, &exitErr) {
+		return verifierVerdictReject, fmt.Errorf("verifier exited %d", exitErr.ExitCode())
+	}
+	return verifierVerdictInfra, fmt.Errorf("verifier launch failed: %w", runErr)
+}
+
+// classifyVerifierFailure turns a verdict into the row-level failure
+// category. A harness timeout is its own class: it is NOT automatically
+// infrastructure, because the deadline may have cut off a run that would
+// have finished either way.
+func classifyVerifierFailure(ctx context.Context, verdictErr error, verdict verifierVerdict) string {
+	switch verdict {
+	case verifierVerdictTimeout:
+		return "harness_timeout"
+	case verifierVerdictInfra:
+		return "verifier_infra"
+	case verifierVerdictReject:
+		return "verifier_rejected"
+	case verifierVerdictPass:
+		// A passing verifier with a non-nil error only happens when the
+		// caller's context died; classify from the context.
+		if ctx.Err() != nil {
+			return "harness_timeout"
+		}
+		return "provider_failure"
+	}
+	_ = verdictErr
+	return "provider_failure"
 }
 
 // sumStreamJSONWork counts the run's work events from a captured exec
@@ -374,8 +489,9 @@ func matchTraceTokens(results []schemas.TraceQueryResult, sessionID string) (tok
 	return 0, 0, false
 }
 
-// verifierExitFromMarker parses the VERIFIER_EXIT=N marker the artifact
-// capture appends, returning nil for exit 0 and an error otherwise.
+// verifierExitFromMarker is retained only for log forensics: the eval
+// verdict no longer derives from the marker (the process exit status is
+// authoritative), but old transcripts still carry it.
 func verifierExitFromMarker(out []byte) error {
 	marker := "VERIFIER_EXIT="
 	idx := strings.LastIndex(string(out), marker)
@@ -405,29 +521,246 @@ func artifactPath(dir, sessionID, name string) string {
 	return filepath.Join(dir, sessionID+"-"+name)
 }
 
-// writeAttemptArtifacts preserves the reconstruction artifacts for one
-// attempt: the exec transcript (already written by the OutputPath tee when
-// configured), the external verifier output including its exit code, and
-// the final patch (git diff) captured BEFORE the verifier's probe files
-// touch the tree. Best-effort: artifact capture never changes the verdict.
-func writeAttemptArtifacts(dir, sessionID string, execOut []byte, verifierOut []byte, cwd string) {
-	if dir == "" {
+// proposalSnapshot is the complete change manifest of one agent attempt:
+// tracked modifications/deletions/renames AND untracked files, with modes,
+// so the captured bytes reconstruct the proposal. Captured BEFORE the
+// verifier runs, so verifier probe files never pollute the evidence.
+type proposalSnapshot struct {
+	// Patch holds `git diff HEAD` plus untracked file contents appended as
+	// diff-style sections, so the proposal is reconstructable from this one
+	// artifact.
+	Patch []byte
+	// Manifest is the machine-readable change manifest JSON (one entry per
+	// changed or untracked path, with the change kind and file mode).
+	Manifest []byte
+	// ManifestDigest and ProposedDigest are sha256 hex digests of Manifest
+	// and Patch respectively. Empty means the digest was not computed.
+	ManifestDigest string
+	ProposedDigest string
+	// Commit and Tree are the starting revision (HEAD commit) and its tree
+	// hash at capture time. Separate fields: a commit hash is never
+	// relabeled as a tree hash. Either may be "" when git could not read
+	// the repo.
+	Commit string
+	Tree   string
+	// Entries counts manifest entries (0 means no changes captured).
+	Entries int
+	// Error records the first capture failure, if any. A capture failure
+	// never changes the verdict; it only marks the evidence incomplete.
+	Error error
+}
+
+// captureProposal records the agent's source changes in cwd: a tracked diff
+// (including modifications, deletions, renames, and mode changes), untracked
+// file contents, a machine-readable manifest, and the starting commit and
+// tree. Read-only over the user's git state: it never touches the index,
+// so nothing here can disturb the agent's or the user's in-progress work.
+func captureProposal(cwd string) proposalSnapshot {
+	snap := proposalSnapshot{}
+	if cwd == "" {
+		snap.Error = fmt.Errorf("no cwd for proposal capture")
+		return snap
+	}
+	snap.Commit = gitHeadCommit(cwd)
+	snap.Tree = gitTreeHash(cwd)
+
+	patch, patchErr := exec.Command("git", "-C", cwd, "diff", "HEAD").Output()
+	if patchErr != nil {
+		snap.Error = fmt.Errorf("capture tracked diff: %w", patchErr)
+	}
+
+	untracked, untrackedErr := untrackedFiles(cwd)
+	if untrackedErr != nil && snap.Error == nil {
+		snap.Error = fmt.Errorf("list untracked files: %w", untrackedErr)
+	}
+
+	var manifest []changeManifestEntry
+	appendTrackedManifestEntries(cwd, &manifest, &snap.Error)
+	for _, path := range untracked {
+		content, err := os.ReadFile(filepath.Join(cwd, path))
+		if err != nil {
+			if snap.Error == nil {
+				snap.Error = fmt.Errorf("read untracked file %s: %w", path, err)
+			}
+			continue
+		}
+		manifest = append(manifest, changeManifestEntry{Path: path, Kind: "untracked", Mode: fileModeString(filepath.Join(cwd, path))})
+		patch = append(patch, untrackedDiffSection(path, content)...)
+	}
+
+	manifestData, manifestErr := json.Marshal(changeManifest{
+		BaseCommit: snap.Commit,
+		BaseTree:   snap.Tree,
+		Entries:    manifest,
+	})
+	if manifestErr != nil {
+		if snap.Error == nil {
+			snap.Error = fmt.Errorf("encode change manifest: %w", manifestErr)
+		}
+	}
+	if manifestErr == nil {
+		snap.Manifest = manifestData
+		snap.ManifestDigest = sha256Hex(manifestData)
+		snap.Entries = len(manifest)
+	}
+	snap.Patch = patch
+	snap.ProposedDigest = sha256Hex(patch)
+	return snap
+}
+
+// changeManifest is the machine-readable record of one attempt's source
+// changes. Digesting this JSON pins the evidence identity: the same digest
+// in the row and on disk proves the row's evidence is the evidence read.
+type changeManifest struct {
+	BaseCommit string                `json:"base_commit"`
+	BaseTree   string                `json:"base_tree"`
+	Entries    []changeManifestEntry `json:"entries"`
+}
+
+type changeManifestEntry struct {
+	Path string `json:"path"`
+	Kind string `json:"kind"` // modified | deleted | renamed | mode_change | untracked
+	Mode string `json:"mode,omitempty"`
+}
+
+// untrackedFiles lists untracked (and unignored) files relative to cwd.
+func untrackedFiles(cwd string) ([]string, error) {
+	out, err := exec.Command("git", "-C", cwd, "ls-files", "--others", "--exclude-standard").Output()
+	if err != nil {
+		return nil, err
+	}
+	var files []string
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			files = append(files, line)
+		}
+	}
+	return files, nil
+}
+
+// appendTrackedManifestEntries records every tracked change (modification,
+// deletion, rename, mode change) from porcelain status.
+func appendTrackedManifestEntries(cwd string, manifest *[]changeManifestEntry, firstErr *error) {
+	out, err := exec.Command("git", "-C", cwd, "status", "--porcelain").Output()
+	if err != nil {
+		if *firstErr == nil {
+			*firstErr = fmt.Errorf("read git status: %w", err)
+		}
 		return
 	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if len(line) < 4 {
+			continue
+		}
+		status, path := line[:2], strings.TrimSpace(line[3:])
+		if path == "" {
+			continue
+		}
+		kind := "modified"
+		switch {
+		case strings.Contains(line, " -> "):
+			kind = "renamed"
+			path = path[strings.Index(path, " -> ")+4:]
+		case strings.HasPrefix(status, "D"):
+			kind = "deleted"
+		case status == " M" || status == "M ":
+			kind = "modified"
+		}
+		if strings.HasPrefix(status, "??") {
+			// Untracked entries are added by the caller with file contents.
+			continue
+		}
+		*manifest = append(*manifest, changeManifestEntry{Path: path, Kind: kind, Mode: fileModeString(filepath.Join(cwd, path))})
+	}
+}
+
+// fileModeString renders the octal permission bits of path, or "" when the
+// stat fails. Modes ride the manifest so a chmod-only change is visible.
+func fileModeString(path string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	return strconv.FormatUint(uint64(info.Mode().Perm()), 8)
+}
+
+// untrackedDiffSection renders one untracked file as a diff-style section so
+// the patch artifact alone reconstructs the full proposal.
+func untrackedDiffSection(path string, content []byte) []byte {
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf, "\n--- /dev/null\n+++ %s\n@@ -0,0 +1,%d @@\n", path, bytes.Count(content, []byte("\n")))
+	for _, line := range strings.Split(strings.TrimSuffix(string(content), "\n"), "\n") {
+		if line == "" && strings.HasSuffix(string(content), "\n") && len(content) == 1 {
+			continue
+		}
+		buf.WriteString("+" + line + "\n")
+	}
+	return buf.Bytes()
+}
+
+// sha256Hex returns the hex sha256 of data, or "" on no data. An empty
+// digest means "not captured", never "digest of nothing".
+func sha256Hex(data []byte) string {
+	if data == nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// writeProposalArtifact persists the exec transcript, the proposal patch,
+// and the change manifest. Best-effort per file, but a failure is returned
+// to the caller by writeAttemptEvidence; these helpers never panic and
+// never change the verdict.
+func writeProposalArtifact(dir, sessionID string, execOut []byte, snap proposalSnapshot) {
 	_ = os.MkdirAll(dir, 0o755)
 	if len(execOut) > 0 {
 		_ = os.WriteFile(artifactPath(dir, sessionID, "exec.jsonl"), execOut, 0o644)
 	}
+	if len(snap.Patch) > 0 {
+		_ = os.WriteFile(artifactPath(dir, sessionID, "patch.diff"), snap.Patch, 0o644)
+	}
+	if len(snap.Manifest) > 0 {
+		_ = os.WriteFile(artifactPath(dir, sessionID, "manifest.json"), snap.Manifest, 0o644)
+	}
+	if snap.Commit != "" {
+		_ = os.WriteFile(artifactPath(dir, sessionID, "commit.txt"), []byte(snap.Commit), 0o644)
+	}
+	if snap.Tree != "" {
+		_ = os.WriteFile(artifactPath(dir, sessionID, "tree.txt"), []byte(snap.Tree), 0o644)
+	}
+}
+
+// writeVerifierArtifact persists the verifier's captured output, redacted
+// with the central redactor so secrets never land in the evidence tree.
+func writeVerifierArtifact(dir, sessionID string, verifierOut []byte) {
+	_ = os.MkdirAll(dir, 0o755)
 	if len(verifierOut) > 0 {
-		_ = os.WriteFile(artifactPath(dir, sessionID, "verifier.txt"), verifierOut, 0o644)
+		_ = os.WriteFile(artifactPath(dir, sessionID, "verifier.txt"), []byte(redactCLIString(string(verifierOut))), 0o644)
 	}
-	if cwd != "" {
-		patch, err := exec.Command("git", "-C", cwd, "diff", "HEAD").Output()
-		if err == nil {
-			_ = os.WriteFile(artifactPath(dir, sessionID, "patch.diff"), patch, 0o644)
+}
+
+// writeAttemptEvidence verifies the artifact files written for one attempt
+// actually exist and are non-empty. It is the completeness check behind
+// EvidenceStatus: a missing or empty artifact is an explicit evidence
+// failure, never a silent gap and never a correctness change.
+func writeAttemptEvidence(dir, sessionID string, snap proposalSnapshot) error {
+	if dir == "" {
+		return fmt.Errorf("no artifact dir for session %s", sessionID)
+	}
+	if snap.Error != nil {
+		return fmt.Errorf("proposal capture failed: %w", snap.Error)
+	}
+	for _, name := range []string{"exec.jsonl", "patch.diff", "manifest.json", "commit.txt", "tree.txt"} {
+		info, err := os.Stat(artifactPath(dir, sessionID, name))
+		if err != nil {
+			return fmt.Errorf("artifact %s missing: %w", name, err)
 		}
-		if tree, err := exec.Command("git", "-C", cwd, "rev-parse", "HEAD").Output(); err == nil {
-			_ = os.WriteFile(artifactPath(dir, sessionID, "tree.txt"), tree, 0o644)
+		if info.Size() == 0 {
+			return fmt.Errorf("artifact %s is empty", name)
 		}
 	}
+	return nil
 }

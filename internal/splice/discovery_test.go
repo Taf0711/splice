@@ -331,7 +331,7 @@ func TestDiscoveryPlanAccountingIsHonest(t *testing.T) {
 	}
 	tr := &runTraceAccumulator{stages: map[stageKey]schemas.InputMeta{}}
 	tr.recordDiscoveryPlan("code_writer", 1, plan)
-	meta := tr.stages[stageKey{"code_writer", 1}]
+	meta := tr.stages[stageKey{"code_writer", 1, 0}]
 	if meta.DiscoveryQuestions != 4 || meta.DiscoveryResolvedCog != 2 ||
 		meta.DiscoveryUnresolved != 1 ||
 		meta.AnchorsValidated != 2 || meta.AnchorsFailed != 1 {

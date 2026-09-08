@@ -574,9 +574,19 @@ type StageScopePlan struct {
 	// when unresolved questions exist that need it; false after a full
 	// cognition resolution so redundant searches are suppressed.
 	AllowGlobalSearch bool
+	// SemanticResolved is true when the resolutions came from the
+	// semantic fallback path. Semantic candidates prioritize context
+	// without authorizing tool narrowing; the run gate reads this field
+	// so a semantic-only plan still reaches the context swap.
+	SemanticResolved bool
 	// ExpansionBudget is the remaining number of bounded scope expansions
 	// (new deterministic evidence grants one targeted lookup each).
 	ExpansionBudget int
+	// ExpansionsSpent is the number of expansion grants this invocation
+	// actually spent. It is the measured counter the trace records as
+	// expansions_performed; the remaining budget is never reported as
+	// performed work.
+	ExpansionsSpent int
 }
 
 // scopePlanFor derives the scope plan from a DiscoveryPlan and the fresh
@@ -628,6 +638,9 @@ func scopePlanFor(plan DiscoveryPlan, planNodes []memd.GraphNode, priorScope *St
 	// coverage. A fresh fact about one package does not answer how another
 	// package stores or exposes what the target needs.
 	scope.CognitionResolved = len(plan.ResolvedByCognition) > 0 && !plan.SemanticResolved
+	// The semantic flag flows to the run gate so a semantic-only plan
+	// reaches the context-prioritization swap without tool narrowing.
+	scope.SemanticResolved = plan.SemanticResolved
 	// Privileges: global listing survives whenever the resolutions came
 	// from the semantic path (authority not established); global search
 	// survives while unresolved questions remain.
@@ -669,22 +682,49 @@ func ScopedContextRequest(defaultReq schemas.ContextRequest, scope StageScopePla
 			return defaultReq, sup
 		}
 		// Semantic-only candidates: PRIORITIZE the known files by
-		// prepending their reads to the FULL default request. No
-		// suppression is claimed - the planner did not establish what can
-		// be omitted. The global listing stays (discovery remains open);
-		// the model simply sees the prioritized files first.
-		prepended := make([]schemas.ContextQuery, 0, len(scope.KnownFiles)+len(defaultReq.Queries))
+		// moving their reads to the front of the FULL default request.
+		// No suppression is claimed - the planner did not establish what
+		// can be omitted. The global listing stays (discovery remains
+		// open); the model simply sees the prioritized files first.
+		//
+		// Move-not-duplicate: a hinted file that the default request
+		// already reads is MOVED to the priority position instead of
+		// being duplicated as a second read of the same path.
+		priority := make([]schemas.ContextQuery, 0, len(scope.KnownFiles))
+		remaining := make([]schemas.ContextQuery, 0, len(defaultReq.Queries))
+		moved := make(map[int]struct{}, len(defaultReq.Queries))
 		for _, f := range scope.KnownFiles {
+			matched := false
+			for i, q := range defaultReq.Queries {
+				if _, done := moved[i]; done {
+					continue
+				}
+				if q.QueryType == schemas.ContextReadFile && q.Path != nil && *q.Path == f {
+					priority = append(priority, q)
+					moved[i] = struct{}{}
+					matched = true
+					break
+				}
+			}
+			if matched {
+				continue
+			}
 			path := f
-			prepended = append(prepended, schemas.ContextQuery{
+			priority = append(priority, schemas.ContextQuery{
 				QueryType:  schemas.ContextReadFile,
 				Path:       &path,
 				MaxResults: 10,
 				MaxChars:   scopedReadMaxChars,
 			})
 		}
-		prepended = append(prepended, defaultReq.Queries...)
-		return schemas.ContextRequest{Reason: reason, Queries: prepended}, sup
+		for i, q := range defaultReq.Queries {
+			if _, done := moved[i]; done {
+				continue
+			}
+			remaining = append(remaining, q)
+		}
+		combined := append(priority, remaining...)
+		return schemas.ContextRequest{Reason: reason, Queries: combined}, sup
 	}
 	if len(scope.UnresolvedQuestions) > 0 {
 		// Exact-anchor resolutions with remaining unresolved questions:

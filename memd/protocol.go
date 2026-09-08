@@ -686,3 +686,30 @@ type graphCollectResponse struct {
 	OK        bool  `json:"ok"`
 	Collected int64 `json:"collected"`
 }
+
+// graphCaptureSetRequest is the JSON body for POST /graph/capture_set.
+// SourceRunID is optional: when set, the capture set is scoped to the
+// producer run that persisted the nodes, so two runs that verified the
+// same tree keep separate sets. When omitted, the historical
+// project+revision behavior is preserved.
+type graphCaptureSetRequest struct {
+	ProjectPath string  `json:"project_path"`
+	Revision    string  `json:"revision"`
+	SourceRunID *string `json:"source_run_id,omitempty"`
+}
+
+func (r *graphCaptureSetRequest) Validate() error {
+	if r.ProjectPath == "" || r.Revision == "" {
+		return fmt.Errorf("project_path and revision are required")
+	}
+	if r.SourceRunID != nil && *r.SourceRunID == "" {
+		return fmt.Errorf("source_run_id must be omitted, not empty")
+	}
+	return nil
+}
+
+// graphCaptureSetResponse is the JSON body returned by POST /graph/capture_set.
+type graphCaptureSetResponse struct {
+	OK  bool    `json:"ok"`
+	IDs []int64 `json:"ids"`
+}

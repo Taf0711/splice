@@ -129,7 +129,7 @@ func TestCognitionFastPath_A_FreshHit(t *testing.T) {
 	if store.queried {
 		t.Fatal("TraceQuerier called on direct hit, want exemplars skipped")
 	}
-	meta := tr.stages[stageKey{"code_writer", 1}]
+	meta := tr.stages[stageKey{"code_writer", 1, 0}]
 	if meta.MemoryLookupMode != "direct" {
 		t.Fatalf("memory_lookup_mode = %q, want direct", meta.MemoryLookupMode)
 	}
@@ -174,7 +174,7 @@ func TestCognitionFastPath_B_MissFallback(t *testing.T) {
 	if !store.queried {
 		t.Fatal("TraceQuerier not called on Search path, exemplars should be attempted")
 	}
-	meta := tr.stages[stageKey{"code_writer", 1}]
+	meta := tr.stages[stageKey{"code_writer", 1, 0}]
 	if meta.MemoryLookupMode != "search" {
 		t.Fatalf("memory_lookup_mode = %q, want search", meta.MemoryLookupMode)
 	}
@@ -378,7 +378,7 @@ func TestCognitionFastPath_G_DuplicateDedupe(t *testing.T) {
 	if len(store.queries) != 0 {
 		t.Fatalf("Search called %d times, want 0 (direct hit should be used)", len(store.queries))
 	}
-	meta := tr.stages[stageKey{"code_writer", 1}]
+	meta := tr.stages[stageKey{"code_writer", 1, 0}]
 	// Both observations were classified fresh pre-admission; Admit's StableID
 	// dedupe then kept one. DirectHits counts the pre-admission fresh set.
 	if meta.DirectHits != 2 {
@@ -427,7 +427,7 @@ func TestCognitionFastPath_H_BudgetCompaction(t *testing.T) {
 	if delivered == 0 || delivered >= 5 {
 		t.Fatalf("compaction must drop some observations: delivered=%d, want 1..4", delivered)
 	}
-	meta := tr.stages[stageKey{"code_writer", 1}]
+	meta := tr.stages[stageKey{"code_writer", 1, 0}]
 	if meta.MemoryItems != delivered {
 		t.Fatalf("trace MemoryItems = %d, want post-compaction delivered %d", meta.MemoryItems, delivered)
 	}

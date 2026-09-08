@@ -18,6 +18,17 @@ type RunInput struct {
 	Prompt    string
 	Cwd       string // the arm's repo copy
 	Check     string // shell command; exit 0 = success
+	// Treatment optionally names the experiment treatment this run
+	// realizes (cold, retrieval-only, delivery-only, scope-only, full).
+	// When set, the run seam appends the treatment's subprocess
+	// environment (SPLICE_SCOPE_MODE / SPLICE_EXEMPLAR_MODE) to the exec
+	// child so concurrent arms never share mutable knob state. Empty
+	// keeps the parent environment as-is (the historical behavior).
+	Treatment string `json:"-"`
+	// TreatmentEnv carries the resolved treatment environment entries.
+	// Production derives it from Treatment; a test may set it directly
+	// to assert what the child would receive without resolving.
+	TreatmentEnv []string `json:"-"`
 	// OutputPath optionally names a file the run seam writes the captured
 	// exec transcript to (debugging aid; empty disables the write).
 	OutputPath string `json:"-"`
@@ -49,6 +60,26 @@ type RunOutput struct {
 	// Artifact paths for this attempt (empty when ArtifactDir was unset).
 	VerifierOutputPath string
 	PatchPath          string
+	// FailureCategory classifies a non-success outcome so a model failure
+	// stays separable from infrastructure noise: "", "agent_noncompletion",
+	// "verifier_rejected", "verifier_infra", "provider_failure",
+	// "budget_exhausted", or "harness_timeout". A harness timeout is its
+	// own category, never an automatic infrastructure verdict.
+	FailureCategory string
+	// EvidenceStatus is "" when every configured artifact was captured and
+	// written, "incomplete" when evidence collection failed. An incomplete
+	// evidence set never changes the correctness result.
+	EvidenceStatus string
+	// ArtifactError names the first evidence-collection failure (empty when
+	// EvidenceStatus is not "incomplete").
+	ArtifactError string
+	// ManifestDigest is the sha256 of the captured change manifest and
+	// ProposedDigest the sha256 of the proposal patch bytes. Empty means
+	// not captured, never a fabricated zero digest.
+	ManifestDigest string
+	ProposedDigest string
+	// VerifierTimeMs is the wall-clock time of the verifier invocation.
+	VerifierTimeMs int64
 }
 
 // RunFunc runs one headless exec invocation in an arm copy and returns its

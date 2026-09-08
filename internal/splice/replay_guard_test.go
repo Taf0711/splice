@@ -157,7 +157,7 @@ func TestReplayGuard_DirectPathNoFallback(t *testing.T) {
 		t.Fatalf("Search called %d times after direct suppression, want 0 (suppression is not a retrieval miss)", len(store.queries))
 	}
 	// Direct-path telemetry stays honest: the hit was still recorded.
-	meta := tr.stages[stageKey{"code_writer", 2}]
+	meta := tr.stages[stageKey{"code_writer", 2, 0}]
 	if meta.MemoryLookupMode != "direct" || meta.DirectHits != 1 {
 		t.Fatalf("re-entry lookup meta = mode %q hits %d, want direct/1", meta.MemoryLookupMode, meta.DirectHits)
 	}

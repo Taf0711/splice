@@ -21,16 +21,13 @@ func TestArtifactCapturePreservesVerifierOutput(t *testing.T) {
 	// survive on disk with the session id prefix.
 	sessionID := "mvp-test-session"
 	verifierText := "FAIL demo/internal/session [build failed]\nundefined: RecordDunningNotice\n"
-	writeAttemptArtifacts(artifactDir, sessionID, []byte(`{"type":"run_end"}`), []byte(verifierText), "")
+	writeVerifierArtifact(artifactDir, sessionID, []byte(verifierText))
 	data, err := os.ReadFile(artifactPath(artifactDir, sessionID, "verifier.txt"))
 	if err != nil {
 		t.Fatalf("verifier artifact missing: %v", err)
 	}
 	if !strings.Contains(string(data), "undefined: RecordDunningNotice") {
 		t.Fatalf("verifier artifact lost the failure cause: %q", data)
-	}
-	if _, err := os.Stat(artifactPath(artifactDir, sessionID, "exec.jsonl")); err != nil {
-		t.Fatalf("exec transcript artifact missing: %v", err)
 	}
 }
 

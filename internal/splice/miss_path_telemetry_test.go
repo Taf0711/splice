@@ -35,7 +35,7 @@ func TestMissPathTelemetryLandsInTrace(t *testing.T) {
 	// The caller (prepareStageInput) records the detail; replay that wiring
 	// here since this test drives the seam directly.
 	tr.recordMissPathDetail("code_writer", 0, detail)
-	meta := tr.stages[stageKey{"code_writer", 0}]
+	meta := tr.stages[stageKey{"code_writer", 0, 0}]
 	if meta.KeysGenerated != 1 || meta.FTSFallback != 0 {
 		t.Fatalf("trace meta = keys %d fallback %d, want 1/0", meta.KeysGenerated, meta.FTSFallback)
 	}
@@ -55,7 +55,7 @@ func TestMissPathTelemetryLandsInTrace(t *testing.T) {
 		t.Fatalf("fallback path must not derive keys, got %d", detail2.KeysGenerated)
 	}
 	p2.Trace.recordMissPathDetail("code_writer", 0, detail2)
-	meta2 := tr2.stages[stageKey{"code_writer", 0}]
+	meta2 := tr2.stages[stageKey{"code_writer", 0, 0}]
 	if meta2.FTSFallback != 1 || meta2.KeysGenerated != 0 {
 		t.Fatalf("fallback trace meta = keys %d fallback %d, want 0/1", meta2.KeysGenerated, meta2.FTSFallback)
 	}

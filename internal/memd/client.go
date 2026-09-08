@@ -892,7 +892,17 @@ func (c *Client) CollectGraph(ctx context.Context, olderThanSeconds int64) (int6
 // anchored at fromRevision - the capture set of the verified run that
 // produced them. The harness uses this to scope a reanchor to exactly the
 // nodes its verified run captured, instead of every node of the project.
+// The two-arg form omits the source_run_id filter, which preserves the
+// historical project+revision behavior on the sidecar.
 func (c *Client) CaptureSetIDs(ctx context.Context, projectPath, fromRevision string) ([]int64, error) {
+	return c.CaptureSetIDsForRun(ctx, projectPath, fromRevision, "")
+}
+
+// CaptureSetIDsForRun is CaptureSetIDs with an optional producer-run
+// filter: when sourceRunID is non-empty the sidecar scopes the capture
+// set to the run that persisted the nodes, so two runs that verified the
+// same tree keep separate sets. An empty sourceRunID sends no filter.
+func (c *Client) CaptureSetIDsForRun(ctx context.Context, projectPath, fromRevision, sourceRunID string) ([]int64, error) {
 	if projectPath == "" || fromRevision == "" {
 		return nil, fmt.Errorf("memd graph capture set: project path and revision are required")
 	}
@@ -902,6 +912,9 @@ func (c *Client) CaptureSetIDs(ctx context.Context, projectPath, fromRevision st
 		Error string  `json:"error,omitempty"`
 	}
 	body := map[string]any{"project_path": projectPath, "revision": fromRevision}
+	if sourceRunID != "" {
+		body["source_run_id"] = sourceRunID
+	}
 	if err := c.do(ctx, http.MethodPost, "/graph/capture_set", body, &resp); err != nil {
 		return nil, err
 	}

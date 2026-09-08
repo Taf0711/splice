@@ -204,8 +204,75 @@ type familyPairRow struct {
 	// e.g. the cold arm). A warm attempt whose precursor failed carries
 	// WarmSetupInvalid=true: its cognition came from nothing legitimate.
 	Precursor      string `json:"precursor,omitempty"`
-	WarmSetupValid bool   `json:"-"`
+	WarmSetupValid *bool  `json:"warm_setup_valid,omitempty"`
 	WarmSetupNote  string `json:"warm_setup_note,omitempty"`
+
+	// ---- Per-attempt identity and provenance. Unknown values stay absent
+	// (omitempty) or read "unavailable": a missing measurement is never a
+	// fabricated zero.
+
+	// Experiment ties every row of one invocation together; PipelineRunID
+	// is the harness run that produced this row. SessionID (above) is the
+	// per-attempt agent session; the two are distinct namespaces.
+	ExperimentID  string `json:"experiment_id,omitempty"`
+	PipelineRunID string `json:"pipeline_run_id,omitempty"`
+	// Treatment is the causal condition of this attempt (memory on/off,
+	// scope mode, and so on), kept as the arm name plus mode string.
+	Treatment string `json:"treatment,omitempty"`
+	// SnapshotID names the shared Task A snapshot in matched-snapshot
+	// runs: every Task B row of one family shares it.
+	SnapshotID string `json:"snapshot_id,omitempty"`
+	// Executed is false only for rows that describe a target slot that
+	// never ran (skipped). Every row that ran any code is true.
+	Executed bool `json:"executed"`
+	// SetupOutcome is the typed per-attempt setup result for skipped rows:
+	// "precursor_failed", "timeout", "memory_reset_failed", and so on.
+	// Empty for executed rows.
+	SetupOutcome string `json:"setup_outcome,omitempty"`
+
+	// Provenance of the harness and fixture this attempt ran against.
+	SpliceCommit  string `json:"splice_commit,omitempty"`
+	SpliceDirty   bool   `json:"splice_dirty,omitempty"`
+	SpliceBinary  string `json:"splice_binary,omitempty"`
+	FixtureCommit string `json:"fixture_commit,omitempty"`
+	FixtureTree   string `json:"fixture_tree,omitempty"` // tree hash, NOT the commit
+	// PromptHash and VerifierHash pin exactly which prompt and verifier
+	// script bytes the attempt used (sha256 hex).
+	PromptHash      string `json:"prompt_hash,omitempty"`
+	VerifierHash    string `json:"verifier_hash,omitempty"`
+	ConfiguredModel string `json:"configured_model,omitempty"`
+
+	// Starting state of the arm for this attempt.
+	StartCommit string `json:"start_commit,omitempty"`
+	StartTree   string `json:"start_tree,omitempty"` // tree hash, NOT the commit
+	// CleanStateVerified records the externally verified clean-state result
+	// for the attempt's precursor ("success"/"failed"/"timeout").
+	CleanStateVerified string `json:"clean_state_verified,omitempty"`
+	// ProposedDigest is the sha256 of the captured proposal bytes.
+	ProposedDigest string `json:"proposed_digest,omitempty"`
+
+	// Evidence: the change-manifest digest plus references to the on-disk
+	// artifacts. ArtifactRef paths are relative to the attempts log's out
+	// dir when known, absolute otherwise.
+	ManifestDigest string   `json:"manifest_digest,omitempty"`
+	ArtifactRefs   []string `json:"artifact_refs,omitempty"`
+	// EvidenceStatus is "" (complete), "incomplete", or "unavailable".
+	EvidenceStatus string `json:"evidence_status,omitempty"`
+	ArtifactError  string `json:"artifact_error,omitempty"`
+
+	// Timing and cost: agent elapsed, verifier elapsed, and token totals.
+	// Token totals ride the existing Tokens/InputTokens/OutputTokens
+	// fields; AgentTimeMs is the exec run's wall clock.
+	AgentTimeMs     int64  `json:"agent_time_ms,omitempty"`
+	VerifierTimeMs  int64  `json:"verifier_time_ms,omitempty"`
+	FailureCategory string `json:"failure_category,omitempty"`
+
+	// SeedStatus records how the warm arm's cognition was seeded for the
+	// matched-snapshots flow: "replayed" (the frozen capture payload of
+	// the verified Task A run was rematerialized into this project), or
+	// an explicit failure status. Cold rows and non-matched flows leave
+	// it empty; a missing seed is never recorded as silent success.
+	SeedStatus string `json:"seed_status,omitempty"`
 }
 
 // familiesRunTimeout is the deterministic per-run bound: a provider stall
@@ -591,6 +658,18 @@ func seedFamilyObservation(ctx context.Context, warmDir string, family familyEnt
 // fails. The families runner records it so the freshness gate can classify.
 func gitHeadCommit(dir string) string {
 	out, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// gitTreeHash returns the TREE hash of the repo at dir, or "" when git
+// fails. This is the commit's content identity (rev-parse HEAD^{tree}), a
+// different object from the commit hash: two commits over the same bytes
+// share a tree but not a commit.
+func gitTreeHash(dir string) string {
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD^{tree}").Output()
 	if err != nil {
 		return ""
 	}

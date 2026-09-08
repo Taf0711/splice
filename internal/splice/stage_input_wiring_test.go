@@ -69,7 +69,7 @@ func TestPrepareStageInputTracesPostCompactionDeliveredMemory(t *testing.T) {
 		t.Fatalf("prepareStageInput: %v", err)
 	}
 
-	meta := tr.stages[stageKey{"code_writer", 1}]
+	meta := tr.stages[stageKey{"code_writer", 1, 0}]
 	delivered := 0
 	if prepared.MemoryBundle != nil {
 		delivered = len(prepared.MemoryBundle.Observations) + len(prepared.MemoryBundle.Exemplars)
@@ -282,7 +282,7 @@ func TestRepairReentryRetrievesAndTracesEachMemoryInvocation(t *testing.T) {
 	// Retrieval stayed real (2 searches) but delivery happened once: the
 	// delivered-memory counters count MODEL-VISIBLE items (one invocation's
 	// worth), not retrievals.
-	meta := tr.stages[stageKey{"code_writer", 1}]
+	meta := tr.stages[stageKey{"code_writer", 1, 0}]
 	// Both invocations (initial + repair re-entry) delivered the fact: the
 	// repair request is fresh, so the re-delivery is model-visible and the
 	// delivered-memory counters count both.

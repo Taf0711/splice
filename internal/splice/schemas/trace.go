@@ -74,6 +74,16 @@ type InputMeta struct {
 	MemoryChars      int `json:"memory_chars"`
 	ExemplarItems    int `json:"exemplar_items"`
 	EdgePayloadBytes int `json:"edge_payload_bytes"`
+	// ContextFailures counts context queries that executed but failed to
+	// produce content (the fulfilled item carries an error). A failed read
+	// is executed work and a delivery miss, never successfully delivered
+	// context. Measured zero is recorded, not absent.
+	ContextFailures int `json:"context_failures"`
+	// ProviderRetries counts provider-level stream retries this invocation
+	// consumed (attempt 2 of a retried stage records 1). Zero means no
+	// retry was needed; the field is absent on traces written before it
+	// existed.
+	ProviderRetries int `json:"provider_retries,omitempty"`
 	// MemoryLookupMode records which retrieval path produced this stage's
 	// memory bundle: "direct" (a fresh cognition fast-path hit, broad search
 	// skipped) or "search" (the broad search path ran). Empty means memory
@@ -120,7 +130,17 @@ type InputMeta struct {
 	ContextQueriesSuppressed int `json:"context_queries_suppressed,omitempty"`
 	GlobalListsSuppressed    int `json:"global_lists_suppressed,omitempty"`
 	SearchesSuppressed       int `json:"searches_suppressed,omitempty"`
-	ScopeExpansions          int `json:"scope_expansions,omitempty"`
+	// ScopeExpansions is the REMAINING expansion budget at the end of the
+	// invocation, never a count of performed expansions. ExpansionsPerformed
+	// is the measured count of expansion grants the invocation actually
+	// spent; a run that expanded nothing records 0, not an absent field.
+	ScopeExpansions     int `json:"scope_expansions,omitempty"`
+	ExpansionsPerformed int `json:"expansions_performed"`
+	// InvocationOrdinal distinguishes repeated invocations of the same
+	// stage within one iteration: 0 is the initial pass invocation, 1 and
+	// above are repair re-entries in repair order. Two invocations of the
+	// same stage produce two metric records instead of overwriting one.
+	InvocationOrdinal int `json:"invocation_ordinal,omitempty"`
 }
 
 // ScopeMetrics is the per-stage scope-suppression payload for
@@ -131,13 +151,18 @@ type ScopeMetrics struct {
 	ContextQueriesSuppressed int `json:"context_queries_suppressed,omitempty"`
 	GlobalListsSuppressed    int `json:"global_lists_suppressed,omitempty"`
 	SearchesSuppressed       int `json:"searches_suppressed,omitempty"`
-	ScopeExpansions          int `json:"scope_expansions,omitempty"`
+	// ScopeExpansions is the REMAINING expansion budget after the
+	// invocation; ExpansionsPerformed is the measured count the
+	// invocation actually spent.
+	ScopeExpansions     int `json:"scope_expansions,omitempty"`
+	ExpansionsPerformed int `json:"expansions_performed"`
 }
 
 // Validate checks the scope metrics.
 func (m ScopeMetrics) Validate() error {
 	if m.ContextQueriesDefault < 0 || m.ContextQueriesExecuted < 0 || m.ContextQueriesSuppressed < 0 ||
-		m.GlobalListsSuppressed < 0 || m.SearchesSuppressed < 0 || m.ScopeExpansions < 0 {
+		m.GlobalListsSuppressed < 0 || m.SearchesSuppressed < 0 || m.ScopeExpansions < 0 ||
+		m.ExpansionsPerformed < 0 {
 		return errors.New("scope metrics counts must be non-negative")
 	}
 	return nil
@@ -148,6 +173,9 @@ func (m InputMeta) Validate() error {
 	if m.ContextItems < 0 || m.ContextChars < 0 || m.MemoryItems < 0 || m.MemoryChars < 0 || m.ExemplarItems < 0 || m.EdgePayloadBytes < 0 {
 		return errors.New("input metadata counts must be non-negative")
 	}
+	if m.ContextFailures < 0 || m.ProviderRetries < 0 {
+		return errors.New("input metadata failure counts must be non-negative")
+	}
 	if m.DirectCandidates < 0 || m.DirectHits < 0 || m.StaleHits < 0 {
 		return errors.New("cognition lookup counts must be non-negative")
 	}
@@ -156,7 +184,8 @@ func (m InputMeta) Validate() error {
 	}
 	if m.FileReadsSuppressed < 0 ||
 		m.ContextQueriesDefault < 0 || m.ContextQueriesExecuted < 0 || m.ContextQueriesSuppressed < 0 ||
-		m.GlobalListsSuppressed < 0 || m.SearchesSuppressed < 0 || m.ScopeExpansions < 0 {
+		m.GlobalListsSuppressed < 0 || m.SearchesSuppressed < 0 || m.ScopeExpansions < 0 ||
+		m.ExpansionsPerformed < 0 || m.InvocationOrdinal < 0 {
 		return errors.New("context scope counts must be non-negative")
 	}
 	if m.DiscoveryQuestions < 0 || m.DiscoveryResolvedTask < 0 || m.DiscoveryResolvedCog < 0 ||
