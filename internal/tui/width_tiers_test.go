@@ -71,10 +71,11 @@ func TestWidthTierSegments(t *testing.T) {
 		}
 
 		status := plainRender(t, m.statusLine(tc.width))
-		// Status line now carries the run-state chip (permission mode), NOT the
-		// surface or model (those live in the title bar / composer rule).
-		if strings.Contains(status, "interactive") || strings.Contains(status, "claude-sonnet-4.5") {
-			t.Errorf("width %d: status should not include surface or model (%q)", tc.width, status)
+		// Status line carries the run-state chip (permission mode) and the
+		// mock's status grammar (model on the right); the surface label and
+		// provider stay in the title bar / composer rule.
+		if strings.Contains(status, "interactive") {
+			t.Errorf("width %d: status should not include the surface label (%q)", tc.width, status)
 		}
 		if !strings.Contains(status, "auto-approve") {
 			t.Errorf("width %d: status should show the permission mode (%q)", tc.width, status)

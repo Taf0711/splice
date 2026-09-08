@@ -75,27 +75,50 @@ func (f FileChangeSummary) Validate() error {
 }
 
 // CompletionReceipt records how a run ended. It is nil until the run
-// finishes.
+// finishes. Terminal receipts are `completed`, `failed`, and `cancelled`
+// (v0.5 receipts contract). `cancelled` is NOT failure: it means the user
+// stopped the run, and `Staged` vs `Applied` file counts distinguish work
+// that was proposed from work that reached the tree.
 type CompletionReceipt struct {
-	Status string `json:"status"`
-	Detail string `json:"detail,omitempty"`
+	Status  string `json:"status"`
+	Detail  string `json:"detail,omitempty"`
+	Staged  int    `json:"staged_files,omitempty"`
+	Applied int    `json:"applied_files,omitempty"`
 }
 
-// Validate checks the closed completion status.
+// Validate checks the closed completion status and non-negative counts.
 func (c CompletionReceipt) Validate() error {
 	switch c.Status {
-	case "completed", "failed":
-		return nil
+	case "completed", "failed", "cancelled":
+	default:
+		return fmt.Errorf("unknown completion status %q", c.Status)
 	}
-	return fmt.Errorf("unknown completion status %q", c.Status)
+	if c.Staged < 0 {
+		return fmt.Errorf("completion %s: staged file count must be non-negative, got %d", c.Status, c.Staged)
+	}
+	if c.Applied < 0 {
+		return fmt.Errorf("completion %s: applied file count must be non-negative, got %d", c.Status, c.Applied)
+	}
+	if c.Status == "cancelled" && c.Applied > 0 {
+		return fmt.Errorf("completion cancelled: %d applied files contradicts the staged-not-applied invariant; cancelled means work did not reach the tree", c.Applied)
+	}
+	return nil
 }
 
 // State is the versioned presentation contract the runtime emits and the
 // TUI projects. The reducer derives it from stream events; every state
 // produced by a legal event sequence passes Validate.
+//
+// Lifecycle and Health are independent dimensions (v0.5 §2): the phase says
+// where the run is, health says whether it is blocked, sick, or ended. A
+// Gate may coexist with any phase (e.g. design + blocked_on_user + ask_user);
+// the runtime upholds the hard-gate invariants (0 running agents, 0 token
+// burn) and the projection mirrors them.
 type State struct {
 	SchemaVersion int                 `json:"schema_version"`
 	Lifecycle     Lifecycle           `json:"lifecycle"`
+	Health        Health              `json:"health,omitempty"`
+	Gate          *GateView           `json:"gate,omitempty"`
 	Plan          Plan                `json:"plan"`
 	Nodes         []ExecutionNode     `json:"nodes"`
 	Interventions []Intervention      `json:"interventions"`

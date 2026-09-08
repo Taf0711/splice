@@ -154,15 +154,44 @@ func TestApplyPlanAndRun(t *testing.T) {
 		}
 	})
 
-	t.Run("run failed from recovery", func(t *testing.T) {
+	t.Run("run failed from verifying", func(t *testing.T) {
 		state, _ := Apply(State{}, PlanEvent{})
-		state.Lifecycle = LifecycleRecovery
+		state.Lifecycle = LifecycleVerifying
 		state, err := Apply(state, RunEvent{Status: "failed"})
 		if err != nil {
 			t.Fatalf("Apply run: %v", err)
 		}
 		if state.Completion == nil || state.Completion.Status != "failed" {
 			t.Fatalf("completion = %+v", state.Completion)
+		}
+		if state.Health != HealthFailed {
+			t.Fatalf("health = %q, want failed", state.Health)
+		}
+	})
+
+	t.Run("run cancelled is distinct from failed", func(t *testing.T) {
+		state, _ := Apply(State{}, PlanEvent{})
+		state.Lifecycle = LifecycleExecute
+		state, err := Apply(state, RunEvent{Status: "cancelled"})
+		if err != nil {
+			t.Fatalf("Apply run: %v", err)
+		}
+		if state.Lifecycle != LifecycleComplete {
+			t.Fatalf("lifecycle = %q, want complete", state.Lifecycle)
+		}
+		if state.Health != HealthCancelled {
+			t.Fatalf("health = %q, want cancelled", state.Health)
+		}
+		if state.Completion == nil || state.Completion.Status != "cancelled" {
+			t.Fatalf("completion = %+v", state.Completion)
+		}
+		// Cancelled is staged-not-applied by construction: the reducer
+		// records zero applied files for a cancelled run.
+		if state.Completion.Applied != 0 {
+			t.Fatalf("cancelled receipt carries %d applied files, want 0", state.Completion.Applied)
+		}
+		if err := state.Validate(); err != nil {
+			t.Fatalf("reducer output invalid: %v", err)
 		}
 	})
 }

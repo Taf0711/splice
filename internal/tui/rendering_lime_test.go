@@ -1311,23 +1311,26 @@ func TestComposerLineShowsRequiredCommandArgumentHint(t *testing.T) {
 
 func TestComposerBoxFramesInputAndBottomModelLabel(t *testing.T) {
 	m := limeTestModel()
+	m.transcript = append(m.transcript, transcriptRow{kind: rowAssistant, text: "history"})
 	m.input.SetValue("add a flag")
 
 	got := plainRender(t, m.composerBox(96))
-	// The box bottom rule shows the model only; the permission mode moved to the
-	// status line below the box.
-	for _, want := range []string{"╭", "│", "∞ add a flag", "╰", "test-model"} {
+	// Pen composer: a bare "❯ <text>" row — no border, no bottom model rule
+	// (the model lives in the status line right side).
+	for _, want := range []string{"❯ add a flag"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("composer box = %q, missing %q", got, want)
 		}
 	}
+	if strings.Contains(got, "╭") || strings.Contains(got, "│") {
+		t.Fatalf("composer box = %q, must be a bare row (no border)", got)
+	}
+	if strings.Contains(got, "test-model") {
+		t.Fatalf("composer box = %q, should not show the model (moved to status line)", got)
+	}
 	if strings.Contains(got, "auto-approve") {
 		t.Fatalf("composer box = %q, should not show the mode (moved to status line)", got)
 	}
-	if strings.Contains(got, "run ↵") {
-		t.Fatalf("composer box = %q, should not show run hint", got)
-	}
-	assertRenderedLineWidths(t, got, 96)
 }
 
 func TestComposerBoxWrapsLongPrompt(t *testing.T) {
@@ -1339,28 +1342,30 @@ func TestComposerBoxWrapsLongPrompt(t *testing.T) {
 	if !strings.Contains(got, "Bootstrap 5.3") || !strings.Contains(got, "reading progress bars") {
 		t.Fatalf("composer box should show wrapped long prompt, got:\n%s", got)
 	}
-	if lineCount := len(strings.Split(got, "\n")); lineCount < 5 {
-		t.Fatalf("composer box line count = %d, want wrapped multi-line box:\n%s", lineCount, got)
+	// Bare-row contract: prompt rows wrap without border lines, so the count
+	// is the wrapped content lines themselves.
+	if lineCount := len(strings.Split(got, "\n")); lineCount < 3 {
+		t.Fatalf("composer box line count = %d, want wrapped multi-line prompt:\n%s", lineCount, got)
 	}
-	assertRenderedLineWidths(t, got, 72)
 }
 
 func TestComposerBoxCapsLongPromptHeightAroundCursor(t *testing.T) {
 	m := limeTestModel()
+	m.transcript = append(m.transcript, transcriptRow{kind: rowAssistant, text: "history"})
 	m.input.SetValue(strings.Repeat("alpha beta gamma delta ", 12) + "final words")
 	m.input.CursorEnd()
 
 	got := plainRender(t, m.composerBox(44))
-	if lineCount := len(strings.Split(got, "\n")); lineCount != composerMaxVisibleLines+2 {
-		t.Fatalf("composer box line count = %d, want %d:\n%s", lineCount, composerMaxVisibleLines+2, got)
+	// Bare-row contract: no border rows, so the cap is the visible-line cap.
+	if lineCount := len(strings.Split(got, "\n")); lineCount != composerMaxVisibleLines {
+		t.Fatalf("composer box line count = %d, want %d:\n%s", lineCount, composerMaxVisibleLines, got)
 	}
 	if !strings.Contains(got, "final words") {
 		t.Fatalf("composer box should keep cursor-adjacent tail visible, got:\n%s", got)
 	}
-	if !strings.Contains(got, "∞") {
+	if !strings.Contains(got, "❯") {
 		t.Fatalf("composer box should keep the prompt marker visible when capped, got:\n%s", got)
 	}
-	assertRenderedLineWidths(t, got, 44)
 }
 
 func TestMalformedAskUserToolResultIsHiddenFromChatSurface(t *testing.T) {
@@ -1396,13 +1401,13 @@ func TestMalformedToolArgumentResultIsHiddenFromChatSurface(t *testing.T) {
 func TestStatusLineGroups(t *testing.T) {
 	m := limeTestModel()
 	got := plainRender(t, m.statusLine(110))
-	// Status line shows the run-state chip (permission mode), NOT the provider,
-	// surface, or model — those live in the title bar / composer rule.
-	if !strings.Contains(got, "● auto-approve") {
-		t.Fatalf("status line = %q, missing the permission-mode chip", got)
+	// Status line shows the phase chip (frame kAYHl grammar, no "status"
+	// word) plus the safety segments; the model lives on the right.
+	if !strings.Contains(got, "auto-approve") {
+		t.Fatalf("status line = %q, missing the permission mode", got)
 	}
-	if strings.Contains(got, "interactive") || strings.Contains(got, "test-model") || strings.Contains(got, "test-provider") {
-		t.Fatalf("status line = %q, should not include surface, model, or provider", got)
+	if strings.Contains(got, "interactive") || strings.Contains(got, "test-provider") {
+		t.Fatalf("status line = %q, should not include surface or provider", got)
 	}
 	divider := plainRender(t, m.composerDividerLine(110))
 	if !strings.Contains(divider, "test-model") {
@@ -1775,7 +1780,7 @@ func TestModelPickerRowsCarryCapabilityMeta(t *testing.T) {
 
 	m.picker = picker
 	got := plainRender(t, m.pickerOverlay(100))
-	for _, want := range []string{"Choose a model", "Enter select", "Ctrl+F favorite", "❯"} {
+	for _, want := range []string{"Choose a model", "⏎ confirm", "ctrl+f favorite", "❯"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("picker overlay = %q, missing %q", got, want)
 		}

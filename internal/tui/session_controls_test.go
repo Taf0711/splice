@@ -282,8 +282,9 @@ func TestStyleCommandListsAndSetsSessionPreference(t *testing.T) {
 	if next.responseStyle != "explanatory" {
 		t.Fatalf("expected explanatory style, got %q", next.responseStyle)
 	}
-	if !transcriptContains(next.transcript, "active style: explanatory") {
-		t.Fatalf("expected style switch transcript, got %#v", next.transcript)
+	// P15 ack grammar: the switch acks as one verb-column line.
+	if !transcriptContains(next.transcript, "balanced -> explanatory") {
+		t.Fatalf("expected style switch ack, got %#v", next.transcript)
 	}
 }
 

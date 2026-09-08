@@ -43,6 +43,24 @@ func (m model) plainTranscriptText() string {
 			prefix = "· "
 		case rowError:
 			prefix = "error: "
+			// Receipt payload rows export their readable form (title,
+			// body, recovery actions), not the internal NUL-tagged marker.
+			if card, ok := parseReceiptTranscriptPayload(row.text); ok {
+				var b strings.Builder
+				b.WriteString(card.title)
+				if card.elapsed != "" {
+					b.WriteString(" (" + card.elapsed + ")")
+				}
+				for _, line := range card.lines {
+					if strings.TrimSpace(line) != "" {
+						b.WriteString("\n  " + line)
+					}
+				}
+				for _, action := range card.actions {
+					b.WriteString("\n[" + action[0] + "] " + action[1])
+				}
+				row.text = b.String()
+			}
 		default:
 			continue
 		}
@@ -63,7 +81,12 @@ func (m model) plainTranscriptText() string {
 func (m model) handleExportCommand(args string) string {
 	body := m.plainTranscriptText()
 	if strings.TrimSpace(body) == "" {
-		return "Export\nnothing to export yet."
+		return ackSystemText(ack{
+			verb:    "export",
+			blocked: true,
+			outcome: "nothing to export yet",
+			unblock: "no transcript in this session",
+		})
 	}
 
 	path := strings.TrimSpace(args)
@@ -77,7 +100,15 @@ func (m model) handleExportCommand(args string) string {
 	// 0o600: a transcript can include tool/bash output that echoed secrets, so it
 	// must not be world/group-readable on a shared machine.
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		return "Export\nfailed to write " + path + ": " + err.Error()
+		return ackSystemText(ack{
+			verb:    "export",
+			blocked: true,
+			outcome: "failed to write " + path,
+			unblock: err.Error(),
+		})
 	}
-	return "Export\nwrote transcript to " + path
+	return ackSystemText(ack{
+		verb:    "export",
+		outcome: path,
+	})
 }

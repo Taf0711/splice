@@ -260,7 +260,9 @@ The event is a JSON object, but `final.text` is itself a JSON string for pipelin
 and design-plan results. Decode `text` when the client needs result fields.
 
 A pipeline result can contain `run_id`, `status`, `tier`, stage records, usage
-totals, and `abort_reason`.
+totals, `abort_reason`, and `user_aborted`. `user_aborted` is true only when
+the user chose to stop the run. Clients must treat `status=aborted` with
+`user_aborted=false` as a failure, not a user cancellation.
 
 A design-plan run returns a design-plan result with completed, failed, and
 skipped task IDs. Each task runs as an independent pipeline run.

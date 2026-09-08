@@ -31,7 +31,7 @@ func TestProgramDecodesInputRendersAndQuits(t *testing.T) {
 		tea.WithContext(ctx),
 		tea.WithInput(strings.NewReader("/exit\r")),
 		tea.WithOutput(&output),
-		tea.WithWindowSize(80, 24),
+		tea.WithWindowSize(120, 40),
 		tea.WithColorProfile(colorprofile.Ascii),
 		tea.WithoutSignals(),
 	)

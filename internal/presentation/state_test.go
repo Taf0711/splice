@@ -6,16 +6,76 @@ import (
 )
 
 func TestLifecycleValidation(t *testing.T) {
-	valid := []Lifecycle{"", LifecycleDesign, LifecycleCrystallize, LifecycleApprove, LifecycleExecute, LifecycleRecovery, LifecycleComplete}
+	valid := []Lifecycle{
+		"",
+		LifecycleDesign,
+		LifecycleCrystallizing,
+		LifecyclePlanReady,
+		LifecycleCritique,
+		LifecycleAwaitingApprove,
+		LifecycleExecute,
+		LifecycleVerifying,
+		LifecycleMergeBack,
+		LifecycleComplete,
+	}
 	for _, l := range valid {
 		if err := l.Validate(); err != nil {
 			t.Fatalf("lifecycle %q rejected: %v", l, err)
 		}
 	}
-	for _, l := range []Lifecycle{"bogus", "EXECUTE", "design "} {
+	for _, l := range []Lifecycle{"bogus", "EXECUTE", "design ", "crystallize", "approve", "recovery"} {
 		if err := l.Validate(); err == nil {
 			t.Fatalf("lifecycle %q accepted", l)
 		}
+	}
+}
+
+func TestHealthValidation(t *testing.T) {
+	for _, h := range []Health{"", HealthNormal, HealthBlockedOnUser, HealthRegression, HealthRecovering, HealthFailed, HealthCancelled, HealthUntrusted} {
+		if err := h.Validate(); err != nil {
+			t.Fatalf("health %q rejected: %v", h, err)
+		}
+	}
+	for _, h := range []Health{"bogus", "NORMAL", "failed "} {
+		if err := h.Validate(); err == nil {
+			t.Fatalf("health %q accepted", h)
+		}
+	}
+	if got := Health("").Effective(); got != HealthNormal {
+		t.Fatalf("empty health effective = %q, want normal", got)
+	}
+	if got := HealthRegression.Effective(); got != HealthRegression {
+		t.Fatalf("regression effective = %q, want regression", got)
+	}
+}
+
+func TestGateValidation(t *testing.T) {
+	valid := GateView{Kind: GateAskUser, Prompt: "buffer streamed bodies?", Blocking: true}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid gate rejected: %v", err)
+	}
+	for _, kind := range []GateKind{GateAskUser, GateApproval, GateCritiqueBlk, GateTrust} {
+		if err := (GateView{Kind: kind, Prompt: "p", Blocking: true}).Validate(); err != nil {
+			t.Fatalf("gate kind %q rejected: %v", kind, err)
+		}
+	}
+	cases := []struct {
+		name   string
+		mutate func(*GateView)
+		want   string
+	}{
+		{"unknown kind", func(g *GateView) { g.Kind = "pause" }, "unknown gate kind"},
+		{"non-blocking", func(g *GateView) { g.Blocking = false }, "only blocking gates"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gate := valid
+			tc.mutate(&gate)
+			err := gate.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want substring %q", err, tc.want)
+			}
+		})
 	}
 }
 

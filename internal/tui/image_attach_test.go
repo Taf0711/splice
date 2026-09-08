@@ -140,7 +140,7 @@ func TestImageCommandMissingFileNotice(t *testing.T) {
 
 func TestTranscriptViewShowsImageChips(t *testing.T) {
 	m := newModel(context.Background(), Options{ModelName: "gpt-4.1"})
-	m.width = 100
+	m.width = 130
 	m.height = 30
 	m.pendingImageLabels = []string{"photo.png", "diagram.gif"}
 
@@ -396,7 +396,7 @@ func TestImageCommandClearAlsoClearsDocuments(t *testing.T) {
 // The chip row shows a "[doc: …]" entry for staged documents.
 func TestTranscriptViewShowsDocumentChips(t *testing.T) {
 	m := newModel(context.Background(), Options{ModelName: "gpt-4.1"})
-	m.width = 100
+	m.width = 130
 	m.height = 30
 	m.pendingDocuments = []pendingDocument{{label: "spec.pdf", text: "body"}}
 

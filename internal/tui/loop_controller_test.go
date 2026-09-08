@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Taf0711/splice/internal/usercommands"
 )
@@ -418,11 +419,11 @@ func TestLoopClearRequiresConfirm(t *testing.T) {
 		t.Fatal("/clear keeps loops running (it wipes the screen, not the session)")
 	}
 	// The confirmed clear must actually wipe the transcript, not silently no-op:
-	// only the clear path appends the "Transcript cleared" note, and the pre-clear
+	// only the clear path appends the cleared ack, and the pre-clear
 	// loop-start row must be gone.
 	clearedNote, staleRow := false, false
 	for _, r := range n4.transcript {
-		if strings.Contains(r.text, "Transcript cleared") {
+		if strings.Contains(ansi.Strip(r.text), "cleared") && strings.Contains(ansi.Strip(r.text), "/new") {
 			clearedNote = true
 		}
 		if strings.Contains(r.text, "Loop L1 started") {

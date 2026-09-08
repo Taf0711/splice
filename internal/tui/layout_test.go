@@ -9,7 +9,7 @@ import (
 
 func TestTranscriptFrameLayoutPinsMainRegions(t *testing.T) {
 	m := mouseTestModel()
-	m.width = 100
+	m.width = 130
 	m.height = 24
 	m.providerName = "openai"
 	m.modelName = "gpt-4.1"
@@ -116,7 +116,7 @@ func TestFrameComposerRegionDrivesMouseHit(t *testing.T) {
 
 func TestOverlayMouseRectCentersInsideTranscriptBody(t *testing.T) {
 	m := mouseTestModel()
-	m.width = 100
+	m.width = 130
 	m.height = 30
 
 	width := m.chatColumnWidth()

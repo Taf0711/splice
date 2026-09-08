@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestLastAssistantAnswerPrefersFinal(t *testing.T) {
@@ -66,9 +68,10 @@ func TestHandleExportCommandWritesFile(t *testing.T) {
 		},
 	}
 
-	// Explicit relative path resolves against cwd.
-	msg := m.handleExportCommand("out.txt")
-	if !strings.Contains(msg, "wrote transcript to") {
+	// Explicit relative path resolves against cwd. The ack grammar renders the
+	// path as the outcome (strip the ANSI so the styled line matches).
+	msg := ansi.Strip(m.handleExportCommand("out.txt"))
+	if !strings.Contains(msg, "out.txt") {
 		t.Fatalf("export status = %q", msg)
 	}
 	outPath := filepath.Join(dir, "out.txt")

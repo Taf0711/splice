@@ -77,12 +77,11 @@ func (m model) backgroundTerminalsText() string {
 func (m model) stopBackgroundTerminalsText(input string) string {
 	controller, ok := m.execSessionController()
 	if !ok {
-		return renderCommandCardTranscript(commandCard{
-			Title:   "Background Terminals",
-			Summary: []string{"unavailable"},
-			Sections: []commandCardSection{{
-				Rows: []commandRow{{Text: "exec_command is not registered."}},
-			}},
+		return ackSystemText(ack{
+			verb:    "stop",
+			blocked: true,
+			outcome: "exec_command is not registered",
+			unblock: "background terminals only exist inside a run",
 		})
 	}
 	input = strings.TrimSpace(input)
@@ -92,46 +91,46 @@ func (m model) stopBackgroundTerminalsText(input string) string {
 	}
 	id, err := strconv.Atoi(input)
 	if err != nil || id <= 0 {
-		return renderCommandCardTranscript(commandCard{
-			Title:   "Background Terminals",
-			Summary: []string{"invalid session id"},
-			Sections: []commandCardSection{{
-				Rows: []commandRow{{Text: "Usage: /stop [session_id]"}},
-			}},
+		return ackSystemText(ack{
+			verb:    "stop",
+			blocked: true,
+			outcome: "invalid session id: " + input,
+			unblock: "usage: /stop [session_id]",
 		})
 	}
 	if !controller.StopExecSession(id) {
-		return renderCommandCardTranscript(commandCard{
-			Title:   "Background Terminals",
-			Summary: []string{"not found"},
-			Sections: []commandCardSection{{
-				Rows: []commandRow{{Text: fmt.Sprintf("No running background terminal with session_id %d.", id)}},
-			}},
+		return ackSystemText(ack{
+			verb:    "stop",
+			blocked: true,
+			outcome: ackf("no running background terminal with session_id %d", id),
+			unblock: "/ps lists the running session ids",
 		})
 	}
 	return renderStopBackgroundTerminalsCard([]int{id}, "")
 }
 
+// renderStopBackgroundTerminalsCard is the /stop OK reply. It renders as ONE
+// ack line (P15): the verb column, the stopped ids as the outcome. When
+// nothing was running, that fact is the outcome (no card, no sections).
 func renderStopBackgroundTerminalsCard(stopped []int, note string) string {
-	card := commandCard{Title: "Background Terminals"}
 	if len(stopped) == 0 {
-		card.Summary = []string{"none running"}
-		card.Sections = []commandCardSection{{
-			Rows: []commandRow{{Text: "No background terminals running."}},
-		}}
-		return renderCommandCardTranscript(card)
+		return ackSystemText(ack{
+			verb:    "stop",
+			outcome: "no background terminals running",
+		})
 	}
 	values := make([]string, 0, len(stopped))
 	for _, id := range stopped {
 		values = append(values, strconv.Itoa(id))
 	}
-	card.Summary = []string{"stopping " + strings.Join(values, ", ")}
-	rows := []commandRow{{Text: "Stopping background terminal sessions."}}
+	outcome := "stopping " + strings.Join(values, ", ")
 	if strings.TrimSpace(note) != "" {
-		rows = append(rows, commandRow{Text: note})
+		outcome += "; " + strings.TrimSpace(note)
 	}
-	card.Sections = []commandCardSection{{Rows: rows}}
-	return renderCommandCardTranscript(card)
+	return ackSystemText(ack{
+		verb:    "stop",
+		outcome: outcome,
+	})
 }
 
 func formatBackgroundTerminalRow(session tools.ExecSessionSnapshot, now time.Time) string {

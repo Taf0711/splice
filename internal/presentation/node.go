@@ -156,10 +156,19 @@ type ExecutionNode struct {
 	Cost         CostSummary  `json:"cost"`
 	Usage        UsageSummary `json:"usage"`
 	Dependencies []string     `json:"dependencies,omitempty"`
+	// Workspace is the agent's isolation state (v0.5 agent_workspace,
+	// DoD 26): "isolated" (own worktree) or "shared_cwd" (authoritative
+	// working directory shared with other lanes). Empty projects as
+	// shared_cwd at render time; the runtime stamps the true value.
+	Workspace string `json:"workspace,omitempty"`
+	// WorktreePath is the isolated lane's worktree when Workspace is
+	// "isolated"; empty for shared-cwd nodes.
+	WorktreePath string `json:"worktree_path,omitempty"`
 }
 
 // Validate checks every field: required identifiers, kind format, closed
-// status, in-range progress, non-negative iteration and cost.
+// status, in-range progress, non-negative iteration and cost, and a closed
+// workspace set.
 func (n ExecutionNode) Validate() error {
 	if strings.TrimSpace(n.ID) == "" {
 		return fmt.Errorf("node id is required")
@@ -194,6 +203,14 @@ func (n ExecutionNode) Validate() error {
 			return fmt.Errorf("node %s: duplicate dependency %q", n.ID, dep)
 		}
 		seen[dep] = true
+	}
+	// Workspace is a closed set (v0.5 agent_workspace): empty means unset
+	// (the renderer projects shared_cwd); anything non-empty must be one of
+	// the two isolation states.
+	switch n.Workspace {
+	case "", "isolated", "shared_cwd":
+	default:
+		return fmt.Errorf("node %s: unknown workspace %q", n.ID, n.Workspace)
 	}
 	return nil
 }

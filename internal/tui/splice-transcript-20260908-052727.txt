@@ -1,0 +1,10 @@
+splice: {"plan_id":"plan-abc","status":"completed","completed_tasks":[{"task_id":"t1","run_id":"plan-abc-t1","status":"completed"},{"task_id":"t2","run_id":"plan-abc-t2","status":"completed"}]}
+
+error: VERIFIED (1m30s)
+  [+] design plan plan-abc completed
+  [+] 2 task(s) completed: t1, t2
+  12,345 tok in · 678 tok out
+[O] open diff
+[E] export receipt
+[R] resume
+

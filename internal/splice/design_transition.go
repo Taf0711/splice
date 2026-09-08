@@ -3,6 +3,7 @@ package splice
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/Taf0711/splice/internal/tools"
@@ -199,4 +200,205 @@ func (t *designTransitionTool) Run(_ context.Context, args map[string]any) tools
 		Status: tools.StatusOK,
 		Output: t.name + " queued. " + detail,
 	}
+}
+
+// DecisionRecorder accumulates design decisions pinned by the design agent
+// during one turn (§7.1, P4 E1). The TUI drains it after the turn and
+// appends one decision_pinned session event per decision, so the ledger
+// survives compaction in the raw event log and ReconstructDesignState
+// rebuilds it.
+type DecisionRecorder struct {
+	mu        sync.Mutex
+	decisions []DecisionPinnedPayload
+}
+
+// NewDecisionRecorder creates an empty decision ledger for one design turn.
+func NewDecisionRecorder() *DecisionRecorder {
+	return &DecisionRecorder{}
+}
+
+// Pin records one settled decision. A statement is required; malformed
+// calls return a named error and never silently default.
+func (r *DecisionRecorder) Record(statement, detail string) error {
+	if strings.TrimSpace(statement) == "" {
+		return fmt.Errorf("pin_design_decision ignored: statement is required")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.decisions = append(r.decisions, DecisionPinnedPayload{Statement: statement, Detail: detail})
+	return nil
+}
+
+// Take returns and clears the recorded decisions. It is called exactly once,
+// by the TUI run goroutine, after the agent turn finishes.
+func (r *DecisionRecorder) Take() []DecisionPinnedPayload {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := r.decisions
+	r.decisions = nil
+	return out
+}
+
+// OpenQuestionRecorder accumulates open questions raised by the design agent
+// during one turn (§7.1). It mirrors DecisionRecorder: the TUI drains it
+// after the turn and appends one open_question_raised session event per
+// question, so the open set survives compaction and reconstructs.
+type OpenQuestionRecorder struct {
+	mu        sync.Mutex
+	questions []OpenQuestionPayload
+}
+
+// NewOpenQuestionRecorder creates an empty open-question ledger for one
+// design turn.
+func NewOpenQuestionRecorder() *OpenQuestionRecorder {
+	return &OpenQuestionRecorder{}
+}
+
+// Raise records one open question. A question is required; a duplicate of a
+// question already queued this turn returns a named error and queues nothing.
+func (r *OpenQuestionRecorder) Raise(question, detail string) error {
+	if strings.TrimSpace(question) == "" {
+		return fmt.Errorf("raise_open_question ignored: question is required")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, existing := range r.questions {
+		if existing.Question == question {
+			return fmt.Errorf("raise_open_question ignored: %q is already open", question)
+		}
+	}
+	r.questions = append(r.questions, OpenQuestionPayload{Question: question, Detail: detail})
+	return nil
+}
+
+// Take returns and clears the recorded questions. It is called exactly once,
+// by the TUI run goroutine, after the agent turn finishes.
+func (r *OpenQuestionRecorder) Take() []OpenQuestionPayload {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := r.questions
+	r.questions = nil
+	return out
+}
+
+// raiseOpenQuestionTool lets the design agent raise an open question as
+// first-class runtime data. Permission is Allow: it queues a ledger entry
+// the host persists after the turn, like the pin tool.
+type raiseOpenQuestionTool struct {
+	recorder *OpenQuestionRecorder
+}
+
+func (t *raiseOpenQuestionTool) Name() string { return "raise_open_question" }
+
+func (t *raiseOpenQuestionTool) Parameters() tools.Schema {
+	return tools.Schema{
+		Type: "object",
+		Properties: map[string]tools.PropertySchema{
+			"question": {
+				Type:        "string",
+				Description: "The open question in one sentence, e.g. 'are streamed bodies idempotent?'.",
+			},
+			"detail": {
+				Type:        "string",
+				Description: "Optional context: why the answer blocks the design.",
+			},
+		},
+		Required:             []string{"question"},
+		AdditionalProperties: false,
+	}
+}
+
+func (t *raiseOpenQuestionTool) Safety() tools.Safety {
+	return tools.Safety{
+		SideEffect: tools.SideEffectLocalControl,
+		Permission: tools.PermissionAllow,
+		Reason:     "Queues an open design question the host persists after the turn.",
+	}
+}
+
+func (t *raiseOpenQuestionTool) Run(_ context.Context, args map[string]any) tools.Result {
+	question, _ := args["question"].(string)
+	detail, _ := args["detail"].(string)
+	if err := t.recorder.Raise(question, detail); err != nil {
+		return tools.Result{Status: tools.StatusError, Output: "Error: " + err.Error()}
+	}
+	return tools.Result{
+		Status: tools.StatusOK,
+		Output: "open question raised: " + question,
+	}
+}
+
+// NewRaiseOpenQuestionTool builds the raise_open_question tool. The design
+// agent calls it when the design depends on an unanswered decision; the host
+// persists it as an open_question_raised event after the turn.
+func NewRaiseOpenQuestionTool(recorder *OpenQuestionRecorder) tools.Tool {
+	return &raiseOpenQuestionTool{recorder: recorder}
+}
+
+func (t *raiseOpenQuestionTool) Description() string {
+	return "Raise one open design question as durable runtime data. " +
+		"Call this when the design depends on an answer you do not have " +
+		"(the user has not decided, or evidence is missing). " +
+		"The question joins the open set, renders on the resume card, and " +
+		"stays open until a decision settles it or it is withdrawn."
+}
+
+// pinDesignDecisionTool lets the design agent pin a settled decision as
+// first-class runtime data. Permission is Allow: it queues a ledger entry
+// the host persists after the turn, like the transition tools.
+type pinDesignDecisionTool struct {
+	recorder *DecisionRecorder
+}
+
+func (t *pinDesignDecisionTool) Name() string { return "pin_design_decision" }
+func (t *pinDesignDecisionTool) Parameters() tools.Schema {
+	return tools.Schema{
+		Type: "object",
+		Properties: map[string]tools.PropertySchema{
+			"statement": {
+				Type:        "string",
+				Description: "The settled decision in one sentence, e.g. 'retry only idempotent methods'.",
+			},
+			"detail": {
+				Type:        "string",
+				Description: "Optional supporting detail (constraints, rejected alternatives).",
+			},
+		},
+		Required:             []string{"statement"},
+		AdditionalProperties: false,
+	}
+}
+
+func (t *pinDesignDecisionTool) Safety() tools.Safety {
+	return tools.Safety{
+		SideEffect: tools.SideEffectLocalControl,
+		Permission: tools.PermissionAllow,
+		Reason:     "Queues a design decision the host persists after the turn.",
+	}
+}
+
+func (t *pinDesignDecisionTool) Run(_ context.Context, args map[string]any) tools.Result {
+	statement, _ := args["statement"].(string)
+	detail, _ := args["detail"].(string)
+	if err := t.recorder.Record(statement, detail); err != nil {
+		return tools.Result{Status: tools.StatusError, Output: "Error: " + err.Error()}
+	}
+	return tools.Result{
+		Status: tools.StatusOK,
+		Output: "decision pinned: " + statement,
+	}
+}
+
+// NewPinDesignDecisionTool builds the pin_design_decision tool. The design
+// agent calls it when a decision settles in conversation; the host persists
+// it as a decision_pinned event after the turn.
+func NewPinDesignDecisionTool(recorder *DecisionRecorder) tools.Tool {
+	return &pinDesignDecisionTool{recorder: recorder}
+}
+
+func (t *pinDesignDecisionTool) Description() string {
+	return "Pin one settled design decision as durable runtime data. " +
+		"Call this when a decision settles in conversation (the user confirmed an approach, " +
+		"a constraint was agreed, or an alternative was explicitly rejected). " +
+		"The pinned decision joins the design ledger and is reused when crystallizing the plan."
 }

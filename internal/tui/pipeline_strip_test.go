@@ -103,8 +103,8 @@ func TestPipelineStripWidthDegradation(t *testing.T) {
 	}).presentation()
 
 	cases := []struct{ width, wantLines int }{
-		{width: 100, wantLines: 3}, // full: header + stage run + bar
-		{width: 80, wantLines: 3},  // medium: header + stage run + bar
+		{width: 130, wantLines: 3}, // full: header + stage run + bar
+		{width: 80, wantLines: 4},  // compact: header + stage run + bar + section tabs
 		{width: 66, wantLines: 1},  // narrow: header + current label, one line
 		{width: 50, wantLines: 1},  // tiny: header only
 		{width: 38, wantLines: 1},  // tiny: header only
@@ -193,7 +193,7 @@ func TestPipelineStripShowsWhenSidebarCannotHost(t *testing.T) {
 // suppressed so the roster is not rendered twice.
 func TestPipelineStripHiddenWhenSidebarHosts(t *testing.T) {
 	m := mouseTestModel()
-	m.width = 110
+	m.width = 130
 	m.height = 40
 	m.pipeline.applyState(pendingRosterState("code_writer", "test_runner", "acceptance_verifier"))
 	m.transcript = append(m.transcript, transcriptRow{kind: rowToolCall, tool: "read_file"})
@@ -348,7 +348,7 @@ func TestPipelineStripDegradesWithoutColorAcrossWidthTiers(t *testing.T) {
 		wantLines int
 	}{
 		{width: 120, wantLines: 3}, // full tier
-		{width: 80, wantLines: 3},  // medium tier
+		{width: 80, wantLines: 4},  // compact tier: + section tabs
 		{width: 60, wantLines: 1},  // narrow tier
 		{width: 12, wantLines: 1},  // tiny tier
 	} {

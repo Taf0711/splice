@@ -34,6 +34,9 @@ type Event struct {
 	StageNames       []string
 	Title            string
 	InterventionKind InterventionKind
+	// Workspace isolation state (DoD 26), stamped by the adapter.
+	Workspace    string
+	WorktreePath string
 }
 
 // StreamEventLike is the minimal event contract: anything that can project
@@ -46,13 +49,18 @@ type StreamEventLike interface {
 
 // StageEvent is the presentation projection of a stage lifecycle event. It
 // carries the same data as the runtime's stage event: node name, kind (from
-// the adapter), status, detail, and integer progress.
+// the adapter), status, detail, and integer progress, plus the stage's
+// workspace isolation state (DoD 26).
 type StageEvent struct {
 	ID       string
 	Kind     NodeKind
 	Status   string
 	Detail   string
 	Progress int
+	// Workspace is the stage's isolation state ("isolated"/"shared_cwd"),
+	// stamped by the runtime; empty means unset.
+	Workspace    string
+	WorktreePath string
 }
 
 // PresentationEvent projects the stage event into the normalized form.
@@ -64,6 +72,9 @@ func (e StageEvent) PresentationEvent() Event {
 		Status:   e.Status,
 		Detail:   e.Detail,
 		Progress: e.Progress,
+		// Workspace flows through for DoD 26's isolation badge.
+		Workspace:    e.Workspace,
+		WorktreePath: e.WorktreePath,
 	}
 }
 
@@ -198,6 +209,9 @@ func applyStage(state State, event Event) (State, error) {
 		Kind:     kind,
 		Status:   status,
 		Progress: float64(progress) / 100,
+		// Workspace isolation flows from the runtime event (DoD 26).
+		Workspace:    event.Workspace,
+		WorktreePath: event.WorktreePath,
 	}
 	if idx >= 0 {
 		// Preserve per-node identity across updates. A terminal status may
@@ -207,13 +221,36 @@ func applyStage(state State, event Event) (State, error) {
 		node.Cost = prior.Cost
 		node.Usage = prior.Usage
 		node.Dependencies = prior.Dependencies
+		// Workspace identity persists across re-entries: a lane does not
+		// change isolation mid-run.
+		if node.Workspace == "" {
+			node.Workspace = prior.Workspace
+			node.WorktreePath = prior.WorktreePath
+		}
 		out.Nodes[idx] = node
-		return out, nil
+	} else {
+		out.Nodes = append(out.Nodes, node)
 	}
-	out.Nodes = append(out.Nodes, node)
+	// Health is projection too: a failed stage is failed health; a repair
+	// re-entry of the same stage clears it back to normal (the intervention
+	// path owns recovering). Regression/refining semantics stay with the
+	// trajectory layer, which sets them through interventions.
+	if status == NodeStatusFailed {
+		if out.Health.Effective() != HealthRecovering {
+			out.Health = HealthFailed
+		}
+	} else if out.Health == HealthFailed && status == NodeStatusRunning {
+		// The failed stage re-entered: the run is recovering.
+		out.Health = HealthRecovering
+	}
+	out.Lifecycle = runPhase(out.Nodes)
 	return out, nil
 }
 
+// applyPlan sets the plan and moves the run into executing. In the contract's
+// runtime lane the orchestrator owns execution transitions: once the stage
+// roster is announced, the run IS executing (the design/crystallize/critique
+// phases belong to the design lane and are projected from design-mode runs).
 func applyPlan(state State, event Event) (State, error) {
 	if state.Lifecycle == LifecycleComplete {
 		return State{}, fmt.Errorf("plan event after completion")
@@ -224,16 +261,57 @@ func applyPlan(state State, event Event) (State, error) {
 	return out, nil
 }
 
+// runPhase derives the presentation phase from the running node set (v0.5
+// lane: executing while code moves, verifying once only evidence stages
+// remain). A node kind maps to the verify/analysis lane; write and test
+// kinds are the execution lane. This is projection of runtime node truth,
+// never a policy decision: the reducer only re-labels what the stage events
+// already said.
+func runPhase(nodes []ExecutionNode) Lifecycle {
+	anyRunning := false
+	verifyRunning := false
+	execRunning := false
+	for _, node := range nodes {
+		switch node.Status {
+		case NodeStatusRunning:
+			anyRunning = true
+			switch node.Kind {
+			case NodeKindVerify, NodeKindAnalyze, NodeKindSecurity:
+				verifyRunning = true
+			default:
+				execRunning = true
+			}
+		}
+	}
+	switch {
+	case !anyRunning:
+		return LifecycleExecute
+	case execRunning:
+		return LifecycleExecute
+	case verifyRunning:
+		return LifecycleVerifying
+	}
+	return LifecycleExecute
+}
+
 func applyRun(state State, event Event) (State, error) {
 	status := event.Status
-	if status != "completed" && status != "failed" {
+	if status != "completed" && status != "failed" && status != "cancelled" {
 		return State{}, fmt.Errorf("run event: unknown run status %q", status)
 	}
-	if state.Lifecycle != LifecycleExecute && state.Lifecycle != LifecycleRecovery {
-		return State{}, fmt.Errorf("run event: run finished while lifecycle is %q; completion requires execute or recovery", state.Lifecycle)
+	if state.Lifecycle != LifecycleExecute && state.Lifecycle != LifecycleVerifying && state.Lifecycle != LifecycleMergeBack {
+		return State{}, fmt.Errorf("run event: run finished while lifecycle is %q; completion requires execute, verify, or merge_back", state.Lifecycle)
 	}
 	out := cloneState(state)
 	out.Lifecycle = LifecycleComplete
+	switch status {
+	case "completed":
+		out.Health = ""
+	case "failed":
+		out.Health = HealthFailed
+	case "cancelled":
+		out.Health = HealthCancelled
+	}
 	out.Completion = &CompletionReceipt{Status: status, Detail: event.Detail}
 	return out, nil
 }
@@ -280,6 +358,10 @@ func cloneState(state State) State {
 	out.Trajectory.PassScores = append([]float64(nil), state.Trajectory.PassScores...)
 	out.Trajectory.RestoreMarkers = append([]string(nil), state.Trajectory.RestoreMarkers...)
 	out.Usage.ByNode = cloneTokenUsage(state.Usage.ByNode)
+	if state.Gate != nil {
+		gate := *state.Gate
+		out.Gate = &gate
+	}
 	if state.Completion != nil {
 		completion := *state.Completion
 		out.Completion = &completion

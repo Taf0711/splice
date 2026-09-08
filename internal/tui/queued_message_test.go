@@ -70,20 +70,21 @@ func TestQueuedPromptPreviewSitsAboveComposer(t *testing.T) {
 
 	footer := plainRender(t, next.footerView(96))
 	lines := strings.Split(footer, "\n")
-	queuedLine, composerTopLine := -1, -1
+	queuedLine, composerLine := -1, -1
 	for i, ln := range lines {
 		if queuedLine < 0 && strings.Contains(ln, "queued") {
 			queuedLine = i
 		}
-		if composerTopLine < 0 && strings.Contains(ln, "╭") { // composer box top border
-			composerTopLine = i
+		// Bare-row composer (Pen): locate the prompt row by its glyph.
+		if composerLine < 0 && (strings.Contains(ln, "❯") || strings.Contains(ln, "∞") || strings.Contains(ln, "> ")) {
+			composerLine = i
 		}
 	}
-	if queuedLine < 0 || composerTopLine < 0 {
-		t.Fatalf("expected both a queued line and a composer box; queued=%d composer=%d\n%s", queuedLine, composerTopLine, footer)
+	if queuedLine < 0 || composerLine < 0 {
+		t.Fatalf("expected both a queued line and a composer prompt; queued=%d composer=%d\n%s", queuedLine, composerLine, footer)
 	}
-	if queuedLine >= composerTopLine {
-		t.Fatalf("queued preview (line %d) must sit ABOVE the composer box top border (line %d):\n%s", queuedLine, composerTopLine, footer)
+	if queuedLine >= composerLine {
+		t.Fatalf("queued preview (line %d) must sit ABOVE the composer prompt (line %d):\n%s", queuedLine, composerLine, footer)
 	}
 }
 

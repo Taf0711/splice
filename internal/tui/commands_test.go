@@ -35,6 +35,68 @@ func listCommandNames() []string {
 	return names
 }
 
+// namesOnlyInvariantNameExtractsCommandNamesFromHelpLines pulls the command
+// tokens (e.g. "/model", "/debug") out of a names-only help line, ignoring
+// group headers, the card frame, and the hint line.
+func namesOnlyInvariantNameExtractsCommandNamesFromHelpLines(lines []string) []string {
+	names := []string{}
+	for _, line := range lines {
+		for _, field := range strings.Fields(line) {
+			token := strings.Trim(field, "(),")
+			if strings.HasPrefix(token, "/") {
+				names = append(names, token)
+			}
+		}
+	}
+	return names
+}
+
+func TestHelpOutputIsNamesOnly(t *testing.T) {
+	help := formatGroupedCommandHelp()
+	if strings.Contains(help, " - ") {
+		t.Fatalf("expected names-only /help with no description separators, got:\n%s", help)
+	}
+	if !strings.Contains(help, "Type / for command details") {
+		t.Fatalf("expected /help hint to point descriptions at the palette, got:\n%s", help)
+	}
+}
+
+func TestHelpOutputCoversEveryCommandDefinition(t *testing.T) {
+	// The nothing-is-help-only invariant: every name in commandDefinitions
+	// appears in /help, and every command that renders aliases shows them.
+	help := formatGroupedCommandHelp()
+	helpNames := map[string]bool{}
+	for _, name := range namesOnlyInvariantNameExtractsCommandNamesFromHelpLines(strings.Split(help, "\n")) {
+		helpNames[strings.TrimSuffix(name, ")")] = true
+	}
+	for _, command := range commandDefinitions {
+		if !helpNames[command.name] {
+			t.Fatalf("expected /help to list %q (nothing is help-only), got:\n%s", command.name, help)
+		}
+		if len(command.aliases) == 0 {
+			continue
+		}
+		line := formatCommandHelpLine(command)
+		if !strings.HasSuffix(line, ")") {
+			t.Fatalf("expected /help line for %q to keep aliases in parens, got %q", command.name, line)
+		}
+		for _, alias := range command.aliases {
+			if !helpNames[alias] {
+				t.Fatalf("expected /help to list alias %q, got:\n%s", alias, help)
+			}
+		}
+	}
+}
+
+func TestHelpOutputFitsOneScreen(t *testing.T) {
+	// One screen, no scroll: for the current 45-command set the grouped help
+	// must stay materially below the old description-per-line card height.
+	const maxHelpLines = 60
+	if lines := formatGroupedCommandHelpLines(); len(lines) > maxHelpLines {
+		t.Fatalf("expected /help to fit one screen (%d lines max), got %d lines", maxHelpLines, len(lines))
+	}
+}
+
 func TestFormatCommandHelpLinesGroupsCommandsByStableOrder(t *testing.T) {
 	lines := formatGroupedCommandHelpLines()
 	help := strings.Join(lines, "\n")
@@ -54,19 +116,19 @@ func TestFormatCommandHelpLinesGroupsCommandsByStableOrder(t *testing.T) {
 
 	for _, want := range []string{
 		"model:",
-		"  /provider [status] - Open provider setup.",
-		"  /model [list|id] - Show or switch the active model.",
-		"  /effort [list|low|medium|high|auto] - Show or set reasoning effort for supported models.",
+		"  /provider [status]",
+		"  /model [list|id]",
+		"  /effort [list|low|medium|high|auto]",
 		"session:",
-		"  /plan - Show planning mode status.",
+		"  /plan",
 		"runtime:",
-		"  /permissions - Show the active permission mode and sandbox grants.",
-		"  /debug (/debug-mode) - Show debug mode status.",
+		"  /permissions",
+		"  /debug (/debug-mode)",
 		"tools:",
-		"  /mcp (/mcp-status) - Show MCP server status.",
-		"  /search <query> (/find) - Search local session events. Requires a query argument.",
+		"  /mcp (/mcp-status)",
+		"  /search <query> (/find)",
 		"meta:",
-		"  /exit (/quit) - Exit Splice.",
+		"  /exit (/quit)",
 	} {
 		if !strings.Contains(help, want) {
 			t.Fatalf("expected grouped help to contain %q, got:\n%s", want, help)
@@ -320,7 +382,7 @@ func TestMCPManagerDeleteEditsSearchQuery(t *testing.T) {
 	}
 }
 
-func TestMCPManagerMarketplaceSelectionPrefillsInstallCommand(t *testing.T) {
+func TestMCPManagerMarketplaceSelectionOpensStagedAdd(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.input.SetValue("/mcp")
 
@@ -331,13 +393,23 @@ func TestMCPManagerMarketplaceSelectionPrefillsInstallCommand(t *testing.T) {
 	updated, cmd := next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if cmd != nil {
-		t.Fatal("expected marketplace selection to prefill synchronously")
+		t.Fatal("expected marketplace selection to open the staged wizard synchronously")
 	}
 	if next.mcpManager != nil {
 		t.Fatal("expected marketplace install selection to close manager")
 	}
-	if got, want := next.input.Value(), "/mcp add context7 --url https://mcp.context7.com/mcp"; got != want {
-		t.Fatalf("composer = %q, want %q", got, want)
+	// GAP-H (frame VCeGi): the selection must NOT dump a command into the
+	// composer; it opens the add wizard on the ENDPOINT step with the entry
+	// prefilled (remote URL is still confirmed by the user), then the
+	// staged-add card.
+	if got := next.input.Value(); got != "" {
+		t.Fatalf("composer = %q, want empty (no command dumping)", got)
+	}
+	if next.mcpAddWizard == nil || next.mcpAddWizard.step != mcpAddWizardStepEndpoint {
+		t.Fatalf("expected add wizard on endpoint step, got %+v", next.mcpAddWizard)
+	}
+	if next.mcpAddWizard.serverName != "context7" || next.mcpAddWizard.endpoint != "https://mcp.context7.com/mcp" {
+		t.Fatalf("wizard not prefilled from the marketplace entry: %+v", next.mcpAddWizard)
 	}
 }
 
@@ -663,6 +735,7 @@ func TestMCPAddWizardOpenCancelsStaleManagerResult(t *testing.T) {
 }
 
 func TestMCPAddWizardConfirmRedactsSensitiveSourceAndEndpoint(t *testing.T) {
+	m := newModel(context.Background(), Options{})
 	wizard := newMCPAddWizard("http")
 	wizard.step = mcpAddWizardStepConfirm
 	wizard.serverName = "remote"
@@ -672,7 +745,7 @@ func TestMCPAddWizardConfirmRedactsSensitiveSourceAndEndpoint(t *testing.T) {
 	wizard.sourceURL = "https://docs.example/setup?api_key=docs-secret"
 	wizard.headerKey = "Authorization"
 
-	got := plainRender(t, wizard.render(120))
+	got := plainRender(t, wizard.render(m, 120))
 	for _, leaked := range []string{"user:password", "endpoint-secret", "fragment-secret", "docs-secret"} {
 		if strings.Contains(got, leaked) {
 			t.Fatalf("wizard confirm leaked %q in:\n%s", leaked, got)

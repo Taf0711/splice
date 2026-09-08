@@ -119,6 +119,10 @@ type PreferencesConfig struct {
 	// the user turned post-turn recaps off. A *bool is its own tri-state, so no
 	// custom unmarshal is needed (unlike ToolsConfig.DeferThreshold's int).
 	Recaps *bool `json:"recaps,omitempty"`
+	// Layout is the persisted TUI layout preset name (default/compact/
+	// execution/review/minimal). Applied at startup; empty = unset (the
+	// built-in defaults).
+	Layout string `json:"layout,omitempty"`
 }
 
 // RecapsEnabled reports whether post-turn recaps are on. Unset defaults to ON.
@@ -175,6 +179,9 @@ type KeyBindingsConfig struct {
 	TogglePlan KeyBindingDef `json:"togglePlan,omitempty"`
 	// ToggleSidebar toggles the right context sidebar (default: ctrl+b).
 	ToggleSidebar KeyBindingDef `json:"toggleSidebar,omitempty"`
+	// ToggleNarration cycles the transcript verbosity quiet/normal/detailed
+	// (default: ctrl+n).
+	ToggleNarration KeyBindingDef `json:"toggleNarration,omitempty"`
 }
 
 // LocalControlConfig controls local browser/desktop/terminal automation helpers.
