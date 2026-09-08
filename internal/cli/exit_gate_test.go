@@ -34,18 +34,18 @@ func TestExitGateCampaignReconstructedFromArtifacts(t *testing.T) {
 			t.Fatal(err)
 		}
 		in := eval.RunInput{
-			SessionID:     session,
-			Memory:        map[bool]string{true: "on", false: "off"}[warm],
-			Treatment:     map[bool]string{true: "full", false: "cold"}[warm],
-			Prompt:        "add the retention cutoff",
-			Check:         "go test ./...",
-			ArtifactDir:   dir,
-			ExperimentID:  experimentID,
-			Family:        "fam-05",
-			Arm:           arm,
-			Task:          "B",
-			Attempt:       1,
-			ArmOrder:      1,
+			SessionID:    session,
+			Memory:       map[bool]string{true: "on", false: "off"}[warm],
+			Treatment:    map[bool]string{true: "full", false: "cold"}[warm],
+			Prompt:       "add the retention cutoff",
+			Check:        "go test ./...",
+			ArtifactDir:  dir,
+			ExperimentID: experimentID,
+			Family:       "fam-05",
+			Arm:          arm,
+			Task:         "B",
+			Attempt:      1,
+			ArmOrder:     1,
 		}
 		// The agent's proposal: one real changed file in the (soon to be
 		// deleted) worktree.
