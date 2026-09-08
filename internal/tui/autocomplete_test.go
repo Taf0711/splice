@@ -340,6 +340,51 @@ func TestSuggestionOverlayVisibleOnTallTerminal(t *testing.T) {
 	}
 }
 
+// Regression: the palette card rendered with its lower rows cut off (owner
+// report "the bottom is cut off"). Two caches served stale geometry for the
+// overlay frame: the settled body-items list and the viewport span cache.
+// The card must render WHOLE — top border, rows, action footer, bottom
+// border — and sit around the vertical middle at every height.
+func TestSuggestionOverlayRendersWholeCardAtEveryHeight(t *testing.T) {
+	for _, height := range []int{46, 52, 60, 100} {
+		m := newModel(context.Background(), Options{AltScreen: true})
+		m.width, m.height = 250, height
+		m.headerPrinted = true
+		// Settle the frame the way a live session does, so the settled-items
+		// and span caches are warm before the palette opens.
+		m.flushedAny = true
+		m.altScreenSettledWidth = m.chatColumnWidth()
+		m.altScreenSettledFrontier = m.flushed
+		_ = plainRender(t, m.View())
+
+		m = typeRunes(t, m, "/")
+		lines := strings.Split(plainRender(t, m.View()), "\n")
+
+		top, bottom, footer := -1, -1, -1
+		for index, line := range lines {
+			switch {
+			case top < 0 && strings.Contains(line, "╭── Commands"):
+				top = index
+			case top >= 0 && footer < 0 && strings.Contains(line, "Esc close"):
+				footer = index
+			case top >= 0 && bottom < 0 && strings.Contains(line, "╰──"):
+				bottom = index
+			}
+		}
+		if top < 0 || footer < 0 || bottom < 0 {
+			t.Fatalf("height %d: palette card must render whole (top=%d footer=%d bottom=%d):\n%s",
+				height, top, footer, bottom, strings.Join(lines, "\n"))
+		}
+		if !(top < footer && footer < bottom) {
+			t.Fatalf("height %d: card rows out of order: top=%d footer=%d bottom=%d", height, top, footer, bottom)
+		}
+		// Vertically middle-ish: never pinned to the very top of the body.
+		if top < 3 {
+			t.Fatalf("height %d: palette should sit toward the middle, got top row %d", height, top)
+		}
+	}
+}
+
 func TestSuggestionOverlayStaysVisibleWhenTranscriptScrolled(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.width, m.height = 96, 32

@@ -70,19 +70,25 @@ func (m model) emptyStateWithOverlay(width int, overlay string) string {
 	// budget: a block taller than the viewport gets scrolled from its
 	// bottom, which showed only blank gap rows (the "blank screen" at tall
 	// terminals).
-	available := normalizedStartupHeight(m.height) - 5
-	if m.titleBarInTranscriptBody() {
-		available -= 2
+	// Size against the measured body height for this frame when the caller
+	// supplied one; fall back to the height estimate for non-alt-screen and
+	// test paths. The card must never be taller than the viewport or the
+	// bottom-anchored window clips its lower rows.
+	available := m.overlayBodyHeight
+	if available <= 0 {
+		available = normalizedStartupHeight(m.height) - 5
+		if m.titleBarInTranscriptBody() {
+			available -= 2
+		}
 	}
 	if len(lines) >= available {
 		// Degenerate: no room to pad. Render the palette bare.
 		return strings.Join(lines, "\n")
 	}
-	// Drop the palette about a third of the way into the body — visually
-	// centered — but keep most of the padding BELOW it: the transcript
-	// viewport is bottom-anchored, so a large top pad made the window show
-	// only blank tail rows on tall terminals (the blank "/" screen).
-	above := minInt(20, maxInt(1, (available-len(lines))/3))
+	// Drop the palette toward the vertical middle: half the spare rows above,
+	// the rest below. The block is exactly `available` rows, so the
+	// bottom-anchored viewport shows all of it and nothing is cut off.
+	above := maxInt(1, (available-len(lines))/2)
 	below := available - above - len(lines)
 	return strings.Repeat("\n", above) + strings.Join(lines, "\n") + strings.Repeat("\n", below)
 }

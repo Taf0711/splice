@@ -234,7 +234,11 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string, detailed bool
 	// must never hit the settled cache or the swap is invisible. A verbosity
 	// switch changes the visible row set without moving the frontier, so the
 	// settled generation must match too (GAP-L).
-	if m.altScreen && !detailed && !m.fileView.active && !m.diffView.active && !m.detailView.active && !m.pending && m.pendingSpecReview == nil &&
+	// An empty-state overlay (the slash/file palette) replaces the body for
+	// this frame only and is NOT part of the settled list, so the fast path
+	// must never serve it: doing so dropped the palette (and the cockpit)
+	// and rendered a blank body.
+	if m.altScreen && emptyOverlay == "" && !detailed && !m.fileView.active && !m.diffView.active && !m.detailView.active && !m.pending && m.pendingSpecReview == nil &&
 		m.flushedAny && m.flushed == len(m.transcript) &&
 		m.altScreenSettledWidth == width && m.altScreenSettledFrontier == m.flushed &&
 		m.narrationSettledGeneration == m.narrationVerbosityLevel {

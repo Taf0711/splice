@@ -331,6 +331,11 @@ type model struct {
 	swarmDoneAt      map[string]time.Time
 	now              func() time.Time
 	chatScrollOffset int
+	// overlayBodyHeight is the measured transcript-body height for the frame
+	// being rendered. The empty-state overlay (the slash palette) sizes its
+	// padding against it so the block matches the viewport exactly: guessing
+	// from m.height clipped the card's lower rows on some geometries.
+	overlayBodyHeight int
 	// chatBodyLines is the live body's line count at the last update; used to pin
 	// the viewport (hold the read position) when content streams in while the user
 	// has scrolled up. 0 means "at the bottom / not pinned".
@@ -3292,6 +3297,12 @@ func (m model) transcriptView() string {
 	emptyOverlay := ""
 	if m.transcriptEmpty() && !m.pending && viewportOverlay != "" {
 		emptyOverlay = viewportOverlay
+		// Size the overlay against the REAL body height for this frame so
+		// the palette block matches the viewport exactly (see the
+		// two-column path).
+		if m.altScreen && m.height > 0 {
+			m.overlayBodyHeight = m.scrollableTranscriptFrame(m.normalTranscriptHeader(width), m.footerView(width)).bodyRect.height
+		}
 	}
 	bodyItems := m.transcriptBodyItems(width, emptyOverlay, false)
 
@@ -3346,6 +3357,10 @@ func (m model) twoColumnTranscriptView() string {
 		// two-column layout; dropping it left a blank body and a wiped
 		// composer row whenever the sidebar was visible.
 		emptyOverlay = suggestionOverlay
+		// Size the overlay against the REAL body height for this frame
+		// (header + footer already measured) so the palette block matches
+		// the viewport exactly instead of guessing from m.height.
+		m.overlayBodyHeight = m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width)).bodyRect.height
 	}
 	bodyItems := m.transcriptBodyItems(width, emptyOverlay, false)
 	footer := m.footerView(width)
@@ -3686,7 +3701,7 @@ func (m model) scrollableTranscriptItemsView(header string, items []transcriptBo
 	if subchat {
 		sourceLen = len(m.subchat.childRows)
 	}
-	if overlay == "" && cache.valid && cache.generation == m.chatLayoutGen &&
+	if overlay == "" && m.overlayBodyHeight == 0 && cache.valid && cache.generation == m.chatLayoutGen &&
 		cache.width == width && cache.sourceLen == sourceLen && cache.flushed == m.flushed &&
 		cache.height == frame.bodyRect.height &&
 		cache.itemCount == len(items) && cache.detailed == detailed && cache.subchat == subchat {
