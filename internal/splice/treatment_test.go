@@ -115,3 +115,34 @@ func TestTreatmentMatrixDistinguishesDeclaredDimensionsOnly(t *testing.T) {
 		t.Fatal("cold and retrieval-only must share the baseline context dimension")
 	}
 }
+
+func TestTreatmentOverridesIndividualKnobs(t *testing.T) {
+	// SPLICE_TREATMENT takes precedence: the declared treatment and the
+	// realized delivery/context cannot disagree through mixed knob state.
+	t.Setenv(treatmentEnv, "retrieval-only")
+	t.Setenv(exemplarModeEnv, "both")           // contradicts the treatment
+	t.Setenv(scopeModeEnv, string(ScopeModeOn)) // contradicts the treatment
+	mode, err := resolveExemplarMode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode != ExemplarModeRetrieveNoPrompt {
+		t.Fatalf("exemplar mode = %q, want the treatment's retrieve-no-prompt", mode)
+	}
+	scope, err := scopeEnabled()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scope {
+		t.Fatal("scope must be off under retrieval-only despite SPLICE_SCOPE_MODE=on")
+	}
+	// An invalid treatment name fails loud even when individual knobs
+	// would have been valid.
+	t.Setenv(treatmentEnv, "banana")
+	if _, err := resolveExemplarMode(); err == nil {
+		t.Fatal("invalid treatment must fail loud")
+	}
+	if _, err := scopeEnabled(); err == nil {
+		t.Fatal("invalid treatment must fail loud for scope too")
+	}
+}

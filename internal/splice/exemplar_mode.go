@@ -31,11 +31,27 @@ const (
 
 const exemplarModeEnv = "SPLICE_EXEMPLAR_MODE"
 
+// treatmentEnv is the typed treatment shorthand. When set, it overrides
+// SPLICE_EXEMPLAR_MODE (delivery dimension) and SPLICE_SCOPE_MODE (context
+// dimension) with the treatment's resolved values.
+const treatmentEnv = "SPLICE_TREATMENT"
+
 // resolveExemplarMode reads the ablation mode from the environment. Unset or
 // empty means "both" (today's behavior, so the ablation is strictly opt-in).
 // An invalid value is a loud configuration error naming the offender: a
 // silently wrong mode would poison benchmark attribution.
+// SPLICE_TREATMENT (the typed experiment shorthand) takes precedence: when
+// set, it must be a valid treatment name and the exemplar mode comes from
+// the treatment spec, so the declared treatment and the realized delivery
+// cannot disagree.
 func resolveExemplarMode() (ExemplarMode, error) {
+	if raw := strings.TrimSpace(os.Getenv(treatmentEnv)); raw != "" {
+		spec, err := ResolveTreatment(raw)
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", treatmentEnv, err)
+		}
+		return spec.ExemplarMode, nil
+	}
 	raw := strings.TrimSpace(os.Getenv(exemplarModeEnv))
 	switch ExemplarMode(raw) {
 	case "":

@@ -3,6 +3,7 @@ package splice
 import (
 	"fmt"
 	"os"
+	"strings"
 )
 
 // ScopeMode is the Part A ablation switch: whether the cognition scope
@@ -41,8 +42,16 @@ func resolveScopeMode() (ScopeMode, error) {
 }
 
 // scopeEnabled reports whether the scope may change context acquisition
-// and tool behavior for this run.
+// and tool behavior for this run. SPLICE_TREATMENT takes precedence over
+// SPLICE_SCOPE_MODE when set.
 func scopeEnabled() (bool, error) {
+	if raw := strings.TrimSpace(os.Getenv(treatmentEnv)); raw != "" {
+		spec, err := ResolveTreatment(raw)
+		if err != nil {
+			return false, fmt.Errorf("%s: %w", treatmentEnv, err)
+		}
+		return spec.ScopeOnlyContext, nil
+	}
 	mode, err := resolveScopeMode()
 	if err != nil {
 		return false, err
