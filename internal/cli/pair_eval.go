@@ -172,49 +172,99 @@ func writePairEvalReport(outDir string, report eval.Report) error {
 	return os.WriteFile(filepath.Join(outDir, "pe-report.md"), []byte(report.RenderMarkdown()), 0o644)
 }
 
+// pairEvalArgv builds the exact argument vector the eval child process is
+// executed with. It is a pure function so the argv contract can be tested
+// directly: an earlier version wrote the treatment's memory value over the
+// --init-session-id FLAG (index 6) instead of the memory VALUE (index 5),
+// which silently corrupted every explicit-treatment child's session id.
+// Positional index arithmetic over a flag slice is the bug class, so the
+// memory value is now placed by name while the slice is built.
+//
+// DELIBERATE SEAM (Veritas): when the semantic cache lands, eval runs must
+// set X-Veritas-Bypass (skip read AND write) so eval traffic never pollutes
+// the corpus. This argv is the single point where the flag will be added.
+func pairEvalArgv(in eval.RunInput, model string, spec splice.TreatmentSpec, haveSpec bool) []string {
+	// The treatment is the authority for the memory flag when set:
+	// resolving knobs from two sources invites a treatment whose declared
+	// and realized memory dimensions disagree.
+	memory := in.Memory
+	if haveSpec {
+		memory = spec.PromptMemory
+	}
+	args := []string{
+		"--no-trust", "exec",
+		"--output-format", "stream-json",
+		"--memory", memory,
+		"--init-session-id", in.SessionID,
+	}
+	if strings.TrimSpace(model) != "" {
+		args = append(args, "--model", model)
+	}
+	return append(args, in.Prompt)
+}
+
+// pairEvalChildEnv builds the child environment that REALIZES spec, so an
+// explicitly requested treatment cannot be overridden by ambient state.
+//
+// resolveExemplarMode and resolveScopeMode give SPLICE_TREATMENT precedence
+// over SPLICE_EXEMPLAR_MODE and SPLICE_SCOPE_MODE. Appending the spec's
+// entries to a raw os.Environ() therefore left an inherited
+// SPLICE_TREATMENT in charge: a child launched for "full" under ambient
+// SPLICE_TREATMENT=cold silently ran with delivery and scope disabled, and
+// the attempt row recorded a treatment the run never had.
+//
+// SPLICE_TREATMENT is dropped from the inherited environment here, in the
+// caller, rather than emitted by TreatmentSpec.Environment(): a variable
+// cannot be UNSET by appending to an env slice, only overwritten, and
+// Environment() stays honest by returning exactly the knobs it sets. The
+// resolvers then read the spec's own SPLICE_SCOPE_MODE and
+// SPLICE_EXEMPLAR_MODE, which is the requested treatment by construction.
+func pairEvalChildEnv(ambient []string, spec splice.TreatmentSpec) []string {
+	env := make([]string, 0, len(ambient)+len(spec.Environment()))
+	for _, entry := range ambient {
+		switch {
+		case strings.HasPrefix(entry, splice.TreatmentEnvVar+"="),
+			strings.HasPrefix(entry, splice.ExemplarModeEnvVar+"="),
+			strings.HasPrefix(entry, splice.ScopeModeEnvVar+"="):
+			// Every dimension the treatment owns is dropped, then set
+			// from the spec below. Filtering only SPLICE_TREATMENT would
+			// still let an ambient SPLICE_SCOPE_MODE fight the spec's
+			// own value depending on which entry the resolver reads last.
+			continue
+		}
+		env = append(env, entry)
+	}
+	return append(env, spec.Environment()...)
+}
+
 // pairEvalRunFunc builds the production run seam: it shells out to splice exec
 // (headless) with a deterministic session id and the requested memory mode,
 // runs the check command, and collects tokens and interventions from the trace.
-//
-// DELIBERATE SEAM (Veritas): when the semantic cache lands, eval runs must set
-// X-Veritas-Bypass (skip read AND write) so eval traffic never pollutes the
-// corpus. That header is not wired yet; the exec argv below is the single
-// point where the bypass flag will be added.
 func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
 	return func(ctx context.Context, in eval.RunInput) (eval.RunOutput, error) {
 		exe, err := os.Executable()
 		if err != nil {
 			return eval.RunOutput{}, fmt.Errorf("resolve executable: %w", err)
 		}
-		args := []string{"--no-trust", "exec", "--output-format", "stream-json", "--memory", in.Memory, "--init-session-id", in.SessionID}
-		if in.Treatment != "" {
-			// The treatment is the authority for the memory flag when set:
-			// resolving knobs from two sources invites a treatment whose
-			// declared and realized memory dimensions disagree.
-			spec, terr := splice.ResolveTreatment(in.Treatment)
+		// Resolve the treatment ONCE per child. ResolveTreatment is pure,
+		// so concurrent arms cannot observe or corrupt each other's
+		// settings, and one resolution point means the argv and the child
+		// environment cannot describe different treatments.
+		var spec splice.TreatmentSpec
+		haveSpec := in.Treatment != ""
+		if haveSpec {
+			var terr error
+			spec, terr = splice.ResolveTreatment(in.Treatment)
 			if terr != nil {
 				return eval.RunOutput{}, terr
 			}
-			args[6] = spec.PromptMemory
 		}
-		if strings.TrimSpace(model) != "" {
-			args = append(args, "--model", model)
-		}
-		args = append(args, in.Prompt)
+		args := pairEvalArgv(in, model, spec, haveSpec)
 
 		runCmd := exec.CommandContext(ctx, exe, args...)
 		runCmd.Dir = in.Cwd
-		if in.Treatment != "" {
-			// Resolve the treatment's knob environment fresh per child:
-			// ResolveTreatment is pure, so concurrent arms cannot observe
-			// or corrupt each other's settings. The spec was already
-			// resolved for the memory flag above; reusing the same call
-			// shape keeps the two resolution points textually adjacent.
-			spec, terr := splice.ResolveTreatment(in.Treatment)
-			if terr != nil {
-				return eval.RunOutput{}, terr
-			}
-			runCmd.Env = append(os.Environ(), spec.Environment()...)
+		if haveSpec {
+			runCmd.Env = pairEvalChildEnv(os.Environ(), spec)
 		}
 		out, runErr := runCmd.CombinedOutput()
 		if in.OutputPath != "" {

@@ -24,6 +24,44 @@ const (
 
 const scopeModeEnv = "SPLICE_SCOPE_MODE"
 
+// ScopeModeEnvVar is the exported name of the scope mode variable, for
+// callers that build a child environment and must filter it.
+const ScopeModeEnvVar = scopeModeEnv
+
+// RealizedDimensions reports what the PROCESS ENVIRONMENT actually
+// realizes, as opposed to what a treatment name declares. It runs the same
+// resolvers the production paths use, so a caller that constructs a child
+// environment can prove the child will behave as requested instead of
+// asserting only on the strings it wrote.
+//
+// This exists because SPLICE_TREATMENT outranks SPLICE_EXEMPLAR_MODE and
+// SPLICE_SCOPE_MODE: an env that merely CONTAINS the right knob values can
+// still realize a different treatment when an ambient shorthand survives.
+type RealizedDimensions struct {
+	ScopeOn        bool
+	ExemplarMode   ExemplarMode
+	PromptDelivery bool
+}
+
+// RealizedTreatmentDimensions resolves the ambient environment through the
+// production resolvers. An invalid environment is a loud error, matching
+// the resolvers' own contract.
+func RealizedTreatmentDimensions() (RealizedDimensions, error) {
+	mode, err := resolveExemplarMode()
+	if err != nil {
+		return RealizedDimensions{}, err
+	}
+	scope, err := scopeEnabled()
+	if err != nil {
+		return RealizedDimensions{}, err
+	}
+	return RealizedDimensions{
+		ScopeOn:        scope,
+		ExemplarMode:   mode,
+		PromptDelivery: mode.deliverToModel(),
+	}, nil
+}
+
 // resolveScopeMode reads the scope ablation mode from the environment.
 // Unset or empty means "on" (the bridge is the feature under test).
 // An invalid value is a loud configuration error naming the offender.

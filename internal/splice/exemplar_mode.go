@@ -31,10 +31,19 @@ const (
 
 const exemplarModeEnv = "SPLICE_EXEMPLAR_MODE"
 
+// ExemplarModeEnvVar, TreatmentEnvVar, and ScopeModeEnvVar (scope_mode.go)
+// expose the env var NAMES the resolvers read. A caller that constructs a
+// child environment must filter exactly these; naming them here keeps the
+// producer and the consumer from drifting apart on a string literal.
+const ExemplarModeEnvVar = exemplarModeEnv
+
 // treatmentEnv is the typed treatment shorthand. When set, it overrides
 // SPLICE_EXEMPLAR_MODE (delivery dimension) and SPLICE_SCOPE_MODE (context
 // dimension) with the treatment's resolved values.
 const treatmentEnv = "SPLICE_TREATMENT"
+
+// TreatmentEnvVar is the exported name of the treatment shorthand variable.
+const TreatmentEnvVar = treatmentEnv
 
 // resolveExemplarMode reads the ablation mode from the environment. Unset or
 // empty means "both" (today's behavior, so the ablation is strictly opt-in).

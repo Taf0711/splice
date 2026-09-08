@@ -46,8 +46,28 @@ type TreatmentSpec struct {
 // Retrieval runs in every treatment except cold: the scope-off telemetry
 // path still plans discovery, so retrieval-only, delivery-only, scope-only,
 // and full all retrieve. Cold never builds a sidecar trace.
+//
+// Retrieval is gated by the exec --memory flag, so this reports what
+// PromptMemory realizes rather than a second opinion about it. Cold is the
+// only treatment with --memory off, and off is the deliberate-cold path:
+// nil memory store, no retrieval, no scope construction.
 func (t TreatmentSpec) MemoryRetrieval() bool {
-	return t.Name != TreatmentCold
+	return t.PromptMemory == "on"
+}
+
+// PromptDelivery reports whether cognition prose reaches the model. It is
+// the delivery dimension of the treatment triple, and it is owned by the
+// exemplar mode: retrieve-no-prompt retrieves without delivering, which is
+// how retrieval-only and scope-only suppress prompt text while keeping
+// retrieval and its downstream effects real.
+func (t TreatmentSpec) PromptDelivery() bool {
+	return t.ExemplarMode.deliverToModel()
+}
+
+// ContextPolicy reports whether the scope context policy applies. It is the
+// context dimension of the triple and maps to SPLICE_SCOPE_MODE.
+func (t TreatmentSpec) ContextPolicy() bool {
+	return t.ScopeOnlyContext
 }
 
 // ResolveTreatment maps a treatment name to its knob configuration.
@@ -78,10 +98,18 @@ func ResolveTreatment(name string) (TreatmentSpec, error) {
 			ExemplarMode:     ExemplarModeBoth,
 		}, nil
 	case TreatmentScopeOnly:
+		// PromptMemory is "on" so RETRIEVAL RUNS. With "off", exec takes
+		// the deliberate-cold path (nil memory store, no retrieval, no
+		// scope construction), so scope-only degenerated into cold and
+		// measured nothing it claimed to measure. Prompt delivery is
+		// suppressed by the exemplar mode instead: retrieve-no-prompt
+		// retrieves and records, but delivers no cognition prose to the
+		// model. The realized triple is (retrieval on, delivery off,
+		// scope on), which is the treatment's contract.
 		return TreatmentSpec{
 			Name:             TreatmentScopeOnly,
 			ScopeOnlyContext: true,
-			PromptMemory:     "off",
+			PromptMemory:     "on",
 			ExemplarMode:     ExemplarModeRetrieveNoPrompt,
 		}, nil
 	case TreatmentFull:

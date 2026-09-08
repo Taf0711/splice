@@ -361,15 +361,36 @@ func runMvpMatchedSnapshots(
 // the treatment environment applies process-wide: a warm arm under
 // SPLICE_TREATMENT=cold is realized as retrieval-only, not full, and the
 // row must say so or the analysis attributes the wrong condition.
+//
+// This path sets the child's --memory flag from the ARM, not from the
+// treatment, so the arm can contradict the treatment's declared retrieval
+// dimension. Since scope-only now declares retrieval ON (it used to run
+// with --memory off and degenerate into cold), a memory_off arm under
+// SPLICE_TREATMENT=scope-only realizes retrieval OFF. The label names that
+// contradiction rather than leaving a reader to infer the treatment's
+// declared retrieval held.
 func armTreatment(arm string) string {
 	memory := "memory_off"
 	if arm == "warm" {
 		memory = "memory_on"
 	}
-	if t := strings.TrimSpace(os.Getenv("SPLICE_TREATMENT")); t != "" {
-		return memory + "+" + t
+	raw := strings.TrimSpace(os.Getenv("SPLICE_TREATMENT"))
+	if raw == "" {
+		return memory
 	}
-	return memory
+	label := memory + "+" + raw
+	spec, err := splice.ResolveTreatment(raw)
+	if err != nil {
+		// An unresolvable ambient treatment is recorded verbatim: the row
+		// must not claim a realized condition the process cannot resolve.
+		return label + "+unresolved_treatment"
+	}
+	if spec.MemoryRetrieval() != (arm == "warm") {
+		// The arm's memory flag wins over the treatment's declared
+		// retrieval, because it is the flag actually passed to the child.
+		return label + "+retrieval_overridden_by_arm"
+	}
+	return label
 }
 
 // appendRowWithCheckpoint appends one completed or skipped row and

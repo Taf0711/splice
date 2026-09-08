@@ -20,7 +20,10 @@ func TestResolveTreatmentMatrix(t *testing.T) {
 		{"cold", false, "off", ExemplarModeRetrieveNoPrompt},
 		{"retrieval-only", false, "on", ExemplarModeRetrieveNoPrompt},
 		{"delivery-only", false, "on", ExemplarModeBoth},
-		{"scope-only", true, "off", ExemplarModeRetrieveNoPrompt},
+		// scope-only runs with --memory ON. With "off" the exec path took
+		// the deliberate-cold branch (nil memory store, no retrieval, no
+		// scope construction), so the treatment degenerated into cold.
+		{"scope-only", true, "on", ExemplarModeRetrieveNoPrompt},
 		{"full", true, "on", ExemplarModeBoth},
 	}
 	for _, tc := range tests {
@@ -43,6 +46,78 @@ func TestResolveTreatmentMatrix(t *testing.T) {
 		if got := spec.MemoryRetrieval(); got != (tc.name != "cold") {
 			t.Fatalf("%s: MemoryRetrieval = %v", tc.name, got)
 		}
+	}
+}
+
+// The treatment triple is the experiment's unit of meaning: (retrieval,
+// prompt delivery, context policy). Each treatment must realize a DISTINCT
+// and intended combination. scope-only previously realized (off, off, on),
+// which is cold with a scope flag: it disabled the retrieval whose effect
+// it existed to measure.
+func TestTreatmentRealizedTriples(t *testing.T) {
+	tests := []struct {
+		name          string
+		wantRetrieval bool
+		wantDelivery  bool
+		wantScope     bool
+	}{
+		{"cold", false, false, false},
+		{"retrieval-only", true, false, false},
+		{"delivery-only", true, true, false},
+		{"scope-only", true, false, true},
+		{"full", true, true, true},
+	}
+	for _, tc := range tests {
+		spec, err := ResolveTreatment(tc.name)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if got := spec.MemoryRetrieval(); got != tc.wantRetrieval {
+			t.Errorf("%s: retrieval = %v, want %v", tc.name, got, tc.wantRetrieval)
+		}
+		if got := spec.PromptDelivery(); got != tc.wantDelivery {
+			t.Errorf("%s: prompt delivery = %v, want %v", tc.name, got, tc.wantDelivery)
+		}
+		if got := spec.ContextPolicy(); got != tc.wantScope {
+			t.Errorf("%s: context policy = %v, want %v", tc.name, got, tc.wantScope)
+		}
+	}
+}
+
+// Every treatment must be distinguishable by its realized triple. Two
+// treatments with the same triple would be the same experiment under two
+// names, and the matrix could not attribute an effect to either.
+func TestTreatmentTriplesAreUnique(t *testing.T) {
+	seen := map[[3]bool]string{}
+	for _, name := range []string{"cold", "retrieval-only", "delivery-only", "scope-only", "full"} {
+		spec, err := ResolveTreatment(name)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		key := [3]bool{spec.MemoryRetrieval(), spec.PromptDelivery(), spec.ContextPolicy()}
+		if prior, dup := seen[key]; dup {
+			t.Fatalf("%s realizes the same triple %v as %s", name, key, prior)
+		}
+		seen[key] = name
+	}
+}
+
+// scope-only must not take the deliberate-cold exec path. The --memory
+// flag is the gate: "off" means nil memory store, so retrieval and scope
+// construction never run and the treatment measures nothing.
+func TestScopeOnlyRetrievesAndSuppressesPromptOnly(t *testing.T) {
+	spec, err := ResolveTreatment("scope-only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.PromptMemory != "on" {
+		t.Fatalf("scope-only --memory = %q; \"off\" takes the deliberate-cold path and disables retrieval", spec.PromptMemory)
+	}
+	if spec.ExemplarMode != ExemplarModeRetrieveNoPrompt {
+		t.Fatalf("scope-only exemplar mode = %q; prompt delivery must be suppressed by the mode, not by disabling retrieval", spec.ExemplarMode)
+	}
+	if !spec.ContextPolicy() {
+		t.Fatal("scope-only must apply the context policy")
 	}
 }
 
