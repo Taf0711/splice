@@ -566,6 +566,11 @@ type model struct {
 	// was built at, so a switch rebuilds it (the visible row set changed
 	// without the frontier moving).
 	narrationSettledGeneration narrationVerbosity
+	// worktreeOp is the single in-flight worktree mutation scheduled by a
+	// user action (worktree_ops.go). Non-nil means Git work is running in
+	// a command goroutine; every action surface refuses to schedule a
+	// second one until its result lands.
+	worktreeOp *worktreeOpState
 	// pendingHandoff is the live handoff for the most recently exited lane
 	// (GAP-F): the [M] merge-back and [X] discard keys act on it. Nil when
 	// no handoff is offered or it was resolved.
@@ -1291,6 +1296,25 @@ func (m model) noBlockingModal() bool {
 		m.providerWizard == nil && m.stageModelWizard == nil && m.mcpAddWizard == nil && m.mcpManager == nil && m.picker == nil
 }
 
+// cardKeysOwnInput reports whether an advertised card action key may claim
+// a printable keypress (review finding 2: "give one explicit surface
+// ownership of each key event"). Three conditions must hold.
+//
+// No modal owns input, including the help overlay, which noBlockingModal
+// alone does not cover (the provider setup wizard is already one of its
+// modal fields).
+//
+// The composer must be EMPTY. While a draft exists the user is writing a
+// sentence, and every printable key belongs to that sentence: an uppercase
+// R inside "Please Revise" must stay text, never a card action. An empty
+// composer is the state the card's advertised keys were rendered for.
+func (m model) cardKeysOwnInput() bool {
+	if !m.noBlockingModal() || m.helpOverlay {
+		return false
+	}
+	return strings.TrimSpace(m.composerValue()) == ""
+}
+
 func (m model) quit() (tea.Model, tea.Cmd) {
 	m.stopPRWatcher()
 	m.stopAllBackgroundTerminalSessions()
@@ -1409,8 +1433,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// tuiRemoveWorktree), so the handoff never mutates files independently
 	// of the tested path. Intercepted before the main switch so plain-key
 	// handlers (composer echo) cannot swallow them.
+	//
+	// Ownership (review finding 2): these keys dispatch only while the
+	// COMPOSER IS EMPTY. A card advertises its keys to a user who is not
+	// mid-sentence; once a draft exists the composer owns every printable
+	// key, so typing "Move the..." can never merge a worktree. The run
+	// gate is explicit here too: a new run means the previous lane's card
+	// is no longer the live surface (beginRun does not disarm it).
 	if keyMsg, ok := msg.(tea.KeyMsg); ok && m.pendingHandoff != nil &&
-		m.pendingHandoff.preserved && m.noBlockingModal() {
+		m.pendingHandoff.preserved && !m.pending && m.cardKeysOwnInput() {
 		if handled, model, cmd := m.handleHandoffKey(keyMsg); handled {
 			return model, cmd
 		}
@@ -1431,7 +1462,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// owns input, the run is released, and an armed handoff did not just
 	// claim the key (the handoff's [D] means review-diff there, not
 	// discard). Plain lowercase letters fall through to the composer.
-	if keyMsg, ok := msg.(tea.KeyMsg); ok && !m.pending && m.noBlockingModal() &&
+	if keyMsg, ok := msg.(tea.KeyMsg); ok && !m.pending && m.cardKeysOwnInput() &&
 		!(m.pendingHandoff != nil && m.pendingHandoff.preserved) {
 		if handled, model, cmd := m.handleReceiptKey(keyMsg); handled {
 			return model, cmd
@@ -1896,11 +1927,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.handleMCPManagerKey(msg)
 			}
 			if m.picker != nil && m.picker.kind == pickerModel && !m.modelPickerIsLoading() {
-				// Tab toggles long context on the highlighted /model row. Rows without
-				// the capability ignore it (and don't advertise it in the hint bar), so
-				// Tab stays inert rather than surprising there.
-				next, _ := m.toggleModelPickerContext()
-				return next, nil
+				// Tab is inert on the /model picker: the long-context
+				// toggle it drove had no runtime consumer and was removed
+				// (review finding 15). Swallow it so Tab does not fall
+				// through to suggestion cycling while the picker owns input.
+				return m, nil
 			}
 			if m.picker == nil && m.suggestionsActive() {
 				m.moveSuggestion(1)
@@ -2667,6 +2698,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case crystallizeResultMsg:
 		if msg.runID != m.activeRunID {
+			// Same cancellation rule as the plan execution path: a
+			// cancelled crystallization owns its receipt and its drain
+			// obligation. It holds no worktree of its own.
+			if m.wasCancelled(msg.runID) {
+				m = m.finalizeCancelledRun(cancelledRunFinalization{runID: msg.runID})
+				if m.cancelledRunExit() {
+					return m.quit()
+				}
+			}
 			return m, nil
 		}
 		m.releaseRun()
@@ -2737,6 +2777,24 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case planExecutionResultMsg:
 		if msg.runID != m.activeRunID {
+			// A run the user CANCELLED still returns its terminal
+			// message here, because cancelRun already cleared
+			// activeRunID. That is not a stale session result: it is
+			// the cancellation's own completion, and it owns the
+			// CANCELLED receipt, the handoff surface, and the drain
+			// obligation cancelRun recorded (review finding 3).
+			if m.wasCancelled(msg.runID) {
+				m = m.finalizeCancelledRun(cancelledRunFinalization{
+					runID:          msg.runID,
+					worktree:       msg.worktree,
+					preserved:      msg.worktreePreserved,
+					mergeAvailable: msg.mergeAvailable,
+				})
+				if m.cancelledRunExit() {
+					return m.quit()
+				}
+				return m, nil
+			}
 			unlockPreparedWorktree(msg.worktree)
 			return m, nil
 		}
@@ -2819,8 +2877,38 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case worktreeReviewResultMsg:
+		// Clear the in-flight operation before anything else, so a
+		// refused or failed action re-arms the surface immediately.
+		// A result whose scheduled identity no longer matches the live
+		// one (session switched, or a new run started) is stale: its
+		// notice is still shown, but it must not resolve a surface that
+		// now belongs to a different session or run.
+		staleOp := false
+		if msg.op != nil {
+			if m.worktreeOp != nil && *m.worktreeOp == *msg.op {
+				m.worktreeOp = nil
+			}
+			staleOp = msg.op.session != m.activeSession.SessionID
+		}
 		if notice := strings.TrimSpace(msg.notice); notice != "" {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: notice})
+		}
+		if staleOp {
+			return m, nil
+		}
+		// HANDOFF resolution (finding 5): the handoff clears ONLY when
+		// the operation actually completed. A merge conflict, a dirty
+		// source refusal, a failed preserve, or a failed cleanup all
+		// return the worktree in kept, and the user needs the card's
+		// recovery keys exactly then. Announcing the outcome is the
+		// notice's job above; this decides whether the surface survives.
+		if msg.op != nil && m.pendingHandoff != nil && m.pendingHandoff.lane == msg.op.lane {
+			switch msg.op.kind {
+			case worktreeOpHandoffMerge, worktreeOpHandoffDiscard:
+				if msg.succeeded() {
+					m.pendingHandoff = nil
+				}
+			}
 		}
 		// Capture the lane BEFORE the mutation below nils activeWorktree
 		// (Reject keeps no worktree, so kept is nil). The diff viewport
@@ -5133,8 +5221,8 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		// the UI loop); the picker opens when sessionsScannedMsg lands.
 		// `/resume <id>` and `/resume latest` still resolve directly.
 		if strings.TrimSpace(command.text) == "" {
-			if next, ok := m.openSessionPicker(); ok {
-				return next, resumeScanCmd
+			if next, scanCmd, ok := m.openSessionPicker(); ok {
+				return next, scanCmd
 			}
 		}
 		text := ""
@@ -5548,6 +5636,11 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	m.specialists.clear()
 	m.plan.clear()
 	m.pipeline.clear()
+	// lastState described the PREVIOUS run. Clearing the pipeline while
+	// keeping it left an interval where the panel was empty but the
+	// completion, receipt, and phase chip still projected the old run
+	// (review finding 7). Clear the whole projection together.
+	m.lastState = presentation.State{}
 	m.stepWork = nil
 	m.stepNarration = nil
 	m.stepExplanation = nil
@@ -6423,28 +6516,18 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			}
 			// P1.1: pipeline runs surface presentation snapshots to the
 			// session event log so the run record carries runtime truth.
-			// Rendering from these landed in P1.2.
-			// F3 (§15): the FULL canonical state is persisted, not a stub,
-			// so resume can replay presentation.State through the
-			// accumulator without touching the runtime. The event keeps
-			// its old summary fields for existing consumers.
-			downstreamPresentation := options.OnPresentationState
-			options.OnPresentationState = func(state presentation.State) {
-				stateJSON, jsonErr := json.Marshal(state)
-				payload := map[string]any{"presentation_schema_version": state.SchemaVersion, "lifecycle": string(state.Lifecycle)}
-				if jsonErr == nil {
-					payload["presentation_state"] = json.RawMessage(stateJSON)
-				}
-				sessionEvents = append(sessionEvents, pendingSessionEvent{
-					Type:    sessions.EventMessage,
-					Payload: payload,
-				})
-				if downstreamPresentation != nil {
-					downstreamPresentation(state)
-				}
-			}
+			// The persistence itself lives in runtimeWiring
+			// (recordPresentationState), shared with the approval path;
+			// this path only supplies the sink.
 		}
-		options = (runtimeWiring{runID: runID, send: m.runtimeMessageSink, beforeText: beforeText}).decorate(options)
+		options = (runtimeWiring{
+			runID:      runID,
+			send:       m.runtimeMessageSink,
+			beforeText: beforeText,
+			recordEvent: func(event pendingSessionEvent) {
+				sessionEvents = append(sessionEvents, event)
+			},
+		}).decorate(options)
 		if m.captureRunOptions != nil {
 			m.captureRunOptions(options)
 		}

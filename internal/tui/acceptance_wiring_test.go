@@ -302,14 +302,22 @@ func TestAcceptanceHandoffOfferedOnFailure(t *testing.T) {
 // of the real dispatch path.
 func TestAcceptanceHandoffMergeKeyDispatchesMerge(t *testing.T) {
 	origMerge := tuiMergeBackWorktree
-	defer func() { tuiMergeBackWorktree = origMerge }()
+	origRemove := tuiRemoveWorktree
+	defer func() {
+		tuiMergeBackWorktree = origMerge
+		tuiRemoveWorktree = origRemove
+	}()
+	// A merged lane is cleaned up afterwards; the test lane path does not
+	// exist, and a real cleanup failure correctly KEEPS the worktree,
+	// which is a different case than the successful merge under test.
+	tuiRemoveWorktree = func(_ context.Context, _ worktrees.RemoveOptions) error { return nil }
 	merged := false
 	tuiMergeBackWorktree = func(_ context.Context, options worktrees.MergeBackOptions) (worktrees.MergeBackResult, error) {
 		merged = true
 		if options.Name != "wt-acc2" {
 			t.Fatalf("acceptance: merge ran on the wrong lane: %q", options.Name)
 		}
-		return worktrees.MergeBackResult{}, nil
+		return worktrees.MergeBackResult{Status: worktrees.MergeBackMerged, Message: "merged"}, nil
 	}
 
 	m := mouseTestModel()
@@ -333,14 +341,21 @@ func TestAcceptanceHandoffMergeKeyDispatchesMerge(t *testing.T) {
 
 	updated, cmd := next.Update(testKey('M'))
 	nextModel := updated.(model)
+	// The Git work runs inside the command (review finding 4), and the
+	// handoff resolves only once a successful result lands (finding 5).
+	if merged {
+		t.Fatal("acceptance: [M] ran the merge synchronously inside Update")
+	}
+	if cmd == nil {
+		t.Fatal("acceptance: [M] produced no background command for the merge")
+	}
+	resultMsg := execCmd(cmd)
 	if !merged {
 		t.Fatal("acceptance: [M] did not dispatch the merge-back seam")
 	}
-	if nextModel.pendingHandoff != nil {
-		t.Fatal("acceptance: [M] did not resolve the handoff")
-	}
-	if cmd == nil {
-		t.Fatal("acceptance: [M] produced no background command for the review result")
+	resolved, _ := nextModel.Update(resultMsg)
+	if resolved.(model).pendingHandoff != nil {
+		t.Fatal("acceptance: a successful [M] did not resolve the handoff")
 	}
 }
 
@@ -381,13 +396,18 @@ func TestAcceptanceHandoffDiscardKeyDispatchesRemove(t *testing.T) {
 	next = updatedAfterKeep.(model)
 	next.pendingHandoff.preserved = true
 
-	updated, _ := next.Update(testKey('X'))
+	updated, cmd := next.Update(testKey('X'))
 	nextModel := updated.(model)
+	if cmd == nil {
+		t.Fatal("acceptance: [X] did not schedule preserve-then-remove")
+	}
+	resultMsg := execCmd(cmd)
 	if !preserved || !removed {
 		t.Fatalf("acceptance: [X] did not run preserve-then-remove (preserved=%v removed=%v)", preserved, removed)
 	}
-	if nextModel.pendingHandoff != nil {
-		t.Fatal("acceptance: [X] did not resolve the handoff")
+	resolved, _ := nextModel.Update(resultMsg)
+	if resolved.(model).pendingHandoff != nil {
+		t.Fatal("acceptance: a successful [X] did not resolve the handoff")
 	}
 }
 
@@ -397,15 +417,22 @@ func TestAcceptanceHandoffDiscardKeyDispatchesRemove(t *testing.T) {
 // the diff with a capture command in flight. The diff text comes from the
 // tuiDiffCapture seam (stubbed here); the pane itself never edits files.
 func TestAcceptanceHandoffDiffKeyOpensDiffViewport(t *testing.T) {
-	origCapture := tuiDiffCapture
-	defer func() { tuiDiffCapture = origCapture }()
+	origSnapshot := tuiReviewSnapshot
+	defer func() { tuiReviewSnapshot = origSnapshot }()
 	captured := false
-	tuiDiffCapture = func(_ context.Context, wt worktrees.Result) (string, error) {
+	// The capture goes through the review SNAPSHOT seam now (review
+	// finding 1): the patch must cover the same content merge-back
+	// commits, and the snapshot's tree pins what the user reviewed.
+	tuiReviewSnapshot = func(_ context.Context, wt worktrees.Result) (worktrees.ReviewSnapshotResult, error) {
 		captured = true
 		if wt.Name != "wt-acc2" {
 			t.Fatalf("acceptance: diff captured on the wrong lane: %q", wt.Name)
 		}
-		return "diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n@@ -1,2 +1,3 @@\n ok\n+new\n", nil
+		return worktrees.ReviewSnapshotResult{
+			Tree:  "tree-acc2",
+			Base:  "main",
+			Patch: "diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n@@ -1,2 +1,3 @@\n ok\n+new\n",
+		}, nil
 	}
 
 	m := mouseTestModel()
@@ -504,31 +531,53 @@ func reviewArmedHandoffModel(t *testing.T, lane string) model {
 }
 
 // The advertised [M] must dispatch when pressed as a real terminal emits
-// shift+m. This test fails on the pre-fix code (uppercase-Code matching).
+// shift+m. The Git work now runs inside the returned command (review
+// finding 4), so the probe drives that command rather than expecting the
+// merge to have already happened inside Update. The handoff resolves only
+// once the successful result lands (finding 5).
 func TestReviewHandoffShiftMDispatchesMergeOnRealShape(t *testing.T) {
 	origMerge := tuiMergeBackWorktree
-	defer func() { tuiMergeBackWorktree = origMerge }()
+	origRemove := tuiRemoveWorktree
+	defer func() {
+		tuiMergeBackWorktree = origMerge
+		tuiRemoveWorktree = origRemove
+	}()
+	// A merged lane is cleaned up afterwards. Stub the removal: the test
+	// lane path does not exist, and a real cleanup failure would correctly
+	// keep the worktree, which is a different case than the one under test.
+	tuiRemoveWorktree = func(_ context.Context, _ worktrees.RemoveOptions) error { return nil }
 	merged := false
 	tuiMergeBackWorktree = func(_ context.Context, options worktrees.MergeBackOptions) (worktrees.MergeBackResult, error) {
 		merged = true
 		if options.Name != "wt-real-m" {
 			t.Fatalf("review probe: merge ran on the wrong lane: %q", options.Name)
 		}
-		return worktrees.MergeBackResult{}, nil
+		// A real success reports a terminal merged status. An empty
+		// status is a refusal, and the handoff must survive that.
+		return worktrees.MergeBackResult{Status: worktrees.MergeBackMerged, Message: "merged"}, nil
 	}
 	next := reviewArmedHandoffModel(t, "wt-real-m")
-	updated, _ := next.Update(reviewRealShiftKey('M'))
+	updated, cmd := next.Update(reviewRealShiftKey('M'))
 	nextModel := updated.(model)
-	if !merged {
-		t.Fatal("review probe: advertised [M] (shift+m, real terminal shape) did not dispatch the merge seam")
+	if merged {
+		t.Fatal("review probe: merge ran synchronously inside Update instead of in the command")
 	}
-	if nextModel.pendingHandoff != nil {
-		t.Fatal("review probe: [M] did not resolve the handoff")
+	if cmd == nil {
+		t.Fatal("review probe: advertised [M] (shift+m, real terminal shape) did not schedule the merge seam")
+	}
+	msg := execCmd(cmd)
+	if !merged {
+		t.Fatal("review probe: the scheduled command did not run the merge seam")
+	}
+	resolved, _ := nextModel.Update(msg)
+	if resolved.(model).pendingHandoff != nil {
+		t.Fatal("review probe: a successful merge did not resolve the handoff")
 	}
 }
 
 // The advertised [X] must dispatch when pressed as a real terminal emits
-// shift+x, through the same preserve-then-remove seams the review uses.
+// shift+x, through the same preserve-then-remove seams the review uses, and
+// through the same command scheduling as [M].
 func TestReviewHandoffShiftXDispatchesDiscardOnRealShape(t *testing.T) {
 	origRemove := tuiRemoveWorktree
 	origPreserve := tuiPreserveWorktree
@@ -549,13 +598,21 @@ func TestReviewHandoffShiftXDispatchesDiscardOnRealShape(t *testing.T) {
 		return "splice/wt-real-x", nil
 	}
 	next := reviewArmedHandoffModel(t, "wt-real-x")
-	updated, _ := next.Update(reviewRealShiftKey('X'))
+	updated, cmd := next.Update(reviewRealShiftKey('X'))
 	nextModel := updated.(model)
+	if preserved || removed {
+		t.Fatal("review probe: discard ran synchronously inside Update instead of in the command")
+	}
+	if cmd == nil {
+		t.Fatal("review probe: [X] did not schedule preserve-then-remove")
+	}
+	msg := execCmd(cmd)
 	if !preserved || !removed {
 		t.Fatalf("review probe: [X] did not run preserve-then-remove (preserved=%v removed=%v)", preserved, removed)
 	}
-	if nextModel.pendingHandoff != nil {
-		t.Fatal("review probe: [X] did not resolve the handoff")
+	resolved, _ := nextModel.Update(msg)
+	if resolved.(model).pendingHandoff != nil {
+		t.Fatal("review probe: a successful discard did not resolve the handoff")
 	}
 }
 

@@ -123,16 +123,20 @@ func TestDiffBaseRefPrefersSourceBranch(t *testing.T) {
 func TestDiffCaptureCommand(t *testing.T) {
 	wt := diffTestWorktree()
 	called := false
-	restore := tuiDiffCapture
-	tuiDiffCapture = func(_ context.Context, _ worktrees.Result) (string, error) {
+	restore := tuiReviewSnapshot
+	tuiReviewSnapshot = func(_ context.Context, _ worktrees.Result) (worktrees.ReviewSnapshotResult, error) {
 		called = true
-		return "diff --git a/x b/x\n", nil
+		return worktrees.ReviewSnapshotResult{Tree: "tree-a1", Base: "main", Patch: "diff --git a/x b/x\n"}, nil
 	}
-	defer func() { tuiDiffCapture = restore }()
+	defer func() { tuiReviewSnapshot = restore }()
 	msg := diffCaptureCmd(wt)()
 	got, ok := msg.(diffCapturedMsg)
 	if !ok || !called || got.lane != "wt-a1" || got.res == "" {
 		t.Fatalf("capture cmd wrong: called=%v msg=%+v", called, msg)
+	}
+	// The reviewed tree rides along so the apply path can revalidate it.
+	if got.tree != "tree-a1" {
+		t.Fatalf("capture cmd dropped the reviewed tree: %q", got.tree)
 	}
 }
 
@@ -293,12 +297,15 @@ func TestDiffRejectHunkDoesNotEditFiles(t *testing.T) {
 	}
 	found := false
 	for _, row := range next.transcript {
-		if strings.Contains(row.text, "step_back") {
+		if strings.Contains(row.text, "cannot reject a single hunk") {
 			found = true
+		}
+		if strings.Contains(row.text, "step_back") {
+			t.Error("reject claims an intervention the runtime never receives (review finding 11)")
 		}
 	}
 	if !found {
-		t.Error("reject did not record the intervention notice")
+		t.Error("reject did not state the hunk-rejection limitation")
 	}
 }
 

@@ -143,9 +143,12 @@ func newStageModelWizard(userConfigPath string, savedProviders []config.Provider
 	}
 
 	wizard := &stageModelWizardState{
-		step:                   stageModelWizardStepOverview,
-		config:                 cfg,
-		initialConfig:          cfg,
+		step:   stageModelWizardStepOverview,
+		config: cfg,
+		// The baseline is a deep copy: config and initialConfig must not
+		// share the Stages map or the Escalation pointer, or an edit to an
+		// existing override would write through both and read as clean.
+		initialConfig:          cloneStageModelConfigFile(cfg),
 		providers:              providers,
 		modelOptionsByProvider: map[string][]stageModelOption{},
 	}
@@ -211,7 +214,48 @@ func (w *stageModelWizardState) isDirty() bool {
 	if w == nil {
 		return false
 	}
+	// A baseline that shares mutable memory with the draft cannot prove the
+	// draft is clean: writing an EXISTING override writes through both
+	// values, so a struct comparison sees no change. Report dirty instead of
+	// silently dropping the edit at the discard guard.
+	if stageModelBaselineAliasesDraft(w.config, w.initialConfig) {
+		return true
+	}
 	return !reflect.DeepEqual(w.config, w.initialConfig)
+}
+
+// stageModelBaselineAliasesDraft reports whether the baseline snapshot shares
+// the draft's Stages map or Escalation pointer. StageModelConfigFile is a
+// struct with a map and a pointer, so plain assignment copies the header and
+// keeps the contents shared. newStageModelWizard and save take a deep copy,
+// so this is false in every real flow; it fires only on a shallow snapshot,
+// which is exactly the state a dirty check must not trust.
+func stageModelBaselineAliasesDraft(draft schemas.StageModelConfigFile, baseline schemas.StageModelConfigFile) bool {
+	if draft.Escalation != nil && draft.Escalation == baseline.Escalation {
+		return true
+	}
+	if draft.Stages == nil || baseline.Stages == nil {
+		return false
+	}
+	return reflect.ValueOf(draft.Stages).Pointer() == reflect.ValueOf(baseline.Stages).Pointer()
+}
+
+// cloneStageModelConfigFile deep-copies a stage model config so a baseline
+// snapshot owns its own Stages map and Escalation value. Every entry is a
+// value type, so one level of copying is enough.
+func cloneStageModelConfigFile(cfg schemas.StageModelConfigFile) schemas.StageModelConfigFile {
+	clone := schemas.StageModelConfigFile{Default: cfg.Default}
+	if cfg.Escalation != nil {
+		escalation := *cfg.Escalation
+		clone.Escalation = &escalation
+	}
+	if cfg.Stages != nil {
+		clone.Stages = make(map[string]schemas.StageModelConfig, len(cfg.Stages))
+		for name, stage := range cfg.Stages {
+			clone.Stages[name] = stage
+		}
+	}
+	return clone
 }
 
 func (w *stageModelWizardState) knownStageRows() []stageModelStageRow {
@@ -814,7 +858,9 @@ func (w *stageModelWizardState) save(userConfigPath string) error {
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
-	w.initialConfig = w.config
+	// Re-baseline with a deep copy so later edits to an existing override
+	// are still detectable (a shared map would hide them).
+	w.initialConfig = cloneStageModelConfigFile(w.config)
 	return nil
 }
 

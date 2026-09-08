@@ -49,6 +49,7 @@ func (m model) exitDetailView() model {
 	m.chatScrollOffset = m.detailView.parentScrollOffset
 	m.detailView = detailViewState{}
 	m = m.clearHover()
+	m.invalidateSettledTranscript()
 	return m
 }
 

@@ -179,23 +179,19 @@ func formatRatePerMillion(rate float64) string {
 	return fmt.Sprintf("$%.2f / 1M", rate)
 }
 
-// renderContextToggle is the "Long context  Off  tab" line shown only for rows
-// that advertise long context. It sits above the price readout because enabling
-// it changes which pricing tier applies on several providers.
+// renderContextToggle states the long-context capability of the highlighted
+// row. It sits above the price readout because the capability affects which
+// pricing tier applies on several providers.
 //
-// The key is named on this line rather than in the hint bar at the bottom: the
-// binding is row-conditional, so it belongs next to the state it flips, where it
-// is visible exactly when it works. That also keeps it off the hint bar, which
-// has to shed entries to fit the overlay width.
+// It is a READOUT, not a control: the former Tab toggle flipped a
+// field no model selection or run configuration ever consumed, so it
+// promised an effect it could not deliver (review finding 15). The
+// capability itself is real catalog information and stays visible.
 func renderContextToggle(item pickerItem) string {
 	if !item.LongContext {
 		return ""
 	}
-	state := zeroTheme.faint.Render("Off")
-	if item.LongContextOn {
-		state = zeroTheme.accent.Render("On")
-	}
-	return zeroTheme.muted.Render("Long context  ") + state + zeroTheme.faintest.Render("   tab")
+	return zeroTheme.muted.Render("Long context  ") + zeroTheme.accent.Render("supported")
 }
 
 // modelPickerHintBar names only the keys the highlighted row responds to, so the

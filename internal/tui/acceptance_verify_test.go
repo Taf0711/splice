@@ -129,17 +129,22 @@ func TestVerifyDiffKeysOnRealShapes(t *testing.T) {
 		t.Fatal("verifier: real shift+n did not move to the next file")
 	}
 
-	// j emits the intervention notice and touches nothing.
+	// j states the limitation and touches nothing. The pane has no
+	// per-hunk channel to the orchestrator, so it must not claim to have
+	// recorded an intervention (review finding 11).
 	updated, _ = next.Update(reviewRealPlainKey('j'))
 	next = updated.(model)
 	found := false
 	for _, row := range next.transcript {
-		if strings.Contains(row.text, "step_back") {
+		if strings.Contains(row.text, "cannot reject a single hunk") {
 			found = true
+		}
+		if strings.Contains(row.text, "step_back") {
+			t.Fatal("verifier: j still claims an intervention the runtime never receives")
 		}
 	}
 	if !found {
-		t.Fatal("verifier: real j did not record the hunk-rejection notice")
+		t.Fatal("verifier: real j did not state the hunk-rejection limitation")
 	}
 
 	// o with EDITOR set produces the exec cmd.
@@ -178,18 +183,27 @@ func TestVerifyDiffApproveAllDispatchesAcceptSeam(t *testing.T) {
 		if options.Name != "wt-vfy-a" {
 			t.Fatalf("verifier: approve-all ran on the wrong lane: %q", options.Name)
 		}
-		return worktrees.MergeBackResult{}, nil
+		return worktrees.MergeBackResult{Status: worktrees.MergeBackMerged, Message: "merged"}, nil
 	}
 	m := mouseTestModel()
 	// Bind the view to a lane the stub can match, via the handoff path's
 	// activeWorktree so applyWorktreeReview resolves.
 	wt := &worktrees.Result{Name: "wt-vfy-a", Path: t.TempDir(), RepoRoot: "/nonexistent"}
 	m.activeWorktree = wt
-	m.diffView = diffViewState{active: true, wt: *wt, base: "main", text: diffReviewTestDiff, files: diffFileStats(diffReviewTestDiff)}
-	updated, _ := m.Update(reviewRealPlainKey('a'))
+	m.diffView = diffViewState{active: true, wt: *wt, base: "main", text: diffReviewTestDiff, files: diffFileStats(diffReviewTestDiff), loaded: true}
+	updated, cmd := m.Update(reviewRealPlainKey('a'))
 	next := updated.(model)
+	// The Git work runs in the returned command, not inside Update
+	// (review finding 4).
+	if merged {
+		t.Fatal("verifier: approve-all ran the merge synchronously inside Update")
+	}
+	if cmd == nil {
+		t.Fatal("verifier: diff approve-all did not schedule the review Accept seam")
+	}
+	execCmd(cmd)
 	if !merged {
-		t.Fatal("verifier: diff approve-all did not dispatch the review Accept seam")
+		t.Fatal("verifier: the scheduled command did not dispatch the review Accept seam")
 	}
 	if next.diffView.active {
 		t.Fatal("verifier: approve-all did not close the diff view")
@@ -351,16 +365,16 @@ func TestVerifyDiffAndHandoffKeysDoNotCollide(t *testing.T) {
 	tuiPreserveWorktree = func(_ context.Context, _ worktrees.MergeBackOptions) (string, error) {
 		return "splice/wt-vfy-both", nil
 	}
-	updated2, _ := m.Update(reviewRealShiftKey('X'))
+	updated2, discardCmd := m.Update(reviewRealShiftKey('X'))
 	mid := updated2.(model)
-	// The discard runs synchronously, but its result arrives as a deferred
-	// worktreeReviewResultMsg (tea.Batch in runHandoffDiscard) — the same
-	// shape the real event loop delivers. Feed it through: this is where
-	// the stale diff view must close.
-	updated3, _ := mid.Update(worktreeReviewResultMsg{
-		decision: worktreeReviewReject,
-		reason:   "handoff discard",
-	})
+	// The discard now runs INSIDE the command (review finding 4). Execute
+	// it, then feed its result through the update path: that is where the
+	// stale diff view must close.
+	if discardCmd == nil {
+		t.Fatal("verifier: shift+X while the diff view is open did not schedule the handoff discard")
+	}
+	discardMsg := execCmd(discardCmd)
+	updated3, _ := mid.Update(discardMsg)
 	final := updated3.(model)
 	if !removed {
 		t.Fatal("verifier: shift+X while the diff view is open did not reach the handoff discard")

@@ -255,10 +255,6 @@ func (m model) handleResumeCommand(args string) (model, string) {
 	// session already owns a design epoch, so the first resumed prompt must not
 	// enter a fresh epoch and discard that state.
 	m = m.reconstructDesignState()
-	// F3 (§15): replay the persisted presentation states through the
-	// accumulator so the pipeline panel, lifecycle, and health reconstruct
-	// from runtime truth without touching the runtime.
-	m = m.replayPresentationState(events)
 	m.designNoticeShown = true
 	loopsCleared := 0
 	if session.SessionID != previousID {
@@ -267,8 +263,18 @@ func (m model) handleResumeCommand(args string) (model, string) {
 		// binding) belong to the previous session's run; reset them on a
 		// real switch. A no-op switch (resuming the active session) leaves
 		// them untouched.
+		//
+		// ORDER MATTERS (review finding 7): the reset clears run-owned
+		// presentation state, so it must run BEFORE the replay below.
+		// Replaying first and resetting second discarded exactly the
+		// state the replay had just reconstructed.
 		m = m.resetRunInteractionState()
 	}
+	// F3 (§15): replay the persisted presentation states so the pipeline
+	// panel, lifecycle, health, and receipt reconstruct from runtime truth
+	// without touching the runtime. A session with no valid snapshot lands
+	// on the empty projection rather than inheriting the previous session's.
+	m = m.replayPresentationState(events)
 
 	rows := initialTranscript()
 	rows = appendRow(rows, rowSystem, m.formatResumeSummary(*session, len(events)))
@@ -638,25 +644,24 @@ func eventsHaveResumableContent(events []sessions.Event) bool {
 }
 
 // openSessionPicker arms the async scan for a bare /resume and returns the
-// scan cmd via resumeScanCmd (a package-level holder for the just-armed
-// cmd — the commandResume switch returns (model, cmd) and needs the cmd to
-// reach the event loop). ok is false only when there is no store at all.
-var resumeScanCmd tea.Cmd
-
-func (m model) openSessionPicker() (model, bool) {
+// scan command directly (review finding 10: the command used to be stashed
+// in a package global and dropped by callers that returned only a boolean,
+// so the receipt's [R] marked a scan in flight and scheduled nothing).
+// ok is false only when there is no store at all.
+func (m model) openSessionPicker() (model, tea.Cmd, bool) {
 	if m.sessionStore == nil {
-		return m, false
+		return m, nil, false
 	}
 	if m.sessionScanInFlight {
 		// A scan is already running: mark its landing as resume-wanted so
-		// the picker arms when it lands.
+		// the picker arms when it lands. Joining an in-flight scan needs
+		// no second command.
 		m.resumePickerWanted = true
-		return m, true
+		return m, nil, true
 	}
 	next, cmd := startSessionScan(m, "Resume a session")
 	next.resumePickerWanted = true
-	resumeScanCmd = cmd
-	return next, cmd != nil
+	return next, cmd, cmd != nil
 }
 
 func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {

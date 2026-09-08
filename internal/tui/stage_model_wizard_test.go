@@ -338,6 +338,91 @@ func TestStageModelWizardDirtyTracking(t *testing.T) {
 	}
 }
 
+// The baseline snapshot must own its own Stages map and Escalation value.
+// A shallow copy shares them, so editing an EXISTING override writes through
+// both and the discard guard never fires. Test the mutable members, not only
+// the nil-to-new allocation case.
+func TestStageModelWizardDirtyDetectsExistingOverrideEdits(t *testing.T) {
+	newWizard := func(t *testing.T) *stageModelWizardState {
+		t.Helper()
+		dir := t.TempDir()
+		configPath := filepath.Join(dir, "config.json")
+		content := `{
+			"default": {"provider_profile": "openai", "model": "gpt-4.1"},
+			"escalation": {"provider_profile": "openai", "model": "gpt-4.1"},
+			"stages": {"code_writer": {"provider_profile": "openai", "model": "gpt-4.1"}}
+		}`
+		if err := os.WriteFile(stageModelConfigPath(configPath), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		providers := []config.ProviderProfile{{Name: "openai", Model: "gpt-4.1"}}
+		wizard, err := newStageModelWizard(configPath, providers, providers[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if wizard.isDirty() {
+			t.Fatal("freshly loaded wizard is dirty")
+		}
+		return wizard
+	}
+
+	t.Run("existing stage override", func(t *testing.T) {
+		wizard := newWizard(t)
+		stage := wizard.config.Stages["code_writer"]
+		stage.ReasoningEffort = "high"
+		wizard.config.Stages["code_writer"] = stage
+		if !wizard.isDirty() {
+			t.Fatal("editing an existing stage override did not mark the wizard dirty")
+		}
+		if got := wizard.initialConfig.Stages["code_writer"].ReasoningEffort; got != "" {
+			t.Fatalf("baseline stage mutated to %q; the snapshot shares the draft map", got)
+		}
+	})
+
+	t.Run("existing escalation override", func(t *testing.T) {
+		wizard := newWizard(t)
+		wizard.config.Escalation.ReasoningEffort = "high"
+		if !wizard.isDirty() {
+			t.Fatal("editing an existing escalation override did not mark the wizard dirty")
+		}
+		if got := wizard.initialConfig.Escalation.ReasoningEffort; got != "" {
+			t.Fatalf("baseline escalation mutated to %q; the snapshot shares the draft pointer", got)
+		}
+	})
+
+	t.Run("inline effort editor on an existing override", func(t *testing.T) {
+		m := model{stageModelWizard: newWizard(t)}
+		m.stageModelWizard.overviewCursor = 2 // code_writer, which already has an override
+		m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyRight))
+		if !m.stageModelWizard.isDirty() {
+			t.Fatal("inline effort edit of an existing override did not mark the wizard dirty")
+		}
+		m, _ = m.handleStageModelWizardKey(stageWizardKey(tea.KeyEsc))
+		if m.stageModelWizard == nil || !m.stageModelWizard.confirmDiscard {
+			t.Fatal("Esc closed the wizard without the unsaved-change guard")
+		}
+	})
+
+	t.Run("save re-baselines deeply", func(t *testing.T) {
+		wizard := newWizard(t)
+		stage := wizard.config.Stages["code_writer"]
+		stage.ReasoningEffort = "high"
+		wizard.config.Stages["code_writer"] = stage
+		if err := wizard.save(filepath.Join(t.TempDir(), "config.json")); err != nil {
+			t.Fatal(err)
+		}
+		if wizard.isDirty() {
+			t.Fatal("wizard dirty right after a successful save")
+		}
+		stage = wizard.config.Stages["code_writer"]
+		stage.ReasoningEffort = "low"
+		wizard.config.Stages["code_writer"] = stage
+		if !wizard.isDirty() {
+			t.Fatal("post-save baseline shares the draft map; a later edit reads as clean")
+		}
+	})
+}
+
 func TestStageModelWizardKnownStageRows(t *testing.T) {
 	wizard := &stageModelWizardState{config: schemas.StageModelConfigFile{Default: schemas.StageModelConfig{ProviderProfile: "x", Model: "y"}}}
 	rows := wizard.knownStageRows()

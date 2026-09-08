@@ -63,8 +63,58 @@ func (m model) replayPresentationState(events []sessions.Event) model {
 		found = true
 	}
 	if !found {
-		return m
+		// A session with no valid snapshot is UNKNOWN, not "whatever the
+		// previous session showed" (review finding 7). Returning the old
+		// model unchanged left the destination session displaying the
+		// source session's completion, receipt, and pipeline. Clear the
+		// presentation state instead: empty is the honest projection for
+		// a session whose runtime snapshots were never persisted.
+		return m.clearPresentationState()
 	}
-	m.lastState = last
+	return m.applyPresentationSnapshot(last)
+}
+
+// applyPresentationSnapshot is the ONE path that lands a presentation.State
+// on the model, used by both live snapshots and replay (review finding 7).
+// Replay used to assign lastState only, so the pipeline panel, phase trail,
+// and receipt state stayed empty or stale while a live event updated them
+// through a different path.
+func (m model) applyPresentationSnapshot(state presentation.State) model {
+	m.lastState = state
+	m.pipeline.applyState(state)
+	m.phaseTrail.observe(state.Lifecycle)
+	// The terminal receipt is runtime truth from the snapshot's
+	// completion, so a resumed session offers the same actions the live
+	// run offered. A run still in flight has no terminal receipt.
+	m.lastTerminalReceipt = terminalReceiptForState(state)
 	return m
+}
+
+// clearPresentationState drops every projection owned by a run's
+// presentation truth. Session switches and replay into a session without
+// snapshots both use it, so no surface outlives the truth it came from.
+func (m model) clearPresentationState() model {
+	m.lastState = presentation.State{}
+	m.pipeline.clear()
+	m.phaseTrail.reset()
+	m.lastTerminalReceipt = ""
+	return m
+}
+
+// terminalReceiptForState maps a completed run's snapshot to the receipt
+// card kind whose action keys should be armed. A run without a terminal
+// completion arms nothing.
+func terminalReceiptForState(state presentation.State) receiptKind {
+	if state.Completion == nil {
+		return ""
+	}
+	switch state.Completion.Status {
+	case "cancelled":
+		return receiptCancelled
+	case "failed":
+		return receiptFailed
+	case "completed":
+		return receiptVerified
+	}
+	return ""
 }

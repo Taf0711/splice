@@ -127,14 +127,22 @@ func TestReceiptCancelledApplyKeyMergesBack(t *testing.T) {
 	next := updated.(model)
 	updated, _ = next.Update(testKey(tea.KeyEnter)) // keep
 	next = updated.(model)
-	updated, _ = next.Update(reviewRealShiftKey('A'))
+	updated, applyCmd := next.Update(reviewRealShiftKey('A'))
 	applied := updated.(model)
+	// The merge runs in the command, off the UI loop (review finding 4).
+	if merged {
+		t.Fatal("receipt key: [A] ran the merge synchronously inside Update")
+	}
+	if applyCmd == nil {
+		t.Fatal("receipt key: cancelled [A] apply staged did not schedule the merge-back seam")
+	}
+	execCmd(applyCmd)
 	if !merged {
 		t.Fatal("receipt key: cancelled [A] apply staged did not run the merge-back seam")
 	}
 	joined := transcriptText(applied.transcript)
-	if !strings.Contains(joined, "Receipt action queued") {
-		t.Fatal("receipt key: [A] produced no queued-action notice")
+	if !strings.Contains(joined, "Receipt action running") {
+		t.Fatal("receipt key: [A] produced no in-flight notice")
 	}
 }
 
@@ -163,7 +171,12 @@ func TestReceiptCancelledDiscardKeyPreservesThenRemoves(t *testing.T) {
 	next := updated.(model)
 	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
-	updated, _ = next.Update(reviewRealShiftKey('D'))
+	updated, discardCmd := next.Update(reviewRealShiftKey('D'))
+	_ = updated
+	if discardCmd == nil {
+		t.Fatal("receipt key: cancelled [D] did not schedule the discard")
+	}
+	execCmd(discardCmd)
 	if !preserved || !removed {
 		t.Fatalf("receipt key: cancelled [D] (preserved=%v removed=%v) did not discard via the review seams", preserved, removed)
 	}

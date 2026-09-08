@@ -103,30 +103,10 @@ func (m model) adjustModelPickerEffort(delta int) (model, bool) {
 	return m, true
 }
 
-// toggleModelPickerContext flips the highlighted row's long-context request.
-// Only rows advertising the capability respond, which is why the Tab hint is
-// rendered conditionally — an inert key with a visible label would be worse than
-// no label.
-func (m model) toggleModelPickerContext() (model, bool) {
-	if m.picker == nil || m.picker.kind != pickerModel {
-		return m, false
-	}
-	item, ok := m.picker.current()
-	if !ok || !item.LongContext {
-		return m, false
-	}
-	m.picker.setCurrentLongContext(!item.LongContextOn)
-	return m, true
-}
-
 // setCurrentEffort writes an effort index to the highlighted row in both the
 // filtered view and the unfiltered backing list, matched by Value.
 func (p *commandPicker) setCurrentEffort(index int) {
 	p.mutateCurrent(func(item *pickerItem) { item.EffortIndex = index })
-}
-
-func (p *commandPicker) setCurrentLongContext(on bool) {
-	p.mutateCurrent(func(item *pickerItem) { item.LongContextOn = on })
 }
 
 // mutateCurrent applies fn to the highlighted row and to its twin in allItems,
@@ -212,19 +192,25 @@ func costRailBounds(items []pickerItem) (low, high float64) {
 // Silence is deliberate here: the row's effort was visible on screen at the
 // moment of Enter, and handleModelCommand already emits a card for the switch.
 // A second "reasoning effort set to high" line for something the user watched
-// themselves set would be noise. A row left on auto writes nothing at all —
-// handleModelCommand's own effort reconciliation stays in charge of that case.
+// themselves set would be noise.
+//
+// AUTO IS AN EXPLICIT CHOICE, not a no-op (review finding 15). Returning
+// early on auto left a previously-selected effort active, so picking auto
+// on a model already running high kept high: the picker showed one thing
+// and the next run used another. Auto means "no effort preference", so it
+// clears the preference.
 func (m model) applyPickedModelEffort(item pickerItem) model {
-	effort := item.selectedEffort()
-	if effort == "" {
-		return m
-	}
 	// The model switch can be refused (no provider profile for the target, an
 	// unresolvable ID). The effort was dialed in for the model on that ROW, so
 	// applying it after a refused switch would retune whatever model is still
 	// active — a change the user never asked for and did not see. Confirm the
 	// switch actually landed before touching effort.
 	if strings.TrimSpace(m.modelName) != strings.TrimSpace(item.Value) {
+		return m
+	}
+	effort := item.selectedEffort()
+	if effort == "" {
+		m.reasoningEffort = ""
 		return m
 	}
 	requested := modelregistry.ReasoningEffort(effort)

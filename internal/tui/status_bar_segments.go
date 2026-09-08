@@ -115,6 +115,19 @@ func (m model) phaseChipSegment() string {
 	if !alerting {
 		style = statusPhaseStyle(phase)
 	}
+	// TERMINAL OUTCOME overrides both (review finding 9). A failed or
+	// cancelled run has lifecycle `complete` and a health that
+	// statusHealthStyle does not treat as alerting, so the chip rendered a
+	// green "complete" for a run that failed. The completion receipt is
+	// the run's own verdict: say what happened, in its own color.
+	if phase == presentation.LifecycleComplete && m.lastState.Completion != nil {
+		switch m.lastState.Completion.Status {
+		case "failed":
+			word, style = "failed", zeroTheme.red
+		case "cancelled":
+			word, style = "cancelled", zeroTheme.amber
+		}
+	}
 	return style.Render("●") + " " + style.Render(word)
 }
 

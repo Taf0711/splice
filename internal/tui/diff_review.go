@@ -53,6 +53,15 @@ type diffViewState struct {
 	err     string           // non-empty when the diff could not be produced
 	files   []diffFileInfo   // per-file stats parsed from the same text
 	hunkTop int              // first visible line of the hunk body
+	// loaded distinguishes "the capture has not landed yet" from "the
+	// capture landed and the lane genuinely produced no changes" (review
+	// finding 14). Without it an empty successful capture rendered
+	// "Capturing diff" forever, because empty text was the only signal.
+	loaded bool
+	// tree pins the reviewed content (worktrees.ReviewSnapshotResult.Tree).
+	// The apply path passes it back as MergeBackOptions.ExpectedTree, so a
+	// worktree changed after this review is refused, not merged unseen.
+	tree string
 	// parentScrollOffset preserves the chat scroll position so closing the
 	// view returns to the same spot (mirrors fileViewState).
 	parentScrollOffset int
@@ -103,6 +112,7 @@ func (m model) exitDiffReview() model {
 	m.chatScrollOffset = m.diffView.parentScrollOffset
 	m.diffView = diffViewState{}
 	m = m.clearHover()
+	m.invalidateSettledTranscript()
 	return m
 }
 
@@ -117,17 +127,28 @@ func diffBaseRef(wt worktrees.Result) string {
 	return "main"
 }
 
-// tuiDiffCapture runs `git diff --no-color <base>...HEAD` inside the worktree
-// and returns the raw patch text. It is a seam var so tests can replace it;
-// the default is worktrees.GitCapture, keeping every git exec on the
-// package's single runner path.
+// tuiDiffCapture builds the lane's review snapshot and returns its patch.
+// The snapshot covers committed, staged, unstaged, and untracked changes,
+// which is exactly the set MergeBack commits (review finding 1): a review
+// that read `<base>...HEAD` showed committed trees only, so a normal run
+// with unstaged writes displayed an empty diff and the user could approve
+// work never shown. It is a seam var so tests can replace it.
 var tuiDiffCapture = func(ctx context.Context, wt worktrees.Result) (string, error) {
-	res, err := worktrees.GitCapture(ctx, nil, wt.Path,
-		"diff", "--no-color", diffBaseRef(wt)+"...HEAD")
+	snapshot, err := tuiReviewSnapshot(ctx, wt)
 	if err != nil {
 		return "", err
 	}
-	return res.Stdout, nil
+	return snapshot.Patch, nil
+}
+
+// tuiReviewSnapshot is the capture seam that also yields the reviewed tree
+// SHA, which the apply path pins so content changed after the review is
+// refused instead of merged unseen.
+var tuiReviewSnapshot = func(ctx context.Context, wt worktrees.Result) (worktrees.ReviewSnapshotResult, error) {
+	return worktrees.CaptureReviewSnapshot(ctx, worktrees.ReviewSnapshotOptions{
+		WorktreePath: wt.Path,
+		BaseRef:      diffBaseRef(wt),
+	})
 }
 
 // diffCapturedMsg lands the captured diff on the model. It carries the lane
@@ -135,14 +156,19 @@ var tuiDiffCapture = func(ctx context.Context, wt worktrees.Result) (string, err
 type diffCapturedMsg struct {
 	lane string
 	res  string
+	// tree is the reviewed snapshot's tree SHA, carried to the apply path.
+	tree string
 	err  error
 }
 
 // diffCaptureCmd runs the capture off the UI loop.
 func diffCaptureCmd(wt worktrees.Result) tea.Cmd {
 	return func() tea.Msg {
-		text, err := tuiDiffCapture(context.Background(), wt)
-		return diffCapturedMsg{lane: wt.Name, res: text, err: err}
+		snapshot, err := tuiReviewSnapshot(context.Background(), wt)
+		if err != nil {
+			return diffCapturedMsg{lane: wt.Name, err: err}
+		}
+		return diffCapturedMsg{lane: wt.Name, res: snapshot.Patch, tree: snapshot.Tree}
 	}
 }
 
@@ -156,12 +182,18 @@ func (m model) handleDiffCaptured(msg diffCapturedMsg) model {
 		m.diffView.err = msg.err.Error()
 		m.diffView.text = ""
 		m.diffView.files = nil
+		m.diffView.tree = ""
+		m.diffView.loaded = false
 		return m
 	}
 	m.diffView.err = ""
 	m.diffView.text = msg.res
 	m.diffView.files = diffFileStats(msg.res)
 	m.diffView.hunkTop = 0
+	m.diffView.tree = msg.tree
+	// The capture landed. An empty patch here is a real answer (the lane
+	// produced no changes), not a pending state.
+	m.diffView.loaded = true
 	return m
 }
 
@@ -363,7 +395,10 @@ func (m model) renderDiffReview(width int) string {
 		}
 		return styledBlock(width, lines, zeroTheme.cardErr)
 	}
-	if dv.text == "" {
+	// Loading is the ONLY state that has neither a landed capture nor any
+	// text. A landed capture with an empty patch is a loaded result ("no
+	// file changes"), not a pending one (review finding 14).
+	if !dv.loaded && dv.text == "" {
 		return zeroTheme.faint.Render("Capturing diff…")
 	}
 	if width <= 0 {
@@ -386,12 +421,16 @@ func (m model) renderDiffReview(width int) string {
 		head = append(head, "  "+zeroTheme.faint.Render("no file changes — the lane produced no diff against "+dv.base))
 	}
 
-	// Body window: visible slice of the joined hunks under the line budget.
+	// Body window: visible slice of the joined hunks.
+	//
+	// The window is taken from the COMPLETE parsed body (review finding
+	// 14). Truncating the source to diffViewMaxBlockLines before applying
+	// the viewport clamped any scroll position past that line back into
+	// the head, so the tail of a large patch could never be inspected even
+	// though navigation used the full length. The cap now bounds how many
+	// lines are RENDERED per frame, not how much of the patch exists.
 	body := strings.Join(hunks, "\n")
 	bodyLines := strings.Split(body, "\n")
-	if len(bodyLines) > diffViewMaxBlockLines {
-		bodyLines = bodyLines[:diffViewMaxBlockLines]
-	}
 	maxTop := len(bodyLines) - 1
 	if maxTop < 0 {
 		maxTop = 0
@@ -532,30 +571,41 @@ func (m model) nextDiffFile() model {
 	return m
 }
 
-// approveDiffAll dispatches the review's Accept path for the viewed lane —
-// the same seam the review picker and the handoff [M] key use. The view
-// closes and the review result message flows through the normal handler.
+// approveDiffAll schedules the review's Accept path for the viewed lane
+// through the shared operation scheduler (finding 4) — the same seam the
+// review picker and the handoff [M] key use. The view closes and the
+// review result flows through the normal handler when the merge finishes.
 func (m model) approveDiffAll() (bool, tea.Model, tea.Cmd) {
 	wt := m.diffView.wt
 	if strings.TrimSpace(wt.Path) == "" {
 		return true, m.exitDiffReview(), nil
 	}
-	msg := applyWorktreeReview(wt, worktreeReviewAccept, false, "diff review approve all")
-	next := m.exitDiffReview()
+	if ok, refusal := m.worktreeActionAllowed(); !ok {
+		return true, m.appendSystemNotice(refusal), nil
+	}
+	// Schedule from the model that STILL has the review boundary, then
+	// close the pane: exitDiffReview clears diffView, including the tree
+	// the merge must revalidate against.
+	scheduled, cmd := m.scheduleWorktreeOp(worktreeOpDiffApprove, wt, worktreeReviewAccept, "diff review approve all")
+	next := scheduled.exitDiffReview()
 	next.transcript = appendTranscriptRow(next.transcript, transcriptRow{
-		kind: rowSystem, text: "Diff review: approve all dispatched for lane " + wt.Name,
+		kind: rowSystem, text: "Diff review: merging lane " + wt.Name + "...",
 	})
-	return true, next, tea.Batch(func() tea.Msg { return msg })
+	return true, next, cmd
 }
 
-// rejectDiffHunk records the rejection as a runtime intervention notice and
-// returns to the run's decision path — the pane never edits files itself
-// (contract §11: rejecting a hunk emits a runtime intervention). The step_back
-// vocabulary matches the runtime's intervention set.
+// rejectDiffHunk states what the pane can and cannot do. The pane has no
+// channel to the orchestrator: there is no runtime intervention queue a
+// hunk rejection can enter today, so claiming one was "recorded" and that
+// "the orchestrator decides the intervention" was false (review finding
+// 11). The honest surface names the actions that DO exist. Wiring a real
+// hunk-level intervention needs a typed request carrying lane, snapshot
+// identity, file, and hunk identity, and a persisted decision; it stays
+// deferred-pending-runtime until that channel exists.
 func (m model) rejectDiffHunk() model {
 	wt := m.diffView.wt
-	return m.appendSystemNotice("Hunk rejection recorded for lane " + wt.Name +
-		" — the orchestrator decides the intervention (step_back). The diff pane never edits files; use the worktree review to act on the whole lane.")
+	return m.appendSystemNotice("Splice cannot reject a single hunk yet: the diff pane never edits files, and there is no per-hunk channel to the orchestrator. " +
+		"To act on lane " + wt.Name + ", use the worktree review on the whole lane, or edit the worktree directly with [O].")
 }
 
 // diffHunkAtWindow returns the text of the hunk the current window top sits

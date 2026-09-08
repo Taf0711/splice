@@ -118,29 +118,33 @@ func (m model) dispatchTerminalReceiptKey(key string) (bool, tea.Model, tea.Cmd)
 	return false, m, nil
 }
 
-// receiptWorktreeAction runs the worktree merge-back (accept) or
-// preserve-then-remove (reject) seam off the UI loop, mirroring the
-// handoff's dispatch shape. When the failed/cancelled lane left no
+// receiptWorktreeAction schedules the worktree merge-back (accept) or
+// preserve-then-remove (reject) seam through the shared operation
+// scheduler, so the Git work runs off the UI loop and a second keypress
+// cannot dispatch it twice. When the failed or cancelled lane left no
 // worktree, the key says so instead of silently doing nothing.
 func (m model) receiptWorktreeAction(decision string, reason string) (bool, tea.Model, tea.Cmd) {
 	if m.activeWorktree == nil || strings.TrimSpace(m.activeWorktree.Path) == "" {
 		return true, m.appendSystemNotice("No staged work to act on — the lane left no worktree."), nil
 	}
-	msg := applyWorktreeReview(*m.activeWorktree, decision, false, reason)
-	next := m
+	if ok, refusal := m.worktreeActionAllowed(); !ok {
+		return true, m.appendSystemNotice(refusal), nil
+	}
+	next, cmd := m.scheduleWorktreeOp(worktreeOpReceipt, *m.activeWorktree, decision, reason)
 	next.transcript = appendTranscriptRow(next.transcript, transcriptRow{
 		kind: rowSystem,
-		text: "Receipt action queued: " + reason + " on lane " + m.activeWorktree.Name,
+		text: "Receipt action running: " + reason + " on lane " + m.activeWorktree.Name + "...",
 	})
-	return true, next, tea.Batch(func() tea.Msg { return msg })
+	return true, next, cmd
 }
 
 // receiptResume opens the session picker (the same surface bare /resume
-// opens). The picker falls back to the text list when there is nothing to
-// resume, so the key never dead-ends.
+// opens) and returns its scan command, so the key actually schedules the
+// scan it marks in flight (review finding 10). The picker falls back to the
+// text list when there is nothing to resume, so the key never dead-ends.
 func (m model) receiptResume() (bool, tea.Model, tea.Cmd) {
-	if next, ok := m.openSessionPicker(); ok {
-		return true, next, nil
+	if next, scanCmd, ok := m.openSessionPicker(); ok {
+		return true, next, scanCmd
 	}
 	text := ""
 	m, text = m.handleResumeCommand("")

@@ -45,13 +45,30 @@ const (
 
 // classifyNarration derives a row's narration class from its fields. Pure
 // function over the row — the reducer's projection of runtime truth.
-// The decisions ledger card (a rowSystem row carrying the tagged ledger) is
-// NOT system chatter: it is the decision-anchor record (§7.1) and survives
-// every verbosity level — quiet drops transient command output, never the
-// anchors.
+//
+// MANDATORY WORKFLOW STATE is promoted out of generic system notices
+// (review finding 13). Plan, critique, handoff, and decision cards all
+// arrive as rowSystem, so classifying them as system chatter let quiet mode
+// hide them while their action keys stayed armed: the user lost the plan
+// card but kept the [A] that approves it. Compact, execution, and minimal
+// presets all select quiet narration, so this was an ordinary workflow
+// state, not an edge case. A card the user must act on survives every
+// verbosity level, by class rather than by special case at render time.
 func classifyNarration(row transcriptRow) NarrationClass {
-	if row.kind == rowSystem && strings.HasPrefix(row.text, decisionsCardMarker) {
-		return NarrationAgentDecision
+	if row.kind == rowSystem {
+		switch {
+		case strings.HasPrefix(row.text, decisionsCardMarker):
+			return NarrationAgentDecision
+		case strings.HasPrefix(row.text, planCardMarker),
+			strings.HasPrefix(row.text, critiqueCardMarker):
+			// The plan and its critique are the approval gate's own
+			// content: they carry the [A]/[R]/[F] decision.
+			return NarrationGate
+		case strings.HasPrefix(row.text, handoffTranscriptMarker):
+			// The handoff is the run's terminal outcome surface and
+			// carries the lane recovery keys.
+			return NarrationReceipt
+		}
 	}
 	switch row.kind {
 	case rowUser:

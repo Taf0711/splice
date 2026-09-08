@@ -166,28 +166,23 @@ func TestModelPickerEffortNotAppliedWhenSwitchRefused(t *testing.T) {
 	}
 }
 
-// Tab only responds on rows that advertise long context, matching the toggle
-// line that appears there — an inert key with a visible label would mislead.
-func TestModelPickerContextToggleOnlyWhereSupported(t *testing.T) {
+// The long-context line is a capability READOUT, not a toggle: no run
+// configuration consumed the old per-row toggle, so it was removed rather
+// than left advertising an effect it could not deliver (review finding 15).
+// The line still appears only on rows that actually support long context.
+func TestModelPickerContextLineOnlyWhereSupported(t *testing.T) {
 	m := modelPickerFixture(t, "gpt-4o", "gpt-5.6-sol")
-	m, toggled := m.toggleModelPickerContext()
-	if !toggled {
-		t.Fatal("gpt-5.6-sol advertises long context; tab must toggle it")
-	}
 	item, _ := m.picker.current()
-	if !item.LongContextOn {
-		t.Fatal("toggle did not stick")
+	if !item.LongContext {
+		t.Fatal("gpt-5.6-sol advertises long context")
 	}
-	if !strings.Contains(plainRender(t, renderContextToggle(item)), "On") {
-		t.Fatal("toggle line must show the On state")
+	if !strings.Contains(plainRender(t, renderContextToggle(item)), "supported") {
+		t.Fatal("the long-context line must state the capability")
 	}
 
 	other := modelPickerFixture(t, "gpt-4o", "claude-sonnet-4.5")
-	if _, toggled := other.toggleModelPickerContext(); toggled {
-		t.Fatal("claude-sonnet-4.5 has no long-context capability; tab must be inert")
-	}
 	if got := renderContextToggle(mustCurrent(t, other)); got != "" {
-		t.Fatalf("no toggle line expected for an unsupported row, got %q", got)
+		t.Fatalf("no long-context line expected for an unsupported row, got %q", got)
 	}
 }
 

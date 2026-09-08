@@ -19,6 +19,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/Taf0711/splice/internal/hooks"
 )
 
 // projectTrustConfig is the typed "what would change" summary for one
@@ -32,9 +34,19 @@ type projectTrustConfig struct {
 	MCPServerCount int
 	// MCPServerNames lists the server names in config order.
 	MCPServerNames []string
-	// HookCount is the number of hook entries (lifecycle commands the
-	// project can run).
+	// HookCount is the number of EXECUTABLE hook entries: lifecycle
+	// commands the project would actually run (the hooks file is enabled
+	// and the entry itself is enabled).
 	HookCount int
+	// HookDisabledCount is the number of hook definitions the file carries
+	// that would NOT run, either because the file sets "enabled": false or
+	// because the entry sets "enabled": false. They are still disclosed:
+	// a disabled definition is one edit away from executable.
+	HookDisabledCount int
+	// HookParseError is non-empty when the sibling hooks file exists but
+	// the canonical hooks reader rejects it. An unreadable hooks file is
+	// itself information about the workspace.
+	HookParseError string
 	// ProviderCount is the number of provider profiles the project defines.
 	ProviderCount int
 	// ActiveProviderOverride is set when the project config names its own
@@ -58,7 +70,8 @@ type projectTrustConfig struct {
 
 // Empty reports whether the config carries nothing worth a trust decision.
 func (c projectTrustConfig) Empty() bool {
-	return c.MCPServerCount == 0 && c.HookCount == 0 && c.ProviderCount == 0 &&
+	return c.MCPServerCount == 0 && c.HookCount == 0 && c.HookDisabledCount == 0 &&
+		c.HookParseError == "" && c.ProviderCount == 0 &&
 		c.ActiveProviderOverride == "" && c.MaxTurnsOverride == 0 &&
 		len(c.SandboxTightening) == 0 && c.KeybindingOverrides == 0 &&
 		c.ParseError == ""
@@ -69,11 +82,18 @@ func (c projectTrustConfig) Empty() bool {
 // with no error: absence is the normal case for most workspaces. Parse
 // failures are captured on the struct (not returned as errors) because an
 // unparseable file is exactly what the user needs to see before deciding.
+//
+// The sibling hooks file is inspected independently of config.json. A
+// workspace with no config.json but with a hooks.json still runs commands,
+// so an absent or unparseable config.json must not hide the hooks.
 func describeProjectTrustConfig(path string) projectTrustConfig {
 	out := projectTrustConfig{Path: path}
 	if strings.TrimSpace(path) == "" {
 		return out
 	}
+	// hooks.json is a separate executable file next to config.json; count it
+	// first so it is disclosed even when config.json is absent or broken.
+	out.HookCount, out.HookDisabledCount, out.HookParseError = inspectProjectHooks(filepath.Join(filepath.Dir(path), "hooks.json"))
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -108,9 +128,6 @@ func describeProjectTrustConfig(path string) projectTrustConfig {
 		out.MCPServerNames = append(out.MCPServerNames, name)
 	}
 	sort.Strings(out.MCPServerNames)
-	// hooks.json is a separate file next to config.json; count its entries
-	// too so the card reflects every executable file in .splice/.
-	out.HookCount = countHookEntries(filepath.Join(filepath.Dir(path), "hooks.json"))
 	out.ProviderCount = len(cfg.Providers)
 	out.ActiveProviderOverride = strings.TrimSpace(cfg.ActiveProvider)
 	out.MaxTurnsOverride = cfg.MaxTurns
@@ -127,28 +144,50 @@ func describeProjectTrustConfig(path string) projectTrustConfig {
 	return out
 }
 
-// countHookEntries reads hooks.json and counts lifecycle hook entries.
-// Shape-tolerant: an object of arrays (event -> commands) or a bare array.
-// A parse error yields 0 — the config card's job is the summary, and the
-// loader will surface the real error if hooks are ever loaded.
-func countHookEntries(path string) int {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return 0
+// inspectProjectHooks reads one hooks file through the canonical hooks
+// reader (hooks.ConfigStore.List, a pure read of a single path) and reports
+// how many entries would run, how many are defined but disabled, and the
+// reader's own error when the file is unreadable.
+//
+// The TUI keeps no second hooks schema. The real schema is
+// {"enabled": bool, "hooks": [ {..., "enabled": bool} ]}, and only the
+// canonical reader is allowed to know that. A missing file is not an error:
+// most workspaces have none.
+func inspectProjectHooks(path string) (executable int, disabled int, parseError string) {
+	if strings.TrimSpace(path) == "" {
+		return 0, 0, ""
 	}
-	var asObject map[string][]json.RawMessage
-	if err := json.Unmarshal(data, &asObject); err == nil {
-		total := 0
-		for _, entries := range asObject {
-			total += len(entries)
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return 0, 0, ""
 		}
-		return total
+		return 0, 0, fmt.Errorf("read hooks file %s: %w", path, err).Error()
 	}
-	var asArray []json.RawMessage
-	if err := json.Unmarshal(data, &asArray); err == nil {
-		return len(asArray)
+	store, err := hooks.NewConfigStore(hooks.StoreOptions{ConfigPath: path})
+	if err != nil {
+		return 0, 0, fmt.Errorf("read hooks file %s: %w", path, err).Error()
 	}
-	return 0
+	// List is read-only: it parses the single file and never writes it.
+	config, err := store.List()
+	if err != nil {
+		return 0, 0, fmt.Errorf("read hooks file %s: %w", path, err).Error()
+	}
+	for _, hook := range config.Hooks {
+		if config.Enabled && hook.Enabled {
+			executable++
+			continue
+		}
+		disabled++
+	}
+	return executable, disabled, ""
+}
+
+// countHookEntries returns the number of hook commands the file at path
+// would actually run. It delegates to the canonical reader through
+// inspectProjectHooks; a disabled file or a disabled entry counts zero.
+func countHookEntries(path string) int {
+	executable, _, _ := inspectProjectHooks(path)
+	return executable
 }
 
 // countKeybindingOverrides counts the top-level keys of a keybindings object.
@@ -172,7 +211,9 @@ func trustConfigCardLines(c projectTrustConfig, width int) []string {
 		lines = append(lines,
 			"  config file could not be read as valid JSON:",
 			"  "+clipLine(c.ParseError, maxInt(8, width-4)))
-		return lines
+		// Do not return here: the sibling hooks file is a separate
+		// executable surface and stays disclosed even when config.json
+		// is broken.
 	}
 	if c.Empty() {
 		return lines
@@ -186,6 +227,12 @@ func trustConfigCardLines(c projectTrustConfig, width int) []string {
 	}
 	if c.HookCount > 0 {
 		lines = append(lines, fmt.Sprintf("  hooks              %d commands on lifecycle events", c.HookCount))
+	}
+	if c.HookDisabledCount > 0 {
+		lines = append(lines, fmt.Sprintf("  hooks (disabled)   %d defined but off", c.HookDisabledCount))
+	}
+	if c.HookParseError != "" {
+		lines = append(lines, "  hooks              "+clipLine(c.HookParseError, maxInt(8, width-21)))
 	}
 	if c.ProviderCount > 0 {
 		lines = append(lines, fmt.Sprintf("  providers          %d defined in project config", c.ProviderCount))

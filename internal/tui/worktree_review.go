@@ -35,7 +35,17 @@ type worktreeReviewResultMsg struct {
 	kept     *worktrees.Result
 	decision string
 	reason   string
+	// op identifies the scheduled operation this result belongs to
+	// (worktree_ops.go). Nil for results from the review picker, which
+	// owns input itself and needs no in-flight bookkeeping.
+	op *worktreeOpState
 }
+
+// succeeded reports whether the operation actually completed. Merge-back
+// and discard both leave no worktree on success; any refusal, failure, or
+// cleanup failure returns the worktree in kept so the user keeps a
+// recovery path (finding 5: a refused merge must not announce success).
+func (msg worktreeReviewResultMsg) succeeded() bool { return msg.kept == nil }
 
 func inspectSourceDirty(wt worktrees.Result) bool {
 	if strings.TrimSpace(wt.RepoRoot) == "" {
@@ -310,44 +320,44 @@ func (m model) openWorktreeInEditor(dir string) (tea.Model, tea.Cmd) {
 	})
 }
 
-// runHandoffMerge merges the pending handoff's worktree back into the main
-// checkout and clears the handoff. It reuses runWorktreeReview's Accept
-// path so the merge, unlock, and notice handling stay in one tested place.
+// runHandoffMerge schedules the merge-back of the pending handoff's
+// worktree. The Git work runs in the command goroutine (finding 4) and the
+// handoff stays armed until the result proves the merge landed (finding 5):
+// a conflict or a dirty source branch returns a kept worktree, and the user
+// must keep the recovery controls that acted on it.
 func (m model) runHandoffMerge() (bool, tea.Model, tea.Cmd) {
 	wt := m.activeWorktree
 	if wt == nil || wt.Name != m.pendingHandoff.lane {
 		m.pendingHandoff = nil
 		return true, m, nil
 	}
-	msg := applyWorktreeReview(*wt, worktreeReviewAccept, false, "handoff merge-back")
-	// The review clears the handoff on success (kept == nil after a merge).
-	next := m
-	if msg.kept == nil {
-		next.pendingHandoff = nil
-	} else {
-		next.pendingHandoff = nil
+	if ok, reason := m.worktreeActionAllowed(); !ok {
+		return true, m.appendSystemNotice(reason), nil
 	}
+	next, cmd := m.scheduleWorktreeOp(worktreeOpHandoffMerge, *wt, worktreeReviewAccept, "handoff merge-back")
 	next.transcript = appendTranscriptRow(next.transcript, transcriptRow{
-		kind: rowSystem, text: "Handoff resolved: merged from " + m.pendingHandoffBranch(),
+		kind: rowSystem, text: "Merging lane " + wt.Name + " back into " + m.pendingHandoffBranch() + "...",
 	})
-	return true, next, tea.Batch(func() tea.Msg { return msg })
+	return true, next, cmd
 }
 
-// runHandoffDiscard removes the pending handoff's worktree (branch kept)
-// and clears the handoff. It reuses the review's Reject path.
+// runHandoffDiscard schedules the removal of the pending handoff's worktree
+// (branch kept). Same scheduling and same honesty rule as the merge: the
+// handoff resolves only when the removal actually succeeded.
 func (m model) runHandoffDiscard() (bool, tea.Model, tea.Cmd) {
 	wt := m.activeWorktree
 	if wt == nil || wt.Name != m.pendingHandoff.lane {
 		m.pendingHandoff = nil
 		return true, m, nil
 	}
-	msg := applyWorktreeReview(*wt, worktreeReviewReject, false, "handoff discard")
-	next := m
-	next.pendingHandoff = nil
+	if ok, reason := m.worktreeActionAllowed(); !ok {
+		return true, m.appendSystemNotice(reason), nil
+	}
+	next, cmd := m.scheduleWorktreeOp(worktreeOpHandoffDiscard, *wt, worktreeReviewReject, "handoff discard")
 	next.transcript = appendTranscriptRow(next.transcript, transcriptRow{
-		kind: rowSystem, text: "Handoff resolved: discarded lane " + m.pendingHandoff.lane + " (branch kept)",
+		kind: rowSystem, text: "Discarding lane " + wt.Name + " (branch kept)...",
 	})
-	return true, next, tea.Batch(func() tea.Msg { return msg })
+	return true, next, cmd
 }
 
 // pendingHandoffBranch returns the branch name for status lines.
@@ -358,14 +368,21 @@ func (m model) pendingHandoffBranch() string {
 	return m.pendingHandoff.branch
 }
 
+// applyWorktreeReview runs the review decision. reviewedTree, when set,
+// pins the snapshot the user actually inspected: MergeBack revalidates it
+// and refuses a merge whose content changed after the review (finding 1).
 func applyWorktreeReview(wt worktrees.Result, decision string, dirtyOffered bool, reason string) worktreeReviewResultMsg {
-	msg := runWorktreeReview(wt, decision, dirtyOffered)
+	return applyReviewedWorktree(wt, decision, dirtyOffered, reason, "")
+}
+
+func applyReviewedWorktree(wt worktrees.Result, decision string, dirtyOffered bool, reason string, reviewedTree string) worktreeReviewResultMsg {
+	msg := runWorktreeReview(wt, decision, dirtyOffered, reviewedTree)
 	msg.decision = decision
 	msg.reason = reason
 	return msg
 }
 
-func runWorktreeReview(wt worktrees.Result, decision string, dirtyOffered bool) worktreeReviewResultMsg {
+func runWorktreeReview(wt worktrees.Result, decision string, dirtyOffered bool, reviewedTree string) worktreeReviewResultMsg {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	unlock := func() error {
@@ -394,6 +411,7 @@ func runWorktreeReview(wt worktrees.Result, decision string, dirtyOffered bool) 
 			RepoRoot:     wt.RepoRoot,
 			WorktreePath: wt.Path,
 			Name:         wt.Name,
+			ExpectedTree: reviewedTree,
 		})
 		if err != nil {
 			return keep("Merge-back failed: " + err.Error() + ". Worktree kept at " + wt.Path)

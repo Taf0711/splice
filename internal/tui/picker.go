@@ -71,10 +71,13 @@ type pickerItem struct {
 	// Badge marks catalog status (preview/deprecated) for the row's asterisk and
 	// the legend under the list.
 	Badge pickerBadge
-	// LongContext is true when the model advertises the long-context capability,
-	// which enables the Tab toggle line under the list.
-	LongContext   bool
-	LongContextOn bool
+	// LongContext reports that the model advertises the long-context
+	// capability. It is DISPLAY ONLY: the picker states the capability but
+	// offers no toggle, because no run configuration consumes a
+	// per-selection long-context request (review finding 15). A control
+	// whose selected state never reaches the runtime is removed, not left
+	// advertised. Restore a toggle only alongside real runtime semantics.
+	LongContext bool
 }
 
 // effortAuto is the EffortIndex value meaning "no explicit effort" — it maps to

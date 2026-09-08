@@ -98,10 +98,17 @@ func TestPermissionPromptCancelResolvesCallbackExactlyOnce(t *testing.T) {
 	}
 }
 
-// cancelled run + late goroutine result (§8): the late agentResponseMsg
-// must not offer a worktree review or resurrect run state, but MUST release
-// the worktree lock (stale path) and drain for session persistence.
-func TestCancelledRunLateResultReleasesWorktreeWithoutReview(t *testing.T) {
+// cancelled run + late goroutine result (§8, review finding 3): the late
+// result belongs to the run the user cancelled, so it MUST project the
+// cancellation (CANCELLED receipt + the lane's handoff surface) and drain
+// the flush obligation cancelRun recorded. It must not resurrect run state.
+//
+// This previously asserted the opposite ("a cancelled run's lane surfaces
+// nothing actionable"), which protected the defect: the user stopped a run
+// whose worktree held staged work, and the UI offered no way to act on it
+// while the run ID stayed undrained forever, so a deferred Ctrl+C exit
+// could wait on a drain no handler performed.
+func TestCancelledRunLateResultProjectsCancellationAndDrains(t *testing.T) {
 	m := mouseTestModel()
 	m.activeRunID = 11
 	m.pending = true
@@ -110,19 +117,23 @@ func TestCancelledRunLateResultReleasesWorktreeWithoutReview(t *testing.T) {
 	if m.activeRunID != 0 {
 		t.Fatal("verifier setup: cancel did not clear activeRunID")
 	}
-	flushCount := len(m.flushRunIDs)
-	if flushCount == 0 {
+	if len(m.flushRunIDs) == 0 {
 		t.Fatal("verifier setup: cancelled run not flagged for flush")
 	}
 	// The late result arrives with the runID the run started under.
 	wt := &worktrees.Result{Name: "wt-late", Path: t.TempDir(), RepoRoot: "/nonexistent"}
-	updated, _ := m.Update(planExecutionResultMsg{runID: 11, err: acceptErr("late failure"), worktree: wt})
+	updated, _ := m.Update(planExecutionResultMsg{runID: 11, err: acceptErr("late failure"), worktree: wt, worktreePreserved: true})
 	next := updated.(model)
-	if next.pendingHandoff != nil {
-		t.Fatal("late result for a cancelled run offered a HANDOFF — a cancelled run's lane surfaces nothing actionable")
+	if next.lastTerminalReceipt != receiptCancelled {
+		t.Fatalf("cancelled run projected receipt %q, want the CANCELLED card", next.lastTerminalReceipt)
 	}
-	// The worktree lock release ran (no panic, state consistent).
-	if next.activeWorktree != nil && next.activeWorktree.Name == "wt-late" && next.pending {
+	if next.pendingHandoff == nil {
+		t.Fatal("a cancelled run with a preserved lane must offer the handoff surface")
+	}
+	if len(next.flushRunIDs) != 0 {
+		t.Fatalf("cancelled run left %d undrained run IDs; a deferred exit would wait forever", len(next.flushRunIDs))
+	}
+	if next.pending {
 		t.Fatal("late result resurrected pending state for a cancelled run")
 	}
 }

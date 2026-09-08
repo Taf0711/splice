@@ -28,7 +28,13 @@ func writeTrustConfigFixture(t *testing.T, workspace string) {
 	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(trustConfigFixture), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	hooks := `{"pre_tool_call": [{"command": "echo hi"}], "post_tool_call": [{"command": "a"}, {"command": "b"}]}`
+	// The real hooks schema (internal/hooks.Config): a file-level enabled
+	// flag and an array of definitions, each with its own enabled flag.
+	hooks := `{"enabled": true, "hooks": [
+		{"id": "pre", "event": "beforeTool", "command": "echo", "args": ["hi"], "enabled": true},
+		{"id": "post-a", "event": "afterTool", "command": "a", "enabled": true},
+		{"id": "post-b", "event": "afterTool", "command": "b", "enabled": true}
+	]}`
 	if err := os.WriteFile(filepath.Join(dir, "hooks.json"), []byte(hooks), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -59,6 +65,86 @@ func TestDescribeProjectTrustConfigMissingFileIsEmpty(t *testing.T) {
 	cfg := describeProjectTrustConfig(filepath.Join(t.TempDir(), ".splice", "config.json"))
 	if !cfg.Empty() {
 		t.Errorf("missing config should be empty, got %+v", cfg)
+	}
+}
+
+// The hooks summary must read the real hooks schema through the canonical
+// reader: a file-level enabled flag plus per-entry enabled flags. Executable
+// and disabled definitions are disclosed separately.
+func TestDescribeProjectTrustConfigCountsRealHooksSchema(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		hooks        string
+		wantEnabled  int
+		wantDisabled int
+		wantErr      bool
+	}{
+		{
+			name:        "one executable hook",
+			hooks:       `{"enabled":true,"hooks":[{"id":"hook","event":"sessionStart","command":"example","enabled":true}]}`,
+			wantEnabled: 1,
+		},
+		{
+			name:         "entry disabled",
+			hooks:        `{"enabled":true,"hooks":[{"id":"hook","event":"sessionStart","command":"example","enabled":false}]}`,
+			wantDisabled: 1,
+		},
+		{
+			name:         "file disabled",
+			hooks:        `{"enabled":false,"hooks":[{"id":"hook","event":"sessionStart","command":"example","enabled":true}]}`,
+			wantDisabled: 1,
+		},
+		{
+			name:    "invalid schema is reported, not counted as zero silently",
+			hooks:   `{"enabled":true,"hooks":[{"id":"hook","event":"notAnEvent","command":"example"}]}`,
+			wantErr: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), ".splice")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "hooks.json"), []byte(tc.hooks), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg := describeProjectTrustConfig(filepath.Join(dir, "config.json"))
+			if cfg.HookCount != tc.wantEnabled {
+				t.Errorf("executable hooks = %d, want %d", cfg.HookCount, tc.wantEnabled)
+			}
+			if cfg.HookDisabledCount != tc.wantDisabled {
+				t.Errorf("disabled hooks = %d, want %d", cfg.HookDisabledCount, tc.wantDisabled)
+			}
+			if (cfg.HookParseError != "") != tc.wantErr {
+				t.Errorf("hook parse error = %q, wantErr=%v", cfg.HookParseError, tc.wantErr)
+			}
+			if cfg.Empty() {
+				t.Error("a hooks file with content must not summarize as empty")
+			}
+			if n := countHookEntries(filepath.Join(dir, "hooks.json")); n != tc.wantEnabled {
+				t.Errorf("countHookEntries = %d, want %d", n, tc.wantEnabled)
+			}
+		})
+	}
+}
+
+// A workspace can carry an executable hooks.json with no config.json. The
+// summary must still disclose it instead of returning early.
+func TestDescribeProjectTrustConfigSeesHooksWithoutConfigFile(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), ".splice")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"enabled":true,"hooks":[{"id":"hook","event":"sessionStart","command":"example","enabled":true}]}`
+	if err := os.WriteFile(filepath.Join(dir, "hooks.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := describeProjectTrustConfig(filepath.Join(dir, "config.json"))
+	if cfg.HookCount != 1 {
+		t.Fatalf("hooks beside an absent config.json = %d, want 1", cfg.HookCount)
+	}
+	if !strings.Contains(strings.Join(trustConfigCardLines(cfg, 120), "\n"), "hooks") {
+		t.Error("hooks row missing from the card when config.json is absent")
 	}
 }
 
