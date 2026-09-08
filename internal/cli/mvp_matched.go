@@ -153,6 +153,49 @@ func runMvpMatchedSnapshots(
 			return fmt.Errorf("seed capture set for family %s: no producer run id", family.ID)
 		}
 
+		// A4: export the ACTUAL runtime capture set and freeze it into a
+		// bundle file shared by every compared arm. A missing natural
+		// capture fails natural-capture setup loudly; the labeled
+		// reconstruction path is the explicit fallback (Reconstructed=true
+		// rides the bundle, the seed set, and every row).
+		bundle := snapshotBundle{
+			ProducerRunID: seedSet.ProducerRunID,
+			Commit:        snapHead,
+			Tree:          gitTreeHash(snapDir),
+			VerifyCommand: prov.VerifyCommand,
+		}
+		if client, err := memd.Resolve(ctx); err == nil && client != nil {
+			if nodes, expErr := exportNaturalCaptureSet(ctx, client, snapDir, preHead, seedSet.ProducerRunID); expErr == nil {
+				bundle.Nodes = nodes
+				bundle.CaptureOrigin = "natural"
+				seedSet.Reconstructed = false
+			} else {
+				// Labeled diagnostic fallback: reconstruct from the
+				// verified tree, and mark it everywhere.
+				bundle.CaptureOrigin = "reconstructed"
+				bundle.CaptureOriginNote = truncateForNote(expErr.Error(), 300)
+				seedSet.Reconstructed = true
+				fmt.Fprintf(stderr, "family %s: natural capture export failed (%v); using RECONSTRUCTED captures (diagnostic mode)\n", family.ID, expErr)
+			}
+		} else {
+			bundle.CaptureOrigin = "reconstructed"
+			bundle.CaptureOriginNote = "memory sidecar unavailable for export"
+			seedSet.Reconstructed = true
+		}
+		if bundle.Nodes == nil && seedSet.Reconstructed {
+			// Reconstruction: materialize the deterministic payload and
+			// export its shape into the bundle so import paths see one
+			// representation. The Reconstructed flag rides the bundle.
+			bundle.Nodes = seedCapturesToExported(seedSet)
+		}
+		if options.OutDir != "" {
+			bundleDir := filepath.Join(options.OutDir, "snapshots", snapshotID)
+			if bErr := exportSnapshotBundle(bundleDir, bundle); bErr != nil {
+				cleanup()
+				return fmt.Errorf("export snapshot bundle: %w", bErr)
+			}
+		}
+
 		// Persist the frozen capture set once per family, under the
 		// snapshot project identity, with the real run id on every node.
 		seedPersisted := false
@@ -359,6 +402,12 @@ func runMvpMatchedSnapshots(
 				row.FixtureCommit = snapHead
 				row.FixtureTree = snapTree
 				row.SeedStatus = seedStatus
+				// A4: natural-capture provenance reaches every row. A
+				// record can be replayed AND reconstructed: separate
+				// dimensions. The digest pins the exact payload replayed.
+				row.CaptureReconstructed = &seedSet.Reconstructed
+				row.CaptureReplayed = boolPtr(seedStatus == "replayed")
+				row.CaptureDigest = bundleDigest(bundle.Nodes)
 				row.WarmSetupValid = &trueValue
 				if ctx.Err() != nil {
 					appendRowWithCheckpoint(rows, options.OutDir, row)

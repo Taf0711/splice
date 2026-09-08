@@ -106,6 +106,32 @@ func buildSeedCaptureSet(snapDir string, prov captureProvenance, changedFiles []
 	return set
 }
 
+// seedCapturesToExported renders a seed capture set in the exported-node
+// form so a reconstructed payload rides the same bundle representation as a
+// natural export. The Reconstructed flag travels on the BUNDLE and rows,
+// never inside a node: canonical node identity (kind, claim hash) is
+// origin-independent.
+func seedCapturesToExported(set seedCaptureSet) []memd.ExportedCaptureNode {
+	nodes := make([]memd.ExportedCaptureNode, 0, len(set.Captures))
+	for _, c := range set.Captures {
+		anchors := make([]memd.GraphAnchor, 0, len(c.Anchors))
+		anchors = append(anchors, c.Anchors...)
+		evidence := make([]memd.GraphEvidence, 0, len(c.Evidence))
+		evidence = append(evidence, c.Evidence...)
+		nodes = append(nodes, memd.ExportedCaptureNode{
+			Node: memd.GraphNode{
+				Kind:             c.Kind,
+				Claim:            c.Claim,
+				SourceRunID:      &set.ProducerRunID,
+				VerifiedRevision: &c.Revision,
+			},
+			Anchors:  anchors,
+			Evidence: evidence,
+		})
+	}
+	return nodes
+}
+
 // persistSeedCaptureSet persists the frozen capture set once per family,
 // under the SNAPSHOT project identity (the producer run's own project). The
 // persisted nodes carry the real run id, so the F9 producer-run filter

@@ -900,8 +900,8 @@ func (c *Client) CaptureSetIDs(ctx context.Context, projectPath, fromRevision st
 
 // CaptureSetIDsForRun is CaptureSetIDs with an optional producer-run
 // filter: when sourceRunID is non-empty the sidecar scopes the capture
-// set to the run that persisted the nodes, so two runs that verified the
-// same tree keep separate sets. An empty sourceRunID sends no filter.
+// set to the run that persisted the nodes, so two runs that verified
+// the same tree keep separate sets. An empty sourceRunID sends no filter.
 func (c *Client) CaptureSetIDsForRun(ctx context.Context, projectPath, fromRevision, sourceRunID string) ([]int64, error) {
 	if projectPath == "" || fromRevision == "" {
 		return nil, fmt.Errorf("memd graph capture set: project path and revision are required")
@@ -922,4 +922,71 @@ func (c *Client) CaptureSetIDsForRun(ctx context.Context, projectPath, fromRevis
 		return nil, fmt.Errorf("memd graph capture_set: %s", resp.Error)
 	}
 	return resp.IDs, nil
+}
+
+// ExportedCaptureNode is one fully materialized node in an exported capture
+// set: the complete node payload with its anchors and evidence, plus the
+// source sidecar id and claim hash for canonical identity (numeric ids are
+// not stable across stores; the (kind, claim_hash) pair is).
+type ExportedCaptureNode struct {
+	Node      GraphNode       `json:"node"`
+	Anchors   []GraphAnchor   `json:"anchors"`
+	Evidence  []GraphEvidence `json:"evidence"`
+	SourceID  int64           `json:"source_id"`
+	ClaimHash string          `json:"claim_hash"`
+}
+
+// ExportCaptureSet returns the FULL payloads of a capture set (A4): every
+// active node anchored at the given revision for the project (optionally
+// scoped to the producer run), each with anchors and evidence verbatim.
+// This is the export side of the natural-capture provenance contract; the
+// ids-only capture_set endpoint cannot reconstruct capture content.
+func (c *Client) ExportCaptureSet(ctx context.Context, projectPath, revision, sourceRunID string) ([]ExportedCaptureNode, error) {
+	if projectPath == "" || revision == "" {
+		return nil, fmt.Errorf("memd graph export: project path and revision are required")
+	}
+	var resp struct {
+		OK    bool                  `json:"ok"`
+		Nodes []ExportedCaptureNode `json:"nodes"`
+		Error string                `json:"error,omitempty"`
+	}
+	body := map[string]any{"project_path": projectPath, "revision": revision}
+	if sourceRunID != "" {
+		body["source_run_id"] = sourceRunID
+	}
+	if err := c.do(ctx, http.MethodPost, "/graph/export_capture_set", body, &resp); err != nil {
+		return nil, err
+	}
+	if !resp.OK {
+		return nil, fmt.Errorf("memd graph export_capture_set: %s", resp.Error)
+	}
+	return resp.Nodes, nil
+}
+
+// ImportCaptureSet persists a previously exported capture set into
+// projectPath (A4). Project identity is remapped by the sidecar; producer
+// identity rides the nodes verbatim. Returns the number of nodes the
+// sidecar imported. The upsert dedupe makes a retry idempotent.
+func (c *Client) ImportCaptureSet(ctx context.Context, projectPath string, nodes []ExportedCaptureNode) (int64, error) {
+	if projectPath == "" {
+		return 0, fmt.Errorf("memd graph import: project path is required")
+	}
+	if len(nodes) == 0 {
+		return 0, fmt.Errorf("memd graph import: node set is empty")
+	}
+	var resp struct {
+		OK       bool   `json:"ok"`
+		Imported int64  `json:"imported"`
+		Error    string `json:"error,omitempty"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/graph/import_capture_set", map[string]any{
+		"project_path": projectPath,
+		"nodes":        nodes,
+	}, &resp); err != nil {
+		return 0, err
+	}
+	if !resp.OK {
+		return 0, fmt.Errorf("memd graph import_capture_set: %s", resp.Error)
+	}
+	return resp.Imported, nil
 }

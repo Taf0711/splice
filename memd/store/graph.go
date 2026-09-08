@@ -591,6 +591,34 @@ func (s *Store) AddEvidence(ctx context.Context, nodeID int64, in EvidenceInput)
 	return nil
 }
 
+// EvidenceFor returns every evidence record on the given node ids, grouped
+// by node id. It is the read side of AddEvidence and the export path needs
+// it: an exported capture set carries its evidence verbatim.
+func (s *Store) EvidenceFor(ctx context.Context, ids []int64) (map[int64][]Evidence, error) {
+	out := make(map[int64][]Evidence, len(ids))
+	for _, id := range ids {
+		rows, err := s.db.QueryContext(ctx,
+			`SELECT kind, ref, detail FROM cognition_evidence WHERE node_id = ? ORDER BY id`, id)
+		if err != nil {
+			return nil, fmt.Errorf("graph: evidence for node %d: %w", id, err)
+		}
+		for rows.Next() {
+			var e Evidence
+			if err := rows.Scan(&e.Kind, &e.Ref, &e.Detail); err != nil {
+				rows.Close() //nolint:errcheck
+				return nil, fmt.Errorf("graph: evidence scan node %d: %w", id, err)
+			}
+			out[id] = append(out[id], e)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close() //nolint:errcheck
+			return nil, fmt.Errorf("graph: evidence rows node %d: %w", id, err)
+		}
+		rows.Close() //nolint:errcheck
+	}
+	return out, nil
+}
+
 // GetExactOptions bounds and scopes an exact anchor query.
 type GetExactOptions struct {
 	ProjectPath string

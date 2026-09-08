@@ -205,6 +205,17 @@ type familyPairRow struct {
 	EffContextPolicy      *bool  `json:"effective_context_policy,omitempty"`
 	StoreAvailable        *bool  `json:"store_available,omitempty"`
 
+	// A4 natural-capture provenance. CaptureReconstructed=true means the
+	// seed payload came from the deterministic reconstruction path, NOT
+	// the producer run's own persisted captures. CaptureReplayed means
+	// the payload was replayed into this arm (a record can be both
+	// replayed and reconstructed: separate dimensions). CaptureDigest is
+	// the canonical digest of the replayed payload. The pointer keeps
+	// false a measured fact and null absent.
+	CaptureReconstructed *bool  `json:"capture_reconstructed,omitempty"`
+	CaptureReplayed      *bool  `json:"capture_replayed,omitempty"`
+	CaptureDigest        string `json:"capture_digest,omitempty"`
+
 	// Track C discovery-plan telemetry, summed across the run's stages:
 	// what the cognition graph resolved, what freshness admitted, and the
 	// conservatively counted avoided discovery operations.

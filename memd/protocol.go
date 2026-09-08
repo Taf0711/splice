@@ -713,3 +713,54 @@ type graphCaptureSetResponse struct {
 	OK  bool    `json:"ok"`
 	IDs []int64 `json:"ids"`
 }
+
+// exportedCaptureNode is one fully materialized node in an exported capture
+// set: the complete node payload plus its anchors and evidence, with the
+// source sidecar id and claim hash carried for canonical identity on
+// import (sidecar numeric ids are not stable across stores).
+type exportedCaptureNode struct {
+	Node      graphNode       `json:"node"`
+	Anchors   []graphAnchor   `json:"anchors"`
+	Evidence  []graphEvidence `json:"evidence"`
+	SourceID  int64           `json:"source_id"`
+	ClaimHash string          `json:"claim_hash"`
+}
+
+// graphExportCaptureSetResponse is the JSON body returned by POST
+// /graph/export_capture_set.
+type graphExportCaptureSetResponse struct {
+	OK    bool                  `json:"ok"`
+	Nodes []exportedCaptureNode `json:"nodes"`
+	Error string                `json:"error,omitempty"`
+}
+
+// graphImportCaptureSetRequest is the JSON body for POST
+// /graph/import_capture_set. ProjectPath is the NEW project identity every
+// node is remapped to; producer identity inside each node is preserved.
+type graphImportCaptureSetRequest struct {
+	ProjectPath string                `json:"project_path"`
+	Nodes       []exportedCaptureNode `json:"nodes"`
+}
+
+func (r *graphImportCaptureSetRequest) Validate() error {
+	if r.ProjectPath == "" {
+		return fmt.Errorf("project_path is required")
+	}
+	if len(r.Nodes) == 0 {
+		return fmt.Errorf("nodes must not be empty")
+	}
+	for i, n := range r.Nodes {
+		if n.Node.Kind == "" || n.Node.Claim == "" {
+			return fmt.Errorf("nodes[%d]: kind and claim are required", i)
+		}
+	}
+	return nil
+}
+
+// graphImportCaptureSetResponse is the JSON body returned by POST
+// /graph/import_capture_set.
+type graphImportCaptureSetResponse struct {
+	OK       bool   `json:"ok"`
+	Imported int64  `json:"imported"`
+	Error    string `json:"error,omitempty"`
+}
