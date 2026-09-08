@@ -125,6 +125,47 @@ type ContextQuery struct {
 	Regex      bool             `json:"regex"`
 	MaxResults int              `json:"max_results"`
 	MaxChars   int              `json:"max_chars"`
+	// StartLine/EndLine are the optional 1-based inclusive byte-range
+	// selectors for read_file queries (B1). Both must be set together;
+	// one without the other is a validation error. EndLine >= StartLine.
+	// Ranges let a large file deliver only the relevant span instead of
+	// paying whole-file delivery.
+	StartLine *int `json:"start_line,omitempty"`
+	EndLine   *int `json:"end_line,omitempty"`
+}
+
+// HasRange reports whether the query carries a line-range selector.
+func (c ContextQuery) HasRange() bool {
+	return c.StartLine != nil && c.EndLine != nil
+}
+
+// MaxAggregateContextQueries bounds the QUERIES PER REQUEST, not each
+// query. One request with a hundred tiny reads is the same flood as one
+// huge read, so the aggregate gets its own bound.
+const MaxAggregateContextQueries = 16
+
+// MaxAggregateContextBytes bounds the request's total MaxChars budget: the
+// sum of per-query budgets across the request. Per-query validation alone
+// would let 16 x 20000-byte reads through as "bounded".
+const MaxAggregateContextBytes = 64000
+
+// validateRange checks the optional line-range selector's internal
+// consistency. File-relative bounds (EOF clamping) are the fulfillment
+// path's job; this validates the request shape.
+func (c ContextQuery) validateRange() error {
+	if (c.StartLine == nil) != (c.EndLine == nil) {
+		return errors.New("start_line and end_line must be set together")
+	}
+	if c.StartLine == nil {
+		return nil
+	}
+	if *c.StartLine < 1 {
+		return errors.New("start_line must be >= 1")
+	}
+	if *c.EndLine < *c.StartLine {
+		return fmt.Errorf("end_line %d precedes start_line %d", *c.EndLine, *c.StartLine)
+	}
+	return nil
 }
 
 // Validate checks that the query type has the required fields.
@@ -160,6 +201,27 @@ func (c ContextQuery) Validate() error {
 	}
 	if c.MaxChars < 1 || c.MaxChars > 20000 {
 		return errors.New("max_chars must be between 1 and 20000")
+	}
+	if err := c.validateRange(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// AggregateValidate checks the bounds that only exist across a request:
+// the number of queries and the SUM of their MaxChars budgets. Per-query
+// Validate is necessary but not sufficient; a request of many legal
+// queries can still be unbounded in aggregate.
+func (c ContextRequest) AggregateValidate() error {
+	if len(c.Queries) > MaxAggregateContextQueries {
+		return fmt.Errorf("request carries %d queries, more than the %d-query aggregate bound", len(c.Queries), MaxAggregateContextQueries)
+	}
+	total := 0
+	for _, q := range c.Queries {
+		total += q.MaxChars
+	}
+	if total > MaxAggregateContextBytes {
+		return fmt.Errorf("request aggregates %d max-chars across queries, more than the %d-byte bound", total, MaxAggregateContextBytes)
 	}
 	return nil
 }
