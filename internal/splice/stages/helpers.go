@@ -201,10 +201,15 @@ func selectRelevantContext(static []string, prior map[string]string, context *sc
 	return selected
 }
 
+// formatContextBundle renders a fulfilled context bundle into prompt text
+// (B3). Source text is serialized ONCE: the item payload's text rides as a
+// plain fenced block, not JSON-embedded inside another JSON string. Views
+// are deduped by (path, version, range) identity so the same source bytes
+// never reach the prompt twice.
 func formatContextBundle(bundle *schemas.ContextBundle) []string {
 	formatted := []string{}
+	seen := map[string]bool{}
 	for _, item := range bundle.Items {
-		payload, _ := json.Marshal(item.Payload)
 		errStr := ""
 		if item.Error != nil {
 			errStr = fmt.Sprintf(" error=%s", *item.Error)
@@ -213,12 +218,63 @@ func formatContextBundle(bundle *schemas.ContextBundle) []string {
 		if item.Truncated {
 			suffix = " truncated"
 		}
+		// Dedupe by source identity when the item carries one (B1 views
+		// embed path/version/range); fall back to the query signature.
+		identity := contextItemIdentity(item)
+		if seen[identity] {
+			continue
+		}
+		seen[identity] = true
+		// The payload's text field is plain source/context text: deliver
+		// it as a fenced block, serialized exactly once. Structured
+		// metadata (path/version) stays on the summary line, not nested
+		// in a JSON string inside a string.
+		text := ""
+		if raw, ok := item.Payload["text"].(string); ok {
+			text = raw
+		} else if item.Payload != nil {
+			payload, _ := json.Marshal(item.Payload)
+			text = string(payload)
+		}
 		formatted = append(formatted, fmt.Sprintf(
 			"context %s%s: %s\n%s%s",
-			item.Query.QueryType, suffix, item.Summary, string(payload), errStr,
+			item.Query.QueryType, suffix, item.Summary, text, errStr,
 		))
 	}
 	return formatted
+}
+
+// contextItemIdentity builds the dedupe key for one fulfilled item:
+// source identity (path+version+range) when present, else the query
+// shape. Two items with the same identity deliver the same bytes twice.
+func contextItemIdentity(item schemas.ContextItem) string {
+	path, _ := item.Payload["path"].(string)
+	version, _ := item.Payload["version"].(string)
+	start, _ := item.Payload["start"].(int)
+	end, _ := item.Payload["end"].(int)
+	if path != "" && version != "" {
+		return fmt.Sprintf("%s@%s#%d-%d", path, version, start, end)
+	}
+	q := item.Query
+	key, _ := json.Marshal(struct {
+		Type    string
+		Path    string
+		Pattern string
+		Symbol  string
+	}{
+		Type:    string(q.QueryType),
+		Path:    derefString(q.Path),
+		Pattern: derefString(q.Pattern),
+		Symbol:  derefString(q.Symbol),
+	})
+	return string(key)
+}
+
+func derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // selectMemory maps an admitted MemoryBundle into bounded SelectedMemory

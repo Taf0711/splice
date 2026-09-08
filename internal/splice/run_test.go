@@ -852,7 +852,7 @@ func TestRunStageWithContextPersistsToolDegradationObservation(t *testing.T) {
 	if obs.TopicKey == nil || *obs.TopicKey != "tool_degradation:get_symbol" {
 		t.Fatalf("TopicKey = %#v, want tool_degradation:get_symbol", obs.TopicKey)
 	}
-	wantContent := "get_symbol requires AST inspection, deferred for v1; use find_symbol + read_file"
+	wantContent := "get_symbol \"foo\" requires a path-qualified query; use find_symbol to locate the file first"
 	if obs.Content != wantContent {
 		t.Fatalf("Content = %q, want %q", obs.Content, wantContent)
 	}
