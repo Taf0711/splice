@@ -29,6 +29,12 @@ import (
 // seed set and row telemetry, so a replayed capture is never mistaken for
 // the producer run's own persisted node.
 //
+// Section-11 campaign mode (--conditions three-condition) extends the arm
+// table to the three live conditions plus the diagnostic manual arm, with
+// a recorded scheduling seed driving the per-experiment arm launch order
+// (Section 11.2). The legacy 2-arm behavior stays the default behind
+// --conditions cold,warm, so old scripts are not silently changed.
+//
 // Lifecycle guarantees (work package A): every run gets a FRESH
 // context.WithTimeout inside the loop (the outer cancellation still
 // propagates, and each derived context is cancelled when the attempt
@@ -46,7 +52,25 @@ func runMvpMatchedSnapshots(
 	stderr interface{ Write([]byte) (int, error) },
 	rows *[]familyPairRow,
 ) error {
+	arms, err := campaignArmsFor(options.Conditions)
+	if err != nil {
+		return err
+	}
 	experimentID := fmt.Sprintf("mvp-matched-%d", time.Now().UnixNano())
+	// Section 11.2: the scheduling seed is recorded and the arm launch
+	// order for the experiment is derived from it with math/rand. Arms
+	// still run sequentially: no concurrent env mutation.
+	schedulingSeed := options.SchedulingSeed
+	if schedulingSeed == 0 {
+		schedulingSeed = defaultSchedulingSeed
+	}
+	armOrder := shuffledArms(arms, schedulingSeed)
+	orderNames := make([]string, len(armOrder))
+	for i, arm := range armOrder {
+		orderNames[i] = arm.name
+	}
+	fmt.Fprintf(stderr, "experiment %s: scheduling seed %d, arm order %v\n",
+		experimentID, schedulingSeed, orderNames)
 	prov := harnessProvenance(options, manifestDir)
 
 	for _, family := range manifest.Families {
@@ -98,8 +122,10 @@ func runMvpMatchedSnapshots(
 			cleanup()
 			// Record the failed setup as a real outcome of the workflow:
 			// ONE setup failure row plus the correct number of skipped
-			// target slots (Rollouts x 2 arms), each marked skipped, not
-			// failed.
+			// target slots (Rollouts x arms), each marked skipped, not
+			// failed. Skipped rows carry the scheduling seed and their
+			// arm's launch-order index so the run order stays auditable
+			// even on the interrupted path.
 			note := "snapshot Task A did not verify; target not run"
 			if snapErr != nil {
 				note = "snapshot Task A did not verify; target not run: " + truncateForNote(snapErr.Error(), 200)
@@ -108,16 +134,20 @@ func runMvpMatchedSnapshots(
 			if snapStatus == "timeout" {
 				setup = "timeout"
 			}
-			for _, arm := range []string{"cold", "warm"} {
+			for _, arm := range arms {
 				for attempt := 1; attempt <= options.Rollouts; attempt++ {
+					diagnostic := arm.diagnosticOnly
 					row := familyPairRow{
-						Family: family.ID, Task: "B", Attempt: attempt, Arm: arm,
+						Family: family.ID, Task: "B", Attempt: attempt, Arm: arm.name,
 						ExperimentID: experimentID, PipelineRunID: experimentID,
 						SnapshotID: snapshotID, SetupOutcome: setup,
-						Executed: false, Treatment: armTreatment(arm),
+						Executed: false, Treatment: armTreatmentFor(arm),
 						WarmSetupValid: &falseValue,
 						WarmSetupNote:  note,
 						InfraStatus:    "precursor_failed",
+						Condition:      arm.condition, DiagnosticOnly: &diagnostic,
+						SchedulingSeed: schedulingSeed,
+						ArmOrderIndex:  armOrderIndex(armOrder, arm.name),
 					}
 					appendRowWithCheckpoint(rows, options.OutDir, row)
 				}
@@ -230,99 +260,112 @@ func runMvpMatchedSnapshots(
 			return fmt.Errorf("read snapshot tree hash: git rev-parse HEAD^{tree} failed for %s", snapDir)
 		}
 
-		// ---- Phase 2: the warm arm gets its own stable project
-		// directory whose bytes are the verified tree. The graph is keyed
-		// by project path, and the cold arm must NOT see the seeded
-		// cognition.
-		warmDir, err := os.MkdirTemp("", "splice-mvp-warm-")
-		if err != nil {
-			cleanup()
-			return fmt.Errorf("materialize warm arm: %w", err)
-		}
-		coldDir, err := os.MkdirTemp("", "splice-mvp-cold-")
-		if err != nil {
-			os.RemoveAll(warmDir)
-			cleanup()
-			return fmt.Errorf("materialize cold arm: %w", err)
+		// ---- Phase 2: every arm gets its own stable project directory
+		// whose bytes are the verified tree. The graph is keyed by project
+		// path, and the memory-off arms must NOT see the seeded cognition.
+		armDirs := map[string]string{}
+		for _, arm := range arms {
+			dir, err := os.MkdirTemp("", "splice-mvp-"+arm.name+"-")
+			if err != nil {
+				cleanupArms(armDirs)
+				cleanup()
+				return fmt.Errorf("materialize %s arm: %w", arm.name, err)
+			}
+			armDirs[arm.name] = dir
 		}
 		cleanupArms := func() {
-			os.RemoveAll(warmDir)
-			os.RemoveAll(coldDir)
+			cleanupArms(armDirs)
 			cleanup()
 		}
 
-		// Materialize both arms from the snapshot commit (identical bytes).
-		for _, dir := range []string{warmDir, coldDir} {
-			if err := materializeFromCommit(snapDir, snapHead, dir); err != nil {
+		// Materialize every arm from the snapshot commit (identical bytes).
+		for _, arm := range arms {
+			if err := materializeFromCommit(snapDir, snapHead, armDirs[arm.name]); err != nil {
 				cleanupArms()
 				return fmt.Errorf("materialize arm from snapshot: %w", err)
 			}
 		}
 
-		// Seed the warm arm's cognition by REPLAYING the frozen capture
-		// payload (B2): the persisted captures of the successful Task A
-		// run are rematerialized with only the project identity remapped.
+		// Seed the seeding arms' cognition from the FROZEN snapshot bundle.
+		// automatic replays the full frozen capture payload (B2); manual
+		// imports ONLY the records the E4 subject-matching selects over
+		// the needs derived from the target task (Section 11.3).
 		seedStatus := ""
 		if !seedPersisted {
 			seedStatus = "seed_skipped_no_sidecar"
 		} else if client, err := memd.Resolve(ctx); err == nil && client != nil {
-			if err := replaySeedCaptures(ctx, client, warmDir, seedSet); err != nil {
-				cleanupArms()
-				return fmt.Errorf("seed warm cognition from snapshot: %w", err)
-			}
 			seedStatus = "replayed"
+			for _, arm := range arms {
+				if !arm.seed {
+					continue
+				}
+				if arm.name == "manual" {
+					if _, mErr := seedManualArm(ctx, client, armDirs[arm.name], bundle, family.TargetTask); mErr != nil {
+						cleanupArms()
+						return fmt.Errorf("seed manual cognition from snapshot: %w", mErr)
+					}
+				} else {
+					if err := replaySeedCaptures(ctx, client, armDirs[arm.name], seedSet); err != nil {
+						cleanupArms()
+						return fmt.Errorf("seed warm cognition from snapshot: %w", err)
+					}
+				}
+			}
 		} else {
 			seedStatus = "seed_skipped_no_sidecar"
 		}
 		if seedStatus == "seed_skipped_no_sidecar" {
-			// Fail loud: a warm attempt without seeded cognition is a
+			// Fail loud: a seeding arm without seeded cognition is a
 			// cold attempt wearing a warm label, which corrupts the
 			// paired measurement.
 			cleanupArms()
-			return fmt.Errorf("warm arm %s: memory sidecar unavailable; cannot replay snapshot cognition", family.ID)
+			return fmt.Errorf("seeding arm for family %s: memory sidecar unavailable; cannot seed snapshot cognition", family.ID)
 		}
 
-		// Assert starting state equality for BOTH arms BEFORE any Task B
+		// Assert starting state equality for EVERY arm BEFORE any Task B
 		// execution (the loop re-asserts per attempt). Commit and tree are
 		// verified as separate facts against the snapshot identity.
-		for armName, armDir := range map[string]string{"warm": warmDir, "cold": coldDir} {
-			if _, aerr := assertCleanSnapshot(armDir, snapHead, snapTree); aerr != nil {
+		for _, arm := range arms {
+			if _, aerr := assertCleanSnapshot(armDirs[arm.name], snapHead, snapTree); aerr != nil {
 				cleanupArms()
-				return fmt.Errorf("initial %s arm snapshot assertion: %w", armName, aerr)
+				return fmt.Errorf("initial %s arm snapshot assertion: %w", arm.name, aerr)
 			}
 		}
 
-		// ---- Phase 3: Task B attempts on the frozen, identical tree.
+		// ---- Phase 3: Task B attempts on the frozen, identical tree, in
+		// the scheduling-seed-derived arm order. Arms run sequentially.
 		for attempt := 1; attempt <= options.Rollouts; attempt++ {
-			for _, arm := range []struct {
-				name      string
-				dir       string
-				memory    string
-				treatment string
-			}{{"cold", coldDir, "off", "cold"}, {"warm", warmDir, "on", "full"}} {
+			for _, arm := range armOrder {
 				// Reset the arm's sidecar state so attempt N's captures
 				// never leak into attempt N+1, then restore the snapshot
-				// cognition for the warm arm.
-				if resetErr := resetArmMemory(ctx, arm.dir); resetErr != nil {
+				// cognition for the seeding arms.
+				if resetErr := resetArmMemory(ctx, armDirs[arm.name]); resetErr != nil {
 					cleanupArms()
 					return fmt.Errorf("reset %s memory (family %s attempt %d): %w", arm.name, family.ID, attempt, resetErr)
 				}
-				if arm.name == "warm" {
+				if arm.seed {
 					if client, err := memd.Resolve(ctx); err == nil && client != nil {
-						if err := replaySeedCaptures(ctx, client, warmDir, seedSet); err != nil {
-							cleanupArms()
-							return fmt.Errorf("re-seed warm cognition (attempt %d): %w", attempt, err)
+						if arm.name == "manual" {
+							if _, err := seedManualArm(ctx, client, armDirs[arm.name], bundle, family.TargetTask); err != nil {
+								cleanupArms()
+								return fmt.Errorf("re-seed manual cognition (attempt %d): %w", attempt, err)
+							}
+						} else {
+							if err := replaySeedCaptures(ctx, client, armDirs[arm.name], seedSet); err != nil {
+								cleanupArms()
+								return fmt.Errorf("re-seed warm cognition (attempt %d): %w", attempt, err)
+							}
 						}
 					} else {
 						cleanupArms()
-						return fmt.Errorf("re-seed warm cognition (attempt %d): memory sidecar unavailable", attempt)
+						return fmt.Errorf("re-seed %s cognition (attempt %d): memory sidecar unavailable", arm.name, attempt)
 					}
 				}
 				// Reset the worktree to the frozen verified tree (Task B's
 				// own edits from attempt N-1 must not leak). Rematerialize
 				// FIRST, then assert: the previous attempt's files must
 				// not survive.
-				if err := materializeFromCommit(snapDir, snapHead, arm.dir); err != nil {
+				if err := materializeFromCommit(snapDir, snapHead, armDirs[arm.name]); err != nil {
 					cleanupArms()
 					return fmt.Errorf("reset %s worktree (attempt %d): %w", arm.name, attempt, err)
 				}
@@ -332,7 +375,7 @@ func runMvpMatchedSnapshots(
 				// commit AND tree AND a clean index/working tree,
 				// immediately BEFORE the model launches. The assertion
 				// result lands on the row before the run.
-				asserted, assertErr := assertCleanSnapshot(arm.dir, snapHead, snapTree)
+				asserted, assertErr := assertCleanSnapshot(armDirs[arm.name], snapHead, snapTree)
 				cleanState := "success"
 				if assertErr != nil {
 					cleanState = "failed"
@@ -345,17 +388,21 @@ func runMvpMatchedSnapshots(
 					// state. Record the assertion result and stop,
 					// because proceeding would measure a different
 					// experiment than intended.
+					diagnostic := arm.diagnosticOnly
 					row := familyPairRow{
 						Family: family.ID, Task: "B", Attempt: attempt, Arm: arm.name,
 						ExperimentID: experimentID, PipelineRunID: experimentID,
 						SnapshotID: snapshotID, Executed: false,
-						Treatment:   armTreatment(arm.name),
+						Treatment:   armTreatmentFor(arm),
 						StartCommit: asserted.Commit, StartTree: asserted.Tree,
 						CleanStateVerified: cleanState,
 						FixtureCommit:      snapHead, FixtureTree: snapTree,
 						SeedStatus: seedStatus, WarmSetupValid: &trueValue,
 						InfraStatus: "snapshot_dirty", SetupOutcome: "snapshot_dirty",
-						Error: truncateForNote(assertErr.Error(), 300),
+						Error:     truncateForNote(assertErr.Error(), 300),
+						Condition: arm.condition, DiagnosticOnly: &diagnostic,
+						SchedulingSeed: schedulingSeed,
+						ArmOrderIndex:  armOrderIndex(armOrder, arm.name),
 					}
 					appendRowWithCheckpoint(rows, options.OutDir, row)
 					cleanupArms()
@@ -374,9 +421,9 @@ func runMvpMatchedSnapshots(
 					Arm:             arm.name,
 					Task:            "B",
 					Attempt:         attempt,
-					ArmOrder:        1,
+					ArmOrder:        armOrderIndex(armOrder, arm.name),
 					Prompt:          family.TargetTask,
-					Cwd:             arm.dir,
+					Cwd:             armDirs[arm.name],
 					Check:           targetChecksFor(manifestDir, family),
 					CheckScriptPath: filepath.Join(manifestDir, family.TargetCheckFile),
 					OutputPath:      mvpDebugPath(options.OutDir, family.ID, attempt, arm.name, "b"),
@@ -393,7 +440,7 @@ func runMvpMatchedSnapshots(
 				row.PipelineRunID = experimentID
 				row.SnapshotID = snapshotID
 				row.Executed = true
-				row.Treatment = armTreatment(arm.name)
+				row.Treatment = armTreatmentFor(arm)
 				// The start state recorded here is the state the
 				// assertion VERIFIED immediately before the launch.
 				row.StartCommit = asserted.Commit
@@ -406,9 +453,21 @@ func runMvpMatchedSnapshots(
 				// record can be replayed AND reconstructed: separate
 				// dimensions. The digest pins the exact payload replayed.
 				row.CaptureReconstructed = &seedSet.Reconstructed
-				row.CaptureReplayed = boolPtr(seedStatus == "replayed")
+				row.CaptureReplayed = boolPtr(arm.seed && seedStatus == "replayed")
 				row.CaptureDigest = bundleDigest(bundle.Nodes)
 				row.WarmSetupValid = &trueValue
+				// Section-11 campaign fields: condition, diagnostic flag,
+				// scheduling seed, arm order index.
+				row.Condition = arm.condition
+				row.DiagnosticOnly = &arm.diagnosticOnly
+				row.SchedulingSeed = schedulingSeed
+				row.ArmOrderIndex = armOrderIndex(armOrder, arm.name)
+				// The F2 WorkflowCostReport for this row's condition: the
+				// campaign verdict number. Built over the condition's
+				// rows so far in this family (including this attempt).
+				if report, rErr := conditionCostReport(conditionRows(*rows, family.ID, arm.condition)); rErr == nil {
+					row.WorkflowCost = report
+				}
 				if ctx.Err() != nil {
 					appendRowWithCheckpoint(rows, options.OutDir, row)
 					cleanupArms()
@@ -418,9 +477,28 @@ func runMvpMatchedSnapshots(
 			}
 		}
 		cleanupArms()
-		fmt.Fprintf(stderr, "family %s: matched-snapshot %d rollouts x 2 arms done\n", family.ID, options.Rollouts)
+		fmt.Fprintf(stderr, "family %s: matched-snapshot %d rollouts x %d arms done\n", family.ID, options.Rollouts, len(arms))
 	}
 	return nil
+}
+
+// cleanupArms removes every arm project directory recorded so far.
+func cleanupArms(armDirs map[string]string) {
+	for _, dir := range armDirs {
+		os.RemoveAll(dir)
+	}
+}
+
+// conditionRows returns the executed Task B rows of one family and
+// condition (the per-condition sample the cost report joins).
+func conditionRows(rows []familyPairRow, family, condition string) []familyPairRow {
+	out := make([]familyPairRow, 0, len(rows))
+	for _, row := range rows {
+		if row.Family == family && row.Task == "B" && row.Executed && row.Condition == condition {
+			out = append(out, row)
+		}
+	}
+	return out
 }
 
 // armTreatment returns the treatment label for one arm. The label records
@@ -438,7 +516,7 @@ func runMvpMatchedSnapshots(
 // declared retrieval held.
 func armTreatment(arm string) string {
 	memory := "memory_off"
-	if arm == "warm" {
+	if arm == "warm" || arm == "manual" {
 		memory = "memory_on"
 	}
 	raw := strings.TrimSpace(os.Getenv("SPLICE_TREATMENT"))
@@ -452,7 +530,7 @@ func armTreatment(arm string) string {
 		// must not claim a realized condition the process cannot resolve.
 		return label + "+unresolved_treatment"
 	}
-	if spec.MemoryRetrieval() != (arm == "warm") {
+	if spec.MemoryRetrieval() != (arm == "warm" || arm == "manual") {
 		// The arm's memory flag wins over the treatment's declared
 		// retrieval, because it is the flag actually passed to the child.
 		return label + "+retrieval_overridden_by_arm"

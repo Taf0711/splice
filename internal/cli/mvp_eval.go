@@ -36,6 +36,16 @@ type mvpEvalOptions struct {
 	// an identical coding task. Off by default: the default mode measures
 	// the full independent A->B workflow per arm.
 	MatchedSnapshots bool
+	// Conditions selects the arm table for matched-snapshot runs:
+	// "cold,warm" (the legacy 2-arm default, so old scripts are not
+	// silently changed) or "three-condition" (the Section-11 campaign:
+	// cold, improved-cold, warm/automatic, and the diagnostic manual
+	// arm). Non-matched flows ignore it.
+	Conditions string
+	// SchedulingSeed is the recorded seed the arm launch ORDER is derived
+	// from per experiment (Section 11.2). Zero means the deterministic
+	// default; the recorded seed lands on every attempts row.
+	SchedulingSeed int64
 }
 
 func parseMvpEvalArgs(args []string) (mvpEvalOptions, bool, error) {
@@ -101,6 +111,33 @@ func parseMvpEvalArgs(args []string) (mvpEvalOptions, bool, error) {
 			options.Rollouts = n
 		case arg == "--matched-snapshots":
 			options.MatchedSnapshots = true
+		case arg == "--conditions":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.Conditions = strings.TrimSpace(value)
+			index = next
+		case strings.HasPrefix(arg, "--conditions="):
+			options.Conditions = strings.TrimSpace(strings.TrimPrefix(arg, "--conditions="))
+		case arg == "--scheduling-seed":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			index = next
+			n, parseErr := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+			if parseErr != nil {
+				return options, false, execUsageError{fmt.Sprintf("--scheduling-seed requires an integer, got %q", value)}
+			}
+			options.SchedulingSeed = n
+		case strings.HasPrefix(arg, "--scheduling-seed="):
+			value := strings.TrimSpace(strings.TrimPrefix(arg, "--scheduling-seed="))
+			n, parseErr := strconv.ParseInt(value, 10, 64)
+			if parseErr != nil {
+				return options, false, execUsageError{fmt.Sprintf("--scheduling-seed requires an integer, got %q", value)}
+			}
+			options.SchedulingSeed = n
 		case strings.HasPrefix(arg, "-"):
 			return options, false, execUsageError{fmt.Sprintf("unknown eval mvp flag %q", arg)}
 		default:
@@ -112,6 +149,9 @@ func parseMvpEvalArgs(args []string) (mvpEvalOptions, bool, error) {
 	}
 	if options.TasksetDir == "" {
 		return options, false, execUsageError{"--taskset requires the MVP taskset directory (holding fixture/)"}
+	}
+	if _, err := campaignArmsFor(options.Conditions); err != nil {
+		return options, false, execUsageError{err.Error()}
 	}
 	return options, false, nil
 }
