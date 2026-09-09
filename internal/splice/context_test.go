@@ -346,6 +346,11 @@ func TestFulfillContextRequestAgainstRealRegistry(t *testing.T) {
 	registry.Register(tools.NewReadFileTool(root))
 	registry.Register(tools.NewListDirectoryTool(root))
 	registry.Register(tools.NewGrepTool(root))
+	// B1/B2: the guarded raw-bytes reader backs get_symbol's seam. The
+	// tool is PermissionDeny + HostSeamTool, so the model surface never
+	// sees it; RegistryToolRunner.RunHostSeamTool is the only path that
+	// executes it.
+	registry.Register(tools.NewScopedRawFileReadTool(root, nil))
 
 	runner := NewRegistryToolRunner(registry)
 
@@ -353,6 +358,10 @@ func TestFulfillContextRequestAgainstRealRegistry(t *testing.T) {
 	searchPattern := "func"
 	symbol := "helper"
 
+	// B2: get_symbol resolves helper in lib.go via go/parser over the
+	// guarded seam (no path in the query means typed unsupported
+	// evidence, so the query carries the path here).
+	getSymbolPath := "lib.go"
 	req := schemas.ContextRequest{
 		Reason: "explore",
 		Queries: []schemas.ContextQuery{
@@ -361,7 +370,7 @@ func TestFulfillContextRequestAgainstRealRegistry(t *testing.T) {
 			{QueryType: schemas.ContextOutline, Path: &readPath, MaxResults: 10, MaxChars: 500},
 			{QueryType: schemas.ContextSearch, Pattern: &searchPattern, Regex: true, MaxResults: 5, MaxChars: 1000},
 			{QueryType: schemas.ContextFindSymbol, Symbol: &symbol, MaxResults: 5, MaxChars: 1000},
-			{QueryType: schemas.ContextGetSymbol, Symbol: &symbol, MaxResults: 5, MaxChars: 1000},
+			{QueryType: schemas.ContextGetSymbol, Symbol: &symbol, Path: &getSymbolPath, MaxResults: 5, MaxChars: 1000},
 		},
 	}
 
@@ -408,8 +417,13 @@ func TestFulfillContextRequestAgainstRealRegistry(t *testing.T) {
 		t.Fatal("expected find_symbol payload")
 	}
 
-	if bundle.Items[5].Error == nil {
-		t.Fatal("expected get_symbol to return unsupported-in-v1 error item")
+	// B2: get_symbol resolved the declaration (typed evidence, not the
+	// v1 deferral error). The item carries kind/path provenance.
+	if bundle.Items[5].Error != nil {
+		t.Fatalf("get_symbol should resolve now, got error: %s", *bundle.Items[5].Error)
+	}
+	if kind, _ := bundle.Items[5].Payload["kind"].(string); kind != "func" {
+		t.Fatalf("get_symbol kind = %v, want func", bundle.Items[5].Payload["kind"])
 	}
 
 	// Test empty directory and missing path.

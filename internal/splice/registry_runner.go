@@ -81,6 +81,34 @@ func (r RegistryToolRunner) RunTool(ctx context.Context, name string, args map[s
 	}, nil
 }
 
+// RunHostSeamTool is the host-seam entry (B1 review fix): it marks the
+// call as orchestrator-initiated so PermissionDeny tools that implement
+// tools.HostSeamTool (raw_file_read) execute through the registry with
+// their full guard set. The agent loop and every model-initiated path
+// never call this, and the registry rejects a host-seam-flagged call to
+// any tool that does not implement the interface, so the marker cannot be
+// used to widen the model surface.
+func (r RegistryToolRunner) RunHostSeamTool(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
+	if _, ok := r.registry.Get(name); !ok {
+		return ToolResult{}, errToolNotFound{tool: name}
+	}
+	res := r.registry.RunWithOptions(ctx, name, args, tools.RunOptions{Sandbox: r.sandbox, RequireReadBeforeWrite: true, HostSeam: true})
+	meta := res.Meta
+	if meta == nil {
+		meta = map[string]string{}
+	}
+	return ToolResult{
+		OK:           res.Status == tools.StatusOK,
+		Output:       res.Output,
+		Truncated:    res.Truncated || meta["truncated"] == "true",
+		Meta:         meta,
+		Status:       res.Status,
+		Redacted:     res.Redacted,
+		ChangedFiles: res.ChangedFiles,
+		Display:      res.Display,
+	}, nil
+}
+
 type errToolNotFound struct {
 	tool string
 }

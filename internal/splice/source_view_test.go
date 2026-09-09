@@ -6,10 +6,13 @@ package splice
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/Taf0711/splice/internal/splice/schemas"
+	"github.com/Taf0711/splice/internal/tools"
 )
 
 // strPtr returns a pointer to s (test helper).
@@ -114,6 +117,46 @@ func TestSourceViewRangeAndContent(t *testing.T) {
 	}
 	if !view.Truncated || len(view.Text) != maxSourceViewBytes {
 		t.Fatalf("oversized view: truncated=%v len=%d", view.Truncated, len(view.Text))
+	}
+}
+
+// TestSourceReaderRealRegistryHostSeam pins the end-to-end seam path with
+// a REAL registry: ToolRunnerSourceReader reaches the raw bytes through
+// RegistryToolRunner.RunHostSeamTool, the Deny tool's only executable
+// path, and the tool's guard set (path scoping) still applies.
+func TestSourceReaderRealRegistryHostSeam(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "real.go"), []byte("package real\n\nfunc Real() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewScopedRawFileReadTool(root, nil))
+	runner := NewRegistryToolRunner(registry)
+	reader := ToolRunnerSourceReader{Inner: runner}
+	snap, err := reader.ReadSource(context.Background(), "real.go")
+	if err != nil {
+		t.Fatalf("host-seam read through real registry: %v", err)
+	}
+	if !strings.Contains(string(snap.Raw), "func Real()") {
+		t.Fatalf("snapshot bytes wrong: %q", snap.Raw)
+	}
+	if snap.SHA256 == "" {
+		t.Fatal("snapshot digest must be computed")
+	}
+	// Path scoping survives: an outside-root read fails even through the
+	// seam.
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "escape.go"), []byte("package escape\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.ReadSource(context.Background(), filepath.Join(outside, "escape.go")); err == nil {
+		t.Fatal("host-seam marker must not bypass path scoping")
+	}
+	// And a model-initiated call on the same runner is still rejected:
+	// the marker lives on the entry point, not the tool.
+	res, _ := runner.RunTool(context.Background(), "raw_file_read", map[string]any{"path": "real.go"})
+	if res.OK {
+		t.Fatalf("model-surface RunTool executed a host-seam-only tool: %q", res.Output)
 	}
 }
 

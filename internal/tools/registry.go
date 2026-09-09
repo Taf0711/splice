@@ -13,17 +13,33 @@ type Registry struct {
 	tools map[string]Tool
 }
 
+// HostSeamTool is an optional interface marking a tool as
+// orchestrator-only (B1 review fix): it is never advertised to the model
+// (Safety().Permission is PermissionDeny, so ToolAdvertised returns false
+// in every mode) and the registry executes it only through a call carrying
+// RunOptions.HostSeam. The agent loop never sets that flag, so the model
+// can neither see nor invoke the tool; the host's source-reader seam sets
+// it and the tool runs with its full guard set (scoping, tracker,
+// redaction) unchanged.
+type HostSeamTool interface {
+	HostSeamOnly() bool
+}
+
 type RunOptions struct {
 	PermissionGranted bool
 	PermissionMode    string
 	Autonomy          string
 	TrustedWorkspace  bool
 	Sandbox           *sandbox.Engine
-	// RequireReadBeforeWrite, when true, makes write_file and edit_file refuse
-	// to modify an existing path that this session has no recorded baseline
-	// for (the model never read it via read_file). Deterministic pipeline
-	// stages set it so a blind full-content rewrite becomes a loud, recoverable
-	// failure instead of silent data loss. Interactive sessions leave it false.
+	// HostSeam marks a call as orchestrator-initiated (context
+	// fulfillment, the source-reader seam), never model-initiated. A
+	// tool that implements HostSeamTool and carries PermissionDeny
+	// executes only when BOTH are true: the registry rejects a Deny tool
+	// from any path that lacks the flag, and rejects a flag-carrying
+	// call to a tool that does not implement the interface. The agent
+	// loop never sets this flag, so a Deny tool is invisible and
+	// unexecutable from the model surface in every permission mode.
+	HostSeam               bool
 	RequireReadBeforeWrite bool
 	ToolCallID             string
 	SessionID              string
@@ -174,6 +190,26 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 	permission := effectiveToolPermission(tool, args)
 	sandboxGrantAuthorized := false
 	var sandboxDecision *sandbox.Decision
+	// Host-seam gate (B1 review fix): a Deny tool that declares itself
+	// orchestrator-only runs ONLY through a call explicitly marked
+	// HostSeam, and the marker only authorizes a tool that actually
+	// implements the interface. Any other path - model-initiated in any
+	// permission mode, or a host call that forgot the flag - is denied
+	// with a message naming the boundary.
+	if permission == PermissionDeny {
+		if _, isHostSeam := tool.(HostSeamTool); isHostSeam {
+			if !options.HostSeam {
+				res := errorResult("Error: " + name + " is a host-seam tool; it is not invokable from the model surface.")
+				return res
+			}
+		} else if !options.HostSeam || options.PermissionGranted {
+			// A plain Deny tool with no host-seam declaration stays
+			// hard-denied on every path (PermissionGranted cannot lift
+			// it; that flag authorizes Prompt tools only).
+			res := errorResult("Error: Permission denied for " + name + ": " + tool.Safety().Reason)
+			return res
+		}
+	}
 	if options.Sandbox != nil {
 		// Evaluate against the working directory of THIS execution, not only
 		// the engine's construction-time root. A pipeline run that binds a
@@ -219,6 +255,12 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 			return res
 		}
 	default:
+		// PermissionDeny: hard-denied on every path EXCEPT the verified
+		// host-seam case the gate above already admitted (Deny tool that
+		// implements HostSeamTool, called with RunOptions.HostSeam).
+		if _, isHostSeam := tool.(HostSeamTool); isHostSeam && options.HostSeam {
+			break
+		}
 		res := errorResult("Error: Permission denied for " + name + ": " + tool.Safety().Reason)
 		res.SandboxDecision = sandboxDecision
 		return res

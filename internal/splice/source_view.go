@@ -109,6 +109,9 @@ type SourceReader interface {
 // redaction hooks, and the sandbox all apply exactly as before. The runner
 // must expose a raw-bytes file read (RawFileRead capability); a runner
 // without it yields a typed error, never a fallback to unguarded I/O.
+// The call carries the host-seam marker: raw_file_read is PermissionDeny
+// (never advertised to the model) and the registry executes it only
+// through this flagged path, which the agent loop never issues.
 type ToolRunnerSourceReader struct {
 	Inner ToolRunner
 }
@@ -122,10 +125,28 @@ const rawFileReadToolName = "raw_file_read"
 // to bypass the seam.
 var errNoRawRead = fmt.Errorf("source reader: runner exposes no %s capability", rawFileReadToolName)
 
+// hostSeamRunner is the optional runner capability that marks a call as
+// orchestrator-initiated. RegistryToolRunner implements it; test fakes may
+// too. The flag authorizes ONLY tools implementing tools.HostSeamTool, so
+// a leaked marker can never widen the model surface.
+type hostSeamRunner interface {
+	RunHostSeamTool(ctx context.Context, name string, args map[string]any) (ToolResult, error)
+}
+
 // ReadSource reads path through the guarded tool boundary.
 func (r ToolRunnerSourceReader) ReadSource(ctx context.Context, path string) (SourceSnapshot, error) {
 	if r.Inner == nil {
 		return SourceSnapshot{}, errNoRawRead
+	}
+	if seam, ok := r.Inner.(hostSeamRunner); ok {
+		res, err := seam.RunHostSeamTool(ctx, rawFileReadToolName, map[string]any{"path": path})
+		if err != nil {
+			return SourceSnapshot{}, fmt.Errorf("read source %s: %w", path, err)
+		}
+		if !res.OK {
+			return SourceSnapshot{}, fmt.Errorf("read source %s: %s", path, res.Output)
+		}
+		return NewSourceSnapshot(path, []byte(res.Output)), nil
 	}
 	res, err := r.Inner.RunTool(ctx, rawFileReadToolName, map[string]any{"path": path})
 	if err != nil {

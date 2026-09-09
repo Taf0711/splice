@@ -46,12 +46,31 @@ func NewScopedRawFileReadTool(workspaceRoot string, scope PathScope) Tool {
 				Required:             []string{"path"},
 				AdditionalProperties: false,
 			},
-			safety: readOnlySafety("Reads raw file contents without modifying files."),
+			// PermissionDeny keeps the tool out of every model-facing
+			// surface: agent.ToolAdvertised returns false for Deny tools
+			// in auto, member-auto, spec-draft, and ask alike, so the
+			// schema never enters the provider tool list. Execution is
+			// gated by the registry's host-seam check: only a call
+			// carrying RunOptions.HostSeam (the orchestrator's
+			// source-reader seam) runs it; a model-initiated call is
+			// rejected before any path scoping even evaluates. The deny
+			// reason documents the boundary for tool listings.
+			safety: Safety{
+				SideEffect: SideEffectRead,
+				Permission: PermissionDeny,
+				Reason:     "Host-seam-only source reader: the orchestrator reads exact bytes through the guarded tool boundary; the model uses read_file.",
+			},
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
 		scope:         scope,
 	}
 }
+
+// HostSeamOnly implements tools.HostSeamTool: the registry executes this
+// tool only through a RunOptions.HostSeam call, which the agent loop never
+// issues. The guard set (scoped paths, tracker baseline, redaction) is
+// identical on the host path; the model simply never gets the channel.
+func (tool rawFileReadTool) HostSeamOnly() bool { return true }
 
 func (tool rawFileReadTool) Run(ctx context.Context, args map[string]any) Result {
 	return tool.RunWithOptions(ctx, args, RunOptions{})
