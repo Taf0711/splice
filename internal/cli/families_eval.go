@@ -14,6 +14,7 @@ import (
 
 	"github.com/Taf0711/splice/internal/eval"
 	"github.com/Taf0711/splice/internal/memd"
+	"github.com/Taf0711/splice/internal/splice"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
@@ -305,6 +306,31 @@ type familyPairRow struct {
 	// an explicit failure status. Cold rows and non-matched flows leave
 	// it empty; a missing seed is never recorded as silent success.
 	SeedStatus string `json:"seed_status,omitempty"`
+
+	// ---- Section-11 three-condition campaign fields. They ride every
+	// row so the campaign verdict is auditable from the attempts log
+	// alone. Unknown values stay absent (omitempty): a missing fact is
+	// never a fabricated default.
+
+	// Condition is the campaign condition label for this attempt:
+	// "cold" | "warm" | "improved-cold" | "manual" | "automatic".
+	// Absent on legacy 2-arm rows and on Task A rows.
+	Condition string `json:"condition,omitempty"`
+	// DiagnosticOnly marks the manual-selection arm: its rows can never
+	// count toward the automatic-cognition gate (Section 11.5.8). The
+	// pointer keeps false a measured fact and null absent.
+	DiagnosticOnly *bool `json:"diagnostic_only,omitempty"`
+	// SchedulingSeed is the recorded seed the arm ORDER for this
+	// experiment was derived from (Section 11.2). Every row of one
+	// matched-snapshot experiment carries the same seed.
+	SchedulingSeed int64 `json:"scheduling_seed,omitempty"`
+	// ArmOrderIndex is this arm's position in the derived launch order
+	// for the experiment (1-based). Rows record the order actually run.
+	ArmOrderIndex int `json:"arm_order_index,omitempty"`
+	// WorkflowCost is the F2 full-workflow cost report for this row's
+	// condition (the campaign verdict number). Absent when no report
+	// could be built for the condition.
+	WorkflowCost *splice.WorkflowCostReport `json:"workflow_cost,omitempty"`
 }
 
 // familiesRunTimeout is the deterministic per-run bound: a provider stall
