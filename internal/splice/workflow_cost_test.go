@@ -220,3 +220,25 @@ func TestWorkflowCostReportValidateRejectsBrokenIdentity(t *testing.T) {
 		t.Fatalf("expected negative-entry failure, got %v", err)
 	}
 }
+
+// Validate must be order-independent: Go randomizes map iteration order, so
+// the two float64 cost sums (Totals built in record order, Validate's
+// per-source sum in map order) can differ in the last bit. This test runs
+// the identity check many times to catch any order-dependent rejection.
+func TestWorkflowCostReportIdentityOrderIndependent(t *testing.T) {
+	views := []spendRecordView{
+		f2View(0.10, costStatusPriced, 40, 10),
+		f2View(0.20, costStatusPriced, 40, 10),
+		f2View(0.05, costStatusPriced, 0, 0),
+	}
+	sources := []string{"generation", "expansion", "repair"}
+	report, err := BuildWorkflowCostReport(views, func(i int) string { return sources[i] }, WorkflowCostOptions{VerifiedCompletions: 1})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	for i := 0; i < 200; i++ {
+		if err := report.Validate(); err != nil {
+			t.Fatalf("iteration %d: %v", i, err)
+		}
+	}
+}

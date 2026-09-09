@@ -344,7 +344,30 @@ func (r *WorkflowCostReport) Validate() error {
 		return fmt.Errorf("workflow cost totals total_tokens != input + output")
 	}
 	if costPresent {
-		if r.Totals.CostUSD == nil || *r.Totals.CostUSD != cost {
+		// Cost is a float64 summed in two map iterations whose order Go
+		// randomizes; floating-point addition is not associative, so the
+		// two sums can differ in the last bit. Compare with a relative
+		// epsilon instead of exact equality.
+		const costEpsilon = 1e-9
+		totalCost := 0.0
+		if r.Totals.CostUSD != nil {
+			totalCost = *r.Totals.CostUSD
+		}
+		diff := cost - totalCost
+		if diff < 0 {
+			diff = -diff
+		}
+		scale := cost
+		if scale < 0 {
+			scale = -scale
+		}
+		if totalCost > scale {
+			scale = totalCost
+		}
+		if scale > 1 {
+			scale = 1
+		}
+		if diff > costEpsilon*scale {
 			return fmt.Errorf("workflow cost identity broken for cost: sources sum %v != total %v", cost, r.Totals.CostUSD)
 		}
 	}
