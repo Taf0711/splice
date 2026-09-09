@@ -160,6 +160,12 @@ func candidatePaths(intent string) []string {
 	return seen
 }
 
+// selectRelevantContext composes the model-visible context entries for one
+// stage request. Package F3 (warm-cost handoff Section 10): after assembly,
+// the composition passes through the shared dedup filter so static
+// instructions and prior-stage summaries repeated across requests are
+// delivered once. Required evidence, acceptance constraints, and active
+// failure evidence are protected by the filter and never removed.
 func selectRelevantContext(static []string, prior map[string]string, context *schemas.ContextBundle, roster []string) []string {
 	selected := append([]string(nil), static...)
 	keys := make([]string, 0, len(prior))
@@ -198,7 +204,65 @@ func selectRelevantContext(static []string, prior map[string]string, context *sc
 	if context != nil {
 		selected = append(selected, formatContextBundle(context)...)
 	}
-	return selected
+	return dedupeRepeatedContext(selected)
+}
+
+// dedupeRepeatedContext removes exact-duplicate entries and static
+// instructions repeated across request compositions (F3). The filter is
+// content-addressed: two entries survive identically only when they are
+// byte-equal after trimming surrounding whitespace. Protected classes
+// (required evidence, acceptance constraints, active failure evidence) are
+// exempt: a repeated protected entry is delivered every time it appears.
+// Order is otherwise preserved, so composition stays deterministic and
+// byte-comparable.
+func dedupeRepeatedContext(entries []string) []string {
+	out := make([]string, 0, len(entries))
+	seen := map[string]int{}
+	for _, entry := range entries {
+		key := strings.TrimSpace(entry)
+		if key == "" {
+			continue
+		}
+		if isProtectedContextEntry(key) {
+			// Protected evidence survives every occurrence.
+			out = append(out, entry)
+			continue
+		}
+		if first, dup := seen[key]; dup {
+			// Byte-identical repeat: keep the first occurrence's position.
+			_ = first
+			continue
+		}
+		seen[key] = len(out)
+		out = append(out, entry)
+	}
+	return out
+}
+
+// isProtectedContextEntry reports whether an entry carries required
+// evidence, acceptance constraints, or active failure evidence. These
+// classes survive repeated-content removal (handoff Section 4: required
+// intent, acceptance constraints, active failure evidence, and source edit
+// preconditions survive prompt compaction).
+func isProtectedContextEntry(entry string) bool {
+	for _, marker := range protectedContextMarkers {
+		if strings.Contains(entry, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// protectedContextMarkers are the stable content markers of protected entry
+// classes. They match the composition formats in this file and the repair
+// evidence formats in repair.go.
+var protectedContextMarkers = []string{
+	"acceptance",
+	"failing",
+	"failure",
+	"error=",
+	"fingerprint",
+	"revision",
 }
 
 // formatContextBundle renders a fulfilled context bundle into prompt text
