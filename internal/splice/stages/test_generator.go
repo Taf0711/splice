@@ -168,9 +168,29 @@ func parseTestGeneratorOutput(collected *zeroruntime.CollectedStream) (schemas.T
 	if err != nil {
 		return schemas.TestGeneratorOutput{}, fmt.Errorf("parse %s args: %w", testGeneratorToolName, err)
 	}
+	// C3: both protocol versions, normalized through the SAME shared
+	// materializer as the writer (parseCodeWriterArgs' logic, typed for
+	// this output).
+	var probe struct {
+		Files []json.RawMessage `json:"files"`
+	}
+	if err := json.Unmarshal([]byte(stripped), &probe); err != nil {
+		return schemas.TestGeneratorOutput{}, fmt.Errorf("parse %s args: %w", testGeneratorToolName, err)
+	}
 	var output schemas.TestGeneratorOutput
 	if err := json.Unmarshal([]byte(stripped), &output); err != nil {
 		return schemas.TestGeneratorOutput{}, fmt.Errorf("parse %s args: %w", testGeneratorToolName, err)
+	}
+	if proposalsContainEdits(probe.Files) {
+		proposals, derr := decodeProposals(probe.Files)
+		if derr != nil {
+			return schemas.TestGeneratorOutput{}, derr
+		}
+		changes, _, merr := MaterializeProposals(proposals, currentProposalSnapshot)
+		if merr != nil {
+			return schemas.TestGeneratorOutput{}, fmt.Errorf("normalize compact proposals: %w", merr)
+		}
+		output.Files = changes
 	}
 	if err := output.Validate(); err != nil {
 		return schemas.TestGeneratorOutput{}, err
@@ -185,7 +205,7 @@ func testGeneratorToolDefinition(hasMemory bool) zeroruntime.ToolDefinition {
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"files":             fileChangeArraySchema(),
+				"files":             proposalArraySchema(),
 				"language":          map[string]any{"type": "string"},
 				"intent":            map[string]any{"type": "string"},
 				"known_limitations": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},

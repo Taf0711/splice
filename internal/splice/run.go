@@ -1173,6 +1173,12 @@ func runStageWithContext(
 	if tr != nil {
 		tr.recordContext(input.StageName, iteration, bundle)
 	}
+	// C1: record the delivered source views as the proposal base for this
+	// stage invocation. The model may only edit text present in these
+	// views; the parser's base_ref resolves here, and the write tool's
+	// expected-base recheck verifies the file still matches at mutation
+	// time.
+	stages.RecordProposalBases(&bundle)
 	if mem != nil {
 		for _, obs := range extractDegradationObservations(input.StageName, input.RunID, memoryProjectRoot(options, workDir), bundle) {
 			persistObservation(ctx, mem, obs, func(msg string) {

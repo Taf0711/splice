@@ -25,6 +25,15 @@ type HostSeamTool interface {
 	HostSeamOnly() bool
 }
 
+// ExpectedBaseCarrier is an optional interface a Tool implements to have
+// its RunOptions receive the caller's expected-content digest (C2 write
+// boundary). write_file rechecks it INSIDE the tool, after before-tool
+// hooks and immediately before mutation, so a hook that mutated the file
+// between preflight and write is caught and no overwrite happens.
+type ExpectedBaseCarrier interface {
+	SetExpectedBase(digest string)
+}
+
 type RunOptions struct {
 	PermissionGranted bool
 	PermissionMode    string
@@ -39,7 +48,13 @@ type RunOptions struct {
 	// call to a tool that does not implement the interface. The agent
 	// loop never sets this flag, so a Deny tool is invisible and
 	// unexecutable from the model surface in every permission mode.
-	HostSeam               bool
+	HostSeam bool
+	// ExpectedBase, when non-empty, is the content sha256 the caller
+	// asserts the target file has RIGHT NOW (C2 write boundary). An
+	// ExpectedBaseCarrier tool rechecks it inside the tool, immediately
+	// before mutation, after before-tool hooks. A mismatch is a loud
+	// error and no write: the preflight view is stale.
+	ExpectedBase           string
 	RequireReadBeforeWrite bool
 	ToolCallID             string
 	SessionID              string

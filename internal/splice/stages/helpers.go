@@ -296,9 +296,40 @@ func formatPathList(paths []string, max int) string {
 	return fmt.Sprintf("%s, ... and %d more", strings.Join(paths[:max], ", "), len(paths)-max)
 }
 
-// fileChangeArraySchema is the shared JSON schema for a stage's `files` array
-// (used by submit_code and submit_tests). Both tools accept the same file
-// change shape, so the schema is defined once.
+// proposalArraySchema is the shared JSON schema for a stage's `files`
+// array under the compact/1 edit protocol (C3). Both writer and test
+// generator advertise the SAME versioned schema so both arms of a
+// comparison send the same shape. A file entry is exactly one of:
+// create (content only), modify (base_ref + edits), delete (base_ref).
+func proposalArraySchema() map[string]any {
+	return map[string]any{
+		"type": "array",
+		"items": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path":        map[string]any{"type": "string"},
+				"change_type": map[string]any{"type": "string", "enum": []string{"create", "modify", "delete"}},
+				"base_ref":    map[string]any{"type": "string", "description": "For modify/delete: the source handle of the base content you received in context views. The host resolves it to exact bytes; you never compute hashes."},
+				"edits": map[string]any{
+					"type":        "array",
+					"description": "For modify: exact text replacements matched against the base content. old must appear exactly once; no fuzzy matching.",
+					"items": map[string]any{
+						"type":       "object",
+						"properties": map[string]any{"old": map[string]any{"type": "string"}, "new": map[string]any{"type": "string", "description": "Replacement text; empty deletes the matched span."}},
+						"required":   []string{"old", "new"},
+					},
+				},
+				"content": map[string]any{"type": "string", "description": "For create only: the full file content."},
+			},
+			"required": []string{"path", "change_type"},
+		},
+	}
+}
+
+// fileChangeArraySchema is the legacy full/1 schema, kept for stored
+// artifacts and legacy routes. The live comparison uses proposalArraySchema
+// for BOTH arms; this function remains the pairing reference for the
+// legacy protocol version.
 func fileChangeArraySchema() map[string]any {
 	return map[string]any{
 		"type": "array",

@@ -9,13 +9,18 @@ behavior. Prefer an existing seam, choose the highest available seam, and use
 fewer seams when possible.
 
 Return a TestGeneratorOutput object with:
-- files: every test file to create or modify
+- files: the test files to create or modify, as compact proposals (same
+  compact/1 rules as the code writer: create with content; modify with
+  base_ref plus exact old/new edits; delete with base_ref)
 - language: the test language
 - intent: one or two sentences summarizing what the tests cover
 - known_limitations: any uncertainty or intentionally incomplete test coverage
 - confidence: a number from 0.0 to 1.0
 
-Before you return content for a test file that may already exist, you must read that file with read_file first. Never write a file you have not read in this session.
+Source access: source code reaches you ONLY through your context views;
+there is no model-visible read_file tool. If you need test-file content you
+have not received, return a context request instead of inventing content.
+You may only modify text present in the base content your views delivered.
 
 Preserve every existing test, helper, and symbol in that file. Prefer modifying an existing test file over creating a new one. Write focused unit tests. Cover happy paths, edge cases, and the most likely failure modes. Use the project's existing test framework. Default to pytest for Python when no framework is detected.
 
