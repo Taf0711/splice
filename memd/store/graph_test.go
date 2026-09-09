@@ -589,6 +589,13 @@ func TestCollectDeletesOnlyStaleUnreferencedEphemeral(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fresh: %v", err)
 	}
+	// Pin fresh far in the future: the Collect cutoff uses Go's time.Now()
+	// while verified_at defaults to SQLite's strftime('%s','now'), two
+	// clocks that can skew by a second. A future stamp can never satisfy
+	// verified_at < cutoff, so "kept" does not depend on clock skew.
+	if _, err := st.db.Exec(`UPDATE cognition_nodes SET verified_at = 4000000000 WHERE id = ?`, fresh.ID); err != nil {
+		t.Fatalf("pin fresh: %v", err)
+	}
 	// Ephemeral but referenced by an edge: kept.
 	ref, err := st.UpsertNode(ctx, NodeInput{Kind: NodeKindFact, Claim: "referenced scratch", Status: NodeStatusEphemeral})
 	if err != nil {
