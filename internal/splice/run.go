@@ -1891,6 +1891,18 @@ func newAgentToolRunner(options PipelineRunConfig, cwd string) ToolRunner {
 			}
 		}
 		agentOpts := options.agentOptions()
+		runOptions := agent.NewToolRunOptions(agentOpts, call, cwd, permissionGranted)
+		// D1: host-seam marking. The deterministic pipeline IS the
+		// orchestrator; when the requested tool implements
+		// tools.HostSeamTool, this call is by definition host-initiated
+		// (the model surface never sees such tools - they are Deny and
+		// unadvertised). The registry gate still verifies the interface,
+		// so the flag cannot widen the model surface.
+		if tool, ok := options.Registry.Get(name); ok {
+			if _, isHostSeam := tool.(tools.HostSeamTool); isHostSeam {
+				runOptions.HostSeam = true
+			}
+		}
 		if outcome, blocked := agent.RunBeforeToolHooks(ctx, agentOpts, call, args); blocked {
 			blockedResult := agent.HookBlockedResult(call, outcome)
 			res := ToolResult{
@@ -1905,7 +1917,6 @@ func newAgentToolRunner(options PipelineRunConfig, cwd string) ToolRunner {
 		}
 		// Keep the pipeline's auto/spec-draft grant semantics. The shared helper
 		// only builds tools.RunOptions; it does not replace this prompt flow.
-		runOptions := agent.NewToolRunOptions(agentOpts, call, cwd, permissionGranted)
 		if options.StageRequireReadBeforeWrite {
 			runOptions.RequireReadBeforeWrite = true
 		}

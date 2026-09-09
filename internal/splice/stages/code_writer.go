@@ -65,12 +65,40 @@ func (CodeWriter) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 	if err != nil {
 		return schemas.HarnessStageOutput{}, err
 	}
+	// D1: the validate callback decodes the discriminated action. A
+	// request_context action is VALID typed output (no format retry); the
+	// orchestrator fulfills it and re-invokes. A submit action goes
+	// through the existing proposal parse.
 	collected, err := callValidatedToolUse(ctx, provider, options.model("medium"), options.ReasoningEffort, composeSystemPrompt(codeWriterSystemPrompt), string(payload), options.Images, submitCodeToolDefinition(len(cwInput.Memory) > 0), options.MaxOutputTokens, &options.Stream, func(collected *zeroruntime.CollectedStream) error {
-		_, err := parseCodeWriterOutput(collected)
+		action, err := TryDecodeStageAction(codeWriterToolName, collected)
+		if err != nil {
+			return err
+		}
+		if action.Request != nil {
+			return nil // valid context action; no retry
+		}
+		_, err = parseCodeWriterArgs(action.ProposalArgs)
 		return err
 	}, options.PromptCacheKey)
 	if err != nil {
 		return schemas.HarnessStageOutput{}, withCollectedUsage(err, collected)
+	}
+	// Decode the terminal action. A request_context surfaces as
+	// output.ContextRequest for the orchestrator's expansion loop; a
+	// submit normalizes through the shared materializer below.
+	action, err := TryDecodeStageAction(codeWriterToolName, collected)
+	if err != nil {
+		return schemas.HarnessStageOutput{}, withCollectedUsage(err, collected)
+	}
+	if action.Request != nil {
+		options.report("requesting context expansion: " + action.Request.Reason)
+		return schemas.HarnessStageOutput{
+			Summary:        "Code Writer requested additional context.",
+			Detail:         action.Request.Reason,
+			Confidence:     1.0,
+			ContextRequest: action.Request,
+			Usage:          usageFromCollected(collected),
+		}, nil
 	}
 	output, err := parseCodeWriterOutput(collected)
 	if err != nil {

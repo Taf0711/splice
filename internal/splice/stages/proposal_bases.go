@@ -47,6 +47,12 @@ func contentDigest(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// ContentDigest is the exported shared sha256-hex helper (D tests resolve
+// base handles the same way the registry does).
+func ContentDigest(s string) string {
+	return contentDigest(s)
+}
+
 // HandleFor returns the 12-char handle for a content digest.
 func HandleFor(digest string) string {
 	if len(digest) < 12 {
@@ -56,13 +62,13 @@ func HandleFor(digest string) string {
 }
 
 // RecordFromBundle registers every source-bearing item of a fulfilled
-// bundle. Whole-file reads register the file's full bytes under a
-// handle; range views (payload carries path+version+start+end+text)
-// accumulate per path, and the handle covers the CONCATENATION the model
-// saw for that path. Unread spans are simply not in the base text, so an
-// edit matched against them fails with "not found" (the C1 rule that a
-// whole-file host baseline does not authorize edits in unseen content
-// falls out of the same mechanism).
+// bundle. Per the planner steer on base_ref identity: the handle keys on
+// the DELIVERED VIEW text (what the model actually saw, display text
+// included), so a proposal edit can only ever match inside delivered
+// views - the unseen-span rule is enforced by construction. The snapshot
+// records BOTH digests: ViewDigest over the delivered text (matching
+// identity for base_ref) and ContentDigest over the raw file bytes (for
+// the C2 boundary recheck). Raw bytes ride the snapshot host-side only.
 func (r *ProposalBaseRegistry) RecordFromBundle(bundle *schemas.ContextBundle) {
 	if r == nil || bundle == nil {
 		return
@@ -71,6 +77,7 @@ func (r *ProposalBaseRegistry) RecordFromBundle(bundle *schemas.ContextBundle) {
 	defer r.mu.Unlock()
 	// Group delivered text per path, in bundle order.
 	pathText := map[string]*strings.Builder{}
+	rawByPath := map[string]string{}
 	var order []string
 	for _, item := range bundle.Items {
 		if item.Error != nil {
@@ -79,6 +86,7 @@ func (r *ProposalBaseRegistry) RecordFromBundle(bundle *schemas.ContextBundle) {
 		path, _ := item.Payload["path"].(string)
 		version, _ := item.Payload["version"].(string)
 		text, _ := item.Payload["text"].(string)
+		raw, hasRaw := item.Payload["raw"].(string)
 		if path == "" || version == "" || text == "" {
 			continue
 		}
@@ -92,12 +100,25 @@ func (r *ProposalBaseRegistry) RecordFromBundle(bundle *schemas.ContextBundle) {
 			pathText[path] = &strings.Builder{}
 		}
 		pathText[path].WriteString(text)
+		if hasRaw {
+			rawByPath[path] = raw
+		}
 	}
 	for _, path := range order {
 		text := pathText[path].String()
-		digest := contentDigest(text)
-		handle := HandleFor(digest)
-		r.byHandle[handle] = ProposalSnapshot{Path: path, Version: digest, Base: text}
+		viewDigest := contentDigest(text)
+		handle := HandleFor(viewDigest)
+		snap := ProposalSnapshot{
+			Path:       path,
+			Version:    viewDigest,
+			ViewDigest: viewDigest,
+			Base:       text,
+		}
+		if raw, ok := rawByPath[path]; ok {
+			snap.ContentDigest = contentDigest(raw)
+			snap.Raw = raw
+		}
+		r.byHandle[handle] = snap
 		r.byPath[path] = handle
 	}
 }
@@ -129,6 +150,34 @@ func currentProposalSnapshot(baseRef string) (ProposalSnapshot, bool) {
 // runs; tests may set it directly.
 var currentProposalBases = NewProposalBaseRegistry()
 
+// ProbeBasePaths lists the paths with recorded bases (test seam).
+func ProbeBasePaths() []string {
+	currentProposalBases.mu.Lock()
+	defer currentProposalBases.mu.Unlock()
+	out := make([]string, 0, len(currentProposalBases.byPath))
+	for path := range currentProposalBases.byPath {
+		out = append(out, path)
+	}
+	return out
+}
+
+// CurrentBaseForProbe returns the recorded delivered text for one path
+// (test seam for gate mocks that must reference base_ref handles exactly
+// as the model would).
+func CurrentBaseForProbe(path string) (string, bool) {
+	currentProposalBases.mu.Lock()
+	defer currentProposalBases.mu.Unlock()
+	handle, ok := currentProposalBases.byPath[path]
+	if !ok {
+		return "", false
+	}
+	snap, ok := currentProposalBases.byHandle[handle]
+	if !ok {
+		return "", false
+	}
+	return snap.Base, true
+}
+
 // RecordProposalBases registers a fulfilled context bundle as the
 // proposal base for the current stage invocation (C1). Run-stage-locally:
 // the model may only propose edits against text it actually received.
@@ -142,4 +191,9 @@ func SetProposalBases(reg *ProposalBaseRegistry) func() {
 	prev := currentProposalBases
 	currentProposalBases = reg
 	return func() { currentProposalBases = prev }
+}
+
+// ProbeDefaultRequestFor is the test seam for the default context request.
+func ProbeDefaultRequestFor(intent, workDir, language string) schemas.ContextRequest {
+	return defaultContextRequest(intent, workDir, language)
 }

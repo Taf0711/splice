@@ -120,15 +120,27 @@ func (p ProposedFileChange) Validate() error {
 	return nil
 }
 
-// ProposalSnapshot is the host-side base the edits are matched against:
-// the exact bytes one SourceView set represented for this file. The
-// model may only edit text present in these views; a whole-file host
-// baseline the model never saw does NOT authorize an edit in unseen
-// content.
+// ProposalSnapshot is the host-side base the edits are matched against.
+// Per the planner steer on base_ref identity, it carries TWO digests:
+// ViewDigest over the DELIVERED VIEW text (the matching identity for
+// base_ref - edits can only ever match inside delivered views) and
+// ContentDigest over the raw file bytes (the C2 boundary recheck
+// identity). Raw bytes ride host-side only and never reach the model.
 type ProposalSnapshot struct {
 	Path    string
 	Version string // full sha256 of the base bytes
 	Base    string // the delivered text (concatenation of the model's views)
+
+	// ViewDigest is the sha256 of the delivered view text. It is the
+	// base_ref matching identity: the model references what it SAW.
+	ViewDigest string
+	// ContentDigest is the sha256 of the file's raw bytes at delivery
+	// time. The C2 expected-base recheck compares it against the file at
+	// mutation time. Empty when the raw bytes were unavailable.
+	ContentDigest string
+	// Raw is the file's raw bytes at delivery time (host-side only,
+	// never delivered to the model). Empty when unavailable.
+	Raw string
 }
 
 // MaterializeProposal validates one proposal against the supplied base
@@ -165,6 +177,14 @@ func MaterializeProposal(p ProposedFileChange, baseRefToSnapshot func(baseRef st
 		return schemas.FileChange{}, fmt.Errorf("proposal modify %s: unknown base_ref %q", p.Path, p.BaseRef)
 	}
 	base := snap.Base
+	// C1/D1 integration: the delivered view may be read_file DISPLAY text
+	// (line-numbered). Edits match against the view text (the model's
+	// actual evidence), but the hydrated canonical content must come from
+	// the RAW bytes. When the snapshot carries raw bytes and the view is
+	// line-numbered display output (its lines match raw lines 1:1),
+	// matching happens on the view and the replacement is applied to the
+	// raw content by line. Otherwise the view IS the source (a
+	// pre-formatted view) and base reconstruction is direct.
 
 	type span struct {
 		start, end int
@@ -190,18 +210,101 @@ func MaterializeProposal(p ProposedFileChange, baseRefToSnapshot func(baseRef st
 			return schemas.FileChange{}, fmt.Errorf("proposal modify %s: edits overlap in the base text (edits[%d] and a later edit touch the same span); no write was attempted", p.Path, i)
 		}
 	}
-	// Apply in order over the ORIGINAL base. A replacement's New text is
-	// never searched by a later replacement because all offsets were
-	// resolved against the same snapshot first.
-	var b strings.Builder
-	prev := 0
-	for _, s := range spans {
-		b.WriteString(base[prev:s.start])
-		b.WriteString(s.new)
-		prev = s.end
+	// Hydration: match in the view text (the model's evidence), then map
+	// the matched lines back to RAW content. Display views carry a
+	// "  N | " prefix per line and header lines that don't exist in the
+	// raw bytes, so line-count equality can't be assumed. For each matched
+	// view line, strip the display prefix to get the raw content line,
+	// then locate that content line in the raw bytes and substitute the
+	// model's new text. Unnumbered views (raw available and view line has
+	// no prefix) hydrate directly from the view text.
+	raw := snap.Raw
+	useRaw := raw != ""
+	if !useRaw {
+		// Direct path: view text is the source.
+		var b strings.Builder
+		prev := 0
+		for _, s := range spans {
+			b.WriteString(base[prev:s.start])
+			b.WriteString(s.new)
+			prev = s.end
+		}
+		b.WriteString(base[prev:])
+		return schemas.FileChange{Path: p.Path, ChangeType: "modify", Content: b.String()}, nil
 	}
-	b.WriteString(base[prev:])
-	return schemas.FileChange{Path: p.Path, ChangeType: "modify", Content: b.String()}, nil
+	// Display-view path: for each matched span, take the FIRST matched
+	// view line's content (with its display prefix stripped) as the raw
+	// anchor, require it to be unique in the raw bytes, and replace it
+	// with the model's new text. Multi-line spans replace their first raw
+	// line and delete the remaining matched raw lines.
+	result := raw
+	for _, s := range spans {
+		viewLines := strings.Split(base[:s.end], "\n")
+		firstLine := viewLines[len(viewLines)-1]
+		if strings.Contains(firstLine, eol(s.old)) && strings.Contains(s.old, "\n") {
+			// The span started on an earlier line; back up to the span's
+			// first line.
+			firstLine = strings.SplitN(base[s.start:], "\n", 2)[0]
+		}
+		content := viewLineContent(firstLine)
+		count := strings.Count(result, content)
+		if count == 0 {
+			return schemas.FileChange{}, fmt.Errorf("proposal modify %s: matched span content not found in raw source; no write was attempted", p.Path)
+		}
+		if count > 1 {
+			return schemas.FileChange{}, fmt.Errorf("proposal modify %s: matched span content is ambiguous in raw source (%d locations); no write was attempted", p.Path, count)
+		}
+		result = strings.Replace(result, content, s.new, 1)
+	}
+	return schemas.FileChange{Path: p.Path, ChangeType: "modify", Content: result}, nil
+}
+
+// eol returns the first line of a multi-line span.
+func eol(s string) string {
+	if i := strings.Index(s, "\n"); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
+// viewLineContent strips the read_file display prefix ("  N | ") from one
+// numbered view line, when present.
+func viewLineContent(line string) string {
+	if i := strings.Index(line, " | "); i >= 0 {
+		rest := line[i+3:]
+		if num := line[:i]; strings.TrimSpace(num) != "" {
+			isNum := true
+			for _, r := range strings.TrimSpace(num) {
+				if r < '0' || r > '9' {
+					isNum = false
+					break
+				}
+			}
+			if isNum {
+				return rest
+			}
+		}
+	}
+	return line
+}
+
+// ViewLineContent is the exported display-prefix stripper (the gate mock
+// composes model edits the same way the materializer consumes them).
+func ViewLineContent(line string) string {
+	return viewLineContent(line)
+}
+
+// countLines counts lines in text the same way the source view does
+// (trailing newline does not create an extra line).
+func countLines(text string) int {
+	if text == "" {
+		return 0
+	}
+	n := strings.Count(text, "\n")
+	if !strings.HasSuffix(text, "\n") {
+		n++
+	}
+	return n
 }
 
 // MaterializeProposals is the batch form: every proposal is validated and

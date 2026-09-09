@@ -1525,6 +1525,9 @@ func newRunTestWorkspace(t *testing.T) (string, *tools.Registry) {
 	registry.Register(tools.NewWriteFileTool(workDir))
 	registry.Register(tools.NewDeleteFileTool(workDir))
 	registry.Register(tools.NewBashTool(workDir))
+	// D-gate: the guarded raw seam backs the proposal base registry
+	// (host-seam-only; the model surface never sees this tool).
+	registry.Register(tools.NewScopedRawFileReadTool(workDir, nil))
 	return workDir, registry
 }
 

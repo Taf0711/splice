@@ -35,6 +35,15 @@ func (f ToolRunnerFunc) RunTool(ctx context.Context, name string, args map[strin
 	return f(ctx, name, args)
 }
 
+// RunHostSeamTool implements hostSeamRunner for function-adapted runners.
+// The pipeline's own ToolRunnerFunc is orchestrator-side, so its raw-seam
+// reads are host-seam calls: the registry's gate accepts them because the
+// raw_file_read tool implements HostSeamTool, and the model surface never
+// issues this call shape.
+func (f ToolRunnerFunc) RunHostSeamTool(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
+	return f(ctx, name, args)
+}
+
 // RegistryToolRunner adapts Zero's tools.Registry to the ToolRunner interface.
 // It is the read-only context-fulfillment runner. It does not apply SD12 tool
 // filters or hooks. newAgentToolRunner owns those for pipeline tool calls.

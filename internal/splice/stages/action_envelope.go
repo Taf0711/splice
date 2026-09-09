@@ -148,12 +148,14 @@ func TryDecodeStageAction(toolName string, collected *zeroruntime.CollectedStrea
 	}
 	action, err := DecodeStageAction(toolName, stripped)
 	if err != nil {
-		// Backward compatibility: a bare C-protocol payload (files array,
-		// no envelope fields) is a submit_changes action.
+		// Backward compatibility: a bare C-protocol payload (files array
+		// present as a JSON field, even empty, and no envelope fields) is
+		// a submit_changes action. The legacy full/1 and compact/1 forms
+		// both carry "files".
 		var bare struct {
-			Files []json.RawMessage `json:"files"`
+			Files json.RawMessage `json:"files"`
 		}
-		if jsonErr := json.Unmarshal([]byte(stripped), &bare); jsonErr == nil && len(bare.Files) > 0 {
+		if jsonErr := json.Unmarshal([]byte(stripped), &bare); jsonErr == nil && bare.Files != nil {
 			return StageAction{ProposalArgs: stripped, RawArgs: stripped}, nil
 		}
 		return StageAction{}, err

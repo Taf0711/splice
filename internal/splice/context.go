@@ -102,6 +102,14 @@ func fulfillReadFile(ctx context.Context, query schemas.ContextQuery, runner Too
 	if query.Path == nil || *query.Path == "" {
 		return schemas.ContextItem{}, fmt.Errorf("read_file requires path")
 	}
+	// D1/C1: acquire through the guarded raw seam so the item carries the
+	// file's content digest as its version. The model-visible text stays
+	// the same read_file output as before; the version identity lets the
+	// proposal base registry pin what the model received (base_ref
+	// resolution) and the C2 expected-base recheck verify it at write
+	// time. A seam failure degrades gracefully: the item is still
+	// delivered without a version, and no base is recorded for it.
+	raw, rawErr := ToolRunnerSourceReader{Inner: runner}.ReadSource(ctx, *query.Path)
 	res, err := runner.RunTool(ctx, readToolName, map[string]any{"path": *query.Path})
 	if err != nil {
 		return schemas.ContextItem{}, err
@@ -110,12 +118,46 @@ func fulfillReadFile(ctx context.Context, query schemas.ContextQuery, runner Too
 		return contextErrorItem(query, res.Output), nil
 	}
 	text, truncated := truncateRunes(res.Output, query.MaxChars)
+	payload := map[string]any{
+		"text":    text,
+		"path":    *query.Path,
+		"version": raw.SHA256,
+		"start":   1,
+		"end":     rawLineCount(raw.Raw),
+		// Host-side only: the prompt composer serializes only "text";
+		// "raw" feeds the proposal base registry's content digest and the
+		// numbered-view hydration path. Never model-visible.
+		"raw": string(raw.Raw),
+	}
+	if rawErr != nil {
+		// No raw seam: keep the display text, drop the version identity
+		// (an unversioned item cannot seed a proposal base).
+		delete(payload, "version")
+		delete(payload, "start")
+		delete(payload, "end")
+	}
+	_ = truncated
 	return schemas.ContextItem{
 		Query:     query,
 		Summary:   fmt.Sprintf("Read %s.", *query.Path),
-		Payload:   map[string]any{"text": text},
+		Payload:   payload,
 		Truncated: truncated || res.Truncated,
 	}, nil
+}
+
+// rawLineCount counts lines in raw bytes (1-based inclusive end line for
+// whole-file views).
+func rawLineCount(raw []byte) int {
+	if len(raw) == 0 {
+		return 0
+	}
+	count := 1
+	for _, b := range raw {
+		if b == '\n' {
+			count++
+		}
+	}
+	return count
 }
 
 func fulfillOutline(ctx context.Context, query schemas.ContextQuery, runner ToolRunner) (schemas.ContextItem, error) {
