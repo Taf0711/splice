@@ -32,6 +32,7 @@ import (
 	"fmt"
 
 	"github.com/Taf0711/splice/internal/memd"
+	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
 // memdClient aliases the sidecar client type so the slice seams stay
@@ -203,4 +204,82 @@ func sliceTraceJSON(results []SliceResult) string {
 		return fmt.Sprintf("trace marshal error: %v", err)
 	}
 	return string(data)
+}
+
+// sliceSpendSource maps a slice condition's operation class onto the F1
+// spend sources. The slice synthesizes ledger records for its offline
+// conditions; the mapping is mechanical and shared by both arms.
+func sliceSpendSource(op string) string {
+	switch op {
+	case "generation":
+		return schemas.SpendSourceGeneration
+	case "format_retry":
+		return schemas.SpendSourceFormatRetry
+	case "expansion":
+		return schemas.SpendSourceExpansion
+	case "repair":
+		return schemas.SpendSourceRepair
+	case "capture":
+		return schemas.SpendSourceCapture
+	case "auxiliary":
+		return schemas.SpendSourceAuxiliary
+	default:
+		return schemas.SpendSourceGeneration
+	}
+}
+
+// SliceConditionCostOptions configures the cost report for one slice
+// condition.
+type SliceConditionCostOptions struct {
+	// SpendSource is the recorded spend source of each synthesized record.
+	// A condition that eliminates a discovery operation simply synthesizes
+	// fewer records for it; eliminated operations contribute no spend rather
+	// than a zero entry.
+	SpendSource string
+	// RequestsPerOp approximates the provider requests each retained cold
+	// operation costs in the slice's fixed fixture. One request per retained
+	// operation keeps the offline comparison conservative and spend-free.
+	RequestsPerOp int
+	// ColdPerformsCapture isolates maintenance only when the cold baseline
+	// does not also perform the capture work.
+	ColdPerformsCapture bool
+	// VerifiedCompletions is the per-completion denominator.
+	VerifiedCompletions int
+}
+
+// SliceConditionCost builds the F2 WorkflowCostReport for one slice
+// condition from its plan difference. Retained cold operations synthesize
+// spend records; eliminated operations synthesize none (absent, never
+// zero). The report asserts the accounting identity, isolates maintenance,
+// and contains no negative entries. NO LIVE SPEND: the records are the
+// fixture's fixed byte counts, not measured provider output.
+func SliceConditionCost(beforeOps, eliminated []string, opts SliceConditionCostOptions) (*WorkflowCostReport, error) {
+	views := make([]spendRecordView, 0, len(beforeOps)*max(1, opts.RequestsPerOp))
+	eliminatedSet := map[string]bool{}
+	for _, op := range eliminated {
+		eliminatedSet[op] = true
+	}
+	for i, op := range beforeOps {
+		if eliminatedSet[op] {
+			continue
+		}
+		for r := 0; r < max(1, opts.RequestsPerOp); r++ {
+			// Fixed fixture bytes (deterministic; no live measurement). The
+			// op index distinguishes operations; the record content is
+			// stable so reports are byte-comparable across runs.
+			views = append(views, spendRecordView{
+				input:      400 + i*10,
+				output:     200,
+				costStatus: costStatusPriced,
+			})
+		}
+	}
+	source := opts.SpendSource
+	if source == "" {
+		source = schemas.SpendSourceGeneration
+	}
+	return BuildWorkflowCostReport(views, func(int) string { return source }, WorkflowCostOptions{
+		VerifiedCompletions: opts.VerifiedCompletions,
+		ColdPerformsCapture: opts.ColdPerformsCapture,
+	})
 }
