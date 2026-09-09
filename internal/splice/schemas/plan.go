@@ -609,6 +609,40 @@ const (
 	CostStatusError    = "error"
 )
 
+// Spend sources classify why a provider request exists (Package F1, warm-cost
+// handoff Section 10). The accounting identity of WorkflowCostReport sums
+// these sources; every priced request must carry exactly one.
+const (
+	// SpendSourceGeneration is the initial pass of a planned stage.
+	SpendSourceGeneration = "generation"
+	// SpendSourceFormatRetry is a repeated request under the same D3 request
+	// identity: typed-output format retries and forced-choice compatibility
+	// retries within one stage invocation.
+	SpendSourceFormatRetry = "format_retry"
+	// SpendSourceExpansion is a bounded context-expansion round (D2).
+	SpendSourceExpansion = "expansion"
+	// SpendSourceRepair is a repair re-entry of a stage (test-failure loop).
+	SpendSourceRepair = "repair"
+	// SpendSourceCapture is a provider request issued for memory capture or
+	// maintenance work. Capture is currently deterministic (digests plus
+	// sidecar writes); the source stays reserved so a future capture-time
+	// model call lands in the ledger instead of outside it.
+	SpendSourceCapture = "capture"
+	// SpendSourceAuxiliary is any model call outside the planned stage
+	// sequence, such as step-back analysis.
+	SpendSourceAuxiliary = "auxiliary"
+)
+
+// ValidSpendSource reports whether s is a recognized spend source.
+func ValidSpendSource(s string) bool {
+	switch s {
+	case "", SpendSourceGeneration, SpendSourceFormatRetry, SpendSourceExpansion,
+		SpendSourceRepair, SpendSourceCapture, SpendSourceAuxiliary:
+		return true
+	}
+	return false
+}
+
 // PipelineUsageRecord is one provider request priced at the orchestrator ledger.
 type PipelineUsageRecord struct {
 	Sequence          int      `json:"sequence"`
@@ -616,6 +650,9 @@ type PipelineUsageRecord struct {
 	Model             string   `json:"model,omitempty"`
 	Stage             string   `json:"stage"`
 	Iteration         int      `json:"iteration"`
+	InvocationOrdinal int      `json:"invocation_ordinal,omitempty"`
+	ContextRound      int      `json:"context_round,omitempty"`
+	SpendSource       string   `json:"spend_source,omitempty"`
 	UsageReported     bool     `json:"usage_reported"`
 	InputTokens       int      `json:"input_tokens"`
 	OutputTokens      int      `json:"output_tokens"`
@@ -665,6 +702,12 @@ func (r PipelineUsageRecord) Validate() error {
 		if r.CostStatus != CostStatusUnpriced {
 			return errors.New("usage_reported false requires unpriced cost status")
 		}
+	}
+	if !ValidSpendSource(r.SpendSource) {
+		return fmt.Errorf("invalid spend_source %q", r.SpendSource)
+	}
+	if r.InvocationOrdinal < 0 || r.ContextRound < 0 {
+		return errors.New("invocation ordinal and context round must be non-negative")
 	}
 	switch r.CostStatus {
 	case CostStatusPriced:

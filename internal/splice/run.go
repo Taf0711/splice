@@ -41,6 +41,19 @@ type requestLedger struct {
 
 func newRequestLedger() *requestLedger { return &requestLedger{} }
 
+// spendSourceForInvocation is the F1 mechanical source classification for a
+// stage invocation before any expansion round: ordinal 0 is the initial
+// generation pass, ordinal 1+ are repair re-entries. The D2 loop reclassifies
+// round 1+ as expansion spend (see runStageWithContextBudgeted). Auxiliary
+// calls (step_back) and capture-time calls, if any ever exist, set their own
+// source explicitly.
+func spendSourceForInvocation(invocationOrdinal int) string {
+	if invocationOrdinal > 0 {
+		return schemas.SpendSourceRepair
+	}
+	return schemas.SpendSourceGeneration
+}
+
 func (ledger *requestLedger) append(record schemas.PipelineUsageRecord) {
 	record.Sequence = len(ledger.records) + 1
 	ledger.records = append(ledger.records, record)
@@ -94,6 +107,9 @@ func (ledger *requestLedger) recordingOptions(options PipelineRunConfig) Pipelin
 			Model:             attributed.Model,
 			Stage:             attributed.Stage,
 			Iteration:         attributed.Iteration,
+			InvocationOrdinal: attributed.InvocationOrdinal,
+			ContextRound:      attributed.ContextRound,
+			SpendSource:       attributed.SpendSource,
 			UsageReported:     attributed.UsageReported,
 			InputTokens:       attributed.Usage.EffectiveInputTokens(),
 			OutputTokens:      attributed.Usage.EffectiveOutputTokens(),
@@ -745,7 +761,10 @@ func runIterationLoop(
 				Model:           options.Model,
 				ReasoningEffort: options.ReasoningEffort,
 			}
-			stageOpts := stageOptions("step_back", i, sbSelection, options, workDir, runner, stages.Capabilities{})
+			// F1: auxiliary model call. step_back runs outside the planned
+			// stage sequence, so its spend is classified auxiliary and stays
+			// in the ledger (no hidden paid work).
+			stageOpts := stageOptions("step_back", i, sbSelection, options, workDir, runner, stages.Capabilities{}, agent.NewRequestAttribution(0, 0, schemas.SpendSourceAuxiliary))
 			analysis, sbErr := stages.StepBack(ctx, provider, stageOpts, report)
 			if sbErr != nil {
 				if errors.Is(sbErr, context.Canceled) || ctx.Err() != nil {
@@ -1178,7 +1197,13 @@ func runStageWithContextBudgeted(
 	invocationOrdinal int,
 	execBudget *StageExecutionBudget,
 ) (schemas.HarnessStageOutput, error) {
-	stageOpts := stageOptions(input.StageName, iteration, selection, options, workDir, runner, stage.Capabilities())
+	// F1: the orchestrator owns the classification cell for this invocation.
+	// The stage's usage closure reads it at emission time, so reclassification
+	// between expansion rounds re-labels the spend source without threading
+	// new parameters through every stage. The derived source is mechanical:
+	// repair ordinal -> repair, otherwise the D2 loop reclassifies per round.
+	invocationAttribution := agent.NewRequestAttribution(invocationOrdinal, 0, spendSourceForInvocation(invocationOrdinal))
+	stageOpts := stageOptions(input.StageName, iteration, selection, options, workDir, runner, stage.Capabilities(), invocationAttribution)
 	// Part A context bridge: fresh cognition narrows the default context
 	// request. The scoped request replaces the default ONLY when the scope
 	// resolved a question; otherwise the cold path stays byte-identical.
@@ -1240,6 +1265,13 @@ func runStageWithContextBudgeted(
 	for round := 0; ; round++ {
 		if ctx.Err() != nil {
 			return schemas.HarnessStageOutput{}, withStageUsage(ctx.Err(), usageTotal)
+		}
+		// F1: round 0 is the initial generation pass; round 1+ re-runs of the
+		// stage are expansion spend under the same D3 request identity. The
+		// cell is reclassified BEFORE the stage streams so its usage closure
+		// stamps the round and source onto every request this round issues.
+		if round > 0 {
+			invocationAttribution.Set(invocationOrdinal, round, schemas.SpendSourceExpansion)
 		}
 		output, err := stage.Run(ctx, input, selection.Provider, stageOpts)
 		if err != nil {
