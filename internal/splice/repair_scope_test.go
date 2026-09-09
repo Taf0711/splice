@@ -83,7 +83,7 @@ func TestRepairExecutesWithFreshlyPreparedScope(t *testing.T) {
 	repaired, _, err := attemptLocalRepair(
 		context.Background(), "run-scope-fresh", 1, repairPlanForScope(), registry, nil,
 		PipelineRunConfig{}, t.TempDir(), nil, nil, nil, markerScope(),
-		time.Now().Add(time.Minute), &records, &outputs,
+		time.Now().Add(time.Minute), NewStageExecutionBudget(0), &records, &outputs,
 		&summaries, &changed, initial,
 	)
 	if err != nil {
@@ -116,7 +116,7 @@ func TestRepairScopeStateCarriesAcrossRepairInvocations(t *testing.T) {
 		context.Background(), time.Now().Add(time.Minute),
 		schemas.HarnessStageInput{RunID: "run-s", StageName: "code_writer", RequestIntent: "add ForceSignOut"},
 		&scopeProbingWriter{}, 1, agent.ModelSelection{}, PipelineRunConfig{}, t.TempDir(),
-		nil, nil, schemas.StageBudget{}, schemas.TierLight, nil, prepared, 1, &fresh,
+		nil, nil, schemas.StageBudget{}, schemas.TierLight, nil, prepared, 1, &fresh, NewStageExecutionBudget(0),
 	)
 	if err != nil {
 		t.Fatalf("first runRepairStage: %v", err)
@@ -138,7 +138,7 @@ func TestRepairScopeStateCarriesAcrossRepairInvocations(t *testing.T) {
 		context.Background(), time.Now().Add(time.Minute),
 		schemas.HarnessStageInput{RunID: "run-s", StageName: "code_writer", RequestIntent: "add ForceSignOut"},
 		&scopeProbingWriter{}, 1, agent.ModelSelection{}, PipelineRunConfig{}, t.TempDir(),
-		nil, nil, schemas.StageBudget{}, schemas.TierLight, nil, fresh, 2, &secondScope,
+		nil, nil, schemas.StageBudget{}, schemas.TierLight, nil, fresh, 2, &secondScope, NewStageExecutionBudget(0),
 	)
 	if err != nil {
 		t.Fatalf("second runRepairStage: %v", err)

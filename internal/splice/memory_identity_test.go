@@ -43,7 +43,7 @@ func TestMemoryIdentityUsesProjectRoot(t *testing.T) {
 		options := PipelineConfigFromAgentOptions(agent.Options{})
 		options.ProjectRoot = repoRoot
 
-		_, _, completed, err := runPass(context.Background(), "run-id", 1, plan, registry, runFakeProvider{}, options, workDir, nil, time.Time{}, nil, store, nil)
+		_, _, completed, err := runPass(context.Background(), "run-id", 1, plan, registry, runFakeProvider{}, options, workDir, nil, time.Time{}, nil, store, nil, NewStageExecutionBudget(0))
 		if err != nil || !completed {
 			t.Fatalf("workDir %q: runPass completed=%v err=%v", workDir, completed, err)
 		}
@@ -91,7 +91,7 @@ func TestMemoryIdentityFallbackUsesWorkDir(t *testing.T) {
 	// ProjectRoot is deliberately empty here.
 	options := PipelineConfigFromAgentOptions(agent.Options{})
 
-	_, _, completed, err := runPass(context.Background(), "run-id", 1, plan, registry, runFakeProvider{}, options, workDir, nil, time.Time{}, nil, store, nil)
+	_, _, completed, err := runPass(context.Background(), "run-id", 1, plan, registry, runFakeProvider{}, options, workDir, nil, time.Time{}, nil, store, nil, NewStageExecutionBudget(0))
 	if err != nil || !completed {
 		t.Fatalf("runPass completed=%v err=%v", completed, err)
 	}

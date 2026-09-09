@@ -226,6 +226,7 @@ func attemptLocalRepair(
 	tr *runTraceAccumulator,
 	priorScope *StageScopePlan,
 	wallDeadline time.Time,
+	execBudget *StageExecutionBudget,
 	records *[]schemas.StageRecord,
 	outputs *[]schemas.HarnessStageOutput,
 	priorSummaries *map[string]string,
@@ -349,7 +350,7 @@ func attemptLocalRepair(
 		writerInput := repairStageInput(runID, "code_writer", plan, stageNames, *priorSummaries, *priorChangedFiles, &revisionContext)
 		writerStart := time.Now()
 		var writerScope *StageScopePlan
-		writerOutput, werr := runRepairStage(ctx, wallDeadline, writerInput, codeWriterStage, iteration, repairSelection(options, provider, "code_writer", false), options, workDir, runner, mem, stageBudgetByName(plan, "code_writer"), plan.Tier, tr, repairScope, repairN, &writerScope)
+		writerOutput, werr := runRepairStage(ctx, wallDeadline, writerInput, codeWriterStage, iteration, repairSelection(options, provider, "code_writer", false), options, workDir, runner, mem, stageBudgetByName(plan, "code_writer"), plan.Tier, tr, repairScope, repairN, &writerScope, execBudget)
 		totalLatency += int(time.Since(writerStart).Milliseconds())
 		if werr != nil {
 			return false, nil, fmt.Errorf("repair: code_writer re-entry: %w", werr)
@@ -381,7 +382,7 @@ func attemptLocalRepair(
 		testInput := repairStageInput(runID, "test_runner", plan, stageNames, *priorSummaries, *priorChangedFiles, nil)
 		testStart := time.Now()
 		var runnerScope *StageScopePlan
-		newTestOutput, terr := runRepairStage(ctx, wallDeadline, testInput, testRunnerStage, iteration, agent.ModelSelection{}, options, workDir, runner, mem, stageBudgetByName(plan, "test_runner"), plan.Tier, tr, repairScope, repairN, &runnerScope)
+		newTestOutput, terr := runRepairStage(ctx, wallDeadline, testInput, testRunnerStage, iteration, agent.ModelSelection{}, options, workDir, runner, mem, stageBudgetByName(plan, "test_runner"), plan.Tier, tr, repairScope, repairN, &runnerScope, execBudget)
 		totalLatency += int(time.Since(testStart).Milliseconds())
 		if terr != nil {
 			return false, nil, fmt.Errorf("repair: test_runner re-run: %w", terr)
@@ -611,7 +612,7 @@ func scopePlanIsUncomputed(s StageScopePlan) bool {
 // flows back through freshScope so the next repair validates against this
 // invocation's scope rather than the initial pointer. invocationOrdinal
 // separates repair re-entry trace records from the initial-pass record.
-func runRepairStage(ctx context.Context, wallDeadline time.Time, input schemas.HarnessStageInput, stage stages.Stage, iteration int, selection agent.ModelSelection, options PipelineRunConfig, workDir string, runner ToolRunner, mem MemoryStore, budget schemas.StageBudget, tier schemas.PipelineTier, tr *runTraceAccumulator, priorScope *StageScopePlan, invocationOrdinal int, freshScope **StageScopePlan) (schemas.HarnessStageOutput, error) {
+func runRepairStage(ctx context.Context, wallDeadline time.Time, input schemas.HarnessStageInput, stage stages.Stage, iteration int, selection agent.ModelSelection, options PipelineRunConfig, workDir string, runner ToolRunner, mem MemoryStore, budget schemas.StageBudget, tier schemas.PipelineTier, tr *runTraceAccumulator, priorScope *StageScopePlan, invocationOrdinal int, freshScope **StageScopePlan, execBudget *StageExecutionBudget) (schemas.HarnessStageOutput, error) {
 	prepared, freshPlan, _, err := prepareStageInput(ctx, stageInputPreparation{
 		Input:         input,
 		Stage:         stage,
@@ -657,7 +658,7 @@ func runRepairStage(ctx context.Context, wallDeadline time.Time, input schemas.H
 	// resolved in THIS repair preparation (partial scope keeps default
 	// reads for unresolved questions, so newly needed context is not
 	// denied). Historical locations are hints, not stale authority.
-	return runStageWithContext(stageCtx, input, stage, iteration, selection, options, workDir, runner, mem, budget.OutputMax, tr, &plan, invocationOrdinal)
+	return runStageWithContextBudgeted(stageCtx, input, stage, iteration, selection, options, workDir, runner, mem, budget.OutputMax, tr, &plan, invocationOrdinal, execBudget)
 }
 
 // stageBudgetByName returns the full stage budget for a named plan stage, or

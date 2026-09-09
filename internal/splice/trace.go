@@ -53,8 +53,12 @@ type runTraceAccumulator struct {
 	// fails (a deliberately-disabled run stays off).
 	memoryStatus string
 
-	stages        map[stageKey]schemas.InputMeta
-	stageOrder    []stageKey
+	stages     map[stageKey]schemas.InputMeta
+	stageOrder []stageKey
+	// contextRounds holds per-expansion-round context telemetry (D3),
+	// keyed separately from the aggregate InputMeta rows so repair and
+	// expansion records never overwrite ordinal zero.
+	contextRounds map[contextRoundKey]contextRoundMeta
 	interventions []schemas.InterventionRecord
 	interactions  []schemas.InteractionRecord
 	memoryItems   int
@@ -126,6 +130,7 @@ func newRunTraceAccumulator(store TraceStore, runID, sessionID, projectRoot stri
 		memoryStatus:     memoryStatus,
 		warnWriteFailure: warnWriteFailure,
 		stages:           make(map[stageKey]schemas.InputMeta),
+		contextRounds:    make(map[contextRoundKey]contextRoundMeta),
 		deliveredMemory:  make(map[deliveredMemoryKey]struct{}),
 	}
 }
@@ -213,6 +218,51 @@ func (tr *runTraceAccumulator) replaySuppressedCount() int {
 	tr.muDelivered.Lock()
 	defer tr.muDelivered.Unlock()
 	return tr.replaySuppressed
+}
+
+// recordContextRound records the context telemetry for one EXPANSION
+// round (D3) under its own key: {stage, iteration, ordinal, round}.
+// Round 0 is the initial handshake and records under the historical
+// recordContext path; rounds 1+ are expansion rounds. Separate keys mean
+// an expansion never overwrites the initial record and repair/expansion
+// records never collide.
+func (tr *runTraceAccumulator) recordContextRound(stage string, iteration, ordinal, round int, bundle schemas.ContextBundle) {
+	if tr == nil {
+		return
+	}
+	key := contextRoundKey{name: stage, iteration: iteration, ordinal: ordinal, round: round}
+	meta := tr.contextRounds[key]
+	meta.ContextItems += len(bundle.Items)
+	for _, item := range bundle.Items {
+		meta.ContextChars += len(item.Summary)
+		if item.Error != nil {
+			// A failed query is executed work and a delivery miss, never
+			// successfully delivered context (same rule as recordContext).
+			meta.ContextFailures++
+		}
+	}
+	meta.InvocationOrdinal = ordinal
+	meta.ContextRound = round
+	tr.contextRounds[key] = meta
+}
+
+// contextRoundKey identifies one context round within a stage invocation.
+type contextRoundKey struct {
+	name      string
+	iteration int
+	ordinal   int
+	round     int
+}
+
+// contextRoundMeta is the per-round context telemetry shape (mirrors the
+// ContextItems/Chars/Failures slice of InputMeta so consumers read the
+// same units).
+type contextRoundMeta struct {
+	ContextItems      int
+	ContextChars      int
+	ContextFailures   int
+	InvocationOrdinal int
+	ContextRound      int
 }
 
 func (tr *runTraceAccumulator) noteStage(stage string, iteration int) {

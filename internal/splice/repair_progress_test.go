@@ -85,7 +85,7 @@ func TestAttemptLocalRepairNoProgressStopsLoop(t *testing.T) {
 	repaired, interaction, err := attemptLocalRepair(
 		context.Background(), "run-noprogress", 1, plan, registry, nil,
 		options, t.TempDir(), nil, nil, nil, nil,
-		time.Now().Add(time.Minute), &records, &outputs,
+		time.Now().Add(time.Minute), NewStageExecutionBudget(0), &records, &outputs,
 		&priorSummaries, &priorChangedFiles, initial,
 	)
 	if err != nil {
@@ -148,7 +148,7 @@ func TestAttemptLocalRepairBudgetCannotBeExceeded(t *testing.T) {
 	_, interaction, err := attemptLocalRepair(
 		context.Background(), "run-budget", 1, plan, registry, nil,
 		PipelineRunConfig{}, t.TempDir(), nil, nil, nil, nil,
-		time.Now().Add(time.Minute), &records, &outputs,
+		time.Now().Add(time.Minute), NewStageExecutionBudget(0), &records, &outputs,
 		&priorSummaries, &priorChangedFiles, initial,
 	)
 	if err != nil {
@@ -314,7 +314,7 @@ func TestAttemptLocalRepairSecondAttemptReceivesResolverEvidence(t *testing.T) {
 	_, _, err := attemptLocalRepair(
 		context.Background(), "run-resolver", 1, plan, registry, nil,
 		PipelineRunConfig{}, workspace, nil, nil, nil, nil,
-		time.Now().Add(time.Minute), &records, &outputs,
+		time.Now().Add(time.Minute), NewStageExecutionBudget(0), &records, &outputs,
 		&priorSummaries, &priorChangedFiles, initial,
 	)
 	if err != nil {

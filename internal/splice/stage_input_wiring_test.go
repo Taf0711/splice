@@ -247,7 +247,7 @@ func TestRepairReentryRetrievesAndTracesEachMemoryInvocation(t *testing.T) {
 
 	records, _, completed, err := runPass(context.Background(), "repair-memory", 1, plan,
 		stageRegistry{"code_writer": stages.CodeWriter{}, "test_runner": testRunner},
-		provider, PipelineConfigFromAgentOptions(agent.Options{}), workDir, fakeRunner, time.Time{}, nil, store, tr)
+		provider, PipelineConfigFromAgentOptions(agent.Options{}), workDir, fakeRunner, time.Time{}, nil, store, tr, NewStageExecutionBudget(0))
 	if err != nil || !completed {
 		t.Fatalf("completed=%v err=%v records=%+v", completed, err, records)
 	}
@@ -316,7 +316,7 @@ func TestWarmRunTracesNormalizedMemoryReview(t *testing.T) {
 
 	records, outputs, completed, err := runPass(context.Background(), "warm-review", 1, plan,
 		stageRegistry{"code_writer": stages.CodeWriter{}},
-		provider, PipelineConfigFromAgentOptions(agent.Options{}), workDir, fakeRunner, time.Time{}, nil, store, nil)
+		provider, PipelineConfigFromAgentOptions(agent.Options{}), workDir, fakeRunner, time.Time{}, nil, store, nil, NewStageExecutionBudget(0))
 	if err != nil || !completed || len(records) != 1 || records[0].Status != schemas.StageCompleted {
 		t.Fatalf("completed=%v records=%#v err=%v", completed, records, err)
 	}
@@ -368,7 +368,7 @@ func TestWarmRunWithoutDispositionsStillSucceeds(t *testing.T) {
 
 	records, _, completed, err := runPass(context.Background(), "warm-silent", 1, plan,
 		stageRegistry{"code_writer": stages.CodeWriter{}},
-		provider, PipelineConfigFromAgentOptions(agent.Options{}), workDir, fakeRunner, time.Time{}, nil, store, nil)
+		provider, PipelineConfigFromAgentOptions(agent.Options{}), workDir, fakeRunner, time.Time{}, nil, store, nil, NewStageExecutionBudget(0))
 	if err != nil || !completed || records[0].Status != schemas.StageCompleted {
 		t.Fatalf("completed=%v records=%#v err=%v", completed, records, err)
 	}

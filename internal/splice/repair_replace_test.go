@@ -94,7 +94,7 @@ func TestRepairReplacesStaleFailingOutputSoSuccessIsVisible(t *testing.T) {
 	repaired, interaction, err := attemptLocalRepair(
 		context.Background(), "run-replace", 1, plan, registry, nil,
 		PipelineRunConfig{}, t.TempDir(), nil, nil, nil, nil,
-		time.Now().Add(time.Minute), &records, &outputs,
+		time.Now().Add(time.Minute), NewStageExecutionBudget(0), &records, &outputs,
 		&priorSummaries, &priorChangedFiles, initial,
 	)
 	if err != nil {
@@ -154,7 +154,7 @@ func TestExhaustedRepairsKeepExactlyOneFailingPayload(t *testing.T) {
 	repaired, interaction, err := attemptLocalRepair(
 		context.Background(), "run-exhausted", 1, plan, registry, nil,
 		PipelineRunConfig{}, t.TempDir(), nil, nil, nil, nil,
-		time.Now().Add(time.Minute), &records, &outputs,
+		time.Now().Add(time.Minute), NewStageExecutionBudget(0), &records, &outputs,
 		&priorSummaries, &priorChangedFiles, initial,
 	)
 	if err != nil {
@@ -208,7 +208,7 @@ func TestRepairEmitsLabeledRerunAndExhaustionEvents(t *testing.T) {
 	_, _, _ = attemptLocalRepair(
 		context.Background(), "run-events", 1, plan, registry, nil,
 		options, t.TempDir(), nil, nil, nil, nil,
-		time.Now().Add(time.Minute), &records, &outputs,
+		time.Now().Add(time.Minute), NewStageExecutionBudget(0), &records, &outputs,
 		&priorSummaries, &priorChangedFiles, initial,
 	)
 

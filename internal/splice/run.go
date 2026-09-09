@@ -601,7 +601,7 @@ func runIterationLoop(
 		}
 
 		emitProgress(options, fmt.Sprintf("Starting pipeline iteration %d\n", i))
-		passRecords, passOutputs, completed, err := runPass(ctx, runID, i, plan, registry, provider, options, workDir, runner, wallDeadline, revisionContext, mem, tr)
+		passRecords, passOutputs, completed, err := runPass(ctx, runID, i, plan, registry, provider, options, workDir, runner, wallDeadline, revisionContext, mem, tr, NewStageExecutionBudget(0))
 		if err != nil {
 			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 				return schemas.PipelineResult{}, context.Canceled
@@ -814,6 +814,7 @@ func runPass(
 	revisionContext *string,
 	mem MemoryStore,
 	tr *runTraceAccumulator,
+	execBudget *StageExecutionBudget,
 ) ([]schemas.StageRecord, []schemas.HarnessStageOutput, bool, error) {
 	priorSummaries := map[string]string{}
 	priorChangedFiles := map[string][]string{}
@@ -956,7 +957,12 @@ func runPass(
 		}
 
 		start := time.Now()
-		output, err := runStageWithContext(stageCtx, input, agentStage, iteration, selection, options, workDir, runner, mem, stage.Budget.OutputMax, tr, priorScope, 0)
+		// D2: each stage invocation in the pass owns a fresh shared budget;
+		// the local repair loop of that stage (attemptLocalRepair) reuses the
+		// same instance, so pass + repairs of one stage share one allowance,
+		// while different stages never starve each other.
+		stageBudget := NewStageExecutionBudget(0)
+		output, err := runStageWithContextBudgeted(stageCtx, input, agentStage, iteration, selection, options, workDir, runner, mem, stage.Budget.OutputMax, tr, priorScope, 0, stageBudget)
 		if cancelStage != nil {
 			cancelStage()
 		}
@@ -1054,7 +1060,7 @@ func runPass(
 		if stageName == "test_runner" && record.Status == schemas.StageCompleted {
 			if results, ok := output.Data["test_results"].(schemas.TestRunResults); ok && results.Failed() > 0 {
 				if _, hasWriter := priorSummaries["code_writer"]; hasWriter {
-					if _, interaction, rerr := attemptLocalRepair(ctx, runID, iteration, plan, registry, provider, options, workDir, runner, mem, tr, priorScope, wallDeadline, &records, &outputs, &priorSummaries, &priorChangedFiles, output); rerr != nil {
+					if _, interaction, rerr := attemptLocalRepair(ctx, runID, iteration, plan, registry, provider, options, workDir, runner, mem, tr, priorScope, wallDeadline, execBudget, &records, &outputs, &priorSummaries, &priorChangedFiles, output); rerr != nil {
 						return records, outputs, false, rerr
 					} else if interaction != nil && tr != nil {
 						tr.recordInteraction(*interaction)
@@ -1116,6 +1122,29 @@ func runStageWithContext(
 	priorScope *StageScopePlan,
 	invocationOrdinal int,
 ) (schemas.HarnessStageOutput, error) {
+	return runStageWithContextBudgeted(ctx, input, stage, iteration, selection, options, workDir, runner, mem, outputMax, tr, priorScope, invocationOrdinal, nil)
+}
+
+// runStageWithContextBudgeted is runStageWithContext with an explicit
+// shared execution budget (D2/D3). A nil budget creates a fresh one (the
+// unthreaded pass path); repair re-entry passes the SAME budget as the
+// pass so provider requests and expansions share one allowance.
+func runStageWithContextBudgeted(
+	ctx context.Context,
+	input schemas.HarnessStageInput,
+	stage stages.Stage,
+	iteration int,
+	selection agent.ModelSelection,
+	options PipelineRunConfig,
+	workDir string,
+	runner ToolRunner,
+	mem MemoryStore,
+	outputMax int,
+	tr *runTraceAccumulator,
+	priorScope *StageScopePlan,
+	invocationOrdinal int,
+	execBudget *StageExecutionBudget,
+) (schemas.HarnessStageOutput, error) {
 	stageOpts := stageOptions(input.StageName, iteration, selection, options, workDir, runner, stage.Capabilities())
 	// Part A context bridge: fresh cognition narrows the default context
 	// request. The scoped request replaces the default ONLY when the scope
@@ -1157,28 +1186,116 @@ func runStageWithContext(
 	}
 	stageOpts.ModelOverride = selection.Model
 	stageOpts.ReasoningEffort = selection.ReasoningEffort
-	output, err := stage.Run(ctx, input, selection.Provider, stageOpts)
-	if err != nil {
-		return schemas.HarnessStageOutput{}, err
-	}
-	if output.ContextRequest == nil {
-		return output, nil
-	}
 
-	bundle, err := FulfillContextRequest(ctx, *output.ContextRequest, runner)
+	// Model-free stages keep the single-call path (no provider request,
+	// no expansion semantics). The budget is created fresh here when the
+	// caller did not thread one (pass loop), or reuses the shared one
+	// (repair re-entry): additional context is never a fresh repair
+	// budget.
+	budget := execBudget
+	if budget == nil {
+		budget = NewStageExecutionBudget(0)
+	}
+	ledger := newExpansionLedger()
+	if stageOpts.OverrideContextRequest != nil {
+		ledger.Record(*stageOpts.OverrideContextRequest)
+	}
+	var usageTotal *schemas.StageUsage
+	accumulate := func(u *schemas.StageUsage) {
+		usageTotal = mergeStageUsage(usageTotal, u)
+	}
+	for round := 0; ; round++ {
+		if ctx.Err() != nil {
+			return schemas.HarnessStageOutput{}, withStageUsage(ctx.Err(), usageTotal)
+		}
+		output, err := stage.Run(ctx, input, selection.Provider, stageOpts)
+		if err != nil {
+			return schemas.HarnessStageOutput{}, withStageUsage(err, usageTotal)
+		}
+		accumulate(output.Usage)
+
+		if output.ContextRequest == nil {
+			// Terminal: the model submitted changes (bare C-protocol or
+			// submit_changes envelope) or produced a model-free output.
+			// D1: the writer/test-generator decoded its own action
+			// internally — a request_context action is surfaced as
+			// output.ContextRequest, and a submit action as the proposal.
+			// Nothing else to decode here.
+			output.Usage = usageTotal
+			return output, nil
+		}
+
+		// Stage-level ContextRequest (the historical one-shot contract,
+		// still used by the initial handshake). Fulfill it if the budget
+		// allows; this replaces the old hard "requested context more
+		// than once" error with a bounded continuation.
+		if !budget.SpendRequest() || budget.Exhausted() && round > 0 {
+			return schemas.HarnessStageOutput{}, withStageUsage(fmt.Errorf("%w while fulfilling the stage context request", errExpansionBudgetExhausted), usageTotal)
+		}
+		expanded, eerr := expandContextRound(ctx, input, output.ContextRequest, budget, ledger, runner, mem, tr, options, workDir, iteration, invocationOrdinal)
+		if eerr != nil {
+			return schemas.HarnessStageOutput{}, withStageUsage(eerr, usageTotal)
+		}
+		input = expanded
+		// The stage re-runs on the next loop iteration with the new
+		// evidence; the historical "requested context more than once"
+		// error becomes a bounded continuation instead.
+	}
+}
+
+// expandContextRound validates, bounds, and fulfills one context round
+// (initial handshake or envelope expansion). It mutates nothing global;
+// the caller re-invokes the stage with the returned input.
+func expandContextRound(
+	ctx context.Context,
+	input schemas.HarnessStageInput,
+	request *schemas.ContextRequest,
+	budget *StageExecutionBudget,
+	ledger *expansionLedger,
+	runner ToolRunner,
+	mem MemoryStore,
+	tr *runTraceAccumulator,
+	options PipelineRunConfig,
+	workDir string,
+	iteration int,
+	invocationOrdinal int,
+) (schemas.HarnessStageInput, error) {
+	if request == nil {
+		return input, nil
+	}
+	if !budget.SpendRequest() {
+		return input, fmt.Errorf("%w: %d provider request(s) spent", errExpansionBudgetExhausted, budget.RequestsUsed())
+	}
+	if ledger != nil {
+		if err := ledger.Check(*request); err != nil {
+			return input, fmt.Errorf("expansion rejected: %w", err)
+		}
+	}
+	bundle, err := FulfillContextRequest(ctx, *request, runner)
 	if err != nil {
-		return schemas.HarnessStageOutput{}, withStageUsage(fmt.Errorf("fulfill context: %w", err), output.Usage)
+		return input, fmt.Errorf("fulfill context: %w", err)
 	}
-	input.Context = &bundle
+	if ledger != nil {
+		ledger.Record(*request)
+	}
+	// Merge new evidence after previously delivered items: expansions
+	// ADD, never remove acceptance or failure evidence.
+	if input.Context != nil {
+		bundle.Items = append(input.Context.Items, bundle.Items...)
+	}
 	if tr != nil {
-		tr.recordContext(input.StageName, iteration, bundle)
+		round := budget.RoundsUsed()
+		if round == 0 {
+			tr.recordContext(input.StageName, iteration, bundle)
+		} else {
+			tr.recordContextRound(input.StageName, iteration, invocationOrdinal, round, bundle)
+		}
 	}
-	// C1: record the delivered source views as the proposal base for this
-	// stage invocation. The model may only edit text present in these
-	// views; the parser's base_ref resolves here, and the write tool's
-	// expected-base recheck verifies the file still matches at mutation
-	// time.
+	// C1: the delivered views are the proposal base for this invocation.
 	stages.RecordProposalBases(&bundle)
+	// Degradation observations persist per fulfilled bundle (the
+	// historical behavior for the initial handshake; expansions observe
+	// too, since a failed expansion query is the same delivery miss).
 	if mem != nil {
 		for _, obs := range extractDegradationObservations(input.StageName, input.RunID, memoryProjectRoot(options, workDir), bundle) {
 			persistObservation(ctx, mem, obs, func(msg string) {
@@ -1186,16 +1303,9 @@ func runStageWithContext(
 			})
 		}
 	}
-	finalOutput, err := stage.Run(ctx, input, selection.Provider, stageOpts)
-	if err != nil {
-		return schemas.HarnessStageOutput{}, withStageUsage(err, output.Usage)
-	}
-	if finalOutput.ContextRequest != nil {
-		usage := mergeStageUsage(output.Usage, finalOutput.Usage)
-		return schemas.HarnessStageOutput{}, withStageUsage(fmt.Errorf("stage requested context more than once"), usage)
-	}
-	finalOutput.Usage = mergeStageUsage(output.Usage, finalOutput.Usage)
-	return finalOutput, nil
+	input.Context = &bundle
+	emitProgress(options, fmt.Sprintf("[%s] context round fulfilled: %d item(s) delivered\n", input.StageName, len(bundle.Items)))
+	return input, nil
 }
 
 func passSucceeded(records []schemas.StageRecord, state schemas.IterationState) bool {
