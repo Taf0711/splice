@@ -210,7 +210,7 @@ func buildWarmPlan(cold ColdPlan, admitted []AdmittedResolution, unresolved []Co
 			// The subject's current evidence is delivered as a view so the
 			// model can USE the located answer without re-reading the file
 			// through discovery.
-			if subj := viewSubject(res); subj != "" && !containsString(warm.DeliveredViews, subj) {
+			if subj := viewSubject(res); subj != "" && !planContains(warm.DeliveredViews, subj) {
 				warm.DeliveredViews = append(warm.DeliveredViews, subj)
 			}
 		}
@@ -263,6 +263,17 @@ func indexOfOperation(ops []ColdOperation, name string) int {
 		}
 	}
 	return -1
+}
+
+// planContains reports whether the operation list already carries name.
+// Named separately from run_test.go's containsString helper.
+func planContains(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 // subjectToOpName converts a replaced-operation phrase like
