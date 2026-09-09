@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // AdmissionDecision is the typed result of admission. It names the verdict
@@ -231,17 +232,133 @@ func splitSubject(subject string) (string, string) {
 // and slash-normalized; the read hits the actual worktree file, so dirty and
 // untracked relevant files are included by construction. Missing files
 // return an error the caller classifies; unreadable files return
-// ("" , err) which callers treat as unavailable.
+// ("", err) which callers treat as unavailable.
+//
+// Package F4 (warm-cost handoff Section 10): results are memoized by
+// content version through the run's digest memo. The memo is invalidation-
+// exact, never optimistic: a recorded mutation of the file (or any file in
+// the worktree, via InvalidateAll) drops the entry so the next admission
+// re-hashes the current bytes. The mutation record is the same
+// PriorChangedFiles evidence the pipeline already tracks (writer output,
+// repair re-entry writes), so a pipeline-permitted edit always invalidates.
 func currentFileDigest(workspace, relPath string) (string, error) {
 	if workspace == "" || relPath == "" {
 		return "", errDigestUnavailable(relPath)
 	}
+	if memo := runDigestMemo(); memo != nil {
+		if digest, ok, err := memo.lookup(workspace, relPath); ok {
+			return digest, err
+		}
+		digest, err := currentFileDigestUncached(workspace, relPath)
+		memo.store(workspace, relPath, digest, err)
+		return digest, err
+	}
+	return currentFileDigestUncached(workspace, relPath)
+}
+
+// currentFileDigestUncached is the uncached hash: one file read plus SHA-256.
+func currentFileDigestUncached(workspace, relPath string) (string, error) {
 	raw, err := os.ReadFile(filepath.Join(workspace, filepath.FromSlash(relPath)))
 	if err != nil {
 		return "", err
 	}
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+// digestMemo memoizes (workspace, relPath) -> content digest for one run.
+// The zero-lookup seam keeps tests and offline tools (which run without a
+// memo) byte-identical to the pre-F4 behavior. Concurrent use is safe: the
+// pass loop and repair re-entry can interleave.
+type digestMemo struct {
+	mu         sync.Mutex
+	entries    map[digestMemoKey]digestMemoEntry
+	capacity   int
+	generation uint64
+}
+
+type digestMemoKey struct {
+	workspace string
+	path      string
+}
+
+type digestMemoEntry struct {
+	digest     string
+	err        error
+	generation uint64
+}
+
+// newDigestMemo returns a bounded memo. Capacity 512 entries is far above the
+// per-run file set; the LRU bound keeps pathological runs honest.
+func newDigestMemo() *digestMemo {
+	return &digestMemo{entries: map[digestMemoKey]digestMemoEntry{}, capacity: 512}
+}
+
+// lookup returns the memoized digest. ok=false means re-hash.
+func (m *digestMemo) lookup(workspace, relPath string) (digest string, ok bool, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := digestMemoKey{workspace: workspace, path: relPath}
+	entry, exists := m.entries[key]
+	if !exists || entry.generation != m.generation {
+		return "", false, nil
+	}
+	return entry.digest, true, entry.err
+}
+
+// store records one hash result at the current generation.
+func (m *digestMemo) store(workspace, relPath, digest string, hashErr error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.entries) >= m.capacity {
+		// Bound exceeded: drop everything (simpler than LRU; correctness is
+		// unaffected because a drop only causes a re-hash).
+		m.entries = map[digestMemoKey]digestMemoEntry{}
+	}
+	m.entries[digestMemoKey{workspace: workspace, path: relPath}] = digestMemoEntry{
+		digest:     digest,
+		err:        hashErr,
+		generation: m.generation,
+	}
+}
+
+// Invalidate drops the memoized digest for one file. Call it when the
+// pipeline records a mutation of that file.
+func (m *digestMemo) Invalidate(workspace, relPath string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.entries, digestMemoKey{workspace: workspace, path: relPath})
+}
+
+// InvalidateAll drops every entry. Call it when the worktree as a whole may
+// have moved (repair re-entry with a broad write set).
+func (m *digestMemo) InvalidateAll() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.generation++
+	m.entries = map[digestMemoKey]digestMemoEntry{}
+}
+
+// run-scoped memo seam. Tests and offline slices run with no memo (nil), so
+// their behavior is byte-identical to the uncached path.
+var (
+	digestMemoMu sync.Mutex
+	digestMemoV  *digestMemo
+)
+
+// SetRunDigestMemo installs the run-scoped memo. Pass nil to clear (tests).
+// The memo lives for one pipeline run: a new run installs a fresh memo.
+func SetRunDigestMemo(m *digestMemo) {
+	digestMemoMu.Lock()
+	defer digestMemoMu.Unlock()
+	digestMemoV = m
+}
+
+// runDigestMemo returns the active memo, or nil when none is installed.
+func runDigestMemo() *digestMemo {
+	digestMemoMu.Lock()
+	defer digestMemoMu.Unlock()
+	return digestMemoV
 }
 
 type digestUnavailableError string

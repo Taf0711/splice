@@ -213,6 +213,11 @@ func Run(ctx context.Context, prompt string, provider agent.Provider, options ag
 	}
 
 	cfg := PipelineConfigFromAgentOptions(options)
+	// F4: one digest memo per run. Same stage need re-hashes only when new
+	// evidence (a recorded mutation) invalidates the cached content version.
+	memo := newDigestMemo()
+	SetRunDigestMemo(memo)
+	defer SetRunDigestMemo(nil)
 	result, err := runExecutionPlan(ctx, runID, plan, provider, cfg, mem, rec)
 	if err != nil {
 		return agent.Result{}, err

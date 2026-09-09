@@ -369,6 +369,16 @@ func attemptLocalRepair(
 			// classification re-proves everything against the new tree
 			// instead of trusting a memoized set from before the repair.
 			tr.noteSpliceMutation(stageChangedFilesMap(writerOutput))
+			// F4: the same mutation evidence invalidates the admission
+			// digest memo. New evidence (recorded writes) means cached
+			// content versions may no longer match the worktree.
+			if memo := runDigestMemo(); memo != nil {
+				for _, files := range stageChangedFilesMap(writerOutput) {
+					for _, f := range files {
+						memo.Invalidate(workDir, strings.TrimPrefix(f, "./"))
+					}
+				}
+			}
 		}
 		*outputs = append(*outputs, writerOutput)
 		lastWriterOutput = writerOutput
