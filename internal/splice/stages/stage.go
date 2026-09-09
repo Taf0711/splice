@@ -73,6 +73,12 @@ type StageOptions struct {
 	Command []string
 	// TimeoutSeconds bounds deterministic subprocess execution.
 	TimeoutSeconds int
+	// OnFormatRetry, when set, is invoked before each typed-output format
+	// retry attempt (attempt 2 and up) of callValidatedToolUse. The
+	// orchestrator uses it to reclassify the request attribution cell so
+	// retry spend lands under the format_retry source instead of
+	// generation. Nil means the stage never reclassifies (legacy shape).
+	OnFormatRetry func(attempt int)
 	// Plan is used by the plan_critic stage.
 	Plan *schemas.DesignPlan
 	// PreviousPlan is the plan from the prior crystallization, when available.

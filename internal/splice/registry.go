@@ -10,6 +10,7 @@ import (
 
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/splice/dtools"
+	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/splice/stages"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
@@ -64,14 +65,24 @@ func stageOptions(name string, iteration int, selection agent.ModelSelection, op
 	var onUsageResult func(zeroruntime.Usage, bool, *float64)
 	var onUsageError func(string)
 	var onLegacyUsage func(zeroruntime.Usage)
+	// formatRetryNotify reclassifies the attribution cell for format-retry
+	// attempts (F1). Declared here so the StageOptions literal below can
+	// reference it; set only when attribution is active.
+	var formatRetryNotify func(attempt int)
+	var cell *agent.RequestAttribution
 	if options.OnAttributedUsage != nil {
 		// The closure reads the classification cell AT EMISSION TIME, not at
 		// registration: an expansion round or repair re-entry reclassifies
 		// the cell before its request streams, so the record carries the
 		// round/ordinal the request actually belongs to.
-		var cell *agent.RequestAttribution
 		if len(attribution) > 0 {
 			cell = attribution[0]
+		}
+		if cell != nil {
+			formatRetryNotify = func(attempt int) {
+				ordinal, round, _ := cell.Snapshot()
+				cell.Set(ordinal, round, schemas.SpendSourceFormatRetry)
+			}
 		}
 		emitAttributed := func(usage zeroruntime.Usage, reported bool, usageError string, reportedCostUSD *float64) {
 			ordinal, round, source := cell.Snapshot()
@@ -120,6 +131,12 @@ func stageOptions(name string, iteration int, selection agent.ModelSelection, op
 		RecordCommand:  makeRecordedCommandCallback(options),
 		ModelOverride:  options.Model,
 		PromptCacheKey: promptCacheKey,
+		// F1 wiring: format retries reclassify the attribution cell so the
+		// per-attempt usage events for attempts 2+ carry the format_retry
+		// source. The closure runs inside callValidatedToolUse's retry loop
+		// BEFORE each retry request streams; the emission-time Snapshot()
+		// then reads the reclassified value.
+		OnFormatRetry:  formatRetryNotify,
 		TimeoutSeconds: timeoutSeconds,
 	}
 }

@@ -110,7 +110,7 @@ func callToolUse(ctx context.Context, provider zeroruntime.Provider, model, reas
 // callValidatedToolUse retries typed-output contract failures. The observed
 // OpenRouter request error gets one compatibility retry with auto tool calling.
 // All other provider, transport, and cancellation errors return immediately.
-func callValidatedToolUse(ctx context.Context, provider zeroruntime.Provider, model, reasoningEffort, systemPrompt, userPrompt string, images []zeroruntime.ImageBlock, tool zeroruntime.ToolDefinition, maxOutputTokens int, callbacks *zeroruntime.CollectOptions, validate func(*zeroruntime.CollectedStream) error, promptCacheKey string) (*zeroruntime.CollectedStream, error) {
+func callValidatedToolUse(ctx context.Context, provider zeroruntime.Provider, model, reasoningEffort, systemPrompt, userPrompt string, images []zeroruntime.ImageBlock, tool zeroruntime.ToolDefinition, maxOutputTokens int, callbacks *zeroruntime.CollectOptions, validate func(*zeroruntime.CollectedStream) error, promptCacheKey string, onFormatRetry ...func(attempt int)) (*zeroruntime.CollectedStream, error) {
 	var total zeroruntime.Usage
 	attemptPrompt := userPrompt
 	var lastErr error
@@ -118,6 +118,17 @@ func callValidatedToolUse(ctx context.Context, provider zeroruntime.Provider, mo
 	for attempt := 1; attempt <= maxTypedToolAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+		// F1 wiring: attempts 2+ are format_retry spend. The orchestrator's
+		// reclassification callback (when supplied) flips the attribution
+		// cell BEFORE the request streams, so the per-attempt usage event
+		// carries the format_retry source instead of generation.
+		if attempt > 1 {
+			for _, notify := range onFormatRetry {
+				if notify != nil {
+					notify(attempt)
+				}
+			}
 		}
 		collected, err := callToolUse(ctx, provider, model, reasoningEffort, systemPrompt, attemptPrompt, images, tool, maxOutputTokens, callbacks, promptCacheKey, forceChoice)
 		if err != nil {

@@ -171,3 +171,42 @@ func TestCaptureSpendSourceReserved(t *testing.T) {
 		t.Fatalf("capture record invalid: %v", err)
 	}
 }
+
+// F1 wiring: a format retry must reclassify the attribution cell so the
+// ledger records the retry attempt's spend under format_retry instead of
+// generation. This pins the orchestrator-side reclassification contract
+// the registry installs as StageOptions.OnFormatRetry.
+func TestFormatRetryReclassifiesAttributionCell(t *testing.T) {
+	cell := agent.NewRequestAttribution(0, 0, schemas.SpendSourceGeneration)
+	notify := func(attempt int) {
+		if attempt > 1 {
+			ordinal, round, _ := cell.Snapshot()
+			cell.Set(ordinal, round, schemas.SpendSourceFormatRetry)
+		}
+	}
+	// Attempt 1: generation. The cell is untouched.
+	notify(1)
+	ordinal, round, source := cell.Snapshot()
+	if source != schemas.SpendSourceGeneration || ordinal != 0 || round != 0 {
+		t.Fatalf("attempt 1 reclassified the cell: ordinal=%d round=%d source=%q", ordinal, round, source)
+	}
+	// Attempt 2: format retry. The cell flips to format_retry, keeping the
+	// D3 identity (ordinal, round) intact.
+	notify(2)
+	ordinal, round, source = cell.Snapshot()
+	if source != schemas.SpendSourceFormatRetry {
+		t.Fatalf("attempt 2: source = %q, want format_retry", source)
+	}
+	if ordinal != 0 || round != 0 {
+		t.Fatalf("attempt 2: identity changed: ordinal=%d round=%d", ordinal, round)
+	}
+	// Attempt 3: stays format_retry (no double-flip side effects).
+	notify(3)
+	_, _, source = cell.Snapshot()
+	if source != schemas.SpendSourceFormatRetry {
+		t.Fatalf("attempt 3: source = %q, want format_retry", source)
+	}
+	// Nil cell is a no-op (a stage without attribution never panics).
+	nilCell := (*agent.RequestAttribution)(nil)
+	nilCell.Set(0, 0, schemas.SpendSourceFormatRetry)
+}
