@@ -163,6 +163,7 @@ func newFakeSidecar(t *testing.T) (*fakeSidecar, *memd.Client) {
 			SourceRunID      string             `json:"source_run_id"`
 			VerifiedRevision string             `json:"verified_revision"`
 			Anchors          []memd.GraphAnchor `json:"anchors"`
+			Metadata         map[string]any     `json:"metadata"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		if req.Kind == "" || req.Claim == "" {
@@ -174,11 +175,17 @@ func newFakeSidecar(t *testing.T) (*fakeSidecar, *memd.Client) {
 		f.next++
 		project := req.ProjectPath
 		rev := req.VerifiedRevision
+		var metaJSON *string
+		if req.Metadata != nil {
+			raw, _ := json.Marshal(req.Metadata)
+			s := string(raw)
+			metaJSON = &s
+		}
 		f.nodes[id] = memd.GraphNode{
 			ID: id, Kind: req.Kind, Claim: req.Claim,
 			Status: req.Status, ProjectPath: &project,
 			VerifiedRevision: &rev, SourceRunID: &req.SourceRunID,
-			Anchors: req.Anchors,
+			Anchors: req.Anchors, MetadataJSON: metaJSON,
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "node": f.nodes[id]})
 	})

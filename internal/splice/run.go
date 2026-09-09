@@ -395,13 +395,15 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 		if anchorReason != "" {
 			emitProgress(options, fmt.Sprintf("[cognition] anchored at HEAD (%s)", anchorReason))
 		}
-		captures := captureFromVerifiedRun(
+		captures := captureFromVerifiedRunVerified(
 			projectRoot,
 			result.Status,
 			worktreeChangedFiles(ctx, absWorkDir),
 			pipelineTestCommand(result),
 			snapshot,
 			runID,
+			captureVerificationFromResult(result),
+			CaptureOriginRuntime,
 		)
 		for _, capture := range captures {
 			id, capErr := persistGraphCapture(ctx, graphClient, capture)
@@ -472,6 +474,37 @@ func pipelineTestCommand(result schemas.PipelineResult) string {
 		return "go test ./..."
 	}
 	return ""
+}
+
+// captureVerificationFromResult extracts the E2 verification observation
+// from the pipeline result: did the applicable required checks EXECUTE and
+// PASS? Stage status completed is not evidence; the counts come from the
+// final iteration state's executed totals. A run with zero executed checks
+// yields a zero-value observation, which capture labels provisional (or
+// unverified for legacy callers), never verified. Skipped facts do not
+// count: only acceptance facts that actually executed and passed do.
+func captureVerificationFromResult(result schemas.PipelineResult) captureVerification {
+	ver := captureVerification{}
+	for i := len(result.Stages) - 1; i >= 0; i-- {
+		stage := result.Stages[i]
+		if stage.Name != "test_runner" || stage.Status != schemas.StageCompleted {
+			continue
+		}
+		ver.TestStageRan = true
+		ver.TestCommand = pipelineTestCommand(result)
+		break
+	}
+	if state := result.FinalState; state != nil {
+		ver.TestsExecuted = state.TestsPassing + state.TestsFailing + state.TestsErrored
+		ver.TestsFailed = state.TestsFailing + state.TestsErrored
+		ver.AcceptanceTotal = state.AcceptanceFactsPassing + state.AcceptanceFactsFailing
+		ver.AcceptancePassed = state.AcceptanceFactsPassing
+	}
+	if ver.TestStageRan {
+		ver.EnvironmentStdLib = true
+		ver.ObservedResult = fmt.Sprintf("executed %d test(s), %d failed", ver.TestsExecuted, ver.TestsFailed)
+	}
+	return ver
 }
 
 // headRevision returns the current git HEAD sha of the working directory,
@@ -666,7 +699,7 @@ func runIterationLoop(
 		}
 
 		if passSucceeded(passRecords, state) {
-			return finishCompleted(runID, plan, allRecords)
+			return finishCompleted(runID, plan, allRecords, state)
 		}
 
 		decision := EvaluateTrajectory(history, maxIterations, &tokenBudget)
@@ -2156,12 +2189,13 @@ func emitPermissionDecision(options PipelineRunConfig, request agent.PermissionR
 	})
 }
 
-func finishCompleted(runID string, plan schemas.ExecutionPlan, records []schemas.StageRecord) (schemas.PipelineResult, error) {
+func finishCompleted(runID string, plan schemas.ExecutionPlan, records []schemas.StageRecord, finalState schemas.IterationState) (schemas.PipelineResult, error) {
 	return schemas.PipelineResult{
-		RunID:  runID,
-		Status: "completed",
-		Tier:   plan.Tier,
-		Stages: records,
+		RunID:      runID,
+		Status:     "completed",
+		Tier:       plan.Tier,
+		Stages:     records,
+		FinalState: &finalState,
 	}, nil
 }
 

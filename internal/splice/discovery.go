@@ -2,10 +2,13 @@ package splice
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -393,6 +396,12 @@ func firstLine(s string) string {
 // GraphCapture is one verified cognition node derived from a completed run,
 // ready to persist through the sidecar. Capture is evidence-gated: the run
 // must have completed verification before a FACT node is proposed.
+//
+// E2: the extra fields carry the typed reuse record inputs. FileDigests maps
+// each anchored file to the sha256 of its bytes at the verified revision
+// (the freshness manifest E3 validates). VerificationStatus distinguishes
+// passed (checks executed and passed) from provisional (native pre-evaluator
+// capture) and unverified; captureFromVerifiedRun enforces the contract.
 type GraphCapture struct {
 	Kind     string
 	Claim    string
@@ -401,6 +410,31 @@ type GraphCapture struct {
 	Revision string
 	Anchors  []memd.GraphAnchor
 	Evidence []memd.GraphEvidence
+
+	CaptureOrigin      string
+	VerificationStatus string
+	Applicability      string
+	FileDigests        map[string]string
+	FailureFingerprint string
+	TestCommand        string
+	TestPackages       []string
+	EnvironmentAssumed string
+	ObservedResult     string
+}
+
+// captureVerification is the run-level verification observation capture
+// consumes. Executed and passed are separate booleans so a completed run
+// with zero executed checks can never pass as verified.
+type captureVerification struct {
+	TestStageRan      bool
+	TestsExecuted     int
+	TestsFailed       int
+	AcceptanceTotal   int
+	AcceptancePassed  int
+	TestCommand       string
+	TestPackages      []string
+	EnvironmentStdLib bool
+	ObservedResult    string
 }
 
 // captureFromVerifiedRun derives candidate cognition from a completed
@@ -420,19 +454,74 @@ type GraphCapture struct {
 // compares against the exact bytes the run verified. It produces nothing
 // when verification did not complete.
 func captureFromVerifiedRun(projectPath, outcomeStatus string, changedFiles []string, testCommand, revision, runID string) []GraphCapture {
+	return captureFromVerifiedRunVerified(projectPath, outcomeStatus, changedFiles, testCommand, revision, runID, captureVerification{}, "")
+}
+
+// captureFromVerifiedRunVerified is the E2 capture contract. Arguments:
+//
+//   - outcomeStatus "completed" is necessary but NOT sufficient: verification
+//     requires evidence the applicable required checks EXECUTED and PASSED
+//     (ver.captureVerification). A completed run with zero executed checks
+//     contributes only provisional captures.
+//   - origin is the capture origin. A runtime capture whose verification
+//     evidence passed is labeled passed; a native pre-evaluator capture
+//     (origin eval-import or explicit provisional) is labeled provisional
+//     and stays eligible-incomplete until a later result attaches.
+//   - ver carries the structured verification observation (executed counts,
+//     failed counts, actual command, packages, environment assumptions,
+//     observed result).
+//   - digests maps each changed file to the sha256 of its verified bytes.
+//     A nil map means digests were unavailable: captures still form but the
+//     reuse record marks freshness unavailable (E3 fails closed).
+//
+// Legacy callers (the 6-argument form above) get the historical behavior:
+// structural procedure + file-fact captures. Their records carry
+// verification status unverified unless ver proves otherwise, so legacy
+// captures remain hints, never trusted substitutions.
+func captureFromVerifiedRunVerified(projectPath, outcomeStatus string, changedFiles []string, testCommand, revision, runID string, ver captureVerification, origin string) []GraphCapture {
 	if outcomeStatus != "completed" {
 		return nil
 	}
+	// The capture contract: label verification from EXECUTED evidence only.
+	// trace_status completed != verified; skipped facts do not count.
+	verified := verificationEvidence(ver.TestStageRan, ver.TestsExecuted, ver.TestsFailed, ver.AcceptanceTotal, ver.AcceptancePassed)
+	status := VerificationStatusUnverified
+	switch {
+	case origin == CaptureOriginEvalImport && !verified:
+		// Native pre-evaluator capture: provisional until the later
+		// eligibility result attaches to the identity.
+		status = VerificationStatusProvisional
+	case verified:
+		status = VerificationStatusPassed
+	}
+	digests := worktreeFileDigests(projectPath, changedFiles)
+	command := ver.TestCommand
+	if command == "" {
+		command = testCommand
+	}
+
 	var captures []GraphCapture
-	if testCommand != "" {
+	if command != "" {
 		captures = append(captures, GraphCapture{
 			Kind:     "procedure",
-			Claim:    fmt.Sprintf("Verification passes with: %s", testCommand),
+			Claim:    fmt.Sprintf("Verification passes with: %s", command),
 			Project:  projectPath,
 			RunID:    runID,
 			Revision: revision,
-			Anchors:  []memd.GraphAnchor{{Kind: "test", Value: testCommand}},
+			Anchors:  []memd.GraphAnchor{{Kind: "test", Value: command}},
 			Evidence: []memd.GraphEvidence{{Kind: "test_run", Ref: runID, Detail: "test command exited 0"}},
+			// Procedure records must include the actual command, package
+			// and config dependencies, environment assumptions, and the
+			// observed result. Without them buildReuseRecord keeps the
+			// node a hint instead of admitting a substitution record.
+			TestCommand:        command,
+			TestPackages:       ver.TestPackages,
+			EnvironmentAssumed: environmentAssumption(ver.EnvironmentStdLib),
+			ObservedResult:     ver.ObservedResult,
+			CaptureOrigin:      origin,
+			VerificationStatus: status,
+			Applicability:      "test command for this project at the recorded revision; rerun required after any dependency or config change",
+			FileDigests:        digests,
 		})
 	}
 	for _, file := range changedFiles {
@@ -453,16 +542,56 @@ func captureFromVerifiedRun(projectPath, outcomeStatus string, changedFiles []st
 			}
 		}
 		captures = append(captures, GraphCapture{
-			Kind:     "fact",
-			Claim:    claim,
-			Project:  projectPath,
-			RunID:    runID,
-			Revision: revision,
-			Anchors:  anchors,
-			Evidence: []memd.GraphEvidence{{Kind: "git", Ref: revision, Detail: "verified run changed this file"}},
+			Kind:               "fact",
+			Claim:              claim,
+			Project:            projectPath,
+			RunID:              runID,
+			Revision:           revision,
+			Anchors:            anchors,
+			Evidence:           []memd.GraphEvidence{{Kind: "git", Ref: revision, Detail: "verified run changed this file"}},
+			CaptureOrigin:      origin,
+			VerificationStatus: status,
+			// Narrow applicability: the fact speaks about THIS file's
+			// declared symbols at the verified bytes, nothing more. A file
+			// location can replace a location search; it cannot certify
+			// package behavior.
+			Applicability: "location and declared symbols of this file at the recorded worktree revision; not package behavior",
+			FileDigests:   digests,
 		})
 	}
 	return captures
+}
+
+// environmentAssumption renders the environment assumption string for a
+// procedure record. Only the stdlib-only case is auto-derived; anything else
+// must be stated by the caller.
+func environmentAssumption(stdLibOnly bool) string {
+	if stdLibOnly {
+		return "Go toolchain, standard library only, no network"
+	}
+	return ""
+}
+
+// worktreeFileDigests hashes each changed file's CURRENT bytes in workspace.
+// The digest is the E3 freshness input: a later admission re-hashes the
+// authorized source (including dirty and untracked relevant files) and any
+// mismatch revokes substitution. Missing files hash to "" and count as
+// unavailable, never silently fresh.
+func worktreeFileDigests(workspace string, files []string) map[string]string {
+	digests := make(map[string]string, len(files))
+	for _, f := range files {
+		if f == "" {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(workspace, filepath.FromSlash(f)))
+		if err != nil {
+			digests[f] = ""
+			continue
+		}
+		sum := sha256.Sum256(raw)
+		digests[f] = hex.EncodeToString(sum[:])
+	}
+	return digests
 }
 
 // maxCaptureSymbolsPerFile bounds the symbol anchors one captured file emits.
@@ -512,7 +641,9 @@ func receiverTypeNameString(expr ast.Expr) string {
 }
 
 // persistGraphCapture upserts one capture with its anchors and evidence via
-// the sidecar client. Best-effort at the call site: a sidecar failure must
+// the sidecar client. The E2 typed reuse record rides the node metadata:
+// nodes that meet the record floor carry it, nodes that do not remain
+// hints. Best-effort at the call site: a sidecar failure must
 // degrade the run to cold, never fail it.
 func persistGraphCapture(ctx context.Context, client *memd.Client, c GraphCapture) (int64, error) {
 	if client == nil {
@@ -528,6 +659,7 @@ func persistGraphCapture(ctx context.Context, client *memd.Client, c GraphCaptur
 		VerifiedRevision: c.Revision,
 		Anchors:          c.Anchors,
 		Evidence:         c.Evidence,
+		Metadata:         recordToMetadata(buildReuseRecord(c)),
 	})
 	if err != nil {
 		return 0, err

@@ -724,6 +724,11 @@ type PipelineResult struct {
 	MergeBranch           *string                `json:"merge_branch,omitempty"`
 	MergeCommitSHA        *string                `json:"merge_commit_sha,omitempty"`
 	MergeMessage          *string                `json:"merge_message,omitempty"`
+	// FinalState is the last computed iteration state, attached additively
+	// so post-run consumers (graph capture) can read EXECUTED verification
+	// counts instead of inferring them from stage status. Optional: legacy
+	// producers omit it and legacy consumers ignore it.
+	FinalState *IterationState `json:"final_state,omitempty"`
 }
 
 // Validate checks the pipeline result.
