@@ -294,6 +294,18 @@ func newRecordingImportServer(t *testing.T, record func(project string, nodes []
 		t.Fatalf("listen unix: %v", err)
 	}
 	mux := http.NewServeMux()
+	// Health is Resolve's gate: without it the stub is "unavailable".
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	})
+	// The runner's resetArmMemory calls POST /project/reset before seeding;
+	// a stub without it fails loud on an unreachable sidecar.
+	mux.HandleFunc("/project/reset", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":      true,
+			"deleted": map[string]int{"observations": 0, "run_traces": 0},
+		})
+	})
 	mux.HandleFunc("/graph/import_capture_set", func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
 			ProjectPath string                     `json:"project_path"`
@@ -310,6 +322,9 @@ func newRecordingImportServer(t *testing.T, record func(project string, nodes []
 	srv.Listener = ln
 	srv.Start()
 	t.Cleanup(srv.Close)
+	// Expose the socket path so the runner's memd.Resolve dials THIS stub:
+	// DefaultSocketPath reads SPLICE_MEMD_SOCKET. t.Setenv restores it.
+	t.Setenv("SPLICE_MEMD_SOCKET", sock)
 	return memd.NewClient(sock)
 }
 
@@ -336,20 +351,22 @@ func newCampaignSeamFixture(t *testing.T, rollouts int) (mvpEvalOptions, mvpFami
 
 func TestThreeConditionRowsAreCorrectAndFlagged(t *testing.T) {
 	outDir := t.TempDir()
+	// The in-process sidecar stand-in (import + reset) so the runner's
+	// resetArmMemory and manual-arm seeding run against a real socket.
+	// SPLICE_MEMD_SOCKET is set by the fixture helper; without it CI has
+	// no sidecar binary and reset fails loud before reconstruction.
+	newRecordingImportServer(t, func(project string, nodes []memd.ExportedCaptureNode) {})
 	options, manifest, manifestDir, fixtureDir := newCampaignSeamFixture(t, 1)
 	options.OutDir = outDir
 	deps := appDeps{}
 	seam := &seamRunner{}
 	rows := &[]familyPairRow{}
 	err := runMvpMatchedSnapshots(context.Background(), deps, options, manifest, manifestDir, fixtureDir, seam.run, &strings.Builder{}, rows)
-	// Without a sidecar the A4 contract routes seeding through the labeled
-	// RECONSTRUCTION fallback (CaptureOrigin=reconstructed on the snapshot
-	// bundle), not a hard failure: the sidecar being unreachable is an
-	// infrastructure state, and the run proceeds with records whose
-	// provenance is honestly marked. A missing natural capture despite a
-	// REACHABLE sidecar is the loud path (different precondition).
+	// With a reachable stub sidecar, natural capture export fails (the
+	// stub has no /graph/export endpoints) and the A4 contract routes
+	// through the labeled RECONSTRUCTION fallback, not a hard failure.
 	if err != nil {
-		t.Fatalf("no-sidecar run should complete via the labeled reconstruction fallback: %v", err)
+		t.Fatalf("run should complete via the labeled reconstruction fallback: %v", err)
 	}
 	if len(*rows) == 0 {
 		t.Fatal("no rows written")
