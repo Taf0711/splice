@@ -36,6 +36,16 @@ type mvpEvalOptions struct {
 	// an identical coding task. Off by default: the default mode measures
 	// the full independent A->B workflow per arm.
 	MatchedSnapshots bool
+	// Conditions selects the arm table for matched-snapshot runs:
+	// "cold,warm" (the legacy 2-arm default, so old scripts are not
+	// silently changed) or "three-condition" (the Section-11 campaign:
+	// cold, improved-cold, warm/automatic, and the diagnostic manual
+	// arm). Non-matched flows ignore it.
+	Conditions string
+	// SchedulingSeed is the recorded seed the arm launch ORDER is derived
+	// from per experiment (Section 11.2). Zero means the deterministic
+	// default; the recorded seed lands on every attempts row.
+	SchedulingSeed int64
 }
 
 func parseMvpEvalArgs(args []string) (mvpEvalOptions, bool, error) {
@@ -101,6 +111,33 @@ func parseMvpEvalArgs(args []string) (mvpEvalOptions, bool, error) {
 			options.Rollouts = n
 		case arg == "--matched-snapshots":
 			options.MatchedSnapshots = true
+		case arg == "--conditions":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.Conditions = strings.TrimSpace(value)
+			index = next
+		case strings.HasPrefix(arg, "--conditions="):
+			options.Conditions = strings.TrimSpace(strings.TrimPrefix(arg, "--conditions="))
+		case arg == "--scheduling-seed":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			index = next
+			n, parseErr := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+			if parseErr != nil {
+				return options, false, execUsageError{fmt.Sprintf("--scheduling-seed requires an integer, got %q", value)}
+			}
+			options.SchedulingSeed = n
+		case strings.HasPrefix(arg, "--scheduling-seed="):
+			value := strings.TrimSpace(strings.TrimPrefix(arg, "--scheduling-seed="))
+			n, parseErr := strconv.ParseInt(value, 10, 64)
+			if parseErr != nil {
+				return options, false, execUsageError{fmt.Sprintf("--scheduling-seed requires an integer, got %q", value)}
+			}
+			options.SchedulingSeed = n
 		case strings.HasPrefix(arg, "-"):
 			return options, false, execUsageError{fmt.Sprintf("unknown eval mvp flag %q", arg)}
 		default:
@@ -112,6 +149,9 @@ func parseMvpEvalArgs(args []string) (mvpEvalOptions, bool, error) {
 	}
 	if options.TasksetDir == "" {
 		return options, false, execUsageError{"--taskset requires the MVP taskset directory (holding fixture/)"}
+	}
+	if _, err := campaignArmsFor(options.Conditions); err != nil {
+		return options, false, execUsageError{err.Error()}
 	}
 	return options, false, nil
 }
@@ -764,11 +804,28 @@ func summarizeMvp(stdout io.Writer, manifest mvpFamilyManifest, rows []familyPai
 			continue
 		}
 		var cold, warm []familyPairRow
+		improvedCold, manualRows, autoRows := 0, 0, 0
+		manualS, manualNonDiagnostic, autoS := 0, 0, 0
 		setupFailed := 0
 		failedSnapshots := map[string]bool{}
 		for _, row := range frows {
 			if row.Task != "B" {
 				continue
+			}
+			switch row.Condition {
+			case conditionImprovedCold:
+				improvedCold++
+			case conditionManual:
+				manualRows++
+				manualS += boolToInt(row.Success)
+				if row.DiagnosticOnly == nil || !*row.DiagnosticOnly {
+					// The manual arm must always carry the diagnostic
+					// flag: a missing flag is a wiring bug, reported.
+					manualNonDiagnostic++
+				}
+			case conditionAutomatic:
+				autoRows++
+				autoS += boolToInt(row.Success)
 			}
 			if row.InfraStatus == "precursor_failed" {
 				// A failed precursor is a real outcome of the full
@@ -826,6 +883,17 @@ func summarizeMvp(stdout io.Writer, manifest mvpFamilyManifest, rows []familyPai
 				}
 			}
 		}
+		if manualRows > 0 || improvedCold > 0 || autoRows > 0 {
+			// Section-11 campaign lines. The manual arm is diagnostic
+			// only: its rows never count toward the automatic-cognition
+			// gate, so it is reported separately and never in the gate
+			// comparison.
+			fmt.Fprintf(stdout, "  campaign: improved-cold %d rows, automatic success %d/%d, manual (diagnostic_only) success %d/%d\n",
+				improvedCold, autoS, autoRows, manualS, manualRows)
+			if manualNonDiagnostic > 0 {
+				fmt.Fprintf(stdout, "  campaign WARNING: %d manual row(s) missing diagnostic_only=true; they must never count toward the automatic-cognition gate\n", manualNonDiagnostic)
+			}
+		}
 	}
 }
 
@@ -859,6 +927,13 @@ Flags:
                             tree and captured cognition, and run Task B
                             from identical trees in both arms (starting
                             tree hashes asserted)
+      --conditions <mode>   Matched-snapshot arm table: cold,warm (legacy
+                            2-arm default) or three-condition (Section-11
+                            campaign: cold, improved-cold, automatic, and
+                            the diagnostic manual arm)
+      --scheduling-seed <n> Recorded seed the arm launch order derives from
+                            (Section 11.2; deterministic default when
+                            omitted). Recorded on every attempts row.
   -h, --help                Show this help
 
 Environment (treatment matrix, applies to the exec children):

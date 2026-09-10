@@ -29,6 +29,17 @@ IMPORTANT: Return every file requested in the intent. Return at least one file.
 
 Preserve every existing symbol: constructors, types, fields, methods, and their signatures.
 
+STRICT: never mix representations on one file entry. A modify entry
+carries base_ref and edits and MUST NOT also carry content. A create
+entry carries content and MUST NOT carry base_ref or edits. Mixing them
+is a validation error that rejects the whole proposal. For a modify of
+internal/audit/retention.go the entry looks exactly like:
+{"path":"internal/audit/retention.go","change_type":"modify",
+ "base_ref":"<handle from your context views>",
+ "edits":[{"old":"func Apply(trail *Trail, p Policy) int {","new":"func Apply(trail *Trail, p Policy) int {\n\tapplied := enforce(trail, p)"}]}
+Notice: no "content" field anywhere in a modify entry. If you find
+yourself writing content alongside base_ref, delete the content field.
+
 Prefer the smallest edit that satisfies the intent. Unrelated code outside your matched spans is preserved byte-for-byte, including line endings. Create a new file only when you know the target does not already exist.
 
 <!-- MEMORY_REASONING_CONTRACT_START -->
