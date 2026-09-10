@@ -158,6 +158,7 @@ type ProposalSnapshot struct {
 //   - line endings ride byte-for-byte inside the matched spans; the
 //     materializer never normalizes.
 func MaterializeProposal(p ProposedFileChange, baseRefToSnapshot func(baseRef string) (ProposalSnapshot, bool)) (schemas.FileChange, error) {
+	p = normalizeProposal(p, baseRefToSnapshot)
 	if err := p.Validate(); err != nil {
 		return schemas.FileChange{}, err
 	}
@@ -341,3 +342,4 @@ func HashBytes(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }
+
