@@ -1,8 +1,11 @@
 package stages
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
 // Mixed representation (content + base_ref on a modify): the common model
@@ -65,4 +68,35 @@ func TestNormalizeMixedModifyPreservesExactOnce(t *testing.T) {
 	if !strings.Contains(got.Content, "BETA") || strings.Contains(got.Content, "beta") {
 		t.Fatalf("derived edit did not apply: %q", got.Content)
 	}
+}
+
+// The model also omits base_ref entirely (the gpt-5.6-sol smoke failure):
+// content-only modify with no base_ref at all. Normalization resolves the
+// base by path from the delivered bundle registry.
+func TestNormalizeModifyWithoutBaseRefResolvesByPath(t *testing.T) {
+	base := "package audit\n\nfunc Apply() int {\n\treturn 0\n}\n"
+	provided := "package audit\n\nfunc Apply() int {\n\treturn 1\n}\n"
+	p := ProposedFileChange{
+		Path: "internal/audit/retention.go", ChangeType: "modify", Content: &provided,
+	}
+	RecordProposalBases(nil) // reset
+	// Record the delivered bundle the way the runner does.
+	bundle := &schemas.ContextBundle{Items: []schemas.ContextItem{{
+		Query:   schemas.ContextQuery{QueryType: "read_file"},
+		Summary: "internal/audit/retention.go",
+		Payload: map[string]any{"text": base, "path": "internal/audit/retention.go", "version": "rev-1"},
+	}}}
+	RecordProposalBases(bundle)
+	got, err := MaterializeProposal(p, currentProposalSnapshot)
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	if got.Content != provided {
+		t.Fatalf("hydrated mismatch:\n%q", got.Content)
+	}
+}
+
+func mustRawText(text string) json.RawMessage {
+	b, _ := json.Marshal(map[string]any{"text": text, "path": "internal/audit/retention.go"})
+	return json.RawMessage(b)
 }

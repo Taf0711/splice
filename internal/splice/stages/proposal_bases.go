@@ -197,3 +197,21 @@ func SetProposalBases(reg *ProposalBaseRegistry) func() {
 func ProbeDefaultRequestFor(intent, workDir, language string) schemas.ContextRequest {
 	return defaultContextRequest(intent, workDir, language)
 }
+
+// ResolveByPath finds the snapshot recorded for a path (the by-path
+// index). It backs normalizeProposal's fallback for modify proposals
+// whose model omitted base_ref entirely: the delivered base for that
+// path is unambiguous within one invocation.
+func (r *ProposalBaseRegistry) ResolveByPath(path string) (ProposalSnapshot, bool) {
+	if r == nil {
+		return ProposalSnapshot{}, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	handle, ok := r.byPath[path]
+	if !ok {
+		return ProposalSnapshot{}, false
+	}
+	snap, ok := r.byHandle[handle]
+	return snap, ok
+}
