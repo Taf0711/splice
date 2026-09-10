@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -167,9 +168,9 @@ func newManualSeedingFixture(t *testing.T) (snapshotBundle, string) {
 		SchemaVersion:      splice.ReuseRecordSchemaVersion,
 		Kind:               "fact",
 		Identity:           "id-1",
-		AnsweredNeed:       "locate:a.go#EnforceRetention",
+		AnsweredNeed:       "locate:internal/audit/retention.go#EnforceRetention",
 		Conclusion:         "a.go defines EnforceRetention; verified",
-		Supporting:         []splice.SourceRef{{Path: "a.go", Symbol: "EnforceRetention", Digest: "d1"}},
+		Supporting:         []splice.SourceRef{{Path: "internal/audit/retention.go", Symbol: "EnforceRetention", Digest: "d1"}},
 		ProducerRun:        "run-snap",
 		CaptureOrigin:      splice.CaptureOriginRuntime,
 		WorktreeIdentity:   "rev-1",
@@ -180,9 +181,9 @@ func newManualSeedingFixture(t *testing.T) (snapshotBundle, string) {
 		SchemaVersion:      splice.ReuseRecordSchemaVersion,
 		Kind:               "fact",
 		Identity:           "id-2",
-		AnsweredNeed:       "locate:main.go#BillingDunning",
+		AnsweredNeed:       "locate:other/main.go#BillingDunning",
 		Conclusion:         "main.go defines BillingDunningNotice; verified",
-		Supporting:         []splice.SourceRef{{Path: "main.go", Symbol: "BillingDunningNotice", Digest: "d2"}},
+		Supporting:         []splice.SourceRef{{Path: "other/main.go", Symbol: "BillingDunningNotice", Digest: "d2"}},
 		ProducerRun:        "run-snap",
 		CaptureOrigin:      splice.CaptureOriginRuntime,
 		WorktreeIdentity:   "rev-1",
@@ -212,8 +213,8 @@ func newManualSeedingFixture(t *testing.T) (snapshotBundle, string) {
 	bundle := snapshotBundle{
 		ProducerRunID: "run-snap",
 		Nodes: []memd.ExportedCaptureNode{
-			node(rec1, "a.go defines EnforceRetention"),
-			node(rec2, "main.go defines BillingDunningNotice"),
+			node(rec1, "internal/audit/retention.go defines EnforceRetention"),
+			node(rec2, "other/main.go defines BillingDunningNotice"),
 		},
 		CaptureDigest: bundleDigest(nil), // recomputed by import; direct seed needs none
 	}
@@ -232,6 +233,16 @@ func TestSeedManualArmSelectsOnlyNeedMatchedRecords(t *testing.T) {
 		imported = append(imported, nodes...)
 	})
 	dir := t.TempDir()
+	// The workspace must declare the symbol the intent names: needs are
+	// confirmed against the current-source index (B2), and an empty
+	// workspace would reject "EnforceRetention" before matching runs.
+	if err := os.MkdirAll(filepath.Join(dir, "internal", "audit"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "internal", "audit", "retention.go"),
+		[]byte("package audit\n\n// EnforceRetention applies the retention cutoff and cap.\nfunc EnforceRetention() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	count, err := seedManualArm(context.Background(), client, dir, bundle, intent)
 	if err != nil {
 		t.Fatalf("seed manual arm: %v", err)
@@ -523,7 +534,7 @@ func TestSummarizeMvpKeepsManualRowsOutOfTheGate(t *testing.T) {
 	defer func() { reviewAggregatesQuiet = false }()
 	summarizeMvp(&out, mvpFamilyManifest{Families: []mvpFamilyEntry{{ID: "fam-x"}}}, rows)
 	text := out.String()
-	if !strings.Contains(text, "manual (diagnostic_only) success 1/1") {
+	if !strings.Contains(text, "manual (diagnostic_only) success 2/2") {
 		t.Fatalf("manual rows must be reported under their diagnostic label:\n%s", text)
 	}
 	if strings.Contains(text, "WARNING") {

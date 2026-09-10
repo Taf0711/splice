@@ -76,13 +76,13 @@ func campaignArmsFor(conditions string) ([]campaignArm, error) {
 	case "", conditionsFlagColdWarm:
 		return []campaignArm{
 			{name: "cold", condition: conditionCold, memory: "off", treatment: "cold"},
-			{name: "warm", condition: conditionAutomatic, memory: "on", treatment: "full"},
+			{name: "warm", condition: conditionAutomatic, memory: "on", treatment: "full", seed: true},
 		}, nil
 	case conditionsFlagThreeCondition:
 		return []campaignArm{
 			{name: "cold", condition: conditionCold, memory: "off", treatment: "cold"},
 			{name: "improved-cold", condition: conditionImprovedCold, memory: "off", treatment: "cold"},
-			{name: "warm", condition: conditionAutomatic, memory: "on", treatment: "full"},
+			{name: "warm", condition: conditionAutomatic, memory: "on", treatment: "full", seed: true},
 			{name: "manual", condition: conditionManual, memory: "on", treatment: "full", seed: true, diagnosticOnly: true},
 		}, nil
 	default:
