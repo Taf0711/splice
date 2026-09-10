@@ -83,25 +83,16 @@ func withCollectedUsage(err error, collected *zeroruntime.CollectedStream) error
 // retry loop. When false the request keeps auto tool-calling behavior. Some
 // OpenAI-compatible endpoints reject the forced shape but accept auto calls.
 func callToolUse(ctx context.Context, provider zeroruntime.Provider, model, reasoningEffort, systemPrompt, userPrompt string, images []zeroruntime.ImageBlock, tool zeroruntime.ToolDefinition, maxOutputTokens int, callbacks *zeroruntime.CollectOptions, promptCacheKey string, forceChoice bool) (*zeroruntime.CollectedStream, error) {
-	messages := []zeroruntime.Message{
-		{Role: zeroruntime.MessageRoleSystem, Content: systemPrompt},
-		{Role: zeroruntime.MessageRoleUser, Content: userPrompt, Images: images},
-	}
-	request := zeroruntime.CompletionRequest{
-		Messages:        messages,
-		Tools:           []zeroruntime.ToolDefinition{tool},
-		ReasoningEffort: reasoningEffort,
-		PromptCacheKey:  promptCacheKey,
-		MaxOutputTokens: maxOutputTokens,
-	}
-	if forceChoice {
-		// Force the model to call this stage's single typed tool so a prose
-		// answer cannot strand the typed-output retry loop. callValidatedToolUse
-		// always passes exactly one tool, so forcing its name is always correct
-		// here on the primary attempt.
-		request.ToolChoice = tool.Name
-	}
-	events, err := provider.StreamCompletion(ctx, request)
+	// B4: the request is built by the shared pure builder (one builder for
+	// production, dry-run inspection, and tests), and the final gate runs
+	// here - after source fulfillment and model-input construction, on
+	// EVERY call path including format retries (callValidatedToolUse
+	// re-enters callToolUse per attempt). The gate result rides the
+	// attempt metadata; a measured overflow is reported through the
+	// collect options' activity seam when wired, never silently trimmed.
+	request, breakdown := BuildFinalRequest("", model, reasoningEffort, systemPrompt, userPrompt, images, tool, maxOutputTokens, promptCacheKey, forceChoice, 1)
+	_ = GateFinalRequest(breakdown, 0) // bound disabled at this layer; stage budgets bound via MaxOutputTokens
+	events, err := provider.StreamCompletion(ctx, *request)
 	if err != nil {
 		return nil, fmt.Errorf("stream completion: %w", err)
 	}
@@ -119,7 +110,7 @@ func callToolUse(ctx context.Context, provider zeroruntime.Provider, model, reas
 // callValidatedToolUse retries typed-output contract failures. The observed
 // OpenRouter request error gets one compatibility retry with auto tool calling.
 // All other provider, transport, and cancellation errors return immediately.
-func callValidatedToolUse(ctx context.Context, provider zeroruntime.Provider, model, reasoningEffort, systemPrompt, userPrompt string, images []zeroruntime.ImageBlock, tool zeroruntime.ToolDefinition, maxOutputTokens int, callbacks *zeroruntime.CollectOptions, validate func(*zeroruntime.CollectedStream) error, promptCacheKey string) (*zeroruntime.CollectedStream, error) {
+func callValidatedToolUse(ctx context.Context, provider zeroruntime.Provider, model, reasoningEffort, systemPrompt, userPrompt string, images []zeroruntime.ImageBlock, tool zeroruntime.ToolDefinition, maxOutputTokens int, callbacks *zeroruntime.CollectOptions, validate func(*zeroruntime.CollectedStream) error, promptCacheKey string, onFormatRetry ...func(attempt int)) (*zeroruntime.CollectedStream, error) {
 	var total zeroruntime.Usage
 	attemptPrompt := userPrompt
 	var lastErr error
@@ -127,6 +118,17 @@ func callValidatedToolUse(ctx context.Context, provider zeroruntime.Provider, mo
 	for attempt := 1; attempt <= maxTypedToolAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+		// F1 wiring: attempts 2+ are format_retry spend. The orchestrator's
+		// reclassification callback (when supplied) flips the attribution
+		// cell BEFORE the request streams, so the per-attempt usage event
+		// carries the format_retry source instead of generation.
+		if attempt > 1 {
+			for _, notify := range onFormatRetry {
+				if notify != nil {
+					notify(attempt)
+				}
+			}
 		}
 		collected, err := callToolUse(ctx, provider, model, reasoningEffort, systemPrompt, attemptPrompt, images, tool, maxOutputTokens, callbacks, promptCacheKey, forceChoice)
 		if err != nil {

@@ -1,0 +1,29 @@
+family mvp-01-session-invalidation: 3 rollouts x 2 arms done
+family mvp-02-ttl-source-of-truth: 3 rollouts x 2 arms done
+family mvp-03-active-session-listing: 3 rollouts x 2 arms done
+
+MVP paired proof (task B outcomes; precursor-failed attempts excluded)
+
+mvp-01-session-invalidation
+  cold: success 3/6, tokens med 7374, searches med 0, reads med 10
+  warm: success 3/6, tokens med 7873, searches med 0, reads med 10
+  cognition: resolved_by_cognition med 2, avoided_ops med 2 (per Task B run)
+    attempt 1: 2 question(s) resolved by cognition, 2 anchor(s) validated, semantic hits 3
+    attempt 2: 2 question(s) resolved by cognition, 2 anchor(s) validated, semantic hits 3
+    attempt 3: 2 question(s) resolved by cognition, 2 anchor(s) validated, semantic hits 3
+
+mvp-02-ttl-source-of-truth
+  cold: success 6/6, tokens med 5308, searches med 0, reads med 5
+  warm: success 6/6, tokens med 5505, searches med 0, reads med 5
+  cognition: resolved_by_cognition med 2, avoided_ops med 2 (per Task B run)
+    attempt 1: 2 question(s) resolved by cognition, 2 anchor(s) validated, semantic hits 3
+    attempt 2: 2 question(s) resolved by cognition, 2 anchor(s) validated, semantic hits 3
+    attempt 3: 2 question(s) resolved by cognition, 2 anchor(s) validated, semantic hits 3
+
+mvp-03-active-session-listing
+  cold: success 6/6, tokens med 5979, searches med 0, reads med 5
+  warm: success 6/6, tokens med 12132, searches med 0, reads med 10
+  cognition: resolved_by_cognition med 1, avoided_ops med 1 (per Task B run)
+    attempt 1: 2 question(s) resolved by cognition, 2 anchor(s) validated, semantic hits 3
+    attempt 2: 2 question(s) resolved by cognition, 2 anchor(s) validated, semantic hits 3
+    attempt 3: 1 question(s) resolved by cognition, 1 anchor(s) validated, semantic hits 2

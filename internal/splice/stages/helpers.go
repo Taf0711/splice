@@ -43,6 +43,13 @@ func (o StageOptions) contextRequest(intent string) *schemas.ContextRequest {
 	return nil
 }
 
+// DefaultContextRequestFor is the exported counterfactual: the default
+// context request the cold path would issue for this stage. The cognition
+// scope planner uses it for structural suppression accounting only.
+func DefaultContextRequestFor(intent, workDir, language string) schemas.ContextRequest {
+	return defaultContextRequest(intent, workDir, language)
+}
+
 func defaultContextRequest(intent string, workDir string, language string) schemas.ContextRequest {
 	queries := []schemas.ContextQuery{
 		{QueryType: schemas.ContextListFiles, MaxResults: defaultListMaxResults, MaxChars: 10000},
@@ -153,6 +160,12 @@ func candidatePaths(intent string) []string {
 	return seen
 }
 
+// selectRelevantContext composes the model-visible context entries for one
+// stage request. Package F3 (warm-cost handoff Section 10): after assembly,
+// the composition passes through the shared dedup filter so static
+// instructions and prior-stage summaries repeated across requests are
+// delivered once. Required evidence, acceptance constraints, and active
+// failure evidence are protected by the filter and never removed.
 func selectRelevantContext(static []string, prior map[string]string, context *schemas.ContextBundle, roster []string) []string {
 	selected := append([]string(nil), static...)
 	keys := make([]string, 0, len(prior))
@@ -191,13 +204,76 @@ func selectRelevantContext(static []string, prior map[string]string, context *sc
 	if context != nil {
 		selected = append(selected, formatContextBundle(context)...)
 	}
-	return selected
+	return dedupeRepeatedContext(selected)
 }
 
+// dedupeRepeatedContext removes exact-duplicate entries and static
+// instructions repeated across request compositions (F3). The filter is
+// content-addressed: two entries survive identically only when they are
+// byte-equal after trimming surrounding whitespace. Protected classes
+// (required evidence, acceptance constraints, active failure evidence) are
+// exempt: a repeated protected entry is delivered every time it appears.
+// Order is otherwise preserved, so composition stays deterministic and
+// byte-comparable.
+func dedupeRepeatedContext(entries []string) []string {
+	out := make([]string, 0, len(entries))
+	seen := map[string]int{}
+	for _, entry := range entries {
+		key := strings.TrimSpace(entry)
+		if key == "" {
+			continue
+		}
+		if isProtectedContextEntry(key) {
+			// Protected evidence survives every occurrence.
+			out = append(out, entry)
+			continue
+		}
+		if first, dup := seen[key]; dup {
+			// Byte-identical repeat: keep the first occurrence's position.
+			_ = first
+			continue
+		}
+		seen[key] = len(out)
+		out = append(out, entry)
+	}
+	return out
+}
+
+// isProtectedContextEntry reports whether an entry carries required
+// evidence, acceptance constraints, or active failure evidence. These
+// classes survive repeated-content removal (handoff Section 4: required
+// intent, acceptance constraints, active failure evidence, and source edit
+// preconditions survive prompt compaction).
+func isProtectedContextEntry(entry string) bool {
+	for _, marker := range protectedContextMarkers {
+		if strings.Contains(entry, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// protectedContextMarkers are the stable content markers of protected entry
+// classes. They match the composition formats in this file and the repair
+// evidence formats in repair.go.
+var protectedContextMarkers = []string{
+	"acceptance",
+	"failing",
+	"failure",
+	"error=",
+	"fingerprint",
+	"revision",
+}
+
+// formatContextBundle renders a fulfilled context bundle into prompt text
+// (B3). Source text is serialized ONCE: the item payload's text rides as a
+// plain fenced block, not JSON-embedded inside another JSON string. Views
+// are deduped by (path, version, range) identity so the same source bytes
+// never reach the prompt twice.
 func formatContextBundle(bundle *schemas.ContextBundle) []string {
 	formatted := []string{}
+	seen := map[string]bool{}
 	for _, item := range bundle.Items {
-		payload, _ := json.Marshal(item.Payload)
 		errStr := ""
 		if item.Error != nil {
 			errStr = fmt.Sprintf(" error=%s", *item.Error)
@@ -206,12 +282,63 @@ func formatContextBundle(bundle *schemas.ContextBundle) []string {
 		if item.Truncated {
 			suffix = " truncated"
 		}
+		// Dedupe by source identity when the item carries one (B1 views
+		// embed path/version/range); fall back to the query signature.
+		identity := contextItemIdentity(item)
+		if seen[identity] {
+			continue
+		}
+		seen[identity] = true
+		// The payload's text field is plain source/context text: deliver
+		// it as a fenced block, serialized exactly once. Structured
+		// metadata (path/version) stays on the summary line, not nested
+		// in a JSON string inside a string.
+		text := ""
+		if raw, ok := item.Payload["text"].(string); ok {
+			text = raw
+		} else if item.Payload != nil {
+			payload, _ := json.Marshal(item.Payload)
+			text = string(payload)
+		}
 		formatted = append(formatted, fmt.Sprintf(
 			"context %s%s: %s\n%s%s",
-			item.Query.QueryType, suffix, item.Summary, string(payload), errStr,
+			item.Query.QueryType, suffix, item.Summary, text, errStr,
 		))
 	}
 	return formatted
+}
+
+// contextItemIdentity builds the dedupe key for one fulfilled item:
+// source identity (path+version+range) when present, else the query
+// shape. Two items with the same identity deliver the same bytes twice.
+func contextItemIdentity(item schemas.ContextItem) string {
+	path, _ := item.Payload["path"].(string)
+	version, _ := item.Payload["version"].(string)
+	start, _ := item.Payload["start"].(int)
+	end, _ := item.Payload["end"].(int)
+	if path != "" && version != "" {
+		return fmt.Sprintf("%s@%s#%d-%d", path, version, start, end)
+	}
+	q := item.Query
+	key, _ := json.Marshal(struct {
+		Type    string
+		Path    string
+		Pattern string
+		Symbol  string
+	}{
+		Type:    string(q.QueryType),
+		Path:    derefString(q.Path),
+		Pattern: derefString(q.Pattern),
+		Symbol:  derefString(q.Symbol),
+	})
+	return string(key)
+}
+
+func derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // selectMemory maps an admitted MemoryBundle into bounded SelectedMemory
@@ -233,9 +360,40 @@ func formatPathList(paths []string, max int) string {
 	return fmt.Sprintf("%s, ... and %d more", strings.Join(paths[:max], ", "), len(paths)-max)
 }
 
-// fileChangeArraySchema is the shared JSON schema for a stage's `files` array
-// (used by submit_code and submit_tests). Both tools accept the same file
-// change shape, so the schema is defined once.
+// proposalArraySchema is the shared JSON schema for a stage's `files`
+// array under the compact/1 edit protocol (C3). Both writer and test
+// generator advertise the SAME versioned schema so both arms of a
+// comparison send the same shape. A file entry is exactly one of:
+// create (content only), modify (base_ref + edits), delete (base_ref).
+func proposalArraySchema() map[string]any {
+	return map[string]any{
+		"type": "array",
+		"items": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path":        map[string]any{"type": "string"},
+				"change_type": map[string]any{"type": "string", "enum": []string{"create", "modify", "delete"}},
+				"base_ref":    map[string]any{"type": "string", "description": "For modify/delete: the source handle of the base content you received in context views. The host resolves it to exact bytes; you never compute hashes."},
+				"edits": map[string]any{
+					"type":        "array",
+					"description": "For modify: exact text replacements matched against the base content. old must appear exactly once; no fuzzy matching.",
+					"items": map[string]any{
+						"type":       "object",
+						"properties": map[string]any{"old": map[string]any{"type": "string"}, "new": map[string]any{"type": "string", "description": "Replacement text; empty deletes the matched span."}},
+						"required":   []string{"old", "new"},
+					},
+				},
+				"content": map[string]any{"type": "string", "description": "For create only: the full file content."},
+			},
+			"required": []string{"path", "change_type"},
+		},
+	}
+}
+
+// fileChangeArraySchema is the legacy full/1 schema, kept for stored
+// artifacts and legacy routes. The live comparison uses proposalArraySchema
+// for BOTH arms; this function remains the pairing reference for the
+// legacy protocol version.
 func fileChangeArraySchema() map[string]any {
 	return map[string]any{
 		"type": "array",

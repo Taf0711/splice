@@ -224,7 +224,9 @@ func attemptLocalRepair(
 	runner ToolRunner,
 	mem MemoryStore,
 	tr *runTraceAccumulator,
+	priorScope *StageScopePlan,
 	wallDeadline time.Time,
+	execBudget *StageExecutionBudget,
 	records *[]schemas.StageRecord,
 	outputs *[]schemas.HarnessStageOutput,
 	priorSummaries *map[string]string,
@@ -250,6 +252,12 @@ func attemptLocalRepair(
 	var lastMessage schemas.StageMessage
 	progress := newRepairProgressState()
 	var lastWriterOutput schemas.HarnessStageOutput
+	// repairScope is the scope state for this repair loop. Each re-entry
+	// executes with the scope freshly prepared for THAT re-entry and then
+	// replaces repairScope, so repair N+1 validates against repair N's
+	// plan, never the initial pass pointer. Keyed to this repair call's
+	// stage set; an unrelated stage's scope cannot leak in.
+	repairScope := priorScope
 
 	for repairN := 1; repairN <= maxLocalRepairs; repairN++ {
 		if ctx.Err() != nil {
@@ -341,10 +349,14 @@ func attemptLocalRepair(
 		// Re-enter code_writer with the focused revision context.
 		writerInput := repairStageInput(runID, "code_writer", plan, stageNames, *priorSummaries, *priorChangedFiles, &revisionContext)
 		writerStart := time.Now()
-		writerOutput, werr := runRepairStage(ctx, wallDeadline, writerInput, codeWriterStage, iteration, repairSelection(options, provider, "code_writer", false), options, workDir, runner, mem, stageBudgetByName(plan, "code_writer"), plan.Tier, tr)
+		var writerScope *StageScopePlan
+		writerOutput, werr := runRepairStage(ctx, wallDeadline, writerInput, codeWriterStage, iteration, repairSelection(options, provider, "code_writer", false), options, workDir, runner, mem, stageBudgetByName(plan, "code_writer"), plan.Tier, tr, repairScope, repairN, &writerScope, execBudget)
 		totalLatency += int(time.Since(writerStart).Milliseconds())
 		if werr != nil {
 			return false, nil, fmt.Errorf("repair: code_writer re-entry: %w", werr)
+		}
+		if writerScope != nil {
+			repairScope = writerScope
 		}
 		mergedWriter := mergeRepairRecord(records, iteration, "code_writer", writerOutput, false)
 		if tr != nil {
@@ -357,6 +369,16 @@ func attemptLocalRepair(
 			// classification re-proves everything against the new tree
 			// instead of trusting a memoized set from before the repair.
 			tr.noteSpliceMutation(stageChangedFilesMap(writerOutput))
+			// F4: the same mutation evidence invalidates the admission
+			// digest memo. New evidence (recorded writes) means cached
+			// content versions may no longer match the worktree.
+			if memo := runDigestMemo(); memo != nil {
+				for _, files := range stageChangedFilesMap(writerOutput) {
+					for _, f := range files {
+						memo.Invalidate(workDir, strings.TrimPrefix(f, "./"))
+					}
+				}
+			}
 		}
 		*outputs = append(*outputs, writerOutput)
 		lastWriterOutput = writerOutput
@@ -369,10 +391,14 @@ func attemptLocalRepair(
 		emitStageEvent(options, "test_runner", "message", fmt.Sprintf("repair re-entry %d: re-running tests", attempts), 0, nil)
 		testInput := repairStageInput(runID, "test_runner", plan, stageNames, *priorSummaries, *priorChangedFiles, nil)
 		testStart := time.Now()
-		newTestOutput, terr := runRepairStage(ctx, wallDeadline, testInput, testRunnerStage, iteration, agent.ModelSelection{}, options, workDir, runner, mem, stageBudgetByName(plan, "test_runner"), plan.Tier, tr)
+		var runnerScope *StageScopePlan
+		newTestOutput, terr := runRepairStage(ctx, wallDeadline, testInput, testRunnerStage, iteration, agent.ModelSelection{}, options, workDir, runner, mem, stageBudgetByName(plan, "test_runner"), plan.Tier, tr, repairScope, repairN, &runnerScope, execBudget)
 		totalLatency += int(time.Since(testStart).Milliseconds())
 		if terr != nil {
 			return false, nil, fmt.Errorf("repair: test_runner re-run: %w", terr)
+		}
+		if runnerScope != nil {
+			repairScope = runnerScope
 		}
 		mergedRunner := mergeRepairRecord(records, iteration, "test_runner", newTestOutput, true)
 		if tr != nil {
@@ -578,28 +604,56 @@ func repairSelection(options PipelineRunConfig, provider agent.Provider, stageNa
 	return selection
 }
 
+// scopePlanIsUncomputed reports whether a scope plan is the zero value
+// preparation produces when it never ran the Track C bridge (nil memory
+// store or a stage that does not consume memory). Such a plan carries no
+// authority, so the caller must not let it replace a real prior scope.
+func scopePlanIsUncomputed(s StageScopePlan) bool {
+	return !s.CognitionResolved && !s.SemanticResolved && len(s.KnownFiles) == 0 &&
+		len(s.KnownSymbols) == 0 && s.ExpansionBudget == 0
+}
+
 // runRepairStage runs a stage under the pass wall deadline, mirroring the
 // pass loop's deadline scoping. Re-entry composes its input through the same
 // preparation module as the normal pass, so repair retrieves current memory,
 // applies admission and compaction, and records post-compaction counts; it
-// receives the full stage budget, not only OutputMax.
-func runRepairStage(ctx context.Context, wallDeadline time.Time, input schemas.HarnessStageInput, stage stages.Stage, iteration int, selection agent.ModelSelection, options PipelineRunConfig, workDir string, runner ToolRunner, mem MemoryStore, budget schemas.StageBudget, tier schemas.PipelineTier, tr *runTraceAccumulator) (schemas.HarnessStageOutput, error) {
-	prepared, err := prepareStageInput(ctx, stageInputPreparation{
-		Input:     input,
-		Stage:     stage,
-		Budget:    budget,
-		Tier:      tier,
-		Iteration: iteration,
-		WorkDir:   workDir,
-		Options:   options,
-		Memory:    mem,
-		Trace:     tr,
-		NowUnix:   time.Now().Unix(),
+// receives the full stage budget, not only OutputMax. The freshly prepared
+// scope plan (not the caller's prior pointer) executes, and the fresh plan
+// flows back through freshScope so the next repair validates against this
+// invocation's scope rather than the initial pointer. invocationOrdinal
+// separates repair re-entry trace records from the initial-pass record.
+func runRepairStage(ctx context.Context, wallDeadline time.Time, input schemas.HarnessStageInput, stage stages.Stage, iteration int, selection agent.ModelSelection, options PipelineRunConfig, workDir string, runner ToolRunner, mem MemoryStore, budget schemas.StageBudget, tier schemas.PipelineTier, tr *runTraceAccumulator, priorScope *StageScopePlan, invocationOrdinal int, freshScope **StageScopePlan, execBudget *StageExecutionBudget) (schemas.HarnessStageOutput, error) {
+	prepared, freshPlan, _, err := prepareStageInput(ctx, stageInputPreparation{
+		Input:         input,
+		Stage:         stage,
+		Budget:        budget,
+		Tier:          tier,
+		Iteration:     iteration,
+		WorkDir:       workDir,
+		Options:       options,
+		Memory:        mem,
+		Trace:         tr,
+		NowUnix:       time.Now().Unix(),
+		PriorScope:    priorScope,
+		RepairReentry: true,
 	})
 	if err != nil {
 		return schemas.HarnessStageOutput{}, err
 	}
 	input = prepared
+	// The fresh plan, not the stale prior pointer, governs this execution
+	// and becomes the scope the next repair invocation validates against.
+	// Preparation only computes a scope plan when the stage consumes memory
+	// through a store; when it did not run (nil store), the zero plan is
+	// not authoritative and the prior scope persists unchanged.
+	plan := freshPlan
+	if freshScope != nil {
+		if scopePlanIsUncomputed(freshPlan) && priorScope != nil {
+			*freshScope = priorScope
+		} else {
+			*freshScope = &plan
+		}
+	}
 
 	stageCtx := ctx
 	var cancel context.CancelFunc
@@ -609,7 +663,12 @@ func runRepairStage(ctx context.Context, wallDeadline time.Time, input schemas.H
 	if cancel != nil {
 		defer cancel()
 	}
-	return runStageWithContext(stageCtx, input, stage, iteration, selection, options, workDir, runner, mem, budget.OutputMax, tr)
+	// The freshly prepared scope carries into repair so already-granted
+	// files persist; runStageWithContext revalidates via the cognition
+	// resolved in THIS repair preparation (partial scope keeps default
+	// reads for unresolved questions, so newly needed context is not
+	// denied). Historical locations are hints, not stale authority.
+	return runStageWithContextBudgeted(stageCtx, input, stage, iteration, selection, options, workDir, runner, mem, budget.OutputMax, tr, &plan, invocationOrdinal, execBudget)
 }
 
 // stageBudgetByName returns the full stage budget for a named plan stage, or

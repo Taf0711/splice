@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"sync"
 
 	"github.com/Taf0711/splice/internal/hooks"
 	"github.com/Taf0711/splice/internal/modelregistry"
@@ -60,6 +61,60 @@ type AttributedUsage struct {
 	// It lives here rather than on Usage because Usage is rebuilt from plain
 	// numeric literals at several call sites that would silently drop it.
 	ReportedCostUSD *float64
+	// InvocationOrdinal separates repeated invocations of one stage within an
+	// iteration (0 is the initial pass, 1+ are repair re-entries). Zero value
+	// means the initial pass; the orchestrator ledger records it as absent
+	// through omitempty rather than as a fabricated zero (A3 convention).
+	InvocationOrdinal int
+	// ContextRound is the D2 expansion round this request belongs to
+	// (0 = initial handshake / no expansion).
+	ContextRound int
+	// SpendSource classifies why the request exists (Package F1). Empty means
+	// the orchestrator has not classified it; the ledger then derives the
+	// source mechanically instead of guessing.
+	SpendSource string
+}
+
+// RequestAttribution is the orchestrator-owned classification cell for
+// provider requests of one stage invocation. The stage emits usage through a
+// closure that reads a snapshot at emission time, so the orchestrator can
+// reclassify the cell between expansion rounds without threading new
+// parameters through every stage. Safe for concurrent use: stream callbacks
+// and the D2 loop interleave.
+type RequestAttribution struct {
+	mu                sync.Mutex
+	invocationOrdinal int
+	contextRound      int
+	spendSource       string
+}
+
+// NewRequestAttribution returns a classification cell seeded with the given
+// values.
+func NewRequestAttribution(ordinal, round int, source string) *RequestAttribution {
+	return &RequestAttribution{invocationOrdinal: ordinal, contextRound: round, spendSource: source}
+}
+
+// Set reclassifies the cell. The orchestrator calls it between provider
+// requests of one invocation (expansion rounds, repair re-entry).
+func (a *RequestAttribution) Set(ordinal, round int, source string) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.invocationOrdinal = ordinal
+	a.contextRound = round
+	a.spendSource = source
+}
+
+// Snapshot returns the current classification.
+func (a *RequestAttribution) Snapshot() (ordinal, round int, source string) {
+	if a == nil {
+		return 0, 0, ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.invocationOrdinal, a.contextRound, a.spendSource
 }
 
 // ModelSelection is one resolved provider route for a pipeline stage.

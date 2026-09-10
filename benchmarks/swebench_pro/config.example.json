@@ -1,0 +1,10 @@
+{
+  "repo_dir": "/path/to/SWE-bench_Pro-os",
+  "raw_sample_path": "/path/to/swe_bench_pro_full.csv",
+  "splice_bin": "",
+  "workspace_dir": "/path/to/workspaces",
+  "dockerhub_username": "jefzda",
+  "use_local_docker": false,
+  "num_workers": 4,
+  "timeout_per_instance": 3600
+}

@@ -762,15 +762,26 @@ func (c *Client) ContradictGraphNode(ctx context.Context, nodeID, byNodeID int64
 	return nil
 }
 
-// GraphSearchHit pairs a node ID with its semantic similarity score.
+// GraphSearchHit pairs a node ID with its semantic similarity score. Node is
+// the full active node with anchors when the hit resolved to a live row; nil
+// when the index entry is stale.
 type GraphSearchHit struct {
-	NodeID int64   `json:"node_id"`
-	Score  float64 `json:"score"`
+	NodeID int64      `json:"node_id"`
+	Score  float64    `json:"score"`
+	Node   *GraphNode `json:"node,omitempty"`
 }
 
 // SearchGraphSemantically ranks active nodes by cosine similarity to text and
 // returns the top k hits.
 func (c *Client) SearchGraphSemantically(ctx context.Context, text string, k int) ([]GraphSearchHit, error) {
+	return c.SearchGraphSemanticallyScoped(ctx, text, k, "")
+}
+
+// SearchGraphSemanticallyScoped is SearchGraphSemantically with an optional
+// project scope: when projectPath is non-empty, only that project's nodes
+// rank. Scoped retrieval is what planDiscovery uses: cross-project hits
+// would anchor at another repo's revisions and poison freshness validation.
+func (c *Client) SearchGraphSemanticallyScoped(ctx context.Context, text string, k int, projectPath string) ([]GraphSearchHit, error) {
 	if text == "" {
 		return nil, fmt.Errorf("memd graph search_semantic: text is required")
 	}
@@ -779,7 +790,7 @@ func (c *Client) SearchGraphSemantically(ctx context.Context, text string, k int
 		Hits  []GraphSearchHit `json:"hits"`
 		Error string           `json:"error,omitempty"`
 	}
-	if err := c.do(ctx, http.MethodPost, "/graph/search_semantic", map[string]any{"text": text, "k": k}, &resp); err != nil {
+	if err := c.do(ctx, http.MethodPost, "/graph/search_semantic", map[string]any{"text": text, "k": k, "project_path": projectPath}, &resp); err != nil {
 		return nil, err
 	}
 	if !resp.OK {
@@ -788,6 +799,52 @@ func (c *Client) SearchGraphSemantically(ctx context.Context, text string, k int
 	return resp.Hits, nil
 }
 
+// ReanchorGraph advances the verified revision of one project's active
+// nodes. See the /graph/reanchor wire contract.
+func (c *Client) ReanchorGraph(ctx context.Context, projectPath, fromRevision, toRevision string) (int64, error) {
+	if projectPath == "" || fromRevision == "" || toRevision == "" {
+		return 0, fmt.Errorf("memd graph reanchor: project path and both revisions are required")
+	}
+	var resp struct {
+		OK    bool   `json:"ok"`
+		Nodes int64  `json:"nodes"`
+		Error string `json:"error,omitempty"`
+	}
+	body := map[string]any{"project_path": projectPath, "from_revision": fromRevision, "to_revision": toRevision}
+	if err := c.do(ctx, http.MethodPost, "/graph/reanchor", body, &resp); err != nil {
+		return 0, err
+	}
+	if !resp.OK {
+		return 0, fmt.Errorf("memd graph reanchor: %s", resp.Error)
+	}
+	return resp.Nodes, nil
+}
+
+// ReanchorGraphByIDs advances EXACTLY the given capture set (the nodes one
+// verified run persisted) from one revision to another. Scoped to the
+// capture set: other runs' nodes of the same project are untouched, and any
+// id that does not match the project/active/from-revision contract fails
+// loud. See the /graph/reanchor_ids wire contract.
+func (c *Client) ReanchorGraphByIDs(ctx context.Context, projectPath string, nodeIDs []int64, fromRevision, toRevision string) (int64, error) {
+	if projectPath == "" || len(nodeIDs) == 0 || fromRevision == "" || toRevision == "" {
+		return 0, fmt.Errorf("memd graph reanchor_ids: project path, node ids, and both revisions are required")
+	}
+	var resp struct {
+		OK    bool   `json:"ok"`
+		Nodes int64  `json:"nodes"`
+		Error string `json:"error,omitempty"`
+	}
+	body := map[string]any{"project_path": projectPath, "node_ids": nodeIDs, "from_revision": fromRevision, "to_revision": toRevision}
+	if err := c.do(ctx, http.MethodPost, "/graph/reanchor_ids", body, &resp); err != nil {
+		return 0, err
+	}
+	if !resp.OK {
+		return 0, fmt.Errorf("memd graph reanchor_ids: %s", resp.Error)
+	}
+	return resp.Nodes, nil
+}
+
+// GraphCompactionReport mirrors the sidecar's compaction summary.
 // GraphCompactionReport mirrors the sidecar's compaction summary.
 type GraphCompactionReport struct {
 	DuplicateGroups  int   `json:"duplicate_groups"`
@@ -829,4 +886,107 @@ func (c *Client) CollectGraph(ctx context.Context, olderThanSeconds int64) (int6
 		return 0, fmt.Errorf("memd graph collect: %s", resp.Error)
 	}
 	return resp.Collected, nil
+}
+
+// CaptureSetIDs returns the ids of a project's active nodes currently
+// anchored at fromRevision - the capture set of the verified run that
+// produced them. The harness uses this to scope a reanchor to exactly the
+// nodes its verified run captured, instead of every node of the project.
+// The two-arg form omits the source_run_id filter, which preserves the
+// historical project+revision behavior on the sidecar.
+func (c *Client) CaptureSetIDs(ctx context.Context, projectPath, fromRevision string) ([]int64, error) {
+	return c.CaptureSetIDsForRun(ctx, projectPath, fromRevision, "")
+}
+
+// CaptureSetIDsForRun is CaptureSetIDs with an optional producer-run
+// filter: when sourceRunID is non-empty the sidecar scopes the capture
+// set to the run that persisted the nodes, so two runs that verified
+// the same tree keep separate sets. An empty sourceRunID sends no filter.
+func (c *Client) CaptureSetIDsForRun(ctx context.Context, projectPath, fromRevision, sourceRunID string) ([]int64, error) {
+	if projectPath == "" || fromRevision == "" {
+		return nil, fmt.Errorf("memd graph capture set: project path and revision are required")
+	}
+	var resp struct {
+		OK    bool    `json:"ok"`
+		IDs   []int64 `json:"ids"`
+		Error string  `json:"error,omitempty"`
+	}
+	body := map[string]any{"project_path": projectPath, "revision": fromRevision}
+	if sourceRunID != "" {
+		body["source_run_id"] = sourceRunID
+	}
+	if err := c.do(ctx, http.MethodPost, "/graph/capture_set", body, &resp); err != nil {
+		return nil, err
+	}
+	if !resp.OK {
+		return nil, fmt.Errorf("memd graph capture_set: %s", resp.Error)
+	}
+	return resp.IDs, nil
+}
+
+// ExportedCaptureNode is one fully materialized node in an exported capture
+// set: the complete node payload with its anchors and evidence, plus the
+// source sidecar id and claim hash for canonical identity (numeric ids are
+// not stable across stores; the (kind, claim_hash) pair is).
+type ExportedCaptureNode struct {
+	Node      GraphNode       `json:"node"`
+	Anchors   []GraphAnchor   `json:"anchors"`
+	Evidence  []GraphEvidence `json:"evidence"`
+	SourceID  int64           `json:"source_id"`
+	ClaimHash string          `json:"claim_hash"`
+}
+
+// ExportCaptureSet returns the FULL payloads of a capture set (A4): every
+// active node anchored at the given revision for the project (optionally
+// scoped to the producer run), each with anchors and evidence verbatim.
+// This is the export side of the natural-capture provenance contract; the
+// ids-only capture_set endpoint cannot reconstruct capture content.
+func (c *Client) ExportCaptureSet(ctx context.Context, projectPath, revision, sourceRunID string) ([]ExportedCaptureNode, error) {
+	if projectPath == "" || revision == "" {
+		return nil, fmt.Errorf("memd graph export: project path and revision are required")
+	}
+	var resp struct {
+		OK    bool                  `json:"ok"`
+		Nodes []ExportedCaptureNode `json:"nodes"`
+		Error string                `json:"error,omitempty"`
+	}
+	body := map[string]any{"project_path": projectPath, "revision": revision}
+	if sourceRunID != "" {
+		body["source_run_id"] = sourceRunID
+	}
+	if err := c.do(ctx, http.MethodPost, "/graph/export_capture_set", body, &resp); err != nil {
+		return nil, err
+	}
+	if !resp.OK {
+		return nil, fmt.Errorf("memd graph export_capture_set: %s", resp.Error)
+	}
+	return resp.Nodes, nil
+}
+
+// ImportCaptureSet persists a previously exported capture set into
+// projectPath (A4). Project identity is remapped by the sidecar; producer
+// identity rides the nodes verbatim. Returns the number of nodes the
+// sidecar imported. The upsert dedupe makes a retry idempotent.
+func (c *Client) ImportCaptureSet(ctx context.Context, projectPath string, nodes []ExportedCaptureNode) (int64, error) {
+	if projectPath == "" {
+		return 0, fmt.Errorf("memd graph import: project path is required")
+	}
+	if len(nodes) == 0 {
+		return 0, fmt.Errorf("memd graph import: node set is empty")
+	}
+	var resp struct {
+		OK       bool   `json:"ok"`
+		Imported int64  `json:"imported"`
+		Error    string `json:"error,omitempty"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/graph/import_capture_set", map[string]any{
+		"project_path": projectPath,
+		"nodes":        nodes,
+	}, &resp); err != nil {
+		return 0, err
+	}
+	if !resp.OK {
+		return 0, fmt.Errorf("memd graph import_capture_set: %s", resp.Error)
+	}
+	return resp.Imported, nil
 }

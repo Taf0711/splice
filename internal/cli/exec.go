@@ -1122,6 +1122,12 @@ func registerExecCoreTools(registry *tools.Registry, workspaceRoot string, scope
 		}
 		registry.Register(tool)
 	}
+	// B1: the raw-bytes source reader rides the same scoped registration.
+	// It is host-seam-only (the SourceReader in the splice package reads
+	// through it); it never enters the model-facing toolset, because the
+	// model keeps numbered read_file output and the raw channel exists so
+	// the orchestrator's typed source views carry exact bytes.
+	registry.Register(tools.NewScopedRawFileReadTool(workspaceRoot, scope))
 }
 
 // deferredEligibleCount returns the number of registered tools that are

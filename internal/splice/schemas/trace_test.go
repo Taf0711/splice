@@ -185,3 +185,92 @@ func TestIterationStateTestCountsValidate(t *testing.T) {
 		t.Fatalf("negative preexisting fail must be rejected, got %v", err)
 	}
 }
+
+// TestInputMetaScopeFieldsValidate covers the scope-suppression counters:
+// negatives are rejected, zero is valid, and omitempty keeps absent fields
+// out of the wire format. Table-driven over every new field.
+func TestInputMetaScopeFieldsValidate(t *testing.T) {
+	fields := []struct {
+		name  string
+		apply func(*InputMeta, int)
+	}{
+		{"context_queries_default", func(m *InputMeta, v int) { m.ContextQueriesDefault = v }},
+		{"context_queries_executed", func(m *InputMeta, v int) { m.ContextQueriesExecuted = v }},
+		{"context_queries_suppressed", func(m *InputMeta, v int) { m.ContextQueriesSuppressed = v }},
+		{"global_lists_suppressed", func(m *InputMeta, v int) { m.GlobalListsSuppressed = v }},
+		{"searches_suppressed", func(m *InputMeta, v int) { m.SearchesSuppressed = v }},
+		{"scope_expansions", func(m *InputMeta, v int) { m.ScopeExpansions = v }},
+	}
+	for _, f := range fields {
+		t.Run(f.name+"_zero_valid", func(t *testing.T) {
+			var m InputMeta
+			f.apply(&m, 0)
+			if err := m.Validate(); err != nil {
+				t.Fatalf("zero value must validate: %v", err)
+			}
+		})
+		t.Run(f.name+"_positive_valid", func(t *testing.T) {
+			var m InputMeta
+			f.apply(&m, 3)
+			if err := m.Validate(); err != nil {
+				t.Fatalf("positive value must validate: %v", err)
+			}
+		})
+		t.Run(f.name+"_negative_rejected", func(t *testing.T) {
+			var m InputMeta
+			f.apply(&m, -1)
+			if err := m.Validate(); err == nil {
+				t.Fatalf("negative value must be rejected")
+			}
+		})
+	}
+}
+
+// TestInputMetaScopeFieldsOmitEmpty pins the omitempty round-trip: a zero
+// InputMeta marshals without any scope key, and a populated one keeps every
+// key present with its exact value.
+func TestInputMetaScopeFieldsOmitEmpty(t *testing.T) {
+	zeroJSON, err := json.Marshal(InputMeta{})
+	if err != nil {
+		t.Fatalf("marshal zero: %v", err)
+	}
+	for _, key := range []string{
+		"context_queries_default", "context_queries_executed",
+		"context_queries_suppressed", "global_lists_suppressed",
+		"searches_suppressed", "scope_expansions",
+	} {
+		if strings.Contains(string(zeroJSON), key) {
+			t.Fatalf("zero InputMeta must omit %q, got %s", key, zeroJSON)
+		}
+	}
+	full := InputMeta{
+		ContextQueriesDefault:    5,
+		ContextQueriesExecuted:   2,
+		ContextQueriesSuppressed: 3,
+		GlobalListsSuppressed:    1,
+		SearchesSuppressed:       1,
+		ScopeExpansions:          2,
+	}
+	fullJSON, err := json.Marshal(full)
+	if err != nil {
+		t.Fatalf("marshal full: %v", err)
+	}
+	var decoded InputMeta
+	if err := json.Unmarshal(fullJSON, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if decoded != full {
+		t.Fatalf("round-trip mismatch: got %+v, want %+v", decoded, full)
+	}
+}
+
+// TestScopeMetricsValidate covers the ScopeMetrics payload struct.
+func TestScopeMetricsValidate(t *testing.T) {
+	if err := (ScopeMetrics{}).Validate(); err != nil {
+		t.Fatalf("zero ScopeMetrics must validate: %v", err)
+	}
+	neg := ScopeMetrics{ContextQueriesSuppressed: -1}
+	if err := neg.Validate(); err == nil {
+		t.Fatalf("negative ScopeMetrics must be rejected")
+	}
+}

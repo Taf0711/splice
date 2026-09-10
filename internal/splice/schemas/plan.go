@@ -125,6 +125,47 @@ type ContextQuery struct {
 	Regex      bool             `json:"regex"`
 	MaxResults int              `json:"max_results"`
 	MaxChars   int              `json:"max_chars"`
+	// StartLine/EndLine are the optional 1-based inclusive byte-range
+	// selectors for read_file queries (B1). Both must be set together;
+	// one without the other is a validation error. EndLine >= StartLine.
+	// Ranges let a large file deliver only the relevant span instead of
+	// paying whole-file delivery.
+	StartLine *int `json:"start_line,omitempty"`
+	EndLine   *int `json:"end_line,omitempty"`
+}
+
+// HasRange reports whether the query carries a line-range selector.
+func (c ContextQuery) HasRange() bool {
+	return c.StartLine != nil && c.EndLine != nil
+}
+
+// MaxAggregateContextQueries bounds the QUERIES PER REQUEST, not each
+// query. One request with a hundred tiny reads is the same flood as one
+// huge read, so the aggregate gets its own bound.
+const MaxAggregateContextQueries = 16
+
+// MaxAggregateContextBytes bounds the request's total MaxChars budget: the
+// sum of per-query budgets across the request. Per-query validation alone
+// would let 16 x 20000-byte reads through as "bounded".
+const MaxAggregateContextBytes = 64000
+
+// validateRange checks the optional line-range selector's internal
+// consistency. File-relative bounds (EOF clamping) are the fulfillment
+// path's job; this validates the request shape.
+func (c ContextQuery) validateRange() error {
+	if (c.StartLine == nil) != (c.EndLine == nil) {
+		return errors.New("start_line and end_line must be set together")
+	}
+	if c.StartLine == nil {
+		return nil
+	}
+	if *c.StartLine < 1 {
+		return errors.New("start_line must be >= 1")
+	}
+	if *c.EndLine < *c.StartLine {
+		return fmt.Errorf("end_line %d precedes start_line %d", *c.EndLine, *c.StartLine)
+	}
+	return nil
 }
 
 // Validate checks that the query type has the required fields.
@@ -160,6 +201,27 @@ func (c ContextQuery) Validate() error {
 	}
 	if c.MaxChars < 1 || c.MaxChars > 20000 {
 		return errors.New("max_chars must be between 1 and 20000")
+	}
+	if err := c.validateRange(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// AggregateValidate checks the bounds that only exist across a request:
+// the number of queries and the SUM of their MaxChars budgets. Per-query
+// Validate is necessary but not sufficient; a request of many legal
+// queries can still be unbounded in aggregate.
+func (c ContextRequest) AggregateValidate() error {
+	if len(c.Queries) > MaxAggregateContextQueries {
+		return fmt.Errorf("request carries %d queries, more than the %d-query aggregate bound", len(c.Queries), MaxAggregateContextQueries)
+	}
+	total := 0
+	for _, q := range c.Queries {
+		total += q.MaxChars
+	}
+	if total > MaxAggregateContextBytes {
+		return fmt.Errorf("request aggregates %d max-chars across queries, more than the %d-byte bound", total, MaxAggregateContextBytes)
 	}
 	return nil
 }
@@ -547,6 +609,40 @@ const (
 	CostStatusError    = "error"
 )
 
+// Spend sources classify why a provider request exists (Package F1, warm-cost
+// handoff Section 10). The accounting identity of WorkflowCostReport sums
+// these sources; every priced request must carry exactly one.
+const (
+	// SpendSourceGeneration is the initial pass of a planned stage.
+	SpendSourceGeneration = "generation"
+	// SpendSourceFormatRetry is a repeated request under the same D3 request
+	// identity: typed-output format retries and forced-choice compatibility
+	// retries within one stage invocation.
+	SpendSourceFormatRetry = "format_retry"
+	// SpendSourceExpansion is a bounded context-expansion round (D2).
+	SpendSourceExpansion = "expansion"
+	// SpendSourceRepair is a repair re-entry of a stage (test-failure loop).
+	SpendSourceRepair = "repair"
+	// SpendSourceCapture is a provider request issued for memory capture or
+	// maintenance work. Capture is currently deterministic (digests plus
+	// sidecar writes); the source stays reserved so a future capture-time
+	// model call lands in the ledger instead of outside it.
+	SpendSourceCapture = "capture"
+	// SpendSourceAuxiliary is any model call outside the planned stage
+	// sequence, such as step-back analysis.
+	SpendSourceAuxiliary = "auxiliary"
+)
+
+// ValidSpendSource reports whether s is a recognized spend source.
+func ValidSpendSource(s string) bool {
+	switch s {
+	case "", SpendSourceGeneration, SpendSourceFormatRetry, SpendSourceExpansion,
+		SpendSourceRepair, SpendSourceCapture, SpendSourceAuxiliary:
+		return true
+	}
+	return false
+}
+
 // PipelineUsageRecord is one provider request priced at the orchestrator ledger.
 type PipelineUsageRecord struct {
 	Sequence          int      `json:"sequence"`
@@ -554,6 +650,9 @@ type PipelineUsageRecord struct {
 	Model             string   `json:"model,omitempty"`
 	Stage             string   `json:"stage"`
 	Iteration         int      `json:"iteration"`
+	InvocationOrdinal int      `json:"invocation_ordinal,omitempty"`
+	ContextRound      int      `json:"context_round,omitempty"`
+	SpendSource       string   `json:"spend_source,omitempty"`
 	UsageReported     bool     `json:"usage_reported"`
 	InputTokens       int      `json:"input_tokens"`
 	OutputTokens      int      `json:"output_tokens"`
@@ -603,6 +702,12 @@ func (r PipelineUsageRecord) Validate() error {
 		if r.CostStatus != CostStatusUnpriced {
 			return errors.New("usage_reported false requires unpriced cost status")
 		}
+	}
+	if !ValidSpendSource(r.SpendSource) {
+		return fmt.Errorf("invalid spend_source %q", r.SpendSource)
+	}
+	if r.InvocationOrdinal < 0 || r.ContextRound < 0 {
+		return errors.New("invocation ordinal and context round must be non-negative")
 	}
 	switch r.CostStatus {
 	case CostStatusPriced:
@@ -662,6 +767,11 @@ type PipelineResult struct {
 	MergeBranch           *string                `json:"merge_branch,omitempty"`
 	MergeCommitSHA        *string                `json:"merge_commit_sha,omitempty"`
 	MergeMessage          *string                `json:"merge_message,omitempty"`
+	// FinalState is the last computed iteration state, attached additively
+	// so post-run consumers (graph capture) can read EXECUTED verification
+	// counts instead of inferring them from stage status. Optional: legacy
+	// producers omit it and legacy consumers ignore it.
+	FinalState *IterationState `json:"final_state,omitempty"`
 }
 
 // Validate checks the pipeline result.

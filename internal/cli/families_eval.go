@@ -14,6 +14,7 @@ import (
 
 	"github.com/Taf0711/splice/internal/eval"
 	"github.com/Taf0711/splice/internal/memd"
+	"github.com/Taf0711/splice/internal/splice"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
@@ -138,6 +139,7 @@ type familyEntry struct {
 // unknown count is absent data, never a fabricated zero.
 type familyPairRow struct {
 	Family    string `json:"family"`
+	Task      string `json:"task,omitempty"` // "A" or "B"; explicit, never inferred from session suffixes
 	Attempt   int    `json:"attempt"`
 	Arm       string `json:"arm"` // cold | warm
 	Success   bool   `json:"success"`
@@ -169,6 +171,11 @@ type familyPairRow struct {
 	FileReads      int `json:"file_reads,omitempty"`
 	WebSearchCalls int `json:"web_search_calls,omitempty"`
 	Repairs        int `json:"repair_count,omitempty"`
+	// A3: StreamWorkObserved distinguishes a measured zero from absent
+	// work telemetry. true means a stream transcript was parsed (zero
+	// counters are real zeros); nil/false means no transcript, so the
+	// counters above are unknown, not free.
+	StreamWorkObserved *bool `json:"stream_work_observed,omitempty"`
 
 	// Outcome from the trace: status plus abort reason (abort_budget is the
 	// pathological tail marker).
@@ -182,6 +189,148 @@ type familyPairRow struct {
 	ExemplarItems int    `json:"exemplars_delivered,omitempty"`
 	DirectHits    int    `json:"direct_hits,omitempty"`
 	LookupMode    string `json:"retrieval_mode,omitempty"` // direct | search | ""
+
+	// A1 typed treatment: what the run configuration REQUESTED and what
+	// the child ACTUALLY ran. The effective name is the resolved
+	// treatment; the dimensions are pointers so false is a measured fact
+	// and null is unknown. StoreAvailable is the availability fact that
+	// gates retrieval independently of every environment setting.
+	// NormalizedFromAmbient is set only on the legacy ambient path (a
+	// warm arm under SPLICE_TREATMENT=cold normalizing to
+	// retrieval-only), so an old script's meaning stays visible.
+	RequestedTreatment    string `json:"requested_treatment,omitempty"`
+	EffectiveTreatment    string `json:"effective_treatment,omitempty"`
+	NormalizedFromAmbient string `json:"normalized_from_ambient,omitempty"`
+	EffRetrieval          *bool  `json:"effective_retrieval,omitempty"`
+	EffPromptDelivery     *bool  `json:"effective_prompt_delivery,omitempty"`
+	EffContextPolicy      *bool  `json:"effective_context_policy,omitempty"`
+	StoreAvailable        *bool  `json:"store_available,omitempty"`
+
+	// A4 natural-capture provenance. CaptureReconstructed=true means the
+	// seed payload came from the deterministic reconstruction path, NOT
+	// the producer run's own persisted captures. CaptureReplayed means
+	// the payload was replayed into this arm (a record can be both
+	// replayed and reconstructed: separate dimensions). CaptureDigest is
+	// the canonical digest of the replayed payload. The pointer keeps
+	// false a measured fact and null absent.
+	CaptureReconstructed *bool  `json:"capture_reconstructed,omitempty"`
+	CaptureReplayed      *bool  `json:"capture_replayed,omitempty"`
+	CaptureDigest        string `json:"capture_digest,omitempty"`
+
+	// Track C discovery-plan telemetry, summed across the run's stages:
+	// what the cognition graph resolved, what freshness admitted, and the
+	// conservatively counted avoided discovery operations.
+	ScopeFileReadsSuppressed int `json:"file_reads_suppressed,omitempty"`
+	ScopeQueriesSuppressed   int `json:"context_queries_suppressed,omitempty"`
+	ScopeListsSuppressed     int `json:"global_lists_suppressed,omitempty"`
+	DiscoveryQuestions       int `json:"discovery_questions,omitempty"`
+	DiscoveryResolvedCog     int `json:"discovery_resolved_by_cognition,omitempty"`
+	DiscoveryUnresolved      int `json:"discovery_unresolved,omitempty"`
+	DiscoveryReadsAvoided    int `json:"discovery_reads_avoided,omitempty"`
+	AnchorsValidated         int `json:"anchors_validated,omitempty"`
+	AnchorsFailed            int `json:"anchors_failed,omitempty"`
+	SemanticHits             int `json:"semantic_hits,omitempty"`
+	GraphNodesCaptured       int `json:"graph_nodes_captured,omitempty"`
+	// Precursor reports the causal setup outcome for the warm arm of a
+	// Task A -> Task B pair: "success" (Task A verified, cognition
+	// captured), "failed" (Task A did not verify), or "" (not applicable,
+	// e.g. the cold arm). A warm attempt whose precursor failed carries
+	// WarmSetupInvalid=true: its cognition came from nothing legitimate.
+	Precursor      string `json:"precursor,omitempty"`
+	WarmSetupValid *bool  `json:"warm_setup_valid,omitempty"`
+	WarmSetupNote  string `json:"warm_setup_note,omitempty"`
+
+	// ---- Per-attempt identity and provenance. Unknown values stay absent
+	// (omitempty) or read "unavailable": a missing measurement is never a
+	// fabricated zero.
+
+	// Experiment ties every row of one invocation together; PipelineRunID
+	// is the harness run that produced this row. SessionID (above) is the
+	// per-attempt agent session; the two are distinct namespaces.
+	ExperimentID  string `json:"experiment_id,omitempty"`
+	PipelineRunID string `json:"pipeline_run_id,omitempty"`
+	// Treatment is the causal condition of this attempt (memory on/off,
+	// scope mode, and so on), kept as the arm name plus mode string.
+	Treatment string `json:"treatment,omitempty"`
+	// SnapshotID names the shared Task A snapshot in matched-snapshot
+	// runs: every Task B row of one family shares it.
+	SnapshotID string `json:"snapshot_id,omitempty"`
+	// Executed is false only for rows that describe a target slot that
+	// never ran (skipped). Every row that ran any code is true.
+	Executed bool `json:"executed"`
+	// SetupOutcome is the typed per-attempt setup result for skipped rows:
+	// "precursor_failed", "timeout", "memory_reset_failed", and so on.
+	// Empty for executed rows.
+	SetupOutcome string `json:"setup_outcome,omitempty"`
+
+	// Provenance of the harness and fixture this attempt ran against.
+	SpliceCommit  string `json:"splice_commit,omitempty"`
+	SpliceDirty   bool   `json:"splice_dirty,omitempty"`
+	SpliceBinary  string `json:"splice_binary,omitempty"`
+	FixtureCommit string `json:"fixture_commit,omitempty"`
+	FixtureTree   string `json:"fixture_tree,omitempty"` // tree hash, NOT the commit
+	// PromptHash and VerifierHash pin exactly which prompt and verifier
+	// script bytes the attempt used (sha256 hex).
+	PromptHash      string `json:"prompt_hash,omitempty"`
+	VerifierHash    string `json:"verifier_hash,omitempty"`
+	ConfiguredModel string `json:"configured_model,omitempty"`
+
+	// Starting state of the arm for this attempt.
+	StartCommit string `json:"start_commit,omitempty"`
+	StartTree   string `json:"start_tree,omitempty"` // tree hash, NOT the commit
+	// CleanStateVerified records the externally verified clean-state result
+	// for the attempt's precursor ("success"/"failed"/"timeout").
+	CleanStateVerified string `json:"clean_state_verified,omitempty"`
+	// ProposedDigest is the sha256 of the captured proposal bytes.
+	ProposedDigest string `json:"proposed_digest,omitempty"`
+
+	// Evidence: the change-manifest digest plus references to the on-disk
+	// artifacts. ArtifactRef paths are relative to the attempts log's out
+	// dir when known, absolute otherwise.
+	ManifestDigest string   `json:"manifest_digest,omitempty"`
+	ArtifactRefs   []string `json:"artifact_refs,omitempty"`
+	// EvidenceStatus is "" (complete), "incomplete", or "unavailable".
+	EvidenceStatus string `json:"evidence_status,omitempty"`
+	ArtifactError  string `json:"artifact_error,omitempty"`
+
+	// Timing and cost: agent elapsed, verifier elapsed, and token totals.
+	// Token totals ride the existing Tokens/InputTokens/OutputTokens
+	// fields; AgentTimeMs is the exec run's wall clock.
+	AgentTimeMs     int64  `json:"agent_time_ms,omitempty"`
+	VerifierTimeMs  int64  `json:"verifier_time_ms,omitempty"`
+	FailureCategory string `json:"failure_category,omitempty"`
+
+	// SeedStatus records how the warm arm's cognition was seeded for the
+	// matched-snapshots flow: "replayed" (the frozen capture payload of
+	// the verified Task A run was rematerialized into this project), or
+	// an explicit failure status. Cold rows and non-matched flows leave
+	// it empty; a missing seed is never recorded as silent success.
+	SeedStatus string `json:"seed_status,omitempty"`
+
+	// ---- Section-11 three-condition campaign fields. They ride every
+	// row so the campaign verdict is auditable from the attempts log
+	// alone. Unknown values stay absent (omitempty): a missing fact is
+	// never a fabricated default.
+
+	// Condition is the campaign condition label for this attempt:
+	// "cold" | "warm" | "improved-cold" | "manual" | "automatic".
+	// Absent on legacy 2-arm rows and on Task A rows.
+	Condition string `json:"condition,omitempty"`
+	// DiagnosticOnly marks the manual-selection arm: its rows can never
+	// count toward the automatic-cognition gate (Section 11.5.8). The
+	// pointer keeps false a measured fact and null absent.
+	DiagnosticOnly *bool `json:"diagnostic_only,omitempty"`
+	// SchedulingSeed is the recorded seed the arm ORDER for this
+	// experiment was derived from (Section 11.2). Every row of one
+	// matched-snapshot experiment carries the same seed.
+	SchedulingSeed int64 `json:"scheduling_seed,omitempty"`
+	// ArmOrderIndex is this arm's position in the derived launch order
+	// for the experiment (1-based). Rows record the order actually run.
+	ArmOrderIndex int `json:"arm_order_index,omitempty"`
+	// WorkflowCost is the F2 full-workflow cost report for this row's
+	// condition (the campaign verdict number). Absent when no report
+	// could be built for the condition.
+	WorkflowCost *splice.WorkflowCostReport `json:"workflow_cost,omitempty"`
 }
 
 // familiesRunTimeout is the deterministic per-run bound: a provider stall
@@ -238,6 +387,7 @@ func runFamiliesEvalCommand(args []string, stdout io.Writer, stderr io.Writer, d
 	ctx, stop := signalContext()
 	defer stop()
 
+	experimentID := fmt.Sprintf("families-%d", time.Now().UnixNano())
 	runFunc := pairEvalRunFunc(deps, options.Model)
 	rows := make([]familyPairRow, 0, len(manifest.Families)*options.Rollouts*2)
 
@@ -334,11 +484,20 @@ func runFamiliesEvalCommand(args []string, stdout io.Writer, stderr io.Writer, d
 						tryID = fmt.Sprintf("%s-try%d", sessionID, try)
 					}
 					out, runErr = runFunc(runCtx, eval.RunInput{
-						SessionID: tryID,
-						Memory:    arm.memory,
-						Prompt:    family.TargetTask,
-						Cwd:       arm.dir,
-						Check:     verifiers[family.ID],
+						SessionID:       tryID,
+						Memory:          arm.memory,
+						Treatment:       armTreatment(arm.name),
+						ExperimentID:    experimentID,
+						Family:          family.ID,
+						Arm:             arm.name,
+						Task:            "B",
+						Attempt:         attempt,
+						ArmOrder:        try + 1,
+						Check:           verifiers[family.ID],
+						CheckScriptPath: filepath.Join(manifestDir, family.TargetCheckFile),
+						Prompt:          family.TargetTask,
+						Cwd:             arm.dir,
+						ArtifactDir:     mvpArtifactDir(options.OutDir, family.ID, attempt, arm.name, "b"),
 					})
 					if runErr == nil || ctx.Err() != nil {
 						break
@@ -478,11 +637,16 @@ func collectRunTelemetry(ctx context.Context, deps appDeps, repoRoot, sessionID 
 		return
 	}
 	trace := matched.Trace
+	// A3: zero the TRACE-SOURCED fields only. ToolCalls/SearchCalls/
+	// FileReads are stream-work counters (sumStreamJSONWork), never trace
+	// fields; zeroing them here erased the stream counts on every row
+	// that had a trace and kept them on rows without one, which was
+	// arm-asymmetric in practice (cold rows kept tool_calls, warm rows
+	// lost them). This function no longer touches them at all.
 	row.InputTokens = 0
 	row.OutputTokens = 0
 	row.ReasoningTokens = 0
 	row.CachedTokens = 0
-	row.ToolCalls = 0
 	row.WebSearchCalls = 0
 	row.MemoryItems = 0
 	row.MemoryChars = 0
@@ -514,6 +678,19 @@ func collectRunTelemetry(ctx context.Context, deps appDeps, repoRoot, sessionID 
 	row.Status = trace.Outcome.Status
 	row.AbortReason = trace.Outcome.AbortReason
 	row.Repairs = len(trace.Interactions)
+	for _, stage := range trace.Stages {
+		meta := stage.InputMeta
+		row.DiscoveryQuestions += meta.DiscoveryQuestions
+		row.DiscoveryResolvedCog += meta.DiscoveryResolvedCog
+		row.DiscoveryUnresolved += meta.DiscoveryUnresolved
+		row.DiscoveryReadsAvoided += meta.DiscoveryReadsAvoided
+		row.AnchorsValidated += meta.AnchorsValidated
+		row.AnchorsFailed += meta.AnchorsFailed
+		row.SemanticHits += meta.SemanticHits
+		row.ScopeFileReadsSuppressed += meta.FileReadsSuppressed
+		row.ScopeQueriesSuppressed += meta.ContextQueriesSuppressed
+		row.ScopeListsSuppressed += meta.GlobalListsSuppressed
+	}
 }
 
 // seedFamilyObservation upserts the family's observation into memory with
@@ -554,6 +731,18 @@ func seedFamilyObservation(ctx context.Context, warmDir string, family familyEnt
 // fails. The families runner records it so the freshness gate can classify.
 func gitHeadCommit(dir string) string {
 	out, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// gitTreeHash returns the TREE hash of the repo at dir, or "" when git
+// fails. This is the commit's content identity (rev-parse HEAD^{tree}), a
+// different object from the commit hash: two commits over the same bytes
+// share a tree but not a commit.
+func gitTreeHash(dir string) string {
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD^{tree}").Output()
 	if err != nil {
 		return ""
 	}

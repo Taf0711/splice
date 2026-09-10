@@ -167,7 +167,7 @@ type SemanticHit struct {
 // IDs whose nodes are active, ordered by score descending (ties broken by
 // node ID ascending for determinism). An empty index returns an empty result
 // and no error: that is the documented fallback.
-func (si *SemanticIndex) Search(ctx context.Context, text string, k int) ([]SemanticHit, error) {
+func (si *SemanticIndex) Search(ctx context.Context, text string, k int, projectPath string) ([]SemanticHit, error) {
 	if strings.TrimSpace(text) == "" {
 		return nil, fmt.Errorf("semantic: search text is required")
 	}
@@ -176,12 +176,16 @@ func (si *SemanticIndex) Search(ctx context.Context, text string, k int) ([]Sema
 	}
 	qvec := semanticEmbed(text)
 
+	// Project filter: when set, only nodes of that project rank. Cross-
+	// project hits would anchor at another repo's revisions and poison the
+	// caller's freshness diffs, so scoping is a correctness requirement.
 	rows, err := si.store.db.QueryContext(ctx, `
 		SELECT e.node_id, e.vector
 		FROM cognition_embeddings e
 		JOIN cognition_nodes n ON n.id = e.node_id
 		WHERE n.status = ?
-	`, NodeStatusActive)
+		  AND (? = '' OR n.project_path = ?)
+	`, NodeStatusActive, projectPath, projectPath)
 	if err != nil {
 		return nil, fmt.Errorf("semantic: scan vectors: %w", err)
 	}

@@ -106,7 +106,7 @@ func TestCognitionFastPath_A_FreshHit(t *testing.T) {
 	}}
 	plan := cognitionPlan("code_writer")
 	tr := newRunTraceAccumulator(nil, "run", "session", root, plan, "active", nil)
-	prepared, err := prepareStageInput(context.Background(), stageInputPreparation{
+	prepared, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 		Input:     cognitionInput("code_writer", "fix session invalidation in internal/auth/session.go"),
 		Stage:     &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
 		Budget:    stageBudgetByName(plan, "code_writer"),
@@ -129,7 +129,7 @@ func TestCognitionFastPath_A_FreshHit(t *testing.T) {
 	if store.queried {
 		t.Fatal("TraceQuerier called on direct hit, want exemplars skipped")
 	}
-	meta := tr.stages[stageKey{"code_writer", 1}]
+	meta := tr.stages[stageKey{"code_writer", 1, 0}]
 	if meta.MemoryLookupMode != "direct" {
 		t.Fatalf("memory_lookup_mode = %q, want direct", meta.MemoryLookupMode)
 	}
@@ -151,7 +151,7 @@ func TestCognitionFastPath_B_MissFallback(t *testing.T) {
 	}
 	plan := cognitionPlan("code_writer")
 	tr := newRunTraceAccumulator(nil, "run", "session", root, plan, "active", nil)
-	prepared, err := prepareStageInput(context.Background(), stageInputPreparation{
+	prepared, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 		Input:     cognitionInput("code_writer", "fix internal/auth/session.go"),
 		Stage:     &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
 		Budget:    stageBudgetByName(plan, "code_writer"),
@@ -174,7 +174,7 @@ func TestCognitionFastPath_B_MissFallback(t *testing.T) {
 	if !store.queried {
 		t.Fatal("TraceQuerier not called on Search path, exemplars should be attempted")
 	}
-	meta := tr.stages[stageKey{"code_writer", 1}]
+	meta := tr.stages[stageKey{"code_writer", 1, 0}]
 	if meta.MemoryLookupMode != "search" {
 		t.Fatalf("memory_lookup_mode = %q, want search", meta.MemoryLookupMode)
 	}
@@ -201,7 +201,7 @@ func TestCognitionFastPath_C_StaleFallback(t *testing.T) {
 	}
 	plan := cognitionPlan("code_writer")
 	tr := newRunTraceAccumulator(nil, "run", "session", root, plan, "active", nil)
-	prepared, err := prepareStageInput(context.Background(), stageInputPreparation{
+	prepared, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 		Input:     cognitionInput("code_writer", "fix internal/auth/session.go"),
 		Stage:     &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
 		Budget:    stageBudgetByName(plan, "code_writer"),
@@ -242,7 +242,7 @@ func TestCognitionFastPath_D_UnknownFreshness(t *testing.T) {
 		}},
 	}
 	plan := cognitionPlan("code_writer")
-	prepared, err := prepareStageInput(context.Background(), stageInputPreparation{
+	prepared, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 		Input:     cognitionInput("code_writer", "fix internal/auth/session.go"),
 		Stage:     &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
 		Budget:    stageBudgetByName(plan, "code_writer"),
@@ -280,7 +280,7 @@ func TestCognitionFastPath_E_WrongProject(t *testing.T) {
 		}},
 	}
 	plan := cognitionPlan("code_writer")
-	prepared, err := prepareStageInput(context.Background(), stageInputPreparation{
+	prepared, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 		Input:     cognitionInput("code_writer", "fix internal/auth/session.go"),
 		Stage:     &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
 		Budget:    stageBudgetByName(plan, "code_writer"),
@@ -321,7 +321,7 @@ func TestCognitionFastPath_F_ReviewDue(t *testing.T) {
 		}},
 	}
 	plan := cognitionPlan("code_writer")
-	prepared, err := prepareStageInput(context.Background(), stageInputPreparation{
+	prepared, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 		Input:     cognitionInput("code_writer", "fix internal/auth/session.go"),
 		Stage:     &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
 		Budget:    stageBudgetByName(plan, "code_writer"),
@@ -358,7 +358,7 @@ func TestCognitionFastPath_G_DuplicateDedupe(t *testing.T) {
 	}}
 	plan := cognitionPlan("code_writer")
 	tr := newRunTraceAccumulator(nil, "run", "session", root, plan, "active", nil)
-	prepared, err := prepareStageInput(context.Background(), stageInputPreparation{
+	prepared, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 		Input:     cognitionInput("code_writer", "fix internal/auth/session.go"),
 		Stage:     &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
 		Budget:    stageBudgetByName(plan, "code_writer"),
@@ -378,7 +378,7 @@ func TestCognitionFastPath_G_DuplicateDedupe(t *testing.T) {
 	if len(store.queries) != 0 {
 		t.Fatalf("Search called %d times, want 0 (direct hit should be used)", len(store.queries))
 	}
-	meta := tr.stages[stageKey{"code_writer", 1}]
+	meta := tr.stages[stageKey{"code_writer", 1, 0}]
 	// Both observations were classified fresh pre-admission; Admit's StableID
 	// dedupe then kept one. DirectHits counts the pre-admission fresh set.
 	if meta.DirectHits != 2 {
@@ -406,7 +406,7 @@ func TestCognitionFastPath_H_BudgetCompaction(t *testing.T) {
 	}}
 	plan := cognitionPlan("code_writer")
 	tr := newRunTraceAccumulator(nil, "run", "session", root, plan, "active", nil)
-	prepared, err := prepareStageInput(context.Background(), stageInputPreparation{
+	prepared, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 		Input:     cognitionInput("code_writer", "fix internal/auth/session.go"),
 		Stage:     &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
 		Budget:    stageBudgetByName(plan, "code_writer"),
@@ -427,7 +427,7 @@ func TestCognitionFastPath_H_BudgetCompaction(t *testing.T) {
 	if delivered == 0 || delivered >= 5 {
 		t.Fatalf("compaction must drop some observations: delivered=%d, want 1..4", delivered)
 	}
-	meta := tr.stages[stageKey{"code_writer", 1}]
+	meta := tr.stages[stageKey{"code_writer", 1, 0}]
 	if meta.MemoryItems != delivered {
 		t.Fatalf("trace MemoryItems = %d, want post-compaction delivered %d", meta.MemoryItems, delivered)
 	}
@@ -445,7 +445,7 @@ func TestCognitionFastPath_I_NoCapability(t *testing.T) {
 		Observations:    []schemas.MemoryObservation{obsWithID(1, root, "plain search")},
 	}}
 	plan := cognitionPlan("code_writer")
-	prepared, err := prepareStageInput(context.Background(), stageInputPreparation{
+	prepared, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 		Input:     cognitionInput("code_writer", "fix internal/auth/session.go"),
 		Stage:     &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
 		Budget:    stageBudgetByName(plan, "code_writer"),
@@ -476,7 +476,7 @@ func TestCognitionFastPath_J_RepairReentry(t *testing.T) {
 
 	// Initial pass: no keys derived from request intent (no path tokens),
 	// so Search is not called (no memory consumed).
-	first, err := prepareStageInput(context.Background(), stageInputPreparation{
+	first, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 		Input:     cognitionInput("code_writer", "no structural tokens here"),
 		Stage:     &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
 		Budget:    stageBudgetByName(plan, "code_writer"),
@@ -495,7 +495,7 @@ func TestCognitionFastPath_J_RepairReentry(t *testing.T) {
 
 	// Repair re-entry: same store, Iteration=2. The function must handle it
 	// without error or panic.
-	second, err := prepareStageInput(context.Background(), stageInputPreparation{
+	second, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 		Input:     cognitionInput("code_writer", "still no tokens"),
 		Stage:     &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
 		Budget:    stageBudgetByName(plan, "code_writer"),

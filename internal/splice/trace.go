@@ -21,10 +21,21 @@ type TraceStore interface {
 	UpsertVerdict(ctx context.Context, verdict schemas.VerdictRecord) error
 }
 
-// stageKey identifies one stage execution within a run.
+// stageKey identifies one stage execution within a run. InvocationOrdinal
+// distinguishes repeated invocations of the same stage and iteration: 0 is
+// the initial pass invocation, 1 and above are repair re-entries in repair
+// order, so a re-entry never overwrites the initial invocation's metrics.
 type stageKey struct {
-	name      string
-	iteration int
+	name              string
+	iteration         int
+	invocationOrdinal int
+}
+
+// stageKeyFor builds the accumulator key for one stage invocation. The
+// ordinal separates initial-pass records (0) from repair re-entries, so a
+// re-entry records its own metrics instead of overwriting the initial pass.
+func stageKeyFor(stage string, iteration int, ordinal int) stageKey {
+	return stageKey{name: stage, iteration: iteration, invocationOrdinal: ordinal}
 }
 
 // runTraceAccumulator collects the per-stage input metadata, interventions,
@@ -42,8 +53,12 @@ type runTraceAccumulator struct {
 	// fails (a deliberately-disabled run stays off).
 	memoryStatus string
 
-	stages        map[stageKey]schemas.InputMeta
-	stageOrder    []stageKey
+	stages     map[stageKey]schemas.InputMeta
+	stageOrder []stageKey
+	// contextRounds holds per-expansion-round context telemetry (D3),
+	// keyed separately from the aggregate InputMeta rows so repair and
+	// expansion records never overwrite ordinal zero.
+	contextRounds map[contextRoundKey]contextRoundMeta
 	interventions []schemas.InterventionRecord
 	interactions  []schemas.InteractionRecord
 	memoryItems   int
@@ -115,6 +130,7 @@ func newRunTraceAccumulator(store TraceStore, runID, sessionID, projectRoot stri
 		memoryStatus:     memoryStatus,
 		warnWriteFailure: warnWriteFailure,
 		stages:           make(map[stageKey]schemas.InputMeta),
+		contextRounds:    make(map[contextRoundKey]contextRoundMeta),
 		deliveredMemory:  make(map[deliveredMemoryKey]struct{}),
 	}
 }
@@ -204,6 +220,51 @@ func (tr *runTraceAccumulator) replaySuppressedCount() int {
 	return tr.replaySuppressed
 }
 
+// recordContextRound records the context telemetry for one EXPANSION
+// round (D3) under its own key: {stage, iteration, ordinal, round}.
+// Round 0 is the initial handshake and records under the historical
+// recordContext path; rounds 1+ are expansion rounds. Separate keys mean
+// an expansion never overwrites the initial record and repair/expansion
+// records never collide.
+func (tr *runTraceAccumulator) recordContextRound(stage string, iteration, ordinal, round int, bundle schemas.ContextBundle) {
+	if tr == nil {
+		return
+	}
+	key := contextRoundKey{name: stage, iteration: iteration, ordinal: ordinal, round: round}
+	meta := tr.contextRounds[key]
+	meta.ContextItems += len(bundle.Items)
+	for _, item := range bundle.Items {
+		meta.ContextChars += len(item.Summary)
+		if item.Error != nil {
+			// A failed query is executed work and a delivery miss, never
+			// successfully delivered context (same rule as recordContext).
+			meta.ContextFailures++
+		}
+	}
+	meta.InvocationOrdinal = ordinal
+	meta.ContextRound = round
+	tr.contextRounds[key] = meta
+}
+
+// contextRoundKey identifies one context round within a stage invocation.
+type contextRoundKey struct {
+	name      string
+	iteration int
+	ordinal   int
+	round     int
+}
+
+// contextRoundMeta is the per-round context telemetry shape (mirrors the
+// ContextItems/Chars/Failures slice of InputMeta so consumers read the
+// same units).
+type contextRoundMeta struct {
+	ContextItems      int
+	ContextChars      int
+	ContextFailures   int
+	InvocationOrdinal int
+	ContextRound      int
+}
+
 func (tr *runTraceAccumulator) noteStage(stage string, iteration int) {
 	tr.currentStage = stage
 	tr.currentIter = iteration
@@ -278,7 +339,7 @@ func (tr *runTraceAccumulator) recordHistory(state schemas.IterationState) {
 }
 
 func (tr *runTraceAccumulator) recordMemory(stage string, iteration int, bundle schemas.MemoryBundle) {
-	key := stageKey{stage, iteration}
+	key := stageKeyFor(stage, iteration, 0)
 	meta := tr.stages[key]
 	meta.MemoryItems += len(bundle.Observations)
 	meta.ExemplarItems += len(bundle.Exemplars)
@@ -293,17 +354,23 @@ func (tr *runTraceAccumulator) recordMemory(stage string, iteration int, bundle 
 }
 
 func (tr *runTraceAccumulator) recordContext(stage string, iteration int, bundle schemas.ContextBundle) {
-	key := stageKey{stage, iteration}
+	key := stageKeyFor(stage, iteration, 0)
 	meta := tr.stages[key]
 	meta.ContextItems = len(bundle.Items)
 	for _, item := range bundle.Items {
 		meta.ContextChars += len(item.Summary)
+		if item.Error != nil {
+			// A failed query is executed work and a delivery miss, never
+			// successfully delivered context. Counting it here keeps the
+			// failure visible next to the issued-request total.
+			meta.ContextFailures++
+		}
 	}
 	tr.stages[key] = meta
 }
 
 func (tr *runTraceAccumulator) recordEdge(stage string, iteration int, bytes int) {
-	key := stageKey{stage, iteration}
+	key := stageKeyFor(stage, iteration, 0)
 	meta := tr.stages[key]
 	meta.EdgePayloadBytes = bytes
 	tr.stages[key] = meta
@@ -325,7 +392,7 @@ func (tr *runTraceAccumulator) noteMemorySearchFailed() {
 // direct_candidates is their sum (the topic lookup returned them all). The
 // fields are consumer-pending: no reader consumes them yet (pairing rule).
 func (tr *runTraceAccumulator) recordMemoryLookup(stage string, iteration int, mode string, direct, stale int) {
-	key := stageKey{stage, iteration}
+	key := stageKeyFor(stage, iteration, 0)
 	meta := tr.stages[key]
 	meta.MemoryLookupMode = mode
 	meta.DirectCandidates = direct + stale
@@ -343,12 +410,104 @@ func (tr *runTraceAccumulator) recordMissPathDetail(stage string, iteration int,
 	if tr == nil {
 		return
 	}
-	key := stageKey{stage, iteration}
+	key := stageKeyFor(stage, iteration, 0)
 	meta := tr.stages[key]
 	meta.KeysGenerated = detail.KeysGenerated
 	meta.LookupMisses = detail.LookupMisses
 	meta.FTSFallback = detail.FallbackToPlainSearch
 	meta.ExemplarsRetrieved = detail.ExemplarsRetrieved
+	tr.stages[key] = meta
+}
+
+// recordScopeMetrics records the Part A context-bridge suppression counts
+// for one stage invocation: the deterministic counterfactual default
+// request size, what the scoped request actually executed, and the
+// operations the host structurally omitted. It also carries the scope
+// plan's privilege booleans via expansion count. Counts only.
+// InvocationOrdinal 0 marks the initial pass; repair re-entries record
+// under their own ordinal so a re-entry never overwrites this record.
+func (tr *runTraceAccumulator) recordScopeMetrics(stage string, iteration int, sup ScopeSuppression, scope StageScopePlan) {
+	tr.recordScopeMetricsOrdinal(stage, iteration, 0, sup, scope)
+}
+
+// recordScopeMetricsOrdinal is the ordinal-aware form. The scope plan's
+// remaining ExpansionBudget lands in ScopeExpansions (its documented
+// meaning); ExpansionsPerformed records what the invocation actually spent,
+// as a measured zero when nothing expanded. Expansions are not yet granted
+// anywhere in production, so the performed count comes from the scope
+// plan's spent field when the planner starts granting; today it records 0.
+func (tr *runTraceAccumulator) recordScopeMetricsOrdinal(stage string, iteration, ordinal int, sup ScopeSuppression, scope StageScopePlan) {
+	if tr == nil {
+		return
+	}
+	key := stageKeyFor(stage, iteration, ordinal)
+	meta := tr.stages[key]
+	meta.ContextQueriesDefault = sup.ContextQueriesDefault
+	meta.ContextQueriesExecuted = sup.ContextQueriesExecuted
+	meta.ContextQueriesSuppressed = sup.ContextQueriesSuppressed
+	meta.GlobalListsSuppressed = sup.GlobalListsSuppressed
+	meta.FileReadsSuppressed = sup.FileReadsSuppressed
+	meta.SearchesSuppressed = sup.SearchesSuppressed
+	meta.ScopeExpansions = scope.ExpansionBudget
+	meta.ExpansionsPerformed = scope.ExpansionsSpent
+	meta.InvocationOrdinal = ordinal
+	tr.stages[key] = meta
+}
+
+// RecordScopeMetrics records the scope-suppression metrics for one stage
+// invocation from a caller-supplied ScopeMetrics payload. It writes ONLY the
+// scope fields on InputMeta: the discovery-plan counters (and the legacy
+// DiscoveryReadsAvoided inferred-savings counter in particular) are never
+// touched here, so observed host omissions stay decoupled from resolved
+// question tallies. Counts only; no query text or paths land in the trace.
+func (tr *runTraceAccumulator) RecordScopeMetrics(stage string, iteration int, m schemas.ScopeMetrics) {
+	if tr == nil {
+		return
+	}
+	if err := m.Validate(); err != nil {
+		return
+	}
+	key := stageKeyFor(stage, iteration, 0)
+	meta := tr.stages[key]
+	meta.ContextQueriesDefault = m.ContextQueriesDefault
+	meta.ContextQueriesExecuted = m.ContextQueriesExecuted
+	meta.ContextQueriesSuppressed = m.ContextQueriesSuppressed
+	meta.GlobalListsSuppressed = m.GlobalListsSuppressed
+	meta.SearchesSuppressed = m.SearchesSuppressed
+	meta.ScopeExpansions = m.ScopeExpansions
+	tr.stages[key] = meta
+}
+
+// recordDiscoveryPlan records the Track C discovery-plan outcome for one
+// stage invocation: how many questions the plan saw, how many the task
+// itself answered, how many the cognition graph resolved (each counts as one
+// conservatively avoided discovery operation), how many stayed unresolved,
+// and the anchor freshness validation tally. Counts only; no question text
+// or node claims land in the trace.
+func (tr *runTraceAccumulator) recordDiscoveryPlan(stage string, iteration int, plan DiscoveryPlan) {
+	tr.recordDiscoveryPlanOrdinal(stage, iteration, 0, plan)
+}
+
+// recordDiscoveryPlanOrdinal records the discovery-plan counters under an
+// explicit invocation ordinal. Initial pass (0) and repair re-entries (1+)
+// keep separate records instead of overwriting one {stage, iteration} row.
+func (tr *runTraceAccumulator) recordDiscoveryPlanOrdinal(stage string, iteration, ordinal int, plan DiscoveryPlan) {
+	if tr == nil {
+		return
+	}
+	key := stageKeyFor(stage, iteration, ordinal)
+	meta := tr.stages[key]
+	meta.DiscoveryQuestions = len(plan.ResolvedByTask) + len(plan.ResolvedByCognition) + len(plan.Unresolved)
+	meta.DiscoveryResolvedTask = len(plan.ResolvedByTask)
+	meta.DiscoveryResolvedCog = len(plan.ResolvedByCognition)
+	meta.DiscoveryUnresolved = len(plan.Unresolved)
+	// DiscoveryReadsAvoided is deliberately NOT set here: a resolved
+	// question is not a suppressed read. Actual suppression is recorded
+	// by recordScopeMetrics from the host decisions in ScopedContextRequest.
+	meta.AnchorsValidated = plan.AnchorsValidated
+	meta.AnchorsFailed = plan.AnchorsFailed
+	meta.SemanticHits = plan.SemanticHits
+	meta.InvocationOrdinal = ordinal
 	tr.stages[key] = meta
 }
 
@@ -453,7 +612,7 @@ func (tr *runTraceAccumulator) recordPermission(event agent.PermissionEvent) {
 func (tr *runTraceAccumulator) buildOutcome(stageRecords []schemas.StageRecord, status, abortReason string) (schemas.RunOutcome, error) {
 	stages := make([]schemas.TracedStage, 0, len(stageRecords))
 	for _, rec := range stageRecords {
-		meta := tr.stages[stageKey{rec.Name, rec.Iteration}]
+		meta := tr.stages[stageKeyFor(rec.Name, rec.Iteration, 0)]
 		stages = append(stages, schemas.TracedStage{
 			StageRecord: rec,
 			InputMeta:   meta,

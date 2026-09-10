@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"time"
+
+	"github.com/Taf0711/splice/internal/splice"
 )
 
 // RunInput is one headless exec invocation plus its check command.
@@ -18,6 +20,46 @@ type RunInput struct {
 	Prompt    string
 	Cwd       string // the arm's repo copy
 	Check     string // shell command; exit 0 = success
+	// Treatment optionally names the experiment treatment this run
+	// realizes (cold, retrieval-only, delivery-only, scope-only, full).
+	// When set, the run seam appends the treatment's subprocess
+	// environment (SPLICE_SCOPE_MODE / SPLICE_EXEMPLAR_MODE) to the exec
+	// child so concurrent arms never share mutable knob state. Empty
+	// keeps the parent environment as-is (the historical behavior).
+	Treatment string `json:"-"`
+	// EffectiveTreatment is the typed resolution of what this run's
+	// treatment ACTUALLY is: requested vs effective names, the three
+	// causal dimensions, and store availability. Production resolves it
+	// ONCE pre-launch in the run seam; a test may set it directly to
+	// assert what the row would record.
+	EffectiveTreatment *splice.EffectiveTreatmentSpec `json:"-"`
+	// TreatmentEnv carries the resolved treatment environment entries.
+	// Production derives it from Treatment; a test may set it directly
+	// to assert what the child would receive without resolving.
+	TreatmentEnv []string `json:"-"`
+	// OutputPath optionally names a file the run seam writes the captured
+	// exec transcript to (debugging aid; empty disables the write).
+	OutputPath string `json:"-"`
+	// ArtifactDir optionally names a directory the run seam fills with
+	// reconstruction artifacts: the exec transcript, the external
+	// verifier output, and the final patch. Empty disables capture.
+	// Artifacts are what make a failed attempt explainable; the JSONL
+	// boolean alone cannot distinguish a wrong signature from a failed
+	// compile from a behavioral miss.
+	ArtifactDir string `json:"-"`
+	// Attempt identity fields (A2): they flow into the typed attempt
+	// evidence manifest. Family/Arm/Attempt/ArmOrder/ExperimentID name
+	// the attempt in the experiment grid; CheckScriptPath names the
+	// verifier script FILE backing the check command when one exists
+	// (empty for command-only verifiers), so the manifest can hash the
+	// script's actual bytes separately from the command string.
+	ExperimentID    string `json:"-"`
+	Family          string `json:"-"`
+	Arm             string `json:"-"`
+	Task            string `json:"-"`
+	Attempt         int    `json:"-"`
+	ArmOrder        int    `json:"-"`
+	CheckScriptPath string `json:"-"`
 }
 
 // RunOutput is one run's outcome.
@@ -36,6 +78,47 @@ type RunOutput struct {
 	ToolCalls   int
 	FileReads   int
 	SearchCalls int
+	// StreamWorkObserved records whether a stream transcript was
+	// actually parsed for this run (A3): a non-nil true with zero
+	// counters is a measured zero; nil or false means no transcript, so
+	// the counters are unknown, never free.
+	StreamWorkObserved *bool
+	// Artifact paths for this attempt (empty when ArtifactDir was unset).
+	VerifierOutputPath string
+	PatchPath          string
+	// FailureCategory classifies a non-success outcome so a model failure
+	// stays separable from infrastructure noise: "", "agent_noncompletion",
+	// "verifier_rejected", "verifier_infra", "provider_failure",
+	// "budget_exhausted", or "harness_timeout". A harness timeout is its
+	// own category, never an automatic infrastructure verdict.
+	FailureCategory string
+	// EvidenceStatus is "" when every configured artifact was captured and
+	// written, "incomplete" when evidence collection failed. An incomplete
+	// evidence set never changes the correctness result.
+	EvidenceStatus string
+	// ArtifactError names the first evidence-collection failure (empty when
+	// EvidenceStatus is not "incomplete").
+	ArtifactError string
+	// ManifestDigest is the sha256 of the captured change manifest and
+	// ProposedDigest the sha256 of the proposal patch bytes. Empty means
+	// not captured, never a fabricated zero digest.
+	ManifestDigest string
+	ProposedDigest string
+	// VerifierTimeMs is the wall-clock time of the verifier invocation.
+	VerifierTimeMs int64
+	// Stream token split (A3): input/output measured from the run's own
+	// stream-json usage events. SplitFound distinguishes a transcript
+	// with split-bearing usage records (measured values) from one
+	// without (unknown; totals may still exist).
+	StreamInputTokens  int
+	StreamOutputTokens int
+	StreamSplitFound   bool
+	// EffectiveTreatment carries the typed resolution of what this
+	// attempt's treatment actually was (A1). It rides every outcome
+	// path, including failures, so a failed attempt still records the
+	// realized condition. nil means the run seam could not resolve it
+	// (never silently rewritten on the row).
+	EffectiveTreatment *splice.EffectiveTreatmentSpec
 }
 
 // RunFunc runs one headless exec invocation in an arm copy and returns its

@@ -57,12 +57,28 @@ type AdmissionResult struct {
 	Rejected AdmissionCounts
 }
 
-// StableID returns the auditable identity for one observation.
+// StableID returns the auditable identity for one observation. The ID
+// sequence is source-scoped: graph nodes and observation rows have
+// separate numeric sequences, so the identity is qualified by the source
+// ("graph:42" vs "observation:42"). Two items with the same numeric ID
+// from different sources must never share a delivery identity, or the
+// replay guard would suppress one as a duplicate of the other. The content
+// digest makes an updated item with the same ID distinguishable from its
+// old content.
 func StableID(obs schemas.MemoryObservation) string {
 	if obs.ID <= 0 {
 		return ""
 	}
-	return "observation:" + strconv.FormatInt(obs.ID, 10)
+	prefix := "observation"
+	if obs.OwnerAgent == "cognition_graph" {
+		prefix = "graph"
+	}
+	// Content versioning (an updated item with the same ID is a new
+	// content version) is a deliberate follow-up: adding the digest here
+	// changes duplicate semantics across admission, not just delivery
+	// identity. The collision fix is the defect; versioning is scoped to
+	// the delivery-reconciliation follow-up.
+	return prefix + ":" + strconv.FormatInt(obs.ID, 10)
 }
 
 // Admit applies deterministic metadata policy to a retrieved bundle and

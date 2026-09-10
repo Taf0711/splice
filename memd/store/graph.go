@@ -294,6 +294,57 @@ const nodeColumns = `id, kind, claim, scope, project_path, status, confidence,
 source_run_id, created_revision, verified_revision, created_at, verified_at,
 claim_hash, metadata_json`
 
+// GetByIDs returns the nodes with the given ids that are ACTIVE and (when
+// projectPath is non-empty) belong to that project, in the same order as the
+// input ids with unresolvable ids skipped. This is the read side of the
+// semantic search pipeline: /graph/search_semantic returns ranked ids, and
+// the server enriches them into full nodes for the wire.
+func (s *Store) GetByIDs(ctx context.Context, ids []int64, projectPath string) ([]Node, error) {
+	out := make([]Node, 0, len(ids))
+	for _, id := range ids {
+		row := s.db.QueryRowContext(ctx,
+			`SELECT `+nodeColumns+`
+			 FROM cognition_nodes n
+			 WHERE n.id = ? AND n.status = ? AND (? = '' OR n.project_path = ?)`,
+			id, NodeStatusActive, projectPath, projectPath)
+		n, err := nodeFromRow(func(dest ...any) error { return row.Scan(dest...) })
+		if err == sql.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("graph: get by id %d: %w", id, err)
+		}
+		out = append(out, n)
+	}
+	return out, nil
+}
+
+// AnchorsFor returns every anchor on the given node ids, grouped by node id.
+func (s *Store) AnchorsFor(ctx context.Context, ids []int64) (map[int64][]Anchor, error) {
+	out := make(map[int64][]Anchor, len(ids))
+	for _, id := range ids {
+		rows, err := s.db.QueryContext(ctx,
+			`SELECT kind, value FROM cognition_anchors WHERE node_id = ? ORDER BY kind, value`, id)
+		if err != nil {
+			return nil, fmt.Errorf("graph: anchors for node %d: %w", id, err)
+		}
+		for rows.Next() {
+			var a Anchor
+			if err := rows.Scan(&a.Kind, &a.Value); err != nil {
+				rows.Close() //nolint:errcheck
+				return nil, fmt.Errorf("graph: anchors scan node %d: %w", id, err)
+			}
+			out[id] = append(out[id], a)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close() //nolint:errcheck
+			return nil, fmt.Errorf("graph: anchors rows node %d: %w", id, err)
+		}
+		rows.Close() //nolint:errcheck
+	}
+	return out, nil
+}
+
 // UpsertNode dedupes by (kind, claim_hash, project_path). A match updates
 // verified_at, verified_revision, and provenance, then returns the existing
 // row with its canonical id. No match inserts a new node. Anchors and edges
@@ -540,6 +591,34 @@ func (s *Store) AddEvidence(ctx context.Context, nodeID int64, in EvidenceInput)
 	return nil
 }
 
+// EvidenceFor returns every evidence record on the given node ids, grouped
+// by node id. It is the read side of AddEvidence and the export path needs
+// it: an exported capture set carries its evidence verbatim.
+func (s *Store) EvidenceFor(ctx context.Context, ids []int64) (map[int64][]Evidence, error) {
+	out := make(map[int64][]Evidence, len(ids))
+	for _, id := range ids {
+		rows, err := s.db.QueryContext(ctx,
+			`SELECT kind, ref, detail FROM cognition_evidence WHERE node_id = ? ORDER BY created_at`, id)
+		if err != nil {
+			return nil, fmt.Errorf("graph: evidence for node %d: %w", id, err)
+		}
+		for rows.Next() {
+			var e Evidence
+			if err := rows.Scan(&e.Kind, &e.Ref, &e.Detail); err != nil {
+				rows.Close() //nolint:errcheck
+				return nil, fmt.Errorf("graph: evidence scan node %d: %w", id, err)
+			}
+			out[id] = append(out[id], e)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close() //nolint:errcheck
+			return nil, fmt.Errorf("graph: evidence rows node %d: %w", id, err)
+		}
+		rows.Close() //nolint:errcheck
+	}
+	return out, nil
+}
+
 // GetExactOptions bounds and scopes an exact anchor query.
 type GetExactOptions struct {
 	ProjectPath string
@@ -741,6 +820,197 @@ func (s *Store) getActiveNode(ctx context.Context, id int64) (Node, error) {
 		return Node{}, fmt.Errorf("graph: get node %d: %w", id, err)
 	}
 	return n, nil
+}
+
+// Reanchor moves the verified revision of every ACTIVE node of one project
+// from one revision to another. This is the eval-harness re-anchor: a
+// verified run captures cognition against the run-time worktree state,
+// which the stage sandbox cannot snapshot (stash create is a write-shaped
+// operation the read-scoped profile refuses), so nodes anchor at HEAD and
+// the harness commits the verified tree afterward. The commit does not
+// change what the run verified, only the revision naming those bytes, so
+// advancing verified_revision from the pre-verify HEAD to the post-verify
+// commit preserves the freshness contract exactly.
+// Both revisions must be non-empty and differ. Count is informational.
+func (s *Store) Reanchor(ctx context.Context, projectPath, fromRevision, toRevision string) (int64, error) {
+	if strings.TrimSpace(projectPath) == "" {
+		return 0, fmt.Errorf("graph: reanchor needs a project path")
+	}
+	if strings.TrimSpace(fromRevision) == "" || strings.TrimSpace(toRevision) == "" {
+		return 0, fmt.Errorf("graph: reanchor needs both revisions")
+	}
+	if fromRevision == toRevision {
+		return 0, fmt.Errorf("graph: reanchor revisions are identical")
+	}
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE cognition_nodes
+		SET verified_revision = ?, verified_at = ?
+		WHERE project_path = ?
+		  AND status = ?
+		  AND verified_revision = ?
+	`, toRevision, time.Now().Unix(), projectPath, NodeStatusActive, fromRevision)
+	if err != nil {
+		return 0, fmt.Errorf("graph: reanchor %s %s->%s: %w", projectPath, fromRevision[:10], toRevision[:10], err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("graph: reanchor rows: %w", err)
+	}
+	return n, nil
+}
+
+// CaptureSetIDs returns the ids of a project's active nodes anchored at
+// the given revision - the capture set of the verified run that produced
+// them. Scoped to the project and revision so a reanchor can advance
+// exactly that set. When sourceRunID is non-empty the set is also scoped
+// to the producer run that persisted the nodes, so two runs that verified
+// the same tree keep separate capture sets. An empty sourceRunID keeps
+// the historical project+revision behavior.
+func (s *Store) CaptureSetIDs(ctx context.Context, projectPath, revision, sourceRunID string) ([]int64, error) {
+	if strings.TrimSpace(projectPath) == "" || strings.TrimSpace(revision) == "" {
+		return nil, fmt.Errorf("graph: capture set needs a project path and a revision")
+	}
+	query := `
+		SELECT id FROM cognition_nodes
+		WHERE project_path = ? AND status = ? AND verified_revision = ?
+	`
+	args := []any{projectPath, NodeStatusActive, revision}
+	if strings.TrimSpace(sourceRunID) != "" {
+		query += ` AND source_run_id = ?`
+		args = append(args, sourceRunID)
+	}
+	query += `
+		ORDER BY id
+	`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("graph: capture set query: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("graph: capture set scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("graph: capture set rows: %w", err)
+	}
+	return ids, nil
+}
+
+// ReanchorByIDs advances the verified revision of EXACTLY the given node
+// IDs (the capture set of one verified run) from one revision to another.
+// Unlike Reanchor, which updates every active node of a project matching
+// the source revision, this operation is scoped to the capture set: nodes
+// captured by other runs of the same project are untouched. The whole
+// operation is one SQL transaction and all-or-nothing: BEFORE any update,
+// the full ID list is validated; duplicates, unknown IDs, nodes outside
+// the project, inactive nodes, and nodes not anchored at fromRevision are
+// each rejected with an error naming the offending input, so no record
+// ever advances partially. A mid-loop SQL error aborts the transaction.
+func (s *Store) ReanchorByIDs(ctx context.Context, projectPath string, nodeIDs []int64, fromRevision, toRevision string) (int64, error) {
+	if strings.TrimSpace(projectPath) == "" {
+		return 0, fmt.Errorf("graph: reanchor by ids needs a project path")
+	}
+	if strings.TrimSpace(fromRevision) == "" || strings.TrimSpace(toRevision) == "" {
+		return 0, fmt.Errorf("graph: reanchor by ids needs both revisions")
+	}
+	if fromRevision == toRevision {
+		return 0, fmt.Errorf("graph: reanchor revisions are identical")
+	}
+	if len(nodeIDs) == 0 {
+		return 0, fmt.Errorf("graph: reanchor by ids needs at least one node id")
+	}
+	seen := make(map[int64]struct{}, len(nodeIDs))
+	for _, id := range nodeIDs {
+		if id < 1 {
+			return 0, fmt.Errorf("graph: reanchor by ids: node id must be >= 1, got %d", id)
+		}
+		if _, dup := seen[id]; dup {
+			return 0, fmt.Errorf("graph: reanchor by ids: duplicate node id %d", id)
+		}
+		seen[id] = struct{}{}
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("graph: reanchor by ids begin: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback() //nolint:errcheck
+		}
+	}()
+
+	// Validate every requested ID against the loaded row BEFORE any
+	// update runs. A mismatch fails the whole transaction, so a bad
+	// second ID can never leave the first record advanced.
+	for _, id := range nodeIDs {
+		var (
+			rowProjectPath, rowStatus, rowRevision sql.NullString
+		)
+		err = tx.QueryRowContext(ctx, `
+			SELECT project_path, status, verified_revision
+			FROM cognition_nodes WHERE id = ?
+		`, id).Scan(&rowProjectPath, &rowStatus, &rowRevision)
+		if errors.Is(err, sql.ErrNoRows) {
+			err = fmt.Errorf("graph: reanchor node %d: unknown id", id)
+			return 0, err
+		}
+		if err != nil {
+			err = fmt.Errorf("graph: reanchor node %d load: %w", id, err)
+			return 0, err
+		}
+		if !rowProjectPath.Valid || rowProjectPath.String != projectPath {
+			err = fmt.Errorf("graph: reanchor node %d: project mismatch (belongs to %q, want %q)", id, rowProjectPath.String, projectPath)
+			return 0, err
+		}
+		if rowStatus.String != NodeStatusActive {
+			err = fmt.Errorf("graph: reanchor node %d: status %q is not active", id, rowStatus.String)
+			return 0, err
+		}
+		if !rowRevision.Valid || rowRevision.String != fromRevision {
+			err = fmt.Errorf("graph: reanchor node %d: not anchored at %q (currently %q)", id, fromRevision, rowRevision.String)
+			return 0, err
+		}
+	}
+
+	// Every requested ID validated. Update them inside the transaction.
+	advanced := int64(0)
+	now := time.Now().Unix()
+	for _, id := range nodeIDs {
+		var res sql.Result
+		res, err = tx.ExecContext(ctx, `
+			UPDATE cognition_nodes
+			SET verified_revision = ?, verified_at = ?
+			WHERE id = ? AND project_path = ? AND status = ? AND verified_revision = ?
+		`, toRevision, now, id, projectPath, NodeStatusActive, fromRevision)
+		if err != nil {
+			err = fmt.Errorf("graph: reanchor node %d: %w", id, err)
+			return advanced, err
+		}
+		var affected int64
+		affected, err = res.RowsAffected()
+		if err != nil {
+			err = fmt.Errorf("graph: reanchor node %d rows: %w", id, err)
+			return advanced, err
+		}
+		if affected == 0 {
+			// Impossible after validation; fail loud rather than
+			// report a count the rows do not support.
+			err = fmt.Errorf("graph: reanchor node %d: update matched no rows after validation", id)
+			return advanced, err
+		}
+		advanced++
+	}
+	if err = tx.Commit(); err != nil {
+		err = fmt.Errorf("graph: reanchor by ids commit: %w", err)
+		return 0, err
+	}
+	return advanced, nil
 }
 
 // SetStatus moves a node to a new status.

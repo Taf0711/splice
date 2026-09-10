@@ -74,6 +74,16 @@ type InputMeta struct {
 	MemoryChars      int `json:"memory_chars"`
 	ExemplarItems    int `json:"exemplar_items"`
 	EdgePayloadBytes int `json:"edge_payload_bytes"`
+	// ContextFailures counts context queries that executed but failed to
+	// produce content (the fulfilled item carries an error). A failed read
+	// is executed work and a delivery miss, never successfully delivered
+	// context. Measured zero is recorded, not absent.
+	ContextFailures int `json:"context_failures"`
+	// ProviderRetries counts provider-level stream retries this invocation
+	// consumed (attempt 2 of a retried stage records 1). Zero means no
+	// retry was needed; the field is absent on traces written before it
+	// existed.
+	ProviderRetries int `json:"provider_retries,omitempty"`
 	// MemoryLookupMode records which retrieval path produced this stage's
 	// memory bundle: "direct" (a fresh cognition fast-path hit, broad search
 	// skipped) or "search" (the broad search path ran). Empty means memory
@@ -90,6 +100,72 @@ type InputMeta struct {
 	LookupMisses       int `json:"lookup_misses,omitempty"`
 	FTSFallback        int `json:"fts_fallback,omitempty"`
 	ExemplarsRetrieved int `json:"exemplars_retrieved,omitempty"`
+	// Track C discovery-plan telemetry: what the cognition graph resolved
+	// for this stage invocation and what it could not. The question,
+	// resolution, and anchor tallies are observed counts.
+	DiscoveryQuestions    int `json:"discovery_questions,omitempty"`
+	DiscoveryResolvedTask int `json:"discovery_resolved_by_task,omitempty"`
+	DiscoveryResolvedCog  int `json:"discovery_resolved_by_cognition,omitempty"`
+	DiscoveryUnresolved   int `json:"discovery_unresolved,omitempty"`
+	// DiscoveryReadsAvoided is a legacy inferred-savings counter: it
+	// assumed one avoided read per question resolved by cognition. New
+	// runs must leave it zero. Real suppression is observed host behavior
+	// recorded in the scope fields below; the field stays so old traces
+	// still decode.
+	DiscoveryReadsAvoided int `json:"discovery_reads_avoided,omitempty"`
+	AnchorsValidated      int `json:"anchors_validated,omitempty"`
+	AnchorsFailed         int `json:"anchors_failed,omitempty"`
+	SemanticHits          int `json:"semantic_hits,omitempty"`
+	// Scope-suppression accounting: host decisions that actually omitted
+	// repository discovery operations versus the deterministic default
+	// context request. A *_suppressed count is an observed omission the
+	// host made, never an inference. Suppressed memory redelivery (the
+	// already-consumed filter on a bundle) is delivery dedup on the memory
+	// channel and never lands here; these fields cover the repository
+	// discovery channel only. FileReadsSuppressed is set by the Part A
+	// context bridge; the other fields are set by RecordScopeMetrics.
+	FileReadsSuppressed      int `json:"file_reads_suppressed,omitempty"`
+	ContextQueriesDefault    int `json:"context_queries_default,omitempty"`
+	ContextQueriesExecuted   int `json:"context_queries_executed,omitempty"`
+	ContextQueriesSuppressed int `json:"context_queries_suppressed,omitempty"`
+	GlobalListsSuppressed    int `json:"global_lists_suppressed,omitempty"`
+	SearchesSuppressed       int `json:"searches_suppressed,omitempty"`
+	// ScopeExpansions is the REMAINING expansion budget at the end of the
+	// invocation, never a count of performed expansions. ExpansionsPerformed
+	// is the measured count of expansion grants the invocation actually
+	// spent; a run that expanded nothing records 0, not an absent field.
+	ScopeExpansions     int `json:"scope_expansions,omitempty"`
+	ExpansionsPerformed int `json:"expansions_performed"`
+	// InvocationOrdinal distinguishes repeated invocations of the same
+	// stage within one iteration: 0 is the initial pass invocation, 1 and
+	// above are repair re-entries in repair order. Two invocations of the
+	// same stage produce two metric records instead of overwriting one.
+	InvocationOrdinal int `json:"invocation_ordinal,omitempty"`
+}
+
+// ScopeMetrics is the per-stage scope-suppression payload for
+// RecordScopeMetrics. Its fields mirror the scope fields on InputMeta.
+type ScopeMetrics struct {
+	ContextQueriesDefault    int `json:"context_queries_default,omitempty"`
+	ContextQueriesExecuted   int `json:"context_queries_executed,omitempty"`
+	ContextQueriesSuppressed int `json:"context_queries_suppressed,omitempty"`
+	GlobalListsSuppressed    int `json:"global_lists_suppressed,omitempty"`
+	SearchesSuppressed       int `json:"searches_suppressed,omitempty"`
+	// ScopeExpansions is the REMAINING expansion budget after the
+	// invocation; ExpansionsPerformed is the measured count the
+	// invocation actually spent.
+	ScopeExpansions     int `json:"scope_expansions,omitempty"`
+	ExpansionsPerformed int `json:"expansions_performed"`
+}
+
+// Validate checks the scope metrics.
+func (m ScopeMetrics) Validate() error {
+	if m.ContextQueriesDefault < 0 || m.ContextQueriesExecuted < 0 || m.ContextQueriesSuppressed < 0 ||
+		m.GlobalListsSuppressed < 0 || m.SearchesSuppressed < 0 || m.ScopeExpansions < 0 ||
+		m.ExpansionsPerformed < 0 {
+		return errors.New("scope metrics counts must be non-negative")
+	}
+	return nil
 }
 
 // Validate checks the input metadata.
@@ -97,11 +173,25 @@ func (m InputMeta) Validate() error {
 	if m.ContextItems < 0 || m.ContextChars < 0 || m.MemoryItems < 0 || m.MemoryChars < 0 || m.ExemplarItems < 0 || m.EdgePayloadBytes < 0 {
 		return errors.New("input metadata counts must be non-negative")
 	}
+	if m.ContextFailures < 0 || m.ProviderRetries < 0 {
+		return errors.New("input metadata failure counts must be non-negative")
+	}
 	if m.DirectCandidates < 0 || m.DirectHits < 0 || m.StaleHits < 0 {
 		return errors.New("cognition lookup counts must be non-negative")
 	}
 	if m.KeysGenerated < 0 || m.LookupMisses < 0 || m.FTSFallback < 0 || m.ExemplarsRetrieved < 0 {
 		return errors.New("cognition miss-path counts must be non-negative")
+	}
+	if m.FileReadsSuppressed < 0 ||
+		m.ContextQueriesDefault < 0 || m.ContextQueriesExecuted < 0 || m.ContextQueriesSuppressed < 0 ||
+		m.GlobalListsSuppressed < 0 || m.SearchesSuppressed < 0 || m.ScopeExpansions < 0 ||
+		m.ExpansionsPerformed < 0 || m.InvocationOrdinal < 0 {
+		return errors.New("context scope counts must be non-negative")
+	}
+	if m.DiscoveryQuestions < 0 || m.DiscoveryResolvedTask < 0 || m.DiscoveryResolvedCog < 0 ||
+		m.DiscoveryUnresolved < 0 || m.DiscoveryReadsAvoided < 0 || m.AnchorsValidated < 0 ||
+		m.AnchorsFailed < 0 || m.SemanticHits < 0 {
+		return errors.New("discovery plan counts must be non-negative")
 	}
 	switch m.MemoryLookupMode {
 	case "", "direct", "search":

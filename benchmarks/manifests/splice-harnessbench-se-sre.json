@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "manifest_id": "splice-harnessbench-se-sre",
+  "benchmark": "harness-bench",
+  "upstream_repo": "https://github.com/Qihoo360/harness-bench",
+  "upstream_commit": "1025086a446653702b80cfb48babbeec35db6b2c",
+  "DEVELOPMENT SUBSET - NOT FULL BENCHMARK SCORE": "This manifest selects a fixed subset of upstream tasks for development iteration only. Any score computed from it must carry the label DEVELOPMENT SUBSET - NOT FULL BENCHMARK SCORE. It is not a Harness-Bench score and must never be compared with the full 106-task suite or with other benchmarks.",
+  "selection_rule": "Fixed task-id selection committed with this manifest. Categories were enumerated from the upstream class field in tasks/<task_id>/task.yaml at the pinned commit. Selection is by id only, never by solved-status, difficulty outcome, or run results.",
+  "categories": [
+    {
+      "class": "Software Engineering & Codebase Maintenance",
+      "upstream_task_count": 22,
+      "selected_task_ids": [
+        "009-git-pr-merge",
+        "011-code-debug",
+        "016-code-repair-pytest",
+        "039-repo-architecture-map",
+        "040-test-coverage-fill",
+        "041-frontend-state-bug",
+        "042-api-schema-migration",
+        "044-ci-config-repair",
+        "045-dependency-upgrade-compat",
+        "046-performance-regression",
+        "048-release-note-changelog",
+        "084-js-state-type-bug",
+        "085-flaky-test-root-cause",
+        "086-sql-migration-preflight-rollback",
+        "087-cli-parser-bug-tests"
+      ],
+      "selection_note": "15 of 22 upstream SE tasks, picked to cover debug, repair, tests, CI, migration, and review task shapes. The full SE class must be used for any reported SE score."
+    },
+    {
+      "class": "SRE, DevOps & Release Ops",
+      "upstream_task_count": 7,
+      "selected_task_ids": [
+        "019-incident-runbook-synthesis",
+        "062-k8s-config-audit",
+        "063-alert-dedup-noise",
+        "064-service-dependency-triage",
+        "065-capacity-planning",
+        "066-rollback-readiness",
+        "067-canary-release-check"
+      ],
+      "selection_note": "All 7 upstream SRE tasks."
+    }
+  ],
+  "total_selected": 22,
+  "upstream_total": 106
+}
