@@ -478,7 +478,19 @@ func captureFromVerifiedRun(projectPath, outcomeStatus string, changedFiles []st
 // structural procedure + file-fact captures. Their records carry
 // verification status unverified unless ver proves otherwise, so legacy
 // captures remain hints, never trusted substitutions.
+// canonicalProjectPath resolves symlinks in a project path so the stored
+// project identity matches the queried identity regardless of how each
+// caller spells the directory (macOS: /var/folders vs /private/var/folders).
+// An unresolvable path is returned unchanged.
+func canonicalProjectPath(projectPath string) string {
+	if resolved, err := filepath.EvalSymlinks(projectPath); err == nil {
+		return resolved
+	}
+	return projectPath
+}
+
 func captureFromVerifiedRunVerified(projectPath, outcomeStatus string, changedFiles []string, testCommand, revision, runID string, ver captureVerification, origin string) []GraphCapture {
+	projectPath = canonicalProjectPath(projectPath)
 	if outcomeStatus != "completed" {
 		return nil
 	}

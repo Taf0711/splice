@@ -120,11 +120,24 @@ func importSnapshotBundle(path string) (snapshotBundle, error) {
 // no capture set for the run at the revision: a missing natural capture
 // must fail natural-capture setup loudly, never silently fall back to the
 // deterministic reconstruction path.
+// canonicalProjectPath resolves symlinks in a project path so the stored
+// project identity matches the queried identity regardless of how each
+// caller spells the directory (macOS: /var/folders vs /private/var/folders).
+// An unresolvable path (deleted dir) is returned unchanged; the caller's
+// error handling owns that case.
+func canonicalProjectPath(projectPath string) string {
+	if resolved, err := filepath.EvalSymlinks(projectPath); err == nil {
+		return resolved
+	}
+	return projectPath
+}
+
 func exportNaturalCaptureSet(ctx context.Context, client *memd.Client, projectPath, revision, producerRunID string) ([]memd.ExportedCaptureNode, error) {
 	if client == nil {
 		return nil, fmt.Errorf("export natural capture set: memory sidecar unavailable")
 	}
-	nodes, err := client.ExportCaptureSet(ctx, projectPath, revision, producerRunID)
+	queryPath := canonicalProjectPath(projectPath)
+	nodes, err := client.ExportCaptureSet(ctx, queryPath, revision, producerRunID)
 	if err != nil {
 		return nil, fmt.Errorf("export capture set for run %s: %w", producerRunID, err)
 	}
