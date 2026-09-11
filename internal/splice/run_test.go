@@ -1767,7 +1767,7 @@ func TestEmitStageEventProducesTypedEventAndMarker(t *testing.T) {
 		OnStageEvent: func(event agent.StageEvent) { events = append(events, event) },
 	})
 
-	emitStageEvent(options, "code_writer", "running", "writing files", 50, []string{"main.go"})
+	emitStageEvent(options, 0, "code_writer", "running", "writing files", 50, []string{"main.go"})
 
 	if len(events) != 1 {
 		t.Fatalf("expected 1 typed stage event, got %d", len(events))
@@ -1803,7 +1803,7 @@ func TestEmitStageEventProducesTypedEventAndMarker(t *testing.T) {
 
 func TestEmitStageEventNilOnReasoning(t *testing.T) {
 	options := PipelineConfigFromAgentOptions(agent.Options{})
-	emitStageEvent(options, "code_writer", "running", "", 0, nil)
+	emitStageEvent(options, 0, "code_writer", "running", "", 0, nil)
 	// Should not panic.
 }
 

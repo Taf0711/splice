@@ -340,3 +340,36 @@ func TestPairingInvariant(t *testing.T) {
 		})
 	}
 }
+
+// TestApplyStageKeysNodesByNameAndIteration pins that node identity is the
+// (name, iteration) pair: a later pass appends its own node instead of
+// overwriting the earlier pass.
+func TestApplyStageKeysNodesByNameAndIteration(t *testing.T) {
+	state, err := Apply(State{}, StageEvent{ID: "code_writer", Kind: NodeKindWrite, Status: "completed", Iteration: 0})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	state, err = Apply(state, StageEvent{ID: "code_writer", Kind: NodeKindWrite, Status: "running", Iteration: 1})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(state.Nodes) != 2 {
+		t.Fatalf("nodes = %d, want 2 (one per pass)", len(state.Nodes))
+	}
+	if state.Nodes[0].Iteration != 0 || state.Nodes[0].Status != NodeStatusComplete {
+		t.Fatalf("first pass node = %+v, want iteration 0 complete", state.Nodes[0])
+	}
+	if state.Nodes[1].Iteration != 1 || state.Nodes[1].Status != NodeStatusRunning {
+		t.Fatalf("second pass node = %+v, want iteration 1 running", state.Nodes[1])
+	}
+	state, err = Apply(state, StageEvent{ID: "code_writer", Kind: NodeKindWrite, Status: "failed", Iteration: 1})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(state.Nodes) != 2 {
+		t.Fatalf("nodes after same-pass update = %d, want 2", len(state.Nodes))
+	}
+	if state.Nodes[1].Iteration != 1 || state.Nodes[1].Status != NodeStatusFailed {
+		t.Fatalf("updated node = %+v, want iteration 1 failed", state.Nodes[1])
+	}
+}

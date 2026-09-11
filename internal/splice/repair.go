@@ -102,7 +102,7 @@ func attemptLocalRepair(
 		lastMessage = message
 		attempts++
 
-		emitStageEvent(options, "test_runner", "message", fmt.Sprintf("revision_request -> code_writer: %d failing tests", len(names)), 0, nil)
+		emitStageEvent(options, iteration-1, "test_runner", "message", fmt.Sprintf("revision_request -> code_writer: %d failing tests", len(names)), 0, nil)
 
 		// Re-enter code_writer with the focused revision context.
 		writerInput := repairStageInput(runID, "code_writer", plan, stageNames, *priorSummaries, *priorChangedFiles, &revisionContext)
@@ -130,7 +130,7 @@ func attemptLocalRepair(
 		// re-entry itself already emits running/completed through
 		// runStageWithContext; this labeled note is what makes the stream show
 		// WHY a second test_runner run exists mid-iteration.
-		emitStageEvent(options, "test_runner", "message", fmt.Sprintf("repair re-entry %d: re-running tests", attempts), 0, nil)
+		emitStageEvent(options, iteration-1, "test_runner", "message", fmt.Sprintf("repair re-entry %d: re-running tests", attempts), 0, nil)
 		testInput := repairStageInput(runID, "test_runner", plan, stageNames, *priorSummaries, *priorChangedFiles, nil)
 		testStart := time.Now()
 		newTestOutput, terr := runRepairStage(ctx, wallDeadline, testInput, testRunnerStage, iteration, agent.ModelSelection{}, options, workDir, runner, mem, stageBudgetByName(plan, "test_runner"), plan.Tier, tr)
@@ -157,7 +157,7 @@ func attemptLocalRepair(
 		currentOutput = newTestOutput
 
 		if newResults, ok := newTestOutput.Data["test_results"].(schemas.TestRunResults); ok && newResults.Failed() == 0 {
-			emitStageEvent(options, "test_runner", "repaired", "revision resolved: tests pass", 100, nil)
+			emitStageEvent(options, iteration-1, "test_runner", "repaired", "revision resolved: tests pass", 100, nil)
 			(*priorSummaries)["code_writer"] = *mergedWriter.OutputSummary
 			(*priorSummaries)["test_runner"] = *mergedRunner.OutputSummary
 			return true, &schemas.InteractionRecord{
@@ -177,7 +177,7 @@ func attemptLocalRepair(
 	// Exhausted: the test_runner record already reflects the latest failing
 	// result via the merge above; the pass continues normally. Distinguish
 	// "still failing after N repairs" from "no repair attempted" in streams.
-	emitStageEvent(options, "test_runner", "message", fmt.Sprintf("repair_exhausted: still failing after %d repair(s)", attempts), 0, nil)
+	emitStageEvent(options, iteration-1, "test_runner", "message", fmt.Sprintf("repair_exhausted: still failing after %d repair(s)", attempts), 0, nil)
 	return false, &schemas.InteractionRecord{
 		Message:   lastMessage,
 		Iteration: iteration,

@@ -31,6 +31,9 @@ type pipelineStageRow struct {
 	status   pipelineStageStatus
 	detail   string
 	progress int // 0-100
+	// iteration is the pipeline pass this row belongs to. A stage that
+	// re-enters on a later pass keeps one row per pass.
+	iteration int
 	// reentered is true when a terminal stage (completed/failed/skipped/
 	// incomplete) was re-entered as running. This marks the repair loop
 	// (test_runner -> code_writer re-entry -> test_runner) without inventing a
@@ -85,10 +88,19 @@ func (s pipelinePanelState) presentation() pipelinePresentation {
 		active:   s.active,
 		stages:   append([]pipelineStageRow(nil), s.stages...),
 		messages: append([]pipelineMessageRow(nil), s.messages...),
-		total:    len(s.stages),
 	}
+	// The roster is the set of distinct stage names. A re-entry pass adds a
+	// row but not a stage, so the header counters stay bounded by the roster.
+	latest := make(map[string]int, len(p.stages))
+	for i := range p.stages {
+		latest[p.stages[i].name] = i
+	}
+	p.total = len(latest)
 	progressUnits := 0
 	for i := range p.stages {
+		if latest[p.stages[i].name] != i {
+			continue // an earlier pass of a stage, already represented
+		}
 		stage := &p.stages[i]
 		switch stage.status {
 		case pipelineStageCompleted:
@@ -137,6 +149,7 @@ func (s *pipelinePanelState) applyState(state presentation.State) {
 			kind:         node.Kind,
 			status:       pipelineStageStatusFromNode(node.Status),
 			progress:     int(node.Progress * 100),
+			iteration:    node.Iteration,
 			workspace:    node.Workspace,
 			worktreePath: node.WorktreePath,
 		}
@@ -401,12 +414,12 @@ func (p pipelinePresentation) renderStripWithChip(width int, phase int, chip str
 // yields "".
 func (p pipelinePresentation) stripCurrentLabel() string {
 	if p.current != nil {
-		return pipelineStageLabel(p.current.name)
+		return pipelineStageLabel(p.current.name) + iterationSuffix(p.current.iteration)
 	}
 	for _, stage := range p.stages {
 		if stage.status != pipelineStageCompleted && stage.status != pipelineStageFailed &&
 			stage.status != pipelineStageSkipped && stage.status != pipelineStageIncomplete {
-			return pipelineStageLabel(stage.name)
+			return pipelineStageLabel(stage.name) + iterationSuffix(stage.iteration)
 		}
 	}
 	return ""
@@ -419,7 +432,7 @@ func (p pipelinePresentation) stripLabels(width int, phase int) string {
 	cells := make([]string, 0, len(p.stages))
 	for _, stage := range p.stages {
 		glyph, style := pipelineStageGlyphAndStyle(stage.status, phase)
-		cells = append(cells, style.Render(glyph+" "+pipelineStageLabel(stage.name)))
+		cells = append(cells, style.Render(glyph+" "+pipelineStageLabel(stage.name)+iterationSuffix(stage.iteration)))
 	}
 	return fitRun(cells, width, " ")
 }
@@ -452,18 +465,20 @@ func (p pipelinePresentation) renderSection(width int, phase int) []string {
 	lines := make([]string, 0, len(p.stages)+7)
 	for _, stage := range p.stages {
 		glyph, bodyStyle := pipelineStageGlyphAndStyle(stage.status, phase)
-		line := " " + glyph + " " + bodyStyle.Render(truncateStep(stage.name, room))
+		displayName := stage.name + iterationSuffix(stage.iteration)
+		line := " " + glyph + " " + bodyStyle.Render(truncateStep(displayName, room))
+		nameWidth := len([]rune(displayName))
 		// Isolation badge (DoD 26): "isolated" lanes are badged distinctly
 		// from "shared cwd" so parallel-lane honesty survives the compact
 		// panel. Renders only when the whole row fits, like the kind tag.
-		if badge := workspaceBadge(stage.workspace); badge != "" && len([]rune(stage.name))+1+len(badge) <= room {
+		if badge := workspaceBadge(stage.workspace); badge != "" && nameWidth+1+len(badge) <= room {
 			line += " " + zeroTheme.faint.Render(badge)
 		}
 		// The kind tag is metadata shown faintly after the label. It renders
 		// only when the whole row fits; otherwise the row degrades exactly as
 		// P1.2 (name truncated by truncateStep, tag dropped), so narrow widths
 		// need no layout changes.
-		if tag := kindTag(stage.kind); tag != "" && len([]rune(stage.name))+1+len(tag) <= room {
+		if tag := kindTag(stage.kind); tag != "" && nameWidth+1+len(tag) <= room {
 			line += " " + zeroTheme.faint.Render(tag)
 		}
 		lines = append(lines, line)
@@ -581,6 +596,15 @@ func compactSectionTabs(width int) string {
 // rune of each underscore part (code_writer -> cw, static_analyzer -> sa,
 // test_runner -> tr). A single-part name keeps its first two runes. Missing
 // or empty names fall back to "?".
+// iterationSuffix marks a re-entry pass on a rendered stage label. The
+// first pass (0) stays unmarked, so a single-pass run renders unchanged.
+func iterationSuffix(iteration int) string {
+	if iteration <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(" i%d", iteration)
+}
+
 func pipelineStageLabel(name string) string {
 	if strings.TrimSpace(name) == "" {
 		return "?"

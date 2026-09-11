@@ -60,6 +60,8 @@ func AdaptStageEvent(event agent.StageEvent) presentation.StreamEventLike {
 		Status:   event.Status,
 		Detail:   event.Detail,
 		Progress: event.Progress,
+		// Iteration carries the pass so the reducer keeps one node per pass.
+		Iteration: event.Iteration,
 		// Workspace flows through for DoD 26's isolation badge. The
 		// reducer stores it on the node verbatim; the renderer decides
 		// how to badge it.

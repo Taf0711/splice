@@ -274,7 +274,11 @@ type PipelinePlanEvent struct {
 
 // StageEvent is a typed pipeline stage lifecycle event.
 type StageEvent struct {
-	Name         string
+	Name string
+	// Iteration is the pipeline pass this event belongs to. It is 0 for the
+	// first pass and rises on each revision re-entry, so the presentation
+	// layer can keep an earlier pass instead of overwriting it.
+	Iteration    int
 	Status       string
 	Detail       string
 	Progress     int

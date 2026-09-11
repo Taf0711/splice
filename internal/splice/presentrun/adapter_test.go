@@ -29,11 +29,11 @@ func TestNodeKindForStage(t *testing.T) {
 
 func TestAdaptStageEvent(t *testing.T) {
 	t.Run("stage transition", func(t *testing.T) {
-		adapted := AdaptStageEvent(agent.StageEvent{Name: "code_writer", Status: "running", Detail: "writing", Progress: 50})
+		adapted := AdaptStageEvent(agent.StageEvent{Name: "code_writer", Status: "running", Detail: "writing", Progress: 50, Iteration: 2})
 		event := adapted.PresentationEvent()
 		if event.Kind != presentation.EventKindStage || event.NodeID != "code_writer" ||
 			event.NodeKind != presentation.NodeKindWrite || event.Status != "running" ||
-			event.Detail != "writing" || event.Progress != 50 {
+			event.Detail != "writing" || event.Progress != 50 || event.Iteration != 2 {
 			t.Fatalf("unexpected stage projection: %+v", event)
 		}
 	})

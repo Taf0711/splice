@@ -710,7 +710,7 @@ func runPass(
 					Iteration:     iteration,
 					OutputSummary: &summary,
 				})
-				emitStageEvent(options, stageName, "skipped", summary, 0, nil)
+				emitStageEvent(options, iteration-1, stageName, "skipped", summary, 0, nil)
 				continue
 			}
 			summary := fmt.Sprintf("Stage unavailable: %s has no configured agent", stageName)
@@ -783,7 +783,7 @@ func runPass(
 		}
 
 		emitProgress(options, fmt.Sprintf("[%s] stage started\n", stageName))
-		emitStageEvent(options, stageName, "running", caps.Description, 0, nil)
+		emitStageEvent(options, iteration-1, stageName, "running", caps.Description, 0, nil)
 
 		// Model-free stages skip provider resolution and attribution.
 		modelFree := caps.ModelFree
@@ -804,7 +804,7 @@ func runPass(
 					if caps.Description != "" {
 						detail = caps.Description + " · " + resolved.Model
 					}
-					emitStageEvent(options, stageName, "running", detail, 0, nil)
+					emitStageEvent(options, iteration-1, stageName, "running", detail, 0, nil)
 				}
 			}
 		}
@@ -862,7 +862,7 @@ func runPass(
 				tr.recordStageCompletion(record)
 				tr.persistPartial(ctx)
 			}
-			emitStageEvent(options, stageName, "failed", summary, 0, nil)
+			emitStageEvent(options, iteration-1, stageName, "failed", summary, 0, nil)
 			return records, outputs, false, nil
 		}
 		if output.ContextRequest != nil {
@@ -878,7 +878,7 @@ func runPass(
 				tr.recordStageCompletion(record)
 				tr.persistPartial(ctx)
 			}
-			emitStageEvent(options, stageName, "failed", failSummary, 0, nil)
+			emitStageEvent(options, iteration-1, stageName, "failed", failSummary, 0, nil)
 			return records, outputs, false, nil
 		}
 		record.Status = schemas.StageCompleted
@@ -898,9 +898,9 @@ func runPass(
 			tr.persistPartial(ctx)
 		}
 		if record.Status == schemas.StageIncomplete {
-			emitStageEvent(options, stageName, "incomplete", summary, 0, nil)
+			emitStageEvent(options, iteration-1, stageName, "incomplete", summary, 0, nil)
 		} else {
-			emitStageEvent(options, stageName, "completed", summary, 100, stageChangedFiles(output))
+			emitStageEvent(options, iteration-1, stageName, "completed", summary, 100, stageChangedFiles(output))
 		}
 		for _, obs := range extractWriteObservations(stageName, runID, memoryProjectRoot(options, workDir), output) {
 			persistObservation(ctx, mem, obs, func(msg string) {
@@ -1713,9 +1713,14 @@ func emitPipelinePlan(options PipelineRunConfig, plan schemas.ExecutionPlan) {
 // emitStageEvent sends a typed stage lifecycle event. It also writes the
 // deprecated NUL marker on OnReasoning for one release. status is one of:
 // running, completed, failed, skipped, incomplete.
-func emitStageEvent(options PipelineRunConfig, stageName, status, detail string, progress int, changedFiles []string) {
+// emitStageEvent stamps a stage lifecycle event. iteration is the 0-based
+// pass index (the pipeline's first pass is 0, the runtime loop counts from
+// 1), so the presentation layer keeps one node per (stage, pass) and leaves
+// the first pass unmarked.
+func emitStageEvent(options PipelineRunConfig, iteration int, stageName, status, detail string, progress int, changedFiles []string) {
 	event := agent.StageEvent{
 		Name:         stageName,
+		Iteration:    iteration,
 		Status:       status,
 		Detail:       detail,
 		Progress:     progress,

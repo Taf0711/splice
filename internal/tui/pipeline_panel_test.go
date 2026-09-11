@@ -1239,3 +1239,30 @@ func TestPipelineSidebarHeaderCountStableAcrossPowerOfTen(t *testing.T) {
 		t.Fatalf("sidebar header = %q, want zero-padded 09/10 counter", got)
 	}
 }
+
+// TestPipelinePanelSeparatesIterations pins that a re-entry pass keeps its
+// own panel row while the header counters stay bounded by the roster.
+func TestPipelinePanelSeparatesIterations(t *testing.T) {
+	state := presentation.State{
+		SchemaVersion: presentation.PresentationSchemaVersionV1,
+		Lifecycle:     presentation.LifecycleExecute,
+		Nodes: []presentation.ExecutionNode{
+			{ID: "code_writer", Label: "code_writer", Kind: presentation.NodeKindWrite, Status: presentation.NodeStatusComplete, Progress: 1, Iteration: 0},
+			{ID: "code_writer", Label: "code_writer", Kind: presentation.NodeKindWrite, Status: presentation.NodeStatusRunning, Progress: 0.4, Iteration: 1},
+			{ID: "test_runner", Label: "test_runner", Kind: presentation.NodeKindTest, Status: presentation.NodeStatusPending, Iteration: 0},
+		},
+	}
+	var panel pipelinePanelState
+	panel.applyState(state)
+	if len(panel.stages) != 3 {
+		t.Fatalf("panel rows = %d, want 3", len(panel.stages))
+	}
+	p := panel.presentation()
+	if p.total != 2 {
+		t.Fatalf("roster total = %d, want 2 distinct stages", p.total)
+	}
+	section := strings.Join(p.renderSection(80, 0), "\n")
+	if !strings.Contains(section, "i1") {
+		t.Fatalf("rendered section does not mark the second pass:\n%s", section)
+	}
+}
