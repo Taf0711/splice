@@ -938,7 +938,7 @@ func (m *model) populateSetupPipelinePicks() {
 
 	primaryModelID := m.setupCurrentModel().ID
 	if setupProviderUsesTypedModel(option) {
-		for stage := range splicerun.StageTierLabels() {
+		for stage := range m.stageTierLabels() {
 			m.setup.pipelinePicks[stage] = primaryModelID
 		}
 		m.setup.pipelineOptions = make(map[string][]stageModelOption)
@@ -993,7 +993,7 @@ func (m *model) populateSetupPipelinePicks() {
 		}
 	}
 
-	for stage := range splicerun.StageTierLabels() {
+	for stage := range m.stageTierLabels() {
 		entry := splicerun.ResolveStageTierModel(stage, profile, m.modelCatalog)
 		pick := primaryModelID
 		if entry != nil {
@@ -1633,7 +1633,7 @@ func (m model) setupPipelineReadySummary() string {
 		return "single model"
 	}
 	count := 0
-	for stage := range splicerun.StageTierLabels() {
+	for stage := range m.stageTierLabels() {
 		if strings.TrimSpace(m.setup.pipelinePicks[stage]) != "" {
 			count++
 		}
@@ -1944,7 +1944,7 @@ func setupOptionIndex(options []stageModelOption, value string) int {
 }
 
 func (m model) sortedSetupPipelineStages() []string {
-	labels := splicerun.StageTierLabels()
+	labels := m.stageTierLabels()
 	out := make([]string, 0, len(labels))
 	for stage := range labels {
 		out = append(out, stage)

@@ -7,6 +7,7 @@ import (
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/config"
 	"github.com/Taf0711/splice/internal/modelregistry"
+	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
 var stageTierLabels = map[string]string{
@@ -16,13 +17,46 @@ var stageTierLabels = map[string]string{
 	"plan_critic":        "reasoning",
 }
 
-// StageTierLabels returns the map of model-backed stage names to their
-// resolver tier labels. It is exported so first-run onboarding can enumerate
-// the stages that need per-stage model selection.
+// designStageTierLabels are the design-phase stages. They are not topology
+// nodes (the design pipeline is separate from the execution pipeline), so they
+// are enumerated always, independent of the active topology.
+var designStageTierLabels = map[string]string{
+	"design_crystallize": "medium",
+	"plan_critic":        "reasoning",
+}
+
+// StageTierLabels returns the labels for the embedded default topology. It is
+// the compatibility entry point for a caller that has no active topology.
 func StageTierLabels() map[string]string {
+	return StageTierLabelsFor(nil)
+}
+
+// StageTierLabelsFor returns the model-backed stage names of one topology with
+// their resolver tier labels, plus the design-phase stages. A model-backed node
+// with no known label defaults to "medium", so a custom prompt node is
+// selectable in the model wizard. Model-free nodes are excluded because they
+// never resolve a model. A nil topology means the embedded default.
+func StageTierLabelsFor(topology *schemas.PipelineTopology) map[string]string {
 	out := make(map[string]string, len(stageTierLabels))
-	for k, v := range stageTierLabels {
-		out[k] = v
+	if topology == nil {
+		for name, label := range stageTierLabels {
+			out[name] = label
+		}
+		return out
+	}
+	// The design stages are never topology nodes, so they are always present.
+	for name, label := range designStageTierLabels {
+		out[name] = label
+	}
+	for _, node := range topology.Nodes {
+		if node.EffectiveCapabilities().ModelFree {
+			continue
+		}
+		if label, ok := stageTierLabels[node.Name]; ok {
+			out[node.Name] = label
+			continue
+		}
+		out[node.Name] = "medium"
 	}
 	return out
 }
