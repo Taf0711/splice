@@ -7,14 +7,14 @@ import (
 )
 
 // ScopeMode is the Part A ablation switch: whether the cognition scope
-// changes context acquisition and tool behavior. "on" (default) applies
-// the StageScopePlan to the context request and tool runner. "off" runs
+// changes context acquisition and tool behavior. "off" (default) runs
 // planDiscovery for telemetry only - the retrieval happens and is recorded,
 // but the model's input and the host's context operations stay byte-
 // identical to a cold run. This is the retrieval-only arm of the treatment
 // matrix: it measures retrieval overhead and detects unintended
 // control-flow side effects, which "no memory text" alone does not, because
 // scope construction changes context acquisition separately from delivery.
+// "on" applies the StageScopePlan to the context request and tool runner.
 type ScopeMode string
 
 const (
@@ -63,13 +63,15 @@ func RealizedTreatmentDimensions() (RealizedDimensions, error) {
 }
 
 // resolveScopeMode reads the scope ablation mode from the environment.
-// Unset or empty means "on" (the bridge is the feature under test).
+// Unset or empty means "off". The suppression path changes context
+// acquisition and tool behavior, so it stays off until a paired correctness
+// measurement justifies it. Set SPLICE_SCOPE_MODE=on to switch it on.
 // An invalid value is a loud configuration error naming the offender.
 func resolveScopeMode() (ScopeMode, error) {
 	raw := os.Getenv(scopeModeEnv)
 	switch ScopeMode(raw) {
 	case "":
-		return ScopeModeOn, nil
+		return ScopeModeOff, nil
 	case ScopeModeOn:
 		return ScopeModeOn, nil
 	case ScopeModeOff:

@@ -6,8 +6,8 @@ import (
 
 func TestResolveScopeMode(t *testing.T) {
 	t.Setenv(scopeModeEnv, "")
-	if on, err := scopeEnabled(); err != nil || !on {
-		t.Fatalf("unset = %v, %v; want on, nil", on, err)
+	if on, err := scopeEnabled(); err != nil || on {
+		t.Fatalf("unset = %v, %v; want off, nil", on, err)
 	}
 	t.Setenv(scopeModeEnv, "on")
 	if on, err := scopeEnabled(); err != nil || !on {

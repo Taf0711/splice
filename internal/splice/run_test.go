@@ -1841,7 +1841,7 @@ func TestRunTerminalStageFailureIncludesOutputSummary(t *testing.T) {
 	}
 	result, err := runIterationLoop(context.Background(), "run-terminal-failure", plan, stageRegistry{
 		"terminal_failure": terminalDetailStage{},
-	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 1}), t.TempDir(), nil, nil, nil, nil, nil)
+	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 1}), t.TempDir(), nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -1897,7 +1897,7 @@ func TestRunIterationLoopStopsRepeatedIdenticalStageFailure(t *testing.T) {
 
 	result, err := runIterationLoop(context.Background(), "run-repeated-failure", plan, stageRegistry{
 		"code_writer": stage,
-	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 50}), t.TempDir(), runner, nil, nil, nil, nil)
+	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 50}), t.TempDir(), runner, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -1939,7 +1939,7 @@ func TestRunIterationLoopCapsChangingStageFailures(t *testing.T) {
 
 			result, err := runIterationLoop(context.Background(), "run-changing-failure", plan, stageRegistry{
 				"code_writer": stage,
-			}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{MaxTurns: tc.maxTurns}), t.TempDir(), nil, nil, nil, nil, nil)
+			}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{MaxTurns: tc.maxTurns}), t.TempDir(), nil, nil, nil, nil, nil, nil)
 			if err != nil {
 				t.Fatalf("runIterationLoop: %v", err)
 			}
@@ -2273,7 +2273,7 @@ func TestStepBackIntegration(t *testing.T) {
 		nil,
 		nil,
 		nil, nil,
-		nil)
+		nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -2485,7 +2485,7 @@ func TestRunEscalatesOnCycle(t *testing.T) {
 		nil,
 		nil,
 		nil, nil,
-		nil)
+		nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -2550,7 +2550,7 @@ func TestRunEscalationNilResolverNonFatal(t *testing.T) {
 		nil,
 		nil,
 		nil, nil,
-		nil)
+		nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -2593,7 +2593,7 @@ func TestRunEscalationErrorResolverNonFatal(t *testing.T) {
 		nil,
 		nil,
 		nil, nil,
-		nil)
+		nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -2732,7 +2732,7 @@ func TestNoProgressBrakeStepsBackOnceThenAborts(t *testing.T) {
 		nil,
 		nil,
 		nil, nil,
-		nil)
+		nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -2776,7 +2776,7 @@ func TestSurfaceToUserNilCallbackAborts(t *testing.T) {
 		nil,
 		nil,
 		nil, nil,
-		nil)
+		nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -2827,7 +2827,7 @@ func TestSurfaceToUserContinue(t *testing.T) {
 		nil,
 		nil,
 		nil, nil,
-		nil)
+		nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -2887,7 +2887,7 @@ func TestSurfaceToUserAbort(t *testing.T) {
 		nil,
 		nil,
 		nil, nil,
-		nil)
+		nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -2936,7 +2936,7 @@ func TestSurfaceToUserCallbackError(t *testing.T) {
 		nil,
 		nil,
 		nil, nil,
-		nil)
+		nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -2981,7 +2981,7 @@ func TestSurfaceToUserCancellation(t *testing.T) {
 		nil,
 		nil,
 		nil, nil,
-		nil)
+		nil, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}

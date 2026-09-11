@@ -130,6 +130,11 @@ type InputMeta struct {
 	ContextQueriesSuppressed int `json:"context_queries_suppressed,omitempty"`
 	GlobalListsSuppressed    int `json:"global_lists_suppressed,omitempty"`
 	SearchesSuppressed       int `json:"searches_suppressed,omitempty"`
+	// NecessaryCallsSuppressed counts suppressed calls that a later
+	// correctness decline proved necessary (W2). It is an observed host
+	// omission paired with an observed correctness loss, never an inference
+	// about cause.
+	NecessaryCallsSuppressed int `json:"necessary_calls_suppressed,omitempty"`
 	// ScopeExpansions is the REMAINING expansion budget at the end of the
 	// invocation, never a count of performed expansions. ExpansionsPerformed
 	// is the measured count of expansion grants the invocation actually
@@ -191,6 +196,9 @@ type ScopeMetrics struct {
 	ContextQueriesSuppressed int `json:"context_queries_suppressed,omitempty"`
 	GlobalListsSuppressed    int `json:"global_lists_suppressed,omitempty"`
 	SearchesSuppressed       int `json:"searches_suppressed,omitempty"`
+	// NecessaryCallsSuppressed counts suppressed calls that a later
+	// correctness decline proved necessary (W2).
+	NecessaryCallsSuppressed int `json:"necessary_calls_suppressed,omitempty"`
 	// ScopeExpansions is the REMAINING expansion budget after the
 	// invocation; ExpansionsPerformed is the measured count the
 	// invocation actually spent.
@@ -201,8 +209,8 @@ type ScopeMetrics struct {
 // Validate checks the scope metrics.
 func (m ScopeMetrics) Validate() error {
 	if m.ContextQueriesDefault < 0 || m.ContextQueriesExecuted < 0 || m.ContextQueriesSuppressed < 0 ||
-		m.GlobalListsSuppressed < 0 || m.SearchesSuppressed < 0 || m.ScopeExpansions < 0 ||
-		m.ExpansionsPerformed < 0 {
+		m.GlobalListsSuppressed < 0 || m.SearchesSuppressed < 0 || m.NecessaryCallsSuppressed < 0 ||
+		m.ScopeExpansions < 0 || m.ExpansionsPerformed < 0 {
 		return errors.New("scope metrics counts must be non-negative")
 	}
 	return nil

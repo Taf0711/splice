@@ -63,6 +63,12 @@ type runTraceAccumulator struct {
 	interactions  []schemas.InteractionRecord
 	memoryItems   int
 	memoryChars   int
+	// suppressionMu guards suppression, the run-scoped recorder the scoped
+	// tool runner writes its host-side omissions to (W2). The loop resets
+	// the recorder at the start of each iteration, so the pairing reads
+	// exactly the suppressions that iteration made.
+	suppressionMu sync.Mutex
+	suppression   *SuppressionRecorder
 	currentStage  string
 	currentIter   int
 	history       []schemas.IterationState
@@ -448,10 +454,53 @@ func (tr *runTraceAccumulator) recordScopeMetricsOrdinal(stage string, iteration
 	meta.GlobalListsSuppressed = sup.GlobalListsSuppressed
 	meta.FileReadsSuppressed = sup.FileReadsSuppressed
 	meta.SearchesSuppressed = sup.SearchesSuppressed
+	meta.NecessaryCallsSuppressed = sup.NecessaryCallsSuppressed
 	meta.ScopeExpansions = scope.ExpansionBudget
 	meta.ExpansionsPerformed = scope.ExpansionsSpent
 	meta.InvocationOrdinal = ordinal
 	tr.stages[key] = meta
+}
+
+// suppressionRecorder returns the run-scoped suppression recorder, creating
+// it on first use. A nil accumulator returns nil, so a runner without a trace
+// behaves exactly as before W2.
+func (tr *runTraceAccumulator) suppressionRecorder() *SuppressionRecorder {
+	if tr == nil {
+		return nil
+	}
+	tr.suppressionMu.Lock()
+	defer tr.suppressionMu.Unlock()
+	if tr.suppression == nil {
+		tr.suppression = NewSuppressionRecorder()
+	}
+	return tr.suppression
+}
+
+// resetSuppressionRecorder starts a new suppression window for one iteration.
+func (tr *runTraceAccumulator) resetSuppressionRecorder() {
+	if tr == nil {
+		return
+	}
+	tr.suppressionMu.Lock()
+	defer tr.suppressionMu.Unlock()
+	tr.suppression = NewSuppressionRecorder()
+}
+
+// recordNecessarySuppressions stamps the paired necessary-suppression count
+// (W2) onto every invocation record already written for one iteration. It
+// updates only existing rows, so it never fabricates a metric for an
+// invocation that recorded none.
+func (tr *runTraceAccumulator) recordNecessarySuppressions(iteration, n int) {
+	if tr == nil {
+		return
+	}
+	for key, meta := range tr.stages {
+		if key.iteration != iteration {
+			continue
+		}
+		meta.NecessaryCallsSuppressed = n
+		tr.stages[key] = meta
+	}
 }
 
 // recordEvidencePlanOrdinal records the production evidence plan's
@@ -535,6 +584,7 @@ func (tr *runTraceAccumulator) RecordScopeMetrics(stage string, iteration int, m
 	meta.ContextQueriesSuppressed = m.ContextQueriesSuppressed
 	meta.GlobalListsSuppressed = m.GlobalListsSuppressed
 	meta.SearchesSuppressed = m.SearchesSuppressed
+	meta.NecessaryCallsSuppressed = m.NecessaryCallsSuppressed
 	meta.ScopeExpansions = m.ScopeExpansions
 	tr.stages[key] = meta
 }

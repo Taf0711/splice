@@ -369,7 +369,7 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 		})
 	}
 
-	result, err := runIterationLoop(ctx, runID, plan, registry, provider, ledgerOpts, absWorkDir, runner, mem, rec, tr, acc)
+	result, err := runIterationLoop(ctx, runID, plan, registry, provider, ledgerOpts, absWorkDir, runner, mem, rec, tr, acc, ledger)
 	if err == nil {
 		finishPresentation(acc, options, result)
 	}
@@ -608,6 +608,7 @@ func runIterationLoop(
 	rec WorkspaceRecovery,
 	tr *runTraceAccumulator,
 	acc *presentrun.Accumulator,
+	ledger *requestLedger,
 ) (schemas.PipelineResult, error) {
 	maxWallSeconds := defaultMaxWallSeconds
 	// Generation-only gate: input volume is bounded per call by compaction
@@ -617,6 +618,10 @@ func runIterationLoop(
 
 	history := []schemas.IterationState{}
 	allRecords := []schemas.StageRecord{}
+	// prevCost is the cumulative billed spend the trajectory cost rule reads
+	// as the previous sample. It starts unknown, so the rule stays inactive
+	// until two consecutive iterations report complete pricing.
+	var prevCost billedCostSnapshot
 	wallDeadline := time.Now().Add(time.Duration(maxWallSeconds) * time.Second)
 	var revisionContext *string
 	var priorFailure string
@@ -655,6 +660,9 @@ func runIterationLoop(
 		}
 
 		emitProgress(options, fmt.Sprintf("Starting pipeline iteration %d\n", i))
+		if tr != nil {
+			tr.resetSuppressionRecorder()
+		}
 		passRecords, passOutputs, completed, err := runPass(ctx, runID, i, plan, registry, provider, options, workDir, runner, wallDeadline, revisionContext, mem, tr, NewStageExecutionBudget(0))
 		if err != nil {
 			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
@@ -697,6 +705,22 @@ func runIterationLoop(
 		if err != nil {
 			return finishWithReason(runID, plan, allRecords, "failed", fmt.Sprintf("compute iteration state: %v", err))
 		}
+		// W2: pair this iteration's host-side suppressions with the
+		// correctness signal. A suppression that coincided with a correctness
+		// decline is recorded as necessary on the invocation metrics. The
+		// pairing is telemetry here: a scope switch that is off by default
+		// must not abort a run on a coincident decline.
+		if tr != nil && len(history) > 0 {
+			if rec := tr.suppressionRecorder(); rec != nil && rec.Suppressed() > 0 {
+				pair, pairErr := CheckScopeNonInferiority(rec, history[len(history)-1], state)
+				if pairErr != nil {
+					emitProgress(options, fmt.Sprintf("[scope] %v\n", pairErr))
+				}
+				if pair.NecessaryCallsSuppressed > 0 {
+					tr.recordNecessarySuppressions(i, pair.NecessaryCallsSuppressed)
+				}
+			}
+		}
 		history = append(history, state)
 		if tr != nil {
 			tr.recordHistory(state)
@@ -723,7 +747,34 @@ func runIterationLoop(
 			return finishCompleted(runID, plan, allRecords, state)
 		}
 
-		decision := EvaluateTrajectory(history, maxIterations, &tokenBudget)
+		// W3: the cost rule reads BILLED cost from the authoritative request
+		// ledger, never raw tokens, because a cache-read round costs a
+		// fraction of a cold round and a token total hides that. The signal is
+		// the delta since the previous iteration. When pricing coverage is not
+		// complete the billed delta is unknown, so the cost rule stays
+		// inactive and the run records why. Missing pricing is never a zero
+		// cost.
+		costSnapshot, cerr := ledgerCostSnapshot(ledger)
+		if cerr != nil {
+			return finishWithReason(runID, plan, allRecords, "failed", cerr.Error())
+		}
+		costSignal, cerr := iterationCostSignal(prevCost, costSnapshot)
+		if cerr != nil {
+			return finishWithReason(runID, plan, allRecords, "failed", fmt.Sprintf("trajectory cost signal: %v", cerr))
+		}
+		prevCost = costSnapshot
+		var decision schemas.TrajectoryDecision
+		if costSignal != nil {
+			decision, cerr = EvaluateTrajectoryWithCost(history, maxIterations, &tokenBudget, costSignal)
+			if cerr != nil {
+				return finishWithReason(runID, plan, allRecords, "failed", fmt.Sprintf("trajectory cost signal: %v", cerr))
+			}
+		} else {
+			decision = EvaluateTrajectory(history, maxIterations, &tokenBudget)
+			if costSnapshot.Note != "" {
+				emitProgress(options, fmt.Sprintf("[trajectory] cost rule inactive: %s\n", costSnapshot.Note))
+			}
+		}
 		if acc != nil && presentrun.IsTrajectoryIntervention(decision.Action) {
 			failed := findFailed(passRecords)
 			if adapted, ok := presentrun.AdaptTrajectoryDecision(decision.Action, decision.Reason, failed.Name); ok {
@@ -1226,7 +1277,11 @@ func runStageWithContextBudgeted(
 		// context fulfillment path uses the raw runner with explicit
 		// granted paths, so the scoped request is never blocked by its
 		// own scope.
-		scoped := ScopedToolRunner{Inner: runner, Scope: *priorScope}
+		var supRec *SuppressionRecorder
+		if tr != nil {
+			supRec = tr.suppressionRecorder()
+		}
+		scoped := ScopedToolRunner{Inner: runner, Scope: *priorScope, Recorder: supRec}
 		stageOpts.RunTool = func(ctx context.Context, name string, args map[string]any) (stages.ToolResult, error) {
 			res, err := scoped.RunTool(ctx, name, args)
 			if err != nil {

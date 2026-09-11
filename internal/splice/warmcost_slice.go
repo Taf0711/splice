@@ -30,6 +30,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/Taf0711/splice/internal/memd"
 	"github.com/Taf0711/splice/internal/splice/schemas"
@@ -116,8 +117,14 @@ type SliceResult struct {
 	DeliveredNotes int      `json:"delivered_notes,omitempty"`
 	DeliveredViews []string `json:"delivered_views,omitempty"`
 	// IncrementalBenefit is false when improved cold supplies the same
-	// information at the same cost. The no-benefit case stays in reports.
+	// information at the same cost, or when the expected-value gate (W1)
+	// rejects the structural elimination. The no-benefit case stays in
+	// reports.
 	IncrementalBenefit bool `json:"incremental_benefit"`
+	// EVGate records the expected-value gate inputs and decision when the
+	// gate is active. Nil means no measured inputs were installed, so the
+	// gate was inactive and structural elimination is the recorded benefit.
+	EVGate *SliceEVGate `json:"ev_gate,omitempty"`
 	// MechanismGate names the eliminated discovery operation or provider
 	// round when one actually exists with correctness retained.
 	MechanismGate string `json:"mechanism_gate,omitempty"`
@@ -139,6 +146,21 @@ func RunRetentionSlice(taskBIntent string, worktree string, taskARecords []nodeW
 	// memory. The comparison is always cold-plan-first (E4 rule).
 	cold := buildColdPlan(taskBIntent, worktree, nil, 8)
 	coldOps := operationNames(cold.Operations)
+
+	// W1 expected-value gate: when measured inputs are installed, a
+	// structural elimination counts as a benefit only when p*W > H. With no
+	// inputs the gate is inactive and structural elimination is the benefit,
+	// so an unmeasured configuration is byte-identical to the pre-gate path.
+	evGate := evaluateSubstitutionEVGate()
+	incrementalBenefit := func(eliminated []string) bool {
+		if len(eliminated) == 0 {
+			return false
+		}
+		if evGate == nil {
+			return true
+		}
+		return evGate.Admitted
+	}
 
 	// Condition 1: improved cold.
 	results = append(results, SliceResult{
@@ -163,9 +185,10 @@ func RunRetentionSlice(taskBIntent string, worktree string, taskARecords []nodeW
 		DeliveredViews:     manualDiff.DeliveredViews,
 		PolicyDecisions:    manualWarm.PolicyDecisions,
 		DiagnosticOnly:     true,
-		IncrementalBenefit: len(manualDiff.Eliminated) > 0,
+		IncrementalBenefit: incrementalBenefit(manualDiff.Eliminated),
+		EVGate:             evGate,
 	}
-	if len(manualDiff.Eliminated) > 0 {
+	if manualResult.IncrementalBenefit && len(manualDiff.Eliminated) > 0 {
 		manualResult.MechanismGate = "manual: eliminated " + manualDiff.Eliminated[0]
 	}
 	results = append(results, manualResult)
@@ -185,11 +208,16 @@ func RunRetentionSlice(taskBIntent string, worktree string, taskARecords []nodeW
 		DeliveredNotes:     autoDiff.DeliveredNotes,
 		DeliveredViews:     autoDiff.DeliveredViews,
 		PolicyDecisions:    autoWarm.PolicyDecisions,
-		IncrementalBenefit: len(autoDiff.Eliminated) > 0,
+		IncrementalBenefit: incrementalBenefit(autoDiff.Eliminated),
+		EVGate:             evGate,
 	}
-	if len(autoDiff.Eliminated) > 0 {
+	switch {
+	case autoResult.IncrementalBenefit && len(autoDiff.Eliminated) > 0:
 		autoResult.MechanismGate = "automatic: eliminated " + autoDiff.Eliminated[0]
-	} else {
+	case len(autoDiff.Eliminated) > 0:
+		autoResult.PolicyDecisions = append(autoResult.PolicyDecisions,
+			"EV_GATE_REJECTED: structural elimination recorded but the expected-value gate did not admit ("+strings.Join(evGate.Reasons, "; ")+")")
+	default:
 		autoResult.PolicyDecisions = append(autoResult.PolicyDecisions,
 			"NO_INCREMENTAL_BENEFIT: improved cold supplies the same information at the same cost")
 	}

@@ -343,6 +343,7 @@ func TestTrajectoryRuleOrder(t *testing.T) {
 		"oscillation",
 		"cycle",
 		"no_progress",
+		"cost_without_progress",
 		"rollback",
 		"step_back",
 		"confidence",

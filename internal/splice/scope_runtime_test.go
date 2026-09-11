@@ -70,7 +70,9 @@ func (s *semanticContextStage) Run(_ context.Context, _ schemas.HarnessStageInpu
 
 func scopeOnForScopeRuntime(t *testing.T) {
 	t.Helper()
-	t.Setenv(scopeModeEnv, "")
+	// The scope bridge is off by default; these cases exercise the on-path, so
+	// they switch it on explicitly instead of relying on the old default.
+	t.Setenv(scopeModeEnv, string(ScopeModeOn))
 }
 
 // plainRunner is the inner runner. Its list_directory output is a fixed marker

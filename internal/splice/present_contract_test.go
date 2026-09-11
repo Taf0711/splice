@@ -235,7 +235,7 @@ func TestPresentationContractRepairLoop(t *testing.T) {
 		Cwd:                 t.TempDir(),
 	}
 	wrapped, acc := wirePresentation(options, plan)
-	result, err := runIterationLoop(context.Background(), "repair-run", plan, registry, runFakeProvider{}, wrapped, t.TempDir(), nil, nil, nil, nil, acc)
+	result, err := runIterationLoop(context.Background(), "repair-run", plan, registry, runFakeProvider{}, wrapped, t.TempDir(), nil, nil, nil, nil, acc, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -283,7 +283,7 @@ func TestPresentationContractDegradedRun(t *testing.T) {
 		Cwd:                 t.TempDir(),
 	}
 	wrapped, acc := wirePresentation(options, plan)
-	result, err := runIterationLoop(context.Background(), "degraded-run", plan, registry, runFakeProvider{}, wrapped, t.TempDir(), nil, nil, nil, nil, acc)
+	result, err := runIterationLoop(context.Background(), "degraded-run", plan, registry, runFakeProvider{}, wrapped, t.TempDir(), nil, nil, nil, nil, acc, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}

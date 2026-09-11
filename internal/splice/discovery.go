@@ -985,6 +985,10 @@ type ScopeSuppression struct {
 	GlobalListsSuppressed    int
 	FileReadsSuppressed      int
 	SearchesSuppressed       int
+	// NecessaryCallsSuppressed is the suppressed-call count that a later
+	// correctness decline proved necessary (W2). It is zero unless the run
+	// suppressed work and then lost correctness.
+	NecessaryCallsSuppressed int
 }
 
 // ScopedToolRunner wraps the model-facing tool runner with the cognition
@@ -998,6 +1002,9 @@ type ScopeSuppression struct {
 type ScopedToolRunner struct {
 	Inner ToolRunner
 	Scope StageScopePlan
+	// Recorder counts the suppressions this runner makes. Nil is allowed: a
+	// runner without a recorder behaves exactly as before W2.
+	Recorder *SuppressionRecorder
 }
 
 // ToolRunner implements the same interface via RunTool.
@@ -1012,6 +1019,7 @@ func (s ScopedToolRunner) RunTool(ctx context.Context, name string, args map[str
 		// eval round (cold 3/3, warm 0/3 when audit-package reads were
 		// denied). Suppression is scoped to what is provably redundant.
 		if !s.Scope.AllowGlobalList {
+			s.Recorder.record("list_directory")
 			return ToolResult{OK: true, Output: "workspace listing suppressed by cognition scope. The verified cognition graph names the relevant files: " +
 				strings.Join(s.Scope.KnownFiles, ", ")}, nil
 		}
@@ -1033,6 +1041,14 @@ func (s ScopedToolRunner) grantsPath(path string) bool {
 		}
 	}
 	return false
+}
+
+// SuppressionPairing pairs this runner's suppression count with the
+// correctness signal observed for the invocation (W2). It is the reporting
+// half of the pairing: the model self-report that authorized the scope is
+// checked against what the run actually achieved.
+func (s ScopedToolRunner) SuppressionPairing(baseline, observed schemas.IterationState) (ScopeCorrectnessPairing, error) {
+	return CheckScopeNonInferiority(s.Recorder, baseline, observed)
 }
 
 // CaptureFromVerifiedRun is the exported capture entry for eval harnesses

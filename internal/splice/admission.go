@@ -77,7 +77,23 @@ func admitRecord(ctx context.Context, rec *ReuseRecord, need ContextNeed, ac adm
 		return decision, why
 	}
 	// Applicability gate: the claim must fit the need.
-	return admitApplicability(rec, need)
+	decision, why = admitApplicability(rec, need)
+	if decision != AdmissionAccepted {
+		return decision, why
+	}
+	// Expected-value gate (W1): a need class selects a substitution only when
+	// its MEASURED p*W > H. With no measurement installed the gate is
+	// inactive and this branch does not run, so admission stays
+	// byte-identical to the pre-gate path. A record that fails the need class
+	// never reaches this gate, and a record the gate rejects is a hint, never
+	// a substitution.
+	if in, ok := substitutionEVFor(need.Kind); ok {
+		if admits, gateWhy := in.ExpectedValueAdmits(); !admits {
+			return AdmissionHintOnly, gateWhy
+		}
+		return AdmissionAccepted, why
+	}
+	return decision, why
 }
 
 // admitFreshness re-hashes each supporting source and dependency digest
