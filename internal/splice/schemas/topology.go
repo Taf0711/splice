@@ -122,7 +122,9 @@ func (b BudgetOverride) Validate() error {
 
 // builtinCapabilityProfile is the explicit capability map keyed by builtin
 // stage type. It is the default source for builtin nodes and for the
-// capability flags that drive model-free, context, and memory behavior.
+// capability flags that drive model-free, context, and memory behavior. Every
+// entry must match the stage implementation's own Capabilities() declaration;
+// TestBuiltinCapabilityProfileMatchesStageDeclarations fails when one drifts.
 var builtinCapabilityProfile = map[string]NodeCapabilities{
 	"code_writer": {
 		ModelFree:   false,
@@ -137,25 +139,25 @@ var builtinCapabilityProfile = map[string]NodeCapabilities{
 	"static_analyzer": {
 		ModelFree:            true,
 		PullContext:          boolPointer(false),
-		PullMemory:           boolPointer(true),
+		PullMemory:           boolPointer(false),
 		ProducesVerification: true,
 	},
 	"security_auditor": {
 		ModelFree:            true,
 		PullContext:          boolPointer(false),
-		PullMemory:           boolPointer(true),
+		PullMemory:           boolPointer(false),
 		ProducesVerification: true,
 	},
 	"test_runner": {
 		ModelFree:            true,
 		PullContext:          boolPointer(false),
-		PullMemory:           boolPointer(true),
+		PullMemory:           boolPointer(false),
 		ProducesVerification: true,
 	},
 	"acceptance_verifier": {
 		ModelFree:            true,
 		PullContext:          boolPointer(false),
-		PullMemory:           boolPointer(true),
+		PullMemory:           boolPointer(false),
 		ProducesVerification: true,
 	},
 }

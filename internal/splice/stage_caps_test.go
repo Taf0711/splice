@@ -94,7 +94,34 @@ func TestCompileTopologyCarriesResolvedCaps(t *testing.T) {
 	}
 	runner := byName["test_runner"]
 	if !runner.Caps.ModelFree || runner.Caps.PullContext == nil || *runner.Caps.PullContext ||
-		runner.Caps.PullMemory == nil || !*runner.Caps.PullMemory || !runner.Caps.ProducesVerification {
-		t.Fatalf("test_runner caps = %+v, want model-free, no context, memory, verification", *runner.Caps)
+		runner.Caps.PullMemory == nil || *runner.Caps.PullMemory || !runner.Caps.ProducesVerification {
+		t.Fatalf("test_runner caps = %+v, want model-free, no context, no memory, verification", *runner.Caps)
+	}
+}
+
+// TestBuiltinCapabilityProfileMatchesStageDeclarations is the pairing guard for
+// T4a: the compiled profile is authoritative for model-free, pull-context, and
+// memory gating, so any drift from the stage implementation silently changes
+// runtime behavior. This fails CI when one side moves without the other.
+func TestBuiltinCapabilityProfileMatchesStageDeclarations(t *testing.T) {
+	registry, err := buildStageRegistry(PipelineRunConfig{}, t.TempDir())
+	if err != nil {
+		t.Fatalf("buildStageRegistry: %v", err)
+	}
+	for name, stage := range registry {
+		profile, ok := schemas.BuiltinCapabilities(name)
+		if !ok {
+			continue // a custom node has no builtin profile
+		}
+		runtime := stage.Capabilities()
+		if profile.ModelFree != runtime.ModelFree {
+			t.Errorf("%s: profile model_free = %v, stage declares %v", name, profile.ModelFree, runtime.ModelFree)
+		}
+		if got := profile.PullContext != nil && *profile.PullContext; got != runtime.PullContext {
+			t.Errorf("%s: profile pull_context = %v, stage declares %v", name, got, runtime.PullContext)
+		}
+		if got := profile.PullMemory != nil && *profile.PullMemory; got != runtime.ConsumesMemory {
+			t.Errorf("%s: profile pull_memory = %v, stage declares consumes_memory = %v", name, got, runtime.ConsumesMemory)
+		}
 	}
 }

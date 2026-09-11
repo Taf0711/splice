@@ -165,8 +165,8 @@ func CompileTopology(topology *schemas.PipelineTopology, tier schemas.PipelineTi
 // filled, so an execution stage always carries a complete capability set.
 func resolvedNodeCapsPtr(node schemas.PipelineNode) *schemas.NodeCapabilities {
 	caps := node.EffectiveCapabilities()
-	pullContext := caps.PullContext != nil && *caps.PullContext
-	pullMemory := caps.PullMemory != nil && *caps.PullMemory
+	pullContext := node.PullsContext()
+	pullMemory := node.PullsMemory()
 	return &schemas.NodeCapabilities{
 		ModelFree:            caps.ModelFree,
 		PullContext:          &pullContext,
