@@ -68,7 +68,7 @@ func registerTopologyNodes(r stageRegistry, topology *schemas.PipelineTopology) 
 		case schemas.NodeTypeCommand:
 			r[node.Name] = stages.CommandStage{Name: node.Name, Command: append([]string(nil), node.Command...)}
 		case schemas.NodeTypePrompt:
-			return fmt.Errorf("topology node %s: prompt nodes are not implemented yet", node.Name)
+			r[node.Name] = stages.PromptStage{Name: node.Name, Template: node.Prompt}
 		default:
 			if node.Name == node.Type {
 				continue // already registered under its builtin name

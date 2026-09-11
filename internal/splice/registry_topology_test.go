@@ -34,21 +34,31 @@ func TestRegisterTopologyNodesAddsCommandNode(t *testing.T) {
 	}
 }
 
-// TestRegisterTopologyNodesRejectsPromptNode pins that an unsupported custom
-// node fails loud instead of silently compiling to a missing stage.
-func TestRegisterTopologyNodesRejectsPromptNode(t *testing.T) {
+// TestRegisterTopologyNodesAddsPromptNode pins that a prompt node reaches the
+// registry keyed by node name with its template.
+func TestRegisterTopologyNodesAddsPromptNode(t *testing.T) {
 	registry := stageRegistry{}
 	topology := &schemas.PipelineTopology{
 		Version: schemas.TopologySchemaVersion,
 		Name:    "custom",
-		Nodes:   []schemas.PipelineNode{{Name: "note", Type: schemas.NodeTypePrompt, Prompt: "x"}},
+		Nodes:   []schemas.PipelineNode{{Name: "note", Type: schemas.NodeTypePrompt, Prompt: "answer {{intent}}"}},
 	}
-	err := registerTopologyNodes(registry, topology)
-	if err == nil {
-		t.Fatal("registerTopologyNodes accepted an unsupported prompt node")
+	if err := registerTopologyNodes(registry, topology); err != nil {
+		t.Fatalf("registerTopologyNodes: %v", err)
 	}
-	if !strings.Contains(err.Error(), "not implemented") || !strings.Contains(err.Error(), "note") {
-		t.Fatalf("error = %v, want a named not-implemented error", err)
+	stage, ok := registry["note"]
+	if !ok {
+		t.Fatal("prompt node not registered under its node name")
+	}
+	prompt, ok := stage.(stages.PromptStage)
+	if !ok {
+		t.Fatalf("registered %T, want stages.PromptStage", stage)
+	}
+	if prompt.Template != "answer {{intent}}" {
+		t.Fatalf("template = %q, want the node template", prompt.Template)
+	}
+	if prompt.Capabilities().ModelFree {
+		t.Fatal("a prompt node is model-backed")
 	}
 }
 
