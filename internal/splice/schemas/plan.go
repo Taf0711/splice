@@ -17,6 +17,16 @@ const (
 	TierArchitectural PipelineTier = "architectural"
 )
 
+// Validate reports an error for a tier outside the closed set.
+func (t PipelineTier) Validate() error {
+	switch t {
+	case TierTrivial, TierLight, TierStandard, TierSubstantial, TierArchitectural:
+		return nil
+	default:
+		return fmt.Errorf("unknown pipeline tier %q", t)
+	}
+}
+
 // StageStatus is the execution status of a stage.
 type StageStatus string
 
@@ -292,6 +302,9 @@ func (t TokenBudget) Validate() error {
 type ExecutionStage struct {
 	Name   string      `json:"name"`
 	Budget StageBudget `json:"budget"`
+	// DependsOn lists the stages that must run before this one. It is empty
+	// for a linear plan and populated when the planner compiles a topology.
+	DependsOn []string `json:"depends_on,omitempty"`
 }
 
 // Validate checks the execution stage.

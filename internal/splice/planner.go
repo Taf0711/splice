@@ -15,25 +15,15 @@ func ClassifyRequest(request string) schemas.PipelineTier {
 }
 
 // stagesForTier builds the ordered execution-stage list and token budget for a
-// tier. Shared by BuildExecutionPlan and BuildExecutionPlanForTask so the
-// tier-to-stages shape lives in one place.
+// tier by compiling the embedded default topology. Shared by
+// BuildExecutionPlan and BuildExecutionPlanForTask so the tier-to-stages shape
+// lives in one place.
 func stagesForTier(tier schemas.PipelineTier) ([]schemas.ExecutionStage, schemas.TokenBudget, error) {
-	budget, err := BudgetForTier(tier)
+	compiled, err := CompileTopology(defaultTopology(), tier)
 	if err != nil {
 		return nil, schemas.TokenBudget{}, err
 	}
-	names, err := StageNamesForTier(tier)
-	if err != nil {
-		return nil, schemas.TokenBudget{}, err
-	}
-	stages := make([]schemas.ExecutionStage, 0, len(budget.PerStage))
-	for _, name := range names {
-		stages = append(stages, schemas.ExecutionStage{
-			Name:   name,
-			Budget: budget.PerStage[name],
-		})
-	}
-	return stages, budget, nil
+	return compiled.Stages, compiled.Budget, nil
 }
 
 // BuildExecutionPlan builds a minimal execution plan for the current request.
