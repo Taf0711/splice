@@ -326,6 +326,10 @@ type ExecutionPlan struct {
 	TokenBudget            TokenBudget      `json:"token_budget"`
 	AcceptanceFacts        []AcceptanceFact `json:"acceptance_facts,omitempty"`
 	RequiredKnowledgeFiles []string         `json:"required_knowledge_files,omitempty"`
+	// Warnings carries the non-fatal compile warnings for the plan's
+	// topology. The runtime surfaces them once at run start; they never
+	// block execution, and an empty field serializes nothing.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // Validate checks the execution plan.

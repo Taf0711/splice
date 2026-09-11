@@ -14,12 +14,19 @@ func ClassifyRequest(request string) schemas.PipelineTier {
 	return ClassifyRequestTyped(request).Tier
 }
 
+// compileForTier compiles the embedded default topology for a tier. It is the
+// single source for the tier's stages, budget, and compile warnings, so the
+// warnings cannot be dropped between the compiler and the plan.
+func compileForTier(tier schemas.PipelineTier) (CompiledTopology, error) {
+	return CompileTopology(defaultTopology(), tier)
+}
+
 // stagesForTier builds the ordered execution-stage list and token budget for a
 // tier by compiling the embedded default topology. Shared by
 // BuildExecutionPlan and BuildExecutionPlanForTask so the tier-to-stages shape
 // lives in one place.
 func stagesForTier(tier schemas.PipelineTier) ([]schemas.ExecutionStage, schemas.TokenBudget, error) {
-	compiled, err := CompileTopology(defaultTopology(), tier)
+	compiled, err := compileForTier(tier)
 	if err != nil {
 		return nil, schemas.TokenBudget{}, err
 	}
@@ -29,7 +36,7 @@ func stagesForTier(tier schemas.PipelineTier) ([]schemas.ExecutionStage, schemas
 // BuildExecutionPlan builds a minimal execution plan for the current request.
 func BuildExecutionPlan(request string) (schemas.ExecutionPlan, error) {
 	tier := ClassifyRequest(request)
-	stages, budget, err := stagesForTier(tier)
+	compiled, err := compileForTier(tier)
 	if err != nil {
 		return schemas.ExecutionPlan{}, err
 	}
@@ -40,8 +47,9 @@ func BuildExecutionPlan(request string) (schemas.ExecutionPlan, error) {
 	return schemas.ExecutionPlan{
 		Tier:          tier,
 		RequestIntent: intent,
-		Stages:        stages,
-		TokenBudget:   budget,
+		Stages:        compiled.Stages,
+		TokenBudget:   compiled.Budget,
+		Warnings:      append([]string(nil), compiled.Warnings...),
 	}, nil
 }
 
@@ -61,7 +69,7 @@ func BuildExecutionPlanForTaskWithFacts(task schemas.Task) (schemas.ExecutionPla
 			break
 		}
 	}
-	stages, budget, err := stagesForTier(tier)
+	compiled, err := compileForTier(tier)
 	if err != nil {
 		return schemas.ExecutionPlan{}, nil, err
 	}
@@ -72,9 +80,10 @@ func BuildExecutionPlanForTaskWithFacts(task schemas.Task) (schemas.ExecutionPla
 	return schemas.ExecutionPlan{
 		Tier:            tier,
 		RequestIntent:   task.Intent,
-		Stages:          stages,
-		TokenBudget:     budget,
+		Stages:          compiled.Stages,
+		TokenBudget:     compiled.Budget,
 		AcceptanceFacts: append([]schemas.AcceptanceFact(nil), task.AcceptanceFacts...),
+		Warnings:        append([]string(nil), compiled.Warnings...),
 	}, acceptanceFacts, nil
 }
 

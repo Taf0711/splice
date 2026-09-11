@@ -1,6 +1,7 @@
 package presentrun
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/Taf0711/splice/internal/agent"
@@ -110,4 +111,25 @@ func TestAdaptTrajectoryDecision(t *testing.T) {
 			t.Fatal("targetless rollback should not adapt")
 		}
 	})
+}
+
+// TestAdaptPlanEventWithDependencies pins that the compiled graph reaches the
+// presentation event and that the adapter copies it.
+func TestAdaptPlanEventWithDependencies(t *testing.T) {
+	deps := map[string][]string{"test_generator": {"code_writer"}}
+	adapted := AdaptPlanEventWithDependencies("graph", []string{"code_writer", "test_generator"}, deps)
+	event := adapted.PresentationEvent()
+	if event.Kind != presentation.EventKindPlan || event.Title != "graph" {
+		t.Fatalf("unexpected plan projection: %+v", event)
+	}
+	if !reflect.DeepEqual(event.StageNames, []string{"code_writer", "test_generator"}) {
+		t.Fatalf("stage names = %v", event.StageNames)
+	}
+	if !reflect.DeepEqual(event.StageDependencies, deps) {
+		t.Fatalf("stage dependencies = %v, want %v", event.StageDependencies, deps)
+	}
+	deps["test_generator"][0] = "tampered"
+	if event.StageDependencies["test_generator"][0] != "code_writer" {
+		t.Fatalf("event dependencies alias the input: %v", event.StageDependencies)
+	}
 }

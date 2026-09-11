@@ -270,6 +270,11 @@ type SurfaceToUserDecision struct {
 // PipelinePlanEvent announces the ordered stage roster for one pipeline plan.
 type PipelinePlanEvent struct {
 	Stages []string
+	// Dependencies maps each stage name to the stages that must run before
+	// it. It is empty for a legacy linear plan and populated when the
+	// planner compiles a topology, so the presentation layer can carry the
+	// graph instead of a flat roster.
+	Dependencies map[string][]string
 }
 
 // StageEvent is a typed pipeline stage lifecycle event.

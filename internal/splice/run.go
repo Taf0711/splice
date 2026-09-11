@@ -243,6 +243,12 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 		}
 	}
 
+	// Topology compile warnings: a non-fatal coupling problem in the plan's
+	// graph is surfaced once at run start, never silently.
+	for _, warning := range plan.Warnings {
+		emitProgress(options, "[topology] warning: "+warning+"\n")
+	}
+
 	// Preflight: diagnose substrate interference (permission mode, hooks,
 	// provider capability) before any stage runs. Advisory only: each issue is
 	// emitted as a warning and the run continues. User machinery is
@@ -1452,7 +1458,7 @@ func wirePresentation(options PipelineRunConfig, plan schemas.ExecutionPlan) (Pi
 	}
 	priorPlan := options.OnPipelinePlan
 	options.OnPipelinePlan = func(event agent.PipelinePlanEvent) {
-		acc.Apply(presentrun.AdaptPlanEvent(plan.RequestIntent, event.Stages))
+		acc.Apply(presentrun.AdaptPlanEventWithDependencies(plan.RequestIntent, event.Stages, event.Dependencies))
 		options.OnPresentationState(acc.Snapshot())
 		if priorPlan != nil {
 			priorPlan(event)
@@ -1704,10 +1710,14 @@ func emitPipelinePlan(options PipelineRunConfig, plan schemas.ExecutionPlan) {
 		return
 	}
 	stages := make([]string, len(plan.Stages))
+	dependencies := make(map[string][]string, len(plan.Stages))
 	for i, stage := range plan.Stages {
 		stages[i] = stage.Name
+		if len(stage.DependsOn) > 0 {
+			dependencies[stage.Name] = append([]string(nil), stage.DependsOn...)
+		}
 	}
-	options.OnPipelinePlan(agent.PipelinePlanEvent{Stages: stages})
+	options.OnPipelinePlan(agent.PipelinePlanEvent{Stages: stages, Dependencies: dependencies})
 }
 
 // emitStageEvent sends a typed stage lifecycle event. It also writes the

@@ -1,6 +1,7 @@
 package presentation
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -371,5 +372,46 @@ func TestApplyStageKeysNodesByNameAndIteration(t *testing.T) {
 	}
 	if state.Nodes[1].Iteration != 1 || state.Nodes[1].Status != NodeStatusFailed {
 		t.Fatalf("updated node = %+v, want iteration 1 failed", state.Nodes[1])
+	}
+}
+
+// TestApplyPlanCarriesDependenciesToNodes pins the graph wiring: the plan
+// event stores the compiled dependencies, and each stage node receives its
+// own entry instead of a flat roster.
+func TestApplyPlanCarriesDependenciesToNodes(t *testing.T) {
+	state, err := Apply(State{}, PlanEvent{
+		Title:      "graph",
+		StageNames: []string{"code_writer", "test_generator"},
+		Dependencies: map[string][]string{
+			"test_generator": {"code_writer"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Apply plan: %v", err)
+	}
+	if got := state.Plan.Dependencies["test_generator"]; !reflect.DeepEqual(got, []string{"code_writer"}) {
+		t.Fatalf("plan dependencies = %v, want test_generator -> code_writer", state.Plan.Dependencies)
+	}
+	state, err = Apply(state, StageEvent{ID: "test_generator", Kind: NodeKindWrite, Status: "running"})
+	if err != nil {
+		t.Fatalf("Apply stage: %v", err)
+	}
+	var node *ExecutionNode
+	for i := range state.Nodes {
+		if state.Nodes[i].ID == "test_generator" {
+			node = &state.Nodes[i]
+		}
+	}
+	if node == nil {
+		t.Fatal("test_generator node missing")
+	}
+	if !reflect.DeepEqual(node.Dependencies, []string{"code_writer"}) {
+		t.Fatalf("node dependencies = %v, want [code_writer]", node.Dependencies)
+	}
+	// cloneState must not alias the plan graph: mutating the node's
+	// dependencies must not change the plan.
+	node.Dependencies[0] = "tampered"
+	if state.Plan.Dependencies["test_generator"][0] != "code_writer" {
+		t.Fatalf("plan dependencies aliased node dependencies: %v", state.Plan.Dependencies["test_generator"])
 	}
 }

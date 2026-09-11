@@ -74,7 +74,31 @@ func AdaptStageEvent(event agent.StageEvent) presentation.StreamEventLike {
 // title comes from the plan identity available at emission time (the request
 // intent for now; the full plan projection arrives in P1.4).
 func AdaptPlanEvent(title string, stages []string) presentation.StreamEventLike {
-	return presentation.PlanEvent{Title: title, StageNames: append([]string(nil), stages...)}
+	return AdaptPlanEventWithDependencies(title, stages, nil)
+}
+
+// AdaptPlanEventWithDependencies is AdaptPlanEvent with the compiled stage
+// graph, so the presentation layer carries each node's dependencies instead
+// of a flat roster.
+func AdaptPlanEventWithDependencies(title string, stages []string, dependencies map[string][]string) presentation.StreamEventLike {
+	return presentation.PlanEvent{
+		Title:        title,
+		StageNames:   append([]string(nil), stages...),
+		Dependencies: cloneDependencies(dependencies),
+	}
+}
+
+// cloneDependencies copies a stage-to-dependencies map so the presentation
+// snapshot never aliases the runtime's plan.
+func cloneDependencies(source map[string][]string) map[string][]string {
+	if source == nil {
+		return nil
+	}
+	out := make(map[string][]string, len(source))
+	for name, deps := range source {
+		out[name] = append([]string(nil), deps...)
+	}
+	return out
 }
 
 // AdaptRunEvent maps the terminal run outcome onto a run event.
