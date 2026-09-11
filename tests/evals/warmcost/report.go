@@ -21,6 +21,22 @@ func renderMarkdown(agg Aggregate) string {
 	fmt.Fprintf(&b, "- Win rule: %s\n", agg.PreRegistration.WinRule)
 	fmt.Fprintf(&b, "- Stopping rule: %s\n\n", agg.PreRegistration.StoppingRule)
 
+	fmt.Fprintf(&b, "## Retention protocol\n\n")
+	fmt.Fprintf(&b, "- Mode: %s\n", agg.Retention.Mode)
+	if agg.Retention.SidecarRoot != "" {
+		fmt.Fprintf(&b, "- Sidecar root: `%s`\n", agg.Retention.SidecarRoot)
+	} else {
+		fmt.Fprintf(&b, "- Sidecar root: (ambient, operator-managed)\n")
+	}
+	for _, a := range agg.Retention.Assignment {
+		fmt.Fprintf(&b, "- %s: %s\n", a.Arm, a.Pattern)
+	}
+	fmt.Fprintf(&b, "- Ordering rule: %s\n", agg.Retention.OrderingRule)
+	if agg.Retention.Note != "" {
+		fmt.Fprintf(&b, "- Note: %s\n", agg.Retention.Note)
+	}
+	fmt.Fprintf(&b, "\n")
+
 	fmt.Fprintf(&b, "## Cost coverage\n\n")
 	fmt.Fprintf(&b, "Attempts: %d. Partial attempts: %d. Complete: %t.\n\n", agg.Coverage.Attempts, agg.Coverage.PartialAttempts, agg.Coverage.Complete)
 	if !agg.Coverage.Complete {
@@ -28,20 +44,23 @@ func renderMarkdown(agg Aggregate) string {
 	}
 
 	fmt.Fprintf(&b, "## Arms\n\n")
-	fmt.Fprintf(&b, "| arm | attempts | verified | requests | req/verified | billed USD | USD/attempt | USD/verified | round share | cache share |\n")
-	fmt.Fprintf(&b, "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
+	fmt.Fprintf(&b, "| arm | attempts | verified | requests | req/verified | billed USD | USD/attempt | USD/verified | input tok | output tok | cached tok | cache-write tok | reasoning tok | input tok/attempt | input tok/verified | round share | cache share |\n")
+	fmt.Fprintf(&b, "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
 	for _, m := range agg.ArmMetrics {
-		fmt.Fprintf(&b, "| %s | %d | %d | %d | %.2f | %.4f | %.4f | %.4f | %.3f | %.3f |\n",
+		fmt.Fprintf(&b, "| %s | %d | %d | %d | %.2f | %.4f | %.4f | %.4f | %d | %d | %d | %d | %d | %.0f | %.0f | %.3f | %.3f |\n",
 			m.Arm, m.Attempts, m.VerifiedCompletions, m.Requests, m.RequestsPerVerifiedCompletion,
-			m.BilledUSD, m.BilledUSDPerAttempt, m.BilledUSDPerVerifiedCompletion, m.RoundShare, m.CacheShare)
+			m.BilledUSD, m.BilledUSDPerAttempt, m.BilledUSDPerVerifiedCompletion,
+			m.InputTokens, m.OutputTokens, m.CachedTokens, m.CacheWriteTokens, m.ReasoningTokens,
+			m.InputTokensPerAttempt, m.InputTokensPerVerifiedCompletion, m.RoundShare, m.CacheShare)
 	}
 	fmt.Fprintf(&b, "\n")
 
-	fmt.Fprintf(&b, "## Cost decomposition (warm minus cold)\n\n")
-	fmt.Fprintf(&b, "| channel | USD |\n| --- | ---: |\n")
-	fmt.Fprintf(&b, "| total delta | %+.4f |\n", agg.Decomposition.TotalDeltaUSD)
-	fmt.Fprintf(&b, "| round channel | %+.4f |\n", agg.Decomposition.RoundChannelUSD)
-	fmt.Fprintf(&b, "| payload channel | %+.4f |\n", agg.Decomposition.PayloadChannelUSD)
+	fmt.Fprintf(&b, "## Cost decomposition by spend source (warm minus cold)\n\n")
+	fmt.Fprintf(&b, "| source | cold USD | warm USD | delta USD |\n| --- | ---: | ---: | ---: |\n")
+	for _, s := range agg.Decomposition.Sources {
+		fmt.Fprintf(&b, "| %s | %.4f | %.4f | %+.4f |\n", s.Source, s.ColdUSD, s.WarmUSD, s.DeltaUSD)
+	}
+	fmt.Fprintf(&b, "| total | | | %+.4f |\n", agg.Decomposition.TotalDeltaUSD)
 	fmt.Fprintf(&b, "\nCache channel: %+d tokens. %s\n\n", agg.Decomposition.CacheTokensDelta, agg.Decomposition.CacheChannelNote)
 
 	fmt.Fprintf(&b, "## Task-clustered bootstrap\n\n")

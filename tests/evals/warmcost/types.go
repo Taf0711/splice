@@ -1,13 +1,15 @@
 // Package warmcost implements the paired cold-versus-warm measurement design
 // in tests/evals/cognition-families/MEASUREMENT_DESIGN.md.
 //
-// The package is out of CI: it has no *_test.go files, so `go test ./...`
-// never runs it. It is a release-cadence tool. It never selects a provider or
-// a model by itself; the operator supplies the exact approved exec command in
-// Part 3 of the mission.
+// The package has unit tests, but they are provider-free and fast. The paid
+// measurement itself is a release-cadence tool, never a CI test. The package
+// never selects a provider or a model by itself; the operator supplies the
+// exact approved exec command.
 package warmcost
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Taf0711/splice/internal/splice/schemas"
@@ -66,12 +68,71 @@ func (a Arm) Valid() bool {
 	return false
 }
 
+// RetentionMode selects the sidecar lifetime protocol for a run.
+type RetentionMode string
+
+const (
+	// RetentionFresh gives every attempt its own sidecar. The warm arms then
+	// have no retained experience, so the run measures the enabled mechanisms
+	// at cold memory and cannot support a memory-effect claim.
+	RetentionFresh RetentionMode = "fresh"
+	// RetentionShared gives the warm arms ONE sidecar that persists across the
+	// tasks and repeats, so an earlier attempt's captured evidence can be
+	// retrieved by a later attempt. The cold arm keeps a per-attempt sidecar
+	// so it stays a clean control.
+	RetentionShared RetentionMode = "shared"
+)
+
+// Valid reports whether the retention mode is known.
+func (m RetentionMode) Valid() bool {
+	switch m {
+	case RetentionFresh, RetentionShared:
+		return true
+	}
+	return false
+}
+
+// ParseRetention parses a retention mode. An unset value means fresh. An
+// unknown value is a loud configuration error naming the offender.
+func ParseRetention(raw string) (RetentionMode, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return RetentionFresh, nil
+	}
+	mode := RetentionMode(trimmed)
+	if !mode.Valid() {
+		return "", fmt.Errorf("unknown retention mode %q (want fresh or shared)", trimmed)
+	}
+	return mode, nil
+}
+
+// Task phases order the corpus so a write precedes a read on a shared sidecar.
+const (
+	// PhaseWrite marks a task that captures experience for later tasks.
+	PhaseWrite = "write"
+	// PhaseRead marks a task that reads retained experience.
+	PhaseRead = "read"
+)
+
 // Task is one task in the measurement corpus.
 type Task struct {
 	ID      string `json:"id"`
 	Prompt  string `json:"prompt"`
 	Check   string `json:"check"`
 	Fixture string `json:"fixture,omitempty"`
+	// Phase is write, read, or empty. A write-phase task runs before every
+	// other task, so a shared sidecar receives writes before reads.
+	Phase string `json:"phase,omitempty"`
+}
+
+// ValidPhase reports whether the task phase is one of the known values. An
+// empty phase means the task keeps its taskset position.
+func (t Task) ValidPhase() bool {
+	switch t.Phase {
+	case "", PhaseWrite, PhaseRead:
+		return true
+	}
+	return false
 }
 
 // ModelSettings records the model configuration an attempt used.

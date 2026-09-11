@@ -29,6 +29,8 @@ RUN_BASE="${RUN_BASE:-wc-paid-k3-$(date +%Y%m%dT%H%M%S)}"
 OUT_DIR="${OUT_DIR:-tests/evals/results}"
 MAX_RETRIES="${MAX_RETRIES:-2}"
 MEMD_DIR="${MEMD_DIR:-/tmp/warmcost-paid-memd}"
+RETENTION="${RETENTION:-fresh}"
+SIDECAR_ROOT="${SIDECAR_ROOT:-}"
 
 export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
 export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-/tmp/splice-cfg}"
@@ -77,6 +79,12 @@ SIDECAR_REV="$(git rev-parse --short HEAD)"
 log "pre-registration: model=$MODEL arms=$ARMS tasks=${#TASKS[@]} repeats=$REPEATS margin=$MARGIN bootstrap=$BOOTSTRAP_SAMPLES"
 log "revision=$REV sidecar_revision=$SIDECAR_REV taskset=${TASKS[*]}"
 log "arm order: $ARMS; interleaved per repeat by the runner"
+log "retention: $RETENTION sidecar_root=${SIDECAR_ROOT:-<ambient>}"
+
+if [[ "$RETENTION" == "shared" && -z "$SIDECAR_ROOT" ]]; then
+  log "retention shared requires SIDECAR_ROOT, because the warm arms must share one persistent sidecar"
+  exit 1
+fi
 
 FINAL_RUN=""
 for try in $(seq 0 "$MAX_RETRIES"); do
@@ -84,19 +92,25 @@ for try in $(seq 0 "$MAX_RETRIES"); do
   RUN_DIR="$OUT_DIR/$RUN_ID"
   log "run $RUN_ID start"
   set +e
-  "$RUNNER" \
-    --repo . \
-    --binary "$BIN" \
-    --model "$MODEL" \
-    --tasks "$TASKSET" \
-    --out "$OUT_DIR" \
-    --repeats "$REPEATS" \
-    --arms "$ARMS" \
-    --correctness-margin "$MARGIN" \
-    --bootstrap-samples "$BOOTSTRAP_SAMPLES" \
-    --bootstrap-seed 1 \
-    --run-id "$RUN_ID" \
-    --sidecar-revision "$SIDECAR_REV" 2>&1 | tee "$RUN_DIR.log"
+  RUNNER_ARGS=(
+    --repo .
+    --binary "$BIN"
+    --model "$MODEL"
+    --tasks "$TASKSET"
+    --out "$OUT_DIR"
+    --repeats "$REPEATS"
+    --arms "$ARMS"
+    --correctness-margin "$MARGIN"
+    --bootstrap-samples "$BOOTSTRAP_SAMPLES"
+    --bootstrap-seed 1
+    --run-id "$RUN_ID"
+    --sidecar-revision "$SIDECAR_REV"
+    --retention "$RETENTION"
+  )
+  if [[ -n "$SIDECAR_ROOT" ]]; then
+    RUNNER_ARGS+=(--sidecar-root "$SIDECAR_ROOT")
+  fi
+  "$RUNNER" "${RUNNER_ARGS[@]}" 2>&1 | tee "$RUN_DIR.log"
   runner_exit="${PIPESTATUS[0]}"
   set -e
   if [[ "$runner_exit" -ne 0 ]]; then
@@ -143,12 +157,12 @@ if [[ -z "$FINAL_RUN" ]]; then
 fi
 
 log "final run: $FINAL_RUN"
-python3 - "$OUT_DIR" "$FINAL_RUN" "$MODEL" "$ARMS" "${#TASKS[@]}" "$REPEATS" "$MARGIN" "$REV" "$SIDECAR_REV" <<'PY'
+python3 - "$OUT_DIR" "$FINAL_RUN" "$MODEL" "$ARMS" "${#TASKS[@]}" "$REPEATS" "$MARGIN" "$REV" "$SIDECAR_REV" "$RETENTION" <<'PY'
 import json
 import os
 import sys
 
-out_dir, run_id, model, arms, task_count, repeats, margin, revision, sidecar = sys.argv[1:10]
+out_dir, run_id, model, arms, task_count, repeats, margin, revision, sidecar, retention = sys.argv[1:11]
 run_dir = os.path.join(out_dir, run_id)
 with open(os.path.join(run_dir, "aggregate.json"), encoding="utf-8") as fh:
     agg = json.load(fh)
@@ -179,9 +193,14 @@ lines.append(f"- Repeats per task per arm: {repeats}")
 lines.append(f"- Correctness noninferiority margin: {margin}")
 lines.append(f"- Binary revision: `{revision}`")
 lines.append(f"- Sidecar revision: `{sidecar}`")
-lines.append(f"- Sidecar database: fresh for this run, so the warm arms have no retained")
-lines.append("  experience. The result measures the enabled mechanisms at cold memory, not a")
-lines.append("  memory-effect claim.")
+lines.append(f"- Retention: `{retention}`")
+if retention == "fresh":
+    lines.append(f"- Sidecar database: fresh for this run, so the warm arms have no retained")
+    lines.append("  experience. The result measures the enabled mechanisms at cold memory, not a")
+    lines.append("  memory-effect claim.")
+else:
+    lines.append(f"- Sidecar database: shared across the warm arms for this run, so an earlier")
+    lines.append("  attempt's evidence can be retrieved by a later attempt.")
 lines.append(f"- Attempt statuses in the final run: {status_counts}")
 lines.append("")
 lines.append("## Runner report")

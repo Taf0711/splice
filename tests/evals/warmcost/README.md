@@ -3,8 +3,9 @@
 This directory holds the runner for the design in
 `tests/evals/cognition-families/MEASUREMENT_DESIGN.md`.
 
-It is out of CI. It has no test files, so `go test ./...` never runs it. It
-runs on the release cadence.
+It is out of CI for the paid run. The unit tests in this package are
+provider-free and fast, so `go test ./...` runs only those. The paid run
+itself runs on the release cadence.
 
 ## What it measures
 
@@ -28,11 +29,42 @@ It marks an attempt partial when `cost_coverage` is not complete and withholds
 the total-cost claim for the run. A missing price is never read as zero.
 
 The aggregate reports per arm: requests per verified completion, billed USD per
-attempt, billed USD per verified completion, round share, and cache share. It
-splits the warm-minus-cold bill into a round channel and a payload channel. The
-cache channel is reported in tokens because the ledger has no per-token cache
-price. It bootstraps over tasks, not requests, and reports per-task effects
-before the aggregate.
+attempt, billed USD per verified completion, the input and output token
+totals, cached and cache-write tokens, reasoning tokens, input tokens per
+attempt, input tokens per verified completion, round share, and cache share.
+
+It splits the warm-minus-cold bill by SPEND SOURCE, not by round and payload.
+The source names come from the ledger (`generation`, `repair`, `expansion`,
+`format_retry`, `capture`), so a repair-cost difference is never relabeled as a
+round effect. The per-source deltas must sum to the total delta, and the runner
+fails loud when they do not. The cache channel is reported in tokens because
+the ledger has no per-token cache price. It bootstraps over tasks, not
+requests, and reports per-task effects before the aggregate.
+
+## Retention protocol
+
+`--retention fresh|shared` selects the sidecar lifetime protocol.
+
+- `fresh` (default): every attempt gets its own sidecar under
+  `<sidecar-root>/fresh-<session-id>`. The warm arms then have no retained
+  experience, so the run measures the enabled mechanisms at cold memory. A
+  fresh run can never claim a total-cost result.
+- `shared`: the warm and warm-retrieval-only arms share ONE sidecar under
+  `<sidecar-root>/shared-warm` that persists across the tasks and repeats, so
+  an earlier attempt's captured evidence can be retrieved by a later attempt.
+  The cold arm keeps a per-attempt sidecar so it stays a clean control.
+  `shared` requires `--sidecar-root`.
+
+With no `--sidecar-root`, every attempt uses the ambient operator sidecar.
+The runner assigns `SPLICE_MEMD_SOCKET` and `SPLICE_MEMD_DB` per class, and the
+splice binary auto-spawns a sidecar daemon for each distinct socket.
+
+Task order: a task with `"phase": "write"` runs before every other task, so a
+write on the shared sidecar precedes a read of it. Tasks keep their taskset
+order inside each phase.
+
+Clear the sidecar root before a `fresh` run. Keep it for the duration of a
+`shared` run.
 
 ## Taskset format
 
@@ -41,7 +73,8 @@ before the aggregate.
 ```text
 <dir>/tasks/*.json      one task per file:
                         {"id": "...", "prompt": "...", "check": "shell command",
-                         "fixture": "optional path under <dir>"}
+                         "fixture": "optional path under <dir>",
+                         "phase": "optional: write or read"}
 <dir>/fixture/          optional default fixture, copied per attempt
 ```
 
@@ -61,6 +94,8 @@ go run ./tests/evals/warmcost/cmd/warmcost-eval \
   --repeats 3 \
   --arms cold,warm \
   --correctness-margin 0.05 \
+  --retention shared \
+  --sidecar-root /tmp/warmcost-sidecar \
   --sidecar-revision <revision>
 ```
 

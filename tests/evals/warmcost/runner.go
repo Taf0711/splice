@@ -37,6 +37,12 @@ type Config struct {
 	CorrectnessMargin float64
 	SidecarRevision   string
 	KeepWorkspaces    bool
+	// Retention selects the sidecar lifetime protocol. Empty means
+	// RetentionFresh.
+	Retention RetentionMode
+	// SidecarRoot is the directory the runner assigns per-class sidecar
+	// sockets and databases under. Empty keeps the ambient operator sidecar.
+	SidecarRoot string
 }
 
 // ExecRequest is one child process invocation.
@@ -95,6 +101,7 @@ type Aggregate struct {
 	GeneratedAt     time.Time       `json:"generated_at"`
 	PreRegistration PreRegistration `json:"pre_registration"`
 	Provenance      Provenance      `json:"provenance"`
+	Retention       RetentionReport `json:"retention"`
 	ArmMetrics      []ArmMetrics    `json:"arm_metrics"`
 	PerTask         []TaskEffect    `json:"per_task"`
 	SkippedTasks    []string        `json:"skipped_tasks,omitempty"`
@@ -144,6 +151,20 @@ func NewRunner(cfg Config, seam ExecFunc) (*Runner, error) {
 			return nil, fmt.Errorf("warmcost: unknown arm %q", a)
 		}
 	}
+	if cfg.Retention == "" {
+		cfg.Retention = RetentionFresh
+	}
+	if !cfg.Retention.Valid() {
+		return nil, fmt.Errorf("warmcost: unknown retention mode %q (want fresh or shared)", cfg.Retention)
+	}
+	if cfg.Retention == RetentionShared && strings.TrimSpace(cfg.SidecarRoot) == "" {
+		return nil, errors.New("warmcost: retention shared requires a sidecar root, because the warm arms must share one persistent sidecar")
+	}
+	for _, t := range cfg.Tasks {
+		if !t.ValidPhase() {
+			return nil, fmt.Errorf("warmcost: task %s has unknown phase %q (want write, read, or empty)", t.ID, t.Phase)
+		}
+	}
 	if cfg.RunID == "" {
 		cfg.RunID = "warmcost-" + time.Now().UTC().Format("20060102T150405Z")
 	}
@@ -174,6 +195,10 @@ func (r *Runner) Run(ctx context.Context) (Aggregate, error) {
 
 	var attempts []Attempt
 
+	// orderTasks puts write-phase tasks first so a shared sidecar receives a
+	// write before a read.
+	tasks := orderTasks(r.cfg.Tasks)
+
 	// Interleave arm order across repeats to reduce drift.
 	for repeat := 0; repeat < r.cfg.Repeats; repeat++ {
 		arms := append([]Arm(nil), r.cfg.Arms...)
@@ -182,7 +207,7 @@ func (r *Runner) Run(ctx context.Context) (Aggregate, error) {
 				arms[i], arms[j] = arms[j], arms[i]
 			}
 		}
-		for _, task := range r.cfg.Tasks {
+		for _, task := range tasks {
 			for _, arm := range arms {
 				attempt, err := r.runAttempt(ctx, task, arm, repeat, provenance)
 				if err != nil {
@@ -196,7 +221,10 @@ func (r *Runner) Run(ctx context.Context) (Aggregate, error) {
 		}
 	}
 
-	agg := r.aggregate(provenance, attempts)
+	agg, err := r.aggregate(provenance, attempts)
+	if err != nil {
+		return Aggregate{}, err
+	}
 	data, err := json.MarshalIndent(agg, "", "  ")
 	if err != nil {
 		return Aggregate{}, fmt.Errorf("warmcost: marshal aggregate: %w", err)
@@ -239,12 +267,16 @@ func (r *Runner) runAttempt(ctx context.Context, task Task, arm Arm, repeat int,
 		StartedAt:       started,
 	}
 
+	class := sidecarClass(r.cfg.Retention, arm, sessionID)
+	if err := r.prepareSidecar(class); err != nil {
+		return Attempt{}, err
+	}
 	runCtx, cancel := context.WithTimeout(ctx, r.cfg.Timeout)
 	defer cancel()
 	res, err := r.exec(runCtx, ExecRequest{
 		Binary: r.cfg.Binary,
 		Args:   execArgs(arm, r.cfg.Model, sessionID, task.Prompt),
-		Env:    envWithOverrides(os.Environ(), arm.Env()...),
+		Env:    envWithOverrides(os.Environ(), append(append([]string{}, arm.Env()...), r.sidecarEnv(class)...)...),
 		Dir:    workspace,
 	})
 	ended := r.now()
@@ -294,8 +326,9 @@ func (r *Runner) failedAttempt(task Task, arm Arm, repeat int, prov Provenance, 
 	}
 }
 
-// aggregate builds the run-level report from the captured attempts.
-func (r *Runner) aggregate(prov Provenance, attempts []Attempt) Aggregate {
+// aggregate builds the run-level report from the captured attempts. It fails
+// loud when the per-source cost split disagrees with the billed total.
+func (r *Runner) aggregate(prov Provenance, attempts []Attempt) (Aggregate, error) {
 	byArm := map[Arm][]Attempt{}
 	for _, a := range attempts {
 		byArm[a.Arm] = append(byArm[a.Arm], a)
@@ -311,7 +344,10 @@ func (r *Runner) aggregate(prov Provenance, attempts []Attempt) Aggregate {
 
 	effects, skipped := ComputeTaskEffects(attempts, ArmCold, ArmWarm)
 
-	decomp := Decompose(metricByArm[ArmCold], metricByArm[ArmWarm])
+	decomp, err := Decompose(metricByArm[ArmCold], metricByArm[ArmWarm])
+	if err != nil {
+		return Aggregate{}, err
+	}
 	boot := BootstrapTaskDeltas(effects, r.cfg.BootstrapSamples, r.cfg.BootstrapSeed)
 
 	coverage := Coverage{Attempts: len(attempts)}
@@ -321,7 +357,7 @@ func (r *Runner) aggregate(prov Provenance, attempts []Attempt) Aggregate {
 		}
 	}
 	coverage.Complete = coverage.PartialAttempts == 0
-	claim := EvaluateClaim(decomp, boot, r.cfg.CorrectnessMargin, !coverage.Complete)
+	claim := EvaluateClaim(decomp, boot, r.cfg.CorrectnessMargin, !coverage.Complete, r.cfg.Retention == RetentionFresh)
 
 	agg := Aggregate{
 		Version:     Version,
@@ -336,6 +372,7 @@ func (r *Runner) aggregate(prov Provenance, attempts []Attempt) Aggregate {
 			StoppingRule:               "if warm does not reduce provider requests per verified completion on a corpus that triggers expansions, stop",
 		},
 		Provenance:    prov,
+		Retention:     r.retentionReport(),
 		ArmMetrics:    metrics,
 		PerTask:       effects,
 		SkippedTasks:  skipped,
@@ -345,7 +382,102 @@ func (r *Runner) aggregate(prov Provenance, attempts []Attempt) Aggregate {
 		Coverage:      coverage,
 		Note:          "Every number comes from the captured authoritative request ledger. Tokens are provider-reported. A partial run withholds the total-cost claim.",
 	}
-	return agg
+	return agg, nil
+}
+
+// SidecarAssignment names the sidecar pattern one arm uses.
+type SidecarAssignment struct {
+	Arm     Arm    `json:"arm"`
+	Pattern string `json:"pattern"`
+}
+
+// RetentionReport states the sidecar lifetime protocol of a run, so a reader
+// can tell whether the warm arm had any retained experience.
+type RetentionReport struct {
+	Mode         RetentionMode       `json:"mode"`
+	SidecarRoot  string              `json:"sidecar_root"`
+	Assignment   []SidecarAssignment `json:"assignment"`
+	OrderingRule string              `json:"ordering_rule"`
+	Note         string              `json:"note,omitempty"`
+}
+
+// retentionReport records the protocol the run used.
+func (r *Runner) retentionReport() RetentionReport {
+	rep := RetentionReport{
+		Mode:         r.cfg.Retention,
+		SidecarRoot:  r.cfg.SidecarRoot,
+		OrderingRule: "write-phase tasks run before read-phase tasks, and the runner interleaves arm order per repeat, so a write on the shared sidecar precedes a read of it",
+	}
+	for _, arm := range r.cfg.Arms {
+		rep.Assignment = append(rep.Assignment, SidecarAssignment{Arm: arm, Pattern: sidecarPattern(r.cfg.Retention, arm)})
+	}
+	if strings.TrimSpace(r.cfg.SidecarRoot) == "" {
+		rep.Note = "no sidecar root is set, so every attempt uses the ambient operator sidecar"
+	}
+	return rep
+}
+
+// sidecarClass names the sidecar a (mode, arm, session) uses. Shared mode
+// gives the warm arms ONE class so a later attempt can retrieve an earlier
+// attempt's evidence. The cold arm always gets a per-attempt class so it stays
+// a clean control. Fresh mode gives every attempt its own class.
+func sidecarClass(mode RetentionMode, arm Arm, sessionID string) string {
+	if mode == RetentionShared && arm != ArmCold {
+		return "shared-warm"
+	}
+	return "fresh-" + sessionID
+}
+
+// sidecarPattern describes a sidecar class in words for the report.
+func sidecarPattern(mode RetentionMode, arm Arm) string {
+	if mode == RetentionShared && arm != ArmCold {
+		return "one shared sidecar for every attempt: <sidecar-root>/shared-warm"
+	}
+	return "a fresh sidecar per attempt: <sidecar-root>/fresh-<session-id>"
+}
+
+// sidecarEnv returns the sidecar environment overrides for one class. With no
+// sidecar root the ambient operator sidecar is used unchanged.
+func (r *Runner) sidecarEnv(class string) []string {
+	if strings.TrimSpace(r.cfg.SidecarRoot) == "" {
+		return nil
+	}
+	dir := filepath.Join(r.cfg.SidecarRoot, class)
+	return []string{
+		"SPLICE_MEMD_SOCKET=" + filepath.Join(dir, "mem.sock"),
+		"SPLICE_MEMD_DB=" + filepath.Join(dir, "mem.db"),
+	}
+}
+
+// prepareSidecar creates the sidecar directory for one class. The sidecar
+// daemon owns the socket and database files.
+func (r *Runner) prepareSidecar(class string) error {
+	if strings.TrimSpace(r.cfg.SidecarRoot) == "" {
+		return nil
+	}
+	dir := filepath.Join(r.cfg.SidecarRoot, class)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("warmcost: create sidecar dir %s: %w", dir, err)
+	}
+	return nil
+}
+
+// orderTasks puts write-phase tasks before every other task while keeping the
+// taskset order inside each group, so the taskset owns the sequence and the
+// runner only enforces the phase rule.
+func orderTasks(tasks []Task) []Task {
+	out := make([]Task, 0, len(tasks))
+	for _, t := range tasks {
+		if t.Phase == PhaseWrite {
+			out = append(out, t)
+		}
+	}
+	for _, t := range tasks {
+		if t.Phase != PhaseWrite {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func (r *Runner) binaryRevision() string {

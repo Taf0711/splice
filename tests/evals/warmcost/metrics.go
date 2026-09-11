@@ -1,39 +1,56 @@
 package warmcost
 
 import (
+	"fmt"
 	"math"
 	"math/rand"
 	"sort"
+	"strings"
 
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
 // ArmMetrics aggregates one arm over all tasks and repeats.
 type ArmMetrics struct {
-	Arm                            Arm     `json:"arm"`
-	Attempts                       int     `json:"attempts"`
-	VerifiedCompletions            int     `json:"verified_completions"`
-	FailedAttempts                 int     `json:"failed_attempts"`
-	PartialAttempts                int     `json:"partial_attempts"`
-	Requests                       int     `json:"requests"`
-	RequestsPerVerifiedCompletion  float64 `json:"requests_per_verified_completion"`
-	BilledUSD                      float64 `json:"billed_usd"`
-	BilledUSDPerAttempt            float64 `json:"billed_usd_per_attempt"`
-	BilledUSDPerVerifiedCompletion float64 `json:"billed_usd_per_verified_completion"`
-	InputTokens                    int     `json:"input_tokens"`
-	OutputTokens                   int     `json:"output_tokens"`
-	CachedTokens                   int     `json:"cached_input_tokens"`
-	CacheWriteTokens               int     `json:"cache_write_tokens"`
-	ReasoningTokens                int     `json:"reasoning_tokens"`
-	ExpansionRequests              int     `json:"expansion_requests"`
-	RoundShare                     float64 `json:"round_share"`
-	CacheShare                     float64 `json:"cache_share"`
-	CoverageComplete               bool    `json:"coverage_complete"`
+	Arm                              Arm                `json:"arm"`
+	Attempts                         int                `json:"attempts"`
+	VerifiedCompletions              int                `json:"verified_completions"`
+	FailedAttempts                   int                `json:"failed_attempts"`
+	PartialAttempts                  int                `json:"partial_attempts"`
+	Requests                         int                `json:"requests"`
+	RequestsPerVerifiedCompletion    float64            `json:"requests_per_verified_completion"`
+	BilledUSD                        float64            `json:"billed_usd"`
+	BilledUSDPerAttempt              float64            `json:"billed_usd_per_attempt"`
+	BilledUSDPerVerifiedCompletion   float64            `json:"billed_usd_per_verified_completion"`
+	InputTokens                      int                `json:"input_tokens"`
+	OutputTokens                     int                `json:"output_tokens"`
+	CachedTokens                     int                `json:"cached_input_tokens"`
+	CacheWriteTokens                 int                `json:"cache_write_tokens"`
+	ReasoningTokens                  int                `json:"reasoning_tokens"`
+	InputTokensPerAttempt            float64            `json:"input_tokens_per_attempt"`
+	InputTokensPerVerifiedCompletion float64            `json:"input_tokens_per_verified_completion"`
+	BilledUSDBySource                map[string]float64 `json:"billed_usd_by_source"`
+	ExpansionRequests                int                `json:"expansion_requests"`
+	RoundShare                       float64            `json:"round_share"`
+	CacheShare                       float64            `json:"cache_share"`
+	CoverageComplete                 bool               `json:"coverage_complete"`
+}
+
+// SpendSourceUnspecified buckets a request whose ledger spend source is empty.
+// The ledger permits an empty source, so the split must not drop it.
+const SpendSourceUnspecified = "unspecified"
+
+// spendSourceKey normalizes a ledger spend source into a split key.
+func spendSourceKey(source string) string {
+	if strings.TrimSpace(source) == "" {
+		return SpendSourceUnspecified
+	}
+	return source
 }
 
 // ComputeArmMetrics aggregates the attempts of one arm.
 func ComputeArmMetrics(arm Arm, attempts []Attempt) ArmMetrics {
-	m := ArmMetrics{Arm: arm, CoverageComplete: true}
+	m := ArmMetrics{Arm: arm, CoverageComplete: true, BilledUSDBySource: map[string]float64{}}
 	for _, a := range attempts {
 		m.Attempts++
 		if a.VerifierResult {
@@ -56,14 +73,19 @@ func ComputeArmMetrics(arm Arm, attempts []Attempt) ArmMetrics {
 			if r.SpendSource == schemas.SpendSourceExpansion {
 				m.ExpansionRequests++
 			}
+			if r.CostUSD != nil {
+				m.BilledUSDBySource[spendSourceKey(r.SpendSource)] += *r.CostUSD
+			}
 		}
 	}
 	if m.Attempts > 0 {
 		m.BilledUSDPerAttempt = m.BilledUSD / float64(m.Attempts)
+		m.InputTokensPerAttempt = float64(m.InputTokens) / float64(m.Attempts)
 	}
 	if m.VerifiedCompletions > 0 {
 		m.RequestsPerVerifiedCompletion = float64(m.Requests) / float64(m.VerifiedCompletions)
 		m.BilledUSDPerVerifiedCompletion = m.BilledUSD / float64(m.VerifiedCompletions)
+		m.InputTokensPerVerifiedCompletion = float64(m.InputTokens) / float64(m.VerifiedCompletions)
 	}
 	if m.Requests > 0 {
 		m.RoundShare = float64(m.ExpansionRequests) / float64(m.Requests)
@@ -74,38 +96,80 @@ func ComputeArmMetrics(arm Arm, attempts []Attempt) ArmMetrics {
 	return m
 }
 
-// Decomposition splits the warm-minus-cold billed cost into a round channel
-// and a payload channel. The cache channel is reported in tokens because the
-// ledger carries no per-token cache price, so a USD cache split would be
-// fabricated. The two USD parts sum exactly to the total delta.
-type Decomposition struct {
-	TotalDeltaUSD     float64 `json:"total_delta_usd"`
-	RoundChannelUSD   float64 `json:"round_channel_usd"`
-	PayloadChannelUSD float64 `json:"payload_channel_usd"`
-	CacheTokensDelta  int     `json:"cache_tokens_delta"`
-	CacheChannelNote  string  `json:"cache_channel_note"`
+// SourceDelta is one spend source's billed USD in both arms and their
+// difference. The source names come from the authoritative ledger, so a
+// generation request and a repair request never collapse into one label.
+type SourceDelta struct {
+	Source   string  `json:"source"`
+	ColdUSD  float64 `json:"cold_usd"`
+	WarmUSD  float64 `json:"warm_usd"`
+	DeltaUSD float64 `json:"delta_usd"`
 }
 
-// Decompose computes the cost channels from one cold and one warm arm.
-func Decompose(cold, warm ArmMetrics) Decomposition {
-	nCold, nWarm := cold.Requests, warm.Requests
-	var avgCold, avgWarm float64
-	if nCold > 0 {
-		avgCold = cold.BilledUSD / float64(nCold)
+// Decomposition splits the warm-minus-cold billed cost by spend source. The
+// cache channel is reported in tokens because the ledger carries no per-token
+// cache price, so a USD cache split would be fabricated. The per-source USD
+// deltas sum exactly to the total delta.
+type Decomposition struct {
+	TotalDeltaUSD    float64       `json:"total_delta_usd"`
+	Sources          []SourceDelta `json:"sources"`
+	CacheTokensDelta int           `json:"cache_tokens_delta"`
+	CacheChannelNote string        `json:"cache_channel_note"`
+}
+
+// Decompose computes the per-source cost channels from one cold and one warm
+// arm. It fails loud when an arm's per-source USD does not sum to its billed
+// total, because that means the ledger and the split disagree.
+func Decompose(cold, warm ArmMetrics) (Decomposition, error) {
+	if err := validateSourceIdentity(cold); err != nil {
+		return Decomposition{}, err
 	}
-	if nWarm > 0 {
-		avgWarm = warm.BilledUSD / float64(nWarm)
+	if err := validateSourceIdentity(warm); err != nil {
+		return Decomposition{}, err
 	}
-	round := float64(nWarm-nCold) * avgCold
-	payload := float64(nWarm) * (avgWarm - avgCold)
-	return Decomposition{
-		TotalDeltaUSD:     warm.BilledUSD - cold.BilledUSD,
-		RoundChannelUSD:   round,
-		PayloadChannelUSD: payload,
+	keys := map[string]bool{}
+	for k := range cold.BilledUSDBySource {
+		keys[k] = true
+	}
+	for k := range warm.BilledUSDBySource {
+		keys[k] = true
+	}
+	names := make([]string, 0, len(keys))
+	for k := range keys {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	d := Decomposition{
+		TotalDeltaUSD: warm.BilledUSD - cold.BilledUSD,
 		CacheTokensDelta: (warm.CachedTokens + warm.CacheWriteTokens) -
 			(cold.CachedTokens + cold.CacheWriteTokens),
 		CacheChannelNote: "ledger carries cache-read and cache-write tokens but no per-token cache price, so the cache channel is reported in tokens and is not folded into the USD split",
 	}
+	sum := 0.0
+	for _, name := range names {
+		c := cold.BilledUSDBySource[name]
+		w := warm.BilledUSDBySource[name]
+		d.Sources = append(d.Sources, SourceDelta{Source: name, ColdUSD: c, WarmUSD: w, DeltaUSD: w - c})
+		sum += w - c
+	}
+	if math.Abs(sum-d.TotalDeltaUSD) > 1e-9 {
+		return Decomposition{}, fmt.Errorf("warmcost: source deltas sum to %.9f but the total delta is %.9f", sum, d.TotalDeltaUSD)
+	}
+	return d, nil
+}
+
+// validateSourceIdentity proves the per-source USD split reconstructs the
+// arm's billed total. A mismatch is a ledger or split defect, never a value to
+// smooth over.
+func validateSourceIdentity(m ArmMetrics) error {
+	sum := 0.0
+	for _, v := range m.BilledUSDBySource {
+		sum += v
+	}
+	if math.Abs(sum-m.BilledUSD) > 1e-9 {
+		return fmt.Errorf("warmcost: arm %s per-source USD sums to %.9f but the billed total is %.9f", m.Arm, sum, m.BilledUSD)
+	}
+	return nil
 }
 
 // TaskEffect is one task's paired summary over repeats.
@@ -277,9 +341,12 @@ type Claim struct {
 
 // EvaluateClaim applies the win rule: warm must be cheaper with an interval
 // that excludes zero, and correctness must be noninferior to the margin.
-func EvaluateClaim(decomp Decomposition, boot BootstrapResult, margin float64, anyPartial bool) Claim {
+func EvaluateClaim(decomp Decomposition, boot BootstrapResult, margin float64, anyPartial, retentionFresh bool) Claim {
 	if anyPartial {
 		return Claim{TotalCostClaimAllowed: false, Reason: "at least one run has partial cost coverage, so total cost is unknown"}
+	}
+	if retentionFresh {
+		return Claim{TotalCostClaimAllowed: false, Reason: "the retention protocol is fresh, so the warm arm has no retained experience and a total-cost claim is not available"}
 	}
 	if decomp.TotalDeltaUSD >= 0 {
 		return Claim{TotalCostClaimAllowed: false, Reason: "warm billed cost is not lower than cold"}

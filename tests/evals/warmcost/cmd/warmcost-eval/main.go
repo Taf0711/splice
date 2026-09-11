@@ -52,6 +52,8 @@ type options struct {
 	bootstrapSeed     int64
 	correctnessMargin float64
 	sidecarRevision   string
+	retention         string
+	sidecarRoot       string
 	keepWorkspaces    bool
 	runID             string
 }
@@ -72,6 +74,8 @@ func main() {
 	flag.Int64Var(&opts.bootstrapSeed, "bootstrap-seed", 1, "bootstrap seed")
 	flag.Float64Var(&opts.correctnessMargin, "correctness-margin", 0, "pre-registered acceptable success-rate drop")
 	flag.StringVar(&opts.sidecarRevision, "sidecar-revision", "", "sidecar binary revision recorded per attempt")
+	flag.StringVar(&opts.retention, "retention", "fresh", "sidecar lifetime protocol: fresh or shared")
+	flag.StringVar(&opts.sidecarRoot, "sidecar-root", "", "directory for per-class sidecar sockets and databases (required for shared retention)")
 	flag.BoolVar(&opts.keepWorkspaces, "keep-workspaces", false, "keep per-attempt workspaces for debugging")
 	flag.StringVar(&opts.runID, "run-id", "", "run id (default: timestamp)")
 	flag.Parse()
@@ -90,6 +94,10 @@ func run(opts options) error {
 		return errors.New("--tasks is required")
 	}
 	arms, err := parseArms(opts.arms)
+	if err != nil {
+		return err
+	}
+	retention, err := warmcost.ParseRetention(opts.retention)
 	if err != nil {
 		return err
 	}
@@ -112,6 +120,8 @@ func run(opts options) error {
 		BootstrapSeed:     opts.bootstrapSeed,
 		CorrectnessMargin: opts.correctnessMargin,
 		SidecarRevision:   opts.sidecarRevision,
+		Retention:         retention,
+		SidecarRoot:       opts.sidecarRoot,
 		KeepWorkspaces:    opts.keepWorkspaces,
 	}
 	runner, err := warmcost.NewRunner(cfg, nil)
@@ -178,6 +188,7 @@ func loadTasks(dir string) ([]warmcost.Task, error) {
 			Prompt  string `json:"prompt"`
 			Check   string `json:"check"`
 			Fixture string `json:"fixture"`
+			Phase   string `json:"phase"`
 		}
 		if err := json.Unmarshal(data, &raw); err != nil {
 			return nil, fmt.Errorf("parse task %s: %w", path, err)
@@ -202,7 +213,7 @@ func loadTasks(dir string) ([]warmcost.Task, error) {
 		if fixture == "" {
 			fixture = defaultFixture
 		}
-		tasks = append(tasks, warmcost.Task{ID: id, Prompt: raw.Prompt, Check: raw.Check, Fixture: fixture})
+		tasks = append(tasks, warmcost.Task{ID: id, Prompt: raw.Prompt, Check: raw.Check, Fixture: fixture, Phase: strings.TrimSpace(raw.Phase)})
 	}
 	if len(tasks) == 0 {
 		return nil, fmt.Errorf("taskset %s has no tasks under tasks/*.json", dir)
