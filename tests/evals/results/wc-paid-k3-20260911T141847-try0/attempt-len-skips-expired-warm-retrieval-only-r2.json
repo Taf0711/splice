@@ -1,0 +1,65 @@
+{
+  "task_id": "len-skips-expired",
+  "arm": "warm-retrieval-only",
+  "repeat": 2,
+  "binary_revision": "64fec8f7587e598ceb6d0e385d7e5eb5585c9261",
+  "sidecar_revision": "64fec8f",
+  "fixture_digest": "sha256:756d22408dee57206ca9d3bf97499af6096a903b3944d745c932721704c2dcfe",
+  "model_id": "z-ai/glm-5.3-flash",
+  "model_settings": {},
+  "treatment_env": [
+    "SPLICE_SCOPE_MODE=on",
+    "SPLICE_EVIDENCE_SUBSTITUTION=off",
+    "SPLICE_EXEMPLAR_MODE=retrieve-no-prompt"
+  ],
+  "session_id": "wc-wc-paid-k3-20260911T141847-try0-len-skips-expired-warm-retrieval-only-r2",
+  "run_status": "completed",
+  "cost_coverage": "complete",
+  "verifier_result": true,
+  "verifier_output": "ok  \tdemo\t0.215s\n",
+  "requests": [
+    {
+      "sequence": 1,
+      "stage": "code_writer",
+      "iteration": 1,
+      "invocation_ordinal": 0,
+      "context_round": 0,
+      "spend_source": "generation",
+      "input_tokens": 3042,
+      "output_tokens": 273,
+      "cached_input_tokens": 2944,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 16,
+      "cost_usd": 0.00023952,
+      "cost_status": "priced"
+    },
+    {
+      "sequence": 2,
+      "stage": "code_writer",
+      "iteration": 1,
+      "invocation_ordinal": 0,
+      "context_round": 0,
+      "spend_source": "generation",
+      "input_tokens": 3084,
+      "output_tokens": 326,
+      "cached_input_tokens": 3008,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 42,
+      "cost_usd": 0.00026464,
+      "cost_status": "priced"
+    }
+  ],
+  "totals": {
+    "requests": 2,
+    "input_tokens": 6126,
+    "output_tokens": 599,
+    "cached_input_tokens": 5952,
+    "cache_write_tokens": 0,
+    "reasoning_tokens": 58,
+    "billed_usd": 0.00050416,
+    "priced_records": 2
+  },
+  "started_at": "2026-09-11T14:39:42.904587-04:00",
+  "ended_at": "2026-09-11T14:39:59.509368-04:00",
+  "duration_ms": 16604
+}
