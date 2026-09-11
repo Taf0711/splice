@@ -33,10 +33,21 @@ func stagesForTier(tier schemas.PipelineTier) ([]schemas.ExecutionStage, schemas
 	return compiled.Stages, compiled.Budget, nil
 }
 
-// BuildExecutionPlan builds a minimal execution plan for the current request.
+// BuildExecutionPlan builds a minimal execution plan for the current request
+// from the embedded default topology.
 func BuildExecutionPlan(request string) (schemas.ExecutionPlan, error) {
+	return BuildExecutionPlanWithTopology(defaultTopology(), request)
+}
+
+// BuildExecutionPlanWithTopology builds the plan for one request from the given
+// topology. A nil topology compiles the embedded default, so a legacy caller
+// keeps today's behavior.
+func BuildExecutionPlanWithTopology(topology *schemas.PipelineTopology, request string) (schemas.ExecutionPlan, error) {
+	if topology == nil {
+		topology = defaultTopology()
+	}
 	tier := ClassifyRequest(request)
-	compiled, err := compileForTier(tier)
+	compiled, err := CompileTopology(topology, tier)
 	if err != nil {
 		return schemas.ExecutionPlan{}, err
 	}
@@ -50,6 +61,7 @@ func BuildExecutionPlan(request string) (schemas.ExecutionPlan, error) {
 		Stages:        compiled.Stages,
 		TokenBudget:   compiled.Budget,
 		Warnings:      append([]string(nil), compiled.Warnings...),
+		TopologyName:  topology.Name,
 	}, nil
 }
 

@@ -334,6 +334,9 @@ type ExecutionPlan struct {
 	// topology. The runtime surfaces them once at run start; they never
 	// block execution, and an empty field serializes nothing.
 	Warnings []string `json:"warnings,omitempty"`
+	// TopologyName names the resolved topology that produced this plan. It is
+	// empty for a plan built before topology resolution existed.
+	TopologyName string `json:"topology_name,omitempty"`
 }
 
 // Validate checks the execution plan.
@@ -669,9 +672,12 @@ func (r PipelineUsageRecord) Validate() error {
 
 // PipelineResult is the final pipeline result returned by the CLI.
 type PipelineResult struct {
-	RunID                 string                 `json:"run_id"`
-	Status                string                 `json:"status"`
-	Tier                  PipelineTier           `json:"tier"`
+	RunID  string       `json:"run_id"`
+	Status string       `json:"status"`
+	Tier   PipelineTier `json:"tier"`
+	// TopologyName names the resolved topology that produced this run, so a
+	// result is self-describing. Empty for a plan built before resolution.
+	TopologyName          string                 `json:"topology_name,omitempty"`
 	Stages                []StageRecord          `json:"stages"`
 	FinalOutput           map[string]interface{} `json:"final_output,omitempty"`
 	TotalCostUSD          float64                `json:"total_cost_usd"`

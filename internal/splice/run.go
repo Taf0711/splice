@@ -187,7 +187,15 @@ func Run(ctx context.Context, prompt string, provider agent.Provider, options ag
 		runID = "run-" + hex.EncodeToString(b)
 	}
 
-	plan, err := BuildExecutionPlan(prompt)
+	workspaceRoot := options.ProjectRoot
+	if workspaceRoot == "" {
+		workspaceRoot = options.Cwd
+	}
+	topology, topologySource, topologyWarnings, err := ResolveTopology(TopologySourcesFor(workspaceRoot, options.TrustedWorkspace))
+	if err != nil {
+		return agent.Result{}, fmt.Errorf("resolve topology: %w", err)
+	}
+	plan, err := BuildExecutionPlanWithTopology(topology, prompt)
 	if err != nil {
 		return agent.Result{}, fmt.Errorf("build plan: %w", err)
 	}
@@ -196,6 +204,12 @@ func Run(ctx context.Context, prompt string, provider agent.Provider, options ag
 	}
 
 	cfg := PipelineConfigFromAgentOptions(options)
+	for _, warning := range topologyWarnings {
+		emitProgress(cfg, "[topology] warning: "+warning+"\n")
+	}
+	if topologySource != TopologySourceDefault {
+		emitProgress(cfg, "[topology] active pipeline from "+topologySource+"\n")
+	}
 	// Workspace isolation (DoD 26): a run whose Cwd is a worktree path
 	// distinct from the stable repo root is an isolated lane; stage events
 	// stamp that so the sidebar can badge the lane honestly.
@@ -366,6 +380,7 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 	if err != nil {
 		return schemas.PipelineResult{}, err
 	}
+	result.TopologyName = plan.TopologyName
 
 	if err := applyRequestLedger(&result, ledger); err != nil {
 		return schemas.PipelineResult{}, fmt.Errorf("apply request ledger: %w", err)
