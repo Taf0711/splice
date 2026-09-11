@@ -674,12 +674,22 @@ func runPass(
 ) ([]schemas.StageRecord, []schemas.HarnessStageOutput, bool, error) {
 	priorSummaries := map[string]string{}
 	priorChangedFiles := map[string][]string{}
+	summariesByStage := map[string]string{}
+	changedByStage := map[string][]string{}
+	outputsByStage := map[string]schemas.HarnessStageOutput{}
 	records := []schemas.StageRecord{}
 	outputs := []schemas.HarnessStageOutput{}
 
 	stageNames := make([]string, len(plan.Stages))
+	// A topology-compiled plan carries dependencies; a stage then sees only
+	// the summaries its incoming edges deliver. A legacy plan carries none,
+	// and every stage keeps today's cumulative view.
+	planHasEdges := false
 	for i, stage := range plan.Stages {
 		stageNames[i] = stage.Name
+		if len(stage.DependsOn) > 0 {
+			planHasEdges = true
+		}
 	}
 
 	for seq, stage := range plan.Stages {
@@ -718,6 +728,10 @@ func runPass(
 			nextStage = stageNames[seq+1]
 		}
 
+		prior, priorChanged := maps.Clone(priorSummaries), cloneChangedFiles(priorChangedFiles)
+		if planHasEdges {
+			prior, priorChanged = scopedStageInputs(stage, summariesByStage, changedByStage, outputsByStage)
+		}
 		input := schemas.HarnessStageInput{
 			RunID:             runID,
 			StageName:         stageName,
@@ -725,8 +739,8 @@ func runPass(
 			PlanTier:          plan.Tier,
 			RequestIntent:     plan.RequestIntent,
 			AcceptanceFacts:   append([]schemas.AcceptanceFact(nil), plan.AcceptanceFacts...),
-			PriorSummaries:    maps.Clone(priorSummaries),
-			PriorChangedFiles: cloneChangedFiles(priorChangedFiles),
+			PriorSummaries:    prior,
+			PriorChangedFiles: priorChanged,
 			RevisionContext:   revisionContext,
 			PipelineStages:    stageNames,
 			NextStage:         nextStage,
@@ -893,8 +907,12 @@ func runPass(
 				emitProgress(options, fmt.Sprintf("[%s] %s", stageName, msg))
 			})
 		}
+		changedFiles := stageChangedFiles(output)
 		priorSummaries[stageName] = *record.OutputSummary
-		priorChangedFiles[stageName] = append([]string(nil), stageChangedFiles(output)...)
+		priorChangedFiles[stageName] = append([]string(nil), changedFiles...)
+		summariesByStage[stageName] = *record.OutputSummary
+		changedByStage[stageName] = append([]string(nil), changedFiles...)
+		outputsByStage[stageName] = output
 		outputs = append(outputs, output)
 
 		// DM2: when the test runner completes with failing tests, route a focused
@@ -1737,18 +1755,23 @@ func emitStageEvent(options PipelineRunConfig, stageName, status, detail string,
 // stage types that produce FileChange slices. Returns nil when neither is
 // present, so non-completed callers and stages without files pass nil cleanly.
 func stageChangedFiles(output schemas.HarnessStageOutput) []string {
-	var files []string
-	if cw, ok := output.Data["code_writer_output"]; ok {
-		if cwo, ok := cw.(schemas.CodeWriterOutput); ok {
-			for _, f := range cwo.Files {
-				files = append(files, f.Path)
+	// Additive field first: a custom stage reports its changed paths
+	// directly. The legacy Data keys stay as the builtin fallback so the
+	// existing stages keep working unchanged.
+	files := append([]string(nil), output.ChangedFiles...)
+	if len(files) == 0 {
+		if cw, ok := output.Data["code_writer_output"]; ok {
+			if cwo, ok := cw.(schemas.CodeWriterOutput); ok {
+				for _, f := range cwo.Files {
+					files = append(files, f.Path)
+				}
 			}
 		}
-	}
-	if tg, ok := output.Data["test_generator_output"]; ok {
-		if tgo, ok := tg.(schemas.TestGeneratorOutput); ok {
-			for _, f := range tgo.Files {
-				files = append(files, f.Path)
+		if tg, ok := output.Data["test_generator_output"]; ok {
+			if tgo, ok := tg.(schemas.TestGeneratorOutput); ok {
+				for _, f := range tgo.Files {
+					files = append(files, f.Path)
+				}
 			}
 		}
 	}

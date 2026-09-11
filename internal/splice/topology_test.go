@@ -208,6 +208,51 @@ func TestCompileTopologyWarnings(t *testing.T) {
 	}
 }
 
+// TestCompileTopologyWarnsOnMismatchedWriterName pins that the builtin
+// coupling warning keys on the name test_generator reads (code_writer), not
+// on the node type.
+func TestCompileTopologyWarnsOnMismatchedWriterName(t *testing.T) {
+	couplingWarning := "no code_writer upstream edge"
+	topology := &schemas.PipelineTopology{
+		Version: schemas.TopologySchemaVersion,
+		Name:    "mismatch",
+		Nodes: []schemas.PipelineNode{
+			{Name: "writer", Type: "code_writer"},
+			{Name: "gen", Type: "test_generator"},
+		},
+		Edges: []schemas.PipelineEdge{{From: "writer", To: "gen"}},
+	}
+
+	compiled, err := CompileTopology(topology, schemas.TierStandard)
+	if err != nil {
+		t.Fatalf("CompileTopology = %v", err)
+	}
+	if !strings.Contains(strings.Join(compiled.Warnings, "\n"), couplingWarning) {
+		t.Fatalf("warnings = %v, want the coupling warning for a renamed writer", compiled.Warnings)
+	}
+
+	// A none payload stops the summary from crossing, so the coupling breaks.
+	topology.Edges[0].Payload = schemas.EdgePayloadNone
+	compiled, err = CompileTopology(topology, schemas.TierStandard)
+	if err != nil {
+		t.Fatalf("CompileTopology = %v", err)
+	}
+	if !strings.Contains(strings.Join(compiled.Warnings, "\n"), couplingWarning) {
+		t.Fatalf("warnings = %v, want the coupling warning for a none payload", compiled.Warnings)
+	}
+
+	// The canonical name and a summary payload satisfy the coupling.
+	topology.Nodes[0].Name = "code_writer"
+	topology.Edges[0] = schemas.PipelineEdge{From: "code_writer", To: "gen"}
+	compiled, err = CompileTopology(topology, schemas.TierStandard)
+	if err != nil {
+		t.Fatalf("CompileTopology = %v", err)
+	}
+	if len(compiled.Warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", compiled.Warnings)
+	}
+}
+
 func TestStagesForTierMatchesCompiledDefault(t *testing.T) {
 	for _, tier := range allTiers {
 		stages, budget, err := stagesForTier(tier)

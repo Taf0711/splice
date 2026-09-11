@@ -305,6 +305,9 @@ type ExecutionStage struct {
 	// DependsOn lists the stages that must run before this one. It is empty
 	// for a linear plan and populated when the planner compiles a topology.
 	DependsOn []string `json:"depends_on,omitempty"`
+	// EdgePayloads maps each dependency name to the information payload its
+	// edge carries. A missing entry means EdgePayloadSummary.
+	EdgePayloads map[string]EdgePayload `json:"edge_payloads,omitempty"`
 }
 
 // Validate checks the execution stage.
@@ -516,7 +519,11 @@ type HarnessStageOutput struct {
 	// MemoryReview is the normalized per-invocation memory review. Nil when no
 	// memory was delivered; never an empty review.
 	MemoryReview *MemoryReview `json:"memory_review,omitempty"`
-	Usage        *StageUsage   `json:"-"`
+	// ChangedFiles lists the repo-relative paths this stage changed. The
+	// field is additive: custom stages set it directly, builtins keep their
+	// legacy Data keys, and stageChangedFiles prefers this field.
+	ChangedFiles []string    `json:"changed_files,omitempty"`
+	Usage        *StageUsage `json:"-"`
 }
 
 // Validate checks the harness stage output.

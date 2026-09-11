@@ -92,8 +92,20 @@ func CompileTopology(topology *schemas.PipelineTopology, tier schemas.PipelineTi
 	}
 
 	dependencies := make(map[string][]string, len(active))
+	edgePayloads := make(map[string]map[string]schemas.EdgePayload, len(active))
 	for _, edge := range activeEdges {
 		dependencies[edge.To] = append(dependencies[edge.To], edge.From)
+		// Summary is the edge default, so only a non-default payload is
+		// recorded. A topology whose edges are all summary keeps an empty
+		// field and its serialized form is unchanged.
+		payload := edge.Payload.Effective()
+		if payload == schemas.EdgePayloadSummary {
+			continue
+		}
+		if edgePayloads[edge.To] == nil {
+			edgePayloads[edge.To] = make(map[string]schemas.EdgePayload, 1)
+		}
+		edgePayloads[edge.To][edge.From] = payload
 	}
 
 	baseBudgets := stageBudgets(tier)
@@ -113,9 +125,10 @@ func CompileTopology(topology *schemas.PipelineTopology, tier schemas.PipelineTi
 		sumInput += budget.InputMax
 		sumOutput += budget.OutputMax
 		stages = append(stages, schemas.ExecutionStage{
-			Name:      node.Name,
-			Budget:    budget,
-			DependsOn: append([]string(nil), dependencies[node.Name]...),
+			Name:         node.Name,
+			Budget:       budget,
+			DependsOn:    append([]string(nil), dependencies[node.Name]...),
+			EdgePayloads: edgePayloads[node.Name],
 		})
 	}
 
@@ -246,19 +259,22 @@ func compileWarnings(nodes []schemas.PipelineNode, edges []schemas.PipelineEdge)
 		}
 	}
 
-	hasCodeWriterUpstream := make(map[string]bool, len(nodes))
-	for _, node := range nodes {
-		if node.Type != "code_writer" {
+	// test_generator reads PriorSummaries["code_writer"] by name, so the
+	// builtin coupling holds only when a node named code_writer is a direct
+	// upstream dependency that delivers its summary. A code_writer-typed node
+	// with a different name does not satisfy the read.
+	writerUpstream := make(map[string]bool, len(nodes))
+	for _, edge := range edges {
+		if edge.From != "code_writer" {
 			continue
 		}
-		for _, dependent := range edges {
-			if dependent.From == node.Name {
-				hasCodeWriterUpstream[dependent.To] = true
-			}
+		if edge.Payload.Effective() == schemas.EdgePayloadNone {
+			continue
 		}
+		writerUpstream[edge.To] = true
 	}
 	for _, node := range nodes {
-		if node.Type == "test_generator" && !hasCodeWriterUpstream[node.Name] {
+		if node.Type == "test_generator" && !writerUpstream[node.Name] {
 			warnings = append(warnings, fmt.Sprintf("node %s has no code_writer upstream edge; it will run without code-writer context", node.Name))
 		}
 	}
