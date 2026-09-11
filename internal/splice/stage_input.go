@@ -237,7 +237,15 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 	scope := StageScopePlan{}
 	sup := ScopeSuppression{}
 	caps := p.Stage.Capabilities()
-	if caps.ConsumesMemory && caps.PullContext && strings.TrimSpace(input.RequestIntent) != "" {
+	// Evidence substitution is opt-in and OFF by default: the measured effect
+	// is a net prompt and validation cost with no change in model-visible
+	// context or tool use. When off, no evidence plan is built and no
+	// validation read is spent.
+	evidenceOn, evErr := resolveEvidenceSubstitution()
+	if evErr != nil {
+		return schemas.HarnessStageInput{}, StageScopePlan{}, ScopeSuppression{}, evErr
+	}
+	if evidenceOn && caps.ConsumesMemory && caps.PullContext && strings.TrimSpace(input.RequestIntent) != "" {
 		// The improved cold plan is built for both arms. Evidence-free
 		// runs use the cold plan unchanged; retained evidence can later
 		// transform it without changing any other deterministic choice.
@@ -284,7 +292,10 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 		// The plan is attached even when no substitution is admitted, so
 		// cold and warm observe the same deterministic baseline and only
 		// the admitted transformation differs.
-		scope.Evidence = buildEvidencePlan(input.RequestIntent, p.WorkDir, priorChangedFilesForEvidence(input.PriorChangedFiles), planNodes)
+		// Opt-in only: with the switch off this build is skipped entirely.
+		if evidenceOn {
+			scope.Evidence = buildEvidencePlan(input.RequestIntent, p.WorkDir, priorChangedFilesForEvidence(input.PriorChangedFiles), planNodes)
+		}
 		// The legacy input-side suppression accounting is removed with the
 		// abandoned cognition scoping path. The scope plan still governs
 		// tool-level listing suppression through ScopedToolRunner, which is

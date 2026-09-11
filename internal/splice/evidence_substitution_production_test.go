@@ -113,6 +113,7 @@ func prodEvidenceRunner(t *testing.T, probe *prodEvidenceProbe) ToolRunner {
 }
 
 func TestProductionEvidenceSubstitutionOmitsPlannedSymbolLookup(t *testing.T) {
+	t.Setenv(EvidenceSubstitutionEnvVar, "on")
 	if _, err := os.Stat(".git"); err != nil {
 		// The production test runs inside the repository test tree; git is
 		// needed for freshness validation, not for the workspace fixture.
@@ -234,6 +235,7 @@ func prodEvidenceReadSeen(reads []string, path string) bool {
 // typed record's byte digest is stale. Admission must reject it, the read
 // operation must stay in the plan, and the trace must record the rejection.
 func TestProductionEvidenceSubstitutionStaleRecordRetainsColdRead(t *testing.T) {
+	t.Setenv(EvidenceSubstitutionEnvVar, "on")
 	workDir, rev, body := prodEvidenceRepo(t)
 	rec := prodEvidenceRecord(t, workDir, rev, body)
 	rec.Supporting[0].Digest = "0000000000000000000000000000000000000000000000000000000000000000"

@@ -80,6 +80,7 @@ func reportArm(a armEconomics) {
 // TestEvidenceSubstitutionEconomics runs both arms through the production entry
 // point and reports the cost comparison.
 func TestEvidenceSubstitutionEconomics(t *testing.T) {
+	t.Setenv(EvidenceSubstitutionEnvVar, "on")
 	workDir, rev, body := prodEvidenceRepo(t)
 	mem := prodEvidenceStore(t, workDir, rev, body)
 
