@@ -872,6 +872,30 @@ func TestCodeWriterRunOmitsMemoryFieldWhenNil(t *testing.T) {
 	}
 }
 
+// TestApplyFileChangesCreateReplacesExisting pins the repair-path fix: a
+// create carries full content, and the repair loop re-emits prior-written
+// files with change_type create. The write must replace the existing bytes
+// instead of colliding on "already exists".
+func TestApplyFileChangesCreateReplacesExisting(t *testing.T) {
+	workDir := t.TempDir()
+	path := filepath.Join(workDir, "recreated.go")
+	if err := os.WriteFile(path, []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	files := []schemas.FileChange{{Path: "recreated.go", Content: "new\n", ChangeType: "create"}}
+	res, err := applyFileChanges(context.Background(), workDir, files, registryRunTool(t, workDir))
+	if err != nil {
+		t.Fatalf("apply create over an existing file: %v", err)
+	}
+	if len(res.Applied) != 1 {
+		t.Fatalf("applied = %d, want 1", len(res.Applied))
+	}
+	content, rerr := os.ReadFile(path)
+	if rerr != nil || string(content) != "new\n" {
+		t.Fatalf("create did not replace the existing bytes: err=%v content=%q", rerr, string(content))
+	}
+}
+
 func TestApplyFileChangesRegistryBacked(t *testing.T) {
 	t.Run("create", func(t *testing.T) {
 		workDir := t.TempDir()

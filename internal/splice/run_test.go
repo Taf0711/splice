@@ -498,8 +498,59 @@ func TestBuildRevisionContextCarriesPriorOutputFiles(t *testing.T) {
 		},
 	}}
 	got := buildRevisionContext("revise tests", nil, nil, []schemas.HarnessStageOutput{output}, "retry")
-	if !strings.Contains(got, "storage_test.go") || !strings.Contains(got, "overwrite: true") {
-		t.Fatalf("revision context did not surface prior file and overwrite guidance: %q", got)
+	if !strings.Contains(got, "storage_test.go") {
+		t.Fatalf("revision context did not surface the prior file: %q", got)
+	}
+}
+
+// TestBuildRevisionContextPriorFilesUseSatisfiableRepresentation pins the
+// repair-path fix. The revision context is built before the stage runs, so the
+// host holds no delivered view for a prior-written path and cannot mint a
+// base_ref. The instruction must therefore ask for the full-content create
+// form. Steering the model at modify produced base_ref-is-required aborts,
+// because a bare path list gives it no handle to submit.
+func TestBuildRevisionContextPriorFilesUseSatisfiableRepresentation(t *testing.T) {
+	output := schemas.HarnessStageOutput{Data: map[string]any{
+		"code_writer_output": schemas.CodeWriterOutput{
+			Files: []schemas.FileChange{{Path: "internal/audit/retention.go", ChangeType: "modify"}},
+		},
+	}}
+	got := buildRevisionContext("fix the service", nil, nil, []schemas.HarnessStageOutput{output}, "")
+	if strings.Contains(got, "change_type modify") {
+		t.Fatalf("revision context must not steer prior files at modify without a handle:\n%s", got)
+	}
+	if !strings.Contains(got, "change_type create") {
+		t.Fatalf("revision context must request the full-content create form:\n%s", got)
+	}
+	if !strings.Contains(got, "internal/audit/retention.go") {
+		t.Fatalf("revision context must name the prior-written path:\n%s", got)
+	}
+}
+
+// TestFailureCauseClassSeparatesRootCauses pins that repeated failures which
+// share the wrapper name but differ in root cause carry different labels, so
+// aggregate telemetry can tell them apart.
+func TestFailureCauseClassSeparatesRootCauses(t *testing.T) {
+	tests := []struct {
+		name    string
+		summary string
+		want    string
+	}{
+		{name: "missing base_ref", summary: "*stages.TypedOutputError: proposal modify x.go: base_ref is required", want: "validation"},
+		{name: "typed output", summary: "*stages.TypedOutputError: model returned no tool call", want: "typed_output"},
+		{name: "provider", summary: `provider request error: {"detail":"Unsupported parameter"}`, want: "provider"},
+		{name: "auth", summary: "stream error: auth error: invalid API key", want: "auth"},
+		{name: "unclassified", summary: "something else entirely", want: "unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := failureCauseClass(tt.summary); got != tt.want {
+				t.Fatalf("failureCauseClass(%q) = %q, want %q", tt.summary, got, tt.want)
+			}
+		})
+	}
+	if failureCauseClass(tests[0].summary) == failureCauseClass(tests[1].summary) {
+		t.Fatalf("validation and typed_output must not share a label")
 	}
 }
 

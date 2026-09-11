@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -264,6 +266,15 @@ type familyPairRow struct {
 	// SnapshotID names the shared Task A snapshot in matched-snapshot
 	// runs: every Task B row of one family shares it.
 	SnapshotID string `json:"snapshot_id,omitempty"`
+	// HarnessRevision is the build revision that produced the artifact.
+	// DirtyTreeDigest is a digest of the uncommitted working tree (empty when
+	// clean). ProvenanceNote records why a provenance field is empty. These
+	// three are emitted WITHOUT omitempty, so absent provenance shows as an
+	// empty value instead of a silently dropped key: the artifact must be
+	// auditable against the source that produced it.
+	HarnessRevision string `json:"harness_revision"`
+	DirtyTreeDigest string `json:"dirty_tree_digest"`
+	ProvenanceNote  string `json:"provenance_note,omitempty"`
 	// Executed is false only for rows that describe a target slot that
 	// never ran (skipped). Every row that ran any code is true.
 	Executed bool `json:"executed"`
@@ -570,6 +581,7 @@ func runFamiliesEvalCommand(args []string, stdout io.Writer, stderr io.Writer, d
 	}
 
 	if options.OutDir != "" {
+		stampRowProvenance(rows)
 		if err := writeFamiliesRows(options.OutDir, rows); err != nil {
 			return writeAppError(stderr, "failed to write families log: "+err.Error(), exitCrash)
 		}
@@ -746,6 +758,49 @@ func gitHeadCommit(dir string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// workingTreeProvenance returns the build revision and a digest of the
+// uncommitted working tree. It never fails the run: an unavailable git leaves
+// the fields empty and records the reason in note. An empty digest means the
+// tree is clean, which is a measured fact, not missing data.
+func workingTreeProvenance(dir string) (revision, dirtyDigest, note string) {
+	revision = gitHeadCommit(dir)
+	if revision == "" {
+		note = "git rev-parse HEAD unavailable"
+	}
+	diff, derr := gitOutput(dir, "diff", "HEAD")
+	if derr != nil {
+		return revision, "", appendProvenanceNote(note, "git diff HEAD unavailable")
+	}
+	untracked, uerr := gitOutput(dir, "ls-files", "--others", "--exclude-standard")
+	if uerr != nil {
+		return revision, "", appendProvenanceNote(note, "git ls-files unavailable")
+	}
+	if diff == "" && untracked == "" {
+		return revision, "", note
+	}
+	sum := sha256.Sum256([]byte(diff + "\x00" + untracked))
+	return revision, hex.EncodeToString(sum[:]), note
+}
+
+func appendProvenanceNote(note, add string) string {
+	if note == "" {
+		return add
+	}
+	return note + "; " + add
+}
+
+// gitOutput runs one git command in dir and returns stdout. An error is a
+// loud signal to the caller, which records the provenance gap instead of
+// guessing a value.
+func gitOutput(dir string, args ...string) (string, error) {
+	full := append([]string{"-C", dir}, args...)
+	out, err := exec.Command("git", full...).Output()
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
 // gitTreeHash returns the TREE hash of the repo at dir, or "" when git
 // fails. This is the commit's content identity (rev-parse HEAD^{tree}), a
 // different object from the commit hash: two commits over the same bytes
@@ -865,6 +920,23 @@ func gitCommitAll(dir string) (string, error) {
 		}
 	}
 	return gitHeadCommit(dir), nil
+}
+
+// stampRowProvenance stamps the build revision and the dirty-tree digest on
+// every row once, at write time, so the artifact is auditable against the
+// source that produced it. The process working directory is the repo root the
+// command runs from.
+func stampRowProvenance(rows []familyPairRow) {
+	dir, err := os.Getwd()
+	if err != nil {
+		dir = "."
+	}
+	revision, digest, note := workingTreeProvenance(dir)
+	for i := range rows {
+		rows[i].HarnessRevision = revision
+		rows[i].DirtyTreeDigest = digest
+		rows[i].ProvenanceNote = note
+	}
 }
 
 func writeFamiliesRows(outDir string, rows []familyPairRow) error {

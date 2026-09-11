@@ -346,7 +346,14 @@ func applyFileChanges(ctx context.Context, workDir string, files []schemas.FileC
 			switch f.ChangeType {
 			case "create":
 				toolName = "write_file"
-				args = map[string]any{"path": f.Path, "content": f.Content}
+				// A create is a full-content write. The repair loop re-emits
+				// files the prior iteration wrote with change_type create,
+				// because the host cannot mint a base_ref for a path it did not
+				// deliver as a view to this invocation. Allow the create to
+				// replace an existing path; RequireReadBeforeWrite and the
+				// tracker conflict guard still refuse an unread or externally
+				// changed file.
+				args = map[string]any{"path": f.Path, "content": f.Content, "overwrite": true}
 			case "modify":
 				toolName = "write_file"
 				args = map[string]any{"path": f.Path, "content": f.Content, "overwrite": true}

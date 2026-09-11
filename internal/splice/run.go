@@ -680,7 +680,8 @@ func runIterationLoop(
 			failed := findFailed(passRecords)
 			failure := failed.Name + "\x00" + DerefString(failed.OutputSummary)
 			if failure == priorFailure {
-				reason := fmt.Sprintf("repeated unchanged stage failure in iterations %d and %d: %s", i-1, i, failed.Name)
+				reason := fmt.Sprintf("repeated unchanged stage failure (%s) in iterations %d and %d: %s",
+					failureCauseClass(DerefString(failed.OutputSummary)), i-1, i, failed.Name)
 				if detail := DerefString(failed.OutputSummary); detail != "" {
 					reason += ": " + detail
 				}
@@ -1543,13 +1544,44 @@ func buildRevisionContext(intent string, history []schemas.IterationState, recor
 		if len(changedFiles) > 50 {
 			changedFiles = changedFiles[:50]
 		}
-		lines = append(lines, "", "Files written by the prior iteration (use change_type modify and overwrite: true when editing them):")
+		// The model cannot satisfy a modify for these paths. modify requires a
+		// base_ref that keys a source view DELIVERED to the current invocation,
+		// and this context is built before the stage runs, so the host holds no
+		// such view. Minting a base from current bytes would key edits against
+		// text the model never received, which the materializer's exact-match
+		// rule forbids. The full-content create form needs no base, so it is the
+		// only representation the model can actually submit here.
+		lines = append(lines, "", "Files written by the prior iteration (re-emit each with change_type create and the full file content; the host replaces the prior bytes):")
 		lines = append(lines, "  "+strings.Join(changedFiles, ", "))
 	}
 	if note != "" {
 		lines = append(lines, "", note)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// failureCauseClass names the error family of a stage failure so aggregate
+// telemetry can separate repeated failures that share the wrapper name but
+// differ in root cause. The full detail is still appended to the reason;
+// this label is additive, never a replacement. The order matters: a typed
+// output error that reports a missing base_ref is a validation failure, and
+// the more specific class must win.
+func failureCauseClass(summary string) string {
+	s := strings.ToLower(summary)
+	switch {
+	case strings.Contains(s, "base_ref"), strings.Contains(s, "proposal "), strings.Contains(s, "validation"):
+		return "validation"
+	case strings.Contains(s, "typedoutputerror"), strings.Contains(s, "typed output"):
+		return "typed_output"
+	case strings.Contains(s, "timed out"), strings.Contains(s, "timeout"):
+		return "timeout"
+	case strings.Contains(s, "auth"):
+		return "auth"
+	case strings.Contains(s, "provider request error"):
+		return "provider"
+	default:
+		return "unknown"
+	}
 }
 
 func cloneChangedFiles(input map[string][]string) map[string][]string {
