@@ -10,6 +10,7 @@ import (
 
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/splice/dtools"
+	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/splice/stages"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
@@ -46,7 +47,40 @@ func buildStageRegistry(options PipelineRunConfig, workDir string) (stageRegistr
 			options.Registry.Register(dtools.NewSarifTool(workDir))
 		}
 	}
+	if err := registerTopologyNodes(r, defaultTopology()); err != nil {
+		return nil, err
+	}
 	return r, nil
+}
+
+// registerTopologyNodes adds a stage for every custom node in the topology,
+// keyed by node name, and aliases a renamed builtin node under its node name.
+// A custom node the build does not support yet is a hard error: a topology
+// must never compile to a plan whose stage silently has no implementation.
+// The caller passes the active topology, so a loaded topology reaches the
+// registry through one seam.
+func registerTopologyNodes(r stageRegistry, topology *schemas.PipelineTopology) error {
+	if topology == nil {
+		return nil
+	}
+	for _, node := range topology.Nodes {
+		switch node.Type {
+		case schemas.NodeTypeCommand:
+			r[node.Name] = stages.CommandStage{Name: node.Name, Command: append([]string(nil), node.Command...)}
+		case schemas.NodeTypePrompt:
+			return fmt.Errorf("topology node %s: prompt nodes are not implemented yet", node.Name)
+		default:
+			if node.Name == node.Type {
+				continue // already registered under its builtin name
+			}
+			builtin, ok := r[node.Type]
+			if !ok {
+				return fmt.Errorf("topology node %s: no builtin stage for type %q", node.Name, node.Type)
+			}
+			r[node.Name] = builtin
+		}
+	}
+	return nil
 }
 
 // stageOptions builds StageOptions for a named stage.
