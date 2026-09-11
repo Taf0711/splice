@@ -1249,18 +1249,16 @@ func runStageWithContextBudgeted(
 			tr.recordEvidencePlanOrdinal(input.StageName, iteration, invocationOrdinal, priorScope.Evidence)
 		}
 	}
+	// Evidence substitution is the ONLY mechanism that may shape the live
+	// context request. The legacy cognition scoping path (ScopedContextRequest)
+	// is abandoned: it narrowed the host request without ever changing what the
+	// model did, and measurement showed it bought prompt growth rather than
+	// savings. Evidence-free stages keep the historical default request
+	// byte-for-byte, so a stage with no admitted substitution is unaffected.
 	if priorScope != nil && priorScope.Evidence != nil && priorScope.Evidence.SubstitutionCount() > 0 {
 		req := EvidenceRequestFromOperations(priorScope.Evidence.Warm.Operations,
 			"Evidence-backed exact substitution: admitted retained records replaced redundant discovery operations.")
 		stageOpts.OverrideContextRequest = &req
-	} else if scopeOn && priorScope != nil && (priorScope.CognitionResolved || priorScope.SemanticResolved) {
-		defaultReq := stages.DefaultContextRequestFor(input.RequestIntent, workDir, detectLanguage(workDir))
-		scoped, sup := ScopedContextRequest(defaultReq, *priorScope,
-			"Cognition-resolved scope: known files and symbols from the verified cognition graph replace repository-wide discovery.")
-		stageOpts.OverrideContextRequest = &scoped
-		if tr != nil {
-			tr.recordScopeMetricsOrdinal(input.StageName, iteration, invocationOrdinal, sup, *priorScope)
-		}
 	}
 	if outputMax > 0 {
 		// The stage's output budget caps every LLM request this stage makes. Zero

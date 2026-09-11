@@ -285,15 +285,11 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 		// cold and warm observe the same deterministic baseline and only
 		// the admitted transformation differs.
 		scope.Evidence = buildEvidencePlan(input.RequestIntent, p.WorkDir, priorChangedFilesForEvidence(input.PriorChangedFiles), planNodes)
-		// Input-side suppression accounting: compute the concrete host
-		// omissions this plan would authorize against the deterministic
-		// default request, so the caller can record them instead of
-		// discarding the result. Execution still records its own measured
-		// suppression; this value covers the plan decision itself.
-		if scope.CognitionResolved || scope.SemanticResolved {
-			defaultReq := stages.DefaultContextRequestFor(input.RequestIntent, p.WorkDir, detectLanguage(p.WorkDir))
-			_, sup = ScopedContextRequest(defaultReq, scope, "")
-		}
+		// The legacy input-side suppression accounting is removed with the
+		// abandoned cognition scoping path. The scope plan still governs
+		// tool-level listing suppression through ScopedToolRunner, which is
+		// unaffected. sup therefore stays zero: the legacy mechanism no longer
+		// authorizes any host omission.
 		if plan.AnchorsFailed > 0 {
 			emitProgress(p.Options, fmt.Sprintf("[%s] discovery: %d anchor(s) failed freshness validation\n",
 				input.StageName, plan.AnchorsFailed))
