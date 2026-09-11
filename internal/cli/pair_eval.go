@@ -286,15 +286,21 @@ func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
 			_ = os.WriteFile(in.OutputPath, out, 0o644) // best-effort debug tee
 		}
 
-		// Cold arms (--memory off) never create a trace by design: no sidecar
-		// client means no tracer. When the trace join finds nothing, fall back
-		// to the run's own stream-json usage records so both arms carry real
-		// measured cost and the comparison stays symmetric.
-		tokens, interventions, found := collectTrace(ctx, deps, in.Cwd, in.SessionID)
+		// Symmetric token source: the authoritative request ledger carried by
+		// the run's final stream-json event, for BOTH arms. The trace is
+		// warm-only (a cold arm has no sidecar client), so reading warm tokens
+		// from the trace and cold tokens from stream-json compared different
+		// sources. The ledger is the same source for both.
+		tokens, found := parsePipelineResultTokens(out)
+		tokenSource := "ledger"
 		if !found {
 			tokens = sumStreamJSONTokens(out)
+			tokenSource = "stream-json"
 			found = tokens > 0
 		}
+		// Interventions are a warm-side trace signal; they never carry the
+		// token comparison.
+		_, interventions, _ := collectTrace(ctx, deps, in.Cwd, in.SessionID)
 		toolCalls, fileReads, searchCalls := sumStreamJSONWork(out)
 		// A3: record transcript presence so a zero counter downstream is
 		// known to be a measured zero, not missing telemetry.
@@ -338,7 +344,8 @@ func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
 				_ = writeAttemptManifest(in.ArtifactDir, manifest)
 			}
 			return eval.RunOutput{Success: false, Tokens: tokens, TelemetryFound: found,
-					ToolCalls: toolCalls, FileReads: fileReads, SearchCalls: searchCalls,
+					TokenSource: tokenSource,
+					ToolCalls:   toolCalls, FileReads: fileReads, SearchCalls: searchCalls,
 					StreamWorkObserved: boolPtr(streamObserved),
 					StreamInputTokens:  streamIn, StreamOutputTokens: streamOut, StreamSplitFound: splitFound,
 					FailureCategory: "agent_noncompletion",
@@ -365,7 +372,8 @@ func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
 		}
 
 		result := eval.RunOutput{Success: success, Tokens: tokens, Interventions: interventions,
-			TelemetryFound: found, ToolCalls: toolCalls, FileReads: fileReads, SearchCalls: searchCalls,
+			TelemetryFound: found, TokenSource: tokenSource,
+			ToolCalls: toolCalls, FileReads: fileReads, SearchCalls: searchCalls,
 			VerifierOutputPath: artifactPath(in.ArtifactDir, in.SessionID, "verifier.txt"),
 			PatchPath:          artifactPath(in.ArtifactDir, in.SessionID, "patch.diff"),
 			ManifestDigest:     proposal.ManifestDigest, ProposedDigest: proposal.ProposedDigest,
@@ -535,6 +543,33 @@ type streamJSONUsage struct {
 	PromptTokens     int `json:"promptTokens"`
 	CompletionTokens int `json:"completionTokens"`
 	TotalTokens      int `json:"totalTokens"`
+}
+
+// parsePipelineResultTokens reads the run's final stream-json event and sums
+// the authoritative ledger totals (input + output). The final event's text is
+// the PipelineResult produced after applyRequestLedger, so both arms read the
+// same source instead of warm-from-trace and cold-from-stream. The found flag
+// distinguishes a measured zero from an absent result.
+func parsePipelineResultTokens(out []byte) (int, bool) {
+	for _, line := range strings.Split(string(out), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || trimmed[0] != '{' {
+			continue
+		}
+		var event struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if json.Unmarshal([]byte(trimmed), &event) != nil || event.Type != "final" || event.Text == "" {
+			continue
+		}
+		var result schemas.PipelineResult
+		if json.Unmarshal([]byte(event.Text), &result) != nil {
+			continue
+		}
+		return result.TotalTokensInput + result.TotalTokensOutput, true
+	}
+	return 0, false
 }
 
 // sumStreamJSONTokens sums totalTokens across stream-json usage records in a

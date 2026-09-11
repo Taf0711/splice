@@ -4137,3 +4137,66 @@ func TestPipelineConfigMapsTraceWriteWarn(t *testing.T) {
 		t.Fatal("nil TraceWriteWarn must map to nil TraceWriteWarn")
 	}
 }
+
+// handshakeStage models the writer's first round: it returns a ContextRequest
+// with no provider usage, then emits usage once context is present. It exists
+// to pin that the first provider-bearing round is labeled generation, not
+// expansion, even though the loop round is 1.
+type handshakeStage struct{ calls int }
+
+func (*handshakeStage) Capabilities() stages.Capabilities { return stages.Capabilities{} }
+
+func (s *handshakeStage) Run(_ context.Context, input schemas.HarnessStageInput, _ zeroruntime.Provider, options stages.StageOptions) (schemas.HarnessStageOutput, error) {
+	s.calls++
+	if input.Context == nil {
+		symbol := "foo"
+		return schemas.HarnessStageOutput{
+			Summary: "needs context",
+			ContextRequest: &schemas.ContextRequest{
+				Reason: "handshake",
+				Queries: []schemas.ContextQuery{{
+					QueryType:  schemas.ContextGetSymbol,
+					Symbol:     &symbol,
+					MaxResults: 5,
+					MaxChars:   1000,
+				}},
+			},
+		}, nil
+	}
+	usage := schemas.StageUsage{InputTokens: 6, OutputTokens: 5}
+	if options.Stream.OnUsageResult != nil {
+		options.Stream.OnUsageResult(zeroruntime.Usage{InputTokens: 6, OutputTokens: 5}, true, nil)
+	}
+	return schemas.HarnessStageOutput{Summary: "done", Usage: &usage}, nil
+}
+
+// TestRunStageWithContextLabelsFirstProviderRoundGeneration pins the live
+// attribution fix: a context-handshake round issues no provider request, so
+// the round that follows it is the generation pass (source generation, round
+// 0), never expansion. Before the fix the live ledger carried no generation
+// record at all.
+func TestRunStageWithContextLabelsFirstProviderRoundGeneration(t *testing.T) {
+	workDir := t.TempDir()
+	store := &stubStore{}
+	stage := &handshakeStage{}
+	var attributed []agent.AttributedUsage
+	selection := agent.ModelSelection{Provider: runFakeProvider{}, ProviderName: "provider-a", Model: "model-a"}
+
+	if _, err := runStageWithContext(context.Background(), schemas.HarnessStageInput{
+		RunID:     "run-handshake",
+		StageName: "code_writer",
+	}, stage, 1, selection, PipelineConfigFromAgentOptions(agent.Options{OnAttributedUsage: func(usage agent.AttributedUsage) {
+		attributed = append(attributed, usage)
+	}}), workDir, nil, store, 0, nil, nil, 0); err != nil {
+		t.Fatalf("runStageWithContext: %v", err)
+	}
+	if stage.calls != 2 {
+		t.Fatalf("stage calls = %d, want 2 (handshake then provider round)", stage.calls)
+	}
+	if len(attributed) != 1 {
+		t.Fatalf("attributed usage calls = %d, want 1", len(attributed))
+	}
+	if got := attributed[0]; got.SpendSource != schemas.SpendSourceGeneration || got.ContextRound != 0 {
+		t.Fatalf("first provider round = source %q round %d, want %q/0", got.SpendSource, got.ContextRound, schemas.SpendSourceGeneration)
+	}
+}

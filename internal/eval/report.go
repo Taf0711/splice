@@ -33,6 +33,12 @@ type TaskPair struct {
 	// reported, so an abort biases no gate in anyone's favor.
 	ColdError string `json:"cold_error,omitempty"`
 	WarmError string `json:"warm_error,omitempty"`
+	// ColdTokenSource and WarmTokenSource name where each arm's token count
+	// came from: "ledger" (the authoritative request ledger), "stream-json"
+	// (fallback), or "". The run seam reads the same source for both arms; a
+	// mismatch is a measurement defect, not a result.
+	ColdTokenSource string `json:"cold_token_source,omitempty"`
+	WarmTokenSource string `json:"warm_token_source,omitempty"`
 }
 
 // Report is the paired-eval result. It carries counts, ratios, and named
@@ -117,6 +123,25 @@ func (r Report) RenderMarkdown() string {
 	fmt.Fprintf(&b, "cold: %d successes, %d tokens, %d weighted interventions\n", r.Cold.Successes, r.Cold.Tokens, r.Cold.WeightedInterventions)
 	fmt.Fprintf(&b, "warm: %d successes, %d tokens, %d weighted interventions\n", r.Warm.Successes, r.Warm.Tokens, r.Warm.WeightedInterventions)
 
+	// Token provenance: both arms must read the same source. A mismatch is a
+	// measurement defect and is named, never averaged over.
+	coldSources := map[string]bool{}
+	warmSources := map[string]bool{}
+	for _, task := range r.Tasks {
+		if task.ColdTokenSource != "" {
+			coldSources[task.ColdTokenSource] = true
+		}
+		if task.WarmTokenSource != "" {
+			warmSources[task.WarmTokenSource] = true
+		}
+	}
+	if len(coldSources) > 0 || len(warmSources) > 0 {
+		fmt.Fprintf(&b, "token source: cold=%s warm=%s\n", sourceList(coldSources), sourceList(warmSources))
+	}
+	if !sameSourceSet(coldSources, warmSources) {
+		fmt.Fprintf(&b, "\n> **TOKEN SOURCE MISMATCH:** the arms were read from different token sources, so their token comparison is not valid.\n")
+	}
+
 	var failed []TaskPair
 	for _, task := range r.Tasks {
 		if task.ColdError != "" || task.WarmError != "" {
@@ -160,4 +185,31 @@ func singleLine(s string) string {
 		return flat[:max] + " ... [truncated; see pe-report.json]"
 	}
 	return flat
+}
+
+// sourceList renders the distinct token sources in a stable order.
+func sourceList(set map[string]bool) string {
+	switch {
+	case set["ledger"] && set["stream-json"]:
+		return "ledger,stream-json"
+	case set["ledger"]:
+		return "ledger"
+	case set["stream-json"]:
+		return "stream-json"
+	default:
+		return ""
+	}
+}
+
+// sameSourceSet reports whether the two arms used the same token source set.
+func sameSourceSet(a, b map[string]bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if !b[k] {
+			return false
+		}
+	}
+	return true
 }

@@ -124,9 +124,14 @@ func armOrderIndex(order []campaignArm, name string) int {
 	return 0
 }
 
-// armTreatmentFor reuses the 2-arm treatment labeling (memory flag plus the
-// ambient SPLICE_TREATMENT resolution) for the extended arm set.
+// armTreatmentFor returns the arm table's explicit treatment name. The table
+// already carries a resolvable name (cold or full); recomputing it from the
+// arm name produced the unresolvable memory_off/memory_on labels. The arm name
+// is the fallback only when a future arm leaves the treatment empty.
 func armTreatmentFor(arm campaignArm) string {
+	if arm.treatment != "" {
+		return arm.treatment
+	}
 	return armTreatment(arm.name)
 }
 

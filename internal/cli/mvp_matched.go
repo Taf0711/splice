@@ -524,41 +524,30 @@ func conditionRows(rows []familyPairRow, family, condition string) []familyPairR
 	return out
 }
 
-// armTreatment returns the treatment label for one arm. The label records
-// the arm's memory flag AND the ambient SPLICE_TREATMENT when set, because
-// the treatment environment applies process-wide: a warm arm under
-// SPLICE_TREATMENT=cold is realized as retrieval-only, not full, and the
-// row must say so or the analysis attributes the wrong condition.
+// armTreatment returns a VALID treatment name for one arm. The value is
+// passed to splice.ResolveTreatment by the run seam, so it must be one of
+// cold, retrieval-only, delivery-only, scope-only, or full. The previous
+// "memory_off"/"memory_on" labels were not resolvable and made every mvp and
+// families attempt fail before its provider call.
 //
-// This path sets the child's --memory flag from the ARM, not from the
-// treatment, so the arm can contradict the treatment's declared retrieval
-// dimension. Since scope-only now declares retrieval ON (it used to run
-// with --memory off and degenerate into cold), a memory_off arm under
-// SPLICE_TREATMENT=scope-only realizes retrieval OFF. The label names that
-// contradiction rather than leaving a reader to infer the treatment's
-// declared retrieval held.
+// An ambient SPLICE_TREATMENT wins when it resolves: the operator's explicit
+// process configuration is the requested treatment, and the run seam records
+// the realized dimensions through ResolveEffectiveTreatment. An unresolvable
+// ambient value is returned verbatim so the failure stays loud and names the
+// offender. With no ambient treatment, a cold arm is cold and every other arm
+// is full.
 func armTreatment(arm string) string {
-	memory := "memory_off"
-	if arm == "warm" || arm == "manual" {
-		memory = "memory_on"
+	raw := strings.TrimSpace(os.Getenv(splice.TreatmentEnvVar))
+	if raw != "" {
+		if spec, err := splice.ResolveTreatment(raw); err == nil {
+			return string(spec.Name)
+		}
+		return raw
 	}
-	raw := strings.TrimSpace(os.Getenv("SPLICE_TREATMENT"))
-	if raw == "" {
-		return memory
+	if arm == "cold" {
+		return string(splice.TreatmentCold)
 	}
-	label := memory + "+" + raw
-	spec, err := splice.ResolveTreatment(raw)
-	if err != nil {
-		// An unresolvable ambient treatment is recorded verbatim: the row
-		// must not claim a realized condition the process cannot resolve.
-		return label + "+unresolved_treatment"
-	}
-	if spec.MemoryRetrieval() != (arm == "warm" || arm == "manual") {
-		// The arm's memory flag wins over the treatment's declared
-		// retrieval, because it is the flag actually passed to the child.
-		return label + "+retrieval_overridden_by_arm"
-	}
-	return label
+	return string(splice.TreatmentFull)
 }
 
 // appendRowWithCheckpoint appends one completed or skipped row and

@@ -65,8 +65,14 @@ type RunInput struct {
 // RunOutput is one run's outcome.
 type RunOutput struct {
 	Success       bool
-	Tokens        int // total tokens (input+output) from the trace
+	Tokens        int // total tokens (input+output) from the named TokenSource
 	Interventions int // weighted intervention sum from the trace
+	// TokenSource names where Tokens came from: "ledger" (the authoritative
+	// request ledger in the final pipeline result, the symmetric source for
+	// both arms), "stream-json" (the fallback when no final result exists),
+	// or "" (absent). A report must never compare arms that used different
+	// sources.
+	TokenSource string
 	// TelemetryFound records whether the tokens came from a matching usage
 	// trace. False with Success=true means the token count is absent data,
 	// not a measured zero, and the report must say so.
@@ -238,6 +244,8 @@ func (h *Harness) Run(ctx context.Context, taskset TaskSet, model, provider stri
 				WarmError:         warmError,
 				ColdTelemetry:     coldOut.TelemetryFound,
 				WarmTelemetry:     warmOut.TelemetryFound,
+				ColdTokenSource:   coldOut.TokenSource,
+				WarmTokenSource:   warmOut.TokenSource,
 			}
 			pairs = append(pairs, pair)
 

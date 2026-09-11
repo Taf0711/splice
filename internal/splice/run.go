@@ -1261,7 +1261,22 @@ func runStageWithContextBudgeted(
 	// new parameters through every stage. The derived source is mechanical:
 	// repair ordinal -> repair, otherwise the D2 loop reclassifies per round.
 	invocationAttribution := agent.NewRequestAttribution(invocationOrdinal, 0, spendSourceForInvocation(invocationOrdinal))
-	stageOpts := stageOptions(input.StageName, iteration, selection, options, workDir, runner, stage.Capabilities(), invocationAttribution)
+	// F1: count the provider requests this invocation actually issues. The
+	// writer's first round is a deterministic context handshake that makes no
+	// provider call, so a round counter alone labels its successor expansion
+	// and the live ledger then carries no generation record. The counter below
+	// lets the loop put the generation label on the first provider-bearing
+	// round.
+	providerRequests := 0
+	stageRunOptions := options
+	if options.OnAttributedUsage != nil {
+		baseAttributedUsage := options.OnAttributedUsage
+		stageRunOptions.OnAttributedUsage = func(attributed agent.AttributedUsage) {
+			providerRequests++
+			baseAttributedUsage(attributed)
+		}
+	}
+	stageOpts := stageOptions(input.StageName, iteration, selection, stageRunOptions, workDir, runner, stage.Capabilities(), invocationAttribution)
 	// Part A context bridge: fresh cognition narrows the default context
 	// request. The scoped request replaces the default ONLY when the scope
 	// resolved a question; otherwise the cold path stays byte-identical.
@@ -1337,20 +1352,31 @@ func runStageWithContextBudgeted(
 	accumulate := func(u *schemas.StageUsage) {
 		usageTotal = mergeStageUsage(usageTotal, u)
 	}
+	providerRound := 0
 	for round := 0; ; round++ {
 		if ctx.Err() != nil {
 			return schemas.HarnessStageOutput{}, withStageUsage(ctx.Err(), usageTotal)
 		}
-		// F1: round 0 is the initial generation pass; round 1+ re-runs of the
-		// stage are expansion spend under the same D3 request identity. The
-		// cell is reclassified BEFORE the stage streams so its usage closure
-		// stamps the round and source onto every request this round issues.
+		// F1: the first provider-bearing round is the generation pass (or the
+		// repair pass when invocationOrdinal > 0); later provider-bearing
+		// rounds are expansion spend under the same D3 request identity. A
+		// context-handshake round issues no provider request, so it must not
+		// consume the generation label. The cell is set BEFORE the stage
+		// streams so its usage closure stamps every request this round issues.
 		if round > 0 {
-			invocationAttribution.Set(invocationOrdinal, round, schemas.SpendSourceExpansion)
+			if providerRequests == 0 {
+				invocationAttribution.Set(invocationOrdinal, 0, spendSourceForInvocation(invocationOrdinal))
+			} else {
+				invocationAttribution.Set(invocationOrdinal, providerRound, schemas.SpendSourceExpansion)
+			}
 		}
+		requestsBefore := providerRequests
 		output, err := stage.Run(ctx, input, selection.Provider, stageOpts)
 		if err != nil {
 			return schemas.HarnessStageOutput{}, withStageUsage(err, usageTotal)
+		}
+		if providerRequests > requestsBefore {
+			providerRound++
 		}
 		accumulate(output.Usage)
 

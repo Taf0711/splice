@@ -629,12 +629,15 @@ func TestCampaignArmTreatmentLabelsMatchChildOptions(t *testing.T) {
 	}
 	for _, arm := range arms {
 		got := armTreatmentFor(arm)
-		wantMemory := "memory_" + arm.memory
-		if !strings.HasPrefix(got, wantMemory) {
-			t.Fatalf("arm %s treatment %q does not reflect child --memory=%s", arm.name, got, arm.memory)
+		if got != arm.treatment {
+			t.Fatalf("arm %s treatment %q does not match the arm table %q", arm.name, got, arm.treatment)
 		}
-		if arm.name == "manual" && !strings.Contains(got, "memory_on") {
-			t.Fatalf("manual arm treatment %q must reflect memory_on", got)
+		spec, err := splice.ResolveTreatment(got)
+		if err != nil {
+			t.Fatalf("arm %s treatment %q does not resolve: %v", arm.name, got, err)
+		}
+		if spec.PromptMemory != arm.memory {
+			t.Fatalf("arm %s treatment %q realizes --memory %s, arm flag is %s", arm.name, got, spec.PromptMemory, arm.memory)
 		}
 	}
 }
@@ -727,5 +730,23 @@ func TestSummaryExcludesManualFromPrimaryWarmAggregates(t *testing.T) {
 	}
 	if !strings.Contains(text, "manual (diagnostic_only) success 0/1") {
 		t.Fatalf("manual diagnostic line missing:\\n%s", text)
+	}
+}
+
+// TestArmTreatmentReturnsResolvableNames pins the treatment-label contract:
+// every arm name maps to a treatment name ResolveTreatment accepts. The old
+// memory_off/memory_on labels made every families and mvp attempt fail before
+// its provider call.
+func TestArmTreatmentReturnsResolvableNames(t *testing.T) {
+	t.Setenv("SPLICE_TREATMENT", "")
+	cases := map[string]string{"cold": "cold", "warm": "full", "manual": "full"}
+	for arm, want := range cases {
+		got := armTreatment(arm)
+		if got != want {
+			t.Fatalf("armTreatment(%q) = %q, want %q", arm, got, want)
+		}
+		if _, err := splice.ResolveTreatment(got); err != nil {
+			t.Fatalf("armTreatment(%q) = %q does not resolve: %v", arm, got, err)
+		}
 	}
 }

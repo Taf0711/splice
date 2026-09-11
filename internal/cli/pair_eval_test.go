@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -126,5 +127,35 @@ func TestRepoRootQueryCandidatesPinsBothForms(t *testing.T) {
 	}
 	if got := repoRootQueryCandidates("/no/such/path-zzz"); len(got) != 1 || got[0] != "/no/such/path-zzz" {
 		t.Fatalf("unresolvable path must yield exactly itself, got %v", got)
+	}
+}
+
+// TestParsePipelineResultTokensReadsLedgerTotals pins the symmetric token
+// source: the final stream-json event carries the authoritative request
+// ledger, and both arms read it. A transcript without a final event reports
+// found=false so the caller falls back to stream-json instead of guessing.
+func TestParsePipelineResultTokensReadsLedgerTotals(t *testing.T) {
+	result := schemas.PipelineResult{
+		RunID:             "r",
+		Status:            "completed",
+		Tier:              schemas.TierLight,
+		TotalTokensInput:  100,
+		TotalTokensOutput: 40,
+	}
+	text, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := json.Marshal(map[string]string{"type": "final", "text": string(text)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := []byte("{\"type\":\"run_start\"}\n" + string(event) + "\n")
+	tokens, found := parsePipelineResultTokens(out)
+	if !found || tokens != 140 {
+		t.Fatalf("tokens = %d, found = %t; want 140, true", tokens, found)
+	}
+	if _, found := parsePipelineResultTokens([]byte("{\"type\":\"text\",\"delta\":\"hi\"}\n")); found {
+		t.Fatal("a transcript with no final event must report found=false")
 	}
 }
