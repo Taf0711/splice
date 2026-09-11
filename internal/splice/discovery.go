@@ -731,6 +731,11 @@ type StageScopePlan struct {
 	// expansions_performed; the remaining budget is never reported as
 	// performed work.
 	ExpansionsSpent int
+	// Evidence is the production E4 decision for this invocation: the
+	// improved cold plan, the warm plan after admitted substitution, and
+	// the concrete operation difference. Nil means no evidence plan was
+	// built, so the ordinary discovery path stays byte-identical.
+	Evidence *EvidencePlan
 }
 
 // scopePlanFor derives the scope plan from a DiscoveryPlan and the fresh

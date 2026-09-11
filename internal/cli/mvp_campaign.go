@@ -7,8 +7,6 @@ package cli
 //
 // The three campaign conditions (handoff Section 11, warmcost E5 slice):
 //
-//   - improved-cold: memory OFF, no seeding. A true cold run on the
-//     improved (current) runtime.
 //   - manual: memory ON + records seeded from the FROZEN snapshot bundle
 //     (A4 import path), selected by the E4 subject-matching over the needs
 //     derived from the target task. Diagnostic only: flagged
@@ -67,6 +65,15 @@ type campaignArm struct {
 	diagnosticOnly bool
 }
 
+// realizationSignature is the behavior-distinguishing tuple of an arm:
+// child memory flag, treatment label, whether it seeds retained evidence,
+// and whether the arm is diagnostic-only. Condition names are labels and do
+// not participate: two arms with the same signature are the same runtime
+// treatment regardless of label.
+func (a campaignArm) realizationSignature() string {
+	return a.memory + "|" + a.treatment + "|" + fmt.Sprintf("%t", a.seed) + "|" + fmt.Sprintf("%t", a.diagnosticOnly)
+}
+
 // campaignArmsFor returns the ordered arm table for the requested
 // conditions mode. The returned order is the CANONICAL table order; the
 // per-experiment launch order is derived from the scheduling seed by
@@ -79,9 +86,11 @@ func campaignArmsFor(conditions string) ([]campaignArm, error) {
 			{name: "warm", condition: conditionAutomatic, memory: "on", treatment: "full", seed: true},
 		}, nil
 	case conditionsFlagThreeCondition:
+		// The old improved-cold label was runtime-identical to cold
+		// (same memory flag, same treatment, same executable behavior).
+		// It is removed rather than kept as a nominal fourth arm.
 		return []campaignArm{
 			{name: "cold", condition: conditionCold, memory: "off", treatment: "cold"},
-			{name: "improved-cold", condition: conditionImprovedCold, memory: "off", treatment: "cold"},
 			{name: "warm", condition: conditionAutomatic, memory: "on", treatment: "full", seed: true},
 			{name: "manual", condition: conditionManual, memory: "on", treatment: "full", seed: true, diagnosticOnly: true},
 		}, nil

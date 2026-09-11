@@ -19,6 +19,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Taf0711/splice/internal/eval"
 	"github.com/Taf0711/splice/internal/memd"
 	"github.com/Taf0711/splice/internal/splice"
 )
@@ -49,16 +50,19 @@ func TestCampaignArmsForThreeCondition(t *testing.T) {
 	for _, arm := range arms {
 		byName[arm.name] = arm
 	}
-	if len(byName) != 4 {
-		t.Fatalf("table = %v, want 4 arms (cold, improved-cold, warm, manual)", armNames(arms))
+	if len(byName) != 3 {
+		t.Fatalf("table = %v, want 3 arms (cold, warm, manual)", armNames(arms))
 	}
 	cold := byName["cold"]
 	if cold.memory != "off" || cold.condition != conditionCold || cold.seed || cold.diagnosticOnly {
 		t.Fatalf("cold arm = %+v, want memory off, no seed, legacy parity reporting", cold)
 	}
-	improved := byName["improved-cold"]
-	if improved.memory != "off" || improved.seed || improved.condition != conditionImprovedCold {
-		t.Fatalf("improved-cold arm = %+v, want memory off and no seeding (true cold, improved runtime)", improved)
+	// The removed improved-cold label must not return under a different
+	// name with the same runtime signature as cold.
+	for _, arm := range arms {
+		if arm.name != "cold" && arm.realizationSignature() == cold.realizationSignature() {
+			t.Fatalf("arm %s has the same realization signature as cold: %s", arm.name, arm.realizationSignature())
+		}
 	}
 	warm := byName["warm"]
 	if warm.memory != "on" || !warm.seed || warm.condition != conditionAutomatic || warm.diagnosticOnly {
@@ -397,7 +401,7 @@ func TestThreeConditionRowsAreCorrectAndFlagged(t *testing.T) {
 		seenArms[row.Arm] = true
 	}
 	// All four arms produced rows.
-	for _, arm := range []string{"cold", "improved-cold", "warm", "manual"} {
+	for _, arm := range []string{"cold", "warm", "manual"} {
 		if !seenArms[arm] {
 			t.Fatalf("arm %s produced no rows", arm)
 		}
@@ -544,7 +548,7 @@ func TestSummarizeMvpKeepsManualRowsOutOfTheGate(t *testing.T) {
 		{Family: "fam-x", Task: "B", Arm: "warm", Attempt: 1, Success: true, Executed: true, Condition: conditionAutomatic},
 		{Family: "fam-x", Task: "B", Arm: "manual", Attempt: 1, Success: true, Executed: true, Condition: conditionManual, DiagnosticOnly: &diag},
 		{Family: "fam-x", Task: "B", Arm: "manual", Attempt: 2, Success: true, Executed: true, Condition: conditionManual, DiagnosticOnly: &diag},
-		{Family: "fam-x", Task: "B", Arm: "improved-cold", Attempt: 1, Executed: false, Condition: conditionImprovedCold, DiagnosticOnly: &manual},
+		{Family: "fam-x", Task: "B", Arm: "cold", Attempt: 2, Executed: false, Condition: conditionCold, DiagnosticOnly: &manual},
 	}
 	var out strings.Builder
 	reviewAggregatesQuiet = true
@@ -586,5 +590,142 @@ func TestSchedulingSeedDerivationRecordedDeterministically(t *testing.T) {
 		// Allowed by chance but suspicious across the fixed pair; assert
 		// the stronger property over many seeds instead.
 		t.Fatal("expected different orders for different seeds in this fixture")
+	}
+}
+
+// TestCampaignArmsHaveRealExecutionDifferences pins the experiment-design
+// correction: the arm table must not carry a nominal duplicate. Two arms may
+// share a label only when their child memory flag, treatment, and seeding
+// differ; the manual arm remains diagnostic and separate.
+func TestCampaignArmsHaveRealExecutionDifferences(t *testing.T) {
+	arms, err := campaignArmsFor(conditionsFlagThreeCondition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]string{}
+	for _, arm := range arms {
+		sig := arm.realizationSignature()
+		if prev, ok := seen[sig]; ok {
+			t.Fatalf("arms %s and %s have the same execution signature %q", prev, arm.name, sig)
+		}
+		seen[sig] = arm.name
+		if arm.name == "manual" && !arm.diagnosticOnly {
+			t.Fatalf("manual arm must remain diagnostic_only")
+		}
+		if arm.name != "manual" && arm.diagnosticOnly {
+			t.Fatalf("arm %s must not be diagnostic_only", arm.name)
+		}
+	}
+}
+
+// TestCampaignArmTreatmentLabelsMatchChildOptions is the realized-options
+// guard: the treatment label records what the child receives, not just the
+// arm name. The test catches a duplicate regime where cold and a second arm
+// differ only in their condition label.
+func TestCampaignArmTreatmentLabelsMatchChildOptions(t *testing.T) {
+	arms, err := campaignArmsFor(conditionsFlagThreeCondition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, arm := range arms {
+		got := armTreatmentFor(arm)
+		wantMemory := "memory_" + arm.memory
+		if !strings.HasPrefix(got, wantMemory) {
+			t.Fatalf("arm %s treatment %q does not reflect child --memory=%s", arm.name, got, arm.memory)
+		}
+		if arm.name == "manual" && !strings.Contains(got, "memory_on") {
+			t.Fatalf("manual arm treatment %q must reflect memory_on", got)
+		}
+	}
+}
+
+// TestSummarySeparatesLegacyInferredAvoidanceFromMeasuredOperations pins the
+// telemetry consumer contract: the legacy DiscoveryReadsAvoided counter is
+// labeled as inferred, while the measured evidence-operation counters are
+// surfaced separately and are never summed into it.
+func TestSummarySeparatesLegacyInferredAvoidanceFromMeasuredOperations(t *testing.T) {
+	rows := []familyPairRow{
+		{Family: "fam-tel", Task: "B", Arm: "cold", Attempt: 1, Success: true, Executed: true},
+		{Family: "fam-tel", Task: "B", Arm: "warm", Attempt: 1, Success: true, Executed: true,
+			Condition: conditionAutomatic, DiscoveryReadsAvoided: 99,
+			OperationsExecuted: 4, OperationsSatisfiedByEvidence: 2, EvidenceValidationReads: 3},
+	}
+	var out strings.Builder
+	summarizeMvp(&out, mvpFamilyManifest{Families: []mvpFamilyEntry{{ID: "fam-tel"}}}, rows)
+	text := out.String()
+	if !strings.Contains(text, "legacy_inferred_avoided_ops med 99") {
+		t.Fatalf("legacy inferred counter not labeled:\n%s", text)
+	}
+	if !strings.Contains(text, "executed_ops med 4") || !strings.Contains(text, "evidence_satisfied_ops med 2") || !strings.Contains(text, "validation_reads med 3") {
+		t.Fatalf("measured operation counters missing:\n%s", text)
+	}
+	if strings.Contains(text, "resolved_by_cognition med 0, avoided_ops med 99") {
+		t.Fatalf("legacy inferred counter presented as measured savings:\n%s", text)
+	}
+}
+
+// TestPrecursorFailureLogsActionableCause pins the diagnostic line emitted
+// when a matched-snapshot precursor does not verify. A failed Task A must
+// name the family, execution status, error, session, failure category, and
+// the measured work counters; otherwise the only visible output is the
+// generic "did not verify" skip line.
+func TestPrecursorFailureLogsActionableCause(t *testing.T) {
+	newRecordingImportServer(t, func(project string, nodes []memd.ExportedCaptureNode) {})
+	options, manifest, manifestDir, fixtureDir := newCampaignSeamFixture(t, 1)
+	options.OutDir = t.TempDir()
+	seam := &seamRunner{
+		Outputs: []eval.RunOutput{{Tokens: 321, ToolCalls: 7, FileReads: 3, FailureCategory: "agent_noncompletion"}},
+		Errors:  []error{fmt.Errorf("precursor boom")},
+	}
+	rows := &[]familyPairRow{}
+	var stderr strings.Builder
+	if err := runMvpMatchedSnapshots(context.Background(), appDeps{}, options, manifest, manifestDir, fixtureDir, seam.run, &stderr, rows); err != nil {
+		t.Fatalf("run should complete with a failed precursor: %v", err)
+	}
+	text := stderr.String()
+	for _, want := range []string{
+		"snapshot Task A did not verify",
+		"precursor boom",
+		"failure_category=agent_noncompletion",
+		"tokens=321",
+		"tool_calls=7",
+		"file_reads=3",
+		"executed=true",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("precursor failure log missing %q:\n%s", want, text)
+		}
+	}
+	foundSetup := false
+	for _, row := range *rows {
+		if row.SetupOutcome == "precursor_failed" {
+			foundSetup = true
+			break
+		}
+	}
+	if !foundSetup {
+		t.Fatalf("failed precursor rows missing/incorrect: %+v", *rows)
+	}
+}
+
+// TestSummaryExcludesManualFromPrimaryWarmAggregates pins the primary
+// comparison: cold vs automatic. Manual is diagnostic-only and must not
+// dilute the warm token/success aggregates, especially when its setup
+// fails with zero measured work.
+func TestSummaryExcludesManualFromPrimaryWarmAggregates(t *testing.T) {
+	diag := true
+	rows := []familyPairRow{
+		{Family: "fam-x", Task: "B", Arm: "cold", Attempt: 1, Success: true, Executed: true, Tokens: 1000, Condition: conditionCold},
+		{Family: "fam-x", Task: "B", Arm: "warm", Attempt: 1, Success: true, Executed: true, Tokens: 900, Condition: conditionAutomatic},
+		{Family: "fam-x", Task: "B", Arm: "manual", Attempt: 1, Success: false, Executed: false, Tokens: 0, Condition: conditionManual, DiagnosticOnly: &diag, InfraStatus: "setup_failed"},
+	}
+	var out strings.Builder
+	summarizeMvp(&out, mvpFamilyManifest{Families: []mvpFamilyEntry{{ID: "fam-x"}}}, rows)
+	text := out.String()
+	if !strings.Contains(text, "warm: success 1/1, tokens med 900") {
+		t.Fatalf("manual row diluted primary warm aggregate:\\n%s", text)
+	}
+	if !strings.Contains(text, "manual (diagnostic_only) success 0/1") {
+		t.Fatalf("manual diagnostic line missing:\\n%s", text)
 	}
 }

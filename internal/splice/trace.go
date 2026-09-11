@@ -454,6 +454,67 @@ func (tr *runTraceAccumulator) recordScopeMetricsOrdinal(stage string, iteration
 	tr.stages[key] = meta
 }
 
+// recordEvidencePlanOrdinal records the production evidence plan's
+// operation-level dispositions for one invocation. Every remaining warm-plan
+// operation is recorded as executed; every admitted replacement is recorded
+// as satisfied-by-evidence with its evidence identity; every rejected
+// candidate records the cold operations that stayed after rejection. The
+// validation counters estimate validation reads from the supporting and
+// dependency references E3 actually re-hashed; they are reported separately
+// from executed work.
+func (tr *runTraceAccumulator) recordEvidencePlanOrdinal(stage string, iteration, ordinal int, plan *EvidencePlan) {
+	if tr == nil || plan == nil {
+		return
+	}
+	key := stageKeyFor(stage, iteration, ordinal)
+	meta := tr.stages[key]
+	decisions := make([]schemas.OperationDecision, 0, len(plan.Warm.Operations)+len(plan.Admitted)+len(plan.Rejected))
+	executed, satisfied, retained := 0, 0, 0
+	validationReads := 0
+	for _, res := range plan.Admitted {
+		reads := 0
+		if res.Record != nil {
+			reads = len(res.Record.Supporting) + len(res.Record.Dependencies)
+		}
+		for _, op := range res.Replaced {
+			decisions = append(decisions, schemas.OperationDecision{
+				Operation:       subjectToOpName(op),
+				Disposition:     schemas.OperationSatisfiedByEvidence,
+				EvidenceID:      res.Record.Identity,
+				Reason:          res.Reason,
+				ValidationReads: reads,
+			})
+			satisfied++
+			validationReads += reads
+		}
+	}
+	for _, rej := range plan.Rejected {
+		for _, op := range replacedOperationsFor(rej.Need) {
+			decisions = append(decisions, schemas.OperationDecision{
+				Operation:   subjectToOpName(op),
+				Disposition: schemas.OperationRetainedAfterReject,
+				Reason:      rej.Reason,
+			})
+			retained++
+		}
+	}
+	for _, op := range plan.Warm.Operations {
+		decisions = append(decisions, schemas.OperationDecision{
+			Operation:   op.Name,
+			Disposition: schemas.OperationExecuted,
+			Reason:      "retained improved cold operation",
+		})
+		executed++
+	}
+	meta.OperationDecisions = &decisions
+	meta.OperationsExecuted = executed
+	meta.OperationsSatisfiedByEvidence = satisfied
+	meta.OperationsRetainedAfterReject = retained
+	meta.EvidenceValidationReads = validationReads
+	meta.InvocationOrdinal = ordinal
+	tr.stages[key] = meta
+}
+
 // RecordScopeMetrics records the scope-suppression metrics for one stage
 // invocation from a caller-supplied ScopeMetrics payload. It writes ONLY the
 // scope fields on InputMeta: the discovery-plan counters (and the legacy

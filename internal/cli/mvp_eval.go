@@ -39,7 +39,7 @@ type mvpEvalOptions struct {
 	// Conditions selects the arm table for matched-snapshot runs:
 	// "cold,warm" (the legacy 2-arm default, so old scripts are not
 	// silently changed) or "three-condition" (the Section-11 campaign:
-	// cold, improved-cold, warm/automatic, and the diagnostic manual
+	// cold, warm/automatic, and the diagnostic manual
 	// arm). Non-matched flows ignore it.
 	Conditions string
 	// SchedulingSeed is the recorded seed the arm launch ORDER is derived
@@ -804,7 +804,7 @@ func summarizeMvp(stdout io.Writer, manifest mvpFamilyManifest, rows []familyPai
 			continue
 		}
 		var cold, warm []familyPairRow
-		improvedCold, manualRows, autoRows := 0, 0, 0
+		manualRows, autoRows := 0, 0
 		manualS, manualNonDiagnostic, autoS := 0, 0, 0
 		setupFailed := 0
 		failedSnapshots := map[string]bool{}
@@ -813,8 +813,6 @@ func summarizeMvp(stdout io.Writer, manifest mvpFamilyManifest, rows []familyPai
 				continue
 			}
 			switch row.Condition {
-			case conditionImprovedCold:
-				improvedCold++
 			case conditionManual:
 				manualRows++
 				manualS += boolToInt(row.Success)
@@ -844,12 +842,15 @@ func summarizeMvp(stdout io.Writer, manifest mvpFamilyManifest, rows []familyPai
 			}
 			if row.Arm == "cold" {
 				cold = append(cold, row)
-			} else {
+			} else if row.Condition != conditionManual {
+				// Manual is a diagnostic condition, not part of the primary
+				// memory-effect comparison. Its zero-work setup failures must
+				// not dilute the automatic warm median.
 				warm = append(warm, row)
 			}
 		}
 		coldS, warmS := 0, 0
-		var coldTok, warmTok, coldSearch, warmSearch, coldReads, warmReads, warmAvoid, warmCog []int
+		var coldTok, warmTok, coldSearch, warmSearch, coldReads, warmReads, warmAvoid, warmCog, warmOpsExecuted, warmOpsSatisfied, warmValidationReads []int
 		for _, row := range cold {
 			coldS += boolToInt(row.Success)
 			coldTok = append(coldTok, row.Tokens)
@@ -863,6 +864,9 @@ func summarizeMvp(stdout io.Writer, manifest mvpFamilyManifest, rows []familyPai
 			warmReads = append(warmReads, row.FileReads)
 			warmAvoid = append(warmAvoid, row.DiscoveryReadsAvoided)
 			warmCog = append(warmCog, row.DiscoveryResolvedCog)
+			warmOpsExecuted = append(warmOpsExecuted, row.OperationsExecuted)
+			warmOpsSatisfied = append(warmOpsSatisfied, row.OperationsSatisfiedByEvidence)
+			warmValidationReads = append(warmValidationReads, row.EvidenceValidationReads)
 		}
 		fmt.Fprintf(stdout, "\n%s\n", family.ID)
 		if setupFailed > 0 {
@@ -874,8 +878,8 @@ func summarizeMvp(stdout io.Writer, manifest mvpFamilyManifest, rows []familyPai
 				coldS, len(cold), medStr(coldTok), medStr(coldSearch), medStr(coldReads))
 			fmt.Fprintf(stdout, "  warm: success %d/%d, tokens med %s, searches med %s, reads med %s\n",
 				warmS, len(warm), medStr(warmTok), medStr(warmSearch), medStr(warmReads))
-			fmt.Fprintf(stdout, "  cognition: resolved_by_cognition med %s, avoided_ops med %s (per Task B run)\n",
-				medStr(warmCog), medStr(warmAvoid))
+			fmt.Fprintf(stdout, "  cognition: resolved_by_cognition med %s, legacy_inferred_avoided_ops med %s, executed_ops med %s, evidence_satisfied_ops med %s, validation_reads med %s (per Task B run)\n",
+				medStr(warmCog), medStr(warmAvoid), medStr(warmOpsExecuted), medStr(warmOpsSatisfied), medStr(warmValidationReads))
 			for _, row := range warm {
 				if row.DiscoveryResolvedCog > 0 {
 					fmt.Fprintf(stdout, "    attempt %d: %d question(s) resolved by cognition, %d anchor(s) validated, semantic hits %d\n",
@@ -883,13 +887,13 @@ func summarizeMvp(stdout io.Writer, manifest mvpFamilyManifest, rows []familyPai
 				}
 			}
 		}
-		if manualRows > 0 || improvedCold > 0 || autoRows > 0 {
+		if manualRows > 0 || autoRows > 0 {
 			// Section-11 campaign lines. The manual arm is diagnostic
 			// only: its rows never count toward the automatic-cognition
 			// gate, so it is reported separately and never in the gate
 			// comparison.
-			fmt.Fprintf(stdout, "  campaign: improved-cold %d rows, automatic success %d/%d, manual (diagnostic_only) success %d/%d\n",
-				improvedCold, autoS, autoRows, manualS, manualRows)
+			fmt.Fprintf(stdout, "  campaign: automatic success %d/%d, manual (diagnostic_only) success %d/%d\n",
+				autoS, autoRows, manualS, manualRows)
 			if manualNonDiagnostic > 0 {
 				fmt.Fprintf(stdout, "  campaign WARNING: %d manual row(s) missing diagnostic_only=true; they must never count toward the automatic-cognition gate\n", manualNonDiagnostic)
 			}
@@ -929,8 +933,8 @@ Flags:
                             tree hashes asserted)
       --conditions <mode>   Matched-snapshot arm table: cold,warm (legacy
                             2-arm default) or three-condition (Section-11
-                            campaign: cold, improved-cold, automatic, and
-                            the diagnostic manual arm)
+                            campaign: cold, automatic, and the diagnostic
+                            manual arm)
       --scheduling-seed <n> Recorded seed the arm launch order derives from
                             (Section 11.2; deterministic default when
                             omitted). Recorded on every attempts row.

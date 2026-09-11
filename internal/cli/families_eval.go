@@ -218,19 +218,28 @@ type familyPairRow struct {
 	CaptureDigest        string `json:"capture_digest,omitempty"`
 
 	// Track C discovery-plan telemetry, summed across the run's stages:
-	// what the cognition graph resolved, what freshness admitted, and the
-	// conservatively counted avoided discovery operations.
+	// what the cognition graph resolved and what freshness admitted. The
+	// DiscoveryReadsAvoided value remains only as a legacy inferred field:
+	// new traces leave it zero and summaries must not present it as measured
+	// savings.
 	ScopeFileReadsSuppressed int `json:"file_reads_suppressed,omitempty"`
 	ScopeQueriesSuppressed   int `json:"context_queries_suppressed,omitempty"`
 	ScopeListsSuppressed     int `json:"global_lists_suppressed,omitempty"`
 	DiscoveryQuestions       int `json:"discovery_questions,omitempty"`
 	DiscoveryResolvedCog     int `json:"discovery_resolved_by_cognition,omitempty"`
 	DiscoveryUnresolved      int `json:"discovery_unresolved,omitempty"`
-	DiscoveryReadsAvoided    int `json:"discovery_reads_avoided,omitempty"`
-	AnchorsValidated         int `json:"anchors_validated,omitempty"`
-	AnchorsFailed            int `json:"anchors_failed,omitempty"`
-	SemanticHits             int `json:"semantic_hits,omitempty"`
-	GraphNodesCaptured       int `json:"graph_nodes_captured,omitempty"`
+	// DiscoveryReadsAvoided is legacy inferred telemetry. New traces leave
+	// it zero; measured operation dispositions live in the counters below.
+	DiscoveryReadsAvoided int `json:"legacy_discovery_reads_avoided,omitempty"`
+	// Operation-level production telemetry, summed from InputMeta.
+	OperationsExecuted            int `json:"operations_executed,omitempty"`
+	OperationsSatisfiedByEvidence int `json:"operations_satisfied_by_evidence,omitempty"`
+	OperationsRetainedAfterReject int `json:"operations_retained_after_reject,omitempty"`
+	EvidenceValidationReads       int `json:"evidence_validation_reads,omitempty"`
+	AnchorsValidated              int `json:"anchors_validated,omitempty"`
+	AnchorsFailed                 int `json:"anchors_failed,omitempty"`
+	SemanticHits                  int `json:"semantic_hits,omitempty"`
+	GraphNodesCaptured            int `json:"graph_nodes_captured,omitempty"`
 	// Precursor reports the causal setup outcome for the warm arm of a
 	// Task A -> Task B pair: "success" (Task A verified, cognition
 	// captured), "failed" (Task A did not verify), or "" (not applicable,
@@ -313,7 +322,7 @@ type familyPairRow struct {
 	// never a fabricated default.
 
 	// Condition is the campaign condition label for this attempt:
-	// "cold" | "warm" | "improved-cold" | "manual" | "automatic".
+	// "cold" | "warm" | "manual" | "automatic".
 	// Absent on legacy 2-arm rows and on Task A rows.
 	Condition string `json:"condition,omitempty"`
 	// DiagnosticOnly marks the manual-selection arm: its rows can never

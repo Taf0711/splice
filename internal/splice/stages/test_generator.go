@@ -5,6 +5,8 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/Taf0711/splice/internal/splice/schemas"
@@ -35,8 +37,14 @@ func (TestGenerator) Run(ctx context.Context, input schemas.HarnessStageInput, p
 	// longer match the tree.
 	writerChangedPathsEarly := append([]string(nil), input.PriorChangedFiles["code_writer"]...)
 	if input.Context == nil && len(writerChangedPathsEarly) > 0 && options.PullContext {
-		queries := make([]schemas.ContextQuery, 0, len(writerChangedPathsEarly))
-		for _, path := range writerChangedPathsEarly {
+		// Existing sibling tests are edit targets too: without their actual
+		// bytes the model treats the file as absent and submits create,
+		// which fails against an already-existing test file. Request the
+		// post-write sources first, then the existing tests they own.
+		requestPaths := append([]string(nil), writerChangedPathsEarly...)
+		requestPaths = append(requestPaths, relatedExistingTestPaths(options.WorkDir, writerChangedPathsEarly)...)
+		queries := make([]schemas.ContextQuery, 0, len(requestPaths))
+		for _, path := range requestPaths {
 			p := path
 			queries = append(queries, schemas.ContextQuery{
 				QueryType:  schemas.ContextReadFile,
@@ -157,6 +165,33 @@ func (TestGenerator) Run(ctx context.Context, input schemas.HarnessStageInput, p
 		Data:         data,
 		Usage:        usageFromCollected(collected),
 	}, nil
+}
+
+// relatedExistingTestPaths lists sibling test files that already exist for
+// the writer's changed implementation files. They are the files a regression
+// edit must modify rather than recreate.
+func relatedExistingTestPaths(workDir string, writerPaths []string) []string {
+	if workDir == "" || len(writerPaths) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, p := range writerPaths {
+		p = strings.TrimSpace(p)
+		if p == "" || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+			continue
+		}
+		candidate := strings.TrimSuffix(p, ".go") + "_test.go"
+		if seen[candidate] {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(workDir, filepath.FromSlash(candidate))); err != nil {
+			continue
+		}
+		seen[candidate] = true
+		out = append(out, candidate)
+	}
+	return out
 }
 
 func parseTestGeneratorOutput(collected *zeroruntime.CollectedStream) (schemas.TestGeneratorOutput, error) {

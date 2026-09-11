@@ -203,6 +203,14 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 	}
 
 	permission := effectiveToolPermission(tool, args)
+	// A host-seam-only tool executes because the orchestrator already owns
+	// the call. The tool's own scoped path checks still run, but the
+	// model-facing sandbox decision must not re-deny the orchestrator's
+	// source seam merely because the tool is PermissionDeny.
+	hostSeamCall := false
+	if hs, ok := tool.(HostSeamTool); ok && options.HostSeam && hs.HostSeamOnly() {
+		hostSeamCall = true
+	}
 	sandboxGrantAuthorized := false
 	var sandboxDecision *sandbox.Decision
 	// Host-seam gate (B1 review fix): a Deny tool that declares itself
@@ -225,7 +233,7 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 			return res
 		}
 	}
-	if options.Sandbox != nil {
+	if options.Sandbox != nil && !hostSeamCall {
 		// Evaluate against the working directory of THIS execution, not only
 		// the engine's construction-time root. A pipeline run that binds a
 		// worktree after startup (TUI /exec) keeps its engine rooted at the

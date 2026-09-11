@@ -144,7 +144,13 @@ func admitApplicability(rec *ReuseRecord, need ContextNeed) (AdmissionDecision, 
 		return AdmissionHintOnly, "open-ended discovery is never answered by substitution"
 	}
 	switch need.Kind {
-	case NeedLocateNamedOperation, NeedInspectEditTarget, NeedObtainReferencedDeclaration:
+	case NeedInspectEditTarget:
+		// Inspecting an edit target needs the CURRENT BODY bytes. A
+		// location/identity record certifies where the symbol is; it does
+		// not carry the current declaration body. Reuse must therefore
+		// leave the read operation in the cold plan.
+		return AdmissionHintOnly, "edit-target needs current body bytes; location evidence is not a body view"
+	case NeedLocateNamedOperation, NeedObtainReferencedDeclaration:
 		// Location-class needs: the record must speak about the same
 		// subject (file or file#symbol).
 		if !recordSpeaksOfSubject(rec, need.Subject) {

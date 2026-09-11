@@ -100,3 +100,79 @@ func mustRawText(text string) json.RawMessage {
 	b, _ := json.Marshal(map[string]any{"text": text, "path": "internal/audit/retention.go"})
 	return json.RawMessage(b)
 }
+
+// TestProposalBaseRegistryResolvesPathBaseRef pins the compatibility path:
+// a model may echo the delivered view path as base_ref instead of the short
+// content handle. The path must resolve only when it was actually delivered;
+// unknown paths still fail loudly.
+func TestProposalBaseRegistryResolvesPathBaseRef(t *testing.T) {
+	base := "package audit\n\nfunc Apply() {}\n"
+	reg := NewProposalBaseRegistry()
+	reg.RecordFromBundle(&schemas.ContextBundle{Items: []schemas.ContextItem{{
+		Query:   schemas.ContextQuery{QueryType: "read_file"},
+		Summary: "internal/audit/retention.go",
+		Payload: map[string]any{
+			"text":    base,
+			"path":    "internal/audit/retention.go",
+			"version": "rev-1",
+			"raw":     base,
+		},
+	}}})
+	if _, ok := reg.Resolve("internal/audit/retention.go"); !ok {
+		t.Fatal("delivered path must resolve as a base_ref compatibility alias")
+	}
+	if _, ok := reg.Resolve("internal/audit/not-delivered.go"); ok {
+		t.Fatal("undelivered path must remain an unknown base_ref")
+	}
+}
+
+// TestNormalizeCompactEditRawSourceFallback covers models that write exact
+// edits against raw source text while the delivered view is read_file
+// display output. The old text is absent from the numbered view but occurs
+// exactly once in the raw bytes, so hydration must use raw directly.
+func TestNormalizeCompactEditRawSourceFallback(t *testing.T) {
+	raw := "package audit\n\nfunc Apply() {}\n"
+	view := " 1 | package audit\n 2 | \n 3 | func Apply() {}\n"
+	reg := NewProposalBaseRegistry()
+	restore := SetProposalBases(reg)
+	defer restore()
+	bundle := &schemas.ContextBundle{Items: []schemas.ContextItem{{
+		Query:   schemas.ContextQuery{QueryType: "read_file"},
+		Summary: "internal/audit/retention.go",
+		Payload: map[string]any{
+			"text":    view,
+			"path":    "internal/audit/retention.go",
+			"version": "rev-1",
+			"raw":     raw,
+		},
+	}}}
+	reg.RecordFromBundle(bundle)
+	regHandle := ""
+	reg.mu.Lock()
+	for path, handle := range reg.byPath {
+		if path == "internal/audit/retention.go" {
+			regHandle = handle
+		}
+	}
+	reg.mu.Unlock()
+	if regHandle == "" {
+		t.Fatal("delivered path did not receive a handle")
+	}
+	provided := "package audit\n\nfunc Apply() int { return 1 }\n"
+	old := ProposedFileChange{
+		Path:       "internal/audit/retention.go",
+		ChangeType: "modify",
+		BaseRef:    regHandle,
+		Edits: []TextReplacement{{
+			Old: "func Apply() {}",
+			New: "func Apply() int { return 1 }",
+		}},
+	}
+	got, err := MaterializeProposal(old, currentProposalSnapshot)
+	if err != nil {
+		t.Fatalf("materialize raw fallback: %v", err)
+	}
+	if got.Content != provided {
+		t.Fatalf("raw fallback content mismatch:\n%q\nwant\n%q", got.Content, provided)
+	}
+}

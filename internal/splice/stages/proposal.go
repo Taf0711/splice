@@ -195,6 +195,16 @@ func MaterializeProposal(p ProposedFileChange, baseRefToSnapshot func(baseRef st
 	for i, e := range p.Edits {
 		count := strings.Count(base, e.Old)
 		if count == 0 {
+			// Some models write edits against the raw source text while the
+			// delivered view is read_file display text. The raw bytes are the
+			// same evidence without display prefixes; if every edit matches
+			// exactly once there, hydrate from raw directly. A missing or
+			// ambiguous raw match still fails loudly.
+			if raw := snap.Raw; raw != "" {
+				if rawSpans, rawErr := matchProposalEdits(raw, p.Edits); rawErr == nil {
+					return schemas.FileChange{Path: p.Path, ChangeType: "modify", Content: applyProposalEdits(raw, rawSpans)}, nil
+				}
+			}
 			return schemas.FileChange{}, fmt.Errorf("proposal modify %s: edits[%d] old text not found in the delivered source (no fuzzy matching; request the current source first)", p.Path, i)
 		}
 		if count > 1 {
@@ -258,6 +268,50 @@ func MaterializeProposal(p ProposedFileChange, baseRefToSnapshot func(baseRef st
 		result = strings.Replace(result, content, s.new, 1)
 	}
 	return schemas.FileChange{Path: p.Path, ChangeType: "modify", Content: result}, nil
+}
+
+// proposalEditSpan is one exact edit match in a source string.
+type proposalEditSpan struct {
+	start, end int
+	new        string
+}
+
+// matchProposalEdits requires every edit old text to occur exactly once and
+// rejects overlapping spans. It is the shared exact-match rule used for both
+// delivered-view text and raw-source fallback.
+func matchProposalEdits(source string, edits []TextReplacement) ([]proposalEditSpan, error) {
+	spans := make([]proposalEditSpan, 0, len(edits))
+	for _, e := range edits {
+		count := strings.Count(source, e.Old)
+		if count == 0 {
+			return nil, fmt.Errorf("old text not found")
+		}
+		if count > 1 {
+			return nil, fmt.Errorf("old text matches %d locations", count)
+		}
+		start := strings.Index(source, e.Old)
+		spans = append(spans, proposalEditSpan{start: start, end: start + len(e.Old), new: e.New})
+	}
+	sort.Slice(spans, func(i, j int) bool { return spans[i].start < spans[j].start })
+	for i := 1; i < len(spans); i++ {
+		if spans[i].start < spans[i-1].end {
+			return nil, fmt.Errorf("edits overlap")
+		}
+	}
+	return spans, nil
+}
+
+// applyProposalEdits applies exact, non-overlapping spans to source.
+func applyProposalEdits(source string, spans []proposalEditSpan) string {
+	var b strings.Builder
+	prev := 0
+	for _, s := range spans {
+		b.WriteString(source[prev:s.start])
+		b.WriteString(s.new)
+		prev = s.end
+	}
+	b.WriteString(source[prev:])
+	return b.String()
 }
 
 // eol returns the first line of a multi-line span.

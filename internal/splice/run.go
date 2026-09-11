@@ -962,7 +962,9 @@ func runPass(
 		}
 		input = preparedInput
 		priorScope = &stageScope
-		_ = scopeSup
+		if tr != nil && !scopePlanIsUncomputed(stageScope) {
+			tr.recordScopeMetricsOrdinal(stageName, iteration, 0, scopeSup, stageScope)
+		}
 
 		if err := input.Validate(); err != nil {
 			return records, outputs, false, fmt.Errorf("stage %s input: %w", stageName, err)
@@ -1233,7 +1235,25 @@ func runStageWithContextBudgeted(
 			return stages.ToolResult{OK: res.OK, Output: res.Output, Truncated: res.Truncated, Meta: res.Meta}, nil
 		}
 	}
-	if scopeOn && priorScope != nil && (priorScope.CognitionResolved || priorScope.SemanticResolved) {
+	// Production evidence substitution: when admitted retained evidence
+	// replaced a concrete cold-plan operation, the executor uses the warm
+	// plan's remaining operations as the concrete context request. The
+	// eliminated operation is never issued; required unresolved operations
+	// stay in the request.
+	// Only an actual admitted substitution may change the live context
+	// request. Evidence-free stages keep the historical default request
+	// byte-for-byte, so the improvement cannot silently reduce or reshape
+	// the discovery coverage that Task A already relies on.
+	if priorScope != nil && priorScope.Evidence != nil {
+		if tr != nil && (priorScope.Evidence.SubstitutionCount() > 0 || len(priorScope.Evidence.Rejected) > 0) {
+			tr.recordEvidencePlanOrdinal(input.StageName, iteration, invocationOrdinal, priorScope.Evidence)
+		}
+	}
+	if priorScope != nil && priorScope.Evidence != nil && priorScope.Evidence.SubstitutionCount() > 0 {
+		req := EvidenceRequestFromOperations(priorScope.Evidence.Warm.Operations,
+			"Evidence-backed exact substitution: admitted retained records replaced redundant discovery operations.")
+		stageOpts.OverrideContextRequest = &req
+	} else if scopeOn && priorScope != nil && (priorScope.CognitionResolved || priorScope.SemanticResolved) {
 		defaultReq := stages.DefaultContextRequestFor(input.RequestIntent, workDir, detectLanguage(workDir))
 		scoped, sup := ScopedContextRequest(defaultReq, *priorScope,
 			"Cognition-resolved scope: known files and symbols from the verified cognition graph replace repository-wide discovery.")
@@ -1260,9 +1280,6 @@ func runStageWithContextBudgeted(
 		budget = NewStageExecutionBudget(0)
 	}
 	ledger := newExpansionLedger()
-	if stageOpts.OverrideContextRequest != nil {
-		ledger.Record(*stageOpts.OverrideContextRequest)
-	}
 	var usageTotal *schemas.StageUsage
 	accumulate := func(u *schemas.StageUsage) {
 		usageTotal = mergeStageUsage(usageTotal, u)

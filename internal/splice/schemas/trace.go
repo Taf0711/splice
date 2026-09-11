@@ -141,6 +141,46 @@ type InputMeta struct {
 	// above are repair re-entries in repair order. Two invocations of the
 	// same stage produce two metric records instead of overwriting one.
 	InvocationOrdinal int `json:"invocation_ordinal,omitempty"`
+	// OperationDecisions is the per-operation execution disposition from
+	// the production evidence path. Each retained cold operation records
+	// executed; each operation replaced by admitted evidence records
+	// satisfied; each rejected substitution records retained-rejected with
+	// the reason. Decisions are recorded from the plan that the executor
+	// actually used, not inferred from a retrieval hit.
+	OperationDecisions *[]OperationDecision `json:"operation_decisions,omitempty"`
+	// Summary counters for the same decision set, so settlement and
+	// dashboard consumers do not need to re-tally the slice.
+	OperationsExecuted             int `json:"operations_executed,omitempty"`
+	OperationsSatisfiedByEvidence  int `json:"operations_satisfied_by_evidence,omitempty"`
+	OperationsRetainedAfterReject  int `json:"operations_retained_after_reject,omitempty"`
+	EvidenceValidationReads        int `json:"evidence_validation_reads,omitempty"`
+	EvidenceValidationSubprocesses int `json:"evidence_validation_subprocesses,omitempty"`
+}
+
+// OperationDisposition is the typed outcome of one planned discovery
+// operation in the production evidence path.
+type OperationDisposition string
+
+const (
+	// OperationExecuted: the operation remained in the plan and the host
+	// executed it through the ordinary context/tool path.
+	OperationExecuted OperationDisposition = "executed"
+	// OperationSatisfiedByEvidence: admitted retained evidence replaced the
+	// operation, so the host did not issue it.
+	OperationSatisfiedByEvidence OperationDisposition = "satisfied-by-evidence"
+	// OperationRetainedAfterReject: a candidate was rejected by freshness or
+	// applicability, so the cold operation stayed in the plan.
+	OperationRetainedAfterReject OperationDisposition = "retained-after-reject"
+)
+
+// OperationDecision is one auditable production operation disposition.
+type OperationDecision struct {
+	Operation              string               `json:"operation"`
+	Disposition            OperationDisposition `json:"disposition"`
+	EvidenceID             string               `json:"evidence_id,omitempty"`
+	Reason                 string               `json:"reason,omitempty"`
+	ValidationReads        int                  `json:"validation_reads,omitempty"`
+	ValidationSubprocesses int                  `json:"validation_subprocesses,omitempty"`
 }
 
 // ScopeMetrics is the per-stage scope-suppression payload for
@@ -187,6 +227,22 @@ func (m InputMeta) Validate() error {
 		m.GlobalListsSuppressed < 0 || m.SearchesSuppressed < 0 || m.ScopeExpansions < 0 ||
 		m.ExpansionsPerformed < 0 || m.InvocationOrdinal < 0 {
 		return errors.New("context scope counts must be non-negative")
+	}
+	if m.OperationsExecuted < 0 || m.OperationsSatisfiedByEvidence < 0 || m.OperationsRetainedAfterReject < 0 ||
+		m.EvidenceValidationReads < 0 || m.EvidenceValidationSubprocesses < 0 {
+		return errors.New("evidence operation counts must be non-negative")
+	}
+	if m.OperationDecisions != nil {
+		for i, d := range *m.OperationDecisions {
+			switch d.Disposition {
+			case OperationExecuted, OperationSatisfiedByEvidence, OperationRetainedAfterReject:
+			default:
+				return fmt.Errorf("operation_decisions[%d]: invalid disposition %q", i, d.Disposition)
+			}
+			if d.ValidationReads < 0 || d.ValidationSubprocesses < 0 {
+				return fmt.Errorf("operation_decisions[%d]: validation counts must be non-negative", i)
+			}
+		}
 	}
 	if m.DiscoveryQuestions < 0 || m.DiscoveryResolvedTask < 0 || m.DiscoveryResolvedCog < 0 ||
 		m.DiscoveryUnresolved < 0 || m.DiscoveryReadsAvoided < 0 || m.AnchorsValidated < 0 ||

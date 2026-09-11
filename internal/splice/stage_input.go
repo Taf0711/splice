@@ -237,6 +237,12 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 	scope := StageScopePlan{}
 	sup := ScopeSuppression{}
 	caps := p.Stage.Capabilities()
+	if caps.ConsumesMemory && caps.PullContext && strings.TrimSpace(input.RequestIntent) != "" {
+		// The improved cold plan is built for both arms. Evidence-free
+		// runs use the cold plan unchanged; retained evidence can later
+		// transform it without changing any other deterministic choice.
+		scope.Evidence = buildEvidencePlan(input.RequestIntent, p.WorkDir, priorChangedFilesForEvidence(input.PriorChangedFiles), nil)
+	}
 	if p.Memory != nil && caps.ConsumesMemory {
 		root := memoryProjectRoot(p.Options, p.WorkDir)
 
@@ -273,6 +279,21 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 		// knowledge. PriorScope carries already-granted files across
 		// repair re-entry so privileges are never lost mid-trajectory.
 		scope = scopePlanFor(plan, planNodes, p.PriorScope)
+		// Production evidence substitution: map fresh graph nodes that
+		// carry typed reuse records through the existing E3/E4 checks.
+		// The plan is attached even when no substitution is admitted, so
+		// cold and warm observe the same deterministic baseline and only
+		// the admitted transformation differs.
+		scope.Evidence = buildEvidencePlan(input.RequestIntent, p.WorkDir, priorChangedFilesForEvidence(input.PriorChangedFiles), planNodes)
+		// Input-side suppression accounting: compute the concrete host
+		// omissions this plan would authorize against the deterministic
+		// default request, so the caller can record them instead of
+		// discarding the result. Execution still records its own measured
+		// suppression; this value covers the plan decision itself.
+		if scope.CognitionResolved || scope.SemanticResolved {
+			defaultReq := stages.DefaultContextRequestFor(input.RequestIntent, p.WorkDir, detectLanguage(p.WorkDir))
+			_, sup = ScopedContextRequest(defaultReq, scope, "")
+		}
 		if plan.AnchorsFailed > 0 {
 			emitProgress(p.Options, fmt.Sprintf("[%s] discovery: %d anchor(s) failed freshness validation\n",
 				input.StageName, plan.AnchorsFailed))

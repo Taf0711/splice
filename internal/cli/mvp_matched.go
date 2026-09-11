@@ -152,7 +152,10 @@ func runMvpMatchedSnapshots(
 					appendRowWithCheckpoint(rows, options.OutDir, row)
 				}
 			}
-			fmt.Fprintf(stderr, "family %s: snapshot Task A did not verify; skipping target\n", family.ID)
+			fmt.Fprintf(stderr,
+				"family %s: snapshot Task A did not verify; skipping target (status=%s error=%q session=%s failure_category=%s tokens=%d tool_calls=%d file_reads=%d latency_ms=%d executed=%t)\n",
+				family.ID, snapStatus, truncateForNote(fmt.Sprint(snapErr), 400), snapRow.SessionID,
+				snapRow.FailureCategory, snapRow.Tokens, snapRow.ToolCalls, snapRow.FileReads, snapRow.LatencyMs, snapRow.Executed)
 			continue
 		}
 
@@ -291,6 +294,7 @@ func runMvpMatchedSnapshots(
 		// imports ONLY the records the E4 subject-matching selects over
 		// the needs derived from the target task (Section 11.3).
 		seedStatus := ""
+		var manualSeedErr error
 		if !seedPersisted {
 			seedStatus = "seed_skipped_no_sidecar"
 		} else if client, err := memd.Resolve(ctx); err == nil && client != nil {
@@ -301,8 +305,11 @@ func runMvpMatchedSnapshots(
 				}
 				if arm.name == "manual" {
 					if _, mErr := seedManualArm(ctx, client, armDirs[arm.name], bundle, family.TargetTask); mErr != nil {
-						cleanupArms()
-						return fmt.Errorf("seed manual cognition from snapshot: %w", mErr)
+						// Manual selection is diagnostic: no matching record is an
+						// honest no-benefit outcome, not a reason to abort the
+						// whole family. Record it and skip only that arm.
+						manualSeedErr = mErr
+						fmt.Fprintf(stderr, "family %s: manual seeding unavailable (%v); manual diagnostic arm will be recorded as setup failure\n", family.ID, mErr)
 					}
 				} else {
 					if err := replaySeedCaptures(ctx, client, armDirs[arm.name], seedSet); err != nil {
@@ -336,6 +343,22 @@ func runMvpMatchedSnapshots(
 		// the scheduling-seed-derived arm order. Arms run sequentially.
 		for attempt := 1; attempt <= options.Rollouts; attempt++ {
 			for _, arm := range armOrder {
+				if arm.name == "manual" && manualSeedErr != nil {
+					diagnostic := true
+					appendRowWithCheckpoint(rows, options.OutDir, familyPairRow{
+						Family: family.ID, Task: "B", Attempt: attempt, Arm: arm.name,
+						ExperimentID: experimentID, PipelineRunID: experimentID,
+						SnapshotID: snapshotID, SetupOutcome: "manual_seed_unavailable",
+						Executed: false, Treatment: armTreatmentFor(arm),
+						WarmSetupValid: &falseValue,
+						WarmSetupNote:  truncateForNote(manualSeedErr.Error(), 300),
+						InfraStatus:    "setup_failed",
+						Condition:      arm.condition, DiagnosticOnly: &diagnostic,
+						SchedulingSeed: schedulingSeed,
+						ArmOrderIndex:  armOrderIndex(armOrder, arm.name),
+					})
+					continue
+				}
 				// Reset the arm's sidecar state so attempt N's captures
 				// never leak into attempt N+1, then restore the snapshot
 				// cognition for the seeding arms.

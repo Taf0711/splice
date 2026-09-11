@@ -598,7 +598,7 @@ func (s *Store) EvidenceFor(ctx context.Context, ids []int64) (map[int64][]Evide
 	out := make(map[int64][]Evidence, len(ids))
 	for _, id := range ids {
 		rows, err := s.db.QueryContext(ctx,
-			`SELECT kind, ref, detail FROM cognition_evidence WHERE node_id = ? ORDER BY created_at`, id)
+			`SELECT kind, ref, detail FROM cognition_evidence WHERE node_id = ? ORDER BY created_at, rowid`, id)
 		if err != nil {
 			return nil, fmt.Errorf("graph: evidence for node %d: %w", id, err)
 		}

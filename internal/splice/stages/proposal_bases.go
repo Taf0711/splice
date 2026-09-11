@@ -132,8 +132,20 @@ func (r *ProposalBaseRegistry) Resolve(baseRef string) (ProposalSnapshot, bool) 
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	snap, ok := r.byHandle[strings.TrimSpace(baseRef)]
-	return snap, ok
+	key := strings.TrimSpace(baseRef)
+	if snap, ok := r.byHandle[key]; ok {
+		return snap, true
+	}
+	// Models frequently echo the path from the delivered view instead of
+	// the short content handle. A path that was actually delivered is
+	// unambiguous and resolves to the same snapshot; anything not
+	// delivered still fails loudly as an unknown base_ref.
+	if handle, ok := r.byPath[key]; ok {
+		if snap, ok := r.byHandle[handle]; ok {
+			return snap, true
+		}
+	}
+	return ProposalSnapshot{}, false
 }
 
 // CurrentProposalSnapshot resolves the base_ref for the parser. It reads
