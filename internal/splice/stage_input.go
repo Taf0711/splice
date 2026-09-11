@@ -194,6 +194,7 @@ func stageOrder(pipelineStages []string) []string {
 type stageInputPreparation struct {
 	Input     schemas.HarnessStageInput
 	Stage     stages.Stage
+	Caps      stages.Capabilities
 	Budget    schemas.StageBudget
 	Tier      schemas.PipelineTier
 	Iteration int
@@ -220,7 +221,12 @@ type stageInputPreparation struct {
 // path below.
 func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.HarnessStageInput, error) {
 	input := p.Input
-	caps := p.Stage.Capabilities()
+	// A preparation that carries no capabilities (a legacy or unit-test
+	// caller) falls back to the stage's own declaration.
+	caps := p.Caps
+	if caps == (stages.Capabilities{}) {
+		caps = p.Stage.Capabilities()
+	}
 	if p.Memory != nil && caps.ConsumesMemory {
 		root := memoryProjectRoot(p.Options, p.WorkDir)
 

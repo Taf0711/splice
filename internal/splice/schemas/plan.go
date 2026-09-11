@@ -308,6 +308,10 @@ type ExecutionStage struct {
 	// EdgePayloads maps each dependency name to the information payload its
 	// edge carries. A missing entry means EdgePayloadSummary.
 	EdgePayloads map[string]EdgePayload `json:"edge_payloads,omitempty"`
+	// Caps is the compiled node capability set, resolved from the topology.
+	// Nil means the plan predates capability compilation, and the executor
+	// falls back to the stage's own declaration.
+	Caps *NodeCapabilities `json:"capabilities,omitempty"`
 }
 
 // Validate checks the execution stage.

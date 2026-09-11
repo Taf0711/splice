@@ -107,7 +107,9 @@ func attemptLocalRepair(
 		// Re-enter code_writer with the focused revision context.
 		writerInput := repairStageInput(runID, "code_writer", plan, stageNames, *priorSummaries, *priorChangedFiles, &revisionContext)
 		writerStart := time.Now()
-		writerOutput, werr := runRepairStage(ctx, wallDeadline, writerInput, codeWriterStage, iteration, repairSelection(options, provider, "code_writer", false), options, workDir, runner, mem, stageBudgetByName(plan, "code_writer"), plan.Tier, tr)
+		writerPlanStage, _ := stageByPlanName(plan, "code_writer")
+		writerCaps := effectiveCaps(writerPlanStage, codeWriterStage.Capabilities())
+		writerOutput, werr := runRepairStage(ctx, wallDeadline, writerInput, codeWriterStage, iteration, repairSelection(options, provider, "code_writer", false), options, workDir, runner, mem, writerCaps, stageBudgetByName(plan, "code_writer"), plan.Tier, tr)
 		totalLatency += int(time.Since(writerStart).Milliseconds())
 		if werr != nil {
 			return false, nil, fmt.Errorf("repair: code_writer re-entry: %w", werr)
@@ -133,7 +135,9 @@ func attemptLocalRepair(
 		emitStageEvent(options, iteration-1, "test_runner", "message", fmt.Sprintf("repair re-entry %d: re-running tests", attempts), 0, nil)
 		testInput := repairStageInput(runID, "test_runner", plan, stageNames, *priorSummaries, *priorChangedFiles, nil)
 		testStart := time.Now()
-		newTestOutput, terr := runRepairStage(ctx, wallDeadline, testInput, testRunnerStage, iteration, agent.ModelSelection{}, options, workDir, runner, mem, stageBudgetByName(plan, "test_runner"), plan.Tier, tr)
+		testPlanStage, _ := stageByPlanName(plan, "test_runner")
+		testCaps := effectiveCaps(testPlanStage, testRunnerStage.Capabilities())
+		newTestOutput, terr := runRepairStage(ctx, wallDeadline, testInput, testRunnerStage, iteration, agent.ModelSelection{}, options, workDir, runner, mem, testCaps, stageBudgetByName(plan, "test_runner"), plan.Tier, tr)
 		totalLatency += int(time.Since(testStart).Milliseconds())
 		if terr != nil {
 			return false, nil, fmt.Errorf("repair: test_runner re-run: %w", terr)
@@ -262,10 +266,11 @@ func repairSelection(options PipelineRunConfig, provider agent.Provider, stageNa
 // preparation module as the normal pass, so repair retrieves current memory,
 // applies admission and compaction, and records post-compaction counts; it
 // receives the full stage budget, not only OutputMax.
-func runRepairStage(ctx context.Context, wallDeadline time.Time, input schemas.HarnessStageInput, stage stages.Stage, iteration int, selection agent.ModelSelection, options PipelineRunConfig, workDir string, runner ToolRunner, mem MemoryStore, budget schemas.StageBudget, tier schemas.PipelineTier, tr *runTraceAccumulator) (schemas.HarnessStageOutput, error) {
+func runRepairStage(ctx context.Context, wallDeadline time.Time, input schemas.HarnessStageInput, stage stages.Stage, iteration int, selection agent.ModelSelection, options PipelineRunConfig, workDir string, runner ToolRunner, mem MemoryStore, caps stages.Capabilities, budget schemas.StageBudget, tier schemas.PipelineTier, tr *runTraceAccumulator) (schemas.HarnessStageOutput, error) {
 	prepared, err := prepareStageInput(ctx, stageInputPreparation{
 		Input:     input,
 		Stage:     stage,
+		Caps:      caps,
 		Budget:    budget,
 		Tier:      tier,
 		Iteration: iteration,
@@ -288,7 +293,7 @@ func runRepairStage(ctx context.Context, wallDeadline time.Time, input schemas.H
 	if cancel != nil {
 		defer cancel()
 	}
-	return runStageWithContext(stageCtx, input, stage, iteration, selection, options, workDir, runner, mem, budget.OutputMax, tr)
+	return runStageWithContext(stageCtx, input, stage, iteration, selection, options, workDir, runner, mem, caps, budget.OutputMax, tr)
 }
 
 // stageBudgetByName returns the full stage budget for a named plan stage, or

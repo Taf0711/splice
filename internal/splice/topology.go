@@ -129,6 +129,7 @@ func CompileTopology(topology *schemas.PipelineTopology, tier schemas.PipelineTi
 			Budget:       budget,
 			DependsOn:    append([]string(nil), dependencies[node.Name]...),
 			EdgePayloads: edgePayloads[node.Name],
+			Caps:         resolvedNodeCapsPtr(node),
 		})
 	}
 
@@ -158,6 +159,20 @@ func CompileTopology(topology *schemas.PipelineTopology, tier schemas.PipelineTi
 		},
 		Warnings: compileWarnings(active, activeEdges),
 	}, nil
+}
+
+// resolvedNodeCapsPtr resolves a node's capabilities with every pointer field
+// filled, so an execution stage always carries a complete capability set.
+func resolvedNodeCapsPtr(node schemas.PipelineNode) *schemas.NodeCapabilities {
+	caps := node.EffectiveCapabilities()
+	pullContext := caps.PullContext != nil && *caps.PullContext
+	pullMemory := caps.PullMemory != nil && *caps.PullMemory
+	return &schemas.NodeCapabilities{
+		ModelFree:            caps.ModelFree,
+		PullContext:          &pullContext,
+		PullMemory:           &pullMemory,
+		ProducesVerification: caps.ProducesVerification,
+	}
 }
 
 // resolveNodeBudget returns the effective budget for one node. An explicit

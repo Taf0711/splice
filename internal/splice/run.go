@@ -752,7 +752,7 @@ func runPass(
 			NextStage:         nextStage,
 		}
 
-		caps := agentStage.Capabilities()
+		caps := effectiveCaps(stage, agentStage.Capabilities())
 		if tr != nil {
 			tr.noteStage(stageName, iteration)
 		}
@@ -762,6 +762,7 @@ func runPass(
 		preparedInput, perr := prepareStageInput(ctx, stageInputPreparation{
 			Input:     input,
 			Stage:     agentStage,
+			Caps:      caps,
 			Budget:    stage.Budget,
 			Tier:      plan.Tier,
 			Iteration: iteration,
@@ -826,7 +827,7 @@ func runPass(
 		}
 
 		start := time.Now()
-		output, err := runStageWithContext(stageCtx, input, agentStage, iteration, selection, options, workDir, runner, mem, stage.Budget.OutputMax, tr)
+		output, err := runStageWithContext(stageCtx, input, agentStage, iteration, selection, options, workDir, runner, mem, caps, stage.Budget.OutputMax, tr)
 		if cancelStage != nil {
 			cancelStage()
 		}
@@ -985,10 +986,11 @@ func runStageWithContext(
 	workDir string,
 	runner ToolRunner,
 	mem MemoryStore,
+	caps stages.Capabilities,
 	outputMax int,
 	tr *runTraceAccumulator,
 ) (schemas.HarnessStageOutput, error) {
-	stageOpts := stageOptions(input.StageName, iteration, selection, options, workDir, runner, stage.Capabilities())
+	stageOpts := stageOptions(input.StageName, iteration, selection, options, workDir, runner, caps)
 	if outputMax > 0 {
 		// The stage's output budget caps every LLM request this stage makes. Zero
 		// keeps the provider default (no per-request override).
