@@ -79,7 +79,7 @@ func (CodeWriter) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 		}
 		_, err = parseCodeWriterArgs(action.ProposalArgs)
 		return err
-	}, options.PromptCacheKey)
+	}, options.PromptCacheKey, options.OnFormatRetry)
 	if err != nil {
 		return schemas.HarnessStageOutput{}, withCollectedUsage(err, collected)
 	}
@@ -253,23 +253,33 @@ func actionContextRequestSchema() map[string]any {
 				"maxItems": maxActionContextQueries,
 				"items": map[string]any{
 					"type": "object",
+					"description": "One bounded source query. Every query needs max_results and max_chars. " +
+						"read_file and outline need path; search needs pattern; find_symbol and get_symbol need symbol.",
 					"properties": map[string]any{
-						"query_type": map[string]any{"type": "string", "enum": []string{
+						"query_type": map[string]any{"type": "string", "description": "read_file or outline need path. search needs pattern. find_symbol or get_symbol need symbol.", "enum": []string{
 							string(schemas.ContextReadFile),
 							string(schemas.ContextOutline),
 							string(schemas.ContextSearch),
 							string(schemas.ContextFindSymbol),
 							string(schemas.ContextGetSymbol),
 						}},
-						"path":        map[string]any{"type": "string"},
-						"pattern":     map[string]any{"type": "string"},
-						"symbol":      map[string]any{"type": "string"},
-						"start_line":  map[string]any{"type": "integer"},
-						"end_line":    map[string]any{"type": "integer"},
-						"max_results": map[string]any{"type": "integer"},
-						"max_chars":   map[string]any{"type": "integer"},
+						"path":        map[string]any{"type": "string", "description": "Workspace-relative path. Required for read_file and outline."},
+						"pattern":     map[string]any{"type": "string", "description": "Search pattern. Required for search."},
+						"symbol":      map[string]any{"type": "string", "description": "Qualified symbol name. Required for find_symbol and get_symbol."},
+						"start_line":  map[string]any{"type": "integer", "description": "Optional 1-based first line of a read_file range. Set together with end_line."},
+						"end_line":    map[string]any{"type": "integer", "description": "Optional 1-based last line of a read_file range. Set together with start_line."},
+						"max_results": map[string]any{"type": "integer", "minimum": 1, "maximum": 200, "description": "Mandatory. Maximum matches to return, 1 to 200."},
+						"max_chars":   map[string]any{"type": "integer", "minimum": 1, "maximum": 20000, "description": "Mandatory. Maximum characters to deliver, 1 to 20000."},
 					},
-					"required": []string{"query_type"},
+					"required": []string{"query_type", "max_results", "max_chars"},
+					// The per-type field cannot be expressed as a flat required
+					// list, so anyOf names the alternatives. The decoder still
+					// enforces the exact field for each query_type.
+					"anyOf": []any{
+						map[string]any{"required": []string{"path"}},
+						map[string]any{"required": []string{"pattern"}},
+						map[string]any{"required": []string{"symbol"}},
+					},
 				},
 			},
 		},

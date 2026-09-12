@@ -116,7 +116,7 @@ func (TestGenerator) Run(ctx context.Context, input schemas.HarnessStageInput, p
 	collected, err := callValidatedToolUse(ctx, provider, options.model("medium"), options.ReasoningEffort, composeSystemPrompt(testGeneratorSystemPrompt), string(payload), options.Images, testGeneratorToolDefinition(len(tgInput.Memory) > 0), options.MaxOutputTokens, &options.Stream, func(collected *zeroruntime.CollectedStream) error {
 		_, err := parseTestGeneratorOutput(collected)
 		return err
-	}, options.PromptCacheKey)
+	}, options.PromptCacheKey, options.OnFormatRetry)
 	if err != nil {
 		return schemas.HarnessStageOutput{}, withCollectedUsage(err, collected)
 	}

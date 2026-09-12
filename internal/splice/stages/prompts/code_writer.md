@@ -17,7 +17,10 @@ You choose exactly one action per call, named in the `action` field:
   evidence. Bounds: at most 4 queries; query_type is one of read_file,
   outline, search, find_symbol, or get_symbol; repository-wide listing is not
   allowed. A query that repeats one already fulfilled in this invocation is
-  rejected.
+  rejected. Every query MUST carry `max_results` (1 to 200) and `max_chars`
+  (1 to 20000). read_file and outline MUST carry `path`; search MUST carry
+  `pattern`; find_symbol and get_symbol MUST carry `symbol`. A query that omits
+  a required field is rejected and never reaches the host.
 - `action: "submit_changes"` returns the complete CodeWriterOutput (files,
   language, intent, confidence). This is the terminal action.
 
