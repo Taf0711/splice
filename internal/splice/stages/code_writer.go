@@ -245,7 +245,7 @@ const actionFieldName = "action"
 func actionContextRequestSchema() map[string]any {
 	return map[string]any{
 		"type":        "object",
-		"description": "Source you have not received. The host fulfills it and calls you again with the new evidence.",
+		"description": "Source you have not received. The host fulfills it and calls you again with the new evidence. reason is required and must name what you need and why.",
 		"properties": map[string]any{
 			"reason": map[string]any{"type": "string"},
 			"queries": map[string]any{
@@ -283,7 +283,7 @@ func actionContextRequestSchema() map[string]any {
 				},
 			},
 		},
-		"required": []string{"queries"},
+		"required": []string{"reason", "queries"},
 	}
 }
 

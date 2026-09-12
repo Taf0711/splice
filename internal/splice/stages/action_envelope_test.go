@@ -140,3 +140,25 @@ func TestTryDecodeFromCollectedStream(t *testing.T) {
 		t.Fatal("a stream without the tool call must error")
 	}
 }
+
+// TestDeclaredActionConflictPropagates proves the backward-compat fallback
+// does not swallow a declared-action conflict. A payload carrying both
+// action=submit_changes and a request_context must fail loud.
+func TestDeclaredActionConflictPropagates(t *testing.T) {
+	args := `{"action":"submit_changes","request_context":{"reason":"x","queries":[{"query_type":"read_file","path":"y","max_results":1,"max_chars":100}]},"files":[{"path":"x","change_type":"modify","base_ref":"h","edits":[{"old":"a","new":"b"}]}]}`
+	_, err := DecodeStageAction("submit_code", args)
+	if err == nil {
+		t.Fatal("action=submit_changes with request_context and files decoded, want a loud rejection for mutual exclusivity")
+	}
+}
+
+// TestDeclaredActionConflictWithActionFieldPropagates proves that even
+// when a conflicting payload has a files array, the presence of the action
+// field means the error propagates rather than being silently downgraded.
+func TestDeclaredActionConflictWithActionFieldPropagates(t *testing.T) {
+	args := `{"action":"request_context","submit_changes":{"files":[]},"request_context":{"reason":"x","queries":[{"query_type":"read_file","path":"y","max_results":1,"max_chars":100}]}}`
+	_, err := DecodeStageAction("submit_code", args)
+	if err == nil {
+		t.Fatal("action=request_context with submit_changes and request_context decoded, want a loud rejection")
+	}
+}

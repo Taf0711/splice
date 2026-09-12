@@ -249,10 +249,19 @@ func TryDecodeStageAction(toolName string, collected *zeroruntime.CollectedStrea
 	}
 	action, err := DecodeStageAction(toolName, stripped)
 	if err != nil {
-		// Backward compatibility: a bare C-protocol payload (files array
-		// present as a JSON field, even empty, and no envelope fields) is
+		// Backward compatibility: a bare C-protocol payload with NO
+		// declared action field (a flat files array, no envelope) is
 		// a submit_changes action. The legacy full/1 and compact/1 forms
-		// both carry "files".
+		// both carry "files". When an action IS declared, the error
+		// must propagate so a declarative conflict (for example,
+		// action=submit_changes with a request_context payload) fails
+		// loud instead of being silently downgraded.
+		var hasAction struct {
+			Action *string `json:"action"`
+		}
+		if actionErr := json.Unmarshal([]byte(stripped), &hasAction); actionErr == nil && hasAction.Action != nil {
+			return StageAction{}, err
+		}
 		var bare struct {
 			Files json.RawMessage `json:"files"`
 		}

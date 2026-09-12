@@ -27,6 +27,8 @@ You choose exactly one action per call, named in the `action` field:
 Example request_context:
 {"action":"request_context","request_context":{"reason":"the intent needs the cache client, which the views did not include","queries":[{"query_type":"read_file","path":"internal/cache/client.go","max_results":10,"max_chars":12000},{"query_type":"find_symbol","symbol":"CacheClient.Close","max_results":10,"max_chars":12000}]}}
 
+reason is mandatory and must name what source you need and why the existing views are insufficient.
+
 Example submit_changes:
 {"action":"submit_changes","files":[{"path":"internal/cache/client.go","change_type":"modify","base_ref":"<handle from your context views>","edits":[{"old":"<exact text>","new":"<replacement>"}]}],"language":"go","intent":"close the cache client on shutdown","confidence":0.9}
 
