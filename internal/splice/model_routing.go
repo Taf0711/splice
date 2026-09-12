@@ -12,6 +12,37 @@ func providerCacheKey(profile, model, effort string) string {
 	return profile + "\x00" + model + "\x00" + effort
 }
 
+// Model route origin labels: which rung of the ladder supplied a stage's model.
+const (
+	ModelOriginNode    = "node"
+	ModelOriginStage   = "stage"
+	ModelOriginDefault = "default"
+	ModelOriginTier    = "tier"
+	ModelOriginPrimary = "primary"
+)
+
+// ResolveModelRoute reports the effective model declaration for one stage and
+// the rung that supplied it, without building a provider. It mirrors the
+// executor precedence exactly: a node model, then a stage-models.json entry for
+// the stage (even an incomplete one, which the executor then fails to build),
+// then the Default entry, then the tier resolver when the stage has a tier
+// label, then the primary model.
+func ResolveModelRoute(stageName string, nodeModel *schemas.StageModelConfig, stageConfig schemas.StageModelConfigFile, hasTierLabel bool) (schemas.StageModelConfig, string) {
+	if nodeModel != nil {
+		return *nodeModel, ModelOriginNode
+	}
+	if specific, ok := stageConfig.Stages[stageName]; ok {
+		return specific, ModelOriginStage
+	}
+	if stageConfig.Default.ProviderProfile != "" && stageConfig.Default.Model != "" {
+		return stageConfig.Default, ModelOriginDefault
+	}
+	if hasTierLabel {
+		return schemas.StageModelConfig{}, ModelOriginTier
+	}
+	return schemas.StageModelConfig{}, ModelOriginPrimary
+}
+
 // ModelResolvers bundles the routing hooks built from one stage-model config
 // and one provider factory. All three share the profile map and the provider
 // cache, so a node override and a stage override of the same model reuse one

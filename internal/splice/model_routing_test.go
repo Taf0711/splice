@@ -225,3 +225,45 @@ func TestBuildNodeModelResolver(t *testing.T) {
 		t.Fatalf("unknown profile error = %v", err)
 	}
 }
+
+// TestResolveModelRoute pins the origin labels against the executor
+// precedence, including the incomplete stage entry that the executor accepts
+// and then fails to build.
+func TestResolveModelRoute(t *testing.T) {
+	nodeModel := &schemas.StageModelConfig{ProviderProfile: "team", Model: "node-model", ReasoningEffort: "high"}
+	stageConfig := schemas.StageModelConfigFile{
+		Default: schemas.StageModelConfig{ProviderProfile: "fallback", Model: "fallback-model"},
+		Stages: map[string]schemas.StageModelConfig{
+			"code_writer": {ProviderProfile: "local", Model: "stage-model"},
+			"broken":      {},
+		},
+	}
+	cases := []struct {
+		name         string
+		stage        string
+		node         *schemas.StageModelConfig
+		config       schemas.StageModelConfigFile
+		hasTierLabel bool
+		wantOrigin   string
+		wantProfile  string
+		wantModel    string
+	}{
+		{"node wins over everything", "code_writer", nodeModel, stageConfig, true, ModelOriginNode, "team", "node-model"},
+		{"stage entry", "code_writer", nil, stageConfig, true, ModelOriginStage, "local", "stage-model"},
+		{"incomplete stage entry still wins", "broken", nil, stageConfig, true, ModelOriginStage, "", ""},
+		{"default entry", "test_generator", nil, stageConfig, true, ModelOriginDefault, "fallback", "fallback-model"},
+		{"tier label", "test_generator", nil, schemas.StageModelConfigFile{}, true, ModelOriginTier, "", ""},
+		{"primary", "test_generator", nil, schemas.StageModelConfigFile{}, false, ModelOriginPrimary, "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, origin := ResolveModelRoute(tc.stage, tc.node, tc.config, tc.hasTierLabel)
+			if origin != tc.wantOrigin {
+				t.Fatalf("origin = %q, want %q", origin, tc.wantOrigin)
+			}
+			if cfg.ProviderProfile != tc.wantProfile || cfg.Model != tc.wantModel {
+				t.Fatalf("config = %+v, want %s/%s", cfg, tc.wantProfile, tc.wantModel)
+			}
+		})
+	}
+}
