@@ -235,13 +235,62 @@ func decodeProposals(files []json.RawMessage) ([]ProposedFileChange, error) {
 	return out, nil
 }
 
+// actionFieldName is the declared discriminator field. The tool schema
+// advertises it; the decoder dispatches on it.
+const actionFieldName = "action"
+
+// actionContextRequestSchema is the declared `request_context` payload:
+// bounded file/range/symbol/search reads only. Repository-wide listing is
+// deliberately absent, because ValidateActionContextRequest rejects it.
+func actionContextRequestSchema() map[string]any {
+	return map[string]any{
+		"type":        "object",
+		"description": "Source you have not received. The host fulfills it and calls you again with the new evidence.",
+		"properties": map[string]any{
+			"reason": map[string]any{"type": "string"},
+			"queries": map[string]any{
+				"type":     "array",
+				"maxItems": maxActionContextQueries,
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"query_type": map[string]any{"type": "string", "enum": []string{
+							string(schemas.ContextReadFile),
+							string(schemas.ContextOutline),
+							string(schemas.ContextSearch),
+							string(schemas.ContextFindSymbol),
+							string(schemas.ContextGetSymbol),
+						}},
+						"path":        map[string]any{"type": "string"},
+						"pattern":     map[string]any{"type": "string"},
+						"symbol":      map[string]any{"type": "string"},
+						"start_line":  map[string]any{"type": "integer"},
+						"end_line":    map[string]any{"type": "integer"},
+						"max_results": map[string]any{"type": "integer"},
+						"max_chars":   map[string]any{"type": "integer"},
+					},
+					"required": []string{"query_type"},
+				},
+			},
+		},
+		"required": []string{"queries"},
+	}
+}
+
 func submitCodeToolDefinition(hasMemory bool) zeroruntime.ToolDefinition {
 	definition := zeroruntime.ToolDefinition{
-		Name:        codeWriterToolName,
-		Description: "Submit the complete CodeWriterOutput for the requested implementation.",
+		Name: codeWriterToolName,
+		Description: "Choose exactly one action. request_context asks for source you have not received; " +
+			"submit_changes returns the complete CodeWriterOutput. Set the action field to name your choice.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
+				"action": map[string]any{
+					"type":        "string",
+					"enum":        []string{actionFieldContext, actionFieldChanges},
+					"description": "Exactly one action. request_context asks for missing source; submit_changes submits the implementation.",
+				},
+				"request_context":   actionContextRequestSchema(),
 				"files":             proposalArraySchema(),
 				"language":          map[string]any{"type": "string"},
 				"intent":            map[string]any{"type": "string"},
@@ -249,7 +298,11 @@ func submitCodeToolDefinition(hasMemory bool) zeroruntime.ToolDefinition {
 				"known_limitations": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 				"confidence":        map[string]any{"type": "number"},
 			},
-			"required": []string{"files", "language", "intent", "confidence"},
+			// Only the discriminator is unconditionally required. The
+			// submit fields are required when action is submit_changes, and
+			// the decoder enforces that per-action condition because a flat
+			// JSON Schema object cannot express it.
+			"required": []string{actionFieldName},
 		},
 	}
 	applyMemoryDefinition(definition.Parameters, hasMemory)

@@ -10,6 +10,27 @@ Return a CodeWriterOutput object with:
 - known_limitations: any uncertainty or intentionally incomplete work
 - confidence: a number from 0.0 to 1.0
 
+You choose exactly one action per call, named in the `action` field:
+
+- `action: "request_context"` asks the host for source your context views did
+  not deliver. The host fulfills the request and calls you again with the new
+  evidence. Bounds: at most 4 queries; query_type is one of read_file,
+  outline, search, find_symbol, or get_symbol; repository-wide listing is not
+  allowed. A query that repeats one already fulfilled in this invocation is
+  rejected.
+- `action: "submit_changes"` returns the complete CodeWriterOutput (files,
+  language, intent, confidence). This is the terminal action.
+
+Example request_context:
+{"action":"request_context","request_context":{"reason":"the intent needs the cache client, which the views did not include","queries":[{"query_type":"read_file","path":"internal/cache/client.go","max_results":10,"max_chars":12000},{"query_type":"find_symbol","symbol":"CacheClient.Close","max_results":10,"max_chars":12000}]}}
+
+Example submit_changes:
+{"action":"submit_changes","files":[{"path":"internal/cache/client.go","change_type":"modify","base_ref":"<handle from your context views>","edits":[{"old":"<exact text>","new":"<replacement>"}]}],"language":"go","intent":"close the cache client on shutdown","confidence":0.9}
+
+Never invent source. Use request_context when you need source you have not
+received. When you cannot obtain it, report the gap in known_limitations
+instead of guessing, and submit the best bounded change.
+
 Files use the compact edit protocol (compact/1). Each file entry is exactly one of:
 - create: content holds the full file content; no base_ref or edits.
 - modify: base_ref plus one or more edits. base_ref is the source handle
@@ -52,9 +73,10 @@ Do not provide chain-of-thought. In memory_disposition, return exactly one conci
 
 Keep changes minimal, understandable, and aligned with the provided revision context when present.
 
-If a revision context lists a file written by an earlier iteration, return it
-with `change_type: "modify"` and a base_ref plus edits against the content you
-received. Do not treat an existing file as a new create.
+If a revision context lists a file written by an earlier iteration, re-emit it
+with `change_type: "create"` and the full file content. The host replaces the
+prior bytes. Do not use `change_type: "modify"` for those files: no base_ref
+view was delivered for them, and `modify` requires a base_ref.
 
 Return compact proposals for the pipeline to materialize and apply. Report anything
 you could not verify in `known_limitations`. The pipeline's deterministic stages
