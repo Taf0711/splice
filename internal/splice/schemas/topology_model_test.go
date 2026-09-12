@@ -100,3 +100,80 @@ func TestEffectiveCapabilitiesModelFreeMatrix(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateRejectsInertPullFlags pins the rule that a capability requiring a
+// model prompt cannot be declared on a node that has none. pull_context is read
+// only by code_writer and test_generator; pull_memory only by code_writer,
+// test_generator, and prompt nodes. Everywhere else the declaration is inert,
+// and pull_memory still pays for a retrieval.
+func TestValidateRejectsInertPullFlags(t *testing.T) {
+	cases := []struct {
+		name string
+		node PipelineNode
+		want string
+	}{
+		{"model-free builtin pull_context", PipelineNode{Name: "lint", Type: "static_analyzer", Caps: NodeCapabilities{PullContext: boolPtr(true)}}, "pull_context has no effect"},
+		{"model-free builtin pull_memory", PipelineNode{Name: "lint", Type: "static_analyzer", Caps: NodeCapabilities{PullMemory: boolPtr(true)}}, "pull_memory has no effect"},
+		{"test_runner pull_memory", PipelineNode{Name: "test_runner", Type: "test_runner", Caps: NodeCapabilities{PullMemory: boolPtr(true)}}, "pull_memory has no effect"},
+		{"command pull_context", PipelineNode{Name: "lint", Type: NodeTypeCommand, Command: []string{"true"}, Caps: NodeCapabilities{PullContext: boolPtr(true)}}, "pull_context has no effect"},
+		{"command pull_memory", PipelineNode{Name: "lint", Type: NodeTypeCommand, Command: []string{"true"}, Caps: NodeCapabilities{PullMemory: boolPtr(true)}}, "pull_memory has no effect"},
+		{"prompt pull_context", PipelineNode{Name: "note", Type: NodeTypePrompt, Prompt: "x", Caps: NodeCapabilities{PullContext: boolPtr(true)}}, "no context variable in v1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			topology := PipelineTopology{Version: TopologySchemaVersion, Name: "caps", Nodes: []PipelineNode{tc.node}}
+			err := topology.Validate()
+			if err == nil {
+				t.Fatal("Validate accepted a declaration that would be inert")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestValidateAcceptsMeaningfulAndDisabledPullFlags pins the other side: a
+// prompt node's pull_memory is meaningful, an explicit false anywhere is a
+// no-op, and the model-backed builtins keep both flags.
+func TestValidateAcceptsMeaningfulAndDisabledPullFlags(t *testing.T) {
+	valid := []struct {
+		name string
+		node PipelineNode
+	}{
+		{"prompt pull_memory", PipelineNode{Name: "note", Type: NodeTypePrompt, Prompt: "x", Caps: NodeCapabilities{PullMemory: boolPtr(true)}}},
+		{"model-free explicit false", PipelineNode{Name: "lint", Type: "static_analyzer", Caps: NodeCapabilities{PullContext: boolPtr(false), PullMemory: boolPtr(false)}}},
+		{"code_writer pull flags", PipelineNode{Name: "code_writer", Type: "code_writer", Caps: NodeCapabilities{PullContext: boolPtr(true), PullMemory: boolPtr(true)}}},
+		{"code_writer disabled context", PipelineNode{Name: "code_writer", Type: "code_writer", Caps: NodeCapabilities{PullContext: boolPtr(false)}}},
+	}
+	for _, tc := range valid {
+		t.Run(tc.name, func(t *testing.T) {
+			topology := PipelineTopology{Version: TopologySchemaVersion, Name: "caps", Nodes: []PipelineNode{tc.node}}
+			if err := topology.Validate(); err != nil {
+				t.Fatalf("Validate rejected a meaningful declaration: %v", err)
+			}
+		})
+	}
+	// The embedded default declares no capabilities, so it still validates.
+	if err := defaultTopologyValidationProbe().Validate(); err != nil {
+		t.Fatalf("embedded default topology must validate: %v", err)
+	}
+}
+
+// defaultTopologyValidationProbe builds a topology equivalent to the embedded
+// default's node declarations. The splice package owns defaultTopology, so this
+// schema test uses the same node shape.
+func defaultTopologyValidationProbe() PipelineTopology {
+	return PipelineTopology{
+		Version: TopologySchemaVersion,
+		Name:    "default",
+		Nodes: []PipelineNode{
+			{Name: "code_writer", Type: "code_writer"},
+			{Name: "test_generator", Type: "test_generator"},
+			{Name: "static_analyzer", Type: "static_analyzer"},
+			{Name: "security_auditor", Type: "security_auditor"},
+			{Name: "test_runner", Type: "test_runner"},
+			{Name: "acceptance_verifier", Type: "acceptance_verifier"},
+		},
+	}
+}

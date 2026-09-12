@@ -285,6 +285,23 @@ func (n PipelineNode) Validate() error {
 	if n.Model != nil && effective.ModelFree {
 		return fmt.Errorf("node %s: type %q is model-free; a model declaration is not valid", n.Name, n.Type)
 	}
+	// A capability that needs a model prompt is a contradiction on a model-free
+	// node: nothing consumes it, and pull_memory would still pay for a memory
+	// retrieval. Reject it rather than let the declaration be silently ignored.
+	if effective.ModelFree {
+		if n.Caps.PullContext != nil && *n.Caps.PullContext {
+			return fmt.Errorf("node %s: type %q is model-free; pull_context has no effect", n.Name, n.Type)
+		}
+		if n.Caps.PullMemory != nil && *n.Caps.PullMemory {
+			return fmt.Errorf("node %s: type %q is model-free; pull_memory has no effect", n.Name, n.Type)
+		}
+	}
+	// A prompt node renders intent, summaries, and memory. It has no context
+	// variable in v1, so an explicit pull_context there is inert too. Its
+	// pull_memory is meaningful ({{memory}}).
+	if n.Type == NodeTypePrompt && n.Caps.PullContext != nil && *n.Caps.PullContext {
+		return fmt.Errorf("node %s: type %q has no context variable in v1; pull_context has no effect", n.Name, NodeTypePrompt)
+	}
 	if n.Model != nil {
 		if err := n.Model.Validate(); err != nil {
 			return fmt.Errorf("node %s: model: %w", n.Name, err)
