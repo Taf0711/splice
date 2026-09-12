@@ -31,7 +31,7 @@ func TestBuildStageModelResolvers(t *testing.T) {
 	}
 	profiles := []config.ProviderProfile{{Name: "local", Model: "old-local"}, {Name: "cloud", Model: "old-cloud"}}
 	builds := map[string]int{}
-	stageResolver, escalationResolver := BuildStageModelResolvers(configFile, profiles, func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+	stageResolver, escalationResolver := testModelResolvers(configFile, profiles, func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
 		builds[profile.Name+"/"+profile.Model]++
 		return &routingTestProvider{model: profile.Model}, nil
 	}, TierResolverConfig{})
@@ -69,7 +69,7 @@ func TestBuildStageModelResolvers(t *testing.T) {
 }
 
 func TestBuildStageModelResolversAbsentConfigIsNoOp(t *testing.T) {
-	stageResolver, escalationResolver := BuildStageModelResolvers(schemas.StageModelConfigFile{}, nil, nil, TierResolverConfig{})
+	stageResolver, escalationResolver := testModelResolvers(schemas.StageModelConfigFile{}, nil, nil, TierResolverConfig{})
 	selection, err := stageResolver("code_writer")
 	if err != nil || selection != (agent.ModelSelection{}) {
 		t.Fatalf("absent stage config = (%+v, %v), want no-op", selection, err)
@@ -87,7 +87,7 @@ func TestBuildStageModelResolversErrorsNameRoute(t *testing.T) {
 			"code_writer": {ProviderProfile: "broken", Model: "model"},
 		},
 	}
-	stageResolver, _ := BuildStageModelResolvers(configFile, []config.ProviderProfile{{Name: "broken"}}, func(config.ProviderProfile) (zeroruntime.Provider, error) {
+	stageResolver, _ := testModelResolvers(configFile, []config.ProviderProfile{{Name: "broken"}}, func(config.ProviderProfile) (zeroruntime.Provider, error) {
 		return nil, errors.New("factory failed")
 	}, TierResolverConfig{})
 	if _, err := stageResolver("test_generator"); err == nil || !strings.Contains(err.Error(), `stage "test_generator" references unknown provider profile "missing"`) {
@@ -109,7 +109,7 @@ func TestBuildStageModelResolversExplicitOverrideWinsOverTier(t *testing.T) {
 		},
 	}
 	primaryProfile := config.ProviderProfile{Name: "primary", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-5.6-sol"}
-	stageResolver, _ := BuildStageModelResolvers(
+	stageResolver, _ := testModelResolvers(
 		configFile,
 		[]config.ProviderProfile{primaryProfile},
 		func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
@@ -135,7 +135,7 @@ func TestBuildStageModelResolversTierFallbackUsedWhenNoOverride(t *testing.T) {
 		t.Fatalf("DefaultRegistry: %v", err)
 	}
 	primaryProfile := config.ProviderProfile{Name: "primary", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-5.6-sol"}
-	stageResolver, _ := BuildStageModelResolvers(
+	stageResolver, _ := testModelResolvers(
 		schemas.StageModelConfigFile{},
 		[]config.ProviderProfile{primaryProfile},
 		func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
@@ -161,7 +161,7 @@ func TestBuildStageModelResolversNoTierLabelFallsBackToPrimary(t *testing.T) {
 		t.Fatalf("DefaultRegistry: %v", err)
 	}
 	primaryProfile := config.ProviderProfile{Name: "primary", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-5.6-sol"}
-	stageResolver, _ := BuildStageModelResolvers(
+	stageResolver, _ := testModelResolvers(
 		schemas.StageModelConfigFile{},
 		[]config.ProviderProfile{primaryProfile},
 		func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
@@ -175,5 +175,53 @@ func TestBuildStageModelResolversNoTierLabelFallsBackToPrimary(t *testing.T) {
 	}
 	if selection.Provider != nil || selection.Model != "" {
 		t.Fatalf("deterministic stage = %+v, want zero selection", selection)
+	}
+}
+
+// testModelResolvers adapts the struct return to the tuple these routing tests
+// destructure.
+func testModelResolvers(
+	configFile schemas.StageModelConfigFile,
+	profiles []config.ProviderProfile,
+	newProvider func(config.ProviderProfile) (zeroruntime.Provider, error),
+	tierResolverConfig TierResolverConfig,
+) (agent.StageModelResolver, agent.EscalationModelResolver) {
+	built := BuildStageModelResolvers(configFile, profiles, newProvider, tierResolverConfig)
+	return built.Stage, built.Escalation
+}
+
+// TestBuildNodeModelResolver pins the strongest rung: a node's explicit model
+// resolves through the same build path, names the node on error, and shares the
+// provider cache with a stage override of the same model.
+func TestBuildNodeModelResolver(t *testing.T) {
+	profiles := []config.ProviderProfile{{Name: "local", Model: "old-local"}}
+	builds := map[string]int{}
+	built := BuildStageModelResolvers(schemas.StageModelConfigFile{}, profiles, func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+		builds[profile.Name+"/"+profile.Model]++
+		return &routingTestProvider{model: profile.Model}, nil
+	}, TierResolverConfig{})
+
+	selection, err := built.Node("summarizer", agent.ModelOverride{ProviderProfile: "local", Model: "qwen-node", ReasoningEffort: "high"})
+	if err != nil {
+		t.Fatalf("node resolver: %v", err)
+	}
+	if selection.ProviderName != "local" || selection.Model != "qwen-node" || selection.ReasoningEffort != "high" {
+		t.Fatalf("node selection = %+v", selection)
+	}
+	if got := selection.Provider.(*routingTestProvider).model; got != "qwen-node" {
+		t.Fatalf("node provider model = %q, want qwen-node", got)
+	}
+
+	again, err := built.Node("other", agent.ModelOverride{ProviderProfile: "local", Model: "qwen-node", ReasoningEffort: "high"})
+	if err != nil {
+		t.Fatalf("node resolver (cached): %v", err)
+	}
+	if again.Provider != selection.Provider || builds["local/qwen-node"] != 1 {
+		t.Fatalf("node provider not cached: builds=%v", builds)
+	}
+
+	if _, err := built.Node("summarizer", agent.ModelOverride{ProviderProfile: "ghost", Model: "x"}); err == nil ||
+		!strings.Contains(err.Error(), `node "summarizer" references unknown provider profile "ghost"`) {
+		t.Fatalf("unknown profile error = %v", err)
 	}
 }

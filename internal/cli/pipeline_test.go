@@ -17,7 +17,7 @@ func writePipelineFile(t *testing.T, path, name string) {
 		Version: schemas.TopologySchemaVersion,
 		Name:    name,
 		Nodes: []schemas.PipelineNode{
-			{Name: "code_writer", Type: "code_writer"},
+			{Name: "code_writer", Type: "code_writer", Model: &schemas.StageModelConfig{ProviderProfile: "local", Model: "qwen-node", ReasoningEffort: "high"}},
 			{Name: "lint_cmd", Type: schemas.NodeTypeCommand, Command: []string{"true", "--strict"}},
 		},
 		Edges: []schemas.PipelineEdge{{From: "code_writer", To: "lint_cmd", Payload: schemas.EdgePayloadNone}},
@@ -47,7 +47,7 @@ func TestPipelineCommandShowNamed(t *testing.T) {
 		t.Fatalf("exit = %d, stderr = %s", code, stderr.String())
 	}
 	out := stdout.String()
-	for _, want := range []string{"topology: team", "code_writer", "lint_cmd", "command nodes:", "true --strict", "code_writer -> lint_cmd (none)"} {
+	for _, want := range []string{"topology: team", "code_writer", "lint_cmd", "command nodes:", "true --strict", "code_writer -> lint_cmd (none)", "model: local/qwen-node (high)"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("show output missing %q:\n%s", want, out)
 		}

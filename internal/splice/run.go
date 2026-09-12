@@ -817,19 +817,23 @@ func runPass(
 			Model:           options.Model,
 			ReasoningEffort: options.ReasoningEffort,
 		}
-		if options.StageModelResolver != nil && !modelFree {
+		switch {
+		case !modelFree && stage.Model != nil && options.NodeModelResolver != nil:
+			// Strongest rung: the node's own declaration. A broken declaration
+			// fails loud; it must not silently degrade to the per-stage file.
+			resolved, rerr := options.NodeModelResolver(stageName, nodeModelOverride(stage.Model))
+			if rerr != nil {
+				return records, outputs, false, fmt.Errorf("stage %s model: %w", stageName, rerr)
+			}
+			selection = resolved
+			emitResolvedModel(options, iteration-1, caps, stageName, resolved)
+		case !modelFree && options.StageModelResolver != nil:
 			resolved, rerr := options.StageModelResolver(stageName)
 			if rerr != nil {
 				emitProgress(options, fmt.Sprintf("[%s] stage model resolution failed: %v\n", stageName, rerr))
 			} else if resolved.Provider != nil {
 				selection = resolved
-				if resolved.Model != "" {
-					detail := resolved.Model
-					if caps.Description != "" {
-						detail = caps.Description + " · " + resolved.Model
-					}
-					emitStageEvent(options, iteration-1, stageName, "running", detail, 0, nil)
-				}
+				emitResolvedModel(options, iteration-1, caps, stageName, resolved)
 			}
 		}
 		if modelFree {
@@ -1742,6 +1746,19 @@ func emitPipelinePlan(options PipelineRunConfig, plan schemas.ExecutionPlan) {
 // emitStageEvent sends a typed stage lifecycle event. It also writes the
 // deprecated NUL marker on OnReasoning for one release. status is one of:
 // running, completed, failed, skipped, incomplete.
+// emitResolvedModel announces the model a stage resolved to, so the live panel
+// names the model actually in use. iteration is the 0-based pass index.
+func emitResolvedModel(options PipelineRunConfig, iteration int, caps stages.Capabilities, stageName string, resolved agent.ModelSelection) {
+	if resolved.Model == "" {
+		return
+	}
+	detail := resolved.Model
+	if caps.Description != "" {
+		detail = caps.Description + " · " + resolved.Model
+	}
+	emitStageEvent(options, iteration, stageName, "running", detail, 0, nil)
+}
+
 // emitStageEvent stamps a stage lifecycle event. iteration is the 0-based
 // pass index (the pipeline's first pass is 0, the runtime loop counts from
 // 1), so the presentation layer keeps one node per (stage, pass) and leaves

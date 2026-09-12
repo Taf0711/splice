@@ -73,6 +73,20 @@ type ModelSelection struct {
 type StageModelResolver func(stageName string) (ModelSelection, error)
 type EscalationModelResolver func() (ModelSelection, error)
 
+// ModelOverride is an explicit model declaration from a pipeline topology node.
+// It names a provider profile and a model, both references, so a shared
+// topology carries its routing without carrying secrets.
+type ModelOverride struct {
+	ProviderProfile string
+	Model           string
+	ReasoningEffort string
+}
+
+// NodeModelResolver resolves an explicit topology node model declaration to a
+// selection. It is consulted before the name-keyed StageModelResolver, so a
+// node's declaration is stronger than the per-stage file.
+type NodeModelResolver func(nodeName string, override ModelOverride) (ModelSelection, error)
+
 type PermissionMode string
 type PermissionAction string
 type PermissionDecisionAction string
@@ -473,6 +487,11 @@ type Options struct {
 	// options.Model/ReasoningEffort are used for every stage (byte-identical to
 	// pre-AR11 behavior). Splice addition (AR11b).
 	StageModelResolver StageModelResolver
+
+	// NodeModelResolver resolves an explicit topology node model before the
+	// name-keyed StageModelResolver. When nil, a node model declaration is
+	// ignored and the per-stage ladder applies. Splice addition (T6c).
+	NodeModelResolver NodeModelResolver
 
 	// EscalationModelResolver resolves an escalation provider, model, and
 	// reasoning effort when the trajectory monitor fires cycle or oscillation

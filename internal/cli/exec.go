@@ -699,12 +699,13 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		PrimaryProfile: resolved.Provider,
 		Registry:       &modelRegistry,
 	}
-	stageModelResolver, escalationModelResolver := splicerun.BuildStageModelResolvers(
+	modelResolvers := splicerun.BuildStageModelResolvers(
 		stageModelConfig,
 		resolved.Providers,
 		deps.newProvider,
 		tierResolverConfig,
 	)
+	stageModelResolver, escalationModelResolver := modelResolvers.Stage, modelResolvers.Escalation
 
 	estimator := usage.NewCostEstimator(&modelRegistry)
 	// runtimeSessionID feeds the deterministic pipeline's Options.SessionID, which
@@ -757,6 +758,9 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		// from ~/.config/splice/stage-models.json (AR11b). nil keeps pre-AR11
 		// behavior: every stage uses the default provider.
 		StageModelResolver: stageModelResolver,
+		// NodeModelResolver is the strongest rung of the model ladder: a
+		// topology node's explicit model beats the per-stage file.
+		NodeModelResolver: modelResolvers.Node,
 		// TraceWriteWarn surfaces trace-persistence loss on the exec output
 		// seam exactly once per run, so a stale sidecar announces itself.
 		TraceWriteWarn: writer.warning,

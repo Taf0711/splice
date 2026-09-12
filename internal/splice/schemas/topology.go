@@ -241,7 +241,7 @@ func (n PipelineNode) Validate() error {
 		if len(n.Command) > 0 {
 			return fmt.Errorf("node %s: command is only valid for type %q", n.Name, NodeTypeCommand)
 		}
-		if n.Caps.ModelFree {
+		if profile, ok := builtinCapabilityProfile[n.Type]; ok && !profile.ModelFree && n.Caps.ModelFree {
 			return fmt.Errorf("node %s: type %q is model-backed in the builtin profile; model_free must be false", n.Name, n.Type)
 		}
 	case n.Type == NodeTypePrompt:
@@ -281,6 +281,9 @@ func (n PipelineNode) Validate() error {
 		if !effective.ModelFree && zero {
 			return fmt.Errorf("node %s: model-backed node has a zero budget; model-backed nodes must use a model-backed budget", n.Name)
 		}
+	}
+	if n.Model != nil && effective.ModelFree {
+		return fmt.Errorf("node %s: type %q is model-free; a model declaration is not valid", n.Name, n.Type)
 	}
 	if n.Model != nil {
 		if err := n.Model.Validate(); err != nil {

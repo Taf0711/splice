@@ -312,6 +312,10 @@ type ExecutionStage struct {
 	// Nil means the plan predates capability compilation, and the executor
 	// falls back to the stage's own declaration.
 	Caps *NodeCapabilities `json:"capabilities,omitempty"`
+	// Model is the node's explicit model declaration, resolved from the
+	// topology. It is the strongest rung of the model ladder: a node model
+	// beats the per-stage file. Nil means the node declares no model.
+	Model *StageModelConfig `json:"model,omitempty"`
 }
 
 // Validate checks the execution stage.

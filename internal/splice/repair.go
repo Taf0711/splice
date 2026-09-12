@@ -109,7 +109,7 @@ func attemptLocalRepair(
 		writerStart := time.Now()
 		writerPlanStage, _ := stageByPlanName(plan, "code_writer")
 		writerCaps := effectiveCaps(writerPlanStage, codeWriterStage.Capabilities())
-		writerOutput, werr := runRepairStage(ctx, wallDeadline, writerInput, codeWriterStage, iteration, repairSelection(options, provider, "code_writer", false), options, workDir, runner, mem, writerCaps, stageBudgetByName(plan, "code_writer"), plan.Tier, tr)
+		writerOutput, werr := runRepairStage(ctx, wallDeadline, writerInput, codeWriterStage, iteration, repairSelection(options, provider, "code_writer", writerPlanStage.Model, false), options, workDir, runner, mem, writerCaps, stageBudgetByName(plan, "code_writer"), plan.Tier, tr)
 		totalLatency += int(time.Since(writerStart).Milliseconds())
 		if werr != nil {
 			return false, nil, fmt.Errorf("repair: code_writer re-entry: %w", werr)
@@ -243,20 +243,27 @@ func repairStageInput(runID, stageName string, plan schemas.ExecutionPlan, stage
 // repairSelection resolves a repair stage's model selection with the same
 // precedence as the pass loop: default run selection, then the per-stage
 // resolver for model-backed stages; model-free stages get a zero selection.
-func repairSelection(options PipelineRunConfig, provider agent.Provider, stageName string, modelFree bool) agent.ModelSelection {
+func repairSelection(options PipelineRunConfig, provider agent.Provider, stageName string, model *schemas.StageModelConfig, modelFree bool) agent.ModelSelection {
 	selection := agent.ModelSelection{
 		Provider:        provider,
 		ProviderName:    options.ProviderName,
 		Model:           options.Model,
 		ReasoningEffort: options.ReasoningEffort,
 	}
-	if options.StageModelResolver != nil && !modelFree {
-		if resolved, rerr := options.StageModelResolver(stageName); rerr == nil && resolved.Provider != nil {
-			selection = resolved
+	if modelFree {
+		return agent.ModelSelection{}
+	}
+	// Same precedence as the pass loop: a node declaration is the strongest
+	// rung, so a repair re-entry resolves the model the pass resolved.
+	if model != nil && options.NodeModelResolver != nil {
+		if resolved, rerr := options.NodeModelResolver(stageName, nodeModelOverride(model)); rerr == nil && resolved.Provider != nil {
+			return resolved
 		}
 	}
-	if modelFree {
-		selection = agent.ModelSelection{}
+	if options.StageModelResolver != nil {
+		if resolved, rerr := options.StageModelResolver(stageName); rerr == nil && resolved.Provider != nil {
+			return resolved
+		}
 	}
 	return selection
 }

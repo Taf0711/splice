@@ -130,6 +130,7 @@ func CompileTopology(topology *schemas.PipelineTopology, tier schemas.PipelineTi
 			DependsOn:    append([]string(nil), dependencies[node.Name]...),
 			EdgePayloads: edgePayloads[node.Name],
 			Caps:         resolvedNodeCapsPtr(node),
+			Model:        cloneNodeModel(node.Model),
 		})
 	}
 
@@ -159,6 +160,16 @@ func CompileTopology(topology *schemas.PipelineTopology, tier schemas.PipelineTi
 		},
 		Warnings: compileWarnings(active, activeEdges),
 	}, nil
+}
+
+// cloneNodeModel copies a node's model declaration so the compiled plan never
+// aliases the topology that produced it.
+func cloneNodeModel(model *schemas.StageModelConfig) *schemas.StageModelConfig {
+	if model == nil {
+		return nil
+	}
+	cloned := *model
+	return &cloned
 }
 
 // resolvedNodeCapsPtr resolves a node's capabilities with every pointer field

@@ -172,6 +172,13 @@ func formatTopology(topology *schemas.PipelineTopology) string {
 			tiers = strings.Join(parts, ",")
 		}
 		fmt.Fprintf(&b, "  %s (%s, %s, %s)\n", node.Name, node.Type, kind, tiers)
+		if node.Model != nil {
+			effort := node.Model.ReasoningEffort
+			if effort == "" {
+				effort = "default effort"
+			}
+			fmt.Fprintf(&b, "    model: %s/%s (%s)\n", node.Model.ProviderProfile, node.Model.Model, effort)
+		}
 	}
 	b.WriteString("edges:\n")
 	if len(topology.Edges) == 0 {

@@ -1,6 +1,7 @@
 package splice
 
 import (
+	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/splice/stages"
 )
@@ -22,6 +23,18 @@ func effectiveCaps(stage schemas.ExecutionStage, runtime stages.Capabilities) st
 		merged.ConsumesMemory = *stage.Caps.PullMemory
 	}
 	return merged
+}
+
+// nodeModelOverride converts a compiled node model to the resolver's override.
+func nodeModelOverride(model *schemas.StageModelConfig) agent.ModelOverride {
+	if model == nil {
+		return agent.ModelOverride{}
+	}
+	return agent.ModelOverride{
+		ProviderProfile: model.ProviderProfile,
+		Model:           model.Model,
+		ReasoningEffort: model.ReasoningEffort,
+	}
 }
 
 // stageByPlanName returns the compiled stage with the given name.
