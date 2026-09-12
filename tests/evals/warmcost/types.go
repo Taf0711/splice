@@ -218,9 +218,12 @@ type Attempt struct {
 	Requests        []RequestRecord `json:"requests"`
 	Totals          Totals          `json:"totals"`
 	LedgerError     string          `json:"ledger_error,omitempty"`
-	StartedAt       time.Time       `json:"started_at"`
-	EndedAt         time.Time       `json:"ended_at"`
-	DurationMS      int64           `json:"duration_ms"`
+	// RawStream names the additive raw stream-json artifact for this
+	// attempt, when one was captured. Empty means no raw artifact exists.
+	RawStream  string    `json:"raw_stream,omitempty"`
+	StartedAt  time.Time `json:"started_at"`
+	EndedAt    time.Time `json:"ended_at"`
+	DurationMS int64     `json:"duration_ms"`
 }
 
 // CompleteCoverage reports whether every captured request carries a priced

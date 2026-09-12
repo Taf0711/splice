@@ -24,7 +24,18 @@ MARGIN="${MARGIN:-0.05}"
 BOOTSTRAP_SAMPLES="${BOOTSTRAP_SAMPLES:-10000}"
 ARMS="${ARMS:-cold,warm,warm-retrieval-only}"
 TASKSET_SRC="${TASKSET_SRC:-tests/evals/taskset-v0}"
-TASKS=(healthz-detail-gating len-skips-expired sessions-active-since)
+# TASKS_ENV is a bounded override for a pilot corpus. Every name must exist
+# under "$TASKSET_SRC/tasks/<name>.json"; an unknown name is a loud error.
+# Leaving it unset preserves the pre-registered default task list exactly.
+if [[ -n "${TASKS_ENV:-}" ]]; then
+  read -r -a TASKS <<< "$TASKS_ENV"
+  if [[ ${#TASKS[@]} -eq 0 ]]; then
+    printf 'TASKS_ENV is set but names no tasks\n' >&2
+    exit 1
+  fi
+else
+  TASKS=(healthz-detail-gating len-skips-expired sessions-active-since)
+fi
 RUN_BASE="${RUN_BASE:-wc-paid-k3-$(date +%Y%m%dT%H%M%S)}"
 OUT_DIR="${OUT_DIR:-tests/evals/results}"
 MAX_RETRIES="${MAX_RETRIES:-2}"
@@ -39,6 +50,13 @@ export SPLICE_MEMD_SOCKET="$MEMD_DIR/mem.sock"
 export SPLICE_MEMD_DB="$MEMD_DIR/mem.db"
 
 log() { printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*"; }
+
+for name in "${TASKS[@]}"; do
+  if [[ ! -f "$TASKSET_SRC/tasks/$name.json" ]]; then
+    log "unknown task $name: $TASKSET_SRC/tasks/$name.json does not exist"
+    exit 1
+  fi
+done
 
 log "building binary and runner from $(git rev-parse --short HEAD)"
 go build -o "$BIN" ./cmd/splice
@@ -77,6 +95,7 @@ fi
 REV="$(git rev-parse HEAD)"
 SIDECAR_REV="$(git rev-parse --short HEAD)"
 log "pre-registration: model=$MODEL arms=$ARMS tasks=${#TASKS[@]} repeats=$REPEATS margin=$MARGIN bootstrap=$BOOTSTRAP_SAMPLES"
+log "attempt cap: tasks=${#TASKS[@]} x arms=$ARMS x repeats=$REPEATS = $((${#TASKS[@]} * ${REPEATS})) attempts; MAX_RETRIES=$MAX_RETRIES"
 log "revision=$REV sidecar_revision=$SIDECAR_REV taskset=${TASKS[*]}"
 log "arm order: $ARMS; interleaved per repeat by the runner"
 log "retention: $RETENTION sidecar_root=${SIDECAR_ROOT:-<ambient>}"

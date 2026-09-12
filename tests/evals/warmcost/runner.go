@@ -285,6 +285,14 @@ func (r *Runner) runAttempt(ctx context.Context, task Task, arm Arm, repeat int,
 	if err != nil {
 		return attempt, fmt.Errorf("warmcost: exec task %s arm %s: %w", task.ID, arm, err)
 	}
+	// Additive raw artifact: keep the child's full stream-json so the report
+	// can quote model output and the expansion reason. The attempt JSON is a
+	// projection of the final PipelineResult, not the whole stream.
+	rawName := rawStreamName(task.ID, arm, repeat)
+	if werr := os.WriteFile(filepath.Join(filepath.Join(r.cfg.OutDir, r.cfg.RunID), rawName), res.Stdout, 0o644); werr != nil {
+		return attempt, fmt.Errorf("warmcost: write raw stream for task %s: %w", task.ID, werr)
+	}
+	attempt.RawStream = rawName
 
 	if parsed, perr := parsePipelineResult(res.Stdout); perr != nil {
 		attempt.LedgerError = perr.Error()
@@ -703,6 +711,12 @@ func digestFixture(fixture string) (string, error) {
 	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// rawStreamName is the additive raw-stream artifact name for one attempt.
+func rawStreamName(taskID string, arm Arm, repeat int) string {
+	return fmt.Sprintf("raw-%s-%s-r%d.jsonl", taskID, arm, repeat)
+}
+
+// writeAttempt writes one attempt JSON artifact.
 func writeAttempt(runDir string, attempt Attempt) error {
 	data, err := json.MarshalIndent(attempt, "", "  ")
 	if err != nil {
