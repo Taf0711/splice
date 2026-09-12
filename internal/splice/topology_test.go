@@ -248,8 +248,8 @@ func TestCompileTopologyWarnsOnMismatchedWriterName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompileTopology = %v", err)
 	}
-	if len(compiled.Warnings) != 0 {
-		t.Fatalf("warnings = %v, want none", compiled.Warnings)
+	if strings.Contains(strings.Join(compiled.Warnings, "\n"), couplingWarning) {
+		t.Fatalf("warnings = %v, want no coupling warning", compiled.Warnings)
 	}
 }
 

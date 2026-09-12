@@ -264,6 +264,9 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 	for _, warning := range plan.Warnings {
 		emitProgress(options, "[topology] warning: "+warning+"\n")
 	}
+	if !planHasVerification(plan) {
+		emitProgress(options, "[topology] notice: topology has no verification node; revision loops are disabled\n")
+	}
 
 	// Preflight: diagnose substrate interference (permission mode, hooks,
 	// provider capability) before any stage runs. Advisory only: each issue is
@@ -909,6 +912,10 @@ func runPass(
 			emitStageEvent(options, iteration-1, stageName, "failed", failSummary, 0, nil)
 			return records, outputs, false, nil
 		}
+		// A verification-producing node's report is re-keyed to the canonical
+		// key here, so the trajectory monitor collects it without knowing which
+		// builtin emitted it. The legacy keys stay for the severity counts.
+		output = normalizeVerificationReport(output, stage.Caps != nil && stage.Caps.ProducesVerification)
 		record.Status = schemas.StageCompleted
 		if isVerificationIncompleteOutput(output) {
 			record.Status = schemas.StageIncomplete
@@ -1077,14 +1084,8 @@ func passSucceeded(records []schemas.StageRecord, state schemas.IterationState) 
 // record StageIncomplete instead of StageCompleted for deterministic stages
 // whose required checks could not run.
 func isVerificationIncompleteOutput(output schemas.HarnessStageOutput) bool {
-	for _, key := range []string{"static_analyzer_output", "security_auditor_output"} {
-		if report, ok := output.Data[key].(schemas.VerificationReport); ok {
-			if report.Status == schemas.VerificationIncomplete {
-				return true
-			}
-		}
-	}
-	return false
+	report, ok := verificationReport(output)
+	return ok && report.Status == schemas.VerificationIncomplete
 }
 
 func findFailed(records []schemas.StageRecord) schemas.StageRecord {

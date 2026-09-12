@@ -304,6 +304,19 @@ func compileWarnings(nodes []schemas.PipelineNode, edges []schemas.PipelineEdge)
 			warnings = append(warnings, fmt.Sprintf("node %s has no code_writer upstream edge; it will run without code-writer context", node.Name))
 		}
 	}
+	// A graph with no verification node single-passes: there is nothing to
+	// revise against. The notice is emitted here (load time) and once at run
+	// start, never silently.
+	hasVerification := false
+	for _, node := range nodes {
+		if node.EffectiveCapabilities().ProducesVerification {
+			hasVerification = true
+			break
+		}
+	}
+	if !hasVerification {
+		warnings = append(warnings, "topology has no verification node; revision loops are disabled")
+	}
 	if len(warnings) == 0 {
 		return nil
 	}

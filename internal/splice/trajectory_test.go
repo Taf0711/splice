@@ -309,9 +309,15 @@ func TestTrajectoryExtractorsCoverRegistryStages(t *testing.T) {
 		claimed[key] = stage
 	}
 	for key := range trajectoryExtractors {
-		if _, ok := claimed[key]; !ok {
-			t.Errorf("trajectoryExtractors has %s, but no registry stage claims that key", key)
+		if _, ok := claimed[key]; ok {
+			continue
 		}
+		// A canonical key is emitted by any node with the matching capability,
+		// so no single registry stage claims it.
+		if _, canonical := trajectoryCanonicalOutputKeys[key]; canonical {
+			continue
+		}
+		t.Errorf("trajectoryExtractors has %s, but no registry stage claims that key and it is not listed as canonical", key)
 	}
 	for name := range trajectoryRelevantOutputKeys {
 		if _, ok := registry[name]; !ok {

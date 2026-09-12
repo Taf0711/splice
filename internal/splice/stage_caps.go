@@ -37,6 +37,24 @@ func nodeModelOverride(model *schemas.StageModelConfig) agent.ModelOverride {
 	}
 }
 
+// planHasVerification reports whether any planned stage produces verification.
+// A compiled stage carries its capabilities; a legacy plan falls back to the
+// builtin profile for the stage name.
+func planHasVerification(plan schemas.ExecutionPlan) bool {
+	for _, stage := range plan.Stages {
+		if stage.Caps != nil {
+			if stage.Caps.ProducesVerification {
+				return true
+			}
+			continue
+		}
+		if caps, ok := schemas.BuiltinCapabilities(stage.Name); ok && caps.ProducesVerification {
+			return true
+		}
+	}
+	return false
+}
+
 // stageByPlanName returns the compiled stage with the given name.
 func stageByPlanName(plan schemas.ExecutionPlan, name string) (schemas.ExecutionStage, bool) {
 	for _, stage := range plan.Stages {

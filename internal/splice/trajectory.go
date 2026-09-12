@@ -234,12 +234,20 @@ func ruleConfidence(rc trajectoryRuleContext) *schemas.TrajectoryDecision {
 }
 
 type iterationSignals struct {
-	testResults       []schemas.TestRunResults
-	staticOutputs     []schemas.VerificationReport
-	securityOutputs   []schemas.VerificationReport
-	codeWriterOutputs []schemas.CodeWriterOutput
-	testGenOutputs    []schemas.TestGeneratorOutput
-	acceptanceResults [][]schemas.TestCaseResult
+	testResults         []schemas.TestRunResults
+	staticOutputs       []schemas.VerificationReport
+	securityOutputs     []schemas.VerificationReport
+	verificationReports []schemas.VerificationReport
+	codeWriterOutputs   []schemas.CodeWriterOutput
+	testGenOutputs      []schemas.TestGeneratorOutput
+	acceptanceResults   [][]schemas.TestCaseResult
+}
+
+// trajectoryCanonicalOutputKeys are output keys any stage may emit, so no single
+// registry stage claims them. The pairing test accepts them from this map
+// instead of trajectoryRelevantOutputKeys.
+var trajectoryCanonicalOutputKeys = map[string]string{
+	VerificationReportKey: "emitted by any node whose capabilities declare produces_verification",
 }
 
 type trajectoryExtractor func(outputs []schemas.HarnessStageOutput, dest *iterationSignals) error
@@ -269,6 +277,19 @@ var trajectoryExtractors = map[string]trajectoryExtractor{
 			return err
 		}
 		dest.securityOutputs = values
+		return nil
+	},
+	// The canonical key is the universal verification channel: every node
+	// whose capabilities declare produces_verification reaches the monitor
+	// through it, so collection no longer depends on which builtin emitted the
+	// report. The per-builtin keys above stay because the lint and security
+	// severity counts read them by name.
+	VerificationReportKey: func(outputs []schemas.HarnessStageOutput, dest *iterationSignals) error {
+		values, err := typedPayloads[schemas.VerificationReport](outputs, VerificationReportKey)
+		if err != nil {
+			return err
+		}
+		dest.verificationReports = values
 		return nil
 	},
 	"code_writer_output": func(outputs []schemas.HarnessStageOutput, dest *iterationSignals) error {
@@ -341,11 +362,11 @@ func ComputeIterationState(iteration int, stageOutputs []schemas.HarnessStageOut
 		LintIssuesBySeverity:     countBySeverity(signals.staticOutputs),
 		SecurityIssuesBySeverity: countBySeverity(signals.securityOutputs),
 		CodeSizeBytes:            codeSizeBytes(signals.codeWriterOutputs),
-		StateHash:                stateHash(signals.codeWriterOutputs),
+		StateHash:                stateHash(signals.codeWriterOutputs, signals.verificationReports),
 		Confidence:               aggregateConfidence(stageOutputs),
 		TokensConsumed:           tokensConsumed(stageRecords),
 		TokensGenerated:          tokensGenerated(stageRecords),
-		VerificationIncomplete:   countStageStatus(stageRecords, schemas.StageIncomplete),
+		VerificationIncomplete:   verificationIncompleteCount(stageRecords, signals.verificationReports),
 		FilesChanged:             sortedPaths(changeSummary.ChangedFiles),
 		LinesAdded:               linesAdded,
 		LinesRemoved:             linesRemoved,
@@ -527,12 +548,45 @@ func codeSizeBytes(outputs []schemas.CodeWriterOutput) int {
 	return size
 }
 
-func stateHash(outputs []schemas.CodeWriterOutput) string {
+// verificationIncompleteCount counts incomplete verification for one pass. The
+// canonical report collection is authoritative when any report exists, because
+// a verification-only graph has no stage record of its own to read. A legacy
+// pass with no canonical reports keeps the stage-record count.
+func verificationIncompleteCount(records []schemas.StageRecord, reports []schemas.VerificationReport) int {
+	if len(reports) == 0 {
+		return countStageStatus(records, schemas.StageIncomplete)
+	}
+	count := 0
+	for _, report := range reports {
+		if report.Status == schemas.VerificationIncomplete {
+			count++
+		}
+	}
+	return count
+}
+
+func stateHash(outputs []schemas.CodeWriterOutput, reports []schemas.VerificationReport) string {
 	digest := sha256.New()
 	var entries [][3]string
 	for _, output := range outputs {
 		for _, file := range output.Files {
 			entries = append(entries, [3]string{file.Path, file.ChangeType, file.Content})
+		}
+	}
+	if len(entries) == 0 {
+		// A verification-only graph has no code-writer file set, so hashing
+		// the files would produce the same value on every pass and the cycle
+		// detector would abort a legitimate revision loop. Fall back to the
+		// verification findings: rule, path, and line, which change as the
+		// graph makes progress.
+		for _, report := range reports {
+			for _, finding := range report.Findings {
+				line := ""
+				if finding.Line != nil {
+					line = fmt.Sprintf("%d", *finding.Line)
+				}
+				entries = append(entries, [3]string{finding.RuleID, finding.Path, line})
+			}
 		}
 	}
 	sort.Slice(entries, func(i, j int) bool {
