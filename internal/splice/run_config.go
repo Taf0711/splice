@@ -156,6 +156,7 @@ func (c PipelineRunConfig) agentOptions() agent.Options {
 // pipeline does not consume. Reasons must stay non-empty.
 var pipelineIgnoredAgentOptionReasons = map[string]string{
 	"MaxTurns":                   "agent.Run turn cap; pipeline passes use defaultMaxIterations (SD6)",
+	"Pipeline":                   "the --pipeline topology selection is resolved by Run after workspace trust, not by PipelineConfigFromAgentOptions",
 	"DeferThreshold":             "deferred MCP/tool_search loading is agent-loop only",
 	"Specialists":                "Task-tool prompt decoration is agent-loop only",
 	"Skills":                     "skill-tool prompt decoration is agent-loop only",

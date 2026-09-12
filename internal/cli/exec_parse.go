@@ -403,6 +403,15 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 			index = next
 		case strings.HasPrefix(arg, "--worktree-dir="):
 			options.worktreeDir = strings.TrimSpace(strings.TrimPrefix(arg, "--worktree-dir="))
+		case arg == "--pipeline":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.pipeline = value
+			index = next
+		case strings.HasPrefix(arg, "--pipeline="):
+			options.pipeline = strings.TrimSpace(strings.TrimPrefix(arg, "--pipeline="))
 		case arg == "--merge-back":
 			options.mergeBack = true
 		case arg == "--":

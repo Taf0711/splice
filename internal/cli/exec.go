@@ -99,6 +99,9 @@ type execOptions struct {
 	worktree            bool
 	worktreeName        string
 	worktreeDir         string
+	// pipeline is the --pipeline selection: a user-library pipeline name or a
+	// path to a topology file.
+	pipeline string
 	// mergeBack opts a --worktree run into merging the worktree's changes back
 	// into the source repository on success. Off by default: inherited
 	// --worktree behavior leaves the worktree for manual merging.
@@ -769,6 +772,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		PermissionMode:    permissionMode,
 		Autonomy:          options.autonomy,
 		TrustedWorkspace:  trusted,
+		Pipeline:          options.pipeline,
 		// SelfCorrect is agent-loop only: the deterministic pipeline does not run
 		// the post-edit verify-and-correct loop, so it is inert under `splice exec`.
 		SelfCorrect: selfCorrector,

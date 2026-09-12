@@ -191,7 +191,9 @@ func Run(ctx context.Context, prompt string, provider agent.Provider, options ag
 	if workspaceRoot == "" {
 		workspaceRoot = options.Cwd
 	}
-	topology, topologySource, topologyWarnings, err := ResolveTopology(TopologySourcesFor(workspaceRoot, options.TrustedWorkspace))
+	sources := TopologySourcesFor(workspaceRoot, options.TrustedWorkspace)
+	sources.FlagName = options.Pipeline
+	topology, topologySource, topologyWarnings, err := ResolveTopology(sources)
 	if err != nil {
 		return agent.Result{}, fmt.Errorf("resolve topology: %w", err)
 	}

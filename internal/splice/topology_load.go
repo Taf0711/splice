@@ -28,8 +28,11 @@ type TopologySources struct {
 	WorkspaceRoot string
 	// Trusted gates the project file.
 	Trusted bool
-	// FlagPath is the resolved --pipeline file path, or empty.
+	// FlagPath is a resolved --pipeline file path, or empty.
 	FlagPath string
+	// FlagName is the raw --pipeline value: a library name or a file path. It is
+	// resolved against the library before FlagPath is considered.
+	FlagName string
 	// ActiveName is config.json's active_pipeline library name, or empty.
 	ActiveName string
 	// UserConfigDir is the base for the user library. Empty uses the default.
@@ -83,7 +86,7 @@ func ResolveTopology(sources TopologySources) (*schemas.PipelineTopology, string
 			warnings = append(warnings, "ignored untrusted project topology "+projectPath)
 		}
 	}
-	if path := strings.TrimSpace(sources.FlagPath); path != "" {
+	if path := sources.flagTopologyPath(libraryDir); path != "" {
 		topology, present, err := loadTopologyIfPresent(path)
 		if err != nil {
 			return nil, "", nil, fmt.Errorf("--pipeline topology %s: %w", path, err)
@@ -116,9 +119,50 @@ func (s TopologySources) Sources() (project, flag, library string, err error) {
 	if strings.TrimSpace(s.WorkspaceRoot) != "" {
 		project = filepath.Join(s.WorkspaceRoot, ".splice", "pipeline.json")
 	}
-	flag = strings.TrimSpace(s.FlagPath)
+	flag = s.flagTopologyPath(libraryDir)
 	library = libraryPath(libraryDir, s.ActiveName)
 	return project, flag, library, nil
+}
+
+// flagTopologyPath resolves the --pipeline value: a value with a path
+// separator or a .json suffix is a file path, anything else names a library
+// entry. FlagName wins over an explicit FlagPath.
+func (s TopologySources) flagTopologyPath(libraryDir string) string {
+	name := strings.TrimSpace(s.FlagName)
+	if name == "" {
+		return strings.TrimSpace(s.FlagPath)
+	}
+	if strings.ContainsRune(name, filepath.Separator) || strings.HasSuffix(name, ".json") {
+		return name
+	}
+	return libraryPath(libraryDir, name)
+}
+
+// LoadNamedTopology loads one topology by --pipeline reference (a library name
+// or a file path) and returns it with the resolved path. It fails loud when the
+// reference does not resolve or the file does not parse and validate.
+func LoadNamedTopology(reference string) (*schemas.PipelineTopology, string, error) {
+	base, err := config.UserConfigDir()
+	if err != nil {
+		return nil, "", err
+	}
+	sources := TopologySources{FlagName: reference, UserConfigDir: base}
+	libraryDir, err := sources.libraryDir()
+	if err != nil {
+		return nil, "", err
+	}
+	path := sources.flagTopologyPath(libraryDir)
+	if path == "" {
+		return nil, "", fmt.Errorf("pipeline reference is empty")
+	}
+	topology, present, err := loadTopologyIfPresent(path)
+	if err != nil {
+		return nil, path, err
+	}
+	if !present {
+		return nil, path, fmt.Errorf("topology %s not found", path)
+	}
+	return topology, path, nil
 }
 
 func (s TopologySources) libraryDir() (string, error) {

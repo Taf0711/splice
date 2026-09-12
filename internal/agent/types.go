@@ -387,7 +387,11 @@ type Options struct {
 	// TrustedWorkspace lets the sandbox auto-allow file mutations that stay in
 	// the trusted workspace. It does not grant shell, network, or external access.
 	TrustedWorkspace bool
-	Sandbox          *sandbox.Engine
+	// Pipeline is the --pipeline selection: a pipeline name in the user library
+	// or a path to a topology file. Empty resolves the active pipeline from
+	// config. The runtime resolves it after workspace trust.
+	Pipeline string
+	Sandbox  *sandbox.Engine
 	// FileTracker records per-session file read/write versions so the write tools
 	// can detect a file changed on disk outside Splice since it was last read. nil
 	// disables the check. Created once per session and threaded into every tool run.

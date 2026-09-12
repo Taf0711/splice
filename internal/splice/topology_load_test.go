@@ -176,3 +176,38 @@ func TestBuildExecutionPlanWithTopologyCarriesName(t *testing.T) {
 		t.Fatalf("fallback topology name = %q, want default", fallback.TopologyName)
 	}
 }
+
+// TestResolveTopologyFlagName pins that --pipeline resolves to the user library
+// by name and directly when it is a path.
+func TestResolveTopologyFlagName(t *testing.T) {
+	base := t.TempDir()
+	writeTopologyFile(t, filepath.Join(base, "splice", "pipelines", "team.json"), "team")
+	topology, source, _, err := ResolveTopology(TopologySources{FlagName: "team", UserConfigDir: base})
+	if err != nil {
+		t.Fatalf("ResolveTopology: %v", err)
+	}
+	if topology.Name != "team" || source != TopologySourceFlag {
+		t.Fatalf("resolved %q from %q, want team from the flag layer", topology.Name, source)
+	}
+	path := filepath.Join(t.TempDir(), "path-team.json")
+	writeTopologyFile(t, path, "path-team")
+	topology, _, _, err = ResolveTopology(TopologySources{FlagName: path, UserConfigDir: base})
+	if err != nil {
+		t.Fatalf("ResolveTopology(path): %v", err)
+	}
+	if topology.Name != "path-team" {
+		t.Fatalf("resolved %q, want path-team", topology.Name)
+	}
+}
+
+// TestLoadNamedTopologyMissingFailsLoud pins the missing-reference error.
+func TestLoadNamedTopologyMissingFailsLoud(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	_, _, err := LoadNamedTopology("ghost")
+	if err == nil {
+		t.Fatal("LoadNamedTopology accepted a missing reference")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("error = %v, want a not-found error", err)
+	}
+}
