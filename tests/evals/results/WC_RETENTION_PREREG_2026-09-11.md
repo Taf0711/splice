@@ -1,7 +1,7 @@
 # Pre-registration: warm-cost retention run
 
 Date: 2026-09-11.
-Status: NOT RUN. Awaiting explicit owner approval for the exact command.
+Status: SUPERSEDED 2026-09-13. The memory-reuse line for code-writing tasks is stopped. See tests/evals/results/WARM_COST_STOP_DECISION_2026-09-13.md. This document was never run as a full campaign.
 Entry point: `tests/evals/warmcost/paid-run.sh` with the retention flags below.
 Runner: `tests/evals/warmcost/cmd/warmcost-eval`.
 

@@ -1,0 +1,28 @@
+================================================================================
+FILE raw-clock-helper-read-warm-r0.jsonl
+-- request_context reason: The intent requires reusing the existing runClockTable helper from clock_test.go, but its signature and case fields were not delivered in the context views.
+   query: {"max_chars": 12000, "max_results": 5, "path": "clock_test.go", "query_type": "read_file"}
+-- request_context reason: 
+-- submit files: ['expiry_boundary_test.go']
+-- request_context reason: 
+-- submit files: ['store_expiry_test.go']
+-- request_context reason: 
+   query: {"max_chars": 200, "max_results": 1, "path": "clock_test.go", "query_type": "read_file"}
+-- submit files: ['store_expiry_boundary_test.go']
+-- request_context reason: The intent requires reusing the existing runClockTable helper and its case fields, but clock_test.go was not delivered; I need its exact table-case struct fields and helper signature to write a compatible test without inventing source.
+   query: {"max_chars": 12000, "max_results": 10, "path": "clock_test.go", "query_type": "read_file"}
+-- request_context reason: unused
+-- request_context reason: unused
+   query: {"max_chars": 1000, "max_results": 1, "path": "session.go", "query_type": "read_file"}
+-- submit files: ['session_expiry_test.go']
+-- request_context reason: placeholder
+   query: {"max_chars": 1, "max_results": 1, "path": "session.go", "query_type": "read_file"}
+-- submit files: ['session_expiry_test.go']
+================================================================================
+FILE raw-clock-helper-write-warm-r0.jsonl
+-- request_context reason: The typed intent is truncated mid-sentence ('change runClockTable to...'), so I will infer the refactor of runClockTable to use the new helper; to write newClockStore correctly I need session.go's Store and its now field, which no context view delivered.
+   query: {"max_chars": 4000, "max_results": 5, "path": "session.go", "query_type": "read_file"}
+-- request_context reason: 
+-- submit files: ['clock_test.go']
+-- submit files: ['clock_test.go']
+-- submit files: ['clock_test.go']

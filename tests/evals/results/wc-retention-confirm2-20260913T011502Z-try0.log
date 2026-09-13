@@ -1,0 +1,3 @@
+run wc-retention-confirm2-20260913T011502Z-try0: arms=1 tasks=0 attempts=2
+total-cost claim allowed: false (warm billed cost is not lower than cold)
+artifacts: tests/evals/results/wc-retention-confirm2-20260913T011502Z-try0
