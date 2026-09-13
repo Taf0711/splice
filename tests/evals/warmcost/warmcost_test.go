@@ -1,6 +1,12 @@
 package warmcost
 
 import (
+	"context"
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -272,5 +278,206 @@ func TestRenderMarkdownShowsTokensAndSourceChannels(t *testing.T) {
 		if strings.Contains(out, gone) {
 			t.Fatalf("report still contains the stale label %q", gone)
 		}
+	}
+}
+
+func TestGroupSequencesWriteThenRead(t *testing.T) {
+	tasks := []Task{
+		{ID: "read-1", Phase: PhaseRead, Fixture: "/fixture"},
+		{ID: "plain", Fixture: "/fixture"},
+		{ID: "write-1", Phase: PhaseWrite, Fixture: "/fixture"},
+		{ID: "read-2", Phase: PhaseRead, Fixture: "/fixture"},
+		{ID: "write-2", Phase: PhaseWrite, Fixture: "/fixture"},
+	}
+	sequences, err := groupSequences(tasks)
+	if err != nil {
+		t.Fatalf("groupSequences: %v", err)
+	}
+	if len(sequences) != 2 {
+		t.Fatalf("sequences = %d, want 2", len(sequences))
+	}
+	got := sequences[0].Tasks[0].ID + "," + sequences[1].Tasks[0].ID + "," + sequences[1].Tasks[1].ID + "," + sequences[1].Tasks[2].ID + "," + sequences[1].Tasks[3].ID
+	if got != "write-1,write-2,read-1,plain,read-2" {
+		t.Fatalf("sequence order = %s", got)
+	}
+	if !sequences[0].GitInit || !sequences[1].GitInit {
+		t.Fatal("a sequence with a write-phase task must initialize a git workspace")
+	}
+}
+
+func TestGroupSequencesWithoutWriteSplitsPerTask(t *testing.T) {
+	tasks := []Task{
+		{ID: "a", Phase: PhaseRead, Fixture: "/fixture"},
+		{ID: "b", Fixture: "/fixture"},
+	}
+	sequences, err := groupSequences(tasks)
+	if err != nil {
+		t.Fatalf("groupSequences: %v", err)
+	}
+	if len(sequences) != 2 || sequences[0].Tasks[0].ID != "a" || sequences[1].Tasks[0].ID != "b" {
+		t.Fatalf("sequences = %+v, want one task each", sequences)
+	}
+	if sequences[0].GitInit || sequences[1].GitInit {
+		t.Fatal("a taskset with no write-phase task must keep the plain workspace behavior")
+	}
+}
+
+func TestGroupSequencesRejectsMixedFixtures(t *testing.T) {
+	_, err := groupSequences([]Task{
+		{ID: "write-1", Phase: PhaseWrite, Fixture: "/a"},
+		{ID: "read-1", Phase: PhaseRead, Fixture: "/b"},
+	})
+	if err == nil {
+		t.Fatal("a sequence that mixes fixtures must fail loud")
+	}
+}
+
+func TestRunSequenceSharesOneWorkspace(t *testing.T) {
+	fixture := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fixture, "seed.txt"), []byte("seed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{
+		Binary:  "/bin/true",
+		OutDir:  t.TempDir(),
+		Repeats: 1,
+		Arms:    []Arm{ArmCold},
+		Tasks: []Task{
+			{ID: "write-1", Prompt: "write", Check: "test -f write-marker", Fixture: fixture, Phase: PhaseWrite},
+			{ID: "read-1", Prompt: "read", Check: "test -f write-marker", Fixture: fixture, Phase: PhaseRead},
+		},
+	}
+	var dirs []string
+	seam := func(_ context.Context, req ExecRequest) (ExecResult, error) {
+		dirs = append(dirs, req.Dir)
+		// The write task leaves a marker; the read task's verifier asserts it
+		// is still present, so the two tasks must have shared one workspace.
+		if err := os.WriteFile(filepath.Join(req.Dir, "write-marker"), []byte("x"), 0o644); err != nil {
+			return ExecResult{}, err
+		}
+		payload, _ := json.Marshal(map[string]any{
+			"run_id": "seq", "status": "completed", "tier": "light",
+			"stages": []any{}, "cost_coverage": "not_applicable",
+			"total_cost_usd": 0, "priced_request_count": 0,
+		})
+		line, _ := json.Marshal(map[string]any{"type": "final", "text": string(payload)})
+		return ExecResult{Stdout: append(line, '\n')}, nil
+	}
+	r, err := NewRunner(cfg, seam)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(dirs) != 2 || dirs[0] != dirs[1] {
+		t.Fatalf("workspace dirs = %v, want one shared directory for both tasks", dirs)
+	}
+}
+
+// mockPipelineResult is a minimal valid final stream-json event for the seam.
+func mockPipelineResult(runID string) ExecResult {
+	payload, _ := json.Marshal(map[string]any{
+		"run_id": runID, "status": "completed", "tier": "light",
+		"stages": []any{}, "cost_coverage": "not_applicable",
+		"total_cost_usd": 0, "priced_request_count": 0,
+	})
+	line, _ := json.Marshal(map[string]any{"type": "final", "text": string(payload)})
+	return ExecResult{Stdout: append(line, '\n')}
+}
+
+func sequenceFixture(t *testing.T) string {
+	t.Helper()
+	fixture := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fixture, "seed.txt"), []byte("seed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return fixture
+}
+
+func TestRunSequenceCommitsAndReanchorsAfterVerifiedWrite(t *testing.T) {
+	fixture := sequenceFixture(t)
+	cfg := Config{
+		Binary:  "/bin/true",
+		OutDir:  t.TempDir(),
+		Repeats: 1,
+		Arms:    []Arm{ArmWarm},
+		Tasks: []Task{
+			{ID: "write-1", Prompt: "write", Check: "true", Fixture: fixture, Phase: PhaseWrite},
+			{ID: "read-1", Prompt: "read", Check: "true", Fixture: fixture, Phase: PhaseRead},
+		},
+	}
+	seam := func(_ context.Context, req ExecRequest) (ExecResult, error) {
+		prompt := req.Args[len(req.Args)-1]
+		if err := os.WriteFile(filepath.Join(req.Dir, "seed.txt"), []byte(prompt), 0o644); err != nil {
+			return ExecResult{}, err
+		}
+		return mockPipelineResult("run-seq-1"), nil
+	}
+	r, err := NewRunner(cfg, seam)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type reanchorCall struct {
+		pre, post, producer string
+		commits             int
+	}
+	var calls []reanchorCall
+	r.reanchorFn = func(_ context.Context, dir, class, pre, post, producer string) error {
+		out, _ := exec.Command("git", "-C", dir, "rev-list", "--count", "HEAD").Output()
+		n, _ := strconv.Atoi(strings.TrimSpace(string(out)))
+		calls = append(calls, reanchorCall{pre: pre, post: post, producer: producer, commits: n})
+		return nil
+	}
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("reanchor calls = %d, want 1", len(calls))
+	}
+	call := calls[0]
+	if call.pre == "" || call.post == "" || call.pre == call.post {
+		t.Fatalf("reanchor revisions = %q -> %q, want two distinct non-empty revisions", call.pre, call.post)
+	}
+	if call.producer != "run-seq-1" {
+		t.Fatalf("producer run id = %q, want run-seq-1", call.producer)
+	}
+	if call.commits < 2 {
+		t.Fatalf("commits at reanchor = %d, want at least 2 (fixture + verified tree)", call.commits)
+	}
+}
+
+func TestRunSequenceFailedWriteDoesNotCommitOrReanchor(t *testing.T) {
+	fixture := sequenceFixture(t)
+	cfg := Config{
+		Binary:  "/bin/true",
+		OutDir:  t.TempDir(),
+		Repeats: 1,
+		Arms:    []Arm{ArmWarm},
+		Tasks: []Task{
+			{ID: "write-1", Prompt: "write", Check: "false", Fixture: fixture, Phase: PhaseWrite},
+			{ID: "read-1", Prompt: "read", Check: "true", Fixture: fixture, Phase: PhaseRead},
+		},
+	}
+	seam := func(_ context.Context, req ExecRequest) (ExecResult, error) {
+		if err := os.WriteFile(filepath.Join(req.Dir, "seed.txt"), []byte("dirty"), 0o644); err != nil {
+			return ExecResult{}, err
+		}
+		return mockPipelineResult("run-seq-2"), nil
+	}
+	r, err := NewRunner(cfg, seam)
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := 0
+	r.reanchorFn = func(context.Context, string, string, string, string, string) error {
+		called++
+		return nil
+	}
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if called != 0 {
+		t.Fatalf("reanchor called %d time(s) after a failed write, want 0", called)
 	}
 }

@@ -63,6 +63,36 @@ Task order: a task with `"phase": "write"` runs before every other task, so a
 write on the shared sidecar precedes a read of it. Tasks keep their taskset
 order inside each phase.
 
+## Sequences
+
+One workspace serves each (arm, sequence). A write-phase task starts a sequence.
+The tasks after it, up to the next write-phase task, run in that same workspace,
+in order, with one verifier and one ledger record each. The runner resets the
+workspace contents at the start of every repeat and never between the tasks of a
+sequence, so a write task's bytes persist for the read task after it. A taskset
+with no write-phase task keeps one workspace per task.
+
+The workspace path is stable across repeats for one (arm, sequence), so the
+runtime memory project identity is also stable. That is what lets a later read
+task retrieve an earlier write task's captured evidence on the shared sidecar.
+
+When a sequence contains a write-phase task, the runner initializes the
+workspace as a git repository with one initial commit and a local identity
+(`warmcost@example.invalid`). The runtime capture path anchors evidence at a git
+revision, and a workspace with no repository produces no reusable record. A
+taskset with no write-phase task keeps the previous plain workspace behavior.
+
+After a write-phase task's verifier passes, and before the next task of the
+sequence runs, the runner commits the verified tree and advances that run's
+captured nodes from the pre-verify HEAD to the post-verify commit. The stage
+sandbox refuses the write-shaped `git stash create`, so in-run capture anchors
+at the pre-verify HEAD. The commit does not change what the run verified, it
+only names the same bytes at a new revision, so the read task's freshness diff
+is empty and the write task's evidence is admissible. The commit runs in every
+arm, so the workspace treatment is identical. Only arms with memory on reanchor,
+because a cold arm captures nothing. A write task whose verifier fails is never
+committed.
+
 Clear the sidecar root before a `fresh` run. Keep it for the duration of a
 `shared` run.
 

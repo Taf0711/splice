@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Taf0711/splice/internal/memd"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
@@ -112,11 +113,19 @@ type Aggregate struct {
 	Note            string          `json:"note"`
 }
 
+// reanchorFunc advances one run's capture set from one revision to another.
+// It is a seam so a unit test can prove the commit-and-reanchor step runs
+// after a passed write task and does not run after a failed one.
+type reanchorFunc func(ctx context.Context, workspace, class, preHead, postHead, producerRunID string) error
+
 // Runner executes the measurement.
 type Runner struct {
 	cfg  Config
 	exec ExecFunc
 	now  func() time.Time
+	// reanchorFn is the capture-reanchor seam; it defaults to the sidecar
+	// implementation and is replaced only in tests.
+	reanchorFn reanchorFunc
 }
 
 // NewRunner validates the configuration and returns a runner. A nil exec seam
@@ -171,10 +180,87 @@ func NewRunner(cfg Config, seam ExecFunc) (*Runner, error) {
 	if seam == nil {
 		seam = runExec
 	}
-	return &Runner{cfg: cfg, exec: seam, now: time.Now}, nil
+	runner := &Runner{cfg: cfg, exec: seam, now: time.Now}
+	runner.reanchorFn = runner.reanchorSequence
+	return runner, nil
 }
 
-// Run executes every arm, every task, every repeat, and returns the aggregate.
+// sequence is one ordered task group that shares ONE workspace. The runner
+// runs a sequence's tasks in order in the same directory, so a write-phase
+// task's bytes persist for the read-phase task that follows it. A taskset
+// with no write-phase task keeps one sequence per task, which preserves the
+// per-task workspace behavior of the earlier protocol versions.
+type sequence struct {
+	Index   int
+	Tasks   []Task
+	Fixture string
+	// GitInit makes the sequence workspace a git repository with an initial
+	// commit. The capture path anchors evidence at a git revision
+	// (internal/splice/run.go verifiedRevision falls back to HEAD), so a
+	// sequence that is meant to retain evidence needs a repository. Plain
+	// tasksets keep the previous workspace behavior.
+	GitInit bool
+}
+
+// groupSequences orders the tasks and groups them into shared workspaces. A
+// write-phase task starts a new sequence; the tasks after it, up to the next
+// write-phase task, run in its workspace. With no write-phase task, every
+// task is its own sequence.
+func groupSequences(tasks []Task) ([]sequence, error) {
+	ordered := orderTasks(tasks)
+	hasWrite := false
+	for _, t := range ordered {
+		if t.Phase == PhaseWrite {
+			hasWrite = true
+			break
+		}
+	}
+	var groups [][]Task
+	if !hasWrite {
+		for _, t := range ordered {
+			groups = append(groups, []Task{t})
+		}
+	} else {
+		var current []Task
+		for _, t := range ordered {
+			if t.Phase == PhaseWrite && len(current) > 0 {
+				groups = append(groups, current)
+				current = nil
+			}
+			current = append(current, t)
+		}
+		if len(current) > 0 {
+			groups = append(groups, current)
+		}
+	}
+	sequences := make([]sequence, 0, len(groups))
+	for i, group := range groups {
+		fixture := group[0].Fixture
+		gitInit := false
+		for _, t := range group {
+			if t.Fixture != fixture {
+				return nil, fmt.Errorf("warmcost: sequence %d mixes fixtures %q and %q (task %s)", i, fixture, t.Fixture, t.ID)
+			}
+			if t.Phase == PhaseWrite {
+				gitInit = true
+			}
+		}
+		sequences = append(sequences, sequence{Index: i, Tasks: group, Fixture: fixture, GitInit: gitInit})
+	}
+	return sequences, nil
+}
+
+// sequenceSession is the sidecar session id for one (sequence, arm, repeat).
+// Shared retention still collapses the warm arms onto one sidecar class; the
+// id distinguishes fresh sidecars.
+func sequenceSession(runID string, seqIndex int, arm Arm, repeat int) string {
+	return fmt.Sprintf("wc-%s-seq%02d-%s-r%d", runID, seqIndex, arm, repeat)
+}
+
+// Run executes every arm, every sequence, every repeat, and returns the
+// aggregate. One workspace serves every task of one (arm, sequence); the
+// workspace contents are reset once per repeat and never between the tasks
+// of a sequence.
 func (r *Runner) Run(ctx context.Context) (Aggregate, error) {
 	runDir := filepath.Join(r.cfg.OutDir, r.cfg.RunID)
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
@@ -193,11 +279,24 @@ func (r *Runner) Run(ctx context.Context) (Aggregate, error) {
 		Repeats:         r.cfg.Repeats,
 	}
 
-	var attempts []Attempt
+	sequences, err := groupSequences(r.cfg.Tasks)
+	if err != nil {
+		return Aggregate{}, err
+	}
+	// seqBase holds one stable workspace path per (arm, sequence). The path is
+	// stable across repeats, which keeps the runtime memory project identity
+	// stable, and its CONTENTS are reset at the start of every repeat. A
+	// stable path is what lets a later read task retrieve an earlier write
+	// task's captured evidence.
+	seqBase, err := os.MkdirTemp("", "warmcost-seq-base-")
+	if err != nil {
+		return Aggregate{}, fmt.Errorf("warmcost: create sequence base: %w", err)
+	}
+	if !r.cfg.KeepWorkspaces {
+		defer os.RemoveAll(seqBase)
+	}
 
-	// orderTasks puts write-phase tasks first so a shared sidecar receives a
-	// write before a read.
-	tasks := orderTasks(r.cfg.Tasks)
+	var attempts []Attempt
 
 	// Interleave arm order across repeats to reduce drift.
 	for repeat := 0; repeat < r.cfg.Repeats; repeat++ {
@@ -207,15 +306,25 @@ func (r *Runner) Run(ctx context.Context) (Aggregate, error) {
 				arms[i], arms[j] = arms[j], arms[i]
 			}
 		}
-		for _, task := range tasks {
+		for _, seq := range sequences {
 			for _, arm := range arms {
-				attempt, err := r.runAttempt(ctx, task, arm, repeat, provenance)
-				if err != nil {
-					attempt = r.failedAttempt(task, arm, repeat, provenance, err)
+				seqAttempts, seqErr := r.runSequence(ctx, seq, arm, repeat, seqBase, provenance)
+				for _, attempt := range seqAttempts {
+					attempts = append(attempts, attempt)
+					if err := writeAttempt(runDir, attempt); err != nil {
+						return Aggregate{}, err
+					}
 				}
-				attempts = append(attempts, attempt)
-				if err := writeAttempt(runDir, attempt); err != nil {
-					return Aggregate{}, err
+				if seqErr != nil {
+					// Record the tasks the sequence never reached, so a
+					// failed sequence stays in total spend honestly.
+					for ordinal := len(seqAttempts); ordinal < len(seq.Tasks); ordinal++ {
+						attempt := r.failedAttempt(seq.Tasks[ordinal], arm, repeat, seq.Index, ordinal, len(seq.Tasks), provenance, seqErr)
+						attempts = append(attempts, attempt)
+						if err := writeAttempt(runDir, attempt); err != nil {
+							return Aggregate{}, err
+						}
+					}
 				}
 			}
 		}
@@ -236,102 +345,6 @@ func (r *Runner) Run(ctx context.Context) (Aggregate, error) {
 		return Aggregate{}, fmt.Errorf("warmcost: write report: %w", err)
 	}
 	return agg, nil
-}
-
-// runAttempt runs one task/arm/repeat and captures the authoritative ledger.
-func (r *Runner) runAttempt(ctx context.Context, task Task, arm Arm, repeat int, prov Provenance) (Attempt, error) {
-	started := r.now()
-	workspace, cleanup, err := prepareWorkspace(task.Fixture)
-	if err != nil {
-		return Attempt{}, err
-	}
-	if !r.cfg.KeepWorkspaces {
-		defer cleanup()
-	}
-	fixtureDigest, err := digestFixture(task.Fixture)
-	if err != nil {
-		return Attempt{}, err
-	}
-	sessionID := fmt.Sprintf("wc-%s-%s-%s-r%d", r.cfg.RunID, task.ID, arm, repeat)
-	attempt := Attempt{
-		TaskID:          task.ID,
-		Arm:             arm,
-		Repeat:          repeat,
-		BinaryRevision:  prov.BinaryRevision,
-		SidecarRevision: prov.SidecarRevision,
-		FixtureDigest:   fixtureDigest,
-		ModelID:         r.cfg.Model,
-		ModelSettings:   r.cfg.ModelSettings,
-		TreatmentEnv:    arm.Env(),
-		SessionID:       sessionID,
-		StartedAt:       started,
-	}
-
-	class := sidecarClass(r.cfg.Retention, arm, sessionID)
-	if err := r.prepareSidecar(class); err != nil {
-		return Attempt{}, err
-	}
-	runCtx, cancel := context.WithTimeout(ctx, r.cfg.Timeout)
-	defer cancel()
-	res, err := r.exec(runCtx, ExecRequest{
-		Binary: r.cfg.Binary,
-		Args:   execArgs(arm, r.cfg.Model, sessionID, task.Prompt),
-		Env:    envWithOverrides(os.Environ(), append(append([]string{}, arm.Env()...), r.sidecarEnv(class)...)...),
-		Dir:    workspace,
-	})
-	ended := r.now()
-	attempt.EndedAt = ended
-	attempt.DurationMS = ended.Sub(started).Milliseconds()
-	if err != nil {
-		return attempt, fmt.Errorf("warmcost: exec task %s arm %s: %w", task.ID, arm, err)
-	}
-	// Additive raw artifact: keep the child's full stream-json so the report
-	// can quote model output and the expansion reason. The attempt JSON is a
-	// projection of the final PipelineResult, not the whole stream.
-	rawName := rawStreamName(task.ID, arm, repeat)
-	if werr := os.WriteFile(filepath.Join(filepath.Join(r.cfg.OutDir, r.cfg.RunID), rawName), res.Stdout, 0o644); werr != nil {
-		return attempt, fmt.Errorf("warmcost: write raw stream for task %s: %w", task.ID, werr)
-	}
-	attempt.RawStream = rawName
-
-	if parsed, perr := parsePipelineResult(res.Stdout); perr != nil {
-		attempt.LedgerError = perr.Error()
-	} else {
-		attempt.Requests = requestRecords(parsed.UsageRecords)
-		attempt.RunStatus = parsed.Status
-		attempt.CostCoverage = parsed.CostCoverage
-		attempt.Totals = totalsFromResult(parsed)
-	}
-
-	verified, output, verr := runVerifier(runCtx, workspace, task.Check)
-	if verr != nil {
-		return attempt, fmt.Errorf("warmcost: verifier task %s: %w", task.ID, verr)
-	}
-	attempt.VerifierResult = verified
-	attempt.VerifierOutput = output
-	return attempt, nil
-}
-
-// failedAttempt records an infrastructure failure honestly instead of dropping
-// it, so failed attempts stay in total spend.
-func (r *Runner) failedAttempt(task Task, arm Arm, repeat int, prov Provenance, cause error) Attempt {
-	now := r.now()
-	return Attempt{
-		TaskID:          task.ID,
-		Arm:             arm,
-		Repeat:          repeat,
-		BinaryRevision:  prov.BinaryRevision,
-		SidecarRevision: prov.SidecarRevision,
-		ModelID:         r.cfg.Model,
-		ModelSettings:   r.cfg.ModelSettings,
-		TreatmentEnv:    arm.Env(),
-		RunStatus:       "infrastructure_failed",
-		CostCoverage:    schemas.CostCoveragePartial,
-		VerifierResult:  false,
-		LedgerError:     cause.Error(),
-		StartedAt:       now,
-		EndedAt:         now,
-	}
 }
 
 // aggregate builds the run-level report from the captured attempts. It fails
@@ -414,7 +427,7 @@ func (r *Runner) retentionReport() RetentionReport {
 	rep := RetentionReport{
 		Mode:         r.cfg.Retention,
 		SidecarRoot:  r.cfg.SidecarRoot,
-		OrderingRule: "write-phase tasks run before read-phase tasks, and the runner interleaves arm order per repeat, so a write on the shared sidecar precedes a read of it",
+		OrderingRule: "one workspace per (arm, sequence); the write-phase task and the read-phase tasks that follow it run in that workspace in order, and the runner interleaves arm order per repeat, so a write on the shared sidecar and in the workspace precedes its read",
 	}
 	for _, arm := range r.cfg.Arms {
 		rep.Assignment = append(rep.Assignment, SidecarAssignment{Arm: arm, Pattern: sidecarPattern(r.cfg.Retention, arm)})
@@ -627,22 +640,306 @@ func envWithOverrides(base []string, overrides ...string) []string {
 	return append(out, overrides...)
 }
 
-// prepareWorkspace copies the fixture into a fresh temp directory. An empty
-// fixture yields an empty workspace, which is correct for a cold task.
-func prepareWorkspace(fixture string) (string, func(), error) {
-	dir, err := os.MkdirTemp("", "warmcost-ws-")
+// runSequence prepares one workspace for the sequence and runs every task in
+// it, in order. Each task still produces its own attempt, verifier, and
+// ledger. A task failure does not stop the sequence: the workspace keeps
+// whatever the failed task left and the next task runs in it.
+func (r *Runner) runSequence(ctx context.Context, seq sequence, arm Arm, repeat int, seqBase string, prov Provenance) ([]Attempt, error) {
+	dir := filepath.Join(seqBase, fmt.Sprintf("%s-seq%02d", arm, seq.Index))
+	if err := prepareWorkspaceAt(dir, seq.Fixture); err != nil {
+		return nil, err
+	}
+	if seq.GitInit {
+		if err := initGitWorkspace(dir); err != nil {
+			return nil, err
+		}
+	}
+	attempts := make([]Attempt, 0, len(seq.Tasks))
+	class := sidecarClass(r.cfg.Retention, arm, sequenceSession(r.cfg.RunID, seq.Index, arm, repeat))
+	for ordinal, task := range seq.Tasks {
+		attempt, taskErr := r.runTaskInWorkspace(ctx, task, arm, repeat, seq.Index, ordinal, len(seq.Tasks), dir, prov)
+		if taskErr != nil {
+			attempt = r.failedAttempt(task, arm, repeat, seq.Index, ordinal, len(seq.Tasks), prov, taskErr)
+		}
+		attempts = append(attempts, attempt)
+		// The documented eval contract: once a write-phase task's verifier
+		// passes, the harness commits the verified tree and advances that
+		// run's captured nodes from the pre-verify HEAD to the post-verify
+		// commit. The stage sandbox refuses the write-shaped stash create,
+		// so in-run capture anchors at the pre-verify HEAD; without this
+		// step the read task's freshness diff sees the write's edit and
+		// rejects the nodes. A failed write is never committed.
+		if taskErr == nil && seq.GitInit && task.Phase == PhaseWrite && attempt.VerifierResult {
+			if cerr := r.commitAndReanchor(ctx, dir, class, arm, attempt); cerr != nil {
+				return attempts, fmt.Errorf("warmcost: sequence %d task %s: %w", seq.Index, task.ID, cerr)
+			}
+		}
+	}
+	return attempts, nil
+}
+
+// runTaskInWorkspace runs one task in an already-prepared sequence workspace
+// and captures its ledger, raw stream, and verifier result.
+func (r *Runner) runTaskInWorkspace(ctx context.Context, task Task, arm Arm, repeat, seqIndex, seqOrdinal, seqTasks int, workspace string, prov Provenance) (Attempt, error) {
+	started := r.now()
+	fixtureDigest, err := digestFixture(task.Fixture)
 	if err != nil {
-		return "", nil, fmt.Errorf("warmcost: create workspace: %w", err)
+		return Attempt{}, err
 	}
-	cleanup := func() { _ = os.RemoveAll(dir) }
+	sessionID := fmt.Sprintf("wc-%s-%s-%s-r%d", r.cfg.RunID, task.ID, arm, repeat)
+	attempt := Attempt{
+		TaskID:          task.ID,
+		Arm:             arm,
+		Repeat:          repeat,
+		Sequence:        seqIndex,
+		SequenceOrdinal: seqOrdinal,
+		SequenceTasks:   seqTasks,
+		Workspace:       workspace,
+		BinaryRevision:  prov.BinaryRevision,
+		SidecarRevision: prov.SidecarRevision,
+		FixtureDigest:   fixtureDigest,
+		ModelID:         r.cfg.Model,
+		ModelSettings:   r.cfg.ModelSettings,
+		TreatmentEnv:    arm.Env(),
+		SessionID:       sessionID,
+		StartedAt:       started,
+	}
+
+	class := sidecarClass(r.cfg.Retention, arm, sequenceSession(r.cfg.RunID, seqIndex, arm, repeat))
+	if err := r.prepareSidecar(class); err != nil {
+		return attempt, err
+	}
+	runCtx, cancel := context.WithTimeout(ctx, r.cfg.Timeout)
+	defer cancel()
+	res, err := r.exec(runCtx, ExecRequest{
+		Binary: r.cfg.Binary,
+		Args:   execArgs(arm, r.cfg.Model, sessionID, task.Prompt),
+		Env:    envWithOverrides(os.Environ(), append(append([]string{}, arm.Env()...), r.sidecarEnv(class)...)...),
+		Dir:    workspace,
+	})
+	ended := r.now()
+	attempt.EndedAt = ended
+	attempt.DurationMS = ended.Sub(started).Milliseconds()
+	if err != nil {
+		return attempt, fmt.Errorf("warmcost: exec task %s arm %s: %w", task.ID, arm, err)
+	}
+	// Additive raw artifact: keep the child's full stream-json so the report
+	// can quote model output and the expansion reason. The attempt JSON is a
+	// projection of the final PipelineResult, not the whole stream.
+	rawName := rawStreamName(task.ID, arm, repeat)
+	if werr := os.WriteFile(filepath.Join(filepath.Join(r.cfg.OutDir, r.cfg.RunID), rawName), res.Stdout, 0o644); werr != nil {
+		return attempt, fmt.Errorf("warmcost: write raw stream for task %s: %w", task.ID, werr)
+	}
+	attempt.RawStream = rawName
+
+	if parsed, perr := parsePipelineResult(res.Stdout); perr != nil {
+		attempt.LedgerError = perr.Error()
+	} else {
+		attempt.Requests = requestRecords(parsed.UsageRecords)
+		attempt.RunID = parsed.RunID
+		attempt.RunStatus = parsed.Status
+		attempt.CostCoverage = parsed.CostCoverage
+		attempt.Totals = totalsFromResult(parsed)
+	}
+
+	verified, output, verr := runVerifier(runCtx, workspace, task.Check)
+	if verr != nil {
+		return attempt, fmt.Errorf("warmcost: verifier task %s: %w", task.ID, verr)
+	}
+	attempt.VerifierResult = verified
+	attempt.VerifierOutput = output
+	return attempt, nil
+}
+
+// prepareWorkspaceAt resets dir to a fresh copy of the fixture. An empty
+// fixture yields an empty workspace, which is correct for a cold task.
+func prepareWorkspaceAt(dir, fixture string) error {
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("warmcost: reset workspace %s: %w", dir, err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("warmcost: create workspace %s: %w", dir, err)
+	}
 	if strings.TrimSpace(fixture) == "" {
-		return dir, cleanup, nil
+		return nil
 	}
-	if err := copyTree(fixture, dir); err != nil {
-		cleanup()
-		return "", nil, err
+	return copyTree(fixture, dir)
+}
+
+// initGitWorkspace makes one sequence workspace a git repository with one
+// initial commit and a local identity. The runtime capture path anchors
+// evidence at a git revision (verifiedRevision falls back to HEAD), and a
+// workspace with no repository produces no reusable record. The initial
+// commit gives HEAD a revision; the write task's edits then appear as an
+// uncommitted diff, which is what capture snapshots and what a later
+// freshness diff compares.
+func initGitWorkspace(dir string) error {
+	steps := [][]string{
+		{"init", "-q"},
+		{"add", "-A"},
+		{"-c", "user.email=warmcost@example.invalid", "-c", "user.name=warmcost", "commit", "-q", "-m", "warmcost sequence fixture"},
+		{"config", "user.email", "warmcost@example.invalid"},
+		{"config", "user.name", "warmcost"},
 	}
-	return dir, cleanup, nil
+	for _, args := range steps {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("warmcost: git %s in %s: %w: %s", strings.Join(args, " "), dir, err, strings.TrimSpace(string(out)))
+		}
+	}
+	return nil
+}
+
+// commitAndReanchor applies the documented eval contract after a write-phase
+// task's verifier passes: commit the verified tree, then advance the write
+// run's captured nodes from the pre-verify HEAD to the post-verify commit.
+// The stage sandbox refuses the write-shaped `git stash create`, so in-run
+// capture anchors at the pre-verify HEAD; the commit does not change what the
+// run verified, it only renames those bytes, so the freshness contract holds.
+// Both arms commit, so the workspace treatment is identical. Only arms with
+// memory on reanchor, because a cold arm captures nothing.
+func (r *Runner) commitAndReanchor(ctx context.Context, dir, class string, arm Arm, attempt Attempt) error {
+	preHead, err := gitHeadRevision(ctx, dir)
+	if err != nil {
+		return err
+	}
+	dirty, err := gitTreeDirty(ctx, dir)
+	if err != nil {
+		return err
+	}
+	if err := runGit(ctx, dir, "add", "-A"); err != nil {
+		return err
+	}
+	if dirty {
+		if err := runGit(ctx, dir, "-c", "user.email=warmcost@example.invalid", "-c", "user.name=warmcost",
+			"commit", "-q", "-m", "warmcost: verified sequence tree"); err != nil {
+			return err
+		}
+	}
+	postHead, err := gitHeadRevision(ctx, dir)
+	if err != nil {
+		return err
+	}
+	if dirty && postHead == preHead {
+		return fmt.Errorf("warmcost: verified tree commit in %s produced no new revision", dir)
+	}
+	if postHead == preHead || arm.MemoryMode() != "on" {
+		return nil
+	}
+	if r.reanchorFn == nil {
+		return nil
+	}
+	return r.reanchorFn(ctx, dir, class, preHead, postHead, attempt.RunID)
+}
+
+// reanchorSequence is the sidecar implementation of the reanchor seam. It
+// scopes the update to the write run's capture set when the producer run id is
+// known, matching the MVP eval contract.
+func (r *Runner) reanchorSequence(ctx context.Context, workspace, class, preHead, postHead, producerRunID string) error {
+	if preHead == "" || postHead == "" || preHead == postHead {
+		return fmt.Errorf("warmcost: reanchor %s: two distinct revisions are required", workspace)
+	}
+	client, err := r.sidecarClient(ctx, class)
+	if err != nil {
+		return err
+	}
+	if client == nil {
+		return fmt.Errorf("warmcost: reanchor %s: memory sidecar unavailable", workspace)
+	}
+	project := canonicalWorkspacePath(workspace)
+	ids, err := client.CaptureSetIDsForRun(ctx, project, preHead, producerRunID)
+	if err != nil {
+		return fmt.Errorf("warmcost: resolve capture set for run %q at %s: %w", producerRunID, shortRevision(preHead), err)
+	}
+	if len(ids) == 0 {
+		if producerRunID != "" {
+			return fmt.Errorf("warmcost: no capture set for run %q at revision %s in %s", producerRunID, shortRevision(preHead), project)
+		}
+		return nil
+	}
+	if _, err := client.ReanchorGraphByIDs(ctx, project, ids, preHead, postHead); err != nil {
+		return fmt.Errorf("warmcost: reanchor %d node(s) %s -> %s: %w", len(ids), shortRevision(preHead), shortRevision(postHead), err)
+	}
+	return nil
+}
+
+// sidecarClient resolves the sidecar for one sidecar class. With no sidecar
+// root the ambient operator sidecar is used.
+func (r *Runner) sidecarClient(ctx context.Context, class string) (*memd.Client, error) {
+	if strings.TrimSpace(r.cfg.SidecarRoot) == "" {
+		return memd.Resolve(ctx)
+	}
+	socket := filepath.Join(r.cfg.SidecarRoot, class, "mem.sock")
+	client := memd.NewClient(socket)
+	if err := client.Health(ctx); err != nil {
+		return nil, fmt.Errorf("warmcost: sidecar health at %s: %w", socket, err)
+	}
+	return client, nil
+}
+
+// canonicalWorkspacePath resolves symlinks so the path matches the project
+// path the runtime canonicalized when it persisted the capture.
+func canonicalWorkspacePath(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return path
+}
+
+func shortRevision(rev string) string {
+	if len(rev) > 10 {
+		return rev[:10]
+	}
+	return rev
+}
+
+func gitHeadRevision(ctx context.Context, dir string) (string, error) {
+	out, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		return "", fmt.Errorf("warmcost: git rev-parse HEAD in %s: %w", dir, err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func gitTreeDirty(ctx context.Context, dir string) (bool, error) {
+	out, err := exec.CommandContext(ctx, "git", "-C", dir, "status", "--porcelain").Output()
+	if err != nil {
+		return false, fmt.Errorf("warmcost: git status in %s: %w", dir, err)
+	}
+	return strings.TrimSpace(string(out)) != "", nil
+}
+
+func runGit(ctx context.Context, dir string, args ...string) error {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("warmcost: git %s in %s: %w: %s", strings.Join(args, " "), dir, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// failedAttempt records an infrastructure failure honestly instead of dropping
+// it, so failed attempts stay in total spend.
+func (r *Runner) failedAttempt(task Task, arm Arm, repeat, seqIndex, seqOrdinal, seqTasks int, prov Provenance, cause error) Attempt {
+	now := r.now()
+	return Attempt{
+		TaskID:          task.ID,
+		Arm:             arm,
+		Repeat:          repeat,
+		Sequence:        seqIndex,
+		SequenceOrdinal: seqOrdinal,
+		SequenceTasks:   seqTasks,
+		BinaryRevision:  prov.BinaryRevision,
+		SidecarRevision: prov.SidecarRevision,
+		ModelID:         r.cfg.Model,
+		ModelSettings:   r.cfg.ModelSettings,
+		TreatmentEnv:    arm.Env(),
+		RunStatus:       "infrastructure_failed",
+		CostCoverage:    schemas.CostCoveragePartial,
+		VerifierResult:  false,
+		LedgerError:     cause.Error(),
+		StartedAt:       now,
+		EndedAt:         now,
+	}
 }
 
 func copyTree(src, dst string) error {

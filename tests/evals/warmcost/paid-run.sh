@@ -36,6 +36,8 @@ if [[ -n "${TASKS_ENV:-}" ]]; then
 else
   TASKS=(healthz-detail-gating len-skips-expired sessions-active-since)
 fi
+IFS=',' read -r -a ARM_LIST <<< "${ARMS// /}"
+ARM_COUNT="${#ARM_LIST[@]}"
 RUN_BASE="${RUN_BASE:-wc-paid-k3-$(date +%Y%m%dT%H%M%S)}"
 OUT_DIR="${OUT_DIR:-tests/evals/results}"
 MAX_RETRIES="${MAX_RETRIES:-2}"
@@ -95,7 +97,7 @@ fi
 REV="$(git rev-parse HEAD)"
 SIDECAR_REV="$(git rev-parse --short HEAD)"
 log "pre-registration: model=$MODEL arms=$ARMS tasks=${#TASKS[@]} repeats=$REPEATS margin=$MARGIN bootstrap=$BOOTSTRAP_SAMPLES"
-log "attempt cap: tasks=${#TASKS[@]} x arms=$ARMS x repeats=$REPEATS = $((${#TASKS[@]} * ${REPEATS})) attempts; MAX_RETRIES=$MAX_RETRIES"
+log "attempt cap: arms=$ARM_COUNT x tasks=${#TASKS[@]} x repeats=$REPEATS = $((ARM_COUNT * ${#TASKS[@]} * REPEATS)) attempts; MAX_RETRIES=$MAX_RETRIES"
 log "revision=$REV sidecar_revision=$SIDECAR_REV taskset=${TASKS[*]}"
 log "arm order: $ARMS; interleaved per repeat by the runner"
 log "retention: $RETENTION sidecar_root=${SIDECAR_ROOT:-<ambient>}"

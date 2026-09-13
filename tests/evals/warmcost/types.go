@@ -201,9 +201,24 @@ func requestRecords(recs []schemas.PipelineUsageRecord) []RequestRecord {
 // Attempt is the per-attempt JSON artifact. Every number comes from the
 // captured ledger or the verifier, never from a hand sum.
 type Attempt struct {
-	TaskID          string          `json:"task_id"`
-	Arm             Arm             `json:"arm"`
-	Repeat          int             `json:"repeat"`
+	TaskID string `json:"task_id"`
+	Arm    Arm    `json:"arm"`
+	Repeat int    `json:"repeat"`
+	// Sequence identifies the shared workspace this attempt ran in. Tasks in
+	// one sequence run one after another in the same directory, so a
+	// write-phase task's bytes persist for the read-phase task that follows.
+	Sequence int `json:"sequence"`
+	// SequenceOrdinal is the task's position inside its sequence.
+	SequenceOrdinal int `json:"sequence_ordinal"`
+	// SequenceTasks is the number of tasks in the sequence.
+	SequenceTasks int `json:"sequence_tasks"`
+	// Workspace is the shared sequence workspace this attempt ran in. It is
+	// also the runtime memory project identity, so a write and a read in one
+	// sequence share it.
+	Workspace string `json:"workspace,omitempty"`
+	// RunID is the pipeline run id from the final result. The harness passes
+	// it as the producer run id when it reanchors that run's capture set.
+	RunID           string          `json:"run_id,omitempty"`
 	BinaryRevision  string          `json:"binary_revision"`
 	SidecarRevision string          `json:"sidecar_revision"`
 	FixtureDigest   string          `json:"fixture_digest"`
