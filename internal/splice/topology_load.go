@@ -76,13 +76,17 @@ func ResolveTopology(sources TopologySources) (*schemas.PipelineTopology, string
 		projectPath = filepath.Join(sources.WorkspaceRoot, ".splice", "pipeline.json")
 	}
 	if projectPath != "" {
-		topology, present, err := loadTopologyIfPresent(projectPath)
-		switch {
-		case err != nil:
-			return nil, "", nil, fmt.Errorf("project topology %s: %w", projectPath, err)
-		case present && sources.Trusted:
-			return topology, TopologySourceProject, warnings, nil
-		case present:
+		// Trust is resolved before the file is read. An untrusted project file
+		// is ignored, so a malformed untrusted file cannot fail the run.
+		if sources.Trusted {
+			topology, present, err := loadTopologyIfPresent(projectPath)
+			switch {
+			case err != nil:
+				return nil, "", nil, fmt.Errorf("project topology %s: %w", projectPath, err)
+			case present:
+				return topology, TopologySourceProject, warnings, nil
+			}
+		} else if filePresent(projectPath) {
 			warnings = append(warnings, "ignored untrusted project topology "+projectPath)
 		}
 	}
@@ -204,6 +208,14 @@ func loadTopologyIfPresent(path string) (*schemas.PipelineTopology, bool, error)
 		return nil, false, err
 	}
 	return &topology, true, nil
+}
+
+// filePresent reports whether path names an existing regular file. It only
+// decides whether to warn about an ignored untrusted topology, so a stat
+// error is treated as absent.
+func filePresent(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
 // activePipelineName reads config.json's active_pipeline pointer. A missing

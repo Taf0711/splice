@@ -7161,3 +7161,25 @@ design brief (20ac5f3) as a Planned doc.
 
 Next: EV2-3 frozen memory policy. Demo remains gated only on a fresh GIF
 capture with scrubbed terminal chrome.
+
+## 2026-09-13 - Track T core review hardening (H1, H2, M2, M4)
+
+A review of the committed T1-T8 work on `feat/topology-core` found and fixed
+four defects. H1: `defaultTopology` gave `security_auditor` only
+`test_generator` as an incoming edge, so edge scoping would have starved the
+future model-backed security advisor of the `code_writer` summary; the
+`code_writer -> security_auditor` edge is now declared and a test pins it. H2:
+`ExecutionStage.Validate` ignored `DependsOn`, so a plan with an unknown or
+self dependency passed validation and then scoped to nothing;
+`ExecutionPlan.Validate` now rejects both, with a forward reference still valid.
+M2: the project topology was parsed before the trust gate, so a malformed
+untrusted file failed the whole run; the loader now checks `Trusted` first and
+reports an ignored file as a warning. M4: prompt-node summaries and memory were
+inlined with no delimiter under a comment that claimed they were data; both are
+now wrapped in data blocks and the system prompt names those blocks.
+
+Open review items not fixed in this checkpoint: `splice_min_version` is still
+never checked (M1), the capability fallback is keyed by stage name rather than
+type (M3), the command node joins argv into a shell line (L1, now documented),
+the verification report type assertion breaks on a JSON round trip (L2), and 17
+TUI transcript files remain committed debug artifacts (L3).

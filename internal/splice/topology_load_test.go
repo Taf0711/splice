@@ -116,6 +116,30 @@ func TestResolveTopologyFailsLoudOnInvalidTrustedProject(t *testing.T) {
 	}
 }
 
+// TestResolveTopologyIgnoresInvalidUntrustedProject pins M2: the project file
+// is parsed only after trust resolution, so a malformed untrusted file is
+// ignored with a warning instead of failing the run.
+func TestResolveTopologyIgnoresInvalidUntrustedProject(t *testing.T) {
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, ".splice", "pipeline.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	topology, source, warnings, err := ResolveTopology(TopologySources{WorkspaceRoot: workspace, Trusted: false, UserConfigDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("ResolveTopology: %v", err)
+	}
+	if topology.Name != "default" || source != TopologySourceDefault {
+		t.Fatalf("resolved %q from %q, want the embedded default", topology.Name, source)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "untrusted") {
+		t.Fatalf("warnings = %v, want one untrusted-project warning", warnings)
+	}
+}
+
 func TestResolveTopologyRejectsInvalidTopology(t *testing.T) {
 	workspace := t.TempDir()
 	path := filepath.Join(workspace, ".splice", "pipeline.json")

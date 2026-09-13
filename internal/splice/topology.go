@@ -41,6 +41,11 @@ func defaultTopology() *schemas.PipelineTopology {
 			{From: "code_writer", To: "test_generator", Payload: schemas.EdgePayloadSummary},
 			{From: "code_writer", To: "static_analyzer", Payload: schemas.EdgePayloadSummary},
 			{From: "test_generator", To: "security_auditor", Payload: schemas.EdgePayloadSummary},
+			// The audit follows the write. The auditor is model-free today and
+			// does not read the summary. The edge is here because the hybrid
+			// security advisor will read the written-code summary, and edge
+			// scoping delivers a summary only across a declared edge.
+			{From: "code_writer", To: "security_auditor", Payload: schemas.EdgePayloadSummary},
 			{From: "static_analyzer", To: "test_runner", Payload: schemas.EdgePayloadSummary},
 			{From: "test_runner", To: "acceptance_verifier", Payload: schemas.EdgePayloadSummary},
 		},
@@ -281,7 +286,7 @@ func compileWarnings(nodes []schemas.PipelineNode, edges []schemas.PipelineEdge)
 		fromFree := from.EffectiveCapabilities().ModelFree
 		toFree := to.EffectiveCapabilities().ModelFree
 		if fromFree && !toFree {
-			warnings = append(warnings, fmt.Sprintf("edge %s -> %s carries command output into a model-backed node; the output is bounded, delimited, and treated as untrusted data", edge.From, edge.To))
+			warnings = append(warnings, fmt.Sprintf("edge %s -> %s carries command output into a model-backed node; the output is bounded, marked as data, and treated as untrusted", edge.From, edge.To))
 		}
 	}
 

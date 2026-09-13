@@ -10,8 +10,8 @@ import (
 )
 
 // maxCommandOutputChars bounds the output a command node carries downstream.
-// A command node's output is untrusted: a downstream LLM stage receives it as
-// delimited data, never as instructions.
+// A command node's output is untrusted. A downstream model stage receives it
+// as bounded, marked data. The marker is not a sanitizer.
 const maxCommandOutputChars = 4000
 
 // commandToolName is the one registry tool a command node may run through.
@@ -26,7 +26,10 @@ const commandToolName = "bash"
 type CommandStage struct {
 	// Name is the node name; it labels errors and activity.
 	Name string
-	// Command is the argv to run.
+	// Command is the argv to run. The stage joins the elements into one shell
+	// line before it calls the bash tool, so an argument that contains a space
+	// loses its boundary. Treat each element as one word of a shell command,
+	// not as one element of an exec vector.
 	Command []string
 }
 

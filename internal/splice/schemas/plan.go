@@ -374,6 +374,19 @@ func (e ExecutionPlan) Validate() error {
 		}
 		stageNames[stage.Name] = struct{}{}
 	}
+	// DependsOn is validated here, not per stage, because one stage cannot see
+	// its siblings. Edge scoping reads DependsOn, so an unknown or self
+	// dependency would scope a stage to nothing and look like success.
+	for i, stage := range e.Stages {
+		for _, dependency := range stage.DependsOn {
+			if dependency == stage.Name {
+				return fmt.Errorf("stages[%d] %q depends on itself", i, stage.Name)
+			}
+			if _, exists := stageNames[dependency]; !exists {
+				return fmt.Errorf("stages[%d] %q depends_on unknown stage %q", i, stage.Name, dependency)
+			}
+		}
+	}
 	return nil
 }
 

@@ -201,6 +201,42 @@ func TestDefaultTopologyKeepsBuiltinReaderCoupling(t *testing.T) {
 	}
 }
 
+// TestDefaultTopologySecurityAuditorSeesCodeWriter pins the intended flow for
+// the hybrid security advisor. The auditor is model-free today, so the edge is
+// inert. The advisor will read the written-code summary, and edge scoping
+// delivers that summary only when code_writer is an incoming dependency.
+func TestDefaultTopologySecurityAuditorSeesCodeWriter(t *testing.T) {
+	for _, tier := range allTiers {
+		compiled, err := CompileTopology(defaultTopology(), tier)
+		if err != nil {
+			t.Fatalf("CompileTopology(default, %s) = %v", tier, err)
+		}
+		var auditor *schemas.ExecutionStage
+		for i := range compiled.Stages {
+			if compiled.Stages[i].Name == "security_auditor" {
+				auditor = &compiled.Stages[i]
+			}
+		}
+		if auditor == nil {
+			continue
+		}
+		found := false
+		for _, dependency := range auditor.DependsOn {
+			if dependency == "code_writer" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("tier %s: security_auditor dependencies = %v, want code_writer", tier, auditor.DependsOn)
+		}
+		summaries := map[string]string{"code_writer": "wrote files"}
+		scoped, _ := scopedStageInputs(*auditor, summaries, nil, nil)
+		if scoped["code_writer"] != "wrote files" {
+			t.Fatalf("tier %s: security_auditor scoped summaries = %v, want code_writer", tier, scoped)
+		}
+	}
+}
+
 // TestStageChangedFilesPrefersAdditiveField pins the additive field wins over
 // the legacy Data keys, and that the legacy keys still work without it.
 func TestStageChangedFilesPrefersAdditiveField(t *testing.T) {

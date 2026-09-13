@@ -490,44 +490,48 @@ are delegation candidates per the model routing table).
 
 Every T-core checkpoint is zero behavior change until T5/T6.
 
-- `[ ]` **T1: topology schema.** `schemas/topology.go` (structs + `Validate()`
+- `[x]` **T1: topology schema.** `schemas/topology.go` (structs + `Validate()`
   per section 4.1: version rule, type/prompt/command consistency, budget vs
   `model_free` consistency, unique names, DAG). Table-driven tests naming
   each violation. Gate: `go test ./internal/splice/schemas/`.
-- `[ ]` **T2: embedded default + compiler.** `topology.go`
+- `[x]` **T2: embedded default + compiler.** `topology.go`
   (`defaultTopology()`, tier filter, compile-time rules, topo order, budget
   resolution, `CompileTopology`); planner compiles the default. Dogfood test
   asserts the section 4.2 equivalence relation for every tier. Gate:
   `go test ./internal/splice/...`.
-- `[ ]` **T3: executor honors the DAG.** `run.go`: topological schedule,
+- `[x]` **T3: executor honors the DAG.** `run.go`: topological schedule,
   edge-scoped `PriorSummaries` (summary/output/none), additive `ChangedFiles`
   on `HarnessStageOutput`, `(name, iteration)` stage-event keys. Default-graph
   equivalence + custom-graph tests (diamond, disconnected node). Gate:
   `go test ./internal/splice/... ./internal/tui/`.
-- `[ ]` **T4: capability flags.** Node caps drive model-free / pull-context /
+- `[x]` **T4: capability flags.** Node caps drive model-free / pull-context /
   memory gating; `isModelFreeStage` and the `stageOptions` name check deleted;
   the builtin profile map (4.1) is the default source. `StageTierLabels` and
   TUI enumerations read the active topology. Gate:
   `go test ./internal/splice/... ./internal/tui/`.
-- `[ ]` **T5: custom node types.** `stages/prompt_stage.go` (one LLM call,
+- `[x]` **T5: custom node types.** `stages/prompt_stage.go` (one LLM call,
   bounded template context, no tools in v1) + `stages/command_stage.go` (one
   fixed shell tool, never arbitrary tool names); registry built from topology;
   the `commands.go` raw-exec fallback becomes an error (fail loud). Mock
   provider + mock `RecordCommand` tests prove the sandboxed path is the only
   path. Gate: `go test ./internal/splice/...`.
-- `[ ]` **T6: loader, library, precedence, CLI verbs.** `topology_load.go`
+- `[x]` **T6: loader, library, precedence, CLI verbs.** `topology_load.go`
   (snapshot-at-start), `internal/cli/pipeline.go` (`list`/`use`/`show`/
   `import`/`export`), trust-gated project file (loaded after trust resolution
   in exec.go and app.go), hardened import client (https-only, no cross-host
   redirects, 1 MB cap, timeout), `--pipeline` flag, the section 5 model
   ladder, `topology_name` into `PipelineResult` + eval CSV (round-trip test).
   Gate: `go test ./internal/splice/... ./internal/cli/ ./internal/agenteval/`.
-- `[ ]` **T7: `splice config describe`.** Origin-annotated effective config,
+- `[x]` **T7: `splice config describe`.** Origin-annotated effective config,
   bounded to the section 5 key set. Gate: `go test ./internal/cli/`.
-- `[ ]` **T8: trajectory adaptation.** Canonical `verification_report` key +
+- `[x]` **T8: trajectory adaptation.** Canonical `verification_report` key +
   legacy aliases, capability-aware collection in `ComputeIterationState`,
   state-hash fallback to verification findings, load-time + run-start notice
   for verification-free graphs. Gate: `go test ./internal/splice/...`.
+
+A post-track review hardened four points: the audit edge from `code_writer`,
+`DependsOn` validation in `ExecutionPlan.Validate`, trust-before-parse in the
+topology loader, and data delimiters for prompt-node context.
 
 ### Track W checkpoints: web foundation (one local server, stdlib only)
 

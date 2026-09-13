@@ -66,7 +66,7 @@ func TestDefaultTopologyDependsOn(t *testing.T) {
 		"code_writer":         nil,
 		"test_generator":      {"code_writer"},
 		"static_analyzer":     {"code_writer"},
-		"security_auditor":    {"test_generator"},
+		"security_auditor":    {"test_generator", "code_writer"},
 		"test_runner":         {"static_analyzer"},
 		"acceptance_verifier": {"test_runner"},
 	}
@@ -203,7 +203,7 @@ func TestCompileTopologyWarnings(t *testing.T) {
 	if !strings.Contains(joined, "no code_writer upstream edge") {
 		t.Fatalf("warnings = %v, want the test_generator coupling warning", compiled.Warnings)
 	}
-	if !strings.Contains(joined, "untrusted data") {
+	if !strings.Contains(joined, "carries command output into a model-backed node") {
 		t.Fatalf("warnings = %v, want the command-to-model edge warning", compiled.Warnings)
 	}
 }
