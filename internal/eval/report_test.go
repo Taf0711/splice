@@ -20,7 +20,18 @@ func sampleReport() Report {
 		Tasks:     []TaskPair{{Name: "t", ColdSuccess: true, WarmSuccess: true, ColdTokens: 100, WarmTokens: 60}},
 		Gates:     []GateResult{{Name: "evidence", Passed: true}, {Name: "success", Passed: true}, {Name: "cost", Passed: true}, {Name: "burden", Passed: true}},
 		Verdict:   VerdictConclusive,
-		Reason:    "warm wins: 40.0% fewer tokens at equal success",
+		Reason:    "warm wins: matched-pair cost 40.0% lower at equal-or-better success (matched 1000 to 600 over 8 pairs, total 1000 to 600, mean per success 125 to 75, median per success 125 to 75)",
+		Cost: CostMeasures{
+			TotalCold:            1000,
+			TotalWarm:            600,
+			MeanColdPerSuccess:   125,
+			MeanWarmPerSuccess:   75,
+			MedianColdPerSuccess: 125,
+			MedianWarmPerSuccess: 75,
+			MatchedPairs:         8,
+			MatchedCold:          1000,
+			MatchedWarm:          600,
+		},
 		Constants: ReportConstants(),
 	}
 }
@@ -36,7 +47,7 @@ func TestReportGoldenKeys(t *testing.T) {
 	if err := json.Unmarshal(data, &keys); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	for _, want := range []string{"contract", "taskset", "model", "provider", "timestamp", "pairs", "cold", "warm", "tasks", "gates", "verdict", "reason", "constants"} {
+	for _, want := range []string{"contract", "taskset", "model", "provider", "timestamp", "pairs", "cold", "warm", "tasks", "gates", "verdict", "reason", "cost", "constants"} {
 		if _, ok := keys[want]; !ok {
 			t.Errorf("report JSON missing key %q: %s", want, data)
 		}
@@ -45,7 +56,7 @@ func TestReportGoldenKeys(t *testing.T) {
 
 func TestReportMarkdownContainsSections(t *testing.T) {
 	md := sampleReport().RenderMarkdown()
-	for _, want := range []string{"## Verdict", "## Gates", "## Tasks", "## Arms", "## Constants", "warm wins"} {
+	for _, want := range []string{"## Verdict", "## Gates", "## Tasks", "## Arms", "## Cost", "## Constants", "warm wins"} {
 		if !strings.Contains(md, want) {
 			t.Errorf("markdown missing %q", want)
 		}
