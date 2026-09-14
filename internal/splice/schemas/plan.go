@@ -662,7 +662,13 @@ type PipelineResult struct {
 	PricedRequestCount    int                    `json:"priced_request_count"`
 	UnpricedRequestCount  int                    `json:"unpriced_request_count"`
 	ErrorRequestCount     int                    `json:"error_request_count"`
-	AbortReason           *string                `json:"abort_reason,omitempty"`
+	// PromptLayoutFlips counts requests whose cacheable prefix layout (system
+	// prompt plus tool schema) differs from the previous request of the same
+	// stage in this run. Zero is the contract: a non-zero count means the
+	// provider's prefix cache was forfeited mid-stage. A request without a
+	// prompt_layout_hash carries no layout to compare and is skipped.
+	PromptLayoutFlips int     `json:"prompt_layout_flips,omitempty"`
+	AbortReason       *string `json:"abort_reason,omitempty"`
 	// UserAborted marks an aborted run the USER chose to stop. It is set
 	// only at the site that applies a user abort decision. Every other
 	// aborted run is an internal stop (max iterations, wall time, rollback
@@ -707,7 +713,7 @@ func (p PipelineResult) Validate() error {
 			return fmt.Errorf("invalid merge_status %q", *p.MergeStatus)
 		}
 	}
-	if p.PricedRequestCount < 0 || p.UnpricedRequestCount < 0 || p.ErrorRequestCount < 0 {
+	if p.PricedRequestCount < 0 || p.UnpricedRequestCount < 0 || p.ErrorRequestCount < 0 || p.PromptLayoutFlips < 0 {
 		return errors.New("request counts must be non-negative")
 	}
 	var input, output, cached, cacheWrite, reasoning int

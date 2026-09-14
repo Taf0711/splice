@@ -365,6 +365,9 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 	if err := applyRequestLedger(&result, ledger); err != nil {
 		return schemas.PipelineResult{}, fmt.Errorf("apply request ledger: %w", err)
 	}
+	if result.PromptLayoutFlips > 0 {
+		emitProgress(options, fmt.Sprintf("[orchestrator] the cacheable prompt prefix changed %d time(s) mid-run; the provider prefix cache was forfeited", result.PromptLayoutFlips))
+	}
 
 	if err := result.Validate(); err != nil {
 		return schemas.PipelineResult{}, fmt.Errorf("validate pipeline result: %w", err)
@@ -1908,6 +1911,28 @@ func abortReason(result schemas.PipelineResult) string {
 	return ""
 }
 
+// countPromptLayoutFlips reports how many requests changed the cacheable prefix
+// layout of their stage within one run. Records arrive in request order, and a
+// record without a layout hash carries no layout to compare, so it is skipped
+// rather than counted as a change. Distinct stages legitimately have distinct
+// layouts, so a stage is only ever compared against itself.
+func countPromptLayoutFlips(records []schemas.PipelineUsageRecord) int {
+	last := make(map[string]string)
+	seen := make(map[string]bool)
+	flips := 0
+	for _, r := range records {
+		if r.PromptLayoutHash == "" {
+			continue
+		}
+		if seen[r.Stage] && last[r.Stage] != r.PromptLayoutHash {
+			flips++
+		}
+		seen[r.Stage] = true
+		last[r.Stage] = r.PromptLayoutHash
+	}
+	return flips
+}
+
 // applyRequestLedger replaces stage-derived totals with authoritative request totals.
 func applyRequestLedger(result *schemas.PipelineResult, ledger *requestLedger) error {
 	type stageUsageKey struct {
@@ -1926,6 +1951,7 @@ func applyRequestLedger(result *schemas.PipelineResult, ledger *requestLedger) e
 		stageIndex[key] = i
 	}
 	result.UsageRecords = append([]schemas.PipelineUsageRecord(nil), ledger.records...)
+	result.PromptLayoutFlips = countPromptLayoutFlips(ledger.records)
 
 	// Reset old stage-derived totals so retries and auxiliary calls are counted
 	// once.
