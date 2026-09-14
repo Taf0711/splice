@@ -286,6 +286,11 @@ Each request records `prompt_layout_hash`. The hash covers the system prompt and
 the tool schema. The tool schema does not change when memory is present or
 absent, so the prefix stays stable for a stage.
 
+A record states `cache_hit` when the provider reported usage. The field stays
+empty when usage is missing, because a missing report is not a cache miss. A
+record also states `memory_position`. Splice places dynamic content after the
+prefix.
+
 The result counts prefix changes in `prompt_layout_flips`. Zero is the contract.
 Splice writes a progress line when the count is not zero. A change adds cost and
 does not fail the run.

@@ -51,6 +51,9 @@ func (ledger *requestLedger) recordingOptions(options PipelineRunConfig) Pipelin
 	downstreamLegacy := options.OnUsage
 	recorded.OnAttributedUsage = func(attributed agent.AttributedUsage) {
 		attributed.Sequence = len(ledger.records) + 1
+		// usageTrusted is true only when a normalized provider report exists.
+		// cache_hit stays nil otherwise, because a missing report is not a miss.
+		usageTrusted := false
 		if attributed.UsageError != "" {
 			attributed.Usage = zeroruntime.Usage{}
 			attributed.Cost = costError(attributed.UsageError)
@@ -71,6 +74,7 @@ func (ledger *requestLedger) recordingOptions(options PipelineRunConfig) Pipelin
 				attributed.Cost = costError(err.Error())
 			} else {
 				attributed.Usage = normalized
+				usageTrusted = true
 				if attributed.ReportedCostUSD != nil {
 					// The provider told us the exact charge; trust it over the
 					// registry estimate instead of computing one we'd discard.
@@ -87,6 +91,11 @@ func (ledger *requestLedger) recordingOptions(options PipelineRunConfig) Pipelin
 			attributed.Cost = costError("invalid cost estimate: " + err.Error())
 		}
 
+		var cacheHit *bool
+		if usageTrusted {
+			hit := attributed.Usage.CachedInputTokens > 0
+			cacheHit = &hit
+		}
 		record := schemas.PipelineUsageRecord{
 			Sequence:          attributed.Sequence,
 			Provider:          attributed.ProviderName,
@@ -107,6 +116,8 @@ func (ledger *requestLedger) recordingOptions(options PipelineRunConfig) Pipelin
 			PricingAsOf:       attributed.Cost.PricingAsOf,
 			UnpricedReason:    attributed.Cost.UnpricedReason,
 			PromptLayoutHash:  attributed.PromptLayoutHash,
+			CacheHit:          cacheHit,
+			MemoryPosition:    schemas.MemoryPositionAfterPrefix,
 		}
 		if attributed.Cost.CostUSD != nil {
 			cost := *attributed.Cost.CostUSD

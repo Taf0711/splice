@@ -547,6 +547,14 @@ const (
 	CostStatusError    = "error"
 )
 
+// MemoryPosition states describe where dynamic content sits relative to the
+// cacheable prefix of a request. Dynamic content after the prefix keeps the
+// prefix cacheable. Content before the prefix changes the prefix itself.
+const (
+	MemoryPositionAfterPrefix  = "after_prefix"
+	MemoryPositionBeforePrefix = "before_prefix"
+)
+
 // PipelineUsageRecord is one provider request priced at the orchestrator ledger.
 type PipelineUsageRecord struct {
 	Sequence          int      `json:"sequence"`
@@ -573,6 +581,16 @@ type PipelineUsageRecord struct {
 	// share one hash; a change between rounds means the cacheable prefix
 	// flipped and the provider's prefix cache was forfeited.
 	PromptLayoutHash string `json:"prompt_layout_hash,omitempty"`
+	// CacheHit reports whether this request read a cached prefix. Nil means the
+	// provider reported no usage, or the report could not be normalized. A
+	// missing report is not a cache miss, so the field stays nil rather than
+	// defaulting to false.
+	CacheHit *bool `json:"cache_hit,omitempty"`
+	// MemoryPosition records where dynamic content (memory, prior summaries,
+	// revision context) sits relative to the cacheable prefix. Splice places it
+	// after the prefix by construction, so this is a constant today. It is
+	// recorded so a reader does not have to infer the placement.
+	MemoryPosition string `json:"memory_position,omitempty"`
 }
 
 // Validate checks the pipeline usage record.
@@ -607,6 +625,17 @@ func (r PipelineUsageRecord) Validate() error {
 		}
 		if r.CostStatus != CostStatusUnpriced {
 			return errors.New("usage_reported false requires unpriced cost status")
+		}
+	}
+	if r.MemoryPosition != "" && r.MemoryPosition != MemoryPositionAfterPrefix && r.MemoryPosition != MemoryPositionBeforePrefix {
+		return fmt.Errorf("invalid memory_position %q", r.MemoryPosition)
+	}
+	if r.CacheHit != nil {
+		if !r.UsageReported {
+			return errors.New("cache_hit requires reported usage")
+		}
+		if *r.CacheHit != (r.CachedTokens > 0) {
+			return fmt.Errorf("cache_hit %t does not match cached input tokens %d", *r.CacheHit, r.CachedTokens)
 		}
 	}
 	switch r.CostStatus {

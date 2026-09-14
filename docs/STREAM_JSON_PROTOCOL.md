@@ -261,8 +261,9 @@ and design-plan results. Decode `text` when the client needs result fields.
 
 A pipeline result can contain `run_id`, `status`, `tier`, stage records, usage
 totals, `abort_reason`, and `user_aborted`. Each `usage_records` entry can
-contain `prompt_layout_hash`. The result can contain `prompt_layout_flips`, the
-count of prefix changes during the run. `user_aborted` is true only when
+contain `prompt_layout_hash`, `cache_hit`, and `memory_position`. The result can
+contain `prompt_layout_flips`, the count of prefix changes during the run.
+`user_aborted` is true only when
 the user chose to stop the run. Clients must treat `status=aborted` with
 `user_aborted=false` as a failure, not a user cancellation.
 

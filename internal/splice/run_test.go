@@ -3323,6 +3323,46 @@ func TestRequestLedgerRecordingOptionsCases(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "records a cache hit from cached tokens",
+			usages: []agent.AttributedUsage{{
+				Usage:         zeroruntime.Usage{InputTokens: 100, CachedInputTokens: 60, OutputTokens: 10},
+				UsageReported: true, Stage: "code_writer", Iteration: 1,
+			}},
+			check: func(t *testing.T, ledger *requestLedger, _ []agent.AttributedUsage) {
+				rec := ledger.records[0]
+				if rec.CacheHit == nil || !*rec.CacheHit {
+					t.Fatalf("cache_hit = %v, want true", rec.CacheHit)
+				}
+				if rec.MemoryPosition != schemas.MemoryPositionAfterPrefix {
+					t.Fatalf("memory_position = %q, want %q", rec.MemoryPosition, schemas.MemoryPositionAfterPrefix)
+				}
+			},
+		},
+		{
+			name: "records a cache miss when usage is reported without cached tokens",
+			usages: []agent.AttributedUsage{{
+				Usage:         zeroruntime.Usage{InputTokens: 100, OutputTokens: 10},
+				UsageReported: true, Stage: "code_writer", Iteration: 1,
+			}},
+			check: func(t *testing.T, ledger *requestLedger, _ []agent.AttributedUsage) {
+				rec := ledger.records[0]
+				if rec.CacheHit == nil || *rec.CacheHit {
+					t.Fatalf("cache_hit = %v, want false", rec.CacheHit)
+				}
+			},
+		},
+		{
+			name: "leaves cache_hit unknown when usage is missing",
+			usages: []agent.AttributedUsage{{
+				UsageReported: false, Stage: "test_runner", Iteration: 1,
+			}},
+			check: func(t *testing.T, ledger *requestLedger, _ []agent.AttributedUsage) {
+				if got := ledger.records[0].CacheHit; got != nil {
+					t.Fatalf("cache_hit = %v, want nil for missing usage", *got)
+				}
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

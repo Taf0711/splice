@@ -366,10 +366,24 @@ func TestPipelineUsageRecordValidation(t *testing.T) {
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("valid record: %v", err)
 	}
+	withCache := valid
+	cachedTokens := 30
+	hit := true
+	withCache.InputTokens = 100
+	withCache.CachedTokens = cachedTokens
+	withCache.CacheHit = &hit
+	withCache.MemoryPosition = MemoryPositionAfterPrefix
+	if err := withCache.Validate(); err != nil {
+		t.Fatalf("record with cache telemetry: %v", err)
+	}
 	unpriced := PipelineUsageRecord{
 		Sequence: 1, Stage: "s", Iteration: 1, UsageReported: true,
 		InputTokens: 10, OutputTokens: 5,
 		CostStatus: CostStatusUnpriced, UnpricedReason: "no model", CostUSD: &zero,
+	}
+	unreported := PipelineUsageRecord{
+		Sequence: 1, Stage: "s", Iteration: 1, UsageReported: false,
+		CostStatus: CostStatusUnpriced, UnpricedReason: "not reported",
 	}
 	tests := []struct {
 		name    string
@@ -388,6 +402,9 @@ func TestPipelineUsageRecordValidation(t *testing.T) {
 		{name: "unpriced cost usd", base: unpriced, wantErr: "unpriced record must not have cost_usd"},
 		{name: "unpriced reason", base: unpriced, mutate: func(r *PipelineUsageRecord) { r.CostUSD = nil; r.UnpricedReason = "" }, wantErr: "unpriced_reason"},
 		{name: "cost status", mutate: func(r *PipelineUsageRecord) { r.CostStatus = "unknown" }, wantErr: "cost_status"},
+		{name: "invalid memory position", mutate: func(r *PipelineUsageRecord) { r.MemoryPosition = "sideways" }, wantErr: "memory_position"},
+		{name: "cache hit contradicts cached tokens", mutate: func(r *PipelineUsageRecord) { flag := true; r.CacheHit = &flag; r.CachedTokens = 0 }, wantErr: "cache_hit"},
+		{name: "cache hit without reported usage", base: unreported, mutate: func(r *PipelineUsageRecord) { flag := true; r.CacheHit = &flag }, wantErr: "cache_hit requires reported usage"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
