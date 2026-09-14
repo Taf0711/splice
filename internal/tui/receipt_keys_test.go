@@ -11,6 +11,8 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -282,6 +284,11 @@ func TestReceiptKeysInertBehindArmedHandoff(t *testing.T) {
 func verifiedRunFixture(t *testing.T) model {
 	t.Helper()
 	m := mouseTestModel()
+	// The verified receipt advertises [E] export, and handleExportCommand
+	// resolves its default path against the model cwd. Point that cwd at a
+	// per-test temp dir so the test cannot write an artifact into the package
+	// directory (the origin of the tracked splice-transcript-*.txt files).
+	m.cwd = t.TempDir()
 	m.sessionStore = testSessionStore(t)
 	m.activeRunID = 7
 	m.width, m.height, m.altScreen = 100, 40, true
@@ -350,6 +357,23 @@ func TestVerifiedReceiptExportResumeAndNoWorktreeOpen(t *testing.T) {
 	exported := updated.(model)
 	if !strings.Contains(transcriptText(exported.transcript), "export") {
 		t.Fatal("verified receipt: [E] produced no export ack")
+	}
+	// The default export path resolves against the model cwd. The fixture
+	// must not use the package directory (the test process cwd), or the
+	// suite writes splice-transcript-*.txt into the checkout.
+	packageDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Clean(exported.cwd) == filepath.Clean(packageDir) {
+		t.Fatalf("verified receipt fixture cwd is the package dir %q; export would litter the checkout", packageDir)
+	}
+	matches, err := filepath.Glob(filepath.Join(exported.cwd, "splice-transcript-*.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("verified receipt export wrote %d files under %q, want 1", len(matches), exported.cwd)
 	}
 	updated, _ = exported.Update(reviewRealShiftKey('R'))
 	resumed := updated.(model)
