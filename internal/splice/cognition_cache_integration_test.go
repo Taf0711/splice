@@ -108,11 +108,87 @@ func TestPrepareStageInputOneSpawnPerUniqueCommit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepareStageInput re-entry: %v", err)
 	}
-	if prepared2.MemoryBundle == nil || len(prepared2.MemoryBundle.Observations) != 1 {
-		t.Fatalf("re-entry expected 1 observation (single key), got %v", prepared2.MemoryBundle)
+	// Run-local replay guard: the first invocation delivered observation 1 to
+	// code_writer, so the re-entry (repair semantics: same stage, same run)
+	// must SUPPRESS it from prompt delivery even though the direct hit and
+	// its zero-spawn freshness memo still work. Suppression is delivery-level
+	// only — the git spawn count below proves retrieval stayed real.
+	if prepared2.MemoryBundle == nil || len(prepared2.MemoryBundle.Observations) != 0 {
+		t.Fatalf("re-entry expected the already-consumed observation to be suppressed, got %v", prepared2.MemoryBundle)
+	}
+	if got := tr.replaySuppressedCount(); got != 1 {
+		t.Fatalf("replay suppressed count = %d, want 1", got)
 	}
 	if got := runner.spawns; got != 0 {
 		t.Fatalf("git spawns on re-entry = %d, want 0 (memoized)", got)
+	}
+}
+
+// TestPrepareStageInputRepairReentryRedeliversDirectHit pins the repair
+// exemption on the direct cognition path. A repair builds a fresh provider
+// request, so a direct hit the initial invocation consumed must be
+// re-delivered; a plain re-entry in the same run still suppresses it. The
+// zero-spawn freshness memo holds through both.
+func TestPrepareStageInputRepairReentryRedeliversDirectHit(t *testing.T) {
+	root, commit := cognitionFixtureRepo(t, "internal/auth/session.go", "package auth\n")
+	obs := obsWithID(1, root, "session invalidation rule")
+	obs.SourceCommit = &commit
+	obs.TopicKey = ptr("file:internal/auth/session.go")
+	store := &cognitionLookupStore{topics: map[string]schemas.MemoryBundle{
+		"file:internal/auth/session.go": {RequestingAgent: "code_writer", Observations: []schemas.MemoryObservation{obs}},
+	}}
+
+	runner := &spawnCountingRunner{}
+	prevCapture := cognition.SetGitCaptureForTest(runner.Capture)
+	defer cognition.SetGitCaptureForTest(prevCapture)
+
+	plan := cognitionPlan("code_writer")
+	tr := newRunTraceAccumulator(nil, "run-repair-direct", "session", root, plan, "active", nil)
+	prepare := func(iteration int, repair bool) schemas.HarnessStageInput {
+		t.Helper()
+		prepared, err := prepareStageInput(context.Background(), stageInputPreparation{
+			Input:         cognitionInput("code_writer", "fix session invalidation in internal/auth/session.go#ResetPassword"),
+			Stage:         &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
+			Budget:        stageBudgetByName(plan, "code_writer"),
+			Tier:          plan.Tier,
+			Iteration:     iteration,
+			WorkDir:       root,
+			Options:       PipelineConfigFromAgentOptions(agent.Options{}),
+			Memory:        store,
+			Trace:         tr,
+			RepairReentry: repair,
+		})
+		if err != nil {
+			t.Fatalf("prepareStageInput: %v", err)
+		}
+		return prepared
+	}
+
+	first := prepare(1, false)
+	if first.MemoryBundle == nil || len(first.MemoryBundle.Observations) != 1 {
+		t.Fatalf("first invocation observations = %v, want 1", first.MemoryBundle)
+	}
+	runner.mu.Lock()
+	runner.spawns = 0
+	runner.mu.Unlock()
+
+	replay := prepare(2, false)
+	if replay.MemoryBundle == nil || len(replay.MemoryBundle.Observations) != 0 {
+		t.Fatalf("plain re-entry must suppress the consumed fact, got %v", replay.MemoryBundle)
+	}
+	if got := tr.replaySuppressedCount(); got != 1 {
+		t.Fatalf("plain re-entry replay suppressed count = %d, want 1", got)
+	}
+
+	repair := prepare(2, true)
+	if repair.MemoryBundle == nil || len(repair.MemoryBundle.Observations) != 1 {
+		t.Fatalf("repair re-entry must re-deliver the fresh-request fact, got %v", repair.MemoryBundle)
+	}
+	if got := tr.replaySuppressedCount(); got != 1 {
+		t.Fatalf("repair re-entry added a suppression: count = %d, want 1", got)
+	}
+	if got := runner.spawns; got != 0 {
+		t.Fatalf("git spawns after memoized re-entries = %d, want 0", got)
 	}
 }
 

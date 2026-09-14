@@ -274,6 +274,9 @@ func runRepairStage(ctx context.Context, wallDeadline time.Time, input schemas.H
 		Memory:    mem,
 		Trace:     tr,
 		NowUnix:   time.Now().Unix(),
+		// A repair builds a fresh provider request, so still-relevant
+		// facts must be re-delivered rather than replay-suppressed.
+		RepairReentry: true,
 	})
 	if err != nil {
 		return schemas.HarnessStageOutput{}, err

@@ -202,6 +202,13 @@ type stageInputPreparation struct {
 	Memory    MemoryStore
 	Trace     *runTraceAccumulator
 	NowUnix   int64
+	// RepairReentry marks that this preparation serves a repair invocation.
+	// Each repair builds a FRESH provider request (a new system+user message
+	// pair with no conversation carry-over), so a fact delivered to the
+	// initial invocation is not automatically present. The run-local replay
+	// suppression MUST NOT remove still-relevant facts here: they are
+	// re-delivered, bounded by the same admission and compaction limits.
+	RepairReentry bool
 }
 
 // prepareStageInput is the single composition path for both the normal pass
@@ -235,10 +242,38 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 		}
 
 		// C0: direct cognition fast path (retrieval only, never control flow).
+		// retrieve-no-prompt keeps the retrieval telemetry honest but strips
+		// the delivery: the miss path below runs and records what it found,
+		// while the bundle never reaches the stage input.
 		if direct, ok := p.tryDirectCognition(ctx, input, root); ok {
-			input.MemoryBundle = &direct.bundle
-			if p.Trace != nil {
-				p.Trace.recordMemoryLookup(input.StageName, p.Iteration, "direct", direct.fresh, direct.stale)
+			if mode, modeErr := resolveExemplarMode(); modeErr != nil {
+				return schemas.HarnessStageInput{}, modeErr
+			} else if !mode.deliverToModel() {
+				if p.Trace != nil {
+					p.Trace.recordMemoryLookup(input.StageName, p.Iteration, "direct", direct.fresh, direct.stale)
+					p.Trace.recordMemory(input.StageName, p.Iteration, direct.bundle)
+				}
+			} else {
+				// Run-local replay guard: a direct hit the stage already
+				// consumed this run is NOT a retrieval miss. The hit still
+				// counts for telemetry, the bundle empties, and because the
+				// direct path returned true the broad search below is
+				// skipped: suppression must not push the same cognition back
+				// through FTS redelivery. Repair re-entry is exempt because
+				// its provider request is fresh, so the fact is re-delivered.
+				if !p.RepairReentry {
+					suppressed := p.Trace.filterAlreadyDelivered(input.StageName, &direct.bundle)
+					if suppressed > 0 {
+						emitProgress(p.Options, fmt.Sprintf("[%s] cognition: %d already-consumed item(s) suppressed on re-entry\n", input.StageName, suppressed))
+					}
+				}
+				if direct.bundle.Observations == nil && len(direct.bundle.Observations) == 0 {
+					direct.bundle.Observations = []schemas.MemoryObservation{}
+				}
+				input.MemoryBundle = &direct.bundle
+				if p.Trace != nil {
+					p.Trace.recordMemoryLookup(input.StageName, p.Iteration, "direct", direct.fresh, direct.stale)
+				}
 			}
 		} else {
 			bundle, mErr := p.Memory.Search(ctx, newMemoryQuery(input.StageName, input.RequestIntent, root))
@@ -251,17 +286,50 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 				}
 			} else {
 				bundle.RequestingAgent = input.StageName
-				// PC3: append kept-run exemplars. Best-effort and silent on
-				// failure; an empty exemplar set is correct, not a bug.
-				if querier, ok := p.Memory.(learn.TraceQuerier); ok && querier != nil {
-					if exemplars, eErr := retrieveExemplars(ctx, querier, root, input.RequestIntent); eErr == nil {
-						bundle.Exemplars = exemplars
-						if len(exemplars) > 0 {
-							emitProgress(p.Options, fmt.Sprintf("exemplars: %d from kept runs\n", len(exemplars)))
+				// C1c D4: the ablation mode governs which memory classes the
+				// miss path delivers. The default (both) reproduces today's
+				// behavior; other modes exist for the benchmark only.
+				mode, modeErr := resolveExemplarMode()
+				if modeErr != nil {
+					return schemas.HarnessStageInput{}, modeErr
+				}
+				if mode.deliverExemplars() {
+					// PC3: append kept-run exemplars. Best-effort and silent on
+					// failure; an empty exemplar set is correct, not a bug.
+					if querier, ok := p.Memory.(learn.TraceQuerier); ok && querier != nil {
+						if exemplars, eErr := retrieveExemplars(ctx, querier, root, input.RequestIntent); eErr == nil {
+							bundle.Exemplars = exemplars
+							if len(exemplars) > 0 {
+								emitProgress(p.Options, fmt.Sprintf("exemplars: %d from kept runs\n", len(exemplars)))
+							}
 						}
 					}
 				}
+				if !mode.deliverObservations() {
+					bundle.Observations = nil
+				}
 				admitted := memoryreason.Admit(&bundle, root, p.NowUnix)
+				if !mode.deliverToModel() {
+					// retrieve-no-prompt: record what admission WOULD have
+					// delivered, then deliver nothing. The trace keeps the
+					// retrieval truth; the stage input stays cognition-free.
+					if p.Trace != nil && admitted.Bundle != nil {
+						p.Trace.recordMemory(input.StageName, p.Iteration, *admitted.Bundle)
+					}
+					bundle.Observations = nil
+					bundle.Exemplars = nil
+					admitted.Bundle = &bundle
+				}
+				// Run-local replay guard: items this stage already consumed
+				// earlier in the run are suppressed from delivery. Retrieval
+				// and admission ran for real (counts and miss-path telemetry
+				// stay honest); only the prompt replay is removed. Genuinely
+				// new cognition stays fully eligible (consumed-set semantics,
+				// not a memory-off switch). Repair re-entry is exempt: its
+				// provider request is fresh, so still-relevant facts return.
+				if !p.RepairReentry {
+					p.Trace.filterAlreadyDelivered(input.StageName, admitted.Bundle)
+				}
 				input.MemoryBundle = admitted.Bundle
 				emitProgress(p.Options, admissionProgressLine(input.StageName, admitted))
 			}
@@ -282,6 +350,12 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 	// Post-compaction trace accounting: counts describe delivered memory.
 	if p.Trace != nil && input.MemoryBundle != nil {
 		p.Trace.recordMemory(input.StageName, p.Iteration, *input.MemoryBundle)
+	}
+	// Mark consumption AFTER compaction so only model-visible items enter the
+	// run-local consumed set: an item compaction dropped never reached the
+	// model and stays eligible for a later legitimate delivery.
+	if p.Trace != nil {
+		p.Trace.markDelivered(input.StageName, input.MemoryBundle)
 	}
 	return input, nil
 }

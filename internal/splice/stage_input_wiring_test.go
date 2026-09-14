@@ -177,10 +177,20 @@ func int64Ptr(n int64) *int64 { return &n }
 type memoryScriptedProvider struct {
 	claims  []schemas.MemoryDisposition
 	request zeroruntime.CompletionRequest
+	// capturePayload optionally records each request's user-message content
+	// (the typed payload) for tests that need to assert on delivered memory.
+	capturePayload *[]string
 }
 
 func (p *memoryScriptedProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
 	p.request = request
+	if p.capturePayload != nil {
+		for _, message := range request.Messages {
+			if strings.Contains(message.Content, `"intent"`) {
+				*p.capturePayload = append(*p.capturePayload, message.Content)
+			}
+		}
+	}
 	core := map[string]any{
 		"files": []schemas.FileChange{}, "language": "go",
 		"intent": "no changes", "confidence": 0.9,
@@ -251,18 +261,31 @@ func TestRepairReentryRetrievesAndTracesEachMemoryInvocation(t *testing.T) {
 			break
 		}
 	}
+	// Repair re-entry builds a FRESH provider request (a new system+user
+	// message pair, no conversation carry-over), so the fact delivered to
+	// the initial invocation is NOT automatically present in the repair
+	// request. The run-local replay suppression is skipped for repair
+	// re-entry: still-relevant facts are re-delivered, bounded by the same
+	// admission and compaction limits. Both invocations' reviews land in the
+	// record.
 	if len(writer.MemoryReviews) != 2 {
-		t.Fatalf("writer reviews = %+v, want initial plus repair", writer.MemoryReviews)
+		t.Fatalf("writer reviews = %+v, want initial plus repair re-entry review", writer.MemoryReviews)
 	}
-	for i, review := range writer.MemoryReviews {
+	for _, review := range writer.MemoryReviews {
 		if len(review.Items) != 1 || review.Items[0].MemoryID != "observation:8" {
-			t.Fatalf("review %d = %+v", i, review)
+			t.Fatalf("both invocations must re-deliver observation:8, got %+v", review)
 		}
 	}
+	if got := tr.replaySuppressedCount(); got != 0 {
+		t.Fatalf("replay suppressed count = %d, want 0 (repair re-entry skips suppression)", got)
+	}
+	// Retrieval stayed real (2 searches) and both fresh requests delivered
+	// the fact: the delivered-memory counters count MODEL-VISIBLE items
+	// across the initial invocation and the repair re-entry.
 	meta := tr.stages[stageKey{"code_writer", 1}]
 	wantChars := 2 * (len(observation.Title) + len(observation.Content))
 	if meta.MemoryItems != 2 || meta.MemoryChars != wantChars || tr.memoryItems != 2 || tr.memoryChars != wantChars {
-		t.Fatalf("memory counters: meta=%+v total_items=%d total_chars=%d, want two invocations and %d chars", meta, tr.memoryItems, tr.memoryChars, wantChars)
+		t.Fatalf("memory counters: meta=%+v total_items=%d total_chars=%d, want two delivered invocations and %d chars", meta, tr.memoryItems, tr.memoryChars, wantChars)
 	}
 }
 
