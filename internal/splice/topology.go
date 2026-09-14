@@ -41,11 +41,14 @@ func defaultTopology() *schemas.PipelineTopology {
 			{From: "code_writer", To: "test_generator", Payload: schemas.EdgePayloadSummary},
 			{From: "code_writer", To: "static_analyzer", Payload: schemas.EdgePayloadSummary},
 			{From: "test_generator", To: "security_auditor", Payload: schemas.EdgePayloadSummary},
-			// The audit follows the write. The auditor is model-free today and
-			// does not read the summary. The edge is here because the hybrid
-			// security advisor will read the written-code summary, and edge
-			// scoping delivers a summary only across a declared edge.
+			// The audit follows both the write and the static analysis. The
+			// auditor is model-free today and reads neither summary. The edges
+			// are here because the hybrid security advisor will read the
+			// written-code and analysis summaries, and edge scoping delivers a
+			// summary only across a declared edge. This edge precedes the
+			// analyzer-to-runner edge so the topological order stays stable.
 			{From: "code_writer", To: "security_auditor", Payload: schemas.EdgePayloadSummary},
+			{From: "static_analyzer", To: "security_auditor", Payload: schemas.EdgePayloadSummary},
 			{From: "static_analyzer", To: "test_runner", Payload: schemas.EdgePayloadSummary},
 			{From: "test_runner", To: "acceptance_verifier", Payload: schemas.EdgePayloadSummary},
 		},

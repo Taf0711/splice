@@ -66,7 +66,7 @@ func TestDefaultTopologyDependsOn(t *testing.T) {
 		"code_writer":         nil,
 		"test_generator":      {"code_writer"},
 		"static_analyzer":     {"code_writer"},
-		"security_auditor":    {"test_generator", "code_writer"},
+		"security_auditor":    {"test_generator", "code_writer", "static_analyzer"},
 		"test_runner":         {"static_analyzer"},
 		"acceptance_verifier": {"test_runner"},
 	}

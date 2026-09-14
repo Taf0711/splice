@@ -7168,7 +7168,8 @@ A review of the committed T1-T8 work on `feat/topology-core` found and fixed
 four defects. H1: `defaultTopology` gave `security_auditor` only
 `test_generator` as an incoming edge, so edge scoping would have starved the
 future model-backed security advisor of the `code_writer` summary; the
-`code_writer -> security_auditor` edge is now declared and a test pins it. H2:
+`code_writer -> security_auditor` and `static_analyzer -> security_auditor`
+edges are now declared and a test pins them. H2:
 `ExecutionStage.Validate` ignored `DependsOn`, so a plan with an unknown or
 self dependency passed validation and then scoped to nothing;
 `ExecutionPlan.Validate` now rejects both, with a forward reference still valid.

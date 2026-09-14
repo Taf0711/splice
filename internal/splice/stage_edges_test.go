@@ -201,11 +201,12 @@ func TestDefaultTopologyKeepsBuiltinReaderCoupling(t *testing.T) {
 	}
 }
 
-// TestDefaultTopologySecurityAuditorSeesCodeWriter pins the intended flow for
-// the hybrid security advisor. The auditor is model-free today, so the edge is
-// inert. The advisor will read the written-code summary, and edge scoping
-// delivers that summary only when code_writer is an incoming dependency.
-func TestDefaultTopologySecurityAuditorSeesCodeWriter(t *testing.T) {
+// TestDefaultTopologySecurityAuditorSeesUpstreamContext pins the intended flow
+// for the hybrid security advisor. The auditor is model-free today, so the
+// edges are inert. The advisor will read the written-code and static-analysis
+// summaries, and edge scoping delivers a summary only when the producer is an
+// incoming dependency.
+func TestDefaultTopologySecurityAuditorSeesUpstreamContext(t *testing.T) {
 	for _, tier := range allTiers {
 		compiled, err := CompileTopology(defaultTopology(), tier)
 		if err != nil {
@@ -220,19 +221,19 @@ func TestDefaultTopologySecurityAuditorSeesCodeWriter(t *testing.T) {
 		if auditor == nil {
 			continue
 		}
-		found := false
+		dependencies := make(map[string]bool, len(auditor.DependsOn))
 		for _, dependency := range auditor.DependsOn {
-			if dependency == "code_writer" {
-				found = true
+			dependencies[dependency] = true
+		}
+		for _, want := range []string{"code_writer", "static_analyzer"} {
+			if !dependencies[want] {
+				t.Fatalf("tier %s: security_auditor dependencies = %v, want %s", tier, auditor.DependsOn, want)
 			}
 		}
-		if !found {
-			t.Fatalf("tier %s: security_auditor dependencies = %v, want code_writer", tier, auditor.DependsOn)
-		}
-		summaries := map[string]string{"code_writer": "wrote files"}
+		summaries := map[string]string{"code_writer": "wrote files", "static_analyzer": "no findings"}
 		scoped, _ := scopedStageInputs(*auditor, summaries, nil, nil)
-		if scoped["code_writer"] != "wrote files" {
-			t.Fatalf("tier %s: security_auditor scoped summaries = %v, want code_writer", tier, scoped)
+		if scoped["code_writer"] != "wrote files" || scoped["static_analyzer"] != "no findings" {
+			t.Fatalf("tier %s: security_auditor scoped summaries = %v, want code_writer and static_analyzer", tier, scoped)
 		}
 	}
 }
