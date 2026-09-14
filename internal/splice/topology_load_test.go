@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Taf0711/splice/internal/splice/schemas"
+	"github.com/Taf0711/splice/internal/version"
 )
 
 func writeTopologyFile(t *testing.T, path, name string) {
@@ -138,6 +139,74 @@ func TestResolveTopologyIgnoresInvalidUntrustedProject(t *testing.T) {
 	if len(warnings) != 1 || !strings.Contains(warnings[0], "untrusted") {
 		t.Fatalf("warnings = %v, want one untrusted-project warning", warnings)
 	}
+}
+
+// TestResolveTopologyEnforcesMinSplice pins M1 at the loader: a topology that
+// requires a newer Splice fails loud, an untrusted file is ignored before the
+// check, and a dev build skips the check so local work is not blocked.
+func TestResolveTopologyEnforcesMinSplice(t *testing.T) {
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, ".splice", "pipeline.json")
+	topology := schemas.PipelineTopology{
+		Version:   schemas.TopologySchemaVersion,
+		Name:      "needs-newer",
+		MinSplice: "99.0.0",
+		Nodes:     []schemas.PipelineNode{{Name: "code_writer", Type: "code_writer"}},
+	}
+	data, err := json.MarshalIndent(topology, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	original := version.Version
+	t.Cleanup(func() { version.Version = original })
+
+	t.Run("release build below the requirement fails loud", func(t *testing.T) {
+		version.Version = "0.9.0"
+		_, _, _, err := ResolveTopology(TopologySources{WorkspaceRoot: workspace, Trusted: true, UserConfigDir: t.TempDir()})
+		if err == nil || !strings.Contains(err.Error(), "requires Splice") {
+			t.Fatalf("error = %v, want a minimum-version error", err)
+		}
+	})
+	t.Run("release build at the requirement passes", func(t *testing.T) {
+		version.Version = "99.0.0"
+		resolved, source, _, err := ResolveTopology(TopologySources{WorkspaceRoot: workspace, Trusted: true, UserConfigDir: t.TempDir()})
+		if err != nil {
+			t.Fatalf("ResolveTopology: %v", err)
+		}
+		if resolved.Name != "needs-newer" || source != TopologySourceProject {
+			t.Fatalf("resolved %q from %q, want the project topology", resolved.Name, source)
+		}
+	})
+	t.Run("untrusted file is ignored before the check", func(t *testing.T) {
+		version.Version = "0.9.0"
+		resolved, source, warnings, err := ResolveTopology(TopologySources{WorkspaceRoot: workspace, Trusted: false, UserConfigDir: t.TempDir()})
+		if err != nil {
+			t.Fatalf("ResolveTopology: %v", err)
+		}
+		if resolved.Name != "default" || source != TopologySourceDefault {
+			t.Fatalf("resolved %q from %q, want the embedded default", resolved.Name, source)
+		}
+		if len(warnings) != 1 || !strings.Contains(warnings[0], "untrusted") {
+			t.Fatalf("warnings = %v, want one untrusted warning", warnings)
+		}
+	})
+	t.Run("dev build skips the check", func(t *testing.T) {
+		version.Version = "dev"
+		resolved, source, _, err := ResolveTopology(TopologySources{WorkspaceRoot: workspace, Trusted: true, UserConfigDir: t.TempDir()})
+		if err != nil {
+			t.Fatalf("ResolveTopology: %v", err)
+		}
+		if resolved.Name != "needs-newer" || source != TopologySourceProject {
+			t.Fatalf("resolved %q from %q, want the project topology", resolved.Name, source)
+		}
+	})
 }
 
 func TestResolveTopologyRejectsInvalidTopology(t *testing.T) {

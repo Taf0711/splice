@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/Taf0711/splice/internal/version"
 )
 
 // TopologySchemaVersion is the only pipeline topology version this build
@@ -362,6 +364,21 @@ func (t PipelineTopology) Validate() error {
 		if err := t.Budget.Validate(); err != nil {
 			return fmt.Errorf("topology %s: %w", t.Name, err)
 		}
+	}
+	return nil
+}
+
+// ValidateMinSplice reports an error when this build is older than the
+// topology's declared minimum. An empty requirement passes. A build version
+// that is not a release version, such as "dev", skips the check, so local work
+// is not blocked. A malformed requirement fails loud.
+func (t PipelineTopology) ValidateMinSplice(current string) error {
+	ok, err := version.SatisfiesMin(current, t.MinSplice)
+	if err != nil {
+		return fmt.Errorf("topology %s: splice_min_version: %w", t.Name, err)
+	}
+	if !ok {
+		return fmt.Errorf("topology %s requires Splice %s or newer; this build is %s", t.Name, t.MinSplice, current)
 	}
 	return nil
 }

@@ -197,3 +197,41 @@ func TestPipelineTierValidate(t *testing.T) {
 		t.Fatalf("unknown tier Validate() = nil, want error")
 	}
 }
+
+// TestPipelineTopologyValidateMinSplice pins the M1 check at the schema layer:
+// the comparison is pure and driven by the current version, a dev build skips,
+// and a malformed requirement fails loud instead of passing silently.
+func TestPipelineTopologyValidateMinSplice(t *testing.T) {
+	base := PipelineTopology{
+		Version: TopologySchemaVersion,
+		Name:    "x",
+		Nodes:   []PipelineNode{{Name: "a", Type: "code_writer"}},
+	}
+	cases := []struct {
+		name    string
+		min     string
+		current string
+		wantErr bool
+	}{
+		{name: "empty requirement passes", current: "0.0.1"},
+		{name: "newer build passes", min: "1.2.0", current: "1.3.0"},
+		{name: "equal build passes", min: "1.2.0", current: "1.2.0"},
+		{name: "older build fails", min: "1.2.0", current: "1.1.9", wantErr: true},
+		{name: "dev build skips", min: "9.9.9", current: "dev"},
+		{name: "malformed requirement fails", min: "nine", current: "1.0.0", wantErr: true},
+		{name: "malformed requirement fails on dev", min: "nine", current: "dev", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			topology := base
+			topology.MinSplice = tc.min
+			err := topology.ValidateMinSplice(tc.current)
+			if tc.wantErr && err == nil {
+				t.Fatalf("ValidateMinSplice(%q) = nil, want error", tc.current)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("ValidateMinSplice(%q) = %v", tc.current, err)
+			}
+		})
+	}
+}

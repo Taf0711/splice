@@ -9,6 +9,7 @@ import (
 
 	"github.com/Taf0711/splice/internal/config"
 	"github.com/Taf0711/splice/internal/splice/schemas"
+	"github.com/Taf0711/splice/internal/version"
 )
 
 // Topology source labels. They are stable so a caller can report where the
@@ -205,6 +206,9 @@ func loadTopologyIfPresent(path string) (*schemas.PipelineTopology, bool, error)
 		return nil, false, fmt.Errorf("parse: %w", err)
 	}
 	if err := topology.Validate(); err != nil {
+		return nil, false, err
+	}
+	if err := topology.ValidateMinSplice(version.Version); err != nil {
 		return nil, false, err
 	}
 	return &topology, true, nil

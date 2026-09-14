@@ -40,13 +40,17 @@ import (
 	"github.com/Taf0711/splice/internal/tui"
 	"github.com/Taf0711/splice/internal/update"
 	"github.com/Taf0711/splice/internal/verify"
+	spliceversion "github.com/Taf0711/splice/internal/version"
 	"github.com/Taf0711/splice/internal/worktrees"
 	"github.com/Taf0711/splice/internal/zerogit"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 	"github.com/charmbracelet/x/term"
 )
 
-var version = "dev"
+// version is the CLI build version. It reads the shared build version so the
+// topology minimum check, `splice version`, and the update check agree. The
+// release workflow sets the shared value at link time.
+var version = spliceversion.Version
 
 // rootTrust and rootNoTrust hold the values of the global --trust / --no-trust
 // persistent flags parsed before subcommand dispatch. They are consulted by

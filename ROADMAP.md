@@ -529,9 +529,10 @@ Every T-core checkpoint is zero behavior change until T5/T6.
   state-hash fallback to verification findings, load-time + run-start notice
   for verification-free graphs. Gate: `go test ./internal/splice/...`.
 
-A post-track review hardened four points: the audit edge from `code_writer`,
+A post-track review hardened five points: the audit edge from `code_writer`,
 `DependsOn` validation in `ExecutionPlan.Validate`, trust-before-parse in the
-topology loader, and data delimiters for prompt-node context.
+topology loader, data delimiters for prompt-node context, and the
+`splice_min_version` gate.
 
 ### Track W checkpoints: web foundation (one local server, stdlib only)
 

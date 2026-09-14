@@ -7176,10 +7176,16 @@ M2: the project topology was parsed before the trust gate, so a malformed
 untrusted file failed the whole run; the loader now checks `Trusted` first and
 reports an ignored file as a warning. M4: prompt-node summaries and memory were
 inlined with no delimiter under a comment that claimed they were data; both are
-now wrapped in data blocks and the system prompt names those blocks.
+now wrapped in data blocks and the system prompt names those blocks. M1 landed
+in the same checkpoint: the leaf `internal/version` package carries the build
+version and a pure `SatisfiesMin`, `PipelineTopology.ValidateMinSplice` compares
+the running build against `splice_min_version`, the loader applies it to every
+loaded topology, a malformed requirement fails loud, a dev build skips, and the
+release ldflags now target `internal/version.Version` instead of
+`internal/cli.version`.
 
-Open review items not fixed in this checkpoint: `splice_min_version` is still
-never checked (M1), the capability fallback is keyed by stage name rather than
-type (M3), the command node joins argv into a shell line (L1, now documented),
-the verification report type assertion breaks on a JSON round trip (L2), and 17
-TUI transcript files remain committed debug artifacts (L3).
+Open review items not fixed in this checkpoint: the capability fallback is
+keyed by stage name rather than type (M3), the command node joins argv into a
+shell line (L1, now documented), the verification report type assertion breaks
+on a JSON round trip (L2), and 17 TUI transcript files remain committed debug
+artifacts (L3).
