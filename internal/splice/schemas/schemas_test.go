@@ -182,6 +182,43 @@ func TestExecutionPlanDuplicateStageName(t *testing.T) {
 	}
 }
 
+// TestExecutionPlanFlagsMustBeSortedAndUnique pins the plan's flag provenance
+// contract: the recorded enabled-flag names are sorted and carry no duplicate,
+// so a plan is byte-stable and a resumed run can trust the list.
+func TestExecutionPlanFlagsMustBeSortedAndUnique(t *testing.T) {
+	budget := StageBudget{InputMax: 1, OutputMax: 1}
+	base := func(flagNames []string) ExecutionPlan {
+		return ExecutionPlan{
+			Tier:          TierLight,
+			RequestIntent: "x",
+			Stages:        []ExecutionStage{{Name: "a", Budget: budget}},
+			TokenBudget:   TokenBudget{TotalInputBudget: 10, TotalOutputBudget: 10, PerStage: map[string]StageBudget{"a": budget}, OverflowPolicy: "abort"},
+			Flags:         flagNames,
+		}
+	}
+
+	if err := base([]string{"a.flag", "b.flag"}).Validate(); err != nil {
+		t.Fatalf("sorted flags must validate: %v", err)
+	}
+	if err := base(nil).Validate(); err != nil {
+		t.Fatalf("absent flags must validate: %v", err)
+	}
+	for _, tc := range []struct {
+		name  string
+		flags []string
+	}{
+		{name: "unsorted", flags: []string{"b.flag", "a.flag"}},
+		{name: "duplicate", flags: []string{"a.flag", "a.flag"}},
+		{name: "empty name", flags: []string{""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := base(tc.flags).Validate(); err == nil {
+				t.Fatalf("flags %v must be rejected", tc.flags)
+			}
+		})
+	}
+}
+
 func TestDesignPlanTaskGraphIntegrity(t *testing.T) {
 	plan := DesignPlan{
 		Epic:         "epic",

@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/flags"
 	"github.com/Taf0711/splice/internal/hooks"
 	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/presentation"
@@ -19,6 +20,9 @@ import (
 // Splice-specific methods.
 type PipelineRunConfig struct {
 	SessionID string
+	// Flags is the resolved feature-flag set for this run. The zero value means
+	// all defaults, so a caller that does not set it keeps today's behavior.
+	Flags flags.Set
 	// TraceWriteWarn is invoked at most once when a trace persistence
 	// attempt fails, so telemetry loss can reach the caller's output seam.
 	// Same name as agent.Options.TraceWriteWarn: PipelineConfigFromAgentOptions
@@ -88,6 +92,7 @@ type PipelineRunConfig struct {
 func PipelineConfigFromAgentOptions(options agent.Options) PipelineRunConfig {
 	return PipelineRunConfig{
 		SessionID:               options.SessionID,
+		Flags:                   options.Flags,
 		TraceWriteWarn:          options.TraceWriteWarn,
 		ProviderName:            options.ProviderName,
 		Model:                   options.Model,

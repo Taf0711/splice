@@ -146,7 +146,7 @@ func RunDesignPlanWithResume(ctx context.Context, plan schemas.DesignPlan, provi
 			runOpts.OnTaskStart(task, runID)
 		}
 
-		taskPlan, acceptanceFacts, err := BuildExecutionPlanForTaskWithFacts(task)
+		taskPlan, acceptanceFacts, err := BuildExecutionPlanForTaskWithFacts(task, cfg.Flags)
 		if err != nil {
 			return agent.Result{}, fmt.Errorf("build task plan %s: %w", task.ID, err)
 		}

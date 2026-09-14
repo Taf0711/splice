@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 
+	"github.com/Taf0711/splice/internal/flags"
 	"github.com/Taf0711/splice/internal/hooks"
 	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/presentation"
@@ -289,6 +290,9 @@ type StageEvent struct {
 
 type Options struct {
 	MaxTurns int
+	// Flags is the resolved feature-flag set for this run. The zero value means
+	// all defaults. The pipeline reads it through PipelineRunConfig.Flags.
+	Flags flags.Set
 	// TraceWriteWarn, when non-nil, is called at most once per pipeline run
 	// when a run-trace persistence attempt fails. The headless exec surface
 	// wires it to its warning event so stale sidecars self-announce; other

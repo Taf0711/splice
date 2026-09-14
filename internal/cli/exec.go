@@ -86,19 +86,22 @@ type execOptions struct {
 	autonomy            string
 	enabledTools        []string
 	disabledTools       []string
-	listTools           bool
-	resume              string
-	resumeLatest        bool
-	fork                string
-	callingSessionID    string
-	callingToolUseID    string
-	tag                 string
-	depth               int
-	sessionTitle        string
-	initSessionID       string
-	worktree            bool
-	worktreeName        string
-	worktreeDir         string
+	// flags carries the parsed --flags override. Nil means no override, so the
+	// resolved flag set falls back to config and environment.
+	flags            map[string]bool
+	listTools        bool
+	resume           string
+	resumeLatest     bool
+	fork             string
+	callingSessionID string
+	callingToolUseID string
+	tag              string
+	depth            int
+	sessionTitle     string
+	initSessionID    string
+	worktree         bool
+	worktreeName     string
+	worktreeDir      string
 	// mergeBack opts a --worktree run into merging the worktree's changes back
 	// into the source repository on success. Off by default: inherited
 	// --worktree behavior leaves the worktree for manual merging.
@@ -344,6 +347,9 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	}
 
 	overrides := config.Overrides{}
+	if len(options.flags) > 0 {
+		overrides.Flags = options.flags
+	}
 	modelOverride := options.model
 	if options.useSpec && options.specModel != "" {
 		modelOverride = options.specModel
@@ -746,6 +752,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		ProviderName:     resolved.Provider.Name,
 		Model:            resolved.Provider.Model,
 		ModelRegistry:    modelRegistry,
+		Flags:            resolved.Flags,
 		// ModelSwitcher is agent-loop only: mid-run model escalation is not wired
 		// into the deterministic pipeline, so it is inert under `splice exec`.
 		ModelSwitcher:   modelSwitcher,

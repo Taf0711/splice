@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Taf0711/splice/internal/flags"
 	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/notify"
 	"github.com/Taf0711/splice/internal/providercatalog"
@@ -66,12 +67,16 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		MaxTurns:            defaultMaxTurns,
 		DefaultProjectTrust: "ask",
 	}
+	// Flag sources are kept separate from the merged config so flag resolution
+	// can enforce per-source scope and name the offending source in an error.
+	var userFlags, projectFlags map[string]bool
 
 	if options.UserConfigPath != "" {
 		fileConfig, err := loadConfigFile(options.UserConfigPath)
 		if err != nil {
 			return ResolvedConfig{}, err
 		}
+		userFlags = fileConfig.Flags
 		mergeConfig(&cfg, fileConfig)
 		cfg.Auth = fileConfig.Auth
 	}
@@ -86,6 +91,7 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		if err := mergeProjectConfig(&cfg, fileConfig); err != nil {
 			return ResolvedConfig{}, err
 		}
+		projectFlags = fileConfig.Flags
 	}
 
 	applyEnv(&cfg, options.Env)
@@ -101,6 +107,16 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 	applyOverrides(&cfg, options.Overrides)
 	for _, issue := range validateReasoningEfforts(cfg.Providers) {
 		return ResolvedConfig{}, fmt.Errorf("invalid %s: %s", issue.FieldPath, issue.Message)
+	}
+
+	flagSet, err := flags.Resolve(flags.Sources{
+		User:    userFlags,
+		Project: projectFlags,
+		Env:     envValue(options.Env, flags.EnvVar),
+		CLI:     options.Overrides.Flags,
+	})
+	if err != nil {
+		return ResolvedConfig{}, err
 	}
 
 	if !cfg.Tools.deferThresholdSet && cfg.Tools.DeferThreshold == 0 {
@@ -169,6 +185,7 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		LocalControl:        cfg.LocalControl,
 		Worktrees:           cfg.Worktrees,
 		DefaultProjectTrust: cfg.DefaultProjectTrust,
+		Flags:               flagSet,
 	}, nil
 }
 

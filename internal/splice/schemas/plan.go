@@ -310,6 +310,10 @@ type ExecutionPlan struct {
 	TokenBudget            TokenBudget      `json:"token_budget"`
 	AcceptanceFacts        []AcceptanceFact `json:"acceptance_facts,omitempty"`
 	RequiredKnowledgeFiles []string         `json:"required_knowledge_files,omitempty"`
+	// Flags records the enabled feature-flag names that shaped this plan, sorted.
+	// It is the plan's provenance: a resumed run reads the recorded set rather
+	// than re-resolving against a changed ambient environment.
+	Flags []string `json:"flags,omitempty"`
 }
 
 // Validate checks the execution plan.
@@ -342,6 +346,14 @@ func (e ExecutionPlan) Validate() error {
 			return fmt.Errorf("duplicate stage name %q", stage.Name)
 		}
 		stageNames[stage.Name] = struct{}{}
+	}
+	for i, name := range e.Flags {
+		if name == "" {
+			return fmt.Errorf("flags[%d]: name is required", i)
+		}
+		if i > 0 && e.Flags[i-1] >= name {
+			return fmt.Errorf("flags must be sorted and unique: %q is not after %q", name, e.Flags[i-1])
+		}
 	}
 	return nil
 }

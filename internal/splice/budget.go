@@ -3,8 +3,36 @@ package splice
 import (
 	"fmt"
 
+	"github.com/Taf0711/splice/internal/flags"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
+
+// stageFlag maps a filterable stage name to the flag that can disable it.
+//
+// Only optional stages appear here. code_writer is deliberately absent: it is
+// the stage that produces the change, and a plan without it is not a pipeline
+// run. TestStageFlagMappingIsValid pins both properties.
+var stageFlag = map[string]flags.Flag{
+	"security_auditor": flags.StageSecurityAuditor,
+	"test_generator":   flags.StageTestGenerator,
+}
+
+// FilterStageNames removes stages that a resolved flag disables, keeping the
+// input order. It is pure: the caller owns provenance and wiring.
+//
+// A stage with no flag mapping is always kept. With the zero flag set every
+// declared flag reads its default, so the result equals the input and a caller
+// that does not set flags keeps today's stage shape.
+func FilterStageNames(names []string, set flags.Set) []string {
+	filtered := make([]string, 0, len(names))
+	for _, name := range names {
+		if flag, ok := stageFlag[name]; ok && !set.Enabled(flag) {
+			continue
+		}
+		filtered = append(filtered, name)
+	}
+	return filtered
+}
 
 // stageBudgets holds per-stage baseline budgets.
 //
