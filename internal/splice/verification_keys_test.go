@@ -1,6 +1,7 @@
 package splice
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -45,6 +46,43 @@ func TestVerificationReportReadsCanonicalFirst(t *testing.T) {
 	}
 	if _, ok := verificationReport(schemas.HarnessStageOutput{}); ok {
 		t.Fatal("an empty output reported a verification report")
+	}
+}
+
+// TestVerificationReportSurvivesJSONRoundTrip pins L2: a report decoded from
+// JSON is a map, not the typed struct, and must still read. Unrelated data and
+// an out-of-set status are not promoted into a verification authority.
+func TestVerificationReportSurvivesJSONRoundTrip(t *testing.T) {
+	report := schemas.VerificationReport{
+		Status:   schemas.VerificationFindings,
+		Complete: true,
+		Summary:  "found",
+		Findings: []schemas.VerificationFinding{{RuleID: "R1", Path: "a.go", Message: "m"}},
+	}
+	for _, key := range []string{VerificationReportKey, "static_analyzer_output", "security_auditor_output"} {
+		encoded, err := json.Marshal(schemas.HarnessStageOutput{Summary: "s", Confidence: 1, Data: map[string]any{key: report}})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		var decoded schemas.HarnessStageOutput
+		if err := json.Unmarshal(encoded, &decoded); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		got, ok := verificationReport(decoded)
+		if !ok {
+			t.Fatalf("key %s: report lost after a JSON round trip", key)
+		}
+		if got.Status != report.Status || got.Summary != report.Summary || len(got.Findings) != 1 {
+			t.Fatalf("key %s: report = %+v, want %+v", key, got, report)
+		}
+	}
+	unrelated := schemas.HarnessStageOutput{Data: map[string]any{VerificationReportKey: map[string]any{"command": "ls"}}}
+	if _, ok := verificationReport(unrelated); ok {
+		t.Fatal("unrelated data was promoted to a verification report")
+	}
+	notReport := schemas.HarnessStageOutput{Data: map[string]any{VerificationReportKey: map[string]any{"status": "unknown"}}}
+	if _, ok := verificationReport(notReport); ok {
+		t.Fatal("an out-of-set status was accepted")
 	}
 }
 
@@ -117,6 +155,10 @@ func TestPlanHasVerification(t *testing.T) {
 	}
 	if !planHasVerification(schemas.ExecutionPlan{Stages: []schemas.ExecutionStage{{Name: "test_runner"}}}) {
 		t.Fatal("test_runner must count as verification")
+	}
+	// A renamed builtin resolves by its carried type, not its name.
+	if !planHasVerification(schemas.ExecutionPlan{Stages: []schemas.ExecutionStage{{Name: "audit", Type: "security_auditor"}}}) {
+		t.Fatal("a renamed verification node must count by type")
 	}
 	yes, no := true, false
 	if !planHasVerification(schemas.ExecutionPlan{Stages: []schemas.ExecutionStage{{Name: "custom", Caps: &schemas.NodeCapabilities{ProducesVerification: yes}}}}) {

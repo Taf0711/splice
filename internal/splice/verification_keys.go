@@ -1,6 +1,10 @@
 package splice
 
-import "github.com/Taf0711/splice/internal/splice/schemas"
+import (
+	"encoding/json"
+
+	"github.com/Taf0711/splice/internal/splice/schemas"
+)
 
 // VerificationReportKey is the canonical stage-output key for a verification
 // report. A node whose capabilities declare produces_verification emits its
@@ -43,7 +47,7 @@ func normalizeVerificationReport(output schemas.HarnessStageOutput, producesVeri
 // output, in a stable key order.
 func legacyVerificationReport(output schemas.HarnessStageOutput) (schemas.VerificationReport, bool) {
 	for _, key := range legacyVerificationKeys {
-		if report, ok := output.Data[key].(schemas.VerificationReport); ok {
+		if report, ok := decodeVerificationReport(output.Data[key]); ok {
 			return report, true
 		}
 	}
@@ -56,8 +60,40 @@ func verificationReport(output schemas.HarnessStageOutput) (schemas.Verification
 	if output.Data == nil {
 		return schemas.VerificationReport{}, false
 	}
-	if report, ok := output.Data[VerificationReportKey].(schemas.VerificationReport); ok {
+	if report, ok := decodeVerificationReport(output.Data[VerificationReportKey]); ok {
 		return report, true
 	}
 	return legacyVerificationReport(output)
+}
+
+// decodeVerificationReport returns a typed report from a stage-output data
+// value. A value that survived a JSON round trip is a map, not the typed
+// struct, so a marshal round trip recovers it. The status must belong to the
+// closed set, so unrelated data is never promoted into a verification
+// authority.
+func decodeVerificationReport(value any) (schemas.VerificationReport, bool) {
+	switch typed := value.(type) {
+	case schemas.VerificationReport:
+		return typed, true
+	case *schemas.VerificationReport:
+		if typed == nil {
+			return schemas.VerificationReport{}, false
+		}
+		return *typed, true
+	default:
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return schemas.VerificationReport{}, false
+		}
+		var report schemas.VerificationReport
+		if err := json.Unmarshal(encoded, &report); err != nil {
+			return schemas.VerificationReport{}, false
+		}
+		switch report.Status {
+		case schemas.VerificationPassed, schemas.VerificationFindings, schemas.VerificationIncomplete, schemas.VerificationNotApplicable:
+			return report, true
+		default:
+			return schemas.VerificationReport{}, false
+		}
+	}
 }

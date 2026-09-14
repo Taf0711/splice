@@ -37,9 +37,22 @@ func nodeModelOverride(model *schemas.StageModelConfig) agent.ModelOverride {
 	}
 }
 
+// stageCapabilities returns the builtin capability profile for a planned stage
+// that carries no compiled capabilities. The node type is authoritative; the
+// name is the fallback for a plan built before node types were carried, where
+// name and type are the same.
+func stageCapabilities(stage schemas.ExecutionStage) (schemas.NodeCapabilities, bool) {
+	if stage.Type != "" {
+		if caps, ok := schemas.BuiltinCapabilities(stage.Type); ok {
+			return caps, true
+		}
+	}
+	return schemas.BuiltinCapabilities(stage.Name)
+}
+
 // planHasVerification reports whether any planned stage produces verification.
 // A compiled stage carries its capabilities; a legacy plan falls back to the
-// builtin profile for the stage name.
+// builtin profile for the stage type, then the stage name.
 func planHasVerification(plan schemas.ExecutionPlan) bool {
 	for _, stage := range plan.Stages {
 		if stage.Caps != nil {
@@ -48,7 +61,7 @@ func planHasVerification(plan schemas.ExecutionPlan) bool {
 			}
 			continue
 		}
-		if caps, ok := schemas.BuiltinCapabilities(stage.Name); ok && caps.ProducesVerification {
+		if caps, ok := stageCapabilities(stage); ok && caps.ProducesVerification {
 			return true
 		}
 	}
@@ -67,12 +80,12 @@ func stageByPlanName(plan schemas.ExecutionPlan, name string) (schemas.Execution
 
 // stageModelFree reports whether a planned stage is deterministic. The
 // compiled node capabilities are authoritative; a legacy plan with none falls
-// back to the builtin profile for the stage name.
+// back to the builtin profile for the stage type, then the stage name.
 func stageModelFree(stage schemas.ExecutionStage) bool {
 	if stage.Caps != nil {
 		return stage.Caps.ModelFree
 	}
-	if caps, ok := schemas.BuiltinCapabilities(stage.Name); ok {
+	if caps, ok := stageCapabilities(stage); ok {
 		return caps.ModelFree
 	}
 	return false

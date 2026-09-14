@@ -300,7 +300,11 @@ func (t TokenBudget) Validate() error {
 
 // ExecutionStage is one planned pipeline stage.
 type ExecutionStage struct {
-	Name   string      `json:"name"`
+	Name string `json:"name"`
+	// Type names the node's stage type from the topology. It differs from Name
+	// when a topology renames a node. Empty for a plan built before node types
+	// were carried, where Name is the builtin type.
+	Type   string      `json:"type,omitempty"`
 	Budget StageBudget `json:"budget"`
 	// DependsOn lists the stages that must run before this one. It is empty
 	// for a linear plan and populated when the planner compiles a topology.

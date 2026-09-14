@@ -131,6 +131,7 @@ func CompileTopology(topology *schemas.PipelineTopology, tier schemas.PipelineTi
 		sumOutput += budget.OutputMax
 		stages = append(stages, schemas.ExecutionStage{
 			Name:         node.Name,
+			Type:         node.Type,
 			Budget:       budget,
 			DependsOn:    append([]string(nil), dependencies[node.Name]...),
 			EdgePayloads: edgePayloads[node.Name],

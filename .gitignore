@@ -76,3 +76,6 @@ graphify-out/
 /demo-work/
 /demo-repair-loop.tape
 /DEMO-RUNBOOK.md
+
+# TUI transcript exports (/export writes these into the working directory)
+splice-transcript-*.txt

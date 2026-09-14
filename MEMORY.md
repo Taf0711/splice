@@ -7184,8 +7184,13 @@ loaded topology, a malformed requirement fails loud, a dev build skips, and the
 release ldflags now target `internal/version.Version` instead of
 `internal/cli.version`.
 
-Open review items not fixed in this checkpoint: the capability fallback is
-keyed by stage name rather than type (M3), the command node joins argv into a
-shell line (L1, now documented), the verification report type assertion breaks
-on a JSON round trip (L2), and 17 TUI transcript files remain committed debug
-artifacts (L3).
+The same checkpoint closed the remaining low-impact items. M3: `ExecutionStage`
+now carries `Type`, `CompileTopology` populates it, and the capability fallback
+keys on `Type` before `Name`. L2: `decodeVerificationReport` accepts a JSON
+round-tripped report by re-marshaling, and rejects data whose status is not in
+the closed set. L3: the 17 committed TUI transcript debug files were removed
+and `splice-transcript-*.txt` is gitignored.
+
+The only open review item is L5, a cross-branch reconciliation: the wip branch
+has a shared request builder (`request_gate.go`) that T5's prompt node should
+adopt when the branches meet.

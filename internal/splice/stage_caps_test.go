@@ -62,6 +62,10 @@ func TestStageModelFreeFallsBackToBuiltinProfile(t *testing.T) {
 			t.Fatalf("stageModelFree(%s) = %v, want %v", tc.name, got, tc.want)
 		}
 	}
+	// A renamed builtin resolves by its carried type, not its name.
+	if got := stageModelFree(schemas.ExecutionStage{Name: "lint", Type: "static_analyzer"}); !got {
+		t.Fatal("renamed static_analyzer by type = false, want true")
+	}
 	free := true
 	if got := stageModelFree(schemas.ExecutionStage{Name: "code_writer", Caps: &schemas.NodeCapabilities{ModelFree: free}}); !got {
 		t.Fatal("stageModelFree with compiled caps = false, want true")
@@ -88,6 +92,9 @@ func TestCompileTopologyCarriesResolvedCaps(t *testing.T) {
 	}
 	if byName["code_writer"].Caps.ModelFree {
 		t.Fatal("code_writer must be model-backed")
+	}
+	if byName["code_writer"].Type != "code_writer" {
+		t.Fatalf("compiled code_writer type = %q, want code_writer", byName["code_writer"].Type)
 	}
 	if byName["test_generator"].Caps.PullContext == nil || !*byName["test_generator"].Caps.PullContext {
 		t.Fatal("test_generator must pull context")

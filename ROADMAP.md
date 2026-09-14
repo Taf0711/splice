@@ -532,7 +532,9 @@ Every T-core checkpoint is zero behavior change until T5/T6.
 A post-track review hardened five points: the audit edge from `code_writer`,
 `DependsOn` validation in `ExecutionPlan.Validate`, trust-before-parse in the
 topology loader, data delimiters for prompt-node context, and the
-`splice_min_version` gate.
+`splice_min_version` gate. The remaining low items also landed: a type-keyed
+capability fallback (M3), a round-trip-safe verification report decode (L2),
+and removal of committed TUI transcript debug files (L3).
 
 ### Track W checkpoints: web foundation (one local server, stdlib only)
 
