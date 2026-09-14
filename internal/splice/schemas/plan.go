@@ -568,6 +568,11 @@ type PipelineUsageRecord struct {
 	PricingSource     string   `json:"pricing_source,omitempty"`
 	PricingAsOf       string   `json:"pricing_as_of,omitempty"`
 	UnpricedReason    string   `json:"unpriced_reason,omitempty"`
+	// PromptLayoutHash is the stable-prefix layout hash (system prompt plus
+	// tool schema) of this request. Records for one stage within a run must
+	// share one hash; a change between rounds means the cacheable prefix
+	// flipped and the provider's prefix cache was forfeited.
+	PromptLayoutHash string `json:"prompt_layout_hash,omitempty"`
 }
 
 // Validate checks the pipeline usage record.

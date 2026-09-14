@@ -60,17 +60,23 @@ func stageOptions(name string, iteration int, selection agent.ModelSelection, op
 	var onUsageResult func(zeroruntime.Usage, bool, *float64)
 	var onUsageError func(string)
 	var onLegacyUsage func(zeroruntime.Usage)
+	// layoutHash is the most recent request's stable-prefix layout hash. The
+	// layout callback fires just before each request and the usage callback just
+	// after it, and requests within a stage invocation are sequential, so the
+	// usage emitted next belongs to this hash.
+	layoutHash := ""
 	if options.OnAttributedUsage != nil {
 		emitAttributed := func(usage zeroruntime.Usage, reported bool, usageError string, reportedCostUSD *float64) {
 			options.OnAttributedUsage(agent.AttributedUsage{
-				Usage:           usage,
-				UsageReported:   reported,
-				UsageError:      usageError,
-				ProviderName:    selection.ProviderName,
-				Model:           selection.Model,
-				Stage:           name,
-				Iteration:       iteration,
-				ReportedCostUSD: reportedCostUSD,
+				Usage:            usage,
+				UsageReported:    reported,
+				UsageError:       usageError,
+				ProviderName:     selection.ProviderName,
+				Model:            selection.Model,
+				Stage:            name,
+				Iteration:        iteration,
+				ReportedCostUSD:  reportedCostUSD,
+				PromptLayoutHash: layoutHash,
 			})
 		}
 		onUsageResult = func(usage zeroruntime.Usage, reported bool, reportedCostUSD *float64) {
@@ -99,6 +105,7 @@ func stageOptions(name string, iteration int, selection agent.ModelSelection, op
 			OnUsageError:    onUsageError,
 			OnToolCallStart: options.OnToolCallStart,
 			OnToolCallDelta: options.OnToolCallDelta,
+			OnPromptLayout:  func(hash string) { layoutHash = hash },
 		},
 		Images:         append([]zeroruntime.ImageBlock(nil), options.Images...),
 		RecordCommand:  makeRecordedCommandCallback(options),

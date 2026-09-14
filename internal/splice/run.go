@@ -106,6 +106,7 @@ func (ledger *requestLedger) recordingOptions(options PipelineRunConfig) Pipelin
 			PricingSource:     attributed.Cost.PricingSource,
 			PricingAsOf:       attributed.Cost.PricingAsOf,
 			UnpricedReason:    attributed.Cost.UnpricedReason,
+			PromptLayoutHash:  attributed.PromptLayoutHash,
 		}
 		if attributed.Cost.CostUSD != nil {
 			cost := *attributed.Cost.CostUSD

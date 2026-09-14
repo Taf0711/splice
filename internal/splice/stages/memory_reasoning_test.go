@@ -1,6 +1,7 @@
 package stages
 
 import (
+	"context"
 	"encoding/json"
 	"slices"
 	"strings"
@@ -143,4 +144,102 @@ func TestReconcileNoteWarnsOnce(t *testing.T) {
 		t.Fatal("omitted dispositions must produce the one warning")
 	}
 	var _ = json.Marshal // keep json import if assertions change
+}
+
+// TestPromptLayoutHashDetectsPrefixDrift pins the W3 detector. The layout hash
+// covers the cacheable prefix (system prompt plus tool schema), so the ledger
+// can show a flip between rounds. It must be stable for identical input and
+// must move when either component moves. The memory-dependent required entry
+// removed from the schema is exactly the drift this detector has to see.
+func TestPromptLayoutHashDetectsPrefixDrift(t *testing.T) {
+	baseHash, err := promptLayoutHash(codeWriterSystemPrompt, submitCodeToolDefinition())
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	againHash, err := promptLayoutHash(codeWriterSystemPrompt, submitCodeToolDefinition())
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	if baseHash != againHash {
+		t.Fatalf("layout hash is unstable for identical input: %s vs %s", baseHash, againHash)
+	}
+
+	drifted := submitCodeToolDefinition()
+	drifted.Parameters["required"] = append(drifted.Parameters["required"].([]string), "memory_disposition")
+	driftedHash, err := promptLayoutHash(codeWriterSystemPrompt, drifted)
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	if driftedHash == baseHash {
+		t.Fatal("a memory-dependent required entry must change the layout hash")
+	}
+
+	promptDriftHash, err := promptLayoutHash(codeWriterSystemPrompt+"\n", submitCodeToolDefinition())
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	if promptDriftHash == baseHash {
+		t.Fatal("a system prompt change must change the layout hash")
+	}
+
+	tgHash, err := promptLayoutHash(testGeneratorSystemPrompt, testGeneratorToolDefinition())
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	if tgHash == baseHash {
+		t.Fatal("distinct stages must not share a layout hash")
+	}
+}
+
+// TestCallToolUseReportsPromptLayoutHash proves the request site fires the
+// layout callback with the hash of the prefix it is about to send. The
+// registry wiring depends on this firing; if it stopped, every ledger record
+// would carry an empty hash, which looks the same as a stable prefix.
+func TestCallToolUseReportsPromptLayoutHash(t *testing.T) {
+	provider := &fakeProvider{events: toolCallEvent(codeWriterToolName, `{}`)}
+	var got []string
+	callbacks := &zeroruntime.CollectOptions{OnPromptLayout: func(hash string) { got = append(got, hash) }}
+	if _, err := callToolUse(context.Background(), provider, "m", "", codeWriterSystemPrompt, "payload", nil, submitCodeToolDefinition(), 0, callbacks, "", true); err != nil {
+		t.Fatalf("callToolUse: %v", err)
+	}
+	want, err := promptLayoutHash(codeWriterSystemPrompt, submitCodeToolDefinition())
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("layout callbacks = %v, want [%s]", got, want)
+	}
+}
+
+// TestCodeWriterRunReportsPromptLayoutHash closes the loop: a real stage run
+// must report the layout hash of the prefix it sends, not just a direct
+// callToolUse call. This is the seam that feeds the registry wiring and the
+// run ledger, so a break here would leave production records empty.
+func TestCodeWriterRunReportsPromptLayoutHash(t *testing.T) {
+	workDir := t.TempDir()
+	output := schemas.CodeWriterOutput{Language: "go", Intent: "no changes", Confidence: 0.9}
+	args, _ := json.Marshal(output)
+	provider := &requestCapturingProvider{events: toolCallEvent(codeWriterToolName, string(args))}
+
+	var layouts []string
+	stage := CodeWriter{}
+	if _, err := stage.Run(context.Background(), newHarnessInput("no changes"), provider, StageOptions{
+		WorkDir:  workDir,
+		Language: "go",
+		Stream:   zeroruntime.CollectOptions{OnPromptLayout: func(hash string) { layouts = append(layouts, hash) }},
+	}); err != nil {
+		t.Fatalf("stage run: %v", err)
+	}
+	want, err := promptLayoutHash(composeSystemPrompt(codeWriterSystemPrompt), submitCodeToolDefinition())
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	if len(layouts) == 0 {
+		t.Fatal("stage run reported no prompt layout hash")
+	}
+	for _, got := range layouts {
+		if got != want {
+			t.Fatalf("layout hash = %s, want %s", got, want)
+		}
+	}
 }

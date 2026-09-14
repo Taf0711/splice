@@ -2,7 +2,9 @@ package stages
 
 import (
 	"context"
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -100,6 +102,13 @@ func callToolUse(ctx context.Context, provider zeroruntime.Provider, model, reas
 		// always passes exactly one tool, so forcing its name is always correct
 		// here on the primary attempt.
 		request.ToolChoice = tool.Name
+	}
+	if callbacks != nil && callbacks.OnPromptLayout != nil {
+		hash, err := promptLayoutHash(systemPrompt, tool)
+		if err != nil {
+			return nil, err
+		}
+		callbacks.OnPromptLayout(hash)
 	}
 	events, err := provider.StreamCompletion(ctx, request)
 	if err != nil {
@@ -272,6 +281,23 @@ var memoryDispositionSchema = map[string]any{
 func applyMemoryDefinition(params map[string]any) {
 	props := params["properties"].(map[string]any)
 	props["memory_disposition"] = memoryDispositionSchema
+}
+
+// promptLayoutHash returns a stable hash of the cacheable prompt prefix: the
+// system prompt and the tool schema. The prefix must not depend on per-request
+// state such as memory presence, because any change invalidates the provider's
+// prefix cache for later rounds of the same stage. Callers record the hash per
+// request so a flip between rounds is visible in the run ledger. Canonical
+// JSON gives a stable byte sequence for the schema map.
+func promptLayoutHash(systemPrompt string, tool zeroruntime.ToolDefinition) (string, error) {
+	schema, err := json.Marshal(tool.Parameters)
+	if err != nil {
+		return "", fmt.Errorf("layout hash: marshal tool schema for %q: %w", tool.Name, err)
+	}
+	sum := sha256.New()
+	fmt.Fprintf(sum, "system\x00%d\x00%s", len(systemPrompt), systemPrompt)
+	fmt.Fprintf(sum, "tool\x00%d\x00%s\x00%d\x00%s\x00%d\x00%s", len(tool.Name), tool.Name, len(tool.Description), tool.Description, len(schema), schema)
+	return hex.EncodeToString(sum.Sum(nil)), nil
 }
 
 // stripDispositionClaims removes the memory_disposition property from a tool

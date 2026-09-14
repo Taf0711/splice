@@ -60,6 +60,12 @@ type AttributedUsage struct {
 	// It lives here rather than on Usage because Usage is rebuilt from plain
 	// numeric literals at several call sites that would silently drop it.
 	ReportedCostUSD *float64
+	// PromptLayoutHash is the stable-prefix layout hash (system prompt plus
+	// tool schema) of the request that produced this usage. Requests for one
+	// stage within a run must carry the same hash; a change between rounds
+	// means the cacheable prefix flipped and the provider's prefix cache was
+	// forfeited. Empty when the caller does not report prompt layout.
+	PromptLayoutHash string
 }
 
 // ModelSelection is one resolved provider route for a pipeline stage.

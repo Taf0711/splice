@@ -3305,6 +3305,24 @@ func TestRequestLedgerRecordingOptionsCases(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "carries the prompt layout hash",
+			usages: []agent.AttributedUsage{{
+				Usage:            zeroruntime.Usage{InputTokens: 10, OutputTokens: 5},
+				UsageReported:    true,
+				Stage:            "code_writer",
+				Iteration:        1,
+				PromptLayoutHash: "layout-abc",
+			}},
+			check: func(t *testing.T, ledger *requestLedger, _ []agent.AttributedUsage) {
+				if len(ledger.records) != 1 {
+					t.Fatalf("records = %d, want 1", len(ledger.records))
+				}
+				if got := ledger.records[0].PromptLayoutHash; got != "layout-abc" {
+					t.Fatalf("prompt_layout_hash = %q, want layout-abc", got)
+				}
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

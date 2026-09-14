@@ -251,3 +251,54 @@ func TestDetectLanguageCachesPerWorkDir(t *testing.T) {
 		t.Fatalf("detectLanguage(dirB) = %q, want %q (cache must be per-workDir, not sticky)", got, "javascript")
 	}
 }
+
+// TestStageOptionsAttachesPromptLayoutHashToUsage pins the W3 wiring: the
+// layout callback fired before a request must reach the attributed usage and
+// the run ledger. A silent break here would leave prompt_layout_hash empty in
+// every record, which is indistinguishable from a stable prefix.
+func TestStageOptionsAttachesPromptLayoutHashToUsage(t *testing.T) {
+	ledger := newRequestLedger()
+	var captured []agent.AttributedUsage
+	options := ledger.recordingOptions(PipelineConfigFromAgentOptions(agent.Options{
+		OnAttributedUsage: func(u agent.AttributedUsage) { captured = append(captured, u) },
+	}))
+	opts := stageOptions("code_writer", 1, agent.ModelSelection{ProviderName: "openrouter", Model: "m"}, options, "", nil, stages.Capabilities{})
+	if opts.Stream.OnPromptLayout == nil {
+		t.Fatal("stage options must wire OnPromptLayout")
+	}
+	opts.Stream.OnPromptLayout("layout-1")
+	opts.Stream.OnUsageResult(zeroruntime.Usage{InputTokens: 10, OutputTokens: 5}, true, nil)
+	if len(captured) != 1 {
+		t.Fatalf("captured = %d, want 1", len(captured))
+	}
+	if got := captured[0].PromptLayoutHash; got != "layout-1" {
+		t.Fatalf("attributed PromptLayoutHash = %q, want layout-1", got)
+	}
+	if len(ledger.records) != 1 {
+		t.Fatalf("records = %d, want 1", len(ledger.records))
+	}
+	if got := ledger.records[0].PromptLayoutHash; got != "layout-1" {
+		t.Fatalf("record PromptLayoutHash = %q, want layout-1", got)
+	}
+}
+
+// TestStageOptionsPromptLayoutHashFollowsTheLastRequest proves the pairing: a
+// later request's layout must replace the earlier one, so a flip between
+// rounds is reported against the round that actually flipped.
+func TestStageOptionsPromptLayoutHashFollowsTheLastRequest(t *testing.T) {
+	ledger := newRequestLedger()
+	options := ledger.recordingOptions(PipelineConfigFromAgentOptions(agent.Options{
+		OnAttributedUsage: func(agent.AttributedUsage) {},
+	}))
+	opts := stageOptions("code_writer", 1, agent.ModelSelection{ProviderName: "openrouter", Model: "m"}, options, "", nil, stages.Capabilities{})
+	opts.Stream.OnPromptLayout("layout-1")
+	opts.Stream.OnUsageResult(zeroruntime.Usage{InputTokens: 10, OutputTokens: 5}, true, nil)
+	opts.Stream.OnPromptLayout("layout-2")
+	opts.Stream.OnUsageResult(zeroruntime.Usage{InputTokens: 12, OutputTokens: 6}, true, nil)
+	if len(ledger.records) != 2 {
+		t.Fatalf("records = %d, want 2", len(ledger.records))
+	}
+	if ledger.records[0].PromptLayoutHash != "layout-1" || ledger.records[1].PromptLayoutHash != "layout-2" {
+		t.Fatalf("hashes = %q, %q; want layout-1, layout-2", ledger.records[0].PromptLayoutHash, ledger.records[1].PromptLayoutHash)
+	}
+}
