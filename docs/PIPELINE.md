@@ -276,5 +276,19 @@ tokens. The result keeps per-stage latency and request attribution.
 Splice uses a provider-reported cost when available. Otherwise, it can use a
 known price record. An unknown cost remains unknown and never becomes zero.
 
+### Prompt layout and the prefix cache
+
+A provider can cache the prefix of a request. For Splice, the prefix is the
+system prompt and the tool schema. A change to the prefix discards the cache for
+later requests of the same stage.
+
+Each request records `prompt_layout_hash`. The hash covers the system prompt and
+the tool schema. The tool schema does not change when memory is present or
+absent, so the prefix stays stable for a stage.
+
+The result counts prefix changes in `prompt_layout_flips`. Zero is the contract.
+Splice writes a progress line when the count is not zero. A change adds cost and
+does not fail the run.
+
 The stream `final` event contains the serialized pipeline result in its `text`
 field. See [Stream-JSON protocol](STREAM_JSON_PROTOCOL.md).
