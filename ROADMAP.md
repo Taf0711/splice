@@ -1407,6 +1407,15 @@ per-checkpoint record, and the note on GitHub Actions billing (WG6
 onward gated by a local replica of `.github/workflows/ci.yml` instead of
 live CI; get a real CI confirmation once billing is restored).
 
+Track WG found the defect class by hand. The durable guard is now
+`internal/wiring`: a stdlib-only `go/parser` checker over declarative
+producer/consumer contracts. `TestContractsHold` fails when a producer is never
+referenced in production code, or when its named consumer stops referencing it.
+`TestContractsNameExistingProofs` requires each contract to name an existing
+proof test, and `TestWiringCheckerDetectsDroppedReference` proves the guard
+itself. Inert producers are recorded with an owner and a reason. See
+`docs/WIRING.md`.
+
 ## Track PE: first-class pipeline evals (2026-07-26)
 
 Source of truth:

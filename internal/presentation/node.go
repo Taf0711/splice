@@ -147,15 +147,18 @@ func (u UsageSummary) Validate() error {
 // other node IDs; the reducer preserves append order, so node ordering is
 // stable across applies.
 type ExecutionNode struct {
-	ID           string       `json:"id"`
-	Label        string       `json:"label"`
-	Kind         NodeKind     `json:"kind"`
-	Status       NodeStatus   `json:"status"`
-	Progress     float64      `json:"progress"`
-	Iteration    int          `json:"iteration"`
-	Cost         CostSummary  `json:"cost"`
-	Usage        UsageSummary `json:"usage"`
-	Dependencies []string     `json:"dependencies,omitempty"`
+	ID        string       `json:"id"`
+	Label     string       `json:"label"`
+	Kind      NodeKind     `json:"kind"`
+	Status    NodeStatus   `json:"status"`
+	Progress  float64      `json:"progress"`
+	Iteration int          `json:"iteration"`
+	Cost      CostSummary  `json:"cost"`
+	Usage     UsageSummary `json:"usage"`
+	// Dependencies names the upstream stages this node waits for. The reducer
+	// carries them into presentation state. No renderer reads them yet; the
+	// Track T9 viewer is the consumer. Registered in internal/wiring.
+	Dependencies []string `json:"dependencies,omitempty"`
 	// Workspace is the agent's isolation state (v0.5 agent_workspace,
 	// DoD 26): "isolated" (own worktree) or "shared_cwd" (authoritative
 	// working directory shared with other lanes). Empty projects as

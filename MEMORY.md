@@ -7195,3 +7195,32 @@ and `splice-transcript-*.txt` is gitignored.
 The only open review item is L5, a cross-branch reconciliation: the wip branch
 has a shared request builder (`request_gate.go`) that T5's prompt node should
 adopt when the branches meet.
+
+## 2026-09-14 - Wiring verification system and residue cleanup
+
+Track WG found the produced-but-never-consumed defect class by hand, with a
+local graphify pass that CI could not run. `internal/wiring` is now the durable
+guard. It is stdlib only (`go/parser`, no new dependency) and holds a
+declarative producer/consumer contract list in `contracts.go`.
+`TestContractsHold` fails when a producer is never referenced in production
+code, or when its named consumer stops referencing it.
+`TestContractsNameExistingProofs` requires each contract to name an existing
+proof test, and `TestWiringCheckerDetectsDroppedReference` proves the guard
+catches a dropped reference. Inert producers are recorded with an owner and a
+reason. Seed contracts cover topology `DependsOn` scoping, compilation, and
+validation, compiled caps, the node model ladder, the canonical verification
+key and its round-trip decode, the min-splice gate, the version build value,
+additive changed files, prompt delimiters, and the shared `streamCompletion`
+request gate. `docs/WIRING.md` has the add-a-contract procedure.
+
+The residue from the review is closed. L5: `prompt_stage.go` no longer calls
+`provider.StreamCompletion` directly; every stage model call goes through
+`streamCompletion` in `stages/provider.go`, which is the local form of the wip
+branch's `request_gate.go` and supersedes it at reconciliation. The inert
+readers are documented and registered: `CompiledTopology.Tier` and
+`presentation.ExecutionNode.Dependencies` both name Track T9 as the pending
+consumer. The default-topology edge comment notes that the
+`static_analyzer -> security_auditor` edge serializes the two analyzers, which
+is a deliberate divergence from RR13. `docs/PIPELINE.md` now documents the
+default graph as a DAG with typed edge payloads and edge scoping, not a linear
+chain.

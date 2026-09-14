@@ -94,19 +94,7 @@ func callTextCompletion(ctx context.Context, provider zeroruntime.Provider, mode
 		PromptCacheKey:  promptCacheKey,
 		MaxOutputTokens: maxOutputTokens,
 	}
-	events, err := provider.StreamCompletion(ctx, request)
-	if err != nil {
-		return nil, fmt.Errorf("stream completion: %w", err)
-	}
-	var opts zeroruntime.CollectOptions
-	if callbacks != nil {
-		opts = *callbacks
-	}
-	collected := zeroruntime.CollectStreamWithOptions(ctx, events, opts)
-	if collected.Error != "" {
-		return &collected, fmt.Errorf("stream error: %s", collected.Error)
-	}
-	return &collected, nil
+	return streamCompletion(ctx, provider, request, callbacks)
 }
 
 // renderPromptTemplate substitutes the three documented context variables. An

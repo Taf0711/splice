@@ -101,6 +101,15 @@ func callToolUse(ctx context.Context, provider zeroruntime.Provider, model, reas
 		// here on the primary attempt.
 		request.ToolChoice = tool.Name
 	}
+	return streamCompletion(ctx, provider, request, callbacks)
+}
+
+// streamCompletion is the single request gate for stage model calls. Every
+// stage request goes through it, so provider handling cannot drift between the
+// tool-use path and the prompt path. This is the local form of the shared
+// request builder; the wip branch's request_gate.go supersedes it at branch
+// reconciliation.
+func streamCompletion(ctx context.Context, provider zeroruntime.Provider, request zeroruntime.CompletionRequest, callbacks *zeroruntime.CollectOptions) (*zeroruntime.CollectedStream, error) {
 	events, err := provider.StreamCompletion(ctx, request)
 	if err != nil {
 		return nil, fmt.Errorf("stream completion: %w", err)

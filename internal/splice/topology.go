@@ -10,7 +10,10 @@ import (
 
 // CompiledTopology is the executable shape of one topology at one tier.
 type CompiledTopology struct {
-	Name     string
+	Name string
+	// Tier is the tier this topology compiled for. The field is inert until
+	// Track T9: the read-only pipeline viewer is the consumer. It is registered
+	// in internal/wiring as an inert contract.
 	Tier     schemas.PipelineTier
 	Stages   []schemas.ExecutionStage
 	Budget   schemas.TokenBudget
@@ -46,7 +49,9 @@ func defaultTopology() *schemas.PipelineTopology {
 			// are here because the hybrid security advisor will read the
 			// written-code and analysis summaries, and edge scoping delivers a
 			// summary only across a declared edge. This edge precedes the
-			// analyzer-to-runner edge so the topological order stays stable.
+			// analyzer-to-runner edge so the topological order stays stable. This
+			// edge also serializes the analyzer and the auditor in the default
+			// graph; RR13 (parallel analyzers) would need a different shape.
 			{From: "code_writer", To: "security_auditor", Payload: schemas.EdgePayloadSummary},
 			{From: "static_analyzer", To: "security_auditor", Payload: schemas.EdgePayloadSummary},
 			{From: "static_analyzer", To: "test_runner", Payload: schemas.EdgePayloadSummary},
