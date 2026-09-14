@@ -262,16 +262,16 @@ var memoryDispositionSchema = map[string]any{
 	},
 }
 
-// applyMemoryDefinition adds the disposition property and, when memory was
-// delivered, makes it required so the warm consideration contract is
-// enforced by the tool schema itself. Cold definitions keep it optional so
-// the cold schema stays small.
-func applyMemoryDefinition(params map[string]any, hasMemory bool) {
+// applyMemoryDefinition adds the memory_disposition property to a tool schema.
+// The property is never added to required, so the schema stays byte-identical
+// whether or not memory was delivered. A memory-dependent schema changes the
+// cached prompt prefix between rounds of the same stage and forfeits the
+// provider's prefix cache. Presence is enforced in code instead:
+// reconcileMemoryReview marks a delivered item that carries no valid claim as
+// unreported.
+func applyMemoryDefinition(params map[string]any) {
 	props := params["properties"].(map[string]any)
 	props["memory_disposition"] = memoryDispositionSchema
-	if hasMemory {
-		params["required"] = append(params["required"].([]string), "memory_disposition")
-	}
 }
 
 // stripDispositionClaims removes the memory_disposition property from a tool
