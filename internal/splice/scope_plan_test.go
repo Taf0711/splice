@@ -9,104 +9,6 @@ import (
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
-func scopeTestRequest() schemas.ContextRequest {
-	p1 := "cmd/server/main.go"
-	p2 := "internal/session/store.go"
-	return schemas.ContextRequest{
-		Reason: "default",
-		Queries: []schemas.ContextQuery{
-			{QueryType: schemas.ContextListFiles, MaxResults: 100, MaxChars: 10000},
-			{QueryType: schemas.ContextReadFile, Path: &p1, MaxResults: 10, MaxChars: 5000},
-			{QueryType: schemas.ContextReadFile, Path: &p2, MaxResults: 10, MaxChars: 5000},
-		},
-	}
-}
-
-func TestScopedContextRequest_ColdFallbackIsDefault(t *testing.T) {
-	// Zero-value plan: no cognition privilege. The scoped request must be
-	// byte-identical to the default, with zero suppression.
-	scope := StageScopePlan{AllowGlobalList: true, AllowGlobalSearch: true}
-	req, sup := ScopedContextRequest(scopeTestRequest(), scope, "cold")
-	if len(req.Queries) != 3 {
-		t.Fatalf("cold scoped queries = %d, want 3", len(req.Queries))
-	}
-	if sup.ContextQueriesSuppressed != 0 || sup.FileReadsSuppressed != 0 || sup.GlobalListsSuppressed != 0 {
-		t.Fatalf("cold suppression must be zero: %+v", sup)
-	}
-	if req.Queries[0].QueryType != schemas.ContextListFiles {
-		t.Fatal("cold request must keep the global listing")
-	}
-}
-
-func TestScopedContextRequest_FreshCognitionSuppressesListingAndDefaults(t *testing.T) {
-	// Fresh cognition resolved the location: known files cover the
-	// counterfactual default reads; global listing is suppressed.
-	scope := StageScopePlan{
-		CognitionResolved: true,
-		KnownFiles:        []string{"internal/session/store.go"},
-		KnownSymbols:      []string{"internal/session/store.go#Store.InvalidateUserSessions"},
-		ExpansionBudget:   2,
-	}
-	req, sup := ScopedContextRequest(scopeTestRequest(), scope, "warm")
-	// Queries: 1 read (known file) + 1 get_symbol = 2. The default had 3
-	// (listing + 2 reads). The main.go read is dropped structurally.
-	if len(req.Queries) != 2 {
-		t.Fatalf("scoped queries = %d, want 2 (read + symbol)", len(req.Queries))
-	}
-	if req.Queries[0].QueryType != schemas.ContextReadFile || *req.Queries[0].Path != "internal/session/store.go" {
-		t.Fatalf("first scoped query must read the known file, got %+v", req.Queries[0])
-	}
-	if req.Queries[1].QueryType != schemas.ContextGetSymbol {
-		t.Fatalf("second scoped query must be the symbol, got %+v", req.Queries[1])
-	}
-	if sup.GlobalListsSuppressed != 1 {
-		t.Fatalf("global listing must be suppressed, got %+v", sup)
-	}
-	if sup.FileReadsSuppressed != 1 {
-		// Only main.go is omitted (uncovered). The store.go default read
-		// is RETAINED work: the scoped request still reads that exact
-		// file, so counting it as suppressed would inflate savings.
-		t.Fatalf("file reads suppressed = %d, want 1", sup.FileReadsSuppressed)
-	}
-	if sup.ContextQueriesDefault != 3 || sup.ContextQueriesExecuted != 2 || sup.ContextQueriesSuppressed != 1 {
-		t.Fatalf("context query accounting wrong: %+v", sup)
-	}
-	if err := req.Validate(); err != nil {
-		t.Fatalf("scoped request invalid: %v", err)
-	}
-}
-
-func TestScopedContextRequest_UnresolvedKeepsTargetedDiscovery(t *testing.T) {
-	// Cognition resolves the invalidation location but the admin wiring is
-	// unknown: unresolved questions keep targeted search alive.
-	scope := StageScopePlan{
-		CognitionResolved:   true,
-		KnownFiles:          []string{"internal/session/store.go"},
-		UnresolvedQuestions: []string{"where is admin HTTP behavior implemented?"},
-		ExpansionBudget:     2,
-	}
-	def := scopeTestRequest()
-	// Give the default a search query so the unresolved path has something
-	// targeted to carry over.
-	pat := "admin"
-	def.Queries = append(def.Queries, schemas.ContextQuery{
-		QueryType: schemas.ContextSearch, Pattern: &pat, MaxResults: 10, MaxChars: 4000,
-	})
-	req, sup := ScopedContextRequest(def, scope, "partial")
-	found := 0
-	for _, q := range req.Queries {
-		if q.QueryType == schemas.ContextSearch {
-			found++
-		}
-	}
-	if found != 1 {
-		t.Fatalf("targeted search must survive for unresolved questions, got %d", found)
-	}
-	if sup.GlobalListsSuppressed != 1 {
-		t.Fatal("global listing stays suppressed even with unresolved questions")
-	}
-}
-
 func TestScopePlanFor_StaleNodesGrantNothing(t *testing.T) {
 	// scopePlanFor consumes only admitted fresh nodes; a plan with zero
 	// resolutions must not grant any privilege.
@@ -176,8 +78,8 @@ func TestScopePlanFor_RepairReEntryCarriesGrants(t *testing.T) {
 
 func TestTelemetry_ResolvedQuestionsAreNotSuppressedReads(t *testing.T) {
 	// A9 pin: a plan with resolved questions but NO scoped-request
-	// execution must not report suppressed reads. The suppression counters
-	// only move through ScopedContextRequest host decisions.
+	// execution must not report suppressed reads. The live stage-input
+	// path authorizes no host omission, so the counters stay zero.
 	tr := &runTraceAccumulator{stages: map[stageKey]schemas.InputMeta{}}
 	tr.recordDiscoveryPlan("code_writer", 1, DiscoveryPlan{
 		ResolvedByCognition: []ResolvedQuestion{{Question: "q", NodeID: 1}, {Question: "r", NodeID: 2}},
@@ -281,34 +183,6 @@ type fakeToolRunner struct {
 func (f *fakeToolRunner) RunTool(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
 	f.calls++
 	return ToolResult{OK: true, Output: "ran"}, nil
-}
-
-func TestSemanticOnlyPlan_PrioritizesWithoutNarrowing(t *testing.T) {
-	// A semantic hit for billing files on an AUDIT task: the candidate
-	// files are prepended for priority, but the default request is fully
-	// retained (no suppression claimed) and the listing stays - the
-	// planner never established what can be omitted.
-	scope := StageScopePlan{
-		CognitionResolved: false, // semantic-only: no authority
-		KnownFiles:        []string{"internal/billing/dunning.go"},
-		ExpansionBudget:   2,
-	}
-	def := scopeTestRequest() // listing + 2 reads
-	req, sup := ScopedContextRequest(def, scope, "semantic-priority")
-	// 1 prepended read + 3 default queries.
-	if len(req.Queries) != 4 {
-		t.Fatalf("semantic-priority queries = %d, want 4", len(req.Queries))
-	}
-	if req.Queries[0].QueryType != schemas.ContextReadFile || *req.Queries[0].Path != "internal/billing/dunning.go" {
-		t.Fatalf("first query must be the prioritized known file, got %+v", req.Queries[0])
-	}
-	if sup.ContextQueriesSuppressed != 0 || sup.FileReadsSuppressed != 0 || sup.GlobalListsSuppressed != 0 {
-		t.Fatalf("semantic-priority must claim zero suppression: %+v", sup)
-	}
-	// Listing retained.
-	if req.Queries[1].QueryType != schemas.ContextListFiles {
-		t.Fatal("semantic-priority must retain the listing")
-	}
 }
 
 func TestSemanticCandidatesForAuditTask_CannotSuppressAuditDiscovery(t *testing.T) {

@@ -613,8 +613,10 @@ func (tr *runTraceAccumulator) recordDiscoveryPlanOrdinal(stage string, iteratio
 	meta.DiscoveryResolvedCog = len(plan.ResolvedByCognition)
 	meta.DiscoveryUnresolved = len(plan.Unresolved)
 	// DiscoveryReadsAvoided is deliberately NOT set here: a resolved
-	// question is not a suppressed read. Actual suppression is recorded
-	// by recordScopeMetrics from the host decisions in ScopedContextRequest.
+	// question is not a suppressed read. Actual suppression was recorded
+	// by recordScopeMetrics from the abandoned cognition scoping path,
+	// which is removed; the live stage-input path authorizes no host
+	// omission, so the suppression counters stay zero.
 	meta.AnchorsValidated = plan.AnchorsValidated
 	meta.AnchorsFailed = plan.AnchorsFailed
 	meta.SemanticHits = plan.SemanticHits
