@@ -1,0 +1,49 @@
+{
+  "task_id": "healthz-detail-gating",
+  "arm": "warm",
+  "repeat": 0,
+  "binary_revision": "54bb470af0ae9f0c1b89fe4c5d9315a0e5c9e9b3",
+  "sidecar_revision": "",
+  "fixture_digest": "sha256:756d22408dee57206ca9d3bf97499af6096a903b3944d745c932721704c2dcfe",
+  "model_id": "z-ai/glm-5.3-flash",
+  "model_settings": {},
+  "treatment_env": [
+    "SPLICE_SCOPE_MODE=on",
+    "SPLICE_EVIDENCE_SUBSTITUTION=on"
+  ],
+  "session_id": "wc-wc-pe3-healthz-detail-gating-warm-r0",
+  "run_status": "completed",
+  "cost_coverage": "complete",
+  "verifier_result": true,
+  "verifier_output": "ok  \tdemo\t0.313s\n",
+  "requests": [
+    {
+      "sequence": 1,
+      "stage": "code_writer",
+      "iteration": 1,
+      "invocation_ordinal": 0,
+      "context_round": 1,
+      "spend_source": "expansion",
+      "input_tokens": 3764,
+      "output_tokens": 223,
+      "cached_input_tokens": 0,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.0006761,
+      "cost_status": "priced"
+    }
+  ],
+  "totals": {
+    "requests": 1,
+    "input_tokens": 3764,
+    "output_tokens": 223,
+    "cached_input_tokens": 0,
+    "cache_write_tokens": 0,
+    "reasoning_tokens": 0,
+    "billed_usd": 0.0006761,
+    "priced_records": 1
+  },
+  "started_at": "2026-09-11T11:59:54.323535-04:00",
+  "ended_at": "2026-09-11T12:00:34.140446-04:00",
+  "duration_ms": 39816
+}
