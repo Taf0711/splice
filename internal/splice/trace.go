@@ -232,6 +232,18 @@ func (tr *runTraceAccumulator) replaySuppressedCount() int {
 // recordContext path; rounds 1+ are expansion rounds. Separate keys mean
 // an expansion never overwrites the initial record and repair/expansion
 // records never collide.
+// recordMemoryPrefetch records the memory-assisted dependency prefetch
+// decisions under the invocation's stage key, so the report can show which
+// retained record authorized which delivered view.
+func (tr *runTraceAccumulator) recordMemoryPrefetch(stage string, iteration, ordinal int, fetches []schemas.MemoryPrefetchRecord) {
+	if tr == nil || len(fetches) == 0 {
+		return
+	}
+	meta := tr.stages[stageKeyFor(stage, iteration, ordinal)]
+	meta.MemoryPrefetch = append(meta.MemoryPrefetch, fetches...)
+	tr.stages[stageKeyFor(stage, iteration, ordinal)] = meta
+}
+
 func (tr *runTraceAccumulator) recordContextRound(stage string, iteration, ordinal, round int, bundle schemas.ContextBundle) {
 	if tr == nil {
 		return

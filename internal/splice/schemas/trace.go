@@ -74,6 +74,12 @@ type InputMeta struct {
 	MemoryChars      int `json:"memory_chars"`
 	ExemplarItems    int `json:"exemplar_items"`
 	EdgePayloadBytes int `json:"edge_payload_bytes"`
+	// MemoryPrefetch records the memory-assisted dependency prefetch
+	// decisions for this invocation: each entry names the retained record
+	// that authorized the fetch, the file fetched, and its verified
+	// revision. Empty when the treatment is off or nothing was delivered.
+	// These are host-side reads, never provider tokens.
+	MemoryPrefetch []MemoryPrefetchRecord `json:"memory_prefetch,omitempty"`
 	// ContextFailures counts context queries that executed but failed to
 	// produce content (the fulfilled item carries an error). A failed read
 	// is executed work and a delivery miss, never successfully delivered
@@ -516,4 +522,15 @@ type TraceQueryResult struct {
 	Trace   RunOutcome     `json:"trace"`
 	Verdict *VerdictRecord `json:"verdict,omitempty"`
 	Rank    float64        `json:"rank,omitempty"`
+}
+
+// MemoryPrefetchRecord is one memory-assisted dependency prefetch: the
+// retained record that authorized the fetch, the file fetched, and the
+// verified revision the record carried. Host-side work; never provider
+// tokens and never a substitution.
+type MemoryPrefetchRecord struct {
+	Path           string `json:"path"`
+	Reason         string `json:"reason,omitempty"`
+	RecordRef      string `json:"record_ref,omitempty"`
+	ContentVersion string `json:"content_version,omitempty"`
 }

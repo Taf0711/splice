@@ -89,11 +89,95 @@ func (p *EvidencePlan) PrefetchQueries() []schemas.ContextQuery {
 	return queries
 }
 
-// EvidenceRequestFromPlan builds the concrete host ContextRequest for a warm
-// operation plan. Only operations remaining after substitution are issued;
-// eliminated operations never appear in the request. The request keeps the
-// list operation only when the plan retained it, so the global listing is
-// dropped only with an explicit structural decision.
+// SourceFetch is one memory-assisted dependency prefetch decision: the
+// host will fetch this file's current bounded view into the initial
+// context handshake because a retained verified record names it. This is
+// NOT a substitution: no operation is removed, the source is acquired
+// earlier, and the handoff's tracking separates the two.
+type SourceFetch struct {
+	// Path is the repo-relative file the record vouches for.
+	Path string `json:"path"`
+	// Reason is the record's own claim line, bounded, so the delivery is
+	// explainable after the fact.
+	Reason string `json:"reason"`
+	// RecordRef and ContentVersion identify the retained record that
+	// authorized the fetch (producer, kind, content version).
+	RecordRef      string `json:"record_ref"`
+	ContentVersion string `json:"content_version"`
+}
+
+// maxMemoryPrefetchFiles bounds the prefetch: one dependency group per
+// invocation, per the measurement design's conservative default.
+const maxMemoryPrefetchFiles = 2
+
+// MemoryPrefetchFromNodes derives the prefetch decisions from the delivered
+// fresh records' file anchors. Only records the retrieval stage already
+// selected and freshness-validated are candidates, the same records the
+// ordinary delivery path would hand to the model as prose; the prefetch
+// adds the CURRENT source those anchors name. Deduplicated by path and
+// capped, because the selection rule is uncalibrated.
+func MemoryPrefetchFromNodes(nodes []memd.GraphNode) []SourceFetch {
+	seen := map[string]bool{}
+	var out []SourceFetch
+	for _, n := range nodes {
+		if len(out) >= maxMemoryPrefetchFiles {
+			break
+		}
+		for _, a := range n.Anchors {
+			if len(out) >= maxMemoryPrefetchFiles {
+				break
+			}
+			if a.Kind != "file" || strings.TrimSpace(a.Value) == "" || seen[a.Value] {
+				continue
+			}
+			seen[a.Value] = true
+			reason := n.Claim
+			if len(reason) > 200 {
+				reason = reason[:200]
+			}
+			ref := n.Kind
+			if n.SourceRunID != nil {
+				ref = n.Kind + ":" + *n.SourceRunID
+			}
+			version := ""
+			if n.VerifiedRevision != nil {
+				version = *n.VerifiedRevision
+			}
+			out = append(out, SourceFetch{
+				Path:           a.Value,
+				Reason:         reason,
+				RecordRef:      ref,
+				ContentVersion: version,
+			})
+		}
+	}
+	return out
+}
+
+// PrefetchQueriesFor converts prefetch decisions into the bounded context
+// queries the handshake fulfills. Bounded read_file views: the declaration
+// body plus its neighbors, which is what the caller needs to USE the
+// dependency (a function name alone is not enough when the caller must
+// construct its argument types).
+func PrefetchQueriesFor(fetches []SourceFetch) []schemas.ContextQuery {
+	queries := make([]schemas.ContextQuery, 0, len(fetches))
+	for _, f := range fetches {
+		path := f.Path
+		queries = append(queries, schemas.ContextQuery{
+			QueryType:  schemas.ContextReadFile,
+			Path:       &path,
+			MaxResults: 10,
+			MaxChars:   5000,
+		})
+	}
+	return queries
+}
+
+// EvidenceRequestFromOperations builds the concrete host ContextRequest for
+// a warm operation plan. Only operations remaining after substitution are
+// issued; eliminated operations never appear in the request. The request
+// keeps the list operation only when the plan retained it, so the global
+// listing is dropped only with an explicit structural decision.
 func EvidenceRequestFromOperations(ops []ColdOperation, reason string) schemas.ContextRequest {
 	queries := make([]schemas.ContextQuery, 0, len(ops))
 	for _, op := range ops {

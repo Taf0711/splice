@@ -731,6 +731,13 @@ type StageScopePlan struct {
 	// the concrete operation difference. Nil means no evidence plan was
 	// built, so the ordinary discovery path stays byte-identical.
 	Evidence *EvidencePlan
+	// MemoryPrefetch is the memory-assisted dependency prefetch decision
+	// for this invocation: retained verified records name these files, and
+	// the host fetches their current bounded views into the initial
+	// context handshake. This is NOT a substitution (no operation is
+	// removed); source is acquired earlier because of retained evidence.
+	// Empty when the treatment is off or nothing was delivered.
+	MemoryPrefetch []SourceFetch
 }
 
 // scopePlanFor derives the scope plan from a DiscoveryPlan and the fresh

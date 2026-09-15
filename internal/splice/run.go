@@ -1320,12 +1320,13 @@ func runStageWithContextBudgeted(
 			tr.recordEvidencePlanOrdinal(input.StageName, iteration, invocationOrdinal, priorScope.Evidence)
 		}
 	}
-	// Evidence substitution is the ONLY mechanism that may shape the live
-	// context request. The legacy cognition scoping path (ScopedContextRequest)
-	// is abandoned: it narrowed the host request without ever changing what the
-	// model did, and measurement showed it bought prompt growth rather than
-	// savings. Evidence-free stages keep the historical default request
-	// byte-for-byte, so a stage with no admitted substitution is unaffected.
+	// Evidence substitution is the ONLY mechanism that may REMOVE a live
+	// context operation. The legacy cognition scoping path
+	// (ScopedContextRequest) is abandoned: it narrowed the host request
+	// without ever changing what the model did, and measurement showed it
+	// bought prompt growth rather than savings. Evidence-free stages keep
+	// the historical default request byte-for-byte, so a stage with no
+	// admitted substitution is unaffected.
 	if priorScope != nil && priorScope.Evidence != nil && priorScope.Evidence.SubstitutionCount() > 0 {
 		req := EvidenceRequestFromOperations(priorScope.Evidence.Warm.Operations,
 			"Evidence-backed exact substitution: admitted retained records replaced redundant discovery operations.")
@@ -1338,6 +1339,34 @@ func runStageWithContextBudgeted(
 			req.Queries = append(req.Queries, q)
 		}
 		stageOpts.OverrideContextRequest = &req
+	}
+	// Memory-assisted dependency prefetch (experimental treatment, OFF by
+	// default): retained verified records name source files, and the host
+	// fetches their current bounded views into the initial handshake. This
+	// ADDS queries; it never removes an operation, and it is tracked
+	// separately from substitution in the trace and the report.
+	if priorScope != nil && len(priorScope.MemoryPrefetch) > 0 {
+		var req schemas.ContextRequest
+		if stageOpts.OverrideContextRequest != nil {
+			req = *stageOpts.OverrideContextRequest
+		} else {
+			req = stages.DefaultContextRequestFor(input.RequestIntent, workDir, detectLanguage(workDir))
+			req.Reason = "Memory-assisted dependency prefetch: retained verified work names these sources; the host fetched their current views before your first request."
+		}
+		for _, q := range PrefetchQueriesFor(priorScope.MemoryPrefetch) {
+			req.Queries = append(req.Queries, q)
+		}
+		stageOpts.OverrideContextRequest = &req
+		records := make([]schemas.MemoryPrefetchRecord, 0, len(priorScope.MemoryPrefetch))
+		for _, f := range priorScope.MemoryPrefetch {
+			records = append(records, schemas.MemoryPrefetchRecord{
+				Path: f.Path, Reason: f.Reason, RecordRef: f.RecordRef, ContentVersion: f.ContentVersion,
+			})
+		}
+		if tr != nil {
+			tr.recordMemoryPrefetch(input.StageName, iteration, invocationOrdinal, records)
+		}
+		emitProgress(options, fmt.Sprintf("[%s] memory prefetch: fetching %d retained-record source view(s) before the first model request", input.StageName, len(records)))
 	}
 	if outputMax > 0 {
 		// The stage's output budget caps every LLM request this stage makes. Zero

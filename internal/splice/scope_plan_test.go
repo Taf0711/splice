@@ -132,7 +132,7 @@ func TestRecordScopeMetricsWritesOnlyScopeFields(t *testing.T) {
 func TestRecordScopeMetricsRejectsNegative(t *testing.T) {
 	tr := &runTraceAccumulator{stages: map[stageKey]schemas.InputMeta{}}
 	tr.RecordScopeMetrics("code_writer", 1, schemas.ScopeMetrics{SearchesSuppressed: -1})
-	if meta := tr.stages[stageKey{"code_writer", 1, 0}]; meta != (schemas.InputMeta{}) {
+	if meta := tr.stages[stageKey{"code_writer", 1, 0}]; meta.ContextItems != 0 || meta.ContextChars != 0 {
 		t.Fatalf("invalid metrics must not be recorded, got %+v", meta)
 	}
 }

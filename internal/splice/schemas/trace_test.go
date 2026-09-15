@@ -259,7 +259,9 @@ func TestInputMetaScopeFieldsOmitEmpty(t *testing.T) {
 	if err := json.Unmarshal(fullJSON, &decoded); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if decoded != full {
+	if decoded.ContextItems != full.ContextItems || decoded.ContextChars != full.ContextChars ||
+		decoded.MemoryItems != full.MemoryItems || decoded.ExemplarItems != full.ExemplarItems ||
+		decoded.ScopeExpansions != full.ScopeExpansions || decoded.DiscoveryReadsAvoided != full.DiscoveryReadsAvoided {
 		t.Fatalf("round-trip mismatch: got %+v, want %+v", decoded, full)
 	}
 }

@@ -168,3 +168,127 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+// P3 acceptance (handoff section 7.6): the memory-assisted dependency
+// prefetch. A fresh retained record reaches the selector, the host fetches
+// its file through the guarded reader, and the CURRENT view appears in the
+// INITIAL provider request — without any substitution firing (the need is
+// cold-resolved; the mechanism is source acquired earlier, not a removed
+// operation). The no-memory variant falls back to the ordinary handshake.
+
+// TestMemoryPrefetchDeliversRetainedSourceBeforeTheFirstRequest runs the
+// full chain with prefetch ON and no substitution eligible: the retained
+// record's file anchor is fetched, and the declaration body appears in the
+// first provider request's payload.
+func TestMemoryPrefetchDeliversRetainedSourceBeforeTheFirstRequest(t *testing.T) {
+	t.Setenv(MemoryPrefetchEnvVar, "on")
+	workDir, rev, body := testSymbolRepo(t, nil)
+	mem := testSymbolVouchedStore(t, workDir, rev, body)
+
+	submission := schemas.CodeWriterOutput{
+		Files:      []schemas.FileChange{{Path: "expiry_test.go", ChangeType: "create", Content: "package main\n\nimport \"testing\"\n\nfunc TestStoreExpiryBoundary(t *testing.T) { runClockTable(t) }\n"}},
+		Language:   "go",
+		Intent:     "add the expiry boundary test",
+		Confidence: 0.9,
+	}
+	submitArgs, _ := json.Marshal(submission)
+	provider := &payloadCapturingProvider{steps: [][]zeroruntime.StreamEvent{
+		submitToolCallEvents(string(submitArgs)),
+	}}
+	options := PipelineConfigFromAgentOptions(agent.Options{})
+	var hostReads []string
+	runner := ToolRunnerFunc(func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
+		switch name {
+		case "read_file":
+			if p, ok := args["path"].(string); ok {
+				hostReads = append(hostReads, p)
+			}
+			return ToolResult{OK: true, Output: testFileBody}, nil
+		case "list_directory":
+			return ToolResult{OK: true, Output: "clock.go\n  clock_test.go\n"}, nil
+		default:
+			return ToolResult{OK: true, Output: ""}, nil
+		}
+	})
+
+	tr := newRunTraceAccumulator(nil, "memory-prefetch", "session", workDir, actionRecoveryPlan(), "active", nil)
+	records, _, completed, err := runPass(context.Background(), "memory-prefetch", 1, actionRecoveryPlan(),
+		stageRegistry{"code_writer": stages.CodeWriter{}}, provider, options, workDir, runner, time.Time{}, nil, mem, tr, NewStageExecutionBudget(0))
+	if err != nil || !completed {
+		t.Fatalf("pass: completed=%v err=%v records=%+v", completed, err, records)
+	}
+
+	// The prefetch fetched the record's file through the guarded reader
+	// BEFORE the first model request: the handshake is provider-free, so
+	// one provider request means the source was already in it.
+	if len(provider.requests) != 1 {
+		t.Fatalf("provider requests = %d, want 1 (the prefetch must not add provider calls)", len(provider.requests))
+	}
+	payload := userPayload(provider.requests[0])
+	if !strings.Contains(payload, "func runClockTable") {
+		t.Fatalf("the prefetched declaration never reached the first request; payload=%q", payload[:min(len(payload), 600)])
+	}
+	foundRead := false
+	for _, r := range hostReads {
+		if strings.HasSuffix(r, testSymbolPath) {
+			foundRead = true
+		}
+	}
+	if !foundRead {
+		t.Fatalf("the host never fetched the retained file; reads=%v", hostReads)
+	}
+
+	// The trace records the prefetch decision with its record identity and
+	// verified revision (the report's per-candidate evidence).
+	stage := tr.stages[stageKeyFor("code_writer", 1, 0)]
+	if len(stage.MemoryPrefetch) == 0 {
+		t.Fatalf("trace recorded no memory prefetch decision: %+v", stage)
+	}
+	for _, rec := range stage.MemoryPrefetch {
+		if rec.Path != testSymbolPath {
+			t.Fatalf("prefetch path = %q, want %q", rec.Path, testSymbolPath)
+		}
+		if rec.ContentVersion != rev {
+			t.Fatalf("prefetch content version = %q, want the verified revision %q", rec.ContentVersion, rev)
+		}
+	}
+}
+
+// TestMemoryPrefetchOffKeepsTheColdHandshake proves the fallback: with the
+// treatment off, no prefetch decision is recorded. The declaration still
+// reaches the handshake because the SHARED resolver resolves the visible
+// test helper for cold on its own (the P2a capability), never through a
+// memory pointer.
+func TestMemoryPrefetchOffKeepsTheColdHandshake(t *testing.T) {
+	workDir, rev, body := testSymbolRepo(t, nil)
+	mem := testSymbolVouchedStore(t, workDir, rev, body)
+
+	provider := &payloadCapturingProvider{steps: [][]zeroruntime.StreamEvent{
+		submitToolCallEvents(`{"files":[{"path":"expiry_test.go","change_type":"create","content":"package main\n"}],"language":"go","intent":"add the test","confidence":0.9}`),
+	}}
+	options := PipelineConfigFromAgentOptions(agent.Options{})
+	runner := ToolRunnerFunc(func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
+		return ToolResult{OK: true, Output: testFileBody}, nil
+	})
+
+	tr := newRunTraceAccumulator(nil, "prefetch-off", "session", workDir, actionRecoveryPlan(), "active", nil)
+	_, _, completed, err := runPass(context.Background(), "prefetch-off", 1, actionRecoveryPlan(),
+		stageRegistry{"code_writer": stages.CodeWriter{}}, provider, options, workDir, runner, time.Time{}, nil, mem, tr, NewStageExecutionBudget(0))
+	if err != nil || !completed {
+		t.Fatalf("pass: completed=%v err=%v", completed, err)
+	}
+	if len(provider.requests) == 0 {
+		t.Fatal("no provider request recorded")
+	}
+	// No prefetch decision recorded for any invocation.
+	for key, meta := range tr.stages {
+		if len(meta.MemoryPrefetch) != 0 {
+			t.Fatalf("prefetch recorded with the treatment off: %v %+v", key, meta.MemoryPrefetch)
+		}
+	}
+	// The shared resolver still delivers the helper through cold's own
+	// handshake, which is the P2a capability, not the prefetch treatment.
+	if got := userPayload(provider.requests[0]); !strings.Contains(got, "func runClockTable") {
+		t.Fatalf("the cold handshake lost the shared-resolver delivery; payload=%q", got[:min(len(got), 400)])
+	}
+}

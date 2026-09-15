@@ -28,3 +28,29 @@ func resolveEvidenceSubstitution() (bool, error) {
 		return false, fmt.Errorf("%s: invalid value %q (want on or off)", EvidenceSubstitutionEnvVar, raw)
 	}
 }
+
+// MemoryPrefetchEnvVar is the explicit opt-in for memory-assisted
+// dependency prefetch: when a retained verified record names a source
+// file, the host fetches that file's current bounded view into the initial
+// context handshake, so the model starts with the declaration instead of
+// spending expansion rounds to rediscover it. The selection rule is
+// uncalibrated (delivery is capped and the trigger is record delivery,
+// not a measured expected value), so this is an experimental treatment,
+// OFF by default, and never reported as a substitution: no operation is
+// removed, source is acquired earlier.
+const MemoryPrefetchEnvVar = "SPLICE_MEMORY_PREFETCH"
+
+// resolveMemoryPrefetch reads the opt-in. Unset or empty means OFF. An
+// invalid value fails loud, so a misspelled experiment cannot silently
+// measure the cold path.
+func resolveMemoryPrefetch() (bool, error) {
+	raw := strings.TrimSpace(os.Getenv(MemoryPrefetchEnvVar))
+	switch strings.ToLower(raw) {
+	case "", "off":
+		return false, nil
+	case "on":
+		return true, nil
+	default:
+		return false, fmt.Errorf("%s: invalid value %q (want on or off)", MemoryPrefetchEnvVar, raw)
+	}
+}

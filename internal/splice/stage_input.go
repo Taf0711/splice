@@ -245,7 +245,12 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 	if evErr != nil {
 		return schemas.HarnessStageInput{}, StageScopePlan{}, ScopeSuppression{}, evErr
 	}
-	if evidenceOn && caps.ConsumesMemory && caps.PullContext && strings.TrimSpace(input.RequestIntent) != "" {
+	memoryPrefetchOn, mpErr := resolveMemoryPrefetch()
+	if mpErr != nil {
+		return schemas.HarnessStageInput{}, StageScopePlan{}, ScopeSuppression{}, mpErr
+	}
+	planForEvidence := evidenceOn || memoryPrefetchOn
+	if planForEvidence && caps.ConsumesMemory && caps.PullContext && strings.TrimSpace(input.RequestIntent) != "" {
 		// The improved cold plan is built for both arms. Evidence-free
 		// runs use the cold plan unchanged; retained evidence can later
 		// transform it without changing any other deterministic choice.
@@ -293,8 +298,15 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 		// cold and warm observe the same deterministic baseline and only
 		// the admitted transformation differs.
 		// Opt-in only: with the switch off this build is skipped entirely.
-		if evidenceOn {
+		if planForEvidence {
 			scope.Evidence = buildEvidencePlan(input.RequestIntent, p.WorkDir, priorChangedFilesForEvidence(input.PriorChangedFiles), planNodes)
+		}
+		// Memory-assisted dependency prefetch: the delivered fresh records
+		// name source files; the host fetches their current bounded views
+		// into the initial handshake. Experimental treatment, OFF by
+		// default, and never counted as a substitution.
+		if memoryPrefetchOn {
+			scope.MemoryPrefetch = MemoryPrefetchFromNodes(planNodes)
 		}
 		// The legacy input-side suppression accounting is removed with the
 		// abandoned cognition scoping path. The scope plan still governs
