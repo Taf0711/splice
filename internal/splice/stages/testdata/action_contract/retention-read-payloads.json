@@ -1,0 +1,79 @@
+{
+ "source": "tests/evals/results/wc-retention-confirm2-20260913T011502Z-try0/raw-clock-helper-read-warm-r0.jsonl",
+ "captured": "2026-09-13",
+ "description": "All eight submit_code tool calls from the retention read attempt, reassembled from tool_call_delta fragments in stream order.",
+ "calls": [
+  {
+   "index": 1,
+   "tool_call_id": "call_01a0985657e97f60b90f5737",
+   "tool": "submit_code",
+   "arguments_json": "{\"action\": \"request_context\", \"confidence\": 0.9, \"intent\": \"Need the exact runClockTable helper API and case fields to write the new table-driven test correctly\", \"memory_disposition\": [{\"action\": \"applied\", \"memory_id\": \"graph:2\", \"reason\": \"relevant\"}], \"request_context\": {\"queries\": [{\"max_chars\": 12000, \"max_results\": 5, \"path\": \"clock_test.go\", \"query_type\": \"read_file\"}], \"reason\": \"The intent requires reusing the existing runClockTable helper from clock_test.go, but its signature and case fields were not delivered in the context views.\"}}",
+   "declared_action": "request_context",
+   "has_files": false,
+   "has_request_context": true
+  },
+  {
+   "index": 2,
+   "tool_call_id": "call_01a098565efa7db392f57e90",
+   "tool": "submit_code",
+   "arguments_json": "{\"action\":\"submit_changes\",\"files\":[{\"change_type\":\"create\",\"content\":\"package main\\n\\nimport \\\"time\\\"\\n\\n// TestStoreExpiryBoundary checks the expiry boundary of Store.Get using the\\n// shared fake-clock table helper, so no test sleeps.\\nfunc TestStoreExpiryBoundary(t *testing.T) {\\n\\trunClockTable(t, []clockCase{\\n\\t\\t{name: \\\"stay under ttl\\\", ttl: 30 * time.Minute, advance: 29 * time.Minute, wantErr: false, wantLen: 1},\\n\\t\\t{name: \\\"drop over ttl\\\", ttl: 30 * time.Minute, advance: 31 * time.Minute, wantErr: true, wantLen: 0},\\n\\t})\\n}\\n\",\"path\":\"expiry_boundary_test.go\"}],\"intent\":\"Add TestStoreExpiryBoundary in expiry_boundary_test.go, reusing runClockTable to cover under-TTL retention and over-TTL expiry without sleeping.\",\"known_limitations\":[],\"language\":\"go\",\"memory_disposition\":[{\"action\":\"applied\",\"memory_id\":\"graph:2\",\"reason\":\"relevant\"}],\"request_context\":{\"queries\":[],\"reason\":\"\"}}",
+   "declared_action": "submit_changes",
+   "has_files": true,
+   "has_request_context": true
+  },
+  {
+   "index": 3,
+   "tool_call_id": "call_01a0985669247cc19825edcf",
+   "tool": "submit_code",
+   "arguments_json": "{\"action\":\"submit_changes\",\"files\":[{\"change_type\":\"create\",\"content\":\"package main\\n\\nimport \\\"testing\\\"\\n\\n// TestStoreExpiryBoundary covers the expiry boundary of Store.Get with the\\n// shared fake-clock table helper: a stay inside the TTL and a drop past it.\\nfunc TestStoreExpiryBoundary(t *testing.T) {\\n\\trunClockTable(t, []clockCase{\\n\\t\\t{name: \\\"under-ttl-stays\\\", ttl: 30 * time.Minute, advance: 29 * time.Minute, wantLen: 1},\\n\\t\\t{name: \\\"over-ttl-dropped\\\", ttl: 30 * time.Minute, advance: 31 * time.Minute, wantErr: true, wantLen: 0},\\n\\t})\\n}\\n\",\"path\":\"store_expiry_test.go\"}],\"language\":\"go\",\"memory_disposition\":[{\"action\":\"applied\",\"memory_id\":\"graph:2\",\"reason\":\"relevant\"}] ,\"request_context\":{\"queries\":[]  ,\"reason\":\"\" } }",
+   "declared_action": "submit_changes",
+   "has_files": true,
+   "has_request_context": true
+  },
+  {
+   "index": 4,
+   "tool_call_id": "call_01a09856721d72239299d217",
+   "tool": "submit_code",
+   "arguments_json": "{\"action\":\"submit_changes\",\"files\":[{\"change_type\":\"create\",\"content\":\"package main\\n\\nimport \\\"testing\\\"\\n\\n// TestStoreExpiryBoundary covers expiry just under and just over the TTL\\n// using the shared fake-clock table helper, so no test sleeps.\\nfunc TestStoreExpiryBoundary(t *testing.T) {\\n\\trunClockTable(t, []clockCase{\\n\\t\\t{name: \\\"stay-just-under-ttl\\\", ttl: time.Minute, advance: 30 * time.Second, wantLen: 1},\\n\\t\\t{name: \\\"drop-just-over-ttl\\\", ttl: time.Minute, advance: 61 * time.Second, wantErr: true, wantLen: 0},\\n\\t})\\n}\\n\",\"path\":\"store_expiry_boundary_test.go\"}],\"intent\":\"Add TestStoreExpiryBoundary in a new file, reusing runClockTable to cover under-TTL stay and over-TTL drop without sleeping.\",\"language\":\"go\",\"memory_disposition\":[{\"action\":\"applied\",\"memory_id\":\"graph:2\",\"reason\":\"relevant\"}],\"request_context\":{  \"queries\":[{\"query_type\":\"read_file\",\"path\":\"clock_test.go\",\"max_results\":1,\"max_chars\":200}]  ,\"reason\":\"\"}  }",
+   "declared_action": "submit_changes",
+   "has_files": true,
+   "has_request_context": true
+  },
+  {
+   "index": 5,
+   "tool_call_id": "call_01a09856817c7b00926b9aa6",
+   "tool": "submit_code",
+   "arguments_json": "{\"action\": \"request_context\", \"confidence\": 0.7, \"intent\": \"Reuse runClockTable in a new expiry-boundary table test\", \"memory_disposition\": [{\"action\": \"applied\", \"memory_id\": \"graph:2\", \"reason\": \"relevant\"}], \"request_context\": {\"queries\": [{\"max_chars\": 12000, \"max_results\": 10, \"path\": \"clock_test.go\", \"query_type\": \"read_file\"}], \"reason\": \"The intent requires reusing the existing runClockTable helper and its case fields, but clock_test.go was not delivered; I need its exact table-case struct fields and helper signature to write a compatible test without inventing source.\"}}",
+   "declared_action": "request_context",
+   "has_files": false,
+   "has_request_context": true
+  },
+  {
+   "index": 6,
+   "tool_call_id": "call_01a09856895f7740bfdbe968",
+   "tool": "submit_code",
+   "arguments_json": "{\"action\":\"submit_changes\",\"memory_disposition\":[{\"action\":\"applied\",\"memory_id\":\"graph:2\",\"reason\":\"relevant\"}],\"request_context\":{ \"queries\":[] \t, \t\"reason\":\"unused\"\t}\t}",
+   "declared_action": "submit_changes",
+   "has_files": false,
+   "has_request_context": true
+  },
+  {
+   "index": 7,
+   "tool_call_id": "call_01a098568de47410a473a64d",
+   "tool": "submit_code",
+   "arguments_json": "{\"action\":\"submit_changes\",\"files\":[{\"change_type\":\"create\",\"content\":\"package main\\n\\nimport (\\n\\t\\\"testing\\\"\\n\\t\\\"time\\\"\\n)\\n\\n// TestStoreExpiryBoundary checks the TTL boundary with the shared fake-clock\\n// table helper: a stay just under the TTL and a drop just over it.\\nfunc TestStoreExpiryBoundary(t *testing.T) {\\n\\trunClockTable(t, []clockCase{\\n\\t\\t{name: \\\"under-ttl\\\", ttl: time.Minute, advance: 30 * time.Second, wantLen: 1},\\n\\t\\t{name: \\\"over-ttl\\\", ttl: time.Minute, advance: 2 * time.Minute, wantErr: true, wantLen: 0},\\n\\t})\\n}\\n\",\"path\":\"session_expiry_test.go\"}],\"language\":\"go\",\"memory_disposition\":[{\"action\":\"applied\",\"memory_id\":\"graph:2\",\"reason\":\"relevant\"}],\"request_context\":{\"queries\":[{\"max_chars\":1000,\"max_results\":1,\"query_type\":\"read_file\",\"path\":\"session.go\"}],\"reason\":\"unused\"}  }",
+   "declared_action": "submit_changes",
+   "has_files": true,
+   "has_request_context": true
+  },
+  {
+   "index": 8,
+   "tool_call_id": "call_01a0985694b57891bfdf4c35",
+   "tool": "submit_code",
+   "arguments_json": "{\"action\":\"submit_changes\",\"files\":[{\"change_type\":\"create\",\"content\":\"package main\\n\\nimport \\\"time\\\"\\n\\n// TestStoreExpiryBoundary checks the store's expiry boundary: a stay just\\n// under the TTL and a drop just past it, driven by the shared fake-clock\\n// table helper so the test never sleeps.\\nfunc TestStoreExpiryBoundary(t *testing.T) {\\n\\trunClockTable(t, []clockCase{\\n\\t\\t{name: \\\"under-ttl-stay\\\", ttl: time.Minute, advance: 59 * time.Second, wantLen: 1},\\n\\t\\t{name: \\\"over-ttl-drop\\\", ttl: time.Minute, advance: 61 * time.Second, wantErr: true, wantLen: 0},\\n\\t})\\n}\\n\",\"path\":\"session_expiry_test.go\"}],\"language\":\"go\",\"memory_disposition\":[{\"action\":\"applied\",\"memory_id\":\"graph:2\",\"reason\":\"relevant\"}] ,\"request_context\": {\"queries\": [{\"max_chars\": 1, \"max_results\": 1, \"query_type\": \"read_file\", \"path\": \"session.go\"}], \"reason\": \"placeholder\"} }",
+   "declared_action": "submit_changes",
+   "has_files": true,
+   "has_request_context": true
+  }
+ ]
+}
