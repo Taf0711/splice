@@ -77,15 +77,6 @@ const (
 	// NeedOriginStructural: the open-ended need that exists because
 	// structure alone cannot prove the task is fully specified.
 	NeedOriginStructural = "structural"
-	// NeedOriginEvidenceVouchedTest: an explicit identifier from the task
-	// text was confirmed only in a test source file, and admitted cognition
-	// vouches for the declaring file. Cold's production index cannot
-	// confirm it, so cold discovers it through open-ended discovery and
-	// warm may substitute a vouched record for that discovery. The
-	// file-vouching gate keeps the trap-test guard intact: a planted decoy
-	// test file is never vouched, so it can neither confirm an identifier
-	// nor become a locate target.
-	NeedOriginEvidenceVouchedTest = "evidence-vouched-test"
 )
 
 // ContextNeed is one thing a stage must know before it can edit correctly.
@@ -152,31 +143,24 @@ type symbolIndex struct {
 	byName map[string][]string
 }
 
-// buildSymbolIndex walks workspace Go files (production sources only; test
-// files are excluded so a trap test cannot plant a phantom symbol) and
-// records every top-level function, method, and type declaration. Parse
-// failures are skipped: the index is best-effort evidence, never a gate.
+// buildSymbolIndex walks every visible Go source under workspace (both
+// production and test sources) and records every top-level function,
+// method, and type declaration, with the source role recorded per file.
+// The shared resolver serves every arm: an identifier the index confirms
+// is cold-resolved, so warm gets no credit for it, and a test helper the
+// task names is discoverable without memory exactly like a production
+// symbol. A test file that plants a decoy declaration cannot confirm a
+// need by itself: ambiguous same-named declarations stay unresolved until
+// disambiguated, and hidden evaluator material is kept out of the visible
+// workspace by the harness, not by this index. Parse failures are
+// skipped: the index is best-effort evidence, never a gate.
 func buildSymbolIndex(workspace string) *symbolIndex {
 	idx := &symbolIndex{byName: map[string][]string{}}
 	if workspace == "" {
 		return idx
 	}
-	production, _ := goFilesByKind(workspace)
+	production, tests := goFilesByKind(workspace)
 	indexDeclarations(idx, workspace, production)
-	return idx
-}
-
-// buildTestSymbolIndex indexes *_test.go declarations. Its output is
-// evidence-gated by every caller: a test-file symbol confirms a task-text
-// identifier only when admitted cognition vouches for the declaring file.
-// The gate keeps the trap-test guard intact without excluding the
-// pipeline's own verified test-side symbols.
-func buildTestSymbolIndex(workspace string) *symbolIndex {
-	idx := &symbolIndex{byName: map[string][]string{}}
-	if workspace == "" {
-		return idx
-	}
-	_, tests := goFilesByKind(workspace)
 	indexDeclarations(idx, workspace, tests)
 	return idx
 }
@@ -287,35 +271,15 @@ func isTestGoFile(name string) bool {
 	return strings.HasSuffix(name, "_test.go")
 }
 
-// allVouched reports whether every declaring file is vouched by admitted
-// cognition evidence. The vouched set carries repo-relative slash paths,
-// the same convention the index stores.
-func allVouched(files, vouched []string) bool {
-	set := make(map[string]struct{}, len(vouched))
-	for _, v := range vouched {
-		set[v] = struct{}{}
-	}
-	for _, f := range files {
-		if _, ok := set[f]; !ok {
-			return false
-		}
-	}
-	return true
-}
-
 // deriveContextNeeds forms the typed need set for one stage from the task
 // intent, structured prior evidence, and the derived cognition keys. It is
 // deterministic and model-free.
 //
 // Mapping (documented, testable):
 //
-//   - explicit identifier confirmed in the production symbol index ->
-//     locate-named-operation with Origin cold-symbol-index (cold already
-//     resolved it);
-//   - explicit identifier confirmed only in a test source, and admitted
-//     cognition vouches for every declaring file -> locate-named-operation
-//     with Origin evidence-vouched-test (cold cannot confirm it, so warm
-//     may substitute the vouched record for the discovery);
+//   - explicit identifier confirmed in the shared source index (either
+//     source role) -> locate-named-operation with Origin cold-symbol-index
+//     (cold already resolved it, in cold and warm alike);
 //   - an unconfirmed capitalized identifier is NOT a need: prose is not a
 //     symbol (the no-capitalized-word rule);
 //   - symbol keys from task text (path#Sym) -> locate-named-operation
@@ -327,11 +291,7 @@ func allVouched(files, vouched []string) bool {
 //     declaration (the verification target's declarations must be known);
 //   - prior failure evidence -> resolve-concrete-failure;
 //   - always: one open-ended need when structure cannot prove full coverage.
-//
-// vouchedFiles carries the repo-relative files admitted cognition vouches
-// for (fresh, verified file anchors). It gates test-source confirmation and
-// leaves production confirmation unchanged.
-func deriveContextNeeds(intent string, workspace string, priorFiles []string, failureEvidence []string, vouchedFiles []string) []ContextNeed {
+func deriveContextNeeds(intent string, workspace string, priorFiles []string, failureEvidence []string) []ContextNeed {
 	needs := []ContextNeed{}
 	seen := map[string]bool{}
 	add := func(n ContextNeed) {
@@ -343,31 +303,14 @@ func deriveContextNeeds(intent string, workspace string, priorFiles []string, fa
 	}
 
 	// Explicit identifiers from the task text, confirmed against the
-	// current-source index. Cold resolves these through the same index, so
-	// their origin marks them cold-resolved: warm gets no credit.
-	//
-	// A test-source declaration confirms the identifier only when admitted
-	// cognition vouches for every declaring file. The production index stays
-	// the only unconditioned resolver, so a planted decoy test file can
-	// neither confirm an identifier nor become a locate target, and cold's
-	// production behavior is unchanged.
+	// shared current-source index. Cold resolves these through the same
+	// index, so their origin marks them cold-resolved: warm gets no credit,
+	// whichever source role declared them.
 	idx := buildSymbolIndex(workspace)
-	var testIdx *symbolIndex
-	if len(vouchedFiles) > 0 {
-		testIdx = buildTestSymbolIndex(workspace)
-	}
 	candidates := identifierCandidates(intent)
 	sort.Strings(candidates)
 	for _, name := range candidates {
 		files := idx.lookup(name)
-		origin := NeedOriginSymbolIndex
-		if len(files) == 0 && testIdx != nil {
-			tfiles := testIdx.lookup(name)
-			if len(tfiles) > 0 && allVouched(tfiles, vouchedFiles) {
-				files = tfiles
-				origin = NeedOriginEvidenceVouchedTest
-			}
-		}
 		if len(files) == 0 {
 			continue
 		}
@@ -384,7 +327,7 @@ func deriveContextNeeds(intent string, workspace string, priorFiles []string, fa
 			ID:       needID("locate", subject),
 			Kind:     NeedLocateNamedOperation,
 			Subject:  subject,
-			Origin:   origin,
+			Origin:   NeedOriginSymbolIndex,
 			Required: true,
 		})
 	}

@@ -1329,6 +1329,14 @@ func runStageWithContextBudgeted(
 	if priorScope != nil && priorScope.Evidence != nil && priorScope.Evidence.SubstitutionCount() > 0 {
 		req := EvidenceRequestFromOperations(priorScope.Evidence.Warm.Operations,
 			"Evidence-backed exact substitution: admitted retained records replaced redundant discovery operations.")
+		// Delivery wiring: each substituted subject's CURRENT source is
+		// fetched through the same guarded request, so the model receives
+		// the declaration body instead of a location claim. Without this,
+		// the substituted discovery loses its query and the answer never
+		// reaches the model (the recorded retention failure).
+		for _, q := range priorScope.Evidence.PrefetchQueries() {
+			req.Queries = append(req.Queries, q)
+		}
 		stageOpts.OverrideContextRequest = &req
 	}
 	if outputMax > 0 {

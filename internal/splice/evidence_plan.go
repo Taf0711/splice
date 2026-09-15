@@ -35,6 +35,60 @@ func (p *EvidencePlan) SubstitutionCount() int {
 	return len(p.Warm.Substitutions)
 }
 
+// PrefetchQueries returns the bounded source queries the substituted
+// subjects authorize: the current source of each located dependency,
+// fetched through the guarded context tools so the model receives the
+// declaration body instead of a location claim. The handoff names this
+// delivery honestly: source acquired earlier because of retained evidence,
+// not an eliminated discovery operation. Queries deduplicate against the
+// remaining plan operations (a subject the plan still fetches needs no
+// second query) and against each other.
+func (p *EvidencePlan) PrefetchQueries() []schemas.ContextQuery {
+	if p == nil {
+		return nil
+	}
+	needByID := make(map[string]ContextNeed, len(p.Needs))
+	for _, n := range p.Needs {
+		needByID[n.ID] = n
+	}
+	// The remaining ops the request already carries: a subject fetched
+	// there needs no prefetch copy.
+	already := map[string]bool{}
+	for _, op := range p.Warm.Operations {
+		already[op.Subject] = true
+	}
+	seen := map[string]bool{}
+	queries := make([]schemas.ContextQuery, 0, len(p.Warm.Substitutions))
+	for _, sub := range p.Warm.Substitutions {
+		need, ok := needByID[sub.NeedID]
+		if !ok || already[need.Subject] || seen[need.Subject] {
+			continue
+		}
+		file, symbol := splitSubject(need.Subject)
+		seen[need.Subject] = true
+		if symbol != "" {
+			sym := need.Subject
+			queries = append(queries, schemas.ContextQuery{
+				QueryType:  schemas.ContextGetSymbol,
+				Path:       &file,
+				Symbol:     &sym,
+				MaxResults: 10,
+				MaxChars:   4000,
+			})
+			continue
+		}
+		if file != "" {
+			queries = append(queries, schemas.ContextQuery{
+				QueryType:  schemas.ContextReadFile,
+				Path:       &file,
+				MaxResults: 10,
+				MaxChars:   5000,
+			})
+		}
+	}
+	return queries
+}
+
 // EvidenceRequestFromPlan builds the concrete host ContextRequest for a warm
 // operation plan. Only operations remaining after substitution are issued;
 // eliminated operations never appear in the request. The request keeps the
@@ -114,9 +168,8 @@ func buildEvidencePlan(intent, workspace string, priorFiles []string, nodes []me
 	if strings.TrimSpace(workspace) == "" {
 		return nil
 	}
-	vouched := vouchedFilesFromNodes(nodes)
-	needs := deriveContextNeeds(intent, workspace, priorFiles, nil, vouched)
-	cold := buildColdPlan(intent, workspace, priorFiles, 8, vouched)
+	needs := deriveContextNeeds(intent, workspace, priorFiles, nil)
+	cold := buildColdPlan(intent, workspace, priorFiles, 8)
 	candidates := recordsFromDiscoveryNodes(nodes, needs)
 	admitted, rejected := admitCandidates(candidates, needs, admissionContext{Workspace: workspace})
 	warm := buildWarmPlan(cold, admitted, needs)

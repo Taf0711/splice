@@ -101,11 +101,14 @@ func testSymbolVouchedStore(t *testing.T, workspace, revision string, body []byt
 	})
 }
 
-// TestEvidenceVouchedTestSymbolMintsNeedAndSubstitutes is the production
-// chain: the read task names the identifier, the write's verified record
-// vouches for the test file, and the substitution fires through the real
-// pass loop with the cold control unchanged.
-func TestEvidenceVouchedTestSymbolMintsNeedAndSubstitutes(t *testing.T) {
+// TestSharedResolverMintsTestSymbolNeedForColdAndWarm is the production
+// chain for the shared resolver: the read task names the identifier, the
+// shared source index confirms it in the test source for EVERY arm (cold
+// derivation included), and the cold plan carries the symbol operation the
+// handshake resolves. The need is cold-resolved, so warm claims no credit:
+// no substitution fires for it, and the handshake delivers the symbol to
+// both arms without memory.
+func TestSharedResolverMintsTestSymbolNeedForColdAndWarm(t *testing.T) {
 	t.Setenv(EvidenceSubstitutionEnvVar, "on")
 	workDir, rev, body := testSymbolRepo(t, nil)
 	mem := testSymbolVouchedStore(t, workDir, rev, body)
@@ -116,8 +119,8 @@ func TestEvidenceVouchedTestSymbolMintsNeedAndSubstitutes(t *testing.T) {
 	}
 	options := PipelineConfigFromAgentOptions(agent.Options{})
 
-	// Plan inspection: the evidence-vouched need exists, the cold plan
-	// carries the symbol operation it replaces, and the warm plan omits it.
+	// Plan inspection: the need exists with the cold-resolved origin, and
+	// the cold plan carries the symbol operation. No substitution fires.
 	prepared, planScope, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 		Input: schemas.HarnessStageInput{
 			RunID: "testfile-evidence-plan", StageName: "code_writer", Sequence: 1,
@@ -142,39 +145,43 @@ func TestEvidenceVouchedTestSymbolMintsNeedAndSubstitutes(t *testing.T) {
 	for _, n := range planScope.Evidence.Needs {
 		if n.Subject == wantSubject {
 			foundNeed = true
-			if n.Origin != NeedOriginEvidenceVouchedTest {
-				t.Fatalf("test-symbol need origin = %q, want %q", n.Origin, NeedOriginEvidenceVouchedTest)
+			if n.Origin != NeedOriginSymbolIndex {
+				t.Fatalf("test-symbol need origin = %q, want %q (shared resolver, cold-resolved)", n.Origin, NeedOriginSymbolIndex)
 			}
 		}
 	}
 	if !foundNeed {
-		t.Fatalf("no evidence-vouched locate need for %s in %+v", wantSubject, planScope.Evidence.Needs)
+		t.Fatalf("no shared-resolver locate need for %s in %+v", wantSubject, planScope.Evidence.Needs)
 	}
 	if !prodEvidenceOpsContain(planScope.Evidence.Cold.Operations, "symbol:"+wantSubject) {
-		t.Fatalf("cold plan lost the vouched test-symbol operation: %+v", planScope.Evidence.Cold.Operations)
+		t.Fatalf("cold plan lost the shared-resolver test-symbol operation: %+v", planScope.Evidence.Cold.Operations)
+	}
+	// The retained record substitutes the located operation and delivers
+	// its view, so the warm request omits the lookup.
+	if planScope.Evidence.SubstitutionCount() == 0 {
+		t.Fatalf("no substitution recorded for the matched record: %+v", planScope.Evidence.Diff)
 	}
 	if prodEvidenceOpsContain(planScope.Evidence.Warm.Operations, "symbol:"+wantSubject) {
 		t.Fatalf("warm plan retained the substituted test-symbol operation: %+v", planScope.Evidence.Warm.Operations)
 	}
-	if planScope.Evidence.SubstitutionCount() == 0 {
-		t.Fatalf("no substitution recorded: %+v", planScope.Evidence.Diff)
-	}
 
-	// Cold control: the same read task without evidence keeps the historical
-	// behavior. The cold plan must not contain the test-symbol operation,
-	// because cold cannot confirm it.
+	// Cold derivation alone (no memory store) mints the same need.
 	coldNeeds := DeriveContextNeeds(vouchedReadIdent, workDir, nil, nil)
+	foundCold := false
 	for _, n := range coldNeeds {
-		if n.Kind == NeedLocateNamedOperation && strings.Contains(n.Subject, testSymbolName) {
-			t.Fatalf("cold derivation minted a need for the unvouched test symbol: %+v", coldNeeds)
+		if n.Kind == NeedLocateNamedOperation && n.Subject == wantSubject {
+			foundCold = true
+			if n.Origin != NeedOriginSymbolIndex {
+				t.Fatalf("cold-derived origin = %q, want %q", n.Origin, NeedOriginSymbolIndex)
+			}
 		}
 	}
-	coldPlan := buildColdPlan(vouchedReadIdent, workDir, nil, 8, nil)
-	if prodEvidenceOpsContain(coldPlan.Operations, "symbol:"+wantSubject) {
-		t.Fatalf("cold plan without evidence grew a test-symbol operation: %+v", coldPlan.Operations)
+	if !foundCold {
+		t.Fatalf("cold derivation missed the test-source symbol: %+v", coldNeeds)
 	}
 
-	// Warm execution: the substitution fires through the real pass loop.
+	// The warm plan still executes, and the handshake delivers the symbol
+	// operation in both arms: the plan retains it.
 	var warmProbe prodEvidenceProbe
 	warmRunner := prodEvidenceRunner(t, &warmProbe)
 	tr := newRunTraceAccumulator(nil, "testfile-evidence-warm", "session", workDir, plan, "active", nil)
@@ -199,59 +206,37 @@ func TestEvidenceVouchedTestSymbolMintsNeedAndSubstitutes(t *testing.T) {
 	}
 }
 
-// TestUnvouchedTestSymbolStaysUnconfirmed is the trap guard: the identifier
-// exists only in a test file and nothing vouches for it, so it must not
-// mint a need and the cold plan must not grow the operation.
-func TestUnvouchedTestSymbolStaysUnconfirmed(t *testing.T) {
-	workDir, _, _ := testSymbolRepo(t, nil)
-	needs := DeriveContextNeeds(vouchedReadIdent, workDir, nil, nil)
-	for _, n := range needs {
-		if n.Kind == NeedLocateNamedOperation && strings.Contains(n.Subject, testSymbolName) {
-			t.Fatalf("unvouched test symbol minted a need: %+v", needs)
-		}
-	}
-	cold := buildColdPlan(vouchedReadIdent, workDir, nil, 8, nil)
-	if prodEvidenceOpsContain(cold.Operations, testSymbolName) {
-		t.Fatalf("unvouched test symbol grew the cold plan: %+v", cold.Operations)
-	}
-}
-
-// TestDecoyTestFileCannotConfirm is the adversarial case the original
-// exclusion guarded: two test files declare the identifier and evidence
-// vouches only one. The decoy must not turn the confirmation ambiguous or
-// resolve the need to the wrong file.
-func TestDecoyTestFileCannotConfirm(t *testing.T) {
+// TestDecoyTestFileKeepsTheNeedAmbiguous is the adversarial case the
+// original exclusion guarded: two test files declare the identifier. The
+// shared resolver must keep the need ambiguous (unresolvable to one file)
+// instead of silently resolving to the decoy.
+func TestDecoyTestFileKeepsTheNeedAmbiguous(t *testing.T) {
 	decoys := map[string]string{
 		"decoy_test.go": "package main\n\nimport \"testing\"\n\nfunc runClockTable(t *testing.T) {}\n",
 	}
-	workDir, rev, body := testSymbolRepo(t, decoys)
-	// The record vouches only clock_test.go, not the decoy.
-	rec := testSymbolRecord(t, workDir, rev, body)
-	_ = rec
-	vouched := vouchedFilesFromNodes([]memd.GraphNode{{
-		Kind:    "fact",
-		Anchors: []memd.GraphAnchor{{Kind: "file", Value: testSymbolPath}},
-	}})
-	needs := deriveContextNeeds(vouchedReadIdent, workDir, nil, nil, vouched)
+	workDir, _, _ := testSymbolRepo(t, decoys)
+	needs := deriveContextNeeds(vouchedReadIdent, workDir, nil, nil)
+	foundAmbiguous := false
 	for _, n := range needs {
-		if n.Kind == NeedLocateNamedOperation && strings.Contains(n.Subject, testSymbolName) {
-			t.Fatalf("partially vouched decoy confirmed the identifier: %+v", needs)
+		if n.Kind == NeedLocateNamedOperation && strings.Contains(n.Subject, testSymbolName+" (declared in ") {
+			foundAmbiguous = true
+		}
+		if strings.HasSuffix(n.Subject, "#"+testSymbolName) {
+			t.Fatalf("decoy resolved to a single file: %+v", needs)
 		}
 	}
-	cold := buildColdPlan(vouchedReadIdent, workDir, nil, 8, vouched)
-	if prodEvidenceOpsContain(cold.Operations, testSymbolName) {
-		t.Fatalf("partially vouched decoy grew the cold plan: %+v", cold.Operations)
+	if !foundAmbiguous {
+		t.Fatalf("ambiguous same-named declarations did not stay ambiguous: %+v", needs)
 	}
 }
 
 // TestVouchedProductionSymbolStillColdResolved is the no-double-credit
-// guard: an identifier the production index confirms keeps its cold-resolved
-// origin even when evidence also vouches for its file, so warm can never
-// claim credit for a lookup cold resolves anyway.
-func TestVouchedProductionSymbolStillColdResolved(t *testing.T) {
+// guard: an identifier the shared index confirms keeps its cold-resolved
+// origin whichever source role declares it, so warm can never claim credit
+// for a lookup cold resolves anyway.
+func TestSharedResolverProductionSymbolStillColdResolved(t *testing.T) {
 	workDir, _, _ := prodEvidenceRepo(t)
-	vouched := []string{prodEvidencePath}
-	needs := deriveContextNeeds("reuse Apply from "+prodEvidencePath, workDir, nil, nil, vouched)
+	needs := deriveContextNeeds("reuse Apply from "+prodEvidencePath, workDir, nil, nil)
 	for _, n := range needs {
 		if n.Subject == prodEvidencePath+"#Apply" && n.Origin != NeedOriginSymbolIndex {
 			t.Fatalf("production symbol origin = %q, want %q", n.Origin, NeedOriginSymbolIndex)

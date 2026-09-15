@@ -76,11 +76,12 @@ not fetch the substituted subject's source, and the model receives the
 record prose without the declaration body. This is the concrete defect
 behind "fact delivered, read still failed needing the source."
 
-D2. The current-source layer is unwired. `ToolRunnerSourceReader`,
-`BuildSourceView`, and `extractGoSymbol` (`source_view.go:137`,
-`source_view.go:216`, `symbol_extract.go:64`) have zero production
-callers. D1's repair should route through them, which keeps permission
-and registry paths intact.
+D2 (CORRECTED 2026-09-15). The original note claimed the current-source
+layer was unwired; that was a search error. `fulfillGetSymbol`
+(`context.go:252`) routes through `ToolRunnerSourceReader` and
+`extractGoSymbol`, so the layer is live behind the context-request
+fulfillment path. The defect is only that the substituted subject never
+issues a query (D1).
 
 D3. The trace's per-round context telemetry is disconnected.
 `expandContextRound` (`run.go:1417`) never calls `SpendRound`
@@ -88,7 +89,8 @@ D3. The trace's per-round context telemetry is disconnected.
 records through the initial-handshake path (`run.go:1455`). The ledger's
 `context_round` attribution (`registry.go:99`) is the wired per-request
 round signal, and it is what the measurement reads.
-D4. `25d207d` gates the test-file symbol index on memory-vouched files,
+D4. `25d207d` (superseded same day) gated the test-file symbol index on
+memory-vouched files,
 which gives warm an exclusive capability. Handoff section 6.1 requires
 the shared resolver to serve every arm and section 7.5 forbids inventing
 a cold operation to pass the `SubstitutionCount()` gate, which is how

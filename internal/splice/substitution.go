@@ -59,7 +59,7 @@ type ColdOperation struct {
 // task come first, symbol-confirmed identifiers add symbol lookups, and the
 // bounded production-source fallback reads only files that can plausibly be
 // edit targets (it shrinks when the task names its targets explicitly).
-func buildColdPlan(intent string, workspace string, priorFiles []string, maxFallback int, vouchedFiles []string) ColdPlan {
+func buildColdPlan(intent string, workspace string, priorFiles []string, maxFallback int) ColdPlan {
 	plan := ColdPlan{}
 	named := strictTaskPaths(intent)
 	for _, p := range named {
@@ -81,30 +81,6 @@ func buildColdPlan(intent string, workspace string, priorFiles []string, maxFall
 		}
 		op := ColdOperation{Name: "symbol:" + files[0] + "#" + name, Kind: "symbol", Subject: files[0] + "#" + name}
 		plan.Operations = append(plan.Operations, op)
-	}
-	// Evidence-vouched test sources: a task-text identifier the production
-	// index cannot confirm may live in a test file that admitted cognition
-	// vouches for. The plan records that symbol lookup so an admitted
-	// record has the concrete operation it replaces. Without vouched
-	// evidence this branch never runs and the cold plan is unchanged.
-	if len(vouchedFiles) > 0 {
-		tws := buildTestSymbolIndex(workspace)
-		for _, name := range identifierCandidates(intent) {
-			if len(ws.lookup(name)) != 0 {
-				// The production index already confirmed it; a test-source
-				// copy would duplicate the need and the operation.
-				continue
-			}
-			tfiles := tws.lookup(name)
-			if len(tfiles) != 1 || !allVouched(tfiles, vouchedFiles) {
-				continue
-			}
-			plan.Operations = append(plan.Operations, ColdOperation{
-				Name:    "symbol:" + tfiles[0] + "#" + name,
-				Kind:    "symbol",
-				Subject: tfiles[0] + "#" + name,
-			})
-		}
 	}
 	// Prior files the stage must integrate with.
 	for _, p := range priorFiles {

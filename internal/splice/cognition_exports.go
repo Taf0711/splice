@@ -14,9 +14,7 @@ import "encoding/json"
 // the current-source index of workspace, the prior changed files (the
 // integration surface), and recorded failure evidence.
 func DeriveContextNeeds(intent string, workspace string, priorFiles []string, failureEvidence []string) []ContextNeed {
-	// No vouched files: the matched-snapshot campaign predates evidence-
-	// vouched test-file confirmation and keeps its historical derivation.
-	return deriveContextNeeds(intent, workspace, priorFiles, failureEvidence, nil)
+	return deriveContextNeeds(intent, workspace, priorFiles, failureEvidence)
 }
 
 // RecordSpeaksOfSubject is the exported E4 subject-matching predicate: does

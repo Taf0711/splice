@@ -144,7 +144,7 @@ func RunRetentionSlice(taskBIntent string, worktree string, taskARecords []nodeW
 
 	// The improved cold plan first: same task, current-source tools, no
 	// memory. The comparison is always cold-plan-first (E4 rule).
-	cold := buildColdPlan(taskBIntent, worktree, nil, 8, nil)
+	cold := buildColdPlan(taskBIntent, worktree, nil, 8)
 	coldOps := operationNames(cold.Operations)
 
 	// W1 expected-value gate: when measured inputs are installed, a
