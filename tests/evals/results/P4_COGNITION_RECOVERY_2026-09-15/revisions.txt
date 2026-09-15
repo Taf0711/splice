@@ -1,0 +1,4 @@
+product/harness revision: 27a1eedb09407ab5517f515554bb0dae6f002ff1
+empty dir:
+/Users/tafseerhaque/Documents/splice-archeval
+working tree dirty (at preflight): no committed changes; untracked harness manifest added below

@@ -1,0 +1,11 @@
+experiment mvp-matched-1789500226196647000: scheduling seed 20260915, arm order [warm cold manual]
+family mvp-02-ttl-source-of-truth: snapshot Task A did not verify; skipping target (status=failed error="exec run mvp-snap-mvp-02-ttl-source-of-truth-1789500226303738000-taska: exit status 4: {\"apiModel\":\"z-ai/glm-5.3-flash\",\"cwd\":\"/private/var/folders/cf/37chkgfx22q5bb_ws8brslx00000gn/T/splice-mvp-snap-2932623860\",\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"openai-compatible\",\"runId\":\"run_20260915192346_a736f0\",\"schemaVersion\":2,\"sessionId\":\"mvp-snap-mvp-02-ttl-source-of-truth-1789500226303738000-taska" session=mvp-snap-mvp-02-ttl-source-of-truth-1789500226303738000-taska failure_category=agent_noncompletion tokens=37455 tool_calls=22 file_reads=10 latency_ms=58667 executed=true)
+
+MVP paired proof (task B outcomes; precursor-failed attempts excluded)
+
+mvp-02-ttl-source-of-truth
+  setup failures excluded from target analysis: 3 (failed snapshots: 1, skipped target slots: 3)
+  cold: success 0/0, tokens med n/a, searches med n/a, reads med n/a
+  warm: success 0/0, tokens med n/a, searches med n/a, reads med n/a
+  cognition: resolved_by_cognition med n/a, legacy_inferred_avoided_ops med n/a, executed_ops med n/a, evidence_satisfied_ops med n/a, validation_reads med n/a (per Task B run)
+  campaign: automatic success 0/1, manual (diagnostic_only) success 0/1
