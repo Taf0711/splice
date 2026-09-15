@@ -123,8 +123,13 @@ func (r *ProposalBaseRegistry) RecordFromBundle(bundle *schemas.ContextBundle) {
 	}
 }
 
-// Resolve finds the snapshot for a model-supplied base_ref. The second
-// return is false when the handle is unknown: the parser then fails the
+// Resolve finds the snapshot for a model-supplied base_ref. Two forms are
+// accepted: the host-minted view handle, and the delivered view's PATH as
+// an alias for the same snapshot. The path form exists because a live
+// model reliably cites the file it saw but cannot compute a hash of text
+// it only read; the recorded P4 smoke failure was two guessed handles
+// burning format retries before the modify was abandoned. The second
+// return is false when neither form is known: the parser then fails the
 // proposal loudly instead of guessing a base.
 func (r *ProposalBaseRegistry) Resolve(baseRef string) (ProposalSnapshot, bool) {
 	if r == nil {

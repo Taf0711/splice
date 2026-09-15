@@ -373,7 +373,7 @@ func proposalArraySchema() map[string]any {
 			"properties": map[string]any{
 				"path":        map[string]any{"type": "string"},
 				"change_type": map[string]any{"type": "string", "enum": []string{"create", "modify", "delete"}},
-				"base_ref":    map[string]any{"type": "string", "description": "For modify/delete: the source handle of the base content you received in context views. The host resolves it to exact bytes; you never compute hashes."},
+				"base_ref":    map[string]any{"type": "string", "description": "For modify/delete: the path of the delivered view you are editing, exactly as named in your context views (for example \"clock_test.go\"). The host resolves it to the delivered base text; you never compute hashes."},
 				"edits": map[string]any{
 					"type":        "array",
 					"description": "For modify: exact text replacements matched against the base content. old must appear exactly once; no fuzzy matching.",

@@ -37,7 +37,7 @@ files, language, intent, confidence, and optionally dependencies and
 known_limitations. files, language, intent, and confidence are required.
 
 Example submit_code arguments:
-{"files":[{"path":"internal/cache/client.go","change_type":"modify","base_ref":"<handle from your context views>","edits":[{"old":"<exact text>","new":"<replacement>"}]}],"language":"go","intent":"close the cache client on shutdown","confidence":0.9}
+{"files":[{"path":"internal/cache/client.go","change_type":"modify","base_ref":"<path of the delivered view>","edits":[{"old":"<exact text>","new":"<replacement>"}]}],"language":"go","intent":"close the cache client on shutdown","confidence":0.9}
 
 Never invent source. Call request_codebase_context when you need source you
 have not received. When you cannot obtain it, report the gap in
@@ -45,10 +45,12 @@ known_limitations instead of guessing, and submit the best bounded change.
 
 Files use the compact edit protocol (compact/1). Each file entry is exactly one of:
 - create: content holds the full file content; no base_ref or edits.
-- modify: base_ref plus one or more edits. base_ref is the source handle
-  of the base content you received in your context views. Each edit has
-  old and new: old must appear EXACTLY ONCE in that base content and is
-  replaced byte-for-byte by new. An empty new deletes the matched span.
+- modify: base_ref plus one or more edits. base_ref is
+  "the path of the delivered view" you are editing, exactly as your context
+  views named it (for example "clock_test.go"); a short handle from your
+  context views is also accepted. Each edit has old and new: old must
+  appear EXACTLY ONCE in that base content and is replaced byte-for-byte
+  by new. An empty new deletes the matched span.
   An empty old is invalid. There is no fuzzy matching and no guessing.
 - delete: base_ref only.
 
@@ -68,7 +70,7 @@ entry carries content and MUST NOT carry base_ref or edits. Mixing them
 is a validation error that rejects the whole proposal. For a modify of
 internal/audit/retention.go the entry looks exactly like:
 {"path":"internal/audit/retention.go","change_type":"modify",
- "base_ref":"<handle from your context views>",
+ "base_ref":"<path of the delivered view>",
  "edits":[{"old":"func Apply(trail *Trail, p Policy) int {","new":"func Apply(trail *Trail, p Policy) int {\n\tapplied := enforce(trail, p)"}]}
 Notice: no "content" field anywhere in a modify entry. If you find
 yourself writing content alongside base_ref, delete the content field.
