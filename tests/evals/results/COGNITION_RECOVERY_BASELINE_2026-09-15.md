@@ -82,7 +82,13 @@ D2. The current-source layer is unwired. `ToolRunnerSourceReader`,
 callers. D1's repair should route through them, which keeps permission
 and registry paths intact.
 
-D3. `25d207d` gates the test-file symbol index on memory-vouched files,
+D3. The trace's per-round context telemetry is disconnected.
+`expandContextRound` (`run.go:1417`) never calls `SpendRound`
+(`expansion_budget.go:68`), so `RoundsUsed()` stays 0 and every round
+records through the initial-handshake path (`run.go:1455`). The ledger's
+`context_round` attribution (`registry.go:99`) is the wired per-request
+round signal, and it is what the measurement reads.
+D4. `25d207d` gates the test-file symbol index on memory-vouched files,
 which gives warm an exclusive capability. Handoff section 6.1 requires
 the shared resolver to serve every arm and section 7.5 forbids inventing
 a cold operation to pass the `SubstitutionCount()` gate, which is how

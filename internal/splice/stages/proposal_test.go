@@ -351,8 +351,8 @@ func TestParseCompactProposalsNormalize(t *testing.T) {
 // rule: both arms (and both stages) advertise the SAME versioned files
 // schema, so a comparison never measures a schema difference.
 func TestSubmitCodeAndSubmitTestsAdvertiseIdenticalSchema(t *testing.T) {
-	code := submitCodeToolDefinition(false)
-	tests := testGeneratorToolDefinition(false)
+	code := submitCodeToolDefinition()
+	tests := testGeneratorToolDefinition()
 	codeProps, _ := code.Parameters["properties"].(map[string]any)
 	testProps, _ := tests.Parameters["properties"].(map[string]any)
 	codeFiles := codeProps["files"]

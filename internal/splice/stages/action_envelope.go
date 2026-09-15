@@ -272,3 +272,99 @@ func TryDecodeStageAction(toolName string, collected *zeroruntime.CollectedStrea
 	}
 	return action, nil
 }
+
+// contextRequestToolName is the named context-request tool. The action
+// contract is expressed as two independently named tool schemas normalized
+// into the same StageAction: a submission tool that carries no
+// request_context property, and this tool. A model cannot attach a context
+// payload to a submission through a field the submission schema does not
+// declare, which is the failure mode the single-tool discriminator shape
+// produced (six of eight recorded calls mixed the payloads and were
+// rejected as format retries).
+const contextRequestToolName = "request_codebase_context"
+
+// contextRequestToolDefinition is the model-facing context-request tool:
+// one bounded reason and one to four bounded queries, nothing else. The
+// payload is the ContextRequest itself, not a nested envelope.
+func contextRequestToolDefinition() zeroruntime.ToolDefinition {
+	full := actionContextRequestSchema()
+	return zeroruntime.ToolDefinition{
+		Name:        contextRequestToolName,
+		Description: "Ask the host for bounded source your context views did not deliver. The host fulfills the request and calls you again with the new evidence. reason is required and must name what you need and why.",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"reason":             full["properties"].(map[string]any)["reason"],
+				"queries":            full["properties"].(map[string]any)["queries"],
+				"memory_disposition": memoryDispositionSchema,
+			},
+			"required": []string{"reason", "queries"},
+		},
+	}
+}
+
+// TryDecodeStageActionFromTools decodes the one typed action from a stream
+// that offered both the submission tool and the context-request tool.
+// Exactly one tool call is allowed: both present is a conflict that fails
+// loud and is retried as a format error, never silently downgraded. The
+// submission branch keeps the legacy flat and envelope forms so a model
+// that follows either description lands on the same action.
+func TryDecodeStageActionFromTools(collected *zeroruntime.CollectedStream, submitToolName, contextToolName string) (StageAction, error) {
+	submitCall := findToolCall(collected, submitToolName)
+	contextCall := findToolCall(collected, contextToolName)
+	switch {
+	case submitCall != nil && contextCall != nil:
+		return StageAction{}, fmt.Errorf("%s action: exactly one action is allowed; both %q and %q were called and neither was applied", submitToolName, submitToolName, contextToolName)
+	case contextCall != nil:
+		stripped, err := stripDispositionClaims(contextCall.Arguments)
+		if err != nil {
+			return StageAction{}, fmt.Errorf("parse %s args: %w", contextToolName, err)
+		}
+		var request schemas.ContextRequest
+		if err := json.Unmarshal([]byte(stripped), &request); err != nil {
+			return StageAction{}, fmt.Errorf("parse %s request_context: %w", contextToolName, err)
+		}
+		if err := ValidateActionContextRequest(request); err != nil {
+			return StageAction{}, err
+		}
+		return StageAction{Request: &request, RawArgs: stripped}, nil
+	case submitCall != nil:
+		stripped, err := stripDispositionClaims(submitCall.Arguments)
+		if err != nil {
+			return StageAction{}, fmt.Errorf("parse %s args: %w", submitToolName, err)
+		}
+		return decodeSubmissionCall(submitToolName, stripped)
+	default:
+		return StageAction{}, fmt.Errorf("model did not call %s or %s", submitToolName, contextToolName)
+	}
+}
+
+// decodeSubmissionCall validates one submission tool call's arguments. The
+// two-tool schema declares files, language, intent, and confidence as
+// required, so the decoder keeps the guarantee the schema states: a
+// submission carries at least one file. A request_context key on a
+// submission is a conflict and fails loud, even though the schema no
+// longer advertises it.
+func decodeSubmissionCall(toolName, stripped string) (StageAction, error) {
+	var probe struct {
+		Files          json.RawMessage `json:"files"`
+		RequestContext json.RawMessage `json:"request_context"`
+	}
+	if err := json.Unmarshal([]byte(stripped), &probe); err != nil {
+		return StageAction{}, fmt.Errorf("parse %s args: %w", toolName, err)
+	}
+	if probe.RequestContext != nil {
+		return StageAction{}, fmt.Errorf("%s action: a context request and a change submission are mutually exclusive; both were present and neither was applied", toolName)
+	}
+	if probe.Files == nil {
+		return StageAction{}, fmt.Errorf("%s requires the %q field", toolName, "files")
+	}
+	var files []json.RawMessage
+	if err := json.Unmarshal(probe.Files, &files); err != nil {
+		return StageAction{}, fmt.Errorf("%s: files must be an array: %w", toolName, err)
+	}
+	if len(files) == 0 {
+		return StageAction{}, fmt.Errorf("%s: files is empty; a submit must carry at least one file", toolName)
+	}
+	return StageAction{ProposalArgs: stripped, RawArgs: stripped}, nil
+}

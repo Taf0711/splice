@@ -8,52 +8,103 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
-// TestSubmitCodeSchemaDeclaresBothActions pins the model-facing contract:
-// the serialized tool schema names the discriminator and both actions.
-func TestSubmitCodeSchemaDeclaresBothActions(t *testing.T) {
-	def := submitCodeToolDefinition(false)
-	props, ok := def.Parameters["properties"].(map[string]any)
+// TestSubmitAndContextToolsAreStructurallyExclusive pins the model-facing
+// contract: two independently named tool schemas, one per action. The
+// submission tool carries no request_context property and no action
+// discriminator, so a model cannot attach a context payload to a
+// submission through a field the schema declares. Each schema states the
+// fields its validator requires.
+func TestSubmitAndContextToolsAreStructurallyExclusive(t *testing.T) {
+	submit := submitCodeToolDefinition()
+	submitProps, ok := submit.Parameters["properties"].(map[string]any)
 	if !ok {
-		t.Fatalf("schema has no properties object: %T", def.Parameters["properties"])
+		t.Fatalf("submit schema has no properties object: %T", submit.Parameters["properties"])
 	}
-	actionProp, ok := props[actionFieldName].(map[string]any)
+	if _, ok := submitProps["request_context"]; ok {
+		t.Fatal("submission schema advertises request_context; the branches are no longer structurally exclusive")
+	}
+	if _, ok := submitProps[actionFieldName]; ok {
+		t.Fatal("submission schema advertises an action discriminator; the tool name is the discriminator")
+	}
+	submitRequired, ok := submit.Parameters["required"].([]string)
 	if !ok {
-		t.Fatalf("schema does not declare the %q discriminator", actionFieldName)
+		t.Fatalf("submit schema required = %#v, want a list", submit.Parameters["required"])
 	}
-	enum, ok := actionProp["enum"].([]string)
-	if !ok || len(enum) != 2 {
-		t.Fatalf("action enum = %#v, want two values", actionProp["enum"])
+	for _, want := range []string{"files", "language", "intent", "confidence"} {
+		found := false
+		for _, r := range submitRequired {
+			if r == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("submit schema required = %v, missing %q: the validator requires it and the model must see that", submitRequired, want)
+		}
 	}
-	if enum[0] != actionFieldContext || enum[1] != actionFieldChanges {
-		t.Fatalf("action enum = %v, want [%s %s]", enum, actionFieldContext, actionFieldChanges)
+
+	context := contextRequestToolDefinition()
+	if context.Name != contextRequestToolName {
+		t.Fatalf("context tool name = %q, want %q", context.Name, contextRequestToolName)
 	}
-	if _, ok := props[actionFieldContext].(map[string]any); !ok {
-		t.Fatalf("schema does not declare the %q payload", actionFieldContext)
+	contextProps, ok := context.Parameters["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("context schema has no properties object: %T", context.Parameters["properties"])
 	}
-	required, ok := def.Parameters["required"].([]string)
-	if !ok || len(required) != 1 || required[0] != actionFieldName {
-		t.Fatalf("required = %#v, want only %s", def.Parameters["required"], actionFieldName)
+	for _, forbidden := range []string{"files", "language", "intent", "confidence", "action"} {
+		if _, ok := contextProps[forbidden]; ok {
+			t.Fatalf("context schema advertises %q; the branches are no longer structurally exclusive", forbidden)
+		}
 	}
-	// Some adapters re-marshal the opaque Parameters map, so the schema
+	contextRequired, ok := context.Parameters["required"].([]string)
+	if !ok {
+		t.Fatalf("context schema required = %#v, want a list", context.Parameters["required"])
+	}
+	for _, want := range []string{"reason", "queries"} {
+		found := false
+		for _, r := range contextRequired {
+			if r == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("context schema required = %v, missing %q", contextRequired, want)
+		}
+	}
+
+	// Some adapters re-marshal the opaque Parameters map, so both schemas
 	// must survive a JSON round trip.
-	if _, err := json.Marshal(def.Parameters); err != nil {
-		t.Fatalf("schema is not serializable: %v", err)
+	for _, def := range []zeroruntime.ToolDefinition{submit, context} {
+		if _, err := json.Marshal(def.Parameters); err != nil {
+			t.Fatalf("schema %s is not serializable: %v", def.Name, err)
+		}
 	}
 }
 
-// TestCodeWriterPromptDeclaresTheActionContract pins the prompt side: a
-// concrete example of each action reaches the model.
+// TestCodeWriterPromptDeclaresTheActionContract pins the prompt side: the
+// two named tools, one concrete example per tool, and the required-field
+// statement. The prompt examples must match the emitted schemas exactly.
 func TestCodeWriterPromptDeclaresTheActionContract(t *testing.T) {
 	for _, want := range []string{
-		`"action":"request_context"`,
-		`"action":"submit_changes"`,
+		"request_codebase_context",
+		`"reason":"`,
 		"max_results",
 		"known_limitations",
+		"files, language, intent, and confidence are required",
 	} {
 		if !strings.Contains(codeWriterSystemPrompt, want) {
 			t.Fatalf("prompt is missing %q", want)
+		}
+	}
+	// The retired single-tool discriminator must be gone: its examples
+	// taught the model to mix the payloads, which was the recorded
+	// failure.
+	for _, gone := range []string{`"action":"request_context"`, `"action":"submit_changes"`} {
+		if strings.Contains(codeWriterSystemPrompt, gone) {
+			t.Fatalf("prompt still carries the retired discriminator example %q", gone)
 		}
 	}
 }

@@ -372,6 +372,13 @@ func (provider *Provider) geminiRequest(request zeroruntime.CompletionRequest) (
 				AllowedFunctionNames: []string{name},
 			},
 		}
+	} else if request.ToolChoiceRequired {
+		// Any-tool forcing: the model must call one of the offered tools,
+		// without naming which. ANY with no allowed-name list means any of
+		// the declared functions.
+		mapped.ToolConfig = &toolConfig{
+			FunctionCallingConfig: functionCallingConfig{Mode: "ANY"},
+		}
 	}
 	return mapped, nil
 }

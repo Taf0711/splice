@@ -20,16 +20,11 @@ func mustMap(t *testing.T, value any, label string) map[string]any {
 	return m
 }
 
-// requestContextItemSchema walks the serialized submit_code schema down to the
-// request_context query item.
+// requestContextItemSchema walks the serialized request_codebase_context
+// tool schema down to the query item.
 func requestContextItemSchema(t *testing.T) map[string]any {
 	t.Helper()
-	params := submitCodeToolDefinition(false).Parameters
-	props := mustMap(t, params["properties"], "parameters.properties")
-	contextProp := mustMap(t, props[actionFieldContext], "request_context")
-	contextProps := mustMap(t, contextProp["properties"], "request_context.properties")
-	queries := mustMap(t, contextProps["queries"], "request_context.queries")
-	return mustMap(t, queries["items"], "request_context.queries.items")
+	return mustMap(t, requestContextObjectSchema(t)["properties"].(map[string]any)["queries"], "request_context.queries")["items"].(map[string]any)
 }
 
 func requiredList(t *testing.T, item map[string]any) []string {
@@ -134,14 +129,11 @@ func TestRequestContextSchemaShapedQueryOmittingBoundsIsRejected(t *testing.T) {
 
 // --- Drift guard: schema and validator must agree in both directions -------
 
-// requestContextObjectSchema walks the serialized submit_code schema down to
-// the request_context object level, returns the object schema map.
+// requestContextObjectSchema returns the request_codebase_context tool's
+// parameter schema: the ContextRequest object the model fills.
 func requestContextObjectSchema(t *testing.T) map[string]any {
 	t.Helper()
-	params := submitCodeToolDefinition(false).Parameters
-	props := mustMap(t, params["properties"], "parameters.properties")
-	contextProp := mustMap(t, props[actionFieldContext], "request_context")
-	return contextProp
+	return mustMap(t, contextRequestToolDefinition().Parameters, "parameters")
 }
 
 // TestRequestContextSchemaRequiresEveryValidatorField demonstrates that the

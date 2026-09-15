@@ -267,6 +267,14 @@ type CompletionRequest struct {
 	// behavior byte-for-byte. Used by typed stages that require one typed tool
 	// call.
 	ToolChoice string
+	// ToolChoiceRequired, when true and ToolChoice is empty, requires the
+	// model to call at least one tool without naming which one. Adapters map
+	// it to their native any-tool forcing (OpenAI tool_choice "required",
+	// Anthropic tool_choice "any", Gemini functionCallingConfig ANY with no
+	// allowed-name restriction). Used by stages that accept more than one
+	// typed tool and must not strand on prose. When both fields are set the
+	// named forcing wins, because it is the stricter request.
+	ToolChoiceRequired bool
 }
 
 // ServerTool is one provider-executed tool request.

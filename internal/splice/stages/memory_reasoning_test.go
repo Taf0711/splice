@@ -2,6 +2,7 @@ package stages
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -52,38 +53,46 @@ func memoryBundle() *schemas.MemoryBundle {
 	}
 }
 
-func TestToolDefinitionMemorySchemaWarmVsCold(t *testing.T) {
-	warm := submitCodeToolDefinition(true)
-	props := warm.Parameters["properties"].(map[string]any)
-	if _, ok := props["memory_disposition"]; !ok {
-		t.Fatal("warm definition lacks memory_disposition property")
-	}
-	required := warm.Parameters["required"].([]string)
-	found := false
-	for _, r := range required {
-		if r == "memory_disposition" {
-			found = true
+// TestToolDefinitionSchemaStableAcrossMemoryPresence pins the cache
+// contract: the tool schemas must not depend on whether memory was
+// delivered. A memory-dependent schema changes the cached prompt prefix
+// between rounds of the same stage and forfeits the provider's prefix
+// cache. The builders take no memory argument, so identity across memory
+// states is structural; the required lists are pinned so a
+// memory-dependent entry added later fails loudly. Disposition presence is
+// enforced in code by reconcileMemoryReview, not by the schema.
+func TestToolDefinitionSchemaStableAcrossMemoryPresence(t *testing.T) {
+	wantSubmitRequired := []string{"files", "language", "intent", "confidence"}
+	for _, tc := range []struct {
+		name          string
+		def           zeroruntime.ToolDefinition
+		wantRequired  []string
+		wantMandatory bool
+	}{
+		{"code_writer submission", submitCodeToolDefinition(), wantSubmitRequired, true},
+		{"test_generator submission", testGeneratorToolDefinition(), wantSubmitRequired, true},
+		{"code_writer context", contextRequestToolDefinition(), []string{"reason", "queries"}, false},
+	} {
+		props, ok := tc.def.Parameters["properties"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s: properties missing", tc.name)
 		}
-	}
-	if !found {
-		t.Fatal("warm definition must require memory_disposition")
-	}
-
-	cold := submitCodeToolDefinition(false)
-	coldRequired := cold.Parameters["required"].([]string)
-	for _, r := range coldRequired {
-		if r == "memory_disposition" {
-			t.Fatal("cold definition must not require disposition")
+		if tc.wantMandatory {
+			if _, ok := props["memory_disposition"]; !ok {
+				t.Fatalf("%s: lacks the memory_disposition property", tc.name)
+			}
 		}
-	}
-	if _, ok := cold.Parameters["properties"].(map[string]any)["memory_disposition"]; !ok {
-		t.Fatal("cold definition keeps the property optional but present")
-	}
-
-	tgCold := testGeneratorToolDefinition(false)
-	for _, r := range tgCold.Parameters["required"].([]string) {
-		if r == "memory_disposition" {
-			t.Fatal("test generator cold definition must not require disposition")
+		required, ok := tc.def.Parameters["required"].([]string)
+		if !ok {
+			t.Fatalf("%s: required missing", tc.name)
+		}
+		for _, r := range required {
+			if r == "memory_disposition" {
+				t.Fatalf("%s: memory_disposition must never be required, or the schema depends on memory presence", tc.name)
+			}
+		}
+		if !slices.Equal(required, tc.wantRequired) {
+			t.Fatalf("%s: required = %v, want %v", tc.name, required, tc.wantRequired)
 		}
 	}
 }

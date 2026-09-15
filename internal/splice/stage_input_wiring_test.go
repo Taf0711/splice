@@ -192,8 +192,8 @@ func (p *memoryScriptedProvider) StreamCompletion(ctx context.Context, request z
 		}
 	}
 	core := map[string]any{
-		"files": []schemas.FileChange{}, "language": "go",
-		"intent": "no changes", "confidence": 0.9,
+		"files":    []schemas.FileChange{{Path: "main.go", ChangeType: "create", Content: "package main\n"}},
+		"language": "go", "intent": "no changes", "confidence": 0.9,
 	}
 	if p.claims != nil {
 		core["memory_disposition"] = p.claims

@@ -65,12 +65,12 @@ func (CodeWriter) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 	if err != nil {
 		return schemas.HarnessStageOutput{}, err
 	}
-	// D1: the validate callback decodes the discriminated action. A
-	// request_context action is VALID typed output (no format retry); the
-	// orchestrator fulfills it and re-invokes. A submit action goes
-	// through the existing proposal parse.
-	collected, err := callValidatedToolUse(ctx, provider, options.model("medium"), options.ReasoningEffort, composeSystemPrompt(codeWriterSystemPrompt), string(payload), options.Images, submitCodeToolDefinition(len(cwInput.Memory) > 0), options.MaxOutputTokens, &options.Stream, func(collected *zeroruntime.CollectedStream) error {
-		action, err := TryDecodeStageAction(codeWriterToolName, collected)
+	// D1: the validate callback decodes the action across both typed tools.
+	// A context request is VALID typed output (no format retry); the
+	// orchestrator fulfills it and re-invokes. A submission goes through the
+	// existing proposal parse.
+	collected, err := callValidatedToolUse(ctx, provider, options.model("medium"), options.ReasoningEffort, composeSystemPrompt(codeWriterSystemPrompt), string(payload), options.Images, codeWriterTools(), options.MaxOutputTokens, &options.Stream, func(collected *zeroruntime.CollectedStream) error {
+		action, err := TryDecodeStageActionFromTools(collected, codeWriterToolName, contextRequestToolName)
 		if err != nil {
 			return err
 		}
@@ -86,17 +86,25 @@ func (CodeWriter) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 	// Decode the terminal action. A request_context surfaces as
 	// output.ContextRequest for the orchestrator's expansion loop; a
 	// submit normalizes through the shared materializer below.
-	action, err := TryDecodeStageAction(codeWriterToolName, collected)
+	action, err := TryDecodeStageActionFromTools(collected, codeWriterToolName, contextRequestToolName)
 	if err != nil {
 		return schemas.HarnessStageOutput{}, withCollectedUsage(err, collected)
 	}
 	if action.Request != nil {
 		options.report("requesting context expansion: " + action.Request.Reason)
+		// The memory-review contract applies to every typed call, so the
+		// model's dispositions ride the expansion output too.
+		claims, claimIssues := parseDispositionClaims(contextRequestToolName, collected)
+		memoryReview, reviewNote := reconcileMemoryReview(cwInput.Memory, claims, claimIssues)
+		if reviewNote != "" {
+			options.report(reviewNote)
+		}
 		return schemas.HarnessStageOutput{
 			Summary:        "Code Writer requested additional context.",
 			Detail:         action.Request.Reason,
 			Confidence:     1.0,
 			ContextRequest: action.Request,
+			MemoryReview:   memoryReview,
 			Usage:          usageFromCollected(collected),
 		}, nil
 	}
@@ -287,20 +295,19 @@ func actionContextRequestSchema() map[string]any {
 	}
 }
 
-func submitCodeToolDefinition(hasMemory bool) zeroruntime.ToolDefinition {
+// submitCodeToolDefinition is the model-facing submission tool. It carries
+// no request_context property and no action discriminator: the two-tool
+// contract makes the branches structurally exclusive, and the required
+// list states exactly what a submission must carry, so the model can see
+// the fields the validator enforces. The schema is stable across memory
+// presence (see applyMemoryDefinition).
+func submitCodeToolDefinition() zeroruntime.ToolDefinition {
 	definition := zeroruntime.ToolDefinition{
-		Name: codeWriterToolName,
-		Description: "Choose exactly one action. request_context asks for source you have not received; " +
-			"submit_changes returns the complete CodeWriterOutput. Set the action field to name your choice.",
+		Name:        codeWriterToolName,
+		Description: "Submit the complete CodeWriterOutput for the requested implementation. To ask for missing source instead, call " + contextRequestToolName + ".",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"action": map[string]any{
-					"type":        "string",
-					"enum":        []string{actionFieldContext, actionFieldChanges},
-					"description": "Exactly one action. request_context asks for missing source; submit_changes submits the implementation.",
-				},
-				"request_context":   actionContextRequestSchema(),
 				"files":             proposalArraySchema(),
 				"language":          map[string]any{"type": "string"},
 				"intent":            map[string]any{"type": "string"},
@@ -308,15 +315,25 @@ func submitCodeToolDefinition(hasMemory bool) zeroruntime.ToolDefinition {
 				"known_limitations": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 				"confidence":        map[string]any{"type": "number"},
 			},
-			// Only the discriminator is unconditionally required. The
-			// submit fields are required when action is submit_changes, and
-			// the decoder enforces that per-action condition because a flat
-			// JSON Schema object cannot express it.
-			"required": []string{actionFieldName},
+			"required": []string{"files", "language", "intent", "confidence"},
 		},
 	}
-	applyMemoryDefinition(definition.Parameters, hasMemory)
+	applyMemoryDefinition(definition.Parameters)
 	return definition
+}
+
+// codeWriterTools lists both typed actions the code writer may take. Two
+// independently named tool schemas normalize into the same StageAction,
+// which makes the branches structurally exclusive: the submission tool
+// carries no request_context property, and the context tool carries no
+// submission payload. With several tools the request forces some tool call
+// without naming which, so prose cannot strand the typed-output retry
+// loop.
+func codeWriterTools() []zeroruntime.ToolDefinition {
+	return []zeroruntime.ToolDefinition{
+		submitCodeToolDefinition(),
+		contextRequestToolDefinition(),
+	}
 }
 
 // runToolWithExpectedBase invokes the mutating tool with the caller's

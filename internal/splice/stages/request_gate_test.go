@@ -29,11 +29,11 @@ func b4Tool() zeroruntime.ToolDefinition {
 func TestBuildFinalRequestMatchesCallToolUse(t *testing.T) {
 	provider := &requestCapturingProvider{events: toolCallEvent("submit_code", `{"confidence":0.9,"intent":"i","language":"go","files":[]}`)}
 	const system, user = "system prompt", "user payload with source"
-	_, err := callToolUse(t.Context(), provider, "model-x", "medium", system, user, nil, b4Tool(), 777, nil, "cache-key", true)
+	_, err := callToolUse(t.Context(), provider, "model-x", "medium", system, user, nil, []zeroruntime.ToolDefinition{b4Tool()}, 777, nil, "cache-key", true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	built, _ := BuildFinalRequest("code_writer", "model-x", "medium", system, user, nil, b4Tool(), 777, "cache-key", true, 1)
+	built, _ := BuildFinalRequest("code_writer", "model-x", "medium", system, user, nil, []zeroruntime.ToolDefinition{b4Tool()}, 777, "cache-key", true, 1)
 	if len(provider.request.Messages) != len(built.Messages) {
 		t.Fatalf("message count drifted: %d vs %d", len(provider.request.Messages), len(built.Messages))
 	}
@@ -53,7 +53,7 @@ func TestBuildFinalRequestMatchesCallToolUse(t *testing.T) {
 func TestFinalRequestBreakdownByteCountsAreExact(t *testing.T) {
 	const system, user = "abc", "hello world"
 	schema, _ := json.Marshal(b4Tool())
-	built, breakdown := BuildFinalRequest("stage", "m", "", system, user, nil, b4Tool(), 0, "", false, 2)
+	built, breakdown := BuildFinalRequest("stage", "m", "", system, user, nil, []zeroruntime.ToolDefinition{b4Tool()}, 0, "", false, 2)
 	if breakdown.SystemBytes != len(system) || breakdown.UserBytes != len(user) {
 		t.Fatalf("component bytes drifted: %+v", breakdown)
 	}
@@ -79,7 +79,7 @@ func TestFinalRequestBreakdownByteCountsAreExact(t *testing.T) {
 // gate reports the bound, the measured size, and actionable guidance; it
 // never trims content itself and never reports overflow when unbounded.
 func TestGateFinalRequestOverflowNamesBound(t *testing.T) {
-	built, breakdown := BuildFinalRequest("s", "m", "", strings.Repeat("s", 400), strings.Repeat("u", 400), nil, b4Tool(), 0, "", false, 1)
+	built, breakdown := BuildFinalRequest("s", "m", "", strings.Repeat("s", 400), strings.Repeat("u", 400), nil, []zeroruntime.ToolDefinition{b4Tool()}, 0, "", false, 1)
 	// Unbounded: no overflow.
 	if gate := GateFinalRequest(breakdown, 0); gate.Overflow != nil {
 		t.Fatalf("unbounded gate reported overflow: %v", gate.Overflow)
@@ -111,8 +111,8 @@ func TestGateFinalRequestOverflowNamesBound(t *testing.T) {
 func TestFinalRequestGateFitsAfterFulfillment(t *testing.T) {
 	smallSource := strings.Repeat("a", 200)
 	largeSource := strings.Repeat("a", 40000)
-	small, sb := BuildFinalRequest("s", "m", "", "sys", smallSource, nil, b4Tool(), 0, "", false, 1)
-	large, lb := BuildFinalRequest("s", "m", "", "sys", largeSource, nil, b4Tool(), 0, "", false, 1)
+	small, sb := BuildFinalRequest("s", "m", "", "sys", smallSource, nil, []zeroruntime.ToolDefinition{b4Tool()}, 0, "", false, 1)
+	large, lb := BuildFinalRequest("s", "m", "", "sys", largeSource, nil, []zeroruntime.ToolDefinition{b4Tool()}, 0, "", false, 1)
 	if sb.UserBytes != 200 || lb.UserBytes != 40000 {
 		t.Fatal("user bytes must reflect the FULFILLED source size")
 	}

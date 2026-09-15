@@ -82,7 +82,7 @@ func withCollectedUsage(err error, collected *zeroruntime.CollectedStream) error
 // tool (ToolChoice: tool.Name) so a prose answer cannot strand the typed-output
 // retry loop. When false the request keeps auto tool-calling behavior. Some
 // OpenAI-compatible endpoints reject the forced shape but accept auto calls.
-func callToolUse(ctx context.Context, provider zeroruntime.Provider, model, reasoningEffort, systemPrompt, userPrompt string, images []zeroruntime.ImageBlock, tool zeroruntime.ToolDefinition, maxOutputTokens int, callbacks *zeroruntime.CollectOptions, promptCacheKey string, forceChoice bool) (*zeroruntime.CollectedStream, error) {
+func callToolUse(ctx context.Context, provider zeroruntime.Provider, model, reasoningEffort, systemPrompt, userPrompt string, images []zeroruntime.ImageBlock, tools []zeroruntime.ToolDefinition, maxOutputTokens int, callbacks *zeroruntime.CollectOptions, promptCacheKey string, forceChoice bool) (*zeroruntime.CollectedStream, error) {
 	// B4: the request is built by the shared pure builder (one builder for
 	// production, dry-run inspection, and tests), and the final gate runs
 	// here - after source fulfillment and model-input construction, on
@@ -90,7 +90,7 @@ func callToolUse(ctx context.Context, provider zeroruntime.Provider, model, reas
 	// re-enters callToolUse per attempt). The gate result rides the
 	// attempt metadata; a measured overflow is reported through the
 	// collect options' activity seam when wired, never silently trimmed.
-	request, breakdown := BuildFinalRequest("", model, reasoningEffort, systemPrompt, userPrompt, images, tool, maxOutputTokens, promptCacheKey, forceChoice, 1)
+	request, breakdown := BuildFinalRequest("", model, reasoningEffort, systemPrompt, userPrompt, images, tools, maxOutputTokens, promptCacheKey, forceChoice, 1)
 	_ = GateFinalRequest(breakdown, 0) // bound disabled at this layer; stage budgets bound via MaxOutputTokens
 	events, err := provider.StreamCompletion(ctx, *request)
 	if err != nil {
@@ -110,7 +110,15 @@ func callToolUse(ctx context.Context, provider zeroruntime.Provider, model, reas
 // callValidatedToolUse retries typed-output contract failures. The observed
 // OpenRouter request error gets one compatibility retry with auto tool calling.
 // All other provider, transport, and cancellation errors return immediately.
-func callValidatedToolUse(ctx context.Context, provider zeroruntime.Provider, model, reasoningEffort, systemPrompt, userPrompt string, images []zeroruntime.ImageBlock, tool zeroruntime.ToolDefinition, maxOutputTokens int, callbacks *zeroruntime.CollectOptions, validate func(*zeroruntime.CollectedStream) error, promptCacheKey string, onFormatRetry ...func(attempt int)) (*zeroruntime.CollectedStream, error) {
+func callValidatedToolUse(ctx context.Context, provider zeroruntime.Provider, model, reasoningEffort, systemPrompt, userPrompt string, images []zeroruntime.ImageBlock, tools []zeroruntime.ToolDefinition, maxOutputTokens int, callbacks *zeroruntime.CollectOptions, validate func(*zeroruntime.CollectedStream) error, promptCacheKey string, onFormatRetry ...func(attempt int)) (*zeroruntime.CollectedStream, error) {
+	if len(tools) == 0 {
+		return nil, fmt.Errorf("typed tool retry: no tools offered")
+	}
+	toolNames := make([]string, 0, len(tools))
+	for _, t := range tools {
+		toolNames = append(toolNames, t.Name)
+	}
+	toolLabel := strings.Join(toolNames, "+")
 	var total zeroruntime.Usage
 	attemptPrompt := userPrompt
 	var lastErr error
@@ -130,7 +138,7 @@ func callValidatedToolUse(ctx context.Context, provider zeroruntime.Provider, mo
 				}
 			}
 		}
-		collected, err := callToolUse(ctx, provider, model, reasoningEffort, systemPrompt, attemptPrompt, images, tool, maxOutputTokens, callbacks, promptCacheKey, forceChoice)
+		collected, err := callToolUse(ctx, provider, model, reasoningEffort, systemPrompt, attemptPrompt, images, tools, maxOutputTokens, callbacks, promptCacheKey, forceChoice)
 		if err != nil {
 			if forceChoice && shouldRetryWithAutoToolChoice(err) {
 				forceChoice = false
@@ -155,7 +163,7 @@ func callValidatedToolUse(ctx context.Context, provider zeroruntime.Provider, mo
 			collected.Usage = total
 			return collected, &TypedOutputError{
 				Model:      model,
-				Tool:       tool.Name,
+				Tool:       toolLabel,
 				Attempts:   attempt,
 				Cause:      lastErr,
 				stageUsage: usageFromCollected(collected),
@@ -166,7 +174,7 @@ func callValidatedToolUse(ctx context.Context, provider zeroruntime.Provider, mo
 			feedbackRunes = feedbackRunes[:300]
 		}
 		feedback := string(feedbackRunes)
-		attemptPrompt = fmt.Sprintf("%s\n\nYour previous response did not satisfy the typed output contract: %s. Call %s exactly once with valid JSON arguments matching its schema.", userPrompt, feedback, tool.Name)
+		attemptPrompt = fmt.Sprintf("%s\n\nYour previous response did not satisfy the typed output contract: %s. Call exactly one of %s once with valid JSON arguments matching its schema.", userPrompt, feedback, strings.Join(toolNames, " or "))
 	}
 	return nil, fmt.Errorf("typed output retry loop ended unexpectedly")
 }
@@ -264,16 +272,16 @@ var memoryDispositionSchema = map[string]any{
 	},
 }
 
-// applyMemoryDefinition adds the disposition property and, when memory was
-// delivered, makes it required so the warm consideration contract is
-// enforced by the tool schema itself. Cold definitions keep it optional so
-// the cold schema stays small.
-func applyMemoryDefinition(params map[string]any, hasMemory bool) {
+// applyMemoryDefinition adds the memory_disposition property to a tool
+// schema. The property is never added to required, so the schema stays
+// byte-identical whether or not memory was delivered. A memory-dependent
+// schema changes the cached prompt prefix between rounds of the same stage
+// and forfeits the provider's prefix cache. Presence is enforced in code
+// instead: reconcileMemoryReview marks a delivered item that carries no
+// valid claim as unreported.
+func applyMemoryDefinition(params map[string]any) {
 	props := params["properties"].(map[string]any)
 	props["memory_disposition"] = memoryDispositionSchema
-	if hasMemory {
-		params["required"] = append(params["required"].([]string), "memory_disposition")
-	}
 }
 
 // stripDispositionClaims removes the memory_disposition property from a tool

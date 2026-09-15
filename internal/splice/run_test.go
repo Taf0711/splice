@@ -639,7 +639,7 @@ type captureRequestProvider struct {
 func (p *captureRequestProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
 	p.request = request
 	output := schemas.CodeWriterOutput{
-		Files:      []schemas.FileChange{},
+		Files:      []schemas.FileChange{{Path: "main.go", ChangeType: "create", Content: "package main\n"}},
 		Language:   "go",
 		Intent:     "no changes",
 		Confidence: 0.9,

@@ -54,33 +54,53 @@ const EstimateLabelEstimate = "bytes/4 estimate; provider usage is authoritative
 // BuildFinalRequest is the shared pure request builder. Production, the
 // dry-run inspection seam, and tests all call this one function, so what
 // the gate measures is byte-identical to what the provider receives.
-func BuildFinalRequest(stage, model, reasoningEffort, systemPrompt, userPrompt string, images []zeroruntime.ImageBlock, tool zeroruntime.ToolDefinition, maxOutputTokens int, promptCacheKey string, forceChoice bool, attempt int) (*zeroruntime.CompletionRequest, FinalRequestBreakdown) {
+//
+// tools carries every tool the model may call this request. With one tool
+// and forceChoice, the request forces that exact tool (the historical
+// single-typed-tool behavior). With several tools and forceChoice, the
+// request requires some tool call without naming which, so a stage that
+// accepts more than one typed action stays reachable; a provider that
+// cannot express any-tool forcing degrades through the established
+// provider-error fallback.
+func BuildFinalRequest(stage, model, reasoningEffort, systemPrompt, userPrompt string, images []zeroruntime.ImageBlock, tools []zeroruntime.ToolDefinition, maxOutputTokens int, promptCacheKey string, forceChoice bool, attempt int) (*zeroruntime.CompletionRequest, FinalRequestBreakdown) {
 	messages := []zeroruntime.Message{
 		{Role: zeroruntime.MessageRoleSystem, Content: systemPrompt},
 		{Role: zeroruntime.MessageRoleUser, Content: userPrompt, Images: images},
 	}
 	request := &zeroruntime.CompletionRequest{
 		Messages:        messages,
-		Tools:           []zeroruntime.ToolDefinition{tool},
+		Tools:           append([]zeroruntime.ToolDefinition(nil), tools...),
 		ReasoningEffort: reasoningEffort,
 		PromptCacheKey:  promptCacheKey,
 		MaxOutputTokens: maxOutputTokens,
 	}
 	if forceChoice {
-		request.ToolChoice = tool.Name
+		if len(tools) == 1 {
+			request.ToolChoice = tools[0].Name
+		} else if len(tools) > 1 {
+			request.ToolChoiceRequired = true
+		}
 	}
 	systemBytes := len(systemPrompt)
-	schemaBytes, _ := json.Marshal(tool)
+	schemaBytes := 0
+	for _, tool := range tools {
+		encoded, err := json.Marshal(tool)
+		if err != nil {
+			schemaBytes += len(tool.Name)
+			continue
+		}
+		schemaBytes += len(encoded)
+	}
 	userBytes := len(userPrompt)
 	breakdown := FinalRequestBreakdown{
 		SystemBytes:    systemBytes,
-		SchemaBytes:    len(schemaBytes),
+		SchemaBytes:    schemaBytes,
 		UserBytes:      userBytes,
-		TotalBytes:     systemBytes + len(schemaBytes) + userBytes,
+		TotalBytes:     systemBytes + schemaBytes + userBytes,
 		MaxOutputBound: maxOutputTokens,
 		// Deterministic estimate over the exact bytes. bytes/4 is the
 		// project's standing estimate ratio (bytesPerTokenEstimate).
-		EstimatedInputTokens: (systemBytes + len(schemaBytes) + userBytes + 3) / 4,
+		EstimatedInputTokens: (systemBytes + schemaBytes + userBytes + 3) / 4,
 		Stage:                stage,
 		Attempt:              attempt,
 		EstimateLabel:        EstimateLabelEstimate,

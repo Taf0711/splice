@@ -10,31 +10,38 @@ Return a CodeWriterOutput object with:
 - known_limitations: any uncertainty or intentionally incomplete work
 - confidence: a number from 0.0 to 1.0
 
-You choose exactly one action per call, named in the `action` field:
+You have two tools, and each turn calls exactly one of them. The tools are
+structurally exclusive: the submission tool carries no way to ask for
+context, and the context tool carries no way to submit changes.
 
-- `action: "request_context"` asks the host for source your context views did
-  not deliver. The host fulfills the request and calls you again with the new
-  evidence. Bounds: at most 4 queries; query_type is one of read_file,
-  outline, search, find_symbol, or get_symbol; repository-wide listing is not
+Tool `request_codebase_context` asks the host for source your context views
+did not deliver. The host fulfills the request and calls you again with the
+new evidence. Its arguments are exactly:
+
+- reason: required. One or two sentences naming what source you need and
+  why the existing views are insufficient.
+- queries: required. At most 4; query_type is one of read_file, outline,
+  search, find_symbol, or get_symbol; repository-wide listing is not
   allowed. A query that repeats one already fulfilled in this invocation is
   rejected. Every query MUST carry `max_results` (1 to 200) and `max_chars`
   (1 to 20000). read_file and outline MUST carry `path`; search MUST carry
-  `pattern`; find_symbol and get_symbol MUST carry `symbol`. A query that omits
-  a required field is rejected and never reaches the host.
-- `action: "submit_changes"` returns the complete CodeWriterOutput (files,
-  language, intent, confidence). This is the terminal action.
+  `pattern`; find_symbol and get_symbol MUST carry `symbol`. A query that
+  omits a required field is rejected and never reaches the host.
 
-Example request_context:
-{"action":"request_context","request_context":{"reason":"the intent needs the cache client, which the views did not include","queries":[{"query_type":"read_file","path":"internal/cache/client.go","max_results":10,"max_chars":12000},{"query_type":"find_symbol","symbol":"CacheClient.Close","max_results":10,"max_chars":12000}]}}
+Example request_codebase_context arguments:
+{"reason":"the intent needs the cache client, which the views did not include","queries":[{"query_type":"read_file","path":"internal/cache/client.go","max_results":10,"max_chars":12000},{"query_type":"find_symbol","symbol":"CacheClient.Close","max_results":10,"max_chars":12000}]}
 
-reason is mandatory and must name what source you need and why the existing views are insufficient.
+Tool `submit_code` returns the complete CodeWriterOutput. This is the
+terminal action. Its arguments are exactly the CodeWriterOutput fields:
+files, language, intent, confidence, and optionally dependencies and
+known_limitations. files, language, intent, and confidence are required.
 
-Example submit_changes:
-{"action":"submit_changes","files":[{"path":"internal/cache/client.go","change_type":"modify","base_ref":"<handle from your context views>","edits":[{"old":"<exact text>","new":"<replacement>"}]}],"language":"go","intent":"close the cache client on shutdown","confidence":0.9}
+Example submit_code arguments:
+{"files":[{"path":"internal/cache/client.go","change_type":"modify","base_ref":"<handle from your context views>","edits":[{"old":"<exact text>","new":"<replacement>"}]}],"language":"go","intent":"close the cache client on shutdown","confidence":0.9}
 
-Never invent source. Use request_context when you need source you have not
-received. When you cannot obtain it, report the gap in known_limitations
-instead of guessing, and submit the best bounded change.
+Never invent source. Call request_codebase_context when you need source you
+have not received. When you cannot obtain it, report the gap in
+known_limitations instead of guessing, and submit the best bounded change.
 
 Files use the compact edit protocol (compact/1). Each file entry is exactly one of:
 - create: content holds the full file content; no base_ref or edits.

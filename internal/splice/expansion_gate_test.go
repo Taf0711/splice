@@ -41,22 +41,33 @@ var dGateWorkDir string
 func (p *dGateProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
 	p.turn++
 	ch := make(chan zeroruntime.StreamEvent, 8)
+	// The two-tool contract: the submission tool and the context-request
+	// tool are offered together; the model calls exactly one per turn.
 	toolName := ""
-	if len(request.Tools) > 0 {
-		toolName = request.Tools[0].Name
+	contextToolName := ""
+	for _, tool := range request.Tools {
+		switch tool.Name {
+		case "submit_code":
+			toolName = tool.Name
+		case "request_codebase_context":
+			contextToolName = tool.Name
+		}
 	}
 	var args string
 	switch p.turn {
 	case 1:
 		// Turn 1: the model sees the main file but not the helper it
-		// needs; it returns a request_context action instead of a guess.
+		// needs; it calls the context tool instead of a guess. The args
+		// ARE the ContextRequest, not a nested envelope.
+		toolName = contextToolName
+		if toolName == "" {
+			return nil, fmt.Errorf("gate wiring: the code writer offered no context-request tool (tools=%v)", request.Tools)
+		}
 		req := map[string]any{
-			"request_context": map[string]any{
-				"reason": "need the helper file to call it correctly",
-				"queries": []map[string]any{{
-					"query_type": "read_file", "path": "helper.go", "max_results": 5, "max_chars": 8000,
-				}},
-			},
+			"reason": "need the helper file to call it correctly",
+			"queries": []map[string]any{{
+				"query_type": "read_file", "path": "helper.go", "max_results": 5, "max_chars": 8000,
+			}},
 		}
 		b, _ := json.Marshal(req)
 		args = string(b)

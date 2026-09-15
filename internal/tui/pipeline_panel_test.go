@@ -455,11 +455,11 @@ type tuiPipelineFeatureProvider struct {
 }
 
 func (provider *tuiPipelineFeatureProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
-	if len(request.Tools) != 1 {
-		return nil, fmt.Errorf("expected one stage output tool, got %d", len(request.Tools))
+	if len(request.Tools) != 2 {
+		return nil, fmt.Errorf("expected both code writer tools, got %d", len(request.Tools))
 	}
 	toolName := request.Tools[0].Name
-	provider.toolNames = append(provider.toolNames, toolName)
+	provider.toolNames = append(provider.toolNames, toolName, request.Tools[1].Name)
 	var arguments []byte
 	switch toolName {
 	case "submit_code":
@@ -573,8 +573,8 @@ func TestTUIPipelineEndToEndFeature(t *testing.T) {
 	if len(builtProfiles) != 1 || builtProfiles[0].Name != "local" || builtProfiles[0].Model != "qwen-local" {
 		t.Fatalf("routed provider builds = %#v", builtProfiles)
 	}
-	if strings.Join(localProvider.toolNames, ",") != "submit_code" {
-		t.Fatalf("local provider tools = %v, want submit_code", localProvider.toolNames)
+	if strings.Join(localProvider.toolNames, ",") != "submit_code,request_codebase_context" {
+		t.Fatalf("local provider tools = %v, want submit_code,request_codebase_context", localProvider.toolNames)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "hello.go")); err != nil {
 		t.Fatalf("pipeline did not apply generated file: %v", err)
