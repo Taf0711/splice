@@ -1,0 +1,5 @@
+gate-gofmt.txt
+exit=0
+---
+gate-govet
+vet_exit=0
