@@ -23,9 +23,13 @@ import (
 
 // Config is one measurement run.
 type Config struct {
-	RunID             string
-	RepoDir           string
-	Binary            string
+	RunID   string
+	RepoDir string
+	Binary  string
+	// BinaryRevision is the revision of the binary under test. When set it
+	// overrides the repo-derived revision, so an Arm A and an Arm B run record
+	// the revision that actually ran instead of the harness repo's HEAD.
+	BinaryRevision    string
 	Model             string
 	ModelSettings     ModelSettings
 	Tasks             []Task
@@ -110,7 +114,9 @@ type Aggregate struct {
 	Bootstrap       BootstrapResult `json:"bootstrap"`
 	Claim           Claim           `json:"claim"`
 	Coverage        Coverage        `json:"coverage"`
-	Note            string          `json:"note"`
+	// CacheLayout is the run-level prefix layout summary (Option B telemetry).
+	CacheLayout CacheLayoutReport `json:"cache_layout"`
+	Note        string            `json:"note"`
 }
 
 // reanchorFunc advances one run's capture set from one revision to another.
@@ -401,6 +407,7 @@ func (r *Runner) aggregate(prov Provenance, attempts []Attempt) (Aggregate, erro
 		Bootstrap:     boot,
 		Claim:         claim,
 		Coverage:      coverage,
+		CacheLayout:   computeCacheLayout(attempts),
 		Note:          "Every number comes from the captured authoritative request ledger. Tokens are provider-reported. A partial run withholds the total-cost claim.",
 	}
 	return agg, nil
@@ -501,7 +508,14 @@ func orderTasks(tasks []Task) []Task {
 	return out
 }
 
+// binaryRevision is the revision recorded on the run and every attempt. An
+// explicit Config.BinaryRevision is authoritative, so an operator-supplied
+// binary records the revision it was built from rather than the harness repo's
+// HEAD. The repo derivation is the fallback when the override is empty.
 func (r *Runner) binaryRevision() string {
+	if rev := strings.TrimSpace(r.cfg.BinaryRevision); rev != "" {
+		return rev
+	}
 	if r.cfg.RepoDir == "" {
 		return ""
 	}
@@ -553,9 +567,9 @@ type streamFinalEvent struct {
 	Text string `json:"text"`
 }
 
-// parsePipelineResult finds the final stream-json event and parses its text as
-// the pipeline result. The text IS the JSON produced after applyRequestLedger.
-func parsePipelineResult(stdout []byte) (schemas.PipelineResult, error) {
+// finalEventText finds the last final stream-json event and returns its text,
+// which IS the JSON produced after applyRequestLedger.
+func finalEventText(stdout []byte) (string, error) {
 	scanner := bufio.NewScanner(bytes.NewReader(stdout))
 	scanner.Buffer(make([]byte, 0, 1<<20), 32<<20)
 	finalText := ""
@@ -573,10 +587,20 @@ func parsePipelineResult(stdout []byte) (schemas.PipelineResult, error) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return schemas.PipelineResult{}, fmt.Errorf("scan exec output: %w", err)
+		return "", fmt.Errorf("scan exec output: %w", err)
 	}
 	if finalText == "" {
-		return schemas.PipelineResult{}, errors.New("no final event with a pipeline result in exec output")
+		return "", errors.New("no final event with a pipeline result in exec output")
+	}
+	return finalText, nil
+}
+
+// parsePipelineResult parses the final stream-json event text as the pipeline
+// result.
+func parsePipelineResult(stdout []byte) (schemas.PipelineResult, error) {
+	finalText, err := finalEventText(stdout)
+	if err != nil {
+		return schemas.PipelineResult{}, err
 	}
 	var result schemas.PipelineResult
 	if err := json.Unmarshal([]byte(finalText), &result); err != nil {
@@ -695,6 +719,7 @@ func (r *Runner) runTaskInWorkspace(ctx context.Context, task Task, arm Arm, rep
 		SequenceOrdinal: seqOrdinal,
 		SequenceTasks:   seqTasks,
 		Workspace:       workspace,
+		Binary:          prov.Binary,
 		BinaryRevision:  prov.BinaryRevision,
 		SidecarRevision: prov.SidecarRevision,
 		FixtureDigest:   fixtureDigest,
@@ -740,6 +765,18 @@ func (r *Runner) runTaskInWorkspace(ctx context.Context, task Task, arm Arm, rep
 		attempt.RunStatus = parsed.Status
 		attempt.CostCoverage = parsed.CostCoverage
 		attempt.Totals = totalsFromResult(parsed)
+		// Option B: decode the cache telemetry from the same final event with
+		// harness-local structs and merge it onto the typed records. A decode
+		// failure leaves the telemetry unreported, never reported as zero.
+		if tel, terr := parseCacheTelemetry(res.Stdout); terr != nil {
+			attempt.LedgerError = terr.Error()
+		} else {
+			attempt.Requests = mergeCacheTelemetry(attempt.Requests, tel)
+			attempt.CacheTelemetryReported = tel.Reported
+			attempt.PromptLayoutFlips = tel.Flips
+		}
+		attempt.Rounds = computeRounds(attempt.Requests)
+		attempt.LayoutStability = computeLayoutStability(attempt.Requests)
 	}
 
 	verified, output, verr := runVerifier(runCtx, workspace, task.Check)
@@ -928,6 +965,7 @@ func (r *Runner) failedAttempt(task Task, arm Arm, repeat, seqIndex, seqOrdinal,
 		Sequence:        seqIndex,
 		SequenceOrdinal: seqOrdinal,
 		SequenceTasks:   seqTasks,
+		Binary:          prov.Binary,
 		BinaryRevision:  prov.BinaryRevision,
 		SidecarRevision: prov.SidecarRevision,
 		ModelID:         r.cfg.Model,

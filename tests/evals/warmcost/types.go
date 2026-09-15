@@ -172,10 +172,26 @@ type RequestRecord struct {
 	Reasoning         int      `json:"reasoning_tokens"`
 	CostUSD           *float64 `json:"cost_usd"`
 	CostStatus        string   `json:"cost_status"`
+	// PromptLayoutHash is the cacheable prefix layout hash (system prompt plus
+	// tool schema) the telemetry branch reports per request. Empty means the
+	// binary emitted no telemetry for this request, which is unknown, not a
+	// layout change. Option B decodes it from the raw JSON, not the product
+	// schema.
+	PromptLayoutHash string `json:"prompt_layout_hash,omitempty"`
+	// CacheHit is the provider's stated cache read: true, false, or nil when no
+	// usage was reported. Nil is unknown and is never read as a miss.
+	CacheHit *bool `json:"cache_hit"`
+	// MemoryPosition states where dynamic content sits relative to the
+	// cacheable prefix. Empty means the binary emitted no telemetry.
+	MemoryPosition string `json:"memory_position,omitempty"`
 }
 
 // requestRecords maps the authoritative ledger into the explicit artifact
-// shape. Nothing is recomputed.
+// shape. Nothing is recomputed. The three cache telemetry fields
+// (PromptLayoutHash, CacheHit, MemoryPosition) are not on the harness branch's
+// product schema; they are decoded from the raw final result JSON and copied on
+// afterward by mergeCacheTelemetry (Option B), so this function stays the one
+// place the typed ledger fields are projected.
 func requestRecords(recs []schemas.PipelineUsageRecord) []RequestRecord {
 	out := make([]RequestRecord, 0, len(recs))
 	for _, r := range recs {
@@ -218,7 +234,10 @@ type Attempt struct {
 	Workspace string `json:"workspace,omitempty"`
 	// RunID is the pipeline run id from the final result. The harness passes
 	// it as the producer run id when it reanchors that run's capture set.
-	RunID           string          `json:"run_id,omitempty"`
+	RunID string `json:"run_id,omitempty"`
+	// Binary is the path of the binary under test. It is recorded so a reader
+	// can tie a run to the artifact that produced it, not only to a revision.
+	Binary          string          `json:"binary"`
 	BinaryRevision  string          `json:"binary_revision"`
 	SidecarRevision string          `json:"sidecar_revision"`
 	FixtureDigest   string          `json:"fixture_digest"`
@@ -232,7 +251,20 @@ type Attempt struct {
 	VerifierOutput  string          `json:"verifier_output,omitempty"`
 	Requests        []RequestRecord `json:"requests"`
 	Totals          Totals          `json:"totals"`
-	LedgerError     string          `json:"ledger_error,omitempty"`
+	// CacheTelemetryReported is true when the binary emitted at least one
+	// telemetry value for this attempt. False means the telemetry fields are
+	// unknown, not zero.
+	CacheTelemetryReported bool `json:"cache_telemetry_reported"`
+	// PromptLayoutFlips is the binary's mid-run prompt layout flip count. Nil
+	// means the binary emitted no cache telemetry, so the count is unknown and
+	// must not be reported as zero.
+	PromptLayoutFlips *int `json:"prompt_layout_flips,omitempty"`
+	// Rounds is the per-(stage, iteration) cache view required by SPEC section
+	// 8 item 3. A round with no hit is a full-priced round.
+	Rounds []RoundCache `json:"rounds,omitempty"`
+	// LayoutStability is the per-stage distinct prompt layout hash view.
+	LayoutStability []StageLayout `json:"layout_stability,omitempty"`
+	LedgerError     string        `json:"ledger_error,omitempty"`
 	// RawStream names the additive raw stream-json artifact for this
 	// attempt, when one was captured. Empty means no raw artifact exists.
 	RawStream  string    `json:"raw_stream,omitempty"`

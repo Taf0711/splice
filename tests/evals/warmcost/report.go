@@ -2,6 +2,7 @@ package warmcost
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -69,6 +70,31 @@ func renderMarkdown(agg Aggregate) string {
 	fmt.Fprintf(&b, "| billed USD/attempt | %+.4f | %+.4f |\n", agg.Bootstrap.BilledUSDPerAttempt.Lower, agg.Bootstrap.BilledUSDPerAttempt.Upper)
 	fmt.Fprintf(&b, "| requests/attempt | %+.3f | %+.3f |\n", agg.Bootstrap.RequestsPerAttempt.Lower, agg.Bootstrap.RequestsPerAttempt.Upper)
 	fmt.Fprintf(&b, "| success rate | %+.3f | %+.3f |\n\n", agg.Bootstrap.SuccessRateDelta.Lower, agg.Bootstrap.SuccessRateDelta.Upper)
+
+	fmt.Fprintf(&b, "## Cache layout stability\n\n")
+	cl := agg.CacheLayout
+	fmt.Fprintf(&b, "Attempts: %d. With cache telemetry: %d. Without: %d.\n\n", cl.Attempts, cl.AttemptsWithTelemetry, cl.AttemptsWithoutTelemetry)
+	fmt.Fprintf(&b, "Total prompt layout flips: %d.\n", cl.TotalPromptLayoutFlips)
+	if len(cl.AttemptsWithFlips) > 0 {
+		fmt.Fprintf(&b, "Attempts with a non-zero flip count: %s.\n", strings.Join(cl.AttemptsWithFlips, ", "))
+	} else if cl.AttemptsWithTelemetry > 0 {
+		fmt.Fprintf(&b, "No attempt reported a non-zero flip count.\n")
+	}
+	if len(cl.DistinctHashesByStage) > 0 {
+		stages := make([]string, 0, len(cl.DistinctHashesByStage))
+		for stage := range cl.DistinctHashesByStage {
+			stages = append(stages, stage)
+		}
+		sort.Strings(stages)
+		fmt.Fprintf(&b, "\n| stage | distinct prompt layout hashes |\n| --- | --- |\n")
+		for _, stage := range stages {
+			fmt.Fprintf(&b, "| %s | %s |\n", stage, strings.Join(cl.DistinctHashesByStage[stage], ", "))
+		}
+	}
+	if cl.Note != "" {
+		fmt.Fprintf(&b, "\n%s\n", cl.Note)
+	}
+	fmt.Fprintf(&b, "\nPer-attempt per-round rows (requests, input tokens, cached tokens, cache hit\nrate, spend source) and per-attempt distinct hashes are in each `attempt-*.json`\nartifact under the run directory.\n\n")
 
 	fmt.Fprintf(&b, "## Claim\n\nAllowed: %t. %s\n\n", agg.Claim.TotalCostClaimAllowed, agg.Claim.Reason)
 

@@ -15,9 +15,18 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$REPO"
 
+# B2: an operator-supplied BIN must never be rebuilt over. Track whether BIN
+# came from the environment before the default is applied.
+BIN_WAS_SET="0"
+if [[ -n "${BIN:-}" ]]; then
+  BIN_WAS_SET="1"
+fi
 BIN="${BIN:-/tmp/splice-archeval-paid}"
 RUNNER="${RUNNER:-/tmp/warmcost-eval-paid}"
 MEMD_BIN="${MEMD_BIN:-/tmp/splice-memd}"
+# B1: BUILD_REV selects the revision of the binary under test. The runner is
+# always built from this harness repo, so only the binary varies.
+BUILD_REV="${BUILD_REV:-HEAD}"
 MODEL="${MODEL:-z-ai/glm-5.3-flash}"
 REPEATS="${REPEATS:-3}"
 MARGIN="${MARGIN:-0.05}"
@@ -53,6 +62,23 @@ export SPLICE_MEMD_DB="$MEMD_DIR/mem.db"
 
 log() { printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*"; }
 
+TASKSET=""
+MEMD_PID=""
+BUILD_WT=""
+cleanup() {
+  if [[ -n "$MEMD_PID" ]]; then
+    kill "$MEMD_PID" 2>/dev/null || true
+    wait "$MEMD_PID" 2>/dev/null || true
+  fi
+  if [[ -n "$BUILD_WT" && -d "$BUILD_WT" ]]; then
+    git worktree remove "$BUILD_WT" --force 2>/dev/null || true
+  fi
+  if [[ -n "$TASKSET" ]]; then
+    rm -rf "$TASKSET"
+  fi
+}
+trap cleanup EXIT
+
 for name in "${TASKS[@]}"; do
   if [[ ! -f "$TASKSET_SRC/tasks/$name.json" ]]; then
     log "unknown task $name: $TASKSET_SRC/tasks/$name.json does not exist"
@@ -60,20 +86,43 @@ for name in "${TASKS[@]}"; do
   fi
 done
 
-log "building binary and runner from $(git rev-parse --short HEAD)"
-go build -o "$BIN" ./cmd/splice
+# B1: resolve BUILD_REV before anything is built, and fail loud when it does not
+# name a commit. The binary under test is built from a detached worktree at that
+# revision; the runner is always built from this harness repo, so the harness
+# code does not vary with BUILD_REV.
+if ! BUILD_REV_SHA="$(git rev-parse --verify --quiet "${BUILD_REV}^{commit}")"; then
+  log "BUILD_REV does not resolve to a commit: ${BUILD_REV}"
+  exit 1
+fi
+
+# B2: never overwrite an operator-supplied binary. When BIN comes from the
+# environment it is used as-is after an explicit BIN_PREBUILT=1 acknowledgement.
+if [[ "$BIN_WAS_SET" == "1" ]]; then
+  if [[ "${BIN_PREBUILT:-0}" != "1" ]]; then
+    log "BIN is operator-supplied ($BIN); refusing to rebuild it. Set BIN_PREBUILT=1 to use it as-is."
+    exit 1
+  fi
+  log "using operator-supplied binary $BIN (BIN_PREBUILT=1); not rebuilding"
+else
+  BUILD_WT="$(mktemp -d "${TMPDIR:-/tmp}/warmcost-build.XXXXXX")"
+  log "building binary $BIN from BUILD_REV=$BUILD_REV ($BUILD_REV_SHA) via detached worktree $BUILD_WT"
+  git worktree add --detach --force "$BUILD_WT" "$BUILD_REV_SHA" >/dev/null
+  ( cd "$BUILD_WT" && go build -o "$BIN" ./cmd/splice )
+  git worktree remove "$BUILD_WT" --force
+  BUILD_WT=""
+fi
+log "building runner $RUNNER from harness repo $(git rev-parse --short HEAD)"
 go build -o "$RUNNER" ./tests/evals/warmcost/cmd/warmcost-eval
 
+# BUILD_ONLY is a no-provider seam for the shell guard tests. It stops after the
+# builds, before the sidecar starts, so a supplied BIN can be proven untouched
+# without spending anything.
+if [[ "${BUILD_ONLY:-0}" == "1" ]]; then
+  log "BUILD_ONLY=1: stopping after build (no memd start, no provider request)"
+  exit 0
+fi
+
 TASKSET="$(mktemp -d "${TMPDIR:-/tmp}/warmcost-paid-taskset.XXXXXX")"
-MEMD_PID=""
-cleanup() {
-  if [[ -n "$MEMD_PID" ]]; then
-    kill "$MEMD_PID" 2>/dev/null || true
-    wait "$MEMD_PID" 2>/dev/null || true
-  fi
-  rm -rf "$TASKSET"
-}
-trap cleanup EXIT
 
 mkdir -p "$TASKSET/tasks"
 cp -R "$TASKSET_SRC/fixture" "$TASKSET/fixture"
@@ -94,7 +143,7 @@ if [[ ! -S "$SPLICE_MEMD_SOCKET" ]]; then
   exit 1
 fi
 
-REV="$(git rev-parse HEAD)"
+REV="$BUILD_REV_SHA"
 SIDECAR_REV="$(git rev-parse --short HEAD)"
 log "pre-registration: model=$MODEL arms=$ARMS tasks=${#TASKS[@]} repeats=$REPEATS margin=$MARGIN bootstrap=$BOOTSTRAP_SAMPLES"
 log "attempt cap: arms=$ARM_COUNT x tasks=${#TASKS[@]} x repeats=$REPEATS = $((ARM_COUNT * ${#TASKS[@]} * REPEATS)) attempts; MAX_RETRIES=$MAX_RETRIES"
@@ -116,6 +165,7 @@ for try in $(seq 0 "$MAX_RETRIES"); do
   RUNNER_ARGS=(
     --repo .
     --binary "$BIN"
+    --binary-revision "$REV"
     --model "$MODEL"
     --tasks "$TASKSET"
     --out "$OUT_DIR"

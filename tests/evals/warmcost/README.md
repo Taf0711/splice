@@ -41,6 +41,58 @@ fails loud when they do not. The cache channel is reported in tokens because
 the ledger has no per-token cache price. It bootstraps over tasks, not
 requests, and reports per-task effects before the aggregate.
 
+## Cache telemetry and per-round reporting
+
+The telemetry branch adds four values the harness records: per request
+`prompt_layout_hash`, `cache_hit` (*bool; nil means no usage was reported, which
+is unknown and is never read as a miss) and `memory_position`, and per run
+`prompt_layout_flips`.
+
+The harness reads them with **Option B**: it decodes them from the raw final
+result JSON into a harness-local struct (`tests/evals/warmcost/telemetry.go`) and
+merges them onto the typed records, rather than cherry-picking the telemetry
+product commits into this branch. Cherry-picking would have required resolving
+product-behavior conflicts in `internal/splice/stages/provider.go`,
+`internal/splice/schemas/plan.go`, `internal/splice/run.go` and
+`internal/splice/registry.go` across a large divergence, which is product work,
+not harness work, and would have changed the product schemas on this branch.
+With Option B the product schemas stay untouched, the branch history is not
+rewritten, and the harness still decodes a telemetry-emitting binary and an
+older binary from the same final event.
+
+Per attempt the artifact now carries:
+
+- `cache_telemetry_reported`: true only when the binary emitted at least one
+  telemetry value. False means the telemetry is unknown, not zero.
+- `prompt_layout_flips`: the binary's mid-run flip count, or nil when the binary
+  emitted no telemetry. A nil is unknown and is never reported as zero.
+- `rounds`: one row per (stage, iteration) with requests, input tokens, cached
+  tokens, cache hit rate (cached/input) and the spend source set. A round with no
+  hit is a full-priced round (SPEC section 8 item 3).
+- `layout_stability`: one row per stage with the distinct prompt layout hashes,
+  how many requests carried a hash, and whether the stage was stable. A stage
+  with more than one distinct hash is a layout flip.
+
+`aggregate.json` and `report.md` add a `cache_layout` section: attempts with and
+without telemetry, the total flip count, every attempt with a non-zero flip
+count, and the distinct hashes per stage. A non-zero flip count is reported as a
+finding, never hidden. Partial telemetry coverage is stated, and the layout view
+is not read as complete when some attempts emitted no telemetry.
+
+### A/B plan (owner-gated)
+
+The open SPEC section 12 question is whether the cacheable prefix actually flips
+in a real run and whether stabilizing it raises the provider cache hit rate. The
+clean comparison is:
+
+- Arm A: binary built at `e3e97b1` (before the stable-schema fix `970510f`).
+- Arm B: binary built at `d9c52b3` (after the fix).
+
+Only `970510f` changes what Splice sends to a provider, so a cache-behavior
+difference between the two revisions is attributable to the schema fix. This
+run requires an explicit owner-approved cap and a corpus that triggers context
+expansions and memory re-entry; it is not started without both.
+
 ## Retention protocol
 
 `--retention fresh|shared` selects the sidecar lifetime protocol.

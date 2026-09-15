@@ -51,6 +51,7 @@ type options struct {
 	bootstrapSamples  int
 	bootstrapSeed     int64
 	correctnessMargin float64
+	binaryRevision    string
 	sidecarRevision   string
 	retention         string
 	sidecarRoot       string
@@ -73,6 +74,7 @@ func main() {
 	flag.IntVar(&opts.bootstrapSamples, "bootstrap-samples", 10000, "task-clustered bootstrap samples")
 	flag.Int64Var(&opts.bootstrapSeed, "bootstrap-seed", 1, "bootstrap seed")
 	flag.Float64Var(&opts.correctnessMargin, "correctness-margin", 0, "pre-registered acceptable success-rate drop")
+	flag.StringVar(&opts.binaryRevision, "binary-revision", "", "revision of the binary under test; overrides the --repo derivation when set")
 	flag.StringVar(&opts.sidecarRevision, "sidecar-revision", "", "sidecar binary revision recorded per attempt")
 	flag.StringVar(&opts.retention, "retention", "fresh", "sidecar lifetime protocol: fresh or shared")
 	flag.StringVar(&opts.sidecarRoot, "sidecar-root", "", "directory for per-class sidecar sockets and databases (required for shared retention)")
@@ -109,6 +111,7 @@ func run(opts options) error {
 		RunID:             opts.runID,
 		RepoDir:           opts.repo,
 		Binary:            opts.binary,
+		BinaryRevision:    opts.binaryRevision,
 		Model:             opts.model,
 		ModelSettings:     warmcost.ModelSettings{ReasoningEffort: opts.reasoningEffort, MaxTurns: opts.maxTurns},
 		Tasks:             tasks,
