@@ -9,7 +9,7 @@ func e4Workspace(t *testing.T) string { return e1Workspace(t) }
 
 func TestColdPlanReadsNamedTargetsAndSkipsFallback(t *testing.T) {
 	ws := e4Workspace(t)
-	cold := buildColdPlan("extend internal/audit/log.go with the EnforceRetention cap", ws, nil, 8)
+	cold := buildColdPlan("extend internal/audit/log.go with the EnforceRetention cap", ws, nil, 8, nil)
 	names := operationNames(cold.Operations)
 	if !containsString(names, "read:internal/audit/log.go") {
 		t.Fatalf("named target not read: %v", names)
@@ -34,7 +34,7 @@ func TestColdPlanReadsNamedTargetsAndSkipsFallback(t *testing.T) {
 
 func TestColdPlanFallsBackWithoutNamedTargets(t *testing.T) {
 	ws := e4Workspace(t)
-	cold := buildColdPlan("make the audit hygiene visible", ws, nil, 1)
+	cold := buildColdPlan("make the audit hygiene visible", ws, nil, 1, nil)
 	readCount := 0
 	for _, o := range cold.Operations {
 		if o.Kind == "read" {
@@ -51,10 +51,10 @@ func TestColdPlanFallsBackWithoutNamedTargets(t *testing.T) {
 
 func TestWarmPlanSubstitutesLocatedOperation(t *testing.T) {
 	ws := e4Workspace(t)
-	cold := buildColdPlan("reuse the EnforceRetention cutoff rules", ws, nil, 8)
+	cold := buildColdPlan("reuse the EnforceRetention cutoff rules", ws, nil, 8, nil)
 	// The cold plan locates EnforceRetention through the symbol index; a
 	// warm record for the SAME need gets NO credit (coldResolved).
-	needs := deriveContextNeeds("reuse the EnforceRetention cutoff rules", ws, nil, nil)
+	needs := deriveContextNeeds("reuse the EnforceRetention cutoff rules", ws, nil, nil, nil)
 	var coldNeed *ContextNeed
 	for i := range needs {
 		if needs[i].Kind == NeedLocateNamedOperation {
@@ -115,8 +115,8 @@ func TestWarmPlanSubstitutesLocatedOperation(t *testing.T) {
 
 func TestNoEligibleRecordMeansWarmEqualsCold(t *testing.T) {
 	ws := e4Workspace(t)
-	cold := buildColdPlan("polish the audit hygiene", ws, nil, 8)
-	warm := buildWarmPlan(cold, nil, deriveContextNeeds("polish the audit hygiene", ws, nil, nil))
+	cold := buildColdPlan("polish the audit hygiene", ws, nil, 8, nil)
+	warm := buildWarmPlan(cold, nil, deriveContextNeeds("polish the audit hygiene", ws, nil, nil, nil))
 	d := diffPlans(cold, warm)
 	if len(d.Eliminated) != 0 {
 		t.Fatalf("warm eliminated operations with no record: %+v", d.Eliminated)
@@ -135,8 +135,8 @@ func TestNoEligibleRecordMeansWarmEqualsCold(t *testing.T) {
 
 func TestOpenNeedSurvivesSubstitution(t *testing.T) {
 	ws := e4Workspace(t)
-	cold := buildColdPlan("reuse the EnforceRetention rules", ws, nil, 8)
-	unresolved := deriveContextNeeds("reuse the EnforceRetention rules", ws, nil, nil)
+	cold := buildColdPlan("reuse the EnforceRetention rules", ws, nil, 8, nil)
+	unresolved := deriveContextNeeds("reuse the EnforceRetention rules", ws, nil, nil, nil)
 	_, digests := e3Workspace(t)
 	rec := e3Record(digests)
 	need := ContextNeed{ID: "locate:internal/audit/log.go#Enforce", Kind: NeedLocateNamedOperation,

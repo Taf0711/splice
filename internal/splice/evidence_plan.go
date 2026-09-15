@@ -114,8 +114,9 @@ func buildEvidencePlan(intent, workspace string, priorFiles []string, nodes []me
 	if strings.TrimSpace(workspace) == "" {
 		return nil
 	}
-	needs := deriveContextNeeds(intent, workspace, priorFiles, nil)
-	cold := buildColdPlan(intent, workspace, priorFiles, 8)
+	vouched := vouchedFilesFromNodes(nodes)
+	needs := deriveContextNeeds(intent, workspace, priorFiles, nil, vouched)
+	cold := buildColdPlan(intent, workspace, priorFiles, 8, vouched)
 	candidates := recordsFromDiscoveryNodes(nodes, needs)
 	admitted, rejected := admitCandidates(candidates, needs, admissionContext{Workspace: workspace})
 	warm := buildWarmPlan(cold, admitted, needs)
@@ -127,6 +128,28 @@ func buildEvidencePlan(intent, workspace string, priorFiles []string, nodes []me
 		Rejected: rejected,
 		Needs:    needs,
 	}
+}
+
+// vouchedFilesFromNodes collects the file anchors of the delivered discovery
+// nodes. A file anchor means the record's freshness was proven against that
+// file at the current verified revision, so the file is evidence the
+// pipeline itself validated. Only such files may confirm task-text
+// identifiers the production index cannot, which keeps the trap-test guard
+// intact: a planted decoy test file is never vouched.
+func vouchedFilesFromNodes(nodes []memd.GraphNode) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, n := range nodes {
+		for _, a := range n.Anchors {
+			if a.Kind != "file" || strings.TrimSpace(a.Value) == "" || seen[a.Value] {
+				continue
+			}
+			seen[a.Value] = true
+			out = append(out, a.Value)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // recordsFromDiscoveryNodes pairs each fresh graph node that carries a typed

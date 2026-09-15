@@ -30,7 +30,7 @@ func TestDeriveContextNeedsConfirmSymbolsAgainstIndex(t *testing.T) {
 	ws := e1Workspace(t)
 	intent := "Add RetentionDeficit that reuses the EnforceRetention cutoff and cap rules without mutating the trail."
 
-	needs := deriveContextNeeds(intent, ws, nil, nil)
+	needs := deriveContextNeeds(intent, ws, nil, nil, nil)
 
 	var locate []ContextNeed
 	for _, n := range needs {
@@ -69,7 +69,7 @@ func TestDeriveContextNeedsConfirmSymbolsAgainstIndex(t *testing.T) {
 func TestDeriveContextNeedsRejectUnconfirmedIdentifiers(t *testing.T) {
 	ws := e1Workspace(t)
 	intent := "Add FiscalDeficit accounting that reuses EnforceRetention."
-	needs := deriveContextNeeds(intent, ws, nil, nil)
+	needs := deriveContextNeeds(intent, ws, nil, nil, nil)
 	for _, n := range needs {
 		if n.Kind == NeedLocateNamedOperation && strings.Contains(n.Subject, "FiscalDeficit") {
 			t.Fatalf("unconfirmed identifier became a symbol need: %+v", n)
@@ -89,7 +89,7 @@ func TestDeriveContextNeedsRejectUnconfirmedIdentifiers(t *testing.T) {
 
 func TestDeriveContextNeedsAlwaysKeepsOpenDiscovery(t *testing.T) {
 	ws := e1Workspace(t)
-	needs := deriveContextNeeds("polish the audit package", ws, nil, nil)
+	needs := deriveContextNeeds("polish the audit package", ws, nil, nil, nil)
 	open := 0
 	for _, n := range needs {
 		if n.Kind == NeedOpenDiscovery {
@@ -110,7 +110,7 @@ func TestDeriveContextNeedsAlwaysKeepsOpenDiscovery(t *testing.T) {
 func TestDeriveContextNeedsMapsPriorFilesAndFailures(t *testing.T) {
 	ws := e1Workspace(t)
 	needs := deriveContextNeeds("extend the retention logic", ws,
-		[]string{"internal/audit/log.go"}, []string{"TestEnforceRetention DropsOldEvents failed: got 2 want 3"})
+		[]string{"internal/audit/log.go"}, []string{"TestEnforceRetention DropsOldEvents failed: got 2 want 3"}, nil)
 	kinds := map[string]int{}
 	for _, n := range needs {
 		kinds[n.Kind]++
