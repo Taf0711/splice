@@ -1,0 +1,8 @@
+# cross-check: telemetry branch mocked end-to-end test (provider-free)
+worktree: /Users/tafseerhaque/Documents/splice
+revision: d9c52b3560fbab839ee377a57a8ad8ae1414801d (d9c52b3)
+command: go test ./internal/cli/ -run TestRunExecRecordsPromptLayoutAndCacheTelemetry -count=1 -v
+=== RUN   TestRunExecRecordsPromptLayoutAndCacheTelemetry
+--- PASS: TestRunExecRecordsPromptLayoutAndCacheTelemetry (2.92s)
+PASS
+ok  	github.com/Taf0711/splice/internal/cli	3.572s

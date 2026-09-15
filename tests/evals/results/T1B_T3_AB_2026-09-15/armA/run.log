@@ -1,0 +1,18 @@
+2026-09-14T22:38:30-0400 building binary /tmp/splice-archeval-paid from BUILD_REV=e3e97b1 (e3e97b1cada3ac2df2bdf4a06f54ee4d2a108496) via detached worktree /var/folders/cf/37chkgfx22q5bb_ws8brslx00000gn/T//warmcost-build.JRgg1s
+Preparing worktree (detached HEAD e3e97b1)
+2026-09-14T22:38:41-0400 building runner /tmp/warmcost-eval-paid from harness repo 2f4ccde
+2026-09-14T22:38:42-0400 pre-registration: model=z-ai/glm-5.3-flash arms=warm tasks=2 repeats=3 margin=0.05 bootstrap=10000
+2026-09-14T22:38:42-0400 attempt cap: arms=1 x tasks=2 x repeats=3 = 6 attempts; MAX_RETRIES=0
+2026-09-14T22:38:42-0400 revision=e3e97b1cada3ac2df2bdf4a06f54ee4d2a108496 sidecar_revision=2f4ccde taskset=clock-helper-write clock-helper-read
+2026-09-14T22:38:42-0400 arm order: warm; interleaved per repeat by the runner
+2026-09-14T22:38:42-0400 retention: shared sidecar_root=/tmp/wc-ab-armA-sidecar
+2026-09-14T22:38:42-0400 run wc-ab-armA-20260915T023826Z-try0 start
+run wc-ab-armA-20260915T023826Z-try0: arms=1 tasks=0 attempts=6
+total-cost claim allowed: false (at least one run has partial cost coverage, so total cost is unknown)
+artifacts: tests/evals/results/wc-ab-armA-20260915T023826Z-try0
+RETRYABLE attempt-clock-helper-read-warm-r0.json,attempt-clock-helper-read-warm-r1.json,attempt-clock-helper-read-warm-r2.json
+2026-09-14T22:39:51-0400 run wc-ab-armA-20260915T023826Z-try0 was retryable; retrying with a fresh workspace
+2026-09-14T22:39:51-0400 no clean run; keeping last run wc-ab-armA-20260915T023826Z-try0 and reporting it as retry-limited
+2026-09-14T22:39:51-0400 final run: wc-ab-armA-20260915T023826Z-try0
+wrote tests/evals/results/PAID_RUN_wc-ab-armA-20260915T023826Z-try0.md
+2026-09-14T22:39:51-0400 complete

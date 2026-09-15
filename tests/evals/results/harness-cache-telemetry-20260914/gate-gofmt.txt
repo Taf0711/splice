@@ -1,0 +1,5 @@
+# gate: gofmt -l .
+# captured 2026-09-14T19:04:18Z
+command: gofmt -l .
+# output (empty means clean):
+# exit=0

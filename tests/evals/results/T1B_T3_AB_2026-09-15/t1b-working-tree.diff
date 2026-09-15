@@ -1,0 +1,446 @@
+diff --git a/tests/evals/warmcost/README.md b/tests/evals/warmcost/README.md
+index f8acc6c..1dc7ae5 100644
+--- a/tests/evals/warmcost/README.md
++++ b/tests/evals/warmcost/README.md
+@@ -41,6 +41,58 @@ fails loud when they do not. The cache channel is reported in tokens because
+ the ledger has no per-token cache price. It bootstraps over tasks, not
+ requests, and reports per-task effects before the aggregate.
+ 
++## Cache telemetry and per-round reporting
++
++The telemetry branch adds four values the harness records: per request
++`prompt_layout_hash`, `cache_hit` (*bool; nil means no usage was reported, which
++is unknown and is never read as a miss) and `memory_position`, and per run
++`prompt_layout_flips`.
++
++The harness reads them with **Option B**: it decodes them from the raw final
++result JSON into a harness-local struct (`tests/evals/warmcost/telemetry.go`) and
++merges them onto the typed records, rather than cherry-picking the telemetry
++product commits into this branch. Cherry-picking would have required resolving
++product-behavior conflicts in `internal/splice/stages/provider.go`,
++`internal/splice/schemas/plan.go`, `internal/splice/run.go` and
++`internal/splice/registry.go` across a large divergence, which is product work,
++not harness work, and would have changed the product schemas on this branch.
++With Option B the product schemas stay untouched, the branch history is not
++rewritten, and the harness still decodes a telemetry-emitting binary and an
++older binary from the same final event.
++
++Per attempt the artifact now carries:
++
++- `cache_telemetry_reported`: true only when the binary emitted at least one
++  telemetry value. False means the telemetry is unknown, not zero.
++- `prompt_layout_flips`: the binary's mid-run flip count, or nil when the binary
++  emitted no telemetry. A nil is unknown and is never reported as zero.
++- `rounds`: one row per (stage, iteration) with requests, input tokens, cached
++  tokens, cache hit rate (cached/input) and the spend source set. A round with no
++  hit is a full-priced round (SPEC section 8 item 3).
++- `layout_stability`: one row per stage with the distinct prompt layout hashes,
++  how many requests carried a hash, and whether the stage was stable. A stage
++  with more than one distinct hash is a layout flip.
++
++`aggregate.json` and `report.md` add a `cache_layout` section: attempts with and
++without telemetry, the total flip count, every attempt with a non-zero flip
++count, and the distinct hashes per stage. A non-zero flip count is reported as a
++finding, never hidden. Partial telemetry coverage is stated, and the layout view
++is not read as complete when some attempts emitted no telemetry.
++
++### A/B plan (owner-gated)
++
++The open SPEC section 12 question is whether the cacheable prefix actually flips
++in a real run and whether stabilizing it raises the provider cache hit rate. The
++clean comparison is:
++
++- Arm A: binary built at `e3e97b1` (before the stable-schema fix `970510f`).
++- Arm B: binary built at `d9c52b3` (after the fix).
++
++Only `970510f` changes what Splice sends to a provider, so a cache-behavior
++difference between the two revisions is attributable to the schema fix. This
++run requires an explicit owner-approved cap and a corpus that triggers context
++expansions and memory re-entry; it is not started without both.
++
+ ## Retention protocol
+ 
+ `--retention fresh|shared` selects the sidecar lifetime protocol.
+diff --git a/tests/evals/warmcost/cmd/warmcost-eval/main.go b/tests/evals/warmcost/cmd/warmcost-eval/main.go
+index 2c043ba..2861ddd 100644
+--- a/tests/evals/warmcost/cmd/warmcost-eval/main.go
++++ b/tests/evals/warmcost/cmd/warmcost-eval/main.go
+@@ -51,6 +51,7 @@ type options struct {
+ 	bootstrapSamples  int
+ 	bootstrapSeed     int64
+ 	correctnessMargin float64
++	binaryRevision    string
+ 	sidecarRevision   string
+ 	retention         string
+ 	sidecarRoot       string
+@@ -73,6 +74,7 @@ func main() {
+ 	flag.IntVar(&opts.bootstrapSamples, "bootstrap-samples", 10000, "task-clustered bootstrap samples")
+ 	flag.Int64Var(&opts.bootstrapSeed, "bootstrap-seed", 1, "bootstrap seed")
+ 	flag.Float64Var(&opts.correctnessMargin, "correctness-margin", 0, "pre-registered acceptable success-rate drop")
++	flag.StringVar(&opts.binaryRevision, "binary-revision", "", "revision of the binary under test; overrides the --repo derivation when set")
+ 	flag.StringVar(&opts.sidecarRevision, "sidecar-revision", "", "sidecar binary revision recorded per attempt")
+ 	flag.StringVar(&opts.retention, "retention", "fresh", "sidecar lifetime protocol: fresh or shared")
+ 	flag.StringVar(&opts.sidecarRoot, "sidecar-root", "", "directory for per-class sidecar sockets and databases (required for shared retention)")
+@@ -109,6 +111,7 @@ func run(opts options) error {
+ 		RunID:             opts.runID,
+ 		RepoDir:           opts.repo,
+ 		Binary:            opts.binary,
++		BinaryRevision:    opts.binaryRevision,
+ 		Model:             opts.model,
+ 		ModelSettings:     warmcost.ModelSettings{ReasoningEffort: opts.reasoningEffort, MaxTurns: opts.maxTurns},
+ 		Tasks:             tasks,
+diff --git a/tests/evals/warmcost/paid-run.sh b/tests/evals/warmcost/paid-run.sh
+index 7eacd52..e3c5472 100755
+--- a/tests/evals/warmcost/paid-run.sh
++++ b/tests/evals/warmcost/paid-run.sh
+@@ -15,9 +15,18 @@ set -euo pipefail
+ REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
+ cd "$REPO"
+ 
++# B2: an operator-supplied BIN must never be rebuilt over. Track whether BIN
++# came from the environment before the default is applied.
++BIN_WAS_SET="0"
++if [[ -n "${BIN:-}" ]]; then
++  BIN_WAS_SET="1"
++fi
+ BIN="${BIN:-/tmp/splice-archeval-paid}"
+ RUNNER="${RUNNER:-/tmp/warmcost-eval-paid}"
+ MEMD_BIN="${MEMD_BIN:-/tmp/splice-memd}"
++# B1: BUILD_REV selects the revision of the binary under test. The runner is
++# always built from this harness repo, so only the binary varies.
++BUILD_REV="${BUILD_REV:-HEAD}"
+ MODEL="${MODEL:-z-ai/glm-5.3-flash}"
+ REPEATS="${REPEATS:-3}"
+ MARGIN="${MARGIN:-0.05}"
+@@ -53,6 +62,23 @@ export SPLICE_MEMD_DB="$MEMD_DIR/mem.db"
+ 
+ log() { printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*"; }
+ 
++TASKSET=""
++MEMD_PID=""
++BUILD_WT=""
++cleanup() {
++  if [[ -n "$MEMD_PID" ]]; then
++    kill "$MEMD_PID" 2>/dev/null || true
++    wait "$MEMD_PID" 2>/dev/null || true
++  fi
++  if [[ -n "$BUILD_WT" && -d "$BUILD_WT" ]]; then
++    git worktree remove "$BUILD_WT" --force 2>/dev/null || true
++  fi
++  if [[ -n "$TASKSET" ]]; then
++    rm -rf "$TASKSET"
++  fi
++}
++trap cleanup EXIT
++
+ for name in "${TASKS[@]}"; do
+   if [[ ! -f "$TASKSET_SRC/tasks/$name.json" ]]; then
+     log "unknown task $name: $TASKSET_SRC/tasks/$name.json does not exist"
+@@ -60,20 +86,43 @@ for name in "${TASKS[@]}"; do
+   fi
+ done
+ 
+-log "building binary and runner from $(git rev-parse --short HEAD)"
+-go build -o "$BIN" ./cmd/splice
++# B1: resolve BUILD_REV before anything is built, and fail loud when it does not
++# name a commit. The binary under test is built from a detached worktree at that
++# revision; the runner is always built from this harness repo, so the harness
++# code does not vary with BUILD_REV.
++if ! BUILD_REV_SHA="$(git rev-parse --verify --quiet "${BUILD_REV}^{commit}")"; then
++  log "BUILD_REV does not resolve to a commit: ${BUILD_REV}"
++  exit 1
++fi
++
++# B2: never overwrite an operator-supplied binary. When BIN comes from the
++# environment it is used as-is after an explicit BIN_PREBUILT=1 acknowledgement.
++if [[ "$BIN_WAS_SET" == "1" ]]; then
++  if [[ "${BIN_PREBUILT:-0}" != "1" ]]; then
++    log "BIN is operator-supplied ($BIN); refusing to rebuild it. Set BIN_PREBUILT=1 to use it as-is."
++    exit 1
++  fi
++  log "using operator-supplied binary $BIN (BIN_PREBUILT=1); not rebuilding"
++else
++  BUILD_WT="$(mktemp -d "${TMPDIR:-/tmp}/warmcost-build.XXXXXX")"
++  log "building binary $BIN from BUILD_REV=$BUILD_REV ($BUILD_REV_SHA) via detached worktree $BUILD_WT"
++  git worktree add --detach --force "$BUILD_WT" "$BUILD_REV_SHA" >/dev/null
++  ( cd "$BUILD_WT" && go build -o "$BIN" ./cmd/splice )
++  git worktree remove "$BUILD_WT" --force
++  BUILD_WT=""
++fi
++log "building runner $RUNNER from harness repo $(git rev-parse --short HEAD)"
+ go build -o "$RUNNER" ./tests/evals/warmcost/cmd/warmcost-eval
+ 
++# BUILD_ONLY is a no-provider seam for the shell guard tests. It stops after the
++# builds, before the sidecar starts, so a supplied BIN can be proven untouched
++# without spending anything.
++if [[ "${BUILD_ONLY:-0}" == "1" ]]; then
++  log "BUILD_ONLY=1: stopping after build (no memd start, no provider request)"
++  exit 0
++fi
++
+ TASKSET="$(mktemp -d "${TMPDIR:-/tmp}/warmcost-paid-taskset.XXXXXX")"
+-MEMD_PID=""
+-cleanup() {
+-  if [[ -n "$MEMD_PID" ]]; then
+-    kill "$MEMD_PID" 2>/dev/null || true
+-    wait "$MEMD_PID" 2>/dev/null || true
+-  fi
+-  rm -rf "$TASKSET"
+-}
+-trap cleanup EXIT
+ 
+ mkdir -p "$TASKSET/tasks"
+ cp -R "$TASKSET_SRC/fixture" "$TASKSET/fixture"
+@@ -94,7 +143,7 @@ if [[ ! -S "$SPLICE_MEMD_SOCKET" ]]; then
+   exit 1
+ fi
+ 
+-REV="$(git rev-parse HEAD)"
++REV="$BUILD_REV_SHA"
+ SIDECAR_REV="$(git rev-parse --short HEAD)"
+ log "pre-registration: model=$MODEL arms=$ARMS tasks=${#TASKS[@]} repeats=$REPEATS margin=$MARGIN bootstrap=$BOOTSTRAP_SAMPLES"
+ log "attempt cap: arms=$ARM_COUNT x tasks=${#TASKS[@]} x repeats=$REPEATS = $((ARM_COUNT * ${#TASKS[@]} * REPEATS)) attempts; MAX_RETRIES=$MAX_RETRIES"
+@@ -116,6 +165,7 @@ for try in $(seq 0 "$MAX_RETRIES"); do
+   RUNNER_ARGS=(
+     --repo .
+     --binary "$BIN"
++    --binary-revision "$REV"
+     --model "$MODEL"
+     --tasks "$TASKSET"
+     --out "$OUT_DIR"
+diff --git a/tests/evals/warmcost/report.go b/tests/evals/warmcost/report.go
+index b600120..0692ae0 100644
+--- a/tests/evals/warmcost/report.go
++++ b/tests/evals/warmcost/report.go
+@@ -2,6 +2,7 @@ package warmcost
+ 
+ import (
+ 	"fmt"
++	"sort"
+ 	"strings"
+ )
+ 
+@@ -70,6 +71,31 @@ func renderMarkdown(agg Aggregate) string {
+ 	fmt.Fprintf(&b, "| requests/attempt | %+.3f | %+.3f |\n", agg.Bootstrap.RequestsPerAttempt.Lower, agg.Bootstrap.RequestsPerAttempt.Upper)
+ 	fmt.Fprintf(&b, "| success rate | %+.3f | %+.3f |\n\n", agg.Bootstrap.SuccessRateDelta.Lower, agg.Bootstrap.SuccessRateDelta.Upper)
+ 
++	fmt.Fprintf(&b, "## Cache layout stability\n\n")
++	cl := agg.CacheLayout
++	fmt.Fprintf(&b, "Attempts: %d. With cache telemetry: %d. Without: %d.\n\n", cl.Attempts, cl.AttemptsWithTelemetry, cl.AttemptsWithoutTelemetry)
++	fmt.Fprintf(&b, "Total prompt layout flips: %d.\n", cl.TotalPromptLayoutFlips)
++	if len(cl.AttemptsWithFlips) > 0 {
++		fmt.Fprintf(&b, "Attempts with a non-zero flip count: %s.\n", strings.Join(cl.AttemptsWithFlips, ", "))
++	} else if cl.AttemptsWithTelemetry > 0 {
++		fmt.Fprintf(&b, "No attempt reported a non-zero flip count.\n")
++	}
++	if len(cl.DistinctHashesByStage) > 0 {
++		stages := make([]string, 0, len(cl.DistinctHashesByStage))
++		for stage := range cl.DistinctHashesByStage {
++			stages = append(stages, stage)
++		}
++		sort.Strings(stages)
++		fmt.Fprintf(&b, "\n| stage | distinct prompt layout hashes |\n| --- | --- |\n")
++		for _, stage := range stages {
++			fmt.Fprintf(&b, "| %s | %s |\n", stage, strings.Join(cl.DistinctHashesByStage[stage], ", "))
++		}
++	}
++	if cl.Note != "" {
++		fmt.Fprintf(&b, "\n%s\n", cl.Note)
++	}
++	fmt.Fprintf(&b, "\nPer-attempt per-round rows (requests, input tokens, cached tokens, cache hit\nrate, spend source) and per-attempt distinct hashes are in each `attempt-*.json`\nartifact under the run directory.\n\n")
++
+ 	fmt.Fprintf(&b, "## Claim\n\nAllowed: %t. %s\n\n", agg.Claim.TotalCostClaimAllowed, agg.Claim.Reason)
+ 
+ 	fmt.Fprintf(&b, "## Per-task effects\n\n")
+diff --git a/tests/evals/warmcost/runner.go b/tests/evals/warmcost/runner.go
+index 95c7ca3..1559411 100644
+--- a/tests/evals/warmcost/runner.go
++++ b/tests/evals/warmcost/runner.go
+@@ -23,9 +23,13 @@ import (
+ 
+ // Config is one measurement run.
+ type Config struct {
+-	RunID             string
+-	RepoDir           string
+-	Binary            string
++	RunID   string
++	RepoDir string
++	Binary  string
++	// BinaryRevision is the revision of the binary under test. When set it
++	// overrides the repo-derived revision, so an Arm A and an Arm B run record
++	// the revision that actually ran instead of the harness repo's HEAD.
++	BinaryRevision    string
+ 	Model             string
+ 	ModelSettings     ModelSettings
+ 	Tasks             []Task
+@@ -110,7 +114,9 @@ type Aggregate struct {
+ 	Bootstrap       BootstrapResult `json:"bootstrap"`
+ 	Claim           Claim           `json:"claim"`
+ 	Coverage        Coverage        `json:"coverage"`
+-	Note            string          `json:"note"`
++	// CacheLayout is the run-level prefix layout summary (Option B telemetry).
++	CacheLayout CacheLayoutReport `json:"cache_layout"`
++	Note        string            `json:"note"`
+ }
+ 
+ // reanchorFunc advances one run's capture set from one revision to another.
+@@ -401,6 +407,7 @@ func (r *Runner) aggregate(prov Provenance, attempts []Attempt) (Aggregate, erro
+ 		Bootstrap:     boot,
+ 		Claim:         claim,
+ 		Coverage:      coverage,
++		CacheLayout:   computeCacheLayout(attempts),
+ 		Note:          "Every number comes from the captured authoritative request ledger. Tokens are provider-reported. A partial run withholds the total-cost claim.",
+ 	}
+ 	return agg, nil
+@@ -501,7 +508,14 @@ func orderTasks(tasks []Task) []Task {
+ 	return out
+ }
+ 
++// binaryRevision is the revision recorded on the run and every attempt. An
++// explicit Config.BinaryRevision is authoritative, so an operator-supplied
++// binary records the revision it was built from rather than the harness repo's
++// HEAD. The repo derivation is the fallback when the override is empty.
+ func (r *Runner) binaryRevision() string {
++	if rev := strings.TrimSpace(r.cfg.BinaryRevision); rev != "" {
++		return rev
++	}
+ 	if r.cfg.RepoDir == "" {
+ 		return ""
+ 	}
+@@ -553,9 +567,9 @@ type streamFinalEvent struct {
+ 	Text string `json:"text"`
+ }
+ 
+-// parsePipelineResult finds the final stream-json event and parses its text as
+-// the pipeline result. The text IS the JSON produced after applyRequestLedger.
+-func parsePipelineResult(stdout []byte) (schemas.PipelineResult, error) {
++// finalEventText finds the last final stream-json event and returns its text,
++// which IS the JSON produced after applyRequestLedger.
++func finalEventText(stdout []byte) (string, error) {
+ 	scanner := bufio.NewScanner(bytes.NewReader(stdout))
+ 	scanner.Buffer(make([]byte, 0, 1<<20), 32<<20)
+ 	finalText := ""
+@@ -573,10 +587,20 @@ func parsePipelineResult(stdout []byte) (schemas.PipelineResult, error) {
+ 		}
+ 	}
+ 	if err := scanner.Err(); err != nil {
+-		return schemas.PipelineResult{}, fmt.Errorf("scan exec output: %w", err)
++		return "", fmt.Errorf("scan exec output: %w", err)
+ 	}
+ 	if finalText == "" {
+-		return schemas.PipelineResult{}, errors.New("no final event with a pipeline result in exec output")
++		return "", errors.New("no final event with a pipeline result in exec output")
++	}
++	return finalText, nil
++}
++
++// parsePipelineResult parses the final stream-json event text as the pipeline
++// result.
++func parsePipelineResult(stdout []byte) (schemas.PipelineResult, error) {
++	finalText, err := finalEventText(stdout)
++	if err != nil {
++		return schemas.PipelineResult{}, err
+ 	}
+ 	var result schemas.PipelineResult
+ 	if err := json.Unmarshal([]byte(finalText), &result); err != nil {
+@@ -695,6 +719,7 @@ func (r *Runner) runTaskInWorkspace(ctx context.Context, task Task, arm Arm, rep
+ 		SequenceOrdinal: seqOrdinal,
+ 		SequenceTasks:   seqTasks,
+ 		Workspace:       workspace,
++		Binary:          prov.Binary,
+ 		BinaryRevision:  prov.BinaryRevision,
+ 		SidecarRevision: prov.SidecarRevision,
+ 		FixtureDigest:   fixtureDigest,
+@@ -740,6 +765,18 @@ func (r *Runner) runTaskInWorkspace(ctx context.Context, task Task, arm Arm, rep
+ 		attempt.RunStatus = parsed.Status
+ 		attempt.CostCoverage = parsed.CostCoverage
+ 		attempt.Totals = totalsFromResult(parsed)
++		// Option B: decode the cache telemetry from the same final event with
++		// harness-local structs and merge it onto the typed records. A decode
++		// failure leaves the telemetry unreported, never reported as zero.
++		if tel, terr := parseCacheTelemetry(res.Stdout); terr != nil {
++			attempt.LedgerError = terr.Error()
++		} else {
++			attempt.Requests = mergeCacheTelemetry(attempt.Requests, tel)
++			attempt.CacheTelemetryReported = tel.Reported
++			attempt.PromptLayoutFlips = tel.Flips
++		}
++		attempt.Rounds = computeRounds(attempt.Requests)
++		attempt.LayoutStability = computeLayoutStability(attempt.Requests)
+ 	}
+ 
+ 	verified, output, verr := runVerifier(runCtx, workspace, task.Check)
+@@ -928,6 +965,7 @@ func (r *Runner) failedAttempt(task Task, arm Arm, repeat, seqIndex, seqOrdinal,
+ 		Sequence:        seqIndex,
+ 		SequenceOrdinal: seqOrdinal,
+ 		SequenceTasks:   seqTasks,
++		Binary:          prov.Binary,
+ 		BinaryRevision:  prov.BinaryRevision,
+ 		SidecarRevision: prov.SidecarRevision,
+ 		ModelID:         r.cfg.Model,
+diff --git a/tests/evals/warmcost/types.go b/tests/evals/warmcost/types.go
+index e1ee11e..253a140 100644
+--- a/tests/evals/warmcost/types.go
++++ b/tests/evals/warmcost/types.go
+@@ -172,10 +172,26 @@ type RequestRecord struct {
+ 	Reasoning         int      `json:"reasoning_tokens"`
+ 	CostUSD           *float64 `json:"cost_usd"`
+ 	CostStatus        string   `json:"cost_status"`
++	// PromptLayoutHash is the cacheable prefix layout hash (system prompt plus
++	// tool schema) the telemetry branch reports per request. Empty means the
++	// binary emitted no telemetry for this request, which is unknown, not a
++	// layout change. Option B decodes it from the raw JSON, not the product
++	// schema.
++	PromptLayoutHash string `json:"prompt_layout_hash,omitempty"`
++	// CacheHit is the provider's stated cache read: true, false, or nil when no
++	// usage was reported. Nil is unknown and is never read as a miss.
++	CacheHit *bool `json:"cache_hit"`
++	// MemoryPosition states where dynamic content sits relative to the
++	// cacheable prefix. Empty means the binary emitted no telemetry.
++	MemoryPosition string `json:"memory_position,omitempty"`
+ }
+ 
+ // requestRecords maps the authoritative ledger into the explicit artifact
+-// shape. Nothing is recomputed.
++// shape. Nothing is recomputed. The three cache telemetry fields
++// (PromptLayoutHash, CacheHit, MemoryPosition) are not on the harness branch's
++// product schema; they are decoded from the raw final result JSON and copied on
++// afterward by mergeCacheTelemetry (Option B), so this function stays the one
++// place the typed ledger fields are projected.
+ func requestRecords(recs []schemas.PipelineUsageRecord) []RequestRecord {
+ 	out := make([]RequestRecord, 0, len(recs))
+ 	for _, r := range recs {
+@@ -218,7 +234,10 @@ type Attempt struct {
+ 	Workspace string `json:"workspace,omitempty"`
+ 	// RunID is the pipeline run id from the final result. The harness passes
+ 	// it as the producer run id when it reanchors that run's capture set.
+-	RunID           string          `json:"run_id,omitempty"`
++	RunID string `json:"run_id,omitempty"`
++	// Binary is the path of the binary under test. It is recorded so a reader
++	// can tie a run to the artifact that produced it, not only to a revision.
++	Binary          string          `json:"binary"`
+ 	BinaryRevision  string          `json:"binary_revision"`
+ 	SidecarRevision string          `json:"sidecar_revision"`
+ 	FixtureDigest   string          `json:"fixture_digest"`
+@@ -232,7 +251,20 @@ type Attempt struct {
+ 	VerifierOutput  string          `json:"verifier_output,omitempty"`
+ 	Requests        []RequestRecord `json:"requests"`
+ 	Totals          Totals          `json:"totals"`
+-	LedgerError     string          `json:"ledger_error,omitempty"`
++	// CacheTelemetryReported is true when the binary emitted at least one
++	// telemetry value for this attempt. False means the telemetry fields are
++	// unknown, not zero.
++	CacheTelemetryReported bool `json:"cache_telemetry_reported"`
++	// PromptLayoutFlips is the binary's mid-run prompt layout flip count. Nil
++	// means the binary emitted no cache telemetry, so the count is unknown and
++	// must not be reported as zero.
++	PromptLayoutFlips *int `json:"prompt_layout_flips,omitempty"`
++	// Rounds is the per-(stage, iteration) cache view required by SPEC section
++	// 8 item 3. A round with no hit is a full-priced round.
++	Rounds []RoundCache `json:"rounds,omitempty"`
++	// LayoutStability is the per-stage distinct prompt layout hash view.
++	LayoutStability []StageLayout `json:"layout_stability,omitempty"`
++	LedgerError     string        `json:"ledger_error,omitempty"`
+ 	// RawStream names the additive raw stream-json artifact for this
+ 	// attempt, when one was captured. Empty means no raw artifact exists.
+ 	RawStream  string    `json:"raw_stream,omitempty"`
