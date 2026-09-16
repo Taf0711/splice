@@ -1,0 +1,6 @@
+usage accounting (OpenRouter key /auth/key, cumulative):
+baseline after the wrong-model smoke2 run: 10.607297009
+after killed glm smoke3 (stalled ~8min, no artifact): 10.616458559 (delta 0.00916155)
+after killed glm smoke4 (~110s, no artifact): 10.687668549 (delta 0.071211); final usage 10.687668549
+wrong-model smoke2 ledger billed_usd: 0.16480640000000002
+estimated assignment total: 0.1648064 + 0.00916155 + 0.071211 = 0.24518

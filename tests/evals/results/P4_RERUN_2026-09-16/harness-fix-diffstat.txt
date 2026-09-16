@@ -1,0 +1,12 @@
+commit d3ce20dc9958d579087a87a43dffcfe3c4fdf2ce
+Author: eval <eval@example.invalid>
+Date:   Wed Sep 16 13:30:06 2026 -0400
+
+    test(evals): report billed dollars per campaign attempt
+
+ internal/cli/families_eval.go  |  8 +++++
+ internal/cli/mvp_eval.go       | 55 ++++++++++++++++++++++++++++++
+ internal/cli/pair_eval.go      | 42 ++++++++++++++++++++++-
+ internal/cli/pair_eval_test.go | 77 ++++++++++++++++++++++++++++++++++++++++++
+ internal/eval/harness.go       |  7 ++++
+ 5 files changed, 188 insertions(+), 1 deletion(-)

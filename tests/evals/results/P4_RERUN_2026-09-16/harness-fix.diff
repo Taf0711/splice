@@ -1,0 +1,238 @@
+commit d3ce20dc9958d579087a87a43dffcfe3c4fdf2ce
+Author: eval <eval@example.invalid>
+Date:   Wed Sep 16 13:30:06 2026 -0400
+
+    test(evals): report billed dollars per campaign attempt
+
+diff --git a/internal/cli/families_eval.go b/internal/cli/families_eval.go
+index 7f9d053..ebbf726 100644
+--- a/internal/cli/families_eval.go
++++ b/internal/cli/families_eval.go
+@@ -164,6 +164,14 @@ type familyPairRow struct {
+ 	OutputTokens    int `json:"output_tokens,omitempty"`
+ 	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+ 	CachedTokens    int `json:"cached_input_tokens,omitempty"`
++	// Billed spend from the producer ledger. BilledUSD is absent when the
++	// producer reported no cost (unknown, never zero). BilledUSDEstimated is
++	// true when the reported total is a lower bound (partial coverage), so a
++	// reader never presents it as the complete attempt cost. BilledUSDSource
++	// names where the figure came from ("ledger" or "unavailable").
++	BilledUSD          *float64 `json:"billed_usd,omitempty"`
++	BilledUSDEstimated *bool    `json:"billed_usd_estimated,omitempty"`
++	BilledUSDSource    string   `json:"billed_usd_source,omitempty"`
+ 
+ 	// Work counters: tool calls, discovery searches, file reads (from the
+ 	// run's stream-json transcript) and pipeline interventions (repairs)
+diff --git a/internal/cli/mvp_eval.go b/internal/cli/mvp_eval.go
+index a865105..2658b50 100644
+--- a/internal/cli/mvp_eval.go
++++ b/internal/cli/mvp_eval.go
+@@ -597,6 +597,12 @@ func fillAttemptRow(row familyPairRow, out eval.RunOutput, runErr error, latency
+ 	row.Success = out.Success
+ 	row.Tokens = out.Tokens
+ 	row.Telemetry = out.TelemetryFound
++	// Billed spend rides every outcome, including failures (a failed attempt
++	// still spent money). nil stays absent: a missing producer cost is
++	// unknown, never zero.
++	row.BilledUSD = out.BilledUSD
++	row.BilledUSDEstimated = out.BilledUSDEstimated
++	row.BilledUSDSource = out.BilledUSDSource
+ 	row.LatencyMs = latency.Milliseconds()
+ 	// A3: stream work counters land UNCONDITIONALLY (not gated on being
+ 	// nonzero), with transcript presence recorded separately. This makes
+@@ -806,6 +812,7 @@ func summarizeMvp(stdout io.Writer, manifest mvpFamilyManifest, rows []familyPai
+ 		var cold, warm []familyPairRow
+ 		manualRows, autoRows := 0, 0
+ 		manualS, manualNonDiagnostic, autoS := 0, 0, 0
++		var coldSpend, warmSpend, manualSpend, autoSpend spendSum
+ 		setupFailed := 0
+ 		failedSnapshots := map[string]bool{}
+ 		for _, row := range frows {
+@@ -816,6 +823,7 @@ func summarizeMvp(stdout io.Writer, manifest mvpFamilyManifest, rows []familyPai
+ 			case conditionManual:
+ 				manualRows++
+ 				manualS += boolToInt(row.Success)
++				manualSpend.add(row)
+ 				if row.DiagnosticOnly == nil || !*row.DiagnosticOnly {
+ 					// The manual arm must always carry the diagnostic
+ 					// flag: a missing flag is a wiring bug, reported.
+@@ -824,6 +832,7 @@ func summarizeMvp(stdout io.Writer, manifest mvpFamilyManifest, rows []familyPai
+ 			case conditionAutomatic:
+ 				autoRows++
+ 				autoS += boolToInt(row.Success)
++				autoSpend.add(row)
+ 			}
+ 			if row.InfraStatus == "precursor_failed" {
+ 				// A failed precursor is a real outcome of the full
+@@ -856,12 +865,14 @@ func summarizeMvp(stdout io.Writer, manifest mvpFamilyManifest, rows []familyPai
+ 			coldTok = append(coldTok, row.Tokens)
+ 			coldSearch = append(coldSearch, row.SearchCalls)
+ 			coldReads = append(coldReads, row.FileReads)
++			coldSpend.add(row)
+ 		}
+ 		for _, row := range warm {
+ 			warmS += boolToInt(row.Success)
+ 			warmTok = append(warmTok, row.Tokens)
+ 			warmSearch = append(warmSearch, row.SearchCalls)
+ 			warmReads = append(warmReads, row.FileReads)
++			warmSpend.add(row)
+ 			warmAvoid = append(warmAvoid, row.DiscoveryReadsAvoided)
+ 			warmCog = append(warmCog, row.DiscoveryResolvedCog)
+ 			warmOpsExecuted = append(warmOpsExecuted, row.OperationsExecuted)
+@@ -878,6 +889,8 @@ func summarizeMvp(stdout io.Writer, manifest mvpFamilyManifest, rows []familyPai
+ 				coldS, len(cold), medStr(coldTok), medStr(coldSearch), medStr(coldReads))
+ 			fmt.Fprintf(stdout, "  warm: success %d/%d, tokens med %s, searches med %s, reads med %s\n",
+ 				warmS, len(warm), medStr(warmTok), medStr(warmSearch), medStr(warmReads))
++			fmt.Fprintf(stdout, "  spend: cold %s, warm %s (billed USD; estimated rows marked)\n",
++				coldSpend.String(), warmSpend.String())
+ 			fmt.Fprintf(stdout, "  cognition: resolved_by_cognition med %s, legacy_inferred_avoided_ops med %s, executed_ops med %s, evidence_satisfied_ops med %s, validation_reads med %s (per Task B run)\n",
+ 				medStr(warmCog), medStr(warmAvoid), medStr(warmOpsExecuted), medStr(warmOpsSatisfied), medStr(warmValidationReads))
+ 			for _, row := range warm {
+@@ -894,6 +907,8 @@ func summarizeMvp(stdout io.Writer, manifest mvpFamilyManifest, rows []familyPai
+ 			// comparison.
+ 			fmt.Fprintf(stdout, "  campaign: automatic success %d/%d, manual (diagnostic_only) success %d/%d\n",
+ 				autoS, autoRows, manualS, manualRows)
++			fmt.Fprintf(stdout, "  campaign spend: automatic %s, manual %s (billed USD; estimated rows marked)\n",
++				autoSpend.String(), manualSpend.String())
+ 			if manualNonDiagnostic > 0 {
+ 				fmt.Fprintf(stdout, "  campaign WARNING: %d manual row(s) missing diagnostic_only=true; they must never count toward the automatic-cognition gate\n", manualNonDiagnostic)
+ 			}
+@@ -901,6 +916,46 @@ func summarizeMvp(stdout io.Writer, manifest mvpFamilyManifest, rows []familyPai
+ 	}
+ }
+ 
++// spendSum accumulates per-row billed dollars without turning an unknown row
++// into a zero: Known counts rows with a reported cost, Unknown counts rows
++// without one, and Estimated is true when any reported total is only a lower
++// bound (partial coverage).
++type spendSum struct {
++	USD       float64
++	Known     int
++	Unknown   int
++	Estimated bool
++}
++
++func (s *spendSum) add(row familyPairRow) {
++	if row.BilledUSD == nil {
++		s.Unknown++
++		return
++	}
++	s.USD += *row.BilledUSD
++	s.Known++
++	if row.BilledUSDEstimated != nil && *row.BilledUSDEstimated {
++		s.Estimated = true
++	}
++}
++
++// String renders the accumulated spend with its coverage, so a partial or
++// unknown result is never read as a complete dollar total.
++func (s spendSum) String() string {
++	if s.Known == 0 && s.Unknown == 0 {
++		return "n/a"
++	}
++	label := "$%.4f over %d row(s)"
++	out := fmt.Sprintf(label, s.USD, s.Known)
++	if s.Unknown > 0 {
++		out += fmt.Sprintf(" + %d unknown", s.Unknown)
++	}
++	if s.Estimated {
++		out += " (estimated)"
++	}
++	return out
++}
++
+ // medStr renders a median or "n/a" when no samples exist.
+ func medStr(values []int) string {
+ 	if len(values) == 0 {
+diff --git a/internal/cli/pair_eval.go b/internal/cli/pair_eval.go
+index c5947a6..4d4ef29 100644
+--- a/internal/cli/pair_eval.go
++++ b/internal/cli/pair_eval.go
+@@ -298,6 +298,11 @@ func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
+ 			tokenSource = "stream-json"
+ 			found = tokens > 0
+ 		}
++		// Billed spend: the same authoritative ledger carries the producer's
++		// reported total_cost_usd. A partial coverage total is a lower bound,
++		// marked estimated; a missing result leaves the cost unknown (nil),
++		// never zero. This is the per-row dollar the campaign report needs.
++		billedUSD, billedEstimated, billedSource := parsePipelineResultSpend(out)
+ 		// Interventions are a warm-side trace signal; they never carry the
+ 		// token comparison.
+ 		_, interventions, _ := collectTrace(ctx, deps, in.Cwd, in.SessionID)
+@@ -345,7 +350,8 @@ func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
+ 			}
+ 			return eval.RunOutput{Success: false, Tokens: tokens, TelemetryFound: found,
+ 					TokenSource: tokenSource,
+-					ToolCalls:   toolCalls, FileReads: fileReads, SearchCalls: searchCalls,
++					BilledUSD:   billedUSD, BilledUSDEstimated: billedEstimated, BilledUSDSource: billedSource,
++					ToolCalls: toolCalls, FileReads: fileReads, SearchCalls: searchCalls,
+ 					StreamWorkObserved: boolPtr(streamObserved),
+ 					StreamInputTokens:  streamIn, StreamOutputTokens: streamOut, StreamSplitFound: splitFound,
+ 					FailureCategory: "agent_noncompletion",
+@@ -373,6 +379,7 @@ func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
+ 
+ 		result := eval.RunOutput{Success: success, Tokens: tokens, Interventions: interventions,
+ 			TelemetryFound: found, TokenSource: tokenSource,
++			BilledUSD: billedUSD, BilledUSDEstimated: billedEstimated, BilledUSDSource: billedSource,
+ 			ToolCalls: toolCalls, FileReads: fileReads, SearchCalls: searchCalls,
+ 			VerifierOutputPath: artifactPath(in.ArtifactDir, in.SessionID, "verifier.txt"),
+ 			PatchPath:          artifactPath(in.ArtifactDir, in.SessionID, "patch.diff"),
+@@ -572,6 +579,39 @@ func parsePipelineResultTokens(out []byte) (int, bool) {
+ 	return 0, false
+ }
+ 
++// parsePipelineResultSpend reads the run's final stream-json event and returns
++// the producer-reported billed total in USD, whether that total is only a lower
++// bound (partial coverage), and its source. A run with no final result, or one
++// whose ledger carries no usage records, leaves the cost UNKNOWN: it returns
++// nil, never a fabricated zero.
++func parsePipelineResultSpend(out []byte) (*float64, *bool, string) {
++	for _, line := range strings.Split(string(out), "\n") {
++		trimmed := strings.TrimSpace(line)
++		if trimmed == "" || trimmed[0] != '{' {
++			continue
++		}
++		var event struct {
++			Type string `json:"type"`
++			Text string `json:"text"`
++		}
++		if json.Unmarshal([]byte(trimmed), &event) != nil || event.Type != "final" || event.Text == "" {
++			continue
++		}
++		var result schemas.PipelineResult
++		if json.Unmarshal([]byte(event.Text), &result) != nil {
++			continue
++		}
++		if len(result.UsageRecords) == 0 {
++			// No usage records: cost is not applicable/unknown, never zero.
++			return nil, nil, "unavailable"
++		}
++		usd := result.TotalCostUSD
++		estimated := result.CostCoverage != schemas.CostCoverageComplete
++		return &usd, boolPtr(estimated), "ledger"
++	}
++	return nil, nil, "unavailable"
++}
++
+ // sumStreamJSONTokens sums totalTokens across stream-json usage records in a
+ // captured exec transcript. It is best-effort: unparseable lines are skipped,
+ // and an empty transcript yields zero.
+diff --git a/internal/eval/harness.go b/internal/eval/harness.go
+index 9007a74..3fb9ee0 100644
+--- a/internal/eval/harness.go
++++ b/internal/eval/harness.go
+@@ -67,6 +67,13 @@ type RunOutput struct {
+ 	Success       bool
+ 	Tokens        int // total tokens (input+output) from the named TokenSource
+ 	Interventions int // weighted intervention sum from the trace
++	// BilledUSD is the producer-reported billed cost for this attempt when
++	// the ledger carried it. nil means unknown, never zero. Estimated is
++	// true when the reported sum is a lower bound (partial cost coverage),
++	// so a caller does not present it as the complete attempt cost.
++	BilledUSD          *float64
++	BilledUSDEstimated *bool
++	BilledUSDSource    string // "ledger" | "unavailable"; "" means not recorded
+ 	// TokenSource names where Tokens came from: "ledger" (the authoritative
+ 	// request ledger in the final pipeline result, the symmetric source for
+ 	// both arms), "stream-json" (the fallback when no final result exists),
