@@ -164,6 +164,14 @@ type familyPairRow struct {
 	OutputTokens    int `json:"output_tokens,omitempty"`
 	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
 	CachedTokens    int `json:"cached_input_tokens,omitempty"`
+	// Billed spend from the producer ledger. BilledUSD is absent when the
+	// producer reported no cost (unknown, never zero). BilledUSDEstimated is
+	// true when the reported total is a lower bound (partial coverage), so a
+	// reader never presents it as the complete attempt cost. BilledUSDSource
+	// names where the figure came from ("ledger" or "unavailable").
+	BilledUSD          *float64 `json:"billed_usd,omitempty"`
+	BilledUSDEstimated *bool    `json:"billed_usd_estimated,omitempty"`
+	BilledUSDSource    string   `json:"billed_usd_source,omitempty"`
 
 	// Work counters: tool calls, discovery searches, file reads (from the
 	// run's stream-json transcript) and pipeline interventions (repairs)

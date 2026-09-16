@@ -67,6 +67,13 @@ type RunOutput struct {
 	Success       bool
 	Tokens        int // total tokens (input+output) from the named TokenSource
 	Interventions int // weighted intervention sum from the trace
+	// BilledUSD is the producer-reported billed cost for this attempt when
+	// the ledger carried it. nil means unknown, never zero. Estimated is
+	// true when the reported sum is a lower bound (partial cost coverage),
+	// so a caller does not present it as the complete attempt cost.
+	BilledUSD          *float64
+	BilledUSDEstimated *bool
+	BilledUSDSource    string // "ledger" | "unavailable"; "" means not recorded
 	// TokenSource names where Tokens came from: "ledger" (the authoritative
 	// request ledger in the final pipeline result, the symmetric source for
 	// both arms), "stream-json" (the fallback when no final result exists),

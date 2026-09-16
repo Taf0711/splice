@@ -597,6 +597,12 @@ func fillAttemptRow(row familyPairRow, out eval.RunOutput, runErr error, latency
 	row.Success = out.Success
 	row.Tokens = out.Tokens
 	row.Telemetry = out.TelemetryFound
+	// Billed spend rides every outcome, including failures (a failed attempt
+	// still spent money). nil stays absent: a missing producer cost is
+	// unknown, never zero.
+	row.BilledUSD = out.BilledUSD
+	row.BilledUSDEstimated = out.BilledUSDEstimated
+	row.BilledUSDSource = out.BilledUSDSource
 	row.LatencyMs = latency.Milliseconds()
 	// A3: stream work counters land UNCONDITIONALLY (not gated on being
 	// nonzero), with transcript presence recorded separately. This makes
@@ -806,6 +812,7 @@ func summarizeMvp(stdout io.Writer, manifest mvpFamilyManifest, rows []familyPai
 		var cold, warm []familyPairRow
 		manualRows, autoRows := 0, 0
 		manualS, manualNonDiagnostic, autoS := 0, 0, 0
+		var coldSpend, warmSpend, manualSpend, autoSpend spendSum
 		setupFailed := 0
 		failedSnapshots := map[string]bool{}
 		for _, row := range frows {
@@ -816,6 +823,7 @@ func summarizeMvp(stdout io.Writer, manifest mvpFamilyManifest, rows []familyPai
 			case conditionManual:
 				manualRows++
 				manualS += boolToInt(row.Success)
+				manualSpend.add(row)
 				if row.DiagnosticOnly == nil || !*row.DiagnosticOnly {
 					// The manual arm must always carry the diagnostic
 					// flag: a missing flag is a wiring bug, reported.
@@ -824,6 +832,7 @@ func summarizeMvp(stdout io.Writer, manifest mvpFamilyManifest, rows []familyPai
 			case conditionAutomatic:
 				autoRows++
 				autoS += boolToInt(row.Success)
+				autoSpend.add(row)
 			}
 			if row.InfraStatus == "precursor_failed" {
 				// A failed precursor is a real outcome of the full
@@ -856,12 +865,14 @@ func summarizeMvp(stdout io.Writer, manifest mvpFamilyManifest, rows []familyPai
 			coldTok = append(coldTok, row.Tokens)
 			coldSearch = append(coldSearch, row.SearchCalls)
 			coldReads = append(coldReads, row.FileReads)
+			coldSpend.add(row)
 		}
 		for _, row := range warm {
 			warmS += boolToInt(row.Success)
 			warmTok = append(warmTok, row.Tokens)
 			warmSearch = append(warmSearch, row.SearchCalls)
 			warmReads = append(warmReads, row.FileReads)
+			warmSpend.add(row)
 			warmAvoid = append(warmAvoid, row.DiscoveryReadsAvoided)
 			warmCog = append(warmCog, row.DiscoveryResolvedCog)
 			warmOpsExecuted = append(warmOpsExecuted, row.OperationsExecuted)
@@ -878,6 +889,8 @@ func summarizeMvp(stdout io.Writer, manifest mvpFamilyManifest, rows []familyPai
 				coldS, len(cold), medStr(coldTok), medStr(coldSearch), medStr(coldReads))
 			fmt.Fprintf(stdout, "  warm: success %d/%d, tokens med %s, searches med %s, reads med %s\n",
 				warmS, len(warm), medStr(warmTok), medStr(warmSearch), medStr(warmReads))
+			fmt.Fprintf(stdout, "  spend: cold %s, warm %s (billed USD; estimated rows marked)\n",
+				coldSpend.String(), warmSpend.String())
 			fmt.Fprintf(stdout, "  cognition: resolved_by_cognition med %s, legacy_inferred_avoided_ops med %s, executed_ops med %s, evidence_satisfied_ops med %s, validation_reads med %s (per Task B run)\n",
 				medStr(warmCog), medStr(warmAvoid), medStr(warmOpsExecuted), medStr(warmOpsSatisfied), medStr(warmValidationReads))
 			for _, row := range warm {
@@ -894,11 +907,53 @@ func summarizeMvp(stdout io.Writer, manifest mvpFamilyManifest, rows []familyPai
 			// comparison.
 			fmt.Fprintf(stdout, "  campaign: automatic success %d/%d, manual (diagnostic_only) success %d/%d\n",
 				autoS, autoRows, manualS, manualRows)
+			fmt.Fprintf(stdout, "  campaign spend: automatic %s, manual %s (billed USD; estimated rows marked)\n",
+				autoSpend.String(), manualSpend.String())
 			if manualNonDiagnostic > 0 {
 				fmt.Fprintf(stdout, "  campaign WARNING: %d manual row(s) missing diagnostic_only=true; they must never count toward the automatic-cognition gate\n", manualNonDiagnostic)
 			}
 		}
 	}
+}
+
+// spendSum accumulates per-row billed dollars without turning an unknown row
+// into a zero: Known counts rows with a reported cost, Unknown counts rows
+// without one, and Estimated is true when any reported total is only a lower
+// bound (partial coverage).
+type spendSum struct {
+	USD       float64
+	Known     int
+	Unknown   int
+	Estimated bool
+}
+
+func (s *spendSum) add(row familyPairRow) {
+	if row.BilledUSD == nil {
+		s.Unknown++
+		return
+	}
+	s.USD += *row.BilledUSD
+	s.Known++
+	if row.BilledUSDEstimated != nil && *row.BilledUSDEstimated {
+		s.Estimated = true
+	}
+}
+
+// String renders the accumulated spend with its coverage, so a partial or
+// unknown result is never read as a complete dollar total.
+func (s spendSum) String() string {
+	if s.Known == 0 && s.Unknown == 0 {
+		return "n/a"
+	}
+	label := "$%.4f over %d row(s)"
+	out := fmt.Sprintf(label, s.USD, s.Known)
+	if s.Unknown > 0 {
+		out += fmt.Sprintf(" + %d unknown", s.Unknown)
+	}
+	if s.Estimated {
+		out += " (estimated)"
+	}
+	return out
 }
 
 // medStr renders a median or "n/a" when no samples exist.

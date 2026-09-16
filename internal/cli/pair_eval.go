@@ -298,6 +298,11 @@ func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
 			tokenSource = "stream-json"
 			found = tokens > 0
 		}
+		// Billed spend: the same authoritative ledger carries the producer's
+		// reported total_cost_usd. A partial coverage total is a lower bound,
+		// marked estimated; a missing result leaves the cost unknown (nil),
+		// never zero. This is the per-row dollar the campaign report needs.
+		billedUSD, billedEstimated, billedSource := parsePipelineResultSpend(out)
 		// Interventions are a warm-side trace signal; they never carry the
 		// token comparison.
 		_, interventions, _ := collectTrace(ctx, deps, in.Cwd, in.SessionID)
@@ -345,7 +350,8 @@ func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
 			}
 			return eval.RunOutput{Success: false, Tokens: tokens, TelemetryFound: found,
 					TokenSource: tokenSource,
-					ToolCalls:   toolCalls, FileReads: fileReads, SearchCalls: searchCalls,
+					BilledUSD:   billedUSD, BilledUSDEstimated: billedEstimated, BilledUSDSource: billedSource,
+					ToolCalls: toolCalls, FileReads: fileReads, SearchCalls: searchCalls,
 					StreamWorkObserved: boolPtr(streamObserved),
 					StreamInputTokens:  streamIn, StreamOutputTokens: streamOut, StreamSplitFound: splitFound,
 					FailureCategory: "agent_noncompletion",
@@ -373,6 +379,7 @@ func pairEvalRunFunc(deps appDeps, model string) eval.RunFunc {
 
 		result := eval.RunOutput{Success: success, Tokens: tokens, Interventions: interventions,
 			TelemetryFound: found, TokenSource: tokenSource,
+			BilledUSD: billedUSD, BilledUSDEstimated: billedEstimated, BilledUSDSource: billedSource,
 			ToolCalls: toolCalls, FileReads: fileReads, SearchCalls: searchCalls,
 			VerifierOutputPath: artifactPath(in.ArtifactDir, in.SessionID, "verifier.txt"),
 			PatchPath:          artifactPath(in.ArtifactDir, in.SessionID, "patch.diff"),
@@ -570,6 +577,39 @@ func parsePipelineResultTokens(out []byte) (int, bool) {
 		return result.TotalTokensInput + result.TotalTokensOutput, true
 	}
 	return 0, false
+}
+
+// parsePipelineResultSpend reads the run's final stream-json event and returns
+// the producer-reported billed total in USD, whether that total is only a lower
+// bound (partial coverage), and its source. A run with no final result, or one
+// whose ledger carries no usage records, leaves the cost UNKNOWN: it returns
+// nil, never a fabricated zero.
+func parsePipelineResultSpend(out []byte) (*float64, *bool, string) {
+	for _, line := range strings.Split(string(out), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || trimmed[0] != '{' {
+			continue
+		}
+		var event struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if json.Unmarshal([]byte(trimmed), &event) != nil || event.Type != "final" || event.Text == "" {
+			continue
+		}
+		var result schemas.PipelineResult
+		if json.Unmarshal([]byte(event.Text), &result) != nil {
+			continue
+		}
+		if len(result.UsageRecords) == 0 {
+			// No usage records: cost is not applicable/unknown, never zero.
+			return nil, nil, "unavailable"
+		}
+		usd := result.TotalCostUSD
+		estimated := result.CostCoverage != schemas.CostCoverageComplete
+		return &usd, boolPtr(estimated), "ledger"
+	}
+	return nil, nil, "unavailable"
 }
 
 // sumStreamJSONTokens sums totalTokens across stream-json usage records in a
