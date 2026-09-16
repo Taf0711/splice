@@ -50,6 +50,9 @@ ARM_COUNT="${#ARM_LIST[@]}"
 RUN_BASE="${RUN_BASE:-wc-paid-k3-$(date +%Y%m%dT%H%M%S)}"
 OUT_DIR="${OUT_DIR:-tests/evals/results}"
 MAX_RETRIES="${MAX_RETRIES:-2}"
+# TIMEOUT is the per-attempt provider bound. It stays bounded so a stalled
+# provider self-terminates and leaves a partial raw stream plus a kill reason.
+TIMEOUT="${TIMEOUT:-30m}"
 MEMD_DIR="${MEMD_DIR:-/tmp/warmcost-paid-memd}"
 RETENTION="${RETENTION:-fresh}"
 SIDECAR_ROOT="${SIDECAR_ROOT:-}"
@@ -114,6 +117,17 @@ fi
 log "building runner $RUNNER from harness repo $(git rev-parse --short HEAD)"
 go build -o "$RUNNER" ./tests/evals/warmcost/cmd/warmcost-eval
 
+# Preflight (mandatory): resolve the stage model exactly as the pipeline will
+# and abort unless it equals MODEL. The operator's stage-models.json once mapped
+# code_writer to gpt-5.6-sol and overrode --model, spending $0.1648 before any
+# attempt was valid. A printed --model flag is not the resolved route.
+PREFLIGHT_BIN="${PREFLIGHT_BIN:-/tmp/p4-preflight}"
+go build -o "$PREFLIGHT_BIN" ./tests/evals/warmcost/cmd/p4preflight
+if ! "$PREFLIGHT_BIN" --splice-dir "${XDG_CONFIG_HOME}/splice" --stage code_writer --want "$MODEL"; then
+  log "model assertion failed for stage code_writer; aborting before any provider request"
+  exit 1
+fi
+
 # BUILD_ONLY is a no-provider seam for the shell guard tests. It stops after the
 # builds, before the sidecar starts, so a supplied BIN can be proven untouched
 # without spending anything.
@@ -145,7 +159,7 @@ fi
 
 REV="$BUILD_REV_SHA"
 SIDECAR_REV="$(git rev-parse --short HEAD)"
-log "pre-registration: model=$MODEL arms=$ARMS tasks=${#TASKS[@]} repeats=$REPEATS margin=$MARGIN bootstrap=$BOOTSTRAP_SAMPLES"
+log "pre-registration: model=$MODEL arms=$ARMS tasks=${#TASKS[@]} repeats=$REPEATS margin=$MARGIN bootstrap=$BOOTSTRAP_SAMPLES timeout=$TIMEOUT"
 log "attempt cap: arms=$ARM_COUNT x tasks=${#TASKS[@]} x repeats=$REPEATS = $((ARM_COUNT * ${#TASKS[@]} * REPEATS)) attempts; MAX_RETRIES=$MAX_RETRIES"
 log "revision=$REV sidecar_revision=$SIDECAR_REV taskset=${TASKS[*]}"
 log "arm order: $ARMS; interleaved per repeat by the runner"
@@ -174,6 +188,7 @@ for try in $(seq 0 "$MAX_RETRIES"); do
     --correctness-margin "$MARGIN"
     --bootstrap-samples "$BOOTSTRAP_SAMPLES"
     --bootstrap-seed 1
+    --timeout "$TIMEOUT"
     --run-id "$RUN_ID"
     --sidecar-revision "$SIDECAR_REV"
     --retention "$RETENTION"

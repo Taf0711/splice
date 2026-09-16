@@ -25,10 +25,22 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/paid-run-guards.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
 
+# The mandatory model preflight resolves the stage model from the config dir.
+# Give the guard cases a config that pins code_writer to the default MODEL so
+# the assertion passes and the build-guard behavior under test is reached.
+CFG="$tmp/cfg"
+mkdir -p "$CFG/splice"
+cat > "$CFG/splice/stage-models.json" <<'JSON'
+{"default":{"provider_profile":"openrouter","model":"z-ai/glm-5.3-flash"},"stages":{"code_writer":{"provider_profile":"openrouter","model":"z-ai/glm-5.3-flash"}}}
+JSON
+cat > "$CFG/splice/config.json" <<'JSON'
+{"activeProvider":"openrouter","providers":[{"name":"openrouter","model":"z-ai/glm-5.3-flash","active":true}]}
+JSON
+
 # Case A: BUILD_REV that does not resolve.
 out="$tmp/a.out"
 set +e
-TASKSET_SRC="$TASKSET_SRC" TASKS_ENV="$TASKS_ENV_VALUE" \
+XDG_CONFIG_HOME="$CFG" TASKSET_SRC="$TASKSET_SRC" TASKS_ENV="$TASKS_ENV_VALUE" \
   BUILD_REV="definitely-not-a-revision-xyz" BUILD_ONLY=1 \
   BIN="$tmp/bin-a" RUNNER="$tmp/runner-a" \
   bash "$SCRIPT" >"$out" 2>&1
@@ -44,7 +56,7 @@ printf 'operator-binary-payload' >"$tmp/bin-b"
 before="$(cat "$tmp/bin-b")"
 out="$tmp/b.out"
 set +e
-TASKSET_SRC="$TASKSET_SRC" TASKS_ENV="$TASKS_ENV_VALUE" \
+XDG_CONFIG_HOME="$CFG" TASKSET_SRC="$TASKSET_SRC" TASKS_ENV="$TASKS_ENV_VALUE" \
   BUILD_REV=HEAD BUILD_ONLY=1 \
   BIN="$tmp/bin-b" RUNNER="$tmp/runner-b" \
   bash "$SCRIPT" >"$out" 2>&1
@@ -62,7 +74,7 @@ printf 'operator-binary-payload' >"$tmp/bin-c"
 before="$(cat "$tmp/bin-c")"
 out="$tmp/c.out"
 set +e
-TASKSET_SRC="$TASKSET_SRC" TASKS_ENV="$TASKS_ENV_VALUE" \
+XDG_CONFIG_HOME="$CFG" TASKSET_SRC="$TASKSET_SRC" TASKS_ENV="$TASKS_ENV_VALUE" \
   BUILD_REV=HEAD BUILD_ONLY=1 BIN_PREBUILT=1 \
   BIN="$tmp/bin-c" RUNNER="$tmp/runner-c" \
   bash "$SCRIPT" >"$out" 2>&1

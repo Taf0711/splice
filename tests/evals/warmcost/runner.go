@@ -56,6 +56,11 @@ type ExecRequest struct {
 	Args   []string
 	Env    []string
 	Dir    string
+	// OutputPath, when set, receives the child's stdout incrementally as it
+	// streams, so a killed or timed-out attempt still leaves a partial raw
+	// transcript in the run directory. The full buffer is still returned in
+	// ExecResult.Stdout.
+	OutputPath string
 }
 
 // ExecResult is one child process result. A non-zero exit is not a Go error.
@@ -546,11 +551,45 @@ func runExec(ctx context.Context, req ExecRequest) (ExecResult, error) {
 	cmd := exec.CommandContext(ctx, req.Binary, req.Args...)
 	cmd.Dir = req.Dir
 	cmd.Env = req.Env
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
+	// A bounded WaitDelay keeps Run from blocking on a grandchild that holds
+	// the stderr pipe after the direct child is killed at the deadline.
+	cmd.WaitDelay = 2 * time.Second
+	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
+	var stdout []byte
+	var outFile *os.File
+	var stdoutBuf *bytes.Buffer
+	if req.OutputPath != "" {
+		// Give the child the raw file as a direct fd (no copier goroutine).
+		// Output is therefore flushed to disk as it streams and survives a
+		// kill or timeout, and Run returns as soon as the child dies.
+		f, ferr := os.Create(req.OutputPath)
+		if ferr != nil {
+			return ExecResult{}, fmt.Errorf("warmcost: create raw stream %s: %w", req.OutputPath, ferr)
+		}
+		outFile = f
+		cmd.Stdout = f
+	} else {
+		buf := new(bytes.Buffer)
+		stdoutBuf = buf
+		cmd.Stdout = buf
+	}
 	err := cmd.Run()
-	res := ExecResult{Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
+	if outFile != nil {
+		_ = outFile.Close()
+		if data, rerr := os.ReadFile(req.OutputPath); rerr == nil {
+			stdout = data
+		}
+	} else if stdoutBuf != nil {
+		stdout = append(stdout, stdoutBuf.Bytes()...)
+	}
+	res := ExecResult{Stdout: stdout, Stderr: stderr.Bytes()}
+	// A context cancellation (per-attempt timeout) must be an error even when
+	// the killed process also produced an *exec.ExitError; otherwise a timeout
+	// would be misread as a normal non-zero exit.
+	if cerr := ctx.Err(); cerr != nil {
+		return res, fmt.Errorf("run %s: %w", req.Binary, cerr)
+	}
 	if err == nil {
 		return res, nil
 	}
@@ -683,7 +722,31 @@ func (r *Runner) runSequence(ctx context.Context, seq sequence, arm Arm, repeat 
 	for ordinal, task := range seq.Tasks {
 		attempt, taskErr := r.runTaskInWorkspace(ctx, task, arm, repeat, seq.Index, ordinal, len(seq.Tasks), dir, prov)
 		if taskErr != nil {
-			attempt = r.failedAttempt(task, arm, repeat, seq.Index, ordinal, len(seq.Tasks), prov, taskErr)
+			// Preserve the partial attempt's identity, timings, and raw
+			// stream: a timeout or kill still leaves a partial transcript,
+			// and dropping it here was why two killed glm attempts left no
+			// artifact. Fall back to a synthetic failure only when the
+			// attempt never started.
+			failed := r.failedAttempt(task, arm, repeat, seq.Index, ordinal, len(seq.Tasks), prov, taskErr)
+			if attempt.TaskID == "" {
+				attempt = failed
+			} else {
+				if attempt.RunStatus == "" {
+					attempt.RunStatus = failed.RunStatus
+				}
+				if attempt.LedgerError == "" {
+					attempt.LedgerError = failed.LedgerError
+				}
+				attempt.VerifierResult = false
+				attempt.CostCoverage = failed.CostCoverage
+				if attempt.StartedAt.IsZero() {
+					attempt.StartedAt = failed.StartedAt
+				}
+				if attempt.EndedAt.IsZero() {
+					attempt.EndedAt = failed.EndedAt
+					attempt.DurationMS = failed.DurationMS
+				}
+			}
 		}
 		attempts = append(attempts, attempt)
 		// The documented eval contract: once a write-phase task's verifier
@@ -734,28 +797,46 @@ func (r *Runner) runTaskInWorkspace(ctx context.Context, task Task, arm Arm, rep
 	if err := r.prepareSidecar(class); err != nil {
 		return attempt, err
 	}
+	// Name the raw stream BEFORE launch and stream into it, so a kill or a
+	// timeout leaves the partial transcript on disk even when the harness
+	// cannot finish the attempt.
+	rawName := rawStreamName(task.ID, arm, repeat)
+	rawPath := filepath.Join(filepath.Join(r.cfg.OutDir, r.cfg.RunID), rawName)
+	attempt.RawStream = rawName
 	runCtx, cancel := context.WithTimeout(ctx, r.cfg.Timeout)
 	defer cancel()
 	res, err := r.exec(runCtx, ExecRequest{
-		Binary: r.cfg.Binary,
-		Args:   execArgs(arm, r.cfg.Model, sessionID, task.Prompt),
-		Env:    envWithOverrides(os.Environ(), append(append([]string{}, arm.Env()...), r.sidecarEnv(class)...)...),
-		Dir:    workspace,
+		Binary:     r.cfg.Binary,
+		Args:       execArgs(arm, r.cfg.Model, sessionID, task.Prompt),
+		Env:        envWithOverrides(os.Environ(), append(append([]string{}, arm.Env()...), r.sidecarEnv(class)...)...),
+		Dir:        workspace,
+		OutputPath: rawPath,
 	})
 	ended := r.now()
 	attempt.EndedAt = ended
 	attempt.DurationMS = ended.Sub(started).Milliseconds()
 	if err != nil {
+		// Record why the attempt ended. A per-attempt timeout is an
+		// infrastructure outcome, never a model failure, and it keeps the
+		// partial transcript that streamed to disk.
+		if runCtx.Err() == context.DeadlineExceeded {
+			attempt.RunStatus = "timeout"
+			attempt.LedgerError = fmt.Sprintf("attempt timeout after %s; partial raw stream retained", r.cfg.Timeout)
+		} else {
+			attempt.RunStatus = "infrastructure_failed"
+			attempt.LedgerError = fmt.Sprintf("exec failed: %v", err)
+		}
+		if len(res.Stdout) > 0 {
+			_ = os.WriteFile(rawPath, res.Stdout, 0o644)
+		}
 		return attempt, fmt.Errorf("warmcost: exec task %s arm %s: %w", task.ID, arm, err)
 	}
 	// Additive raw artifact: keep the child's full stream-json so the report
 	// can quote model output and the expansion reason. The attempt JSON is a
 	// projection of the final PipelineResult, not the whole stream.
-	rawName := rawStreamName(task.ID, arm, repeat)
-	if werr := os.WriteFile(filepath.Join(filepath.Join(r.cfg.OutDir, r.cfg.RunID), rawName), res.Stdout, 0o644); werr != nil {
+	if werr := os.WriteFile(rawPath, res.Stdout, 0o644); werr != nil {
 		return attempt, fmt.Errorf("warmcost: write raw stream for task %s: %w", task.ID, werr)
 	}
-	attempt.RawStream = rawName
 
 	if parsed, perr := parsePipelineResult(res.Stdout); perr != nil {
 		attempt.LedgerError = perr.Error()
