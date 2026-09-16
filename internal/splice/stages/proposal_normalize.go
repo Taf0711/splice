@@ -6,14 +6,22 @@ import (
 
 // normalizeProposal accepts the common model output shapes that the strict
 // contract rejects: (a) a modify entry carrying BOTH content and base_ref,
-// or (b) a modify entry carrying content with NO base_ref at all. The base
+// (b) a modify entry carrying content with NO base_ref at all, and (c) the
+// hedged modify carrying content AND base_ref AND edits together. The base
 // snapshot resolves via base_ref or (when omitted) via the by-path index
-// of the delivered context bundle; a line-level diff between the base text
-// and the provided content derives exact old/new edits, which then flow
-// through the standard strict path. Everything else passes through
-// unchanged; Validate still rejects every other contract breach.
+// of the delivered context bundle.
+//
+// For (a) and (b), a line-level diff between the base text and the
+// provided content derives exact old/new edits. For (c), the explicit
+// edits are authoritative when every old span appears exactly once in the
+// delivered base (the same exact-once rule the strict path enforces), and
+// the redundant content is dropped; when an edit does not match, the full
+// content becomes authoritative and the diff derives the edits instead.
+// Either way the mixed shape normalizes to exactly one representation
+// before the strict path runs. Everything else passes through unchanged;
+// Validate still rejects every other contract breach.
 func normalizeProposal(p ProposedFileChange, baseRefToSnapshot func(baseRef string) (ProposalSnapshot, bool)) ProposedFileChange {
-	if p.ChangeType != "modify" || p.Content == nil || len(p.Edits) > 0 {
+	if p.ChangeType != "modify" || p.Content == nil {
 		return p
 	}
 	var snap ProposalSnapshot
@@ -25,6 +33,27 @@ func normalizeProposal(p ProposedFileChange, baseRefToSnapshot func(baseRef stri
 	}
 	if !ok {
 		return p // unresolvable base: Validate reports it exactly as before
+	}
+	if len(p.Edits) > 0 {
+		// Case (c): the model hedged with both representations. Prefer the
+		// explicit edits when each old span appears exactly once in the
+		// delivered base (the exact-once rule the strict path enforces);
+		// otherwise the content is the authoritative form and the diff
+		// derives the edits below.
+		allMatch := true
+		for _, e := range p.Edits {
+			if strings.Count(snap.Base, e.Old) != 1 {
+				allMatch = false
+				break
+			}
+		}
+		if allMatch {
+			p.Content = nil
+			if p.BaseRef == "" {
+				p.BaseRef = HandleFor(snap.ViewDigest)
+			}
+			return p
+		}
 	}
 	edits, _ := deriveEditsFromContent(snap.Base, *p.Content)
 	if len(edits) == 0 {

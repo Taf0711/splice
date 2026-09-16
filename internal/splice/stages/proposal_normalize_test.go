@@ -176,3 +176,69 @@ func TestNormalizeCompactEditRawSourceFallback(t *testing.T) {
 		t.Fatalf("raw fallback content mismatch:\n%q\nwant\n%q", got.Content, provided)
 	}
 }
+
+// TestNormalizeHedgedModifyPrefersExactEdits is the recorded P4 re-run
+// failure: gpt-5.6-sol emitted modify with content AND base_ref AND edits,
+// six times, and the mixed shape was rejected before any edit could
+// apply. The hedge normalizes to the authoritative representation: exact
+// edits win, the redundant content is dropped, and the proposal flows
+// through the strict path.
+func TestNormalizeHedgedModifyPrefersExactEdits(t *testing.T) {
+	base := "package main\n\nfunc Hello() string { return \"hello\" }\n"
+	reg := NewProposalBaseRegistry()
+	reg.RecordFromBundle(bundleOf(baseRefItem("main.go", "v1", base)))
+	reset := SetProposalBases(reg)
+	defer reset()
+
+	mixed := ProposedFileChange{
+		Path:       "main.go",
+		ChangeType: "modify",
+		BaseRef:    "main.go", // the path form the model reliably cites
+		Content:    ptr("package main\n\nfunc Hello() string { return \"HELLO\" }\n"),
+		Edits:      []TextReplacement{{Old: "return \"hello\"", New: "return \"HELLO\""}},
+	}
+	got := normalizeProposal(mixed, currentProposalSnapshot)
+	if got.Content != nil {
+		t.Fatalf("hedged modify kept both representations: %+v", got)
+	}
+	if len(got.Edits) != 1 || got.Edits[0].Old != "return \"hello\"" {
+		t.Fatalf("edits = %+v, want the explicit edit kept", got.Edits)
+	}
+}
+
+// TestNormalizeHedgedModifyFallsBackToContentDiff is the adversarial
+// hedge: the edits do not match the delivered base, so the full content
+// becomes authoritative and the diff derives the edits.
+func TestNormalizeHedgedModifyFallsBackToContentDiff(t *testing.T) {
+	base := "package main\n\nfunc Hello() string { return \"hello\" }\n"
+	reg := NewProposalBaseRegistry()
+	reg.RecordFromBundle(bundleOf(baseRefItem("main.go", "v1", base)))
+	reset := SetProposalBases(reg)
+	defer reset()
+
+	mixed := ProposedFileChange{
+		Path:       "main.go",
+		ChangeType: "modify",
+		BaseRef:    "main.go",
+		Content:    ptr("package main\n\nfunc Hello() string { return \"HELLO\" }\n"),
+		Edits:      []TextReplacement{{Old: "span that was never delivered", New: "x"}},
+	}
+	got := normalizeProposal(mixed, currentProposalSnapshot)
+	if got.Content != nil {
+		t.Fatalf("content fallback kept both representations: %+v", got)
+	}
+	if len(got.Edits) == 0 {
+		t.Fatalf("content diff derived no edits: %+v", got)
+	}
+	for _, e := range got.Edits {
+		if strings.Count(base, e.Old) != 1 {
+			t.Fatalf("derived edit does not match the base exactly once: %+v", e)
+		}
+	}
+}
+
+func ptr(s string) *string { return &s }
+
+func bundleOf(items ...schemas.ContextItem) *schemas.ContextBundle {
+	return &schemas.ContextBundle{Items: items}
+}
