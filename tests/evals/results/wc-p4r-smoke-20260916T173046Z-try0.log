@@ -1,0 +1,3 @@
+run wc-p4r-smoke-20260916T173046Z-try0: arms=1 tasks=0 attempts=1
+total-cost claim allowed: false (at least one run has partial cost coverage, so total cost is unknown)
+artifacts: tests/evals/results/wc-p4r-smoke-20260916T173046Z-try0
