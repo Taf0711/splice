@@ -91,15 +91,25 @@ resolvable base_ref, STOP"), I stopped rather than spend the P4 campaign.
 
 ## 5. Spend against the cap
 
-| item | USD |
-| --- | ---: |
-| wrong-model smoke (ledger `total_cost_usd`) | 0.164806 |
-| killed slow glm smoke (key usage delta) | 0.009162 |
-| killed glm smoke (key usage delta) | 0.071211 |
-| **total** | **0.245179** |
+The OpenRouter credential is a shared operator key. Its cumulative `/auth/key`
+usage is the only figure available for the two killed runs (they left no ledger
+artifact), and that figure kept rising after every local process was confirmed
+stopped (10.687668549 -> 10.795679529 -> 10.803436839), so the key is NOT a
+clean per-assignment meter. The accounting is therefore split:
 
-Cap $0.25; **$0.004821 left**. OpenRouter key cumulative usage after the runs:
-`10.687668549`. All failures are included.
+| item | USD | source |
+| --- | ---: | --- |
+| wrong-model smoke (certain) | 0.164806 | pipeline ledger `total_cost_usd` |
+| killed slow glm smoke | <= 0.009162 | key delta (upper bound) |
+| killed glm smoke | <= 0.071211 | key delta (upper bound) |
+| **certain + upper bound** | **<= 0.245179** | |
+| **certain only** | **0.164806** | |
+
+Cap $0.25. The certain spend alone is $0.1648; the two killed runs are known only
+as an upper bound, and the shared key makes even that uncertain. Either way the
+remaining headroom is small-to-none and no further run can be budgeted
+reliably, so all spend stopped here. Every failure is included (none was free
+except the zero-token auth failure).
 
 ## 6. Why the three-condition comparison did not run
 
@@ -123,7 +133,7 @@ comparison, no paired causal example, and no token-benefit assessment exist.
 ## 8. Verdict
 
 `LIVE_SETUP_BLOCKED` — a specific setup constraint (an unintended expensive
-`stage-models.json` model plus provider stalls) consumed almost the entire $0.25
-ceiling before a clean stage-0 smoke, so the prepared P4 diagnostic could not be
-run. The repair itself is offline-verified and was observed producing the path
-form live.
+`stage-models.json` model consuming $0.1648, plus provider stalls) consumed the
+$0.25 ceiling before a clean stage-0 smoke, so the prepared P4 diagnostic could
+not be run. The repair itself is offline-verified and was observed producing the
+path form live (Section 4, run 2).
