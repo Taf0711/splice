@@ -1,0 +1,7 @@
+ledger spend:
+  smoke clock-helper-write: 0.00107562
+  A snapshot: 0.00345895
+  B automatic: 0.00212125
+  B cold: 0.00063315
+  total: 0.00728897
+OpenRouter shared key delta (contaminated): 12.08924255
