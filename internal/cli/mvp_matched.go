@@ -229,6 +229,18 @@ func runMvpMatchedSnapshots(
 			}
 		}
 
+		// ADDENDUM 3 pre-B gate: derive the target task's non-open-discovery
+		// needs against the frozen A tree and require at least one frozen
+		// capture record to answer one of them. It runs AFTER Task A verified
+		// and BEFORE any Task B provider request; an empty matrix stops the
+		// run and records the matrix for the report.
+		if options.MatchMatrixGate {
+			if _, gateErr := runMatchMatrixGate(stderr, options, family, snapshotID, snapDir, bundle.Nodes); gateErr != nil {
+				cleanup()
+				return gateErr
+			}
+		}
+
 		// Persist the frozen capture set once per family, under the
 		// snapshot project identity, with the real run id on every node.
 		seedPersisted := false

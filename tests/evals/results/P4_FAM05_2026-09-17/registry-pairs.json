@@ -1,0 +1,17 @@
+{
+  "schema": "splice.eval.cognition-families-pairs-registry.v1",
+  "validated": "2026-09-17",
+  "manifest": "/Users/tafseerhaque/Documents/splice-archeval/tests/evals/cognition-families/fam-05-pair.json",
+  "families": [
+    {
+      "id": "fam-05-handler-error-mapping",
+      "letters": "FPFPF",
+      "base": "F",
+      "goldA": "P",
+      "baseB": "F",
+      "goldB": "P",
+      "wrongB": "F",
+      "ok": true
+    }
+  ]
+}

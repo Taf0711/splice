@@ -1,0 +1,3 @@
+A/snapshot executed=True success=True tokens=30147 billed_usd=0.00318519 source=ledger latency_ms=80698 failure=None
+B/warm executed=True success=False tokens=18152 billed_usd=None source=unavailable latency_ms=406109 failure=agent_noncompletion
+ledger-authoritative sum (rows with priced ledger) = 0.00318519

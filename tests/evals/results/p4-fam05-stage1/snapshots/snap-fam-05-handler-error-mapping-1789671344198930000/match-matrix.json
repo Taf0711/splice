@@ -1,0 +1,90 @@
+{
+  "family": "fam-05-handler-error-mapping",
+  "snapshot_id": "snap-fam-05-handler-error-mapping-1789671344198930000",
+  "task_intent": "# Target: fam-05-handler-error-mapping\n\nNew admin endpoints must map their store errors using the SAME table as the /session handler. Refactor mapStoreError in main.go if needed and use it from any new admin handlers you add. The mapping table must stay the single source of truth for store-error-to-status translation.",
+  "needs": [
+    {
+      "id": "locate:main.go#main",
+      "kind": "locate-named-operation",
+      "subject": "main.go#main",
+      "origin": "cold-symbol-index",
+      "required": true
+    },
+    {
+      "id": "locate:main.go#mapStoreError",
+      "kind": "locate-named-operation",
+      "subject": "main.go#mapStoreError",
+      "origin": "cold-symbol-index",
+      "required": true
+    }
+  ],
+  "records": [
+    {
+      "claim_hash": "f6aade87df301afde3707c8b97b811cd81fb3120fedcfed497b8412dd4d68022",
+      "reason": "no derived need subject matched this record's supporting refs"
+    },
+    {
+      "claim_hash": "b8865a05cf236e0abd9d7c82bce0aa21ee1336f3ba78fe077e01d980f6a30193",
+      "supporting": [
+        {
+          "path": "main.go"
+        },
+        {
+          "path": "main.go",
+          "symbol": "main"
+        },
+        {
+          "path": "main.go",
+          "symbol": "sessionHandler"
+        },
+        {
+          "path": "main.go",
+          "symbol": "mapStoreError"
+        },
+        {
+          "path": "main.go",
+          "symbol": "healthHandler"
+        },
+        {
+          "path": "main.go",
+          "symbol": "writeJSON"
+        }
+      ],
+      "matched_need_ids": [
+        "locate:main.go#main",
+        "locate:main.go#mapStoreError"
+      ]
+    },
+    {
+      "claim_hash": "da630237e9e2210b9be33afe81c90b8163bd7989fa0ff0544d59e9e8a6311e1a",
+      "supporting": [
+        {
+          "path": "session.go"
+        },
+        {
+          "path": "session.go",
+          "symbol": "NewStore"
+        },
+        {
+          "path": "session.go",
+          "symbol": "Store.Create"
+        },
+        {
+          "path": "session.go",
+          "symbol": "Store.Get"
+        },
+        {
+          "path": "session.go",
+          "symbol": "Store.Delete"
+        },
+        {
+          "path": "session.go",
+          "symbol": "Store.Len"
+        }
+      ],
+      "reason": "no derived need subject matched this record's supporting refs"
+    }
+  ],
+  "matched_records": 1,
+  "open_discovery_needs": 1
+}

@@ -46,6 +46,14 @@ type mvpEvalOptions struct {
 	// from per experiment (Section 11.2). Zero means the deterministic
 	// default; the recorded seed lands on every attempts row.
 	SchedulingSeed int64
+	// MatchMatrixGate enables the pre-B match-matrix gate: after Task A
+	// verifies and the frozen capture bundle exists, derive the target
+	// task's non-open-discovery needs against the frozen A tree and
+	// require at least one bundle record to speak of at least one need
+	// subject. An empty matrix STOPS the run before any Task B provider
+	// request, so a pair whose diagnosis is wrong cannot masquerade as a
+	// mechanism observation (the TTL pair's failure mode).
+	MatchMatrixGate bool
 }
 
 func parseMvpEvalArgs(args []string) (mvpEvalOptions, bool, error) {
@@ -138,6 +146,18 @@ func parseMvpEvalArgs(args []string) (mvpEvalOptions, bool, error) {
 				return options, false, execUsageError{fmt.Sprintf("--scheduling-seed requires an integer, got %q", value)}
 			}
 			options.SchedulingSeed = n
+		case arg == "--match-matrix-gate":
+			options.MatchMatrixGate = true
+		case strings.HasPrefix(arg, "--match-matrix-gate="):
+			value := strings.TrimSpace(strings.TrimPrefix(arg, "--match-matrix-gate="))
+			switch value {
+			case "true", "on", "1":
+				options.MatchMatrixGate = true
+			case "false", "off", "0":
+				options.MatchMatrixGate = false
+			default:
+				return options, false, execUsageError{fmt.Sprintf("--match-matrix-gate requires true or false, got %q", value)}
+			}
 		case strings.HasPrefix(arg, "-"):
 			return options, false, execUsageError{fmt.Sprintf("unknown eval mvp flag %q", arg)}
 		default:
@@ -993,6 +1013,11 @@ Flags:
       --scheduling-seed <n> Recorded seed the arm launch order derives from
                             (Section 11.2; deterministic default when
                             omitted). Recorded on every attempts row.
+      --match-matrix-gate   Before any Task B request, require at least
+                            one frozen capture record to answer a
+                            non-open-discovery need derived from the
+                            target task; an empty matrix stops the run
+                            and writes match-matrix.json.
   -h, --help                Show this help
 
 Environment (treatment matrix, applies to the exec children):

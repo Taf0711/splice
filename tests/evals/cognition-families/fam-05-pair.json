@@ -1,0 +1,14 @@
+{
+  "schema": "splice.eval.mvp-families.v1",
+  "fixture": "../taskset-v0/fixture",
+  "families": [
+    {
+      "id": "fam-05-handler-error-mapping",
+      "category": "error-handling-convention",
+      "precursor_task": "# Precursor: fam-05-handler-error-mapping\n\nThe /session handler maps store failures to HTTP status codes ad hoc. Codify the mapping table in main.go as a function mapStoreError(err error) int returning: 404 for ErrNotFound, 409 for ErrConflict, 400 for ErrInvalidID, 429 for ErrUserAtCap, and 500 for anything else. Use it from every branch of sessionHandler so status codes have one source of truth. (If a store error type does not exist yet in the fixture, treat this as mapping from the known sentinel errors that do exist: ErrNotFound, and leave TODO markers for the others.)",
+      "target_task": "# Target: fam-05-handler-error-mapping\n\nNew admin endpoints must map their store errors using the SAME table as the /session handler. Refactor mapStoreError in main.go if needed and use it from any new admin handlers you add. The mapping table must stay the single source of truth for store-error-to-status translation.",
+      "precursor_check_file": "verifiers/fam-05-a.sh",
+      "target_check_file": "verifiers/fam-05-b.sh"
+    }
+  ]
+}

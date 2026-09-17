@@ -1,0 +1,151 @@
+{
+  "schema": "splice.snapshot-bundle/v1",
+  "producer_run_id": "mvp-snap-fam-05-handler-error-mapping-1789671344416638000-taska",
+  "start_revision": "",
+  "commit": "ba125c8db48926f368bec9d0ea23ac2ce1688d14",
+  "tree": "3dd698085b04a17ad249dc3a4202e79ba8676b90",
+  "capture_origin": "natural",
+  "nodes": [
+    {
+      "node": {
+        "id": 1,
+        "kind": "procedure",
+        "claim": "Verification passes with: go test ./...",
+        "scope": "project",
+        "project_path": "/private/var/folders/cf/37chkgfx22q5bb_ws8brslx00000gn/T/splice-mvp-snap-3697577800",
+        "status": "active",
+        "confidence": null,
+        "source_run_id": "mvp-snap-fam-05-handler-error-mapping-1789671344416638000-taska",
+        "created_revision": null,
+        "verified_revision": "7dccf965948550f217e1efe4d33208eb0f4773a6",
+        "created_at": 1789671423,
+        "verified_at": 1789671423,
+        "claim_hash": "f6aade87df301afde3707c8b97b811cd81fb3120fedcfed497b8412dd4d68022",
+        "metadata_json": "{\"reuse_record\":{\"answered_need\":\"\",\"applicability\":\"test command for this project at the recorded revision; rerun required after any dependency or config change\",\"capture_origin\":\"runtime\",\"conclusion\":\"Verification passes with: go test ./...\",\"content_version\":\"ed0d7aeadcc15d601447b1eff1314b59e685d6c7242c266cfbff92d3b492daad\",\"environment_assumed\":\"Go toolchain, standard library only, no network\",\"evidence_refs\":[\"test_run:mvp-snap-fam-05-handler-error-mapping-1789671344416638000-taska\"],\"identity\":\"/private/var/folders/cf/37chkgfx22q5bb_ws8brslx00000gn/T/splice-mvp-snap-3697577800\\u0000procedure\\u0000go test ./...\",\"kind\":\"procedure\",\"observed_result\":\"executed 2 test(s), 0 failed\",\"producer_run\":\"mvp-snap-fam-05-handler-error-mapping-1789671344416638000-taska\",\"schema_version\":1,\"status\":\"active\",\"supporting\":null,\"test_command\":\"go test ./...\",\"verification_status\":\"passed\",\"worktree_identity\":\"7dccf965948550f217e1efe4d33208eb0f4773a6\"}}"
+      },
+      "anchors": [
+        {
+          "kind": "test",
+          "value": "go test ./..."
+        }
+      ],
+      "evidence": [
+        {
+          "kind": "test_run",
+          "ref": "mvp-snap-fam-05-handler-error-mapping-1789671344416638000-taska",
+          "detail": "test command exited 0"
+        }
+      ],
+      "source_id": 1,
+      "claim_hash": "f6aade87df301afde3707c8b97b811cd81fb3120fedcfed497b8412dd4d68022"
+    },
+    {
+      "node": {
+        "id": 2,
+        "kind": "fact",
+        "claim": "main.go defines main, sessionHandler, mapStoreError, healthHandler, writeJSON; verified at revision 7dccf96594",
+        "scope": "project",
+        "project_path": "/private/var/folders/cf/37chkgfx22q5bb_ws8brslx00000gn/T/splice-mvp-snap-3697577800",
+        "status": "active",
+        "confidence": null,
+        "source_run_id": "mvp-snap-fam-05-handler-error-mapping-1789671344416638000-taska",
+        "created_revision": null,
+        "verified_revision": "7dccf965948550f217e1efe4d33208eb0f4773a6",
+        "created_at": 1789671423,
+        "verified_at": 1789671423,
+        "claim_hash": "b8865a05cf236e0abd9d7c82bce0aa21ee1336f3ba78fe077e01d980f6a30193",
+        "metadata_json": "{\"reuse_record\":{\"answered_need\":\"\",\"applicability\":\"location and declared symbols of this file at the recorded worktree revision; not package behavior\",\"capture_origin\":\"runtime\",\"conclusion\":\"main.go defines main, sessionHandler, mapStoreError, healthHandler, writeJSON; verified at revision 7dccf96594\",\"content_version\":\"279325597514055086402dc80e264222212713fa22ace08555f8f50aaa772150\",\"evidence_refs\":[\"git:7dccf965948550f217e1efe4d33208eb0f4773a6\"],\"identity\":\"/private/var/folders/cf/37chkgfx22q5bb_ws8brslx00000gn/T/splice-mvp-snap-3697577800\\u0000fact\\u0000main.go\",\"kind\":\"fact\",\"producer_run\":\"mvp-snap-fam-05-handler-error-mapping-1789671344416638000-taska\",\"schema_version\":1,\"status\":\"active\",\"supporting\":[{\"digest\":\"ce0188de9a1ff1af3d945cf4b95cc99cc081a963545c9ab403f4c9ac2af9f2f9\",\"path\":\"main.go\"},{\"digest\":\"ce0188de9a1ff1af3d945cf4b95cc99cc081a963545c9ab403f4c9ac2af9f2f9\",\"path\":\"main.go\",\"symbol\":\"main\"},{\"digest\":\"ce0188de9a1ff1af3d945cf4b95cc99cc081a963545c9ab403f4c9ac2af9f2f9\",\"path\":\"main.go\",\"symbol\":\"sessionHandler\"},{\"digest\":\"ce0188de9a1ff1af3d945cf4b95cc99cc081a963545c9ab403f4c9ac2af9f2f9\",\"path\":\"main.go\",\"symbol\":\"mapStoreError\"},{\"digest\":\"ce0188de9a1ff1af3d945cf4b95cc99cc081a963545c9ab403f4c9ac2af9f2f9\",\"path\":\"main.go\",\"symbol\":\"healthHandler\"},{\"digest\":\"ce0188de9a1ff1af3d945cf4b95cc99cc081a963545c9ab403f4c9ac2af9f2f9\",\"path\":\"main.go\",\"symbol\":\"writeJSON\"}],\"verification_status\":\"passed\",\"worktree_identity\":\"7dccf965948550f217e1efe4d33208eb0f4773a6\"}}"
+      },
+      "anchors": [
+        {
+          "kind": "file",
+          "value": "main.go"
+        },
+        {
+          "kind": "symbol",
+          "value": "main.go#healthHandler"
+        },
+        {
+          "kind": "symbol",
+          "value": "main.go#main"
+        },
+        {
+          "kind": "symbol",
+          "value": "main.go#mapStoreError"
+        },
+        {
+          "kind": "symbol",
+          "value": "main.go#sessionHandler"
+        },
+        {
+          "kind": "symbol",
+          "value": "main.go#writeJSON"
+        }
+      ],
+      "evidence": [
+        {
+          "kind": "git",
+          "ref": "7dccf965948550f217e1efe4d33208eb0f4773a6",
+          "detail": "verified run changed this file"
+        }
+      ],
+      "source_id": 2,
+      "claim_hash": "b8865a05cf236e0abd9d7c82bce0aa21ee1336f3ba78fe077e01d980f6a30193"
+    },
+    {
+      "node": {
+        "id": 3,
+        "kind": "fact",
+        "claim": "session.go defines NewStore, Store.Create, Store.Get, Store.Delete, Store.Len; verified at revision 7dccf96594",
+        "scope": "project",
+        "project_path": "/private/var/folders/cf/37chkgfx22q5bb_ws8brslx00000gn/T/splice-mvp-snap-3697577800",
+        "status": "active",
+        "confidence": null,
+        "source_run_id": "mvp-snap-fam-05-handler-error-mapping-1789671344416638000-taska",
+        "created_revision": null,
+        "verified_revision": "7dccf965948550f217e1efe4d33208eb0f4773a6",
+        "created_at": 1789671423,
+        "verified_at": 1789671423,
+        "claim_hash": "da630237e9e2210b9be33afe81c90b8163bd7989fa0ff0544d59e9e8a6311e1a",
+        "metadata_json": "{\"reuse_record\":{\"answered_need\":\"\",\"applicability\":\"location and declared symbols of this file at the recorded worktree revision; not package behavior\",\"capture_origin\":\"runtime\",\"conclusion\":\"session.go defines NewStore, Store.Create, Store.Get, Store.Delete, Store.Len; verified at revision 7dccf96594\",\"content_version\":\"063d40480e814773563efb643609f4050dd5c21eb4cf04761ee21a2bd4ccdab8\",\"evidence_refs\":[\"git:7dccf965948550f217e1efe4d33208eb0f4773a6\"],\"identity\":\"/private/var/folders/cf/37chkgfx22q5bb_ws8brslx00000gn/T/splice-mvp-snap-3697577800\\u0000fact\\u0000session.go\",\"kind\":\"fact\",\"producer_run\":\"mvp-snap-fam-05-handler-error-mapping-1789671344416638000-taska\",\"schema_version\":1,\"status\":\"active\",\"supporting\":[{\"digest\":\"98cfd012a603e35d045f8e53ad7dbcae2994e7ef813e399ce7eb5cffa2cc2459\",\"path\":\"session.go\"},{\"digest\":\"98cfd012a603e35d045f8e53ad7dbcae2994e7ef813e399ce7eb5cffa2cc2459\",\"path\":\"session.go\",\"symbol\":\"NewStore\"},{\"digest\":\"98cfd012a603e35d045f8e53ad7dbcae2994e7ef813e399ce7eb5cffa2cc2459\",\"path\":\"session.go\",\"symbol\":\"Store.Create\"},{\"digest\":\"98cfd012a603e35d045f8e53ad7dbcae2994e7ef813e399ce7eb5cffa2cc2459\",\"path\":\"session.go\",\"symbol\":\"Store.Get\"},{\"digest\":\"98cfd012a603e35d045f8e53ad7dbcae2994e7ef813e399ce7eb5cffa2cc2459\",\"path\":\"session.go\",\"symbol\":\"Store.Delete\"},{\"digest\":\"98cfd012a603e35d045f8e53ad7dbcae2994e7ef813e399ce7eb5cffa2cc2459\",\"path\":\"session.go\",\"symbol\":\"Store.Len\"}],\"verification_status\":\"passed\",\"worktree_identity\":\"7dccf965948550f217e1efe4d33208eb0f4773a6\"}}"
+      },
+      "anchors": [
+        {
+          "kind": "file",
+          "value": "session.go"
+        },
+        {
+          "kind": "symbol",
+          "value": "session.go#NewStore"
+        },
+        {
+          "kind": "symbol",
+          "value": "session.go#Store.Create"
+        },
+        {
+          "kind": "symbol",
+          "value": "session.go#Store.Delete"
+        },
+        {
+          "kind": "symbol",
+          "value": "session.go#Store.Get"
+        },
+        {
+          "kind": "symbol",
+          "value": "session.go#Store.Len"
+        }
+      ],
+      "evidence": [
+        {
+          "kind": "git",
+          "ref": "7dccf965948550f217e1efe4d33208eb0f4773a6",
+          "detail": "verified run changed this file"
+        }
+      ],
+      "source_id": 3,
+      "claim_hash": "da630237e9e2210b9be33afe81c90b8163bd7989fa0ff0544d59e9e8a6311e1a"
+    }
+  ],
+  "capture_digest": "096685d54be24fc659ac5d31e386b53a28f05de152510275e2292937ac795137",
+  "verify_command": "# fam-05 precursor check (Task A): mapStoreError is declared in main.go as\n# the single store-error-to-status table and the /session handler routes its\n# store-error branch through it. Behavioral: a missing session answers 404\n# through the table; the unknown-error default is 500. Structural: the table\n# lives in main.go and sessionHandler does not hand-code the store-failure\n# status. Runs with CWD = the arm directory (the fixture copy).\ncat \u003e probe_errmap_a_test.go \u003c\u003c'EOF'\npackage main\n\nimport (\n\t\"errors\"\n\t\"net/http/httptest\"\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestProbeStoreErrorMappingTable(t *testing.T) {\n\t// The shared table exists and maps the known sentinel.\n\tif got := mapStoreError(ErrNotFound); got != 404 {\n\t\tt.Fatalf(\"mapStoreError(ErrNotFound) = %d, want 404\", got)\n\t}\n\t// Anything else is 500 (the fixture only has ErrNotFound today).\n\tif got := mapStoreError(errors.New(\"unexpected\")); got != 500 {\n\t\tt.Fatalf(\"mapStoreError(unknown) = %d, want 500\", got)\n\t}\n\t// The /session handler answers a missing session through the table.\n\thandler := sessionHandler(NewStore(time.Minute))\n\trec := httptest.NewRecorder()\n\thandler(rec, httptest.NewRequest(\"GET\", \"/session?id=missing\", nil))\n\tif rec.Code != 404 {\n\t\tt.Fatalf(\"session handler status = %d, want 404 via mapStoreError\", rec.Code)\n\t}\n}\nEOF\ngo test -count=1 . ; rc=$? ; rm -f probe_errmap_a_test.go\nif [ $rc -ne 0 ]; then exit $rc; fi\n# Structural: the table is declared in main.go (the task's stated location).\ngrep -Eq 'func mapStoreError' main.go || exit 1\n# Structural: sessionHandler references the table and no store-failure status\n# is hand-coded in its body (the POST 400 is input validation, not a store\n# error, and is intentionally allowed).\nif awk '\n  /func sessionHandler/ { insess=1 }\n  insess \u0026\u0026 /^}/ { insess=0; next }\n  insess \u0026\u0026 /http\\.Error\\(/ \u0026\u0026 /StatusNotFound|40[049]|429/ { print FILENAME; exit 1 }\n' main.go; then :; else exit 1; fi\nawk '/func sessionHandler/,/^}/' main.go | grep -q 'mapStoreError' || exit 1\nexit 0\n"
+}

@@ -21,8 +21,12 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand"
+	"os"
+	"path/filepath"
 
 	"github.com/Taf0711/splice/internal/memd"
 	"github.com/Taf0711/splice/internal/splice"
@@ -147,31 +151,18 @@ func seedManualArm(ctx context.Context, client *memd.Client, manualDir string, b
 	if len(bundle.Nodes) == 0 {
 		return 0, fmt.Errorf("seed manual arm: snapshot bundle for run %s carries no captures", bundle.ProducerRunID)
 	}
-	// Needs derived from the TARGET task only: the task text, the current
-	// source index, no prior files, no failure evidence (a true cold Task
-	// B has neither yet).
-	needs := splice.DeriveContextNeeds(targetIntent, manualDir, nil, nil)
+	// Needs derived from the TARGET task only (the task text, the current
+	// source index, no prior files, no failure evidence: a true cold Task B
+	// has neither yet), matched to the frozen bundle records through the
+	// SAME predicate the pre-B match-matrix gate uses.
+	matrix := buildMatchMatrix(targetIntent, manualDir, bundle.Nodes)
 
 	// Parse the records through the restart boundary (node metadata JSON,
 	// never process memory) and keep only records matched to a need.
 	matched := 0
-	for _, node := range bundle.Nodes {
-		record := splice.ParseReuseRecordJSON(derefString(node.Node.MetadataJSON))
-		if record == nil {
-			continue // a hint, never a substitution
-		}
-		matchedToNeed := false
-		for _, need := range needs {
-			if need.Kind == splice.NeedOpenDiscovery {
-				continue
-			}
-			if splice.RecordSpeaksOfSubject(record, need.Subject) {
-				matchedToNeed = true
-				break
-			}
-		}
-		if !matchedToNeed {
-			continue
+	for i, node := range bundle.Nodes {
+		if i >= len(matrix.Records) || len(matrix.Records[i].MatchedNeedIDs) == 0 {
+			continue // a hint or an unmatched record, never a substitution
 		}
 		if _, err := client.ImportCaptureSet(ctx, manualDir, []memd.ExportedCaptureNode{node}); err != nil {
 			return matched, fmt.Errorf("seed manual arm: import record %s: %w", node.ClaimHash, err)
@@ -215,4 +206,158 @@ func conditionCostReport(rows []familyPairRow) (*splice.WorkflowCostReport, erro
 		return nil, nil
 	}
 	return splice.BuildAttemptSpendReport(views, verified)
+}
+
+// ---------------------------------------------------------------------------
+// ADDENDUM 3 (option 1): the pre-B match-matrix gate.
+//
+// The staged mechanism observation is only justified when Task A's frozen
+// capture actually speaks to a need Task B can derive. The TTL pair failed
+// this gate: A captured nothing that matched any B need, so the arms measured
+// protocol, not memory. This gate derives the target task's needs against the
+// frozen A tree and tests EVERY frozen bundle record against every
+// non-open-discovery need with the SAME RecordSpeaksOfSubject predicate the
+// manual arm's seedManualArm uses. It runs after Task A verifies and before
+// any Task B provider request, records needs x records with reasons, and
+// fails loud on an empty matrix.
+
+// matchMatrixNeed is one non-open-discovery need derived from the target task.
+type matchMatrixNeed struct {
+	ID       string `json:"id"`
+	Kind     string `json:"kind"`
+	Subject  string `json:"subject"`
+	Origin   string `json:"origin"`
+	Required bool   `json:"required"`
+}
+
+// matchMatrixRef is one supporting source reference of a bundle record.
+type matchMatrixRef struct {
+	Path   string `json:"path"`
+	Symbol string `json:"symbol,omitempty"`
+}
+
+// matchMatrixRecord is one frozen bundle record and how it matched.
+type matchMatrixRecord struct {
+	ClaimHash      string           `json:"claim_hash"`
+	Supporting     []matchMatrixRef `json:"supporting,omitempty"`
+	MatchedNeedIDs []string         `json:"matched_need_ids,omitempty"`
+	Reason         string           `json:"reason,omitempty"`
+}
+
+// matchMatrix is the recorded needs x records match result. An empty matrix
+// (no non-open-discovery need matched any record) stops the run.
+type matchMatrix struct {
+	Family             string              `json:"family"`
+	SnapshotID         string              `json:"snapshot_id"`
+	TaskIntent         string              `json:"task_intent"`
+	Needs              []matchMatrixNeed   `json:"needs"`
+	Records            []matchMatrixRecord `json:"records"`
+	MatchedRecords     int                 `json:"matched_records"`
+	OpenDiscoveryNeeds int                 `json:"open_discovery_needs"`
+}
+
+// buildMatchMatrix derives the target task's needs against the frozen A tree
+// and tests EVERY frozen bundle record against every non-open-discovery need
+// with the same RecordSpeaksOfSubject predicate seedManualArm uses. Records
+// that are not typed reuse records are reported as hints, never matches.
+func buildMatchMatrix(targetIntent, workspace string, nodes []memd.ExportedCaptureNode) matchMatrix {
+	needs := splice.DeriveContextNeeds(targetIntent, workspace, nil, nil)
+	matrix := matchMatrix{TaskIntent: targetIntent}
+	nonOpen := make([]splice.ContextNeed, 0, len(needs))
+	for _, need := range needs {
+		if need.Kind == splice.NeedOpenDiscovery {
+			matrix.OpenDiscoveryNeeds++
+			continue
+		}
+		nonOpen = append(nonOpen, need)
+		matrix.Needs = append(matrix.Needs, matchMatrixNeed{
+			ID: need.ID, Kind: need.Kind, Subject: need.Subject,
+			Origin: need.Origin, Required: need.Required,
+		})
+	}
+	for _, node := range nodes {
+		row := matchMatrixRecord{ClaimHash: node.ClaimHash}
+		record := splice.ParseReuseRecordJSON(derefString(node.Node.MetadataJSON))
+		if record == nil {
+			row.Reason = "not a typed reuse record; node stays a hint"
+			matrix.Records = append(matrix.Records, row)
+			continue
+		}
+		for _, ref := range record.Supporting {
+			row.Supporting = append(row.Supporting, matchMatrixRef{Path: ref.Path, Symbol: ref.Symbol})
+		}
+		for _, need := range nonOpen {
+			if splice.RecordSpeaksOfSubject(record, need.Subject) {
+				row.MatchedNeedIDs = append(row.MatchedNeedIDs, need.ID)
+			}
+		}
+		if len(row.MatchedNeedIDs) == 0 {
+			if len(nonOpen) == 0 {
+				row.Reason = "no non-open-discovery need was derived"
+			} else {
+				row.Reason = "no derived need subject matched this record's supporting refs"
+			}
+		} else {
+			matrix.MatchedRecords++
+		}
+		matrix.Records = append(matrix.Records, row)
+	}
+	return matrix
+}
+
+// exportMatchMatrix writes the matrix JSON into dir.
+func exportMatchMatrix(dir string, matrix matchMatrix) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create match-matrix dir: %w", err)
+	}
+	data, err := json.MarshalIndent(matrix, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode match matrix: %w", err)
+	}
+	return os.WriteFile(filepath.Join(dir, "match-matrix.json"), append(data, '\n'), 0o644)
+}
+
+// printMatchMatrix renders the needs x records matrix compactly for stderr.
+func printMatchMatrix(w io.Writer, matrix matchMatrix) {
+	fmt.Fprintf(w, "match matrix for %s (snapshot %s): %d non-open needs, %d open-discovery, %d records, %d matched\n",
+		matrix.Family, matrix.SnapshotID, len(matrix.Needs), matrix.OpenDiscoveryNeeds, len(matrix.Records), matrix.MatchedRecords)
+	for _, need := range matrix.Needs {
+		fmt.Fprintf(w, "  need %s kind=%s subject=%q origin=%s required=%t\n", need.ID, need.Kind, need.Subject, need.Origin, need.Required)
+	}
+	for _, row := range matrix.Records {
+		status := "UNMATCHED"
+		if len(row.MatchedNeedIDs) > 0 {
+			status = "MATCHED"
+		}
+		refs := make([]string, 0, len(row.Supporting))
+		for _, ref := range row.Supporting {
+			if ref.Symbol != "" {
+				refs = append(refs, ref.Path+"#"+ref.Symbol)
+			} else {
+				refs = append(refs, ref.Path)
+			}
+		}
+		fmt.Fprintf(w, "  record %s [%s] refs=%v needs=%v reason=%q\n", row.ClaimHash, status, refs, row.MatchedNeedIDs, row.Reason)
+	}
+}
+
+// runMatchMatrixGate computes the needs x records matrix over the frozen A
+// tree and bundle, records it, and fails loud when no non-open-discovery need
+// matches any record. It runs after Task A verifies and before any Task B
+// provider request, so a mis-diagnosed pair cannot spend on B.
+func runMatchMatrixGate(w io.Writer, options mvpEvalOptions, family mvpFamilyEntry, snapshotID, frozenTree string, nodes []memd.ExportedCaptureNode) (matchMatrix, error) {
+	matrix := buildMatchMatrix(family.TargetTask, frozenTree, nodes)
+	matrix.Family = family.ID
+	matrix.SnapshotID = snapshotID
+	if options.OutDir != "" {
+		matrixDir := filepath.Join(options.OutDir, "snapshots", snapshotID)
+		if err := exportMatchMatrix(matrixDir, matrix); err != nil {
+			return matrix, fmt.Errorf("export match matrix: %w", err)
+		}
+	}
+	if matrix.MatchedRecords == 0 {
+		printMatchMatrix(w, matrix)
+		return matrix, fmt.Errorf("match matrix gate: no non-open-discovery need matched any frozen capture record for family %s (needs=%d records=%d)", family.ID, len(matrix.Needs), len(matrix.Records))
+	}
+	return matrix, nil
 }

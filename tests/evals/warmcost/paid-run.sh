@@ -123,7 +123,7 @@ go build -o "$RUNNER" ./tests/evals/warmcost/cmd/warmcost-eval
 # attempt was valid. A printed --model flag is not the resolved route.
 PREFLIGHT_BIN="${PREFLIGHT_BIN:-/tmp/p4-preflight}"
 go build -o "$PREFLIGHT_BIN" ./tests/evals/warmcost/cmd/p4preflight
-if ! "$PREFLIGHT_BIN" --splice-dir "${XDG_CONFIG_HOME}/splice" --stage code_writer --want "$MODEL"; then
+if ! "$PREFLIGHT_BIN" --splice-dir "${XDG_CONFIG_HOME}/splice" --stage code_writer --want "$MODEL" --check-reasoning; then
   log "model assertion failed for stage code_writer; aborting before any provider request"
   exit 1
 fi
