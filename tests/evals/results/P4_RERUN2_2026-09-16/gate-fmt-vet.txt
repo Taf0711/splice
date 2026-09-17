@@ -1,0 +1,4 @@
+gofmt -l . : (empty)
+gofmt_exit=0
+go vet ./... :
+vet_exit=0

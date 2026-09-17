@@ -1,0 +1,5 @@
+revision d93149a71f7a15177c814a365a27b113e42ed37e (ad71955 fix + d93149a harness)
+model assertion: resolved z-ai/glm-5.3-flash source stage-models.json:code_writer
+per-attempt timeout: 10m
+openrouter key usage baseline (pre-smoke): 11.300143463
+openrouter key usage after smoke: 11.83610576 (shared key; upper bound)
