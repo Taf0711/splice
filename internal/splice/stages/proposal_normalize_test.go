@@ -2,6 +2,7 @@ package stages
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -241,4 +242,86 @@ func ptr(s string) *string { return &s }
 
 func bundleOf(items ...schemas.ContextItem) *schemas.ContextBundle {
 	return &schemas.ContextBundle{Items: items}
+}
+
+// TestNormalizeHedgedModifyKeepsRawAnchoredEdits is the recorded P4
+// payload shape: the delivered view is line-numbered read_file display
+// text, the snapshot carries the raw bytes, and the model's edits are
+// raw-anchored (they match the raw source exactly once and never the
+// numbered view) beside an empty content hedge. The edits are kept, the
+// empty hedge is dropped, and the materializer's raw fallback applies
+// them.
+func TestNormalizeHedgedModifyKeepsRawAnchoredEdits(t *testing.T) {
+	raw := "package main\n\nfunc Hello() string { return \"hello\" }\n"
+	var view strings.Builder
+	for i, line := range strings.Split(strings.TrimSuffix(raw, "\n"), "\n") {
+		fmt.Fprintf(&view, "%3d | %s\n", i+1, line)
+	}
+	reg := NewProposalBaseRegistry()
+	reg.RecordFromBundle(bundleOf(schemas.ContextItem{
+		Summary: "numbered view of main.go",
+		Payload: map[string]interface{}{
+			"path": "main.go", "version": "v1", "text": view.String(), "raw": raw,
+		},
+	}))
+	reset := SetProposalBases(reg)
+	defer reset()
+
+	hedged := ProposedFileChange{
+		Path:       "main.go",
+		ChangeType: "modify",
+		BaseRef:    "main.go",
+		Content:    ptr(""),
+		Edits:      []TextReplacement{{Old: "return \"hello\"", New: "return \"HELLO\""}},
+	}
+	got := normalizeProposal(hedged, currentProposalSnapshot)
+	if got.Content != nil {
+		t.Fatalf("hedge content survived normalization: %+v", got)
+	}
+	if len(got.Edits) != 1 {
+		t.Fatalf("edits = %+v, want the raw-anchored edit kept", got.Edits)
+	}
+	change, err := MaterializeProposal(hedged, currentProposalSnapshot)
+	if err != nil {
+		t.Fatalf("raw-anchored edits must materialize through the raw fallback: %v", err)
+	}
+	if !strings.Contains(change.Content, "return \"HELLO\"") {
+		t.Fatalf("materialized content lost the replacement: %q", change.Content)
+	}
+}
+
+// TestNormalizeDropsEmptyContentNeverWipes pins the degenerate hedge: an
+// empty content must never normalize into a derived full-file deletion,
+// whether or not edits ride along.
+func TestNormalizeDropsEmptyContentNeverWipes(t *testing.T) {
+	base := "package main\n\nfunc Hello() string { return \"hello\" }\n"
+	reg := NewProposalBaseRegistry()
+	reg.RecordFromBundle(bundleOf(baseRefItem("main.go", "v1", base)))
+	reset := SetProposalBases(reg)
+	defer reset()
+
+	withEdits := ProposedFileChange{
+		Path: "main.go", ChangeType: "modify", BaseRef: "main.go",
+		Content: ptr(""),
+		Edits:   []TextReplacement{{Old: "span that was never delivered", New: "x"}},
+	}
+	got := normalizeProposal(withEdits, currentProposalSnapshot)
+	if got.Content != nil {
+		t.Fatalf("empty content survived: %+v", got)
+	}
+	if len(got.Edits) != 1 {
+		t.Fatalf("empty content must not fabricate edits: %+v", got.Edits)
+	}
+
+	noEdits := ProposedFileChange{
+		Path: "main.go", ChangeType: "modify", BaseRef: "main.go",
+		Content: ptr(""),
+	}
+	got = normalizeProposal(noEdits, currentProposalSnapshot)
+	if got.Content != nil || len(got.Edits) != 0 {
+		t.Fatalf("empty content with no edits must stay empty, got %+v", got)
+	}
+	if err := got.Validate(); err == nil {
+		t.Fatalf("empty modify must fail Validate, not pass as a no-op")
+	}
 }

@@ -3,6 +3,7 @@ package stages
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/Taf0711/splice/internal/splice/schemas"
@@ -65,11 +66,25 @@ func TestReplayRecordedP4HedgedPayloads(t *testing.T) {
 			if err := norm.Validate(); err != nil {
 				t.Fatalf("payload %d: normalized hedged modify still fails Validate: %v", i, err)
 			}
-			// Materialization is the next stage; record its outcome so the
-			// residual (display-view hydration of a content-derived diff)
-			// stays visible instead of silently assumed clean.
-			if _, err := MaterializeProposal(f, currentProposalSnapshot); err != nil {
-				t.Logf("payload %d: normalized but not materializable: %v", i, err)
+			// Materialization is the guard: the recorded edits are
+			// raw-anchored and the snapshot carries the raw bytes, so every
+			// payload must materialize through the raw fallback. This pins
+			// the former residual (a content-derived diff over the numbered
+			// display view) as a CI failure, not an assumption.
+			change, err := MaterializeProposal(f, currentProposalSnapshot)
+			if err != nil {
+				t.Fatalf("payload %d: normalized but not materializable: %v", i, err)
+			}
+			if change.ChangeType != "modify" {
+				t.Fatalf("payload %d: change type = %q, want modify", i, change.ChangeType)
+			}
+			for _, e := range norm.Edits {
+				if !strings.Contains(change.Content, e.New) {
+					t.Fatalf("payload %d: materialized content lost the replacement %q", i, e.New)
+				}
+			}
+			if strings.Contains(change.Content, " | ") {
+				t.Fatalf("payload %d: materialized content still carries display prefixes", i)
 			}
 		}
 	}
