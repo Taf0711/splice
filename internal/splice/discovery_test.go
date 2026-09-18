@@ -9,10 +9,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/Taf0711/splice/internal/memd"
 	"github.com/Taf0711/splice/internal/splice/cognition"
+	"github.com/Taf0711/splice/internal/splice/memoryreason"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
@@ -502,5 +505,65 @@ func TestEvalContract_CommittedVerifiedTree(t *testing.T) {
 	plan, nodes = planDiscovery(context.Background(), client, dir, "intent", []string{"file:internal/session/store.go"})
 	if len(plan.ResolvedByCognition) != 1 || len(nodes) != 1 || plan.AnchorsValidated != 1 {
 		t.Fatalf("committed verified tree must classify FRESH: %+v nodes=%d", plan, len(nodes))
+	}
+}
+
+// TestDiscoveryResolvesBareFilenameIntentAndDelivers is the fam-05 pairing
+// test: the task text names a bare root-level file ("in main.go"), A's
+// natural capture is anchored on exactly that file, and the whole delivery
+// chain must light up as one unit: key derivation, exact-anchor retrieval,
+// structural freshness, the node-to-observation bridge, and admission. The
+// live run broke at the first link (zero keys derived) and delivered zero
+// cognition despite a matched matrix.
+func TestDiscoveryResolvesBareFilenameIntentAndDelivers(t *testing.T) {
+	dir, rev := setupFreshnessRepo(t)
+	fake, client := newFakeSidecar(t)
+	fake.add(t,
+		"main.go defines mapStoreError, main, sessionHandler; verified at revision "+rev,
+		"active", rev, dir,
+		[]memd.GraphAnchor{
+			{Kind: "file", Value: "main.go"},
+			{Kind: "symbol", Value: "main.go#mapStoreError"},
+		})
+
+	// Link 1: the fam-05 task intent derives the bare-filename key.
+	intent := "New admin endpoints must map their store errors using the SAME table as the /session handler. Refactor mapStoreError in main.go if needed and use it from any new admin handlers you add. The mapping table must stay the single source of truth for store-error-to-status translation."
+	keys := cognition.DeriveKeys(cognition.DeriveInput{RequestIntent: intent})
+	if !slices.Contains(keys, "file:main.go") {
+		t.Fatalf("bare filename not keyed: %v", keys)
+	}
+
+	// Link 2: the exact-anchor discovery resolves the question.
+	plan, nodes := planDiscovery(context.Background(), client, dir, intent, keys)
+	if len(plan.ResolvedByCognition) != 1 || len(nodes) != 1 {
+		t.Fatalf("discovery did not resolve the bare-filename question: %+v nodes=%d", plan, len(nodes))
+	}
+	if plan.ResolvedByCognition[0].NodeKind != "fact" {
+		t.Fatalf("resolved node kind = %q, want fact", plan.ResolvedByCognition[0].NodeKind)
+	}
+
+	// Link 3: the resolved node becomes an admissible observation - the
+	// delivery path the stage input actually runs.
+	bundle := schemas.MemoryBundle{Observations: cognitionBundleFromNodes(nodes)}
+	admitted := memoryreason.Admit(&bundle, dir, time.Now().Unix())
+	if admitted.Bundle == nil || len(admitted.Bundle.Observations) != 1 {
+		t.Fatalf("admission rejected the delivered capture: %+v", admitted.Rejected)
+	}
+
+	// Adversarial: a sibling anchor that the intent never names must not
+	// ride along through the bare-filename key.
+	other := fake.add(t, "session.go defines Store; verified at revision "+rev,
+		"active", rev, dir,
+		[]memd.GraphAnchor{{Kind: "file", Value: "session.go"}})
+	plan2, nodes2 := planDiscovery(context.Background(), client, dir, intent, keys)
+	gotIDs := map[int64]bool{}
+	for _, n := range nodes2 {
+		gotIDs[n.ID] = true
+	}
+	if gotIDs[other] {
+		t.Fatalf("unrelated sibling anchor resolved from the main.go key")
+	}
+	if len(plan2.ResolvedByCognition) != 1 || len(nodes2) != 1 {
+		t.Fatalf("second pass should still resolve exactly the main.go node: %+v", plan2)
 	}
 }
