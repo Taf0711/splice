@@ -1,0 +1,6 @@
+cold: tool_calls=14 reads=['main.go', 'main.go', 'session.go', 'session.go', 'session_test.go', 'session_test.go', 'README.md', 'README.md']
+admission=[]
+automatic: tool_calls=21 reads=['main.go', 'main.go', 'session.go', 'session.go', 'session_test.go', 'session_test.go', 'main.go', 'main.go', 'main.go', 'main.go']
+admission=['memory admission: code_writer supplied 0', 'memory admission: code_writer supplied 0', 'memory admission: code_writer supplied 0']
+manual: tool_calls=13 reads=['main.go', 'main.go', 'session.go', 'session.go', 'session_test.go', 'session_test.go']
+admission=['memory admission: code_writer supplied 0']

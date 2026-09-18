@@ -59,6 +59,15 @@ type mvpEvalOptions struct {
 	// The ADDENDUM 4 campaign pins 10m so a reasoning loop cannot burn
 	// the spend ceiling before the loop-stop rule fires.
 	AttemptTimeout time.Duration
+	// ReuseSnapshotDir + ReuseSnapshotBundle resume a matched-snapshot
+	// campaign from a FROZEN Task A: the producer model is not re-run.
+	// ReuseSnapshotDir holds the frozen A working tree (the fixture plus
+	// A's edits, no .git needed); ReuseSnapshotBundle is the recorded
+	// snapshot bundle. The runner rematerializes the tree, commits it,
+	// and aborts unless the resulting commit and tree equal the bundle's,
+	// then reuses the bundle's capture payload verbatim.
+	ReuseSnapshotDir    string
+	ReuseSnapshotBundle string
 }
 
 func parseMvpEvalArgs(args []string) (mvpEvalOptions, bool, error) {
@@ -169,6 +178,24 @@ func parseMvpEvalArgs(args []string) (mvpEvalOptions, bool, error) {
 				return options, false, execUsageError{fmt.Sprintf("--attempt-timeout requires a positive duration (e.g. 10m), got %q", value)}
 			}
 			options.AttemptTimeout = d
+		case arg == "--reuse-snapshot-dir":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.ReuseSnapshotDir = strings.TrimSpace(value)
+			index = next
+		case strings.HasPrefix(arg, "--reuse-snapshot-dir="):
+			options.ReuseSnapshotDir = strings.TrimSpace(strings.TrimPrefix(arg, "--reuse-snapshot-dir="))
+		case arg == "--reuse-snapshot-bundle":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.ReuseSnapshotBundle = strings.TrimSpace(value)
+			index = next
+		case strings.HasPrefix(arg, "--reuse-snapshot-bundle="):
+			options.ReuseSnapshotBundle = strings.TrimSpace(strings.TrimPrefix(arg, "--reuse-snapshot-bundle="))
 		case arg == "--match-matrix-gate":
 			options.MatchMatrixGate = true
 		case strings.HasPrefix(arg, "--match-matrix-gate="):
@@ -195,6 +222,12 @@ func parseMvpEvalArgs(args []string) (mvpEvalOptions, bool, error) {
 	}
 	if _, err := campaignArmsFor(options.Conditions); err != nil {
 		return options, false, execUsageError{err.Error()}
+	}
+	if (options.ReuseSnapshotDir == "") != (options.ReuseSnapshotBundle == "") {
+		return options, false, execUsageError{"--reuse-snapshot-dir and --reuse-snapshot-bundle must be supplied together"}
+	}
+	if options.ReuseSnapshotDir != "" && !options.MatchedSnapshots {
+		return options, false, execUsageError{"--reuse-snapshot-dir requires --matched-snapshots"}
 	}
 	return options, false, nil
 }
@@ -1052,6 +1085,12 @@ Flags:
                             and writes match-matrix.json.
       --attempt-timeout <d> Per-provider-attempt bound (Go duration, e.g.
                             10m). Defaults to the historical 30m.
+      --reuse-snapshot-dir <d>  Resume from a FROZEN Task A tree (the
+                            fixture plus A's edits): do not re-run the
+                            producer. Requires --reuse-snapshot-bundle;
+                            the rebuilt commit/tree must equal the
+                            bundle's or the run aborts.
+      --reuse-snapshot-bundle <f> Recorded snapshot-bundle.json to reuse.
   -h, --help                Show this help
 
 Environment (treatment matrix, applies to the exec children):

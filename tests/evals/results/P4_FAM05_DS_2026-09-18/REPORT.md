@@ -77,7 +77,7 @@ Fresh Task A on the new model; verifier passed; fresh natural capture.
 | A outcome | success, verifier pass |
 | A commit / tree | `ba125c8db48926f368bec9d0ea23ac2ce1688d14` / `3dd698085b04a17ad249dc3a4202e79ba8676b90` |
 | A bundle capture origin | `natural`, 3 nodes |
-| A bundle capture digest | `096685d54be24fc659ac5d31e386b53a28f05de152510275e2292937ac795137` |
+| A bundle capture digest | `3638a087a08bbb8bac97ff3144fbe1d484c666c1a84b004ffcffd5ef42c520e2 (corrected in addendum 5; the original addendum-4 record mis-copied the glm digest)` |
 | A tokens / billed | 28,978 / $0.003659776 (ledger) |
 
 Match matrix (`match-matrix.json`): 2 non-open needs derived -

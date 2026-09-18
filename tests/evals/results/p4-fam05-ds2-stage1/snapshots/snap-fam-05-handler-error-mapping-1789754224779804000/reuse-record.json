@@ -1,0 +1,17 @@
+{
+  "schema": "splice.eval.snapshot-reuse.v1",
+  "family": "fam-05-handler-error-mapping",
+  "snapshot_id": "snap-fam-05-handler-error-mapping-1789754224779804000",
+  "bundle_path": "tests/evals/results/p4-fam05-ds-stage1/snapshots/snap-fam-05-handler-error-mapping-1789746241371130000/snapshot-bundle.json",
+  "producer_run_id": "mvp-snap-fam-05-handler-error-mapping-1789746241584398000-taska",
+  "commit": "817d95067a22752cb2ba997a9101261647ca19c4",
+  "tree": "28a49a80b85bba590df8c3908ccce1a52cd11db5",
+  "capture_origin": "natural",
+  "capture_digest": "3638a087a08bbb8bac97ff3144fbe1d484c666c1a84b004ffcffd5ef42c520e2",
+  "changed_files": [
+    "main.go",
+    "session.go"
+  ],
+  "reused": true,
+  "producer_model_rerun": false
+}

@@ -607,9 +607,60 @@ func parsePipelineResultSpend(out []byte) (*float64, *bool, string) {
 		}
 		usd := result.TotalCostUSD
 		estimated := result.CostCoverage != schemas.CostCoverageComplete
+		// ADDENDUM 5 (defect 3): a result whose provider reported tokens but
+		// no positive priced cost must never be presented as a confirmed $0.
+		// The manual/diagnostic fam-05 arm hit exactly this: 18,076 tokens,
+		// three "priced" records all at cost 0, coverage "complete". Report an
+		// estimate (marked estimated) instead of a false zero.
+		if usd == 0 && pipelineResultTokens(result) > 0 {
+			if est := estimateUnpricedResultCost(result); est > 0 {
+				return &est, boolPtr(true), "estimated"
+			}
+			return nil, boolPtr(true), "estimated"
+		}
 		return &usd, boolPtr(estimated), "ledger"
 	}
 	return nil, nil, "unavailable"
+}
+
+// pipelineResultTokens returns the total input+output tokens a result carried,
+// preferring the top-level totals and falling back to the usage records.
+func pipelineResultTokens(result schemas.PipelineResult) int {
+	total := result.TotalTokensInput + result.TotalTokensOutput
+	if total > 0 {
+		return total
+	}
+	for _, r := range result.UsageRecords {
+		total += r.InputTokens + r.OutputTokens
+	}
+	return total
+}
+
+// estimateUnpricedResultCost returns a token-based cost estimate for a result
+// whose provider reported tokens but a zero priced total. The rate is the
+// result's own positive-cost priced records' implied rate when any exist;
+// otherwise it is the blended fallback derived from the fam-05 deepseek arms
+// (cold ~9.9e-8 and warm ~1.4e-7 USD/token) rounded to 1.0e-7. The caller
+// always marks the result estimated, so the fallback is never presented as an
+// exact ledger price.
+func estimateUnpricedResultCost(result schemas.PipelineResult) float64 {
+	tokens := pipelineResultTokens(result)
+	if tokens <= 0 {
+		return 0
+	}
+	spentCost := 0.0
+	spentTokens := 0
+	for _, r := range result.UsageRecords {
+		if r.CostUSD != nil && *r.CostUSD > 0 {
+			spentCost += *r.CostUSD
+			spentTokens += r.InputTokens + r.OutputTokens
+		}
+	}
+	rate := 1.0e-7
+	if spentTokens > 0 && spentCost > 0 {
+		rate = spentCost / float64(spentTokens)
+	}
+	return rate * float64(tokens)
 }
 
 // sumStreamJSONTokens sums totalTokens across stream-json usage records in a

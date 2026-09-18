@@ -1,0 +1,6 @@
+automatic trace memory: {"status": "active", "items": 0, "chars": 0}
+automatic trace outcome: {"status": "failed", "abort_reason": "repair: code_writer re-entry: context expansion budget exhausted while fulfilling the stage context request"}
+automatic admission lines: ["memory admission: code_writer supplied 0", "memory admission: code_writer supplied 0", "memory admission: code_writer supplied 0"]
+manual trace memory: {"status": "active", "items": 0, "chars": 0}
+manual trace outcome: {"status": "completed", "changed_files": ["admin.go", "main.go"]}
+manual admission lines: ["memory admission: code_writer supplied 0"]

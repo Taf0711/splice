@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -77,6 +78,16 @@ func runMvpMatchedSnapshots(
 		snapshotID := fmt.Sprintf("snap-%s-%d", family.ID, time.Now().UnixNano())
 
 		// ---- Phase 1: run Task A once, in a dedicated snapshot project.
+		//
+		// ADDENDUM 5 reuse: when a frozen A tree and its recorded bundle are
+		// supplied, the producer model is NOT re-run. The frozen tree is
+		// rematerialized deterministically (pristine fixture + the supplied
+		// tree), committed, and the rebuilt commit/tree are asserted equal to
+		// the bundle's before anything downstream runs. The recorded capture
+		// payload is reused verbatim - the capture is deterministic host
+		// evidence, and re-running A would add a variable the repair did not
+		// touch.
+		reuseSnapshot := options.ReuseSnapshotDir != ""
 		snapDir, err := os.MkdirTemp("", "splice-mvp-snap-")
 		if err != nil {
 			return fmt.Errorf("materialize snapshot arm: %w", err)
@@ -93,32 +104,50 @@ func runMvpMatchedSnapshots(
 			return fmt.Errorf("reset snapshot memory: %w", resetErr)
 		}
 
-		snapSession := fmt.Sprintf("mvp-snap-%s-%d", family.ID, time.Now().UnixNano())
-		// Fresh timeout per Task A run, cancelled when the run ends.
-		snapCtx, snapCancel := context.WithTimeout(ctx, options.attemptTimeout())
-		snapStatus, snapErr, snapRow := mvpRunOnceTracked(deps, ctx, snapCtx, runFunc, eval.RunInput{
-			SessionID:       snapSession + "-taska",
-			Memory:          "on",
-			Treatment:       "full",
-			ExperimentID:    experimentID,
-			Family:          family.ID,
-			Arm:             "snapshot",
-			Task:            "A",
-			Attempt:         0,
-			ArmOrder:        1,
-			Prompt:          family.PrecursorTask,
-			Cwd:             snapDir,
-			Check:           precursorChecksFor(manifestDir, family),
-			CheckScriptPath: filepath.Join(manifestDir, family.PrecursorCheckFile),
-			ArtifactDir:     mvpArtifactDir(options.OutDir, family.ID, 0, "snapshot", "a"),
-		}, experimentID, options, prov, family.ID, 0, "snapshot", "A", options.OutDir)
-		snapCancel()
-		appendRowWithCheckpoint(rows, options.OutDir, snapRow)
-		if ctx.Err() != nil {
-			cleanup()
-			return fmt.Errorf("interrupted")
+		var snapStatus string
+		var snapErr error
+		var snapRow familyPairRow
+		var reusedBundle snapshotBundle
+		if reuseSnapshot {
+			if err := overlayTree(options.ReuseSnapshotDir, snapDir); err != nil {
+				cleanup()
+				return fmt.Errorf("reuse frozen snapshot tree: %w", err)
+			}
+			loaded, err := importSnapshotBundle(options.ReuseSnapshotBundle)
+			if err != nil {
+				cleanup()
+				return fmt.Errorf("reuse frozen snapshot bundle: %w", err)
+			}
+			reusedBundle = loaded
+			snapStatus = "reused"
+		} else {
+			snapSession := fmt.Sprintf("mvp-snap-%s-%d", family.ID, time.Now().UnixNano())
+			// Fresh timeout per Task A run, cancelled when the run ends.
+			snapCtx, snapCancel := context.WithTimeout(ctx, options.attemptTimeout())
+			snapStatus, snapErr, snapRow = mvpRunOnceTracked(deps, ctx, snapCtx, runFunc, eval.RunInput{
+				SessionID:       snapSession + "-taska",
+				Memory:          "on",
+				Treatment:       "full",
+				ExperimentID:    experimentID,
+				Family:          family.ID,
+				Arm:             "snapshot",
+				Task:            "A",
+				Attempt:         0,
+				ArmOrder:        1,
+				Prompt:          family.PrecursorTask,
+				Cwd:             snapDir,
+				Check:           precursorChecksFor(manifestDir, family),
+				CheckScriptPath: filepath.Join(manifestDir, family.PrecursorCheckFile),
+				ArtifactDir:     mvpArtifactDir(options.OutDir, family.ID, 0, "snapshot", "a"),
+			}, experimentID, options, prov, family.ID, 0, "snapshot", "A", options.OutDir)
+			snapCancel()
+			appendRowWithCheckpoint(rows, options.OutDir, snapRow)
+			if ctx.Err() != nil {
+				cleanup()
+				return fmt.Errorf("interrupted")
+			}
 		}
-		if snapStatus != "success" {
+		if snapStatus != "success" && snapStatus != "reused" {
 			cleanup()
 			// Record the failed setup as a real outcome of the workflow:
 			// ONE setup failure row plus the correct number of skipped
@@ -179,11 +208,39 @@ func runMvpMatchedSnapshots(
 		// check the harness actually executed. A failed Task A never
 		// reaches this point (the status gate above), so seeding is gated
 		// on external verification.
-		prov := captureProvenanceFromRow(snapRow, precursorChecksFor(manifestDir, family))
+		var prov captureProvenance
+		if reuseSnapshot {
+			// Provenance comes from the recorded bundle, never fabricated.
+			prov = captureProvenance{ProducerRunID: reusedBundle.ProducerRunID, VerifyCommand: precursorChecksFor(manifestDir, family)}
+		} else {
+			prov = captureProvenanceFromRow(snapRow, precursorChecksFor(manifestDir, family))
+		}
 		seedSet := buildSeedCaptureSet(snapDir, prov, changedFiles, snapHead)
 		if seedSet.ProducerRunID == "" {
 			cleanup()
 			return fmt.Errorf("seed capture set for family %s: no producer run id", family.ID)
+		}
+		if reuseSnapshot {
+			builtTree := gitTreeHash(snapDir)
+			if builtTree != reusedBundle.Tree || snapHead != reusedBundle.Commit {
+				cleanup()
+				return fmt.Errorf("reuse snapshot identity mismatch: rebuilt commit=%s tree=%s, bundle commit=%s tree=%s",
+					snapHead, builtTree, reusedBundle.Commit, reusedBundle.Tree)
+			}
+			if err := writeReuseRecord(options.OutDir, family.ID, snapshotID, options.ReuseSnapshotBundle, reusedBundle, snapHead, builtTree, changedFiles); err != nil {
+				cleanup()
+				return fmt.Errorf("write reuse record: %w", err)
+			}
+			fmt.Fprintf(stderr, "family %s: REUSED frozen Task A (bundle %s commit %s tree %s capture_digest %s origin %s)\n",
+				family.ID, options.ReuseSnapshotBundle, snapHead, builtTree, reusedBundle.CaptureDigest, reusedBundle.CaptureOrigin)
+			appendRowWithCheckpoint(rows, options.OutDir, familyPairRow{
+				Family: family.ID, Task: "A", Attempt: 0, Arm: "snapshot",
+				ExperimentID: experimentID, PipelineRunID: experimentID, SnapshotID: snapshotID,
+				Executed: false, Success: true, Treatment: "full",
+				WarmSetupValid: &trueValue,
+				WarmSetupNote:  "reused frozen Task A bundle: commit " + snapHead + " tree " + builtTree + " capture_digest " + reusedBundle.CaptureDigest,
+				InfraStatus:    "reused", SetupOutcome: "reused",
+			})
 		}
 
 		// A4: export the ACTUAL runtime capture set and freeze it into a
@@ -191,35 +248,43 @@ func runMvpMatchedSnapshots(
 		// capture fails natural-capture setup loudly; the labeled
 		// reconstruction path is the explicit fallback (Reconstructed=true
 		// rides the bundle, the seed set, and every row).
-		bundle := snapshotBundle{
-			ProducerRunID: seedSet.ProducerRunID,
-			Commit:        snapHead,
-			Tree:          gitTreeHash(snapDir),
-			VerifyCommand: prov.VerifyCommand,
-		}
-		if client, err := memd.Resolve(ctx); err == nil && client != nil {
-			if nodes, expErr := exportNaturalCaptureSet(ctx, client, snapDir, preHead, seedSet.ProducerRunID); expErr == nil {
-				bundle.Nodes = nodes
-				bundle.CaptureOrigin = "natural"
-				seedSet.Reconstructed = false
-			} else {
-				// Labeled diagnostic fallback: reconstruct from the
-				// verified tree, and mark it everywhere.
-				bundle.CaptureOrigin = "reconstructed"
-				bundle.CaptureOriginNote = truncateForNote(expErr.Error(), 300)
-				seedSet.Reconstructed = true
-				fmt.Fprintf(stderr, "family %s: natural capture export failed (%v); using RECONSTRUCTED captures (diagnostic mode)\n", family.ID, expErr)
-			}
+		var bundle snapshotBundle
+		if reuseSnapshot {
+			// Reuse the recorded payload verbatim; the rebuilt identity was
+			// asserted above. The Reconstructed flag rides the bundle.
+			bundle = reusedBundle
+			seedSet.Reconstructed = bundle.CaptureOrigin == "reconstructed"
 		} else {
-			bundle.CaptureOrigin = "reconstructed"
-			bundle.CaptureOriginNote = "memory sidecar unavailable for export"
-			seedSet.Reconstructed = true
-		}
-		if bundle.Nodes == nil && seedSet.Reconstructed {
-			// Reconstruction: materialize the deterministic payload and
-			// export its shape into the bundle so import paths see one
-			// representation. The Reconstructed flag rides the bundle.
-			bundle.Nodes = seedCapturesToExported(seedSet)
+			bundle = snapshotBundle{
+				ProducerRunID: seedSet.ProducerRunID,
+				Commit:        snapHead,
+				Tree:          gitTreeHash(snapDir),
+				VerifyCommand: prov.VerifyCommand,
+			}
+			if client, err := memd.Resolve(ctx); err == nil && client != nil {
+				if nodes, expErr := exportNaturalCaptureSet(ctx, client, snapDir, preHead, seedSet.ProducerRunID); expErr == nil {
+					bundle.Nodes = nodes
+					bundle.CaptureOrigin = "natural"
+					seedSet.Reconstructed = false
+				} else {
+					// Labeled diagnostic fallback: reconstruct from the
+					// verified tree, and mark it everywhere.
+					bundle.CaptureOrigin = "reconstructed"
+					bundle.CaptureOriginNote = truncateForNote(expErr.Error(), 300)
+					seedSet.Reconstructed = true
+					fmt.Fprintf(stderr, "family %s: natural capture export failed (%v); using RECONSTRUCTED captures (diagnostic mode)\n", family.ID, expErr)
+				}
+			} else {
+				bundle.CaptureOrigin = "reconstructed"
+				bundle.CaptureOriginNote = "memory sidecar unavailable for export"
+				seedSet.Reconstructed = true
+			}
+			if bundle.Nodes == nil && seedSet.Reconstructed {
+				// Reconstruction: materialize the deterministic payload and
+				// export its shape into the bundle so import paths see one
+				// representation. The Reconstructed flag rides the bundle.
+				bundle.Nodes = seedCapturesToExported(seedSet)
+			}
 		}
 		if options.OutDir != "" {
 			bundleDir := filepath.Join(options.OutDir, "snapshots", snapshotID)
@@ -576,4 +641,93 @@ func appendRowWithCheckpoint(rows *[]familyPairRow, outDir string, row familyPai
 	if err := writeFamiliesRows(outDir, *rows); err != nil {
 		fmt.Fprintf(os.Stderr, "checkpoint write failed: %v\n", err)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// ADDENDUM 5: frozen Task A reuse.
+
+// overlayTree copies every regular file under src into dst, skipping any .git
+// directory. It rematerializes a frozen Task A working tree over the pristine
+// fixture checkout so the runner can rebuild the exact commit/tree the
+// recorded bundle names without re-running the producer model.
+func overlayTree(src, dst string) error {
+	if strings.TrimSpace(src) == "" {
+		return fmt.Errorf("reuse tree: empty source directory")
+	}
+	info, err := os.Stat(src)
+	if err != nil || !info.IsDir() {
+		return fmt.Errorf("reuse tree: %s is not a directory", src)
+	}
+	return filepath.WalkDir(src, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		if rel == ".git" || strings.HasPrefix(rel, ".git"+string(filepath.Separator)) {
+			return nil
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, 0o644)
+	})
+}
+
+// reuseRecord pins the frozen-A reuse decision: the bundle reused, the rebuilt
+// commit/tree (asserted equal to the bundle's), the capture digest, and the
+// fact that the producer model was NOT re-run.
+type reuseRecord struct {
+	Schema        string   `json:"schema"`
+	Family        string   `json:"family"`
+	SnapshotID    string   `json:"snapshot_id"`
+	BundlePath    string   `json:"bundle_path"`
+	ProducerRunID string   `json:"producer_run_id"`
+	Commit        string   `json:"commit"`
+	Tree          string   `json:"tree"`
+	CaptureOrigin string   `json:"capture_origin"`
+	CaptureDigest string   `json:"capture_digest"`
+	ChangedFiles  []string `json:"changed_files"`
+	Reused        bool     `json:"reused"`
+	ProducerRerun bool     `json:"producer_model_rerun"`
+}
+
+// writeReuseRecord records the reuse under the snapshot's artifact directory.
+func writeReuseRecord(outDir, family, snapshotID, bundlePath string, bundle snapshotBundle, commit, tree string, changedFiles []string) error {
+	if outDir == "" {
+		return nil
+	}
+	dir := filepath.Join(outDir, "snapshots", snapshotID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	rec := reuseRecord{
+		Schema:        "splice.eval.snapshot-reuse.v1",
+		Family:        family,
+		SnapshotID:    snapshotID,
+		BundlePath:    bundlePath,
+		ProducerRunID: bundle.ProducerRunID,
+		Commit:        commit,
+		Tree:          tree,
+		CaptureOrigin: bundle.CaptureOrigin,
+		CaptureDigest: bundle.CaptureDigest,
+		ChangedFiles:  changedFiles,
+		Reused:        true,
+		ProducerRerun: false,
+	}
+	data, err := json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "reuse-record.json"), append(data, '\n'), 0o644)
 }
