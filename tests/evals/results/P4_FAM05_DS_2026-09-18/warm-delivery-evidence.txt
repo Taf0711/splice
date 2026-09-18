@@ -1,0 +1,7 @@
+warm trace memory section: {"status": "active", "items": 0, "chars": 0}
+warm trace outcome: {"status": "completed", "changed_files": ["main.go"]}
+admission lines: ["memory admission: code_writer supplied 0", "memory admission: code_writer supplied 0"]
+context-round lines: ["[code_writer] context round fulfilled: 2 item(s) delivered", "[code_writer] context round fulfilled: 4 item(s) delivered", "[code_writer] context round fulfilled: 2 item(s) delivered", "[code_writer] context round fulfilled: 5 item(s) delivered"]
+model reasoning about memory: [".go\".\n\nNow memory field absent \u2014"]
+cold-r1 usage (prompt,completion): [(4504, 853), (5449, 741), (4651, 165), (6134, 823)]
+warm-r1 usage (prompt,completion): [(4509, 134), (5979, 1417), (4758, 475), (6279, 1848)]

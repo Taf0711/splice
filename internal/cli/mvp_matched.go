@@ -95,7 +95,7 @@ func runMvpMatchedSnapshots(
 
 		snapSession := fmt.Sprintf("mvp-snap-%s-%d", family.ID, time.Now().UnixNano())
 		// Fresh timeout per Task A run, cancelled when the run ends.
-		snapCtx, snapCancel := context.WithTimeout(ctx, familiesRunTimeout)
+		snapCtx, snapCancel := context.WithTimeout(ctx, options.attemptTimeout())
 		snapStatus, snapErr, snapRow := mvpRunOnceTracked(deps, ctx, snapCtx, runFunc, eval.RunInput{
 			SessionID:       snapSession + "-taska",
 			Memory:          "on",
@@ -446,7 +446,7 @@ func runMvpMatchedSnapshots(
 
 				sessionID := fmt.Sprintf("mvp-match-%s-%s-r%d-%d", family.ID, arm.name, attempt, time.Now().UnixNano())
 				// Fresh timeout per Task B attempt, cancelled when it ends.
-				runCtx, cancel := context.WithTimeout(ctx, familiesRunTimeout)
+				runCtx, cancel := context.WithTimeout(ctx, options.attemptTimeout())
 				_, _, row := mvpRunTracked(deps, ctx, runCtx, runFunc, eval.RunInput{
 					SessionID:       sessionID,
 					Memory:          arm.memory,

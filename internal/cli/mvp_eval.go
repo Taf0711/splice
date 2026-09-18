@@ -54,6 +54,11 @@ type mvpEvalOptions struct {
 	// request, so a pair whose diagnosis is wrong cannot masquerade as a
 	// mechanism observation (the TTL pair's failure mode).
 	MatchMatrixGate bool
+	// AttemptTimeout bounds each provider attempt (Task A and every
+	// Task B arm). Zero keeps the historical familiesRunTimeout (30m).
+	// The ADDENDUM 4 campaign pins 10m so a reasoning loop cannot burn
+	// the spend ceiling before the loop-stop rule fires.
+	AttemptTimeout time.Duration
 }
 
 func parseMvpEvalArgs(args []string) (mvpEvalOptions, bool, error) {
@@ -146,6 +151,24 @@ func parseMvpEvalArgs(args []string) (mvpEvalOptions, bool, error) {
 				return options, false, execUsageError{fmt.Sprintf("--scheduling-seed requires an integer, got %q", value)}
 			}
 			options.SchedulingSeed = n
+		case arg == "--attempt-timeout":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			d, parseErr := time.ParseDuration(strings.TrimSpace(value))
+			if parseErr != nil || d <= 0 {
+				return options, false, execUsageError{fmt.Sprintf("--attempt-timeout requires a positive duration (e.g. 10m), got %q", value)}
+			}
+			options.AttemptTimeout = d
+			index = next
+		case strings.HasPrefix(arg, "--attempt-timeout="):
+			value := strings.TrimSpace(strings.TrimPrefix(arg, "--attempt-timeout="))
+			d, parseErr := time.ParseDuration(value)
+			if parseErr != nil || d <= 0 {
+				return options, false, execUsageError{fmt.Sprintf("--attempt-timeout requires a positive duration (e.g. 10m), got %q", value)}
+			}
+			options.AttemptTimeout = d
 		case arg == "--match-matrix-gate":
 			options.MatchMatrixGate = true
 		case strings.HasPrefix(arg, "--match-matrix-gate="):
@@ -174,6 +197,15 @@ func parseMvpEvalArgs(args []string) (mvpEvalOptions, bool, error) {
 		return options, false, execUsageError{err.Error()}
 	}
 	return options, false, nil
+}
+
+// attemptTimeout returns the per-attempt bound: the operator's explicit
+// --attempt-timeout, else the historical familiesRunTimeout.
+func (o mvpEvalOptions) attemptTimeout() time.Duration {
+	if o.AttemptTimeout > 0 {
+		return o.AttemptTimeout
+	}
+	return familiesRunTimeout
 }
 
 // mvpFamilyManifest mirrors tests/evals/mvp-families/cognition-mvp-families.json.
@@ -1018,6 +1050,8 @@ Flags:
                             non-open-discovery need derived from the
                             target task; an empty matrix stops the run
                             and writes match-matrix.json.
+      --attempt-timeout <d> Per-provider-attempt bound (Go duration, e.g.
+                            10m). Defaults to the historical 30m.
   -h, --help                Show this help
 
 Environment (treatment matrix, applies to the exec children):

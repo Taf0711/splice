@@ -1,0 +1,2 @@
+FAIL	demo [build failed]
+FAIL

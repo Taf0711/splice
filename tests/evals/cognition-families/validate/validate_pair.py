@@ -135,13 +135,29 @@ def run_pair(manifest_path: pathlib.Path, wanted: list[str] | None) -> int:
             failures.append(f"{fid}: B verifier unexpectedly PASSED on wrong B")
         shutil.rmtree(repo, ignore_errors=True)
 
+        # altB (regression): the task does not name the handler, so the B
+        # verifier must PASS the same deliverable under a different function
+        # name. The original verifier pinned the unnamed adminSessionHandler
+        # and rejected every model arm; this arm guards that over-specification.
+        altb = HERE / "_alt-b" / f"fam-{short}"
+        if altb.is_dir():
+            repo = fresh_fixture(fixture)
+            apply_overlay_dir(golda, repo)
+            apply_overlay_dir(altb, repo)
+            rc, out = sh(f"bash {families_dir / family['target_check_file']}", repo)
+            row["altB"] = "P" if rc == 0 else "F"
+            if rc != 0:
+                failures.append(f"{fid}: B verifier FAILED on a differently named admin handler (alt B): {out}")
+            shutil.rmtree(repo, ignore_errors=True)
+
         row["letters"] = row["base"] + row["goldA"] + row["baseB"] + row["goldB"] + row["wrongB"]
-        row["ok"] = row["letters"] == "FPFPF"
+        row["ok"] = row["letters"] == "FPFPF" and row.get("altB", "P") == "P"
         if not row["ok"] and f"{fid}:" not in " ".join(failures):
             failures.append(f"{fid}: matrix {row['letters']} != FPFPF")
         registry["families"].append(row)
         state = "OK" if row["ok"] else "MISMATCH"
-        print(f"{fid}: [{row['letters']}] {state} (base/goldA/baseB/goldB/wrongB)")
+        alt = f", altB={row['altB']}" if "altB" in row else ""
+        print(f"{fid}: [{row['letters']}] {state} (base/goldA/baseB/goldB/wrongB{alt})")
 
     out_path = manifest_path.parent / "registry-pairs.json"
     out_path.write_text(json.dumps(registry, indent=2) + "\n")

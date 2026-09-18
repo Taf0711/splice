@@ -1,0 +1,41 @@
+diff --git a/main.go b/main.go
+index 321a3eb..2bc9f7a 100644
+--- a/main.go
++++ b/main.go
+@@ -11,6 +11,7 @@ import (
+ func main() {
+ 	store := NewStore(30 * time.Minute)
+ 	http.HandleFunc("/session", sessionHandler(store))
++	http.HandleFunc("/admin/sessions", adminSessionsHandler(store))
+ 	http.HandleFunc("/healthz", healthHandler(store))
+ 	log.Println("listening on :8080")
+ 	log.Fatal(http.ListenAndServe(":8080", nil))
+@@ -57,6 +58,28 @@ func mapStoreError(err error) int {
+ 	}
+ }
+ 
++// adminSessionsHandler is the admin view over the same store. It deletes a
++// session on DELETE and looks one up on GET, translating every store error
++// through the shared mapStoreError table.
++func adminSessionsHandler(store *Store) http.HandlerFunc {
++	return func(w http.ResponseWriter, r *http.Request) {
++		switch r.Method {
++		case http.MethodGet:
++			session, err := store.Get(r.URL.Query().Get("id"))
++			if err != nil {
++				http.Error(w, err.Error(), mapStoreError(err))
++				return
++			}
++			writeJSON(w, session)
++		case http.MethodDelete:
++			store.Delete(r.URL.Query().Get("id"))
++			writeJSON(w, map[string]string{"status": "deleted"})
++		default:
++			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
++		}
++	}
++}
++
+ // healthHandler reports how many sessions are currently held.
+ func healthHandler(store *Store) http.HandlerFunc {
+ 	return func(w http.ResponseWriter, r *http.Request) {
