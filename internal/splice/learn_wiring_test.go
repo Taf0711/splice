@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/memd"
 	"github.com/Taf0711/splice/internal/splice/learn"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/splice/stages"
@@ -96,7 +97,7 @@ func runWithCorpus(t *testing.T, n, in, out int) *schemas.RunOutcome {
 	abs, _ := filepath.Abs(workDir)
 	model := "model-x"
 	key := learn.BucketKey{
-		RepoRoot:        abs,
+		RepoRoot:        memd.CanonicalProjectPath(abs),
 		Stage:           "code_writer",
 		PromptHash:      learn.Hash(stages.StagePrompt("code_writer")),
 		Model:           model,

@@ -1,0 +1,37 @@
+diff --git a/cmd/server/main.go b/cmd/server/main.go
+index 925a0ae..bcc2903 100644
+--- a/cmd/server/main.go
++++ b/cmd/server/main.go
+@@ -5,7 +5,6 @@ package main
+ import (
+ 	"log"
+ 	"net/http"
+-	"time"
+ 
+ 	"demo/internal/admin"
+ 	"demo/internal/auth"
+@@ -13,7 +12,7 @@ import (
+ )
+ 
+ func main() {
+-	store := session.NewStore(30 * time.Minute)
++	store := session.NewStore(session.DefaultTTL)
+ 
+ 	mux := http.NewServeMux()
+ 	mux.Handle("/admin/", admin.NewHandler(store))
+diff --git a/internal/session/store.go b/internal/session/store.go
+index 6408444..b1183f2 100644
+--- a/internal/session/store.go
++++ b/internal/session/store.go
+@@ -10,6 +10,11 @@ import (
+ // ErrNotFound is returned when a session id is unknown or has expired.
+ var ErrNotFound = errors.New("session not found")
+ 
++// DefaultTTL is the default session lifetime used when constructing the
++// store at the server's entry point. It is the single source of truth for
++// that default.
++const DefaultTTL = 30 * time.Minute
++
+ // Session is one signed-in user.
+ type Session struct {
+ 	ID       string

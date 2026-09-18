@@ -7,9 +7,9 @@ package memoryreason
 
 import (
 	"encoding/json"
-	"path/filepath"
 	"strconv"
 
+	"github.com/Taf0711/splice/internal/memd"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
@@ -106,7 +106,7 @@ func Admit(bundle *schemas.MemoryBundle, projectRoot string, nowUnix int64) Admi
 			result.Rejected.ReviewDue++
 			continue
 		case obs.Scope == schemas.MemoryScopeProject:
-			if obs.ProjectPath == nil || filepath.Clean(*obs.ProjectPath) != filepath.Clean(projectRoot) {
+			if obs.ProjectPath == nil || memd.CanonicalProjectPath(*obs.ProjectPath) != memd.CanonicalProjectPath(projectRoot) {
 				result.Rejected.WrongProject++
 				continue
 			}

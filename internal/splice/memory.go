@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Taf0711/splice/internal/memd"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
@@ -22,10 +23,16 @@ type MemoryStore interface {
 // otherwise the working directory argument (already absolute in the real
 // flow). Both paths are absolute.
 func memoryProjectRoot(options PipelineRunConfig, workDir string) string {
-	if options.ProjectRoot == "" {
-		return workDir
+	root := workDir
+	if options.ProjectRoot != "" {
+		root = options.ProjectRoot
 	}
-	return options.ProjectRoot
+	// One canonical project identity for every sidecar touch: retrieval,
+	// admission's project comparison, and capture all key on this string.
+	// The memd client canonicalizes its own payloads too, so a caller-held
+	// spelling can never split a project across two sidecar identities
+	// (the /var vs /private/var split that zeroed the fam-05 delivery).
+	return memd.CanonicalProjectPath(root)
 }
 
 // newMemoryQuery builds the bounded search the orchestrator issues for a stage:

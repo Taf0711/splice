@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/memd"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/splice/stages"
 )
@@ -95,7 +96,7 @@ func TestMemoryIdentityFallbackUsesWorkDir(t *testing.T) {
 	if err != nil || !completed {
 		t.Fatalf("runPass completed=%v err=%v", completed, err)
 	}
-	if len(store.queries) != 1 || store.queries[0].ProjectPath == nil || *store.queries[0].ProjectPath != workDir {
+	if len(store.queries) != 1 || store.queries[0].ProjectPath == nil || *store.queries[0].ProjectPath != memd.CanonicalProjectPath(workDir) {
 		t.Fatalf("query ProjectPath = %#v, want %q", store.queries[0].ProjectPath, workDir)
 	}
 }

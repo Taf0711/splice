@@ -1,0 +1,79 @@
+{
+  "task_id": "clock-helper-write",
+  "arm": "cold",
+  "repeat": 0,
+  "sequence": 0,
+  "sequence_ordinal": 0,
+  "sequence_tasks": 1,
+  "workspace": "/var/folders/cf/37chkgfx22q5bb_ws8brslx00000gn/T/warmcost-seq-base-1604579585/cold-seq00",
+  "run_id": "wc-wc-p4b-smoke-20260917T161527Z-try0-clock-helper-write-cold-r0",
+  "binary": "/tmp/p4b-splice",
+  "binary_revision": "cee57c7942e76f7638189e08e3df6ffb21e9f244",
+  "sidecar_revision": "cee57c7",
+  "fixture_digest": "sha256:8fc24bf5d59af39d35218838ef5181dafd601712af1628949bc357ea804e9727",
+  "model_id": "z-ai/glm-5.3-flash",
+  "model_settings": {},
+  "treatment_env": [
+    "SPLICE_SCOPE_MODE=off",
+    "SPLICE_EVIDENCE_SUBSTITUTION=off"
+  ],
+  "session_id": "wc-wc-p4b-smoke-20260917T161527Z-try0-clock-helper-write-cold-r0",
+  "run_status": "completed",
+  "cost_coverage": "complete",
+  "verifier_result": true,
+  "verifier_output": "ok  \tdemo\t0.293s\n",
+  "requests": [
+    {
+      "sequence": 1,
+      "stage": "code_writer",
+      "iteration": 1,
+      "invocation_ordinal": 0,
+      "context_round": 0,
+      "spend_source": "generation",
+      "input_tokens": 4159,
+      "output_tokens": 545,
+      "cached_input_tokens": 0,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 14,
+      "cost_usd": 0.00107562,
+      "cost_status": "priced",
+      "cache_hit": null
+    }
+  ],
+  "totals": {
+    "requests": 1,
+    "input_tokens": 4159,
+    "output_tokens": 545,
+    "cached_input_tokens": 0,
+    "cache_write_tokens": 0,
+    "reasoning_tokens": 14,
+    "billed_usd": 0.00107562,
+    "priced_records": 1
+  },
+  "cache_telemetry_reported": false,
+  "rounds": [
+    {
+      "stage": "code_writer",
+      "iteration": 1,
+      "requests": 1,
+      "input_tokens": 4159,
+      "cached_input_tokens": 0,
+      "cache_hit_rate": 0,
+      "spend_source": "generation"
+    }
+  ],
+  "layout_stability": [
+    {
+      "stage": "code_writer",
+      "prompt_layout_hashes": [],
+      "requests": 1,
+      "requests_with_hash": 0,
+      "hashed": false,
+      "stable": false
+    }
+  ],
+  "raw_stream": "raw-clock-helper-write-cold-r0.jsonl",
+  "started_at": "2026-09-17T12:15:29.022429-04:00",
+  "ended_at": "2026-09-17T12:15:54.998465-04:00",
+  "duration_ms": 25975
+}

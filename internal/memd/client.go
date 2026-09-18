@@ -109,7 +109,7 @@ func (c *Client) Upsert(ctx context.Context, obs schemas.MemoryObservation) (sch
 		return schemas.MemoryObservation{}, fmt.Errorf("memd upsert: %w", err)
 	}
 	req := upsertRequest{
-		ProjectPath:  obs.ProjectPath,
+		ProjectPath:  canonicalStringPtr(obs.ProjectPath),
 		Scope:        obs.Scope,
 		OwnerAgent:   obs.OwnerAgent,
 		Visibility:   obs.Visibility,
@@ -141,6 +141,7 @@ func (c *Client) Upsert(ctx context.Context, obs schemas.MemoryObservation) (sch
 // Search runs a bounded FTS query and returns the matching observations as a
 // bundle attributed to the requesting agent.
 func (c *Client) Search(ctx context.Context, query schemas.MemoryQuery) (schemas.MemoryBundle, error) {
+	query.ProjectPath = canonicalStringPtr(query.ProjectPath)
 	if err := query.Validate(); err != nil {
 		return schemas.MemoryBundle{}, fmt.Errorf("memd search: %w", err)
 	}
@@ -168,6 +169,7 @@ func (c *Client) Search(ctx context.Context, query schemas.MemoryQuery) (schemas
 // (the consuming stage), never by the sidecar: the store only filters by
 // visibility. The bundle carries no exemplars.
 func (c *Client) LookupTopic(ctx context.Context, query schemas.MemoryTopicQuery) (schemas.MemoryBundle, error) {
+	query.ProjectPath = CanonicalProjectPath(query.ProjectPath)
 	if err := query.Validate(); err != nil {
 		return schemas.MemoryBundle{}, fmt.Errorf("memd lookup_topic: %w", err)
 	}
@@ -197,6 +199,7 @@ func (c *Client) LookupTopic(ctx context.Context, query schemas.MemoryTopicQuery
 // an error; callers treat that as an ordinary retrieval failure and fall
 // back to Search.
 func (c *Client) SearchRanked(ctx context.Context, query schemas.MemoryQuery) ([]schemas.MemoryRanked, bool, error) {
+	query.ProjectPath = canonicalStringPtr(query.ProjectPath)
 	if err := query.Validate(); err != nil {
 		return nil, false, fmt.Errorf("memd search_ranked: %w", err)
 	}
@@ -286,7 +289,7 @@ type ResetCounts struct {
 // memory state to empty so a fresh seed is the only cognition that project
 // carries. Zero counts are valid and reported, never hidden.
 func (c *Client) ResetProject(ctx context.Context, projectPath string) (ResetCounts, error) {
-	req := map[string]string{"project_path": projectPath}
+	req := map[string]string{"project_path": CanonicalProjectPath(projectPath)}
 	var resp struct {
 		OK           bool   `json:"ok"`
 		Observations int64  `json:"observations"`
@@ -624,6 +627,7 @@ type GraphEvidence struct {
 // UpsertGraphNode creates or updates one node with anchors and edges, then
 // returns the stored node with its canonical ID.
 func (c *Client) UpsertGraphNode(ctx context.Context, in GraphUpsertInput) (GraphNode, error) {
+	in.ProjectPath = CanonicalProjectPath(in.ProjectPath)
 	if in.Kind == "" {
 		return GraphNode{}, fmt.Errorf("memd graph upsert: kind is required")
 	}
@@ -653,7 +657,7 @@ func (c *Client) GetExactNodes(ctx context.Context, anchors map[string][]string,
 	}
 	req := map[string]any{
 		"anchors":      anchors,
-		"project_path": projectPath,
+		"project_path": CanonicalProjectPath(projectPath),
 		"limit":        limitDefault(limit),
 	}
 	var resp struct {
@@ -790,7 +794,7 @@ func (c *Client) SearchGraphSemanticallyScoped(ctx context.Context, text string,
 		Hits  []GraphSearchHit `json:"hits"`
 		Error string           `json:"error,omitempty"`
 	}
-	if err := c.do(ctx, http.MethodPost, "/graph/search_semantic", map[string]any{"text": text, "k": k, "project_path": projectPath}, &resp); err != nil {
+	if err := c.do(ctx, http.MethodPost, "/graph/search_semantic", map[string]any{"text": text, "k": k, "project_path": CanonicalProjectPath(projectPath)}, &resp); err != nil {
 		return nil, err
 	}
 	if !resp.OK {
@@ -810,7 +814,7 @@ func (c *Client) ReanchorGraph(ctx context.Context, projectPath, fromRevision, t
 		Nodes int64  `json:"nodes"`
 		Error string `json:"error,omitempty"`
 	}
-	body := map[string]any{"project_path": projectPath, "from_revision": fromRevision, "to_revision": toRevision}
+	body := map[string]any{"project_path": CanonicalProjectPath(projectPath), "from_revision": fromRevision, "to_revision": toRevision}
 	if err := c.do(ctx, http.MethodPost, "/graph/reanchor", body, &resp); err != nil {
 		return 0, err
 	}
@@ -834,7 +838,7 @@ func (c *Client) ReanchorGraphByIDs(ctx context.Context, projectPath string, nod
 		Nodes int64  `json:"nodes"`
 		Error string `json:"error,omitempty"`
 	}
-	body := map[string]any{"project_path": projectPath, "node_ids": nodeIDs, "from_revision": fromRevision, "to_revision": toRevision}
+	body := map[string]any{"project_path": CanonicalProjectPath(projectPath), "node_ids": nodeIDs, "from_revision": fromRevision, "to_revision": toRevision}
 	if err := c.do(ctx, http.MethodPost, "/graph/reanchor_ids", body, &resp); err != nil {
 		return 0, err
 	}
@@ -911,7 +915,7 @@ func (c *Client) CaptureSetIDsForRun(ctx context.Context, projectPath, fromRevis
 		IDs   []int64 `json:"ids"`
 		Error string  `json:"error,omitempty"`
 	}
-	body := map[string]any{"project_path": projectPath, "revision": fromRevision}
+	body := map[string]any{"project_path": CanonicalProjectPath(projectPath), "revision": fromRevision}
 	if sourceRunID != "" {
 		body["source_run_id"] = sourceRunID
 	}
@@ -950,7 +954,7 @@ func (c *Client) ExportCaptureSet(ctx context.Context, projectPath, revision, so
 		Nodes []ExportedCaptureNode `json:"nodes"`
 		Error string                `json:"error,omitempty"`
 	}
-	body := map[string]any{"project_path": projectPath, "revision": revision}
+	body := map[string]any{"project_path": CanonicalProjectPath(projectPath), "revision": revision}
 	if sourceRunID != "" {
 		body["source_run_id"] = sourceRunID
 	}
@@ -980,7 +984,7 @@ func (c *Client) ImportCaptureSet(ctx context.Context, projectPath string, nodes
 		Error    string `json:"error,omitempty"`
 	}
 	if err := c.do(ctx, http.MethodPost, "/graph/import_capture_set", map[string]any{
-		"project_path": projectPath,
+		"project_path": CanonicalProjectPath(projectPath),
 		"nodes":        nodes,
 	}, &resp); err != nil {
 		return 0, err

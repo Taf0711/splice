@@ -269,7 +269,7 @@ func TestPlanDiscoveryExactRetrievalAndFreshness(t *testing.T) {
 	fake, client := newFakeSidecar(t)
 
 	// Task A's captured node: session.go defines the invalidation helper.
-	fake.add(t, "internal/session/store.go defines Store.InvalidateUserSessions", "active", rev, dir,
+	fake.add(t, "internal/session/store.go defines Store.InvalidateUserSessions", "active", rev, memd.CanonicalProjectPath(dir),
 		[]memd.GraphAnchor{
 			{Kind: "file", Value: "internal/session/store.go"},
 			{Kind: "symbol", Value: "internal/session/store.go#Store.InvalidateUserSessions"},
@@ -309,7 +309,7 @@ func TestPlanDiscoverySemanticFallbackAndSuppression(t *testing.T) {
 
 	// Task A's captured node is in the graph; the intent names no paths, so
 	// only the semantic path can find it.
-	fake.add(t, "internal/session/store.go defines Store.InvalidateUserSessions; verified at revision abc", "active", rev, dir,
+	fake.add(t, "internal/session/store.go defines Store.InvalidateUserSessions; verified at revision abc", "active", rev, memd.CanonicalProjectPath(dir),
 		[]memd.GraphAnchor{{Kind: "file", Value: "internal/session/store.go"}})
 
 	// No structural keys: the plan must fall back to semantic entry nodes.
@@ -441,7 +441,7 @@ func TestSemanticPathRejectsStaleNodes(t *testing.T) {
 	fake, client := newFakeSidecar(t)
 
 	// A's captured node: fresh at capture time.
-	fake.add(t, "internal/session/store.go defines Store.InvalidateUserSessions", "active", rev, dir,
+	fake.add(t, "internal/session/store.go defines Store.InvalidateUserSessions", "active", rev, memd.CanonicalProjectPath(dir),
 		[]memd.GraphAnchor{{Kind: "file", Value: "internal/session/store.go"}})
 
 	// B edits the anchored file BEFORE retrieval: the node is now stale and
@@ -479,7 +479,7 @@ func TestEvalContract_CommittedVerifiedTree(t *testing.T) {
 	}
 	fake.add(t, "internal/session/store.go defines Store.ActiveSessionsFor", "active",
 		oldHead,
-		dir, []memd.GraphAnchor{{Kind: "file", Value: "internal/session/store.go"}})
+		memd.CanonicalProjectPath(dir), []memd.GraphAnchor{{Kind: "file", Value: "internal/session/store.go"}})
 	plan, nodes := planDiscovery(context.Background(), client, dir, "intent", []string{"file:internal/session/store.go"})
 	if len(nodes) != 0 || plan.AnchorsFailed != 1 {
 		t.Fatalf("dirty-tree anchor must fail closed: %+v nodes=%d", plan, len(nodes))
@@ -501,7 +501,7 @@ func TestEvalContract_CommittedVerifiedTree(t *testing.T) {
 	}
 	// Re-capture at the committed revision: now FRESH at Task B start.
 	fake.add(t, "internal/session/store.go defines Store.ActiveSessionsFor", "active",
-		rev, dir, []memd.GraphAnchor{{Kind: "file", Value: "internal/session/store.go"}})
+		rev, memd.CanonicalProjectPath(dir), []memd.GraphAnchor{{Kind: "file", Value: "internal/session/store.go"}})
 	plan, nodes = planDiscovery(context.Background(), client, dir, "intent", []string{"file:internal/session/store.go"})
 	if len(plan.ResolvedByCognition) != 1 || len(nodes) != 1 || plan.AnchorsValidated != 1 {
 		t.Fatalf("committed verified tree must classify FRESH: %+v nodes=%d", plan, len(nodes))
@@ -518,9 +518,11 @@ func TestEvalContract_CommittedVerifiedTree(t *testing.T) {
 func TestDiscoveryResolvesBareFilenameIntentAndDelivers(t *testing.T) {
 	dir, rev := setupFreshnessRepo(t)
 	fake, client := newFakeSidecar(t)
+	// Store under the identity a canonicalizing client writes, not the
+	// caller's spelling: the client canonicalizes on write and on query.
 	fake.add(t,
 		"main.go defines mapStoreError, main, sessionHandler; verified at revision "+rev,
-		"active", rev, dir,
+		"active", rev, memd.CanonicalProjectPath(dir),
 		[]memd.GraphAnchor{
 			{Kind: "file", Value: "main.go"},
 			{Kind: "symbol", Value: "main.go#mapStoreError"},
@@ -553,7 +555,7 @@ func TestDiscoveryResolvesBareFilenameIntentAndDelivers(t *testing.T) {
 	// Adversarial: a sibling anchor that the intent never names must not
 	// ride along through the bare-filename key.
 	other := fake.add(t, "session.go defines Store; verified at revision "+rev,
-		"active", rev, dir,
+		"active", rev, memd.CanonicalProjectPath(dir),
 		[]memd.GraphAnchor{{Kind: "file", Value: "session.go"}})
 	plan2, nodes2 := planDiscovery(context.Background(), client, dir, intent, keys)
 	gotIDs := map[int64]bool{}
@@ -565,5 +567,52 @@ func TestDiscoveryResolvesBareFilenameIntentAndDelivers(t *testing.T) {
 	}
 	if len(plan2.ResolvedByCognition) != 1 || len(nodes2) != 1 {
 		t.Fatalf("second pass should still resolve exactly the main.go node: %+v", plan2)
+	}
+}
+
+// TestDiscoverySurvivesProjectPathSpellings is the live geometry of the
+// fam-05 deepseek failure, portable: the capture is replayed through one
+// spelling of the arm directory (the /var form os.MkdirTemp returns) while
+// the pipeline resolves the repo root to the other (/private/var). The
+// sidecar identity must survive both spellings, so the exact-anchor
+// discovery still resolves and still delivers.
+func TestDiscoverySurvivesProjectPathSpellings(t *testing.T) {
+	dir, rev := setupFreshnessRepo(t)
+	link := filepath.Join(t.TempDir(), "arm-link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	fake, client := newFakeSidecar(t)
+	// Replay import through the LINK spelling (what a MkdirTemp caller
+	// would pass as the warm project).
+	// The import side canonicalizes, so the row lands under the canonical
+	// identity even though the replay caller held the link spelling.
+	fake.add(t,
+		"main.go defines mapStoreError, main, sessionHandler; verified at revision "+rev,
+		"active", rev, memd.CanonicalProjectPath(link),
+		[]memd.GraphAnchor{{Kind: "file", Value: "main.go"}})
+
+	intent := "Refactor mapStoreError in main.go if needed and use it from any new admin handlers you add."
+	keys := cognition.DeriveKeys(cognition.DeriveInput{RequestIntent: intent})
+	if !slices.Contains(keys, "file:main.go") {
+		t.Fatalf("bare filename not keyed: %v", keys)
+	}
+
+	// Retrieval through the REAL spelling (what the pipeline's repo root
+	// holds). The client canonicalizes both sides, so the question
+	// resolves regardless of which spelling the caller held.
+	plan, nodes := planDiscovery(context.Background(), client, dir, intent, keys)
+	if len(plan.ResolvedByCognition) != 1 || len(nodes) != 1 {
+		t.Fatalf("cross-spelling discovery did not resolve: %+v nodes=%d", plan, len(nodes))
+	}
+
+	// Admission must accept the record under either root spelling: the
+	// same class of comparison the stage input runs.
+	bundle := schemas.MemoryBundle{Observations: cognitionBundleFromNodes(nodes)}
+	for _, rootSpelling := range []string{dir, link} {
+		admitted := memoryreason.Admit(&bundle, rootSpelling, time.Now().Unix())
+		if admitted.Bundle == nil || len(admitted.Bundle.Observations) != 1 {
+			t.Fatalf("admission rejected under root spelling %s: %+v", rootSpelling, admitted.Rejected)
+		}
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/memd"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/tools"
 )
@@ -67,7 +68,7 @@ func TestRunInjectsExemplars(t *testing.T) {
 		{Trace: exemplarTrace("kept-3", "add a Hello function and tests", 1000, 2000, []string{"main.go"}), Rank: -6},
 	}
 	for i := range corpus {
-		corpus[i].Trace.RepoRoot = abs
+		corpus[i].Trace.RepoRoot = memd.CanonicalProjectPath(abs)
 	}
 	store := &exemplarStore{corpus: corpus}
 
@@ -114,7 +115,7 @@ func runExemplarProgress(t *testing.T, corpus []schemas.TraceQueryResult) []stri
 	}
 	abs, _ := filepath.Abs(workDir)
 	for i := range corpus {
-		corpus[i].Trace.RepoRoot = abs
+		corpus[i].Trace.RepoRoot = memd.CanonicalProjectPath(abs)
 	}
 	store := &exemplarStore{corpus: corpus}
 	var reasoning []string

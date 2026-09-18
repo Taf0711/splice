@@ -15,6 +15,7 @@ import (
 
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/hooks"
+	"github.com/Taf0711/splice/internal/memd"
 	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/splice/stages"
@@ -307,7 +308,7 @@ func TestRunPassInjectsMemoryBundleAndSkipsRetrievalErrors(t *testing.T) {
 	if retriever.gotQuery.RequestingAgent != "code_writer" {
 		t.Fatalf("requesting agent = %q, want code_writer", retriever.gotQuery.RequestingAgent)
 	}
-	if retriever.gotQuery.ProjectPath == nil || *retriever.gotQuery.ProjectPath != workDir {
+	if retriever.gotQuery.ProjectPath == nil || *retriever.gotQuery.ProjectPath != memd.CanonicalProjectPath(workDir) {
 		t.Fatalf("project path = %#v, want %q", retriever.gotQuery.ProjectPath, workDir)
 	}
 	if retriever.gotQuery.Limit != 5 {
@@ -763,7 +764,7 @@ func TestRunPassPersistsDiscoveredTestCommand(t *testing.T) {
 		if obs.SourceRunID == nil || *obs.SourceRunID != runID {
 			t.Fatalf("SourceRunID = %#v, want %q", obs.SourceRunID, runID)
 		}
-		if obs.ProjectPath == nil || *obs.ProjectPath != workDir {
+		if obs.ProjectPath == nil || *obs.ProjectPath != memd.CanonicalProjectPath(workDir) {
 			t.Fatalf("ProjectPath = %#v, want %q", obs.ProjectPath, workDir)
 		}
 	})
@@ -844,7 +845,7 @@ func TestRunExecutionPlanPersistsConfigObservation(t *testing.T) {
 	if obs.SourceStage != nil {
 		t.Fatalf("SourceStage = %#v, want nil", obs.SourceStage)
 	}
-	if obs.ProjectPath == nil || *obs.ProjectPath != absWorkDir {
+	if obs.ProjectPath == nil || *obs.ProjectPath != memd.CanonicalProjectPath(absWorkDir) {
 		t.Fatalf("ProjectPath = %#v, want %q", obs.ProjectPath, absWorkDir)
 	}
 }
@@ -913,8 +914,9 @@ func TestRunStageWithContextPersistsToolDegradationObservation(t *testing.T) {
 	if obs.SourceStage == nil || *obs.SourceStage != stageName {
 		t.Fatalf("SourceStage = %#v, want %q", obs.SourceStage, stageName)
 	}
-	if obs.ProjectPath == nil || *obs.ProjectPath != workDir {
-		t.Fatalf("ProjectPath = %#v, want %q", obs.ProjectPath, workDir)
+	// Persisted observations carry the canonical project identity.
+	if obs.ProjectPath == nil || *obs.ProjectPath != memd.CanonicalProjectPath(workDir) {
+		t.Fatalf("ProjectPath = %#v, want %q", obs.ProjectPath, memd.CanonicalProjectPath(workDir))
 	}
 }
 
