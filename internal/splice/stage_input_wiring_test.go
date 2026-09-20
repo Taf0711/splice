@@ -261,28 +261,31 @@ func TestRepairReentryRetrievesAndTracesEachMemoryInvocation(t *testing.T) {
 			break
 		}
 	}
-	// Run-local replay guard: the initial invocation delivered observation:8
-	// to code_writer, so the repair re-entry (same stage, same run) must
-	// suppress it from prompt delivery even though retrieval still ran. The
-	// repair invocation receives an EMPTY bundle, emits a nil review (nothing
-	// was delivered to reconcile), and mergeRepairRecord appends nothing:
-	// the record therefore carries exactly ONE model-visible review.
-	if len(writer.MemoryReviews) != 1 {
-		t.Fatalf("writer reviews = %+v, want exactly the initial invocation's review", writer.MemoryReviews)
+	// Repair re-entry builds a FRESH provider request (a new system+user
+	// message pair, no conversation carry-over), so the fact delivered to
+	// the initial invocation is NOT automatically present in the repair
+	// request. The run-local replay suppression is skipped for repair
+	// re-entry: still-relevant facts are re-delivered, bounded by the same
+	// admission and compaction limits. Both invocations' reviews land in the
+	// record.
+	if len(writer.MemoryReviews) != 2 {
+		t.Fatalf("writer reviews = %+v, want initial plus repair re-entry review", writer.MemoryReviews)
 	}
-	if len(writer.MemoryReviews[0].Items) != 1 || writer.MemoryReviews[0].Items[0].MemoryID != "observation:8" {
-		t.Fatalf("initial review = %+v", writer.MemoryReviews[0])
+	for _, review := range writer.MemoryReviews {
+		if len(review.Items) != 1 || review.Items[0].MemoryID != "observation:8" {
+			t.Fatalf("both invocations must re-deliver observation:8, got %+v", review)
+		}
 	}
-	if got := tr.replaySuppressedCount(); got != 1 {
-		t.Fatalf("replay suppressed count = %d, want 1", got)
+	if got := tr.replaySuppressedCount(); got != 0 {
+		t.Fatalf("replay suppressed count = %d, want 0 (repair re-entry skips suppression)", got)
 	}
-	// Retrieval stayed real (2 searches) but delivery happened once: the
-	// delivered-memory counters count MODEL-VISIBLE items (one invocation's
-	// worth), not retrievals.
+	// Retrieval stayed real (2 searches) and both fresh requests delivered
+	// the fact: the delivered-memory counters count MODEL-VISIBLE items
+	// across the initial invocation and the repair re-entry.
 	meta := tr.stages[stageKey{"code_writer", 1}]
-	wantChars := len(observation.Title) + len(observation.Content)
-	if meta.MemoryItems != 1 || meta.MemoryChars != wantChars || tr.memoryItems != 1 || tr.memoryChars != wantChars {
-		t.Fatalf("memory counters: meta=%+v total_items=%d total_chars=%d, want one delivered invocation and %d chars", meta, tr.memoryItems, tr.memoryChars, wantChars)
+	wantChars := 2 * (len(observation.Title) + len(observation.Content))
+	if meta.MemoryItems != 2 || meta.MemoryChars != wantChars || tr.memoryItems != 2 || tr.memoryChars != wantChars {
+		t.Fatalf("memory counters: meta=%+v total_items=%d total_chars=%d, want two delivered invocations and %d chars", meta, tr.memoryItems, tr.memoryChars, wantChars)
 	}
 }
 

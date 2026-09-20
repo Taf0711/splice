@@ -202,6 +202,13 @@ type stageInputPreparation struct {
 	Memory    MemoryStore
 	Trace     *runTraceAccumulator
 	NowUnix   int64
+	// RepairReentry marks that this preparation serves a repair invocation.
+	// Each repair builds a FRESH provider request (a new system+user message
+	// pair with no conversation carry-over), so a fact delivered to the
+	// initial invocation is not automatically present. The run-local replay
+	// suppression MUST NOT remove still-relevant facts here: they are
+	// re-delivered, bounded by the same admission and compaction limits.
+	RepairReentry bool
 }
 
 // prepareStageInput is the single composition path for both the normal pass
@@ -249,13 +256,16 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 			} else {
 				// Run-local replay guard: a direct hit the stage already
 				// consumed this run is NOT a retrieval miss. The hit still
-				// counts for telemetry (fresh/stale/direct above), the bundle
-				// empties, and because the direct path returned true the
-				// broad search below is skipped — suppression must not push
-				// the same cognition back through FTS redelivery.
-				suppressed := p.Trace.filterAlreadyDelivered(input.StageName, &direct.bundle)
-				if suppressed > 0 {
-					emitProgress(p.Options, fmt.Sprintf("[%s] cognition: %d already-consumed item(s) suppressed on re-entry\n", input.StageName, suppressed))
+				// counts for telemetry, the bundle empties, and because the
+				// direct path returned true the broad search below is
+				// skipped: suppression must not push the same cognition back
+				// through FTS redelivery. Repair re-entry is exempt because
+				// its provider request is fresh, so the fact is re-delivered.
+				if !p.RepairReentry {
+					suppressed := p.Trace.filterAlreadyDelivered(input.StageName, &direct.bundle)
+					if suppressed > 0 {
+						emitProgress(p.Options, fmt.Sprintf("[%s] cognition: %d already-consumed item(s) suppressed on re-entry\n", input.StageName, suppressed))
+					}
 				}
 				if direct.bundle.Observations == nil && len(direct.bundle.Observations) == 0 {
 					direct.bundle.Observations = []schemas.MemoryObservation{}
@@ -329,8 +339,11 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 				// and admission ran for real (counts and miss-path telemetry
 				// stay honest); only the prompt replay is removed. Genuinely
 				// new cognition stays fully eligible (consumed-set semantics,
-				// not a memory-off switch).
-				p.Trace.filterAlreadyDelivered(input.StageName, admitted.Bundle)
+				// not a memory-off switch). Repair re-entry is exempt: its
+				// provider request is fresh, so still-relevant facts return.
+				if !p.RepairReentry {
+					p.Trace.filterAlreadyDelivered(input.StageName, admitted.Bundle)
+				}
 				input.MemoryBundle = admitted.Bundle
 				emitProgress(p.Options, admissionProgressLine(input.StageName, admitted))
 			}

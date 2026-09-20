@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -97,6 +98,8 @@ type model struct {
 	loadSkills                  func() []skills.Skill  // lazy installed-skills loader for /skills + /<skill-name>
 	userConfigPath              string
 	doctorUserConfigPath        string
+	doctorGOOS                  string                       // sandbox-backend check platform override; empty = runtime.GOOS
+	doctorLookupExecutable      func(string) (string, error) // PATH stub for deterministic doctor checks; nil = exec.LookPath
 	projectConfigPath           string
 	gitBranch                   string
 	providerName                string
@@ -309,6 +312,10 @@ type model struct {
 	// active the chat column's body shows the file's diff/content instead of the
 	// transcript, mirroring the subchat drill-in.
 	fileView fileViewState
+	// detailView is the Ctrl+O detail/evidence pane (GAP-G rest, §17): while
+	// active the chat column's body shows the run's evidence projection
+	// (evidence groups, interventions, receipt) re-read from lastState.
+	detailView detailViewState
 	// Git-sweep state (files_git_sweep.go): the startup snapshot of already-dirty
 	// paths (nil until Init's sweep answers), the newly dirty files discovered by
 	// live sweeps (bash/subagent mutations that carry no changedFiles), the
@@ -324,6 +331,11 @@ type model struct {
 	swarmDoneAt      map[string]time.Time
 	now              func() time.Time
 	chatScrollOffset int
+	// overlayBodyHeight is the measured transcript-body height for the frame
+	// being rendered. The empty-state overlay (the slash palette) sizes its
+	// padding against it so the block matches the viewport exactly: guessing
+	// from m.height clipped the card's lower rows on some geometries.
+	overlayBodyHeight int
 	// chatBodyLines is the live body's line count at the last update; used to pin
 	// the viewport (hold the read position) when content streams in while the user
 	// has scrolled up. 0 means "at the bottom / not pinned".
@@ -521,6 +533,75 @@ type model struct {
 	// launched with. Nil in production; used by tests to assert compaction and
 	// run-config threading without a real provider round-trip.
 	captureRunOptions func(agent.Options)
+	// glyphTier selects the marker/progress rune set (v0.5 §9.1). ASCII is
+	// the production default; NO_COLOR also forces ASCII because color is
+	// the only channel the richer tiers add on top of width safety.
+	glyphTier presentation.GlyphTier
+	// trajectoryVisible toggles the trajectory inspection surface (§10,
+	// GAP-G). OFF by default (DoD 11): trajectory is an inspectable
+	// surface, not permanent screen furniture. Regression auto-reveals it
+	// (with an explicit notice); Ctrl+T toggles it back.
+	trajectoryVisible bool
+	// trajectoryAutoRevealed is true when the runtime revealed trajectory
+	// because of a regression, so the UI can say "auto-revealed" instead
+	// of pretending the user opened it.
+	trajectoryAutoRevealed bool
+	// lastState holds the most recent presentation snapshot so inspection
+	// surfaces (trajectory) render at render time from the latest runtime
+	// truth.
+	lastState presentation.State
+	// phaseTrail is the status bar's context trail (P1.4 delta, frame
+	// w0BIJA): the breadcrumb of lifecycle phases visited this session.
+	// Observed on every presentation state change; appended on CHANGE only,
+	// never rewinds; reset on session switch (the new session has its own
+	// story).
+	phaseTrail statusPhaseTrail
+	// narrationVerbosity is the live transcript verbosity (GAP-L, DoD 41):
+	// quiet collapses tool activity, detailed (the default) shows everything.
+	// It changes only what is SHOWN — never what is recorded — so switching
+	// is live-safe and resume-safe. Ctrl+N cycles it. Initialized to
+	// verbosityDetailed in newModel (the zero value is quiet).
+	narrationVerbosityLevel narrationVerbosity
+	// narrationSettledGeneration tracks which verbosity the settled snapshot
+	// was built at, so a switch rebuilds it (the visible row set changed
+	// without the frontier moving).
+	narrationSettledGeneration narrationVerbosity
+	// worktreeOp is the single in-flight worktree mutation scheduled by a
+	// user action (worktree_ops.go). Non-nil means Git work is running in
+	// a command goroutine; every action surface refuses to schedule a
+	// second one until its result lands.
+	worktreeOp *worktreeOpState
+	// pendingHandoff is the live handoff for the most recently exited lane
+	// (GAP-F): the [M] merge-back and [X] discard keys act on it. Nil when
+	// no handoff is offered or it was resolved.
+	pendingHandoff *handoffState
+	// lastTerminalReceipt remembers which terminal receipt card (GAP-E) is
+	// the live outcome surface, so the advertised [A]/[D]/[R]/[I]/[L] keys
+	// dispatch. Runtime state, not transcript scraping. Cleared when a new
+	// run begins or the session switches — the card stops being live then.
+	lastTerminalReceipt receiptKind
+	// sessionScanInFlight arms while the async session scan (F1 boundary:
+	// no store I/O on the UI loop) is running, so a second /resume or
+	// launch pass never spawns a duplicate scan.
+	sessionScanInFlight bool
+	// keySeq counts processed key presses. The session scan stamps its
+	// start seq; the landing picker arms only if the user has pressed
+	// nothing since — a scan landing after the user started typing never
+	// steals the composer (the typed runes may still be in flight when the
+	// msg processes, so an empty-composer check alone is not enough).
+	keySeq          uint64
+	scanStartKeySeq uint64
+	// resumePickerWanted marks a scan started by an explicit /resume: its
+	// landing arms the picker. Launch scans never do (no auto-open modals).
+	resumePickerWanted bool
+	// scannedLatest holds the newest qualifying workspace session from the
+	// last scan — the launch resume card's data source. Nil until a scan
+	// lands or when nothing qualified (honest absence).
+	scannedLatest *scannedSession
+	// diffView is the GAP-G diff review surface (§11): when active, the
+	// transcript body swaps to the worktree diff and the title bar swaps to
+	// the diff nav bar. Inactive is the zero value.
+	diffView diffViewState
 }
 
 type agentTextMsg struct {
@@ -609,6 +690,11 @@ type agentResponseMsg struct {
 	// designTransition is a transition the design agent queued this turn. It is
 	// run only when the turn succeeded (msg.err == nil), after pending clears.
 	designTransition *splicerun.DesignTransitionRequest
+	// worktreePreserved/mergeAvailable for the HANDOFF card, computed in the
+	// run goroutine (off the UI loop) — F1, §14. mergeAvailable mirrors the
+	// review's dirty-main gate: preserved AND source not dirty.
+	worktreePreserved bool
+	mergeAvailable    bool
 }
 
 type agentRowMsg struct {
@@ -793,6 +879,9 @@ type pendingAskUserPrompt struct {
 	// reviewDecision is empty on the review decision prompt; it is
 	// worktreeReviewReject on the follow-up reject-reason prompt.
 	reviewDecision string
+	// startedAt is when the gate opened, for the NEEDS YOU wait timer
+	// (P3 gate signature). Zero means unknown and hides the timer.
+	startedAt time.Time
 }
 
 type pendingSpecReviewPrompt struct {
@@ -824,6 +913,14 @@ type tuiAgentRunOptions struct {
 	// transition is the per-turn recorder for the design-transition tools. It
 	// is set only for design-conversation runs, and only they drain it.
 	transition *splicerun.DesignTransitionRecorder
+	// decisions is the per-turn ledger for the pin_design_decision tool
+	// (§7.1). Design-conversation runs drain it into decision_pinned
+	// session events after the turn.
+	decisions *splicerun.DecisionRecorder
+	// openQuestions is the per-turn ledger for the raise_open_question tool
+	// (§7.1). Design-conversation runs drain it into open_question_raised
+	// session events after the turn.
+	openQuestions *splicerun.OpenQuestionRecorder
 }
 
 func newModel(ctx context.Context, options Options) model {
@@ -883,6 +980,10 @@ func newModel(ctx context.Context, options Options) model {
 	if doctorUserConfigPath == "" {
 		doctorUserConfigPath = options.UserConfigPath
 	}
+	// Deterministic doctor checks: tests can pin the sandbox platform and the
+	// PATH lookups so the sandbox/LSP results do not depend on the host.
+	doctorGOOS := options.DoctorGOOS
+	doctorLookup := options.DoctorLookupExecutable
 
 	permissionMode := options.PermissionMode
 	if permissionMode == "" {
@@ -894,6 +995,11 @@ func newModel(ctx context.Context, options Options) model {
 	asciiEnabled := spliceASCIIEnabled(os.Getenv)
 
 	input := textinput.New()
+	// Pen composer grammar (frames kAYHl / ws5rS / design frames): the
+	// prompt row is a BARE line — "> _" on the launch screen, "❯ <text>"
+	// while typing, "∞ steer this run…" while a run is in flight — never a
+	// bordered box. The glyph swaps at render time (composerVisualLinePrefix
+	// / composerBox); the base prompt is the in-run ∞.
 	input.Prompt = "∞ "
 	input.Placeholder = composerPlaceholder
 	// Bubble's Ctrl+V binding reads the clipboard itself. Keep it disabled so
@@ -929,6 +1035,8 @@ func newModel(ctx context.Context, options Options) model {
 		composerCursorVisible:       true,
 		userConfigPath:              options.UserConfigPath,
 		doctorUserConfigPath:        doctorUserConfigPath,
+		doctorGOOS:                  doctorGOOS,
+		doctorLookupExecutable:      doctorLookup,
 		projectConfigPath:           options.ProjectConfigPath,
 		savedProviders:              options.SavedProviders,
 		gitBranch:                   gitBranch(cwd),
@@ -987,6 +1095,16 @@ func newModel(ctx context.Context, options Options) model {
 		applyTheme(m.themeMode, true)
 	}
 	m.reducedMotion = defaultReducedMotion()
+	// GAP-L: the default verbosity is detailed (the zero value is quiet, so
+	// it must be set explicitly at construction).
+	m.narrationVerbosityLevel = verbosityDetailed
+	// GAP-K DoD 36: apply the persisted layout preset. Unknown/empty names
+	// keep the built-in defaults (fail-quiet at startup is correct here: the
+	// preference is a hint, not runtime truth, and a renamed preset must not
+	// brick the TUI).
+	if preset, ok := layoutPresetByName(strings.ToLower(strings.TrimSpace(options.SavedLayout))); ok {
+		m = m.applyLayoutPreset(preset)
+	}
 	// The streaming-text fade (a lime→ink glow on freshly streamed lines) is
 	// disabled: it read as a distracting glow rather than a subtle liveness cue.
 	// Streaming text always renders statically at base ink (the disabled path in
@@ -1006,6 +1124,12 @@ func newModel(ctx context.Context, options Options) model {
 	// sends a turn in design mode; that keeps construction-time model creation
 	// free of side effects while still making the default phase planning-first.
 	m.designMode = true
+	// Glyph tier selection: SPLICE_GLYPH_TIER overrides; a UTF-8 locale
+	// upgrades to the Pen rich set (◉ ✓ ✗ ▲ ○ ◆); NO_COLOR forces ASCII —
+	// when color is off, markers are the only state channel, so they must
+	// be width-exact everywhere.
+	m.glyphTier = presentation.SelectGlyphTier(os.Getenv)
+	pipelineGlyphTier = m.glyphTier
 	return m
 }
 
@@ -1057,6 +1181,13 @@ func (m model) doctorOptions(connectivity bool) doctor.Options {
 		WorkspaceRoot:  m.cwd,
 		Connectivity:   connectivity,
 		ProviderHealth: health,
+		GOOS:           m.doctorGOOS,
+		LookupExecutable: func(name string) (string, error) {
+			if m.doctorLookupExecutable != nil {
+				return m.doctorLookupExecutable(name)
+			}
+			return exec.LookPath(name)
+		},
 	}
 }
 
@@ -1140,6 +1271,11 @@ func (m model) Init() tea.Cmd {
 			return prWatcherStartedMsg{stop: stop}
 		})
 	}
+	// Async session scan (F1, §14): the resume picker and launch card arm
+	// from the sessionsScannedMsg — never from store I/O on the UI loop.
+	if _, scanCmd := m.openLaunchSessionPicker(); scanCmd != nil {
+		cmds = append(cmds, scanCmd)
+	}
 	return tea.Batch(cmds...)
 }
 
@@ -1158,6 +1294,25 @@ func (m *model) stopPRWatcher() {
 func (m model) noBlockingModal() bool {
 	return m.pendingPermission == nil && m.pendingAskUser == nil && m.pendingSpecReview == nil &&
 		m.providerWizard == nil && m.stageModelWizard == nil && m.mcpAddWizard == nil && m.mcpManager == nil && m.picker == nil
+}
+
+// cardKeysOwnInput reports whether an advertised card action key may claim
+// a printable keypress (review finding 2: "give one explicit surface
+// ownership of each key event"). Three conditions must hold.
+//
+// No modal owns input, including the help overlay, which noBlockingModal
+// alone does not cover (the provider setup wizard is already one of its
+// modal fields).
+//
+// The composer must be EMPTY. While a draft exists the user is writing a
+// sentence, and every printable key belongs to that sentence: an uppercase
+// R inside "Please Revise" must stay text, never a card action. An empty
+// composer is the state the card's advertised keys were rendered for.
+func (m model) cardKeysOwnInput() bool {
+	if !m.noBlockingModal() || m.helpOverlay {
+		return false
+	}
+	return strings.TrimSpace(m.composerValue()) == ""
 }
 
 func (m model) quit() (tea.Model, tea.Cmd) {
@@ -1271,6 +1426,48 @@ func batchCommands(cmds ...tea.Cmd) tea.Cmd {
 }
 
 func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// HANDOFF keys (GAP-F, DoD 28): [M] merge back now and [X] discard
+	// lane act on the pending handoff when a lane has exited with
+	// preserved work and no modal owns input. Each dispatches the SAME
+	// runtime seam the worktree review uses (tuiMergeBackWorktree /
+	// tuiRemoveWorktree), so the handoff never mutates files independently
+	// of the tested path. Intercepted before the main switch so plain-key
+	// handlers (composer echo) cannot swallow them.
+	//
+	// Ownership (review finding 2): these keys dispatch only while the
+	// COMPOSER IS EMPTY. A card advertises its keys to a user who is not
+	// mid-sentence; once a draft exists the composer owns every printable
+	// key, so typing "Move the..." can never merge a worktree. The run
+	// gate is explicit here too: a new run means the previous lane's card
+	// is no longer the live surface (beginRun does not disarm it).
+	if keyMsg, ok := msg.(tea.KeyMsg); ok && m.pendingHandoff != nil &&
+		m.pendingHandoff.preserved && !m.pending && m.cardKeysOwnInput() {
+		if handled, model, cmd := m.handleHandoffKey(keyMsg); handled {
+			return model, cmd
+		}
+	}
+	// Diff review keys (GAP-G, §11): while the diff viewport is active it
+	// owns n/a/j/o and scrolling, before the main switch (the same
+	// interception point the handoff keys use). Esc/scroll fall through to
+	// the diff handler FIRST so a plain-key handler cannot swallow them;
+	// unhandled keys keep processing (composer stays reachable by Esc out).
+	if keyMsg, ok := msg.(tea.KeyMsg); ok && m.diffView.active {
+		if handled, model, cmd := m.handleDiffReviewKey(keyMsg); handled {
+			return model, cmd
+		}
+	}
+	// Receipt and lifecycle-card keys (GAP-E action rows, P4 approve rows):
+	// the terminal receipt cards and the pending plan/critique cards
+	// advertise [A]/[D]/[R]/[I]/[L]/[F] keys. They dispatch when no modal
+	// owns input, the run is released, and an armed handoff did not just
+	// claim the key (the handoff's [D] means review-diff there, not
+	// discard). Plain lowercase letters fall through to the composer.
+	if keyMsg, ok := msg.(tea.KeyMsg); ok && !m.pending && m.cardKeysOwnInput() &&
+		!(m.pendingHandoff != nil && m.pendingHandoff.preserved) {
+		if handled, model, cmd := m.handleReceiptKey(keyMsg); handled {
+			return model, cmd
+		}
+	}
 	switch msg := msg.(type) {
 	case composerBlinkMsg:
 		m.composerCursorVisible = !m.composerCursorVisible
@@ -1307,6 +1504,20 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.copyStatus = ""
 		}
 		return m, nil
+	case diffCopiedMsg:
+		// GAP-G [E]: the hunk copy reports through the same status readout as
+		// the transcript selection copy. Failure keeps the view open for a
+		// retry; success reports the copied size.
+		m.copyStatusSeq++
+		if msg.err != nil {
+			m.copyStatus = "Copy failed"
+		} else {
+			m.copyStatus = fmt.Sprintf("Copied hunk (%d chars)", msg.chars)
+		}
+		seq := m.copyStatusSeq
+		return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
+			return transcriptCopyStatusExpiredMsg{seq: seq}
+		})
 	case exitConfirmExpiredMsg:
 		if msg.seq == m.exitConfirmSeq {
 			m.exitConfirmActive = false
@@ -1356,6 +1567,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.PasteMsg:
 		return m.routePaste(msg.Content)
 	case tea.KeyPressMsg:
+		m.keySeq++
 		if m.trustPromptRequired && m.picker != nil && m.picker.kind == pickerTrust {
 			if keyCtrl(msg, 'c') || keyIs(msg, tea.KeyEsc) {
 				return m, nil
@@ -1389,6 +1601,18 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleCtrlC()
 		case m.keyMatch(m.keyBindings.toggleDetailed, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'o') }):
 			return m.toggleDetailedTranscript(), nil
+		case keyCtrl(msg, 'g'):
+			// GAP-G rest (§17): the detail/evidence pane toggle. Ctrl+O stays
+			// the detailed-transcript toggle (its pinned contract and tests);
+			// the pane gets its own chord.
+			return m.toggleDetailView(), nil
+		case m.keyMatch(m.keyBindings.toggleNarration, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'n') }) && !m.transcriptDetailed:
+			// GAP-L (DoD 41): cycle the live narration verbosity. A pure
+			// projection change: nothing recorded is dropped, and the height
+			// cache must re-measure because the visible row set changed.
+			m.narrationVerbosityLevel = m.narrationVerbosityLevel.next()
+			m.altScreenSettledWidth = 0
+			return m, nil
 		case m.fileView.active && m.noBlockingModal() && m.composerValue() == "" && (keyText(msg) == "d" || keyText(msg) == "f"):
 			// Mode toggle for the file drill-in, only while the composer is empty
 			// (so mid-sentence typing is never hijacked) and no modal is up (so a
@@ -1429,6 +1653,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// silently close the drill-in behind it.
 			if m.fileView.active && m.noBlockingModal() {
 				return m.exitFileView(), nil
+			}
+			// Detail pane exits on Esc (same drill-in contract).
+			if m.detailView.active && m.noBlockingModal() {
+				return m.exitDetailView(), nil
 			}
 			if m.mcpCommandCancel != nil {
 				m.cancelMCPCommand()
@@ -1601,6 +1829,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.transcriptDetailed {
 				return m, nil
 			}
+			// During an execution run, Ctrl+T toggles the trajectory
+			// surface (§10, GAP-G): a run in flight is when trajectory is
+			// worth inspecting, and the contract names Ctrl+T for it.
+			// Outside a run (design mode, idle) it keeps cycling reasoning
+			// effort — the pre-existing binding, unchanged.
+			if m.pipeline.active && m.noBlockingModal() {
+				m.trajectoryVisible = !m.trajectoryVisible
+				m.trajectoryAutoRevealed = false
+				return m, nil
+			}
 			// Ctrl+T cycles reasoning effort (auto -> low ->
 			// medium -> high -> auto), but only when nothing modal is up — the
 			// same gate shift+tab uses above. Not gated on m.pending: cycling
@@ -1688,9 +1926,29 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.mcpManager != nil {
 				return m.handleMCPManagerKey(msg)
 			}
+			if m.picker != nil && m.picker.kind == pickerModel && !m.modelPickerIsLoading() {
+				// Tab is inert on the /model picker: the long-context
+				// toggle it drove had no runtime consumer and was removed
+				// (review finding 15). Swallow it so Tab does not fall
+				// through to suggestion cycling while the picker owns input.
+				return m, nil
+			}
 			if m.picker == nil && m.suggestionsActive() {
 				m.moveSuggestion(1)
 				return m, nil
+			}
+		case keyIs(msg, tea.KeyLeft) || keyIs(msg, tea.KeyRight):
+			// ←/→ dial the highlighted /model row's reasoning effort in place, so
+			// "this model, thinking harder" is one pass through one surface instead
+			// of /model followed by /effort. Only the model picker claims these keys;
+			// everywhere else they fall through to the composer's cursor movement.
+			if m.picker != nil && m.picker.kind == pickerModel && !m.modelPickerIsLoading() {
+				delta := 1
+				if keyIs(msg, tea.KeyLeft) {
+					delta = -1
+				}
+				next, _ := m.adjustModelPickerEffort(delta)
+				return next, nil
 			}
 		case keyIs(msg, tea.KeyPgUp):
 			m = m.clearHover()
@@ -2182,9 +2440,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.transcript = appendTranscriptRow(m.transcript, askUserTranscriptRow(msg.request))
 		m.pendingAskUser = &pendingAskUserPrompt{
-			request: msg.request,
-			answer:  msg.answer,
-			states:  newAskUserStates(msg.request.Questions),
+			request:   msg.request,
+			answer:    msg.answer,
+			states:    newAskUserStates(msg.request.Questions),
+			startedAt: m.now(),
 		}
 		m.reportAgentLifecycle(herdrBlocked)
 		m.clearComposer()
@@ -2277,9 +2536,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.worktreeNotice = notice
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: notice})
 		}
-		m.clearStreamingToolCall() // active run finished — drop any lingering "writing" block
-		m.clearActiveTool()        // and any in-flight tool label/elapsed clock
-		m.pending = false
+		m.releaseRun()
 		m = m.disarmCancelConfirmation() // the run finished on its own — nothing left to confirm cancelling
 		// Fully reset the fade state at stream end. The next render
 		// emits the final row in solid ink (no settling animation), and
@@ -2289,14 +2546,6 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// carrying over to the next turn (and stops lineAges from
 		// growing indefinitely across many runs).
 		m.resetStreamingFade()
-		// The run is complete: release its context now instead of waiting for the
-		// parent context — every prompt leaked a CancelFunc (and its timer
-		// resources) until app exit otherwise.
-		if m.runCancel != nil {
-			m.runCancel()
-		}
-		m.runCancel = nil
-		m.activeRunID = 0
 		m.plan.frozenAt = m.now() // freeze the plan clock while idle (no run in flight)
 		// A fully successful turn means the task is done. Weaker models often
 		// forget the final update_plan, leaving the panel stuck mid-progress;
@@ -2325,6 +2574,23 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m, sessionRows = m.appendSessionEvents(msg.sessionEvents)
 		for _, row := range sessionRows {
 			m.transcript = appendTranscriptRow(m.transcript, row)
+		}
+		// GAP-L DoD 46: a design turn that pinned decisions refreshes the
+		// ledger card in the live transcript. The ledger re-projects whole
+		// from the reconstructed state (append-only, revised markers kept),
+		// replacing the previous ledger card so the transcript carries the
+		// current ledger, not a stack of stale ones.
+		if msg.err == nil && len(msg.sessionEvents) > 0 {
+			hasPins := false
+			for _, event := range msg.sessionEvents {
+				if event.Type == sessions.EventDecisionPinned {
+					hasPins = true
+					break
+				}
+			}
+			if hasPins {
+				m = m.refreshDecisionsLedgerCard()
+			}
 		}
 		for _, row := range msg.rows {
 			if row.kind == rowReasoning {
@@ -2432,16 +2698,18 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case crystallizeResultMsg:
 		if msg.runID != m.activeRunID {
+			// Same cancellation rule as the plan execution path: a
+			// cancelled crystallization owns its receipt and its drain
+			// obligation. It holds no worktree of its own.
+			if m.wasCancelled(msg.runID) {
+				m = m.finalizeCancelledRun(cancelledRunFinalization{runID: msg.runID})
+				if m.cancelledRunExit() {
+					return m.quit()
+				}
+			}
 			return m, nil
 		}
-		m.clearStreamingToolCall()
-		m.clearActiveTool()
-		m.pending = false
-		if m.runCancel != nil {
-			m.runCancel()
-		}
-		m.runCancel = nil
-		m.activeRunID = 0
+		m.releaseRun()
 		m.reportAgentLifecycle(herdrIdle)
 		var flushRows []transcriptRow
 		events := flushableSessionEvents(msg.sessionEvents)
@@ -2483,13 +2751,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.pendingPlan = &msg.plan
 		m.pendingCritique = &msg.critique
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: formatDesignPlan(msg.plan)})
+		// P4 lifecycle cards (GAP-E): the plan and its typed critique render
+		// as contract cards instead of flat system notes. The gate logic
+		// below is unchanged — required issues still block /approve.
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: planCardTranscriptText(msg.plan, msg.critique)})
 		if warning := designCoverageWarning(msg.plan); warning != "" {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: warning})
 		}
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: formatPlanCritique(msg.critique)})
 		if msg.critique.MustFixBeforeExecution {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Critic flagged must-fix issues. /approve is blocked. Revise and re-run /crystallize."})
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: critiqueCardTranscriptText(msg.plan, msg.critique)})
 		} else {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan is ready. Type /approve to execute."})
 		}
@@ -2507,6 +2777,24 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case planExecutionResultMsg:
 		if msg.runID != m.activeRunID {
+			// A run the user CANCELLED still returns its terminal
+			// message here, because cancelRun already cleared
+			// activeRunID. That is not a stale session result: it is
+			// the cancellation's own completion, and it owns the
+			// CANCELLED receipt, the handoff surface, and the drain
+			// obligation cancelRun recorded (review finding 3).
+			if m.wasCancelled(msg.runID) {
+				m = m.finalizeCancelledRun(cancelledRunFinalization{
+					runID:          msg.runID,
+					worktree:       msg.worktree,
+					preserved:      msg.worktreePreserved,
+					mergeAvailable: msg.mergeAvailable,
+				})
+				if m.cancelledRunExit() {
+					return m.quit()
+				}
+				return m, nil
+			}
 			unlockPreparedWorktree(msg.worktree)
 			return m, nil
 		}
@@ -2515,13 +2803,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.worktreeNotice = notice
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: notice})
 		}
-		m.pending = false
-		m.clearActiveTool()
-		if m.runCancel != nil {
-			m.runCancel()
-		}
-		m.runCancel = nil
-		m.activeRunID = 0
+		m.releaseRun()
 		m.reportAgentLifecycle(herdrIdle)
 		// Refresh before the failure branch returns. A run that fails still
 		// appended events — the approval, the tasks that did start, and each
@@ -2533,19 +2815,127 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if msg.err != nil {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Plan execution failed: " + msg.err.Error()})
+			// Terminal receipt (GAP-E): a failed or user-cancelled plan
+			// execution renders as a styled result card — failing stage,
+			// full untruncated reason, recovery keys — not a bare error
+			// line (audit finding 3). Cancellation (context canceled from
+			// the user's Ctrl+C) projects the CANCELLED card, which is
+			// distinct from failure by contract, with the lane's real
+			// worktree context (slice B of SPEC_TUI_RECEIPTS_OPEN_WORK).
+			card := failedExecutionCard(msg.err)
+			if card.kind == receiptCancelled {
+				card = cancelledReceiptForWorktree(msg.worktree)
+			}
+			// The receipt is the live outcome surface: its advertised
+			// [A]/[D]/[R]/[I]/[L] keys dispatch through handleReceiptKey until
+			// a new run begins.
+			m.lastTerminalReceipt = card.kind
+			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
+				kind: rowError,
+				text: receiptTranscriptPayload(card),
+			})
+			// HANDOFF (GAP-F): the lane exited with the worktree preserved.
+			// The card distinguishes lane death from work loss and names
+			// the resume path, before any review picker.
+			outcome := "failed"
+			if card.kind == receiptCancelled {
+				outcome = "cancelled"
+			}
+			m.offerHandoff(msg.worktree, outcome, 0, 0, msg.worktreePreserved, msg.mergeAvailable)
 			return m.maybeOfferWorktreeReview(msg.worktree, msg.sourceDirty)
 		}
 		m.designMode = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendAssistant, text: msg.result.FinalAnswer})
 		m.pendingPlan = nil
 		m.pendingCritique = nil
+		// Terminal receipt (GAP-E, slice A of SPEC_TUI_RECEIPTS_OPEN_WORK):
+		// a run the runtime marked completed projects the VERIFIED card.
+		// The DoD-13 gate is the presentation state's completion receipt —
+		// deterministic runtime truth, not an inference from the error
+		// boundary. Evidence derives from the persisted plan result; a
+		// parse failure appends nothing (the JSON answer above still
+		// carries the data — honest absence, never an invented card).
+		if m.lastState.Completion != nil && m.lastState.Completion.Status == "completed" {
+			if card, ok := verifiedReceiptFromResult(msg.result.FinalAnswer, m.lastState.Usage, m.turnStartedAt, m.now()); ok {
+				m.lastTerminalReceipt = card.kind
+				// rowError is the receipt row channel (rendering.go
+				// routes receipt payloads from error rows); the card
+				// colors by its own kind, so VERIFIED renders green.
+				m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
+					kind: rowError,
+					text: receiptTranscriptPayload(card),
+				})
+			}
+		}
 		return m.maybeOfferWorktreeReview(msg.worktree, msg.sourceDirty)
+	case diffCapturedMsg:
+		m = m.handleDiffCaptured(msg)
+		return m, nil
+	case diffEditorMsg:
+		if msg.err != nil {
+			m = m.appendSystemNotice("Editor exited with an error: " + msg.err.Error())
+		}
+		return m, nil
 	case worktreeReviewResultMsg:
+		// Clear the in-flight operation before anything else, so a
+		// refused or failed action re-arms the surface immediately.
+		// A result whose scheduled identity no longer matches the live
+		// one (session switched, or a new run started) is stale: its
+		// notice is still shown, but it must not resolve a surface that
+		// now belongs to a different session or run.
+		staleOp := false
+		if msg.op != nil {
+			if m.worktreeOp != nil && *m.worktreeOp == *msg.op {
+				m.worktreeOp = nil
+			}
+			staleOp = msg.op.session != m.activeSession.SessionID
+		}
 		if notice := strings.TrimSpace(msg.notice); notice != "" {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: notice})
 		}
+		if staleOp {
+			return m, nil
+		}
+		// HANDOFF resolution (finding 5): the handoff clears ONLY when
+		// the operation actually completed. A merge conflict, a dirty
+		// source refusal, a failed preserve, or a failed cleanup all
+		// return the worktree in kept, and the user needs the card's
+		// recovery keys exactly then. Announcing the outcome is the
+		// notice's job above; this decides whether the surface survives.
+		if msg.op != nil && m.pendingHandoff != nil && m.pendingHandoff.lane == msg.op.lane {
+			switch msg.op.kind {
+			case worktreeOpHandoffMerge, worktreeOpHandoffDiscard:
+				if msg.succeeded() {
+					m.pendingHandoff = nil
+				}
+			}
+		}
+		// Capture the lane BEFORE the mutation below nils activeWorktree
+		// (Reject keeps no worktree, so kept is nil). The diff viewport
+		// shows the lane's worktree: any decision that resolved the lane
+		// (merged or removed) leaves that diff pointing at a worktree that
+		// no longer exists — close the view so the UI never renders a diff
+		// of a deleted directory. A Keep leaves the worktree on disk and
+		// the view open.
+		resolvedLane := ""
+		if m.pendingHandoff != nil {
+			resolvedLane = m.pendingHandoff.lane
+		} else if m.activeWorktree != nil {
+			resolvedLane = m.activeWorktree.Name
+		}
 		m.activeWorktree = msg.kept
+		// The diff viewport shows the lane's worktree. Any review decision
+		// that resolved the lane (merged or removed) leaves that diff
+		// pointing at a worktree that no longer exists — close the view so
+		// the UI never renders a diff of a deleted directory. A Keep (kept
+		// != nil) leaves the worktree on disk and the view open. The lane
+		// match goes through the pending handoff (the handoff keys set it)
+		// or the active worktree, so a stale diff for an unrelated lane is
+		// never closed.
+		lane := resolvedLane
+		if lane != "" && msg.kept == nil && m.diffView.active && lane == m.diffView.wt.Name {
+			m = m.exitDiffReview()
+		}
 		// Record the decision and reject reason on a session event so a later
 		// trace consumer can lift them into the run_outcome. Best-effort: a
 		// review trace write never fails the turn.
@@ -2565,6 +2955,19 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			v.RunID = m.activeSession.SessionID
 			v.DecidedAt = m.now()
 			verdictCmd = m.writeVerdictCmd(*v)
+		}
+		// HANDOFF re-arm (GAP-F): a Keep/Reject/Esc decision leaves the
+		// worktree on disk with work preserved. The review picker owned
+		// input while it was up; once it resolves, the handoff card's keys
+		// arm so the user can still merge-back, open, or discard from the
+		// persistent card. An Accept resolved the worktree (merged) — the
+		// handoff stays disarmed. The preserved check is a single os.Stat
+		// on a path the review just touched (kept != nil means the review
+		// left it in place); it re-checks on the next render instead of the
+		// UI loop (F1): the card's payload re-validates on offer, and a
+		// vanished worktree renders the WORK LOST form from the payload.
+		if msg.kept != nil && m.pendingHandoff != nil {
+			m.pendingHandoff.preserved = tuiWorktreeExists(msg.kept.Path)
 		}
 		m.reportAgentLifecycle(herdrIdle)
 		return m, verdictCmd
@@ -2610,6 +3013,18 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.pipeline.applyState(msg.state)
+		// Regression auto-reveals trajectory with an explicit notice (§10,
+		// GAP-G): the runtime surfaced a critical failure on the diagnostic
+		// surface, and the UI must say so rather than pretend the user
+		// opened it. DoD 12's "auto-revealed | ctrl+t to hide" wording.
+		if msg.state.Health.Effective() == presentation.HealthRegression && !m.trajectoryVisible {
+			m.trajectoryVisible = true
+			m.trajectoryAutoRevealed = true
+		}
+		// P1.4 status bar: the context trail observes every lifecycle
+		// transition (append-on-change, never rewinds — frame RRoni).
+		m.phaseTrail.observe(msg.state.Lifecycle)
+		m.lastState = msg.state
 		return m, nil
 	case planStepExplanationMsg:
 		// Drop a result from a previous run: beginRun bumps planDetailGen and clears
@@ -2833,6 +3248,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case mcpCommandResultMsg:
 		return m.applyMCPCommandResultMessage(msg), nil
+	case sessionsScannedMsg:
+		// Async session scan landed (F1, §14): arm the resume picker and
+		// launch resume card from the result. No store I/O happened here.
+		return applySessionsScanned(m, msg), nil
+	case initialCmdsBatchMsg:
+		return m, tea.Batch(msg.cmds...)
 	}
 
 	var cmd tea.Cmd
@@ -2964,6 +3385,12 @@ func (m model) transcriptView() string {
 	emptyOverlay := ""
 	if m.transcriptEmpty() && !m.pending && viewportOverlay != "" {
 		emptyOverlay = viewportOverlay
+		// Size the overlay against the REAL body height for this frame so
+		// the palette block matches the viewport exactly (see the
+		// two-column path).
+		if m.altScreen && m.height > 0 {
+			m.overlayBodyHeight = m.scrollableTranscriptFrame(m.normalTranscriptHeader(width), m.footerView(width)).bodyRect.height
+		}
 	}
 	bodyItems := m.transcriptBodyItems(width, emptyOverlay, false)
 
@@ -2978,7 +3405,15 @@ func (m model) transcriptView() string {
 	// not pinned at the top. It appears above the specialist cards like a
 	// chat message, the way todo/plan updates render inline.
 	if m.altScreen && m.height > 0 {
-		return m.scrollableTranscriptItemsView(m.normalTranscriptHeader(width), bodyItems, footer, width, overlayForViewport)
+		// GAP-K slice 2 (owner Tension-3 call): the in-flow evidence band.
+		// During a run, on a wide single-column frame, execution evidence
+		// renders in the transcript flow above the scrolling body — the
+		// header carries it so it stays pinned while the transcript scrolls.
+		header := m.normalTranscriptHeader(width)
+		if band := m.evidenceBandBlock(width); band != "" {
+			header = header + "\n" + band
+		}
+		return m.scrollableTranscriptItemsView(header, bodyItems, footer, width, overlayForViewport)
 	}
 
 	bodyLayout := layoutTranscriptBodyItems(bodyItems)
@@ -3004,7 +3439,18 @@ func (m model) twoColumnTranscriptView() string {
 	width := chatW
 
 	suggestionOverlay := m.suggestionOverlay(width)
-	bodyItems := m.transcriptBodyItems(width, "", false)
+	emptyOverlay := ""
+	if m.transcriptEmpty() && !m.pending && suggestionOverlay != "" {
+		// The command/file palette must also ride the launch cockpit in the
+		// two-column layout; dropping it left a blank body and a wiped
+		// composer row whenever the sidebar was visible.
+		emptyOverlay = suggestionOverlay
+		// Size the overlay against the REAL body height for this frame
+		// (header + footer already measured) so the palette block matches
+		// the viewport exactly instead of guessing from m.height.
+		m.overlayBodyHeight = m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width)).bodyRect.height
+	}
+	bodyItems := m.transcriptBodyItems(width, emptyOverlay, false)
 	footer := m.footerView(width)
 	overlayForViewport := suggestionOverlay
 	if m.transcriptEmpty() && !m.pending {
@@ -3033,6 +3479,15 @@ func (m model) pinnedTitleBar(width int) string {
 	if m.fileView.active {
 		return m.fileViewNavBar(width)
 	}
+	// The diff review (GAP-G) uses the same one-line swap; the diff nav
+	// bar carries the run/base header and the review keys.
+	if m.diffView.active {
+		return m.diffViewNavBar(width)
+	}
+	// The detail pane (GAP-G rest, Ctrl+O) uses the same one-line swap.
+	if m.detailView.active {
+		return m.detailViewNavBar(width)
+	}
 	return m.titleBar(width)
 }
 
@@ -3042,7 +3497,7 @@ func (m model) footerView(width int) string {
 	// text box becomes the questionnaire): render the tabbed prompt + status line and
 	// skip the plan panel / idle hints / composer for a focused modal.
 	if m.pendingAskUser != nil {
-		footer.WriteString(renderAskUserQuestionnaire(*m.pendingAskUser, m.input.Value(), width))
+		footer.WriteString(renderAskUserQuestionnaire(*m.pendingAskUser, m.input.Value(), width, m.glyphTier))
 		footer.WriteString("\n")
 		footer.WriteString(m.statusLine(width))
 		return footer.String()
@@ -3164,19 +3619,18 @@ func (m model) composerIdleHint() string {
 		return ""
 	}
 	sidebarKey := labelOr(m.keyBindings.toggleSidebar, "Ctrl+B")
-	detailKey := labelOr(m.keyBindings.toggleDetailed, "Ctrl+O")
-	mouseKey := labelOr(m.keyBindings.toggleMouse, "Ctrl+E")
 
 	var hint string
 	switch widthTier(m.width) {
 	case tierTiny:
 		return "" // too cramped for a hint
 	case tierNarrow:
-		hint = "? shortcuts"
+		hint = "? shortcuts · / palette"
 	case tierMedium:
-		hint = fmt.Sprintf("? shortcuts · %s sidebar · %s copy", sidebarKey, mouseKey)
+		hint = fmt.Sprintf("? shortcuts · %s sidebar · / palette", sidebarKey)
 	default:
-		hint = fmt.Sprintf("? shortcuts · %s sidebar · %s detail · %s copy · Shift+Tab mode", sidebarKey, detailKey, mouseKey)
+		// Frame kAYHl item 9: the launch hint names the four entry points.
+		hint = fmt.Sprintf("? shortcuts · %s sidebar · / palette · /help index", sidebarKey)
 	}
 	return zeroTheme.faint.Render(hint)
 }
@@ -3335,7 +3789,7 @@ func (m model) scrollableTranscriptItemsView(header string, items []transcriptBo
 	if subchat {
 		sourceLen = len(m.subchat.childRows)
 	}
-	if overlay == "" && cache.valid && cache.generation == m.chatLayoutGen &&
+	if overlay == "" && m.overlayBodyHeight == 0 && cache.valid && cache.generation == m.chatLayoutGen &&
 		cache.width == width && cache.sourceLen == sourceLen && cache.flushed == m.flushed &&
 		cache.height == frame.bodyRect.height &&
 		cache.itemCount == len(items) && cache.detailed == detailed && cache.subchat == subchat {
@@ -3918,18 +4372,12 @@ func (m model) appendStreamingCursor(lines []string, width int) []string {
 // composerLine renders the borderless composer.
 func (m model) composerLine(width int) string {
 	input := m.input
-	hideInputForSuggestions := m.suggestionsActive() && (!m.suggestionsAreFiles || fileSuggestionOnlyInput(m.input.Value()))
-	if hideInputForSuggestions {
-		input.SetValue("")
-		input.Placeholder = ""
-		input.CursorEnd()
-	}
+	// The palette owns the screen, but the Pen prompt row still shows the
+	// live query ("> /mod") — wiping it made the composer look broken while
+	// the palette was open.
 	state := composerState{text: input.Value(), cursor: input.Position()}
 	if m.composerActive {
 		state = m.composer
-	}
-	if hideInputForSuggestions {
-		state = composerState{}
 	}
 	argumentHint := commandArgumentHintForInput(input.Value())
 	if argumentHint != "" && input.Position() != len([]rune(input.Value())) {
@@ -3949,6 +4397,18 @@ func (m model) composerLine(width int) string {
 			cursor: composerDisplayCursorForPastePreviews(end, previews),
 		}
 	}
+	// Pen composer grammar: the prompt glyph swaps per state — "❯ " while
+	// typing, "∞ " while a run is in flight, "> " on the launch-idle
+	// screen (frame kAYHl). The textinput prompt drives the per-line
+	// prefix, so set it before rendering.
+	switch {
+	case m.transcriptEmpty():
+		input.Prompt = "> "
+	case m.pending:
+		input.Prompt = "∞ "
+	default:
+		input.Prompt = "❯ "
+	}
 	return renderComposerInput(input, displayState, width, m.composerCursorVisible, displaySelection)
 }
 
@@ -3964,9 +4424,9 @@ func renderComposerInput(input textinput.Model, state composerState, width int, 
 		return ""
 	}
 	if state.text == "" {
-		// Empty box: show a (blinking) cursor before the placeholder so the focused
-		// input always has a visible caret. A plain space when blinked off keeps the
-		// placeholder column stable.
+		// Empty prompt: show a (blinking) cursor before the placeholder so the
+		// focused input always has a visible caret. A plain space when blinked
+		// off keeps the placeholder column stable.
 		cursor := " "
 		if cursorVisible {
 			cursor = composerCursor(" ")
@@ -4088,6 +4548,10 @@ func renderComposerVisualLine(input textinput.Model, state composerState, segmen
 	return line.String()
 }
 
+// composerVisualLinePrefix is the prompt-gutter cell used for wrapping and
+// hit-test width math: input.Prompt (set to the in-run ∞ glyph at model
+// construction, "" in layout tests). The state-aware glyph selection lives
+// in renderComposerInput.
 func composerVisualLinePrefix(input textinput.Model, first bool) string {
 	if first {
 		return zeroTheme.userPrompt.Render(input.Prompt)
@@ -4238,29 +4702,20 @@ func commandArgumentHintForInput(value string) string {
 	return commandRequiredInputHint(command.name)
 }
 
+// composerBox renders the Pen composer: a BARE prompt row, never a bordered
+// box (frames kAYHl "> _", design frames "❯ <text>", in-run "∞ steer this
+// run…"). The model name lives in the status line, not the composer.
+// Attachment chips still render as their own row above the input.
 func (m model) composerBox(width int) string {
 	if width < 8 {
 		return fitStyledLine(m.composerLine(width), width)
 	}
-	innerWidth := maxInt(1, width-4)
-	content := m.composerLine(innerWidth)
-	lines := strings.Split(content, "\n")
-
-	rendered := make([]string, 0, len(lines)+3)
-	rendered = append(rendered, zeroTheme.lineStrong.Render("╭"+strings.Repeat("─", width-2)+"╮"))
-	// Attachment chips ([Image #1] …) render INSIDE the box, above the input line,
-	// instead of as a separate row above the box.
+	lines := strings.Split(m.composerLine(width), "\n")
+	rendered := make([]string, 0, len(lines)+1)
 	if chips := renderAttachmentChips(m.pendingImageLabels, m.pendingDocuments); chips != "" {
-		fitted := fitStyledLine(zeroTheme.muted.Render(chips), innerWidth)
-		pad := strings.Repeat(" ", maxInt(0, innerWidth-lipgloss.Width(fitted)))
-		rendered = append(rendered, zeroTheme.lineStrong.Render("│ ")+fitted+pad+zeroTheme.lineStrong.Render(" │"))
+		rendered = append(rendered, fitStyledLine(zeroTheme.muted.Render(chips), width))
 	}
-	for _, line := range lines {
-		fitted := fitStyledLine(line, innerWidth)
-		pad := strings.Repeat(" ", maxInt(0, innerWidth-lipgloss.Width(fitted)))
-		rendered = append(rendered, zeroTheme.lineStrong.Render("│ ")+fitted+pad+zeroTheme.lineStrong.Render(" │"))
-	}
-	rendered = append(rendered, m.composerDividerLine(width))
+	rendered = append(rendered, lines...)
 	return strings.Join(rendered, "\n")
 }
 
@@ -4440,6 +4895,11 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 			m, text = m.handleModelCommand(item.Value)
 		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		// Enter commits the effort the row was left on as well as the model. The
+		// model switch must land first: handleModelCommand re-derives the supported
+		// effort ring and clears an effort the new model does not accept, so
+		// applying effort before it would be overwritten.
+		m = m.applyPickedModelEffort(item)
 	case pickerEffort:
 		text := ""
 		m, text = m.handleEffortCommand(item.Value)
@@ -4474,6 +4934,22 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		// required choice hands off to the normal launch session picker.
 		var trustNote string
 		var saved bool
+		if item.Value == trustActionView {
+			// [V] view config (GAP-I): hand the config to $EDITOR via the
+			// same exec seam as diff [O], then come back to this menu. Not
+			// a trust decision; the empty note is skipped below. The menu
+			// is re-opened on the RETURNED model (choosePicker nils the
+			// picker on its own copy, so openTrustConfigInViewer's model
+			// is the one to mutate).
+			next, cmd := m.openTrustConfigInViewer(m.projectConfigPath)
+			if nextModel, ok := next.(model); ok {
+				cfg := describeProjectTrustConfig(m.projectConfigPath)
+				nextModel.trustConfigNotice(cfg)
+				nextModel.picker = nextModel.newTrustPicker()
+				next = nextModel
+			}
+			return next, cmd
+		}
 		m, trustNote, saved = m.applyTrustPickerChoice(item)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: trustNote})
 		if m.trustPromptRequired {
@@ -4482,7 +4958,9 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.trustPromptRequired = false
-			m = m.openLaunchSessionPicker()
+			var scanCmd tea.Cmd
+			m, scanCmd = m.openLaunchSessionPicker()
+			return m, scanCmd
 		}
 	}
 	return m, cmd
@@ -4572,10 +5050,14 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		}
 		m.loopLeavePrompt = commandEmpty
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionClear})
-		// Clearing wipes the visible transcript only — the session's context is
-		// intact, so the next prompt still replays the full history. Say so, and
-		// point to /new, so "cleared screen" isn't mistaken for "fresh context."
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Transcript cleared. The agent still has the full session context — use /new to start a fresh session."})
+		// P15 ack grammar: one line, verb column, outcome, unblock. Clearing
+		// wipes the visible transcript only — the session's context is intact,
+		// so say so and point to /new rather than let "cleared screen" read as
+		// "fresh context."
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: ackSystemText(ack{
+			verb:    "cleared",
+			outcome: "the agent still has the session — /new starts fresh",
+		})})
 		// Scrollback above can't be un-printed; a faint divider marks where the
 		// cleared surface ended and the frontier restarts for the fresh transcript.
 		m.resetFlushFrontier("· cleared ·")
@@ -4717,7 +5199,15 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	case commandDoctor:
 		return m.startDoctorCommand(command.text)
 	case commandSearch:
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.searchText(command.text)})
+		text := m.searchText(command.text)
+		// The frame's '! /search with no query is an error' rule: an
+		// error-style reply naming the usage must be appended as an error row,
+		// not the calm system note an empty result would produce.
+		kind := actionAppendSystem
+		if strings.HasPrefix(text, "Search\nusage: ") {
+			kind = actionAppendError
+		}
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: kind, text: text})
 		return m, nil
 	case commandResume:
 		if m.pending {
@@ -4727,12 +5217,12 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
-		// Bare `/resume` opens an interactive session picker (like /model & /provider);
-		// `/resume <id>` and `/resume latest` still resolve directly. The picker falls
-		// back to the text path when there is nothing to resume.
+		// Bare `/resume` arms the async session scan (F1: no store I/O on
+		// the UI loop); the picker opens when sessionsScannedMsg lands.
+		// `/resume <id>` and `/resume latest` still resolve directly.
 		if strings.TrimSpace(command.text) == "" {
-			if next, ok := m.openSessionPicker(); ok {
-				return next, nil
+			if next, scanCmd, ok := m.openSessionPicker(); ok {
+				return next, scanCmd
 			}
 		}
 		text := ""
@@ -4776,6 +5266,14 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	case commandExec:
 		return m.handleExecCommand(command.text)
 	case commandLayout:
+		// GAP-K DoD 36: with an argument, /layout applies a named preset
+		// (and persists it); bare /layout keeps the plan-panel toggle.
+		if strings.TrimSpace(command.text) != "" {
+			var text string
+			m, text = m.handleLayoutPresetCommand(command.text)
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+			return m, nil
+		}
 		return m.handleLayoutCommand()
 	case commandInit:
 		return m.handleInitCommand()
@@ -4822,7 +5320,12 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		// that sub-agents spawned later in THIS run read, making the run's budget
 		// inconsistent. Require an idle session (the new budget applies next run).
 		if m.pending && strings.TrimSpace(command.text) != "" {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Turns\nFinish or stop the current run before changing the tool-turn budget."})
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: ackSystemText(ack{
+				verb:    "turns",
+				blocked: true,
+				outcome: "a run is in progress",
+				unblock: "finish or stop the run, then set the budget",
+			})})
 			return m, nil
 		}
 		text := ""
@@ -4898,18 +5401,33 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.pending {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Retry\ncannot retry while a run is in progress."})
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: ackSystemText(ack{
+				verb:    "retry",
+				blocked: true,
+				outcome: "a run is in progress",
+				unblock: "esc esc to cancel, then retry",
+			})})
 			return m, nil
 		}
 		if m.compactInFlight {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{
 				kind: actionAppendSystem,
-				text: "Retry\nstatus: warning\nCompaction is running. Retry once it finishes.",
+				text: ackSystemText(ack{
+					verb:    "retry",
+					blocked: true,
+					outcome: "compaction is running",
+					unblock: "retry once it finishes",
+				}),
 			})
 			return m, nil
 		}
 		if strings.TrimSpace(m.lastPrompt) == "" {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Retry\nno previous prompt to resend."})
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: ackSystemText(ack{
+				verb:    "retry",
+				blocked: true,
+				outcome: "no previous prompt in this session",
+				unblock: "send a prompt first, then retry",
+			})})
 			return m, nil
 		}
 		// Re-stage the attachments the last prompt carried so launchPrompt rebuilds
@@ -4922,7 +5440,12 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		return m.launchPrompt(m.lastPrompt)
 	case commandEdit:
 		if strings.TrimSpace(m.lastPrompt) == "" {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Edit\nno previous prompt to recall."})
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: ackSystemText(ack{
+				verb:    "edit",
+				blocked: true,
+				outcome: "no previous prompt to recall",
+				unblock: "send a prompt first, then edit",
+			})})
 			return m, nil
 		}
 		// Re-stage the remembered attachments alongside the recalled text so an
@@ -4938,7 +5461,12 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	case commandCopy:
 		text := m.lastAssistantAnswer()
 		if strings.TrimSpace(text) == "" {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Copy\nno answer to copy yet."})
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: ackSystemText(ack{
+				verb:    "copy",
+				blocked: true,
+				outcome: "nothing to copy yet",
+				unblock: "no answer in this session",
+			})})
 			return m, nil
 		}
 		return m, copyTranscriptSelectionCmd(text)
@@ -5066,6 +5594,16 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 		transition := splicerun.NewDesignTransitionRecorder()
 		approveAvailable := m.pendingPlan != nil && (m.pendingCritique == nil || !m.pendingCritique.MustFixBeforeExecution)
 		designTransitionRegistry(designRegistry, approveAvailable, transition)
+		// The decisions ledger lets the agent pin settled decisions as
+		// first-class runtime data (§7.1); drained into session events
+		// after the turn.
+		decisions := splicerun.NewDecisionRecorder()
+		designRegistry.Register(splicerun.NewPinDesignDecisionTool(decisions))
+		// The open-question ledger lets the agent raise unresolved questions
+		// the design depends on (§7.1); drained into session events the same
+		// way, and rendered on the resume card / launch DECISIONS module.
+		openQuestions := splicerun.NewOpenQuestionRecorder()
+		designRegistry.Register(splicerun.NewRaiseOpenQuestionTool(openQuestions))
 		return m, tea.Batch(m.runAgentWithOptions(m.activeRunID, runCtx, rawPrompt, turnImages, tuiAgentRunOptions{
 			registry:      designRegistry,
 			systemPrompt:  designSystemPrompt,
@@ -5073,6 +5611,8 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 			priorMessages: designPrior,
 			serverTools:   []zeroruntime.ServerTool{{Kind: zeroruntime.ServerToolWebSearch}},
 			transition:    transition,
+			decisions:     decisions,
+			openQuestions: openQuestions,
 		}), m.spinner.Tick)
 	}
 	runOpts := tuiAgentRunOptions{execDirect: m.execDirectPending}
@@ -5096,11 +5636,19 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	m.specialists.clear()
 	m.plan.clear()
 	m.pipeline.clear()
+	// lastState described the PREVIOUS run. Clearing the pipeline while
+	// keeping it left an interval where the panel was empty but the
+	// completion, receipt, and phase chip still projected the old run
+	// (review finding 7). Clear the whole projection together.
+	m.lastState = presentation.State{}
 	m.stepWork = nil
 	m.stepNarration = nil
 	m.stepExplanation = nil
 	m.planDetailOpen = false
 	m.planDetailGen++ // invalidate any in-flight step-explanation from the prior run
+	// The previous run's terminal receipt card is no longer the live
+	// outcome surface; its action keys stop dispatching.
+	m.lastTerminalReceipt = ""
 	// Swarm task IDs can repeat. Scope their cached completion/session state to
 	// this run so a reused subagent-1 cannot inherit the prior row and disappear.
 	m.swarmDoneAt = map[string]time.Time{}
@@ -5143,7 +5691,15 @@ func (m *model) ensureSpinnerTick() tea.Cmd {
 }
 
 func (m model) launchQueuedMessageIfReady() (model, tea.Cmd) {
-	if !m.hasQueuedMessage() || m.pending || m.exiting || m.pendingPermission != nil || m.pendingAskUser != nil || m.pendingSpecReview != nil {
+	// Busy guards mirror loopBusy (loop.go) where it matters: a queued prompt
+	// must not launch while a run streams, while exiting, or during
+	// compaction — compactResultMsg rewrites transcript and session events
+	// wholesale, and a run launched mid-compaction races that rewrite (the
+	// same race /retry's compactInFlight guard exists for). The modal guards
+	// here cover the three gates that own the composer; loopBusy additionally
+	// refuses to LAUNCH a run behind any open modal, a stricter bar a queued
+	// prompt (queued before the modal opened) does not need.
+	if !m.hasQueuedMessage() || m.pending || m.exiting || m.compactInFlight || m.pendingPermission != nil || m.pendingAskUser != nil || m.pendingSpecReview != nil {
 		return m, nil
 	}
 	prompt := m.queuedMessage
@@ -5535,10 +6091,15 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				m.sendAgentRow(runID, row)
 				// Persist the reasoning text so it survives /resume. One event per
 				// flushed segment; the text mirrors the row (trimmed by
-				// reasoningTranscriptRow).
+				// reasoningTranscriptRow). The ordinal rides along so rehydration
+				// rebuilds the SAME stable block id (DoD 43/45): identity is not
+				// positional guesswork on the consumer side.
 				sessionEvents = append(sessionEvents, pendingSessionEvent{
-					Type:    sessions.EventReasoning,
-					Payload: map[string]any{"content": row.text},
+					Type: sessions.EventReasoning,
+					Payload: map[string]any{
+						"content": row.text,
+						"seq":     reasoningSeq,
+					},
 				})
 			}
 			reasoningText = ""
@@ -5955,19 +6516,18 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			}
 			// P1.1: pipeline runs surface presentation snapshots to the
 			// session event log so the run record carries runtime truth.
-			// Rendering from these landed in P1.2.
-			downstreamPresentation := options.OnPresentationState
-			options.OnPresentationState = func(state presentation.State) {
-				sessionEvents = append(sessionEvents, pendingSessionEvent{
-					Type:    sessions.EventMessage,
-					Payload: map[string]any{"presentation_schema_version": state.SchemaVersion, "lifecycle": string(state.Lifecycle)},
-				})
-				if downstreamPresentation != nil {
-					downstreamPresentation(state)
-				}
-			}
+			// The persistence itself lives in runtimeWiring
+			// (recordPresentationState), shared with the approval path;
+			// this path only supplies the sink.
 		}
-		options = (runtimeWiring{runID: runID, send: m.runtimeMessageSink, beforeText: beforeText}).decorate(options)
+		options = (runtimeWiring{
+			runID:      runID,
+			send:       m.runtimeMessageSink,
+			beforeText: beforeText,
+			recordEvent: func(event pendingSessionEvent) {
+				sessionEvents = append(sessionEvents, event)
+			},
+		}).decorate(options)
 		if m.captureRunOptions != nil {
 			m.captureRunOptions(options)
 		}
@@ -6024,13 +6584,19 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				preparedPtr = &copy
 			}
 			sourceDirty := inspectSourceDirty(preparedWorktree)
+			// HANDOFF card inputs (F1): computed HERE, off the UI loop.
+			// preserved = the worktree path still exists (lane death vs
+			// work loss); mergeAvailable = preserved AND source not dirty
+			// (the review's dirty-main gate).
+			wtPreserved := preparedPtr != nil && tuiWorktreeExists(preparedPtr.Path)
+			wtMergeable := wtPreserved && !sourceDirty
 			if err != nil {
 				flushReasoning(m.now())
 				sessionEvents = append(sessionEvents, pendingSessionEvent{
 					Type:    sessions.EventError,
 					Payload: map[string]any{"message": err.Error()},
 				})
-				return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, turnTools: toolCalls, turnElapsed: m.now().Sub(started), memoryStatus: memStatus, memoryCount: memCount, memoryByType: memByType, worktree: preparedPtr, worktreeNotice: worktreeNotice, sourceDirty: sourceDirty}
+				return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, turnTools: toolCalls, turnElapsed: m.now().Sub(started), memoryStatus: memStatus, memoryCount: memCount, memoryByType: memByType, worktree: preparedPtr, worktreeNotice: worktreeNotice, sourceDirty: sourceDirty, worktreePreserved: wtPreserved, mergeAvailable: wtMergeable}
 			}
 			flushReasoning(m.now())
 			elapsed := m.now().Sub(started)
@@ -6056,7 +6622,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 					"content": result.FinalAnswer,
 				},
 			})
-			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, turnTools: toolCalls, turnElapsed: elapsed, ttft: ttft, turnVisibleOutputTokens: turnVisibleOutputTokens, memoryStatus: memStatus, memoryCount: memCount, memoryByType: memByType, worktree: preparedPtr, worktreeNotice: worktreeNotice, sourceDirty: sourceDirty}
+			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, turnTools: toolCalls, turnElapsed: elapsed, ttft: ttft, turnVisibleOutputTokens: turnVisibleOutputTokens, memoryStatus: memStatus, memoryCount: memCount, memoryByType: memByType, worktree: preparedPtr, worktreeNotice: worktreeNotice, sourceDirty: sourceDirty, worktreePreserved: wtPreserved, mergeAvailable: wtMergeable}
 		}
 		if err != nil {
 			flushReasoning(m.now())
@@ -6111,6 +6677,27 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		var designTransition *splicerun.DesignTransitionRequest
 		if runOptions.runKind == tuiRunDesignConversation && runOptions.transition != nil {
 			designTransition = runOptions.transition.Take()
+		}
+		// A design-conversation turn also drains its decisions ledger into
+		// decision_pinned session events (§7.1): the pinned decisions become
+		// durable runtime data that survives compaction and reconstructs.
+		if runOptions.runKind == tuiRunDesignConversation && runOptions.decisions != nil {
+			for _, d := range runOptions.decisions.Take() {
+				sessionEvents = append(sessionEvents, pendingSessionEvent{
+					Type:    sessions.EventDecisionPinned,
+					Payload: d,
+				})
+			}
+		}
+		// And its open questions into open_question_raised session events
+		// (§7.1): the open set becomes durable runtime data the same way.
+		if runOptions.runKind == tuiRunDesignConversation && runOptions.openQuestions != nil {
+			for _, q := range runOptions.openQuestions.Take() {
+				sessionEvents = append(sessionEvents, pendingSessionEvent{
+					Type:    sessions.EventOpenQuestionRaised,
+					Payload: q,
+				})
+			}
 		}
 		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, turnTools: toolCalls, turnElapsed: elapsed, ttft: ttft, turnVisibleOutputTokens: turnVisibleOutputTokens, memoryStatus: memStatus, memoryCount: memCount, memoryByType: memByType, designTransition: designTransition}
 	}
@@ -6236,6 +6823,33 @@ func (m *model) clearActiveTool() {
 	// rejection, cancellation, timeout, or run completion).
 	m.liveToolCallID = ""
 	m.liveToolOutput = ""
+}
+
+// releaseRun is the single run-release invariant for the terminal-run
+// handlers (agentResponseMsg, crystallizeResultMsg, planExecutionResultMsg):
+// every path that ends the active run must clear the transient per-run state
+// in exactly this way, because each piece exists to stop a leak or a stale
+// render:
+//
+//   - clearStreamingToolCall / clearActiveTool: no "writing" block or running
+//     tool survives the run that owned it;
+//   - runCancel released: the run's context CancelFunc is invoked and dropped
+//     now rather than at app exit (every prompt leaked one before this);
+//   - pending false + activeRunID 0: late messages for this run take the
+//     stale-async path (runID != activeRunID), never the live path.
+//
+// Handlers keep their own extras (lifecycle report, session-event flush,
+// plan reconciliation); this covers only the pieces every terminal handler
+// shares. Pointer receiver: runCancel invokes and nils.
+func (m *model) releaseRun() {
+	m.clearStreamingToolCall()
+	m.clearActiveTool()
+	m.pending = false
+	if m.runCancel != nil {
+		m.runCancel()
+	}
+	m.runCancel = nil
+	m.activeRunID = 0
 }
 
 func (m model) sendAgentReasoning(runID int, delta string) {

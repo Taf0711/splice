@@ -181,6 +181,12 @@ func checkPipelineGolden(t *testing.T, name string, state presentation.State, wi
 }
 
 func TestPipelineGoldenRenders(t *testing.T) {
+	// Goldens pin the ASCII-tier bar (the production fallback and the
+	// width-exact guarantee); the rich eighth-block bar is asserted in
+	// presentation tests.
+	saved := pipelineGlyphTier
+	pipelineGlyphTier = presentation.GlyphTierASCII
+	t.Cleanup(func() { pipelineGlyphTier = saved })
 	fixtures := []struct {
 		name  string
 		state presentation.State

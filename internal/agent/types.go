@@ -60,6 +60,12 @@ type AttributedUsage struct {
 	// It lives here rather than on Usage because Usage is rebuilt from plain
 	// numeric literals at several call sites that would silently drop it.
 	ReportedCostUSD *float64
+	// PromptLayoutHash is the stable-prefix layout hash (system prompt plus
+	// tool schema) of the request that produced this usage. Requests for one
+	// stage within a run must carry the same hash; a change between rounds
+	// means the cacheable prefix flipped and the provider's prefix cache was
+	// forfeited. Empty when the caller does not report prompt layout.
+	PromptLayoutHash string
 }
 
 // ModelSelection is one resolved provider route for a pipeline stage.
@@ -279,6 +285,12 @@ type StageEvent struct {
 	Detail       string
 	Progress     int
 	ChangedFiles []string
+	// Workspace stamps the stage's isolation state ("isolated" when the
+	// run executes in a Splice worktree, "shared_cwd" otherwise), so the
+	// presentation contract can carry DoD 26's isolation badge. Empty
+	// means unset (the renderer projects shared_cwd).
+	Workspace    string
+	WorktreePath string
 }
 
 type Options struct {

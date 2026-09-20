@@ -199,7 +199,7 @@ func (m model) chooseMCPManagerItem() (model, tea.Cmd) {
 	case mcpManagerItemServer:
 		return m.runMCPManagerCommand([]string{"check", item.Name})
 	case mcpManagerItemMarketplace:
-		return m.prefillMCPManagerCommand(item.InstallCommand), nil
+		return m.prefillMCPManagerCommand(item.InstallCommand, item.Label), nil
 	case mcpManagerItemAddRemote:
 		return m.openMCPAddWizard("http"), nil
 	case mcpManagerItemAddStdio:
@@ -211,7 +211,97 @@ func (m model) chooseMCPManagerItem() (model, tea.Cmd) {
 	}
 }
 
-func (m model) prefillMCPManagerCommand(command string) model {
+// mcpMarketplaceEntryByCommand parses a marketplace InstallCommand
+// ("/mcp add <name> [--type t] [--url u] -- [cmd...]") into wizard inputs so
+// a marketplace selection opens the staged-add card instead of prefilling
+// the composer (GAP-H, frame VCeGi).
+type mcpWizardPrefill struct {
+	serverName string
+	endpoint   string
+	wizardType string
+	label      string
+}
+
+func (p mcpWizardPrefill) isRemote() bool {
+	return p.wizardType == "" || p.wizardType == "http" || p.wizardType == "sse"
+}
+
+func mcpMarketplaceEntryByCommand(command string, label string) (mcpWizardPrefill, bool) {
+	fields := strings.Fields(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(command), "/mcp")))
+	if len(fields) < 2 || fields[0] != "add" {
+		return mcpWizardPrefill{}, false
+	}
+	prefill := mcpWizardPrefill{serverName: fields[1], label: label}
+	rest := fields[2:]
+	// Split at "--" if present: everything after is the stdio command.
+	commandParts := []string{}
+	for i, arg := range rest {
+		if arg == "--" {
+			commandParts = rest[i+1:]
+			rest = rest[:i]
+			break
+		}
+	}
+	for i := 0; i < len(rest); i++ {
+		switch rest[i] {
+		case "--type":
+			if i+1 < len(rest) {
+				prefill.wizardType = rest[i+1]
+				i++
+			}
+		case "--url":
+			if i+1 < len(rest) {
+				prefill.endpoint = rest[i+1]
+				i++
+			}
+		case "--disabled":
+			// Marketplace entries are never staged disabled.
+		}
+	}
+	if prefill.wizardType == "" {
+		if prefill.endpoint != "" {
+			prefill.wizardType = "http"
+		} else if len(commandParts) > 0 {
+			prefill.wizardType = "stdio"
+			prefill.endpoint = strings.Join(commandParts, " ")
+		} else {
+			return mcpWizardPrefill{}, false
+		}
+	} else if len(commandParts) > 0 {
+		prefill.endpoint = strings.Join(commandParts, " ")
+	}
+	if prefill.serverName == "" || prefill.endpoint == "" {
+		return mcpWizardPrefill{}, false
+	}
+	return prefill, true
+}
+
+func (m model) prefillMCPManagerCommand(command string, label string) model {
+	// GAP-H (frame VCeGi): a marketplace selection must NOT dump a command
+	// into the composer. Open the staged-add wizard with the marketplace
+	// entry's server name and endpoint pre-filled instead; the user reviews
+	// the staged card and applies there. Falls back to composer prefill only
+	// when the command cannot be parsed into wizard inputs.
+	entry, ok := mcpMarketplaceEntryByCommand(command, label)
+	if ok {
+		m.mcpManager = nil
+		wizard := m.openMCPAddWizard(entry.wizardType)
+		wiz := wizard.mcpAddWizard
+		wiz.serverName = entry.serverName
+		wiz.endpoint = entry.endpoint
+		wiz.sourceLabel = entry.label
+		if entry.isRemote() {
+			// Both inputs are prefilled; skip to the endpoint step so the
+			// user still sees/authenticates the URL before the staged card.
+			wiz.step = mcpAddWizardStepEndpoint
+		} else {
+			// stdio commands need no auth step: go straight to the staged
+			// card for review.
+			wiz.step = mcpAddWizardStepConfirm
+		}
+		m.clearSuggestions()
+		return wizard
+	}
 	m.mcpManager = nil
 	m.input.SetValue(command)
 	m.input.SetCursor(len([]rune(command)))

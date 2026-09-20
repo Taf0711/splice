@@ -52,8 +52,10 @@ func doctorCommandStatus(report doctor.Report) commandStatus {
 }
 
 func doctorCheckSections(checks []doctor.Check) (provider []commandRow, platform []commandRow, other []commandRow) {
+	// The frame shows all five checks with status glyphs — a passing check is
+	// information ("this was verified"), not noise. Only skip rows with no id.
 	for _, check := range checks {
-		if check.Status == doctor.StatusPass && check.ID != "provider.connectivity" {
+		if check.ID == "" {
 			continue
 		}
 		row := commandRow{Text: doctorCheckRow(check)}

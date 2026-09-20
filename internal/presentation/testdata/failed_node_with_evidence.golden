@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "lifecycle": "execute",
+  "lifecycle": "executing",
   "plan": {
     "task_count": 2
   },

@@ -1,7 +1,9 @@
 package stages
 
 import (
+	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -52,38 +54,36 @@ func memoryBundle() *schemas.MemoryBundle {
 	}
 }
 
-func TestToolDefinitionMemorySchemaWarmVsCold(t *testing.T) {
-	warm := submitCodeToolDefinition(true)
-	props := warm.Parameters["properties"].(map[string]any)
-	if _, ok := props["memory_disposition"]; !ok {
-		t.Fatal("warm definition lacks memory_disposition property")
-	}
-	required := warm.Parameters["required"].([]string)
-	found := false
-	for _, r := range required {
-		if r == "memory_disposition" {
-			found = true
+// TestToolDefinitionSchemaHasNoMemoryDependence pins the cache contract: the
+// tool schema must not depend on whether memory was delivered. A schema that
+// varies by memory presence changes the cached prompt prefix between rounds of
+// the same stage and forfeits the provider's prefix cache. The definition
+// builders take no memory argument, so identity across memory states is
+// structural; the required list is pinned here so a memory-dependent entry
+// added later fails loudly. Disposition presence is enforced in code by
+// reconcileMemoryReview (see TestReconcileNoteWarnsOnce), not by the schema.
+func TestToolDefinitionSchemaHasNoMemoryDependence(t *testing.T) {
+	wantRequired := []string{"files", "language", "intent", "confidence"}
+	for _, tc := range []struct {
+		name string
+		def  zeroruntime.ToolDefinition
+	}{
+		{"code_writer", submitCodeToolDefinition()},
+		{"test_generator", testGeneratorToolDefinition()},
+	} {
+		props, ok := tc.def.Parameters["properties"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s: properties missing", tc.name)
 		}
-	}
-	if !found {
-		t.Fatal("warm definition must require memory_disposition")
-	}
-
-	cold := submitCodeToolDefinition(false)
-	coldRequired := cold.Parameters["required"].([]string)
-	for _, r := range coldRequired {
-		if r == "memory_disposition" {
-			t.Fatal("cold definition must not require disposition")
+		if _, ok := props["memory_disposition"]; !ok {
+			t.Fatalf("%s: lacks the memory_disposition property", tc.name)
 		}
-	}
-	if _, ok := cold.Parameters["properties"].(map[string]any)["memory_disposition"]; !ok {
-		t.Fatal("cold definition keeps the property optional but present")
-	}
-
-	tgCold := testGeneratorToolDefinition(false)
-	for _, r := range tgCold.Parameters["required"].([]string) {
-		if r == "memory_disposition" {
-			t.Fatal("test generator cold definition must not require disposition")
+		required, ok := tc.def.Parameters["required"].([]string)
+		if !ok {
+			t.Fatalf("%s: required missing", tc.name)
+		}
+		if !slices.Equal(required, wantRequired) {
+			t.Fatalf("%s: required = %v, want %v; a memory-dependent entry here flips the cached prefix between rounds", tc.name, required, wantRequired)
 		}
 	}
 }
@@ -144,4 +144,102 @@ func TestReconcileNoteWarnsOnce(t *testing.T) {
 		t.Fatal("omitted dispositions must produce the one warning")
 	}
 	var _ = json.Marshal // keep json import if assertions change
+}
+
+// TestPromptLayoutHashDetectsPrefixDrift pins the W3 detector. The layout hash
+// covers the cacheable prefix (system prompt plus tool schema), so the ledger
+// can show a flip between rounds. It must be stable for identical input and
+// must move when either component moves. The memory-dependent required entry
+// removed from the schema is exactly the drift this detector has to see.
+func TestPromptLayoutHashDetectsPrefixDrift(t *testing.T) {
+	baseHash, err := promptLayoutHash(codeWriterSystemPrompt, submitCodeToolDefinition())
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	againHash, err := promptLayoutHash(codeWriterSystemPrompt, submitCodeToolDefinition())
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	if baseHash != againHash {
+		t.Fatalf("layout hash is unstable for identical input: %s vs %s", baseHash, againHash)
+	}
+
+	drifted := submitCodeToolDefinition()
+	drifted.Parameters["required"] = append(drifted.Parameters["required"].([]string), "memory_disposition")
+	driftedHash, err := promptLayoutHash(codeWriterSystemPrompt, drifted)
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	if driftedHash == baseHash {
+		t.Fatal("a memory-dependent required entry must change the layout hash")
+	}
+
+	promptDriftHash, err := promptLayoutHash(codeWriterSystemPrompt+"\n", submitCodeToolDefinition())
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	if promptDriftHash == baseHash {
+		t.Fatal("a system prompt change must change the layout hash")
+	}
+
+	tgHash, err := promptLayoutHash(testGeneratorSystemPrompt, testGeneratorToolDefinition())
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	if tgHash == baseHash {
+		t.Fatal("distinct stages must not share a layout hash")
+	}
+}
+
+// TestCallToolUseReportsPromptLayoutHash proves the request site fires the
+// layout callback with the hash of the prefix it is about to send. The
+// registry wiring depends on this firing; if it stopped, every ledger record
+// would carry an empty hash, which looks the same as a stable prefix.
+func TestCallToolUseReportsPromptLayoutHash(t *testing.T) {
+	provider := &fakeProvider{events: toolCallEvent(codeWriterToolName, `{}`)}
+	var got []string
+	callbacks := &zeroruntime.CollectOptions{OnPromptLayout: func(hash string) { got = append(got, hash) }}
+	if _, err := callToolUse(context.Background(), provider, "m", "", codeWriterSystemPrompt, "payload", nil, submitCodeToolDefinition(), 0, callbacks, "", true); err != nil {
+		t.Fatalf("callToolUse: %v", err)
+	}
+	want, err := promptLayoutHash(codeWriterSystemPrompt, submitCodeToolDefinition())
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("layout callbacks = %v, want [%s]", got, want)
+	}
+}
+
+// TestCodeWriterRunReportsPromptLayoutHash closes the loop: a real stage run
+// must report the layout hash of the prefix it sends, not just a direct
+// callToolUse call. This is the seam that feeds the registry wiring and the
+// run ledger, so a break here would leave production records empty.
+func TestCodeWriterRunReportsPromptLayoutHash(t *testing.T) {
+	workDir := t.TempDir()
+	output := schemas.CodeWriterOutput{Language: "go", Intent: "no changes", Confidence: 0.9}
+	args, _ := json.Marshal(output)
+	provider := &requestCapturingProvider{events: toolCallEvent(codeWriterToolName, string(args))}
+
+	var layouts []string
+	stage := CodeWriter{}
+	if _, err := stage.Run(context.Background(), newHarnessInput("no changes"), provider, StageOptions{
+		WorkDir:  workDir,
+		Language: "go",
+		Stream:   zeroruntime.CollectOptions{OnPromptLayout: func(hash string) { layouts = append(layouts, hash) }},
+	}); err != nil {
+		t.Fatalf("stage run: %v", err)
+	}
+	want, err := promptLayoutHash(composeSystemPrompt(codeWriterSystemPrompt), submitCodeToolDefinition())
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	if len(layouts) == 0 {
+		t.Fatal("stage run reported no prompt layout hash")
+	}
+	for _, got := range layouts {
+		if got != want {
+			t.Fatalf("layout hash = %s, want %s", got, want)
+		}
+	}
 }

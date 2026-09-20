@@ -50,6 +50,9 @@ type Report struct {
 	Gates     []GateResult `json:"gates"`
 	Verdict   string       `json:"verdict"`
 	Reason    string       `json:"reason"`
+	// Cost carries every cost measure separately. A single per-success ratio
+	// is never the only number a reader sees.
+	Cost      CostMeasures `json:"cost"`
 	Constants Constants    `json:"constants"`
 }
 
@@ -116,6 +119,15 @@ func (r Report) RenderMarkdown() string {
 	fmt.Fprintf(&b, "\n## Arms\n\n")
 	fmt.Fprintf(&b, "cold: %d successes, %d tokens, %d weighted interventions\n", r.Cold.Successes, r.Cold.Tokens, r.Cold.WeightedInterventions)
 	fmt.Fprintf(&b, "warm: %d successes, %d tokens, %d weighted interventions\n", r.Warm.Successes, r.Warm.Tokens, r.Warm.WeightedInterventions)
+
+	fmt.Fprintf(&b, "\n## Cost\n\n")
+	fmt.Fprintf(&b, "The cost gate decides on matched-success pairs (tasks both arms passed). ")
+	fmt.Fprintf(&b, "That is the only like-for-like comparison. The other measures are reported for context.\n\n")
+	fmt.Fprintf(&b, "| measure | cold | warm | warm/cold |\n| --- | ---: | ---: | ---: |\n")
+	fmt.Fprintf(&b, "| total spend | %d | %d | %.3f |\n", r.Cost.TotalCold, r.Cost.TotalWarm, r.Cost.TotalRatio())
+	fmt.Fprintf(&b, "| mean per success | %.0f | %.0f | %.3f |\n", r.Cost.MeanColdPerSuccess, r.Cost.MeanWarmPerSuccess, r.Cost.MeanRatio())
+	fmt.Fprintf(&b, "| median per success | %.0f | %.0f | %.3f |\n", r.Cost.MedianColdPerSuccess, r.Cost.MedianWarmPerSuccess, r.Cost.MedianRatio())
+	fmt.Fprintf(&b, "| matched-success pairs (%d) | %d | %d | %.3f |\n", r.Cost.MatchedPairs, r.Cost.MatchedCold, r.Cost.MatchedWarm, r.Cost.MatchedRatio())
 
 	var failed []TaskPair
 	for _, task := range r.Tasks {

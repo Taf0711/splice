@@ -21,10 +21,17 @@ import (
 
 // Options configures the reusable Splice terminal UI shell.
 type Options struct {
-	Cwd                         string
-	Version                     string // CLI build version, shown on the home screen; empty hides it
-	UserConfigPath              string
-	DoctorUserConfigPath        string
+	Cwd                  string
+	Version              string // CLI build version, shown on the home screen; empty hides it
+	UserConfigPath       string
+	DoctorUserConfigPath string
+	// DoctorGOOS pins the platform for the doctor sandbox-backend check
+	// (internal/doctor). Empty means runtime.GOOS; tests set it so the check
+	// is deterministic regardless of the host.
+	DoctorGOOS string
+	// DoctorLookupExecutable resolves binaries on PATH for the doctor
+	// sandbox/LSP checks. Nil means exec.LookPath; tests inject a stub.
+	DoctorLookupExecutable      func(string) (string, error)
 	ProjectConfigPath           string
 	ProviderName                string
 	ModelName                   string
@@ -68,7 +75,11 @@ type Options struct {
 	// SavedTheme is the theme persisted in user config (Preferences.Theme). Applied
 	// at startup below --theme and SPLICE_THEME, so a /theme choice survives restart.
 	SavedTheme string
-	UserAgent  string
+	// SavedLayout is the layout preset persisted in user config
+	// (Preferences.Layout). Applied at startup so a /layout <preset> choice
+	// survives restart. Empty/unknown = built-in defaults.
+	SavedLayout string
+	UserAgent   string
 
 	// Notify configures completion / awaiting-input notifications.
 	Notify config.NotifyConfig

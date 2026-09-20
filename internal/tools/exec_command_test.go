@@ -493,6 +493,65 @@ func TestExecToolResultSurfacesBufferTruncationOutsideByteBudget(t *testing.T) {
 	}
 }
 
+// TestExecToolResultReducesNativeGoTestOutput: exec_command ran its output
+// through truncateExecOutput without the native reducer, so `go test -v` run
+// through a session kept every passing-test block that the bash path removes.
+// The reducer now runs before truncation, and a reduction that truncation does
+// not follow spills the raw output because the transcript no longer holds it.
+func TestExecToolResultReducesNativeGoTestOutput(t *testing.T) {
+	var b strings.Builder
+	for _, name := range []string{"TestAlpha", "TestBeta", "TestGamma"} {
+		b.WriteString("=== RUN   " + name + "\n")
+		b.WriteString("--- PASS: " + name + " (0.00s)\n")
+	}
+	b.WriteString("=== RUN   TestFail\n")
+	b.WriteString("--- FAIL: TestFail (0.00s)\n")
+	b.WriteString("    fail_test.go:12: want 1, got 2\n")
+	b.WriteString("FAIL\n")
+
+	result := execToolResult(execToolResultInput{
+		commandText:     "go test -v ./...",
+		output:          b.String(),
+		sessionID:       1,
+		exited:          true,
+		exitCode:        1,
+		maxOutputTokens: defaultMaxOutputTokens,
+	})
+
+	if strings.Contains(result.Output, "TestAlpha") {
+		t.Fatalf("a matched passing-test block must be removed, got %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "TestFail") {
+		t.Fatalf("a failing test must survive reduction, got %q", result.Output)
+	}
+	if result.Meta["output_reducer"] == "" {
+		t.Fatalf("meta must record the reducer, got %#v", result.Meta)
+	}
+	if !strings.Contains(result.Output, "reduced output saved to") {
+		t.Fatalf("a reduction without truncation must spill the raw output, got %q", result.Output)
+	}
+}
+
+// TestExecToolResultKeepsUnreducibleOutput: output with no matched passing
+// blocks must pass through unchanged, so the reducer cannot rewrite arbitrary
+// command output.
+func TestExecToolResultKeepsUnreducibleOutput(t *testing.T) {
+	text := "plain output\nwith two lines\n"
+	result := execToolResult(execToolResultInput{
+		commandText:     "echo hi",
+		output:          text,
+		sessionID:       1,
+		exited:          true,
+		maxOutputTokens: defaultMaxOutputTokens,
+	})
+	if !strings.Contains(result.Output, "plain output") || strings.Contains(result.Output, "output_reducer") {
+		t.Fatalf("unreducible output must pass through unchanged, got %q", result.Output)
+	}
+	if result.Meta["output_reducer"] != "" {
+		t.Fatalf("no reduction means no reducer meta, got %#v", result.Meta)
+	}
+}
+
 // TestCollectRespectsDeadlineUnderContinuousOutput asserts collect() returns
 // close to its requested deadline even while output keeps arriving. Before
 // the corresponding fix, the deadline was only checked in the branch reached

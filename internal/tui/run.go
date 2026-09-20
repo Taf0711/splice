@@ -65,9 +65,10 @@ func Run(ctx context.Context, options Options) int {
 	initialModel.herdr = reporter
 	if !initialModel.setup.visible {
 		initialModel = initialModel.openTrustPromptIfRequired()
-		if initialModel.picker == nil {
-			initialModel = initialModel.openLaunchSessionPicker()
-		}
+		// The session scan is armed in Init() (async, F1): the picker and
+		// launch card arm from sessionsScannedMsg. program.Send must NOT be
+		// used before Run() — it blocks until the program starts, which
+		// deadlocked the first paint.
 	}
 	if initialModel.wantsMouseCapture() {
 		initialModel.mouseCapture = true

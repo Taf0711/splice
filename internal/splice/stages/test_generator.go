@@ -70,7 +70,7 @@ func (TestGenerator) Run(ctx context.Context, input schemas.HarnessStageInput, p
 
 	options.report("generating tests")
 	payload, _ := json.MarshalIndent(tgInput, "", "  ")
-	collected, err := callValidatedToolUse(ctx, provider, options.model("medium"), options.ReasoningEffort, composeSystemPrompt(testGeneratorSystemPrompt), string(payload), options.Images, testGeneratorToolDefinition(len(tgInput.Memory) > 0), options.MaxOutputTokens, &options.Stream, func(collected *zeroruntime.CollectedStream) error {
+	collected, err := callValidatedToolUse(ctx, provider, options.model("medium"), options.ReasoningEffort, composeSystemPrompt(testGeneratorSystemPrompt), string(payload), options.Images, testGeneratorToolDefinition(), options.MaxOutputTokens, &options.Stream, func(collected *zeroruntime.CollectedStream) error {
 		_, err := parseTestGeneratorOutput(collected)
 		return err
 	}, options.PromptCacheKey)
@@ -143,7 +143,7 @@ func parseTestGeneratorOutput(collected *zeroruntime.CollectedStream) (schemas.T
 	return output, nil
 }
 
-func testGeneratorToolDefinition(hasMemory bool) zeroruntime.ToolDefinition {
+func testGeneratorToolDefinition() zeroruntime.ToolDefinition {
 	definition := zeroruntime.ToolDefinition{
 		Name:        testGeneratorToolName,
 		Description: "Submit the complete TestGeneratorOutput for the requested tests.",
@@ -159,6 +159,6 @@ func testGeneratorToolDefinition(hasMemory bool) zeroruntime.ToolDefinition {
 			"required": []string{"files", "language", "intent", "confidence"},
 		},
 	}
-	applyMemoryDefinition(definition.Parameters, hasMemory)
+	applyMemoryDefinition(definition.Parameters)
 	return definition
 }

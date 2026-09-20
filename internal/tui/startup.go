@@ -53,12 +53,10 @@ const emptyStateTagline = "Any model. Every tool. Splice limits."
 // transcript has no real content: the brand glyph and tagline.
 func (m model) emptyState(width int) string {
 	lines := m.emptyStateLines(width)
-
-	// Vertically center within the stream area: the frame around it (title bar,
-	// rules, composer, status line) occupies ~6 terminal rows.
-	height := normalizedStartupHeight(m.height)
-	gap := clamp((height-6-len(lines))/2, 0, 12)
-	return strings.Repeat("\n", gap) + strings.Join(lines, "\n") + strings.Repeat("\n", gap)
+	// The cockpit reads from the top (frame kAYHl): the contract band is the
+	// first row of the body, not a poster floating mid-screen. No vertical
+	// centering — the launch body starts directly under the title bar.
+	return strings.Join(lines, "\n")
 }
 
 func (m model) emptyStateWithOverlay(width int, overlay string) string {
@@ -67,36 +65,40 @@ func (m model) emptyStateWithOverlay(width int, overlay string) string {
 		lines[index] = fitStyledLine(lines[index], width)
 	}
 
-	// Center the palette in the visible chat area. While the command palette is
-	// open it replaces the empty-state wordmark instead of sitting below it.
-	available := normalizedStartupHeight(m.height) - 5
-	if m.titleBarInTranscriptBody() {
-		available -= 2
+	// The palette replaces the empty-state cockpit while open. Center it in
+	// the visible body, but keep the padded block within the viewport
+	// budget: a block taller than the viewport gets scrolled from its
+	// bottom, which showed only blank gap rows (the "blank screen" at tall
+	// terminals).
+	// Size against the measured body height for this frame when the caller
+	// supplied one; fall back to the height estimate for non-alt-screen and
+	// test paths. The card must never be taller than the viewport or the
+	// bottom-anchored window clips its lower rows.
+	available := m.overlayBodyHeight
+	if available <= 0 {
+		available = normalizedStartupHeight(m.height) - 5
+		if m.titleBarInTranscriptBody() {
+			available -= 2
+		}
 	}
-	gap := maxInt(0, (available-len(lines))/2)
-	return strings.Repeat("\n", gap) + strings.Join(lines, "\n") + strings.Repeat("\n", gap)
+	if len(lines) >= available {
+		// Degenerate: no room to pad. Render the palette bare.
+		return strings.Join(lines, "\n")
+	}
+	// Drop the palette toward the vertical middle: half the spare rows above,
+	// the rest below. The block is exactly `available` rows, so the
+	// bottom-anchored viewport shows all of it and nothing is cut off.
+	above := maxInt(1, (available-len(lines))/2)
+	below := available - above - len(lines)
+	return strings.Repeat("\n", above) + strings.Join(lines, "\n") + strings.Repeat("\n", below)
 }
 
 func (m model) emptyStateLines(width int) []string {
-	lines := []string{}
-	for _, glyph := range spliceLockupLines() {
-		lines = append(lines, centerLine(glyph, width))
-	}
-	lines = append(lines, "")
-	lines = append(lines, centerLine(zeroTheme.muted.Render(emptyStateTagline), width))
-	// Orientation: where SPLICE is pointed (cwd · branch · model) so a returning user
-	// sees the context before typing instead of a blank brand screen.
-	if orient := m.emptyStateOrientation(); orient != "" {
-		lines = append(lines, "")
-		lines = append(lines, centerLine(orient, width))
-	}
-	// A couple of example prompts to seed the first message.
-	lines = append(lines, "")
-	lines = append(lines, centerLine(zeroTheme.faint.Render(emptyStateExamples), width))
-	lines = append(lines, "")
-	lines = append(lines, centerLine(zeroTheme.faint.Render("Press ? for keyboard shortcuts · / for commands"), width))
-	// centerLine pads but never truncates; below ~62 cols the lines would exceed
-	// the frame without this fit.
+	// P12 (frame kAYHl): the launch body is the information cockpit —
+	// wordmark, facts, resume card (when one exists), START, honest state —
+	// replacing the centered braid splash. Left-aligned per the frame; the
+	// cockpit reads as a column, not a poster.
+	lines := m.launchScreenLines()
 	for index := range lines {
 		lines[index] = fitStyledLine(lines[index], width)
 	}

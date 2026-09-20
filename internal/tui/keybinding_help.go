@@ -68,6 +68,7 @@ func (m model) buildKeybindingGroups() []keybindingGroup {
 				{"\u2191 / Esc (in a sub-session)", "return to the main chat"},
 				{"Ctrl+F (in /model)", "toggle the highlighted model as a favorite"},
 				{"Click a tool card", "expand / collapse its output"},
+				{labelOr(m.keyBindings.toggleNarration, "Ctrl+N"), "cycle transcript verbosity (quiet / normal / detailed)"},
 				{"Right-click", "paste the clipboard"},
 			},
 		},

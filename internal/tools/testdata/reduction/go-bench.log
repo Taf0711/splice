@@ -1,0 +1,16 @@
+=== RUN   TestAlpha
+--- PASS: TestAlpha (0.00s)
+=== RUN   TestBravo
+--- PASS: TestBravo (0.00s)
+=== RUN   TestCharlie
+--- PASS: TestCharlie (0.00s)
+goos: darwin
+goarch: arm64
+pkg: gtbench
+cpu: Apple M2
+BenchmarkThing
+BenchmarkThing-8   	      10	        20.80 ns/op
+BenchmarkOther
+BenchmarkOther-8   	      10	        16.70 ns/op
+PASS
+ok  	gtbench	0.376s

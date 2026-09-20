@@ -23,6 +23,12 @@ const (
 	sidebarMinWidth  = 26
 	sidebarMaxWidth  = 40
 	sidebarMinColumn = 60 // below this total width the sidebar is suppressed
+	// compactModeMinWidth is the contract's wide/compact boundary (v0.5 spec
+	// layout: wide >= 120, compact 80-119). Between 80 and 119 the sidebar is
+	// suppressed: the compact projection REMOVES the permanent sidebar rather
+	// than crushing it (DoD 16), the pipeline collapses to the strip, and
+	// section access moves to shortcuts. At 120+ the full cockpit renders.
+	compactModeMinWidth = 120
 )
 
 // sidebarWidth returns the sidebar column width for a given total width, or 0
@@ -57,10 +63,9 @@ func (m model) sidebarToggleAllowed() bool {
 		m.mcpManager != nil || m.picker != nil {
 		return false
 	}
-	// Home/welcome screen: stay single-column until there's real conversation.
-	if m.transcriptEmpty() {
-		return false
-	}
+	// P12 (frame kAYHl): the launch cockpit is two-column, so the toggle
+	// responds from the first frame too. The old welcome-screen exception is
+	// retired with the splash.
 	return true
 }
 
@@ -77,10 +82,12 @@ func (m model) sidebarAvailable() bool {
 	if sidebarWidth(m.width) <= 0 {
 		return false
 	}
-	// Only split once the chat column survives it: require the medium tier (>=80
-	// cols). Between 60-79 the sidebar would starve the chat to ~30 cells, so the
-	// layout commits to two healthy columns or stays cleanly single-column.
-	if widthTier(m.width) < tierMedium {
+	// Only split once the chat column survives it: the contract's compact
+	// projection (80-119) removes the sidebar entirely, so the two-column
+	// cockpit only renders at the wide boundary (>= 120). Between 60-119
+	// the layout commits to the single-column compact mode instead of
+	// squeezing a starving second column.
+	if m.width < compactModeMinWidth {
 		return false
 	}
 	// Full-screen overlays (setup, wizards, and pickers) take over the chat
@@ -90,14 +97,11 @@ func (m model) sidebarAvailable() bool {
 		m.mcpManager != nil || m.picker != nil {
 		return false
 	}
-	// Home/welcome screen: stay single-column until there's real conversation, so
-	// the empty home screen isn't split by an (empty) sidebar.
-	if m.transcriptEmpty() {
-		return false
-	}
-	// Keep the layout stable across transient content changes. A run start clears
-	// live plan and agent state before the first new event arrives; content-based
-	// auto-hide made the whole column disappear and reappear during that gap.
+	// P12 (frame kAYHl): the launch screen IS two-column — the sidebar hosts
+	// the launch modules (NEXT/DECISIONS/AGENTS/TOOLS/CONTEXT) from the first
+	// frame, so the cockpit reads as the full surface the owner revised. The
+	// old "stay single-column until real conversation" rule is retired: the
+	// launch cockpit IS real content for the sidebar.
 	return true
 }
 
@@ -578,78 +582,36 @@ func (m model) renderContextSidebar(width, height int) []string {
 		return nil
 	}
 
+	// GAP-K slice 1: the sections compose through the module registry (slot
+	// order, blank line between, budget-bounded drop-whole). The registry is
+	// the composition contract; the render walk below only finishes the frame:
+	// the token floor, hover highlight, and width normalization.
+	//
+	// Budget accounting (mirrors the old hardcoded walk): the token readout
+	// reserves the bottom row; everything above shares height-1.
+	bodyBudget := height - 1
 	var lines []string
-	add := func(s string) { lines = append(lines, s) }
-
-	// AGENTS section — spawned subagents and their live working detail.
-	add(m.sidebarAgentHeader(width))
-	agentLines := m.sidebarAgentLines(width)
-	if len(agentLines) == 0 {
-		add(sidebarPlaceholder("no agents spawned", width))
-	} else {
-		lines = append(lines, agentLines...)
-	}
-
-	// PLAN section.
-	add("")
-	add(m.sidebarPlanHeader(width))
-	planLines := m.sidebarPlanLines(width)
-	if len(planLines) == 0 {
-		add(sidebarPlaceholder("no active plan", width))
-	} else {
-		lines = append(lines, planLines...)
-	}
-
-	// PIPELINE section (pipeline stages).
-	pipeline := m.pipeline.presentation()
-	if pipeline.active && pipeline.total > 0 {
-		add("")
-		add(pipeline.headerLineWithChip(width, m.worktreeChip()))
-		lines = append(lines, pipeline.renderSection(width, m.spinnerPhase)...)
-	}
-
-	// MEMORY section: compact observation count when the sidecar is active.
-	// Absent when off or unknown so the sidebar stays clean when memory is off
-	// (the status line already covers the off state).
-	if m.memoryStatus == "active" {
-		add("")
-		add(sidebarHeader("🧵 Memory", width))
-		lines = append(lines, m.memorySidebarLines(width)...)
-	}
-
-	// FILES section: the files this session has touched (files_panel.go).
-	// Rendered BELOW the plan steps so it never shifts sidebarPlanSelectables'
-	// click offsets; its own hits (sidebarFileSelectables) account for the
-	// sections above it.
-	add("")
-	add(m.sidebarFilesHeader(width))
-	fileLines, _ := m.sidebarFileLines(width)
-	if len(fileLines) == 0 {
-		add(sidebarPlaceholder("no files touched", width))
-	} else {
-		lines = append(lines, fileLines...)
-	}
-
-	// ACTIVITY section: recent completed work + a live "generating…" pulse. Shown
-	// BELOW the plan steps so it never shifts sidebarPlanSelectables' click offsets,
-	// and budgeted (height-1 minus what's used) so it clips ITSELF from the bottom
-	// rather than letting the end-truncation eat into the plan. Absent when empty.
-	if activityLines := m.sidebarActivityLines(width, maxInt(0, height-1-len(lines))); len(activityLines) > 0 {
-		add("")
-		add(sidebarHeader("ACTIVITY", width))
-		lines = append(lines, activityLines...)
+	if bodyBudget > 0 {
+		if m.transcriptEmpty() {
+			// P12 (frame kAYHl): the launch cockpit hosts the launch module
+			// set (NEXT/DECISIONS/AGENTS/TOOLS/CONTEXT) instead of the
+			// run-time modules, which have nothing to project yet.
+			lines = m.launchSidebarModules(width, bodyBudget)
+		} else {
+			lines = m.renderContextModules(width, bodyBudget)
+		}
 	}
 
 	// Token readout pinned to the bottom.
 	tokenLine := m.sidebarTokenLine(width)
 	// Reserve the bottom row for tokens; pad the gap so it sits at the floor.
 	for len(lines) < height-1 {
-		add("")
+		lines = append(lines, "")
 	}
 	if len(lines) > height-1 {
 		lines = lines[:height-1]
 	}
-	add(tokenLine)
+	lines = append(lines, tokenLine)
 
 	// Hover highlight: resolved by STABLE IDENTITY (sessionID / stepIndex), not a
 	// cached line offset — see hoveredSidebarLineOffset. A row whose identity no

@@ -422,11 +422,32 @@ func budgetBashOutput(stdout string, stderr string, meta map[string]string) (str
 // raw_bytes therefore reflects everything the command produced, not just what was
 // kept in memory.
 func budgetBashCapture(out string, outTotal int, errStr string, errTotal int, meta map[string]string) (string, string, bool) {
-	outText, outRaw, outTrunc := truncateHeadTailWithTotal(out, outTotal, bashOutputBudgetBytes)
-	errText, errRaw, errTrunc := truncateHeadTailWithTotal(errStr, errTotal, bashOutputBudgetBytes)
+	// Keep the captured text for the spill artifact before any reduction. A
+	// reduction defers content out of the transcript, so the recovery file must
+	// hold what the transcript no longer does.
+	rawOut, rawOutTotal := out, outTotal
+	rawErr, rawErrTotal := errStr, errTotal
+
+	// Reduce before truncation. Head+tail truncation is position-blind: it drops
+	// whatever sits in the middle, which for a unified diff is an arbitrary set
+	// of files and hunks. The budget below stays the hard backstop. The totals
+	// track the reduced text so meta's raw_bytes cannot overstate what was
+	// emitted.
+	reduced := false
+	if r := reduceOutputText("bash", out, meta); r != out {
+		out, outTotal, reduced = r, len(r), true
+	}
+	if r := reduceOutputText("bash", errStr, meta); r != errStr {
+		errStr, errTotal, reduced = r, len(r), true
+	}
+
+	outText, outRaw, outTrunc := truncateDiffStructurally(out, outTotal, bashOutputBudgetBytes)
+	errText, errRaw, errTrunc := truncateDiffStructurally(errStr, errTotal, bashOutputBudgetBytes)
 	truncated := outTrunc || errTrunc
-	if truncated {
-		if spillPath := spillBashStreams(out, outTotal, errStr, errTotal); spillPath != "" {
+	// Spill on truncation OR on reduction: both remove content from the
+	// transcript, so both need a recovery artifact.
+	if truncated || reduced {
+		if spillPath := spillBashStreams(rawOut, rawOutTotal, rawErr, rawErrTotal); spillPath != "" {
 			hint := "\n[splice] captured output saved to " + spillPath + " (grep or read_file it instead of re-running)"
 			if errTrunc {
 				errText += hint

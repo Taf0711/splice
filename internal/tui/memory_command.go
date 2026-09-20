@@ -84,7 +84,7 @@ func (m model) handleMemoryStats() (model, tea.Cmd) {
 		if err != nil {
 			return memoryResultMsg{text: "Memory stats error: " + err.Error(), isError: true}
 		}
-		return memoryResultMsg{text: formatMemoryStats(stats)}
+		return memoryResultMsg{text: renderMemoryStatsCard(stats)}
 	}
 }
 
@@ -108,11 +108,8 @@ func (m model) handleMemorySearch(query string) (model, tea.Cmd) {
 		if err != nil {
 			return memoryResultMsg{text: "Memory search error: " + err.Error(), isError: true}
 		}
-		return memoryResultMsg{text: formatMemoryList(
-			fmt.Sprintf("🧵 Memory Search: %q — %d result(s)", query, len(bundle.Observations)),
-			"No memories found.",
-			bundle.Observations,
-		)}
+		return memoryResultMsg{text: renderMemoryListCard("Search", memoryListSummary(
+			len(bundle.Observations), query, nil), bundle.Observations)}
 	}
 }
 
@@ -138,56 +135,145 @@ func (m model) handleMemoryRecent() (model, tea.Cmd) {
 			}
 			return memoryResultMsg{text: "Memory search error: " + err.Error(), isError: true}
 		}
-		return memoryResultMsg{text: formatMemoryList(
-			fmt.Sprintf("🧵 Recent Memories — %d", len(bundle.Observations)),
-			"No memories yet.",
-			bundle.Observations,
-		)}
+		return memoryResultMsg{text: renderMemoryListCard("Recent", memoryListSummary(
+			len(bundle.Observations), "", nil), bundle.Observations)}
 	}
 }
 
-func formatMemoryStats(stats memd.MemoryStats) string {
-	var b strings.Builder
-	b.WriteString("🧵 Memory Sidecar Stats\n\n")
-	b.WriteString(fmt.Sprintf("  Total observations: %d\n", stats.Total))
-	if len(stats.ByType) > 0 {
-		b.WriteString("  By type:\n")
+// memoryObservationAge renders the "settled 4d ago" tail of a detail line. It
+// returns "" when the observation carries no timestamp so the separator never
+// dangles.
+func memoryObservationAge(obs schemas.MemoryObservation) string {
+	if obs.UpdatedAt <= 0 {
+		return ""
+	}
+	now := time.Now()
+	stamp := time.Unix(obs.UpdatedAt, 0)
+	if stamp.After(now) {
+		stamp = now
+	}
+	days := int(now.Sub(stamp).Hours() / 24)
+	switch {
+	case days <= 0:
+		hours := int(now.Sub(stamp).Hours())
+		if hours <= 0 {
+			return "just now"
+		}
+		return fmt.Sprintf("%dh ago", hours)
+	case days < 30:
+		return fmt.Sprintf("%dd ago", days)
+	case days < 365:
+		return fmt.Sprintf("%dmo ago", days/30)
+	default:
+		return fmt.Sprintf("%dy ago", days/365)
+	}
+}
+
+// memoryObservationDetail builds the continuation line under an observation
+// title: the content (folded to one line and bounded), plus the age suffix
+// when the observation carries a timestamp.
+func memoryObservationDetail(obs schemas.MemoryObservation) string {
+	detail := strings.Join(strings.Fields(obs.Content), " ")
+	detail = truncateRunes(detail, 120)
+	if age := memoryObservationAge(obs); age != "" {
+		if detail == "" {
+			detail = age
+		} else {
+			detail = detail + " — " + age
+		}
+	}
+	return detail
+}
+
+// memoryListSummary assembles the header counts for a /memory result card.
+// The query (when present) and the memory-types breakdown ride the summary
+// line the way the P14 frame's "3 hits · 412 observations · 8.2 MB" does.
+func memoryListSummary(count int, query string, byType map[string]int) string {
+	parts := []string{fmt.Sprintf("%d hits", count)}
+	if query != "" {
+		parts = append(parts, fmt.Sprintf("query %q", query))
+	}
+	types := make([]string, 0, len(byType))
+	for t := range byType {
+		types = append(types, t)
+	}
+	sort.Strings(types)
+	rendered := make([]string, 0, len(types))
+	for _, t := range types {
+		rendered = append(rendered, fmt.Sprintf("%s %d", t, byType[t]))
+	}
+	if len(rendered) > 0 {
+		parts = append(parts, strings.Join(rendered, "/"))
+	}
+	return strings.Join(parts, " · ")
+}
+
+// renderMemoryListCard renders /memory search and /memory recent results as
+// the P14 tagged two-column card: one row per observation ("[type] title"),
+// the detail on an indented continuation line, and the /memory + /search
+// pointer footer. The empty state is honest — the card renders with the
+// zero-hit summary, not a fake list. The /search pointer footer carries the
+// frame's store note: search reads this repo's event log, memory reads prior
+// sessions, so the two stay separate commands with one result grammar.
+func renderMemoryListCard(title, summary string, observations []schemas.MemoryObservation) string {
+	section := commandCardSection{}
+	if len(observations) == 0 {
+		section.Lines = []string{"no observations match"}
+	} else {
+		lines := make([]string, 0, 2*len(observations))
+		for _, obs := range observations {
+			memoryType := obs.MemoryType
+			if memoryType == "" {
+				memoryType = "note"
+			}
+			heading := obs.Title
+			if heading == "" {
+				heading = "(untitled)"
+			}
+			// One observation = one tagged heading line plus its indented
+			// detail continuation line. Two Lines entries (not a multi-line
+			// Row) because the card section compactor folds row whitespace.
+			lines = append(lines,
+				fmt.Sprintf("[%s] %s", memoryType, heading),
+				"    "+memoryObservationDetail(obs))
+		}
+		section.Lines = lines
+	}
+	return renderCommandCardTranscript(commandCard{
+		Title:    title,
+		Summary:  []string{summary},
+		Sections: []commandCardSection{section},
+		Actions:  []string{"/memory", "/memory recent", "/search <query>"},
+	})
+}
+
+// renderMemoryStatsCard renders /memory as the P14 stats card: the counts
+// (total observations, DB size) ride the header summary per the frame's
+// "3 hits · 412 observations · 8.2 MB" pattern, and the per-type counts use
+// the same tagged two-column rows as the search card.
+func renderMemoryStatsCard(stats memd.MemoryStats) string {
+	summary := fmt.Sprintf("%d observations · %s", stats.Total, humanizeBytes(stats.DBSizeBytes))
+	section := commandCardSection{}
+	if len(stats.ByType) == 0 {
+		section.Lines = []string{"no observations stored yet"}
+	} else {
 		types := make([]string, 0, len(stats.ByType))
 		for t := range stats.ByType {
 			types = append(types, t)
 		}
 		sort.Strings(types)
+		lines := make([]string, 0, len(types))
 		for _, t := range types {
-			b.WriteString(fmt.Sprintf("    %s: %d\n", t, stats.ByType[t]))
+			lines = append(lines, fmt.Sprintf("[%s] %d", t, stats.ByType[t]))
 		}
+		section.Lines = lines
 	}
-	if stats.DBSizeBytes > 0 {
-		b.WriteString(fmt.Sprintf("  DB size: %s\n", humanizeBytes(stats.DBSizeBytes)))
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
-
-// formatMemoryList renders a header line plus a numbered observation list.
-// Shared by search and recent: only the header and empty-message differ.
-func formatMemoryList(header, emptyText string, observations []schemas.MemoryObservation) string {
-	var b strings.Builder
-	b.WriteString(header + "\n\n")
-	if len(observations) == 0 {
-		b.WriteString("  " + emptyText)
-		return b.String()
-	}
-	for i, obs := range observations {
-		title := obs.Title
-		if title == "" {
-			title = "(untitled)"
-		}
-		content := obs.Content
-		if len(content) > 100 {
-			content = content[:97] + "..."
-		}
-		b.WriteString(fmt.Sprintf("  %d. [%s] %s\n     %s\n", i+1, obs.MemoryType, title, content))
-	}
-	return strings.TrimRight(b.String(), "\n")
+	return renderCommandCardTranscript(commandCard{
+		Title:    "Memory",
+		Summary:  []string{summary},
+		Sections: []commandCardSection{section},
+		Actions:  []string{"/memory", "/memory recent", "/search <query>"},
+	})
 }
 
 func humanizeBytes(b int64) string {

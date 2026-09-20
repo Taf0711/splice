@@ -883,11 +883,18 @@ type execToolResultInput struct {
 }
 
 func execToolResult(input execToolResultInput) Result {
-	output, truncated := truncateExecOutput(input.output, input.maxOutputTokens)
 	meta := map[string]string{
 		"cwd": input.relativeCwd,
 		"tty": strconv.FormatBool(input.tty),
 	}
+	// Reduce before truncation, matching the bash path. The native reducers
+	// remove whole passing test blocks, and head/tail truncation is
+	// position-blind, so reducing first spends the budget on content that
+	// survives. A reduction that truncation does not follow still removes
+	// bytes from the transcript, so it spills the raw output for recovery.
+	reducedText := reduceOutputText("exec_command", input.output, meta)
+	reduced := reducedText != input.output
+	output, truncated := truncateExecOutput(reducedText, input.maxOutputTokens)
 	addSandboxMeta(meta, input.plan)
 	if input.exited {
 		meta["exit_code"] = strconv.Itoa(input.exitCode)
@@ -913,6 +920,13 @@ func execToolResult(input execToolResultInput) Result {
 		if issue := detectShellOutputIssue(output, runtimeGOOS()); issue != nil {
 			meta["shell_issue"] = issue.Kind
 			body = appendShellIssueHint(body, *issue)
+		}
+	}
+	if reduced && !truncated {
+		// The transcript no longer holds the bytes the reducer removed, so
+		// point at the spilled original the same way the bash path does.
+		if spillPath := spillTruncatedOutput("exec_command", input.output); spillPath != "" {
+			body += "\n[splice] reduced output saved to " + spillPath + " (grep or read_file it instead of re-running)"
 		}
 	}
 	if input.outputBufferTruncated {

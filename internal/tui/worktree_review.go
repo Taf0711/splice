@@ -2,8 +2,10 @@ package tui
 
 import (
 	"context"
+	"os"
 	"strings"
 	"time"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -33,7 +35,17 @@ type worktreeReviewResultMsg struct {
 	kept     *worktrees.Result
 	decision string
 	reason   string
+	// op identifies the scheduled operation this result belongs to
+	// (worktree_ops.go). Nil for results from the review picker, which
+	// owns input itself and needs no in-flight bookkeeping.
+	op *worktreeOpState
 }
+
+// succeeded reports whether the operation actually completed. Merge-back
+// and discard both leave no worktree on success; any refusal, failure, or
+// cleanup failure returns the worktree in kept so the user keeps a
+// recovery path (finding 5: a refused merge must not announce success).
+func (msg worktreeReviewResultMsg) succeeded() bool { return msg.kept == nil }
 
 func inspectSourceDirty(wt worktrees.Result) bool {
 	if strings.TrimSpace(wt.RepoRoot) == "" {
@@ -199,14 +211,178 @@ func (m model) maybeOfferWorktreeReview(wt *worktrees.Result, dirty bool) (model
 	return m, nil
 }
 
+// offerHandoff appends the HANDOFF card for an exited lane whose work
+// survived (kept worktree, or failure/cancellation before any review).
+// It distinguishes lane death from work loss: preserved and mergeAvailable
+// are computed by the CALLER (the run goroutine that produced the result
+// message), never on the UI loop — §14 keeps filesystem and git access off
+// Update(). Best-effort: the card never fails the turn.
+func (m *model) offerHandoff(wt *worktrees.Result, outcome string, staged, applied int, preserved, mergeAvailable bool) {
+	if wt == nil || strings.TrimSpace(wt.Path) == "" {
+		return
+	}
+	h := handoffState{
+		lane:      wt.Name,
+		path:      wt.Path,
+		branch:    "splice/" + wt.Name,
+		outcome:   outcome,
+		staged:    staged,
+		applied:   applied,
+		preserved: preserved,
+	}
+	m.pendingHandoff = &h
+	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
+		kind: rowSystem,
+		text: handoffTranscriptPayload(h, mergeAvailable),
+	})
+}
+
+// tuiWorktreeExists reports whether the worktree path still exists on disk
+// (the lane-death vs work-loss check).
+func tuiWorktreeExists(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+// handleHandoffKey dispatches the handoff card's [M]/[X]/[D] keys. Returns
+// handled=false for anything else so the main switch keeps processing.
+// The keys map to the same runtime seams the review uses: [M] runs the
+// merge-back, [X] removes the worktree (branch kept), both through a
+// background command so the UI stays responsive.
+func (m model) handleHandoffKey(msg tea.KeyMsg) (bool, tea.Model, tea.Cmd) {
+	// The advertised keys are CAPITAL letters. ultraviolet lowercases
+	// Key.Code for every letter (shift+m arrives as Code 'm' with
+	// ShiftedCode 'M', Text "M", Mod Shift), so matching Code against 'M'
+	// never fires on a real terminal. Dispatch on the pressed text,
+	// requiring the shifted form, so plain m/x/d still reach the composer.
+	// The uppercase-Code branch covers test seams that build a bare
+	// Key{Code:'M'} with no text.
+	if text := keyText(msg); text != "" {
+		if strings.ToUpper(text) != text {
+			return false, m, nil
+		}
+		switch strings.ToLower(text) {
+		case "m":
+			return m.runHandoffMerge()
+		case "x":
+			return m.runHandoffDiscard()
+		case "o":
+			// [O] open worktree (GAP-F): the card advertises this key, so
+			// it must dispatch — a rendered key with no handler is a dead
+			// affordance (frame j3ZQBu cell 4: "a dead key is never
+			// advertised"). Same editor exec seam as the diff view's [O].
+			next, cmd := m.openWorktreeInEditor(m.pendingHandoff.path)
+			return true, next, cmd
+		case "d":
+			// [D] review diff (GAP-G): opens the diff review viewport
+			// for the handoff's lane. The diff is runtime truth from
+			// the worktree.
+			next, cmd := m.openDiffReviewForHandoff()
+			return true, next, cmd
+		}
+		return false, m, nil
+	}
+	if !unicode.IsUpper(keyCode(msg)) {
+		return false, m, nil
+	}
+	switch unicode.ToLower(keyCode(msg)) {
+	case 'm':
+		return m.runHandoffMerge()
+	case 'x':
+		return m.runHandoffDiscard()
+	case 'o':
+		next, cmd := m.openWorktreeInEditor(m.pendingHandoff.path)
+		return true, next, cmd
+	case 'd':
+		next, cmd := m.openDiffReviewForHandoff()
+		return true, next, cmd
+	}
+	return false, m, nil
+}
+
+// openWorktreeInEditor opens dir in $EDITOR via the same exec seam the diff
+// view uses, with honest failure notices: a vanished worktree and a missing
+// $EDITOR both say so instead of silently doing nothing.
+func (m model) openWorktreeInEditor(dir string) (tea.Model, tea.Cmd) {
+	if strings.TrimSpace(dir) == "" || !tuiWorktreeExists(dir) {
+		return m.appendSystemNotice("Worktree no longer exists — nothing to open."), nil
+	}
+	editor := strings.TrimSpace(osEditor())
+	if editor == "" {
+		return m.appendSystemNotice("No $EDITOR set — open the worktree manually: cd " + dir), nil
+	}
+	c := execEditor(editor, dir)
+	return m, tea.ExecProcess(c, func(err error) tea.Msg {
+		return diffEditorMsg{err: err}
+	})
+}
+
+// runHandoffMerge schedules the merge-back of the pending handoff's
+// worktree. The Git work runs in the command goroutine (finding 4) and the
+// handoff stays armed until the result proves the merge landed (finding 5):
+// a conflict or a dirty source branch returns a kept worktree, and the user
+// must keep the recovery controls that acted on it.
+func (m model) runHandoffMerge() (bool, tea.Model, tea.Cmd) {
+	wt := m.activeWorktree
+	if wt == nil || wt.Name != m.pendingHandoff.lane {
+		m.pendingHandoff = nil
+		return true, m, nil
+	}
+	if ok, reason := m.worktreeActionAllowed(); !ok {
+		return true, m.appendSystemNotice(reason), nil
+	}
+	next, cmd := m.scheduleWorktreeOp(worktreeOpHandoffMerge, *wt, worktreeReviewAccept, "handoff merge-back")
+	next.transcript = appendTranscriptRow(next.transcript, transcriptRow{
+		kind: rowSystem, text: "Merging lane " + wt.Name + " back into " + m.pendingHandoffBranch() + "...",
+	})
+	return true, next, cmd
+}
+
+// runHandoffDiscard schedules the removal of the pending handoff's worktree
+// (branch kept). Same scheduling and same honesty rule as the merge: the
+// handoff resolves only when the removal actually succeeded.
+func (m model) runHandoffDiscard() (bool, tea.Model, tea.Cmd) {
+	wt := m.activeWorktree
+	if wt == nil || wt.Name != m.pendingHandoff.lane {
+		m.pendingHandoff = nil
+		return true, m, nil
+	}
+	if ok, reason := m.worktreeActionAllowed(); !ok {
+		return true, m.appendSystemNotice(reason), nil
+	}
+	next, cmd := m.scheduleWorktreeOp(worktreeOpHandoffDiscard, *wt, worktreeReviewReject, "handoff discard")
+	next.transcript = appendTranscriptRow(next.transcript, transcriptRow{
+		kind: rowSystem, text: "Discarding lane " + wt.Name + " (branch kept)...",
+	})
+	return true, next, cmd
+}
+
+// pendingHandoffBranch returns the branch name for status lines.
+func (m model) pendingHandoffBranch() string {
+	if m.pendingHandoff == nil {
+		return ""
+	}
+	return m.pendingHandoff.branch
+}
+
+// applyWorktreeReview runs the review decision. reviewedTree, when set,
+// pins the snapshot the user actually inspected: MergeBack revalidates it
+// and refuses a merge whose content changed after the review (finding 1).
 func applyWorktreeReview(wt worktrees.Result, decision string, dirtyOffered bool, reason string) worktreeReviewResultMsg {
-	msg := runWorktreeReview(wt, decision, dirtyOffered)
+	return applyReviewedWorktree(wt, decision, dirtyOffered, reason, "")
+}
+
+func applyReviewedWorktree(wt worktrees.Result, decision string, dirtyOffered bool, reason string, reviewedTree string) worktreeReviewResultMsg {
+	msg := runWorktreeReview(wt, decision, dirtyOffered, reviewedTree)
 	msg.decision = decision
 	msg.reason = reason
 	return msg
 }
 
-func runWorktreeReview(wt worktrees.Result, decision string, dirtyOffered bool) worktreeReviewResultMsg {
+func runWorktreeReview(wt worktrees.Result, decision string, dirtyOffered bool, reviewedTree string) worktreeReviewResultMsg {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	unlock := func() error {
@@ -235,6 +411,7 @@ func runWorktreeReview(wt worktrees.Result, decision string, dirtyOffered bool) 
 			RepoRoot:     wt.RepoRoot,
 			WorktreePath: wt.Path,
 			Name:         wt.Name,
+			ExpectedTree: reviewedTree,
 		})
 		if err != nil {
 			return keep("Merge-back failed: " + err.Error() + ". Worktree kept at " + wt.Path)

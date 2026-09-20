@@ -13,6 +13,7 @@ import (
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/config"
 	"github.com/Taf0711/splice/internal/notify"
+	"github.com/Taf0711/splice/internal/presentation"
 	"github.com/Taf0711/splice/internal/sessions"
 	splicerun "github.com/Taf0711/splice/internal/splice"
 	"github.com/Taf0711/splice/internal/splice/schemas"
@@ -45,6 +46,14 @@ func (m model) enterDesignMode(notice string) model {
 	}
 	m.pendingPlan = nil
 	m.pendingCritique = nil
+	// Design is a lifecycle phase, and entering it must reach the phase
+	// trail (review finding 9). Without this, the chip kept showing the
+	// PREVIOUS run's complete phase while the user was in design, because
+	// phaseTrail.observe is fed only by execution snapshots. The previous
+	// run's completion also stops being the live outcome here.
+	m.lastState = presentation.State{}
+	m.lastTerminalReceipt = ""
+	m.phaseTrail.observe(presentation.LifecycleDesign)
 	if notice != "" {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: notice})
 	}
@@ -387,7 +396,17 @@ func (m model) startApprovalConfirmed(source splicerun.DesignTransitionSource, p
 			onPermission(event)
 		}
 	}
-	options = (runtimeWiring{runID: runID, send: m.runtimeMessageSink}).decorate(options)
+	// The approval run records the same durable presentation snapshots the
+	// direct path does (review finding 6): it used to transport them live
+	// and persist nothing, so reopening the session could not reconstruct
+	// the run. Both paths now share runtimeWiring's recording seam.
+	options = (runtimeWiring{
+		runID: runID,
+		send:  m.runtimeMessageSink,
+		recordEvent: func(event pendingSessionEvent) {
+			sessionEvents = append(sessionEvents, event)
+		},
+	}).decorate(options)
 
 	options.EstimateUsageCost = estimator
 	onAttributedUsage := options.OnAttributedUsage
@@ -472,7 +491,11 @@ func (m model) startApprovalConfirmed(source splicerun.DesignTransitionSource, p
 					}
 				}
 			}
-			return planExecutionResultMsg{runID: runID, result: result, err: err, store: store, sessionID: sessionID, sessionEvents: sessionEvents, worktree: preparedPtr, worktreeNotice: notice, sourceDirty: inspectSourceDirty(prepared)}
+			// HANDOFF card inputs (F1): computed HERE in the cmd goroutine,
+			// off the UI loop.
+			sourceDirty := inspectSourceDirty(prepared)
+			wtPreserved := preparedPtr != nil && tuiWorktreeExists(preparedPtr.Path)
+			return planExecutionResultMsg{runID: runID, result: result, err: err, store: store, sessionID: sessionID, sessionEvents: sessionEvents, worktree: preparedPtr, worktreeNotice: notice, sourceDirty: sourceDirty, worktreePreserved: wtPreserved, mergeAvailable: wtPreserved && !sourceDirty}
 		},
 		m.spinner.Tick,
 	)
@@ -663,6 +686,10 @@ type planExecutionResultMsg struct {
 	worktree       *worktrees.Result
 	worktreeNotice string
 	sourceDirty    bool
+	// worktreePreserved/mergeAvailable are computed in the producing cmd
+	// (off the UI loop) and consumed by offerHandoff (F1, §14).
+	worktreePreserved bool
+	mergeAvailable    bool
 }
 
 // designCoverageWarning reports plan fields that the conversation did not
@@ -778,7 +805,10 @@ func (m model) handleLayoutCommand() (model, tea.Cmd) {
 	if m.planPanelPersistent {
 		state = "on"
 	}
-	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Persistent plan panel " + state + "."})
+	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: ackSystemText(ack{
+		verb:    "layout",
+		outcome: "persistent plan panel  " + state,
+	})})
 	return m, nil
 }
 

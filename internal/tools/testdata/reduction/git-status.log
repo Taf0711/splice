@@ -1,0 +1,27 @@
+ M .gitignore
+ M internal/eval/decide.go
+ M internal/eval/decide_test.go
+ M internal/eval/harness.go
+ M internal/eval/report.go
+ M internal/eval/report_test.go
+ M internal/splice/cognition_cache_integration_test.go
+ A internal/splice/exemplar_mode.go
+ M internal/splice/stage_input.go
+ M internal/splice/stage_input_wiring_test.go
+ M internal/splice/stages/helpers.go
+ M internal/splice/trace.go
+ M internal/tui/receipt_keys_test.go
+ D internal/tui/splice-transcript-20260908-052331.txt
+ D internal/tui/splice-transcript-20260908-052601.txt
+ D internal/tui/splice-transcript-20260908-052641.txt
+ D internal/tui/splice-transcript-20260908-052727.txt
+?? docs/assets/repair-loop.gif
+?? internal/cli/.splice-sandbox-outside-2632765301/
+?? plans/COGNITION_AUDIT_2026-09-10.md
+?? plans/SPEC_P10_P15_MAPPING_AUDIT.md
+?? plans/SPEC_P12_LAUNCH_SCREEN.md
+?? plans/SPEC_SESSION_SCAN_OFF_LOOP.md
+?? plans/SPEC_TUI_RECEIPTS_OPEN_WORK.md
+?? plans/SPEC_TUI_RECEIPT_KEY_DISPATCH.md
+?? plans/TOOL_LAYER_COMPARISON_2026-09-10.md
+?? plans/TOOL_PERMISSION_AUDIT_2026-09-10.md

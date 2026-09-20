@@ -35,7 +35,7 @@ func TestHelpCommandRendersGroupedSections(t *testing.T) {
 		"Meta",
 		"  /model [list|id]",
 		"  /permissions",
-		"hint: submit plain text to ask Splice",
+		"hint: descriptions live in the palette. Type / for command details.",
 	} {
 		assertContains(t, text, want)
 	}
@@ -150,11 +150,10 @@ func TestToolsCommandRendersCommandCard(t *testing.T) {
 	toolsText := transcriptText(next.transcript)
 	for _, want := range []string{
 		"Tools",
-		"1 registered | registered catalog",
-		"Registry",
-		"registered  1",
-		"Available",
-		"- read_file",
+		"1 registered",
+		"BUILTIN",
+		"read_file",
+		"hint: every tool here is gated by /permissions — registration is not access",
 		"actions: /mcp manage servers | /permissions manage access",
 	} {
 		assertContains(t, toolsText, want)
@@ -203,33 +202,21 @@ func TestToolsCommandShowsFullSortedCatalog(t *testing.T) {
 		t.Fatal("expected /tools to be handled without starting an agent run")
 	}
 	text := transcriptText(next.transcript)
-	for _, want := range []string{
-		"9 registered | registered catalog",
-		"- apply_patch",
-		"- bash",
-		"- edit_file",
-		"- glob",
-		"- grep",
-		"- read_file",
-		"- web_fetch",
-		"- web_search",
-		"- write_file",
-	} {
-		assertContains(t, text, want)
-	}
-	assertNotContains(t, text, "... 1 more")
+	assertContains(t, text, "9 registered")
 
+	// Every name renders exactly once, in the BUILTIN group, alpha-sorted,
+	// four per wrapped line (no truncation, no "... N more").
 	previous := -1
 	for _, want := range []string{
-		"- apply_patch",
-		"- bash",
-		"- edit_file",
-		"- glob",
-		"- grep",
-		"- read_file",
-		"- web_fetch",
-		"- web_search",
-		"- write_file",
+		"apply_patch",
+		"bash",
+		"edit_file",
+		"glob",
+		"grep",
+		"read_file",
+		"web_fetch",
+		"web_search",
+		"write_file",
 	} {
 		current := strings.Index(text, want)
 		if current < 0 {
@@ -240,6 +227,149 @@ func TestToolsCommandShowsFullSortedCatalog(t *testing.T) {
 		}
 		previous = current
 	}
+	for _, unwanted := range []string{"... 1 more", "Available"} {
+		assertNotContains(t, text, unwanted)
+	}
+	builtinIndex := strings.Index(text, "\nBUILTIN\n")
+	if builtinIndex < 0 {
+		t.Fatalf("expected a BUILTIN group header, got:\n%s", text)
+	}
+	if strings.Count(text, "BUILTIN") != 1 {
+		t.Fatalf("expected exactly one BUILTIN group, got:\n%s", text)
+	}
+}
+
+func TestToolsCommandGroupsMCPToolsUnderServerName(t *testing.T) {
+	cfg := config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"github": {Type: "http", URL: "https://github.example/mcp"},
+	}}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool("."))
+	registry.Register(commandTestMCPTool{name: "mcp_github_create_pr", serverName: "github", description: "Create a PR"})
+	registry.Register(commandTestMCPTool{name: "mcp_github_list_issues", serverName: "github", description: "List issues"})
+	registry.Register(commandTestMCPTool{name: "mcp_orphan_ping", description: "No owning server"})
+
+	m := newModel(context.Background(), Options{
+		Registry:  registry,
+		MCPConfig: cfg,
+	})
+	m.input.SetValue("/tools")
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /tools to be handled without starting an agent run")
+	}
+	if got := countTranscriptRows(next.transcript, rowSystem); got != 1 {
+		t.Fatalf("expected /tools to render as a single command card, got %d system rows: %#v", got, next.transcript)
+	}
+	text := transcriptText(next.transcript)
+	for _, want := range []string{
+		"4 registered · 3 sources",
+		"BUILTIN",
+		"github",
+		"connected",
+		"mcp_github_create_pr mcp_github_list_issues",
+		"(unknown source)",
+		"mcp_orphan_ping",
+		"hint: every tool here is gated by /permissions — registration is not access",
+		"actions: /mcp manage servers | /permissions manage access",
+	} {
+		assertContains(t, text, want)
+	}
+	// The card's NUL routing tag is a transcript transport marker: renderRow
+	// consumes it, so the marker must never survive into rendered body text.
+	if !strings.Contains(text, commandCardTranscriptPrefix) {
+		t.Fatalf("expected a tagged command card in the transcript, got:\n%s", text)
+	}
+}
+
+func TestToolsCommandMarksDegradedServerWithHiddenTools(t *testing.T) {
+	cfg := config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"postgres": {Type: "stdio", Command: "pg-mcp"},
+	}}
+	registry := tools.NewRegistry()
+	registry.Register(commandTestMCPTool{name: "mcp_postgres_query", serverName: "postgres", description: "Query"})
+	registry.Register(commandTestMCPTool{
+		name:        "mcp_postgres_explain",
+		serverName:  "postgres",
+		description: "Explain",
+		safety:      tools.Safety{SideEffect: tools.SideEffectNetwork, Permission: tools.PermissionPrompt},
+	})
+	// Make the fake deferred-eligible: agent deferral hides eligible tools once
+	// the eligible count reaches DeferThreshold (1).
+	registry.Register(deferralEligibleTestTool{commandTestMCPTool{
+		name:        "mcp_postgres_analyze",
+		serverName:  "postgres",
+		description: "Analyze",
+	}})
+
+	m := newModel(context.Background(), Options{
+		Registry:  registry,
+		MCPConfig: cfg,
+		AgentOptions: agent.Options{
+			DeferThreshold: 1,
+		},
+	})
+	m.input.SetValue("/tools")
+
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+
+	text := transcriptText(next.transcript)
+	assertContains(t, text, "3 registered")
+	assertContains(t, text, "postgres")
+	assertContains(t, text, "degraded — 1 tools hidden")
+	assertContains(t, text, "mcp_postgres_explain mcp_postgres_query")
+	assertNotContains(t, text, "mcp_postgres_analyze")
+}
+
+// deferralEligibleTestTool marks a test MCP tool as deferral-eligible so the
+// /tools card exercises the hidden-tool ("degraded") path.
+type deferralEligibleTestTool struct {
+	commandTestMCPTool
+}
+
+func (tool deferralEligibleTestTool) Deferred() bool {
+	return true
+}
+
+// toolVisibility
+func TestToolsCommandHiddenToolsStayRegisteredButUngrouped(t *testing.T) {
+	cfg := config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"solo": {Type: "stdio", Command: "solo-mcp"},
+	}}
+	registry := tools.NewRegistry()
+	registry.Register(deferralEligibleTestTool{commandTestMCPTool{
+		name:        "mcp_solo_only",
+		serverName:  "solo",
+		description: "The only tool",
+	}})
+	registry.Register(deferralEligibleTestTool{commandTestMCPTool{
+		name:        "mcp_solo_extra",
+		serverName:  "solo",
+		description: "The second tool",
+	}})
+
+	m := newModel(context.Background(), Options{
+		Registry:     registry,
+		MCPConfig:    cfg,
+		AgentOptions: agent.Options{DeferThreshold: 1},
+	})
+	m.input.SetValue("/tools")
+
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+
+	text := transcriptText(next.transcript)
+	// Both tools stay registered in the count; both are hidden behind
+	// tool_search; the server group still renders with the hidden count.
+	assertContains(t, text, "2 registered")
+	assertContains(t, text, "solo")
+	assertContains(t, text, "degraded — 2 tools hidden")
+	assertNotContains(t, text, "mcp_solo_only")
+	assertNotContains(t, text, "mcp_solo_extra")
 }
 
 func TestContextAndPermissionsCommandsRenderProductState(t *testing.T) {

@@ -116,7 +116,7 @@ func TestBuildKeybindingGroupsAreWellFormed(t *testing.T) {
 // still be present alongside "Keyboard Shortcuts".
 func TestHelpOverlayCompositesOverChatNotReplacingIt(t *testing.T) {
 	m := newModel(context.Background(), Options{ModelName: "gpt-4o"})
-	m.width = 100
+	m.width = 130
 	m.height = 40
 	m.altScreen = true
 
