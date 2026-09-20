@@ -1,0 +1,6 @@
+provider route: openrouter (slug deepseek/deepseek-v4.1-flash routes to Baseten via OpenRouter); no Baseten direct fallback used (BASETEN_API_KEY unset)
+advertised reasoning: supported_efforts=[max high low] default_effort=high
+decision: low is a small advertised effort -> PIN low and assert it
+--- p4preflight output ---
+p4preflight: stage=code_writer resolved_model=deepseek/deepseek-v4.1-flash source=stage-models.json:code_writer splice_dir=/tmp/p4r-cfg/splice want=deepseek/deepseek-v4.1-flash
+p4preflight: stage=code_writer reasoning_effort=low source=stage-models.json:code_writer supported_efforts=[max high low] model=deepseek/deepseek-v4.1-flash

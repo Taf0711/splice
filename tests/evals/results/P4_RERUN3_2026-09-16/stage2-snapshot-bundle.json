@@ -1,0 +1,135 @@
+{
+  "schema": "splice.snapshot-bundle/v1",
+  "producer_run_id": "mvp-snap-mvp-02-ttl-source-of-truth-1789661816427572000-taska",
+  "start_revision": "",
+  "commit": "b5488795fbbd8bd8503da46bdd681ece468f1533",
+  "tree": "46b4f301a728f219f66b9d38a7fa12127619eb52",
+  "capture_origin": "natural",
+  "nodes": [
+    {
+      "node": {
+        "id": 1,
+        "kind": "procedure",
+        "claim": "Verification passes with: go test ./...",
+        "scope": "project",
+        "project_path": "/private/var/folders/cf/37chkgfx22q5bb_ws8brslx00000gn/T/splice-mvp-snap-1300200948",
+        "status": "active",
+        "confidence": null,
+        "source_run_id": "mvp-snap-mvp-02-ttl-source-of-truth-1789661816427572000-taska",
+        "created_revision": null,
+        "verified_revision": "119d23f6f193149d3673fd6aab42729bc83c6dcf",
+        "created_at": 1789661917,
+        "verified_at": 1789661917,
+        "claim_hash": "f6aade87df301afde3707c8b97b811cd81fb3120fedcfed497b8412dd4d68022",
+        "metadata_json": "{\"reuse_record\":{\"answered_need\":\"\",\"applicability\":\"test command for this project at the recorded revision; rerun required after any dependency or config change\",\"capture_origin\":\"runtime\",\"conclusion\":\"Verification passes with: go test ./...\",\"content_version\":\"ed0d7aeadcc15d601447b1eff1314b59e685d6c7242c266cfbff92d3b492daad\",\"environment_assumed\":\"Go toolchain, standard library only, no network\",\"evidence_refs\":[\"test_run:mvp-snap-mvp-02-ttl-source-of-truth-1789661816427572000-taska\"],\"identity\":\"/private/var/folders/cf/37chkgfx22q5bb_ws8brslx00000gn/T/splice-mvp-snap-1300200948\\u0000procedure\\u0000go test ./...\",\"kind\":\"procedure\",\"observed_result\":\"executed 3 test(s), 0 failed\",\"producer_run\":\"mvp-snap-mvp-02-ttl-source-of-truth-1789661816427572000-taska\",\"schema_version\":1,\"status\":\"active\",\"supporting\":null,\"test_command\":\"go test ./...\",\"verification_status\":\"passed\",\"worktree_identity\":\"119d23f6f193149d3673fd6aab42729bc83c6dcf\"}}"
+      },
+      "anchors": [
+        {
+          "kind": "test",
+          "value": "go test ./..."
+        }
+      ],
+      "evidence": [
+        {
+          "kind": "test_run",
+          "ref": "mvp-snap-mvp-02-ttl-source-of-truth-1789661816427572000-taska",
+          "detail": "test command exited 0"
+        }
+      ],
+      "source_id": 1,
+      "claim_hash": "f6aade87df301afde3707c8b97b811cd81fb3120fedcfed497b8412dd4d68022"
+    },
+    {
+      "node": {
+        "id": 2,
+        "kind": "fact",
+        "claim": "cmd/server/main.go defines main; verified at revision 119d23f6f1",
+        "scope": "project",
+        "project_path": "/private/var/folders/cf/37chkgfx22q5bb_ws8brslx00000gn/T/splice-mvp-snap-1300200948",
+        "status": "active",
+        "confidence": null,
+        "source_run_id": "mvp-snap-mvp-02-ttl-source-of-truth-1789661816427572000-taska",
+        "created_revision": null,
+        "verified_revision": "119d23f6f193149d3673fd6aab42729bc83c6dcf",
+        "created_at": 1789661917,
+        "verified_at": 1789661917,
+        "claim_hash": "e0a01a4b3e24daf2188a529eec9fcd2414b7c6d15a65ca088a6e2e8159bfb985",
+        "metadata_json": "{\"reuse_record\":{\"answered_need\":\"\",\"applicability\":\"location and declared symbols of this file at the recorded worktree revision; not package behavior\",\"capture_origin\":\"runtime\",\"conclusion\":\"cmd/server/main.go defines main; verified at revision 119d23f6f1\",\"content_version\":\"4c94818a7345a0e8e768990c05f16df3b573f1803844f75c3d00cec25c050474\",\"evidence_refs\":[\"git:119d23f6f193149d3673fd6aab42729bc83c6dcf\"],\"identity\":\"/private/var/folders/cf/37chkgfx22q5bb_ws8brslx00000gn/T/splice-mvp-snap-1300200948\\u0000fact\\u0000cmd/server/main.go\",\"kind\":\"fact\",\"producer_run\":\"mvp-snap-mvp-02-ttl-source-of-truth-1789661816427572000-taska\",\"schema_version\":1,\"status\":\"active\",\"supporting\":[{\"digest\":\"1a2b873d938cf57b46d9c99089631870b2b451366249873b94010752d273c6d0\",\"path\":\"cmd/server/main.go\"},{\"digest\":\"1a2b873d938cf57b46d9c99089631870b2b451366249873b94010752d273c6d0\",\"path\":\"cmd/server/main.go\",\"symbol\":\"main\"}],\"verification_status\":\"passed\",\"worktree_identity\":\"119d23f6f193149d3673fd6aab42729bc83c6dcf\"}}"
+      },
+      "anchors": [
+        {
+          "kind": "file",
+          "value": "cmd/server/main.go"
+        },
+        {
+          "kind": "symbol",
+          "value": "cmd/server/main.go#main"
+        }
+      ],
+      "evidence": [
+        {
+          "kind": "git",
+          "ref": "119d23f6f193149d3673fd6aab42729bc83c6dcf",
+          "detail": "verified run changed this file"
+        }
+      ],
+      "source_id": 2,
+      "claim_hash": "e0a01a4b3e24daf2188a529eec9fcd2414b7c6d15a65ca088a6e2e8159bfb985"
+    },
+    {
+      "node": {
+        "id": 3,
+        "kind": "fact",
+        "claim": "internal/session/store.go defines NewStore, Store.Create, Store.Get, Store.Delete, Store.Len; verified at revision 119d23f6f1",
+        "scope": "project",
+        "project_path": "/private/var/folders/cf/37chkgfx22q5bb_ws8brslx00000gn/T/splice-mvp-snap-1300200948",
+        "status": "active",
+        "confidence": null,
+        "source_run_id": "mvp-snap-mvp-02-ttl-source-of-truth-1789661816427572000-taska",
+        "created_revision": null,
+        "verified_revision": "119d23f6f193149d3673fd6aab42729bc83c6dcf",
+        "created_at": 1789661917,
+        "verified_at": 1789661917,
+        "claim_hash": "131a10d2c2941b171c91a79475ef8645e7053bdc8b96ccaa994c81fabb33a381",
+        "metadata_json": "{\"reuse_record\":{\"answered_need\":\"\",\"applicability\":\"location and declared symbols of this file at the recorded worktree revision; not package behavior\",\"capture_origin\":\"runtime\",\"conclusion\":\"internal/session/store.go defines NewStore, Store.Create, Store.Get, Store.Delete, Store.Len; verified at revision 11...\",\"content_version\":\"62b5a80361ef4708d457ee89c846431d5945361d771f8364cd05c9ffc55b3957\",\"evidence_refs\":[\"git:119d23f6f193149d3673fd6aab42729bc83c6dcf\"],\"identity\":\"/private/var/folders/cf/37chkgfx22q5bb_ws8brslx00000gn/T/splice-mvp-snap-1300200948\\u0000fact\\u0000internal/session/store.go\",\"kind\":\"fact\",\"producer_run\":\"mvp-snap-mvp-02-ttl-source-of-truth-1789661816427572000-taska\",\"schema_version\":1,\"status\":\"active\",\"supporting\":[{\"digest\":\"e7ad75d315e3ad4c9ad2a16c2a8b4ecd9bdc7a6e5828b9f2a7e6f83cd631c569\",\"path\":\"internal/session/store.go\"},{\"digest\":\"e7ad75d315e3ad4c9ad2a16c2a8b4ecd9bdc7a6e5828b9f2a7e6f83cd631c569\",\"path\":\"internal/session/store.go\",\"symbol\":\"NewStore\"},{\"digest\":\"e7ad75d315e3ad4c9ad2a16c2a8b4ecd9bdc7a6e5828b9f2a7e6f83cd631c569\",\"path\":\"internal/session/store.go\",\"symbol\":\"Store.Create\"},{\"digest\":\"e7ad75d315e3ad4c9ad2a16c2a8b4ecd9bdc7a6e5828b9f2a7e6f83cd631c569\",\"path\":\"internal/session/store.go\",\"symbol\":\"Store.Get\"},{\"digest\":\"e7ad75d315e3ad4c9ad2a16c2a8b4ecd9bdc7a6e5828b9f2a7e6f83cd631c569\",\"path\":\"internal/session/store.go\",\"symbol\":\"Store.Delete\"},{\"digest\":\"e7ad75d315e3ad4c9ad2a16c2a8b4ecd9bdc7a6e5828b9f2a7e6f83cd631c569\",\"path\":\"internal/session/store.go\",\"symbol\":\"Store.Len\"}],\"verification_status\":\"passed\",\"worktree_identity\":\"119d23f6f193149d3673fd6aab42729bc83c6dcf\"}}"
+      },
+      "anchors": [
+        {
+          "kind": "file",
+          "value": "internal/session/store.go"
+        },
+        {
+          "kind": "symbol",
+          "value": "internal/session/store.go#NewStore"
+        },
+        {
+          "kind": "symbol",
+          "value": "internal/session/store.go#Store.Create"
+        },
+        {
+          "kind": "symbol",
+          "value": "internal/session/store.go#Store.Delete"
+        },
+        {
+          "kind": "symbol",
+          "value": "internal/session/store.go#Store.Get"
+        },
+        {
+          "kind": "symbol",
+          "value": "internal/session/store.go#Store.Len"
+        }
+      ],
+      "evidence": [
+        {
+          "kind": "git",
+          "ref": "119d23f6f193149d3673fd6aab42729bc83c6dcf",
+          "detail": "verified run changed this file"
+        }
+      ],
+      "source_id": 3,
+      "claim_hash": "131a10d2c2941b171c91a79475ef8645e7053bdc8b96ccaa994c81fabb33a381"
+    }
+  ],
+  "capture_digest": "499aaf61a3a180735c4ec56eda8440e653a9eec964899d06fafc1cbbc3e903dd",
+  "verify_command": "# mvp-02 A: the session package gains DefaultTTL as the single lifetime\n# source of truth and the construction site reads it. Base fails (no\n# constant), gold passes, wrong (wrong value or still a literal at the\n# construction site) fails.\nmkdir -p internal/session\ncat \u003e internal/session/probe_ttl_test.go \u003c\u003c'EOF'\npackage session\n\nimport (\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestProbeDefaultTTL(t *testing.T) {\n\tif DefaultTTL != 30*time.Minute {\n\t\tt.Fatalf(\"DefaultTTL = %v, want 30m\", DefaultTTL)\n\t}\n\tstore := NewStore(DefaultTTL)\n\tstore.now = func() time.Time { return time.Unix(0, 0) }\n\tstore.Create(\"a\", \"u\")\n\t// Get refreshes LastSeen, so the expiry probe must not Get first.\n\tstore.now = func() time.Time { return time.Unix(1799, 0) }\n\tif _, err := store.Get(\"a\"); err != nil {\n\t\tt.Fatalf(\"session expired before DefaultTTL: %v\", err)\n\t}\n\tstore.Create(\"b\", \"u\")\n\tstore.now = func() time.Time { return time.Unix(3601, 0) }\n\tif _, err := store.Get(\"b\"); err == nil {\n\t\tt.Fatal(\"session survived past DefaultTTL\")\n\t}\n}\nEOF\ngo test -count=1 ./internal/session/ ; rc=$?\nrm -f internal/session/probe_ttl_test.go\nif [ $rc -ne 0 ]; then exit $rc; fi\n# The construction site must read the constant, not keep its own literal.\nif grep -q \"30 \\* time.Minute\" cmd/server/main.go; then\n  echo \"cmd/server/main.go still hard-codes the TTL literal\" \u003e\u00262\n  exit 1\nfi\nexit 0"
+}

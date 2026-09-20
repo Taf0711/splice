@@ -1,0 +1,308 @@
+{
+  "schema_version": "1",
+  "run_id": "mvp-snap-fam-05-handler-error-mapping-1789746241584398000-taska",
+  "session_id": "mvp-snap-fam-05-handler-error-mapping-1789746241584398000-taska",
+  "repo_root": "/private/var/folders/cf/37chkgfx22q5bb_ws8brslx00000gn/T/splice-mvp-snap-328320278",
+  "intent": "# Precursor: fam-05-handler-error-mapping The /session handler maps store failures to HTTP status codes ad hoc. Codify the mapping table in main.go as a function mapStoreError(err error) int returning: 404 for ErrNotFound, 409 for ErrConflict, 400 for ErrInvalidID, 429 for ErrUserAtCap, and 500 for anything else. Us...",
+  "tier": "light",
+  "plan": {
+    "tier": "light",
+    "request_intent": "# Precursor: fam-05-handler-error-mapping The /session handler maps store failures to HTTP status codes ad hoc. Codify the mapping table in main.go as a function mapStoreError(err error) int returning: 404 for ErrNotFound, 409 for ErrConflict, 400 for ErrInvalidID, 429 for ErrUserAtCap, and 500 for anything else. Us...",
+    "stages": [
+      {
+        "name": "code_writer",
+        "budget": {
+          "input_max": 20000,
+          "output_max": 8192,
+          "skippable": false
+        }
+      },
+      {
+        "name": "static_analyzer",
+        "budget": {
+          "input_max": 0,
+          "output_max": 0,
+          "skippable": true
+        }
+      },
+      {
+        "name": "test_runner",
+        "budget": {
+          "input_max": 0,
+          "output_max": 0,
+          "skippable": true
+        }
+      },
+      {
+        "name": "acceptance_verifier",
+        "budget": {
+          "input_max": 0,
+          "output_max": 0,
+          "skippable": true
+        }
+      }
+    ],
+    "token_budget": {
+      "total_input_budget": 21000,
+      "total_output_budget": 9192,
+      "per_stage": {
+        "acceptance_verifier": {
+          "input_max": 0,
+          "output_max": 0,
+          "skippable": true
+        },
+        "code_writer": {
+          "input_max": 20000,
+          "output_max": 8192,
+          "skippable": false
+        },
+        "static_analyzer": {
+          "input_max": 0,
+          "output_max": 0,
+          "skippable": true
+        },
+        "test_runner": {
+          "input_max": 0,
+          "output_max": 0,
+          "skippable": true
+        }
+      },
+      "reserve": 1000,
+      "overflow_policy": "abort"
+    }
+  },
+  "iterations": [
+    {
+      "iteration": 2,
+      "timestamp": 1789746455.891994,
+      "tests_passing": 2,
+      "tests_failing": 0,
+      "tests_errored": 0,
+      "preexisting": {
+        "pass": 2,
+        "fail": 0,
+        "errored": 0
+      },
+      "authored": {
+        "pass": 0,
+        "fail": 0,
+        "errored": 0
+      },
+      "acceptance_facts_passing": 0,
+      "acceptance_facts_failing": 0,
+      "code_size_bytes": 4054,
+      "verification_incomplete": 0,
+      "state_hash": "1bb9604693457cc9d102ed9ba886c8168fcd6dc8460721b45bb13766a28f96e0",
+      "confidence": 0.55,
+      "tokens_consumed": 19027,
+      "tokens_generated": 2892,
+      "files_changed": [
+        "main.go",
+        "session.go"
+      ],
+      "lines_added": 28,
+      "lines_removed": 1
+    }
+  ],
+  "stages": [
+    {
+      "name": "code_writer",
+      "status": "failed",
+      "iteration": 1,
+      "provider": "openrouter",
+      "model": "deepseek/deepseek-v4.1-flash",
+      "output_summary": "splice.stageRunError: context expansion budget exhausted while fulfilling the stage context request",
+      "tokens_input": 9530,
+      "tokens_output": 421,
+      "tokens_cached": 0,
+      "tokens_cache_write": 0,
+      "tokens_reasoning": 112,
+      "web_search_requests": 0,
+      "cost_usd": 0.0010046,
+      "latency_ms": 14665,
+      "input_meta": {
+        "context_items": 4,
+        "context_chars": 168,
+        "memory_items": 0,
+        "memory_chars": 0,
+        "exemplar_items": 0,
+        "edge_payload_bytes": 595,
+        "context_failures": 0,
+        "memory_lookup_mode": "search",
+        "scope_expansions": 2,
+        "expansions_performed": 0
+      },
+      "cache": {
+        "hit": false,
+        "similarity": 0
+      },
+      "prompt_hash": "25f5a5609d1b3217"
+    },
+    {
+      "name": "code_writer",
+      "status": "completed",
+      "iteration": 2,
+      "provider": "openrouter",
+      "model": "deepseek/deepseek-v4.1-flash",
+      "confidence": 0.85,
+      "output_summary": "Define the sentinel errors ErrConflict, ErrInvalidID, and ErrUserAtCap in session.go so mapStoreError in main.go compiles.",
+      "tokens_input": 16135,
+      "tokens_output": 2892,
+      "tokens_cached": 4096,
+      "tokens_cache_write": 0,
+      "tokens_reasoning": 1652,
+      "web_search_requests": 0,
+      "cost_usd": 0.0026551760000000004,
+      "latency_ms": 111143,
+      "input_meta": {
+        "context_items": 5,
+        "context_chars": 283,
+        "memory_items": 0,
+        "memory_chars": 0,
+        "exemplar_items": 0,
+        "edge_payload_bytes": 1258,
+        "context_failures": 0,
+        "memory_lookup_mode": "search",
+        "scope_expansions": 2,
+        "expansions_performed": 0
+      },
+      "cache": {
+        "hit": false,
+        "similarity": 0
+      },
+      "prompt_hash": "25f5a5609d1b3217"
+    },
+    {
+      "name": "static_analyzer",
+      "status": "completed",
+      "iteration": 2,
+      "confidence": 1,
+      "output_summary": "All applicable verification checks passed.",
+      "tokens_input": 0,
+      "tokens_output": 0,
+      "tokens_cached": 0,
+      "tokens_cache_write": 0,
+      "tokens_reasoning": 0,
+      "web_search_requests": 0,
+      "cost_usd": 0,
+      "latency_ms": 140,
+      "input_meta": {
+        "context_items": 0,
+        "context_chars": 0,
+        "memory_items": 0,
+        "memory_chars": 0,
+        "exemplar_items": 0,
+        "edge_payload_bytes": 1626,
+        "context_failures": 0,
+        "expansions_performed": 0
+      },
+      "cache": {
+        "hit": false,
+        "similarity": 0
+      }
+    },
+    {
+      "name": "test_runner",
+      "status": "completed",
+      "iteration": 2,
+      "confidence": 1,
+      "output_summary": "Test command passed.",
+      "tokens_input": 0,
+      "tokens_output": 0,
+      "tokens_cached": 0,
+      "tokens_cache_write": 0,
+      "tokens_reasoning": 0,
+      "web_search_requests": 0,
+      "cost_usd": 0,
+      "latency_ms": 18876,
+      "input_meta": {
+        "context_items": 0,
+        "context_chars": 0,
+        "memory_items": 0,
+        "memory_chars": 0,
+        "exemplar_items": 0,
+        "edge_payload_bytes": 1716,
+        "context_failures": 0,
+        "expansions_performed": 0
+      },
+      "cache": {
+        "hit": false,
+        "similarity": 0
+      }
+    },
+    {
+      "name": "acceptance_verifier",
+      "status": "completed",
+      "iteration": 2,
+      "confidence": 1,
+      "output_summary": "Acceptance verification: 0 passed, 0 failed, 0 errored, 0 skipped.",
+      "tokens_input": 0,
+      "tokens_output": 0,
+      "tokens_cached": 0,
+      "tokens_cache_write": 0,
+      "tokens_reasoning": 0,
+      "web_search_requests": 0,
+      "cost_usd": 0,
+      "latency_ms": 0,
+      "input_meta": {
+        "context_items": 0,
+        "context_chars": 0,
+        "memory_items": 0,
+        "memory_chars": 0,
+        "exemplar_items": 0,
+        "edge_payload_bytes": 1586,
+        "context_failures": 0,
+        "expansions_performed": 0
+      },
+      "cache": {
+        "hit": false,
+        "similarity": 0
+      }
+    }
+  ],
+  "outcome": {
+    "status": "completed",
+    "changed_files": [
+      "main.go",
+      "session.go"
+    ]
+  },
+  "memory": {
+    "status": "active",
+    "items": 0,
+    "chars": 0
+  },
+  "interactions": [
+    {
+      "message": {
+        "id": "mvp-snap-fam-05-handler-error-mapping-1789746241584398000-taska-r1",
+        "run_id": "mvp-snap-fam-05-handler-error-mapping-1789746241584398000-taska",
+        "from": "test_runner",
+        "to": "code_writer",
+        "kind": "revision_request",
+        "evidence": [
+          "build demo [demo.test]"
+        ],
+        "payload": {
+          "failing_evidence": [
+            "build demo [demo.test]: ./main.go:49:22: undefined: ErrConflict\n./main.go:51:22: undefined: ErrInvalidID\n./main.go:53:22: undefined: ErrUserAtCap\nbuild failed: demo [demo.test]"
+          ],
+          "changed_files": [
+            "main.go"
+          ],
+          "instruction": "The test runner reports failing tests after your implementation. Fix the implementation so these tests pass. Do not rewrite unrelated code."
+        }
+      },
+      "iteration": 2,
+      "repairs": 1,
+      "resolved": true,
+      "latency_ms": 69091
+    }
+  ],
+  "tool_fingerprint": "78c0df80ecf31888",
+  "topology_hash": "60e9f0ff7c9f1d12",
+  "budget_provenance": {
+    "code_writer": "budget not calibrated: 0/20 for this key"
+  },
+  "events_status": "complete"
+}

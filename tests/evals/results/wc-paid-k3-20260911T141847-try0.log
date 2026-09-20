@@ -1,0 +1,3 @@
+run wc-paid-k3-20260911T141847-try0: arms=3 tasks=3 attempts=27
+total-cost claim allowed: false (the task-clustered interval for the cost delta does not exclude zero)
+artifacts: tests/evals/results/wc-paid-k3-20260911T141847-try0

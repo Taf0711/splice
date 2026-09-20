@@ -1,0 +1,2 @@
+ok  	github.com/Taf0711/splice/memd	0.760s
+ok  	github.com/Taf0711/splice/memd/store	1.833s

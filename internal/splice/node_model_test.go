@@ -81,7 +81,7 @@ func TestRunPassNodeModelBeatsStageResolver(t *testing.T) {
 		},
 	})
 
-	records, _, completed, err := runPass(context.Background(), "run-node-model", 1, plan, registry, &namedProvider{name: "default"}, options, workDir, nil, time.Time{}, nil, nil, nil)
+	records, _, completed, err := runPass(context.Background(), "run-node-model", 1, plan, registry, &namedProvider{name: "default"}, options, workDir, nil, time.Time{}, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("runPass: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestRunPassBrokenNodeModelFailsLoud(t *testing.T) {
 			return agent.ModelSelection{}, nil
 		},
 	})
-	_, _, _, err := runPass(context.Background(), "run-broken-node-model", 1, plan, registry, &namedProvider{name: "default"}, options, workDir, nil, time.Time{}, nil, nil, nil)
+	_, _, _, err := runPass(context.Background(), "run-broken-node-model", 1, plan, registry, &namedProvider{name: "default"}, options, workDir, nil, time.Time{}, nil, nil, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "stage code_writer model") {
 		t.Fatalf("err = %v, want a node-model failure naming the stage", err)
 	}

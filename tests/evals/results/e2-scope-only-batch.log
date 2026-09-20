@@ -1,0 +1,11 @@
+family large-02-audit-retention-enforcer: matched-snapshot 3 rollouts x 2 arms done
+
+MVP paired proof (task B outcomes; precursor-failed attempts excluded)
+
+large-02-audit-retention-enforcer
+  cold: success 3/3, tokens med 6030, searches med 0, reads med 8
+  warm: success 3/3, tokens med 6643, searches med 0, reads med 9
+  cognition: resolved_by_cognition med 2, avoided_ops med 0 (per Task B run)
+    attempt 1: 2 question(s) resolved by cognition, 2 anchor(s) validated, semantic hits 3
+    attempt 2: 2 question(s) resolved by cognition, 2 anchor(s) validated, semantic hits 3
+    attempt 3: 2 question(s) resolved by cognition, 2 anchor(s) validated, semantic hits 3

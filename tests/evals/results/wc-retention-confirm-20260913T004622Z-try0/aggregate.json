@@ -1,0 +1,179 @@
+{
+  "version": 1,
+  "run_id": "wc-retention-confirm-20260913T004622Z-try0",
+  "generated_at": "2026-09-12T20:48:17.176373-04:00",
+  "pre_registration": {
+    "primary_correctness_endpoint": "verifier pass or fail per attempt",
+    "noninferiority_margin": 0.05,
+    "primary_cost_endpoint": "billed USD per verified completion",
+    "secondary_cost_endpoint": "billed USD per attempt",
+    "win_rule": "warm is a win only when the matched-pair cost delta is negative with a task-clustered interval that excludes zero, and correctness is noninferior to the margin",
+    "stopping_rule": "if warm does not reduce provider requests per verified completion on a corpus that triggers expansions, stop"
+  },
+  "provenance": {
+    "repo_dir": ".",
+    "binary": "/tmp/splice-archeval-paid",
+    "binary_revision": "8c496067ed31e04b1d5f7273ec63b356078897ff",
+    "sidecar_revision": "8c49606",
+    "model_id": "z-ai/glm-5.3-flash",
+    "model_settings": {},
+    "arms": [
+      "cold",
+      "warm"
+    ],
+    "tasks": 2,
+    "repeats": 1
+  },
+  "retention": {
+    "mode": "shared",
+    "sidecar_root": "/tmp/warmcost-retention-seq-sidecar",
+    "assignment": [
+      {
+        "arm": "cold",
+        "pattern": "a fresh sidecar per attempt: \u003csidecar-root\u003e/fresh-\u003csession-id\u003e"
+      },
+      {
+        "arm": "warm",
+        "pattern": "one shared sidecar for every attempt: \u003csidecar-root\u003e/shared-warm"
+      }
+    ],
+    "ordering_rule": "one workspace per (arm, sequence); the write-phase task and the read-phase tasks that follow it run in that workspace in order, and the runner interleaves arm order per repeat, so a write on the shared sidecar and in the workspace precedes its read"
+  },
+  "arm_metrics": [
+    {
+      "arm": "cold",
+      "attempts": 2,
+      "verified_completions": 1,
+      "failed_attempts": 1,
+      "partial_attempts": 0,
+      "requests": 13,
+      "requests_per_verified_completion": 13,
+      "billed_usd": 0.0073468199999999996,
+      "billed_usd_per_attempt": 0.0036734099999999998,
+      "billed_usd_per_verified_completion": 0.0073468199999999996,
+      "input_tokens": 64785,
+      "output_tokens": 3819,
+      "cached_input_tokens": 34688,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 411,
+      "input_tokens_per_attempt": 32392.5,
+      "input_tokens_per_verified_completion": 64785,
+      "billed_usd_by_source": {
+        "expansion": 0.0024498999999999996,
+        "format_retry": 0.0016307899999999998,
+        "generation": 0.00326613
+      },
+      "expansion_requests": 3,
+      "round_share": 0.23076923076923078,
+      "cache_share": 0.5354325847032492,
+      "coverage_complete": true
+    },
+    {
+      "arm": "warm",
+      "attempts": 2,
+      "verified_completions": 0,
+      "failed_attempts": 2,
+      "partial_attempts": 0,
+      "requests": 14,
+      "requests_per_verified_completion": 0,
+      "billed_usd": 0.00762446,
+      "billed_usd_per_attempt": 0.00381223,
+      "billed_usd_per_verified_completion": 0,
+      "input_tokens": 70734,
+      "output_tokens": 4750,
+      "cached_input_tokens": 44672,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 319,
+      "input_tokens_per_attempt": 35367,
+      "input_tokens_per_verified_completion": 0,
+      "billed_usd_by_source": {
+        "expansion": 0.0020551,
+        "format_retry": 0.00294659,
+        "generation": 0.00262277
+      },
+      "expansion_requests": 2,
+      "round_share": 0.14285714285714285,
+      "cache_share": 0.6315491842678203,
+      "coverage_complete": true
+    }
+  ],
+  "per_task": [
+    {
+      "task_id": "clock-helper-read",
+      "cold_billed_usd_per_attempt": 0.00473529,
+      "warm_billed_usd_per_attempt": 0.00424266,
+      "delta_billed_usd_per_attempt": -0.00049263,
+      "cold_requests_per_attempt": 8,
+      "warm_requests_per_attempt": 8,
+      "delta_requests_per_attempt": 0,
+      "cold_success_rate": 0,
+      "warm_success_rate": 0,
+      "delta_success_rate": 0
+    },
+    {
+      "task_id": "clock-helper-write",
+      "cold_billed_usd_per_attempt": 0.00261153,
+      "warm_billed_usd_per_attempt": 0.0033818000000000003,
+      "delta_billed_usd_per_attempt": 0.0007702700000000004,
+      "cold_requests_per_attempt": 5,
+      "warm_requests_per_attempt": 6,
+      "delta_requests_per_attempt": 1,
+      "cold_success_rate": 1,
+      "warm_success_rate": 0,
+      "delta_success_rate": -1
+    }
+  ],
+  "decomposition": {
+    "total_delta_usd": 0.00027764,
+    "sources": [
+      {
+        "source": "expansion",
+        "cold_usd": 0.0024498999999999996,
+        "warm_usd": 0.0020551,
+        "delta_usd": -0.00039479999999999984
+      },
+      {
+        "source": "format_retry",
+        "cold_usd": 0.0016307899999999998,
+        "warm_usd": 0.00294659,
+        "delta_usd": 0.0013158
+      },
+      {
+        "source": "generation",
+        "cold_usd": 0.00326613,
+        "warm_usd": 0.00262277,
+        "delta_usd": -0.0006433599999999999
+      }
+    ],
+    "cache_tokens_delta": 9984,
+    "cache_channel_note": "ledger carries cache-read and cache-write tokens but no per-token cache price, so the cache channel is reported in tokens and is not folded into the USD split"
+  },
+  "bootstrap": {
+    "unit": "task",
+    "samples": 10000,
+    "tasks": 2,
+    "seed": 1,
+    "billed_usd_per_attempt_delta_ci": {
+      "lower": -0.00049263,
+      "upper": 0.0007702700000000004
+    },
+    "requests_per_attempt_delta_ci": {
+      "lower": 0,
+      "upper": 1
+    },
+    "success_rate_delta_ci": {
+      "lower": -1,
+      "upper": 0
+    }
+  },
+  "claim": {
+    "total_cost_claim_allowed": false,
+    "reason": "warm billed cost is not lower than cold"
+  },
+  "coverage": {
+    "attempts": 4,
+    "partial_attempts": 0,
+    "complete": true
+  },
+  "note": "Every number comes from the captured authoritative request ledger. Tokens are provider-reported. A partial run withholds the total-cost claim."
+}

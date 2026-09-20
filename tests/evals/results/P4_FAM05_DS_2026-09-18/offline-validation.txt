@@ -1,0 +1,4 @@
+fam-05-handler-error-mapping: [FPFPF] OK (base/goldA/baseB/goldB/wrongB, altB=P)
+wrote /Users/tafseerhaque/Documents/splice-archeval/tests/evals/cognition-families/registry-pairs.json
+
+all pairs validate [base FAIL, goldA PASS, baseB FAIL, goldB PASS, wrongB FAIL]

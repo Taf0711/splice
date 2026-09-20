@@ -560,6 +560,10 @@ func (provider *Provider) openAIRequest(request zeroruntime.CompletionRequest) c
 			"type":     "function",
 			"function": map[string]any{"name": name},
 		}
+	} else if request.ToolChoiceRequired {
+		// Any-tool forcing: the model must call one of the offered tools,
+		// without naming which. The OpenAI wire form is the string form.
+		mapped.ToolChoice = "required"
 	}
 	return mapped
 }

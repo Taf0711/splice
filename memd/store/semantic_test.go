@@ -137,7 +137,7 @@ func TestSemanticSearchFindsRelatedNode(t *testing.T) {
 		}
 	}
 
-	hits, err := idx.Search(ctx, "how does session storage work", 2)
+	hits, err := idx.Search(ctx, "how does session storage work", 2, "")
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestSemanticSearchFindsRelatedNode(t *testing.T) {
 	}
 
 	// Irrelevant query ranks the unrelated node lower, not first.
-	hits, err = idx.Search(ctx, "sign the release binary", 3)
+	hits, err = idx.Search(ctx, "sign the release binary", 3, "")
 	if err != nil {
 		t.Fatalf("search 2: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestSemanticSearchEmptyIndexFallback(t *testing.T) {
 	st, idx := newSemanticTestStore(t)
 	ctx := context.Background()
 
-	hits, err := idx.Search(ctx, "anything at all", 8)
+	hits, err := idx.Search(ctx, "anything at all", 8, "")
 	if err != nil {
 		t.Fatalf("empty index search returned error: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestSemanticSearchEmptyIndexFallback(t *testing.T) {
 	if err := st.SetStatus(ctx, node.ID, NodeStatusSuperseded); err != nil {
 		t.Fatalf("set status: %v", err)
 	}
-	hits, err = idx.Search(ctx, "builds", 8)
+	hits, err = idx.Search(ctx, "builds", 8, "")
 	if err != nil {
 		t.Fatalf("search after supersede: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestSemanticSearchEmptyIndexFallback(t *testing.T) {
 	}
 
 	// Empty search text fails loud.
-	if _, err := idx.Search(ctx, "  ", 8); err == nil {
+	if _, err := idx.Search(ctx, "  ", 8, ""); err == nil {
 		t.Error("expected empty search text to fail")
 	}
 }
@@ -219,11 +219,44 @@ func TestSemanticIndexReindexAll(t *testing.T) {
 	if n != 2 {
 		t.Fatalf("expected 2 nodes indexed, got %d", n)
 	}
-	hits, err := idx.Search(ctx, "storage", 1)
+	hits, err := idx.Search(ctx, "storage", 1, "")
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
 	if len(hits) == 0 {
 		t.Fatal("expected a hit after reindex")
+	}
+}
+
+func TestSemanticSearchProjectScoped(t *testing.T) {
+	st := newGraphTestStore(t)
+	idx := NewSemanticIndex(st)
+	ctx := context.Background()
+
+	n1, err := st.UpsertNode(ctx, NodeInput{
+		Kind: NodeKindFact, Claim: "session storage keeps tokens in memory", ProjectPath: "/repo/one",
+	})
+	if err != nil {
+		t.Fatalf("upsert one: %v", err)
+	}
+	n2, err := st.UpsertNode(ctx, NodeInput{
+		Kind: NodeKindFact, Claim: "session storage keeps tokens in memory", ProjectPath: "/repo/two",
+	})
+	if err != nil {
+		t.Fatalf("upsert two: %v", err)
+	}
+	if err := idx.IndexNode(ctx, n1.ID, n1.Claim); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.IndexNode(ctx, n2.ID, n2.Claim); err != nil {
+		t.Fatal(err)
+	}
+
+	hits, err := idx.Search(ctx, "session storage", 8, "/repo/two")
+	if err != nil {
+		t.Fatalf("scoped search: %v", err)
+	}
+	if len(hits) != 1 || hits[0].NodeID != n2.ID {
+		t.Fatalf("scoped search returned %+v, want only project two's node", hits)
 	}
 }

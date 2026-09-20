@@ -1,0 +1,7 @@
+A/snapshot exec=False ok=True tok=0 billed_usd=None source=None estimated=None reads=None tools=None latency_ms=None fail=None
+B/cold exec=True ok=True tok=11601 billed_usd=0.0011600999999999998 source=estimated estimated=True reads=4 tools=14 latency_ms=11545 fail=None
+B/warm exec=True ok=False tok=28998 billed_usd=0.000897 source=ledger estimated=False reads=5 tools=21 latency_ms=18620 fail=agent_noncompletion
+B/manual exec=True ok=True tok=11377 billed_usd=0.0011377 source=estimated estimated=True reads=3 tools=13 latency_ms=11523 fail=None
+addendum-5 ledger total = 0.003194800
+addenda 4+5 total = 0.009422162 + 0.003194800 = 0.012616962
+remaining against 0.05 = 0.037383038

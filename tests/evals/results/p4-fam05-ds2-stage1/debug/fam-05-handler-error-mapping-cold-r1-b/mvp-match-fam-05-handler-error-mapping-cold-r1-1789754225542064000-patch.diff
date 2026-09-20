@@ -1,0 +1,40 @@
+diff --git a/main.go b/main.go
+index 321a3eb..68cde2b 100644
+--- a/main.go
++++ b/main.go
+@@ -12,6 +12,7 @@ func main() {
+ 	store := NewStore(30 * time.Minute)
+ 	http.HandleFunc("/session", sessionHandler(store))
+ 	http.HandleFunc("/healthz", healthHandler(store))
++	http.HandleFunc("/admin/session", adminDeleteHandler(store))
+ 	log.Println("listening on :8080")
+ 	log.Fatal(http.ListenAndServe(":8080", nil))
+ }
+@@ -41,6 +42,27 @@ func sessionHandler(store *Store) http.HandlerFunc {
+ 	}
+ }
+ 
++// adminDeleteHandler removes a session on DELETE.
++func adminDeleteHandler(store *Store) http.HandlerFunc {
++	return func(w http.ResponseWriter, r *http.Request) {
++		if r.Method != http.MethodDelete {
++			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
++			return
++		}
++		id := r.URL.Query().Get("id")
++		if id == "" {
++			http.Error(w, "id is required", http.StatusBadRequest)
++			return
++		}
++		if _, err := store.Get(id); err != nil {
++			http.Error(w, err.Error(), mapStoreError(err))
++			return
++		}
++		store.Delete(id)
++		w.WriteHeader(http.StatusNoContent)
++	}
++}
++
+ // mapStoreError translates store sentinel errors into HTTP status codes.
+ func mapStoreError(err error) int {
+ 	switch {

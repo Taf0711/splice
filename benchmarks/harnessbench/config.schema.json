@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Harness-Bench Splice adapter entry",
+  "description": "Validates the splice-local models entry in a Harness-Bench harness.yaml. Field names follow config/harness.example.yaml at upstream commit 1025086a446653702b80cfb48babbeec35db6b2c.",
+  "type": "object",
+  "required": ["models"],
+  "properties": {
+    "models": {
+      "type": "object",
+      "required": ["splice-local"],
+      "properties": {
+        "splice-local": {
+          "type": "object",
+          "required": ["adapter", "command"],
+          "properties": {
+            "adapter": { "const": "splice" },
+            "command": { "type": "string", "minLength": 1 },
+            "session_prefix": { "type": "string" },
+            "timeout_sec": { "type": "integer", "minimum": 1 },
+            "args": {
+              "type": "array",
+              "items": { "type": ["string", "number", "boolean"] }
+            }
+          },
+          "additionalProperties": true
+        }
+      }
+    }
+  }
+}

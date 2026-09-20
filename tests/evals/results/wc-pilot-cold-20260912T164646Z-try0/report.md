@@ -1,0 +1,64 @@
+# Warm-cost measurement: wc-pilot-cold-20260912T164646Z-try0
+
+Generated: 2026-09-12 12:49:18 EDT
+
+Revision: `c56e78edd1b1818009acec5b2d3cdf49321caf94`  Sidecar: `c56e78e`  Model: `z-ai/glm-5.3-flash`
+
+## Pre-registration
+
+- Primary correctness endpoint: verifier pass or fail per attempt
+- Noninferiority margin: 0.05
+- Primary cost endpoint: billed USD per verified completion
+- Secondary cost endpoint: billed USD per attempt
+- Win rule: warm is a win only when the matched-pair cost delta is negative with a task-clustered interval that excludes zero, and correctness is noninferior to the margin
+- Stopping rule: if warm does not reduce provider requests per verified completion on a corpus that triggers expansions, stop
+
+## Retention protocol
+
+- Mode: fresh
+- Sidecar root: (ambient, operator-managed)
+- cold: a fresh sidecar per attempt: <sidecar-root>/fresh-<session-id>
+- Ordering rule: write-phase tasks run before read-phase tasks, and the runner interleaves arm order per repeat, so a write on the shared sidecar precedes a read of it
+- Note: no sidecar root is set, so every attempt uses the ambient operator sidecar
+
+## Cost coverage
+
+Attempts: 3. Partial attempts: 0. Complete: true.
+
+## Arms
+
+| arm | attempts | verified | requests | req/verified | billed USD | USD/attempt | USD/verified | input tok | output tok | cached tok | cache-write tok | reasoning tok | input tok/attempt | input tok/verified | round share | cache share |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| cold | 3 | 1 | 16 | 16.00 | 0.0120 | 0.0040 | 0.0120 | 70310 | 7031 | 17088 | 0 | 774 | 23437 | 70310 | 0.250 | 0.243 |
+
+## Cost decomposition by spend source (warm minus cold)
+
+| source | cold USD | warm USD | delta USD |
+| --- | ---: | ---: | ---: |
+| expansion | 0.0039 | 0.0000 | -0.0039 |
+| format_retry | 0.0012 | 0.0000 | -0.0012 |
+| generation | 0.0052 | 0.0000 | -0.0052 |
+| repair | 0.0017 | 0.0000 | -0.0017 |
+| total | | | -0.0120 |
+
+Cache channel: -17088 tokens. ledger carries cache-read and cache-write tokens but no per-token cache price, so the cache channel is reported in tokens and is not folded into the USD split
+
+## Task-clustered bootstrap
+
+Unit: task. Samples: 10000. Tasks: 0. Seed: 1.
+
+| delta | lower 2.5% | upper 97.5% |
+| --- | ---: | ---: |
+| billed USD/attempt | +0.0000 | +0.0000 |
+| requests/attempt | +0.000 | +0.000 |
+| success rate | +0.000 | +0.000 |
+
+## Claim
+
+Allowed: false. the retention protocol is fresh, so the warm arm has no retained experience and a total-cost claim is not available
+
+## Per-task effects
+
+| task | cold USD/attempt | warm USD/attempt | delta USD | delta requests | delta success |
+| --- | ---: | ---: | ---: | ---: | ---: |
+

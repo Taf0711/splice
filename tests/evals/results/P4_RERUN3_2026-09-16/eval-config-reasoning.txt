@@ -1,0 +1,2 @@
+openrouter reasoningEffort = medium
+stage-models default reasoning_effort = medium

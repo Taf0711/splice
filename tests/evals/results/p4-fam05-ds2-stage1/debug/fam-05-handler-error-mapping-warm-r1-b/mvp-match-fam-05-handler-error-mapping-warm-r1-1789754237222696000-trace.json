@@ -1,0 +1,91 @@
+{
+  "schema_version": "1",
+  "run_id": "mvp-match-fam-05-handler-error-mapping-warm-r1-1789754237222696000",
+  "session_id": "mvp-match-fam-05-handler-error-mapping-warm-r1-1789754237222696000",
+  "repo_root": "/private/var/folders/cf/37chkgfx22q5bb_ws8brslx00000gn/T/splice-mvp-warm-296356534",
+  "intent": "# Target: fam-05-handler-error-mapping New admin endpoints must map their store errors using the SAME table as the /session handler. Refactor mapStoreError in main.go if needed and use it from any new admin handlers you add. The mapping table must stay the single source of truth for store-error-to-status translation.",
+  "tier": "light",
+  "plan": {
+    "tier": "light",
+    "request_intent": "# Target: fam-05-handler-error-mapping New admin endpoints must map their store errors using the SAME table as the /session handler. Refactor mapStoreError in main.go if needed and use it from any new admin handlers you add. The mapping table must stay the single source of truth for store-error-to-status translation.",
+    "stages": [
+      {
+        "name": "code_writer",
+        "budget": {
+          "input_max": 20000,
+          "output_max": 8192,
+          "skippable": false
+        }
+      },
+      {
+        "name": "static_analyzer",
+        "budget": {
+          "input_max": 0,
+          "output_max": 0,
+          "skippable": true
+        }
+      },
+      {
+        "name": "test_runner",
+        "budget": {
+          "input_max": 0,
+          "output_max": 0,
+          "skippable": true
+        }
+      },
+      {
+        "name": "acceptance_verifier",
+        "budget": {
+          "input_max": 0,
+          "output_max": 0,
+          "skippable": true
+        }
+      }
+    ],
+    "token_budget": {
+      "total_input_budget": 21000,
+      "total_output_budget": 9192,
+      "per_stage": {
+        "acceptance_verifier": {
+          "input_max": 0,
+          "output_max": 0,
+          "skippable": true
+        },
+        "code_writer": {
+          "input_max": 20000,
+          "output_max": 8192,
+          "skippable": false
+        },
+        "static_analyzer": {
+          "input_max": 0,
+          "output_max": 0,
+          "skippable": true
+        },
+        "test_runner": {
+          "input_max": 0,
+          "output_max": 0,
+          "skippable": true
+        }
+      },
+      "reserve": 1000,
+      "overflow_policy": "abort"
+    }
+  },
+  "iterations": null,
+  "stages": [],
+  "outcome": {
+    "status": "failed",
+    "abort_reason": "repair: code_writer re-entry: context expansion budget exhausted while fulfilling the stage context request"
+  },
+  "memory": {
+    "status": "active",
+    "items": 0,
+    "chars": 0
+  },
+  "tool_fingerprint": "78c0df80ecf31888",
+  "topology_hash": "60e9f0ff7c9f1d12",
+  "budget_provenance": {
+    "code_writer": "budget not calibrated: 0/20 for this key"
+  },
+  "events_status": "complete"
+}

@@ -1,0 +1,3 @@
+cold: tool_calls=18 reads=['main.go', 'main.go', 'session.go', 'session.go', 'main.go', 'main.go', 'session.go', 'session.go', 'session_test.go', 'session_test.go']
+automatic: tool_calls=22 reads=['main.go', 'main.go', 'session.go', 'session.go', 'session_test.go', 'session_test.go', 'main.go', 'main.go', 'session.go', 'session.go', 'session_test.go', 'session_test.go', 'go.mod', 'go.mod']
+manual: tool_calls=13 reads=['main.go', 'main.go', 'session.go', 'session.go', 'main.go', 'main.go']

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -226,5 +227,66 @@ func TestGitHeadCommitReadsResetRepo(t *testing.T) {
 	}
 	if _, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output(); err != nil {
 		t.Fatalf("repo unusable: %v", err)
+	}
+}
+
+// TestFamiliesRowsCarryFullRowAndProvenance writes the artifact through the
+// real emit path and asserts the emitted JSON carries the full telemetry row
+// plus the provenance fields. A prior artifact carried only 12 keys and could
+// not be audited against the source that produced it.
+func TestFamiliesRowsCarryFullRowAndProvenance(t *testing.T) {
+	outDir := t.TempDir()
+	rows := []familyPairRow{
+		{
+			Family: "fam-01", Attempt: 1, Arm: "warm", Success: true, Tokens: 1234, Telemetry: true,
+			InputTokens: 900, OutputTokens: 300, ReasoningTokens: 34, CachedTokens: 120,
+			ToolCalls: 4, FileReads: 2, Status: "completed",
+		},
+		{
+			Family: "fam-01", Attempt: 1, Arm: "cold", Success: false, Tokens: 4321, Telemetry: true,
+			InfraStatus: "timeout", Error: "exec run timed out",
+			Status: "failed", AbortReason: "repeated unchanged stage failure (validation) in iterations 1 and 2: code_writer",
+		},
+	}
+	stampRowProvenance(rows)
+	if err := writeFamiliesRows(outDir, rows); err != nil {
+		t.Fatalf("writeFamiliesRows: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(outDir, "families-attempts.jsonl"))
+	if err != nil {
+		t.Fatalf("read artifact: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("artifact lines = %d, want 2", len(lines))
+	}
+	var completed, aborted map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &completed); err != nil {
+		t.Fatalf("unmarshal completed row: %v", err)
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &aborted); err != nil {
+		t.Fatalf("unmarshal aborted row: %v", err)
+	}
+	for _, key := range []string{
+		"harness_revision", "dirty_tree_digest",
+		"trace_status", "input_tokens", "output_tokens", "reasoning_tokens", "cached_input_tokens",
+		"tool_calls", "file_reads",
+	} {
+		if _, ok := completed[key]; !ok {
+			t.Fatalf("completed row missing key %q: %s", key, lines[0])
+		}
+	}
+	for _, key := range []string{"abort_reason", "infra_status", "trace_status"} {
+		if _, ok := aborted[key]; !ok {
+			t.Fatalf("aborted row missing key %q: %s", key, lines[1])
+		}
+	}
+	// Provenance is emitted without omitempty: an unauditable artifact must
+	// show an empty value, never a silently dropped key.
+	if _, ok := aborted["harness_revision"]; !ok {
+		t.Fatalf("harness_revision must be emitted without omitempty")
+	}
+	if _, ok := aborted["dirty_tree_digest"]; !ok {
+		t.Fatalf("dirty_tree_digest must be emitted without omitempty")
 	}
 }

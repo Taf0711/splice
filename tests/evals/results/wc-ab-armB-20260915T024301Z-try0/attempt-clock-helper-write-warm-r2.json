@@ -1,0 +1,84 @@
+{
+  "task_id": "clock-helper-write",
+  "arm": "warm",
+  "repeat": 2,
+  "sequence": 0,
+  "sequence_ordinal": 0,
+  "sequence_tasks": 2,
+  "workspace": "/var/folders/cf/37chkgfx22q5bb_ws8brslx00000gn/T/warmcost-seq-base-2549132945/warm-seq00",
+  "run_id": "wc-wc-ab-armB-20260915T024301Z-try0-clock-helper-write-warm-r2",
+  "binary": "/tmp/splice-archeval-paid",
+  "binary_revision": "d9c52b3560fbab839ee377a57a8ad8ae1414801d",
+  "sidecar_revision": "2f4ccde",
+  "fixture_digest": "sha256:8fc24bf5d59af39d35218838ef5181dafd601712af1628949bc357ea804e9727",
+  "model_id": "z-ai/glm-5.3-flash",
+  "model_settings": {},
+  "treatment_env": [
+    "SPLICE_SCOPE_MODE=on",
+    "SPLICE_EVIDENCE_SUBSTITUTION=on"
+  ],
+  "session_id": "wc-wc-ab-armB-20260915T024301Z-try0-clock-helper-write-warm-r2",
+  "run_status": "completed",
+  "cost_coverage": "complete",
+  "verifier_result": true,
+  "verifier_output": "ok  \tdemo\t0.291s\n",
+  "requests": [
+    {
+      "sequence": 1,
+      "stage": "code_writer",
+      "iteration": 1,
+      "invocation_ordinal": 0,
+      "context_round": 0,
+      "spend_source": "",
+      "input_tokens": 2733,
+      "output_tokens": 854,
+      "cached_input_tokens": 2732,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 48,
+      "cost_usd": 0.00050911,
+      "cost_status": "priced",
+      "prompt_layout_hash": "cc09a35d5dcfbe6e0e4a757243b998f4edc54934dbd382323cbc0abbbf78f692",
+      "cache_hit": true,
+      "memory_position": "after_prefix"
+    }
+  ],
+  "totals": {
+    "requests": 1,
+    "input_tokens": 2733,
+    "output_tokens": 854,
+    "cached_input_tokens": 2732,
+    "cache_write_tokens": 0,
+    "reasoning_tokens": 48,
+    "billed_usd": 0.00050911,
+    "priced_records": 1
+  },
+  "cache_telemetry_reported": true,
+  "prompt_layout_flips": 0,
+  "rounds": [
+    {
+      "stage": "code_writer",
+      "iteration": 1,
+      "requests": 1,
+      "input_tokens": 2733,
+      "cached_input_tokens": 2732,
+      "cache_hit_rate": 0.9996341017197219,
+      "spend_source": "unspecified"
+    }
+  ],
+  "layout_stability": [
+    {
+      "stage": "code_writer",
+      "prompt_layout_hashes": [
+        "cc09a35d5dcfbe6e0e4a757243b998f4edc54934dbd382323cbc0abbbf78f692"
+      ],
+      "requests": 1,
+      "requests_with_hash": 1,
+      "hashed": true,
+      "stable": true
+    }
+  ],
+  "raw_stream": "raw-clock-helper-write-warm-r2.jsonl",
+  "started_at": "2026-09-14T22:46:04.021118-04:00",
+  "ended_at": "2026-09-14T22:47:16.865007-04:00",
+  "duration_ms": 72843
+}

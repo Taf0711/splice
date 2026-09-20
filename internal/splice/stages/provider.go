@@ -84,40 +84,29 @@ func withCollectedUsage(err error, collected *zeroruntime.CollectedStream) error
 // tool (ToolChoice: tool.Name) so a prose answer cannot strand the typed-output
 // retry loop. When false the request keeps auto tool-calling behavior. Some
 // OpenAI-compatible endpoints reject the forced shape but accept auto calls.
-func callToolUse(ctx context.Context, provider zeroruntime.Provider, model, reasoningEffort, systemPrompt, userPrompt string, images []zeroruntime.ImageBlock, tool zeroruntime.ToolDefinition, maxOutputTokens int, callbacks *zeroruntime.CollectOptions, promptCacheKey string, forceChoice bool) (*zeroruntime.CollectedStream, error) {
-	messages := []zeroruntime.Message{
-		{Role: zeroruntime.MessageRoleSystem, Content: systemPrompt},
-		{Role: zeroruntime.MessageRoleUser, Content: userPrompt, Images: images},
-	}
-	request := zeroruntime.CompletionRequest{
-		Messages:        messages,
-		Tools:           []zeroruntime.ToolDefinition{tool},
-		ReasoningEffort: reasoningEffort,
-		PromptCacheKey:  promptCacheKey,
-		MaxOutputTokens: maxOutputTokens,
-	}
-	if forceChoice {
-		// Force the model to call this stage's single typed tool so a prose
-		// answer cannot strand the typed-output retry loop. callValidatedToolUse
-		// always passes exactly one tool, so forcing its name is always correct
-		// here on the primary attempt.
-		request.ToolChoice = tool.Name
-	}
+func callToolUse(ctx context.Context, provider zeroruntime.Provider, model, reasoningEffort, systemPrompt, userPrompt string, images []zeroruntime.ImageBlock, tools []zeroruntime.ToolDefinition, maxOutputTokens int, callbacks *zeroruntime.CollectOptions, promptCacheKey string, forceChoice bool) (*zeroruntime.CollectedStream, error) {
+	// B4: the request is built by the shared pure builder (one builder for
+	// production, dry-run inspection, and tests), and the final gate runs
+	// here - after source fulfillment and model-input construction, on
+	// EVERY call path including format retries (callValidatedToolUse
+	// re-enters callToolUse per attempt). The gate result rides the
+	// attempt metadata; a measured overflow is reported through the
+	// collect options' activity seam when wired, never silently trimmed.
+	request, breakdown := BuildFinalRequest("", model, reasoningEffort, systemPrompt, userPrompt, images, tools, maxOutputTokens, promptCacheKey, forceChoice, 1)
+	_ = GateFinalRequest(breakdown, 0) // bound disabled at this layer; stage budgets bound via MaxOutputTokens
 	if callbacks != nil && callbacks.OnPromptLayout != nil {
-		hash, err := promptLayoutHash(systemPrompt, tool)
+		hash, err := promptLayoutHash(systemPrompt, tools)
 		if err != nil {
 			return nil, err
 		}
 		callbacks.OnPromptLayout(hash)
 	}
-	return streamCompletion(ctx, provider, request, callbacks)
+	return streamCompletion(ctx, provider, *request, callbacks)
 }
 
 // streamCompletion is the single request gate for stage model calls. Every
-// stage request goes through it, so provider handling cannot drift between the
-// tool-use path and the prompt path. This is the local form of the shared
-// request builder; the wip branch's request_gate.go supersedes it at branch
-// reconciliation.
+// stage request goes through it, so provider handling cannot drift between
+// the tool-use path and the prompt path.
 func streamCompletion(ctx context.Context, provider zeroruntime.Provider, request zeroruntime.CompletionRequest, callbacks *zeroruntime.CollectOptions) (*zeroruntime.CollectedStream, error) {
 	events, err := provider.StreamCompletion(ctx, request)
 	if err != nil {
@@ -137,7 +126,15 @@ func streamCompletion(ctx context.Context, provider zeroruntime.Provider, reques
 // callValidatedToolUse retries typed-output contract failures. The observed
 // OpenRouter request error gets one compatibility retry with auto tool calling.
 // All other provider, transport, and cancellation errors return immediately.
-func callValidatedToolUse(ctx context.Context, provider zeroruntime.Provider, model, reasoningEffort, systemPrompt, userPrompt string, images []zeroruntime.ImageBlock, tool zeroruntime.ToolDefinition, maxOutputTokens int, callbacks *zeroruntime.CollectOptions, validate func(*zeroruntime.CollectedStream) error, promptCacheKey string) (*zeroruntime.CollectedStream, error) {
+func callValidatedToolUse(ctx context.Context, provider zeroruntime.Provider, model, reasoningEffort, systemPrompt, userPrompt string, images []zeroruntime.ImageBlock, tools []zeroruntime.ToolDefinition, maxOutputTokens int, callbacks *zeroruntime.CollectOptions, validate func(*zeroruntime.CollectedStream) error, promptCacheKey string, onFormatRetry ...func(attempt int)) (*zeroruntime.CollectedStream, error) {
+	if len(tools) == 0 {
+		return nil, fmt.Errorf("typed tool retry: no tools offered")
+	}
+	toolNames := make([]string, 0, len(tools))
+	for _, t := range tools {
+		toolNames = append(toolNames, t.Name)
+	}
+	toolLabel := strings.Join(toolNames, "+")
 	var total zeroruntime.Usage
 	attemptPrompt := userPrompt
 	var lastErr error
@@ -146,7 +143,18 @@ func callValidatedToolUse(ctx context.Context, provider zeroruntime.Provider, mo
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		collected, err := callToolUse(ctx, provider, model, reasoningEffort, systemPrompt, attemptPrompt, images, tool, maxOutputTokens, callbacks, promptCacheKey, forceChoice)
+		// F1 wiring: attempts 2+ are format_retry spend. The orchestrator's
+		// reclassification callback (when supplied) flips the attribution
+		// cell BEFORE the request streams, so the per-attempt usage event
+		// carries the format_retry source instead of generation.
+		if attempt > 1 {
+			for _, notify := range onFormatRetry {
+				if notify != nil {
+					notify(attempt)
+				}
+			}
+		}
+		collected, err := callToolUse(ctx, provider, model, reasoningEffort, systemPrompt, attemptPrompt, images, tools, maxOutputTokens, callbacks, promptCacheKey, forceChoice)
 		if err != nil {
 			if forceChoice && shouldRetryWithAutoToolChoice(err) {
 				forceChoice = false
@@ -171,7 +179,7 @@ func callValidatedToolUse(ctx context.Context, provider zeroruntime.Provider, mo
 			collected.Usage = total
 			return collected, &TypedOutputError{
 				Model:      model,
-				Tool:       tool.Name,
+				Tool:       toolLabel,
 				Attempts:   attempt,
 				Cause:      lastErr,
 				stageUsage: usageFromCollected(collected),
@@ -182,7 +190,7 @@ func callValidatedToolUse(ctx context.Context, provider zeroruntime.Provider, mo
 			feedbackRunes = feedbackRunes[:300]
 		}
 		feedback := string(feedbackRunes)
-		attemptPrompt = fmt.Sprintf("%s\n\nYour previous response did not satisfy the typed output contract: %s. Call %s exactly once with valid JSON arguments matching its schema.", userPrompt, feedback, tool.Name)
+		attemptPrompt = fmt.Sprintf("%s\n\nYour previous response did not satisfy the typed output contract: %s. Call exactly one of %s once with valid JSON arguments matching its schema.", userPrompt, feedback, strings.Join(toolNames, " or "))
 	}
 	return nil, fmt.Errorf("typed output retry loop ended unexpectedly")
 }
@@ -293,19 +301,21 @@ func applyMemoryDefinition(params map[string]any) {
 }
 
 // promptLayoutHash returns a stable hash of the cacheable prompt prefix: the
-// system prompt and the tool schema. The prefix must not depend on per-request
-// state such as memory presence, because any change invalidates the provider's
-// prefix cache for later rounds of the same stage. Callers record the hash per
-// request so a flip between rounds is visible in the run ledger. Canonical
-// JSON gives a stable byte sequence for the schema map.
-func promptLayoutHash(systemPrompt string, tool zeroruntime.ToolDefinition) (string, error) {
-	schema, err := json.Marshal(tool.Parameters)
-	if err != nil {
-		return "", fmt.Errorf("layout hash: marshal tool schema for %q: %w", tool.Name, err)
-	}
+// system prompt and every tool definition, in order. The prefix must not
+// depend on per-request state such as memory presence, because any change
+// invalidates the provider's prefix cache for later rounds of the same stage.
+// Callers record the hash per request so a flip between rounds is visible in
+// the run ledger. Canonical JSON gives a stable byte sequence for each schema.
+func promptLayoutHash(systemPrompt string, tools []zeroruntime.ToolDefinition) (string, error) {
 	sum := sha256.New()
 	fmt.Fprintf(sum, "system\x00%d\x00%s", len(systemPrompt), systemPrompt)
-	fmt.Fprintf(sum, "tool\x00%d\x00%s\x00%d\x00%s\x00%d\x00%s", len(tool.Name), tool.Name, len(tool.Description), tool.Description, len(schema), schema)
+	for _, tool := range tools {
+		schema, err := json.Marshal(tool.Parameters)
+		if err != nil {
+			return "", fmt.Errorf("layout hash: marshal tool schema for %q: %w", tool.Name, err)
+		}
+		fmt.Fprintf(sum, "tool\x00%d\x00%s\x00%d\x00%s\x00%d\x00%s", len(tool.Name), tool.Name, len(tool.Description), tool.Description, len(schema), schema)
+	}
 	return hex.EncodeToString(sum.Sum(nil)), nil
 }
 

@@ -54,36 +54,46 @@ func memoryBundle() *schemas.MemoryBundle {
 	}
 }
 
-// TestToolDefinitionSchemaHasNoMemoryDependence pins the cache contract: the
-// tool schema must not depend on whether memory was delivered. A schema that
-// varies by memory presence changes the cached prompt prefix between rounds of
-// the same stage and forfeits the provider's prefix cache. The definition
-// builders take no memory argument, so identity across memory states is
-// structural; the required list is pinned here so a memory-dependent entry
-// added later fails loudly. Disposition presence is enforced in code by
-// reconcileMemoryReview (see TestReconcileNoteWarnsOnce), not by the schema.
-func TestToolDefinitionSchemaHasNoMemoryDependence(t *testing.T) {
-	wantRequired := []string{"files", "language", "intent", "confidence"}
+// TestToolDefinitionSchemaStableAcrossMemoryPresence pins the cache
+// contract: the tool schemas must not depend on whether memory was
+// delivered. A memory-dependent schema changes the cached prompt prefix
+// between rounds of the same stage and forfeits the provider's prefix
+// cache. The builders take no memory argument, so identity across memory
+// states is structural; the required lists are pinned so a
+// memory-dependent entry added later fails loudly. Disposition presence is
+// enforced in code by reconcileMemoryReview, not by the schema.
+func TestToolDefinitionSchemaStableAcrossMemoryPresence(t *testing.T) {
+	wantSubmitRequired := []string{"files", "language", "intent", "confidence"}
 	for _, tc := range []struct {
-		name string
-		def  zeroruntime.ToolDefinition
+		name          string
+		def           zeroruntime.ToolDefinition
+		wantRequired  []string
+		wantMandatory bool
 	}{
-		{"code_writer", submitCodeToolDefinition()},
-		{"test_generator", testGeneratorToolDefinition()},
+		{"code_writer submission", submitCodeToolDefinition(), wantSubmitRequired, true},
+		{"test_generator submission", testGeneratorToolDefinition(), wantSubmitRequired, true},
+		{"code_writer context", contextRequestToolDefinition(), []string{"reason", "queries"}, false},
 	} {
 		props, ok := tc.def.Parameters["properties"].(map[string]any)
 		if !ok {
 			t.Fatalf("%s: properties missing", tc.name)
 		}
-		if _, ok := props["memory_disposition"]; !ok {
-			t.Fatalf("%s: lacks the memory_disposition property", tc.name)
+		if tc.wantMandatory {
+			if _, ok := props["memory_disposition"]; !ok {
+				t.Fatalf("%s: lacks the memory_disposition property", tc.name)
+			}
 		}
 		required, ok := tc.def.Parameters["required"].([]string)
 		if !ok {
 			t.Fatalf("%s: required missing", tc.name)
 		}
-		if !slices.Equal(required, wantRequired) {
-			t.Fatalf("%s: required = %v, want %v; a memory-dependent entry here flips the cached prefix between rounds", tc.name, required, wantRequired)
+		for _, r := range required {
+			if r == "memory_disposition" {
+				t.Fatalf("%s: memory_disposition must never be required, or the schema depends on memory presence", tc.name)
+			}
+		}
+		if !slices.Equal(required, tc.wantRequired) {
+			t.Fatalf("%s: required = %v, want %v", tc.name, required, tc.wantRequired)
 		}
 	}
 }
@@ -152,11 +162,11 @@ func TestReconcileNoteWarnsOnce(t *testing.T) {
 // must move when either component moves. The memory-dependent required entry
 // removed from the schema is exactly the drift this detector has to see.
 func TestPromptLayoutHashDetectsPrefixDrift(t *testing.T) {
-	baseHash, err := promptLayoutHash(codeWriterSystemPrompt, submitCodeToolDefinition())
+	baseHash, err := promptLayoutHash(codeWriterSystemPrompt, []zeroruntime.ToolDefinition{submitCodeToolDefinition()})
 	if err != nil {
 		t.Fatalf("hash: %v", err)
 	}
-	againHash, err := promptLayoutHash(codeWriterSystemPrompt, submitCodeToolDefinition())
+	againHash, err := promptLayoutHash(codeWriterSystemPrompt, []zeroruntime.ToolDefinition{submitCodeToolDefinition()})
 	if err != nil {
 		t.Fatalf("hash: %v", err)
 	}
@@ -166,7 +176,7 @@ func TestPromptLayoutHashDetectsPrefixDrift(t *testing.T) {
 
 	drifted := submitCodeToolDefinition()
 	drifted.Parameters["required"] = append(drifted.Parameters["required"].([]string), "memory_disposition")
-	driftedHash, err := promptLayoutHash(codeWriterSystemPrompt, drifted)
+	driftedHash, err := promptLayoutHash(codeWriterSystemPrompt, []zeroruntime.ToolDefinition{drifted})
 	if err != nil {
 		t.Fatalf("hash: %v", err)
 	}
@@ -174,7 +184,7 @@ func TestPromptLayoutHashDetectsPrefixDrift(t *testing.T) {
 		t.Fatal("a memory-dependent required entry must change the layout hash")
 	}
 
-	promptDriftHash, err := promptLayoutHash(codeWriterSystemPrompt+"\n", submitCodeToolDefinition())
+	promptDriftHash, err := promptLayoutHash(codeWriterSystemPrompt+"\n", []zeroruntime.ToolDefinition{submitCodeToolDefinition()})
 	if err != nil {
 		t.Fatalf("hash: %v", err)
 	}
@@ -182,7 +192,7 @@ func TestPromptLayoutHashDetectsPrefixDrift(t *testing.T) {
 		t.Fatal("a system prompt change must change the layout hash")
 	}
 
-	tgHash, err := promptLayoutHash(testGeneratorSystemPrompt, testGeneratorToolDefinition())
+	tgHash, err := promptLayoutHash(testGeneratorSystemPrompt, []zeroruntime.ToolDefinition{testGeneratorToolDefinition()})
 	if err != nil {
 		t.Fatalf("hash: %v", err)
 	}
@@ -199,10 +209,10 @@ func TestCallToolUseReportsPromptLayoutHash(t *testing.T) {
 	provider := &fakeProvider{events: toolCallEvent(codeWriterToolName, `{}`)}
 	var got []string
 	callbacks := &zeroruntime.CollectOptions{OnPromptLayout: func(hash string) { got = append(got, hash) }}
-	if _, err := callToolUse(context.Background(), provider, "m", "", codeWriterSystemPrompt, "payload", nil, submitCodeToolDefinition(), 0, callbacks, "", true); err != nil {
+	if _, err := callToolUse(context.Background(), provider, "m", "", codeWriterSystemPrompt, "payload", nil, []zeroruntime.ToolDefinition{submitCodeToolDefinition()}, 0, callbacks, "", true); err != nil {
 		t.Fatalf("callToolUse: %v", err)
 	}
-	want, err := promptLayoutHash(codeWriterSystemPrompt, submitCodeToolDefinition())
+	want, err := promptLayoutHash(codeWriterSystemPrompt, []zeroruntime.ToolDefinition{submitCodeToolDefinition()})
 	if err != nil {
 		t.Fatalf("hash: %v", err)
 	}
@@ -217,7 +227,14 @@ func TestCallToolUseReportsPromptLayoutHash(t *testing.T) {
 // run ledger, so a break here would leave production records empty.
 func TestCodeWriterRunReportsPromptLayoutHash(t *testing.T) {
 	workDir := t.TempDir()
-	output := schemas.CodeWriterOutput{Language: "go", Intent: "no changes", Confidence: 0.9}
+	// The merged action contract requires a submission to carry at least one
+	// file, so the fake emits a minimal valid create submission.
+	output := schemas.CodeWriterOutput{
+		Files:      []schemas.FileChange{{Path: "main.go", Content: "package main\n", ChangeType: "create"}},
+		Language:   "go",
+		Intent:     "no changes",
+		Confidence: 0.9,
+	}
 	args, _ := json.Marshal(output)
 	provider := &requestCapturingProvider{events: toolCallEvent(codeWriterToolName, string(args))}
 
@@ -230,7 +247,7 @@ func TestCodeWriterRunReportsPromptLayoutHash(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("stage run: %v", err)
 	}
-	want, err := promptLayoutHash(composeSystemPrompt(codeWriterSystemPrompt), submitCodeToolDefinition())
+	want, err := promptLayoutHash(composeSystemPrompt(codeWriterSystemPrompt), codeWriterTools())
 	if err != nil {
 		t.Fatalf("hash: %v", err)
 	}

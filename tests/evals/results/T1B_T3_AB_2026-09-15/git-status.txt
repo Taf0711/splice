@@ -1,0 +1,22 @@
+# changed files (uncommitted, harness only)
+ M tests/evals/warmcost/README.md
+ M tests/evals/warmcost/cmd/warmcost-eval/main.go
+ M tests/evals/warmcost/paid-run.sh
+ M tests/evals/warmcost/report.go
+ M tests/evals/warmcost/runner.go
+ M tests/evals/warmcost/types.go
+?? tests/evals/results/HARNESS_CACHE_TELEMETRY_2026-09-14.md
+?? tests/evals/results/PAID_RUN_wc-ab-armA-20260915T023826Z-try0.md
+?? tests/evals/results/PAID_RUN_wc-ab-armB-20260915T024301Z-try0.md
+?? tests/evals/results/T1B_T3_AB_2026-09-15/
+?? tests/evals/results/harness-cache-telemetry-20260914/
+?? tests/evals/results/larger-eval-2026-09-11/
+?? tests/evals/results/live-smoke-2026-09-11/
+?? tests/evals/results/wc-ab-armA-20260915T023826Z-try0.log
+?? tests/evals/results/wc-ab-armA-20260915T023826Z-try0/
+?? tests/evals/results/wc-ab-armB-20260915T024301Z-try0.log
+?? tests/evals/results/wc-ab-armB-20260915T024301Z-try0/
+?? tests/evals/warmcost/build_revision_test.go
+?? tests/evals/warmcost/paid_run_guards_test.sh
+?? tests/evals/warmcost/telemetry.go
+?? tests/evals/warmcost/telemetry_test.go

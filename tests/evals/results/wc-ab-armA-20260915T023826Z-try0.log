@@ -1,0 +1,3 @@
+run wc-ab-armA-20260915T023826Z-try0: arms=1 tasks=0 attempts=6
+total-cost claim allowed: false (at least one run has partial cost coverage, so total cost is unknown)
+artifacts: tests/evals/results/wc-ab-armA-20260915T023826Z-try0

@@ -1,0 +1,40 @@
+{
+  "task_id": "clock-helper-write",
+  "arm": "cold",
+  "repeat": 0,
+  "sequence": 0,
+  "sequence_ordinal": 0,
+  "sequence_tasks": 1,
+  "workspace": "/var/folders/cf/37chkgfx22q5bb_ws8brslx00000gn/T/warmcost-seq-base-3608981355/cold-seq00",
+  "binary": "/tmp/p4a-splice",
+  "binary_revision": "d93149a71f7a15177c814a365a27b113e42ed37e",
+  "sidecar_revision": "d93149a",
+  "fixture_digest": "sha256:8fc24bf5d59af39d35218838ef5181dafd601712af1628949bc357ea804e9727",
+  "model_id": "z-ai/glm-5.3-flash",
+  "model_settings": {},
+  "treatment_env": [
+    "SPLICE_SCOPE_MODE=off",
+    "SPLICE_EVIDENCE_SUBSTITUTION=off"
+  ],
+  "session_id": "wc-wc-p4a-smoke-20260916T182032Z-try0-clock-helper-write-cold-r0",
+  "run_status": "timeout",
+  "cost_coverage": "partial",
+  "verifier_result": false,
+  "requests": null,
+  "totals": {
+    "requests": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cached_input_tokens": 0,
+    "cache_write_tokens": 0,
+    "reasoning_tokens": 0,
+    "billed_usd": 0,
+    "priced_records": 0
+  },
+  "cache_telemetry_reported": false,
+  "ledger_error": "attempt timeout after 10m0s; partial raw stream retained",
+  "raw_stream": "raw-clock-helper-write-cold-r0.jsonl",
+  "started_at": "2026-09-16T14:20:34.413607-04:00",
+  "ended_at": "2026-09-16T14:31:41.884241-04:00",
+  "duration_ms": 600016
+}

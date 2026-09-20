@@ -1,0 +1,9 @@
+derived needs:
+  locate:main.go#main kind=locate-named-operation subject="main.go#main" origin=cold-symbol-index required=true
+  locate:main.go#mapStoreError kind=locate-named-operation subject="main.go#mapStoreError" origin=cold-symbol-index required=true
+  inspect:main.go kind=inspect-edit-target subject="main.go" origin=task-text required=true
+bundle tests/evals/results/p4-fam05-ds-stage1/snapshots/snap-fam-05-handler-error-mapping-1789746241371130000/snapshot-bundle.json commit=817d95067a22752cb2ba997a9101261647ca19c4 tree=28a49a80b85bba590df8c3908ccce1a52cd11db5 digest=3638a087a08bbb8bac97ff3144fbe1d484c666c1a84b004ffcffd5ef42c520e2 nodes=3
+  record f6aade87df301afde3707c8b97b811cd81fb3120fedcfed497b8412dd4d68022 matched=[] reason=no derived need subject matched this record
+  record b8865a05cf236e0abd9d7c82bce0aa21ee1336f3ba78fe077e01d980f6a30193 matched=[locate:main.go#main locate:main.go#mapStoreError inspect:main.go] reason=no derived need subject matched this record
+  record da630237e9e2210b9be33afe81c90b8163bd7989fa0ff0544d59e9e8a6311e1a matched=[] reason=no derived need subject matched this record
+matched_records=1 non_open_needs=3

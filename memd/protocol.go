@@ -257,6 +257,7 @@ type resetProjectResponse struct {
 	OK           bool  `json:"ok"`
 	Observations int64 `json:"observations"`
 	Traces       int64 `json:"traces"`
+	GraphNodes   int64 `json:"graph_nodes,omitempty"`
 }
 
 // lookupTopicRequest is the JSON body for POST /lookup_topic. It is the
@@ -589,9 +590,11 @@ func (r *graphContradictRequest) Validate() error {
 }
 
 // graphSearchRequest is the JSON body for POST /graph/search_semantic.
+// ProjectPath is optional: when set, only nodes of that project rank.
 type graphSearchRequest struct {
-	Text string `json:"text"`
-	K    int    `json:"k"`
+	Text        string `json:"text"`
+	K           int    `json:"k"`
+	ProjectPath string `json:"project_path,omitempty"`
 }
 
 func (r *graphSearchRequest) Validate() error {
@@ -604,16 +607,59 @@ func (r *graphSearchRequest) Validate() error {
 	return nil
 }
 
-// graphSearchHit is one semantic search hit in wire form.
+// graphSearchHit is one semantic search hit in wire form. Node is the full
+// active node with its anchors when the hit resolved to a live row; nil when
+// the index entry is stale (deleted or superseded node).
 type graphSearchHit struct {
-	NodeID int64   `json:"node_id"`
-	Score  float64 `json:"score"`
+	NodeID int64      `json:"node_id"`
+	Score  float64    `json:"score"`
+	Node   *graphNode `json:"node,omitempty"`
 }
 
 // graphSearchResponse is the JSON body returned by POST /graph/search_semantic.
 type graphSearchResponse struct {
 	OK   bool             `json:"ok"`
 	Hits []graphSearchHit `json:"hits"`
+}
+
+// graphReanchorIDsRequest is the JSON body for POST /graph/reanchor_ids.
+type graphReanchorIDsRequest struct {
+	ProjectPath  string  `json:"project_path"`
+	NodeIDs      []int64 `json:"node_ids"`
+	FromRevision string  `json:"from_revision"`
+	ToRevision   string  `json:"to_revision"`
+}
+
+func (r *graphReanchorIDsRequest) Validate() error {
+	if r.ProjectPath == "" || r.FromRevision == "" || r.ToRevision == "" {
+		return fmt.Errorf("project_path, from_revision, and to_revision are required")
+	}
+	if len(r.NodeIDs) == 0 {
+		return fmt.Errorf("at least one node id is required")
+	}
+	return nil
+}
+
+// graphReanchorResponse is reused for /graph/reanchor_ids (same shape).
+
+// graphReanchorRequest is the JSON body for POST /graph/reanchor.
+type graphReanchorRequest struct {
+	ProjectPath  string `json:"project_path"`
+	FromRevision string `json:"from_revision"`
+	ToRevision   string `json:"to_revision"`
+}
+
+func (r *graphReanchorRequest) Validate() error {
+	if r.ProjectPath == "" || r.FromRevision == "" || r.ToRevision == "" {
+		return fmt.Errorf("project_path, from_revision, and to_revision are required")
+	}
+	return nil
+}
+
+// graphReanchorResponse is the JSON body returned by POST /graph/reanchor.
+type graphReanchorResponse struct {
+	OK    bool  `json:"ok"`
+	Nodes int64 `json:"nodes"`
 }
 
 // graphCompactResponse is the JSON body returned by POST /graph/compact.
@@ -639,4 +685,82 @@ func (r *graphCollectRequest) Validate() error {
 type graphCollectResponse struct {
 	OK        bool  `json:"ok"`
 	Collected int64 `json:"collected"`
+}
+
+// graphCaptureSetRequest is the JSON body for POST /graph/capture_set.
+// SourceRunID is optional: when set, the capture set is scoped to the
+// producer run that persisted the nodes, so two runs that verified the
+// same tree keep separate sets. When omitted, the historical
+// project+revision behavior is preserved.
+type graphCaptureSetRequest struct {
+	ProjectPath string  `json:"project_path"`
+	Revision    string  `json:"revision"`
+	SourceRunID *string `json:"source_run_id,omitempty"`
+}
+
+func (r *graphCaptureSetRequest) Validate() error {
+	if r.ProjectPath == "" || r.Revision == "" {
+		return fmt.Errorf("project_path and revision are required")
+	}
+	if r.SourceRunID != nil && *r.SourceRunID == "" {
+		return fmt.Errorf("source_run_id must be omitted, not empty")
+	}
+	return nil
+}
+
+// graphCaptureSetResponse is the JSON body returned by POST /graph/capture_set.
+type graphCaptureSetResponse struct {
+	OK  bool    `json:"ok"`
+	IDs []int64 `json:"ids"`
+}
+
+// exportedCaptureNode is one fully materialized node in an exported capture
+// set: the complete node payload plus its anchors and evidence, with the
+// source sidecar id and claim hash carried for canonical identity on
+// import (sidecar numeric ids are not stable across stores).
+type exportedCaptureNode struct {
+	Node      graphNode       `json:"node"`
+	Anchors   []graphAnchor   `json:"anchors"`
+	Evidence  []graphEvidence `json:"evidence"`
+	SourceID  int64           `json:"source_id"`
+	ClaimHash string          `json:"claim_hash"`
+}
+
+// graphExportCaptureSetResponse is the JSON body returned by POST
+// /graph/export_capture_set.
+type graphExportCaptureSetResponse struct {
+	OK    bool                  `json:"ok"`
+	Nodes []exportedCaptureNode `json:"nodes"`
+	Error string                `json:"error,omitempty"`
+}
+
+// graphImportCaptureSetRequest is the JSON body for POST
+// /graph/import_capture_set. ProjectPath is the NEW project identity every
+// node is remapped to; producer identity inside each node is preserved.
+type graphImportCaptureSetRequest struct {
+	ProjectPath string                `json:"project_path"`
+	Nodes       []exportedCaptureNode `json:"nodes"`
+}
+
+func (r *graphImportCaptureSetRequest) Validate() error {
+	if r.ProjectPath == "" {
+		return fmt.Errorf("project_path is required")
+	}
+	if len(r.Nodes) == 0 {
+		return fmt.Errorf("nodes must not be empty")
+	}
+	for i, n := range r.Nodes {
+		if n.Node.Kind == "" || n.Node.Claim == "" {
+			return fmt.Errorf("nodes[%d]: kind and claim are required", i)
+		}
+	}
+	return nil
+}
+
+// graphImportCaptureSetResponse is the JSON body returned by POST
+// /graph/import_capture_set.
+type graphImportCaptureSetResponse struct {
+	OK       bool   `json:"ok"`
+	Imported int64  `json:"imported"`
+	Error    string `json:"error,omitempty"`
 }

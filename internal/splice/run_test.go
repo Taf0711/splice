@@ -15,6 +15,7 @@ import (
 
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/hooks"
+	"github.com/Taf0711/splice/internal/memd"
 	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/splice/stages"
@@ -247,7 +248,7 @@ func TestRunStageWithContextFailurePreservesBothAttemptsUsage(t *testing.T) {
 	_, err := runStageWithContext(context.Background(), schemas.HarnessStageInput{
 		RunID:     "run-context-failure",
 		StageName: "context_stage",
-	}, stage, 1, agent.ModelSelection{Provider: runFakeProvider{}}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, nil, stage.Capabilities(), 0, nil)
+	}, stage, 1, agent.ModelSelection{Provider: runFakeProvider{}}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, nil, stage.Capabilities(), 0, nil, nil, 0)
 	if err == nil {
 		t.Fatal("runStageWithContext returned nil error")
 	}
@@ -288,7 +289,7 @@ func TestRunPassInjectsMemoryBundleAndSkipsRetrievalErrors(t *testing.T) {
 
 	records, outputs, completed, err := runPass(context.Background(), "run-memory", 1, plan, stageRegistry{
 		"code_writer": &capturingStage{inputs: &inputs, caps: stages.Capabilities{ConsumesMemory: true, PullContext: true}},
-	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir, nil, time.Time{}, nil, retriever, nil)
+	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir, nil, time.Time{}, nil, retriever, nil, NewStageExecutionBudget(0))
 	if err != nil {
 		t.Fatalf("runPass with memory: %v", err)
 	}
@@ -307,7 +308,7 @@ func TestRunPassInjectsMemoryBundleAndSkipsRetrievalErrors(t *testing.T) {
 	if retriever.gotQuery.RequestingAgent != "code_writer" {
 		t.Fatalf("requesting agent = %q, want code_writer", retriever.gotQuery.RequestingAgent)
 	}
-	if retriever.gotQuery.ProjectPath == nil || *retriever.gotQuery.ProjectPath != workDir {
+	if retriever.gotQuery.ProjectPath == nil || *retriever.gotQuery.ProjectPath != memd.CanonicalProjectPath(workDir) {
 		t.Fatalf("project path = %#v, want %q", retriever.gotQuery.ProjectPath, workDir)
 	}
 	if retriever.gotQuery.Limit != 5 {
@@ -331,7 +332,7 @@ func TestRunPassInjectsMemoryBundleAndSkipsRetrievalErrors(t *testing.T) {
 	var progress []string
 	_, _, completed, err = runPass(context.Background(), "run-memory-error", 1, plan, stageRegistry{
 		"code_writer": &capturingStage{inputs: &errorInputs, caps: stages.Capabilities{ConsumesMemory: true, PullContext: true}},
-	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{OnReasoning: func(text string) { progress = append(progress, text) }}), workDir, nil, time.Time{}, nil, errorRetriever, nil)
+	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{OnReasoning: func(text string) { progress = append(progress, text) }}), workDir, nil, time.Time{}, nil, errorRetriever, nil, NewStageExecutionBudget(0))
 	if err != nil || !completed {
 		t.Fatalf("memory retrieval error should not fail run: completed=%v err=%v", completed, err)
 	}
@@ -345,7 +346,7 @@ func TestRunPassInjectsMemoryBundleAndSkipsRetrievalErrors(t *testing.T) {
 	var nilInputs []schemas.HarnessStageInput
 	_, _, completed, err = runPass(context.Background(), "run-memory-nil", 1, plan, stageRegistry{
 		"code_writer": &capturingStage{inputs: &nilInputs, caps: stages.Capabilities{ConsumesMemory: true, PullContext: true}},
-	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir, nil, time.Time{}, nil, nil, nil)
+	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir, nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
 	if err != nil || !completed {
 		t.Fatalf("nil retriever should complete: completed=%v err=%v", completed, err)
 	}
@@ -383,7 +384,7 @@ func TestRunPassSearchesOnlyMemoryConsumingStages(t *testing.T) {
 		registry[name] = stage
 	}
 
-	_, _, completed, err := runPass(context.Background(), "run-memory-consumers", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir, nil, time.Time{}, nil, retriever, nil)
+	_, _, completed, err := runPass(context.Background(), "run-memory-consumers", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir, nil, time.Time{}, nil, retriever, nil, NewStageExecutionBudget(0))
 	if err != nil || !completed {
 		t.Fatalf("runPass: completed=%v err=%v", completed, err)
 	}
@@ -431,7 +432,7 @@ func TestRunPassPopulatesPipelineRoster(t *testing.T) {
 		plan.Stages = append(plan.Stages, schemas.ExecutionStage{Name: name})
 	}
 
-	_, _, completed, err := runPass(context.Background(), "run-roster-standard", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir, nil, time.Time{}, nil, nil, nil)
+	_, _, completed, err := runPass(context.Background(), "run-roster-standard", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir, nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
 	if err != nil || !completed {
 		t.Fatalf("runPass: completed=%v err=%v", completed, err)
 	}
@@ -482,7 +483,7 @@ func TestRunPassCarriesWriterChangedPathsToTestGenerator(t *testing.T) {
 		Tier: schemas.TierStandard, RequestIntent: "write storage tests",
 		Stages: []schemas.ExecutionStage{{Name: "code_writer"}, {Name: "test_generator"}},
 	}
-	_, _, completed, err := runPass(context.Background(), "run-writer-paths", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir, nil, time.Time{}, nil, nil, nil)
+	_, _, completed, err := runPass(context.Background(), "run-writer-paths", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir, nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
 	if err != nil || !completed {
 		t.Fatalf("runPass: completed=%v err=%v", completed, err)
 	}
@@ -498,8 +499,59 @@ func TestBuildRevisionContextCarriesPriorOutputFiles(t *testing.T) {
 		},
 	}}
 	got := buildRevisionContext("revise tests", nil, nil, []schemas.HarnessStageOutput{output}, "retry")
-	if !strings.Contains(got, "storage_test.go") || !strings.Contains(got, "overwrite: true") {
-		t.Fatalf("revision context did not surface prior file and overwrite guidance: %q", got)
+	if !strings.Contains(got, "storage_test.go") {
+		t.Fatalf("revision context did not surface the prior file: %q", got)
+	}
+}
+
+// TestBuildRevisionContextPriorFilesUseSatisfiableRepresentation pins the
+// repair-path fix. The revision context is built before the stage runs, so the
+// host holds no delivered view for a prior-written path and cannot mint a
+// base_ref. The instruction must therefore ask for the full-content create
+// form. Steering the model at modify produced base_ref-is-required aborts,
+// because a bare path list gives it no handle to submit.
+func TestBuildRevisionContextPriorFilesUseSatisfiableRepresentation(t *testing.T) {
+	output := schemas.HarnessStageOutput{Data: map[string]any{
+		"code_writer_output": schemas.CodeWriterOutput{
+			Files: []schemas.FileChange{{Path: "internal/audit/retention.go", ChangeType: "modify"}},
+		},
+	}}
+	got := buildRevisionContext("fix the service", nil, nil, []schemas.HarnessStageOutput{output}, "")
+	if strings.Contains(got, "change_type modify") {
+		t.Fatalf("revision context must not steer prior files at modify without a handle:\n%s", got)
+	}
+	if !strings.Contains(got, "change_type create") {
+		t.Fatalf("revision context must request the full-content create form:\n%s", got)
+	}
+	if !strings.Contains(got, "internal/audit/retention.go") {
+		t.Fatalf("revision context must name the prior-written path:\n%s", got)
+	}
+}
+
+// TestFailureCauseClassSeparatesRootCauses pins that repeated failures which
+// share the wrapper name but differ in root cause carry different labels, so
+// aggregate telemetry can tell them apart.
+func TestFailureCauseClassSeparatesRootCauses(t *testing.T) {
+	tests := []struct {
+		name    string
+		summary string
+		want    string
+	}{
+		{name: "missing base_ref", summary: "*stages.TypedOutputError: proposal modify x.go: base_ref is required", want: "validation"},
+		{name: "typed output", summary: "*stages.TypedOutputError: model returned no tool call", want: "typed_output"},
+		{name: "provider", summary: `provider request error: {"detail":"Unsupported parameter"}`, want: "provider"},
+		{name: "auth", summary: "stream error: auth error: invalid API key", want: "auth"},
+		{name: "unclassified", summary: "something else entirely", want: "unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := failureCauseClass(tt.summary); got != tt.want {
+				t.Fatalf("failureCauseClass(%q) = %q, want %q", tt.summary, got, tt.want)
+			}
+		})
+	}
+	if failureCauseClass(tests[0].summary) == failureCauseClass(tests[1].summary) {
+		t.Fatalf("validation and typed_output must not share a label")
 	}
 }
 
@@ -513,7 +565,7 @@ func TestRunPassPopulatesPipelineRosterTrivialTier(t *testing.T) {
 	}
 	registry := stageRegistry{"code_writer": &capturingStage{inputs: &inputs}}
 
-	_, _, completed, err := runPass(context.Background(), "run-roster-trivial", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir, nil, time.Time{}, nil, nil, nil)
+	_, _, completed, err := runPass(context.Background(), "run-roster-trivial", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir, nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
 	if err != nil || !completed {
 		t.Fatalf("runPass: completed=%v err=%v", completed, err)
 	}
@@ -538,7 +590,7 @@ func TestRunPassSkipsStagesAfterWallDeadline(t *testing.T) {
 	_, _, completed, err := runPass(context.Background(), "run-wall", 1, plan, stageRegistry{
 		"a": capturer,
 		"b": capturer,
-	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Now().Add(-time.Second), nil, nil, nil)
+	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Now().Add(-time.Second), nil, nil, nil, NewStageExecutionBudget(0))
 	if !errors.Is(err, errWallTimeExceeded) {
 		t.Fatalf("err = %v, want wall-time sentinel", err)
 	}
@@ -567,7 +619,7 @@ func TestRunPassStageCrossingWallDeadlineAborts(t *testing.T) {
 
 	_, _, _, err := runPass(parentCtx, "run-wall-cross", 1, plan, stageRegistry{
 		"blocker": stage,
-	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Now().Add(50*time.Millisecond), nil, nil, nil)
+	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Now().Add(50*time.Millisecond), nil, nil, nil, NewStageExecutionBudget(0))
 	if !started {
 		t.Fatal("stage did not start")
 	}
@@ -588,7 +640,7 @@ type captureRequestProvider struct {
 func (p *captureRequestProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
 	p.request = request
 	output := schemas.CodeWriterOutput{
-		Files:      []schemas.FileChange{},
+		Files:      []schemas.FileChange{{Path: "main.go", ChangeType: "create", Content: "package main\n"}},
 		Language:   "go",
 		Intent:     "no changes",
 		Confidence: 0.9,
@@ -638,7 +690,7 @@ func TestRunPassInjectsSelectedMemoryIntoConsumingStage(t *testing.T) {
 
 	records, _, completed, err := runPass(context.Background(), "run-memory-consume", 1, plan, stageRegistry{
 		"code_writer": stages.CodeWriter{},
-	}, provider, PipelineConfigFromAgentOptions(agent.Options{}), workDir, fakeRunner, time.Time{}, nil, store, nil)
+	}, provider, PipelineConfigFromAgentOptions(agent.Options{}), workDir, fakeRunner, time.Time{}, nil, store, nil, NewStageExecutionBudget(0))
 	if err != nil {
 		t.Fatalf("runPass: %v", err)
 	}
@@ -680,7 +732,7 @@ func TestRunPassPersistsDiscoveredTestCommand(t *testing.T) {
 				Confidence: 1,
 				Data:       map[string]any{"test_command": []string{"go", "test", "./..."}},
 			}},
-		}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir, nil, time.Time{}, nil, store, nil)
+		}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir, nil, time.Time{}, nil, store, nil, NewStageExecutionBudget(0))
 		if err != nil || !completed {
 			t.Fatalf("runPass: completed=%v err=%v", completed, err)
 		}
@@ -712,7 +764,7 @@ func TestRunPassPersistsDiscoveredTestCommand(t *testing.T) {
 		if obs.SourceRunID == nil || *obs.SourceRunID != runID {
 			t.Fatalf("SourceRunID = %#v, want %q", obs.SourceRunID, runID)
 		}
-		if obs.ProjectPath == nil || *obs.ProjectPath != workDir {
+		if obs.ProjectPath == nil || *obs.ProjectPath != memd.CanonicalProjectPath(workDir) {
 			t.Fatalf("ProjectPath = %#v, want %q", obs.ProjectPath, workDir)
 		}
 	})
@@ -732,7 +784,7 @@ func TestRunPassPersistsDiscoveredTestCommand(t *testing.T) {
 				Confidence: 1,
 				Data:       map[string]any{"test_command": []string{"go", "test", "./..."}},
 			}},
-		}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir, nil, time.Time{}, nil, store, nil)
+		}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir, nil, time.Time{}, nil, store, nil, NewStageExecutionBudget(0))
 		if err != nil || !completed {
 			t.Fatalf("runPass: completed=%v err=%v", completed, err)
 		}
@@ -793,7 +845,7 @@ func TestRunExecutionPlanPersistsConfigObservation(t *testing.T) {
 	if obs.SourceStage != nil {
 		t.Fatalf("SourceStage = %#v, want nil", obs.SourceStage)
 	}
-	if obs.ProjectPath == nil || *obs.ProjectPath != absWorkDir {
+	if obs.ProjectPath == nil || *obs.ProjectPath != memd.CanonicalProjectPath(absWorkDir) {
 		t.Fatalf("ProjectPath = %#v, want %q", obs.ProjectPath, absWorkDir)
 	}
 }
@@ -814,7 +866,7 @@ func TestRunStageWithContextPersistsToolDegradationObservation(t *testing.T) {
 		StageName: stageName,
 	}, stage, 1, selection, PipelineConfigFromAgentOptions(agent.Options{OnAttributedUsage: func(usage agent.AttributedUsage) {
 		attributed = append(attributed, usage)
-	}}), workDir, nil, store, stage.Capabilities(), 0, nil)
+	}}), workDir, nil, store, stage.Capabilities(), 0, nil, nil, 0)
 	if err != nil {
 		t.Fatalf("runStageWithContext: %v", err)
 	}
@@ -852,7 +904,7 @@ func TestRunStageWithContextPersistsToolDegradationObservation(t *testing.T) {
 	if obs.TopicKey == nil || *obs.TopicKey != "tool_degradation:get_symbol" {
 		t.Fatalf("TopicKey = %#v, want tool_degradation:get_symbol", obs.TopicKey)
 	}
-	wantContent := "get_symbol requires AST inspection, deferred for v1; use find_symbol + read_file"
+	wantContent := "get_symbol \"foo\" requires a path-qualified query; use find_symbol to locate the file first"
 	if obs.Content != wantContent {
 		t.Fatalf("Content = %q, want %q", obs.Content, wantContent)
 	}
@@ -862,8 +914,9 @@ func TestRunStageWithContextPersistsToolDegradationObservation(t *testing.T) {
 	if obs.SourceStage == nil || *obs.SourceStage != stageName {
 		t.Fatalf("SourceStage = %#v, want %q", obs.SourceStage, stageName)
 	}
-	if obs.ProjectPath == nil || *obs.ProjectPath != workDir {
-		t.Fatalf("ProjectPath = %#v, want %q", obs.ProjectPath, workDir)
+	// Persisted observations carry the canonical project identity.
+	if obs.ProjectPath == nil || *obs.ProjectPath != memd.CanonicalProjectPath(workDir) {
+		t.Fatalf("ProjectPath = %#v, want %q", obs.ProjectPath, memd.CanonicalProjectPath(workDir))
 	}
 }
 
@@ -1251,7 +1304,7 @@ func TestRunPassModelFreeStageCapabilities(t *testing.T) {
 			resolverCalls++
 			return agent.ModelSelection{Provider: &namedProvider{name: "unexpected"}, ProviderName: "unexpected-provider", Model: "unexpected-model", ReasoningEffort: "low"}, nil
 		},
-	}), workDir, nil, time.Time{}, nil, nil, nil)
+	}), workDir, nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
 	if err != nil {
 		t.Fatalf("runPass: %v", err)
 	}
@@ -1300,7 +1353,7 @@ func TestRunPassModelBackedAndCustomStageRouting(t *testing.T) {
 			resolved = append(resolved, stageName)
 			return agent.ModelSelection{Provider: routedProvider, ProviderName: "routed-provider", Model: "routed-model", ReasoningEffort: "high"}, nil
 		},
-	}), workDir, nil, time.Time{}, nil, nil, nil)
+	}), workDir, nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
 	if err != nil {
 		t.Fatalf("runPass: %v", err)
 	}
@@ -1525,6 +1578,9 @@ func newRunTestWorkspace(t *testing.T) (string, *tools.Registry) {
 	registry.Register(tools.NewWriteFileTool(workDir))
 	registry.Register(tools.NewDeleteFileTool(workDir))
 	registry.Register(tools.NewBashTool(workDir))
+	// D-gate: the guarded raw seam backs the proposal base registry
+	// (host-seam-only; the model surface never sees this tool).
+	registry.Register(tools.NewScopedRawFileReadTool(workDir, nil))
 	return workDir, registry
 }
 
@@ -1838,7 +1894,7 @@ func TestRunTerminalStageFailureIncludesOutputSummary(t *testing.T) {
 	}
 	result, err := runIterationLoop(context.Background(), "run-terminal-failure", plan, stageRegistry{
 		"terminal_failure": terminalDetailStage{},
-	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 1}), t.TempDir(), nil, nil, nil, nil, nil)
+	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 1}), t.TempDir(), nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -1894,7 +1950,7 @@ func TestRunIterationLoopStopsRepeatedIdenticalStageFailure(t *testing.T) {
 
 	result, err := runIterationLoop(context.Background(), "run-repeated-failure", plan, stageRegistry{
 		"code_writer": stage,
-	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 50}), t.TempDir(), runner, nil, nil, nil, nil)
+	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 50}), t.TempDir(), runner, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -1936,7 +1992,7 @@ func TestRunIterationLoopCapsChangingStageFailures(t *testing.T) {
 
 			result, err := runIterationLoop(context.Background(), "run-changing-failure", plan, stageRegistry{
 				"code_writer": stage,
-			}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{MaxTurns: tc.maxTurns}), t.TempDir(), nil, nil, nil, nil, nil)
+			}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{MaxTurns: tc.maxTurns}), t.TempDir(), nil, nil, nil, nil, nil, nil)
 			if err != nil {
 				t.Fatalf("runIterationLoop: %v", err)
 			}
@@ -1958,7 +2014,7 @@ func TestRunPassRecordsUsageFromFailedTypedOutput(t *testing.T) {
 	}
 	records, _, completed, err := runPass(context.Background(), "run-metered-failure", 1, plan, stageRegistry{
 		"metered_failure": meteredFailingStage{},
-	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{Model: "qwen-local", ProviderName: "ollama"}), t.TempDir(), nil, time.Time{}, nil, nil, nil)
+	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{Model: "qwen-local", ProviderName: "ollama"}), t.TempDir(), nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
 	if err != nil || completed {
 		t.Fatalf("runPass err=%v completed=%v, want recorded stage failure", err, completed)
 	}
@@ -1987,7 +2043,7 @@ func TestRunPassEmitsStageEvents(t *testing.T) {
 	retriever := &stubStore{}
 	_, _, completed, err := runPass(context.Background(), "run-stage-test", 1, plan, stageRegistry{
 		"memory_stage": &capturingStage{inputs: &inputs},
-	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{OnReasoning: func(s string) { reasoning = append(reasoning, s) }}), workDir, nil, time.Time{}, nil, retriever, nil)
+	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{OnReasoning: func(s string) { reasoning = append(reasoning, s) }}), workDir, nil, time.Time{}, nil, retriever, nil, NewStageExecutionBudget(0))
 	if err != nil || !completed {
 		t.Fatalf("runPass failed: err=%v completed=%v", err, completed)
 	}
@@ -2036,7 +2092,7 @@ func TestRunningStageEventCarriesDescription(t *testing.T) {
 		"described_stage": &capturingStage{inputs: &inputs, caps: stages.Capabilities{Description: description}},
 	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{
 		OnStageEvent: func(event agent.StageEvent) { events = append(events, event) },
-	}), t.TempDir(), nil, time.Time{}, nil, nil, nil)
+	}), t.TempDir(), nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
 	if err != nil || !completed {
 		t.Fatalf("runPass failed: err=%v completed=%v", err, completed)
 	}
@@ -2061,7 +2117,7 @@ func TestRunningStageEventOmitsEmptyDescription(t *testing.T) {
 		"empty_description_stage": &capturingStage{inputs: &inputs},
 	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{
 		OnStageEvent: func(event agent.StageEvent) { events = append(events, event) },
-	}), t.TempDir(), nil, time.Time{}, nil, nil, nil)
+	}), t.TempDir(), nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
 	if err != nil || !completed {
 		t.Fatalf("runPass failed: err=%v completed=%v", err, completed)
 	}
@@ -2092,7 +2148,7 @@ func TestModelBackedStageEventNamesModel(t *testing.T) {
 				return agent.ModelSelection{Provider: &namedProvider{name: "resolved-provider"}, ProviderName: "resolved-provider", Model: model}, nil
 			},
 			OnStageEvent: func(event agent.StageEvent) { events = append(events, event) },
-		}), t.TempDir(), nil, time.Time{}, nil, nil, nil)
+		}), t.TempDir(), nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
 		if err != nil || !completed {
 			t.Fatalf("runPass failed: err=%v completed=%v", err, completed)
 		}
@@ -2124,7 +2180,7 @@ func TestModelBackedStageEventNamesModel(t *testing.T) {
 				return agent.ModelSelection{Provider: &namedProvider{name: "unexpected"}, Model: "unexpected-model"}, nil
 			},
 			OnStageEvent: func(event agent.StageEvent) { events = append(events, event) },
-		}), t.TempDir(), nil, time.Time{}, nil, nil, nil)
+		}), t.TempDir(), nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
 		if err != nil || !completed {
 			t.Fatalf("runPass failed: err=%v completed=%v", err, completed)
 		}
@@ -2158,7 +2214,7 @@ func TestModelBackedStageEventNamesModel(t *testing.T) {
 				return agent.ModelSelection{Provider: &namedProvider{name: "resolved-provider"}, Model: model}, nil
 			},
 			OnStageEvent: func(event agent.StageEvent) { events = append(events, event) },
-		}), t.TempDir(), nil, time.Time{}, nil, nil, nil)
+		}), t.TempDir(), nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
 		if err != nil || !completed {
 			t.Fatalf("runPass failed: err=%v completed=%v", err, completed)
 		}
@@ -2202,7 +2258,7 @@ func TestRunPassEmitsStageEventsWithChangedFiles(t *testing.T) {
 	retriever := &stubStore{}
 	_, _, completed, err := runPass(context.Background(), "run-changed-files", 1, plan, stageRegistry{
 		"code_writer": stage,
-	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{OnReasoning: func(s string) { reasoning = append(reasoning, s) }}), workDir, nil, time.Time{}, nil, retriever, nil)
+	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{OnReasoning: func(s string) { reasoning = append(reasoning, s) }}), workDir, nil, time.Time{}, nil, retriever, nil, NewStageExecutionBudget(0))
 	if err != nil || !completed {
 		t.Fatalf("runPass failed: err=%v completed=%v", err, completed)
 	}
@@ -2270,7 +2326,7 @@ func TestStepBackIntegration(t *testing.T) {
 		nil,
 		nil,
 		nil, nil,
-		nil)
+		nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -2482,7 +2538,7 @@ func TestRunEscalatesOnCycle(t *testing.T) {
 		nil,
 		nil,
 		nil, nil,
-		nil)
+		nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -2547,7 +2603,7 @@ func TestRunEscalationNilResolverNonFatal(t *testing.T) {
 		nil,
 		nil,
 		nil, nil,
-		nil)
+		nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -2590,7 +2646,7 @@ func TestRunEscalationErrorResolverNonFatal(t *testing.T) {
 		nil,
 		nil,
 		nil, nil,
-		nil)
+		nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -2729,7 +2785,7 @@ func TestNoProgressBrakeStepsBackOnceThenAborts(t *testing.T) {
 		nil,
 		nil,
 		nil, nil,
-		nil)
+		nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -2773,7 +2829,7 @@ func TestSurfaceToUserNilCallbackAborts(t *testing.T) {
 		nil,
 		nil,
 		nil, nil,
-		nil)
+		nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -2824,7 +2880,7 @@ func TestSurfaceToUserContinue(t *testing.T) {
 		nil,
 		nil,
 		nil, nil,
-		nil)
+		nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -2884,7 +2940,7 @@ func TestSurfaceToUserAbort(t *testing.T) {
 		nil,
 		nil,
 		nil, nil,
-		nil)
+		nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -2933,7 +2989,7 @@ func TestSurfaceToUserCallbackError(t *testing.T) {
 		nil,
 		nil,
 		nil, nil,
-		nil)
+		nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -2978,7 +3034,7 @@ func TestSurfaceToUserCancellation(t *testing.T) {
 		nil,
 		nil,
 		nil, nil,
-		nil)
+		nil, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
@@ -3527,7 +3583,7 @@ func TestRunPassThreadsStageOutputBudgetToCompletionRequest(t *testing.T) {
 
 	_, _, completed, err := runPass(context.Background(), "run-budget-8192", 1, plan, stageRegistry{
 		"code_writer": stages.CodeWriter{},
-	}, provider, PipelineConfigFromAgentOptions(agent.Options{}), workDir, fakeRunner, time.Time{}, nil, nil, nil)
+	}, provider, PipelineConfigFromAgentOptions(agent.Options{}), workDir, fakeRunner, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
 	if err != nil || !completed {
 		t.Fatalf("runPass: completed=%v err=%v", completed, err)
 	}
@@ -3552,7 +3608,7 @@ func TestRunPassZeroOutputBudgetSendsNoOverride(t *testing.T) {
 
 	_, _, completed, err := runPass(context.Background(), "run-budget-zero", 1, plan, stageRegistry{
 		"code_writer": stages.CodeWriter{},
-	}, provider, PipelineConfigFromAgentOptions(agent.Options{}), workDir, fakeRunner, time.Time{}, nil, nil, nil)
+	}, provider, PipelineConfigFromAgentOptions(agent.Options{}), workDir, fakeRunner, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
 	if err != nil || !completed {
 		t.Fatalf("runPass: completed=%v err=%v", completed, err)
 	}
@@ -3775,7 +3831,7 @@ func TestRunPassRepairsFailingTests(t *testing.T) {
 		}),
 	}
 
-	records, _, completed, err := runPass(context.Background(), "run-repair", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, nil)
+	records, _, completed, err := runPass(context.Background(), "run-repair", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
 	if err != nil || !completed {
 		t.Fatalf("runPass: completed=%v err=%v", completed, err)
 	}
@@ -3821,7 +3877,7 @@ func TestRunPassRepairRevisionContextNamesFailingTest(t *testing.T) {
 		}),
 	}
 
-	if _, _, _, err := runPass(context.Background(), "run-repair-ctx", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, nil); err != nil {
+	if _, _, _, err := runPass(context.Background(), "run-repair-ctx", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0)); err != nil {
 		t.Fatalf("runPass: %v", err)
 	}
 	if len(writerInputs) != 2 {
@@ -3848,7 +3904,7 @@ func TestRunPassRepairCapsAtTwo(t *testing.T) {
 		}),
 	}
 
-	records, _, completed, err := runPass(context.Background(), "run-repair-cap", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, nil)
+	records, _, completed, err := runPass(context.Background(), "run-repair-cap", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
 	if err != nil || !completed {
 		t.Fatalf("runPass: completed=%v err=%v", completed, err)
 	}
@@ -3885,7 +3941,7 @@ func TestRunPassNoRepairWhenTestsPass(t *testing.T) {
 		}),
 	}
 
-	if _, _, _, err := runPass(context.Background(), "run-repair-pass", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, nil); err != nil {
+	if _, _, _, err := runPass(context.Background(), "run-repair-pass", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0)); err != nil {
 		t.Fatalf("runPass: %v", err)
 	}
 	if writerCalls != 1 {
@@ -3906,7 +3962,7 @@ func TestRunPassNoRepairWhenTestResultsAbsent(t *testing.T) {
 		}),
 	}
 
-	if _, _, _, err := runPass(context.Background(), "run-repair-absent", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, nil); err != nil {
+	if _, _, _, err := runPass(context.Background(), "run-repair-absent", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0)); err != nil {
 		t.Fatalf("runPass: %v", err)
 	}
 	if writerCalls != 1 {
@@ -3940,7 +3996,7 @@ func TestRunRepairPersistsInteraction(t *testing.T) {
 	tr := newRunTraceAccumulator(store, "run-interaction", "sess-1", "/repo", plan, "active", nil)
 	var writerCalls, testCalls int
 
-	records, _, completed, err := runPass(context.Background(), "run-interaction", 1, plan, repairTraceRegistry(&writerCalls, &testCalls), runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, tr)
+	records, _, completed, err := runPass(context.Background(), "run-interaction", 1, plan, repairTraceRegistry(&writerCalls, &testCalls), runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, tr, NewStageExecutionBudget(0))
 	if err != nil || !completed {
 		t.Fatalf("runPass: completed=%v err=%v", completed, err)
 	}
@@ -3982,7 +4038,7 @@ func TestRunNoRepairLeavesInteractionsEmpty(t *testing.T) {
 		}),
 	}
 
-	records, _, _, err := runPass(context.Background(), "run-nointeraction", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, tr)
+	records, _, _, err := runPass(context.Background(), "run-nointeraction", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, tr, NewStageExecutionBudget(0))
 	if err != nil {
 		t.Fatalf("runPass: %v", err)
 	}
@@ -4011,7 +4067,7 @@ func TestRunRepairExhaustedInteractionUnresolved(t *testing.T) {
 		}),
 	}
 
-	records, _, completed, err := runPass(context.Background(), "run-exhausted", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, tr)
+	records, _, completed, err := runPass(context.Background(), "run-exhausted", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, tr, NewStageExecutionBudget(0))
 	if err != nil || !completed {
 		t.Fatalf("runPass: completed=%v err=%v", completed, err)
 	}
@@ -4245,5 +4301,68 @@ func TestPipelineConfigMapsTraceWriteWarn(t *testing.T) {
 	}
 	if cfg2 := PipelineConfigFromAgentOptions(agent.Options{}); cfg2.TraceWriteWarn != nil {
 		t.Fatal("nil TraceWriteWarn must map to nil TraceWriteWarn")
+	}
+}
+
+// handshakeStage models the writer's first round: it returns a ContextRequest
+// with no provider usage, then emits usage once context is present. It exists
+// to pin that the first provider-bearing round is labeled generation, not
+// expansion, even though the loop round is 1.
+type handshakeStage struct{ calls int }
+
+func (*handshakeStage) Capabilities() stages.Capabilities { return stages.Capabilities{} }
+
+func (s *handshakeStage) Run(_ context.Context, input schemas.HarnessStageInput, _ zeroruntime.Provider, options stages.StageOptions) (schemas.HarnessStageOutput, error) {
+	s.calls++
+	if input.Context == nil {
+		symbol := "foo"
+		return schemas.HarnessStageOutput{
+			Summary: "needs context",
+			ContextRequest: &schemas.ContextRequest{
+				Reason: "handshake",
+				Queries: []schemas.ContextQuery{{
+					QueryType:  schemas.ContextGetSymbol,
+					Symbol:     &symbol,
+					MaxResults: 5,
+					MaxChars:   1000,
+				}},
+			},
+		}, nil
+	}
+	usage := schemas.StageUsage{InputTokens: 6, OutputTokens: 5}
+	if options.Stream.OnUsageResult != nil {
+		options.Stream.OnUsageResult(zeroruntime.Usage{InputTokens: 6, OutputTokens: 5}, true, nil)
+	}
+	return schemas.HarnessStageOutput{Summary: "done", Usage: &usage}, nil
+}
+
+// TestRunStageWithContextLabelsFirstProviderRoundGeneration pins the live
+// attribution fix: a context-handshake round issues no provider request, so
+// the round that follows it is the generation pass (source generation, round
+// 0), never expansion. Before the fix the live ledger carried no generation
+// record at all.
+func TestRunStageWithContextLabelsFirstProviderRoundGeneration(t *testing.T) {
+	workDir := t.TempDir()
+	store := &stubStore{}
+	stage := &handshakeStage{}
+	var attributed []agent.AttributedUsage
+	selection := agent.ModelSelection{Provider: runFakeProvider{}, ProviderName: "provider-a", Model: "model-a"}
+
+	if _, err := runStageWithContext(context.Background(), schemas.HarnessStageInput{
+		RunID:     "run-handshake",
+		StageName: "code_writer",
+	}, stage, 1, selection, PipelineConfigFromAgentOptions(agent.Options{OnAttributedUsage: func(usage agent.AttributedUsage) {
+		attributed = append(attributed, usage)
+	}}), workDir, nil, store, stage.Capabilities(), 0, nil, nil, 0); err != nil {
+		t.Fatalf("runStageWithContext: %v", err)
+	}
+	if stage.calls != 2 {
+		t.Fatalf("stage calls = %d, want 2 (handshake then provider round)", stage.calls)
+	}
+	if len(attributed) != 1 {
+		t.Fatalf("attributed usage calls = %d, want 1", len(attributed))
+	}
+	if got := attributed[0]; got.SpendSource != schemas.SpendSourceGeneration || got.ContextRound != 0 {
+		t.Fatalf("first provider round = source %q round %d, want %q/0", got.SpendSource, got.ContextRound, schemas.SpendSourceGeneration)
 	}
 }

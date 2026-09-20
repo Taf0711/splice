@@ -1,0 +1,14 @@
+{
+  "schema": "splice.eval.mvp-families.v1",
+  "fixture": "fixture",
+  "families": [
+    {
+      "id": "large-01-billing-dunning-notice",
+      "category": "state-mutation-rule",
+      "precursor_task": "The billing service tracks payment reminders per account. Add a method RecordDunningNotice(accountID string) DunningLevel on the billing Service that advances and returns the account's dunning level, keeping the per-account levels in the service. The DunningLevel type and its levels (LevelNone, LevelFirst, LevelFinal, LevelSuspended with Next()) already exist in the billing package. Add a regression test covering level advancement for one account and isolation between accounts.",
+      "target_task": "Operations wants to see the newest payment-reminder event for an account. Add an exported function LatestDunningEvent(trail *Trail, action string) *Event in the audit package that returns the most recent audit event with that action, or nil when none exists. Add a regression test pinning the latest-match rule when several matching events exist and nil when none do.",
+      "precursor_check_file": "verifiers/large-01-a.sh",
+      "target_check_file": "verifiers/large-01-b.sh"
+    }
+  ]
+}

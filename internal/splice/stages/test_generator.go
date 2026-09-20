@@ -5,6 +5,8 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/Taf0711/splice/internal/splice/schemas"
@@ -28,6 +30,40 @@ func (TestGenerator) Capabilities() Capabilities {
 }
 
 func (TestGenerator) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options StageOptions) (schemas.HarnessStageOutput, error) {
+	// B3: the post-write source request precedes the default request. The
+	// writer's changed files are the FIRST thing test generation needs;
+	// when they exist, the default discovery request would fetch
+	// pre-write bytes and the generator would target symbols that no
+	// longer match the tree.
+	writerChangedPathsEarly := append([]string(nil), input.PriorChangedFiles["code_writer"]...)
+	if input.Context == nil && len(writerChangedPathsEarly) > 0 && options.PullContext {
+		// Existing sibling tests are edit targets too: without their actual
+		// bytes the model treats the file as absent and submits create,
+		// which fails against an already-existing test file. Request the
+		// post-write sources first, then the existing tests they own.
+		requestPaths := append([]string(nil), writerChangedPathsEarly...)
+		requestPaths = append(requestPaths, relatedExistingTestPaths(options.WorkDir, writerChangedPathsEarly)...)
+		queries := make([]schemas.ContextQuery, 0, len(requestPaths))
+		for _, path := range requestPaths {
+			p := path
+			queries = append(queries, schemas.ContextQuery{
+				QueryType:  schemas.ContextReadFile,
+				Path:       &p,
+				MaxResults: 10,
+				MaxChars:   12000,
+			})
+		}
+		options.report(fmt.Sprintf("requesting post-write source for %d changed file(s)", len(queries)))
+		return schemas.HarnessStageOutput{
+			Summary:    "Test Generator requested post-write implementation source.",
+			Detail:     "The writer changed files this run; tests are generated against the post-write bytes.",
+			Confidence: 1.0,
+			ContextRequest: &schemas.ContextRequest{
+				Reason:  "post-write implementation source for test generation",
+				Queries: queries,
+			},
+		}, nil
+	}
 	if input.Context == nil {
 		req := options.contextRequest(input.RequestIntent)
 		if req != nil {
@@ -49,6 +85,13 @@ func (TestGenerator) Run(ctx context.Context, input schemas.HarnessStageInput, p
 	if prior := input.PriorSummaries["code_writer"]; prior != "" {
 		relevantContext = append(relevantContext, "code_writer: "+prior)
 	}
+	// B3: the fulfilled context bundle's source evidence must actually
+	// reach the provider. The relevantContext array carries it through
+	// formatContextBundle via selectRelevantContext; the historical bug
+	// was constructing RelevantContext WITHOUT the bundle, so fetched
+	// source never entered the payload. The code_writer summary stays a
+	// one-line pointer; it must not substitute for the bytes.
+	relevantContext = append(relevantContext, selectRelevantContext(nil, nil, input.Context, input.PipelineStages)...)
 	writerChangedPaths := append([]string(nil), input.PriorChangedFiles["code_writer"]...)
 	if len(writerChangedPaths) > maxWriterChangedPaths {
 		writerChangedPaths = writerChangedPaths[:maxWriterChangedPaths]
@@ -70,10 +113,10 @@ func (TestGenerator) Run(ctx context.Context, input schemas.HarnessStageInput, p
 
 	options.report("generating tests")
 	payload, _ := json.MarshalIndent(tgInput, "", "  ")
-	collected, err := callValidatedToolUse(ctx, provider, options.model("medium"), options.ReasoningEffort, composeSystemPrompt(testGeneratorSystemPrompt), string(payload), options.Images, testGeneratorToolDefinition(), options.MaxOutputTokens, &options.Stream, func(collected *zeroruntime.CollectedStream) error {
+	collected, err := callValidatedToolUse(ctx, provider, options.model("medium"), options.ReasoningEffort, composeSystemPrompt(testGeneratorSystemPrompt), string(payload), options.Images, []zeroruntime.ToolDefinition{testGeneratorToolDefinition()}, options.MaxOutputTokens, &options.Stream, func(collected *zeroruntime.CollectedStream) error {
 		_, err := parseTestGeneratorOutput(collected)
 		return err
-	}, options.PromptCacheKey)
+	}, options.PromptCacheKey, options.OnFormatRetry)
 	if err != nil {
 		return schemas.HarnessStageOutput{}, withCollectedUsage(err, collected)
 	}
@@ -128,6 +171,33 @@ func (TestGenerator) Run(ctx context.Context, input schemas.HarnessStageInput, p
 	}, nil
 }
 
+// relatedExistingTestPaths lists sibling test files that already exist for
+// the writer's changed implementation files. They are the files a regression
+// edit must modify rather than recreate.
+func relatedExistingTestPaths(workDir string, writerPaths []string) []string {
+	if workDir == "" || len(writerPaths) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, p := range writerPaths {
+		p = strings.TrimSpace(p)
+		if p == "" || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+			continue
+		}
+		candidate := strings.TrimSuffix(p, ".go") + "_test.go"
+		if seen[candidate] {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(workDir, filepath.FromSlash(candidate))); err != nil {
+			continue
+		}
+		seen[candidate] = true
+		out = append(out, candidate)
+	}
+	return out
+}
+
 func parseTestGeneratorOutput(collected *zeroruntime.CollectedStream) (schemas.TestGeneratorOutput, error) {
 	tc := findToolCall(collected, testGeneratorToolName)
 	if tc == nil {
@@ -137,9 +207,29 @@ func parseTestGeneratorOutput(collected *zeroruntime.CollectedStream) (schemas.T
 	if err != nil {
 		return schemas.TestGeneratorOutput{}, fmt.Errorf("parse %s args: %w", testGeneratorToolName, err)
 	}
+	// C3: both protocol versions, normalized through the SAME shared
+	// materializer as the writer (parseCodeWriterArgs' logic, typed for
+	// this output).
+	var probe struct {
+		Files []json.RawMessage `json:"files"`
+	}
+	if err := json.Unmarshal([]byte(stripped), &probe); err != nil {
+		return schemas.TestGeneratorOutput{}, fmt.Errorf("parse %s args: %w", testGeneratorToolName, err)
+	}
 	var output schemas.TestGeneratorOutput
 	if err := json.Unmarshal([]byte(stripped), &output); err != nil {
 		return schemas.TestGeneratorOutput{}, fmt.Errorf("parse %s args: %w", testGeneratorToolName, err)
+	}
+	if proposalsContainEdits(probe.Files) {
+		proposals, derr := decodeProposals(probe.Files)
+		if derr != nil {
+			return schemas.TestGeneratorOutput{}, derr
+		}
+		changes, _, merr := MaterializeProposals(proposals, currentProposalSnapshot)
+		if merr != nil {
+			return schemas.TestGeneratorOutput{}, fmt.Errorf("normalize compact proposals: %w", merr)
+		}
+		output.Files = changes
 	}
 	if err := output.Validate(); err != nil {
 		return schemas.TestGeneratorOutput{}, err
@@ -154,7 +244,7 @@ func testGeneratorToolDefinition() zeroruntime.ToolDefinition {
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"files":             fileChangeArraySchema(),
+				"files":             proposalArraySchema(),
 				"language":          map[string]any{"type": "string"},
 				"intent":            map[string]any{"type": "string"},
 				"known_limitations": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},

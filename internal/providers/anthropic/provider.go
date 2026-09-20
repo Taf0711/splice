@@ -432,6 +432,9 @@ func (provider *Provider) anthropicRequest(request zeroruntime.CompletionRequest
 	// ToolChoice nil, which omits the field (byte-identical to before).
 	if name := strings.TrimSpace(request.ToolChoice); name != "" {
 		mapped.ToolChoice = &toolChoice{Type: "tool", Name: name}
+	} else if request.ToolChoiceRequired {
+		// Any-tool forcing: the model must use a tool, without naming which.
+		mapped.ToolChoice = &toolChoice{Type: "any"}
 	}
 	applyMessageCacheBreakpoints(mapped.Messages)
 	return mapped, nil

@@ -1,0 +1,123 @@
+{
+  "version": 1,
+  "run_id": "wc-ab-armB-20260915T024301Z-try0",
+  "generated_at": "2026-09-14T22:47:17.638942-04:00",
+  "pre_registration": {
+    "primary_correctness_endpoint": "verifier pass or fail per attempt",
+    "noninferiority_margin": 0.05,
+    "primary_cost_endpoint": "billed USD per verified completion",
+    "secondary_cost_endpoint": "billed USD per attempt",
+    "win_rule": "warm is a win only when the matched-pair cost delta is negative with a task-clustered interval that excludes zero, and correctness is noninferior to the margin",
+    "stopping_rule": "if warm does not reduce provider requests per verified completion on a corpus that triggers expansions, stop"
+  },
+  "provenance": {
+    "repo_dir": ".",
+    "binary": "/tmp/splice-archeval-paid",
+    "binary_revision": "d9c52b3560fbab839ee377a57a8ad8ae1414801d",
+    "sidecar_revision": "2f4ccde",
+    "model_id": "z-ai/glm-5.3-flash",
+    "model_settings": {},
+    "arms": [
+      "warm"
+    ],
+    "tasks": 2,
+    "repeats": 3
+  },
+  "retention": {
+    "mode": "shared",
+    "sidecar_root": "/tmp/wc-ab-armB-sidecar",
+    "assignment": [
+      {
+        "arm": "warm",
+        "pattern": "one shared sidecar for every attempt: \u003csidecar-root\u003e/shared-warm"
+      }
+    ],
+    "ordering_rule": "one workspace per (arm, sequence); the write-phase task and the read-phase tasks that follow it run in that workspace in order, and the runner interleaves arm order per repeat, so a write on the shared sidecar and in the workspace precedes its read"
+  },
+  "arm_metrics": [
+    {
+      "arm": "warm",
+      "attempts": 6,
+      "verified_completions": 3,
+      "failed_attempts": 3,
+      "partial_attempts": 3,
+      "requests": 3,
+      "requests_per_verified_completion": 1,
+      "billed_usd": 0.0019442,
+      "billed_usd_per_attempt": 0.00032403333333333337,
+      "billed_usd_per_verified_completion": 0.0006480666666666667,
+      "input_tokens": 8142,
+      "output_tokens": 2593,
+      "cached_input_tokens": 4780,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 123,
+      "input_tokens_per_attempt": 1357,
+      "input_tokens_per_verified_completion": 2714,
+      "billed_usd_by_source": {
+        "unspecified": 0.0019442
+      },
+      "expansion_requests": 0,
+      "round_share": 0,
+      "cache_share": 0.5870793416850897,
+      "coverage_complete": false
+    }
+  ],
+  "per_task": null,
+  "skipped_tasks": [
+    "clock-helper-read",
+    "clock-helper-write"
+  ],
+  "decomposition": {
+    "total_delta_usd": 0.0019442,
+    "sources": [
+      {
+        "source": "unspecified",
+        "cold_usd": 0,
+        "warm_usd": 0.0019442,
+        "delta_usd": 0.0019442
+      }
+    ],
+    "cache_tokens_delta": 4780,
+    "cache_channel_note": "ledger carries cache-read and cache-write tokens but no per-token cache price, so the cache channel is reported in tokens and is not folded into the USD split"
+  },
+  "bootstrap": {
+    "unit": "task",
+    "samples": 10000,
+    "tasks": 0,
+    "seed": 1,
+    "billed_usd_per_attempt_delta_ci": {
+      "lower": 0,
+      "upper": 0
+    },
+    "requests_per_attempt_delta_ci": {
+      "lower": 0,
+      "upper": 0
+    },
+    "success_rate_delta_ci": {
+      "lower": 0,
+      "upper": 0
+    }
+  },
+  "claim": {
+    "total_cost_claim_allowed": false,
+    "reason": "at least one run has partial cost coverage, so total cost is unknown"
+  },
+  "coverage": {
+    "attempts": 6,
+    "partial_attempts": 3,
+    "complete": false
+  },
+  "cache_layout": {
+    "attempts": 6,
+    "attempts_with_telemetry": 3,
+    "attempts_without_telemetry": 3,
+    "total_prompt_layout_flips": 0,
+    "distinct_hashes_by_stage": {
+      "code_writer": [
+        "cc09a35d5dcfbe6e0e4a757243b998f4edc54934dbd382323cbc0abbbf78f692"
+      ]
+    },
+    "note": "3 of 6 attempt(s) emitted no cache telemetry, so the layout view is partial and the flip count is unknown for those attempts, not zero"
+  },
+  "note": "Every number comes from the captured authoritative request ledger. Tokens are provider-reported. A partial run withholds the total-cost claim."
+}

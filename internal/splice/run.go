@@ -41,6 +41,19 @@ type requestLedger struct {
 
 func newRequestLedger() *requestLedger { return &requestLedger{} }
 
+// spendSourceForInvocation is the F1 mechanical source classification for a
+// stage invocation before any expansion round: ordinal 0 is the initial
+// generation pass, ordinal 1+ are repair re-entries. The D2 loop reclassifies
+// round 1+ as expansion spend (see runStageWithContextBudgeted). Auxiliary
+// calls (step_back) and capture-time calls, if any ever exist, set their own
+// source explicitly.
+func spendSourceForInvocation(invocationOrdinal int) string {
+	if invocationOrdinal > 0 {
+		return schemas.SpendSourceRepair
+	}
+	return schemas.SpendSourceGeneration
+}
+
 func (ledger *requestLedger) append(record schemas.PipelineUsageRecord) {
 	record.Sequence = len(ledger.records) + 1
 	ledger.records = append(ledger.records, record)
@@ -103,6 +116,9 @@ func (ledger *requestLedger) recordingOptions(options PipelineRunConfig) Pipelin
 			Model:             attributed.Model,
 			Stage:             attributed.Stage,
 			Iteration:         attributed.Iteration,
+			InvocationOrdinal: attributed.InvocationOrdinal,
+			ContextRound:      attributed.ContextRound,
+			SpendSource:       attributed.SpendSource,
 			UsageReported:     attributed.UsageReported,
 			InputTokens:       attributed.Usage.EffectiveInputTokens(),
 			OutputTokens:      attributed.Usage.EffectiveOutputTokens(),
@@ -231,6 +247,11 @@ func Run(ctx context.Context, prompt string, provider agent.Provider, options ag
 	if cfg.ProjectRoot != "" && cfg.Cwd != cfg.ProjectRoot {
 		cfg.IsolatedWorktree = cfg.Cwd
 	}
+	// F4: one digest memo per run. Same stage need re-hashes only when new
+	// evidence (a recorded mutation) invalidates the cached content version.
+	memo := newDigestMemo()
+	SetRunDigestMemo(memo)
+	defer SetRunDigestMemo(nil)
 	result, err := runExecutionPlan(ctx, runID, plan, provider, cfg, mem, rec)
 	if err != nil {
 		return agent.Result{}, err
@@ -391,7 +412,7 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 		})
 	}
 
-	result, err := runIterationLoop(ctx, runID, plan, registry, provider, ledgerOpts, absWorkDir, runner, mem, rec, tr, acc)
+	result, err := runIterationLoop(ctx, runID, plan, registry, provider, ledgerOpts, absWorkDir, runner, mem, rec, tr, acc, ledger)
 	if err == nil {
 		finishPresentation(acc, options, result)
 	}
@@ -438,13 +459,19 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 		graphClient = provider.GraphClient()
 	}
 	if graphClient != nil {
-		captures := captureFromVerifiedRun(
+		snapshot, anchorReason := verifiedRevision(ctx, absWorkDir)
+		if anchorReason != "" {
+			emitProgress(options, fmt.Sprintf("[cognition] anchored at HEAD (%s)", anchorReason))
+		}
+		captures := captureFromVerifiedRunVerified(
 			projectRoot,
 			result.Status,
-			resultOutcomeChangedFiles(result),
+			worktreeChangedFiles(ctx, absWorkDir),
 			pipelineTestCommand(result),
-			headRevision(ctx, absWorkDir),
+			snapshot,
 			runID,
+			captureVerificationFromResult(result),
+			CaptureOriginRuntime,
 		)
 		for _, capture := range captures {
 			id, capErr := persistGraphCapture(ctx, graphClient, capture)
@@ -458,32 +485,42 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 	return result, nil
 }
 
-// resultOutcomeChangedFiles returns the changed files for graph capture.
-// StageRecord has no changed-file list; the files arrive on the run's
-// iteration records (files_changed), so the capture is passed them directly
-// by the caller. This helper returns nil and the run seam sources the list
-// from the last iteration state instead.
-func resultOutcomeChangedFiles(result schemas.PipelineResult) []string {
+// worktreeChangedFiles lists the repo-relative files that differ from HEAD
+// (modified, added, or renamed) via one porcelain git status. This is the
+// deterministic changed-file source for graph capture: the verified run's
+// own edits, exactly what a freshness diff will later compare against.
+// Untracked files are included (git status --porcelain default) because the
+// run may have created new files. Empty output on any failure: capture then
+// persists only the procedure node, never wrong file facts.
+func worktreeChangedFiles(ctx context.Context, workDir string) []string {
+	engine := procrun.NewStageEngine(workDir)
+	cmd, plan, cerr := stages.PrepareStageCommand(ctx, engine, workDir,
+		[]string{"git", "-C", workDir, "status", "--porcelain"})
+	if cerr != nil {
+		return nil
+	}
+	defer plan.Cleanup()
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
 	var files []string
-	seen := map[string]struct{}{}
-	for _, stage := range result.Stages {
-		if stage.Name != "code_writer" && stage.Name != "test_generator" {
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if len(line) < 4 {
 			continue
 		}
-		if stage.OutputSummary == nil {
+		path := strings.TrimSpace(line[3:])
+		if path == "" || strings.HasPrefix(path, `"`) {
+			// Quoted paths (special characters) are skipped: a wrong byte
+			// path would poison the anchor index, so we omit rather than
+			// guess the unescaping.
 			continue
 		}
-		for _, part := range strings.Split(*stage.OutputSummary, ",") {
-			file := strings.TrimSpace(part)
-			if file == "" || strings.Contains(file, " ") || strings.Contains(file, "(") {
-				continue
-			}
-			if _, dup := seen[file]; dup {
-				continue
-			}
-			seen[file] = struct{}{}
-			files = append(files, file)
+		if i := strings.Index(path, " -> "); i >= 0 {
+			path = path[i+4:]
 		}
+		files = append(files, path)
 	}
 	return files
 }
@@ -507,6 +544,37 @@ func pipelineTestCommand(result schemas.PipelineResult) string {
 	return ""
 }
 
+// captureVerificationFromResult extracts the E2 verification observation
+// from the pipeline result: did the applicable required checks EXECUTE and
+// PASS? Stage status completed is not evidence; the counts come from the
+// final iteration state's executed totals. A run with zero executed checks
+// yields a zero-value observation, which capture labels provisional (or
+// unverified for legacy callers), never verified. Skipped facts do not
+// count: only acceptance facts that actually executed and passed do.
+func captureVerificationFromResult(result schemas.PipelineResult) captureVerification {
+	ver := captureVerification{}
+	for i := len(result.Stages) - 1; i >= 0; i-- {
+		stage := result.Stages[i]
+		if stage.Name != "test_runner" || stage.Status != schemas.StageCompleted {
+			continue
+		}
+		ver.TestStageRan = true
+		ver.TestCommand = pipelineTestCommand(result)
+		break
+	}
+	if state := result.FinalState; state != nil {
+		ver.TestsExecuted = state.TestsPassing + state.TestsFailing + state.TestsErrored
+		ver.TestsFailed = state.TestsFailing + state.TestsErrored
+		ver.AcceptanceTotal = state.AcceptanceFactsPassing + state.AcceptanceFactsFailing
+		ver.AcceptancePassed = state.AcceptanceFactsPassing
+	}
+	if ver.TestStageRan {
+		ver.EnvironmentStdLib = true
+		ver.ObservedResult = fmt.Sprintf("executed %d test(s), %d failed", ver.TestsExecuted, ver.TestsFailed)
+	}
+	return ver
+}
+
 // headRevision returns the current git HEAD sha of the working directory,
 // or "" when unavailable (no repo, git failure). The read routes through
 // the stage sandbox profile like every other deterministic git read.
@@ -522,6 +590,48 @@ func headRevision(ctx context.Context, workDir string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// verifiedRevision returns a git revision object naming the CURRENT worktree
+// bytes: `git stash create` records the staged+unstaged state as a commit
+// object WITHOUT touching HEAD, the index, or the working tree (it is the
+// plumbing behind git stash and has no visible side effects beyond an
+// unreferenced commit object). Captured cognition anchors at that snapshot,
+// so a later freshness diff compares against the exact tree the run verified
+// rather than the pre-run HEAD. Empty worktrees (nothing changed) return ""
+// from stash create, and the caller falls back to HEAD so the anchor still
+// names a resolvable revision. Any failure falls back to headRevision; a
+// missing anchor degrades capture to the pre-run base revision, never fails
+// the run.
+//
+// The returned reason names WHY a snapshot was unavailable ("snapshot
+// unavailable: <cause>") so the capture progress line can say "anchored at
+// HEAD (snapshot unavailable: ...)" instead of silently anchoring at HEAD.
+// An anchor at HEAD is correct when the caller committed the verified tree
+// before capturing (the eval harness does); it is a degradation, visible in
+// telemetry, when the worktree was dirty and the snapshot failed.
+func verifiedRevision(ctx context.Context, workDir string) (revision string, reason string) {
+	fallback := func(why string) (string, string) {
+		return headRevision(ctx, workDir), why
+	}
+	engine := procrun.NewStageEngine(workDir)
+	snapCmd, plan, cerr := stages.PrepareStageCommand(ctx, engine, workDir, []string{"git", "-C", workDir, "stash", "create"})
+	if cerr != nil {
+		return fallback(fmt.Sprintf("snapshot unavailable: %v", cerr))
+	}
+	defer plan.Cleanup()
+	out, err := snapCmd.Output()
+	if err != nil {
+		return fallback(fmt.Sprintf("snapshot unavailable: %v", err))
+	}
+	snapshot := strings.TrimSpace(string(out))
+	if snapshot == "" {
+		// Nothing to stash: the worktree is clean, so HEAD names the
+		// verified bytes exactly. This is the correct, expected path when
+		// the caller committed the verified tree before capture.
+		return headRevision(ctx, workDir), ""
+	}
+	return snapshot, ""
 }
 func resolvedModelForStage(options PipelineRunConfig, stageName string) string {
 	if options.StageModelResolver != nil {
@@ -545,6 +655,7 @@ func runIterationLoop(
 	rec WorkspaceRecovery,
 	tr *runTraceAccumulator,
 	acc *presentrun.Accumulator,
+	ledger *requestLedger,
 ) (schemas.PipelineResult, error) {
 	maxWallSeconds := defaultMaxWallSeconds
 	// Generation-only gate: input volume is bounded per call by compaction
@@ -554,6 +665,10 @@ func runIterationLoop(
 
 	history := []schemas.IterationState{}
 	allRecords := []schemas.StageRecord{}
+	// prevCost is the cumulative billed spend the trajectory cost rule reads
+	// as the previous sample. It starts unknown, so the rule stays inactive
+	// until two consecutive iterations report complete pricing.
+	var prevCost billedCostSnapshot
 	wallDeadline := time.Now().Add(time.Duration(maxWallSeconds) * time.Second)
 	var revisionContext *string
 	var priorFailure string
@@ -592,7 +707,10 @@ func runIterationLoop(
 		}
 
 		emitProgress(options, fmt.Sprintf("Starting pipeline iteration %d\n", i))
-		passRecords, passOutputs, completed, err := runPass(ctx, runID, i, plan, registry, provider, options, workDir, runner, wallDeadline, revisionContext, mem, tr)
+		if tr != nil {
+			tr.resetSuppressionRecorder()
+		}
+		passRecords, passOutputs, completed, err := runPass(ctx, runID, i, plan, registry, provider, options, workDir, runner, wallDeadline, revisionContext, mem, tr, NewStageExecutionBudget(0))
 		if err != nil {
 			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 				return schemas.PipelineResult{}, context.Canceled
@@ -609,7 +727,8 @@ func runIterationLoop(
 			failed := findFailed(passRecords)
 			failure := failed.Name + "\x00" + DerefString(failed.OutputSummary)
 			if failure == priorFailure {
-				reason := fmt.Sprintf("repeated unchanged stage failure in iterations %d and %d: %s", i-1, i, failed.Name)
+				reason := fmt.Sprintf("repeated unchanged stage failure (%s) in iterations %d and %d: %s",
+					failureCauseClass(DerefString(failed.OutputSummary)), i-1, i, failed.Name)
 				if detail := DerefString(failed.OutputSummary); detail != "" {
 					reason += ": " + detail
 				}
@@ -634,6 +753,22 @@ func runIterationLoop(
 		if err != nil {
 			return finishWithReason(runID, plan, allRecords, "failed", fmt.Sprintf("compute iteration state: %v", err))
 		}
+		// W2: pair this iteration's host-side suppressions with the
+		// correctness signal. A suppression that coincided with a correctness
+		// decline is recorded as necessary on the invocation metrics. The
+		// pairing is telemetry here: a scope switch that is off by default
+		// must not abort a run on a coincident decline.
+		if tr != nil && len(history) > 0 {
+			if rec := tr.suppressionRecorder(); rec != nil && rec.Suppressed() > 0 {
+				pair, pairErr := CheckScopeNonInferiority(rec, history[len(history)-1], state)
+				if pairErr != nil {
+					emitProgress(options, fmt.Sprintf("[scope] %v\n", pairErr))
+				}
+				if pair.NecessaryCallsSuppressed > 0 {
+					tr.recordNecessarySuppressions(i, pair.NecessaryCallsSuppressed)
+				}
+			}
+		}
 		history = append(history, state)
 		if tr != nil {
 			tr.recordHistory(state)
@@ -657,10 +792,37 @@ func runIterationLoop(
 		}
 
 		if passSucceeded(passRecords, state) {
-			return finishCompleted(runID, plan, allRecords)
+			return finishCompleted(runID, plan, allRecords, state)
 		}
 
-		decision := EvaluateTrajectory(history, maxIterations, &tokenBudget)
+		// W3: the cost rule reads BILLED cost from the authoritative request
+		// ledger, never raw tokens, because a cache-read round costs a
+		// fraction of a cold round and a token total hides that. The signal is
+		// the delta since the previous iteration. When pricing coverage is not
+		// complete the billed delta is unknown, so the cost rule stays
+		// inactive and the run records why. Missing pricing is never a zero
+		// cost.
+		costSnapshot, cerr := ledgerCostSnapshot(ledger)
+		if cerr != nil {
+			return finishWithReason(runID, plan, allRecords, "failed", cerr.Error())
+		}
+		costSignal, cerr := iterationCostSignal(prevCost, costSnapshot)
+		if cerr != nil {
+			return finishWithReason(runID, plan, allRecords, "failed", fmt.Sprintf("trajectory cost signal: %v", cerr))
+		}
+		prevCost = costSnapshot
+		var decision schemas.TrajectoryDecision
+		if costSignal != nil {
+			decision, cerr = EvaluateTrajectoryWithCost(history, maxIterations, &tokenBudget, costSignal)
+			if cerr != nil {
+				return finishWithReason(runID, plan, allRecords, "failed", fmt.Sprintf("trajectory cost signal: %v", cerr))
+			}
+		} else {
+			decision = EvaluateTrajectory(history, maxIterations, &tokenBudget)
+			if costSnapshot.Note != "" {
+				emitProgress(options, fmt.Sprintf("[trajectory] cost rule inactive: %s\n", costSnapshot.Note))
+			}
+		}
 		if acc != nil && presentrun.IsTrajectoryIntervention(decision.Action) {
 			failed := findFailed(passRecords)
 			if adapted, ok := presentrun.AdaptTrajectoryDecision(decision.Action, decision.Reason, failed.Name); ok {
@@ -703,7 +865,10 @@ func runIterationLoop(
 				Model:           options.Model,
 				ReasoningEffort: options.ReasoningEffort,
 			}
-			stageOpts := stageOptions("step_back", i, sbSelection, options, workDir, runner, stages.Capabilities{})
+			// F1: auxiliary model call. step_back runs outside the planned
+			// stage sequence, so its spend is classified auxiliary and stays
+			// in the ledger (no hidden paid work).
+			stageOpts := stageOptions("step_back", i, sbSelection, options, workDir, runner, stages.Capabilities{}, agent.NewRequestAttribution(0, 0, schemas.SpendSourceAuxiliary))
 			analysis, sbErr := stages.StepBack(ctx, provider, stageOpts, report)
 			if sbErr != nil {
 				if errors.Is(sbErr, context.Canceled) || ctx.Err() != nil {
@@ -805,6 +970,7 @@ func runPass(
 	revisionContext *string,
 	mem MemoryStore,
 	tr *runTraceAccumulator,
+	execBudget *StageExecutionBudget,
 ) ([]schemas.StageRecord, []schemas.HarnessStageOutput, bool, error) {
 	priorSummaries := map[string]string{}
 	priorChangedFiles := map[string][]string{}
@@ -825,6 +991,10 @@ func runPass(
 			planHasEdges = true
 		}
 	}
+
+	// priorScope carries the cognition context scope across stage
+	// invocations and repair re-entry within this run.
+	var priorScope *StageScopePlan
 
 	for seq, stage := range plan.Stages {
 		if ctx.Err() != nil {
@@ -887,23 +1057,28 @@ func runPass(
 		// Single composition path shared with repair re-entry: retrieval,
 		// deterministic admission, compaction, then post-compaction trace
 		// accounting of delivered memory.
-		preparedInput, perr := prepareStageInput(ctx, stageInputPreparation{
-			Input:     input,
-			Stage:     agentStage,
-			Caps:      caps,
-			Budget:    stage.Budget,
-			Tier:      plan.Tier,
-			Iteration: iteration,
-			WorkDir:   workDir,
-			Options:   options,
-			Memory:    mem,
-			Trace:     tr,
-			NowUnix:   time.Now().Unix(),
+		preparedInput, stageScope, scopeSup, perr := prepareStageInput(ctx, stageInputPreparation{
+			Input:      input,
+			Stage:      agentStage,
+			Caps:       caps,
+			Budget:     stage.Budget,
+			Tier:       plan.Tier,
+			Iteration:  iteration,
+			WorkDir:    workDir,
+			Options:    options,
+			Memory:     mem,
+			Trace:      tr,
+			NowUnix:    time.Now().Unix(),
+			PriorScope: priorScope,
 		})
 		if perr != nil {
 			return records, outputs, false, perr
 		}
 		input = preparedInput
+		priorScope = &stageScope
+		if tr != nil && !scopePlanIsUncomputed(stageScope) {
+			tr.recordScopeMetricsOrdinal(stageName, iteration, 0, scopeSup, stageScope)
+		}
 
 		if err := input.Validate(); err != nil {
 			return records, outputs, false, fmt.Errorf("stage %s input: %w", stageName, err)
@@ -959,7 +1134,12 @@ func runPass(
 		}
 
 		start := time.Now()
-		output, err := runStageWithContext(stageCtx, input, agentStage, iteration, selection, options, workDir, runner, mem, caps, stage.Budget.OutputMax, tr)
+		// D2: each stage invocation in the pass owns a fresh shared budget;
+		// the local repair loop of that stage (attemptLocalRepair) reuses the
+		// same instance, so pass + repairs of one stage share one allowance,
+		// while different stages never starve each other.
+		stageBudget := NewStageExecutionBudget(0)
+		output, err := runStageWithContextBudgeted(stageCtx, input, agentStage, iteration, selection, options, workDir, runner, mem, caps, stage.Budget.OutputMax, tr, priorScope, 0, stageBudget)
 		if cancelStage != nil {
 			cancelStage()
 		}
@@ -1065,7 +1245,7 @@ func runPass(
 		if stageName == "test_runner" && record.Status == schemas.StageCompleted {
 			if results, ok := output.Data["test_results"].(schemas.TestRunResults); ok && results.Failed() > 0 {
 				if _, hasWriter := priorSummaries["code_writer"]; hasWriter {
-					if _, interaction, rerr := attemptLocalRepair(ctx, runID, iteration, plan, registry, provider, options, workDir, runner, mem, tr, wallDeadline, &records, &outputs, &priorSummaries, &priorChangedFiles, output); rerr != nil {
+					if _, interaction, rerr := attemptLocalRepair(ctx, runID, iteration, plan, registry, provider, options, workDir, runner, mem, tr, priorScope, wallDeadline, execBudget, &records, &outputs, &priorSummaries, &priorChangedFiles, output); rerr != nil {
 						return records, outputs, false, rerr
 					} else if interaction != nil && tr != nil {
 						tr.recordInteraction(*interaction)
@@ -1125,8 +1305,145 @@ func runStageWithContext(
 	caps stages.Capabilities,
 	outputMax int,
 	tr *runTraceAccumulator,
+	priorScope *StageScopePlan,
+	invocationOrdinal int,
 ) (schemas.HarnessStageOutput, error) {
-	stageOpts := stageOptions(input.StageName, iteration, selection, options, workDir, runner, caps)
+	return runStageWithContextBudgeted(ctx, input, stage, iteration, selection, options, workDir, runner, mem, caps, outputMax, tr, priorScope, invocationOrdinal, nil)
+}
+
+// runStageWithContextBudgeted is runStageWithContext with an explicit
+// shared execution budget (D2/D3). A nil budget creates a fresh one (the
+// unthreaded pass path); repair re-entry passes the SAME budget as the
+// pass so provider requests and expansions share one allowance.
+func runStageWithContextBudgeted(
+	ctx context.Context,
+	input schemas.HarnessStageInput,
+	stage stages.Stage,
+	iteration int,
+	selection agent.ModelSelection,
+	options PipelineRunConfig,
+	workDir string,
+	runner ToolRunner,
+	mem MemoryStore,
+	caps stages.Capabilities,
+	outputMax int,
+	tr *runTraceAccumulator,
+	priorScope *StageScopePlan,
+	invocationOrdinal int,
+	execBudget *StageExecutionBudget,
+) (schemas.HarnessStageOutput, error) {
+	// F1: the orchestrator owns the classification cell for this invocation.
+	// The stage's usage closure reads it at emission time, so reclassification
+	// between expansion rounds re-labels the spend source without threading
+	// new parameters through every stage. The derived source is mechanical:
+	// repair ordinal -> repair, otherwise the D2 loop reclassifies per round.
+	invocationAttribution := agent.NewRequestAttribution(invocationOrdinal, 0, spendSourceForInvocation(invocationOrdinal))
+	// F1: count the provider requests this invocation actually issues. The
+	// writer's first round is a deterministic context handshake that makes no
+	// provider call, so a round counter alone labels its successor expansion
+	// and the live ledger then carries no generation record. The counter below
+	// lets the loop put the generation label on the first provider-bearing
+	// round.
+	providerRequests := 0
+	stageRunOptions := options
+	if options.OnAttributedUsage != nil {
+		baseAttributedUsage := options.OnAttributedUsage
+		stageRunOptions.OnAttributedUsage = func(attributed agent.AttributedUsage) {
+			providerRequests++
+			baseAttributedUsage(attributed)
+		}
+	}
+	stageOpts := stageOptions(input.StageName, iteration, selection, stageRunOptions, workDir, runner, caps, invocationAttribution)
+	// Part A context bridge: fresh cognition narrows the default context
+	// request. The scoped request replaces the default ONLY when the scope
+	// resolved a question; otherwise the cold path stays byte-identical.
+	// The suppression accounting is returned so the caller's trace records
+	// host omissions, not inferences.
+	scopeOn, serr := scopeEnabled()
+	if serr != nil {
+		return schemas.HarnessStageOutput{}, serr
+	}
+	if scopeOn && priorScope != nil && priorScope.CognitionResolved && stageOpts.RunTool != nil {
+		// A7 host-side enforcement: the model-facing tool runner is
+		// scoped when cognition resolved the location question. The
+		// context fulfillment path uses the raw runner with explicit
+		// granted paths, so the scoped request is never blocked by its
+		// own scope.
+		var supRec *SuppressionRecorder
+		if tr != nil {
+			supRec = tr.suppressionRecorder()
+		}
+		scoped := ScopedToolRunner{Inner: runner, Scope: *priorScope, Recorder: supRec}
+		stageOpts.RunTool = func(ctx context.Context, name string, args map[string]any) (stages.ToolResult, error) {
+			res, err := scoped.RunTool(ctx, name, args)
+			if err != nil {
+				return stages.ToolResult{}, err
+			}
+			return stages.ToolResult{OK: res.OK, Output: res.Output, Truncated: res.Truncated, Meta: res.Meta}, nil
+		}
+	}
+	// Production evidence substitution: when admitted retained evidence
+	// replaced a concrete cold-plan operation, the executor uses the warm
+	// plan's remaining operations as the concrete context request. The
+	// eliminated operation is never issued; required unresolved operations
+	// stay in the request.
+	// Only an actual admitted substitution may change the live context
+	// request. Evidence-free stages keep the historical default request
+	// byte-for-byte, so the improvement cannot silently reduce or reshape
+	// the discovery coverage that Task A already relies on.
+	if priorScope != nil && priorScope.Evidence != nil {
+		if tr != nil && (priorScope.Evidence.SubstitutionCount() > 0 || len(priorScope.Evidence.Rejected) > 0) {
+			tr.recordEvidencePlanOrdinal(input.StageName, iteration, invocationOrdinal, priorScope.Evidence)
+		}
+	}
+	// Evidence substitution is the ONLY mechanism that may REMOVE a live
+	// context operation. The legacy cognition scoping path
+	// (ScopedContextRequest) is abandoned: it narrowed the host request
+	// without ever changing what the model did, and measurement showed it
+	// bought prompt growth rather than savings. Evidence-free stages keep
+	// the historical default request byte-for-byte, so a stage with no
+	// admitted substitution is unaffected.
+	if priorScope != nil && priorScope.Evidence != nil && priorScope.Evidence.SubstitutionCount() > 0 {
+		req := EvidenceRequestFromOperations(priorScope.Evidence.Warm.Operations,
+			"Evidence-backed exact substitution: admitted retained records replaced redundant discovery operations.")
+		// Delivery wiring: each substituted subject's CURRENT source is
+		// fetched through the same guarded request, so the model receives
+		// the declaration body instead of a location claim. Without this,
+		// the substituted discovery loses its query and the answer never
+		// reaches the model (the recorded retention failure).
+		for _, q := range priorScope.Evidence.PrefetchQueries() {
+			req.Queries = append(req.Queries, q)
+		}
+		stageOpts.OverrideContextRequest = &req
+	}
+	// Memory-assisted dependency prefetch (experimental treatment, OFF by
+	// default): retained verified records name source files, and the host
+	// fetches their current bounded views into the initial handshake. This
+	// ADDS queries; it never removes an operation, and it is tracked
+	// separately from substitution in the trace and the report.
+	if priorScope != nil && len(priorScope.MemoryPrefetch) > 0 {
+		var req schemas.ContextRequest
+		if stageOpts.OverrideContextRequest != nil {
+			req = *stageOpts.OverrideContextRequest
+		} else {
+			req = stages.DefaultContextRequestFor(input.RequestIntent, workDir, detectLanguage(workDir))
+			req.Reason = "Memory-assisted dependency prefetch: retained verified work names these sources; the host fetched their current views before your first request."
+		}
+		for _, q := range PrefetchQueriesFor(priorScope.MemoryPrefetch) {
+			req.Queries = append(req.Queries, q)
+		}
+		stageOpts.OverrideContextRequest = &req
+		records := make([]schemas.MemoryPrefetchRecord, 0, len(priorScope.MemoryPrefetch))
+		for _, f := range priorScope.MemoryPrefetch {
+			records = append(records, schemas.MemoryPrefetchRecord{
+				Path: f.Path, Reason: f.Reason, RecordRef: f.RecordRef, ContentVersion: f.ContentVersion,
+			})
+		}
+		if tr != nil {
+			tr.recordMemoryPrefetch(input.StageName, iteration, invocationOrdinal, records)
+		}
+		emitProgress(options, fmt.Sprintf("[%s] memory prefetch: fetching %d retained-record source view(s) before the first model request", input.StageName, len(records)))
+	}
 	if outputMax > 0 {
 		// The stage's output budget caps every LLM request this stage makes. Zero
 		// keeps the provider default (no per-request override).
@@ -1134,22 +1451,131 @@ func runStageWithContext(
 	}
 	stageOpts.ModelOverride = selection.Model
 	stageOpts.ReasoningEffort = selection.ReasoningEffort
-	output, err := stage.Run(ctx, input, selection.Provider, stageOpts)
-	if err != nil {
-		return schemas.HarnessStageOutput{}, err
-	}
-	if output.ContextRequest == nil {
-		return output, nil
-	}
 
-	bundle, err := FulfillContextRequest(ctx, *output.ContextRequest, runner)
+	// Model-free stages keep the single-call path (no provider request,
+	// no expansion semantics). The budget is created fresh here when the
+	// caller did not thread one (pass loop), or reuses the shared one
+	// (repair re-entry): additional context is never a fresh repair
+	// budget.
+	budget := execBudget
+	if budget == nil {
+		budget = NewStageExecutionBudget(0)
+	}
+	ledger := newExpansionLedger()
+	var usageTotal *schemas.StageUsage
+	accumulate := func(u *schemas.StageUsage) {
+		usageTotal = mergeStageUsage(usageTotal, u)
+	}
+	providerRound := 0
+	for round := 0; ; round++ {
+		if ctx.Err() != nil {
+			return schemas.HarnessStageOutput{}, withStageUsage(ctx.Err(), usageTotal)
+		}
+		// F1: the first provider-bearing round is the generation pass (or the
+		// repair pass when invocationOrdinal > 0); later provider-bearing
+		// rounds are expansion spend under the same D3 request identity. A
+		// context-handshake round issues no provider request, so it must not
+		// consume the generation label. The cell is set BEFORE the stage
+		// streams so its usage closure stamps every request this round issues.
+		if round > 0 {
+			if providerRequests == 0 {
+				invocationAttribution.Set(invocationOrdinal, 0, spendSourceForInvocation(invocationOrdinal))
+			} else {
+				invocationAttribution.Set(invocationOrdinal, providerRound, schemas.SpendSourceExpansion)
+			}
+		}
+		requestsBefore := providerRequests
+		output, err := stage.Run(ctx, input, selection.Provider, stageOpts)
+		if err != nil {
+			return schemas.HarnessStageOutput{}, withStageUsage(err, usageTotal)
+		}
+		if providerRequests > requestsBefore {
+			providerRound++
+		}
+		accumulate(output.Usage)
+
+		if output.ContextRequest == nil {
+			// Terminal: the model submitted changes (bare C-protocol or
+			// submit_changes envelope) or produced a model-free output.
+			// D1: the writer/test-generator decoded its own action
+			// internally — a request_context action is surfaced as
+			// output.ContextRequest, and a submit action as the proposal.
+			// Nothing else to decode here.
+			output.Usage = usageTotal
+			return output, nil
+		}
+
+		// Stage-level ContextRequest (the historical one-shot contract,
+		// still used by the initial handshake). Fulfill it if the budget
+		// allows; this replaces the old hard "requested context more
+		// than once" error with a bounded continuation.
+		if !budget.SpendRequest() || budget.Exhausted() && round > 0 {
+			return schemas.HarnessStageOutput{}, withStageUsage(fmt.Errorf("%w while fulfilling the stage context request", errExpansionBudgetExhausted), usageTotal)
+		}
+		expanded, eerr := expandContextRound(ctx, input, output.ContextRequest, budget, ledger, runner, mem, tr, options, workDir, iteration, invocationOrdinal)
+		if eerr != nil {
+			return schemas.HarnessStageOutput{}, withStageUsage(eerr, usageTotal)
+		}
+		input = expanded
+		// The stage re-runs on the next loop iteration with the new
+		// evidence; the historical "requested context more than once"
+		// error becomes a bounded continuation instead.
+	}
+}
+
+// expandContextRound validates, bounds, and fulfills one context round
+// (initial handshake or envelope expansion). It mutates nothing global;
+// the caller re-invokes the stage with the returned input.
+func expandContextRound(
+	ctx context.Context,
+	input schemas.HarnessStageInput,
+	request *schemas.ContextRequest,
+	budget *StageExecutionBudget,
+	ledger *expansionLedger,
+	runner ToolRunner,
+	mem MemoryStore,
+	tr *runTraceAccumulator,
+	options PipelineRunConfig,
+	workDir string,
+	iteration int,
+	invocationOrdinal int,
+) (schemas.HarnessStageInput, error) {
+	if request == nil {
+		return input, nil
+	}
+	if !budget.SpendRequest() {
+		return input, fmt.Errorf("%w: %d provider request(s) spent", errExpansionBudgetExhausted, budget.RequestsUsed())
+	}
+	if ledger != nil {
+		if err := ledger.Check(*request); err != nil {
+			return input, fmt.Errorf("expansion rejected: %w", err)
+		}
+	}
+	bundle, err := FulfillContextRequest(ctx, *request, runner)
 	if err != nil {
-		return schemas.HarnessStageOutput{}, withStageUsage(fmt.Errorf("fulfill context: %w", err), output.Usage)
+		return input, fmt.Errorf("fulfill context: %w", err)
 	}
-	input.Context = &bundle
+	if ledger != nil {
+		ledger.Record(*request)
+	}
+	// Merge new evidence after previously delivered items: expansions
+	// ADD, never remove acceptance or failure evidence.
+	if input.Context != nil {
+		bundle.Items = append(input.Context.Items, bundle.Items...)
+	}
 	if tr != nil {
-		tr.recordContext(input.StageName, iteration, bundle)
+		round := budget.RoundsUsed()
+		if round == 0 {
+			tr.recordContext(input.StageName, iteration, bundle)
+		} else {
+			tr.recordContextRound(input.StageName, iteration, invocationOrdinal, round, bundle)
+		}
 	}
+	// C1: the delivered views are the proposal base for this invocation.
+	stages.RecordProposalBases(&bundle)
+	// Degradation observations persist per fulfilled bundle (the
+	// historical behavior for the initial handshake; expansions observe
+	// too, since a failed expansion query is the same delivery miss).
 	if mem != nil {
 		for _, obs := range extractDegradationObservations(input.StageName, input.RunID, memoryProjectRoot(options, workDir), bundle) {
 			persistObservation(ctx, mem, obs, func(msg string) {
@@ -1157,16 +1583,9 @@ func runStageWithContext(
 			})
 		}
 	}
-	finalOutput, err := stage.Run(ctx, input, selection.Provider, stageOpts)
-	if err != nil {
-		return schemas.HarnessStageOutput{}, withStageUsage(err, output.Usage)
-	}
-	if finalOutput.ContextRequest != nil {
-		usage := mergeStageUsage(output.Usage, finalOutput.Usage)
-		return schemas.HarnessStageOutput{}, withStageUsage(fmt.Errorf("stage requested context more than once"), usage)
-	}
-	finalOutput.Usage = mergeStageUsage(output.Usage, finalOutput.Usage)
-	return finalOutput, nil
+	input.Context = &bundle
+	emitProgress(options, fmt.Sprintf("[%s] context round fulfilled: %d item(s) delivered\n", input.StageName, len(bundle.Items)))
+	return input, nil
 }
 
 func passSucceeded(records []schemas.StageRecord, state schemas.IterationState) bool {
@@ -1232,13 +1651,44 @@ func buildRevisionContext(intent string, history []schemas.IterationState, recor
 		if len(changedFiles) > 50 {
 			changedFiles = changedFiles[:50]
 		}
-		lines = append(lines, "", "Files written by the prior iteration (use change_type modify and overwrite: true when editing them):")
+		// The model cannot satisfy a modify for these paths. modify requires a
+		// base_ref that keys a source view DELIVERED to the current invocation,
+		// and this context is built before the stage runs, so the host holds no
+		// such view. Minting a base from current bytes would key edits against
+		// text the model never received, which the materializer's exact-match
+		// rule forbids. The full-content create form needs no base, so it is the
+		// only representation the model can actually submit here.
+		lines = append(lines, "", "Files written by the prior iteration (re-emit each with change_type create and the full file content; the host replaces the prior bytes):")
 		lines = append(lines, "  "+strings.Join(changedFiles, ", "))
 	}
 	if note != "" {
 		lines = append(lines, "", note)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// failureCauseClass names the error family of a stage failure so aggregate
+// telemetry can separate repeated failures that share the wrapper name but
+// differ in root cause. The full detail is still appended to the reason;
+// this label is additive, never a replacement. The order matters: a typed
+// output error that reports a missing base_ref is a validation failure, and
+// the more specific class must win.
+func failureCauseClass(summary string) string {
+	s := strings.ToLower(summary)
+	switch {
+	case strings.Contains(s, "base_ref"), strings.Contains(s, "proposal "), strings.Contains(s, "validation"):
+		return "validation"
+	case strings.Contains(s, "typedoutputerror"), strings.Contains(s, "typed output"):
+		return "typed_output"
+	case strings.Contains(s, "timed out"), strings.Contains(s, "timeout"):
+		return "timeout"
+	case strings.Contains(s, "auth"):
+		return "auth"
+	case strings.Contains(s, "provider request error"):
+		return "provider"
+	default:
+		return "unknown"
+	}
 }
 
 func cloneChangedFiles(input map[string][]string) map[string][]string {
@@ -1757,6 +2207,18 @@ func newAgentToolRunner(options PipelineRunConfig, cwd string) ToolRunner {
 			}
 		}
 		agentOpts := options.agentOptions()
+		runOptions := agent.NewToolRunOptions(agentOpts, call, cwd, permissionGranted)
+		// D1: host-seam marking. The deterministic pipeline IS the
+		// orchestrator; when the requested tool implements
+		// tools.HostSeamTool, this call is by definition host-initiated
+		// (the model surface never sees such tools - they are Deny and
+		// unadvertised). The registry gate still verifies the interface,
+		// so the flag cannot widen the model surface.
+		if tool, ok := options.Registry.Get(name); ok {
+			if _, isHostSeam := tool.(tools.HostSeamTool); isHostSeam {
+				runOptions.HostSeam = true
+			}
+		}
 		if outcome, blocked := agent.RunBeforeToolHooks(ctx, agentOpts, call, args); blocked {
 			blockedResult := agent.HookBlockedResult(call, outcome)
 			res := ToolResult{
@@ -1771,7 +2233,6 @@ func newAgentToolRunner(options PipelineRunConfig, cwd string) ToolRunner {
 		}
 		// Keep the pipeline's auto/spec-draft grant semantics. The shared helper
 		// only builds tools.RunOptions; it does not replace this prompt flow.
-		runOptions := agent.NewToolRunOptions(agentOpts, call, cwd, permissionGranted)
 		if options.StageRequireReadBeforeWrite {
 			runOptions.RequireReadBeforeWrite = true
 		}
@@ -2048,12 +2509,13 @@ func emitPermissionDecision(options PipelineRunConfig, request agent.PermissionR
 	})
 }
 
-func finishCompleted(runID string, plan schemas.ExecutionPlan, records []schemas.StageRecord) (schemas.PipelineResult, error) {
+func finishCompleted(runID string, plan schemas.ExecutionPlan, records []schemas.StageRecord, finalState schemas.IterationState) (schemas.PipelineResult, error) {
 	return schemas.PipelineResult{
-		RunID:  runID,
-		Status: "completed",
-		Tier:   plan.Tier,
-		Stages: records,
+		RunID:      runID,
+		Status:     "completed",
+		Tier:       plan.Tier,
+		Stages:     records,
+		FinalState: &finalState,
 	}, nil
 }
 

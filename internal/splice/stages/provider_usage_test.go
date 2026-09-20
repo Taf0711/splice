@@ -89,7 +89,7 @@ func TestValidatedToolUseUnnormalizedReasoningMatchesLedger(t *testing.T) {
 		return nil
 	}
 	tool := zeroruntime.ToolDefinition{Name: "submit_code"}
-	collected, err := callValidatedToolUse(context.Background(), provider, "m", "", "", "p", nil, tool, 0, callbacks, validate, "")
+	collected, err := callValidatedToolUse(context.Background(), provider, "m", "", "", "p", nil, []zeroruntime.ToolDefinition{tool}, 0, callbacks, validate, "")
 	if err != nil {
 		t.Fatalf("callValidatedToolUse: %v", err)
 	}

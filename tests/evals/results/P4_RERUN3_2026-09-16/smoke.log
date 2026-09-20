@@ -1,0 +1,17 @@
+2026-09-17T12:15:27-0400 using operator-supplied binary /tmp/p4b-splice (BIN_PREBUILT=1); not rebuilding
+2026-09-17T12:15:27-0400 building runner /tmp/warmcost-eval-paid from harness repo cee57c7
+p4preflight: stage=code_writer resolved_model=z-ai/glm-5.3-flash source=stage-models.json:code_writer splice_dir=/tmp/p4r-cfg/splice want=z-ai/glm-5.3-flash
+2026-09-17T12:15:28-0400 pre-registration: model=z-ai/glm-5.3-flash arms=cold tasks=1 repeats=1 margin=0.05 bootstrap=10000 timeout=10m
+2026-09-17T12:15:28-0400 attempt cap: arms=1 x tasks=1 x repeats=1 = 1 attempts; MAX_RETRIES=0
+2026-09-17T12:15:28-0400 revision=cee57c7942e76f7638189e08e3df6ffb21e9f244 sidecar_revision=cee57c7 taskset=clock-helper-write
+2026-09-17T12:15:28-0400 arm order: cold; interleaved per repeat by the runner
+2026-09-17T12:15:28-0400 retention: fresh sidecar_root=<ambient>
+2026-09-17T12:15:28-0400 run wc-p4b-smoke-20260917T161527Z-try0 start
+run wc-p4b-smoke-20260917T161527Z-try0: arms=1 tasks=0 attempts=1
+total-cost claim allowed: false (the retention protocol is fresh, so the warm arm has no retained experience and a total-cost claim is not available)
+artifacts: tests/evals/results/wc-p4b-smoke-20260917T161527Z-try0
+CLEAN
+2026-09-17T12:15:56-0400 run wc-p4b-smoke-20260917T161527Z-try0 clean; stopping retry loop
+2026-09-17T12:15:56-0400 final run: wc-p4b-smoke-20260917T161527Z-try0
+wrote tests/evals/results/PAID_RUN_wc-p4b-smoke-20260917T161527Z-try0.md
+2026-09-17T12:15:56-0400 complete

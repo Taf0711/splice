@@ -1,0 +1,25 @@
+# T3 blocker evidence
+
+cognition_nodes count per arm sidecar (0 = no capture):
+-n   Arm A: 
+0
+-n   Arm B: 
+0
+
+table counts Arm A:
+run_traces|3
+observations|2
+cognition_nodes|0
+
+discovery.go presence (1=present,0=absent):
+-n   e3e97b1: 
+       0
+-n   d9c52b3: 
+       0
+-n   2f4ccde: 
+       1
+
+read-attempt abort (Arm A r0):
+  warmcost: sequence 0 task clock-helper-write: warmcost: no capture set for run "wc-wc-ab-armA-20260915T023826Z-try0-clock-helper-write-warm-r0" at revision 35ed517903 in /private/var/folders/cf/37chkgfx22q5bb_ws8brslx00000gn/T/warmcost-seq-base-449728177/warm-seq00
+read-attempt abort (Arm B r0):
+  warmcost: sequence 0 task clock-helper-write: warmcost: no capture set for run "wc-wc-ab-armB-20260915T024301Z-try0-clock-helper-write-warm-r0" at revision aba6fb7d24 in /private/var/folders/cf/37chkgfx22q5bb_ws8brslx00000gn/T/warmcost-seq-base-2549132945/warm-seq00

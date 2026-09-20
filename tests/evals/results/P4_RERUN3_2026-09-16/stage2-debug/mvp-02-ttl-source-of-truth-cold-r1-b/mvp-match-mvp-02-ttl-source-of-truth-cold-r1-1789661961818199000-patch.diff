@@ -1,0 +1,27 @@
+diff --git a/internal/session/store.go b/internal/session/store.go
+index b1183f2..fbdc6d4 100644
+--- a/internal/session/store.go
++++ b/internal/session/store.go
+@@ -77,6 +77,22 @@ func (s *Store) Delete(id string) {
+ 	delete(s.sessions, id)
+ }
+ 
++// Sweep removes every expired session and returns how many it removed.
++// Expiry uses the same ttl the store was configured with.
++func (s *Store) Sweep() int {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	now := s.now()
++	removed := 0
++	for id, session := range s.sessions {
++		if now.Sub(session.LastSeen) > s.ttl {
++			delete(s.sessions, id)
++			removed++
++		}
++	}
++	return removed
++}
++
+ // Len reports how many sessions are held.
+ func (s *Store) Len() int {
+ 	s.mu.RLock()

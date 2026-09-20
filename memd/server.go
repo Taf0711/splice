@@ -75,6 +75,11 @@ func newServer(store *store.Store, socketPath string) *server {
 	mux.HandleFunc("/graph/contradict", s.handleGraphContradict)
 	mux.HandleFunc("/graph/search_semantic", s.handleGraphSearchSemantic)
 	mux.HandleFunc("/graph/compact", s.handleGraphCompact)
+	mux.HandleFunc("/graph/reanchor", s.handleGraphReanchor)
+	mux.HandleFunc("/graph/reanchor_ids", s.handleGraphReanchorIDs)
+	mux.HandleFunc("/graph/capture_set", s.handleGraphCaptureSet)
+	mux.HandleFunc("/graph/export_capture_set", s.handleGraphExportCaptureSet)
+	mux.HandleFunc("/graph/import_capture_set", s.handleGraphImportCaptureSet)
 	mux.HandleFunc("/graph/collect", s.handleGraphCollect)
 	s.httpServer = &http.Server{
 		Handler:           mux,
@@ -469,6 +474,7 @@ func (s *server) handleProjectReset(w http.ResponseWriter, r *http.Request) {
 		OK:           true,
 		Observations: counts.Observations,
 		Traces:       counts.Traces,
+		GraphNodes:   counts.GraphNodes,
 	})
 }
 

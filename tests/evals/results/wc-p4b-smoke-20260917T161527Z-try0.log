@@ -1,0 +1,3 @@
+run wc-p4b-smoke-20260917T161527Z-try0: arms=1 tasks=0 attempts=1
+total-cost claim allowed: false (the retention protocol is fresh, so the warm arm has no retained experience and a total-cost claim is not available)
+artifacts: tests/evals/results/wc-p4b-smoke-20260917T161527Z-try0

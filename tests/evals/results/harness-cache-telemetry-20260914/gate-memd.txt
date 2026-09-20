@@ -1,0 +1,6 @@
+# gate: cd memd && go test ./...
+command: cd memd && go test ./...
+# captured:
+ok  	github.com/Taf0711/splice/memd	0.760s
+ok  	github.com/Taf0711/splice/memd/store	1.833s
+# exit=0

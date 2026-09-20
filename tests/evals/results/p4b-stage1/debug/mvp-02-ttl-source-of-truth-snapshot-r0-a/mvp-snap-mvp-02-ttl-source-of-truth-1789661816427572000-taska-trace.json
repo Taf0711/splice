@@ -1,0 +1,314 @@
+{
+  "schema_version": "1",
+  "run_id": "mvp-snap-mvp-02-ttl-source-of-truth-1789661816427572000-taska",
+  "session_id": "mvp-snap-mvp-02-ttl-source-of-truth-1789661816427572000-taska",
+  "repo_root": "/private/var/folders/cf/37chkgfx22q5bb_ws8brslx00000gn/T/splice-mvp-snap-1300200948",
+  "intent": "The session lifetime is hard-coded as a duration literal where the store is constructed. Introduce an exported constant DefaultTTL in the session package as the one source of truth for the default session lifetime, value 30 minutes, and make the construction site read it. Behavior must not change and the existing te...",
+  "tier": "light",
+  "plan": {
+    "tier": "light",
+    "request_intent": "The session lifetime is hard-coded as a duration literal where the store is constructed. Introduce an exported constant DefaultTTL in the session package as the one source of truth for the default session lifetime, value 30 minutes, and make the construction site read it. Behavior must not change and the existing te...",
+    "stages": [
+      {
+        "name": "code_writer",
+        "budget": {
+          "input_max": 20000,
+          "output_max": 8192,
+          "skippable": false
+        }
+      },
+      {
+        "name": "static_analyzer",
+        "budget": {
+          "input_max": 0,
+          "output_max": 0,
+          "skippable": true
+        }
+      },
+      {
+        "name": "test_runner",
+        "budget": {
+          "input_max": 0,
+          "output_max": 0,
+          "skippable": true
+        }
+      },
+      {
+        "name": "acceptance_verifier",
+        "budget": {
+          "input_max": 0,
+          "output_max": 0,
+          "skippable": true
+        }
+      }
+    ],
+    "token_budget": {
+      "total_input_budget": 21000,
+      "total_output_budget": 9192,
+      "per_stage": {
+        "acceptance_verifier": {
+          "input_max": 0,
+          "output_max": 0,
+          "skippable": true
+        },
+        "code_writer": {
+          "input_max": 20000,
+          "output_max": 8192,
+          "skippable": false
+        },
+        "static_analyzer": {
+          "input_max": 0,
+          "output_max": 0,
+          "skippable": true
+        },
+        "test_runner": {
+          "input_max": 0,
+          "output_max": 0,
+          "skippable": true
+        }
+      },
+      "reserve": 1000,
+      "overflow_policy": "abort"
+    }
+  },
+  "iterations": [
+    {
+      "iteration": 3,
+      "timestamp": 1789661917.876825,
+      "tests_passing": 3,
+      "tests_failing": 0,
+      "tests_errored": 0,
+      "preexisting": {
+        "pass": 3,
+        "fail": 0,
+        "errored": 0
+      },
+      "authored": {
+        "pass": 0,
+        "fail": 0,
+        "errored": 0
+      },
+      "acceptance_facts_passing": 0,
+      "acceptance_facts_failing": 0,
+      "code_size_bytes": 2859,
+      "verification_incomplete": 0,
+      "state_hash": "557a7549ca3404408488d87377076aed81d297d522768326ff9f2b80e3725cf2",
+      "confidence": 0.98,
+      "tokens_consumed": 6403,
+      "tokens_generated": 357,
+      "files_changed": [
+        "cmd/server/main.go",
+        "internal/session/store.go"
+      ],
+      "lines_added": 6,
+      "lines_removed": 2
+    }
+  ],
+  "stages": [
+    {
+      "name": "code_writer",
+      "status": "failed",
+      "iteration": 1,
+      "provider": "openrouter",
+      "model": "z-ai/glm-5.3-flash",
+      "output_summary": "*stages.TypedOutputError: model \"z-ai/glm-5.3-flash\" failed typed output after 3 attempts: required tool \"submit_code+request_codebase_context\" with valid JSON arguments: normalize compact proposals: proposals[1]: proposal modify cmd/server/main.go: base_ref is required; select a model that supports tool calling through the configured API (OpenAI-compatible for local runtimes)",
+      "tokens_input": 17439,
+      "tokens_output": 965,
+      "tokens_cached": 11520,
+      "tokens_cache_write": 0,
+      "tokens_reasoning": 13,
+      "web_search_requests": 0,
+      "cost_usd": 0.0017159500000000002,
+      "latency_ms": 38460,
+      "input_meta": {
+        "context_items": 6,
+        "context_chars": 182,
+        "memory_items": 0,
+        "memory_chars": 0,
+        "exemplar_items": 0,
+        "edge_payload_bytes": 593,
+        "context_failures": 0,
+        "memory_lookup_mode": "search",
+        "scope_expansions": 2,
+        "expansions_performed": 0
+      },
+      "cache": {
+        "hit": false,
+        "similarity": 0
+      },
+      "prompt_hash": "25f5a5609d1b3217"
+    },
+    {
+      "name": "code_writer",
+      "status": "failed",
+      "iteration": 2,
+      "provider": "openrouter",
+      "model": "z-ai/glm-5.3-flash",
+      "output_summary": "*stages.TypedOutputError: model \"z-ai/glm-5.3-flash\" failed typed output after 3 attempts: required tool \"submit_code+request_codebase_context\" with valid JSON arguments: normalize compact proposals: proposals[0]: proposal modify internal/session/store.go: base_ref is required; select a model that supports tool calling through the configured API (OpenAI-compatible for local runtimes)",
+      "tokens_input": 18240,
+      "tokens_output": 912,
+      "tokens_cached": 15360,
+      "tokens_cache_write": 0,
+      "tokens_reasoning": 0,
+      "web_search_requests": 0,
+      "cost_usd": 0.0013488,
+      "latency_ms": 39942,
+      "input_meta": {
+        "context_items": 6,
+        "context_chars": 182,
+        "memory_items": 0,
+        "memory_chars": 0,
+        "exemplar_items": 0,
+        "edge_payload_bytes": 1824,
+        "context_failures": 0,
+        "memory_lookup_mode": "search",
+        "scope_expansions": 2,
+        "expansions_performed": 0
+      },
+      "cache": {
+        "hit": false,
+        "similarity": 0
+      },
+      "prompt_hash": "25f5a5609d1b3217"
+    },
+    {
+      "name": "code_writer",
+      "status": "completed",
+      "iteration": 3,
+      "provider": "openrouter",
+      "model": "z-ai/glm-5.3-flash",
+      "confidence": 0.98,
+      "output_summary": "Introduce exported DefaultTTL (30 minutes) in the session package and use it at the store construction site in cmd/server/main.go, removing the hard-coded literal and the now-unused time import.",
+      "tokens_input": 6046,
+      "tokens_output": 357,
+      "tokens_cached": 5760,
+      "tokens_cache_write": 0,
+      "tokens_reasoning": 0,
+      "web_search_requests": 0,
+      "cost_usd": 0.0003942,
+      "latency_ms": 10033,
+      "input_meta": {
+        "context_items": 6,
+        "context_chars": 182,
+        "memory_items": 0,
+        "memory_chars": 0,
+        "exemplar_items": 0,
+        "edge_payload_bytes": 1838,
+        "context_failures": 0,
+        "memory_lookup_mode": "search",
+        "scope_expansions": 2,
+        "expansions_performed": 0
+      },
+      "cache": {
+        "hit": false,
+        "similarity": 0
+      },
+      "prompt_hash": "25f5a5609d1b3217"
+    },
+    {
+      "name": "static_analyzer",
+      "status": "completed",
+      "iteration": 3,
+      "confidence": 1,
+      "output_summary": "All applicable verification checks passed.",
+      "tokens_input": 0,
+      "tokens_output": 0,
+      "tokens_cached": 0,
+      "tokens_cache_write": 0,
+      "tokens_reasoning": 0,
+      "web_search_requests": 0,
+      "cost_usd": 0,
+      "latency_ms": 151,
+      "input_meta": {
+        "context_items": 0,
+        "context_chars": 0,
+        "memory_items": 0,
+        "memory_chars": 0,
+        "exemplar_items": 0,
+        "edge_payload_bytes": 2158,
+        "context_failures": 0,
+        "expansions_performed": 0
+      },
+      "cache": {
+        "hit": false,
+        "similarity": 0
+      }
+    },
+    {
+      "name": "test_runner",
+      "status": "completed",
+      "iteration": 3,
+      "confidence": 1,
+      "output_summary": "Test command passed.",
+      "tokens_input": 0,
+      "tokens_output": 0,
+      "tokens_cached": 0,
+      "tokens_cache_write": 0,
+      "tokens_reasoning": 0,
+      "web_search_requests": 0,
+      "cost_usd": 0,
+      "latency_ms": 12455,
+      "input_meta": {
+        "context_items": 0,
+        "context_chars": 0,
+        "memory_items": 0,
+        "memory_chars": 0,
+        "exemplar_items": 0,
+        "edge_payload_bytes": 2248,
+        "context_failures": 0,
+        "expansions_performed": 0
+      },
+      "cache": {
+        "hit": false,
+        "similarity": 0
+      }
+    },
+    {
+      "name": "acceptance_verifier",
+      "status": "completed",
+      "iteration": 3,
+      "confidence": 1,
+      "output_summary": "Acceptance verification: 0 passed, 0 failed, 0 errored, 0 skipped.",
+      "tokens_input": 0,
+      "tokens_output": 0,
+      "tokens_cached": 0,
+      "tokens_cache_write": 0,
+      "tokens_reasoning": 0,
+      "web_search_requests": 0,
+      "cost_usd": 0,
+      "latency_ms": 0,
+      "input_meta": {
+        "context_items": 0,
+        "context_chars": 0,
+        "memory_items": 0,
+        "memory_chars": 0,
+        "exemplar_items": 0,
+        "edge_payload_bytes": 2277,
+        "context_failures": 0,
+        "expansions_performed": 0
+      },
+      "cache": {
+        "hit": false,
+        "similarity": 0
+      }
+    }
+  ],
+  "outcome": {
+    "status": "completed",
+    "changed_files": [
+      "cmd/server/main.go",
+      "internal/session/store.go"
+    ]
+  },
+  "memory": {
+    "status": "active",
+    "items": 0,
+    "chars": 0
+  },
+  "tool_fingerprint": "78c0df80ecf31888",
+  "topology_hash": "60e9f0ff7c9f1d12",
+  "budget_provenance": {
+    "code_writer": "budget not calibrated: 0/20 for this key"
+  },
+  "events_status": "complete"
+}

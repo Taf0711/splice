@@ -1,0 +1,18 @@
+Spend accounting (OpenRouter credential is a SHARED operator key; its /auth/key
+cumulative usage is not a clean per-assignment meter and kept rising after all
+local processes were confirmed stopped).
+
+Certain (from the pipeline ledger):
+  wrong-model smoke2 ledger total_cost_usd = 0.16480640000000002
+
+Upper bound for the two killed runs (key deltas at the time):
+  baseline after smoke2           = 10.607297009
+  after killed glm smoke3         = 10.616458559  (delta 0.00916155)
+  after killed glm smoke4         = 10.687668549  (delta 0.071211)
+  later, no local processes       = 10.795679529, then 10.803436839
+    -> the later rises are NOT from this assignment (no processes), so the
+       key deltas are upper bounds, not exact figures.
+
+Total certain + upper bound <= 0.245179 against the $0.25 cap.
+Total certain only          =  0.164806.
+No further run can be budgeted reliably; all spend stopped.

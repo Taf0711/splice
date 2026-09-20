@@ -54,7 +54,7 @@ func TestPrepareStageInputTracesPostCompactionDeliveredMemory(t *testing.T) {
 		PlanTier:      plan.Tier,
 		RequestIntent: "intent",
 	}
-	prepared, err := prepareStageInput(context.Background(), stageInputPreparation{
+	prepared, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 		Input:     input,
 		Stage:     &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
 		Budget:    stageBudgetByName(plan, "code_writer"),
@@ -69,7 +69,7 @@ func TestPrepareStageInputTracesPostCompactionDeliveredMemory(t *testing.T) {
 		t.Fatalf("prepareStageInput: %v", err)
 	}
 
-	meta := tr.stages[stageKey{"code_writer", 1}]
+	meta := tr.stages[stageKey{"code_writer", 1, 0}]
 	delivered := 0
 	if prepared.MemoryBundle != nil {
 		delivered = len(prepared.MemoryBundle.Observations) + len(prepared.MemoryBundle.Exemplars)
@@ -98,7 +98,7 @@ func TestPrepareStageInputAdmissionBeforeCompaction(t *testing.T) {
 	store := &stubStore{bundle: schemas.MemoryBundle{RequestingAgent: "code_writer", Observations: []schemas.MemoryObservation{due, invalid}}}
 
 	plan := schemas.ExecutionPlan{Tier: schemas.TierLight, RequestIntent: "i", Stages: []schemas.ExecutionStage{{Name: "code_writer"}}}
-	prepared, err := prepareStageInput(context.Background(), stageInputPreparation{
+	prepared, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 		Input:     schemas.HarnessStageInput{RunID: "r", StageName: "code_writer", PlanTier: plan.Tier, RequestIntent: "i"},
 		Stage:     &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
 		Budget:    stageBudgetByName(plan, "code_writer"),
@@ -192,8 +192,8 @@ func (p *memoryScriptedProvider) StreamCompletion(ctx context.Context, request z
 		}
 	}
 	core := map[string]any{
-		"files": []schemas.FileChange{}, "language": "go",
-		"intent": "no changes", "confidence": 0.9,
+		"files":    []schemas.FileChange{{Path: "main.go", ChangeType: "create", Content: "package main\n"}},
+		"language": "go", "intent": "no changes", "confidence": 0.9,
 	}
 	if p.claims != nil {
 		core["memory_disposition"] = p.claims
@@ -247,7 +247,7 @@ func TestRepairReentryRetrievesAndTracesEachMemoryInvocation(t *testing.T) {
 
 	records, _, completed, err := runPass(context.Background(), "repair-memory", 1, plan,
 		stageRegistry{"code_writer": stages.CodeWriter{}, "test_runner": testRunner},
-		provider, PipelineConfigFromAgentOptions(agent.Options{}), workDir, fakeRunner, time.Time{}, nil, store, tr)
+		provider, PipelineConfigFromAgentOptions(agent.Options{}), workDir, fakeRunner, time.Time{}, nil, store, tr, NewStageExecutionBudget(0))
 	if err != nil || !completed {
 		t.Fatalf("completed=%v err=%v records=%+v", completed, err, records)
 	}
@@ -265,11 +265,11 @@ func TestRepairReentryRetrievesAndTracesEachMemoryInvocation(t *testing.T) {
 	// message pair, no conversation carry-over), so the fact delivered to
 	// the initial invocation is NOT automatically present in the repair
 	// request. The run-local replay suppression is skipped for repair
-	// re-entry: still-relevant facts are re-delivered, bounded by the same
-	// admission and compaction limits. Both invocations' reviews land in the
-	// record.
+	// re-entry: still-relevant facts are re-delivered (bounded by the same
+	// admission and compaction limits), and mergeRepairRecord appends the
+	// repair invocation's review to the record.
 	if len(writer.MemoryReviews) != 2 {
-		t.Fatalf("writer reviews = %+v, want initial plus repair re-entry review", writer.MemoryReviews)
+		t.Fatalf("writer reviews = %+v, want initial + repair re-entry reviews", writer.MemoryReviews)
 	}
 	for _, review := range writer.MemoryReviews {
 		if len(review.Items) != 1 || review.Items[0].MemoryID != "observation:8" {
@@ -279,10 +279,13 @@ func TestRepairReentryRetrievesAndTracesEachMemoryInvocation(t *testing.T) {
 	if got := tr.replaySuppressedCount(); got != 0 {
 		t.Fatalf("replay suppressed count = %d, want 0 (repair re-entry skips suppression)", got)
 	}
-	// Retrieval stayed real (2 searches) and both fresh requests delivered
-	// the fact: the delivered-memory counters count MODEL-VISIBLE items
-	// across the initial invocation and the repair re-entry.
-	meta := tr.stages[stageKey{"code_writer", 1}]
+	// Retrieval stayed real (2 searches) but delivery happened once: the
+	// delivered-memory counters count MODEL-VISIBLE items (one invocation's
+	// worth), not retrievals.
+	meta := tr.stages[stageKey{"code_writer", 1, 0}]
+	// Both invocations (initial + repair re-entry) delivered the fact: the
+	// repair request is fresh, so the re-delivery is model-visible and the
+	// delivered-memory counters count both.
 	wantChars := 2 * (len(observation.Title) + len(observation.Content))
 	if meta.MemoryItems != 2 || meta.MemoryChars != wantChars || tr.memoryItems != 2 || tr.memoryChars != wantChars {
 		t.Fatalf("memory counters: meta=%+v total_items=%d total_chars=%d, want two delivered invocations and %d chars", meta, tr.memoryItems, tr.memoryChars, wantChars)
@@ -313,7 +316,7 @@ func TestWarmRunTracesNormalizedMemoryReview(t *testing.T) {
 
 	records, outputs, completed, err := runPass(context.Background(), "warm-review", 1, plan,
 		stageRegistry{"code_writer": stages.CodeWriter{}},
-		provider, PipelineConfigFromAgentOptions(agent.Options{}), workDir, fakeRunner, time.Time{}, nil, store, nil)
+		provider, PipelineConfigFromAgentOptions(agent.Options{}), workDir, fakeRunner, time.Time{}, nil, store, nil, NewStageExecutionBudget(0))
 	if err != nil || !completed || len(records) != 1 || records[0].Status != schemas.StageCompleted {
 		t.Fatalf("completed=%v records=%#v err=%v", completed, records, err)
 	}
@@ -365,7 +368,7 @@ func TestWarmRunWithoutDispositionsStillSucceeds(t *testing.T) {
 
 	records, _, completed, err := runPass(context.Background(), "warm-silent", 1, plan,
 		stageRegistry{"code_writer": stages.CodeWriter{}},
-		provider, PipelineConfigFromAgentOptions(agent.Options{}), workDir, fakeRunner, time.Time{}, nil, store, nil)
+		provider, PipelineConfigFromAgentOptions(agent.Options{}), workDir, fakeRunner, time.Time{}, nil, store, nil, NewStageExecutionBudget(0))
 	if err != nil || !completed || records[0].Status != schemas.StageCompleted {
 		t.Fatalf("completed=%v records=%#v err=%v", completed, records, err)
 	}

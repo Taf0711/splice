@@ -1,0 +1,250 @@
+{
+  "schema_version": "1",
+  "run_id": "mvp-match-fam-05-handler-error-mapping-manual-r1-1789754255975541000",
+  "session_id": "mvp-match-fam-05-handler-error-mapping-manual-r1-1789754255975541000",
+  "repo_root": "/private/var/folders/cf/37chkgfx22q5bb_ws8brslx00000gn/T/splice-mvp-manual-1643387109",
+  "intent": "# Target: fam-05-handler-error-mapping New admin endpoints must map their store errors using the SAME table as the /session handler. Refactor mapStoreError in main.go if needed and use it from any new admin handlers you add. The mapping table must stay the single source of truth for store-error-to-status translation.",
+  "tier": "light",
+  "plan": {
+    "tier": "light",
+    "request_intent": "# Target: fam-05-handler-error-mapping New admin endpoints must map their store errors using the SAME table as the /session handler. Refactor mapStoreError in main.go if needed and use it from any new admin handlers you add. The mapping table must stay the single source of truth for store-error-to-status translation.",
+    "stages": [
+      {
+        "name": "code_writer",
+        "budget": {
+          "input_max": 20000,
+          "output_max": 8192,
+          "skippable": false
+        }
+      },
+      {
+        "name": "static_analyzer",
+        "budget": {
+          "input_max": 0,
+          "output_max": 0,
+          "skippable": true
+        }
+      },
+      {
+        "name": "test_runner",
+        "budget": {
+          "input_max": 0,
+          "output_max": 0,
+          "skippable": true
+        }
+      },
+      {
+        "name": "acceptance_verifier",
+        "budget": {
+          "input_max": 0,
+          "output_max": 0,
+          "skippable": true
+        }
+      }
+    ],
+    "token_budget": {
+      "total_input_budget": 21000,
+      "total_output_budget": 9192,
+      "per_stage": {
+        "acceptance_verifier": {
+          "input_max": 0,
+          "output_max": 0,
+          "skippable": true
+        },
+        "code_writer": {
+          "input_max": 20000,
+          "output_max": 8192,
+          "skippable": false
+        },
+        "static_analyzer": {
+          "input_max": 0,
+          "output_max": 0,
+          "skippable": true
+        },
+        "test_runner": {
+          "input_max": 0,
+          "output_max": 0,
+          "skippable": true
+        }
+      },
+      "reserve": 1000,
+      "overflow_policy": "abort"
+    }
+  },
+  "iterations": [
+    {
+      "iteration": 1,
+      "timestamp": 1789754266.477577,
+      "tests_passing": 2,
+      "tests_failing": 0,
+      "tests_errored": 0,
+      "preexisting": {
+        "pass": 2,
+        "fail": 0,
+        "errored": 0
+      },
+      "authored": {
+        "pass": 0,
+        "fail": 0,
+        "errored": 0
+      },
+      "acceptance_facts_passing": 0,
+      "acceptance_facts_failing": 0,
+      "code_size_bytes": 3279,
+      "verification_incomplete": 0,
+      "state_hash": "91e48cb8b18acae6d1ebc97aa1ee6bffb356e952e8ce28522f5bb0ac5315a53a",
+      "confidence": 0.85,
+      "tokens_consumed": 11377,
+      "tokens_generated": 876,
+      "files_changed": [
+        "admin.go",
+        "main.go"
+      ],
+      "lines_added": 46,
+      "lines_removed": 0
+    }
+  ],
+  "stages": [
+    {
+      "name": "code_writer",
+      "status": "completed",
+      "iteration": 1,
+      "provider": "openrouter",
+      "model": "deepseek/deepseek-v4.1-flash",
+      "confidence": 0.85,
+      "output_summary": "Add admin endpoints that translate store errors via the existing shared mapStoreError table in main.go, keeping it the single source of truth for store-error-to-status mapping.",
+      "tokens_input": 10501,
+      "tokens_output": 876,
+      "tokens_cached": 4352,
+      "tokens_cache_write": 0,
+      "tokens_reasoning": 0,
+      "web_search_requests": 0,
+      "cost_usd": 0,
+      "latency_ms": 4123,
+      "input_meta": {
+        "context_items": 4,
+        "context_chars": 145,
+        "memory_items": 0,
+        "memory_chars": 0,
+        "exemplar_items": 0,
+        "edge_payload_bytes": 598,
+        "context_failures": 0,
+        "memory_lookup_mode": "search",
+        "discovery_questions": 1,
+        "discovery_unresolved": 1,
+        "scope_expansions": 2,
+        "expansions_performed": 0
+      },
+      "cache": {
+        "hit": false,
+        "similarity": 0
+      },
+      "prompt_hash": "25f5a5609d1b3217"
+    },
+    {
+      "name": "static_analyzer",
+      "status": "completed",
+      "iteration": 1,
+      "confidence": 1,
+      "output_summary": "All applicable verification checks passed.",
+      "tokens_input": 0,
+      "tokens_output": 0,
+      "tokens_cached": 0,
+      "tokens_cache_write": 0,
+      "tokens_reasoning": 0,
+      "web_search_requests": 0,
+      "cost_usd": 0,
+      "latency_ms": 136,
+      "input_meta": {
+        "context_items": 0,
+        "context_chars": 0,
+        "memory_items": 0,
+        "memory_chars": 0,
+        "exemplar_items": 0,
+        "edge_payload_bytes": 872,
+        "context_failures": 0,
+        "expansions_performed": 0
+      },
+      "cache": {
+        "hit": false,
+        "similarity": 0
+      }
+    },
+    {
+      "name": "test_runner",
+      "status": "completed",
+      "iteration": 1,
+      "confidence": 1,
+      "output_summary": "Test command passed.",
+      "tokens_input": 0,
+      "tokens_output": 0,
+      "tokens_cached": 0,
+      "tokens_cache_write": 0,
+      "tokens_reasoning": 0,
+      "web_search_requests": 0,
+      "cost_usd": 0,
+      "latency_ms": 5983,
+      "input_meta": {
+        "context_items": 0,
+        "context_chars": 0,
+        "memory_items": 0,
+        "memory_chars": 0,
+        "exemplar_items": 0,
+        "edge_payload_bytes": 962,
+        "context_failures": 0,
+        "expansions_performed": 0
+      },
+      "cache": {
+        "hit": false,
+        "similarity": 0
+      }
+    },
+    {
+      "name": "acceptance_verifier",
+      "status": "completed",
+      "iteration": 1,
+      "confidence": 1,
+      "output_summary": "Acceptance verification: 0 passed, 0 failed, 0 errored, 0 skipped.",
+      "tokens_input": 0,
+      "tokens_output": 0,
+      "tokens_cached": 0,
+      "tokens_cache_write": 0,
+      "tokens_reasoning": 0,
+      "web_search_requests": 0,
+      "cost_usd": 0,
+      "latency_ms": 0,
+      "input_meta": {
+        "context_items": 0,
+        "context_chars": 0,
+        "memory_items": 0,
+        "memory_chars": 0,
+        "exemplar_items": 0,
+        "edge_payload_bytes": 991,
+        "context_failures": 0,
+        "expansions_performed": 0
+      },
+      "cache": {
+        "hit": false,
+        "similarity": 0
+      }
+    }
+  ],
+  "outcome": {
+    "status": "completed",
+    "changed_files": [
+      "admin.go",
+      "main.go"
+    ]
+  },
+  "memory": {
+    "status": "active",
+    "items": 0,
+    "chars": 0
+  },
+  "tool_fingerprint": "78c0df80ecf31888",
+  "topology_hash": "60e9f0ff7c9f1d12",
+  "budget_provenance": {
+    "code_writer": "budget not calibrated: 0/20 for this key"
+  },
+  "events_status": "complete"
+}

@@ -1,0 +1,102 @@
+# gate: go test ./...
+command: go test ./...
+# captured from the tmux run; full output:
+ok  	github.com/Taf0711/splice/benchmarks	(cached)
+ok  	github.com/Taf0711/splice/benchmarks/report	(cached)
+ok  	github.com/Taf0711/splice/benchmarks/swebench_pro	(cached)
+?   	github.com/Taf0711/splice/benchmarks/swebench_pro/cmd/swebench-runner	[no test files]
+?   	github.com/Taf0711/splice/cmd/splice	[no test files]
+ok  	github.com/Taf0711/splice/cmd/splice-perf-bench	(cached)
+?   	github.com/Taf0711/splice/cmd/splice-pi-bridge	[no test files]
+ok  	github.com/Taf0711/splice/cmd/splice-release	(cached)
+?   	github.com/Taf0711/splice/cmd/splice-seccomp	[no test files]
+?   	github.com/Taf0711/splice/cmd/splice-windows-command-runner	[no test files]
+?   	github.com/Taf0711/splice/cmd/splice-windows-sandbox-setup	[no test files]
+ok  	github.com/Taf0711/splice/internal/acp	(cached)
+ok  	github.com/Taf0711/splice/internal/agent	(cached)
+ok  	github.com/Taf0711/splice/internal/agenteval	44.097s
+ok  	github.com/Taf0711/splice/internal/agentinit	(cached)
+ok  	github.com/Taf0711/splice/internal/background	(cached)
+ok  	github.com/Taf0711/splice/internal/browser	(cached)
+ok  	github.com/Taf0711/splice/internal/cli	283.922s
+ok  	github.com/Taf0711/splice/internal/config	(cached)
+ok  	github.com/Taf0711/splice/internal/contextreport	(cached)
+ok  	github.com/Taf0711/splice/internal/credstore	(cached)
+ok  	github.com/Taf0711/splice/internal/cron	(cached)
+ok  	github.com/Taf0711/splice/internal/daemon	(cached)
+ok  	github.com/Taf0711/splice/internal/daemon/remote	(cached)
+ok  	github.com/Taf0711/splice/internal/doctor	(cached)
+ok  	github.com/Taf0711/splice/internal/errhint	(cached)
+ok  	github.com/Taf0711/splice/internal/eval	(cached)
+ok  	github.com/Taf0711/splice/internal/eval/v2	(cached)
+ok  	github.com/Taf0711/splice/internal/harness	(cached)
+ok  	github.com/Taf0711/splice/internal/harness/pi	(cached)
+ok  	github.com/Taf0711/splice/internal/hooks	(cached)
+ok  	github.com/Taf0711/splice/internal/imageinput	(cached)
+ok  	github.com/Taf0711/splice/internal/installtest	(cached)
+ok  	github.com/Taf0711/splice/internal/keyring	(cached)
+ok  	github.com/Taf0711/splice/internal/localcontrol	(cached)
+ok  	github.com/Taf0711/splice/internal/lsp	(cached)
+ok  	github.com/Taf0711/splice/internal/mcp	(cached)
+ok  	github.com/Taf0711/splice/internal/memd	(cached)
+ok  	github.com/Taf0711/splice/internal/minify	(cached)
+ok  	github.com/Taf0711/splice/internal/modelregistry	(cached)
+ok  	github.com/Taf0711/splice/internal/notify	(cached)
+ok  	github.com/Taf0711/splice/internal/npmwrapper	(cached)
+ok  	github.com/Taf0711/splice/internal/oauth	(cached)
+ok  	github.com/Taf0711/splice/internal/observability	(cached)
+ok  	github.com/Taf0711/splice/internal/perfbench	(cached)
+ok  	github.com/Taf0711/splice/internal/plugins	(cached)
+ok  	github.com/Taf0711/splice/internal/presentation	(cached)
+ok  	github.com/Taf0711/splice/internal/providercatalog	(cached)
+ok  	github.com/Taf0711/splice/internal/providerhealth	(cached)
+ok  	github.com/Taf0711/splice/internal/providermodelcatalog	(cached)
+ok  	github.com/Taf0711/splice/internal/providermodeldiscovery	(cached)
+ok  	github.com/Taf0711/splice/internal/provideroauth	(cached)
+ok  	github.com/Taf0711/splice/internal/provideronboarding	(cached)
+ok  	github.com/Taf0711/splice/internal/providers	(cached)
+ok  	github.com/Taf0711/splice/internal/providers/anthropic	(cached)
+ok  	github.com/Taf0711/splice/internal/providers/gemini	(cached)
+ok  	github.com/Taf0711/splice/internal/providers/openai	(cached)
+ok  	github.com/Taf0711/splice/internal/providers/providerio	(cached)
+ok  	github.com/Taf0711/splice/internal/redaction	(cached)
+ok  	github.com/Taf0711/splice/internal/release	(cached)
+ok  	github.com/Taf0711/splice/internal/repoinfo	(cached)
+ok  	github.com/Taf0711/splice/internal/repomap	(cached)
+ok  	github.com/Taf0711/splice/internal/sandbox	3.993s
+ok  	github.com/Taf0711/splice/internal/sandbox/procrun	(cached)
+ok  	github.com/Taf0711/splice/internal/search	(cached)
+ok  	github.com/Taf0711/splice/internal/secrets	(cached)
+ok  	github.com/Taf0711/splice/internal/securefile	(cached)
+ok  	github.com/Taf0711/splice/internal/selfverify	(cached)
+ok  	github.com/Taf0711/splice/internal/sessions	(cached)
+ok  	github.com/Taf0711/splice/internal/skills	(cached)
+ok  	github.com/Taf0711/splice/internal/specialist	(cached)
+ok  	github.com/Taf0711/splice/internal/specmode	(cached)
+ok  	github.com/Taf0711/splice/internal/splice	68.535s
+ok  	github.com/Taf0711/splice/internal/splice/cognition	98.954s
+ok  	github.com/Taf0711/splice/internal/splice/dtools	6.130s
+ok  	github.com/Taf0711/splice/internal/splice/learn	(cached)
+ok  	github.com/Taf0711/splice/internal/splice/memoryrank	(cached)
+ok  	github.com/Taf0711/splice/internal/splice/memoryreason	(cached)
+ok  	github.com/Taf0711/splice/internal/splice/presentrun	(cached)
+ok  	github.com/Taf0711/splice/internal/splice/schemas	(cached)
+ok  	github.com/Taf0711/splice/internal/splice/stages	34.772s
+ok  	github.com/Taf0711/splice/internal/streamjson	(cached)
+ok  	github.com/Taf0711/splice/internal/swarm	3.141s
+ok  	github.com/Taf0711/splice/internal/testrunner	(cached)
+ok  	github.com/Taf0711/splice/internal/tools	26.727s
+ok  	github.com/Taf0711/splice/internal/tui	42.609s
+ok  	github.com/Taf0711/splice/internal/update	0.738s
+ok  	github.com/Taf0711/splice/internal/usage	0.613s
+ok  	github.com/Taf0711/splice/internal/usercommands	0.403s
+ok  	github.com/Taf0711/splice/internal/verify	0.435s
+ok  	github.com/Taf0711/splice/internal/workspaceindex	0.433s
+ok  	github.com/Taf0711/splice/internal/workspaceseed	0.400s
+ok  	github.com/Taf0711/splice/internal/worktrees	46.003s
+ok  	github.com/Taf0711/splice/internal/zerocommands	0.859s
+ok  	github.com/Taf0711/splice/internal/zerogit	5.587s
+ok  	github.com/Taf0711/splice/internal/zeroruntime	0.427s
+ok  	github.com/Taf0711/splice/tests/evals/warmcost	(cached)
+?   	github.com/Taf0711/splice/tests/evals/warmcost/cmd/warmcost-eval	[no test files]
+# exit=0

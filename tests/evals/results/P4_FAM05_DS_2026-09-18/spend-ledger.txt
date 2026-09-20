@@ -1,0 +1,5 @@
+A/snapshot cond=None executed=True success=True tokens=28978 billed_usd=0.003659776 source=ledger latency_ms=215769 failure=None reads=5 tools=24
+B/cold cond=cold executed=True success=False tokens=23320 billed_usd=0.002301368 source=ledger latency_ms=179295 failure=verifier_rejected reads=5 tools=18
+B/warm cond=automatic executed=True success=False tokens=25399 billed_usd=0.003461018 source=ledger latency_ms=135996 failure=verifier_rejected reads=7 tools=22
+B/manual cond=manual executed=True success=False tokens=18076 billed_usd=0 source=ledger latency_ms=37836 failure=verifier_rejected reads=3 tools=13
+ledger-authoritative total (all rows) = 0.009422162

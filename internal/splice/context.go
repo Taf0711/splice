@@ -23,6 +23,12 @@ func FulfillContextRequest(ctx context.Context, request schemas.ContextRequest, 
 	if err := request.Validate(); err != nil {
 		return schemas.ContextBundle{}, err
 	}
+	// B1: the aggregate bounds ride every fulfillment. Per-query Validate
+	// is necessary but not sufficient; a request of legal queries can
+	// still flood the bundle in aggregate.
+	if err := request.AggregateValidate(); err != nil {
+		return schemas.ContextBundle{}, err
+	}
 	items := make([]schemas.ContextItem, 0, len(request.Queries))
 	for _, query := range request.Queries {
 		item, err := fulfillQuery(ctx, query, runner)
@@ -47,7 +53,7 @@ func fulfillQuery(ctx context.Context, query schemas.ContextQuery, runner ToolRu
 	case schemas.ContextFindSymbol:
 		return fulfillFindSymbol(ctx, query, runner)
 	case schemas.ContextGetSymbol:
-		return fulfillGetSymbol(query)
+		return fulfillGetSymbol(ctx, query, runner)
 	default:
 		return contextErrorItem(query, fmt.Sprintf("unknown context query type %q", query.QueryType)), nil
 	}
@@ -96,6 +102,14 @@ func fulfillReadFile(ctx context.Context, query schemas.ContextQuery, runner Too
 	if query.Path == nil || *query.Path == "" {
 		return schemas.ContextItem{}, fmt.Errorf("read_file requires path")
 	}
+	// D1/C1: acquire through the guarded raw seam so the item carries the
+	// file's content digest as its version. The model-visible text stays
+	// the same read_file output as before; the version identity lets the
+	// proposal base registry pin what the model received (base_ref
+	// resolution) and the C2 expected-base recheck verify it at write
+	// time. A seam failure degrades gracefully: the item is still
+	// delivered without a version, and no base is recorded for it.
+	raw, rawErr := ToolRunnerSourceReader{Inner: runner}.ReadSource(ctx, *query.Path)
 	res, err := runner.RunTool(ctx, readToolName, map[string]any{"path": *query.Path})
 	if err != nil {
 		return schemas.ContextItem{}, err
@@ -104,12 +118,46 @@ func fulfillReadFile(ctx context.Context, query schemas.ContextQuery, runner Too
 		return contextErrorItem(query, res.Output), nil
 	}
 	text, truncated := truncateRunes(res.Output, query.MaxChars)
+	payload := map[string]any{
+		"text":    text,
+		"path":    *query.Path,
+		"version": raw.SHA256,
+		"start":   1,
+		"end":     rawLineCount(raw.Raw),
+		// Host-side only: the prompt composer serializes only "text";
+		// "raw" feeds the proposal base registry's content digest and the
+		// numbered-view hydration path. Never model-visible.
+		"raw": string(raw.Raw),
+	}
+	if rawErr != nil {
+		// No raw seam: keep the display text, drop the version identity
+		// (an unversioned item cannot seed a proposal base).
+		delete(payload, "version")
+		delete(payload, "start")
+		delete(payload, "end")
+	}
+	_ = truncated
 	return schemas.ContextItem{
 		Query:     query,
 		Summary:   fmt.Sprintf("Read %s.", *query.Path),
-		Payload:   map[string]any{"text": text},
+		Payload:   payload,
 		Truncated: truncated || res.Truncated,
 	}, nil
+}
+
+// rawLineCount counts lines in raw bytes (1-based inclusive end line for
+// whole-file views).
+func rawLineCount(raw []byte) int {
+	if len(raw) == 0 {
+		return 0
+	}
+	count := 1
+	for _, b := range raw {
+		if b == '\n' {
+			count++
+		}
+	}
+	return count
 }
 
 func fulfillOutline(ctx context.Context, query schemas.ContextQuery, runner ToolRunner) (schemas.ContextItem, error) {
@@ -195,9 +243,53 @@ func fulfillFindSymbol(ctx context.Context, query schemas.ContextQuery, runner T
 	}, nil
 }
 
-func fulfillGetSymbol(query schemas.ContextQuery) (schemas.ContextItem, error) {
-	message := "get_symbol requires AST inspection, deferred for v1; use find_symbol + read_file"
-	return contextErrorItem(query, message), nil
+// fulfillGetSymbol resolves one symbol deterministically over the guarded
+// source seam (B2): go/parser over raw bytes acquired through the tool
+// boundary, path-qualified queries preferred. Ambiguity, parse failure,
+// and missing declarations return typed unresolved evidence with a
+// bounded fallback hint instead of picking an arbitrary same-named
+// symbol. The stub deferral error is gone.
+func fulfillGetSymbol(ctx context.Context, query schemas.ContextQuery, runner ToolRunner) (schemas.ContextItem, error) {
+	if query.Symbol == nil || *query.Symbol == "" {
+		return schemas.ContextItem{}, fmt.Errorf("get_symbol requires symbol")
+	}
+	path := ""
+	if query.Path != nil {
+		path = *query.Path
+	}
+	reader := ToolRunnerSourceReader{Inner: runner}
+	cache := newSourceCache("fulfill")
+	result, err := extractGoSymbol(ctx, cache, reader, *query.Symbol, path)
+	if err != nil {
+		return schemas.ContextItem{}, err
+	}
+	if result.Resolution.Unresolved != "" {
+		// Typed unresolved evidence reaches the model as an error item:
+		// visible, actionable (re-query with a path), never a silent
+		// arbitrary pick.
+		return contextErrorItem(query, result.Resolution.Unresolved), nil
+	}
+	res := result.Resolution
+	summary := fmt.Sprintf("Resolved %s %s at %s:%d-%d.", res.Kind, *query.Symbol, res.Path, res.StartLine, res.EndLine)
+	if res.Receiver != "" {
+		summary = fmt.Sprintf("Resolved method %s on %s at %s:%d-%d.", *query.Symbol, res.Receiver, res.Path, res.StartLine, res.EndLine)
+	}
+	importCtx := ""
+	if len(res.Imports) > 0 {
+		importCtx = fmt.Sprintf("\nimports: %s", strings.Join(res.Imports, ", "))
+	}
+	return schemas.ContextItem{
+		Query:   query,
+		Summary: summary,
+		Payload: map[string]any{
+			"text":    res.Decl + importCtx,
+			"path":    res.Path,
+			"version": res.Version,
+			"start":   res.StartLine,
+			"end":     res.EndLine,
+			"kind":    res.Kind,
+		},
+	}, nil
 }
 
 func countFileLines(text string) int {

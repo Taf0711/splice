@@ -1,0 +1,14 @@
+p4preflight: stage=code_writer resolved_model=z-ai/glm-5.3-flash source=stage-models.json:code_writer splice_dir=/tmp/p4r-cfg/splice want=z-ai/glm-5.3-flash
+experiment mvp-matched-1789661816214588000: scheduling seed 20260917, arm order [warm manual cold]
+family mvp-02-ttl-source-of-truth: manual seeding unavailable (seed manual arm: no bundle record matched any target need for run mvp-snap-mvp-02-ttl-source-of-truth-1789661816427572000-taska); manual diagnostic arm will be recorded as setup failure
+family mvp-02-ttl-source-of-truth: matched-snapshot 1 rollouts x 3 arms done
+
+MVP paired proof (task B outcomes; precursor-failed attempts excluded)
+
+mvp-02-ttl-source-of-truth
+  cold: success 1/1, tokens med 12226, searches med 0, reads med 5
+  warm: success 1/1, tokens med 12450, searches med 0, reads med 5
+  spend: cold $0.0006 over 1 row(s), warm $0.0021 over 1 row(s) (billed USD; estimated rows marked)
+  cognition: resolved_by_cognition med 0, legacy_inferred_avoided_ops med 0, executed_ops med 0, evidence_satisfied_ops med 0, validation_reads med 0 (per Task B run)
+  campaign: automatic success 1/1, manual (diagnostic_only) success 0/1
+  campaign spend: automatic $0.0021 over 1 row(s), manual $0.0000 over 0 row(s) + 1 unknown (billed USD; estimated rows marked)

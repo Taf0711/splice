@@ -1,0 +1,64 @@
+diff --git a/main.go b/main.go
+index a3c70de..c845f79 100644
+--- a/main.go
++++ b/main.go
+@@ -2,6 +2,7 @@ package main
+ 
+ import (
+ 	"encoding/json"
++	"errors"
+ 	"log"
+ 	"net/http"
+ 	"time"
+@@ -30,7 +31,7 @@ func sessionHandler(store *Store) http.HandlerFunc {
+ 		case http.MethodGet:
+ 			session, err := store.Get(r.URL.Query().Get("id"))
+ 			if err != nil {
+-				http.Error(w, err.Error(), http.StatusNotFound)
++				http.Error(w, err.Error(), mapStoreError(err))
+ 				return
+ 			}
+ 			writeJSON(w, session)
+@@ -40,6 +41,22 @@ func sessionHandler(store *Store) http.HandlerFunc {
+ 	}
+ }
+ 
++// mapStoreError codifies the store-error to HTTP status mapping.
++func mapStoreError(err error) int {
++	switch {
++	case errors.Is(err, ErrNotFound):
++		return http.StatusNotFound
++	case errors.Is(err, ErrConflict):
++		return http.StatusConflict
++	case errors.Is(err, ErrInvalidID):
++		return http.StatusBadRequest
++	case errors.Is(err, ErrUserAtCap):
++		return http.StatusTooManyRequests
++	default:
++		return http.StatusInternalServerError
++	}
++}
++
+ // healthHandler reports how many sessions are currently held.
+ func healthHandler(store *Store) http.HandlerFunc {
+ 	return func(w http.ResponseWriter, r *http.Request) {
+diff --git a/session.go b/session.go
+index 775bd2f..7d3978e 100644
+--- a/session.go
++++ b/session.go
+@@ -9,6 +9,15 @@ import (
+ // ErrNotFound is returned when a session id is unknown or has expired.
+ var ErrNotFound = errors.New("session not found")
+ 
++// ErrConflict is returned when an operation clashes with existing state.
++var ErrConflict = errors.New("session conflict")
++
++// ErrInvalidID is returned when a session id is malformed.
++var ErrInvalidID = errors.New("invalid session id")
++
++// ErrUserAtCap is returned when a user has reached their session limit.
++var ErrUserAtCap = errors.New("user at session cap")
++
+ // Session is one signed-in user.
+ type Session struct {
+ 	ID       string

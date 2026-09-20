@@ -1,0 +1,16 @@
+2026-09-15T15:15:48-0400 using operator-supplied binary /tmp/p4-splice (BIN_PREBUILT=1); not rebuilding
+2026-09-15T15:15:48-0400 building runner /tmp/warmcost-eval-paid from harness repo 27a1eed
+2026-09-15T15:15:49-0400 pre-registration: model=z-ai/glm-5.3-flash arms=cold tasks=2 repeats=1 margin=0.05 bootstrap=10000
+2026-09-15T15:15:49-0400 attempt cap: arms=1 x tasks=2 x repeats=1 = 2 attempts; MAX_RETRIES=0
+2026-09-15T15:15:49-0400 revision=27a1eedb09407ab5517f515554bb0dae6f002ff1 sidecar_revision=27a1eed taskset=clock-helper-write clock-helper-read
+2026-09-15T15:15:49-0400 arm order: cold; interleaved per repeat by the runner
+2026-09-15T15:15:49-0400 retention: fresh sidecar_root=<ambient>
+2026-09-15T15:15:49-0400 run wc-p4-smoke-20260915T191548Z-try0 start
+run wc-p4-smoke-20260915T191548Z-try0: arms=1 tasks=0 attempts=2
+total-cost claim allowed: false (the retention protocol is fresh, so the warm arm has no retained experience and a total-cost claim is not available)
+artifacts: tests/evals/results/wc-p4-smoke-20260915T191548Z-try0
+CLEAN
+2026-09-15T15:16:38-0400 run wc-p4-smoke-20260915T191548Z-try0 clean; stopping retry loop
+2026-09-15T15:16:38-0400 final run: wc-p4-smoke-20260915T191548Z-try0
+wrote tests/evals/results/PAID_RUN_wc-p4-smoke-20260915T191548Z-try0.md
+2026-09-15T15:16:38-0400 complete

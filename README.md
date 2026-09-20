@@ -14,6 +14,14 @@
   <img alt="Go 1.25+" src="https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white">
 </p>
 
+<p align="center">
+  <img src="docs/assets/repair-loop.gif" alt="Splice implements a change, the test suite fails, the test runner returns typed failure evidence, and the rerun passes" width="900">
+</p>
+
+<p align="center"><em>One unedited run. The code writer implements the change, the test runner
+fails on a trap test, it returns the failure evidence to the code writer, and
+the rerun passes. Six stages, one repair re-entry.</em></p>
+
 Splice is a local-first terminal agent for repository work. It can inspect code,
 edit files, run checks, and use your selected model provider.
 

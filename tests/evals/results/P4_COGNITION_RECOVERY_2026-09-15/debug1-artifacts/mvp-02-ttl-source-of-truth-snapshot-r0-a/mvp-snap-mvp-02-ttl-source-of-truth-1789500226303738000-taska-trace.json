@@ -1,0 +1,158 @@
+{
+  "schema_version": "1",
+  "run_id": "mvp-snap-mvp-02-ttl-source-of-truth-1789500226303738000-taska",
+  "session_id": "mvp-snap-mvp-02-ttl-source-of-truth-1789500226303738000-taska",
+  "repo_root": "/private/var/folders/cf/37chkgfx22q5bb_ws8brslx00000gn/T/splice-mvp-snap-2932623860",
+  "intent": "The session lifetime is hard-coded as a duration literal where the store is constructed. Introduce an exported constant DefaultTTL in the session package as the one source of truth for the default session lifetime, value 30 minutes, and make the construction site read it. Behavior must not change and the existing te...",
+  "tier": "light",
+  "plan": {
+    "tier": "light",
+    "request_intent": "The session lifetime is hard-coded as a duration literal where the store is constructed. Introduce an exported constant DefaultTTL in the session package as the one source of truth for the default session lifetime, value 30 minutes, and make the construction site read it. Behavior must not change and the existing te...",
+    "stages": [
+      {
+        "name": "code_writer",
+        "budget": {
+          "input_max": 20000,
+          "output_max": 8192,
+          "skippable": false
+        }
+      },
+      {
+        "name": "static_analyzer",
+        "budget": {
+          "input_max": 0,
+          "output_max": 0,
+          "skippable": true
+        }
+      },
+      {
+        "name": "test_runner",
+        "budget": {
+          "input_max": 0,
+          "output_max": 0,
+          "skippable": true
+        }
+      },
+      {
+        "name": "acceptance_verifier",
+        "budget": {
+          "input_max": 0,
+          "output_max": 0,
+          "skippable": true
+        }
+      }
+    ],
+    "token_budget": {
+      "total_input_budget": 21000,
+      "total_output_budget": 9192,
+      "per_stage": {
+        "acceptance_verifier": {
+          "input_max": 0,
+          "output_max": 0,
+          "skippable": true
+        },
+        "code_writer": {
+          "input_max": 20000,
+          "output_max": 8192,
+          "skippable": false
+        },
+        "static_analyzer": {
+          "input_max": 0,
+          "output_max": 0,
+          "skippable": true
+        },
+        "test_runner": {
+          "input_max": 0,
+          "output_max": 0,
+          "skippable": true
+        }
+      },
+      "reserve": 1000,
+      "overflow_policy": "abort"
+    }
+  },
+  "iterations": null,
+  "stages": [
+    {
+      "name": "code_writer",
+      "status": "failed",
+      "iteration": 1,
+      "provider": "openrouter",
+      "model": "z-ai/glm-5.3-flash",
+      "output_summary": "*stages.TypedOutputError: model \"z-ai/glm-5.3-flash\" failed typed output after 3 attempts: required tool \"submit_code+request_codebase_context\" with valid JSON arguments: normalize compact proposals: proposals[0]: proposal modify internal/session/store.go: base_ref is required; select a model that supports tool calling through the configured API (OpenAI-compatible for local runtimes)",
+      "tokens_input": 17310,
+      "tokens_output": 908,
+      "tokens_cached": 9920,
+      "tokens_cache_write": 0,
+      "tokens_reasoning": 0,
+      "web_search_requests": 0,
+      "cost_usd": 0.0018601,
+      "latency_ms": 27968,
+      "input_meta": {
+        "context_items": 6,
+        "context_chars": 182,
+        "memory_items": 0,
+        "memory_chars": 0,
+        "exemplar_items": 0,
+        "edge_payload_bytes": 593,
+        "context_failures": 0,
+        "memory_lookup_mode": "search",
+        "scope_expansions": 2,
+        "expansions_performed": 0
+      },
+      "cache": {
+        "hit": false,
+        "similarity": 0
+      },
+      "prompt_hash": "382f0a0fe7d571e7"
+    },
+    {
+      "name": "code_writer",
+      "status": "failed",
+      "iteration": 2,
+      "provider": "openrouter",
+      "model": "z-ai/glm-5.3-flash",
+      "output_summary": "*stages.TypedOutputError: model \"z-ai/glm-5.3-flash\" failed typed output after 3 attempts: required tool \"submit_code+request_codebase_context\" with valid JSON arguments: normalize compact proposals: proposals[0]: proposal modify internal/session/store.go: base_ref is required; select a model that supports tool calling through the configured API (OpenAI-compatible for local runtimes)",
+      "tokens_input": 18120,
+      "tokens_output": 1117,
+      "tokens_cached": 14784,
+      "tokens_cache_write": 0,
+      "tokens_reasoning": 133,
+      "web_search_requests": 0,
+      "cost_usd": 0.00150242,
+      "latency_ms": 30130,
+      "input_meta": {
+        "context_items": 6,
+        "context_chars": 182,
+        "memory_items": 0,
+        "memory_chars": 0,
+        "exemplar_items": 0,
+        "edge_payload_bytes": 1838,
+        "context_failures": 0,
+        "memory_lookup_mode": "search",
+        "scope_expansions": 2,
+        "expansions_performed": 0
+      },
+      "cache": {
+        "hit": false,
+        "similarity": 0
+      },
+      "prompt_hash": "382f0a0fe7d571e7"
+    }
+  ],
+  "outcome": {
+    "status": "failed",
+    "abort_reason": "repeated unchanged stage failure (validation) in iterations 1 and 2: code_writer: *stages.TypedOutputError: model \"z-ai/glm-5.3-flash\" failed typed output after 3 attempts: required tool \"submit_code+request_codebase_context\" with valid JSON arguments: normalize compact proposals: proposals[0]: proposal modify internal/session/store.go: base_ref is required; select a model that supports tool calling through the configured API (OpenAI-compatible for local runtimes)"
+  },
+  "memory": {
+    "status": "active",
+    "items": 0,
+    "chars": 0
+  },
+  "tool_fingerprint": "78c0df80ecf31888",
+  "topology_hash": "60e9f0ff7c9f1d12",
+  "budget_provenance": {
+    "code_writer": "budget not calibrated: 0/20 for this key"
+  },
+  "events_status": "complete"
+}
