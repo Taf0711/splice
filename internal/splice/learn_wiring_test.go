@@ -85,7 +85,7 @@ func runWithCorpus(t *testing.T, n, in, out int) *schemas.RunOutcome {
 		registry.Register(tool)
 	}
 
-	plan, err := BuildExecutionPlan("add a Hello function and tests")
+	plan, err := BuildExecutionPlan("", nil)
 	if err != nil {
 		t.Fatalf("BuildExecutionPlan: %v", err)
 	}

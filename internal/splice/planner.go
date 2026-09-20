@@ -4,6 +4,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/Taf0711/splice/internal/flags"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
@@ -15,9 +16,10 @@ func ClassifyRequest(request string) schemas.PipelineTier {
 }
 
 // stagesForTier builds the ordered execution-stage list and token budget for a
-// tier. Shared by BuildExecutionPlan and BuildExecutionPlanForTask so the
-// tier-to-stages shape lives in one place.
-func stagesForTier(tier schemas.PipelineTier) ([]schemas.ExecutionStage, schemas.TokenBudget, error) {
+// tier, then removes stages disabled by the resolved flag set. Shared by
+// BuildExecutionPlan and BuildExecutionPlanForTask so the tier-to-stages shape
+// lives in one place.
+func stagesForTier(tier schemas.PipelineTier, set flags.Set) ([]schemas.ExecutionStage, schemas.TokenBudget, error) {
 	budget, err := BudgetForTier(tier)
 	if err != nil {
 		return nil, schemas.TokenBudget{}, err
@@ -26,6 +28,7 @@ func stagesForTier(tier schemas.PipelineTier) ([]schemas.ExecutionStage, schemas
 	if err != nil {
 		return nil, schemas.TokenBudget{}, err
 	}
+	names = FilterStageNames(names, set)
 	stages := make([]schemas.ExecutionStage, 0, len(budget.PerStage))
 	for _, name := range names {
 		stages = append(stages, schemas.ExecutionStage{
@@ -37,9 +40,9 @@ func stagesForTier(tier schemas.PipelineTier) ([]schemas.ExecutionStage, schemas
 }
 
 // BuildExecutionPlan builds a minimal execution plan for the current request.
-func BuildExecutionPlan(request string) (schemas.ExecutionPlan, error) {
+func BuildExecutionPlan(request string, set flags.Set) (schemas.ExecutionPlan, error) {
 	tier := ClassifyRequest(request)
-	stages, budget, err := stagesForTier(tier)
+	stages, budget, err := stagesForTier(tier, set)
 	if err != nil {
 		return schemas.ExecutionPlan{}, err
 	}
@@ -52,18 +55,19 @@ func BuildExecutionPlan(request string) (schemas.ExecutionPlan, error) {
 		RequestIntent: intent,
 		Stages:        stages,
 		TokenBudget:   budget,
+		Flags:         set.EnabledNames(),
 	}, nil
 }
 
 // BuildExecutionPlanForTask builds a plan for a design task.
-func BuildExecutionPlanForTask(task schemas.Task) (schemas.ExecutionPlan, error) {
-	plan, _, err := BuildExecutionPlanForTaskWithFacts(task)
+func BuildExecutionPlanForTask(task schemas.Task, set flags.Set) (schemas.ExecutionPlan, error) {
+	plan, _, err := BuildExecutionPlanForTaskWithFacts(task, set)
 	return plan, err
 }
 
 // BuildExecutionPlanForTaskWithFacts builds a plan for a design task and
 // extracts acceptance fact statements for context injection.
-func BuildExecutionPlanForTaskWithFacts(task schemas.Task) (schemas.ExecutionPlan, []string, error) {
+func BuildExecutionPlanForTaskWithFacts(task schemas.Task, set flags.Set) (schemas.ExecutionPlan, []string, error) {
 	tier := ClassifyRequest(task.Intent)
 	for _, fact := range task.AcceptanceFacts {
 		if fact.AutomatedVerification && tier == schemas.TierTrivial {
@@ -71,7 +75,7 @@ func BuildExecutionPlanForTaskWithFacts(task schemas.Task) (schemas.ExecutionPla
 			break
 		}
 	}
-	stages, budget, err := stagesForTier(tier)
+	stages, budget, err := stagesForTier(tier, set)
 	if err != nil {
 		return schemas.ExecutionPlan{}, nil, err
 	}
@@ -85,6 +89,7 @@ func BuildExecutionPlanForTaskWithFacts(task schemas.Task) (schemas.ExecutionPla
 		Stages:          stages,
 		TokenBudget:     budget,
 		AcceptanceFacts: append([]schemas.AcceptanceFact(nil), task.AcceptanceFacts...),
+		Flags:           set.EnabledNames(),
 	}, acceptanceFacts, nil
 }
 

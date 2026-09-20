@@ -135,7 +135,7 @@ func TestBudgetForTier(t *testing.T) {
 }
 
 func TestBuildExecutionPlan(t *testing.T) {
-	plan, err := BuildExecutionPlan("Update database schema for user profiles")
+	plan, err := BuildExecutionPlan("", nil)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestBuildExecutionPlanForTaskFloorsAutomatedAcceptanceAtLight(t *testing.T)
 			VerificationCommand:   &command,
 		}},
 	}
-	plan, facts, err := BuildExecutionPlanForTaskWithFacts(task)
+	plan, facts, err := BuildExecutionPlanForTaskWithFacts(task, nil)
 	if err != nil {
 		t.Fatalf("BuildExecutionPlanForTaskWithFacts: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestBuildExecutionPlanForTaskFloorsAutomatedAcceptanceAtLight(t *testing.T)
 
 func TestBuildExecutionPlanForTask(t *testing.T) {
 	task := schemas.Task{ID: "t1", Title: "T", Intent: "add search"}
-	plan, err := BuildExecutionPlanForTask(task)
+	plan, err := BuildExecutionPlanForTask(task, nil)
 	if err != nil {
 		t.Fatalf("build plan for task: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestBuildExecutionPlanForTaskIgnoresPersistedEstimatedTier(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &task); err != nil {
 		t.Fatalf("unmarshal persisted task: %v", err)
 	}
-	plan, err := BuildExecutionPlanForTask(task)
+	plan, err := BuildExecutionPlanForTask(task, nil)
 	if err != nil {
 		t.Fatalf("build plan for task: %v", err)
 	}

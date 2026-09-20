@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Taf0711/splice/internal/flags"
 	"github.com/Taf0711/splice/internal/modelregistry"
 )
 
@@ -1919,5 +1921,92 @@ func TestResolveRequiresModelErrorIsSetupFixable(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "sk-x") {
 		t.Fatalf("error leaked API key: %q", err.Error())
+	}
+}
+
+// flagsTestProviderJSON makes a config resolvable so flag assertions are not
+// masked by ErrNoActiveProvider.
+const flagsTestProviderJSON = `"activeProvider":"p","providers":[{"name":"p","provider":"openai","apiKey":"sk-x","model":"m"}]`
+
+// TestFileConfigMarshalRoundTripsFlags guards the custom MarshalJSON allowlist.
+// FileConfig.MarshalJSON builds an explicit rawConfig struct, so a field added
+// to FileConfig but not to that struct is silently dropped on write. Without
+// this test a saved flag vanishes with no error.
+func TestFileConfigMarshalRoundTripsFlags(t *testing.T) {
+	cfg := FileConfig{Flags: map[string]bool{string(flags.TUIPipelineEnabled): false}}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), string(flags.TUIPipelineEnabled)) {
+		t.Fatalf("flags dropped by MarshalJSON: %s", data)
+	}
+	var back FileConfig
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(back.Flags, cfg.Flags) {
+		t.Fatalf("round trip changed flags: got %v want %v", back.Flags, cfg.Flags)
+	}
+}
+
+func TestResolveFlagPrecedence(t *testing.T) {
+	userPath := writeConfig(t, `{`+flagsTestProviderJSON+`,"flags":{"tui.pipeline.enabled":false}}`)
+	projectPath := writeConfig(t, `{`+flagsTestProviderJSON+`,"flags":{"tui.pipeline.enabled":true}}`)
+
+	resolved, err := Resolve(ResolveOptions{UserConfigPath: userPath, ProjectConfigPath: projectPath})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !resolved.Flags.Enabled(flags.TUIPipelineEnabled) {
+		t.Fatal("project config must outrank user config")
+	}
+
+	resolved, err = Resolve(ResolveOptions{
+		UserConfigPath:    userPath,
+		ProjectConfigPath: projectPath,
+		Env:               map[string]string{flags.EnvVar: "-" + string(flags.TUIPipelineEnabled)},
+	})
+	if err != nil {
+		t.Fatalf("Resolve with env: %v", err)
+	}
+	if resolved.Flags.Enabled(flags.TUIPipelineEnabled) {
+		t.Fatal("env must outrank project config")
+	}
+
+	resolved, err = Resolve(ResolveOptions{
+		UserConfigPath: userPath,
+		Env:            map[string]string{flags.EnvVar: "-" + string(flags.TUIPipelineEnabled)},
+		Overrides:      Overrides{Flags: map[string]bool{string(flags.TUIPipelineEnabled): true}},
+	})
+	if err != nil {
+		t.Fatalf("Resolve with override: %v", err)
+	}
+	if !resolved.Flags.Enabled(flags.TUIPipelineEnabled) {
+		t.Fatal("command line must outrank env")
+	}
+}
+
+func TestResolveRejectsUnknownFlagFromConfig(t *testing.T) {
+	userPath := writeConfig(t, `{`+flagsTestProviderJSON+`,"flags":{"not.a.flag":true}}`)
+	_, err := Resolve(ResolveOptions{UserConfigPath: userPath})
+	if err == nil {
+		t.Fatal("Resolve accepted an unknown flag")
+	}
+	if !strings.Contains(err.Error(), "unknown feature flag") {
+		t.Fatalf("error %q must name the unknown flag", err)
+	}
+}
+
+// TestResolveRejectsUserScopeFlagFromProjectConfig is the adversarial guard: a
+// cloned repository must not be able to disable a user-scope flag.
+func TestResolveRejectsUserScopeFlagFromProjectConfig(t *testing.T) {
+	projectPath := writeConfig(t, `{`+flagsTestProviderJSON+`,"flags":{"pipeline.stage.security_auditor":false}}`)
+	_, err := Resolve(ResolveOptions{ProjectConfigPath: projectPath})
+	if err == nil {
+		t.Fatal("project config was allowed to set a user-scope flag")
+	}
+	if !strings.Contains(err.Error(), "user-scope") {
+		t.Fatalf("error %q must explain the scope refusal", err)
 	}
 }
