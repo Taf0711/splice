@@ -140,6 +140,9 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 	ceilingExempt := false
 	defer func() {
 		result = scrubResultSecrets(result)
+		// The external reducer runs after the scrub (so it never sees hidden
+		// content) and before the ceiling (so the ceiling stays the backstop).
+		result = reduceToolResultOutput(name, result)
 		if !ceilingExempt {
 			result = enforceOutputCeiling(name, result)
 		}

@@ -3305,6 +3305,64 @@ func TestRequestLedgerRecordingOptionsCases(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "carries the prompt layout hash",
+			usages: []agent.AttributedUsage{{
+				Usage:            zeroruntime.Usage{InputTokens: 10, OutputTokens: 5},
+				UsageReported:    true,
+				Stage:            "code_writer",
+				Iteration:        1,
+				PromptLayoutHash: "layout-abc",
+			}},
+			check: func(t *testing.T, ledger *requestLedger, _ []agent.AttributedUsage) {
+				if len(ledger.records) != 1 {
+					t.Fatalf("records = %d, want 1", len(ledger.records))
+				}
+				if got := ledger.records[0].PromptLayoutHash; got != "layout-abc" {
+					t.Fatalf("prompt_layout_hash = %q, want layout-abc", got)
+				}
+			},
+		},
+		{
+			name: "records a cache hit from cached tokens",
+			usages: []agent.AttributedUsage{{
+				Usage:         zeroruntime.Usage{InputTokens: 100, CachedInputTokens: 60, OutputTokens: 10},
+				UsageReported: true, Stage: "code_writer", Iteration: 1,
+			}},
+			check: func(t *testing.T, ledger *requestLedger, _ []agent.AttributedUsage) {
+				rec := ledger.records[0]
+				if rec.CacheHit == nil || !*rec.CacheHit {
+					t.Fatalf("cache_hit = %v, want true", rec.CacheHit)
+				}
+				if rec.MemoryPosition != schemas.MemoryPositionAfterPrefix {
+					t.Fatalf("memory_position = %q, want %q", rec.MemoryPosition, schemas.MemoryPositionAfterPrefix)
+				}
+			},
+		},
+		{
+			name: "records a cache miss when usage is reported without cached tokens",
+			usages: []agent.AttributedUsage{{
+				Usage:         zeroruntime.Usage{InputTokens: 100, OutputTokens: 10},
+				UsageReported: true, Stage: "code_writer", Iteration: 1,
+			}},
+			check: func(t *testing.T, ledger *requestLedger, _ []agent.AttributedUsage) {
+				rec := ledger.records[0]
+				if rec.CacheHit == nil || *rec.CacheHit {
+					t.Fatalf("cache_hit = %v, want false", rec.CacheHit)
+				}
+			},
+		},
+		{
+			name: "leaves cache_hit unknown when usage is missing",
+			usages: []agent.AttributedUsage{{
+				UsageReported: false, Stage: "test_runner", Iteration: 1,
+			}},
+			check: func(t *testing.T, ledger *requestLedger, _ []agent.AttributedUsage) {
+				if got := ledger.records[0].CacheHit; got != nil {
+					t.Fatalf("cache_hit = %v, want nil for missing usage", *got)
+				}
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -3319,6 +3377,61 @@ func TestRequestLedgerRecordingOptionsCases(t *testing.T) {
 			}
 			tc.check(t, ledger, captured)
 		})
+	}
+}
+
+// TestCountPromptLayoutFlips pins the detector's failure modes: a change
+// within one stage counts, a difference between stages must not, and a record
+// with no layout must be skipped rather than read as a change.
+func TestCountPromptLayoutFlips(t *testing.T) {
+	rec := func(stage, hash string) schemas.PipelineUsageRecord {
+		return schemas.PipelineUsageRecord{Stage: stage, Iteration: 1, PromptLayoutHash: hash}
+	}
+	tests := []struct {
+		name    string
+		records []schemas.PipelineUsageRecord
+		want    int
+	}{
+		{"stable layout", []schemas.PipelineUsageRecord{rec("code_writer", "a"), rec("code_writer", "a")}, 0},
+		{"flip within a stage", []schemas.PipelineUsageRecord{rec("code_writer", "a"), rec("code_writer", "b")}, 1},
+		{"distinct stages do not flip", []schemas.PipelineUsageRecord{rec("code_writer", "a"), rec("test_generator", "b")}, 0},
+		{"empty hash is skipped, not a flip", []schemas.PipelineUsageRecord{rec("code_writer", "a"), rec("code_writer", ""), rec("code_writer", "a")}, 0},
+		{"empty hash never becomes the baseline", []schemas.PipelineUsageRecord{rec("code_writer", ""), rec("code_writer", "a"), rec("code_writer", "b")}, 1},
+		{"flip back counts again", []schemas.PipelineUsageRecord{rec("code_writer", "a"), rec("code_writer", "b"), rec("code_writer", "a")}, 2},
+		{"no records", nil, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := countPromptLayoutFlips(tc.records); got != tc.want {
+				t.Fatalf("flips = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestApplyRequestLedgerRecordsPromptLayoutFlips proves the count reaches the
+// run result, which is what a surface or a report reads.
+func TestApplyRequestLedgerRecordsPromptLayoutFlips(t *testing.T) {
+	l := newRequestLedger()
+	for _, hash := range []string{"a", "b"} {
+		l.append(schemas.PipelineUsageRecord{
+			Stage: "code_writer", Iteration: 1, UsageReported: true,
+			InputTokens: 10, OutputTokens: 5,
+			CostStatus: schemas.CostStatusUnpriced, PromptLayoutHash: hash,
+		})
+	}
+	result := schemas.PipelineResult{
+		RunID: "test", Status: "completed", Tier: schemas.TierLight,
+		Stages: []schemas.StageRecord{{
+			Name: "code_writer", Status: schemas.StageCompleted, Iteration: 1,
+			TokensInput: 20, TokensOutput: 10,
+		}},
+	}
+	if err := applyRequestLedger(&result, l); err != nil {
+		t.Fatalf("applyRequestLedger: %v", err)
+	}
+	if result.PromptLayoutFlips != 1 {
+		t.Fatalf("PromptLayoutFlips = %d, want 1", result.PromptLayoutFlips)
 	}
 }
 

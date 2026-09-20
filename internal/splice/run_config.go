@@ -69,6 +69,11 @@ type PipelineRunConfig struct {
 	OnSurfaceToUser             func(ctx context.Context, req agent.SurfaceToUserRequest) (agent.SurfaceToUserDecision, error)
 	OnPipelinePlan              func(agent.PipelinePlanEvent)
 	OnStageEvent                func(agent.StageEvent)
+	// IsolatedWorktree marks that this run executes in a Splice-managed
+	// worktree (DoD 26): stage events stamp Workspace="isolated" with the
+	// worktree path, and the sidebar badges those lanes. Empty means the
+	// run shares the authoritative working directory (shared_cwd).
+	IsolatedWorktree string
 	// OnPresentationState receives a presentation.State snapshot after each
 	// significant pipeline transition when emission is enabled. Nil disables
 	// emission: no accumulator is created and no snapshots are produced.

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "lifecycle": "execute",
+  "lifecycle": "executing",
   "plan": {
     "title": "hello service",
     "task_count": 8

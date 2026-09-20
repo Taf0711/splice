@@ -145,20 +145,25 @@ func (m model) attachClipboardImage(data []byte, mediaType string) model {
 }
 
 // handleImageCommand processes "/image <path>" and "/image clear". A bare
-// "/image" prints usage. PDFs are routed to the document path (text layer always
-// attaches; pages rasterize to images only for vision models with a rasterizer).
-// Image files attach only to vision models. Attachment failures (missing file,
-// unsupported type, oversize) surface as an inline notice and attach nothing.
+// "/image" answers with the usage ack (blocked: it names the unblock). PDFs
+// are routed to the document path (text layer always attaches; pages
+// rasterize to images only for vision models with a rasterizer). Image files
+// attach only to vision models. Failure replies render as ack lines (verb
+// "image"); success stays quiet — the composer attachment chip ([Image #N])
+// is the confirmation, matching the compact attach UX.
 func (m model) handleImageCommand(arg string) model {
 	trimmed := strings.TrimSpace(arg)
 	switch {
 	case trimmed == "":
-		return m.appendImageNotice("Usage: /image <path>  (image or PDF; or /image clear)")
+		return m.appendImageNotice(ackSystemText(m.imageUsageAck()))
 	case strings.EqualFold(trimmed, "clear"):
 		m.pendingImages = nil
 		m.pendingImageLabels = nil
 		m.pendingDocuments = nil
-		return m.appendImageNotice("Cleared pending attachments.")
+		return m.appendImageNotice(ackSystemText(ack{
+			verb:    "image",
+			outcome: "cleared pending attachments",
+		}))
 	}
 
 	// A PDF carries a text layer every model can read, so it is not gated on
@@ -175,19 +180,46 @@ func (m model) handleImageCommand(arg string) model {
 		if name == "" {
 			name = "the active model"
 		}
-		return m.appendImageNotice("Model " + name + " does not support image input; attachment refused.")
+		return m.appendImageNotice(ackSystemText(ack{
+			verb:    "image",
+			blocked: true,
+			outcome: "model " + name + " does not support image input",
+			unblock: "switch to a vision model, or attach a PDF (its text layer works on any model)",
+		}))
 	}
 
 	block, err := imageinput.LoadFile(trimmed, m.cwd)
 	if err != nil {
-		return m.appendImageNotice(err.Error())
+		return m.appendImageNotice(ackSystemText(m.imageLoadFailureAck(err.Error())))
 	}
 
 	m.pendingImages = append(m.pendingImages, block)
 	m.pendingImageLabels = append(m.pendingImageLabels, filepath.Base(trimmed))
-	// No "attached" system message: the composer attachment chip ([Image #N]) is
-	// the confirmation, matching the compact attach UX.
+	// No "attached" ack: the composer attachment chip ([Image #N]) is the
+	// confirmation, matching the compact attach UX.
 	return m
+}
+
+// imageLoadFailureAck renders a load failure (missing file, oversize,
+// unsupported type) as a blocked image ack naming the file and the fix.
+func (m model) imageLoadFailureAck(reason string) ack {
+	return ack{
+		verb:    "image",
+		blocked: true,
+		outcome: reason,
+		unblock: "check the path, then run /image again",
+	}
+}
+
+// imageUsageAck is the bare "/image" usage reply: a blocked ack whose unblock
+// names the valid arguments.
+func (m model) imageUsageAck() ack {
+	return ack{
+		verb:    "image",
+		blocked: true,
+		outcome: "nothing attached",
+		unblock: "usage: /image <path> (image or PDF); /image clear removes pending attachments",
+	}
 }
 
 // pendingDocument is a PDF staged by /image for the next user turn: its extracted

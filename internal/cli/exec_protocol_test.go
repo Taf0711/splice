@@ -597,6 +597,71 @@ func TestRunExecStreamJSONEmitsReasoningEvents(t *testing.T) {
 	}
 }
 
+// TestRunExecRecordsPromptLayoutAndCacheTelemetry is the end-to-end seam check
+// for the cache telemetry. A real pipeline run must produce usage records that
+// carry a layout hash, a cache hit, and a memory position, and the run must
+// report no prefix flip. The unit tests cover each layer; this proves the
+// layers are wired to one another in a run.
+func TestRunExecRecordsPromptLayoutAndCacheTelemetry(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	cwd := t.TempDir()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"exec", "--output-format", "stream-json", "write notes"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		resolveConfig: func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return newExecStageAwareProvider(execStageProviderOptions{
+				Usage: zeroruntime.Usage{InputTokens: 100, OutputTokens: 20, CachedInputTokens: 40},
+				Files: []schemas.FileChange{
+					{Path: "go.mod", Content: "module example\n\ngo 1.22\n", ChangeType: "create"},
+					{Path: "notes.txt", Content: "hello", ChangeType: "create"},
+					{Path: "main.go", Content: "package main\n\nfunc Hello() string { return \"hello\" }\n", ChangeType: "create"},
+				},
+			}), nil
+		},
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+
+	events := decodeJSONLines(t, stdout.String())
+	final := findJSONEvent(t, events, "final")
+	text, ok := final["text"].(string)
+	if !ok {
+		t.Fatalf("final event has no text: %#v", final)
+	}
+	var result schemas.PipelineResult
+	if err := json.Unmarshal([]byte(text), &result); err != nil {
+		t.Fatalf("decode final result: %v: %s", err, text)
+	}
+	if len(result.UsageRecords) == 0 {
+		t.Fatalf("run produced no usage records: %s", text)
+	}
+	byStage := make(map[string]string, len(result.UsageRecords))
+	for i, rec := range result.UsageRecords {
+		if rec.PromptLayoutHash == "" {
+			t.Fatalf("usage_records[%d] for stage %s has no prompt_layout_hash", i, rec.Stage)
+		}
+		if prev, seen := byStage[rec.Stage]; seen && prev != rec.PromptLayoutHash {
+			t.Fatalf("stage %s changed its layout hash mid-run: %s then %s", rec.Stage, prev, rec.PromptLayoutHash)
+		}
+		byStage[rec.Stage] = rec.PromptLayoutHash
+		if rec.MemoryPosition != schemas.MemoryPositionAfterPrefix {
+			t.Fatalf("usage_records[%d] memory_position = %q, want %q", i, rec.MemoryPosition, schemas.MemoryPositionAfterPrefix)
+		}
+		if rec.CacheHit == nil || !*rec.CacheHit {
+			t.Fatalf("usage_records[%d] cache_hit = %v, want true", i, rec.CacheHit)
+		}
+	}
+	if result.PromptLayoutFlips != 0 {
+		t.Fatalf("prompt_layout_flips = %d, want 0 for a stable prefix", result.PromptLayoutFlips)
+	}
+}
+
 func TestExecEventWriterTruncatesStreamJSONToolResults(t *testing.T) {
 	var stdout bytes.Buffer
 	writer := execEventWriter{

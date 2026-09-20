@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -9,6 +10,7 @@ import (
 
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/presentation"
+	"github.com/Taf0711/splice/internal/sessions"
 	"github.com/Taf0711/splice/internal/tools"
 )
 
@@ -22,6 +24,33 @@ type runtimeWiring struct {
 	runID      int
 	send       func(tea.Msg)
 	beforeText func(string)
+	// recordEvent durably records a run event. It is the shared seam for
+	// the persistence half of the runtime contract (review finding 6):
+	// the decorator used to transport presentation snapshots to the UI
+	// while each run path assembled its own persistence, so the approval
+	// path emitted live snapshots and saved none, and reopening the
+	// session could not reconstruct what was never written. Live
+	// transport and durable recording now live together, and each run
+	// kind supplies only the sink. A nil sink records nothing, which is
+	// the honest behavior for a run with no session to record into.
+	recordEvent func(pendingSessionEvent)
+}
+
+// recordPresentationState is the durable half of the presentation
+// contract. The FULL canonical state is persisted (F3, §15) so resume can
+// replay it; the event keeps its summary fields for existing consumers.
+func (w runtimeWiring) recordPresentationState(state presentation.State) {
+	if w.recordEvent == nil {
+		return
+	}
+	payload := map[string]any{
+		"presentation_schema_version": state.SchemaVersion,
+		"lifecycle":                   string(state.Lifecycle),
+	}
+	if stateJSON, err := json.Marshal(state); err == nil {
+		payload["presentation_state"] = json.RawMessage(stateJSON)
+	}
+	w.recordEvent(pendingSessionEvent{Type: sessions.EventMessage, Payload: payload})
 }
 
 // decorate wraps the callbacks that have shared TUI behavior. Each wrapper
@@ -154,9 +183,10 @@ func (w runtimeWiring) decorate(options agent.Options) agent.Options {
 			return agent.SurfaceToUserDecision{Action: agent.SurfaceToUserAbort, Message: ctx.Err().Error()}, ctx.Err()
 		}
 	}
-	// OnPresentationState forwards the presentation snapshot to the TUI.
-	// The session-log wrapper (set upstream in runAgentWithOptions) runs
-	// after this one, so the TUI renders before the log entry is appended.
+	// OnPresentationState forwards the presentation snapshot to the TUI and
+	// records it durably through the shared sink, so every run kind that
+	// supplies a sink gets the same live-versus-replayed equivalence. The
+	// TUI renders before the log entry is appended.
 	// OnPipelinePlan and OnStageEvent pass through unwrapped: the TUI no
 	// longer derives panel content from raw pipeline events (P1.2).
 	priorPresentation := options.OnPresentationState
@@ -164,6 +194,7 @@ func (w runtimeWiring) decorate(options agent.Options) agent.Options {
 		if w.send != nil {
 			w.send(presentationStateMsg{runID: w.runID, state: state})
 		}
+		w.recordPresentationState(state)
 		if priorPresentation != nil {
 			priorPresentation(state)
 		}

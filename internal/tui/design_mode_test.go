@@ -197,7 +197,7 @@ func TestDesignAgentApproveRequestsUserConfirmation(t *testing.T) {
 		t.Fatalf("ensureActiveSession: %v", err)
 	}
 	m.designNoticeShown = true
-	m.width = 100
+	m.width = 130
 	m.height = 30
 	m.altScreen = true
 	m.headerPrinted = true
@@ -1095,7 +1095,7 @@ func TestCrystallizeResultMsgDisplaysPlan(t *testing.T) {
 	}
 	m.activeSession = sess
 	m.activeRunID = 42
-	m.width = 100
+	m.width = 130
 	m.height = 30
 	m.altScreen = true
 	m.headerPrinted = true
@@ -1126,11 +1126,13 @@ func TestCrystallizeResultMsgDisplaysPlan(t *testing.T) {
 	if next.pendingCritique == nil || next.pendingCritique.OverallAssessment != critique.OverallAssessment {
 		t.Fatalf("expected pendingCritique set, got %#v", next.pendingCritique)
 	}
-	if !transcriptContains(next.transcript, plan.Epic) {
-		t.Fatalf("expected plan epic in transcript, got %#v", next.transcript)
+	// The P4 plan card carries the numbered tasks; the flat epic/assessment
+	// lines were replaced by the card render.
+	if !transcriptContains(next.transcript, "IMPLEMENTATION PLAN") {
+		t.Fatalf("expected the plan card in transcript, got %#v", next.transcript)
 	}
-	if !transcriptContains(next.transcript, critique.OverallAssessment) {
-		t.Fatalf("expected critique assessment in transcript, got %#v", next.transcript)
+	if !transcriptContains(next.transcript, "Implement it") {
+		t.Fatalf("expected plan task title in transcript, got %#v", next.transcript)
 	}
 	if !next.sidebarActive() {
 		t.Fatal("crystallized plan did not activate the context sidebar")
@@ -1227,8 +1229,7 @@ func TestCrystallizeResultMsgOutcomes(t *testing.T) {
 			wantCritique:      true,
 			wantSessionEvents: true,
 			wantTranscript: []string{
-				validPlan.Epic,
-				validCritique.OverallAssessment,
+				"IMPLEMENTATION PLAN",
 				"Plan is ready. Type /approve to execute.",
 			},
 		},
@@ -1386,8 +1387,8 @@ func TestCrystallizeResultMsgMustFixBlocksApprove(t *testing.T) {
 	updated, _ := m.Update(msg)
 	next := updated.(model)
 
-	if !transcriptContains(next.transcript, "/approve is blocked") {
-		t.Fatalf("expected blocked message, got %#v", next.transcript)
+	if !transcriptContains(next.transcript, "BLOCKED by required issues") {
+		t.Fatalf("expected the blocked verdict on the critique card, got %#v", next.transcript)
 	}
 	if transcriptContains(next.transcript, "Plan is ready") {
 		t.Fatalf("did not expect ready message, got %#v", next.transcript)
@@ -1531,8 +1532,8 @@ func TestFailedPlanExecutionStillRefreshesSessionEvents(t *testing.T) {
 	if len(updated.sessionEvents) == 0 {
 		t.Fatal("failed plan execution left session events stale (none loaded)")
 	}
-	if !transcriptContains(updated.transcript, "Plan execution failed") {
-		t.Fatalf("expected the failure to be reported, got %#v", updated.transcript)
+	if !transcriptContains(updated.transcript, "task step-1 stopped with status failed") {
+		t.Fatalf("expected the failure receipt in transcript, got %#v", updated.transcript)
 	}
 }
 
@@ -2108,8 +2109,8 @@ func TestPlanExecutionResultMsgErrorPreservesDesignState(t *testing.T) {
 	if next.pendingCritique == nil {
 		t.Fatal("pendingCritique should be preserved after execution error")
 	}
-	if !transcriptContains(next.transcript, "Plan execution failed") {
-		t.Fatalf("expected error in transcript, got %#v", next.transcript)
+	if !transcriptContains(next.transcript, "task t1: pipeline failed") {
+		t.Fatalf("expected failure receipt in transcript, got %#v", next.transcript)
 	}
 }
 
@@ -2295,7 +2296,7 @@ func TestLayoutCommandTogglesPersistentPlanPanel(t *testing.T) {
 	if !next.planPanelPersistent {
 		t.Fatal("/layout should turn the persistent plan panel on")
 	}
-	if !transcriptContains(next.transcript, "Persistent plan panel on.") {
+	if !transcriptContains(next.transcript, "persistent plan panel  on") {
 		t.Fatalf("missing on-notice, transcript: %#v", next.transcript)
 	}
 	// Toggle back off.
@@ -2305,7 +2306,7 @@ func TestLayoutCommandTogglesPersistentPlanPanel(t *testing.T) {
 	if next.planPanelPersistent {
 		t.Fatal("second /layout should turn the persistent plan panel off")
 	}
-	if !transcriptContains(next.transcript, "Persistent plan panel off.") {
+	if !transcriptContains(next.transcript, "persistent plan panel  off") {
 		t.Fatalf("missing off-notice, transcript: %#v", next.transcript)
 	}
 }

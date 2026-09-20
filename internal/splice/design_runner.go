@@ -90,6 +90,12 @@ func RunDesignPlan(ctx context.Context, plan schemas.DesignPlan, provider agent.
 // callbacks, acceptance fact propagation, and a unique plan revision ID.
 func RunDesignPlanWithResume(ctx context.Context, plan schemas.DesignPlan, provider agent.Provider, options agent.Options, mem MemoryStore, rec WorkspaceRecovery, runOpts RunDesignPlanOptions) (agent.Result, error) {
 	cfg := PipelineConfigFromAgentOptions(options)
+	// Workspace isolation (DoD 26): a run whose Cwd is a worktree path
+	// distinct from the stable repo root is an isolated lane; the stage
+	// events stamp that so the sidebar can badge the lane honestly.
+	if cfg.ProjectRoot != "" && cfg.Cwd != cfg.ProjectRoot {
+		cfg.IsolatedWorktree = cfg.Cwd
+	}
 	if err := plan.Validate(); err != nil {
 		return agent.Result{}, fmt.Errorf("validate plan: %w", err)
 	}

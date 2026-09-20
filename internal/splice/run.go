@@ -52,6 +52,9 @@ func (ledger *requestLedger) recordingOptions(options PipelineRunConfig) Pipelin
 	downstreamLegacy := options.OnUsage
 	recorded.OnAttributedUsage = func(attributed agent.AttributedUsage) {
 		attributed.Sequence = len(ledger.records) + 1
+		// usageTrusted is true only when a normalized provider report exists.
+		// cache_hit stays nil otherwise, because a missing report is not a miss.
+		usageTrusted := false
 		if attributed.UsageError != "" {
 			attributed.Usage = zeroruntime.Usage{}
 			attributed.Cost = costError(attributed.UsageError)
@@ -72,6 +75,7 @@ func (ledger *requestLedger) recordingOptions(options PipelineRunConfig) Pipelin
 				attributed.Cost = costError(err.Error())
 			} else {
 				attributed.Usage = normalized
+				usageTrusted = true
 				if attributed.ReportedCostUSD != nil {
 					// The provider told us the exact charge; trust it over the
 					// registry estimate instead of computing one we'd discard.
@@ -88,6 +92,11 @@ func (ledger *requestLedger) recordingOptions(options PipelineRunConfig) Pipelin
 			attributed.Cost = costError("invalid cost estimate: " + err.Error())
 		}
 
+		var cacheHit *bool
+		if usageTrusted {
+			hit := attributed.Usage.CachedInputTokens > 0
+			cacheHit = &hit
+		}
 		record := schemas.PipelineUsageRecord{
 			Sequence:          attributed.Sequence,
 			Provider:          attributed.ProviderName,
@@ -107,6 +116,9 @@ func (ledger *requestLedger) recordingOptions(options PipelineRunConfig) Pipelin
 			PricingSource:     attributed.Cost.PricingSource,
 			PricingAsOf:       attributed.Cost.PricingAsOf,
 			UnpricedReason:    attributed.Cost.UnpricedReason,
+			PromptLayoutHash:  attributed.PromptLayoutHash,
+			CacheHit:          cacheHit,
+			MemoryPosition:    schemas.MemoryPositionAfterPrefix,
 		}
 		if attributed.Cost.CostUSD != nil {
 			cost := *attributed.Cost.CostUSD
@@ -197,6 +209,12 @@ func Run(ctx context.Context, prompt string, provider agent.Provider, options ag
 	}
 
 	cfg := PipelineConfigFromAgentOptions(options)
+	// Workspace isolation (DoD 26): a run whose Cwd is a worktree path
+	// distinct from the stable repo root is an isolated lane; stage events
+	// stamp that so the sidebar can badge the lane honestly.
+	if cfg.ProjectRoot != "" && cfg.Cwd != cfg.ProjectRoot {
+		cfg.IsolatedWorktree = cfg.Cwd
+	}
 	result, err := runExecutionPlan(ctx, runID, plan, provider, cfg, mem, rec)
 	if err != nil {
 		return agent.Result{}, err
@@ -358,6 +376,9 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 
 	if err := applyRequestLedger(&result, ledger); err != nil {
 		return schemas.PipelineResult{}, fmt.Errorf("apply request ledger: %w", err)
+	}
+	if result.PromptLayoutFlips > 0 {
+		emitProgress(options, fmt.Sprintf("[orchestrator] the cacheable prompt prefix changed %d time(s) mid-run; the provider prefix cache was forfeited", result.PromptLayoutFlips))
 	}
 
 	if err := result.Validate(); err != nil {
@@ -728,7 +749,7 @@ func runIterationLoop(
 			switch userDecision.Action {
 			case agent.SurfaceToUserAbort:
 				msg := "user aborted: " + userDecision.Message
-				return finishWithReason(runID, plan, allRecords, "aborted", msg)
+				return finishWithUserAbort(runID, plan, allRecords, msg)
 			case agent.SurfaceToUserContinue:
 				rc := userDecision.Message
 				revisionContext = &rc
@@ -1531,7 +1552,15 @@ func wirePresentation(options PipelineRunConfig, plan schemas.ExecutionPlan) (Pi
 }
 
 // finishPresentation feeds the terminal run event and emits the final
-// snapshot. Aborted and failed runs both project as "failed".
+// snapshot. Receipt kinds (v0.5 receipts contract): "completed" projects
+// VERIFIED-eligible, "failed" projects failed, and a run the USER chose to
+// stop projects "cancelled" (a distinct receipt: staged work preserved,
+// nothing applied). The user stop is TYPED on the result (UserAborted),
+// set only at the user-abort decision site. A run aborted for internal
+// reasons (max iterations, wall time, rollback refuse) has UserAborted
+// false and projects "failed", because cancelled means the user chose to
+// stop. User cancels that travel as context.Canceled bypass this function
+// entirely and classify at the TUI error boundary.
 func finishPresentation(acc *presentrun.Accumulator, options PipelineRunConfig, result schemas.PipelineResult) {
 	if acc == nil {
 		return
@@ -1539,6 +1568,9 @@ func finishPresentation(acc *presentrun.Accumulator, options PipelineRunConfig, 
 	status := "completed"
 	if result.Status != "completed" {
 		status = "failed"
+		if result.Status == "aborted" && result.UserAborted {
+			status = "cancelled"
+		}
 	}
 	acc.Apply(presentrun.AdaptRunEvent(status, abortReason(result)))
 	options.OnPresentationState(acc.Snapshot())
@@ -1779,6 +1811,16 @@ func emitStageEvent(options PipelineRunConfig, stageName, status, detail string,
 		Progress:     progress,
 		ChangedFiles: append([]string(nil), changedFiles...),
 	}
+	// Workspace isolation (DoD 26): a run bound to a Splice worktree
+	// stamps every stage event with the isolated badge so the sidebar can
+	// show the lane's isolation honestly. The runtime derives it from its
+	// own config, never from the renderer.
+	if options.IsolatedWorktree != "" {
+		event.Workspace = "isolated"
+		event.WorktreePath = options.IsolatedWorktree
+	} else {
+		event.Workspace = "shared_cwd"
+	}
 	if options.OnStageEvent != nil {
 		options.OnStageEvent(event)
 	}
@@ -1950,11 +1992,49 @@ func finishWithReason(runID string, plan schemas.ExecutionPlan, records []schema
 	}, nil
 }
 
+// finishWithUserAbort records an aborted run the USER chose to stop. Only
+// the user-abort decision site may call it: UserAborted is the typed
+// signal the presentation layer keys on to project a CANCELLED receipt
+// (staged work preserved, nothing applied). Internal aborts keep
+// finishWithReason and project FAILED.
+func finishWithUserAbort(runID string, plan schemas.ExecutionPlan, records []schemas.StageRecord, reason string) (schemas.PipelineResult, error) {
+	return schemas.PipelineResult{
+		RunID:       runID,
+		Status:      "aborted",
+		Tier:        plan.Tier,
+		Stages:      records,
+		AbortReason: &reason,
+		UserAborted: true,
+	}, nil
+}
+
 func abortReason(result schemas.PipelineResult) string {
 	if result.AbortReason != nil {
 		return *result.AbortReason
 	}
 	return ""
+}
+
+// countPromptLayoutFlips reports how many requests changed the cacheable prefix
+// layout of their stage within one run. Records arrive in request order, and a
+// record without a layout hash carries no layout to compare, so it is skipped
+// rather than counted as a change. Distinct stages legitimately have distinct
+// layouts, so a stage is only ever compared against itself.
+func countPromptLayoutFlips(records []schemas.PipelineUsageRecord) int {
+	last := make(map[string]string)
+	seen := make(map[string]bool)
+	flips := 0
+	for _, r := range records {
+		if r.PromptLayoutHash == "" {
+			continue
+		}
+		if seen[r.Stage] && last[r.Stage] != r.PromptLayoutHash {
+			flips++
+		}
+		seen[r.Stage] = true
+		last[r.Stage] = r.PromptLayoutHash
+	}
+	return flips
 }
 
 // applyRequestLedger replaces stage-derived totals with authoritative request totals.
@@ -1975,6 +2055,7 @@ func applyRequestLedger(result *schemas.PipelineResult, ledger *requestLedger) e
 		stageIndex[key] = i
 	}
 	result.UsageRecords = append([]schemas.PipelineUsageRecord(nil), ledger.records...)
+	result.PromptLayoutFlips = countPromptLayoutFlips(ledger.records)
 
 	// Reset old stage-derived totals so retries and auxiliary calls are counted
 	// once.

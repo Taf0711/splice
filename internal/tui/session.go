@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/sessions"
@@ -104,6 +106,10 @@ func (m model) startNewSession() model {
 	m.memoryCount = 0
 	m.memoryByType = nil
 	m.memoryNoticed = false
+	// Run-bound interaction surfaces (pending handoff, diff/file views,
+	// worktree binding, trajectory reveal) belong to the previous session's
+	// run. A kept worktree stays on disk; only the actionable surface resets.
+	m = m.resetRunInteractionState()
 
 	note := "Started a new session."
 	if previousID != "" {
@@ -253,7 +259,22 @@ func (m model) handleResumeCommand(args string) (model, string) {
 	loopsCleared := 0
 	if session.SessionID != previousID {
 		m, loopsCleared = m.clearLoopsForSessionSwitch()
+		// Interaction surfaces (handoff card, diff/file views, worktree
+		// binding) belong to the previous session's run; reset them on a
+		// real switch. A no-op switch (resuming the active session) leaves
+		// them untouched.
+		//
+		// ORDER MATTERS (review finding 7): the reset clears run-owned
+		// presentation state, so it must run BEFORE the replay below.
+		// Replaying first and resetting second discarded exactly the
+		// state the replay had just reconstructed.
+		m = m.resetRunInteractionState()
 	}
+	// F3 (§15): replay the persisted presentation states so the pipeline
+	// panel, lifecycle, health, and receipt reconstruct from runtime truth
+	// without touching the runtime. A session with no valid snapshot lands
+	// on the empty projection rather than inheriting the previous session's.
+	m = m.replayPresentationState(events)
 
 	rows := initialTranscript()
 	rows = appendRow(rows, rowSystem, m.formatResumeSummary(*session, len(events)))
@@ -481,28 +502,37 @@ func sessionPlanStatus(state splicerun.DesignState) string {
 }
 
 // openTrustPromptIfRequired opens the required trust menu before the chat.
+// When the workspace has an executable project config (.splice/config.json
+// or hooks.json) and trust is undecided or declined, the UNTRUSTED PROJECT
+// CONFIG card accompanies the menu: the decision deserves the evidence of
+// what the config would change (GAP-I, frame I1). The card never decides —
+// the picker does.
 func (m model) openTrustPromptIfRequired() model {
+	if m.trustPromptRequired || !m.trusted {
+		if cfg := describeProjectTrustConfig(m.projectConfigPath); !cfg.Empty() || cfg.ParseError != "" {
+			m.trustConfigNotice(cfg)
+		}
+	}
 	if m.trustPromptRequired {
 		m.picker = m.newTrustPicker()
 	}
 	return m
 }
 
-// openLaunchSessionPicker opens the plan picker for a fresh interactive TUI.
-// The existing picker build performs all cheap workspace and metadata filters,
-// then reads each surviving session once and shares those events with both
-// resumable-content and design-state derivation.
-func (m model) openLaunchSessionPicker() model {
+// openLaunchSessionPicker arms the async session scan for a fresh
+// interactive TUI (F1, §14: no store I/O on the UI loop). The scan feeds
+// the launch resume card; the RESUME PICKER no longer auto-opens on launch
+// — a modal popping open over a user who already started typing swallows
+// their input and reads as a dead screen (owner report 2026-09-06). The
+// resume affordances are the LAST SESSION card and /resume.
+func (m model) openLaunchSessionPicker() (model, tea.Cmd) {
 	if m.setup.visible || m.activeSession.SessionID != "" || os.Getenv("SPLICE_NO_RESUME_PROMPT") == "1" {
-		return m
+		return m, nil
 	}
-	picker := m.newSessionPicker()
-	if picker == nil || !picker.planBearing {
-		return m
+	if m.sessionScanInFlight {
+		return m, nil
 	}
-	picker.title = "Continue where you left off"
-	m.picker = picker
-	return m
+	return startSessionScan(m, "Continue where you left off")
 }
 
 // sessionHasResumableContent reports whether a session has anything worth
@@ -613,15 +643,25 @@ func eventsHaveResumableContent(events []sessions.Event) bool {
 	return false
 }
 
-// openSessionPicker opens the /resume picker; ok is false when there is nothing to
-// resume (the caller then falls back to the text list / "none" message).
-func (m model) openSessionPicker() (model, bool) {
-	picker := m.newSessionPicker()
-	if picker == nil {
-		return m, false
+// openSessionPicker arms the async scan for a bare /resume and returns the
+// scan command directly (review finding 10: the command used to be stashed
+// in a package global and dropped by callers that returned only a boolean,
+// so the receipt's [R] marked a scan in flight and scheduled nothing).
+// ok is false only when there is no store at all.
+func (m model) openSessionPicker() (model, tea.Cmd, bool) {
+	if m.sessionStore == nil {
+		return m, nil, false
 	}
-	m.picker = picker
-	return m, true
+	if m.sessionScanInFlight {
+		// A scan is already running: mark its landing as resume-wanted so
+		// the picker arms when it lands. Joining an in-flight scan needs
+		// no second command.
+		m.resumePickerWanted = true
+		return m, nil, true
+	}
+	next, cmd := startSessionScan(m, "Resume a session")
+	next.resumePickerWanted = true
+	return next, cmd, cmd != nil
 }
 
 func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
@@ -631,6 +671,9 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 	// disambiguation the live runner applies — without it, dedup would drop
 	// every tool card after the first occurrence of an id.
 	callSeq := map[string]int{}
+	// GAP-L DoD 43/45: reasoning block ids rebuild across resume. Legacy
+	// payloads (pre-seq) count ordinally; new payloads pin the exact seq.
+	reasoningSeq := 0
 	// Pre-pass: collect the tool-call ids of Task delegations that actually started
 	// a specialist (each renders as a card below). Only those Task tool-call/result
 	// rows are redundant and skipped; a Task that failed before a specialist started
@@ -678,8 +721,17 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 		case sessions.EventReasoning:
 			// Rehydrate reasoning as a collapsed row so thinking survives /resume.
 			// The row shape matches the live path (reasoningTranscriptRow).
+			// The persisted seq rebuilds the same stable block id the live path
+			// minted (reasoning_N, DoD 43/45); legacy payloads without a seq fall
+			// back to ordinal counting over this event stream.
 			if content := payloadString(payload, "content"); content != "" {
-				if row, ok := reasoningTranscriptRow("", 0, content); ok {
+				reasoningSeq++
+				id := fmt.Sprintf("reasoning_%d", reasoningSeq)
+				if raw, ok := payloadInt(payload, "seq"); ok && raw > 0 {
+					id = fmt.Sprintf("reasoning_%d", raw)
+					reasoningSeq = raw
+				}
+				if row, ok := reasoningTranscriptRow(id, 0, content); ok {
 					rows = append(rows, row)
 				}
 			}
@@ -754,6 +806,16 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 			parentID := payloadString(payload, "parentSessionId")
 			if parentID != "" {
 				rows = append(rows, transcriptRow{kind: rowSystem, text: "forked from session: " + parentID})
+			}
+		case sessions.EventDecisionPinned:
+			// GAP-L DoD 46: the pinned-decisions ledger survives resume. The
+			// raw events carry each pin; the WHOLE ledger re-projects from the
+			// reconstructed state (append-only, revised decisions keep their
+			// predecessor visible) as one card instead of one row per event.
+			if state, stateErr := splicerun.ReconstructDesignState(events); stateErr == nil && len(state.Decisions) > 0 {
+				if card := decisionsCardTranscriptText(state.Decisions); card != "" {
+					rows = append(rows, transcriptRow{kind: rowSystem, text: card})
+				}
 			}
 		case sessions.EventSpecialistStart:
 			info := specialistInfoFromPayload(payload)

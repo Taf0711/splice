@@ -108,6 +108,23 @@ func TestStartupTrustChoiceContinuesToLaunchSessionPicker(t *testing.T) {
 	next = selectTrustItem(t, next, trustActionCurrent)
 	chosen, _ := next.choosePicker()
 	got := chosen.(model)
+	// Trust resolves into the launch state: the scan feeds the resume card,
+	// and the picker opens only via /resume (no auto-open modals). A scan
+	// already in flight (armed at Init) means /resume marks the intent and
+	// the picker arms when that scan lands.
+	// The trust flow armed a launch scan whose cmd the choosePicker return
+	// carried; this test dropped it, so emulate the landing (the flag
+	// clears, scannedLatest arms) before the explicit /resume.
+	got.sessionScanInFlight = false
+	got.input.SetValue("/resume")
+	updated, cmd := got.Update(testKey(tea.KeyEnter))
+	got = updated.(model)
+	if cmd != nil {
+		if msg := cmd(); msg != nil {
+			updated, _ = got.Update(msg)
+			got = updated.(model)
+		}
+	}
 	if got.picker == nil || got.picker.kind != pickerSession {
 		t.Fatalf("trust choice did not continue to launch session picker: %#v", got.picker)
 	}

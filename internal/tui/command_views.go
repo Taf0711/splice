@@ -16,10 +16,225 @@ import (
 	"github.com/Taf0711/splice/internal/zerocommands"
 )
 
+// toolsSourceGroup is one per-source grouping of the registered tool catalog:
+// the built-in tools, or the tools owned by one MCP server.
+type toolsSourceGroup struct {
+	// Source is the display source label: "BUILTIN", the MCP server name, or
+	// "(unknown source)" when a registered MCP tool cannot be attributed to a
+	// configured server. Never invent a server name — unattributable tools land
+	// here so the card stays honest.
+	Source string
+	// Names are the tool names in the group, alpha-sorted, in registry form.
+	Names []string
+	// Hidden counts tools the run defers behind tool_search; 0 when none.
+	Hidden int
+	// State is the MCP connection state from the MCP view ("connected",
+	// "degraded", "disabled", "enabled"); empty for BUILTIN.
+	State string
+}
+
+const toolsUnknownSourceLabel = "(unknown source)"
+
+// toolsGroupBySource partitions the registered tools into per-source groups.
+// Builtin tools (no "mcp_" prefix) form the BUILTIN group. MCP tools are
+// attributed via MCPServerName() when the tool reports it, else via the server
+// token in the "mcp_<server>_<tool>" registry name matched against the
+// configured MCP servers. Anything unattributable goes to "(unknown source)".
+// hidden counts deferred MCP tools whose schemas the run withholds behind
+// tool_search (agent.Options.DeferThreshold > 0 with more eligible tools than
+// the threshold); the card surfaces them as "degraded — N tools hidden" so the
+// registration list never overstates what the model can call without loading.
+func toolsGroupBySource(registered []tools.Tool, state MCPViewState, deferThreshold int) []toolsSourceGroup {
+	builtinNames := []string{}
+	serverTools := map[string][]string{}
+	var unknownNames []string
+
+	sortedServers := make([]string, 0, len(state.Servers))
+	for _, server := range state.Servers {
+		sortedServers = append(sortedServers, server.Name)
+	}
+	sort.Strings(sortedServers)
+
+	serverTokenMap := mcpServerTokens(state)
+
+	// eligible counts deferral-eligible MCP tools so hidden can be derived
+	// against the run's DeferThreshold, mirroring the agent loop's gate.
+	eligible := 0
+	for _, tool := range registered {
+		if tools.IsDeferralEligible(tool) {
+			eligible++
+		}
+	}
+	deferActive := deferThreshold > 0 && eligible >= deferThreshold
+
+	// A deferred MCP tool's schema is withheld: count it as hidden. Deferral
+	// only applies to deferred-eligible tools; builtin tools are always eager.
+	deferredEligibleNames := map[string]bool{}
+	if deferActive {
+		for _, tool := range registered {
+			if tools.IsDeferralEligible(tool) {
+				deferredEligibleNames[tool.Name()] = true
+			}
+		}
+	}
+
+	for _, tool := range registered {
+		name := tool.Name()
+		if !strings.HasPrefix(name, "mcp_") {
+			builtinNames = append(builtinNames, name)
+			continue
+		}
+		if deferredEligibleNames[name] {
+			continue
+		}
+		server := toolsServerFor(tool, state, serverTokenMap)
+		if server == "" {
+			unknownNames = append(unknownNames, name)
+			continue
+		}
+		serverTools[server] = append(serverTools[server], name)
+	}
+	sort.Strings(builtinNames)
+	for _, names := range serverTools {
+		sort.Strings(names)
+	}
+
+	groups := make([]toolsSourceGroup, 0, 1+len(state.Servers)+1)
+	if len(builtinNames) > 0 {
+		groups = append(groups, toolsSourceGroup{Source: "BUILTIN", Names: builtinNames})
+	}
+	for _, server := range sortedServers {
+		view := mcpServerViewByName(state, server)
+		group := toolsSourceGroup{
+			Source: server,
+			Names:  serverTools[server],
+			State:  toolsServerStateLabel(view),
+		}
+		hidden := 0
+		for _, tool := range registered {
+			if !deferredEligibleNames[tool.Name()] {
+				continue
+			}
+			if toolsServerFor(tool, state, serverTokenMap) == server {
+				hidden++
+			}
+		}
+		group.Hidden = hidden
+		if len(group.Names) > 0 || hidden > 0 {
+			groups = append(groups, group)
+		}
+	}
+	if len(unknownNames) > 0 {
+		sort.Strings(unknownNames)
+		groups = append(groups, toolsSourceGroup{Source: toolsUnknownSourceLabel, Names: unknownNames})
+	}
+	return groups
+}
+
+// mcpServerTokens maps each configured server's sanitized name token (the token
+// registryToolName embeds in "mcp_<server>_<tool>") to the server's real name.
+func mcpServerTokens(state MCPViewState) map[string]string {
+	tokens := make(map[string]string, len(state.Servers))
+	for _, server := range state.Servers {
+		tokens[mcpStateSanitizeToolNamePart(server.Name)] = server.Name
+	}
+	return tokens
+}
+
+// toolsServerFor resolves a registered MCP tool's owning server name: the
+// tool's own MCPServerName() report when present, else the configured server
+// whose sanitized token the registry name carries, else "" (unknown).
+func toolsServerFor(tool tools.Tool, state MCPViewState, serverTokenMap map[string]string) string {
+	if named, ok := tool.(mcpServerNamedTool); ok {
+		if reported := strings.TrimSpace(named.MCPServerName()); reported != "" && mcpServerViewByName(state, reported) != nil {
+			return reported
+		}
+	}
+	rest, ok := strings.CutPrefix(tool.Name(), "mcp_")
+	if !ok {
+		return ""
+	}
+	tokens := make([]string, 0, len(serverTokenMap))
+	for token := range serverTokenMap {
+		tokens = append(tokens, token)
+	}
+	sort.Slice(tokens, func(left, right int) bool {
+		if len(tokens[left]) != len(tokens[right]) {
+			return len(tokens[left]) > len(tokens[right])
+		}
+		return tokens[left] < tokens[right]
+	})
+	for _, token := range tokens {
+		if strings.HasPrefix(rest, token+"_") {
+			return serverTokenMap[token]
+		}
+	}
+	return ""
+}
+
+func mcpServerViewByName(state MCPViewState, name string) *MCPServerView {
+	for index := range state.Servers {
+		if state.Servers[index].Name == name {
+			return &state.Servers[index]
+		}
+	}
+	return nil
+}
+
+// toolsServerStateLabel picks the connection label for a server section header:
+// "degraded" when the run defers tools behind tool_search, otherwise the
+// configured state ("disabled" or "connected" for an enabled server).
+func toolsServerStateLabel(view *MCPServerView) string {
+	if view == nil {
+		return ""
+	}
+	if strings.EqualFold(strings.TrimSpace(view.State), "disabled") {
+		return "disabled"
+	}
+	return "connected"
+}
+
+// toolsSummaryLine joins a section's state words ("degraded — 2 tools hidden")
+// with the frame's em-dash separator. Sits on the section title line.
+func toolsSummaryLine(group toolsSourceGroup) string {
+	parts := []string{}
+	switch {
+	case group.Hidden > 0:
+		parts = append(parts, "degraded", fmt.Sprintf("— %d tools hidden", group.Hidden))
+	case group.State != "":
+		parts = append(parts, group.State)
+	}
+	return strings.Join(parts, " ")
+}
+
+// toolsRenderSectionLines renders a group's tool names the way the frame lays
+// them out: four per wrapped line, double-spaced, aligned under the header.
+func toolsRenderSectionLines(group toolsSourceGroup) []string {
+	lines := make([]string, 0, 1+len(group.Names)/4+1)
+	if summary := toolsSummaryLine(group); summary != "" {
+		lines = append(lines, summary)
+	}
+	const perLine = 4
+	for start := 0; start < len(group.Names); start += perLine {
+		end := start + perLine
+		if end > len(group.Names) {
+			end = len(group.Names)
+		}
+		lines = append(lines, strings.Join(group.Names[start:end], "  "))
+	}
+	return lines
+}
+
+// toolsHints renders the registration-vs-access note the /tools frame carries:
+// registration only lists a tool; /permissions decides what runs.
+func toolsHints(groups []toolsSourceGroup) []string {
+	return []string{"every tool here is gated by /permissions — registration is not access"}
+}
+
 func (m model) toolsText() string {
 	registered := m.registeredTools()
 	count := len(registered)
-	if len(registered) == 0 {
+	if count == 0 {
 		return renderCommandCardTranscript(commandCard{
 			Title:   "Tools",
 			Summary: []string{"0 registered", "no tools available"},
@@ -33,32 +248,28 @@ func (m model) toolsText() string {
 		})
 	}
 
-	names := make([]string, 0, count)
-	for _, tool := range registered {
-		names = append(names, tool.Name())
+	state := m.mcpViewState()
+	groups := toolsGroupBySource(registered, state, m.agentOptions.DeferThreshold)
+
+	sections := make([]commandCardSection, 0, len(groups))
+	for _, group := range groups {
+		sections = append(sections, commandCardSection{
+			Title: group.Source,
+			Lines: toolsRenderSectionLines(group),
+		})
 	}
-	sort.Strings(names)
-	available := make([]string, 0, len(names))
-	for _, name := range names {
-		available = append(available, commandBullet(name))
+
+	summary := fmt.Sprintf("%d registered", count)
+	if len(groups) > 1 {
+		summary = fmt.Sprintf("%d registered · %d sources", count, len(groups))
 	}
 
 	return renderCommandCardTranscript(commandCard{
-		Title:   "Tools",
-		Summary: []string{fmt.Sprintf("%d registered", count), "registered catalog"},
-		Sections: []commandCardSection{
-			{
-				Title: "Registry",
-				Fields: []commandField{
-					{Key: "registered", Value: fmt.Sprint(count)},
-				},
-			},
-			{
-				Title: "Available",
-				Lines: available,
-			},
-		},
-		Actions: []string{"/mcp manage servers", "/permissions manage access"},
+		Title:    "Tools",
+		Summary:  []string{summary, "registered catalog"},
+		Sections: sections,
+		Actions:  []string{"/mcp manage servers", "/permissions manage access"},
+		Hints:    toolsHints(groups),
 	})
 }
 
@@ -627,7 +838,16 @@ func (m model) contextText() string {
 
 // applyTrustPickerChoice saves the selected action and updates the live trust
 // indicator. Project resources keep the startup decision until the next launch.
+// The [V] view-config row is handled BEFORE the unknown-choice guard: it is an
+// inspection action, not a trust decision — it returns to the menu unchanged.
 func (m model) applyTrustPickerChoice(item pickerItem) (model, string, bool) {
+	if item.Value == trustActionView {
+		// Re-open the trust menu after the editor exits, and append the
+		// evidence card so the summary stays in the transcript.
+		cfg := describeProjectTrustConfig(m.projectConfigPath)
+		m.trustConfigNotice(cfg)
+		return m, "", false
+	}
 	target := m.cwd
 	trusted := item.Value != trustActionDecline
 	if item.Value == trustActionParent {

@@ -269,14 +269,15 @@ func (m model) composerPositionAtMouse(msg tea.MouseMsg) (int, bool) {
 	if width < 8 {
 		return m.composerPositionAtVisualCell(localX, localY, width)
 	}
-	contentY := localY - 1
+	contentY := localY
 	if renderAttachmentChips(m.pendingImageLabels, m.pendingDocuments) != "" {
 		contentY--
 	}
 	if contentY < 0 {
 		return 0, false
 	}
-	return m.composerPositionAtVisualCell(localX-2, contentY, maxInt(1, width-4))
+	// Bare-row composer (Pen): no border inset, full chat width.
+	return m.composerPositionAtVisualCell(localX, contentY, width)
 }
 
 func (m model) composerMouseSelectionBlocked() bool {

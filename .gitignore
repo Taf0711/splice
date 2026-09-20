@@ -77,5 +77,14 @@ graphify-out/
 /demo-repair-loop.tape
 /DEMO-RUNBOOK.md
 
-# Internal planning docs (specs/plans) - local only, never pushed to release branches
-plans/
+# Test transcript exports (tests must use their own temp dirs)
+/internal/tui/splice-transcript-*.txt
+
+# Local planning notes (working documents, not part of the product)
+/plans/
+
+# Demo capture asset (unreferenced, local only)
+/docs/assets/repair-loop.gif
+
+# Sandbox escape-test artifacts
+/internal/cli/.splice-sandbox-outside-*/

@@ -175,7 +175,7 @@ func TestDoctorCommandUsesDiagnosticCenterRow(t *testing.T) {
 			t.Fatalf("doctor row missing %q:\n%s", want, text)
 		}
 	}
-	for _, unwanted := range []string{"Generated", "Checks", "[pass]"} {
+	for _, unwanted := range []string{"Generated", "Checks"} {
 		if strings.Contains(text, unwanted) {
 			t.Fatalf("doctor row should hide %q:\n%s", unwanted, text)
 		}

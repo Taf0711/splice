@@ -272,9 +272,9 @@ var commandDefinitions = []commandDefinition{
 	},
 	{
 		name:        "/layout",
-		usage:       "/layout",
+		usage:       "/layout [list|preset]",
 		group:       commandGroupSession,
-		description: "Toggle layout options (persistent plan panel).",
+		description: "Show layout state, or apply a preset (default/compact/execution/review/minimal).",
 		kind:        commandLayout,
 	},
 	{
@@ -488,7 +488,7 @@ func formatGroupedCommandHelp() string {
 		lines = append(lines, commandGroupTitle(group))
 		lines = append(lines, groupLines...)
 	}
-	lines = append(lines, "hint: submit plain text to ask Splice")
+	lines = append(lines, "hint: descriptions live in the palette. Type / for command details.")
 	return strings.Join(lines, "\n")
 }
 
@@ -503,12 +503,15 @@ func commandHelpLinesForGroup(group commandGroup) []string {
 	return lines
 }
 
+// formatCommandHelpLine renders a help line as the command usage shape
+// (canonical name, optional arguments, aliases in parens). Descriptions do
+// not appear here: they live in the "/" palette suggestions.
 func formatCommandHelpLine(command commandDefinition) string {
 	label := command.usage
 	if len(command.aliases) > 0 {
 		label += " (" + strings.Join(command.aliases, ", ") + ")"
 	}
-	return label + " - " + command.description
+	return label
 }
 
 func commandSelectionRequiresInput(name string) bool {

@@ -324,6 +324,10 @@ const (
 	MergeBackSkippedDirty MergeBackStatus = "skipped_dirty"
 	// MergeBackConflict means the merge produced conflicts and was aborted.
 	MergeBackConflict MergeBackStatus = "conflict"
+	// MergeBackStale means the worktree content changed after the user
+	// reviewed it, so the merge was refused rather than applying work the
+	// user never saw (review finding 1).
+	MergeBackStale MergeBackStatus = "stale_review"
 )
 
 // MergeBackOptions configures MergeBack.
@@ -337,7 +341,14 @@ type MergeBackOptions struct {
 	// CommitMessage is used for the worktree commit; a default is derived
 	// from Name when empty.
 	CommitMessage string
-	RunGit        GitRunner
+	// ExpectedTree pins the content the user reviewed (review finding 1).
+	// When set, MergeBack recomputes the worktree's review tree and
+	// refuses the merge if it no longer matches, so a file changed after
+	// the review opened is never applied unseen. Empty means no review
+	// boundary was established and no revalidation is performed.
+	ExpectedTree string
+	RunGit       GitRunner
+	EnvGit       envGitRunner
 }
 
 // MergeBackResult reports what happened, including the surviving branch name
@@ -362,6 +373,22 @@ func MergeBack(ctx context.Context, options MergeBackOptions) (MergeBackResult, 
 	}
 	if err := validateName(options.Name); err != nil {
 		return MergeBackResult{}, err
+	}
+
+	// Review boundary (finding 1): when the caller reviewed a specific
+	// snapshot, confirm the worktree still holds it. A file written after
+	// the review opened would otherwise ride into the merge unseen.
+	if expected := strings.TrimSpace(options.ExpectedTree); expected != "" {
+		current, err := CurrentReviewTree(ctx, options.WorktreePath, options.EnvGit)
+		if err != nil {
+			return MergeBackResult{}, fmt.Errorf("revalidate reviewed snapshot %s: %w", expected, err)
+		}
+		if current != expected {
+			return MergeBackResult{
+				Status:  MergeBackStale,
+				Message: "worktree changed after the review: reviewed tree " + expected + ", current tree " + current,
+			}, nil
+		}
 	}
 
 	if err := commitWorktreeChanges(ctx, runGit, options); err != nil {

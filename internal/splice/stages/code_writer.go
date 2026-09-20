@@ -64,7 +64,7 @@ func (CodeWriter) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 	if err != nil {
 		return schemas.HarnessStageOutput{}, err
 	}
-	collected, err := callValidatedToolUse(ctx, provider, options.model("medium"), options.ReasoningEffort, composeSystemPrompt(codeWriterSystemPrompt), string(payload), options.Images, submitCodeToolDefinition(len(cwInput.Memory) > 0), options.MaxOutputTokens, &options.Stream, func(collected *zeroruntime.CollectedStream) error {
+	collected, err := callValidatedToolUse(ctx, provider, options.model("medium"), options.ReasoningEffort, composeSystemPrompt(codeWriterSystemPrompt), string(payload), options.Images, submitCodeToolDefinition(), options.MaxOutputTokens, &options.Stream, func(collected *zeroruntime.CollectedStream) error {
 		_, err := parseCodeWriterOutput(collected)
 		return err
 	}, options.PromptCacheKey)
@@ -141,7 +141,7 @@ func parseCodeWriterOutput(collected *zeroruntime.CollectedStream) (schemas.Code
 	return output, nil
 }
 
-func submitCodeToolDefinition(hasMemory bool) zeroruntime.ToolDefinition {
+func submitCodeToolDefinition() zeroruntime.ToolDefinition {
 	definition := zeroruntime.ToolDefinition{
 		Name:        codeWriterToolName,
 		Description: "Submit the complete CodeWriterOutput for the requested implementation.",
@@ -158,7 +158,7 @@ func submitCodeToolDefinition(hasMemory bool) zeroruntime.ToolDefinition {
 			"required": []string{"files", "language", "intent", "confidence"},
 		},
 	}
-	applyMemoryDefinition(definition.Parameters, hasMemory)
+	applyMemoryDefinition(definition.Parameters)
 	return definition
 }
 

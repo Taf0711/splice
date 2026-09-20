@@ -63,6 +63,12 @@ type CollectOptions struct {
 	OnToolCallDelta    func(id, fragment string)
 	OnServerToolUse    func(kind string, query string)
 	OnServerToolResult func(kind string, resultCount int)
+	// OnPromptLayout reports the stable-prefix layout hash of the request that
+	// is about to run. It fires once per provider request, before the stream
+	// starts. The hash covers the system prompt and the tool schema, the two
+	// components of a cacheable prefix, so a caller can detect a prefix flip
+	// between rounds. nil is a no-op.
+	OnPromptLayout func(hash string)
 }
 
 // SeedMessages creates the initial system and user turns for a request. It is a

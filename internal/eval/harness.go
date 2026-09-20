@@ -164,7 +164,7 @@ func (h *Harness) Run(ctx context.Context, taskset TaskSet, model, provider stri
 		}
 	}
 
-	decision := Decide(DecisionInput{Pairs: len(pairs), Cold: cold, Warm: warm})
+	decision := Decide(DecisionInput{Pairs: len(taskset.Tasks), Cold: cold, Warm: warm, Tasks: pairs})
 	return Report{
 		Contract:  ReportContractVersion,
 		Taskset:   taskset.Name,
@@ -178,6 +178,7 @@ func (h *Harness) Run(ctx context.Context, taskset TaskSet, model, provider stri
 		Gates:     decision.Gates,
 		Verdict:   decision.Verdict,
 		Reason:    decision.Reason,
+		Cost:      decision.Cost,
 		Constants: ReportConstants(),
 	}, nil
 }

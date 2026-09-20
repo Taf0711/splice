@@ -547,6 +547,14 @@ const (
 	CostStatusError    = "error"
 )
 
+// MemoryPosition states describe where dynamic content sits relative to the
+// cacheable prefix of a request. Dynamic content after the prefix keeps the
+// prefix cacheable. Content before the prefix changes the prefix itself.
+const (
+	MemoryPositionAfterPrefix  = "after_prefix"
+	MemoryPositionBeforePrefix = "before_prefix"
+)
+
 // PipelineUsageRecord is one provider request priced at the orchestrator ledger.
 type PipelineUsageRecord struct {
 	Sequence          int      `json:"sequence"`
@@ -568,6 +576,21 @@ type PipelineUsageRecord struct {
 	PricingSource     string   `json:"pricing_source,omitempty"`
 	PricingAsOf       string   `json:"pricing_as_of,omitempty"`
 	UnpricedReason    string   `json:"unpriced_reason,omitempty"`
+	// PromptLayoutHash is the stable-prefix layout hash (system prompt plus
+	// tool schema) of this request. Records for one stage within a run must
+	// share one hash; a change between rounds means the cacheable prefix
+	// flipped and the provider's prefix cache was forfeited.
+	PromptLayoutHash string `json:"prompt_layout_hash,omitempty"`
+	// CacheHit reports whether this request read a cached prefix. Nil means the
+	// provider reported no usage, or the report could not be normalized. A
+	// missing report is not a cache miss, so the field stays nil rather than
+	// defaulting to false.
+	CacheHit *bool `json:"cache_hit,omitempty"`
+	// MemoryPosition records where dynamic content (memory, prior summaries,
+	// revision context) sits relative to the cacheable prefix. Splice places it
+	// after the prefix by construction, so this is a constant today. It is
+	// recorded so a reader does not have to infer the placement.
+	MemoryPosition string `json:"memory_position,omitempty"`
 }
 
 // Validate checks the pipeline usage record.
@@ -602,6 +625,17 @@ func (r PipelineUsageRecord) Validate() error {
 		}
 		if r.CostStatus != CostStatusUnpriced {
 			return errors.New("usage_reported false requires unpriced cost status")
+		}
+	}
+	if r.MemoryPosition != "" && r.MemoryPosition != MemoryPositionAfterPrefix && r.MemoryPosition != MemoryPositionBeforePrefix {
+		return fmt.Errorf("invalid memory_position %q", r.MemoryPosition)
+	}
+	if r.CacheHit != nil {
+		if !r.UsageReported {
+			return errors.New("cache_hit requires reported usage")
+		}
+		if *r.CacheHit != (r.CachedTokens > 0) {
+			return fmt.Errorf("cache_hit %t does not match cached input tokens %d", *r.CacheHit, r.CachedTokens)
 		}
 	}
 	switch r.CostStatus {
@@ -657,11 +691,22 @@ type PipelineResult struct {
 	PricedRequestCount    int                    `json:"priced_request_count"`
 	UnpricedRequestCount  int                    `json:"unpriced_request_count"`
 	ErrorRequestCount     int                    `json:"error_request_count"`
-	AbortReason           *string                `json:"abort_reason,omitempty"`
-	MergeStatus           *string                `json:"merge_status,omitempty"`
-	MergeBranch           *string                `json:"merge_branch,omitempty"`
-	MergeCommitSHA        *string                `json:"merge_commit_sha,omitempty"`
-	MergeMessage          *string                `json:"merge_message,omitempty"`
+	// PromptLayoutFlips counts requests whose cacheable prefix layout (system
+	// prompt plus tool schema) differs from the previous request of the same
+	// stage in this run. Zero is the contract: a non-zero count means the
+	// provider's prefix cache was forfeited mid-stage. A request without a
+	// prompt_layout_hash carries no layout to compare and is skipped.
+	PromptLayoutFlips int     `json:"prompt_layout_flips,omitempty"`
+	AbortReason       *string `json:"abort_reason,omitempty"`
+	// UserAborted marks an aborted run the USER chose to stop. It is set
+	// only at the site that applies a user abort decision. Every other
+	// aborted run is an internal stop (max iterations, wall time, rollback
+	// refuse) and must project FAILED, not CANCELLED.
+	UserAborted    bool    `json:"user_aborted,omitempty"`
+	MergeStatus    *string `json:"merge_status,omitempty"`
+	MergeBranch    *string `json:"merge_branch,omitempty"`
+	MergeCommitSHA *string `json:"merge_commit_sha,omitempty"`
+	MergeMessage   *string `json:"merge_message,omitempty"`
 }
 
 // Validate checks the pipeline result.
@@ -697,7 +742,7 @@ func (p PipelineResult) Validate() error {
 			return fmt.Errorf("invalid merge_status %q", *p.MergeStatus)
 		}
 	}
-	if p.PricedRequestCount < 0 || p.UnpricedRequestCount < 0 || p.ErrorRequestCount < 0 {
+	if p.PricedRequestCount < 0 || p.UnpricedRequestCount < 0 || p.ErrorRequestCount < 0 || p.PromptLayoutFlips < 0 {
 		return errors.New("request counts must be non-negative")
 	}
 	var input, output, cached, cacheWrite, reasoning int

@@ -167,7 +167,7 @@ func TestSwarmSessionsMsgPopulatesMap(t *testing.T) {
 
 func sidebarTestModel() model {
 	m := newModel(context.Background(), Options{ProviderName: "test-provider", ModelName: "test-model"})
-	m.width = 100
+	m.width = 130
 	m.height = 30
 	m.altScreen = true
 	m.headerPrinted = true
@@ -198,11 +198,14 @@ func TestSidebarActiveGating(t *testing.T) {
 		t.Fatalf("expected sidebar active for wide alt-screen model")
 	}
 
-	// Home/welcome screen (no real conversation yet): single column.
+	// P12 (frame kAYHl): the launch cockpit IS two-column — the empty home
+	// screen hosts the launch modules (NEXT/DECISIONS/AGENTS/TOOLS/CONTEXT),
+	// so the sidebar stays active there. The old single-column-until-conversation
+	// rule retired with the splash.
 	home := m
 	home.transcript = nil
-	if home.sidebarActive() {
-		t.Fatalf("sidebar should be inactive on the empty home screen")
+	if !home.sidebarActive() {
+		t.Fatalf("sidebar should be ACTIVE on the empty home screen (launch cockpit is two-column)")
 	}
 
 	// Too narrow: single column only.
