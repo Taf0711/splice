@@ -320,7 +320,7 @@ func DefaultBuildOutput(rootDir string, goos string) string {
 }
 
 func BuildLdflags(version string) string {
-	return "-s -w -X github.com/Taf0711/splice/internal/cli.version=" + version
+	return "-s -w -X github.com/Taf0711/splice/internal/version.Version=" + version
 }
 
 func ReleasePlatform(goos string) (string, error) {

@@ -4,7 +4,18 @@
     "lifecycle": "executing",
     "plan": {
       "title": "add a Hello function and tests",
-      "task_count": 4
+      "task_count": 4,
+      "dependencies": {
+        "acceptance_verifier": [
+          "test_runner"
+        ],
+        "static_analyzer": [
+          "code_writer"
+        ],
+        "test_runner": [
+          "static_analyzer"
+        ]
+      }
     },
     "nodes": null,
     "interventions": null,
@@ -24,7 +35,18 @@
     "lifecycle": "executing",
     "plan": {
       "title": "add a Hello function and tests",
-      "task_count": 4
+      "task_count": 4,
+      "dependencies": {
+        "acceptance_verifier": [
+          "test_runner"
+        ],
+        "static_analyzer": [
+          "code_writer"
+        ],
+        "test_runner": [
+          "static_analyzer"
+        ]
+      }
     },
     "nodes": [
       {
@@ -65,7 +87,18 @@
     "lifecycle": "executing",
     "plan": {
       "title": "add a Hello function and tests",
-      "task_count": 4
+      "task_count": 4,
+      "dependencies": {
+        "acceptance_verifier": [
+          "test_runner"
+        ],
+        "static_analyzer": [
+          "code_writer"
+        ],
+        "test_runner": [
+          "static_analyzer"
+        ]
+      }
     },
     "nodes": [
       {
@@ -106,7 +139,18 @@
     "lifecycle": "verifying",
     "plan": {
       "title": "add a Hello function and tests",
-      "task_count": 4
+      "task_count": 4,
+      "dependencies": {
+        "acceptance_verifier": [
+          "test_runner"
+        ],
+        "static_analyzer": [
+          "code_writer"
+        ],
+        "test_runner": [
+          "static_analyzer"
+        ]
+      }
     },
     "nodes": [
       {
@@ -147,6 +191,9 @@
           "reasoning_tokens": 0,
           "cost_usd": 0
         },
+        "dependencies": [
+          "code_writer"
+        ],
         "workspace": "shared_cwd"
       }
     ],
@@ -167,7 +214,18 @@
     "lifecycle": "executing",
     "plan": {
       "title": "add a Hello function and tests",
-      "task_count": 4
+      "task_count": 4,
+      "dependencies": {
+        "acceptance_verifier": [
+          "test_runner"
+        ],
+        "static_analyzer": [
+          "code_writer"
+        ],
+        "test_runner": [
+          "static_analyzer"
+        ]
+      }
     },
     "nodes": [
       {
@@ -208,6 +266,9 @@
           "reasoning_tokens": 0,
           "cost_usd": 0
         },
+        "dependencies": [
+          "code_writer"
+        ],
         "workspace": "shared_cwd"
       }
     ],
@@ -228,7 +289,18 @@
     "lifecycle": "executing",
     "plan": {
       "title": "add a Hello function and tests",
-      "task_count": 4
+      "task_count": 4,
+      "dependencies": {
+        "acceptance_verifier": [
+          "test_runner"
+        ],
+        "static_analyzer": [
+          "code_writer"
+        ],
+        "test_runner": [
+          "static_analyzer"
+        ]
+      }
     },
     "nodes": [
       {
@@ -269,6 +341,9 @@
           "reasoning_tokens": 0,
           "cost_usd": 0
         },
+        "dependencies": [
+          "code_writer"
+        ],
         "workspace": "shared_cwd"
       },
       {
@@ -289,6 +364,9 @@
           "reasoning_tokens": 0,
           "cost_usd": 0
         },
+        "dependencies": [
+          "static_analyzer"
+        ],
         "workspace": "shared_cwd"
       }
     ],
@@ -309,7 +387,18 @@
     "lifecycle": "executing",
     "plan": {
       "title": "add a Hello function and tests",
-      "task_count": 4
+      "task_count": 4,
+      "dependencies": {
+        "acceptance_verifier": [
+          "test_runner"
+        ],
+        "static_analyzer": [
+          "code_writer"
+        ],
+        "test_runner": [
+          "static_analyzer"
+        ]
+      }
     },
     "nodes": [
       {
@@ -350,6 +439,9 @@
           "reasoning_tokens": 0,
           "cost_usd": 0
         },
+        "dependencies": [
+          "code_writer"
+        ],
         "workspace": "shared_cwd"
       },
       {
@@ -370,6 +462,9 @@
           "reasoning_tokens": 0,
           "cost_usd": 0
         },
+        "dependencies": [
+          "static_analyzer"
+        ],
         "workspace": "shared_cwd"
       }
     ],
@@ -390,7 +485,18 @@
     "lifecycle": "verifying",
     "plan": {
       "title": "add a Hello function and tests",
-      "task_count": 4
+      "task_count": 4,
+      "dependencies": {
+        "acceptance_verifier": [
+          "test_runner"
+        ],
+        "static_analyzer": [
+          "code_writer"
+        ],
+        "test_runner": [
+          "static_analyzer"
+        ]
+      }
     },
     "nodes": [
       {
@@ -431,6 +537,9 @@
           "reasoning_tokens": 0,
           "cost_usd": 0
         },
+        "dependencies": [
+          "code_writer"
+        ],
         "workspace": "shared_cwd"
       },
       {
@@ -451,6 +560,9 @@
           "reasoning_tokens": 0,
           "cost_usd": 0
         },
+        "dependencies": [
+          "static_analyzer"
+        ],
         "workspace": "shared_cwd"
       },
       {
@@ -471,6 +583,9 @@
           "reasoning_tokens": 0,
           "cost_usd": 0
         },
+        "dependencies": [
+          "test_runner"
+        ],
         "workspace": "shared_cwd"
       }
     ],
@@ -491,7 +606,18 @@
     "lifecycle": "executing",
     "plan": {
       "title": "add a Hello function and tests",
-      "task_count": 4
+      "task_count": 4,
+      "dependencies": {
+        "acceptance_verifier": [
+          "test_runner"
+        ],
+        "static_analyzer": [
+          "code_writer"
+        ],
+        "test_runner": [
+          "static_analyzer"
+        ]
+      }
     },
     "nodes": [
       {
@@ -532,6 +658,9 @@
           "reasoning_tokens": 0,
           "cost_usd": 0
         },
+        "dependencies": [
+          "code_writer"
+        ],
         "workspace": "shared_cwd"
       },
       {
@@ -552,6 +681,9 @@
           "reasoning_tokens": 0,
           "cost_usd": 0
         },
+        "dependencies": [
+          "static_analyzer"
+        ],
         "workspace": "shared_cwd"
       },
       {
@@ -572,6 +704,9 @@
           "reasoning_tokens": 0,
           "cost_usd": 0
         },
+        "dependencies": [
+          "test_runner"
+        ],
         "workspace": "shared_cwd"
       }
     ],
@@ -592,7 +727,18 @@
     "lifecycle": "complete",
     "plan": {
       "title": "add a Hello function and tests",
-      "task_count": 4
+      "task_count": 4,
+      "dependencies": {
+        "acceptance_verifier": [
+          "test_runner"
+        ],
+        "static_analyzer": [
+          "code_writer"
+        ],
+        "test_runner": [
+          "static_analyzer"
+        ]
+      }
     },
     "nodes": [
       {
@@ -633,6 +779,9 @@
           "reasoning_tokens": 0,
           "cost_usd": 0
         },
+        "dependencies": [
+          "code_writer"
+        ],
         "workspace": "shared_cwd"
       },
       {
@@ -653,6 +802,9 @@
           "reasoning_tokens": 0,
           "cost_usd": 0
         },
+        "dependencies": [
+          "static_analyzer"
+        ],
         "workspace": "shared_cwd"
       },
       {
@@ -673,6 +825,9 @@
           "reasoning_tokens": 0,
           "cost_usd": 0
         },
+        "dependencies": [
+          "test_runner"
+        ],
         "workspace": "shared_cwd"
       }
     ],

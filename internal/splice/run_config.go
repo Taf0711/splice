@@ -69,6 +69,7 @@ type PipelineRunConfig struct {
 	OnToolOutput                func(tools.OutputSnapshot)
 	FileDiagnostics             func(ctx context.Context, absPath string) string
 	StageModelResolver          agent.StageModelResolver
+	NodeModelResolver           agent.NodeModelResolver
 	EscalationModelResolver     agent.EscalationModelResolver
 	OnSurfaceToUser             func(ctx context.Context, req agent.SurfaceToUserRequest) (agent.SurfaceToUserDecision, error)
 	OnPipelinePlan              func(agent.PipelinePlanEvent)
@@ -125,6 +126,7 @@ func PipelineConfigFromAgentOptions(options agent.Options) PipelineRunConfig {
 		OnToolOutput:            options.OnToolOutput,
 		FileDiagnostics:         options.FileDiagnostics,
 		StageModelResolver:      options.StageModelResolver,
+		NodeModelResolver:       options.NodeModelResolver,
 		EscalationModelResolver: options.EscalationModelResolver,
 		OnSurfaceToUser:         options.OnSurfaceToUser,
 		OnPipelinePlan:          options.OnPipelinePlan,
@@ -161,6 +163,7 @@ func (c PipelineRunConfig) agentOptions() agent.Options {
 // pipeline does not consume. Reasons must stay non-empty.
 var pipelineIgnoredAgentOptionReasons = map[string]string{
 	"MaxTurns":                   "agent.Run turn cap; pipeline passes use defaultMaxIterations (SD6)",
+	"Pipeline":                   "the --pipeline topology selection is resolved by Run after workspace trust, not by PipelineConfigFromAgentOptions",
 	"DeferThreshold":             "deferred MCP/tool_search loading is agent-loop only",
 	"Specialists":                "Task-tool prompt decoration is agent-loop only",
 	"Skills":                     "skill-tool prompt decoration is agent-loop only",

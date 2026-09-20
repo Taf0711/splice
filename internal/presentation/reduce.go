@@ -25,15 +25,22 @@ const (
 // the runtime event types without modifying them. An unknown EventKind is an
 // error, never a silent no-op.
 type Event struct {
-	Kind             EventKind
-	NodeID           string
-	NodeKind         NodeKind
-	Status           string
-	Detail           string
-	Progress         int
-	StageNames       []string
-	Title            string
-	InterventionKind InterventionKind
+	Kind   EventKind
+	NodeID string
+	// Iteration is the pipeline pass the node event belongs to. Node
+	// identity is (NodeID, Iteration), so a later pass does not overwrite an
+	// earlier one.
+	Iteration  int
+	NodeKind   NodeKind
+	Status     string
+	Detail     string
+	Progress   int
+	StageNames []string
+	// StageDependencies carries the compiled graph when the plan event has
+	// one: stage name to the stages that run before it.
+	StageDependencies map[string][]string
+	Title             string
+	InterventionKind  InterventionKind
 	// Workspace isolation state (DoD 26), stamped by the adapter.
 	Workspace    string
 	WorktreePath string
@@ -52,11 +59,14 @@ type StreamEventLike interface {
 // the adapter), status, detail, and integer progress, plus the stage's
 // workspace isolation state (DoD 26).
 type StageEvent struct {
-	ID       string
-	Kind     NodeKind
-	Status   string
-	Detail   string
-	Progress int
+	ID string
+	// Iteration is the pipeline pass this stage event belongs to. Together
+	// with ID it is the node identity, so a re-entry pass keeps its own node.
+	Iteration int
+	Kind      NodeKind
+	Status    string
+	Detail    string
+	Progress  int
 	// Workspace is the stage's isolation state ("isolated"/"shared_cwd"),
 	// stamped by the runtime; empty means unset.
 	Workspace    string
@@ -66,12 +76,13 @@ type StageEvent struct {
 // PresentationEvent projects the stage event into the normalized form.
 func (e StageEvent) PresentationEvent() Event {
 	return Event{
-		Kind:     EventKindStage,
-		NodeID:   e.ID,
-		NodeKind: e.Kind,
-		Status:   e.Status,
-		Detail:   e.Detail,
-		Progress: e.Progress,
+		Kind:      EventKindStage,
+		NodeID:    e.ID,
+		Iteration: e.Iteration,
+		NodeKind:  e.Kind,
+		Status:    e.Status,
+		Detail:    e.Detail,
+		Progress:  e.Progress,
 		// Workspace flows through for DoD 26's isolation badge.
 		Workspace:    e.Workspace,
 		WorktreePath: e.WorktreePath,
@@ -80,16 +91,18 @@ func (e StageEvent) PresentationEvent() Event {
 
 // PlanEvent announces the ordered stage roster of one pipeline plan.
 type PlanEvent struct {
-	Title      string
-	StageNames []string
+	Title        string
+	StageNames   []string
+	Dependencies map[string][]string
 }
 
 // PresentationEvent projects the plan event into the normalized form.
 func (e PlanEvent) PresentationEvent() Event {
 	return Event{
-		Kind:       EventKindPlan,
-		StageNames: e.StageNames,
-		Title:      e.Title,
+		Kind:              EventKindPlan,
+		StageNames:        e.StageNames,
+		StageDependencies: clonePlanDependencies(e.Dependencies),
+		Title:             e.Title,
 	}
 }
 
@@ -193,25 +206,31 @@ func applyStage(state State, event Event) (State, error) {
 	}
 	kind := event.NodeKind
 	if err := kind.Validate(); err != nil {
-		return State{}, fmt.Errorf("stage event for %s: %w", nodeID, err)
+		return State{}, fmt.Errorf("stage event for %s iteration %d: %w", nodeID, event.Iteration, err)
 	}
 	out := cloneState(state)
 	idx := -1
 	for i := range out.Nodes {
-		if out.Nodes[i].ID == nodeID {
+		if out.Nodes[i].ID == nodeID && out.Nodes[i].Iteration == event.Iteration {
 			idx = i
 			break
 		}
 	}
 	node := ExecutionNode{
-		ID:       nodeID,
-		Label:    nodeID,
-		Kind:     kind,
-		Status:   status,
-		Progress: float64(progress) / 100,
+		ID:        nodeID,
+		Label:     nodeID,
+		Iteration: event.Iteration,
+		Kind:      kind,
+		Status:    status,
+		Progress:  float64(progress) / 100,
 		// Workspace isolation flows from the runtime event (DoD 26).
 		Workspace:    event.Workspace,
 		WorktreePath: event.WorktreePath,
+	}
+	// The plan graph is the source of a node's dependencies. It arrives with
+	// the plan event, before any stage event, so it is available here.
+	if deps := out.Plan.Dependencies[nodeID]; len(deps) > 0 {
+		node.Dependencies = append([]string(nil), deps...)
 	}
 	if idx >= 0 {
 		// Preserve per-node identity across updates. A terminal status may
@@ -220,7 +239,11 @@ func applyStage(state State, event Event) (State, error) {
 		node.Iteration = prior.Iteration
 		node.Cost = prior.Cost
 		node.Usage = prior.Usage
-		node.Dependencies = prior.Dependencies
+		// The compiled graph is the source of truth; a node created without a
+		// plan event keeps whatever an earlier event carried.
+		if len(node.Dependencies) == 0 {
+			node.Dependencies = prior.Dependencies
+		}
 		// Workspace identity persists across re-entries: a lane does not
 		// change isolation mid-run.
 		if node.Workspace == "" {
@@ -257,7 +280,7 @@ func applyPlan(state State, event Event) (State, error) {
 	}
 	out := cloneState(state)
 	out.Lifecycle = LifecycleExecute
-	out.Plan = Plan{Title: event.Title, TaskCount: len(event.StageNames)}
+	out.Plan = Plan{Title: event.Title, TaskCount: len(event.StageNames), Dependencies: clonePlanDependencies(event.StageDependencies)}
 	return out, nil
 }
 
@@ -349,6 +372,7 @@ func applyIntervention(state State, event Event) (State, error) {
 func cloneState(state State) State {
 	out := state
 	out.Nodes = append([]ExecutionNode(nil), state.Nodes...)
+	out.Plan.Dependencies = clonePlanDependencies(state.Plan.Dependencies)
 	for i := range out.Nodes {
 		out.Nodes[i].Usage.ByNode = cloneTokenUsage(state.Nodes[i].Usage.ByNode)
 	}
@@ -365,6 +389,17 @@ func cloneState(state State) State {
 	if state.Completion != nil {
 		completion := *state.Completion
 		out.Completion = &completion
+	}
+	return out
+}
+
+func clonePlanDependencies(source map[string][]string) map[string][]string {
+	if source == nil {
+		return nil
+	}
+	out := make(map[string][]string, len(source))
+	for name, deps := range source {
+		out[name] = append([]string(nil), deps...)
 	}
 	return out
 }

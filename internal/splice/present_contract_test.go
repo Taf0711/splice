@@ -173,7 +173,7 @@ func replayAccumulator(t *testing.T, plans []agent.PipelinePlanEvent, events []a
 	t.Helper()
 	acc := presentrun.New(func(msg string) { t.Logf("presentrun: %s", msg) })
 	for _, plan := range plans {
-		acc.Apply(presentrun.AdaptPlanEvent(title, plan.Stages))
+		acc.Apply(presentrun.AdaptPlanEventWithDependencies(title, plan.Stages, plan.Dependencies))
 	}
 	for _, event := range events {
 		acc.Apply(presentrun.AdaptStageEvent(event))
@@ -321,7 +321,7 @@ func TestPresentationErrorSurface(t *testing.T) {
 	var warnings []string
 	acc := presentrun.New(func(msg string) { warnings = append(warnings, msg) })
 	for _, plan := range plans {
-		acc.Apply(presentrun.AdaptPlanEvent("", plan.Stages))
+		acc.Apply(presentrun.AdaptPlanEventWithDependencies("", plan.Stages, plan.Dependencies))
 	}
 	for _, event := range stages {
 		acc.Apply(presentrun.AdaptStageEvent(event))
@@ -341,5 +341,34 @@ func TestPresentationErrorSurface(t *testing.T) {
 	}
 	if applied == 0 {
 		t.Fatal("no events applied before the refusal")
+	}
+}
+
+// TestPresentationCarriesCompiledDependencies pins the end-to-end graph
+// wiring: the compiled plan's DependsOn reaches the plan event, and each
+// presentation node carries its dependencies instead of an empty field.
+func TestPresentationCarriesCompiledDependencies(t *testing.T) {
+	_, plans, snapshots, result := runWithPresentation(t, "add a Hello function and tests", runFakeProvider{}, agent.Options{PermissionMode: agent.PermissionModeAuto})
+	if result.Status != "completed" {
+		t.Fatalf("pipeline status = %q, want completed", result.Status)
+	}
+	planHasDeps := false
+	for _, plan := range plans {
+		if len(plan.Dependencies) > 0 {
+			planHasDeps = true
+		}
+	}
+	if !planHasDeps {
+		t.Fatal("no pipeline plan event carried compiled dependencies")
+	}
+	final := snapshots[len(snapshots)-1]
+	found := false
+	for _, node := range final.Nodes {
+		if len(node.Dependencies) > 0 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no presentation node carried compiled dependencies")
 	}
 }

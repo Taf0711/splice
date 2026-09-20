@@ -289,7 +289,7 @@ func attemptLocalRepair(
 		if repairN > 1 && (repeatedNoEvidence || stalledCount >= 2) {
 			// Same fingerprint and no new evidence after the evidence-informed
 			// retry: stop writing and surface the typed outcome.
-			emitStageEvent(options, "test_runner", "message", fmt.Sprintf("%s: identical failure with no new evidence after %d repair(s); stopping repair loop", repairNoProgressReason, attempts), 0, nil)
+			emitStageEvent(options, iteration-1, "test_runner", "message", fmt.Sprintf("%s: identical failure with no new evidence after %d repair(s); stopping repair loop", repairNoProgressReason, attempts), 0, nil)
 			return false, &schemas.InteractionRecord{
 				Message:   lastMessage,
 				Iteration: iteration,
@@ -336,12 +336,14 @@ func attemptLocalRepair(
 		lastMessage = message
 		attempts++
 
-		emitStageEvent(options, "test_runner", "message", fmt.Sprintf("revision_request -> code_writer: %d failing tests", len(names)), 0, nil)
+		emitStageEvent(options, iteration-1, "test_runner", "message", fmt.Sprintf("revision_request -> code_writer: %d failing tests", len(names)), 0, nil)
 
 		// Re-enter code_writer with the focused revision context.
 		writerInput := repairStageInput(runID, "code_writer", plan, stageNames, *priorSummaries, *priorChangedFiles, &revisionContext)
 		writerStart := time.Now()
-		writerOutput, werr := runRepairStage(ctx, wallDeadline, writerInput, codeWriterStage, iteration, repairSelection(options, provider, "code_writer", false), options, workDir, runner, mem, stageBudgetByName(plan, "code_writer"), plan.Tier, tr)
+		writerPlanStage, _ := stageByPlanName(plan, "code_writer")
+		writerCaps := effectiveCaps(writerPlanStage, codeWriterStage.Capabilities())
+		writerOutput, werr := runRepairStage(ctx, wallDeadline, writerInput, codeWriterStage, iteration, repairSelection(options, provider, "code_writer", writerPlanStage.Model, false), options, workDir, runner, mem, writerCaps, stageBudgetByName(plan, "code_writer"), plan.Tier, tr)
 		totalLatency += int(time.Since(writerStart).Milliseconds())
 		if werr != nil {
 			return false, nil, fmt.Errorf("repair: code_writer re-entry: %w", werr)
@@ -366,10 +368,12 @@ func attemptLocalRepair(
 		// re-entry itself already emits running/completed through
 		// runStageWithContext; this labeled note is what makes the stream show
 		// WHY a second test_runner run exists mid-iteration.
-		emitStageEvent(options, "test_runner", "message", fmt.Sprintf("repair re-entry %d: re-running tests", attempts), 0, nil)
+		emitStageEvent(options, iteration-1, "test_runner", "message", fmt.Sprintf("repair re-entry %d: re-running tests", attempts), 0, nil)
 		testInput := repairStageInput(runID, "test_runner", plan, stageNames, *priorSummaries, *priorChangedFiles, nil)
 		testStart := time.Now()
-		newTestOutput, terr := runRepairStage(ctx, wallDeadline, testInput, testRunnerStage, iteration, agent.ModelSelection{}, options, workDir, runner, mem, stageBudgetByName(plan, "test_runner"), plan.Tier, tr)
+		testPlanStage, _ := stageByPlanName(plan, "test_runner")
+		testCaps := effectiveCaps(testPlanStage, testRunnerStage.Capabilities())
+		newTestOutput, terr := runRepairStage(ctx, wallDeadline, testInput, testRunnerStage, iteration, agent.ModelSelection{}, options, workDir, runner, mem, testCaps, stageBudgetByName(plan, "test_runner"), plan.Tier, tr)
 		totalLatency += int(time.Since(testStart).Milliseconds())
 		if terr != nil {
 			return false, nil, fmt.Errorf("repair: test_runner re-run: %w", terr)
@@ -392,9 +396,8 @@ func attemptLocalRepair(
 		*outputs = append(*outputs, newTestOutput)
 		currentOutput = newTestOutput
 
-		newResults, resultsOK := newTestOutput.Data["test_results"].(schemas.TestRunResults)
-		if resultsOK && newResults.Failed() == 0 {
-			emitStageEvent(options, "test_runner", "repaired", "revision resolved: tests pass", 100, nil)
+		if newResults, ok := newTestOutput.Data["test_results"].(schemas.TestRunResults); ok && newResults.Failed() == 0 {
+			emitStageEvent(options, iteration-1, "test_runner", "repaired", "revision resolved: tests pass", 100, nil)
 			(*priorSummaries)["code_writer"] = *mergedWriter.OutputSummary
 			(*priorSummaries)["test_runner"] = *mergedRunner.OutputSummary
 			return true, &schemas.InteractionRecord{
@@ -417,7 +420,7 @@ func attemptLocalRepair(
 	// Exhausted: the test_runner record already reflects the latest failing
 	// result via the merge above; the pass continues normally. Distinguish
 	// "still failing after N repairs" from "no repair attempted" in streams.
-	emitStageEvent(options, "test_runner", "message", fmt.Sprintf("repair_exhausted: still failing after %d repair(s)", attempts), 0, nil)
+	emitStageEvent(options, iteration-1, "test_runner", "message", fmt.Sprintf("repair_exhausted: still failing after %d repair(s)", attempts), 0, nil)
 	return false, &schemas.InteractionRecord{
 		Message:   lastMessage,
 		Iteration: iteration,
@@ -560,20 +563,27 @@ func repairStageInput(runID, stageName string, plan schemas.ExecutionPlan, stage
 // repairSelection resolves a repair stage's model selection with the same
 // precedence as the pass loop: default run selection, then the per-stage
 // resolver for model-backed stages; model-free stages get a zero selection.
-func repairSelection(options PipelineRunConfig, provider agent.Provider, stageName string, modelFree bool) agent.ModelSelection {
+func repairSelection(options PipelineRunConfig, provider agent.Provider, stageName string, model *schemas.StageModelConfig, modelFree bool) agent.ModelSelection {
 	selection := agent.ModelSelection{
 		Provider:        provider,
 		ProviderName:    options.ProviderName,
 		Model:           options.Model,
 		ReasoningEffort: options.ReasoningEffort,
 	}
-	if options.StageModelResolver != nil && !modelFree {
-		if resolved, rerr := options.StageModelResolver(stageName); rerr == nil && resolved.Provider != nil {
-			selection = resolved
+	if modelFree {
+		return agent.ModelSelection{}
+	}
+	// Same precedence as the pass loop: a node declaration is the strongest
+	// rung, so a repair re-entry resolves the model the pass resolved.
+	if model != nil && options.NodeModelResolver != nil {
+		if resolved, rerr := options.NodeModelResolver(stageName, nodeModelOverride(model)); rerr == nil && resolved.Provider != nil {
+			return resolved
 		}
 	}
-	if modelFree {
-		selection = agent.ModelSelection{}
+	if options.StageModelResolver != nil {
+		if resolved, rerr := options.StageModelResolver(stageName); rerr == nil && resolved.Provider != nil {
+			return resolved
+		}
 	}
 	return selection
 }
@@ -583,10 +593,11 @@ func repairSelection(options PipelineRunConfig, provider agent.Provider, stageNa
 // preparation module as the normal pass, so repair retrieves current memory,
 // applies admission and compaction, and records post-compaction counts; it
 // receives the full stage budget, not only OutputMax.
-func runRepairStage(ctx context.Context, wallDeadline time.Time, input schemas.HarnessStageInput, stage stages.Stage, iteration int, selection agent.ModelSelection, options PipelineRunConfig, workDir string, runner ToolRunner, mem MemoryStore, budget schemas.StageBudget, tier schemas.PipelineTier, tr *runTraceAccumulator) (schemas.HarnessStageOutput, error) {
+func runRepairStage(ctx context.Context, wallDeadline time.Time, input schemas.HarnessStageInput, stage stages.Stage, iteration int, selection agent.ModelSelection, options PipelineRunConfig, workDir string, runner ToolRunner, mem MemoryStore, caps stages.Capabilities, budget schemas.StageBudget, tier schemas.PipelineTier, tr *runTraceAccumulator) (schemas.HarnessStageOutput, error) {
 	prepared, err := prepareStageInput(ctx, stageInputPreparation{
 		Input:     input,
 		Stage:     stage,
+		Caps:      caps,
 		Budget:    budget,
 		Tier:      tier,
 		Iteration: iteration,
@@ -612,7 +623,7 @@ func runRepairStage(ctx context.Context, wallDeadline time.Time, input schemas.H
 	if cancel != nil {
 		defer cancel()
 	}
-	return runStageWithContext(stageCtx, input, stage, iteration, selection, options, workDir, runner, mem, budget.OutputMax, tr)
+	return runStageWithContext(stageCtx, input, stage, iteration, selection, options, workDir, runner, mem, caps, budget.OutputMax, tr)
 }
 
 // stageBudgetByName returns the full stage budget for a named plan stage, or

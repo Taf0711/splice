@@ -17,6 +17,16 @@ const (
 	TierArchitectural PipelineTier = "architectural"
 )
 
+// Validate reports an error for a tier outside the closed set.
+func (t PipelineTier) Validate() error {
+	switch t {
+	case TierTrivial, TierLight, TierStandard, TierSubstantial, TierArchitectural:
+		return nil
+	default:
+		return fmt.Errorf("unknown pipeline tier %q", t)
+	}
+}
+
 // StageStatus is the execution status of a stage.
 type StageStatus string
 
@@ -290,8 +300,26 @@ func (t TokenBudget) Validate() error {
 
 // ExecutionStage is one planned pipeline stage.
 type ExecutionStage struct {
-	Name   string      `json:"name"`
+	Name string `json:"name"`
+	// Type names the node's stage type from the topology. It differs from Name
+	// when a topology renames a node. Empty for a plan built before node types
+	// were carried, where Name is the builtin type.
+	Type   string      `json:"type,omitempty"`
 	Budget StageBudget `json:"budget"`
+	// DependsOn lists the stages that must run before this one. It is empty
+	// for a linear plan and populated when the planner compiles a topology.
+	DependsOn []string `json:"depends_on,omitempty"`
+	// EdgePayloads maps each dependency name to the information payload its
+	// edge carries. A missing entry means EdgePayloadSummary.
+	EdgePayloads map[string]EdgePayload `json:"edge_payloads,omitempty"`
+	// Caps is the compiled node capability set, resolved from the topology.
+	// Nil means the plan predates capability compilation, and the executor
+	// falls back to the stage's own declaration.
+	Caps *NodeCapabilities `json:"capabilities,omitempty"`
+	// Model is the node's explicit model declaration, resolved from the
+	// topology. It is the strongest rung of the model ladder: a node model
+	// beats the per-stage file. Nil means the node declares no model.
+	Model *StageModelConfig `json:"model,omitempty"`
 }
 
 // Validate checks the execution stage.
@@ -314,6 +342,13 @@ type ExecutionPlan struct {
 	// It is the plan's provenance: a resumed run reads the recorded set rather
 	// than re-resolving against a changed ambient environment.
 	Flags []string `json:"flags,omitempty"`
+	// Warnings carries the non-fatal compile warnings for the plan's
+	// topology. The runtime surfaces them once at run start; they never
+	// block execution, and an empty field serializes nothing.
+	Warnings []string `json:"warnings,omitempty"`
+	// TopologyName names the resolved topology that produced this plan. It is
+	// empty for a plan built before topology resolution existed.
+	TopologyName string `json:"topology_name,omitempty"`
 }
 
 // Validate checks the execution plan.
@@ -353,6 +388,19 @@ func (e ExecutionPlan) Validate() error {
 		}
 		if i > 0 && e.Flags[i-1] >= name {
 			return fmt.Errorf("flags must be sorted and unique: %q is not after %q", name, e.Flags[i-1])
+		}
+	}
+	// DependsOn is validated here, not per stage, because one stage cannot see
+	// its siblings. Edge scoping reads DependsOn, so an unknown or self
+	// dependency would scope a stage to nothing and look like success.
+	for i, stage := range e.Stages {
+		for _, dependency := range stage.DependsOn {
+			if dependency == stage.Name {
+				return fmt.Errorf("stages[%d] %q depends on itself", i, stage.Name)
+			}
+			if _, exists := stageNames[dependency]; !exists {
+				return fmt.Errorf("stages[%d] %q depends_on unknown stage %q", i, stage.Name, dependency)
+			}
 		}
 	}
 	return nil
@@ -515,7 +563,11 @@ type HarnessStageOutput struct {
 	// MemoryReview is the normalized per-invocation memory review. Nil when no
 	// memory was delivered; never an empty review.
 	MemoryReview *MemoryReview `json:"memory_review,omitempty"`
-	Usage        *StageUsage   `json:"-"`
+	// ChangedFiles lists the repo-relative paths this stage changed. The
+	// field is additive: custom stages set it directly, builtins keep their
+	// legacy Data keys, and stageChangedFiles prefers this field.
+	ChangedFiles []string    `json:"changed_files,omitempty"`
+	Usage        *StageUsage `json:"-"`
 }
 
 // Validate checks the harness stage output.
@@ -687,9 +739,12 @@ func (r PipelineUsageRecord) Validate() error {
 
 // PipelineResult is the final pipeline result returned by the CLI.
 type PipelineResult struct {
-	RunID                 string                 `json:"run_id"`
-	Status                string                 `json:"status"`
-	Tier                  PipelineTier           `json:"tier"`
+	RunID  string       `json:"run_id"`
+	Status string       `json:"status"`
+	Tier   PipelineTier `json:"tier"`
+	// TopologyName names the resolved topology that produced this run, so a
+	// result is self-describing. Empty for a plan built before resolution.
+	TopologyName          string                 `json:"topology_name,omitempty"`
 	Stages                []StageRecord          `json:"stages"`
 	FinalOutput           map[string]interface{} `json:"final_output,omitempty"`
 	TotalCostUSD          float64                `json:"total_cost_usd"`

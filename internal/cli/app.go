@@ -40,13 +40,17 @@ import (
 	"github.com/Taf0711/splice/internal/tui"
 	"github.com/Taf0711/splice/internal/update"
 	"github.com/Taf0711/splice/internal/verify"
+	spliceversion "github.com/Taf0711/splice/internal/version"
 	"github.com/Taf0711/splice/internal/worktrees"
 	"github.com/Taf0711/splice/internal/zerogit"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 	"github.com/charmbracelet/x/term"
 )
 
-var version = "dev"
+// version is the CLI build version. It reads the shared build version so the
+// topology minimum check, `splice version`, and the update check agree. The
+// release workflow sets the shared value at link time.
+var version = spliceversion.Version
 
 // rootTrust and rootNoTrust hold the values of the global --trust / --no-trust
 // persistent flags parsed before subcommand dispatch. They are consulted by
@@ -429,6 +433,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runDaemon(args[1:], stdout, stderr, deps)
 	case "config":
 		return runConfig(args[1:], stdout, stderr, deps)
+	case "pipeline":
+		return runPipelineCommand(args[1:], stdout, stderr)
 	case "models":
 		return runModels(args[1:], stdout, stderr, deps)
 	case "providers":
@@ -1321,6 +1327,7 @@ Commands:
   daemon     Manage the local background worker daemon (start/stop/status/run/attach)
   setup      Guide first-run provider setup
   config     Inspect resolved Go configuration without leaking secrets
+  pipeline   List and inspect pipeline topologies
   models     List Splice model registry entries
   providers  Inspect resolved provider profiles
   doctor     Run backend health checks for config and provider setup
@@ -1526,6 +1533,7 @@ Flags:
       --spec-reasoning-effort <effort>
                                     Override draft reasoning effort when --use-spec is set
       --plan <path>                  Execute a design plan JSON file
+      --pipeline <name|path>         Run a pipeline topology from the user library or a file
       --max-turns <number>           Override the maximum agent loop turns
       --auto <low|medium|high>       Set exec autonomy; high enables unsafe tools
       --enabled-tools <tools>        Only expose these comma or space separated tools

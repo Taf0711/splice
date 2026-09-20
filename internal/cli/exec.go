@@ -102,6 +102,9 @@ type execOptions struct {
 	worktree         bool
 	worktreeName     string
 	worktreeDir      string
+	// pipeline is the --pipeline selection: a user-library pipeline name or a
+	// path to a topology file.
+	pipeline string
 	// mergeBack opts a --worktree run into merging the worktree's changes back
 	// into the source repository on success. Off by default: inherited
 	// --worktree behavior leaves the worktree for manual merging.
@@ -702,12 +705,13 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		PrimaryProfile: resolved.Provider,
 		Registry:       &modelRegistry,
 	}
-	stageModelResolver, escalationModelResolver := splicerun.BuildStageModelResolvers(
+	modelResolvers := splicerun.BuildStageModelResolvers(
 		stageModelConfig,
 		resolved.Providers,
 		deps.newProvider,
 		tierResolverConfig,
 	)
+	stageModelResolver, escalationModelResolver := modelResolvers.Stage, modelResolvers.Escalation
 
 	estimator := usage.NewCostEstimator(&modelRegistry)
 	// runtimeSessionID feeds the deterministic pipeline's Options.SessionID, which
@@ -761,6 +765,9 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		// from ~/.config/splice/stage-models.json (AR11b). nil keeps pre-AR11
 		// behavior: every stage uses the default provider.
 		StageModelResolver: stageModelResolver,
+		// NodeModelResolver is the strongest rung of the model ladder: a
+		// topology node's explicit model beats the per-stage file.
+		NodeModelResolver: modelResolvers.Node,
 		// TraceWriteWarn surfaces trace-persistence loss on the exec output
 		// seam exactly once per run, so a stale sidecar announces itself.
 		TraceWriteWarn: writer.warning,
@@ -776,6 +783,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		PermissionMode:    permissionMode,
 		Autonomy:          options.autonomy,
 		TrustedWorkspace:  trusted,
+		Pipeline:          options.pipeline,
 		// SelfCorrect is agent-loop only: the deterministic pipeline does not run
 		// the post-edit verify-and-correct loop, so it is inert under `splice exec`.
 		SelfCorrect: selfCorrector,

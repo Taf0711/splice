@@ -80,6 +80,20 @@ type ModelSelection struct {
 type StageModelResolver func(stageName string) (ModelSelection, error)
 type EscalationModelResolver func() (ModelSelection, error)
 
+// ModelOverride is an explicit model declaration from a pipeline topology node.
+// It names a provider profile and a model, both references, so a shared
+// topology carries its routing without carrying secrets.
+type ModelOverride struct {
+	ProviderProfile string
+	Model           string
+	ReasoningEffort string
+}
+
+// NodeModelResolver resolves an explicit topology node model declaration to a
+// selection. It is consulted before the name-keyed StageModelResolver, so a
+// node's declaration is stronger than the per-stage file.
+type NodeModelResolver func(nodeName string, override ModelOverride) (ModelSelection, error)
+
 type PermissionMode string
 type PermissionAction string
 type PermissionDecisionAction string
@@ -277,11 +291,20 @@ type SurfaceToUserDecision struct {
 // PipelinePlanEvent announces the ordered stage roster for one pipeline plan.
 type PipelinePlanEvent struct {
 	Stages []string
+	// Dependencies maps each stage name to the stages that must run before
+	// it. It is empty for a legacy linear plan and populated when the
+	// planner compiles a topology, so the presentation layer can carry the
+	// graph instead of a flat roster.
+	Dependencies map[string][]string
 }
 
 // StageEvent is a typed pipeline stage lifecycle event.
 type StageEvent struct {
-	Name         string
+	Name string
+	// Iteration is the pipeline pass this event belongs to. It is 0 for the
+	// first pass and rises on each revision re-entry, so the presentation
+	// layer can keep an earlier pass instead of overwriting it.
+	Iteration    int
 	Status       string
 	Detail       string
 	Progress     int
@@ -388,7 +411,11 @@ type Options struct {
 	// TrustedWorkspace lets the sandbox auto-allow file mutations that stay in
 	// the trusted workspace. It does not grant shell, network, or external access.
 	TrustedWorkspace bool
-	Sandbox          *sandbox.Engine
+	// Pipeline is the --pipeline selection: a pipeline name in the user library
+	// or a path to a topology file. Empty resolves the active pipeline from
+	// config. The runtime resolves it after workspace trust.
+	Pipeline string
+	Sandbox  *sandbox.Engine
 	// FileTracker records per-session file read/write versions so the write tools
 	// can detect a file changed on disk outside Splice since it was last read. nil
 	// disables the check. Created once per session and threaded into every tool run.
@@ -470,6 +497,11 @@ type Options struct {
 	// options.Model/ReasoningEffort are used for every stage (byte-identical to
 	// pre-AR11 behavior). Splice addition (AR11b).
 	StageModelResolver StageModelResolver
+
+	// NodeModelResolver resolves an explicit topology node model before the
+	// name-keyed StageModelResolver. When nil, a node model declaration is
+	// ignored and the per-stage ladder applies. Splice addition (T6c).
+	NodeModelResolver NodeModelResolver
 
 	// EscalationModelResolver resolves an escalation provider, model, and
 	// reasoning effort when the trajectory monitor fires cycle or oscillation

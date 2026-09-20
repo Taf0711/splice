@@ -297,3 +297,35 @@ does not fail the run.
 
 The stream `final` event contains the serialized pipeline result in its `text`
 field. See [Stream-JSON protocol](STREAM_JSON_PROTOCOL.md).
+
+## Workflow topology
+
+The pipeline is data. The embedded default topology lives in
+`internal/splice/topology.go`. A tier compiles that topology into an ordered
+stage list and a token budget.
+
+A topology declares nodes and edges. An edge carries one of three payloads:
+`summary`, `output`, or `none`. A stage receives the summaries that its
+incoming edges deliver. A stage with no incoming edge receives no upstream
+summary.
+
+The default topology declares these edges:
+
+- `code_writer` to `test_generator`
+- `code_writer` to `static_analyzer`
+- `test_generator` to `security_auditor`
+- `code_writer` to `security_auditor`
+- `static_analyzer` to `security_auditor`
+- `static_analyzer` to `test_runner`
+- `test_runner` to `acceptance_verifier`
+
+The graph is not a linear chain. Two stages can run from one upstream. The
+executor orders the stages with a deterministic topological sort.
+
+A legacy plan carries no edges. The executor then keeps the cumulative
+summary view. A compiled plan carries edges, so the executor scopes the input
+to the declared edges.
+
+The compiler emits a warning for a graph problem that does not block a run.
+A user can load a topology from a project file, the `--pipeline` flag, or the
+user library. See [Configuration](CONFIGURATION.md).

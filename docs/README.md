@@ -14,6 +14,7 @@ control. `splice exec` provides a typed pipeline for scripts and automation.
 ## Understand a run
 
 - [Pipeline behavior](PIPELINE.md)
+- [Wiring checks](WIRING.md)
 - [Design transitions](DESIGN_TRANSITIONS.md)
 - [Design revision context](DESIGN_REVISION_CONTEXT.md)
 - [Stream-JSON protocol](STREAM_JSON_PROTOCOL.md)

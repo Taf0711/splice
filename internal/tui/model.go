@@ -5985,7 +5985,10 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 					PrimaryProfile: m.providerProfile,
 					Registry:       &m.modelCatalog,
 				}
-				options.StageModelResolver, options.EscalationModelResolver = splicerun.BuildStageModelResolvers(stageConfig, profiles, m.newProvider, tierResolverConfig)
+				resolvers := splicerun.BuildStageModelResolvers(stageConfig, profiles, m.newProvider, tierResolverConfig)
+				options.StageModelResolver = resolvers.Stage
+				options.NodeModelResolver = resolvers.Node
+				options.EscalationModelResolver = resolvers.Escalation
 				m.stageModelResolver = options.StageModelResolver
 			}
 		}

@@ -32,7 +32,7 @@ func TestAcceptanceStageEventsStampWorkspace(t *testing.T) {
 		IsolatedWorktree: "/repo/.splice/wt/a1",
 		OnStageEvent:     collect(&isolatedEvents),
 	}
-	emitStageEvent(isolatedCfg, "code_writer", "running", "writing", 0, nil)
+	emitStageEvent(isolatedCfg, 0, "code_writer", "running", "writing", 0, nil)
 	if len(isolatedEvents) != 1 {
 		t.Fatalf("acceptance: isolated run emitted %d events, want 1", len(isolatedEvents))
 	}
@@ -46,7 +46,7 @@ func TestAcceptanceStageEventsStampWorkspace(t *testing.T) {
 		ProjectRoot:  "/repo",
 		OnStageEvent: collect(&sharedEvents),
 	}
-	emitStageEvent(sharedCfg, "code_writer", "running", "writing", 0, nil)
+	emitStageEvent(sharedCfg, 0, "code_writer", "running", "writing", 0, nil)
 	if len(sharedEvents) != 1 {
 		t.Fatalf("acceptance: shared run emitted %d events, want 1", len(sharedEvents))
 	}

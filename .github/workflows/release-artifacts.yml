@@ -99,7 +99,7 @@ jobs:
           if [ "${{ matrix.goos }}" = "windows" ]; then
             BINARY_NAME="splice.exe"
           fi
-          go build -ldflags "-s -w -X github.com/Taf0711/splice/internal/cli.version=${{ steps.version.outputs.VERSION }}" \
+          go build -ldflags "-s -w -X github.com/Taf0711/splice/internal/version.Version=${{ steps.version.outputs.VERSION }}" \
             -o "staging/$BINARY_NAME" ./cmd/splice
 
       - name: Verify splice binary version

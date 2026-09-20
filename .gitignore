@@ -88,3 +88,5 @@ graphify-out/
 
 # Sandbox escape-test artifacts
 /internal/cli/.splice-sandbox-outside-*/
+# TUI transcript exports (/export writes these into the working directory)
+splice-transcript-*.txt

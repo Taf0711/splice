@@ -16,13 +16,32 @@ const PresentationSchemaVersionV1 = 1
 type Plan struct {
 	Title     string `json:"title,omitempty"`
 	TaskCount int    `json:"task_count"`
+	// Dependencies is the compiled stage graph: stage name to the stages that
+	// run before it. Empty for a legacy linear plan.
+	Dependencies map[string][]string `json:"dependencies,omitempty"`
 }
 
-// Validate checks the task count is non-negative. The title may be empty
-// until the plan projection exists.
+// Validate checks the task count is non-negative and every declared
+// dependency edge is well formed. The title may be empty until the plan
+// projection exists.
 func (p Plan) Validate() error {
 	if p.TaskCount < 0 {
 		return fmt.Errorf("plan task_count must be non-negative, got %d", p.TaskCount)
+	}
+	for name, deps := range p.Dependencies {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("plan dependencies: stage name must not be empty")
+		}
+		seen := make(map[string]bool, len(deps))
+		for _, dep := range deps {
+			if strings.TrimSpace(dep) == "" {
+				return fmt.Errorf("plan dependencies[%s]: dependency must not be empty", name)
+			}
+			if seen[dep] {
+				return fmt.Errorf("plan dependencies[%s]: duplicate dependency %q", name, dep)
+			}
+			seen[dep] = true
+		}
 	}
 	return nil
 }

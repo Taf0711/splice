@@ -219,6 +219,37 @@ func TestExecutionPlanFlagsMustBeSortedAndUnique(t *testing.T) {
 	}
 }
 
+// TestExecutionPlanDependsOnIntegrity pins the H2 guard: edge scoping reads
+// DependsOn, so an unknown or self dependency must fail validation instead of
+// scoping the stage to nothing. A forward reference is valid because the
+// dependency set is resolved after every stage name is known.
+func TestExecutionPlanDependsOnIntegrity(t *testing.T) {
+	budget := StageBudget{InputMax: 1, OutputMax: 1}
+	plan := func(stages []ExecutionStage) ExecutionPlan {
+		return ExecutionPlan{
+			Tier:          TierLight,
+			RequestIntent: "x",
+			Stages:        stages,
+			TokenBudget:   TokenBudget{TotalInputBudget: 10, TotalOutputBudget: 10, PerStage: map[string]StageBudget{"a": budget, "b": budget}, OverflowPolicy: "abort"},
+		}
+	}
+	t.Run("unknown dependency fails", func(t *testing.T) {
+		if err := plan([]ExecutionStage{{Name: "a", Budget: budget, DependsOn: []string{"ghost"}}}).Validate(); err == nil || !strings.Contains(err.Error(), "unknown stage") {
+			t.Fatalf("expected unknown-dependency error, got %v", err)
+		}
+	})
+	t.Run("self dependency fails", func(t *testing.T) {
+		if err := plan([]ExecutionStage{{Name: "a", Budget: budget, DependsOn: []string{"a"}}}).Validate(); err == nil || !strings.Contains(err.Error(), "itself") {
+			t.Fatalf("expected self-dependency error, got %v", err)
+		}
+	})
+	t.Run("forward reference passes", func(t *testing.T) {
+		if err := plan([]ExecutionStage{{Name: "b", Budget: budget, DependsOn: []string{"a"}}, {Name: "a", Budget: budget}}).Validate(); err != nil {
+			t.Fatalf("forward reference rejected: %v", err)
+		}
+	})
+}
+
 func TestDesignPlanTaskGraphIntegrity(t *testing.T) {
 	plan := DesignPlan{
 		Epic:         "epic",
