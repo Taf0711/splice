@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Taf0711/splice/internal/flags"
 	"github.com/Taf0711/splice/internal/sessions"
 	"github.com/Taf0711/splice/internal/specialist"
 )
@@ -43,6 +44,27 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 			if err := setExecMemoryMode(&options, value); err != nil {
 				return options, false, err
 			}
+		case arg == "--flags":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			parsed, err := flags.ParseList(value)
+			if err != nil {
+				return options, false, err
+			}
+			options.flags = parsed
+			index = next
+		case strings.HasPrefix(arg, "--flags="):
+			value, err := requiredInlineFlagValue(arg, "--flags")
+			if err != nil {
+				return options, false, err
+			}
+			parsed, err := flags.ParseList(value)
+			if err != nil {
+				return options, false, err
+			}
+			options.flags = parsed
 		case arg == "--allow-escalation":
 			options.allowEscalation = true
 		case arg == "--trust":

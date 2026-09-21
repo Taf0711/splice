@@ -402,7 +402,7 @@ func TestBuildRunOutcomeCoversEveryField(t *testing.T) {
 // caller's warning callback fires exactly once across all attempts, and a
 // healthy store never fires it at all.
 func TestTraceWriteFailureWarnsOnce(t *testing.T) {
-	plan, err := BuildExecutionPlan("add a helper")
+	plan, err := BuildExecutionPlan("", nil)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}

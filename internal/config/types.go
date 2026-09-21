@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/Taf0711/splice/internal/flags"
 )
 
 const OpenAIBaseURL = "https://api.openai.com/v1"
@@ -301,6 +303,10 @@ type FileConfig struct {
 	Compaction          CompactionConfig   `json:"compaction,omitempty"`
 	Worktrees           WorktreesConfig    `json:"worktrees,omitempty"`
 	DefaultProjectTrust string             `json:"defaultProjectTrust,omitempty"`
+	// Flags holds per-feature switches as declared in internal/flags. Only
+	// registered names resolve; an unknown name fails loudly. Project config
+	// may set ScopeProject flags only.
+	Flags map[string]bool `json:"flags,omitempty"`
 }
 
 func (cfg FileConfig) MarshalJSON() ([]byte, error) {
@@ -320,6 +326,7 @@ func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 		Compaction          CompactionConfig    `json:"compaction,omitempty"`
 		Worktrees           WorktreesConfig     `json:"worktrees,omitempty"`
 		DefaultProjectTrust string              `json:"defaultProjectTrust,omitempty"`
+		Flags               map[string]bool     `json:"flags,omitempty"`
 	}
 	raw := rawConfig{
 		ActiveProvider:      cfg.ActiveProvider,
@@ -335,6 +342,7 @@ func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 		Compaction:          cfg.Compaction,
 		Worktrees:           cfg.Worktrees,
 		DefaultProjectTrust: cfg.DefaultProjectTrust,
+		Flags:               cfg.Flags,
 	}
 	if strings.TrimSpace(cfg.Auth.Storage) != "" {
 		raw.Auth = &cfg.Auth
@@ -365,6 +373,7 @@ type Overrides struct {
 	KeyBindings    KeyBindingsConfig
 	LocalControl   LocalControlConfig
 	Worktrees      WorktreesConfig
+	Flags          map[string]bool
 }
 
 type ResolvedConfig struct {
@@ -384,6 +393,8 @@ type ResolvedConfig struct {
 	LocalControl        LocalControlConfig
 	Worktrees           WorktreesConfig
 	DefaultProjectTrust string
+	// Flags is the resolved flag set. The zero value means all defaults.
+	Flags flags.Set
 }
 
 type MCPConfig struct {
@@ -435,6 +446,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 		Compaction          CompactionConfig           `json:"compaction"`
 		Worktrees           WorktreesConfig            `json:"worktrees"`
 		DefaultProjectTrust string                     `json:"defaultProjectTrust"`
+		Flags               map[string]bool            `json:"flags"`
 		MCPServers          map[string]MCPServerConfig `json:"mcpServers"`
 		MCPServersSnake     map[string]MCPServerConfig `json:"mcp_servers"`
 	}
@@ -466,6 +478,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	cfg.Compaction = raw.Compaction
 	cfg.Worktrees = raw.Worktrees
 	cfg.DefaultProjectTrust = raw.DefaultProjectTrust
+	cfg.Flags = raw.Flags
 	if cfg.MCP.Servers == nil && (len(raw.MCPServers) > 0 || len(raw.MCPServersSnake) > 0) {
 		cfg.MCP.Servers = map[string]MCPServerConfig{}
 	}

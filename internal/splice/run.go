@@ -200,7 +200,7 @@ func Run(ctx context.Context, prompt string, provider agent.Provider, options ag
 		runID = "run-" + hex.EncodeToString(b)
 	}
 
-	plan, err := BuildExecutionPlan(prompt)
+	plan, err := BuildExecutionPlan(prompt, options.Flags)
 	if err != nil {
 		return agent.Result{}, fmt.Errorf("build plan: %w", err)
 	}

@@ -2410,3 +2410,34 @@ func TestFormatSpawnAuditAndSinkRestore(t *testing.T) {
 	}
 	procrun.SetAuditSink(nil)
 }
+
+func TestParseExecArgsFlags(t *testing.T) {
+	options, help, err := parseExecArgs([]string{"--flags", "pipeline.stage.test_generator=0,-tui.pipeline.enabled", "prompt"})
+	if err != nil || help {
+		t.Fatalf("parse: err=%v help=%v", err, help)
+	}
+	if options.flags == nil {
+		t.Fatal("--flags did not populate options.flags")
+	}
+	if options.flags["pipeline.stage.test_generator"] {
+		t.Fatal("explicit =0 must disable the flag")
+	}
+	if options.flags["tui.pipeline.enabled"] {
+		t.Fatal("leading dash must disable the flag")
+	}
+
+	inline, help, err := parseExecArgs([]string{"--flags=pipeline.stage.security_auditor=0", "prompt"})
+	if err != nil || help {
+		t.Fatalf("inline parse: err=%v help=%v", err, help)
+	}
+	if inline.flags["pipeline.stage.security_auditor"] {
+		t.Fatal("inline form must parse")
+	}
+
+	if _, _, err := parseExecArgs([]string{"--flags", "not valid name", "prompt"}); err == nil {
+		t.Fatal("an invalid flag name must fail the parse, not silently drop")
+	}
+	if _, _, err := parseExecArgs([]string{"--flags", "a.b=maybe", "prompt"}); err == nil {
+		t.Fatal("an invalid boolean must fail the parse")
+	}
+}

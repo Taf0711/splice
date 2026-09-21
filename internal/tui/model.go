@@ -6538,7 +6538,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		memCount := 0
 		var memByType map[string]int
 		var mem splicerun.MemoryStore
-		if runOptions.runKind == tuiRunSpecDraft || runOptions.runKind == tuiRunDesignConversation {
+		if !usesPipeline(runOptions.runKind, options.Flags) {
 			result, err = agent.Run(runCtx, prompt, m.provider, options)
 		} else {
 			memClient, mErr := tuiResolveMemory(runCtx)

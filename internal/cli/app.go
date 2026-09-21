@@ -960,6 +960,7 @@ func runInteractiveTUIWithSetup(stdout io.Writer, stderr io.Writer, deps appDeps
 			CompactionKeepRecentTokens: resolved.Compaction.KeepRecentTokens,
 			Specialists:                specialistRuntime.specialists,
 			Skills:                     pluginActivation.skillInfos(deps.skillsDir()),
+			Flags:                      resolved.Flags,
 		},
 		// LoadSkills backs /skills and direct /<skill-name> invocation in the TUI.
 		// It resolves against the same merged set (default dir + plugin skill
@@ -1552,6 +1553,8 @@ Flags:
       --session-title <text>         Set the created session title
       --init-session-id <id>         Create a new exec session with this id
       --memory <on|off>              Enable or disable the memory sidecar (default on; off = a deliberate cold run).
+      --flags <list>                 Override feature flags for this run, e.g. "-pipeline.stage.test_generator".
+                                    Items are comma separated: name, -name, name=1, or name=0.
                                     A real run consumes real provider tokens and may cost money.
       --skip-permissions-unsafe      Allow prompt-gated tools without approval
       --allow-escalation             Let the agent escalate to a stronger model mid-run via escalate_model
