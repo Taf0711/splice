@@ -163,7 +163,7 @@ func preflightProviderCapability(plan schemas.ExecutionPlan, options PipelineRun
 	// for the first LLM stage in the plan (or without a stage when none runs).
 	stage := ""
 	for _, s := range plan.Stages {
-		if !modelFreeStage(s.Name) {
+		if !stageModelFree(s) {
 			stage = s.Name
 			break
 		}
@@ -175,13 +175,5 @@ func preflightProviderCapability(plan schemas.ExecutionPlan, options PipelineRun
 	}}
 }
 
-// modelFreeStage reports whether a stage name is a deterministic (model-free)
-// pipeline stage. Used to name the LLM stage a capability issue affects.
-func modelFreeStage(name string) bool {
-	switch name {
-	case "static_analyzer", "security_auditor", "test_runner", "acceptance_verifier":
-		return true
-	default:
-		return false
-	}
-}
+// modelFreeStage was a stage-name switch. It is replaced by stageModelFree
+// (stage_caps.go), which reads the compiled node capabilities.

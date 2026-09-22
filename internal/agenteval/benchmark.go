@@ -49,8 +49,11 @@ type BenchmarkTaskReport struct {
 	CostCoverage      string           `json:"costCoverage,omitempty"`
 	LatencyMs         int64            `json:"latencyMs,omitempty"`
 	Stages            []StageBreakdown `json:"stages,omitempty"`
-	Agent             AgentRunResult   `json:"agent"`
-	Report            Report           `json:"report"`
+	// TopologyName names the resolved pipeline topology, when the runner is the
+	// Splice pipeline. Empty for other runners.
+	TopologyName string         `json:"topologyName,omitempty"`
+	Agent        AgentRunResult `json:"agent"`
+	Report       Report         `json:"report"`
 }
 
 type BenchmarkSummary struct {
@@ -287,6 +290,7 @@ func copyAgentMetrics(taskReport *BenchmarkTaskReport, agentResult AgentRunResul
 	taskReport.CostCoverage = agentResult.CostCoverage
 	taskReport.LatencyMs = agentResult.LatencyMs
 	taskReport.Stages = agentResult.Stages
+	taskReport.TopologyName = agentResult.TopologyName
 	taskReport.ModelsUsed = modelsUsed(agentResult)
 }
 
@@ -418,7 +422,7 @@ func boolPointer(value bool) *bool {
 
 func WriteBenchmarkCSV(w io.Writer, report BenchmarkReport) error {
 	writer := csv.NewWriter(w)
-	if err := writer.Write([]string{"taskId", "runner", "requestedModel", "modelsUsed", "status", "pass", "inputTokens", "outputTokens", "cachedInputTokens", "cacheWriteTokens", "reasoningTokens", "estimatedCostUSD", "costCoverage", "pricedUsageRecords", "unpricedUsageRecords", "errorUsageRecords", "latencyMs", "stageBreakdown"}); err != nil {
+	if err := writer.Write([]string{"taskId", "runner", "requestedModel", "modelsUsed", "status", "pass", "inputTokens", "outputTokens", "cachedInputTokens", "cacheWriteTokens", "reasoningTokens", "estimatedCostUSD", "costCoverage", "pricedUsageRecords", "unpricedUsageRecords", "errorUsageRecords", "latencyMs", "stageBreakdown", "topologyName"}); err != nil {
 		return err
 	}
 	for _, task := range report.Tasks {
@@ -447,6 +451,7 @@ func WriteBenchmarkCSV(w io.Writer, report BenchmarkReport) error {
 			fmt.Sprintf("%d", errors),
 			fmt.Sprintf("%d", task.LatencyMs),
 			formatStageBreakdown(task.Stages),
+			task.TopologyName,
 		}); err != nil {
 			return err
 		}

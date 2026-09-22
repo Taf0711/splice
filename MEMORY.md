@@ -7161,3 +7161,66 @@ design brief (20ac5f3) as a Planned doc.
 
 Next: EV2-3 frozen memory policy. Demo remains gated only on a fresh GIF
 capture with scrubbed terminal chrome.
+
+## 2026-09-13 - Track T core review hardening (H1, H2, M2, M4)
+
+A review of the committed T1-T8 work on `feat/topology-core` found and fixed
+four defects. H1: `defaultTopology` gave `security_auditor` only
+`test_generator` as an incoming edge, so edge scoping would have starved the
+future model-backed security advisor of the `code_writer` summary; the
+`code_writer -> security_auditor` and `static_analyzer -> security_auditor`
+edges are now declared and a test pins them. H2:
+`ExecutionStage.Validate` ignored `DependsOn`, so a plan with an unknown or
+self dependency passed validation and then scoped to nothing;
+`ExecutionPlan.Validate` now rejects both, with a forward reference still valid.
+M2: the project topology was parsed before the trust gate, so a malformed
+untrusted file failed the whole run; the loader now checks `Trusted` first and
+reports an ignored file as a warning. M4: prompt-node summaries and memory were
+inlined with no delimiter under a comment that claimed they were data; both are
+now wrapped in data blocks and the system prompt names those blocks. M1 landed
+in the same checkpoint: the leaf `internal/version` package carries the build
+version and a pure `SatisfiesMin`, `PipelineTopology.ValidateMinSplice` compares
+the running build against `splice_min_version`, the loader applies it to every
+loaded topology, a malformed requirement fails loud, a dev build skips, and the
+release ldflags now target `internal/version.Version` instead of
+`internal/cli.version`.
+
+The same checkpoint closed the remaining low-impact items. M3: `ExecutionStage`
+now carries `Type`, `CompileTopology` populates it, and the capability fallback
+keys on `Type` before `Name`. L2: `decodeVerificationReport` accepts a JSON
+round-tripped report by re-marshaling, and rejects data whose status is not in
+the closed set. L3: the 17 committed TUI transcript debug files were removed
+and `splice-transcript-*.txt` is gitignored.
+
+The only open review item is L5, a cross-branch reconciliation: the wip branch
+has a shared request builder (`request_gate.go`) that T5's prompt node should
+adopt when the branches meet.
+
+## 2026-09-14 - Wiring verification system and residue cleanup
+
+Track WG found the produced-but-never-consumed defect class by hand, with a
+local graphify pass that CI could not run. `internal/wiring` is now the durable
+guard. It is stdlib only (`go/parser`, no new dependency) and holds a
+declarative producer/consumer contract list in `contracts.go`.
+`TestContractsHold` fails when a producer is never referenced in production
+code, or when its named consumer stops referencing it.
+`TestContractsNameExistingProofs` requires each contract to name an existing
+proof test, and `TestWiringCheckerDetectsDroppedReference` proves the guard
+catches a dropped reference. Inert producers are recorded with an owner and a
+reason. Seed contracts cover topology `DependsOn` scoping, compilation, and
+validation, compiled caps, the node model ladder, the canonical verification
+key and its round-trip decode, the min-splice gate, the version build value,
+additive changed files, prompt delimiters, and the shared `streamCompletion`
+request gate. `docs/WIRING.md` has the add-a-contract procedure.
+
+The residue from the review is closed. L5: `prompt_stage.go` no longer calls
+`provider.StreamCompletion` directly; every stage model call goes through
+`streamCompletion` in `stages/provider.go`, which is the local form of the wip
+branch's `request_gate.go` and supersedes it at reconciliation. The inert
+readers are documented and registered: `CompiledTopology.Tier` and
+`presentation.ExecutionNode.Dependencies` both name Track T9 as the pending
+consumer. The default-topology edge comment notes that the
+`static_analyzer -> security_auditor` edge serializes the two analyzers, which
+is a deliberate divergence from RR13. `docs/PIPELINE.md` now documents the
+default graph as a DAG with typed edge payloads and edge scoping, not a linear
+chain.

@@ -12,15 +12,56 @@ func providerCacheKey(profile, model, effort string) string {
 	return profile + "\x00" + model + "\x00" + effort
 }
 
-// BuildStageModelResolvers constructs the per-stage and escalation routing
-// hooks shared by headless exec and the interactive TUI. Providers are built
-// lazily and cached for the lifetime of one pipeline run.
+// Model route origin labels: which rung of the ladder supplied a stage's model.
+const (
+	ModelOriginNode    = "node"
+	ModelOriginStage   = "stage"
+	ModelOriginDefault = "default"
+	ModelOriginTier    = "tier"
+	ModelOriginPrimary = "primary"
+)
+
+// ResolveModelRoute reports the effective model declaration for one stage and
+// the rung that supplied it, without building a provider. It mirrors the
+// executor precedence exactly: a node model, then a stage-models.json entry for
+// the stage (even an incomplete one, which the executor then fails to build),
+// then the Default entry, then the tier resolver when the stage has a tier
+// label, then the primary model.
+func ResolveModelRoute(stageName string, nodeModel *schemas.StageModelConfig, stageConfig schemas.StageModelConfigFile, hasTierLabel bool) (schemas.StageModelConfig, string) {
+	if nodeModel != nil {
+		return *nodeModel, ModelOriginNode
+	}
+	if specific, ok := stageConfig.Stages[stageName]; ok {
+		return specific, ModelOriginStage
+	}
+	if stageConfig.Default.ProviderProfile != "" && stageConfig.Default.Model != "" {
+		return stageConfig.Default, ModelOriginDefault
+	}
+	if hasTierLabel {
+		return schemas.StageModelConfig{}, ModelOriginTier
+	}
+	return schemas.StageModelConfig{}, ModelOriginPrimary
+}
+
+// ModelResolvers bundles the routing hooks built from one stage-model config
+// and one provider factory. All three share the profile map and the provider
+// cache, so a node override and a stage override of the same model reuse one
+// provider instance.
+type ModelResolvers struct {
+	Stage      agent.StageModelResolver
+	Escalation agent.EscalationModelResolver
+	Node       agent.NodeModelResolver
+}
+
+// BuildStageModelResolvers constructs the per-node, per-stage, and escalation
+// routing hooks shared by headless exec and the interactive TUI. Providers are
+// built lazily and cached for the lifetime of one pipeline run.
 func BuildStageModelResolvers(
 	stageConfig schemas.StageModelConfigFile,
 	profiles []config.ProviderProfile,
 	newProvider func(config.ProviderProfile) (agent.Provider, error),
 	tierResolverConfig TierResolverConfig,
-) (agent.StageModelResolver, agent.EscalationModelResolver) {
+) ModelResolvers {
 	profilesByName := make(map[string]config.ProviderProfile, len(profiles))
 	for _, profile := range profiles {
 		profilesByName[profile.Name] = profile
@@ -90,5 +131,15 @@ func BuildStageModelResolvers(
 		return build("escalation", *stageConfig.Escalation)
 	}
 
-	return stageResolver, escalationResolver
+	// nodeResolver is the strongest rung: a topology node's explicit model. It
+	// reuses the same build path, profile map, and cache as the stage resolver.
+	nodeResolver := func(nodeName string, override agent.ModelOverride) (agent.ModelSelection, error) {
+		return build(fmt.Sprintf("node %q", nodeName), schemas.StageModelConfig{
+			ProviderProfile: override.ProviderProfile,
+			Model:           override.Model,
+			ReasoningEffort: override.ReasoningEffort,
+		})
+	}
+
+	return ModelResolvers{Stage: stageResolver, Escalation: escalationResolver, Node: nodeResolver}
 }

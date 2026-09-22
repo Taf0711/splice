@@ -2,6 +2,7 @@ package splice
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/Taf0711/splice/internal/flags"
@@ -133,5 +134,42 @@ func TestBuildExecutionPlanRecordsFlags(t *testing.T) {
 		if stage.Name == "test_generator" {
 			t.Fatal("disabled stage test_generator is still in the plan")
 		}
+	}
+
+	// Cascade: security_auditor depends on test_generator, so disabling
+	// test_generator must remove security_auditor too, with a named warning.
+	// A surviving stage with an unsatisfiable dependency edge would be scoped
+	// to nothing at runtime and look like success.
+	for _, stage := range filtered.Stages {
+		if stage.Name == "security_auditor" {
+			t.Fatal("security_auditor must cascade out with its disabled dependency test_generator")
+		}
+	}
+	found := false
+	for _, warning := range filtered.Warnings {
+		if strings.Contains(warning, "security_auditor") && strings.Contains(warning, "test_generator") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("plan warnings must name the cascade removal, got %v", filtered.Warnings)
+	}
+
+	// Disabling a leaf stage (no dependents) removes only that stage.
+	leaf, err := flags.Resolve(flags.Sources{User: map[string]bool{
+		string(flags.StageSecurityAuditor): false,
+	}})
+	if err != nil {
+		t.Fatalf("Resolve leaf: %v", err)
+	}
+	leafPlan, err := BuildExecutionPlan(prompt, leaf)
+	if err != nil {
+		t.Fatalf("BuildExecutionPlan leaf: %v", err)
+	}
+	if err := leafPlan.Validate(); err != nil {
+		t.Fatalf("leaf-filtered plan must validate: %v", err)
+	}
+	if got := len(base.Stages) - len(leafPlan.Stages); got != 1 {
+		t.Fatalf("disabling a leaf stage must remove exactly one stage, removed %d", got)
 	}
 }

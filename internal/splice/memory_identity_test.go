@@ -116,7 +116,7 @@ func TestMemoryIdentityDegradationObservationUsesProjectRoot(t *testing.T) {
 	_, err := runStageWithContext(context.Background(), schemas.HarnessStageInput{
 		RunID:     "run-degraded",
 		StageName: "context_stage",
-	}, stage, 1, selection, options, workDir, nil, store, 0, nil)
+	}, stage, 1, selection, options, workDir, nil, store, stage.Capabilities(), 0, nil)
 	if err != nil {
 		t.Fatalf("runStageWithContext: %v", err)
 	}

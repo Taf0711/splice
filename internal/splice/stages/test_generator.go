@@ -119,6 +119,10 @@ func (TestGenerator) Run(ctx context.Context, input schemas.HarnessStageInput, p
 		Detail:       strings.Join(changedPaths, ", "),
 		Confidence:   output.Confidence,
 		MemoryReview: memoryReview,
+		// The additive field carries the changed paths directly, so a
+		// downstream consumer and the TUI read one source instead of the
+		// legacy Data key.
+		ChangedFiles: append([]string(nil), changedPaths...),
 		Data:         data,
 		Usage:        usageFromCollected(collected),
 	}, nil

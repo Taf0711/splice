@@ -26,6 +26,9 @@ type modelSummary = zerocommands.ModelSnapshot
 type providerCatalogSummary = zerocommands.ProviderCatalogSnapshot
 
 func runConfig(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	if len(args) > 0 && args[0] == "describe" {
+		return runConfigDescribe(args[1:], stdout, stderr, deps)
+	}
 	options, help, err := parseCommandCenterArgs(args, false, false)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
@@ -445,11 +448,15 @@ func formatProviderCatalogValue(value string, fallback string) string {
 func writeConfigHelp(w io.Writer) error {
 	_, err := fmt.Fprint(w, `Usage:
   splice config [flags]
+  splice config describe [--tier <tier>] [--json]
 
-Inspects resolved Go configuration without printing secrets.
+Inspects resolved Go configuration without printing secrets. The describe
+subcommand reports the active pipeline, the effective token envelope, each
+node's model with the origin that supplied it, and the stage-models entries.
 
 Flags:
       --json      Print JSON summary
+      --tier      Pipeline tier to describe (default standard)
   -h, --help      Show this help
 `)
 	return err

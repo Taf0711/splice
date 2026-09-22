@@ -615,7 +615,8 @@ func (m model) startCrystallization(source splicerun.DesignTransitionSource, app
 			PrimaryProfile: m.providerProfile,
 			Registry:       &m.modelCatalog,
 		}
-		resolver, _ = splicerun.BuildStageModelResolvers(stageConfig, profiles, m.newProvider, tierResolverConfig)
+		resolvers := splicerun.BuildStageModelResolvers(stageConfig, profiles, m.newProvider, tierResolverConfig)
+		resolver = resolvers.Stage
 		m.stageModelResolver = resolver
 	}
 

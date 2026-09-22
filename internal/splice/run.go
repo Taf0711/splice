@@ -200,7 +200,17 @@ func Run(ctx context.Context, prompt string, provider agent.Provider, options ag
 		runID = "run-" + hex.EncodeToString(b)
 	}
 
-	plan, err := BuildExecutionPlan(prompt, options.Flags)
+	workspaceRoot := options.ProjectRoot
+	if workspaceRoot == "" {
+		workspaceRoot = options.Cwd
+	}
+	sources := TopologySourcesFor(workspaceRoot, options.TrustedWorkspace)
+	sources.FlagName = options.Pipeline
+	topology, topologySource, topologyWarnings, err := ResolveTopology(sources)
+	if err != nil {
+		return agent.Result{}, fmt.Errorf("resolve topology: %w", err)
+	}
+	plan, err := BuildExecutionPlanWithTopology(topology, prompt, options.Flags)
 	if err != nil {
 		return agent.Result{}, fmt.Errorf("build plan: %w", err)
 	}
@@ -209,6 +219,12 @@ func Run(ctx context.Context, prompt string, provider agent.Provider, options ag
 	}
 
 	cfg := PipelineConfigFromAgentOptions(options)
+	for _, warning := range topologyWarnings {
+		emitProgress(cfg, "[topology] warning: "+warning+"\n")
+	}
+	if topologySource != TopologySourceDefault {
+		emitProgress(cfg, "[topology] active pipeline from "+topologySource+"\n")
+	}
 	// Workspace isolation (DoD 26): a run whose Cwd is a worktree path
 	// distinct from the stable repo root is an isolated lane; stage events
 	// stamp that so the sidebar can badge the lane honestly.
@@ -254,6 +270,15 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 		} else {
 			memoryStatus = "off"
 		}
+	}
+
+	// Topology compile warnings: a non-fatal coupling problem in the plan's
+	// graph is surfaced once at run start, never silently.
+	for _, warning := range plan.Warnings {
+		emitProgress(options, "[topology] warning: "+warning+"\n")
+	}
+	if !planHasVerification(plan) {
+		emitProgress(options, "[topology] notice: topology has no verification node; revision loops are disabled\n")
 	}
 
 	// Preflight: diagnose substrate interference (permission mode, hooks,
@@ -373,6 +398,7 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 	if err != nil {
 		return schemas.PipelineResult{}, err
 	}
+	result.TopologyName = plan.TopologyName
 
 	if err := applyRequestLedger(&result, ledger); err != nil {
 		return schemas.PipelineResult{}, fmt.Errorf("apply request ledger: %w", err)
@@ -782,12 +808,22 @@ func runPass(
 ) ([]schemas.StageRecord, []schemas.HarnessStageOutput, bool, error) {
 	priorSummaries := map[string]string{}
 	priorChangedFiles := map[string][]string{}
+	summariesByStage := map[string]string{}
+	changedByStage := map[string][]string{}
+	outputsByStage := map[string]schemas.HarnessStageOutput{}
 	records := []schemas.StageRecord{}
 	outputs := []schemas.HarnessStageOutput{}
 
 	stageNames := make([]string, len(plan.Stages))
+	// A topology-compiled plan carries dependencies; a stage then sees only
+	// the summaries its incoming edges deliver. A legacy plan carries none,
+	// and every stage keeps today's cumulative view.
+	planHasEdges := false
 	for i, stage := range plan.Stages {
 		stageNames[i] = stage.Name
+		if len(stage.DependsOn) > 0 {
+			planHasEdges = true
+		}
 	}
 
 	for seq, stage := range plan.Stages {
@@ -808,7 +844,7 @@ func runPass(
 					Iteration:     iteration,
 					OutputSummary: &summary,
 				})
-				emitStageEvent(options, stageName, "skipped", summary, 0, nil)
+				emitStageEvent(options, iteration-1, stageName, "skipped", summary, 0, nil)
 				continue
 			}
 			summary := fmt.Sprintf("Stage unavailable: %s has no configured agent", stageName)
@@ -826,6 +862,10 @@ func runPass(
 			nextStage = stageNames[seq+1]
 		}
 
+		prior, priorChanged := maps.Clone(priorSummaries), cloneChangedFiles(priorChangedFiles)
+		if planHasEdges {
+			prior, priorChanged = scopedStageInputs(stage, summariesByStage, changedByStage, outputsByStage)
+		}
 		input := schemas.HarnessStageInput{
 			RunID:             runID,
 			StageName:         stageName,
@@ -833,14 +873,14 @@ func runPass(
 			PlanTier:          plan.Tier,
 			RequestIntent:     plan.RequestIntent,
 			AcceptanceFacts:   append([]schemas.AcceptanceFact(nil), plan.AcceptanceFacts...),
-			PriorSummaries:    maps.Clone(priorSummaries),
-			PriorChangedFiles: cloneChangedFiles(priorChangedFiles),
+			PriorSummaries:    prior,
+			PriorChangedFiles: priorChanged,
 			RevisionContext:   revisionContext,
 			PipelineStages:    stageNames,
 			NextStage:         nextStage,
 		}
 
-		caps := agentStage.Capabilities()
+		caps := effectiveCaps(stage, agentStage.Capabilities())
 		if tr != nil {
 			tr.noteStage(stageName, iteration)
 		}
@@ -850,6 +890,7 @@ func runPass(
 		preparedInput, perr := prepareStageInput(ctx, stageInputPreparation{
 			Input:     input,
 			Stage:     agentStage,
+			Caps:      caps,
 			Budget:    stage.Budget,
 			Tier:      plan.Tier,
 			Iteration: iteration,
@@ -877,7 +918,7 @@ func runPass(
 		}
 
 		emitProgress(options, fmt.Sprintf("[%s] stage started\n", stageName))
-		emitStageEvent(options, stageName, "running", caps.Description, 0, nil)
+		emitStageEvent(options, iteration-1, stageName, "running", caps.Description, 0, nil)
 
 		// Model-free stages skip provider resolution and attribution.
 		modelFree := caps.ModelFree
@@ -887,19 +928,23 @@ func runPass(
 			Model:           options.Model,
 			ReasoningEffort: options.ReasoningEffort,
 		}
-		if options.StageModelResolver != nil && !modelFree {
+		switch {
+		case !modelFree && stage.Model != nil && options.NodeModelResolver != nil:
+			// Strongest rung: the node's own declaration. A broken declaration
+			// fails loud; it must not silently degrade to the per-stage file.
+			resolved, rerr := options.NodeModelResolver(stageName, nodeModelOverride(stage.Model))
+			if rerr != nil {
+				return records, outputs, false, fmt.Errorf("stage %s model: %w", stageName, rerr)
+			}
+			selection = resolved
+			emitResolvedModel(options, iteration-1, caps, stageName, resolved)
+		case !modelFree && options.StageModelResolver != nil:
 			resolved, rerr := options.StageModelResolver(stageName)
 			if rerr != nil {
 				emitProgress(options, fmt.Sprintf("[%s] stage model resolution failed: %v\n", stageName, rerr))
 			} else if resolved.Provider != nil {
 				selection = resolved
-				if resolved.Model != "" {
-					detail := resolved.Model
-					if caps.Description != "" {
-						detail = caps.Description + " · " + resolved.Model
-					}
-					emitStageEvent(options, stageName, "running", detail, 0, nil)
-				}
+				emitResolvedModel(options, iteration-1, caps, stageName, resolved)
 			}
 		}
 		if modelFree {
@@ -914,7 +959,7 @@ func runPass(
 		}
 
 		start := time.Now()
-		output, err := runStageWithContext(stageCtx, input, agentStage, iteration, selection, options, workDir, runner, mem, stage.Budget.OutputMax, tr)
+		output, err := runStageWithContext(stageCtx, input, agentStage, iteration, selection, options, workDir, runner, mem, caps, stage.Budget.OutputMax, tr)
 		if cancelStage != nil {
 			cancelStage()
 		}
@@ -956,7 +1001,7 @@ func runPass(
 				tr.recordStageCompletion(record)
 				tr.persistPartial(ctx)
 			}
-			emitStageEvent(options, stageName, "failed", summary, 0, nil)
+			emitStageEvent(options, iteration-1, stageName, "failed", summary, 0, nil)
 			return records, outputs, false, nil
 		}
 		if output.ContextRequest != nil {
@@ -972,9 +1017,13 @@ func runPass(
 				tr.recordStageCompletion(record)
 				tr.persistPartial(ctx)
 			}
-			emitStageEvent(options, stageName, "failed", failSummary, 0, nil)
+			emitStageEvent(options, iteration-1, stageName, "failed", failSummary, 0, nil)
 			return records, outputs, false, nil
 		}
+		// A verification-producing node's report is re-keyed to the canonical
+		// key here, so the trajectory monitor collects it without knowing which
+		// builtin emitted it. The legacy keys stay for the severity counts.
+		output = normalizeVerificationReport(output, stage.Caps != nil && stage.Caps.ProducesVerification)
 		record.Status = schemas.StageCompleted
 		if isVerificationIncompleteOutput(output) {
 			record.Status = schemas.StageIncomplete
@@ -992,17 +1041,21 @@ func runPass(
 			tr.persistPartial(ctx)
 		}
 		if record.Status == schemas.StageIncomplete {
-			emitStageEvent(options, stageName, "incomplete", summary, 0, nil)
+			emitStageEvent(options, iteration-1, stageName, "incomplete", summary, 0, nil)
 		} else {
-			emitStageEvent(options, stageName, "completed", summary, 100, stageChangedFiles(output))
+			emitStageEvent(options, iteration-1, stageName, "completed", summary, 100, stageChangedFiles(output))
 		}
 		for _, obs := range extractWriteObservations(stageName, runID, memoryProjectRoot(options, workDir), output) {
 			persistObservation(ctx, mem, obs, func(msg string) {
 				emitProgress(options, fmt.Sprintf("[%s] %s", stageName, msg))
 			})
 		}
+		changedFiles := stageChangedFiles(output)
 		priorSummaries[stageName] = *record.OutputSummary
-		priorChangedFiles[stageName] = append([]string(nil), stageChangedFiles(output)...)
+		priorChangedFiles[stageName] = append([]string(nil), changedFiles...)
+		summariesByStage[stageName] = *record.OutputSummary
+		changedByStage[stageName] = append([]string(nil), changedFiles...)
+		outputsByStage[stageName] = output
 		outputs = append(outputs, output)
 
 		// DM2: when the test runner completes with failing tests, route a focused
@@ -1069,10 +1122,11 @@ func runStageWithContext(
 	workDir string,
 	runner ToolRunner,
 	mem MemoryStore,
+	caps stages.Capabilities,
 	outputMax int,
 	tr *runTraceAccumulator,
 ) (schemas.HarnessStageOutput, error) {
-	stageOpts := stageOptions(input.StageName, iteration, selection, options, workDir, runner, stage.Capabilities())
+	stageOpts := stageOptions(input.StageName, iteration, selection, options, workDir, runner, caps)
 	if outputMax > 0 {
 		// The stage's output budget caps every LLM request this stage makes. Zero
 		// keeps the provider default (no per-request override).
@@ -1138,14 +1192,8 @@ func passSucceeded(records []schemas.StageRecord, state schemas.IterationState) 
 // record StageIncomplete instead of StageCompleted for deterministic stages
 // whose required checks could not run.
 func isVerificationIncompleteOutput(output schemas.HarnessStageOutput) bool {
-	for _, key := range []string{"static_analyzer_output", "security_auditor_output"} {
-		if report, ok := output.Data[key].(schemas.VerificationReport); ok {
-			if report.Status == schemas.VerificationIncomplete {
-				return true
-			}
-		}
-	}
-	return false
+	report, ok := verificationReport(output)
+	return ok && report.Status == schemas.VerificationIncomplete
 }
 
 func findFailed(records []schemas.StageRecord) schemas.StageRecord {
@@ -1542,7 +1590,7 @@ func wirePresentation(options PipelineRunConfig, plan schemas.ExecutionPlan) (Pi
 	}
 	priorPlan := options.OnPipelinePlan
 	options.OnPipelinePlan = func(event agent.PipelinePlanEvent) {
-		acc.Apply(presentrun.AdaptPlanEvent(plan.RequestIntent, event.Stages))
+		acc.Apply(presentrun.AdaptPlanEventWithDependencies(plan.RequestIntent, event.Stages, event.Dependencies))
 		options.OnPresentationState(acc.Snapshot())
 		if priorPlan != nil {
 			priorPlan(event)
@@ -1794,18 +1842,40 @@ func emitPipelinePlan(options PipelineRunConfig, plan schemas.ExecutionPlan) {
 		return
 	}
 	stages := make([]string, len(plan.Stages))
+	dependencies := make(map[string][]string, len(plan.Stages))
 	for i, stage := range plan.Stages {
 		stages[i] = stage.Name
+		if len(stage.DependsOn) > 0 {
+			dependencies[stage.Name] = append([]string(nil), stage.DependsOn...)
+		}
 	}
-	options.OnPipelinePlan(agent.PipelinePlanEvent{Stages: stages})
+	options.OnPipelinePlan(agent.PipelinePlanEvent{Stages: stages, Dependencies: dependencies})
 }
 
 // emitStageEvent sends a typed stage lifecycle event. It also writes the
 // deprecated NUL marker on OnReasoning for one release. status is one of:
 // running, completed, failed, skipped, incomplete.
-func emitStageEvent(options PipelineRunConfig, stageName, status, detail string, progress int, changedFiles []string) {
+// emitResolvedModel announces the model a stage resolved to, so the live panel
+// names the model actually in use. iteration is the 0-based pass index.
+func emitResolvedModel(options PipelineRunConfig, iteration int, caps stages.Capabilities, stageName string, resolved agent.ModelSelection) {
+	if resolved.Model == "" {
+		return
+	}
+	detail := resolved.Model
+	if caps.Description != "" {
+		detail = caps.Description + " · " + resolved.Model
+	}
+	emitStageEvent(options, iteration, stageName, "running", detail, 0, nil)
+}
+
+// emitStageEvent stamps a stage lifecycle event. iteration is the 0-based
+// pass index (the pipeline's first pass is 0, the runtime loop counts from
+// 1), so the presentation layer keeps one node per (stage, pass) and leaves
+// the first pass unmarked.
+func emitStageEvent(options PipelineRunConfig, iteration int, stageName, status, detail string, progress int, changedFiles []string) {
 	event := agent.StageEvent{
 		Name:         stageName,
+		Iteration:    iteration,
 		Status:       status,
 		Detail:       detail,
 		Progress:     progress,
@@ -1845,18 +1915,23 @@ func emitStageEvent(options PipelineRunConfig, stageName, status, detail string,
 // stage types that produce FileChange slices. Returns nil when neither is
 // present, so non-completed callers and stages without files pass nil cleanly.
 func stageChangedFiles(output schemas.HarnessStageOutput) []string {
-	var files []string
-	if cw, ok := output.Data["code_writer_output"]; ok {
-		if cwo, ok := cw.(schemas.CodeWriterOutput); ok {
-			for _, f := range cwo.Files {
-				files = append(files, f.Path)
+	// Additive field first: a custom stage reports its changed paths
+	// directly. The legacy Data keys stay as the builtin fallback so the
+	// existing stages keep working unchanged.
+	files := append([]string(nil), output.ChangedFiles...)
+	if len(files) == 0 {
+		if cw, ok := output.Data["code_writer_output"]; ok {
+			if cwo, ok := cw.(schemas.CodeWriterOutput); ok {
+				for _, f := range cwo.Files {
+					files = append(files, f.Path)
+				}
 			}
 		}
-	}
-	if tg, ok := output.Data["test_generator_output"]; ok {
-		if tgo, ok := tg.(schemas.TestGeneratorOutput); ok {
-			for _, f := range tgo.Files {
-				files = append(files, f.Path)
+		if tg, ok := output.Data["test_generator_output"]; ok {
+			if tgo, ok := tg.(schemas.TestGeneratorOutput); ok {
+				for _, f := range tgo.Files {
+					files = append(files, f.Path)
+				}
 			}
 		}
 	}
