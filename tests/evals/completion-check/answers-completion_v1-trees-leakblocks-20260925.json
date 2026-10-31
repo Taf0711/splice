@@ -1,0 +1,302 @@
+[
+ {
+  "ID": "fam-01_gold",
+  "Label": true,
+  "Requirements": [
+   "Add AdminForceSignOut(store *Store, userID string) error in admin.go",
+   "invalidate every session held by userID, reusing the SAME invalidation rule the password reset path established",
+   "Follow that convention",
+   "A user with no sessions is not an error"
+  ],
+  "Answers": {
+   "requirement_0": 0.95,
+   "requirement_1": 0.61,
+   "requirement_2": 0.57,
+   "requirement_3": 0.94
+  },
+  "Min": 0.57
+ },
+ {
+  "ID": "fam-01_wrong",
+  "Label": false,
+  "Requirements": [
+   "Add AdminForceSignOut(store *Store, userID string) error in admin.go",
+   "invalidate every session held by userID, reusing the SAME invalidation rule the password reset path established",
+   "Follow that convention",
+   "A user with no sessions is not an error"
+  ],
+  "Answers": {
+   "requirement_0": 0.84,
+   "requirement_1": 0.09,
+   "requirement_2": 0.15,
+   "requirement_3": 0.87
+  },
+  "Min": 0.09
+ },
+ {
+  "ID": "fam-02_gold",
+  "Label": true,
+  "Requirements": [
+   "The sweep/eviction logic (any code that removes expired sessions) must use the SAME configured TTL source of truth rather than its own duration literal",
+   "Refactor so every expiry decision reads the single sessionTTL constant",
+   "Behavior must not change"
+  ],
+  "Answers": {
+   "requirement_0": 0.59,
+   "requirement_1": 0.65,
+   "requirement_2": 0.75
+  },
+  "Min": 0.59
+ },
+ {
+  "ID": "fam-02_wrong",
+  "Label": false,
+  "Requirements": [
+   "The sweep/eviction logic (any code that removes expired sessions) must use the SAME configured TTL source of truth rather than its own duration literal",
+   "Refactor so every expiry decision reads the single sessionTTL constant",
+   "Behavior must not change"
+  ],
+  "Answers": {
+   "requirement_0": 0.13,
+   "requirement_1": 0.11,
+   "requirement_2": 0.08
+  },
+  "Min": 0.08
+ },
+ {
+  "ID": "fam-03_gold",
+  "Label": true,
+  "Requirements": [
+   "Add DeleteAllForUser(userID string) int to Store in session.go",
+   "delete every session of the user, return the count",
+   "It MUST follow the idempotence contract TestDeleteIdempotent pinned",
+   "zero sessions returns 0, not an error",
+   "Pin it with TestDeleteAllForUserIdempotent"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.96,
+   "requirement_2": 0.74,
+   "requirement_3": 0.94,
+   "requirement_4": 0.93
+  },
+  "Min": 0.74
+ },
+ {
+  "ID": "fam-03_wrong",
+  "Label": false,
+  "Requirements": [
+   "Add DeleteAllForUser(userID string) int to Store in session.go",
+   "delete every session of the user, return the count",
+   "It MUST follow the idempotence contract TestDeleteIdempotent pinned",
+   "zero sessions returns 0, not an error",
+   "Pin it with TestDeleteAllForUserIdempotent"
+  ],
+  "Answers": {
+   "requirement_0": 0.85,
+   "requirement_1": 0.57,
+   "requirement_2": 0.05,
+   "requirement_3": 0.04,
+   "requirement_4": 0.04
+  },
+  "Min": 0.04
+ },
+ {
+  "ID": "fam-04_gold",
+  "Label": true,
+  "Requirements": [
+   "Add an AdminSessionView struct in admin.go (fields ID, User, Created, LastSeen, plus Admin bool) that reuses the SAME explicit JSON tag convention established for Session, and return it from a new adminSessionsHandler",
+   "Follow the tag convention from the Session work"
+  ],
+  "Answers": {
+   "requirement_0": 0.59,
+   "requirement_1": 0.89
+  },
+  "Min": 0.59
+ },
+ {
+  "ID": "fam-04_wrong",
+  "Label": false,
+  "Requirements": [
+   "Add an AdminSessionView struct in admin.go (fields ID, User, Created, LastSeen, plus Admin bool) that reuses the SAME explicit JSON tag convention established for Session, and return it from a new adminSessionsHandler",
+   "Follow the tag convention from the Session work"
+  ],
+  "Answers": {
+   "requirement_0": 0.07,
+   "requirement_1": 0.05
+  },
+  "Min": 0.05
+ },
+ {
+  "ID": "fam-05_gold",
+  "Label": true,
+  "Requirements": [
+   "Add adminSessionHandler(store *Store) http.HandlerFunc in admin.go for GET /admin/session?id=X",
+   "It must map store errors with the SAME mapStoreError table the /session handler uses (refactor it in main.go if needed)",
+   "that table stays the single source of truth for store-error-to-status translation"
+  ],
+  "Answers": {
+   "requirement_0": 0.89,
+   "requirement_1": 0.39,
+   "requirement_2": 0.49
+  },
+  "Min": 0.39
+ },
+ {
+  "ID": "fam-05_wrong",
+  "Label": false,
+  "Requirements": [
+   "Add adminSessionHandler(store *Store) http.HandlerFunc in admin.go for GET /admin/session?id=X",
+   "It must map store errors with the SAME mapStoreError table the /session handler uses (refactor it in main.go if needed)",
+   "that table stays the single source of truth for store-error-to-status translation"
+  ],
+  "Answers": {
+   "requirement_0": 0.71,
+   "requirement_1": 0.1,
+   "requirement_2": 0.13
+  },
+  "Min": 0.1
+ },
+ {
+  "ID": "fam-06_gold",
+  "Label": true,
+  "Requirements": [
+   "Add SessionsForUser(user string) []Session to Store in session.go",
+   "return that user's live sessions following the SAME locking discipline the audit established (read paths take RLock and must not mutate)",
+   "Add the same style of lock comment",
+   "The verifier runs under -race"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.87,
+   "requirement_2": 0.93,
+   "requirement_3": 0.71
+  },
+  "Min": 0.71
+ },
+ {
+  "ID": "fam-06_wrong",
+  "Label": false,
+  "Requirements": [
+   "Add SessionsForUser(user string) []Session to Store in session.go",
+   "return that user's live sessions following the SAME locking discipline the audit established (read paths take RLock and must not mutate)",
+   "Add the same style of lock comment",
+   "The verifier runs under -race"
+  ],
+  "Answers": {
+   "requirement_0": 0.69,
+   "requirement_1": 0.05,
+   "requirement_2": 0.07,
+   "requirement_3": 0.09
+  },
+  "Min": 0.05
+ },
+ {
+  "ID": "fam-07_gold",
+  "Label": true,
+  "Requirements": [
+   "Add newSessionMux(store *Store) *http.ServeMux in main.go that registers the handlers, and a table-driven TestSessionLookupTable in lookup_table_test.go covering GET /session on a fresh mux (200 live, 404 missing, 405 wrong method) in the SAME table style as the expiry table",
+   "One table, controllable clock"
+  ],
+  "Answers": {
+   "requirement_0": 0.93,
+   "requirement_1": 0.92
+  },
+  "Min": 0.92
+ },
+ {
+  "ID": "fam-07_wrong",
+  "Label": false,
+  "Requirements": [
+   "Add newSessionMux(store *Store) *http.ServeMux in main.go that registers the handlers, and a table-driven TestSessionLookupTable in lookup_table_test.go covering GET /session on a fresh mux (200 live, 404 missing, 405 wrong method) in the SAME table style as the expiry table",
+   "One table, controllable clock"
+  ],
+  "Answers": {
+   "requirement_0": 0.1,
+   "requirement_1": 0.09
+  },
+  "Min": 0.09
+ },
+ {
+  "ID": "fam-08_gold",
+  "Label": true,
+  "Requirements": [
+   "Create session_unix.go with a //go:build unix tag containing package main func platformNote() string { return \"unix\" }, and session_other.go with //go:build !unix returning \"other\"",
+   "The go.mod toolchain line stays pinned"
+  ],
+  "Answers": {
+   "requirement_0": 0.94,
+   "requirement_1": 0.12
+  },
+  "Min": 0.12
+ },
+ {
+  "ID": "fam-08_wrong",
+  "Label": false,
+  "Requirements": [
+   "Create session_unix.go with a //go:build unix tag containing package main func platformNote() string { return \"unix\" }, and session_other.go with //go:build !unix returning \"other\"",
+   "The go.mod toolchain line stays pinned"
+  ],
+  "Answers": {
+   "requirement_0": 0.02,
+   "requirement_1": 0.05
+  },
+  "Min": 0.02
+ },
+ {
+  "ID": "fam-09_gold",
+  "Label": true,
+  "Requirements": [
+   "Extend /healthz with uptime_seconds (integer seconds since process start, tracked via a package-level start time in main)",
+   "Status stays exactly \"ok\" and sessions is unchanged",
+   "existing fields never change name or type"
+  ],
+  "Answers": {
+   "requirement_0": 0.83,
+   "requirement_1": 0.96,
+   "requirement_2": 0.95
+  },
+  "Min": 0.83
+ },
+ {
+  "ID": "fam-09_wrong",
+  "Label": false,
+  "Requirements": [
+   "Extend /healthz with uptime_seconds (integer seconds since process start, tracked via a package-level start time in main)",
+   "Status stays exactly \"ok\" and sessions is unchanged",
+   "existing fields never change name or type"
+  ],
+  "Answers": {
+   "requirement_0": 0.69,
+   "requirement_1": 0.06,
+   "requirement_2": 0.05
+  },
+  "Min": 0.05
+ },
+ {
+  "ID": "fam-10_gold",
+  "Label": true,
+  "Requirements": [
+   "Add adminSessionHandler(store *Store) http.HandlerFunc in main.go for GET /admin/session?id=X",
+   "a read-only variant answering the same JSON as GET /session, enforcing the SAME id validation rule (invalid ids answer 400 via the store-level ErrInvalidID path, not re-implemented)"
+  ],
+  "Answers": {
+   "requirement_0": 0.67,
+   "requirement_1": 0.41
+  },
+  "Min": 0.41
+ },
+ {
+  "ID": "fam-10_wrong",
+  "Label": false,
+  "Requirements": [
+   "Add adminSessionHandler(store *Store) http.HandlerFunc in main.go for GET /admin/session?id=X",
+   "a read-only variant answering the same JSON as GET /session, enforcing the SAME id validation rule (invalid ids answer 400 via the store-level ErrInvalidID path, not re-implemented)"
+  ],
+  "Answers": {
+   "requirement_0": 0.23,
+   "requirement_1": 0.07
+  },
+  "Min": 0.07
+ }
+]

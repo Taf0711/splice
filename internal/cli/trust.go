@@ -55,3 +55,40 @@ func envTrustWorkspaceSet() bool {
 	_, ok := os.LookupEnv("SPLICE_TRUST_WORKSPACE")
 	return ok
 }
+
+// workspaceTrusted reports whether root is trusted for this process. It
+// applies the root --trust or --no-trust flag, SPLICE_TRUST_WORKSPACE, the
+// trust store, and defaultProjectTrust from the user config. It does not
+// persist a decision or prompt. An error gives false.
+func workspaceTrusted(root string) bool {
+	userConfigPath, err := config.DefaultUserConfigPath()
+	if err != nil {
+		return false
+	}
+	trusted, err := config.ResolveProjectTrust(root, userConfigPath, rootTrust, rootNoTrust)
+	return err == nil && trusted
+}
+
+// pinWorkspaceTrust makes every later config and MCP resolution through deps
+// use the trust decision of this launch. A decision made later in the same
+// process (for example /trust in the TUI) applies from the next launch.
+func pinWorkspaceTrust(deps appDeps, trusted bool) appDeps {
+	resolve := deps.resolveConfig
+	deps.resolveConfig = func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+		if overrides.ProjectTrust == nil {
+			overrides.ProjectTrust = &trusted
+		}
+		return resolve(workspaceRoot, overrides)
+	}
+	deps.pinnedTrust = &trusted
+	return deps
+}
+
+// projectTrusted returns the pinned launch decision when there is one, and
+// otherwise workspaceTrusted(root).
+func (deps appDeps) projectTrusted(root string) bool {
+	if deps.pinnedTrust != nil {
+		return *deps.pinnedTrust
+	}
+	return workspaceTrusted(root)
+}

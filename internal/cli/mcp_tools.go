@@ -25,14 +25,19 @@ type mcpToolListItem struct {
 // optionally excluding the project-layer config. It is the trust-aware seam
 // used by both the TUI startup and headless exec paths.
 func defaultResolveMCPConfig(workspaceRoot string, includeProject bool) (config.MCPConfig, error) {
-	options, err := config.DefaultResolveOptions(workspaceRoot)
+	options, err := config.WorkspaceResolveOptions(workspaceRoot, includeProject)
 	if err != nil {
 		return config.MCPConfig{}, err
 	}
-	if !includeProject {
-		options.ProjectConfigPath = ""
-	}
 	return config.ResolveMCP(options)
+}
+
+// resolveWorkspaceMCPConfig resolves the MCP servers for workspaceRoot. The
+// project layer is included only when the workspace is trusted (see
+// appDeps.projectTrusted). Every MCP command uses it, so a command cannot
+// start a server from an untrusted project config.
+func resolveWorkspaceMCPConfig(deps appDeps, workspaceRoot string) (config.MCPConfig, error) {
+	return deps.resolveMCPConfigTrust(workspaceRoot, deps.projectTrusted(workspaceRoot))
 }
 
 // projectConfigExists reports whether workspaceRoot has any project-layer

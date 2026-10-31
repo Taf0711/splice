@@ -54,7 +54,7 @@ func TestInvalidProjectAuthStorageIsIgnored(t *testing.T) {
 	if err := os.WriteFile(project, []byte(`{"auth":{"storage":"bogus"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: project, Env: map[string]string{}})
+	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: project, ProjectTrusted: true, Env: map[string]string{}})
 	if err != nil {
 		t.Fatalf("project auth.storage should be ignored: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestProjectAuthStorageDoesNotMerge(t *testing.T) {
 	if err := os.WriteFile(project, []byte(`{"auth":{"storage":"file"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	resolved, err := Resolve(ResolveOptions{UserConfigPath: user, ProjectConfigPath: project, Env: map[string]string{}})
+	resolved, err := Resolve(ResolveOptions{UserConfigPath: user, ProjectConfigPath: project, ProjectTrusted: true, Env: map[string]string{}})
 	if err != nil {
 		t.Fatal(err)
 	}

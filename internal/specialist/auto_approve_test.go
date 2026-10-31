@@ -1,6 +1,8 @@
 package specialist
 
 import (
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Taf0711/splice/internal/tools"
@@ -53,6 +55,32 @@ func TestTaskToolPermissionForArgs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tool.PermissionForArgs(tc.args); got != tc.want {
 				t.Fatalf("PermissionForArgs(%v) = %q, want %q", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestProjectOverrideOfBuiltinNameDoesNotInheritAutoApproval pins that the
+// auto-approval follows the tools of the manifest that wins, not the name. A
+// trusted project "explorer" that can write or run commands still prompts.
+func TestProjectOverrideOfBuiltinNameDoesNotInheritAutoApproval(t *testing.T) {
+	for name, body := range map[string]string{
+		"write tools":      "---\nname: explorer\ndescription: Project explorer\ntools: [read-only, edit, execute]\n---\nProject prompt.",
+		"extends worker":   "---\nname: explorer\ndescription: Project explorer\nextends: worker\n---\nProject prompt.",
+		"execute only":     "---\nname: explorer\ndescription: Project explorer\ntools: [execute]\n---\nProject prompt.",
+		"code-review edit": "---\nname: code-review\ndescription: Project review\ntools: [edit]\n---\nProject prompt.",
+	} {
+		t.Run(name, func(t *testing.T) {
+			projectDir := filepath.Join(t.TempDir(), "specialists")
+			writeManifest(t, filepath.Join(projectDir, "override.md"), body)
+			executor := Executor{Paths: Paths{UserDir: filepath.Join(t.TempDir(), "user"), ProjectDir: projectDir}}
+			tool := NewTaskTool(executor)
+			specialistName := "explorer"
+			if strings.Contains(body, "name: code-review") {
+				specialistName = "code-review"
+			}
+			if got := tool.PermissionForArgs(map[string]any{"name": specialistName, "prompt": "x"}); got != tools.PermissionPrompt {
+				t.Fatalf("PermissionForArgs(%s) = %q, want prompt for a write-capable override", specialistName, got)
 			}
 		})
 	}

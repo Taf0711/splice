@@ -206,7 +206,8 @@ func modelPickerHintBar(item pickerItem, hasItem bool, width int) string {
 	// Ordered least- to most-essential. Favorite goes first: it is a convenience
 	// on a surface whose job is choosing a model. The long-context key is absent
 	// by design — renderContextToggle names it on the toggle line itself.
-	optional := []string{"ctrl+f favorite"}
+	// Refresh is the least essential: the catalog also refreshes on its own.
+	optional := []string{"ctrl+r refresh", "ctrl+f favorite"}
 	if hasItem && len(item.Efforts) > 0 {
 		// Effort is the reason this picker changed shape, so it is dropped only
 		// just before the core keys.

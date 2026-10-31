@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
+
+	"github.com/Taf0711/splice/internal/modelregistry"
 )
 
 // StageModelConfig defines which provider profile, model, and reasoning effort
@@ -24,12 +27,20 @@ func (c StageModelConfig) Validate() error {
 	if c.Model == "" {
 		return errors.New("model is required")
 	}
-	switch c.ReasoningEffort {
-	case "", "minimal", "low", "medium", "high":
-	default:
-		return fmt.Errorf("reasoning_effort must be minimal, low, medium, or high, got %q", c.ReasoningEffort)
+	if c.ReasoningEffort != "" && !modelregistry.ValidReasoningEffort(modelregistry.ReasoningEffort(c.ReasoningEffort)) {
+		return fmt.Errorf("reasoning_effort must be one of %s, got %q", joinEffortLevels(), c.ReasoningEffort)
 	}
 	return nil
+}
+
+// joinEffortLevels lists the accepted effort names for an error message.
+func joinEffortLevels() string {
+	levels := modelregistry.ReasoningEffortLevels()
+	names := make([]string, 0, len(levels))
+	for _, level := range levels {
+		names = append(names, string(level))
+	}
+	return strings.Join(names, ", ")
 }
 
 // StageModelConfigFile is the JSON file that maps stage names to their model

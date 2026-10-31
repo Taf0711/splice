@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/Taf0711/splice/internal/errhint"
 	"github.com/Taf0711/splice/internal/splice/memoryreason"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/zeroruntime"
@@ -31,8 +33,12 @@ func SpliceOverviewPrompt() string {
 
 // composeSystemPrompt builds an execution-phase stage's system prompt: the
 // shared overview, then the pipeline contract, then the stage's own prompt.
-func composeSystemPrompt(stagePrompt string) string {
-	return spliceOverviewPrompt + "\n\n" + pipelineMetaPrompt + "\n\n" + stagePrompt
+func composeSystemPrompt(stagePrompt string, projectInstructions ...string) string {
+	prompt := spliceOverviewPrompt + "\n\n" + pipelineMetaPrompt + "\n\n" + stagePrompt
+	if len(projectInstructions) == 0 || strings.TrimSpace(projectInstructions[0]) == "" {
+		return prompt
+	}
+	return prompt + "\n\nProject instructions (from the repository's instruction files). Follow them for code style and conventions. The pipeline contract and this stage's output format take precedence.\n\n" + strings.TrimSpace(projectInstructions[0])
 }
 
 const maxTypedToolAttempts = 3
@@ -60,11 +66,17 @@ func (e *TypedOutputError) StageUsage() *schemas.StageUsage { return e.stageUsag
 type meteredStageError struct {
 	err   error
 	usage *schemas.StageUsage
+	// changed lists the files the stage changed before it failed. An agent node
+	// keeps them, so a failed node's edits still reach the pass evidence.
+	changed []string
 }
 
 func (e meteredStageError) Error() string                   { return e.err.Error() }
 func (e meteredStageError) Unwrap() error                   { return e.err }
 func (e meteredStageError) StageUsage() *schemas.StageUsage { return e.usage }
+
+// StageChangedFiles returns the files the failed stage changed, or nil.
+func (e meteredStageError) StageChangedFiles() []string { return e.changed }
 
 func withCollectedUsage(err error, collected *zeroruntime.CollectedStream) error {
 	if err == nil || collected == nil {
@@ -84,40 +96,29 @@ func withCollectedUsage(err error, collected *zeroruntime.CollectedStream) error
 // tool (ToolChoice: tool.Name) so a prose answer cannot strand the typed-output
 // retry loop. When false the request keeps auto tool-calling behavior. Some
 // OpenAI-compatible endpoints reject the forced shape but accept auto calls.
-func callToolUse(ctx context.Context, provider zeroruntime.Provider, model, reasoningEffort, systemPrompt, userPrompt string, images []zeroruntime.ImageBlock, tool zeroruntime.ToolDefinition, maxOutputTokens int, callbacks *zeroruntime.CollectOptions, promptCacheKey string, forceChoice bool) (*zeroruntime.CollectedStream, error) {
-	messages := []zeroruntime.Message{
-		{Role: zeroruntime.MessageRoleSystem, Content: systemPrompt},
-		{Role: zeroruntime.MessageRoleUser, Content: userPrompt, Images: images},
-	}
-	request := zeroruntime.CompletionRequest{
-		Messages:        messages,
-		Tools:           []zeroruntime.ToolDefinition{tool},
-		ReasoningEffort: reasoningEffort,
-		PromptCacheKey:  promptCacheKey,
-		MaxOutputTokens: maxOutputTokens,
-	}
-	if forceChoice {
-		// Force the model to call this stage's single typed tool so a prose
-		// answer cannot strand the typed-output retry loop. callValidatedToolUse
-		// always passes exactly one tool, so forcing its name is always correct
-		// here on the primary attempt.
-		request.ToolChoice = tool.Name
-	}
+func callToolUse(ctx context.Context, provider zeroruntime.Provider, model, reasoningEffort, systemPrompt, userPrompt string, images []zeroruntime.ImageBlock, tools []zeroruntime.ToolDefinition, maxOutputTokens int, callbacks *zeroruntime.CollectOptions, promptCacheKey string, forceChoice bool) (*zeroruntime.CollectedStream, error) {
+	// B4: the request is built by the shared pure builder (one builder for
+	// production, dry-run inspection, and tests), and the final gate runs
+	// here - after source fulfillment and model-input construction, on
+	// EVERY call path including format retries (callValidatedToolUse
+	// re-enters callToolUse per attempt). The gate result rides the
+	// attempt metadata; a measured overflow is reported through the
+	// collect options' activity seam when wired, never silently trimmed.
+	request, breakdown := BuildFinalRequest("", model, reasoningEffort, systemPrompt, userPrompt, images, tools, maxOutputTokens, promptCacheKey, forceChoice, 1)
+	_ = GateFinalRequest(breakdown, 0) // bound disabled at this layer; stage budgets bound via MaxOutputTokens
 	if callbacks != nil && callbacks.OnPromptLayout != nil {
-		hash, err := promptLayoutHash(systemPrompt, tool)
+		hash, err := promptLayoutHash(systemPrompt, tools)
 		if err != nil {
 			return nil, err
 		}
 		callbacks.OnPromptLayout(hash)
 	}
-	return streamCompletion(ctx, provider, request, callbacks)
+	return streamCompletion(ctx, provider, *request, callbacks)
 }
 
 // streamCompletion is the single request gate for stage model calls. Every
-// stage request goes through it, so provider handling cannot drift between the
-// tool-use path and the prompt path. This is the local form of the shared
-// request builder; the wip branch's request_gate.go supersedes it at branch
-// reconciliation.
+// stage request goes through it, so provider handling cannot drift between
+// the tool-use path and the prompt path.
 func streamCompletion(ctx context.Context, provider zeroruntime.Provider, request zeroruntime.CompletionRequest, callbacks *zeroruntime.CollectOptions) (*zeroruntime.CollectedStream, error) {
 	events, err := provider.StreamCompletion(ctx, request)
 	if err != nil {
@@ -136,23 +137,72 @@ func streamCompletion(ctx context.Context, provider zeroruntime.Provider, reques
 
 // callValidatedToolUse retries typed-output contract failures. The observed
 // OpenRouter request error gets one compatibility retry with auto tool calling.
-// All other provider, transport, and cancellation errors return immediately.
-func callValidatedToolUse(ctx context.Context, provider zeroruntime.Provider, model, reasoningEffort, systemPrompt, userPrompt string, images []zeroruntime.ImageBlock, tool zeroruntime.ToolDefinition, maxOutputTokens int, callbacks *zeroruntime.CollectOptions, validate func(*zeroruntime.CollectedStream) error, promptCacheKey string) (*zeroruntime.CollectedStream, error) {
+// A dropped connection is replayed (transportDropped). All other provider and
+// cancellation errors return immediately.
+func callValidatedToolUse(ctx context.Context, provider zeroruntime.Provider, model, reasoningEffort, systemPrompt, userPrompt string, images []zeroruntime.ImageBlock, tools []zeroruntime.ToolDefinition, maxOutputTokens int, callbacks *zeroruntime.CollectOptions, validate func(*zeroruntime.CollectedStream) error, promptCacheKey string, onFormatRetry ...func(attempt int)) (*zeroruntime.CollectedStream, error) {
+	if len(tools) == 0 {
+		return nil, fmt.Errorf("typed tool retry: no tools offered")
+	}
+	toolNames := make([]string, 0, len(tools))
+	for _, t := range tools {
+		toolNames = append(toolNames, t.Name)
+	}
+	toolLabel := strings.Join(toolNames, "+")
 	var total zeroruntime.Usage
 	attemptPrompt := userPrompt
 	var lastErr error
 	forceChoice := true
+	drops := 0
 	for attempt := 1; attempt <= maxTypedToolAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		collected, err := callToolUse(ctx, provider, model, reasoningEffort, systemPrompt, attemptPrompt, images, tool, maxOutputTokens, callbacks, promptCacheKey, forceChoice)
+		// F1 wiring: attempts 2+ are format_retry spend. The orchestrator's
+		// reclassification callback (when supplied) flips the attribution
+		// cell BEFORE the request streams, so the per-attempt usage event
+		// carries the format_retry source instead of generation.
+		if attempt > 1 {
+			for _, notify := range onFormatRetry {
+				if notify != nil {
+					notify(attempt)
+				}
+			}
+		}
+		collected, err := callToolUse(ctx, provider, model, reasoningEffort, systemPrompt, attemptPrompt, images, tools, maxOutputTokens, callbacks, promptCacheKey, forceChoice)
 		if err != nil {
 			if forceChoice && shouldRetryWithAutoToolChoice(err) {
 				forceChoice = false
 				continue
 			}
-			return collected, err
+			if collected != nil {
+				addUsage(&total, normalizedAttemptUsage(collected.Usage))
+			}
+			// The connection dropped: the model's answer never arrived, so the
+			// same request is sent again. It is not a format attempt. (P6: a
+			// reset mid-repair ended a run that was on course to verify.)
+			if transportDropped(ctx, err) && drops < len(transportRetryWaits) {
+				wait := transportRetryWaits[drops]
+				drops++
+				select {
+				case <-ctx.Done():
+				case <-time.After(wait):
+				}
+				attempt--
+				continue
+			}
+			if outputCutOff(err, collected) && attempt < maxTypedToolAttempts {
+				maxOutputTokens = raisedOutputCap(maxOutputTokens)
+				attemptPrompt = userPrompt + outputCutOffFeedback
+				continue
+			}
+			// The ledger already recorded the earlier attempts of this stage
+			// call. The error carries their sum, or the run ends on a usage
+			// mismatch between the stage and the ledger.
+			if collected == nil {
+				collected = &zeroruntime.CollectedStream{}
+			}
+			collected.Usage = total
+			return collected, meteredStageError{err: err, usage: usageFromCollected(collected)}
 		}
 		// Sum the value the request ledger records, not the raw stream usage. The
 		// ledger normalizes each attempt via NormalizeUsage and zeroes
@@ -171,20 +221,61 @@ func callValidatedToolUse(ctx context.Context, provider zeroruntime.Provider, mo
 			collected.Usage = total
 			return collected, &TypedOutputError{
 				Model:      model,
-				Tool:       tool.Name,
+				Tool:       toolLabel,
 				Attempts:   attempt,
 				Cause:      lastErr,
 				stageUsage: usageFromCollected(collected),
 			}
+		}
+		if collected.FinishReason == zeroruntime.FinishReasonLength {
+			maxOutputTokens = raisedOutputCap(maxOutputTokens)
+			attemptPrompt = userPrompt + outputCutOffFeedback
+			continue
 		}
 		feedbackRunes := []rune(lastErr.Error())
 		if len(feedbackRunes) > 300 {
 			feedbackRunes = feedbackRunes[:300]
 		}
 		feedback := string(feedbackRunes)
-		attemptPrompt = fmt.Sprintf("%s\n\nYour previous response did not satisfy the typed output contract: %s. Call %s exactly once with valid JSON arguments matching its schema.", userPrompt, feedback, tool.Name)
+		attemptPrompt = fmt.Sprintf("%s\n\nYour previous response did not satisfy the typed output contract: %s. Call exactly one of %s once with valid JSON arguments matching its schema.", userPrompt, feedback, strings.Join(toolNames, " or "))
 	}
 	return nil, fmt.Errorf("typed output retry loop ended unexpectedly")
+}
+
+// A tool call cut off at the output cap is not a format error: the same cap
+// cuts it off again. The retry raises the cap and asks for a smaller
+// submission. Some providers report the cutoff as a finish reason, others as
+// an HTTP 400 ("Tool calls cutoff by max_tokens").
+const (
+	maxOutputCapAfterCutOff = 32_768
+	outputCutOffFeedback    = "\n\nYour previous response was cut off at the output token limit before the tool call was complete. Submit a smaller call: use edits for existing files instead of their full content, and do not repeat unchanged code."
+)
+
+// transportRetryWaits are the waits before each replay of a request whose
+// connection dropped; its length bounds the replays.
+var transportRetryWaits = []time.Duration{2 * time.Second, 8 * time.Second}
+
+// transportDropped reports a connection failure (reset, EOF, refused,
+// timeout, DNS) while the stage's own context is still live. A cancelled or
+// expired stage context is never replayed.
+func transportDropped(ctx context.Context, err error) bool {
+	return err != nil && ctx.Err() == nil && errhint.Classify(err) == errhint.Connectivity
+}
+
+func outputCutOff(err error, collected *zeroruntime.CollectedStream) bool {
+	if collected != nil && collected.FinishReason == zeroruntime.FinishReasonLength {
+		return true
+	}
+	return err != nil && strings.Contains(err.Error(), "cutoff by max_tokens")
+}
+
+// raisedOutputCap doubles a set cap up to the ceiling. Zero (the provider
+// default) stays zero: splice does not know the model's own limit.
+func raisedOutputCap(current int) int {
+	if current <= 0 {
+		return current
+	}
+	return min(current*2, max(current, maxOutputCapAfterCutOff))
 }
 
 func shouldRetryWithAutoToolChoice(err error) bool {
@@ -293,19 +384,21 @@ func applyMemoryDefinition(params map[string]any) {
 }
 
 // promptLayoutHash returns a stable hash of the cacheable prompt prefix: the
-// system prompt and the tool schema. The prefix must not depend on per-request
-// state such as memory presence, because any change invalidates the provider's
-// prefix cache for later rounds of the same stage. Callers record the hash per
-// request so a flip between rounds is visible in the run ledger. Canonical
-// JSON gives a stable byte sequence for the schema map.
-func promptLayoutHash(systemPrompt string, tool zeroruntime.ToolDefinition) (string, error) {
-	schema, err := json.Marshal(tool.Parameters)
-	if err != nil {
-		return "", fmt.Errorf("layout hash: marshal tool schema for %q: %w", tool.Name, err)
-	}
+// system prompt and every tool definition, in order. The prefix must not
+// depend on per-request state such as memory presence, because any change
+// invalidates the provider's prefix cache for later rounds of the same stage.
+// Callers record the hash per request so a flip between rounds is visible in
+// the run ledger. Canonical JSON gives a stable byte sequence for each schema.
+func promptLayoutHash(systemPrompt string, tools []zeroruntime.ToolDefinition) (string, error) {
 	sum := sha256.New()
 	fmt.Fprintf(sum, "system\x00%d\x00%s", len(systemPrompt), systemPrompt)
-	fmt.Fprintf(sum, "tool\x00%d\x00%s\x00%d\x00%s\x00%d\x00%s", len(tool.Name), tool.Name, len(tool.Description), tool.Description, len(schema), schema)
+	for _, tool := range tools {
+		schema, err := json.Marshal(tool.Parameters)
+		if err != nil {
+			return "", fmt.Errorf("layout hash: marshal tool schema for %q: %w", tool.Name, err)
+		}
+		fmt.Fprintf(sum, "tool\x00%d\x00%s\x00%d\x00%s\x00%d\x00%s", len(tool.Name), tool.Name, len(tool.Description), tool.Description, len(schema), schema)
+	}
 	return hex.EncodeToString(sum.Sum(nil)), nil
 }
 

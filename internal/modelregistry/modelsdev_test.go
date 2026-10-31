@@ -134,7 +134,7 @@ func TestParseModelsDev(t *testing.T) {
 	if !ok {
 		t.Fatal("expected anthropic sonnet record")
 	}
-	if record.Limit.Context != 1_000_000 || record.Cost.Input != 3.5 {
+	if record.Limit.Context != 1_000_000 || *record.Cost.Input != 3.5 {
 		t.Fatalf("unexpected record: %+v", record)
 	}
 	if _, err := parseModelsDev([]byte(`{}`)); err == nil {
@@ -157,8 +157,8 @@ func TestModelsDevCostTiers(t *testing.T) {
 	}
 	record := func(input, output, cacheRead, cacheWrite float64, tiers ...modelsDevCostTier) modelsDevModel {
 		var model modelsDevModel
-		model.Cost.Input = input
-		model.Cost.Output = output
+		model.Cost.Input = &input
+		model.Cost.Output = &output
 		model.Cost.CacheRead = cacheRead
 		model.Cost.CacheWrite = cacheWrite
 		model.Cost.Tiers = tiers
@@ -235,8 +235,9 @@ func TestModelsDevCostTiers(t *testing.T) {
 
 func TestModelsDevCostTiersCalculateCostUsesInheritedCacheRate(t *testing.T) {
 	var record modelsDevModel
-	record.Cost.Input = 2.5
-	record.Cost.Output = 15
+	input, output := 2.5, 15.0
+	record.Cost.Input = &input
+	record.Cost.Output = &output
 	record.Cost.CacheRead = 0.25
 	record.Cost.Tiers = []modelsDevCostTier{{
 		Input:  5,
@@ -250,8 +251,8 @@ func TestModelsDevCostTiersCalculateCostUsesInheritedCacheRate(t *testing.T) {
 	model := ModelEntry{
 		ID: "302ai/gpt-5.4",
 		Cost: ModelCost{
-			InputPerMillion:       record.Cost.Input,
-			OutputPerMillion:      record.Cost.Output,
+			InputPerMillion:       *record.Cost.Input,
+			OutputPerMillion:      *record.Cost.Output,
 			CachedInputPerMillion: record.Cost.CacheRead,
 			Tiers:                 tiers,
 		},
@@ -395,7 +396,14 @@ func TestApplyModelsDevOverridesSkipsInvalidDerivedRecords(t *testing.T) {
         "limit": {"context": 16384, "output": 65536},
         "cost": {"input": 1, "output": 2}
       },
-      "bad-cost": {
+      "no-cost": {
+        "limit": {"context": 16384, "output": 8192}
+      },
+      "half-zero": {
+        "limit": {"context": 16384, "output": 8192},
+        "cost": {"input": 1, "output": 0}
+      },
+      "free": {
         "limit": {"context": 16384, "output": 8192},
         "cost": {"input": 0, "output": 0}
       },
@@ -410,8 +418,11 @@ func TestApplyModelsDevOverridesSkipsInvalidDerivedRecords(t *testing.T) {
 		t.Fatal(err)
 	}
 	entries, skipped := applyModelsDevOverridesWithStats(DefaultModelEntries(), providers, "openrouter")
-	if skipped != 2 {
-		t.Fatalf("skipped records = %d, want 2", skipped)
+	// bad-limits fails validation. no-cost has no price at all, and half-zero
+	// has one zero rate. Each is skipped. free lists both rates at zero and is
+	// kept as a free model.
+	if skipped != 3 {
+		t.Fatalf("skipped records = %d, want 3", skipped)
 	}
 	registry, err := NewRegistry(entries)
 	if err != nil {
@@ -420,8 +431,14 @@ func TestApplyModelsDevOverridesSkipsInvalidDerivedRecords(t *testing.T) {
 	if _, ok := registry.Get("bad-limits"); ok {
 		t.Fatal("derived record with invalid limits was not skipped")
 	}
-	if _, ok := registry.Get("bad-cost"); ok {
-		t.Fatal("derived record with invalid cost was not skipped")
+	for _, id := range []string{"no-cost", "half-zero"} {
+		if _, ok := registry.Get(id); ok {
+			t.Fatalf("derived record %q with no usable price was not skipped", id)
+		}
+	}
+	free, ok := registry.Get("free")
+	if !ok || !free.Cost.Free || free.Cost.IsUnpriced() || free.Cost.InputPerMillion != 0 || free.Cost.OutputPerMillion != 0 {
+		t.Fatalf("explicit zero listing = %+v/%v, want a free model", free.Cost, ok)
 	}
 	if _, ok := registry.Get("good"); !ok {
 		t.Fatal("valid derived record was skipped")
@@ -684,7 +701,7 @@ func TestRefreshModelsDevCacheFetchesAndCaches(t *testing.T) {
 	t.Setenv("SPLICE_MODELS_URL", server.URL)
 	t.Setenv("SPLICE_DISABLE_MODELS_FETCH", "")
 
-	if err := RefreshModelsDevCache(t.Context()); err != nil {
+	if _, err := RefreshModelsDevCache(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if hits != 1 {
@@ -694,7 +711,7 @@ func TestRefreshModelsDevCacheFetchesAndCaches(t *testing.T) {
 		t.Fatalf("cache file missing: %v", err)
 	}
 	// Fresh cache: second call must not re-fetch.
-	if err := RefreshModelsDevCache(t.Context()); err != nil {
+	if _, err := RefreshModelsDevCache(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if hits != 1 {
@@ -720,7 +737,7 @@ func TestRefreshModelsDevCacheRejectsBadBodyWithoutClobbering(t *testing.T) {
 	t.Setenv("SPLICE_MODELS_CACHE_PATH", cachePath)
 	t.Setenv("SPLICE_MODELS_URL", server.URL)
 
-	if err := RefreshModelsDevCache(t.Context()); err == nil {
+	if _, err := RefreshModelsDevCache(t.Context()); err == nil {
 		t.Fatal("bad body must return an error")
 	}
 	content, err := os.ReadFile(cachePath)
@@ -737,7 +754,7 @@ func TestRefreshModelsDevCacheDisabledByEnv(t *testing.T) {
 	t.Setenv("SPLICE_MODELS_CACHE_PATH", filepath.Join(t.TempDir(), "modelsdev.json"))
 	t.Setenv("SPLICE_MODELS_URL", server.URL)
 	t.Setenv("SPLICE_DISABLE_MODELS_FETCH", "1")
-	if err := RefreshModelsDevCache(t.Context()); err != nil {
+	if _, err := RefreshModelsDevCache(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -754,7 +771,7 @@ func TestRefreshModelsDevCacheDisabledByEnvDoesNotCallHTTP(t *testing.T) {
 	t.Setenv("SPLICE_MODELS_URL", "https://models.dev.invalid/api.json")
 	t.Setenv("SPLICE_DISABLE_MODELS_FETCH", "1")
 
-	if err := RefreshModelsDevCache(t.Context()); err != nil {
+	if _, err := RefreshModelsDevCache(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if hits != 0 {
@@ -882,8 +899,8 @@ func TestDefaultRegistryUsesEmbeddedPricingForDerivedProviderModel(t *testing.T)
 	if !expectedOK {
 		return
 	}
-	if glm.Cost.InputPerMillion != expected.Cost.Input || glm.Cost.OutputPerMillion != expected.Cost.Output || glm.Cost.CachedInputPerMillion != expected.Cost.CacheRead {
-		t.Fatalf("embedded z-ai/glm-5.2 pricing = %+v, want input %.12g/output %.12g/cache-read %.12g", glm.Cost, expected.Cost.Input, expected.Cost.Output, expected.Cost.CacheRead)
+	if glm.Cost.InputPerMillion != *expected.Cost.Input || glm.Cost.OutputPerMillion != *expected.Cost.Output || glm.Cost.CachedInputPerMillion != expected.Cost.CacheRead {
+		t.Fatalf("embedded z-ai/glm-5.2 pricing = %+v, want input %.12g/output %.12g/cache-read %.12g", glm.Cost, *expected.Cost.Input, *expected.Cost.Output, expected.Cost.CacheRead)
 	}
 	if glm.Cost.Source != modelsDevEmbeddedSource || glm.Cost.SourceLastVerified != strings.TrimSpace(string(modelsDevEmbeddedDate)) {
 		t.Fatalf("embedded z-ai/glm-5.2 source = %q/%q, want embedded %s", glm.Cost.Source, glm.Cost.SourceLastVerified, strings.TrimSpace(string(modelsDevEmbeddedDate)))
@@ -959,7 +976,7 @@ func TestDefaultRegistrySelectsEmbeddedAndNewerDiskPricing(t *testing.T) {
 		record, ok := embeddedModelsDevRecordForTest(t, "openai", "gpt-5.6-sol")
 		wantInput, wantSource, wantDate := 0.0, "", ""
 		if ok {
-			wantInput = record.Cost.Input
+			wantInput = *record.Cost.Input
 			wantSource = modelsDevEmbeddedSource
 			wantDate = strings.TrimSpace(string(modelsDevEmbeddedDate))
 		}
@@ -991,7 +1008,7 @@ func TestDefaultRegistryUsesEmbeddedPricingWithoutDiskCache(t *testing.T) {
 	if gpt.Cost.Source != modelsDevEmbeddedSource || gpt.Cost.SourceLastVerified != strings.TrimSpace(string(modelsDevEmbeddedDate)) {
 		t.Fatalf("gpt-5.6-sol cost = %+v/%v, want embedded pricing", gpt.Cost, ok)
 	}
-	if gpt.Cost.InputPerMillion != expected.Cost.Input || gpt.Cost.OutputPerMillion != expected.Cost.Output || gpt.Cost.CachedInputPerMillion != expected.Cost.CacheRead || gpt.Cost.CacheWritePerMillion != expected.Cost.CacheWrite {
+	if gpt.Cost.InputPerMillion != *expected.Cost.Input || gpt.Cost.OutputPerMillion != *expected.Cost.Output || gpt.Cost.CachedInputPerMillion != expected.Cost.CacheRead || gpt.Cost.CacheWritePerMillion != expected.Cost.CacheWrite {
 		t.Fatalf("gpt-5.6-sol pricing = %+v, want embedded record rates", gpt.Cost)
 	}
 	contextSteps := make([]modelsDevCostTier, 0, len(expected.Cost.Tiers))
@@ -1035,70 +1052,192 @@ func TestDefaultRegistryUsesEmbeddedPricingWithoutDiskCache(t *testing.T) {
 // catalog breaks every reasoning request. This tripwire fails when a catalog
 // model in the models.dev snapshot no longer accepts budget_tokens.
 
-// anthropicModelAcceptsBudgetTokens reports whether a models.dev record exposes
-// at least one reasoning option of type budget_tokens, which is the only
-// thinking mode Splice's Anthropic transport can send today.
-func anthropicModelAcceptsBudgetTokens(record modelsDevModel) bool {
-	for _, option := range record.ReasoningOptions {
-		if option.Type == "budget_tokens" {
-			return true
-		}
-	}
-	return false
-}
+// A refresh that writes a newer cache must reach the running process: the
+// next registry build lists the new model and its effort levels, without a
+// restart (the old sync.Once memo kept the stale catalog until relaunch).
+func TestForcedRefreshReachesTheRunningRegistry(t *testing.T) {
+	resetModelsDevCacheForTest()
+	t.Cleanup(resetModelsDevCacheForTest)
+	EnableModelsDevOverlay()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"openrouter": {"models": {"acme/brand-new-9": {
+			"tool_call": true, "reasoning": true,
+			"reasoning_options": [{"type": "effort", "values": ["low", "high", "max"]}],
+			"limit": {"context": 400000, "output": 32000},
+			"cost": {"input": 1, "output": 2}}}}}`))
+	}))
+	defer server.Close()
+	t.Setenv("SPLICE_MODELS_CACHE_PATH", filepath.Join(t.TempDir(), "modelsdev.json"))
+	t.Setenv("SPLICE_MODELS_URL", server.URL)
+	t.Setenv("SPLICE_DISABLE_MODELS_FETCH", "")
 
-func TestAnthropicCatalogModelsAcceptBudgetTokens(t *testing.T) {
-	registry, err := DefaultRegistry()
+	before, err := DefaultRegistry("openrouter")
 	if err != nil {
 		t.Fatal(err)
 	}
-	entries := registry.ListByProvider(ProviderAnthropic)
-	if len(entries) == 0 {
-		t.Fatal("no anthropic catalog entries found; lookup returned nothing")
+	if _, ok := before.Get("acme/brand-new-9"); ok {
+		t.Fatal("fixture model already present before the refresh")
 	}
-	anthropic := cachedModelsDevProviders()["anthropic"]
-	for _, entry := range entries {
-		t.Run(entry.ID, func(t *testing.T) {
-			if len(registry.ReasoningEfforts(entry.ID)) == 0 {
-				return // never enables thinking
-			}
-			record, ok := anthropic[strings.TrimSpace(entry.APIModel)]
-			if !ok {
-				t.Logf("model %q (%s) absent from the models.dev snapshot; cannot judge", entry.ID, entry.APIModel)
-				return
-			}
-			if len(record.ReasoningOptions) == 0 {
-				return // no data to judge
-			}
-			if !anthropicModelAcceptsBudgetTokens(record) {
-				types := make([]string, 0, len(record.ReasoningOptions))
-				for _, option := range record.ReasoningOptions {
-					types = append(types, option.Type)
-				}
-				t.Errorf("model %q (API %q) exposes reasoning options %v, none of which is budget_tokens. Splice's Anthropic transport only sends thinking:{type:\"enabled\",budget_tokens}, which this model rejects with an HTTP 400. Adaptive thinking plus output_config.effort must be implemented before this model can ship.", entry.ID, entry.APIModel, types)
-			}
-		})
+	written, err := ForceRefreshModelsDevCache(t.Context())
+	if err != nil || !written {
+		t.Fatalf("forced refresh: written=%v err=%v", written, err)
+	}
+	after, err := DefaultRegistry("openrouter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := after.Get("acme/brand-new-9"); !ok {
+		t.Fatal("refreshed model missing: the running registry did not reload the cache")
+	}
+	if got := after.ReasoningEfforts("acme/brand-new-9"); len(got) != 3 || got[2] != ReasoningEffortMax {
+		t.Fatalf("refreshed effort levels = %v, want [low high max]", got)
 	}
 }
 
-func TestAnthropicAcceptsBudgetTokensHelper(t *testing.T) {
-	newRecord := func(types ...string) modelsDevModel {
-		var record modelsDevModel
-		for _, typ := range types {
-			record.ReasoningOptions = append(record.ReasoningOptions, struct {
-				Type   string   `json:"type"`
-				Values []string `json:"values"`
-			}{Type: typ})
-		}
-		return record
+// sampleWS1Fixture has the shape that mispriced campaign A1: a zero-priced
+// subscription plan lists the bare id, and openrouter lists the slash-qualified
+// id at a real price.
+const sampleWS1Fixture = `{
+  "alibaba-token-plan": {
+    "models": {
+      "deepseek-v4.1-flash": {"limit": {"context": 131072, "output": 8192}, "cost": {"input": 0, "output": 0}}
+    }
+  },
+  "openrouter": {
+    "models": {
+      "deepseek/deepseek-v4.1-flash": {"limit": {"context": 131072, "output": 8192}, "cost": {"input": 0.3, "output": 1.2, "cache_read": 0.006}}
+    }
+  }
+}`
+
+// The serving provider's own listing sets the price. A zero-priced plan's bare
+// id never prices an OpenRouter request, and an unlisted provider stays unpriced.
+func TestWS1FixturePricesFromServingProviderOnly(t *testing.T) {
+	resetModelsDevCacheForTest()
+	t.Cleanup(resetModelsDevCacheForTest)
+	EnableModelsDevOverlay()
+	providers, err := parseModelsDev([]byte(sampleWS1Fixture))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !anthropicModelAcceptsBudgetTokens(newRecord("budget_tokens")) {
-		t.Error("budget_tokens record must be accepted")
+	usage := zeroruntime.Usage{InputTokens: 1_000_000, OutputTokens: 1_000_000}
+
+	openrouter, err := NewRegistry(applyModelsDevOverrides(DefaultModelEntries(), providers, "openrouter"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if anthropicModelAcceptsBudgetTokens(newRecord("effort")) {
-		t.Error("effort-only record must be reported as unsupported")
+	model, ok := openrouter.Get("deepseek/deepseek-v4.1-flash")
+	if !ok {
+		t.Fatal("openrouter model did not resolve")
 	}
-	if !anthropicModelAcceptsBudgetTokens(newRecord("effort", "budget_tokens")) {
-		t.Error("record that includes budget_tokens must be accepted")
+	breakdown, err := CalculateCost(model, usage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model.Cost.InputPerMillion != 0.3 || model.Cost.OutputPerMillion != 1.2 || breakdown.TotalCost != 1.5 {
+		t.Fatalf("openrouter cost = %+v total %v, want 0.3/1.2 total 1.5", model.Cost, breakdown.TotalCost)
+	}
+	if _, ok := openrouter.Get("deepseek-v4.1-flash"); ok {
+		t.Fatal("openrouter profile borrowed the bare id from another provider")
+	}
+
+	plan, err := NewRegistry(applyModelsDevOverrides(DefaultModelEntries(), providers, "alibaba-token-plan"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	planModel, ok := plan.Get("deepseek-v4.1-flash")
+	if !ok || !planModel.Cost.Free {
+		t.Fatalf("plan listing = %+v/%v, want a free model on its own provider", planModel.Cost, ok)
+	}
+	if breakdown, err := CalculateCost(planModel, usage); err != nil || breakdown.TotalCost != 0 {
+		t.Fatalf("plan cost = %v/%v, want 0", breakdown.TotalCost, err)
+	}
+
+	unlisted, err := NewRegistry(applyModelsDevOverrides(DefaultModelEntries(), providers, "unknown"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := unlisted.Get("deepseek-v4.1-flash"); ok {
+		t.Fatal("a provider with no entry must have no price for the id")
+	}
+	if _, ok := unlisted.Get("deepseek/deepseek-v4.1-flash"); ok {
+		t.Fatal("a provider with no entry must have no price for the slash id")
+	}
+}
+
+// sampleGatewayFixture has the gateway shape that must keep its own price. The
+// opencode gateway lists claude-sonnet-5 at $5/$25, which differs from the
+// anthropic owner price. The openai owner lists
+// gpt-5.6-sol, and no record exists for claude-sonnet-5 under anthropic.
+const sampleGatewayFixture = `{
+  "opencode": {
+    "models": {
+      "claude-sonnet-5": {"limit": {"context": 200000, "output": 8192}, "cost": {"input": 5, "output": 25}}
+    }
+  },
+  "openai": {
+    "models": {
+      "gpt-5.6-sol": {"limit": {"context": 200000, "output": 8192}, "cost": {"input": 9, "output": 9}}
+    }
+  }
+}`
+
+// A gateway that lists a curated model with its own valid price is priced at
+// that price, for its own profile. A profile with no record stays unpriced, and
+// the owner's price is unchanged.
+func TestGatewayListingPricesCuratedModelForItsProfile(t *testing.T) {
+	resetModelsDevCacheForTest()
+	t.Cleanup(resetModelsDevCacheForTest)
+	EnableModelsDevOverlay()
+	providers, err := parseModelsDev([]byte(sampleGatewayFixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage := zeroruntime.Usage{InputTokens: 1_000_000, OutputTokens: 1_000_000}
+
+	gateway, err := NewRegistry(applyModelsDevOverrides(DefaultModelEntries(), providers, "opencode"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, ok := gateway.Get("claude-sonnet-5")
+	if !ok {
+		t.Fatal("gateway registry lacks claude-sonnet-5")
+	}
+	if model.Cost.InputPerMillion != 5 || model.Cost.OutputPerMillion != 25 || model.ModelsDevProvider != "opencode" {
+		t.Fatalf("gateway entry = %+v, want opencode's own price bound to opencode", model.Cost)
+	}
+	if owners := model.PriceCatalogs(); owners != nil {
+		t.Fatalf("gateway-bound entry owners = %v, want unrestricted (bound to its profile)", owners)
+	}
+	breakdown, err := CalculateCost(model, usage)
+	if err != nil || breakdown.TotalCost != 30 {
+		t.Fatalf("gateway cost = %v/%v, want 30", breakdown.TotalCost, err)
+	}
+
+	proxy, err := NewRegistry(applyModelsDevOverrides(DefaultModelEntries(), providers, "my-proxy"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlisted, ok := proxy.Get("claude-sonnet-5")
+	if !ok {
+		t.Fatal("proxy registry lacks the curated claude-sonnet-5")
+	}
+	if unlisted.ModelsDevProvider != "" || unlisted.Cost.InputPerMillion == 5 {
+		t.Fatalf("unlisted proxy entry = %+v, want the curated entry, never the gateway's price", unlisted.Cost)
+	}
+	if owners := unlisted.PriceCatalogs(); len(owners) != 1 || owners[0] != "anthropic" {
+		t.Fatalf("curated owners = %v, want anthropic", owners)
+	}
+
+	openai, err := NewRegistry(applyModelsDevOverrides(DefaultModelEntries(), providers, "openai"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, ok := openai.Get("gpt-5.6-sol")
+	if !ok {
+		t.Fatal("openai registry lacks gpt-5.6-sol")
+	}
+	if owner.ModelsDevProvider != "" || owner.Cost.InputPerMillion != 9 {
+		t.Fatalf("owner entry = %+v, want the owner's record price and no gateway binding", owner.Cost)
 	}
 }

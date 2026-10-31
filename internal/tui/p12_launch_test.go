@@ -77,47 +77,25 @@ func TestLaunchMCPActionAdapts(t *testing.T) {
 	assertContains(t, joinedDegraded, "reconnect the degraded server")
 }
 
-// The contract band renders the launch contract dimension under the header
-// (frame item 2): "phase idle | health normal | gate none" on a clean model,
-// with health degraded (amber) when a real MCP server is degraded.
-func TestLaunchContractBand(t *testing.T) {
-	m := launchTestModel(t)
-	joined := strings.Join(stripANSIStrings([]string{m.launchContractBand()}), "\n")
-	assertContains(t, joined, "phase idle")
-	assertContains(t, joined, "health normal")
-	assertContains(t, joined, "gate none")
-
+// A degraded MCP server is tool health, not run health. It shows in the
+// TOOLS module and the facts grid; the mode label and the launch body never
+// report it as a health state (the contract's health set has no "degraded").
+func TestLaunchMCPDegradationIsNotRunHealth(t *testing.T) {
 	degraded := launchTestModel(t)
 	degraded.mcpViewStateCache = MCPViewState{Servers: []MCPServerView{{Name: "firecrawl", State: "degraded"}}}
 	degraded.mcpViewStateReady = true
-	band := strings.Join(stripANSIStrings([]string{degraded.launchContractBand()}), "\n")
-	assertContains(t, band, "health degraded")
-
-	// The band renders in the launch body through the real View path.
-	view := plainRender(t, m.View())
-	assertContains(t, view, "phase idle")
-}
-
-// Health rides the mode label on the idle frame (frame item 8):
-// "design (degraded)" when a server is degraded, plain "design" otherwise.
-func TestLaunchHealthRidesModeLabel(t *testing.T) {
-	m := launchTestModel(t)
-	text, _ := m.modeLabel()
-	if text != "design" {
-		t.Fatalf("modeLabel = %q on a clean model, want \"design\"", text)
+	if text, _ := degraded.modeLabel(); text != "design" {
+		t.Fatalf("modeLabel = %q with a degraded server, want \"design\"", text)
 	}
-
-	degraded := launchTestModel(t)
-	degraded.mcpViewStateCache = MCPViewState{Servers: []MCPServerView{{Name: "firecrawl", State: "degraded"}}}
-	degraded.mcpViewStateReady = true
-	text, _ = degraded.modeLabel()
-	if text != "design (degraded)" {
-		t.Fatalf("modeLabel = %q with a degraded server, want \"design (degraded)\"", text)
-	}
-
-	// The degraded label reaches the rendered status line through the real path.
 	joined := strings.Join(stripANSIStrings([]string{degraded.statusLine(100)}), "\n")
-	assertContains(t, joined, "design (degraded)")
+	if strings.Contains(joined, "degraded") {
+		t.Fatalf("status line reports MCP degradation as health: %q", joined)
+	}
+	body := strings.Join(stripANSIStrings(degraded.launchScreenLines()), "\n")
+	if strings.Contains(body, "health") {
+		t.Fatalf("launch body renders a health band: %q", body)
+	}
+	assertContains(t, body, "1 degraded")
 }
 
 // The facts block projects real in-tree counts: an empty registry renders

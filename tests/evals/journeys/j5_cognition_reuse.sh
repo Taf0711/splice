@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# J5 — cognition-reuse journey (deterministic observability probe).
+# J5: cognition-reuse journey (deterministic observability probe).
 # Precursor task seeds memory (sidecar ON); the target task then runs WARM
 # (memory ON) and COLD (SPLICE_EXEC_MEMORY=off). The journey asserts the
 # OBSERVABLE difference: the warm run's stream records direct-hit cognition,

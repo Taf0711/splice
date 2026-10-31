@@ -20,6 +20,10 @@ A higher-priority profile replaces a profile with the same name. Splice includes
 Review a project specialist before you trust the repository. Its prompt and tool
 selection are repository input.
 
+Splice ignores project specialists in an untrusted workspace. Then
+`splice specialist list` and `show` use only the built-in and user profiles.
+The list tells you how many project profiles Splice ignores.
+
 ## Manage profiles
 
 ```bash

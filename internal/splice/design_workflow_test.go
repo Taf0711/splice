@@ -608,15 +608,24 @@ func TestCrystallizeAndCritique_ResolverErrorFallsBack(t *testing.T) {
 	}
 
 	wf := NewDesignWorkflow(store, "test-session", "plan-1").WithPrimarySelection("primary", "primary-model", "medium")
-	selection := wf.resolveProvider(defaultProvider, resolver, "design_crystallize")
-	if selection.Provider != defaultProvider || selection.ProviderName != "primary" || selection.Model != "primary-model" || selection.ReasoningEffort != "medium" {
-		t.Fatalf("fallback selection = %+v", selection)
+	// A route that cannot resolve is an error naming the stage, not a silent
+	// fallback to the primary provider.
+	if _, err := wf.resolveProvider(defaultProvider, resolver, "design_crystallize"); err == nil || !strings.Contains(err.Error(), "stage design_crystallize model") {
+		t.Fatalf("resolveProvider err = %v, want a route error naming design_crystallize", err)
 	}
-	if _, _, err := wf.CrystallizeAndCritique(ctx, events, defaultProvider, resolver, nil, "", nil); err != nil {
-		t.Fatalf("CrystallizeAndCritique: %v", err)
+	if _, _, err := wf.CrystallizeAndCritique(ctx, events, defaultProvider, resolver, nil, "", nil); err == nil || !strings.Contains(err.Error(), "stage design_crystallize model") {
+		t.Fatalf("CrystallizeAndCritique err = %v, want the route error", err)
 	}
-	if len(defaultProvider.request.Messages) == 0 {
-		t.Errorf("default provider was not used when resolver errored")
+	if defaultProvider.request.Messages != nil {
+		t.Fatal("a provider request was sent on the broken route, want none")
+	}
+	// A tier-layer failure keeps the primary selection.
+	tierResolver := func(string) (agent.ModelSelection, error) {
+		return agent.ModelSelection{}, &stageTierFallback{err: errors.New("tier unavailable")}
+	}
+	selection, err := wf.resolveProvider(defaultProvider, tierResolver, "design_crystallize")
+	if err != nil || selection.Provider != defaultProvider || selection.ProviderName != "primary" || selection.Model != "primary-model" || selection.ReasoningEffort != "medium" {
+		t.Fatalf("tier fallback selection = %+v, err = %v", selection, err)
 	}
 }
 

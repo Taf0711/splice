@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# J3 — tui-launch-and-task journey (vhs tape driving the real TUI).
+# J3: tui-launch-and-task journey (vhs tape driving the real TUI).
 # The TUI must boot in a real terminal (tmux per the bubbletea terminal-query
 # gotcha), render the pipeline strip, and exit cleanly with no panic text.
 set -u

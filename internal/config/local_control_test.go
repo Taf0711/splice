@@ -48,7 +48,7 @@ func TestResolveLocalControlIgnoresProjectOptIn(t *testing.T) {
 		t.Fatalf("write project config: %v", err)
 	}
 
-	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: projectPath})
+	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: projectPath, ProjectTrusted: true})
 	if err != nil {
 		t.Fatalf("Resolve returned error: %v", err)
 	}

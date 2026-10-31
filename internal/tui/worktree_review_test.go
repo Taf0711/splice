@@ -2,10 +2,13 @@ package tui
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/Taf0711/splice/internal/sessions"
 	"github.com/Taf0711/splice/internal/splice/schemas"
+	"github.com/Taf0711/splice/internal/tools"
 )
 
 func TestVerdictForReview(t *testing.T) {
@@ -102,5 +105,33 @@ func TestTUIKeepPathWritesNoVerdict(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Fatalf("tuiUpsertVerdict calls = %d, want 0", calls)
+	}
+}
+
+// A TUI worktree run must read through the raw source reader rooted in the
+// worktree, never in the live checkout it was copied from.
+func TestTUIWorktreeRegistryRebindsRawReaderToRunDir(t *testing.T) {
+	live := t.TempDir()
+	runDir := t.TempDir()
+	base := tools.NewRegistry()
+	tools.RegisterPipelineSourceReader(base, live, nil)
+	if err := os.WriteFile(filepath.Join(runDir, "a.txt"), []byte("worktree bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(live, "b.txt"), []byte("live bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := tuiWorktreeRegistry(base, runDir)
+	if _, ok := reg.Get(tools.RawFileReadToolName); !ok {
+		t.Fatalf("worktree registry lacks %s", tools.RawFileReadToolName)
+	}
+	inRun := reg.RunWithOptions(context.Background(), tools.RawFileReadToolName, map[string]any{"path": "a.txt"}, tools.RunOptions{HostSeam: true})
+	if inRun.Status != tools.StatusOK || inRun.Output != "worktree bytes" {
+		t.Fatalf("worktree raw read = %s %q, want ok worktree bytes", inRun.Status, inRun.Output)
+	}
+	live2 := reg.RunWithOptions(context.Background(), tools.RawFileReadToolName, map[string]any{"path": filepath.Join(live, "b.txt")}, tools.RunOptions{HostSeam: true})
+	if live2.Status == tools.StatusOK {
+		t.Fatalf("worktree registry read the live checkout: %q", live2.Output)
 	}
 }

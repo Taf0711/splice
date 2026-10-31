@@ -44,6 +44,13 @@ func sandboxBackendCheck(goos string, lookup func(string) (string, error), works
 }
 
 func sandboxBackendWarning(goos string, backend sandbox.Backend) string {
+	if goos == "linux" {
+		reason := backend.Message
+		if reason == "" {
+			reason = "no native backend"
+		}
+		return fmt.Sprintf("Native sandbox backend unavailable on linux: %s. Pipeline stages and command nodes cannot run; %s.", reason, sandbox.LinuxBackendInstallHint)
+	}
 	if backend.Message != "" {
 		return fmt.Sprintf("Native sandbox backend unavailable on %s: %s.", goos, backend.Message)
 	}
@@ -55,7 +62,7 @@ func sandboxBackendWarning(goos string, backend sandbox.Backend) string {
 func sandboxRemedy(goos string, backend sandbox.Backend) string {
 	switch goos {
 	case "linux":
-		return "install the Linux sandbox helper or bubblewrap so native command wrapping is available"
+		return sandbox.LinuxBackendInstallHint
 	case "darwin":
 		return "sandbox-exec ships with macOS; ensure /usr/bin is on PATH so `sandbox-exec` resolves"
 	case "windows":

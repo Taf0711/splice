@@ -16,22 +16,29 @@ import (
 	"github.com/Taf0711/splice/internal/config"
 	splicerun "github.com/Taf0711/splice/internal/splice"
 	"github.com/Taf0711/splice/internal/splice/schemas"
+	"github.com/Taf0711/splice/internal/web"
 )
 
 const pipelineUsage = `Usage: splice pipeline <command>
 
 Commands:
   list                       list the topology layers and the active pipeline
-  show [name|path]           show the nodes, edges, and command nodes of a topology
+  show [name|path|default]   show the nodes, edges, and command nodes of a topology
   use <name>                 set config.json's active_pipeline to a library entry
-  export <name|path> [file]  write a topology to a file, or to stdout
+  export <name|path|default> [file]  write a topology to a file, or to stdout
   import <path|url> [--yes]  install a topology into the user library
+  edit [--new] [name|default]  edit a topology in the browser editor
 
 Topology files: <workspace>/.splice/pipeline.json (project),
 ~/.config/splice/pipelines/<name>.json (library), or a path passed to
 --pipeline. A command node is always listed by show and before an import.
 An import over https is size-capped and refuses a cross-host redirect.
+edit serves the browser editor on 127.0.0.1 and prints a one-time link to
+stderr. It edits a draft and publishes to the library, never to a project.
 `
+
+// pipelineStdin is where pipeline import reads its confirmation. Tests replace it.
+var pipelineStdin io.Reader = os.Stdin
 
 // runPipelineCommand implements `splice pipeline <verb>`.
 func runPipelineCommand(args []string, stdout, stderr io.Writer) int {
@@ -53,6 +60,8 @@ func runPipelineCommand(args []string, stdout, stderr io.Writer) int {
 		return runPipelineExport(args[1:], stdout, stderr)
 	case "import":
 		return runPipelineImport(args[1:], stdout, stderr)
+	case "edit":
+		return runPipelineEdit(args[1:], stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown pipeline subcommand %q\n\n%s", args[0], pipelineUsage)
 		return 2
@@ -112,7 +121,10 @@ func runPipelineList(stdout, stderr io.Writer) int {
 func runPipelineShow(args []string, stdout, stderr io.Writer) int {
 	root, _ := os.Getwd()
 	var topology *schemas.PipelineTopology
-	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
+	if len(args) > 0 && strings.TrimSpace(args[0]) == "default" {
+		topology = splicerun.DefaultTopology()
+		fmt.Fprintf(stdout, "source: %s\n", splicerun.TopologySourceDefault)
+	} else if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
 		loaded, path, err := splicerun.LoadNamedTopology(args[0])
 		if err != nil {
 			fmt.Fprintf(stderr, "load topology %q: %v\n", args[0], err)
@@ -129,16 +141,27 @@ func runPipelineShow(args []string, stdout, stderr io.Writer) int {
 		topology = resolved
 		fmt.Fprintf(stdout, "source: %s\n", source)
 	}
-	fmt.Fprint(stdout, formatTopology(topology))
+	fmt.Fprint(stdout, splicerun.FormatTopology(topology))
+	warnPinProfileGaps(stderr, topology, root)
 	return 0
 }
 
-// workspaceTrusted resolves the workspace trust without prompting. A resolver
-// failure is treated as untrusted, which keeps a project topology out of the
-// active set.
-func workspaceTrusted(root string) bool {
-	trusted, _, _, _, err := resolveWorkspaceTrust(root, "", false, false)
-	return err == nil && trusted
+// warnPinProfileGaps warns for node pins whose provider profile is missing from
+// the user's config. It warns only: profiles can differ per machine.
+func warnPinProfileGaps(stderr io.Writer, topology *schemas.PipelineTopology, root string) {
+	opts, err := config.WorkspaceResolveOptions(root, workspaceTrusted(root))
+	if err != nil {
+		fmt.Fprintf(stderr, "warning: cannot check node pin profiles: %v\n", err)
+		return
+	}
+	resolved, err := config.Resolve(opts)
+	if err != nil {
+		fmt.Fprintf(stderr, "warning: cannot check node pin profiles: %v\n", err)
+		return
+	}
+	for _, gap := range splicerun.PinProfileGaps(topology, resolved.Providers) {
+		fmt.Fprintf(stderr, "warning: %s\n", gap)
+	}
 }
 
 func presenceSuffix(path string) string {
@@ -148,60 +171,6 @@ func presenceSuffix(path string) string {
 	return " (absent)"
 }
 
-// formatTopology renders a topology's nodes, edges, and command nodes. Command
-// nodes are always listed, so an executable command is visible before it runs.
-func formatTopology(topology *schemas.PipelineTopology) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "topology: %s\n", topology.Name)
-	if topology.Description != "" {
-		fmt.Fprintf(&b, "description: %s\n", topology.Description)
-	}
-	b.WriteString("nodes:\n")
-	for _, node := range topology.Nodes {
-		caps := node.EffectiveCapabilities()
-		kind := "model"
-		if caps.ModelFree {
-			kind = "model-free"
-		}
-		tiers := "all tiers"
-		if len(node.Tiers) > 0 {
-			parts := make([]string, 0, len(node.Tiers))
-			for _, tier := range node.Tiers {
-				parts = append(parts, string(tier))
-			}
-			tiers = strings.Join(parts, ",")
-		}
-		fmt.Fprintf(&b, "  %s (%s, %s, %s)\n", node.Name, node.Type, kind, tiers)
-		if node.Model != nil {
-			effort := node.Model.ReasoningEffort
-			if effort == "" {
-				effort = "default effort"
-			}
-			fmt.Fprintf(&b, "    model: %s/%s (%s)\n", node.Model.ProviderProfile, node.Model.Model, effort)
-		}
-	}
-	b.WriteString("edges:\n")
-	if len(topology.Edges) == 0 {
-		b.WriteString("  (none)\n")
-	}
-	for _, edge := range topology.Edges {
-		fmt.Fprintf(&b, "  %s -> %s (%s)\n", edge.From, edge.To, edge.Payload.Effective())
-	}
-	b.WriteString("command nodes:\n")
-	commandNodes := 0
-	for _, node := range topology.Nodes {
-		if node.Type != schemas.NodeTypeCommand {
-			continue
-		}
-		commandNodes++
-		fmt.Fprintf(&b, "  %s: %s\n", node.Name, strings.Join(node.Command, " "))
-	}
-	if commandNodes == 0 {
-		b.WriteString("  (none)\n")
-	}
-	return b.String()
-}
-
 // runPipelineUse sets config.json's active_pipeline to a library entry.
 func runPipelineUse(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || strings.TrimSpace(args[0]) == "" {
@@ -209,17 +178,15 @@ func runPipelineUse(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	name := strings.TrimSpace(args[0])
-	topology, path, err := splicerun.LoadNamedTopology(name)
+	topology, path, err := splicerun.ActivateLibraryPipeline(name)
 	if err != nil {
-		fmt.Fprintf(stderr, "use pipeline %q: %v\n", name, err)
-		return 1
-	}
-	if err := setActivePipeline(name); err != nil {
 		fmt.Fprintf(stderr, "use pipeline %q: %v\n", name, err)
 		return 1
 	}
 	fmt.Fprintf(stdout, "active pipeline: %s (%s)\n", topology.Name, path)
 	reportCommandNodes(stdout, topology)
+	root, _ := os.Getwd()
+	warnPinProfileGaps(stderr, topology, root)
 	return 0
 }
 
@@ -230,15 +197,29 @@ func runPipelineExport(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "usage: splice pipeline export <name|path> [file]\n")
 		return 2
 	}
-	topology, path, err := splicerun.LoadNamedTopology(args[0])
-	if err != nil {
-		fmt.Fprintf(stderr, "export: %v\n", err)
-		return 1
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		fmt.Fprintf(stderr, "export: %v\n", err)
-		return 1
+	var (
+		data []byte
+		name string
+	)
+	if strings.TrimSpace(args[0]) == "default" {
+		encoded, err := json.MarshalIndent(splicerun.DefaultTopology(), "", "  ")
+		if err != nil {
+			fmt.Fprintf(stderr, "export: %v\n", err)
+			return 1
+		}
+		data, name = append(encoded, '\n'), "default"
+	} else {
+		topology, path, err := splicerun.LoadNamedTopology(args[0])
+		if err != nil {
+			fmt.Fprintf(stderr, "export: %v\n", err)
+			return 1
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			fmt.Fprintf(stderr, "export: %v\n", err)
+			return 1
+		}
+		data, name = raw, topology.Name
 	}
 	if len(args) < 2 || strings.TrimSpace(args[1]) == "" {
 		if _, err := stdout.Write(data); err != nil {
@@ -252,7 +233,7 @@ func runPipelineExport(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "export: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "wrote %s (%s)\n", target, topology.Name)
+	fmt.Fprintf(stdout, "wrote %s (%s)\n", target, name)
 	return 0
 }
 
@@ -287,33 +268,38 @@ func runPipelineImport(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "import %s: %v\n", reference, err)
 		return 1
 	}
-	var topology schemas.PipelineTopology
-	if err := json.Unmarshal(data, &topology); err != nil {
-		fmt.Fprintf(stderr, "import %s: parse: %v\n", source, err)
-		return 1
-	}
-	if err := topology.Validate(); err != nil {
+	topology, err := splicerun.DecodeTopology(data)
+	if err != nil {
 		fmt.Fprintf(stderr, "import %s: %v\n", source, err)
 		return 1
 	}
 	fmt.Fprintf(stdout, "import %s: topology %q with %d node(s)\n", source, topology.Name, len(topology.Nodes))
 	reportCommandNodes(stdout, &topology)
-	if !assumeYes {
-		if !promptYesNo(os.Stdin, stdout, fmt.Sprintf("Install %q into the user library?", topology.Name)) {
-			fmt.Fprintln(stdout, "import cancelled")
-			return 0
-		}
-	}
-	target, err := libraryEntryPath(topology.Name)
+	// Validate passed, so the name is a safe library file name.
+	target, err := splicerun.LibraryEntryPath(topology.Name)
 	if err != nil {
 		fmt.Fprintf(stderr, "import: %v\n", err)
 		return 1
+	}
+	_, statErr := os.Stat(target)
+	exists := statErr == nil
+	if !assumeYes {
+		question := fmt.Sprintf("Install %q into the user library?", topology.Name)
+		if exists {
+			question = fmt.Sprintf("Replace the existing library entry %q (%s)?", topology.Name, target)
+		}
+		if !promptYesNo(pipelineStdin, stdout, question) {
+			fmt.Fprintln(stdout, "import cancelled")
+			return 0
+		}
+	} else if exists {
+		fmt.Fprintf(stdout, "replacing the existing library entry %s\n", target)
 	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		fmt.Fprintf(stderr, "import: %v\n", err)
 		return 1
 	}
-	if err := os.WriteFile(target, data, 0o644); err != nil {
+	if err := splicerun.WriteFileAtomic(target, data, 0o644); err != nil {
 		fmt.Fprintf(stderr, "import: %v\n", err)
 		return 1
 	}
@@ -387,61 +373,14 @@ func fetchTopology(rawURL string) ([]byte, error) {
 	return data, nil
 }
 
-// libraryEntryPath returns the user-library path for a pipeline name.
-func libraryEntryPath(name string) (string, error) {
-	base, err := config.UserConfigDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(base, "splice", "pipelines", name+".json"), nil
-}
-
-// setActivePipeline writes config.json's active_pipeline while preserving every
-// other key, so a topology selection never drops unrelated configuration.
-func setActivePipeline(name string) error {
-	base, err := config.UserConfigDir()
-	if err != nil {
-		return err
-	}
-	path := filepath.Join(base, "splice", "config.json")
-	raw := map[string]json.RawMessage{}
-	if data, err := os.ReadFile(path); err == nil {
-		if err := json.Unmarshal(data, &raw); err != nil {
-			return fmt.Errorf("parse %s: %w", path, err)
-		}
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	encoded, err := json.Marshal(name)
-	if err != nil {
-		return err
-	}
-	raw["active_pipeline"] = encoded
-	out, err := json.MarshalIndent(raw, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(path, append(out, '\n'), 0o600)
-}
-
-// reportCommandNodes lists the executable command nodes of a topology, so a
-// command is visible before it is installed or activated.
+// reportCommandNodes lists the executable command nodes of a topology.
 func reportCommandNodes(w io.Writer, topology *schemas.PipelineTopology) {
-	commandNodes := 0
-	for _, node := range topology.Nodes {
-		if node.Type != schemas.NodeTypeCommand {
-			continue
-		}
-		commandNodes++
-		fmt.Fprintf(w, "  command node %s: %s\n", node.Name, strings.Join(node.Command, " "))
+	for _, line := range splicerun.CommandNodeLines(topology) {
+		fmt.Fprintln(w, line)
 	}
-	if commandNodes == 0 {
-		return
+	for _, line := range splicerun.AgentNodeLines(topology) {
+		fmt.Fprintln(w, line)
 	}
-	fmt.Fprintf(w, "  %d command node(s) will run shell commands when this topology is active\n", commandNodes)
 }
 
 // promptYesNo reads one line from reader and reports whether it is affirmative.
@@ -457,4 +396,86 @@ func promptYesNo(reader io.Reader, w io.Writer, prompt string) bool {
 	default:
 		return false
 	}
+}
+
+// pipelineEditContext ends a `pipeline edit` server. The default ends on
+// Ctrl-C. Tests replace it.
+var pipelineEditContext = signalContext
+
+// runPipelineEdit serves the browser editor for a headless user. It opens a
+// draft of the library entry name, a copy of the embedded default, or with
+// no name the active topology. It resumes the latest draft of that source;
+// --new starts a fresh one. The one-time link goes to stderr.
+// The server runs until Ctrl-C or until it is idle for the idle timeout.
+func runPipelineEdit(args []string, stderr io.Writer) int {
+	ref, fresh, err := web.ParseEditArgs(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "pipeline edit: %v\nusage: splice pipeline edit [--new] [name|default]\n", err)
+		return 2
+	}
+	root, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(stderr, "resolve working directory: %v\n", err)
+		return 1
+	}
+	editor := web.NewEditor(web.EditorConfig{
+		Sources: splicerun.TopologySourcesFor(root, workspaceTrusted(root)),
+		Models:  editorModelChoices(root),
+		Use: func(name string) (string, error) {
+			topology, path, err := splicerun.ActivateLibraryPipeline(name)
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("Active pipeline: %s (%s). It applies from the next run.", topology.Name, path), nil
+		},
+	})
+	id, err := editor.OpenDraft(ref, fresh)
+	if err != nil {
+		fmt.Fprintf(stderr, "pipeline edit: %v\n", err)
+		return 1
+	}
+	ctx, stop := pipelineEditContext()
+	defer stop()
+	server := web.New(0)
+	if err := editor.Attach(server); err != nil {
+		fmt.Fprintf(stderr, "pipeline edit: %v\n", err)
+		return 1
+	}
+	server.SetLanding(web.EditorSurface)
+	if _, err := server.Start(ctx); err != nil {
+		fmt.Fprintf(stderr, "pipeline edit: %v\n", err)
+		return 1
+	}
+	defer server.Stop()
+	link, err := server.BootstrapURLFor(web.EditorSurface, url.Values{"draft": {id}})
+	if err != nil {
+		fmt.Fprintf(stderr, "pipeline edit: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stderr, "Pipeline editor: %s\nOpen the link once in a browser on this computer. Press Ctrl-C to stop. The server stops after %s without use.\n", link, web.DefaultIdleTimeout)
+	select {
+	case <-ctx.Done():
+	case <-server.Done():
+	}
+	fmt.Fprintln(stderr, "Pipeline editor stopped. The draft keeps the last saved state.")
+	return 0
+}
+
+// editorModelChoices offers each configured provider profile with its model.
+func editorModelChoices(root string) []web.ModelChoice {
+	opts, err := config.WorkspaceResolveOptions(root, workspaceTrusted(root))
+	if err != nil {
+		return nil
+	}
+	resolved, err := config.Resolve(opts)
+	if err != nil {
+		return nil
+	}
+	var choices []web.ModelChoice
+	for _, profile := range resolved.Providers {
+		if strings.TrimSpace(profile.Name) != "" && strings.TrimSpace(profile.Model) != "" {
+			choices = append(choices, web.ModelChoice{Provider: profile.Name, Model: profile.Model})
+		}
+	}
+	return choices
 }

@@ -4,7 +4,7 @@ package tui
 // over the EXISTING layout state. Post one-column (owner Tension-3 decision)
 // the preset controls the projection knobs that remain:
 //
-//	default    — detailed off, sidebar available, persistent plan off
+//	default    — detailed narration, sidebar available, persistent plan off
 //	compact    — quiet narration, sidebar hidden, persistent plan off
 //	execution  — quiet narration, sidebar hidden, persistent plan on
 //	review     — detailed off, sidebar available, persistent plan on
@@ -33,7 +33,7 @@ type layoutPreset struct {
 
 // layoutPresets is the closed preset set (DoD 36). Order is the listing order.
 var layoutPresets = []layoutPreset{
-	{name: "default", description: "normal narration, sidebar, plan panel off", verbosity: verbosityDetailed, sidebarHidden: false, planPersistent: false},
+	{name: "default", description: "detailed narration, sidebar, plan panel off", verbosity: verbosityDetailed, sidebarHidden: false, planPersistent: false},
 	{name: "compact", description: "quiet narration, sidebar hidden", verbosity: verbosityQuiet, sidebarHidden: true, planPersistent: false},
 	{name: "execution", description: "quiet narration, sidebar hidden, plan pinned", verbosity: verbosityQuiet, sidebarHidden: true, planPersistent: true},
 	{name: "review", description: "normal narration, sidebar, plan pinned", verbosity: verbosityNormal, sidebarHidden: false, planPersistent: true},

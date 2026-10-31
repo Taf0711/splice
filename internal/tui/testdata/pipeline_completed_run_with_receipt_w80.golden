@@ -1,5 +1,3 @@
- ✓ code_writer shared cwd w
- ✓ test_runner shared cwd t
- ✓ security_auditor shared cwd s
-
+PIPELINE 3/3
+ ✓ code_writer  ✓ test_runner  ✓ security_auditor
  [################] 100%

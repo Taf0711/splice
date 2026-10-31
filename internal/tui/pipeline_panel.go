@@ -7,6 +7,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/Taf0711/splice/internal/presentation"
+	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
 const (
@@ -65,6 +66,13 @@ type pipelinePanelState struct {
 	lifecycle string
 	health    string
 	gate      string
+	// graphTopology is the topology the run compiled from, resolved once
+	// when the plan names it, so the live graph can show the nodes the run
+	// tier skipped. graphTopologyNote says why it is missing when it did
+	// not resolve. Render never reads files.
+	graphTopology     *schemas.PipelineTopology
+	graphTopologyName string
+	graphTopologyNote string
 }
 
 // pipelinePresentation is the immutable display model shared by pipeline
@@ -184,9 +192,7 @@ func (s *pipelinePanelState) applyState(state presentation.State) {
 }
 
 // pipelineStageStatusFromNode maps a presentation node status onto the
-// panel's display status. NodeStatusPending covers both pending and skipped
-// stages: the presentation contract normalizes "skipped" to pending, so the
-// panel cannot distinguish them (the skip glyph is a P1.3+ kind concern).
+// panel's display status. A skipped stage has its own status and glyph.
 func pipelineStageStatusFromNode(status presentation.NodeStatus) pipelineStageStatus {
 	switch status {
 	case presentation.NodeStatusRunning:
@@ -197,6 +203,8 @@ func pipelineStageStatusFromNode(status presentation.NodeStatus) pipelineStageSt
 		return pipelineStageFailed
 	case presentation.NodeStatusDegraded:
 		return pipelineStageIncomplete
+	case presentation.NodeStatusSkipped:
+		return pipelineStageSkipped
 	default:
 		return pipelineStagePending
 	}
@@ -214,39 +222,62 @@ func hasInterventionForNode(interventions []presentation.Intervention, nodeID st
 	return false
 }
 
-// kindTag abbreviates a node kind to a compact tag shown faintly after the
-// roster label: the first letter of the kind plus, when the kind has an
-// underscore part, the first letter of that part. WRITE -> "w", SECURITY ->
-// "s", TEST -> "t", VERIFY -> "v", CUSTOM -> "c", DATA_TRANSFORM -> "dt".
-// The kind set is open (presentation.NodeKind.Validate accepts any
-// uppercase-safe value), so unknown kinds still render a sensible tag and
-// unknown or empty formats fall back to "?". The tag is metadata, never a
-// status signal: the glyph and color stay owned by NodeStatus.
-func kindTag(kind presentation.NodeKind) string {
-	parts := strings.Split(string(kind), "_")
-	var b strings.Builder
-	for _, part := range parts {
-		if part == "" {
-			continue
+// kindTag names a node's kind, faintly after its label, only when the name
+// does not already say it: "test_generator" gains "write", while
+// "test_runner" needs no "test". CUSTOM adds nothing a reader can use. The
+// kind set is open, so an unknown kind renders as its lowercased word.
+func kindTag(name string, kind presentation.NodeKind) string {
+	word := strings.ToLower(string(kind))
+	if word == "" || kind == presentation.NodeKindCustom {
+		return ""
+	}
+	stem := word
+	if len(stem) > 5 {
+		stem = stem[:5]
+	}
+	if strings.Contains(strings.ToLower(name), stem) {
+		return ""
+	}
+	return word
+}
+
+// isolationWorthShowing reports whether workspace badges carry information:
+// when any lane is isolated (the badge says where the work lives), or when
+// more than one stage runs at once (parallel lanes in a shared cwd is the
+// unsafe case the badge exists for). A plain sequential run in one cwd
+// would only repeat "shared cwd" on every row.
+func (p pipelinePresentation) isolationWorthShowing() bool {
+	running, isolated := 0, 0
+	for _, stage := range p.stages {
+		if stage.status == pipelineStageRunning {
+			running++
 		}
-		b.WriteString(strings.ToLower(part[:1]))
+		if stage.workspace == "isolated" {
+			isolated++
+		}
 	}
-	if b.Len() == 0 {
-		return "?"
-	}
-	return b.String()
+	return running > 1 || isolated > 0
 }
 
 // reset clears stage rows and marks a new pipeline run active.
 func (s *pipelinePanelState) reset() {
+	s.clearGraphTopology()
 	s.stages = nil
 	s.active = true
 	s.changedFiles = nil
 	s.messages = nil
 }
 
+// clearGraphTopology forgets the previous run's topology.
+func (s *pipelinePanelState) clearGraphTopology() {
+	s.graphTopology = nil
+	s.graphTopologyName = ""
+	s.graphTopologyNote = ""
+}
+
 // clear removes all pipeline state and hides the panel.
 func (s *pipelinePanelState) clear() {
+	s.clearGraphTopology()
 	s.stages = nil
 	s.active = false
 	s.changedFiles = nil
@@ -258,6 +289,16 @@ func (s *pipelinePanelState) clear() {
 
 func (s pipelinePanelState) isEmpty() bool {
 	return !s.active || len(s.stages) == 0
+}
+
+// withRuntime overlays the live phase/health/gate projection, so the panel
+// header agrees with the status chip while a prompt blocks the run.
+func (s pipelinePanelState) withRuntime(rv runtimeView) pipelinePanelState {
+	if rv.gate != nil {
+		s.gate = string(rv.gate.Kind)
+		s.health = string(rv.health)
+	}
+	return s
 }
 
 // lifecycleChip renders the phase/health/gate readout for the pipeline
@@ -364,6 +405,11 @@ func (p pipelinePresentation) renderStripWithChip(width int, phase int, chip str
 		headColor = zeroTheme.green
 	}
 	label := "PIPELINE"
+	// The outcome is a word, not only a color: NO_COLOR and ANSI16 users
+	// must read a failed run as failed.
+	if p.settledFailed() && !strings.Contains(chip, "failed") {
+		label += " failed"
+	}
 	if strings.TrimSpace(chip) != "" {
 		label += " " + chip
 	}
@@ -378,22 +424,19 @@ func (p pipelinePresentation) renderStripWithChip(width int, phase int, chip str
 		// Wide: header with count, then a stage-label run, then a compact bar.
 		lines = append(lines, headColor.Render(truncateDisplayWidth(header, width)))
 		lines = append(lines, " "+p.stripLabels(width-1, phase))
-		bar := renderPipelineProgressBar(p.progress, width)
+		bar := p.progressBar(width)
 		if bar != "" {
 			lines = append(lines, " "+bar)
 		}
 	case tierMedium:
-		// Compact (80-119): header, stage-label run, bar, then the section
-		// shortcut row — the sidebar sections become tabs (spec §4.2 rule
-		// "sidebar_sections_become_tabs") because the permanent sidebar is
-		// removed in compact mode (DoD 16).
+		// Compact (80-119): header, stage-label run, bar. The model appends
+		// the section shortcut row (it owns the user's key bindings).
 		lines = append(lines, headColor.Render(truncateDisplayWidth(header, width)))
 		lines = append(lines, " "+p.stripLabels(width-1, phase))
-		bar := renderPipelineProgressBar(p.progress, width)
+		bar := p.progressBar(width)
 		if bar != "" {
 			lines = append(lines, " "+bar)
 		}
-		lines = append(lines, " "+compactSectionTabs(width))
 	case tierNarrow:
 		// Mid: header plus the current-running label (or first pending).
 		headLabel := p.stripCurrentLabel()
@@ -414,27 +457,35 @@ func (p pipelinePresentation) renderStripWithChip(width int, phase int, chip str
 // yields "".
 func (p pipelinePresentation) stripCurrentLabel() string {
 	if p.current != nil {
-		return pipelineStageLabel(p.current.name) + iterationSuffix(p.current.iteration)
+		return p.current.name + iterationSuffix(p.current.iteration)
 	}
 	for _, stage := range p.stages {
 		if stage.status != pipelineStageCompleted && stage.status != pipelineStageFailed &&
 			stage.status != pipelineStageSkipped && stage.status != pipelineStageIncomplete {
-			return pipelineStageLabel(stage.name) + iterationSuffix(stage.iteration)
+			return stage.name + iterationSuffix(stage.iteration)
 		}
 	}
 	return ""
 }
 
-// stripLabels renders every stage label in roster order, glyph-prefixed,
-// joined by spaces. Labels use the compact abbreviation so the run stays
-// legible at narrower widths.
+// stripLabels renders every stage label in roster order, glyph-prefixed.
+// Full names when the whole roster fits; the initials form only when it
+// does not, because a reader cannot decode "cw tr av" at a glance.
 func (p pipelinePresentation) stripLabels(width int, phase int) string {
-	cells := make([]string, 0, len(p.stages))
-	for _, stage := range p.stages {
-		glyph, style := pipelineStageGlyphAndStyle(stage.status, phase)
-		cells = append(cells, style.Render(glyph+" "+pipelineStageLabel(stage.name)+iterationSuffix(stage.iteration)))
+	cells := func(label func(string) string, sep string) (string, bool) {
+		out := make([]string, 0, len(p.stages))
+		for _, stage := range p.stages {
+			glyph, style := pipelineStageGlyphAndStyle(stage.status, phase)
+			out = append(out, style.Render(glyph+" "+label(stage.name)+iterationSuffix(stage.iteration)))
+		}
+		run := fitRun(out, width, sep)
+		return run, lipgloss.Width(run) == lipgloss.Width(strings.Join(out, sep))
 	}
-	return fitRun(cells, width, " ")
+	if run, whole := cells(func(name string) string { return name }, "  "); whole {
+		return run
+	}
+	run, _ := cells(pipelineStageLabel, " ")
+	return run
 }
 
 // fitRun right-packs rendered cells joined by sep into width by dropping
@@ -461,8 +512,15 @@ func (p pipelinePresentation) renderSection(width int, phase int) []string {
 	if !p.active || p.total == 0 {
 		return nil
 	}
+	return append(p.renderStageRows(width, phase), p.renderSectionTail(width)...)
+}
+
+// renderStageRows renders the flat stage roster. The live graph replaces it
+// when the plan graph is known (renderPipelineGraph).
+func (p pipelinePresentation) renderStageRows(width int, phase int) []string {
 	room := maxInt(4, width-3)
-	lines := make([]string, 0, len(p.stages)+7)
+	lines := make([]string, 0, len(p.stages))
+	showBadges := p.isolationWorthShowing()
 	for _, stage := range p.stages {
 		glyph, bodyStyle := pipelineStageGlyphAndStyle(stage.status, phase)
 		displayName := stage.name + iterationSuffix(stage.iteration)
@@ -471,19 +529,26 @@ func (p pipelinePresentation) renderSection(width int, phase int) []string {
 		// Isolation badge (DoD 26): "isolated" lanes are badged distinctly
 		// from "shared cwd" so parallel-lane honesty survives the compact
 		// panel. Renders only when the whole row fits, like the kind tag.
-		if badge := workspaceBadge(stage.workspace); badge != "" && nameWidth+1+len(badge) <= room {
+		if badge := workspaceBadge(stage.workspace); showBadges && badge != "" && nameWidth+1+len(badge) <= room {
 			line += " " + zeroTheme.faint.Render(badge)
 		}
 		// The kind tag is metadata shown faintly after the label. It renders
 		// only when the whole row fits; otherwise the row degrades exactly as
 		// P1.2 (name truncated by truncateStep, tag dropped), so narrow widths
 		// need no layout changes.
-		if tag := kindTag(stage.kind); tag != "" && nameWidth+1+len(tag) <= room {
+		if tag := kindTag(stage.name, stage.kind); tag != "" && nameWidth+1+len(tag) <= room {
 			line += " " + zeroTheme.faint.Render(tag)
 		}
 		lines = append(lines, line)
 	}
-	lines = append(lines, "", " "+renderPipelineProgressBar(p.progress, width))
+	return lines
+}
+
+// renderSectionTail renders the progress bar, the current stage, and the
+// repair messages under the roster or the graph.
+func (p pipelinePresentation) renderSectionTail(width int) []string {
+	room := maxInt(4, width-3)
+	lines := []string{"", " " + p.progressBar(width)}
 	if p.current != nil {
 		lines = append(lines, "")
 		lines = append(lines, zeroTheme.muted.Bold(true).Render("CURRENT"))
@@ -575,23 +640,6 @@ func workspaceBadge(workspace string) string {
 	}
 }
 
-// compactSectionTabs renders the compact-mode section shortcut row: the
-// sidebar's permanent sections collapse into keyboard-reachable tabs
-// (spec §4.2). Keys follow the existing bindings: Ctrl+B toggles the
-// sidebar (restoring it on a wide-enough terminal), Ctrl+P toggles the
-// plan panel, ? opens shortcuts. The row fits the width whole (segments
-// are short); if even the row cannot fit it returns empty rather than
-// truncating into noise.
-func compactSectionTabs(width int) string {
-	tabs := zeroTheme.muted.Render("[B]") + zeroTheme.faint.Render(" sidebar ") +
-		zeroTheme.muted.Render("[P]") + zeroTheme.faint.Render(" plan ") +
-		zeroTheme.muted.Render("[?]") + zeroTheme.faint.Render(" shortcuts")
-	if lipgloss.Width(tabs) > width {
-		return ""
-	}
-	return tabs
-}
-
 // pipelineStageLabel abbreviates a stage name for the narrow strip: the first
 // rune of each underscore part (code_writer -> cw, static_analyzer -> sa,
 // test_runner -> tr). A single-part name keeps its first two runes. Missing
@@ -664,7 +712,32 @@ func pipelineStageGlyphAndStyle(status pipelineStageStatus, phase int) (string, 
 // per process by construction.
 var pipelineGlyphTier = presentation.GlyphTierASCII
 
+// progressBar renders the run's bar in the run's own color: a failed run
+// must not look like a finished one, so it turns red and says "failed"
+// instead of "100%". A clean finish is green; anything live stays amber.
+func (p pipelinePresentation) progressBar(width int) string {
+	if p.settledFailed() {
+		return styledPipelineProgressBar(p.progress, width, zeroTheme.red, zeroTheme.red.Render("failed"))
+	}
+	switch p.stripState() {
+	case pipelineStripDone:
+		return styledPipelineProgressBar(p.progress, width, zeroTheme.green, zeroTheme.faint.Render(fmt.Sprintf("%3d%%", p.progress)))
+	}
+	return renderPipelineProgressBar(p.progress, width)
+}
+
+// settledFailed reports a failed stage with nothing left running. While a
+// stage still runs (a repair pass), the run is live, not failed.
+func (p pipelinePresentation) settledFailed() bool {
+	return p.failed && p.current == nil
+}
+
 func renderPipelineProgressBar(progress, width int) string {
+	// Right-aligned percent: 0% -> 100% keeps one stable display width.
+	return styledPipelineProgressBar(progress, width, zeroTheme.amber, zeroTheme.faint.Render(fmt.Sprintf("%3d%%", progress)))
+}
+
+func styledPipelineProgressBar(progress, width int, style lipgloss.Style, label string) string {
 	barWidth := width - 8
 	if barWidth > 16 {
 		barWidth = 16
@@ -673,12 +746,11 @@ func renderPipelineProgressBar(progress, width int) string {
 		barWidth = 4
 	}
 	bar := presentation.ProgressBar(float64(progress)/100, barWidth)
-	body := zeroTheme.amber.Render(strings.ReplaceAll(bar, "-", "─"))
+	body := style.Render(strings.ReplaceAll(bar, "-", "─"))
 	if pipelineGlyphTier == presentation.GlyphTierRichUnicode {
 		// The Pen mock's progress language: eighth-block runs, single-cell
 		// exact (▏▎▍▌▋▊▉█).
-		body = zeroTheme.amber.Render(presentation.RichProgressBar(float64(progress)/100, barWidth))
+		body = style.Render(presentation.RichProgressBar(float64(progress)/100, barWidth))
 	}
-	// Right-aligned percent: 0% -> 100% keeps one stable display width.
-	return body + " " + zeroTheme.faint.Render(fmt.Sprintf("%3d%%", progress))
+	return body + " " + label
 }

@@ -193,6 +193,10 @@ type Policy struct {
 	DenyRead   []string `json:"denyRead,omitempty"`
 	AllowWrite []string `json:"allowWrite,omitempty"`
 	DenyWrite  []string `json:"denyWrite,omitempty"`
+	// TempRoot, when set, is the only temp directory a command can write. The
+	// system temp roots (/tmp, TMPDIR, the platform temp trees) are then not
+	// write roots. The caller makes the directory and sets TMPDIR to it.
+	TempRoot string `json:"tempRoot,omitempty"`
 }
 
 type Request struct {
@@ -264,9 +268,35 @@ func DefaultPolicy() Policy {
 	}
 }
 
+// credentialFileDenyPaths lists credential files and directories that the
+// in-process file tools (read_file, grep, glob) must not read. They are not in
+// DenyRead, so the OS profile of a shell command does not change: git, npm,
+// pip, and cargo in a sandboxed command still read their own configuration.
+// The read check drops an entry that does not exist, like DenyRead.
+func credentialFileDenyPaths() []string {
+	return []string{
+		"~/.git-credentials",
+		"~/.netrc",
+		"~/.npmrc",
+		"~/.pypirc",
+		"~/.pip",
+		"~/.config/pip",
+		"~/.cargo/credentials",
+		"~/.cargo/credentials.toml",
+		"~/.m2/settings.xml",
+		"~/.vault-token",
+		"~/.gem/credentials",
+		"~/.terraform.d/credentials.tfrc.json",
+		filepath.Join("~", "Library", "Keychains"),
+	}
+}
+
 // defaultDenyReadPaths lists credential directories that a sandboxed command
 // must not read by default. The entries use the same home/config resolution as
-// the token stores, and policy path handling drops entries that do not exist.
+// the token stores. The read exclusions drop entries that do not exist. The
+// sandbox profile and UnsandboxedExecutionAllowed keep them, so the default
+// list counts as an active denied-read restriction. Credential files that only
+// the in-process file tools deny are in credentialFileDenyPaths.
 func defaultDenyReadPaths() []string {
 	paths := []string{
 		"~/.ssh",

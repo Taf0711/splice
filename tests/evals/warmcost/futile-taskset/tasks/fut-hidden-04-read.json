@@ -1,0 +1,8 @@
+{
+  "name": "fut-hidden-04-read",
+  "phase": "read",
+  "precursor": "fut-hidden-04-write",
+  "prompt": "In the perms package, add the permission \"audit:purge\" to the permissions roles can hold.",
+  "check": "# fut-hidden-04 B\ncat > internal/perms/probe_audit_purge_test.go <<'EOF'\npackage perms\n\nimport (\n\t\"slices\"\n\t\"testing\"\n)\n\nfunc TestProbe(t *testing.T) {\n\tif !slices.Contains(Names, \"audit:purge\") {\n\t\tt.Fatal(\"Names lacks audit:purge\")\n\t}\n}\nEOF\ngo test -count=1 ./... ; rc=$?\nrm -f internal/perms/probe_audit_purge_test.go\nexit $rc\n",
+  "fixture": "../../chain-families/fixture-hidden"
+}

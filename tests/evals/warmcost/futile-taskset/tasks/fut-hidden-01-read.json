@@ -1,0 +1,8 @@
+{
+  "name": "fut-hidden-01-read",
+  "phase": "read",
+  "precursor": "fut-hidden-01-write",
+  "prompt": "In the events package, add the event kind \"invoice.refunded\" to the kinds the service emits.",
+  "check": "# fut-hidden-01 B\ncat > internal/events/probe_invoice_refunded_test.go <<'EOF'\npackage events\n\nimport (\n\t\"slices\"\n\t\"testing\"\n)\n\nfunc TestProbe(t *testing.T) {\n\tif !slices.Contains(Kinds, \"invoice.refunded\") {\n\t\tt.Fatal(\"Kinds lacks invoice.refunded\")\n\t}\n}\nEOF\ngo test -count=1 ./... ; rc=$?\nrm -f internal/events/probe_invoice_refunded_test.go\nexit $rc\n",
+  "fixture": "../../chain-families/fixture-hidden"
+}

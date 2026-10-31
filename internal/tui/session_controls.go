@@ -200,13 +200,21 @@ func (m model) effortForcingAllowed() bool {
 	return !known
 }
 
-func (m model) cycleReasoningEffort() (model, tea.Cmd) {
+// reasoningEffortRing is the ordered list Ctrl+T cycles through: the active
+// model's supported levels, or the forced ring for an unknown model. Empty when
+// the model has no effort controls.
+func (m model) reasoningEffortRing() []modelregistry.ReasoningEffort {
 	efforts := m.availableReasoningEfforts()
-	if len(efforts) == 0 {
-		if !m.effortForcingAllowed() {
-			return m, nil
-		}
+	if len(efforts) == 0 && m.effortForcingAllowed() {
 		efforts = forcedEffortRing
+	}
+	return efforts
+}
+
+func (m model) cycleReasoningEffort() (model, tea.Cmd) {
+	efforts := m.reasoningEffortRing()
+	if len(efforts) == 0 {
+		return m, nil
 	}
 	if m.reasoningEffort == "" {
 		m.reasoningEffort = efforts[0]
@@ -356,6 +364,9 @@ func (m model) selfCorrectText() string {
 	depth := "LSP diagnostics only — fast, scoped to changed files"
 	if m.selfCorrectTests {
 		depth = "LSP diagnostics + project test plan (e.g. go test ./...) — slower, whole-repo"
+		if !m.agentOptions.TrustedWorkspace {
+			depth = "LSP diagnostics only. The project test plan does not run until you trust this workspace."
+		}
 	}
 	return renderCommandOutput(commandOutput{
 		Title:  "Self-correct",

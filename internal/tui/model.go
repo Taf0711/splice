@@ -24,6 +24,7 @@ import (
 	"github.com/Taf0711/splice/internal/config"
 	"github.com/Taf0711/splice/internal/doctor"
 	"github.com/Taf0711/splice/internal/errhint"
+	"github.com/Taf0711/splice/internal/flags"
 	"github.com/Taf0711/splice/internal/lsp"
 	internalmcp "github.com/Taf0711/splice/internal/mcp"
 	"github.com/Taf0711/splice/internal/memd"
@@ -88,28 +89,35 @@ const dragEdgeScrollInterval = 70 * time.Millisecond
 const dragEdgeScrollStep = 1
 
 type model struct {
-	ctx                         context.Context
-	cwd                         string
-	trusted                     bool
-	trustStore                  *config.TrustStore
-	trustPromptRequired         bool
-	appVersion                  string
-	userCommands                []usercommands.Command // file-sourced /commands (.splice/commands)
-	loadSkills                  func() []skills.Skill  // lazy installed-skills loader for /skills + /<skill-name>
-	userConfigPath              string
-	doctorUserConfigPath        string
-	doctorGOOS                  string                       // sandbox-backend check platform override; empty = runtime.GOOS
-	doctorLookupExecutable      func(string) (string, error) // PATH stub for deterministic doctor checks; nil = exec.LookPath
-	projectConfigPath           string
-	gitBranch                   string
-	providerName                string
-	modelName                   string
-	modelCatalog                modelregistry.Registry
+	ctx                     context.Context
+	surface                 *tuiSurface
+	cwd                     string
+	trusted                 bool
+	trustStore              *config.TrustStore
+	trustPromptRequired     bool
+	appVersion              string
+	userCommands            []usercommands.Command // file-sourced /commands (.splice/commands)
+	loadSkills              func() []skills.Skill  // lazy installed-skills loader for /skills + /<skill-name>
+	userConfigPath          string
+	flagResolutions         []flags.Resolution
+	doctorUserConfigPath    string
+	doctorDecisionAdvisor   config.DecisionAdvisorConfig  // resolved section for the doctor's trajectory line
+	doctorTrajectoryProfile config.ProviderProfile        // profile the default classifier runs on, for the doctor line
+	doctorEvaluator         zeroruntime.DecisionEvaluator // the run's evaluator, for the doctor line
+	doctorGOOS              string                        // sandbox-backend check platform override; empty = runtime.GOOS
+	doctorLookupExecutable  func(string) (string, error)  // PATH stub for deterministic doctor checks; nil = exec.LookPath
+	projectConfigPath       string
+	gitBranch               string
+	providerName            string
+	modelName               string
+	modelCatalog            modelregistry.Registry
+	// costCatalogLoad builds a provider profile's pricing catalog. Nil means
+	// modelregistry.DefaultRegistry. Tests inject one.
+	costCatalogLoad             func(profile string) (modelregistry.Registry, error)
 	providerProfile             config.ProviderProfile
 	savedProviders              []config.ProviderProfile
 	provider                    zeroruntime.Provider
 	newProvider                 func(config.ProviderProfile) (zeroruntime.Provider, error)
-	stageModelResolver          agent.StageModelResolver
 	probeProviderHealth         func(context.Context, providerhealth.Options) providerhealth.Result
 	discoverProviderModels      func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
 	discoverOllamaContextWindow func(ctx context.Context, baseURL string, model string) (int, error)
@@ -126,6 +134,8 @@ type model struct {
 	mcpPermissionStore   *internalmcp.PermissionStore
 	mcpTokenStore        *internalmcp.TokenStore
 	mcpCommand           func(context.Context, []string) MCPCommandResult
+	backendCommand       func(context.Context, []string) BackendCommandResult
+	refreshModelCatalog  func(context.Context, bool) (bool, error)
 	sandboxSetupCommand  func(context.Context) SandboxSetupCommandResult
 	mcpViewStateCache    MCPViewState
 	mcpViewStateReady    bool
@@ -469,7 +479,11 @@ type model struct {
 	// execDirectPending arms CLI-parity behavior for the next launched prompt
 	// (set by /exec, consumed by launchPrompt).
 	execDirectPending bool
-	cancelConfirmSeq  int
+	// activeExecDirect is true while the in-flight run was launched through
+	// /exec. Such a run executes under auto permission mode whatever the
+	// session selector shows (see the /exec notice in runAgentWithOptions).
+	activeExecDirect bool
+	cancelConfirmSeq int
 	// edgeScrollDelta drives the smooth-glide auto-scroll while a drag holds past
 	// the transcript's top/bottom edge: 0 when idle, else the signed per-tick step
 	// (matches transcriptEdgeScrollDelta's sign convention). A self-scheduling
@@ -695,6 +709,10 @@ type agentResponseMsg struct {
 	// review's dirty-main gate: preserved AND source not dirty.
 	worktreePreserved bool
 	mergeAvailable    bool
+	// receipt is the terminal receipt payload of a pipeline turn (/exec or a
+	// pipeline run), built in the run goroutine from the run's result or error.
+	// The same payload is persisted on the session event, so resume replays it.
+	receipt string
 }
 
 type agentRowMsg struct {
@@ -869,13 +887,17 @@ type askUserRequestMsg struct {
 // active is the current tab (0..N-1 = questions, N = Confirm); states holds the
 // per-question picker/free-text state and committed answer. See ask_user_prompt.go.
 type pendingAskUserPrompt struct {
-	request   agent.AskUserRequest
-	answer    func([]string)
-	active    int
-	states    []askUserAnswerState
-	keepOnEsc bool
-	worktree  *worktrees.Result
-	dirtyMain bool
+	// othersRunning is set at render time: specialists still in flight
+	// while this question waits. The gate footer must not claim "no work
+	// running" when they are.
+	othersRunning int
+	request       agent.AskUserRequest
+	answer        func([]string)
+	active        int
+	states        []askUserAnswerState
+	keepOnEsc     bool
+	worktree      *worktrees.Result
+	dirtyMain     bool
 	// reviewDecision is empty on the review decision prompt; it is
 	// worktreeReviewReject on the follow-up reject-reason prompt.
 	reviewDecision string
@@ -992,7 +1014,7 @@ func newModel(ctx context.Context, options Options) model {
 	if permissionMode == "" {
 		permissionMode = agent.PermissionModeAuto
 	}
-	asciiEnabled := spliceASCIIEnabled(os.Getenv)
+	asciiEnabled := spliceASCIIEnabled(os.Getenv) || presentation.TerminalNeedsASCII(os.Getenv)
 
 	input := textinput.New()
 	// Pen composer grammar (frames kAYHl / ws5rS / design frames): the
@@ -1021,8 +1043,11 @@ func newModel(ctx context.Context, options Options) model {
 
 	resolvedKeyBindings, keyBindingWarnings := sanitizeKeyBindings(resolveKeyBindings(options.KeyBindings))
 	options.AgentOptions.TrustedWorkspace = options.Trusted
+	// Trust was resolved for the launch directory, which is cwd.
+	options.AgentOptions.TrustRoot = cwd
 
 	m := model{
+		surface:                     newTUISurface(),
 		ctx:                         ctx,
 		cwd:                         cwd,
 		trusted:                     options.Trusted,
@@ -1034,7 +1059,11 @@ func newModel(ctx context.Context, options Options) model {
 		loadSkills:                  options.LoadSkills,
 		composerCursorVisible:       true,
 		userConfigPath:              options.UserConfigPath,
+		flagResolutions:             options.FlagResolutions,
 		doctorUserConfigPath:        doctorUserConfigPath,
+		doctorDecisionAdvisor:       options.DecisionAdvisor,
+		doctorTrajectoryProfile:     options.DoctorTrajectoryProfile,
+		doctorEvaluator:             options.DoctorEvaluator,
 		doctorGOOS:                  doctorGOOS,
 		doctorLookupExecutable:      doctorLookup,
 		projectConfigPath:           options.ProjectConfigPath,
@@ -1061,6 +1090,8 @@ func newModel(ctx context.Context, options Options) model {
 		mcpPermissionStore:          options.MCPPermissionStore,
 		mcpTokenStore:               options.MCPTokenStore,
 		mcpCommand:                  options.MCPCommand,
+		backendCommand:              options.BackendCommand,
+		refreshModelCatalog:         options.RefreshModelCatalog,
 		sandboxSetupCommand:         options.SandboxSetupCommand,
 		agentOptions:                options.AgentOptions,
 		sessionCompactor:            options.SessionCompactor,
@@ -1113,7 +1144,7 @@ func newModel(ctx context.Context, options Options) model {
 	// One session-long LSP manager (cheap to build — servers start lazily on the
 	// first Check), reused across prompts so gopls stays warm between turns.
 	if cwd != "" {
-		m.lspManager = lsp.NewManager(cwd)
+		m.lspManager = lsp.NewManager(cwd, options.Trusted)
 	}
 	m.refreshMCPViewState()
 	for _, warning := range keyBindingWarnings {
@@ -1159,29 +1190,52 @@ func (m *model) rebuildModelCatalog() {
 
 func (m model) doctorOptions(connectivity bool) doctor.Options {
 	var health *providerhealth.Result
-	if connectivity && m.probeProviderHealth != nil && config.HasProviderProfile(m.providerProfile) {
-		ctx := m.ctx
-		if ctx == nil {
-			ctx = context.Background()
+	if connectivity && m.probeProviderHealth != nil {
+		// The probe sends the stored credential, as a run does. When the
+		// credential cannot be read, do not probe: a keyless probe returns a
+		// generic 401 that hides the read error. Report the read error as the
+		// connectivity failure instead. The error text names the provider and
+		// the store, never the key.
+		probeProfile, err := m.profileWithCredential(m.providerProfile)
+		if err != nil {
+			health = &providerhealth.Result{
+				Status: providerhealth.StatusFail,
+				Checks: []providerhealth.Check{{
+					ID:       "provider.credential",
+					Label:    "Provider credential",
+					Status:   providerhealth.StatusFail,
+					Category: providerhealth.CategoryConfig,
+					Message:  err.Error(),
+				}},
+			}
+		} else if config.HasProviderProfile(probeProfile) {
+			ctx := m.ctx
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			result := m.probeProviderHealth(ctx, providerhealth.Options{
+				Profile:      probeProfile,
+				Connectivity: true,
+				UserAgent:    m.userAgent,
+			})
+			health = &result
 		}
-		result := m.probeProviderHealth(ctx, providerhealth.Options{
-			Profile:      m.providerProfile,
-			Connectivity: true,
-			UserAgent:    m.userAgent,
-		})
-		health = &result
 	}
 
 	return doctor.Options{
-		Now:            m.now,
-		Runtime:        "go",
-		UserConfig:     m.doctorUserConfigPath,
-		ProjectConfig:  m.projectConfigPath,
-		Provider:       m.providerProfile,
-		WorkspaceRoot:  m.cwd,
-		Connectivity:   connectivity,
-		ProviderHealth: health,
-		GOOS:           m.doctorGOOS,
+		Now:               m.now,
+		Runtime:           "go",
+		UserConfig:        m.doctorUserConfigPath,
+		ProjectConfig:     m.projectConfigPath,
+		Provider:          m.providerProfile,
+		DecisionAdvisor:   m.doctorDecisionAdvisor,
+		TrajectoryProfile: m.doctorTrajectoryProfile,
+		Evaluator:         m.doctorEvaluator,
+		Flags:             flagSetFromResolutions(m.flagResolutions),
+		WorkspaceRoot:     m.cwd,
+		Connectivity:      connectivity,
+		ProviderHealth:    health,
+		GOOS:              m.doctorGOOS,
 		LookupExecutable: func(name string) (string, error) {
 			if m.doctorLookupExecutable != nil {
 				return m.doctorLookupExecutable(name)
@@ -1224,10 +1278,17 @@ func (m model) Init() tea.Cmd {
 	// terminal's unprompted push — mirrors the RequestBackgroundColor request
 	// below for the same reason.
 	cmds = append(cmds, tea.RequestWindowSize)
+	// Refresh a stale model catalog in the background; a newer one rebuilds
+	// the catalog in place (model_catalog_refresh.go).
+	if cmd := m.modelCatalogRefreshCmd(false); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
 	// Baseline git snapshot for the FILES sidebar sweep: whatever is already
 	// dirty when the TUI opens is pre-existing state, not this session's work
 	// (files_git_sweep.go). Async; a non-git workspace just disables the sweep.
-	if strings.TrimSpace(m.cwd) != "" {
+	// An untrusted workspace gets no git at all: a repo filter driver runs
+	// during git status and diff, so git must wait for the trust decision.
+	if strings.TrimSpace(m.cwd) != "" && m.trusted {
 		cmds = append(cmds, gitSweepCmd(m.ctx, m.cwd, true))
 	}
 	// In auto mode, ask the terminal for its background color; the reply arrives
@@ -1257,19 +1318,8 @@ func (m model) Init() tea.Cmd {
 			cmds = append(cmds, cmd)
 		}
 	}
-	if m.prService != nil && m.runtimeMessageSink != nil {
-		service := m.prService
-		sink := m.runtimeMessageSink
-		ctx := m.ctx
-		if ctx == nil {
-			ctx = context.Background()
-		}
-		cmds = append(cmds, func() tea.Msg {
-			stop := WatchPRStateContext(ctx, service, func(state PrState) {
-				sink(prStateMsg{state: state})
-			})
-			return prWatcherStartedMsg{stop: stop}
-		})
+	if cmd := m.prWatcherCmd(); cmd != nil {
+		cmds = append(cmds, cmd)
 	}
 	// Async session scan (F1, §14): the resume picker and launch card arm
 	// from the sessionsScannedMsg — never from store I/O on the UI loop.
@@ -1277,6 +1327,26 @@ func (m model) Init() tea.Cmd {
 		cmds = append(cmds, scanCmd)
 	}
 	return tea.Batch(cmds...)
+}
+
+// prWatcherCmd starts the PR and merge-request watcher. It returns nil until the
+// workspace is trusted: gh and glab read the repository's remotes and config.
+func (m model) prWatcherCmd() tea.Cmd {
+	if !m.trusted || m.prService == nil || m.runtimeMessageSink == nil {
+		return nil
+	}
+	service := m.prService
+	sink := m.runtimeMessageSink
+	ctx := m.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return func() tea.Msg {
+		stop := WatchPRStateContext(ctx, service, func(state PrState) {
+			sink(prStateMsg{state: state})
+		})
+		return prWatcherStartedMsg{stop: stop}
+	}
 }
 
 func (m *model) stopPRWatcher() {
@@ -1316,6 +1386,7 @@ func (m model) cardKeysOwnInput() bool {
 }
 
 func (m model) quit() (tea.Model, tea.Cmd) {
+	m.surface.stop()
 	m.stopPRWatcher()
 	m.stopAllBackgroundTerminalSessions()
 	m.shutdownLSPManager()
@@ -1613,6 +1684,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.narrationVerbosityLevel = m.narrationVerbosityLevel.next()
 			m.altScreenSettledWidth = 0
 			return m, nil
+		case m.detailView.active && m.noBlockingModal() && m.composerValue() == "" && m.detailGraphKey(msg):
+			// The Ctrl+G pane's graph selection and node drawer, only while
+			// the composer is empty, so typing is never captured.
+			return m.handleDetailGraphKey(msg), nil
 		case m.fileView.active && m.noBlockingModal() && m.composerValue() == "" && (keyText(msg) == "d" || keyText(msg) == "f"):
 			// Mode toggle for the file drill-in, only while the composer is empty
 			// (so mid-sentence typing is never hijacked) and no modal is up (so a
@@ -1653,6 +1728,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// silently close the drill-in behind it.
 			if m.fileView.active && m.noBlockingModal() {
 				return m.exitFileView(), nil
+			}
+			// An open node drawer closes first, then the pane.
+			if m.detailView.active && m.detailView.drawerOpen && m.noBlockingModal() {
+				return m.closePipelineDrawer(), nil
 			}
 			// Detail pane exits on Esc (same drill-in contract).
 			if m.detailView.active && m.noBlockingModal() {
@@ -1823,6 +1902,19 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// and let the key fall through to their own handlers below.
 			if m.noBlockingModal() {
 				m.permissionMode = nextPermissionMode(m.permissionMode)
+				outcome := "ask: each tool asks first"
+				if m.permissionMode == agent.PermissionModeAuto {
+					outcome = "auto: tools run without asking"
+				}
+				// A run copies the mode at launch, so a toggle during a run
+				// takes effect only from the next run.
+				if m.pending {
+					outcome = string(m.permissionMode) + ": applies from the next run"
+				}
+				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: ackSystemText(ack{
+					verb:    "permissions",
+					outcome: outcome,
+				})})
 				return m, nil
 			}
 		case m.keyMatch(m.keyBindings.cycleReasoning, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 't') }):
@@ -1869,6 +1961,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.input.SetWidth(maxInt(20, m.chatColumnWidth()-14))
 				return m, nil
 			}
+			// Compact widths remove the sidebar (collapse, not crush), so the
+			// same key opens its modules as a full-width sheet over the body.
+			if m.altScreen && !m.transcriptDetailed && m.noBlockingModal() && m.compactWidth() && !m.subchat.active {
+				return m.toggleDetailView(), nil
+			}
+		case keyCtrl(msg, 'r') && m.picker != nil && m.picker.kind == pickerModel:
+			// Ctrl+R in /model: fetch the latest catalog now and re-run live
+			// discovery, so new models and their effort levels appear.
+			return m, tea.Batch(m.modelCatalogRefreshCmd(true), m.modelPickerDiscoveryCmds())
 		case keyCtrl(msg, 'f'):
 			if m.picker != nil && m.picker.kind == pickerModel {
 				if m.modelPickerIsLoading() {
@@ -2461,9 +2562,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(fireCmd, m.scheduleLoopTick())
 	case agentResponseMsg:
 		if msg.runID != m.activeRunID {
-			// A cancelled or superseded run still owns a locked worktree until we
-			// release it. Review is not offered on this path.
-			unlockPreparedWorktree(msg.worktree)
+			flushSessionID, flushing := m.flushRunIDs[msg.runID]
+			// A cancelled pipeline run in the session it ran in projects its
+			// receipt card and adopts its lane, as finalizeCancelledRun does:
+			// the worktree stays locked for the card's [A]/[D] keys. Any other
+			// cancelled or superseded run still owns a locked worktree until
+			// we release it here. Review is not offered on this path.
+			adoptLane := flushing && msg.receipt != "" && flushSessionID == m.activeSession.SessionID
+			if !adoptLane {
+				unlockPreparedWorktree(msg.worktree)
+			}
 			// A run cancelled while in flight still finishes in its goroutine and
 			// returns its accumulated session events here. Persist ONLY those events
 			// (notably the EventSessionCheckpoint payloads captured before each
@@ -2471,7 +2579,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// works; the cancel path already wrote the "Run cancelled." marker, so
 			// skip transcript rows, the trailing cancellation error, and any pending
 			// state changes.
-			if flushSessionID, flushing := m.flushRunIDs[msg.runID]; flushing {
+			if flushing {
 				delete(m.flushRunIDs, msg.runID)
 				// The cancelled run still consumed tokens; record them so the usage
 				// readout doesn't undercount interrupted turns.
@@ -2496,6 +2604,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// visible rather than swallowed.
 				var flushRows []transcriptRow
 				events := flushableSessionEvents(msg.sessionEvents)
+				if msg.receipt != "" {
+					// The trailing error event is dropped above, so persist the
+					// CANCELLED card as a receipt message; resume replays it.
+					events = append(events, pendingSessionEvent{Type: sessions.EventMessage, Payload: map[string]any{"role": "receipt", "content": msg.receipt}})
+				}
 				if flushSessionID == m.activeSession.SessionID {
 					m, flushRows = m.appendSessionEvents(events)
 				} else {
@@ -2503,6 +2616,14 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				for _, row := range flushRows {
 					m.transcript = appendTranscriptRow(m.transcript, row)
+				}
+				// A cancelled pipeline turn projects its CANCELLED receipt (the
+				// same card the live turn would have shown), only in the session
+				// it ran in. After /resume the card is in that session's log and
+				// replays there; this transcript and its keys are not its lane.
+				if adoptLane {
+					m.activeWorktree = msg.worktree
+					m = m.appendTurnReceipt(transcriptRow{text: msg.receipt})
 				}
 				// A Ctrl+C during an in-flight run defers its quit until the run's
 				// checkpoint session events have been flushed (above). Now that the
@@ -2599,6 +2720,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.transcript = appendTranscriptRow(m.transcript, row)
 		}
+		if card, ok := parseReceiptTranscriptPayload(msg.receipt); ok {
+			// Arms the receipt keys ([A]/[D]/[R]/...) for this turn's card.
+			m.lastTerminalReceipt = card.kind
+		}
 		if msg.err != nil {
 			// A failed turn has no final answer row to supersede the streamed
 			// text the user already watched — keep the partial answer instead of
@@ -2614,14 +2739,27 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// metadata a final assistant row would have carried. A recognized
 			// provider failure (auth/rate-limit/connectivity/…) also carries a
 			// one-line next step so the user isn't left staring at a raw blob.
-			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
-				kind:        rowError,
-				text:        msg.err.Error(),
-				hint:        errhint.TUIHint(msg.err),
-				final:       true,
-				turnTools:   msg.turnTools,
-				turnElapsed: msg.turnElapsed,
-			})
+			if msg.receipt != "" {
+				// A pipeline turn shows its FAILED or CANCELLED card in place of
+				// the raw error row. The card keeps the error text, wrapped, and
+				// the row keeps the next-step hint and the turn metadata.
+				m = m.appendTurnReceipt(transcriptRow{
+					text:        msg.receipt,
+					hint:        errhint.TUIHint(msg.err),
+					final:       true,
+					turnTools:   msg.turnTools,
+					turnElapsed: msg.turnElapsed,
+				})
+			} else {
+				m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
+					kind:        rowError,
+					text:        msg.err.Error(),
+					hint:        errhint.TUIHint(msg.err),
+					final:       true,
+					turnTools:   msg.turnTools,
+					turnElapsed: msg.turnElapsed,
+				})
+			}
 		}
 		m.streamingText = nil
 		m.streamingReasoning = ""
@@ -2855,8 +2993,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// boundary. Evidence derives from the persisted plan result; a
 		// parse failure appends nothing (the JSON answer above still
 		// carries the data — honest absence, never an invented card).
-		if m.lastState.Completion != nil && m.lastState.Completion.Status == "completed" {
-			if card, ok := verifiedReceiptFromResult(msg.result.FinalAnswer, m.lastState.Usage, m.turnStartedAt, m.now()); ok {
+		// A completed run that no check verified projects the UNVERIFIED card
+		// from the completion receipt, never the VERIFIED card.
+		if completion := m.lastState.Completion; completion != nil && completion.Status == "completed" {
+			card, ok := verifiedReceiptCardFor(completion, msg.result.FinalAnswer, m.lastState.Usage, m.turnStartedAt, m.now())
+			if ok {
 				m.lastTerminalReceipt = card.kind
 				// rowError is the receipt row channel (rendering.go
 				// routes receipt payloads from error rows); the card
@@ -3025,6 +3166,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// transition (append-on-change, never rewinds — frame RRoni).
 		m.phaseTrail.observe(msg.state.Lifecycle)
 		m.lastState = msg.state
+		m.observeRunTopology(msg.state)
 		return m, nil
 	case planStepExplanationMsg:
 		// Drop a result from a previous run: beginRun bumps planDetailGen and clears
@@ -3049,7 +3191,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.planDetailOpen && m.planDetailStep == msg.stepIndex &&
 			msg.stepIndex >= 0 && msg.stepIndex < len(m.plan.steps) &&
 			planStepExplanationKey(m.plan.steps[msg.stepIndex]) == msg.key {
-			m.transcript = dropTranscriptRowsByID(m.transcript, planStepDetailRowID)
+			m = m.dropTranscriptRows(planStepDetailRowID)
 			m.transcript = m.appendPlanStepCard(msg.stepIndex, text, false)
 		}
 		return m, nil
@@ -3110,6 +3252,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.specialists.addToolCall(msg.toolCallID, msg.toolName, msg.detail)
 		m.specialists.setCurrentTool(msg.toolCallID, msg.toolName, msg.detail)
 		return m, nil
+	case editorUseMsg:
+		return m.handleEditorUse(msg), nil
 	case agentRowMsg:
 		if msg.runID != m.activeRunID {
 			return m, nil
@@ -3248,6 +3392,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case mcpCommandResultMsg:
 		return m.applyMCPCommandResultMessage(msg), nil
+	case modelCatalogRefreshedMsg:
+		return m.applyModelCatalogRefresh(msg)
+	case backendCommandResultMsg:
+		return m.setBackendRow(msg.rowID, backendCard(msg.title, msg.result)), nil
 	case sessionsScannedMsg:
 		// Async session scan landed (F1, §14): arm the resume picker and
 		// launch resume card from the result. No store I/O happened here.
@@ -3497,7 +3645,9 @@ func (m model) footerView(width int) string {
 	// text box becomes the questionnaire): render the tabbed prompt + status line and
 	// skip the plan panel / idle hints / composer for a focused modal.
 	if m.pendingAskUser != nil {
-		footer.WriteString(renderAskUserQuestionnaire(*m.pendingAskUser, m.input.Value(), width, m.glyphTier))
+		prompt := *m.pendingAskUser
+		prompt.othersRunning = m.specialists.running()
+		footer.WriteString(renderAskUserQuestionnaire(prompt, m.input.Value(), width, m.glyphTier))
 		footer.WriteString("\n")
 		footer.WriteString(m.statusLine(width))
 		return footer.String()
@@ -3522,7 +3672,19 @@ func (m model) footerView(width int) string {
 		// hide within the two-column chat-column copy.
 		var strip []string
 		if !m.hidePinnedPlan && !m.sidebarAvailable() && !m.pipeline.isEmpty() {
-			strip = m.pipeline.presentation().renderStripWithChip(width, m.spinnerPhase, m.worktreeChip())
+			chip := m.worktreeChip()
+			if lifecycle := m.pipeline.withRuntime(m.runtimeView()).lifecycleChip(width / 2); lifecycle != "" {
+				if chip != "" {
+					chip += " · "
+				}
+				chip += lifecycle
+			}
+			strip = m.pipeline.presentation().renderStripWithChip(width, m.spinnerPhase, chip)
+			if widthTier(width) == tierMedium && len(strip) > 0 {
+				if tabs := m.compactSectionTabs(width - 1); tabs != "" {
+					strip = append(strip, " "+tabs)
+				}
+			}
 		}
 
 		// Pinned surfaces declare claims against the shared envelope and the
@@ -3626,11 +3788,18 @@ func (m model) composerIdleHint() string {
 		return "" // too cramped for a hint
 	case tierNarrow:
 		hint = "? shortcuts · / palette"
-	case tierMedium:
-		hint = fmt.Sprintf("? shortcuts · %s sidebar · / palette", sidebarKey)
 	default:
 		// Frame kAYHl item 9: the launch hint names the four entry points.
-		hint = fmt.Sprintf("? shortcuts · %s sidebar · / palette · /help index", sidebarKey)
+		// Below the two-column boundary Ctrl+B opens the context sheet, so
+		// the hint says what the key does at this width.
+		what := "sidebar"
+		if m.compactWidth() {
+			what = "context"
+		}
+		hint = fmt.Sprintf("? shortcuts · %s %s · / palette", sidebarKey, what)
+		if widthTier(m.width) == tierFull {
+			hint += " · /help index"
+		}
 	}
 	return zeroTheme.faint.Render(hint)
 }
@@ -4103,11 +4272,9 @@ func (m model) interimBlock(width int) string {
 	// is buffered until its closing fence arrives so the code appears as one
 	// highlighted block instead of recoloring token-by-token.
 	lines := renderStreamingAssistantMarkdownText(text, assistantMeasure(width), width)
-	for index, line := range lines {
-		// styleStreamingLine fades plain prose but leaves already-highlighted
-		// markdown/code lines alone, so live colors match the committed row.
-		lines[index] = m.styleStreamingLine(line, index, len(lines))
-	}
+	// Fades plain prose but leaves already-highlighted markdown/code lines
+	// alone, so live colors match the committed row.
+	m.styleStreamingLines(lines)
 	lines = m.appendStreamingCursor(lines, width)
 	blocks = append(blocks, strings.Join(lines, "\n"))
 	// Live preview of a file currently being written, so a long write_file/edit
@@ -4941,9 +5108,9 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 			// is re-opened on the RETURNED model (choosePicker nils the
 			// picker on its own copy, so openTrustConfigInViewer's model
 			// is the one to mutate).
-			next, cmd := m.openTrustConfigInViewer(m.projectConfigPath)
+			next, cmd := m.openTrustConfigInViewer(m.projectTrustViewTarget())
 			if nextModel, ok := next.(model); ok {
-				cfg := describeProjectTrustConfig(m.projectConfigPath)
+				cfg := describeProjectTrustConfig(m.projectTrustConfigPath())
 				nextModel.trustConfigNotice(cfg)
 				nextModel.picker = nextModel.newTrustPicker()
 				next = nextModel
@@ -5067,6 +5234,8 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 			m = m.appendLoopSystem(m.loopFooterSummary() + " still running — /loop stop all to end them.")
 		}
 		return m, nil
+	case commandWeb:
+		return m.openWebSurface(), nil
 	case commandNew:
 		// A fresh session mid-run would strand the in-flight turn's events; make the
 		// user cancel first. Idle, /new saves the current session (already on disk)
@@ -5099,6 +5268,17 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	case commandTools:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.toolsText()})
 		return m, nil
+	case commandFlags:
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.flagsText()})
+		return m, nil
+	case commandPipeline:
+		if fields := strings.Fields(command.text); len(fields) > 0 && fields[0] == "edit" {
+			return m.openPipelineEditor(fields[1:]), nil
+		}
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.pipelineCommandText(command.text)})
+		return m, nil
+	case commandHooks, commandPlugins, commandSpecialists, commandUsage, commandChanges, commandVerify:
+		return m.startBackendCommand(command.kind, command.text)
 	case commandSkills:
 		// With skills installed, /skills opens a searchable picker (like /model);
 		// the text card remains only as the no-skills install hint.
@@ -5522,6 +5702,7 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 	if expanded, ok := expandSpecialistMention(prompt, m.agentOptions.Specialists); ok {
 		prompt = expanded
 	}
+	titleSource := prompt
 	// Prepend any staged PDF document text as a model-facing preamble. The
 	// visible transcript above keeps the user's clean prompt; the agent (and the
 	// recorded session, for resume fidelity) sees the document text first.
@@ -5531,6 +5712,9 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 	var err error
 	rawPrompt := prompt
 	m, err = m.ensureActiveSession(prompt)
+	if err == nil {
+		m = m.titleSessionFromFirstPrompt(titleSource)
+	}
 	if err != nil {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{
 			kind: actionAppendError,
@@ -5631,6 +5815,7 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	m.activeRunID = m.runID
 	m.runCancel = cancel
 	m.pending = true
+	m.activeExecDirect = m.execDirectPending
 	// Clear per-run tracking state so stale specialists and plans from the
 	// previous turn don't bleed into the new one.
 	m.specialists.clear()
@@ -5641,6 +5826,7 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	// completion, receipt, and phase chip still projected the old run
 	// (review finding 7). Clear the whole projection together.
 	m.lastState = presentation.State{}
+	m.mirrorPipeline()
 	m.stepWork = nil
 	m.stepNarration = nil
 	m.stepExplanation = nil
@@ -5876,18 +6062,48 @@ func (m model) bindPipelineWorktree(ctx context.Context, options *agent.Options)
 	if prepared.Path == "" {
 		return worktrees.Result{}, tuiWorktreeFallbackNotice, nil
 	}
-	options.Cwd = prepared.Path
+	// A run launched from a repository subdirectory works in the same
+	// subdirectory of the worktree, as a run in the live checkout does.
+	runDir := prepared.Path
+	if strings.TrimSpace(m.cwd) != "" {
+		launchDir, err := worktrees.LaunchDir(prepared, m.cwd)
+		if err != nil {
+			// This run made the worktree and cannot use it: remove it, so a
+			// failed launch leaves nothing behind. A reused worktree stays.
+			var cleanupErr error
+			if prepared.Locked {
+				cleanupErr = tuiUnlockWorktree(ctx, worktrees.UnlockOptions{RepoRoot: prepared.RepoRoot, Path: prepared.Path})
+			}
+			if cleanupErr == nil && !prepared.Reused {
+				cleanupErr = tuiRemoveWorktree(ctx, worktrees.RemoveOptions{RepoRoot: prepared.RepoRoot, Path: prepared.Path, Force: true})
+			}
+			if cleanupErr != nil {
+				return worktrees.Result{}, "", fmt.Errorf("pipeline worktree: %w; the worktree remains at %s: %v", err, prepared.Path, cleanupErr)
+			}
+			return worktrees.Result{}, "", fmt.Errorf("pipeline worktree: %w", err)
+		}
+		runDir = launchDir
+	}
+	options.Cwd = runDir
+	options.Registry = tuiWorktreeRegistry(options.Registry, runDir)
+	return prepared, "", nil
+}
+
+// tuiWorktreeRegistry rebuilds the pipeline registry for a worktree run. The
+// core tools and the raw source reader are rebound to runDir, so the run
+// never reads or writes the live checkout.
+func tuiWorktreeRegistry(base *tools.Registry, runDir string) *tools.Registry {
 	reg := tools.NewRegistry()
-	if options.Registry != nil {
-		for _, tool := range options.Registry.All() {
+	if base != nil {
+		for _, tool := range base.All() {
 			reg.Register(tool)
 		}
 	}
-	for _, tool := range tools.CoreTools(prepared.Path) {
+	for _, tool := range tools.CoreTools(runDir) {
 		reg.Register(tool)
 	}
-	options.Registry = reg
-	return prepared, "", nil
+	tools.RegisterPipelineSourceReader(reg, runDir, nil)
+	return reg
 }
 
 var tuiWorktreeNameClean = regexp.MustCompile(`[^A-Za-z0-9._-]`)
@@ -5960,7 +6176,14 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			stageConfigPath := filepath.Join(filepath.Dir(m.userConfigPath), "stage-models.json")
 			stageConfig, err := schemas.LoadStageModelConfig(stageConfigPath)
 			if err != nil {
-				warning := "stage routing config ignored: " + err.Error()
+				warning := "stage routing config invalid: " + err.Error()
+				// Neither a node pin nor a stage route can fall back to the run
+				// model. Their resolvers return the cause, so the run fails at
+				// the first stage that needs a route.
+				options.NodeModelResolver = func(string, agent.ModelOverride) (agent.ModelSelection, error) {
+					return agent.ModelSelection{}, fmt.Errorf("stage routing config invalid: %w", err)
+				}
+				options.StageModelResolver = invalidStageRoutingResolver(err)
 				rows = append(rows, transcriptRow{kind: rowSystem, text: warning, runID: runID})
 				sessionEvents = append(sessionEvents, pendingSessionEvent{
 					Type: sessions.EventMessage,
@@ -5989,7 +6212,6 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				options.StageModelResolver = resolvers.Stage
 				options.NodeModelResolver = resolvers.Node
 				options.EscalationModelResolver = resolvers.Escalation
-				m.stageModelResolver = options.StageModelResolver
 			}
 		}
 		if m.captureRunImages != nil {
@@ -6046,16 +6268,18 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			// model directly — fall back to a per-run manager that is shut down here.
 			lspManager := m.lspManager
 			if lspManager == nil {
-				lspManager = lsp.NewManager(options.Cwd)
+				lspManager = lsp.NewManager(options.Cwd, m.trusted)
 				defer func() {
 					shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 					defer cancel()
 					_ = lspManager.Shutdown(shutdownCtx)
 				}()
 			}
+			// The project test plan runs outside the sandbox, so it runs only in
+			// a trusted workspace.
 			options.SelfCorrect = agent.NewSelfCorrector(options.Cwd, agent.NewLSPDiagnosticsChecker(lspManager), agent.NewProjectVerifier(options.Cwd), agent.SelfCorrectConfig{
 				Enabled:      true,
-				IncludeTests: m.selfCorrectTests,
+				IncludeTests: m.selfCorrectTests && options.TrustedWorkspace,
 				IncludeLSP:   true,
 				Autonomy:     selfCorrectAutonomyForMode(options.PermissionMode),
 			})
@@ -6254,6 +6478,12 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			}
 		}
 
+		// Pipeline notices (command nodes a run will execute) are visible system
+		// rows, not part of the collapsed reasoning stream.
+		options.OnNotice = func(text string) {
+			m.sendAgentRow(runID, transcriptRow{kind: rowSystem, text: text, runID: runID})
+		}
+		finishRun := m.applyRunEvents(&options, runID)
 		onToolCall := options.OnToolCall
 		options.OnToolCall = func(call agent.ToolCall) {
 			flushReasoning(m.now())
@@ -6455,7 +6685,10 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				}
 			}
 		} else {
-			estimator := usage.NewCostEstimator(&m.modelCatalog)
+			catalogs := m.newCostCatalogs()
+			estimator := func(model string, event agent.Usage, reported bool) agent.UsageCostEstimate {
+				return catalogs.Estimate(m.providerName, model, event, reported)
+			}
 			options.OnUsage = func(event zeroruntime.Usage) {
 				usageEvents = append(usageEvents, event)
 				turnVisibleOutputTokens += event.VisibleOutputTokens()
@@ -6501,10 +6734,11 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		// Pipeline runs persist request attribution and use routed model prices.
 		// Other run kinds keep the legacy usage callback.
 		if runOptions.runKind == tuiRunPipeline {
-			estimator := usage.NewCostEstimator(&m.modelCatalog)
-			options.EstimateUsageCost = estimator
+			catalogs := m.newCostCatalogs()
+			options.EstimateServedUsageCost = catalogs.Estimate
 			downstreamAU := options.OnAttributedUsage
 			options.OnAttributedUsage = func(au agent.AttributedUsage) {
+				au = priceUnpricedAttributedUsage(au, catalogs.Estimate)
 				usageEvents = append(usageEvents, au.Usage)
 				turnVisibleOutputTokens += au.Usage.VisibleOutputTokens()
 				payload := usage.AttributedUsagePayload(au)
@@ -6541,7 +6775,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		memCount := 0
 		var memByType map[string]int
 		var mem splicerun.MemoryStore
-		if !usesPipeline(runOptions.runKind, options.Flags) {
+		if !usesPipeline(runOptions.runKind, options.Flags, runOptions.execDirect) {
 			result, err = agent.Run(runCtx, prompt, m.provider, options)
 		} else {
 			memClient, mErr := tuiResolveMemory(runCtx)
@@ -6581,6 +6815,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				recovery = worktrees.NewIterationRecovery(preparedWorktree)
 			}
 			result, err = tuiSpliceRun(runCtx, prompt, m.provider, options, mem, recovery)
+			finishRun(result.FinalAnswer, err)
 			var preparedPtr *worktrees.Result
 			if preparedWorktree.Path != "" {
 				copy := preparedWorktree
@@ -6595,11 +6830,17 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			wtMergeable := wtPreserved && !sourceDirty
 			if err != nil {
 				flushReasoning(m.now())
+				errPayload := map[string]any{"message": err.Error()}
+				var receipt string
+				if card, ok := pipelineTurnReceipt("", "", err, preparedPtr, started, m.now()); ok {
+					receipt = receiptTranscriptPayload(card)
+					errPayload["receipt"] = receipt
+				}
 				sessionEvents = append(sessionEvents, pendingSessionEvent{
 					Type:    sessions.EventError,
-					Payload: map[string]any{"message": err.Error()},
+					Payload: errPayload,
 				})
-				return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, turnTools: toolCalls, turnElapsed: m.now().Sub(started), memoryStatus: memStatus, memoryCount: memCount, memoryByType: memByType, worktree: preparedPtr, worktreeNotice: worktreeNotice, sourceDirty: sourceDirty, worktreePreserved: wtPreserved, mergeAvailable: wtMergeable}
+				return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, turnTools: toolCalls, turnElapsed: m.now().Sub(started), memoryStatus: memStatus, memoryCount: memCount, memoryByType: memByType, worktree: preparedPtr, worktreeNotice: worktreeNotice, sourceDirty: sourceDirty, worktreePreserved: wtPreserved, mergeAvailable: wtMergeable, receipt: receipt}
 			}
 			flushReasoning(m.now())
 			elapsed := m.now().Sub(started)
@@ -6615,17 +6856,24 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				turnTools:   toolCalls,
 				turnElapsed: elapsed,
 			})
+			assistantPayload := map[string]any{
+				"role":    "assistant",
+				"content": result.FinalAnswer,
+			}
+			var receipt string
+			if card, ok := pipelineTurnReceipt(result.FinalAnswer, result.IncompleteReason, nil, preparedPtr, started, m.now()); ok {
+				receipt = receiptTranscriptPayload(card)
+				rows = append(rows, transcriptRow{kind: rowError, text: receipt})
+				assistantPayload["receipt"] = receipt
+			}
 			if truncation := result.TruncationNotice(); truncation != "" {
 				rows = append(rows, transcriptRow{kind: rowSystem, text: truncation})
 			}
 			sessionEvents = append(sessionEvents, pendingSessionEvent{
-				Type: sessions.EventMessage,
-				Payload: map[string]any{
-					"role":    "assistant",
-					"content": result.FinalAnswer,
-				},
+				Type:    sessions.EventMessage,
+				Payload: assistantPayload,
 			})
-			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, turnTools: toolCalls, turnElapsed: elapsed, ttft: ttft, turnVisibleOutputTokens: turnVisibleOutputTokens, memoryStatus: memStatus, memoryCount: memCount, memoryByType: memByType, worktree: preparedPtr, worktreeNotice: worktreeNotice, sourceDirty: sourceDirty, worktreePreserved: wtPreserved, mergeAvailable: wtMergeable}
+			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, turnTools: toolCalls, turnElapsed: elapsed, ttft: ttft, turnVisibleOutputTokens: turnVisibleOutputTokens, memoryStatus: memStatus, memoryCount: memCount, memoryByType: memByType, worktree: preparedPtr, worktreeNotice: worktreeNotice, sourceDirty: sourceDirty, worktreePreserved: wtPreserved, mergeAvailable: wtMergeable, receipt: receipt}
 		}
 		if err != nil {
 			flushReasoning(m.now())
@@ -6889,4 +7137,40 @@ func toolResultRowText(result agent.ToolResult) string {
 		status = tools.StatusOK
 	}
 	return fmt.Sprintf("tool result: %s %s %s", result.Name, status, truncateTUIOutput(result.Output, tuiToolOutputLimit))
+}
+
+// priceUnpricedAttributedUsage fills in the cost of an attributed usage event
+// that reached the TUI with no cost. The splice ledger prices every stream
+// first, so this path only sees runs that skip the ledger. Such a run sends an
+// empty cost, which the usage tracker rejects, so the cost is priced here, as
+// design runs do. Malformed usage stays an error, never a priced zero.
+func priceUnpricedAttributedUsage(au agent.AttributedUsage, estimate agent.ServedUsageCostEstimator) agent.AttributedUsage {
+	if au.Cost.Status != "" {
+		return au
+	}
+	if au.UsageError != "" {
+		au.Cost = agent.UsageCostEstimate{Status: agent.CostStatusError, UnpricedReason: au.UsageError}
+		return au
+	}
+	au.Cost = estimate(au.ProviderName, au.Model, au.Usage, au.UsageReported)
+	return au
+}
+
+// flagSetFromResolutions returns the resolved flag set the doctor reads.
+func flagSetFromResolutions(resolutions []flags.Resolution) flags.Set {
+	set := make(flags.Set, len(resolutions))
+	for _, r := range resolutions {
+		set[r.Name] = r.Value
+	}
+	return set
+}
+
+// newCostCatalogs returns the run's pricing catalogs: one registry per serving
+// provider profile, built on first use.
+func (m model) newCostCatalogs() *usage.CostCatalogs {
+	providers := append([]config.ProviderProfile{m.providerProfile}, m.savedProviders...)
+	if m.costCatalogLoad != nil {
+		return usage.NewCostCatalogs(m.costCatalogLoad).WithProviders(providers)
+	}
+	return usage.NewProfileCostCatalogs(providers)
 }

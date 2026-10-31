@@ -33,15 +33,20 @@ func compileForTier(tier schemas.PipelineTier) (CompiledTopology, error) {
 // scope-to-nothing, which looks like success. Such dependents are removed
 // too, transitively, and each cascade removal returns a named warning for
 // the plan. Nothing dangles silently.
-func filterStagesForFlags(compiled CompiledTopology, set flags.Set) ([]schemas.ExecutionStage, []string) {
+//
+// The third result names why each removed stage is gone, so the views can say
+// "removed" with its cause instead of reporting a tier skip.
+func filterStagesForFlags(compiled CompiledTopology, set flags.Set) ([]schemas.ExecutionStage, []string, map[string]string) {
 	disabled := make(map[string]bool)
+	reasons := make(map[string]string)
 	for _, stage := range compiled.Stages {
 		if flag, ok := stageFlag[stage.Name]; ok && !set.Enabled(flag) {
 			disabled[stage.Name] = true
+			reasons[stage.Name] = fmt.Sprintf("flag %s is off", flag)
 		}
 	}
 	if len(disabled) == 0 {
-		return append([]schemas.ExecutionStage(nil), compiled.Stages...), nil
+		return append([]schemas.ExecutionStage(nil), compiled.Stages...), nil, nil
 	}
 	warnings := make([]string, 0, len(disabled))
 	removed := make(map[string]bool, len(disabled))
@@ -57,6 +62,7 @@ func filterStagesForFlags(compiled CompiledTopology, set flags.Set) ([]schemas.E
 			for _, dependency := range stage.DependsOn {
 				if removed[dependency] {
 					removed[stage.Name] = true
+					reasons[stage.Name] = fmt.Sprintf("dependency %s was removed", dependency)
 					warnings = append(warnings, fmt.Sprintf("stage %q removed: dependency %q is disabled by flag", stage.Name, dependency))
 					changed = true
 					break
@@ -70,7 +76,7 @@ func filterStagesForFlags(compiled CompiledTopology, set flags.Set) ([]schemas.E
 			filtered = append(filtered, stage)
 		}
 	}
-	return filtered, warnings
+	return filtered, warnings, reasons
 }
 
 // stagesForTier builds the ordered execution-stage list and token budget for a
@@ -78,12 +84,18 @@ func filterStagesForFlags(compiled CompiledTopology, set flags.Set) ([]schemas.E
 // disabled by the resolved flag set. Shared by BuildExecutionPlan and
 // BuildExecutionPlanForTask so the tier-to-stages shape lives in one place.
 func stagesForTier(tier schemas.PipelineTier, set flags.Set) ([]schemas.ExecutionStage, schemas.TokenBudget, []string, error) {
+	stages, budget, warnings, _, err := stagesForTierWithRemovals(tier, set)
+	return stages, budget, warnings, err
+}
+
+// stagesForTierWithRemovals is stagesForTier plus the removal reasons.
+func stagesForTierWithRemovals(tier schemas.PipelineTier, set flags.Set) ([]schemas.ExecutionStage, schemas.TokenBudget, []string, map[string]string, error) {
 	compiled, err := compileForTier(tier)
 	if err != nil {
-		return nil, schemas.TokenBudget{}, nil, err
+		return nil, schemas.TokenBudget{}, nil, nil, err
 	}
-	stages, cascade := filterStagesForFlags(compiled, set)
-	return stages, compiled.Budget, append(append([]string(nil), compiled.Warnings...), cascade...), nil
+	stages, cascade, removed := filterStagesForFlags(compiled, set)
+	return stages, compiled.Budget, append(append([]string(nil), compiled.Warnings...), cascade...), removed, nil
 }
 
 // BuildExecutionPlan builds a minimal execution plan for the current request
@@ -109,8 +121,9 @@ func BuildExecutionPlanWithTopology(topology *schemas.PipelineTopology, request 
 	if intent == "" {
 		intent = "image-only request"
 	}
-	stages, cascade := filterStagesForFlags(compiled, set)
+	stages, cascade, removed := filterStagesForFlags(compiled, set)
 	return schemas.ExecutionPlan{
+		RemovedStages: removed,
 		Tier:          tier,
 		RequestIntent: intent,
 		Stages:        stages,
@@ -137,7 +150,7 @@ func BuildExecutionPlanForTaskWithFacts(task schemas.Task, set flags.Set) (schem
 			break
 		}
 	}
-	stages, budget, warnings, err := stagesForTier(tier, set)
+	stages, budget, warnings, removed, err := stagesForTierWithRemovals(tier, set)
 	if err != nil {
 		return schemas.ExecutionPlan{}, nil, err
 	}
@@ -153,6 +166,7 @@ func BuildExecutionPlanForTaskWithFacts(task schemas.Task, set flags.Set) (schem
 		AcceptanceFacts: append([]schemas.AcceptanceFact(nil), task.AcceptanceFacts...),
 		Flags:           set.EnabledNames(),
 		Warnings:        warnings,
+		RemovedStages:   removed,
 	}, acceptanceFacts, nil
 }
 

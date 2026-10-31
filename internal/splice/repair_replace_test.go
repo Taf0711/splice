@@ -93,8 +93,8 @@ func TestRepairReplacesStaleFailingOutputSoSuccessIsVisible(t *testing.T) {
 
 	repaired, interaction, err := attemptLocalRepair(
 		context.Background(), "run-replace", 1, plan, registry, nil,
-		PipelineRunConfig{}, t.TempDir(), nil, nil, nil,
-		time.Now().Add(time.Minute), &records, &outputs,
+		PipelineRunConfig{}, t.TempDir(), nil, nil, nil, nil,
+		time.Now().Add(time.Minute), NewStageExecutionBudget(0), &records, &outputs,
 		&priorSummaries, &priorChangedFiles, initial,
 	)
 	if err != nil {
@@ -153,8 +153,8 @@ func TestExhaustedRepairsKeepExactlyOneFailingPayload(t *testing.T) {
 
 	repaired, interaction, err := attemptLocalRepair(
 		context.Background(), "run-exhausted", 1, plan, registry, nil,
-		PipelineRunConfig{}, t.TempDir(), nil, nil, nil,
-		time.Now().Add(time.Minute), &records, &outputs,
+		PipelineRunConfig{}, t.TempDir(), nil, nil, nil, nil,
+		time.Now().Add(time.Minute), NewStageExecutionBudget(0), &records, &outputs,
 		&priorSummaries, &priorChangedFiles, initial,
 	)
 	if err != nil {
@@ -207,8 +207,8 @@ func TestRepairEmitsLabeledRerunAndExhaustionEvents(t *testing.T) {
 
 	_, _, _ = attemptLocalRepair(
 		context.Background(), "run-events", 1, plan, registry, nil,
-		options, t.TempDir(), nil, nil, nil,
-		time.Now().Add(time.Minute), &records, &outputs,
+		options, t.TempDir(), nil, nil, nil, nil,
+		time.Now().Add(time.Minute), NewStageExecutionBudget(0), &records, &outputs,
 		&priorSummaries, &priorChangedFiles, initial,
 	)
 
@@ -239,4 +239,51 @@ func (s *scriptedWriter) Run(_ context.Context, _ schemas.HarnessStageInput, _ z
 
 func (s *scriptedWriter) Capabilities() stages.Capabilities {
 	return stages.Capabilities{ModelFree: false, Description: "writing code changes"}
+}
+
+// failingWriter fails its re-entry with err.
+type failingWriter struct{ err error }
+
+func (w *failingWriter) Run(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+	return schemas.HarnessStageOutput{}, w.err
+}
+
+func (w *failingWriter) Capabilities() stages.Capabilities {
+	return stages.Capabilities{ModelFree: false, Description: "writing code changes"}
+}
+
+// TestFailedRepairReentryStopsRepairsNotTheRun: the chain pilot's dead end.
+// A re-entry that fails (here, a spent context budget) ends the repairs with
+// an unresolved outcome and no error, so the pass reaches the iteration
+// boundary; its metered usage joins the code_writer record, which keeps
+// the ledger and the records equal. A cancelled run still ends.
+func TestFailedRepairReentryStopsRepairsNotTheRun(t *testing.T) {
+	plan := schemas.ExecutionPlan{Stages: []schemas.ExecutionStage{{Name: "code_writer"}, {Name: "test_runner"}}}
+	run := func(ctx context.Context, err error) (bool, *schemas.InteractionRecord, error, []schemas.StageRecord) {
+		registry := stageRegistry{"code_writer": &failingWriter{err: err}, "test_runner": &scriptedTestRunner{failTimes: 9}}
+		records := []schemas.StageRecord{{Name: "code_writer", Iteration: 1, Status: schemas.StageCompleted, TokensInput: 50}}
+		var outputs []schemas.HarnessStageOutput
+		prior := map[string]string{"code_writer": "added the kind"}
+		changed := map[string][]string{}
+		initial := schemas.HarnessStageOutput{Summary: "Test command failed with exit code 1.", Data: testResultsPayload(true)}
+		repaired, interaction, rerr := attemptLocalRepair(ctx, "run-fail", 1, plan, registry, nil,
+			PipelineRunConfig{}, t.TempDir(), nil, nil, nil, nil, time.Now().Add(time.Minute), NewStageExecutionBudget(0),
+			&records, &outputs, &prior, &changed, initial)
+		return repaired, interaction, rerr, records
+	}
+
+	spent := withStageUsage(fmt.Errorf("%w while fulfilling the stage context request", errExpansionBudgetExhausted), &schemas.StageUsage{InputTokens: 100})
+	repaired, interaction, err, records := run(context.Background(), spent)
+	if err != nil || repaired || interaction == nil || interaction.Resolved {
+		t.Fatalf("repaired=%v interaction=%+v err=%v; want unresolved and no error", repaired, interaction, err)
+	}
+	if records[0].TokensInput != 150 {
+		t.Fatalf("code_writer input tokens = %d, want 150 (the failed re-entry's usage added)", records[0].TokensInput)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err, _ := run(ctx, context.Canceled); err == nil {
+		t.Fatal("a cancelled run must still end")
+	}
 }

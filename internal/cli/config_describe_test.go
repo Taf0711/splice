@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Taf0711/splice/internal/config"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
@@ -34,8 +35,8 @@ func TestConfigDescribeReportsOrigins(t *testing.T) {
 		Name:    "team",
 		Nodes: []schemas.PipelineNode{
 			{Name: "code_writer", Type: "code_writer", Model: &schemas.StageModelConfig{ProviderProfile: "team", Model: "node-model", ReasoningEffort: "high"}},
-			{Name: "test_generator", Type: "test_generator"},
-			{Name: "test_runner", Type: "test_runner"},
+			{Name: "test_generator", Type: "test_generator", Tiers: []schemas.PipelineTier{schemas.TierStandard}},
+			{Name: "test_runner", Type: "test_runner", Tiers: []schemas.PipelineTier{schemas.TierStandard}},
 		},
 	}
 	data, err := json.MarshalIndent(topology, "", "  ")
@@ -79,6 +80,65 @@ func TestConfigDescribeReportsOrigins(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("describe output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// TestConfigDescribeNamesResolvedTierModel pins the tier row's resolved model:
+// a tier-routed node prints the model the resolver would use, not "primary".
+func TestConfigDescribeNamesResolvedTierModel(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", base)
+	workspace := t.TempDir()
+
+	topology := schemas.PipelineTopology{
+		Version: schemas.TopologySchemaVersion,
+		Name:    "team",
+		Nodes: []schemas.PipelineNode{
+			{Name: "code_writer", Type: "code_writer"},
+		},
+	}
+	data, err := json.MarshalIndent(topology, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeDescribeFile(t, filepath.Join(base, "splice", "pipelines", "team.json"), data)
+	writeDescribeFile(t, filepath.Join(base, "splice", "config.json"), []byte(`{"active_pipeline":"team"}`))
+
+	deps := appDeps{
+		getwd:          func() (string, error) { return workspace, nil },
+		userConfigPath: func() (string, error) { return filepath.Join(base, "splice", "config.json"), nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{
+				ActiveProvider: "openai",
+				Provider: config.ProviderProfile{
+					Name:         "openai",
+					ProviderKind: config.ProviderKindOpenAI,
+					Model:        "gpt-5.6-sol",
+				},
+			}, nil
+		},
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runConfigDescribe([]string{"--tier", "standard"}, &stdout, &stderr, deps); code != 0 {
+		t.Fatalf("exit = %d, stderr = %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "code_writer type=code_writer") {
+		t.Fatalf("describe output missing the code_writer node:\n%s", out)
+	}
+	foundTier := false
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.Contains(line, "origin=tier") {
+			continue
+		}
+		foundTier = true
+		trimmed := strings.TrimSpace(line)
+		if strings.Contains(trimmed, "model=primary") || !strings.Contains(trimmed, "(tier)") {
+			t.Fatalf("tier node did not name the resolved model: %q", line)
+		}
+	}
+	if !foundTier {
+		t.Fatalf("describe output has no tier-origin node:\n%s", out)
 	}
 }
 

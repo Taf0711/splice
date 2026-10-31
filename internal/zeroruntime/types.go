@@ -230,6 +230,11 @@ type StreamEvent struct {
 	// and a cost field there would be silently dropped by every one of them.
 	// nil means no reported cost; the caller must fall back to estimating from
 	// the pricing registry, exactly as before this field existed.
+	// RequestID carries the provider's request/correlation identity for this
+	// request (OpenRouter's X-Generation-Id response header), when reported.
+	// It rides the usage event because usage is where per-request metadata
+	// already aggregates; empty means the backend reported none.
+	RequestID       string
 	ReportedCostUSD *float64
 }
 
@@ -267,6 +272,14 @@ type CompletionRequest struct {
 	// behavior byte-for-byte. Used by typed stages that require one typed tool
 	// call.
 	ToolChoice string
+	// ToolChoiceRequired, when true and ToolChoice is empty, requires the
+	// model to call at least one tool without naming which one. Adapters map
+	// it to their native any-tool forcing (OpenAI tool_choice "required",
+	// Anthropic tool_choice "any", Gemini functionCallingConfig ANY with no
+	// allowed-name restriction). Used by stages that accept more than one
+	// typed tool and must not strand on prose. When both fields are set the
+	// named forcing wins, because it is the stricter request.
+	ToolChoiceRequired bool
 }
 
 // ServerTool is one provider-executed tool request.

@@ -252,9 +252,13 @@ func keysEvalCases() []keyCase {
 			wantNone: true,
 		},
 		{
-			name:     "single-segment filename rejected (no slash)",
-			input:    DeriveInput{RequestIntent: "session.go is broken"},
-			wantNone: true,
+			// Contract change (fam-05 delivery repair): a bare source
+			// filename in an intent is a file reference and derives its
+			// key; see TestDeriveKeys_BareSourceFilename and the promoted
+			// TestKeysEvalSuiteBareFilenameIsAFileReference.
+			name:  "single-segment filename now keys (was rejected)",
+			input: DeriveInput{RequestIntent: "session.go is broken"},
+			want:  []string{"file:session.go"},
 		},
 
 		// --- intent + verify command + changed files combined ---
@@ -322,6 +326,13 @@ func TestKeysEvalSuite(t *testing.T) {
 // TestKeysEvalSuiteNoFuzzySlop is a property sweep over hostile prose: none
 // of these sentences may produce any key. This is the precision-over-recall
 // contract as a bulk property, so a regex loosening fails loudly.
+//
+// Contract note (fam-05 delivery repair): a BARE source filename in an
+// intent is a legitimate file reference and produces a key - see
+// TestDeriveKeys_BareSourceFilename. That entry moved out of this sweep
+// when bare filenames became the third key source; everything here that
+// merely LOOKS path-shaped (URLs, Windows paths, escapes, extension-less
+// words) still derives nothing.
 func TestKeysEvalSuiteNoFuzzySlop(t *testing.T) {
 	hostile := []string{
 		"see http://example.com/a/b.go for reference",
@@ -334,7 +345,6 @@ func TestKeysEvalSuiteNoFuzzySlop(t *testing.T) {
 		"there are twenty-three reasons why",
 		"FILE://server/share/session.go protocol link",
 		"192.168.0.1/internal/auth/session.go as an IP route",
-		"session.go",
 		"internal/auth/session",
 		"auth",
 	}
@@ -343,6 +353,19 @@ func TestKeysEvalSuiteNoFuzzySlop(t *testing.T) {
 		if len(got) != 0 {
 			t.Fatalf("PRECISION REGRESSION on %q: got %v", sentence, got)
 		}
+	}
+}
+
+// TestKeysEvalSuiteBareFilenameIsAFileReference pins the promoted contract:
+// a bare source filename in an intent is a file reference (the fam-05
+// delivery chain asked no discovery question while the capture was anchored
+// on exactly that file), and the key form matches the capture's file anchor
+// value exactly.
+func TestKeysEvalSuiteBareFilenameIsAFileReference(t *testing.T) {
+	got := DeriveKeys(DeriveInput{RequestIntent: "session.go"})
+	want := []string{"file:session.go"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("DeriveKeys = %v, want %v", got, want)
 	}
 }
 

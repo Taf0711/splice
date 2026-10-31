@@ -243,7 +243,7 @@ func runMCPCheck(ctx context.Context, args []string, stdout io.Writer, stderr io
 	if err != nil {
 		return writeAppError(stderr, "failed to resolve workspace: "+err.Error(), exitCrash)
 	}
-	cfg, err := deps.resolveMCPConfig(cwd)
+	cfg, err := resolveWorkspaceMCPConfig(deps, cwd)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}

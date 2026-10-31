@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/config"
 	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
@@ -300,7 +302,9 @@ func Normalize(usage zeroruntime.Usage) (Normalized, zeroruntime.Usage, error) {
 		return Normalized{}, zeroruntime.Usage{}, err
 	}
 	if reasoningTokens > outputTokens {
-		return Normalized{}, zeroruntime.Usage{}, fmt.Errorf("reasoning tokens %d exceeds output tokens %d", reasoningTokens, outputTokens)
+		// Reasoning-exclusive provider report: sum instead of rejecting.
+		// The rejection path zeroed billed work downstream.
+		outputTokens += reasoningTokens
 	}
 	webSearchRequests, err := nonNegative(usage.WebSearchRequests, "webSearchRequests")
 	if err != nil {
@@ -677,52 +681,193 @@ func comma(value int) string {
 // usage produce priced records with CostUSD set.
 func NewCostEstimator(registry *modelregistry.Registry) func(model string, usage zeroruntime.Usage, reported bool) agent.UsageCostEstimate {
 	return func(model string, usage zeroruntime.Usage, reported bool) agent.UsageCostEstimate {
-		if !reported {
-			return agent.UsageCostEstimate{
-				Status:         agent.CostStatusUnpriced,
-				UnpricedReason: "usage not reported by provider",
-			}
+		return priceWithRegistry(registry, model, usage, reported)
+	}
+}
+
+// CostCatalogs prices each request from the catalog of the provider that served
+// it. A provider's registry is built on first use and kept for the run, so a
+// request served by B is never priced from A's catalog.
+type CostCatalogs struct {
+	mu sync.Mutex
+	// subscription names the profiles served by a flat subscription. They are
+	// unpriced, never priced from a catalog.
+	subscription map[string]bool
+	// catalogIDs maps a profile name to its catalog id. A profile without an
+	// entry is its own catalog id.
+	catalogIDs map[string]string
+	load       func(profile string) (modelregistry.Registry, error)
+	registries map[string]modelregistry.Registry
+	errs       map[string]error
+}
+
+// NewCostCatalogs returns catalogs that build each profile's registry with load.
+func NewCostCatalogs(load func(profile string) (modelregistry.Registry, error)) *CostCatalogs {
+	return &CostCatalogs{load: load, registries: map[string]modelregistry.Registry{}, errs: map[string]error{}}
+}
+
+// NewProfileCostCatalogs returns catalogs that build each provider profile's
+// registry with modelregistry.DefaultRegistry. The configured providers supply
+// each profile's catalog id and its subscription flag. A run creates one and
+// keeps it.
+func NewProfileCostCatalogs(providers []config.ProviderProfile) *CostCatalogs {
+	return NewCostCatalogs(func(profile string) (modelregistry.Registry, error) {
+		return modelregistry.DefaultRegistry(profile)
+	}).WithProviders(providers)
+}
+
+// WithProviders sets each configured profile's catalog id and subscription flag
+// from the provider list, and returns the catalogs.
+func (c *CostCatalogs) WithProviders(providers []config.ProviderProfile) *CostCatalogs {
+	c.subscription = config.ChatGPTSubscriptionProfiles(providers)
+	c.catalogIDs = map[string]string{}
+	for _, profile := range providers {
+		// A profile without a catalog id is served from its provider kind's catalog.
+		id := strings.ToLower(strings.TrimSpace(profile.CatalogID))
+		if id == "" {
+			id = string(profile.ProviderKind)
 		}
-		_, normalizedUsage, err := Normalize(usage)
-		if err != nil {
-			return agent.UsageCostEstimate{
-				Status:         agent.CostStatusError,
-				UnpricedReason: err.Error(),
-			}
+		if id != "" {
+			c.catalogIDs[profile.Name] = id
 		}
-		if model == "" {
-			return agent.UsageCostEstimate{
-				Status:         agent.CostStatusUnpriced,
-				UnpricedReason: "model unknown",
-			}
+	}
+	return c
+}
+
+// SetProfileCatalogIDs maps profile names to their catalog ids.
+func (c *CostCatalogs) SetProfileCatalogIDs(ids map[string]string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.catalogIDs = ids
+}
+
+// catalogIDFor returns the catalog id a profile is served from.
+func (c *CostCatalogs) catalogIDFor(profile string) string {
+	if id, ok := c.catalogIDs[profile]; ok {
+		return id
+	}
+	return strings.ToLower(profile)
+}
+
+// ownedBy reports whether an owner list is absent (no restriction) or names the
+// catalog.
+func ownedBy(owners []string, catalogID string) bool {
+	if owners == nil {
+		return true
+	}
+	for _, owner := range owners {
+		if owner == catalogID {
+			return true
 		}
-		if registry == nil {
-			return agent.UsageCostEstimate{
-				Status:         agent.CostStatusUnpriced,
-				UnpricedReason: "model registry unavailable",
-			}
-		}
-		entry, err := registry.Require(model)
-		if err != nil {
-			return agent.UsageCostEstimate{
-				Status:         agent.CostStatusUnpriced,
-				UnpricedReason: fmt.Sprintf("model %q not in registry", model),
-			}
-		}
-		breakdown, err := modelregistry.CalculateCost(entry, normalizedUsage)
-		if err != nil {
-			return agent.UsageCostEstimate{
-				Status:         agent.CostStatusUnpriced,
-				UnpricedReason: err.Error(),
-			}
-		}
-		costUSD := breakdown.TotalCost
+	}
+	return false
+}
+
+// SetSubscriptionProfiles names the profiles served by a flat subscription.
+func (c *CostCatalogs) SetSubscriptionProfiles(profiles map[string]bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.subscription = profiles
+}
+
+// Estimate prices one request served by provider. A request with no served
+// provider is unpriced. A provider whose catalog cannot be built is unpriced
+// with the reason.
+func (c *CostCatalogs) Estimate(provider string, model string, usage zeroruntime.Usage, reported bool) agent.UsageCostEstimate {
+	profile := strings.TrimSpace(provider)
+	if profile == "" {
+		return agent.UsageCostEstimate{Status: agent.CostStatusUnpriced, UnpricedReason: "served provider unknown"}
+	}
+	if c.subscription[profile] {
+		return agent.UsageCostEstimate{Status: agent.CostStatusUnpriced, UnpricedReason: config.ChatGPTSubscriptionUnpricedReason, Subscription: true}
+	}
+	registry, err := c.registryFor(profile)
+	if err != nil {
+		return agent.UsageCostEstimate{Status: agent.CostStatusUnpriced, UnpricedReason: fmt.Sprintf("catalog for provider %q unavailable: %v", profile, err)}
+	}
+	return priceServed(&registry, model, usage, reported, profile, c.catalogIDFor(profile))
+}
+
+func (c *CostCatalogs) registryFor(profile string) (modelregistry.Registry, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if registry, ok := c.registries[profile]; ok {
+		return registry, nil
+	}
+	if err, ok := c.errs[profile]; ok {
+		return modelregistry.Registry{}, err
+	}
+	registry, err := c.load(profile)
+	if err != nil {
+		c.errs[profile] = err
+		return modelregistry.Registry{}, err
+	}
+	c.registries[profile] = registry
+	return registry, nil
+}
+
+// priceWithRegistry is the one pricing rule: normalize the usage, find the model
+// in the registry, and price it. The registry decides which provider's prices
+// apply, so callers pass the serving provider's registry only.
+func priceWithRegistry(registry *modelregistry.Registry, model string, usage zeroruntime.Usage, reported bool) agent.UsageCostEstimate {
+	return priceServed(registry, model, usage, reported, "", "")
+}
+
+// priceServed prices a request served by profile from catalog catalogID. A
+// curated entry prices it only when its owner catalog is the served one. An
+// empty catalogID skips that check.
+func priceServed(registry *modelregistry.Registry, model string, usage zeroruntime.Usage, reported bool, profile string, catalogID string) agent.UsageCostEstimate {
+	if !reported {
 		return agent.UsageCostEstimate{
-			CostUSD:       &costUSD,
-			Status:        agent.CostStatusPriced,
-			Provenance:    agent.CostProvenanceRuntimeEstimate,
-			PricingSource: entry.Cost.Source,
-			PricingAsOf:   entry.Cost.SourceLastVerified,
+			Status:         agent.CostStatusUnpriced,
+			UnpricedReason: "usage not reported by provider",
 		}
+	}
+	_, normalizedUsage, err := Normalize(usage)
+	if err != nil {
+		return agent.UsageCostEstimate{
+			Status:         agent.CostStatusError,
+			UnpricedReason: err.Error(),
+		}
+	}
+	if model == "" {
+		return agent.UsageCostEstimate{
+			Status:         agent.CostStatusUnpriced,
+			UnpricedReason: "model unknown",
+		}
+	}
+	if registry == nil {
+		return agent.UsageCostEstimate{
+			Status:         agent.CostStatusUnpriced,
+			UnpricedReason: "model registry unavailable",
+		}
+	}
+	entry, err := registry.Require(model)
+	if err != nil {
+		return agent.UsageCostEstimate{
+			Status:         agent.CostStatusUnpriced,
+			UnpricedReason: fmt.Sprintf("model %q not in registry", model),
+		}
+	}
+	if catalogID != "" && !ownedBy(entry.PriceCatalogs(), catalogID) {
+		return agent.UsageCostEstimate{
+			Status:         agent.CostStatusUnpriced,
+			UnpricedReason: fmt.Sprintf("no price for %s on %s", model, profile),
+		}
+	}
+	breakdown, err := modelregistry.CalculateCost(entry, normalizedUsage)
+	if err != nil {
+		return agent.UsageCostEstimate{
+			Status:         agent.CostStatusUnpriced,
+			UnpricedReason: err.Error(),
+		}
+	}
+	costUSD := breakdown.TotalCost
+	return agent.UsageCostEstimate{
+		CostUSD:       &costUSD,
+		Status:        agent.CostStatusPriced,
+		Provenance:    agent.CostProvenanceRuntimeEstimate,
+		PricingSource: entry.Cost.Source,
+		PricingAsOf:   entry.Cost.SourceLastVerified,
 	}
 }

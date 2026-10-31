@@ -11,6 +11,7 @@ import (
 	"github.com/Taf0711/splice/internal/config"
 	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/notify"
+	"github.com/Taf0711/splice/internal/providers/decisions"
 	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/sessions"
 	"github.com/Taf0711/splice/internal/specmode"
@@ -21,11 +22,14 @@ import (
 )
 
 type execSpecDraftRun struct {
-	options            execOptions
-	stdout             io.Writer
-	stderr             io.Writer
-	deps               appDeps
-	workspaceRoot      string
+	options       execOptions
+	stdout        io.Writer
+	stderr        io.Writer
+	deps          appDeps
+	workspaceRoot string
+	// trusted is the run's workspace trust decision. An untrusted workspace
+	// loads no project hooks.
+	trusted            bool
 	registry           *tools.Registry
 	modelRegistry      modelregistry.Registry
 	resolved           config.ResolvedConfig
@@ -116,7 +120,22 @@ func runExecSpecDraft(run execSpecDraftRun) int {
 		run.resolved.Compaction,
 		resolvedContextWindow,
 	)
+	section := run.resolved.DecisionAdvisor
+	if section.Backend == "provider" {
+		for _, profile := range run.resolved.Providers {
+			if profile.Name == section.ProviderProfile && !section.TrajectoryDefault {
+				section.Profile = profile.Model
+			}
+		}
+	}
+	evaluator, err := decisions.NewEvaluator(section, run.resolved)
+	if err != nil {
+		return writeExecSpecDraftProviderError(&writer, run.options.outputFormat, err.Error())
+	}
 	result, err := agent.Run(runCtx, run.prompt, run.provider, agent.Options{
+		DecisionEvaluator:          evaluator,
+		DecisionAdvisorConfig:      section,
+		TrajectoryConfig:           run.resolved.Trajectory,
 		MaxTurns:                   run.resolved.MaxTurns,
 		ContextWindow:              contextWindow,
 		CompactionReserveTokens:    compactionReserve,
@@ -134,7 +153,7 @@ func runExecSpecDraft(run execSpecDraftRun) int {
 		Autonomy:                   "low",
 		Sandbox:                    run.sandboxEngine,
 		FileTracker:                tools.NewFileTracker(),
-		Hooks:                      newHookDispatcher(run.workspaceRoot),
+		Hooks:                      newHookDispatcherWithExtra(run.workspaceRoot, !run.trusted, nil),
 		EnabledTools:               run.options.enabledTools,
 		DisabledTools:              run.options.disabledTools,
 		OnText:                     writer.text,
@@ -180,11 +199,17 @@ func runExecSpecDraft(run execSpecDraftRun) int {
 		},
 		OnUsage: func(u agent.Usage) {
 			writer.usage(u)
-			sessionRecorder.append(sessions.EventUsage, usage.EventUsagePayload(u))
+			// The provider and model are recorded so the event is priced from the
+			// catalog of the provider that served it.
+			payload := usage.EventUsagePayload(u)
+			payload["provider"] = run.resolved.Provider.Name
+			payload["model"] = run.resolved.Provider.Model
+			sessionRecorder.append(sessions.EventUsage, payload)
 		},
 		OnCompactionUsage: func(u agent.Usage, model string) {
 			writer.usage(u)
 			payload := usage.EventUsagePayload(u)
+			payload["provider"] = run.resolved.Provider.Name
 			payload["model"] = model
 			payload["stage"] = "compaction"
 			sessionRecorder.append(sessions.EventUsage, payload)

@@ -1222,3 +1222,17 @@ func anthropicTestProfile(modelID string) config.ProviderProfile {
 		Model:        modelID,
 	}
 }
+
+// TestSelfCorrectTextSaysTestsNeedTrust pins the notice: the project test
+// plan runs outside the sandbox, so /selfcorrect on does not run it in an
+// untrusted workspace, and the status says so.
+func TestSelfCorrectTextSaysTestsNeedTrust(t *testing.T) {
+	m := model{selfCorrectTests: true}
+	if text := m.selfCorrectText(); !strings.Contains(text, "until you trust this workspace") {
+		t.Fatalf("untrusted /selfcorrect status = %q, want the trust notice", text)
+	}
+	m.agentOptions.TrustedWorkspace = true
+	if text := m.selfCorrectText(); strings.Contains(text, "until you trust this workspace") || !strings.Contains(text, "project test plan") {
+		t.Fatalf("trusted /selfcorrect status = %q, want the test plan", text)
+	}
+}

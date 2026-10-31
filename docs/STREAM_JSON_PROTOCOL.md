@@ -260,7 +260,9 @@ The event is a JSON object, but `final.text` is itself a JSON string for pipelin
 and design-plan results. Decode `text` when the client needs result fields.
 
 A pipeline result can contain `run_id`, `status`, `tier`, stage records, usage
-totals, `abort_reason`, and `user_aborted`. Each `usage_records` entry can
+totals, `abort_reason`, `user_aborted`, `verified`, and `unverified_reason`.
+A failed stage record can have `failure_kind`. The values are `stage_error`,
+`test_failure`, and `none`. Each `usage_records` entry can
 contain `prompt_layout_hash`, `cache_hit`, and `memory_position`. The result can
 contain `prompt_layout_flips`, the count of prefix changes during the run.
 `user_aborted` is true only when
@@ -289,3 +291,16 @@ The worktree branch remains available when Splice does not merge it.
 
 Clients should display the error message, retain the run ID, and use the final
 exit code for automation decisions.
+
+A completed run that did not verify, with `--require-verified` or
+`--merge-back`, ends with these events. The `final` event comes first.
+
+```json
+{"schemaVersion":2,"type":"error","runId":"run_20260810_abc123","code":"unverified","message":"no check applied: static_analyzer (no analyzer for this repository)","recoverable":false}
+{"schemaVersion":2,"type":"run_end","runId":"run_20260810_abc123","status":"unverified","exitCode":4}
+```
+
+The `code` field names the error class. `usage_error` is a command line that is
+not valid. `input_error` is a topology, a node pin, or a stage route that is not
+valid. Splice finds it before the first provider request. Both errors end with
+exit code 2. `provider_error` ends with exit code 3.

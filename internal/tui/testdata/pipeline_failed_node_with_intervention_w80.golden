@@ -1,7 +1,3 @@
- ✓ code_writer shared cwd w
- ✗ test_runner shared cwd t
-
- [################] 100%
-
-MESSAGES
- … test_runner: revision_request -> code_writer: 2 failing tests
+PIPELINE failed 2/2
+ ✓ code_writer  ✗ test_runner
+ [################] failed

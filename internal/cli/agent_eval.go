@@ -113,6 +113,9 @@ func runAgentEvalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 	if len(args) > 0 && args[0] == "families" {
 		return runFamiliesEvalCommand(args[1:], stdout, stderr, deps)
 	}
+	if len(args) > 0 && args[0] == "mvp" {
+		return runMvpEvalCommand(args[1:], stdout, stderr, deps)
+	}
 	options, help, err := parseAgentEvalArgs(args)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())

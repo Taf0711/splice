@@ -21,6 +21,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/Taf0711/splice/internal/projectfile"
 )
 
 // Command is a user-defined slash command parsed from a markdown file.
@@ -88,7 +90,12 @@ func loadDir(dir string, project bool) []Command {
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
-		raw, err := os.ReadFile(path)
+		// Project commands sit at <workspace>/.splice/commands and stay inside it.
+		root := ""
+		if project {
+			root = filepath.Dir(filepath.Dir(dir))
+		}
+		raw, err := projectfile.Read(path, root)
 		if err != nil {
 			continue
 		}

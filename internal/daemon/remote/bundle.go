@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Taf0711/splice/internal/daemon"
+	"github.com/Taf0711/splice/internal/gitenv"
 )
 
 // gitTimeout bounds a single git invocation (bundle create/verify, clone) so a
@@ -301,6 +302,9 @@ func gitClone(ctx context.Context, bundleFile, destDir string) error {
 // isGitWorktree reports whether dir is inside a git work tree.
 func isGitWorktree(dir string) bool {
 	cmd := exec.Command("git", "-C", dir, "rev-parse", "--is-inside-work-tree")
+	if err := gitenv.Harden(cmd); err != nil {
+		return false
+	}
 	out, err := cmd.CombinedOutput()
 	return err == nil && strings.TrimSpace(string(out)) == "true"
 }
@@ -310,6 +314,9 @@ func runGit(ctx context.Context, dir string, args ...string) error {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	if dir != "" {
 		cmd.Dir = dir
+	}
+	if err := gitenv.Harden(cmd); err != nil {
+		return err
 	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {

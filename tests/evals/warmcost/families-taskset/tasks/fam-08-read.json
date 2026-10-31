@@ -1,0 +1,8 @@
+{
+  "name": "fam-08-read",
+  "phase": "read",
+  "precursor": "fam-08-write",
+  "prompt": "Create session_unix.go with a //go:build unix tag containing package main func platformNote() string { return \"unix\" }, and session_other.go with //go:build !unix returning \"other\". The go.mod toolchain line stays pinned.",
+  "check": "# fam-08: build-tag files exist with the right tags, platformNote answers\n# per-GOOS, and the go.mod toolchain line stays at the pinned version.\ncat > probe_platform_test.go <<'EOF'\npackage main\n\nimport \"testing\"\n\nfunc TestProbePlatformNote(t *testing.T) {\n\t// On the test host (a unix OS in CI and eval) the unix path answers.\n\t// The note must be non-empty either way; the build-tag split is\n\t// verified structurally below.\n\tnote := platformNote()\n\tif note == \"\" {\n\t\tt.Fatal(\"platformNote() returned an empty string\")\n\t}\n}\nEOF\ngo test -count=1 . ; rc=$? ; rm -f probe_platform_test.go\nif [ $rc -ne 0 ]; then exit $rc; fi\n# Structural: both files with the exact build tags.\ngrep -Eq '^//go:build unix' session_unix.go || exit 1\ngrep -Eq '^//go:build !unix' session_other.go || exit 1\ngrep -q 'platformNote' session_unix.go || exit 1\ngrep -q 'platformNote' session_other.go || exit 1\n# The opposite-GOOS side must still compile.\nGOOS=windows go vet . || exit 1\nGOOS=windows go build . || exit 1\n# The pinned toolchain line from precursor-08 stays explicit in go.mod.\ngrep -Eq '^go 1\\.26' go.mod || exit 1\nexit 0",
+  "fixture": "fixture"
+}

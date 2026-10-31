@@ -199,6 +199,17 @@ func (t *specialistTracker) getBySessionID(childSessionID string) (specialistInf
 
 // all returns a copy of the specialists slice so callers may iterate without
 // the underlying array mutating underneath them.
+// running counts specialists still in flight.
+func (t *specialistTracker) running() int {
+	n := 0
+	for _, s := range t.specialists {
+		if s.status == specialistRunning {
+			n++
+		}
+	}
+	return n
+}
+
 func (t *specialistTracker) all() []specialistInfo {
 	if len(t.specialists) == 0 {
 		return nil

@@ -292,3 +292,24 @@ func TestSessionForEvictsDeadSession(t *testing.T) {
 		t.Fatal("should return a fresh session, not the dead one")
 	}
 }
+
+// TestUntrustedManagerNeverStartsServer: an untrusted workspace starts no
+// language server, for diagnostics or navigation. The starter fails the test
+// if it is ever called.
+func TestUntrustedManagerNeverStartsServer(t *testing.T) {
+	starter := func(context.Context, []string, string) (lspServer, error) {
+		t.Fatal("a language server was started in an untrusted workspace")
+		return nil, nil
+	}
+	m := fastManager(starter)
+	m.trusted = false
+
+	diags, err := m.Check(context.Background(), "main.go", "package main\n")
+	if err != nil || diags != nil {
+		t.Fatalf("Check untrusted = (%v, %v), want (nil, nil): diagnostics are skipped", diags, err)
+	}
+	_, _, _, err = m.Navigate(context.Background(), NavRequest{Op: NavDefinition, Path: "main.go", Line: 1, Character: 1})
+	if !errors.Is(err, ErrWorkspaceUntrusted) {
+		t.Fatalf("Navigate untrusted err = %v, want ErrWorkspaceUntrusted", err)
+	}
+}

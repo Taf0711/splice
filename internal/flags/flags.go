@@ -37,6 +37,32 @@ const (
 	ScopeProject
 )
 
+// String returns the lower-case scope name.
+func (s Scope) String() string {
+	if s == ScopeProject {
+		return "project"
+	}
+	return "user"
+}
+
+// Stability states how settled a flag is.
+type Stability uint8
+
+const (
+	// Stable flags are supported behavior switches.
+	Stable Stability = iota
+	// Experimental flags are treatments under measurement. They default to off.
+	Experimental
+)
+
+// String returns the lower-case stability name.
+func (s Stability) String() string {
+	if s == Experimental {
+		return "experimental"
+	}
+	return "stable"
+}
+
 // Definition declares one flag.
 type Definition struct {
 	// Name is the flag's registry name.
@@ -45,11 +71,24 @@ type Definition struct {
 	Default bool
 	// Scope is the highest config scope allowed to set the flag.
 	Scope Scope
+	// Stability is Stable or Experimental. An experimental flag must default to false.
+	Stability Stability
 	// Description states what the flag does, in one sentence.
 	Description string
 	// ReadBy names the call site that consumes the flag. It must be non-empty:
 	// the project's dominant defect class is a value produced and never read.
 	ReadBy string
+	// LegacyEnv is an older environment variable that also sets the flag. Empty means none.
+	LegacyEnv string
+	// LegacyOn and LegacyOff list the LegacyEnv values that mean true and false
+	// (compared case-insensitively after TrimSpace). An empty value always means "not set".
+	// Any other value is a resolution error that names the variable and the value,
+	// unless LegacyAnyOtherOn or LegacyAnyOtherOff says otherwise.
+	LegacyOn, LegacyOff []string
+	// LegacyAnyOtherOn makes any non-empty LegacyEnv value that is in neither list mean true.
+	LegacyAnyOtherOn bool
+	// LegacyAnyOtherOff makes any non-empty LegacyEnv value that is in neither list mean false.
+	LegacyAnyOtherOff bool
 }
 
 // Declared flags. A consumer references these constants, never a literal.
@@ -60,6 +99,34 @@ const (
 	StageTestGenerator Flag = "pipeline.stage.test_generator"
 	// TUIPipelineEnabled routes interactive TUI turns through the pipeline.
 	TUIPipelineEnabled Flag = "tui.pipeline.enabled"
+	// DecisionAdvisorEnabled is the advisor kill switch. When false the
+	// decision advisor is off regardless of its configured mode; when true
+	// the decision_advisor config section governs. Default false: no
+	// decision call happens before the owner flips this on.
+	DecisionAdvisorEnabled Flag = "pipeline.decision_advisor"
+	// TrajectoryClassifierEnabled runs the trajectory classifier by default.
+	// When it is on and no decision_advisor section is set, the classifier
+	// uses the validated ChatGPT sign-in profile. The selector stays off.
+	TrajectoryClassifierEnabled Flag = "pipeline.trajectory_classifier"
+	// PassEvidence makes each pass's workspace change, measured since the end
+	// of the previous pass, the value the trajectory state reads. Off keeps the
+	// HEAD-relative values; the per-pass evidence is recorded either way.
+	PassEvidence Flag = "pipeline.pass_evidence"
+	// MemoryPrefetch prefetches the source file a verified memory record names.
+	MemoryPrefetch Flag = "memory.prefetch"
+	// MemoryEvidenceSubstitution turns on production evidence substitution.
+	MemoryEvidenceSubstitution Flag = "memory.evidence_substitution"
+	// MemoryScope scopes context acquisition and tool behavior to cognition.
+	MemoryScope Flag = "memory.scope"
+	// PipelineBudgetFit applies learned stage budgets when true and freezes
+	// every stage at its static budget when false.
+	PipelineBudgetFit Flag = "pipeline.budget_fit"
+	// ToolsFormatOnWrite runs the language formatter after each file write.
+	ToolsFormatOnWrite Flag = "tools.format_on_write"
+	// SessionsCheckpoints captures file checkpoints before each mutating tool call.
+	SessionsCheckpoints Flag = "sessions.checkpoints"
+	// ProviderPromptCacheKey sends the session prompt cache key to the provider.
+	ProviderPromptCacheKey Flag = "provider.prompt_cache_key"
 )
 
 // Registry is the single source of truth for declared flags.
@@ -68,6 +135,7 @@ var Registry = []Definition{
 		Name:        StageSecurityAuditor,
 		Default:     true,
 		Scope:       ScopeUser,
+		Stability:   Stable,
 		Description: "Run the security auditor stage in the pipeline.",
 		ReadBy:      "splice.FilterStageNames",
 	},
@@ -75,6 +143,7 @@ var Registry = []Definition{
 		Name:        StageTestGenerator,
 		Default:     true,
 		Scope:       ScopeUser,
+		Stability:   Stable,
 		Description: "Run the test generator stage in the pipeline.",
 		ReadBy:      "splice.FilterStageNames",
 	},
@@ -82,8 +151,120 @@ var Registry = []Definition{
 		Name:        TUIPipelineEnabled,
 		Default:     true,
 		Scope:       ScopeProject,
-		Description: "Route interactive TUI turns through the pipeline.",
+		Stability:   Stable,
+		Description: "Route interactive TUI turns through the pipeline. /exec always uses the pipeline.",
 		ReadBy:      "tui.usesPipeline",
+	},
+	{
+		Name:        DecisionAdvisorEnabled,
+		Default:     false,
+		Scope:       ScopeUser,
+		Stability:   Experimental,
+		Description: "Enable the decision advisor per its decision_advisor config mode.",
+		ReadBy:      "splice.DecisionAdvisorFromRunConfig",
+	},
+	{
+		Name:        TrajectoryClassifierEnabled,
+		Default:     true,
+		Scope:       ScopeUser,
+		Stability:   Stable,
+		Description: "Run the trajectory classifier; by default it uses a ChatGPT sign-in profile, else the rules decide.",
+		ReadBy:      "config.trajectoryClassifierDefault",
+	},
+	{
+		Name:        MemoryPrefetch,
+		Default:     false,
+		Scope:       ScopeUser,
+		Stability:   Experimental,
+		Description: "Prefetch the source file that a verified memory record names.",
+		ReadBy:      "splice.prepareStageInput",
+		LegacyEnv:   "SPLICE_MEMORY_PREFETCH",
+		LegacyOn:    []string{"on"},
+		LegacyOff:   []string{"off"},
+	},
+	{
+		Name:        MemoryEvidenceSubstitution,
+		Default:     false,
+		Scope:       ScopeUser,
+		Stability:   Experimental,
+		Description: "Substitute verified memory evidence for reads in the first stage request.",
+		ReadBy:      "splice.prepareStageInput",
+		LegacyEnv:   "SPLICE_EVIDENCE_SUBSTITUTION",
+		LegacyOn:    []string{"on"},
+		LegacyOff:   []string{"off"},
+	},
+	{
+		Name:        MemoryScope,
+		Default:     false,
+		Scope:       ScopeUser,
+		Stability:   Experimental,
+		Description: "Scope context acquisition and tool behavior to the cognition scope.",
+		ReadBy:      "splice.scopeEnabled",
+		LegacyEnv:   "SPLICE_SCOPE_MODE",
+		LegacyOn:    []string{"on"},
+		LegacyOff:   []string{"off"},
+	},
+	{
+		Name:        PipelineBudgetFit,
+		Default:     true,
+		Scope:       ScopeUser,
+		Stability:   Stable,
+		Description: "Apply learned stage budgets; off freezes every stage at its static budget.",
+		ReadBy:      "splice.runExecutionPlan",
+		LegacyEnv:   "SPLICE_BUDGET_FIT",
+		LegacyOn:    []string{"fit"},
+		LegacyOff:   []string{"off"},
+	},
+	{
+		Name:        PassEvidence,
+		Default:     false,
+		Scope:       ScopeUser,
+		Stability:   Experimental,
+		Description: "Measure each pass's workspace change since the previous pass, not since HEAD.",
+		ReadBy:      "splice.runExecutionPlan",
+		LegacyEnv:   "SPLICE_PASS_EVIDENCE",
+		LegacyOn:    []string{"on"},
+		LegacyOff:   []string{"off"},
+	},
+	{
+		Name:        ToolsFormatOnWrite,
+		Default:     false,
+		Scope:       ScopeUser,
+		Stability:   Stable,
+		Description: "Run the language formatter on each file that a tool writes.",
+		ReadBy:      "tools.maybeFormatWrittenFile",
+		LegacyEnv:   "SPLICE_FORMAT_ON_WRITE",
+		LegacyOn:    []string{"1", "true", "on", "yes"},
+		LegacyOff:   []string{"0", "false"},
+		// Today any non-empty value other than 0 or false turns the formatter on.
+		LegacyAnyOtherOn: true,
+	},
+	{
+		Name:        SessionsCheckpoints,
+		Default:     true,
+		Scope:       ScopeUser,
+		Stability:   Stable,
+		Description: "Capture file checkpoints before each mutating tool call.",
+		ReadBy:      "sessions.CheckpointsEnabled",
+		LegacyEnv:   "SPLICE_CHECKPOINTS",
+		LegacyOn:    []string{"on"},
+		LegacyOff:   []string{"off"},
+		// Today anything other than exactly "off" leaves checkpoints on.
+		LegacyAnyOtherOn: true,
+	},
+	{
+		Name:        ProviderPromptCacheKey,
+		Default:     true,
+		Scope:       ScopeUser,
+		Stability:   Stable,
+		Description: "Send the session prompt cache key to the OpenAI-compatible provider.",
+		ReadBy:      "openai.promptCacheKeyDisabled",
+		LegacyEnv:   "SPLICE_DISABLE_PROMPT_CACHE_KEY",
+		// The legacy variable is a disable switch, so its values are inverted.
+		LegacyOn:  []string{"0", "false"},
+		LegacyOff: []string{"1", "true", "on", "yes"},
+		// Today any non-empty value other than 0 or false disables the key.
+		LegacyAnyOtherOff: true,
 	},
 }
 

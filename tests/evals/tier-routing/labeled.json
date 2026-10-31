@@ -1,0 +1,856 @@
+{
+ "version": 1,
+ "rubric": {
+  "trivial": "No behavior change: documentation, comments, wording, formatting, or repository housekeeping. Runs code_writer only.",
+  "light": "A focused behavior change in one area, where the request itself states the check or the test to write, or where existing tests already cover it (including behavior-preserving refactors).",
+  "standard": "New behavior, or a behavior change whose correctness needs new tests that the request does not spell out. Adds test_generator.",
+  "substantial": "Touches security-sensitive behavior (authentication, secrets, sandboxing, permissions, personal data, bounds on untrusted input) or needs coordinated changes across several modules. Adds security_auditor.",
+  "architectural": "Creates or restructures a subsystem, protocol, storage layer, or the pipeline orchestration itself. Same stages as substantial."
+ },
+ "scoring_note": "substantial and architectural compile to the same stages and reserve, so the routing score treats them as one route (heavy).",
+ "label_status": "golden-* rows are owner labels; every other row is a draft label by Claude and needs owner review before it is used as ground truth. Owner decisions 2026-09-25: stage needs replace tiers; broader security review is preferred.",
+ "rows": [
+  {
+   "id": "golden-typo-readme",
+   "request": "Fix a typo in README.md.",
+   "tier": "trivial",
+   "source": "golden_tasks.json (owner label)",
+   "needs": {
+    "new_tests": false,
+    "security_review": false,
+    "code_change": false
+   }
+  },
+  {
+   "id": "golden-parser-bug",
+   "request": "Fix a parser bug and add a regression test.",
+   "tier": "light",
+   "source": "golden_tasks.json (owner label)",
+   "needs": {
+    "new_tests": false,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "golden-oauth-service",
+   "request": "Design an OAuth service with permission checks.",
+   "tier": "substantial",
+   "source": "golden_tasks.json (owner label)",
+   "needs": {
+    "new_tests": true,
+    "security_review": true,
+    "code_change": true
+   }
+  },
+  {
+   "id": "golden-storage-layer",
+   "request": "Redesign the orchestrator storage layer.",
+   "tier": "architectural",
+   "source": "golden_tasks.json (owner label)",
+   "needs": {
+    "new_tests": true,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "content-type-enforcement",
+   "request": "The POST /session endpoint accepts requests with any Content-Type, but the body is always read from query parameters, and clients keep sending JSON bodies that get ignored. Make the API contract explicit: POST /session must require a Content-Type of application/json. When the header is missing or names any other type, answer 415 Unsupported Media Type with a short plain-text message and do not touch the store. GET requests are unaffected. Missing Content-Type on POST is also a 415 (no sniffing, no defaults).",
+   "tier": "standard",
+   "source": "tests/evals/taskset-v0/tasks/content-type-enforcement.json (claude-draft label); security_review relabeled True by owner policy 2026-09-25 (an extra audit is acceptable; broader review is preferred)",
+   "needs": {
+    "new_tests": true,
+    "security_review": true,
+    "code_change": true
+   }
+  },
+  {
+   "id": "create-conflict-error",
+   "request": "Store.Create in session.go currently overwrites an existing session when the same id is used twice. Change Create to return (Session, error): if the id already exists and has not expired, return the existing session unchanged together with a non-nil error (define ErrConflict for this). An expired session with the same id must be replaceable and must not return an error. Keep Get working exactly as before. Update main.go's call site so it still compiles and returns 409 Conflict on the error.",
+   "tier": "standard",
+   "source": "tests/evals/taskset-v0/tasks/create-conflict-error.json (claude-draft label); security_review relabeled True by owner policy 2026-09-25 (an extra audit is acceptable; broader review is preferred)",
+   "needs": {
+    "new_tests": true,
+    "security_review": true,
+    "code_change": true
+   }
+  },
+  {
+   "id": "create-rate-limit",
+   "request": "A runaway client can hammer POST /session with the same id. Add per-id rate limiting in main.go: implement func allowCreate(id string, now time.Time) bool backed by a package-level map guarded by a mutex that records the last ACCEPTED create time per id; a POST for an id that was accepted less than 1 second ago must be refused with 429 Too Many Requests and must not touch the store. Allowed requests proceed exactly as before. The limiter must be safe for concurrent use and must not rate-limit different ids independently of each other (each id has its own window).",
+   "tier": "substantial",
+   "source": "tests/evals/taskset-v0/tasks/create-rate-limit.json (claude-draft label)",
+   "needs": {
+    "new_tests": true,
+    "security_review": true,
+    "code_change": true
+   }
+  },
+  {
+   "id": "expire-sweep-endpoint",
+   "request": "Add an admin endpoint POST /admin/sweep in main.go that removes every expired session from the store immediately and answers with a JSON body {\"swept\": N} where N is how many sessions were removed. Add the corresponding Sweep() int method to Store in session.go: it deletes expired entries and returns how many it deleted. Register the route so it only answers on exactly POST /admin/sweep.",
+   "tier": "standard",
+   "source": "tests/evals/taskset-v0/tasks/expire-sweep-endpoint.json (claude-draft label)",
+   "needs": {
+    "new_tests": true,
+    "security_review": null,
+    "code_change": true
+   }
+  },
+  {
+   "id": "expiry-predicate-single-source",
+   "request": "session.go decides expiry inline in Get with `now.Sub(session.LastSeen) > ttl`. Introduce a single named method on Store: func (s *Store) expired(session Session) bool that returns true when the session's idle time exceeds the ttl, and make Get the only caller today. The refactoring must not change any behavior: Get still reports expired sessions as not found and still drops them. Add nothing else; this is a pure extract-method refactor so later changes have one place to touch.",
+   "tier": "light",
+   "source": "tests/evals/taskset-v0/tasks/expiry-predicate-single-source.json (claude-draft label)",
+   "needs": {
+    "new_tests": false,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "expiry-regression-table",
+   "request": "Expiry behavior has regressed twice this quarter and nothing pins it. Write a regression test file named expiry_regression_test.go (package main) containing a single table-driven test func TestExpiryRegressionTable(t *testing.T) that covers ALL of these cases against a store with a 1-minute TTL and a controllable clock (store.now): (1) fresh session readable immediately; (2) session at exactly ttl is still live; (3) session one second past ttl returns ErrNotFound; (4) expired session is dropped by the read so Len reports one fewer; (5) a session created after an expired one with the same id is readable. Use errors.Is for error checks. The test must pass, and every case must be a table entry, not a separate test function.",
+   "tier": "light",
+   "source": "tests/evals/taskset-v0/tasks/expiry-regression-table.json (claude-draft label)",
+   "needs": {
+    "new_tests": false,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "field-projection",
+   "request": "Mobile clients want smaller payloads. Extend GET /session in main.go with an optional query parameter fields: when fields=user, respond with only {\"user\": ...} from the session; when fields=id, only {\"id\": ...}; when the parameter is absent or has any other value, respond with the full session as today. A comma list like fields=id,user returns both keys. Field names are case-sensitive lowercase. Do not change session.go. Malformed requests keep their current behavior.",
+   "tier": "standard",
+   "source": "tests/evals/taskset-v0/tasks/field-projection.json (claude-draft label); security_review relabeled True by owner policy 2026-09-25 (an extra audit is acceptable; broader review is preferred)",
+   "needs": {
+    "new_tests": true,
+    "security_review": true,
+    "code_change": true
+   }
+  },
+  {
+   "id": "get-auth-token",
+   "request": "Session data is user PII; GET /session currently serves it to anyone who can guess an id. Add a GET-only auth check in main.go: GET /session must include a valid token via the X-Session-Token header; the valid token is the literal value from const validToken = \"sesstok_v1\" in main.go. Compare with subtle.ConstantTimeCompare from crypto/subtle (do not use ==). A missing or wrong token answers 401 Unauthorized. POST /session stays open (registration is unauthenticated by design). Do not change session.go.",
+   "tier": "substantial",
+   "source": "tests/evals/taskset-v0/tasks/get-auth-token.json (claude-draft label)",
+   "needs": {
+    "new_tests": true,
+    "security_review": true,
+    "code_change": true
+   }
+  },
+  {
+   "id": "get-no-refresh",
+   "request": "Store.Get in session.go currently refreshes LastSeen on every read, so polling the /session endpoint keeps a session alive forever. Change Get to be read-only: it must report the session as expired when now-LastSeen exceeds ttl, but it must NOT update LastSeen. Add a new Touch(id) error method that explicitly refreshes LastSeen (unknown id returns ErrNotFound). Update main.go: the GET /session handler must call Get (no refresh), and add a POST /session/touch handler that calls Touch and answers 204, or 404 when Touch returns ErrNotFound.",
+   "tier": "light",
+   "source": "tests/evals/taskset-v0/tasks/get-no-refresh.json (claude-draft label); security_review relabeled True by owner policy 2026-09-25 (an extra audit is acceptable; broader review is preferred)",
+   "needs": {
+    "new_tests": true,
+    "security_review": true,
+    "code_change": true
+   }
+  },
+  {
+   "id": "get-or-create",
+   "request": "Several callers implement get-or-create by calling Get then Create, which is racy: two callers can both miss and both create. Add func (s *Store) GetOrCreate(id, user string) (Session, bool) to session.go. It must be ATOMIC (one lock acquisition): if a live session with id exists, return it and false (wasCreated); otherwise create it with the caller's user and return it with true. An expired session is replaced and true is returned. Do not implement this by calling Get and Create; do the lookup and insert inside a single lock scope.",
+   "tier": "standard",
+   "source": "tests/evals/taskset-v0/tasks/get-or-create.json (claude-draft label); security_review relabeled True by owner policy 2026-09-25 (an extra audit is acceptable; broader review is preferred)",
+   "needs": {
+    "new_tests": true,
+    "security_review": true,
+    "code_change": true
+   }
+  },
+  {
+   "id": "graceful-shutdown",
+   "request": "main.go never shuts down cleanly: log.Fatal(http.ListenAndServe(...)) dies with requests in flight. Refactor: run the server in a goroutine, and add func shutdown(server *http.Server) error in main.go that calls server.Shutdown with a 5-second context timeout and returns the shutdown error. A live server must stop accepting, in-flight requests finish or the context expires at 5s, and calling shutdown on an already-stopped server must return no error. Keep the ListenAndServe error logged (ErrServerClosed is expected and must not log as a failure).",
+   "tier": "standard",
+   "source": "tests/evals/taskset-v0/tasks/graceful-shutdown.json (claude-draft label)",
+   "needs": {
+    "new_tests": true,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "healthz-detail-gating",
+   "request": "The /healthz endpoint currently reports the internal session count to anyone. Keep /healthz answering 200 for everyone, but only include the session count when the request carries the admin flag in the query (admin=1); without it, respond with an empty JSON object {}. Add no new dependencies and do not change sessionHandler.",
+   "tier": "substantial",
+   "source": "tests/evals/taskset-v0/tasks/healthz-detail-gating.json (claude-draft label)",
+   "needs": {
+    "new_tests": true,
+    "security_review": true,
+    "code_change": true
+   }
+  },
+  {
+   "id": "len-skips-expired",
+   "request": "There is an inconsistency in session.go: Store.Len reports every session in the map, including ones that have already expired but have not been read yet, while Get would report those same sessions as not found. Change Len to count only sessions that are still live (now minus LastSeen not exceeding ttl), and to drop expired entries it encounters while counting, exactly matching what Get would report. Len must stay safe for concurrent use.",
+   "tier": "light",
+   "source": "tests/evals/taskset-v0/tasks/len-skips-expired.json (claude-draft label); security_review relabeled True by owner policy 2026-09-25 (an extra audit is acceptable; broader review is preferred)",
+   "needs": {
+    "new_tests": true,
+    "security_review": true,
+    "code_change": true
+   }
+  },
+  {
+   "id": "list-sessions-paged",
+   "request": "The unpaginated list variant is too blunt for large stores. Add a paged accessor: func (s *Store) ListPage(offset, limit int) ([]Session, int) in session.go. It returns up to limit live sessions starting at offset in the same canonical order as List (LastSeen ascending, ID ascending as tiebreak), plus the TOTAL count of live sessions (so callers can compute pages). offset < 0 or limit <= 0 must return an empty slice and the total count. The store must not be mutated. Note: another Store method already named List may exist or not \u2014 if it does not, do NOT add one; this task is only about ListPage.",
+   "tier": "standard",
+   "source": "tests/evals/taskset-v0/tasks/list-sessions-paged.json (claude-draft label)",
+   "needs": {
+    "new_tests": true,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "listen-addr-from-env",
+   "request": "main.go hard-codes the listen address. Make it configurable: add a helper listenAddr(getenv func(string) string) string in main.go that returns the value of the ADDR environment variable when it is a valid host:port or :port address, and falls back to \":8080\" when the variable is unset or empty. An ADDR that is set but malformed (no colon, or non-numeric port) must cause main to exit before listening; implement the validation inside listenAddr by returning a second error return value instead: change the signature to listenAddr(getenv func(string) string) (string, error) and have main log the error and exit with status 2. Use the helper in main so tests can inject their own getenv.",
+   "tier": "light",
+   "source": "tests/evals/taskset-v0/tasks/listen-addr-from-env.json (claude-draft label); security_review relabeled True by owner policy 2026-09-25 (an extra audit is acceptable; broader review is preferred)",
+   "needs": {
+    "new_tests": true,
+    "security_review": true,
+    "code_change": true
+   }
+  },
+  {
+   "id": "no-id-in-logs",
+   "request": "Compliance flagged that session ids must never appear in application logs. In main.go: add func logRequest(method, path string, status int, id string) that writes one line like method=POST path=/session status=200 id=[REDACTED] using the log package, where the id field is the literal [REDACTED] whenever id is non-empty and empty when it is empty. Wire it into sessionHandler for POST, GET, and DELETE (defer a call with the query id and a 200 status). No actual session id may ever appear in the log output.",
+   "tier": "substantial",
+   "source": "tests/evals/taskset-v0/tasks/no-id-in-logs.json (claude-draft label)",
+   "needs": {
+    "new_tests": true,
+    "security_review": true,
+    "code_change": true
+   }
+  },
+  {
+   "id": "per-user-session-cap",
+   "request": "A runaway client can create unbounded sessions for one user. Add a per-user cap: add field MaxPerUser int to Store, set via an option-style constructor NewStoreWithCap(ttl time.Duration, maxPerUser int) (keep NewStore unchanged and make it set MaxPerUser to 0, meaning unlimited). Store.Create must return a new error ErrUserAtCap (define it) when the user already holds MaxPerUser live sessions (with MaxPerUser > 0), and in that case must not create the session. Live means the same rule Get uses. Update main.go's POST handler to answer 429 Too Many Requests when Create returns ErrUserAtCap.",
+   "tier": "standard",
+   "source": "tests/evals/taskset-v0/tasks/per-user-session-cap.json (claude-draft label)",
+   "needs": {
+    "new_tests": true,
+    "security_review": true,
+    "code_change": true
+   }
+  },
+  {
+   "id": "readme-delete-endpoint-doc",
+   "request": "The service supports DELETE /session?id=abc (it removes the session and answers 204; deleting an unknown id is also 204), but README.md does not mention it. Two changes, both required: (1) in main.go, make DELETE on /session answer with exactly status 204 and an EMPTY body (currently the DELETE branch does not exist and falls through to 405); (2) add a README bullet for DELETE /session in the same list style as the existing endpoint bullets, describing the 204 behavior. The verifier checks both the behavior and that README.md mentions the DELETE endpoint.",
+   "tier": "light",
+   "source": "tests/evals/taskset-v0/tasks/readme-delete-endpoint-doc.json (claude-draft label); security_review relabeled True by owner policy 2026-09-25 (an extra audit is acceptable; broader review is preferred)",
+   "needs": {
+    "new_tests": false,
+    "security_review": true,
+    "code_change": true
+   }
+  },
+  {
+   "id": "readme-expiry-semantics",
+   "request": "The README says sessions 'are lost when the process stops' but does not explain the expiry rule, and the rule in code is subtle: a session expires after 30 minutes of IDLE time (LastSeen refreshes on every successful GET), and expiry is enforced lazily on read. Two changes: (1) in main.go, expose the ttl via a constant const sessionTTL = 30 * time.Minute and use it in main instead of the literal; (2) add a README section '## Expiry' with exactly these three sentences: 'A session expires after 30 minutes of inactivity.' 'Reading a session refreshes its idle timer.' 'Expired sessions are removed when they are read.' The verifier checks the constant is used and the section exists verbatim.",
+   "tier": "light",
+   "source": "tests/evals/taskset-v0/tasks/readme-expiry-semantics.json (claude-draft label)",
+   "needs": {
+    "new_tests": false,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "remove-expired-hook",
+   "request": "Ops reports: after sessions expire, /healthz keeps showing them until someone reads that exact id. The root cause is that expiry is enforced lazily inside Get only. Add func (s *Store) RemoveExpired() int to session.go: it deletes every expired session immediately and returns the count. Wire it into main.go so /healthz calls RemoveExpired() before reporting the count, so /healthz always reflects only live sessions. RemoveExpired must be safe for concurrent use.",
+   "tier": "standard",
+   "source": "tests/evals/taskset-v0/tasks/remove-expired-hook.json (claude-draft label); security_review relabeled True by owner policy 2026-09-25 (an extra audit is acceptable; broader review is preferred)",
+   "needs": {
+    "new_tests": true,
+    "security_review": true,
+    "code_change": true
+   }
+  },
+  {
+   "id": "request-body-cap",
+   "request": "main.go reads requests without bounding their size, so a client can send an enormous body and exhaust memory. Add a body cap: add const maxRequestBodyBytes = 1 << 20 (1 MiB) in main.go and add func boundedBody(r *http.Request) *http.LimitedReader that wraps r.Body in an http.MaxBytesReader-limited reader of maxRequestBodyBytes. Call boundedBody in the POST /session branch before any body handling, and when a request's body exceeds the cap, the handler must answer 413 Request Entity Too Large. Bodies at or under the cap proceed normally.",
+   "tier": "substantial",
+   "source": "tests/evals/taskset-v0/tasks/request-body-cap.json (claude-draft label)",
+   "needs": {
+    "new_tests": true,
+    "security_review": true,
+    "code_change": true
+   }
+  },
+  {
+   "id": "route-registration-single-source",
+   "request": "main.go registers routes inline in main(). Extract route registration into one function: func routes() *http.ServeMux that creates a fresh ServeMux, registers every endpoint, and returns it. main() then uses http.Server{Addr: \":8080\", Handler: routes()}. Behavior must not change: all endpoints keep working through the returned mux. This is the standard seam that later tests and shutdown work build on, so main() must contain no HandleFunc calls.",
+   "tier": "light",
+   "source": "tests/evals/taskset-v0/tasks/route-registration-single-source.json (claude-draft label)",
+   "needs": {
+    "new_tests": false,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "session-id-validation",
+   "request": "Session ids flow straight from query parameters into the store. Add validation at the STORE boundary: add func ValidSessionID(id string) bool in session.go returning true only when the id is 2 to 64 characters long and consists solely of ASCII letters, digits, and hyphens. Store.Get must return a new error ErrInvalidID (define it, wrapping nothing) when ValidSessionID(id) is false. Store.Create must refuse to store anything when ValidSessionID(id) is false (return the zero Session, no panic). Update main.go so POST and GET answer 400 Bad Request for invalid ids. Empty and short ids are invalid too, so the existing missing-param 400 stays consistent.",
+   "tier": "substantial",
+   "source": "tests/evals/taskset-v0/tasks/session-id-validation.json (claude-draft label)",
+   "needs": {
+    "new_tests": true,
+    "security_review": true,
+    "code_change": true
+   }
+  },
+  {
+   "id": "sessions-active-since",
+   "request": "Add a SessionsActiveSince(cutoff time.Time) []Session method to Store in session.go. It returns the sessions whose LastSeen is strictly after cutoff, sorted by LastSeen ascending (oldest activity first). Ties on LastSeen sort by ID ascending. Expired sessions must not be returned. The method must not mutate the store.",
+   "tier": "standard",
+   "source": "tests/evals/taskset-v0/tasks/sessions-active-since.json (claude-draft label)",
+   "needs": {
+    "new_tests": true,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "sessions-by-user-endpoint",
+   "request": "Support needs to answer 'what sessions does user X hold'. Add a GET /sessions endpoint in main.go: with a user query parameter it answers a JSON array of that user's live sessions (only live ones; expired excluded), sorted by Created ascending; without the user parameter it answers 400. Add the backing method func (s *Store) SessionsForUser(user string) []Session to session.go (sorted the same way, expired excluded). Register the route in main.go.",
+   "tier": "standard",
+   "source": "tests/evals/taskset-v0/tasks/sessions-by-user-endpoint.json (claude-draft label)",
+   "needs": {
+    "new_tests": true,
+    "security_review": null,
+    "code_change": true
+   }
+  },
+  {
+   "id": "sessions-expiring-within",
+   "request": "Ops needs to warn users before their session dies. Add func (s *Store) SessionsExpiringWithin(d time.Duration) []Session in session.go: it returns the LIVE sessions that will expire within d from now (remaining lifetime = ttl - (now - LastSeen) is strictly less than d and the session is still live). Results sort by remaining lifetime ascending (soonest expiry first), with ID ascending on ties. d <= 0 returns an empty slice. The store is not mutated.",
+   "tier": "standard",
+   "source": "tests/evals/taskset-v0/tasks/sessions-expiring-within.json (claude-draft label)",
+   "needs": {
+    "new_tests": true,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "store-counters",
+   "request": "Support wants visibility into store traffic. Add three counters to Store, incremented in the existing methods (no behavior change otherwise): Created (number of successful Create calls), Lookups (number of Get calls, successful or not), Deletes (number of Delete calls). Expose them as a single method: func (s *Store) Counters() (created, lookups, deletes int64). Counters must be safe for concurrent use and start at zero. The counters are monotonically increasing.",
+   "tier": "light",
+   "source": "tests/evals/taskset-v0/tasks/store-counters.json (claude-draft label)",
+   "needs": {
+    "new_tests": true,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "structured-json-logs",
+   "request": "main.go logs with bare log.Println/log.Fatal, which makes production logs hard to query. Introduce a small structured logger: add func logLine(level, message string, fields map[string]any) in main.go that writes one JSON object per line to the standard logger with keys {\"level\", \"msg\", plus each field}. Convert the existing log.Println startup line to logLine(\"info\", \"listening\", map[string]any{\"addr\": addr-less: just use the same message text as today: logLine(\"info\", \"listening on :8080\", nil)}) \u2014 keep the existing message strings exactly, and log.Fatal stays as-is (process exit semantics). No external dependencies.",
+   "tier": "standard",
+   "source": "tests/evals/taskset-v0/tasks/structured-json-logs.json (claude-draft label)",
+   "needs": {
+    "new_tests": true,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "typed-lookup-error",
+   "request": "Callers of this service need to distinguish an unknown session id from other lookup problems without string matching. Introduce a typed error: add a struct type LookupError struct{ ID string } in session.go with an Error() string method (message must contain the session id) that implements error, and make the store's not-found condition return a *LookupError wrapping the missing id. Keep the existing ErrNotFound variable working: it must remain declared, and errors.Is(err, ErrNotFound) must still be true for a *LookupError (implement Is on the type or use Unwrap appropriately). Update nothing else.",
+   "tier": "standard",
+   "source": "tests/evals/taskset-v0/tasks/typed-lookup-error.json (claude-draft label)",
+   "needs": {
+    "new_tests": true,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "unix-timestamps-wire",
+   "request": "The /session endpoints currently serialize Session with Go's default time.Time JSON shape (RFC3339 with nanoseconds and timezone). Wire clients need stable integer fields: change the JSON representation of Session so Created and LastSeen are emitted as Unix seconds (numbers), without changing the field names (Created, LastSeen) or the in-memory time.Time types. Add the minimum marshaling support needed and make sure the existing endpoints still compile and behave identically apart from the timestamp encoding.",
+   "tier": "standard",
+   "source": "tests/evals/taskset-v0/tasks/unix-timestamps-wire.json (claude-draft label)",
+   "needs": {
+    "new_tests": true,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "user-lookup-index",
+   "request": "CountUser-style per-user scans walk the whole map on every call (the existing per-user queries in this file are O(n) per lookup). Introduce a secondary index: add a map[string]int (or map[string][]string, your choice, document it) on Store that stays in sync with the primary sessions map across Create, Get expiry drops, and Delete. Add func (s *Store) CountUser(user string) int that answers per-user counts from the index in O(1). The existing behavior of Create/Get/Delete must not change. Concurrency safety must hold: the index updates under the same lock scope as the mutations.",
+   "tier": "standard",
+   "source": "tests/evals/taskset-v0/tasks/user-lookup-index.json (claude-draft label)",
+   "needs": {
+    "new_tests": true,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "validate-user-helper-read",
+   "request": "Add func adminHandler(store *Store) http.HandlerFunc for POST /admin: read the user query value, validate it with the existing validateUser helper in session.go (one source of truth; do not duplicate the rule), and write 200 when valid or 400 when not. Register it in main.go.",
+   "tier": "light",
+   "source": "tests/evals/warmcost/holdout-taskset/tasks/validate-user-helper-read.json (claude-draft label)",
+   "needs": {
+    "new_tests": true,
+    "security_review": null,
+    "code_change": true
+   }
+  },
+  {
+   "id": "validate-user-helper-write",
+   "request": "Add func validateUser(user string) bool to session.go: false when the user string is empty or longer than 64 characters, true otherwise. Call it from Create and store the user string \"anonymous\" when it fails. Add a table-driven test for validateUser covering empty, short, exactly-64, and over-64.",
+   "tier": "light",
+   "source": "tests/evals/warmcost/holdout-taskset/tasks/validate-user-helper-write.json (claude-draft label); security_review relabeled True by owner policy 2026-09-25 (an extra audit is acceptable; broader review is preferred)",
+   "needs": {
+    "new_tests": false,
+    "security_review": true,
+    "code_change": true
+   }
+  },
+  {
+   "id": "error-envelope-from-doc",
+   "request": "All error responses from the session service currently use http.Error, so they are plain text. Change main.go so every error response is the JSON error envelope this repo documents for the service. Keep the existing status codes and follow the documented envelope exactly, including its field names and its per-status code strings.",
+   "tier": "standard",
+   "source": "tests/evals/warmcost/pilot-taskset/tasks/error-envelope-from-doc.json (claude-draft label)",
+   "needs": {
+    "new_tests": true,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "listen-address-from-config",
+   "request": "The session service hardcodes the listen address :8080. Change main.go so it listens on the address declared in this repo's deployment config. Add a function resolveListenAddr() (string, error) that reads the config and returns the address, and have main call it. Do not add dependencies; keep the config file's existing format.",
+   "tier": "standard",
+   "source": "tests/evals/warmcost/pilot-taskset/tasks/listen-address-from-config.json (claude-draft label)",
+   "needs": {
+    "new_tests": true,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "clock-helper-read",
+   "request": "Add a table-driven test named TestStoreExpiryBoundary in a new file next to the store. Reuse the repository's existing fake-clock table helper (runClockTable) so the test never sleeps. Cover an under-TTL stay and an over-TTL drop with the existing case fields.",
+   "tier": "light",
+   "source": "tests/evals/warmcost/retention-taskset/tasks/clock-helper-read.json (claude-draft label)",
+   "needs": {
+    "new_tests": false,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "example-01",
+   "request": "Add a function Half to internal/mathx/half.go that returns x/2 and add a test for it.",
+   "tier": "light",
+   "source": "tests/evals/warmcost/taskset-example/tasks/example-01.json (claude-draft label)",
+   "needs": {
+    "new_tests": false,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "fam-02-read",
+   "request": "The sweep/eviction logic (any code that removes expired sessions) must use the SAME configured TTL source of truth rather than its own duration literal. Refactor so every expiry decision reads the single sessionTTL constant. Behavior must not change.",
+   "tier": "light",
+   "source": "tests/evals/warmcost/families-taskset/tasks/fam-02-read.json (claude-draft label); security_review relabeled True by owner policy 2026-09-25 (an extra audit is acceptable; broader review is preferred)",
+   "needs": {
+    "new_tests": false,
+    "security_review": true,
+    "code_change": true
+   }
+  },
+  {
+   "id": "fam-08-read",
+   "request": "Create session_unix.go with a //go:build unix tag containing package main func platformNote() string { return \"unix\" }, and session_other.go with //go:build !unix returning \"other\". The go.mod toolchain line stays pinned.",
+   "tier": "light",
+   "source": "tests/evals/warmcost/families-taskset/tasks/fam-08-read.json (claude-draft label)",
+   "needs": {
+    "new_tests": true,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "fam-10-read",
+   "request": "Add GET /admin/session?id=X in main.go: a read-only variant answering the same JSON as GET /session, enforcing the SAME id validation rule at its boundary (invalid ids answer 400, reusing the store-level ErrInvalidID path, not re-implemented).",
+   "tier": "standard",
+   "source": "tests/evals/warmcost/families-taskset/tasks/fam-10-read.json (claude-draft label); security_review relabeled True by owner policy 2026-09-25 (an extra audit is acceptable; broader review is preferred)",
+   "needs": {
+    "new_tests": true,
+    "security_review": true,
+    "code_change": true
+   }
+  },
+  {
+   "id": "commit-8b5487d",
+   "request": "Add a regression discipline section for pipeline and learning logic to AGENTS.md",
+   "tier": "trivial",
+   "source": "git commit 8b5487d in splice (claude-draft label; diff used as a sanity check); request reworded to name the doc, because the stripped docs: prefix carried that fact",
+   "needs": {
+    "new_tests": false,
+    "security_review": false,
+    "code_change": false
+   }
+  },
+  {
+   "id": "commit-9d6ce55",
+   "request": "Align the upstream discipline section of the docs with the release strategy",
+   "tier": "trivial",
+   "source": "git commit 9d6ce55 in splice (claude-draft label; diff used as a sanity check); request reworded to name the doc, because the stripped docs: prefix carried that fact",
+   "needs": {
+    "new_tests": false,
+    "security_review": false,
+    "code_change": false
+   }
+  },
+  {
+   "id": "commit-a1bc23d",
+   "request": "Gitignore plans/ (internal planning docs, never pushed to release branches)",
+   "tier": "trivial",
+   "source": "git commit a1bc23d in splice (claude-draft label; diff used as a sanity check)",
+   "needs": {
+    "new_tests": false,
+    "security_review": false,
+    "code_change": false
+   }
+  },
+  {
+   "id": "commit-0f1f02e",
+   "request": "Keep the demo capture workspace out of git",
+   "tier": "trivial",
+   "source": "git commit 0f1f02e in splice (claude-draft label; diff used as a sanity check)",
+   "needs": {
+    "new_tests": false,
+    "security_review": false,
+    "code_change": false
+   }
+  },
+  {
+   "id": "commit-30a33d8",
+   "request": "Harden compact-proposal prompts against mixed representations (in stages)",
+   "tier": "light",
+   "source": "git commit 30a33d8 in splice (claude-draft label; diff used as a sanity check); security_review relabeled True by owner policy 2026-09-25 (an extra audit is acceptable; broader review is preferred)",
+   "needs": {
+    "new_tests": null,
+    "security_review": true,
+    "code_change": true
+   }
+  },
+  {
+   "id": "commit-c6c3693",
+   "request": "Evidence query orders by created_at, not a nonexistent id column (in memd)",
+   "tier": "light",
+   "source": "git commit c6c3693 in splice (claude-draft label; diff used as a sanity check)",
+   "needs": {
+    "new_tests": true,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "commit-c62d381",
+   "request": "Slash palette stays visible on tall terminals (in tui)",
+   "tier": "light",
+   "source": "git commit c62d381 in splice (claude-draft label; diff used as a sanity check)",
+   "needs": {
+    "new_tests": true,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "commit-4f553e0",
+   "request": "Fall back to stream usage records when a run writes no trace (in eval)",
+   "tier": "light",
+   "source": "git commit 4f553e0 in splice (claude-draft label; diff used as a sanity check)",
+   "needs": {
+    "new_tests": true,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "commit-35ce459",
+   "request": "Lifecycle cards draw exactly one border (double-box bug) (in tui)",
+   "tier": "light",
+   "source": "git commit 35ce459 in splice (claude-draft label; diff used as a sanity check)",
+   "needs": {
+    "new_tests": true,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "commit-a200452",
+   "request": "Evaluate rules from an ordered table (in trajectory)",
+   "tier": "light",
+   "source": "git commit a200452 in splice (claude-draft label; diff used as a sanity check); new_tests relabeled True: the real commit added trajectory_test.go, so its author judged new tests necessary",
+   "needs": {
+    "new_tests": true,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "commit-eee883d",
+   "request": "Canonicalize project paths across capture and export (in cognition)",
+   "tier": "standard",
+   "source": "git commit eee883d in splice (claude-draft label; diff used as a sanity check)",
+   "needs": {
+    "new_tests": true,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "commit-5e627cf",
+   "request": "Count mid-run prompt layout flips (in splice)",
+   "tier": "standard",
+   "source": "git commit 5e627cf in splice (claude-draft label; diff used as a sanity check)",
+   "needs": {
+    "new_tests": true,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "commit-0e6911c",
+   "request": "Record cache_hit and memory_position per request (in splice)",
+   "tier": "standard",
+   "source": "git commit 0e6911c in splice (claude-draft label; diff used as a sanity check)",
+   "needs": {
+    "new_tests": true,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "commit-81b10ba",
+   "request": "Key stage state by name and iteration (T3b) (in splice)",
+   "tier": "standard",
+   "source": "git commit 81b10ba in splice (claude-draft label; diff used as a sanity check)",
+   "needs": {
+    "new_tests": true,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "commit-c0ba692",
+   "request": "Report a repository under sandbox refusal (in splice)",
+   "tier": "standard",
+   "source": "git commit c0ba692 in splice (claude-draft label; diff used as a sanity check)",
+   "needs": {
+    "new_tests": true,
+    "security_review": null,
+    "code_change": true
+   }
+  },
+  {
+   "id": "commit-d6eb25b",
+   "request": "Expose FTS rank on /search_ranked (C1c D1) (in memd)",
+   "tier": "standard",
+   "source": "git commit d6eb25b in splice (claude-draft label; diff used as a sanity check)",
+   "needs": {
+    "new_tests": true,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "commit-d22a5fe",
+   "request": "Diff review viewport (GAP-G, contract \u00a711, frame tOwI1) (in tui)",
+   "tier": "standard",
+   "source": "git commit d22a5fe in splice (claude-draft label; diff used as a sanity check)",
+   "needs": {
+    "new_tests": true,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "commit-362a243",
+   "request": "Enable the read guard before the runner is built (in splice)",
+   "tier": "substantial",
+   "source": "git commit 362a243 in splice (claude-draft label; diff used as a sanity check)",
+   "needs": {
+    "new_tests": true,
+    "security_review": true,
+    "code_change": true
+   }
+  },
+  {
+   "id": "commit-11cb387",
+   "request": "Gate raw_file_read to the host seam, never the model surface (in tools)",
+   "tier": "substantial",
+   "source": "git commit 11cb387 in splice (claude-draft label; diff used as a sanity check)",
+   "needs": {
+    "new_tests": true,
+    "security_review": true,
+    "code_change": true
+   }
+  },
+  {
+   "id": "commit-f265ce9",
+   "request": "Run pipeline turns in an isolated worktree (in tui)",
+   "tier": "substantial",
+   "source": "git commit f265ce9 in splice (claude-draft label; diff used as a sanity check)",
+   "needs": {
+    "new_tests": true,
+    "security_review": true,
+    "code_change": true
+   }
+  },
+  {
+   "id": "commit-14d02b2",
+   "request": "One canonical project identity for sidecar memory (in splice,memd)",
+   "tier": "substantial",
+   "source": "git commit 14d02b2 in splice (claude-draft label; diff used as a sanity check)",
+   "needs": {
+    "new_tests": true,
+    "security_review": null,
+    "code_change": true
+   }
+  },
+  {
+   "id": "commit-084211e",
+   "request": "Retrieve kept-run exemplars into stage memory bundles (PC3) (in splice)",
+   "tier": "substantial",
+   "source": "git commit 084211e in splice (claude-draft label; diff used as a sanity check)",
+   "needs": {
+    "new_tests": true,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "commit-7860649",
+   "request": "Enforce task qa sealing integrity (in eval)",
+   "tier": "substantial",
+   "source": "git commit 7860649 in splice (claude-draft label; diff used as a sanity check)",
+   "needs": {
+    "new_tests": true,
+    "security_review": null,
+    "code_change": true
+   }
+  },
+  {
+   "id": "commit-bc9ce31",
+   "request": "Structural cognition keys and freshness gate (in splice)",
+   "tier": "substantial",
+   "source": "git commit bc9ce31 in splice (claude-draft label; diff used as a sanity check); security_review relabeled True by owner policy 2026-09-25 (an extra audit is acceptable; broader review is preferred)",
+   "needs": {
+    "new_tests": true,
+    "security_review": true,
+    "code_change": true
+   }
+  },
+  {
+   "id": "commit-54c6407",
+   "request": "Executor honors the topology DAG (T3a) (in splice)",
+   "tier": "architectural",
+   "source": "git commit 54c6407 in splice (claude-draft label; diff used as a sanity check)",
+   "needs": {
+    "new_tests": true,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "commit-3267784",
+   "request": "Node capabilities drive the executor (T4a) (in splice)",
+   "tier": "architectural",
+   "source": "git commit 3267784 in splice (claude-draft label; diff used as a sanity check)",
+   "needs": {
+    "new_tests": true,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "commit-f0a7dd8",
+   "request": "Decision advisor host side: snapshots, gates, shadow mode (Jev M3) (in splice)",
+   "tier": "architectural",
+   "source": "git commit f0a7dd8 in splice (claude-draft label; diff used as a sanity check)",
+   "needs": {
+    "new_tests": true,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "commit-698bc92",
+   "request": "Add Eval v2 typed protocol schemas",
+   "tier": "architectural",
+   "source": "git commit 698bc92 in splice (claude-draft label; diff used as a sanity check)",
+   "needs": {
+    "new_tests": true,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "commit-3c2bcb3",
+   "request": "Context bridge - StageScopePlan turns resolved cognition into scoped context acquisition (in cognition)",
+   "tier": "architectural",
+   "source": "git commit 3c2bcb3 in splice (claude-draft label; diff used as a sanity check)",
+   "needs": {
+    "new_tests": true,
+    "security_review": false,
+    "code_change": true
+   }
+  },
+  {
+   "id": "commit-e3e97b1",
+   "request": "Record the output-reducer evaluation results in the eval docs",
+   "tier": "trivial",
+   "source": "git commit e3e97b1 in splice (docs-only diff; request worded from the subject; claude-draft label)",
+   "needs": {
+    "new_tests": false,
+    "security_review": false,
+    "code_change": false
+   }
+  },
+  {
+   "id": "commit-28594fb",
+   "request": "Add the EV2-1 durable identity spec to plans/",
+   "tier": "trivial",
+   "source": "git commit 28594fb in splice (docs-only diff; request worded from the subject; claude-draft label)",
+   "needs": {
+    "new_tests": false,
+    "security_review": false,
+    "code_change": false
+   }
+  },
+  {
+   "id": "commit-ca61022",
+   "request": "Record cycle 5 (run 7) in the paired-eval run log document",
+   "tier": "trivial",
+   "source": "git commit ca61022 in splice (docs-only diff; request worded from the subject; claude-draft label)",
+   "needs": {
+    "new_tests": false,
+    "security_review": false,
+    "code_change": false
+   }
+  }
+ ],
+ "needs_rubric": {
+  "new_tests": "The request adds or changes behavior and does not itself say how the result is checked (no stated test, verifier, or check), and it is not a behavior-preserving refactor. Decides test_generator.",
+  "security_review": "The request changes authentication, authorization, secrets, sandboxing or isolation, personal-data exposure, or limits on untrusted input. Decides security_auditor. Owner policy 2026-09-25: an extra security audit is acceptable, so session lifecycle, input validation, and admin-endpoint changes count as security-sensitive.",
+  "null": "Ambiguous under the rubric; excluded from scoring and listed for owner review.",
+  "code_change": "The request changes any code, configuration, or prompt text, including a behavior-preserving refactor. False for documentation, comments, wording, formatting, and repository housekeeping. Decides whether verification stages run."
+ }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "cpl-06-read",
+  "phase": "read",
+  "precursor": "cpl-06-write",
+  "prompt": "In the audit package, add the audit action \"invoice.voided\" (ActionInvoiceVoided) to the recorded actions. Its label is \"Invoice voided\".",
+  "check": "# cpl-06 B\nmkdir -p internal/admin\ncat > internal/admin/probe_action_invoice_voided_test.go <<'EOF'\npackage admin\n\nimport (\n\t\"slices\"\n\t\"testing\"\n\n\t\"demo/internal/audit\"\n)\n\nfunc TestProbeActionInvoiceVoided(t *testing.T) {\n\tif audit.ActionInvoiceVoided != \"invoice.voided\" || !slices.Contains(audit.Actions, audit.ActionInvoiceVoided) {\n\t\tt.Fatal(\"audit.Actions lacks invoice.voided\")\n\t}\n\tif Label(\"invoice.voided\") != \"Invoice voided\" {\n\t\tt.Fatalf(\"Label(invoice.voided) = %q\", Label(\"invoice.voided\"))\n\t}\n}\nEOF\ngo test -count=1 ./... ; rc=$?\nrm -f internal/admin/probe_action_invoice_voided_test.go\nexit $rc\n",
+  "fixture": "../../coupled-families/fixture"
+}

@@ -55,7 +55,7 @@ func TestContextCardCarriesStyleToolsAndActionPointers(t *testing.T) {
 		"effort",
 		"style",
 		"registered  0",
-		"actions: /permissions manage access | /tools inspect catalog",
+		"actions: /permissions show access | /tools inspect catalog",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("context card missing %q:\n%s", want, text)

@@ -78,6 +78,76 @@ func stageByPlanName(plan schemas.ExecutionPlan, name string) (schemas.Execution
 	return schemas.ExecutionStage{}, false
 }
 
+// roleStageName returns the plan stage name for a builtin role (a builtin node
+// type such as "code_writer"). A topology may rename a builtin node, so the
+// plan stage carries the role in Type and the node name in Name. A plan that
+// predates node types has no Type, so its stage name is the role. An absent
+// role, or a plan without the role, falls back to the role name.
+func roleStageName(plan schemas.ExecutionPlan, role string) string {
+	for _, stage := range plan.Stages {
+		if stage.Type == role {
+			return stage.Name
+		}
+	}
+	return role
+}
+
+// codeWriterName returns the plan name of the code writer stage, or "" when
+// the plan has no code writer, such as an agent-only topology.
+func codeWriterName(plan schemas.ExecutionPlan) string {
+	for _, stage := range plan.Stages {
+		if stageRole(stage) == "code_writer" {
+			return stage.Name
+		}
+	}
+	return ""
+}
+
+// boundaryStage labels a trajectory boundary snapshot: the code writer, or
+// "pass" when the plan has no code writer.
+func boundaryStage(plan schemas.ExecutionPlan) string {
+	if name := codeWriterName(plan); name != "" {
+		return name
+	}
+	return "pass"
+}
+
+// stageRole returns the builtin role of a planned stage: its node type, or its
+// name for a plan that predates node types.
+func stageRole(stage schemas.ExecutionStage) string {
+	if stage.Type != "" {
+		return stage.Type
+	}
+	return stage.Name
+}
+
+// writerStageName is the plan name of the code writer when a topology renames
+// it, or empty when the writer keeps its builtin name.
+func writerStageName(plan schemas.ExecutionPlan) string {
+	if name := roleStageName(plan, "code_writer"); name != "code_writer" {
+		return name
+	}
+	return ""
+}
+
+// withRoleAlias adds the builtin role key to a map of prior stage output when a
+// topology renames that role. A stage that reads prior output by its builtin
+// name (test_generator reads the code_writer summary) keeps working. The map
+// is copied, never changed in place.
+func withRoleAlias[V any](m map[string]V, plan schemas.ExecutionPlan, role string) map[string]V {
+	name := roleStageName(plan, role)
+	v, ok := m[name]
+	if name == role || !ok {
+		return m
+	}
+	out := make(map[string]V, len(m)+1)
+	for k, val := range m {
+		out[k] = val
+	}
+	out[role] = v
+	return out
+}
+
 // stageModelFree reports whether a planned stage is deterministic. The
 // compiled node capabilities are authoritative; a legacy plan with none falls
 // back to the builtin profile for the stage type, then the stage name.

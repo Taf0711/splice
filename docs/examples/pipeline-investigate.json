@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "name": "investigate",
+  "description": "Read-only investigation. An agent node finds the code for the request and reports the files. It changes nothing.",
+  "splice_min_version": "0.3.0",
+  "nodes": [
+    {
+      "name": "investigate",
+      "type": "agent",
+      "prompt": "Find where {{intent}} is handled. Read the code. Name the files and the functions, and explain the flow in a few sentences. Do not change any file.",
+      "tools": ["read_file", "grep", "glob", "list_directory"],
+      "max_turns": 8,
+      "permission": "ask",
+      "budget": {"input_max": 60000, "output_max": 8000}
+    }
+  ],
+  "edges": []
+}

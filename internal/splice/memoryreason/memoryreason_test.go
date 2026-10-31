@@ -283,3 +283,23 @@ func TestPropertyReviewCoversExactlyDeliveredSet(t *testing.T) {
 		}
 	}
 }
+
+func TestStableIDSourceQualified(t *testing.T) {
+	// Graph node 42 and observation 42 come from separate ID sequences.
+	// The identity MUST be source-qualified or the replay guard suppresses
+	// a graph item as a duplicate of an unrelated observation (and vice
+	// versa).
+	graph := schemas.MemoryObservation{ID: 42, OwnerAgent: "cognition_graph", Content: "fact"}
+	obs := schemas.MemoryObservation{ID: 42, OwnerAgent: "code_writer", Content: "fact"}
+	gid := StableID(graph)
+	oid := StableID(obs)
+	if gid == oid {
+		t.Fatalf("graph and observation identities collided: %q", gid)
+	}
+	if !strings.HasPrefix(gid, "graph:") {
+		t.Fatalf("graph identity = %q, want graph: prefix", gid)
+	}
+	if !strings.HasPrefix(oid, "observation:") {
+		t.Fatalf("observation identity = %q, want observation: prefix", oid)
+	}
+}

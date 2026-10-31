@@ -126,6 +126,67 @@ func equalTestRunnerStrings(left []string, right []string) bool {
 	return true
 }
 
+func TestExpandConfiguredTestCommand(t *testing.T) {
+	root := t.TempDir()
+	testDir := filepath.Join(root, "tests")
+	command := []string{"python", "tests/runtests.py", "{tests}", "{test_modules}"}
+	changed := map[string][]string{
+		"test_generator": {"tests/test_auth.py", "tests/unit/test_more.py", "src/not_a_test.py"},
+		"code_writer":    {"tests.py", "internal/foo_test.go", "web/app.spec.ts"},
+	}
+	got, err := expandConfiguredTestCommand(command, changed, root, testDir)
+	if err != nil {
+		t.Fatalf("expandConfiguredTestCommand: %v", err)
+	}
+	want := []string{"python", "tests/runtests.py", "test_auth.py", "unit/test_more.py", "test_auth", "unit.test_more"}
+	if !equalTestRunnerStrings(got, want) {
+		t.Fatalf("expanded command = %#v, want %#v", got, want)
+	}
+}
+
+func TestExpandConfiguredTestCommandEmptySetAndOutsideDir(t *testing.T) {
+	root := t.TempDir()
+	got, err := expandConfiguredTestCommand([]string{"pytest", "{tests}"}, map[string][]string{
+		"code_writer": {"src/app.py", "other_test.go"},
+	}, root, filepath.Join(root, "tests"))
+	if err != nil {
+		t.Fatalf("expandConfiguredTestCommand: %v", err)
+	}
+	if !equalTestRunnerStrings(got, []string{"pytest"}) {
+		t.Fatalf("expanded empty command = %#v, want pytest only", got)
+	}
+}
+
+func TestTestRunnerUsesConfiguredCommandAndWorkingDirectory(t *testing.T) {
+	root := t.TempDir()
+	testDir := filepath.Join(root, "tests")
+	var got map[string]any
+	var toolName string
+	output, err := (TestRunner{}).Run(context.Background(), newHarnessInput("verify workspace"), &fakeProvider{}, StageOptions{
+		WorkDir:        root,
+		Command:        []string{"python", "{tests}"},
+		CommandWorkDir: testDir,
+		RunTool: func(_ context.Context, name string, args map[string]any) (ToolResult, error) {
+			toolName = name
+			got = args
+			return ToolResult{OK: true, Output: "ok"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("stage run: %v", err)
+	}
+	if got["cwd"] != testDir {
+		t.Fatalf("cwd = %#v, want %q", got["cwd"], testDir)
+	}
+	if toolName != "bash" {
+		t.Fatalf("tool = %q, want bash through the existing command path", toolName)
+	}
+	results := output.Data["test_results"].(schemas.TestRunResults)
+	if !equalTestRunnerStrings(results.Command, []string{"python"}) {
+		t.Fatalf("recorded command = %#v, want configured command with empty expansion", results.Command)
+	}
+}
+
 // A1: a seeded go test -json stream with one passing and one failing test
 // must parse into per-test entries, not a single suite entry.
 func TestParseGoTestJSONPerTestResults(t *testing.T) {

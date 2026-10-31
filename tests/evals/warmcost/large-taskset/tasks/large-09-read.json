@@ -1,0 +1,8 @@
+{
+  "name": "large-09-read",
+  "phase": "read",
+  "precursor": "large-09-write",
+  "prompt": "Add RetryPlan(b Backoff, attempts int) []time.Duration in the worker package: the delays of the next attempts retries in order, without changing the caller's backoff. Reuse Backoff.Next so the ceiling rule stays in one place. Add a regression test.",
+  "check": "# large-09 B: Add RetryPlan(b Backoff, attempts int) []time.Duration in the worker p\nmkdir -p internal/worker\ncat > internal/worker/probe_retry_plan_test.go <<'EOF'\npackage worker\n\nimport (\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestProbeRetryPlan(t *testing.T) {\n\tb := Backoff{Current: time.Second, Ceiling: 5 * time.Second}\n\tgot := RetryPlan(b, 4)\n\twant := []time.Duration{2 * time.Second, 4 * time.Second, 5 * time.Second, 5 * time.Second}\n\tif len(got) != len(want) {\n\t\tt.Fatalf(\"RetryPlan = %v, want %v\", got, want)\n\t}\n\tfor i := range want {\n\t\tif got[i] != want[i] {\n\t\t\tt.Fatalf(\"RetryPlan = %v, want %v\", got, want)\n\t\t}\n\t}\n\tif b.Current != time.Second {\n\t\tt.Fatal(\"RetryPlan must not change the caller's backoff\")\n\t}\n}\nEOF\ngo test -count=1 ./internal/worker/ ; rc=$?\nrm -f internal/worker/probe_retry_plan_test.go\nif [ $rc -ne 0 ]; then exit $rc; fi\nexit 0\n",
+  "fixture": "../../large-families/fixture"
+}

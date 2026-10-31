@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Taf0711/splice/internal/gitenv/gitenvtest"
 )
 
 // fakeGit returns canned output per subcommand and records every subcommand used.
@@ -280,4 +282,10 @@ func TestCollectOnlyReadOnlyLocalSubcommands(t *testing.T) {
 			t.Fatalf("disallowed git subcommand used: %q (network-free invariant)", sub)
 		}
 	}
+}
+
+func TestDefaultRunGitHardensEnv(t *testing.T) {
+	record := gitenvtest.InstallRecorder(t)
+	_, _ = defaultRunGit(context.Background(), t.TempDir(), "rev-parse", "HEAD")
+	gitenvtest.AssertHardened(t, gitenvtest.Runs(t, record))
 }

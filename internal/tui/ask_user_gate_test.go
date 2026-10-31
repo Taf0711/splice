@@ -116,3 +116,19 @@ func TestAskUserGateWiredFromRun(t *testing.T) {
 		t.Fatal("gate opened without a start time; the NEEDS YOU timer cannot run")
 	}
 }
+
+// The gate footer states the hard-gate invariant only when it holds: with
+// specialists still in flight it says so instead of "no work running".
+func TestAskUserGateFooterIsTruthfulAboutRunningSpecialists(t *testing.T) {
+	prompt := pendingAskUserPrompt{request: agent.AskUserRequest{Questions: []agent.AskUserQuestion{{Question: "which flag wins?"}}}}
+	prompt.states = newAskUserStates(prompt.request.Questions)
+	idle := stripANSI(renderAskUserQuestionnaire(prompt, "", 90, presentation.GlyphTierASCII))
+	if !strings.Contains(idle, "no work running") {
+		t.Fatalf("idle gate lost the invariant line:\n%s", idle)
+	}
+	prompt.othersRunning = 2
+	busy := stripANSI(renderAskUserQuestionnaire(prompt, "", 90, presentation.GlyphTierASCII))
+	if strings.Contains(busy, "no work running") || !strings.Contains(busy, "2 specialist(s) still running") {
+		t.Fatalf("gate claims idle while specialists run:\n%s", busy)
+	}
+}

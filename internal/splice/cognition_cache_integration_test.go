@@ -17,6 +17,12 @@ import (
 	"github.com/Taf0711/splice/internal/worktrees"
 )
 
+// spawnsPerBatch is the git spawns of one changed-path batch on a tree with
+// no untracked files: the diff against the anchor, then the untracked-file
+// listing (untracked files are compared by content, see
+// cognition.ChangedPaths).
+const spawnsPerBatch = 2
+
 // spawnCountingRunner wraps the real git runner and counts every git
 // process spawn, proving the batch+memo behavior end-to-end through
 // prepareStageInput.
@@ -65,7 +71,7 @@ func TestPrepareStageInputOneSpawnPerUniqueCommit(t *testing.T) {
 
 	plan := cognitionPlan("code_writer")
 	tr := newRunTraceAccumulator(nil, "run", "session", root, plan, "active", nil)
-	prepared, err := prepareStageInput(context.Background(), stageInputPreparation{
+	prepared, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 		Input:     cognitionInput("code_writer", "fix session invalidation in internal/auth/session.go#ResetPassword"),
 		Stage:     &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
 		Budget:    stageBudgetByName(plan, "code_writer"),
@@ -85,8 +91,8 @@ func TestPrepareStageInputOneSpawnPerUniqueCommit(t *testing.T) {
 		// delivered and the symbol: key is never consulted.
 		t.Fatalf("expected the first key's admitted observation, got %v", prepared.MemoryBundle)
 	}
-	if got := runner.spawns; got != 1 {
-		t.Fatalf("git spawns for one invocation with 2 keys/2 observations = %d, want 1 (batch)", got)
+	if got := runner.spawns; got != spawnsPerBatch {
+		t.Fatalf("git spawns for one invocation with 2 keys/2 observations = %d, want %d (batch)", got, spawnsPerBatch)
 	}
 
 	// Re-entry through the same run's cache: the second invocation for the
@@ -94,7 +100,7 @@ func TestPrepareStageInputOneSpawnPerUniqueCommit(t *testing.T) {
 	runner.mu.Lock()
 	runner.spawns = 0
 	runner.mu.Unlock()
-	prepared2, err := prepareStageInput(context.Background(), stageInputPreparation{
+	prepared2, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 		Input:     cognitionInput("code_writer", "fix session invalidation in internal/auth/session.go"),
 		Stage:     &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
 		Budget:    stageBudgetByName(plan, "code_writer"),
@@ -146,7 +152,7 @@ func TestPrepareStageInputRepairReentryRedeliversDirectHit(t *testing.T) {
 	tr := newRunTraceAccumulator(nil, "run-repair-direct", "session", root, plan, "active", nil)
 	prepare := func(iteration int, repair bool) schemas.HarnessStageInput {
 		t.Helper()
-		prepared, err := prepareStageInput(context.Background(), stageInputPreparation{
+		prepared, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 			Input:         cognitionInput("code_writer", "fix session invalidation in internal/auth/session.go#ResetPassword"),
 			Stage:         &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
 			Budget:        stageBudgetByName(plan, "code_writer"),
@@ -214,7 +220,7 @@ func TestPrepareStageInputMutationBumpsGeneration(t *testing.T) {
 
 	// Invocation 1: no prior mutations, memoize the fresh verdict.
 	input1 := cognitionInput("code_writer", "fix session invalidation in internal/auth/session.go")
-	if _, err := prepareStageInput(context.Background(), stageInputPreparation{
+	if _, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 		Input: input1, Stage: &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
 		Budget: stageBudgetByName(plan, "code_writer"), Tier: plan.Tier, Iteration: 1,
 		WorkDir: root, Options: PipelineConfigFromAgentOptions(agent.Options{}),
@@ -222,8 +228,8 @@ func TestPrepareStageInputMutationBumpsGeneration(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("invocation 1: %v", err)
 	}
-	if got := runner.spawns; got != 1 {
-		t.Fatalf("spawns after invocation 1 = %d, want 1", got)
+	if got := runner.spawns; got != spawnsPerBatch {
+		t.Fatalf("spawns after invocation 1 = %d, want %d", got, spawnsPerBatch)
 	}
 
 	// A Splice-permitted mutation appears in the changed-file record: the
@@ -231,7 +237,7 @@ func TestPrepareStageInputMutationBumpsGeneration(t *testing.T) {
 	// Splice's control, so the memoized set must be re-proven by a spawn.
 	input2 := cognitionInput("code_writer", "fix session invalidation in internal/auth/session.go")
 	input2.PriorChangedFiles = map[string][]string{"code_writer": {"internal/auth/token.go"}}
-	if _, err := prepareStageInput(context.Background(), stageInputPreparation{
+	if _, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 		Input: input2, Stage: &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
 		Budget: stageBudgetByName(plan, "code_writer"), Tier: plan.Tier, Iteration: 2,
 		WorkDir: root, Options: PipelineConfigFromAgentOptions(agent.Options{}),
@@ -239,14 +245,14 @@ func TestPrepareStageInputMutationBumpsGeneration(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("invocation 2: %v", err)
 	}
-	if got := runner.spawns; got != 2 {
-		t.Fatalf("spawns after mutation = %d, want 2 (generation bump re-proves)", got)
+	if got := runner.spawns; got != 2*spawnsPerBatch {
+		t.Fatalf("spawns after mutation = %d, want %d (generation bump re-proves)", got, 2*spawnsPerBatch)
 	}
 
 	// The mutation record is unchanged now: memoized, zero spawns.
 	input3 := input2
 	input3.PriorChangedFiles = map[string][]string{"code_writer": {"internal/auth/token.go"}}
-	if _, err := prepareStageInput(context.Background(), stageInputPreparation{
+	if _, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 		Input: input3, Stage: &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
 		Budget: stageBudgetByName(plan, "code_writer"), Tier: plan.Tier, Iteration: 3,
 		WorkDir: root, Options: PipelineConfigFromAgentOptions(agent.Options{}),
@@ -254,8 +260,8 @@ func TestPrepareStageInputMutationBumpsGeneration(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("invocation 3: %v", err)
 	}
-	if got := runner.spawns; got != 2 {
-		t.Fatalf("spawns after stable record = %d, want 2 (memoized)", got)
+	if got := runner.spawns; got != 2*spawnsPerBatch {
+		t.Fatalf("spawns after stable record = %d, want %d (memoized)", got, 2*spawnsPerBatch)
 	}
 }
 
@@ -283,7 +289,7 @@ func TestPrepareStageInputRepairReEntryMemoized(t *testing.T) {
 	// itself must carry the structural intent for this fixture.
 	plan.RequestIntent = "fix session invalidation in internal/auth/session.go"
 	writerInput := repairStageInput("run", "code_writer", plan, []string{"code_writer"}, map[string]string{}, map[string][]string{}, &revision)
-	if _, err := prepareStageInput(context.Background(), stageInputPreparation{
+	if _, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 		Input: writerInput, Stage: &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
 		Budget: stageBudgetByName(plan, "code_writer"), Tier: plan.Tier, Iteration: 1,
 		WorkDir: root, Options: PipelineConfigFromAgentOptions(agent.Options{}),
@@ -291,13 +297,13 @@ func TestPrepareStageInputRepairReEntryMemoized(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("writer entry: %v", err)
 	}
-	if got := runner.spawns; got != 1 {
-		t.Fatalf("spawns after writer entry = %d, want 1", got)
+	if got := runner.spawns; got != spawnsPerBatch {
+		t.Fatalf("spawns after writer entry = %d, want %d", got, spawnsPerBatch)
 	}
 
 	// Repair re-entry: same anchor, no mutation recorded. Zero spawns.
 	reEntry := repairStageInput("run", "code_writer", plan, []string{"code_writer"}, map[string]string{}, map[string][]string{}, &revision)
-	if _, err := prepareStageInput(context.Background(), stageInputPreparation{
+	if _, _, _, err := prepareStageInput(context.Background(), stageInputPreparation{
 		Input: reEntry, Stage: &capturingStage{caps: stages.Capabilities{ConsumesMemory: true}},
 		Budget: stageBudgetByName(plan, "code_writer"), Tier: plan.Tier, Iteration: 1,
 		WorkDir: root, Options: PipelineConfigFromAgentOptions(agent.Options{}),
@@ -305,8 +311,8 @@ func TestPrepareStageInputRepairReEntryMemoized(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("writer re-entry: %v", err)
 	}
-	if got := runner.spawns; got != 1 {
-		t.Fatalf("spawns after repair re-entry = %d, want 1 (memoized)", got)
+	if got := runner.spawns; got != spawnsPerBatch {
+		t.Fatalf("spawns after repair re-entry = %d, want %d (memoized)", got, spawnsPerBatch)
 	}
 }
 

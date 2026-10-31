@@ -208,48 +208,44 @@ func TestCompileTopologyWarnings(t *testing.T) {
 	}
 }
 
-// TestCompileTopologyWarnsOnMismatchedWriterName pins that the builtin
-// coupling warning keys on the name test_generator reads (code_writer), not
-// on the node type.
-func TestCompileTopologyWarnsOnMismatchedWriterName(t *testing.T) {
-	couplingWarning := "no code_writer upstream edge"
-	topology := &schemas.PipelineTopology{
-		Version: schemas.TopologySchemaVersion,
-		Name:    "mismatch",
-		Nodes: []schemas.PipelineNode{
-			{Name: "writer", Type: "code_writer"},
-			{Name: "gen", Type: "test_generator"},
-		},
-		Edges: []schemas.PipelineEdge{{From: "writer", To: "gen"}},
+// The coupling warning keys on the code writer's node type, under any name.
+// A renamed writer that delivers its summary satisfies the coupling. A node
+// that only carries the name code_writer does not.
+func TestCompileTopologyCouplingFollowsWriterRole(t *testing.T) {
+	const couplingWarning = "no code_writer upstream edge"
+	warns := func(t *testing.T, nodes []schemas.PipelineNode, edges []schemas.PipelineEdge) bool {
+		t.Helper()
+		compiled, err := CompileTopology(&schemas.PipelineTopology{
+			Version: schemas.TopologySchemaVersion,
+			Name:    "coupling",
+			Nodes:   nodes,
+			Edges:   edges,
+		}, schemas.TierStandard)
+		if err != nil {
+			t.Fatalf("CompileTopology = %v", err)
+		}
+		return strings.Contains(strings.Join(compiled.Warnings, "\n"), couplingWarning)
+	}
+	gen := schemas.PipelineNode{Name: "gen", Type: "test_generator"}
+
+	renamed := []schemas.PipelineNode{{Name: "writer", Type: "code_writer"}, gen}
+	if warns(t, renamed, []schemas.PipelineEdge{{From: "writer", To: "gen"}}) {
+		t.Fatal("a renamed writer with a summary edge must satisfy the coupling")
+	}
+	if !warns(t, renamed, nil) {
+		t.Fatal("a renamed writer with no edge must warn")
+	}
+	if !warns(t, renamed, []schemas.PipelineEdge{{From: "writer", To: "gen", Payload: schemas.EdgePayloadNone}}) {
+		t.Fatal("a none payload must break the coupling")
 	}
 
-	compiled, err := CompileTopology(topology, schemas.TierStandard)
-	if err != nil {
-		t.Fatalf("CompileTopology = %v", err)
+	// A command node that only carries the name code_writer is not the writer.
+	named := []schemas.PipelineNode{
+		{Name: "code_writer", Type: schemas.NodeTypeCommand, Command: []string{"true"}},
+		gen,
 	}
-	if !strings.Contains(strings.Join(compiled.Warnings, "\n"), couplingWarning) {
-		t.Fatalf("warnings = %v, want the coupling warning for a renamed writer", compiled.Warnings)
-	}
-
-	// A none payload stops the summary from crossing, so the coupling breaks.
-	topology.Edges[0].Payload = schemas.EdgePayloadNone
-	compiled, err = CompileTopology(topology, schemas.TierStandard)
-	if err != nil {
-		t.Fatalf("CompileTopology = %v", err)
-	}
-	if !strings.Contains(strings.Join(compiled.Warnings, "\n"), couplingWarning) {
-		t.Fatalf("warnings = %v, want the coupling warning for a none payload", compiled.Warnings)
-	}
-
-	// The canonical name and a summary payload satisfy the coupling.
-	topology.Nodes[0].Name = "code_writer"
-	topology.Edges[0] = schemas.PipelineEdge{From: "code_writer", To: "gen"}
-	compiled, err = CompileTopology(topology, schemas.TierStandard)
-	if err != nil {
-		t.Fatalf("CompileTopology = %v", err)
-	}
-	if strings.Contains(strings.Join(compiled.Warnings, "\n"), couplingWarning) {
-		t.Fatalf("warnings = %v, want no coupling warning", compiled.Warnings)
+	if !warns(t, named, []schemas.PipelineEdge{{From: "code_writer", To: "gen"}}) {
+		t.Fatal("a non-writer node named code_writer must not satisfy the coupling")
 	}
 }
 
@@ -269,5 +265,62 @@ func TestStagesForTierMatchesCompiledDefault(t *testing.T) {
 		if !reflect.DeepEqual(budget, compiled.Budget) {
 			t.Fatalf("%s stagesForTier budget != compiled budget", tier)
 		}
+	}
+}
+
+// TestTopologyWarningsNameTheirTiers pins the idle /pipeline warnings: each
+// compile warning appears once with the tiers it applies to.
+func TestTopologyWarningsNameTheirTiers(t *testing.T) {
+	warnings, err := TopologyWarnings(DefaultTopology())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"at trivial: " + tierNoVerificationWarning}
+	if !reflect.DeepEqual(warnings, want) {
+		t.Fatalf("warnings = %q, want %q", warnings, want)
+	}
+}
+
+// TestDescribeTopologyResolvesEachNode pins the shared describe resolution
+// that `config describe` and the TUI node drawer read: the model rung, the
+// tier budget, and the exact command line of a command node.
+func TestDescribeTopologyResolvesEachNode(t *testing.T) {
+	topology := &schemas.PipelineTopology{
+		Version: schemas.TopologySchemaVersion,
+		Name:    "described",
+		Nodes: []schemas.PipelineNode{
+			{Name: "code_writer", Type: "code_writer", Model: &schemas.StageModelConfig{ProviderProfile: "local", Model: "pinned", ReasoningEffort: "high"}},
+			{Name: "static_analyzer", Type: "static_analyzer"},
+			{Name: "lint", Type: schemas.NodeTypeCommand, Command: []string{"go", "vet", "./..."}},
+			{Name: "test_runner", Type: "test_runner"},
+		},
+		Edges: []schemas.PipelineEdge{
+			{From: "code_writer", To: "static_analyzer"},
+			{From: "code_writer", To: "lint"},
+			{From: "lint", To: "test_runner"},
+		},
+	}
+	stageConfig := schemas.StageModelConfigFile{Stages: map[string]schemas.StageModelConfig{"static_analyzer": {ProviderProfile: "local", Model: "routed"}}}
+	compiled, nodes, err := DescribeTopology(topology, schemas.TierStandard, stageConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.Tier != schemas.TierStandard || len(nodes) != 4 {
+		t.Fatalf("compiled tier %s, %d nodes", compiled.Tier, len(nodes))
+	}
+	byName := map[string]NodeDescription{}
+	for _, node := range nodes {
+		byName[node.Name] = node
+	}
+	if got := byName["code_writer"]; got.ModelOrigin != ModelOriginNode || got.Model.Model != "pinned" || got.Budget != compiled.Budget.PerStage["code_writer"] {
+		t.Fatalf("code_writer = %+v", got)
+	}
+	// static_analyzer is model-free by its builtin profile, so the stage route
+	// does not apply.
+	if got := byName["static_analyzer"]; got.ModelOrigin != ModelOriginModelFree {
+		t.Fatalf("static_analyzer origin = %q, want model-free", got.ModelOrigin)
+	}
+	if got := byName["lint"]; got.ModelOrigin != ModelOriginModelFree || got.Command != "go vet ./..." {
+		t.Fatalf("lint = %+v", got)
 	}
 }

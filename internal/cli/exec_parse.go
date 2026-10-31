@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Taf0711/splice/internal/flags"
 	"github.com/Taf0711/splice/internal/sessions"
@@ -73,6 +74,8 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 			options.noTrust = true
 		case arg == "--self-correct":
 			options.selfCorrect = true
+		case arg == "--loop":
+			options.loop = true
 		case arg == "--no-notify":
 			options.noNotify = true
 		case arg == "--notify":
@@ -248,6 +251,23 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 				return options, false, err
 			}
 			options.maxTurns = maxTurns
+		case arg == "--max-wall":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			maxWall, err := parseExecMaxWall(value)
+			if err != nil {
+				return options, false, err
+			}
+			options.maxWall = maxWall
+			index = next
+		case strings.HasPrefix(arg, "--max-wall="):
+			maxWall, err := parseExecMaxWall(strings.TrimSpace(strings.TrimPrefix(arg, "--max-wall=")))
+			if err != nil {
+				return options, false, err
+			}
+			options.maxWall = maxWall
 		case arg == "-C" || arg == "--cwd":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
@@ -436,6 +456,12 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 			options.pipeline = strings.TrimSpace(strings.TrimPrefix(arg, "--pipeline="))
 		case arg == "--merge-back":
 			options.mergeBack = true
+		case arg == "--allow-unverified-merge":
+			options.allowUnverifiedMerge = true
+		case arg == "--require-verified":
+			options.requireVerified = true
+		case arg == "--serve":
+			options.serve = true
 		case arg == "--":
 			options.promptParts = append(options.promptParts, args[index+1:]...)
 			index = len(args)
@@ -477,6 +503,17 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 	if options.planPath != "" && options.useSpec {
 		return options, false, execUsageError{"--plan cannot be combined with --use-spec."}
 	}
+	if options.loop && options.planPath != "" {
+		return options, false, execUsageError{"--loop cannot be combined with --plan."}
+	}
+	if options.planPath != "" && options.pipeline != "" {
+		// A design plan runs the default topology, so --pipeline would be
+		// silently ignored.
+		return options, false, execUsageError{"--pipeline cannot be combined with --plan."}
+	}
+	if options.loop && options.useSpec {
+		return options, false, execUsageError{"--loop cannot be combined with --use-spec."}
+	}
 	if options.planPath != "" && options.file != "" {
 		return options, false, execUsageError{"--plan cannot be combined with --file."}
 	}
@@ -510,8 +547,28 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 	if options.mergeBack && !options.worktree {
 		return options, false, execUsageError{"--merge-back requires --worktree."}
 	}
+	if options.allowUnverifiedMerge && !options.mergeBack {
+		return options, false, execUsageError{"--allow-unverified-merge requires --merge-back."}
+	}
 	if options.useSpec && options.mergeBack {
 		return options, false, execUsageError{"--merge-back cannot be combined with --use-spec."}
+	}
+	// The plain loop and a spec draft have no verification step, so a gate
+	// that needs a verified run can never pass. Refuse the combination.
+	if options.loop && options.mergeBack {
+		return options, false, execUsageError{"--merge-back cannot be combined with --loop: the loop has no verification step."}
+	}
+	if options.loop && options.requireVerified {
+		return options, false, execUsageError{"--require-verified cannot be combined with --loop: the loop has no verification step."}
+	}
+	if options.useSpec && options.requireVerified {
+		return options, false, execUsageError{"--require-verified cannot be combined with --use-spec: a spec draft has no verification step."}
+	}
+	if options.useSpec && options.serve {
+		return options, false, execUsageError{"--serve cannot be combined with --use-spec."}
+	}
+	if options.loop && options.serve {
+		return options, false, execUsageError{"--serve cannot be combined with --loop."}
 	}
 	if options.initSessionID != "" && !sessions.ValidSessionID(options.initSessionID) {
 		return options, false, execUsageError{fmt.Sprintf("invalid --init-session-id %q", options.initSessionID)}
@@ -547,6 +604,18 @@ func parseExecMaxTurns(value string) (int, error) {
 		return 0, execUsageError{fmt.Sprintf("invalid --max-turns %q. Expected a positive integer.", value)}
 	}
 	return maxTurns, nil
+}
+
+func parseExecMaxWall(value string) (time.Duration, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return 0, execUsageError{"--max-wall requires a value"}
+	}
+	maxWall, err := time.ParseDuration(trimmed)
+	if err != nil || maxWall <= 0 {
+		return 0, execUsageError{fmt.Sprintf("invalid --max-wall %q. Expected a positive Go duration such as 30m.", value)}
+	}
+	return maxWall, nil
 }
 
 func nextFlagValue(args []string, index int, flag string) (string, int, error) {

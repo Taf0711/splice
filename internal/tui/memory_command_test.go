@@ -186,6 +186,18 @@ type capturedMemoryClient struct {
 	searchQuery *schemas.MemoryQuery
 	recentQuery *schemas.MemoryQuery
 	recentErr   error
+	forgetKind  string
+	forgetID    int64
+	pruned      bool
+}
+
+func (c *capturedMemoryClient) Forget(_ context.Context, kind string, id int64) error {
+	c.forgetKind, c.forgetID = kind, id
+	return nil
+}
+func (c *capturedMemoryClient) Maintenance(context.Context) (memd.MaintenanceReport, error) {
+	c.pruned = true
+	return memd.MaintenanceReport{}, nil
 }
 
 func (c *capturedMemoryClient) Search(_ context.Context, query schemas.MemoryQuery) (schemas.MemoryBundle, error) {
@@ -266,6 +278,30 @@ func TestHandleMemoryRecentDegradesForOldDaemon(t *testing.T) {
 	}
 	if strings.Contains(msg.text, "unexpected status") || strings.Contains(msg.text, "404") {
 		t.Fatalf("degradation exposed raw HTTP error: %q", msg.text)
+	}
+}
+
+func TestHandleMemoryForgetAndPrune(t *testing.T) {
+	client := &capturedMemoryClient{}
+	previous := tuiResolveMemoryCommand
+	tuiResolveMemoryCommand = func(context.Context) (memoryCommandClient, error) { return client, nil }
+	t.Cleanup(func() { tuiResolveMemoryCommand = previous })
+	m := newModel(context.Background(), Options{})
+	_, forgetCmd := m.handleMemoryCommand("forget node 42")
+	if forgetCmd == nil {
+		t.Fatal("forget must return a command")
+	}
+	_ = forgetCmd()
+	if client.forgetKind != "node" || client.forgetID != 42 {
+		t.Fatalf("forget = %q/%d", client.forgetKind, client.forgetID)
+	}
+	_, pruneCmd := m.handleMemoryCommand("prune")
+	if pruneCmd == nil {
+		t.Fatal("prune must return a command")
+	}
+	_ = pruneCmd()
+	if !client.pruned {
+		t.Fatal("prune did not call maintenance")
 	}
 }
 

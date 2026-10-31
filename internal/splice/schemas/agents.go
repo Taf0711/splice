@@ -204,12 +204,23 @@ func (s SelectedMemory) Validate() error {
 	}
 	switch s.Scope {
 	case MemoryScopeProject, MemoryScopeGlobal, MemoryScopePersonal:
-		if !strings.HasPrefix(s.ID, "observation:") {
-			return fmt.Errorf("scope %s requires an observation:<id> stable id, got %q", s.Scope, s.ID)
-		}
-		num := strings.TrimPrefix(s.ID, "observation:")
-		if n, err := strconv.ParseUint(num, 10, 64); err != nil || num == "0" || num == "" || strings.HasPrefix(num, "0") || n == 0 {
-			return fmt.Errorf("observation stable id must be a positive decimal without leading zeros, got %q", s.ID)
+		// Identity is source-qualified: observation rows and cognition
+		// graph nodes have separate numeric ID sequences, so graph items
+		// carry a graph:<id> identity. Both must be positive decimals
+		// without leading zeros; anything else fails loud.
+		switch {
+		case strings.HasPrefix(s.ID, "observation:"):
+			num := strings.TrimPrefix(s.ID, "observation:")
+			if n, err := strconv.ParseUint(num, 10, 64); err != nil || num == "0" || num == "" || strings.HasPrefix(num, "0") || n == 0 {
+				return fmt.Errorf("observation stable id must be a positive decimal without leading zeros, got %q", s.ID)
+			}
+		case strings.HasPrefix(s.ID, "graph:"):
+			num := strings.TrimPrefix(s.ID, "graph:")
+			if n, err := strconv.ParseUint(num, 10, 64); err != nil || num == "0" || num == "" || strings.HasPrefix(num, "0") || n == 0 {
+				return fmt.Errorf("graph stable id must be a positive decimal without leading zeros, got %q", s.ID)
+			}
+		default:
+			return fmt.Errorf("scope %s requires an observation:<id> or graph:<id> stable id, got %q", s.Scope, s.ID)
 		}
 	case MemoryScopeExemplar:
 		if !strings.HasPrefix(s.ID, "exemplar:") || s.RunID == "" || s.ID != "exemplar:"+s.RunID {

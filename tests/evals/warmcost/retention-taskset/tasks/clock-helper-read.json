@@ -1,0 +1,12 @@
+{
+  "name": "clock-helper-read",
+  "phase": "read",
+  "prompt": "Add a table-driven test named TestStoreExpiryBoundary in a new file next to the store. Reuse the repository's existing fake-clock table helper (runClockTable) so the test never sleeps. Cover an under-TTL stay and an over-TTL drop with the existing case fields.",
+  "check": "found=0\nfor f in $(grep -rl 'runClockTable' --include='*_test.go' . 2>/dev/null); do\n  case \"$f\" in\n    *clock_test.go) ;;\n    *) found=1 ;;\n  esac\ndone\nif [ \"$found\" -ne 1 ]; then\n  echo \"no test outside clock_test.go reuses runClockTable\" >&2\n  exit 1\nfi\ngo test -count=1 -run TestStoreExpiryBoundary ./...",
+  "gold": {
+    "expiry_boundary_test.go": "package main\n\nimport (\n\t\"testing\"\n\t\"time\"\n)\n\n// TestStoreExpiryBoundary covers the idle-expiry boundary with the existing\n// fake-clock table helper.\nfunc TestStoreExpiryBoundary(t *testing.T) {\n\trunClockTable(t, []clockCase{\n\t\t{name: \"under-ttl-stays\", ttl: time.Minute, advance: 30 * time.Second, wantErr: false, wantLen: 1},\n\t\t{name: \"over-ttl-dropped\", ttl: time.Minute, advance: 2 * time.Minute, wantErr: true, wantLen: 0},\n\t})\n}\n"
+  },
+  "wrong": {
+    "expiry_boundary_test.go": "package main\n\nimport (\n\t\"testing\"\n\t\"time\"\n)\n\n// TestStoreExpiryBoundary rolls its own clock plumbing instead of reusing the\n// repository's table helper.\nfunc TestStoreExpiryBoundary(t *testing.T) {\n\tstore := NewStore(time.Minute)\n\tclock := time.Now()\n\tstore.now = func() time.Time { return clock }\n\tstore.Create(\"abc\", \"ada\")\n\tclock = clock.Add(2 * time.Minute)\n\tif _, err := store.Get(\"abc\"); err == nil {\n\t\tt.Fatal(\"over ttl Get: err = nil, want an error\")\n\t}\n\tif got := store.Len(); got != 0 {\n\t\tt.Fatalf(\"Len = %d, want 0\", got)\n\t}\n}\n"
+  }
+}

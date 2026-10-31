@@ -2,6 +2,7 @@ package tui
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -23,13 +24,22 @@ const trustConfigTranscriptMarker = "\x00trust-config\x00"
 const trustActionView = "view-config"
 
 // trustConfigTranscriptPayload serializes the config summary into the row
-// text. Fields join with NUL: path, parseError, summary lines joined by \x1f.
+// text. Fields join with NUL: path, parseError, view file, config flag ("1"
+// or "0"), summary lines joined by \x1f.
 func trustConfigTranscriptPayload(c projectTrustConfig) string {
 	var b strings.Builder
 	b.WriteString(trustConfigTranscriptMarker)
 	b.WriteString(c.Path)
 	b.WriteByte(0)
 	b.WriteString(c.ParseError)
+	b.WriteByte(0)
+	b.WriteString(c.ViewFile)
+	b.WriteByte(0)
+	if c.ConfigFile {
+		b.WriteString("1")
+	} else {
+		b.WriteString("0")
+	}
 	b.WriteByte(0)
 	b.WriteString(strings.Join(trustConfigCardLines(c, 0), "\x1f"))
 	return b.String()
@@ -41,11 +51,24 @@ func parseTrustConfigTranscriptPayload(text string) (projectTrustConfig, []strin
 		return projectTrustConfig{}, nil, false
 	}
 	parts := strings.Split(strings.TrimPrefix(text, trustConfigTranscriptMarker), "\x00")
-	if len(parts) != 3 {
+	if len(parts) != 5 {
 		return projectTrustConfig{}, nil, false
 	}
-	return projectTrustConfig{Path: parts[0], ParseError: parts[1]},
-		strings.Split(parts[2], "\x1f"), true
+	return projectTrustConfig{
+			Path:       parts[0],
+			ParseError: parts[1],
+			ViewFile:   parts[2],
+			ConfigFile: parts[3] == "1",
+		},
+		strings.Split(parts[4], "\x1f"), true
+}
+
+// trustViewLabel names the [V] action by the file it opens.
+func trustViewLabel(c projectTrustConfig) string {
+	if c.ViewFile == "" {
+		return "view config file"
+	}
+	return "view " + filepath.Base(c.ViewFile)
 }
 
 // renderTrustConfigCard renders the card at the given width. Form per I1:
@@ -58,9 +81,14 @@ func renderTrustConfigCard(c projectTrustConfig, summary []string, width int) st
 	if width <= 0 {
 		return ""
 	}
-	header := zeroTheme.amber.Render("[~] UNTRUSTED PROJECT CONFIG — not loaded")
+	header := zeroTheme.amber.Render("[~] UNTRUSTED PROJECT CONFIG (not loaded)")
+	configLine := "  config: " + c.Path
+	if !c.ConfigFile {
+		header = zeroTheme.amber.Render("[~] UNTRUSTED PROJECT FILES (not loaded)")
+		configLine = "  config: none (no .splice/config.json)"
+	}
 	lines := []string{header, ""}
-	lines = append(lines, "  config: "+c.Path)
+	lines = append(lines, configLine)
 	if len(summary) > 0 {
 		lines = append(lines, "")
 		lines = append(lines, summary...)
@@ -72,7 +100,7 @@ func renderTrustConfigCard(c projectTrustConfig, summary []string, width int) st
 	)
 	lines = append(lines, "")
 	lines = append(lines,
-		zeroTheme.muted.Render("[V]")+" "+zeroTheme.ink.Render("view config file")+"  "+
+		zeroTheme.muted.Render("[V]")+" "+zeroTheme.ink.Render(trustViewLabel(c))+"  "+
 			zeroTheme.muted.Render("[T]")+" "+zeroTheme.ink.Render("trust (menu open)")+"  "+
 			zeroTheme.muted.Render("[D]")+" "+zeroTheme.ink.Render("decline = defaults"))
 	return styledBlock(width, lines, zeroTheme.cardRun)
@@ -100,11 +128,11 @@ func (m model) openTrustConfigInViewer(path string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if _, err := os.Stat(path); err != nil {
-		return m.appendSystemNotice("Config file no longer exists: " + path), nil
+		return m.appendSystemNotice("Config file not found: " + path), nil
 	}
 	editor := strings.TrimSpace(osEditor())
 	if editor == "" {
-		return m.appendSystemNotice("No $EDITOR set — read it manually: cat " + path), nil
+		return m.appendSystemNotice("No $EDITOR set. Read it manually: cat " + path), nil
 	}
 	c := execEditor(editor, path)
 	return m, tea.ExecProcess(c, func(err error) tea.Msg {

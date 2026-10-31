@@ -157,7 +157,15 @@ func checkPipelineGolden(t *testing.T, name string, state presentation.State, wi
 	t.Helper()
 	var panel pipelinePanelState
 	panel.applyState(state)
-	rendered := strings.Join(panel.renderSection(width, 0), "\n")
+	// Render what a user sees at this terminal width: below the two-column
+	// boundary the sidebar is removed and the pinned strip carries the run;
+	// at and above it, the sidebar section at the sidebar's real width.
+	var rendered string
+	if width < compactModeMinWidth {
+		rendered = strings.Join(panel.presentation().renderStripWithChip(width, 0, ""), "\n")
+	} else {
+		rendered = strings.Join(panel.renderSection(sidebarWidth(width), 0), "\n")
+	}
 	plain := ansiPattern.ReplaceAllString(rendered, "")
 	encoded := []byte(plain + "\n")
 	path := tuiGoldenPath(name)
@@ -244,32 +252,27 @@ func TestProjectionShowsRepairTruthFromState(t *testing.T) {
 // TestKindTagPinsKnownAndMadeUpKinds is the D2 table pin: the kind tag is
 // derived from Kind metadata for both known constants and kinds outside the
 // known set, so an unknown topology renders without TUI changes.
-func TestKindTagPinsKnownAndMadeUpKinds(t *testing.T) {
+func TestKindTagAddsOnlyNewInformation(t *testing.T) {
 	cases := []struct {
+		name string
 		kind presentation.NodeKind
 		want string
 	}{
-		{presentation.NodeKindWrite, "w"},
-		{presentation.NodeKindAnalyze, "a"},
-		{presentation.NodeKindSecurity, "s"},
-		{presentation.NodeKindLint, "l"},
-		{presentation.NodeKindCustom, "c"},
-		{presentation.NodeKindTest, "t"},
-		{presentation.NodeKindVerify, "v"},
-		{presentation.NodeKindReview, "r"},
-		// Kinds outside the known constants (open-set valid):
-		{"DATA_TRANSFORM", "dt"},
-		{"DATA_PIPELINE", "dp"},
-		{"RELEASE_GATE", "rg"},
-		{"MULTI_PART_KIND", "mpk"},
-		// Unknown or empty formats fall back to "?".
-		{"", "?"},
-		{"_", "?"},
-		{"__", "?"},
+		{"code_writer", presentation.NodeKindWrite, ""},
+		{"test_generator", presentation.NodeKindWrite, "write"},
+		{"static_analyzer", presentation.NodeKindAnalyze, ""},
+		{"security_auditor", presentation.NodeKindSecurity, ""},
+		{"test_runner", presentation.NodeKindTest, ""},
+		{"acceptance_verifier", presentation.NodeKindVerify, ""},
+		{"deploy_hook", presentation.NodeKindCustom, ""},
+		{"style_pass", presentation.NodeKindLint, "lint"},
+		// Kinds outside the known constants (open-set valid) read as words.
+		{"sync_worker", "DATA_PIPELINE", "data_pipeline"},
+		{"anything", "", ""},
 	}
 	for _, tc := range cases {
-		if got := kindTag(tc.kind); got != tc.want {
-			t.Fatalf("kindTag(%q) = %q, want %q", tc.kind, got, tc.want)
+		if got := kindTag(tc.name, tc.kind); got != tc.want {
+			t.Fatalf("kindTag(%q, %q) = %q, want %q", tc.name, tc.kind, got, tc.want)
 		}
 	}
 }

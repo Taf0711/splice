@@ -3,7 +3,9 @@ package schemas
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/Taf0711/splice/internal/version"
 )
@@ -17,6 +19,21 @@ const TopologySchemaVersion = 1
 const (
 	NodeTypePrompt  = "prompt"
 	NodeTypeCommand = "command"
+	// NodeTypeAgent is a model-backed node that runs a bounded agent loop over
+	// an explicit tool allowlist. It is the only node type with tool access
+	// besides the builtin stages.
+	NodeTypeAgent = "agent"
+)
+
+// Agent node limits. An agent node with no max_turns runs AgentDefaultMaxTurns
+// turns. A file with an agent node requires AgentNodeMinSplice or newer.
+const (
+	AgentDefaultMaxTurns = 8
+	AgentMaxTurnsLimit   = 50
+	AgentMaxTools        = 16
+	AgentNodeMinSplice   = "0.3.0"
+	AgentPermissionAsk   = "ask"
+	AgentPermissionAuto  = "auto"
 )
 
 // EdgePayload is the information contract across one edge. It decides what
@@ -67,6 +84,17 @@ type PipelineNode struct {
 	// derives the budget from the builtin budget table.
 	Budget *StageBudget     `json:"budget,omitempty"`
 	Caps   NodeCapabilities `json:"capabilities,omitempty"`
+	// Tools is the tool allowlist of an agent node. It is required on an agent
+	// node and must be empty on every other type. Each name must be listed in
+	// AgentEligibleTools.
+	Tools []string `json:"tools,omitempty"`
+	// MaxTurns caps the agent loop turns. Zero means AgentDefaultMaxTurns. It is
+	// valid only on an agent node.
+	MaxTurns int `json:"max_turns,omitempty"`
+	// Permission is the node's own permission mode, "ask" or "auto". Empty
+	// means the run's mode. The effective mode is never looser than the run's.
+	// It is valid only on an agent node.
+	Permission string `json:"permission,omitempty"`
 }
 
 // NodeCapabilities declares per-node behavior. It replaces every name switch
@@ -230,12 +258,71 @@ func (n PipelineNode) ActiveAtTier(tier PipelineTier) bool {
 	return false
 }
 
+// hasAgentFields reports whether any agent-only field is set on the node.
+func (n PipelineNode) hasAgentFields() bool {
+	return len(n.Tools) > 0 || n.MaxTurns != 0 || n.Permission != ""
+}
+
+// validateAgentFields checks the agent-only fields of an agent node.
+func (n PipelineNode) validateAgentFields() error {
+	if len(n.Tools) == 0 || len(n.Tools) > AgentMaxTools {
+		return fmt.Errorf("node %s: type %q requires 1 to %d tools, got %d", n.Name, NodeTypeAgent, AgentMaxTools, len(n.Tools))
+	}
+	seen := make(map[string]bool, len(n.Tools))
+	for _, tool := range n.Tools {
+		if seen[tool] {
+			return fmt.Errorf("node %s: tool %q is listed more than once", n.Name, tool)
+		}
+		seen[tool] = true
+		if !IsAgentEligibleTool(tool) {
+			return fmt.Errorf("node %s: tool %q is not allowed on an agent node", n.Name, tool)
+		}
+	}
+	if n.MaxTurns < 0 || n.MaxTurns > AgentMaxTurnsLimit {
+		return fmt.Errorf("node %s: max_turns must be 1 to %d, got %d", n.Name, AgentMaxTurnsLimit, n.MaxTurns)
+	}
+	switch n.Permission {
+	case "", AgentPermissionAsk, AgentPermissionAuto:
+	default:
+		return fmt.Errorf("node %s: permission must be %q or %q, got %q", n.Name, AgentPermissionAsk, AgentPermissionAuto, n.Permission)
+	}
+	return nil
+}
+
 // Validate checks one node against the schema rules.
 func (n PipelineNode) Validate() error {
 	if strings.TrimSpace(n.Name) == "" {
 		return errors.New("node name is required")
 	}
+	// A node name is shown in every disclosure surface. A control character in it
+	// could rewrite the terminal, so it is refused here. The error quotes the
+	// name, so the error text stays safe too.
+	if hasNonPrintable(n.Name) {
+		return fmt.Errorf("node name %q contains a control or non-printable character", n.Name)
+	}
+	if n.Type != NodeTypeAgent && n.hasAgentFields() {
+		return fmt.Errorf("node %s: tools, max_turns, and permission are only valid for type %q", n.Name, NodeTypeAgent)
+	}
 	switch {
+	case n.Type == NodeTypeAgent:
+		if strings.TrimSpace(n.Prompt) == "" {
+			return fmt.Errorf("node %s: type %q requires a non-empty prompt", n.Name, NodeTypeAgent)
+		}
+		if len(n.Command) > 0 {
+			return fmt.Errorf("node %s: command is only valid for type %q", n.Name, NodeTypeCommand)
+		}
+		if n.Caps.ModelFree {
+			return fmt.Errorf("node %s: type %q is model-backed; model_free must be false", n.Name, NodeTypeAgent)
+		}
+		if n.Caps.ProducesVerification {
+			return fmt.Errorf("node %s: type %q cannot set produces_verification; verification comes from builtin verification stages", n.Name, NodeTypeAgent)
+		}
+		if err := n.validateAgentFields(); err != nil {
+			return err
+		}
+		if n.Budget == nil {
+			return fmt.Errorf("node %s: type %q requires an explicit budget; set budget.input_max and budget.output_max", n.Name, NodeTypeAgent)
+		}
 	case IsBuiltinStageType(n.Type):
 		if n.Prompt != "" {
 			return fmt.Errorf("node %s: prompt is only valid for type %q", n.Name, NodeTypePrompt)
@@ -256,6 +343,9 @@ func (n PipelineNode) Validate() error {
 		if n.Caps.ModelFree {
 			return fmt.Errorf("node %s: type %q is model-backed; model_free must be false", n.Name, NodeTypePrompt)
 		}
+		if n.Caps.ProducesVerification {
+			return fmt.Errorf("node %s: type %q cannot set produces_verification; verification comes from builtin verification stages", n.Name, NodeTypePrompt)
+		}
 	case n.Type == NodeTypeCommand:
 		if len(n.Command) == 0 {
 			return fmt.Errorf("node %s: type %q requires a non-empty command", n.Name, NodeTypeCommand)
@@ -263,8 +353,11 @@ func (n PipelineNode) Validate() error {
 		if n.Prompt != "" {
 			return fmt.Errorf("node %s: prompt is only valid for type %q", n.Name, NodeTypePrompt)
 		}
+		if n.Caps.ProducesVerification {
+			return fmt.Errorf("node %s: type %q cannot set produces_verification; verification comes from builtin verification stages", n.Name, NodeTypeCommand)
+		}
 	default:
-		return fmt.Errorf("node %s: unknown node type %q (want a builtin stage name, %q, or %q)", n.Name, n.Type, NodeTypePrompt, NodeTypeCommand)
+		return fmt.Errorf("node %s: unknown node type %q (want a builtin stage name, %q, %q, or %q)", n.Name, n.Type, NodeTypePrompt, NodeTypeCommand, NodeTypeAgent)
 	}
 	for i, tier := range n.Tiers {
 		if err := tier.Validate(); err != nil {
@@ -301,13 +394,48 @@ func (n PipelineNode) Validate() error {
 	// A prompt node renders intent, summaries, and memory. It has no context
 	// variable in v1, so an explicit pull_context there is inert too. Its
 	// pull_memory is meaningful ({{memory}}).
-	if n.Type == NodeTypePrompt && n.Caps.PullContext != nil && *n.Caps.PullContext {
-		return fmt.Errorf("node %s: type %q has no context variable in v1; pull_context has no effect", n.Name, NodeTypePrompt)
+	if (n.Type == NodeTypePrompt || n.Type == NodeTypeAgent) && n.Caps.PullContext != nil && *n.Caps.PullContext {
+		return fmt.Errorf("node %s: type %q has no context variable in v1; pull_context has no effect", n.Name, n.Type)
 	}
 	if n.Model != nil {
 		if err := n.Model.Validate(); err != nil {
 			return fmt.Errorf("node %s: model: %w", n.Name, err)
 		}
+		if err := printableField("model.provider_profile", n.Model.ProviderProfile); err != nil {
+			return fmt.Errorf("node %s: %w", n.Name, err)
+		}
+		if err := printableField("model.model", n.Model.Model); err != nil {
+			return fmt.Errorf("node %s: %w", n.Name, err)
+		}
+	}
+	return nil
+}
+
+// hasNonPrintable reports whether text has a control or non-printable
+// character.
+func hasNonPrintable(text string) bool {
+	return strings.IndexFunc(text, func(r rune) bool { return !unicode.IsPrint(r) }) >= 0
+}
+
+// printableField refuses a topology value that a disclosure surface prints
+// when it has a control or non-printable character, with the same rule as a
+// node name. The error quotes the value, so the error text stays safe too.
+func printableField(field, value string) error {
+	if hasNonPrintable(value) {
+		return fmt.Errorf("%s %q contains a control or non-printable character", field, value)
+	}
+	return nil
+}
+
+// topologyNamePattern is the one rule for a topology name. The user library
+// stores each topology as <name>.json, so the name must be a safe file name.
+var topologyNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+
+// ValidateTopologyName reports whether name is a valid topology name: 1 to 64
+// lowercase letters, digits, "-", or "_", that start with a letter or digit.
+func ValidateTopologyName(name string) error {
+	if !topologyNamePattern.MatchString(name) {
+		return fmt.Errorf("invalid pipeline name %q: use 1 to 64 lowercase letters, digits, '-', or '_', and start with a letter or digit", name)
 	}
 	return nil
 }
@@ -320,6 +448,15 @@ func (t PipelineTopology) Validate() error {
 	}
 	if strings.TrimSpace(t.Name) == "" {
 		return errors.New("topology name is required")
+	}
+	if err := ValidateTopologyName(t.Name); err != nil {
+		return err
+	}
+	if err := printableField("description", t.Description); err != nil {
+		return fmt.Errorf("topology %s: %w", t.Name, err)
+	}
+	if err := printableField("author", t.Author); err != nil {
+		return fmt.Errorf("topology %s: %w", t.Name, err)
 	}
 	if len(t.Nodes) == 0 {
 		return fmt.Errorf("topology %s: at least one node is required", t.Name)
@@ -357,6 +494,9 @@ func (t PipelineTopology) Validate() error {
 		}
 		seenEdge[key] = true
 	}
+	if err := t.validateAgentMinSplice(); err != nil {
+		return err
+	}
 	if err := detectTopologyCycle(t.Nodes, t.Edges); err != nil {
 		return fmt.Errorf("topology %s: %w", t.Name, err)
 	}
@@ -364,6 +504,35 @@ func (t PipelineTopology) Validate() error {
 		if err := t.Budget.Validate(); err != nil {
 			return fmt.Errorf("topology %s: %w", t.Name, err)
 		}
+	}
+	return nil
+}
+
+// validateAgentMinSplice requires splice_min_version to name AgentNodeMinSplice
+// or newer when the topology has an agent node. An older build cannot run the
+// node, so the file must say so instead of failing at run time.
+func (t PipelineTopology) validateAgentMinSplice() error {
+	hasAgent := false
+	for _, node := range t.Nodes {
+		if node.Type == NodeTypeAgent {
+			hasAgent = true
+			break
+		}
+	}
+	if !hasAgent {
+		return nil
+	}
+	need := fmt.Sprintf("topology %s has agent nodes and needs splice_min_version %s or newer", t.Name, AgentNodeMinSplice)
+	if strings.TrimSpace(t.MinSplice) == "" {
+		return fmt.Errorf("%s; set splice_min_version", need)
+	}
+	// SatisfiesMin fails loud on a malformed minimum. The current argument is a
+	// fixed release, so the call only checks the declared value.
+	if _, err := version.SatisfiesMin("0.0.0", t.MinSplice); err != nil {
+		return fmt.Errorf("%s: %w", need, err)
+	}
+	if ok, _ := version.SatisfiesMin(t.MinSplice, AgentNodeMinSplice); !ok {
+		return fmt.Errorf("%s, got %s", need, t.MinSplice)
 	}
 	return nil
 }

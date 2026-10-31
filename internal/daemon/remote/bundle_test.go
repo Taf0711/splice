@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/Taf0711/splice/internal/gitenv/gitenvtest"
 )
 
 // initTestRepo creates a temp git work tree with one committed file and returns
@@ -190,4 +192,10 @@ func TestBridgeBundleRejectsBadToken(t *testing.T) {
 	if err == nil {
 		t.Fatal("bundle upload with a bad token must be refused")
 	}
+}
+
+func TestIsGitWorktreeHardensEnv(t *testing.T) {
+	record := gitenvtest.InstallRecorder(t)
+	_ = isGitWorktree(t.TempDir())
+	gitenvtest.AssertHardened(t, gitenvtest.Runs(t, record))
 }

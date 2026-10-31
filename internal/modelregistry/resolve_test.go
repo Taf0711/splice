@@ -180,3 +180,34 @@ func TestEffectiveReasoningEffortUsesNameFallback(t *testing.T) {
 		}
 	}
 }
+
+// RequestEffort fits a requested effort to one model: auto stays auto, a
+// missing level moves to the nearest supported one, and a model with no
+// known levels gets the request unchanged.
+func TestRequestEffortFitsEachModel(t *testing.T) {
+	resetModelsDevCacheForTest()
+	t.Cleanup(resetModelsDevCacheForTest)
+	EnableModelsDevOverlay()
+	reg, err := DefaultRegistry("openrouter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		model     string
+		requested ReasoningEffort
+		want      ReasoningEffort
+	}{
+		{"z-ai/glm-5.2", ReasoningEffortMedium, ReasoningEffortHigh}, // starts at high
+		{"z-ai/glm-5.2", ReasoningEffortXHigh, ReasoningEffortXHigh},
+		{"anthropic/claude-opus-5", ReasoningEffortMax, ReasoningEffortMax},
+		{"anthropic/claude-opus-5", ReasoningEffortMinimal, ReasoningEffortLow},
+		{"openai/gpt-5.6-luna", ReasoningEffortNone, ReasoningEffortNone},
+		{"anthropic/claude-opus-5", "", ""},                                    // auto stays auto
+		{"my-proxy/unknown-model", ReasoningEffortXHigh, ReasoningEffortXHigh}, // no data: pass through
+	}
+	for _, tc := range cases {
+		if got := reg.RequestEffort(tc.model, tc.requested); got != tc.want {
+			t.Fatalf("RequestEffort(%s, %q) = %q, want %q", tc.model, tc.requested, got, tc.want)
+		}
+	}
+}

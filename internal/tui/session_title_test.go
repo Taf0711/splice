@@ -347,3 +347,25 @@ func TestRetitleBackfillTitlesOnlyAutoTitledSessions(t *testing.T) {
 		t.Fatalf("an empty session must be skipped and keep its title, got %#v", got)
 	}
 }
+
+// A design session starts with a placeholder title; the first real prompt
+// replaces it so /resume can tell sessions apart. A later prompt, or a
+// session with a real title, is left alone.
+func TestFirstPromptReplacesDesignPlaceholderTitle(t *testing.T) {
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+	session, err := store.Create(sessions.CreateInput{Title: designSessionPlaceholderTitle, Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := limeTestModel()
+	m.sessionStore = store
+	m.activeSession = session
+	m = m.titleSessionFromFirstPrompt("  add a --yaml flag to splice search  ")
+	if m.activeSession.Title != "add a --yaml flag to splice search" {
+		t.Fatalf("title = %q", m.activeSession.Title)
+	}
+	m = m.titleSessionFromFirstPrompt("second prompt")
+	if m.activeSession.Title != "add a --yaml flag to splice search" {
+		t.Fatalf("a later prompt retitled the session: %q", m.activeSession.Title)
+	}
+}

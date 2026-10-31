@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/Taf0711/splice/internal/gitenv/gitenvtest"
 )
 
 func TestRunnerMapsPassingAndFailingCommandResults(t *testing.T) {
@@ -292,4 +294,10 @@ func runnerSuite() Suite {
 			},
 		},
 	}
+}
+
+func TestDefaultRunGitHardensEnv(t *testing.T) {
+	record := gitenvtest.InstallRecorder(t)
+	_, _ = defaultRunGit(context.Background(), t.TempDir(), "rev-parse", "HEAD")
+	gitenvtest.AssertHardened(t, gitenvtest.Runs(t, record))
 }

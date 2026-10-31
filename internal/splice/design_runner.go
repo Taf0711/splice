@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/projectdocs"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
@@ -80,6 +82,9 @@ type RunDesignPlanOptions struct {
 
 // RunDesignPlan executes each task in a design plan as an independent pipeline run.
 func RunDesignPlan(ctx context.Context, plan schemas.DesignPlan, provider agent.Provider, options agent.Options, mem MemoryStore, rec WorkspaceRecovery) (agent.Result, error) {
+	if _, err := ResolveExpansionRounds(); err != nil {
+		return agent.Result{}, runInputError{err}
+	}
 	cfg := PipelineConfigFromAgentOptions(options)
 	return RunDesignPlanWithResume(ctx, plan, provider, options, mem, rec, RunDesignPlanOptions{
 		PlanID: cfg.SessionID,
@@ -89,7 +94,18 @@ func RunDesignPlan(ctx context.Context, plan schemas.DesignPlan, provider agent.
 // RunDesignPlanWithResume executes a design plan with resume support, per-task
 // callbacks, acceptance fact propagation, and a unique plan revision ID.
 func RunDesignPlanWithResume(ctx context.Context, plan schemas.DesignPlan, provider agent.Provider, options agent.Options, mem MemoryStore, rec WorkspaceRecovery, runOpts RunDesignPlanOptions) (agent.Result, error) {
+	return bracketRun(options, func() (agent.Result, error) {
+		return runDesignPlanWithResume(ctx, plan, provider, options, mem, rec, runOpts)
+	})
+}
+
+func runDesignPlanWithResume(ctx context.Context, plan schemas.DesignPlan, provider agent.Provider, options agent.Options, mem MemoryStore, rec WorkspaceRecovery, runOpts RunDesignPlanOptions) (agent.Result, error) {
 	cfg := PipelineConfigFromAgentOptions(options)
+	instructionDir := cfg.Cwd
+	if instructionDir == "" {
+		instructionDir = cfg.ProjectRoot
+	}
+	cfg.ProjectInstructions = projectdocs.Load(instructionDir)
 	// Workspace isolation (DoD 26): a run whose Cwd is a worktree path
 	// distinct from the stable repo root is an isolated lane; the stage
 	// events stamp that so the sidebar can badge the lane honestly.
@@ -107,6 +123,20 @@ func RunDesignPlanWithResume(ctx context.Context, plan schemas.DesignPlan, provi
 		planID = "plan-" + hex.EncodeToString(b)
 	}
 
+	// The advisor config is checked once, before any task runs, and the
+	// classifier state is reported once for the plan. Each task builds its
+	// own advisor below, so budgets and records stay per task, as in a run.
+	if err := resolveRunAdvisor(options, &cfg, false); err != nil {
+		return agent.Result{}, err
+	}
+	classifierReported := false
+	// Design task plans come from the default tier planner, so they run the
+	// default topology. Say so when another pipeline is active. A topology
+	// that does not resolve is not used here, so it does not stop the plan.
+	if topology, source, _, err := resolveRunTopology(options); err == nil && source != TopologySourceDefault {
+		emitNotice(cfg, sanitizeNoticeLine("[topology] Design plans run the default topology; the active pipeline "+topology.Name+" is not used."))
+	}
+
 	ordered, err := topologicalOrder(plan.Tasks)
 	if err != nil {
 		result := schemas.DesignPlanResult{
@@ -122,7 +152,39 @@ func RunDesignPlanWithResume(ctx context.Context, plan schemas.DesignPlan, provi
 		completedSet[id] = true
 	}
 
+	// Check the node pins and stage routes of every task plan before the
+	// first task runs, as Run does, so a model that cannot resolve stops the
+	// plan before any provider request. A task plan that does not build is
+	// reported by the task loop below.
+	for _, task := range ordered {
+		if completedSet[task.ID] {
+			continue
+		}
+		taskPlan, _, err := BuildExecutionPlanForTaskWithFacts(task, cfg.Flags)
+		if err != nil {
+			continue
+		}
+		if err := preflightNodePins(taskPlan, cfg); err != nil {
+			return agent.Result{}, preflightRunError(fmt.Errorf("task %s: %w", task.ID, err))
+		}
+		if err := preflightStageRoutes(taskPlan, cfg); err != nil {
+			return agent.Result{}, preflightRunError(fmt.Errorf("task %s: %w", task.ID, err))
+		}
+	}
+
 	completedOutcomes := []schemas.TaskRunOutcome{}
+	// The plan is verified only when every completed task verified. The first
+	// unverified task names the reason.
+	unverifiedReason := ""
+	noteUnverified := func(taskID, reason string) {
+		if unverifiedReason != "" {
+			return
+		}
+		if strings.TrimSpace(reason) == "" {
+			reason = "completed without a passing verification check"
+		}
+		unverifiedReason = "task " + taskID + ": " + reason
+	}
 	nextTaskNumber := 1
 	totalTasks := len(ordered)
 
@@ -136,6 +198,7 @@ func RunDesignPlanWithResume(ctx context.Context, plan schemas.DesignPlan, provi
 				Status: "completed",
 			}
 			completedOutcomes = append(completedOutcomes, outcome)
+			noteUnverified(task.ID, "completed in an earlier run; this run did not verify it")
 			continue
 		}
 
@@ -158,7 +221,19 @@ func RunDesignPlanWithResume(ctx context.Context, plan schemas.DesignPlan, provi
 			taskPlan.RequestIntent = task.Intent + "\n\nAcceptance criteria:\n- " + strings.Join(acceptanceFacts, "\n- ")
 		}
 
-		pipelineResult, err := runExecutionPlan(ctx, runID, taskPlan, provider, cfg, mem, rec)
+		// Design task plans come from the default tier planner, so the default
+		// topology is the one whose nodes must be resolvable here.
+		taskCfg := cfg
+		if err := resolveRunAdvisor(options, &taskCfg, !classifierReported); err != nil {
+			return agent.Result{}, fmt.Errorf("task %s: %w", task.ID, err)
+		}
+		classifierReported = true
+		pipelineResult, err := runExecutionPlan(ctx, runID, taskPlan, defaultTopology(), provider, taskCfg, mem, rec)
+		if dir := os.Getenv(DecisionRecordsDirEnvVar); dir != "" && taskCfg.Advisor != nil {
+			if werr := writeDecisionRecords(dir, runID, taskCfg.Advisor.Records()); werr != nil {
+				emitProgress(taskCfg, fmt.Sprintf("[decision advisor] warning: cannot write decision records: %v\n", werr))
+			}
+		}
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return agent.Result{}, context.Canceled
@@ -180,6 +255,9 @@ func RunDesignPlanWithResume(ctx context.Context, plan schemas.DesignPlan, provi
 
 		if pipelineResult.Status == "completed" {
 			completedOutcomes = append(completedOutcomes, outcome)
+			if !pipelineResult.Verified {
+				noteUnverified(task.ID, pipelineResult.UnverifiedReason)
+			}
 			continue
 		}
 		result := schemas.DesignPlanResult{
@@ -201,7 +279,13 @@ func RunDesignPlanWithResume(ctx context.Context, plan schemas.DesignPlan, provi
 		Status:         "completed",
 		CompletedTasks: completedOutcomes,
 	}
-	return designPlanAgentResult(cfg, result, "")
+	if len(completedOutcomes) == 0 {
+		unverifiedReason = "the plan has no task"
+	}
+	agentResult, err := designPlanAgentResult(cfg, result, "")
+	agentResult.Verified = unverifiedReason == ""
+	agentResult.UnverifiedReason = unverifiedReason
+	return agentResult, err
 }
 
 func taskIDs(tasks []schemas.Task) []string {

@@ -21,6 +21,15 @@ type chatCompletionRequest struct {
 	// {"type":"function","function":{"name":<ToolChoice>}} object. Nil keeps
 	// the current auto behavior byte-for-byte (omitted via omitempty).
 	ToolChoice any `json:"tool_choice,omitempty"`
+	// Provider is OpenRouter's upstream routing (openrouter.ai only). Nil
+	// keeps OpenRouter's default price-weighted routing across upstreams.
+	Provider *openRouterRouting `json:"provider,omitempty"`
+}
+
+// openRouterRouting pins the upstreams OpenRouter may use, in order.
+type openRouterRouting struct {
+	Order          []string `json:"order"`
+	AllowFallbacks bool     `json:"allow_fallbacks"`
 }
 
 // streamOptions requests the final usage chunk on a streaming response. Without
@@ -98,6 +107,9 @@ type toolFunction struct {
 }
 
 type streamChunk struct {
+	// ID is OpenRouter's generation ID ("gen-..."), the same identity as
+	// the X-Generation-Id header, which a streamed response can omit.
+	ID      string         `json:"id"`
 	Choices []streamChoice `json:"choices"`
 	Usage   *usage         `json:"usage"`
 	Error   *apiError      `json:"error"`
@@ -183,10 +195,54 @@ type usage struct {
 	// name is an OpenRouter extension, not part of the OpenAI schema, so an
 	// unrelated proxy reusing it could mean something else entirely.
 	Cost *float64 `json:"cost,omitempty"`
+	// IsBYOK is true when the request ran on the user's own upstream key. Then
+	// Cost can read 0 and the real charge is CostDetails.UpstreamInferenceCost.
+	IsBYOK      bool             `json:"is_byok,omitempty"`
+	CostDetails *openRouterCosts `json:"cost_details,omitempty"`
+}
+
+// openRouterCosts is OpenRouter's cost breakdown. Only the upstream total is
+// read; the split fields are not needed for pricing.
+type openRouterCosts struct {
+	UpstreamInferenceCost *float64 `json:"upstream_inference_cost,omitempty"`
+}
+
+// reportedUsageCost returns the exact charge OpenRouter reported for a usage
+// chunk, or nil when it reported none. For a BYOK request the billed charge is
+// the upstream inference cost, because Cost reads 0 in that case.
+func reportedUsageCost(u usage) *float64 {
+	if u.IsBYOK && u.CostDetails != nil && u.CostDetails.UpstreamInferenceCost != nil && *u.CostDetails.UpstreamInferenceCost > 0 {
+		cost := *u.CostDetails.UpstreamInferenceCost
+		return &cost
+	}
+	if u.Cost == nil {
+		return nil
+	}
+	cost := *u.Cost
+	return &cost
+}
+
+// keepReportedCost folds a later usage chunk's reported cost into the value
+// already seen. A later zero never overwrites a real charge, so the stored
+// cost does not depend on which usage chunk arrives last.
+func keepReportedCost(previous, next *float64) *float64 {
+	if next == nil {
+		return previous
+	}
+	if *next == 0 && previous != nil && *previous > 0 {
+		return previous
+	}
+	return next
 }
 
 type promptTokenDetails struct {
 	CachedTokens int `json:"cached_tokens"`
+	// CacheWriteTokens counts tokens written to the prompt cache on this
+	// request. The field name follows the OpenAI-compatible extension shape
+	// that OpenRouter documents for prompt_tokens_details; backends that do
+	// not report cache writes omit it, and the zero value then means "not
+	// reported", which is distinct from a reported zero.
+	CacheWriteTokens int `json:"cache_write_tokens"`
 }
 
 type completionTokenDetails struct {

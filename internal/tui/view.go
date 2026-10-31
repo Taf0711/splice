@@ -12,6 +12,8 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/projectfile"
+	"github.com/Taf0711/splice/internal/splice/presentrun"
 	"github.com/Taf0711/splice/internal/usage"
 )
 
@@ -232,12 +234,10 @@ func (m model) statusLine(width int) string {
 	if seg := m.narrationVerbosityLevel.label(); seg != "" {
 		left += zeroTheme.faint.Render(" " + seg)
 	}
-	// During execution the permission mode demotes to a muted suffix so the safety
-	// signal stays visible while commands may fire during test_runner.
-	if m.pending && !m.designMode {
-		permText, permStyle := m.permissionModeLabel()
-		left += zeroTheme.muted.Render(" · ") + permStyle.Render(permText)
-	}
+	// The permission mode is always shown, ahead of the trust segment, so it
+	// drops under width pressure no earlier than "! untrusted" does.
+	permText, permStyle := m.permissionModeLabel()
+	left += zeroTheme.muted.Render(" · ") + permStyle.Render(permText)
 	if !m.trusted {
 		left += zeroTheme.muted.Render(" · ") + zeroTheme.amber.Render("! untrusted")
 	}
@@ -381,12 +381,6 @@ func nextPermissionMode(mode agent.PermissionMode) agent.PermissionMode {
 
 func (m model) modeLabel() (string, lipgloss.Style) {
 	if m.designMode {
-		// Frame kAYHl item 8: health rides the mode label on the idle frame —
-		// "idle (degraded)". Design mode is the launch frame's mode chip; the
-		// degraded-server state is the only honest launch health source.
-		if health := m.launchHealth(); health != "normal" {
-			return "design (" + health + ")", zeroTheme.accent
-		}
 		return "design", zeroTheme.accent
 	}
 	if m.pending {
@@ -400,10 +394,19 @@ func (m model) modeLabel() (string, lipgloss.Style) {
 	return m.permissionModeLabel()
 }
 
+// effectivePermissionMode is the mode the in-flight run actually uses. An
+// /exec run is forced to auto; otherwise the session selector applies.
+func (m model) effectivePermissionMode() agent.PermissionMode {
+	if m.pending && m.activeExecDirect {
+		return agent.PermissionModeAuto
+	}
+	return m.permissionMode
+}
+
 // permissionModeLabel returns the safety chip (ask/auto-approve/unsafe) used as
 // the idle footer primary and as the executing-phase suffix.
 func (m model) permissionModeLabel() (string, lipgloss.Style) {
-	switch m.permissionMode {
+	switch m.effectivePermissionMode() {
 	case agent.PermissionModeAuto:
 		return "auto-approve", zeroTheme.modeAuto
 	case agent.PermissionModeAsk:
@@ -411,7 +414,7 @@ func (m model) permissionModeLabel() (string, lipgloss.Style) {
 	case agent.PermissionModeUnsafe:
 		return "unsafe", zeroTheme.modeUnsafe
 	default:
-		mode := strings.TrimSpace(string(m.permissionMode))
+		mode := strings.TrimSpace(string(m.effectivePermissionMode()))
 		if mode == "" {
 			return "auto-approve", zeroTheme.modeAuto
 		}
@@ -511,22 +514,7 @@ func (m model) contextWindowSegment() string {
 // humanCount renders a token count the way the status line wants it: 999,
 // 12.4K, 200K, 1M, 1.2M.
 func humanCount(n int) string {
-	if n < 0 {
-		n = 0
-	}
-	switch {
-	case n < 1000:
-		return strconv.Itoa(n)
-	case n < 1_000_000:
-		return humanCountScaled(float64(n)/1000, "K")
-	default:
-		return humanCountScaled(float64(n)/1_000_000, "M")
-	}
-}
-
-func humanCountScaled(value float64, suffix string) string {
-	text := fmt.Sprintf("%.1f%s", value, suffix)
-	return strings.Replace(text, ".0"+suffix, suffix, 1)
+	return presentrun.HumanCount(n)
 }
 
 // formatContextWindow renders a model's context window for the title bar
@@ -573,8 +561,11 @@ func gitBranch(cwd string) string {
 	}
 
 	headPath := filepath.Join(gitPath, "HEAD")
+	headRoot := cwd
 	if !info.IsDir() {
-		data, err := os.ReadFile(gitPath)
+		// The .git file comes from the repository, so it is read through the
+		// bounded reader and must stay inside cwd.
+		data, err := projectfile.Read(gitPath, cwd)
 		if err != nil {
 			return ""
 		}
@@ -582,10 +573,16 @@ func gitBranch(cwd string) string {
 		if dir == "" {
 			return ""
 		}
+		// A worktree gitdir can be relative to cwd, and it can name a location
+		// outside cwd. HEAD is then contained by that git dir.
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(cwd, dir)
+		}
 		headPath = filepath.Join(dir, "HEAD")
+		headRoot = dir
 	}
 
-	data, err := os.ReadFile(headPath)
+	data, err := projectfile.Read(headPath, headRoot)
 	if err != nil {
 		return ""
 	}
@@ -723,11 +720,18 @@ func styledBlockFillTitleStyled(width int, title string, lines []string, borderS
 		return styledBlockFill(width, lines, borderStyle, fill)
 	}
 	ruleWidth := width - 2
+	if lipgloss.Width(title)+4 > ruleWidth {
+		// Cut the title to fit rather than drop it: on a narrow box the title can
+		// carry state that the body does not repeat. The budget leaves room for
+		// the frame ("╭──" and "╮") and the two padding spaces.
+		budget := ruleWidth - 4
+		if budget <= 0 {
+			return styledBlockFill(width, lines, borderStyle, fill)
+		}
+		title = truncateDisplayWidth(title, budget)
+	}
 	titleText := " " + title + " "
 	titleWidth := lipgloss.Width(titleText)
-	if titleWidth >= ruleWidth {
-		return styledBlockFill(width, lines, borderStyle, fill)
-	}
 
 	leftRule := "──"
 	rightRule := strings.Repeat("─", maxInt(0, ruleWidth-lipgloss.Width(leftRule)-titleWidth))
@@ -838,6 +842,10 @@ func (m model) pickerOverlay(width int) string {
 	lines := make([]string, 0, len(visible)+5)
 	title := strings.TrimSpace(m.picker.title)
 	hint := "↑/↓ · ⏎ · esc"
+	if m.picker.kind == pickerTrust && m.trustPromptRequired {
+		// The mandatory first-run trust menu ignores Esc, so do not advertise it.
+		hint = "↑/↓ · ⏎"
+	}
 	lines = append(lines, zeroTheme.faint.Render(hint))
 	lastGroup := ""
 	for index, item := range visible {
@@ -865,7 +873,13 @@ func (m model) pickerOverlay(width int) string {
 		left += surface(zeroTheme.ink).Render(item.Label)
 		right := ""
 		if item.Meta != "" {
-			right = surface(zeroTheme.faintest).Render(item.Meta)
+			meta := item.Meta
+			// On overflow, cut the Meta from the left so its end (for a path, the
+			// leaf the user is about to trust) survives fitStyledLine.
+			if room := innerWidth - lipgloss.Width(left) - 1; room > 0 && lipgloss.Width(left)+1+lipgloss.Width(meta) > innerWidth {
+				meta = truncateLeftDisplayWidth(meta, room)
+			}
+			right = surface(zeroTheme.faintest).Render(meta)
 		}
 		// Paint the gap on the row surface so selected rows read as one solid
 		// band; joinHeaderLine would pad with bare (untinted) spaces.
@@ -1176,6 +1190,31 @@ func looksLikeDiff(text string) bool {
 		}
 	}
 	return false
+}
+
+// truncateLeftDisplayWidth keeps the end of text that fits budget cells and
+// marks the cut with a leading "…".
+func truncateLeftDisplayWidth(text string, budget int) string {
+	if budget <= 0 {
+		return ""
+	}
+	if lipgloss.Width(text) <= budget {
+		return text
+	}
+	if budget == 1 {
+		return "…"
+	}
+	runes := []rune(text)
+	start, used := len(runes), 0
+	for start > 0 {
+		w := lipgloss.Width(string(runes[start-1]))
+		if used+w > budget-1 {
+			break
+		}
+		start--
+		used += w
+	}
+	return "…" + string(runes[start:])
 }
 
 func truncateRunes(text string, limit int) string {

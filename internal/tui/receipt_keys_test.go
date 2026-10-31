@@ -463,6 +463,11 @@ func TestCancelledReceiptStatesWorktreeTruth(t *testing.T) {
 			t.Fatalf("cancelled receipt (shared) missing %q:\n%s", want, sharedPlain)
 		}
 	}
+	// Nothing is staged without a worktree, so apply/discard are not
+	// advertised (a card never shows a dead key); resume stays.
+	if strings.Contains(sharedPlain, "apply staged") || strings.Contains(sharedPlain, "discard") || !strings.Contains(sharedPlain, "resume") {
+		t.Fatalf("cancelled receipt (shared) advertises actions it cannot take:\n%s", sharedPlain)
+	}
 	if strings.Contains(sharedPlain, "nothing was written to disk") {
 		t.Fatalf("cancelled receipt (shared) still claims nothing was written:\n%s", sharedPlain)
 	}

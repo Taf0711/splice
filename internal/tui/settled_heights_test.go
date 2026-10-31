@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -69,5 +71,61 @@ func TestBakedHeightsSurviveCacheEviction(t *testing.T) {
 	// height must still be the true one. Separator + rows are deterministic.
 	if layout.totalLines() == 0 {
 		t.Fatal("empty layout after eviction")
+	}
+}
+
+// TestIncrementalSettleMatchesFullRebuild pins the O(turn) settle path: at
+// every frontier step, extending the cache must produce exactly the items a
+// full rebuild produces (same kinds, rows, cache keys, rendered lines), or
+// the viewport silently diverges from history.
+func TestIncrementalSettleMatchesFullRebuild(t *testing.T) {
+	var rows []transcriptRow
+	for turn := 0; turn < 6; turn++ {
+		rows = append(rows,
+			transcriptRow{kind: rowUser, text: fmt.Sprintf("turn %d request", turn)},
+			transcriptRow{kind: rowReasoning, text: "thinking about it"},
+			transcriptRow{kind: rowToolResult, tool: "read_file", id: fmt.Sprintf("r%da", turn), detail: "a.go"},
+			transcriptRow{kind: rowToolResult, tool: "grep", id: fmt.Sprintf("r%db", turn), detail: "needle"},
+			transcriptRow{kind: rowReasoning, text: "next step"},
+			transcriptRow{kind: rowToolResult, tool: "bash", id: fmt.Sprintf("r%dc", turn), detail: "go test ./..."},
+			transcriptRow{kind: rowToolResult, tool: "edit_file", id: fmt.Sprintf("r%dd", turn), detail: "a.go"},
+			transcriptRow{kind: rowAssistant, text: fmt.Sprintf("turn %d answer with a longer explanation", turn)},
+		)
+	}
+	render := func(items []transcriptBodyItem) []string {
+		var out []string
+		for _, item := range items {
+			out = append(out, fmt.Sprintf("%d|%d|%s|%d", item.kind, item.rowIndex, item.heightCacheKey, item.height))
+			out = append(out, renderTranscriptBodyItem(item, 0).lines...)
+		}
+		return out
+	}
+	for _, step := range []int{1, 3, 5} {
+		incremental := benchTranscriptModel(0)
+		incremental.transcript = append([]transcriptRow(nil), rows...)
+		incremental.flushed, incremental.flushedAny = 0, false
+		incremental.altScreenSettledItems = nil
+		incremental.altScreenSettledWidth, incremental.altScreenSettledFrontier = 0, 0
+		width := incremental.chatColumnWidth()
+		extended := 0
+		for frontier := step; frontier <= len(rows); frontier += step {
+			incremental.transcript = rows[:frontier]
+			incremental, _ = incremental.settleTranscript()
+			if incremental.flushed != frontier {
+				t.Fatalf("step %d: frontier %d did not settle (flushed=%d)", step, frontier, incremental.flushed)
+			}
+			full := incremental
+			full.altScreenSettledItems = nil
+			full.rebuildAltScreenSettledItems(width)
+			got, want := render(incremental.altScreenSettledItems), render(full.altScreenSettledItems)
+			if strings.Join(got, "\n") != strings.Join(want, "\n") {
+				t.Fatalf("step %d frontier %d: incremental settle diverged from full rebuild\n--- incremental\n%s\n--- full\n%s",
+					step, frontier, strings.Join(got, "\n"), strings.Join(want, "\n"))
+			}
+			extended++
+		}
+		if extended == 0 {
+			t.Fatalf("step %d: no frontier advanced", step)
+		}
 	}
 }

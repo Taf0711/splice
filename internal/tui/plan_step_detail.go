@@ -164,6 +164,25 @@ func dropTranscriptRowsByID(rows []transcriptRow, id string) []transcriptRow {
 	return out
 }
 
+// dropTranscriptRows removes rows by id and keeps the flush frontier and the
+// settled cache true: a removed settled row shifts every later row index,
+// so the frontier moves back by the settled rows removed and the cache
+// rebuilds instead of serving descriptors for rows that moved.
+func (m model) dropTranscriptRows(id string) model {
+	settledRemoved := 0
+	for i := 0; i < m.flushed && i < len(m.transcript); i++ {
+		if id != "" && m.transcript[i].id == id {
+			settledRemoved++
+		}
+	}
+	m.transcript = dropTranscriptRowsByID(m.transcript, id)
+	if settledRemoved > 0 {
+		m.flushed -= settledRemoved
+		m.invalidateSettledTranscript()
+	}
+	return m
+}
+
 // openPlanStepDetail toggles a transcript card explaining a plan step. The card
 // adapts to the step's status: a finished step (completed/failed) reads as "what
 // we did"; an unfinished step (pending or in_progress) reads as "what we will do
@@ -181,7 +200,7 @@ func (m model) openPlanStepDetail(stepIndex int) (model, tea.Cmd) {
 		return m, nil
 	}
 	wasOpen := m.planDetailOpen && m.planDetailStep == stepIndex
-	m.transcript = dropTranscriptRowsByID(m.transcript, planStepDetailRowID)
+	m = m.dropTranscriptRows(planStepDetailRowID)
 	if wasOpen {
 		m.planDetailOpen = false
 		return m, nil

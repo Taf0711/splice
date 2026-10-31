@@ -71,3 +71,29 @@ func TestRichProgressBarWidthExact(t *testing.T) {
 		t.Fatalf("RichProgressBar(0.5, 4) = %q, want ██  ", got)
 	}
 }
+
+// Locale precedence is POSIX (LC_ALL > LC_CTYPE > LANG), and only a set,
+// non-UTF-8 locale folds the whole frame; an unset locale is unknown.
+func TestTerminalNeedsASCII(t *testing.T) {
+	cases := []struct {
+		env  map[string]string
+		want bool
+		tier GlyphTier
+	}{
+		{map[string]string{}, false, GlyphTierASCII},
+		{map[string]string{"LANG": "en_US.UTF-8"}, false, GlyphTierRichUnicode},
+		{map[string]string{"LANG": "en_US.UTF-8", "LC_ALL": "C"}, true, GlyphTierASCII},
+		{map[string]string{"LANG": "C", "LC_CTYPE": "en_US.UTF-8"}, false, GlyphTierRichUnicode},
+		{map[string]string{"LANG": "POSIX"}, true, GlyphTierASCII},
+		{map[string]string{"LANG": "en_US.UTF-8", "SPLICE_GLYPH_TIER": "ascii"}, true, GlyphTierASCII},
+	}
+	for _, tc := range cases {
+		getenv := func(key string) string { return tc.env[key] }
+		if got := TerminalNeedsASCII(getenv); got != tc.want {
+			t.Fatalf("TerminalNeedsASCII(%v) = %v, want %v", tc.env, got, tc.want)
+		}
+		if got := SelectGlyphTier(getenv); got != tc.tier {
+			t.Fatalf("SelectGlyphTier(%v) = %s, want %s", tc.env, got, tc.tier)
+		}
+	}
+}

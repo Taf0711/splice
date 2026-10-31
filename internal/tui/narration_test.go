@@ -64,11 +64,34 @@ func TestNarrationQuietCollapsesActions(t *testing.T) {
 		{transcriptRow{kind: rowToolResult, id: "t", runID: 1, tool: "bash", status: tools.StatusOK}, false},
 		{transcriptRow{kind: rowPermission, permission: &agent.PermissionEvent{ToolCallID: "p", Action: agent.PermissionActionPrompt}}, true},
 		{transcriptRow{kind: rowError, text: "failed"}, true},
-		{transcriptRow{kind: rowSystem, text: "Transcript cleared."}, false},
+		{transcriptRow{kind: rowSystem, text: "Transcript cleared."}, true},
+		{transcriptRow{kind: rowSystem, id: "s", runID: 3, text: "run notice"}, true},
 	}
 	for _, tc := range cases {
 		if got := narrationVisible(tc.row, verbosityQuiet); got != tc.want {
 			t.Errorf("quiet(%s) = %v, want %v", rowKindName(tc.row.kind), got, tc.want)
+		}
+	}
+}
+
+// Quiet keeps every system notice, including run-owned ones, so command
+// replies and the /exec safety notes always show.
+func TestNarrationQuietKeepsSystemNotices(t *testing.T) {
+	cases := []struct {
+		name      string
+		row       transcriptRow
+		verbosity narrationVerbosity
+		want      bool
+	}{
+		{"quiet command reply", transcriptRow{kind: rowSystem, text: "flags: none"}, verbosityQuiet, true},
+		{"quiet run notice", transcriptRow{kind: rowSystem, runID: 3, text: "note"}, verbosityQuiet, true},
+		{"quiet exec permission notice", transcriptRow{kind: rowSystem, runID: 3, text: "/exec: pipeline runs under auto permission mode (session mode ask deferred)"}, verbosityQuiet, true},
+		{"normal command reply", transcriptRow{kind: rowSystem, text: "flags: none"}, verbosityNormal, true},
+		{"normal run notice", transcriptRow{kind: rowSystem, runID: 3, text: "note"}, verbosityNormal, true},
+	}
+	for _, tc := range cases {
+		if got := narrationVisible(tc.row, tc.verbosity); got != tc.want {
+			t.Errorf("%s: visible = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }

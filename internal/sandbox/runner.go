@@ -487,8 +487,70 @@ func sandboxGoCachePath(workspaceRoot string) (string, error) {
 	if workspaceRoot == "" {
 		return "", errors.New("create sandbox Go cache: workspace path is unavailable")
 	}
-	digest := sha256.Sum256([]byte(workspaceRoot))
+	cacheKey := workspaceRoot
+	if commonDir := gitCommonDir(workspaceRoot); commonDir != "" {
+		cacheKey = commonDir
+	}
+	digest := sha256.Sum256([]byte(cacheKey))
 	return filepath.Join(tempRoot, "splice", "gocache", fmt.Sprintf("%x", digest[:])), nil
+}
+
+// gitCommonDir resolves the repository's shared git directory. Worktrees
+// contain a .git file that points at a per-worktree gitdir; its commondir file
+// points back to the shared repository directory. Non-git paths return empty.
+func gitCommonDir(workspaceRoot string) string {
+	cur := workspaceRoot
+	for {
+		gitPath := filepath.Join(cur, ".git")
+		info, err := os.Stat(gitPath)
+		if err == nil {
+			if info.IsDir() {
+				if _, err := os.Stat(filepath.Join(gitPath, "HEAD")); err == nil {
+					return normalizeProfilePath(gitPath)
+				}
+			} else if common := commonDirFromGitFile(cur, gitPath); common != "" {
+				return common
+			}
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return ""
+		}
+		cur = parent
+	}
+}
+
+func commonDirFromGitFile(workspaceRoot, gitPath string) string {
+	data, err := os.ReadFile(gitPath)
+	if err != nil {
+		return ""
+	}
+	value := strings.TrimSpace(string(data))
+	if !strings.HasPrefix(value, "gitdir: ") {
+		return ""
+	}
+	gitDir := strings.TrimSpace(strings.TrimPrefix(value, "gitdir: "))
+	if gitDir == "" {
+		return ""
+	}
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(workspaceRoot, gitDir)
+	}
+	gitDir = normalizeProfilePath(gitDir)
+	commondirPath := filepath.Join(gitDir, "commondir")
+	if data, err := os.ReadFile(commondirPath); err == nil {
+		common := strings.TrimSpace(string(data))
+		if common != "" {
+			if !filepath.IsAbs(common) {
+				common = filepath.Join(gitDir, common)
+			}
+			common = normalizeProfilePath(common)
+			if common != "" {
+				return common
+			}
+		}
+	}
+	return ""
 }
 
 func cloneStrings(values []string) []string {

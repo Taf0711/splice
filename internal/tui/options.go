@@ -7,6 +7,7 @@ import (
 
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/config"
+	"github.com/Taf0711/splice/internal/flags"
 	"github.com/Taf0711/splice/internal/mcp"
 	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/providerhealth"
@@ -25,6 +26,16 @@ type Options struct {
 	Version              string // CLI build version, shown on the home screen; empty hides it
 	UserConfigPath       string
 	DoctorUserConfigPath string
+	// FlagResolutions explains each feature flag for the read-only /flags command.
+	FlagResolutions []flags.Resolution
+	// DecisionAdvisor is the resolved decision_advisor section. The doctor
+	// view reports the trajectory classifier from it.
+	DecisionAdvisor config.DecisionAdvisorConfig
+	// DoctorTrajectoryProfile is the profile the default trajectory classifier
+	// runs on, for the doctor's classifier line.
+	DoctorTrajectoryProfile config.ProviderProfile
+	// DoctorEvaluator is the evaluator the run uses, for the doctor's line.
+	DoctorEvaluator zeroruntime.DecisionEvaluator
 	// DoctorGOOS pins the platform for the doctor sandbox-backend check
 	// (internal/doctor). Empty means runtime.GOOS; tests set it so the check
 	// is deterministic regardless of the host.
@@ -53,10 +64,16 @@ type Options struct {
 	MCPPermissionStore          *mcp.PermissionStore
 	MCPTokenStore               *mcp.TokenStore
 	MCPCommand                  func(context.Context, []string) MCPCommandResult
-	SandboxSetupCommand         func(context.Context) SandboxSetupCommandResult
-	UsageTracker                *usage.Tracker
-	SessionCompactor            SessionCompactor
-	PrService                   *PrService
+	// BackendCommand runs an allowlisted read-only CLI command in-process
+	// (hooks, plugins, specialists, usage, changes, verify).
+	BackendCommand func(context.Context, []string) BackendCommandResult
+	// RefreshModelCatalog refreshes the models.dev catalog cache and
+	// reports whether a newer one was written (force skips the age check).
+	RefreshModelCatalog func(ctx context.Context, force bool) (bool, error)
+	SandboxSetupCommand func(context.Context) SandboxSetupCommandResult
+	UsageTracker        *usage.Tracker
+	SessionCompactor    SessionCompactor
+	PrService           *PrService
 
 	AgentOptions agent.Options
 	// LoadSkills returns the installed skills (default skills dir merged with any

@@ -155,32 +155,6 @@ func truncateOpenQuestion(question string) string {
 	return string(runes[:budget-1]) + "…"
 }
 
-// launchHealth reports the launch frame's health dimension: degraded when a
-// real MCP server is in a degraded (non-connected, non-disabled) state,
-// normal otherwise. The launch screen has no presentation run state, so the
-// degraded-server count is the only honest health source.
-func (m model) launchHealth() string {
-	if m.launchDegradedServers() > 0 {
-		return "degraded"
-	}
-	return "normal"
-}
-
-// launchContractBand renders the launch contract dimension:
-// "phase idle | health degraded | gate none" (frame kAYHl item 2). The
-// launch screen has run nothing, so phase is idle and gate is none; only
-// health projects live state.
-func (m model) launchContractBand() string {
-	health := m.launchHealth()
-	healthStyle := zeroTheme.ink
-	if health != "normal" {
-		healthStyle = zeroTheme.amber
-	}
-	return zeroTheme.faint.Render("phase ") + zeroTheme.ink.Render("idle") +
-		zeroTheme.faint.Render(" | health ") + healthStyle.Render(health) +
-		zeroTheme.faint.Render(" | gate ") + zeroTheme.ink.Render("none")
-}
-
 // launchFactCell renders one grid cell: the key in a fixed label column, the
 // value truncated to the cell budget with an ellipsis, then padding to padTo
 // total cells (0 = no trailing padding, for the row's last cell). An empty
@@ -240,11 +214,7 @@ func (m model) launchStart() []string {
 // launchScreenLines assembles the full launch body: wordmark + tagline,
 // facts, resume card (when one exists), START, honest-state line.
 func (m model) launchScreenLines() []string {
-	// Frame kAYHl, item 2: the contract dimension renders before any run —
-	// "phase idle | health degraded | gate none". Phase is idle (nothing has
-	// run), gate is none (no gate source exists on launch); health projects
-	// the real degraded-server count.
-	lines := []string{m.launchContractBand(), "", m.launchWordmark(), "", zeroTheme.muted.Render(emptyStateTagline), ""}
+	lines := []string{m.launchWordmark(), "", zeroTheme.muted.Render(emptyStateTagline), ""}
 	// Facts render as the frame's two-column grid (repo|branch, model|effort,
 	// tools|mcp, skills|tests). Column 2 starts at cell 32 (past the widest
 	// left cell the frame shows); a longer left value truncates with an

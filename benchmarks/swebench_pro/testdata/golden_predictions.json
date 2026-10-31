@@ -1,0 +1,12 @@
+[
+  {
+    "instance_id": "instance_flipt-io__flipt-7161f7b876773a911afdd804b281e52681cb7321",
+    "patch": "diff --git a/internal/config/config.go b/internal/config/config.go\nindex 1111111..2222222 100644\n--- a/internal/config/config.go\n+++ b/internal/config/config.go\n@@ -1,3 +1,4 @@\n package config\n\n+// fixed\n func Load() error { return nil }\n",
+    "prefix": "splice"
+  },
+  {
+    "instance_id": "instance_future-architect__vuls-9a32a94806b54141b7ff12503c48da680ebcf199",
+    "patch": "",
+    "prefix": "splice"
+  }
+]

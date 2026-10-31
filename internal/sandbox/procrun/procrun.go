@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Taf0711/splice/internal/gitenv"
 	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/secrets"
 )
@@ -55,6 +56,13 @@ var StageBinaries = []string{
 // cannot reach native platform confinement is refused by Prepare, never run
 // unwrapped.
 func NewStageEngine(workspaceRoot string) *sandbox.Engine {
+	return NewStageEngineWithTempRoot(workspaceRoot, "")
+}
+
+// NewStageEngineWithTempRoot is NewStageEngine with one private temp root:
+// the command can write tempRoot and no system temp directory. An empty
+// tempRoot keeps the system temp roots.
+func NewStageEngineWithTempRoot(workspaceRoot, tempRoot string) *sandbox.Engine {
 	backend := sandbox.SelectBackend(sandbox.BackendOptions{})
 	return sandbox.NewEngine(sandbox.EngineOptions{
 		WorkspaceRoot: workspaceRoot,
@@ -62,6 +70,7 @@ func NewStageEngine(workspaceRoot string) *sandbox.Engine {
 			Mode:             sandbox.ModeEnforce,
 			Network:          sandbox.NetworkDeny,
 			EnforceWorkspace: true,
+			TempRoot:         tempRoot,
 		},
 		Backend: backend,
 	})
@@ -173,6 +182,29 @@ func Prepare(ctx context.Context, req Request) (Prepared, error) {
 		emitAudit(base)
 		return Prepared{}, fmt.Errorf("procrun: refused %s spawn: %s", req.ProfileID, reason)
 	}
+	// Every deterministic spawn carries the gitenv hardening. This covers the
+	// pipeline's own git calls and any git that a build or test tool starts
+	// as a child. The base is the scrubbed environment that the engine and
+	// the direct path use when Spec.Env is nil.
+	//
+	// go and npm start git in bare cache repositories when they fetch a
+	// module, and safe.bareRepository=explicit can refuse that git. Stages
+	// have no network, so they do not fetch. Look at this again if a stage
+	// profile ever gets network access.
+	if deterministicProfile(req.ProfileID) {
+		envBase := req.Spec.Env
+		if envBase == nil {
+			envBase = secrets.ScrubChildEnv(os.Environ())
+		}
+		hardened, err := gitenv.Env(envBase)
+		if err != nil {
+			reason := fmt.Sprintf("harden git environment: %v", err)
+			base.Decision = Decision{Rejected: true, Reason: reason}
+			emitAudit(base)
+			return Prepared{}, fmt.Errorf("procrun: refused %s spawn: %s", req.ProfileID, reason)
+		}
+		req.Spec.Env = hardened
+	}
 	if req.Engine != nil {
 		command, plan, err := req.Engine.CommandContext(ctx, req.Spec)
 		record := base
@@ -255,9 +287,13 @@ func deterministicProfile(profileID string) bool {
 // enforcement level of a refused deterministic spawn. The same text travels
 // on the returned error and the audit decision.
 func deterministicRefusalReason(profileID string, plan sandbox.CommandPlan) string {
-	return fmt.Sprintf(
+	reason := fmt.Sprintf(
 		"deterministic profile %s requires native platform confinement: backend=%s wrapped=%t enforcement=%s",
 		profileID, plan.Backend.Name, plan.Wrapped, plan.EnforcementLevel)
+	if hint := sandbox.MissingLinuxBackendHint(plan.Backend); hint != "" {
+		reason += "; " + hint
+	}
+	return reason
 }
 
 // binaryAllowed matches the command's base name against the allowlist. Stage

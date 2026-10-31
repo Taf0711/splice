@@ -238,18 +238,19 @@ func TestPromptSubmitPersistsReasoningEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadEvents returned error: %v", err)
 	}
-	// Sequence: user message, reasoning, assistant message.
+	// Sequence: user message, reasoning, stream usage, assistant message.
 	if got := eventTypes(events); !equalEventTypes(got, []sessions.EventType{
 		sessions.EventMessage,
 		sessions.EventReasoning,
+		sessions.EventUsage,
 		sessions.EventMessage,
 	}) {
 		t.Fatalf("unexpected event sequence: %#v", got)
 	}
 	assertPayloadField(t, events[0], "role", "user")
 	assertPayloadField(t, events[1], "content", "private thought")
-	assertPayloadField(t, events[2], "role", "assistant")
-	assertPayloadField(t, events[2], "content", "public answer")
+	assertPayloadField(t, events[3], "role", "assistant")
+	assertPayloadField(t, events[3], "content", "public answer")
 	if !transcriptContains(next.transcript, "public answer") {
 		t.Fatalf("expected assistant text in transcript, got %#v", next.transcript)
 	}
@@ -1047,13 +1048,15 @@ func TestResumeCommandListsRecentSessions(t *testing.T) {
 		if !strings.Contains(item.Label, want.title) {
 			t.Fatalf("picker Label %q should contain the title %q", item.Label, want.title)
 		}
-		if !strings.Contains(item.Meta, want.id) {
-			t.Fatalf("picker %q Meta should show the id %q, got %q", want.title, want.id, item.Meta)
+		// Selection resolves by id; the visible right column names the
+		// model, not a 40-character id.
+		if item.Value != want.id || strings.Contains(item.Meta, want.id) {
+			t.Fatalf("picker %q: Value=%q Meta=%q, want Value=id and Meta without the id", want.title, item.Value, item.Meta)
 		}
 	}
-	// The picker overlay renders the titles and ids.
+	// The picker overlay renders the titles.
 	view := viewString(next.View())
-	for _, want := range []string{"Resume a session", "Newer", "Older", first.SessionID, second.SessionID} {
+	for _, want := range []string{"Resume a session", "Newer", "Older"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("session picker view missing %q:\n%s", want, view)
 		}
@@ -2044,11 +2047,8 @@ func TestShiftTabCyclesPermissionMode(t *testing.T) {
 		agent.PermissionModeAsk,
 		agent.PermissionModeAuto,
 	} {
-		updated, cmd := m.Update(testKeyShift(tea.KeyTab))
+		updated, _ := m.Update(testKeyShift(tea.KeyTab))
 		m = updated.(model)
-		if cmd != nil {
-			t.Fatalf("expected shift+tab to cycle mode synchronously, got command")
-		}
 		if m.permissionMode != want {
 			t.Fatalf("expected permission mode %q after shift+tab, got %q", want, m.permissionMode)
 		}
@@ -2061,6 +2061,79 @@ func TestShiftTabCyclesPermissionMode(t *testing.T) {
 	label, _ := m.modeLabel()
 	if label != "auto-approve" {
 		t.Fatalf("expected mode label to track cycled mode, got %q", label)
+	}
+}
+
+// A toggle during a run says it applies from the next run, because the run
+// copied the mode at launch.
+func TestShiftTabDuringRunAcksNextRun(t *testing.T) {
+	m := newModel(context.Background(), Options{PermissionMode: agent.PermissionModeAuto})
+	m.width = 120
+	m.pending = true
+
+	updated, _ := m.Update(testKeyShift(tea.KeyTab))
+	m = updated.(model)
+	if m.permissionMode != agent.PermissionModeAsk {
+		t.Fatalf("permission mode = %q, want ask", m.permissionMode)
+	}
+	last := stripANSI(m.transcript[len(m.transcript)-1].text)
+	if !strings.Contains(last, "ask: applies from the next run") {
+		t.Fatalf("in-run toggle ack = %q, want \"ask: applies from the next run\"", last)
+	}
+}
+
+// An /exec run is forced to auto, so the status line shows auto while the
+// session selector still says ask.
+func TestStatusShowsEffectiveModeOfExecRun(t *testing.T) {
+	m := newModel(context.Background(), Options{PermissionMode: agent.PermissionModeAsk})
+	m.width = 120
+	m.pending = true
+	m.activeExecDirect = true
+
+	if label, _ := m.permissionModeLabel(); label != "auto-approve" {
+		t.Fatalf("exec run label = %q, want auto-approve", label)
+	}
+	if status := stripANSI(m.statusLine(120)); !strings.Contains(status, "auto-approve") {
+		t.Fatalf("exec run status line %q lacks auto-approve", status)
+	}
+	m.pending = false
+	if label, _ := m.permissionModeLabel(); label != "ask" {
+		t.Fatalf("idle label = %q, want ask", label)
+	}
+
+	// beginRun carries the /exec flag into the run it starts.
+	launched := newModel(context.Background(), Options{PermissionMode: agent.PermissionModeAsk})
+	launched.execDirectPending = true
+	if launched = launched.beginRun(func() {}); !launched.activeExecDirect {
+		t.Fatal("beginRun dropped the pending /exec flag")
+	}
+}
+
+// Each toggle acknowledges the new mode in the transcript, and the status line
+// shows the mode for both Ask and Auto.
+func TestShiftTabAcknowledgesAndShowsPermissionMode(t *testing.T) {
+	m := newModel(context.Background(), Options{PermissionMode: agent.PermissionModeAuto})
+	m.width = 120
+	m.designMode = false
+
+	cases := []struct {
+		mode    agent.PermissionMode
+		segment string
+		ack     string
+	}{
+		{agent.PermissionModeAsk, "ask", "ask: each tool asks first"},
+		{agent.PermissionModeAuto, "auto-approve", "auto: tools run without asking"},
+	}
+	for _, tc := range cases {
+		updated, _ := m.Update(testKeyShift(tea.KeyTab))
+		m = updated.(model)
+		last := m.transcript[len(m.transcript)-1]
+		if got := stripANSI(last.text); !strings.Contains(got, "permissions") || !strings.Contains(got, tc.ack) {
+			t.Fatalf("mode %q: transcript ack = %q, want permissions %q", tc.mode, got, tc.ack)
+		}
+		if status := stripANSI(m.statusLine(120)); !strings.Contains(status, tc.segment) {
+			t.Fatalf("mode %q: status line %q lacks %q", tc.mode, status, tc.segment)
+		}
 	}
 }
 

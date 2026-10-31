@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/memd"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/tools"
 )
@@ -309,9 +310,11 @@ func TestRunWritesCompleteTrace(t *testing.T) {
 	if trace.Outcome.Status != "completed" {
 		t.Fatalf("outcome status = %q, want completed", trace.Outcome.Status)
 	}
-	abs, _ := filepath.Abs(workDir)
-	if trace.RepoRoot != abs {
-		t.Fatalf("repo root = %q, want %q", trace.RepoRoot, abs)
+	// The recorded repo root is the canonical project identity (the memd
+	// client and admission key on it), not the caller's raw spelling.
+	wantRoot := memd.CanonicalProjectPath(workDir)
+	if trace.RepoRoot != wantRoot {
+		t.Fatalf("repo root = %q, want %q", trace.RepoRoot, wantRoot)
 	}
 	if trace.Memory.Status != "active" {
 		t.Fatalf("memory status = %q, want active (memory store was provided)", trace.Memory.Status)
@@ -334,6 +337,10 @@ func TestBuildRunOutcomeCoversEveryField(t *testing.T) {
 	tr.recordHistory(schemas.IterationState{
 		Iteration: 1, Timestamp: 1, TestsPassing: 1, StateHash: "abc",
 		Confidence: 0.9, Preexisting: schemas.TestCounts{Pass: 1},
+	})
+	tr.recordPassEvidence(passEvidencePair{
+		head: schemas.PassEvidence{Iteration: 1, Builder: passBuilderHead, FilesChanged: []string{"a.go"}},
+		pass: schemas.PassEvidence{Iteration: 1, Builder: passBuilderPass, FilesChanged: []string{"a.go"}},
 	})
 	tr.recordMemory("code_writer", 1, schemas.MemoryBundle{
 		RequestingAgent: "code_writer",

@@ -12,6 +12,7 @@ import (
 
 	"github.com/mattn/go-runewidth"
 
+	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/config"
 	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/sessions"
@@ -42,6 +43,10 @@ type usageCoverage struct {
 	UnpricedCount      int    `json:"unpricedCount"`
 	ErrorCount         int    `json:"errorCount"`
 	CostCoverage       string `json:"costCoverage"`
+	// AssumedCount counts priced events that record no provider. They are priced
+	// from the active profile, so the coverage is partial, not complete.
+	AssumedCount  int    `json:"assumedProviderCount"`
+	AssumedReason string `json:"assumedProviderReason,omitempty"`
 }
 
 type usageReportJSON struct {
@@ -58,6 +63,7 @@ type historicalUsagePayload struct {
 	WebSearchRequests int      `json:"webSearchRequests"`
 	WebSearchEngine   string   `json:"webSearchEngine"`
 	Model             string   `json:"model"`
+	Provider          string   `json:"provider"`
 	CostUSD           *float64 `json:"costUsd"`
 	CostStatus        string   `json:"costStatus"`
 }
@@ -103,7 +109,7 @@ func filterEventsSince(events []sessions.Event, since string) []sessions.Event {
 	return filtered
 }
 
-func classifyUsageCoverage(events []sessions.Event, meta []sessions.Metadata, registry *modelregistry.Registry) (usageCoverage, error) {
+func classifyUsageCoverage(events []sessions.Event, meta []sessions.Metadata, price usage.Pricer, activeProfile string) (usageCoverage, error) {
 	modelBySession := map[string]string{}
 	for _, item := range meta {
 		modelBySession[item.SessionID] = item.ModelID
@@ -134,16 +140,7 @@ func classifyUsageCoverage(events []sessions.Event, meta []sessions.Metadata, re
 			if modelID == "" {
 				modelID = modelBySession[event.SessionID]
 			}
-			if modelID == "" || registry == nil {
-				coverage.UnpricedCount++
-				continue
-			}
-			model, err := registry.Require(modelID)
-			if err != nil {
-				coverage.UnpricedCount++
-				continue
-			}
-			if _, err := modelregistry.CalculateCost(model, zeroruntime.Usage{
+			estimate := price(payload.Provider, modelID, zeroruntime.Usage{
 				InputTokens:       payload.PromptTokens,
 				OutputTokens:      payload.CompletionTokens,
 				CachedInputTokens: payload.CachedInputTokens,
@@ -151,16 +148,19 @@ func classifyUsageCoverage(events []sessions.Event, meta []sessions.Metadata, re
 				ReasoningTokens:   payload.ReasoningTokens,
 				WebSearchRequests: payload.WebSearchRequests,
 				WebSearchEngine:   payload.WebSearchEngine,
-			}); err != nil {
-				_, searchPriced, searchRateErr := modelregistry.WebSearchPricingRate(model, payload.WebSearchEngine)
-				if payload.WebSearchRequests > 0 && (searchRateErr != nil || !searchPriced) {
-					coverage.UnpricedCount++
-				} else {
-					coverage.ErrorCount++
+			})
+			switch estimate.Status {
+			case usage.CostStatusPriced:
+				coverage.ReconstructedCount++
+				if strings.TrimSpace(payload.Provider) == "" {
+					coverage.AssumedCount++
+					coverage.AssumedReason = fmt.Sprintf("served provider not recorded; priced as %s", activeProfile)
 				}
-				continue
+			case usage.CostStatusUnpriced:
+				coverage.UnpricedCount++
+			default:
+				coverage.ErrorCount++
 			}
-			coverage.ReconstructedCount++
 		default:
 			return usageCoverage{}, fmt.Errorf("usage event %d: unknown cost_status %q", event.Sequence, payload.CostStatus)
 		}
@@ -170,7 +170,7 @@ func classifyUsageCoverage(events []sessions.Event, meta []sessions.Metadata, re
 	switch {
 	case total == 0:
 		coverage.CostCoverage = usage.CostCoverageNotApplicable
-	case priced == total:
+	case priced == total && coverage.AssumedCount == 0:
 		coverage.CostCoverage = usage.CostCoverageComplete
 	case priced > 0:
 		coverage.CostCoverage = usage.CostCoveragePartial
@@ -241,26 +241,27 @@ func runUsage(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) i
 	}
 
 	providerProfile := ""
+	var usageProfiles []config.ProviderProfile
 	if workspaceRoot, rootErr := resolveWorkspaceRoot("", deps); rootErr == nil {
 		if resolved, configErr := deps.resolveConfig(workspaceRoot, config.Overrides{}); configErr == nil {
 			providerProfile = resolved.Provider.Name
+			usageProfiles = append(append(usageProfiles, resolved.Providers...), resolved.Provider)
 		}
 	}
-	var registry modelregistry.Registry
-	var registryErr error
-	if strings.TrimSpace(providerProfile) == "" {
-		registry, registryErr = modelregistry.DefaultRegistry()
-	} else {
-		registry, registryErr = modelregistry.DefaultRegistry(providerProfile)
+	// Each stored request is priced from the catalog of the provider that served
+	// it. An event that names no provider was served by the active profile.
+	catalogs := usage.NewProfileCostCatalogs(usageProfiles)
+	price := func(provider string, model string, u zeroruntime.Usage) agent.UsageCostEstimate {
+		if strings.TrimSpace(provider) == "" {
+			provider = providerProfile
+		}
+		return catalogs.Estimate(provider, model, u, true)
 	}
-	if registryErr != nil {
-		return writeAppError(stderr, registryErr.Error(), exitCrash)
-	}
-	report, err := usage.BuildReport(events, set.meta, &registry, diff.NetLOC())
+	report, err := usage.BuildReportPriced(events, set.meta, price, diff.NetLOC())
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
-	coverage, err := classifyUsageCoverage(events, set.meta, &registry)
+	coverage, err := classifyUsageCoverage(events, set.meta, price, providerProfile)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
@@ -415,6 +416,9 @@ func FormatReport(report usage.Report, insertions int, deletions int, coverage .
 		metrics := coverage[0]
 		builder.WriteString(fmt.Sprintf("\npricing: %s (persisted %d, reconstructed %d, unpriced %d, errors %d)\n",
 			metrics.CostCoverage, metrics.PersistedCount, metrics.ReconstructedCount, metrics.UnpricedCount, metrics.ErrorCount))
+		if metrics.AssumedCount > 0 {
+			builder.WriteString(fmt.Sprintf("pricing note: %d request(s): %s\n", metrics.AssumedCount, metrics.AssumedReason))
+		}
 	}
 
 	builder.WriteString(fmt.Sprintf("\nnet LOC (estimate): +%d / -%d = %d\n",

@@ -104,7 +104,7 @@ func TestPipelineStripWidthDegradation(t *testing.T) {
 
 	cases := []struct{ width, wantLines int }{
 		{width: 130, wantLines: 3}, // full: header + stage run + bar
-		{width: 80, wantLines: 4},  // compact: header + stage run + bar + section tabs
+		{width: 80, wantLines: 3},  // compact: header + stage run + bar (the model adds the tabs row)
 		{width: 66, wantLines: 1},  // narrow: header + current label, one line
 		{width: 50, wantLines: 1},  // tiny: header only
 		{width: 38, wantLines: 1},  // tiny: header only
@@ -141,7 +141,8 @@ func TestPipelineStripHeaderColorByState(t *testing.T) {
 	// Failed roster -> red header (the full header line is colored).
 	failed := stateWith([]pipelineStageRow{{name: "code_writer", status: pipelineStageFailed}}).presentation()
 	got := failed.renderStrip(50, 0)[0]
-	want := zeroTheme.red.Render("PIPELINE 1/1")
+	// The outcome is also a word, so NO_COLOR still reads it as failed.
+	want := zeroTheme.red.Render("PIPELINE failed 1/1")
 	if got != want {
 		t.Fatalf("failed strip header = %q, want red %q", got, want)
 	}
@@ -348,7 +349,7 @@ func TestPipelineStripDegradesWithoutColorAcrossWidthTiers(t *testing.T) {
 		wantLines int
 	}{
 		{width: 120, wantLines: 3}, // full tier
-		{width: 80, wantLines: 4},  // compact tier: + section tabs
+		{width: 80, wantLines: 3},  // compact tier (the model adds the tabs row)
 		{width: 60, wantLines: 1},  // narrow tier
 		{width: 12, wantLines: 1},  // tiny tier
 	} {

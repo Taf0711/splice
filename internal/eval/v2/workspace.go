@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/Taf0711/splice/internal/gitenv"
 )
 
 // WorkspaceOptions selects the caller-owned run root and pinned binaries.
@@ -155,7 +157,7 @@ func RequireCleanSourceWithGit(dir, gitBinary string) error {
 		gitBinary = "git"
 	}
 	cmd := exec.Command(gitBinary, "-C", dir, "status", "--porcelain", "--untracked-files=all")
-	output, err := cmd.Output()
+	output, err := gitenv.Output(cmd)
 	if err != nil {
 		return fmt.Errorf("check source cleanliness in %s: %w", dir, err)
 	}

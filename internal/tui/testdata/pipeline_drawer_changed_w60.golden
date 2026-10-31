@@ -1,0 +1,27 @@
+╭──────────────────────────────────────────────────────────╮
+│ PIPELINE diamond · standard                              │
+│ >[+] code_writer  pass 2  18.4K tok  $0.0123 partial     │
+│  [!] lint  command  failed                               │
+│        <- code_writer                                    │
+│  [+] static_analyzer                                     │
+│        <- code_writer                                    │
+│  [ ] test_runner                                         │
+│        <- lint, static_analyzer                          │
+│                                                          │
+│ NODE code_writer                                         │
+│   type      code_writer                                  │
+│   status    passed · pass 2                              │
+│   tier      standard                                     │
+│   model     cloud/escalated-model (high) · escalated     │
+│   configured chosen at run time (tier resolver (medium   │
+│              tier))                                      │
+│   budget    input 4K / 6K · output 600 / 900             │
+│   cost      $0.0123 partial                              │
+│   changed   a.go, b.go, c.go, d.go, e.go, +1 more        │
+│   summary   from pass 2: wrote six files                 │
+│   esc closes the details · ↑/↓ selects another node      │
+│                                                          │
+│ No run evidence yet. Evidence appears here as stages     │
+│ report QA groups, interventions, and the completion      │
+│ receipt.                                                 │
+╰──────────────────────────────────────────────────────────╯

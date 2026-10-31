@@ -76,13 +76,34 @@ func TestHelpOverlayViewRendersGroupsAndKeys(t *testing.T) {
 	view := plainRender(t, m.View())
 	for _, want := range []string{
 		"Keyboard Shortcuts",
-		"Ctrl+T", "cycle reasoning effort",
+		"Ctrl+T", "reasoning effort (not supported by this model)",
 		"Shift+Tab", "Ctrl+P", "Ctrl+O",
 		"drill into its sub-session",
 		keybindingHelpFooter,
 	} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("help overlay view missing %q, got:\n%s", want, view)
+		}
+	}
+}
+
+// Ctrl+T help lists the same levels the cycle uses, not a fixed list.
+func TestKeybindingHelpEffortListsModelLevels(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-5.5"})
+	ring := m.reasoningEffortRing()
+	if len(ring) == 0 {
+		t.Fatal("gpt-5.5 should expose reasoning effort levels")
+	}
+	names := make([]string, 0, len(ring))
+	for _, effort := range ring {
+		names = append(names, string(effort))
+	}
+	want := "cycle reasoning effort (auto \u2192 " + strings.Join(names, " \u2192 ") + ")"
+	for _, group := range m.buildKeybindingGroups() {
+		for _, binding := range group.bindings {
+			if binding.keys == "Ctrl+T" && binding.desc != want {
+				t.Fatalf("Ctrl+T help = %q, want %q", binding.desc, want)
+			}
 		}
 	}
 }

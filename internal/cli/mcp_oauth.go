@@ -202,7 +202,7 @@ func resolveOAuthServer(deps appDeps, serverName string) (mcp.Server, error) {
 	if err != nil {
 		return mcp.Server{}, fmt.Errorf("failed to resolve workspace: %w", err)
 	}
-	cfg, err := deps.resolveMCPConfig(cwd)
+	cfg, err := resolveWorkspaceMCPConfig(deps, cwd)
 	if err != nil {
 		return mcp.Server{}, err
 	}

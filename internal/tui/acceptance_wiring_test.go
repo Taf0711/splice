@@ -137,8 +137,8 @@ func TestAcceptanceCompactCollapseInLiveView(t *testing.T) {
 	if strings.Contains(view, "no files touched") {
 		t.Fatal("acceptance: sidebar sections leaked into the compact view")
 	}
-	if !strings.Contains(view, "PIPELINE") || !strings.Contains(view, "[B] sidebar") {
-		t.Fatal("acceptance: compact view missing the pipeline strip + section tabs")
+	if !strings.Contains(view, "PIPELINE") || !strings.Contains(view, "Ctrl+B context") {
+		t.Fatalf("acceptance: compact view missing the pipeline strip + section tabs:\n%s", view)
 	}
 }
 

@@ -1,0 +1,3718 @@
+[
+ {
+  "ID": "jev-base-20260925T054734Z/fam-01-read/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "Add AdminForceSignOut(store *Store, userID string) error in admin.go",
+   "invalidate every session held by userID, reusing the SAME invalidation rule the password reset path established",
+   "Follow that convention",
+   "A user with no sessions is not an error"
+  ],
+  "Answers": {
+   "requirement_0": 0.9,
+   "requirement_1": 0.69,
+   "requirement_2": 0.76,
+   "requirement_3": 0.89
+  },
+  "Min": 0.69
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-01-read/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "Add AdminForceSignOut(store *Store, userID string) error in admin.go",
+   "invalidate every session held by userID, reusing the SAME invalidation rule the password reset path established",
+   "Follow that convention",
+   "A user with no sessions is not an error"
+  ],
+  "Answers": {
+   "requirement_0": 0.94,
+   "requirement_1": 0.81,
+   "requirement_2": 0.87,
+   "requirement_3": 0.91
+  },
+  "Min": 0.81
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-01-read/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "Add AdminForceSignOut(store *Store, userID string) error in admin.go",
+   "invalidate every session held by userID, reusing the SAME invalidation rule the password reset path established",
+   "Follow that convention",
+   "A user with no sessions is not an error"
+  ],
+  "Answers": {
+   "requirement_0": 0.97,
+   "requirement_1": 0.86,
+   "requirement_2": 0.84,
+   "requirement_3": 0.97
+  },
+  "Min": 0.84
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-01-read/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "Add AdminForceSignOut(store *Store, userID string) error in admin.go",
+   "invalidate every session held by userID, reusing the SAME invalidation rule the password reset path established",
+   "Follow that convention",
+   "A user with no sessions is not an error"
+  ],
+  "Answers": {
+   "requirement_0": 0.96,
+   "requirement_1": 0.72,
+   "requirement_2": 0.74,
+   "requirement_3": 0.97
+  },
+  "Min": 0.72
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-01-read/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "Add AdminForceSignOut(store *Store, userID string) error in admin.go",
+   "invalidate every session held by userID, reusing the SAME invalidation rule the password reset path established",
+   "Follow that convention",
+   "A user with no sessions is not an error"
+  ],
+  "Answers": {
+   "requirement_0": 0.97,
+   "requirement_1": 0.85,
+   "requirement_2": 0.83,
+   "requirement_3": 0.97
+  },
+  "Min": 0.83
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-01-read/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "Add AdminForceSignOut(store *Store, userID string) error in admin.go",
+   "invalidate every session held by userID, reusing the SAME invalidation rule the password reset path established",
+   "Follow that convention",
+   "A user with no sessions is not an error"
+  ],
+  "Answers": {
+   "requirement_0": 0.92,
+   "requirement_1": 0.75,
+   "requirement_2": 0.81,
+   "requirement_3": 0.87
+  },
+  "Min": 0.75
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-01-write/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "Add ResetPassword(userID string) error to Store in session.go",
+   "delete every session whose User matches userID (no per-user index, so scan) and return nil, or ErrNotFound when none match",
+   "Wire it nowhere else",
+   "the method is the deliverable"
+  ],
+  "Answers": {
+   "requirement_0": 0.92,
+   "requirement_1": 0.91,
+   "requirement_2": 0.91,
+   "requirement_3": 0.78
+  },
+  "Min": 0.78
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-01-write/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "Add ResetPassword(userID string) error to Store in session.go",
+   "delete every session whose User matches userID (no per-user index, so scan) and return nil, or ErrNotFound when none match",
+   "Wire it nowhere else",
+   "the method is the deliverable"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.97,
+   "requirement_2": 0.94,
+   "requirement_3": 0.88
+  },
+  "Min": 0.88
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-01-write/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "Add ResetPassword(userID string) error to Store in session.go",
+   "delete every session whose User matches userID (no per-user index, so scan) and return nil, or ErrNotFound when none match",
+   "Wire it nowhere else",
+   "the method is the deliverable"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.97,
+   "requirement_2": 0.94,
+   "requirement_3": 0.88
+  },
+  "Min": 0.88
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-01-write/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "Add ResetPassword(userID string) error to Store in session.go",
+   "delete every session whose User matches userID (no per-user index, so scan) and return nil, or ErrNotFound when none match",
+   "Wire it nowhere else",
+   "the method is the deliverable"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.96,
+   "requirement_2": 0.94,
+   "requirement_3": 0.89
+  },
+  "Min": 0.89
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-01-write/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "Add ResetPassword(userID string) error to Store in session.go",
+   "delete every session whose User matches userID (no per-user index, so scan) and return nil, or ErrNotFound when none match",
+   "Wire it nowhere else",
+   "the method is the deliverable"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.96,
+   "requirement_2": 0.94,
+   "requirement_3": 0.89
+  },
+  "Min": 0.89
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-01-write/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "Add ResetPassword(userID string) error to Store in session.go",
+   "delete every session whose User matches userID (no per-user index, so scan) and return nil, or ErrNotFound when none match",
+   "Wire it nowhere else",
+   "the method is the deliverable"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.97,
+   "requirement_2": 0.95,
+   "requirement_3": 0.88
+  },
+  "Min": 0.88
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-02-read/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "The sweep/eviction logic (any code that removes expired sessions) must use the SAME configured TTL source of truth rather than its own duration literal",
+   "Refactor so every expiry decision reads the single sessionTTL constant",
+   "Behavior must not change"
+  ],
+  "Answers": {
+   "requirement_0": 0.04,
+   "requirement_1": 0.03,
+   "requirement_2": 0.1
+  },
+  "Min": 0.03
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-02-read/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "The sweep/eviction logic (any code that removes expired sessions) must use the SAME configured TTL source of truth rather than its own duration literal",
+   "Refactor so every expiry decision reads the single sessionTTL constant",
+   "Behavior must not change"
+  ],
+  "Answers": {
+   "requirement_0": 0.03,
+   "requirement_1": 0.03,
+   "requirement_2": 0.12
+  },
+  "Min": 0.03
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-02-read/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "The sweep/eviction logic (any code that removes expired sessions) must use the SAME configured TTL source of truth rather than its own duration literal",
+   "Refactor so every expiry decision reads the single sessionTTL constant",
+   "Behavior must not change"
+  ],
+  "Answers": {
+   "requirement_0": 0.89,
+   "requirement_1": 0.88,
+   "requirement_2": 0.87
+  },
+  "Min": 0.87
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-02-read/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "The sweep/eviction logic (any code that removes expired sessions) must use the SAME configured TTL source of truth rather than its own duration literal",
+   "Refactor so every expiry decision reads the single sessionTTL constant",
+   "Behavior must not change"
+  ],
+  "Answers": {
+   "requirement_0": 0.05,
+   "requirement_1": 0.05,
+   "requirement_2": 0.35
+  },
+  "Min": 0.05
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-02-read/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "The sweep/eviction logic (any code that removes expired sessions) must use the SAME configured TTL source of truth rather than its own duration literal",
+   "Refactor so every expiry decision reads the single sessionTTL constant",
+   "Behavior must not change"
+  ],
+  "Answers": {
+   "requirement_0": 0.1,
+   "requirement_1": 0.11,
+   "requirement_2": 0.14
+  },
+  "Min": 0.1
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-02-read/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "The sweep/eviction logic (any code that removes expired sessions) must use the SAME configured TTL source of truth rather than its own duration literal",
+   "Refactor so every expiry decision reads the single sessionTTL constant",
+   "Behavior must not change"
+  ],
+  "Answers": {
+   "requirement_0": 0.04,
+   "requirement_1": 0.03,
+   "requirement_2": 0.1
+  },
+  "Min": 0.03
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-02-write/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "The session TTL is hard-coded to 30 minutes in main.go",
+   "Add a package-level const sessionTTL = 30 * time.Minute and use it everywhere the TTL is needed, so there is one source of truth for the expiry duration"
+  ],
+  "Answers": {
+   "requirement_0": 0.7,
+   "requirement_1": 0.68
+  },
+  "Min": 0.68
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-02-write/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "The session TTL is hard-coded to 30 minutes in main.go",
+   "Add a package-level const sessionTTL = 30 * time.Minute and use it everywhere the TTL is needed, so there is one source of truth for the expiry duration"
+  ],
+  "Answers": {
+   "requirement_0": 0.68,
+   "requirement_1": 0.66
+  },
+  "Min": 0.66
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-02-write/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "The session TTL is hard-coded to 30 minutes in main.go",
+   "Add a package-level const sessionTTL = 30 * time.Minute and use it everywhere the TTL is needed, so there is one source of truth for the expiry duration"
+  ],
+  "Answers": {
+   "requirement_0": 0.67,
+   "requirement_1": 0.67
+  },
+  "Min": 0.67
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-02-write/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "The session TTL is hard-coded to 30 minutes in main.go",
+   "Add a package-level const sessionTTL = 30 * time.Minute and use it everywhere the TTL is needed, so there is one source of truth for the expiry duration"
+  ],
+  "Answers": {
+   "requirement_0": 0.67,
+   "requirement_1": 0.67
+  },
+  "Min": 0.67
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-02-write/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "The session TTL is hard-coded to 30 minutes in main.go",
+   "Add a package-level const sessionTTL = 30 * time.Minute and use it everywhere the TTL is needed, so there is one source of truth for the expiry duration"
+  ],
+  "Answers": {
+   "requirement_0": 0.67,
+   "requirement_1": 0.66
+  },
+  "Min": 0.66
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-02-write/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "The session TTL is hard-coded to 30 minutes in main.go",
+   "Add a package-level const sessionTTL = 30 * time.Minute and use it everywhere the TTL is needed, so there is one source of truth for the expiry duration"
+  ],
+  "Answers": {
+   "requirement_0": 0.63,
+   "requirement_1": 0.63
+  },
+  "Min": 0.63
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-03-read/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "Add DeleteAllForUser(userID string) int to Store in session.go",
+   "delete every session of the user, return the count",
+   "It MUST follow the idempotence contract TestDeleteIdempotent pinned",
+   "zero sessions returns 0, not an error",
+   "Pin it with TestDeleteAllForUserIdempotent"
+  ],
+  "Answers": {
+   "requirement_0": 0.95,
+   "requirement_1": 0.98,
+   "requirement_2": 0.94,
+   "requirement_3": 0.98,
+   "requirement_4": 0.97
+  },
+  "Min": 0.94
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-03-read/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "Add DeleteAllForUser(userID string) int to Store in session.go",
+   "delete every session of the user, return the count",
+   "It MUST follow the idempotence contract TestDeleteIdempotent pinned",
+   "zero sessions returns 0, not an error",
+   "Pin it with TestDeleteAllForUserIdempotent"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.98,
+   "requirement_2": 0.93,
+   "requirement_3": 0.97,
+   "requirement_4": 0.98
+  },
+  "Min": 0.93
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-03-read/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "Add DeleteAllForUser(userID string) int to Store in session.go",
+   "delete every session of the user, return the count",
+   "It MUST follow the idempotence contract TestDeleteIdempotent pinned",
+   "zero sessions returns 0, not an error",
+   "Pin it with TestDeleteAllForUserIdempotent"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.98,
+   "requirement_2": 0.94,
+   "requirement_3": 0.98,
+   "requirement_4": 0.98
+  },
+  "Min": 0.94
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-03-read/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "Add DeleteAllForUser(userID string) int to Store in session.go",
+   "delete every session of the user, return the count",
+   "It MUST follow the idempotence contract TestDeleteIdempotent pinned",
+   "zero sessions returns 0, not an error",
+   "Pin it with TestDeleteAllForUserIdempotent"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.98,
+   "requirement_2": 0.94,
+   "requirement_3": 0.98,
+   "requirement_4": 0.98
+  },
+  "Min": 0.94
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-03-read/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "Add DeleteAllForUser(userID string) int to Store in session.go",
+   "delete every session of the user, return the count",
+   "It MUST follow the idempotence contract TestDeleteIdempotent pinned",
+   "zero sessions returns 0, not an error",
+   "Pin it with TestDeleteAllForUserIdempotent"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.98,
+   "requirement_2": 0.94,
+   "requirement_3": 0.98,
+   "requirement_4": 0.98
+  },
+  "Min": 0.94
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-03-read/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "Add DeleteAllForUser(userID string) int to Store in session.go",
+   "delete every session of the user, return the count",
+   "It MUST follow the idempotence contract TestDeleteIdempotent pinned",
+   "zero sessions returns 0, not an error",
+   "Pin it with TestDeleteAllForUserIdempotent"
+  ],
+  "Answers": {
+   "requirement_0": 0.97,
+   "requirement_1": 0.98,
+   "requirement_2": 0.93,
+   "requirement_3": 0.98,
+   "requirement_4": 0.98
+  },
+  "Min": 0.93
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-03-write/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "Verify Store.Delete in session.go is idempotent",
+   "deleting an unknown or already-deleted id is a silent no-op (no error, no state change)",
+   "Pin it with TestDeleteIdempotent in session_test.go",
+   "delete twice, delete an unknown id, assert no panic and Len unchanged"
+  ],
+  "Answers": {
+   "requirement_0": 0.72,
+   "requirement_1": 0.58,
+   "requirement_2": 0.96,
+   "requirement_3": 0.94
+  },
+  "Min": 0.58
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-03-write/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "Verify Store.Delete in session.go is idempotent",
+   "deleting an unknown or already-deleted id is a silent no-op (no error, no state change)",
+   "Pin it with TestDeleteIdempotent in session_test.go",
+   "delete twice, delete an unknown id, assert no panic and Len unchanged"
+  ],
+  "Answers": {
+   "requirement_0": 0.78,
+   "requirement_1": 0.62,
+   "requirement_2": 0.96,
+   "requirement_3": 0.94
+  },
+  "Min": 0.62
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-03-write/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "Verify Store.Delete in session.go is idempotent",
+   "deleting an unknown or already-deleted id is a silent no-op (no error, no state change)",
+   "Pin it with TestDeleteIdempotent in session_test.go",
+   "delete twice, delete an unknown id, assert no panic and Len unchanged"
+  ],
+  "Answers": {
+   "requirement_0": 0.74,
+   "requirement_1": 0.62,
+   "requirement_2": 0.96,
+   "requirement_3": 0.93
+  },
+  "Min": 0.62
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-03-write/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "Verify Store.Delete in session.go is idempotent",
+   "deleting an unknown or already-deleted id is a silent no-op (no error, no state change)",
+   "Pin it with TestDeleteIdempotent in session_test.go",
+   "delete twice, delete an unknown id, assert no panic and Len unchanged"
+  ],
+  "Answers": {
+   "requirement_0": 0.74,
+   "requirement_1": 0.61,
+   "requirement_2": 0.96,
+   "requirement_3": 0.95
+  },
+  "Min": 0.61
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-03-write/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "Verify Store.Delete in session.go is idempotent",
+   "deleting an unknown or already-deleted id is a silent no-op (no error, no state change)",
+   "Pin it with TestDeleteIdempotent in session_test.go",
+   "delete twice, delete an unknown id, assert no panic and Len unchanged"
+  ],
+  "Answers": {
+   "requirement_0": 0.71,
+   "requirement_1": 0.6,
+   "requirement_2": 0.97,
+   "requirement_3": 0.95
+  },
+  "Min": 0.6
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-03-write/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "Verify Store.Delete in session.go is idempotent",
+   "deleting an unknown or already-deleted id is a silent no-op (no error, no state change)",
+   "Pin it with TestDeleteIdempotent in session_test.go",
+   "delete twice, delete an unknown id, assert no panic and Len unchanged"
+  ],
+  "Answers": {
+   "requirement_0": 0.73,
+   "requirement_1": 0.6,
+   "requirement_2": 0.97,
+   "requirement_3": 0.95
+  },
+  "Min": 0.6
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-04-read/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "Add an AdminSessionView struct in admin.go (fields ID, User, Created, LastSeen, plus Admin bool) that reuses the SAME explicit JSON tag convention established for Session, and return it from a new adminSessionsHandler",
+   "Follow the tag convention from the Session work"
+  ],
+  "Answers": {
+   "requirement_0": 0.69,
+   "requirement_1": 0.76
+  },
+  "Min": 0.69
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-04-read/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "Add an AdminSessionView struct in admin.go (fields ID, User, Created, LastSeen, plus Admin bool) that reuses the SAME explicit JSON tag convention established for Session, and return it from a new adminSessionsHandler",
+   "Follow the tag convention from the Session work"
+  ],
+  "Answers": {
+   "requirement_0": 0.76,
+   "requirement_1": 0.73
+  },
+  "Min": 0.73
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-04-read/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "Add an AdminSessionView struct in admin.go (fields ID, User, Created, LastSeen, plus Admin bool) that reuses the SAME explicit JSON tag convention established for Session, and return it from a new adminSessionsHandler",
+   "Follow the tag convention from the Session work"
+  ],
+  "Answers": {
+   "requirement_0": 0.5,
+   "requirement_1": 0.67
+  },
+  "Min": 0.5
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-04-read/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "Add an AdminSessionView struct in admin.go (fields ID, User, Created, LastSeen, plus Admin bool) that reuses the SAME explicit JSON tag convention established for Session, and return it from a new adminSessionsHandler",
+   "Follow the tag convention from the Session work"
+  ],
+  "Answers": {
+   "requirement_0": 0.26,
+   "requirement_1": 0.67
+  },
+  "Min": 0.26
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-04-read/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "Add an AdminSessionView struct in admin.go (fields ID, User, Created, LastSeen, plus Admin bool) that reuses the SAME explicit JSON tag convention established for Session, and return it from a new adminSessionsHandler",
+   "Follow the tag convention from the Session work"
+  ],
+  "Answers": {
+   "requirement_0": 0.85,
+   "requirement_1": 0.8
+  },
+  "Min": 0.8
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-04-write/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "The Session struct serializes with Go's default field names",
+   "Give Session explicit JSON field tags in session.go",
+   "ID stays \"ID\", User stays \"User\", Created and LastSeen become \"Created\" and \"LastSeen\" (unchanged names, now explicit)",
+   "The wire format must not change"
+  ],
+  "Answers": {
+   "requirement_0": 0.54,
+   "requirement_1": 0.98,
+   "requirement_2": 0.97,
+   "requirement_3": 0.95
+  },
+  "Min": 0.54
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-04-write/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "The Session struct serializes with Go's default field names",
+   "Give Session explicit JSON field tags in session.go",
+   "ID stays \"ID\", User stays \"User\", Created and LastSeen become \"Created\" and \"LastSeen\" (unchanged names, now explicit)",
+   "The wire format must not change"
+  ],
+  "Answers": {
+   "requirement_0": 0.46,
+   "requirement_1": 0.98,
+   "requirement_2": 0.98,
+   "requirement_3": 0.97
+  },
+  "Min": 0.46
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-04-write/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "The Session struct serializes with Go's default field names",
+   "Give Session explicit JSON field tags in session.go",
+   "ID stays \"ID\", User stays \"User\", Created and LastSeen become \"Created\" and \"LastSeen\" (unchanged names, now explicit)",
+   "The wire format must not change"
+  ],
+  "Answers": {
+   "requirement_0": 0.44,
+   "requirement_1": 0.98,
+   "requirement_2": 0.98,
+   "requirement_3": 0.96
+  },
+  "Min": 0.44
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-04-write/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "The Session struct serializes with Go's default field names",
+   "Give Session explicit JSON field tags in session.go",
+   "ID stays \"ID\", User stays \"User\", Created and LastSeen become \"Created\" and \"LastSeen\" (unchanged names, now explicit)",
+   "The wire format must not change"
+  ],
+  "Answers": {
+   "requirement_0": 0.46,
+   "requirement_1": 0.98,
+   "requirement_2": 0.97,
+   "requirement_3": 0.95
+  },
+  "Min": 0.46
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-04-write/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "The Session struct serializes with Go's default field names",
+   "Give Session explicit JSON field tags in session.go",
+   "ID stays \"ID\", User stays \"User\", Created and LastSeen become \"Created\" and \"LastSeen\" (unchanged names, now explicit)",
+   "The wire format must not change"
+  ],
+  "Answers": {
+   "requirement_0": 0.44,
+   "requirement_1": 0.98,
+   "requirement_2": 0.97,
+   "requirement_3": 0.96
+  },
+  "Min": 0.44
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-04-write/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "The Session struct serializes with Go's default field names",
+   "Give Session explicit JSON field tags in session.go",
+   "ID stays \"ID\", User stays \"User\", Created and LastSeen become \"Created\" and \"LastSeen\" (unchanged names, now explicit)",
+   "The wire format must not change"
+  ],
+  "Answers": {
+   "requirement_0": 0.48,
+   "requirement_1": 0.98,
+   "requirement_2": 0.98,
+   "requirement_3": 0.96
+  },
+  "Min": 0.48
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-05-read/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "Add adminSessionHandler(store *Store) http.HandlerFunc in admin.go for GET /admin/session?id=X",
+   "It must map store errors with the SAME mapStoreError table the /session handler uses (refactor it in main.go if needed)",
+   "that table stays the single source of truth for store-error-to-status translation"
+  ],
+  "Answers": {
+   "requirement_0": 0.95,
+   "requirement_1": 0.74,
+   "requirement_2": 0.78
+  },
+  "Min": 0.74
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-05-read/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "Add adminSessionHandler(store *Store) http.HandlerFunc in admin.go for GET /admin/session?id=X",
+   "It must map store errors with the SAME mapStoreError table the /session handler uses (refactor it in main.go if needed)",
+   "that table stays the single source of truth for store-error-to-status translation"
+  ],
+  "Answers": {
+   "requirement_0": 0.93,
+   "requirement_1": 0.62,
+   "requirement_2": 0.57
+  },
+  "Min": 0.57
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-05-read/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "Add adminSessionHandler(store *Store) http.HandlerFunc in admin.go for GET /admin/session?id=X",
+   "It must map store errors with the SAME mapStoreError table the /session handler uses (refactor it in main.go if needed)",
+   "that table stays the single source of truth for store-error-to-status translation"
+  ],
+  "Answers": {
+   "requirement_0": 0.93,
+   "requirement_1": 0.71,
+   "requirement_2": 0.74
+  },
+  "Min": 0.71
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-05-read/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "Add adminSessionHandler(store *Store) http.HandlerFunc in admin.go for GET /admin/session?id=X",
+   "It must map store errors with the SAME mapStoreError table the /session handler uses (refactor it in main.go if needed)",
+   "that table stays the single source of truth for store-error-to-status translation"
+  ],
+  "Answers": {
+   "requirement_0": 0.93,
+   "requirement_1": 0.59,
+   "requirement_2": 0.62
+  },
+  "Min": 0.59
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-05-read/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "Add adminSessionHandler(store *Store) http.HandlerFunc in admin.go for GET /admin/session?id=X",
+   "It must map store errors with the SAME mapStoreError table the /session handler uses (refactor it in main.go if needed)",
+   "that table stays the single source of truth for store-error-to-status translation"
+  ],
+  "Answers": {
+   "requirement_0": 0.97,
+   "requirement_1": 0.78,
+   "requirement_2": 0.85
+  },
+  "Min": 0.78
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-05-read/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "Add adminSessionHandler(store *Store) http.HandlerFunc in admin.go for GET /admin/session?id=X",
+   "It must map store errors with the SAME mapStoreError table the /session handler uses (refactor it in main.go if needed)",
+   "that table stays the single source of truth for store-error-to-status translation"
+  ],
+  "Answers": {
+   "requirement_0": 0.94,
+   "requirement_1": 0.69,
+   "requirement_2": 0.73
+  },
+  "Min": 0.69
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-05-write/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "Codify the store-error mapping in main.go as func mapStoreError(err error) int",
+   "ErrNotFound -\u003e 404, anything else -\u003e 500 (the fixture has only ErrNotFound",
+   "leave TODOs for other sentinels)",
+   "Use it from every store-failure branch of sessionHandler so statuses have one source of truth"
+  ],
+  "Answers": {
+   "requirement_0": 0.96,
+   "requirement_1": 0.95,
+   "requirement_2": 0.95,
+   "requirement_3": 0.54
+  },
+  "Min": 0.54
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-05-write/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "Codify the store-error mapping in main.go as func mapStoreError(err error) int",
+   "ErrNotFound -\u003e 404, anything else -\u003e 500 (the fixture has only ErrNotFound",
+   "leave TODOs for other sentinels)",
+   "Use it from every store-failure branch of sessionHandler so statuses have one source of truth"
+  ],
+  "Answers": {
+   "requirement_0": 0.97,
+   "requirement_1": 0.94,
+   "requirement_2": 0.95,
+   "requirement_3": 0.52
+  },
+  "Min": 0.52
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-05-write/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "Codify the store-error mapping in main.go as func mapStoreError(err error) int",
+   "ErrNotFound -\u003e 404, anything else -\u003e 500 (the fixture has only ErrNotFound",
+   "leave TODOs for other sentinels)",
+   "Use it from every store-failure branch of sessionHandler so statuses have one source of truth"
+  ],
+  "Answers": {
+   "requirement_0": 0.96,
+   "requirement_1": 0.94,
+   "requirement_2": 0.95,
+   "requirement_3": 0.57
+  },
+  "Min": 0.57
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-05-write/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "Codify the store-error mapping in main.go as func mapStoreError(err error) int",
+   "ErrNotFound -\u003e 404, anything else -\u003e 500 (the fixture has only ErrNotFound",
+   "leave TODOs for other sentinels)",
+   "Use it from every store-failure branch of sessionHandler so statuses have one source of truth"
+  ],
+  "Answers": {
+   "requirement_0": 0.97,
+   "requirement_1": 0.94,
+   "requirement_2": 0.95,
+   "requirement_3": 0.5
+  },
+  "Min": 0.5
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-05-write/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "Codify the store-error mapping in main.go as func mapStoreError(err error) int",
+   "ErrNotFound -\u003e 404, anything else -\u003e 500 (the fixture has only ErrNotFound",
+   "leave TODOs for other sentinels)",
+   "Use it from every store-failure branch of sessionHandler so statuses have one source of truth"
+  ],
+  "Answers": {
+   "requirement_0": 0.96,
+   "requirement_1": 0.89,
+   "requirement_2": 0.95,
+   "requirement_3": 0.52
+  },
+  "Min": 0.52
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-05-write/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "Codify the store-error mapping in main.go as func mapStoreError(err error) int",
+   "ErrNotFound -\u003e 404, anything else -\u003e 500 (the fixture has only ErrNotFound",
+   "leave TODOs for other sentinels)",
+   "Use it from every store-failure branch of sessionHandler so statuses have one source of truth"
+  ],
+  "Answers": {
+   "requirement_0": 0.97,
+   "requirement_1": 0.95,
+   "requirement_2": 0.95,
+   "requirement_3": 0.59
+  },
+  "Min": 0.59
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-06-read/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "Add SessionsForUser(user string) []Session to Store in session.go",
+   "return that user's live sessions following the SAME locking discipline the audit established (read paths take RLock and must not mutate)",
+   "Add the same style of lock comment",
+   "The verifier runs under -race"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.94,
+   "requirement_2": 0.88,
+   "requirement_3": 0.73
+  },
+  "Min": 0.73
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-06-read/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "Add SessionsForUser(user string) []Session to Store in session.go",
+   "return that user's live sessions following the SAME locking discipline the audit established (read paths take RLock and must not mutate)",
+   "Add the same style of lock comment",
+   "The verifier runs under -race"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.95,
+   "requirement_2": 0.89,
+   "requirement_3": 0.72
+  },
+  "Min": 0.72
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-06-read/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "Add SessionsForUser(user string) []Session to Store in session.go",
+   "return that user's live sessions following the SAME locking discipline the audit established (read paths take RLock and must not mutate)",
+   "Add the same style of lock comment",
+   "The verifier runs under -race"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.96,
+   "requirement_2": 0.9,
+   "requirement_3": 0.72
+  },
+  "Min": 0.72
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-06-read/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "Add SessionsForUser(user string) []Session to Store in session.go",
+   "return that user's live sessions following the SAME locking discipline the audit established (read paths take RLock and must not mutate)",
+   "Add the same style of lock comment",
+   "The verifier runs under -race"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.94,
+   "requirement_2": 0.89,
+   "requirement_3": 0.68
+  },
+  "Min": 0.68
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-06-read/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "Add SessionsForUser(user string) []Session to Store in session.go",
+   "return that user's live sessions following the SAME locking discipline the audit established (read paths take RLock and must not mutate)",
+   "Add the same style of lock comment",
+   "The verifier runs under -race"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.92,
+   "requirement_2": 0.89,
+   "requirement_3": 0.71
+  },
+  "Min": 0.71
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-06-read/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "Add SessionsForUser(user string) []Session to Store in session.go",
+   "return that user's live sessions following the SAME locking discipline the audit established (read paths take RLock and must not mutate)",
+   "Add the same style of lock comment",
+   "The verifier runs under -race"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.94,
+   "requirement_2": 0.93,
+   "requirement_3": 0.74
+  },
+  "Min": 0.74
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-06-write/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "Audit the locking in session.go",
+   "Get keeps Lock (it mutates LastSeen and can delete)",
+   "ensure Len takes RLock",
+   "add a comment on each method stating which lock it takes and why",
+   "No behavior change",
+   "the audit comments plus any lock correction are the deliverable"
+  ],
+  "Answers": {
+   "requirement_0": 0.9,
+   "requirement_1": 0.87,
+   "requirement_2": 0.88,
+   "requirement_3": 0.9,
+   "requirement_4": 0.93,
+   "requirement_5": 0.89
+  },
+  "Min": 0.87
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-06-write/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "Audit the locking in session.go",
+   "Get keeps Lock (it mutates LastSeen and can delete)",
+   "ensure Len takes RLock",
+   "add a comment on each method stating which lock it takes and why",
+   "No behavior change",
+   "the audit comments plus any lock correction are the deliverable"
+  ],
+  "Answers": {
+   "requirement_0": 0.88,
+   "requirement_1": 0.86,
+   "requirement_2": 0.83,
+   "requirement_3": 0.88,
+   "requirement_4": 0.9,
+   "requirement_5": 0.89
+  },
+  "Min": 0.83
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-06-write/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "Audit the locking in session.go",
+   "Get keeps Lock (it mutates LastSeen and can delete)",
+   "ensure Len takes RLock",
+   "add a comment on each method stating which lock it takes and why",
+   "No behavior change",
+   "the audit comments plus any lock correction are the deliverable"
+  ],
+  "Answers": {
+   "requirement_0": 0.87,
+   "requirement_1": 0.87,
+   "requirement_2": 0.86,
+   "requirement_3": 0.9,
+   "requirement_4": 0.89,
+   "requirement_5": 0.89
+  },
+  "Min": 0.86
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-06-write/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "Audit the locking in session.go",
+   "Get keeps Lock (it mutates LastSeen and can delete)",
+   "ensure Len takes RLock",
+   "add a comment on each method stating which lock it takes and why",
+   "No behavior change",
+   "the audit comments plus any lock correction are the deliverable"
+  ],
+  "Answers": {
+   "requirement_0": 0.92,
+   "requirement_1": 0.89,
+   "requirement_2": 0.87,
+   "requirement_3": 0.92,
+   "requirement_4": 0.89,
+   "requirement_5": 0.89
+  },
+  "Min": 0.87
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-06-write/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "Audit the locking in session.go",
+   "Get keeps Lock (it mutates LastSeen and can delete)",
+   "ensure Len takes RLock",
+   "add a comment on each method stating which lock it takes and why",
+   "No behavior change",
+   "the audit comments plus any lock correction are the deliverable"
+  ],
+  "Answers": {
+   "requirement_0": 0.9,
+   "requirement_1": 0.87,
+   "requirement_2": 0.87,
+   "requirement_3": 0.88,
+   "requirement_4": 0.86,
+   "requirement_5": 0.87
+  },
+  "Min": 0.86
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-06-write/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "Audit the locking in session.go",
+   "Get keeps Lock (it mutates LastSeen and can delete)",
+   "ensure Len takes RLock",
+   "add a comment on each method stating which lock it takes and why",
+   "No behavior change",
+   "the audit comments plus any lock correction are the deliverable"
+  ],
+  "Answers": {
+   "requirement_0": 0.88,
+   "requirement_1": 0.86,
+   "requirement_2": 0.81,
+   "requirement_3": 0.87,
+   "requirement_4": 0.87,
+   "requirement_5": 0.9
+  },
+  "Min": 0.81
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-07-read/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "Add newSessionMux(store *Store) *http.ServeMux in main.go that registers the handlers, and a table-driven TestSessionLookupTable in lookup_table_test.go covering GET /session on a fresh mux (200 live, 404 missing, 405 wrong method) in the SAME table style as the expiry table",
+   "One table, controllable clock"
+  ],
+  "Answers": {
+   "requirement_0": 0.93,
+   "requirement_1": 0.92
+  },
+  "Min": 0.92
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-07-read/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "Add newSessionMux(store *Store) *http.ServeMux in main.go that registers the handlers, and a table-driven TestSessionLookupTable in lookup_table_test.go covering GET /session on a fresh mux (200 live, 404 missing, 405 wrong method) in the SAME table style as the expiry table",
+   "One table, controllable clock"
+  ],
+  "Answers": {
+   "requirement_0": 0.86,
+   "requirement_1": 0.91
+  },
+  "Min": 0.86
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-07-read/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "Add newSessionMux(store *Store) *http.ServeMux in main.go that registers the handlers, and a table-driven TestSessionLookupTable in lookup_table_test.go covering GET /session on a fresh mux (200 live, 404 missing, 405 wrong method) in the SAME table style as the expiry table",
+   "One table, controllable clock"
+  ],
+  "Answers": {
+   "requirement_0": 0.93,
+   "requirement_1": 0.93
+  },
+  "Min": 0.93
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-07-read/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "Add newSessionMux(store *Store) *http.ServeMux in main.go that registers the handlers, and a table-driven TestSessionLookupTable in lookup_table_test.go covering GET /session on a fresh mux (200 live, 404 missing, 405 wrong method) in the SAME table style as the expiry table",
+   "One table, controllable clock"
+  ],
+  "Answers": {
+   "requirement_0": 0.92,
+   "requirement_1": 0.9
+  },
+  "Min": 0.9
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-07-read/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "Add newSessionMux(store *Store) *http.ServeMux in main.go that registers the handlers, and a table-driven TestSessionLookupTable in lookup_table_test.go covering GET /session on a fresh mux (200 live, 404 missing, 405 wrong method) in the SAME table style as the expiry table",
+   "One table, controllable clock"
+  ],
+  "Answers": {
+   "requirement_0": 0.93,
+   "requirement_1": 0.92
+  },
+  "Min": 0.92
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-07-read/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "Add newSessionMux(store *Store) *http.ServeMux in main.go that registers the handlers, and a table-driven TestSessionLookupTable in lookup_table_test.go covering GET /session on a fresh mux (200 live, 404 missing, 405 wrong method) in the SAME table style as the expiry table",
+   "One table, controllable clock"
+  ],
+  "Answers": {
+   "requirement_0": 0.94,
+   "requirement_1": 0.92
+  },
+  "Min": 0.92
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-07-write/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "The expiry tests are scattered",
+   "create expiry_table_test.go in package main with a table-driven TestSessionExpiryTable covering fresh-readable, exactly-ttl-live, one-second-past-expired, and expired-dropped cases, all against a controllable store.now clock",
+   "All cases must live in ONE table"
+  ],
+  "Answers": {
+   "requirement_0": 0.77,
+   "requirement_1": 0.89,
+   "requirement_2": 0.97
+  },
+  "Min": 0.77
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-07-write/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "The expiry tests are scattered",
+   "create expiry_table_test.go in package main with a table-driven TestSessionExpiryTable covering fresh-readable, exactly-ttl-live, one-second-past-expired, and expired-dropped cases, all against a controllable store.now clock",
+   "All cases must live in ONE table"
+  ],
+  "Answers": {
+   "requirement_0": 0.76,
+   "requirement_1": 0.9,
+   "requirement_2": 0.96
+  },
+  "Min": 0.76
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-07-write/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "The expiry tests are scattered",
+   "create expiry_table_test.go in package main with a table-driven TestSessionExpiryTable covering fresh-readable, exactly-ttl-live, one-second-past-expired, and expired-dropped cases, all against a controllable store.now clock",
+   "All cases must live in ONE table"
+  ],
+  "Answers": {
+   "requirement_0": 0.71,
+   "requirement_1": 0.84,
+   "requirement_2": 0.96
+  },
+  "Min": 0.71
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-07-write/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "The expiry tests are scattered",
+   "create expiry_table_test.go in package main with a table-driven TestSessionExpiryTable covering fresh-readable, exactly-ttl-live, one-second-past-expired, and expired-dropped cases, all against a controllable store.now clock",
+   "All cases must live in ONE table"
+  ],
+  "Answers": {
+   "requirement_0": 0.62,
+   "requirement_1": 0.84,
+   "requirement_2": 0.97
+  },
+  "Min": 0.62
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-07-write/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "The expiry tests are scattered",
+   "create expiry_table_test.go in package main with a table-driven TestSessionExpiryTable covering fresh-readable, exactly-ttl-live, one-second-past-expired, and expired-dropped cases, all against a controllable store.now clock",
+   "All cases must live in ONE table"
+  ],
+  "Answers": {
+   "requirement_0": 0.78,
+   "requirement_1": 0.9,
+   "requirement_2": 0.97
+  },
+  "Min": 0.78
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-07-write/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "The expiry tests are scattered",
+   "create expiry_table_test.go in package main with a table-driven TestSessionExpiryTable covering fresh-readable, exactly-ttl-live, one-second-past-expired, and expired-dropped cases, all against a controllable store.now clock",
+   "All cases must live in ONE table"
+  ],
+  "Answers": {
+   "requirement_0": 0.75,
+   "requirement_1": 0.92,
+   "requirement_2": 0.97
+  },
+  "Min": 0.75
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-08-read/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "Create session_unix.go with a //go:build unix tag containing package main func platformNote() string { return \"unix\" }, and session_other.go with //go:build !unix returning \"other\"",
+   "The go.mod toolchain line stays pinned"
+  ],
+  "Answers": {
+   "requirement_0": 0.93,
+   "requirement_1": 0.36
+  },
+  "Min": 0.36
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-08-read/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "Create session_unix.go with a //go:build unix tag containing package main func platformNote() string { return \"unix\" }, and session_other.go with //go:build !unix returning \"other\"",
+   "The go.mod toolchain line stays pinned"
+  ],
+  "Answers": {
+   "requirement_0": 0.94,
+   "requirement_1": 0.38
+  },
+  "Min": 0.38
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-08-read/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "Create session_unix.go with a //go:build unix tag containing package main func platformNote() string { return \"unix\" }, and session_other.go with //go:build !unix returning \"other\"",
+   "The go.mod toolchain line stays pinned"
+  ],
+  "Answers": {
+   "requirement_0": 0.97,
+   "requirement_1": 0.43
+  },
+  "Min": 0.43
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-08-read/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "Create session_unix.go with a //go:build unix tag containing package main func platformNote() string { return \"unix\" }, and session_other.go with //go:build !unix returning \"other\"",
+   "The go.mod toolchain line stays pinned"
+  ],
+  "Answers": {
+   "requirement_0": 0.95,
+   "requirement_1": 0.38
+  },
+  "Min": 0.38
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-08-read/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "Create session_unix.go with a //go:build unix tag containing package main func platformNote() string { return \"unix\" }, and session_other.go with //go:build !unix returning \"other\"",
+   "The go.mod toolchain line stays pinned"
+  ],
+  "Answers": {
+   "requirement_0": 0.92,
+   "requirement_1": 0.39
+  },
+  "Min": 0.39
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-08-read/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "Create session_unix.go with a //go:build unix tag containing package main func platformNote() string { return \"unix\" }, and session_other.go with //go:build !unix returning \"other\"",
+   "The go.mod toolchain line stays pinned"
+  ],
+  "Answers": {
+   "requirement_0": 0.96,
+   "requirement_1": 0.36
+  },
+  "Min": 0.36
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-08-write/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "In go.mod, make the Go version line explicit (go 1.26) and add a .go-version file containing 1.26 so tooling reads the pinned toolchain",
+   "Nothing else changes"
+  ],
+  "Answers": {
+   "requirement_0": 0.17,
+   "requirement_1": 0.4
+  },
+  "Min": 0.17
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-08-write/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "In go.mod, make the Go version line explicit (go 1.26) and add a .go-version file containing 1.26 so tooling reads the pinned toolchain",
+   "Nothing else changes"
+  ],
+  "Answers": {
+   "requirement_0": 0.91,
+   "requirement_1": 0.63
+  },
+  "Min": 0.63
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-08-write/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "In go.mod, make the Go version line explicit (go 1.26) and add a .go-version file containing 1.26 so tooling reads the pinned toolchain",
+   "Nothing else changes"
+  ],
+  "Answers": {
+   "requirement_0": 0.19,
+   "requirement_1": 0.4
+  },
+  "Min": 0.19
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-08-write/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "In go.mod, make the Go version line explicit (go 1.26) and add a .go-version file containing 1.26 so tooling reads the pinned toolchain",
+   "Nothing else changes"
+  ],
+  "Answers": {
+   "requirement_0": 0.2,
+   "requirement_1": 0.4
+  },
+  "Min": 0.2
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-08-write/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "In go.mod, make the Go version line explicit (go 1.26) and add a .go-version file containing 1.26 so tooling reads the pinned toolchain",
+   "Nothing else changes"
+  ],
+  "Answers": {
+   "requirement_0": 0.22,
+   "requirement_1": 0.42
+  },
+  "Min": 0.22
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-08-write/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "In go.mod, make the Go version line explicit (go 1.26) and add a .go-version file containing 1.26 so tooling reads the pinned toolchain",
+   "Nothing else changes"
+  ],
+  "Answers": {
+   "requirement_0": 0.19,
+   "requirement_1": 0.39
+  },
+  "Min": 0.19
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-09-read/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "Extend /healthz with uptime_seconds (integer seconds since process start, tracked via a package-level start time in main)",
+   "Status stays exactly \"ok\" and sessions is unchanged",
+   "existing fields never change name or type"
+  ],
+  "Answers": {
+   "requirement_0": 0.96,
+   "requirement_1": 0.96,
+   "requirement_2": 0.95
+  },
+  "Min": 0.95
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-09-read/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "Extend /healthz with uptime_seconds (integer seconds since process start, tracked via a package-level start time in main)",
+   "Status stays exactly \"ok\" and sessions is unchanged",
+   "existing fields never change name or type"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.96,
+   "requirement_2": 0.93
+  },
+  "Min": 0.93
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-09-read/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "Extend /healthz with uptime_seconds (integer seconds since process start, tracked via a package-level start time in main)",
+   "Status stays exactly \"ok\" and sessions is unchanged",
+   "existing fields never change name or type"
+  ],
+  "Answers": {
+   "requirement_0": 0.91,
+   "requirement_1": 0.91,
+   "requirement_2": 0.89
+  },
+  "Min": 0.89
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-09-read/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "Extend /healthz with uptime_seconds (integer seconds since process start, tracked via a package-level start time in main)",
+   "Status stays exactly \"ok\" and sessions is unchanged",
+   "existing fields never change name or type"
+  ],
+  "Answers": {
+   "requirement_0": 0.67,
+   "requirement_1": 0.9,
+   "requirement_2": 0.86
+  },
+  "Min": 0.67
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-09-read/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "Extend /healthz with uptime_seconds (integer seconds since process start, tracked via a package-level start time in main)",
+   "Status stays exactly \"ok\" and sessions is unchanged",
+   "existing fields never change name or type"
+  ],
+  "Answers": {
+   "requirement_0": 0.94,
+   "requirement_1": 0.95,
+   "requirement_2": 0.94
+  },
+  "Min": 0.94
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-09-read/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "Extend /healthz with uptime_seconds (integer seconds since process start, tracked via a package-level start time in main)",
+   "Status stays exactly \"ok\" and sessions is unchanged",
+   "existing fields never change name or type"
+  ],
+  "Answers": {
+   "requirement_0": 0.97,
+   "requirement_1": 0.96,
+   "requirement_2": 0.95
+  },
+  "Min": 0.95
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-09-write/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "/healthz currently answers {\"sessions\"",
+   "Give the health payload a stable schema",
+   "add a Status field (\"ok\") alongside sessions, so the response is {\"status\":\"ok\",\"sessions\":N}",
+   "Keep 200 always"
+  ],
+  "Answers": {
+   "requirement_0": 0.75,
+   "requirement_1": 0.96,
+   "requirement_2": 0.96,
+   "requirement_3": 0.74
+  },
+  "Min": 0.74
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-09-write/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "/healthz currently answers {\"sessions\"",
+   "Give the health payload a stable schema",
+   "add a Status field (\"ok\") alongside sessions, so the response is {\"status\":\"ok\",\"sessions\":N}",
+   "Keep 200 always"
+  ],
+  "Answers": {
+   "requirement_0": 0.73,
+   "requirement_1": 0.95,
+   "requirement_2": 0.96,
+   "requirement_3": 0.8
+  },
+  "Min": 0.73
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-09-write/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "/healthz currently answers {\"sessions\"",
+   "Give the health payload a stable schema",
+   "add a Status field (\"ok\") alongside sessions, so the response is {\"status\":\"ok\",\"sessions\":N}",
+   "Keep 200 always"
+  ],
+  "Answers": {
+   "requirement_0": 0.7,
+   "requirement_1": 0.96,
+   "requirement_2": 0.93,
+   "requirement_3": 0.78
+  },
+  "Min": 0.7
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-09-write/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "/healthz currently answers {\"sessions\"",
+   "Give the health payload a stable schema",
+   "add a Status field (\"ok\") alongside sessions, so the response is {\"status\":\"ok\",\"sessions\":N}",
+   "Keep 200 always"
+  ],
+  "Answers": {
+   "requirement_0": 0.53,
+   "requirement_1": 0.81,
+   "requirement_2": 0.27,
+   "requirement_3": 0.63
+  },
+  "Min": 0.27
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-09-write/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "/healthz currently answers {\"sessions\"",
+   "Give the health payload a stable schema",
+   "add a Status field (\"ok\") alongside sessions, so the response is {\"status\":\"ok\",\"sessions\":N}",
+   "Keep 200 always"
+  ],
+  "Answers": {
+   "requirement_0": 0.66,
+   "requirement_1": 0.96,
+   "requirement_2": 0.95,
+   "requirement_3": 0.67
+  },
+  "Min": 0.66
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-09-write/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "/healthz currently answers {\"sessions\"",
+   "Give the health payload a stable schema",
+   "add a Status field (\"ok\") alongside sessions, so the response is {\"status\":\"ok\",\"sessions\":N}",
+   "Keep 200 always"
+  ],
+  "Answers": {
+   "requirement_0": 0.72,
+   "requirement_1": 0.95,
+   "requirement_2": 0.96,
+   "requirement_3": 0.72
+  },
+  "Min": 0.72
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-10-read/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "Add adminSessionHandler(store *Store) http.HandlerFunc in main.go for GET /admin/session?id=X",
+   "a read-only variant answering the same JSON as GET /session, enforcing the SAME id validation rule (invalid ids answer 400 via the store-level ErrInvalidID path, not re-implemented)"
+  ],
+  "Answers": {
+   "requirement_0": 0.96,
+   "requirement_1": 0.9
+  },
+  "Min": 0.9
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-10-read/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "Add adminSessionHandler(store *Store) http.HandlerFunc in main.go for GET /admin/session?id=X",
+   "a read-only variant answering the same JSON as GET /session, enforcing the SAME id validation rule (invalid ids answer 400 via the store-level ErrInvalidID path, not re-implemented)"
+  ],
+  "Answers": {
+   "requirement_0": 0.97,
+   "requirement_1": 0.94
+  },
+  "Min": 0.94
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-10-read/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "Add adminSessionHandler(store *Store) http.HandlerFunc in main.go for GET /admin/session?id=X",
+   "a read-only variant answering the same JSON as GET /session, enforcing the SAME id validation rule (invalid ids answer 400 via the store-level ErrInvalidID path, not re-implemented)"
+  ],
+  "Answers": {
+   "requirement_0": 0.56,
+   "requirement_1": 0.79
+  },
+  "Min": 0.56
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-10-read/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "Add adminSessionHandler(store *Store) http.HandlerFunc in main.go for GET /admin/session?id=X",
+   "a read-only variant answering the same JSON as GET /session, enforcing the SAME id validation rule (invalid ids answer 400 via the store-level ErrInvalidID path, not re-implemented)"
+  ],
+  "Answers": {
+   "requirement_0": 0.71,
+   "requirement_1": 0.91
+  },
+  "Min": 0.71
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-10-read/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "Add adminSessionHandler(store *Store) http.HandlerFunc in main.go for GET /admin/session?id=X",
+   "a read-only variant answering the same JSON as GET /session, enforcing the SAME id validation rule (invalid ids answer 400 via the store-level ErrInvalidID path, not re-implemented)"
+  ],
+  "Answers": {
+   "requirement_0": 0.96,
+   "requirement_1": 0.93
+  },
+  "Min": 0.93
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-10-read/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "Add adminSessionHandler(store *Store) http.HandlerFunc in main.go for GET /admin/session?id=X",
+   "a read-only variant answering the same JSON as GET /session, enforcing the SAME id validation rule (invalid ids answer 400 via the store-level ErrInvalidID path, not re-implemented)"
+  ],
+  "Answers": {
+   "requirement_0": 0.97,
+   "requirement_1": 0.91
+  },
+  "Min": 0.91
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-10-write/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "Session ids arrive raw from query strings",
+   "Add ValidSessionID(id string) bool to session.go (2..64 chars, ASCII letters/digits/hyphens only) and enforce it in Store.Get (return a new ErrInvalidID) and in main.go's POST/GET branches (400)",
+   "Document the rule in a comment on ValidSessionID"
+  ],
+  "Answers": {
+   "requirement_0": 0.58,
+   "requirement_1": 0.97,
+   "requirement_2": 0.98
+  },
+  "Min": 0.58
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-10-write/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "Session ids arrive raw from query strings",
+   "Add ValidSessionID(id string) bool to session.go (2..64 chars, ASCII letters/digits/hyphens only) and enforce it in Store.Get (return a new ErrInvalidID) and in main.go's POST/GET branches (400)",
+   "Document the rule in a comment on ValidSessionID"
+  ],
+  "Answers": {
+   "requirement_0": 0.61,
+   "requirement_1": 0.95,
+   "requirement_2": 0.98
+  },
+  "Min": 0.61
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-10-write/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "Session ids arrive raw from query strings",
+   "Add ValidSessionID(id string) bool to session.go (2..64 chars, ASCII letters/digits/hyphens only) and enforce it in Store.Get (return a new ErrInvalidID) and in main.go's POST/GET branches (400)",
+   "Document the rule in a comment on ValidSessionID"
+  ],
+  "Answers": {
+   "requirement_0": 0.62,
+   "requirement_1": 0.96,
+   "requirement_2": 0.98
+  },
+  "Min": 0.62
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-10-write/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "Session ids arrive raw from query strings",
+   "Add ValidSessionID(id string) bool to session.go (2..64 chars, ASCII letters/digits/hyphens only) and enforce it in Store.Get (return a new ErrInvalidID) and in main.go's POST/GET branches (400)",
+   "Document the rule in a comment on ValidSessionID"
+  ],
+  "Answers": {
+   "requirement_0": 0.64,
+   "requirement_1": 0.95,
+   "requirement_2": 0.98
+  },
+  "Min": 0.64
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-10-write/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "Session ids arrive raw from query strings",
+   "Add ValidSessionID(id string) bool to session.go (2..64 chars, ASCII letters/digits/hyphens only) and enforce it in Store.Get (return a new ErrInvalidID) and in main.go's POST/GET branches (400)",
+   "Document the rule in a comment on ValidSessionID"
+  ],
+  "Answers": {
+   "requirement_0": 0.64,
+   "requirement_1": 0.97,
+   "requirement_2": 0.98
+  },
+  "Min": 0.64
+ },
+ {
+  "ID": "jev-base-20260925T054734Z/fam-10-write/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "Session ids arrive raw from query strings",
+   "Add ValidSessionID(id string) bool to session.go (2..64 chars, ASCII letters/digits/hyphens only) and enforce it in Store.Get (return a new ErrInvalidID) and in main.go's POST/GET branches (400)",
+   "Document the rule in a comment on ValidSessionID"
+  ],
+  "Answers": {
+   "requirement_0": 0.7,
+   "requirement_1": 0.94,
+   "requirement_2": 0.97
+  },
+  "Min": 0.7
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-01-read/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "Add AdminForceSignOut(store *Store, userID string) error in admin.go",
+   "invalidate every session held by userID, reusing the SAME invalidation rule the password reset path established",
+   "Follow that convention",
+   "A user with no sessions is not an error"
+  ],
+  "Answers": {
+   "requirement_0": 0.94,
+   "requirement_1": 0.5,
+   "requirement_2": 0.53,
+   "requirement_3": 0.96
+  },
+  "Min": 0.5
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-01-read/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "Add AdminForceSignOut(store *Store, userID string) error in admin.go",
+   "invalidate every session held by userID, reusing the SAME invalidation rule the password reset path established",
+   "Follow that convention",
+   "A user with no sessions is not an error"
+  ],
+  "Answers": {
+   "requirement_0": 0.94,
+   "requirement_1": 0.83,
+   "requirement_2": 0.83,
+   "requirement_3": 0.97
+  },
+  "Min": 0.83
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-01-read/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "Add AdminForceSignOut(store *Store, userID string) error in admin.go",
+   "invalidate every session held by userID, reusing the SAME invalidation rule the password reset path established",
+   "Follow that convention",
+   "A user with no sessions is not an error"
+  ],
+  "Answers": {
+   "requirement_0": 0.96,
+   "requirement_1": 0.82,
+   "requirement_2": 0.85,
+   "requirement_3": 0.97
+  },
+  "Min": 0.82
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-01-read/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "Add AdminForceSignOut(store *Store, userID string) error in admin.go",
+   "invalidate every session held by userID, reusing the SAME invalidation rule the password reset path established",
+   "Follow that convention",
+   "A user with no sessions is not an error"
+  ],
+  "Answers": {
+   "requirement_0": 0.97,
+   "requirement_1": 0.86,
+   "requirement_2": 0.84,
+   "requirement_3": 0.98
+  },
+  "Min": 0.84
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-01-read/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "Add AdminForceSignOut(store *Store, userID string) error in admin.go",
+   "invalidate every session held by userID, reusing the SAME invalidation rule the password reset path established",
+   "Follow that convention",
+   "A user with no sessions is not an error"
+  ],
+  "Answers": {
+   "requirement_0": 0.91,
+   "requirement_1": 0.68,
+   "requirement_2": 0.73,
+   "requirement_3": 0.89
+  },
+  "Min": 0.68
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-01-read/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "Add AdminForceSignOut(store *Store, userID string) error in admin.go",
+   "invalidate every session held by userID, reusing the SAME invalidation rule the password reset path established",
+   "Follow that convention",
+   "A user with no sessions is not an error"
+  ],
+  "Answers": {
+   "requirement_0": 0.84,
+   "requirement_1": 0.43,
+   "requirement_2": 0.56,
+   "requirement_3": 0.72
+  },
+  "Min": 0.43
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-01-write/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "Add ResetPassword(userID string) error to Store in session.go",
+   "delete every session whose User matches userID (no per-user index, so scan) and return nil, or ErrNotFound when none match",
+   "Wire it nowhere else",
+   "the method is the deliverable"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.96,
+   "requirement_2": 0.94,
+   "requirement_3": 0.89
+  },
+  "Min": 0.89
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-01-write/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "Add ResetPassword(userID string) error to Store in session.go",
+   "delete every session whose User matches userID (no per-user index, so scan) and return nil, or ErrNotFound when none match",
+   "Wire it nowhere else",
+   "the method is the deliverable"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.96,
+   "requirement_2": 0.94,
+   "requirement_3": 0.88
+  },
+  "Min": 0.88
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-01-write/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "Add ResetPassword(userID string) error to Store in session.go",
+   "delete every session whose User matches userID (no per-user index, so scan) and return nil, or ErrNotFound when none match",
+   "Wire it nowhere else",
+   "the method is the deliverable"
+  ],
+  "Answers": {
+   "requirement_0": 0.8,
+   "requirement_1": 0.95,
+   "requirement_2": 0.93,
+   "requirement_3": 0.87
+  },
+  "Min": 0.8
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-01-write/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "Add ResetPassword(userID string) error to Store in session.go",
+   "delete every session whose User matches userID (no per-user index, so scan) and return nil, or ErrNotFound when none match",
+   "Wire it nowhere else",
+   "the method is the deliverable"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.97,
+   "requirement_2": 0.94,
+   "requirement_3": 0.9
+  },
+  "Min": 0.9
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-01-write/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "Add ResetPassword(userID string) error to Store in session.go",
+   "delete every session whose User matches userID (no per-user index, so scan) and return nil, or ErrNotFound when none match",
+   "Wire it nowhere else",
+   "the method is the deliverable"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.96,
+   "requirement_2": 0.94,
+   "requirement_3": 0.87
+  },
+  "Min": 0.87
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-01-write/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "Add ResetPassword(userID string) error to Store in session.go",
+   "delete every session whose User matches userID (no per-user index, so scan) and return nil, or ErrNotFound when none match",
+   "Wire it nowhere else",
+   "the method is the deliverable"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.96,
+   "requirement_2": 0.94,
+   "requirement_3": 0.89
+  },
+  "Min": 0.89
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-02-read/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "The sweep/eviction logic (any code that removes expired sessions) must use the SAME configured TTL source of truth rather than its own duration literal",
+   "Refactor so every expiry decision reads the single sessionTTL constant",
+   "Behavior must not change"
+  ],
+  "Answers": {
+   "requirement_0": 0.67,
+   "requirement_1": 0.61,
+   "requirement_2": 0.58
+  },
+  "Min": 0.58
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-02-read/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "The sweep/eviction logic (any code that removes expired sessions) must use the SAME configured TTL source of truth rather than its own duration literal",
+   "Refactor so every expiry decision reads the single sessionTTL constant",
+   "Behavior must not change"
+  ],
+  "Answers": {
+   "requirement_0": 0.73,
+   "requirement_1": 0.75,
+   "requirement_2": 0.78
+  },
+  "Min": 0.73
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-02-read/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "The sweep/eviction logic (any code that removes expired sessions) must use the SAME configured TTL source of truth rather than its own duration literal",
+   "Refactor so every expiry decision reads the single sessionTTL constant",
+   "Behavior must not change"
+  ],
+  "Answers": {
+   "requirement_0": 0.61,
+   "requirement_1": 0.57,
+   "requirement_2": 0.68
+  },
+  "Min": 0.57
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-02-read/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "The sweep/eviction logic (any code that removes expired sessions) must use the SAME configured TTL source of truth rather than its own duration literal",
+   "Refactor so every expiry decision reads the single sessionTTL constant",
+   "Behavior must not change"
+  ],
+  "Answers": {
+   "requirement_0": 0.09,
+   "requirement_1": 0.09,
+   "requirement_2": 0.54
+  },
+  "Min": 0.09
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-02-read/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "The sweep/eviction logic (any code that removes expired sessions) must use the SAME configured TTL source of truth rather than its own duration literal",
+   "Refactor so every expiry decision reads the single sessionTTL constant",
+   "Behavior must not change"
+  ],
+  "Answers": {
+   "requirement_0": 0.06,
+   "requirement_1": 0.06,
+   "requirement_2": 0.5
+  },
+  "Min": 0.06
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-02-write/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "The session TTL is hard-coded to 30 minutes in main.go",
+   "Add a package-level const sessionTTL = 30 * time.Minute and use it everywhere the TTL is needed, so there is one source of truth for the expiry duration"
+  ],
+  "Answers": {
+   "requirement_0": 0.68,
+   "requirement_1": 0.7
+  },
+  "Min": 0.68
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-02-write/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "The session TTL is hard-coded to 30 minutes in main.go",
+   "Add a package-level const sessionTTL = 30 * time.Minute and use it everywhere the TTL is needed, so there is one source of truth for the expiry duration"
+  ],
+  "Answers": {
+   "requirement_0": 0.7,
+   "requirement_1": 0.71
+  },
+  "Min": 0.7
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-02-write/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "The session TTL is hard-coded to 30 minutes in main.go",
+   "Add a package-level const sessionTTL = 30 * time.Minute and use it everywhere the TTL is needed, so there is one source of truth for the expiry duration"
+  ],
+  "Answers": {
+   "requirement_0": 0.67,
+   "requirement_1": 0.66
+  },
+  "Min": 0.66
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-02-write/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "The session TTL is hard-coded to 30 minutes in main.go",
+   "Add a package-level const sessionTTL = 30 * time.Minute and use it everywhere the TTL is needed, so there is one source of truth for the expiry duration"
+  ],
+  "Answers": {
+   "requirement_0": 0.71,
+   "requirement_1": 0.72
+  },
+  "Min": 0.71
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-02-write/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "The session TTL is hard-coded to 30 minutes in main.go",
+   "Add a package-level const sessionTTL = 30 * time.Minute and use it everywhere the TTL is needed, so there is one source of truth for the expiry duration"
+  ],
+  "Answers": {
+   "requirement_0": 0.69,
+   "requirement_1": 0.67
+  },
+  "Min": 0.67
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-02-write/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "The session TTL is hard-coded to 30 minutes in main.go",
+   "Add a package-level const sessionTTL = 30 * time.Minute and use it everywhere the TTL is needed, so there is one source of truth for the expiry duration"
+  ],
+  "Answers": {
+   "requirement_0": 0.71,
+   "requirement_1": 0.73
+  },
+  "Min": 0.71
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-03-read/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "Add DeleteAllForUser(userID string) int to Store in session.go",
+   "delete every session of the user, return the count",
+   "It MUST follow the idempotence contract TestDeleteIdempotent pinned",
+   "zero sessions returns 0, not an error",
+   "Pin it with TestDeleteAllForUserIdempotent"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.98,
+   "requirement_2": 0.94,
+   "requirement_3": 0.98,
+   "requirement_4": 0.98
+  },
+  "Min": 0.94
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-03-read/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "Add DeleteAllForUser(userID string) int to Store in session.go",
+   "delete every session of the user, return the count",
+   "It MUST follow the idempotence contract TestDeleteIdempotent pinned",
+   "zero sessions returns 0, not an error",
+   "Pin it with TestDeleteAllForUserIdempotent"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.98,
+   "requirement_2": 0.93,
+   "requirement_3": 0.98,
+   "requirement_4": 0.98
+  },
+  "Min": 0.93
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-03-read/warm/r0",
+  "Label": false,
+  "Requirements": [
+   "Add DeleteAllForUser(userID string) int to Store in session.go",
+   "delete every session of the user, return the count",
+   "It MUST follow the idempotence contract TestDeleteIdempotent pinned",
+   "zero sessions returns 0, not an error",
+   "Pin it with TestDeleteAllForUserIdempotent"
+  ],
+  "Answers": {
+   "requirement_0": 0.94,
+   "requirement_1": 0.97,
+   "requirement_2": 0.69,
+   "requirement_3": 0.95,
+   "requirement_4": 0.06
+  },
+  "Min": 0.06
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-03-read/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "Add DeleteAllForUser(userID string) int to Store in session.go",
+   "delete every session of the user, return the count",
+   "It MUST follow the idempotence contract TestDeleteIdempotent pinned",
+   "zero sessions returns 0, not an error",
+   "Pin it with TestDeleteAllForUserIdempotent"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.98,
+   "requirement_2": 0.92,
+   "requirement_3": 0.98,
+   "requirement_4": 0.97
+  },
+  "Min": 0.92
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-03-read/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "Add DeleteAllForUser(userID string) int to Store in session.go",
+   "delete every session of the user, return the count",
+   "It MUST follow the idempotence contract TestDeleteIdempotent pinned",
+   "zero sessions returns 0, not an error",
+   "Pin it with TestDeleteAllForUserIdempotent"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.98,
+   "requirement_2": 0.92,
+   "requirement_3": 0.97,
+   "requirement_4": 0.98
+  },
+  "Min": 0.92
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-03-read/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "Add DeleteAllForUser(userID string) int to Store in session.go",
+   "delete every session of the user, return the count",
+   "It MUST follow the idempotence contract TestDeleteIdempotent pinned",
+   "zero sessions returns 0, not an error",
+   "Pin it with TestDeleteAllForUserIdempotent"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.98,
+   "requirement_2": 0.94,
+   "requirement_3": 0.98,
+   "requirement_4": 0.98
+  },
+  "Min": 0.94
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-03-write/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "Verify Store.Delete in session.go is idempotent",
+   "deleting an unknown or already-deleted id is a silent no-op (no error, no state change)",
+   "Pin it with TestDeleteIdempotent in session_test.go",
+   "delete twice, delete an unknown id, assert no panic and Len unchanged"
+  ],
+  "Answers": {
+   "requirement_0": 0.72,
+   "requirement_1": 0.64,
+   "requirement_2": 0.96,
+   "requirement_3": 0.95
+  },
+  "Min": 0.64
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-03-write/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "Verify Store.Delete in session.go is idempotent",
+   "deleting an unknown or already-deleted id is a silent no-op (no error, no state change)",
+   "Pin it with TestDeleteIdempotent in session_test.go",
+   "delete twice, delete an unknown id, assert no panic and Len unchanged"
+  ],
+  "Answers": {
+   "requirement_0": 0.74,
+   "requirement_1": 0.57,
+   "requirement_2": 0.96,
+   "requirement_3": 0.91
+  },
+  "Min": 0.57
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-03-write/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "Verify Store.Delete in session.go is idempotent",
+   "deleting an unknown or already-deleted id is a silent no-op (no error, no state change)",
+   "Pin it with TestDeleteIdempotent in session_test.go",
+   "delete twice, delete an unknown id, assert no panic and Len unchanged"
+  ],
+  "Answers": {
+   "requirement_0": 0.68,
+   "requirement_1": 0.59,
+   "requirement_2": 0.96,
+   "requirement_3": 0.96
+  },
+  "Min": 0.59
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-03-write/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "Verify Store.Delete in session.go is idempotent",
+   "deleting an unknown or already-deleted id is a silent no-op (no error, no state change)",
+   "Pin it with TestDeleteIdempotent in session_test.go",
+   "delete twice, delete an unknown id, assert no panic and Len unchanged"
+  ],
+  "Answers": {
+   "requirement_0": 0.7,
+   "requirement_1": 0.58,
+   "requirement_2": 0.97,
+   "requirement_3": 0.92
+  },
+  "Min": 0.58
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-03-write/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "Verify Store.Delete in session.go is idempotent",
+   "deleting an unknown or already-deleted id is a silent no-op (no error, no state change)",
+   "Pin it with TestDeleteIdempotent in session_test.go",
+   "delete twice, delete an unknown id, assert no panic and Len unchanged"
+  ],
+  "Answers": {
+   "requirement_0": 0.75,
+   "requirement_1": 0.61,
+   "requirement_2": 0.96,
+   "requirement_3": 0.95
+  },
+  "Min": 0.61
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-03-write/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "Verify Store.Delete in session.go is idempotent",
+   "deleting an unknown or already-deleted id is a silent no-op (no error, no state change)",
+   "Pin it with TestDeleteIdempotent in session_test.go",
+   "delete twice, delete an unknown id, assert no panic and Len unchanged"
+  ],
+  "Answers": {
+   "requirement_0": 0.74,
+   "requirement_1": 0.57,
+   "requirement_2": 0.96,
+   "requirement_3": 0.95
+  },
+  "Min": 0.57
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-04-read/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "Add an AdminSessionView struct in admin.go (fields ID, User, Created, LastSeen, plus Admin bool) that reuses the SAME explicit JSON tag convention established for Session, and return it from a new adminSessionsHandler",
+   "Follow the tag convention from the Session work"
+  ],
+  "Answers": {
+   "requirement_0": 0.81,
+   "requirement_1": 0.81
+  },
+  "Min": 0.81
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-04-read/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "Add an AdminSessionView struct in admin.go (fields ID, User, Created, LastSeen, plus Admin bool) that reuses the SAME explicit JSON tag convention established for Session, and return it from a new adminSessionsHandler",
+   "Follow the tag convention from the Session work"
+  ],
+  "Answers": {
+   "requirement_0": 0.79,
+   "requirement_1": 0.71
+  },
+  "Min": 0.71
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-04-read/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "Add an AdminSessionView struct in admin.go (fields ID, User, Created, LastSeen, plus Admin bool) that reuses the SAME explicit JSON tag convention established for Session, and return it from a new adminSessionsHandler",
+   "Follow the tag convention from the Session work"
+  ],
+  "Answers": {
+   "requirement_0": 0.74,
+   "requirement_1": 0.79
+  },
+  "Min": 0.74
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-04-read/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "Add an AdminSessionView struct in admin.go (fields ID, User, Created, LastSeen, plus Admin bool) that reuses the SAME explicit JSON tag convention established for Session, and return it from a new adminSessionsHandler",
+   "Follow the tag convention from the Session work"
+  ],
+  "Answers": {
+   "requirement_0": 0.55,
+   "requirement_1": 0.73
+  },
+  "Min": 0.55
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-04-read/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "Add an AdminSessionView struct in admin.go (fields ID, User, Created, LastSeen, plus Admin bool) that reuses the SAME explicit JSON tag convention established for Session, and return it from a new adminSessionsHandler",
+   "Follow the tag convention from the Session work"
+  ],
+  "Answers": {
+   "requirement_0": 0.84,
+   "requirement_1": 0.83
+  },
+  "Min": 0.83
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-04-read/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "Add an AdminSessionView struct in admin.go (fields ID, User, Created, LastSeen, plus Admin bool) that reuses the SAME explicit JSON tag convention established for Session, and return it from a new adminSessionsHandler",
+   "Follow the tag convention from the Session work"
+  ],
+  "Answers": {
+   "requirement_0": 0.82,
+   "requirement_1": 0.72
+  },
+  "Min": 0.72
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-04-write/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "The Session struct serializes with Go's default field names",
+   "Give Session explicit JSON field tags in session.go",
+   "ID stays \"ID\", User stays \"User\", Created and LastSeen become \"Created\" and \"LastSeen\" (unchanged names, now explicit)",
+   "The wire format must not change"
+  ],
+  "Answers": {
+   "requirement_0": 0.43,
+   "requirement_1": 0.98,
+   "requirement_2": 0.98,
+   "requirement_3": 0.96
+  },
+  "Min": 0.43
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-04-write/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "The Session struct serializes with Go's default field names",
+   "Give Session explicit JSON field tags in session.go",
+   "ID stays \"ID\", User stays \"User\", Created and LastSeen become \"Created\" and \"LastSeen\" (unchanged names, now explicit)",
+   "The wire format must not change"
+  ],
+  "Answers": {
+   "requirement_0": 0.41,
+   "requirement_1": 0.98,
+   "requirement_2": 0.98,
+   "requirement_3": 0.97
+  },
+  "Min": 0.41
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-04-write/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "The Session struct serializes with Go's default field names",
+   "Give Session explicit JSON field tags in session.go",
+   "ID stays \"ID\", User stays \"User\", Created and LastSeen become \"Created\" and \"LastSeen\" (unchanged names, now explicit)",
+   "The wire format must not change"
+  ],
+  "Answers": {
+   "requirement_0": 0.47,
+   "requirement_1": 0.98,
+   "requirement_2": 0.97,
+   "requirement_3": 0.96
+  },
+  "Min": 0.47
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-04-write/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "The Session struct serializes with Go's default field names",
+   "Give Session explicit JSON field tags in session.go",
+   "ID stays \"ID\", User stays \"User\", Created and LastSeen become \"Created\" and \"LastSeen\" (unchanged names, now explicit)",
+   "The wire format must not change"
+  ],
+  "Answers": {
+   "requirement_0": 0.49,
+   "requirement_1": 0.98,
+   "requirement_2": 0.97,
+   "requirement_3": 0.96
+  },
+  "Min": 0.49
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-04-write/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "The Session struct serializes with Go's default field names",
+   "Give Session explicit JSON field tags in session.go",
+   "ID stays \"ID\", User stays \"User\", Created and LastSeen become \"Created\" and \"LastSeen\" (unchanged names, now explicit)",
+   "The wire format must not change"
+  ],
+  "Answers": {
+   "requirement_0": 0.47,
+   "requirement_1": 0.98,
+   "requirement_2": 0.97,
+   "requirement_3": 0.96
+  },
+  "Min": 0.47
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-04-write/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "The Session struct serializes with Go's default field names",
+   "Give Session explicit JSON field tags in session.go",
+   "ID stays \"ID\", User stays \"User\", Created and LastSeen become \"Created\" and \"LastSeen\" (unchanged names, now explicit)",
+   "The wire format must not change"
+  ],
+  "Answers": {
+   "requirement_0": 0.45,
+   "requirement_1": 0.98,
+   "requirement_2": 0.97,
+   "requirement_3": 0.96
+  },
+  "Min": 0.45
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-05-read/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "Add adminSessionHandler(store *Store) http.HandlerFunc in admin.go for GET /admin/session?id=X",
+   "It must map store errors with the SAME mapStoreError table the /session handler uses (refactor it in main.go if needed)",
+   "that table stays the single source of truth for store-error-to-status translation"
+  ],
+  "Answers": {
+   "requirement_0": 0.95,
+   "requirement_1": 0.65,
+   "requirement_2": 0.73
+  },
+  "Min": 0.65
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-05-read/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "Add adminSessionHandler(store *Store) http.HandlerFunc in admin.go for GET /admin/session?id=X",
+   "It must map store errors with the SAME mapStoreError table the /session handler uses (refactor it in main.go if needed)",
+   "that table stays the single source of truth for store-error-to-status translation"
+  ],
+  "Answers": {
+   "requirement_0": 0.96,
+   "requirement_1": 0.63,
+   "requirement_2": 0.71
+  },
+  "Min": 0.63
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-05-read/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "Add adminSessionHandler(store *Store) http.HandlerFunc in admin.go for GET /admin/session?id=X",
+   "It must map store errors with the SAME mapStoreError table the /session handler uses (refactor it in main.go if needed)",
+   "that table stays the single source of truth for store-error-to-status translation"
+  ],
+  "Answers": {
+   "requirement_0": 0.96,
+   "requirement_1": 0.73,
+   "requirement_2": 0.75
+  },
+  "Min": 0.73
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-05-read/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "Add adminSessionHandler(store *Store) http.HandlerFunc in admin.go for GET /admin/session?id=X",
+   "It must map store errors with the SAME mapStoreError table the /session handler uses (refactor it in main.go if needed)",
+   "that table stays the single source of truth for store-error-to-status translation"
+  ],
+  "Answers": {
+   "requirement_0": 0.92,
+   "requirement_1": 0.67,
+   "requirement_2": 0.67
+  },
+  "Min": 0.67
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-05-read/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "Add adminSessionHandler(store *Store) http.HandlerFunc in admin.go for GET /admin/session?id=X",
+   "It must map store errors with the SAME mapStoreError table the /session handler uses (refactor it in main.go if needed)",
+   "that table stays the single source of truth for store-error-to-status translation"
+  ],
+  "Answers": {
+   "requirement_0": 0.97,
+   "requirement_1": 0.79,
+   "requirement_2": 0.84
+  },
+  "Min": 0.79
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-05-read/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "Add adminSessionHandler(store *Store) http.HandlerFunc in admin.go for GET /admin/session?id=X",
+   "It must map store errors with the SAME mapStoreError table the /session handler uses (refactor it in main.go if needed)",
+   "that table stays the single source of truth for store-error-to-status translation"
+  ],
+  "Answers": {
+   "requirement_0": 0.96,
+   "requirement_1": 0.7,
+   "requirement_2": 0.81
+  },
+  "Min": 0.7
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-05-write/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "Codify the store-error mapping in main.go as func mapStoreError(err error) int",
+   "ErrNotFound -\u003e 404, anything else -\u003e 500 (the fixture has only ErrNotFound",
+   "leave TODOs for other sentinels)",
+   "Use it from every store-failure branch of sessionHandler so statuses have one source of truth"
+  ],
+  "Answers": {
+   "requirement_0": 0.97,
+   "requirement_1": 0.94,
+   "requirement_2": 0.95,
+   "requirement_3": 0.5
+  },
+  "Min": 0.5
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-05-write/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "Codify the store-error mapping in main.go as func mapStoreError(err error) int",
+   "ErrNotFound -\u003e 404, anything else -\u003e 500 (the fixture has only ErrNotFound",
+   "leave TODOs for other sentinels)",
+   "Use it from every store-failure branch of sessionHandler so statuses have one source of truth"
+  ],
+  "Answers": {
+   "requirement_0": 0.97,
+   "requirement_1": 0.94,
+   "requirement_2": 0.95,
+   "requirement_3": 0.51
+  },
+  "Min": 0.51
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-05-write/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "Codify the store-error mapping in main.go as func mapStoreError(err error) int",
+   "ErrNotFound -\u003e 404, anything else -\u003e 500 (the fixture has only ErrNotFound",
+   "leave TODOs for other sentinels)",
+   "Use it from every store-failure branch of sessionHandler so statuses have one source of truth"
+  ],
+  "Answers": {
+   "requirement_0": 0.97,
+   "requirement_1": 0.94,
+   "requirement_2": 0.94,
+   "requirement_3": 0.52
+  },
+  "Min": 0.52
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-05-write/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "Codify the store-error mapping in main.go as func mapStoreError(err error) int",
+   "ErrNotFound -\u003e 404, anything else -\u003e 500 (the fixture has only ErrNotFound",
+   "leave TODOs for other sentinels)",
+   "Use it from every store-failure branch of sessionHandler so statuses have one source of truth"
+  ],
+  "Answers": {
+   "requirement_0": 0.97,
+   "requirement_1": 0.95,
+   "requirement_2": 0.95,
+   "requirement_3": 0.5
+  },
+  "Min": 0.5
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-05-write/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "Codify the store-error mapping in main.go as func mapStoreError(err error) int",
+   "ErrNotFound -\u003e 404, anything else -\u003e 500 (the fixture has only ErrNotFound",
+   "leave TODOs for other sentinels)",
+   "Use it from every store-failure branch of sessionHandler so statuses have one source of truth"
+  ],
+  "Answers": {
+   "requirement_0": 0.97,
+   "requirement_1": 0.94,
+   "requirement_2": 0.95,
+   "requirement_3": 0.53
+  },
+  "Min": 0.53
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-05-write/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "Codify the store-error mapping in main.go as func mapStoreError(err error) int",
+   "ErrNotFound -\u003e 404, anything else -\u003e 500 (the fixture has only ErrNotFound",
+   "leave TODOs for other sentinels)",
+   "Use it from every store-failure branch of sessionHandler so statuses have one source of truth"
+  ],
+  "Answers": {
+   "requirement_0": 0.96,
+   "requirement_1": 0.95,
+   "requirement_2": 0.95,
+   "requirement_3": 0.55
+  },
+  "Min": 0.55
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-06-read/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "Add SessionsForUser(user string) []Session to Store in session.go",
+   "return that user's live sessions following the SAME locking discipline the audit established (read paths take RLock and must not mutate)",
+   "Add the same style of lock comment",
+   "The verifier runs under -race"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.93,
+   "requirement_2": 0.89,
+   "requirement_3": 0.71
+  },
+  "Min": 0.71
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-06-read/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "Add SessionsForUser(user string) []Session to Store in session.go",
+   "return that user's live sessions following the SAME locking discipline the audit established (read paths take RLock and must not mutate)",
+   "Add the same style of lock comment",
+   "The verifier runs under -race"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.94,
+   "requirement_2": 0.93,
+   "requirement_3": 0.74
+  },
+  "Min": 0.74
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-06-read/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "Add SessionsForUser(user string) []Session to Store in session.go",
+   "return that user's live sessions following the SAME locking discipline the audit established (read paths take RLock and must not mutate)",
+   "Add the same style of lock comment",
+   "The verifier runs under -race"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.95,
+   "requirement_2": 0.91,
+   "requirement_3": 0.78
+  },
+  "Min": 0.78
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-06-read/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "Add SessionsForUser(user string) []Session to Store in session.go",
+   "return that user's live sessions following the SAME locking discipline the audit established (read paths take RLock and must not mutate)",
+   "Add the same style of lock comment",
+   "The verifier runs under -race"
+  ],
+  "Answers": {
+   "requirement_0": 0.97,
+   "requirement_1": 0.92,
+   "requirement_2": 0.88,
+   "requirement_3": 0.71
+  },
+  "Min": 0.71
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-06-read/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "Add SessionsForUser(user string) []Session to Store in session.go",
+   "return that user's live sessions following the SAME locking discipline the audit established (read paths take RLock and must not mutate)",
+   "Add the same style of lock comment",
+   "The verifier runs under -race"
+  ],
+  "Answers": {
+   "requirement_0": 0.97,
+   "requirement_1": 0.92,
+   "requirement_2": 0.89,
+   "requirement_3": 0.74
+  },
+  "Min": 0.74
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-06-read/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "Add SessionsForUser(user string) []Session to Store in session.go",
+   "return that user's live sessions following the SAME locking discipline the audit established (read paths take RLock and must not mutate)",
+   "Add the same style of lock comment",
+   "The verifier runs under -race"
+  ],
+  "Answers": {
+   "requirement_0": 0.98,
+   "requirement_1": 0.95,
+   "requirement_2": 0.89,
+   "requirement_3": 0.71
+  },
+  "Min": 0.71
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-06-write/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "Audit the locking in session.go",
+   "Get keeps Lock (it mutates LastSeen and can delete)",
+   "ensure Len takes RLock",
+   "add a comment on each method stating which lock it takes and why",
+   "No behavior change",
+   "the audit comments plus any lock correction are the deliverable"
+  ],
+  "Answers": {
+   "requirement_0": 0.94,
+   "requirement_1": 0.9,
+   "requirement_2": 0.87,
+   "requirement_3": 0.89,
+   "requirement_4": 0.91,
+   "requirement_5": 0.91
+  },
+  "Min": 0.87
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-06-write/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "Audit the locking in session.go",
+   "Get keeps Lock (it mutates LastSeen and can delete)",
+   "ensure Len takes RLock",
+   "add a comment on each method stating which lock it takes and why",
+   "No behavior change",
+   "the audit comments plus any lock correction are the deliverable"
+  ],
+  "Answers": {
+   "requirement_0": 0.9,
+   "requirement_1": 0.88,
+   "requirement_2": 0.83,
+   "requirement_3": 0.88,
+   "requirement_4": 0.9,
+   "requirement_5": 0.87
+  },
+  "Min": 0.83
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-06-write/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "Audit the locking in session.go",
+   "Get keeps Lock (it mutates LastSeen and can delete)",
+   "ensure Len takes RLock",
+   "add a comment on each method stating which lock it takes and why",
+   "No behavior change",
+   "the audit comments plus any lock correction are the deliverable"
+  ],
+  "Answers": {
+   "requirement_0": 0.91,
+   "requirement_1": 0.87,
+   "requirement_2": 0.84,
+   "requirement_3": 0.9,
+   "requirement_4": 0.92,
+   "requirement_5": 0.88
+  },
+  "Min": 0.84
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-06-write/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "Audit the locking in session.go",
+   "Get keeps Lock (it mutates LastSeen and can delete)",
+   "ensure Len takes RLock",
+   "add a comment on each method stating which lock it takes and why",
+   "No behavior change",
+   "the audit comments plus any lock correction are the deliverable"
+  ],
+  "Answers": {
+   "requirement_0": 0.86,
+   "requirement_1": 0.83,
+   "requirement_2": 0.78,
+   "requirement_3": 0.86,
+   "requirement_4": 0.92,
+   "requirement_5": 0.86
+  },
+  "Min": 0.78
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-06-write/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "Audit the locking in session.go",
+   "Get keeps Lock (it mutates LastSeen and can delete)",
+   "ensure Len takes RLock",
+   "add a comment on each method stating which lock it takes and why",
+   "No behavior change",
+   "the audit comments plus any lock correction are the deliverable"
+  ],
+  "Answers": {
+   "requirement_0": 0.91,
+   "requirement_1": 0.88,
+   "requirement_2": 0.87,
+   "requirement_3": 0.86,
+   "requirement_4": 0.9,
+   "requirement_5": 0.88
+  },
+  "Min": 0.86
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-06-write/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "Audit the locking in session.go",
+   "Get keeps Lock (it mutates LastSeen and can delete)",
+   "ensure Len takes RLock",
+   "add a comment on each method stating which lock it takes and why",
+   "No behavior change",
+   "the audit comments plus any lock correction are the deliverable"
+  ],
+  "Answers": {
+   "requirement_0": 0.89,
+   "requirement_1": 0.89,
+   "requirement_2": 0.88,
+   "requirement_3": 0.89,
+   "requirement_4": 0.92,
+   "requirement_5": 0.9
+  },
+  "Min": 0.88
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-07-read/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "Add newSessionMux(store *Store) *http.ServeMux in main.go that registers the handlers, and a table-driven TestSessionLookupTable in lookup_table_test.go covering GET /session on a fresh mux (200 live, 404 missing, 405 wrong method) in the SAME table style as the expiry table",
+   "One table, controllable clock"
+  ],
+  "Answers": {
+   "requirement_0": 0.94,
+   "requirement_1": 0.91
+  },
+  "Min": 0.91
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-07-read/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "Add newSessionMux(store *Store) *http.ServeMux in main.go that registers the handlers, and a table-driven TestSessionLookupTable in lookup_table_test.go covering GET /session on a fresh mux (200 live, 404 missing, 405 wrong method) in the SAME table style as the expiry table",
+   "One table, controllable clock"
+  ],
+  "Answers": {
+   "requirement_0": 0.94,
+   "requirement_1": 0.92
+  },
+  "Min": 0.92
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-07-read/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "Add newSessionMux(store *Store) *http.ServeMux in main.go that registers the handlers, and a table-driven TestSessionLookupTable in lookup_table_test.go covering GET /session on a fresh mux (200 live, 404 missing, 405 wrong method) in the SAME table style as the expiry table",
+   "One table, controllable clock"
+  ],
+  "Answers": {
+   "requirement_0": 0.94,
+   "requirement_1": 0.94
+  },
+  "Min": 0.94
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-07-read/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "Add newSessionMux(store *Store) *http.ServeMux in main.go that registers the handlers, and a table-driven TestSessionLookupTable in lookup_table_test.go covering GET /session on a fresh mux (200 live, 404 missing, 405 wrong method) in the SAME table style as the expiry table",
+   "One table, controllable clock"
+  ],
+  "Answers": {
+   "requirement_0": 0.94,
+   "requirement_1": 0.92
+  },
+  "Min": 0.92
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-07-read/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "Add newSessionMux(store *Store) *http.ServeMux in main.go that registers the handlers, and a table-driven TestSessionLookupTable in lookup_table_test.go covering GET /session on a fresh mux (200 live, 404 missing, 405 wrong method) in the SAME table style as the expiry table",
+   "One table, controllable clock"
+  ],
+  "Answers": {
+   "requirement_0": 0.94,
+   "requirement_1": 0.92
+  },
+  "Min": 0.92
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-07-read/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "Add newSessionMux(store *Store) *http.ServeMux in main.go that registers the handlers, and a table-driven TestSessionLookupTable in lookup_table_test.go covering GET /session on a fresh mux (200 live, 404 missing, 405 wrong method) in the SAME table style as the expiry table",
+   "One table, controllable clock"
+  ],
+  "Answers": {
+   "requirement_0": 0.92,
+   "requirement_1": 0.84
+  },
+  "Min": 0.84
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-07-write/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "The expiry tests are scattered",
+   "create expiry_table_test.go in package main with a table-driven TestSessionExpiryTable covering fresh-readable, exactly-ttl-live, one-second-past-expired, and expired-dropped cases, all against a controllable store.now clock",
+   "All cases must live in ONE table"
+  ],
+  "Answers": {
+   "requirement_0": 0.73,
+   "requirement_1": 0.9,
+   "requirement_2": 0.97
+  },
+  "Min": 0.73
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-07-write/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "The expiry tests are scattered",
+   "create expiry_table_test.go in package main with a table-driven TestSessionExpiryTable covering fresh-readable, exactly-ttl-live, one-second-past-expired, and expired-dropped cases, all against a controllable store.now clock",
+   "All cases must live in ONE table"
+  ],
+  "Answers": {
+   "requirement_0": 0.7,
+   "requirement_1": 0.77,
+   "requirement_2": 0.95
+  },
+  "Min": 0.7
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-07-write/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "The expiry tests are scattered",
+   "create expiry_table_test.go in package main with a table-driven TestSessionExpiryTable covering fresh-readable, exactly-ttl-live, one-second-past-expired, and expired-dropped cases, all against a controllable store.now clock",
+   "All cases must live in ONE table"
+  ],
+  "Answers": {
+   "requirement_0": 0.76,
+   "requirement_1": 0.89,
+   "requirement_2": 0.97
+  },
+  "Min": 0.76
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-07-write/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "The expiry tests are scattered",
+   "create expiry_table_test.go in package main with a table-driven TestSessionExpiryTable covering fresh-readable, exactly-ttl-live, one-second-past-expired, and expired-dropped cases, all against a controllable store.now clock",
+   "All cases must live in ONE table"
+  ],
+  "Answers": {
+   "requirement_0": 0.77,
+   "requirement_1": 0.75,
+   "requirement_2": 0.97
+  },
+  "Min": 0.75
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-07-write/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "The expiry tests are scattered",
+   "create expiry_table_test.go in package main with a table-driven TestSessionExpiryTable covering fresh-readable, exactly-ttl-live, one-second-past-expired, and expired-dropped cases, all against a controllable store.now clock",
+   "All cases must live in ONE table"
+  ],
+  "Answers": {
+   "requirement_0": 0.75,
+   "requirement_1": 0.8,
+   "requirement_2": 0.97
+  },
+  "Min": 0.75
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-07-write/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "The expiry tests are scattered",
+   "create expiry_table_test.go in package main with a table-driven TestSessionExpiryTable covering fresh-readable, exactly-ttl-live, one-second-past-expired, and expired-dropped cases, all against a controllable store.now clock",
+   "All cases must live in ONE table"
+  ],
+  "Answers": {
+   "requirement_0": 0.74,
+   "requirement_1": 0.81,
+   "requirement_2": 0.97
+  },
+  "Min": 0.74
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-08-read/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "Create session_unix.go with a //go:build unix tag containing package main func platformNote() string { return \"unix\" }, and session_other.go with //go:build !unix returning \"other\"",
+   "The go.mod toolchain line stays pinned"
+  ],
+  "Answers": {
+   "requirement_0": 0.95,
+   "requirement_1": 0.36
+  },
+  "Min": 0.36
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-08-read/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "Create session_unix.go with a //go:build unix tag containing package main func platformNote() string { return \"unix\" }, and session_other.go with //go:build !unix returning \"other\"",
+   "The go.mod toolchain line stays pinned"
+  ],
+  "Answers": {
+   "requirement_0": 0.94,
+   "requirement_1": 0.41
+  },
+  "Min": 0.41
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-08-read/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "Create session_unix.go with a //go:build unix tag containing package main func platformNote() string { return \"unix\" }, and session_other.go with //go:build !unix returning \"other\"",
+   "The go.mod toolchain line stays pinned"
+  ],
+  "Answers": {
+   "requirement_0": 0.93,
+   "requirement_1": 0.38
+  },
+  "Min": 0.38
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-08-read/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "Create session_unix.go with a //go:build unix tag containing package main func platformNote() string { return \"unix\" }, and session_other.go with //go:build !unix returning \"other\"",
+   "The go.mod toolchain line stays pinned"
+  ],
+  "Answers": {
+   "requirement_0": 0.95,
+   "requirement_1": 0.38
+  },
+  "Min": 0.38
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-08-read/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "Create session_unix.go with a //go:build unix tag containing package main func platformNote() string { return \"unix\" }, and session_other.go with //go:build !unix returning \"other\"",
+   "The go.mod toolchain line stays pinned"
+  ],
+  "Answers": {
+   "requirement_0": 0.93,
+   "requirement_1": 0.39
+  },
+  "Min": 0.39
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-08-read/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "Create session_unix.go with a //go:build unix tag containing package main func platformNote() string { return \"unix\" }, and session_other.go with //go:build !unix returning \"other\"",
+   "The go.mod toolchain line stays pinned"
+  ],
+  "Answers": {
+   "requirement_0": 0.95,
+   "requirement_1": 0.44
+  },
+  "Min": 0.44
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-08-write/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "In go.mod, make the Go version line explicit (go 1.26) and add a .go-version file containing 1.26 so tooling reads the pinned toolchain",
+   "Nothing else changes"
+  ],
+  "Answers": {
+   "requirement_0": 0.21,
+   "requirement_1": 0.44
+  },
+  "Min": 0.21
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-08-write/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "In go.mod, make the Go version line explicit (go 1.26) and add a .go-version file containing 1.26 so tooling reads the pinned toolchain",
+   "Nothing else changes"
+  ],
+  "Answers": {
+   "requirement_0": 0.91,
+   "requirement_1": 0.61
+  },
+  "Min": 0.61
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-08-write/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "In go.mod, make the Go version line explicit (go 1.26) and add a .go-version file containing 1.26 so tooling reads the pinned toolchain",
+   "Nothing else changes"
+  ],
+  "Answers": {
+   "requirement_0": 0.66,
+   "requirement_1": 0.18
+  },
+  "Min": 0.18
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-08-write/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "In go.mod, make the Go version line explicit (go 1.26) and add a .go-version file containing 1.26 so tooling reads the pinned toolchain",
+   "Nothing else changes"
+  ],
+  "Answers": {
+   "requirement_0": 0.22,
+   "requirement_1": 0.39
+  },
+  "Min": 0.22
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-08-write/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "In go.mod, make the Go version line explicit (go 1.26) and add a .go-version file containing 1.26 so tooling reads the pinned toolchain",
+   "Nothing else changes"
+  ],
+  "Answers": {
+   "requirement_0": 0.2,
+   "requirement_1": 0.43
+  },
+  "Min": 0.2
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-08-write/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "In go.mod, make the Go version line explicit (go 1.26) and add a .go-version file containing 1.26 so tooling reads the pinned toolchain",
+   "Nothing else changes"
+  ],
+  "Answers": {
+   "requirement_0": 0.89,
+   "requirement_1": 0.6
+  },
+  "Min": 0.6
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-09-read/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "Extend /healthz with uptime_seconds (integer seconds since process start, tracked via a package-level start time in main)",
+   "Status stays exactly \"ok\" and sessions is unchanged",
+   "existing fields never change name or type"
+  ],
+  "Answers": {
+   "requirement_0": 0.97,
+   "requirement_1": 0.96,
+   "requirement_2": 0.95
+  },
+  "Min": 0.95
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-09-read/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "Extend /healthz with uptime_seconds (integer seconds since process start, tracked via a package-level start time in main)",
+   "Status stays exactly \"ok\" and sessions is unchanged",
+   "existing fields never change name or type"
+  ],
+  "Answers": {
+   "requirement_0": 0.97,
+   "requirement_1": 0.96,
+   "requirement_2": 0.95
+  },
+  "Min": 0.95
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-09-read/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "Extend /healthz with uptime_seconds (integer seconds since process start, tracked via a package-level start time in main)",
+   "Status stays exactly \"ok\" and sessions is unchanged",
+   "existing fields never change name or type"
+  ],
+  "Answers": {
+   "requirement_0": 0.97,
+   "requirement_1": 0.96,
+   "requirement_2": 0.95
+  },
+  "Min": 0.95
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-09-read/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "Extend /healthz with uptime_seconds (integer seconds since process start, tracked via a package-level start time in main)",
+   "Status stays exactly \"ok\" and sessions is unchanged",
+   "existing fields never change name or type"
+  ],
+  "Answers": {
+   "requirement_0": 0.55,
+   "requirement_1": 0.86,
+   "requirement_2": 0.88
+  },
+  "Min": 0.55
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-09-read/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "Extend /healthz with uptime_seconds (integer seconds since process start, tracked via a package-level start time in main)",
+   "Status stays exactly \"ok\" and sessions is unchanged",
+   "existing fields never change name or type"
+  ],
+  "Answers": {
+   "requirement_0": 0.92,
+   "requirement_1": 0.89,
+   "requirement_2": 0.68
+  },
+  "Min": 0.68
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-09-read/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "Extend /healthz with uptime_seconds (integer seconds since process start, tracked via a package-level start time in main)",
+   "Status stays exactly \"ok\" and sessions is unchanged",
+   "existing fields never change name or type"
+  ],
+  "Answers": {
+   "requirement_0": 0.97,
+   "requirement_1": 0.96,
+   "requirement_2": 0.95
+  },
+  "Min": 0.95
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-09-write/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "/healthz currently answers {\"sessions\"",
+   "Give the health payload a stable schema",
+   "add a Status field (\"ok\") alongside sessions, so the response is {\"status\":\"ok\",\"sessions\":N}",
+   "Keep 200 always"
+  ],
+  "Answers": {
+   "requirement_0": 0.67,
+   "requirement_1": 0.95,
+   "requirement_2": 0.95,
+   "requirement_3": 0.76
+  },
+  "Min": 0.67
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-09-write/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "/healthz currently answers {\"sessions\"",
+   "Give the health payload a stable schema",
+   "add a Status field (\"ok\") alongside sessions, so the response is {\"status\":\"ok\",\"sessions\":N}",
+   "Keep 200 always"
+  ],
+  "Answers": {
+   "requirement_0": 0.7,
+   "requirement_1": 0.94,
+   "requirement_2": 0.95,
+   "requirement_3": 0.78
+  },
+  "Min": 0.7
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-09-write/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "/healthz currently answers {\"sessions\"",
+   "Give the health payload a stable schema",
+   "add a Status field (\"ok\") alongside sessions, so the response is {\"status\":\"ok\",\"sessions\":N}",
+   "Keep 200 always"
+  ],
+  "Answers": {
+   "requirement_0": 0.65,
+   "requirement_1": 0.95,
+   "requirement_2": 0.95,
+   "requirement_3": 0.74
+  },
+  "Min": 0.65
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-09-write/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "/healthz currently answers {\"sessions\"",
+   "Give the health payload a stable schema",
+   "add a Status field (\"ok\") alongside sessions, so the response is {\"status\":\"ok\",\"sessions\":N}",
+   "Keep 200 always"
+  ],
+  "Answers": {
+   "requirement_0": 0.72,
+   "requirement_1": 0.96,
+   "requirement_2": 0.96,
+   "requirement_3": 0.86
+  },
+  "Min": 0.72
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-09-write/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "/healthz currently answers {\"sessions\"",
+   "Give the health payload a stable schema",
+   "add a Status field (\"ok\") alongside sessions, so the response is {\"status\":\"ok\",\"sessions\":N}",
+   "Keep 200 always"
+  ],
+  "Answers": {
+   "requirement_0": 0.41,
+   "requirement_1": 0.7,
+   "requirement_2": 0.23,
+   "requirement_3": 0.69
+  },
+  "Min": 0.23
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-09-write/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "/healthz currently answers {\"sessions\"",
+   "Give the health payload a stable schema",
+   "add a Status field (\"ok\") alongside sessions, so the response is {\"status\":\"ok\",\"sessions\":N}",
+   "Keep 200 always"
+  ],
+  "Answers": {
+   "requirement_0": 0.73,
+   "requirement_1": 0.95,
+   "requirement_2": 0.95,
+   "requirement_3": 0.75
+  },
+  "Min": 0.73
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-10-read/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "Add adminSessionHandler(store *Store) http.HandlerFunc in main.go for GET /admin/session?id=X",
+   "a read-only variant answering the same JSON as GET /session, enforcing the SAME id validation rule (invalid ids answer 400 via the store-level ErrInvalidID path, not re-implemented)"
+  ],
+  "Answers": {
+   "requirement_0": 0.74,
+   "requirement_1": 0.91
+  },
+  "Min": 0.74
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-10-read/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "Add adminSessionHandler(store *Store) http.HandlerFunc in main.go for GET /admin/session?id=X",
+   "a read-only variant answering the same JSON as GET /session, enforcing the SAME id validation rule (invalid ids answer 400 via the store-level ErrInvalidID path, not re-implemented)"
+  ],
+  "Answers": {
+   "requirement_0": 0.97,
+   "requirement_1": 0.9
+  },
+  "Min": 0.9
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-10-read/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "Add adminSessionHandler(store *Store) http.HandlerFunc in main.go for GET /admin/session?id=X",
+   "a read-only variant answering the same JSON as GET /session, enforcing the SAME id validation rule (invalid ids answer 400 via the store-level ErrInvalidID path, not re-implemented)"
+  ],
+  "Answers": {
+   "requirement_0": 0.97,
+   "requirement_1": 0.9
+  },
+  "Min": 0.9
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-10-read/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "Add adminSessionHandler(store *Store) http.HandlerFunc in main.go for GET /admin/session?id=X",
+   "a read-only variant answering the same JSON as GET /session, enforcing the SAME id validation rule (invalid ids answer 400 via the store-level ErrInvalidID path, not re-implemented)"
+  ],
+  "Answers": {
+   "requirement_0": 0.97,
+   "requirement_1": 0.92
+  },
+  "Min": 0.92
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-10-read/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "Add adminSessionHandler(store *Store) http.HandlerFunc in main.go for GET /admin/session?id=X",
+   "a read-only variant answering the same JSON as GET /session, enforcing the SAME id validation rule (invalid ids answer 400 via the store-level ErrInvalidID path, not re-implemented)"
+  ],
+  "Answers": {
+   "requirement_0": 0.96,
+   "requirement_1": 0.6
+  },
+  "Min": 0.6
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-10-read/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "Add adminSessionHandler(store *Store) http.HandlerFunc in main.go for GET /admin/session?id=X",
+   "a read-only variant answering the same JSON as GET /session, enforcing the SAME id validation rule (invalid ids answer 400 via the store-level ErrInvalidID path, not re-implemented)"
+  ],
+  "Answers": {
+   "requirement_0": 0.73,
+   "requirement_1": 0.54
+  },
+  "Min": 0.54
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-10-write/cold/r0",
+  "Label": true,
+  "Requirements": [
+   "Session ids arrive raw from query strings",
+   "Add ValidSessionID(id string) bool to session.go (2..64 chars, ASCII letters/digits/hyphens only) and enforce it in Store.Get (return a new ErrInvalidID) and in main.go's POST/GET branches (400)",
+   "Document the rule in a comment on ValidSessionID"
+  ],
+  "Answers": {
+   "requirement_0": 0.65,
+   "requirement_1": 0.96,
+   "requirement_2": 0.98
+  },
+  "Min": 0.65
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-10-write/cold/r1",
+  "Label": true,
+  "Requirements": [
+   "Session ids arrive raw from query strings",
+   "Add ValidSessionID(id string) bool to session.go (2..64 chars, ASCII letters/digits/hyphens only) and enforce it in Store.Get (return a new ErrInvalidID) and in main.go's POST/GET branches (400)",
+   "Document the rule in a comment on ValidSessionID"
+  ],
+  "Answers": {
+   "requirement_0": 0.64,
+   "requirement_1": 0.96,
+   "requirement_2": 0.98
+  },
+  "Min": 0.64
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-10-write/warm/r0",
+  "Label": true,
+  "Requirements": [
+   "Session ids arrive raw from query strings",
+   "Add ValidSessionID(id string) bool to session.go (2..64 chars, ASCII letters/digits/hyphens only) and enforce it in Store.Get (return a new ErrInvalidID) and in main.go's POST/GET branches (400)",
+   "Document the rule in a comment on ValidSessionID"
+  ],
+  "Answers": {
+   "requirement_0": 0.66,
+   "requirement_1": 0.93,
+   "requirement_2": 0.96
+  },
+  "Min": 0.66
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-10-write/warm/r1",
+  "Label": true,
+  "Requirements": [
+   "Session ids arrive raw from query strings",
+   "Add ValidSessionID(id string) bool to session.go (2..64 chars, ASCII letters/digits/hyphens only) and enforce it in Store.Get (return a new ErrInvalidID) and in main.go's POST/GET branches (400)",
+   "Document the rule in a comment on ValidSessionID"
+  ],
+  "Answers": {
+   "requirement_0": 0.73,
+   "requirement_1": 0.96,
+   "requirement_2": 0.96
+  },
+  "Min": 0.73
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-10-write/warm-jev/r0",
+  "Label": true,
+  "Requirements": [
+   "Session ids arrive raw from query strings",
+   "Add ValidSessionID(id string) bool to session.go (2..64 chars, ASCII letters/digits/hyphens only) and enforce it in Store.Get (return a new ErrInvalidID) and in main.go's POST/GET branches (400)",
+   "Document the rule in a comment on ValidSessionID"
+  ],
+  "Answers": {
+   "requirement_0": 0.66,
+   "requirement_1": 0.94,
+   "requirement_2": 0.97
+  },
+  "Min": 0.66
+ },
+ {
+  "ID": "jev-d0-20260925T054734Z/fam-10-write/warm-jev/r1",
+  "Label": true,
+  "Requirements": [
+   "Session ids arrive raw from query strings",
+   "Add ValidSessionID(id string) bool to session.go (2..64 chars, ASCII letters/digits/hyphens only) and enforce it in Store.Get (return a new ErrInvalidID) and in main.go's POST/GET branches (400)",
+   "Document the rule in a comment on ValidSessionID"
+  ],
+  "Answers": {
+   "requirement_0": 0.63,
+   "requirement_1": 0.95,
+   "requirement_2": 0.97
+  },
+  "Min": 0.63
+ }
+]

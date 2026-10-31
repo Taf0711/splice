@@ -96,7 +96,7 @@ func (m model) dispatchTerminalReceiptKey(key string) (bool, tea.Model, tea.Cmd)
 		case "l":
 			return true, m.openDetailView(), nil
 		}
-	case receiptVerified:
+	case receiptVerified, receiptUnverified:
 		switch key {
 		case "o":
 			// [O] open diff (GAP-G seam): the diff source is the run's

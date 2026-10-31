@@ -3,6 +3,7 @@ package modelregistry
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
@@ -66,6 +67,18 @@ type ModelCost struct {
 	InputPerMillion       float64
 	OutputPerMillion      float64
 	CachedInputPerMillion float64
+	// OutputFree marks a model whose output tokens are explicitly known to
+	// bill at zero (for example a decision model with free output). Only a
+	// true here makes an output rate of zero valid; without the flag, zero
+	// still means "rate missing" and estimation fails loud. A positive
+	// output rate together with OutputFree is a contradiction and is
+	// rejected, so the flag can never silently mask a real price.
+	OutputFree bool
+	// Free marks a model the serving provider lists at an explicit zero input
+	// and output rate (a subscription plan or a free tier). Its requests price
+	// at zero. Free is set only from a listing with no cache rates and no tiers,
+	// so an absent price is never mistaken for a free one.
+	Free bool
 	// CacheWritePerMillion is the cache-creation (cache-write) rate, billed at a
 	// premium over input by providers that support it (Anthropic ~1.25x input).
 	// Splice means "not priced separately". Cache-write tokens fall back to the
@@ -92,11 +105,16 @@ type ModelCostTier struct {
 }
 
 type ModelEntry struct {
-	ID               string
-	DisplayName      string
-	APIModel         string
-	Provider         ProviderKind
-	APIProviders     []ProviderKind
+	ID           string
+	DisplayName  string
+	APIModel     string
+	Provider     ProviderKind
+	APIProviders []ProviderKind
+	// EndpointFamily names the API family whose first-party endpoint can serve
+	// this model. An empty value means the model's Provider. OpenRouter-only
+	// entries set it to ProviderOpenAICompatible, so an official OpenAI
+	// profile never selects them as a tier candidate.
+	EndpointFamily   ProviderKind
 	ContextLimits    ContextLimits
 	ReasoningEfforts []ReasoningEffort
 	// DefaultReasoningEffort is the effort used when the caller does not specify
@@ -235,6 +253,9 @@ func (model ModelEntry) Validate() error {
 			return fmt.Errorf("unknown api provider %q", provider)
 		}
 	}
+	if model.EndpointFamily != "" && !ValidRuntimeProviderKind(model.EndpointFamily) {
+		return fmt.Errorf("unknown endpoint family %q", model.EndpointFamily)
+	}
 	if len(model.APIProviders) > 0 && !model.AllowsProvider(model.Provider) {
 		return fmt.Errorf("primary provider %q not allowed by api providers", model.Provider)
 	}
@@ -251,10 +272,13 @@ func (cost ModelCost) Validate() error {
 	if cost.InputPerMillion < 0 || cost.OutputPerMillion < 0 || cost.CachedInputPerMillion < 0 || cost.CacheWritePerMillion < 0 || cost.WebSearchPerRequest < 0 {
 		return fmt.Errorf("model cost values must be non-negative")
 	}
+	if cost.Free && (cost.InputPerMillion != 0 || cost.OutputPerMillion != 0 || cost.CachedInputPerMillion != 0 || cost.CacheWritePerMillion != 0 || len(cost.Tiers) != 0) {
+		return fmt.Errorf("free model cost must have zero rates and no tiers")
+	}
 	if cost.IsUnpriced() {
 		return nil
 	}
-	if len(cost.Tiers) == 0 {
+	if len(cost.Tiers) == 0 && !cost.Free {
 		if cost.InputPerMillion == 0 && cost.OutputPerMillion == 0 {
 			return fmt.Errorf("model cost must include base pricing or pricing tiers")
 		}
@@ -278,9 +302,10 @@ func (cost ModelCost) Validate() error {
 	return nil
 }
 
-// IsUnpriced reports whether a cost has no base rates or pricing tiers.
+// IsUnpriced reports whether a cost has no base rates or pricing tiers. A free
+// listing is priced at zero, so it is not unpriced.
 func (cost ModelCost) IsUnpriced() bool {
-	return len(cost.Tiers) == 0 &&
+	return !cost.Free && len(cost.Tiers) == 0 &&
 		cost.InputPerMillion == 0 &&
 		cost.OutputPerMillion == 0 &&
 		cost.CachedInputPerMillion == 0 &&
@@ -334,6 +359,32 @@ func (model ModelEntry) AllowsProvider(provider ProviderKind) bool {
 		}
 	}
 	return false
+}
+
+// EndpointFamilyError reports a model that a profile's endpoint family cannot
+// serve, for example a Qwen model on an official OpenAI profile.
+type EndpointFamilyError struct {
+	Model  string
+	Family string
+}
+
+func (e *EndpointFamilyError) Error() string {
+	return fmt.Sprintf("splice model %s is not served by the %s endpoint family", e.Model, e.Family)
+}
+
+// AllowsEndpointFamily reports whether the model can be served by an endpoint
+// of the given family. The OpenAI-compatible family is a transport family, so
+// it keeps accepting every model whose API providers include it. Other families
+// compare the explicit endpoint family, which defaults to the model provider.
+func (model ModelEntry) AllowsEndpointFamily(provider ProviderKind) bool {
+	if provider == ProviderOpenAICompatible {
+		return model.AllowsProvider(ProviderOpenAICompatible)
+	}
+	family := model.EndpointFamily
+	if family == "" {
+		family = model.Provider
+	}
+	return family == provider
 }
 
 type Registry struct {
@@ -570,13 +621,21 @@ func ValidRuntimeProviderKind(provider ProviderKind) bool {
 	return ValidPrimaryProviderKind(provider) || provider == ProviderOpenAICompatible
 }
 
+// reasoningEffortLevels is the closed set of effort names the registry and the
+// provider adapters accept, in ascending order.
+var reasoningEffortLevels = []ReasoningEffort{
+	ReasoningEffortNone, ReasoningEffortMinimal, ReasoningEffortLow, ReasoningEffortMedium,
+	ReasoningEffortHigh, ReasoningEffortXHigh, ReasoningEffortMax,
+}
+
+// ReasoningEffortLevels returns the accepted effort names, ascending. The
+// slice is a copy; callers may not change the set.
+func ReasoningEffortLevels() []ReasoningEffort {
+	return append([]ReasoningEffort(nil), reasoningEffortLevels...)
+}
+
 func ValidReasoningEffort(effort ReasoningEffort) bool {
-	switch effort {
-	case ReasoningEffortNone, ReasoningEffortMinimal, ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh, ReasoningEffortXHigh, ReasoningEffortMax:
-		return true
-	default:
-		return false
-	}
+	return slices.Contains(reasoningEffortLevels, effort)
 }
 
 func ValidModelCapability(capability ModelCapability) bool {
@@ -595,4 +654,27 @@ func ValidModelStatus(status ModelStatus) bool {
 	default:
 		return false
 	}
+}
+
+// PriceCatalogs names the catalog ids whose records price a curated entry. The
+// curated overlay takes a price from the entry's own provider record, and a
+// slash-qualified id from OpenRouter. A derived entry is bound to its own profile
+// already, so it returns nil. nil also means no owner is known, and that
+// entry is not restricted by catalog.
+func (entry ModelEntry) PriceCatalogs() []string {
+	if entry.ModelsDevProvider != "" {
+		return nil
+	}
+	if strings.Contains(entry.APIModel, "/") {
+		return []string{"openrouter"}
+	}
+	switch entry.Provider {
+	case ProviderOpenAI:
+		return []string{"openai"}
+	case ProviderAnthropic:
+		return []string{"anthropic"}
+	case ProviderGoogle:
+		return []string{"google", "google-vertex"}
+	}
+	return nil
 }

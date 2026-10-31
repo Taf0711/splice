@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -50,6 +51,77 @@ func thinkingBudgetForEffort(effort string) int {
 	default:
 		return 0
 	}
+}
+
+// adaptiveMinMaxTokens is the max_tokens floor for adaptive-thinking requests
+// without a caller cap. Requests stream, so a high ceiling costs nothing.
+const adaptiveMinMaxTokens = 32000
+
+// adaptiveThinkingModel reports whether a Claude model takes adaptive
+// thinking (Opus/Sonnet 4.6 and later, Fable and Mythos) instead of a
+// budget. It reads the family and version from the model id, tolerating a
+// provider prefix ("anthropic/", "anthropic.") and a date or "@" suffix.
+// Haiku 4.5, Sonnet 4.5, and older keep the budget form.
+func adaptiveThinkingModel(model string) bool {
+	name := strings.ToLower(strings.TrimSpace(model))
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
+	}
+	name = strings.TrimPrefix(name, "anthropic.")
+	if strings.Contains(name, "fable") || strings.Contains(name, "mythos") {
+		return true
+	}
+	major, minor, ok := claudeVersion(name)
+	if !ok {
+		return false
+	}
+	return major > 4 || (major == 4 && minor >= 6)
+}
+
+// claudeVersion parses "claude-<family>-<major>[-.<minor>]" and ignores a
+// trailing date (claude-sonnet-4-20250514 is 4.0, not 4.20250514).
+func claudeVersion(name string) (major, minor int, ok bool) {
+	for _, family := range []string{"opus", "sonnet", "haiku"} {
+		i := strings.Index(name, "claude-"+family+"-")
+		if i < 0 {
+			continue
+		}
+		rest := strings.FieldsFunc(name[i+len("claude-"+family+"-"):], func(r rune) bool {
+			return r == '-' || r == '.' || r == '@'
+		})
+		if len(rest) == 0 {
+			return 0, 0, false
+		}
+		major, err := strconv.Atoi(rest[0])
+		if err != nil {
+			return 0, 0, false
+		}
+		if len(rest) > 1 && len(rest[1]) <= 2 {
+			minor, _ = strconv.Atoi(rest[1])
+		}
+		return major, minor, true
+	}
+	return 0, 0, false
+}
+
+// adaptiveEffort maps a requested effort onto the output_config.effort enum.
+// "none" and "minimal" become "low": thinking cannot be disabled on every
+// adaptive model, and a low effort is the documented way to think less.
+// Opus/Sonnet 4.6 have no xhigh, so it rounds up to max like the registry
+// clamp does. Empty stays empty (the API default).
+func adaptiveEffort(model, requested string) string {
+	switch effort := strings.ToLower(strings.TrimSpace(requested)); effort {
+	case "none", "minimal":
+		return "low"
+	case "low", "medium", "high", "max":
+		return effort
+	case "xhigh":
+		if major, minor, ok := claudeVersion(strings.ToLower(model)); ok && major == 4 && minor == 6 {
+			return "max"
+		}
+		return effort
+	}
+	return ""
 }
 
 // resolveThinking returns the thinking budget and the max_tokens to send. When a
@@ -398,7 +470,23 @@ func (provider *Provider) anthropicRequest(request zeroruntime.CompletionRequest
 	// the budget shrinks (or thinking disables) to fit. Temperature is
 	// intentionally left unset (Anthropic requires the default when thinking is
 	// on).
-	if budget, effectiveMax, enabled := resolveThinking(request.ReasoningEffort, mapped.MaxTokens, request.MaxOutputTokens > 0); enabled {
+	thinking := false
+	if adaptiveThinkingModel(provider.model) {
+		// Claude 4.6+: adaptive thinking is always requested (on Opus 4.7/4.8
+		// omitting it would switch thinking off), and depth is the effort
+		// level. "Auto" (no effort) leaves the API's own default.
+		thinking = true
+		mapped.Thinking = &thinkingConfig{Type: "adaptive", Display: "summarized"}
+		if effort := adaptiveEffort(provider.model, request.ReasoningEffort); effort != "" {
+			mapped.OutputConfig = &outputConfig{Effort: effort}
+		}
+		if request.MaxOutputTokens <= 0 && mapped.MaxTokens < adaptiveMinMaxTokens {
+			// Thinking counts against max_tokens; the old 4096 default would
+			// cut a thinking model off mid-answer. A caller's cap still wins.
+			mapped.MaxTokens = adaptiveMinMaxTokens
+		}
+	} else if budget, effectiveMax, enabled := resolveThinking(request.ReasoningEffort, mapped.MaxTokens, request.MaxOutputTokens > 0); enabled {
+		thinking = true
 		mapped.MaxTokens = effectiveMax
 		mapped.Thinking = &thinkingConfig{Type: "enabled", BudgetTokens: budget}
 	}
@@ -430,8 +518,14 @@ func (provider *Provider) anthropicRequest(request zeroruntime.CompletionRequest
 	// that exact tool this turn. Typed stages rely on this to make the model call
 	// their single typed tool instead of answering in prose. Empty leaves
 	// ToolChoice nil, which omits the field (byte-identical to before).
-	if name := strings.TrimSpace(request.ToolChoice); name != "" {
+	// Anthropic cannot force a tool while the model thinks (a 400 on every
+	// thinking request, and on Opus 5.5 / Fable 5.1 at all), so a thinking
+	// request keeps auto tool choice; typed stages retry a prose answer.
+	if name := strings.TrimSpace(request.ToolChoice); name != "" && !thinking {
 		mapped.ToolChoice = &toolChoice{Type: "tool", Name: name}
+	} else if request.ToolChoiceRequired {
+		// Any-tool forcing: the model must use a tool, without naming which.
+		mapped.ToolChoice = &toolChoice{Type: "any"}
 	}
 	applyMessageCacheBreakpoints(mapped.Messages)
 	return mapped, nil

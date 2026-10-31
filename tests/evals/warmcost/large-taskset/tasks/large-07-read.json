@@ -1,0 +1,8 @@
+{
+  "name": "large-07-read",
+  "phase": "read",
+  "precursor": "large-07-write",
+  "prompt": "Add (s *Store) PutWithin(q Quota, data []byte) (string, error) in the storage package: store data only when Quota.Enforce allows it against the store's current usage, else return ErrQuotaExceeded and store nothing. Reuse UsedBytes and Enforce. Add a regression test.",
+  "check": "# large-07 B: Add (s *Store) PutWithin(q Quota, data []byte) (string, error) in the \nmkdir -p internal/storage\ncat > internal/storage/probe_put_within_test.go <<'EOF'\npackage storage\n\nimport (\n\t\"errors\"\n\t\"testing\"\n)\n\nfunc TestProbePutWithin(t *testing.T) {\n\ts := NewStore()\n\tq := Quota{MaxBytes: 10}\n\tif _, err := s.PutWithin(q, []byte(\"123456\")); err != nil {\n\t\tt.Fatalf(\"first put: %v\", err)\n\t}\n\tkey, err := s.PutWithin(q, []byte(\"abcdef\"))\n\tif !errors.Is(err, ErrQuotaExceeded) {\n\t\tt.Fatalf(\"second put err = %v, want ErrQuotaExceeded\", err)\n\t}\n\tif key != \"\" || s.UsedBytes() != 6 {\n\t\tt.Fatalf(\"a refused put must store nothing: key=%q used=%d\", key, s.UsedBytes())\n\t}\n}\nEOF\ngo test -count=1 ./internal/storage/ ; rc=$?\nrm -f internal/storage/probe_put_within_test.go\nif [ $rc -ne 0 ]; then exit $rc; fi\nexit 0\n",
+  "fixture": "../../large-families/fixture"
+}

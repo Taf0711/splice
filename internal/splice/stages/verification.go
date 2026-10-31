@@ -55,13 +55,13 @@ func aggregateVerificationResults(results []VerificationCheckResult) schemas.Ver
 
 	hasRequiredIncomplete := false
 	hasFindings := len(findings) > 0
-	allNotApplicable := true
+	hasPassed := false
 	for _, t := range tools {
 		if t.Status == schemas.VerificationIncomplete && t.Required {
 			hasRequiredIncomplete = true
 		}
-		if t.Status != schemas.VerificationNotApplicable {
-			allNotApplicable = false
+		if t.Status == schemas.VerificationPassed {
+			hasPassed = true
 		}
 	}
 
@@ -73,10 +73,14 @@ func aggregateVerificationResults(results []VerificationCheckResult) schemas.Ver
 		complete = false
 	case hasFindings:
 		status = schemas.VerificationFindings
-	case allNotApplicable && len(tools) > 0:
-		status = schemas.VerificationNotApplicable
-	default:
+	case hasPassed:
+		// Passed needs at least one check that ran clean. A non-required
+		// incomplete tool next to not-applicable tools is not a pass.
 		status = schemas.VerificationPassed
+	default:
+		// No check ran clean and none is required and incomplete. Nothing
+		// was verified, so the report is not applicable, never passed.
+		status = schemas.VerificationNotApplicable
 	}
 
 	summary := verificationSummary(status, tools, findings)

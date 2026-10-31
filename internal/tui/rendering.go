@@ -256,8 +256,14 @@ func (m model) renderRowModeUncached(row transcriptRow, width int, rc rowContext
 		if cfg, summary, ok := parseTrustConfigTranscriptPayload(row.text); ok {
 			return renderTrustConfigCard(cfg, summary, width)
 		}
+		if card, ok := parsePipelineGraphCard(row.text); ok {
+			return renderPipelineGraphCard(card, width, m.glyphTier)
+		}
 		if payload, ok := commandCardTranscriptPayload(row.text); ok {
 			return renderCommandCardRow(payload, width)
+		}
+		if title, status, body, ok := parseBackendCard(row.text); ok {
+			return renderBackendCard(title, status, body, width)
 		}
 		if row.tool == "sessions" {
 			return renderSessionsCards(row.text, width)
@@ -280,7 +286,7 @@ func (m model) renderRowModeUncached(row transcriptRow, width int, rc rowContext
 		return renderSystemNote(row.text, width)
 	case rowError:
 		if card, ok := parseReceiptTranscriptPayload(row.text); ok {
-			return renderReceiptCard(card, width, m.glyphTier)
+			return renderReceiptCard(card, width, m.glyphTier) + renderErrorHint(row.hint, width)
 		}
 		return renderErrorRow(row, width)
 	case rowToolCall:
@@ -698,14 +704,22 @@ func renderSystemNote(text string, width int) string {
 	if isCancellationNotice(trimmed) {
 		marker, style = zeroTheme.amber.Render("⊘"), zeroTheme.amber
 	}
+	if width <= 0 {
+		return ""
+	}
+	// A notice wraps to the row width instead of cutting its clause off. Short
+	// notices still fit on the one marked line. The 2 cells are the marker and
+	// its space; continuation lines indent under the first word.
 	srcLines := strings.Split(trimmed, "\n")
 	out := make([]string, 0, len(srcLines))
 	for i, line := range srcLines {
-		prefix := marker + " "
-		if i > 0 {
-			prefix = "  " // continuation lines align under the first word
+		for j, part := range wrapPlainText(line, maxInt(1, width-2)) {
+			prefix := "  " // continuation lines align under the first word
+			if i == 0 && j == 0 {
+				prefix = marker + " "
+			}
+			out = append(out, prefix+style.Render(part))
 		}
-		out = append(out, fitStyledLine(prefix+style.Render(line), width))
 	}
 	return strings.Join(out, "\n")
 }
@@ -1054,14 +1068,37 @@ func isDoctorResultHeading(value string) bool {
 }
 
 func renderErrorRow(row transcriptRow, width int) string {
-	note := noteBox(row.text, width, zeroTheme.cardErr, zeroTheme.red)
-	// A recognized failure carries a one-line next step. Render it just below the
-	// red box in the faint metadata style so it reads as guidance, not more error
-	// text (and to avoid nesting ANSI styles inside noteBox's per-line red wrap).
-	if hint := strings.TrimSpace(row.hint); hint != "" {
-		note += "\n" + fitStyledLine(zeroTheme.faint.Render("→ "+hint), width)
+	// An error row wraps to the box's text width. A cut-off error hides the
+	// cause ("stage routing config…"), so the text must never truncate.
+	text := strings.Join(wrapPlainText(row.text, errorTextWidth(width)), "\n")
+	return noteBox(text, width, zeroTheme.cardErr, zeroTheme.red) + renderErrorHint(row.hint, width)
+}
+
+// renderErrorHint renders the one-line next step of a recognized failure,
+// with a leading newline, or "" when there is no hint. It goes just below the
+// red box or the receipt card in the faint metadata style, so it reads as
+// guidance, not more error text (and does not nest ANSI styles inside
+// noteBox's per-line red wrap).
+func renderErrorHint(hint string, width int) string {
+	hint = strings.TrimSpace(hint)
+	if hint == "" {
+		return ""
 	}
-	return note
+	var out string
+	for _, line := range wrapPlainText("→ "+hint, width) {
+		out += "\n" + zeroTheme.faint.Render(line)
+	}
+	return out
+}
+
+// errorTextWidth is the text width inside a noteBox of the given width: the
+// bordered layout keeps 4 cells for the frame and padding, and the tiny tier
+// keeps the full width (see styledBlockFill).
+func errorTextWidth(width int) int {
+	if widthTier(width) == tierTiny {
+		return maxInt(1, width)
+	}
+	return maxInt(1, width-4)
 }
 
 // noteBox is the bordered one-note container behind system and error rows.
@@ -1348,7 +1385,13 @@ func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width
 
 	var lines []string
 	lines = append(lines, fill(zeroTheme.amber).Render(gateFooter))
-	lines = append(lines, fill(zeroTheme.faint).Render("-- no work running | no tokens burning --"))
+	// The invariant line states what is true: this run waits, and so does
+	// everything else unless specialists are still in flight.
+	if prompt.othersRunning > 0 {
+		lines = append(lines, fill(zeroTheme.amber).Render(fmt.Sprintf("-- this run waits | %d specialist(s) still running --", prompt.othersRunning)))
+	} else {
+		lines = append(lines, fill(zeroTheme.faint).Render("-- no work running | no tokens burning --"))
+	}
 	lines = append(lines, "")
 	if header := strings.TrimSpace(prompt.request.Header); header != "" {
 		lines = append(lines, fill(zeroTheme.ink).Render(header))

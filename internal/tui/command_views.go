@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -10,8 +11,10 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Taf0711/splice/internal/config"
+	"github.com/Taf0711/splice/internal/flags"
 	"github.com/Taf0711/splice/internal/providercatalog"
 	"github.com/Taf0711/splice/internal/sandbox"
+	splicerun "github.com/Taf0711/splice/internal/splice"
 	"github.com/Taf0711/splice/internal/tools"
 	"github.com/Taf0711/splice/internal/zerocommands"
 )
@@ -271,6 +274,131 @@ func (m model) toolsText() string {
 		Actions:  []string{"/mcp manage servers", "/permissions manage access"},
 		Hints:    toolsHints(groups),
 	})
+}
+
+// flagsText renders the read-only /flags card. It shows the same rows as
+// `splice flags`: name, on or off, source, and an experimental marker.
+func (m model) flagsText() string {
+	if len(m.flagResolutions) == 0 {
+		return renderCommandCardTranscript(commandCard{
+			Title:   "Flags",
+			Summary: []string{"0 flags", "no flag state available"},
+		})
+	}
+	nameWidth, sourceWidth, on := 0, 0, 0
+	for _, r := range m.flagResolutions {
+		nameWidth = max(nameWidth, len(r.Name))
+		sourceWidth = max(sourceWidth, len(r.Source))
+		if r.Value {
+			on++
+		}
+	}
+	lines := make([]string, 0, len(m.flagResolutions))
+	for _, r := range m.flagResolutions {
+		value := "off"
+		if r.Value {
+			value = "on"
+		}
+		line := fmt.Sprintf("%-*s  %-3s  %-*s", nameWidth, r.Name, value, sourceWidth, r.Source)
+		if r.Definition.Stability == flags.Experimental {
+			line += "  experimental"
+		}
+		lines = append(lines, line)
+	}
+	return renderCommandCardTranscript(commandCard{
+		Title:    "Flags",
+		Summary:  []string{fmt.Sprintf("%d flags", len(m.flagResolutions)), fmt.Sprintf("%d on", on)},
+		Sections: []commandCardSection{{Title: "Resolved", Lines: lines}},
+		Hints:    []string{"set flags in config, SPLICE_FLAGS, or --flags; this list is read-only"},
+	})
+}
+
+// pipelineText renders the active topology card: the static graph, its
+// source, the compile warnings, and the command nodes. The card stores data
+// and renders at the live width. A resolve error is shown, never replaced by
+// the embedded default.
+func (m model) pipelineText() string {
+	card, err := buildPipelineGraphCard(m.cwd, m.trusted)
+	if err == nil {
+		var payload string
+		if payload, err = pipelineGraphCardPayload(card); err == nil {
+			return payload
+		}
+	}
+	return renderCommandCardTranscript(commandCard{
+		Title:    "Pipeline",
+		Summary:  []string{"topology did not resolve"},
+		Sections: []commandCardSection{{Title: "Error", Lines: []string{err.Error()}}},
+	})
+}
+
+// pipelineCommandText handles /pipeline. With no argument it is the read-only
+// view. "use <name>" selects a library pipeline through the same path as
+// `splice pipeline use`. It applies from the next run. "/pipeline edit" opens
+// the browser editor; the model handles it before this function.
+func (m model) pipelineCommandText(args string) string {
+	fields := strings.Fields(args)
+	if len(fields) == 0 {
+		return m.pipelineText()
+	}
+	if fields[0] != "use" || len(fields) != 2 {
+		return renderCommandCardTranscript(commandCard{
+			Title:   "Pipeline",
+			Summary: []string{"usage: /pipeline [use <name> | edit [--new] [name]]"},
+		})
+	}
+	card, _, _ := m.usePipeline(fields[1])
+	return card
+}
+
+// usePipeline selects a library pipeline. It returns the card to show, a
+// one-line result, and the refusal or error. /pipeline use and the browser
+// editor's "Use it now" both run it, so both refuse while a run is active.
+func (m model) usePipeline(name string) (card, text string, err error) {
+	if m.pending {
+		err = errors.New("Cannot change the pipeline while a run is active.")
+		return renderCommandCardTranscript(commandCard{
+			Title:   "Pipeline",
+			Summary: []string{err.Error()},
+		}), "", err
+	}
+	topology, path, err := splicerun.ActivateLibraryPipeline(name)
+	if err != nil {
+		return renderCommandCardTranscript(commandCard{
+			Title:    "Pipeline",
+			Summary:  []string{"pipeline not selected"},
+			Sections: []commandCardSection{{Title: "Error", Lines: []string{err.Error()}}},
+		}), "", err
+	}
+	hints := []string{"applies from the next run; /pipeline shows the active topology"}
+	text = "Active pipeline: " + topology.Name + ". It applies from the next run."
+	// A trusted project file outranks the library entry, so the selection does
+	// not run while that file is present.
+	if _, source, _, rerr := splicerun.ResolveTopology(splicerun.TopologySourcesFor(m.cwd, m.trusted)); rerr == nil && source == splicerun.TopologySourceProject {
+		hints = append(hints, "a trusted "+splicerun.TopologySourceProject+" still outranks this library entry")
+		text += " A trusted " + splicerun.TopologySourceProject + " still outranks it."
+	}
+	sections := []commandCardSection{}
+	if nodes := splicerun.CommandNodeLines(topology); len(nodes) > 0 {
+		lines := make([]string, 0, len(nodes))
+		for _, line := range nodes {
+			lines = append(lines, strings.TrimSpace(line))
+		}
+		sections = append(sections, commandCardSection{Title: "Command nodes", Lines: lines})
+	}
+	if nodes := splicerun.AgentNodeLines(topology); len(nodes) > 0 {
+		lines := make([]string, 0, len(nodes))
+		for _, line := range nodes {
+			lines = append(lines, strings.TrimSpace(line))
+		}
+		sections = append(sections, commandCardSection{Title: "Agent nodes", Lines: lines})
+	}
+	return renderCommandCardTranscript(commandCard{
+		Title:    "Pipeline",
+		Summary:  []string{"active pipeline: " + topology.Name, "source: " + path},
+		Sections: sections,
+		Hints:    hints,
+	}), text, nil
 }
 
 func (m *model) mcpText() string {
@@ -832,19 +960,21 @@ func (m model) contextText() string {
 				},
 			},
 		},
-		Actions: []string{"/permissions manage access", "/tools inspect catalog"},
+		Actions: []string{"/permissions show access", "/tools inspect catalog"},
 	})
 }
 
 // applyTrustPickerChoice saves the selected action and updates the live trust
-// indicator. Project resources keep the startup decision until the next launch.
+// indicator. The pipeline topology follows the decision from the next run. The
+// project config, hooks, plugins, and MCP servers keep the startup decision
+// until the next launch.
 // The [V] view-config row is handled BEFORE the unknown-choice guard: it is an
 // inspection action, not a trust decision — it returns to the menu unchanged.
 func (m model) applyTrustPickerChoice(item pickerItem) (model, string, bool) {
 	if item.Value == trustActionView {
 		// Re-open the trust menu after the editor exits, and append the
 		// evidence card so the summary stays in the transcript.
-		cfg := describeProjectTrustConfig(m.projectConfigPath)
+		cfg := describeProjectTrustConfig(m.projectTrustConfigPath())
 		m.trustConfigNotice(cfg)
 		return m, "", false
 	}
@@ -875,10 +1005,11 @@ func (m model) applyTrustPickerChoice(item pickerItem) (model, string, bool) {
 
 	m.trusted = trusted
 	m.agentOptions.TrustedWorkspace = trusted
+	m.agentOptions.TrustRoot = m.cwd
 	if !trusted {
 		return m, "Workspace trust declined. This session stays untrusted.", true
 	}
-	return m, "Workspace trust saved. Project resources load on the next launch.", true
+	return m, "Workspace trust saved. The pipeline topology applies from the next run. The project config, hooks, plugins, and MCP servers load on the next launch.", true
 }
 
 func (m model) registeredTools() []tools.Tool {

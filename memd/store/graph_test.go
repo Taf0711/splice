@@ -589,6 +589,13 @@ func TestCollectDeletesOnlyStaleUnreferencedEphemeral(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fresh: %v", err)
 	}
+	// Pin fresh far in the future: the Collect cutoff uses Go's time.Now()
+	// while verified_at defaults to SQLite's strftime('%s','now'), two
+	// clocks that can skew by a second. A future stamp can never satisfy
+	// verified_at < cutoff, so "kept" does not depend on clock skew.
+	if _, err := st.db.Exec(`UPDATE cognition_nodes SET verified_at = 4000000000 WHERE id = ?`, fresh.ID); err != nil {
+		t.Fatalf("pin fresh: %v", err)
+	}
 	// Ephemeral but referenced by an edge: kept.
 	ref, err := st.UpsertNode(ctx, NodeInput{Kind: NodeKindFact, Claim: "referenced scratch", Status: NodeStatusEphemeral})
 	if err != nil {
@@ -694,3 +701,30 @@ func TestGraphTelemetryCounts(t *testing.T) {
 
 // storeGraphTelemetry reads the package-level graph counters.
 func storeGraphTelemetry() GraphCounters { return GraphTelemetry() }
+
+// TestGetExactReturnsTheNewestCaptureFirst: each verified run captures a new
+// node on the same file anchor. The older ones are stale after the file
+// changes, so the limit must not keep them ahead of the newest capture.
+func TestGetExactReturnsTheNewestCaptureFirst(t *testing.T) {
+	st := newGraphTestStore(t)
+	ctx := context.Background()
+	var last Node
+	for _, claim := range []string{"run one", "run two", "run three"} {
+		n, err := st.UpsertNode(ctx, NodeInput{
+			Kind:    NodeKindFact,
+			Claim:   claim,
+			Anchors: []AnchorInput{{Kind: "file", Value: "internal/billing/service.go"}},
+		})
+		if err != nil {
+			t.Fatalf("upsert %q: %v", claim, err)
+		}
+		last = n
+	}
+	nodes, err := st.GetExact(ctx, map[string][]string{"file": {"internal/billing/service.go"}}, GetExactOptions{Limit: 1})
+	if err != nil {
+		t.Fatalf("exact: %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].ID != last.ID {
+		t.Fatalf("limit 1 kept %+v, want the newest node %d", nodes, last.ID)
+	}
+}

@@ -2,6 +2,7 @@ package splice
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"regexp"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/flags"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/splice/stages"
 )
@@ -224,7 +226,9 @@ func attemptLocalRepair(
 	runner ToolRunner,
 	mem MemoryStore,
 	tr *runTraceAccumulator,
+	priorScope *StageScopePlan,
 	wallDeadline time.Time,
+	execBudget *StageExecutionBudget,
 	records *[]schemas.StageRecord,
 	outputs *[]schemas.HarnessStageOutput,
 	priorSummaries *map[string]string,
@@ -235,11 +239,15 @@ func attemptLocalRepair(
 	for i, s := range plan.Stages {
 		stageNames[i] = s.Name
 	}
-	codeWriterStage, ok := registry["code_writer"]
+	// A topology may rename a builtin node, so every stage lookup, record, and
+	// summary below uses the plan's name for the role.
+	writerName := roleStageName(plan, "code_writer")
+	testName := roleStageName(plan, "test_runner")
+	codeWriterStage, ok := registry[writerName]
 	if !ok {
 		return false, nil, fmt.Errorf("repair: code_writer stage not registered")
 	}
-	testRunnerStage, ok := registry["test_runner"]
+	testRunnerStage, ok := registry[testName]
 	if !ok {
 		return false, nil, fmt.Errorf("repair: test_runner stage not registered")
 	}
@@ -250,6 +258,15 @@ func attemptLocalRepair(
 	var lastMessage schemas.StageMessage
 	progress := newRepairProgressState()
 	var lastWriterOutput schemas.HarnessStageOutput
+	// repairScope is the scope state for this repair loop. Each re-entry
+	// executes with the scope freshly prepared for THAT re-entry and then
+	// replaces repairScope, so repair N+1 validates against repair N's
+	// plan, never the initial pass pointer. Keyed to this repair call's
+	// stage set; an unrelated stage's scope cannot leak in.
+	repairScope := priorScope
+	// prevStep is the attempt before the next repair boundary: the pass's
+	// own change and failure, then each repair in turn (traj_v1 state).
+	var prevStep TrajectoryStep
 
 	for repairN := 1; repairN <= maxLocalRepairs; repairN++ {
 		if ctx.Err() != nil {
@@ -270,6 +287,9 @@ func attemptLocalRepair(
 		// the identical failure with no new evidence marks a stall on
 		// re-entry and the second consecutive stall stops the loop.
 		evidence, names := extractFailingTests(results)
+		if repairN == 1 {
+			prevStep = TrajectoryStep{Change: changeSummaryForStage(*priorSummaries, writerName), Failure: strings.Join(evidence, "\n"), FailureKind: schemas.NodeFailureTestFailure}
+		}
 		fingerprint := FingerprintFromTestResults(results)
 		fingerprintHash := fingerprint.Hash()
 		var diagnostics strings.Builder
@@ -289,7 +309,7 @@ func attemptLocalRepair(
 		if repairN > 1 && (repeatedNoEvidence || stalledCount >= 2) {
 			// Same fingerprint and no new evidence after the evidence-informed
 			// retry: stop writing and surface the typed outcome.
-			emitStageEvent(options, iteration-1, "test_runner", "message", fmt.Sprintf("%s: identical failure with no new evidence after %d repair(s); stopping repair loop", repairNoProgressReason, attempts), 0, nil)
+			emitStageEvent(options, iteration-1, testName, "message", fmt.Sprintf("%s: identical failure with no new evidence after %d repair(s); stopping repair loop", repairNoProgressReason, attempts), 0, nil)
 			return false, &schemas.InteractionRecord{
 				Message:   lastMessage,
 				Iteration: iteration,
@@ -308,7 +328,8 @@ func attemptLocalRepair(
 		instruction := repairInstructionDirection(names, diagnostics.String(), lastWriterOutput)
 		revisionContext := buildFocusedRevisionContext(focusedRepairPayload{
 			Intent:           plan.RequestIntent,
-			ChangeSummary:    changeSummaryForStage(*priorSummaries, "code_writer"),
+			ChangeSummary:    changeSummaryForStage(*priorSummaries, writerName),
+			ChangedFiles:     (*priorChangedFiles)[writerName],
 			FailureText:      strings.Join(evidence, "\n"),
 			Fingerprint:      fingerprint,
 			Evidence:         resolverEvidence,
@@ -320,13 +341,13 @@ func attemptLocalRepair(
 		message := schemas.StageMessage{
 			ID:       fmt.Sprintf("%s-r%d", runID, repairN),
 			RunID:    runID,
-			From:     "test_runner",
-			To:       "code_writer",
+			From:     testName,
+			To:       writerName,
 			Kind:     schemas.MessageKindRevisionRequest,
 			Evidence: names,
 			Payload: schemas.RevisionRequest{
 				FailingEvidence: evidence,
-				ChangedFiles:    append([]string(nil), (*priorChangedFiles)["code_writer"]...),
+				ChangedFiles:    append([]string(nil), (*priorChangedFiles)[writerName]...),
 				Instruction:     instruction,
 			},
 		}
@@ -336,19 +357,55 @@ func attemptLocalRepair(
 		lastMessage = message
 		attempts++
 
-		emitStageEvent(options, iteration-1, "test_runner", "message", fmt.Sprintf("revision_request -> code_writer: %d failing tests", len(names)), 0, nil)
+		emitStageEvent(options, iteration-1, testName, "message", fmt.Sprintf("revision_request -> code_writer: %d failing tests", len(names)), 0, nil)
 
 		// Re-enter code_writer with the focused revision context.
-		writerInput := repairStageInput(runID, "code_writer", plan, stageNames, *priorSummaries, *priorChangedFiles, &revisionContext)
+		writerInput := repairStageInput(runID, writerName, plan, stageNames, *priorSummaries, *priorChangedFiles, &revisionContext)
 		writerStart := time.Now()
-		writerPlanStage, _ := stageByPlanName(plan, "code_writer")
+		var writerScope *StageScopePlan
+		writerPlanStage, _ := stageByPlanName(plan, writerName)
 		writerCaps := effectiveCaps(writerPlanStage, codeWriterStage.Capabilities())
-		writerOutput, werr := runRepairStage(ctx, wallDeadline, writerInput, codeWriterStage, iteration, repairSelection(options, provider, "code_writer", writerPlanStage.Model, false), options, workDir, runner, mem, writerCaps, stageBudgetByName(plan, "code_writer"), plan.Tier, tr)
+		writerSelection, selErr := repairSelection(options, provider, writerName, writerPlanStage.Model, false)
+		if selErr != nil {
+			return false, nil, fmt.Errorf("repair: code_writer re-entry: %w", selErr)
+		}
+		writerOutput, werr := runRepairStage(ctx, wallDeadline, writerInput, codeWriterStage, iteration, writerSelection, options, workDir, runner, mem, writerCaps, stageBudgetByName(plan, writerName), plan.Tier, tr, repairScope, repairN, &writerScope, execBudget)
 		totalLatency += int(time.Since(writerStart).Milliseconds())
 		if werr != nil {
-			return false, nil, fmt.Errorf("repair: code_writer re-entry: %w", werr)
+			if ctx.Err() != nil || errors.Is(werr, context.Canceled) || errors.Is(werr, errWallTimeExceeded) {
+				return false, nil, fmt.Errorf("repair: code_writer re-entry: %w", werr)
+			}
+			// A failed re-entry stops the repairs, not the run: the pass ends
+			// with the failing tests, and the iteration boundary decides
+			// (trajectory rules, a fresh budget in the next pass). The
+			// re-entry's requests are in the ledger, so its usage joins the
+			// code_writer record. (Chain pilot: 15 of 16 failures ended the
+			// run here with iterations left.)
+			var metered interface{ StageUsage() *schemas.StageUsage }
+			if errors.As(werr, &metered) {
+				if rec, ok := addRepairUsage(records, iteration, writerName, metered.StageUsage()); ok && tr != nil {
+					tr.replaceStageRecord(rec)
+					tr.persistPartial(ctx)
+				}
+			}
+			// The failed re-entry is a node result of this pass too.
+			noteNodeOutcome(options, iteration, writerName, schemas.StageFailed, failedStageOutput(werr))
+			emitStageEvent(options, iteration-1, testName, "message", fmt.Sprintf("repair stopped: code_writer re-entry failed: %v", werr), 0, nil)
+			return false, &schemas.InteractionRecord{
+				Message:   lastMessage,
+				Iteration: iteration,
+				Repairs:   attempts,
+				Resolved:  false,
+				LatencyMs: totalLatency,
+			}, nil
 		}
-		mergedWriter := mergeRepairRecord(records, iteration, "code_writer", writerOutput, false)
+		if writerScope != nil {
+			repairScope = writerScope
+		}
+		mergedWriter := mergeRepairRecord(records, iteration, writerName, writerOutput, false)
+		// The re-entry is a node result of this pass too, so the pass
+		// attribution names its files.
+		noteNodeOutcome(options, iteration, writerName, mergedWriter.Status, &writerOutput)
 		if tr != nil {
 			tr.replaceStageRecord(mergedWriter)
 			tr.persistPartial(ctx)
@@ -359,6 +416,16 @@ func attemptLocalRepair(
 			// classification re-proves everything against the new tree
 			// instead of trusting a memoized set from before the repair.
 			tr.noteSpliceMutation(stageChangedFilesMap(writerOutput))
+			// F4: the same mutation evidence invalidates the admission
+			// digest memo. New evidence (recorded writes) means cached
+			// content versions may no longer match the worktree.
+			if memo := runDigestMemo(); memo != nil {
+				for _, files := range stageChangedFilesMap(writerOutput) {
+					for _, f := range files {
+						memo.Invalidate(workDir, strings.TrimPrefix(f, "./"))
+					}
+				}
+			}
 		}
 		*outputs = append(*outputs, writerOutput)
 		lastWriterOutput = writerOutput
@@ -368,17 +435,22 @@ func attemptLocalRepair(
 		// re-entry itself already emits running/completed through
 		// runStageWithContext; this labeled note is what makes the stream show
 		// WHY a second test_runner run exists mid-iteration.
-		emitStageEvent(options, iteration-1, "test_runner", "message", fmt.Sprintf("repair re-entry %d: re-running tests", attempts), 0, nil)
-		testInput := repairStageInput(runID, "test_runner", plan, stageNames, *priorSummaries, *priorChangedFiles, nil)
+		emitStageEvent(options, iteration-1, testName, "message", fmt.Sprintf("repair re-entry %d: re-running tests", attempts), 0, nil)
+		testInput := repairStageInput(runID, testName, plan, stageNames, *priorSummaries, *priorChangedFiles, nil)
 		testStart := time.Now()
-		testPlanStage, _ := stageByPlanName(plan, "test_runner")
+		var runnerScope *StageScopePlan
+		testPlanStage, _ := stageByPlanName(plan, testName)
 		testCaps := effectiveCaps(testPlanStage, testRunnerStage.Capabilities())
-		newTestOutput, terr := runRepairStage(ctx, wallDeadline, testInput, testRunnerStage, iteration, agent.ModelSelection{}, options, workDir, runner, mem, testCaps, stageBudgetByName(plan, "test_runner"), plan.Tier, tr)
+		newTestOutput, terr := runRepairStage(ctx, wallDeadline, testInput, testRunnerStage, iteration, agent.ModelSelection{}, options, workDir, runner, mem, testCaps, stageBudgetByName(plan, testName), plan.Tier, tr, repairScope, repairN, &runnerScope, execBudget)
 		totalLatency += int(time.Since(testStart).Milliseconds())
 		if terr != nil {
 			return false, nil, fmt.Errorf("repair: test_runner re-run: %w", terr)
 		}
-		mergedRunner := mergeRepairRecord(records, iteration, "test_runner", newTestOutput, true)
+		if runnerScope != nil {
+			repairScope = runnerScope
+		}
+		mergedRunner := mergeRepairRecord(records, iteration, testName, newTestOutput, true)
+		noteNodeOutcome(options, iteration, testName, mergedRunner.Status, &newTestOutput)
 		if tr != nil {
 			tr.replaceStageRecord(mergedRunner)
 			tr.persistPartial(ctx)
@@ -397,9 +469,9 @@ func attemptLocalRepair(
 		currentOutput = newTestOutput
 
 		if newResults, ok := newTestOutput.Data["test_results"].(schemas.TestRunResults); ok && newResults.Failed() == 0 {
-			emitStageEvent(options, iteration-1, "test_runner", "repaired", "revision resolved: tests pass", 100, nil)
-			(*priorSummaries)["code_writer"] = *mergedWriter.OutputSummary
-			(*priorSummaries)["test_runner"] = *mergedRunner.OutputSummary
+			emitStageEvent(options, iteration-1, testName, "repaired", "revision resolved: tests pass", 100, nil)
+			(*priorSummaries)[writerName] = *mergedWriter.OutputSummary
+			(*priorSummaries)[testName] = *mergedRunner.OutputSummary
 			return true, &schemas.InteractionRecord{
 				Message:   lastMessage,
 				Iteration: iteration,
@@ -407,6 +479,71 @@ func attemptLocalRepair(
 				Resolved:  true,
 				LatencyMs: totalLatency,
 			}, nil
+		}
+		// Only an active classifier can defer an intervention to the pass boundary.
+		// Shadow observations and rules fallbacks preserve the repair loop.
+		if newResults, ok := newTestOutput.Data["test_results"].(schemas.TestRunResults); ok && options.ClassifierPolicy != nil {
+			latestEvidence, _ := extractFailingTests(newResults)
+			latest := TrajectoryStep{
+				Change:      DerefString(mergedWriter.OutputSummary),
+				Failure:     strings.Join(latestEvidence, "\n"),
+				FailureKind: schemas.NodeFailureTestFailure,
+			}
+			repairChange := summarizeWorkspaceChanges(ctx, workDir)
+			var repairShadow []schemas.PassEvidence
+			var repairPassChanged *bool
+			if tracker := options.passEvidence; tracker != nil {
+				// A repair runs inside its pass, so its change is the change
+				// so far in that pass. The baseline is not moved.
+				m := tracker.measure(ctx, iteration, repairChange)
+				m.pair.usedPass = options.Flags.Enabled(flags.PassEvidence) && m.ok
+				noteDegradedPass(options, iteration, m)
+				if m.pair.usedPass {
+					repairChange = m.summary
+					changed := len(m.summary.ChangedFiles) > 0
+					repairPassChanged = &changed
+				}
+				repairShadow = tracker.shadowList(m.pair)
+			}
+			repairState, stateErr := ComputeIterationState(iteration, *outputs, *records, repairChange, nil)
+			if repairPassChanged != nil {
+				// The flag-on state reads the pass builder's progress, as a
+				// pass boundary does.
+				repairState.PassChanged = repairPassChanged
+			}
+			if stateErr != nil {
+				recordBoundaryProjectionFailure(options, iteration, repairN, stateErr, repairShadow, tr)
+			} else {
+				boundaryHistory := append(append([]schemas.IterationState{}, options.ClassifierPolicy.history...), repairState)
+				rules := evaluateTrajectoryJudgmentsFor(boundaryHistory, nil, attributedWriter(options, plan))
+				target, targetOK := selectBestSnapshot(options.ClassifierPolicy.snapshots, iteration)
+				boundary := TrajectoryBoundary{
+					WriterStage:    writerName,
+					RunID:          runID,
+					ProjectID:      memoryProjectRoot(options, workDir),
+					Intent:         plan.RequestIntent,
+					Iteration:      iteration,
+					Repair:         repairN,
+					History:        boundaryHistory,
+					EvidenceShadow: repairShadow,
+					Previous:       &prevStep,
+					Latest:         &latest,
+					Rules:          rules,
+					RollbackTarget: targetOK && target.score > ComputeScore(repairState),
+				}
+				decision, classified := classifyBoundary(ctx, options, boundary, tr)
+				if classified && (decision.Action == schemas.ActionStepBack || decision.Action == schemas.ActionSurfaceToUser) {
+					emitStageEvent(options, iteration-1, testName, "message", fmt.Sprintf("trajectory monitor: %s; the remaining repairs of this pass are skipped", decision.Action), 0, nil)
+					return false, &schemas.InteractionRecord{
+						Message:   lastMessage,
+						Iteration: iteration,
+						Repairs:   attempts,
+						Resolved:  false,
+						LatencyMs: totalLatency,
+					}, nil
+				}
+			}
+			prevStep = latest
 		}
 		// The next loop pass observes the new failing payload through the
 		// guard at its top, with this re-entry's applied content hashes as
@@ -420,7 +557,7 @@ func attemptLocalRepair(
 	// Exhausted: the test_runner record already reflects the latest failing
 	// result via the merge above; the pass continues normally. Distinguish
 	// "still failing after N repairs" from "no repair attempted" in streams.
-	emitStageEvent(options, iteration-1, "test_runner", "message", fmt.Sprintf("repair_exhausted: still failing after %d repair(s)", attempts), 0, nil)
+	emitStageEvent(options, iteration-1, testName, "message", fmt.Sprintf("repair_exhausted: still failing after %d repair(s)", attempts), 0, nil)
 	return false, &schemas.InteractionRecord{
 		Message:   lastMessage,
 		Iteration: iteration,
@@ -455,6 +592,7 @@ func extractFailingTests(results schemas.TestRunResults) (evidence []string, nam
 type focusedRepairPayload struct {
 	Intent           string
 	ChangeSummary    string
+	ChangedFiles     []string
 	FailureText      string
 	Fingerprint      FailureFingerprint
 	Evidence         FocusedEvidence
@@ -477,6 +615,13 @@ func buildFocusedRevisionContext(payload focusedRepairPayload, instruction strin
 	}
 	if payload.ChangeSummary != "" {
 		lines = append(lines, "Current change summary:", payload.ChangeSummary, "")
+	}
+	// The files the run changed are what the repair edits. Naming them
+	// puts them in the re-entry's first round (D0 reads the evidence's
+	// paths); without them the repair spent its expansion rounds finding
+	// its own edits and exhausted the budget (P2b: 6 of 14 failures).
+	if len(payload.ChangedFiles) > 0 {
+		lines = append(lines, "Files this run changed: "+strings.Join(payload.ChangedFiles, ", "), "")
 	}
 	lines = append(lines, "Exact failure:", payload.FailureText, "")
 	lines = append(lines, fmt.Sprintf("Failure fingerprint: %s (kind=%s)", payload.Fingerprint.Hash(), payload.Fingerprint.Kind))
@@ -552,8 +697,9 @@ func repairStageInput(runID, stageName string, plan schemas.ExecutionPlan, stage
 		PlanTier:          plan.Tier,
 		RequestIntent:     plan.RequestIntent,
 		AcceptanceFacts:   append([]schemas.AcceptanceFact(nil), plan.AcceptanceFacts...),
-		PriorSummaries:    maps.Clone(priorSummaries),
-		PriorChangedFiles: cloneChangedFiles(priorChangedFiles),
+		PriorSummaries:    withRoleAlias(maps.Clone(priorSummaries), plan, "code_writer"),
+		PriorChangedFiles: withRoleAlias(cloneChangedFiles(priorChangedFiles), plan, "code_writer"),
+		WriterStage:       writerStageName(plan),
 		RevisionContext:   revisionContext,
 		PipelineStages:    stageNames,
 		NextStage:         nextStage,
@@ -563,7 +709,22 @@ func repairStageInput(runID, stageName string, plan schemas.ExecutionPlan, stage
 // repairSelection resolves a repair stage's model selection with the same
 // precedence as the pass loop: default run selection, then the per-stage
 // resolver for model-backed stages; model-free stages get a zero selection.
-func repairSelection(options PipelineRunConfig, provider agent.Provider, stageName string, model *schemas.StageModelConfig, modelFree bool) agent.ModelSelection {
+// A node pin that cannot resolve is an error: repair never swallows it.
+func repairSelection(options PipelineRunConfig, provider agent.Provider, stageName string, model *schemas.StageModelConfig, modelFree bool) (agent.ModelSelection, error) {
+	selection, err := repairRouteSelection(options, provider, stageName, model, modelFree)
+	if err != nil || modelFree {
+		return selection, err
+	}
+	// Fit the effort to the chosen model, as the pass loop does for a normal
+	// stage (stageReasoningEffort), so a repair never sends a level its model
+	// does not support.
+	selection.ReasoningEffort = stageReasoningEffort(options, selection)
+	return selection, nil
+}
+
+// repairRouteSelection picks the model for a repair re-entry. The effort is
+// the raw route effort; repairSelection fits it.
+func repairRouteSelection(options PipelineRunConfig, provider agent.Provider, stageName string, model *schemas.StageModelConfig, modelFree bool) (agent.ModelSelection, error) {
 	selection := agent.ModelSelection{
 		Provider:        provider,
 		ProviderName:    options.ProviderName,
@@ -571,49 +732,90 @@ func repairSelection(options PipelineRunConfig, provider agent.Provider, stageNa
 		ReasoningEffort: options.ReasoningEffort,
 	}
 	if modelFree {
-		return agent.ModelSelection{}
+		return agent.ModelSelection{}, nil
 	}
 	// Same precedence as the pass loop: a node declaration is the strongest
 	// rung, so a repair re-entry resolves the model the pass resolved.
-	if model != nil && options.NodeModelResolver != nil {
-		if resolved, rerr := options.NodeModelResolver(stageName, nodeModelOverride(model)); rerr == nil && resolved.Provider != nil {
-			return resolved
+	if model != nil {
+		if options.NodeModelResolver == nil {
+			return agent.ModelSelection{}, fmt.Errorf("stage %s model: node model pin has no resolver", stageName)
 		}
+		resolved, rerr := options.NodeModelResolver(stageName, nodeModelOverride(model))
+		if rerr != nil {
+			return agent.ModelSelection{}, fmt.Errorf("stage %s model: %w", stageName, rerr)
+		}
+		if resolved.Provider == nil {
+			return agent.ModelSelection{}, fmt.Errorf("stage %s model: node model pin resolved no provider", stageName)
+		}
+		return resolved, nil
 	}
 	if options.StageModelResolver != nil {
-		if resolved, rerr := options.StageModelResolver(stageName); rerr == nil && resolved.Provider != nil {
-			return resolved
+		resolved, rerr := options.StageModelResolver(stageName)
+		var tierFallback *stageTierFallback
+		if rerr != nil && !errors.As(rerr, &tierFallback) {
+			return agent.ModelSelection{}, fmt.Errorf("stage %s model: %w", stageName, rerr)
+		}
+		if rerr == nil && resolved.Provider != nil {
+			return resolved, nil
+		}
+		if rerr != nil {
+			emitNotice(options, fmt.Sprintf("[%s] tier route failed in repair, using the run model: %v", stageName, rerr))
 		}
 	}
-	return selection
+	return selection, nil
+}
+
+// scopePlanIsUncomputed reports whether a scope plan is the zero value
+// preparation produces when it never ran the Track C bridge (nil memory
+// store or a stage that does not consume memory). Such a plan carries no
+// authority, so the caller must not let it replace a real prior scope.
+func scopePlanIsUncomputed(s StageScopePlan) bool {
+	return !s.CognitionResolved && !s.SemanticResolved && len(s.KnownFiles) == 0 &&
+		len(s.KnownSymbols) == 0 && s.ExpansionBudget == 0
 }
 
 // runRepairStage runs a stage under the pass wall deadline, mirroring the
 // pass loop's deadline scoping. Re-entry composes its input through the same
 // preparation module as the normal pass, so repair retrieves current memory,
 // applies admission and compaction, and records post-compaction counts; it
-// receives the full stage budget, not only OutputMax.
-func runRepairStage(ctx context.Context, wallDeadline time.Time, input schemas.HarnessStageInput, stage stages.Stage, iteration int, selection agent.ModelSelection, options PipelineRunConfig, workDir string, runner ToolRunner, mem MemoryStore, caps stages.Capabilities, budget schemas.StageBudget, tier schemas.PipelineTier, tr *runTraceAccumulator) (schemas.HarnessStageOutput, error) {
-	prepared, err := prepareStageInput(ctx, stageInputPreparation{
-		Input:     input,
-		Stage:     stage,
-		Caps:      caps,
-		Budget:    budget,
-		Tier:      tier,
-		Iteration: iteration,
-		WorkDir:   workDir,
-		Options:   options,
-		Memory:    mem,
-		Trace:     tr,
-		NowUnix:   time.Now().Unix(),
-		// A repair builds a fresh provider request, so still-relevant
-		// facts must be re-delivered rather than replay-suppressed.
+// receives the full stage budget, not only OutputMax. The freshly prepared
+// scope plan (not the caller's prior pointer) executes, and the fresh plan
+// flows back through freshScope so the next repair validates against this
+// invocation's scope rather than the initial pointer. invocationOrdinal
+// separates repair re-entry trace records from the initial-pass record.
+func runRepairStage(ctx context.Context, wallDeadline time.Time, input schemas.HarnessStageInput, stage stages.Stage, iteration int, selection agent.ModelSelection, options PipelineRunConfig, workDir string, runner ToolRunner, mem MemoryStore, caps stages.Capabilities, budget schemas.StageBudget, tier schemas.PipelineTier, tr *runTraceAccumulator, priorScope *StageScopePlan, invocationOrdinal int, freshScope **StageScopePlan, execBudget *StageExecutionBudget) (schemas.HarnessStageOutput, error) {
+	prepared, freshPlan, _, err := prepareStageInput(ctx, stageInputPreparation{
+		Input:         input,
+		Stage:         stage,
+		Caps:          caps,
+		Budget:        budget,
+		Tier:          tier,
+		Iteration:     iteration,
+		WorkDir:       workDir,
+		Options:       options,
+		Memory:        mem,
+		Trace:         tr,
+		NowUnix:       time.Now().Unix(),
+		PriorScope:    priorScope,
 		RepairReentry: true,
 	})
 	if err != nil {
 		return schemas.HarnessStageOutput{}, err
 	}
 	input = prepared
+	// The fresh plan, not the stale prior pointer, governs this execution
+	// and becomes the scope the next repair invocation validates against.
+	// Preparation only computes a scope plan when the stage consumes memory
+	// through a store; when it did not run (nil store), the zero plan is
+	// not authoritative and the prior scope persists unchanged.
+	plan := freshPlan
+	if freshScope != nil {
+		if scopePlanIsUncomputed(freshPlan) && priorScope != nil {
+			*freshScope = priorScope
+		} else {
+			*freshScope = &plan
+		}
+	}
 
 	stageCtx := ctx
 	var cancel context.CancelFunc
@@ -623,7 +825,12 @@ func runRepairStage(ctx context.Context, wallDeadline time.Time, input schemas.H
 	if cancel != nil {
 		defer cancel()
 	}
-	return runStageWithContext(stageCtx, input, stage, iteration, selection, options, workDir, runner, mem, caps, budget.OutputMax, tr)
+	// The freshly prepared scope carries into repair so already-granted
+	// files persist; runStageWithContext revalidates via the cognition
+	// resolved in THIS repair preparation (partial scope keeps default
+	// reads for unresolved questions, so newly needed context is not
+	// denied). Historical locations are hints, not stale authority.
+	return runStageWithContextBudgeted(stageCtx, input, stage, iteration, selection, options, workDir, runner, mem, caps, budget.OutputMax, tr, &plan, invocationOrdinal, execBudget)
 }
 
 // stageBudgetByName returns the full stage budget for a named plan stage, or
@@ -652,6 +859,32 @@ func stageOutputMax(plan schemas.ExecutionPlan, stageName string) int {
 // {stageName, iteration}. For a model-backed stage the usage is summed; for a
 // model-free stage (zero usage) only status/summary/confidence update. It
 // never appends a duplicate record for the iteration.
+// addRepairUsage adds a failed re-entry's usage to the stage's record for
+// the iteration, leaving its status and summary as they were.
+func addRepairUsage(records *[]schemas.StageRecord, iteration int, stageName string, usage *schemas.StageUsage) (schemas.StageRecord, bool) {
+	if usage == nil {
+		return schemas.StageRecord{}, false
+	}
+	for i := range *records {
+		rec := &(*records)[i]
+		if rec.Name != stageName || rec.Iteration != iteration {
+			continue
+		}
+		existing := &schemas.StageUsage{
+			InputTokens:       rec.TokensInput,
+			OutputTokens:      rec.TokensOutput,
+			CachedInputTokens: rec.TokensCached,
+			CacheWriteTokens:  rec.TokensCacheWrite,
+			ReasoningTokens:   rec.TokensReasoning,
+			WebSearchRequests: rec.WebSearchRequests,
+			WebSearchEngine:   rec.WebSearchEngine,
+		}
+		applyStageUsage(rec, mergeStageUsage(existing, usage))
+		return *rec, true
+	}
+	return schemas.StageRecord{}, false
+}
+
 func mergeRepairRecord(records *[]schemas.StageRecord, iteration int, stageName string, output schemas.HarnessStageOutput, modelFree bool) schemas.StageRecord {
 	for i := range *records {
 		rec := &(*records)[i]
@@ -678,6 +911,9 @@ func mergeRepairRecord(records *[]schemas.StageRecord, iteration int, stageName 
 		summary := SummarizeStageOutput(stageName, output)
 		rec.OutputSummary = &summary
 		rec.Status = schemas.StageCompleted
+		if cmd := testCommandFromOutput(output); cmd != "" {
+			rec.TestCommand = cmd
+		}
 		rec.Confidence = &output.Confidence
 		return *rec
 	}
@@ -688,6 +924,9 @@ func mergeRepairRecord(records *[]schemas.StageRecord, iteration int, stageName 
 		Iteration:     iteration,
 		OutputSummary: &summary,
 		Confidence:    &output.Confidence,
+	}
+	if cmd := testCommandFromOutput(output); cmd != "" {
+		rec.TestCommand = cmd
 	}
 	if output.MemoryReview != nil {
 		rec.MemoryReviews = []schemas.MemoryReview{*output.MemoryReview}

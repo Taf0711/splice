@@ -10,8 +10,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
@@ -511,5 +514,81 @@ func TestDoNon2xx(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "internal error") {
 		t.Fatalf("error should include body text, got: %v", err)
+	}
+}
+
+// AUDIT-09: the sidecar timeouts default to 10 seconds and the env overrides
+// parse as Go durations. A bad value is an error that names the variable.
+func TestEnvTimeout(t *testing.T) {
+	if defaultRequestTimeout != 10*time.Second || defaultSpawnDeadline != 10*time.Second {
+		t.Fatalf("defaults = %v / %v, want 10s / 10s", defaultRequestTimeout, defaultSpawnDeadline)
+	}
+	for _, tc := range []struct {
+		value   string
+		want    time.Duration
+		wantErr bool
+	}{
+		{"", 10 * time.Second, false},
+		{"30s", 30 * time.Second, false},
+		{" 1m ", time.Minute, false},
+		{"soon", 10 * time.Second, true},
+		{"0s", 10 * time.Second, true},
+		{"-1s", 10 * time.Second, true},
+	} {
+		got, err := envTimeout(func(string) string { return tc.value }, RequestTimeoutEnv, 10*time.Second)
+		if got != tc.want || (err != nil) != tc.wantErr {
+			t.Fatalf("envTimeout(%q) = %v, %v; want %v, error %v", tc.value, got, err, tc.want, tc.wantErr)
+		}
+		if err != nil && !strings.Contains(err.Error(), RequestTimeoutEnv) {
+			t.Fatalf("error %q does not name %s", err, RequestTimeoutEnv)
+		}
+	}
+}
+
+// AUDIT-09: a sidecar that misses the first health check (slow cold start)
+// is used after one retry, and memory is not turned off.
+func TestResolveRetriesSlowSidecarOnce(t *testing.T) {
+	var calls atomic.Int32
+	client := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			time.Sleep(400 * time.Millisecond)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	t.Setenv("SPLICE_MEMD_SOCKET", client.SocketPath())
+	t.Setenv("SPLICE_MEMD_BIN", "")
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv(RequestTimeoutEnv, "200ms")
+	resolved, err := Resolve(context.Background())
+	if err != nil || resolved == nil {
+		t.Fatalf("Resolve() = %v, %v; want a healthy client after one retry", resolved, err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("health calls = %d, want 2", got)
+	}
+}
+
+// AUDIT-09: when a spawned sidecar never answers, the error names the
+// timeout and the env variables that change it.
+func TestResolveSpawnTimeoutNamesEnv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a Unix no-op binary")
+	}
+	t.Setenv("SPLICE_MEMD_SOCKET", filepath.Join(t.TempDir(), "absent.sock"))
+	t.Setenv("SPLICE_MEMD_BIN", "/usr/bin/true")
+	t.Setenv(SpawnTimeoutEnv, "200ms")
+	t.Setenv(RequestTimeoutEnv, "")
+	_, err := Resolve(context.Background())
+	if err == nil {
+		t.Fatal("Resolve() succeeded with no sidecar")
+	}
+	for _, want := range []string{"200ms", SpawnTimeoutEnv, RequestTimeoutEnv} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("Resolve() error = %q, want %q", err, want)
+		}
+	}
+	t.Setenv(SpawnTimeoutEnv, "never")
+	if _, err := Resolve(context.Background()); err == nil || !strings.Contains(err.Error(), SpawnTimeoutEnv) {
+		t.Fatalf("Resolve() with a bad %s = %v, want an error naming it", SpawnTimeoutEnv, err)
 	}
 }

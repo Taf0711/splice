@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/Taf0711/splice/internal/hooks"
+	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/redaction"
 	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/streamjson"
@@ -118,6 +119,10 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	if maxTurns <= 0 {
 		maxTurns = 12
 	}
+	// One effort for every request of this run, fitted to the model that
+	// serves it: a level carried over from another model (xhigh chosen on
+	// Opus, then a switch to a model without it) must not reach the wire.
+	options.ReasoningEffort = string(options.ModelRegistry.RequestEffort(options.Model, modelregistry.ReasoningEffort(options.ReasoningEffort)))
 
 	registry := options.Registry
 	if registry == nil {
@@ -274,6 +279,22 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// conversation-state duplication.
 		forwardedVisibleText := false
 		forwardingOpts := zeroruntime.CollectOptions{OnUsage: options.OnUsage}
+		if options.OnAttributedUsage != nil {
+			forwardingOpts.OnUsage = nil
+			forwardingOpts.OnUsageResult = func(usage Usage, reported bool, reportedCostUSD *float64, requestID string, failed bool) {
+				options.OnAttributedUsage(AttributedUsage{
+					Usage: usage, UsageReported: reported, ProviderName: options.ProviderName,
+					Model: options.Model, Stage: "agent_loop", Iteration: result.Turns,
+					SpendSource: "generation", ReportedCostUSD: reportedCostUSD, RequestID: requestID, StreamFailed: failed,
+				})
+			}
+			forwardingOpts.OnUsageError = func(reason string) {
+				options.OnAttributedUsage(AttributedUsage{
+					UsageError: reason, UsageReported: true, ProviderName: options.ProviderName, Model: options.Model,
+					Stage: "agent_loop", Iteration: result.Turns, SpendSource: "generation",
+				})
+			}
+		}
 		if options.OnText != nil {
 			forwardingOpts.OnText = func(s string) { forwardedVisibleText = true; options.OnText(s) }
 		}
@@ -317,9 +338,13 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				if retryStreamErr != nil {
 					return collected, retryStreamErr
 				}
-				collected = zeroruntime.CollectStreamWithOptions(ctx, retryStream, zeroruntime.CollectOptions{
-					OnUsage: options.OnUsage,
-				})
+				retryOptions := zeroruntime.CollectOptions{OnUsage: options.OnUsage}
+				if options.OnAttributedUsage != nil {
+					retryOptions.OnUsage = nil
+					retryOptions.OnUsageResult = forwardingOpts.OnUsageResult
+					retryOptions.OnUsageError = forwardingOpts.OnUsageError
+				}
+				collected = zeroruntime.CollectStreamWithOptions(ctx, retryStream, retryOptions)
 			}
 			return collected, nil
 		}
@@ -441,6 +466,12 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			if guards.observeTurn(collected) {
 				result.FinalAnswer = noOutputStopAnswer(result.Turns)
 				result.Messages = copyMessages(messages)
+				if options.RequireCompletionSignal {
+					// A headless run must not report a guard stop as success.
+					result.Incomplete = true
+					result.IncompleteReason = "stopped after repeated turns with no output"
+					result.StopReason = StopReasonNoOutput
+				}
 				return result, nil
 			}
 			if strings.TrimSpace(collected.Text) == "" {
@@ -630,7 +661,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			// policy refusals (disabled tool, permission denial, sandbox block)
 			// aren't fixed by reformatting the call, so a "match this schema" hint
 			// would misdirect the model toward JSON shape or blocked behavior.
-			retriableFailure := isRetriableToolError(toolResult)
+			retriableFailure := isRetriableToolError(toolResult, options.NoSandboxEscape)
 			outcome := guards.observeToolResult(call.Name, retriableFailure, toolResult.Output)
 			if outcome.Stop {
 				// The assistant message advertised EVERY collected tool call, but
@@ -642,6 +673,12 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
 				result.FinalAnswer = toolFailureStopAnswer(call.Name, outcome.Count)
 				result.Messages = copyMessages(messages)
+				if options.RequireCompletionSignal {
+					// A headless run must not report a guard stop as success.
+					result.Incomplete = true
+					result.IncompleteReason = "stopped after repeated failures of tool " + call.Name
+					result.StopReason = StopReasonRepeatedToolFailure
+				}
 				return result, nil
 			}
 			if outcome.InjectHint && failureHint == "" {
@@ -788,13 +825,30 @@ func finalAnswerAfterMaxTurns(ctx context.Context, provider Provider, messages [
 	if err != nil {
 		return "", messages, ""
 	}
-	collected := zeroruntime.CollectStreamWithOptions(ctx, stream, zeroruntime.CollectOptions{
+	collectOptions := zeroruntime.CollectOptions{
 		OnText:          options.OnText,
 		OnReasoning:     options.OnReasoning,
 		OnUsage:         options.OnUsage,
 		OnToolCallStart: options.OnToolCallStart,
 		OnToolCallDelta: options.OnToolCallDelta,
-	})
+	}
+	if options.OnAttributedUsage != nil {
+		collectOptions.OnUsage = nil
+		collectOptions.OnUsageResult = func(usage Usage, reported bool, reportedCostUSD *float64, requestID string, failed bool) {
+			options.OnAttributedUsage(AttributedUsage{
+				Usage: usage, UsageReported: reported, ProviderName: options.ProviderName,
+				Model: options.Model, Stage: "agent_loop", Iteration: options.MaxTurns,
+				SpendSource: "generation", ReportedCostUSD: reportedCostUSD, RequestID: requestID, StreamFailed: failed,
+			})
+		}
+		collectOptions.OnUsageError = func(reason string) {
+			options.OnAttributedUsage(AttributedUsage{
+				UsageError: reason, UsageReported: true, ProviderName: options.ProviderName, Model: options.Model,
+				Stage: "agent_loop", Iteration: options.MaxTurns, SpendSource: "generation",
+			})
+		}
+	}
+	collected := zeroruntime.CollectStreamWithOptions(ctx, stream, collectOptions)
 	if ctx.Err() != nil || collected.Error != "" || strings.TrimSpace(collected.Text) == "" {
 		return "", messages, ""
 	}
@@ -921,6 +975,9 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			DenialReason: DenialFiltered,
 		}, nil
 	}
+	if options.NoSandboxEscape && shellCommandRequiresEscalated(args) {
+		return noSandboxEscapeResult(call), nil
+	}
 	tool, toolFound := registry.Get(call.Name)
 	if permissionMode == PermissionModeSpecDraft && toolFound && !ToolAdvertised(tool, permissionMode) {
 		return ToolResult{
@@ -968,8 +1025,12 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		return executeRequestPermissions(ctx, call, args, permissionMode, options)
 	}
 
+	// An agent node in ask mode prompts for every call that changes files,
+	// runs a command, or reaches the network. No sandbox auto-allow, saved
+	// grant, or command prefix grant skips that prompt.
+	askEveryCall := toolFound && agentNodeAsksEveryCall(tool, permissionMode, options)
 	permissionGranted := permissionMode == PermissionModeUnsafe
-	if toolFound && effectivePermission(tool, args) == tools.PermissionAllow {
+	if toolFound && !askEveryCall && effectivePermission(tool, args) == tools.PermissionAllow {
 		permissionGranted = true
 	}
 
@@ -985,7 +1046,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			}
 		}
 	}()
-	if toolFound && !permissionGranted {
+	if toolFound && !permissionGranted && !askEveryCall {
 		if grant, ok, session := matchCommandPrefix(call.Name, args, options); ok {
 			permissionGranted = true
 			if session {
@@ -1004,7 +1065,9 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		preflightDecision = &decision
 	}
 
-	if toolFound && options.OnPermissionRequest != nil && shouldRequestPermission(tool, args, permissionGranted, preflightDecision) {
+	// With no prompt handler, requestPermission denies, so a headless ask node
+	// refuses the call.
+	if toolFound && (askEveryCall || options.OnPermissionRequest != nil && shouldRequestPermission(tool, args, permissionGranted, preflightDecision)) {
 		requestEvent, ok := buildPermissionEvent(call, tool, args, permissionGranted, permissionMode, options, preflightDecision)
 		if !ok {
 			requestEvent = fallbackPermissionEvent(call, tool, args, permissionMode, options)
@@ -1148,6 +1211,12 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		}
 	}
 	args = shellExecutionArgsForApproval(call.Name, args, decisionAction, options)
+	// Check the final arguments again, right before the call runs. A run that
+	// forbids sandbox escape must never reach a tool with require_escalated,
+	// whatever path produced the arguments.
+	if options.NoSandboxEscape && shellCommandRequiresEscalated(args) {
+		return noSandboxEscapeResult(call), nil
+	}
 
 	// Task tool: wire progress callback so the TUI sees live tool-call events
 	// from the specialist child process.
@@ -1175,6 +1244,8 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		// Per-session file version tracker so write_file/edit_file refuse to clobber
 		// a file that changed on disk outside Splice since it was last read.
 		FileTracker: options.FileTracker,
+		// Strict read-before-write for write_file and edit_file, set by the caller.
+		RequireReadBeforeWrite: options.RequireReadBeforeWrite,
 		// Post-edit diagnostics are NOT forwarded to the tools: they used to run
 		// synchronously inside edit_file/write_file and block every mutating tool
 		// call on the language server (≥300ms debounce floor, 10s cap). The loop
@@ -1238,6 +1309,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		Redacted:     result.Redacted,
 		ChangedFiles: result.ChangedFiles,
 		Display:      result.Display,
+		DenialReason: denialFromRefusal(result.Refusal),
 		LoadedTools:  loadedToolsFromResult(result.Meta),
 		// A tool may signal a mid-run model escalation by carrying the target id
 		// in Meta["escalate_to_model"]. Lift it into the typed loop-level field;
@@ -1247,9 +1319,38 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 	}, nil
 }
 
+// agentNodeAsksEveryCall reports whether the call must prompt because it runs
+// in a pipeline agent node (NoSandboxEscape) in ask mode and the tool is not
+// read-only. A read-only tool, such as read_file or grep, does not prompt.
+func agentNodeAsksEveryCall(tool tools.Tool, permissionMode PermissionMode, options Options) bool {
+	if !options.NoSandboxEscape || permissionMode != PermissionModeAsk {
+		return false
+	}
+	switch tool.Safety().SideEffect {
+	case tools.SideEffectRead, tools.SideEffectNone:
+		return false
+	}
+	return true
+}
+
+// noSandboxEscapeResult refuses a call that asks to run outside the sandbox in
+// a run that forbids sandbox escape.
+func noSandboxEscapeResult(call ToolCall) ToolResult {
+	return ToolResult{
+		ToolCallID:   call.ID,
+		Name:         call.Name,
+		Status:       tools.StatusError,
+		Output:       `Error: sandbox_permissions "require_escalated" is not allowed for this node; the node runs sandboxed.`,
+		DenialReason: DenialPolicy,
+	}
+}
+
 const sandboxNamespaceLimitedReason = "sandbox output is limited to the sandbox PID namespace; host/global state requires approval"
 
 func maybeRetryUnsandboxedAfterSandboxRestriction(ctx context.Context, registry *tools.Registry, call ToolCall, tool tools.Tool, args map[string]any, result tools.Result, permissionMode PermissionMode, options Options, progressCallback func(streamjson.Event)) (tools.Result, *ToolResult, bool, PermissionDecisionAction, string, []string, error) {
+	if options.NoSandboxEscape {
+		return result, nil, false, "", "", nil, nil
+	}
 	if retryResult, directResult, retried, action, reason, abortErr := maybeRetryWithNetworkAfterSandboxDenial(ctx, registry, call, tool, args, result, permissionMode, options, progressCallback); retried || directResult != nil || abortErr != nil {
 		return retryResult, directResult, retried, action, reason, nil, abortErr
 	}
@@ -1307,6 +1408,9 @@ func maybeRetryUnsandboxedAfterSandboxRestriction(ctx context.Context, registry 
 }
 
 func maybeRetryWithNetworkAfterSandboxDenial(ctx context.Context, registry *tools.Registry, call ToolCall, tool tools.Tool, args map[string]any, result tools.Result, permissionMode PermissionMode, options Options, progressCallback func(streamjson.Event)) (tools.Result, *ToolResult, bool, PermissionDecisionAction, string, error) {
+	if options.NoSandboxEscape {
+		return result, nil, false, "", "", nil
+	}
 	if !sandboxDeniedNetworkRetryCandidate(call, args, result, options) {
 		return result, nil, false, "", "", nil
 	}
@@ -1486,10 +1590,12 @@ func runToolForNetworkRetry(ctx context.Context, registry *tools.Registry, name 
 		Depth:             options.Depth,
 		Cwd:               options.Cwd,
 		FileTracker:       options.FileTracker,
-		EnabledTools:      options.EnabledTools,
-		DisabledTools:     options.DisabledTools,
-		Progress:          progressCallback,
-		OnToolOutput:      options.OnToolOutput,
+		// A retry of a guarded write keeps the guard.
+		RequireReadBeforeWrite: options.RequireReadBeforeWrite,
+		EnabledTools:           options.EnabledTools,
+		DisabledTools:          options.DisabledTools,
+		Progress:               progressCallback,
+		OnToolOutput:           options.OnToolOutput,
 	})
 }
 
@@ -1550,6 +1656,7 @@ func toolResultFromPrePermissionReject(call ToolCall, result tools.Result) ToolR
 		Redacted:       result.Redacted || outputRedacted || summaryRedacted || metaRedacted,
 		ChangedFiles:   result.ChangedFiles,
 		Display:        display,
+		DenialReason:   denialFromRefusal(result.Refusal),
 		LoadedTools:    loadedToolsFromResult(meta),
 		RequestedModel: meta["escalate_to_model"],
 	}
@@ -1646,14 +1753,19 @@ func appendHookFeedback(output string, feedback string) (string, bool) {
 // opposed to a policy refusal (disabled tool, permission denial, sandbox
 // block) that no reformatting will satisfy. Only retriable failures should
 // drive the repeated-failure schema hint / stop.
-func isRetriableToolError(result ToolResult) bool {
+//
+// typedRefusals makes the registry refusal categories authoritative too. An
+// agent node sets it (NoSandboxEscape). An interactive run classifies those
+// results by their message text, as it did before the registry set the
+// category, so its retry and stop behavior stays the same.
+func isRetriableToolError(result ToolResult, typedRefusals bool) bool {
 	if result.Status != tools.StatusError {
 		return false
 	}
 	// A categorized denial (filtered / permission / sandbox) is a policy decision,
 	// not a transient failure — never retry it. This is robust to message wording
 	// (the text checks below remain as a fallback for results lacking the field).
-	if result.DenialReason != DenialNone {
+	if result.DenialReason != DenialNone && (typedRefusals || !registryRefusalCategory(result.DenialReason)) {
 		return false
 	}
 	if result.Meta["permission_action"] == string(PermissionActionDeny) {
@@ -1668,6 +1780,16 @@ func isRetriableToolError(result ToolResult) bool {
 		return false
 	}
 	return true
+}
+
+// registryRefusalCategory reports whether category comes from a typed registry
+// refusal (denialFromRefusal).
+func registryRefusalCategory(category DenialCategory) bool {
+	switch category {
+	case DenialPolicy, DenialPermissionRequired, DenialSandboxApproval, DenialSandboxDenied:
+		return true
+	}
+	return false
 }
 
 // scrubInterceptedOutput mirrors the registry's scrubResultSecrets boundary for
@@ -1771,6 +1893,7 @@ func askUserFallbackResult(ctx context.Context, registry *tools.Registry, call T
 			Redacted:     result.Redacted,
 			ChangedFiles: result.ChangedFiles,
 			Display:      result.Display,
+			DenialReason: denialFromRefusal(result.Refusal),
 		}
 	}
 	return ToolResult{
@@ -2615,7 +2738,7 @@ func partitionToolsCached(registry *tools.Registry, permissionMode PermissionMod
 	visible := make([]tools.Tool, 0, len(registeredTools))
 	eligible := 0
 	for _, tool := range registeredTools {
-		if !ToolVisible(tool, permissionMode, options.EnabledTools, options.DisabledTools) {
+		if !toolVisibleForRun(tool, permissionMode, options) {
 			continue
 		}
 		visible = append(visible, tool)
@@ -2755,6 +2878,18 @@ func runtimeToolDefinition(tool tools.Tool) zeroruntime.ToolDefinition {
 
 func ToolVisible(tool tools.Tool, permissionMode PermissionMode, enabledTools []string, disabledTools []string) bool {
 	return ToolAllowedByFilters(tool.Name(), enabledTools, disabledTools) && ToolAdvertised(tool, permissionMode)
+}
+
+// toolVisibleForRun is ToolVisible for one run. An agent node in auto offers
+// its prompt-gated tools too, so the model can call them. Each call still
+// passes the sandbox preflight in executeToolCall.
+func toolVisibleForRun(tool tools.Tool, permissionMode PermissionMode, options Options) bool {
+	if ToolVisible(tool, permissionMode, options.EnabledTools, options.DisabledTools) {
+		return true
+	}
+	return options.NoSandboxEscape && permissionMode == PermissionModeAuto &&
+		tool.Safety().Permission == tools.PermissionPrompt &&
+		ToolAllowedByFilters(tool.Name(), options.EnabledTools, options.DisabledTools)
 }
 
 func ToolAllowedByFilters(name string, enabledTools []string, disabledTools []string) bool {

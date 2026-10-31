@@ -1,0 +1,7 @@
+{
+  "name": "fam-08-write",
+  "phase": "write",
+  "prompt": "In go.mod, make the Go version line explicit (go 1.26) and add a .go-version file containing 1.26 so tooling reads the pinned toolchain. Nothing else changes.",
+  "check": "test -f .go-version && grep -q 'go 1.26' go.mod || { echo 'precursor change missing' >&2; exit 1; }\ngo build ./... && go test -count=1 ./...",
+  "fixture": "fixture"
+}

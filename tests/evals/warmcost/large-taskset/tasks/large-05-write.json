@@ -1,0 +1,7 @@
+{
+  "name": "large-05-write",
+  "phase": "write",
+  "prompt": "Add a Welcome Template variable in the notifications package (Greeting \"Welcome\", Action \"your account is ready\", Footer \"demo service team\") and RenderFor(t Template, to string) Message: an email Message to that recipient with Subject t.Action and Body t.Render(to). Add a regression test.",
+  "check": "# large-05 A: Add a Welcome Template variable in the notifications package (Greeting\nmkdir -p internal/notifications\ncat > internal/notifications/probe_welcome_test.go <<'EOF'\npackage notifications\n\nimport \"testing\"\n\nfunc TestProbeRenderFor(t *testing.T) {\n\tm := RenderFor(Welcome, \"ada\")\n\tif m.Kind != KindEmail || m.To != \"ada\" || m.Subject != \"your account is ready\" {\n\t\tt.Fatalf(\"RenderFor = %+v\", m)\n\t}\n\tif m.Body != Welcome.Render(\"ada\") {\n\t\tt.Fatalf(\"Body = %q, want the rendered template\", m.Body)\n\t}\n\tif Welcome.Footer != \"demo service team\" {\n\t\tt.Fatalf(\"Welcome footer = %q\", Welcome.Footer)\n\t}\n}\nEOF\ngo test -count=1 ./internal/notifications/ ; rc=$?\nrm -f internal/notifications/probe_welcome_test.go\nif [ $rc -ne 0 ]; then exit $rc; fi\nexit 0\n",
+  "fixture": "../../large-families/fixture"
+}

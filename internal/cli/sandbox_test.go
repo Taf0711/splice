@@ -444,7 +444,7 @@ func TestRunSandboxSetupNoopsForNonWindowsBackend(t *testing.T) {
 			return config.ResolvedConfig{}, nil
 		},
 		selectSandboxBackend: func(options sandbox.BackendOptions) sandbox.Backend {
-			return sandbox.Backend{Name: sandbox.BackendLinuxBwrap, Platform: "linux", Available: true}
+			return sandbox.Backend{Name: sandbox.BackendLinuxBwrap, Platform: "linux", Available: true, CommandWrapping: true, NativeIsolation: true}
 		},
 		runSandboxSetupHelper: func(string, []string, io.Writer, io.Writer) error {
 			t.Fatal("setup helper should not run for non-Windows backend")
@@ -459,6 +459,37 @@ func TestRunSandboxSetupNoopsForNonWindowsBackend(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "No native sandbox setup is required for linux") {
 		t.Fatalf("setup output = %q, want non-Windows no-op message", stdout.String())
+	}
+}
+
+// AUDIT-08: a Linux host without a native backend must not hear "no setup
+// required". Setup fails and names the bubblewrap install command.
+func TestRunSandboxSetupNamesMissingLinuxBackend(t *testing.T) {
+	deps := appDeps{
+		getwd: func() (string, error) { return t.TempDir(), nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{}, nil
+		},
+		selectSandboxBackend: func(sandbox.BackendOptions) sandbox.Backend {
+			return sandbox.Backend{Name: sandbox.BackendUnavailable, Platform: "linux", Message: "bubblewrap is not installed"}
+		},
+		runSandboxSetupHelper: func(string, []string, io.Writer, io.Writer) error {
+			t.Fatal("setup helper should not run on Linux")
+			return nil
+		},
+	}
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"sandbox", "setup"}, &stdout, &stderr, deps)
+	if exitCode == exitSuccess {
+		t.Fatalf("setup exit = %d, want failure for a missing Linux backend", exitCode)
+	}
+	if strings.Contains(stdout.String()+stderr.String(), "No native sandbox setup is required") {
+		t.Fatalf("setup output = %q / %q, must not claim no setup is required", stdout.String(), stderr.String())
+	}
+	for _, want := range []string{"bubblewrap is not installed", "apt install bubblewrap", "dnf install bubblewrap", "apk add bubblewrap"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("setup stderr = %q, want %q", stderr.String(), want)
+		}
 	}
 }
 

@@ -42,6 +42,8 @@ var (
 	diagCannotUseRe = regexp.MustCompile(`cannot use (\S+) \((?:variable|value) of type ([^)]+)\) as ([^ ]+)`)
 	// e.g. "./math_test.go:13:2: undefined: helper"
 	diagFileLineRe = regexp.MustCompile(`((?:\./)?[A-Za-z0-9_./\-]+\.go):(\d+):(\d+)?`)
+	// e.g. {"Action":"output","Package":"demo/cmd/server",...}
+	goTestPackageRe = regexp.MustCompile(`"Package":"([^"]+)"`)
 )
 
 // ResolveGoDiagnostics parses captured Go build/test output and produces a
@@ -81,9 +83,13 @@ func ResolveGoDiagnostics(workspace, output string) FocusedEvidence {
 	}
 
 	// File locations from file:line mentions, bounded.
+	inPackage := packageFiles(workspace, lines)
 	for _, line := range lines {
 		if match := diagFileLineRe.FindStringSubmatch(line); match != nil {
 			file := strings.TrimPrefix(match[1], "./")
+			if path := inPackage[file]; path != "" {
+				file = path
+			}
 			lineNum := 0
 			fmt.Sscanf(match[2], "%d", &lineNum)
 			if _, ok := seenFiles[file]; !ok && len(seenFiles) < maxResolverFiles {
@@ -114,6 +120,57 @@ func ResolveGoDiagnostics(workspace, output string) FocusedEvidence {
 		evidence.Facts = evidence.Facts[:maxResolverFactCount]
 	}
 	return evidence
+}
+
+// packageFiles maps a bare file name in go test -json output to its
+// workspace path. go test prints a test file relative to its package
+// directory ("catalog_test.go:16:"), so without the package the repair
+// cannot read the failing test and spends an expansion to find it (P2d
+// cpl-01). A name that two packages print stays bare.
+func packageFiles(workspace string, lines []string) map[string]string {
+	module := goModulePath(workspace)
+	out := map[string]string{}
+	if module == "" {
+		return out
+	}
+	for _, line := range lines {
+		pkg := goTestPackageRe.FindStringSubmatch(line)
+		match := diagFileLineRe.FindStringSubmatch(line)
+		if pkg == nil || match == nil || strings.Contains(match[1], "/") {
+			continue
+		}
+		name := match[1]
+		dir, ok := strings.CutPrefix(pkg[1], module+"/")
+		if !ok && pkg[1] != module {
+			continue
+		}
+		path := filepath.ToSlash(filepath.Join(dir, name))
+		if _, err := os.Stat(filepath.Join(workspace, path)); err != nil {
+			continue
+		}
+		if prev, seen := out[name]; seen {
+			if prev != path {
+				out[name] = ""
+			}
+			continue
+		}
+		out[name] = path
+	}
+	return out
+}
+
+// goModulePath reads the module path from the workspace go.mod, or "".
+func goModulePath(workspace string) string {
+	data, err := os.ReadFile(filepath.Join(workspace, "go.mod"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "module "); ok {
+			return strings.Trim(strings.TrimSpace(rest), `"`)
+		}
+	}
+	return ""
 }
 
 type namedLocation struct {

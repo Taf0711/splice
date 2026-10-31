@@ -103,6 +103,12 @@ func TestPipelineTopologyValidateRejects(t *testing.T) {
 		{"invalid budget override", func(t *PipelineTopology) {
 			t.Budget = &BudgetOverride{TotalInput: 0, TotalOutput: 10}
 		}, "budget.total_input must be > 0"},
+		{"command node claims verification", func(t *PipelineTopology) {
+			t.Nodes[0] = PipelineNode{Name: "lint", Type: NodeTypeCommand, Command: []string{"true"}, Caps: NodeCapabilities{ProducesVerification: true}}
+		}, `node lint: type "command" cannot set produces_verification`},
+		{"prompt node claims verification", func(t *PipelineTopology) {
+			t.Nodes[0] = PipelineNode{Name: "review", Type: NodeTypePrompt, Prompt: "review", Caps: NodeCapabilities{ProducesVerification: true}}
+		}, `node review: type "prompt" cannot set produces_verification`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -233,5 +239,107 @@ func TestPipelineTopologyValidateMinSplice(t *testing.T) {
 				t.Fatalf("ValidateMinSplice(%q) = %v", tc.current, err)
 			}
 		})
+	}
+}
+
+// TestPipelineTopologyValidateRejectsTraversalName pins the name rule inside
+// Validate. The topology is otherwise valid, so only the name check can refuse
+// it. Removing that check must fail this test, not only the import test.
+func TestPipelineTopologyValidateRejectsTraversalName(t *testing.T) {
+	for _, name := range []string{"../x", "a/b", `a\b`, "..", ""} {
+		topology := PipelineTopology{Version: 1, Name: name, Nodes: []PipelineNode{{Name: "code_writer", Type: "code_writer"}}}
+		if err := topology.Validate(); err == nil {
+			t.Fatalf("Validate() accepted name %q, want a name error", name)
+		}
+	}
+}
+
+// agentTopology returns a valid topology with one agent node that tests mutate.
+func agentTopology() PipelineTopology {
+	return PipelineTopology{
+		Version:   TopologySchemaVersion,
+		Name:      "investigate",
+		MinSplice: AgentNodeMinSplice,
+		Nodes: []PipelineNode{{
+			Name:   "investigate",
+			Type:   NodeTypeAgent,
+			Prompt: "Find where {{intent}} is handled.",
+			Tools:  []string{"read_file", "grep"},
+			Budget: &StageBudget{InputMax: 1000, OutputMax: 500},
+		}},
+	}
+}
+
+func TestAgentNodeValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(*PipelineTopology)
+		wantSub string
+	}{
+		{"accepts a read-only node", func(*PipelineTopology) {}, ""},
+		{"accepts ask permission and max turns", func(p *PipelineTopology) {
+			p.Nodes[0].Permission = AgentPermissionAsk
+			p.Nodes[0].MaxTurns = AgentMaxTurnsLimit
+		}, ""},
+		{"missing prompt", func(p *PipelineTopology) { p.Nodes[0].Prompt = "" }, "requires a non-empty prompt"},
+		{"missing budget", func(p *PipelineTopology) { p.Nodes[0].Budget = nil }, `node investigate: type "agent" requires an explicit budget; set budget.input_max and budget.output_max`},
+		{"zero budget", func(p *PipelineTopology) { p.Nodes[0].Budget = &StageBudget{} }, "model-backed node has a zero budget"},
+		{"no tools", func(p *PipelineTopology) { p.Nodes[0].Tools = nil }, "requires 1 to 16 tools, got 0"},
+		{"too many tools", func(p *PipelineTopology) {
+			p.Nodes[0].Tools = make([]string, AgentMaxTools+1)
+			for i := range p.Nodes[0].Tools {
+				p.Nodes[0].Tools[i] = "read_file"
+			}
+		}, "requires 1 to 16 tools, got 17"},
+		{"unknown tool", func(p *PipelineTopology) { p.Nodes[0].Tools = []string{"no_such_tool"} }, `node investigate: tool "no_such_tool" is not allowed on an agent node`},
+		{"delegating tool", func(p *PipelineTopology) { p.Nodes[0].Tools = []string{"Task"} }, `tool "Task" is not allowed`},
+		{"tool_search is not eligible", func(p *PipelineTopology) { p.Nodes[0].Tools = []string{"tool_search"} }, `tool "tool_search" is not allowed`},
+		{"host seam tool", func(p *PipelineTopology) { p.Nodes[0].Tools = []string{"raw_file_read"} }, `tool "raw_file_read" is not allowed`},
+		{"duplicate tool", func(p *PipelineTopology) { p.Nodes[0].Tools = []string{"grep", "grep"} }, `tool "grep" is listed more than once`},
+		{"max turns above limit", func(p *PipelineTopology) { p.Nodes[0].MaxTurns = AgentMaxTurnsLimit + 1 }, "max_turns must be 1 to 50, got 51"},
+		{"negative max turns", func(p *PipelineTopology) { p.Nodes[0].MaxTurns = -1 }, "max_turns must be 1 to 50, got -1"},
+		{"unknown permission", func(p *PipelineTopology) { p.Nodes[0].Permission = "unsafe" }, `permission must be "ask" or "auto", got "unsafe"`},
+		{"model free flag", func(p *PipelineTopology) { p.Nodes[0].Caps.ModelFree = true }, "model_free must be false"},
+		{"produces verification", func(p *PipelineTopology) { p.Nodes[0].Caps.ProducesVerification = true }, "cannot set produces_verification"},
+		{"pull context", func(p *PipelineTopology) { p.Nodes[0].Caps.PullContext = boolPtr(true) }, "pull_context has no effect"},
+		{"command on agent node", func(p *PipelineTopology) { p.Nodes[0].Command = []string{"true"} }, "command is only valid"},
+		{"tools on a prompt node", func(p *PipelineTopology) {
+			p.Nodes[0] = PipelineNode{Name: "note", Type: NodeTypePrompt, Prompt: "x", Tools: []string{"grep"}}
+		}, `tools, max_turns, and permission are only valid for type "agent"`},
+		{"max turns on a command node", func(p *PipelineTopology) {
+			p.Nodes[0] = PipelineNode{Name: "lint", Type: NodeTypeCommand, Command: []string{"true"}, MaxTurns: 3}
+		}, "only valid for type"},
+		{"permission on a builtin node", func(p *PipelineTopology) {
+			p.Nodes[0] = PipelineNode{Name: "code_writer", Type: "code_writer", Permission: "ask"}
+		}, "only valid for type"},
+		{"agent node without min splice", func(p *PipelineTopology) { p.MinSplice = "" }, "needs splice_min_version 0.3.0 or newer; set splice_min_version"},
+		{"agent node with older min splice", func(p *PipelineTopology) { p.MinSplice = "0.2.0" }, "needs splice_min_version 0.3.0 or newer, got 0.2.0"},
+		{"agent node with malformed min splice", func(p *PipelineTopology) { p.MinSplice = "dev" }, "invalid minimum version"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			topology := agentTopology()
+			tc.mutate(&topology)
+			err := topology.Validate()
+			if tc.wantSub == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantSub) {
+				t.Fatalf("Validate() = %v, want error containing %q", err, tc.wantSub)
+			}
+		})
+	}
+}
+
+func TestAgentNodeEffectiveCapabilitiesAreModelBacked(t *testing.T) {
+	node := agentTopology().Nodes[0]
+	if node.EffectiveCapabilities().ModelFree {
+		t.Fatal("agent node reports model_free; agent nodes are always model-backed")
+	}
+	if node.PullsContext() || node.PullsMemory() {
+		t.Fatal("agent node pulls context or memory by default; want the prompt-node default")
 	}
 }

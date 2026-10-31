@@ -7,6 +7,20 @@ package wiring
 // Producer keys are module-relative: "dir.Func", "dir.Type", "dir.Type.Field",
 // or "dir.Type.Method". Consumer keys are production functions or methods.
 var Contracts = []Contract{
+	// TUI v0.5: run health and the blocking gate reach the chrome through
+	// one selector, so the status chip and the pipeline header agree.
+	{
+		ID:       "presentation.health.runtime_view",
+		Producer: "internal/presentation.State.Health",
+		Consumer: "internal/tui.model.runtimeView",
+		Proof:    "internal/tui.TestRuntimeViewProjectsLiveGates",
+	},
+	{
+		ID:       "presentation.gate.runtime_view",
+		Producer: "internal/presentation.State.Gate",
+		Consumer: "internal/tui.model.runtimeView",
+		Proof:    "internal/tui.TestRuntimeViewProjectsLiveGates",
+	},
 	// Track T: the compiled dependency graph decides what each stage sees.
 	{
 		ID:       "topology.depends_on.scoping",
@@ -75,7 +89,7 @@ var Contracts = []Contract{
 	{
 		ID:       "version.build_value.loader",
 		Producer: "internal/version.Version",
-		Consumer: "internal/splice.loadTopologyIfPresent",
+		Consumer: "internal/splice.DecodeTopology",
 		Proof:    "internal/splice.TestResolveTopologyEnforcesMinSplice",
 	},
 	// Additive changed files reach the orchestrator's file accounting.
@@ -100,20 +114,21 @@ var Contracts = []Contract{
 		Proof:    "internal/splice/stages.TestPromptStageRendersTemplateWithoutTools",
 	},
 
+	// Phase 1: the pipeline graph view reads the dependency graph and the
+	// compiled tier.
+	{
+		ID:       "presentation.dependencies.graph_view",
+		Producer: "internal/presentation.ExecutionNode.Dependencies",
+		Consumer: "internal/splice/presentrun.BuildGraph",
+		Proof:    "internal/splice/presentrun.TestBuildGraphDiamond",
+	},
+	{
+		ID:       "topology.compiled_tier.warnings",
+		Producer: "internal/splice.CompiledTopology.Tier",
+		Consumer: "internal/splice.TopologyWarnings",
+		Proof:    "internal/splice.TestTopologyWarningsNameTheirTiers",
+	},
+
 	// Deliberately unwired. Each entry records the owner that will consume the
 	// producer. The checker fails if the symbol disappears.
-	{
-		ID:       "inert.compiled_tier",
-		Producer: "internal/splice.CompiledTopology.Tier",
-		Inert:    true,
-		Owner:    "Track T9 (read-only pipeline viewer)",
-		Reason:   "the compiled tier is carried for the viewer; no production reader exists yet",
-	},
-	{
-		ID:       "inert.presentation_dependencies",
-		Producer: "internal/presentation.ExecutionNode.Dependencies",
-		Inert:    true,
-		Owner:    "Track T9 (read-only pipeline viewer)",
-		Reason:   "the reducer carries node dependencies into presentation state; the renderer is the pending consumer",
-	},
 }

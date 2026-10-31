@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/Taf0711/splice/internal/config"
 	"github.com/Taf0711/splice/internal/mcp"
 	"github.com/Taf0711/splice/internal/redaction"
 	"github.com/Taf0711/splice/internal/tools"
@@ -35,6 +36,12 @@ func runServe(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) i
 	workspaceRoot, err := resolveWorkspaceRoot(options.cwd, deps)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
+	}
+	// Resolve config so the process flag set is recorded before any MCP tool
+	// runs. A missing provider does not block the server, because the tools
+	// need no model.
+	if _, err := deps.resolveConfig(workspaceRoot, config.Overrides{}); err != nil && !isProviderResolveError(err) {
+		return writeAppError(stderr, err.Error(), exitCrash)
 	}
 	registry := newServeRegistry(workspaceRoot, options.allowUnsafeTools)
 	if options.allowUnsafeTools {

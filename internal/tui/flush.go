@@ -137,8 +137,14 @@ func (m model) settleTranscript() (model, tea.Cmd) {
 		// moving the frontier, so the settled snapshot must rebuild even
 		// when frontier/width are unchanged.
 		if m.flushed != oldFlushed || m.altScreenSettledWidth != bodyWidth || m.altScreenSettledFrontier != m.flushed || m.narrationSettledGeneration != m.narrationVerbosityLevel {
+			// Only the frontier moved: extend the cache from the current
+			// turn instead of rebuilding the whole session (O(turn), not
+			// O(history)). Width or verbosity changes re-measure everything.
+			sameProjection := m.altScreenSettledWidth == bodyWidth && m.narrationSettledGeneration == m.narrationVerbosityLevel
 			m.narrationSettledGeneration = m.narrationVerbosityLevel
-			m.rebuildAltScreenSettledItems(bodyWidth)
+			if !sameProjection || !m.extendAltScreenSettledItems(bodyWidth) {
+				m.rebuildAltScreenSettledItems(bodyWidth)
+			}
 		}
 		return m, nil
 	}
@@ -230,6 +236,77 @@ func (m *model) rebuildAltScreenSettledItems(width int) {
 	m.bakeAltScreenSettledHeights(previous, width)
 	m.altScreenSettledWidth = width
 	m.altScreenSettledFrontier = m.flushed
+}
+
+// extendAltScreenSettledItems advances the settled cache to the new frontier
+// without rebuilding settled history. It reuses every cached item before the
+// last turn start (a user row) and rebuilds from there: call/result pairs,
+// explore groups, and the separator rules never cross a turn boundary, so
+// the reused prefix is exactly what a full rebuild would produce. It returns
+// false when there is no safe cut; the caller then rebuilds in full.
+func (m *model) extendAltScreenSettledItems(width int) bool {
+	previous := m.altScreenSettledItems
+	if !m.altScreen || len(previous) == 0 || m.altScreenSettledFrontier <= 0 ||
+		m.altScreenSettledFrontier > m.flushed || m.flushed > len(m.transcript) {
+		return false
+	}
+	cutItem, cutRow := -1, -1
+	for i := len(previous) - 1; i >= 0; i-- {
+		row := previous[i].rowIndex
+		if previous[i].kind == transcriptBodyItemRow && row >= 0 && row < len(m.transcript) && startsTurn(m.transcript[row].kind) {
+			cutItem, cutRow = i, row
+			break
+		}
+	}
+	if cutItem < 0 {
+		return false
+	}
+	// The builder emits the separator or rule above a turn while it
+	// processes the turn row, so those items belong to the rebuilt tail.
+	for cutItem > 0 && (previous[cutItem-1].kind == transcriptBodyItemSeparator || previous[cutItem-1].kind == transcriptBodyItemRule) {
+		cutItem--
+	}
+	previousKind := rowWelcome
+	found := false
+	for i := cutItem - 1; i >= 0; i-- {
+		if row := previous[i].rowIndex; previous[i].kind == transcriptBodyItemRow && row >= 0 && row < len(m.transcript) {
+			previousKind, found = m.transcript[row].kind, true
+			break
+		}
+	}
+	if !found {
+		return false
+	}
+	snapshot := *m
+	snapshot.transcript = m.transcript[:m.flushed]
+	snapshot.flushed = cutRow
+	snapshot.flushedAny = true
+	snapshot.flushedPreviousKind = previousKind
+	snapshot.flushedHavePreviousKind = true
+	// Cap the capacity at the cut so the builder's appends copy instead of
+	// overwriting the previous slice, which the height bake reads below.
+	snapshot.altScreenSettledItems = previous[:cutItem:cutItem]
+	snapshot.altScreenSettledWidth = width
+	snapshot.altScreenSettledFrontier = cutRow
+	snapshot.pending = false
+	snapshot.pendingSpecReview = nil
+	snapshot.fileView = fileViewState{}
+	snapshot.diffView = diffViewState{}
+	snapshot.detailView = detailViewState{}
+	built := snapshot.transcriptBodyItems(width, "", false)
+	// The builder's append already copied the reused prefix into a fresh
+	// array; keep it when it has live-tail scratch room instead of copying
+	// the whole history a second time.
+	if cap(built)-len(built) >= 256 {
+		m.altScreenSettledItems = built
+	} else {
+		m.altScreenSettledItems = make([]transcriptBodyItem, len(built), len(built)+256)
+		copy(m.altScreenSettledItems, built)
+	}
+	m.bakeAltScreenSettledHeights(previous, width)
+	m.altScreenSettledWidth = width
+	m.altScreenSettledFrontier = m.flushed
+	return true
 }
 
 // bakeAltScreenSettledHeights resolves each settled descriptor's height once,

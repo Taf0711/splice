@@ -152,6 +152,18 @@ func (writer *execEventWriter) presentationState(state presentation.State) {
 	writer.lastPresentationState = state
 }
 
+// pipelineNotice returns the OnNotice sink for a pipeline run. Text mode writes
+// each notice line to stderr. JSON modes return nil, so the notice falls back to
+// the reasoning stream that those modes already carry.
+func (writer *execEventWriter) pipelineNotice() func(string) {
+	if writer.format != execOutputText {
+		return nil
+	}
+	return func(text string) {
+		writer.writeStderr("[splice] " + text + "\n")
+	}
+}
+
 func (writer *execEventWriter) reasoning(delta string) {
 	if writer.format == execOutputJSON {
 		writer.writeJSON(map[string]any{"type": "reasoning", "delta": delta})

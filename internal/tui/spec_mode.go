@@ -200,6 +200,9 @@ func (m model) approveSpecReview() (tea.Model, tea.Cmd) {
 	m.pendingSpecReview = nil
 	m.activeSession = impl
 	m.sessionEvents = append([]sessions.Event{}, events...)
+	// The implementation session is a new session, so the browser moves to it
+	// and old links stop working.
+	m = m.rotateWebSession()
 	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Spec approved. Starting implementation session " + impl.SessionID + "."})
 	runCtx, cancel := context.WithCancel(m.ctx)
 	m = m.beginRun(cancel)

@@ -11,6 +11,8 @@ type messagesRequest struct {
 	// Thinking enables extended thinking when a reasoning effort was requested.
 	// Omitted (nil) for normal requests so behavior is unchanged.
 	Thinking *thinkingConfig `json:"thinking,omitempty"`
+	// OutputConfig carries the adaptive-thinking effort (Claude 4.6+).
+	OutputConfig *outputConfig `json:"output_config,omitempty"`
 	// ToolChoice, when non-nil, forces the model to call one named tool this
 	// turn. Nil keeps auto tool selection (omitted via omitempty).
 	ToolChoice *toolChoice     `json:"tool_choice,omitempty"`
@@ -18,12 +20,20 @@ type messagesRequest struct {
 	Stream     bool            `json:"stream"`
 }
 
-// thinkingConfig requests extended thinking with a token budget. Type is always
-// "enabled"; BudgetTokens is how many tokens the model may spend thinking (it is
-// counted against max_tokens).
+// thinkingConfig requests thinking. Older models take Type "enabled" with a
+// BudgetTokens budget (counted against max_tokens); Claude 4.6+ models take
+// Type "adaptive" (the model decides how much to think, steered by
+// output_config.effort) and reject a budget with HTTP 400. Display
+// "summarized" returns readable reasoning; newer models default to omitting it.
 type thinkingConfig struct {
 	Type         string `json:"type"`
-	BudgetTokens int    `json:"budget_tokens"`
+	BudgetTokens int    `json:"budget_tokens,omitempty"`
+	Display      string `json:"display,omitempty"`
+}
+
+// outputConfig sets the adaptive-thinking effort level.
+type outputConfig struct {
+	Effort string `json:"effort,omitempty"`
 }
 
 // toolChoice forces the model to call one specific tool this turn. Type is

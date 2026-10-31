@@ -19,15 +19,39 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
 const (
-	requestTimeout = 2 * time.Second
-	spawnDeadline  = 3 * time.Second
+	// defaultRequestTimeout bounds one sidecar request. A cold or loaded
+	// sidecar can take seconds to answer, so the bound is generous.
+	defaultRequestTimeout = 10 * time.Second
+	// defaultSpawnDeadline bounds the wait for a spawned sidecar to answer.
+	defaultSpawnDeadline = 10 * time.Second
+
+	// RequestTimeoutEnv overrides the request timeout (a Go duration).
+	RequestTimeoutEnv = "SPLICE_MEMD_TIMEOUT"
+	// SpawnTimeoutEnv overrides the spawn deadline (a Go duration).
+	SpawnTimeoutEnv = "SPLICE_MEMD_SPAWN_TIMEOUT"
 )
+
+// envTimeout reads a positive Go duration from the environment variable name.
+// An empty value returns fallback. A value that does not parse, or is not
+// positive, is an error that names the variable.
+func envTimeout(getenv func(string) string, name string, fallback time.Duration) (time.Duration, error) {
+	value := strings.TrimSpace(getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil || d <= 0 {
+		return fallback, fmt.Errorf("invalid %s %q: expected a positive Go duration such as 30s", name, value)
+	}
+	return d, nil
+}
 
 // ErrRecentUnsupported indicates that the running daemon predates the recent
 // listing route. Callers can present an update instruction instead of a raw
@@ -51,6 +75,12 @@ type Client struct {
 
 // NewClient returns a client bound to socketPath. It performs no I/O.
 func NewClient(socketPath string) *Client {
+	// Resolve reports an invalid value; here it keeps the default.
+	timeout, _ := envTimeout(os.Getenv, RequestTimeoutEnv, defaultRequestTimeout)
+	return newClient(socketPath, timeout)
+}
+
+func newClient(socketPath string, timeout time.Duration) *Client {
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, network string, addr string) (net.Conn, error) {
 			var d net.Dialer
@@ -59,7 +89,7 @@ func NewClient(socketPath string) *Client {
 	}
 	return &Client{
 		socketPath: socketPath,
-		httpClient: &http.Client{Transport: transport, Timeout: requestTimeout},
+		httpClient: &http.Client{Transport: transport, Timeout: timeout},
 	}
 }
 
@@ -109,7 +139,7 @@ func (c *Client) Upsert(ctx context.Context, obs schemas.MemoryObservation) (sch
 		return schemas.MemoryObservation{}, fmt.Errorf("memd upsert: %w", err)
 	}
 	req := upsertRequest{
-		ProjectPath:  obs.ProjectPath,
+		ProjectPath:  canonicalStringPtr(obs.ProjectPath),
 		Scope:        obs.Scope,
 		OwnerAgent:   obs.OwnerAgent,
 		Visibility:   obs.Visibility,
@@ -141,6 +171,7 @@ func (c *Client) Upsert(ctx context.Context, obs schemas.MemoryObservation) (sch
 // Search runs a bounded FTS query and returns the matching observations as a
 // bundle attributed to the requesting agent.
 func (c *Client) Search(ctx context.Context, query schemas.MemoryQuery) (schemas.MemoryBundle, error) {
+	query.ProjectPath = canonicalStringPtr(query.ProjectPath)
 	if err := query.Validate(); err != nil {
 		return schemas.MemoryBundle{}, fmt.Errorf("memd search: %w", err)
 	}
@@ -168,6 +199,7 @@ func (c *Client) Search(ctx context.Context, query schemas.MemoryQuery) (schemas
 // (the consuming stage), never by the sidecar: the store only filters by
 // visibility. The bundle carries no exemplars.
 func (c *Client) LookupTopic(ctx context.Context, query schemas.MemoryTopicQuery) (schemas.MemoryBundle, error) {
+	query.ProjectPath = CanonicalProjectPath(query.ProjectPath)
 	if err := query.Validate(); err != nil {
 		return schemas.MemoryBundle{}, fmt.Errorf("memd lookup_topic: %w", err)
 	}
@@ -197,6 +229,7 @@ func (c *Client) LookupTopic(ctx context.Context, query schemas.MemoryTopicQuery
 // an error; callers treat that as an ordinary retrieval failure and fall
 // back to Search.
 func (c *Client) SearchRanked(ctx context.Context, query schemas.MemoryQuery) ([]schemas.MemoryRanked, bool, error) {
+	query.ProjectPath = canonicalStringPtr(query.ProjectPath)
 	if err := query.Validate(); err != nil {
 		return nil, false, fmt.Errorf("memd search_ranked: %w", err)
 	}
@@ -286,7 +319,7 @@ type ResetCounts struct {
 // memory state to empty so a fresh seed is the only cognition that project
 // carries. Zero counts are valid and reported, never hidden.
 func (c *Client) ResetProject(ctx context.Context, projectPath string) (ResetCounts, error) {
-	req := map[string]string{"project_path": projectPath}
+	req := map[string]string{"project_path": CanonicalProjectPath(projectPath)}
 	var resp struct {
 		OK           bool   `json:"ok"`
 		Observations int64  `json:"observations"`
@@ -419,6 +452,25 @@ func (c *Client) QueryTraces(ctx context.Context, filter schemas.TraceQueryFilte
 	return out, nil
 }
 
+// TraceForSession returns the stored trace whose run ID or session ID is
+// sessionID. It queries each repo root in order, because one workspace can
+// be stored under its raw path or its resolved path. It returns nil and no
+// error when no trace matches.
+func (c *Client) TraceForSession(ctx context.Context, repoRoots []string, sessionID string) (*schemas.RunOutcome, error) {
+	for _, root := range repoRoots {
+		results, err := c.QueryTraces(ctx, schemas.TraceQueryFilter{RepoRoot: root, Limit: 1000})
+		if err != nil {
+			return nil, err
+		}
+		for i := range results {
+			if results[i].Trace.RunID == sessionID || results[i].Trace.SessionID == sessionID {
+				return &results[i].Trace, nil
+			}
+		}
+	}
+	return nil, nil
+}
+
 func (c *Client) do(ctx context.Context, method string, path string, body any, out any) error {
 	var reader io.Reader
 	if body != nil {
@@ -490,13 +542,25 @@ func dataDirFor(goos string, home string, xdg string) string {
 // There is no current-working-directory fallback; opening an arbitrary
 // project directory must not auto-execute a repository-provided binary.
 func resolveBinary(getenv func(string) string, lookPath func(string) (string, error)) string {
+	exe, _ := os.Executable()
+	return resolveBinaryNear(getenv, lookPath, exe)
+}
+
+// BinaryFor returns the splice-memd binary that the splice binary at
+// executable spawns, in the order of resolveBinary, or "" when none resolves.
+// A harness that owns the sidecar lifetime starts this binary itself.
+func BinaryFor(getenv func(string) string, executable string) string {
+	return resolveBinaryNear(getenv, exec.LookPath, executable)
+}
+
+func resolveBinaryNear(getenv func(string) string, lookPath func(string) (string, error), exe string) string {
 	if env := getenv("SPLICE_MEMD_BIN"); env != "" {
 		return env
 	}
 	if path, err := lookPath("splice-memd"); err == nil {
 		return path
 	}
-	if exe, err := os.Executable(); err == nil {
+	if exe != "" {
 		sibling := filepath.Join(filepath.Dir(exe), "splice-memd")
 		if info, err := os.Stat(sibling); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
 			return sibling
@@ -510,10 +574,25 @@ func resolveBinary(getenv func(string) string, lookPath func(string) (string, er
 // is simply off) and (nil, err) when a daemon was expected but could not be
 // reached, so the caller can degrade with a single warning.
 func Resolve(ctx context.Context) (*Client, error) {
+	requestTimeout, err := envTimeout(os.Getenv, RequestTimeoutEnv, defaultRequestTimeout)
+	if err != nil {
+		return nil, err
+	}
+	spawnDeadline, err := envTimeout(os.Getenv, SpawnTimeoutEnv, defaultSpawnDeadline)
+	if err != nil {
+		return nil, err
+	}
 	socketPath := DefaultSocketPath()
-	client := NewClient(socketPath)
-	if err := client.Health(ctx); err == nil {
-		return client, nil
+	client := newClient(socketPath, requestTimeout)
+	// A cold or loaded sidecar can miss one health check, so retry once
+	// before memory is declared off or a new sidecar is spawned.
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := client.Health(ctx); err == nil {
+			return client, nil
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 	}
 
 	binary := resolveBinary(os.Getenv, exec.LookPath)
@@ -538,7 +617,8 @@ func Resolve(ctx context.Context) (*Client, error) {
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
-	return nil, fmt.Errorf("splice-memd did not become healthy: %w", lastErr)
+	return nil, fmt.Errorf("splice-memd did not become healthy within %s (request timeout %s; set %s or %s to wait longer): %w",
+		spawnDeadline, requestTimeout, SpawnTimeoutEnv, RequestTimeoutEnv, lastErr)
 }
 
 // spawnDaemon starts `splice-memd --serve` detached from this process group.
@@ -624,6 +704,7 @@ type GraphEvidence struct {
 // UpsertGraphNode creates or updates one node with anchors and edges, then
 // returns the stored node with its canonical ID.
 func (c *Client) UpsertGraphNode(ctx context.Context, in GraphUpsertInput) (GraphNode, error) {
+	in.ProjectPath = CanonicalProjectPath(in.ProjectPath)
 	if in.Kind == "" {
 		return GraphNode{}, fmt.Errorf("memd graph upsert: kind is required")
 	}
@@ -653,7 +734,7 @@ func (c *Client) GetExactNodes(ctx context.Context, anchors map[string][]string,
 	}
 	req := map[string]any{
 		"anchors":      anchors,
-		"project_path": projectPath,
+		"project_path": CanonicalProjectPath(projectPath),
 		"limit":        limitDefault(limit),
 	}
 	var resp struct {
@@ -762,15 +843,26 @@ func (c *Client) ContradictGraphNode(ctx context.Context, nodeID, byNodeID int64
 	return nil
 }
 
-// GraphSearchHit pairs a node ID with its semantic similarity score.
+// GraphSearchHit pairs a node ID with its semantic similarity score. Node is
+// the full active node with anchors when the hit resolved to a live row; nil
+// when the index entry is stale.
 type GraphSearchHit struct {
-	NodeID int64   `json:"node_id"`
-	Score  float64 `json:"score"`
+	NodeID int64      `json:"node_id"`
+	Score  float64    `json:"score"`
+	Node   *GraphNode `json:"node,omitempty"`
 }
 
 // SearchGraphSemantically ranks active nodes by cosine similarity to text and
 // returns the top k hits.
 func (c *Client) SearchGraphSemantically(ctx context.Context, text string, k int) ([]GraphSearchHit, error) {
+	return c.SearchGraphSemanticallyScoped(ctx, text, k, "")
+}
+
+// SearchGraphSemanticallyScoped is SearchGraphSemantically with an optional
+// project scope: when projectPath is non-empty, only that project's nodes
+// rank. Scoped retrieval is what planDiscovery uses: cross-project hits
+// would anchor at another repo's revisions and poison freshness validation.
+func (c *Client) SearchGraphSemanticallyScoped(ctx context.Context, text string, k int, projectPath string) ([]GraphSearchHit, error) {
 	if text == "" {
 		return nil, fmt.Errorf("memd graph search_semantic: text is required")
 	}
@@ -779,7 +871,7 @@ func (c *Client) SearchGraphSemantically(ctx context.Context, text string, k int
 		Hits  []GraphSearchHit `json:"hits"`
 		Error string           `json:"error,omitempty"`
 	}
-	if err := c.do(ctx, http.MethodPost, "/graph/search_semantic", map[string]any{"text": text, "k": k}, &resp); err != nil {
+	if err := c.do(ctx, http.MethodPost, "/graph/search_semantic", map[string]any{"text": text, "k": k, "project_path": CanonicalProjectPath(projectPath)}, &resp); err != nil {
 		return nil, err
 	}
 	if !resp.OK {
@@ -788,6 +880,52 @@ func (c *Client) SearchGraphSemantically(ctx context.Context, text string, k int
 	return resp.Hits, nil
 }
 
+// ReanchorGraph advances the verified revision of one project's active
+// nodes. See the /graph/reanchor wire contract.
+func (c *Client) ReanchorGraph(ctx context.Context, projectPath, fromRevision, toRevision string) (int64, error) {
+	if projectPath == "" || fromRevision == "" || toRevision == "" {
+		return 0, fmt.Errorf("memd graph reanchor: project path and both revisions are required")
+	}
+	var resp struct {
+		OK    bool   `json:"ok"`
+		Nodes int64  `json:"nodes"`
+		Error string `json:"error,omitempty"`
+	}
+	body := map[string]any{"project_path": CanonicalProjectPath(projectPath), "from_revision": fromRevision, "to_revision": toRevision}
+	if err := c.do(ctx, http.MethodPost, "/graph/reanchor", body, &resp); err != nil {
+		return 0, err
+	}
+	if !resp.OK {
+		return 0, fmt.Errorf("memd graph reanchor: %s", resp.Error)
+	}
+	return resp.Nodes, nil
+}
+
+// ReanchorGraphByIDs advances EXACTLY the given capture set (the nodes one
+// verified run persisted) from one revision to another. Scoped to the
+// capture set: other runs' nodes of the same project are untouched, and any
+// id that does not match the project/active/from-revision contract fails
+// loud. See the /graph/reanchor_ids wire contract.
+func (c *Client) ReanchorGraphByIDs(ctx context.Context, projectPath string, nodeIDs []int64, fromRevision, toRevision string) (int64, error) {
+	if projectPath == "" || len(nodeIDs) == 0 || fromRevision == "" || toRevision == "" {
+		return 0, fmt.Errorf("memd graph reanchor_ids: project path, node ids, and both revisions are required")
+	}
+	var resp struct {
+		OK    bool   `json:"ok"`
+		Nodes int64  `json:"nodes"`
+		Error string `json:"error,omitempty"`
+	}
+	body := map[string]any{"project_path": CanonicalProjectPath(projectPath), "node_ids": nodeIDs, "from_revision": fromRevision, "to_revision": toRevision}
+	if err := c.do(ctx, http.MethodPost, "/graph/reanchor_ids", body, &resp); err != nil {
+		return 0, err
+	}
+	if !resp.OK {
+		return 0, fmt.Errorf("memd graph reanchor_ids: %s", resp.Error)
+	}
+	return resp.Nodes, nil
+}
+
+// GraphCompactionReport mirrors the sidecar's compaction summary.
 // GraphCompactionReport mirrors the sidecar's compaction summary.
 type GraphCompactionReport struct {
 	DuplicateGroups  int   `json:"duplicate_groups"`
@@ -796,6 +934,60 @@ type GraphCompactionReport struct {
 	AnchorsMerged    int   `json:"anchors_merged"`
 	EvidenceMerged   int   `json:"evidence_merged"`
 	DurationMs       int64 `json:"duration_ms"`
+}
+
+// MaintenanceReport mirrors the sidecar maintenance response.
+type MaintenanceReport struct {
+	Skipped                 bool                  `json:"skipped"`
+	Disabled                bool                  `json:"disabled"`
+	MissingProjects         int64                 `json:"missing_projects"`
+	ArchivedNodes           int64                 `json:"archived_nodes"`
+	RestoredNodes           int64                 `json:"restored_nodes"`
+	DeletedObservations     int64                 `json:"deleted_observations"`
+	RestoredObservations    int64                 `json:"restored_observations"`
+	Compacted               GraphCompactionReport `json:"compacted"`
+	Collected               int64                 `json:"collected"`
+	HardDeletedNodes        int64                 `json:"hard_deleted_nodes"`
+	HardDeletedObservations int64                 `json:"hard_deleted_observations"`
+	HardDeletedTraces       int64                 `json:"hard_deleted_traces"`
+	Vacuumed                bool                  `json:"vacuumed"`
+}
+
+// Maintenance runs the sidecar maintenance pass.
+func (c *Client) Maintenance(ctx context.Context) (MaintenanceReport, error) {
+	var resp struct {
+		OK     bool              `json:"ok"`
+		Report MaintenanceReport `json:"report"`
+		Error  string            `json:"error,omitempty"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/maintenance", map[string]any{}, &resp); err != nil {
+		return MaintenanceReport{}, err
+	}
+	if !resp.OK {
+		return MaintenanceReport{}, fmt.Errorf("memd maintenance: %s", resp.Error)
+	}
+	return resp.Report, nil
+}
+
+// Forget hard-deletes one node or observation by id.
+func (c *Client) Forget(ctx context.Context, kind string, id int64) error {
+	if kind != "node" && kind != "observation" {
+		return fmt.Errorf("memd forget: kind must be node or observation")
+	}
+	if id < 1 {
+		return fmt.Errorf("memd forget: id must be >= 1, got %d", id)
+	}
+	var resp struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error,omitempty"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/forget", map[string]any{"kind": kind, "id": id}, &resp); err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("memd forget: %s", resp.Error)
+	}
+	return nil
 }
 
 // CompactGraph merges duplicate nodes and returns the report.
@@ -829,4 +1021,107 @@ func (c *Client) CollectGraph(ctx context.Context, olderThanSeconds int64) (int6
 		return 0, fmt.Errorf("memd graph collect: %s", resp.Error)
 	}
 	return resp.Collected, nil
+}
+
+// CaptureSetIDs returns the ids of a project's active nodes currently
+// anchored at fromRevision - the capture set of the verified run that
+// produced them. The harness uses this to scope a reanchor to exactly the
+// nodes its verified run captured, instead of every node of the project.
+// The two-arg form omits the source_run_id filter, which preserves the
+// historical project+revision behavior on the sidecar.
+func (c *Client) CaptureSetIDs(ctx context.Context, projectPath, fromRevision string) ([]int64, error) {
+	return c.CaptureSetIDsForRun(ctx, projectPath, fromRevision, "")
+}
+
+// CaptureSetIDsForRun is CaptureSetIDs with an optional producer-run
+// filter: when sourceRunID is non-empty the sidecar scopes the capture
+// set to the run that persisted the nodes, so two runs that verified
+// the same tree keep separate sets. An empty sourceRunID sends no filter.
+func (c *Client) CaptureSetIDsForRun(ctx context.Context, projectPath, fromRevision, sourceRunID string) ([]int64, error) {
+	if projectPath == "" || fromRevision == "" {
+		return nil, fmt.Errorf("memd graph capture set: project path and revision are required")
+	}
+	var resp struct {
+		OK    bool    `json:"ok"`
+		IDs   []int64 `json:"ids"`
+		Error string  `json:"error,omitempty"`
+	}
+	body := map[string]any{"project_path": CanonicalProjectPath(projectPath), "revision": fromRevision}
+	if sourceRunID != "" {
+		body["source_run_id"] = sourceRunID
+	}
+	if err := c.do(ctx, http.MethodPost, "/graph/capture_set", body, &resp); err != nil {
+		return nil, err
+	}
+	if !resp.OK {
+		return nil, fmt.Errorf("memd graph capture_set: %s", resp.Error)
+	}
+	return resp.IDs, nil
+}
+
+// ExportedCaptureNode is one fully materialized node in an exported capture
+// set: the complete node payload with its anchors and evidence, plus the
+// source sidecar id and claim hash for canonical identity (numeric ids are
+// not stable across stores; the (kind, claim_hash) pair is).
+type ExportedCaptureNode struct {
+	Node      GraphNode       `json:"node"`
+	Anchors   []GraphAnchor   `json:"anchors"`
+	Evidence  []GraphEvidence `json:"evidence"`
+	SourceID  int64           `json:"source_id"`
+	ClaimHash string          `json:"claim_hash"`
+}
+
+// ExportCaptureSet returns the FULL payloads of a capture set (A4): every
+// active node anchored at the given revision for the project (optionally
+// scoped to the producer run), each with anchors and evidence verbatim.
+// This is the export side of the natural-capture provenance contract; the
+// ids-only capture_set endpoint cannot reconstruct capture content.
+func (c *Client) ExportCaptureSet(ctx context.Context, projectPath, revision, sourceRunID string) ([]ExportedCaptureNode, error) {
+	if projectPath == "" || revision == "" {
+		return nil, fmt.Errorf("memd graph export: project path and revision are required")
+	}
+	var resp struct {
+		OK    bool                  `json:"ok"`
+		Nodes []ExportedCaptureNode `json:"nodes"`
+		Error string                `json:"error,omitempty"`
+	}
+	body := map[string]any{"project_path": CanonicalProjectPath(projectPath), "revision": revision}
+	if sourceRunID != "" {
+		body["source_run_id"] = sourceRunID
+	}
+	if err := c.do(ctx, http.MethodPost, "/graph/export_capture_set", body, &resp); err != nil {
+		return nil, err
+	}
+	if !resp.OK {
+		return nil, fmt.Errorf("memd graph export_capture_set: %s", resp.Error)
+	}
+	return resp.Nodes, nil
+}
+
+// ImportCaptureSet persists a previously exported capture set into
+// projectPath (A4). Project identity is remapped by the sidecar; producer
+// identity rides the nodes verbatim. Returns the number of nodes the
+// sidecar imported. The upsert dedupe makes a retry idempotent.
+func (c *Client) ImportCaptureSet(ctx context.Context, projectPath string, nodes []ExportedCaptureNode) (int64, error) {
+	if projectPath == "" {
+		return 0, fmt.Errorf("memd graph import: project path is required")
+	}
+	if len(nodes) == 0 {
+		return 0, fmt.Errorf("memd graph import: node set is empty")
+	}
+	var resp struct {
+		OK       bool   `json:"ok"`
+		Imported int64  `json:"imported"`
+		Error    string `json:"error,omitempty"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/graph/import_capture_set", map[string]any{
+		"project_path": CanonicalProjectPath(projectPath),
+		"nodes":        nodes,
+	}, &resp); err != nil {
+		return 0, err
+	}
+	if !resp.OK {
+		return 0, fmt.Errorf("memd graph import_capture_set: %s", resp.Error)
+	}
+	return resp.Imported, nil
 }

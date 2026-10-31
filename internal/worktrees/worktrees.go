@@ -328,6 +328,10 @@ const (
 	// reviewed it, so the merge was refused rather than applying work the
 	// user never saw (review finding 1).
 	MergeBackStale MergeBackStatus = "stale_review"
+	// MergeBackSourceChanged means the source branch or source commit moved
+	// while the run was in flight. The merge is refused so work cannot land on
+	// a branch the user did not start from.
+	MergeBackSourceChanged MergeBackStatus = "source_changed"
 )
 
 // MergeBackOptions configures MergeBack.
@@ -338,6 +342,12 @@ type MergeBackOptions struct {
 	WorktreePath string
 	// Name is the worktree name; the recovery branch is splice/<name>.
 	Name string
+	// SourceBranch and SourceCommit pin the source repository state recorded
+	// when the worktree was prepared. When set, MergeBack refuses the merge if
+	// the source branch changed or the source commit is no longer an ancestor
+	// of the source HEAD.
+	SourceBranch string
+	SourceCommit string
 	// CommitMessage is used for the worktree commit; a default is derived
 	// from Name when empty.
 	CommitMessage string
@@ -387,6 +397,52 @@ func MergeBack(ctx context.Context, options MergeBackOptions) (MergeBackResult, 
 			return MergeBackResult{
 				Status:  MergeBackStale,
 				Message: "worktree changed after the review: reviewed tree " + expected + ", current tree " + current,
+			}, nil
+		}
+	}
+
+	// Source identity: a run can outlive a branch switch. Refuse to merge into
+	// a branch the user did not start from. The checks run before the worktree
+	// is committed or its branch is pinned, so a refusal changes nothing: the
+	// worktree keeps its changes for a manual merge.
+	if branch := strings.TrimSpace(options.SourceBranch); branch != "" {
+		current, err := gitOutput(ctx, runGit, options.RepoRoot, "rev-parse", "--abbrev-ref", "HEAD")
+		if err != nil {
+			return MergeBackResult{}, fmt.Errorf("resolve source branch: %w", err)
+		}
+		current = strings.TrimSpace(current)
+		if current == "HEAD" {
+			return MergeBackResult{
+				Status:  MergeBackSourceChanged,
+				Branch:  branch,
+				Message: "source repository is on a detached HEAD; merge-back refused",
+			}, nil
+		}
+		if current != branch {
+			return MergeBackResult{
+				Status:  MergeBackSourceChanged,
+				Branch:  branch,
+				Message: fmt.Sprintf("source branch changed from %s to %s; merge-back refused", branch, current),
+			}, nil
+		}
+	}
+	if commit := strings.TrimSpace(options.SourceCommit); commit != "" {
+		if _, err := gitOutput(ctx, runGit, options.RepoRoot, "rev-parse", "--verify", commit+"^{commit}"); err != nil {
+			return MergeBackResult{
+				Status:  MergeBackSourceChanged,
+				Branch:  options.SourceBranch,
+				Message: fmt.Sprintf("recorded source commit %s is not present in the source repository; merge-back refused", commit),
+			}, nil
+		}
+		ancestor, err := isAncestor(ctx, runGit, options.RepoRoot, commit, "HEAD")
+		if err != nil {
+			return MergeBackResult{}, fmt.Errorf("check source commit ancestry: %w", err)
+		}
+		if !ancestor {
+			return MergeBackResult{
+				Status:  MergeBackSourceChanged,
+				Branch:  options.SourceBranch,
+				Message: fmt.Sprintf("source HEAD no longer contains the recorded source commit %s; merge-back refused", commit),
 			}, nil
 		}
 	}
@@ -877,6 +933,31 @@ func DefaultBaseDir(env map[string]string) (string, error) {
 		}
 	}
 	return filepath.Join(home, ".local", "state", "splice", "worktrees"), nil
+}
+
+// LaunchDir returns the directory in the worktree that matches launchDir in
+// the source checkout. A run from a subdirectory of the source repository
+// then uses the same subdirectory of the worktree, as a run without a
+// worktree does. The directory must exist in the worktree. A worktree has only
+// committed files, so a directory with no committed file is an error.
+func LaunchDir(result Result, launchDir string) (string, error) {
+	repoRoot, err := filepath.EvalSymlinks(result.RepoRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve repository root %s: %w", result.RepoRoot, err)
+	}
+	launch, err := filepath.EvalSymlinks(launchDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve launch directory %s: %w", launchDir, err)
+	}
+	rel, err := filepath.Rel(repoRoot, launch)
+	if err != nil || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("launch directory %s is not inside the repository %s", launchDir, result.RepoRoot)
+	}
+	mapped := filepath.Join(result.Path, rel)
+	if info, err := os.Stat(mapped); err != nil || !info.IsDir() {
+		return "", fmt.Errorf("launch directory %s is not in the worktree %s, because a worktree has only committed files (the directory is untracked or ignored). Commit the directory, or run from the repository root", rel, result.Path)
+	}
+	return mapped, nil
 }
 
 func resolveCwd(cwd string) (string, error) {

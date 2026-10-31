@@ -535,3 +535,102 @@ func TestDisabledPolicyCannotBypassGuard(t *testing.T) {
 		t.Fatalf("decision = %+v, want rejected with a nonempty reason", records[0].Decision)
 	}
 }
+
+// TestDeterministicGitDoesNotRunRepoFsmonitor is the H-05 guard at the spawn
+// seam: a stage git call in a repository whose config sets core.fsmonitor
+// must not run that command. The same git call without procrun is the control
+// that proves the fixture runs the hook.
+func TestDeterministicGitDoesNotRunRepoFsmonitor(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git unavailable: %v", err)
+	}
+	workspace := t.TempDir()
+	marker := filepath.Join(workspace, "fsmonitor-ran")
+	gitRun := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", workspace}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	gitRun("init", "-q")
+	gitRun("config", "core.fsmonitor", "sh -c 'touch "+marker+"'")
+	gitRun("status", "--porcelain")
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("control: unhardened git status did not run core.fsmonitor: %v", err)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+
+	read := collectAudit(t)
+	prepared, err := Prepare(context.Background(), Request{
+		ProfileID:       ProfileSpliceStage,
+		AllowedBinaries: StageBinaries,
+		Engine:          NewStageEngine(workspace),
+		Spec:            sandbox.CommandSpec{Name: "git", Args: []string{"-C", workspace, "status", "--porcelain"}, Dir: workspace},
+	})
+	if err != nil {
+		records := read()
+		if len(records) == 1 && records[0].Decision.Rejected && strings.Contains(records[0].Decision.Reason, "native platform confinement") {
+			t.Skipf("host native backend unavailable: %v", err)
+		}
+		t.Fatalf("prepare: %v", err)
+	}
+	defer prepared.Plan.Cleanup()
+	if out, err := prepared.Cmd.CombinedOutput(); err != nil {
+		t.Fatalf("stage git status: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("stage git status ran the repository core.fsmonitor (stat err %v)", err)
+	}
+}
+
+// TestDeterministicSpawnRefusesUnreadableGitConfigCount pins fail-loud
+// behavior: when the git hardening cannot be added, the spawn is refused and
+// audited, never run without it.
+func TestDeterministicSpawnRefusesUnreadableGitConfigCount(t *testing.T) {
+	read := collectAudit(t)
+	root := t.TempDir()
+	_, err := Prepare(context.Background(), Request{
+		ProfileID:       ProfileSpliceStage,
+		AllowedBinaries: StageBinaries,
+		Engine:          NewStageEngine(root),
+		Spec:            sandbox.CommandSpec{Name: "git", Args: []string{"status"}, Dir: root, Env: []string{"GIT_CONFIG_COUNT=two"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "GIT_CONFIG_COUNT") {
+		t.Fatalf("Prepare() error = %v, want a GIT_CONFIG_COUNT refusal", err)
+	}
+	records := read()
+	if len(records) != 1 || !records[0].Decision.Rejected {
+		t.Fatalf("audit stream = %+v, want one rejected record", records)
+	}
+}
+
+// AUDIT-08: on a Linux host with no native backend, the refusal names the
+// bubblewrap install command. Other platforms keep the plain reason.
+func TestDeterministicRefusalNamesLinuxInstallCommand(t *testing.T) {
+	for _, tc := range []struct {
+		platform string
+		want     bool
+	}{{"linux", true}, {"darwin", false}} {
+		workspace := t.TempDir()
+		_ = collectAudit(t)
+		_, err := Prepare(context.Background(), Request{
+			ProfileID:       ProfileSpliceStage,
+			AllowedBinaries: StageBinaries,
+			Engine: sandbox.NewEngine(sandbox.EngineOptions{
+				WorkspaceRoot: workspace,
+				Policy:        sandbox.Policy{Mode: sandbox.ModeEnforce, Network: sandbox.NetworkDeny, EnforceWorkspace: true},
+				Backend:       sandbox.Backend{Name: sandbox.BackendUnavailable, Platform: tc.platform, Message: "bubblewrap is not installed"},
+			}),
+			Spec: sandbox.CommandSpec{Name: "go", Args: []string{"version"}, Dir: workspace},
+		})
+		if err == nil {
+			t.Fatalf("%s: deterministic spawn with no native backend must fail closed", tc.platform)
+		}
+		if got := strings.Contains(err.Error(), "apt install bubblewrap"); got != tc.want {
+			t.Fatalf("%s: refusal %q, want install command %v", tc.platform, err, tc.want)
+		}
+	}
+}

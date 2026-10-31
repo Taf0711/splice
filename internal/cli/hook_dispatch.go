@@ -4,23 +4,16 @@ import (
 	"github.com/Taf0711/splice/internal/hooks"
 )
 
-// newHookDispatcher builds the per-session hooks dispatcher for a workspace,
-// merging user + project hooks.json and wiring the audit store. It fails OPEN:
-// any load or setup error yields a nil dispatcher, which Dispatch treats as a
-// no-op, so a malformed hooks config can never wedge tool execution. With no
-// hooks configured the dispatcher selects nothing and runs no commands, so the
-// hot path stays free of overhead until a user opts in via hooks.json.
-func newHookDispatcher(workspaceRoot string) *hooks.Dispatcher {
-	return newHookDispatcherWithExtra(workspaceRoot, false, nil)
-}
-
-// newHookDispatcherWithExtra builds the dispatcher like newHookDispatcher but also
-// folds plugin-activated hook definitions into the active hook set, so a plugin's
-// declared hooks run alongside the user/project hooks.json hooks. Plugin hooks are
-// appended after the configured hooks; their ids are plugin-namespaced (plugin
-// id + hook name) so they never collide with hooks.json ids. A nil/empty extra
-// slice is byte-equivalent to newHookDispatcher. When disableProject is true,
-// the project hooks.json layer is skipped (untrusted workspace).
+// newHookDispatcherWithExtra builds the per-session hooks dispatcher for a
+// workspace, merging user + project hooks.json and wiring the audit store. It
+// fails OPEN: any load or setup error yields a nil dispatcher, which Dispatch
+// treats as a no-op, so a malformed hooks config can never wedge tool execution.
+// Plugin-activated hook definitions in extra are folded into the active hook set,
+// so a plugin's declared hooks run alongside the user/project hooks.json hooks.
+// Plugin hooks are appended after the configured hooks; their ids are
+// plugin-namespaced (plugin id + hook name) so they never collide with hooks.json
+// ids. A nil/empty extra slice adds nothing. When disableProject is true, the
+// project hooks.json layer is skipped (untrusted workspace).
 func newHookDispatcherWithExtra(workspaceRoot string, disableProject bool, extra []hooks.Definition) *hooks.Dispatcher {
 	loaded, err := hooks.LoadConfig(hooks.LoadOptions{Cwd: workspaceRoot, DisableProject: disableProject})
 	if err != nil {

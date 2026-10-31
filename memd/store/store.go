@@ -77,7 +77,8 @@ type Query struct {
 
 // Store wraps a SQLite database.
 type Store struct {
-	db *sql.DB
+	db  *sql.DB
+	now func() time.Time
 }
 
 // New opens (or creates) a SQLite database at path and runs the schema
@@ -121,7 +122,18 @@ func New(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("store.New: migrate: %w", err)
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, now: time.Now}, nil
+}
+
+// SetClockForTest replaces the store clock. It is intended for deterministic
+// maintenance tests and must not be used by production callers.
+func (s *Store) SetClockForTest(now func() time.Time) { s.now = now }
+
+func (s *Store) currentTime() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
 }
 
 // Close releases the database connection.
@@ -149,6 +161,12 @@ func migrateDB(db *sql.DB) error {
 	// NULL intent and never match the index (no backfill).
 	if err := addTraceIntentColumn(db); err != nil {
 		return fmt.Errorf("migrate: trace intent column: %w", err)
+	}
+	if err := addColumnIfMissing(db, "observations", "maintenance_deleted_at", "INTEGER"); err != nil {
+		return fmt.Errorf("migrate: observation maintenance marker: %w", err)
+	}
+	if err := addColumnIfMissing(db, "cognition_nodes", "status_changed_at", "INTEGER"); err != nil {
+		return fmt.Errorf("migrate: node status timestamp: %w", err)
 	}
 	// The schema is split into statements so errors can name the failing DDL
 	// fragment; splitSQL keeps trigger bodies (BEGIN...END) intact.
@@ -201,6 +219,37 @@ func addTraceIntentColumn(db *sql.DB) error {
 		return err
 	}
 	_, err = db.Exec(`ALTER TABLE run_traces ADD COLUMN intent TEXT`)
+	return err
+}
+
+func addColumnIfMissing(db *sql.DB, table, column, definition string) error {
+	var exists string
+	if err := db.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.Exec("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition)
 	return err
 }
 
@@ -661,12 +710,14 @@ func (s *Store) MarkReviewed(ctx context.Context, id int64) error {
 	return nil
 }
 
-// ResetProject hard-deletes every observation and every run trace whose
-// project path or repo root matches projectPath, including the FTS index
-// rows (the delete triggers keep observations_fts and run_traces_fts in
-// sync). The match is exact: no prefix, no normalization. This is the
-// eval-harness isolation primitive: it restores one project's memory state
-// to empty so a fresh seed is the only cognition the project carries.
+// ResetProject hard-deletes every observation, every run trace, and every
+// cognition graph node (with its anchored edges, anchors, evidence, and
+// embedding rows via ON DELETE CASCADE) whose project path or repo root
+// matches projectPath. Observation and trace deletes keep the FTS index rows
+// in sync via the delete triggers. The match is exact: no prefix, no
+// normalization. This is the eval-harness isolation primitive: it restores
+// one project's memory state to empty so a fresh seed is the only cognition
+// the project carries.
 // Counts report what was removed, never a silent zero.
 func (s *Store) ResetProject(ctx context.Context, projectPath string) (ResetCounts, error) {
 	if projectPath == "" {
@@ -699,11 +750,26 @@ func (s *Store) ResetProject(ctx context.Context, projectPath string) (ResetCoun
 		return counts, fmt.Errorf("reset project: count traces: %w", err)
 	}
 
+	// Graph nodes cascade: edges, anchors, evidence, and embeddings all
+	// reference cognition_nodes(id) ON DELETE CASCADE, so one delete clears
+	// the project's whole graph. The embeddings table is part of the
+	// semantic index; the index never stores node rows outside it.
+	graphRes, err := tx.ExecContext(ctx,
+		`DELETE FROM cognition_nodes WHERE project_path = ?`, projectPath)
+	if err != nil {
+		return counts, fmt.Errorf("reset project: delete graph nodes: %w", err)
+	}
+	graphNodes, err := graphRes.RowsAffected()
+	if err != nil {
+		return counts, fmt.Errorf("reset project: count graph nodes: %w", err)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return counts, fmt.Errorf("reset project: commit: %w", err)
 	}
 	counts.Observations = observations
 	counts.Traces = traces
+	counts.GraphNodes = graphNodes
 	return counts, nil
 }
 
@@ -711,6 +777,7 @@ func (s *Store) ResetProject(ctx context.Context, projectPath string) (ResetCoun
 type ResetCounts struct {
 	Observations int64 `json:"observations"`
 	Traces       int64 `json:"traces"`
+	GraphNodes   int64 `json:"graph_nodes"`
 }
 
 // byID fetches one observation by primary key. Used after upsert.

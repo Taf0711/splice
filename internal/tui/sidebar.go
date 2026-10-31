@@ -56,7 +56,9 @@ func (m model) sidebarToggleAllowed() bool {
 	if sidebarWidth(m.width) <= 0 {
 		return false
 	}
-	if widthTier(m.width) < tierMedium {
+	// Below the two-column boundary the sidebar cannot render, so the key
+	// opens the context sheet instead (see the Ctrl+B handler).
+	if m.width < compactModeMinWidth {
 		return false
 	}
 	if m.setup.visible || m.providerWizard != nil || m.stageModelWizard != nil || m.mcpAddWizard != nil ||
@@ -874,7 +876,13 @@ func (m model) activityCommandForRow(id string, runID int) string {
 func (m model) sidebarTokenLine(width int) string {
 	label := m.sidebarTokenText()
 	if label == "" {
+		// No provider step has run in this process. On a resumed session the
+		// history is real, so "0 tokens" would be false: the footprint is
+		// measured on the next turn.
 		label = "0 tokens"
+		if !m.transcriptEmpty() {
+			label = "tokens: after next turn"
+		}
 	}
 	// Append the graded context-fill % — the at-a-glance "how full is the window"
 	// the compaction trigger reasons about. Reserve its width so the token label
@@ -933,4 +941,27 @@ func joinColumns(chat []string, sidebar []string, chatW, sidebarW int) []string 
 		out[i] = left + divider + right
 	}
 	return out
+}
+
+// compactWidth reports the compact projection (80-119 and below): the
+// permanent sidebar is removed and its modules live behind Ctrl+B. An
+// unknown width (headless, before the first resize) counts as wide.
+func (m model) compactWidth() bool {
+	return m.width > 0 && m.width < compactModeMinWidth
+}
+
+// compactSectionTabs renders the compact-mode shortcut row (spec §4.2): the
+// permanent sidebar is removed below compactModeMinWidth, so its sections
+// stay one chord away. Every key named here works at this width; labels
+// follow the user's bindings. Empty when the row cannot fit whole.
+func (m model) compactSectionTabs(width int) string {
+	key := func(label string) string { return zeroTheme.muted.Render(label) }
+	word := func(text string) string { return zeroTheme.faint.Render(text) }
+	tabs := key(labelOr(m.keyBindings.toggleSidebar, "Ctrl+B")) + word(" context  ") +
+		key(labelOr(m.keyBindings.togglePlan, "Ctrl+P")) + word(" plan  ") +
+		key("?") + word(" shortcuts")
+	if lipgloss.Width(tabs) > width {
+		return ""
+	}
+	return tabs
 }

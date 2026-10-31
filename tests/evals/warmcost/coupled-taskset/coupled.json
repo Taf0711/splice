@@ -1,0 +1,26 @@
+[
+  {
+    "id": "cpl-01",
+    "coupled": "internal/config/catalog.go"
+  },
+  {
+    "id": "cpl-02",
+    "coupled": "internal/config/catalog.go"
+  },
+  {
+    "id": "cpl-03",
+    "coupled": "cmd/server/jobs.go"
+  },
+  {
+    "id": "cpl-04",
+    "coupled": "internal/admin/permissions.go"
+  },
+  {
+    "id": "cpl-05",
+    "coupled": "internal/admin/pricing.go"
+  },
+  {
+    "id": "cpl-06",
+    "coupled": "internal/admin/labels.go"
+  }
+]

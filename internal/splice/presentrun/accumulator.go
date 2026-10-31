@@ -2,6 +2,7 @@ package presentrun
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/Taf0711/splice/internal/presentation"
 )
@@ -20,6 +21,9 @@ import (
 // the control path and stay fail-closed. Silently dropping an event would be
 // wrong, which is why every refusal is counted and surfaced.
 type Accumulator struct {
+	// mu guards the state and counters: usage callbacks may arrive from a
+	// provider stream goroutine while stage events arrive from the run.
+	mu      sync.Mutex
 	state   presentation.State
 	applied int
 	skipped int
@@ -36,6 +40,8 @@ func New(onWarn func(msg string)) *Accumulator {
 // Apply feeds one presentation event into the reducer. A refused event is
 // counted and logged; the accumulated state stays at its last good value.
 func (a *Accumulator) Apply(event presentation.StreamEventLike) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if event == nil {
 		a.errors++
 		a.warn("presentrun: refusing nil presentation event")
@@ -54,17 +60,23 @@ func (a *Accumulator) Apply(event presentation.StreamEventLike) {
 // Skip counts an event the caller chose not to feed (for example a
 // trajectory decision that is not representable as an intervention).
 func (a *Accumulator) Skip() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	a.skipped++
 }
 
 // Snapshot returns the current accumulated state. It always passes
 // presentation Validate for legal event sequences.
 func (a *Accumulator) Snapshot() presentation.State {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	return a.state
 }
 
 // Counts returns (applied, skipped, errors) for the run so far.
 func (a *Accumulator) Counts() (applied, skipped, errors int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	return a.applied, a.skipped, a.errors
 }
 

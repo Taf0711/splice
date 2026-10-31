@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
+	"sync"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -51,6 +53,37 @@ func (w runtimeWiring) recordPresentationState(state presentation.State) {
 		payload["presentation_state"] = json.RawMessage(stateJSON)
 	}
 	w.recordEvent(pendingSessionEvent{Type: sessions.EventMessage, Payload: payload})
+}
+
+// presentationPersistGate coalesces durable snapshots. Every provider request
+// emits a snapshot that changes only node spend; persisting each one wrote
+// the full state JSON per request. A snapshot is persisted when anything
+// other than spend changed, and always when the run has ended, so the
+// last-state-wins replay still rebuilds the final state with its spend.
+type presentationPersistGate struct {
+	mu   sync.Mutex
+	last *presentation.State
+}
+
+func (g *presentationPersistGate) admit(state presentation.State) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.last != nil && state.Completion == nil && reflect.DeepEqual(withoutSpend(*g.last), withoutSpend(state)) {
+		return false
+	}
+	kept := state
+	g.last = &kept
+	return true
+}
+
+// withoutSpend returns the state with every node's usage and cost cleared.
+func withoutSpend(state presentation.State) presentation.State {
+	state.Nodes = append([]presentation.ExecutionNode(nil), state.Nodes...)
+	for i := range state.Nodes {
+		state.Nodes[i].Usage = presentation.UsageSummary{}
+		state.Nodes[i].Cost = presentation.CostSummary{}
+	}
+	return state
 }
 
 // decorate wraps the callbacks that have shared TUI behavior. Each wrapper
@@ -190,11 +223,14 @@ func (w runtimeWiring) decorate(options agent.Options) agent.Options {
 	// OnPipelinePlan and OnStageEvent pass through unwrapped: the TUI no
 	// longer derives panel content from raw pipeline events (P1.2).
 	priorPresentation := options.OnPresentationState
+	var persist presentationPersistGate
 	options.OnPresentationState = func(state presentation.State) {
 		if w.send != nil {
 			w.send(presentationStateMsg{runID: w.runID, state: state})
 		}
-		w.recordPresentationState(state)
+		if persist.admit(state) {
+			w.recordPresentationState(state)
+		}
 		if priorPresentation != nil {
 			priorPresentation(state)
 		}

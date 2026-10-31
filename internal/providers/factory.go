@@ -205,6 +205,15 @@ func resolveProfile(profile config.ProviderProfile, options Options) (resolvedPr
 		} else if providerKind != modelProvider {
 			return resolvedProfile{}, fmt.Errorf("splice model %s belongs to %s, not %s", entry.ID, entry.Provider, providerKind)
 		}
+		// An explicit first-party provider must be able to serve the model at
+		// its own endpoint. This stops an official OpenAI profile from using
+		// an OpenRouter-only entry whose model family is OpenAI.
+		switch providerKind {
+		case config.ProviderKindOpenAI, config.ProviderKindAnthropic, config.ProviderKindGoogle:
+			if !entry.AllowsEndpointFamily(modelregistry.ProviderKind(providerKind)) {
+				return resolvedProfile{}, &modelregistry.EndpointFamilyError{Model: entry.ID, Family: string(providerKind)}
+			}
+		}
 		// Defensive rule: a max-output cap at or above the total context window is
 		// unusable on the wire (input + tools + output must fit the context, so
 		// the provider rejects such a request). Zero means omit the cap and let

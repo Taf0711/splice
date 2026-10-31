@@ -3,6 +3,7 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -528,5 +529,24 @@ func TestCodexAccountForKey(t *testing.T) {
 	}
 	if got, err := codexAccountForKey(oauth.ProviderKey("chatgpt")); err != nil || got != "acc-rotated" {
 		t.Fatalf("account = %q,%v, want acc-rotated,nil (replacement token must be read)", got, err)
+	}
+}
+
+// P2-4 (d): an official OpenAI profile cannot send a Qwen model to the OpenAI
+// endpoint.
+func TestResolveProfileRejectsQwenOnOfficialOpenAI(t *testing.T) {
+	for _, model := range []string{"qwen/qwen3-coder-30b-a3b-instruct", "qwen3-coder-30b"} {
+		_, err := resolveProfile(config.ProviderProfile{
+			Name:         "openai",
+			ProviderKind: config.ProviderKindOpenAI,
+			Model:        model,
+		}, Options{})
+		if err == nil || !strings.Contains(err.Error(), "is not served by the openai endpoint family") {
+			t.Fatalf("resolveProfile(openai, %s) error = %v, want the endpoint-family refusal", model, err)
+		}
+		var family *modelregistry.EndpointFamilyError
+		if !errors.As(err, &family) {
+			t.Fatalf("resolveProfile(openai, %s) error %T is not a typed endpoint-family error", model, err)
+		}
 	}
 }

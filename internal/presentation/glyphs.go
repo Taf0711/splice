@@ -61,14 +61,39 @@ func SelectGlyphTier(getenv func(string) string) GlyphTier {
 	// UTF-8 locale: the terminal is expected to render the contract set.
 	// The set is pinned and width-tested (P3); the rich tier matches the
 	// Pen mock. C/POSIX/unknown stays ASCII.
-	locale := getenv("LANG")
-	if locale == "" {
-		locale = getenv("LC_ALL")
-	}
-	if strings.Contains(strings.ToUpper(locale), "UTF-8") || strings.Contains(strings.ToUpper(locale), "UTF8") {
+	if localeIsUTF8(effectiveLocale(getenv)) {
 		return GlyphTierRichUnicode
 	}
 	return GlyphTierASCII
+}
+
+// effectiveLocale resolves the character-type locale in POSIX precedence:
+// LC_ALL, then LC_CTYPE, then LANG.
+func effectiveLocale(getenv func(string) string) string {
+	for _, key := range []string{"LC_ALL", "LC_CTYPE", "LANG"} {
+		if value := strings.TrimSpace(getenv(key)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func localeIsUTF8(locale string) bool {
+	upper := strings.ToUpper(locale)
+	return strings.Contains(upper, "UTF-8") || strings.Contains(upper, "UTF8")
+}
+
+// TerminalNeedsASCII reports whether the whole frame, not only the state
+// markers, must be ASCII: the user asked for the ascii tier, or the locale
+// is set and is not UTF-8 (C, POSIX, Latin-1), where box drawing and
+// spinners render as garbage. An unset locale is unknown, not ASCII: many
+// terminals that render Unicode well export no locale at all.
+func TerminalNeedsASCII(getenv func(string) string) bool {
+	if getenv("SPLICE_GLYPH_TIER") == "ascii" {
+		return true
+	}
+	locale := effectiveLocale(getenv)
+	return locale != "" && !localeIsUTF8(locale)
 }
 
 // ErrUnknownGlyphTier is returned by GlyphTier.Validate for values
@@ -116,6 +141,8 @@ func asciiMarker(status NodeStatus) Marker {
 		return Marker{Glyph: "[~]", Word: "degraded"}
 	case NodeStatusPending:
 		return Marker{Glyph: "[ ]", Word: "pending"}
+	case NodeStatusSkipped:
+		return Marker{Glyph: "[-]", Word: "skipped"}
 	}
 	return Marker{Glyph: "[ ]", Word: ""}
 }
@@ -147,6 +174,9 @@ func richMarker(status NodeStatus) Marker {
 		return Marker{Glyph: "▲  ", Word: "degraded"}
 	case NodeStatusPending:
 		return Marker{Glyph: "○  ", Word: "pending"}
+	case NodeStatusSkipped:
+		// No width-safe rich glyph says "skipped"; the ASCII marker does.
+		return asciiMarker(status)
 	}
 	return Marker{Glyph: "◆  ", Word: ""}
 }

@@ -1,11 +1,12 @@
 package tui
 
 import (
-	"github.com/Taf0711/splice/internal/presentation"
-
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/presentation"
 )
 
 func stripANSI(s string) string {
@@ -39,7 +40,7 @@ func TestReceiptCardsRenderActionRow(t *testing.T) {
 				"test_runner pass 2",
 				"1m02s",
 			),
-			contains: []string{"FAILED", "1m02s", "acceptance_verifier", "2 failing", "restorable", "[R]", "restore", "[I]", "intervene", "[L]", "logs"},
+			contains: []string{"FAILED", "1m02s", "acceptance_verifier", "2 failing", "restorable", "[R]", "resume", "[I]", "intervene", "[L]", "logs"},
 		},
 		{
 			name:     "cancelled",
@@ -154,5 +155,74 @@ func TestCancelErrorProjectsCancelledReceipt(t *testing.T) {
 	plain := stripANSI(renderReceiptCard(card, 80, presentation.GlyphTierASCII))
 	if strings.Contains(plain, "FAILED") {
 		t.Fatalf("cancel projected failure language:\n%s", plain)
+	}
+}
+
+// An unverified run renders the UNVERIFIED card: the title says NOT VERIFIED,
+// the body names the reason, and the bare word VERIFIED never appears.
+func TestUnverifiedReceiptNeverReadsVerified(t *testing.T) {
+	card := unverifiedReceiptCard("no check applied: static_analyzer (No applicable files to verify.)", "3.0s")
+	if card.kind != receiptUnverified {
+		t.Fatalf("kind = %q, want unverified", card.kind)
+	}
+	view := plainRender(t, renderReceiptCard(card, 80, presentation.GlyphTierASCII))
+	for _, want := range []string{"DONE · NOT VERIFIED", "no check applied: static_analyzer", "[O] open diff"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("unverified receipt missing %q:\n%s", want, view)
+		}
+	}
+	if strings.Count(view, "VERIFIED") != strings.Count(view, "NOT VERIFIED") {
+		t.Fatalf("unverified receipt reads as VERIFIED:\n%s", view)
+	}
+}
+
+func TestUnverifiedReceiptPayloadRoundTrip(t *testing.T) {
+	original := unverifiedReceiptCard("no tests ran", "")
+	decoded, ok := parseReceiptTranscriptPayload(receiptTranscriptPayload(original))
+	if !ok {
+		t.Fatal("unverified payload failed to round-trip")
+	}
+	if decoded.kind != receiptUnverified || decoded.lines[0] != "no tests ran" {
+		t.Fatalf("round-trip = %+v, want unverified with its reason", decoded)
+	}
+}
+
+// A completed run whose receipt is unverified projects the UNVERIFIED card and
+// arms its keys, even though the persisted result carries evidence-like JSON.
+func TestUnverifiedRunProjectsUnverifiedReceipt(t *testing.T) {
+	m := mouseTestModel()
+	m.sessionStore = testSessionStore(t)
+	m.activeRunID = 9
+	m.width, m.height, m.altScreen = 100, 40, true
+	m.lastState = presentation.State{
+		SchemaVersion: presentation.PresentationSchemaVersionV1,
+		Lifecycle:     presentation.LifecycleComplete,
+		Completion:    &presentation.CompletionReceipt{Status: "completed", Detail: "no check applied: static_analyzer (n/a)", Unverified: true},
+	}
+	updated, _ := m.Update(planExecutionResultMsg{
+		runID:  9,
+		result: agent.Result{FinalAnswer: `{"plan_id":"p","status":"completed","completed_tasks":[{"task_id":"t1","run_id":"r1","status":"completed"}]}`},
+	})
+	next := updated.(model)
+	if next.lastTerminalReceipt != receiptUnverified {
+		t.Fatalf("lastTerminalReceipt = %q, want unverified", next.lastTerminalReceipt)
+	}
+	view := plainRender(t, next.View())
+	if !strings.Contains(view, "NOT VERIFIED") || !strings.Contains(view, "no check applied: static_analyzer") {
+		t.Fatalf("live view lacks the unverified receipt:\n%s", view)
+	}
+	if strings.Contains(view, "design plan p completed") {
+		t.Fatalf("unverified run rendered VERIFIED evidence:\n%s", view)
+	}
+}
+
+func TestReplayArmsUnverifiedReceipt(t *testing.T) {
+	state := presentation.State{Completion: &presentation.CompletionReceipt{Status: "completed", Unverified: true}}
+	if got := terminalReceiptForState(state); got != receiptUnverified {
+		t.Fatalf("terminalReceiptForState = %q, want unverified", got)
+	}
+	state.Completion.Unverified = false
+	if got := terminalReceiptForState(state); got != receiptVerified {
+		t.Fatalf("verified completion = %q, want verified", got)
 	}
 }

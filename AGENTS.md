@@ -215,6 +215,11 @@ go test ./...
 gofmt -l .                      # must print nothing
 ```
 
+Run the full suite from a checkout that is not under `/tmp`. The sandbox
+tests fail there (the sandbox treats `/tmp` paths as special). A suite run
+leaves locked task worktrees in `~/.local/state/splice/worktrees`; remove
+them after the run (see Stale Work and Disk Space).
+
 The memd sidecar has its own module:
 
 ```bash
@@ -226,6 +231,51 @@ Cross-compile helper:
 ```bash
 go run ./cmd/splice-release build --goos linux --goarch amd64
 ```
+
+## Stale Work and Disk Space
+
+Tests, evaluation campaigns, and splice runs leave files outside the
+repository. Remove them when the work that made them is complete. A full
+disk stops builds, and it can corrupt a running campaign.
+
+Before a long evaluation campaign:
+
+- Make sure that the disk has at least 50 GB free (`df -h`).
+- Use a short `--run-id`. The memory sidecar socket path must be 103 bytes
+  or less. The harness does not start when the path is longer.
+- Keep the evaluation configuration (`XDG_CONFIG_HOME`) out of `/tmp`.
+  Files in `/tmp` can go away during a campaign; without `config.json` the
+  provider has no key. Use a directory such as `~/.config/splice-evals`.
+  The harness stops at the first run that has no key.
+
+After a campaign, or at the end of a work session:
+
+1. Record the results first. Add each campaign to the private campaign
+   index. Keep `aggregate.json` and `report.md`.
+2. Remove the raw campaign data (`attempt-*.json`, `raw-*.jsonl`, logs).
+3. Remove the campaign sidecar directories and binaries from `/tmp`.
+4. Trim the caches:
+   - `$TMPDIR/splice/gocache`, the Go cache of the test runner stage.
+     Splice does not trim it. Remove the entries that are older than one
+     day.
+   - The Go build cache: `go clean -cache` when it is large.
+5. Remove the temporary test directories in `$TMPDIR` (`Test*`,
+   `splice-cli-test-sessions-*`, `go-build*`, `warmcost-seq-base-*`) that
+   are older than one day.
+6. Remove the splice task worktrees in `~/.local/state/splice/worktrees`
+   that no run uses. Splice locks each task worktree and does not unlock
+   it when a run stops early, so these do not get pruned. For each
+   worktree, first make sure that it has no uncommitted change and that
+   its commit is on a branch. Then use `git worktree remove -f -f`.
+
+Rules for removal:
+
+- Make a list of the exact paths. Read the list. Then remove only those
+  paths. Do not remove with broad glob patterns.
+- Do not remove files that a running campaign or test uses. Look at the
+  running processes first. Keep the files that are newer than one hour.
+- Do not remove a file that another person or tool made, unless you know
+  what it is.
 
 ## Documentation
 

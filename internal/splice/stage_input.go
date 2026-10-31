@@ -12,11 +12,16 @@ package splice
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
+	"github.com/Taf0711/splice/internal/flags"
+	"github.com/Taf0711/splice/internal/memd"
 	"github.com/Taf0711/splice/internal/splice/cognition"
 	"github.com/Taf0711/splice/internal/splice/learn"
 	"github.com/Taf0711/splice/internal/splice/memoryreason"
@@ -203,12 +208,17 @@ type stageInputPreparation struct {
 	Memory    MemoryStore
 	Trace     *runTraceAccumulator
 	NowUnix   int64
-	// RepairReentry marks that this preparation serves a repair invocation.
-	// Each repair builds a FRESH provider request (a new system+user message
-	// pair with no conversation carry-over), so a fact delivered to the
-	// initial invocation is not automatically present. The run-local replay
-	// suppression MUST NOT remove still-relevant facts here: they are
-	// re-delivered, bounded by the same admission and compaction limits.
+	// PriorScope carries the previous invocation scope plan for repair
+	// re-entry, so already-granted files and spent expansion budget
+	// persist across the trajectory. Nil on the first pass.
+	PriorScope *StageScopePlan
+	// RepairReentry marks that this preparation serves a repair
+	// invocation: each repair builds a FRESH provider request (a new
+	// system+user message pair, no conversation carry-over), so facts
+	// delivered to the first invocation are not automatically present
+	// and the run-local replay suppression MUST NOT remove them. Still-
+	// relevant facts are re-delivered (bounded by the same admission
+	// and compaction limits); irrelevant ones stay excluded.
 	RepairReentry bool
 }
 
@@ -226,13 +236,116 @@ type stageInputPreparation struct {
 // outcome - no key, no capability, lookup miss/error, stale, unknown, or
 // empty after admission - falls back byte-identically to the existing Search
 // path below.
-func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.HarnessStageInput, error) {
+// runJevSelector converts the discovery nodes into bounded selector
+// candidates (one per anchored declaration, see
+// selectorCandidatesFromNodes) and runs the advisor's selector over one
+// unresolved need. The snapshot's source digest combines the changed-file
+// list with the candidate anchors: it changes whenever the run's source
+// signal changes, which is the freshness contract the cache and staleness
+// checks need. It is not a whole-tree content hash; a comment records that
+// limit honestly.
+func runJevSelectorWithCalibration(ctx context.Context, p stageInputPreparation, input schemas.HarnessStageInput, nodes []memd.GraphNode, calibration CalibrationStore) (SelectorOutcome, error) {
+	candidates, named := selectorCandidatesFromNodes(input.RequestIntent, nodes)
+	if len(candidates) == 0 {
+		if len(named) > 0 {
+			// Every declaration the fresh nodes anchor is named by the
+			// intent: the deterministic path owns them and no decision is
+			// bought. The record makes the bypass visible in the trace.
+			p.Options.Advisor.recordExactBypass(schemas.SemanticSnapshot{
+				RunID:           p.Options.SessionID,
+				Stage:           input.StageName,
+				Iteration:       p.Iteration,
+				DistilledIntent: truncateClaim(input.RequestIntent, 300),
+			}, named)
+		}
+		return SelectorOutcome{}, nil
+	}
+	changedPaths := make([]string, 0, len(input.PriorChangedFiles))
+	for path := range input.PriorChangedFiles {
+		changedPaths = append(changedPaths, path)
+	}
+	sort.Strings(changedPaths)
+	digestInput := strings.Join(changedPaths, ";")
+	for _, c := range candidates {
+		digestInput += "|" + c.Ref
+	}
+	digest := sha256.Sum256([]byte(digestInput))
+	snap := schemas.SemanticSnapshot{
+		RunID:              p.Options.SessionID,
+		EpisodeID:          fmt.Sprintf("%s:%d:%d", input.StageName, p.Iteration, p.NowUnix),
+		Stage:              input.StageName,
+		StageInvocation:    invocationOrdinalFor(p),
+		Iteration:          p.Iteration,
+		EventID:            fmt.Sprintf("%s:%d", input.StageName, p.Iteration),
+		SnapshotSchema:     schemas.SnapshotSchemaV1,
+		QuestionPack:       schemas.QuestionPackDependencyRelationV1,
+		HostPolicy:         schemas.HostPolicyBoundedPrefetchV1,
+		CanonicalProjectID: memoryProjectRoot(p.Options, p.WorkDir),
+		SourceDigest:       hex.EncodeToString(digest[:8]),
+		DistilledIntent:    truncateClaim(input.RequestIntent, 300),
+		UnresolvedRelation: selectorNeed(input.RequestIntent),
+		PromptLayoutHash:   "", // the layout hash is stamped by the caller when known
+	}
+	for _, c := range candidates {
+		snap.CandidateRefs = append(snap.CandidateRefs, schemas.CandidateRef{Ref: c.Ref, Origin: c.Origin, Claim: c.Claim})
+	}
+	outcome, err := p.Options.Advisor.runSelector(ctx, snap, candidates, calibration, nil)
+	if err != nil {
+		return SelectorOutcome{}, err
+	}
+	return outcome, nil
+}
+
+// selectorNeed derives the one unresolved relation from the distilled
+// intent: the selector asks which candidate resolves the intent's need.
+func selectorNeed(intent string) string {
+	return "which candidate resolves: " + intent
+}
+
+// truncateClaim bounds a claim line.
+func truncateClaim(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= max {
+		return s
+	}
+	return s[:max]
+}
+
+// invocationOrdinalFor reports the repair ordinal for the snapshot.
+func invocationOrdinalFor(p stageInputPreparation) int {
+	if p.RepairReentry {
+		return 1
+	}
+	return 0
+}
+
+func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.HarnessStageInput, StageScopePlan, ScopeSuppression, error) {
 	input := p.Input
+	// scope/sup are the Part A context-bridge outputs. Zero value means no
+	// cognition privilege: the caller falls back to the default request.
+	scope := StageScopePlan{}
+	sup := ScopeSuppression{}
 	// A preparation that carries no capabilities (a legacy or unit-test
 	// caller) falls back to the stage's own declaration.
 	caps := p.Caps
 	if caps == (stages.Capabilities{}) {
 		caps = p.Stage.Capabilities()
+	}
+	// Evidence substitution is opt-in and OFF by default: the measured effect
+	// is a net prompt and validation cost with no change in model-visible
+	// context or tool use. When off, no evidence plan is built and no
+	// validation read is spent.
+	evidenceOn := p.Options.Flags.Enabled(flags.MemoryEvidenceSubstitution)
+	memoryPrefetchOn := p.Options.Flags.Enabled(flags.MemoryPrefetch)
+	// Only the substitution switch builds the evidence plan. Prefetch does
+	// not read it, and an admitted substitution in the plan replaces the
+	// first-round request (memory v2: memory never replaces reading).
+	planForEvidence := evidenceOn
+	if planForEvidence && caps.ConsumesMemory && caps.PullContext && strings.TrimSpace(input.RequestIntent) != "" {
+		// The improved cold plan is built for both arms. Evidence-free
+		// runs use the cold plan unchanged; retained evidence can later
+		// transform it without changing any other deterministic choice.
+		scope.Evidence = buildEvidencePlan(input.RequestIntent, p.WorkDir, priorChangedFilesForEvidence(input.PriorChangedFiles), nil)
 	}
 	if p.Memory != nil && caps.ConsumesMemory {
 		root := memoryProjectRoot(p.Options, p.WorkDir)
@@ -247,13 +360,151 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 			p.Trace.noteSpliceMutation(input.PriorChangedFiles)
 		}
 
+		// Track C: discovery planning over the cognition graph. The plan
+		// resolves structural questions from exact anchors (freshness
+		// validated) or, when no structural keys derive, from semantic entry
+		// nodes plus one bounded hop. Resolved questions deliver their nodes
+		// through the same MemoryBundle channel; the broad search below is
+		// suppressed only when the plan actually resolved something, so the
+		// graph cognition does not stack on top of full FTS redelivery.
+		plan, planNodes := planStageDiscovery(ctx, p, input, root)
+		if p.Trace != nil {
+			// Repair re-entries record their discovery telemetry under
+			// their own invocation ordinal (1+) so the initial pass
+			// record survives instead of being overwritten.
+			ordinal := 0
+			if p.RepairReentry {
+				ordinal = 1
+			}
+			p.Trace.recordDiscoveryPlanOrdinal(input.StageName, p.Iteration, ordinal, plan)
+		}
+		// Part A context bridge: admitted cognition becomes a host-side
+		// scope plan that governs context acquisition, not only model
+		// knowledge. PriorScope carries already-granted files across
+		// repair re-entry so privileges are never lost mid-trajectory.
+		scope = scopePlanFor(plan, planNodes, p.PriorScope)
+		// Production evidence substitution: map fresh graph nodes that
+		// carry typed reuse records through the existing E3/E4 checks.
+		// The plan is attached even when no substitution is admitted, so
+		// cold and warm observe the same deterministic baseline and only
+		// the admitted transformation differs.
+		// Opt-in only: with the switch off this build is skipped entirely.
+		if planForEvidence {
+			scope.Evidence = buildEvidencePlan(input.RequestIntent, p.WorkDir, priorChangedFilesForEvidence(input.PriorChangedFiles), planNodes)
+		}
+		// Memory-assisted dependency prefetch: the delivered fresh records
+		// name source files; the host fetches their current bounded views
+		// into the initial handshake. Experimental treatment, OFF by
+		// default, and never counted as a substitution.
+		if memoryPrefetchOn {
+			scope.MemoryPrefetch = MemoryPrefetchFromNodes(input.RequestIntent, planNodes)
+		}
+		// Decision-advisor dependency selection (Jev M4): the selector
+		// runs only when an advisor is wired (flag on, mode not off, an
+		// evaluator available). A nil advisor keeps this path inert. The
+		// selector is bounded by the plan-8.1 filters, buys at most one
+		// decision per invocation, and delivers only in active modes; in
+		// shadow mode it records the bought decision and delivers nothing.
+		if p.Options.Advisor != nil && p.Options.Advisor.Mode() != AdvisorModeOff && !p.Options.Advisor.selectorOff {
+			before := len(p.Options.Advisor.Records())
+			// The manifest calibration arrives through the environment;
+			// unset means gate 2 refuses and the selector stays baseline.
+			calibration, calErr := resolveCalibration(os.Getenv)
+			if calErr != nil {
+				emitProgress(p.Options, fmt.Sprintf("[%s] decision advisor: calibration rejected: %v\n", input.StageName, calErr))
+				calibration = nil
+			}
+			var selection SelectorOutcome
+			var selErr error
+			if os.Getenv(DecisionPackEnvVar) == QuestionPackPrefetchNeedV1 {
+				// D2 replaces the M4 selector: judge the ranked memory
+				// files, and in active_experimental keep the needed ones.
+				overlap := topRecordOverlap(input.RequestIntent, planNodes)
+				gate, gated := resolvePrefetchNeedGate(os.Getenv)
+				if memoryPrefetchOn && len(scope.MemoryPrefetch) > 0 {
+					emitProgress(p.Options, fmt.Sprintf("[%s] prefetch need: top record overlap %.2f\n", input.StageName, overlap))
+				}
+				if memoryPrefetchOn && len(scope.MemoryPrefetch) > 0 && gated && overlap >= gate {
+					emitProgress(p.Options, fmt.Sprintf("[%s] prefetch need: overlap at or above gate %.2f; code ranking kept\n", input.StageName, gate))
+				} else if memoryPrefetchOn {
+					candidates := rankedMemoryFiles(input.RequestIntent, planNodes, maxPrefetchNeedCandidates)
+					if scores, ok := runPrefetchNeed(ctx, p, input, candidates); ok {
+						mode := p.Options.Advisor.Mode()
+						emitProgress(p.Options, fmt.Sprintf("[%s] prefetch need (%s): %s\n", input.StageName, mode, formatNeedScores(scores)))
+						if threshold, set := resolvePrefetchNeedThreshold(os.Getenv); set && mode == AdvisorModeActiveExperimental {
+							scope.MemoryPrefetch = selectByNeed(candidates, scores, threshold)
+							emitProgress(p.Options, fmt.Sprintf("[%s] prefetch need: kept %d of %d file(s) at threshold %.2f\n", input.StageName, len(scope.MemoryPrefetch), len(candidates), threshold))
+						}
+					}
+				}
+			} else {
+				selection, selErr = runJevSelectorWithCalibration(ctx, p, input, planNodes, calibration)
+			}
+			records := p.Options.Advisor.Records()
+			if len(records) > before {
+				ordinal := 0
+				if p.RepairReentry {
+					ordinal = 1
+				}
+				if p.Trace != nil {
+					p.Trace.recordJevDecisions(input.StageName, p.Iteration, ordinal, records[before:])
+				}
+				// The disposition summary reaches the raw stream so a
+				// campaign attempt is auditable without the run trace.
+				// Flag-on only: the advisor is absent otherwise.
+				for _, rec := range records[before:] {
+					emitProgress(p.Options, fmt.Sprintf("[%s] decision advisor: %s (%s)\n", input.StageName, rec.Disposition, rec.Reason))
+				}
+			}
+			if selErr != nil {
+				// Degrade visible: the selector failure never fails the
+				// stage. The disposition trace records what happened.
+				emitProgress(p.Options, fmt.Sprintf("[%s] decision advisor: selection degraded: %v\n", input.StageName, selErr))
+			} else if len(selection.Fetches) > 0 && p.Options.Advisor.Mode() != AdvisorModeShadow {
+				scope.JevPrefetch = selection.Fetches
+			}
+		}
+		// The legacy input-side suppression accounting is removed with the
+		// abandoned cognition scoping path. The scope plan still governs
+		// tool-level listing suppression through ScopedToolRunner, which is
+		// unaffected. sup therefore stays zero: the legacy mechanism no longer
+		// authorizes any host omission.
+		if plan.AnchorsFailed > 0 {
+			emitProgress(p.Options, fmt.Sprintf("[%s] discovery: %d anchor(s) failed freshness validation\n",
+				input.StageName, plan.AnchorsFailed))
+		}
+		if len(planNodes) > 0 {
+			// Unify admission (review finding): graph observations go
+			// through the SAME memoryreason.Admit as every other source -
+			// relevance and content limits apply, and the admitted subset
+			// is what reaches the bundle. Bypassing admission would give
+			// graph nodes more authority than their evidence supports.
+			graphBundle := schemas.MemoryBundle{
+				RequestingAgent: input.StageName,
+				Observations:    cognitionBundleFromNodes(planNodes),
+			}
+			graphAdmitted := memoryreason.Admit(&graphBundle, root, p.NowUnix)
+			if mode, modeErr := resolveExemplarMode(); modeErr != nil {
+				return schemas.HarnessStageInput{}, StageScopePlan{}, ScopeSuppression{}, modeErr
+			} else if mode.deliverToModel() && graphAdmitted.Bundle != nil && len(graphAdmitted.Bundle.Observations) > 0 {
+				if input.MemoryBundle == nil {
+					input.MemoryBundle = &schemas.MemoryBundle{RequestingAgent: input.StageName}
+				}
+				input.MemoryBundle.Observations = append(input.MemoryBundle.Observations, graphAdmitted.Bundle.Observations...)
+			}
+			emitProgress(p.Options, fmt.Sprintf("[%s] discovery: %d question(s) resolved by cognition, %d node(s)\n",
+				input.StageName, len(plan.ResolvedByCognition), len(planNodes)))
+		}
+		graphResolved := len(plan.ResolvedByCognition)
+
 		// C0: direct cognition fast path (retrieval only, never control flow).
 		// retrieve-no-prompt keeps the retrieval telemetry honest but strips
 		// the delivery: the miss path below runs and records what it found,
 		// while the bundle never reaches the stage input.
-		if direct, ok := p.tryDirectCognition(ctx, input, root); ok {
+		direct, directOK := p.tryDirectCognition(ctx, input, root)
+		if graphResolved == 0 && directOK {
 			if mode, modeErr := resolveExemplarMode(); modeErr != nil {
-				return schemas.HarnessStageInput{}, modeErr
+				return schemas.HarnessStageInput{}, StageScopePlan{}, ScopeSuppression{}, modeErr
 			} else if !mode.deliverToModel() {
 				if p.Trace != nil {
 					p.Trace.recordMemoryLookup(input.StageName, p.Iteration, "direct", direct.fresh, direct.stale)
@@ -262,11 +513,15 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 			} else {
 				// Run-local replay guard: a direct hit the stage already
 				// consumed this run is NOT a retrieval miss. The hit still
-				// counts for telemetry, the bundle empties, and because the
-				// direct path returned true the broad search below is
-				// skipped: suppression must not push the same cognition back
-				// through FTS redelivery. Repair re-entry is exempt because
-				// its provider request is fresh, so the fact is re-delivered.
+				// counts for telemetry (fresh/stale/direct above), the bundle
+				// empties, and because the direct path returned true the
+				// broad search below is skipped — suppression must not push
+				// the same cognition back through FTS redelivery.
+				// Repair re-entry: the provider request is fresh, so
+				// previously delivered facts are NOT automatically
+				// present. The run-local replay suppression is skipped so
+				// still-relevant facts are re-delivered (bounded by
+				// admission and compaction).
 				if !p.RepairReentry {
 					suppressed := p.Trace.filterAlreadyDelivered(input.StageName, &direct.bundle)
 					if suppressed > 0 {
@@ -281,12 +536,15 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 					p.Trace.recordMemoryLookup(input.StageName, p.Iteration, "direct", direct.fresh, direct.stale)
 				}
 			}
-		} else {
+		} else if graphResolved == 0 {
 			// C1c miss path: rerank candidates deterministically when the
 			// store exposes FTS ranks, then admit under the token budget.
 			// A store without the capability (or a ranked-search error,
 			// including an old sidecar) falls back to plain Search ordering
-			// byte-identically; Admit is order-agnostic.
+			// byte-identically; Admit is order-agnostic. When the discovery
+			// plan already resolved a question from the graph, the broad
+			// search is SKIPPED: cognition answered it, re-searching would
+			// duplicate the discovery the graph just eliminated.
 			bundle, missDetail, mErr := p.rerankedMissPath(ctx, input, root)
 			if p.Trace != nil {
 				p.Trace.recordMissPathDetail(input.StageName, p.Iteration, missDetail)
@@ -305,7 +563,7 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 				// behavior; other modes exist for the benchmark only.
 				mode, modeErr := resolveExemplarMode()
 				if modeErr != nil {
-					return schemas.HarnessStageInput{}, modeErr
+					return schemas.HarnessStageInput{}, StageScopePlan{}, ScopeSuppression{}, modeErr
 				}
 				if mode.deliverExemplars() {
 					// PC3: append kept-run exemplars. Best-effort and silent on
@@ -314,7 +572,7 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 						if exemplars, eErr := retrieveExemplars(ctx, querier, root, input.RequestIntent); eErr == nil {
 							bundle.Exemplars = exemplars
 							if p.Trace != nil && len(exemplars) > 0 {
-								key := stageKey{input.StageName, p.Iteration}
+								key := stageKeyFor(input.StageName, p.Iteration, 0)
 								meta := p.Trace.stages[key]
 								meta.ExemplarsRetrieved = len(exemplars)
 								p.Trace.stages[key] = meta
@@ -363,7 +621,7 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 		emitProgress(p.Options, msg+"\n")
 	})
 	if cerr != nil {
-		return input, fmt.Errorf("stage %s: %w", input.StageName, cerr)
+		return input, StageScopePlan{}, ScopeSuppression{}, fmt.Errorf("stage %s: %w", input.StageName, cerr)
 	}
 	input = compactedInput
 
@@ -380,7 +638,7 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 	if p.Trace != nil {
 		p.Trace.markDelivered(input.StageName, input.MemoryBundle)
 	}
-	return input, nil
+	return input, scope, sup, nil
 }
 
 // directCognitionResult is the outcome of one direct fast-path attempt.

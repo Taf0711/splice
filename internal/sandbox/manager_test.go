@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -431,4 +432,106 @@ func mkdirAll(paths ...string) error {
 		}
 	}
 	return nil
+}
+
+// AUDIT-07: each common credential file is denied to read_file, not prompted.
+// The OS profile (policy DenyRead) does not change, so a sandboxed git, npm,
+// or pip command can still read its own configuration.
+func TestCredentialFilesDeniedToReadFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	files := []string{
+		".git-credentials",
+		".netrc",
+		".npmrc",
+		".pypirc",
+		".pip/pip.conf",
+		".config/pip/pip.conf",
+		".cargo/credentials",
+		".cargo/credentials.toml",
+		".m2/settings.xml",
+		".vault-token",
+		".gem/credentials",
+		".terraform.d/credentials.tfrc.json",
+		"Library/Keychains/login.keychain-db",
+		".config/gh/hosts.yml",
+		".docker/config.json",
+		".config/gcloud/credentials.db",
+		".ssh/id_rsa",
+	}
+	for _, rel := range append(files, "notes.txt") {
+		path := filepath.Join(home, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("secret"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	workspace := t.TempDir()
+	engine := NewEngine(EngineOptions{WorkspaceRoot: workspace})
+	evaluate := func(path string) Decision {
+		return engine.Evaluate(context.Background(), Request{
+			WorkspaceRoot:  workspace,
+			ToolName:       "read_file",
+			SideEffect:     SideEffectRead,
+			Permission:     PermissionAllow,
+			PermissionMode: PermissionModeAuto,
+			Args:           map[string]any{"path": path},
+		})
+	}
+	exclusions := engine.ReadExclusions()
+	for _, rel := range files {
+		path := filepath.Join(home, filepath.FromSlash(rel))
+		if decision := evaluate(path); decision.Action != ActionDeny {
+			t.Errorf("read_file %s = %s (%s), want deny", rel, decision.Action, decision.Reason)
+		}
+		if !exclusions.PathExcluded(path) {
+			t.Errorf("grep/glob exclusions do not cover %s", rel)
+		}
+	}
+	// A case-insensitive file system (the macOS and Windows default) opens
+	// ~/.NPMRC as ~/.npmrc. A case variant must not evade the deny, through
+	// read_file (absolute, or relative to a workspace at home) or through the
+	// grep/glob exclusions.
+	if _, err := os.Stat(filepath.Join(home, ".NPMRC")); err == nil {
+		homeEngine := NewEngine(EngineOptions{WorkspaceRoot: home})
+		homeExclusions := homeEngine.ReadExclusions()
+		for _, variant := range []string{".NPMRC", ".SSH/id_rsa", ".Ssh/ID_RSA", ".Git-Credentials"} {
+			path := filepath.Join(home, filepath.FromSlash(variant))
+			if decision := evaluate(path); decision.Action != ActionDeny {
+				t.Errorf("read_file %s = %s (%s), want deny", variant, decision.Action, decision.Reason)
+			}
+			for _, mode := range []PermissionMode{PermissionModeAuto, PermissionUnsafe} {
+				decision := homeEngine.Evaluate(context.Background(), Request{
+					WorkspaceRoot:  home,
+					ToolName:       "read_file",
+					SideEffect:     SideEffectRead,
+					Permission:     PermissionAllow,
+					PermissionMode: mode,
+					Args:           map[string]any{"path": filepath.FromSlash(variant)},
+				})
+				if decision.Action != ActionDeny {
+					t.Errorf("read_file %s in a home workspace (%s) = %s (%s), want deny", variant, mode, decision.Action, decision.Reason)
+				}
+			}
+			if !homeExclusions.PathExcluded(path) {
+				t.Errorf("grep/glob exclusions do not cover %s", variant)
+			}
+		}
+	} else if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		t.Logf("case-sensitive temp volume; case-variant checks skipped")
+	}
+	if decision := evaluate(filepath.Join(home, "notes.txt")); decision.Action == ActionDeny {
+		t.Fatalf("read_file of a plain home file = deny (%s), want the normal out-of-workspace decision", decision.Reason)
+	}
+	for _, entry := range DefaultPolicy().DenyRead {
+		for _, credential := range credentialFileDenyPaths() {
+			if entry == credential {
+				t.Fatalf("DefaultPolicy().DenyRead has %q; the OS shell profile must not change", entry)
+			}
+		}
+	}
 }

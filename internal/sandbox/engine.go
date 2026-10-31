@@ -207,7 +207,7 @@ func (engine *Engine) ReadExclusions() *ReadExclusions {
 	}
 	return &ReadExclusions{
 		workspaceRoot: engine.workspaceRoot,
-		denyRoots:     resolvePolicyPaths(policy.DenyRead),
+		denyRoots:     resolvePolicyPaths(toolDenyReadEntries(policy)),
 		allowRoots:    resolvePolicyPaths(policy.AllowRead),
 	}
 }
@@ -276,6 +276,27 @@ func newScopeBestEffort(workspaceRoot string) *Scope {
 		return scope
 	}
 	return &Scope{workspaceRoot: normalizeWorkspaceRootBestEffort(workspaceRoot)}
+}
+
+// EnforcementGap returns why the engine does not enforce its policy with the
+// native sandbox, or "" when it does. A caller that must never run outside the
+// sandbox, such as a pipeline agent node, refuses to start on a gap.
+func (engine *Engine) EnforcementGap() string {
+	if engine == nil {
+		return "no sandbox engine is available"
+	}
+	policy := engine.effectivePolicy(engine.policy)
+	if policy.Mode == ModeDisabled {
+		return "the sandbox policy is disabled"
+	}
+	if !engine.shellSandboxActive(policy) {
+		reason := "no native sandbox backend is available"
+		if message := strings.TrimSpace(engine.backend.Message); message != "" {
+			reason += " (" + message + ")"
+		}
+		return reason
+	}
+	return ""
 }
 
 // shellSandboxActive reports whether a native wrapping sandbox would actually

@@ -1,0 +1,7 @@
+{
+  "name": "cmp-server-1-cpl-01-write",
+  "prompt": "In the notifications package, add an invoice-due template: kind \"invoice_due\", greeting \"Hello\", action \"your invoice is due in 3 days\", footer \"demo service billing team\".",
+  "check": "# cpl-01 A\nmkdir -p internal/notifications\ncat > internal/notifications/probe_invoice_due_test.go <<'EOF'\npackage notifications\n\nimport (\n\t\"strings\"\n\t\"testing\"\n)\n\nfunc TestProbeInvoiceDue(t *testing.T) {\n\tgot, ok := RenderKind(\"invoice_due\", \"ann\")\n\tif !ok || !strings.Contains(got, \"your invoice is due in 3 days\") || !strings.Contains(got, \"ann\") {\n\t\tt.Fatalf(\"RenderKind(invoice_due) = %q, %v\", got, ok)\n\t}\n}\nEOF\ngo test -count=1 -run '^(TestProbeInvoiceDue|TestEveryNotificationKindIsInTheCatalog)$' ./... ; rc=$?\nrm -f internal/notifications/probe_invoice_due_test.go\nexit $rc\n",
+  "fixture": "../../coupled-families/fixture",
+  "phase": "write"
+}

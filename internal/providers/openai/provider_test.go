@@ -3,12 +3,14 @@ package openai
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Taf0711/splice/internal/flags"
 	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
@@ -193,7 +195,7 @@ func TestStreamCompletionAppliesCustomAuthAndHeaders(t *testing.T) {
 func TestStreamCompletionEmitsTextUsageAndDone(t *testing.T) {
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"choices":[{"delta":{"content":"hello "}}]}`)
-		writeSSE(w, `{"choices":[{"delta":{"content":"splice"}}],"usage":{"prompt_tokens":12,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":3}}}`)
+		writeSSE(w, `{"choices":[{"delta":{"content":"splice"}}],"usage":{"prompt_tokens":12,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":3,"cache_write_tokens":4}}}`)
 		writeSSE(w, `[DONE]`)
 	})
 
@@ -202,6 +204,12 @@ func TestStreamCompletionEmitsTextUsageAndDone(t *testing.T) {
 	assertEvent(t, events[1], zeroruntime.StreamEventText, "splice")
 	if events[2].Type != zeroruntime.StreamEventUsage || events[2].Usage.PromptTokens != 12 || events[2].Usage.CompletionTokens != 5 || events[2].Usage.CachedInputTokens != 3 {
 		t.Fatalf("unexpected usage event: %#v", events[2])
+	}
+	// OpenRouter's prompt_tokens_details extension carries cache-write
+	// tokens next to cached_tokens; dropping them would misprice cache
+	// creation and hide the write discount from later reads.
+	if events[2].Usage.CacheWriteTokens != 4 {
+		t.Fatalf("CacheWriteTokens = %d, want 4 ingested from prompt_tokens_details", events[2].Usage.CacheWriteTokens)
 	}
 	if events[3].Type != zeroruntime.StreamEventDone {
 		t.Fatalf("last event = %#v, want done", events[3])
@@ -1574,26 +1582,25 @@ func TestOpenAIRequestPromptCacheKey(t *testing.T) {
 		t.Fatalf("keyless request must omit prompt_cache_key: %s", data)
 	}
 
-	t.Setenv("SPLICE_DISABLE_PROMPT_CACHE_KEY", "1")
+	flags.SetProcess(flags.Set{flags.ProviderPromptCacheKey: false})
+	t.Cleanup(func() { flags.SetProcess(nil) })
 	req = provider.openAIRequest(zeroruntime.CompletionRequest{
 		Messages:       messages,
 		PromptCacheKey: "sess_123",
 	})
 	if req.PromptCacheKey != "" {
-		t.Fatalf("kill switch ignored; PromptCacheKey = %q", req.PromptCacheKey)
+		t.Fatalf("flag off ignored; PromptCacheKey = %q", req.PromptCacheKey)
 	}
 
-	// Explicitly-falsy kill switch values must NOT disable forwarding — only
-	// truthy values flip the toggle (same parsing as SPLICE_FORMAT_ON_WRITE).
-	for _, value := range []string{"0", "false", "FALSE"} {
-		t.Setenv("SPLICE_DISABLE_PROMPT_CACHE_KEY", value)
-		req = provider.openAIRequest(zeroruntime.CompletionRequest{
-			Messages:       messages,
-			PromptCacheKey: "sess_123",
-		})
-		if req.PromptCacheKey != "sess_123" {
-			t.Fatalf("SPLICE_DISABLE_PROMPT_CACHE_KEY=%q must be a no-op; PromptCacheKey = %q", value, req.PromptCacheKey)
-		}
+	// With the flag on (the default), the key is forwarded. Legacy spellings of
+	// the flag are parsed and tested in internal/flags.
+	flags.SetProcess(flags.Set{flags.ProviderPromptCacheKey: true})
+	req = provider.openAIRequest(zeroruntime.CompletionRequest{
+		Messages:       messages,
+		PromptCacheKey: "sess_123",
+	})
+	if req.PromptCacheKey != "sess_123" {
+		t.Fatalf("flag on must forward the key; PromptCacheKey = %q", req.PromptCacheKey)
 	}
 }
 
@@ -1887,5 +1894,46 @@ func TestStreamCompletionCombinesRequestOutputCap(t *testing.T) {
 				t.Fatalf("max_completion_tokens = %#v, want %d", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestOpenRouterUpstreamPinAndGenerationID: the pin sends OpenRouter's
+// provider routing with no fallbacks, only to openrouter.ai; and the usage
+// event carries the generation ID from the chunks when the header is absent.
+func TestOpenRouterUpstreamPinAndGenerationID(t *testing.T) {
+	t.Setenv(OpenRouterProviderOrderEnvVar, "deepseek, deepinfra/fp8")
+	var body string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		body = string(raw)
+		writeSSE(w, `{"id":"gen-123","choices":[{"delta":{"content":"hi"}}]}`)
+		writeSSE(w, `{"id":"gen-123","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":1}}`)
+		writeSSE(w, `[DONE]`)
+	}))
+	defer server.Close()
+	provider, err := New(Options{Model: "test", BaseURL: "https://openrouter.ai/api/v1", Endpoint: server.URL + "/chat/completions"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := collectProviderEvents(t, provider)
+	if !strings.Contains(body, `"provider":{"order":["deepseek","deepinfra/fp8"],"allow_fallbacks":false}`) {
+		t.Fatalf("request body lacks the pin: %s", body)
+	}
+	var requestID string
+	for _, e := range events {
+		if e.Type == zeroruntime.StreamEventUsage {
+			requestID = e.RequestID
+		}
+	}
+	if requestID != "gen-123" {
+		t.Fatalf("usage request id = %q, want gen-123", requestID)
+	}
+
+	other, err := New(Options{Model: "test", BaseURL: "https://api.example.com/v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.openAIRequest(zeroruntime.CompletionRequest{}).Provider != nil {
+		t.Fatal("the pin must not reach a non-OpenRouter backend")
 	}
 }

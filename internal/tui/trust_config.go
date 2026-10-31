@@ -7,9 +7,9 @@
 //
 // Architecture fence: these are deterministic readers of the config file.
 // They never decide whether the config loads — config.Resolve and the CLI's
-// trusted flag own that (an untrusted workspace skips project MCP servers,
-// hooks, and plugins at the merge layer). The card projects; the runtime
-// decides.
+// trusted flag own that (an untrusted workspace skips the project config, MCP
+// servers, hooks, and plugins at the merge layer). The card projects; the
+// runtime decides.
 package tui
 
 import (
@@ -21,6 +21,12 @@ import (
 	"strings"
 
 	"github.com/Taf0711/splice/internal/hooks"
+	"github.com/Taf0711/splice/internal/plugins"
+	"github.com/Taf0711/splice/internal/projectfile"
+	"github.com/Taf0711/splice/internal/specialist"
+	splicerun "github.com/Taf0711/splice/internal/splice"
+	"github.com/Taf0711/splice/internal/splice/schemas"
+	"github.com/Taf0711/splice/internal/splice/stages"
 )
 
 // projectTrustConfig is the typed "what would change" summary for one
@@ -66,6 +72,51 @@ type projectTrustConfig struct {
 	// JSON. The card shows the error honestly: an unreadable file is itself
 	// information about the workspace.
 	ParseError string
+	// PipelineFile is true when the sibling .splice/pipeline.json exists. The
+	// file is executable topology, so its presence is disclosed.
+	PipelineFile bool
+	// PipelineCommands lists the command nodes of pipeline.json as
+	// "name: command", in file order.
+	PipelineCommands []string
+	// PipelineAgents lists the agent nodes of pipeline.json as
+	// "name: tools, permission, turns", in file order. An agent node runs a
+	// model with the listed tools.
+	PipelineAgents []string
+	// PipelineParseError is non-empty when pipeline.json exists but does not
+	// parse or validate as a topology.
+	PipelineParseError string
+	// PluginCount is the number of project plugins whose manifests parse, from
+	// .splice/plugins/<name>/plugin.json. Their tools and hooks run commands once
+	// the folder is trusted. Disabled plugins are counted too: the card discloses
+	// what the files declare.
+	PluginCount int
+	// PluginCommands lists each tool and hook command of the project plugins, as
+	// "plugin tool name: argv" or "plugin hook name (event): argv".
+	PluginCommands []string
+	// PluginParseErrors lists project plugin manifests that exist but do not
+	// parse. Each entry names the manifest and the field that failed.
+	PluginParseErrors []string
+	// HookCommands lists each hook as "event: argv", in file order. A hook that
+	// would not run is marked "(off)".
+	HookCommands []string
+	// MCPServerCommands lists each MCP server as "name: argv" or "name: url".
+	MCPServerCommands []string
+	// VerifyTestCommand is the project verify.testCommand argv, when set.
+	VerifyTestCommand string
+	// DecisionAdvisorBackend and DecisionAdvisorEndpoint are the project's
+	// decision advisor target, when set.
+	DecisionAdvisorBackend  string
+	DecisionAdvisorEndpoint string
+	// SpecialistNames lists the valid project specialists in .splice/specialists.
+	SpecialistNames []string
+	// SpecialistError is non-empty when .splice/specialists cannot be read.
+	SpecialistError string
+	// ConfigFile is true when the project config.json exists. False means the
+	// card describes hooks or pipeline files only.
+	ConfigFile bool
+	// ViewFile is the file the [V] action opens (see projectTrustViewFile).
+	// Empty when none of the project files exists.
+	ViewFile string
 }
 
 // Empty reports whether the config carries nothing worth a trust decision.
@@ -74,7 +125,53 @@ func (c projectTrustConfig) Empty() bool {
 		c.HookParseError == "" && c.ProviderCount == 0 &&
 		c.ActiveProviderOverride == "" && c.MaxTurnsOverride == 0 &&
 		len(c.SandboxTightening) == 0 && c.KeybindingOverrides == 0 &&
-		c.ParseError == ""
+		c.ParseError == "" && !c.PipelineFile && c.PipelineParseError == "" &&
+		c.PluginCount == 0 && len(c.PluginParseErrors) == 0 &&
+		c.VerifyTestCommand == "" && c.DecisionAdvisorBackend == "" &&
+		c.DecisionAdvisorEndpoint == "" && len(c.SpecialistNames) == 0 &&
+		c.SpecialistError == ""
+}
+
+// projectTrustConfigPath returns the project config path the trust surface
+// describes. config.json may be absent while hooks.json or pipeline.json still
+// runs commands, so the path under the workspace root is used then. The
+// function does not prove the file exists; describeProjectTrustConfig does.
+func (m model) projectTrustConfigPath() string {
+	if m.projectConfigPath != "" {
+		return m.projectConfigPath
+	}
+	if strings.TrimSpace(m.cwd) == "" {
+		return ""
+	}
+	return filepath.Join(m.cwd, ".splice", "config.json")
+}
+
+// projectTrustViewFile returns the project file the [V] action opens: the
+// first of config.json, hooks.json, and pipeline.json that exists beside the
+// config path. It returns "" when none exists. The card label and the action
+// both call this helper, so they always name the same file.
+func projectTrustViewFile(configPath string) string {
+	if strings.TrimSpace(configPath) == "" {
+		return ""
+	}
+	dir := filepath.Dir(configPath)
+	for _, name := range []string{"config.json", "hooks.json", "pipeline.json"} {
+		candidate := filepath.Join(dir, name)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	return ""
+}
+
+// projectTrustViewTarget is the file the [V] action opens. It falls back to
+// the config path when no project file exists, so the action keeps its
+// "not found" notice in that case.
+func (m model) projectTrustViewTarget() string {
+	if file := projectTrustViewFile(m.projectTrustConfigPath()); file != "" {
+		return file
+	}
+	return m.projectTrustConfigPath()
 }
 
 // describeProjectTrustConfig reads the project config at path and returns
@@ -93,15 +190,25 @@ func describeProjectTrustConfig(path string) projectTrustConfig {
 	}
 	// hooks.json is a separate executable file next to config.json; count it
 	// first so it is disclosed even when config.json is absent or broken.
-	out.HookCount, out.HookDisabledCount, out.HookParseError = inspectProjectHooks(filepath.Join(filepath.Dir(path), "hooks.json"))
-	data, err := os.ReadFile(path)
+	out.HookCount, out.HookDisabledCount, out.HookCommands, out.HookParseError = inspectProjectHooks(filepath.Join(filepath.Dir(path), "hooks.json"))
+	// pipeline.json is a sibling executable file too: its command nodes run
+	// when the project topology is trusted. Disclose it like hooks.json.
+	out.PipelineFile, out.PipelineCommands, out.PipelineAgents, out.PipelineParseError = inspectProjectPipeline(filepath.Join(filepath.Dir(path), "pipeline.json"))
+	// Project plugins run their tool and hook commands once the folder is
+	// trusted, so their manifests are disclosed the same way.
+	out.PluginCount, out.PluginCommands, out.PluginParseErrors = inspectProjectPlugins(filepath.Join(filepath.Dir(path), "plugins"))
+	out.SpecialistNames, out.SpecialistError = inspectProjectSpecialists(filepath.Join(filepath.Dir(path), "specialists"))
+	out.ViewFile = projectTrustViewFile(path)
+	data, err := projectfile.Read(path, filepath.Dir(filepath.Dir(path)))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return out
 		}
+		out.ConfigFile = true
 		out.ParseError = err.Error()
 		return out
 	}
+	out.ConfigFile = true
 	var cfg struct {
 		ActiveProvider string `json:"activeProvider"`
 		MaxTurns       int    `json:"maxTurns"`
@@ -111,7 +218,14 @@ func describeProjectTrustConfig(path string) projectTrustConfig {
 		MCP struct {
 			Servers map[string]json.RawMessage `json:"servers"`
 		} `json:"mcp"`
-		Hooks   json.RawMessage `json:"hooks"`
+		Hooks  json.RawMessage `json:"hooks"`
+		Verify struct {
+			TestCommand []string `json:"testCommand"`
+		} `json:"verify"`
+		DecisionAdvisor struct {
+			Backend  string `json:"backend"`
+			Endpoint string `json:"endpoint"`
+		} `json:"decisionAdvisor"`
 		Sandbox struct {
 			Network          string `json:"network"`
 			BlockUnixSockets bool   `json:"blockUnixSockets"`
@@ -128,6 +242,14 @@ func describeProjectTrustConfig(path string) projectTrustConfig {
 		out.MCPServerNames = append(out.MCPServerNames, name)
 	}
 	sort.Strings(out.MCPServerNames)
+	for _, name := range out.MCPServerNames {
+		out.MCPServerCommands = append(out.MCPServerCommands, mcpServerCardLine(name, cfg.MCP.Servers[name]))
+	}
+	if len(cfg.Verify.TestCommand) > 0 {
+		out.VerifyTestCommand = cardArgv(redactedCommandArgs(cfg.Verify.TestCommand))
+	}
+	out.DecisionAdvisorBackend = cardText(strings.TrimSpace(cfg.DecisionAdvisor.Backend))
+	out.DecisionAdvisorEndpoint = cardText(redactMCPDisplayURL(strings.TrimSpace(cfg.DecisionAdvisor.Endpoint)))
 	out.ProviderCount = len(cfg.Providers)
 	out.ActiveProviderOverride = strings.TrimSpace(cfg.ActiveProvider)
 	out.MaxTurnsOverride = cfg.MaxTurns
@@ -146,47 +268,162 @@ func describeProjectTrustConfig(path string) projectTrustConfig {
 
 // inspectProjectHooks reads one hooks file through the canonical hooks
 // reader (hooks.ConfigStore.List, a pure read of a single path) and reports
-// how many entries would run, how many are defined but disabled, and the
-// reader's own error when the file is unreadable.
+// how many entries would run, how many are defined but disabled, each hook's
+// command, and the reader's own error when the file is unreadable.
 //
 // The TUI keeps no second hooks schema. The real schema is
 // {"enabled": bool, "hooks": [ {..., "enabled": bool} ]}, and only the
 // canonical reader is allowed to know that. A missing file is not an error:
 // most workspaces have none.
-func inspectProjectHooks(path string) (executable int, disabled int, parseError string) {
+func inspectProjectHooks(path string) (executable int, disabled int, commands []string, parseError string) {
 	if strings.TrimSpace(path) == "" {
-		return 0, 0, ""
+		return 0, 0, nil, ""
 	}
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
-			return 0, 0, ""
+			return 0, 0, nil, ""
 		}
-		return 0, 0, fmt.Errorf("read hooks file %s: %w", path, err).Error()
+		return 0, 0, nil, fmt.Errorf("read hooks file %s: %w", path, err).Error()
 	}
 	store, err := hooks.NewConfigStore(hooks.StoreOptions{ConfigPath: path})
 	if err != nil {
-		return 0, 0, fmt.Errorf("read hooks file %s: %w", path, err).Error()
+		return 0, 0, nil, fmt.Errorf("read hooks file %s: %w", path, err).Error()
 	}
 	// List is read-only: it parses the single file and never writes it.
 	config, err := store.List()
 	if err != nil {
-		return 0, 0, fmt.Errorf("read hooks file %s: %w", path, err).Error()
+		return 0, 0, nil, fmt.Errorf("read hooks file %s: %w", path, err).Error()
 	}
 	for _, hook := range config.Hooks {
+		line := cardText(string(hook.Event)) + ": " + cardArgv(redactedCommandArgs(append([]string{hook.Command}, hook.Args...)))
 		if config.Enabled && hook.Enabled {
 			executable++
-			continue
+		} else {
+			disabled++
+			line += " (off)"
 		}
-		disabled++
+		commands = append(commands, line)
 	}
-	return executable, disabled, ""
+	return executable, disabled, commands, ""
+}
+
+// inspectProjectPipeline reads the project topology file through the canonical
+// topology loader and lists its command nodes. A missing file is not an error.
+func inspectProjectPipeline(path string) (present bool, commands, agents []string, parseError string) {
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil, nil, ""
+		}
+		return true, nil, nil, fmt.Errorf("read pipeline file %s: %w", path, err).Error()
+	}
+	topology, err := splicerun.LoadTopologyFile(path, filepath.Dir(filepath.Dir(path)))
+	if err != nil {
+		return true, nil, nil, err.Error()
+	}
+	for _, node := range topology.Nodes {
+		switch node.Type {
+		case schemas.NodeTypeCommand:
+			commands = append(commands, cardText(node.Name)+": "+cardArgv(node.Command))
+		case schemas.NodeTypeAgent:
+			agents = append(agents, cardText(splicerun.AgentNodeLine(node)))
+		}
+	}
+	return true, commands, agents, ""
+}
+
+// inspectProjectPlugins reads the project plugins under root through the
+// plugins package loader. It only parses manifests; nothing runs. A missing
+// root is not an error. Each tool and hook command is listed so the trust card
+// names every command the plugins can run.
+func inspectProjectPlugins(root string) (count int, commands []string, parseErrors []string) {
+	loaded, err := plugins.Load(plugins.LoadOptions{
+		Roots: []plugins.Root{{Source: plugins.SourceProject, Path: root}},
+	})
+	if err != nil {
+		return 0, nil, []string{cardText(err.Error())}
+	}
+	for _, diagnostic := range loaded.Diagnostics {
+		location := diagnostic.ManifestPath
+		if location == "" {
+			location = diagnostic.Root
+		}
+		message := diagnostic.Message
+		if diagnostic.FieldPath != "" {
+			message = diagnostic.FieldPath + ": " + message
+		}
+		parseErrors = append(parseErrors, cardText(location)+": "+cardText(message))
+	}
+	for _, plugin := range loaded.Plugins {
+		for _, tool := range plugin.Tools {
+			commands = append(commands, cardText(plugin.Name)+" tool "+cardText(tool.Name)+": "+cardArgv(append([]string{tool.Command}, tool.Args...)))
+		}
+		for _, hook := range plugin.Hooks {
+			commands = append(commands, cardText(plugin.Name)+" hook "+cardText(hook.Name)+" ("+cardText(string(hook.Event))+"): "+cardArgv(append([]string{hook.Command}, hook.Args...)))
+		}
+	}
+	return len(loaded.Plugins), commands, parseErrors
+}
+
+// inspectProjectSpecialists lists the valid specialist manifests in the project
+// specialists directory. A missing directory is not an error.
+func inspectProjectSpecialists(dir string) (names []string, errText string) {
+	manifests, _, err := specialist.LoadProjectDir(dir)
+	if err != nil {
+		return nil, cardText(err.Error())
+	}
+	for _, manifest := range manifests {
+		names = append(names, cardText(manifest.Metadata.Name))
+	}
+	sort.Strings(names)
+	return names, ""
+}
+
+// mcpServerCardLine describes one MCP server for the trust card: its command
+// and args, or its URL for a remote server. Secrets are redacted as the MCP
+// status view redacts them.
+func mcpServerCardLine(name string, raw json.RawMessage) string {
+	var server struct {
+		Command  string   `json:"command"`
+		Args     []string `json:"args"`
+		URL      string   `json:"url"`
+		Disabled bool     `json:"disabled"`
+	}
+	label := cardText(name)
+	if err := json.Unmarshal(raw, &server); err != nil {
+		return label + ": (unreadable entry)"
+	}
+	var target string
+	switch {
+	case server.Command != "":
+		target = cardArgv(redactedCommandArgs(append([]string{server.Command}, server.Args...)))
+	case server.URL != "":
+		target = "url " + cardText(redactMCPDisplayURL(server.URL))
+	default:
+		target = "no command or url"
+	}
+	if server.Disabled {
+		target += " (off)"
+	}
+	return label + ": " + target
+}
+
+// cardArgv joins an argv for the trust card. Each argument is made safe for
+// the card with cardText.
+func cardArgv(argv []string) string {
+	return cardText(stages.CommandLine(argv))
+}
+
+// cardText makes untrusted project text safe for the NUL and \x1f delimited
+// trust card: terminal control sequences go, and so do the delimiters.
+func cardText(s string) string {
+	return strings.NewReplacer("\x00", "", "\x1f", "").Replace(sanitizeTerminalOutput(s, false))
 }
 
 // countHookEntries returns the number of hook commands the file at path
 // would actually run. It delegates to the canonical reader through
 // inspectProjectHooks; a disabled file or a disabled entry counts zero.
 func countHookEntries(path string) int {
-	executable, _, _ := inspectProjectHooks(path)
+	executable, _, _, _ := inspectProjectHooks(path)
 	return executable
 }
 
@@ -207,10 +444,17 @@ func countKeybindingOverrides(raw json.RawMessage) int {
 // and the "no run starts until you choose" invariant footer.
 func trustConfigCardLines(c projectTrustConfig, width int) []string {
 	lines := []string{}
+	// A zero width is the transcript payload: keep every parse error whole.
+	clip := func(text string, n int) string {
+		if width <= 0 {
+			return text
+		}
+		return clipLine(text, n)
+	}
 	if c.ParseError != "" {
 		lines = append(lines,
 			"  config file could not be read as valid JSON:",
-			"  "+clipLine(c.ParseError, maxInt(8, width-4)))
+			"  "+clip(c.ParseError, maxInt(8, width-4)))
 		// Do not return here: the sibling hooks file is a separate
 		// executable surface and stays disclosed even when config.json
 		// is broken.
@@ -219,35 +463,99 @@ func trustConfigCardLines(c projectTrustConfig, width int) []string {
 		return lines
 	}
 	if c.MCPServerCount > 0 {
-		names := strings.Join(c.MCPServerNames, ", ")
+		names := cardText(strings.Join(c.MCPServerNames, ", "))
 		if len(names) > 60 {
 			names = names[:57] + "..."
 		}
-		lines = append(lines, fmt.Sprintf("  mcp servers        %d (%s)", c.MCPServerCount, names))
+		lines = append(lines, trustCardRow("mcp servers", fmt.Sprintf("%d (%s)", c.MCPServerCount, names)))
+		lines = append(lines, trustCardList("mcp server", c.MCPServerCommands)...)
 	}
 	if c.HookCount > 0 {
-		lines = append(lines, fmt.Sprintf("  hooks              %d commands on lifecycle events", c.HookCount))
+		lines = append(lines, trustCardRow("hooks", pluralizeCount(c.HookCount, "command on lifecycle events", "commands on lifecycle events")))
 	}
 	if c.HookDisabledCount > 0 {
-		lines = append(lines, fmt.Sprintf("  hooks (disabled)   %d defined but off", c.HookDisabledCount))
+		lines = append(lines, trustCardRow("hooks (disabled)", fmt.Sprintf("%d defined but off", c.HookDisabledCount)))
 	}
 	if c.HookParseError != "" {
-		lines = append(lines, "  hooks              "+clipLine(c.HookParseError, maxInt(8, width-21)))
+		lines = append(lines, trustCardRow("hooks", clip(c.HookParseError, maxInt(8, width-21))))
 	}
+	lines = append(lines, trustCardList("hook command", c.HookCommands)...)
 	if c.ProviderCount > 0 {
-		lines = append(lines, fmt.Sprintf("  providers          %d defined in project config", c.ProviderCount))
+		lines = append(lines, trustCardRow("providers", fmt.Sprintf("%d defined in project config", c.ProviderCount)))
 	}
 	if c.ActiveProviderOverride != "" {
-		lines = append(lines, "  active provider    "+c.ActiveProviderOverride)
+		lines = append(lines, trustCardRow("active provider", c.ActiveProviderOverride))
 	}
 	if c.MaxTurnsOverride > 0 {
-		lines = append(lines, fmt.Sprintf("  max turns          %d", c.MaxTurnsOverride))
+		lines = append(lines, trustCardRow("max turns", fmt.Sprintf("%d", c.MaxTurnsOverride)))
 	}
 	for _, t := range c.SandboxTightening {
-		lines = append(lines, "  sandbox            "+t)
+		lines = append(lines, trustCardRow("sandbox", t))
 	}
 	if c.KeybindingOverrides > 0 {
-		lines = append(lines, fmt.Sprintf("  keybindings        %d overridden", c.KeybindingOverrides))
+		lines = append(lines, trustCardRow("keybindings", fmt.Sprintf("%d overridden", c.KeybindingOverrides)))
+	}
+	if c.VerifyTestCommand != "" {
+		lines = append(lines, trustCardRow("verify testCommand", c.VerifyTestCommand))
+	}
+	if c.DecisionAdvisorBackend != "" || c.DecisionAdvisorEndpoint != "" {
+		var parts []string
+		if c.DecisionAdvisorBackend != "" {
+			parts = append(parts, "backend "+c.DecisionAdvisorBackend)
+		}
+		if c.DecisionAdvisorEndpoint != "" {
+			parts = append(parts, "endpoint "+clip(c.DecisionAdvisorEndpoint, maxInt(8, width-40)))
+		}
+		lines = append(lines, trustCardRow("decision advisor", strings.Join(parts, ", ")))
+	}
+	if c.PipelineParseError != "" {
+		lines = append(lines, trustCardRow("pipeline", clip(c.PipelineParseError, maxInt(8, width-21))))
+	} else if c.PipelineFile {
+		summary := pluralizeCount(len(c.PipelineCommands), "command node", "command nodes")
+		if len(c.PipelineAgents) > 0 {
+			summary += ", " + pluralizeCount(len(c.PipelineAgents), "agent node", "agent nodes")
+		}
+		lines = append(lines, trustCardRow("pipeline", summary+" in .splice/pipeline.json"))
+		lines = append(lines, trustCardList("command node", c.PipelineCommands)...)
+		lines = append(lines, trustCardList("agent node", c.PipelineAgents)...)
+	}
+	parseErrors := make([]string, 0, len(c.PluginParseErrors))
+	for _, parseError := range c.PluginParseErrors {
+		parseErrors = append(parseErrors, clip(parseError, maxInt(8, width-21)))
+	}
+	lines = append(lines, trustCardList("plugin", parseErrors)...)
+	if c.PluginCount > 0 {
+		lines = append(lines, trustCardRow("plugins", pluralizeCount(c.PluginCount, "project plugin", "project plugins")+" in .splice/plugins"))
+		lines = append(lines, trustCardList("plugin command", c.PluginCommands)...)
+	}
+	if c.SpecialistError != "" {
+		lines = append(lines, trustCardRow("specialists", clip(c.SpecialistError, maxInt(8, width-21))))
+	} else if len(c.SpecialistNames) > 0 {
+		lines = append(lines, trustCardRow("specialists", pluralizeCount(len(c.SpecialistNames), "project specialist", "project specialists")+" in .splice/specialists"))
+		lines = append(lines, trustCardList("specialist", c.SpecialistNames)...)
+	}
+	return lines
+}
+
+// trustCardListLimit caps each command or name list on the trust card. Entries
+// past the cap collapse into one "and N more" row.
+const trustCardListLimit = 20
+
+// trustCardRow formats one trust card row. The label sits in a fixed column.
+func trustCardRow(label, value string) string {
+	return fmt.Sprintf("  %-18s %s", label, value)
+}
+
+// trustCardList renders up to trustCardListLimit rows, one per item, then an
+// "and N more" row for the rest.
+func trustCardList(label string, items []string) []string {
+	lines := []string{}
+	for i, item := range items {
+		if i == trustCardListLimit {
+			lines = append(lines, trustCardRow("", fmt.Sprintf("and %d more", len(items)-i)))
+			break
+		}
+		lines = append(lines, trustCardRow(label, item))
 	}
 	return lines
 }

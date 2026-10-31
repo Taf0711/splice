@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Taf0711/splice/internal/gitenv"
 )
 
 // defaultCommandTimeout bounds a single verification command so a hung command
@@ -171,7 +173,7 @@ func execCommand(ctx context.Context, workspace string, command Command) Command
 func defaultRunGit(ctx context.Context, workspace string, args ...string) ([]byte, error) {
 	allArgs := append([]string{"-C", workspace}, args...)
 	cmd := exec.CommandContext(ctx, "git", allArgs...)
-	output, err := cmd.Output()
+	output, err := gitenv.Output(cmd)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr

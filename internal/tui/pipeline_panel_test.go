@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -24,16 +25,46 @@ import (
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
+// TestMain isolates the process from the user's state. It sets the XDG data,
+// state, and config directories to temporary paths, and points the memd socket
+// and database at a temporary directory. It sets the credential and OAuth
+// storage to encrypted-file, so no test reaches the OS keychain. All temporary
+// directories are removed on exit, including on the panic paths.
 func TestMain(m *testing.M) {
-	// Tests without a SessionStore use the default store, which writes to the user data directory.
-	dataDir, err := os.MkdirTemp("", "splice-tui-test-")
-	if err != nil {
-		panic(fmt.Sprintf("create temporary XDG data directory: %v", err))
+	var tempDirs []string
+	cleanup := func() {
+		for _, dir := range tempDirs {
+			_ = os.RemoveAll(dir)
+		}
 	}
-	if err := os.Setenv("XDG_DATA_HOME", dataDir); err != nil {
-		_ = os.RemoveAll(dataDir)
-		panic(fmt.Sprintf("set XDG_DATA_HOME: %v", err))
+	fail := func(format string, args ...any) {
+		cleanup()
+		panic(fmt.Sprintf(format, args...))
 	}
+	tempDir := func(pattern, what string) string {
+		dir, err := os.MkdirTemp("", pattern)
+		if err != nil {
+			fail("create temporary %s: %v", what, err)
+		}
+		tempDirs = append(tempDirs, dir)
+		return dir
+	}
+	setEnv := func(key, value string) {
+		if err := os.Setenv(key, value); err != nil {
+			fail("set %s: %v", key, err)
+		}
+	}
+
+	setEnv("XDG_DATA_HOME", tempDir("splice-tui-test-", "XDG data directory"))
+	setEnv("XDG_STATE_HOME", tempDir("splice-tui-state-", "XDG state directory"))
+	setEnv("XDG_CONFIG_HOME", tempDir("splice-tui-config-", "XDG config directory"))
+	// macOS defaults both stores to the keychain. Pin them to the file backend.
+	setEnv(config.CredentialStorageEnv, "encrypted-file")
+	setEnv(config.OAuthStorageEnv, "encrypted-file")
+	memdDir := tempDir("m-", "memd directory")
+	setEnv("SPLICE_MEMD_SOCKET", filepath.Join(memdDir, "m.sock"))
+	setEnv("SPLICE_MEMD_DB", filepath.Join(memdDir, "m.db"))
+
 	tuiSpliceRun = func(ctx context.Context, prompt string, provider agent.Provider, options agent.Options, mem splicerun.MemoryStore, recovery splicerun.WorkspaceRecovery) (agent.Result, error) {
 		if recovery != nil {
 			panic("TUI must not receive workspace recovery authority")
@@ -43,7 +74,7 @@ func TestMain(m *testing.M) {
 	tuiResolveMemory = func(context.Context) (*memd.Client, error) { return nil, nil }
 	disableTUIWorktreesForTest = true
 	code := m.Run()
-	_ = os.RemoveAll(dataDir)
+	cleanup()
 	os.Exit(code)
 }
 
@@ -455,11 +486,11 @@ type tuiPipelineFeatureProvider struct {
 }
 
 func (provider *tuiPipelineFeatureProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
-	if len(request.Tools) != 1 {
-		return nil, fmt.Errorf("expected one stage output tool, got %d", len(request.Tools))
+	if len(request.Tools) != 2 {
+		return nil, fmt.Errorf("expected both code writer tools, got %d", len(request.Tools))
 	}
 	toolName := request.Tools[0].Name
-	provider.toolNames = append(provider.toolNames, toolName)
+	provider.toolNames = append(provider.toolNames, toolName, request.Tools[1].Name)
 	var arguments []byte
 	switch toolName {
 	case "submit_code":
@@ -573,8 +604,8 @@ func TestTUIPipelineEndToEndFeature(t *testing.T) {
 	if len(builtProfiles) != 1 || builtProfiles[0].Name != "local" || builtProfiles[0].Model != "qwen-local" {
 		t.Fatalf("routed provider builds = %#v", builtProfiles)
 	}
-	if strings.Join(localProvider.toolNames, ",") != "submit_code" {
-		t.Fatalf("local provider tools = %v, want submit_code", localProvider.toolNames)
+	if strings.Join(localProvider.toolNames, ",") != "submit_code,request_codebase_context" {
+		t.Fatalf("local provider tools = %v, want submit_code,request_codebase_context", localProvider.toolNames)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "hello.go")); err != nil {
 		t.Fatalf("pipeline did not apply generated file: %v", err)
@@ -701,6 +732,98 @@ func TestTUIPipelineRunUsesPreparedWorktree(t *testing.T) {
 	}
 	if unlocked {
 		t.Fatal("lock must stay held until the worktree review")
+	}
+}
+
+// TestTUIPipelineRunKeepsLaunchSubdirectoryInWorktree pins H-08 for the TUI:
+// a run launched from repo/sub works in the sub directory of the worktree, and
+// a launch directory that the worktree does not hold fails loud and releases
+// the worktree lock.
+func TestTUIPipelineRunKeepsLaunchSubdirectoryInWorktree(t *testing.T) {
+	origDisable := disableTUIWorktreesForTest
+	origPrepare := tuiPrepareWorktree
+	origUnlock := tuiUnlockWorktree
+	origRemove := tuiRemoveWorktree
+	origRun := tuiSpliceRun
+	defer func() {
+		disableTUIWorktreesForTest = origDisable
+		tuiPrepareWorktree = origPrepare
+		tuiUnlockWorktree = origUnlock
+		tuiRemoveWorktree = origRemove
+		tuiSpliceRun = origRun
+	}()
+	disableTUIWorktreesForTest = false
+	var removed []worktrees.RemoveOptions
+	tuiRemoveWorktree = func(_ context.Context, options worktrees.RemoveOptions) error {
+		removed = append(removed, options)
+		return nil
+	}
+
+	repo := t.TempDir()
+	preparedPath := t.TempDir()
+	for _, dir := range []string{filepath.Join(repo, "sub"), filepath.Join(repo, "untracked"), filepath.Join(preparedPath, "sub")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tuiPrepareWorktree = func(_ context.Context, options worktrees.Options) (worktrees.Result, error) {
+		return worktrees.Result{Name: options.Name, Path: preparedPath, RepoRoot: repo, Locked: true}, nil
+	}
+	unlocked := false
+	tuiUnlockWorktree = func(context.Context, worktrees.UnlockOptions) error {
+		unlocked = true
+		return nil
+	}
+	var gotCwd string
+	tuiSpliceRun = func(_ context.Context, _ string, _ agent.Provider, options agent.Options, _ splicerun.MemoryStore, _ splicerun.WorkspaceRecovery) (agent.Result, error) {
+		gotCwd = options.Cwd
+		return agent.Result{FinalAnswer: `{"status":"completed"}`}, nil
+	}
+
+	m := newModel(context.Background(), Options{Cwd: filepath.Join(repo, "sub")})
+	resp := m.runAgentWithOptions(1, context.Background(), "do work", nil, tuiAgentRunOptions{})().(agentResponseMsg)
+	if resp.err != nil {
+		t.Fatalf("run: %v", resp.err)
+	}
+	if want := filepath.Join(preparedPath, "sub"); gotCwd != want {
+		t.Fatalf("pipeline cwd = %q, want %q", gotCwd, want)
+	}
+
+	gotCwd = ""
+	m = newModel(context.Background(), Options{Cwd: filepath.Join(repo, "untracked")})
+	resp = m.runAgentWithOptions(2, context.Background(), "do work", nil, tuiAgentRunOptions{})().(agentResponseMsg)
+	if resp.err == nil || !strings.Contains(resp.err.Error(), "has only committed files") {
+		t.Fatalf("run err = %v, want the missing launch directory error", resp.err)
+	}
+	if gotCwd != "" {
+		t.Fatalf("the pipeline ran in %q after a failed worktree bind", gotCwd)
+	}
+	if !unlocked {
+		t.Fatal("a failed worktree bind must release the worktree lock")
+	}
+	// The run made the worktree, so a failed bind removes it.
+	if len(removed) != 1 || removed[0].Path != preparedPath || removed[0].RepoRoot != repo || !removed[0].Force {
+		t.Fatalf("removed = %+v, want one forced removal of %s", removed, preparedPath)
+	}
+
+	// A reused worktree is not this run's to remove.
+	removed = nil
+	tuiPrepareWorktree = func(_ context.Context, options worktrees.Options) (worktrees.Result, error) {
+		return worktrees.Result{Name: options.Name, Path: preparedPath, RepoRoot: repo, Locked: true, Reused: true}, nil
+	}
+	resp = m.runAgentWithOptions(3, context.Background(), "do work", nil, tuiAgentRunOptions{})().(agentResponseMsg)
+	if resp.err == nil || len(removed) != 0 {
+		t.Fatalf("reused worktree: err = %v, removed = %+v; want the error and no removal", resp.err, removed)
+	}
+
+	// A removal that fails says where the worktree remains.
+	tuiPrepareWorktree = func(_ context.Context, options worktrees.Options) (worktrees.Result, error) {
+		return worktrees.Result{Name: options.Name, Path: preparedPath, RepoRoot: repo, Locked: true}, nil
+	}
+	tuiRemoveWorktree = func(context.Context, worktrees.RemoveOptions) error { return errors.New("git refused") }
+	resp = m.runAgentWithOptions(4, context.Background(), "do work", nil, tuiAgentRunOptions{})().(agentResponseMsg)
+	if resp.err == nil || !strings.Contains(resp.err.Error(), "the worktree remains at "+preparedPath) || !strings.Contains(resp.err.Error(), "git refused") {
+		t.Fatalf("failed removal err = %v, want it to name the remaining worktree", resp.err)
 	}
 }
 
@@ -1139,7 +1262,7 @@ func TestTUIDemoPipelineRunOffersReview(t *testing.T) {
 	runGit("add", ".")
 	runGit("commit", "-m", "seed")
 
-	m := newModel(context.Background(), Options{Cwd: repo, Provider: &fakeProvider{}})
+	m := newModel(context.Background(), Options{Cwd: repo, Provider: &fakeProvider{}, Worktrees: config.WorktreesConfig{Directory: filepath.Join(t.TempDir(), "worktrees")}})
 	m.activeRunID = 1
 	msg := m.runAgentWithOptions(1, context.Background(), "fix the failing test", nil, tuiAgentRunOptions{})()
 	resp, ok := msg.(agentResponseMsg)
@@ -1265,4 +1388,133 @@ func TestPipelinePanelSeparatesIterations(t *testing.T) {
 	if !strings.Contains(section, "i1") {
 		t.Fatalf("rendered section does not mark the second pass:\n%s", section)
 	}
+}
+
+// TestTUIInvalidStageRoutingFailsNodePins pins that an invalid stage-models.json
+// does not drop node pins silently. The run keeps going, but a pinned node
+// resolves to an error that names the config cause.
+func TestTUIInvalidStageRoutingFailsNodePins(t *testing.T) {
+	originalRun := tuiSpliceRun
+	defer func() { tuiSpliceRun = originalRun }()
+
+	dir := t.TempDir()
+	userConfigPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(filepath.Join(dir, "stage-models.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	profile := config.ProviderProfile{Name: "local", CatalogID: "ollama", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "http://localhost:11434/v1", Model: "base-model"}
+	m := newModel(context.Background(), Options{
+		UserConfigPath:  userConfigPath,
+		ProviderName:    profile.Name,
+		ModelName:       profile.Model,
+		ProviderProfile: profile,
+		SavedProviders:  []config.ProviderProfile{profile},
+		NewProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &tuiRoutingTestProvider{model: profile.Model}, nil
+		},
+	})
+
+	var resolveErr, stageErr error
+	tuiSpliceRun = func(_ context.Context, _ string, _ agent.Provider, options agent.Options, _ splicerun.MemoryStore, _ splicerun.WorkspaceRecovery) (agent.Result, error) {
+		if options.NodeModelResolver == nil {
+			t.Fatal("invalid stage routing left NodeModelResolver nil; node pins would run on the primary model")
+		}
+		_, resolveErr = options.NodeModelResolver("lint_cmd", agent.ModelOverride{ProviderProfile: "team", Model: "node-model"})
+		if options.StageModelResolver == nil {
+			t.Fatal("invalid stage routing left StageModelResolver nil; stage routes would fall back to the run model")
+		}
+		_, stageErr = options.StageModelResolver("code_writer")
+		return agent.Result{FinalAnswer: "done"}, nil
+	}
+	if msg := m.runAgentWithOptions(1, context.Background(), "check", nil, tuiAgentRunOptions{})(); msg.(agentResponseMsg).err != nil {
+		t.Fatalf("run: %v", msg.(agentResponseMsg).err)
+	}
+	if resolveErr == nil || !strings.Contains(resolveErr.Error(), "stage routing config invalid") {
+		t.Fatalf("node resolver error = %v, want the config cause", resolveErr)
+	}
+	if stageErr == nil || !strings.Contains(stageErr.Error(), "stage routing config invalid") {
+		t.Fatalf("stage resolver error = %v, want the config cause", stageErr)
+	}
+}
+
+// TestTUIPipelineCommandNoticesAreSystemRows pins that a pipeline notice, such
+// as a command node the run will execute, reaches the transcript as a visible
+// system row, not the collapsed reasoning stream.
+func TestTUIPipelineCommandNoticesAreSystemRows(t *testing.T) {
+	originalRun := tuiSpliceRun
+	defer func() { tuiSpliceRun = originalRun }()
+
+	dir := t.TempDir()
+	profile := config.ProviderProfile{Name: "local", CatalogID: "ollama", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "http://localhost:11434/v1", Model: "base-model"}
+	m := newModel(context.Background(), Options{
+		UserConfigPath:  filepath.Join(dir, "config.json"),
+		ProviderName:    profile.Name,
+		ModelName:       profile.Model,
+		ProviderProfile: profile,
+		SavedProviders:  []config.ProviderProfile{profile},
+		NewProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &tuiRoutingTestProvider{model: profile.Model}, nil
+		},
+	})
+	var sunk []tea.Msg
+	m.runtimeMessageSink = func(msg tea.Msg) { sunk = append(sunk, msg) }
+	const notice = "[topology] command node lint will run: go vet ./..."
+	tuiSpliceRun = func(_ context.Context, _ string, _ agent.Provider, options agent.Options, _ splicerun.MemoryStore, _ splicerun.WorkspaceRecovery) (agent.Result, error) {
+		if options.OnNotice == nil {
+			t.Fatal("TUI pipeline run has no notice callback")
+		}
+		options.OnNotice(notice)
+		return agent.Result{FinalAnswer: "done"}, nil
+	}
+	if msg := m.runAgentWithOptions(1, context.Background(), "check", nil, tuiAgentRunOptions{})(); msg.(agentResponseMsg).err != nil {
+		t.Fatalf("run: %v", msg.(agentResponseMsg).err)
+	}
+	for _, msg := range sunk {
+		row, ok := msg.(agentRowMsg)
+		if ok && row.row.kind == rowSystem && row.row.text == notice {
+			return
+		}
+	}
+	t.Fatalf("sink messages = %#v, want a system row carrying the command notice", sunk)
+}
+
+// TestTUIPipelineTopologyWarningIsSystemRow pins that a --pipeline override of a
+// trusted project topology reaches the transcript as a visible system row. It
+// must not stay in the collapsed reasoning block.
+func TestTUIPipelineTopologyWarningIsSystemRow(t *testing.T) {
+	originalRun := tuiSpliceRun
+	defer func() { tuiSpliceRun = originalRun }()
+
+	dir := t.TempDir()
+	profile := config.ProviderProfile{Name: "local", CatalogID: "ollama", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "http://localhost:11434/v1", Model: "base-model"}
+	m := newModel(context.Background(), Options{
+		UserConfigPath:  filepath.Join(dir, "config.json"),
+		ProviderName:    profile.Name,
+		ModelName:       profile.Model,
+		ProviderProfile: profile,
+		SavedProviders:  []config.ProviderProfile{profile},
+		NewProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &tuiRoutingTestProvider{model: profile.Model}, nil
+		},
+	})
+	var sunk []tea.Msg
+	m.runtimeMessageSink = func(msg tea.Msg) { sunk = append(sunk, msg) }
+	const notice = "[topology] warning: --pipeline /work/team.json overrides the trusted project topology /work/.splice/pipeline.json"
+	tuiSpliceRun = func(_ context.Context, _ string, _ agent.Provider, options agent.Options, _ splicerun.MemoryStore, _ splicerun.WorkspaceRecovery) (agent.Result, error) {
+		if options.OnNotice == nil {
+			t.Fatal("TUI pipeline run has no notice callback")
+		}
+		options.OnNotice(notice)
+		return agent.Result{FinalAnswer: "done"}, nil
+	}
+	if msg := m.runAgentWithOptions(1, context.Background(), "check", nil, tuiAgentRunOptions{})(); msg.(agentResponseMsg).err != nil {
+		t.Fatalf("run: %v", msg.(agentResponseMsg).err)
+	}
+	for _, msg := range sunk {
+		row, ok := msg.(agentRowMsg)
+		if ok && row.row.kind == rowSystem && row.row.text == notice {
+			return
+		}
+	}
+	t.Fatalf("sink messages = %#v, want a system row carrying the override warning", sunk)
 }

@@ -135,6 +135,47 @@ type ContextQuery struct {
 	Regex      bool             `json:"regex"`
 	MaxResults int              `json:"max_results"`
 	MaxChars   int              `json:"max_chars"`
+	// StartLine/EndLine are the optional 1-based inclusive byte-range
+	// selectors for read_file queries (B1). Both must be set together;
+	// one without the other is a validation error. EndLine >= StartLine.
+	// Ranges let a large file deliver only the relevant span instead of
+	// paying whole-file delivery.
+	StartLine *int `json:"start_line,omitempty"`
+	EndLine   *int `json:"end_line,omitempty"`
+}
+
+// HasRange reports whether the query carries a line-range selector.
+func (c ContextQuery) HasRange() bool {
+	return c.StartLine != nil && c.EndLine != nil
+}
+
+// MaxAggregateContextQueries bounds the QUERIES PER REQUEST, not each
+// query. One request with a hundred tiny reads is the same flood as one
+// huge read, so the aggregate gets its own bound.
+const MaxAggregateContextQueries = 16
+
+// MaxAggregateContextBytes bounds the request's total MaxChars budget: the
+// sum of per-query budgets across the request. Per-query validation alone
+// would let 16 x 20000-byte reads through as "bounded".
+const MaxAggregateContextBytes = 64000
+
+// validateRange checks the optional line-range selector's internal
+// consistency. File-relative bounds (EOF clamping) are the fulfillment
+// path's job; this validates the request shape.
+func (c ContextQuery) validateRange() error {
+	if (c.StartLine == nil) != (c.EndLine == nil) {
+		return errors.New("start_line and end_line must be set together")
+	}
+	if c.StartLine == nil {
+		return nil
+	}
+	if *c.StartLine < 1 {
+		return errors.New("start_line must be >= 1")
+	}
+	if *c.EndLine < *c.StartLine {
+		return fmt.Errorf("end_line %d precedes start_line %d", *c.EndLine, *c.StartLine)
+	}
+	return nil
 }
 
 // Validate checks that the query type has the required fields.
@@ -171,7 +212,43 @@ func (c ContextQuery) Validate() error {
 	if c.MaxChars < 1 || c.MaxChars > 20000 {
 		return errors.New("max_chars must be between 1 and 20000")
 	}
+	if err := c.validateRange(); err != nil {
+		return err
+	}
 	return nil
+}
+
+// AggregateValidate checks the bounds that only exist across a request:
+// the number of queries and the SUM of their MaxChars budgets. Per-query
+// Validate is necessary but not sufficient; a request of many legal
+// queries can still be unbounded in aggregate.
+func (c ContextRequest) AggregateValidate() error {
+	if len(c.Queries) > MaxAggregateContextQueries {
+		return fmt.Errorf("request carries %d queries, more than the %d-query aggregate bound", len(c.Queries), MaxAggregateContextQueries)
+	}
+	total := 0
+	for _, q := range c.Queries {
+		total += q.MaxChars
+	}
+	if total > MaxAggregateContextBytes {
+		return fmt.Errorf("request aggregates %d max-chars across queries, more than the %d-byte bound", total, MaxAggregateContextBytes)
+	}
+	return nil
+}
+
+// FitAggregate drops queries from the end until the request is within the
+// aggregate bounds, and returns how many it dropped. Callers compose
+// requests in priority order (listing, named and evidence paths, files
+// memory knows are needed, fallback reads last), so the drop removes the
+// least valuable reads. Without it, a composed request (an evidence plan
+// plus memory prefetch) exceeded the bound and failed the whole stage.
+func (c *ContextRequest) FitAggregate() int {
+	dropped := 0
+	for len(c.Queries) > 0 && c.AggregateValidate() != nil {
+		c.Queries = c.Queries[:len(c.Queries)-1]
+		dropped++
+	}
+	return dropped
 }
 
 // ContextRequest is a bounded pull-channel request emitted by an agent.
@@ -220,6 +297,12 @@ func (c ContextItem) Validate() error {
 type ContextBundle struct {
 	Request ContextRequest `json:"request"`
 	Items   []ContextItem  `json:"items,omitempty"`
+	// HostNotes are authoritative host-side statements about the delivered
+	// context, rendered with the items. The M6 campaigns showed a model
+	// confabulating "elided ranges" in complete delivered views and
+	// spending its whole expansion allowance re-requesting files it
+	// already held; the no-new-bytes note answers that directly.
+	HostNotes []string `json:"host_notes,omitempty"`
 }
 
 // Validate checks the context bundle.
@@ -349,6 +432,10 @@ type ExecutionPlan struct {
 	// TopologyName names the resolved topology that produced this plan. It is
 	// empty for a plan built before topology resolution existed.
 	TopologyName string `json:"topology_name,omitempty"`
+	// RemovedStages names each stage the flag set removed from the compiled
+	// topology, with the reason: "flag <name> is off" or "dependency <name>
+	// was removed". A stage the tier filtered out is not listed.
+	RemovedStages map[string]string `json:"removed_stages,omitempty"`
 }
 
 // Validate checks the execution plan.
@@ -407,25 +494,32 @@ func (e ExecutionPlan) Validate() error {
 }
 
 // StageRecord is a persistable summary of an executed stage.
+// TestCommand is the expanded command used by a completed test_runner
+// invocation. It is empty for other stages and skipped test runs.
 type StageRecord struct {
-	Name              string      `json:"name"`
-	Status            StageStatus `json:"status"`
-	Iteration         int         `json:"iteration"`
-	Provider          *string     `json:"provider,omitempty"`
-	Model             *string     `json:"model,omitempty"`
-	Confidence        *float64    `json:"confidence,omitempty"`
-	OutputSummary     *string     `json:"output_summary,omitempty"`
-	Activity          *string     `json:"activity,omitempty"`
-	TokensInput       int         `json:"tokens_input"`
-	TokensOutput      int         `json:"tokens_output"`
-	TokensCached      int         `json:"tokens_cached"`
-	TokensCacheWrite  int         `json:"tokens_cache_write"`
-	TokensReasoning   int         `json:"tokens_reasoning"`
-	WebSearchRequests int         `json:"web_search_requests"`
-	WebSearchEngine   string      `json:"web_search_engine,omitempty"`
-	CostUSD           float64     `json:"cost_usd"`
-	LatencyMs         int         `json:"latency_ms"`
-	CommitSHA         *string     `json:"commit_sha,omitempty"`
+	Name          string      `json:"name"`
+	Status        StageStatus `json:"status"`
+	Iteration     int         `json:"iteration"`
+	Provider      *string     `json:"provider,omitempty"`
+	Model         *string     `json:"model,omitempty"`
+	Confidence    *float64    `json:"confidence,omitempty"`
+	OutputSummary *string     `json:"output_summary,omitempty"`
+	// FailureKind classifies a failed stage for the trajectory monitor. Empty
+	// for a stage that did not fail. The closed set is NodeFailureStageError,
+	// NodeFailureTestFailure, and NodeFailureNone.
+	FailureKind       string  `json:"failure_kind,omitempty"`
+	Activity          *string `json:"activity,omitempty"`
+	TokensInput       int     `json:"tokens_input"`
+	TokensOutput      int     `json:"tokens_output"`
+	TokensCached      int     `json:"tokens_cached"`
+	TokensCacheWrite  int     `json:"tokens_cache_write"`
+	TokensReasoning   int     `json:"tokens_reasoning"`
+	WebSearchRequests int     `json:"web_search_requests"`
+	WebSearchEngine   string  `json:"web_search_engine,omitempty"`
+	CostUSD           float64 `json:"cost_usd"`
+	LatencyMs         int     `json:"latency_ms"`
+	CommitSHA         *string `json:"commit_sha,omitempty"`
+	TestCommand       string  `json:"test_command,omitempty"`
 	// MemoryReviews is invocation-ordered. Repair re-entry appends another
 	// review to the same {stage, iteration} record. Legacy traces without the
 	// field remain valid: it is optional and additive.
@@ -446,6 +540,13 @@ func (s StageRecord) Validate() error {
 	case StagePending, StageRunning, StageCompleted, StageFailed, StageSkipped, StageIncomplete:
 	default:
 		return fmt.Errorf("invalid status %q", s.Status)
+	}
+	if s.FailureKind != "" {
+		switch s.FailureKind {
+		case NodeFailureStageError, NodeFailureTestFailure, NodeFailureNone:
+		default:
+			return fmt.Errorf("invalid failure_kind %q", s.FailureKind)
+		}
 	}
 	if s.Iteration < 0 {
 		return errors.New("iteration must be >= 0")
@@ -488,9 +589,13 @@ type HarnessStageInput struct {
 	// PriorChangedFiles carries structured paths from completed earlier stages.
 	// It complements PriorSummaries, which remains the prose hand-off channel.
 	PriorChangedFiles map[string][]string `json:"prior_changed_files,omitempty"`
-	RevisionContext   *string             `json:"revision_context,omitempty"`
-	Context           *ContextBundle      `json:"context,omitempty"`
-	MemoryBundle      *MemoryBundle       `json:"memory_bundle,omitempty"`
+	// WriterStage is the plan name of the code writer when a topology renames
+	// it. Empty means the builtin name. Stages show it to the model, so it is
+	// the name the model sees.
+	WriterStage     string         `json:"writer_stage,omitempty"`
+	RevisionContext *string        `json:"revision_context,omitempty"`
+	Context         *ContextBundle `json:"context,omitempty"`
+	MemoryBundle    *MemoryBundle  `json:"memory_bundle,omitempty"`
 	// PipelineStages is the full ordered roster of stage names for this run,
 	// so a stage can see what will (and will not) run after it. Empty outside
 	// a tier pipeline (e.g. design-phase stages), where no roster applies.
@@ -619,6 +724,46 @@ const (
 	MemoryPositionBeforePrefix = "before_prefix"
 )
 
+// Spend sources classify why a provider request exists (Package F1, warm-cost
+// handoff Section 10). The accounting identity of WorkflowCostReport sums
+// these sources; every priced request must carry exactly one.
+const (
+	// SpendSourceGeneration is the initial pass of a planned stage.
+	SpendSourceGeneration = "generation"
+	// SpendSourceFormatRetry is a repeated request under the same D3 request
+	// identity: typed-output format retries and forced-choice compatibility
+	// retries within one stage invocation.
+	SpendSourceFormatRetry = "format_retry"
+	// SpendSourceExpansion is a bounded context-expansion round (D2).
+	SpendSourceExpansion = "expansion"
+	// SpendSourceRepair is a repair re-entry of a stage (test-failure loop).
+	SpendSourceRepair = "repair"
+	// SpendSourceCapture is a provider request issued for memory capture or
+	// maintenance work. Capture is currently deterministic (digests plus
+	// sidecar writes); the source stays reserved so a future capture-time
+	// model call lands in the ledger instead of outside it.
+	SpendSourceCapture = "capture"
+	// SpendSourceAuxiliary is any model call outside the planned stage
+	// sequence, such as step-back analysis.
+	SpendSourceAuxiliary = "auxiliary"
+	// SpendSourceDecision is a decision-advisor (Jev) request. Its record
+	// names the question pack in DecisionPack.
+	SpendSourceDecision = "decision"
+	// SpendSourceCompaction is a summarizer request made by the plain agent loop.
+	SpendSourceCompaction = "compaction"
+)
+
+// ValidSpendSource reports whether s is a recognized spend source.
+func ValidSpendSource(s string) bool {
+	switch s {
+	case "", SpendSourceGeneration, SpendSourceFormatRetry, SpendSourceExpansion,
+		SpendSourceRepair, SpendSourceCapture, SpendSourceAuxiliary, SpendSourceDecision,
+		SpendSourceCompaction:
+		return true
+	}
+	return false
+}
+
 // PipelineUsageRecord is one provider request priced at the orchestrator ledger.
 type PipelineUsageRecord struct {
 	Sequence          int      `json:"sequence"`
@@ -626,6 +771,9 @@ type PipelineUsageRecord struct {
 	Model             string   `json:"model,omitempty"`
 	Stage             string   `json:"stage"`
 	Iteration         int      `json:"iteration"`
+	InvocationOrdinal int      `json:"invocation_ordinal,omitempty"`
+	ContextRound      int      `json:"context_round,omitempty"`
+	SpendSource       string   `json:"spend_source,omitempty"`
 	UsageReported     bool     `json:"usage_reported"`
 	InputTokens       int      `json:"input_tokens"`
 	OutputTokens      int      `json:"output_tokens"`
@@ -645,6 +793,15 @@ type PipelineUsageRecord struct {
 	// share one hash; a change between rounds means the cacheable prefix
 	// flipped and the provider's prefix cache was forfeited.
 	PromptLayoutHash string `json:"prompt_layout_hash,omitempty"`
+	// RequestID is the provider's request/correlation identity (OpenRouter's
+	// X-Generation-Id response header), when the backend reports one. A
+	// reconciliation replaces the estimate keyed to THIS request; an empty
+	// value means the backend reported none, and reconciliation cannot
+	// target the request.
+	RequestID string `json:"request_id,omitempty"`
+	// DecisionPack names the question pack of a decision-advisor request
+	// (spend source "decision"), for example prefetch_need_v1 or traj_v1.
+	DecisionPack string `json:"decision_pack,omitempty"`
 	// CacheHit reports whether this request read a cached prefix. Nil means the
 	// provider reported no usage, or the report could not be normalized. A
 	// missing report is not a cache miss, so the field stays nil rather than
@@ -701,6 +858,12 @@ func (r PipelineUsageRecord) Validate() error {
 		if *r.CacheHit != (r.CachedTokens > 0) {
 			return fmt.Errorf("cache_hit %t does not match cached input tokens %d", *r.CacheHit, r.CachedTokens)
 		}
+	}
+	if !ValidSpendSource(r.SpendSource) {
+		return fmt.Errorf("invalid spend_source %q", r.SpendSource)
+	}
+	if r.InvocationOrdinal < 0 || r.ContextRound < 0 {
+		return errors.New("invocation ordinal and context round must be non-negative")
 	}
 	switch r.CostStatus {
 	case CostStatusPriced:
@@ -765,6 +928,13 @@ type PipelineResult struct {
 	// prompt_layout_hash carries no layout to compare and is skipped.
 	PromptLayoutFlips int     `json:"prompt_layout_flips,omitempty"`
 	AbortReason       *string `json:"abort_reason,omitempty"`
+	// Verified is true only when at least one verification check passed and
+	// no stage was incomplete or failed. A completed run that verified nothing
+	// has Status "completed" and Verified false: it is never shown as verified.
+	Verified bool `json:"verified"`
+	// UnverifiedReason names why a completed run is not verified: which checks
+	// did not apply. Empty when Verified is true.
+	UnverifiedReason string `json:"unverified_reason,omitempty"`
 	// UserAborted marks an aborted run the USER chose to stop. It is set
 	// only at the site that applies a user abort decision. Every other
 	// aborted run is an internal stop (max iterations, wall time, rollback
@@ -774,6 +944,11 @@ type PipelineResult struct {
 	MergeBranch    *string `json:"merge_branch,omitempty"`
 	MergeCommitSHA *string `json:"merge_commit_sha,omitempty"`
 	MergeMessage   *string `json:"merge_message,omitempty"`
+	// FinalState is the last computed iteration state, attached additively
+	// so post-run consumers (graph capture) can read EXECUTED verification
+	// counts instead of inferring them from stage status. Optional: legacy
+	// producers omit it and legacy consumers ignore it.
+	FinalState *IterationState `json:"final_state,omitempty"`
 }
 
 // Validate checks the pipeline result.

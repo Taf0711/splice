@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# J4 — session-reopen journey.
+# J4: session-reopen journey.
 # First run creates a session; `splice sessions list` finds it; --resume
 # continues it with a follow-up prompt; the lineage shows continuity.
 set -u

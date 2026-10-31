@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -126,5 +127,112 @@ func TestRepoRootQueryCandidatesPinsBothForms(t *testing.T) {
 	}
 	if got := repoRootQueryCandidates("/no/such/path-zzz"); len(got) != 1 || got[0] != "/no/such/path-zzz" {
 		t.Fatalf("unresolvable path must yield exactly itself, got %v", got)
+	}
+}
+
+// TestParsePipelineResultTokensReadsLedgerTotals pins the symmetric token
+// source: the final stream-json event carries the authoritative request
+// ledger, and both arms read it. A transcript without a final event reports
+// found=false so the caller falls back to stream-json instead of guessing.
+func TestParsePipelineResultTokensReadsLedgerTotals(t *testing.T) {
+	result := schemas.PipelineResult{
+		RunID:             "r",
+		Status:            "completed",
+		Tier:              schemas.TierLight,
+		TotalTokensInput:  100,
+		TotalTokensOutput: 40,
+	}
+	text, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := json.Marshal(map[string]string{"type": "final", "text": string(text)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := []byte("{\"type\":\"run_start\"}\n" + string(event) + "\n")
+	tokens, found := parsePipelineResultTokens(out)
+	if !found || tokens != 140 {
+		t.Fatalf("tokens = %d, found = %t; want 140, true", tokens, found)
+	}
+	if _, found := parsePipelineResultTokens([]byte("{\"type\":\"text\",\"delta\":\"hi\"}\n")); found {
+		t.Fatal("a transcript with no final event must report found=false")
+	}
+}
+
+// TestParsePipelineResultSpendReadsLedgerCost proves the per-row billed dollars
+// come from the producer ledger, and that a partial-coverage total is marked as
+// an estimate rather than presented as the complete attempt cost.
+func TestParsePipelineResultSpendReadsLedgerCost(t *testing.T) {
+	finalEvent := func(result schemas.PipelineResult) []byte {
+		text, err := json.Marshal(result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		event, err := json.Marshal(map[string]string{"type": "final", "text": string(text)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return append(event, '\n')
+	}
+	record := schemas.PipelineUsageRecord{Sequence: 1, Stage: "code_writer", Iteration: 1}
+
+	complete := finalEvent(schemas.PipelineResult{
+		RunID: "r", Status: "completed", Tier: schemas.TierLight,
+		TotalCostUSD: 0.0123, CostCoverage: schemas.CostCoverageComplete,
+		UsageRecords: []schemas.PipelineUsageRecord{record},
+	})
+	usd, estimated, source := parsePipelineResultSpend(complete)
+	if usd == nil || *usd != 0.0123 {
+		t.Fatalf("usd = %v, want 0.0123", usd)
+	}
+	if estimated == nil || *estimated {
+		t.Fatalf("estimated = %v, want false for complete coverage", estimated)
+	}
+	if source != "ledger" {
+		t.Fatalf("source = %q, want ledger", source)
+	}
+
+	partial := finalEvent(schemas.PipelineResult{
+		RunID: "r", Status: "completed", Tier: schemas.TierLight,
+		TotalCostUSD: 0.004, CostCoverage: schemas.CostCoveragePartial,
+		UsageRecords: []schemas.PipelineUsageRecord{record},
+	})
+	usd, estimated, _ = parsePipelineResultSpend(partial)
+	if usd == nil || *usd != 0.004 {
+		t.Fatalf("partial usd = %v, want 0.004", usd)
+	}
+	if estimated == nil || !*estimated {
+		t.Fatalf("estimated = %v, want true for partial coverage", estimated)
+	}
+
+	// No final result and a final with no usage records both mean UNKNOWN,
+	// never a fabricated zero.
+	usd, estimated, source = parsePipelineResultSpend([]byte("{\"type\":\"run_start\"}\n"))
+	if usd != nil || estimated != nil || source != "unavailable" {
+		t.Fatalf("no final: usd=%v estimated=%v source=%q, want nil/nil/unavailable", usd, estimated, source)
+	}
+	empty := finalEvent(schemas.PipelineResult{
+		RunID: "r", Status: "completed", Tier: schemas.TierLight,
+	})
+	usd, _, source = parsePipelineResultSpend(empty)
+	if usd != nil || source != "unavailable" {
+		t.Fatalf("empty ledger: usd=%v source=%q, want nil/unavailable", usd, source)
+	}
+}
+
+// TestSpendSumKeepsUnknownApartFromZero proves a row without a producer cost is
+// counted as unknown, and an estimated row taints the aggregate total.
+func TestSpendSumKeepsUnknownApartFromZero(t *testing.T) {
+	v := 0.0025
+	est := true
+	var s spendSum
+	s.add(familyPairRow{})
+	s.add(familyPairRow{BilledUSD: &v, BilledUSDEstimated: &est})
+	got := s.String()
+	for _, want := range []string{"$0.0025", "1 unknown", "estimated"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("spendSum %q missing %q", got, want)
+		}
 	}
 }

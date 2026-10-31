@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -87,6 +88,10 @@ func TestRunPathsFollowCallbackPolicies(t *testing.T) {
 		// OnPresentationState is shared-live since P1.2: both the exec CLI
 		// and the TUI render from presentation state snapshots.
 		"OnPresentationState": {class: "shared-live", execNonNil: true, approveNonNil: true},
+		// OnNotice is set by both TUI pipeline paths, where it becomes a system
+		// row. Headless exec (internal/cli) leaves it nil, so notices use the
+		// progress stream.
+		"OnNotice": {class: "shared-live", execNonNil: true, approveNonNil: true},
 	}
 
 	execValue := reflect.ValueOf(execOptions)
@@ -390,5 +395,45 @@ func TestDecorateProvidesSurfaceToUserFallback(t *testing.T) {
 	}
 	if decision.Action != agent.SurfaceToUserContinue || decision.Message != "continue with focused tests" {
 		t.Fatalf("surface decision = %#v", decision)
+	}
+}
+
+// TestPresentationPersistenceCoalescesSpendOnlySnapshots pins finding 7 of
+// the Phase 1 review: a run with 50 provider requests persists a bounded
+// number of snapshots, and the last persisted one is the final state, so the
+// last-state-wins replay keeps the spend.
+func TestPresentationPersistenceCoalescesSpendOnlySnapshots(t *testing.T) {
+	var recorded []presentation.State
+	decorated := (runtimeWiring{recordEvent: func(event pendingSessionEvent) {
+		payload := event.Payload.(map[string]any)
+		var state presentation.State
+		if err := json.Unmarshal(payload["presentation_state"].(json.RawMessage), &state); err != nil {
+			t.Fatal(err)
+		}
+		recorded = append(recorded, state)
+	}}).decorate(agent.Options{})
+	state, err := presentation.Apply(presentation.State{}, presentation.PlanEvent{StageNames: []string{"code_writer"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	apply := func(event presentation.StreamEventLike) {
+		t.Helper()
+		if state, err = presentation.Apply(state, event); err != nil {
+			t.Fatal(err)
+		}
+		decorated.OnPresentationState(state)
+	}
+	decorated.OnPresentationState(state)
+	apply(presentation.StageEvent{ID: "code_writer", Kind: presentation.NodeKindWrite, Status: "running"})
+	for i := 0; i < 50; i++ {
+		apply(presentation.UsageEvent{NodeID: "code_writer", Usage: presentation.TokenUsage{InputTokens: 10, OutputTokens: 1}})
+	}
+	apply(presentation.StageEvent{ID: "code_writer", Kind: presentation.NodeKindWrite, Status: "completed", Progress: 100})
+	apply(presentation.RunEvent{Status: "completed"})
+	if len(recorded) > 4 {
+		t.Fatalf("persisted %d snapshots for a 50-request run, want at most 4", len(recorded))
+	}
+	if final := recorded[len(recorded)-1]; final.Completion == nil || final.Nodes[0].Cost.Tokens != 550 {
+		t.Fatalf("last persisted snapshot = %+v, want the final state with all spend", final)
 	}
 }

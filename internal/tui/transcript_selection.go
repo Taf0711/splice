@@ -316,6 +316,10 @@ func (m model) buildTranscriptBodyItems(width int, emptyOverlay string, detailed
 		}
 		if startIdx > 0 {
 			previousKind, havePreviousKind = m.flushedPreviousKind, m.flushedHavePreviousKind
+			// A visible row above the frontier counts as shown, so the
+			// tool-card spacing rules match a full rebuild and the live tail
+			// does not shift by a line when it settles.
+			shownAny = havePreviousKind
 		} else {
 			previousKind, havePreviousKind = previousVisibleTranscriptKind(m.transcript, startIdx, rc)
 		}
@@ -649,7 +653,9 @@ func layoutTranscriptBodyItems(items []transcriptBodyItem) transcriptBodyLayout 
 }
 
 func measureTranscriptBodyItems(items []transcriptBodyItem, cache *transcriptBodyHeightCache) transcriptBodyLayout {
-	layout := transcriptBodyLayout{}
+	// Sized up front: this runs every frame over the whole history, and
+	// growing from empty allocated ~5x the final slice in doubling garbage.
+	layout := transcriptBodyLayout{spans: make([]transcriptBodyItemSpan, 0, len(items))}
 	startY := 0
 	for _, item := range items {
 		height := transcriptBodyItemHeight(item, cache)

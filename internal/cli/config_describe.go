@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Taf0711/splice/internal/config"
+	"github.com/Taf0711/splice/internal/modelregistry"
 	splicerun "github.com/Taf0711/splice/internal/splice"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
@@ -33,22 +35,30 @@ type describeEnvelope struct {
 	Reserve     int    `json:"reserve"`
 	Overflow    string `json:"overflowPolicy"`
 	Origin      string `json:"origin"`
+	// AgentInput and AgentOutput are the agent nodes' explicit caps. They are
+	// added on top of TotalInput and TotalOutput, not drawn from them.
+	AgentInput  int `json:"agentInput,omitempty"`
+	AgentOutput int `json:"agentOutput,omitempty"`
 }
 
 type describeNode struct {
-	Name                 string   `json:"name"`
-	Type                 string   `json:"type"`
-	Tiers                []string `json:"tiers,omitempty"`
-	ModelOrigin          string   `json:"modelOrigin"`
-	ModelProfile         string   `json:"modelProfile,omitempty"`
-	Model                string   `json:"model,omitempty"`
-	Effort               string   `json:"effort,omitempty"`
-	BudgetInput          int      `json:"budgetInput"`
-	BudgetOutput         int      `json:"budgetOutput"`
-	ModelFree            bool     `json:"modelFree"`
-	PullContext          bool     `json:"pullContext"`
-	PullMemory           bool     `json:"pullMemory"`
-	ProducesVerification bool     `json:"producesVerification"`
+	Name         string   `json:"name"`
+	Type         string   `json:"type"`
+	Tiers        []string `json:"tiers,omitempty"`
+	ModelOrigin  string   `json:"modelOrigin"`
+	ModelProfile string   `json:"modelProfile,omitempty"`
+	Model        string   `json:"model,omitempty"`
+	// ResolvedModel names the model the tier layer would pick when the origin
+	// is "tier". It is empty for every other origin and when the provider
+	// config cannot be read.
+	ResolvedModel        string `json:"resolvedModel,omitempty"`
+	Effort               string `json:"effort,omitempty"`
+	BudgetInput          int    `json:"budgetInput"`
+	BudgetOutput         int    `json:"budgetOutput"`
+	ModelFree            bool   `json:"modelFree"`
+	PullContext          bool   `json:"pullContext"`
+	PullMemory           bool   `json:"pullMemory"`
+	ProducesVerification bool   `json:"producesVerification"`
 }
 
 type describeStageModel struct {
@@ -121,19 +131,13 @@ func buildDescribeReport(deps appDeps, tier schemas.PipelineTier) (describeRepor
 	if err != nil {
 		return describeReport{}, err
 	}
-	compiled, err := splicerun.CompileTopology(topology, tier)
-	if err != nil {
-		return describeReport{}, err
-	}
 	stageConfig, stageConfigPath, err := loadDescribeStageModels(deps)
 	if err != nil {
 		return describeReport{}, err
 	}
-	labels := splicerun.StageTierLabelsFor(topology)
-
-	nodesByName := make(map[string]schemas.PipelineNode, len(topology.Nodes))
-	for _, node := range topology.Nodes {
-		nodesByName[node.Name] = node
+	compiled, nodes, err := splicerun.DescribeTopology(topology, tier, stageConfig)
+	if err != nil {
+		return describeReport{}, err
 	}
 
 	envelopeOrigin := "tier envelope"
@@ -147,11 +151,13 @@ func buildDescribeReport(deps appDeps, tier schemas.PipelineTier) (describeRepor
 		Trusted:        trusted,
 		Tier:           string(tier),
 		Envelope: describeEnvelope{
-			TotalInput:  compiled.Budget.TotalInputBudget,
-			TotalOutput: compiled.Budget.TotalOutputBudget,
+			TotalInput:  compiled.TierInput,
+			TotalOutput: compiled.TierOutput,
 			Reserve:     compiled.Budget.Reserve,
 			Overflow:    compiled.Budget.OverflowPolicy,
 			Origin:      envelopeOrigin,
+			AgentInput:  compiled.AgentInput,
+			AgentOutput: compiled.AgentOutput,
 		},
 		StageModels: describeStageModel{Path: stageConfigPath, Stages: map[string]string{}},
 	}
@@ -162,33 +168,22 @@ func buildDescribeReport(deps appDeps, tier schemas.PipelineTier) (describeRepor
 		report.StageModels.Stages[name] = formatModelConfig(cfg)
 	}
 
-	for _, stage := range compiled.Stages {
-		node := nodesByName[stage.Name]
-		caps := schemas.NodeCapabilities{}
-		if stage.Caps != nil {
-			caps = *stage.Caps
-		}
-		modelCfg, origin := schemas.StageModelConfig{}, ""
-		if caps.ModelFree {
-			// A model-free node never resolves a model, so reporting a route
-			// would be noise.
-			origin = "model-free"
-		} else {
-			modelCfg, origin = splicerun.ResolveModelRoute(stage.Name, stage.Model, stageConfig, labels[stage.Name] != "")
-		}
+	tierModels := describeTierModels(deps, workspaceRoot, nodes)
+	for _, node := range nodes {
 		entry := describeNode{
-			Name:                 stage.Name,
+			Name:                 node.Name,
+			ResolvedModel:        tierModels[node.Name],
 			Type:                 node.Type,
-			ModelOrigin:          origin,
-			ModelProfile:         modelCfg.ProviderProfile,
-			Model:                modelCfg.Model,
-			Effort:               modelCfg.ReasoningEffort,
-			BudgetInput:          stage.Budget.InputMax,
-			BudgetOutput:         stage.Budget.OutputMax,
-			ModelFree:            caps.ModelFree,
-			PullContext:          caps.PullContext != nil && *caps.PullContext,
-			PullMemory:           caps.PullMemory != nil && *caps.PullMemory,
-			ProducesVerification: caps.ProducesVerification,
+			ModelOrigin:          node.ModelOrigin,
+			ModelProfile:         node.Model.ProviderProfile,
+			Model:                node.Model.Model,
+			Effort:               node.Model.ReasoningEffort,
+			BudgetInput:          node.Budget.InputMax,
+			BudgetOutput:         node.Budget.OutputMax,
+			ModelFree:            node.Caps.ModelFree,
+			PullContext:          node.Caps.PullContext != nil && *node.Caps.PullContext,
+			PullMemory:           node.Caps.PullMemory != nil && *node.Caps.PullMemory,
+			ProducesVerification: node.Caps.ProducesVerification,
 		}
 		for _, nodeTier := range node.Tiers {
 			entry.Tiers = append(entry.Tiers, string(nodeTier))
@@ -196,6 +191,34 @@ func buildDescribeReport(deps appDeps, tier schemas.PipelineTier) (describeRepor
 		report.Nodes = append(report.Nodes, entry)
 	}
 	return report, nil
+}
+
+// describeTierModels resolves the tier layer for each node that names it. A
+// missing or unreadable provider config leaves the map empty, so describe still
+// reports the topology without a provider.
+func describeTierModels(deps appDeps, workspaceRoot string, nodes []splicerun.NodeDescription) map[string]string {
+	out := make(map[string]string)
+	if deps.resolveConfig == nil {
+		return out
+	}
+	resolved, err := deps.resolveConfig(workspaceRoot, config.Overrides{})
+	if err != nil {
+		return out
+	}
+	registry, err := modelregistry.DefaultRegistry(resolved.Provider.Name)
+	if err != nil {
+		return out
+	}
+	for _, node := range nodes {
+		if node.ModelOrigin != splicerun.ModelOriginTier {
+			continue
+		}
+		entry := splicerun.ResolveStageTierModel(node.Name, resolved.Provider, registry)
+		if entry != nil {
+			out[node.Name] = entry.ID
+		}
+	}
+	return out
 }
 
 func loadDescribeStageModels(deps appDeps) (schemas.StageModelConfigFile, string, error) {
@@ -225,6 +248,9 @@ func formatDescribeReport(report describeReport) string {
 	fmt.Fprintf(&b, "workspace: %s (%s)\n", report.Workspace, trustLabel(report.Trusted))
 	fmt.Fprintf(&b, "envelope (%s): input=%d output=%d reserve=%d overflow=%s (origin: %s)\n",
 		report.Tier, report.Envelope.TotalInput, report.Envelope.TotalOutput, report.Envelope.Reserve, report.Envelope.Overflow, report.Envelope.Origin)
+	if report.Envelope.AgentInput > 0 || report.Envelope.AgentOutput > 0 {
+		fmt.Fprintf(&b, "+ agent nodes: input=%d output=%d (added on top of the envelope)\n", report.Envelope.AgentInput, report.Envelope.AgentOutput)
+	}
 	fmt.Fprintf(&b, "nodes (%s):\n", report.Tier)
 	for _, node := range report.Nodes {
 		model := "primary"
@@ -233,6 +259,8 @@ func formatDescribeReport(report describeReport) string {
 			if node.Effort != "" {
 				model += " (" + node.Effort + ")"
 			}
+		} else if node.ModelOrigin == splicerun.ModelOriginTier && node.ResolvedModel != "" {
+			model = node.ResolvedModel + " (tier)"
 		}
 		tiers := "all tiers"
 		if len(node.Tiers) > 0 {

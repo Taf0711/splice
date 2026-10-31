@@ -1,0 +1,7 @@
+{
+  "name": "fut-hidden-04-write",
+  "phase": "write",
+  "prompt": "In the perms package, add the permission \"billing:export\" to the permissions roles can hold.",
+  "check": "# fut-hidden-04 A\ncat > internal/perms/probe_billing_export_test.go <<'EOF'\npackage perms\n\nimport (\n\t\"slices\"\n\t\"testing\"\n)\n\nfunc TestProbe(t *testing.T) {\n\tif !slices.Contains(Names, \"billing:export\") {\n\t\tt.Fatal(\"Names lacks billing:export\")\n\t}\n}\nEOF\ngo test -count=1 ./... ; rc=$?\nrm -f internal/perms/probe_billing_export_test.go\nexit $rc\n",
+  "fixture": "../../chain-families/fixture-hidden"
+}

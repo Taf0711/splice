@@ -1,0 +1,8 @@
+{
+  "name": "chn-03-read",
+  "phase": "read",
+  "precursor": "chn-03-write",
+  "prompt": "In the jobs package, add the job type \"rebuild-index\" to the job types the scheduler accepts.",
+  "check": "# chn-03 B\ncat > internal/jobs/probe_rebuild_index_test.go <<'EOF'\npackage jobs\n\nimport (\n\t\"slices\"\n\t\"testing\"\n)\n\nfunc TestProbe(t *testing.T) {\n\tif !slices.Contains(Types, \"rebuild-index\") {\n\t\tt.Fatal(\"Types lacks rebuild-index\")\n\t}\n}\nEOF\ngo test -count=1 ./... ; rc=$?\nrm -f internal/jobs/probe_rebuild_index_test.go\nexit $rc\n",
+  "fixture": "../../chain-families/fixture"
+}

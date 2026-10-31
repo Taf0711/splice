@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/Taf0711/splice/internal/agent"
 	splicerun "github.com/Taf0711/splice/internal/splice"
+	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
 // SPLICE_TUI_DEMO=worktree-reject is a demo-only seam for scripts/tui-worktree-reject.tape.
@@ -67,5 +69,17 @@ func replayWorktreeRejectDemo(ctx context.Context, options agent.Options) (agent
 	if dir := strings.TrimSpace(options.Cwd); dir != "" {
 		_ = os.WriteFile(filepath.Join(dir, "add.go"), []byte("package add\n\nfunc Add(a, b int) int { return a + b }\n"), 0o644)
 	}
-	return agent.Result{FinalAnswer: "Fixed the planted failing test in the worktree."}, nil
+	// The answer is a pipeline result, as splicerun.Run returns, so the
+	// turn receipt reads it like a real run.
+	answer, err := json.Marshal(schemas.PipelineResult{
+		RunID:      "demo-worktree-reject",
+		Status:     "completed",
+		Tier:       schemas.TierLight,
+		Verified:   true,
+		FinalState: &schemas.IterationState{TestsPassing: 1},
+	})
+	if err != nil {
+		return agent.Result{}, err
+	}
+	return agent.Result{FinalAnswer: string(answer)}, nil
 }

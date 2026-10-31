@@ -90,6 +90,10 @@ func ResolveStageTierModel(stageName string, primaryProfile config.ProviderProfi
 	case config.ProviderKindOpenAICompatible, config.ProviderKindAnthropicCompat:
 		return nil
 	}
+	primaryKind := RegistryProviderKind(primaryProfile.ProviderKind)
+	if primaryKind == "" {
+		return nil
+	}
 	entry, ok := registry.Resolve(primaryProfile.Model)
 	if !ok {
 		return nil
@@ -100,6 +104,9 @@ func ResolveStageTierModel(stageName string, primaryProfile config.ProviderProfi
 		var best modelregistry.ModelEntry
 		for _, candidate := range candidates {
 			if candidate.ID == entry.ID {
+				continue
+			}
+			if !candidate.AllowsEndpointFamily(primaryKind) {
 				continue
 			}
 			if !candidate.Supports(modelregistry.ModelCapabilityToolCalling) || !candidate.Supports(modelregistry.ModelCapabilityReasoning) {
@@ -121,6 +128,9 @@ func ResolveStageTierModel(stageName string, primaryProfile config.ProviderProfi
 	var best modelregistry.ModelEntry
 	for _, candidate := range candidates {
 		if candidate.ID == entry.ID {
+			continue
+		}
+		if !candidate.AllowsEndpointFamily(primaryKind) {
 			continue
 		}
 		if !candidate.Supports(modelregistry.ModelCapabilityToolCalling) {
@@ -168,6 +178,9 @@ func buildCachedProvider(
 	newProvider func(config.ProviderProfile) (agent.Provider, error),
 	providerCache map[string]agent.Provider,
 ) (agent.ModelSelection, error) {
+	if primaryKind := RegistryProviderKind(primaryProfile.ProviderKind); primaryKind != "" && !candidate.AllowsEndpointFamily(primaryKind) {
+		return agent.ModelSelection{}, fmt.Errorf("model %q is not served by the %s endpoint family", candidate.ID, primaryProfile.ProviderKind)
+	}
 	selection := agent.ModelSelection{ProviderName: primaryProfile.Name, Model: candidate.ID}
 	key := providerCacheKey(primaryProfile.Name, candidate.APIModel, "")
 	if cached, ok := providerCache[key]; ok {
@@ -186,6 +199,24 @@ func buildCachedProvider(
 	providerCache[key] = provider
 	selection.Provider = provider
 	return selection, nil
+}
+
+// RegistryProviderKind maps a configured provider kind to the model registry's
+// endpoint family. A compatible transport has no first-party family, so the
+// tier resolver still declines those profiles.
+func RegistryProviderKind(kind config.ProviderKind) modelregistry.ProviderKind {
+	switch kind {
+	case config.ProviderKindOpenAI:
+		return modelregistry.ProviderOpenAI
+	case config.ProviderKindAnthropic:
+		return modelregistry.ProviderAnthropic
+	case config.ProviderKindGoogle:
+		return modelregistry.ProviderGoogle
+	case config.ProviderKindOpenAICompatible:
+		return modelregistry.ProviderOpenAICompatible
+	default:
+		return ""
+	}
 }
 
 func effectiveInputRate(cost modelregistry.ModelCost) float64 {

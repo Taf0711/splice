@@ -1,0 +1,8 @@
+{
+  "name": "cpl-03-read",
+  "phase": "read",
+  "precursor": "cpl-03-write",
+  "prompt": "In the worker package, schedule a \"purge-blobs\" job that runs every 12 hours. The storage team owns it.",
+  "check": "# cpl-03 B\nmkdir -p internal/worker\ncat > internal/worker/probe_purge_blobs_test.go <<'EOF'\npackage worker\n\nimport (\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestProbePurgeBlobs(t *testing.T) {\n\tfor _, s := range DefaultSchedules {\n\t\tif s.Name == \"purge-blobs\" && s.Every == 12*time.Hour {\n\t\t\treturn\n\t\t}\n\t}\n\tt.Fatal(\"no purge-blobs schedule every 12h\")\n}\nEOF\ngo test -count=1 ./... ; rc=$?\nrm -f internal/worker/probe_purge_blobs_test.go\nexit $rc\n",
+  "fixture": "../../coupled-families/fixture"
+}

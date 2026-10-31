@@ -3,6 +3,7 @@ package sandbox
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -103,7 +104,39 @@ func pathUnderPolicyRoot(requestedPath, root, workspaceRoot string) bool {
 		abs = filepath.Join(workspaceRoot, abs)
 	}
 	normalized := NormalizePrefixForRoot(abs, root)
-	return pathWithinRoot(root, normalized)
+	return pathWithinRoot(root, normalized) || caseFoldedWithinRoot(root, normalized)
+}
+
+// caseFoldedWithinRoot reports whether candidate names a path within root in
+// another letter case. macOS and Windows file systems are usually case
+// insensitive, so ~/.NPMRC opens ~/.npmrc. The leading components must match
+// root when case is ignored, and that prefix must be the same file as root.
+// The file check keeps a case-sensitive volume exact: there, the prefix is a
+// different directory or does not exist.
+func caseFoldedWithinRoot(root, candidate string) bool {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
+		return false
+	}
+	sep := string(filepath.Separator)
+	rootParts := strings.Split(filepath.Clean(root), sep)
+	candidateParts := strings.Split(filepath.Clean(candidate), sep)
+	if len(candidateParts) < len(rootParts) {
+		return false
+	}
+	for i, part := range rootParts {
+		if !strings.EqualFold(part, candidateParts[i]) {
+			return false
+		}
+	}
+	rootInfo, err := os.Stat(root)
+	if err != nil {
+		return false
+	}
+	prefixInfo, err := os.Stat(strings.Join(candidateParts[:len(rootParts)], sep))
+	if err != nil {
+		return false
+	}
+	return os.SameFile(rootInfo, prefixInfo)
 }
 
 // readDenied reports whether path is excluded by the DenyRead list with no
@@ -113,7 +146,14 @@ func pathUnderPolicyRoot(requestedPath, root, workspaceRoot string) bool {
 // each call, so it suits a one-shot check (the Evaluate gate). A search walk that
 // checks many paths should use ReadExclusions, which resolves the entries once.
 func readDenied(policy Policy, workspaceRoot, path string) bool {
-	return readDeniedResolved(workspaceRoot, resolvePolicyPaths(policy.DenyRead), resolvePolicyPaths(policy.AllowRead), path)
+	return readDeniedResolved(workspaceRoot, resolvePolicyPaths(toolDenyReadEntries(policy)), resolvePolicyPaths(policy.AllowRead), path)
+}
+
+// toolDenyReadEntries is the deny list of the in-process file tools: the
+// policy DenyRead entries plus the credential files. The OS profile reads only
+// policy.DenyRead.
+func toolDenyReadEntries(policy Policy) []string {
+	return append(append([]string(nil), policy.DenyRead...), credentialFileDenyPaths()...)
 }
 
 // readDeniedResolved is readDenied operating on ALREADY-resolved deny/allow roots,

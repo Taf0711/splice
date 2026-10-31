@@ -132,7 +132,8 @@ func (m model) startNewSession() model {
 		m = updated
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: fmt.Sprintf("Stopped %d loop(s) tied to the previous session.", cleared)})
 	}
-	return m
+	// Old browser links belong to the previous conversation.
+	return m.rotateWebSession()
 }
 
 func (m model) appendSessionEvent(eventType sessions.EventType, payload any) (model, error) {
@@ -213,6 +214,21 @@ func flushableSessionEvents(events []pendingSessionEvent) []pendingSessionEvent 
 	return flushable
 }
 
+// titleSessionFromFirstPrompt replaces the design placeholder with the first
+// real prompt, so /resume lists what each session was about instead of ten
+// identical "Design conversation" rows. The model auto-title can still
+// improve it later; this is the deterministic floor. A store error keeps
+// the placeholder (a title is not worth failing a turn over).
+func (m model) titleSessionFromFirstPrompt(prompt string) model {
+	if m.activeSession.Title != designSessionPlaceholderTitle || m.sessionStore == nil || strings.TrimSpace(prompt) == "" {
+		return m
+	}
+	if updated, err := m.sessionStore.UpdateTitle(m.activeSession.SessionID, tuiSessionTitle(prompt)); err == nil {
+		m.activeSession = updated
+	}
+	return m
+}
+
 func tuiSessionTitle(prompt string) string {
 	// cutRunes keeps the cut on a rune boundary — a bare byte slice could split
 	// a multi-byte rune and persist invalid UTF-8 into the session metadata.
@@ -282,11 +298,19 @@ func (m model) handleResumeCommand(args string) (model, string) {
 		rows = appendRow(rows, rowSystem, fmt.Sprintf("Stopped %d loop(s) tied to the previous session.", loopsCleared))
 	}
 	rows = appendTranscriptRowsDedup(rows, transcriptRowsFromSessionEvents(events))
+	// The summary sits at the top; the view opens at the bottom, so the
+	// next step goes where the eye lands.
+	if next := m.resumeNextStep(); next != "" {
+		rows = appendRow(rows, rowSystem, next)
+	}
 	m.transcript = rows
 	// Every rehydrated row is settled by construction, so resetting the flush
 	// frontier sends the whole resumed history to native scrollback in one
 	// batch — scrollable, selectable, and O(1) for every later frame.
 	m.resetFlushFrontier("· resumed ·")
+	if session.SessionID != previousID {
+		m = m.rotateWebSession()
+	}
 	return m, ""
 }
 
@@ -432,13 +456,6 @@ func (m model) newSessionPicker() *commandPicker {
 		if readErr == nil && !eventsHaveResumableContent(events) {
 			continue
 		}
-		// Lead with the timestamp so same-titled sessions (e.g. the same first
-		// prompt run several times) are visually distinct; the id (right, faint)
-		// stays for reference and is what selection actually resolves.
-		label := displayValue(meta.Title, "untitled")
-		if when := sessionWhen(meta.UpdatedAt, now); when != "" {
-			label = when + "  " + label
-		}
 		status := ""
 		if readErr == nil {
 			if state, stateErr := splicerun.ReconstructDesignState(events); stateErr == nil {
@@ -448,17 +465,7 @@ func (m model) newSessionPicker() *commandPicker {
 				}
 			}
 		}
-		if status != "" {
-			label += "  [" + status + "]"
-		}
-		if isWorktreeSession(meta) {
-			label = "wt: " + label
-		}
-		items = append(items, pickerItem{
-			Label: label,
-			Value: meta.SessionID,
-			Meta:  meta.SessionID,
-		})
+		items = append(items, sessionPickerItem(meta, status, now))
 	}
 	if len(items) == 0 {
 		return nil // every resumable session was an empty/failed run
@@ -509,7 +516,7 @@ func sessionPlanStatus(state splicerun.DesignState) string {
 // the picker does.
 func (m model) openTrustPromptIfRequired() model {
 	if m.trustPromptRequired || !m.trusted {
-		if cfg := describeProjectTrustConfig(m.projectConfigPath); !cfg.Empty() || cfg.ParseError != "" {
+		if cfg := describeProjectTrustConfig(m.projectTrustConfigPath()); !cfg.Empty() || cfg.ParseError != "" {
 			m.trustConfigNotice(cfg)
 		}
 	}
@@ -707,6 +714,9 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 				continue
 			}
 			switch role {
+			case "receipt":
+				// A cancelled pipeline turn persists its CANCELLED card as a receipt message.
+				rows = append(rows, transcriptRow{kind: rowError, text: content})
 			case "user":
 				rows = append(rows, transcriptRow{kind: rowUser, text: content})
 			case "assistant":
@@ -715,6 +725,10 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 				// Format pipeline result JSON as a one-line summary; non-JSON content
 				// passes through unchanged.
 				rows = append(rows, transcriptRow{kind: rowAssistant, text: formatPipelineFinalAnswer(content), final: true})
+				// A pipeline turn persisted its receipt card with its answer.
+				if receipt := payloadString(payload, "receipt"); receipt != "" {
+					rows = append(rows, transcriptRow{kind: rowError, text: receipt})
+				}
 			default:
 				rows = append(rows, transcriptRow{kind: rowSystem, text: content})
 			}
@@ -795,7 +809,10 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 				changedFiles: payloadStringSlice(payload, "changedFiles"),
 			})
 		case sessions.EventError:
-			if message := payloadString(payload, "message"); message != "" {
+			// A pipeline turn persisted its FAILED or CANCELLED card in place of the raw message.
+			if receipt := payloadString(payload, "receipt"); receipt != "" {
+				rows = append(rows, transcriptRow{kind: rowError, text: receipt})
+			} else if message := payloadString(payload, "message"); message != "" {
 				rows = append(rows, transcriptRow{kind: rowError, text: message})
 			}
 		case sessions.EventCompaction:
@@ -1075,4 +1092,26 @@ func payloadInt(payload map[string]any, key string) (int, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// sessionPickerItem is one /resume row: when, title, plan status, and the
+// model it ran on. The timestamp leads so same-titled sessions stay
+// distinct. The session id is what selection resolves, but a 40-character
+// id is noise to read, so the right column names the model instead.
+func sessionPickerItem(meta sessions.Metadata, status string, now time.Time) pickerItem {
+	label := displayValue(meta.Title, "untitled")
+	if when := sessionWhen(meta.UpdatedAt, now); when != "" {
+		label = when + "  " + label
+	}
+	if status != "" {
+		label += "  [" + status + "]"
+	}
+	if isWorktreeSession(meta) {
+		label = "wt: " + label
+	}
+	model := meta.ModelID
+	if i := strings.LastIndex(model, "/"); i >= 0 {
+		model = model[i+1:]
+	}
+	return pickerItem{Label: label, Value: meta.SessionID, Meta: model}
 }

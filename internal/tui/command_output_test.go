@@ -68,7 +68,7 @@ func TestFormatCommandCardRendersBoundedDashboard(t *testing.T) {
 				},
 			},
 		},
-		Actions: []string{"/permissions manage access", "/tools inspect catalog"},
+		Actions: []string{"/permissions show access", "/tools inspect catalog"},
 	})
 
 	want := strings.Join([]string{
@@ -79,7 +79,7 @@ func TestFormatCommandCardRendersBoundedDashboard(t *testing.T) {
 		"  provider  openai",
 		"Tools",
 		"  registered  1",
-		"actions: /permissions manage access | /tools inspect catalog",
+		"actions: /permissions show access | /tools inspect catalog",
 	}, "\n")
 
 	if got != want {

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -15,8 +17,10 @@ import (
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/config"
 	"github.com/Taf0711/splice/internal/modelregistry"
+	"github.com/Taf0711/splice/internal/presentation"
 	"github.com/Taf0711/splice/internal/sessions"
 	splicerun "github.com/Taf0711/splice/internal/splice"
+	"github.com/Taf0711/splice/internal/splice/presentrun"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/tools"
 	"github.com/Taf0711/splice/internal/zeroruntime"
@@ -660,6 +664,13 @@ func TestResumedDesignSessionExposesApproveDesignFromReconstructedState(t *testi
 			updated, _ := m.Update(testKey(tea.KeyEnter))
 			m = updated.(model)
 
+			// The last row names the legal next step: /approve only when
+			// the critique allows it (startApproval's own precondition).
+			last := m.transcript[len(m.transcript)-1].text
+			if strings.Contains(last, "/approve") != tc.exposed || !strings.HasPrefix(last, "Next:") {
+				t.Fatalf("resume next step = %q, want /approve offered = %v", last, tc.exposed)
+			}
+
 			var captured agent.Options
 			m.captureRunOptions = func(options agent.Options) { captured = options }
 			m.input.SetValue("continue the design")
@@ -1037,6 +1048,13 @@ func TestCrystallizeResultMessageCarriesRoutedUsage(t *testing.T) {
 		testModelEntry("routed-plan", 2000, []modelregistry.ModelCapability{modelregistry.ModelCapabilityChat}),
 		testModelEntry("routed-critic", 2000, []modelregistry.ModelCapability{modelregistry.ModelCapabilityChat}),
 	)
+	// The routed stages name two configured profiles on the openai catalog. Their
+	// catalog is the test registry.
+	m.savedProviders = []config.ProviderProfile{
+		{Name: "provider-a", CatalogID: "openai"},
+		{Name: "provider-b", CatalogID: "openai"},
+	}
+	m.costCatalogLoad = func(string) (modelregistry.Registry, error) { return m.modelCatalog, nil }
 	sess, err := store.Create(sessions.CreateInput{SessionID: "test-session", Cwd: t.TempDir()})
 	if err != nil {
 		t.Fatalf("create session: %v", err)
@@ -1052,12 +1070,9 @@ func TestCrystallizeResultMessageCarriesRoutedUsage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read events: %v", err)
 	}
-	m.stageModelResolver = func(stage string) (agent.ModelSelection, error) {
-		if stage == "design_crystallize" {
-			return agent.ModelSelection{Provider: crystallizeProvider, ProviderName: "provider-a", Model: "routed-plan"}, nil
-		}
-		return agent.ModelSelection{Provider: criticProvider, ProviderName: "provider-b", Model: "routed-critic"}, nil
-	}
+	m.userConfigPath = filepath.Join(t.TempDir(), "config.json")
+	writeStageRouting(t, m, `{"default":{"provider_profile":"provider-a","model":"routed-plan"},"stages":{"design_crystallize":{"provider_profile":"provider-a","model":"routed-plan"},"plan_critic":{"provider_profile":"provider-b","model":"routed-critic"}}}`)
+	m.newProvider = routedDesignProviders(crystallizeProvider, criticProvider)
 	_, cmd := m.handleCrystallizeCommand()
 	msg, ok := execCmd(cmd).(crystallizeResultMsg)
 	if !ok {
@@ -2383,5 +2398,214 @@ func TestPersistentPlanHeaderRendersTaskGraph(t *testing.T) {
 	narrow := m.persistentPlanHeader(40)
 	if !strings.Contains(narrow, "- Renderer") || strings.Contains(narrow, "▼") {
 		t.Fatalf("narrow plan header should use the list fallback: %q", narrow)
+	}
+}
+
+// writeStageRouting writes stage-models.json next to the model's config path.
+func writeStageRouting(t *testing.T, m model, doc string) {
+	t.Helper()
+	if m.userConfigPath == "" {
+		t.Fatal("test model has no user config path")
+	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(m.userConfigPath), "stage-models.json"), []byte(doc), 0o600); err != nil {
+		t.Fatalf("write stage-models.json: %v", err)
+	}
+}
+
+// routedDesignProviders maps the two routed profiles of the design tests to
+// their fake providers.
+func routedDesignProviders(crystallize, critic zeroruntime.Provider) func(config.ProviderProfile) (zeroruntime.Provider, error) {
+	return func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+		switch profile.Name {
+		case "provider-a":
+			return crystallize, nil
+		case "provider-b":
+			return critic, nil
+		}
+		return nil, fmt.Errorf("unexpected profile %q", profile.Name)
+	}
+}
+
+// designRoutingModel returns a design-mode model with one conversation message
+// and two routed profiles. The stage file is written by the caller.
+func designRoutingModel(t *testing.T, crystallize, critic *fakeProvider) model {
+	t.Helper()
+	store := testSessionStore(t)
+	m := newDesignModeTestModel(t.TempDir(), crystallize, store)
+	m.userConfigPath = filepath.Join(t.TempDir(), "config.json")
+	m.designMode = true
+	m.modelCatalog = mustTestModelRegistry(t,
+		testModelEntry("routed-plan", 2000, []modelregistry.ModelCapability{modelregistry.ModelCapabilityChat}),
+		testModelEntry("routed-critic", 2000, []modelregistry.ModelCapability{modelregistry.ModelCapabilityChat}),
+	)
+	m.savedProviders = []config.ProviderProfile{
+		{Name: "provider-a", CatalogID: "openai"},
+		{Name: "provider-b", CatalogID: "openai"},
+	}
+	m.newProvider = routedDesignProviders(crystallize, critic)
+	m.costCatalogLoad = func(string) (modelregistry.Registry, error) { return m.modelCatalog, nil }
+	sess, err := store.Create(sessions.CreateInput{SessionID: "test-session", Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	m.activeSession = sess
+	if _, err := store.AppendEvent(sess.SessionID, sessions.AppendEventInput{Type: sessions.EventDesignModeEntered}); err != nil {
+		t.Fatalf("append design mode event: %v", err)
+	}
+	if _, err := store.AppendEvent(sess.SessionID, sessions.AppendEventInput{Type: sessions.EventMessage, Payload: map[string]any{"role": "user", "content": "build it"}}); err != nil {
+		t.Fatalf("append message: %v", err)
+	}
+	m.sessionEvents, err = store.ReadEvents(sess.SessionID)
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	return m
+}
+
+// validDesignProviders returns fake providers that answer a crystallize and a
+// critique with valid submissions.
+func validDesignProviders(t *testing.T) (*fakeProvider, *fakeProvider) {
+	t.Helper()
+	planArgs, _ := json.Marshal(schemas.DesignPlan{
+		Epic:         "Build a feature",
+		Requirements: []string{"must work"},
+		InScope:      []string{"backend"},
+		OutOfScope:   []string{"frontend"},
+		SystemDesign: "Use Go.",
+		Tasks:        []schemas.Task{{ID: "t1", Title: "Implement it", Intent: "Write code"}},
+	})
+	critiqueArgs, _ := json.Marshal(schemas.PlanCritique{OverallAssessment: "Looks good"})
+	crystallize := &fakeProvider{events: []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "plan", ToolName: "submit_design_plan"},
+		{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "plan", ArgumentsFragment: string(planArgs)},
+		{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "plan"},
+		{Type: zeroruntime.StreamEventDone},
+	}}
+	critic := &fakeProvider{events: []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "critique", ToolName: "submit_critique"},
+		{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "critique", ArgumentsFragment: string(critiqueArgs)},
+		{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "critique"},
+		{Type: zeroruntime.StreamEventDone},
+	}}
+	return crystallize, critic
+}
+
+const validRoutingDoc = `{"default":{"provider_profile":"provider-a","model":"routed-plan"},"stages":{"design_crystallize":{"provider_profile":"provider-a","model":"routed-plan"},"plan_critic":{"provider_profile":"provider-b","model":"routed-critic"}}}`
+
+// TestCrystallizeFailsOnInvalidStageRouting pins D2 for design mode: an invalid
+// stage-models.json fails the crystallize run with the named cause, and no
+// request reaches a provider.
+func TestCrystallizeFailsOnInvalidStageRouting(t *testing.T) {
+	crystallize, critic := validDesignProviders(t)
+	m := designRoutingModel(t, crystallize, critic)
+	writeStageRouting(t, m, `{"stages": not json`)
+	_, cmd := m.handleCrystallizeCommand()
+	msg, ok := execCmd(cmd).(crystallizeResultMsg)
+	if !ok {
+		t.Fatal("expected crystallizeResultMsg")
+	}
+	if msg.err == nil || !strings.Contains(msg.err.Error(), "stage routing config invalid") {
+		t.Fatalf("err = %v, want the invalid stage routing cause", msg.err)
+	}
+	if len(crystallize.requests) != 0 || len(critic.requests) != 0 {
+		t.Fatalf("requests sent: crystallize=%d critic=%d, want none", len(crystallize.requests), len(critic.requests))
+	}
+}
+
+// TestCrystallizeRereadsStageRoutingFile pins that the file as it is now wins.
+// A route file that becomes invalid after a valid run fails the next run; the
+// earlier valid resolver is not reused.
+func TestCrystallizeRereadsStageRoutingFile(t *testing.T) {
+	crystallize, critic := validDesignProviders(t)
+	m := designRoutingModel(t, crystallize, critic)
+	writeStageRouting(t, m, validRoutingDoc)
+	next, cmd := m.handleCrystallizeCommand()
+	if msg, ok := execCmd(cmd).(crystallizeResultMsg); !ok || msg.err != nil {
+		t.Fatalf("first run: err=%v, want success", msg.err)
+	}
+
+	writeStageRouting(t, m, `{"stages": not json`)
+	next.pending = false
+	_, cmd = next.handleCrystallizeCommand()
+	msg, ok := execCmd(cmd).(crystallizeResultMsg)
+	if !ok {
+		t.Fatal("expected crystallizeResultMsg")
+	}
+	if msg.err == nil || !strings.Contains(msg.err.Error(), "stage routing config invalid") {
+		t.Fatalf("second run err = %v, want the invalid stage routing cause", msg.err)
+	}
+}
+
+// TestApprovedPlanFailsOnInvalidStageRouting pins D2 for the approved plan run:
+// the run takes stage routes from the current stage-models.json, so an invalid
+// file fails the first model-backed stage with the named cause.
+func TestApprovedPlanFailsOnInvalidStageRouting(t *testing.T) {
+	crystallize, critic := validDesignProviders(t)
+	m := designRoutingModel(t, crystallize, critic)
+	writeStageRouting(t, m, `{"stages": not json`)
+	plan := schemas.DesignPlan{
+		Epic:         "Build a feature",
+		Requirements: []string{"must work"},
+		InScope:      []string{"backend"},
+		OutOfScope:   []string{"frontend"},
+		SystemDesign: "Use Go.",
+		Tasks:        []schemas.Task{{ID: "t1", Title: "Implement it", Intent: "Write code"}},
+		Source:       "conversation",
+	}
+	m.pendingPlan = &plan
+	var captured agent.Options
+	m.captureRunOptions = func(options agent.Options) { captured = options }
+	_, cmd := m.startApprovalConfirmed(splicerun.DesignTransitionSourceManual, "plan-approve")
+	msg, ok := execCmd(cmd).(planExecutionResultMsg)
+	if !ok {
+		t.Fatal("expected planExecutionResultMsg")
+	}
+	if captured.StageModelResolver == nil {
+		t.Fatal("approved plan run has no stage resolver; stage routes are ignored")
+	}
+	// The plan preflight checks every task's stage routes before the first
+	// task runs, as a pipeline run does. The invalid route is an input
+	// error that names the cause; the TUI shows it on the FAILED card.
+	if msg.err == nil || !errors.Is(msg.err, splicerun.ErrInvalidRunInput) || !strings.Contains(msg.err.Error(), "stage routing config invalid") {
+		t.Fatalf("err = %v, want the invalid stage routing cause as an input error", msg.err)
+	}
+	if len(crystallize.requests) != 0 {
+		t.Fatalf("a model-backed stage sent %d request(s) on an invalid route file", len(crystallize.requests))
+	}
+}
+
+// TestFailedApprovedPlanEndsInTheViewer: an approved plan run that fails
+// skips the pipeline's end event. The browser viewer must still show the run
+// as failed, not as running.
+func TestFailedApprovedPlanEndsInTheViewer(t *testing.T) {
+	crystallize, critic := validDesignProviders(t)
+	m := designRoutingModel(t, crystallize, critic)
+	writeStageRouting(t, m, `{"stages": not json`)
+	m.surface.loadSecrets = func(model) ([]string, error) { return nil, nil }
+	m.surface.interactive = func() bool { return false }
+	t.Cleanup(m.surface.stop)
+	m = m.openWebSurface()
+	m.pendingPlan = &schemas.DesignPlan{
+		Epic: "Build a feature", Requirements: []string{"must work"}, InScope: []string{"backend"}, OutOfScope: []string{"frontend"},
+		SystemDesign: "Use Go.", Tasks: []schemas.Task{{ID: "t1", Title: "Implement it", Intent: "Write code"}}, Source: "conversation",
+	}
+	// The run shows one running stage in the viewer before it fails.
+	m.captureRunOptions = func(options agent.Options) {
+		state, err := presentation.Apply(presentation.State{}, presentation.PlanEvent{StageNames: []string{"code_writer"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state, err = presentation.Apply(state, presentrun.AdaptStageEvent(agent.StageEvent{Name: "code_writer", Status: "running"})); err != nil {
+			t.Fatal(err)
+		}
+		options.OnPresentationState(state)
+	}
+	_, cmd := m.startApprovalConfirmed(splicerun.DesignTransitionSourceManual, "plan-approve")
+	if msg, ok := execCmd(cmd).(planExecutionResultMsg); !ok || msg.err == nil {
+		t.Fatalf("want a failed approved plan run, got %#v", msg)
+	}
+	client, landing := viewerClient(t, m)
+	if page := viewerGet(t, client, landing, "./"); !strings.Contains(page, "Failed:") || strings.Contains(page, "Running.") {
+		t.Fatalf("the viewer must show the failed run:\n%s", page)
 	}
 }

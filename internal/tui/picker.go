@@ -1096,9 +1096,16 @@ func (m model) newTrustPicker() *commandPicker {
 	// [V] view config (GAP-I): when an executable project config exists, the
 	// decision deserves its evidence. The row names what it does; it opens
 	// the config and returns to this menu (it is not a trust decision).
-	if cfg := describeProjectTrustConfig(m.projectConfigPath); !cfg.Empty() || cfg.ParseError != "" {
+	if cfg := describeProjectTrustConfig(m.projectTrustConfigPath()); !cfg.Empty() || cfg.ParseError != "" {
+		// Without a config.json, the row names the sibling files it describes.
+		// Judge by the file on disk: a config.json that exists but failed to
+		// resolve is still present.
+		meta := "no config.json; other project files found"
+		if cfg.ConfigFile {
+			meta = filepath.Base(cfg.Path)
+		}
 		items = append(items[:len(items)-1],
-			pickerItem{Label: "View what the project config would change", Value: trustActionView, Meta: filepath.Base(m.projectConfigPath)},
+			pickerItem{Label: "View what the project config would change", Value: trustActionView, Meta: meta},
 			items[len(items)-1])
 	}
 	selected := len(items) - 1

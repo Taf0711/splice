@@ -46,6 +46,20 @@ func runSpecialists(args []string, stdout io.Writer, stderr io.Writer, deps appD
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
+	// list and show report the specialists that a run can use. Exec and the
+	// TUI load project specialists only in a trusted workspace, so these
+	// commands use the same decision. The write commands keep the project
+	// directory because they change only the files that the user names.
+	if (command == "list" || command == "show") && !deps.projectTrusted(workspaceRoot) {
+		ignored, _, err := specialist.LoadProjectDir(paths.ProjectDir)
+		if err != nil {
+			return writeAppError(stderr, err.Error(), exitCrash)
+		}
+		paths.ProjectDir = ""
+		if line := ignoredProjectSpecialistsLine(len(ignored)); line != "" {
+			fmt.Fprintln(stderr, line)
+		}
+	}
 
 	switch command {
 	case "list":
@@ -62,6 +76,19 @@ func runSpecialists(args []string, stdout io.Writer, stderr io.Writer, deps appD
 		return runSpecialistPath(paths, options, stdout)
 	default:
 		return writeExecUsageError(stderr, fmt.Sprintf("unknown specialist command %q", command))
+	}
+}
+
+// ignoredProjectSpecialistsLine tells the user that an untrusted workspace
+// hides count project specialists. It is empty when count is zero.
+func ignoredProjectSpecialistsLine(count int) string {
+	switch count {
+	case 0:
+		return ""
+	case 1:
+		return "1 project specialist is ignored until the workspace is trusted. Run with --trust to load it."
+	default:
+		return fmt.Sprintf("%d project specialists are ignored until the workspace is trusted. Run with --trust to load them.", count)
 	}
 }
 

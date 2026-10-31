@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/Taf0711/splice/internal/flags"
 )
 
 func newCkStore(t *testing.T) (*Store, string) {
@@ -121,7 +123,8 @@ func TestCaptureSkipsOversizeFiles(t *testing.T) {
 }
 
 func TestCaptureDisabled(t *testing.T) {
-	t.Setenv("SPLICE_CHECKPOINTS", "off")
+	flags.SetProcess(flags.Set{flags.SessionsCheckpoints: false})
+	t.Cleanup(func() { flags.SetProcess(nil) })
 	store, ws := newCkStore(t)
 	mustWriteFile(t, filepath.Join(ws, "a.txt"), "v1")
 	ev, err := store.CaptureToolCheckpoint("s", ws, "write_file", []string{"a.txt"})

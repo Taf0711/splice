@@ -163,17 +163,33 @@ func TestNormalizeUsageRejectsExcessiveCachedInputTokens(t *testing.T) {
 	}
 }
 
-func TestNormalizeUsageRejectsExcessiveReasoningTokens(t *testing.T) {
-	_, err := NormalizeUsage(TokenUsage{
+func TestNormalizeUsageReconcilesReasoningExclusiveReports(t *testing.T) {
+	// A provider that reports reasoning tokens EXCLUSIVE of the completion
+	// count (reasoning > output) previously made normalization reject the
+	// record, which zeroed billed work downstream. The honest reconciliation
+	// sums the counts: the model produced both.
+	usage, err := NormalizeUsage(TokenUsage{
 		InputTokens:     10,
 		OutputTokens:    4,
 		ReasoningTokens: 9,
 	})
-	if err == nil {
-		t.Fatal("expected reasoning tokens error")
+	if err != nil {
+		t.Fatalf("exclusive report must reconcile, not reject: %v", err)
 	}
-	if !strings.Contains(err.Error(), "reasoning tokens") {
-		t.Fatalf("error = %q, want reasoning tokens", err.Error())
+	if usage.OutputTokens != 13 || usage.CompletionTokens != 13 {
+		t.Fatalf("output = %d/%d, want the reconciled 13", usage.OutputTokens, usage.CompletionTokens)
+	}
+	if got := usage.TotalTokens(); got != 23 {
+		t.Fatalf("total = %d, want 23", got)
+	}
+	// A subset-consistent report is untouched.
+	subset, err := NormalizeUsage(TokenUsage{
+		InputTokens:     10,
+		OutputTokens:    9,
+		ReasoningTokens: 4,
+	})
+	if err != nil || subset.OutputTokens != 9 {
+		t.Fatalf("subset report changed: %v %+v", err, subset)
 	}
 }
 
@@ -525,8 +541,10 @@ func TestCollectStreamWithOptionsReportsFinalUsageStateOnce(t *testing.T) {
 		name     string
 		events   []StreamEvent
 		reported bool
+		failed   bool
 		usage    Usage
 	}{
+		{name: "failed", events: []StreamEvent{{Type: StreamEventText, Content: "hel"}, {Type: StreamEventError, Error: "stream stalled"}}, failed: true},
 		{name: "reported", events: []StreamEvent{{Type: StreamEventUsage, Usage: Usage{InputTokens: 10, OutputTokens: 5}}, {Type: StreamEventDone}}, reported: true, usage: Usage{InputTokens: 10, OutputTokens: 5}},
 		{name: "not reported", events: []StreamEvent{{Type: StreamEventText, Content: "hello"}, {Type: StreamEventDone}}},
 	}
@@ -540,10 +558,10 @@ func TestCollectStreamWithOptionsReportsFinalUsageStateOnce(t *testing.T) {
 
 			calls := 0
 			CollectStreamWithOptions(context.Background(), events, CollectOptions{
-				OnUsageResult: func(usage Usage, reported bool, _ *float64) {
+				OnUsageResult: func(usage Usage, reported bool, _ *float64, _ string, failed bool) {
 					calls++
-					if usage.EffectiveInputTokens() != test.usage.EffectiveInputTokens() || usage.EffectiveOutputTokens() != test.usage.EffectiveOutputTokens() || reported != test.reported {
-						t.Fatalf("usage result = (%+v, %t), want (%+v, %t)", usage, reported, test.usage, test.reported)
+					if usage.EffectiveInputTokens() != test.usage.EffectiveInputTokens() || usage.EffectiveOutputTokens() != test.usage.EffectiveOutputTokens() || reported != test.reported || failed != test.failed {
+						t.Fatalf("usage result = (%+v, %t, failed %t), want (%+v, %t, failed %t)", usage, reported, failed, test.usage, test.reported, test.failed)
 					}
 				},
 			})
@@ -565,7 +583,7 @@ func TestCollectStreamWithOptionsUsageResultSupersedesLegacyUsage(t *testing.T) 
 	resultCalls := 0
 	legacyCalls := 0
 	CollectStreamWithOptions(context.Background(), events, CollectOptions{
-		OnUsageResult: func(Usage, bool, *float64) { resultCalls++ },
+		OnUsageResult: func(Usage, bool, *float64, string, bool) { resultCalls++ },
 		OnUsage:       func(Usage) { legacyCalls++ },
 	})
 	if resultCalls != 1 {
@@ -598,7 +616,7 @@ func TestCollectStreamWithOptionsUsageResultFiresWithoutUsage(t *testing.T) {
 
 	calls := 0
 	CollectStreamWithOptions(context.Background(), events, CollectOptions{
-		OnUsageResult: func(_ Usage, reported bool, _ *float64) {
+		OnUsageResult: func(_ Usage, reported bool, _ *float64, _ string, _ bool) {
 			calls++
 			if reported {
 				t.Fatal("OnUsageResult reported usage when no usage event was seen")
@@ -619,7 +637,7 @@ func TestCollectStreamWithOptionsReportsMalformedUsageOnce(t *testing.T) {
 	resultCalls := 0
 	errorCalls := 0
 	CollectStreamWithOptions(context.Background(), events, CollectOptions{
-		OnUsageResult: func(Usage, bool, *float64) { resultCalls++ },
+		OnUsageResult: func(Usage, bool, *float64, string, bool) { resultCalls++ },
 		OnUsageError: func(reason string) {
 			errorCalls++
 			if reason != "reasoning exceeds output" {
@@ -683,7 +701,6 @@ func TestNormalizeUsageRejectsAllMalformedSubsets(t *testing.T) {
 	}{
 		{"cached exceeds input", TokenUsage{InputTokens: 10, CachedInputTokens: 15, OutputTokens: 5}, "cached input tokens"},
 		{"cache write plus cached exceeds input", TokenUsage{InputTokens: 100, CachedInputTokens: 60, CacheWriteTokens: 50, OutputTokens: 10}, "cache write tokens"},
-		{"reasoning exceeds output", TokenUsage{InputTokens: 100, OutputTokens: 10, ReasoningTokens: 20}, "reasoning tokens"},
 		{"all bad", TokenUsage{InputTokens: 10, CachedInputTokens: 10, CacheWriteTokens: 10, OutputTokens: 5, ReasoningTokens: 6}, "cached input tokens"},
 	}
 	for _, tc := range tests {

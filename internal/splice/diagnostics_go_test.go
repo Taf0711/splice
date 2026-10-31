@@ -152,3 +152,37 @@ func TestResolveGoDiagnosticsEmptyOutput(t *testing.T) {
 		t.Fatalf("empty output must produce an empty bundle: %+v", evidence)
 	}
 }
+
+// TestFailingTestFileResolvesToItsPackage pins the P2d cpl-01 fix: go test
+// prints "catalog_test.go:16:" relative to the package directory, and two
+// packages have a catalog_test.go. The package field resolves it, so the
+// repair reads the failing test in its first round.
+func TestFailingTestFileResolvesToItsPackage(t *testing.T) {
+	workspace := t.TempDir()
+	for path, body := range map[string]string{
+		"go.mod":                                 "module demo\n\ngo 1.26\n",
+		"cmd/server/catalog_test.go":             "package main\n\nfunc TestCatalog(t *testing.T) {\n\tfor kind := range notifications.Templates {\n\t\tif !listed(config.NotificationKinds, kind) {\n\t\t\tt.Errorf(\"missing\")\n\t\t}\n\t}\n}\n",
+		"internal/notifications/catalog_test.go": "package notifications\n",
+	} {
+		full := filepath.Join(workspace, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	output := strings.Join([]string{
+		`TestCatalog: catalog_test.go:6: missing`,
+		`{"Action":"output","Package":"demo/cmd/server","Test":"TestCatalog","Output":"    catalog_test.go:6: missing\n"}`,
+		`{"Action":"fail","Package":"demo/cmd/server","Test":"TestCatalog","Elapsed":0}`,
+	}, "\n")
+
+	evidence := ResolveGoDiagnostics(workspace, output)
+	if len(evidence.Files) != 1 || evidence.Files[0] != "cmd/server/catalog_test.go" {
+		t.Fatalf("files = %v, want the failing test in its package directory", evidence.Files)
+	}
+	if !strings.Contains(strings.Join(evidence.Facts, "\n"), `cmd/server/catalog_test.go:6: t.Errorf("missing")`) {
+		t.Fatalf("facts = %v, want the excerpt at the failing line", evidence.Facts)
+	}
+}

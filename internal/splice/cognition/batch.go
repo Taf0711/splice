@@ -72,6 +72,62 @@ func ChangedPaths(ctx context.Context, repoRoot, sourceCommit string, run gitCap
 			changed[path] = true
 		}
 	}
+	// git diff <commit> reads the worktree through the index, so a file that
+	// is in the commit but untracked in the worktree reads as deleted, and a
+	// new untracked file reads as unchanged. A capture snapshot contains the
+	// run's new files while they are still untracked, so untracked files are
+	// compared by content: same bytes as the commit is unchanged, anything
+	// else is changed.
+	untracked, err := run(ctx, repoRoot, "ls-files", "--others", "--exclude-standard", "-z")
+	if err != nil || untracked.ExitCode != 0 {
+		return nil, fmt.Errorf("cognition: untracked-path query in %s failed", repoRoot)
+	}
+	var paths []string
+	for _, path := range strings.Split(untracked.Stdout, "\x00") {
+		if strings.TrimSpace(path) != "" {
+			paths = append(paths, path)
+		}
+	}
+	if len(paths) == 0 {
+		return changed, nil
+	}
+	inCommit := map[string]string{}
+	listing, err := run(ctx, repoRoot, append([]string{"ls-tree", "-z", sourceCommit, "--"}, paths...)...)
+	if err == nil && listing.ExitCode == 0 {
+		for _, entry := range strings.Split(listing.Stdout, "\x00") {
+			// "<mode> blob <sha>\t<path>"
+			meta, path, ok := strings.Cut(entry, "\t")
+			if fields := strings.Fields(meta); ok && len(fields) == 3 {
+				inCommit[path] = fields[2]
+			}
+		}
+	}
+	var present []string
+	for _, path := range paths {
+		if _, ok := inCommit[path]; ok {
+			present = append(present, path)
+		} else {
+			changed[path] = true
+		}
+	}
+	if len(present) == 0 {
+		return changed, nil
+	}
+	hashes, err := run(ctx, repoRoot, append([]string{"hash-object", "--"}, present...)...)
+	if err != nil || hashes.ExitCode != 0 {
+		for _, path := range present {
+			changed[path] = true
+		}
+		return changed, nil
+	}
+	for i, sha := range strings.Fields(hashes.Stdout) {
+		if i < len(present) {
+			changed[present[i]] = sha != inCommit[present[i]]
+			if !changed[present[i]] {
+				delete(changed, present[i])
+			}
+		}
+	}
 	return changed, nil
 }
 

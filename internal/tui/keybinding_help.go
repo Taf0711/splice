@@ -31,6 +31,46 @@ type keybindingGroup struct {
 // Sourced from the real key cases in model.go (Update) — not invented. When a
 // binding is added/changed there, update this method too.
 func (m model) buildKeybindingGroups() []keybindingGroup {
+	// Dual-purpose chords say what they do right now, not in general.
+	effortKey := "reasoning effort (not supported by this model)"
+	if ring := m.reasoningEffortRing(); len(ring) > 0 {
+		levels := make([]string, 0, len(ring))
+		for _, effort := range ring {
+			levels = append(levels, string(effort))
+		}
+		effortKey = "cycle reasoning effort (auto \u2192 " + strings.Join(levels, " \u2192 ") + ")"
+	}
+	if m.pipeline.active {
+		effortKey = "show / hide the trajectory (during a run; effort otherwise)"
+	}
+	sidebarKey := "hide / show the right context sidebar"
+	if m.compactWidth() {
+		sidebarKey = "open the context sheet (the sidebar needs 120 columns)"
+	}
+	// In the Ctrl+G pane with a graph, the arrows select a node instead of
+	// scrolling, so the row says what they do there.
+	graph, note := m.detailGraph()
+	paneGraph := m.detailView.active && note == "" && len(graph.Nodes) > 0
+	arrows := "scroll, or move within a popup / multi-line input"
+	if paneGraph {
+		arrows = "select a pipeline node (empty input); PgUp / PgDn scroll the pane"
+	}
+	navigation := []keybinding{
+		{"PgUp / PgDn", "scroll the transcript by a page"},
+		{"\u2191 / \u2193", arrows},
+		{labelOr(m.keyBindings.toggleDetailed, "Ctrl+O"), "toggle the detailed (full-screen) transcript"},
+		{labelOr(m.keyBindings.toggleSidebar, "Ctrl+B"), sidebarKey},
+		{"Ctrl+G", "open the run evidence pane (Esc closes)"},
+	}
+	// The graph keys work only inside the Ctrl+G pane, so they show only there.
+	if paneGraph {
+		navigation = append(navigation, keybinding{"Enter / Esc", "open / close the node details"})
+	}
+	navigation = append(navigation,
+		keybinding{labelOr(m.keyBindings.toggleNarration, "Ctrl+N"), "cycle transcript verbosity (quiet / normal / detailed)"},
+		keybinding{labelOr(m.keyBindings.toggleMouse, "Ctrl+E"), "release the mouse to drag-select & copy text"},
+		keybinding{"Tab", "accept the autocomplete / picker selection"},
+	)
 	return []keybindingGroup{
 		{
 			title: "Chat",
@@ -45,30 +85,22 @@ func (m model) buildKeybindingGroups() []keybindingGroup {
 		{
 			title: "Model & run controls",
 			bindings: []keybinding{
-				{labelOr(m.keyBindings.cycleReasoning, "Ctrl+T"), "cycle reasoning effort (auto \u2192 low \u2192 medium \u2192 high)"},
+				{labelOr(m.keyBindings.cycleReasoning, "Ctrl+T"), effortKey},
 				{"Shift+Tab", "cycle permission mode (auto \u2194 ask)"},
 				{labelOr(m.keyBindings.togglePlan, "Ctrl+P"), "expand / collapse the plan panel"},
 			},
 		},
 		{
-			title: "Navigation & scrollback",
-			bindings: []keybinding{
-				{"PgUp / PgDn", "scroll the transcript by a page"},
-				{"\u2191 / \u2193", "scroll, or move within a popup / multi-line input"},
-				{labelOr(m.keyBindings.toggleDetailed, "Ctrl+O"), "toggle the detailed (full-screen) transcript"},
-				{labelOr(m.keyBindings.toggleSidebar, "Ctrl+B"), "hide / show the right context sidebar"},
-				{labelOr(m.keyBindings.toggleMouse, "Ctrl+E"), "release the mouse to drag-select & copy text"},
-				{"Tab", "accept the autocomplete / picker selection"},
-			},
+			title:    "Navigation & scrollback",
+			bindings: navigation,
 		},
 		{
-			title: "Specialists & pickers",
+			title: "Mouse & pickers",
 			bindings: []keybinding{
 				{"Click a specialist card", "drill into its sub-session"},
 				{"\u2191 / Esc (in a sub-session)", "return to the main chat"},
 				{"Ctrl+F (in /model)", "toggle the highlighted model as a favorite"},
 				{"Click a tool card", "expand / collapse its output"},
-				{labelOr(m.keyBindings.toggleNarration, "Ctrl+N"), "cycle transcript verbosity (quiet / normal / detailed)"},
 				{"Right-click", "paste the clipboard"},
 			},
 		},
@@ -92,7 +124,7 @@ func (m model) renderKeybindingHelpLines(innerWidth int) []string {
 		}
 		lines = append(lines, zeroTheme.accent.Render(group.title))
 		for _, binding := range group.bindings {
-			lines = append(lines, formatKeybindingLine(binding, keyColumn, innerWidth))
+			lines = append(lines, formatKeybindingLines(binding, keyColumn, innerWidth)...)
 		}
 	}
 	lines = append(lines, "")
@@ -114,10 +146,11 @@ func keybindingKeyColumnWidth(groups []keybindingGroup) int {
 	return widest
 }
 
-// formatKeybindingLine renders one "  <keys>   <desc>" row: the key chord in
-// the accent color, padded to keyColumn, then the muted description truncated
-// to fit innerWidth.
-func formatKeybindingLine(binding keybinding, keyColumn int, innerWidth int) string {
+// formatKeybindingLines renders one "  <keys>  <desc>" row: the chord in
+// ink, padded to keyColumn, then the muted description. A description that
+// does not fit wraps under its own column rather than truncating, so no
+// shortcut's meaning is cut off.
+func formatKeybindingLines(binding keybinding, keyColumn int, innerWidth int) []string {
 	keys := binding.keys
 	pad := keyColumn - len([]rune(keys))
 	if pad < 0 {
@@ -126,15 +159,24 @@ func formatKeybindingLine(binding keybinding, keyColumn int, innerWidth int) str
 	keyCell := zeroTheme.ink.Render(keys) + strings.Repeat(" ", pad)
 	// Indent(2) + keyCell + gap(2) consumed before the description.
 	descBudget := innerWidth - 2 - keyColumn - 2
-	if descBudget < 4 {
-		descBudget = 4
+	if descBudget < 12 {
+		descBudget = 12
 	}
-	desc := zeroTheme.muted.Render(truncateRunes(binding.desc, descBudget))
-	return "  " + keyCell + "  " + desc
+	wrapped := wrapPlainText(binding.desc, descBudget)
+	if len(wrapped) == 0 {
+		wrapped = []string{""}
+	}
+	lines := []string{"  " + keyCell + "  " + zeroTheme.muted.Render(wrapped[0])}
+	indent := strings.Repeat(" ", 2+keyColumn+2)
+	for _, part := range wrapped[1:] {
+		lines = append(lines, indent+zeroTheme.muted.Render(part))
+	}
+	return lines
 }
 
-// the given terminal width. Vertical centering is handled by the caller's
-// overlay compositing pipeline (overlayViewportLines in transcriptView).
+// renderKeybindingHelpOverlay frames the `?` overlay, sized to the given
+// terminal width. Vertical centering is handled by the caller's overlay
+// compositing pipeline (overlayViewportLines in transcriptView).
 func (m model) renderKeybindingHelpOverlay(width int) string {
 	overlayWidth := keybindingHelpOverlayWidth(width)
 	lines := m.renderKeybindingHelpLines(overlayWidth - 4)
@@ -146,7 +188,7 @@ func (m model) renderKeybindingHelpOverlay(width int) string {
 // descriptions don't truncate next to the key column, capped, and never wider
 // than the terminal.
 func keybindingHelpOverlayWidth(terminalWidth int) int {
-	width := 76
+	width := 96
 	if terminalWidth-4 < width {
 		width = terminalWidth - 4
 	}

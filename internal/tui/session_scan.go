@@ -142,17 +142,7 @@ func realScanSessions(store SessionLister, cwd string, title string) tea.Msg {
 				planBearing = true
 			}
 		}
-		label := displayValue(meta.Title, "untitled")
-		if when := sessionWhen(meta.UpdatedAt, now); when != "" {
-			label = when + "  " + label
-		}
-		if status != "" {
-			label += "  [" + status + "]"
-		}
-		if isWorktreeSession(meta) {
-			label = "wt: " + label
-		}
-		items = append(items, pickerItem{Label: label, Value: meta.SessionID, Meta: meta.SessionID})
+		items = append(items, sessionPickerItem(meta, status, now))
 	}
 	if len(items) == 0 {
 		// No picker rows (every candidate failed the content check), but

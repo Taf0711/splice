@@ -1,0 +1,8 @@
+{
+  "name": "cpl-05-read",
+  "phase": "read",
+  "precursor": "cpl-05-write",
+  "prompt": "In the billing package, add an \"enterprise\" subscription plan: 49900 cents a month, 1000 seats. Customers see it after scale.",
+  "check": "# cpl-05 B\nmkdir -p internal/admin\ncat > internal/admin/probe_plan_enterprise_test.go <<'EOF'\npackage admin\n\nimport (\n\t\"slices\"\n\t\"testing\"\n\n\t\"demo/internal/billing\"\n)\n\nfunc TestProbePlanEnterprise(t *testing.T) {\n\tp, ok := billing.Lookup(\"enterprise\")\n\tif !ok || p.MonthlyCents != 49900 || p.Seats != 1000 {\n\t\tt.Fatalf(\"billing.Lookup(enterprise) = %+v, %v\", p, ok)\n\t}\n\tif i := slices.Index(PricingOrder, \"enterprise\"); i < 0 || i < slices.Index(PricingOrder, \"scale\") {\n\t\tt.Fatalf(\"pricing order %v: enterprise is not after scale\", PricingOrder)\n\t}\n}\nEOF\ngo test -count=1 ./... ; rc=$?\nrm -f internal/admin/probe_plan_enterprise_test.go\nexit $rc\n",
+  "fixture": "../../coupled-families/fixture"
+}

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# J1 — fresh-install-and-configure journey.
+# J1: fresh-install-and-configure journey.
 # Fresh state root, doctor + config from a pristine state. No maintainer knowledge;
 # only normal CLI surface. Exit 0 iff every expectation holds.
 set -u

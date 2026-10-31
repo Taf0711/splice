@@ -19,6 +19,17 @@ type Plan struct {
 	// Dependencies is the compiled stage graph: stage name to the stages that
 	// run before it. Empty for a legacy linear plan.
 	Dependencies map[string][]string `json:"dependencies,omitempty"`
+	// Stages is the announced stage roster in plan order. A node appears in
+	// Nodes only after its first stage event, so the roster is the only
+	// source for stages that have not started.
+	Stages []string `json:"stages,omitempty"`
+	// Tier is the request tier the plan compiled at. Empty when unknown.
+	Tier string `json:"tier,omitempty"`
+	// Topology names the topology the plan compiled from. Empty when unknown.
+	Topology string `json:"topology,omitempty"`
+	// Removed maps a stage the run removed (not a tier skip) to the reason,
+	// for example "flag splice.security_auditor is off".
+	Removed map[string]string `json:"removed,omitempty"`
 }
 
 // Validate checks the task count is non-negative and every declared
@@ -42,6 +53,16 @@ func (p Plan) Validate() error {
 			}
 			seen[dep] = true
 		}
+	}
+	seen := make(map[string]bool, len(p.Stages))
+	for i, stage := range p.Stages {
+		if strings.TrimSpace(stage) == "" {
+			return fmt.Errorf("plan stages[%d]: stage name must not be empty", i)
+		}
+		if seen[stage] {
+			return fmt.Errorf("plan stages: duplicate stage %q", stage)
+		}
+		seen[stage] = true
 	}
 	return nil
 }
@@ -103,6 +124,9 @@ type CompletionReceipt struct {
 	Detail  string `json:"detail,omitempty"`
 	Staged  int    `json:"staged_files,omitempty"`
 	Applied int    `json:"applied_files,omitempty"`
+	// Unverified marks a completed run that verified nothing. Detail names why.
+	// It is only valid with status completed.
+	Unverified bool `json:"unverified,omitempty"`
 }
 
 // Validate checks the closed completion status and non-negative counts.
@@ -117,6 +141,9 @@ func (c CompletionReceipt) Validate() error {
 	}
 	if c.Applied < 0 {
 		return fmt.Errorf("completion %s: applied file count must be non-negative, got %d", c.Status, c.Applied)
+	}
+	if c.Unverified && c.Status != "completed" {
+		return fmt.Errorf("completion %s: only a completed run can be unverified", c.Status)
 	}
 	if c.Status == "cancelled" && c.Applied > 0 {
 		return fmt.Errorf("completion cancelled: %d applied files contradicts the staged-not-applied invariant; cancelled means work did not reach the tree", c.Applied)

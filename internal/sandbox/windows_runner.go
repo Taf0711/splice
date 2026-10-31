@@ -320,7 +320,7 @@ func windowsRestrictedTokenCommandPlan(execRequest SandboxExecutionRequest, poli
 	spec := execRequest.Command
 	var sandboxHomeEnv map[string]string
 	if spec.Env != nil {
-		sandboxHomeEnv = envListToMap(spec.Env)
+		sandboxHomeEnv = windowsEnvLookupMap(spec.Env)
 	}
 	sandboxHome, err := ResolveWindowsSandboxHome(sandboxHomeEnv)
 	if err != nil {
@@ -423,6 +423,22 @@ func envListToMap(env []string) map[string]string {
 		key, envValue, ok := strings.Cut(value, "=")
 		if ok && strings.TrimSpace(key) != "" {
 			out[key] = envValue
+		}
+	}
+	return out
+}
+
+// windowsEnvLookupMap maps an environment list for name lookups. Windows
+// environment names are case-insensitive ("UserProfile" is USERPROFILE), so
+// each name is upper case in the map. Every name that
+// ResolveWindowsSandboxHome reads is upper case. When two entries differ only
+// in case, the last one wins, as in the Windows environment.
+func windowsEnvLookupMap(env []string) map[string]string {
+	out := map[string]string{}
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok && strings.TrimSpace(key) != "" {
+			out[strings.ToUpper(key)] = value
 		}
 	}
 	return out

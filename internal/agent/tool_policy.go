@@ -55,6 +55,22 @@ func ToolProgressFunc(call ToolCall, onProgress func(toolCallID string, event st
 	}
 }
 
+// denialFromRefusal maps the registry's typed refusal to the loop's denial
+// category. A call the registry ran returns DenialNone.
+func denialFromRefusal(refusal tools.Refusal) DenialCategory {
+	switch refusal {
+	case tools.RefusalPolicy:
+		return DenialPolicy
+	case tools.RefusalPermissionRequired:
+		return DenialPermissionRequired
+	case tools.RefusalSandboxApproval:
+		return DenialSandboxApproval
+	case tools.RefusalSandboxDenied:
+		return DenialSandboxDenied
+	}
+	return DenialNone
+}
+
 // NewToolRunOptions builds the registry options for one tool call, including
 // operator filters, live output, specialist progress, and diagnostics.
 func NewToolRunOptions(options Options, call ToolCall, cwd string, permissionGranted bool) tools.RunOptions {
@@ -74,10 +90,12 @@ func NewToolRunOptions(options Options, call ToolCall, cwd string, permissionGra
 		Depth:             options.Depth,
 		Cwd:               cwd,
 		FileTracker:       options.FileTracker,
-		EnabledTools:      options.EnabledTools,
-		DisabledTools:     options.DisabledTools,
-		Progress:          ToolProgressFunc(call, options.OnToolProgress),
-		OnToolOutput:      options.OnToolOutput,
-		Diagnostics:       options.FileDiagnostics,
+		// Strict read-before-write, when the caller turns it on for this run.
+		RequireReadBeforeWrite: options.RequireReadBeforeWrite,
+		EnabledTools:           options.EnabledTools,
+		DisabledTools:          options.DisabledTools,
+		Progress:               ToolProgressFunc(call, options.OnToolProgress),
+		OnToolOutput:           options.OnToolOutput,
+		Diagnostics:            options.FileDiagnostics,
 	}
 }

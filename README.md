@@ -14,6 +14,14 @@
   <img alt="Go 1.25+" src="https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white">
 </p>
 
+<p align="center">
+  <img src="docs/assets/repair-loop.gif" alt="Splice implements a change, the test suite fails, the test runner returns typed failure evidence, and the rerun passes" width="900">
+</p>
+
+<p align="center"><em>One unedited run. The code writer implements the change, the test runner
+fails on a trap test, it returns the failure evidence to the code writer, and
+the rerun passes. Six stages, one repair re-entry.</em></p>
+
 Splice is a local-first terminal agent for repository work. It can inspect code,
 edit files, run checks, and use your selected model provider.
 
@@ -193,6 +201,8 @@ for the boundary.
 | `splice exec` | Run one request or a saved plan. |
 | `splice setup` | Configure the first provider and model. |
 | `splice config` | Inspect resolved configuration without secret values. |
+| `splice flags` | List feature flags and where each value comes from. |
+| `splice pipeline` | List, show, use, export, import, or edit pipeline topologies. |
 | `splice providers` / `models` | Manage provider profiles and inspect models. |
 | `splice doctor` | Check configuration and provider health. |
 | `splice sessions` / `search` | Inspect local session history. |
@@ -204,6 +214,9 @@ for the boundary.
 | `splice verify` | Detect and run repository checks. |
 | `splice usage` | Report token use and available cost estimates. |
 | `splice update` / `upgrade` | Check for or install a release. |
+
+For agent nodes and the browser view (`/web`), see
+[Custom topologies](docs/PIPELINE.md#custom-topologies).
 
 Read [Command guide](docs/COMMANDS.md) for the complete command groups. The live
 `splice --help` output remains the exact flag reference.

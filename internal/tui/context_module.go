@@ -101,14 +101,14 @@ func contextRegistry() []contextModule {
 				pipeline := m.pipeline.presentation()
 				budget := width - len("PIPELINE ") - len("99/99")
 				chip := m.worktreeChip()
-				if lifecycle := m.pipeline.lifecycleChip(budget); lifecycle != "" {
+				if lifecycle := m.pipeline.withRuntime(m.runtimeView()).lifecycleChip(budget); lifecycle != "" {
 					if chip != "" {
 						chip += " · "
 					}
 					chip += lifecycle
 				}
 				lines := []string{pipeline.headerLineWithChip(width, chip)}
-				return append(lines, pipeline.renderSection(width, m.spinnerPhase)...)
+				return append(lines, m.sidebarPipelineBody(pipeline, width)...)
 			},
 		},
 		{
@@ -164,13 +164,19 @@ func contextRegistry() []contextModule {
 // hardcoded render walk. Bounded by budget: a module that no longer fits is
 // skipped whole (drop-whole, never a truncated section).
 func (m model) renderContextModules(width, budget int) []string {
+	return m.renderContextModulesExcept(width, budget, contextSlotCount)
+}
+
+// renderContextModulesExcept is renderContextModules without the module in
+// the skip slot, for a host that draws that section itself.
+func (m model) renderContextModulesExcept(width, budget int, skip ContextSlot) []string {
 	if width <= 0 || budget <= 0 {
 		return nil
 	}
 	var lines []string
 	used := 0
 	for _, module := range contextRegistry() {
-		if !module.has(m) {
+		if module.slot == skip || !module.has(m) {
 			continue
 		}
 		if len(lines) > 0 {

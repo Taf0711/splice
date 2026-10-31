@@ -1,11 +1,19 @@
 # Splice build/test/lint targets.
 .DEFAULT_GOAL := build
-.PHONY: build build-all test test-race test-cli-tui test-memd check vet fmt fmt-check lint tidy clean help install-memd
+# Recursive "=" so git runs only when the dev target expands it.
+DEV_VERSION = dev-$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)$(shell git diff --quiet HEAD 2>/dev/null || echo -dirty)
+.PHONY: build dev build-all test test-race test-cli-tui test-memd e2e check vet fmt fmt-check lint tidy clean help install-memd
 
 # Remove the old binary before each build. A failed build then leaves no stale binary that a person can run by accident.
 build:
 	rm -f splice
 	go build -o splice ./cmd/splice
+
+# Build ./splice-dev from the working tree. Its version names the commit, plus -dirty for uncommitted changes.
+dev:
+	rm -f splice-dev
+	go build -ldflags "-X github.com/Taf0711/splice/internal/version.Version=$(DEV_VERSION)" -o splice-dev ./cmd/splice
+	@./splice-dev version
 
 # Build every command in cmd/.
 build-all:
@@ -13,15 +21,19 @@ build-all:
 
 # Run the full test suite with the race detector (matches CI expectations).
 test:
-	go test ./... -race -count=1
+	go test ./... -race -count=1 -timeout 30m
 
 # Faster, no race detector.
 test-quick:
-	go test ./...
+	go test -timeout 30m ./...
 
 # Test the CLI and TUI seams with the race detector.
 test-cli-tui:
-	go test -race -count=1 ./internal/cli ./internal/tui
+	go test -race -count=1 -timeout 30m ./internal/cli ./internal/tui
+
+# Run the binary e2e suite (tests/e2e) against a scripted fake provider.
+e2e:
+	SPLICE_E2E=1 go test -count=1 -parallel 4 -timeout 15m ./tests/e2e/...
 
 # Test the memd sidecar (separate Go module; root go test does not see it).
 test-memd:
@@ -33,7 +45,7 @@ test-memd:
 # selection test (false-positive under WSL2; passes on real Linux). Use
 # `make test` for the unskipped race suite that matches CI.
 check: fmt-check vet build-all
-	go test -count=1 -skip 'TestRealMemdSidecarMemoryRetrieval|TestSelectBackendChoosesPlatformAdapterWithFallback' ./...
+	go test -count=1 -timeout 30m -skip 'TestRealMemdSidecarMemoryRetrieval|TestSelectBackendChoosesPlatformAdapterWithFallback' ./...
 
 vet:
 	go vet ./...
@@ -57,8 +69,8 @@ install-memd:
 	cd memd && go install
 
 clean:
-	rm -f splice
+	rm -f splice splice-dev
 	go clean ./...
 
 help:
-	@echo "Targets: build (default), build-all, check, test, test-quick, test-cli-tui, test-memd, vet, fmt, fmt-check, lint, tidy, install-memd, clean"
+	@echo "Targets: build (default), dev, build-all, check, test, test-quick, test-cli-tui, test-memd, e2e, vet, fmt, fmt-check, lint, tidy, install-memd, clean"

@@ -21,10 +21,21 @@ type TraceStore interface {
 	UpsertVerdict(ctx context.Context, verdict schemas.VerdictRecord) error
 }
 
-// stageKey identifies one stage execution within a run.
+// stageKey identifies one stage execution within a run. InvocationOrdinal
+// distinguishes repeated invocations of the same stage and iteration: 0 is
+// the initial pass invocation, 1 and above are repair re-entries in repair
+// order, so a re-entry never overwrites the initial invocation's metrics.
 type stageKey struct {
-	name      string
-	iteration int
+	name              string
+	iteration         int
+	invocationOrdinal int
+}
+
+// stageKeyFor builds the accumulator key for one stage invocation. The
+// ordinal separates initial-pass records (0) from repair re-entries, so a
+// re-entry records its own metrics instead of overwriting the initial pass.
+func stageKeyFor(stage string, iteration int, ordinal int) stageKey {
+	return stageKey{name: stage, iteration: iteration, invocationOrdinal: ordinal}
 }
 
 // runTraceAccumulator collects the per-stage input metadata, interventions,
@@ -42,15 +53,35 @@ type runTraceAccumulator struct {
 	// fails (a deliberately-disabled run stays off).
 	memoryStatus string
 
-	stages        map[stageKey]schemas.InputMeta
-	stageOrder    []stageKey
-	interventions []schemas.InterventionRecord
-	interactions  []schemas.InteractionRecord
-	memoryItems   int
-	memoryChars   int
+	stages     map[stageKey]schemas.InputMeta
+	stageOrder []stageKey
+	// contextRounds holds per-expansion-round context telemetry (D3),
+	// keyed separately from the aggregate InputMeta rows so repair and
+	// expansion records never overwrite ordinal zero.
+	contextRounds map[contextRoundKey]contextRoundMeta
+	// requestedPaths holds the files the model asked for in expansion
+	// rounds and received without error. The host chose the first round's
+	// files; an expansion is the model naming a file it needed. The work
+	// record capture reads this set (see workRecordCapture).
+	requestedPaths map[string]bool
+	// memoryDelivered holds the files memory prefetch put in a first
+	// round. With requestedPaths and the changed files it gives the memory
+	// health line (memoryHealth).
+	memoryDelivered map[string]bool
+	interventions   []schemas.InterventionRecord
+	interactions    []schemas.InteractionRecord
+	memoryItems     int
+	memoryChars     int
+	// suppressionMu guards suppression, the run-scoped recorder the scoped
+	// tool runner writes its host-side omissions to (W2). The loop resets
+	// the recorder at the start of each iteration, so the pairing reads
+	// exactly the suppressions that iteration made.
+	suppressionMu sync.Mutex
+	suppression   *SuppressionRecorder
 	currentStage  string
 	currentIter   int
 	history       []schemas.IterationState
+	passEvidence  []schemas.PassEvidence
 	// completedStages holds every StageRecord the run has produced so far, so a
 	// partial trace can be built mid-run. eventsPartial is set when an
 	// incremental write failed; the final trace records it so consumers know the
@@ -115,6 +146,7 @@ func newRunTraceAccumulator(store TraceStore, runID, sessionID, projectRoot stri
 		memoryStatus:     memoryStatus,
 		warnWriteFailure: warnWriteFailure,
 		stages:           make(map[stageKey]schemas.InputMeta),
+		contextRounds:    make(map[contextRoundKey]contextRoundMeta),
 		deliveredMemory:  make(map[deliveredMemoryKey]struct{}),
 	}
 }
@@ -204,6 +236,156 @@ func (tr *runTraceAccumulator) replaySuppressedCount() int {
 	return tr.replaySuppressed
 }
 
+// recordContextRound records the context telemetry for one EXPANSION
+// round (D3) under its own key: {stage, iteration, ordinal, round}.
+// Round 0 is the initial handshake and records under the historical
+// recordContext path; rounds 1+ are expansion rounds. Separate keys mean
+// an expansion never overwrites the initial record and repair/expansion
+// records never collide.
+// recordMemoryPrefetch records the memory-assisted dependency prefetch
+// decisions under the invocation's stage key, so the report can show which
+// retained record authorized which delivered view.
+func (tr *runTraceAccumulator) recordMemoryPrefetch(stage string, iteration, ordinal int, fetches []schemas.MemoryPrefetchRecord) {
+	if tr == nil || len(fetches) == 0 {
+		return
+	}
+	meta := tr.stages[stageKeyFor(stage, iteration, ordinal)]
+	meta.MemoryPrefetch = append(meta.MemoryPrefetch, fetches...)
+	tr.stages[stageKeyFor(stage, iteration, ordinal)] = meta
+}
+
+// recordJevDecisions records the advisor's disposition trace under the
+// invocation's stage key.
+func (tr *runTraceAccumulator) recordJevDecisions(stage string, iteration, ordinal int, records []schemas.DecisionDispositionRecord) {
+	if tr == nil || len(records) == 0 {
+		return
+	}
+	key := stageKeyFor(stage, iteration, ordinal)
+	meta := tr.stages[key]
+	meta.JevDecisions = append(meta.JevDecisions, records...)
+	tr.stages[key] = meta
+}
+
+// recordJevPrefetch records the decision-approved delivered fetches.
+func (tr *runTraceAccumulator) recordJevPrefetch(stage string, iteration, ordinal int, records []schemas.JevPrefetchRecord) {
+	if tr == nil || len(records) == 0 {
+		return
+	}
+	key := stageKeyFor(stage, iteration, ordinal)
+	meta := tr.stages[key]
+	meta.JevPrefetch = append(meta.JevPrefetch, records...)
+	tr.stages[key] = meta
+}
+
+// noteRequestedPaths records the source paths an expansion round delivered
+// without error.
+func (tr *runTraceAccumulator) noteRequestedPaths(items []schemas.ContextItem) {
+	if tr == nil {
+		return
+	}
+	for _, item := range items {
+		if item.Error != nil || item.Query.Path == nil || strings.TrimSpace(*item.Query.Path) == "" {
+			continue
+		}
+		switch item.Query.QueryType {
+		case schemas.ContextReadFile, schemas.ContextGetSymbol, schemas.ContextOutline:
+		default:
+			continue
+		}
+		if tr.requestedPaths == nil {
+			tr.requestedPaths = map[string]bool{}
+		}
+		tr.requestedPaths[strings.TrimPrefix(*item.Query.Path, "./")] = true
+	}
+}
+
+// noteMemoryDelivered records the files memory prefetch delivered.
+func (tr *runTraceAccumulator) noteMemoryDelivered(paths []string) {
+	if tr == nil {
+		return
+	}
+	if tr.memoryDelivered == nil {
+		tr.memoryDelivered = map[string]bool{}
+	}
+	for _, p := range paths {
+		tr.memoryDelivered[p] = true
+	}
+}
+
+// memoryHealth summarizes how well memory chose for this run: the files it
+// delivered, how many of those the run changed (hits), and how many files
+// the model still had to request in expansions (misses). Memory v2 Section
+// 3.6: these are the per-run inputs of memory precision and recall.
+func (tr *runTraceAccumulator) memoryHealth(changed []string) (delivered, hits, misses int) {
+	if tr == nil {
+		return 0, 0, 0
+	}
+	delivered = len(tr.memoryDelivered)
+	for _, p := range changed {
+		if tr.memoryDelivered[p] {
+			hits++
+		}
+	}
+	for p := range tr.requestedPaths {
+		if !tr.memoryDelivered[p] {
+			misses++
+		}
+	}
+	return delivered, hits, misses
+}
+
+// requestedPathList returns the recorded expansion paths, sorted.
+func (tr *runTraceAccumulator) requestedPathList() []string {
+	if tr == nil {
+		return nil
+	}
+	out := make([]string, 0, len(tr.requestedPaths))
+	for path := range tr.requestedPaths {
+		out = append(out, path)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (tr *runTraceAccumulator) recordContextRound(stage string, iteration, ordinal, round int, bundle schemas.ContextBundle) {
+	if tr == nil {
+		return
+	}
+	key := contextRoundKey{name: stage, iteration: iteration, ordinal: ordinal, round: round}
+	meta := tr.contextRounds[key]
+	meta.ContextItems += len(bundle.Items)
+	for _, item := range bundle.Items {
+		meta.ContextChars += len(item.Summary)
+		if item.Error != nil {
+			// A failed query is executed work and a delivery miss, never
+			// successfully delivered context (same rule as recordContext).
+			meta.ContextFailures++
+		}
+	}
+	meta.InvocationOrdinal = ordinal
+	meta.ContextRound = round
+	tr.contextRounds[key] = meta
+}
+
+// contextRoundKey identifies one context round within a stage invocation.
+type contextRoundKey struct {
+	name      string
+	iteration int
+	ordinal   int
+	round     int
+}
+
+// contextRoundMeta is the per-round context telemetry shape (mirrors the
+// ContextItems/Chars/Failures slice of InputMeta so consumers read the
+// same units).
+type contextRoundMeta struct {
+	ContextItems      int
+	ContextChars      int
+	ContextFailures   int
+	InvocationOrdinal int
+	ContextRound      int
+}
+
 func (tr *runTraceAccumulator) noteStage(stage string, iteration int) {
 	tr.currentStage = stage
 	tr.currentIter = iteration
@@ -277,8 +459,27 @@ func (tr *runTraceAccumulator) recordHistory(state schemas.IterationState) {
 	tr.history = append(tr.history, state)
 }
 
+// recordPassEvidence keeps both builders' records for one pass in the run trace.
+// It returns the index of the head record, so the judged progress can be set
+// once the digest is known. A nil trace returns -1.
+func (tr *runTraceAccumulator) recordPassEvidence(pair passEvidencePair) int {
+	if tr == nil {
+		return -1
+	}
+	tr.passEvidence = append(tr.passEvidence, pair.head, pair.pass)
+	return len(tr.passEvidence) - 2
+}
+
+// setPassEvidencePassChanged sets the judged progress on a recorded head record.
+func (tr *runTraceAccumulator) setPassEvidencePassChanged(index int, changed *bool) {
+	if tr == nil || index < 0 || index >= len(tr.passEvidence) {
+		return
+	}
+	tr.passEvidence[index].PassChanged = changed
+}
+
 func (tr *runTraceAccumulator) recordMemory(stage string, iteration int, bundle schemas.MemoryBundle) {
-	key := stageKey{stage, iteration}
+	key := stageKeyFor(stage, iteration, 0)
 	meta := tr.stages[key]
 	meta.MemoryItems += len(bundle.Observations)
 	meta.ExemplarItems += len(bundle.Exemplars)
@@ -293,17 +494,23 @@ func (tr *runTraceAccumulator) recordMemory(stage string, iteration int, bundle 
 }
 
 func (tr *runTraceAccumulator) recordContext(stage string, iteration int, bundle schemas.ContextBundle) {
-	key := stageKey{stage, iteration}
+	key := stageKeyFor(stage, iteration, 0)
 	meta := tr.stages[key]
 	meta.ContextItems = len(bundle.Items)
 	for _, item := range bundle.Items {
 		meta.ContextChars += len(item.Summary)
+		if item.Error != nil {
+			// A failed query is executed work and a delivery miss, never
+			// successfully delivered context. Counting it here keeps the
+			// failure visible next to the issued-request total.
+			meta.ContextFailures++
+		}
 	}
 	tr.stages[key] = meta
 }
 
 func (tr *runTraceAccumulator) recordEdge(stage string, iteration int, bytes int) {
-	key := stageKey{stage, iteration}
+	key := stageKeyFor(stage, iteration, 0)
 	meta := tr.stages[key]
 	meta.EdgePayloadBytes = bytes
 	tr.stages[key] = meta
@@ -325,7 +532,7 @@ func (tr *runTraceAccumulator) noteMemorySearchFailed() {
 // direct_candidates is their sum (the topic lookup returned them all). The
 // fields are consumer-pending: no reader consumes them yet (pairing rule).
 func (tr *runTraceAccumulator) recordMemoryLookup(stage string, iteration int, mode string, direct, stale int) {
-	key := stageKey{stage, iteration}
+	key := stageKeyFor(stage, iteration, 0)
 	meta := tr.stages[key]
 	meta.MemoryLookupMode = mode
 	meta.DirectCandidates = direct + stale
@@ -343,12 +550,211 @@ func (tr *runTraceAccumulator) recordMissPathDetail(stage string, iteration int,
 	if tr == nil {
 		return
 	}
-	key := stageKey{stage, iteration}
+	key := stageKeyFor(stage, iteration, 0)
 	meta := tr.stages[key]
 	meta.KeysGenerated = detail.KeysGenerated
 	meta.LookupMisses = detail.LookupMisses
 	meta.FTSFallback = detail.FallbackToPlainSearch
 	meta.ExemplarsRetrieved = detail.ExemplarsRetrieved
+	tr.stages[key] = meta
+}
+
+// recordScopeMetrics records the Part A context-bridge suppression counts
+// for one stage invocation: the deterministic counterfactual default
+// request size, what the scoped request actually executed, and the
+// operations the host structurally omitted. It also carries the scope
+// plan's privilege booleans via expansion count. Counts only.
+// InvocationOrdinal 0 marks the initial pass; repair re-entries record
+// under their own ordinal so a re-entry never overwrites this record.
+func (tr *runTraceAccumulator) recordScopeMetrics(stage string, iteration int, sup ScopeSuppression, scope StageScopePlan) {
+	tr.recordScopeMetricsOrdinal(stage, iteration, 0, sup, scope)
+}
+
+// recordScopeMetricsOrdinal is the ordinal-aware form. The scope plan's
+// remaining ExpansionBudget lands in ScopeExpansions (its documented
+// meaning); ExpansionsPerformed records what the invocation actually spent,
+// as a measured zero when nothing expanded. Expansions are not yet granted
+// anywhere in production, so the performed count comes from the scope
+// plan's spent field when the planner starts granting; today it records 0.
+func (tr *runTraceAccumulator) recordScopeMetricsOrdinal(stage string, iteration, ordinal int, sup ScopeSuppression, scope StageScopePlan) {
+	if tr == nil {
+		return
+	}
+	key := stageKeyFor(stage, iteration, ordinal)
+	meta := tr.stages[key]
+	meta.ContextQueriesDefault = sup.ContextQueriesDefault
+	meta.ContextQueriesExecuted = sup.ContextQueriesExecuted
+	meta.ContextQueriesSuppressed = sup.ContextQueriesSuppressed
+	meta.GlobalListsSuppressed = sup.GlobalListsSuppressed
+	meta.FileReadsSuppressed = sup.FileReadsSuppressed
+	meta.SearchesSuppressed = sup.SearchesSuppressed
+	meta.NecessaryCallsSuppressed = sup.NecessaryCallsSuppressed
+	meta.ScopeExpansions = scope.ExpansionBudget
+	meta.ExpansionsPerformed = scope.ExpansionsSpent
+	meta.InvocationOrdinal = ordinal
+	tr.stages[key] = meta
+}
+
+// suppressionRecorder returns the run-scoped suppression recorder, creating
+// it on first use. A nil accumulator returns nil, so a runner without a trace
+// behaves exactly as before W2.
+func (tr *runTraceAccumulator) suppressionRecorder() *SuppressionRecorder {
+	if tr == nil {
+		return nil
+	}
+	tr.suppressionMu.Lock()
+	defer tr.suppressionMu.Unlock()
+	if tr.suppression == nil {
+		tr.suppression = NewSuppressionRecorder()
+	}
+	return tr.suppression
+}
+
+// resetSuppressionRecorder starts a new suppression window for one iteration.
+func (tr *runTraceAccumulator) resetSuppressionRecorder() {
+	if tr == nil {
+		return
+	}
+	tr.suppressionMu.Lock()
+	defer tr.suppressionMu.Unlock()
+	tr.suppression = NewSuppressionRecorder()
+}
+
+// recordNecessarySuppressions stamps the paired necessary-suppression count
+// (W2) onto every invocation record already written for one iteration. It
+// updates only existing rows, so it never fabricates a metric for an
+// invocation that recorded none.
+func (tr *runTraceAccumulator) recordNecessarySuppressions(iteration, n int) {
+	if tr == nil {
+		return
+	}
+	for key, meta := range tr.stages {
+		if key.iteration != iteration {
+			continue
+		}
+		meta.NecessaryCallsSuppressed = n
+		tr.stages[key] = meta
+	}
+}
+
+// recordEvidencePlanOrdinal records the production evidence plan's
+// operation-level dispositions for one invocation. Every remaining warm-plan
+// operation is recorded as executed; every admitted replacement is recorded
+// as satisfied-by-evidence with its evidence identity; every rejected
+// candidate records the cold operations that stayed after rejection. The
+// validation counters estimate validation reads from the supporting and
+// dependency references E3 actually re-hashed; they are reported separately
+// from executed work.
+func (tr *runTraceAccumulator) recordEvidencePlanOrdinal(stage string, iteration, ordinal int, plan *EvidencePlan) {
+	if tr == nil || plan == nil {
+		return
+	}
+	key := stageKeyFor(stage, iteration, ordinal)
+	meta := tr.stages[key]
+	decisions := make([]schemas.OperationDecision, 0, len(plan.Warm.Operations)+len(plan.Admitted)+len(plan.Rejected))
+	executed, satisfied, retained := 0, 0, 0
+	validationReads := 0
+	for _, res := range plan.Admitted {
+		reads := 0
+		if res.Record != nil {
+			reads = len(res.Record.Supporting) + len(res.Record.Dependencies)
+		}
+		for _, op := range res.Replaced {
+			decisions = append(decisions, schemas.OperationDecision{
+				Operation:       subjectToOpName(op),
+				Disposition:     schemas.OperationSatisfiedByEvidence,
+				EvidenceID:      res.Record.Identity,
+				Reason:          res.Reason,
+				ValidationReads: reads,
+			})
+			satisfied++
+			validationReads += reads
+		}
+	}
+	for _, rej := range plan.Rejected {
+		for _, op := range replacedOperationsFor(rej.Need) {
+			decisions = append(decisions, schemas.OperationDecision{
+				Operation:   subjectToOpName(op),
+				Disposition: schemas.OperationRetainedAfterReject,
+				Reason:      rej.Reason,
+			})
+			retained++
+		}
+	}
+	for _, op := range plan.Warm.Operations {
+		decisions = append(decisions, schemas.OperationDecision{
+			Operation:   op.Name,
+			Disposition: schemas.OperationExecuted,
+			Reason:      "retained improved cold operation",
+		})
+		executed++
+	}
+	meta.OperationDecisions = &decisions
+	meta.OperationsExecuted = executed
+	meta.OperationsSatisfiedByEvidence = satisfied
+	meta.OperationsRetainedAfterReject = retained
+	meta.EvidenceValidationReads = validationReads
+	meta.InvocationOrdinal = ordinal
+	tr.stages[key] = meta
+}
+
+// RecordScopeMetrics records the scope-suppression metrics for one stage
+// invocation from a caller-supplied ScopeMetrics payload. It writes ONLY the
+// scope fields on InputMeta: the discovery-plan counters (and the legacy
+// DiscoveryReadsAvoided inferred-savings counter in particular) are never
+// touched here, so observed host omissions stay decoupled from resolved
+// question tallies. Counts only; no query text or paths land in the trace.
+func (tr *runTraceAccumulator) RecordScopeMetrics(stage string, iteration int, m schemas.ScopeMetrics) {
+	if tr == nil {
+		return
+	}
+	if err := m.Validate(); err != nil {
+		return
+	}
+	key := stageKeyFor(stage, iteration, 0)
+	meta := tr.stages[key]
+	meta.ContextQueriesDefault = m.ContextQueriesDefault
+	meta.ContextQueriesExecuted = m.ContextQueriesExecuted
+	meta.ContextQueriesSuppressed = m.ContextQueriesSuppressed
+	meta.GlobalListsSuppressed = m.GlobalListsSuppressed
+	meta.SearchesSuppressed = m.SearchesSuppressed
+	meta.NecessaryCallsSuppressed = m.NecessaryCallsSuppressed
+	meta.ScopeExpansions = m.ScopeExpansions
+	tr.stages[key] = meta
+}
+
+// recordDiscoveryPlan records the Track C discovery-plan outcome for one
+// stage invocation: how many questions the plan saw, how many the task
+// itself answered, how many the cognition graph resolved (each counts as one
+// conservatively avoided discovery operation), how many stayed unresolved,
+// and the anchor freshness validation tally. Counts only; no question text
+// or node claims land in the trace.
+func (tr *runTraceAccumulator) recordDiscoveryPlan(stage string, iteration int, plan DiscoveryPlan) {
+	tr.recordDiscoveryPlanOrdinal(stage, iteration, 0, plan)
+}
+
+// recordDiscoveryPlanOrdinal records the discovery-plan counters under an
+// explicit invocation ordinal. Initial pass (0) and repair re-entries (1+)
+// keep separate records instead of overwriting one {stage, iteration} row.
+func (tr *runTraceAccumulator) recordDiscoveryPlanOrdinal(stage string, iteration, ordinal int, plan DiscoveryPlan) {
+	if tr == nil {
+		return
+	}
+	key := stageKeyFor(stage, iteration, ordinal)
+	meta := tr.stages[key]
+	meta.DiscoveryQuestions = len(plan.ResolvedByTask) + len(plan.ResolvedByCognition) + len(plan.Unresolved)
+	meta.DiscoveryResolvedTask = len(plan.ResolvedByTask)
+	meta.DiscoveryResolvedCog = len(plan.ResolvedByCognition)
+	meta.DiscoveryUnresolved = len(plan.Unresolved)
+	// DiscoveryReadsAvoided is deliberately NOT set here: a resolved
+	// question is not a suppressed read. Actual suppression was recorded
+	// by recordScopeMetrics from the abandoned cognition scoping path,
+	// which is removed; the live stage-input path authorizes no host
+	// omission, so the suppression counters stay zero.
+	meta.AnchorsValidated = plan.AnchorsValidated
+	meta.AnchorsFailed = plan.AnchorsFailed
+	meta.SemanticHits = plan.SemanticHits
+	meta.InvocationOrdinal = ordinal
 	tr.stages[key] = meta
 }
 
@@ -453,7 +859,7 @@ func (tr *runTraceAccumulator) recordPermission(event agent.PermissionEvent) {
 func (tr *runTraceAccumulator) buildOutcome(stageRecords []schemas.StageRecord, status, abortReason string) (schemas.RunOutcome, error) {
 	stages := make([]schemas.TracedStage, 0, len(stageRecords))
 	for _, rec := range stageRecords {
-		meta := tr.stages[stageKey{rec.Name, rec.Iteration}]
+		meta := tr.stages[stageKeyFor(rec.Name, rec.Iteration, 0)]
 		stages = append(stages, schemas.TracedStage{
 			StageRecord: rec,
 			InputMeta:   meta,
@@ -483,6 +889,7 @@ func (tr *runTraceAccumulator) buildOutcome(stageRecords []schemas.StageRecord, 
 		Tier:          string(tr.plan.Tier),
 		Plan:          &tr.plan,
 		Iterations:    tr.history,
+		PassEvidence:  tr.passEvidence,
 		Stages:        stages,
 		Outcome:       outcome,
 		Memory: schemas.MemoryRecord{
@@ -511,7 +918,9 @@ func (tr *runTraceAccumulator) buildOutcome(stageRecords []schemas.StageRecord, 
 // result and the accumulated per-stage metadata. It returns an error on
 // schema-validation failure (a malformed trace is a bug, not a write failure).
 func (tr *runTraceAccumulator) buildRunOutcome(result schemas.PipelineResult) (schemas.RunOutcome, error) {
-	return tr.buildOutcome(result.Stages, result.Status, abortReason(result))
+	outcome, err := tr.buildOutcome(result.Stages, result.Status, abortReason(result))
+	outcome.Outcome.Verified = result.Verified
+	return outcome, err
 }
 
 // changedFilesUnion returns the sorted unique set of files changed across all

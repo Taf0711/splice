@@ -9,27 +9,50 @@ import (
 )
 
 // DefaultResolveOptions builds config resolution inputs from the local process
-// environment and workspace.
+// environment and workspace. It sets ProjectConfigPath when the project config
+// exists, but it does not trust it: Resolve merges that file only when the
+// caller sets ProjectTrusted. Use WorkspaceResolveOptions to apply a trust
+// decision.
 func DefaultResolveOptions(workspaceRoot string) (ResolveOptions, error) {
+	options, err := userResolveOptions()
+	if err != nil {
+		return ResolveOptions{}, err
+	}
+	options.ProjectConfigPath, err = existingConfigFile(filepath.Join(workspaceRoot, ".splice", "config.json"))
+	if err != nil {
+		return ResolveOptions{}, err
+	}
+	return options, nil
+}
+
+// WorkspaceResolveOptions builds config resolution inputs for workspaceRoot
+// with its trust decision applied. For an untrusted workspace it does not
+// look at the project config at all, so a broken project config cannot stop
+// an untrusted launch.
+func WorkspaceResolveOptions(workspaceRoot string, trusted bool) (ResolveOptions, error) {
+	if !trusted {
+		return userResolveOptions()
+	}
+	options, err := DefaultResolveOptions(workspaceRoot)
+	if err != nil {
+		return ResolveOptions{}, err
+	}
+	options.ProjectTrusted = true
+	return options, nil
+}
+
+func userResolveOptions() (ResolveOptions, error) {
 	userConfigPath, err := DefaultUserConfigPath()
 	if err != nil {
 		return ResolveOptions{}, err
 	}
-
 	userConfigPath, err = existingConfigFile(userConfigPath)
 	if err != nil {
 		return ResolveOptions{}, err
 	}
-
-	projectConfigPath, err := existingConfigFile(filepath.Join(workspaceRoot, ".splice", "config.json"))
-	if err != nil {
-		return ResolveOptions{}, err
-	}
-
 	return ResolveOptions{
-		UserConfigPath:    userConfigPath,
-		ProjectConfigPath: projectConfigPath,
-		ProviderCommand:   strings.TrimSpace(os.Getenv("SPLICE_PROVIDER_COMMAND")),
+		UserConfigPath:  userConfigPath,
+		ProviderCommand: strings.TrimSpace(os.Getenv("SPLICE_PROVIDER_COMMAND")),
 	}, nil
 }
 

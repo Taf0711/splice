@@ -51,6 +51,7 @@ splice-linux-sandbox
 
 # Renamed binary artifacts
 /splice
+/splice-dev
 /splice.exe
 /splice-skills
 /splice-termux-arm64
@@ -90,3 +91,14 @@ graphify-out/
 /internal/cli/.splice-sandbox-outside-*/
 # TUI transcript exports (/export writes these into the working directory)
 splice-transcript-*.txt
+
+# Internal planning docs and raw eval output live in splice-internal.
+/plans/
+/ROADMAP.md
+/MEMORY.md
+/tests/evals/results/
+# Built by the families-taskset verifier test.
+/tests/evals/warmcost/families-taskset/write-gold/*/demo
+
+# Journey results are written under ~/.cache/splice-journeys/.
+tests/evals/journeys/journey-results.json

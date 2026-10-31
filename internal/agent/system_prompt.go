@@ -7,9 +7,10 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/Taf0711/splice/internal/config"
+	"github.com/Taf0711/splice/internal/projectdocs"
+	"github.com/Taf0711/splice/internal/projectfile"
 	"github.com/Taf0711/splice/internal/repomap"
 	"github.com/Taf0711/splice/internal/workspaceseed"
 )
@@ -32,13 +33,6 @@ var confirmationPolicy string
 // (it never should be) so a run always has a non-empty system turn.
 const fallbackSystemPrompt = "You are Splice, a terminal coding agent. Help with the current workspace and use tools when needed."
 
-// projectContextFiles are workspace docs injected into the system prompt so the
-// agent honors project-specific conventions (mirrors AGENTS.md / CLAUDE.md).
-// The first match at each directory level wins; the loader walks the chain
-// from the git root down to the cwd and injects the matches in
-// general-to-specific order.
-var projectContextFiles = []string{"AGENTS.md", "SPLICE.md", ".splice/AGENTS.md"}
-
 // userContextFile is the per-user instruction file, resolved under
 // config.UserConfigDir()/splice/ alongside the rest of Splice's per-user config
 // (config.json, commands, specialists) so users can keep personal guidance out
@@ -49,12 +43,14 @@ var userConfigDirForPrompt = config.UserConfigDir
 
 // maxProjectContextBytes caps how much of a single project doc is injected so
 // a large guidelines file can't blow the context budget.
-const maxProjectContextBytes = 8 << 10 // 8 KiB per file
+const maxProjectContextBytes = projectdocs.MaxProjectContextBytes // 8 KiB per file
 
 // maxProjectContextTotalBytes caps the total bytes across all matched
 // project guideline files. With path-walking, multiple files can match (root
 // + sub-tree), so a per-file cap alone is not enough.
-const maxProjectContextTotalBytes = 32 << 10 // 32 KiB total
+const maxProjectContextTotalBytes = projectdocs.MaxProjectContextTotalBytes // 32 KiB total
+
+const truncationMarker = "\n… (truncated)"
 
 // maxRepoMapContextBytes keeps the repository map useful but compact enough to
 // remain stable across normal agent turns.
@@ -80,6 +76,9 @@ func buildSystemPrompt(options Options) string {
 	sections := []string{core}
 	if addendum := modelPromptAddendum(options.Model); addendum != "" {
 		sections = append(sections, addendum)
+	}
+	if extra := strings.TrimSpace(options.SystemAddendum); extra != "" {
+		sections = append(sections, extra)
 	}
 	if session := sessionRuntimeContext(options); session != "" {
 		sections = append(sections, session)
@@ -295,7 +294,7 @@ func workspaceContext(cwd string) string {
 	}
 	b.WriteString("</environment>")
 
-	b.WriteString(projectGuidelines(cwd, findProjectGitRoot(cwd)))
+	b.WriteString(projectdocs.Load(cwd))
 	if repoMap := repoMapContext(cwd); repoMap != "" {
 		b.WriteString("\n\n## Repo map\n\n" + repoMap)
 	}
@@ -310,41 +309,7 @@ func workspaceContext(cwd string) string {
 // at maxProjectContextBytes; the total across all files is capped at
 // maxProjectContextTotalBytes. Returns "" when no file matches.
 func projectGuidelines(cwd, gitRoot string) string {
-	dirs := projectGuidelineDirs(cwd, gitRoot)
-	if len(dirs) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	totalUsed := 0
-	for _, dir := range dirs {
-		if totalUsed >= maxProjectContextTotalBytes {
-			break
-		}
-		match := findProjectContextFile(dir)
-		if match == "" {
-			continue
-		}
-		data, err := os.ReadFile(match)
-		if err != nil {
-			continue
-		}
-		content := strings.TrimSpace(string(data))
-		if content == "" {
-			continue
-		}
-		// Per-file cap is the lesser of the configured per-file limit and
-		// whatever remains of the total budget, so a single file can never
-		// blow past either bound.
-		limit := maxProjectContextBytes
-		if remaining := maxProjectContextTotalBytes - totalUsed; remaining < limit {
-			limit = remaining
-		}
-		content = truncateGuidelineContent(content, limit)
-		label := projectGuidelineLabel(match, gitRoot)
-		b.WriteString("\n\n## Project guidelines (" + label + ")\n\n" + content)
-		totalUsed += len(content)
-	}
-	return b.String()
+	return projectdocs.LoadFrom(cwd, gitRoot)
 }
 
 // userGuidelines returns the per-user SPLICE.md instructions block, if present.
@@ -369,7 +334,7 @@ func userGuidelines() string {
 	if match == "" {
 		return ""
 	}
-	data, err := os.ReadFile(match)
+	data, err := projectfile.Read(match, "")
 	if err != nil {
 		return ""
 	}
@@ -384,38 +349,13 @@ func userGuidelines() string {
 		content
 }
 
-// truncationMarker is appended to guideline content that was cut short.
-const truncationMarker = "\n… (truncated)"
-
 // truncateGuidelineContent caps content at limit bytes without splitting a
 // UTF-8 rune, appending a truncation marker when anything was cut. Space for
 // the marker is reserved before choosing the cut point. When limit is too
 // small to fit the marker itself, the marker is dropped instead, so the
 // returned string never exceeds limit for any non-negative limit.
 func truncateGuidelineContent(content string, limit int) string {
-	if len(content) <= limit {
-		return content
-	}
-	if limit <= 0 {
-		return ""
-	}
-	cut := limit - len(truncationMarker)
-	if cut < 0 {
-		cut = 0
-	}
-	for cut > 0 && !utf8.RuneStart(content[cut]) {
-		cut--
-	}
-	if truncated := content[:cut] + truncationMarker; len(truncated) <= limit {
-		return truncated
-	}
-	// limit is smaller than the marker itself: fall back to a hard,
-	// rune-safe cut at limit bytes with no marker rather than exceeding it.
-	end := limit
-	for end > 0 && !utf8.RuneStart(content[end]) {
-		end--
-	}
-	return content[:end]
+	return projectdocs.TruncateContent(content, limit)
 }
 
 // findCaseInsensitiveFile returns the on-disk path of the regular file in dir
@@ -437,44 +377,13 @@ func findCaseInsensitiveFile(dir, basename string) string {
 // (inclusive), in root-to-leaf order. If gitRoot is empty or unreachable
 // from cwd, the chain collapses to [cwd].
 func projectGuidelineDirs(cwd, gitRoot string) []string {
-	cwd = strings.TrimSpace(cwd)
-	if cwd == "" {
-		return nil
-	}
-	gitRoot = strings.TrimSpace(gitRoot)
-	if gitRoot == "" {
-		return []string{cwd}
-	}
-	rel, err := filepath.Rel(gitRoot, cwd)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return []string{cwd}
-	}
-	if rel == "." {
-		return []string{gitRoot}
-	}
-	dirs := []string{gitRoot}
-	cur := gitRoot
-	for _, seg := range strings.Split(rel, string(filepath.Separator)) {
-		if seg == "" || seg == "." {
-			continue
-		}
-		cur = filepath.Join(cur, seg)
-		dirs = append(dirs, cur)
-	}
-	return dirs
+	return projectdocs.GuidelineDirs(cwd, gitRoot)
 }
 
 // projectGuidelineLabel renders the path of match as a short label relative
 // to gitRoot. When gitRoot is empty, the basename is returned.
 func projectGuidelineLabel(match, gitRoot string) string {
-	if gitRoot == "" {
-		return filepath.Base(match)
-	}
-	rel, err := filepath.Rel(gitRoot, match)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return filepath.Base(match)
-	}
-	return rel
+	return projectdocs.GuidelineLabel(match, gitRoot)
 }
 
 // findProjectContextFile returns the first matching project guideline file
@@ -484,100 +393,25 @@ func projectGuidelineLabel(match, gitRoot string) string {
 // should appear in the project guidelines label.
 // Returns "" when nothing matches.
 func findProjectContextFile(dir string) string {
-	for _, name := range projectContextFiles {
-		// Walk to the file's parent through dir with case-insensitive segment
-		// matching, then find a regular file with the same basename. This works
-		// on both case-sensitive and case-insensitive filesystems and always
-		// returns the on-disk filename.
-		parent, ok := resolveDirCaseInsensitive(filepath.Dir(filepath.Join(dir, name)), dir)
-		if !ok {
-			continue
-		}
-		if match := findCaseInsensitiveFile(parent, filepath.Base(name)); match != "" {
-			return match
-		}
-	}
-	return ""
+	return projectdocs.FindContextFile(dir)
 }
 
 // resolveDirCaseInsensitive walks from anchor to target, matching each
 // segment case-insensitively. Returns the resolved absolute path and true on
 // success, or "" and false if any segment cannot be found.
 func resolveDirCaseInsensitive(target, anchor string) (string, bool) {
-	if target == "" || target == "." {
-		return anchor, true
-	}
-	rel, err := filepath.Rel(anchor, target)
-	if err != nil {
-		return "", false
-	}
-	if rel == "." {
-		return anchor, true
-	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return "", false
-	}
-	parts := strings.Split(rel, string(filepath.Separator))
-	cur := anchor
-	for _, p := range parts {
-		if p == "" {
-			continue
-		}
-		entries, err := os.ReadDir(cur)
-		if err != nil {
-			return "", false
-		}
-		found := false
-		for _, e := range entries {
-			if e.IsDir() && strings.EqualFold(e.Name(), p) {
-				cur = filepath.Join(cur, e.Name())
-				found = true
-				break
-			}
-		}
-		if !found {
-			return "", false
-		}
-	}
-	return cur, true
+	return projectdocs.ResolveDirCaseInsensitive(target, anchor)
 }
 
 // findProjectGitRoot returns the nearest ancestor of cwd that contains a
 // .git entry (file or directory). Returns "" when no git root is found, so
 // the caller can fall back to cwd-only lookup.
 func findProjectGitRoot(cwd string) string {
-	cwd = strings.TrimSpace(cwd)
-	if cwd == "" {
-		return ""
-	}
-	cur := cwd
-	for {
-		if hasGitMetadata(cur) {
-			return cur
-		}
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			return ""
-		}
-		cur = parent
-	}
+	return projectdocs.FindGitRoot(cwd)
 }
 
 func hasGitMetadata(dir string) bool {
-	gitPath := filepath.Join(dir, ".git")
-	info, err := os.Stat(gitPath)
-	if err != nil {
-		return false
-	}
-	if info.IsDir() {
-		_, err := os.Stat(filepath.Join(gitPath, "HEAD"))
-		return err == nil
-	}
-	data, err := os.ReadFile(gitPath)
-	if err != nil {
-		return false
-	}
-	return strings.HasPrefix(strings.TrimSpace(string(data)), "gitdir: ")
+	return projectdocs.HasGitMetadata(dir)
 }
 
 func workspaceSeedContext(cwd string) string {
@@ -625,8 +459,9 @@ func gitBranchForPrompt(cwd string) string {
 		return ""
 	}
 	headPath := filepath.Join(gitPath, "HEAD")
+	headRoot := cwd
 	if !info.IsDir() {
-		data, err := os.ReadFile(gitPath)
+		data, err := projectfile.Read(gitPath, cwd)
 		if err != nil {
 			return ""
 		}
@@ -641,8 +476,12 @@ func gitBranchForPrompt(cwd string) string {
 			dir = filepath.Join(cwd, dir)
 		}
 		headPath = filepath.Join(dir, "HEAD")
+		headRoot = dir
 	}
-	data, err := os.ReadFile(headPath)
+	// A worktree's git dir comes from the .git file and may name a location
+	// outside cwd, so HEAD is contained by that git dir. A plain .git dir must
+	// stay inside cwd.
+	data, err := projectfile.Read(headPath, headRoot)
 	if err != nil {
 		return ""
 	}

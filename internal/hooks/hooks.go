@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Taf0711/splice/internal/projectfile"
 )
 
 type Event string
@@ -106,6 +108,9 @@ type LoadOptions struct {
 
 type StoreOptions struct {
 	ConfigPath string
+	// Source names the layer the file is. The zero value is SourceProject, so a
+	// store is contained to its workspace unless it is told it is the user file.
+	Source ConfigSource
 }
 
 type SelectInput struct {
@@ -277,6 +282,7 @@ func WriteConfig(path string, config Config) error {
 
 type ConfigStore struct {
 	configPath string
+	source     ConfigSource
 }
 
 func NewConfigStore(options StoreOptions) (*ConfigStore, error) {
@@ -292,11 +298,33 @@ func NewConfigStore(options StoreOptions) (*ConfigStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ConfigStore{configPath: resolved}, nil
+	source := options.Source
+	if source == "" {
+		source = SourceProject
+	}
+	return &ConfigStore{configPath: resolved, source: source}, nil
+}
+
+// write saves config to the store path. A user file that is a symlink, such as
+// one linked into a dotfiles repo, keeps its link: the write goes to the
+// resolved target. Project files are written at their own path.
+func (store *ConfigStore) write(config Config) error {
+	path := store.configPath
+	if store.source == SourceUser {
+		info, err := os.Lstat(path)
+		if err == nil && info.Mode()&os.ModeSymlink != 0 {
+			target, err := filepath.EvalSymlinks(path)
+			if err != nil {
+				return fmt.Errorf("resolve symlinked hook config %s: %w", path, err)
+			}
+			path = target
+		}
+	}
+	return WriteConfig(path, config)
 }
 
 func (store *ConfigStore) List() (Config, error) {
-	return readSingleConfig(store.configPath)
+	return readSingleConfig(store.source, store.configPath)
 }
 
 func (store *ConfigStore) Upsert(hook Definition) (Definition, error) {
@@ -327,7 +355,7 @@ func (store *ConfigStore) Upsert(hook Definition) (Definition, error) {
 	next = append(next, normalized)
 	sortDefinitions(next)
 	config.Hooks = next
-	if err := WriteConfig(store.configPath, config); err != nil {
+	if err := store.write(config); err != nil {
 		return Definition{}, err
 	}
 	return normalized, nil
@@ -355,7 +383,7 @@ func (store *ConfigStore) Remove(hookID string) (bool, error) {
 		return false, nil
 	}
 	config.Hooks = next
-	return true, WriteConfig(store.configPath, config)
+	return true, store.write(config)
 }
 
 func (store *ConfigStore) SetEnabled(hookID string, enabled bool) (bool, error) {
@@ -377,7 +405,7 @@ func (store *ConfigStore) SetEnabled(hookID string, enabled bool) (bool, error) 
 	if !changed {
 		return false, nil
 	}
-	return true, WriteConfig(store.configPath, config)
+	return true, store.write(config)
 }
 
 func Select(config Config, input SelectInput) []Definition {
@@ -630,7 +658,13 @@ func readLayer(source ConfigSource, path string, diagnostics *[]Diagnostic) (hoo
 	if err == nil {
 		path = resolved
 	}
-	data, err := os.ReadFile(path)
+	// A project layer sits at <workspace>/.splice/hooks.json. Its reads stay
+	// inside the workspace; user layers are the operator's own files.
+	root := ""
+	if source == SourceProject {
+		root = filepath.Dir(filepath.Dir(path))
+	}
+	data, err := projectfile.Read(path, root)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return hookLayer{}, false
@@ -652,9 +686,9 @@ func readLayer(source ConfigSource, path string, diagnostics *[]Diagnostic) (hoo
 	return hookLayer{source: source, path: path, config: config, enabledSet: enabledSet, hookEnabledSet: hookEnabledSet}, true
 }
 
-func readSingleConfig(path string) (Config, error) {
+func readSingleConfig(source ConfigSource, path string) (Config, error) {
 	diagnostics := []Diagnostic{}
-	layer, ok := readLayer(SourceProject, path, &diagnostics)
+	layer, ok := readLayer(source, path, &diagnostics)
 	if len(diagnostics) > 0 {
 		diagnostic := diagnostics[0]
 		return Config{}, fmt.Errorf("invalid Splice hook config at %s: %s", diagnostic.Path, diagnostic.Message)

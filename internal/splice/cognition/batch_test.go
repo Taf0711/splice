@@ -2,6 +2,7 @@ package cognition
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -53,21 +54,84 @@ func newBatchRepo(t *testing.T, files map[string]string) (string, string) {
 // (report sections 4-6), not raw diff-index, and must parse NUL-separated
 // output.
 func TestChangedPathsPorcelainContract(t *testing.T) {
-	var gotArgs []string
+	var calls [][]string
 	runner := func(_ context.Context, _ string, args ...string) (worktrees.CommandResult, error) {
-		gotArgs = args
-		return worktrees.CommandResult{Stdout: "a.go\x00b.go\x00"}, nil
+		calls = append(calls, args)
+		if args[0] == "diff" {
+			return worktrees.CommandResult{Stdout: "a.go\x00b.go\x00"}, nil
+		}
+		return worktrees.CommandResult{}, nil // no untracked files
 	}
 	changed, err := ChangedPaths(context.Background(), "/repo", "abc123", runner)
 	if err != nil {
 		t.Fatalf("ChangedPaths: %v", err)
 	}
-	want := []string{"diff", "--name-only", "-z", "--no-ext-diff", "--no-renames", "abc123"}
-	if strings.Join(gotArgs, " ") != strings.Join(want, " ") {
-		t.Fatalf("git args = %v, want %v", gotArgs, want)
+	want := [][]string{
+		{"diff", "--name-only", "-z", "--no-ext-diff", "--no-renames", "abc123"},
+		{"ls-files", "--others", "--exclude-standard", "-z"},
+	}
+	if fmt.Sprint(calls) != fmt.Sprint(want) {
+		t.Fatalf("git calls = %v, want %v", calls, want)
 	}
 	if len(changed) != 2 || !changed["a.go"] || !changed["b.go"] {
 		t.Fatalf("changed = %v, want {a.go, b.go}", changed)
+	}
+}
+
+// TestChangedPathsComparesUntrackedFilesByContent pins the capture-snapshot
+// contract on a real repository. A snapshot commit contains a run's new file
+// while the file is still untracked. git diff alone reports that file as
+// deleted; ChangedPaths must report it unchanged while its bytes match, and
+// changed when it is edited or removed.
+func TestChangedPathsComparesUntrackedFilesByContent(t *testing.T) {
+	dir := t.TempDir()
+	git := func(env []string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = append(append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t"), env...)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git(nil, "init", "-q")
+	write("tracked.go", "package a\n")
+	git(nil, "add", "-A")
+	git(nil, "commit", "-qm", "base")
+	write("admin.go", "package a\n// new\n")
+	index := filepath.Join(t.TempDir(), "index")
+	env := []string{"GIT_INDEX_FILE=" + index}
+	git(env, "read-tree", "HEAD")
+	git(env, "add", "-A")
+	snapshot := git(nil, "commit-tree", git(env, "write-tree"), "-p", "HEAD", "-m", "snap")
+
+	changed, err := ChangedPaths(context.Background(), dir, snapshot, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changed) != 0 {
+		t.Fatalf("same bytes, admin.go still untracked: changed = %v, want none", changed)
+	}
+	write("admin.go", "package a\n// edited\n")
+	if changed, _ = ChangedPaths(context.Background(), dir, snapshot, nil); !changed["admin.go"] {
+		t.Fatalf("edited untracked file: changed = %v, want admin.go", changed)
+	}
+	if err := os.Remove(filepath.Join(dir, "admin.go")); err != nil {
+		t.Fatal(err)
+	}
+	if changed, _ = ChangedPaths(context.Background(), dir, snapshot, nil); !changed["admin.go"] {
+		t.Fatalf("removed file: changed = %v, want admin.go", changed)
+	}
+	write("other.go", "package a\n")
+	if changed, _ = ChangedPaths(context.Background(), dir, snapshot, nil); !changed["other.go"] {
+		t.Fatalf("new file absent from the commit: changed = %v, want other.go", changed)
 	}
 }
 

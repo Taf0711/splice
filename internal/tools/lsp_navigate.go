@@ -62,11 +62,28 @@ func NewScopedLSPNavigateTool(workspaceRoot string, scope PathScope) Tool {
 		},
 		workspaceRoot: root,
 		scope:         scope,
-		manager:       lsp.NewManager(root),
+		// Trust is decided per call: Run refuses and RunWithOptions honors
+		// RunOptions.TrustedWorkspace, so this manager starts no server for an
+		// untrusted call.
+		manager: lsp.NewManager(root, true),
 	}
 }
 
+// Run serves direct callers, which carry no trust decision, so it refuses. The
+// registry calls RunWithOptions and passes the workspace trust decision.
 func (tool lspNavigateTool) Run(ctx context.Context, args map[string]any) Result {
+	return tool.run(ctx, args, false)
+}
+
+// RunWithOptions runs the navigation only when the workspace is trusted.
+func (tool lspNavigateTool) RunWithOptions(ctx context.Context, args map[string]any, options RunOptions) Result {
+	return tool.run(ctx, args, options.TrustedWorkspace)
+}
+
+func (tool lspNavigateTool) run(ctx context.Context, args map[string]any, trusted bool) Result {
+	if !trusted {
+		return errorResult("Error: " + lsp.ErrWorkspaceUntrusted.Error())
+	}
 	opRaw, err := stringArg(args, "op", "", true)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for lsp_navigate: " + err.Error())

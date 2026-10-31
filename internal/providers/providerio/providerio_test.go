@@ -395,3 +395,62 @@ func TestWireMaxOutputTokens(t *testing.T) {
 		})
 	}
 }
+
+// AUDIT-09: SPLICE_STREAM_CONTENT_STALL_TIMEOUT replaces the computed window,
+// and a heartbeat-only stream is aborted at that window, not at 1.2x idle.
+func TestContentStallTimeoutEnvOverride(t *testing.T) {
+	t.Setenv(streamContentStallTimeoutEnv, "400ms")
+	if got := ContentStallTimeout(100 * time.Millisecond); got != 400*time.Millisecond {
+		t.Fatalf("ContentStallTimeout with override = %v, want 400ms", got)
+	}
+	if got := ContentStallTimeout(0); got != 0 {
+		t.Fatalf("ContentStallTimeout(0) with override = %v, want 0 (idle off keeps content off)", got)
+	}
+	for _, raw := range []string{"7", "7s"} {
+		t.Setenv(streamContentStallTimeoutEnv, raw)
+		if got := ContentStallTimeout(time.Minute); got != 7*time.Second {
+			t.Fatalf("ContentStallTimeout with %q = %v, want 7s", raw, got)
+		}
+	}
+	for _, raw := range []string{"soon", "0", "-5s"} {
+		t.Setenv(streamContentStallTimeoutEnv, raw)
+		if got := ContentStallTimeout(5 * time.Minute); got != 6*time.Minute {
+			t.Fatalf("ContentStallTimeout with bad %q = %v, want the computed 6m", raw, got)
+		}
+	}
+
+	t.Setenv(streamContentStallTimeoutEnv, "400ms")
+	pr, pw := io.Pipe()
+	defer func() { _ = pw.Close() }()
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if _, err := io.WriteString(pw, ": keep-alive\n\n"); err != nil {
+				return
+			}
+			time.Sleep(30 * time.Millisecond)
+		}
+	}()
+	start := time.Now()
+	done := make(chan error, 1)
+	go func() {
+		done <- ScanSSEDataWithContext(context.Background(), func() {}, pr, 100*time.Millisecond, func(string) bool { return true })
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrStreamStalled) {
+			t.Fatalf("err = %v, want ErrStreamStalled", err)
+		}
+		if elapsed := time.Since(start); elapsed < 350*time.Millisecond {
+			t.Fatalf("stream stalled after %v, want the configured 400ms window", elapsed)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("heartbeat-only stream was not aborted at the configured window")
+	}
+}

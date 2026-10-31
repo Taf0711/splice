@@ -1,0 +1,7 @@
+{
+  "name": "large-09-write",
+  "phase": "write",
+  "prompt": "Add (b *Backoff) Peek() time.Duration in the worker package: the delay the next call to Next would return, without changing the backoff. Add a regression test.",
+  "check": "# large-09 A: Add (b *Backoff) Peek() time.Duration in the worker package: the delay\nmkdir -p internal/worker\ncat > internal/worker/probe_peek_test.go <<'EOF'\npackage worker\n\nimport (\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestProbePeek(t *testing.T) {\n\tb := &Backoff{Current: time.Second, Ceiling: 3 * time.Second}\n\tif got := b.Peek(); got != 2*time.Second {\n\t\tt.Fatalf(\"Peek = %v, want 2s\", got)\n\t}\n\tif b.Current != time.Second {\n\t\tt.Fatal(\"Peek must not change the backoff\")\n\t}\n\tb.Current = 2 * time.Second\n\tif got := b.Peek(); got != 3*time.Second {\n\t\tt.Fatalf(\"Peek at ceiling = %v, want 3s\", got)\n\t}\n}\nEOF\ngo test -count=1 ./internal/worker/ ; rc=$?\nrm -f internal/worker/probe_peek_test.go\nif [ $rc -ne 0 ]; then exit $rc; fi\nexit 0\n",
+  "fixture": "../../large-families/fixture"
+}

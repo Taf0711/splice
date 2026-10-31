@@ -415,20 +415,22 @@ func TestPromptSubmitPersistsToolSessionEvents(t *testing.T) {
 	}
 	if got := eventTypes(events); !equalEventTypes(got, []sessions.EventType{
 		sessions.EventMessage,
+		sessions.EventUsage,
 		sessions.EventToolCall,
 		sessions.EventToolResult,
+		sessions.EventUsage,
 		sessions.EventMessage,
 	}) {
 		t.Fatalf("unexpected event sequence: %#v", got)
 	}
-	assertPayloadField(t, events[1], "id", "call_1")
-	assertPayloadField(t, events[1], "name", "read_file")
-	assertPayloadField(t, events[1], "arguments", `{"path":"notes.txt"}`)
-	assertPayloadField(t, events[2], "toolCallId", "call_1")
+	assertPayloadField(t, events[2], "id", "call_1")
 	assertPayloadField(t, events[2], "name", "read_file")
-	assertPayloadField(t, events[2], "status", "ok")
-	assertPayloadFieldContains(t, events[2], "output", "file contents")
-	assertPayloadField(t, events[3], "content", "read complete")
+	assertPayloadField(t, events[2], "arguments", `{"path":"notes.txt"}`)
+	assertPayloadField(t, events[3], "toolCallId", "call_1")
+	assertPayloadField(t, events[3], "name", "read_file")
+	assertPayloadField(t, events[3], "status", "ok")
+	assertPayloadFieldContains(t, events[3], "output", "file contents")
+	assertPayloadField(t, events[5], "content", "read complete")
 }
 
 func TestPromptSubmitPersistsPermissionSessionEvents(t *testing.T) {
@@ -492,7 +494,7 @@ func TestPromptSubmitPersistsPermissionSessionEvents(t *testing.T) {
 		// not one of the 4 semantic steps this test drives — process them so the
 		// model state advances, but don't count them toward the budget.
 		switch runtimeMsg.(type) {
-		case toolCallStreamStartMsg, toolCallStreamDeltaMsg:
+		case toolCallStreamStartMsg, toolCallStreamDeltaMsg, agentUsageMsg:
 			continue
 		}
 		received++
@@ -529,24 +531,36 @@ func TestPromptSubmitPersistsPermissionSessionEvents(t *testing.T) {
 	}
 	if got := eventTypes(events); !equalEventTypes(got, []sessions.EventType{
 		sessions.EventMessage,
+		sessions.EventUsage,
 		sessions.EventToolCall,
 		sessions.EventSessionCheckpoint,
 		sessions.EventPermissionRequest,
 		sessions.EventPermissionDecision,
 		sessions.EventToolResult,
+		sessions.EventUsage,
 		sessions.EventMessage,
 	}) {
 		t.Fatalf("unexpected event sequence: %#v", got)
 	}
-	assertPayloadField(t, events[3], "toolCallId", "call_write")
-	assertPayloadField(t, events[3], "name", "write_file")
-	assertPayloadField(t, events[3], "action", "prompt")
-	assertPayloadField(t, events[3], "permission", "prompt")
-	assertPayloadField(t, events[3], "permissionMode", "ask")
-	assertPayloadField(t, events[3], "sideEffect", "write")
-	assertPayloadField(t, events[4], "action", "deny")
-	assertPayloadField(t, events[4], "decisionReason", "denied in TUI")
-	assertPayloadField(t, events[6], "content", "write blocked")
+	assertPayloadField(t, events[4], "toolCallId", "call_write")
+	assertPayloadField(t, events[4], "name", "write_file")
+	assertPayloadField(t, events[4], "action", "prompt")
+	assertPayloadField(t, events[4], "permission", "prompt")
+	assertPayloadField(t, events[4], "permissionMode", "ask")
+	assertPayloadField(t, events[4], "sideEffect", "write")
+	assertPayloadField(t, events[5], "action", "deny")
+	assertPayloadField(t, events[5], "decisionReason", "denied in TUI")
+	assertPayloadField(t, events[8], "content", "write blocked")
+	// A stream with no provider usage is priced as unpriced, not rejected.
+	assertPayloadField(t, events[1], "costStatus", "unpriced")
+	assertPayloadField(t, events[1], "unpricedReason", "usage not reported by provider")
+	for _, row := range next.transcript {
+		// A pipeline turn projects its receipt card as an error-kind row. Only a
+		// raw error row is a failure here.
+		if _, isCard := parseReceiptTranscriptPayload(row.text); row.kind == rowError && !isCard {
+			t.Fatalf("expected no error row in transcript, got %q", row.text)
+		}
+	}
 	if !transcriptContains(next.transcript, "permission: write_file prompt") {
 		t.Fatalf("expected permission row in transcript, got %#v", next.transcript)
 	}
@@ -579,19 +593,21 @@ func TestPermissionPromptAllowWritesFileAndRecordsDecision(t *testing.T) {
 	events := readOnlySessionEvents(t, store)
 	if got := eventTypes(events); !equalEventTypes(got, []sessions.EventType{
 		sessions.EventMessage,
+		sessions.EventUsage,
 		sessions.EventToolCall,
 		sessions.EventSessionCheckpoint,
 		sessions.EventPermissionRequest,
 		sessions.EventPermissionDecision,
 		sessions.EventToolResult,
+		sessions.EventUsage,
 		sessions.EventMessage,
 	}) {
 		t.Fatalf("unexpected event sequence: %#v", got)
 	}
-	assertPayloadField(t, events[4], "action", "allow")
-	assertPayloadField(t, events[4], "decisionReason", "approved in TUI")
-	assertPayloadField(t, events[5], "status", "ok")
-	assertPayloadField(t, events[6], "content", "write allowed")
+	assertPayloadField(t, events[5], "action", "allow")
+	assertPayloadField(t, events[5], "decisionReason", "approved in TUI")
+	assertPayloadField(t, events[6], "status", "ok")
+	assertPayloadField(t, events[8], "content", "write allowed")
 	if !transcriptContains(next.transcript, "permission: write_file allow") {
 		t.Fatalf("expected allow decision in transcript, got %#v", next.transcript)
 	}
@@ -704,6 +720,11 @@ func submitAndDrivePermissionRun(t *testing.T, m model, prompt string, key strin
 		runtimeMsg := receiveRuntimeMessage(t, runtimeMessages)
 		updated, _ = next.Update(runtimeMsg)
 		next = updated.(model)
+		// Per-stream usage is bookkeeping, not one of the counted steps.
+		if _, ok := runtimeMsg.(agentUsageMsg); ok {
+			received--
+			continue
+		}
 		if _, ok := runtimeMsg.(permissionRequestMsg); ok && key != "" {
 			updated, _ = next.Update(testKeyText(key))
 			next = updated.(model)

@@ -1,0 +1,7 @@
+{
+  "name": "fam-01-write",
+  "phase": "write",
+  "prompt": "Add ResetPassword(userID string) error to Store in session.go: delete every session whose User matches userID (no per-user index, so scan) and return nil, or ErrNotFound when none match. Wire it nowhere else; the method is the deliverable.",
+  "check": "grep -F -q 'func (s *Store) ResetPassword' session.go || { echo 'precursor change missing' >&2; exit 1; }\ngo build ./... && go test -count=1 ./...",
+  "fixture": "fixture"
+}

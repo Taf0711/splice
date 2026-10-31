@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+
+	"github.com/Taf0711/splice/internal/flags"
 )
 
 // CheckpointsDir is the per-session subdirectory holding content-addressed blobs.
@@ -33,10 +35,10 @@ type CheckpointPayload struct {
 	Files []CheckpointFile `json:"files"`
 }
 
-// CheckpointsEnabled reports whether checkpoint capture is enabled (default on;
-// disabled with SPLICE_CHECKPOINTS=off).
+// CheckpointsEnabled reports whether checkpoint capture is enabled (default
+// on; the sessions.checkpoints flag, or SPLICE_CHECKPOINTS=off, disables it).
 func CheckpointsEnabled() bool {
-	return os.Getenv("SPLICE_CHECKPOINTS") != "off"
+	return flags.Process().Enabled(flags.SessionsCheckpoints)
 }
 
 func maxCheckpointBytes() int {

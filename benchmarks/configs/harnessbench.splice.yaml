@@ -1,0 +1,19 @@
+# Harness-Bench harness config fragment for Splice.
+#
+# Merge the models entry below into the upstream config/harness.yaml
+# (schema follows config/harness.example.yaml at pinned commit
+# 1025086a446653702b80cfb48babbeec35db6b2c), or point the
+# HARNESSBENCH_HARNESS_CONFIG environment variable at a merged file.
+#
+# Upstream resolves `--harness splice-local` to the entry name under
+# `models:` and dispatches to the adapter named by `adapter:`.
+
+models:
+  splice-local:
+    adapter: splice
+    command: splice
+    session_prefix: harnessbench-splice
+    timeout_sec: 2400
+    # Extra args inserted before the fixed `exec --output-format stream-json`
+    # tail built by splice_adapter.py (example: --auto medium).
+    args: []

@@ -1,7 +1,7 @@
- ✓ code_writer shared cwd w
- ✗ test_runner shared cwd t
+ ✓ code_writer
+ ✗ test_runner
 
- [################] 100%
+ [################] failed
 
 MESSAGES
- … test_runner: revision_request -> code_writer: 2 failing tests
+ … test_runner: revision_request ->…

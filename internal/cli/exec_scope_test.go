@@ -189,3 +189,26 @@ func tempDirOutsideDefaultTemp(t *testing.T) string {
 	}
 	return filepath.Clean(abs)
 }
+
+// TestPipelineEntrySurfacesRegisterSourceReader pairs each registry builder
+// that feeds splicerun.Run or RunDesignPlan with the raw source reader. A
+// surface that omits it fails the pipeline with "tool not found in registry:
+// raw_file_read" at the first source-view request.
+func TestPipelineEntrySurfacesRegisterSourceReader(t *testing.T) {
+	root := t.TempDir()
+	scope, err := sandbox.NewScope(root, nil)
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	execRegistry := newCoreRegistry(root)
+	registerExecCoreTools(execRegistry, root, scope)
+	surfaces := map[string]*tools.Registry{
+		"exec":        execRegistry,
+		"tui and app": newCoreRegistryScoped(root, scope),
+	}
+	for name, registry := range surfaces {
+		if _, ok := registry.Get(tools.RawFileReadToolName); !ok {
+			t.Errorf("%s registry lacks %s", name, tools.RawFileReadToolName)
+		}
+	}
+}

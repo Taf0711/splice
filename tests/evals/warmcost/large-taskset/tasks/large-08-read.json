@@ -1,0 +1,8 @@
+{
+  "name": "large-08-read",
+  "phase": "read",
+  "precursor": "large-08-write",
+  "prompt": "Add (s *Store) Sweep() int in the session package: delete every session that Expired reports as expired and return how many were deleted. Reuse Expired; do not re-derive the idle rule. Add a regression test.",
+  "check": "# large-08 B: Add (s *Store) Sweep() int in the session package: delete every sessio\nmkdir -p internal/session\ncat > internal/session/probe_sweep_test.go <<'EOF'\npackage session\n\nimport (\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestProbeSweep(t *testing.T) {\n\ts := NewStore(time.Minute)\n\tat := time.Unix(1000, 0)\n\ts.now = func() time.Time { return at }\n\ts.Create(\"old\", \"ada\")\n\tat = at.Add(30 * time.Second)\n\ts.Create(\"edge\", \"bob\")\n\tat = at.Add(61 * time.Second)\n\ts.Create(\"new\", \"cy\")\n\tat = at.Add(-1 * time.Second)\n\tif got := s.Sweep(); got != 1 {\n\t\tt.Fatalf(\"Sweep = %d, want 1 (only old is past ttl)\", got)\n\t}\n\tif s.Len() != 2 {\n\t\tt.Fatalf(\"Len after sweep = %d, want 2\", s.Len())\n\t}\n}\nEOF\ngo test -count=1 ./internal/session/ ; rc=$?\nrm -f internal/session/probe_sweep_test.go\nif [ $rc -ne 0 ]; then exit $rc; fi\nexit 0\n",
+  "fixture": "../../large-families/fixture"
+}

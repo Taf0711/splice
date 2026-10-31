@@ -1,0 +1,151 @@
+{{define "head"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="splice-action" content="{{.Action}}">
+<title>Pipeline editor · Splice</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="pipeline.css">
+<link rel="stylesheet" href="editor.css">
+<script src="editor.js" defer></script>
+</head>
+{{end}}{{define "missing"}}{{template "head" .}}<body class="ed-home">
+<header class="top"><h1>Pipeline editor</h1></header>
+<main class="home"><p class="empty">This draft does not exist. It was deleted, or the link is wrong. <a href="./">See the drafts</a>.</p></main>
+</body></html>
+{{end}}{{define "home"}}{{template "head" .}}<body class="ed-home" id="home">
+<header class="top">
+<div class="title-row"><h1>Pipeline editor</h1>{{if .Viewer}}<a class="edit-link" href="../pipeline/">Pipeline viewer</a>{{end}}</div>
+<p class="facts">Drafts save as you edit. Publish installs a draft in the user library. The editor never writes a project file; use <code>splice pipeline export</code> for that.</p>
+</header>
+<p id="home-error" class="notice" role="alert" hidden></p>
+<main class="home">
+{{if .FromActive}}<section class="start-copy" aria-labelledby="copy-title"><h2 id="copy-title">Edit a copy of {{.Active}}</h2><p>The copy is a draft. The active topology does not change until you publish and use the copy.</p><button type="button" class="primary" data-from="active" autofocus>Make the copy</button></section>{{end}}
+<section aria-labelledby="start-title">
+<h2 id="start-title">Start from</h2>
+<ul class="list starts">
+<li><button type="button" data-from="new">Blank</button><span class="muted">An empty pipeline.</span></li>
+<li><button type="button" data-from="default">Built-in default</button><span class="muted">A copy of the embedded pipeline.</span></li>
+{{if .ActiveError}}<li><span class="bad">[!] The active topology did not resolve: {{.ActiveError}}</span></li>{{else}}<li><button type="button" data-from="active">{{if .ActiveIsLibrary}}Edit{{else}}Copy{{end}} the active topology</button><span class="muted">{{.Active}}, {{.ActiveSource}}</span></li>{{end}}
+{{range .Examples}}<li><button type="button" data-from="example" data-name="{{.Name}}">Example: {{.Name}}</button><span class="muted">{{.About}}</span></li>{{end}}
+</ul>
+</section>
+<section aria-labelledby="drafts-title">
+<h2 id="drafts-title">Drafts</h2>
+{{if .Drafts}}<ul class="list">{{range .Drafts}}<li><a href="?draft={{.ID}}">{{if .Name}}{{.Name}}{{else}}(no name){{end}}</a> <span class="muted">{{.Source}} · {{.Updated}}</span> {{if .Valid}}<span class="ok">[+] valid</span>{{else}}<span class="bad">[!] has problems</span>{{end}} <button type="button" class="quiet" data-delete="{{.ID}}" aria-label="Delete the draft {{.Name}}">Delete</button></li>{{end}}</ul>
+{{else}}<p class="muted">No drafts yet. Start one above.</p>{{end}}
+</section>
+<section aria-labelledby="library-title">
+<h2 id="library-title">Library</h2>
+{{if .Library}}<ul class="list">{{range .Library}}<li><span class="mono">{{.}}</span> <button type="button" data-from="library" data-name="{{.}}">Edit</button></li>{{end}}</ul>
+{{else}}<p class="muted">The library is empty. Publish a draft to add an entry.</p>{{end}}
+{{if .LibraryDir}}<p class="muted">Folder: <code>{{.LibraryDir}}</code></p>{{end}}
+</section>
+</main>
+</body></html>
+{{end}}{{define "editor"}}{{template "head" .}}<body class="ed" id="editor" data-boot="{{.Boot}}">
+<header class="ed-top">
+<a href="./" class="back">Drafts</a><h1 id="title">{{.Name}}</h1><span id="validity" class="validity"></span><span id="saved" class="saved"></span>
+<span class="bar">
+<button type="button" id="nodes-open" class="narrow">Nodes <kbd>n</kbd></button>
+<button type="button" id="undo">Undo <kbd>u</kbd></button>
+<button type="button" id="redo">Redo <kbd>U</kbd></button>
+<button type="button" id="settings">Pipeline <kbd>s</kbd></button>
+<button type="button" id="validate">Validate</button>
+<button type="button" id="publish" class="primary">Publish <kbd>p</kbd></button>
+</span>
+</header>
+<p id="status" class="status" role="status"></p>
+<main class="ed-body">
+<aside id="palette" class="ed-side ed-pal" aria-labelledby="pal-title">
+<div class="panel-head"><h2 id="pal-title">Nodes</h2><button type="button" class="sheet-close" data-close>Close <kbd>Esc</kbd></button></div>
+<input id="pal-search" type="search" placeholder="Search node types" aria-label="Search node types" autocomplete="off" spellcheck="false">
+<p id="pal-hint" class="hint">Choose a type to add a node.</p>
+<h3>Builtin stages</h3><ul class="pal">{{range .Types}}{{if .Builtin}}<li><button type="button" data-type="{{.Name}}"><span class="mono">{{.Name}}</span><span class="about">{{.About}}</span></button></li>{{end}}{{end}}</ul>
+<h3>Custom</h3><ul class="pal">{{range .Types}}{{if not .Builtin}}<li><button type="button" data-type="{{.Name}}"><span class="mono">{{.Name}}</span><span class="about">{{.About}}</span></button></li>{{end}}{{end}}</ul>
+<p id="pal-empty" class="muted" hidden>No type matches.</p>
+</aside>
+<section class="ed-center">
+<div class="ed-stage">
+<div class="ed-wrap" id="wrap" aria-label="Canvas">
+<svg id="plane" class="graph" role="group" aria-label="Pipeline graph"><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 1 L9 5 L0 9 z"/></marker></defs><g id="edge-g" class="edges"></g><path id="rubber" class="rubber" d=""/><g id="node-g" class="nodes"></g></svg>
+<div id="empty" class="ed-empty" hidden><p>This pipeline has no nodes.</p><p>Choose a type in Nodes, or press <kbd>n</kbd>.</p></div>
+</div>
+<div class="ed-tools" role="toolbar" aria-label="Canvas tools">
+<button type="button" id="z-out" aria-label="Zoom out">−</button><button type="button" id="z-in" aria-label="Zoom in">+</button><button type="button" id="z-fit">Fit</button><button type="button" id="z-reset">Reset</button><button type="button" id="relayout">Auto-layout</button><button type="button" id="help" aria-label="Keyboard shortcuts">?</button>
+</div>
+</div>
+<section class="ed-problems" aria-labelledby="problems-title"><h2 id="problems-title">Problems</h2><ul id="problems" class="list"></ul><ul id="warnings" class="notes"></ul></section>
+</section>
+<aside id="panel" class="ed-side" aria-labelledby="panel-title">
+<div class="panel-head"><h2 id="panel-title">Pipeline</h2><button type="button" class="sheet-close" data-close>Close <kbd>Esc</kbd></button></div>
+<div class="tabs" role="tablist"><button type="button" role="tab" id="tab-form" aria-selected="true" aria-controls="forms">Inspector</button><button type="button" role="tab" id="tab-json" aria-selected="false" aria-controls="json-pane">JSON</button></div>
+<div id="forms" role="tabpanel" aria-labelledby="tab-form">
+<p class="err" data-err="_"></p>
+<form id="topo-form" autocomplete="off">
+<div class="f"><label for="t-name">Name</label><input id="t-name" data-k="name" spellcheck="false"><p class="hint">The library file name: lowercase letters, digits, <code>-</code>, <code>_</code>.</p><p class="err" data-err="name"></p></div>
+<div class="f"><label for="t-desc">Description</label><input id="t-desc" data-k="description"></div>
+<div class="f"><label for="t-min">Minimum Splice version</label><input id="t-min" data-k="splice_min_version" spellcheck="false" placeholder="none"><p class="err" data-err="splice_min_version"></p></div>
+<fieldset class="f"><legend>Run budget</legend><div class="pair"><label>Input <input type="number" min="1" id="t-in" data-k="total_input" placeholder="tier"></label><label>Output <input type="number" min="1" id="t-out" data-k="total_output" placeholder="tier"></label></div><p class="hint">Empty: the tier envelope.</p><p class="err" data-err="budget"></p></fieldset>
+<p class="err" data-err="edges"></p><p class="err" data-err="nodes"></p><p class="err" data-err="version"></p>
+</form>
+<form id="node-form" autocomplete="off" hidden>
+<p id="drop-note" class="note" role="status" hidden></p>
+<div class="f"><label for="n-name">Name</label><input id="n-name" data-k="name" spellcheck="false"><p class="err" data-err="name"></p></div>
+<div class="f"><label for="n-type">Type</label><select id="n-type" data-k="type"><optgroup label="Builtin stages">{{range .Types}}{{if .Builtin}}<option>{{.Name}}</option>{{end}}{{end}}</optgroup><optgroup label="Custom">{{range .Types}}{{if not .Builtin}}<option>{{.Name}}</option>{{end}}{{end}}</optgroup></select><p class="hint" id="type-hint"></p><p class="err" data-err="type"></p></div>
+<fieldset class="f"><legend>Depends on</legend><ul id="deps" class="deps"></ul><select id="dep-add" aria-label="Add a dependency"></select><p class="hint" id="feeds"></p><p class="err" data-err="_node"></p></fieldset>
+<div class="f" data-show="prompt"><label for="n-prompt">Prompt</label><textarea id="n-prompt" data-k="prompt" rows="7" spellcheck="false"></textarea><p class="hint">Variables: <code>{{"{{intent}}"}}</code>, <code>{{"{{summaries}}"}}</code>, <code>{{"{{memory}}"}}</code>.</p><p class="err" data-err="prompt"></p></div>
+<fieldset class="f" data-show="command"><legend>Command</legend><ol id="argv" class="argv"></ol><button type="button" id="argv-add">Add an argument</button><p class="hint">One argument per row. It runs as:</p><pre id="argv-line" class="line"></pre><p class="err" data-err="command"></p></fieldset>
+<fieldset class="f" data-show="agent"><legend>Tools</legend><div class="checks tools">{{range .Tools}}<label><input type="checkbox" data-tool="{{.Name}}"> <span class="mono">{{.Name}}</span>{{if .Marks}} <span class="mark">[~] {{.Marks}}</span>{{end}}</label>{{end}}</div><p class="err" data-err="tools"></p></fieldset>
+<div class="f" data-show="agent"><label for="n-turns">Turn limit</label><input type="number" id="n-turns" min="1" max="50" data-k="max_turns" placeholder="8"><p class="err" data-err="max_turns"></p></div>
+<div class="f" data-show="agent"><label for="n-perm">Permission</label><select id="n-perm" data-k="permission">{{range .Permissions}}<option value="{{.Value}}">{{.Label}}</option>{{end}}</select><p class="hint" id="perm-rule"></p><p class="err" data-err="permission"></p></div>
+<fieldset class="f" data-show="model"><legend>Model</legend>
+<label>Provider <input id="n-provider" list="providers" data-k="provider" spellcheck="false" placeholder="run provider"></label>
+<label>Model <input id="n-model" list="models" data-k="model" spellcheck="false" placeholder="run model"></label>
+<label>Effort <select id="n-effort" data-k="effort"><option value="">model default</option>{{range .Efforts}}<option>{{.}}</option>{{end}}</select></label>
+<p class="hint">Empty: the run model. A pin needs a provider and a model.</p><p class="err" data-err="model"></p>
+<datalist id="providers">{{range .Providers}}<option value="{{.}}"></option>{{end}}</datalist><datalist id="models"></datalist></fieldset>
+<fieldset class="f"><legend>Tiers</legend><div class="checks">{{range .Tiers}}<label><input type="checkbox" data-tier="{{.}}"> {{.}}</label>{{end}}</div><p class="hint">None checked: every tier.</p><p class="err" data-err="tiers"></p></fieldset>
+<fieldset class="f" data-show="budget"><legend>Budget</legend><div class="pair"><label>Input <input type="number" min="0" id="n-in" data-k="input_max" placeholder="derived"></label><label>Output <input type="number" min="0" id="n-out" data-k="output_max" placeholder="derived"></label></div><p class="hint" id="budget-hint"></p><p class="err" data-err="budget"></p></fieldset>
+<fieldset class="f" data-show="caps"><legend>Capabilities</legend>
+<label data-show="pullctx">Pull context <select data-cap="pull_context"><option value="">stage default</option><option value="true">on</option><option value="false">off</option></select></label>
+<label data-show="pullmem">Pull memory <select data-cap="pull_memory"><option value="">stage default</option><option value="true">on</option><option value="false">off</option></select></label>
+<label data-show="verif"><input type="checkbox" data-cap="produces_verification"> Produces verification</label>
+<p class="err" data-err="capabilities"></p></fieldset>
+<button type="button" id="node-delete" class="danger">Delete the node <kbd>Delete</kbd></button>
+</form>
+</div>
+<div id="json-pane" role="tabpanel" aria-labelledby="tab-json" hidden><p id="json-note" class="hint"></p><button type="button" id="json-copy">Copy</button><pre id="json" class="line json" tabindex="0"></pre></div>
+</aside>
+</main>
+<dialog id="pub" aria-labelledby="pub-title">
+<h2 id="pub-title">Publish</h2>
+<div id="pub-body"></div>
+<p id="pub-error" class="err" role="alert"></p>
+<div class="actions"><button type="button" id="pub-cancel" autofocus>Cancel</button><button type="button" id="pub-use" hidden>Use it now</button><button type="button" id="pub-ok" class="primary">Publish</button></div>
+</dialog>
+<dialog id="keys" aria-labelledby="keys-title">
+<h2 id="keys-title">Keyboard shortcuts</h2>
+<dl class="keylist">
+<dt><kbd>Tab</kbd></dt><dd>Select the next node.</dd>
+<dt><kbd>Enter</kbd></dt><dd>Edit the selected node.</dd>
+<dt>Arrow keys</dt><dd>Move the selected node. Hold <kbd>Shift</kbd> to move it more.</dd>
+<dt><kbd>n</kbd></dt><dd>Add a node: search the node types.</dd>
+<dt><kbd>a</kbd></dt><dd>Add a node after the selected node.</dd>
+<dt><kbd>e</kbd></dt><dd>Connect the selected node. Choose the target with Tab or the arrow keys, then push Enter.</dd>
+<dt><kbd>Delete</kbd></dt><dd>Delete the selected node and its edges, or the selected edge.</dd>
+<dt><kbd>u</kbd> <kbd>U</kbd></dt><dd>Undo, redo.</dd>
+<dt><kbd>+</kbd> <kbd>-</kbd> <kbd>0</kbd> <kbd>f</kbd></dt><dd>Zoom in, zoom out, reset, fit.</dd>
+<dt><kbd>l</kbd></dt><dd>Auto-layout, as the viewer draws the graph.</dd>
+<dt><kbd>s</kbd></dt><dd>Pipeline settings.</dd>
+<dt><kbd>j</kbd></dt><dd>The JSON that publish writes.</dd>
+<dt><kbd>p</kbd></dt><dd>Publish.</dd>
+<dt><kbd>?</kbd></dt><dd>This list.</dd>
+<dt><kbd>Esc</kbd></dt><dd>Stop the current action, or clear the selection.</dd>
+</dl>
+<div class="actions"><button type="button" id="keys-close" autofocus>Close</button></div>
+</dialog>
+</body></html>
+{{end}}

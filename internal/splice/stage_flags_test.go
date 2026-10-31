@@ -154,6 +154,17 @@ func TestBuildExecutionPlanRecordsFlags(t *testing.T) {
 	if !found {
 		t.Fatalf("plan warnings must name the cascade removal, got %v", filtered.Warnings)
 	}
+	// The plan names why each stage left, so the views do not call a flag
+	// removal a tier skip.
+	wantRemoved := map[string]string{
+		"test_generator":   "flag " + string(flags.StageTestGenerator) + " is off",
+		"security_auditor": "dependency test_generator was removed",
+	}
+	for name, reason := range wantRemoved {
+		if got := filtered.RemovedStages[name]; got != reason {
+			t.Fatalf("removed[%s] = %q, want %q (all: %v)", name, got, reason, filtered.RemovedStages)
+		}
+	}
 
 	// Disabling a leaf stage (no dependents) removes only that stage.
 	leaf, err := flags.Resolve(flags.Sources{User: map[string]bool{

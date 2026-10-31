@@ -23,6 +23,10 @@ import (
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
+// designSessionPlaceholderTitle names a design session before its first
+// prompt; the first prompt replaces it (see titleSessionFromFirstPrompt).
+const designSessionPlaceholderTitle = "Design conversation"
+
 const designModeNotice = "Planning mode: the agent can read and search files, but it cannot edit files or run commands in this phase. Use /crystallize, then /approve, to create and execute a plan; use /exec <prompt> as a direct-run shortcut."
 
 // enterDesignMode sets designMode, ensures an active session, records the
@@ -32,7 +36,7 @@ const designModeNotice = "Planning mode: the agent can read and search files, bu
 func (m model) enterDesignMode(notice string) model {
 	m.designMode = true
 	var err error
-	m, err = m.ensureActiveSession("Design conversation")
+	m, err = m.ensureActiveSession(designSessionPlaceholderTitle)
 	if err != nil {
 		m.designMode = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "session create error: " + err.Error()})
@@ -52,6 +56,7 @@ func (m model) enterDesignMode(notice string) model {
 	// phaseTrail.observe is fed only by execution snapshots. The previous
 	// run's completion also stops being the live outcome here.
 	m.lastState = presentation.State{}
+	m.mirrorPipeline()
 	m.lastTerminalReceipt = ""
 	m.phaseTrail.observe(presentation.LifecycleDesign)
 	if notice != "" {
@@ -202,18 +207,25 @@ func (m model) startApprovalConfirmed(source splicerun.DesignTransitionSource, p
 	options.ProviderName = m.providerName
 	options.Model = m.modelName
 	options.ReasoningEffort = string(m.reasoningEffort)
+	// The approved plan runs stage routes from the current stage-models.json, as
+	// a pipeline run does. An invalid file fails the first model-backed stage.
+	options.StageModelResolver = m.currentStageResolver()
 
 	// The approved plan runs through the same callback seam as a normal TUI
 	// pipeline run. Keep the accumulated events with the result so the update
 	// path can persist them together with the completed plan.
 	sessionEvents := []pendingSessionEvent{}
-	estimator := usage.NewCostEstimator(&m.modelCatalog)
+	catalogs := m.newCostCatalogs()
 	callSeq := map[string]int{}
 	onReasoning := options.OnReasoning
 	options.OnReasoning = func(delta string) {
 		if onReasoning != nil {
 			onReasoning(delta)
 		}
+	}
+	// Pipeline notices (command nodes a run will execute) stay visible as rows.
+	options.OnNotice = func(text string) {
+		m.sendAgentRow(runID, transcriptRow{kind: rowSystem, text: text, runID: runID})
 	}
 	onToolOutput := options.OnToolOutput
 	options.OnToolOutput = func(snapshot tools.OutputSnapshot) {
@@ -407,13 +419,16 @@ func (m model) startApprovalConfirmed(source splicerun.DesignTransitionSource, p
 			sessionEvents = append(sessionEvents, event)
 		},
 	}).decorate(options)
+	// finishRun ends the run in the browser viewer: a cancelled or failed run
+	// skips the pipeline's own end event.
+	finishRun := m.applyRunEvents(&options, runID)
 
-	options.EstimateUsageCost = estimator
+	options.EstimateServedUsageCost = catalogs.Estimate
 	onAttributedUsage := options.OnAttributedUsage
 	options.OnAttributedUsage = func(attributed agent.AttributedUsage) {
 		cost := attributed.Cost
 		if cost.Status == "" {
-			cost = estimator(attributed.Model, attributed.Usage, attributed.UsageReported)
+			cost = catalogs.Estimate(attributed.ProviderName, attributed.Model, attributed.Usage, attributed.UsageReported)
 			attributed.Cost = cost
 		}
 		sessionEvents = append(sessionEvents, pendingSessionEvent{
@@ -461,6 +476,7 @@ func (m model) startApprovalConfirmed(source splicerun.DesignTransitionSource, p
 		func() tea.Msg {
 			prepared, notice, bindErr := m.bindPipelineWorktree(runCtx, &options)
 			if bindErr != nil {
+				finishRun("", bindErr)
 				return planExecutionResultMsg{runID: runID, err: bindErr, store: store, sessionID: sessionID, sessionEvents: sessionEvents, worktreeNotice: notice}
 			}
 			var preparedPtr *worktrees.Result
@@ -476,6 +492,7 @@ func (m model) startApprovalConfirmed(source splicerun.DesignTransitionSource, p
 				OnTaskStart:     onTaskStart,
 				OnTaskLifecycle: onTaskLifecycle,
 			})
+			finishRun(result.FinalAnswer, err)
 			if store != nil && sessionID != "" {
 				inputs := make([]sessions.AppendEventInput, 0, len(sessionEvents))
 				for _, event := range flushableSessionEvents(sessionEvents) {
@@ -591,34 +608,8 @@ func (m model) startCrystallization(source splicerun.DesignTransitionSource, app
 	cwd := m.cwd
 	runID := m.activeRunID
 
-	resolver := m.stageModelResolver
-	if resolver == nil {
-		stageConfigPath := filepath.Join(filepath.Dir(m.userConfigPath), "stage-models.json")
-		stageConfig, err := schemas.LoadStageModelConfig(stageConfigPath)
-		if err != nil {
-			stageConfig = schemas.StageModelConfigFile{}
-		}
-		profiles := append([]config.ProviderProfile(nil), m.savedProviders...)
-		if m.providerProfile.Name != "" {
-			found := false
-			for _, p := range profiles {
-				if p.Name == m.providerProfile.Name {
-					found = true
-					break
-				}
-			}
-			if !found {
-				profiles = append(profiles, m.providerProfile)
-			}
-		}
-		tierResolverConfig := splicerun.TierResolverConfig{
-			PrimaryProfile: m.providerProfile,
-			Registry:       &m.modelCatalog,
-		}
-		resolvers := splicerun.BuildStageModelResolvers(stageConfig, profiles, m.newProvider, tierResolverConfig)
-		resolver = resolvers.Stage
-		m.stageModelResolver = resolver
-	}
+	// Read stage-models.json on every run, so the file as it is now always wins.
+	resolver := m.currentStageResolver()
 
 	return m, tea.Batch(
 		func() tea.Msg {
@@ -626,7 +617,7 @@ func (m model) startCrystallization(source splicerun.DesignTransitionSource, app
 			// Both design stages run sequentially inside this one goroutine. The
 			// callback appends therefore need no mutex.
 			sessionEvents := []pendingSessionEvent{}
-			estimator := usage.NewCostEstimator(&m.modelCatalog)
+			catalogs := m.newCostCatalogs()
 			streamFactory := splicerun.StageStreamFactory(func(stageName string, selection agent.ModelSelection) zeroruntime.CollectOptions {
 				return zeroruntime.CollectOptions{
 					OnToolCallStart: func(id, name string) {
@@ -639,7 +630,7 @@ func (m model) startCrystallization(source splicerun.DesignTransitionSource, app
 						m.sendAgentReasoning(runID, delta)
 					},
 					OnUsage: func(event zeroruntime.Usage) {
-						cost := estimator(selection.Model, event, true)
+						cost := catalogs.Estimate(selection.ProviderName, selection.Model, event, true)
 						attributed := agent.AttributedUsage{
 							Usage:         event,
 							UsageReported: true,
@@ -996,4 +987,80 @@ func designConversationRegistry(registry *tools.Registry) *tools.Registry {
 		filtered.Register(tool)
 	}
 	return filtered
+}
+
+// resumeNextStep names what the user can do with the restored design state,
+// using only commands whose preconditions hold (startApproval's checks).
+// Empty when the session has no design state worth a hint.
+func (m model) resumeNextStep() string {
+	if len(m.sessionEvents) == 0 {
+		return ""
+	}
+	state, err := splicerun.ReconstructDesignState(m.sessionEvents)
+	if err != nil {
+		return ""
+	}
+	plan := state.Plan
+	switch state.Phase {
+	case schemas.DesignPhaseConversation, schemas.DesignPhaseReview:
+		switch {
+		case plan == nil:
+			return "Next: keep describing the change, or /crystallize when the decisions are settled."
+		case m.pendingCritique != nil && m.pendingCritique.MustFixBeforeExecution:
+			return "Next: the plan has must-fix critique issues. Revise it, then /crystallize again."
+		default:
+			return fmt.Sprintf("Next: /approve runs the %d-step plan, or keep talking to refine it.", len(plan.Tasks))
+		}
+	case schemas.DesignPhaseExecuting:
+		if plan == nil {
+			return ""
+		}
+		done := 0
+		for _, task := range plan.Tasks {
+			if outcome, ok := state.TaskOutcomes[task.ID]; ok && outcome.Status == "completed" {
+				done++
+			}
+		}
+		return fmt.Sprintf("This plan was approved and stopped at %d/%d steps. /changes shows what reached the workspace; /design starts a new plan.", done, len(plan.Tasks))
+	}
+	return ""
+}
+
+// currentStageResolver builds the stage route resolver from the current
+// stage-models.json. A file that does not load yields a resolver that fails
+// each stage with the cause, so no stage silently uses the primary model.
+func (m model) currentStageResolver() agent.StageModelResolver {
+	if strings.TrimSpace(m.userConfigPath) == "" {
+		return nil
+	}
+	stageConfigPath := filepath.Join(filepath.Dir(m.userConfigPath), "stage-models.json")
+	stageConfig, err := schemas.LoadStageModelConfig(stageConfigPath)
+	if err != nil {
+		return invalidStageRoutingResolver(err)
+	}
+	profiles := append([]config.ProviderProfile(nil), m.savedProviders...)
+	if m.providerProfile.Name != "" {
+		found := false
+		for _, p := range profiles {
+			if p.Name == m.providerProfile.Name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			profiles = append(profiles, m.providerProfile)
+		}
+	}
+	tierResolverConfig := splicerun.TierResolverConfig{
+		PrimaryProfile: m.providerProfile,
+		Registry:       &m.modelCatalog,
+	}
+	return splicerun.BuildStageModelResolvers(stageConfig, profiles, m.newProvider, tierResolverConfig).Stage
+}
+
+// invalidStageRoutingResolver fails every stage route with the load cause.
+func invalidStageRoutingResolver(cause error) agent.StageModelResolver {
+	return func(string) (agent.ModelSelection, error) {
+		return agent.ModelSelection{}, fmt.Errorf("stage routing config invalid: %w", cause)
+	}
 }

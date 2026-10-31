@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,6 +26,8 @@ type memoryCommandClient interface {
 	Search(context.Context, schemas.MemoryQuery) (schemas.MemoryBundle, error)
 	Recent(context.Context, schemas.MemoryQuery) (schemas.MemoryBundle, error)
 	Stats(context.Context) (memd.MemoryStats, error)
+	Forget(context.Context, string, int64) error
+	Maintenance(context.Context) (memd.MaintenanceReport, error)
 }
 
 var tuiResolveMemoryCommand = func(ctx context.Context) (memoryCommandClient, error) {
@@ -35,7 +38,8 @@ var tuiResolveMemoryCommand = func(ctx context.Context) (memoryCommandClient, er
 	return client, err
 }
 
-// handleMemoryCommand handles /memory, /memory search <query>, /memory recent.
+// handleMemoryCommand handles the /memory listing, search, recent, forget,
+// and prune subcommands.
 func (m model) handleMemoryCommand(text string) (model, tea.Cmd) {
 	text = strings.TrimSpace(text)
 
@@ -53,13 +57,67 @@ func (m model) handleMemoryCommand(text string) (model, tea.Cmd) {
 	if text == "recent" {
 		return m.handleMemoryRecent()
 	}
-	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Usage: /memory [search <query> | recent]"})
+	if strings.HasPrefix(text, "forget ") {
+		fields := strings.Fields(text)
+		if len(fields) < 2 || len(fields) > 3 {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Usage: /memory forget [observation|node] <id>"})
+			return m, nil
+		}
+		kind := "observation"
+		value := fields[1]
+		if len(fields) == 3 {
+			kind, value = fields[1], fields[2]
+		}
+		id, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || id < 1 || (kind != "observation" && kind != "node") {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Usage: /memory forget [observation|node] <id>"})
+			return m, nil
+		}
+		return m.handleMemoryForget(kind, id)
+	}
+	if text == "prune" {
+		return m.handleMemoryPrune()
+	}
+	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Usage: /memory [search <query> | recent | forget <id> | prune]"})
 	return m, nil
+}
+
+func (m model) handleMemoryForget(kind string, id int64) (model, tea.Cmd) {
+	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: fmt.Sprintf("/memory forget %s %d", kind, id)})
+	runCtx, cancel := context.WithTimeout(m.ctx, 5*time.Second)
+	return m, func() tea.Msg {
+		defer cancel()
+		client, errMsg := resolveMemdOrError(runCtx)
+		if client == nil {
+			return errMsg
+		}
+		if err := client.Forget(runCtx, kind, id); err != nil {
+			return memoryResultMsg{text: "Memory forget error: " + err.Error(), isError: true}
+		}
+		return memoryResultMsg{text: fmt.Sprintf("Forgot %s %d", kind, id)}
+	}
+}
+
+func (m model) handleMemoryPrune() (model, tea.Cmd) {
+	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: "/memory prune"})
+	runCtx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
+	return m, func() tea.Msg {
+		defer cancel()
+		client, errMsg := resolveMemdOrError(runCtx)
+		if client == nil {
+			return errMsg
+		}
+		report, err := client.Maintenance(runCtx)
+		if err != nil {
+			return memoryResultMsg{text: "Memory prune error: " + err.Error(), isError: true}
+		}
+		return memoryResultMsg{text: fmt.Sprintf("Memory prune: archived %d, deleted %d observations, removed %d nodes and %d traces", report.ArchivedNodes, report.HardDeletedObservations, report.HardDeletedNodes, report.HardDeletedTraces)}
+	}
 }
 
 // resolveMemdOrError resolves the sidecar client, returning an error
 // memoryResultMsg when resolution fails or the binary is absent. Shared by
-// all three /memory subcommands.
+// all /memory subcommands.
 func resolveMemdOrError(ctx context.Context) (memoryCommandClient, memoryResultMsg) {
 	client, err := tuiResolveMemoryCommand(ctx)
 	if err != nil {
@@ -234,7 +292,7 @@ func renderMemoryListCard(title, summary string, observations []schemas.MemoryOb
 			// detail continuation line. Two Lines entries (not a multi-line
 			// Row) because the card section compactor folds row whitespace.
 			lines = append(lines,
-				fmt.Sprintf("[%s] %s", memoryType, heading),
+				fmt.Sprintf("[%s] %s (#%d)", memoryType, heading, obs.ID),
 				"    "+memoryObservationDetail(obs))
 		}
 		section.Lines = lines
@@ -243,7 +301,7 @@ func renderMemoryListCard(title, summary string, observations []schemas.MemoryOb
 		Title:    title,
 		Summary:  []string{summary},
 		Sections: []commandCardSection{section},
-		Actions:  []string{"/memory", "/memory recent", "/search <query>"},
+		Actions:  []string{"/memory", "/memory recent", "/memory forget <id>", "/memory prune", "/search <query>"},
 	})
 }
 
@@ -272,7 +330,7 @@ func renderMemoryStatsCard(stats memd.MemoryStats) string {
 		Title:    "Memory",
 		Summary:  []string{summary},
 		Sections: []commandCardSection{section},
-		Actions:  []string{"/memory", "/memory recent", "/search <query>"},
+		Actions:  []string{"/memory", "/memory recent", "/memory forget <id>", "/memory prune", "/search <query>"},
 	})
 }
 

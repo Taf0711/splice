@@ -1,0 +1,6 @@
+{
+  "id": "example-01",
+  "prompt": "Add a function Half to internal/mathx/half.go that returns x/2 and add a test for it.",
+  "check": "go test ./internal/mathx/",
+  "fixture": "fixture"
+}

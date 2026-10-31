@@ -23,6 +23,12 @@ Splice reads these files when they exist:
 The macOS user path also uses `~/.config/splice` unless
 `XDG_CONFIG_HOME` is set.
 
+The project file applies only in a trusted workspace. Splice does not read it
+in a workspace that is not trusted. Trust the workspace with `/trust` in the
+TUI, the `--trust` flag, or `defaultProjectTrust` in the user configuration.
+After `/trust` in the TUI, the project file applies on the next launch. The
+project file cannot set sandbox roots or `worktrees.directory`.
+
 Splice applies sources in this order. A later source can replace an earlier
 value.
 
@@ -36,6 +42,43 @@ value.
 A project file cannot grant access outside the workspace. It also cannot enable
 network access when the user policy denies it. Use user configuration or an
 explicit CLI grant for those changes.
+
+## Feature flags
+
+Feature flags turn some Splice behaviors on or off. Set them with the `flags`
+key, `SPLICE_FLAGS`, or the root `--flags` option. See
+[Feature flags](FEATURE_FLAGS.md) for the list of flags and the precedence
+order.
+
+## Verification command
+
+Set `verify.testCommand` to run a repository-specific test command. The command
+still uses the stage sandbox and the normal command allowlist.
+
+Set `verify.testDir` to a relative directory below the workspace. The default is
+the workspace root. Use `{tests}` or `{test_modules}` as a whole command item.
+Splice replaces these items with changed test files from the current pass.
+
+```json
+{"verify":{"testCommand":["python","tests/runtests.py","{test_modules}"],"testDir":"tests"}}
+```
+
+`{tests}` uses paths relative to `testDir`. `{test_modules}` drops `.py` and
+changes path separators to dots. Splice removes a placeholder when no test file
+changed in the pass.
+
+## Pipeline wall-time limit
+
+Set `pipeline.max_wall_seconds` in the user `config.json` to change the
+wall-time limit of one pipeline run. The default is 600 seconds. The value
+`0` uses the default.
+
+```json
+{"pipeline":{"max_wall_seconds":1800}}
+```
+
+`SPLICE_MAX_WALL` (a Go duration such as `30m`) replaces this value. The
+`splice exec --max-wall` flag replaces both. A project file cannot set this key.
 
 ## Provider profiles
 
@@ -127,6 +170,31 @@ export SPLICE_MEMD_DB=/path/to/mem.db
 ```
 
 Memory access is fail-soft. A sidecar error does not replace the pipeline result.
+
+A cold or busy sidecar can be slow to answer. Splice waits 10 seconds for one
+request and 10 seconds for a new sidecar to start. Splice tries the health
+check again one time before it turns memory off. Use a Go duration to change
+these limits:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `SPLICE_MEMD_TIMEOUT` | `10s` | Time limit for one sidecar request. |
+| `SPLICE_MEMD_SPAWN_TIMEOUT` | `10s` | Time limit for a new sidecar to answer. |
+
+When memory is not available, the warning names these limits.
+
+## Provider stream timeouts
+
+Splice stops a provider stream that sends nothing. Two limits apply:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `SPLICE_STREAM_IDLE_TIMEOUT` | `5m` | Time limit with no data at all. `0` or `off` removes this limit and the content limit. |
+| `SPLICE_STREAM_CONTENT_STALL_TIMEOUT` | 1.2 times the idle limit (`6m`) | Time limit with keep-alive messages but no output. |
+
+A model that reasons for a long time without output can reach the content
+limit. Set a larger `SPLICE_STREAM_CONTENT_STALL_TIMEOUT` for that model.
+Each value is a Go duration, such as `10m`, or a number of seconds.
 
 ## Data directories
 

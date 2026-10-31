@@ -521,3 +521,52 @@ func TestComposerTerminalWordKeybindings(t *testing.T) {
 		})
 	}
 }
+
+func TestCommandArgumentSpaceSkipsCommandsThatExtendTheName(t *testing.T) {
+	tests := []struct {
+		name  string
+		text  string
+		typed string
+		names []string
+		want  bool
+	}{
+		{name: "no other name extends it", text: "/search", typed: "f", names: []string{"/search", "/find"}, want: true},
+		{name: "builtin extends it", text: "/spec", typed: "i", names: []string{"/spec", "/specialists"}, want: false},
+		{name: "alias extends it", text: "/spec", typed: "x", names: []string{"/spec", "/specx"}, want: false},
+		{name: "no name extends it", text: "/spec", typed: "x", names: []string{"/spec", "/search"}, want: true},
+		{name: "case does not hide a prefix", text: "/Spec", typed: "i", names: []string{"/specialists"}, want: false},
+		{name: "text without input hint", text: "/specialists", typed: "x", names: []string{"/specialists"}, want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			state := composerState{text: tc.text, cursor: len([]rune(tc.text))}
+			if got := shouldInsertCommandArgumentSpace(state, tc.typed, tc.names); got != tc.want {
+				t.Fatalf("shouldInsertCommandArgumentSpace(%q, %q) = %v, want %v", tc.text, tc.typed, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTypingCommandNameKeyByKeyKeepsItWhole(t *testing.T) {
+	tests := []struct {
+		typed string
+		want  string
+	}{
+		{typed: "/specialists", want: "/specialists"},
+		{typed: "/speci", want: "/speci"},
+		{typed: "/specx", want: "/spec x"},
+		{typed: "/searchf", want: "/search f"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.typed, func(t *testing.T) {
+			m := newModel(context.Background(), Options{})
+			for _, r := range tc.typed {
+				updated, _ := m.Update(testKeyText(string(r)))
+				m = updated.(model)
+			}
+			if got := m.composer.text; got != tc.want {
+				t.Fatalf("composer text = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

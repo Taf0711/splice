@@ -18,6 +18,8 @@ const (
 	EventKindPlan         EventKind = "plan"
 	EventKindRun          EventKind = "run"
 	EventKindIntervention EventKind = "intervention"
+	EventKindUsage        EventKind = "usage"
+	EventKindRoute        EventKind = "route"
 )
 
 // Event is the normalized event the reducer consumes. Its fields are chosen
@@ -39,11 +41,26 @@ type Event struct {
 	// StageDependencies carries the compiled graph when the plan event has
 	// one: stage name to the stages that run before it.
 	StageDependencies map[string][]string
-	Title             string
-	InterventionKind  InterventionKind
+	// PlanTier and PlanTopology identify the compiled plan (plan events).
+	PlanTier     string
+	PlanTopology string
+	PlanRemoved  map[string]string
+	// Usage and CostUSD carry one request's spend (usage events). A nil
+	// CostUSD means the request had no price.
+	Usage   TokenUsage
+	CostUSD *float64
+	// Route is a node's applied route (route events).
+	Route            NodeRoute
+	Title            string
+	InterventionKind InterventionKind
+	// Unverified marks a run event whose completed run verified nothing.
+	Unverified bool
 	// Workspace isolation state (DoD 26), stamped by the adapter.
 	Workspace    string
 	WorktreePath string
+	// ChangedFiles lists the files a completed stage reported changed. Other
+	// stage events carry none.
+	ChangedFiles []string
 }
 
 // StreamEventLike is the minimal event contract: anything that can project
@@ -71,6 +88,8 @@ type StageEvent struct {
 	// stamped by the runtime; empty means unset.
 	Workspace    string
 	WorktreePath string
+	// ChangedFiles lists the files a completed stage reported changed.
+	ChangedFiles []string
 }
 
 // PresentationEvent projects the stage event into the normalized form.
@@ -85,6 +104,7 @@ func (e StageEvent) PresentationEvent() Event {
 		Progress:  e.Progress,
 		// Workspace flows through for DoD 26's isolation badge.
 		Workspace:    e.Workspace,
+		ChangedFiles: e.ChangedFiles,
 		WorktreePath: e.WorktreePath,
 	}
 }
@@ -94,6 +114,11 @@ type PlanEvent struct {
 	Title        string
 	StageNames   []string
 	Dependencies map[string][]string
+	// Tier and Topology identify the compiled plan. Both may be empty.
+	Tier     string
+	Topology string
+	// Removed maps a removed stage to the reason.
+	Removed map[string]string
 }
 
 // PresentationEvent projects the plan event into the normalized form.
@@ -103,18 +128,49 @@ func (e PlanEvent) PresentationEvent() Event {
 		StageNames:        e.StageNames,
 		StageDependencies: clonePlanDependencies(e.Dependencies),
 		Title:             e.Title,
+		PlanTier:          e.Tier,
+		PlanTopology:      e.Topology,
+		PlanRemoved:       cloneStrings(e.Removed),
 	}
+}
+
+// UsageEvent is the spend of one provider request made by a node.
+type UsageEvent struct {
+	NodeID    string
+	Iteration int
+	Usage     TokenUsage
+	// CostUSD is nil when the request had no price.
+	CostUSD *float64
+}
+
+// RouteEvent records the route a node pass applied when it started.
+type RouteEvent struct {
+	NodeID    string
+	Iteration int
+	Route     NodeRoute
+}
+
+// PresentationEvent projects the route event into the normalized form.
+func (e RouteEvent) PresentationEvent() Event {
+	return Event{Kind: EventKindRoute, NodeID: e.NodeID, Iteration: e.Iteration, Route: e.Route}
+}
+
+// PresentationEvent projects the usage event into the normalized form.
+func (e UsageEvent) PresentationEvent() Event {
+	return Event{Kind: EventKindUsage, NodeID: e.NodeID, Iteration: e.Iteration, Usage: e.Usage, CostUSD: e.CostUSD}
 }
 
 // RunEvent marks the end of a run.
 type RunEvent struct {
 	Status string // "completed" or "failed"
 	Detail string
+	// Unverified marks a completed run that verified nothing. Detail names why.
+	Unverified bool
 }
 
 // PresentationEvent projects the run event into the normalized form.
 func (e RunEvent) PresentationEvent() Event {
-	return Event{Kind: EventKindRun, Status: e.Status, Detail: e.Detail}
+	return Event{Kind: EventKindRun, Status: e.Status, Detail: e.Detail, Unverified: e.Unverified}
 }
 
 // InterventionEvent proposes or applies one intervention against a node.
@@ -162,6 +218,10 @@ func Apply(state State, event StreamEventLike) (State, error) {
 		out, err = applyRun(state, normalized)
 	case EventKindIntervention:
 		out, err = applyIntervention(state, normalized)
+	case EventKindUsage:
+		out, err = applyUsage(state, normalized)
+	case EventKindRoute:
+		out, err = applyRoute(state, normalized)
 	default:
 		return State{}, fmt.Errorf("unknown event kind %q", normalized.Kind)
 	}
@@ -184,7 +244,7 @@ func stageStatus(status string) NodeStatus {
 	case "failed":
 		return NodeStatusFailed
 	case "skipped":
-		return NodeStatusPending
+		return NodeStatusSkipped
 	case "incomplete":
 		return NodeStatusDegraded
 	}
@@ -226,6 +286,8 @@ func applyStage(state State, event Event) (State, error) {
 		// Workspace isolation flows from the runtime event (DoD 26).
 		Workspace:    event.Workspace,
 		WorktreePath: event.WorktreePath,
+		// Each pass's node carries the files its latest stage event reported.
+		ChangedFiles: append([]string(nil), event.ChangedFiles...),
 	}
 	// The plan graph is the source of a node's dependencies. It arrives with
 	// the plan event, before any stage event, so it is available here.
@@ -239,6 +301,8 @@ func applyStage(state State, event Event) (State, error) {
 		node.Iteration = prior.Iteration
 		node.Cost = prior.Cost
 		node.Usage = prior.Usage
+		node.Summary = prior.Summary
+		node.Route = prior.Route
 		// The compiled graph is the source of truth; a node created without a
 		// plan event keeps whatever an earlier event carried.
 		if len(node.Dependencies) == 0 {
@@ -253,6 +317,12 @@ func applyStage(state State, event Event) (State, error) {
 		out.Nodes[idx] = node
 	} else {
 		out.Nodes = append(out.Nodes, node)
+		idx = len(out.Nodes) - 1
+	}
+	// A terminal event's detail is the stage summary. A running event's
+	// detail is only the activity, so the last summary stays.
+	if status != NodeStatusRunning && strings.TrimSpace(event.Detail) != "" {
+		out.Nodes[idx].Summary = event.Detail
 	}
 	// Health is projection too: a failed stage is failed health; a repair
 	// re-entry of the same stage clears it back to normal (the intervention
@@ -262,8 +332,9 @@ func applyStage(state State, event Event) (State, error) {
 		if out.Health.Effective() != HealthRecovering {
 			out.Health = HealthFailed
 		}
-	} else if out.Health == HealthFailed && status == NodeStatusRunning {
-		// The failed stage re-entered: the run is recovering.
+	} else if (out.Health == HealthFailed || out.Health == HealthRegression) && status == NodeStatusRunning {
+		// A failed stage re-entered, or a stage ran after a trajectory
+		// regression: the intervention is in effect and the run is recovering.
 		out.Health = HealthRecovering
 	}
 	out.Lifecycle = runPhase(out.Nodes)
@@ -280,7 +351,84 @@ func applyPlan(state State, event Event) (State, error) {
 	}
 	out := cloneState(state)
 	out.Lifecycle = LifecycleExecute
-	out.Plan = Plan{Title: event.Title, TaskCount: len(event.StageNames), Dependencies: clonePlanDependencies(event.StageDependencies)}
+	out.Plan = Plan{
+		Title:        event.Title,
+		TaskCount:    len(event.StageNames),
+		Dependencies: clonePlanDependencies(event.StageDependencies),
+		Stages:       append([]string(nil), event.StageNames...),
+		Tier:         event.PlanTier,
+		Topology:     event.PlanTopology,
+		Removed:      cloneStrings(event.PlanRemoved),
+	}
+	return out, nil
+}
+
+// applyRoute stores the route a node pass applied. The pass must exist: the
+// runtime emits the route after the stage's running event.
+func applyRoute(state State, event Event) (State, error) {
+	nodeID := strings.TrimSpace(event.NodeID)
+	if nodeID == "" {
+		return State{}, fmt.Errorf("route event: node id is required")
+	}
+	if err := event.Route.Validate(); err != nil {
+		return State{}, fmt.Errorf("route event for %s: %w", nodeID, err)
+	}
+	for i, node := range state.Nodes {
+		if node.ID == nodeID && node.Iteration == event.Iteration {
+			out := cloneState(state)
+			route := event.Route
+			out.Nodes[i].Route = &route
+			return out, nil
+		}
+	}
+	return State{}, fmt.Errorf("route event for unknown node %s iteration %d", nodeID, event.Iteration)
+}
+
+// applyUsage adds one request's spend to its node. The (node, iteration)
+// match wins. A request of a repair re-entry that has no node of its own
+// counts on the latest pass of the same node. A request for a node that
+// does not exist is an error: the caller forwards only plan stages.
+func applyUsage(state State, event Event) (State, error) {
+	nodeID := strings.TrimSpace(event.NodeID)
+	if nodeID == "" {
+		return State{}, fmt.Errorf("usage event: node id is required")
+	}
+	if err := event.Usage.Validate(); err != nil {
+		return State{}, fmt.Errorf("usage event for %s: %w", nodeID, err)
+	}
+	if event.CostUSD != nil {
+		if err := (CostSummary{USD: *event.CostUSD}).Validate(); err != nil {
+			return State{}, fmt.Errorf("usage event for %s: %w", nodeID, err)
+		}
+	}
+	idx := -1
+	for i, node := range state.Nodes {
+		if node.ID != nodeID {
+			continue
+		}
+		if node.Iteration == event.Iteration {
+			idx = i
+			break
+		}
+		if idx < 0 || node.Iteration > state.Nodes[idx].Iteration {
+			idx = i
+		}
+	}
+	if idx < 0 {
+		return State{}, fmt.Errorf("usage event for unknown node %s iteration %d", nodeID, event.Iteration)
+	}
+	out := cloneState(state)
+	node := &out.Nodes[idx]
+	node.Usage.InputTokens += event.Usage.InputTokens
+	node.Usage.OutputTokens += event.Usage.OutputTokens
+	node.Usage.CachedTokens += event.Usage.CachedTokens
+	node.Usage.ReasoningTokens += event.Usage.ReasoningTokens
+	node.Cost.Tokens += event.Usage.InputTokens + event.Usage.OutputTokens
+	if event.CostUSD != nil {
+		node.Cost.USD += *event.CostUSD
+	} else {
+		node.Cost.Unpriced = true
+	}
 	return out, nil
 }
 
@@ -335,7 +483,7 @@ func applyRun(state State, event Event) (State, error) {
 	case "cancelled":
 		out.Health = HealthCancelled
 	}
-	out.Completion = &CompletionReceipt{Status: status, Detail: event.Detail}
+	out.Completion = &CompletionReceipt{Status: status, Detail: event.Detail, Unverified: status == "completed" && event.Unverified}
 	return out, nil
 }
 
@@ -363,6 +511,19 @@ func applyIntervention(state State, event Event) (State, error) {
 		TargetNodeID: target,
 		Status:       InterventionStatus(status),
 	})
+	// An APPLIED corrective intervention is the trajectory layer saying the
+	// evidence regressed; a proposal is only a suggestion and changes
+	// nothing. Terminal health is final.
+	if status == string(InterventionApplied) && out.Health != HealthFailed && out.Health != HealthCancelled {
+		switch kind {
+		case InterventionRollback, InterventionStepBack, InterventionEscalate:
+			out.Health = HealthRegression
+		case InterventionContinue:
+			if out.Health == HealthRegression {
+				out.Health = HealthRecovering
+			}
+		}
+	}
 	return out, nil
 }
 
@@ -373,6 +534,8 @@ func cloneState(state State) State {
 	out := state
 	out.Nodes = append([]ExecutionNode(nil), state.Nodes...)
 	out.Plan.Dependencies = clonePlanDependencies(state.Plan.Dependencies)
+	out.Plan.Stages = append([]string(nil), state.Plan.Stages...)
+	out.Plan.Removed = cloneStrings(state.Plan.Removed)
 	for i := range out.Nodes {
 		out.Nodes[i].Usage.ByNode = cloneTokenUsage(state.Nodes[i].Usage.ByNode)
 	}
@@ -389,6 +552,17 @@ func cloneState(state State) State {
 	if state.Completion != nil {
 		completion := *state.Completion
 		out.Completion = &completion
+	}
+	return out
+}
+
+func cloneStrings(source map[string]string) map[string]string {
+	if source == nil {
+		return nil
+	}
+	out := make(map[string]string, len(source))
+	for key, value := range source {
+		out[key] = value
 	}
 	return out
 }

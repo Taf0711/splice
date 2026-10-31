@@ -5,6 +5,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/charmbracelet/x/ansi"
+
+	"github.com/Taf0711/splice/internal/presentation"
 )
 
 // lastAssistantAnswer returns the text of the most recent assistant row — the
@@ -41,6 +45,10 @@ func (m model) plainTranscriptText() string {
 			prefix = "splice: "
 		case rowSystem:
 			prefix = "· "
+			// The /pipeline card exports its readable form, not its data.
+			if card, ok := parsePipelineGraphCard(row.text); ok {
+				row.text = ansi.Strip(strings.Join(renderPipelineGraphCardLines(card, 100, presentation.GlyphTierASCII), "\n"))
+			}
 		case rowError:
 			prefix = "error: "
 			// Receipt payload rows export their readable form (title,

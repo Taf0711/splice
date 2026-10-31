@@ -52,12 +52,16 @@ const (
 	NodeStatusComplete NodeStatus = "complete"
 	NodeStatusFailed   NodeStatus = "failed"
 	NodeStatusDegraded NodeStatus = "degraded"
+	// NodeStatusSkipped is a stage that ran and had nothing to check (for
+	// example no file in a language it knows). It is not pending: it will
+	// not run in this pass.
+	NodeStatusSkipped NodeStatus = "skipped"
 )
 
 // Validate reports an error for any value outside the closed set.
 func (s NodeStatus) Validate() error {
 	switch s {
-	case NodeStatusPending, NodeStatusRunning, NodeStatusComplete, NodeStatusFailed, NodeStatusDegraded:
+	case NodeStatusPending, NodeStatusRunning, NodeStatusComplete, NodeStatusFailed, NodeStatusDegraded, NodeStatusSkipped:
 		return nil
 	}
 	return fmt.Errorf("unknown node status %q", s)
@@ -67,6 +71,9 @@ func (s NodeStatus) Validate() error {
 type CostSummary struct {
 	USD    float64 `json:"usd"`
 	Tokens int64   `json:"tokens"`
+	// Unpriced is true when at least one request of the node had no price.
+	// USD then counts only the priced requests and is a lower bound.
+	Unpriced bool `json:"unpriced,omitempty"`
 }
 
 // Validate checks non-negative, finite values.
@@ -143,6 +150,27 @@ func (u UsageSummary) Validate() error {
 	return nil
 }
 
+// NodeRoute is the applied route of one node pass.
+type NodeRoute struct {
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Effort   string `json:"effort,omitempty"`
+	// InputBudget and OutputBudget are the applied token allowance.
+	InputBudget  int `json:"input_budget"`
+	OutputBudget int `json:"output_budget"`
+	// Escalated is true when run escalation chose the model, overriding the
+	// configured route or a node pin.
+	Escalated bool `json:"escalated,omitempty"`
+}
+
+// Validate checks non-negative budgets.
+func (r NodeRoute) Validate() error {
+	if r.InputBudget < 0 || r.OutputBudget < 0 {
+		return fmt.Errorf("route budget must be non-negative, got input %d output %d", r.InputBudget, r.OutputBudget)
+	}
+	return nil
+}
+
 // ExecutionNode is one node of the execution graph. Dependencies reference
 // other node IDs; the reducer preserves append order, so node ordering is
 // stable across applies.
@@ -156,9 +184,21 @@ type ExecutionNode struct {
 	Cost      CostSummary  `json:"cost"`
 	Usage     UsageSummary `json:"usage"`
 	// Dependencies names the upstream stages this node waits for. The reducer
-	// carries them into presentation state. No renderer reads them yet; the
-	// Track T9 viewer is the consumer. Registered in internal/wiring.
+	// carries them into presentation state. The pipeline graph view model
+	// (internal/splice/presentrun.BuildGraph) reads them for the terminal
+	// graph and, later, the web viewer. Registered in internal/wiring.
 	Dependencies []string `json:"dependencies,omitempty"`
+	// Summary is the detail of the node's last terminal stage event: the
+	// stage summary, or the failure for a failed stage. A command node's
+	// summary names the command result.
+	Summary string `json:"summary,omitempty"`
+	// ChangedFiles are the files this node's latest completed stage reported
+	// changed. A node that completed with no changes has none.
+	ChangedFiles []string `json:"changed_files,omitempty"`
+	// Route is what the node applied on its latest start: the model the
+	// run sent, the fitted effort, and the budget after learned fits. It is
+	// nil until the node starts. A model-free node has a budget only.
+	Route *NodeRoute `json:"route,omitempty"`
 	// Workspace is the agent's isolation state (v0.5 agent_workspace,
 	// DoD 26): "isolated" (own worktree) or "shared_cwd" (authoritative
 	// working directory shared with other lanes). Empty projects as
@@ -196,6 +236,11 @@ func (n ExecutionNode) Validate() error {
 	}
 	if err := n.Usage.Validate(); err != nil {
 		return fmt.Errorf("node %s: %w", n.ID, err)
+	}
+	if n.Route != nil {
+		if err := n.Route.Validate(); err != nil {
+			return fmt.Errorf("node %s: %w", n.ID, err)
+		}
 	}
 	seen := make(map[string]bool, len(n.Dependencies))
 	for _, dep := range n.Dependencies {

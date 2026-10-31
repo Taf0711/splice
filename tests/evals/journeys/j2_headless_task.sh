@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# J2 — headless-task-exec journey.
+# J2: headless-task-exec journey.
 # Runs a real task in the pristine fixture workspace via splice exec with
 # stream-json output; asserts stream validity, a final result event, a real
 # workspace diff, and that the EXTERNAL verifier (taskset check command)

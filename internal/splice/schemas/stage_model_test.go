@@ -128,3 +128,19 @@ func TestLoadStageModelConfigInvalid(t *testing.T) {
 		t.Fatal("expected validation error for empty provider_profile")
 	}
 }
+
+// Every effort name the registry accepts is a valid pin, and an unknown name
+// is refused with the accepted list in the message.
+func TestStageModelConfigAcceptsEveryEffortLevel(t *testing.T) {
+	for _, effort := range []string{"", "none", "minimal", "low", "medium", "high", "xhigh", "max"} {
+		cfg := StageModelConfig{ProviderProfile: "p", Model: "m", ReasoningEffort: effort}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("effort %q: %v", effort, err)
+		}
+	}
+	err := StageModelConfig{ProviderProfile: "p", Model: "m", ReasoningEffort: "extreme"}.Validate()
+	const want = `reasoning_effort must be one of none, minimal, low, medium, high, xhigh, max, got "extreme"`
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want %q", err, want)
+	}
+}

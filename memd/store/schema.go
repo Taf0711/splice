@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS observations (
     review_after     INTEGER,
     created_at       INTEGER NOT NULL,
     updated_at       INTEGER NOT NULL,
-    deleted_at       INTEGER
+    deleted_at       INTEGER,
+    maintenance_deleted_at INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_obs_project ON observations(project_path, scope, deleted_at);
@@ -112,6 +113,11 @@ CREATE TRIGGER IF NOT EXISTS traces_fts_insert AFTER INSERT ON run_traces BEGIN
     VALUES (new.rowid, new.intent, new.tier);
 END;
 
+CREATE TRIGGER IF NOT EXISTS traces_fts_delete AFTER DELETE ON run_traces BEGIN
+    INSERT INTO run_traces_fts(run_traces_fts, rowid, intent, tier)
+    VALUES ('delete', old.rowid, old.intent, old.tier);
+END;
+
 CREATE TABLE IF NOT EXISTS verdicts (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id      TEXT NOT NULL,
@@ -137,7 +143,13 @@ CREATE TABLE IF NOT EXISTS cognition_nodes (
     created_at        INTEGER NOT NULL,
     verified_at       INTEGER,
     claim_hash        TEXT    NOT NULL,
-    metadata_json     TEXT
+    metadata_json     TEXT,
+    status_changed_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS maintenance_meta (
+    key       TEXT PRIMARY KEY,
+    value     TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_cog_nodes_claim  ON cognition_nodes(kind, claim_hash, project_path);

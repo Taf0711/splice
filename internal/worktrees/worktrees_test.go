@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Taf0711/splice/internal/gitenv/gitenvtest"
 )
 
 func TestDefaultRunGitSeparatesStdoutAndStderr(t *testing.T) {
@@ -408,6 +410,122 @@ func TestMergeBackNoChangesWhenSourceAdvanced(t *testing.T) {
 	if result.Status != MergeBackNoChanges {
 		t.Fatalf("Status = %q, want no_changes (%s)", result.Status, result.Message)
 	}
+}
+
+func TestMergeBackAcceptsPinnedSourceIdentity(t *testing.T) {
+	root, worktree := newMergeBackFixture(t)
+	sourceCommit := strings.TrimSpace(mustGit(t, root, "rev-parse", "HEAD"))
+	if err := os.WriteFile(filepath.Join(worktree, "feature.txt"), []byte("new feature\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := MergeBack(context.Background(), MergeBackOptions{
+		RepoRoot:     root,
+		WorktreePath: worktree,
+		Name:         "task-pinned",
+		SourceBranch: "main",
+		SourceCommit: sourceCommit,
+	})
+	if err != nil {
+		t.Fatalf("MergeBack returned error: %v", err)
+	}
+	if result.Status != MergeBackMerged {
+		t.Fatalf("Status = %q, want merged (%s)", result.Status, result.Message)
+	}
+}
+
+func TestMergeBackRefusesSourceBranchChange(t *testing.T) {
+	root, worktree := newMergeBackFixture(t)
+	if err := os.WriteFile(filepath.Join(worktree, "feature.txt"), []byte("new feature\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, root, "checkout", "-b", "other")
+	result, err := MergeBack(context.Background(), MergeBackOptions{
+		RepoRoot:     root,
+		WorktreePath: worktree,
+		Name:         "task-branch-switch",
+		SourceBranch: "main",
+	})
+	if err != nil {
+		t.Fatalf("MergeBack returned error: %v", err)
+	}
+	if result.Status != MergeBackSourceChanged {
+		t.Fatalf("Status = %q, want source_changed (%s)", result.Status, result.Message)
+	}
+	if _, err := os.Stat(filepath.Join(root, "feature.txt")); err == nil {
+		t.Fatal("worktree change merged after a source branch switch")
+	}
+	assertSourceRefusalLeftWorktreeUntouched(t, root, worktree, "splice/task-branch-switch")
+}
+
+func TestMergeBackRefusesDetachedSourceHead(t *testing.T) {
+	root, worktree := newMergeBackFixture(t)
+	if err := os.WriteFile(filepath.Join(worktree, "feature.txt"), []byte("new feature\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, root, "checkout", "--detach", "HEAD")
+	result, err := MergeBack(context.Background(), MergeBackOptions{
+		RepoRoot:     root,
+		WorktreePath: worktree,
+		Name:         "task-detached",
+		SourceBranch: "main",
+	})
+	if err != nil {
+		t.Fatalf("MergeBack returned error: %v", err)
+	}
+	if result.Status != MergeBackSourceChanged {
+		t.Fatalf("Status = %q, want source_changed (%s)", result.Status, result.Message)
+	}
+	assertSourceRefusalLeftWorktreeUntouched(t, root, worktree, "splice/task-detached")
+}
+
+func TestMergeBackRefusesUnknownSourceCommit(t *testing.T) {
+	root, worktree := newMergeBackFixture(t)
+	if err := os.WriteFile(filepath.Join(worktree, "feature.txt"), []byte("new feature\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := MergeBack(context.Background(), MergeBackOptions{
+		RepoRoot:     root,
+		WorktreePath: worktree,
+		Name:         "task-unknown-commit",
+		SourceBranch: "main",
+		SourceCommit: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+	})
+	if err != nil {
+		t.Fatalf("MergeBack returned error: %v", err)
+	}
+	if result.Status != MergeBackSourceChanged {
+		t.Fatalf("Status = %q, want source_changed (%s)", result.Status, result.Message)
+	}
+	assertSourceRefusalLeftWorktreeUntouched(t, root, worktree, "splice/task-unknown-commit")
+}
+
+func TestMergeBackRefusesSourceCommitNotAncestor(t *testing.T) {
+	root, worktree := newMergeBackFixture(t)
+	mustGit(t, root, "checkout", "-b", "other")
+	if err := os.WriteFile(filepath.Join(root, "other.txt"), []byte("other\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, root, "add", "-A")
+	mustGit(t, root, "commit", "-m", "other commit")
+	otherCommit := strings.TrimSpace(mustGit(t, root, "rev-parse", "HEAD"))
+	mustGit(t, root, "checkout", "main")
+	if err := os.WriteFile(filepath.Join(worktree, "feature.txt"), []byte("new feature\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := MergeBack(context.Background(), MergeBackOptions{
+		RepoRoot:     root,
+		WorktreePath: worktree,
+		Name:         "task-not-ancestor",
+		SourceBranch: "main",
+		SourceCommit: otherCommit,
+	})
+	if err != nil {
+		t.Fatalf("MergeBack returned error: %v", err)
+	}
+	if result.Status != MergeBackSourceChanged {
+		t.Fatalf("Status = %q, want source_changed (%s)", result.Status, result.Message)
+	}
+	assertSourceRefusalLeftWorktreeUntouched(t, root, worktree, "splice/task-not-ancestor")
 }
 
 func TestMergeBackSkipsDirtySourceTree(t *testing.T) {
@@ -1223,5 +1341,62 @@ func TestRecoveryMergeBackAfterRestore(t *testing.T) {
 	}
 	if ref := mustGit(t, worktree, "rev-parse", iter1Ref); ref == "" {
 		t.Fatal("iter1 recovery ref missing after merge")
+	}
+}
+
+func TestRecoveryGitHardensEnv(t *testing.T) {
+	record := gitenvtest.InstallRecorder(t)
+	_, _ = defaultEnvRunGit(context.Background(), t.TempDir(), nil, "rev-parse", "HEAD")
+	gitenvtest.AssertHardened(t, gitenvtest.Runs(t, record))
+}
+
+// TestLaunchDirMapsSubdirectoryIntoWorktree pins H-08: a run launched from a
+// repository subdirectory works in the same subdirectory of the worktree, and
+// a launch directory that the worktree cannot hold fails loud.
+func TestLaunchDirMapsSubdirectoryIntoWorktree(t *testing.T) {
+	repo := t.TempDir()
+	tree := t.TempDir()
+	for _, dir := range []string{filepath.Join(repo, "sub", "deep"), filepath.Join(repo, "untracked"), filepath.Join(tree, "sub", "deep")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(t.TempDir(), "repo-link")
+	if err := os.Symlink(repo, link); err != nil {
+		t.Fatal(err)
+	}
+	result := Result{Path: tree, RepoRoot: resolvedPath(t, repo)}
+
+	for _, tc := range []struct{ launch, want string }{
+		{repo, tree},
+		{filepath.Join(repo, "sub"), filepath.Join(tree, "sub")},
+		{filepath.Join(link, "sub", "deep"), filepath.Join(tree, "sub", "deep")},
+	} {
+		got, err := LaunchDir(result, tc.launch)
+		if err != nil || got != tc.want {
+			t.Fatalf("LaunchDir(%s) = %q, %v; want %q", tc.launch, got, err, tc.want)
+		}
+	}
+	for _, tc := range []struct{ launch, wantErr string }{
+		{t.TempDir(), "is not inside the repository"},
+		{filepath.Join(repo, "untracked"), "has only committed files"},
+		{filepath.Join(repo, "missing"), "resolve launch directory"},
+	} {
+		if got, err := LaunchDir(result, tc.launch); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Fatalf("LaunchDir(%s) = %q, %v; want error containing %q", tc.launch, got, err, tc.wantErr)
+		}
+	}
+}
+
+// assertSourceRefusalLeftWorktreeUntouched pins P3-1: the source checks run
+// before the worktree is committed or its branch is pinned, so a refusal
+// leaves the change uncommitted in the worktree and creates no branch.
+func assertSourceRefusalLeftWorktreeUntouched(t *testing.T, root, worktree, branch string) {
+	t.Helper()
+	if got := strings.TrimSpace(mustGit(t, root, "branch", "--list", branch)); got != "" {
+		t.Fatalf("refusal pinned branch %s; the source checks must run first", branch)
+	}
+	if status := mustGit(t, worktree, "status", "--porcelain", "--untracked-files=all"); !strings.Contains(status, "feature.txt") {
+		t.Fatalf("worktree status = %q, want feature.txt still uncommitted", status)
 	}
 }

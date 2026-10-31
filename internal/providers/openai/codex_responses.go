@@ -62,6 +62,7 @@ const (
 	responsesEventReasoningDelta    = "response.reasoning_summary_text.delta"
 	responsesEventOutputTextDone    = "response.output_text.done"
 	responsesEventFunctionArgsDelta = "response.function_call_arguments.delta"
+	responsesEventFunctionArgsDone  = "response.function_call_arguments.done"
 	responsesEventContentPartDone   = "response.content_part.done"
 	responsesEventOutputItemDone    = "response.output_item.done"
 	responsesEventCompleted         = "response.completed"
@@ -129,6 +130,8 @@ type responsesEvent struct {
 	Type string `json:"type"`
 	// delta payloads (response.output_text.delta / function_call_arguments.delta)
 	Delta string `json:"delta,omitempty"`
+	// Arguments is the full argument text of response.function_call_arguments.done.
+	Arguments string `json:"arguments,omitempty"`
 	// item payloads (response.output_item.added / done)
 	ItemID string `json:"item_id,omitempty"`
 	// OutputIndex is a *int so a real 0 (the first output) is distinguishable from
@@ -523,6 +526,9 @@ func (p *CodexProvider) emitResponsesEvent(
 	case responsesEventFunctionArgsDelta:
 		p.handleFunctionArgsDelta(ctx, &event, state, events)
 		return true
+	case responsesEventFunctionArgsDone:
+		p.handleFunctionArgsDone(ctx, &event, state, events)
+		return true
 	case responsesEventOutputItemDone:
 		p.handleOutputItemDone(ctx, &event, state, events)
 		return true
@@ -618,6 +624,37 @@ func (p *CodexProvider) handleFunctionArgsDelta(
 	})
 }
 
+// handleFunctionArgsDone takes the full arguments of
+// response.function_call_arguments.done when no argument delta arrived for
+// the call. The collector builds arguments from deltas alone, so they go out
+// as one delta. A call that already has arguments (from deltas, or from an
+// earlier done event) is not sent again.
+func (p *CodexProvider) handleFunctionArgsDone(
+	ctx context.Context,
+	event *responsesEvent,
+	state *responsesState,
+	events chan<- zeroruntime.StreamEvent,
+) {
+	key := p.toolCallKey(event)
+	if key == "" || event.Arguments == "" {
+		return
+	}
+	builder, ok := state.toolCalls[key]
+	if !ok {
+		builder = &toolCallBuilder{ID: key}
+		state.toolCalls[key] = builder
+	}
+	if builder.Arguments.Len() > 0 {
+		return
+	}
+	builder.Arguments.WriteString(event.Arguments)
+	providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
+		Type:              zeroruntime.StreamEventToolCallDelta,
+		ToolCallID:        key,
+		ArgumentsFragment: event.Arguments,
+	})
+}
+
 // handleOutputItemDone finalizes a tool call when the item type is
 // function_call. The accumulated arguments and the (possibly late)
 // function name are written to the builder before StreamEventToolCallEnd
@@ -644,9 +681,6 @@ func (p *CodexProvider) handleOutputItemDone(
 	if event.Item.Name != "" {
 		builder.Name = event.Item.Name
 	}
-	if event.Item.Arguments != "" && builder.Arguments.Len() == 0 {
-		builder.Arguments.WriteString(event.Item.Arguments)
-	}
 	if !builder.started {
 		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
 			Type:       zeroruntime.StreamEventToolCallStart,
@@ -654,6 +688,17 @@ func (p *CodexProvider) handleOutputItemDone(
 			ToolName:   builder.Name,
 		})
 		builder.started = true
+	}
+	// The backend can skip the argument deltas and send the arguments only on
+	// this done item (it does so for most parallel calls). The collector builds
+	// arguments from deltas alone, so emit the full arguments as one delta.
+	if event.Item.Arguments != "" && builder.Arguments.Len() == 0 {
+		builder.Arguments.WriteString(event.Item.Arguments)
+		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
+			Type:              zeroruntime.StreamEventToolCallDelta,
+			ToolCallID:        key,
+			ArgumentsFragment: event.Item.Arguments,
+		})
 	}
 	providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
 		Type:       zeroruntime.StreamEventToolCallEnd,

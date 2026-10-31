@@ -75,7 +75,14 @@ func newServer(store *store.Store, socketPath string) *server {
 	mux.HandleFunc("/graph/contradict", s.handleGraphContradict)
 	mux.HandleFunc("/graph/search_semantic", s.handleGraphSearchSemantic)
 	mux.HandleFunc("/graph/compact", s.handleGraphCompact)
+	mux.HandleFunc("/graph/reanchor", s.handleGraphReanchor)
+	mux.HandleFunc("/graph/reanchor_ids", s.handleGraphReanchorIDs)
+	mux.HandleFunc("/graph/capture_set", s.handleGraphCaptureSet)
+	mux.HandleFunc("/graph/export_capture_set", s.handleGraphExportCaptureSet)
+	mux.HandleFunc("/graph/import_capture_set", s.handleGraphImportCaptureSet)
 	mux.HandleFunc("/graph/collect", s.handleGraphCollect)
+	mux.HandleFunc("/maintenance", s.handleMaintenance)
+	mux.HandleFunc("/forget", s.handleForget)
 	s.httpServer = &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -469,6 +476,7 @@ func (s *server) handleProjectReset(w http.ResponseWriter, r *http.Request) {
 		OK:           true,
 		Observations: counts.Observations,
 		Traces:       counts.Traces,
+		GraphNodes:   counts.GraphNodes,
 	})
 }
 
@@ -713,9 +721,36 @@ func runServer() {
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer cancel()
 
 	srv := newServer(st, socketPath)
+	maintenanceDone := make(chan struct{})
+	go func() {
+		defer close(maintenanceDone)
+		if report, err := st.Maintenance(ctx); err != nil {
+			log.Printf("maintenance: %v", err)
+		} else {
+			log.Printf("maintenance: %+v", report)
+		}
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				report, err := st.Maintenance(ctx)
+				if err != nil {
+					log.Printf("maintenance: %v", err)
+				} else {
+					log.Printf("maintenance: %+v", report)
+				}
+			}
+		}
+	}()
+	defer func() {
+		cancel()
+		<-maintenanceDone
+	}()
 
 	if err := srv.listenAndServe(ctx); err != nil {
 		if errors.Is(err, errAlreadyRunning) {

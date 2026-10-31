@@ -1,0 +1,7 @@
+{
+  "name": "large-10-write",
+  "phase": "write",
+  "prompt": "Add (p *Pool) SuccessRate() float64 in the worker package: completed jobs divided by all submitted jobs, and 0 when no job was submitted. Add a regression test.",
+  "check": "# large-10 A: Add (p *Pool) SuccessRate() float64 in the worker package: completed j\nmkdir -p internal/worker\ncat > internal/worker/probe_success_rate_test.go <<'EOF'\npackage worker\n\nimport (\n\t\"errors\"\n\t\"testing\"\n)\n\nfunc TestProbeSuccessRate(t *testing.T) {\n\tp := &Pool{}\n\tif got := p.SuccessRate(); got != 0 {\n\t\tt.Fatalf(\"empty SuccessRate = %v\", got)\n\t}\n\tp.Submit(Job{Run: func() error { return nil }})\n\tp.Submit(Job{Run: func() error { return nil }})\n\tp.Submit(Job{Run: func() error { return nil }})\n\tp.Submit(Job{Run: func() error { return errors.New(\"x\") }})\n\tif got := p.SuccessRate(); got != 0.75 {\n\t\tt.Fatalf(\"SuccessRate = %v, want 0.75\", got)\n\t}\n}\nEOF\ngo test -count=1 ./internal/worker/ ; rc=$?\nrm -f internal/worker/probe_success_rate_test.go\nif [ $rc -ne 0 ]; then exit $rc; fi\nexit 0\n",
+  "fixture": "../../large-families/fixture"
+}

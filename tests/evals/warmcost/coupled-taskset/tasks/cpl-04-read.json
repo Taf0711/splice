@@ -1,0 +1,8 @@
+{
+  "name": "cpl-04-read",
+  "phase": "read",
+  "precursor": "cpl-04-write",
+  "prompt": "In the auth package, add a \"billing_admin\" role (RoleBillingAdmin) that users can hold. Billing admins hold the permissions \"read\" and \"billing\".",
+  "check": "# cpl-04 B\nmkdir -p internal/admin\ncat > internal/admin/probe_role_billing_admin_test.go <<'EOF'\npackage admin\n\nimport (\n\t\"slices\"\n\t\"testing\"\n\n\t\"demo/internal/auth\"\n)\n\nfunc TestProbeRoleBillingAdmin(t *testing.T) {\n\tif !slices.Contains(auth.Roles, auth.RoleBillingAdmin) || auth.RoleBillingAdmin != \"billing_admin\" {\n\t\tt.Fatal(\"auth.Roles lacks the billing_admin role\")\n\t}\n\tif !Can(auth.RoleBillingAdmin, \"read\") || !Can(auth.RoleBillingAdmin, \"billing\") || Can(auth.RoleBillingAdmin, \"write\") {\n\t\tt.Fatal(\"billing_admin permissions are not read and billing\")\n\t}\n}\nEOF\ngo test -count=1 ./... ; rc=$?\nrm -f internal/admin/probe_role_billing_admin_test.go\nexit $rc\n",
+  "fixture": "../../coupled-families/fixture"
+}

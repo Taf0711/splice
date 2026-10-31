@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/config"
+	"github.com/Taf0711/splice/internal/flags"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/tools"
 	"github.com/Taf0711/splice/internal/zeroruntime"
@@ -191,6 +194,52 @@ func TestRunDesignPlanFailFast(t *testing.T) {
 	}
 }
 
+// TestRunDesignPlanBrokenStageRouteFailsBeforeFirstRequest pins the plan
+// path preflight: a stage route that cannot resolve stops the plan before
+// any task sends a request, and it is invalid input, as in Run. A provider
+// that cannot start for a valid route is not invalid input.
+func TestRunDesignPlanBrokenStageRouteFailsBeforeFirstRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		routeErr  error
+		wantInput bool
+	}{
+		{"unknown profile", fmt.Errorf("stage %q references unknown provider profile %q", "code_writer", "ghost"), true},
+		{"provider cannot start", &providerBuildError{err: errors.New("build provider for stage \"code_writer\": keychain locked")}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workDir, registry := newRunTestWorkspace(t)
+			plan := designPlan([]schemas.Task{
+				designTask("t1", "First", nil),
+				designTask("t2", "Second", []string{"t1"}),
+			})
+			provider := &countingProvider{}
+			_, err := RunDesignPlan(context.Background(), plan, provider, agent.Options{
+				Cwd:            workDir,
+				Registry:       registry,
+				PermissionMode: agent.PermissionModeAuto,
+				SessionID:      "plan-route",
+				MaxTurns:       1,
+				StageModelResolver: func(stage string) (agent.ModelSelection, error) {
+					if stage == "code_writer" {
+						return agent.ModelSelection{}, tc.routeErr
+					}
+					return agent.ModelSelection{}, nil
+				},
+			}, nil, nil)
+			if err == nil || !strings.Contains(err.Error(), "task t1: preflight: stage code_writer model") {
+				t.Fatalf("err = %v, want the task t1 preflight error", err)
+			}
+			if got := errors.Is(err, ErrInvalidRunInput); got != tc.wantInput {
+				t.Fatalf("errors.Is(err, ErrInvalidRunInput) = %v, want %v", got, tc.wantInput)
+			}
+			if provider.requests != 0 {
+				t.Fatalf("provider requests = %d, want 0", provider.requests)
+			}
+		})
+	}
+}
+
 func TestRunDesignPlanGeneratedPlanID(t *testing.T) {
 	workDir, registry := newRunTestWorkspace(t)
 	plan := designPlan([]schemas.Task{designTask("t1", "First", nil)})
@@ -332,6 +381,11 @@ func TestRunDesignPlanWithResume_SkipsCompletedTasks(t *testing.T) {
 	}
 	if decoded.PlanID != "plan-resume" {
 		t.Fatalf("plan id = %q, want plan-resume", decoded.PlanID)
+	}
+	// A task completed in an earlier run was not verified by this run, so the
+	// plan is not verified and the reason names that task.
+	if result.Verified || !strings.HasPrefix(result.UnverifiedReason, "task t1: completed in an earlier run") {
+		t.Fatalf("verified = %v reason = %q, want unverified naming task t1", result.Verified, result.UnverifiedReason)
 	}
 
 	taskStarts := 0
@@ -558,5 +612,124 @@ func designPlan(tasks []schemas.Task) schemas.DesignPlan {
 		SystemDesign: "Each task is independent.",
 		Tasks:        tasks,
 		Source:       "authored",
+	}
+}
+
+// A design plan builds the same trajectory advisor as a run: the default
+// classifier is on for every task. The plan prints one classifier line, not
+// one per task, and the flag off prints none.
+func TestRunDesignPlanBuildsTheClassifierOncePerPlan(t *testing.T) {
+	workDir, registry := newRunTestWorkspace(t)
+	plan := designPlan([]schemas.Task{
+		designTask("t1", "First", nil),
+		designTask("t2", "Second", []string{"t1"}),
+		designTask("t3", "Third", []string{"t1"}),
+	})
+	run := func(set flags.Set) (agent.Result, []string) {
+		var reasoning []string
+		result, err := RunDesignPlan(context.Background(), plan, designHappyProvider{workDir: workDir}, agent.Options{
+			Cwd:                   workDir,
+			Registry:              registry,
+			PermissionMode:        agent.PermissionModeAuto,
+			SessionID:             "plan-classifier",
+			MaxTurns:              1,
+			FileTracker:           tools.NewFileTracker(),
+			Flags:                 set,
+			DecisionEvaluator:     &trajectoryEvaluator{label: "continue"},
+			DecisionAdvisorConfig: defaultChatGPTSection(),
+			OnReasoning:           func(text string) { reasoning = append(reasoning, text) },
+		}, nil, nil)
+		if err != nil {
+			t.Fatalf("RunDesignPlan returned error: %v", err)
+		}
+		return result, reasoning
+	}
+	countClassifierLines := func(lines []string) int {
+		n := 0
+		for _, line := range lines {
+			if strings.Contains(line, "[trajectory] classifier:") {
+				n++
+			}
+		}
+		return n
+	}
+
+	result, reasoning := run(flags.Set{flags.TrajectoryClassifierEnabled: true})
+	if result.Incomplete {
+		t.Fatalf("plan incomplete: %s", result.IncompleteReason)
+	}
+	if n := countClassifierLines(reasoning); n != 1 {
+		t.Fatalf("classifier lines = %d, want exactly one for the plan", n)
+	}
+
+	_, reasoning = run(flags.Set{flags.TrajectoryClassifierEnabled: false})
+	if n := countClassifierLines(reasoning); n != 0 {
+		t.Fatalf("classifier off: lines = %d, want none", n)
+	}
+}
+
+// An invalid advisor section fails the plan before any task runs.
+func TestRunDesignPlanRefusesAnInvalidAdvisorBeforeTasks(t *testing.T) {
+	workDir, registry := newRunTestWorkspace(t)
+	plan := designPlan([]schemas.Task{designTask("t1", "First", nil)})
+	var reasoning []string
+	_, err := RunDesignPlan(context.Background(), plan, designHappyProvider{workDir: workDir}, agent.Options{
+		Cwd:                   workDir,
+		Registry:              registry,
+		PermissionMode:        agent.PermissionModeAuto,
+		SessionID:             "plan-bad-advisor",
+		MaxTurns:              1,
+		Flags:                 flags.Set{flags.DecisionAdvisorEnabled: true},
+		DecisionEvaluator:     &trajectoryEvaluator{label: "continue"},
+		DecisionAdvisorConfig: config.DecisionAdvisorConfig{Mode: "turbo", Backend: "provider", ProviderProfile: "p", Profile: "m"},
+		OnReasoning:           func(text string) { reasoning = append(reasoning, text) },
+	}, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "decision advisor") {
+		t.Fatalf("err = %v, want a decision advisor error", err)
+	}
+	for _, line := range reasoning {
+		if strings.Contains(line, "Starting task") {
+			t.Fatalf("a task started before the advisor config was checked: %q", line)
+		}
+	}
+}
+
+// TestRunDesignPlanNamesTheUnusedActivePipeline pins that a design plan says
+// once that it runs the default topology when another pipeline is active.
+func TestRunDesignPlanNamesTheUnusedActivePipeline(t *testing.T) {
+	const want = "[topology] Design plans run the default topology; the active pipeline project-topology is not used."
+	for _, active := range []bool{false, true} {
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		workDir, registry := newRunTestWorkspace(t)
+		if active {
+			writeWorkspaceTopology(t, workDir, "project-topology", schemas.PipelineNode{Name: "code_writer", Type: "code_writer"})
+		}
+		plan := designPlan([]schemas.Task{
+			designTask("t1", "First", nil),
+			designTask("t2", "Second", []string{"t1"}),
+		})
+		var notices []string
+		_, err := RunDesignPlan(context.Background(), plan, designHappyProvider{workDir: workDir}, agent.Options{
+			Cwd:              workDir,
+			Registry:         registry,
+			PermissionMode:   agent.PermissionModeAuto,
+			SessionID:        "plan-topology",
+			MaxTurns:         1,
+			FileTracker:      tools.NewFileTracker(),
+			TrustedWorkspace: true,
+			OnNotice:         func(text string) { notices = append(notices, text) },
+		}, nil, nil)
+		if err != nil {
+			t.Fatalf("active=%v: RunDesignPlan: %v", active, err)
+		}
+		count := 0
+		for _, notice := range notices {
+			if notice == want {
+				count++
+			}
+		}
+		if wantCount := map[bool]int{false: 0, true: 1}[active]; count != wantCount {
+			t.Fatalf("active=%v: the notice appears %d times, want %d; notices=%q", active, count, wantCount, notices)
+		}
 	}
 }

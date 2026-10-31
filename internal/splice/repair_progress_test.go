@@ -84,8 +84,8 @@ func TestAttemptLocalRepairNoProgressStopsLoop(t *testing.T) {
 
 	repaired, interaction, err := attemptLocalRepair(
 		context.Background(), "run-noprogress", 1, plan, registry, nil,
-		options, t.TempDir(), nil, nil, nil,
-		time.Now().Add(time.Minute), &records, &outputs,
+		options, t.TempDir(), nil, nil, nil, nil,
+		time.Now().Add(time.Minute), NewStageExecutionBudget(0), &records, &outputs,
 		&priorSummaries, &priorChangedFiles, initial,
 	)
 	if err != nil {
@@ -147,8 +147,8 @@ func TestAttemptLocalRepairBudgetCannotBeExceeded(t *testing.T) {
 
 	_, interaction, err := attemptLocalRepair(
 		context.Background(), "run-budget", 1, plan, registry, nil,
-		PipelineRunConfig{}, t.TempDir(), nil, nil, nil,
-		time.Now().Add(time.Minute), &records, &outputs,
+		PipelineRunConfig{}, t.TempDir(), nil, nil, nil, nil,
+		time.Now().Add(time.Minute), NewStageExecutionBudget(0), &records, &outputs,
 		&priorSummaries, &priorChangedFiles, initial,
 	)
 	if err != nil {
@@ -313,8 +313,8 @@ func TestAttemptLocalRepairSecondAttemptReceivesResolverEvidence(t *testing.T) {
 
 	_, _, err := attemptLocalRepair(
 		context.Background(), "run-resolver", 1, plan, registry, nil,
-		PipelineRunConfig{}, workspace, nil, nil, nil,
-		time.Now().Add(time.Minute), &records, &outputs,
+		PipelineRunConfig{}, workspace, nil, nil, nil, nil,
+		time.Now().Add(time.Minute), NewStageExecutionBudget(0), &records, &outputs,
 		&priorSummaries, &priorChangedFiles, initial,
 	)
 	if err != nil {
@@ -338,5 +338,116 @@ func TestAttemptLocalRepairSecondAttemptReceivesResolverEvidence(t *testing.T) {
 		if !strings.Contains(*rev, want) {
 			t.Fatalf("revision context missing %q:\n%s", want, *rev)
 		}
+	}
+}
+
+func TestAttemptLocalRepairClassifierPreservesOriginalPath(t *testing.T) {
+	for _, scenario := range []string{"nil", "off", "shadow rules step_back", "active rules fallback", "projection failure", "active classifier step_back"} {
+		t.Run(scenario, func(t *testing.T) {
+			eval := &trajectoryEvaluator{label: "step_back"}
+			var advisor *DecisionAdvisor
+			if scenario != "nil" {
+				advisor = classifierAdvisor(t, eval)
+			}
+			if scenario == "off" {
+				advisor.config.Mode = AdvisorModeOff
+			}
+			if scenario == "shadow rules step_back" {
+				advisor.config.Mode = AdvisorModeShadow
+			}
+			if scenario == "active rules fallback" {
+				advisor.evaluator = nil
+			}
+			if scenario == "active classifier step_back" {
+				advisor.config.QuestionPack = QuestionPackTrajActionV2
+			}
+			options := PipelineRunConfig{Advisor: advisor}
+			options.ClassifierPolicy = newHostTrajectoryPolicy(advisor, options.TrajectoryConfig, false)
+			if options.ClassifierPolicy != nil {
+				// Equal scores, distinct hashes, and changed files select step_back.
+				options.ClassifierPolicy.history = []schemas.IterationState{
+					{TestsFailing: 1, StateHash: "a", FilesChanged: []string{"a.go"}},
+					{TestsFailing: 1, StateHash: "b", FilesChanged: []string{"b.go"}},
+				}
+				options.ClassifierPolicy.maxIterations = defaultMaxIterations
+				options.ClassifierPolicy.tokenBudget = 10000
+			}
+			var progress strings.Builder
+			options.OnReasoning = func(s string) { progress.WriteString(s) }
+			writer := &approachWriter{}
+			runner := &freshFailureRunner{}
+			registry := stageRegistry{"code_writer": writer, "test_runner": runner}
+			plan := schemas.ExecutionPlan{RequestIntent: "Fix the failed test.", Stages: []schemas.ExecutionStage{{Name: "code_writer"}, {Name: "test_runner"}}}
+			var outputs []schemas.HarnessStageOutput
+			if scenario == "projection failure" || scenario == "nil" || scenario == "off" {
+				outputs = append(outputs, schemas.HarnessStageOutput{
+					Data: map[string]any{"security_auditor_output": "invalid typed payload"},
+				})
+			}
+			var records []schemas.StageRecord
+			priorSummaries := map[string]string{}
+			priorChangedFiles := map[string][]string{}
+			workDir := t.TempDir()
+			if scenario == "projection failure" {
+				options.passEvidence = newPassEvidenceTracker(context.Background(), workDir, schemas.ChangeSummary{})
+			}
+			trace := newRunTraceAccumulator(nil, "repair-run", "session", "/project", plan, "off", nil)
+			repaired, interaction, err := attemptLocalRepair(
+				context.Background(), "repair-run", 3, plan, registry, nil,
+				options, workDir, nil, nil, trace, nil,
+				time.Now().Add(time.Minute), NewStageExecutionBudget(0), &records, &outputs,
+				&priorSummaries, &priorChangedFiles, runner.current(),
+			)
+			wantRepairs := maxLocalRepairs
+			if scenario == "active classifier step_back" {
+				// The first failure is new. The next numeric test name has the same signature.
+				wantRepairs = 2
+			}
+			if err != nil || repaired || interaction == nil || interaction.Repairs != wantRepairs || writer.calls != wantRepairs {
+				t.Fatalf("repaired=%v interaction=%+v writer calls=%d error=%v progress=%s", repaired, interaction, writer.calls, err, progress.String())
+			}
+			if scenario == "shadow rules step_back" || scenario == "active rules fallback" {
+				if !strings.Contains(progress.String(), "action=step_back") {
+					t.Fatalf("fixture did not select the rules step_back: %+v", options.ClassifierPolicy.lastDecision)
+				}
+			}
+			if scenario == "active classifier step_back" {
+				decisions := advisor.Records()
+				if len(decisions) != 2 || !decisions[0].Snapshot.Trajectory.Boundary.FailureHistory[0].IsNew ||
+					decisions[1].Snapshot.Trajectory.Boundary.FailureHistory[1].IsNew {
+					t.Fatalf("repair failure history: %+v", decisions)
+				}
+			}
+			if scenario == "projection failure" {
+				if eval.calls != 0 || len(advisor.Records()) != wantRepairs {
+					t.Fatalf("calls=%d records=%+v", eval.calls, advisor.Records())
+				}
+				for i, record := range advisor.Records() {
+					if len(record.EvidenceShadow) != 1 || record.EvidenceShadow[0].Builder != "pass" {
+						t.Fatalf("repair projection failure record %d has evidence shadow %+v", i, record.EvidenceShadow)
+					}
+				}
+				for repair := 1; repair <= wantRepairs; repair++ {
+					decisions := trace.stages[stageKeyFor("trajectory", 3, repair)].JevDecisions
+					if len(decisions) != 1 || !strings.Contains(decisions[0].Reason, "security_auditor_output") {
+						t.Fatalf("repair %d lost its projection cause: %+v", repair, decisions)
+					}
+				}
+			}
+			if scenario == "nil" || scenario == "off" {
+				var decisions []schemas.DecisionDispositionRecord
+				if advisor != nil {
+					decisions = advisor.Records()
+				}
+				if options.ClassifierPolicy != nil || eval.calls != 0 || len(decisions) != 0 || strings.Contains(progress.String(), "[trajectory]") {
+					t.Fatalf("off mode changed the repair path: progress=%s records=%+v", progress.String(), decisions)
+				}
+				for key, meta := range trace.stages {
+					if len(meta.JevDecisions) != 0 {
+						t.Fatalf("off mode recorded decisions at %+v: %+v", key, meta.JevDecisions)
+					}
+				}
+			}
+		})
 	}
 }

@@ -185,19 +185,48 @@ func BenchmarkDiffCaptureParse(b *testing.B) {
 // BenchmarkKeypressToRenderedResponse measures the keypress → rendered
 // response path the directive calls out (p95 ≤ 16ms target): Update with a
 // navigation keypress + a full View, on a busy mid-run model with 1,000
-// settled transcript rows and a live pipeline.
+// settled transcript rows and a live pipeline. The model carries between
+// iterations like the real event loop does; discarding it would make every
+// iteration pay a cold settled-cache build no user ever sees.
 func BenchmarkKeypressToRenderedResponse(b *testing.B) {
 	m := benchTranscriptModel(1_000)
 	m.pending = true
 	m.pipeline.applyState(benchNodeState(10))
-	key := tea.KeyPressMsg(tea.Key{Code: tea.KeyDown})
+	keys := []tea.KeyPressMsg{tea.KeyPressMsg(tea.Key{Code: tea.KeyDown}), tea.KeyPressMsg(tea.Key{Code: tea.KeyUp})}
+	warm, _ := m.Update(keys[0])
+	m = warm.(model)
 	b.ReportAllocs()
+	i := 0
 	for b.Loop() {
-		updated, _ := m.Update(key)
-		next := updated.(model)
-		out := renderContent(next.View())
+		updated, _ := m.Update(keys[i%2])
+		i++
+		m = updated.(model)
+		out := renderContent(m.View())
 		if len(out) == 0 {
 			b.Fatal("empty view")
 		}
+	}
+}
+
+// BenchmarkSettleNewTurnLongSession measures the frame where a new turn
+// settles on top of a long history: the cost must track the turn, not the
+// session length.
+func BenchmarkSettleNewTurnLongSession(b *testing.B) {
+	for _, n := range []int{1_000, 10_000} {
+		b.Run(fmt.Sprintf("turns_%d", n), func(b *testing.B) {
+			base := benchTranscriptModel(n)
+			width := base.chatColumnWidth()
+			b.ReportAllocs()
+			for b.Loop() {
+				m := base
+				m.transcript = append(base.transcript[:len(base.transcript):len(base.transcript)],
+					transcriptRow{kind: rowUser, text: "one more question"},
+					transcriptRow{kind: rowAssistant, text: "one more answer"})
+				m.flushed = len(m.transcript)
+				if !m.extendAltScreenSettledItems(width) {
+					b.Fatal("settle fell back to a full rebuild")
+				}
+			}
+		})
 	}
 }

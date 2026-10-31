@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Taf0711/splice/internal/projectfile"
 	"github.com/Taf0711/splice/internal/tools"
 )
 
@@ -455,4 +456,29 @@ func contains(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestLoadProjectDirRefusesOversizedManifest(t *testing.T) {
+	ws := t.TempDir()
+	projectDir := filepath.Join(ws, ".splice", "specialists")
+	writeManifest(t, filepath.Join(projectDir, "valid.md"), `---
+name: valid
+description: Valid specialist
+---
+Prompt.`)
+	writeManifest(t, filepath.Join(projectDir, "huge.md"), "---\nname: huge\ndescription: "+strings.Repeat("x", projectfile.MaxBytes)+"\n---\nPrompt.")
+
+	result, err := Load(LoadOptions{Paths: Paths{ProjectDir: projectDir, UserDir: filepath.Join(ws, "none")}})
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if _, ok := Find(result, "valid"); !ok {
+		t.Fatalf("valid project manifest should load: %#v", result.Warnings)
+	}
+	if _, ok := Find(result, "huge"); ok {
+		t.Fatalf("oversized project manifest must not load")
+	}
+	if !strings.Contains(strings.Join(result.Warnings, "\n"), "exceeds the size limit") {
+		t.Fatalf("want a size warning, got %#v", result.Warnings)
+	}
 }

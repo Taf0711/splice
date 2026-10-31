@@ -1,4 +1,4 @@
-# EVAL-V0 F — Product Journeys (Golden User Suite)
+# EVAL-V0 F: Product Journeys (Golden User Suite)
 
 Deliverable 41.F: five golden user journeys covering the handoff section
 28 minimum: fresh setup, TUI task, headless task, session reopen, and
@@ -19,14 +19,14 @@ bubblewrap CI path (PR #24) is exercised per-release.
 
 ## The five journeys
 
-### J1 — fresh-install-and-configure
+### J1: fresh-install-and-configure
 Script: `j1_fresh_setup.sh`
 - Fresh XDG_STATE_HOME + empty config; runs `splice doctor`.
 - EXPECT: doctor runs to completion (exit 0), reports the runtime,
   config file paths, and provider state WITHOUT leaking any key material
   to stdout; `splice config` exits 0 and its JSON output parses.
 
-### J2 — headless-task-exec
+### J2: headless-task-exec
 Script: `j2_headless_task.sh`
 - In the pristine fixture workspace: `splice exec --output-format
   stream-json "add a healthz handler to the service"` (or equivalent
@@ -36,7 +36,7 @@ Script: `j2_headless_task.sh`
   hidden verifier (taskset check command) passes against the resulting
   workspace.
 
-### J3 — tui-launch-and-task
+### J3: tui-launch-and-task
 Script: `j3_tui_launch.sh` (vhs tape driving the real TUI)
 - Boots the TUI in a pty (120x40), types a prompt, waits for the pipeline
   strip, quits cleanly.
@@ -44,7 +44,7 @@ Script: `j3_tui_launch.sh` (vhs tape driving the real TUI)
   the pipeline strip (ASCII tier); the process exits 0; no panic text
   appears in the captured output.
 
-### J4 — session-reopen
+### J4: session-reopen
 Script: `j4_session_reopen.sh`
 - J2's session id is captured from the stream-json output; a second
   `splice exec --resume <id>` continues the conversation with a follow-up
@@ -53,7 +53,7 @@ Script: `j4_session_reopen.sh`
   context (the earlier task's final answer is referenced or the session
   lineage shows two entries via `splice sessions`).
 
-### J5 — cognition-reuse
+### J5: cognition-reuse
 Script: `j5_cognition_reuse.sh`
 - Runs the PRECURSOR task from a cognition family (memory ON), captures
   the sidecar observation; then runs the TARGET task twice: once with the
@@ -69,9 +69,11 @@ Script: `j5_cognition_reuse.sh`
 - Allocates a fresh temp state root per journey.
 - Runs the journey script; captures stdout/stderr/exit code.
 - Validates the expectation file (jq-checked JSON assertions).
-- Writes `journey-results.json` (one row per journey: status, duration,
-  failure classification per section 33: setup failure vs agent failure
-  vs infrastructure failure).
+- Writes `journey-results.json` to `~/.cache/splice-journeys/` (or
+  `SPLICE_JOURNEY_ROOT`), not into the repository. It has one row per
+  journey: status, duration, and failure classification per section 33
+  (setup failure, agent failure, or infrastructure failure).
+- A skipped journey (`infrastructure_skipped`) does not fail the result.
 
 ## What is intentionally NOT in V0-F
 
@@ -99,3 +101,66 @@ Script: `j5_cognition_reuse.sh`
   demo-repair-loop.tape conventions. The full pipeline-strip assertion
   needs a live provider run and belongs to the per-release live smoke.
 - J5 needs the memory sidecar binary built (`splice-memd`).
+
+## Layer 2 live journeys (J6 to J10)
+
+These journeys run the real provider. They run on release cadence, not in CI.
+Shared helpers: `live_common.sh`. Stream and screen checks: `live_check.py`.
+
+Rules for every live journey:
+
+- Provider: the ChatGPT sign-in profile (`chatgpt`) only. The script copies
+  `config.json` and sets `activeProvider` to `chatgpt` in the copy. OpenRouter
+  is not used.
+- Do not set `SPLICE_OAUTH_STORAGE` or `SPLICE_CRED_STORAGE`. The token is in
+  the macOS keyring.
+- The real `~/.config/splice` files are read only. The script hashes
+  `config.json`, `trust.json`, and `stage-models.json` before and after. A
+  change fails the journey (`GUARD FAIL`).
+- The state root is a fresh directory under `SPLICE_JOURNEY_ROOT`
+  (default `~/.cache/splice-journeys`), not `/tmp`.
+- `SPLICE_JOURNEY_DRYRUN=1` stops after setup, before any model request.
+
+### J6: custom-topology-exec
+Script: `j6_custom_topology.sh`
+- `splice exec -o stream-json --pipeline` with the example write-vet-test
+  topology, on a copy of the taskset fixture. The task has no classifier keyword.
+- EXPECT: the stream parses; each always-run node has one terminal stage
+  event; the vet node passed; splice's verified claim equals the external
+  verifier (build, vet, grep for the change).
+
+### J7: failing-command-node
+Script: `j7_failing_command.sh`
+- As J6, but the vet node becomes `lint` and runs `sh -c "exit 3"`.
+- EXPECT: the lint node reports a failed-class status; splice does not claim
+  verified (`FALSE SUCCESS` otherwise).
+
+### J8: tui-topology
+Script: `j8_tui_topology.sh` (tmux, 120x40)
+- Trusts the fixture, runs `/pipeline use write-vet-test`, submits a task,
+  opens the Ctrl+G pane and a node drawer during the run, and waits for the
+  receipt (10 minutes).
+- EXPECT: the receipt kind matches the external verifier; the statuses change
+  across captures; the drawer shows a model line; a node reads "not run"; no
+  panic text.
+
+### J9: tui-hostile-repo
+Script: `j9_tui_hostile.sh` (tmux, 120x40, no model request)
+- The project config adds provider `evil` and makes it active. `AGENTS.md`
+  links to a canary file outside the repo. A fake `gopls` on PATH writes a marker.
+- EXPECT: the trust card names the project config; after decline, the footer
+  shows the user provider; no `gopls` marker; `/help` answers within 2 s;
+  after `/trust`, the message says the project config loads on the next launch.
+
+### J10: design-invalid-routes
+Script: `j10_design_invalid_routes.sh` (tmux, 120x40)
+- The copied `stage-models.json` is malformed. The script sends one short
+  design message (one request), then `/crystallize`.
+- EXPECT: the failure names "stage routing config invalid" and the file.
+- Not scripted: the drawer-across-a-tier-change check.
+
+### Known limits (Layer 2)
+- Stream-json does not carry a separate verified field. The verified claim is
+  read from the completion text ("Not verified") and the run-end status.
+- J9 checks the footer for the provider name `chatgpt`. Adjust the check if
+  the footer shows the model name instead.

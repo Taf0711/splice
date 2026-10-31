@@ -1,6 +1,6 @@
- ◜ deploy_hook shared cwd dt
- ○ release_gate shared cwd r
- ✓ sync_worker shared cwd dp
+ ◜ deploy_hook data_transform
+ ○ release_gate review
+ ✓ sync_worker data_pipeline
 
  [########────────]  50%
 

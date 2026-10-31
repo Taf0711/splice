@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -118,7 +119,7 @@ func TestFormatCommandHelpLinesGroupsCommandsByStableOrder(t *testing.T) {
 		"model:",
 		"  /provider [status]",
 		"  /model [list|id]",
-		"  /effort [list|low|medium|high|auto]",
+		"  /effort [list|auto|<level>]",
 		"session:",
 		"  /plan",
 		"runtime:",
@@ -1077,6 +1078,7 @@ func TestCommandSelectionRequiresInputFromUsage(t *testing.T) {
 		{name: "/search", want: true},
 		{name: "/find", want: true},
 		{name: "/image", want: true},
+		{name: "/effort", want: false},
 		{name: "/rewind", want: false},
 		{name: "/model", want: false},
 		{name: "/help", want: false},
@@ -1115,5 +1117,57 @@ func TestImageCommandIsDiscoverable(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("/image should be listed so it appears in help and autocomplete")
+	}
+}
+
+// TestCommandsDocMatchesRegistry fails when the TUI slash command section of
+// docs/COMMANDS.md drifts from commandDefinitions. It checks both directions:
+// every registered name and alias is listed, and every listed name is
+// registered.
+func TestCommandsDocMatchesRegistry(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "docs", "COMMANDS.md"))
+	if err != nil {
+		t.Fatalf("read COMMANDS.md: %v", err)
+	}
+	const heading = "## TUI slash commands"
+	_, section, found := strings.Cut(string(data), heading+"\n")
+	if !found {
+		t.Fatalf("COMMANDS.md has no %q section", heading)
+	}
+	if end := strings.Index(section, "\n## "); end >= 0 {
+		section = section[:end]
+	}
+
+	listed := map[string]bool{}
+	for _, line := range strings.Split(section, "\n") {
+		if !strings.HasPrefix(line, "| `/") {
+			continue
+		}
+		cells := strings.Split(line, "|")
+		if len(cells) < 3 {
+			t.Fatalf("COMMANDS.md command row has too few cells: %q", line)
+		}
+		listed[strings.Trim(strings.TrimSpace(cells[1]), "`")] = true
+		if alias := strings.Trim(strings.TrimSpace(cells[2]), "`"); alias != "none" {
+			listed[alias] = true
+		}
+	}
+
+	registered := map[string]bool{}
+	for _, command := range commandDefinitions {
+		registered[command.name] = true
+		for _, alias := range command.aliases {
+			registered[alias] = true
+		}
+	}
+	for name := range registered {
+		if !listed[name] {
+			t.Errorf("COMMANDS.md TUI section does not list %q", name)
+		}
+	}
+	for name := range listed {
+		if !registered[name] {
+			t.Errorf("COMMANDS.md TUI section lists %q, which is not a registered command", name)
+		}
 	}
 }

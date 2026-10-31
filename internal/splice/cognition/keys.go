@@ -46,15 +46,27 @@ var sourceExtensions = map[string]bool{
 	"md": true, "json": true, "yaml": true, "yml": true, "toml": true,
 }
 
+// The extension alternation is shared by the multi-segment and bare-filename
+// path miners so the two can never drift. It is ordered longest-first so a
+// longer real extension wins over its shorter prefix (.json over .js,
+// .cpp/.cc over .c). The original shortest-first order produced phantom keys
+// like file:x/y.js from x/y.json (found by the E1b eval suite).
+const sourceExtAlternation = `json|yaml|java|toml|cpp|hpp|yml|go|py|ts|js|rs|cc|c|h|sh|md`
+
 // repoPathToken matches a repo-relative path token: identifier-like segments
 // joined by '/', ending in a known source extension. Segments start with an
 // alphanumeric or underscore, so './', '../', and hidden-dot segments are
 // excluded by construction. At least one '/' is required.
-// Extension alternation is ordered longest-first so a longer real extension
-// wins over its shorter prefix (.json over .js, .cpp/.cc over .c). The
-// original shortest-first order produced phantom keys like file:x/y.js from
-// x/y.json (found by the E1b eval suite).
-var repoPathToken = regexp.MustCompile(`[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)+\.(?:json|yaml|java|toml|cpp|hpp|yml|go|py|ts|js|rs|cc|c|h|sh|md)`)
+var repoPathToken = regexp.MustCompile(`[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)+\.(?:` + sourceExtAlternation + `)`)
+
+// barePathToken matches a single-segment source filename (main.go, admin.go)
+// with the same extension alternation. Task texts routinely name root-level
+// files without a directory (the fam-05 pairing found the delivery chain
+// deriving zero keys from "in main.go" while the capture was anchored on
+// exactly that file). A bare match preceded by '/' is the last segment of a
+// multi-segment path; validPathContext rejects it, so the two miners never
+// double-derive one file.
+var barePathToken = regexp.MustCompile(`[A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:` + sourceExtAlternation + `)`)
 
 // symbolToken matches a repo-relative path immediately followed by #Symbol,
 // e.g. internal/auth/session.go#ResetPassword.
@@ -74,14 +86,20 @@ func validPathContext(text string, start int) bool {
 		return true
 	}
 	switch text[start-1] {
-	case ':', '@', '/':
+	case ':', '@', '/', '\\':
+		// '\\' excludes the last segment of a Windows native path
+		// (C:\Users\dev\session.go): a backslash-preceded token is part
+		// of a host path, never a repo-relative filename (found by the
+		// keys eval suite when bare filenames were added).
 		return false
 	}
 	return true
 }
 
-// findRepoRelativePaths mines strict repo-relative path tokens from prose.
-// Each match must pass the surrounding-context filter; nothing fuzzy.
+// findRepoRelativePaths mines strict repo-relative path tokens from prose:
+// multi-segment paths (internal/auth/session.go) and bare single-segment
+// source filenames (main.go) when they name a root-level file. Each match
+// must pass the surrounding-context filter; nothing fuzzy.
 func findRepoRelativePaths(text string) []string {
 	indexes := repoPathToken.FindAllStringIndex(text, -1)
 	paths := make([]string, 0, len(indexes))
@@ -100,6 +118,12 @@ func findRepoRelativePaths(text string) []string {
 			continue
 		}
 		paths = append(paths, path)
+	}
+	for _, loc := range barePathToken.FindAllStringIndex(text, -1) {
+		if !validPathContext(text, loc[0]) {
+			continue
+		}
+		paths = append(paths, text[loc[0]:loc[1]])
 	}
 	return paths
 }

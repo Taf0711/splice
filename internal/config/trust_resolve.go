@@ -1,5 +1,12 @@
 package config
 
+import (
+	"errors"
+	"io/fs"
+	"os"
+	"strings"
+)
+
 // ResolveTrust computes the effective trust decision for a workspace from CLI
 // flags, environment, the persistent store, and the user's default setting.
 //
@@ -43,4 +50,46 @@ func ResolveTrust(
 		return TrustDeclined, false
 	}
 	return TrustUndecided, false
+}
+
+// ProjectTrustSetting returns defaultProjectTrust from the user config at
+// userConfigPath. It never reads a project config, so a project cannot set
+// the value that decides its own trust. An empty path or a missing file gives
+// "ask".
+func ProjectTrustSetting(userConfigPath string) (string, error) {
+	if userConfigPath == "" {
+		return "ask", nil
+	}
+	userConfig, err := loadConfigFile(userConfigPath, "")
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "ask", nil
+		}
+		return "ask", err
+	}
+	if trust := strings.TrimSpace(userConfig.DefaultProjectTrust); trust != "" {
+		return trust, nil
+	}
+	return "ask", nil
+}
+
+// ResolveProjectTrust reports whether the project layer of workspaceRoot may
+// load. It applies ResolveTrust to the CLI flags, SPLICE_TRUST_WORKSPACE, the
+// trust store, and the user config setting (see ProjectTrustSetting). It does
+// not persist a decision. On an error the result is false.
+func ResolveProjectTrust(workspaceRoot, userConfigPath string, trustFlag, noTrustFlag bool) (bool, error) {
+	setting, err := ProjectTrustSetting(userConfigPath)
+	if err != nil {
+		return false, err
+	}
+	storePath, err := DefaultTrustStorePath()
+	if err != nil {
+		return false, err
+	}
+	store, err := LoadTrustStore(storePath)
+	if err != nil {
+		return false, err
+	}
+	decision, _ := ResolveTrust(workspaceRoot, store, setting, trustFlag, noTrustFlag, os.Getenv("SPLICE_TRUST_WORKSPACE"))
+	return decision == TrustTrusted, nil
 }

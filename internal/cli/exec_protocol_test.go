@@ -150,7 +150,7 @@ func TestRunExecListsMCPToolsWithoutProviderConstruction(t *testing.T) {
 			providerBuilt = true
 			return nil, errors.New("provider should not be constructed for --list-tools")
 		},
-		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+		resolveMCPConfigTrust: func(workspaceRoot string, _ bool) (config.MCPConfig, error) {
 			if workspaceRoot != cwd {
 				t.Fatalf("workspaceRoot = %q, want %q", workspaceRoot, cwd)
 			}
@@ -193,7 +193,7 @@ func TestRunExecLogsMCPRuntimeCloseError(t *testing.T) {
 		getwd: func() (string, error) {
 			return cwd, nil
 		},
-		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+		resolveMCPConfigTrust: func(workspaceRoot string, _ bool) (config.MCPConfig, error) {
 			if workspaceRoot != cwd {
 				t.Fatalf("workspaceRoot = %q, want %q", workspaceRoot, cwd)
 			}
@@ -949,4 +949,59 @@ func findSessionEvent(t *testing.T, events []sessions.Event, eventType sessions.
 	}
 	t.Fatalf("session event %q not found in %#v", eventType, events)
 	return sessions.Event{}
+}
+
+// A text-only repo has no language check. The run completes (exit 0), is not
+// verified, and says so in the final JSON result. It must not fail with the
+// required-verification-incomplete exit (4).
+func TestRunExecTextOnlyRepoCompletesNotVerified(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	cwd := t.TempDir()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"exec", "--output-format", "stream-json", "write hello"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return newExecStageAwareProvider(execStageProviderOptions{
+				Files:     []schemas.FileChange{{Path: "hello.txt", Content: "hi\n", ChangeType: "create"}},
+				TestFiles: []schemas.FileChange{{Path: "hello-check.txt", Content: "ok\n", ChangeType: "create"}},
+			}), nil
+		},
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("exit code = %d, want %d (completed, not verified); stderr=%s", exitCode, exitSuccess, stderr.String())
+	}
+
+	var final string
+	for _, event := range decodeJSONLines(t, stdout.String()) {
+		if event["type"] == "final" {
+			final, _ = event["text"].(string)
+		}
+	}
+	var result schemas.PipelineResult
+	if err := json.Unmarshal([]byte(final), &result); err != nil {
+		t.Fatalf("final result is not a pipeline result: %v\n%s", err, final)
+	}
+	if result.Status != "completed" {
+		t.Fatalf("status = %q, want completed", result.Status)
+	}
+	if result.Verified {
+		t.Fatalf("verified = true for a text-only repo with no check; result = %s", final)
+	}
+	if !strings.Contains(result.UnverifiedReason, "static_analyzer") {
+		t.Fatalf("unverified_reason = %q, want it to name the skipped static analyzer", result.UnverifiedReason)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal([]byte(final), &fields); err != nil {
+		t.Fatalf("decode final fields: %v", err)
+	}
+	if v, ok := fields["verified"].(bool); !ok || v {
+		t.Fatalf("final JSON verified = %v (present %v), want an explicit false", fields["verified"], ok)
+	}
 }

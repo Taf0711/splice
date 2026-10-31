@@ -1,0 +1,23 @@
+<svg class="graph" data-layout="3681069e8d3f40e7" width="440" height="364" viewBox="0 0 440 364" role="group" aria-label="Pipeline graph">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 1 L9 5 L0 9 z"/></marker></defs>
+<g class="edges">
+<path class="edge flowed" data-from="code_writer" data-to="lint" d="M220 96 C220 118 110 118 110 140" marker-end="url(#arrow)"/>
+<path class="edge flowed" data-from="code_writer" data-to="static_analyzer" d="M220 96 C220 118 330 118 330 140" marker-end="url(#arrow)"/>
+<path class="edge" data-from="lint" data-to="test_runner" d="M110 224 C110 246 220 246 220 268" marker-end="url(#arrow)"/>
+<path class="edge" data-from="static_analyzer" data-to="test_runner" d="M330 224 C330 246 220 246 220 268" marker-end="url(#arrow)"/>
+</g>
+<g class="nodes">
+<g class="node s-complete" data-name="code_writer" data-iteration="0" transform="translate(122 12)" tabindex="-1" role="button" aria-label="code_writer, [&#43;] passed"><title>code_writer
+write
+[&#43;] passed</title><rect class="ring" x="-5" y="-5" width="206" height="94" rx="12"/><rect class="box" width="196" height="84" rx="8"/><text class="n-name" x="14" y="24">code_writer</text><text class="n-sub" x="14" y="41">write</text><text class="n-status" x="14" y="60">[&#43;] passed</text><text class="n-meta" x="14" y="76">13.8K tok · $0.0123</text></g>
+<g class="node s-failed" data-name="lint" data-iteration="0" transform="translate(12 140)" tabindex="-1" role="button" aria-label="lint, [!] failed"><title>lint
+command · model-free
+[!] failed</title><rect class="ring" x="-5" y="-5" width="206" height="94" rx="12"/><rect class="box" width="196" height="84" rx="8"/><text class="n-name" x="14" y="24">lint</text><text class="n-sub" x="14" y="41">command · model-free</text><text class="n-status" x="14" y="60">[!] failed</text><text class="n-meta" x="14" y="76"></text></g>
+<g class="node s-pending" data-name="static_analyzer" data-iteration="0" transform="translate(232 140)" tabindex="-1" role="button" aria-label="static_analyzer, [ ] not started"><title>static_analyzer
+analyze · model-free
+[ ] not started</title><rect class="ring" x="-5" y="-5" width="206" height="94" rx="12"/><rect class="box" width="196" height="84" rx="8"/><text class="n-name" x="14" y="24">static_analyzer</text><text class="n-sub" x="14" y="41">analyze · model-free</text><text class="n-status" x="14" y="60">[ ] not started</text><text class="n-meta" x="14" y="76"></text></g>
+<g class="node s-pending" data-name="test_runner" data-iteration="0" transform="translate(122 268)" tabindex="-1" role="button" aria-label="test_runner, [ ] not started"><title>test_runner
+test · model-free
+[ ] not started</title><rect class="ring" x="-5" y="-5" width="206" height="94" rx="12"/><rect class="box" width="196" height="84" rx="8"/><text class="n-name" x="14" y="24">test_runner</text><text class="n-sub" x="14" y="41">test · model-free</text><text class="n-status" x="14" y="60">[ ] not started</text><text class="n-meta" x="14" y="76"></text></g>
+</g>
+</svg>

@@ -170,6 +170,10 @@ func TestProviderWizardModelsAreProviderScoped(t *testing.T) {
 }
 
 func TestProviderWizardAdvancesProviderAPIKeyAndModelSteps(t *testing.T) {
+	// A key in the host environment makes the credential step ready, and the
+	// footer then shows the right-arrow hint. Clear it so the test checks the
+	// no-key state.
+	t.Setenv("ANTHROPIC_API_KEY", "")
 	m := newModel(context.Background(), Options{})
 	m = openProviderWizardForTest(t, m)
 

@@ -137,6 +137,13 @@ func runSandboxSetup(args []string, stdout io.Writer, stderr io.Writer, deps app
 	}
 	policy := applyConfiguredSandboxPolicy(zeroSandbox.DefaultPolicy(), resolved.Sandbox)
 	backend := deps.selectSandboxBackend(zeroSandbox.BackendOptions{})
+	if hint := zeroSandbox.MissingLinuxBackendHint(backend); hint != "" {
+		message := "Linux native sandbox backend is not available"
+		if strings.TrimSpace(backend.Message) != "" {
+			message += ": " + backend.Message
+		}
+		return writeAppError(stderr, message+". Pipeline stages and command nodes cannot run; "+hint, exitProvider)
+	}
 	if backend.Platform != "windows" {
 		message := "No native sandbox setup is required for " + displayPlatform(backend.Platform)
 		return writeSandboxSetupResult(stdout, options.json, sandboxSetupResult{

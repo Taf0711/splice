@@ -56,6 +56,15 @@ const (
 	commandLoop
 	commandStages
 	commandLayout
+	commandHooks
+	commandPlugins
+	commandSpecialists
+	commandUsage
+	commandChanges
+	commandVerify
+	commandFlags
+	commandPipeline
+	commandWeb
 	commandUnknown
 )
 
@@ -149,6 +158,20 @@ var commandDefinitions = []commandDefinition{
 		kind:        commandTools,
 	},
 	{
+		name:        "/flags",
+		usage:       "/flags",
+		group:       commandGroupRuntime,
+		description: "Show feature flags, their values, and where each value comes from.",
+		kind:        commandFlags,
+	},
+	{
+		name:        "/pipeline",
+		usage:       "/pipeline [use <name> | edit [--new] [name]]",
+		group:       commandGroupRuntime,
+		description: "Show the active pipeline graph, where it comes from, its warnings, and its command nodes. Use /pipeline use <name> to select a library pipeline. Use /pipeline edit [name] to edit a pipeline in the browser.",
+		kind:        commandPipeline,
+	},
+	{
 		name:        "/skills",
 		usage:       "/skills",
 		group:       commandGroupTools,
@@ -189,6 +212,13 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupMeta,
 		description: "Clear the visible transcript.",
 		kind:        commandClear,
+	},
+	{
+		name:        "/web",
+		usage:       "/web",
+		group:       commandGroupRuntime,
+		description: "Start the local browser surface and show its one-time link.",
+		kind:        commandWeb,
 	},
 	{
 		name:        "/new",
@@ -258,7 +288,7 @@ var commandDefinitions = []commandDefinition{
 	},
 	{
 		name:        "/memory",
-		usage:       "/memory [search <query> | recent]",
+		usage:       "/memory [search <query> | recent | forget <id> | prune]",
 		group:       commandGroupSession,
 		description: "Show memory sidecar stats, search observations, or list recent.",
 		kind:        commandMemory,
@@ -307,9 +337,9 @@ var commandDefinitions = []commandDefinition{
 	},
 	{
 		name:        "/effort",
-		usage:       "/effort [list|low|medium|high|auto]",
+		usage:       "/effort [list|auto|<level>]",
 		group:       commandGroupModel,
-		description: "Show or set reasoning effort for supported models.",
+		description: "Show or set reasoning effort; /effort list shows the levels this model supports.",
 		kind:        commandEffort,
 	},
 	{
@@ -413,6 +443,49 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupMeta,
 		description: "Exit Splice.",
 		kind:        commandExit,
+	},
+	{
+		name:        "/usage",
+		aliases:     []string{"/cost"},
+		usage:       "/usage [--days N] [--since YYYY-MM-DD] [--session ID]",
+		group:       commandGroupSession,
+		description: "Report token use and estimated cost from local session history.",
+		kind:        commandUsage,
+	},
+	{
+		name:        "/changes",
+		usage:       "/changes [--base REF]",
+		group:       commandGroupSession,
+		description: "Inspect local git changes (read-only; commit and push stay in the CLI).",
+		kind:        commandChanges,
+	},
+	{
+		name:        "/verify",
+		usage:       "/verify [--only IDS]",
+		group:       commandGroupRuntime,
+		description: "Detect and run this project's verification checks (trusted workspaces only).",
+		kind:        commandVerify,
+	},
+	{
+		name:        "/hooks",
+		usage:       "/hooks",
+		group:       commandGroupTools,
+		description: "List configured hooks.",
+		kind:        commandHooks,
+	},
+	{
+		name:        "/plugins",
+		usage:       "/plugins",
+		group:       commandGroupTools,
+		description: "List installed plugins.",
+		kind:        commandPlugins,
+	},
+	{
+		name:        "/specialists",
+		usage:       "/specialists",
+		group:       commandGroupTools,
+		description: "List built-in, user, and project specialists.",
+		kind:        commandSpecialists,
 	},
 }
 

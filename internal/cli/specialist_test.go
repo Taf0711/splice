@@ -320,13 +320,11 @@ func TestRunSpecialistArgCountErrors(t *testing.T) {
 func setSpecialistConfigRoot(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
-	switch runtime.GOOS {
-	case "windows":
+	// The darwin config dir honors XDG_CONFIG_HOME before HOME, so always set it.
+	t.Setenv("XDG_CONFIG_HOME", root)
+	t.Setenv("HOME", root)
+	if runtime.GOOS == "windows" {
 		t.Setenv("APPDATA", root)
-	case "darwin":
-		t.Setenv("HOME", root)
-	default:
-		t.Setenv("XDG_CONFIG_HOME", root)
 	}
 	configRoot, err := config.UserConfigDir()
 	if err != nil {
@@ -342,5 +340,67 @@ func writeSpecialistManifest(t *testing.T, path string, content string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("write manifest: %v", err)
+	}
+}
+
+// TestRunSpecialistListAndShowHonorWorkspaceTrust is the H-06 guard: in an
+// untrusted workspace, list and show use the builtin a project specialist
+// overrides, as exec does, and say how many project specialists are ignored.
+func TestRunSpecialistListAndShowHonorWorkspaceTrust(t *testing.T) {
+	cwd := t.TempDir()
+	setSpecialistConfigRoot(t)
+	projectDir := filepath.Join(cwd, ".splice", "specialists")
+	writeSpecialistManifest(t, filepath.Join(projectDir, "explorer.md"), "---\nname: explorer\ndescription: project override\n---\nProject explorer.")
+	writeSpecialistManifest(t, filepath.Join(projectDir, "helper.md"), "---\nname: helper\ndescription: project helper\n---\nProject helper.")
+	base := appDeps{getwd: func() (string, error) { return cwd, nil }}
+
+	run := func(deps appDeps, args ...string) (string, string) {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		if code := runWithDeps(args, &stdout, &stderr, deps); code != exitSuccess {
+			t.Fatalf("%v: exitCode = %d stderr=%s", args, code, stderr.String())
+		}
+		return stdout.String(), stderr.String()
+	}
+
+	untrusted := pinWorkspaceTrust(base, false)
+	out, errOut := run(untrusted, "specialist", "list")
+	if strings.Contains(out, "[project]") || strings.Contains(out, "project override") || strings.Contains(out, "helper") {
+		t.Fatalf("untrusted list shows project specialists:\n%s", out)
+	}
+	if !strings.Contains(out, "explorer [builtin]") {
+		t.Fatalf("untrusted list lacks the builtin explorer:\n%s", out)
+	}
+	if want := "2 project specialists are ignored until the workspace is trusted."; !strings.Contains(errOut, want) {
+		t.Fatalf("untrusted list stderr = %q, want %q", errOut, want)
+	}
+	out, _ = run(untrusted, "specialist", "show", "explorer")
+	if strings.Contains(out, "Project explorer.") {
+		t.Fatalf("untrusted show uses the project override:\n%s", out)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"specialist", "show", "helper"}, &stdout, &stderr, untrusted); code != exitUsage {
+		t.Fatalf("untrusted show of a project-only specialist: exitCode = %d, want usage", code)
+	}
+
+	trusted := pinWorkspaceTrust(base, true)
+	out, errOut = run(trusted, "specialist", "list")
+	if !strings.Contains(out, "explorer [project]") || !strings.Contains(out, "helper [project]") {
+		t.Fatalf("trusted list lacks the project specialists:\n%s", out)
+	}
+	if strings.Contains(errOut, "ignored") {
+		t.Fatalf("trusted list stderr = %q, want no ignored notice", errOut)
+	}
+}
+
+func TestIgnoredProjectSpecialistsLine(t *testing.T) {
+	for count, want := range map[int]string{
+		0: "",
+		1: "1 project specialist is ignored until the workspace is trusted. Run with --trust to load it.",
+		3: "3 project specialists are ignored until the workspace is trusted. Run with --trust to load them.",
+	} {
+		if got := ignoredProjectSpecialistsLine(count); got != want {
+			t.Fatalf("ignoredProjectSpecialistsLine(%d) = %q, want %q", count, got, want)
+		}
 	}
 }

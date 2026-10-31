@@ -1,0 +1,193 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f6f6f4;
+  --panel: #ffffff;
+  --ink: #1c1d1f;
+  --muted: #5d6167;
+  --faint: #8b9098;
+  --line: #d6d7da;
+  --accent: #2b59c3;
+  /* The status palette of the Splice design capsule, at accessible contrast
+     on the light background. The dark theme uses the capsule values. */
+  --running: #0b7285;
+  --complete: #4d7c0f;
+  --failed: #c92a2a;
+  --degraded: #8a6100;
+  --pending: #5f5f66;
+  --failed-tint: #fdf1f0;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #131416;
+    --panel: #1b1c1f;
+    --ink: #e7e7e9;
+    --muted: #a4a8ae;
+    --faint: #7b8088;
+    --line: #34373c;
+    --accent: #85a8ff;
+    --running: #5ccfe6;
+    --complete: #caff3f;
+    --failed: #ff5c57;
+    --degraded: #ffd866;
+    --pending: #6f6f76;
+    --failed-tint: #2a1a19;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  padding: 20px 16px 32px;
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+h1, h2 { margin: 0; font-weight: 600; }
+h1 { font-size: 19px; letter-spacing: -0.01em; }
+h2 { font-size: 15px; }
+kbd {
+  font: 12px var(--mono);
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--ink);
+}
+code { font: 13px var(--mono); overflow-wrap: anywhere; }
+.top { max-width: 1200px; margin: 0 auto 12px; }
+.title-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+.topology { font: 14px var(--mono); color: var(--muted); }
+.edit-link { margin-left: auto; font-size: 14px; color: var(--accent); }
+.facts { margin: 2px 0 0; color: var(--muted); font-size: 14px; overflow-wrap: anywhere; }
+.facts:empty { display: none; }
+.run { margin: 8px 0 0; font-weight: 500; overflow-wrap: anywhere; }
+.run[data-state="running"] { color: var(--running); }
+.run[data-state="completed"] { color: var(--complete); }
+.run[data-state="failed"] { color: var(--failed); }
+.run[data-state="static"], .run[data-state="cancelled"] { color: var(--muted); }
+.run[data-state="replaying"] { color: var(--accent); }
+.run[data-state="stopped"] { color: var(--degraded); }
+.notice {
+  max-width: 1200px;
+  margin: 0 auto 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--running);
+  border-radius: 8px;
+  background: var(--panel);
+}
+.notes { max-width: 1200px; margin: 0 auto 12px; padding: 0 0 0 18px; color: var(--degraded); font-size: 14px; overflow-wrap: anywhere; }
+.notes:empty { display: none; }
+.body { max-width: 1200px; margin: 0 auto; display: grid; gap: 16px; }
+@media (min-width: 900px) {
+  .body.drawer-open { grid-template-columns: minmax(0, 1fr) 340px; align-items: start; }
+}
+.canvas { min-width: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+.graph-scroll { overflow: auto; padding: 8px; max-height: 78vh; }
+.empty { margin: 0; padding: 24px 16px; color: var(--muted); overflow-wrap: anywhere; }
+svg.graph { display: block; margin: 0 auto; max-width: none; }
+.edge { fill: none; stroke: var(--line); stroke-width: 1.5; }
+.edge.flowed { stroke: var(--complete); stroke-opacity: 0.55; }
+.edge.pulse { stroke: var(--complete); stroke-opacity: 1; stroke-dasharray: 5 7; animation: flow 0.8s linear 1; }
+@keyframes flow { to { stroke-dashoffset: -24; } }
+marker path { fill: var(--faint); }
+.node { cursor: pointer; outline: none; }
+.node .box { fill: var(--panel); stroke: var(--line); stroke-width: 1; transition: stroke 160ms ease-out, fill 160ms ease-out; }
+/* Selection is a ring outside the box, so the box keeps its status stroke. */
+.node .ring { fill: none; stroke: transparent; stroke-width: 2; }
+.node.selected .ring { stroke: var(--accent); }
+.node:focus-visible .ring { stroke: var(--accent); stroke-width: 3; }
+.node text { fill: var(--ink); font-size: 12px; }
+.node .n-name { font-size: 14px; font-weight: 600; }
+.node .n-sub { fill: var(--faint); }
+.node .n-status { fill: var(--muted); font-weight: 500; }
+.node .n-meta { fill: var(--muted); font-variant-numeric: tabular-nums; }
+.s-running .box { stroke: var(--running); stroke-width: 2; }
+.s-running .n-status { fill: var(--running); }
+.s-complete .box { stroke: var(--complete); }
+.s-complete .n-status { fill: var(--complete); }
+.s-failed .box { stroke: var(--failed); stroke-width: 2; fill: var(--failed-tint); }
+.s-failed .n-status { fill: var(--failed); }
+.s-degraded .box { stroke: var(--degraded); stroke-width: 2; }
+.s-degraded .n-status { fill: var(--degraded); }
+.s-pending .n-status { fill: var(--pending); }
+.s-skipped .box, .s-notrun .box, .s-removed .box, .s-stopped .box { stroke-dasharray: 4 3; }
+.s-skipped .n-name, .s-notrun .n-name, .s-removed .n-name, .s-stopped .n-name { fill: var(--muted); }
+.s-stopped .box { stroke: var(--degraded); }
+.s-stopped .n-status { fill: var(--degraded); }
+.drawer {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px 16px 16px;
+}
+@media (max-width: 899px) {
+  /* A bottom sheet. It is capped, and the page gets room below the content,
+     so the sheet never covers the timeline: the page scrolls it into view. */
+  .drawer {
+    position: fixed;
+    left: 8px;
+    right: 8px;
+    bottom: 0;
+    max-height: 45vh;
+    overflow: auto;
+    padding-bottom: calc(16px + env(safe-area-inset-bottom));
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.22);
+  }
+  body.has-drawer { padding-bottom: calc(45vh + 24px + env(safe-area-inset-bottom)); }
+}
+body { padding-bottom: calc(32px + env(safe-area-inset-bottom)); }
+.drawer[hidden] { display: none; }
+.drawer-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.drawer-head h2 { font: 600 15px var(--mono); overflow-wrap: anywhere; }
+button {
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.drawer dl { margin: 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 12px; font-size: 14px; }
+.drawer dt { color: var(--faint); }
+.drawer dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.drawer-error { color: var(--failed); margin: 8px 0 0; }
+.budget { margin-top: 12px; font-size: 13px; }
+.budget[hidden] { display: none; }
+.budget-head { margin: 0 0 6px; color: var(--faint); }
+.budget-row { display: grid; grid-template-columns: 4.5em minmax(0, 1fr) max-content; gap: 8px; align-items: center; margin-top: 4px; }
+.budget-row meter { width: 100%; height: 8px; }
+.budget-row.over span:last-child { color: var(--failed); font-weight: 500; }
+.timeline { max-width: 1200px; margin: 16px auto 0; }
+.timeline-head { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; font-size: 14px; }
+.timeline-head label { font-weight: 600; }
+.timeline-head output { color: var(--muted); overflow-wrap: anywhere; }
+.timeline input { width: 100%; margin: 8px 0 0; accent-color: var(--accent); }
+.commands { max-width: 1200px; margin: 16px auto 0; font-size: 14px; }
+.commands ul { margin: 6px 0 0; padding-left: 18px; }
+.commands-note { margin: 4px 0 0; color: var(--muted); }
+.command-name { font-weight: 500; }
+.agent-facts { margin: 4px 0 8px; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 12px; }
+.agent-facts dt { color: var(--faint); }
+.agent-facts dd { margin: 0; overflow-wrap: anywhere; }
+.keys { max-width: 1200px; margin: 20px auto 0; display: flex; flex-wrap: wrap; gap: 6px 16px; color: var(--muted); font-size: 13px; }
+body.ended .canvas, body.ended .timeline { opacity: 0.6; }
+@media (prefers-contrast: more) {
+  :root { --line: #6b6f76; --faint: var(--muted); }
+  .node .box { stroke-width: 2; }
+}
+@media (forced-colors: active) {
+  .node .box, .edge { stroke: CanvasText; }
+  .node.selected .ring, .node:focus-visible .ring { stroke: Highlight; }
+  .node text, marker path { fill: CanvasText; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .edge.pulse { animation: none; stroke-dasharray: none; }
+  .node .box { transition: none; }
+}

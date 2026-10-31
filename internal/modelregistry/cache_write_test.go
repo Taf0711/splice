@@ -61,10 +61,10 @@ func TestCalculateCostCacheWritePremium(t *testing.T) {
 			cacheWriteTokens = usage.CacheWriteTokens
 		}
 		uncachedTokens := usage.InputTokens - cachedTokens - cacheWriteTokens
-		want := float64(uncachedTokens)/tokensPerMillion*record.Cost.Input +
+		want := float64(uncachedTokens)/tokensPerMillion*(*record.Cost.Input) +
 			float64(cachedTokens)/tokensPerMillion*record.Cost.CacheRead +
 			float64(cacheWriteTokens)/tokensPerMillion*record.Cost.CacheWrite +
-			float64(usage.OutputTokens)/tokensPerMillion*record.Cost.Output
+			float64(usage.OutputTokens)/tokensPerMillion*(*record.Cost.Output)
 		if math.Abs(cost.TotalCost-want) > 1e-9 {
 			t.Fatalf("EstimateCost total = %v, want snapshot-derived %v", cost.TotalCost, want)
 		}

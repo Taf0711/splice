@@ -1,0 +1,7 @@
+{
+  "name": "cmp-admin-2-cpl-05-write",
+  "prompt": "In the billing package, add a \"startup\" subscription plan: 900 cents a month, 3 seats. Customers see it between free and team.",
+  "check": "# cpl-05 A\nmkdir -p internal/admin\ncat > internal/admin/probe_plan_startup_test.go <<'EOF'\npackage admin\n\nimport (\n\t\"slices\"\n\t\"testing\"\n\n\t\"demo/internal/billing\"\n)\n\nfunc TestProbePlanStartup(t *testing.T) {\n\tp, ok := billing.Lookup(\"startup\")\n\tif !ok || p.MonthlyCents != 900 || p.Seats != 3 {\n\t\tt.Fatalf(\"billing.Lookup(startup) = %+v, %v\", p, ok)\n\t}\n\ti, free, team := slices.Index(PricingOrder, \"startup\"), slices.Index(PricingOrder, \"free\"), slices.Index(PricingOrder, \"team\")\n\tif i < 0 || !(free < i && i < team) {\n\t\tt.Fatalf(\"pricing order %v: startup is not between free and team\", PricingOrder)\n\t}\n}\nEOF\ngo test -count=1 -run '^(TestProbePlanStartup|TestPricingPageShowsEveryPlan)$' ./... ; rc=$?\nrm -f internal/admin/probe_plan_startup_test.go\nexit $rc\n",
+  "fixture": "../../coupled-families/fixture",
+  "precursor": "cmp-admin-1-cpl-04-write"
+}

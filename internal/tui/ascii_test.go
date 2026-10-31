@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -96,5 +98,40 @@ func TestModelPickerGlyphsFoldWidthExact(t *testing.T) {
 	ring := "← ■■□□ → high"
 	if got, want := runewidth.StringWidth(foldASCII(ring, true)), runewidth.StringWidth(ring); got != want {
 		t.Errorf("ring line width changed under fold: %d, want %d", got, want)
+	}
+}
+
+// Every non-ASCII glyph the TUI source draws has a real fold, not the '?'
+// fallback, so an ASCII terminal never shows what reads as an error.
+func TestASCIIFoldCoversSourceGlyphs(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range files {
+		if strings.HasSuffix(file, "_test.go") || file == "ascii.go" {
+			continue
+		}
+		src, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range strings.Split(string(src), "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "//") {
+				continue
+			}
+			code := line
+			if i := strings.Index(code, "//"); i >= 0 && !strings.ContainsAny(code[:i], "\"'`") {
+				code = code[:i]
+			}
+			for _, glyph := range code {
+				if glyph < 0x80 || runewidth.RuneWidth(glyph) != 1 {
+					continue
+				}
+				if folded := foldASCII(string(glyph), true); strings.Contains(folded, "?") {
+					t.Fatalf("%s draws %q (%U) with no ASCII fold", file, glyph, glyph)
+				}
+			}
+		}
 	}
 }

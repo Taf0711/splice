@@ -289,3 +289,58 @@ func TestStatusLineShowsTrustIndicatorOnlyWhenUntrusted(t *testing.T) {
 		t.Fatalf("trusted status line = %q, must not show trust indicator", got)
 	}
 }
+
+// The trust root is the launch directory, even when a subfolder is opened. The
+// project topology loads from it, so a parent repo's file never applies here.
+func TestNewModelTrustRootIsLaunchDirectory(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	sub := filepath.Join(t.TempDir(), "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(context.Background(), Options{Cwd: sub, Trusted: true})
+	if m.agentOptions.TrustRoot != sub {
+		t.Fatalf("agentOptions.TrustRoot = %q, want launch directory %q", m.agentOptions.TrustRoot, sub)
+	}
+}
+
+// Trusting the current folder through /trust pins the trust root to that folder
+// and marks the session trusted, so the next run loads its project files.
+func TestTrustPickerCurrentFolderPinsTrustRoot(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	workspace := t.TempDir()
+	trustStore, _ := newTrustStore(t)
+	m := newModel(context.Background(), Options{
+		Cwd:         workspace,
+		TrustStore:  trustStore,
+		Trusted:     false,
+		TrustPrompt: true,
+	})
+	m.designMode = false
+	// Simulate a model whose trust root was never pinned, so the picker is the
+	// only code that can set it.
+	m.agentOptions.TrustRoot = ""
+	next := m.openTrustPromptIfRequired()
+	next = selectTrustItem(t, next, trustActionCurrent)
+	chosen, _ := next.choosePicker()
+	got := chosen.(model)
+	if !got.trusted || !got.agentOptions.TrustedWorkspace {
+		t.Fatalf("session trusted = (%v, %v), want (true, true)", got.trusted, got.agentOptions.TrustedWorkspace)
+	}
+	if got.agentOptions.TrustRoot != got.cwd {
+		t.Fatalf("agentOptions.TrustRoot = %q, want session cwd %q", got.agentOptions.TrustRoot, got.cwd)
+	}
+}
+
+// The saved message must match what reloads mid-session. The pipeline topology
+// reads trust on each run. Hooks, plugins, and MCP servers resolve at launch.
+func TestTrustSavedMessageNamesNextRunScope(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	trustStore, _ := newTrustStore(t)
+	m := newModel(context.Background(), Options{Cwd: t.TempDir(), TrustStore: trustStore})
+	_, msg, _ := m.applyTrustPickerChoice(pickerItem{Value: trustActionCurrent})
+	const want = "Workspace trust saved. The pipeline topology applies from the next run. The project config, hooks, plugins, and MCP servers load on the next launch."
+	if msg != want {
+		t.Fatalf("message = %q, want %q", msg, want)
+	}
+}

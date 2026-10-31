@@ -208,7 +208,7 @@ func TestRunMCPToolsListJSONAndText(t *testing.T) {
 		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
 			return config.ResolvedConfig{DefaultProjectTrust: "always"}, nil
 		},
-		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+		resolveMCPConfigTrust: func(workspaceRoot string, _ bool) (config.MCPConfig, error) {
 			if workspaceRoot != cwd {
 				t.Fatalf("workspaceRoot = %q, want %q", workspaceRoot, cwd)
 			}
@@ -271,7 +271,7 @@ func TestRunMCPLegacyListAliases(t *testing.T) {
 		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
 			return config.ResolvedConfig{DefaultProjectTrust: "always"}, nil
 		},
-		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+		resolveMCPConfigTrust: func(workspaceRoot string, _ bool) (config.MCPConfig, error) {
 			if workspaceRoot != cwd {
 				t.Fatalf("workspaceRoot = %q, want %q", workspaceRoot, cwd)
 			}

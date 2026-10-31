@@ -45,7 +45,7 @@ func TestEventUsageRoundTripPreservesCacheAndReasoningCost(t *testing.T) {
 	}}
 	meta := []sessions.Metadata{{SessionID: "s1", ModelID: "claude-sonnet-4.5"}}
 
-	report, err := BuildReport(events, meta, &registry, 0)
+	report, err := BuildReportPriced(events, meta, testRegistryPricer(&registry), 0)
 	if err != nil {
 		t.Fatalf("BuildReport: %v", err)
 	}
@@ -85,9 +85,9 @@ func TestEventUsageRoundTripPreservesWebSearchEngineCost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal payload: %v", err)
 	}
-	report, err := BuildReport(
+	report, err := BuildReportPriced(
 		[]sessions.Event{{SessionID: "s1", Sequence: 1, Type: sessions.EventUsage, CreatedAt: "2026-06-19T10:00:00Z", Payload: raw}},
-		[]sessions.Metadata{{SessionID: "s1", ModelID: "gpt-4.1"}}, &registry, 0,
+		[]sessions.Metadata{{SessionID: "s1", ModelID: "gpt-4.1"}}, testRegistryPricer(&registry), 0,
 	)
 	if err != nil {
 		t.Fatalf("BuildReport: %v", err)

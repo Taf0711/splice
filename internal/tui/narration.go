@@ -96,8 +96,9 @@ func classifyNarration(row transcriptRow) NarrationClass {
 
 // narrationVisible reports whether a row shows at the given verbosity.
 // Tool call/result pairs collapse to their result card at quiet (the result
-// card already collapses long bodies — the collapse_tools contract); plain
-// system chatter drops at quiet; everything else survives every level.
+// card already collapses long bodies — the collapse_tools contract). Quiet
+// only collapses tool activity: every system row (command replies, run
+// notices, safety and config notes) stays visible at every verbosity.
 func narrationVisible(row transcriptRow, verbosity narrationVerbosity) bool {
 	if verbosity >= verbosityDetailed {
 		return true
@@ -111,8 +112,9 @@ func narrationVisible(row transcriptRow, verbosity narrationVerbosity) bool {
 	case NarrationToolActivity:
 		return verbosity >= verbosityNormal
 	case NarrationSystemNotice:
-		// Welcome/recap stay; transient command chatter drops at quiet.
-		return row.kind != rowSystem || verbosity >= verbosityNormal
+		// System notices always show: command replies (/flags, /ps) and
+		// run safety or config notes must not vanish at quiet.
+		return true
 	default:
 		return true
 	}

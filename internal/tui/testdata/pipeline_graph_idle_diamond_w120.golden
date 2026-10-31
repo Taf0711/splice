@@ -1,0 +1,19 @@
+╭── Pipeline ──────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ diamond  source: embedded default                                                                                    │
+│                                                                                                                      │
+│ Graph                                                                                                                │
+│   depth 0                                                                                                            │
+│     code_writer                                                                                                      │
+│   depth 1                                                                                                            │
+│     lint             command  <- code_writer                                                                         │
+│     static_analyzer  <- code_writer                                                                                  │
+│   depth 2                                                                                                            │
+│     test_runner      <- lint, static_analyzer                                                                        │
+│                                                                                                                      │
+│ Command nodes                                                                                                        │
+│   command node lint: go vet ./...                                                                                    │
+│   1 command node runs shell commands when this topology is active                                                    │
+│                                                                                                                      │
+│ hint: change it with /pipeline use <name>; this view is read-only                                                    │
+│ hint: Ctrl+G shows each node's model, budget, and last result                                                        │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

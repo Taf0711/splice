@@ -107,6 +107,28 @@ func TestDoctorCommandOutputGroupsProviderAndPlatformChecks(t *testing.T) {
 	assertRowsContain(t, platform.Rows, "sandbox.backend", "runtime.go", "config.files")
 }
 
+func TestDoctorCommandOutputGroupsStoredKeyAndPipelineChecks(t *testing.T) {
+	output := doctorCommandOutput(doctor.Report{Checks: []doctor.Check{
+		doctorCheck("provider.storedkey", doctor.StatusPass, "Stored key reachable."),
+		doctorCheck("trajectory.classifier", doctor.StatusPass, "Trajectory classifier is off."),
+	}}, nil)
+
+	provider := doctorSection(output, "Provider")
+	if provider == nil {
+		t.Fatalf("missing Provider section: %#v", output.Sections)
+	}
+	assertRowsContain(t, provider.Rows, "provider.storedkey")
+
+	pipeline := doctorSection(output, "Pipeline")
+	if pipeline == nil {
+		t.Fatalf("missing Pipeline section: %#v", output.Sections)
+	}
+	assertRowsContain(t, pipeline.Rows, "trajectory.classifier")
+	if other := doctorSection(output, "Other"); other != nil {
+		t.Fatalf("known checks must not fall under Other: %#v", other.Rows)
+	}
+}
+
 func TestDoctorCommandOutputIsProblemFirstDiagnosticCenter(t *testing.T) {
 	output := doctorCommandOutput(doctor.Report{GeneratedAt: "2026-06-14T00:00:00Z", Checks: []doctor.Check{
 		doctorCheck("provider.config", doctor.StatusPass, "Provider config loaded."),

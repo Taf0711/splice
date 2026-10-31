@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -30,7 +31,17 @@ func (TestRunner) Capabilities() Capabilities {
 func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options StageOptions) (schemas.HarnessStageOutput, error) {
 	var cmd []string
 	cmd = append([]string(nil), options.Command...)
-	if len(cmd) == 0 {
+	configuredCommand := len(cmd) > 0
+	commandWorkDir := options.WorkDir
+	if len(cmd) > 0 && options.CommandWorkDir != "" {
+		commandWorkDir = options.CommandWorkDir
+		var err error
+		cmd, err = expandConfiguredTestCommand(cmd, input.PriorChangedFiles, options.WorkDir, commandWorkDir)
+		if err != nil {
+			return schemas.HarnessStageOutput{}, err
+		}
+	}
+	if len(cmd) == 0 && !configuredCommand {
 		detected, err := testCommand(options.WorkDir, options.Language)
 		if err != nil {
 			return schemas.HarnessStageOutput{}, fmt.Errorf("detect test command: %w", err)
@@ -48,7 +59,7 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 		timeout = options.TimeoutSeconds
 	}
 
-	options.report(fmt.Sprintf("running %s in %s", joinShell(cmd), options.WorkDir))
+	options.report(fmt.Sprintf("running %s in %s", joinShell(cmd), commandWorkDir))
 	// A1: run Go tests with -json so per-test results exist for repair
 	// evidence and trajectory signals. The suite-entry synthesis below stays
 	// only as a fallback when -json is unavailable or parsing fails.
@@ -60,7 +71,7 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 	if options.RunTool != nil {
 		bashArgs := map[string]any{
 			"command":    shellJoin(cmd),
-			"cwd":        options.WorkDir,
+			"cwd":        commandWorkDir,
 			"timeout_ms": timeout * 1000,
 		}
 		start := time.Now()
@@ -85,11 +96,11 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 	} else if options.RecordCommand != nil {
 		args := map[string]any{
 			"command":         cmd,
-			"cwd":             options.WorkDir,
+			"cwd":             commandWorkDir,
 			"timeout_seconds": timeout,
 		}
 		recorded, err := options.RecordCommand(ctx, "splice.test", args, func(runCtx context.Context) (ToolResult, error) {
-			results = runCommand(runCtx, options.Sandbox, cmd, options.WorkDir, timeout)
+			results = runCommand(runCtx, options.Sandbox, cmd, commandWorkDir, timeout)
 			payload, marshalErr := json.Marshal(results)
 			if marshalErr != nil {
 				return ToolResult{OK: false, Output: marshalErr.Error()}, nil
@@ -106,7 +117,7 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 			}
 		}
 	} else {
-		results = runCommand(ctx, options.Sandbox, cmd, options.WorkDir, timeout)
+		results = runCommand(ctx, options.Sandbox, cmd, commandWorkDir, timeout)
 	}
 
 	// A1: when the command was JSON-eligible, try per-test parsing first.
@@ -193,6 +204,100 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 		Confidence: confidence,
 		Data:       map[string]any{"test_results": results, "test_command": cmd},
 	}, nil
+}
+
+// expandConfiguredTestCommand expands whole-argument placeholders from the
+// files changed by earlier write stages in this run.
+func expandConfiguredTestCommand(command []string, changedByStage map[string][]string, workspaceRoot, testDir string) ([]string, error) {
+	if testDir == "" {
+		testDir = workspaceRoot
+	}
+	root, err := filepath.Abs(workspaceRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workspace root: %w", err)
+	}
+	base, err := filepath.Abs(testDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve test directory: %w", err)
+	}
+	relBase, err := filepath.Rel(root, base)
+	if err != nil || relBase == ".." || strings.HasPrefix(relBase, ".."+string(filepath.Separator)) {
+		return nil, fmt.Errorf("verify test directory %q is outside workspace %q", testDir, workspaceRoot)
+	}
+
+	paths := changedTestFiles(changedByStage, root, base)
+	tests := make([]string, len(paths))
+	modules := make([]string, len(paths))
+	for i, path := range paths {
+		tests[i] = path
+		modules[i] = strings.TrimSuffix(path, ".py")
+		modules[i] = strings.ReplaceAll(modules[i], "/", ".")
+	}
+
+	expanded := make([]string, 0, len(command)+len(paths))
+	for _, arg := range command {
+		switch arg {
+		case "{tests}":
+			expanded = append(expanded, tests...)
+		case "{test_modules}":
+			expanded = append(expanded, modules...)
+		default:
+			expanded = append(expanded, arg)
+		}
+	}
+	return expanded, nil
+}
+
+func changedTestFiles(changedByStage map[string][]string, workspaceRoot, testDir string) []string {
+	stageNames := make([]string, 0, len(changedByStage))
+	for stage := range changedByStage {
+		stageNames = append(stageNames, stage)
+	}
+	sort.Strings(stageNames)
+	seen := map[string]bool{}
+	paths := make([]string, 0)
+	for _, stage := range stageNames {
+		for _, changed := range changedByStage[stage] {
+			relPath := filepath.ToSlash(filepath.Clean(changed))
+			if relPath == "." || filepath.IsAbs(changed) || strings.HasPrefix(relPath, "../") || relPath == ".." {
+				continue
+			}
+			absolute := filepath.Join(workspaceRoot, filepath.FromSlash(relPath))
+			relToTestDir, err := filepath.Rel(testDir, absolute)
+			if err != nil || relToTestDir == ".." || strings.HasPrefix(relToTestDir, ".."+string(filepath.Separator)) {
+				continue
+			}
+			relToTestDir = filepath.ToSlash(relToTestDir)
+			if !isTestFilePath(relPath) || seen[relToTestDir] {
+				continue
+			}
+			seen[relToTestDir] = true
+			paths = append(paths, relToTestDir)
+		}
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+func isTestFilePath(path string) bool {
+	path = filepath.ToSlash(path)
+	base := filepath.Base(path)
+	switch {
+	case strings.HasSuffix(base, "_test.go"):
+		return true
+	case strings.HasSuffix(base, ".py"):
+		if strings.HasPrefix(base, "test_") || strings.HasSuffix(base, "_test.py") || base == "tests.py" {
+			return true
+		}
+		for _, part := range strings.Split(path, "/") {
+			if part == "tests" {
+				return true
+			}
+		}
+	case strings.Contains(base, ".test.") || strings.Contains(base, ".spec."):
+		return true
+	}
+	return false
 }
 
 func testCommand(workDir string, language string) ([]string, error) {

@@ -219,7 +219,7 @@ func TestRunIterationLoopRestoresBestSnapshotBeforeNextPass(t *testing.T) {
 		nil,
 		nil,
 		recovery, nil,
-		nil)
+		nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -258,7 +258,7 @@ func TestRunIterationLoopStopsWhenRestoreFails(t *testing.T) {
 		nil,
 		nil,
 		recovery, nil,
-		nil)
+		nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -270,7 +270,40 @@ func TestRunIterationLoopStopsWhenRestoreFails(t *testing.T) {
 	}
 }
 
-func TestRunIterationLoopAbortsRollbackWithoutRecovery(t *testing.T) {
+// TestRollbackRebasesThePassEvidence: a restore rewrites the workspace. The
+// pass after it is measured from the restored state, so a file the restore
+// removed is not listed as a change of that pass.
+func TestRollbackRebasesThePassEvidence(t *testing.T) {
+	dir := t.TempDir()
+	recovery := newFakeRecovery()
+	recovery.restoreFn = func(context.Context, string, string) error {
+		return os.Remove(filepath.Join(dir, "state-3.txt"))
+	}
+	stage := &trajectoryRecoveryStage{recovery: recovery}
+	plan := trajectoryRecoveryPlan()
+	trace := newRunTraceAccumulator(nil, "rollback-run", "session", dir, plan, "off", nil)
+	result, err := runIterationLoop(context.Background(), "rollback-run", plan,
+		stageRegistry{"trajectory_stage": stage}, runFakeProvider{},
+		PipelineConfigFromAgentOptions(agent.Options{Cwd: dir, MaxTurns: 4}),
+		dir, nil, nil, recovery, trace, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	if result.Status != "completed" || !recovery.restored() {
+		t.Fatalf("status = %q restored = %v, want a completed run after a restore", result.Status, recovery.restored())
+	}
+	var pass4 *schemas.PassEvidence
+	for i := range trace.passEvidence {
+		if e := trace.passEvidence[i]; e.Builder == passBuilderPass && e.Iteration == 4 {
+			pass4 = &trace.passEvidence[i]
+		}
+	}
+	if pass4 == nil || strings.Join(pass4.FilesChanged, ",") != "state-4.txt" {
+		t.Fatalf("pass 4 record = %+v, want only state-4.txt", pass4)
+	}
+}
+
+func TestRunIterationLoopDegradesRollbackWithoutRecovery(t *testing.T) {
 	stage := &trajectoryRecoveryStage{}
 	result, err := runIterationLoop(
 		context.Background(),
@@ -283,15 +316,15 @@ func TestRunIterationLoopAbortsRollbackWithoutRecovery(t *testing.T) {
 		nil,
 		nil,
 		nil, nil,
-		nil)
+		nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
-	if result.Status != "aborted" || result.AbortReason == nil || !strings.Contains(*result.AbortReason, "--worktree") {
-		t.Fatalf("result = %+v, want aborted isolated-worktree reason", result)
+	if result.Status == "aborted" && result.AbortReason != nil && strings.Contains(*result.AbortReason, "--worktree") {
+		t.Fatalf("result = %+v, want rollback to degrade instead of aborting", result)
 	}
-	if stage.calls != 3 {
-		t.Fatalf("stage calls = %d, want 3 with no post-rollback mutation", stage.calls)
+	if stage.calls < 4 {
+		t.Fatalf("stage calls = %d, want the run to continue past the unavailable rollback", stage.calls)
 	}
 }
 

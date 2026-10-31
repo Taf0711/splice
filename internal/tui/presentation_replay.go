@@ -87,6 +87,7 @@ func (m model) applyPresentationSnapshot(state presentation.State) model {
 	// completion, so a resumed session offers the same actions the live
 	// run offered. A run still in flight has no terminal receipt.
 	m.lastTerminalReceipt = terminalReceiptForState(state)
+	m.mirrorPipeline()
 	return m
 }
 
@@ -98,6 +99,7 @@ func (m model) clearPresentationState() model {
 	m.pipeline.clear()
 	m.phaseTrail.reset()
 	m.lastTerminalReceipt = ""
+	m.mirrorPipeline()
 	return m
 }
 
@@ -114,6 +116,9 @@ func terminalReceiptForState(state presentation.State) receiptKind {
 	case "failed":
 		return receiptFailed
 	case "completed":
+		if state.Completion.Unverified {
+			return receiptUnverified
+		}
 		return receiptVerified
 	}
 	return ""

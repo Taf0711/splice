@@ -257,3 +257,25 @@ func ApplyStoredAPIKey(profile ProviderProfile, store APIKeyGetter) (ProviderPro
 	}
 	return profile, nil
 }
+
+// ChatGPTSubscriptionUnpricedReason is the cost reason for a request served by a
+// ChatGPT sign-in profile. That access is a subscription, billed per plan and
+// not per request.
+const ChatGPTSubscriptionUnpricedReason = "ChatGPT subscription: not billed per request"
+
+// IsChatGPTSubscription reports whether the profile is a ChatGPT sign-in
+// subscription (catalog id chatgpt, the chatgpt.com codex backend).
+func (profile ProviderProfile) IsChatGPTSubscription() bool {
+	return strings.EqualFold(strings.TrimSpace(profile.CatalogID), "chatgpt")
+}
+
+// ChatGPTSubscriptionProfiles returns the names of the subscription profiles.
+func ChatGPTSubscriptionProfiles(providers []ProviderProfile) map[string]bool {
+	names := map[string]bool{}
+	for _, profile := range providers {
+		if profile.IsChatGPTSubscription() {
+			names[profile.Name] = true
+		}
+	}
+	return names
+}

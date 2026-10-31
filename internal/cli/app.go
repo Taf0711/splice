@@ -17,6 +17,7 @@ import (
 
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/config"
+	"github.com/Taf0711/splice/internal/flags"
 	"github.com/Taf0711/splice/internal/hooks"
 	"github.com/Taf0711/splice/internal/localcontrol"
 	"github.com/Taf0711/splice/internal/mcp"
@@ -29,6 +30,7 @@ import (
 	"github.com/Taf0711/splice/internal/providermodeldiscovery"
 	"github.com/Taf0711/splice/internal/provideronboarding"
 	"github.com/Taf0711/splice/internal/providers"
+	"github.com/Taf0711/splice/internal/providers/decisions"
 	"github.com/Taf0711/splice/internal/redaction"
 	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/selfverify"
@@ -58,21 +60,29 @@ var version = spliceversion.Version
 var (
 	rootTrust   bool
 	rootNoTrust bool
+	// rootFlags holds the --flags list given before the subcommand. It is
+	// applied as command-line overrides to every config resolution.
+	rootFlags map[string]bool
 )
 
 type appDeps struct {
 	getwd          func() (string, error)
 	stdin          io.Reader
 	userConfigPath func() (string, error)
+	// keyStoreOpener opens the credential store for redaction. Nil means the store
+	// beside userConfigPath. Tests set it to inject a broken store.
+	keyStoreOpener func() (config.APIKeyGetter, error)
 	// migrateOAuth runs the explicit OAuth plaintext migration at process startup.
 	// It is intentionally not filled for partial test dependencies, which keeps
 	// tests from touching the user's keychain or config directory.
 	migrateOAuth          func()
 	resolveConfig         func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error)
-	resolveMCPConfig      func(workspaceRoot string) (config.MCPConfig, error)
 	resolveMCPConfigTrust func(workspaceRoot string, projectTrusted bool) (config.MCPConfig, error)
-	newProvider           func(config.ProviderProfile) (zeroruntime.Provider, error)
-	resolveExecutable     func() (string, error)
+	// pinnedTrust is the trust decision of a launch that already decided it
+	// (see pinWorkspaceTrust). Nil means each resolution decides trust itself.
+	pinnedTrust       *bool
+	newProvider       func(config.ProviderProfile) (zeroruntime.Provider, error)
+	resolveExecutable func() (string, error)
 	// exportActiveProvider pins spawned children to the run's provider (production:
 	// config.SetActiveProviderEnv, set in defaultAppDeps — deliberately NOT filled
 	// by fillAppDeps, so tests never mutate the process environment unless they
@@ -154,15 +164,29 @@ func defaultAppDeps() appDeps {
 		},
 		exportActiveProvider: config.SetActiveProviderEnv,
 		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
-			options, err := config.DefaultResolveOptions(workspaceRoot)
+			// The project config merges only in a trusted workspace. A launch
+			// that decided trust passes its decision; any other caller gets the
+			// same rules without the interactive prompt.
+			trusted := false
+			if overrides.ProjectTrust != nil {
+				trusted = *overrides.ProjectTrust
+			} else {
+				trusted = workspaceTrusted(workspaceRoot)
+			}
+			options, err := config.WorkspaceResolveOptions(workspaceRoot, trusted)
 			if err != nil {
 				return config.ResolvedConfig{}, err
 			}
 			options.Overrides = overrides
-			return config.Resolve(options)
-		},
-		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
-			return defaultResolveMCPConfig(workspaceRoot, true)
+			resolved, err := config.Resolve(options)
+			if resolved.Flags != nil {
+				// Every command resolves config here, so this is the one place the
+				// process-level flag set is recorded for code with no set in reach.
+				// A provider error still returns a resolved flag set, so it is
+				// recorded too.
+				flags.SetProcess(resolved.Flags)
+			}
+			return resolved, err
 		},
 		resolveMCPConfigTrust: func(workspaceRoot string, projectTrusted bool) (config.MCPConfig, error) {
 			return defaultResolveMCPConfig(workspaceRoot, projectTrusted)
@@ -281,6 +305,7 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	// a brief notice, rather than a raw stack trace dumped at the user.
 	defer observability.Recover(observability.DefaultCrashDir(), "cli", stderr, &exitCode)
 	deps = fillAppDeps(deps)
+	deps.resolveConfig = withRootFlags(deps.resolveConfig)
 
 	// CLI runs opt into the models.dev overlay (cached live context limits and
 	// pricing on top of the curated catalog). Explicitly enabled here — and only
@@ -305,12 +330,13 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	}
 	addDirs = append(addDirs, moreDirs...)
 
-	// Reset global trust flags so stale values from prior invocations in the same
-	// process (e.g. tests) do not affect this run.
+	// Reset global trust and flag options so stale values from prior invocations
+	// in the same process (e.g. tests) do not affect this run.
 	rootTrust, rootNoTrust = false, false
-	rootTrust, rootNoTrust, args, err = splitLeadingTrustFlags(args)
+	rootFlags = nil
+	rootTrust, rootNoTrust, rootFlags, args, err = splitLeadingRootOptions(args)
 	if err != nil {
-		return writeAppError(stderr, err.Error(), 1)
+		return writeExecUsageError(stderr, err.Error())
 	}
 	if rootTrust && rootNoTrust {
 		return writeAppError(stderr, "Use either --trust or --no-trust, not both.", 1)
@@ -318,6 +344,15 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 
 	if len(args) == 0 {
 		return runInteractiveTUI(stdout, stderr, deps, agent.PermissionModeAsk, addDirs, theme)
+	}
+
+	// --flags sets command-line overrides for config resolution, so it is only
+	// accepted where a command resolves config through deps.resolveConfig. Any
+	// other command would drop the list without a sign, so it fails loud instead.
+	if rootFlags != nil {
+		if label, ok := rootFlagsCommandCheck(args); !ok {
+			return writeExecUsageError(stderr, "--flags is only supported for commands that read config (for example exec, doctor, flags, serve); remove --flags for "+label)
+		}
 	}
 
 	// --add-dir grants an extra write root, and only the interactive TUI and
@@ -433,6 +468,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runDaemon(args[1:], stdout, stderr, deps)
 	case "config":
 		return runConfig(args[1:], stdout, stderr, deps)
+	case "flags":
+		return runFlags(args[1:], stdout, stderr, deps)
 	case "pipeline":
 		return runPipelineCommand(args[1:], stdout, stderr)
 	case "models":
@@ -529,19 +566,7 @@ func fillAppDeps(deps appDeps) appDeps {
 		deps.resolveConfig = defaults.resolveConfig
 	}
 	if deps.resolveMCPConfigTrust == nil {
-		// If the caller injected only the legacy resolver, wrap it so the
-		// trust-aware path still compiles and behaves the same regardless of
-		// trust. Otherwise fall back to the production trust-aware resolver.
-		if deps.resolveMCPConfig != nil {
-			deps.resolveMCPConfigTrust = func(workspaceRoot string, _ bool) (config.MCPConfig, error) {
-				return deps.resolveMCPConfig(workspaceRoot)
-			}
-		} else {
-			deps.resolveMCPConfigTrust = defaults.resolveMCPConfigTrust
-		}
-	}
-	if deps.resolveMCPConfig == nil {
-		deps.resolveMCPConfig = defaults.resolveMCPConfig
+		deps.resolveMCPConfigTrust = defaults.resolveMCPConfigTrust
 	}
 	if deps.newProvider == nil {
 		deps.newProvider = defaults.newProvider
@@ -683,17 +708,53 @@ func runInteractiveTUI(stdout io.Writer, stderr io.Writer, deps appDeps, permiss
 func runInteractiveTUIWithSetup(stdout io.Writer, stderr io.Writer, deps appDeps, permissionMode agent.PermissionMode, addDirs []string, theme string, forceSetup bool) int {
 	// Do not start the update notice on the interactive path. The TUI uses the
 	// alternate screen, so a later stderr write would corrupt its display.
-	// Refresh the models.dev pricing/limits cache in the background when stale;
-	// the overlay is read at registry construction from the cache file, so this
-	// benefits the next run and never blocks or fails this one.
-	go func() { _ = modelregistry.RefreshModelsDevCache(context.Background()) }()
+	// The models.dev catalog refresh runs inside the TUI (Init), which
+	// rebuilds its model catalog when a newer cache lands.
 
 	workspaceRoot, err := deps.getwd()
 	if err != nil {
 		return writeAppError(stderr, "failed to resolve workspace: "+err.Error(), 1)
 	}
 
+	// Decide workspace trust before the project config can merge.
+	// defaultProjectTrust comes from the user config only, so a resolve without
+	// the project layer reads it.
+	noProject := false
+	trustConfig, _ := deps.resolveConfig(workspaceRoot, config.Overrides{ProjectTrust: &noProject})
+	setting := trustConfig.DefaultProjectTrust
+	if setting == "" {
+		setting = "ask"
+	}
+	trusted, decision, persist, store, err := resolveWorkspaceTrust(workspaceRoot, setting, rootTrust, rootNoTrust)
+	if err != nil {
+		fmt.Fprintf(stderr, "warning: failed to resolve workspace trust: %s\n", err)
+		trusted = false
+		decision = config.TrustUndecided
+		persist = false
+	}
+	// Let the main TUI collect an undecided trust choice. Explicit settings,
+	// flags, environment values, and saved decisions still resolve before launch.
+	// A choice made in the session applies from the next launch.
+	trustPrompt := shouldPromptWorkspaceTrust(decision, trustConfig.DefaultProjectTrust, rootTrust, rootNoTrust, envTrustWorkspaceSet(), term.IsTerminal(os.Stdin.Fd()))
+	if persist && store != nil {
+		_ = store.SetTrusted(workspaceRoot, trusted)
+		if saveErr := store.Save(); saveErr != nil {
+			fmt.Fprintf(stderr, "warning: failed to persist trust decision: %s\n", saveErr)
+		}
+	}
+	// The interactive app warns even when no project config exists. This makes
+	// the degraded trust state visible before a project adds config, MCP, hooks,
+	// or plugins.
+	if !trusted {
+		fmt.Fprintf(stderr, "workspace %s is not trusted; skipped project config, MCP servers, hooks, plugins. Run with --trust or set defaultProjectTrust=always to load them.\n", workspaceRoot)
+	}
+	// Every later resolve in this session uses the launch decision.
+	deps = pinWorkspaceTrust(deps, trusted)
+
 	resolved, err := deps.resolveConfig(workspaceRoot, config.Overrides{})
+	// Flag resolutions survive a provider-setup failure, so /flags still lists
+	// them when the setup wizard takes over.
+	flagResolutions := resolved.FlagResolutions
 	if err != nil {
 		// A resolve failure the setup wizard can FIX is not fatal for the
 		// interactive TUI: drop into the wizard with an empty config so the user
@@ -722,7 +783,7 @@ func runInteractiveTUIWithSetup(stdout io.Writer, stderr io.Writer, deps appDeps
 			resolved.Provider = usable
 			resolved.ActiveProvider = usable.Name
 		} else {
-			resolved = config.ResolvedConfig{}
+			resolved = config.ResolvedConfig{Flags: resolved.Flags, FlagResolutions: flagResolutions}
 			forceSetup = true
 		}
 	}
@@ -776,33 +837,6 @@ func runInteractiveTUIWithSetup(stdout io.Writer, stderr io.Writer, deps appDeps
 		}
 	}
 
-	// Resolve workspace trust before loading any project-scope executables.
-	setting := resolved.DefaultProjectTrust
-	if setting == "" {
-		setting = "ask"
-	}
-	trusted, decision, persist, store, err := resolveWorkspaceTrust(workspaceRoot, setting, rootTrust, rootNoTrust)
-	if err != nil {
-		fmt.Fprintf(stderr, "warning: failed to resolve workspace trust: %s\n", err)
-		trusted = false
-		decision = config.TrustUndecided
-		persist = false
-	}
-	// Let the main TUI collect an undecided trust choice. Explicit settings,
-	// flags, environment values, and saved decisions still resolve before launch.
-	trustPrompt := shouldPromptWorkspaceTrust(decision, resolved.DefaultProjectTrust, rootTrust, rootNoTrust, envTrustWorkspaceSet(), term.IsTerminal(os.Stdin.Fd()))
-	if persist && store != nil {
-		_ = store.SetTrusted(workspaceRoot, trusted)
-		if saveErr := store.Save(); saveErr != nil {
-			fmt.Fprintf(stderr, "warning: failed to persist trust decision: %s\n", saveErr)
-		}
-	}
-	// The interactive app warns even when no project config exists. This makes
-	// the degraded trust state visible before a project adds MCP, hooks, or plugins.
-	if !trusted {
-		fmt.Fprintf(stderr, "workspace %s is not trusted; skipped project MCP servers, hooks, plugins. Run with --trust or set defaultProjectTrust=always to load them.\n", workspaceRoot)
-	}
-
 	scope, err := sandbox.NewScope(workspaceRoot, append(append([]string{}, resolved.Sandbox.AdditionalWriteRoots...), addDirs...))
 	if err != nil {
 		return writeAppError(stderr, err.Error(), 1)
@@ -818,7 +852,7 @@ func runInteractiveTUIWithSetup(stdout io.Writer, stderr io.Writer, deps appDeps
 
 	registry := newCoreRegistryScoped(workspaceRoot, scope)
 	registerLocalControlTools(registry, workspaceRoot, resolved.LocalControl)
-	specialistRuntime, err := registerSpecialistTools(registry, workspaceRoot, resolved.Swarm.MaxTeamSize)
+	specialistRuntime, err := registerSpecialistTools(registry, workspaceRoot, resolved.Swarm.MaxTeamSize, trusted)
 	if err != nil {
 		return writeAppError(stderr, "failed to initialize specialist tools: "+err.Error(), 1)
 	}
@@ -897,21 +931,38 @@ func runInteractiveTUIWithSetup(stdout io.Writer, stderr io.Writer, deps appDeps
 	if err != nil {
 		return writeAppError(stderr, err.Error(), 1)
 	}
+	section := resolved.DecisionAdvisor
+	if section.Backend == "provider" {
+		for _, profile := range resolved.Providers {
+			if profile.Name == section.ProviderProfile && !section.TrajectoryDefault {
+				section.Profile = profile.Model
+			}
+		}
+	}
+	evaluator, err := decisions.NewEvaluator(section, resolved)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), 1)
+	}
 	lastKnownMCPConfig := mcpConfig
+	trajectoryProfile, _ := config.TrajectoryClassifierProfile(section, resolved.Providers)
 	return deps.runTUI(context.Background(), tui.Options{
-		Cwd:                  workspaceRoot,
-		Trusted:              trusted,
-		TrustStore:           store,
-		TrustPrompt:          trustPrompt,
-		Version:              version,
-		Theme:                theme,
-		SavedTheme:           resolved.Preferences.Theme,
-		SavedLayout:          resolved.Preferences.Layout,
-		UserConfigPath:       userConfigPath,
-		DoctorUserConfigPath: doctorUserConfigPath,
-		ProjectConfigPath:    projectConfigPath,
-		ProviderName:         resolved.Provider.Name,
-		ModelName:            resolved.Provider.Model,
+		DecisionAdvisor:         section,
+		DoctorTrajectoryProfile: trajectoryProfile,
+		DoctorEvaluator:         evaluator,
+		Cwd:                     workspaceRoot,
+		Trusted:                 trusted,
+		TrustStore:              store,
+		TrustPrompt:             trustPrompt,
+		Version:                 version,
+		Theme:                   theme,
+		SavedTheme:              resolved.Preferences.Theme,
+		SavedLayout:             resolved.Preferences.Layout,
+		UserConfigPath:          userConfigPath,
+		DoctorUserConfigPath:    doctorUserConfigPath,
+		ProjectConfigPath:       projectConfigPath,
+		ProviderName:            resolved.Provider.Name,
+		ModelName:               resolved.Provider.Model,
+		FlagResolutions:         flagResolutions,
 		ReasoningEffort: func() modelregistry.ReasoningEffort {
 			if modelregistry.ValidReasoningEffort(modelregistry.ReasoningEffort(resolved.Provider.ReasoningEffort)) {
 				return modelregistry.ReasoningEffort(resolved.Provider.ReasoningEffort)
@@ -940,7 +991,7 @@ func runInteractiveTUIWithSetup(stdout io.Writer, stderr io.Writer, deps appDeps
 			var stdout, stderr bytes.Buffer
 			exitCode := runMCPWithContext(ctx, args, &stdout, &stderr, deps)
 			nextConfig := lastKnownMCPConfig
-			if refreshed, err := deps.resolveMCPConfig(workspaceRoot); err == nil {
+			if refreshed, err := resolveWorkspaceMCPConfig(deps, workspaceRoot); err == nil {
 				lastKnownMCPConfig = refreshed
 				nextConfig = refreshed
 			}
@@ -952,9 +1003,23 @@ func runInteractiveTUIWithSetup(stdout io.Writer, stderr io.Writer, deps appDeps
 			}
 		},
 		SandboxSetupCommand: tuiSandboxSetupCommand(sandboxBackend, deps),
+		BackendCommand:      newTUIBackendCommand(deps),
+		RefreshModelCatalog: func(ctx context.Context, force bool) (bool, error) {
+			if force {
+				return modelregistry.ForceRefreshModelsDevCache(ctx)
+			}
+			return modelregistry.RefreshModelsDevCache(ctx)
+		},
 		AgentOptions: agent.Options{
+			DecisionEvaluator:          evaluator,
+			DecisionAdvisorConfig:      section,
+			TrajectoryConfig:           resolved.Trajectory,
+			MaxWall:                    resolved.MaxWall,
 			MaxTurns:                   resolved.MaxTurns,
+			VerifyCommand:              append([]string(nil), resolved.Verify.TestCommand...),
+			VerifyDir:                  resolved.Verify.TestDir,
 			TrustedWorkspace:           trusted,
+			TrustRoot:                  workspaceRoot,
 			Registry:                   registry,
 			PermissionMode:             permissionMode,
 			Autonomy:                   "low",
@@ -1122,6 +1187,7 @@ func newCoreRegistryScoped(workspaceRoot string, scope tools.PathScope) *tools.R
 	for _, tool := range tools.WithoutEmptyBackedTools(tools.CoreToolsScoped(workspaceRoot, scope)) {
 		registry.Register(tool)
 	}
+	tools.RegisterPipelineSourceReader(registry, workspaceRoot, scope)
 	registerLocalControlTools(registry, workspaceRoot, config.LocalControlConfig{})
 	return registry
 }
@@ -1208,10 +1274,16 @@ func (r *agentToolRuntime) specialistInfos() []agent.SpecialistInfo {
 	return r.specialists
 }
 
-func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, maxTeamSize int) (*agentToolRuntime, error) {
+func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, maxTeamSize int, trusted bool) (*agentToolRuntime, error) {
 	paths, err := specialist.DefaultPaths(workspaceRoot)
 	if err != nil {
 		return nil, err
+	}
+	// Project specialists (.splice/specialists) load only in a trusted
+	// workspace. The executor keeps these paths, so the Task tool cannot load
+	// or spawn a project specialist in an untrusted workspace either.
+	if !trusted {
+		paths.ProjectDir = ""
 	}
 	loaded, err := specialist.Load(specialist.LoadOptions{Paths: paths})
 	if err != nil {
@@ -1327,6 +1399,7 @@ Commands:
   daemon     Manage the local background worker daemon (start/stop/status/run/attach)
   setup      Guide first-run provider setup
   config     Inspect resolved Go configuration without leaking secrets
+  flags      List feature flags, their values, and where each value comes from
   pipeline   List and inspect pipeline topologies
   models     List Splice model registry entries
   providers  Inspect resolved provider profiles
@@ -1366,6 +1439,7 @@ Flags:
   -p, --prompt                   Run a one-shot prompt
       --add-dir <path>           Allow writes in an extra directory (repeatable)
       --skip-permissions-unsafe  Launch the interactive shell in unsafe mode (enables the ! shell escape)
+      --flags <list>             Set feature flags for this run (SPLICE_FLAGS grammar; exec --flags wins for names it sets)
 `)
 	return err
 }
@@ -1450,11 +1524,94 @@ func splitLeadingThemeFlag(args []string) (string, []string, error) {
 	return theme, args, nil
 }
 
-// splitLeadingTrustFlags strips leading --trust and --no-trust flags from the
-// root argument list before subcommand dispatch. It returns an error if both are
-// present. The values are also stored in rootTrust/rootNoTrust for the startup
-// path.
-func splitLeadingTrustFlags(args []string) (trust bool, noTrust bool, rest []string, err error) {
+// rootFlagsCommandCheck reports whether the root --flags list reaches config
+// resolution for the command in args. When it does not, it returns the command
+// label for the usage error. Commands with subcommands are checked per
+// subcommand, because some subcommands never resolve config. A missing or
+// unknown subcommand is left to that command's own usage error.
+func rootFlagsCommandCheck(args []string) (string, bool) {
+	sub := ""
+	if len(args) > 1 && !strings.HasPrefix(args[1], "-") {
+		sub = strings.ToLower(args[1])
+	}
+	label := strings.TrimSpace(args[0] + " " + sub)
+	switch args[0] {
+	case "--skip-permissions-unsafe", "-p", "--prompt", "exec", "models",
+		"doctor", "context", "flags", "serve":
+		// Each of these resolves config through deps.resolveConfig.
+		return label, true
+	case "config":
+		return label, sub != "describe"
+	case "providers":
+		// The default list and the other read commands resolve config.
+		return label, !(sub == "catalog" || sub == "add" || sub == "use" || sub == "setup" || sub == "help")
+	case "changes", "change":
+		return label, sub == "commit"
+	case "usage":
+		return label, sub == "" || sub == "report"
+	case "mcp":
+		return label, sub == "" || sub == "tools"
+	case "sandbox":
+		return label, sub == "" || sub == "policy" || sub == "setup" || sub == "check"
+	}
+	// Any other command, including one that is not a command at all, fails
+	// loud. It never reads the list.
+	return args[0], false
+}
+
+// withRootFlags wraps a config resolver so the root --flags list reaches every
+// resolution as a command-line override. An exec --flags entry wins for the
+// names it sets.
+func withRootFlags(resolve func(string, config.Overrides) (config.ResolvedConfig, error)) func(string, config.Overrides) (config.ResolvedConfig, error) {
+	return func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+		if len(rootFlags) > 0 {
+			merged := make(map[string]bool, len(rootFlags)+len(overrides.Flags))
+			for name, value := range rootFlags {
+				merged[name] = value
+			}
+			for name, value := range overrides.Flags {
+				merged[name] = value
+			}
+			overrides.Flags = merged
+		}
+		return resolve(workspaceRoot, overrides)
+	}
+}
+
+// splitLeadingFlagsOption strips a leading --flags <list> (space or = form)
+// from the root argument list. The list uses the SPLICE_FLAGS grammar. An
+// invalid list is a usage error that names the bad item.
+func splitLeadingFlagsOption(args []string) (map[string]bool, []string, error) {
+	if len(args) == 0 {
+		return nil, args, nil
+	}
+	var value string
+	switch {
+	case args[0] == "--flags":
+		if len(args) < 2 {
+			return nil, nil, errors.New("--flags requires a list (for example --flags memory.prefetch,-pipeline.stage.test_generator)")
+		}
+		value = args[1]
+		args = args[2:]
+	case strings.HasPrefix(args[0], "--flags="):
+		value = strings.TrimPrefix(args[0], "--flags=")
+		args = args[1:]
+	default:
+		return nil, args, nil
+	}
+	parsed, err := flags.ParseList(value)
+	if err != nil {
+		return nil, nil, fmt.Errorf("--flags: %w", err)
+	}
+	return parsed, args, nil
+}
+
+// splitLeadingRootOptions strips the global options that may come before the
+// subcommand, in any order: --trust, --no-trust, and --flags <list>. The values
+// are also stored in rootTrust, rootNoTrust, and rootFlags by the caller. A
+// --flags list may be given once, so every name belongs in one list.
+func splitLeadingRootOptions(args []string) (trust bool, noTrust bool, set map[string]bool, rest []string, err error) {
+	seenFlags := false
 	for len(args) > 0 {
 		switch {
 		case args[0] == "--trust":
@@ -1463,14 +1620,29 @@ func splitLeadingTrustFlags(args []string) (trust bool, noTrust bool, rest []str
 		case args[0] == "--no-trust":
 			noTrust = true
 			args = args[1:]
+		case args[0] == "--flags" || strings.HasPrefix(args[0], "--flags="):
+			if seenFlags {
+				return false, false, nil, nil, errors.New("--flags may be given once; put every name in one list")
+			}
+			parsed, remaining, flagErr := splitLeadingFlagsOption(args)
+			if flagErr != nil {
+				return false, false, nil, nil, flagErr
+			}
+			seenFlags = true
+			set = parsed
+			args = remaining
 		default:
-			return trust, noTrust, args, nil
+			return trust, noTrust, set, args, nil
 		}
 	}
-	if trust && noTrust {
-		return true, true, args, errors.New("Use either --trust or --no-trust, not both.")
-	}
-	return trust, noTrust, args, nil
+	return trust, noTrust, set, args, nil
+}
+
+// isProviderResolveError reports whether a config resolve failed only because
+// no provider is ready. Such a failure still returns a resolved flag set, and
+// the command can keep going without a provider.
+func isProviderResolveError(err error) bool {
+	return errors.Is(err, config.ErrNoActiveProvider) || errors.Is(err, config.ErrProviderRequiresModel)
 }
 
 // profileHasCredential reports whether the profile can authenticate: a direct API
@@ -1534,7 +1706,9 @@ Flags:
                                     Override draft reasoning effort when --use-spec is set
       --plan <path>                  Execute a design plan JSON file
       --pipeline <name|path>         Run a pipeline topology from the user library or a file
+      --loop                         Run the plain coding-agent tool loop instead of the fixed pipeline
       --max-turns <number>           Override the maximum agent loop turns
+      --max-wall <duration>          Set the pipeline wall-time limit, e.g. 30m (default 10m; env SPLICE_MAX_WALL)
       --auto <low|medium|high>       Set exec autonomy; high enables unsafe tools
       --enabled-tools <tools>        Only expose these comma or space separated tools
       --disabled-tools <tools>       Hide these comma or space separated tools
@@ -1545,7 +1719,10 @@ Flags:
   -C, --cwd <path>                   Set the workspace directory
   -w, --worktree [name]              Run from an isolated git worktree
       --worktree-dir <path>          Base directory for created worktrees
-      --merge-back                   Merge changes and remove the worktree on success (requires --worktree)
+      --merge-back                   Merge changes and remove the worktree on success (requires --worktree and a verified run)
+      --allow-unverified-merge       Permit --merge-back when the run completed without verification (unsafe)
+      --require-verified             Exit 4 when a completed run did not verify (CI truth mode)
+      --serve                        Start a local browser surface and print its one-time URL to stderr
   -i, --input-format text|stream-json
                                     Select prompt input format
   -o, --output-format text|json|stream-json

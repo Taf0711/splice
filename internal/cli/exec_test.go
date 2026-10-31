@@ -13,9 +13,11 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/config"
+	"github.com/Taf0711/splice/internal/flags"
 	"github.com/Taf0711/splice/internal/hooks"
 	"github.com/Taf0711/splice/internal/mcp"
 	"github.com/Taf0711/splice/internal/memd"
@@ -23,6 +25,7 @@ import (
 	"github.com/Taf0711/splice/internal/plugins"
 	"github.com/Taf0711/splice/internal/sandbox/procrun"
 	"github.com/Taf0711/splice/internal/sessions"
+	splicerun "github.com/Taf0711/splice/internal/splice"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/tools"
 	"github.com/Taf0711/splice/internal/usage"
@@ -45,8 +48,41 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	os.Setenv("XDG_DATA_HOME", dir)
+	stateDir, err := os.MkdirTemp("", "splice-cli-test-state-")
+	if err != nil {
+		os.RemoveAll(dir)
+		panic(err)
+	}
+	os.Setenv("XDG_STATE_HOME", stateDir)
+	// An active pipeline in the developer's config.json would change the
+	// topology these tests resolve. Point the config at an empty temp dir.
+	configDir, err := os.MkdirTemp("", "splice-cli-test-config-")
+	if err != nil {
+		os.RemoveAll(dir)
+		os.RemoveAll(stateDir)
+		panic(err)
+	}
+	os.Setenv("XDG_CONFIG_HOME", configDir)
+	// macOS ignores XDG_DATA_HOME for the memd data path. Keep every CLI test
+	// on a short, disposable socket and database so tests cannot touch the
+	// user's real memory store.
+	memdDir, err := os.MkdirTemp("", "m-")
+	if err != nil {
+		os.RemoveAll(dir)
+		os.RemoveAll(stateDir)
+		panic(err)
+	}
+	os.Setenv("SPLICE_MEMD_SOCKET", filepath.Join(memdDir, "m.sock"))
+	os.Setenv("SPLICE_MEMD_DB", filepath.Join(memdDir, "m.db"))
+	// The --serve redaction list reads the OAuth login of a keyless profile.
+	// Keep every test on an empty token file, never the OS keychain.
+	os.Setenv("SPLICE_OAUTH_STORAGE", "file")
+	os.Setenv("SPLICE_OAUTH_TOKENS_PATH", filepath.Join(memdDir, "oauth.json"))
 	code := m.Run()
 	os.RemoveAll(dir)
+	os.RemoveAll(stateDir)
+	os.RemoveAll(memdDir)
+	os.RemoveAll(configDir)
 	os.Exit(code)
 }
 
@@ -192,6 +228,68 @@ func TestRunExecHelpDocumentsM1Flags(t *testing.T) {
 			}
 			if stderr.Len() != 0 {
 				t.Fatalf("expected empty stderr, got %q", stderr.String())
+			}
+		})
+	}
+}
+
+// AUDIT-06: --max-wall takes a positive Go duration and refuses anything else
+// with a usage error before the runtime starts.
+func TestRunExecMaxWallFlag(t *testing.T) {
+	for _, args := range [][]string{
+		{"--max-wall", "soon"},
+		{"--max-wall", "0s"},
+		{"--max-wall=-5m"},
+		{"--max-wall="},
+		{"--max-wall", "30"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			exitCode := Run(append(append([]string{"exec"}, args...), "hello"), &stdout, &stderr)
+			if exitCode != exitUsage {
+				t.Fatalf("exit code = %d, want %d (stderr %q)", exitCode, exitUsage, stderr.String())
+			}
+			if stdout.Len() != 0 || !strings.Contains(stderr.String(), "--max-wall") {
+				t.Fatalf("stdout = %q, stderr = %q, want a --max-wall usage error", stdout.String(), stderr.String())
+			}
+		})
+	}
+
+	for _, args := range [][]string{{"--max-wall", "30m"}, {"--max-wall=30m"}} {
+		options, _, err := parseExecArgs(append(args, "hello"))
+		if err != nil || options.maxWall != 30*time.Minute {
+			t.Fatalf("parseExecArgs(%q) = %v, %v, want 30m", args, options.maxWall, err)
+		}
+	}
+	// The flag wins over the resolved env or config limit; without the flag
+	// the resolved limit stands.
+	if got := execMaxWall(30*time.Minute, 45*time.Minute); got != 30*time.Minute {
+		t.Fatalf("flag over resolved = %v, want 30m", got)
+	}
+	if got := execMaxWall(0, 45*time.Minute); got != 45*time.Minute {
+		t.Fatalf("resolved without flag = %v, want 45m", got)
+	}
+}
+
+// P2-1, P3-5: the loop and a spec draft never verify, so the gates that need a
+// verified run are refused at parse time with the reason.
+func TestRunExecRejectsVerificationGatesWithoutVerification(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--loop", "--worktree", "--merge-back"}, "--merge-back cannot be combined with --loop: the loop has no verification step."},
+		{[]string{"--loop", "--require-verified"}, "--require-verified cannot be combined with --loop: the loop has no verification step."},
+		{[]string{"--use-spec", "--require-verified"}, "--require-verified cannot be combined with --use-spec: a spec draft has no verification step."},
+	} {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			exitCode := Run(append(append([]string{"exec"}, tc.args...), "hello"), &stdout, &stderr)
+			if exitCode != exitUsage {
+				t.Fatalf("exit code = %d, want %d (stderr %q)", exitCode, exitUsage, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tc.want) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), tc.want)
 			}
 		})
 	}
@@ -564,12 +662,15 @@ func TestRunExecPlainRunRecordsUsageInEphemeralSession(t *testing.T) {
 		t.Fatalf("expected at least one usage event, got events = %#v", events)
 	}
 
-	// The acceptance bar: usage.BuildReport (the same aggregator `splice usage`
-	// runs) must be able to read these events back into non-zero totals. A nil
-	// registry is fine here — BuildReport treats it as "skip cost, keep tokens".
-	report, err := usage.BuildReport(events, items, nil, 0)
+	// The acceptance bar: usage.BuildReportPriced (the aggregator `splice usage`
+	// runs) must read these events back into non-zero totals. A pricer that
+	// prices nothing keeps the tokens, which is the bar here.
+	unpriced := func(string, string, zeroruntime.Usage) agent.UsageCostEstimate {
+		return agent.UsageCostEstimate{Status: agent.CostStatusUnpriced, UnpricedReason: "no catalog in this test"}
+	}
+	report, err := usage.BuildReportPriced(events, items, unpriced, 0)
 	if err != nil {
-		t.Fatalf("BuildReport returned error: %v", err)
+		t.Fatalf("BuildReportPriced returned error: %v", err)
 	}
 	if report.Total.InputTokens <= 0 || report.Total.OutputTokens <= 0 || report.Total.Requests <= 0 {
 		t.Fatalf("report.Total = %#v, want positive input/output/requests", report.Total)
@@ -2233,8 +2334,8 @@ func TestRunExecTopTierDeclineNoSwitch(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(userConfigPath), 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	// Pin every model-backed stage to the primary so this test counts provider
-	// builds for the escalation path only, not the tier fallback introduced in CP1.
+	// Pin every model-backed stage to the primary so the tier fallback does not
+	// build other models. The route must resolve: an unresolvable route fails the run.
 	if err := os.WriteFile(stageModelsPath, []byte(`{"default":{"provider_profile":"echo","model":"claude-opus-4.1"}}`), 0o600); err != nil {
 		t.Fatalf("write stage-models.json: %v", err)
 	}
@@ -2262,6 +2363,7 @@ func TestRunExecTopTierDeclineNoSwitch(t *testing.T) {
 			cfg := execResolvedConfig()
 			cfg.Provider.ProviderKind = config.ProviderKindAnthropic
 			cfg.Provider.Model = model
+			cfg.Providers = []config.ProviderProfile{cfg.Provider}
 			cfg.MaxTurns = 3
 			return cfg, nil
 		},
@@ -2274,12 +2376,15 @@ func TestRunExecTopTierDeclineNoSwitch(t *testing.T) {
 		t.Fatalf("exitCode = %d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
 	}
 	// The escalate_model call resolved to a no-target informational result, so the
-	// loop never requested a switch and newProvider was built exactly once.
-	if len(providerModels) != 1 {
-		t.Fatalf("newProvider built for %#v, want exactly 1 (top-tier decline performs no switch)", providerModels)
+	// loop never requested a switch. The pinned route and the primary build the
+	// same model only; a switch would build a different one.
+	if len(providerModels) == 0 {
+		t.Fatal("newProvider was never called")
 	}
-	if providerModels[0] != "claude-opus-4.1" {
-		t.Fatalf("provider model = %q, want claude-opus-4.1", providerModels[0])
+	for _, model := range providerModels {
+		if model != "claude-opus-4.1" {
+			t.Fatalf("newProvider built %#v, want only claude-opus-4.1 (top-tier decline performs no switch)", providerModels)
+		}
 	}
 }
 
@@ -2439,5 +2544,321 @@ func TestParseExecArgsFlags(t *testing.T) {
 	}
 	if _, _, err := parseExecArgs([]string{"--flags", "a.b=maybe", "prompt"}); err == nil {
 		t.Fatal("an invalid boolean must fail the parse")
+	}
+}
+
+func TestParseExecArgsLoop(t *testing.T) {
+	options, help, err := parseExecArgs([]string{"--loop", "--max-turns", "4", "prompt"})
+	if err != nil || help {
+		t.Fatalf("parse: err=%v help=%v", err, help)
+	}
+	if !options.loop || options.maxTurns != 4 {
+		t.Fatalf("loop options = %#v, want loop=true max-turns=4", options)
+	}
+	if _, _, err := parseExecArgs([]string{"--loop", "--plan", "plan.json"}); err == nil {
+		t.Fatal("--loop and --plan must be rejected")
+	}
+}
+
+// TestRunExecRefusesPipelineWithPlan pins that --plan and --pipeline are
+// refused together, as --loop and --plan are: a design plan runs the default
+// topology, so --pipeline would be silently ignored.
+func TestRunExecRefusesPipelineWithPlan(t *testing.T) {
+	for _, args := range [][]string{
+		{"exec", "--plan", "plan.json", "--pipeline", "my-pipeline"},
+		{"exec", "--pipeline=my-pipeline", "--plan", "plan.json"},
+	} {
+		var stdout, stderr bytes.Buffer
+		exitCode := runWithDeps(args, &stdout, &stderr, appDeps{
+			getwd: func() (string, error) { return t.TempDir(), nil },
+		})
+		if exitCode != exitUsage {
+			t.Fatalf("%v: exitCode = %d, want %d; stderr=%s", args, exitCode, exitUsage, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "--pipeline cannot be combined with --plan.") {
+			t.Fatalf("%v: stderr = %q, want the --pipeline and --plan conflict", args, stderr.String())
+		}
+	}
+}
+
+// A real pipeline run uses the provider seam for stages and the evaluator seam for decisions.
+func TestTrajectoryClassifierRunWithStageProvider(t *testing.T) {
+	t.Setenv(splicerun.DecisionAdvisorModeEnvVar, "")
+	t.Setenv(splicerun.TrajectoryPackEnvVar, "")
+	for _, failure := range []bool{false, true} {
+		t.Run(map[bool]string{false: "step_back", true: "classifier failure"}[failure], func(t *testing.T) {
+			cwd := t.TempDir()
+			provider := newExecStageAwareProvider(execStageProviderOptions{})
+			evaluator := &runTrajectoryEvaluator{failure: failure}
+			var progress strings.Builder
+			options := agent.Options{Cwd: cwd, ProjectRoot: cwd, TrustedWorkspace: true, PermissionMode: agent.PermissionModeUnsafe, Registry: newCoreRegistry(cwd), FileTracker: tools.NewFileTracker(), SessionID: "trajectory-run", Model: "echo-model", ProviderName: "echo", Flags: flags.Set{flags.DecisionAdvisorEnabled: true, flags.PipelineBudgetFit: false}, VerifyCommand: []string{"/bin/sh", "-c", "printf 'FAIL TestValue\n'; exit 1"}, DecisionEvaluator: evaluator, DecisionAdvisorConfig: config.DecisionAdvisorConfig{Mode: "active_experimental", Backend: "http", Profile: "test-classifier", QuestionPack: "traj_action_v1"}, OnReasoning: func(s string) { progress.WriteString(s) }}
+			_, err := splicerun.Run(context.Background(), "Create a Go function that returns a greeting and test the result.", provider, options, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if evaluator.calls == 0 {
+				t.Fatalf("classifier was not called: %s", progress.String())
+			}
+			if !failure {
+				if provider.stepBackCalls != 1 {
+					t.Fatalf("step_back calls=%d: %s", provider.stepBackCalls, progress.String())
+				}
+				if !strings.Contains(progress.String(), "http (active_experimental)") {
+					t.Fatal("backend missing from progress")
+				}
+			} else {
+				if !strings.Contains(progress.String(), "rules (active_experimental)") {
+					t.Fatalf("classifier failure left the rules path: %s", progress.String())
+				}
+			}
+		})
+	}
+}
+
+type runTrajectoryEvaluator struct {
+	failure bool
+	calls   int
+}
+
+func (e *runTrajectoryEvaluator) Evaluate(_ context.Context, req zeroruntime.DecisionRequest) (zeroruntime.DecisionResult, error) {
+	e.calls++
+	if e.failure {
+		return zeroruntime.DecisionResult{}, errors.New("test classifier transport failure")
+	}
+	label := "continue"
+	if e.calls == 1 {
+		label = "step_back"
+	}
+	return zeroruntime.DecisionResult{ResolvedModel: req.Model, Answers: []zeroruntime.DecisionAnswer{{QuestionID: "trajectory_action", Kind: zeroruntime.DecisionKindChoice, Probabilities: map[string]float64{label: 1}}}}, nil
+}
+
+// TestRunExecPrintsCommandNodeNoticeOnce pins where a command-node notice goes
+// for each output format. Text mode writes it once to stderr with the [splice]
+// prefix. Stream-json keeps it once on the reasoning stream and leaves stderr
+// empty.
+func TestRunExecPrintsCommandNodeNoticeOnce(t *testing.T) {
+	const notice = "[topology] command node lint_cmd will run: true --strict"
+	for _, tc := range []struct {
+		name   string
+		format string
+	}{
+		{name: "text", format: "text"},
+		{name: "stream-json", format: "stream-json"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("XDG_DATA_HOME", t.TempDir())
+			cwd := t.TempDir()
+			topologyPath := filepath.Join(t.TempDir(), "topology.json")
+			writeExecCommandTopology(t, topologyPath)
+
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			exitCode := runWithDeps([]string{"exec", "--pipeline", topologyPath, "--output-format", tc.format, "write the note"}, &stdout, &stderr, appDeps{
+				getwd: func() (string, error) {
+					return cwd, nil
+				},
+				resolveConfig: func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+					return execResolvedConfig(), nil
+				},
+				newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+					return newExecStageAwareProvider(execStageProviderOptions{
+						Files: []schemas.FileChange{
+							{Path: "go.mod", Content: "module example\n\ngo 1.22\n", ChangeType: "create"},
+						},
+					}), nil
+				},
+			})
+			if exitCode != exitSuccess {
+				t.Fatalf("exitCode = %d, stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
+			}
+
+			if tc.format == "text" {
+				if got := strings.Count(stderr.String(), "[splice] "+notice+"\n"); got != 1 {
+					t.Fatalf("text stderr has %d command-node notices, want 1:\n%s", got, stderr.String())
+				}
+				return
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("stream-json stderr = %q, want empty", stderr.String())
+			}
+			count := 0
+			for _, event := range decodeJSONLines(t, stdout.String()) {
+				if event["type"] == "reasoning" && strings.Contains(event["delta"].(string), notice) {
+					count++
+				}
+			}
+			if count != 1 {
+				t.Fatalf("stream-json reasoning carries the notice %d times, want 1", count)
+			}
+		})
+	}
+}
+
+// writeExecCommandTopology writes a topology with one command node. It names no
+// provider profile, so a pipeline run resolves it with the exec test config.
+func writeExecCommandTopology(t *testing.T, path string) {
+	t.Helper()
+	topology := schemas.PipelineTopology{
+		Version: schemas.TopologySchemaVersion,
+		Name:    "named",
+		Nodes: []schemas.PipelineNode{
+			{Name: "code_writer", Type: "code_writer"},
+			{Name: "lint_cmd", Type: schemas.NodeTypeCommand, Command: []string{"true", "--strict"}},
+		},
+		Edges: []schemas.PipelineEdge{{From: "code_writer", To: "lint_cmd", Payload: schemas.EdgePayloadNone}},
+	}
+	data, err := json.Marshal(topology)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRunExecPrintsTopologyOverrideNoticeOnce pins that a --pipeline override of
+// a trusted project topology prints its warning once in every output format.
+// Text mode writes it to stderr. JSON modes keep it on the reasoning stream.
+func TestRunExecPrintsTopologyOverrideNoticeOnce(t *testing.T) {
+	const marker = "overrides the trusted project topology"
+	for _, format := range []string{"text", "json", "stream-json"} {
+		t.Run(format, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("XDG_DATA_HOME", t.TempDir())
+			cwd := t.TempDir()
+			projectPath := filepath.Join(cwd, ".splice", "pipeline.json")
+			writeExecCommandTopology(t, projectPath)
+			topologyPath := filepath.Join(t.TempDir(), "topology.json")
+			writeExecCommandTopology(t, topologyPath)
+
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			exitCode := runWithDeps([]string{"--trust", "exec", "--pipeline", topologyPath, "--output-format", format, "write the note"}, &stdout, &stderr, appDeps{
+				getwd: func() (string, error) {
+					return cwd, nil
+				},
+				resolveConfig: func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+					return execResolvedConfig(), nil
+				},
+				newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+					return newExecStageAwareProvider(execStageProviderOptions{
+						Files: []schemas.FileChange{
+							{Path: "go.mod", Content: "module example\n\ngo 1.22\n", ChangeType: "create"},
+						},
+					}), nil
+				},
+			})
+			if exitCode != exitSuccess {
+				t.Fatalf("exitCode = %d, stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
+			}
+
+			if format == "text" {
+				if got := strings.Count(stderr.String(), "[splice] [topology] warning: --pipeline "); got != 1 || !strings.Contains(stderr.String(), marker) {
+					t.Fatalf("text stderr has %d override notices, want 1:\n%s", got, stderr.String())
+				}
+				return
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("%s stderr = %q, want empty", format, stderr.String())
+			}
+			count := 0
+			for _, event := range decodeJSONLines(t, stdout.String()) {
+				if event["type"] == "reasoning" && strings.Contains(event["delta"].(string), marker) {
+					count++
+				}
+			}
+			if count != 1 {
+				t.Fatalf("%s reasoning carries the override notice %d times, want 1", format, count)
+			}
+		})
+	}
+}
+
+// TestRunExecInvalidStageModelsFailsTheRun pins the D2 guard in headless
+// exec: an invalid stage-models.json must not fall back to the run model.
+// The first stage that needs a route fails the run and names the cause.
+func TestRunExecInvalidStageModelsFailsTheRun(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	cwd := t.TempDir()
+	userConfigPath := filepath.Join(t.TempDir(), "splice", "config.json")
+	if err := os.MkdirAll(filepath.Dir(userConfigPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(userConfigPath), "stage-models.json"), []byte(`{"stages": {`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"exec", "add a Hello function"}, &stdout, &stderr, appDeps{
+		getwd:          func() (string, error) { return cwd, nil },
+		userConfigPath: func() (string, error) { return userConfigPath, nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			cfg := execResolvedConfig()
+			cfg.Providers = []config.ProviderProfile{cfg.Provider}
+			cfg.MaxTurns = 3
+			return cfg, nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return newExecStageAwareProvider(execStageProviderOptions{}), nil
+		},
+	})
+	output := stdout.String() + stderr.String()
+	if exitCode == exitSuccess {
+		t.Fatalf("exec succeeded with an invalid stage-models.json:\n%s", output)
+	}
+	if !strings.Contains(output, "stage routing config invalid") {
+		t.Fatalf("output does not name the invalid routing config:\n%s", output)
+	}
+}
+
+// TestRunExecInvalidTopologyIsInputError pins the exit-code contract for an
+// input error that Run finds before any provider request: exit 2 with the
+// input_error code in every output format, and no request.
+func TestRunExecInvalidTopologyIsInputError(t *testing.T) {
+	for _, format := range []string{"text", "json", "stream-json"} {
+		t.Run(format, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("XDG_DATA_HOME", t.TempDir())
+			cwd := t.TempDir()
+			topologyPath := filepath.Join(t.TempDir(), "typo.json")
+			if err := os.WriteFile(topologyPath, []byte(`{"name":"typo","modle":"x"}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			provider := newExecStageAwareProvider(execStageProviderOptions{})
+			var stdout, stderr bytes.Buffer
+			exitCode := runWithDeps([]string{"exec", "--pipeline", topologyPath, "--output-format", format, "write the note"}, &stdout, &stderr, appDeps{
+				getwd: func() (string, error) { return cwd, nil },
+				resolveConfig: func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+					return execResolvedConfig(), nil
+				},
+				newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) { return provider, nil },
+			})
+			if exitCode != exitUsage {
+				t.Fatalf("exitCode = %d, want %d; stdout=%s stderr=%s", exitCode, exitUsage, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stdout.String()+stderr.String(), "unknown field") || !strings.Contains(stdout.String()+stderr.String(), "modle") {
+				t.Fatalf("output does not name the unknown field: stdout=%s stderr=%s", stdout.String(), stderr.String())
+			}
+			if format != "text" {
+				found := false
+				for _, event := range decodeJSONLines(t, stdout.String()) {
+					if event["type"] == "error" {
+						found = true
+						if event["code"] != "input_error" {
+							t.Fatalf("error code = %v, want input_error", event["code"])
+						}
+					}
+				}
+				if !found {
+					t.Fatalf("no error event in %s", stdout.String())
+				}
+			}
+			if n := len(provider.seenIntents()); n != 0 {
+				t.Fatalf("provider requests = %d, want 0", n)
+			}
+		})
 	}
 }

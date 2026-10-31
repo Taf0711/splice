@@ -34,6 +34,9 @@ type Stage interface {
 type StageOptions struct {
 	// WorkDir is the workspace root where file changes are applied.
 	WorkDir string
+	// ProjectInstructions contains repository instruction text loaded once by
+	// the orchestrator for this run.
+	ProjectInstructions string
 	// Sandbox is the stage sandbox engine for deterministic subprocesses: an
 	// enforce-mode engine that scopes the filesystem to the workspace and
 	// denies network. Nil skips OS-level confinement; the binary allowlist at
@@ -71,14 +74,27 @@ type StageOptions struct {
 	PromptCacheKey string
 	// Command is an explicit command for deterministic stages like test_runner.
 	Command []string
+	// CommandWorkDir is the working directory for an explicit deterministic
+	// command. Empty uses WorkDir.
+	CommandWorkDir string
 	// TimeoutSeconds bounds deterministic subprocess execution.
 	TimeoutSeconds int
+	// OnFormatRetry, when set, is invoked before each typed-output format
+	// retry attempt (attempt 2 and up) of callValidatedToolUse. The
+	// orchestrator uses it to reclassify the request attribution cell so
+	// retry spend lands under the format_retry source instead of
+	// generation. Nil means the stage never reclassifies (legacy shape).
+	OnFormatRetry func(attempt int)
 	// Plan is used by the plan_critic stage.
 	Plan *schemas.DesignPlan
 	// PreviousPlan is the plan from the prior crystallization, when available.
 	PreviousPlan *schemas.DesignPlan
 	// PreviousCritique is the prior plan review, when available.
 	PreviousCritique *schemas.PlanCritique
+	// RunAgent runs one agent node's bounded tool loop. The orchestrator wires
+	// it, so this package never imports the agent loop. Nil refuses an agent
+	// node instead of running it outside the registry path.
+	RunAgent func(ctx context.Context, request AgentNodeRequest) (AgentNodeResult, error)
 }
 
 // ToolResult is the minimal deterministic-adapter result a stage needs.

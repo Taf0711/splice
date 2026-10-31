@@ -16,6 +16,9 @@ const (
 )
 
 type toolState struct {
+	// requestID is the provider's request identity: the X-Generation-Id
+	// header, or OpenRouter's generation ID from the chunks.
+	requestID      string
 	calls          map[int]*pendingToolCall
 	think          thinkTagSplitter
 	parseThinkTags bool

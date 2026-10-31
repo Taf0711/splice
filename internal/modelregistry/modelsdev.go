@@ -56,8 +56,10 @@ type modelsDevModel struct {
 		Output  int `json:"output"`
 	} `json:"limit"`
 	Cost struct {
-		Input      float64             `json:"input"`
-		Output     float64             `json:"output"`
+		// Input and Output are pointers so an absent cost differs from an
+		// explicit zero. An explicit zero on both marks a free listing.
+		Input      *float64            `json:"input"`
+		Output     *float64            `json:"output"`
 		CacheRead  float64             `json:"cache_read"`
 		CacheWrite float64             `json:"cache_write"`
 		Tiers      []modelsDevCostTier `json:"tiers"`
@@ -79,8 +81,21 @@ type modelsDevCostTier struct {
 	} `json:"tier"`
 }
 
+// modelsDevRate reads an optional models.dev rate. ok is false when the record
+// carries no cost for it, which is not the same as a listed zero.
+func modelsDevRate(rate *float64) (float64, bool) {
+	if rate == nil {
+		return 0, false
+	}
+	return *rate, true
+}
+
 func modelsDevReasoningEfforts(record modelsDevModel) []ReasoningEffort {
+	budgetOnly := false
 	for _, option := range record.ReasoningOptions {
+		if option.Type == "budget_tokens" {
+			budgetOnly = true
+		}
 		if option.Type != "effort" {
 			continue
 		}
@@ -95,6 +110,12 @@ func modelsDevReasoningEfforts(record modelsDevModel) []ReasoningEffort {
 			return nil
 		}
 		return efforts
+	}
+	// A thinking-budget model (Claude Haiku 4.5, Sonnet 4.5) has no effort
+	// enum on the wire, but the provider maps low/medium/high to budgets,
+	// so the user still gets a real depth control instead of none.
+	if budgetOnly {
+		return []ReasoningEffort{ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh}
 	}
 	return nil
 }
@@ -111,8 +132,8 @@ func modelsDevCostTiers(record modelsDevModel) []ModelCostTier {
 	})
 
 	tiers := make([]ModelCostTier, 0, len(steps)+1)
-	inputRate := record.Cost.Input
-	outputRate := record.Cost.Output
+	inputRate, _ := modelsDevRate(record.Cost.Input)
+	outputRate, _ := modelsDevRate(record.Cost.Output)
 	cachedRate := record.Cost.CacheRead
 	cacheWriteRate := record.Cost.CacheWrite
 	for _, step := range steps {
@@ -283,9 +304,11 @@ func applyModelsDevOverridesWithSource(entries []ModelEntry, providers map[strin
 		}
 		// Base rates and tiers must come from the same record. A live base rate
 		// beside a curated boundary misprices every step.
-		if record.Cost.Input > 0 && record.Cost.Output > 0 {
-			entry.Cost.InputPerMillion = record.Cost.Input
-			entry.Cost.OutputPerMillion = record.Cost.Output
+		inputRate, hasInput := modelsDevRate(record.Cost.Input)
+		outputRate, hasOutput := modelsDevRate(record.Cost.Output)
+		if hasInput && hasOutput && inputRate > 0 && outputRate > 0 {
+			entry.Cost.InputPerMillion = inputRate
+			entry.Cost.OutputPerMillion = outputRate
 			if record.Cost.CacheRead > 0 {
 				entry.Cost.CachedInputPerMillion = record.Cost.CacheRead
 			}
@@ -343,9 +366,24 @@ func applyModelsDevOverridesWithSource(entries []ModelEntry, providers map[strin
 			continue
 		}
 		if _, exists := curatedModels[strings.ToLower(modelID)]; exists {
+			// A gateway that lists a curated model with its own valid price is
+			// priced by that price, for this profile only.
+			if idx := curatedEntryIndex(entries, modelID); idx >= 0 {
+				adoptGatewayPrice(&entries[idx], record, providerKey, source, verifiedDate)
+			}
 			continue
 		}
-		if record.Cost.Input <= 0 || record.Cost.Output <= 0 {
+		inputRate, hasInput := modelsDevRate(record.Cost.Input)
+		outputRate, hasOutput := modelsDevRate(record.Cost.Output)
+		// An absent cost is not a price. Both rates explicitly zero means the
+		// serving provider lists the model as free, which is a real price of
+		// zero for this provider only. Any other zero or negative rate is skipped.
+		free := hasInput && hasOutput && inputRate == 0 && outputRate == 0
+		if !free && (!hasInput || !hasOutput || inputRate <= 0 || outputRate <= 0) {
+			skipped++
+			continue
+		}
+		if free && (record.Cost.CacheRead != 0 || record.Cost.CacheWrite != 0) {
 			skipped++
 			continue
 		}
@@ -361,10 +399,11 @@ func applyModelsDevOverridesWithSource(entries []ModelEntry, providers map[strin
 			Cost: ModelCost{
 				Currency:              "USD",
 				Unit:                  "per_1m_tokens",
-				InputPerMillion:       record.Cost.Input,
-				OutputPerMillion:      record.Cost.Output,
+				InputPerMillion:       inputRate,
+				OutputPerMillion:      outputRate,
 				CachedInputPerMillion: record.Cost.CacheRead,
 				CacheWritePerMillion:  record.Cost.CacheWrite,
+				Free:                  free,
 				Tiers:                 modelsDevCostTiers(record),
 				Source:                source,
 				SourceLastVerified:    verifiedDate,
@@ -388,6 +427,51 @@ func applyModelsDevOverridesWithSource(entries []ModelEntry, providers map[strin
 		entries = append(entries, candidate)
 	}
 	return entries, skipped
+}
+
+// curatedEntryIndex finds the curated entry (no derived provider) that a model
+// id names, by id, api model, or alias. It returns -1 when none matches.
+func curatedEntryIndex(entries []ModelEntry, modelID string) int {
+	key := strings.ToLower(strings.TrimSpace(modelID))
+	for i, entry := range entries {
+		if entry.ModelsDevProvider != "" {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(entry.ID)) == key || strings.ToLower(strings.TrimSpace(entry.APIModel)) == key {
+			return i
+		}
+		for _, alias := range entry.Aliases {
+			if strings.ToLower(strings.TrimSpace(alias)) == key {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// adoptGatewayPrice prices a curated entry from a gateway's record when the
+// gateway is not one of the entry's own price catalogs and the record carries a
+// valid price. The entry is then bound to that gateway, so its price serves only
+// that profile's registry. The entry's own owners keep their curated price.
+func adoptGatewayPrice(entry *ModelEntry, record modelsDevModel, providerKey string, source string, verifiedDate string) {
+	for _, owner := range entry.PriceCatalogs() {
+		if owner == providerKey {
+			return
+		}
+	}
+	inputRate, hasInput := modelsDevRate(record.Cost.Input)
+	outputRate, hasOutput := modelsDevRate(record.Cost.Output)
+	if !hasInput || !hasOutput || inputRate <= 0 || outputRate <= 0 {
+		return
+	}
+	entry.Cost.InputPerMillion = inputRate
+	entry.Cost.OutputPerMillion = outputRate
+	entry.Cost.CachedInputPerMillion = record.Cost.CacheRead
+	entry.Cost.CacheWritePerMillion = record.Cost.CacheWrite
+	entry.Cost.Tiers = modelsDevCostTiers(record)
+	entry.Cost.Source = source
+	entry.Cost.SourceLastVerified = verifiedDate
+	entry.ModelsDevProvider = providerKey
 }
 
 func modelsDevCacheDate(modTime time.Time) string {
@@ -416,7 +500,12 @@ var (
 	modelsDevEmbeddedCapture    time.Time
 	modelsDevEmbeddedParseError error
 
-	modelsDevOnce     sync.Once
+	// modelsDevMu guards the selected snapshot. It is chosen lazily and
+	// re-chosen after a refresh writes a newer cache (ReloadModelsDevCache),
+	// so a running TUI picks up new models without a restart. Registries
+	// already built keep their own copy of the entries.
+	modelsDevMu       sync.Mutex
+	modelsDevLoaded   bool
 	modelsDevSelected modelsDevSource
 	modelsDevEnabled  atomic.Bool
 )
@@ -473,14 +562,35 @@ func embeddedModelsDevSnapshot() modelsDevSource {
 	}
 }
 
-// cachedModelsDevProviders loads the selected snapshot once per process.
-// DefaultRegistry is called on hot paths, so it does not re-stat the cache.
+// cachedModelsDevProviders returns the selected snapshot. DefaultRegistry is
+// called on hot paths, so the cache is stat-ed only when (re)loading.
 func cachedModelsDevProviders() map[string]map[string]modelsDevModel {
 	return cachedModelsDevSnapshotInfo().providers
 }
 
 func cachedModelsDevSnapshotInfo() modelsDevSource {
-	modelsDevOnce.Do(func() {
+	modelsDevMu.Lock()
+	defer modelsDevMu.Unlock()
+	if !modelsDevLoaded {
+		modelsDevLoaded = true
+		modelsDevSelected = selectModelsDevSource()
+	}
+	return modelsDevSelected
+}
+
+// ReloadModelsDevCache makes the next registry build re-select between the
+// embedded snapshot and the on-disk cache. A refresh calls it after writing.
+func ReloadModelsDevCache() {
+	modelsDevMu.Lock()
+	modelsDevLoaded = false
+	modelsDevMu.Unlock()
+}
+
+func selectModelsDevSource() modelsDevSource {
+	// Local on purpose: the selection body below assigns this name, and the
+	// caller publishes the result under modelsDevMu.
+	var modelsDevSelected modelsDevSource
+	func() {
 		selected := embeddedModelsDevSnapshot()
 		if modelsDevEmbeddedParseError != nil {
 			modelsDevSelected = selected
@@ -515,33 +625,45 @@ func cachedModelsDevSnapshotInfo() modelsDevSource {
 			modTime:   info.ModTime(),
 			source:    modelsDevCachedSource,
 		}
-	})
+	}()
 	return modelsDevSelected
 }
 
 // resetModelsDevCacheForTest clears the process-level cache memoization and
 // disables the overlay.
 func resetModelsDevCacheForTest() {
-	modelsDevOnce = sync.Once{}
+	modelsDevMu.Lock()
+	modelsDevLoaded = false
 	modelsDevSelected = modelsDevSource{}
+	modelsDevMu.Unlock()
 	modelsDevEnabled.Store(false)
 }
 
 // RefreshModelsDevCache fetches models.dev/api.json into the on-disk cache
-// when the cache is missing or older than modelsDevRefreshAfter. It is safe to
-// call fire-and-forget from startup (use a goroutine); it never affects the
-// current process's registry (see cachedModelsDevProviders). Disabled entirely
-// by SPLICE_DISABLE_MODELS_FETCH. The URL can be overridden with SPLICE_MODELS_URL.
-func RefreshModelsDevCache(ctx context.Context) error {
+// when the cache is missing or older than modelsDevRefreshAfter. It reports
+// whether a new cache was written; the next DefaultRegistry call then uses
+// it (rebuild registries to pick it up). Disabled entirely by
+// SPLICE_DISABLE_MODELS_FETCH. The URL can be overridden with SPLICE_MODELS_URL.
+func RefreshModelsDevCache(ctx context.Context) (bool, error) {
+	return refreshModelsDevCache(ctx, false)
+}
+
+// ForceRefreshModelsDevCache fetches regardless of the cache age: the
+// user asked for fresh models now.
+func ForceRefreshModelsDevCache(ctx context.Context) (bool, error) {
+	return refreshModelsDevCache(ctx, true)
+}
+
+func refreshModelsDevCache(ctx context.Context, force bool) (bool, error) {
 	if strings.TrimSpace(os.Getenv("SPLICE_DISABLE_MODELS_FETCH")) != "" {
-		return nil
+		return false, nil
 	}
 	path, err := modelsDevCachePath()
 	if err != nil {
-		return err
+		return false, err
 	}
-	if info, err := os.Stat(path); err == nil && time.Since(info.ModTime()) < modelsDevRefreshAfter {
-		return nil
+	if info, err := os.Stat(path); !force && err == nil && time.Since(info.ModTime()) < modelsDevRefreshAfter {
+		return false, nil
 	}
 
 	url := strings.TrimSpace(os.Getenv("SPLICE_MODELS_URL"))
@@ -552,40 +674,44 @@ func RefreshModelsDevCache(ctx context.Context) error {
 	defer cancel()
 	request, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, url, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	request.Header.Set("User-Agent", "splice-models-refresh/0.1")
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("modelregistry: models.dev fetch: HTTP %d", response.StatusCode)
+		return false, fmt.Errorf("modelregistry: models.dev fetch: HTTP %d", response.StatusCode)
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, modelsDevFetchLimit))
 	if err != nil {
-		return err
+		return false, err
 	}
 	// Validate before persisting: a bad body must never clobber a good cache.
 	if _, err := parseModelsDev(data); err != nil {
-		return err
+		return false, err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
+		return false, err
 	}
 	temp, err := os.CreateTemp(filepath.Dir(path), "modelsdev-*.json")
 	if err != nil {
-		return err
+		return false, err
 	}
 	if _, err := temp.Write(data); err != nil {
 		_ = temp.Close()
 		_ = os.Remove(temp.Name())
-		return err
+		return false, err
 	}
 	if err := temp.Close(); err != nil {
 		_ = os.Remove(temp.Name())
-		return err
+		return false, err
 	}
-	return os.Rename(temp.Name(), path)
+	if err := os.Rename(temp.Name(), path); err != nil {
+		return false, err
+	}
+	ReloadModelsDevCache()
+	return true, nil
 }

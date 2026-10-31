@@ -177,6 +177,19 @@ func (backend Backend) restrictions(policy Policy) []string {
 	return restrictions
 }
 
+// LinuxBackendInstallHint names the remedy for a Linux host that has no
+// native sandbox backend.
+const LinuxBackendInstallHint = "install bubblewrap: apt install bubblewrap / dnf install bubblewrap / apk add bubblewrap"
+
+// MissingLinuxBackendHint returns LinuxBackendInstallHint when backend is a
+// Linux backend without native confinement, and "" otherwise.
+func MissingLinuxBackendHint(backend Backend) string {
+	if backend.Platform != "linux" || backend.SupportLevel() == BackendSupportNative {
+		return ""
+	}
+	return LinuxBackendInstallHint
+}
+
 func (backend Backend) SupportLevel() BackendSupportLevel {
 	if backend.Available && backend.NativeIsolation && backend.CommandWrapping {
 		return BackendSupportNative

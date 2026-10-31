@@ -205,7 +205,7 @@ func (m model) handleGitSweepMsg(msg gitSweepMsg) model {
 // the baseline exists (Init's snapshot answered), git works here, and the
 // workspace is known. Returns the (possibly nil) command to batch.
 func (m model) maybeGitSweep() (model, tea.Cmd) {
-	if m.gitSweepInFlight || m.gitSweepUnavailable || m.gitFileBaseline == nil || strings.TrimSpace(m.cwd) == "" {
+	if !m.trusted || m.gitSweepInFlight || m.gitSweepUnavailable || m.gitFileBaseline == nil || strings.TrimSpace(m.cwd) == "" {
 		return m, nil
 	}
 	m.gitSweepInFlight = true

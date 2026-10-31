@@ -1,0 +1,7 @@
+{
+  "name": "fam-05-write",
+  "phase": "write",
+  "prompt": "Codify the store-error mapping in main.go as func mapStoreError(err error) int: ErrNotFound -> 404, anything else -> 500 (the fixture has only ErrNotFound; leave TODOs for other sentinels). Use it from every store-failure branch of sessionHandler so statuses have one source of truth.",
+  "check": "grep -F -q 'func mapStoreError' main.go || { echo 'precursor change missing' >&2; exit 1; }\ngo build ./... && go test -count=1 ./...",
+  "fixture": "fixture"
+}

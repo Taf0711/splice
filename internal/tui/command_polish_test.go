@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/config"
+	"github.com/Taf0711/splice/internal/flags"
+	"github.com/Taf0711/splice/internal/presentation"
 	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/tools"
 )
@@ -107,6 +110,35 @@ func TestProviderCommandRedactsCredentialBearingBaseURL(t *testing.T) {
 		assertNotContains(t, text, unwanted)
 	}
 	assertContains(t, text, "base url: https://proxy.local/v1?api_key=[REDACTED]")
+}
+
+func TestFlagsCommandRendersReadOnlyCard(t *testing.T) {
+	resolutions, err := flags.Explain(flags.Sources{CLI: map[string]bool{string(flags.MemoryPrefetch): true}})
+	if err != nil {
+		t.Fatalf("Explain() error = %v", err)
+	}
+	m := newModel(context.Background(), Options{FlagResolutions: resolutions})
+	m.input.SetValue("/flags")
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /flags to be handled without starting an agent run")
+	}
+	text := transcriptText(next.transcript)
+	for _, want := range []string{
+		"Flags",
+		string(flags.MemoryPrefetch),
+		"command line",
+		"experimental",
+		string(flags.StageTestGenerator) + " on default",
+	} {
+		assertContains(t, text, want)
+	}
+	if next.pending {
+		t.Fatal("/flags must not start a run")
+	}
 }
 
 func TestToolsCommandRendersCommandCard(t *testing.T) {
@@ -416,7 +448,7 @@ func TestContextAndPermissionsCommandsRenderProductState(t *testing.T) {
 		"compaction  idle",
 		"Tools",
 		"registered  1",
-		"actions: /permissions manage access | /tools inspect catalog",
+		"actions: /permissions show access | /tools inspect catalog",
 	} {
 		assertContains(t, contextText, want)
 	}
@@ -530,5 +562,190 @@ func TestCompactCommandAvoidsShellOnlyPlaceholder(t *testing.T) {
 	}
 	if strings.Contains(text, "not wired") || strings.Contains(text, "future compaction backend") {
 		t.Fatalf("compact output should describe product state, got %q", text)
+	}
+}
+
+func TestPipelineCommandPointsAtProjectFileWhenSource(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	ws := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(ws, ".splice"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pipeline := `{"version": 1, "name": "lint-only", "nodes": [{"name": "lint", "type": "command", "command": ["go", "vet", "./..."]}]}`
+	if err := os.WriteFile(filepath.Join(ws, ".splice", "pipeline.json"), []byte(pipeline), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(context.Background(), Options{})
+	m.cwd = ws
+	m.trusted = true
+	m.input.SetValue("/pipeline")
+
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	text := pipelineCardPlain(t, updated.(model).transcript)
+
+	assertContains(t, text, "source: project .splice/pipeline.json")
+	assertContains(t, text, "edit .splice/pipeline.json to change it; this view is read-only")
+	if strings.Contains(text, "splice pipeline use <name>") {
+		t.Fatal("project-source hint still tells the user to run splice pipeline use")
+	}
+}
+
+func TestPipelineCommandRendersEmbeddedDefaultReadOnly(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	m := newModel(context.Background(), Options{})
+	m.cwd = t.TempDir()
+	m.trusted = false
+	m.input.SetValue("/pipeline")
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /pipeline to be handled without starting an agent run")
+	}
+	text := pipelineCardPlain(t, next.transcript)
+	for _, want := range []string{
+		"Pipeline",
+		"default  source: embedded default",
+		"Graph",
+		"acceptance_verifier",
+		"<- test_runner",
+		"Command nodes",
+		"change it with /pipeline use <name>; this view is read-only",
+	} {
+		assertContains(t, text, want)
+	}
+	if next.pending {
+		t.Fatal("/pipeline must not start a run")
+	}
+}
+
+// writeLibraryPipeline installs a library topology with one command node under
+// the test's config directory.
+func writeLibraryPipeline(t *testing.T, base, name string) {
+	t.Helper()
+	dir := filepath.Join(base, "splice", "pipelines")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"version": 1, "name": "` + name + `", "nodes": [{"name": "lint", "type": "command", "command": ["go", "vet", "./..."]}]}`
+	if err := os.WriteFile(filepath.Join(dir, name+".json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPipelineUseSelectsLibraryEntry pins that /pipeline use <name> writes the
+// active pipeline through the shared path, lists the command nodes, and stays
+// off the run path.
+func TestPipelineUseSelectsLibraryEntry(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", base)
+	writeLibraryPipeline(t, base, "lint-only")
+	m := newModel(context.Background(), Options{})
+	m.cwd = t.TempDir()
+	m.trusted = false
+	m.input.SetValue("/pipeline use lint-only")
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("/pipeline use must not start an agent run")
+	}
+	text := transcriptText(next.transcript)
+	for _, want := range []string{"active pipeline: lint-only", "Command nodes", "lint: go vet ./...", "applies from the next run"} {
+		assertContains(t, text, want)
+	}
+	data, err := os.ReadFile(filepath.Join(base, "splice", "config.json"))
+	if err != nil {
+		t.Fatalf("config.json not written: %v", err)
+	}
+	if !strings.Contains(string(data), `"active_pipeline": "lint-only"`) {
+		t.Fatalf("config.json = %s, want active_pipeline lint-only", data)
+	}
+}
+
+// TestPipelineUseRefusesWhileRunPending pins that a selection during a run is
+// refused and writes nothing.
+func TestPipelineUseRefusesWhileRunPending(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", base)
+	writeLibraryPipeline(t, base, "lint-only")
+	m := newModel(context.Background(), Options{})
+	m.cwd = t.TempDir()
+	m.pending = true
+	m.input.SetValue("/pipeline use lint-only")
+
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	text := transcriptText(updated.(model).transcript)
+	assertContains(t, text, "Cannot change the pipeline while a run is active.")
+	if _, err := os.Stat(filepath.Join(base, "splice", "config.json")); !os.IsNotExist(err) {
+		t.Fatalf("pending refusal wrote config.json: %v", err)
+	}
+}
+
+// TestPipelineUseRejectsBadReferences pins that a path, a bad name, a missing
+// entry, and a bad usage each show an error card and write nothing.
+func TestPipelineUseRejectsBadReferences(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"/pipeline use ../escape", "splice pipeline import <path>"},
+		{"/pipeline use ghost", "ghost"},
+		{"/pipeline use", "usage: /pipeline [use <name> | edit [--new] [name]]"},
+		{"/pipeline list", "usage: /pipeline [use <name> | edit [--new] [name]]"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			base := t.TempDir()
+			t.Setenv("XDG_CONFIG_HOME", base)
+			m := newModel(context.Background(), Options{})
+			m.cwd = t.TempDir()
+			m.input.SetValue(tc.input)
+			updated, _ := m.Update(testKey(tea.KeyEnter))
+			assertContains(t, transcriptText(updated.(model).transcript), tc.want)
+			if _, err := os.Stat(filepath.Join(base, "splice", "config.json")); !os.IsNotExist(err) {
+				t.Fatalf("%s wrote config.json: %v", tc.input, err)
+			}
+		})
+	}
+}
+
+// pipelineCardPlain renders the last /pipeline graph card of the transcript
+// as plain text at 120 columns.
+func pipelineCardPlain(t *testing.T, rows []transcriptRow) string {
+	t.Helper()
+	for i := len(rows) - 1; i >= 0; i-- {
+		if card, ok := parsePipelineGraphCard(rows[i].text); ok {
+			return ansiPattern.ReplaceAllString(renderPipelineGraphCard(card, 120, presentation.GlyphTierASCII), "")
+		}
+	}
+	t.Fatalf("transcript has no /pipeline graph card: %q", transcriptText(rows))
+	return ""
+}
+
+// TestPipelineUseDisclosesAgentNodes pins that /pipeline use <name> lists an
+// agent node with its tools and permission, under its own section.
+func TestPipelineUseDisclosesAgentNodes(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", base)
+	libraryDir := filepath.Join(base, "splice", "pipelines")
+	if err := os.MkdirAll(libraryDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	agentJSON := `{"version": 1, "name": "investigate", "splice_min_version": "0.3.0", "nodes": [` +
+		`{"name": "investigate", "type": "agent", "prompt": "Find {{intent}}.", "tools": ["read_file", "grep"], "budget": {"input_max": 1000, "output_max": 500}}]}`
+	if err := os.WriteFile(filepath.Join(libraryDir, "investigate.json"), []byte(agentJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(context.Background(), Options{})
+	m.cwd = t.TempDir()
+	m.trusted = false
+	m.input.SetValue("/pipeline use investigate")
+
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	text := transcriptText(updated.(model).transcript)
+	for _, want := range []string{"active pipeline: investigate", "Agent nodes", "investigate: tools read_file, grep; permission run mode; up to 8 turns"} {
+		assertContains(t, text, want)
 	}
 }

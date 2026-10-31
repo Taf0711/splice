@@ -101,17 +101,24 @@ func statusHealthStyle(health presentation.Health) (lipgloss.Style, bool) {
 // must not say "executing", frame Jo2Uk's regression(red) grammar). Empty
 // when no phase has been observed (the segment is optional).
 func (m model) phaseChipSegment() string {
+	rv := m.runtimeView()
 	phase := m.phaseTrail.current()
+	// A blocking gate is the one thing the user must act on, so it shows
+	// even in a plain chat run that has no pipeline phase.
+	if rv.gate != nil && !healthTerminal(rv.health) {
+		return zeroTheme.amber.Render("●") + " " + zeroTheme.amber.Bold(true).Render("needs you") +
+			zeroTheme.faint.Render(" · "+gateKindLabel(rv.gate.Kind))
+	}
 	if phase == "" {
 		return ""
 	}
 	word := string(phase)
-	if health := m.lastState.Health.Effective(); health != presentation.HealthNormal {
-		if _, alerting := statusHealthStyle(health); alerting {
-			word = string(health)
+	if rv.health != presentation.HealthNormal {
+		if _, alerting := statusHealthStyle(rv.health); alerting {
+			word = string(rv.health)
 		}
 	}
-	style, alerting := statusHealthStyle(m.lastState.Health.Effective())
+	style, alerting := statusHealthStyle(rv.health)
 	if !alerting {
 		style = statusPhaseStyle(phase)
 	}
@@ -129,6 +136,21 @@ func (m model) phaseChipSegment() string {
 		}
 	}
 	return style.Render("●") + " " + style.Render(word)
+}
+
+// gateKindLabel is the plain-word name of a gate for chrome.
+func gateKindLabel(kind presentation.GateKind) string {
+	switch kind {
+	case presentation.GateAskUser:
+		return "question"
+	case presentation.GateApproval:
+		return "approval"
+	case presentation.GateCritiqueBlk:
+		return "critique"
+	case presentation.GateTrust:
+		return "trust"
+	}
+	return string(kind)
 }
 
 // contextTrailSegment renders the breadcrumb `design→plan→exec` form: phases

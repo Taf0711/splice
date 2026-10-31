@@ -34,9 +34,13 @@ type trajectoryRule struct {
 }
 
 type trajectoryRuleContext struct {
+	// writer names the code writer node in rule reasons. It is empty unless
+	// the pass evidence flag is on, so flag-off reason text does not change.
+	writer            string
 	history           []schemas.IterationState
 	maxIterations     int
 	tokenBudget       *int
+	cost              *RunCostSignal
 	currentScore      *float64
 	initialScore      *float64
 	tokensConsumed    int
@@ -56,21 +60,53 @@ func (rc trajectoryRuleContext) decision(action schemas.TrajectoryAction, reason
 	}
 }
 
-// trajectoryRules is the ordered policy table. First non-nil decision wins.
-var trajectoryRules = []trajectoryRule{
+// Hard limits run before all judgment rules.
+var hardLimitRules = []trajectoryRule{
 	{name: "iteration_limit", evaluate: ruleIterationLimit},
 	{name: "token_budget", evaluate: ruleTokenBudget},
+}
+
+var judgmentRules = []trajectoryRule{
 	{name: "oscillation", evaluate: ruleOscillation},
 	{name: "cycle", evaluate: ruleCycle},
 	{name: "no_progress", evaluate: ruleNoProgress},
+	{name: "cost_without_progress", evaluate: ruleCostWithoutProgress},
 	{name: "rollback", evaluate: ruleRollback},
 	{name: "step_back", evaluate: ruleStepBack},
 	{name: "confidence", evaluate: ruleConfidence},
 }
 
-// EvaluateTrajectory evaluates trajectory rules over an iteration-state history.
+// trajectoryRules preserves the public policy order for compatibility.
+var trajectoryRules = append(append([]trajectoryRule{}, hardLimitRules...), judgmentRules...)
+
+// EvaluateTrajectory evaluates trajectory rules over an iteration-state
+// history. It runs without a cost signal, so the cost rule stays inactive.
 func EvaluateTrajectory(history []schemas.IterationState, maxIterations int, tokenBudget *int) schemas.TrajectoryDecision {
-	rc := newTrajectoryRuleContext(history, maxIterations, tokenBudget)
+	return evaluateTrajectoryFor(history, maxIterations, tokenBudget, nil, "")
+}
+
+// EvaluateTrajectoryWithCost evaluates the rules with the billed-cost and
+// provider-request signal available to the cost rule. A signal that fails
+// validation is a loud error: the caller must not silently degrade to the
+// round-only rules.
+func EvaluateTrajectoryWithCost(history []schemas.IterationState, maxIterations int, tokenBudget *int, cost *RunCostSignal) (schemas.TrajectoryDecision, error) {
+	return evaluateTrajectoryWithCostFor(history, maxIterations, tokenBudget, cost, "")
+}
+
+// evaluateTrajectoryWithCostFor is EvaluateTrajectoryWithCost with the writer
+// node named in rule reasons.
+func evaluateTrajectoryWithCostFor(history []schemas.IterationState, maxIterations int, tokenBudget *int, cost *RunCostSignal, writer string) (schemas.TrajectoryDecision, error) {
+	if cost != nil {
+		if err := cost.Validate(); err != nil {
+			return schemas.TrajectoryDecision{}, err
+		}
+	}
+	return evaluateTrajectoryFor(history, maxIterations, tokenBudget, cost, writer), nil
+}
+
+func evaluateTrajectoryFor(history []schemas.IterationState, maxIterations int, tokenBudget *int, cost *RunCostSignal, writer string) schemas.TrajectoryDecision {
+	rc := newTrajectoryRuleContext(history, maxIterations, tokenBudget, cost)
+	rc.writer = writer
 	if len(history) == 0 {
 		return rc.decision(schemas.ActionContinue, "No iteration history to evaluate.", nil)
 	}
@@ -82,11 +118,33 @@ func EvaluateTrajectory(history []schemas.IterationState, maxIterations int, tok
 	return rc.decision(schemas.ActionContinue, "Trajectory remains within safe bounds.", nil)
 }
 
-func newTrajectoryRuleContext(history []schemas.IterationState, maxIterations int, tokenBudget *int) trajectoryRuleContext {
+// The classifier host checks hard limits before it asks for an action.
+func evaluateTrajectoryJudgments(history []schemas.IterationState, cost *RunCostSignal) schemas.TrajectoryDecision {
+	return evaluateTrajectoryJudgmentsFor(history, cost, "")
+}
+
+// evaluateTrajectoryJudgmentsFor is evaluateTrajectoryJudgments with the writer
+// node named in rule reasons.
+func evaluateTrajectoryJudgmentsFor(history []schemas.IterationState, cost *RunCostSignal, writer string) schemas.TrajectoryDecision {
+	rc := newTrajectoryRuleContext(history, 0, nil, cost)
+	rc.writer = writer
+	if len(history) == 0 {
+		return rc.decision(schemas.ActionContinue, "No iteration history to evaluate.", nil)
+	}
+	for _, rule := range judgmentRules {
+		if decision := rule.evaluate(rc); decision != nil {
+			return *decision
+		}
+	}
+	return rc.decision(schemas.ActionContinue, "Trajectory remains within safe bounds.", nil)
+}
+
+func newTrajectoryRuleContext(history []schemas.IterationState, maxIterations int, tokenBudget *int, cost *RunCostSignal) trajectoryRuleContext {
 	rc := trajectoryRuleContext{
 		history:       history,
 		maxIterations: maxIterations,
 		tokenBudget:   tokenBudget,
+		cost:          cost,
 		stateHashes:   make([]string, len(history)),
 	}
 	if len(history) > 0 {
@@ -191,11 +249,17 @@ func ruleNoProgress(rc trajectoryRuleContext) *schemas.TrajectoryDecision {
 		"files_changed=0",
 		"lines_changed=0",
 	}
+	// With a named writer the reason ends with the writer and its no-change
+	// fact. Without one, the reason text is the same as before.
+	suffix := ""
+	if rc.writer != "" {
+		suffix = " " + rc.writer + " changed no files this pass."
+	}
 	if noProgressAlreadyFired(rc.history) {
-		decision := rc.decision(schemas.ActionAbortNoProgress, "The last three iterations produced no workspace change after a prior no-progress step-back.", evidence)
+		decision := rc.decision(schemas.ActionAbortNoProgress, "The last three iterations produced no workspace change after a prior no-progress step-back."+suffix, evidence)
 		return &decision
 	}
-	decision := rc.decision(schemas.ActionStepBack, "The last three iterations produced no workspace change.", evidence)
+	decision := rc.decision(schemas.ActionStepBack, "The last three iterations produced no workspace change."+suffix, evidence)
 	return &decision
 }
 
@@ -220,7 +284,51 @@ func trailingNoProgressCount(history []schemas.IterationState) int {
 }
 
 func hasWorkspaceProgress(state schemas.IterationState) bool {
+	if state.PassChanged != nil {
+		return *state.PassChanged
+	}
 	return len(state.FilesChanged) > 0 || state.LinesAdded+state.LinesRemoved > 0
+}
+
+// ruleCostWithoutProgress reads all three signals: the billed cost delta from
+// the F2 report (never raw tokens), the provider request delta, and the
+// correctness signal from the iteration state. It fires only when spend grew
+// while correctness did not improve. It never fires on the round count alone:
+// fewer rounds with higher cost still fires, and more rounds with a
+// correctness gain does not.
+func ruleCostWithoutProgress(rc trajectoryRuleContext) *schemas.TrajectoryDecision {
+	if rc.cost == nil || len(rc.history) < 2 {
+		return nil
+	}
+	if rc.cost.BilledCostDeltaUSD <= 0 && rc.cost.ProviderRequestDelta <= 0 {
+		return nil
+	}
+	prev := rc.history[len(rc.history)-2]
+	cur := rc.history[len(rc.history)-1]
+	if correctnessImproved(prev, cur) {
+		return nil
+	}
+	decision := rc.decision(schemas.ActionStepBack,
+		"Billed spend grew without a correctness gain.",
+		[]string{
+			fmt.Sprintf("billed_cost_delta_usd=%g", rc.cost.BilledCostDeltaUSD),
+			fmt.Sprintf("provider_request_delta=%d", rc.cost.ProviderRequestDelta),
+			fmt.Sprintf("acceptance_facts_passing=%d->%d", prev.AcceptanceFactsPassing, cur.AcceptanceFactsPassing),
+			fmt.Sprintf("tests_passing=%d->%d", prev.TestsPassing, cur.TestsPassing),
+			fmt.Sprintf("tests_failing=%d->%d", prev.TestsFailing, cur.TestsFailing),
+		})
+	return &decision
+}
+
+// correctnessImproved reports whether the later state improved any correctness
+// signal: more acceptance facts or tests passing, or fewer failing or
+// errored. A flat or worse state is not an improvement.
+func correctnessImproved(prev, cur schemas.IterationState) bool {
+	return cur.AcceptanceFactsPassing > prev.AcceptanceFactsPassing ||
+		cur.TestsPassing > prev.TestsPassing ||
+		cur.AcceptanceFactsFailing < prev.AcceptanceFactsFailing ||
+		cur.TestsFailing < prev.TestsFailing ||
+		cur.TestsErrored < prev.TestsErrored
 }
 
 func ruleConfidence(rc trajectoryRuleContext) *schemas.TrajectoryDecision {
@@ -691,4 +799,25 @@ func typedPayloads[T any](outputs []schemas.HarnessStageOutput, key string) ([]T
 		results = append(results, target)
 	}
 	return results, nil
+}
+
+// RulesActionForReplay returns the action the judgment rules reach over a
+// history. The replay tool compares this action across evidence sources. A
+// writer name adds the flag-on rule text, which does not change the action.
+func RulesActionForReplay(history []schemas.IterationState, writer string) schemas.TrajectoryAction {
+	return RulesDecisionForReplay(history, writer).Action
+}
+
+// RulesDecisionForReplay returns the full judgment-rules decision over a
+// history, with the cost signal left out. A live decision includes the billed
+// cost signal, which a saved record does not carry. Replay therefore rebuilds
+// the rules from the History it replays, in every evidence mode.
+func RulesDecisionForReplay(history []schemas.IterationState, writer string) schemas.TrajectoryDecision {
+	return evaluateTrajectoryJudgmentsFor(history, nil, writer)
+}
+
+// WorkspaceProgress reports whether one iteration state shows workspace
+// progress, the same test the no-progress rule applies.
+func WorkspaceProgress(state schemas.IterationState) bool {
+	return hasWorkspaceProgress(state)
 }

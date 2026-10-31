@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -262,5 +263,113 @@ func cliDesignPlan(tasks []schemas.Task) schemas.DesignPlan {
 		SystemDesign: "Tasks are independent.",
 		Tasks:        tasks,
 		Source:       "authored",
+	}
+}
+
+// TestRunExecWorktreeRefusesLaunchDirMissingFromWorktree pins the H-08
+// wiring: a -w run from a repository subdirectory works in that subdirectory
+// of the worktree, so a subdirectory that the worktree does not hold fails
+// loud instead of falling back to the worktree root.
+func TestRunExecWorktreeRefusesLaunchDirMissingFromWorktree(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	repo := t.TempDir()
+	launch := filepath.Join(repo, "untracked-sub")
+	if err := os.MkdirAll(launch, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	worktreeDir := t.TempDir()
+	for _, tc := range []struct {
+		name        string
+		reused      bool
+		removeErr   error
+		wantRemoved bool
+		wantText    string
+	}{
+		{name: "fresh worktree is removed", wantRemoved: true},
+		{name: "reused worktree stays", reused: true},
+		{name: "failed removal names the worktree", removeErr: errors.New("git refused"), wantRemoved: true, wantText: "the worktree remains at " + worktreeDir},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var unlocked bool
+			var removed []worktrees.RemoveOptions
+			var stdout, stderr bytes.Buffer
+			exitCode := runWithDeps([]string{"exec", "--worktree=sub-run", "do it"}, &stdout, &stderr, appDeps{
+				getwd: func() (string, error) { return launch, nil },
+				prepareWorktree: func(_ context.Context, options worktrees.Options) (worktrees.Result, error) {
+					return worktrees.Result{Name: "sub-run", Path: worktreeDir, RepoRoot: repo, Locked: true, Reused: tc.reused}, nil
+				},
+				unlockWorktree: func(context.Context, worktrees.UnlockOptions) error {
+					unlocked = true
+					return nil
+				},
+				removeWorktree: func(_ context.Context, options worktrees.RemoveOptions) error {
+					if !unlocked {
+						t.Fatal("removal before unlock")
+					}
+					removed = append(removed, options)
+					return tc.removeErr
+				},
+				resolveConfig: func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+					return execResolvedConfig(), nil
+				},
+				newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+					t.Fatal("the run must not reach the provider")
+					return nil, nil
+				},
+			})
+			if exitCode != exitUsage {
+				t.Fatalf("exitCode = %d, want %d; stderr=%s", exitCode, exitUsage, stderr.String())
+			}
+			for _, want := range []string{"launch directory untracked-sub is not in the worktree", "untracked or ignored", "Commit the directory, or run from the repository root", tc.wantText} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+				}
+			}
+			if !unlocked {
+				t.Fatal("the failed launch must release the worktree lock")
+			}
+			if got := len(removed) == 1 && removed[0].Path == worktreeDir && removed[0].Force; got != tc.wantRemoved || (!tc.wantRemoved && len(removed) != 0) {
+				t.Fatalf("removed = %+v, want removed=%v", removed, tc.wantRemoved)
+			}
+		})
+	}
+}
+
+// P1-1: a design plan is verified only when every task verified. A plan whose
+// tasks verify passes --require-verified; an unverified task exits 4 and the
+// reason names the task.
+func TestRunExecPlanRequireVerified(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		options  execStageProviderOptions
+		wantExit int
+	}{
+		{name: "verified", options: execStageProviderOptions{}, wantExit: exitSuccess},
+		{name: "unverified", options: execStageProviderOptions{
+			Files:     []schemas.FileChange{{Path: "hello.txt", Content: "hi\n", ChangeType: "create"}},
+			TestFiles: []schemas.FileChange{{Path: "hello-check.txt", Content: "ok\n", ChangeType: "create"}},
+		}, wantExit: exitIncomplete},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_DATA_HOME", t.TempDir())
+			cwd := t.TempDir()
+			planPath := writeExecPlanFile(t, cwd, cliDesignPlan([]schemas.Task{cliDesignTask("t1", "First", nil)}))
+			var stdout, stderr bytes.Buffer
+			exitCode := runWithDeps([]string{"exec", "--plan", planPath, "--require-verified"}, &stdout, &stderr, appDeps{
+				getwd: func() (string, error) { return cwd, nil },
+				resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+					return execResolvedConfig(), nil
+				},
+				newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+					return newExecStageAwareProvider(tc.options), nil
+				},
+			})
+			if exitCode != tc.wantExit {
+				t.Fatalf("exit = %d, want %d; stdout=%s stderr=%s", exitCode, tc.wantExit, stdout.String(), stderr.String())
+			}
+			if tc.wantExit == exitIncomplete && !strings.Contains(stderr.String(), "task t1: ") {
+				t.Fatalf("stderr = %q, want the unverified reason to name task t1", stderr.String())
+			}
+		})
 	}
 }

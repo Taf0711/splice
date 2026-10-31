@@ -52,7 +52,7 @@ func checkPresentationGolden(t *testing.T, name string, snapshots []presentation
 // TestPresentationGoldenTrace pins emission ORDER, not just final state: the
 // whole snapshot list of a happy-path run is serialized and diffed.
 func TestPresentationGoldenTrace(t *testing.T) {
-	_, _, snapshots, result := runWithPresentation(t, "add a Hello function and tests", runFakeProvider{}, agent.Options{PermissionMode: agent.PermissionModeAuto})
+	_, _, _, snapshots, result := runWithPresentation(t, "add a Hello function and tests", runFakeProvider{}, agent.Options{PermissionMode: agent.PermissionModeAuto})
 	if result.Status != "completed" {
 		t.Fatalf("pipeline status = %q, want completed", result.Status)
 	}
@@ -107,10 +107,12 @@ func BenchmarkPresentationEmission(b *testing.B) {
 // runWithPresentation runs a pipeline with both the legacy event recorders
 // and the presentation snapshot recorder wired, returning the recorded
 // events, the live snapshots, and the final pipeline result.
-func runWithPresentation(t *testing.T, prompt string, provider agent.Provider, options agent.Options) ([]agent.StageEvent, []agent.PipelinePlanEvent, []presentation.State, schemas.PipelineResult) {
+func runWithPresentation(t *testing.T, prompt string, provider agent.Provider, options agent.Options) ([]agent.StageEvent, []agent.PipelinePlanEvent, []agent.AttributedUsage, []presentation.State, schemas.PipelineResult) {
 	t.Helper()
 	var stages []agent.StageEvent
 	var plans []agent.PipelinePlanEvent
+	var usages []agent.AttributedUsage
+	options.OnAttributedUsage = func(usage agent.AttributedUsage) { usages = append(usages, usage) }
 	var snapshots []presentation.State
 	options.OnStageEvent = func(event agent.StageEvent) { stages = append(stages, event) }
 	options.OnPipelinePlan = func(event agent.PipelinePlanEvent) { plans = append(plans, event) }
@@ -128,7 +130,7 @@ func runWithPresentation(t *testing.T, prompt string, provider agent.Provider, o
 	if err := json.Unmarshal([]byte(result.FinalAnswer), &pipeline); err != nil {
 		t.Fatalf("parse pipeline result: %v", err)
 	}
-	return stages, plans, snapshots, pipeline
+	return stages, plans, usages, snapshots, pipeline
 }
 
 // assertValidSnapshots checks the pairing invariant on every live snapshot.
@@ -166,17 +168,35 @@ func assertNodesMatchEvents(t *testing.T, events []agent.StageEvent, final prese
 }
 
 // replayAccumulator feeds recorded plan and stage events through a fresh
-// accumulator and returns the final snapshot. title is the plan title the
-// live run used (the plan's request intent); agent.PipelinePlanEvent does
-// not carry it, so the replay receives it as run-level metadata.
-func replayAccumulator(t *testing.T, plans []agent.PipelinePlanEvent, events []agent.StageEvent, runStatus, runDetail, title string) *presentrun.Accumulator {
+// accumulator and returns the final snapshot. identity carries the plan
+// title, tier, and topology the live run used; agent.PipelinePlanEvent does
+// not carry them, so the replay receives them as run-level metadata.
+func replayAccumulator(t *testing.T, plans []agent.PipelinePlanEvent, events []agent.StageEvent, usages []agent.AttributedUsage, runStatus, runDetail string, identity presentation.Plan) *presentrun.Accumulator {
 	t.Helper()
 	acc := presentrun.New(func(msg string) { t.Logf("presentrun: %s", msg) })
 	for _, plan := range plans {
-		acc.Apply(presentrun.AdaptPlanEventWithDependencies(title, plan.Stages, plan.Dependencies))
+		acc.Apply(presentrun.AdaptPipelinePlan(schemas.ExecutionPlan{
+			RequestIntent: identity.Title,
+			Tier:          schemas.PipelineTier(identity.Tier),
+			TopologyName:  identity.Topology,
+		}, plan))
 	}
 	for _, event := range events {
 		acc.Apply(presentrun.AdaptStageEvent(event))
+	}
+	// Spend sums per node, so the order against stage events does not matter
+	// once every node exists. Requests outside the plan stages are not node
+	// spend, as in the live wiring.
+	planned := map[string]bool{}
+	for _, plan := range plans {
+		for _, stage := range plan.Stages {
+			planned[stage] = true
+		}
+	}
+	for _, usage := range usages {
+		if planned[usage.Stage] {
+			acc.Apply(presentrun.AdaptAttributedUsage(usage))
+		}
 	}
 	acc.Apply(presentrun.AdaptRunEvent(runStatus, runDetail))
 	return acc
@@ -185,7 +205,7 @@ func replayAccumulator(t *testing.T, plans []agent.PipelinePlanEvent, events []a
 // TestPresentationContractHappyPath drives a real completed run and proves
 // the emitted snapshots match the recorded event stream.
 func TestPresentationContractHappyPath(t *testing.T) {
-	stages, plans, snapshots, result := runWithPresentation(t, "add a Hello function and tests", runFakeProvider{}, agent.Options{PermissionMode: agent.PermissionModeAuto})
+	stages, plans, usages, snapshots, result := runWithPresentation(t, "add a Hello function and tests", runFakeProvider{}, agent.Options{PermissionMode: agent.PermissionModeAuto})
 	if result.Status != "completed" {
 		t.Fatalf("pipeline status = %q, want completed", result.Status)
 	}
@@ -197,14 +217,22 @@ func TestPresentationContractHappyPath(t *testing.T) {
 	assertNodesMatchEvents(t, stages, final)
 
 	// Replay must agree with live emission.
-	replay := replayAccumulator(t, plans, stages, "completed", "", final.Plan.Title)
+	replay := replayAccumulator(t, plans, stages, usages, "completed", "", final.Plan)
 	if err := replay.Snapshot().Validate(); err != nil {
 		t.Fatalf("replay snapshot invalid: %v", err)
 	}
+	// Routes reach the accumulator through the run's internal route hook,
+	// not a public event, so the replay cannot rebuild them. Every started
+	// node must carry one in the live state; the comparison drops them.
+	for _, node := range final.Nodes {
+		if node.Route == nil {
+			t.Fatalf("live node %s has no applied route", node.ID)
+		}
+	}
 	got, _ := json.Marshal(replay.Snapshot())
-	want, _ := json.Marshal(final)
+	want, _ := json.Marshal(withoutRoutes(final))
 	if string(got) != string(want) {
-		t.Fatal("replay final state differs from live final snapshot")
+		t.Fatalf("replay final state differs from live final snapshot\n got %s\nwant %s", got, want)
 	}
 	applied, skipped, errors := replay.Counts()
 	if skipped != 0 || errors != 0 {
@@ -235,7 +263,7 @@ func TestPresentationContractRepairLoop(t *testing.T) {
 		Cwd:                 t.TempDir(),
 	}
 	wrapped, acc := wirePresentation(options, plan)
-	result, err := runIterationLoop(context.Background(), "repair-run", plan, registry, runFakeProvider{}, wrapped, t.TempDir(), nil, nil, nil, nil, acc)
+	result, err := runIterationLoop(context.Background(), "repair-run", plan, registry, runFakeProvider{}, wrapped, t.TempDir(), nil, nil, nil, nil, acc, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -283,7 +311,7 @@ func TestPresentationContractDegradedRun(t *testing.T) {
 		Cwd:                 t.TempDir(),
 	}
 	wrapped, acc := wirePresentation(options, plan)
-	result, err := runIterationLoop(context.Background(), "degraded-run", plan, registry, runFakeProvider{}, wrapped, t.TempDir(), nil, nil, nil, nil, acc)
+	result, err := runIterationLoop(context.Background(), "degraded-run", plan, registry, runFakeProvider{}, wrapped, t.TempDir(), nil, nil, nil, nil, acc, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -295,8 +323,8 @@ func TestPresentationContractDegradedRun(t *testing.T) {
 	for _, node := range final.Nodes {
 		if node.ID == "unconfigured_stage" {
 			found = true
-			if node.Status != presentation.NodeStatusPending {
-				t.Fatalf("skipped stage status = %q, want pending", node.Status)
+			if node.Status != presentation.NodeStatusSkipped {
+				t.Fatalf("skipped stage status = %q, want skipped", node.Status)
 			}
 		}
 	}
@@ -310,7 +338,7 @@ func TestPresentationContractDegradedRun(t *testing.T) {
 // never aborts the run), and a malformed event fed to the accumulator is
 // counted, logged, and leaves the last-good state valid.
 func TestPresentationErrorSurface(t *testing.T) {
-	stages, plans, snapshots, result := runWithPresentation(t, "add a Hello function", runFakeProvider{}, agent.Options{PermissionMode: agent.PermissionModeAuto})
+	stages, plans, _, snapshots, result := runWithPresentation(t, "add a Hello function", runFakeProvider{}, agent.Options{PermissionMode: agent.PermissionModeAuto})
 	assertValidSnapshots(t, snapshots)
 	if result.Status != "completed" {
 		t.Fatalf("run did not complete with emission enabled: %q", result.Status)
@@ -348,7 +376,7 @@ func TestPresentationErrorSurface(t *testing.T) {
 // wiring: the compiled plan's DependsOn reaches the plan event, and each
 // presentation node carries its dependencies instead of an empty field.
 func TestPresentationCarriesCompiledDependencies(t *testing.T) {
-	_, plans, snapshots, result := runWithPresentation(t, "add a Hello function and tests", runFakeProvider{}, agent.Options{PermissionMode: agent.PermissionModeAuto})
+	_, plans, _, snapshots, result := runWithPresentation(t, "add a Hello function and tests", runFakeProvider{}, agent.Options{PermissionMode: agent.PermissionModeAuto})
 	if result.Status != "completed" {
 		t.Fatalf("pipeline status = %q, want completed", result.Status)
 	}
@@ -370,5 +398,33 @@ func TestPresentationCarriesCompiledDependencies(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("no presentation node carried compiled dependencies")
+	}
+}
+
+// withoutRoutes returns the state with every node route cleared.
+func withoutRoutes(state presentation.State) presentation.State {
+	state.Nodes = append([]presentation.ExecutionNode(nil), state.Nodes...)
+	for i := range state.Nodes {
+		state.Nodes[i].Route = nil
+	}
+	return state
+}
+
+// TestWirePresentationFiltersUsageToPlanStages pins the plan-stage filter:
+// a request outside the plan (step_back) is counted as skipped run spend,
+// never applied to a node or refused as an unknown node.
+func TestWirePresentationFiltersUsageToPlanStages(t *testing.T) {
+	plan := schemas.ExecutionPlan{Tier: schemas.TierTrivial, RequestIntent: "x", Stages: []schemas.ExecutionStage{{Name: "code_writer"}}}
+	options, acc := wirePresentation(PipelineRunConfig{OnPresentationState: func(presentation.State) {}}, plan)
+	options.OnPipelinePlan(agent.PipelinePlanEvent{Stages: []string{"code_writer"}})
+	options.OnStageEvent(agent.StageEvent{Name: "code_writer", Status: "running"})
+	options.OnAttributedUsage(agent.AttributedUsage{Stage: "step_back", Iteration: 1, Usage: agent.Usage{InputTokens: 5}})
+	options.OnAttributedUsage(agent.AttributedUsage{Stage: "code_writer", Iteration: 1, Usage: agent.Usage{InputTokens: 5}})
+	_, skipped, errs := acc.Counts()
+	if skipped != 1 || errs != 0 {
+		t.Fatalf("counts skipped=%d errors=%d, want one skipped request and no errors", skipped, errs)
+	}
+	if got := acc.Snapshot().Nodes[0].Cost.Tokens; got != 5 {
+		t.Fatalf("code_writer tokens = %d, want 5", got)
 	}
 }

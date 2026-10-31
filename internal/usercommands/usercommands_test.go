@@ -3,7 +3,10 @@ package usercommands
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/Taf0711/splice/internal/projectfile"
 )
 
 func writeFile(t *testing.T, dir, name, content string) {
@@ -104,5 +107,24 @@ func TestExpandPlaceholders(t *testing.T) {
 				t.Fatalf("Expand(%q,%q) = %q, want %q", tc.template, tc.args, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestLoadRefusesOversizedOrEscapingProjectCommand(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, ".splice", "commands")
+	writeFile(t, dir, "huge.md", "x"+strings.Repeat("y", projectfile.MaxBytes))
+	outside := filepath.Join(t.TempDir(), "outside.md")
+	if err := os.WriteFile(outside, []byte("OUTSIDE"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "escape.md")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	writeFile(t, dir, "ok.md", "fine")
+
+	cmds := Load(DefaultPaths(root, t.TempDir()))
+	if len(cmds) != 1 || cmds[0].Name != "ok" {
+		t.Fatalf("only the contained, bounded command should load, got %#v", cmds)
 	}
 }

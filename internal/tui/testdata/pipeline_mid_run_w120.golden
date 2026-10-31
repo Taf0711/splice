@@ -1,6 +1,6 @@
- ✓ code_writer shared cwd w
- ◜ test_runner shared cwd t
- ○ acceptance_verifier shared cwd v
+ ✓ code_writer
+ ◜ test_runner
+ ○ acceptance_verifier
 
  [########────────]  50%
 

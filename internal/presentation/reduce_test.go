@@ -73,10 +73,10 @@ func TestApplyStageEvents(t *testing.T) {
 		}
 	})
 
-	t.Run("skipped maps to pending, incomplete to degraded", func(t *testing.T) {
+	t.Run("skipped keeps its own status, incomplete maps to degraded", func(t *testing.T) {
 		skipped, _ := Apply(State{}, StageEvent{ID: "lint", Kind: NodeKindLint, Status: "skipped"})
-		if skipped.Nodes[0].Status != NodeStatusPending {
-			t.Fatalf("skipped status = %q, want pending", skipped.Nodes[0].Status)
+		if skipped.Nodes[0].Status != NodeStatusSkipped {
+			t.Fatalf("skipped status = %q, want skipped", skipped.Nodes[0].Status)
 		}
 		incomplete, _ := Apply(State{}, StageEvent{ID: "auditor", Kind: NodeKindSecurity, Status: "incomplete"})
 		if incomplete.Nodes[0].Status != NodeStatusDegraded {
@@ -152,6 +152,26 @@ func TestApplyPlanAndRun(t *testing.T) {
 		}
 		if err := state.Validate(); err != nil {
 			t.Fatalf("reducer output invalid: %v", err)
+		}
+	})
+
+	t.Run("completed run that verified nothing is unverified", func(t *testing.T) {
+		state, _ := Apply(State{}, PlanEvent{StageNames: []string{"code_writer"}})
+		state, err := Apply(state, RunEvent{Status: "completed", Detail: "no check applied: static_analyzer (n/a)", Unverified: true})
+		if err != nil {
+			t.Fatalf("Apply run: %v", err)
+		}
+		if state.Completion == nil || state.Completion.Status != "completed" || !state.Completion.Unverified {
+			t.Fatalf("completion = %+v, want completed and unverified", state.Completion)
+		}
+		if err := state.Validate(); err != nil {
+			t.Fatalf("reducer output invalid: %v", err)
+		}
+	})
+
+	t.Run("unverified is only valid on a completed run", func(t *testing.T) {
+		if err := (CompletionReceipt{Status: "failed", Unverified: true}).Validate(); err == nil {
+			t.Fatal("failed completion with unverified set validated, want error")
 		}
 	})
 
@@ -413,5 +433,108 @@ func TestApplyPlanCarriesDependenciesToNodes(t *testing.T) {
 	node.Dependencies[0] = "tampered"
 	if state.Plan.Dependencies["test_generator"][0] != "code_writer" {
 		t.Fatalf("plan dependencies aliased node dependencies: %v", state.Plan.Dependencies["test_generator"])
+	}
+}
+
+// Regression health is produced here, not inferred by the UI: an APPLIED
+// corrective intervention sets it, a re-entered stage moves it to
+// recovering, and a proposal or a terminal run never flips it.
+func TestApplyInterventionDrivesRegressionHealth(t *testing.T) {
+	step := func(state State, event StreamEventLike) State {
+		t.Helper()
+		next, err := Apply(state, event)
+		if err != nil {
+			t.Fatalf("Apply %T: %v", event, err)
+		}
+		if err := next.Validate(); err != nil {
+			t.Fatalf("reducer output invalid: %v", err)
+		}
+		return next
+	}
+	state := step(State{}, StageEvent{ID: "test_runner", Kind: NodeKindTest, Status: "running"})
+	state = step(state, InterventionEvent{Kind: InterventionRollback, NodeID: "test_runner", Status: "proposed", Reason: "2 failing"})
+	if got := state.Health.Effective(); got != HealthNormal {
+		t.Fatalf("proposed rollback health = %s, want normal", got)
+	}
+	for _, kind := range []InterventionKind{InterventionRollback, InterventionStepBack, InterventionEscalate} {
+		applied := step(state, InterventionEvent{Kind: kind, NodeID: "test_runner", Status: "applied", Reason: "score dropped"})
+		if applied.Health != HealthRegression {
+			t.Fatalf("applied %s health = %s, want regression", kind, applied.Health)
+		}
+	}
+	state = step(state, InterventionEvent{Kind: InterventionRollback, NodeID: "test_runner", Status: "applied", Reason: "score dropped"})
+	state = step(state, StageEvent{ID: "code_writer", Kind: NodeKindWrite, Status: "running"})
+	if state.Health != HealthRecovering {
+		t.Fatalf("re-entry after regression health = %s, want recovering", state.Health)
+	}
+
+	failed := step(State{}, StageEvent{ID: "test_runner", Kind: NodeKindTest, Status: "failed"})
+	failed = step(failed, RunEvent{Status: "failed"})
+	failed = step(failed, InterventionEvent{Kind: InterventionRollback, NodeID: "test_runner", Status: "applied", Reason: "late"})
+	if failed.Health != HealthFailed {
+		t.Fatalf("terminal health changed to %s", failed.Health)
+	}
+}
+
+// TestApplyCarriesGraphInputs pins the inputs the pipeline graph view reads:
+// the plan roster, tier, and topology; the last terminal summary through a
+// re-entry; and per-node spend from usage events.
+func TestApplyCarriesGraphInputs(t *testing.T) {
+	state, err := Apply(State{}, PlanEvent{StageNames: []string{"a", "b"}, Dependencies: map[string][]string{"b": {"a"}}, Tier: "light", Topology: "custom"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := state.Plan; len(got.Stages) != 2 || got.Tier != "light" || got.Topology != "custom" {
+		t.Fatalf("plan = %+v, want roster, tier, and topology", got)
+	}
+	steps := []StreamEventLike{
+		StageEvent{ID: "a", Kind: NodeKindWrite, Status: "running", Detail: "writing"},
+		StageEvent{ID: "a", Kind: NodeKindWrite, Status: "completed", Detail: "wrote a.go", Progress: 100},
+		StageEvent{ID: "a", Kind: NodeKindWrite, Status: "running", Detail: "writing again"},
+		UsageEvent{NodeID: "a", Usage: TokenUsage{InputTokens: 5, OutputTokens: 2}},
+	}
+	for _, step := range steps {
+		if state, err = Apply(state, step); err != nil {
+			t.Fatal(err)
+		}
+	}
+	node := state.Nodes[0]
+	if node.Summary != "wrote a.go" {
+		t.Fatalf("summary = %q, want the last terminal detail", node.Summary)
+	}
+	if node.Cost.Tokens != 7 || !node.Cost.Unpriced || node.Usage.OutputTokens != 2 {
+		t.Fatalf("spend = %+v %+v, want 7 unpriced tokens", node.Cost, node.Usage)
+	}
+	if err := state.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(state, UsageEvent{NodeID: "a", Usage: TokenUsage{InputTokens: -1}}); err == nil {
+		t.Fatal("Apply accepted negative usage")
+	}
+}
+
+// TestApplyRouteKeepsTheAppliedRoute pins the applied route: it lands on its
+// (node, iteration), survives the terminal event, and an unknown node is
+// refused by name.
+func TestApplyRouteKeepsTheAppliedRoute(t *testing.T) {
+	state, err := Apply(State{}, StageEvent{ID: "a", Kind: NodeKindWrite, Status: "running"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := NodeRoute{Provider: "p", Model: "m", Effort: "low", InputBudget: 10, OutputBudget: 5, Escalated: true}
+	if state, err = Apply(state, RouteEvent{NodeID: "a", Route: route}); err != nil {
+		t.Fatal(err)
+	}
+	if state, err = Apply(state, StageEvent{ID: "a", Kind: NodeKindWrite, Status: "completed", Progress: 100}); err != nil {
+		t.Fatal(err)
+	}
+	if got := state.Nodes[0].Route; got == nil || *got != route {
+		t.Fatalf("route = %+v, want %+v", got, route)
+	}
+	if _, err := Apply(state, RouteEvent{NodeID: "a", Iteration: 1, Route: route}); err == nil || !strings.Contains(err.Error(), "unknown node a iteration 1") {
+		t.Fatalf("err = %v, want the unknown pass named", err)
+	}
+	if _, err := Apply(state, RouteEvent{NodeID: "a", Route: NodeRoute{InputBudget: -1}}); err == nil {
+		t.Fatal("Apply accepted a negative budget")
 	}
 }

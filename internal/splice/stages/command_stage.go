@@ -3,6 +3,7 @@ package stages
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"strings"
 
 	"github.com/Taf0711/splice/internal/splice/schemas"
@@ -19,6 +20,40 @@ const maxCommandOutputChars = 4000
 // tool and route around the registry.
 const commandToolName = "bash"
 
+// CommandLine returns the shell line that runs argv on this host. Each element
+// stays one argument. On a POSIX host, the bash tool runs the line through
+// /bin/sh, so each element is quoted for sh. A Windows host runs cmd.exe, and
+// its quoting is not applied here: the elements are joined with spaces.
+func CommandLine(argv []string) string {
+	return commandLineFor(argv, runtime.GOOS)
+}
+
+func commandLineFor(argv []string, goos string) string {
+	if goos == "windows" {
+		return strings.Join(argv, " ")
+	}
+	words := make([]string, 0, len(argv))
+	for _, arg := range argv {
+		words = append(words, shellWord(arg))
+	}
+	return strings.Join(words, " ")
+}
+
+// shellSafeChars are the bytes that sh reads as themselves. An element made only
+// of these stays unquoted, so the line stays readable.
+const shellSafeChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./=:,+@%-"
+
+// shellWord quotes one argument for sh. An empty argument is the empty
+// single-quoted word. Any other argument with a byte outside shellSafeChars is
+// wrapped in single quotes. Each single quote inside it is written as a close
+// quote, a backslash-escaped quote, and an open quote.
+func shellWord(arg string) string {
+	if arg != "" && strings.IndexFunc(arg, func(r rune) bool { return !strings.ContainsRune(shellSafeChars, r) }) < 0 {
+		return arg
+	}
+	return "'" + strings.ReplaceAll(arg, "'", `'\''`) + "'"
+}
+
 // CommandStage runs one topology command node. It executes the node's argv
 // through the designated shell tool on the sandboxed registry path and is
 // model-free. A command node is not a verification authority in v1: its output
@@ -26,10 +61,8 @@ const commandToolName = "bash"
 type CommandStage struct {
 	// Name is the node name; it labels errors and activity.
 	Name string
-	// Command is the argv to run. The stage joins the elements into one shell
-	// line before it calls the bash tool, so an argument that contains a space
-	// loses its boundary. Treat each element as one word of a shell command,
-	// not as one element of an exec vector.
+	// Command is the argv to run. Each element is passed as one argument. Use
+	// ["sh", "-c", "..."] for shell syntax.
 	Command []string
 }
 
@@ -55,7 +88,7 @@ func (s CommandStage) Run(ctx context.Context, input schemas.HarnessStageInput, 
 	if timeout <= 0 {
 		timeout = DefaultTimeoutSeconds
 	}
-	command := strings.Join(s.Command, " ")
+	command := CommandLine(s.Command)
 	options.report("running " + command)
 	args := map[string]any{
 		"command":    command,
@@ -81,12 +114,17 @@ func (s CommandStage) Run(ctx context.Context, input schemas.HarnessStageInput, 
 		return schemas.HarnessStageOutput{}, fmt.Errorf("command node %s: %w", s.Name, err)
 	}
 	output := truncateCommandOutput(result.Output)
-	status := "failed"
-	if result.OK {
-		status = "succeeded"
+	if !result.OK {
+		// A failed command fails the stage. The pass then takes the
+		// orchestrator's failed-stage path, so the run never verifies on it.
+		lower := strings.ToLower(result.Output)
+		if strings.Contains(lower, "permission required") || strings.Contains(lower, "permission denied") {
+			return schemas.HarnessStageOutput{}, fmt.Errorf("command node %s: command %q denied by permission policy: %s", s.Name, command, output)
+		}
+		return schemas.HarnessStageOutput{}, fmt.Errorf("command node %s: command %q failed: %s", s.Name, command, output)
 	}
 	return schemas.HarnessStageOutput{
-		Summary:    fmt.Sprintf("command %q %s", command, status),
+		Summary:    fmt.Sprintf("command %q succeeded", command),
 		Detail:     output,
 		Confidence: 1.0,
 		Data: map[string]any{

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -99,7 +100,7 @@ func TestRunExecUseSpecCreatesDraftSession(t *testing.T) {
 				MaxTurns: 3,
 			}, nil
 		},
-		resolveMCPConfig: func(string) (config.MCPConfig, error) {
+		resolveMCPConfigTrust: func(string, bool) (config.MCPConfig, error) {
 			return config.MCPConfig{}, nil
 		},
 		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
@@ -249,4 +250,74 @@ func slicesContains(values []string, value string) bool {
 		}
 	}
 	return false
+}
+
+func TestRunExecUseSpecHonorsWorkspaceTrustForHooks(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		trustFlag   string
+		wantMarker  bool
+		wantNotices bool
+	}{
+		{name: "untrusted skips project hooks", trustFlag: "--no-trust", wantMarker: false, wantNotices: true},
+		{name: "trusted runs project hooks", trustFlag: "--trust", wantMarker: true, wantNotices: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setCLIUserConfigRoot(t)
+			t.Setenv("SPLICE_CRED_STORAGE", "encrypted-file")
+			workspaceRoot := t.TempDir()
+			marker := filepath.Join(t.TempDir(), "hook-ran")
+			hookConfig := `{"enabled":true,"hooks":[{"id":"marker","event":"beforeTool","matcher":"*","command":"sh","args":["-c","touch ` + marker + `"],"enabled":true}]}`
+			if err := os.MkdirAll(filepath.Join(workspaceRoot, ".splice"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(workspaceRoot, ".splice", "hooks.json"), []byte(hookConfig), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir(), Now: fixedCLISpecTime})
+			var stdout, stderr bytes.Buffer
+			exitCode := runWithDeps([]string{
+				"exec", tc.trustFlag,
+				"--cwd", workspaceRoot,
+				"--use-spec",
+				"-o", "json",
+				"plan the review flow",
+			}, &stdout, &stderr, appDeps{
+				getwd: func() (string, error) { return workspaceRoot, nil },
+				resolveConfig: func(_ string, overrides config.Overrides) (config.ResolvedConfig, error) {
+					return config.ResolvedConfig{
+						ActiveProvider: "test",
+						Provider: config.ProviderProfile{
+							Name:         "test",
+							ProviderKind: config.ProviderKindOpenAICompatible,
+							BaseURL:      "http://127.0.0.1/v1",
+							Model:        "draft-model",
+						},
+						MaxTurns: 3,
+					}, nil
+				},
+				resolveMCPConfigTrust: func(string, bool) (config.MCPConfig, error) {
+					return config.MCPConfig{}, nil
+				},
+				newProvider:     func(config.ProviderProfile) (zeroruntime.Provider, error) { return &submitSpecExecProvider{}, nil },
+				newSessionStore: func() *sessions.Store { return store },
+				newSandboxStore: func() (*sandbox.GrantStore, error) {
+					return sandbox.NewGrantStore(sandbox.StoreOptions{FilePath: t.TempDir() + "/grants.json"})
+				},
+				now: fixedCLISpecTime,
+			})
+			if exitCode != exitSuccess {
+				t.Fatalf("exit = %d stderr=%s stdout=%s", exitCode, stderr.String(), stdout.String())
+			}
+			_, statErr := os.Stat(marker)
+			ran := statErr == nil
+			if ran != tc.wantMarker {
+				t.Fatalf("project hook ran = %v, want %v (stat err %v)", ran, tc.wantMarker, statErr)
+			}
+			notice := strings.Contains(stderr.String(), "skipped project config, MCP servers, hooks, plugins")
+			if notice != tc.wantNotices {
+				t.Fatalf("skip notice present = %v, want %v; stderr=%s", notice, tc.wantNotices, stderr.String())
+			}
+		})
+	}
 }

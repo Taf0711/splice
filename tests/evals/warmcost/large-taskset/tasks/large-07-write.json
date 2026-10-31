@@ -1,0 +1,7 @@
+{
+  "name": "large-07-write",
+  "phase": "write",
+  "prompt": "Add (s *Store) UsedBytes() int64 in the storage package: the total size in bytes of every stored blob. Add a regression test.",
+  "check": "# large-07 A: Add (s *Store) UsedBytes() int64 in the storage package: the total siz\nmkdir -p internal/storage\ncat > internal/storage/probe_usage_test.go <<'EOF'\npackage storage\n\nimport \"testing\"\n\nfunc TestProbeUsedBytes(t *testing.T) {\n\ts := NewStore()\n\tif got := s.UsedBytes(); got != 0 {\n\t\tt.Fatalf(\"empty UsedBytes = %d\", got)\n\t}\n\ts.Put([]byte(\"abcd\"))\n\ts.Put([]byte(\"xyz\"))\n\tif got := s.UsedBytes(); got != 7 {\n\t\tt.Fatalf(\"UsedBytes = %d, want 7\", got)\n\t}\n}\nEOF\ngo test -count=1 ./internal/storage/ ; rc=$?\nrm -f internal/storage/probe_usage_test.go\nif [ $rc -ne 0 ]; then exit $rc; fi\nexit 0\n",
+  "fixture": "../../large-families/fixture"
+}

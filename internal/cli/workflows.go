@@ -248,6 +248,11 @@ func runChanges(args []string, stdout io.Writer, stderr io.Writer, deps appDeps)
 		}
 		return exitSuccess
 	case "commit":
+		// Only the --auto path resolves config. A manual message would drop
+		// the root --flags list without a sign, so it fails loud instead.
+		if !options.auto && rootFlags != nil {
+			return writeExecUsageError(stderr, "--flags is only supported for changes commit --auto, which reads config; remove --flags for changes commit")
+		}
 		var message string
 		if options.auto {
 			summary, err := deps.inspectChanges(context.Background(), zerogit.InspectOptions{

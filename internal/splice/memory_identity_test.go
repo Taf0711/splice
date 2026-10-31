@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/memd"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/splice/stages"
 )
@@ -43,7 +44,7 @@ func TestMemoryIdentityUsesProjectRoot(t *testing.T) {
 		options := PipelineConfigFromAgentOptions(agent.Options{})
 		options.ProjectRoot = repoRoot
 
-		_, _, completed, err := runPass(context.Background(), "run-id", 1, plan, registry, runFakeProvider{}, options, workDir, nil, time.Time{}, nil, store, nil)
+		_, _, completed, err := runPass(context.Background(), "run-id", 1, plan, registry, runFakeProvider{}, options, workDir, nil, time.Time{}, nil, store, nil, NewStageExecutionBudget(0))
 		if err != nil || !completed {
 			t.Fatalf("workDir %q: runPass completed=%v err=%v", workDir, completed, err)
 		}
@@ -91,11 +92,11 @@ func TestMemoryIdentityFallbackUsesWorkDir(t *testing.T) {
 	// ProjectRoot is deliberately empty here.
 	options := PipelineConfigFromAgentOptions(agent.Options{})
 
-	_, _, completed, err := runPass(context.Background(), "run-id", 1, plan, registry, runFakeProvider{}, options, workDir, nil, time.Time{}, nil, store, nil)
+	_, _, completed, err := runPass(context.Background(), "run-id", 1, plan, registry, runFakeProvider{}, options, workDir, nil, time.Time{}, nil, store, nil, NewStageExecutionBudget(0))
 	if err != nil || !completed {
 		t.Fatalf("runPass completed=%v err=%v", completed, err)
 	}
-	if len(store.queries) != 1 || store.queries[0].ProjectPath == nil || *store.queries[0].ProjectPath != workDir {
+	if len(store.queries) != 1 || store.queries[0].ProjectPath == nil || *store.queries[0].ProjectPath != memd.CanonicalProjectPath(workDir) {
 		t.Fatalf("query ProjectPath = %#v, want %q", store.queries[0].ProjectPath, workDir)
 	}
 }
@@ -116,7 +117,7 @@ func TestMemoryIdentityDegradationObservationUsesProjectRoot(t *testing.T) {
 	_, err := runStageWithContext(context.Background(), schemas.HarnessStageInput{
 		RunID:     "run-degraded",
 		StageName: "context_stage",
-	}, stage, 1, selection, options, workDir, nil, store, stage.Capabilities(), 0, nil)
+	}, stage, 1, selection, options, workDir, nil, store, stage.Capabilities(), 0, nil, nil, 0)
 	if err != nil {
 		t.Fatalf("runStageWithContext: %v", err)
 	}

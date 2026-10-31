@@ -32,6 +32,7 @@ import (
 	"syscall"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/flags"
 	"github.com/Taf0711/splice/internal/harness"
 	"github.com/Taf0711/splice/internal/harness/pi"
 	splicerun "github.com/Taf0711/splice/internal/splice"
@@ -47,6 +48,31 @@ const (
 	exitIncomplete  = 4
 	exitInterrupted = 130
 )
+
+// bridgeOptions builds the run options for the bridge. The bridge does not
+// resolve config, so no decision_advisor section exists. The trajectory
+// classifier is turned off here: with the flag left at its default, the run
+// would print a "rules only" line that no resolved config produced.
+// bridgeRegistry builds the tool registry for the bridge's pipeline run. The
+// code writer applies changes through the core tools, and the pipeline's
+// source seam needs the raw reader on the same registry.
+func bridgeRegistry(cwd string) *tools.Registry {
+	registry := tools.NewRegistry()
+	for _, tool := range tools.CoreTools(cwd) {
+		registry.Register(tool)
+	}
+	tools.RegisterPipelineSourceReader(registry, cwd, nil)
+	return registry
+}
+
+func bridgeOptions(cwd string) agent.Options {
+	return agent.Options{
+		Cwd:            cwd,
+		MaxTurns:       1,
+		PermissionMode: agent.PermissionModeUnsafe, // fixture: no prompt-gated tools
+		Flags:          flags.Set{flags.TrajectoryClassifierEnabled: false},
+	}
+}
 
 // fixtureWaitCancelEnv turns on the deterministic test gate: the fixture
 // provider holds its stream open until a cancel command is routed. It exists
@@ -92,20 +118,12 @@ func main() {
 		os.Exit(exitProvider)
 	}
 
-	options := agent.Options{
-		Cwd:            *cwd,
-		MaxTurns:       1,
-		PermissionMode: agent.PermissionModeUnsafe, // fixture: no prompt-gated tools
-	}
+	options := bridgeOptions(*cwd)
 
 	// The code writer applies file changes through the tool registry. Register
 	// the core tools (write_file, delete_file) so a real run can land its
 	// fixture output. This matches what exec does via newCoreRegistry.
-	registry := tools.NewRegistry()
-	for _, tool := range tools.CoreTools(*cwd) {
-		registry.Register(tool)
-	}
-	options.Registry = registry
+	options.Registry = bridgeRegistry(*cwd)
 
 	// The harness seam attaches the typed event callbacks. The orchestrator
 	// emits PipelinePlanEvent and StageEvent; Wire forwards them to the sink

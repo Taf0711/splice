@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Taf0711/splice/internal/splice/schemas"
@@ -21,7 +22,9 @@ func TestStageTierLabelsReadsActiveTopology(t *testing.T) {
 		Name:    "custom",
 		Nodes: []schemas.PipelineNode{
 			{Name: "code_writer", Type: "code_writer"},
-			{Name: "summarizer", Type: schemas.NodeTypePrompt, Prompt: "summarize {{intent}}"},
+			// The explicit budget keeps the node inside the trivial envelope. The
+			// default prompt budget (3000 input) would fail the topology load.
+			{Name: "summarizer", Type: schemas.NodeTypePrompt, Prompt: "summarize {{intent}}", Budget: &schemas.StageBudget{InputMax: 500, OutputMax: 500}},
 		},
 	}
 	data, err := json.MarshalIndent(topology, "", "  ")
@@ -47,5 +50,34 @@ func TestStageTierLabelsReadsActiveTopology(t *testing.T) {
 	untrusted := model{cwd: workspace, trusted: false}
 	if _, ok := untrusted.stageTierLabels()["summarizer"]; ok {
 		t.Fatal("an untrusted project topology reached the model wizard")
+	}
+}
+
+// TestSetupPipelineShowsTopologyError pins that a malformed active topology is
+// visible in the stage-model wizard. The wizard keeps the default stages, and
+// it also shows one warning line that names the error.
+func TestSetupPipelineShowsTopologyError(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	m, _ := newSetupModelForPipeline(t, "gpt-5.6-sol")
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, ".splice", "pipeline.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"version":1,"name":"broken",`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m.cwd = workspace
+	m.trusted = true
+
+	view := plainRender(t, m.setupView(100))
+	if !strings.Contains(view, "pipeline topology error:") || !strings.Contains(view, "showing the default stages") {
+		t.Fatalf("wizard hid the topology error:\n%s", view)
+	}
+	if !strings.Contains(view, "code_writer:") {
+		t.Fatalf("wizard lost the default stage rows:\n%s", view)
+	}
+	if _, err := m.stageTierLabelsWithError(); err == nil {
+		t.Fatal("stageTierLabelsWithError() returned no error for a malformed topology")
 	}
 }

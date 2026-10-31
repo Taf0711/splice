@@ -42,7 +42,7 @@ func messages(issues []Issue) []string {
 // the stage registry: a rename or deletion leaves a stale key and fails CI.
 // (Additions are not caught; see the comment on stageSpliceTools.)
 func TestStageSpliceToolsKeysAreRealStages(t *testing.T) {
-	registry, err := buildStageRegistry(PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir())
+	registry, err := buildStageRegistry(PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil)
 	if err != nil {
 		t.Fatalf("buildStageRegistry: %v", err)
 	}

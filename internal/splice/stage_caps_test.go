@@ -111,7 +111,7 @@ func TestCompileTopologyCarriesResolvedCaps(t *testing.T) {
 // memory gating, so any drift from the stage implementation silently changes
 // runtime behavior. This fails CI when one side moves without the other.
 func TestBuiltinCapabilityProfileMatchesStageDeclarations(t *testing.T) {
-	registry, err := buildStageRegistry(PipelineRunConfig{}, t.TempDir())
+	registry, err := buildStageRegistry(PipelineRunConfig{}, t.TempDir(), nil)
 	if err != nil {
 		t.Fatalf("buildStageRegistry: %v", err)
 	}

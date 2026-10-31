@@ -3,6 +3,7 @@ package v2
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"github.com/Taf0711/splice/internal/gitenv/gitenvtest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -243,4 +244,10 @@ func runGitTest(t *testing.T, dir string, args ...string) {
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %v: %v\n%s", args, err, output)
 	}
+}
+
+func TestRequireCleanSourceHardensEnv(t *testing.T) {
+	record := gitenvtest.InstallRecorder(t)
+	_ = RequireCleanSource(t.TempDir())
+	gitenvtest.AssertHardened(t, gitenvtest.Runs(t, record))
 }

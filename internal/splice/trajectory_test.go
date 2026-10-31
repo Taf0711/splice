@@ -3,6 +3,8 @@ package splice
 import (
 	"crypto/sha256"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -281,7 +283,7 @@ var trajectoryRelevantOutputKeys = map[string]string{
 var trajectoryIrrelevantStages = map[string]struct{}{}
 
 func TestTrajectoryExtractorsCoverRegistryStages(t *testing.T) {
-	registry, err := buildStageRegistry(PipelineRunConfig{}, t.TempDir())
+	registry, err := buildStageRegistry(PipelineRunConfig{}, t.TempDir(), nil)
 	if err != nil {
 		t.Fatalf("buildStageRegistry: %v", err)
 	}
@@ -349,6 +351,7 @@ func TestTrajectoryRuleOrder(t *testing.T) {
 		"oscillation",
 		"cycle",
 		"no_progress",
+		"cost_without_progress",
 		"rollback",
 		"step_back",
 		"confidence",
@@ -659,5 +662,69 @@ func TestEvaluateTrajectoryEscalatesOnRepeatedEmptyHash(t *testing.T) {
 	decision := EvaluateTrajectory(history, 5, nil)
 	if decision.Action != schemas.ActionEscalateCycleDetected {
 		t.Fatalf("expected cycle detected for repeated empty hash, got %q", decision.Action)
+	}
+}
+
+// TestGenerationAllowanceCoversRepairsAndPasses: the light tier's budget
+// (9192) covers one writer call; a first pass with two repairs may generate
+// three calls' worth, and the allowance grows with each pass.
+func TestGenerationAllowanceCoversRepairsAndPasses(t *testing.T) {
+	if got := generationAllowance(9192, 1); got != 27576 {
+		t.Fatalf("first pass allowance = %d, want 27576", got)
+	}
+	if got := generationAllowance(9192, 2); got != 55152 {
+		t.Fatalf("second pass allowance = %d, want 55152", got)
+	}
+}
+
+// TestRevisionContextCarriesTheFailingTests: the next pass must see which
+// test failed and why, not only a failing count.
+func TestRevisionContextCarriesTheFailingTests(t *testing.T) {
+	outputs := []schemas.HarnessStageOutput{{Data: map[string]any{"test_results": schemas.TestRunResults{
+		Command:  []string{"go", "test", "./..."},
+		ExitCode: 1,
+		Tests:    []schemas.TestCaseResult{{Name: "TestStartupChecksPass", Status: "failed", Message: `startup: currency "GBP" cannot be shown in the console`}},
+	}}}}
+	rc := buildRevisionContext("add GBP", nil, nil, outputs, "")
+	if !strings.Contains(rc, `TestStartupChecksPass: startup: currency "GBP" cannot be shown in the console`) {
+		t.Fatalf("revision context lacks the failing test:\n%s", rc)
+	}
+}
+
+// TestUnchangedPassIsNotProgress pins review finding F7: the change summary
+// compares with HEAD, so an earlier pass's edits made every later pass look
+// like progress and no_progress could never fire. The per-pass flag wins
+// when present; three unchanged passes now step back.
+func TestUnchangedPassIsNotProgress(t *testing.T) {
+	unchanged := false
+	pass := func(i int) schemas.IterationState {
+		return iterState(withHash(fmt.Sprintf("h%d", i)), func(s *schemas.IterationState) {
+			s.FilesChanged = []string{"internal/events/kinds.go"} // an earlier pass's edit, still in the diff against HEAD
+			s.LinesAdded = 1
+			s.PassChanged = &unchanged
+		})
+	}
+	history := []schemas.IterationState{pass(1), pass(2), pass(3)}
+	if got := trailingNoProgressCount(history); got != 3 {
+		t.Fatalf("no-progress passes = %d, want 3", got)
+	}
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	summary := schemas.ChangeSummary{ChangedFiles: []schemas.ChangedFile{{Path: "a.go", Status: "modified"}}}
+	before := passDigest(dir, summary)
+	if again := passDigest(dir, summary); again != before {
+		t.Fatalf("an unchanged pass must keep its digest: %q %q", before, again)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\n\nvar X = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if passDigest(dir, summary) == before {
+		t.Fatal("a content change in a listed file must change the digest")
+	}
+	if passDigest(dir, schemas.ChangeSummary{}) == before {
+		t.Fatal("a file leaving the change list (reverted to HEAD) must change the digest")
 	}
 }

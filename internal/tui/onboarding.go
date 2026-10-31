@@ -977,8 +977,15 @@ func (m *model) populateSetupPipelinePicks() {
 		if hasPrimary {
 			sourceProvider = primaryEntry.Provider
 		}
+		// The catalog lists models by model provider, which can include
+		// models that only another endpoint serves (an OpenRouter-only
+		// OpenAI-family entry). Offer only models this endpoint can serve.
+		family := splicerun.RegistryProviderKind(profile.ProviderKind)
 		for _, candidate := range m.modelCatalog.ListByProvider(sourceProvider) {
 			if !candidate.Supports(modelregistry.ModelCapabilityToolCalling) {
+				continue
+			}
+			if family != "" && !candidate.AllowsEndpointFamily(family) {
 				continue
 			}
 			meta := providerWizardModelMeta(
@@ -1699,6 +1706,25 @@ func setupModelSelectedDetail(model providerWizardModel) string {
 }
 
 func (m model) setupPipelineLines(width int, height int) []string {
+	lines := m.setupPipelineBodyLines(width, height)
+	// A topology error is shown above the stages, not only in the run. The
+	// stages still list the default roster, so the user sees both facts.
+	if _, err := m.stageTierLabelsWithError(); err != nil {
+		rowWidth := setupPipelineBlockWidth(width, nil, nil)
+		// Wrap the text so the whole error shows, not only its first columns.
+		text := zeroTheme.amber.Width(maxInt(10, rowWidth-2)).Render(
+			fmt.Sprintf("pipeline topology error: %v; showing the default stages", err))
+		warning := make([]string, 0, 4)
+		for _, row := range strings.Split(text, "\n") {
+			warning = append(warning, padSetupLine("  "+row, rowWidth))
+		}
+		warning = append(warning, blankSetupBlockLine(rowWidth))
+		lines = append(warning, lines...)
+	}
+	return lines
+}
+
+func (m model) setupPipelineBodyLines(width int, height int) []string {
 	if setupProviderUsesTypedModel(m.setupProvider()) {
 		return m.setupPipelineSingleModelLines(width)
 	}

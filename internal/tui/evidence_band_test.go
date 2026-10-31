@@ -79,7 +79,8 @@ func TestEvidenceBandFoldsBackNarrow(t *testing.T) {
 		t.Fatal("evidence band visible below the 120-col boundary")
 	}
 	plain := plainRender(t, m.View())
-	if strings.Contains(plain, "────────────") && strings.Contains(plain, "stage_0") {
+	// The title bar owns one full-width rule; the band would add two more.
+	if strings.Count(plain, strings.Repeat("─", 60)) > 1 {
 		t.Fatal("band content leaked into the narrow frame")
 	}
 }

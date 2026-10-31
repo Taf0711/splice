@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Taf0711/splice/internal/gitenv/gitenvtest"
 	"github.com/Taf0711/splice/internal/redaction"
 )
 
@@ -726,4 +727,12 @@ func TestCreatePRCommandConstruction(t *testing.T) {
 			t.Fatalf("unexpected dir: %q, want %q", runner.calls[0].dir, root)
 		}
 	})
+}
+
+func TestDefaultRunGitHardensEnv(t *testing.T) {
+	record := gitenvtest.InstallRecorder(t)
+	if _, err := defaultRunGit(context.Background(), t.TempDir(), "status"); err != nil {
+		t.Fatalf("defaultRunGit: %v", err)
+	}
+	gitenvtest.AssertHardened(t, gitenvtest.Runs(t, record))
 }

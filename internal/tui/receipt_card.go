@@ -18,17 +18,19 @@ import (
 // Terminal outcome receipt cards (GAP-E, v0.5 §16 receipts + P2b cell 6):
 // run outcomes render as styled result cards with a next-action row —
 // never a bare error line, never a raw JSON receipt leaking into the
-// transcript (audit finding 3). Three receipts: VERIFIED, FAILED,
-// CANCELLED. `cancelled` is not failure: it distinguishes staged work
-// from applied work and always offers the resume path.
+// transcript (audit finding 3). Four receipts: VERIFIED, UNVERIFIED (the run
+// completed but no check verified it), FAILED, CANCELLED. `cancelled` is not
+// failure: it distinguishes staged work from applied work and always offers
+// the resume path.
 
-// receiptKind discriminates the three terminal outcome cards.
+// receiptKind discriminates the terminal outcome cards.
 type receiptKind string
 
 const (
-	receiptVerified  receiptKind = "verified"
-	receiptFailed    receiptKind = "failed"
-	receiptCancelled receiptKind = "cancelled"
+	receiptVerified   receiptKind = "verified"
+	receiptUnverified receiptKind = "unverified"
+	receiptFailed     receiptKind = "failed"
+	receiptCancelled  receiptKind = "cancelled"
 )
 
 // receiptTranscriptMarker prefixes an error row whose payload is a receipt
@@ -69,7 +71,7 @@ func parseReceiptTranscriptPayload(text string) (receiptCard, bool) {
 	}
 	kind := receiptKind(parts[0])
 	switch kind {
-	case receiptVerified, receiptFailed, receiptCancelled:
+	case receiptVerified, receiptUnverified, receiptFailed, receiptCancelled:
 	default:
 		return receiptCard{}, false
 	}
@@ -132,6 +134,9 @@ func cancelledReceiptForWorktree(wt *worktrees.Result) receiptCard {
 		"stopped by you",
 		"stopped in the shared workspace — edits may already be on disk",
 	)
+	// No worktree means nothing is staged: apply and discard would only
+	// answer "no staged work", and a card never advertises a dead key.
+	card.actions = [][2]string{{"R", "resume"}}
 	return card
 }
 
@@ -162,6 +167,8 @@ func renderReceiptCard(card receiptCard, width int, tier presentation.GlyphTier)
 		gutter, border, titleStyle = marker.Glyph, zeroTheme.cardRun, zeroTheme.green
 	case receiptCancelled:
 		gutter, border, titleStyle = "[?]", zeroTheme.cardRun, zeroTheme.amber
+	case receiptUnverified:
+		gutter, border, titleStyle = "[!]", zeroTheme.cardRun, zeroTheme.amber
 	default:
 		marker := presentation.StatusMarker(presentation.NodeStatusFailed, tier)
 		gutter, border, titleStyle = marker.Glyph, zeroTheme.cardErr, zeroTheme.red
@@ -245,6 +252,34 @@ func verifiedReceiptCard(evidence []string, files string, usage string, elapsed 
 	}
 }
 
+// unverifiedReceiptCard builds the UNVERIFIED card for a completed run that
+// no check verified. The body names why, so the reader sees which checks did
+// not apply. It offers the same keys as VERIFIED: the work is complete, only
+// its verification is missing.
+func unverifiedReceiptCard(reason string, elapsed string) receiptCard {
+	if strings.TrimSpace(reason) == "" {
+		reason = "no verification check passed"
+	}
+	return receiptCard{
+		kind:    receiptUnverified,
+		title:   "DONE · NOT VERIFIED",
+		elapsed: elapsed,
+		lines:   []string{reason},
+		actions: [][2]string{{"O", "open diff"}, {"E", "export receipt"}, {"R", "resume"}},
+	}
+}
+
+// unverifiedReceiptFromState builds the UNVERIFIED card from the run's
+// completion receipt, which carries the reason. The reason is runtime truth,
+// so the card never presents an unverified run as VERIFIED.
+func unverifiedReceiptFromState(reason string, startedAt time.Time, now time.Time) receiptCard {
+	elapsed := ""
+	if !startedAt.IsZero() {
+		elapsed = formatWorkingElapsed(now.Sub(startedAt))
+	}
+	return unverifiedReceiptCard(reason, elapsed)
+}
+
 // failedReceiptCard builds the FAILED card: failing stage, the full reason
 // (the card body wraps it), preserved-state note, and recovery keys.
 func failedReceiptCard(stage string, reason string, snapshot string, elapsed string) receiptCard {
@@ -263,7 +298,8 @@ func failedReceiptCard(stage string, reason string, snapshot string, elapsed str
 		title:   "FAILED",
 		elapsed: elapsed,
 		lines:   lines,
-		actions: [][2]string{{"R", "restore"}, {"I", "intervene"}, {"L", "logs"}},
+		// [R] opens the session picker (receiptResume), so it says resume.
+		actions: [][2]string{{"R", "resume"}, {"I", "intervene"}, {"L", "logs"}},
 	}
 }
 
@@ -340,4 +376,100 @@ func verifiedReceiptFromResult(finalAnswer string, usage presentation.UsageSumma
 		elapsed = formatWorkingElapsed(now.Sub(startedAt))
 	}
 	return verifiedReceiptCard(evidence, "", usageLine, elapsed), true
+}
+
+// verifiedReceiptCardFor picks the card for a completed run. An unverified
+// completion projects the UNVERIFIED card; a verified one projects VERIFIED
+// from the persisted result, and ok is false when that result carries no
+// evidence to show.
+func verifiedReceiptCardFor(completion *presentation.CompletionReceipt, finalAnswer string, usage presentation.UsageSummary, startedAt time.Time, now time.Time) (receiptCard, bool) {
+	if completion.Unverified {
+		return unverifiedReceiptFromState(completion.Detail, startedAt, now), true
+	}
+	return verifiedReceiptFromResult(finalAnswer, usage, startedAt, now)
+}
+
+// pipelineTurnReceipt builds the terminal receipt card for a finished /exec or
+// pipeline turn from the run's result or error. The run goroutine calls it, so
+// the card and its persisted payload come from runtime truth, not from the
+// presentation state, which can land after the turn's result message. It
+// reuses the card builders above. It does no I/O.
+func pipelineTurnReceipt(finalAnswer, incompleteReason string, runErr error, worktree *worktrees.Result, started, now time.Time) (receiptCard, bool) {
+	elapsed := ""
+	if !started.IsZero() {
+		elapsed = formatWorkingElapsed(now.Sub(started))
+	}
+	if runErr != nil {
+		if errors.Is(runErr, context.Canceled) {
+			card := cancelledReceiptForWorktree(worktree)
+			card.elapsed = elapsed
+			return card, true
+		}
+		return failedReceiptCard("", runErr.Error(), "", elapsed), true
+	}
+	var pr schemas.PipelineResult
+	if err := json.Unmarshal([]byte(finalAnswer), &pr); err != nil {
+		return failedReceiptCard("", "pipeline result could not be read: "+err.Error(), "", elapsed), true
+	}
+	// Status mapping matches finishPresentation in internal/splice/run.go:
+	// completed projects VERIFIED or NOT VERIFIED, a user abort projects
+	// CANCELLED, and every other status projects FAILED with its reason.
+	if pr.Status == "completed" {
+		if !pr.Verified {
+			return unverifiedReceiptFromState(pr.UnverifiedReason, started, now), true
+		}
+		return verifiedReceiptCard(pipelineEvidence(pr), "", "", elapsed), true
+	}
+	if pr.Status == "aborted" && pr.UserAborted {
+		card := cancelledReceiptForWorktree(worktree)
+		card.elapsed = elapsed
+		return card, true
+	}
+	reason := incompleteReason
+	if pr.AbortReason != nil && strings.TrimSpace(*pr.AbortReason) != "" {
+		reason = *pr.AbortReason
+	}
+	if strings.TrimSpace(reason) == "" {
+		reason = fmt.Sprintf("the pipeline run ended with status %q and no recorded reason", pr.Status)
+	}
+	return failedReceiptCard("", reason, "", elapsed), true
+}
+
+// pipelineEvidence lists the checks a verified pipeline result records: the
+// tests and acceptance facts that passed in the final state, and the test
+// command that ran. A result that records none says so, so a VERIFIED card
+// never shows an empty body.
+func pipelineEvidence(pr schemas.PipelineResult) []string {
+	var evidence []string
+	if state := pr.FinalState; state != nil {
+		if state.TestsPassing > 0 {
+			evidence = append(evidence, fmt.Sprintf("%d test(s) passed", state.TestsPassing))
+		}
+		if state.AcceptanceFactsPassing > 0 {
+			evidence = append(evidence, fmt.Sprintf("%d acceptance fact(s) passed", state.AcceptanceFactsPassing))
+		}
+	}
+	for i := len(pr.Stages) - 1; i >= 0; i-- {
+		if command := strings.TrimSpace(pr.Stages[i].TestCommand); command != "" && pr.Stages[i].Status == schemas.StageCompleted {
+			evidence = append(evidence, "test command: "+command)
+			break
+		}
+	}
+	if len(evidence) == 0 {
+		evidence = append(evidence, "the pipeline result records no check detail")
+	}
+	return evidence
+}
+
+// appendTurnReceipt adds a pipeline turn's receipt card to the transcript and
+// arms its action keys. row.text is the card payload. The other row fields
+// (hint, turn tools, turn elapsed) stay on the row, so a FAILED card keeps the
+// next step and the done-line metadata of the error row it replaces.
+func (m model) appendTurnReceipt(row transcriptRow) model {
+	if card, ok := parseReceiptTranscriptPayload(row.text); ok {
+		m.lastTerminalReceipt = card.kind
+	}
+	row.kind = rowError
+	m.transcript = appendTranscriptRow(m.transcript, row)
+	return m
 }

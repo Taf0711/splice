@@ -238,8 +238,18 @@ profile, and retry.
 
 ### The Linux sandbox is unavailable
 
-Install Bubblewrap. For a source layout, build the Linux helper and keep it
-beside `splice`.
+Pipeline stages and command nodes need the native sandbox. Without it, Splice
+refuses to run them. `splice sandbox setup` and `splice doctor` report the
+missing backend. Install Bubblewrap with the package manager of your system:
+
+```bash
+sudo apt install bubblewrap   # Debian, Ubuntu
+sudo dnf install bubblewrap   # Fedora, RHEL
+sudo apk add bubblewrap       # Alpine
+```
+
+For a source layout, build the Linux helper and keep it beside `splice`.
+Splice has no option to run these stages without the sandbox.
 
 Inspect the selected backend with:
 

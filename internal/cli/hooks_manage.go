@@ -25,7 +25,11 @@ func hookConfigStore(deps appDeps, user bool) (*hooks.ConfigStore, string, error
 	if user {
 		path = paths.UserConfigPath
 	}
-	store, err := hooks.NewConfigStore(hooks.StoreOptions{ConfigPath: path})
+	source := hooks.SourceProject
+	if user {
+		source = hooks.SourceUser
+	}
+	store, err := hooks.NewConfigStore(hooks.StoreOptions{ConfigPath: path, Source: source})
 	if err != nil {
 		return nil, "", err
 	}

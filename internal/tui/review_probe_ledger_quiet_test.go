@@ -31,11 +31,6 @@ func TestReviewLedgerCardSurvivesQuiet(t *testing.T) {
 	if !m.narrationVisibleRow(row) {
 		t.Fatal("quiet verbosity dropped the decisions ledger card — anchors must survive every verbosity level")
 	}
-	// Contrast: ordinary system chatter still drops at quiet.
-	chatter := transcriptRow{kind: rowSystem, text: "some transient command output"}
-	if m.narrationVisibleRow(chatter) {
-		t.Fatal("sanity: ordinary system rows should still drop at quiet")
-	}
 }
 
 func TestReviewLedgerCardRendersThroughQuietView(t *testing.T) {
