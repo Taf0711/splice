@@ -57,7 +57,9 @@ MEMD_DIR="${MEMD_DIR:-/tmp/warmcost-paid-memd}"
 RETENTION="${RETENTION:-fresh}"
 SIDECAR_ROOT="${SIDECAR_ROOT:-}"
 
-export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
+# Keep the caller's go first so `go build` matches the inherited GOROOT.
+CALLER_GO_DIR="$(dirname "$(command -v go 2>/dev/null || echo /usr/local/bin/go)")"
+export PATH="$CALLER_GO_DIR:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-/tmp/splice-cfg}"
 export SPLICE_MEMD_BIN="$MEMD_BIN"
 export SPLICE_MEMD_SOCKET="$MEMD_DIR/mem.sock"
