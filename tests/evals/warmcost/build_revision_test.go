@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -136,7 +137,14 @@ func TestPaidRunBuildGuards(t *testing.T) {
 	if _, err := os.Stat(script); err != nil {
 		t.Skipf("guard script not found: %v", err)
 	}
+	// Put the GOROOT toolchain first on PATH so the child `go build` matches the
+	// go that `go test` runs under (GOROOT is exported for it).
+	goroot := os.Getenv("GOROOT")
+	if goroot == "" {
+		goroot = runtime.GOROOT()
+	}
 	cmd := exec.Command("bash", script)
+	cmd.Env = append(os.Environ(), "PATH="+filepath.Join(goroot, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("paid-run build guards failed: %v\n%s", err, out)
