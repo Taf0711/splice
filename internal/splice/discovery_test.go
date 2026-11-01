@@ -44,6 +44,10 @@ func gitInit(t *testing.T, dir string) {
 		}
 	}
 	run("init", "-q")
+	// Newer Git runs detached auto-maintenance after commit; its lock file
+	// would appear between pass-evidence snapshots of .git/objects.
+	run("config", "maintenance.auto", "false")
+	run("config", "gc.auto", "0")
 	run("add", "-A")
 	run("commit", "-qm", "base")
 }
