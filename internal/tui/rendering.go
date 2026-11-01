@@ -12,8 +12,10 @@ import (
 	"unicode/utf8"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/presentation"
 	"github.com/Taf0711/splice/internal/tools"
 )
 
@@ -178,6 +180,10 @@ type cardRenderOptions struct {
 	// selected in the FILES sidebar; the card border tints accent so the
 	// selection reads in the transcript.
 	fileSelected bool
+	// detailKey is the label of the global full-transcript keybinding (Ctrl+O
+	// by default), advertised on collapsed tool-card footers so the keyboard
+	// route to the complete redacted output is discoverable.
+	detailKey string
 }
 
 // flushCardBodyMaxLines is the body cap for cards flushed to scrollback. The
@@ -191,7 +197,7 @@ func (m model) renderRow(row transcriptRow, width int, rc rowContext) string {
 }
 
 func (m model) renderRowDetailed(row transcriptRow, width int, rc rowContext) string {
-	opts := cardRenderOptions{bodyCap: 0, cwd: m.cwd}
+	opts := cardRenderOptions{bodyCap: 0, cwd: m.cwd, detailKey: labelOr(m.keyBindings.toggleDetailed, "Ctrl+O")}
 	if defaultRenderCache != nil {
 		if key, stable := m.renderRowCacheKey(row, width, rc, opts, false); key != "" {
 			return defaultRenderCache.render(key, stable, func() string {
@@ -206,7 +212,7 @@ func (m model) renderRowDetailed(row transcriptRow, width int, rc rowContext) st
 // false: tight body caps, spinner-capable) or for its one-time scrollback
 // flush (flush == true: deep body caps so edited code stays reviewable).
 func (m model) renderRowMode(row transcriptRow, width int, rc rowContext, flush bool) string {
-	opts := cardRenderOptions{bodyCap: cardBodyMaxLines, cwd: m.cwd}
+	opts := cardRenderOptions{bodyCap: cardBodyMaxLines, cwd: m.cwd, detailKey: labelOr(m.keyBindings.toggleDetailed, "Ctrl+O")}
 	if flush {
 		opts.bodyCap = flushCardBodyMaxLines
 	}
@@ -236,8 +242,28 @@ func (m model) renderRowModeUncached(row transcriptRow, width int, rc rowContext
 		if payload, ok := planCardTranscriptPayload(row.text); ok {
 			return renderPlanCardRow(payload, width)
 		}
+		// P4 lifecycle cards: tagged design-lane cards render through
+		// their contract renderers at the row's width.
+		if card, ok := parseLifecycleCardPayload(row.text); ok {
+			return card(width)
+		}
+		// HANDOFF card (GAP-F): an exited lane with preserved work.
+		if h, merge, ok := parseHandoffTranscriptPayload(row.text); ok {
+			return renderHandoffCard(h, merge, width)
+		}
+		// Trust config card (GAP-I): what an untrusted project config
+		// would change, shown before the user decides.
+		if cfg, summary, ok := parseTrustConfigTranscriptPayload(row.text); ok {
+			return renderTrustConfigCard(cfg, summary, width)
+		}
+		if card, ok := parsePipelineGraphCard(row.text); ok {
+			return renderPipelineGraphCard(card, width, m.glyphTier)
+		}
 		if payload, ok := commandCardTranscriptPayload(row.text); ok {
 			return renderCommandCardRow(payload, width)
+		}
+		if title, status, body, ok := parseBackendCard(row.text); ok {
+			return renderBackendCard(title, status, body, width)
 		}
 		if row.tool == "sessions" {
 			return renderSessionsCards(row.text, width)
@@ -259,6 +285,9 @@ func (m model) renderRowModeUncached(row transcriptRow, width int, rc rowContext
 		}
 		return renderSystemNote(row.text, width)
 	case rowError:
+		if card, ok := parseReceiptTranscriptPayload(row.text); ok {
+			return renderReceiptCard(card, width, m.glyphTier) + renderErrorHint(row.hint, width)
+		}
 		return renderErrorRow(row, width)
 	case rowToolCall:
 		return m.renderRunningToolCard(row, width, rc, opts)
@@ -675,14 +704,22 @@ func renderSystemNote(text string, width int) string {
 	if isCancellationNotice(trimmed) {
 		marker, style = zeroTheme.amber.Render("⊘"), zeroTheme.amber
 	}
+	if width <= 0 {
+		return ""
+	}
+	// A notice wraps to the row width instead of cutting its clause off. Short
+	// notices still fit on the one marked line. The 2 cells are the marker and
+	// its space; continuation lines indent under the first word.
 	srcLines := strings.Split(trimmed, "\n")
 	out := make([]string, 0, len(srcLines))
 	for i, line := range srcLines {
-		prefix := marker + " "
-		if i > 0 {
-			prefix = "  " // continuation lines align under the first word
+		for j, part := range wrapPlainText(line, maxInt(1, width-2)) {
+			prefix := "  " // continuation lines align under the first word
+			if i == 0 && j == 0 {
+				prefix = marker + " "
+			}
+			out = append(out, prefix+style.Render(part))
 		}
-		out = append(out, fitStyledLine(prefix+style.Render(line), width))
 	}
 	return strings.Join(out, "\n")
 }
@@ -717,6 +754,10 @@ func renderCommandCardRow(text string, width int) string {
 			lines = append(lines, zeroTheme.accent.Render("actions: ")+zeroTheme.ink.Render(strings.TrimSpace(strings.TrimPrefix(trimmed, "actions:"))))
 		case isCommandCardHintLine(trimmed):
 			lines = append(lines, zeroTheme.faint.Render(line))
+		case isCommandCardTagHeading(strings.TrimSpace(strings.TrimLeft(line, " 	"))):
+			// P14 memory-card row: "[type] title" with the tag carrying the type's
+			// token colour (decision amber, finding blue, everything else muted).
+			lines = append(lines, renderMemoryTagHeading(line[:len(line)-len(strings.TrimLeft(line, " 	"))], strings.TrimSpace(strings.TrimLeft(line, " 	"))))
 		case isIndentedCommandCardRow(line):
 			// A content row (indented): a "/cmd … - description" gets two-tone
 			// styling (bright name, muted description); a "key  value" field or a
@@ -753,6 +794,10 @@ func renderPlanCardRow(text string, width int) string {
 			// "status: …" line entirely for the minimal card.
 		case isCommandCardHintLine(trimmed):
 			lines = append(lines, zeroTheme.faint.Render(line))
+		case isCommandCardTagHeading(strings.TrimSpace(strings.TrimLeft(line, " \t"))):
+			// P14 memory-card row: "[type] title" carries its tag's token colour
+			// here too, so the minimal card stays consistent with the standard one.
+			lines = append(lines, renderMemoryTagHeading(line[:len(line)-len(strings.TrimLeft(line, " \t"))], strings.TrimSpace(strings.TrimLeft(line, " \t"))))
 		case isIndentedCommandCardRow(line):
 			lines = append(lines, styleCommandCardContentRow(line))
 		default:
@@ -809,6 +854,36 @@ func styleCommandCardContentRow(line string) string {
 	// "key   value" field row: the value carries the information, so keep the
 	// whole row in readable ink rather than the old faint grey.
 	return indent + zeroTheme.ink.Render(body)
+}
+
+// isCommandCardTagHeading reports whether a row body starts with a "[tag] "
+// marker: the P14 memory-card observation heading. Tag rows are indented, so
+// the indent check happens in the card renderer's switch ordering.
+func isCommandCardTagHeading(body string) bool {
+	if !strings.HasPrefix(body, "[") {
+		return false
+	}
+	tag, rest, ok := strings.Cut(body, "]")
+	if !ok || tag == "[" {
+		return false
+	}
+	return strings.HasPrefix(rest, " ") || rest == ""
+}
+
+// renderMemoryTagHeading styles one "[tag] title" observation row. The tag
+// carries the type's semantic token: [decision] amber, [finding] blue, every
+// other type muted (P3: colour rides theme tokens, never literals). The title
+// stays ink so it reads at full strength.
+func renderMemoryTagHeading(indent, body string) string {
+	tag, rest, _ := strings.Cut(body, "]")
+	style := zeroTheme.muted
+	switch strings.TrimSpace(strings.TrimPrefix(tag, "[")) {
+	case "decision":
+		style = zeroTheme.amber
+	case "finding":
+		style = zeroTheme.blue
+	}
+	return indent + style.Render(tag+"]") + zeroTheme.ink.Render(rest)
 }
 
 // isCommandCardStatusLine reports whether trimmed is a "status: <state>" line.
@@ -993,14 +1068,37 @@ func isDoctorResultHeading(value string) bool {
 }
 
 func renderErrorRow(row transcriptRow, width int) string {
-	note := noteBox(row.text, width, zeroTheme.cardErr, zeroTheme.red)
-	// A recognized failure carries a one-line next step. Render it just below the
-	// red box in the faint metadata style so it reads as guidance, not more error
-	// text (and to avoid nesting ANSI styles inside noteBox's per-line red wrap).
-	if hint := strings.TrimSpace(row.hint); hint != "" {
-		note += "\n" + fitStyledLine(zeroTheme.faint.Render("→ "+hint), width)
+	// An error row wraps to the box's text width. A cut-off error hides the
+	// cause ("stage routing config…"), so the text must never truncate.
+	text := strings.Join(wrapPlainText(row.text, errorTextWidth(width)), "\n")
+	return noteBox(text, width, zeroTheme.cardErr, zeroTheme.red) + renderErrorHint(row.hint, width)
+}
+
+// renderErrorHint renders the one-line next step of a recognized failure,
+// with a leading newline, or "" when there is no hint. It goes just below the
+// red box or the receipt card in the faint metadata style, so it reads as
+// guidance, not more error text (and does not nest ANSI styles inside
+// noteBox's per-line red wrap).
+func renderErrorHint(hint string, width int) string {
+	hint = strings.TrimSpace(hint)
+	if hint == "" {
+		return ""
 	}
-	return note
+	var out string
+	for _, line := range wrapPlainText("→ "+hint, width) {
+		out += "\n" + zeroTheme.faint.Render(line)
+	}
+	return out
+}
+
+// errorTextWidth is the text width inside a noteBox of the given width: the
+// bordered layout keeps 4 cells for the frame and padding, and the tiny tier
+// keeps the full width (see styledBlockFill).
+func errorTextWidth(width int) int {
+	if widthTier(width) == tierTiny {
+		return maxInt(1, width)
+	}
+	return maxInt(1, width-4)
 }
 
 // noteBox is the bordered one-note container behind system and error rows.
@@ -1245,11 +1343,32 @@ func permissionEventScopeLabel(event *agent.PermissionEvent) string {
 // box: a tab row (one per question + a trailing Confirm tab for multi-question
 // prompts), the active question's picker or free-text field, and a key-hint footer.
 // `input` is the live composer value, echoed in free-text mode.
-func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width int) string {
+// formatGateWait renders a gate's wait duration compactly for the NEEDS YOU
+// header: m:ss with zero-padded fields (00:41, 04:05).
+func formatGateWait(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	seconds := int(d.Seconds())
+	return fmt.Sprintf("%02d:%02d", seconds/60, seconds%60)
+}
+
+func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width int, tier presentation.GlyphTier) string {
 	questions := prompt.request.Questions
 	if len(questions) == 0 {
 		return styledBlockFill(width, []string{zeroTheme.badge.Render(" ASK ")}, zeroTheme.lineStrong, lipgloss.NewStyle())
 	}
+	// Gate elevation (P3 cell C / §8, GAP-E): a blocking ask_user is the
+	// contract's NEEDS YOU gate. The card carries the unique blocked
+	// signature — [?] NEEDS YOU header with the wait timer — and the
+	// hard-gate invariant footer: no work running, no tokens burning
+	// while the gate waits.
+	marker := presentation.BlockedMarker(tier)
+	waitLabel := marker.Word
+	if !prompt.startedAt.IsZero() {
+		waitLabel += "  blocked " + formatGateWait(time.Since(prompt.startedAt))
+	}
+	gateFooter := marker.Glyph + " " + waitLabel
 	// The questionnaire replaces the composer, so it paints on the terminal canvas
 	// (black) like the composer box — not a gray card. fill is an identity wrapper
 	// so existing fill(style) call sites render bare foregrounds on that canvas.
@@ -1265,6 +1384,15 @@ func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width
 	multi := len(questions) > 1
 
 	var lines []string
+	lines = append(lines, fill(zeroTheme.amber).Render(gateFooter))
+	// The invariant line states what is true: this run waits, and so does
+	// everything else unless specialists are still in flight.
+	if prompt.othersRunning > 0 {
+		lines = append(lines, fill(zeroTheme.amber).Render(fmt.Sprintf("-- this run waits | %d specialist(s) still running --", prompt.othersRunning)))
+	} else {
+		lines = append(lines, fill(zeroTheme.faint).Render("-- no work running | no tokens burning --"))
+	}
+	lines = append(lines, "")
 	if header := strings.TrimSpace(prompt.request.Header); header != "" {
 		lines = append(lines, fill(zeroTheme.ink).Render(header))
 	}
@@ -1292,27 +1420,41 @@ func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width
 		lines = append(lines, strings.Join(tabs, " "))
 	}
 
-	// Confirm tab: a review of the collected answers.
+	// Confirm tab: a review of the collected answers. Long answers wrap under the
+	// same width rule as free text: the summary prefix keeps its cells, and
+	// continuation lines align under the first answer character.
 	if active == confirm {
 		lines = append(lines, "")
 		lines = append(lines, fill(zeroTheme.ink).Render("Review and submit:"))
+		innerWidth := maxInt(1, width-4) // styledBlockFill reserves 2 border cells per side
 		for index, question := range questions {
 			answer := strings.TrimSpace(prompt.states[index].answer)
-			rendered := fill(zeroTheme.ink).Render(answer)
+			prefix := "  " + fill(zeroTheme.muted).Render(askUserTabTitle(question, index)+": ")
 			if answer == "" {
-				rendered = fill(zeroTheme.faint).Render("(no answer)")
+				lines = append(lines, prefix+fill(zeroTheme.faint).Render("(no answer)"))
+				continue
 			}
-			lines = append(lines, "  "+fill(zeroTheme.muted).Render(askUserTabTitle(question, index)+": ")+rendered)
+			prefixWidth := lipgloss.Width(prefix)
+			chunks := wrapPlainText(answer, maxInt(1, innerWidth-prefixWidth))
+			for chunkIndex, chunk := range chunks {
+				if chunkIndex == 0 {
+					lines = append(lines, prefix+fill(zeroTheme.ink).Render(chunk))
+				} else {
+					lines = append(lines, strings.Repeat(" ", prefixWidth)+fill(zeroTheme.ink).Render(chunk))
+				}
+			}
 		}
 		lines = append(lines, "")
-		lines = append(lines, fill(zeroTheme.faint).Render("⇆ tab · enter submit · esc dismiss"))
+		lines = append(lines, fill(zeroTheme.faint).Render("⇆ tab · enter submit · esc cancel run"))
 		return styledBlockFill(width, lines, zeroTheme.lineStrong, lipgloss.NewStyle())
 	}
 
 	question := questions[active]
 	state := prompt.states[active]
 	lines = append(lines, "")
-	lines = append(lines, fill(zeroTheme.ink).Render(question.Question))
+	for _, line := range wrapPlainText(question.Question, maxInt(1, width-4)) {
+		lines = append(lines, fill(zeroTheme.ink).Render(line))
+	}
 
 	if len(question.Options) > 0 && !state.typing {
 		// Picker: numbered options (with optional descriptions) + a trailing "type
@@ -1341,9 +1483,9 @@ func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width
 			lines = append(lines, "  "+fill(zeroTheme.muted).Render(typeOwn))
 		}
 		lines = append(lines, "")
-		footer := "↑↓ select · enter confirm · esc dismiss"
+		footer := "↑↓ select · enter confirm · esc cancel run"
 		if multi {
-			footer = "⇆ tab · ↑↓ select · enter confirm · esc dismiss"
+			footer = "⇆ tab · ↑↓ select · enter confirm · esc cancel run"
 		}
 		lines = append(lines, fill(zeroTheme.faint).Render(footer))
 		return styledBlockFill(width, lines, zeroTheme.lineStrong, lipgloss.NewStyle())
@@ -1353,13 +1495,23 @@ func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width
 	if question.MultiSelect && len(question.Options) > 0 {
 		lines = append(lines, fill(zeroTheme.muted).Render("suggested: "+strings.Join(question.Options, ", ")))
 	}
-	lines = append(lines, zeroTheme.userPrompt.Render("❯ ")+fill(zeroTheme.ink).Render(input)+fill(zeroTheme.accent).Render("▌"))
-	footer := "enter submit · esc dismiss"
-	switch {
-	case !question.MultiSelect && len(question.Options) > 0:
-		footer = "enter submit · esc back to options"
-	case multi:
-		footer = "⇆ tab · enter submit · esc dismiss"
+	// Wrap the visible answer instead of truncating it to one line. answerBudget
+	// reserves the card borders/padding (4), the "❯ " prefix (2), and the trailing
+	// cursor (1). Continuation lines indent 2 cells so they align under the first
+	// answer character, and the cursor stays inside the card on the final line.
+	answerBudget := maxInt(1, width-7)
+	chunks := wrapPlainText(input, answerBudget)
+	for chunkIndex, chunk := range chunks {
+		if chunkIndex == 0 {
+			lines = append(lines, zeroTheme.userPrompt.Render("❯ ")+fill(zeroTheme.ink).Render(chunk))
+		} else {
+			lines = append(lines, "  "+fill(zeroTheme.ink).Render(chunk))
+		}
+	}
+	lines[len(lines)-1] += fill(zeroTheme.accent).Render("▌")
+	footer := "enter submit · esc cancel run"
+	if multi {
+		footer = "⇆ tab · enter submit · esc cancel run"
 	}
 	lines = append(lines, fill(zeroTheme.faint).Render(footer))
 	return styledBlockFill(width, lines, zeroTheme.lineStrong, lipgloss.NewStyle())
@@ -1384,9 +1536,13 @@ type cardBody struct {
 // result yet: spinner glyph while ITS run is live, a static placeholder for
 // orphans (cancelled/errored turns, rehydrated history) — keying off the
 // global pending flag alone would re-animate dead cards on every later run.
+// The live card also shows the per-call elapsed time (driven by the spinner
+// tick, no second timer) and, for shell tools, the exact command wrapped in
+// the body — never a middle-truncated one-line target.
 func (m model) renderRunningToolCard(row transcriptRow, width int, rc rowContext, opts cardRenderOptions) string {
+	live := m.pending && row.runID != 0 && row.runID == m.activeRunID
 	glyph := zeroTheme.faintest.Render("…")
-	if m.pending && row.runID != 0 && row.runID == m.activeRunID {
+	if live {
 		glyph = zeroTheme.accent.Render(m.spinnerGlyph())
 	}
 	// The call row carries its own argHints; rc.hints/args only matter for
@@ -1399,10 +1555,31 @@ func (m model) renderRunningToolCard(row transcriptRow, width int, rc rowContext
 	if arg == "" {
 		arg = rc.args[rcKey(row.runID, row.id)]
 	}
-	// Running cards keep the normal name color; the accent spinner glyph at the
-	// front already marks them live (and orphaned dead cards must not look active).
-	head := toolCardHead(toolRowName(row), hint, arg, "", "", "", true, zeroTheme.ink, rc.auto[rcKey(row.runID, row.id)], width, opts)
-	return toolCard(head, glyph, nil, "", zeroTheme.cardRun, width)
+	// Per-call elapsed clock: the shared spinner tick re-renders the live card,
+	// so the number advances without scheduling its own timer. Only the active
+	// call of the active run ticks; orphans stay static.
+	headTag := ""
+	if live && row.id == m.activeToolID && !m.activeToolStart.IsZero() {
+		headTag = zeroTheme.faint.Render(formatWorkingElapsed(m.now().Sub(m.activeToolStart)))
+	}
+	headTarget := hint
+	if isShellCommandTool(row.tool) {
+		// The exact command is shown wrapped in the body below; never collapse it
+		// into a middle-truncated one-line head target.
+		headTarget = ""
+		arg = ""
+	}
+	head := toolCardHead(toolRowName(row), headTarget, arg, headTag, "", "", true, zeroTheme.ink, rc.auto[rcKey(row.runID, row.id)], width, opts)
+	var body []string
+	if isShellCommandTool(row.tool) && hint != "" {
+		body = wrappedShellCommandLines(hint, width)
+		// Live bounded shell output renders under the running command: the newest
+		// few visual lines, swapped in as snapshots arrive and cleared with the call.
+		if live && row.id == m.activeToolID && m.liveToolOutput != "" {
+			body = append(body, liveOutputLines(m.liveToolOutput, liveShellOutputLines, width)...)
+		}
+	}
+	return toolCard(head, glyph, body, "", zeroTheme.cardRun, width)
 }
 
 func renderToolResultCard(row transcriptRow, width int, rc rowContext, opts cardRenderOptions) string {
@@ -1428,37 +1605,126 @@ func renderToolResultCard(row transcriptRow, width int, rc rowContext, opts card
 		headTarget = ""
 		headArg = ""
 	}
+	if isShellCommandTool(name) {
+		// The exact command is the first line of the card body; a
+		// middle-truncated copy in the head would only repeat it worse.
+		headTarget = ""
+		headArg = ""
+	}
 	// A successful call whose only output is a one-line confirmation ("Created
 	// examples/calc.go (45 bytes).", "Successfully created directory …") restates
 	// what the head already shows (action + target + status dot), so drop the body and let
 	// the card collapse to a single line — matching the reference agents' density.
 	// Only for clean OK results: errors and anything multi-line keep their body.
 	if !failed && opts.bodyCap > 0 && !toolCardAlwaysExpands(name) && looksLikeRedundantConfirmation(row.detail) {
-		head := toolCardHead(name, headTarget, headArg, "", row.detail, row.text, false, nameStyle, rc.auto[key], width, opts)
+		head := toolCardHead(name, headTarget, headArg, toolResultHeadTag(row, ""), row.detail, row.text, false, nameStyle, rc.auto[key], width, opts)
 		return toolCard(head, glyph, nil, "", borderStyle, width)
 	}
 	// Collapse long, noisy output (web-search/MCP/read dumps) by default so the
-	// transcript stays scannable; the model still received the full output. Click
+	// transcript stays scannable; the model still received the full output. The
+	// collapsed card keeps a bounded 3-line preview plus an accurate hidden-line
+	// count and advertises both disclosure routes (mouse click + Ctrl+O). Click
 	// the card to expand (▸ → ▾) while it is live; collapsed rows flush to
 	// scrollback clean. Skipped for: the uncapped detailed view (opts.bodyCap==0),
-	// diff tools whose body must stay reviewable, and short output.
-	collapsedFooter := ""
-	if opts.bodyCap > 0 && !toolCardAlwaysExpands(name) && !(!failed && (isExploreTool(name) || isLocalControlTool(name))) {
-		collapsedFooter = collapsedToolFooter(row.detail)
-	}
-	if collapsedFooter != "" && !row.expanded {
-		head := toolCardHead(name, headTarget, headArg, "", row.detail, row.text, false, nameStyle, rc.auto[key], width, opts)
-		return toolCard(head, glyph, nil, collapsedFooter, borderStyle, width)
+	// diff tools whose body must stay reviewable, short output, explore/local
+	// summaries, and FAILED results — an error is never hidden behind a click.
+	if collapsedResultCard(name, failed, opts, row.detail) && !row.expanded {
+		bodyOpts := opts
+		bodyOpts.expanded = false
+		bodyOpts.bodyCap = 0 // render the real body so the preview and its hidden count are accurate
+		body := toolCardBody(name, rc.hints[key], rc.args[key], row.detail, width, bodyOpts, failed)
+		preview, hidden := previewCardLines(body.lines, collapsedPreviewLines)
+		footer := collapsedPreviewFooter(hidden, opts.detailKey)
+		if isShellCommandTool(name) {
+			commandLines := len(wrappedShellCommandLines(rc.hints[key], width))
+			preview, hidden = shellResultPreview(body.lines, commandLines, liveShellOutputLines)
+			footer = collapsedShellFooter(hidden, opts.detailKey)
+		}
+		head := toolCardHead(name, headTarget, headArg, toolResultHeadTag(row, body.headTag), row.detail, row.text, false, nameStyle, rc.auto[key], width, opts)
+		return toolCard(head, glyph, preview, footer, borderStyle, width)
 	}
 	bodyOpts := opts
 	bodyOpts.expanded = row.expanded
 	body := toolCardBody(name, rc.hints[key], rc.args[key], row.detail, width, bodyOpts, failed)
-	head := toolCardHead(name, headTarget, headArg, body.headTag, row.detail, row.text, false, nameStyle, rc.auto[key], width, opts)
+	head := toolCardHead(name, headTarget, headArg, toolResultHeadTag(row, body.headTag), row.detail, row.text, false, nameStyle, rc.auto[key], width, opts)
 	footer := body.footer
-	if collapsedFooter != "" && row.expanded && footer == "" {
+	if collapsedResultCard(name, failed, opts, row.detail) && row.expanded && footer == "" {
 		footer = "▾ collapse"
 	}
 	return toolCard(head, glyph, body.lines, footer, borderStyle, width)
+}
+
+func toolResultHeadTag(row transcriptRow, tag string) string {
+	if row.toolElapsed <= 0 {
+		return tag
+	}
+	elapsed := zeroTheme.faint.Render(formatWorkingElapsed(row.toolElapsed))
+	if tag == "" {
+		return elapsed
+	}
+	return tag + "  " + elapsed
+}
+
+// collapsedResultCard reports whether a result card would collapse long output
+// by default: capped view, successful result (an error is never hidden), not a
+// diff-render tool, not an explore/local-control summary, and output longer
+// than the live body cap.
+func collapsedResultCard(name string, failed bool, opts cardRenderOptions, detail string) bool {
+	if opts.bodyCap <= 0 || failed || toolCardAlwaysExpands(name) || isExploreTool(name) || isLocalControlTool(name) {
+		return false
+	}
+	return collapsedToolFooter(detail) != ""
+}
+
+// collapsedPreviewLines is how many useful body lines a collapsed result card
+// previews before the hidden-count footer.
+const collapsedPreviewLines = 3
+
+// previewCardLines keeps the first `cap` non-blank lines of a rendered card
+// body and reports how many body lines stay hidden (the count for the "… N
+// more lines" trailer), with the same semantics as capCardLines: hidden counts
+// every body line not shown, leading blanks included.
+func previewCardLines(lines []string, cap int) ([]string, int) {
+	if cap < 1 {
+		return nil, len(lines)
+	}
+	start := 0
+	for start < len(lines) && strings.TrimSpace(ansi.Strip(lines[start])) == "" {
+		start++
+	}
+	shown := cap
+	if remaining := len(lines) - start; remaining < shown {
+		shown = remaining
+	}
+	preview := make([]string, shown)
+	copy(preview, lines[start:start+shown])
+	return preview, len(lines) - start - shown
+}
+
+// collapsedPreviewFooter summarizes what a collapsed card still hides behind
+// its preview. Both disclosure routes are advertised: the mouse click (the
+// transcript selection toggles the row) and the global full-transcript key.
+func collapsedPreviewFooter(hidden int, detailKey string) string {
+	if hidden > 0 {
+		return zeroTheme.faint.Render(fmt.Sprintf("… %d more lines · click to expand · %s full output", hidden, detailKey))
+	}
+	return zeroTheme.faint.Render(fmt.Sprintf("click to expand · %s full output", detailKey))
+}
+
+func shellResultPreview(lines []string, commandLines, outputLines int) ([]string, int) {
+	commandLines = min(max(0, commandLines), len(lines))
+	output := lines[commandLines:]
+	shown := min(max(0, outputLines), len(output))
+	preview := append([]string(nil), lines[:commandLines]...)
+	preview = append(preview, output[len(output)-shown:]...)
+	return preview, len(output) - shown
+}
+
+func collapsedShellFooter(hidden int, detailKey string) string {
+	if hidden > 0 {
+		return zeroTheme.faint.Render(fmt.Sprintf("… %d earlier lines · click to expand · %s full output", hidden, detailKey))
+	}
+	return collapsedPreviewFooter(0, detailKey)
 }
 
 // confirmationVerbPattern matches a single-line success confirmation that only
@@ -2353,6 +2619,63 @@ func artifactCapturedPath(detail string) string {
 	return ""
 }
 
+// isShellCommandTool reports whether a tool runs a shell command whose exact
+// text must stay visible (bash, exec_command). The command is rendered wrapped
+// in the card body — never middle-truncated into a one-line head target.
+func isShellCommandTool(name string) bool {
+	switch name {
+	case "bash", "exec_command":
+		return true
+	}
+	return false
+}
+
+// wrappedShellCommandLines renders the exact command with a "$ " prompt and
+// wraps it to the card width. Continuation lines align under the command text
+// (4 cells: the two-space indent plus the "$ " prompt), so a long command is
+// fully readable at any terminal width. Empty commands render nothing.
+func wrappedShellCommandLines(command string, width int) []string {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return nil
+	}
+	measure := maxInt(8, width-4) // "  $ " prompt occupies 4 cells
+	lines := []string{}
+	for _, line := range strings.Split(strings.TrimRight(command, "\n"), "\n") {
+		segments := splitPreservingWidth(line, measure)
+		for index, segment := range segments {
+			if index == 0 {
+				lines = append(lines, zeroTheme.faint.Render("  $ ")+zeroTheme.ink.Render(segment))
+			} else {
+				lines = append(lines, "    "+zeroTheme.ink.Render(segment))
+			}
+		}
+	}
+	return lines
+}
+
+// liveShellOutputLines is how many newest visual lines of live shell output
+// render beneath the running command.
+const liveShellOutputLines = 5
+
+// liveOutputLines returns the newest up to cap visual lines of live shell
+// output, each wrapped to width, styled muted. Blank/partial lines at the tail
+// are normal (a command mid-write); the newest content stays on screen.
+func liveOutputLines(text string, cap int, width int) []string {
+	const prefix = "  │ "
+	measure := maxInt(8, width-lipgloss.Width(prefix))
+	var wrapped []string
+	for _, line := range strings.Split(text, "\n") {
+		for _, segment := range wrapPlainText(line, measure) {
+			wrapped = append(wrapped, zeroTheme.faint.Render(prefix)+zeroTheme.muted.Render(segment))
+		}
+	}
+	if len(wrapped) > cap {
+		wrapped = wrapped[len(wrapped)-cap:]
+	}
+	return wrapped
+}
+
 func bashCardBody(command string, detail string, width int, opts cardRenderOptions) cardBody {
 	footer := ""
 	output := []commandOutputLine{}
@@ -2376,7 +2699,8 @@ func bashCardBody(command string, detail string, width int, opts cardRenderOptio
 			output = append(output, commandOutputLine{text: line, style: style})
 		}
 	}
-	lines := renderCommandOutputLines(output, width, opts)
+	lines := wrappedShellCommandLines(command, width)
+	lines = append(lines, renderCommandOutputLines(output, width, opts)...)
 	return cardBody{lines: capCardLines(lines, opts.bodyCap), footer: footer}
 }
 
@@ -2413,7 +2737,8 @@ func execCommandCardBody(command string, detail string, width int, opts cardRend
 			output = append(output, commandOutputLine{text: line, style: style})
 		}
 	}
-	lines := renderCommandOutputLines(output, width, opts)
+	lines := wrappedShellCommandLines(command, width)
+	lines = append(lines, renderCommandOutputLines(output, width, opts)...)
 	return cardBody{lines: capCardLines(lines, opts.bodyCap), footer: footer}
 }
 

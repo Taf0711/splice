@@ -32,7 +32,6 @@ type Task struct {
 	AcceptanceFacts []AcceptanceFact `json:"acceptance_facts,omitempty"`
 	TargetPaths     []string         `json:"target_paths,omitempty"`
 	DependsOn       []string         `json:"depends_on,omitempty"`
-	EstimatedTier   *PipelineTier    `json:"estimated_tier,omitempty"`
 }
 
 // Validate checks the task.
@@ -48,13 +47,6 @@ func (t Task) Validate() error {
 	}
 	if len(t.Intent) > 320 {
 		return errors.New("intent must be <= 320 chars")
-	}
-	if t.EstimatedTier != nil {
-		switch *t.EstimatedTier {
-		case TierTrivial, TierLight, TierStandard, TierSubstantial, TierArchitectural:
-		default:
-			return fmt.Errorf("invalid estimated_tier %q", *t.EstimatedTier)
-		}
 	}
 	for i, f := range t.AcceptanceFacts {
 		if err := f.Validate(); err != nil {

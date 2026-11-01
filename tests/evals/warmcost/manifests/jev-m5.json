@@ -1,0 +1,11 @@
+{
+  "campaign": "jev-m5-diagnostic",
+  "arms": ["cold", "warm", "warm-jev"],
+  "repeats": 2,
+  "task_sets": ["cognition-families/tasks-a", "cognition-families/tasks-b"],
+  "model_pin": "typesafe/jev-1.13",
+  "calibration_p_useful": 0.9,
+  "cap_usd": 0.05,
+  "budget_fit_off": true,
+  "notes": "M5 capped diagnostic per SPEC_DECISION_SELECTOR_M5_DIAGNOSTIC_2026-09-22. Live dispatch requires explicit owner approval of campaign size, estimated spend, and the 0.05 USD advisor cap (DS2 pattern). Calibration 0.9 is the preregistered experiment exception, not a measured value."
+}

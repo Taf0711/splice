@@ -1,0 +1,7 @@
+{
+  "name": "fut-hidden-03-write",
+  "phase": "write",
+  "prompt": "In the flags package, add the feature flag \"bulk_export\" to the known flags.",
+  "check": "# fut-hidden-03 A\ncat > internal/flags/probe_bulk_export_test.go <<'EOF'\npackage flags\n\nimport (\n\t\"slices\"\n\t\"testing\"\n)\n\nfunc TestProbe(t *testing.T) {\n\tif !slices.Contains(Names, \"bulk_export\") {\n\t\tt.Fatal(\"Names lacks bulk_export\")\n\t}\n}\nEOF\ngo test -count=1 ./... ; rc=$?\nrm -f internal/flags/probe_bulk_export_test.go\nexit $rc\n",
+  "fixture": "../../chain-families/fixture-hidden"
+}

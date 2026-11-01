@@ -380,7 +380,6 @@ func TestNormalizeRejectsAllMalformedSubsets(t *testing.T) {
 	}{
 		{"cached exceeds input", zeroruntime.Usage{InputTokens: 10, CachedInputTokens: 15, OutputTokens: 5}, "cached input tokens"},
 		{"cache write plus cached exceeds input", zeroruntime.Usage{InputTokens: 100, CachedInputTokens: 60, CacheWriteTokens: 50, OutputTokens: 10}, "cache write tokens"},
-		{"reasoning exceeds output", zeroruntime.Usage{InputTokens: 100, OutputTokens: 10, ReasoningTokens: 20}, "reasoning tokens"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -497,4 +496,25 @@ func mustTestPricedRegistry(t *testing.T) *modelregistry.Registry {
 		t.Fatalf("test priced registry: %v", err)
 	}
 	return &registry
+}
+
+func TestNormalizeReconcilesReasoningExclusiveReports(t *testing.T) {
+	// Reasoning-exclusive provider reports reconcile instead of rejecting:
+	// the rejection path zeroed billed work downstream (the M6 campaign
+	// evidence: reasoning 3619 > output 3532 priced as 0/0).
+	normalized, runtimeUsage, err := Normalize(zeroruntime.Usage{InputTokens: 100, OutputTokens: 10, ReasoningTokens: 20})
+	if err != nil {
+		t.Fatalf("exclusive report must reconcile: %v", err)
+	}
+	if normalized.OutputTokens != 30 || normalized.TotalTokens != 130 {
+		t.Fatalf("normalized output/total = %d/%d, want 30/130", normalized.OutputTokens, normalized.TotalTokens)
+	}
+	if runtimeUsage.OutputTokens != 30 || runtimeUsage.CompletionTokens != 30 {
+		t.Fatalf("runtime output/completion = %d/%d, want 30/30", runtimeUsage.OutputTokens, runtimeUsage.CompletionTokens)
+	}
+	// A subset-consistent report is untouched.
+	normalized2, _, err := Normalize(zeroruntime.Usage{InputTokens: 100, OutputTokens: 20, ReasoningTokens: 10})
+	if err != nil || normalized2.OutputTokens != 20 {
+		t.Fatalf("subset report changed: %v %+v", err, normalized2)
+	}
 }

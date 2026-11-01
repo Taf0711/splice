@@ -3,6 +3,9 @@ package splice
 import (
 	"crypto/sha256"
 	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -47,6 +50,19 @@ func withConfidence(c float64) func(*schemas.IterationState) {
 func withTokens(n int) func(*schemas.IterationState) {
 	return func(s *schemas.IterationState) {
 		s.TokensConsumed = n
+	}
+}
+
+func withGeneration(n int) func(*schemas.IterationState) {
+	return func(s *schemas.IterationState) {
+		s.TokensGenerated = n
+	}
+}
+
+func withProgress(files ...string) func(*schemas.IterationState) {
+	return func(s *schemas.IterationState) {
+		s.FilesChanged = append([]string(nil), files...)
+		s.LinesAdded = 1
 	}
 }
 
@@ -196,8 +212,8 @@ func TestComputeIterationStateUsesWeakestConfidenceAndSumsTokens(t *testing.T) {
 		harnessOutput("b", 0.4, nil),
 	}
 	records := []schemas.StageRecord{
-		{Name: "a", Status: schemas.StageCompleted, TokensInput: 10, TokensOutput: 20, TokensCached: 5},
-		{Name: "b", Status: schemas.StageCompleted, TokensInput: 1, TokensOutput: 2, TokensCached: 0},
+		{Name: "a", Status: schemas.StageCompleted, TokensInput: 10, TokensOutput: 20, TokensCached: 3, TokensCacheWrite: 2, TokensReasoning: 5},
+		{Name: "b", Status: schemas.StageCompleted, TokensInput: 1, TokensOutput: 2, TokensCached: 0, TokensCacheWrite: 0, TokensReasoning: 1},
 	}
 	state, err := ComputeIterationState(0, outputs, records, schemas.ChangeSummary{}, nil)
 	if err != nil {
@@ -206,8 +222,12 @@ func TestComputeIterationStateUsesWeakestConfidenceAndSumsTokens(t *testing.T) {
 	if state.Confidence != 0.4 {
 		t.Fatalf("expected confidence 0.4, got %v", state.Confidence)
 	}
-	if state.TokensConsumed != 38 {
-		t.Fatalf("expected tokens 38, got %d", state.TokensConsumed)
+	// TokensCached and TokensCacheWrite are input subsets; TokensReasoning is an
+	// output subset. tokensConsumed must count only total input + total output,
+	// never the cached, cache-write, or reasoning subsets (they overlap input
+	// and output and would be double-counted).
+	if state.TokensConsumed != 33 {
+		t.Fatalf("expected tokens 33, got %d", state.TokensConsumed)
 	}
 }
 
@@ -248,15 +268,100 @@ func TestComputeScorePlateausForEquivalentState(t *testing.T) {
 	}
 }
 
-func TestComputeScoreRegressesWhenErrorsSecurityAndTypeIssuesIncrease(t *testing.T) {
+// trajectoryRelevantOutputKeys maps a registry stage to the output key the
+// monitor consumes. trajectoryIrrelevantStages must list every other registry
+// stage. A new stage that is in neither map fails CI.
+var trajectoryRelevantOutputKeys = map[string]string{
+	"code_writer":         "code_writer_output",
+	"test_generator":      "test_generator_output",
+	"test_runner":         "test_results",
+	"static_analyzer":     "static_analyzer_output",
+	"security_auditor":    "security_auditor_output",
+	"acceptance_verifier": "acceptance_results",
+}
+
+var trajectoryIrrelevantStages = map[string]struct{}{}
+
+func TestTrajectoryExtractorsCoverRegistryStages(t *testing.T) {
+	registry, err := buildStageRegistry(PipelineRunConfig{}, t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("buildStageRegistry: %v", err)
+	}
+	for name := range registry {
+		key, relevant := trajectoryRelevantOutputKeys[name]
+		_, irrelevant := trajectoryIrrelevantStages[name]
+		switch {
+		case relevant && irrelevant:
+			t.Errorf("stage %s is listed as both trajectory-relevant and irrelevant", name)
+		case relevant:
+			if _, ok := trajectoryExtractors[key]; !ok {
+				t.Errorf("stage %s produces %s but trajectoryExtractors has no parser for that key", name, key)
+			}
+		case irrelevant:
+			continue
+		default:
+			t.Errorf("unclassified stage %s. Add it to trajectoryRelevantOutputKeys with an extractor, or to trajectoryIrrelevantStages.", name)
+		}
+	}
+	claimed := make(map[string]string, len(trajectoryRelevantOutputKeys))
+	for stage, key := range trajectoryRelevantOutputKeys {
+		if other, ok := claimed[key]; ok {
+			t.Errorf("extractor key %s is claimed by both %s and %s", key, other, stage)
+		}
+		claimed[key] = stage
+	}
+	for key := range trajectoryExtractors {
+		if _, ok := claimed[key]; ok {
+			continue
+		}
+		// A canonical key is emitted by any node with the matching capability,
+		// so no single registry stage claims it.
+		if _, canonical := trajectoryCanonicalOutputKeys[key]; canonical {
+			continue
+		}
+		t.Errorf("trajectoryExtractors has %s, but no registry stage claims that key and it is not listed as canonical", key)
+	}
+	for name := range trajectoryRelevantOutputKeys {
+		if _, ok := registry[name]; !ok {
+			t.Errorf("trajectoryRelevantOutputKeys lists %s, but the registry has no such stage", name)
+		}
+	}
+	for name := range trajectoryIrrelevantStages {
+		if _, ok := registry[name]; !ok {
+			t.Errorf("trajectoryIrrelevantStages lists %s, but the registry has no such stage", name)
+		}
+	}
+}
+
+func TestComputeScoreRegressesWhenErrorsAndSecurityIssuesIncrease(t *testing.T) {
 	before := iterState(withTests(4, 0, 0))
 	after := iterState(withTests(4, 1, 1), withSeverity(nil, map[schemas.Severity]int{schemas.SeverityCritical: 1, schemas.SeverityHigh: 1}))
-	after.TypeErrors = 3
 	if ComputeScore(after) >= ComputeScore(before) {
 		t.Fatal("expected score to regress")
 	}
-	if got := ComputeScore(after); got != -56 {
-		t.Fatalf("expected -56, got %v", got)
+	if got := ComputeScore(after); got != -50 {
+		t.Fatalf("expected -50, got %v", got)
+	}
+}
+
+func TestTrajectoryRuleOrder(t *testing.T) {
+	want := []string{
+		"iteration_limit",
+		"token_budget",
+		"oscillation",
+		"cycle",
+		"no_progress",
+		"cost_without_progress",
+		"rollback",
+		"step_back",
+		"confidence",
+	}
+	got := make([]string, len(trajectoryRules))
+	for i, rule := range trajectoryRules {
+		got[i] = rule.name
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("rule order = %v, want %v", got, want)
 	}
 }
 
@@ -279,11 +384,44 @@ func TestEvaluateTrajectoryAbortsAtHardIterationLimit(t *testing.T) {
 }
 
 func TestEvaluateTrajectoryAbortsAtTokenBudget(t *testing.T) {
-	history := []schemas.IterationState{iterState(withTokens(10), withHash("a")), iterState(withTokens(10), withHash("b"))}
+	history := []schemas.IterationState{iterState(withGeneration(10), withHash("a")), iterState(withGeneration(10), withHash("b"))}
 	budget := 20
 	decision := EvaluateTrajectory(history, 5, &budget)
 	if decision.Action != schemas.ActionAbortBudget {
 		t.Fatalf("expected abort budget, got %q", decision.Action)
+	}
+}
+
+// TestTrajectoryBudgetIgnoresInputVolume pins the generation-only gate: high
+// cumulative input-inclusive consumption with low generation must NOT abort.
+func TestTrajectoryBudgetIgnoresInputVolume(t *testing.T) {
+	history := []schemas.IterationState{
+		iterState(func(s *schemas.IterationState) { s.TokensConsumed = 50000 }, withHash("a")),
+	}
+	budget := 20
+	decision := EvaluateTrajectory(history, 5, &budget)
+	if decision.Action == schemas.ActionAbortBudget {
+		t.Fatalf("input-only spend must not abort: %+v", decision)
+	}
+}
+
+// TestIterationStateStillReportsInputTotals pins the reporting contract: the
+// projection keeps filling TokensConsumed (input-inclusive) alongside the new
+// generation field, so telemetry keeps seeing real total burn.
+func TestIterationStateStillReportsInputTotals(t *testing.T) {
+	records := []schemas.StageRecord{
+		{Name: "code_writer", Status: schemas.StageCompleted, TokensInput: 3000, TokensOutput: 700},
+		{Name: "test_runner", Status: schemas.StageCompleted, TokensInput: 2000, TokensOutput: 100},
+	}
+	state, err := ComputeIterationState(1, nil, records, schemas.ChangeSummary{}, nil)
+	if err != nil {
+		t.Fatalf("build state: %v", err)
+	}
+	if state.TokensConsumed != 5800 {
+		t.Fatalf("input-inclusive total = %d, want 5800", state.TokensConsumed)
+	}
+	if state.TokensGenerated != 800 {
+		t.Fatalf("generation total = %d, want 800", state.TokensGenerated)
 	}
 }
 
@@ -314,9 +452,9 @@ func TestEvaluateTrajectoryDetectsOscillation(t *testing.T) {
 
 func TestEvaluateTrajectoryRollsBackWhenScoreRegressesBelowInitial(t *testing.T) {
 	history := []schemas.IterationState{
-		iterState(withTests(4, 0, 0), withHash("a")),
-		iterState(withTests(3, 0, 0), withHash("b")),
-		iterState(withTests(2, 0, 0), withHash("c")),
+		iterState(withTests(4, 0, 0), withHash("a"), withProgress("a.go")),
+		iterState(withTests(3, 0, 0), withHash("b"), withProgress("b.go")),
+		iterState(withTests(2, 0, 0), withHash("c"), withProgress("c.go")),
 	}
 	decision := EvaluateTrajectory(history, 5, nil)
 	if decision.Action != schemas.ActionRollback {
@@ -329,9 +467,9 @@ func TestEvaluateTrajectoryRollsBackWhenScoreRegressesBelowInitial(t *testing.T)
 
 func TestEvaluateTrajectoryStepsBackWhenScorePlateaus(t *testing.T) {
 	history := []schemas.IterationState{
-		iterState(withTests(1, 0, 0), withHash("a")),
-		iterState(withTests(1, 0, 0), withHash("b")),
-		iterState(withTests(1, 0, 0), withHash("c")),
+		iterState(withTests(1, 0, 0), withHash("a"), withProgress("a.go")),
+		iterState(withTests(1, 0, 0), withHash("b"), withProgress("b.go")),
+		iterState(withTests(1, 0, 0), withHash("c"), withProgress("c.go")),
 	}
 	decision := EvaluateTrajectory(history, 5, nil)
 	if decision.Action != schemas.ActionStepBack {
@@ -339,23 +477,77 @@ func TestEvaluateTrajectoryStepsBackWhenScorePlateaus(t *testing.T) {
 	}
 }
 
+func TestEvaluateTrajectoryStepsBackOnNoWorkspaceProgress(t *testing.T) {
+	history := []schemas.IterationState{
+		iterState(withTests(1, 0, 0), withHash("a")),
+		iterState(withTests(2, 0, 0), withHash("b")),
+		iterState(withTests(3, 0, 0), withHash("c")),
+	}
+	decision := EvaluateTrajectory(history, 5, nil)
+	if decision.Action != schemas.ActionStepBack {
+		t.Fatalf("expected step back, got %q", decision.Action)
+	}
+	wantReason := "The last three iterations produced no workspace change."
+	if decision.Reason != wantReason {
+		t.Fatalf("expected reason %q, got %q", wantReason, decision.Reason)
+	}
+	wantEvidence := []string{"no_progress_iterations=3", "files_changed=0", "lines_changed=0"}
+	if !slices.Equal(decision.Evidence, wantEvidence) {
+		t.Fatalf("expected evidence %v, got %v", wantEvidence, decision.Evidence)
+	}
+}
+
+func TestEvaluateTrajectoryAbortsAfterRepeatedNoWorkspaceProgress(t *testing.T) {
+	history := []schemas.IterationState{
+		iterState(withTests(1, 0, 0), withHash("a")),
+		iterState(withTests(2, 0, 0), withHash("b")),
+		iterState(withTests(3, 0, 0), withHash("c")),
+		iterState(withTests(4, 0, 0), withHash("d")),
+	}
+	decision := EvaluateTrajectory(history, 5, nil)
+	if decision.Action != schemas.ActionAbortNoProgress {
+		t.Fatalf("expected abort no progress, got %q", decision.Action)
+	}
+	wantReason := "The last three iterations produced no workspace change after a prior no-progress step-back."
+	if decision.Reason != wantReason {
+		t.Fatalf("expected reason %q, got %q", wantReason, decision.Reason)
+	}
+}
+
+func TestEvaluateTrajectoryIgnoresNoProgressWhenFilesChange(t *testing.T) {
+	history := []schemas.IterationState{
+		iterState(withTests(1, 0, 0), withHash("a"), withProgress("a.go")),
+		iterState(withTests(2, 0, 0), withHash("b"), withProgress("b.go")),
+		iterState(withTests(3, 0, 0), withHash("c"), withProgress("c.go")),
+	}
+	decision := EvaluateTrajectory(history, 5, nil)
+	if decision.Action != schemas.ActionContinue {
+		t.Fatalf("expected continue, got %q", decision.Action)
+	}
+}
+
 func TestEvaluateTrajectorySurfacesStrictConfidenceCollapse(t *testing.T) {
 	history := []schemas.IterationState{
-		iterState(withTests(1, 0, 0), withHash("a"), withConfidence(0.9)),
-		iterState(withTests(2, 0, 0), withHash("b"), withConfidence(0.6)),
-		iterState(withTests(3, 0, 0), withHash("c"), withConfidence(0.0)),
+		iterState(withTests(1, 0, 0), withHash("a"), withConfidence(0.9), withProgress("a.go")),
+		iterState(withTests(2, 0, 0), withHash("b"), withConfidence(0.6), withProgress("b.go")),
+		iterState(withTests(3, 0, 0), withHash("c"), withConfidence(0.0), withProgress("c.go")),
 	}
 	decision := EvaluateTrajectory(history, 5, nil)
 	if decision.Action != schemas.ActionSurfaceToUser {
 		t.Fatalf("expected surface to user, got %q", decision.Action)
 	}
+	// The reason states only the observed condition. It must not claim a
+	// rollback or retry that the trajectory monitor does not perform.
+	if decision.Reason != "Confidence is strictly decreasing across the last three iterations." {
+		t.Fatalf("expected exact reason string, got %q", decision.Reason)
+	}
 }
 
 func TestEvaluateTrajectoryContinuesWhenScoresImprove(t *testing.T) {
 	history := []schemas.IterationState{
-		iterState(withTests(1, 0, 0), withHash("a"), withConfidence(0.7)),
-		iterState(withTests(2, 0, 0), withHash("b"), withConfidence(0.8)),
-		iterState(withTests(3, 0, 0), withHash("c"), withConfidence(0.9)),
+		iterState(withTests(1, 0, 0), withHash("a"), withConfidence(0.7), withProgress("a.go")),
+		iterState(withTests(2, 0, 0), withHash("b"), withConfidence(0.8), withProgress("b.go")),
+		iterState(withTests(3, 0, 0), withHash("c"), withConfidence(0.9), withProgress("c.go")),
 	}
 	decision := EvaluateTrajectory(history, 5, nil)
 	if decision.Action != schemas.ActionContinue {
@@ -376,6 +568,91 @@ func TestComputeIterationStateReturnsErrorOnMalformedPayload(t *testing.T) {
 	}
 }
 
+func TestEvaluateTrajectoryCycleWithIdenticalVerificationFailures(t *testing.T) {
+	history := []schemas.IterationState{
+		iterState(withHash("a"), withTests(0, 2, 1)),
+		iterState(withHash("b"), withTests(0, 2, 1)),
+		iterState(withHash("a"), withTests(0, 2, 1)),
+	}
+	decision := EvaluateTrajectory(history, 5, nil)
+	if decision.Action != schemas.ActionEscalateCycleDetected {
+		t.Fatalf("expected cycle detected, got %q", decision.Action)
+	}
+	wantReason := "Current state hash was seen before. The identical state came with identical verification failures, so the environment or verifier may be stuck."
+	if decision.Reason != wantReason {
+		t.Fatalf("expected reason %q, got %q", wantReason, decision.Reason)
+	}
+	sig := "tests_failing=2,tests_errored=1,acceptance_facts_failing=0,lint_high_critical=0,security_high_critical=0"
+	wantEvidence := []string{
+		"state_hash=a",
+		"verification_failure_signature_current=" + sig,
+		"verification_failure_signature_previous=" + sig,
+	}
+	if !slices.Equal(decision.Evidence, wantEvidence) {
+		t.Fatalf("expected evidence %v, got %v", wantEvidence, decision.Evidence)
+	}
+}
+
+func TestEvaluateTrajectoryCycleWithChangingVerificationFailures(t *testing.T) {
+	history := []schemas.IterationState{
+		// First occurrence of hash "a"; its signature is not part of the comparison.
+		iterState(withHash("a"), withTests(0, 1, 0)),
+		// Immediately previous state: high+critical lint and security counts aggregate.
+		iterState(withHash("b"), withTests(1, 1, 0),
+			withSeverity(
+				map[schemas.Severity]int{schemas.SeverityHigh: 1, schemas.SeverityMedium: 50},
+				map[schemas.Severity]int{schemas.SeverityHigh: 1},
+			)),
+		// Current state: same hash as the first, different failure signature.
+		iterState(withHash("a"), withTests(0, 2, 1),
+			withSeverity(
+				map[schemas.Severity]int{schemas.SeverityCritical: 1, schemas.SeverityHigh: 2},
+				map[schemas.Severity]int{schemas.SeverityCritical: 1, schemas.SeverityHigh: 1},
+			)),
+	}
+	history[2].AcceptanceFactsFailing = 1
+	decision := EvaluateTrajectory(history, 5, nil)
+	if decision.Action != schemas.ActionEscalateCycleDetected {
+		t.Fatalf("expected cycle detected, got %q", decision.Action)
+	}
+	wantReason := "Current state hash was seen before. The identical state came with changing verification failures, so model thrash is more likely."
+	if decision.Reason != wantReason {
+		t.Fatalf("expected reason %q, got %q", wantReason, decision.Reason)
+	}
+	wantEvidence := []string{
+		"state_hash=a",
+		"verification_failure_signature_current=tests_failing=2,tests_errored=1,acceptance_facts_failing=1,lint_high_critical=3,security_high_critical=2",
+		"verification_failure_signature_previous=tests_failing=1,tests_errored=0,acceptance_facts_failing=0,lint_high_critical=1,security_high_critical=1",
+	}
+	if !slices.Equal(decision.Evidence, wantEvidence) {
+		t.Fatalf("expected evidence %v, got %v", wantEvidence, decision.Evidence)
+	}
+}
+
+func TestEvaluateTrajectoryCycleWithAllZeroVerificationFailures(t *testing.T) {
+	history := []schemas.IterationState{
+		iterState(withHash("a")),
+		iterState(withHash("b")),
+		iterState(withHash("a")),
+	}
+	decision := EvaluateTrajectory(history, 5, nil)
+	if decision.Action != schemas.ActionEscalateCycleDetected {
+		t.Fatalf("expected cycle detected, got %q", decision.Action)
+	}
+	wantReason := "Current state hash was seen before. Neither iteration reported verification failures, so this is likely a no-op pass or model thrash against a non-verifying gate."
+	if decision.Reason != wantReason {
+		t.Fatalf("expected reason %q, got %q", wantReason, decision.Reason)
+	}
+	wantEvidence := []string{
+		"state_hash=a",
+		"verification_failure_signature_current=" + emptyVerificationFailureSignature,
+		"verification_failure_signature_previous=" + emptyVerificationFailureSignature,
+	}
+	if !slices.Equal(decision.Evidence, wantEvidence) {
+		t.Fatalf("expected evidence %v, got %v", wantEvidence, decision.Evidence)
+	}
+}
+
 func TestEvaluateTrajectoryEscalatesOnRepeatedEmptyHash(t *testing.T) {
 	history := []schemas.IterationState{
 		iterState(withHash("")),
@@ -385,5 +662,69 @@ func TestEvaluateTrajectoryEscalatesOnRepeatedEmptyHash(t *testing.T) {
 	decision := EvaluateTrajectory(history, 5, nil)
 	if decision.Action != schemas.ActionEscalateCycleDetected {
 		t.Fatalf("expected cycle detected for repeated empty hash, got %q", decision.Action)
+	}
+}
+
+// TestGenerationAllowanceCoversRepairsAndPasses: the light tier's budget
+// (9192) covers one writer call; a first pass with two repairs may generate
+// three calls' worth, and the allowance grows with each pass.
+func TestGenerationAllowanceCoversRepairsAndPasses(t *testing.T) {
+	if got := generationAllowance(9192, 1); got != 27576 {
+		t.Fatalf("first pass allowance = %d, want 27576", got)
+	}
+	if got := generationAllowance(9192, 2); got != 55152 {
+		t.Fatalf("second pass allowance = %d, want 55152", got)
+	}
+}
+
+// TestRevisionContextCarriesTheFailingTests: the next pass must see which
+// test failed and why, not only a failing count.
+func TestRevisionContextCarriesTheFailingTests(t *testing.T) {
+	outputs := []schemas.HarnessStageOutput{{Data: map[string]any{"test_results": schemas.TestRunResults{
+		Command:  []string{"go", "test", "./..."},
+		ExitCode: 1,
+		Tests:    []schemas.TestCaseResult{{Name: "TestStartupChecksPass", Status: "failed", Message: `startup: currency "GBP" cannot be shown in the console`}},
+	}}}}
+	rc := buildRevisionContext("add GBP", nil, nil, outputs, "")
+	if !strings.Contains(rc, `TestStartupChecksPass: startup: currency "GBP" cannot be shown in the console`) {
+		t.Fatalf("revision context lacks the failing test:\n%s", rc)
+	}
+}
+
+// TestUnchangedPassIsNotProgress pins review finding F7: the change summary
+// compares with HEAD, so an earlier pass's edits made every later pass look
+// like progress and no_progress could never fire. The per-pass flag wins
+// when present; three unchanged passes now step back.
+func TestUnchangedPassIsNotProgress(t *testing.T) {
+	unchanged := false
+	pass := func(i int) schemas.IterationState {
+		return iterState(withHash(fmt.Sprintf("h%d", i)), func(s *schemas.IterationState) {
+			s.FilesChanged = []string{"internal/events/kinds.go"} // an earlier pass's edit, still in the diff against HEAD
+			s.LinesAdded = 1
+			s.PassChanged = &unchanged
+		})
+	}
+	history := []schemas.IterationState{pass(1), pass(2), pass(3)}
+	if got := trailingNoProgressCount(history); got != 3 {
+		t.Fatalf("no-progress passes = %d, want 3", got)
+	}
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	summary := schemas.ChangeSummary{ChangedFiles: []schemas.ChangedFile{{Path: "a.go", Status: "modified"}}}
+	before := passDigest(dir, summary)
+	if again := passDigest(dir, summary); again != before {
+		t.Fatalf("an unchanged pass must keep its digest: %q %q", before, again)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\n\nvar X = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if passDigest(dir, summary) == before {
+		t.Fatal("a content change in a listed file must change the digest")
+	}
+	if passDigest(dir, schemas.ChangeSummary{}) == before {
+		t.Fatal("a file leaving the change list (reverted to HEAD) must change the digest")
 	}
 }

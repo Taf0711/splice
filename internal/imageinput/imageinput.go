@@ -6,14 +6,39 @@
 package imageinput
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 
+	"github.com/Taf0711/splice/internal/sandbox"
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
+
+// prepareImageInputCommand builds one audited child process for the clipboard
+// and poppler helpers. The command goes through the procrun chokepoint under
+// the tui.imageinput profile so every spawn emits an audit record. The engine
+// is nil: these helpers run keychain-backed and parser binaries, and confining
+// them waits for a parity-tested enforcement slice. The environment matches
+// the previous direct-exec behavior: full process inheritance, unscrubbed.
+func prepareImageInputCommand(ctx context.Context, name string, args ...string) (*exec.Cmd, error) {
+	prepared, err := procrun.Prepare(ctx, procrun.Request{
+		ProfileID: procrun.ProfileImageInput,
+		Spec: sandbox.CommandSpec{
+			Name: name,
+			Args: args,
+			Env:  os.Environ(),
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return prepared.Cmd, nil
+}
 
 // MaxImageBytes is the per-image decoded-size cap (10 MiB). Bytes above this are
 // rejected at every input boundary so an unbounded request body never reaches a

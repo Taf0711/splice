@@ -13,6 +13,11 @@ import (
 // publish before treating a document's diagnostics as settled.
 const diagnosticsDebounce = 300 * time.Millisecond
 
+// ErrWorkspaceUntrusted means a language server was asked to start in a
+// workspace the user has not trusted. Servers such as rust-analyzer and jdtls
+// build the project, so repository code would run.
+var ErrWorkspaceUntrusted = errors.New("language servers are off in an untrusted workspace; trust the folder with /trust")
+
 // serverStarter starts (and initializes) a language server. It is injectable so
 // tests can substitute a stub over an in-memory pipe instead of spawning a real
 // server.
@@ -31,21 +36,29 @@ type Manager struct {
 	workspaceRoot string
 	debounce      time.Duration
 	starter       serverStarter
+	// trusted gates every server start. An untrusted manager starts nothing.
+	trusted bool
 
 	mu       sync.Mutex
 	sessions map[string]*session // keyed by server binary
 }
 
-// NewManager creates a Manager rooted at workspaceRoot.
-func NewManager(workspaceRoot string) *Manager {
-	return newManagerWithStarter(workspaceRoot, defaultStarter)
+// NewManager creates a Manager rooted at workspaceRoot. Pass trusted=false for
+// an untrusted workspace: the manager then starts no language server.
+func NewManager(workspaceRoot string, trusted bool) *Manager {
+	m := newManagerWithStarter(workspaceRoot, defaultStarter)
+	m.trusted = trusted
+	return m
 }
 
+// newManagerWithStarter is the test seam. It builds a trusted manager that
+// uses the given starter. Production code goes through NewManager.
 func newManagerWithStarter(workspaceRoot string, starter serverStarter) *Manager {
 	return &Manager{
 		workspaceRoot: workspaceRoot,
 		debounce:      diagnosticsDebounce,
 		starter:       starter,
+		trusted:       true,
 		sessions:      map[string]*session{},
 	}
 }
@@ -56,6 +69,10 @@ func newManagerWithStarter(workspaceRoot string, starter serverStarter) *Manager
 func (m *Manager) Check(ctx context.Context, path, text string) ([]Diagnostic, error) {
 	command, ok := ServerFor(path)
 	if !ok {
+		return nil, nil
+	}
+	if !m.trusted {
+		// Diagnostics are skipped, not failed: the edit itself is not affected.
 		return nil, nil
 	}
 	languageID, _ := LanguageID(path)
@@ -141,6 +158,9 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 // needed. Concurrent first-callers double-check under the lock so only one server
 // is kept; a loser shuts its extra server down.
 func (m *Manager) sessionFor(ctx context.Context, command []string) (*session, error) {
+	if !m.trusted {
+		return nil, ErrWorkspaceUntrusted
+	}
 	key := command[0]
 	m.mu.Lock()
 	if sess, ok := m.sessions[key]; ok {

@@ -1,0 +1,7 @@
+{
+  "name": "fut-under-02-write",
+  "phase": "write",
+  "prompt": "In the jobs package, add the job type \"rotate-keys\" to the job types the scheduler accepts.",
+  "check": "# fut-under-02 A\ncat > internal/jobs/probe_rotate_keys_test.go <<'EOF'\npackage jobs\n\nimport (\n\t\"slices\"\n\t\"testing\"\n)\n\nfunc TestProbe(t *testing.T) {\n\tif !slices.Contains(Types, \"rotate-keys\") {\n\t\tt.Fatal(\"Types lacks rotate-keys\")\n\t}\n}\nEOF\ngo test -count=1 ./... ; rc=$?\nrm -f internal/jobs/probe_rotate_keys_test.go\nexit $rc\n",
+  "fixture": "../../chain-families/fixture-under"
+}

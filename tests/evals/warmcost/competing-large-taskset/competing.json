@@ -1,0 +1,53 @@
+[
+  {
+    "id": "cmp-admin-4-cpl-04-read",
+    "family": "cpl-04",
+    "coupled": "internal/admin/permissions.go",
+    "distractors": [
+      "internal/admin/labels.go",
+      "internal/admin/pricing.go"
+    ]
+  },
+  {
+    "id": "cmp-admin-5-cpl-05-read",
+    "family": "cpl-05",
+    "coupled": "internal/admin/pricing.go",
+    "distractors": [
+      "internal/admin/labels.go",
+      "internal/admin/permissions.go"
+    ]
+  },
+  {
+    "id": "cmp-admin-6-cpl-06-read",
+    "family": "cpl-06",
+    "coupled": "internal/admin/labels.go",
+    "distractors": [
+      "internal/admin/permissions.go",
+      "internal/admin/pricing.go"
+    ]
+  },
+  {
+    "id": "cmp-server-4-cpl-01-read",
+    "family": "cpl-01",
+    "coupled": "internal/config/catalog.go",
+    "distractors": [
+      "cmd/server/jobs.go"
+    ]
+  },
+  {
+    "id": "cmp-server-5-cpl-02-read",
+    "family": "cpl-02",
+    "coupled": "internal/config/catalog.go",
+    "distractors": [
+      "cmd/server/jobs.go"
+    ]
+  },
+  {
+    "id": "cmp-server-6-cpl-03-read",
+    "family": "cpl-03",
+    "coupled": "cmd/server/jobs.go",
+    "distractors": [
+      "internal/config/catalog.go"
+    ]
+  }
+]

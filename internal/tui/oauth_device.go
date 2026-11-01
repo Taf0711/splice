@@ -2,6 +2,8 @@ package tui
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"runtime"
@@ -79,13 +81,12 @@ func oauthDeviceComplete(name string, cfg oauth.Config, auth oauth.DeviceAuth) e
 }
 
 // oauthStoredToken returns a fresh access token for a provider that was logged in
-// via OAuth (token stored under provider:<id>), refreshing on demand. Empty when
-// there is no stored login or the refresh fails. Used to authenticate the model
-// discovery /models call so the wizard can show the live model list after login.
-func oauthStoredToken(ctx context.Context, providerID string) string {
+// via OAuth (token stored under provider:<id>), refreshing on demand. A missing
+// login returns an empty token. Backend and refresh failures are returned.
+func oauthStoredToken(ctx context.Context, providerID string) (string, error) {
 	store, err := oauth.NewStore(oauth.StoreOptions{})
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("open OAuth backend: %w", err)
 	}
 	manager, err := oauth.NewManager(oauth.ManagerOptions{
 		Store:        store,
@@ -93,13 +94,16 @@ func oauthStoredToken(ctx context.Context, providerID string) string {
 		AllowPresets: true, // refreshing a preset-provider token re-resolves its config
 	})
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("create OAuth manager: %w", err)
 	}
 	token, err := manager.GetFresh(ctx, oauth.ProviderKey(providerID))
-	if err != nil {
-		return ""
+	if errors.Is(err, oauth.ErrNoToken) {
+		return "", nil
 	}
-	return strings.TrimSpace(token)
+	if err != nil {
+		return "", fmt.Errorf("read OAuth login from the %s backend: %w", store.Backend(), err)
+	}
+	return strings.TrimSpace(token), nil
 }
 
 // oauthDeviceVerifyTarget picks the best URL to show the user: the complete URI

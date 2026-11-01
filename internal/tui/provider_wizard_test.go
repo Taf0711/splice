@@ -170,6 +170,10 @@ func TestProviderWizardModelsAreProviderScoped(t *testing.T) {
 }
 
 func TestProviderWizardAdvancesProviderAPIKeyAndModelSteps(t *testing.T) {
+	// A key in the host environment makes the credential step ready, and the
+	// footer then shows the right-arrow hint. Clear it so the test checks the
+	// no-key state.
+	t.Setenv("ANTHROPIC_API_KEY", "")
 	m := newModel(context.Background(), Options{})
 	m = openProviderWizardForTest(t, m)
 
@@ -801,6 +805,103 @@ func TestProviderWizardUsesAPIKeyEnvForCurrentSessionWithoutPersistingSecret(t *
 	}
 	if profile.APIKeyEnv != "OLLAMA_API_KEY" {
 		t.Fatalf("persisted APIKeyEnv = %q, want OLLAMA_API_KEY", profile.APIKeyEnv)
+	}
+}
+
+func TestProviderWizardModelsFromDiscoveryUsesRegistryCapability(t *testing.T) {
+	registry := modelregistryForInstalledTest(t)
+
+	// A /v1/models listing carries no tool-calling; the registry overlay is the
+	// source of truth for an installed local model.
+	models := providerWizardModelsFromDiscovery([]providermodeldiscovery.Model{{ID: "local-model"}}, registry)
+	if len(models) != 1 || models[0].ToolCall {
+		t.Fatalf("without overlay, tool call should be false: %#v", models)
+	}
+
+	registry.OverlayCapabilities("local-model", modelregistry.ModelCapabilityToolCalling)
+	models = providerWizardModelsFromDiscovery([]providermodeldiscovery.Model{{ID: "local-model"}}, registry)
+	if len(models) != 1 || !models[0].ToolCall {
+		t.Fatalf("with overlay, tool call should be true: %#v", models)
+	}
+
+	// Empty probed list yields empty models, keeping the default-model flow.
+	if got := providerWizardModelsFromDiscovery(nil, registry); len(got) != 0 {
+		t.Fatalf("empty discovery should yield empty models: %#v", got)
+	}
+}
+
+func modelregistryForInstalledTest(t *testing.T) modelregistry.Registry {
+	t.Helper()
+	registry, err := modelregistry.NewRegistry([]modelregistry.ModelEntry{{
+		ID: "local-model", DisplayName: "Local", APIModel: "local-model",
+		Provider:      modelregistry.ProviderOpenAI,
+		ContextLimits: modelregistry.ContextLimits{ContextWindow: 8192, MaxOutputTokens: 4096},
+		Capabilities:  []modelregistry.ModelCapability{modelregistry.ModelCapabilityChat},
+		Cost: modelregistry.ModelCost{
+			Currency: "USD", Unit: "per_1m_tokens",
+			InputPerMillion: 0.1, OutputPerMillion: 0.1,
+			Source: "test", SourceLastVerified: "2026-01-01",
+		},
+		Status:  modelregistry.ModelStatusActive,
+		Aliases: []string{"local-model"},
+	}})
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	return registry
+}
+
+// TestOllamaCapabilitiesMsgRemovesToolCallingOnlyWhenReported exercises the
+// LL4 surgical negative overlay through the TUI handler: tool-calling is
+// removed only when the daemon reported a capability list that omitted it.
+func TestOllamaCapabilitiesMsgRemovesToolCallingOnlyWhenReported(t *testing.T) {
+	withToolCall := func(t *testing.T) model {
+		t.Helper()
+		entry := modelregistry.ModelEntry{
+			ID: "local-model", DisplayName: "Local", APIModel: "local-model",
+			Provider:      modelregistry.ProviderOpenAI,
+			ContextLimits: modelregistry.ContextLimits{ContextWindow: 8192, MaxOutputTokens: 4096},
+			Capabilities:  []modelregistry.ModelCapability{modelregistry.ModelCapabilityChat, modelregistry.ModelCapabilityToolCalling},
+			Cost: modelregistry.ModelCost{
+				Currency: "USD", Unit: "per_1m_tokens",
+				InputPerMillion: 0.1, OutputPerMillion: 0.1,
+				Source: "test", SourceLastVerified: "2026-01-01",
+			},
+			Status:  modelregistry.ModelStatusActive,
+			Aliases: []string{"local-model"},
+		}
+		registry, err := modelregistry.NewRegistry([]modelregistry.ModelEntry{entry})
+		if err != nil {
+			t.Fatalf("NewRegistry: %v", err)
+		}
+		m := newModel(context.Background(), Options{})
+		m.modelCatalog = registry
+		return m
+	}
+	keepToolCall := func(m model) bool {
+		entry, ok := m.modelCatalog.Get("local-model")
+		return ok && entry.Supports(modelregistry.ModelCapabilityToolCalling)
+	}
+
+	// Unknown case: Reported false must keep tool-calling (the regression guard).
+	m := withToolCall(t)
+	updated, _ := m.Update(ollamaCapabilitiesDiscoveredMsg{modelName: "local-model", caps: providermodeldiscovery.OllamaCapabilities{Reported: false, ToolCall: false}})
+	if !keepToolCall(updated.(model)) {
+		t.Fatal("Reported false (unknown) must keep tool-calling")
+	}
+
+	// Present array with tools: Reported true and ToolCall true keeps it.
+	m = withToolCall(t)
+	updated, _ = m.Update(ollamaCapabilitiesDiscoveredMsg{modelName: "local-model", caps: providermodeldiscovery.OllamaCapabilities{Reported: true, ToolCall: true}})
+	if !keepToolCall(updated.(model)) {
+		t.Fatal("Reported true with tools must keep tool-calling")
+	}
+
+	// Probed-absent: Reported true without tools removes it.
+	m = withToolCall(t)
+	updated, _ = m.Update(ollamaCapabilitiesDiscoveredMsg{modelName: "local-model", caps: providermodeldiscovery.OllamaCapabilities{Reported: true, ToolCall: false}})
+	if keepToolCall(updated.(model)) {
+		t.Fatal("Reported true without tools must remove tool-calling")
 	}
 }
 
@@ -1441,11 +1542,61 @@ func TestApplyProviderWizardExportsActiveProviderEnv(t *testing.T) {
 	}
 }
 
+// A provider added in the live wizard must be available to /stages without a restart.
+func TestApplyProviderWizardRefreshesSavedProvidersForStages(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	oldProfile := config.ProviderProfile{Name: "old", CatalogID: "openai", Model: "old-model"}
+	m := newModel(context.Background(), Options{
+		UserConfigPath:  configPath,
+		ProviderName:    oldProfile.Name,
+		ModelName:       oldProfile.Model,
+		ProviderProfile: oldProfile,
+		SavedProviders:  []config.ProviderProfile{oldProfile},
+		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &fakeProvider{}, nil
+		},
+	})
+	m.providerWizard = &providerWizardState{
+		step:        providerWizardStepModel,
+		profileName: "stage-provider",
+		providers: []providercatalog.Descriptor{{
+			ID:                  "openrouter",
+			Name:                "OpenRouter",
+			Transport:           providercatalog.TransportOpenAICompatible,
+			DefaultBaseURL:      "https://openrouter.ai/api/v1",
+			DefaultModel:        "openai/gpt-4.1",
+			SupportedAPIFormats: []providercatalog.APIFormat{providercatalog.APIFormatOpenAIChatCompletions},
+		}},
+		models: []providerWizardModel{{ID: "openai/gpt-4.1"}},
+	}
+
+	next, _ := m.applyProviderWizard()
+	wizard, err := newStageModelWizard(next.userConfigPath, next.savedProviders, next.providerProfile)
+	if err != nil {
+		t.Fatalf("newStageModelWizard: %v", err)
+	}
+	for _, profile := range wizard.providers {
+		if profile.Name == "stage-provider" {
+			return
+		}
+	}
+	t.Fatalf("stage provider missing after sign-in: saved=%+v stage providers=%+v", next.savedProviders, wizard.providers)
+}
+
+func TestUpsertSavedProviderReplacesStaleProfile(t *testing.T) {
+	old := []config.ProviderProfile{{Name: "Same", Model: "old-model", BaseURL: "https://old.example/v1"}}
+	updated := upsertSavedProvider(old, config.ProviderProfile{Name: "same", Model: "new-model", BaseURL: "https://new.example/v1"})
+	if len(updated) != 1 || updated[0].Model != "new-model" || updated[0].BaseURL != "https://new.example/v1" {
+		t.Fatalf("updated profiles = %+v, want one current profile", updated)
+	}
+	if old[0].Model != "old-model" {
+		t.Fatalf("input slice was mutated: %+v", old)
+	}
+}
+
 // On a config PERSIST failure, applyProviderWizard must leave live state fully
-// unchanged — the chat must NOT already be running on the new provider while the
-// status line and the SPLICE_PROVIDER export (which pins spawned children) still
-// point at the old one. Build and persist are staged into locals; nothing is
-// committed unless both succeed.
+// unchanged. The chat must not run on the new provider while the status line and
+// SPLICE_PROVIDER still point at the old one. Commit only after build and persist succeed.
 func TestApplyProviderWizardPersistFailureLeavesLiveStateUnchanged(t *testing.T) {
 	t.Setenv("SPLICE_CRED_STORAGE", "encrypted-file") // never touch the real OS keychain: apiKey is secured before the persist fails
 	t.Setenv(config.ActiveProviderEnv, "old-provider")

@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
 )
 
 const minimalPDFTextChunkSize = 80
@@ -420,5 +422,42 @@ func TestIsProbablyDocumentPath(t *testing.T) {
 		if got := IsProbablyDocumentPath(path); got != want {
 			t.Fatalf("IsProbablyDocumentPath(%q) = %v, want %v", path, got, want)
 		}
+	}
+}
+
+// TestPopplerSpawnsEmitProcrunAuditRecords pins the pairing contract for the
+// poppler path: a pdftotext spawn and a pdftoppm spawn each emit one audit
+// record under the tui.imageinput profile naming the binary.
+func TestPopplerSpawnsEmitProcrunAuditRecords(t *testing.T) {
+	if !popplerAvailable("pdftotext") || !popplerAvailable("pdftoppm") {
+		t.Skip("poppler is not installed")
+	}
+	var records []procrun.AuditRecord
+	previous := procrun.SetAuditSink(func(record procrun.AuditRecord) {
+		records = append(records, record)
+	})
+	t.Cleanup(func() { procrun.SetAuditSink(previous) })
+
+	pdf := buildMinimalPDF("audit pairing probe")
+	if _, ok := extractTextWithPoppler(pdf); !ok {
+		t.Fatal("extractTextWithPoppler = false, want a successful extraction")
+	}
+	images, err := rasterizeWithPoppler(pdf, 1)
+	if err != nil || len(images) == 0 {
+		t.Fatalf("rasterizeWithPoppler = (%d images, %v), want at least one page", len(images), err)
+	}
+
+	seen := map[string]bool{}
+	for _, record := range records {
+		if record.ProfileID != procrun.ProfileImageInput {
+			t.Fatalf("profile = %q for %q, want %q", record.ProfileID, record.Name, procrun.ProfileImageInput)
+		}
+		if record.Decision.Rejected {
+			t.Fatalf("decision for %q = %+v, want a non-rejected spawn", record.Name, record.Decision)
+		}
+		seen[record.Name] = true
+	}
+	if !seen["pdftotext"] || !seen["pdftoppm"] {
+		t.Fatalf("audited binaries = %v, want pdftotext and pdftoppm", seen)
 	}
 }

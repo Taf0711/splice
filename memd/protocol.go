@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/Taf0711/splice/memd/store"
 )
@@ -33,6 +35,15 @@ type protocolObservation struct {
 	CreatedAt      int64    `json:"created_at"`
 	UpdatedAt      int64    `json:"updated_at"`
 	DeletedAt      *int64   `json:"deleted_at"`
+}
+
+// RankedObservation pairs an observation with its FTS BM25 rank (negative;
+// more negative = more relevant). Used by /search_ranked so the orchestrator
+// can rerank deterministically. Ranks are metadata: they never enter a
+// prompt or a trace review.
+type RankedObservation struct {
+	Observation protocolObservation `json:"observation"`
+	Rank        float64             `json:"rank"`
 }
 
 func toProtocol(obs *store.Observation) protocolObservation {
@@ -176,6 +187,11 @@ func (r *searchRequest) Validate() error {
 	if r.Query == "" {
 		return fmt.Errorf("query is required")
 	}
+	for _, ch := range r.Query {
+		if ch < 0x20 && ch != '\t' && ch != '\n' {
+			return fmt.Errorf("query contains a control character")
+		}
+	}
 	return r.validateCommon()
 }
 
@@ -218,4 +234,533 @@ type statsResponse struct {
 type genericResponse struct {
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
+}
+
+// resetProjectRequest is the JSON body for POST /project/reset. The exact
+// project path (the observation project_path / trace repo_root value) is
+// required: an empty path would silently match nothing, so it fails loud.
+type resetProjectRequest struct {
+	ProjectPath string `json:"project_path"`
+}
+
+func (r *resetProjectRequest) Validate() error {
+	if r.ProjectPath == "" {
+		return fmt.Errorf("project_path is required")
+	}
+	return nil
+}
+
+// resetProjectResponse reports what POST /project/reset removed. Zero counts
+// are meaningful and allowed: the caller decides whether an empty reset is
+// expected, never the server.
+type resetProjectResponse struct {
+	OK           bool  `json:"ok"`
+	Observations int64 `json:"observations"`
+	Traces       int64 `json:"traces"`
+	GraphNodes   int64 `json:"graph_nodes,omitempty"`
+}
+
+// lookupTopicRequest is the JSON body for POST /lookup_topic. It is the
+// deterministic direct-lookup counterpart to /search: an exact topic_key
+// match within one project scope, no full-text query.
+type lookupTopicRequest struct {
+	ProjectPath     string `json:"project_path"`
+	RequestingAgent string `json:"requesting_agent"`
+	Scope           string `json:"scope"`
+	TopicKey        string `json:"topic_key"`
+	Limit           int    `json:"limit"`
+}
+
+func (r *lookupTopicRequest) Validate() error {
+	if r.RequestingAgent == "" {
+		return fmt.Errorf("requesting_agent is required")
+	}
+	if r.Scope == "" {
+		return fmt.Errorf("scope is required")
+	}
+	if r.Scope != "project" && r.Scope != "global" {
+		return fmt.Errorf("scope must be 'project' or 'global', got %q", r.Scope)
+	}
+	if r.TopicKey == "" {
+		return fmt.Errorf("topic_key is required")
+	}
+	if r.Limit > 100 {
+		r.Limit = 100
+	}
+	return nil
+}
+
+// traceUpsertRequest is the JSON body for POST /trace/upsert. Only the indexed
+// columns are decoded; the full body is stored verbatim as the payload so the
+// sidecar never drops unknown fields from a newer schema.
+type traceUpsertRequest struct {
+	RunID     string `json:"run_id"`
+	SessionID string `json:"session_id"`
+	RepoRoot  string `json:"repo_root"`
+	Tier      string `json:"tier"`
+	Intent    string `json:"intent"`
+	Outcome   struct {
+		Status string `json:"status"`
+	} `json:"outcome"`
+}
+
+func (r *traceUpsertRequest) Validate() error {
+	if r.RunID == "" {
+		return fmt.Errorf("run_id is required")
+	}
+	if r.RepoRoot == "" {
+		return fmt.Errorf("repo_root is required")
+	}
+	if r.Tier == "" {
+		return fmt.Errorf("tier is required")
+	}
+	switch r.Outcome.Status {
+	case "running", "completed", "aborted", "failed":
+	default:
+		return fmt.Errorf("outcome.status must be running, completed, aborted, or failed, got %q", r.Outcome.Status)
+	}
+	return nil
+}
+
+// traceUpsertResponse is the JSON body for POST /trace/upsert. inserted is
+// false when a "running" partial write was rejected by the settled-row guard
+// (the existing row already reached completed/aborted/failed).
+type traceUpsertResponse struct {
+	OK       bool `json:"ok"`
+	Inserted bool `json:"inserted"`
+}
+
+// verdictUpsertRequest is the JSON body for POST /trace/verdict. decided_at is
+// the RFC3339 timestamp from VerdictRecord; the store column is unix seconds.
+type verdictUpsertRequest struct {
+	RunID     string    `json:"run_id"`
+	Verdict   string    `json:"verdict"`
+	Reason    string    `json:"reject_reason"`
+	DecidedAt time.Time `json:"decided_at"`
+}
+
+func (r *verdictUpsertRequest) Validate() error {
+	if r.RunID == "" {
+		return fmt.Errorf("run_id is required")
+	}
+	if r.Verdict != "kept" && r.Verdict != "rejected" {
+		return fmt.Errorf("verdict must be kept or rejected, got %q", r.Verdict)
+	}
+	if r.DecidedAt.IsZero() {
+		return fmt.Errorf("decided_at is required")
+	}
+	return nil
+}
+
+// traceQueryRequest is the JSON body for POST /trace/query. Empty fields are
+// ignored; since is unix seconds.
+type traceQueryRequest struct {
+	RepoRoot string `json:"repo_root"`
+	Tier     string `json:"tier"`
+	Status   string `json:"status"`
+	Verdict  string `json:"verdict"`
+	Query    string `json:"query"`
+	Since    int64  `json:"since"`
+	Limit    int    `json:"limit"`
+}
+
+// verdictResponse is the latest verdict joined into a trace query result.
+type verdictResponse struct {
+	DecidedAt int64           `json:"decided_at"`
+	Verdict   string          `json:"verdict"`
+	Reason    string          `json:"reason,omitempty"`
+	Payload   json.RawMessage `json:"payload"`
+}
+
+// traceResponse is one row returned by POST /trace/query.
+type traceResponse struct {
+	RunID     string           `json:"run_id"`
+	SessionID string           `json:"session_id,omitempty"`
+	RepoRoot  string           `json:"repo_root"`
+	Tier      string           `json:"tier"`
+	Status    string           `json:"status"`
+	CreatedAt int64            `json:"created_at"`
+	Rank      float64          `json:"rank,omitempty"`
+	Payload   json.RawMessage  `json:"payload"`
+	Verdict   *verdictResponse `json:"verdict,omitempty"`
+}
+
+// traceQueryResponse is the JSON body returned by POST /trace/query.
+type traceQueryResponse struct {
+	OK     bool            `json:"ok"`
+	Traces []traceResponse `json:"traces"`
+}
+
+// ---------------------------------------------------------------------------
+// Cognition graph wire types (/graph/*). Field names are snake_case and
+// stable: internal/memd is the only client and the wire contract is the only
+// coupling.
+// ---------------------------------------------------------------------------
+
+// graphAnchor is one anchor on a node, in wire form.
+type graphAnchor struct {
+	Kind  string `json:"kind"`
+	Value string `json:"value"`
+}
+
+// graphEdge is one directed edge from the upserted node, in wire form.
+type graphEdge struct {
+	DstID int64  `json:"dst_id"`
+	Kind  string `json:"kind"`
+}
+
+// graphNode is one cognition node, in wire form. Nullable store fields are
+// pointers so json.Marshal emits null instead of sql.Null* structs.
+type graphNode struct {
+	ID               int64         `json:"id"`
+	Kind             string        `json:"kind"`
+	Claim            string        `json:"claim"`
+	Scope            string        `json:"scope"`
+	ProjectPath      *string       `json:"project_path"`
+	Status           string        `json:"status"`
+	Confidence       *float64      `json:"confidence"`
+	SourceRunID      *string       `json:"source_run_id"`
+	CreatedRevision  *string       `json:"created_revision"`
+	VerifiedRevision *string       `json:"verified_revision"`
+	CreatedAt        int64         `json:"created_at"`
+	VerifiedAt       *int64        `json:"verified_at"`
+	ClaimHash        string        `json:"claim_hash"`
+	MetadataJSON     *string       `json:"metadata_json"`
+	Anchors          []graphAnchor `json:"anchors,omitempty"`
+}
+
+// graphUpsertRequest is the JSON body for POST /graph/upsert. One call
+// carries the node, its anchors, and its outgoing edges.
+type graphUpsertRequest struct {
+	Kind             string          `json:"kind"`
+	Claim            string          `json:"claim"`
+	Scope            string          `json:"scope"`
+	ProjectPath      string          `json:"project_path"`
+	Status           string          `json:"status"`
+	Confidence       *float64        `json:"confidence"`
+	SourceRunID      string          `json:"source_run_id"`
+	CreatedRevision  string          `json:"created_revision"`
+	VerifiedRevision string          `json:"verified_revision"`
+	Metadata         map[string]any  `json:"metadata"`
+	Anchors          []graphAnchor   `json:"anchors"`
+	Edges            []graphEdge     `json:"edges"`
+	Evidence         []graphEvidence `json:"evidence"`
+}
+
+// graphEvidence carries one deterministic support record per node at upsert
+// time; it lands in the cognition_evidence table in the same transaction.
+type graphEvidence struct {
+	Kind   string `json:"kind"`
+	Ref    string `json:"ref,omitempty"`
+	Detail string `json:"detail,omitempty"`
+}
+
+func (r *graphUpsertRequest) Validate() error {
+	if r.Kind == "" {
+		return fmt.Errorf("kind is required")
+	}
+	if r.Claim == "" {
+		return fmt.Errorf("claim is required")
+	}
+	for _, a := range r.Anchors {
+		if a.Kind == "" {
+			return fmt.Errorf("anchor kind is required")
+		}
+		if a.Value == "" {
+			return fmt.Errorf("anchor value is required")
+		}
+	}
+	for _, e := range r.Edges {
+		if e.DstID < 1 {
+			return fmt.Errorf("edge dst_id must be >= 1, got %d", e.DstID)
+		}
+		if e.Kind == "" {
+			return fmt.Errorf("edge kind is required")
+		}
+	}
+	return nil
+}
+
+// graphUpsertResponse is the JSON body returned by POST /graph/upsert.
+type graphUpsertResponse struct {
+	OK   bool      `json:"ok"`
+	Node graphNode `json:"node"`
+}
+
+// graphExactRequest is the JSON body for POST /graph/exact. Anchors is a map
+// of anchor kind to values; a node matches when it carries at least one
+// anchor of every requested kind.
+type graphExactRequest struct {
+	Anchors     map[string][]string `json:"anchors"`
+	ProjectPath string              `json:"project_path"`
+	Status      string              `json:"status"`
+	Limit       int                 `json:"limit"`
+}
+
+func (r *graphExactRequest) Validate() error {
+	if len(r.Anchors) == 0 {
+		return fmt.Errorf("anchors is required")
+	}
+	for kind, values := range r.Anchors {
+		if !store.ValidAnchorKind(kind) {
+			return fmt.Errorf("anchor kind %q is not one of file|symbol|package|test|revision", kind)
+		}
+		if len(values) == 0 {
+			return fmt.Errorf("anchor kind %q has no values", kind)
+		}
+	}
+	if r.Limit < 0 {
+		return fmt.Errorf("limit must be >= 0, got %d", r.Limit)
+	}
+	return nil
+}
+
+// graphExactResponse is the JSON body returned by POST /graph/exact.
+type graphExactResponse struct {
+	OK    bool        `json:"ok"`
+	Nodes []graphNode `json:"nodes"`
+}
+
+// graphNeighborsRequest is the JSON body for POST /graph/neighbors.
+type graphNeighborsRequest struct {
+	NodeID int64    `json:"node_id"`
+	Kinds  []string `json:"kinds"`
+	Depth  int      `json:"depth"`
+	Limit  int      `json:"limit"`
+}
+
+func (r *graphNeighborsRequest) Validate() error {
+	if r.NodeID < 1 {
+		return fmt.Errorf("node_id must be >= 1, got %d", r.NodeID)
+	}
+	if r.Depth < 0 {
+		return fmt.Errorf("depth must be >= 0, got %d", r.Depth)
+	}
+	if r.Limit < 0 {
+		return fmt.Errorf("limit must be >= 0, got %d", r.Limit)
+	}
+	return nil
+}
+
+// graphNeighborsResponse is the JSON body returned by POST /graph/neighbors.
+type graphNeighborsResponse struct {
+	OK    bool        `json:"ok"`
+	Nodes []graphNode `json:"nodes"`
+	Edges []graphEdge `json:"edges"`
+}
+
+// graphStatusRequest is the JSON body for POST /graph/status.
+type graphStatusRequest struct {
+	NodeID int64  `json:"node_id"`
+	Status string `json:"status"`
+}
+
+func (r *graphStatusRequest) Validate() error {
+	if r.NodeID < 1 {
+		return fmt.Errorf("node_id must be >= 1, got %d", r.NodeID)
+	}
+	if r.Status == "" {
+		return fmt.Errorf("status is required")
+	}
+	return nil
+}
+
+// graphContradictRequest is the JSON body for POST /graph/contradict. ByNodeID
+// is the node that supersedes or falsifies NodeID (for example a failure node
+// falsifying a fact node); the contradicts edge points by -> node.
+type graphContradictRequest struct {
+	NodeID   int64  `json:"node_id"`
+	ByNodeID int64  `json:"by_node_id"`
+	Kind     string `json:"kind"`
+	Ref      string `json:"ref"`
+	Detail   string `json:"detail"`
+}
+
+func (r *graphContradictRequest) Validate() error {
+	if r.NodeID < 1 {
+		return fmt.Errorf("node_id must be >= 1, got %d", r.NodeID)
+	}
+	if r.ByNodeID < 1 {
+		return fmt.Errorf("by_node_id must be >= 1, got %d", r.ByNodeID)
+	}
+	if r.Kind == "" {
+		return fmt.Errorf("kind is required")
+	}
+	return nil
+}
+
+// graphSearchRequest is the JSON body for POST /graph/search_semantic.
+// ProjectPath is optional: when set, only nodes of that project rank.
+type graphSearchRequest struct {
+	Text        string `json:"text"`
+	K           int    `json:"k"`
+	ProjectPath string `json:"project_path,omitempty"`
+}
+
+func (r *graphSearchRequest) Validate() error {
+	if r.Text == "" {
+		return fmt.Errorf("text is required")
+	}
+	if r.K < 0 {
+		return fmt.Errorf("k must be >= 0, got %d", r.K)
+	}
+	return nil
+}
+
+// graphSearchHit is one semantic search hit in wire form. Node is the full
+// active node with its anchors when the hit resolved to a live row; nil when
+// the index entry is stale (deleted or superseded node).
+type graphSearchHit struct {
+	NodeID int64      `json:"node_id"`
+	Score  float64    `json:"score"`
+	Node   *graphNode `json:"node,omitempty"`
+}
+
+// graphSearchResponse is the JSON body returned by POST /graph/search_semantic.
+type graphSearchResponse struct {
+	OK   bool             `json:"ok"`
+	Hits []graphSearchHit `json:"hits"`
+}
+
+// graphReanchorIDsRequest is the JSON body for POST /graph/reanchor_ids.
+type graphReanchorIDsRequest struct {
+	ProjectPath  string  `json:"project_path"`
+	NodeIDs      []int64 `json:"node_ids"`
+	FromRevision string  `json:"from_revision"`
+	ToRevision   string  `json:"to_revision"`
+}
+
+func (r *graphReanchorIDsRequest) Validate() error {
+	if r.ProjectPath == "" || r.FromRevision == "" || r.ToRevision == "" {
+		return fmt.Errorf("project_path, from_revision, and to_revision are required")
+	}
+	if len(r.NodeIDs) == 0 {
+		return fmt.Errorf("at least one node id is required")
+	}
+	return nil
+}
+
+// graphReanchorResponse is reused for /graph/reanchor_ids (same shape).
+
+// graphReanchorRequest is the JSON body for POST /graph/reanchor.
+type graphReanchorRequest struct {
+	ProjectPath  string `json:"project_path"`
+	FromRevision string `json:"from_revision"`
+	ToRevision   string `json:"to_revision"`
+}
+
+func (r *graphReanchorRequest) Validate() error {
+	if r.ProjectPath == "" || r.FromRevision == "" || r.ToRevision == "" {
+		return fmt.Errorf("project_path, from_revision, and to_revision are required")
+	}
+	return nil
+}
+
+// graphReanchorResponse is the JSON body returned by POST /graph/reanchor.
+type graphReanchorResponse struct {
+	OK    bool  `json:"ok"`
+	Nodes int64 `json:"nodes"`
+}
+
+// graphCompactResponse is the JSON body returned by POST /graph/compact.
+type graphCompactResponse struct {
+	OK     bool                   `json:"ok"`
+	Report store.CompactionReport `json:"report"`
+}
+
+// graphCollectRequest is the JSON body for POST /graph/collect. OlderThan
+// is seconds; ephemeral nodes older than that are hard-deleted.
+type graphCollectRequest struct {
+	OlderThan int64 `json:"older_than"`
+}
+
+func (r *graphCollectRequest) Validate() error {
+	if r.OlderThan < 0 {
+		return fmt.Errorf("older_than must be >= 0, got %d", r.OlderThan)
+	}
+	return nil
+}
+
+// graphCollectResponse is the JSON body returned by POST /graph/collect.
+type graphCollectResponse struct {
+	OK        bool  `json:"ok"`
+	Collected int64 `json:"collected"`
+}
+
+// graphCaptureSetRequest is the JSON body for POST /graph/capture_set.
+// SourceRunID is optional: when set, the capture set is scoped to the
+// producer run that persisted the nodes, so two runs that verified the
+// same tree keep separate sets. When omitted, the historical
+// project+revision behavior is preserved.
+type graphCaptureSetRequest struct {
+	ProjectPath string  `json:"project_path"`
+	Revision    string  `json:"revision"`
+	SourceRunID *string `json:"source_run_id,omitempty"`
+}
+
+func (r *graphCaptureSetRequest) Validate() error {
+	if r.ProjectPath == "" || r.Revision == "" {
+		return fmt.Errorf("project_path and revision are required")
+	}
+	if r.SourceRunID != nil && *r.SourceRunID == "" {
+		return fmt.Errorf("source_run_id must be omitted, not empty")
+	}
+	return nil
+}
+
+// graphCaptureSetResponse is the JSON body returned by POST /graph/capture_set.
+type graphCaptureSetResponse struct {
+	OK  bool    `json:"ok"`
+	IDs []int64 `json:"ids"`
+}
+
+// exportedCaptureNode is one fully materialized node in an exported capture
+// set: the complete node payload plus its anchors and evidence, with the
+// source sidecar id and claim hash carried for canonical identity on
+// import (sidecar numeric ids are not stable across stores).
+type exportedCaptureNode struct {
+	Node      graphNode       `json:"node"`
+	Anchors   []graphAnchor   `json:"anchors"`
+	Evidence  []graphEvidence `json:"evidence"`
+	SourceID  int64           `json:"source_id"`
+	ClaimHash string          `json:"claim_hash"`
+}
+
+// graphExportCaptureSetResponse is the JSON body returned by POST
+// /graph/export_capture_set.
+type graphExportCaptureSetResponse struct {
+	OK    bool                  `json:"ok"`
+	Nodes []exportedCaptureNode `json:"nodes"`
+	Error string                `json:"error,omitempty"`
+}
+
+// graphImportCaptureSetRequest is the JSON body for POST
+// /graph/import_capture_set. ProjectPath is the NEW project identity every
+// node is remapped to; producer identity inside each node is preserved.
+type graphImportCaptureSetRequest struct {
+	ProjectPath string                `json:"project_path"`
+	Nodes       []exportedCaptureNode `json:"nodes"`
+}
+
+func (r *graphImportCaptureSetRequest) Validate() error {
+	if r.ProjectPath == "" {
+		return fmt.Errorf("project_path is required")
+	}
+	if len(r.Nodes) == 0 {
+		return fmt.Errorf("nodes must not be empty")
+	}
+	for i, n := range r.Nodes {
+		if n.Node.Kind == "" || n.Node.Claim == "" {
+			return fmt.Errorf("nodes[%d]: kind and claim are required", i)
+		}
+	}
+	return nil
+}
+
+// graphImportCaptureSetResponse is the JSON body returned by POST
+// /graph/import_capture_set.
+type graphImportCaptureSetResponse struct {
+	OK       bool   `json:"ok"`
+	Imported int64  `json:"imported"`
+	Error    string `json:"error,omitempty"`
 }

@@ -19,6 +19,10 @@ var _ Stage = AcceptanceVerifier{}
 
 const defaultAcceptanceTimeoutSeconds = 30
 
+func (AcceptanceVerifier) Capabilities() Capabilities {
+	return Capabilities{ModelFree: true, TimeoutSeconds: defaultAcceptanceTimeoutSeconds, Description: "verifying acceptance criteria"}
+}
+
 func (AcceptanceVerifier) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options StageOptions) (schemas.HarnessStageOutput, error) {
 	timeout := options.TimeoutSeconds
 	if timeout <= 0 {

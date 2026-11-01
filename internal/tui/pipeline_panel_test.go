@@ -3,8 +3,10 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,23 +16,55 @@ import (
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/config"
 	"github.com/Taf0711/splice/internal/memd"
+	"github.com/Taf0711/splice/internal/presentation"
 	"github.com/Taf0711/splice/internal/sessions"
 	splicerun "github.com/Taf0711/splice/internal/splice"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/tools"
+	"github.com/Taf0711/splice/internal/worktrees"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
+// TestMain isolates the process from the user's state. It sets the XDG data,
+// state, and config directories to temporary paths, and points the memd socket
+// and database at a temporary directory. It sets the credential and OAuth
+// storage to encrypted-file, so no test reaches the OS keychain. All temporary
+// directories are removed on exit, including on the panic paths.
 func TestMain(m *testing.M) {
-	// Tests without a SessionStore use the default store, which writes to the user data directory.
-	dataDir, err := os.MkdirTemp("", "splice-tui-test-")
-	if err != nil {
-		panic(fmt.Sprintf("create temporary XDG data directory: %v", err))
+	var tempDirs []string
+	cleanup := func() {
+		for _, dir := range tempDirs {
+			_ = os.RemoveAll(dir)
+		}
 	}
-	if err := os.Setenv("XDG_DATA_HOME", dataDir); err != nil {
-		_ = os.RemoveAll(dataDir)
-		panic(fmt.Sprintf("set XDG_DATA_HOME: %v", err))
+	fail := func(format string, args ...any) {
+		cleanup()
+		panic(fmt.Sprintf(format, args...))
 	}
+	tempDir := func(pattern, what string) string {
+		dir, err := os.MkdirTemp("", pattern)
+		if err != nil {
+			fail("create temporary %s: %v", what, err)
+		}
+		tempDirs = append(tempDirs, dir)
+		return dir
+	}
+	setEnv := func(key, value string) {
+		if err := os.Setenv(key, value); err != nil {
+			fail("set %s: %v", key, err)
+		}
+	}
+
+	setEnv("XDG_DATA_HOME", tempDir("splice-tui-test-", "XDG data directory"))
+	setEnv("XDG_STATE_HOME", tempDir("splice-tui-state-", "XDG state directory"))
+	setEnv("XDG_CONFIG_HOME", tempDir("splice-tui-config-", "XDG config directory"))
+	// macOS defaults both stores to the keychain. Pin them to the file backend.
+	setEnv(config.CredentialStorageEnv, "encrypted-file")
+	setEnv(config.OAuthStorageEnv, "encrypted-file")
+	memdDir := tempDir("m-", "memd directory")
+	setEnv("SPLICE_MEMD_SOCKET", filepath.Join(memdDir, "m.sock"))
+	setEnv("SPLICE_MEMD_DB", filepath.Join(memdDir, "m.db"))
+
 	tuiSpliceRun = func(ctx context.Context, prompt string, provider agent.Provider, options agent.Options, mem splicerun.MemoryStore, recovery splicerun.WorkspaceRecovery) (agent.Result, error) {
 		if recovery != nil {
 			panic("TUI must not receive workspace recovery authority")
@@ -38,30 +72,98 @@ func TestMain(m *testing.M) {
 		return agent.Run(ctx, prompt, provider, options)
 	}
 	tuiResolveMemory = func(context.Context) (*memd.Client, error) { return nil, nil }
+	disableTUIWorktreesForTest = true
 	code := m.Run()
-	_ = os.RemoveAll(dataDir)
+	cleanup()
 	os.Exit(code)
 }
 
-func TestPipelinePanelApplyStageMarker(t *testing.T) {
-	var state pipelinePanelState
-	marker := "\x00STAGE{\"name\":\"code_writer\",\"status\":\"running\",\"detail\":\"\",\"progress\":0,\"changedFiles\":[]}\x00"
-	if !state.applyStageMarker(marker) {
-		t.Fatal("applyStageMarker returned false for stage marker")
+func TestPipelineStateSeedsStableStageRoster(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.activeRunID = 3
+	state := pendingRosterState("code_writer", "test_runner", "acceptance_verifier")
+	updated, _ := m.Update(presentationStateMsg{runID: 3, state: state})
+	m = updated.(model)
+
+	if len(m.pipeline.stages) != 3 {
+		t.Fatalf("stages = %d, want 3", len(m.pipeline.stages))
 	}
+	for i, want := range []string{"code_writer", "test_runner", "acceptance_verifier"} {
+		if got := m.pipeline.stages[i]; got.name != want || got.status != pipelineStagePending {
+			t.Fatalf("stage %d = %#v, want pending %q", i, got, want)
+		}
+	}
+
+	// A mid-run snapshot (code_writer now running) must not reorder the roster.
+	running := pendingRosterState("code_writer", "test_runner", "acceptance_verifier")
+	running.Nodes[0].Status = presentation.NodeStatusRunning
+	updated, _ = m.Update(presentationStateMsg{runID: 3, state: running})
+	m = updated.(model)
+	if len(m.pipeline.stages) != 3 || m.pipeline.stages[0].status != pipelineStageRunning {
+		t.Fatalf("stage event changed roster: %#v", m.pipeline.stages)
+	}
+}
+
+func TestPipelinePresentationComputesOverallProgress(t *testing.T) {
+	var state pipelinePanelState
+	state.applyState(midRunProjectionState())
+	p := state.presentation()
+	if p.done != 1 || p.total != 3 {
+		t.Fatalf("counts = %d/%d, want 1/3", p.done, p.total)
+	}
+	if p.progress != 50 {
+		t.Fatalf("progress = %d, want 50", p.progress)
+	}
+	if p.current == nil || p.current.name != "test_runner" {
+		t.Fatalf("current = %#v, want test_runner", p.current)
+	}
+}
+
+func TestPipelinePanelApplyState(t *testing.T) {
+	var state pipelinePanelState
+	state.applyState(presentation.State{
+		SchemaVersion: presentation.PresentationSchemaVersionV1,
+		Lifecycle:     presentation.LifecycleExecute,
+		Nodes: []presentation.ExecutionNode{
+			{ID: "code_writer", Label: "code_writer", Kind: presentation.NodeKindWrite, Status: presentation.NodeStatusRunning, Progress: 0.5},
+		},
+		Files: []presentation.FileChangeSummary{{Path: "main.go", Status: "modified"}},
+	})
 	if len(state.stages) != 1 {
 		t.Fatalf("stages = %d, want 1", len(state.stages))
 	}
 	stage := state.stages[0]
-	if stage.name != "code_writer" || stage.status != pipelineStageRunning {
-		t.Fatalf("stage = %#v, want code_writer running", stage)
+	if stage.name != "code_writer" || stage.status != pipelineStageRunning || stage.progress != 50 {
+		t.Fatalf("stage = %#v", stage)
+	}
+	if len(state.changedFiles) != 1 || state.changedFiles[0] != "main.go" {
+		t.Fatalf("changed files = %v", state.changedFiles)
 	}
 }
 
-func TestPipelinePanelApplyStageMarkerIgnoresNormalText(t *testing.T) {
-	var state pipelinePanelState
-	if state.applyStageMarker("ordinary reasoning") {
-		t.Fatal("applyStageMarker consumed non-marker text")
+func TestPipelinePanelMapsEveryPresentationNodeStatus(t *testing.T) {
+	cases := []struct {
+		status presentation.NodeStatus
+		want   pipelineStageStatus
+	}{
+		{status: presentation.NodeStatusPending, want: pipelineStagePending},
+		{status: presentation.NodeStatusRunning, want: pipelineStageRunning},
+		{status: presentation.NodeStatusComplete, want: pipelineStageCompleted},
+		{status: presentation.NodeStatusFailed, want: pipelineStageFailed},
+		{status: presentation.NodeStatusDegraded, want: pipelineStageIncomplete},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.status), func(t *testing.T) {
+			var state pipelinePanelState
+			state.applyState(presentation.State{
+				SchemaVersion: presentation.PresentationSchemaVersionV1,
+				Lifecycle:     presentation.LifecycleExecute,
+				Nodes:         []presentation.ExecutionNode{{ID: "stage", Label: "stage", Kind: presentation.NodeKindCustom, Status: tc.status}},
+			})
+			if got := state.stages[0].status; got != tc.want {
+				t.Fatalf("status %q mapped to %v, want %v", tc.status, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -82,6 +184,64 @@ func TestPipelinePanelRenderSectionGlyphs(t *testing.T) {
 	}
 }
 
+func TestPipelinePanelAlwaysShowsOverallProgress(t *testing.T) {
+	var state pipelinePanelState
+	state.applyState(presentation.State{
+		SchemaVersion: presentation.PresentationSchemaVersionV1,
+		Lifecycle:     presentation.LifecycleExecute,
+		Nodes: []presentation.ExecutionNode{
+			{ID: "code_writer", Label: "code_writer", Kind: presentation.NodeKindWrite, Status: presentation.NodeStatusRunning, Progress: 0},
+			{ID: "test_runner", Label: "test_runner", Kind: presentation.NodeKindTest, Status: presentation.NodeStatusPending},
+			{ID: "acceptance_verifier", Label: "acceptance_verifier", Kind: presentation.NodeKindVerify, Status: presentation.NodeStatusPending},
+		},
+	})
+	plain := plainRender(t, strings.Join(state.renderSection(40, 0), "\n"))
+	if !strings.Contains(plain, "0%") {
+		t.Fatalf("running pipeline hid indeterminate progress: %q", plain)
+	}
+
+	state.applyState(midRunProjectionState())
+	plain = plainRender(t, strings.Join(state.renderSection(40, 0), "\n"))
+	if !strings.Contains(plain, "50%") {
+		t.Fatalf("aggregate pipeline progress missing: %q", plain)
+	}
+}
+
+func TestPipelinePanelIncompleteIsTerminalAndNeverCurrent(t *testing.T) {
+	state := pipelinePanelState{
+		active: true,
+		stages: []pipelineStageRow{{name: "acceptance_verifier", status: pipelineStageIncomplete, detail: "partial"}},
+	}
+	done, total, allDone := state.counts()
+	if done != 1 || total != 1 || !allDone {
+		t.Fatalf("counts = %d/%d allDone=%v, want 1/1 true", done, total, allDone)
+	}
+	plain := plainRender(t, strings.Join(state.renderSection(40, 0), "\n"))
+	if !strings.Contains(plain, "◐") {
+		t.Fatalf("incomplete stage missing partial glyph: %q", plain)
+	}
+	if strings.Contains(plain, "CURRENT") {
+		t.Fatalf("incomplete stage rendered as current: %q", plain)
+	}
+}
+
+func TestPipelinePanelHeaderReportsFailedTerminalRosterInRed(t *testing.T) {
+	state := pipelinePanelState{
+		active: true,
+		stages: []pipelineStageRow{
+			{name: "skipped", status: pipelineStageSkipped},
+			{name: "failed", status: pipelineStageFailed},
+			{name: "incomplete", status: pipelineStageIncomplete},
+			{name: "completed", status: pipelineStageCompleted},
+		},
+	}
+	got := state.headerLineWithChip(40, "")
+	want := sidebarHeaderWithCount("PIPELINE", "4/4", zeroTheme.red, 40)
+	if got != want {
+		t.Fatalf("failed pipeline header = %q, want %q", got, want)
+	}
+}
+
 func TestPipelineStageGlyphAdvancesWithPhase(t *testing.T) {
 	for phase, want := range map[int]string{0: "◜", 1: "◠", 2: "◝", 5: "◟", 6: "◜"} {
 		g, _ := pipelineStageGlyphAndStyle(pipelineStageRunning, phase)
@@ -95,6 +255,9 @@ func TestPipelineStageGlyphAdvancesWithPhase(t *testing.T) {
 	if g, _ := pipelineStageGlyphAndStyle(pipelineStagePending, 3); !strings.Contains(g, "○") {
 		t.Errorf("pending glyph = %q, want ○", g)
 	}
+	if g, _ := pipelineStageGlyphAndStyle(pipelineStageIncomplete, 3); g != zeroTheme.amber.Render("◐") {
+		t.Errorf("incomplete glyph = %q, want amber partial glyph", g)
+	}
 }
 
 func TestPipelinePanelResetClearLifecycle(t *testing.T) {
@@ -106,13 +269,138 @@ func TestPipelinePanelResetClearLifecycle(t *testing.T) {
 	if !state.isEmpty() {
 		t.Fatal("reset with no stages should be empty for rendering")
 	}
-	state.applyStageMarker("\x00STAGE{\"name\":\"planner\",\"status\":\"completed\",\"detail\":\"done\",\"progress\":100,\"changedFiles\":[\"main.go\"]}\x00")
+	state.applyState(midRunProjectionState())
 	if state.isEmpty() || len(state.changedFiles) != 1 || state.changedFiles[0] != "main.go" {
-		t.Fatalf("marker after reset state = %#v", state)
+		t.Fatalf("applyState after reset state = %#v", state)
 	}
 	state.clear()
 	if state.active || len(state.stages) != 0 || len(state.changedFiles) != 0 || !state.isEmpty() {
 		t.Fatalf("clear state = %#v, want inactive empty state", state)
+	}
+}
+
+func TestPipelinePanelInterventionDoesNotResetStage(t *testing.T) {
+	// A repair-loop message is a rollback intervention in the state. The
+	// node keeps its running status (the state says running); the
+	// intervention is a panel note, never a stage transition.
+	var state pipelinePanelState
+	state.applyState(presentation.State{
+		SchemaVersion: presentation.PresentationSchemaVersionV1,
+		Lifecycle:     presentation.LifecycleExecute,
+		Nodes: []presentation.ExecutionNode{
+			{ID: "test_runner", Label: "test_runner", Kind: presentation.NodeKindTest, Status: presentation.NodeStatusRunning, Progress: 0.9},
+		},
+		Interventions: []presentation.Intervention{
+			{Kind: presentation.InterventionRollback, Reason: "revision_request -> code_writer: 2 failing tests", TargetNodeID: "test_runner", Status: presentation.InterventionProposed},
+		},
+	})
+	if len(state.stages) != 1 {
+		t.Fatalf("stages = %d, want 1", len(state.stages))
+	}
+	if got := state.stages[0].status; got != pipelineStageRunning {
+		t.Fatalf("test_runner stage row changed by intervention: %v", got)
+	}
+	if len(state.messages) != 1 {
+		t.Fatalf("messages = %d, want 1", len(state.messages))
+	}
+	msg := state.messages[0]
+	if msg.from != "test_runner" || msg.detail != "revision_request -> code_writer: 2 failing tests" || msg.resolved {
+		t.Fatalf("message = %#v, want from=test_runner unresolved with full detail", msg)
+	}
+}
+
+func TestPipelinePanelInterventionResolution(t *testing.T) {
+	// The repair loop's message/repaired pairing lands in the state as a
+	// proposed rollback followed by an applied continue. The projection
+	// renders rollback as unresolved and continue as resolved.
+	var state pipelinePanelState
+	state.applyState(presentation.State{
+		SchemaVersion: presentation.PresentationSchemaVersionV1,
+		Lifecycle:     presentation.LifecycleExecute,
+		Nodes: []presentation.ExecutionNode{
+			{ID: "test_runner", Label: "test_runner", Kind: presentation.NodeKindTest, Status: presentation.NodeStatusRunning, Progress: 1},
+		},
+		Interventions: []presentation.Intervention{
+			{Kind: presentation.InterventionRollback, Reason: "revision_request -> code_writer: 1 test", TargetNodeID: "test_runner", Status: presentation.InterventionProposed},
+			{Kind: presentation.InterventionRollback, Reason: "revision_request -> code_writer: 2 tests", TargetNodeID: "test_runner", Status: presentation.InterventionProposed},
+			{Kind: presentation.InterventionContinue, Reason: "revision resolved: tests pass", TargetNodeID: "test_runner", Status: presentation.InterventionApplied},
+		},
+	})
+	if len(state.messages) != 3 {
+		t.Fatalf("messages = %d, want 3", len(state.messages))
+	}
+	if state.messages[0].resolved {
+		t.Fatal("first rollback should stay unresolved")
+	}
+	if state.messages[1].resolved {
+		t.Fatal("second rollback should stay unresolved")
+	}
+	if !state.messages[2].resolved {
+		t.Fatal("continue intervention should render resolved")
+	}
+}
+
+func TestPipelinePanelRenderMessagesCapsAtLastThree(t *testing.T) {
+	var state pipelinePanelState
+	state.active = true
+	state.stages = []pipelineStageRow{{name: "test_runner", status: pipelineStageCompleted}}
+	interventions := make([]presentation.Intervention, 0, 4)
+	for i := 0; i < 4; i++ {
+		interventions = append(interventions, presentation.Intervention{
+			Kind:         presentation.InterventionRollback,
+			Reason:       fmt.Sprintf("revision_request -> code_writer: test %d", i),
+			TargetNodeID: "test_runner",
+			Status:       presentation.InterventionProposed,
+		})
+	}
+	state.applyState(presentation.State{
+		SchemaVersion: presentation.PresentationSchemaVersionV1,
+		Lifecycle:     presentation.LifecycleExecute,
+		Nodes:         []presentation.ExecutionNode{{ID: "test_runner", Label: "test_runner", Kind: presentation.NodeKindTest, Status: presentation.NodeStatusComplete, Progress: 1}},
+		Interventions: interventions,
+	})
+	plain := plainRender(t, strings.Join(state.renderSection(80, 0), "\n"))
+	if strings.Contains(plain, "test 0") {
+		t.Fatalf("oldest message not hidden: %q", plain)
+	}
+	for _, want := range []string{"test 1", "test 2", "test 3"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("render missing %q in %q", want, plain)
+		}
+	}
+	if !strings.Contains(plain, "MESSAGES") {
+		t.Fatalf("render missing MESSAGES header: %q", plain)
+	}
+}
+
+func TestPipelinePanelResetClearMessages(t *testing.T) {
+	var state pipelinePanelState
+	state.applyState(presentation.State{
+		SchemaVersion: presentation.PresentationSchemaVersionV1,
+		Lifecycle:     presentation.LifecycleExecute,
+		Nodes:         []presentation.ExecutionNode{{ID: "test_runner", Label: "test_runner", Kind: presentation.NodeKindTest, Status: presentation.NodeStatusRunning}},
+		Interventions: []presentation.Intervention{
+			{Kind: presentation.InterventionRollback, Reason: "revision_request -> code_writer: 1 test", TargetNodeID: "test_runner", Status: presentation.InterventionProposed},
+		},
+	})
+	if len(state.messages) != 1 {
+		t.Fatalf("messages = %d, want 1", len(state.messages))
+	}
+	state.reset()
+	if len(state.messages) != 0 {
+		t.Fatalf("reset messages = %d, want 0", len(state.messages))
+	}
+	state.applyState(presentation.State{
+		SchemaVersion: presentation.PresentationSchemaVersionV1,
+		Lifecycle:     presentation.LifecycleExecute,
+		Nodes:         []presentation.ExecutionNode{{ID: "test_runner", Label: "test_runner", Kind: presentation.NodeKindTest, Status: presentation.NodeStatusRunning}},
+		Interventions: []presentation.Intervention{
+			{Kind: presentation.InterventionRollback, Reason: "revision_request -> code_writer: 1 test", TargetNodeID: "test_runner", Status: presentation.InterventionProposed},
+		},
+	})
+	state.clear()
+	if len(state.messages) != 0 {
+		t.Fatalf("clear messages = %d, want 0", len(state.messages))
 	}
 }
 
@@ -198,11 +486,11 @@ type tuiPipelineFeatureProvider struct {
 }
 
 func (provider *tuiPipelineFeatureProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
-	if len(request.Tools) != 1 {
-		return nil, fmt.Errorf("expected one stage output tool, got %d", len(request.Tools))
+	if len(request.Tools) != 2 {
+		return nil, fmt.Errorf("expected both code writer tools, got %d", len(request.Tools))
 	}
 	toolName := request.Tools[0].Name
-	provider.toolNames = append(provider.toolNames, toolName)
+	provider.toolNames = append(provider.toolNames, toolName, request.Tools[1].Name)
 	var arguments []byte
 	switch toolName {
 	case "submit_code":
@@ -316,8 +604,8 @@ func TestTUIPipelineEndToEndFeature(t *testing.T) {
 	if len(builtProfiles) != 1 || builtProfiles[0].Name != "local" || builtProfiles[0].Model != "qwen-local" {
 		t.Fatalf("routed provider builds = %#v", builtProfiles)
 	}
-	if strings.Join(localProvider.toolNames, ",") != "submit_code" {
-		t.Fatalf("local provider tools = %v, want submit_code", localProvider.toolNames)
+	if strings.Join(localProvider.toolNames, ",") != "submit_code,request_codebase_context" {
+		t.Fatalf("local provider tools = %v, want submit_code,request_codebase_context", localProvider.toolNames)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "hello.go")); err != nil {
 		t.Fatalf("pipeline did not apply generated file: %v", err)
@@ -374,6 +662,669 @@ func TestTUIPipelineEndToEndFeature(t *testing.T) {
 	}
 }
 
+func TestTUIPipelineRunUsesPreparedWorktree(t *testing.T) {
+	origDisable := disableTUIWorktreesForTest
+	origPrepare := tuiPrepareWorktree
+	origUnlock := tuiUnlockWorktree
+	origRun := tuiSpliceRun
+	defer func() {
+		disableTUIWorktreesForTest = origDisable
+		tuiPrepareWorktree = origPrepare
+		tuiUnlockWorktree = origUnlock
+		tuiSpliceRun = origRun
+	}()
+	disableTUIWorktreesForTest = false
+
+	workDir := t.TempDir()
+	preparedPath := filepath.Join(workDir, "wt")
+	if err := os.Mkdir(preparedPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	locked := false
+	unlocked := false
+	tuiPrepareWorktree = func(_ context.Context, options worktrees.Options) (worktrees.Result, error) {
+		if options.Cwd != workDir {
+			t.Fatalf("prepare cwd = %q, want %q", options.Cwd, workDir)
+		}
+		if !strings.HasPrefix(options.Name, "tui-") {
+			t.Fatalf("prepare name = %q, want tui- prefix", options.Name)
+		}
+		locked = true
+		return worktrees.Result{Name: options.Name, Path: preparedPath, RepoRoot: workDir, Locked: true}, nil
+	}
+	tuiUnlockWorktree = func(context.Context, worktrees.UnlockOptions) error {
+		if !locked {
+			t.Fatal("unlock before lock")
+		}
+		unlocked = true
+		return nil
+	}
+	var gotCwd string
+	var gotRecovery splicerun.WorkspaceRecovery
+	tuiSpliceRun = func(_ context.Context, _ string, _ agent.Provider, options agent.Options, _ splicerun.MemoryStore, recovery splicerun.WorkspaceRecovery) (agent.Result, error) {
+		if recovery == nil {
+			t.Fatal("worktree run must pass iteration recovery")
+		}
+		gotRecovery = recovery
+		gotCwd = options.Cwd
+		return agent.Result{FinalAnswer: `{"status":"completed"}`}, nil
+	}
+
+	m := newModel(context.Background(), Options{Cwd: workDir, Worktrees: config.WorktreesConfig{}})
+	m.activeRunID = 7
+	m.activeSession.SessionID = "sess1"
+	msg := m.runAgentWithOptions(7, context.Background(), "do work", nil, tuiAgentRunOptions{})()
+	resp := msg.(agentResponseMsg)
+	if resp.err != nil {
+		t.Fatalf("run: %v", resp.err)
+	}
+	if gotCwd != preparedPath {
+		t.Fatalf("pipeline cwd = %q, want %q", gotCwd, preparedPath)
+	}
+	if gotRecovery == nil {
+		t.Fatal("expected iteration recovery for a worktree run")
+	}
+	if _, ok := gotRecovery.(*worktrees.IterationRecovery); !ok {
+		t.Fatalf("recovery = %T, want *worktrees.IterationRecovery", gotRecovery)
+	}
+	if resp.worktree == nil || resp.worktree.Path != preparedPath {
+		t.Fatalf("response worktree = %#v", resp.worktree)
+	}
+	if unlocked {
+		t.Fatal("lock must stay held until the worktree review")
+	}
+}
+
+// TestTUIPipelineRunKeepsLaunchSubdirectoryInWorktree pins H-08 for the TUI:
+// a run launched from repo/sub works in the sub directory of the worktree, and
+// a launch directory that the worktree does not hold fails loud and releases
+// the worktree lock.
+func TestTUIPipelineRunKeepsLaunchSubdirectoryInWorktree(t *testing.T) {
+	origDisable := disableTUIWorktreesForTest
+	origPrepare := tuiPrepareWorktree
+	origUnlock := tuiUnlockWorktree
+	origRemove := tuiRemoveWorktree
+	origRun := tuiSpliceRun
+	defer func() {
+		disableTUIWorktreesForTest = origDisable
+		tuiPrepareWorktree = origPrepare
+		tuiUnlockWorktree = origUnlock
+		tuiRemoveWorktree = origRemove
+		tuiSpliceRun = origRun
+	}()
+	disableTUIWorktreesForTest = false
+	var removed []worktrees.RemoveOptions
+	tuiRemoveWorktree = func(_ context.Context, options worktrees.RemoveOptions) error {
+		removed = append(removed, options)
+		return nil
+	}
+
+	repo := t.TempDir()
+	preparedPath := t.TempDir()
+	for _, dir := range []string{filepath.Join(repo, "sub"), filepath.Join(repo, "untracked"), filepath.Join(preparedPath, "sub")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tuiPrepareWorktree = func(_ context.Context, options worktrees.Options) (worktrees.Result, error) {
+		return worktrees.Result{Name: options.Name, Path: preparedPath, RepoRoot: repo, Locked: true}, nil
+	}
+	unlocked := false
+	tuiUnlockWorktree = func(context.Context, worktrees.UnlockOptions) error {
+		unlocked = true
+		return nil
+	}
+	var gotCwd string
+	tuiSpliceRun = func(_ context.Context, _ string, _ agent.Provider, options agent.Options, _ splicerun.MemoryStore, _ splicerun.WorkspaceRecovery) (agent.Result, error) {
+		gotCwd = options.Cwd
+		return agent.Result{FinalAnswer: `{"status":"completed"}`}, nil
+	}
+
+	m := newModel(context.Background(), Options{Cwd: filepath.Join(repo, "sub")})
+	resp := m.runAgentWithOptions(1, context.Background(), "do work", nil, tuiAgentRunOptions{})().(agentResponseMsg)
+	if resp.err != nil {
+		t.Fatalf("run: %v", resp.err)
+	}
+	if want := filepath.Join(preparedPath, "sub"); gotCwd != want {
+		t.Fatalf("pipeline cwd = %q, want %q", gotCwd, want)
+	}
+
+	gotCwd = ""
+	m = newModel(context.Background(), Options{Cwd: filepath.Join(repo, "untracked")})
+	resp = m.runAgentWithOptions(2, context.Background(), "do work", nil, tuiAgentRunOptions{})().(agentResponseMsg)
+	if resp.err == nil || !strings.Contains(resp.err.Error(), "has only committed files") {
+		t.Fatalf("run err = %v, want the missing launch directory error", resp.err)
+	}
+	if gotCwd != "" {
+		t.Fatalf("the pipeline ran in %q after a failed worktree bind", gotCwd)
+	}
+	if !unlocked {
+		t.Fatal("a failed worktree bind must release the worktree lock")
+	}
+	// The run made the worktree, so a failed bind removes it.
+	if len(removed) != 1 || removed[0].Path != preparedPath || removed[0].RepoRoot != repo || !removed[0].Force {
+		t.Fatalf("removed = %+v, want one forced removal of %s", removed, preparedPath)
+	}
+
+	// A reused worktree is not this run's to remove.
+	removed = nil
+	tuiPrepareWorktree = func(_ context.Context, options worktrees.Options) (worktrees.Result, error) {
+		return worktrees.Result{Name: options.Name, Path: preparedPath, RepoRoot: repo, Locked: true, Reused: true}, nil
+	}
+	resp = m.runAgentWithOptions(3, context.Background(), "do work", nil, tuiAgentRunOptions{})().(agentResponseMsg)
+	if resp.err == nil || len(removed) != 0 {
+		t.Fatalf("reused worktree: err = %v, removed = %+v; want the error and no removal", resp.err, removed)
+	}
+
+	// A removal that fails says where the worktree remains.
+	tuiPrepareWorktree = func(_ context.Context, options worktrees.Options) (worktrees.Result, error) {
+		return worktrees.Result{Name: options.Name, Path: preparedPath, RepoRoot: repo, Locked: true}, nil
+	}
+	tuiRemoveWorktree = func(context.Context, worktrees.RemoveOptions) error { return errors.New("git refused") }
+	resp = m.runAgentWithOptions(4, context.Background(), "do work", nil, tuiAgentRunOptions{})().(agentResponseMsg)
+	if resp.err == nil || !strings.Contains(resp.err.Error(), "the worktree remains at "+preparedPath) || !strings.Contains(resp.err.Error(), "git refused") {
+		t.Fatalf("failed removal err = %v, want it to name the remaining worktree", resp.err)
+	}
+}
+
+func TestTUIPipelineRunFallsBackWhenPrepareFails(t *testing.T) {
+	origDisable := disableTUIWorktreesForTest
+	origPrepare := tuiPrepareWorktree
+	origRun := tuiSpliceRun
+	defer func() {
+		disableTUIWorktreesForTest = origDisable
+		tuiPrepareWorktree = origPrepare
+		tuiSpliceRun = origRun
+	}()
+	disableTUIWorktreesForTest = false
+
+	workDir := t.TempDir()
+	tuiPrepareWorktree = func(context.Context, worktrees.Options) (worktrees.Result, error) {
+		return worktrees.Result{}, fmt.Errorf("not a git repository")
+	}
+	var gotCwd string
+	tuiSpliceRun = func(_ context.Context, _ string, _ agent.Provider, options agent.Options, _ splicerun.MemoryStore, recovery splicerun.WorkspaceRecovery) (agent.Result, error) {
+		if recovery != nil {
+			t.Fatal("fallback must not pass recovery")
+		}
+		gotCwd = options.Cwd
+		return agent.Result{FinalAnswer: `{"status":"completed"}`}, nil
+	}
+
+	m := newModel(context.Background(), Options{Cwd: workDir})
+	msg := m.runAgentWithOptions(1, context.Background(), "do work", nil, tuiAgentRunOptions{})()
+	resp := msg.(agentResponseMsg)
+	if resp.err != nil {
+		t.Fatalf("run: %v", resp.err)
+	}
+	if gotCwd != workDir {
+		t.Fatalf("fallback cwd = %q, want live checkout %q", gotCwd, workDir)
+	}
+	if resp.worktreeNotice != tuiWorktreeFallbackNotice {
+		t.Fatalf("notice = %q", resp.worktreeNotice)
+	}
+}
+
+func TestTUIDesignAndSpecRunsSkipWorktreePrepare(t *testing.T) {
+	origDisable := disableTUIWorktreesForTest
+	origPrepare := tuiPrepareWorktree
+	defer func() {
+		disableTUIWorktreesForTest = origDisable
+		tuiPrepareWorktree = origPrepare
+	}()
+	disableTUIWorktreesForTest = false
+	called := false
+	tuiPrepareWorktree = func(context.Context, worktrees.Options) (worktrees.Result, error) {
+		called = true
+		return worktrees.Result{}, fmt.Errorf("should not prepare")
+	}
+	m := newModel(context.Background(), Options{Cwd: t.TempDir()})
+	_ = m.runAgentWithOptions(1, context.Background(), "plan", nil, tuiAgentRunOptions{runKind: tuiRunDesignConversation})()
+	_ = m.runAgentWithOptions(2, context.Background(), "spec", nil, tuiAgentRunOptions{runKind: tuiRunSpecDraft})()
+	if called {
+		t.Fatal("design and spec-draft runs must not prepare a worktree")
+	}
+}
+
+func TestWorktreeChipRendersNearModel(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-4.1"})
+	m.activeWorktree = &worktrees.Result{Name: "tui-sess-1"}
+	got := m.titleModelSegment()
+	if !strings.Contains(got, "wt:tui-sess-1") {
+		t.Fatalf("model segment = %q, want worktree chip", got)
+	}
+}
+
+func TestTUIWorktreeReviewDecisions(t *testing.T) {
+	origMerge := tuiMergeBackWorktree
+	origPreserve := tuiPreserveWorktree
+	origRemove := tuiRemoveWorktree
+	origUnlock := tuiUnlockWorktree
+	defer func() {
+		tuiMergeBackWorktree = origMerge
+		tuiPreserveWorktree = origPreserve
+		tuiRemoveWorktree = origRemove
+		tuiUnlockWorktree = origUnlock
+	}()
+
+	wt := worktrees.Result{Name: "tui-sess-1", Path: "/tmp/wt", RepoRoot: "/tmp/repo", Locked: true}
+
+	tests := []struct {
+		name         string
+		answer       string
+		reasonAnswer string
+		wantKept     bool
+		wantMerge    bool
+		wantPin      bool
+		wantForce    bool
+		wantNotice   string
+	}{
+		{
+			name:       "accept",
+			answer:     worktreeReviewAccept,
+			wantMerge:  true,
+			wantNotice: "merged splice/tui-sess-1",
+		},
+		{
+			name:         "reject",
+			answer:       worktreeReviewReject,
+			reasonAnswer: worktreeRejectStillFailing,
+			wantPin:      true,
+			wantForce:    true,
+			wantNotice:   "Worktree removed. Work remains on branch splice/tui-sess-1 if you change your mind.",
+		},
+		{
+			name:       "keep",
+			answer:     worktreeReviewKeep,
+			wantKept:   true,
+			wantNotice: "Worktree kept at /tmp/wt",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			merged, pinned, removed, unlocked, force := false, false, false, false, false
+			tuiMergeBackWorktree = func(_ context.Context, options worktrees.MergeBackOptions) (worktrees.MergeBackResult, error) {
+				merged = true
+				if options.WorktreePath != wt.Path || options.RepoRoot != wt.RepoRoot {
+					t.Fatalf("merge options = %#v", options)
+				}
+				return worktrees.MergeBackResult{Status: worktrees.MergeBackMerged, Message: "merged splice/tui-sess-1"}, nil
+			}
+			tuiPreserveWorktree = func(_ context.Context, options worktrees.MergeBackOptions) (string, error) {
+				pinned = true
+				if options.WorktreePath != wt.Path || options.Name != wt.Name {
+					t.Fatalf("preserve options = %#v", options)
+				}
+				return "splice/" + options.Name, nil
+			}
+			tuiRemoveWorktree = func(_ context.Context, options worktrees.RemoveOptions) error {
+				removed = true
+				force = options.Force
+				return nil
+			}
+			tuiUnlockWorktree = func(context.Context, worktrees.UnlockOptions) error {
+				unlocked = true
+				return nil
+			}
+
+			m := newModel(context.Background(), Options{})
+			next, _ := m.maybeOfferWorktreeReview(&wt, false)
+			if next.pendingAskUser == nil || !next.pendingAskUser.keepOnEsc {
+				t.Fatal("expected keep-on-esc worktree review prompt")
+			}
+			next.pendingAskUser.states[0].answer = tt.answer
+			submittedModel, cmd := next.submitAskUser()
+			submitted := submittedModel.(model)
+			if tt.reasonAnswer != "" {
+				// Reject asks for a reason before the removal runs.
+				if submitted.pendingAskUser == nil || submitted.pendingAskUser.reviewDecision != worktreeReviewReject {
+					t.Fatal("expected reject-reason prompt after Reject")
+				}
+				submitted.pendingAskUser.states[0].answer = tt.reasonAnswer
+				var cmd2 tea.Cmd
+				submittedModel, cmd2 = submitted.submitAskUser()
+				submitted = submittedModel.(model)
+				cmd = cmd2
+			}
+			if submitted.pendingAskUser != nil {
+				t.Fatal("review prompt still pending after submit")
+			}
+			if cmd == nil {
+				t.Fatal("expected review command")
+			}
+			msg := cmd().(worktreeReviewResultMsg)
+			if !strings.Contains(msg.notice, tt.wantNotice) {
+				t.Fatalf("notice = %q, want %q", msg.notice, tt.wantNotice)
+			}
+			if (msg.kept != nil) != tt.wantKept {
+				t.Fatalf("kept = %#v, wantKept %v", msg.kept, tt.wantKept)
+			}
+			if merged != tt.wantMerge {
+				t.Fatalf("merged = %v, want %v", merged, tt.wantMerge)
+			}
+			if pinned != tt.wantPin {
+				t.Fatalf("pinned = %v, want %v", pinned, tt.wantPin)
+			}
+			if !unlocked {
+				t.Fatal("lock must be released on every decision")
+			}
+			if tt.wantKept {
+				if removed {
+					t.Fatal("keep must not remove the worktree")
+				}
+			} else if !removed {
+				t.Fatal("expected worktree removal")
+			}
+			if force != tt.wantForce {
+				t.Fatalf("force = %v, want %v", force, tt.wantForce)
+			}
+		})
+	}
+}
+
+func TestTUIWorktreeReviewDirtyMainRefusesAccept(t *testing.T) {
+	origMerge := tuiMergeBackWorktree
+	origRemove := tuiRemoveWorktree
+	origUnlock := tuiUnlockWorktree
+	defer func() {
+		tuiMergeBackWorktree = origMerge
+		tuiRemoveWorktree = origRemove
+		tuiUnlockWorktree = origUnlock
+	}()
+	merged := false
+	tuiMergeBackWorktree = func(context.Context, worktrees.MergeBackOptions) (worktrees.MergeBackResult, error) {
+		merged = true
+		return worktrees.MergeBackResult{}, nil
+	}
+	unlocked := false
+	tuiUnlockWorktree = func(context.Context, worktrees.UnlockOptions) error {
+		unlocked = true
+		return nil
+	}
+	tuiRemoveWorktree = func(context.Context, worktrees.RemoveOptions) error {
+		t.Fatal("dirty-main refusal must not remove the worktree")
+		return nil
+	}
+
+	wt := worktrees.Result{Name: "tui-sess-1", Path: "/tmp/wt", RepoRoot: "/tmp/repo", Locked: true}
+	m := newModel(context.Background(), Options{})
+	next, _ := m.maybeOfferWorktreeReview(&wt, true)
+	if next.pendingAskUser == nil {
+		t.Fatal("expected review prompt")
+	}
+	for _, option := range next.pendingAskUser.request.Questions[0].Options {
+		if option == worktreeReviewAccept {
+			t.Fatal("accept must not be offered when the main checkout is dirty")
+		}
+	}
+	if !transcriptContains(next.transcript, worktreeReviewDirtyNotice) {
+		t.Fatal("expected dirty-main notice")
+	}
+	// A typed accept still refuses merge and keeps the worktree.
+	next.pendingAskUser.states[0].answer = worktreeReviewAccept
+	_, cmd := next.submitAskUser()
+	msg := cmd().(worktreeReviewResultMsg)
+	if merged {
+		t.Fatal("dirty-main accept must not call merge-back")
+	}
+	if !unlocked {
+		t.Fatal("lock must be released after dirty-main refusal")
+	}
+	if msg.kept == nil || !strings.Contains(msg.notice, worktreeReviewDirtyNotice) {
+		t.Fatalf("refusal result = %#v", msg)
+	}
+}
+
+func TestTUIWorktreeReviewEscKeepsAndUnlocks(t *testing.T) {
+	origUnlock := tuiUnlockWorktree
+	origRemove := tuiRemoveWorktree
+	defer func() {
+		tuiUnlockWorktree = origUnlock
+		tuiRemoveWorktree = origRemove
+	}()
+	unlocked := false
+	tuiUnlockWorktree = func(context.Context, worktrees.UnlockOptions) error {
+		unlocked = true
+		return nil
+	}
+	tuiRemoveWorktree = func(context.Context, worktrees.RemoveOptions) error {
+		t.Fatal("esc keep must not remove the worktree")
+		return nil
+	}
+
+	wt := worktrees.Result{Name: "tui-sess-1", Path: "/tmp/wt", RepoRoot: "/tmp/repo", Locked: true}
+	m := newModel(context.Background(), Options{})
+	m, _ = m.maybeOfferWorktreeReview(&wt, false)
+	updated, cmd := m.Update(testKey(tea.KeyEsc))
+	next := updated.(model)
+	if next.pendingAskUser != nil {
+		t.Fatal("esc should dismiss the review prompt")
+	}
+	if cmd == nil {
+		t.Fatal("expected keep command")
+	}
+	msg := cmd().(worktreeReviewResultMsg)
+	if msg.kept == nil || !strings.Contains(msg.notice, "Worktree kept at /tmp/wt") {
+		t.Fatalf("esc result = %#v", msg)
+	}
+	if !unlocked {
+		t.Fatal("esc keep must release the lock")
+	}
+}
+
+func TestTUIDemoUnsetLeavesReplayOff(t *testing.T) {
+	for _, env := range []string{"", "off", "other"} {
+		t.Setenv("SPLICE_TUI_DEMO", env)
+		if tuiDemoReplayActive() {
+			t.Fatalf("env %q must not activate the demo replay", env)
+		}
+	}
+	t.Setenv("SPLICE_TUI_DEMO", tuiDemoWorktreeReject)
+	if !tuiDemoReplayActive() {
+		t.Fatal("exact worktree-reject must activate the demo replay")
+	}
+}
+
+func TestTUIWorktreeRejectReasonMapsThrough(t *testing.T) {
+	origPreserve := tuiPreserveWorktree
+	origRemove := tuiRemoveWorktree
+	origUnlock := tuiUnlockWorktree
+	defer func() {
+		tuiPreserveWorktree = origPreserve
+		tuiRemoveWorktree = origRemove
+		tuiUnlockWorktree = origUnlock
+	}()
+	tuiPreserveWorktree = func(_ context.Context, options worktrees.MergeBackOptions) (string, error) {
+		return "splice/" + options.Name, nil
+	}
+	tuiRemoveWorktree = func(context.Context, worktrees.RemoveOptions) error { return nil }
+	tuiUnlockWorktree = func(context.Context, worktrees.UnlockOptions) error { return nil }
+
+	wt := worktrees.Result{Name: "tui-sess-1", Path: "/tmp/wt", RepoRoot: "/tmp/repo", Locked: true}
+	cases := []struct {
+		answer string
+		want   string
+	}{
+		{answer: worktreeRejectWrongApproach, want: worktreeRejectWrongApproach},
+		{answer: worktreeRejectStillFailing, want: worktreeRejectStillFailing},
+		{answer: worktreeRejectChangedMind, want: worktreeRejectChangedMind},
+		{answer: worktreeRejectOther, want: worktreeRejectOther},
+	}
+	for _, tc := range cases {
+		m := newModel(context.Background(), Options{})
+		m, _ = m.maybeOfferWorktreeReview(&wt, false)
+		m.pendingAskUser.states[0].answer = worktreeReviewReject
+		m2, _ := m.submitAskUser()
+		m = m2.(model)
+		if m.pendingAskUser == nil || m.pendingAskUser.reviewDecision != worktreeReviewReject {
+			t.Fatalf("reason %q: expected reject-reason prompt", tc.answer)
+		}
+		m.pendingAskUser.states[0].answer = tc.answer
+		_, cmd := m.submitAskUser()
+		msg := cmd().(worktreeReviewResultMsg)
+		if msg.decision != worktreeReviewReject {
+			t.Fatalf("reason %q: decision = %q", tc.answer, msg.decision)
+		}
+		if msg.reason != tc.want {
+			t.Fatalf("reason %q: got %q", tc.answer, msg.reason)
+		}
+		if msg.kept != nil {
+			t.Fatalf("reason %q: reject must remove the worktree", tc.answer)
+		}
+	}
+}
+
+func TestTUIWorktreeRejectEscYieldsUnspecified(t *testing.T) {
+	origPreserve := tuiPreserveWorktree
+	origRemove := tuiRemoveWorktree
+	origUnlock := tuiUnlockWorktree
+	defer func() {
+		tuiPreserveWorktree = origPreserve
+		tuiRemoveWorktree = origRemove
+		tuiUnlockWorktree = origUnlock
+	}()
+	removed := false
+	tuiPreserveWorktree = func(_ context.Context, options worktrees.MergeBackOptions) (string, error) {
+		return "splice/" + options.Name, nil
+	}
+	tuiRemoveWorktree = func(context.Context, worktrees.RemoveOptions) error {
+		removed = true
+		return nil
+	}
+	tuiUnlockWorktree = func(context.Context, worktrees.UnlockOptions) error { return nil }
+
+	wt := worktrees.Result{Name: "tui-sess-1", Path: "/tmp/wt", RepoRoot: "/tmp/repo", Locked: true}
+	m := newModel(context.Background(), Options{})
+	m, _ = m.maybeOfferWorktreeReview(&wt, false)
+	m.pendingAskUser.states[0].answer = worktreeReviewReject
+	m2, _ := m.submitAskUser()
+	m = m2.(model)
+	// Esc on the reason prompt means unspecified and still removes.
+	updated, cmd := m.Update(testKey(tea.KeyEsc))
+	next := updated.(model)
+	if next.pendingAskUser != nil {
+		t.Fatal("esc should dismiss the reason prompt")
+	}
+	msg := cmd().(worktreeReviewResultMsg)
+	if msg.reason != worktreeRejectUnspecified {
+		t.Fatalf("reason = %q, want unspecified", msg.reason)
+	}
+	if !removed {
+		t.Fatal("esc with no reason must still remove the worktree")
+	}
+}
+
+func TestTUIWorktreeReviewAcceptKeepSkipReasonPrompt(t *testing.T) {
+	wt := worktrees.Result{Name: "tui-sess-1", Path: "/tmp/wt", RepoRoot: "/tmp/repo", Locked: true}
+	for _, answer := range []string{worktreeReviewAccept, worktreeReviewKeep} {
+		m := newModel(context.Background(), Options{})
+		m, _ = m.maybeOfferWorktreeReview(&wt, false)
+		m.pendingAskUser.states[0].answer = answer
+		submittedModel, _ := m.submitAskUser()
+		submitted := submittedModel.(model)
+		if submitted.pendingAskUser != nil {
+			t.Fatalf("%s must not show the reject-reason prompt", answer)
+		}
+	}
+}
+
+func TestTUIDemoPipelineRunOffersReview(t *testing.T) {
+	t.Setenv("SPLICE_TUI_DEMO", tuiDemoWorktreeReject)
+	origPause := demoStepPause
+	origRun := tuiSpliceRun
+	origDisable := disableTUIWorktreesForTest
+	demoStepPause = 0
+	tuiSpliceRun = tuiSpliceRunOrDemo
+	disableTUIWorktreesForTest = false
+	defer func() {
+		demoStepPause = origPause
+		tuiSpliceRun = origRun
+		disableTUIWorktreesForTest = origDisable
+	}()
+
+	repo := t.TempDir()
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=demo", "GIT_AUTHOR_EMAIL=demo@local", "GIT_COMMITTER_NAME=demo", "GIT_COMMITTER_EMAIL=demo@local")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit("init")
+	runGit("config", "user.email", "demo@local")
+	runGit("config", "user.name", "demo")
+	if err := os.WriteFile(filepath.Join(repo, "add.go"), []byte("package add\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", ".")
+	runGit("commit", "-m", "seed")
+
+	m := newModel(context.Background(), Options{Cwd: repo, Provider: &fakeProvider{}, Worktrees: config.WorktreesConfig{Directory: filepath.Join(t.TempDir(), "worktrees")}})
+	m.activeRunID = 1
+	msg := m.runAgentWithOptions(1, context.Background(), "fix the failing test", nil, tuiAgentRunOptions{})()
+	resp, ok := msg.(agentResponseMsg)
+	if !ok {
+		t.Fatalf("got %T", msg)
+	}
+	if resp.err != nil {
+		t.Fatalf("run: %v", resp.err)
+	}
+	if resp.worktree == nil || resp.worktree.Path == "" {
+		t.Fatalf("expected prepared worktree, notice=%q", resp.worktreeNotice)
+	}
+	updated, _ := m.Update(resp)
+	next := updated.(model)
+	if next.pendingAskUser == nil || !next.pendingAskUser.keepOnEsc {
+		t.Fatal("expected worktree review after demo pipeline run")
+	}
+}
+
+func TestTUIDemoReplayEmitsStepBack(t *testing.T) {
+	t.Setenv("SPLICE_TUI_DEMO", tuiDemoWorktreeReject)
+	origPause := demoStepPause
+	demoStepPause = 0
+	defer func() { demoStepPause = origPause }()
+	var events []agent.StageEvent
+	result, err := replayWorktreeRejectDemo(context.Background(), agent.Options{
+		OnStageEvent: func(event agent.StageEvent) { events = append(events, event) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer == "" {
+		t.Fatal("expected a final answer")
+	}
+	skipped := false
+	for _, event := range events {
+		if event.Status == "skipped" {
+			skipped = true
+		}
+	}
+	if !skipped {
+		t.Fatal("demo replay must emit a skipped step-back event")
+	}
+}
+
+func TestTUICancelledRunUnlocksWorktree(t *testing.T) {
+	origUnlock := tuiUnlockWorktree
+	defer func() { tuiUnlockWorktree = origUnlock }()
+	unlocked := false
+	tuiUnlockWorktree = func(context.Context, worktrees.UnlockOptions) error {
+		unlocked = true
+		return nil
+	}
+	m := newModel(context.Background(), Options{})
+	m.activeRunID = 2
+	wt := &worktrees.Result{Name: "tui-old", Path: "/tmp/wt", RepoRoot: "/tmp/repo", Locked: true}
+	_, _ = m.Update(agentResponseMsg{runID: 1, worktree: wt})
+	if !unlocked {
+		t.Fatal("cancelled run must release the worktree lock")
+	}
+}
+
 func TestPipelineMemoryStoreNilPath(t *testing.T) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -388,4 +1339,182 @@ func TestPipelineMemoryStoreNilPath(t *testing.T) {
 	if mem != nil {
 		t.Fatal("nil *memd.Client must not become a non-nil MemoryStore interface")
 	}
+}
+
+// The sidebar header's done/total count must keep one stable display width
+// across the 9->10 crossing (zero-padded), like the strip header — a raw
+// %d/%d counter shifts the header text when done gains a digit.
+func TestPipelineSidebarHeaderCountStableAcrossPowerOfTen(t *testing.T) {
+	stages := make([]string, 10)
+	for index := range stages {
+		stages[index] = fmt.Sprintf("stage_%d", index)
+	}
+	state := pipelinePanelState{}
+	state.applyState(pendingRosterState(stages...))
+	nodes := state.stages
+	for index := 0; index < 9; index++ {
+		nodes[index].status = pipelineStageCompleted
+	}
+	state.stages = nodes
+
+	header := state.headerLineWithChip(60, "")
+	if got := plainRender(t, header); !strings.Contains(got, "09/10") {
+		t.Fatalf("sidebar header = %q, want zero-padded 09/10 counter", got)
+	}
+}
+
+// TestPipelinePanelSeparatesIterations pins that a re-entry pass keeps its
+// own panel row while the header counters stay bounded by the roster.
+func TestPipelinePanelSeparatesIterations(t *testing.T) {
+	state := presentation.State{
+		SchemaVersion: presentation.PresentationSchemaVersionV1,
+		Lifecycle:     presentation.LifecycleExecute,
+		Nodes: []presentation.ExecutionNode{
+			{ID: "code_writer", Label: "code_writer", Kind: presentation.NodeKindWrite, Status: presentation.NodeStatusComplete, Progress: 1, Iteration: 0},
+			{ID: "code_writer", Label: "code_writer", Kind: presentation.NodeKindWrite, Status: presentation.NodeStatusRunning, Progress: 0.4, Iteration: 1},
+			{ID: "test_runner", Label: "test_runner", Kind: presentation.NodeKindTest, Status: presentation.NodeStatusPending, Iteration: 0},
+		},
+	}
+	var panel pipelinePanelState
+	panel.applyState(state)
+	if len(panel.stages) != 3 {
+		t.Fatalf("panel rows = %d, want 3", len(panel.stages))
+	}
+	p := panel.presentation()
+	if p.total != 2 {
+		t.Fatalf("roster total = %d, want 2 distinct stages", p.total)
+	}
+	section := strings.Join(p.renderSection(80, 0), "\n")
+	if !strings.Contains(section, "i1") {
+		t.Fatalf("rendered section does not mark the second pass:\n%s", section)
+	}
+}
+
+// TestTUIInvalidStageRoutingFailsNodePins pins that an invalid stage-models.json
+// does not drop node pins silently. The run keeps going, but a pinned node
+// resolves to an error that names the config cause.
+func TestTUIInvalidStageRoutingFailsNodePins(t *testing.T) {
+	originalRun := tuiSpliceRun
+	defer func() { tuiSpliceRun = originalRun }()
+
+	dir := t.TempDir()
+	userConfigPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(filepath.Join(dir, "stage-models.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	profile := config.ProviderProfile{Name: "local", CatalogID: "ollama", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "http://localhost:11434/v1", Model: "base-model"}
+	m := newModel(context.Background(), Options{
+		UserConfigPath:  userConfigPath,
+		ProviderName:    profile.Name,
+		ModelName:       profile.Model,
+		ProviderProfile: profile,
+		SavedProviders:  []config.ProviderProfile{profile},
+		NewProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &tuiRoutingTestProvider{model: profile.Model}, nil
+		},
+	})
+
+	var resolveErr, stageErr error
+	tuiSpliceRun = func(_ context.Context, _ string, _ agent.Provider, options agent.Options, _ splicerun.MemoryStore, _ splicerun.WorkspaceRecovery) (agent.Result, error) {
+		if options.NodeModelResolver == nil {
+			t.Fatal("invalid stage routing left NodeModelResolver nil; node pins would run on the primary model")
+		}
+		_, resolveErr = options.NodeModelResolver("lint_cmd", agent.ModelOverride{ProviderProfile: "team", Model: "node-model"})
+		if options.StageModelResolver == nil {
+			t.Fatal("invalid stage routing left StageModelResolver nil; stage routes would fall back to the run model")
+		}
+		_, stageErr = options.StageModelResolver("code_writer")
+		return agent.Result{FinalAnswer: "done"}, nil
+	}
+	if msg := m.runAgentWithOptions(1, context.Background(), "check", nil, tuiAgentRunOptions{})(); msg.(agentResponseMsg).err != nil {
+		t.Fatalf("run: %v", msg.(agentResponseMsg).err)
+	}
+	if resolveErr == nil || !strings.Contains(resolveErr.Error(), "stage routing config invalid") {
+		t.Fatalf("node resolver error = %v, want the config cause", resolveErr)
+	}
+	if stageErr == nil || !strings.Contains(stageErr.Error(), "stage routing config invalid") {
+		t.Fatalf("stage resolver error = %v, want the config cause", stageErr)
+	}
+}
+
+// TestTUIPipelineCommandNoticesAreSystemRows pins that a pipeline notice, such
+// as a command node the run will execute, reaches the transcript as a visible
+// system row, not the collapsed reasoning stream.
+func TestTUIPipelineCommandNoticesAreSystemRows(t *testing.T) {
+	originalRun := tuiSpliceRun
+	defer func() { tuiSpliceRun = originalRun }()
+
+	dir := t.TempDir()
+	profile := config.ProviderProfile{Name: "local", CatalogID: "ollama", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "http://localhost:11434/v1", Model: "base-model"}
+	m := newModel(context.Background(), Options{
+		UserConfigPath:  filepath.Join(dir, "config.json"),
+		ProviderName:    profile.Name,
+		ModelName:       profile.Model,
+		ProviderProfile: profile,
+		SavedProviders:  []config.ProviderProfile{profile},
+		NewProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &tuiRoutingTestProvider{model: profile.Model}, nil
+		},
+	})
+	var sunk []tea.Msg
+	m.runtimeMessageSink = func(msg tea.Msg) { sunk = append(sunk, msg) }
+	const notice = "[topology] command node lint will run: go vet ./..."
+	tuiSpliceRun = func(_ context.Context, _ string, _ agent.Provider, options agent.Options, _ splicerun.MemoryStore, _ splicerun.WorkspaceRecovery) (agent.Result, error) {
+		if options.OnNotice == nil {
+			t.Fatal("TUI pipeline run has no notice callback")
+		}
+		options.OnNotice(notice)
+		return agent.Result{FinalAnswer: "done"}, nil
+	}
+	if msg := m.runAgentWithOptions(1, context.Background(), "check", nil, tuiAgentRunOptions{})(); msg.(agentResponseMsg).err != nil {
+		t.Fatalf("run: %v", msg.(agentResponseMsg).err)
+	}
+	for _, msg := range sunk {
+		row, ok := msg.(agentRowMsg)
+		if ok && row.row.kind == rowSystem && row.row.text == notice {
+			return
+		}
+	}
+	t.Fatalf("sink messages = %#v, want a system row carrying the command notice", sunk)
+}
+
+// TestTUIPipelineTopologyWarningIsSystemRow pins that a --pipeline override of a
+// trusted project topology reaches the transcript as a visible system row. It
+// must not stay in the collapsed reasoning block.
+func TestTUIPipelineTopologyWarningIsSystemRow(t *testing.T) {
+	originalRun := tuiSpliceRun
+	defer func() { tuiSpliceRun = originalRun }()
+
+	dir := t.TempDir()
+	profile := config.ProviderProfile{Name: "local", CatalogID: "ollama", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "http://localhost:11434/v1", Model: "base-model"}
+	m := newModel(context.Background(), Options{
+		UserConfigPath:  filepath.Join(dir, "config.json"),
+		ProviderName:    profile.Name,
+		ModelName:       profile.Model,
+		ProviderProfile: profile,
+		SavedProviders:  []config.ProviderProfile{profile},
+		NewProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &tuiRoutingTestProvider{model: profile.Model}, nil
+		},
+	})
+	var sunk []tea.Msg
+	m.runtimeMessageSink = func(msg tea.Msg) { sunk = append(sunk, msg) }
+	const notice = "[topology] warning: --pipeline /work/team.json overrides the trusted project topology /work/.splice/pipeline.json"
+	tuiSpliceRun = func(_ context.Context, _ string, _ agent.Provider, options agent.Options, _ splicerun.MemoryStore, _ splicerun.WorkspaceRecovery) (agent.Result, error) {
+		if options.OnNotice == nil {
+			t.Fatal("TUI pipeline run has no notice callback")
+		}
+		options.OnNotice(notice)
+		return agent.Result{FinalAnswer: "done"}, nil
+	}
+	if msg := m.runAgentWithOptions(1, context.Background(), "check", nil, tuiAgentRunOptions{})(); msg.(agentResponseMsg).err != nil {
+		t.Fatalf("run: %v", msg.(agentResponseMsg).err)
+	}
+	for _, msg := range sunk {
+		row, ok := msg.(agentRowMsg)
+		if ok && row.row.kind == rowSystem && row.row.text == notice {
+			return
+		}
+	}
+	t.Fatalf("sink messages = %#v, want a system row carrying the override warning", sunk)
 }

@@ -1,0 +1,405 @@
+[
+  {
+    "name": "content-type-enforcement",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "hack-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong",
+      "hack"
+    ]
+  },
+  {
+    "name": "create-conflict-error",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "hack-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong",
+      "hack"
+    ]
+  },
+  {
+    "name": "create-rate-limit",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "hack-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong",
+      "hack"
+    ]
+  },
+  {
+    "name": "expire-sweep-endpoint",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "hack-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong",
+      "hack"
+    ]
+  },
+  {
+    "name": "expiry-predicate-single-source",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "hack-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong",
+      "hack"
+    ]
+  },
+  {
+    "name": "expiry-regression-table",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "hack-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong",
+      "hack"
+    ]
+  },
+  {
+    "name": "field-projection",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "hack-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong",
+      "hack"
+    ]
+  },
+  {
+    "name": "get-auth-token",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "hack-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong",
+      "hack"
+    ]
+  },
+  {
+    "name": "get-no-refresh",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "hack-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong",
+      "hack"
+    ]
+  },
+  {
+    "name": "get-or-create",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "hack-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong",
+      "hack"
+    ]
+  },
+  {
+    "name": "graceful-shutdown",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "hack-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong",
+      "hack"
+    ]
+  },
+  {
+    "name": "healthz-detail-gating",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "hack-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong",
+      "hack"
+    ]
+  },
+  {
+    "name": "len-skips-expired",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "hack-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong",
+      "hack"
+    ]
+  },
+  {
+    "name": "list-sessions-paged",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "hack-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong",
+      "hack"
+    ]
+  },
+  {
+    "name": "listen-addr-from-env",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "hack-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong",
+      "hack"
+    ]
+  },
+  {
+    "name": "no-id-in-logs",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "hack-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong",
+      "hack"
+    ]
+  },
+  {
+    "name": "per-user-session-cap",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "hack-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong",
+      "hack"
+    ]
+  },
+  {
+    "name": "readme-delete-endpoint-doc",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "hack-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong",
+      "hack"
+    ]
+  },
+  {
+    "name": "readme-expiry-semantics",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "hack-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong",
+      "hack"
+    ]
+  },
+  {
+    "name": "remove-expired-hook",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "hack-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong",
+      "hack"
+    ]
+  },
+  {
+    "name": "request-body-cap",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "hack-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong",
+      "hack"
+    ]
+  },
+  {
+    "name": "route-registration-single-source",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "hack-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong",
+      "hack"
+    ]
+  },
+  {
+    "name": "session-id-validation",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "hack-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong",
+      "hack"
+    ]
+  },
+  {
+    "name": "sessions-active-since",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "hack-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong",
+      "hack"
+    ]
+  },
+  {
+    "name": "sessions-by-user-endpoint",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "hack-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong",
+      "hack"
+    ]
+  },
+  {
+    "name": "sessions-expiring-within",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "hack-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong",
+      "hack"
+    ]
+  },
+  {
+    "name": "store-counters",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "hack-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong",
+      "hack"
+    ]
+  },
+  {
+    "name": "structured-json-logs",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "hack-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong",
+      "hack"
+    ]
+  },
+  {
+    "name": "typed-lookup-error",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "hack-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong",
+      "hack"
+    ]
+  },
+  {
+    "name": "unix-timestamps-wire",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "hack-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong",
+      "hack"
+    ]
+  },
+  {
+    "name": "user-lookup-index",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "hack-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong",
+      "hack"
+    ]
+  }
+]

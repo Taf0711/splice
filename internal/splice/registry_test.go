@@ -4,15 +4,18 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/splice/schemas"
+	"github.com/Taf0711/splice/internal/splice/stages"
 	"github.com/Taf0711/splice/internal/tools"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
 func TestBuildStageRegistryRegistersAllStages(t *testing.T) {
-	registry, err := buildStageRegistry(agent.Options{}, t.TempDir())
+	registry, err := buildStageRegistry(PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil)
 	if err != nil {
 		t.Fatalf("buildStageRegistry: %v", err)
 	}
@@ -23,15 +26,120 @@ func TestBuildStageRegistryRegistersAllStages(t *testing.T) {
 	}
 }
 
+func TestEveryStageDeclaresDescription(t *testing.T) {
+	registry, err := buildStageRegistry(PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("buildStageRegistry: %v", err)
+	}
+	for name, stage := range registry {
+		description := stage.Capabilities().Description
+		if description == "" || len([]rune(description)) > 40 {
+			t.Errorf("stage %q has invalid description %q", name, description)
+		}
+	}
+}
+
+func TestStageCapabilitiesMatchLegacySwitches(t *testing.T) {
+	registry, err := buildStageRegistry(PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("buildStageRegistry: %v", err)
+	}
+	legacyModelFree := map[string]bool{
+		"static_analyzer": true, "security_auditor": true, "test_runner": true, "acceptance_verifier": true,
+	}
+	legacyMemory := map[string]bool{
+		"code_writer": true, "test_generator": true,
+	}
+	legacyPull := map[string]bool{
+		"code_writer": true, "test_generator": true,
+	}
+	legacyTimeout := map[string]int{
+		"acceptance_verifier": 30,
+	}
+	for _, name := range []string{"code_writer", "test_generator", "test_runner", "acceptance_verifier", "static_analyzer", "security_auditor"} {
+		stage, ok := registry[name]
+		if !ok {
+			t.Fatalf("stage %q missing", name)
+		}
+		got := stage.Capabilities()
+		if got.ModelFree != legacyModelFree[name] {
+			t.Errorf("%s.ModelFree = %v, want %v", name, got.ModelFree, legacyModelFree[name])
+		}
+		if got.ConsumesMemory != legacyMemory[name] {
+			t.Errorf("%s.ConsumesMemory = %v, want %v", name, got.ConsumesMemory, legacyMemory[name])
+		}
+		if got.PullContext != legacyPull[name] {
+			t.Errorf("%s.PullContext = %v, want %v", name, got.PullContext, legacyPull[name])
+		}
+		wantTimeout := legacyTimeout[name]
+		if got.TimeoutSeconds != wantTimeout {
+			t.Errorf("%s.TimeoutSeconds = %d, want %d", name, got.TimeoutSeconds, wantTimeout)
+		}
+	}
+}
+
+func TestStageOptionsUsesLongDefaultTimeoutForDeterministicCommands(t *testing.T) {
+	options := stageOptions(
+		"test_runner",
+		1,
+		agent.ModelSelection{},
+		PipelineConfigFromAgentOptions(agent.Options{}),
+		t.TempDir(),
+		nil,
+		stages.Capabilities{},
+	)
+	if options.TimeoutSeconds != stages.DefaultTimeoutSeconds {
+		t.Fatalf("TimeoutSeconds = %d, want %d", options.TimeoutSeconds, stages.DefaultTimeoutSeconds)
+	}
+}
+
+func TestStageOptionsPassesConfiguredVerifyCommandAndDirectory(t *testing.T) {
+	workDir := t.TempDir()
+	config := PipelineConfigFromAgentOptions(agent.Options{
+		VerifyCommand: []string{"python", "{tests}"},
+		VerifyDir:     "tests",
+	})
+	options := withVerifyCommand(stageOptions("test_runner", 1, agent.ModelSelection{}, config, workDir, nil, stages.Capabilities{}), stages.TestRunner{}, config, workDir)
+	if !reflect.DeepEqual(options.Command, []string{"python", "{tests}"}) {
+		t.Fatalf("Command = %#v", options.Command)
+	}
+	if want := filepath.Join(workDir, "tests"); options.CommandWorkDir != want {
+		t.Fatalf("CommandWorkDir = %q, want %q", options.CommandWorkDir, want)
+	}
+}
+
+// The verify command follows the test runner's role. A topology that renames
+// test_runner to tests still runs the configured command, and no other stage
+// takes it.
+func TestVerifyCommandFollowsTheRunnerRoleNotItsName(t *testing.T) {
+	workDir := t.TempDir()
+	config := PipelineConfigFromAgentOptions(agent.Options{VerifyCommand: []string{"go", "test", "./..."}})
+	topology := &schemas.PipelineTopology{Nodes: []schemas.PipelineNode{
+		{Name: "tests", Type: "test_runner"},
+	}}
+	registry, err := buildStageRegistry(config, workDir, topology)
+	if err != nil {
+		t.Fatalf("buildStageRegistry: %v", err)
+	}
+	renamed := withVerifyCommand(stageOptions("tests", 1, agent.ModelSelection{}, config, workDir, nil, stages.Capabilities{}), registry["tests"], config, workDir)
+	if !reflect.DeepEqual(renamed.Command, []string{"go", "test", "./..."}) {
+		t.Fatalf("renamed runner Command = %#v, want the verify command", renamed.Command)
+	}
+	writer := withVerifyCommand(stageOptions("code_writer", 1, agent.ModelSelection{}, config, workDir, nil, stages.Capabilities{}), registry["code_writer"], config, workDir)
+	if len(writer.Command) != 0 {
+		t.Fatalf("code writer Command = %#v, want none", writer.Command)
+	}
+}
+
 func TestBuildStageRegistryRegistersDeterministicToolsExactlyOnce(t *testing.T) {
 	toolRegistry := tools.NewRegistry()
-	options := agent.Options{Registry: toolRegistry}
+	options := PipelineConfigFromAgentOptions(agent.Options{Registry: toolRegistry})
 	workDir := t.TempDir()
 
-	if _, err := buildStageRegistry(options, workDir); err != nil {
+	if _, err := buildStageRegistry(options, workDir, nil); err != nil {
 		t.Fatalf("buildStageRegistry (first call): %v", err)
 	}
-	if _, err := buildStageRegistry(options, workDir); err != nil {
+	if _, err := buildStageRegistry(options, workDir, nil); err != nil {
 		t.Fatalf("buildStageRegistry (second call): %v", err)
 	}
 
@@ -50,12 +158,12 @@ func TestStageOptionsEmitsAttributedUsageWithoutLegacyDuplicate(t *testing.T) {
 	var attributed []agent.AttributedUsage
 	legacyCalls := 0
 	selection := agent.ModelSelection{ProviderName: "routed", Model: "model-a"}
-	options := stageOptions("code_writer", 2, selection, agent.Options{
+	options := stageOptions("code_writer", 2, selection, PipelineConfigFromAgentOptions(agent.Options{
 		OnUsage: func(agent.Usage) { legacyCalls++ },
 		OnAttributedUsage: func(usage agent.AttributedUsage) {
 			attributed = append(attributed, usage)
 		},
-	}, t.TempDir(), nil)
+	}), t.TempDir(), nil, stages.CodeWriter{}.Capabilities())
 
 	events := make(chan zeroruntime.StreamEvent, 2)
 	events <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 4, OutputTokens: 2}}
@@ -75,9 +183,9 @@ func TestStageOptionsEmitsAttributedUsageWithoutLegacyDuplicate(t *testing.T) {
 func TestStageOptionsEmitsMissingUsageAndPreservesLegacyFallback(t *testing.T) {
 	selection := agent.ModelSelection{ProviderName: "primary", Model: "model-a"}
 	var missing agent.AttributedUsage
-	attributedOptions := stageOptions("test_generator", 3, selection, agent.Options{
+	attributedOptions := stageOptions("test_generator", 3, selection, PipelineConfigFromAgentOptions(agent.Options{
 		OnAttributedUsage: func(usage agent.AttributedUsage) { missing = usage },
-	}, t.TempDir(), nil)
+	}), t.TempDir(), nil, stages.TestGenerator{}.Capabilities())
 
 	noUsage := make(chan zeroruntime.StreamEvent, 1)
 	noUsage <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
@@ -97,14 +205,14 @@ func TestStageOptionsEmitsMissingUsageAndPreservesLegacyFallback(t *testing.T) {
 	}
 
 	legacyCalls := 0
-	legacyOptions := stageOptions("code_writer", 1, selection, agent.Options{
+	legacyOptions := stageOptions("code_writer", 1, selection, PipelineConfigFromAgentOptions(agent.Options{
 		OnUsage: func(usage agent.Usage) {
 			legacyCalls++
 			if usage.InputTokens != 2 {
 				t.Fatalf("legacy usage = %+v", usage)
 			}
 		},
-	}, t.TempDir(), nil)
+	}), t.TempDir(), nil, stages.CodeWriter{}.Capabilities())
 	withUsage := make(chan zeroruntime.StreamEvent, 2)
 	withUsage <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 2}}
 	withUsage <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
@@ -117,11 +225,11 @@ func TestStageOptionsEmitsMissingUsageAndPreservesLegacyFallback(t *testing.T) {
 
 func TestStageOptionsPromptCacheKey(t *testing.T) {
 	selection := agent.ModelSelection{ProviderName: "primary", Model: "model-a"}
-	withSession := stageOptions("code_writer", 1, selection, agent.Options{SessionID: "session-1"}, t.TempDir(), nil)
+	withSession := stageOptions("code_writer", 1, selection, PipelineConfigFromAgentOptions(agent.Options{SessionID: "session-1"}), t.TempDir(), nil, stages.CodeWriter{}.Capabilities())
 	if got, want := withSession.PromptCacheKey, "session-1:code_writer"; got != want {
 		t.Fatalf("PromptCacheKey = %q, want %q", got, want)
 	}
-	withoutSession := stageOptions("code_writer", 1, selection, agent.Options{}, t.TempDir(), nil)
+	withoutSession := stageOptions("code_writer", 1, selection, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, stages.CodeWriter{}.Capabilities())
 	if withoutSession.PromptCacheKey != "" {
 		t.Fatalf("PromptCacheKey = %q, want empty", withoutSession.PromptCacheKey)
 	}
@@ -147,6 +255,29 @@ func TestDetectLanguageMarkerFiles(t *testing.T) {
 				t.Fatalf("detectLanguageUncached(%s marker) = %q, want %q", tt.marker, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDetectLanguageNoMarkerIsUnknownNotGo(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := detectLanguageUncached(dir); got != "unknown" {
+		t.Fatalf("detectLanguageUncached(txt-only) = %q, want %q", got, "unknown")
+	}
+}
+
+func TestDetectLanguageRedetectsWhenWriterAddsMarker(t *testing.T) {
+	dir := t.TempDir()
+	if got := detectLanguage(dir); got != "unknown" {
+		t.Fatalf("empty workspace = %q, want unknown", got)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := detectLanguage(dir); got != "go" {
+		t.Fatalf("after go.mod = %q, want go (unknown must not be cached)", got)
 	}
 }
 
@@ -181,5 +312,136 @@ func TestDetectLanguageCachesPerWorkDir(t *testing.T) {
 	}
 	if got := detectLanguage(dirB); got != "javascript" {
 		t.Fatalf("detectLanguage(dirB) = %q, want %q (cache must be per-workDir, not sticky)", got, "javascript")
+	}
+}
+
+// TestStageOptionsAttachesPromptLayoutHashToUsage pins the W3 wiring: the
+// layout callback fired before a request must reach the attributed usage and
+// the run ledger. A silent break here would leave prompt_layout_hash empty in
+// every record, which is indistinguishable from a stable prefix.
+func TestStageOptionsAttachesPromptLayoutHashToUsage(t *testing.T) {
+	ledger := newRequestLedger()
+	var captured []agent.AttributedUsage
+	options := ledger.recordingOptions(PipelineConfigFromAgentOptions(agent.Options{
+		OnAttributedUsage: func(u agent.AttributedUsage) { captured = append(captured, u) },
+	}))
+	opts := stageOptions("code_writer", 1, agent.ModelSelection{ProviderName: "openrouter", Model: "m"}, options, "", nil, stages.Capabilities{})
+	if opts.Stream.OnPromptLayout == nil {
+		t.Fatal("stage options must wire OnPromptLayout")
+	}
+	opts.Stream.OnPromptLayout("layout-1")
+	opts.Stream.OnUsageResult(zeroruntime.Usage{InputTokens: 10, OutputTokens: 5}, true, nil, "", false)
+	if len(captured) != 1 {
+		t.Fatalf("captured = %d, want 1", len(captured))
+	}
+	if got := captured[0].PromptLayoutHash; got != "layout-1" {
+		t.Fatalf("attributed PromptLayoutHash = %q, want layout-1", got)
+	}
+	if len(ledger.records) != 1 {
+		t.Fatalf("records = %d, want 1", len(ledger.records))
+	}
+	if got := ledger.records[0].PromptLayoutHash; got != "layout-1" {
+		t.Fatalf("record PromptLayoutHash = %q, want layout-1", got)
+	}
+}
+
+// TestStageOptionsPromptLayoutHashFollowsTheLastRequest proves the pairing: a
+// later request's layout must replace the earlier one, so a flip between
+// rounds is reported against the round that actually flipped.
+func TestStageOptionsPromptLayoutHashFollowsTheLastRequest(t *testing.T) {
+	ledger := newRequestLedger()
+	options := ledger.recordingOptions(PipelineConfigFromAgentOptions(agent.Options{
+		OnAttributedUsage: func(agent.AttributedUsage) {},
+	}))
+	opts := stageOptions("code_writer", 1, agent.ModelSelection{ProviderName: "openrouter", Model: "m"}, options, "", nil, stages.Capabilities{})
+	opts.Stream.OnPromptLayout("layout-1")
+	opts.Stream.OnUsageResult(zeroruntime.Usage{InputTokens: 10, OutputTokens: 5}, true, nil, "", false)
+	opts.Stream.OnPromptLayout("layout-2")
+	opts.Stream.OnUsageResult(zeroruntime.Usage{InputTokens: 12, OutputTokens: 6}, true, nil, "", false)
+	if len(ledger.records) != 2 {
+		t.Fatalf("records = %d, want 2", len(ledger.records))
+	}
+	if ledger.records[0].PromptLayoutHash != "layout-1" || ledger.records[1].PromptLayoutHash != "layout-2" {
+		t.Fatalf("hashes = %q, %q; want layout-1, layout-2", ledger.records[0].PromptLayoutHash, ledger.records[1].PromptLayoutHash)
+	}
+}
+
+// go.work at the root names a Go workspace, as go.mod does.
+func TestDetectLanguageGoWorkIsGo(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.work"), []byte("go 1.25\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := detectLanguageUncached(dir); got != "go" {
+		t.Fatalf("detectLanguageUncached(go.work) = %q, want go", got)
+	}
+}
+
+// The Python search skips vendored, build, and tool directories. A .py file
+// that exists only there does not make a workspace Python.
+func TestDetectLanguagePythonSearchSkipsDependencyDirs(t *testing.T) {
+	dir := t.TempDir()
+	for _, sub := range []string{".git", "node_modules", "target", "vendor", ".venv"} {
+		if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, sub, "lib.py"), []byte("x = 1\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := detectLanguageUncached(dir); got != "unknown" {
+		t.Fatalf("only dependency .py files = %q, want unknown", got)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "src", "main.py"), []byte("print(1)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := detectLanguageUncached(dir); got != "python" {
+		t.Fatalf("with src/main.py = %q, want python", got)
+	}
+}
+
+// An unknown workspace stays cached until a marker appears, then re-detects.
+func TestDetectLanguageRedetectsWhenGoWorkAppearsAfterUnknown(t *testing.T) {
+	dir := t.TempDir()
+	if got := detectLanguage(dir); got != "unknown" {
+		t.Fatalf("empty workspace = %q, want unknown", got)
+	}
+	if got := detectLanguage(dir); got != "unknown" {
+		t.Fatalf("second call on an unchanged workspace = %q, want unknown", got)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.work"), []byte("go 1.25\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := detectLanguage(dir); got != "go" {
+		t.Fatalf("after go.work = %q, want go", got)
+	}
+}
+
+// An unknown workspace that gains a Python file at its root is re-detected as
+// python without a recursive walk. A Python project file alone also counts.
+func TestDetectLanguageRedetectsWhenPythonAppearsAfterUnknown(t *testing.T) {
+	dir := t.TempDir()
+	if got := detectLanguage(dir); got != "unknown" {
+		t.Fatalf("empty workspace = %q, want unknown", got)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "app.py"), []byte("print('hi')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := detectLanguage(dir); got != "python" {
+		t.Fatalf("after app.py = %q, want python", got)
+	}
+
+	other := t.TempDir()
+	if got := detectLanguage(other); got != "unknown" {
+		t.Fatalf("second empty workspace = %q, want unknown", got)
+	}
+	if err := os.WriteFile(filepath.Join(other, "requirements.txt"), []byte("pytest\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := detectLanguage(other); got != "python" {
+		t.Fatalf("after requirements.txt = %q, want python", got)
 	}
 }

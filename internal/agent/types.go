@@ -2,8 +2,14 @@ package agent
 
 import (
 	"context"
+	"sync"
+	"time"
 
+	"github.com/Taf0711/splice/internal/config"
+	"github.com/Taf0711/splice/internal/flags"
 	"github.com/Taf0711/splice/internal/hooks"
+	"github.com/Taf0711/splice/internal/modelregistry"
+	"github.com/Taf0711/splice/internal/presentation"
 	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/streamjson"
 	"github.com/Taf0711/splice/internal/tools"
@@ -38,7 +44,15 @@ type UsageCostEstimate struct {
 	PricingSource  string
 	PricingAsOf    string
 	UnpricedReason string
+	// Subscription is set when the request is served by a flat subscription
+	// (a ChatGPT sign-in). Such a request is never priced per request, even
+	// when the provider reports a charge.
+	Subscription bool
 }
+
+// ServedUsageCostEstimator prices one request from the catalog of the provider
+// that served it. The provider is the serving profile name.
+type ServedUsageCostEstimator func(provider string, model string, usage Usage, reported bool) UsageCostEstimate
 
 // AttributedUsage carries usage with its attribution context (provider, model,
 // stage, iteration). Emitted once per provider stream by the pipeline.
@@ -58,6 +72,76 @@ type AttributedUsage struct {
 	// It lives here rather than on Usage because Usage is rebuilt from plain
 	// numeric literals at several call sites that would silently drop it.
 	ReportedCostUSD *float64
+	// RequestID is the provider's request/correlation identity for this
+	// request (OpenRouter's X-Generation-Id response header), when reported.
+	// It is the ledger's reconciliation key: a later reconciliation replaces
+	// the estimate for THIS request, never another. Empty when the backend
+	// reports none.
+	RequestID string
+	// StreamFailed is true when the stream ended with an error or a canceled
+	// context, so the request did not complete. Its usage can be missing for
+	// that reason alone.
+	StreamFailed bool
+	// PromptLayoutHash is the stable-prefix layout hash (system prompt plus
+	// tool schema) of the request that produced this usage. Requests for one
+	// stage within a run must carry the same hash; a change between rounds
+	// means the cacheable prefix flipped and the provider's prefix cache was
+	// forfeited. Empty when the caller does not report prompt layout.
+	PromptLayoutHash string
+	// InvocationOrdinal separates repeated invocations of one stage within an
+	// iteration (0 is the initial pass, 1+ are repair re-entries). Zero value
+	// means the initial pass; the orchestrator ledger records it as absent
+	// through omitempty rather than as a fabricated zero (A3 convention).
+	InvocationOrdinal int
+	// ContextRound is the D2 expansion round this request belongs to
+	// (0 = initial handshake / no expansion).
+	ContextRound int
+	// SpendSource classifies why the request exists (Package F1). Empty means
+	// the orchestrator has not classified it; the ledger then derives the
+	// source mechanically instead of guessing.
+	SpendSource string
+}
+
+// RequestAttribution is the orchestrator-owned classification cell for
+// provider requests of one stage invocation. The stage emits usage through a
+// closure that reads a snapshot at emission time, so the orchestrator can
+// reclassify the cell between expansion rounds without threading new
+// parameters through every stage. Safe for concurrent use: stream callbacks
+// and the D2 loop interleave.
+type RequestAttribution struct {
+	mu                sync.Mutex
+	invocationOrdinal int
+	contextRound      int
+	spendSource       string
+}
+
+// NewRequestAttribution returns a classification cell seeded with the given
+// values.
+func NewRequestAttribution(ordinal, round int, source string) *RequestAttribution {
+	return &RequestAttribution{invocationOrdinal: ordinal, contextRound: round, spendSource: source}
+}
+
+// Set reclassifies the cell. The orchestrator calls it between provider
+// requests of one invocation (expansion rounds, repair re-entry).
+func (a *RequestAttribution) Set(ordinal, round int, source string) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.invocationOrdinal = ordinal
+	a.contextRound = round
+	a.spendSource = source
+}
+
+// Snapshot returns the current classification.
+func (a *RequestAttribution) Snapshot() (ordinal, round int, source string) {
+	if a == nil {
+		return 0, 0, ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.invocationOrdinal, a.contextRound, a.spendSource
 }
 
 // ModelSelection is one resolved provider route for a pipeline stage.
@@ -70,6 +154,20 @@ type ModelSelection struct {
 
 type StageModelResolver func(stageName string) (ModelSelection, error)
 type EscalationModelResolver func() (ModelSelection, error)
+
+// ModelOverride is an explicit model declaration from a pipeline topology node.
+// It names a provider profile and a model, both references, so a shared
+// topology carries its routing without carrying secrets.
+type ModelOverride struct {
+	ProviderProfile string
+	Model           string
+	ReasoningEffort string
+}
+
+// NodeModelResolver resolves an explicit topology node model declaration to a
+// selection. It is consulted before the name-keyed StageModelResolver, so a
+// node's declaration is stronger than the per-stage file.
+type NodeModelResolver func(nodeName string, override ModelOverride) (ModelSelection, error)
 
 type PermissionMode string
 type PermissionAction string
@@ -95,6 +193,12 @@ type StopReason string
 
 const (
 	StopReasonSpecReviewRequired StopReason = "spec_review_required"
+	// StopReasonNoOutput is the no-output guard: the model returned runaway
+	// empty turns. Set only when RequireCompletionSignal is on.
+	StopReasonNoOutput StopReason = "no_output"
+	// StopReasonRepeatedToolFailure is the repeated-failure guard: one tool kept
+	// failing. Set only when RequireCompletionSignal is on.
+	StopReasonRepeatedToolFailure StopReason = "repeated_tool_failure"
 )
 
 const (
@@ -148,6 +252,15 @@ const (
 	DenialApprovalCanceled DenialCategory = "approval_canceled" // approval canceled and run aborted
 	DenialSandboxBlock     DenialCategory = "sandbox_block"     // blocked by the sandbox
 	DenialHookBlocked      DenialCategory = "hook_blocked"      // vetoed by a beforeTool hook
+	// DenialPolicy is a hard deny: the tool is not invokable from the path.
+	DenialPolicy DenialCategory = "policy"
+	// DenialPermissionRequired is a prompt-gated tool with no grant, for
+	// example headless "ask" mode with no prompt handler.
+	DenialPermissionRequired DenialCategory = "permission_required"
+	// DenialSandboxApproval is a sandbox decision that needs approval, with no grant.
+	DenialSandboxApproval DenialCategory = "sandbox_approval"
+	// DenialSandboxDenied is a sandbox decision that denies the call outright.
+	DenialSandboxDenied DenialCategory = "sandbox_denied"
 )
 
 type PermissionRequest struct {
@@ -265,8 +378,50 @@ type SurfaceToUserDecision struct {
 	Message string              `json:"message,omitempty"`
 }
 
+// PipelinePlanEvent announces the ordered stage roster for one pipeline plan.
+type PipelinePlanEvent struct {
+	Stages []string
+	// Dependencies maps each stage name to the stages that must run before
+	// it. It is empty for a legacy linear plan and populated when the
+	// planner compiles a topology, so the presentation layer can carry the
+	// graph instead of a flat roster.
+	Dependencies map[string][]string
+}
+
+// StageEvent is a typed pipeline stage lifecycle event.
+type StageEvent struct {
+	Name string
+	// Iteration is the pipeline pass this event belongs to. It is 0 for the
+	// first pass and rises on each revision re-entry, so the presentation
+	// layer can keep an earlier pass instead of overwriting it.
+	Iteration    int
+	Status       string
+	Detail       string
+	Progress     int
+	ChangedFiles []string
+	// Workspace stamps the stage's isolation state ("isolated" when the
+	// run executes in a Splice worktree, "shared_cwd" otherwise), so the
+	// presentation contract can carry DoD 26's isolation badge. Empty
+	// means unset (the renderer projects shared_cwd).
+	Workspace    string
+	WorktreePath string
+	// Kind names the event on Options.EventSink. Empty means a stage event.
+	// "notice" carries one notice line in Detail. "run" marks a run start
+	// (Status "running") or end (Status "completed" or "failed", with the
+	// error text in Detail). Stage callbacks never see a non-empty Kind.
+	Kind string
+}
+
 type Options struct {
 	MaxTurns int
+	// Flags is the resolved feature-flag set for this run. The zero value means
+	// all defaults. The pipeline reads it through PipelineRunConfig.Flags.
+	Flags flags.Set
+	// TraceWriteWarn, when non-nil, is called at most once per pipeline run
+	// when a run-trace persistence attempt fails. The headless exec surface
+	// wires it to its warning event so stale sidecars self-announce; other
+	// callers leave it nil.
+	TraceWriteWarn func(msg string)
 	// DeferThreshold activates deferred MCP-tool loading: when the number of
 	// deferred-eligible visible tools is >= this value (and it is > 0), their
 	// full schemas are withheld and advertised as compact lines via tool_search.
@@ -300,9 +455,36 @@ type Options struct {
 	// ServerTools asks the provider to run these tools itself during inference.
 	// A provider that does not support a kind ignores it, so a run can always
 	// ask. Empty keeps the request unchanged.
-	ServerTools  []zeroruntime.ServerTool
-	Cwd          string
+	ServerTools []zeroruntime.ServerTool
+	Cwd         string
+	// ProjectRoot is the stable repository root used for memory identity. The
+	// pipeline keeps memory keyed to the repo root while tools execute in Cwd
+	// (which may be a per-run worktree path). Empty means memory derives from
+	// Cwd exactly as before. Splice addition (MD1).
+	ProjectRoot string
+	// VerifyCommand is the optional configured test_runner command. Empty keeps
+	// the detected command path.
+	VerifyCommand []string
+	// VerifyDir is the optional test_runner working directory, relative to Cwd.
+	VerifyDir string
+	// MemoryStatus is the run's resolved memory sidecar status: "active" (a
+	// client resolved), "off" (disabled or not configured), or "unavailable"
+	// (a daemon was expected but unreachable). Empty derives from the
+	// MemoryStore argument (nil = off, non-nil = active). Splice addition (Q4).
+	MemoryStatus string
 	SystemPrompt string
+	// NoSandboxEscape forbids a run outside the sandbox. The loop refuses a
+	// call that asks for require_escalated, and it checks the final arguments
+	// again just before the call runs. A command prefix grant does not
+	// escalate the call. The loop also skips the automatic unsandboxed retry
+	// and the network retry. It does not turn the sandbox on: a disabled
+	// sandbox policy stays disabled. Pipeline agent nodes set it. An
+	// interactive run leaves it off.
+	NoSandboxEscape bool
+	// SystemAddendum is appended to the system prompt after the core
+	// instructions and before the workspace sections. Pipeline agent nodes set it
+	// to the data-block rule. An interactive run leaves it empty.
+	SystemAddendum string
 	// ResponseStyle is the operator-selected reply style from the TUI /style
 	// command (e.g. "concise", "explanatory", "review"). It is rendered into the
 	// system prompt as a short directive. Empty or "balanced" adds nothing — the
@@ -312,6 +494,17 @@ type Options struct {
 	// nil for text-only runs (the seeded message then carries no images, exactly
 	// as before).
 	Images []zeroruntime.ImageBlock
+	// DecisionEvaluator is the optional decision-advisor capability (Jev).
+	// The pipeline consumes the zeroruntime.DecisionEvaluator seam; the
+	// CLI constructs the concrete transport (OpenRouter Decisions) and
+	// resolves credentials. Nil with the advisor flag off keeps today's
+	// behavior byte-identically.
+	DecisionEvaluator     zeroruntime.DecisionEvaluator
+	DecisionAdvisorConfig config.DecisionAdvisorConfig
+	TrajectoryConfig      config.TrajectoryConfig
+	// MaxWall is the wall-time limit of one deterministic pipeline run. Zero
+	// uses the pipeline default (600 seconds). agent.Run does not read it.
+	MaxWall time.Duration
 	// PriorMessages are real user/assistant turns from earlier in the session,
 	// seeded before the current prompt so the agent has true multi-turn memory.
 	// nil (the default) reproduces the pre-existing single-prompt seeding
@@ -338,7 +531,19 @@ type Options struct {
 	Registry                   *tools.Registry
 	PermissionMode             PermissionMode
 	Autonomy                   string
-	Sandbox                    *sandbox.Engine
+	// TrustedWorkspace lets the sandbox auto-allow file mutations that stay in
+	// the trusted workspace. It does not grant shell, network, or external access.
+	TrustedWorkspace bool
+	// TrustRoot is the directory whose trust decision TrustedWorkspace reports.
+	// Project files that run commands, such as the pipeline topology, load from
+	// this directory. Empty means ProjectRoot, then Cwd. Set it whenever the
+	// trusted directory is not the one the run uses for memory or tools.
+	TrustRoot string
+	// Pipeline is the --pipeline selection: a pipeline name in the user library
+	// or a path to a topology file. Empty resolves the active pipeline from
+	// config. The runtime resolves it after workspace trust.
+	Pipeline string
+	Sandbox  *sandbox.Engine
 	// FileTracker records per-session file read/write versions so the write tools
 	// can detect a file changed on disk outside Splice since it was last read. nil
 	// disables the check. Created once per session and threaded into every tool run.
@@ -346,12 +551,17 @@ type Options struct {
 	// Hooks, when set, runs configured beforeTool (blocking) and afterTool
 	// (advisory) commands around each tool call. nil disables hooks entirely; a
 	// dispatcher built from an empty config is also a safe no-op.
-	Hooks         *hooks.Dispatcher
-	EnabledTools  []string
-	DisabledTools []string
-	OnText        func(string)
-	OnReasoning   func(string)
-	OnToolCall    func(ToolCall)
+	Hooks *hooks.Dispatcher
+	// RequireReadBeforeWrite turns on the strict read-before-write guard for
+	// write_file and edit_file calls in this run. An existing path with no
+	// read earlier in the run is refused. Pipeline agent nodes set it when the
+	// stage guard is on.
+	RequireReadBeforeWrite bool
+	EnabledTools           []string
+	DisabledTools          []string
+	OnText                 func(string)
+	OnReasoning            func(string)
+	OnToolCall             func(ToolCall)
 	// OnToolCallStart / OnToolCallDelta stream a tool call's arguments LIVE as the
 	// model generates them — OnToolCallStart on open (id, tool name), then
 	// OnToolCallDelta for each argument fragment. A surface can render the
@@ -377,10 +587,22 @@ type Options struct {
 	// the pipeline ledger boundary. The pipeline owns sequence assignment and
 	// calls this exactly once per provider stream. Nil disables pipeline pricing.
 	EstimateUsageCost func(model string, usage Usage, reported bool) UsageCostEstimate
+	// EstimateServedUsageCost prices a request from the catalog of the provider
+	// that served it. It takes precedence over EstimateUsageCost. Production
+	// runs set it, so no request is priced from another provider's catalog.
+	EstimateServedUsageCost ServedUsageCostEstimator
+	// ModelRegistry is the static model catalog used for preflight provider
+	// capability checks (e.g. tool-calling support). It is a zero Registry when
+	// unset; preflight treats that as "not statically knowable" and skips the
+	// check rather than probing live. Built once by the caller (exec/TUI) and
+	// reused. Splice addition.
+	ModelRegistry modelregistry.Registry
 	// OnToolProgress, when set, is called with each stream-json event a
 	// specialist child process emits while running. The toolCallID identifies
 	// which Task tool call the progress belongs to. nil is a no-op.
 	OnToolProgress func(toolCallID string, event streamjson.Event)
+	// OnToolOutput receives bounded, redacted snapshots from running shell tools.
+	OnToolOutput func(tools.OutputSnapshot)
 	// OnContext, when set, is called once per turn with the per-category context
 	// budget of the request about to be sent, so a surface (TUI/CLI) can show
 	// context utilization. Opt-in like the other callbacks; nil is a no-op.
@@ -413,6 +635,11 @@ type Options struct {
 	// pre-AR11 behavior). Splice addition (AR11b).
 	StageModelResolver StageModelResolver
 
+	// NodeModelResolver resolves an explicit topology node model before the
+	// name-keyed StageModelResolver. When nil, a node model declaration is
+	// ignored and the per-stage ladder applies. Splice addition (T6c).
+	NodeModelResolver NodeModelResolver
+
 	// EscalationModelResolver resolves an escalation provider, model, and
 	// reasoning effort when the trajectory monitor fires cycle or oscillation
 	// actions. When nil, escalation is skipped (best-effort, non-fatal). Splice
@@ -427,6 +654,33 @@ type Options struct {
 	// with a clear message rather than silently retrying. Splice addition
 	// (AR10d).
 	OnSurfaceToUser func(ctx context.Context, req SurfaceToUserRequest) (SurfaceToUserDecision, error)
+
+	// OnPipelinePlan receives the ordered stage roster before stage execution.
+	OnPipelinePlan func(PipelinePlanEvent)
+
+	// OnStageEvent receives typed pipeline stage lifecycle events. The
+	// deprecated NUL marker on OnReasoning remains for one release.
+	OnStageEvent func(StageEvent)
+
+	// OnNotice receives one-line pipeline notices a user must see, such as the
+	// command nodes a run will execute. A nil OnNotice sends them to OnReasoning.
+	OnNotice func(text string)
+
+	// EventSink receives every OnNotice line (Kind "notice"), every stage
+	// event (Kind ""), and the run start and end (Kind "run"). Detail text is
+	// redacted before the call. Nil disables the sink, and a run is unchanged.
+	EventSink func(StageEvent)
+
+	// SecretValues are exact secret strings that EventSink redacts, such as the
+	// provider API key. Redaction of the pattern-matched secrets applies anyway.
+	SecretValues []string
+
+	// OnPresentationState receives a presentation.State snapshot after each
+	// significant pipeline transition (plan computed, stage transition,
+	// intervention recorded, run end) when presentation emission is enabled.
+	// Nil disables emission entirely: no accumulator is created and no
+	// snapshots are produced.
+	OnPresentationState func(presentation.State)
 
 	// RequireCompletionSignal gates run completion for HEADLESS exec. Without it,
 	// any assistant turn that produces text but no tool call is accepted as the
@@ -463,6 +717,14 @@ type Result struct {
 	// marked Incomplete (e.g. "pending plan items remain"). Empty when Incomplete
 	// is false. Surfaced in logs / run_end so an abandoned run is debuggable.
 	IncompleteReason string
+	// Verified reports whether a completed pipeline run passed at least one
+	// verification check. It is false for non-pipeline runs and for a pipeline
+	// run that completed without applying a check. Callers that need CI truth
+	// read this field; Incomplete stays false for a completed-but-unverified run.
+	Verified bool
+	// UnverifiedReason names why a completed pipeline run is not verified. Empty
+	// when Verified is true or the run did not use the pipeline.
+	UnverifiedReason string
 }
 
 // Truncated reports whether the final response ended abnormally (cut off at the

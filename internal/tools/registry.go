@@ -13,17 +13,55 @@ type Registry struct {
 	tools map[string]Tool
 }
 
+// HostSeamTool is an optional interface marking a tool as
+// orchestrator-only (B1 review fix): it is never advertised to the model
+// (Safety().Permission is PermissionDeny, so ToolAdvertised returns false
+// in every mode) and the registry executes it only through a call carrying
+// RunOptions.HostSeam. The agent loop never sets that flag, so the model
+// can neither see nor invoke the tool; the host's source-reader seam sets
+// it and the tool runs with its full guard set (scoping, tracker,
+// redaction) unchanged.
+type HostSeamTool interface {
+	HostSeamOnly() bool
+}
+
+// ExpectedBaseCarrier is an optional interface a Tool implements to have
+// its RunOptions receive the caller's expected-content digest (C2 write
+// boundary). write_file rechecks it INSIDE the tool, after before-tool
+// hooks and immediately before mutation, so a hook that mutated the file
+// between preflight and write is caught and no overwrite happens.
+type ExpectedBaseCarrier interface {
+	SetExpectedBase(digest string)
+}
+
 type RunOptions struct {
 	PermissionGranted bool
 	PermissionMode    string
 	Autonomy          string
+	TrustedWorkspace  bool
 	Sandbox           *sandbox.Engine
-	ToolCallID        string
-	SessionID         string
-	Model             string
-	ReasoningEffort   string
-	Depth             int
-	Cwd               string
+	// HostSeam marks a call as orchestrator-initiated (context
+	// fulfillment, the source-reader seam), never model-initiated. A
+	// tool that implements HostSeamTool and carries PermissionDeny
+	// executes only when BOTH are true: the registry rejects a Deny tool
+	// from any path that lacks the flag, and rejects a flag-carrying
+	// call to a tool that does not implement the interface. The agent
+	// loop never sets this flag, so a Deny tool is invisible and
+	// unexecutable from the model surface in every permission mode.
+	HostSeam bool
+	// ExpectedBase, when non-empty, is the content sha256 the caller
+	// asserts the target file has RIGHT NOW (C2 write boundary). An
+	// ExpectedBaseCarrier tool rechecks it inside the tool, immediately
+	// before mutation, after before-tool hooks. A mismatch is a loud
+	// error and no write: the preflight view is stale.
+	ExpectedBase           string
+	RequireReadBeforeWrite bool
+	ToolCallID             string
+	SessionID              string
+	Model                  string
+	ReasoningEffort        string
+	Depth                  int
+	Cwd                    string
 	// FileTracker, when set, records the version of each file read or written this
 	// session so write_file/edit_file can refuse to clobber a file that changed on
 	// disk outside Splice since it was last read. nil disables the feature entirely
@@ -41,6 +79,9 @@ type RunOptions struct {
 	// tool-call progress in the specialist card. nil is a no-op (the default
 	// for every non-Task tool).
 	Progress func(streamjson.Event)
+	// OnToolOutput receives bounded snapshots from shell tools. The registry
+	// redacts each snapshot before this callback runs. nil is a no-op.
+	OnToolOutput func(OutputSnapshot)
 	// Diagnostics, when set, returns a formatted language-diagnostics block for
 	// a file a mutating tool just wrote ("" when clean or no server available).
 	// edit_file/write_file append it to their output so the model sees an error
@@ -130,6 +171,9 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 	ceilingExempt := false
 	defer func() {
 		result = scrubResultSecrets(result)
+		// The external reducer runs after the scrub (so it never sees hidden
+		// content) and before the ceiling (so the ceiling stays the backstop).
+		result = reduceToolResultOutput(name, result)
 		if !ceilingExempt {
 			result = enforceOutputCeiling(name, result)
 		}
@@ -148,46 +192,102 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 		}
 	}
 
+	// Scrub live output at the same registry boundary as final tool results.
+	if options.OnToolOutput != nil {
+		surface := options.OnToolOutput
+		options.OnToolOutput = func(snapshot OutputSnapshot) {
+			snapshot.Output = completeOutputLines(snapshot.Output)
+			if snapshot.Output == "" {
+				return
+			}
+			snapshot.Output = redaction.RedactString(snapshot.Output, redaction.Options{})
+			surface(snapshot)
+		}
+	}
+
 	permission := effectiveToolPermission(tool, args)
+	// A host-seam-only tool executes because the orchestrator already owns
+	// the call. The tool's own scoped path checks still run, but the
+	// model-facing sandbox decision must not re-deny the orchestrator's
+	// source seam merely because the tool is PermissionDeny.
+	hostSeamCall := false
+	if hs, ok := tool.(HostSeamTool); ok && options.HostSeam && hs.HostSeamOnly() {
+		hostSeamCall = true
+	}
 	sandboxGrantAuthorized := false
 	var sandboxDecision *sandbox.Decision
-	if options.Sandbox != nil {
+	// Host-seam gate (B1 review fix): a Deny tool that declares itself
+	// orchestrator-only runs ONLY through a call explicitly marked
+	// HostSeam, and the marker only authorizes a tool that actually
+	// implements the interface. Any other path - model-initiated in any
+	// permission mode, or a host call that forgot the flag - is denied
+	// with a message naming the boundary.
+	if permission == PermissionDeny {
+		if _, isHostSeam := tool.(HostSeamTool); isHostSeam {
+			if !options.HostSeam {
+				res := refusedResult("Error: "+name+" is a host-seam tool; it is not invokable from the model surface.", RefusalPolicy)
+				return res
+			}
+		} else if !options.HostSeam || options.PermissionGranted {
+			// A plain Deny tool with no host-seam declaration stays
+			// hard-denied on every path (PermissionGranted cannot lift
+			// it; that flag authorizes Prompt tools only).
+			res := refusedResult("Error: Permission denied for "+name+": "+tool.Safety().Reason, RefusalPolicy)
+			return res
+		}
+	}
+	if options.Sandbox != nil && !hostSeamCall {
+		// Evaluate against the working directory of THIS execution, not only
+		// the engine's construction-time root. A pipeline run that binds a
+		// worktree after startup (TUI /exec) keeps its engine rooted at the
+		// session workspace; without this, every run-worktree path is refused
+		// as outside_workspace even though the run legitimately executes
+		// there. RunOptions.Cwd is harness-controlled, so this cannot widen
+		// what a model can reach.
 		d := options.Sandbox.Evaluate(ctx, sandbox.Request{
+			WorkspaceRoot:     options.Cwd,
 			ToolName:          name,
 			SideEffect:        sandbox.SideEffect(tool.Safety().SideEffect),
 			Permission:        sandbox.Permission(permission),
 			PermissionGranted: options.PermissionGranted,
 			PermissionMode:    sandbox.PermissionMode(options.PermissionMode),
+			TrustedWorkspace:  options.TrustedWorkspace,
 			Args:              args,
 			Reason:            tool.Safety().Reason,
 		})
 		sandboxDecision = &d
 		if d.Action == sandbox.ActionDeny {
-			res := errorResult(d.ErrorString())
+			res := refusedResult(d.ErrorString(), RefusalSandboxDenied)
 			res.SandboxDecision = sandboxDecision
 			return res
 		}
 		if d.Action == sandbox.ActionPrompt && !options.PermissionGranted {
-			res := errorResult("Error: Sandbox approval required for " + name + ": " + d.Reason)
+			res := refusedResult("Error: Sandbox approval required for "+name+": "+d.Reason, RefusalSandboxApproval)
 			res.SandboxDecision = sandboxDecision
 			return res
 		}
 		// A persistent grant OR a sandbox auto-allow authorizes a prompt tool to run
 		// without a separately-recorded PermissionGranted; the sandbox is the safety
 		// boundary.
-		sandboxGrantAuthorized = d.Action == sandbox.ActionAllow && (d.GrantMatched || d.AutoAllowed)
+		sandboxGrantAuthorized = d.Action == sandbox.ActionAllow && (d.GrantMatched || d.AutoAllowed || d.ProfileMatched)
 	}
 
 	switch permission {
 	case PermissionAllow:
 	case PermissionPrompt:
 		if !options.PermissionGranted && !sandboxGrantAuthorized {
-			res := errorResult("Error: Permission required for " + name + ": " + tool.Safety().Reason + ` The tool is marked "prompt" and was not executed.`)
+			res := refusedResult("Error: Permission required for "+name+": "+tool.Safety().Reason+` The tool is marked "prompt" and was not executed.`, RefusalPermissionRequired)
 			res.SandboxDecision = sandboxDecision
 			return res
 		}
 	default:
-		res := errorResult("Error: Permission denied for " + name + ": " + tool.Safety().Reason)
+		// PermissionDeny: hard-denied on every path EXCEPT the verified
+		// host-seam case the gate above already admitted (Deny tool that
+		// implements HostSeamTool, called with RunOptions.HostSeam).
+		if _, isHostSeam := tool.(HostSeamTool); isHostSeam && options.HostSeam {
+			break
+		}
+		res := refusedResult("Error: Permission denied for "+name+": "+tool.Safety().Reason, RefusalPolicy)
 		res.SandboxDecision = sandboxDecision
 		return res
 	}

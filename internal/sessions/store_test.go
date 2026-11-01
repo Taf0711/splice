@@ -181,6 +181,42 @@ func TestStoreForkCopiesEventsAndLineage(t *testing.T) {
 	}
 }
 
+func TestStoreOriginCwdRoundTripsThroughCreateAndFork(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: fixedClock("2026-06-04T11:00:00Z")})
+	parent, err := store.Create(CreateInput{SessionID: "wt-parent", Title: "Parent", Cwd: "/repo/.wt/1", OriginCwd: "/repo"})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if parent.OriginCwd != "/repo" || parent.Cwd != "/repo/.wt/1" {
+		t.Fatalf("origin/cwd not recorded on create: %#v", parent)
+	}
+	// Read back from disk to confirm persistence, not just the in-memory value.
+	loaded, err := store.Get("wt-parent")
+	if err != nil || loaded == nil {
+		t.Fatalf("Get returned error: %v, %v", loaded, err)
+	}
+	if loaded.OriginCwd != "/repo" {
+		t.Fatalf("OriginCwd did not round-trip through metadata: %#v", loaded)
+	}
+
+	fork, err := store.Fork(parent.SessionID, ForkInput{SessionID: "wt-fork"})
+	if err != nil {
+		t.Fatalf("Fork returned error: %v", err)
+	}
+	if fork.OriginCwd != "/repo" {
+		t.Fatalf("fork did not inherit OriginCwd: %#v", fork)
+	}
+
+	// A session created without an origin stays empty (zero behavior change).
+	plain, err := store.Create(CreateInput{SessionID: "plain", Title: "Plain", Cwd: "/repo"})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if plain.OriginCwd != "" {
+		t.Fatalf("plain session should have empty OriginCwd, got %q", plain.OriginCwd)
+	}
+}
+
 func TestStoreForkSkipsUsageEvents(t *testing.T) {
 	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: fixedClock("2026-06-04T11:00:00Z")})
 	parent, err := store.Create(CreateInput{SessionID: "parent", Title: "Parent"})

@@ -20,6 +20,10 @@ type PlanCritic struct{}
 
 var _ Stage = PlanCritic{}
 
+func (PlanCritic) Capabilities() Capabilities {
+	return Capabilities{Description: "reviewing the plan"}
+}
+
 func (PlanCritic) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options StageOptions) (schemas.HarnessStageOutput, error) {
 	if provider == nil {
 		return schemas.HarnessStageOutput{}, fmt.Errorf("plan critic requires a provider")
@@ -39,7 +43,7 @@ func (PlanCritic) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 		return schemas.HarnessStageOutput{}, fmt.Errorf("plan critic input: %w", err)
 	}
 	payload, _ := json.MarshalIndent(critiqueInput, "", "  ")
-	collected, err := callValidatedToolUse(ctx, provider, options.model("reasoning"), options.ReasoningEffort, composeSystemPrompt(planCriticSystemPrompt), string(payload), options.Images, planCriticToolDefinition(), &options.Stream, parsePlanCritique, options.PromptCacheKey)
+	collected, err := callValidatedToolUse(ctx, provider, options.model("reasoning"), options.ReasoningEffort, composeSystemPrompt(planCriticSystemPrompt, options.ProjectInstructions), string(payload), options.Images, []zeroruntime.ToolDefinition{planCriticToolDefinition()}, options.MaxOutputTokens, &options.Stream, parsePlanCritique, options.PromptCacheKey, options.OnFormatRetry)
 	if err != nil {
 		return schemas.HarnessStageOutput{}, err
 	}

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/Taf0711/splice/internal/splice/schemas"
+	"github.com/Taf0711/splice/internal/tools"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
@@ -23,9 +24,13 @@ type CodeWriter struct{}
 
 var _ Stage = CodeWriter{}
 
+func (CodeWriter) Capabilities() Capabilities {
+	return Capabilities{ConsumesMemory: true, PullContext: true, Description: "writing code changes"}
+}
+
 func (CodeWriter) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options StageOptions) (schemas.HarnessStageOutput, error) {
 	if input.Context == nil {
-		req := options.contextRequest(input.RequestIntent)
+		req := options.contextRequest(input.RequestIntent, derefString(input.RevisionContext))
 		if req != nil {
 			options.report("requesting context: " + req.Reason)
 			return schemas.HarnessStageOutput{
@@ -60,17 +65,69 @@ func (CodeWriter) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 	if err != nil {
 		return schemas.HarnessStageOutput{}, err
 	}
-	collected, err := callValidatedToolUse(ctx, provider, options.model("medium"), options.ReasoningEffort, composeSystemPrompt(codeWriterSystemPrompt), string(payload), options.Images, submitCodeToolDefinition(), &options.Stream, func(collected *zeroruntime.CollectedStream) error {
-		_, err := parseCodeWriterOutput(collected)
-		return err
-	}, options.PromptCacheKey)
+	// D1: the validate callback decodes the action across both typed tools.
+	// A context request is VALID typed output (no format retry); the
+	// orchestrator fulfills it and re-invokes. A submission goes through the
+	// existing proposal parse.
+	collected, err := callValidatedToolUse(ctx, provider, options.model("medium"), options.ReasoningEffort, composeSystemPrompt(codeWriterSystemPrompt, options.ProjectInstructions), string(payload), options.Images, codeWriterTools(), options.MaxOutputTokens, &options.Stream, func(collected *zeroruntime.CollectedStream) error {
+		action, err := TryDecodeStageActionFromTools(collected, codeWriterToolName, contextRequestToolName)
+		if err != nil {
+			return err
+		}
+		if action.Request != nil {
+			return nil // valid context action; no retry
+		}
+		// The whole output contract, as parseCodeWriterOutput applies it
+		// after the call: a missing field is a format retry with feedback,
+		// not a fatal error later (chain pilot: "language is required"
+		// ended a repair).
+		output, err := parseCodeWriterArgs(action.ProposalArgs)
+		if err != nil {
+			return err
+		}
+		return output.Validate()
+	}, options.PromptCacheKey, options.OnFormatRetry)
 	if err != nil {
 		return schemas.HarnessStageOutput{}, withCollectedUsage(err, collected)
+	}
+	// Decode the terminal action. A request_context surfaces as
+	// output.ContextRequest for the orchestrator's expansion loop; a
+	// submit normalizes through the shared materializer below.
+	action, err := TryDecodeStageActionFromTools(collected, codeWriterToolName, contextRequestToolName)
+	if err != nil {
+		return schemas.HarnessStageOutput{}, withCollectedUsage(err, collected)
+	}
+	if action.Request != nil {
+		options.report("requesting context expansion: " + action.Request.Reason)
+		// The memory-review contract applies to every typed call, so the
+		// model's dispositions ride the expansion output too.
+		claims, claimIssues := parseDispositionClaims(contextRequestToolName, collected)
+		memoryReview, reviewNote := reconcileMemoryReview(cwInput.Memory, claims, claimIssues)
+		if reviewNote != "" {
+			options.report(reviewNote)
+		}
+		return schemas.HarnessStageOutput{
+			Summary:        "Code Writer requested additional context.",
+			Detail:         action.Request.Reason,
+			Confidence:     1.0,
+			ContextRequest: action.Request,
+			MemoryReview:   memoryReview,
+			Usage:          usageFromCollected(collected),
+		}, nil
 	}
 	output, err := parseCodeWriterOutput(collected)
 	if err != nil {
 		return schemas.HarnessStageOutput{}, withCollectedUsage(err, collected)
 	}
+	// Disposition bookkeeping is reconciled separately from core output:
+	// malformed claims already could not fail validation, and they never
+	// discard the files above.
+	claims, claimIssues := parseDispositionClaims(codeWriterToolName, collected)
+	memoryReview, reviewNote := reconcileMemoryReview(cwInput.Memory, claims, claimIssues)
+	if reviewNote != "" {
+		options.report(reviewNote)
+	}
+	output.MemoryDisposition = claims
 
 	changedPaths := make([]string, len(output.Files))
 	for i, f := range output.Files {
@@ -100,11 +157,16 @@ func (CodeWriter) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 	}
 
 	return schemas.HarnessStageOutput{
-		Summary:    output.Intent,
-		Detail:     strings.Join(changedPaths, ", "),
-		Confidence: output.Confidence,
-		Data:       data,
-		Usage:      usageFromCollected(collected),
+		Summary:      output.Intent,
+		Detail:       strings.Join(changedPaths, ", "),
+		Confidence:   output.Confidence,
+		MemoryReview: memoryReview,
+		// The additive field carries the changed paths directly, so a
+		// downstream consumer and the TUI read one source instead of the
+		// legacy Data key.
+		ChangedFiles: append([]string(nil), changedPaths...),
+		Data:         data,
+		Usage:        usageFromCollected(collected),
 	}, nil
 }
 
@@ -113,9 +175,13 @@ func parseCodeWriterOutput(collected *zeroruntime.CollectedStream) (schemas.Code
 	if tc == nil {
 		return schemas.CodeWriterOutput{}, fmt.Errorf("model did not call %s", codeWriterToolName)
 	}
-	var output schemas.CodeWriterOutput
-	if err := json.Unmarshal([]byte(tc.Arguments), &output); err != nil {
+	stripped, err := stripDispositionClaims(tc.Arguments)
+	if err != nil {
 		return schemas.CodeWriterOutput{}, fmt.Errorf("parse %s args: %w", codeWriterToolName, err)
+	}
+	output, err := parseCodeWriterArgs(stripped)
+	if err != nil {
+		return schemas.CodeWriterOutput{}, err
 	}
 	if err := output.Validate(); err != nil {
 		return schemas.CodeWriterOutput{}, err
@@ -123,14 +189,162 @@ func parseCodeWriterOutput(collected *zeroruntime.CollectedStream) (schemas.Code
 	return output, nil
 }
 
+// parseCodeWriterArgs decodes submit_code args in EITHER protocol version:
+// the compact/1 proposal form (files carry base_ref/edits/content per the
+// C1 rules) or the legacy full/1 full-content form. Compact proposals are
+// normalized into canonical full-content FileChanges through the shared
+// materializer BEFORE validation, so every downstream consumer (repair
+// hashes, test attribution, changed-path extraction) keeps its full-file
+// contract. The base-snapshot resolver is the caller's view of what the
+// model actually received; a nil resolver makes every compact modify/
+// delete fail with unknown base_ref (loud, never guessed).
+func parseCodeWriterArgs(raw string) (schemas.CodeWriterOutput, error) {
+	var probe struct {
+		Files []json.RawMessage `json:"files"`
+	}
+	if err := json.Unmarshal([]byte(raw), &probe); err != nil {
+		return schemas.CodeWriterOutput{}, fmt.Errorf("parse submit_code args: %w", err)
+	}
+	var output schemas.CodeWriterOutput
+	if err := json.Unmarshal([]byte(raw), &output); err != nil {
+		return schemas.CodeWriterOutput{}, fmt.Errorf("parse submit_code args: %w", err)
+	}
+	if !proposalsContainEdits(probe.Files) {
+		// Legacy full/1: every file carries full content; decode as-is.
+		if err := requireLegacyContent(probe.Files); err != nil {
+			return schemas.CodeWriterOutput{}, err
+		}
+		return output, nil
+	}
+	proposals, err := decodeProposals(probe.Files)
+	if err != nil {
+		return schemas.CodeWriterOutput{}, err
+	}
+	changes, _, err := MaterializeProposals(proposals, currentProposalSnapshot)
+	if err != nil {
+		return schemas.CodeWriterOutput{}, fmt.Errorf("normalize compact proposals: %w", err)
+	}
+	output.Files = changes
+	return output, nil
+}
+
+// proposalsContainEdits reports whether any raw file entry carries the
+// compact/1 fields (base_ref or edits). Used to pick the protocol version
+// per payload: mixed-version payloads normalize through the proposal path
+// and fail there if inconsistent.
+func proposalsContainEdits(files []json.RawMessage) bool {
+	for _, raw := range files {
+		var p struct {
+			BaseRef string            `json:"base_ref"`
+			Edits   []TextReplacement `json:"edits"`
+		}
+		if json.Unmarshal(raw, &p) == nil && (p.BaseRef != "" || len(p.Edits) > 0) {
+			return true
+		}
+	}
+	return false
+}
+
+// requireLegacyContent rejects a full/1 file entry that creates or modifies
+// a file but has no content key and no edits. Decoded as-is, the entry
+// reads as empty content and overwrites the file with nothing. An upstream
+// that strips the nested edit fields from a tool call produced exactly
+// this (P1e, deepinfra/fp8). An explicit "content": "" stays valid.
+func requireLegacyContent(files []json.RawMessage) error {
+	for i, raw := range files {
+		var entry map[string]json.RawMessage
+		if json.Unmarshal(raw, &entry) != nil {
+			continue
+		}
+		var changeType, path string
+		_ = json.Unmarshal(entry["change_type"], &changeType)
+		_ = json.Unmarshal(entry["path"], &path)
+		if _, ok := entry["content"]; ok || changeType == "delete" {
+			continue
+		}
+		return fmt.Errorf("files[%d] %s: %q has no content and no base_ref with edits; send the full content, or base_ref with edits", i, path, changeType)
+	}
+	return nil
+}
+
+func decodeProposals(files []json.RawMessage) ([]ProposedFileChange, error) {
+	out := make([]ProposedFileChange, 0, len(files))
+	for i, raw := range files {
+		var p ProposedFileChange
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, fmt.Errorf("files[%d]: parse proposal: %w", i, err)
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+// actionFieldName is the declared discriminator field. The tool schema
+// advertises it; the decoder dispatches on it.
+const actionFieldName = "action"
+
+// actionContextRequestSchema is the declared `request_context` payload:
+// bounded file/range/symbol/search reads only. Repository-wide listing is
+// deliberately absent, because ValidateActionContextRequest rejects it.
+func actionContextRequestSchema() map[string]any {
+	return map[string]any{
+		"type":        "object",
+		"description": "Source you have not received. The host fulfills it and calls you again with the new evidence. reason is required and must name what you need and why.",
+		"properties": map[string]any{
+			"reason": map[string]any{"type": "string"},
+			"queries": map[string]any{
+				"type":     "array",
+				"maxItems": maxActionContextQueries,
+				"items": map[string]any{
+					"type": "object",
+					"description": "One bounded source query. Every query needs max_results and max_chars. " +
+						"read_file and outline need path; search needs pattern; find_symbol and get_symbol need symbol.",
+					"properties": map[string]any{
+						"query_type": map[string]any{"type": "string", "description": "read_file or outline need path. search needs pattern. find_symbol or get_symbol need symbol.", "enum": []string{
+							string(schemas.ContextReadFile),
+							string(schemas.ContextOutline),
+							string(schemas.ContextSearch),
+							string(schemas.ContextFindSymbol),
+							string(schemas.ContextGetSymbol),
+						}},
+						"path":        map[string]any{"type": "string", "description": "Workspace-relative path. Required for read_file and outline."},
+						"pattern":     map[string]any{"type": "string", "description": "Search pattern. Required for search."},
+						"symbol":      map[string]any{"type": "string", "description": "Qualified symbol name. Required for find_symbol and get_symbol."},
+						"start_line":  map[string]any{"type": "integer", "description": "Optional 1-based first line of a read_file range. Set together with end_line."},
+						"end_line":    map[string]any{"type": "integer", "description": "Optional 1-based last line of a read_file range. Set together with start_line."},
+						"max_results": map[string]any{"type": "integer", "minimum": 1, "maximum": 200, "description": "Mandatory. Maximum matches to return, 1 to 200."},
+						"max_chars":   map[string]any{"type": "integer", "minimum": 1, "maximum": 20000, "description": "Mandatory. Maximum characters to deliver, 1 to 20000."},
+					},
+					"required": []string{"query_type", "max_results", "max_chars"},
+					// The per-type field cannot be expressed as a flat required
+					// list, so anyOf names the alternatives. The decoder still
+					// enforces the exact field for each query_type.
+					"anyOf": []any{
+						map[string]any{"required": []string{"path"}},
+						map[string]any{"required": []string{"pattern"}},
+						map[string]any{"required": []string{"symbol"}},
+					},
+				},
+			},
+		},
+		"required": []string{"reason", "queries"},
+	}
+}
+
+// submitCodeToolDefinition is the model-facing submission tool. It carries
+// no request_context property and no action discriminator: the two-tool
+// contract makes the branches structurally exclusive, and the required
+// list states exactly what a submission must carry, so the model can see
+// the fields the validator enforces. The schema is stable across memory
+// presence (see applyMemoryDefinition).
 func submitCodeToolDefinition() zeroruntime.ToolDefinition {
-	return zeroruntime.ToolDefinition{
+	definition := zeroruntime.ToolDefinition{
 		Name:        codeWriterToolName,
-		Description: "Submit the complete CodeWriterOutput for the requested implementation.",
+		Description: "Submit the complete CodeWriterOutput for the requested implementation. To ask for missing source instead, call " + contextRequestToolName + ".",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"files":             fileChangeArraySchema(),
+				"files":             proposalArraySchema(),
 				"language":          map[string]any{"type": "string"},
 				"intent":            map[string]any{"type": "string"},
 				"dependencies":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
@@ -140,6 +354,42 @@ func submitCodeToolDefinition() zeroruntime.ToolDefinition {
 			"required": []string{"files", "language", "intent", "confidence"},
 		},
 	}
+	applyMemoryDefinition(definition.Parameters)
+	return definition
+}
+
+// codeWriterTools lists both typed actions the code writer may take. Two
+// independently named tool schemas normalize into the same StageAction,
+// which makes the branches structurally exclusive: the submission tool
+// carries no request_context property, and the context tool carries no
+// submission payload. With several tools the request forces some tool call
+// without naming which, so prose cannot strand the typed-output retry
+// loop.
+func codeWriterTools() []zeroruntime.ToolDefinition {
+	return []zeroruntime.ToolDefinition{
+		submitCodeToolDefinition(),
+		contextRequestToolDefinition(),
+	}
+}
+
+// runToolWithExpectedBase invokes the mutating tool with the caller's
+// expected-content digest attached when one exists. The digest rides the
+// args under "expected_base"; write_file reads and verifies it inside the
+// tool, immediately before mutation (C2): a file mutated between
+// preflight and write is caught and nothing is written. Model-supplied
+// args cannot forge safety here: a mismatching digest only FAILS a write,
+// and a correct digest merely confirms the file the model's proposal was
+// composed against is still current.
+func runToolWithExpectedBase(ctx context.Context, runTool func(context.Context, string, map[string]any) (ToolResult, error), toolName string, args map[string]any, expectedBase string) (ToolResult, error) {
+	if expectedBase != "" && toolName == "write_file" {
+		clone := make(map[string]any, len(args)+1)
+		for k, v := range args {
+			clone[k] = v
+		}
+		clone["expected_base"] = expectedBase
+		args = clone
+	}
+	return runTool(ctx, toolName, args)
 }
 
 func applyFileChanges(ctx context.Context, workDir string, files []schemas.FileChange, runTool func(context.Context, string, map[string]any) (ToolResult, error)) (schemas.FileChangeApplyResult, error) {
@@ -151,34 +401,56 @@ func applyFileChanges(ctx context.Context, workDir string, files []schemas.FileC
 		return schemas.FileChangeApplyResult{}, fmt.Errorf("resolve work dir: %w", err)
 	}
 
-	result := schemas.FileChangeApplyResult{Workspace: absWorkDir, Applied: []schemas.AppliedFileChange{}}
+	// C2 preflight: every change is validated and its target resolved
+	// BEFORE the first write starts. A bad later proposal then rejects
+	// the whole batch instead of leaving a half-applied set. The
+	// expected-base digest per modify/delete target is captured here from
+	// the CURRENT bytes; the write_file recheck verifies it again inside
+	// the tool after hooks.
+	type prepared struct {
+		f            schemas.FileChange
+		absTarget    string
+		relTarget    string
+		resolveErr   error
+		expectedBase string
+		priorBytes   int
+	}
+	preparedFiles := make([]prepared, 0, len(files))
 	for _, f := range files {
+		if err := ctx.Err(); err != nil {
+			return schemas.FileChangeApplyResult{Workspace: absWorkDir, Applied: []schemas.AppliedFileChange{}}, fmt.Errorf("preflight %s %s: %w", f.ChangeType, f.Path, err)
+		}
+		if err := f.Validate(); err != nil {
+			return schemas.FileChangeApplyResult{Workspace: absWorkDir, Applied: []schemas.AppliedFileChange{}}, fmt.Errorf("preflight invalid change: %w", err)
+		}
+		p := prepared{f: f}
+		p.absTarget, p.relTarget, p.resolveErr = resolveApplyTarget(absWorkDir, f.Path)
+		if p.resolveErr == nil && p.relTarget == "." {
+			return schemas.FileChangeApplyResult{Workspace: absWorkDir, Applied: []schemas.AppliedFileChange{}}, fmt.Errorf("preflight %s %s: cannot target workspace root", f.ChangeType, f.Path)
+		}
+		if p.resolveErr == nil && (f.ChangeType == "modify" || f.ChangeType == "delete") {
+			if prior, rerr := os.ReadFile(p.absTarget); rerr == nil {
+				p.expectedBase = tools.HashContent(prior)
+				p.priorBytes = len(prior)
+			} else if runTool == nil {
+				return schemas.FileChangeApplyResult{Workspace: absWorkDir, Applied: []schemas.AppliedFileChange{}}, fmt.Errorf("preflight %s %s: read prior content: %w", f.ChangeType, f.Path, rerr)
+			}
+		}
+		preparedFiles = append(preparedFiles, p)
+	}
+
+	result := schemas.FileChangeApplyResult{Workspace: absWorkDir, Applied: []schemas.AppliedFileChange{}}
+	for _, pf := range preparedFiles {
+		f := pf.f
 		if err := ctx.Err(); err != nil {
 			return result, fmt.Errorf("apply %s %s: %w", f.ChangeType, f.Path, err)
 		}
-		if err := f.Validate(); err != nil {
-			return result, fmt.Errorf("apply invalid change: %w", err)
-		}
 
-		// Workspace confinement is enforced in two places on purpose. In registry
-		// mode the scoped tool is the authority: it enforces the workspace AND any
-		// explicitly granted extra write roots (--add-dir), so a resolve failure
-		// here must not pre-empt a grant the tool would honor. In fallback mode
-		// there is no tool, so the resolver is the only guard and stays mandatory.
-		absTarget, relTarget, resolveErr := resolveApplyTarget(absWorkDir, f.Path)
-		if resolveErr == nil && relTarget == "." {
-			return result, fmt.Errorf("apply %s %s: cannot target workspace root", f.ChangeType, f.Path)
-		}
+		absTarget, _, resolveErr := pf.absTarget, pf.relTarget, pf.resolveErr
 
 		var bytesRead int
 		if resolveErr == nil && (f.ChangeType == "modify" || f.ChangeType == "delete") {
-			// Best-effort prior size for the apply record; the tool re-validates
-			// existence and type itself in registry mode.
-			if prior, rerr := os.ReadFile(absTarget); rerr == nil {
-				bytesRead = len(prior)
-			} else if runTool == nil {
-				return result, fmt.Errorf("apply %s %s: read prior content: %w", f.ChangeType, f.Path, rerr)
-			}
+			bytesRead = pf.priorBytes
 		}
 
 		if runTool != nil {
@@ -190,7 +462,14 @@ func applyFileChanges(ctx context.Context, workDir string, files []schemas.FileC
 			switch f.ChangeType {
 			case "create":
 				toolName = "write_file"
-				args = map[string]any{"path": f.Path, "content": f.Content}
+				// A create is a full-content write. The repair loop re-emits
+				// files the prior iteration wrote with change_type create,
+				// because the host cannot mint a base_ref for a path it did not
+				// deliver as a view to this invocation. Allow the create to
+				// replace an existing path; RequireReadBeforeWrite and the
+				// tracker conflict guard still refuse an unread or externally
+				// changed file.
+				args = map[string]any{"path": f.Path, "content": f.Content, "overwrite": true}
 			case "modify":
 				toolName = "write_file"
 				args = map[string]any{"path": f.Path, "content": f.Content, "overwrite": true}
@@ -198,7 +477,7 @@ func applyFileChanges(ctx context.Context, workDir string, files []schemas.FileC
 				toolName = "delete_file"
 				args = map[string]any{"path": f.Path}
 			}
-			res, err := runTool(ctx, toolName, args)
+			res, err := runToolWithExpectedBase(ctx, runTool, toolName, args, pf.expectedBase)
 			if err != nil {
 				return result, fmt.Errorf("apply %s %s: tool error: %w", f.ChangeType, f.Path, err)
 			}

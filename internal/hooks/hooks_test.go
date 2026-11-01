@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Taf0711/splice/internal/projectfile"
 )
 
 func TestResolvePathsUsesXDGLocations(t *testing.T) {
@@ -392,4 +394,139 @@ func hasHookDiagnostic(diagnostics []Diagnostic, kind DiagnosticKind, hookID str
 		return true
 	}
 	return false
+}
+
+func TestLoadConfigRefusesOversizedOrEscapingProjectLayer(t *testing.T) {
+	root := t.TempDir()
+	projectConfigPath := filepath.Join(root, ".splice", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(projectConfigPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oversized := `{"hooks":[],"pad":"` + strings.Repeat("x", projectfile.MaxBytes) + `"}`
+	if err := os.WriteFile(projectConfigPath, []byte(oversized), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := LoadConfig(LoadOptions{UserConfigPath: filepath.Join(root, "none.json"), ProjectConfigPath: projectConfigPath})
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if len(result.Diagnostics) != 1 || result.Diagnostics[0].Kind != DiagnosticIO || !strings.Contains(result.Diagnostics[0].Message, "limit") {
+		t.Fatalf("oversized project layer: want one IO diagnostic naming the limit, got %#v", result.Diagnostics)
+	}
+	if len(result.Config.Hooks) != 0 {
+		t.Fatalf("oversized project layer must not load hooks: %#v", result.Config.Hooks)
+	}
+
+	outside := filepath.Join(t.TempDir(), "outside.json")
+	if err := os.WriteFile(outside, []byte(`{"hooks":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(projectConfigPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, projectConfigPath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	result, err = LoadConfig(LoadOptions{UserConfigPath: filepath.Join(root, "none.json"), ProjectConfigPath: projectConfigPath})
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if len(result.Diagnostics) != 1 || result.Diagnostics[0].Kind != DiagnosticIO {
+		t.Fatalf("escaping project layer: want one IO diagnostic, got %#v", result.Diagnostics)
+	}
+}
+
+// TestConfigStoreUserFileMayBeSymlinked pins that the user hooks.json is read
+// without project containment. A dotfiles repo often links it, so a list of
+// the user file must succeed. The project store keeps the containment check.
+func TestConfigStoreUserFileMayBeSymlinked(t *testing.T) {
+	dir := t.TempDir()
+	// The dotfiles target sits outside both the user config directory and the
+	// workspace, so only the user store may read it.
+	dotfiles := filepath.Join(dir, "dotfiles", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(dotfiles), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dotfiles, []byte(`{"enabled":true,"hooks":[{"id":"u1","event":"beforeTool","command":"sh","args":[],"enabled":true}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "config", "splice", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(dotfiles, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	user, err := NewConfigStore(StoreOptions{ConfigPath: link, Source: SourceUser})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := user.List()
+	if err != nil {
+		t.Fatalf("user List through a symlink: %v", err)
+	}
+	if len(config.Hooks) != 1 || config.Hooks[0].ID != "u1" {
+		t.Fatalf("user List hooks = %#v, want the linked hook", config.Hooks)
+	}
+
+	// A project file sits at <workspace>/.splice/hooks.json, so its root is the
+	// workspace. The same kind of link there must stay refused.
+	projectLink := filepath.Join(dir, "ws", ".splice", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(projectLink), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(dotfiles, projectLink); err != nil {
+		t.Fatal(err)
+	}
+	project, err := NewConfigStore(StoreOptions{ConfigPath: projectLink})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := project.List(); err == nil || !strings.Contains(err.Error(), projectfile.ErrOutsideRoot.Error()) {
+		t.Fatalf("project List through an outside symlink: err = %v, want the outside-root refusal", err)
+	}
+}
+
+// TestConfigStoreUserWriteKeepsSymlink pins that a write to a symlinked user
+// hooks.json keeps the link. The new hook must land in the link target.
+func TestConfigStoreUserWriteKeepsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	dotfiles := filepath.Join(dir, "dotfiles", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(dotfiles), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dotfiles, []byte(`{"enabled":true,"hooks":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "config", "splice", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(dotfiles, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	store, err := NewConfigStore(StoreOptions{ConfigPath: link, Source: SourceUser})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Upsert(Definition{ID: "u2", Event: EventBeforeTool, Command: "sh", Enabled: true}); err != nil {
+		t.Fatalf("user Upsert through a symlink: %v", err)
+	}
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("user hooks.json is no longer a symlink after add; mode = %v", info.Mode())
+	}
+	data, err := os.ReadFile(dotfiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"u2"`) {
+		t.Fatalf("symlink target lacks the new hook: %s", data)
+	}
 }

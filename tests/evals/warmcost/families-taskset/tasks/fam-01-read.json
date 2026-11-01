@@ -1,0 +1,8 @@
+{
+  "name": "fam-01-read",
+  "phase": "read",
+  "precursor": "fam-01-write",
+  "prompt": "Add AdminForceSignOut(store *Store, userID string) error in admin.go: invalidate every session held by userID, reusing the SAME invalidation rule the password reset path established. Follow that convention. A user with no sessions is not an error: return nil.",
+  "check": "# fam-01: AdminForceSignOut invalidates every session of a user.\n# Base fails (no admin.go), gold passes, partial invalidation fails.\ncat > probe_signout_test.go <<'EOF'\npackage main\n\nimport (\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestProbeAdminForceSignOut(t *testing.T) {\n\tstore := NewStore(time.Minute)\n\tstore.now = func() time.Time { return time.Unix(1000, 0) }\n\tfor _, id := range []string{\"s1\", \"s2\", \"s3\"} {\n\t\tstore.Create(id, \"alice\")\n\t}\n\tstore.Create(\"x1\", \"bob\")\n\n\tif err := AdminForceSignOut(store, \"alice\"); err != nil {\n\t\tt.Fatalf(\"AdminForceSignOut: %v\", err)\n\t}\n\t// Every session of alice is gone; other users unaffected.\n\tif _, err := store.Get(\"s1\"); err == nil {\n\t\tt.Fatal(\"s1 still live after force sign-out\")\n\t}\n\tif _, err := store.Get(\"s2\"); err == nil {\n\t\tt.Fatal(\"s2 still live after force sign-out\")\n\t}\n\tif _, err := store.Get(\"s3\"); err == nil {\n\t\tt.Fatal(\"s3 still live after force sign-out\")\n\t}\n\tif _, err := store.Get(\"x1\"); err != nil {\n\t\tt.Fatalf(\"unrelated session was invalidated: %v\", err)\n\t}\n\t// Unknown user is not an error (idempotent convention).\n\tif err := AdminForceSignOut(store, \"nobody\"); err != nil {\n\t\tt.Fatalf(\"sign-out of user with no sessions: %v\", err)\n\t}\n}\nEOF\ngo test -count=1 . ; rc=$? ; rm -f probe_signout_test.go ; exit $rc",
+  "fixture": "fixture"
+}

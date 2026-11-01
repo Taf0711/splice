@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "selection": "sha256(swebench-pro-os-dev-subset-v1 + 0x00 + instance_id), ascending, first 12",
+  "dataset": "ScaleAI/SWE-bench_Pro",
+  "dataset_revision": "7ab5114912baf22bb098818e604c02fe7ad2c11f",
+  "dataset_split": "test",
+  "evaluator_repo": "https://github.com/scaleapi/SWE-bench_Pro-os",
+  "evaluator_commit": "ca10a60a5fcae51e6948ffe1485d4153d421e6c5",
+  "instance_ids": [
+    "instance_ansible__ansible-12734fa21c08a0ce8c84e533abdc560db2eb1955-v7eee2454f617569fd6889f2211f75bc02a35f9f8",
+    "instance_ansible__ansible-5f4e332e3762999d94af27746db29ff1729252c1-v0f01c69f1e2528b935359cfe578530722bca2c59",
+    "instance_ansible__ansible-949c503f2ef4b2c5d668af0492a5c0db1ab86140-v0f01c69f1e2528b935359cfe578530722bca2c59",
+    "instance_flipt-io__flipt-7161f7b876773a911afdd804b281e52681cb7321",
+    "instance_flipt-io__flipt-f743945d599b178293e89e784b3b2374b1026430",
+    "instance_future-architect__vuls-436341a4a522dc83eb8bddd1164b764c8dd6bc45",
+    "instance_future-architect__vuls-9a32a94806b54141b7ff12503c48da680ebcf199",
+    "instance_gravitational__teleport-1330415d33a27594c948a36d9d7701f496229e9f",
+    "instance_internetarchive__openlibrary-9c392b60e2c6fa1d68cb68084b4b4ff04d0cb35c-v2d9a6c849c60ed19fd0858ce9e40b7cc8e097e59",
+    "instance_internetarchive__openlibrary-f8cc11d9c1575fdba5ac66aee0befca970da8d64-v13642507b4fc1f8d234172bf8129942da2c2ca26",
+    "instance_protonmail__webclients-6dcf0d0b0f7965ad94be3f84971afeb437f25b02",
+    "instance_qutebrowser__qutebrowser-3fd8e12949b8feda401930574facf09dd4180bba"
+  ],
+  "note": "Selected by instance id only. No solvability, difficulty, or outcome signal was used."
+}

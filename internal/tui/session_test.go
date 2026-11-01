@@ -46,7 +46,38 @@ func appendPickerPlan(t *testing.T, store *sessions.Store, sessionID string, pla
 	}
 }
 
-// This test pins launch scoping to the current workspace, not global history.
+// runSessionScan executes the launch scan synchronously and feeds the
+// result back through Update, so tests exercise the same async flow the
+// UI does. The scan arms the launch resume card; it never opens a picker.
+func runSessionScan(t *testing.T, m model) model {
+	t.Helper()
+	var scanCmd tea.Cmd
+	m, scanCmd = m.openLaunchSessionPicker()
+	if scanCmd == nil {
+		return m
+	}
+	updated, _ := m.Update(scanCmd())
+	next, _ := updated.(model)
+	return next
+}
+
+// openResumePicker arms the /resume scan and lands it synchronously.
+func openResumePicker(t *testing.T, m model) model {
+	t.Helper()
+	m.input.SetValue("/resume")
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("resume: no scan cmd armed")
+	}
+	if msg := cmd(); msg != nil {
+		updated, _ = next.Update(msg)
+		next = updated.(model)
+	}
+	return next
+}
+
+// Launch never auto-opens a picker — the scan only feeds the resume card.
 func TestLaunchPickerScopesPlansToWorkspace(t *testing.T) {
 	store := testSessionStore(t)
 	foreign, err := store.Create(sessions.CreateInput{Title: "Foreign plan", Cwd: filepath.Join(t.TempDir(), "other")})
@@ -56,9 +87,12 @@ func TestLaunchPickerScopesPlansToWorkspace(t *testing.T) {
 	appendPickerPlan(t, store, foreign.SessionID, "foreign-plan")
 
 	m := newModel(context.Background(), Options{Cwd: filepath.Join(t.TempDir(), "workspace"), SessionStore: store})
-	next := m.openLaunchSessionPicker()
+	next := runSessionScan(t, m)
 	if next.picker != nil {
-		t.Fatalf("launch picker opened for a plan in another workspace: %#v", next.picker.items)
+		t.Fatalf("launch scan opened a picker: %#v", next.picker)
+	}
+	if next.scannedLatest != nil {
+		t.Fatalf("launch card armed for a foreign-workspace session: %+v", next.scannedLatest.Meta)
 	}
 }
 
@@ -78,10 +112,10 @@ func TestLaunchPickerStaysClosedWhenSuppressed(t *testing.T) {
 		return newModel(context.Background(), Options{Cwd: workspace, SessionStore: store})
 	}
 
-	// Control: without a guard the picker must open, otherwise the cases below
-	// would pass for the wrong reason.
-	if newModelWithPlan(t).openLaunchSessionPicker().picker == nil {
-		t.Fatal("control: launch picker did not open for a workspace plan")
+	// Control: the scan must arm the card, and /resume must open the picker —
+	// otherwise the cases below would pass for the wrong reason.
+	if runSessionScan(t, newModelWithPlan(t)).scannedLatest == nil {
+		t.Fatal("control: launch scan did not arm the resume card")
 	}
 
 	for _, test := range []struct {
@@ -100,14 +134,14 @@ func TestLaunchPickerStaysClosedWhenSuppressed(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			m := test.arrange(newModelWithPlan(t))
-			if next := m.openLaunchSessionPicker(); next.picker != nil {
-				t.Fatalf("launch picker opened despite %s: %#v", test.name, next.picker.items)
+			if next := runSessionScan(t, m); next.picker != nil {
+				t.Fatalf("launch scan opened a picker despite %s: %#v", test.name, next.picker)
 			}
 		})
 	}
 }
 
-// This test pins a workspace plan to the launch picker and exposes its phase.
+// /resume's picker pins the workspace plan and exposes its phase.
 func TestLaunchPickerShowsPlanStatus(t *testing.T) {
 	store := testSessionStore(t)
 	workspace := t.TempDir()
@@ -118,12 +152,12 @@ func TestLaunchPickerShowsPlanStatus(t *testing.T) {
 	appendPickerPlan(t, store, session.SessionID, "workspace-plan")
 
 	m := newModel(context.Background(), Options{Cwd: workspace, SessionStore: store})
-	next := m.openLaunchSessionPicker()
+	next := openResumePicker(t, m)
 	if next.picker == nil || !next.picker.planBearing {
-		t.Fatalf("expected launch picker for workspace plan, got %#v", next.picker)
+		t.Fatalf("expected resume picker for workspace plan, got %#v", next.picker)
 	}
-	if next.picker.title != "Continue where you left off" {
-		t.Fatalf("launch picker title = %q", next.picker.title)
+	if next.picker.title != "Resume a session" {
+		t.Fatalf("resume picker title = %q", next.picker.title)
 	}
 	if !strings.Contains(next.picker.items[0].Label, "crystallized") || !strings.Contains(next.picker.items[0].Label, "0/1 steps") {
 		t.Fatalf("plan status missing from picker row: %#v", next.picker.items[0])
@@ -381,20 +415,22 @@ func TestPromptSubmitPersistsToolSessionEvents(t *testing.T) {
 	}
 	if got := eventTypes(events); !equalEventTypes(got, []sessions.EventType{
 		sessions.EventMessage,
+		sessions.EventUsage,
 		sessions.EventToolCall,
 		sessions.EventToolResult,
+		sessions.EventUsage,
 		sessions.EventMessage,
 	}) {
 		t.Fatalf("unexpected event sequence: %#v", got)
 	}
-	assertPayloadField(t, events[1], "id", "call_1")
-	assertPayloadField(t, events[1], "name", "read_file")
-	assertPayloadField(t, events[1], "arguments", `{"path":"notes.txt"}`)
-	assertPayloadField(t, events[2], "toolCallId", "call_1")
+	assertPayloadField(t, events[2], "id", "call_1")
 	assertPayloadField(t, events[2], "name", "read_file")
-	assertPayloadField(t, events[2], "status", "ok")
-	assertPayloadFieldContains(t, events[2], "output", "file contents")
-	assertPayloadField(t, events[3], "content", "read complete")
+	assertPayloadField(t, events[2], "arguments", `{"path":"notes.txt"}`)
+	assertPayloadField(t, events[3], "toolCallId", "call_1")
+	assertPayloadField(t, events[3], "name", "read_file")
+	assertPayloadField(t, events[3], "status", "ok")
+	assertPayloadFieldContains(t, events[3], "output", "file contents")
+	assertPayloadField(t, events[5], "content", "read complete")
 }
 
 func TestPromptSubmitPersistsPermissionSessionEvents(t *testing.T) {
@@ -458,7 +494,7 @@ func TestPromptSubmitPersistsPermissionSessionEvents(t *testing.T) {
 		// not one of the 4 semantic steps this test drives — process them so the
 		// model state advances, but don't count them toward the budget.
 		switch runtimeMsg.(type) {
-		case toolCallStreamStartMsg, toolCallStreamDeltaMsg:
+		case toolCallStreamStartMsg, toolCallStreamDeltaMsg, agentUsageMsg:
 			continue
 		}
 		received++
@@ -495,24 +531,36 @@ func TestPromptSubmitPersistsPermissionSessionEvents(t *testing.T) {
 	}
 	if got := eventTypes(events); !equalEventTypes(got, []sessions.EventType{
 		sessions.EventMessage,
+		sessions.EventUsage,
 		sessions.EventToolCall,
 		sessions.EventSessionCheckpoint,
 		sessions.EventPermissionRequest,
 		sessions.EventPermissionDecision,
 		sessions.EventToolResult,
+		sessions.EventUsage,
 		sessions.EventMessage,
 	}) {
 		t.Fatalf("unexpected event sequence: %#v", got)
 	}
-	assertPayloadField(t, events[3], "toolCallId", "call_write")
-	assertPayloadField(t, events[3], "name", "write_file")
-	assertPayloadField(t, events[3], "action", "prompt")
-	assertPayloadField(t, events[3], "permission", "prompt")
-	assertPayloadField(t, events[3], "permissionMode", "ask")
-	assertPayloadField(t, events[3], "sideEffect", "write")
-	assertPayloadField(t, events[4], "action", "deny")
-	assertPayloadField(t, events[4], "decisionReason", "denied in TUI")
-	assertPayloadField(t, events[6], "content", "write blocked")
+	assertPayloadField(t, events[4], "toolCallId", "call_write")
+	assertPayloadField(t, events[4], "name", "write_file")
+	assertPayloadField(t, events[4], "action", "prompt")
+	assertPayloadField(t, events[4], "permission", "prompt")
+	assertPayloadField(t, events[4], "permissionMode", "ask")
+	assertPayloadField(t, events[4], "sideEffect", "write")
+	assertPayloadField(t, events[5], "action", "deny")
+	assertPayloadField(t, events[5], "decisionReason", "denied in TUI")
+	assertPayloadField(t, events[8], "content", "write blocked")
+	// A stream with no provider usage is priced as unpriced, not rejected.
+	assertPayloadField(t, events[1], "costStatus", "unpriced")
+	assertPayloadField(t, events[1], "unpricedReason", "usage not reported by provider")
+	for _, row := range next.transcript {
+		// A pipeline turn projects its receipt card as an error-kind row. Only a
+		// raw error row is a failure here.
+		if _, isCard := parseReceiptTranscriptPayload(row.text); row.kind == rowError && !isCard {
+			t.Fatalf("expected no error row in transcript, got %q", row.text)
+		}
+	}
 	if !transcriptContains(next.transcript, "permission: write_file prompt") {
 		t.Fatalf("expected permission row in transcript, got %#v", next.transcript)
 	}
@@ -545,19 +593,21 @@ func TestPermissionPromptAllowWritesFileAndRecordsDecision(t *testing.T) {
 	events := readOnlySessionEvents(t, store)
 	if got := eventTypes(events); !equalEventTypes(got, []sessions.EventType{
 		sessions.EventMessage,
+		sessions.EventUsage,
 		sessions.EventToolCall,
 		sessions.EventSessionCheckpoint,
 		sessions.EventPermissionRequest,
 		sessions.EventPermissionDecision,
 		sessions.EventToolResult,
+		sessions.EventUsage,
 		sessions.EventMessage,
 	}) {
 		t.Fatalf("unexpected event sequence: %#v", got)
 	}
-	assertPayloadField(t, events[4], "action", "allow")
-	assertPayloadField(t, events[4], "decisionReason", "approved in TUI")
-	assertPayloadField(t, events[5], "status", "ok")
-	assertPayloadField(t, events[6], "content", "write allowed")
+	assertPayloadField(t, events[5], "action", "allow")
+	assertPayloadField(t, events[5], "decisionReason", "approved in TUI")
+	assertPayloadField(t, events[6], "status", "ok")
+	assertPayloadField(t, events[8], "content", "write allowed")
 	if !transcriptContains(next.transcript, "permission: write_file allow") {
 		t.Fatalf("expected allow decision in transcript, got %#v", next.transcript)
 	}
@@ -670,6 +720,11 @@ func submitAndDrivePermissionRun(t *testing.T, m model, prompt string, key strin
 		runtimeMsg := receiveRuntimeMessage(t, runtimeMessages)
 		updated, _ = next.Update(runtimeMsg)
 		next = updated.(model)
+		// Per-stream usage is bookkeeping, not one of the counted steps.
+		if _, ok := runtimeMsg.(agentUsageMsg); ok {
+			received--
+			continue
+		}
 		if _, ok := runtimeMsg.(permissionRequestMsg); ok && key != "" {
 			updated, _ = next.Update(testKeyText(key))
 			next = updated.(model)
@@ -860,8 +915,13 @@ func TestRewindRefreshesInMemorySessionState(t *testing.T) {
 	eventsBefore := len(m.sessionEvents)
 
 	m, out := m.handleRewindCommand("latest")
-	if !strings.Contains(out, "Rewound") {
+	if !strings.Contains(out, "rewound to sequence") {
 		t.Fatalf("expected a rewind summary, got %q", out)
+	}
+	// P15: the rewind ack must state that evidence was invalidated and that
+	// verification must run again.
+	if !strings.Contains(out, "evidence was invalidated") || !strings.Contains(out, "verification must run again") {
+		t.Fatalf("rewind ack missing the evidence-invalidation warning: %q", out)
 	}
 
 	if len(m.sessionEvents) >= eventsBefore {

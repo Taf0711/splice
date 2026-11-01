@@ -8,7 +8,9 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
+	"github.com/Taf0711/splice/internal/presentation"
 	"github.com/Taf0711/splice/internal/sessions"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/tools"
@@ -165,7 +167,7 @@ func TestSwarmSessionsMsgPopulatesMap(t *testing.T) {
 
 func sidebarTestModel() model {
 	m := newModel(context.Background(), Options{ProviderName: "test-provider", ModelName: "test-model"})
-	m.width = 100
+	m.width = 130
 	m.height = 30
 	m.altScreen = true
 	m.headerPrinted = true
@@ -196,11 +198,14 @@ func TestSidebarActiveGating(t *testing.T) {
 		t.Fatalf("expected sidebar active for wide alt-screen model")
 	}
 
-	// Home/welcome screen (no real conversation yet): single column.
+	// P12 (frame kAYHl): the launch cockpit IS two-column — the empty home
+	// screen hosts the launch modules (NEXT/DECISIONS/AGENTS/TOOLS/CONTEXT),
+	// so the sidebar stays active there. The old single-column-until-conversation
+	// rule retired with the splash.
 	home := m
 	home.transcript = nil
-	if home.sidebarActive() {
-		t.Fatalf("sidebar should be inactive on the empty home screen")
+	if !home.sidebarActive() {
+		t.Fatalf("sidebar should be ACTIVE on the empty home screen (launch cockpit is two-column)")
 	}
 
 	// Too narrow: single column only.
@@ -222,6 +227,29 @@ func TestSidebarActiveGating(t *testing.T) {
 	sub.subchat.active = true
 	if sub.sidebarActive() {
 		t.Fatalf("sidebar should be inactive during subchat drill-in")
+	}
+}
+
+func TestSidebarSurvivesSuggestionPalette(t *testing.T) {
+	m := sidebarTestModel()
+	m.pipeline.reset()
+	m.pipeline.applyState(presentation.State{
+		SchemaVersion: presentation.PresentationSchemaVersionV1,
+		Lifecycle:     presentation.LifecycleExecute,
+		Nodes:         []presentation.ExecutionNode{{ID: "code_writer", Label: "code_writer", Kind: presentation.NodeKindWrite, Status: presentation.NodeStatusRunning}},
+	})
+	m = typeRunes(t, m, "/")
+	if !m.suggestionsActive() {
+		t.Fatalf("expected command suggestions, got %#v", m.suggestions)
+	}
+	if !m.sidebarAvailable() {
+		t.Fatal("sidebar should remain available during an active pipeline run")
+	}
+	if !m.sidebarToggleAllowed() {
+		t.Fatal("sidebar toggle should remain allowed while the suggestion palette is open")
+	}
+	if plain := ansi.Strip(m.transcriptView()); !strings.Contains(plain, "PIPELINE") {
+		t.Fatalf("rendered sidebar should contain PIPELINE while suggestions are open:\n%s", plain)
 	}
 }
 
@@ -669,6 +697,23 @@ func TestSidebarPlanReflectsState(t *testing.T) {
 	}
 }
 
+func TestSidebarPlanFallbackIsHiddenWhileRunIsActive(t *testing.T) {
+	m := sidebarTestModel()
+	m.plan.clear()
+	m.pendingPlan = &schemas.DesignPlan{Tasks: []schemas.Task{{ID: "task-1", Title: "Reviewed task"}}}
+
+	if state := m.sidebarPlanState(); state.isEmpty() {
+		t.Fatal("idle review must show the reviewed design plan")
+	}
+	m.activeRunID = 7
+	if state := m.sidebarPlanState(); !state.isEmpty() {
+		t.Fatalf("active run showed a frozen design-plan fallback: %#v", state.steps)
+	}
+	if lines := m.sidebarPlanLines(40); len(lines) != 0 {
+		t.Fatalf("active run showed fallback plan lines: %#v", lines)
+	}
+}
+
 func TestJoinColumnsAligns(t *testing.T) {
 	chat := []string{"hello", "world", "third row that is longer"}
 	sidebar := []string{"A", "B"}
@@ -702,10 +747,11 @@ func TestTwoColumnTranscriptViewWidth(t *testing.T) {
 func TestSidebarRendersPipelineWithoutPlanOrAgents(t *testing.T) {
 	m := sidebarTestModel()
 	m.plan.steps = nil
-	marker := "\x00STAGE{\"name\":\"code_writer\",\"status\":\"running\",\"detail\":\"\",\"progress\":0,\"changedFiles\":null}\x00"
-	if !m.pipeline.applyStageMarker(marker) {
-		t.Fatal("applyStageMarker returned false")
-	}
+	m.pipeline.applyState(presentation.State{
+		SchemaVersion: presentation.PresentationSchemaVersionV1,
+		Lifecycle:     presentation.LifecycleExecute,
+		Nodes:         []presentation.ExecutionNode{{ID: "code_writer", Label: "code_writer", Kind: presentation.NodeKindWrite, Status: presentation.NodeStatusRunning}},
+	})
 	if !m.sidebarActive() {
 		t.Fatal("the stable sidebar should remain active with pipeline content")
 	}

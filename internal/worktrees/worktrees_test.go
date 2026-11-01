@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Taf0711/splice/internal/gitenv/gitenvtest"
 )
 
 func TestDefaultRunGitSeparatesStdoutAndStderr(t *testing.T) {
@@ -48,7 +50,7 @@ func TestDefaultRunGitSeparatesStdoutAndStderr(t *testing.T) {
 
 func TestPrepareCreatesDetachedGitWorktree(t *testing.T) {
 	root := t.TempDir()
-	base := t.TempDir()
+	base := resolvedPath(t, t.TempDir())
 	runner := &fakeRunner{
 		results: []CommandResult{
 			{Stdout: root + "\n"},
@@ -78,14 +80,121 @@ func TestPrepareCreatesDetachedGitWorktree(t *testing.T) {
 	if !strings.HasPrefix(result.Path, filepath.Join(base, "splice-worktree-")) {
 		t.Fatalf("Path = %q, want under base %q", result.Path, base)
 	}
-	if got := runner.commandLine(3); got != "git worktree add --detach "+result.Path+" HEAD" {
-		t.Fatalf("git worktree command = %q", got)
+	if !result.Locked {
+		t.Fatal("Locked = false, want true")
+	}
+	wantCommand := "git worktree add --detach --lock --reason " + activeWorktreeLockReason + " " + result.Path + " HEAD"
+	if got := runner.commandLine(3); got != wantCommand {
+		t.Fatalf("git worktree command = %q, want %q", got, wantCommand)
+	}
+}
+
+func TestPrepareSeedsWorktreeFromManifest(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	root := resolvedPath(t, t.TempDir())
+	base := resolvedPath(t, t.TempDir())
+	mustGit(t, root, "init", "-b", "main")
+	mustGit(t, root, "config", "user.name", "splice-test")
+	mustGit(t, root, "config", "user.email", "splice-test@local")
+	// A tracked file so the repo has a commit; the seed fixtures stay untracked
+	// (like gitignored .env / node_modules), so the fresh worktree lacks them.
+	if err := os.WriteFile(filepath.Join(root, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, root, "add", "-A")
+	mustGit(t, root, "commit", "-m", "base")
+	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("KEY=value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	nodeModules := filepath.Join(root, "node_modules")
+	if err := os.MkdirAll(nodeModules, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nodeModules, "pkg.txt"), []byte("dep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	seedDir := filepath.Join(root, ".splice")
+	if err := os.MkdirAll(seedDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := "# .splice/worktree-seed\n.env\nsymlink: node_modules\n"
+	if err := os.WriteFile(filepath.Join(seedDir, "worktree-seed"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Prepare(context.Background(), Options{Cwd: root, Name: "seeded", BaseDir: base, Now: fixedTime("2026-06-05T10:30:00Z")})
+	if err != nil {
+		t.Fatalf("Prepare returned error: %v", err)
+	}
+
+	envPath := filepath.Join(result.Path, ".env")
+	data, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("read seeded .env: %v", err)
+	}
+	if string(data) != "KEY=value\n" {
+		t.Fatalf("seeded .env content = %q, want KEY=value\n", string(data))
+	}
+	if info, err := os.Lstat(envPath); err != nil || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf(".env should be a real file, got %v", info)
+	}
+
+	link, err := os.Readlink(filepath.Join(result.Path, "node_modules"))
+	if err != nil {
+		t.Fatalf("read node_modules symlink: %v", err)
+	}
+	if link != nodeModules {
+		t.Fatalf("node_modules symlink = %q, want %q", link, nodeModules)
+	}
+}
+
+func TestPrepareSeedRejectsEscapingAndMissingEntries(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	root := resolvedPath(t, t.TempDir())
+	base := resolvedPath(t, t.TempDir())
+	mustGit(t, root, "init", "-b", "main")
+	mustGit(t, root, "config", "user.name", "splice-test")
+	mustGit(t, root, "config", "user.email", "splice-test@local")
+	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, root, "add", "-A")
+	mustGit(t, root, "commit", "-m", "base")
+	seedDir := filepath.Join(root, ".splice")
+	if err := os.MkdirAll(seedDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name     string
+		manifest string
+		wantErr  string
+	}{
+		{"escape via parent", "../secret\n", "escapes the repository"},
+		{"absolute path", filepath.Join(root, ".env") + "\n", "escapes the repository"},
+		{"missing entry", "does-not-exist\n", "does not exist in the source repository"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(filepath.Join(seedDir, "worktree-seed"), []byte(tc.manifest), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Prepare(context.Background(), Options{Cwd: root, Name: "bad-" + strings.ReplaceAll(tc.name, " ", "-"), BaseDir: base, Now: fixedTime("2026-06-05T10:30:00Z")})
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Prepare error = %v, want containing %q", err, tc.wantErr)
+			}
+		})
 	}
 }
 
 func TestPrepareReusesExistingGitWorktree(t *testing.T) {
 	root := t.TempDir()
-	base := t.TempDir()
+	base := resolvedPath(t, t.TempDir())
 	sourceGit := filepath.Join(root, ".git")
 	if err := os.MkdirAll(sourceGit, 0o700); err != nil {
 		t.Fatal(err)
@@ -101,6 +210,10 @@ func TestPrepareReusesExistingGitWorktree(t *testing.T) {
 			{Stdout: "abc1234\n"},
 			{Stdout: sourceGit + "\n"},
 			{Stdout: sourceGit + "\n"},
+			{},
+			{Stdout: "headsha1\n"},
+			{},
+			{},
 		},
 	}
 
@@ -114,20 +227,20 @@ func TestPrepareReusesExistingGitWorktree(t *testing.T) {
 		t.Fatalf("Prepare returned error: %v", err)
 	}
 
-	if !result.Reused {
-		t.Fatalf("Reused = false, want true")
+	if !result.Reused || !result.Locked {
+		t.Fatalf("expected reused and locked result, got %#v", result)
 	}
 	if result.Path != existing {
 		t.Fatalf("Path = %q, want existing %q", result.Path, existing)
 	}
-	if len(runner.calls) != 5 {
+	if len(runner.calls) != 9 {
 		t.Fatalf("expected metadata git calls only, got %#v", runner.calls)
 	}
 }
 
 func TestPrepareRejectsExistingWorktreeFromDifferentRepo(t *testing.T) {
 	root := t.TempDir()
-	base := t.TempDir()
+	base := resolvedPath(t, t.TempDir())
 	sourceGit := filepath.Join(root, ".git")
 	otherGit := filepath.Join(t.TempDir(), ".git")
 	for _, dir := range []string{sourceGit, otherGit} {
@@ -162,7 +275,7 @@ func TestPrepareRejectsExistingWorktreeFromDifferentRepo(t *testing.T) {
 
 func TestPrepareValidatesNameAndExistingDirectory(t *testing.T) {
 	root := t.TempDir()
-	base := t.TempDir()
+	base := resolvedPath(t, t.TempDir())
 	runner := &fakeRunner{
 		results: []CommandResult{
 			{Stdout: root + "\n"},
@@ -184,6 +297,16 @@ func TestPrepareValidatesNameAndExistingDirectory(t *testing.T) {
 	}
 	if _, err := Prepare(context.Background(), Options{Cwd: root, Name: "blocked", BaseDir: base, RunGit: runner.Run}); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("expected non-empty directory error, got %v", err)
+	}
+}
+
+func TestInspectTargetRejectsSymlink(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "target")
+	if err := os.Symlink(t.TempDir(), target); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := inspectTarget(target); err == nil || !strings.Contains(err.Error(), "not a real directory") {
+		t.Fatalf("expected symlink rejection, got %v", err)
 	}
 }
 
@@ -289,6 +412,122 @@ func TestMergeBackNoChangesWhenSourceAdvanced(t *testing.T) {
 	}
 }
 
+func TestMergeBackAcceptsPinnedSourceIdentity(t *testing.T) {
+	root, worktree := newMergeBackFixture(t)
+	sourceCommit := strings.TrimSpace(mustGit(t, root, "rev-parse", "HEAD"))
+	if err := os.WriteFile(filepath.Join(worktree, "feature.txt"), []byte("new feature\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := MergeBack(context.Background(), MergeBackOptions{
+		RepoRoot:     root,
+		WorktreePath: worktree,
+		Name:         "task-pinned",
+		SourceBranch: "main",
+		SourceCommit: sourceCommit,
+	})
+	if err != nil {
+		t.Fatalf("MergeBack returned error: %v", err)
+	}
+	if result.Status != MergeBackMerged {
+		t.Fatalf("Status = %q, want merged (%s)", result.Status, result.Message)
+	}
+}
+
+func TestMergeBackRefusesSourceBranchChange(t *testing.T) {
+	root, worktree := newMergeBackFixture(t)
+	if err := os.WriteFile(filepath.Join(worktree, "feature.txt"), []byte("new feature\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, root, "checkout", "-b", "other")
+	result, err := MergeBack(context.Background(), MergeBackOptions{
+		RepoRoot:     root,
+		WorktreePath: worktree,
+		Name:         "task-branch-switch",
+		SourceBranch: "main",
+	})
+	if err != nil {
+		t.Fatalf("MergeBack returned error: %v", err)
+	}
+	if result.Status != MergeBackSourceChanged {
+		t.Fatalf("Status = %q, want source_changed (%s)", result.Status, result.Message)
+	}
+	if _, err := os.Stat(filepath.Join(root, "feature.txt")); err == nil {
+		t.Fatal("worktree change merged after a source branch switch")
+	}
+	assertSourceRefusalLeftWorktreeUntouched(t, root, worktree, "splice/task-branch-switch")
+}
+
+func TestMergeBackRefusesDetachedSourceHead(t *testing.T) {
+	root, worktree := newMergeBackFixture(t)
+	if err := os.WriteFile(filepath.Join(worktree, "feature.txt"), []byte("new feature\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, root, "checkout", "--detach", "HEAD")
+	result, err := MergeBack(context.Background(), MergeBackOptions{
+		RepoRoot:     root,
+		WorktreePath: worktree,
+		Name:         "task-detached",
+		SourceBranch: "main",
+	})
+	if err != nil {
+		t.Fatalf("MergeBack returned error: %v", err)
+	}
+	if result.Status != MergeBackSourceChanged {
+		t.Fatalf("Status = %q, want source_changed (%s)", result.Status, result.Message)
+	}
+	assertSourceRefusalLeftWorktreeUntouched(t, root, worktree, "splice/task-detached")
+}
+
+func TestMergeBackRefusesUnknownSourceCommit(t *testing.T) {
+	root, worktree := newMergeBackFixture(t)
+	if err := os.WriteFile(filepath.Join(worktree, "feature.txt"), []byte("new feature\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := MergeBack(context.Background(), MergeBackOptions{
+		RepoRoot:     root,
+		WorktreePath: worktree,
+		Name:         "task-unknown-commit",
+		SourceBranch: "main",
+		SourceCommit: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+	})
+	if err != nil {
+		t.Fatalf("MergeBack returned error: %v", err)
+	}
+	if result.Status != MergeBackSourceChanged {
+		t.Fatalf("Status = %q, want source_changed (%s)", result.Status, result.Message)
+	}
+	assertSourceRefusalLeftWorktreeUntouched(t, root, worktree, "splice/task-unknown-commit")
+}
+
+func TestMergeBackRefusesSourceCommitNotAncestor(t *testing.T) {
+	root, worktree := newMergeBackFixture(t)
+	mustGit(t, root, "checkout", "-b", "other")
+	if err := os.WriteFile(filepath.Join(root, "other.txt"), []byte("other\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, root, "add", "-A")
+	mustGit(t, root, "commit", "-m", "other commit")
+	otherCommit := strings.TrimSpace(mustGit(t, root, "rev-parse", "HEAD"))
+	mustGit(t, root, "checkout", "main")
+	if err := os.WriteFile(filepath.Join(worktree, "feature.txt"), []byte("new feature\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := MergeBack(context.Background(), MergeBackOptions{
+		RepoRoot:     root,
+		WorktreePath: worktree,
+		Name:         "task-not-ancestor",
+		SourceBranch: "main",
+		SourceCommit: otherCommit,
+	})
+	if err != nil {
+		t.Fatalf("MergeBack returned error: %v", err)
+	}
+	if result.Status != MergeBackSourceChanged {
+		t.Fatalf("Status = %q, want source_changed (%s)", result.Status, result.Message)
+	}
+	assertSourceRefusalLeftWorktreeUntouched(t, root, worktree, "splice/task-not-ancestor")
+}
+
 func TestMergeBackSkipsDirtySourceTree(t *testing.T) {
 	root, worktree := newMergeBackFixture(t)
 	if err := os.WriteFile(filepath.Join(worktree, "feature.txt"), []byte("new feature\n"), 0o600); err != nil {
@@ -365,6 +604,337 @@ func TestMergeBackRejectsInvalidName(t *testing.T) {
 	}
 }
 
+func TestRemoveCleanWorktreeUnregistersAndDeletes(t *testing.T) {
+	root, worktree := newMergeBackFixture(t)
+
+	if err := Remove(context.Background(), RemoveOptions{
+		RepoRoot: root,
+		Path:     worktree,
+	}); err != nil {
+		t.Fatalf("Remove returned error: %v", err)
+	}
+	if _, err := os.Stat(worktree); !os.IsNotExist(err) {
+		t.Fatalf("worktree directory still exists after removal: %v", err)
+	}
+	if listed := mustGit(t, root, "worktree", "list", "--porcelain"); strings.Contains(listed, worktree) {
+		t.Fatalf("worktree still registered after removal: %q", listed)
+	}
+}
+
+func TestRemoveDirtyWorktreeFailsAndPreservesData(t *testing.T) {
+	root, worktree := newMergeBackFixture(t)
+	if err := os.WriteFile(filepath.Join(worktree, "dirty.txt"), []byte("uncommitted work\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := Remove(context.Background(), RemoveOptions{
+		RepoRoot: root,
+		Path:     worktree,
+	})
+	if err == nil {
+		t.Fatal("expected removal of a dirty worktree to fail without --force")
+	}
+	if !strings.Contains(err.Error(), worktree) {
+		t.Fatalf("error must name the worktree path, got %v", err)
+	}
+	if data, statErr := os.ReadFile(filepath.Join(worktree, "dirty.txt")); statErr != nil || string(data) != "uncommitted work\n" {
+		t.Fatalf("dirty worktree data was lost: %q, %v", data, statErr)
+	}
+	if listed := mustGit(t, root, "worktree", "list", "--porcelain"); !strings.Contains(listed, worktree) {
+		t.Fatal("worktree was unregistered despite failed removal")
+	}
+}
+
+func TestRemoveForceDeletesDirtyWorktree(t *testing.T) {
+	root, worktree := newMergeBackFixture(t)
+	if err := os.WriteFile(filepath.Join(worktree, "dirty.txt"), []byte("uncommitted work\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Remove(context.Background(), RemoveOptions{
+		RepoRoot: root,
+		Path:     worktree,
+		Force:    true,
+	}); err != nil {
+		t.Fatalf("forced Remove returned error: %v", err)
+	}
+	if _, err := os.Stat(worktree); !os.IsNotExist(err) {
+		t.Fatalf("worktree directory still exists after forced removal: %v", err)
+	}
+}
+
+func TestPreserveThenForceRemoveKeepsBranch(t *testing.T) {
+	root, worktree := newMergeBackFixture(t)
+	head := mustGit(t, root, "rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(worktree, "feature.txt"), []byte("new feature\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	branch, err := Preserve(context.Background(), MergeBackOptions{
+		RepoRoot:     root,
+		WorktreePath: worktree,
+		Name:         "task-reject",
+	})
+	if err != nil {
+		t.Fatalf("Preserve returned error: %v", err)
+	}
+	if branch != "splice/task-reject" {
+		t.Fatalf("branch = %q", branch)
+	}
+	if err := Remove(context.Background(), RemoveOptions{
+		RepoRoot: root,
+		Path:     worktree,
+		Force:    true,
+	}); err != nil {
+		t.Fatalf("forced Remove returned error: %v", err)
+	}
+	if listed := mustGit(t, root, "worktree", "list", "--porcelain"); strings.Contains(listed, worktree) {
+		t.Fatalf("worktree still registered after reject: %q", listed)
+	}
+	if _, err := os.Stat(filepath.Join(root, "feature.txt")); !os.IsNotExist(err) {
+		t.Fatal("reject must leave the main checkout untouched")
+	}
+	if after := mustGit(t, root, "rev-parse", "HEAD"); after != head {
+		t.Fatalf("main HEAD moved on reject: %s -> %s", head, after)
+	}
+	if content := mustGit(t, root, "show", branch+":feature.txt"); content != "new feature\n" {
+		t.Fatalf("preserved branch missing work: %q", content)
+	}
+}
+
+func TestSourceDirtyReportsUncommittedFiles(t *testing.T) {
+	root, _ := newMergeBackFixture(t)
+	dirty, err := SourceDirty(context.Background(), root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dirty {
+		t.Fatal("clean source reported dirty")
+	}
+	if err := os.WriteFile(filepath.Join(root, "extra.txt"), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dirty, err = SourceDirty(context.Background(), root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dirty {
+		t.Fatal("dirty source reported clean")
+	}
+}
+
+func TestRemoveNonzeroGitExitFails(t *testing.T) {
+	runner := &fakeRunner{results: []CommandResult{{}, {ExitCode: 128, Stderr: "remove blocked"}}}
+	err := Remove(context.Background(), RemoveOptions{
+		RepoRoot: t.TempDir(),
+		Path:     t.TempDir(),
+		RunGit:   runner.Run,
+	})
+	if err == nil || !strings.Contains(err.Error(), "remove blocked") {
+		t.Fatalf("expected nonzero remove failure, got %v", err)
+	}
+}
+
+func TestRemoveIgnoredFileFailsAndPreservesData(t *testing.T) {
+	root, worktree := newMergeBackFixture(t)
+	if err := os.WriteFile(filepath.Join(root, ".git", "info", "exclude"), []byte("ignored.txt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ignored := filepath.Join(worktree, "ignored.txt")
+	if err := os.WriteFile(ignored, []byte("local data\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Remove(context.Background(), RemoveOptions{RepoRoot: root, Path: worktree}); err == nil || !strings.Contains(err.Error(), "ignored files remain") {
+		t.Fatalf("expected ignored-file refusal, got %v", err)
+	}
+	if data, err := os.ReadFile(ignored); err != nil || string(data) != "local data\n" {
+		t.Fatalf("ignored data was lost: %q, %v", data, err)
+	}
+}
+
+// addPruneWorktree registers a detached worktree under path and configures a
+// committer identity inside it so the test can make commits there.
+func addPruneWorktree(t *testing.T, root, path string) string {
+	t.Helper()
+	mustGit(t, root, "worktree", "add", "--detach", path, "HEAD")
+	mustGit(t, path, "config", "user.name", "splice-test")
+	mustGit(t, path, "config", "user.email", "splice-test@local")
+	return path
+}
+
+func TestPruneRemovesOnlySafeManagedWorktrees(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	root := resolvedPath(t, t.TempDir())
+	base := resolvedPath(t, t.TempDir())
+	mustGit(t, root, "init", "-b", "main")
+	mustGit(t, root, "config", "user.name", "splice-test")
+	mustGit(t, root, "config", "user.email", "splice-test@local")
+	if err := os.WriteFile(filepath.Join(root, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, root, "add", "-A")
+	mustGit(t, root, "commit", "-m", "base")
+
+	repoDir := filepath.Join(base, "splice-worktree-"+repoKey(root))
+	if err := os.MkdirAll(repoDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// Clean and reachable from source HEAD: removed.
+	safeSource := addPruneWorktree(t, root, filepath.Join(repoDir, "safe-source"))
+
+	// Clean and reachable from a surviving splice branch: removed.
+	spliceWT := addPruneWorktree(t, root, filepath.Join(repoDir, "splice-done"))
+	if err := os.WriteFile(filepath.Join(spliceWT, "splice.txt"), []byte("work\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, spliceWT, "add", "-A")
+	mustGit(t, spliceWT, "commit", "-m", "splice work")
+	spliceHead := strings.TrimSpace(mustGit(t, spliceWT, "rev-parse", "HEAD"))
+	mustGit(t, root, "branch", "-f", "splice/done", spliceHead)
+
+	// Dirty: kept and reported.
+	dirty := addPruneWorktree(t, root, filepath.Join(repoDir, "dirty"))
+	if err := os.WriteFile(filepath.Join(dirty, "uncommitted.txt"), []byte("dirty\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Clean but unreachable from source or splice branches: kept and reported.
+	unreachable := addPruneWorktree(t, root, filepath.Join(repoDir, "unreachable"))
+	if err := os.WriteFile(filepath.Join(unreachable, "lost.txt"), []byte("lost\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, unreachable, "add", "-A")
+	mustGit(t, unreachable, "commit", "-m", "orphan work")
+
+	// Locked: kept and reported.
+	locked := addPruneWorktree(t, root, filepath.Join(repoDir, "locked"))
+	mustGit(t, root, "worktree", "lock", locked)
+
+	// Clean but outside the managed directory: ignored entirely.
+	outside := addPruneWorktree(t, root, filepath.Join(t.TempDir(), "outside"))
+
+	result, err := Prune(context.Background(), PruneOptions{Cwd: root, BaseDir: base})
+	if err != nil {
+		t.Fatalf("Prune returned error: %v", err)
+	}
+
+	removed := make(map[string]bool, len(result.Removed))
+	for _, path := range result.Removed {
+		removed[filepath.Clean(path)] = true
+	}
+	if !removed[filepath.Clean(safeSource)] || !removed[filepath.Clean(spliceWT)] {
+		t.Fatalf("removed = %v, want %q and %q", result.Removed, safeSource, spliceWT)
+	}
+	if len(result.Removed) != 2 {
+		t.Fatalf("removed = %v, want exactly 2 entries", result.Removed)
+	}
+
+	skipped := make(map[string]string, len(result.Skipped))
+	for _, skip := range result.Skipped {
+		skipped[filepath.Clean(skip.Path)] = skip.Reason
+	}
+	for path, wantReason := range map[string]string{
+		dirty:       "not saved",
+		unreachable: "not reachable",
+		locked:      "locked",
+	} {
+		reason, ok := skipped[filepath.Clean(path)]
+		if !ok || !strings.Contains(reason, wantReason) {
+			t.Fatalf("skipped[%q] = %q, want reason containing %q", path, reason, wantReason)
+		}
+	}
+	if _, ok := skipped[filepath.Clean(outside)]; ok {
+		t.Fatal("outside-managed worktree appeared in the skipped report")
+	}
+
+	for _, path := range []string{safeSource, spliceWT} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("removed worktree %q still exists: %v", path, err)
+		}
+	}
+	for _, path := range []string{dirty, unreachable, locked, outside} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("kept worktree %q is missing: %v", path, err)
+		}
+	}
+	if listed := mustGit(t, root, "worktree", "list", "--porcelain"); strings.Contains(listed, safeSource) || strings.Contains(listed, spliceWT) {
+		t.Fatalf("removed worktrees are still registered: %q", listed)
+	}
+	if branch := mustGit(t, root, "branch", "--list", "splice/done"); strings.TrimSpace(branch) == "" {
+		t.Fatal("splice/done branch was deleted")
+	}
+}
+
+func TestPrepareSweepsStaleManagedWorktreesButKeepsRequestedTarget(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	root := resolvedPath(t, t.TempDir())
+	base := resolvedPath(t, t.TempDir())
+	mustGit(t, root, "init", "-b", "main")
+	mustGit(t, root, "config", "user.name", "splice-test")
+	mustGit(t, root, "config", "user.email", "splice-test@local")
+	if err := os.WriteFile(filepath.Join(root, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, root, "add", "-A")
+	mustGit(t, root, "commit", "-m", "base")
+
+	repoDir := filepath.Join(base, "splice-worktree-"+repoKey(root))
+	if err := os.MkdirAll(repoDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale := addPruneWorktree(t, root, filepath.Join(repoDir, "stale"))
+	target := addPruneWorktree(t, root, filepath.Join(repoDir, "target"))
+
+	result, err := Prepare(context.Background(), Options{Cwd: root, Name: "target", BaseDir: base})
+	if err != nil {
+		t.Fatalf("Prepare returned error: %v", err)
+	}
+	if !result.Reused || !result.Locked {
+		t.Fatalf("expected reused and locked result, got %#v", result)
+	}
+	if result.Prune == nil {
+		t.Fatal("expected a non-nil prune sweep report on Prepare")
+	}
+	removed := make(map[string]bool, len(result.Prune.Removed))
+	for _, path := range result.Prune.Removed {
+		removed[filepath.Clean(path)] = true
+	}
+	if !removed[filepath.Clean(stale)] {
+		t.Fatalf("sweep removed = %v, want %q", result.Prune.Removed, stale)
+	}
+	if removed[filepath.Clean(target)] {
+		t.Fatalf("sweep removed the requested target %q", target)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale worktree %q still exists after sweep: %v", stale, err)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("requested target %q was removed: %v", target, err)
+	}
+
+	activeSweep, err := Prune(context.Background(), PruneOptions{Cwd: root, BaseDir: base})
+	if err != nil {
+		t.Fatalf("Prune active target: %v", err)
+	}
+	if len(activeSweep.Skipped) != 1 || filepath.Clean(activeSweep.Skipped[0].Path) != filepath.Clean(target) || activeSweep.Skipped[0].Reason != "locked" {
+		t.Fatalf("active sweep = %#v, want locked target", activeSweep)
+	}
+	if err := Unlock(context.Background(), UnlockOptions{RepoRoot: root, Path: target}); err != nil {
+		t.Fatalf("Unlock target: %v", err)
+	}
+	releasedSweep, err := Prune(context.Background(), PruneOptions{Cwd: root, BaseDir: base})
+	if err != nil {
+		t.Fatalf("Prune released target: %v", err)
+	}
+	if len(releasedSweep.Removed) != 1 || filepath.Clean(releasedSweep.Removed[0]) != filepath.Clean(target) {
+		t.Fatalf("released sweep = %#v, want removed target", releasedSweep)
+	}
+}
+
 // newMergeBackFixture creates a real git repo with one commit, a shared file,
 // and a detached worktree, both with committer identity configured.
 func newMergeBackFixture(t *testing.T) (string, string) {
@@ -387,6 +957,15 @@ func newMergeBackFixture(t *testing.T) (string, string) {
 	mustGit(t, worktree, "config", "user.name", "splice-test")
 	mustGit(t, worktree, "config", "user.email", "splice-test@local")
 	return root, worktree
+}
+
+func resolvedPath(t *testing.T, path string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("resolve path %q: %v", path, err)
+	}
+	return resolved
 }
 
 func mustGit(t *testing.T, dir string, args ...string) string {
@@ -762,5 +1341,62 @@ func TestRecoveryMergeBackAfterRestore(t *testing.T) {
 	}
 	if ref := mustGit(t, worktree, "rev-parse", iter1Ref); ref == "" {
 		t.Fatal("iter1 recovery ref missing after merge")
+	}
+}
+
+func TestRecoveryGitHardensEnv(t *testing.T) {
+	record := gitenvtest.InstallRecorder(t)
+	_, _ = defaultEnvRunGit(context.Background(), t.TempDir(), nil, "rev-parse", "HEAD")
+	gitenvtest.AssertHardened(t, gitenvtest.Runs(t, record))
+}
+
+// TestLaunchDirMapsSubdirectoryIntoWorktree pins H-08: a run launched from a
+// repository subdirectory works in the same subdirectory of the worktree, and
+// a launch directory that the worktree cannot hold fails loud.
+func TestLaunchDirMapsSubdirectoryIntoWorktree(t *testing.T) {
+	repo := t.TempDir()
+	tree := t.TempDir()
+	for _, dir := range []string{filepath.Join(repo, "sub", "deep"), filepath.Join(repo, "untracked"), filepath.Join(tree, "sub", "deep")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(t.TempDir(), "repo-link")
+	if err := os.Symlink(repo, link); err != nil {
+		t.Fatal(err)
+	}
+	result := Result{Path: tree, RepoRoot: resolvedPath(t, repo)}
+
+	for _, tc := range []struct{ launch, want string }{
+		{repo, tree},
+		{filepath.Join(repo, "sub"), filepath.Join(tree, "sub")},
+		{filepath.Join(link, "sub", "deep"), filepath.Join(tree, "sub", "deep")},
+	} {
+		got, err := LaunchDir(result, tc.launch)
+		if err != nil || got != tc.want {
+			t.Fatalf("LaunchDir(%s) = %q, %v; want %q", tc.launch, got, err, tc.want)
+		}
+	}
+	for _, tc := range []struct{ launch, wantErr string }{
+		{t.TempDir(), "is not inside the repository"},
+		{filepath.Join(repo, "untracked"), "has only committed files"},
+		{filepath.Join(repo, "missing"), "resolve launch directory"},
+	} {
+		if got, err := LaunchDir(result, tc.launch); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Fatalf("LaunchDir(%s) = %q, %v; want error containing %q", tc.launch, got, err, tc.wantErr)
+		}
+	}
+}
+
+// assertSourceRefusalLeftWorktreeUntouched pins P3-1: the source checks run
+// before the worktree is committed or its branch is pinned, so a refusal
+// leaves the change uncommitted in the worktree and creates no branch.
+func assertSourceRefusalLeftWorktreeUntouched(t *testing.T, root, worktree, branch string) {
+	t.Helper()
+	if got := strings.TrimSpace(mustGit(t, root, "branch", "--list", branch)); got != "" {
+		t.Fatalf("refusal pinned branch %s; the source checks must run first", branch)
+	}
+	if status := mustGit(t, worktree, "status", "--porcelain", "--untracked-files=all"); !strings.Contains(status, "feature.txt") {
+		t.Fatalf("worktree status = %q, want feature.txt still uncommitted", status)
 	}
 }

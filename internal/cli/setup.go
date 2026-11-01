@@ -301,17 +301,21 @@ func setupProviderEnvVar(descriptor providercatalog.Descriptor) string {
 	return ""
 }
 
-func setupRequired(resolved config.ResolvedConfig) bool {
+func setupRequired(resolved config.ResolvedConfig) (bool, error) {
 	if !config.HasProviderProfile(resolved.Provider) {
-		return true
+		return true, nil
 	}
 	if _, missing := setupMissingCredentialEnv(resolved.Provider); !missing {
-		return false
+		return false, nil
 	}
 	// A stored OAuth login (e.g. `splice auth login xai`) is a credential too, even
-	// though the profile has no inline key / env var — so a logged-in provider
+	// though the profile has no inline key / env var, so a logged-in provider
 	// must not trigger onboarding.
-	return !providerHasOAuthLogin(resolved.Provider, oauthLoggedInProviders())
+	logins, err := oauthLoggedInProviders()
+	if err != nil {
+		return false, err
+	}
+	return !providerHasOAuthLogin(resolved.Provider, logins), nil
 }
 
 // providerHasOAuthLogin reports whether a stored OAuth login exists for the
@@ -330,24 +334,23 @@ func providerHasOAuthLogin(profile config.ProviderProfile, oauthLogins map[strin
 }
 
 // oauthLoggedInProviders returns the set of provider names that have a stored
-// OAuth token, so credential checks recognize an OAuth login (not just inline
-// keys / env vars). Errors degrade to an empty set (no logins).
-func oauthLoggedInProviders() map[string]bool {
+// OAuth token, so credential checks recognize an OAuth login.
+func oauthLoggedInProviders() (map[string]bool, error) {
 	out := map[string]bool{}
 	store, err := oauth.NewStore(oauth.StoreOptions{})
 	if err != nil {
-		return out
+		return nil, fmt.Errorf("open OAuth backend (run `splice auth login --storage encrypted-file` or export %s=encrypted-file): %w", config.OAuthStorageEnv, err)
 	}
 	statuses, err := store.Status(oauth.KeyPrefixProvider)
 	if err != nil {
-		return out
+		return nil, fmt.Errorf("read OAuth logins from the %s backend (run `splice auth login --storage encrypted-file` or export %s=encrypted-file): %w", store.Backend(), config.OAuthStorageEnv, err)
 	}
 	for _, status := range statuses {
 		if status.HasToken {
 			out[strings.TrimPrefix(status.Key, oauth.KeyPrefixProvider)] = true
 		}
 	}
-	return out
+	return out, nil
 }
 
 // firstUsableProvider returns the saved provider best suited to run without
@@ -355,8 +358,8 @@ func oauthLoggedInProviders() map[string]bool {
 // no-auth/local) non-local provider, else the first usable local one. It lets
 // the CLI fall back to an already-configured login when the active provider
 // happens to lack a credential, instead of re-running onboarding every launch.
-func firstUsableProvider(providers []config.ProviderProfile) (config.ProviderProfile, bool) {
-	logins := oauthLoggedInProviders()
+func firstUsableProvider(providers []config.ProviderProfile) (config.ProviderProfile, bool, error) {
+	var logins map[string]bool
 	var localFallback config.ProviderProfile
 	haveLocal := false
 	for _, profile := range providers {
@@ -376,8 +379,17 @@ func firstUsableProvider(providers []config.ProviderProfile) (config.ProviderPro
 		// when the profile has no inline key / env var — mirrors setupRequired and
 		// usableSavedProviders so this fallback doesn't force onboarding for a
 		// provider the user is already authenticated with.
-		if _, missing := setupMissingCredentialEnv(profile); missing && !providerHasOAuthLogin(profile, logins) {
-			continue
+		if _, missing := setupMissingCredentialEnv(profile); missing {
+			if logins == nil {
+				var err error
+				logins, err = oauthLoggedInProviders()
+				if err != nil {
+					return config.ProviderProfile{}, false, err
+				}
+			}
+			if !providerHasOAuthLogin(profile, logins) {
+				continue
+			}
 		}
 		if providerProfileIsLocal(profile) {
 			if !haveLocal {
@@ -386,21 +398,22 @@ func firstUsableProvider(providers []config.ProviderProfile) (config.ProviderPro
 			}
 			continue
 		}
-		return profile, true
+		return profile, true, nil
 	}
 	if haveLocal {
-		return localFallback, true
+		return localFallback, true, nil
 	}
-	return config.ProviderProfile{}, false
+	return config.ProviderProfile{}, false, nil
 }
 
 // usableSavedProviders filters configured providers to those the user can actually
 // use: an inline/stored/env key, an auth header, a stored OAuth login, or a no-auth
 // local provider. This keeps /model from listing providers that are merely present
 // in config.json but never authenticated (e.g. a default openai entry with no key).
-func usableSavedProviders(providers []config.ProviderProfile) []config.ProviderProfile {
-	logins := oauthLoggedInProviders()
-	store, storeErr := config.ProviderKeyStore()
+func usableSavedProviders(providers []config.ProviderProfile) ([]config.ProviderProfile, error) {
+	var logins map[string]bool
+	var store config.APIKeyGetter
+	var err error
 	usable := make([]config.ProviderProfile, 0, len(providers))
 	for _, profile := range providers {
 		if !config.HasProviderProfile(profile) {
@@ -410,11 +423,20 @@ func usableSavedProviders(providers []config.ProviderProfile) []config.ProviderP
 		// only when the key is actually retrievable — the keyring/file entry may have
 		// been deleted, leaving a stale marker that would otherwise list it in /model.
 		if profile.APIKeyStored && strings.TrimSpace(profile.APIKey) == "" {
-			if storeErr == nil {
-				if key, ok, err := store.Get(profile.Name); err == nil && ok && strings.TrimSpace(key) != "" {
-					usable = append(usable, profile)
-					continue
+			if store == nil {
+				opened, err := config.ProviderKeyStore()
+				if err != nil {
+					return nil, fmt.Errorf("open API key store: %w", err)
 				}
+				store = opened
+			}
+			key, ok, err := store.Get(profile.Name)
+			if err != nil {
+				return nil, fmt.Errorf("read API key for provider %q (set auth.storage to encrypted-file or export %s=encrypted-file): %w", profile.Name, config.CredentialStorageEnv, err)
+			}
+			if ok && strings.TrimSpace(key) != "" {
+				usable = append(usable, profile)
+				continue
 			}
 			// Marker present but key missing/unreadable: fall through and judge the
 			// profile on its other signals (env var, OAuth, local) with the marker off.
@@ -422,8 +444,16 @@ func usableSavedProviders(providers []config.ProviderProfile) []config.ProviderP
 			withoutMarker.APIKeyStored = false
 			if _, missing := setupMissingCredentialEnv(withoutMarker); !missing {
 				usable = append(usable, profile)
-			} else if providerHasOAuthLogin(profile, logins) {
-				usable = append(usable, profile)
+			} else {
+				if logins == nil {
+					logins, err = oauthLoggedInProviders()
+					if err != nil {
+						return nil, err
+					}
+				}
+				if providerHasOAuthLogin(profile, logins) {
+					usable = append(usable, profile)
+				}
 			}
 			continue
 		}
@@ -431,11 +461,17 @@ func usableSavedProviders(providers []config.ProviderProfile) []config.ProviderP
 			usable = append(usable, profile)
 			continue
 		}
+		if logins == nil {
+			logins, err = oauthLoggedInProviders()
+			if err != nil {
+				return nil, err
+			}
+		}
 		if providerHasOAuthLogin(profile, logins) {
 			usable = append(usable, profile)
 		}
 	}
-	return usable
+	return usable, nil
 }
 
 // providerProfileIsLocal reports whether a provider points at a local endpoint

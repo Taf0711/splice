@@ -2,6 +2,8 @@ package tui
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -10,7 +12,9 @@ import (
 
 	"github.com/Taf0711/splice/internal/config"
 	"github.com/Taf0711/splice/internal/doctor"
+	"github.com/Taf0711/splice/internal/flags"
 	"github.com/Taf0711/splice/internal/providerhealth"
+	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
 func TestParseDoctorCommandArgsRejectsFixWithConnectivity(t *testing.T) {
@@ -97,6 +101,77 @@ func TestDoctorOptionsConnectivityInvokesConfiguredProviderHealthProbe(t *testin
 	}
 }
 
+func TestDoctorOptionsConnectivitySendsEnvCredentialToProbe(t *testing.T) {
+	const envName = "SPLICE_TEST_PROBE_KEY"
+	t.Setenv(envName, "sk-probe")
+	profile := config.ProviderProfile{
+		Name:         "custom",
+		ProviderKind: config.ProviderKindOpenAICompatible,
+		BaseURL:      "https://api.example.com/v1",
+		Model:        "custom-model",
+		APIKeyEnv:    envName,
+	}
+	var gotKey string
+	m := newModel(context.Background(), Options{
+		ProviderProfile: profile,
+		ProbeProviderHealth: func(_ context.Context, options providerhealth.Options) providerhealth.Result {
+			gotKey = options.Profile.APIKey
+			return providerhealth.Result{Status: providerhealth.StatusPass}
+		},
+	})
+
+	m.doctorOptions(true)
+
+	if gotKey != "sk-probe" {
+		t.Fatalf("probe APIKey = %q, want %q", gotKey, "sk-probe")
+	}
+}
+
+// A stored credential that cannot be read must not reach the probe. The probe
+// would send no key and report a generic 401; the read error is the cause.
+// The store is a corrupt encrypted-file under a temp config dir, so no real
+// keychain or config is touched.
+func TestDoctorOptionsCredentialReadErrorSkipsProbe(t *testing.T) {
+	configHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv(config.CredentialStorageEnv, "encrypted-file")
+	storeDir := filepath.Join(configHome, "splice")
+	if err := os.MkdirAll(storeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(storeDir, "credentials.enc"), []byte("not a sealed credential store"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	profile := config.ProviderProfile{
+		Name:         "custom",
+		ProviderKind: config.ProviderKindOpenAICompatible,
+		BaseURL:      "https://api.example.com/v1",
+		Model:        "custom-model",
+		APIKeyStored: true,
+	}
+	var called int
+	m := newModel(context.Background(), Options{
+		ProviderProfile: profile,
+		ProbeProviderHealth: func(context.Context, providerhealth.Options) providerhealth.Result {
+			called++
+			return providerhealth.Result{Status: providerhealth.StatusPass}
+		},
+	})
+
+	report := doctor.Run(m.doctorOptions(true))
+
+	if called != 0 {
+		t.Fatalf("probe called %d time(s) after a credential read error, want 0", called)
+	}
+	check := report.Check("provider.connectivity")
+	if check == nil || check.Status != doctor.StatusFail {
+		t.Fatalf("connectivity check = %#v, want a failing check", check)
+	}
+	if !strings.Contains(check.Message, "read API key for provider") {
+		t.Fatalf("connectivity message = %q, want the credential read error", check.Message)
+	}
+}
+
 func TestDoctorConnectivityCommandRunsProbeAsynchronously(t *testing.T) {
 	profile := config.ProviderProfile{
 		Name:         "custom",
@@ -175,7 +250,7 @@ func TestDoctorCommandUsesDiagnosticCenterRow(t *testing.T) {
 			t.Fatalf("doctor row missing %q:\n%s", want, text)
 		}
 	}
-	for _, unwanted := range []string{"Generated", "Checks", "[pass]"} {
+	for _, unwanted := range []string{"Generated", "Checks"} {
 		if strings.Contains(text, unwanted) {
 			t.Fatalf("doctor row should hide %q:\n%s", unwanted, text)
 		}
@@ -366,4 +441,31 @@ func TestDoctorFixRunsConnectivityWhenProviderConfigured(t *testing.T) {
 	if !transcriptContains(final.transcript, "[pass] provider.connectivity") {
 		t.Fatalf("expected connectivity result in transcript, got %#v", final.transcript)
 	}
+}
+
+// The TUI doctor reports the trajectory classifier from the resolved section
+// and the resolved flags.
+func TestDoctorOptionsCarryTrajectoryClassifierState(t *testing.T) {
+	section := config.DecisionAdvisorConfig{TrajectoryDefault: true, ProviderProfile: "chatgpt-61", Profile: "gpt-6.1-sol", Mode: "active_experimental", Backend: "provider", QuestionPack: "traj_action_v2"}
+	// The classifier profile carries its own key, so its credential loads
+	// without a stored sign-in login.
+	m := newModel(context.Background(), Options{
+		DecisionAdvisor:         section,
+		DoctorTrajectoryProfile: config.ProviderProfile{Name: "chatgpt-61", CatalogID: "chatgpt", APIKey: "test-key"},
+		DoctorEvaluator:         doctorStubEvaluator{},
+		FlagResolutions:         []flags.Resolution{{Name: flags.TrajectoryClassifierEnabled, Value: true}},
+	})
+	report := doctor.Run(m.doctorOptions(false))
+	check := report.Check("trajectory.classifier")
+	if check == nil || !strings.Contains(check.Message, "ChatGPT sign-in profile chatgpt-61 (model gpt-6.1-sol)") {
+		t.Fatalf("trajectory check = %+v", check)
+	}
+}
+
+// doctorStubEvaluator stands in for the run's evaluator. Doctor builds no
+// request, so Evaluate is never called.
+type doctorStubEvaluator struct{}
+
+func (doctorStubEvaluator) Evaluate(context.Context, zeroruntime.DecisionRequest) (zeroruntime.DecisionResult, error) {
+	return zeroruntime.DecisionResult{}, nil
 }

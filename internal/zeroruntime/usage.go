@@ -40,7 +40,13 @@ func NormalizeUsage(input TokenUsage) (Usage, error) {
 		return Usage{}, err
 	}
 	if reasoningTokens > outputTokens {
-		return Usage{}, fmt.Errorf("reasoning tokens %d exceeds output tokens %d", reasoningTokens, outputTokens)
+		// Some providers report reasoning tokens EXCLUSIVE of the
+		// completion count, which trips the subset invariant the OpenAI
+		// convention assumes. Rejecting the record zeroed real, billed
+		// work downstream - the "never record free work" failure. The
+		// honest reconciliation treats the reported output as
+		// reasoning-exclusive and sums: the model produced both.
+		outputTokens += reasoningTokens
 	}
 	webSearchRequests, err := nonNegative(input.WebSearchRequests, "web search requests")
 	if err != nil {

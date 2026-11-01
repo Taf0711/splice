@@ -1,0 +1,28 @@
+{
+  "campaign": "jev-m6-confirmation-route-b",
+  "arms": ["cold", "warm", "warm-jev"],
+  "repeats": 2,
+  "task_sets": ["holdout-taskset"],
+  "model_pin": "typesafe/jev-1.13",
+  "calibration_p_useful": 0.9,
+  "cap_usd": 0.05,
+  "budget_fit_off": true,
+  "notes": "M6 confirmation, route B. Route amendment from the frozen glm manifest with the evidence trail: glm-5.3-flash at low effort confabulates elision on byte-complete views at roughly a 50% rate (m6e-m6h; the deterministic 18,120-input spiral wall with zero write calls), marathon-streams past attempt timeouts, and reports reasoning exclusive of completions. The same branch and harness ran every attempt clean on deepseek-v4.1-flash (m5d: 4/4 verified, 60% input reduction on the targeted task). STAGE ROUTE: deepseek/deepseek-v4.1-flash via OpenRouter, effort pinned low, isolated XDG config, p4preflight asserted. PRIMARY COST ENDPOINT: the fixed-price replay (token-channel with the published list price applied identically to every arm), because this route reports $0.00 actuals - the actual-charge view is degenerate and is reported alongside, never substituted. Attribution metric unchanged: delivery-line presence, delivered-file re-read avoidance, delivered-symbol reuse.",
+  "confirmation_gates": {
+    "cpvc_min_improvement_fraction": 0.10,
+    "cost_ratio_ci_upper_max": 1.0,
+    "quality_margin_percentage_points": -2.0,
+    "latency_p95_max_increase_fraction": 0.10,
+    "intervention_increase_allowed": false
+  },
+  "price_snapshot": {
+    "stage_model": "deepseek/deepseek-v4.1-flash",
+    "stage_route": "openrouter",
+    "stage_actual_reported_usd": 0.0,
+    "stage_fixed_price_replay_basis": "deepseek published list price applied identically to every arm's token counts; the primary cost endpoint",
+    "advisor_model": "typesafe/jev-1.13",
+    "advisor_billed_usd_per_decision_pilot_reference": 0.0000153,
+    "captured_at": "2026-09-24",
+    "source": "openrouter live usage; the m5d campaign served the same route"
+  }
+}

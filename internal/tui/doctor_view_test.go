@@ -98,15 +98,35 @@ func TestDoctorCommandOutputGroupsProviderAndPlatformChecks(t *testing.T) {
 	if provider == nil {
 		t.Fatalf("missing Provider section: %#v", output.Sections)
 	}
-	assertRowsContain(t, provider.Rows, "provider.model", "provider.connectivity")
-	assertRowsDoNotContain(t, provider.Rows, "provider.config")
+	assertRowsContain(t, provider.Rows, "provider.model", "provider.connectivity", "provider.config")
 
 	platform := doctorSection(output, "Platform")
 	if platform == nil {
 		t.Fatalf("missing Platform section: %#v", output.Sections)
 	}
-	assertRowsContain(t, platform.Rows, "sandbox.backend")
-	assertRowsDoNotContain(t, platform.Rows, "runtime.go", "config.files")
+	assertRowsContain(t, platform.Rows, "sandbox.backend", "runtime.go", "config.files")
+}
+
+func TestDoctorCommandOutputGroupsStoredKeyAndPipelineChecks(t *testing.T) {
+	output := doctorCommandOutput(doctor.Report{Checks: []doctor.Check{
+		doctorCheck("provider.storedkey", doctor.StatusPass, "Stored key reachable."),
+		doctorCheck("trajectory.classifier", doctor.StatusPass, "Trajectory classifier is off."),
+	}}, nil)
+
+	provider := doctorSection(output, "Provider")
+	if provider == nil {
+		t.Fatalf("missing Provider section: %#v", output.Sections)
+	}
+	assertRowsContain(t, provider.Rows, "provider.storedkey")
+
+	pipeline := doctorSection(output, "Pipeline")
+	if pipeline == nil {
+		t.Fatalf("missing Pipeline section: %#v", output.Sections)
+	}
+	assertRowsContain(t, pipeline.Rows, "trajectory.classifier")
+	if other := doctorSection(output, "Other"); other != nil {
+		t.Fatalf("known checks must not fall under Other: %#v", other.Rows)
+	}
 }
 
 func TestDoctorCommandOutputIsProblemFirstDiagnosticCenter(t *testing.T) {
@@ -136,9 +156,6 @@ func TestDoctorCommandOutputIsProblemFirstDiagnosticCenter(t *testing.T) {
 	for _, unwanted := range []string{
 		"Generated",
 		"Checks",
-		"provider.config",
-		"runtime.go",
-		"config.files",
 	} {
 		if strings.Contains(text, unwanted) {
 			t.Fatalf("formatted output should hide %q:\n%s", unwanted, text)

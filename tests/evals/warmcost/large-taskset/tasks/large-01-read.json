@@ -1,0 +1,8 @@
+{
+  "name": "large-01-read",
+  "phase": "read",
+  "precursor": "large-01-write",
+  "prompt": "Add LatestDunningEvent(trail *Trail, action string) *Event in the audit package: return the most recent audit event with that action, or nil when none exists. Add a regression test for the latest match among several matching events and for nil.",
+  "check": "# large-01 B: audit package gains LatestDunningEvent (latest-match query).\n# Base+gold-A fails (no function), gold passes, wrong (first match) fails.\nmkdir -p internal/audit\ncat > internal/audit/probe_latest_test.go <<'EOF'\npackage audit\n\nimport (\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestProbeLatestDunningEvent(t *testing.T) {\n\ttrail := NewTrail()\n\ttrail.Record(\"a1\", \"other.action\", \"acct-1\", \"ok\")\n\ttrail.Record(\"a2\", \"billing.dunning.notice\", \"acct-1\", \"ok\")\n\ttime.Sleep(2 * time.Millisecond)\n\ttrail.Record(\"a3\", \"billing.dunning.notice\", \"acct-1\", \"ok\")\n\n\tgot := LatestDunningEvent(trail, \"billing.dunning.notice\")\n\tif got == nil {\n\t\tt.Fatal(\"LatestDunningEvent returned nil\")\n\t}\n\tif got.Actor != \"a3\" {\n\t\tt.Fatalf(\"latest event actor = %q, want a3\", got.Actor)\n\t}\n\tif LatestDunningEvent(trail, \"nonexistent.action\") != nil {\n\t\tt.Fatal(\"unknown action must return nil\")\n\t}\n}\nEOF\ngo test -count=1 ./internal/audit/ ; rc=$?\nrm -f internal/audit/probe_latest_test.go\nif [ $rc -ne 0 ]; then exit $rc; fi\nexit 0\n",
+  "fixture": "../../large-families/fixture"
+}

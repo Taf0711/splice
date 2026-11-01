@@ -355,9 +355,10 @@ type compactionState struct {
 	// onUsage forwards the summarizer call's token usage for accounting/budgeting.
 	// OnText is deliberately NOT forwarded (compaction stays invisible to the user),
 	// but its token COST must still be counted so usage reports and budgets include it.
-	onUsage           func(Usage)
-	onCompactionUsage func(Usage, string)
-	model             func() string
+	onUsage            func(Usage)
+	onCompactionUsage  func(Usage, string)
+	onCompactionResult func(Usage, bool, *float64, string, bool)
+	model              func() string
 
 	// calibrationRatio scales the raw byte/4 token estimate toward the provider's
 	// real prompt-token count. ApproxTextTokens over-counts code-heavy content by
@@ -409,15 +410,26 @@ func newCompactionState(options Options) *compactionState {
 		}
 		threshold = reserveThreshold
 	}
+	var onCompactionResult func(Usage, bool, *float64, string, bool)
+	if options.OnAttributedUsage != nil {
+		onCompactionResult = func(usage Usage, reported bool, cost *float64, requestID string, failed bool) {
+			options.OnAttributedUsage(AttributedUsage{
+				Usage: usage, UsageReported: reported, ProviderName: options.ProviderName,
+				Model: options.Model, Stage: "compaction", Iteration: 1,
+				SpendSource: "compaction", ReportedCostUSD: cost, RequestID: requestID, StreamFailed: failed,
+			})
+		}
+	}
 	return &compactionState{
-		enabled:           options.ContextWindow > 0,
-		threshold:         threshold,
-		preserveLast:      options.CompactionPreserveLast,
-		reserveTokens:     options.CompactionReserveTokens,
-		keepRecentTokens:  options.CompactionKeepRecentTokens,
-		onUsage:           options.OnUsage,
-		onCompactionUsage: options.OnCompactionUsage,
-		model:             func() string { return options.Model },
+		enabled:            options.ContextWindow > 0,
+		threshold:          threshold,
+		preserveLast:       options.CompactionPreserveLast,
+		reserveTokens:      options.CompactionReserveTokens,
+		keepRecentTokens:   options.CompactionKeepRecentTokens,
+		onUsage:            options.OnUsage,
+		onCompactionUsage:  options.OnCompactionUsage,
+		onCompactionResult: onCompactionResult,
+		model:              func() string { return options.Model },
 	}
 }
 
@@ -465,7 +477,7 @@ func (state *compactionState) maybeCompact(
 	compacted, err := Compact(messages, CompactionOptions{
 		PreserveLast:     state.preserveLast,
 		KeepRecentTokens: state.keepRecentTokens,
-		Summarize:        summarizeClosure(ctx, provider, state.compactionUsage),
+		Summarize:        summarizeClosure(ctx, provider, state.compactionUsage, state.compactionResult),
 	})
 	if err != nil {
 		// Summarizer failed: keep the original history. The reactive path (or a
@@ -510,7 +522,7 @@ func (state *compactionState) recover(
 	result, compactErr := Compact(messages, CompactionOptions{
 		PreserveLast:     state.preserveLast,
 		KeepRecentTokens: state.keepRecentTokens,
-		Summarize:        summarizeClosure(ctx, provider, state.compactionUsage),
+		Summarize:        summarizeClosure(ctx, provider, state.compactionUsage, state.compactionResult),
 	})
 	if compactErr != nil {
 		// A genuine compaction attempt was made (and failed): the budget is spent
@@ -539,9 +551,9 @@ func (state *compactionState) recover(
 // provider call. The summary stream intentionally does NOT forward OnText (so
 // compaction stays invisible on the user-facing surface), but it DOES forward
 // OnUsage so the summarizer's token cost is still counted by usage/budgeting.
-func summarizeClosure(ctx context.Context, provider Provider, onUsage func(Usage)) func([]zeroruntime.Message) (string, error) {
+func summarizeClosure(ctx context.Context, provider Provider, onUsage func(Usage), onResult func(Usage, bool, *float64, string, bool)) func([]zeroruntime.Message) (string, error) {
 	return func(toSummarize []zeroruntime.Message) (string, error) {
-		return summarizeWithFallback(ctx, provider, toSummarize, onUsage)
+		return summarizeWithFallback(ctx, provider, toSummarize, onUsage, onResult)
 	}
 }
 
@@ -562,6 +574,12 @@ func (state *compactionState) compactionUsage(u Usage) {
 	}
 }
 
+func (state *compactionState) compactionResult(u Usage, reported bool, cost *float64, requestID string, failed bool) {
+	if state.onCompactionResult != nil {
+		state.onCompactionResult(u, reported, cost, requestID, failed)
+	}
+}
+
 // summarizeWithFallback summarizes messages in a single provider call. If that
 // call fails with a context-limit error — the slice to summarize is itself too
 // large for the model's input window — it splits the slice in half, summarizes
@@ -569,8 +587,12 @@ func (state *compactionState) compactionUsage(u Usage) {
 // working when the elided middle is bigger than the summarizer's own context.
 // Non-context-limit errors (and a single message that still won't fit) surface
 // to the caller unchanged.
-func summarizeWithFallback(ctx context.Context, provider Provider, messages []zeroruntime.Message, onUsage func(Usage)) (string, error) {
-	summary, err := summarizeMessagesOnce(ctx, provider, messages, onUsage)
+func summarizeWithFallback(ctx context.Context, provider Provider, messages []zeroruntime.Message, onUsage func(Usage), resultCallbacks ...func(Usage, bool, *float64, string, bool)) (string, error) {
+	var onResult func(Usage, bool, *float64, string, bool)
+	if len(resultCallbacks) > 0 {
+		onResult = resultCallbacks[0]
+	}
+	summary, err := summarizeMessagesOnce(ctx, provider, messages, onUsage, onResult)
 	if err == nil {
 		return summary, nil
 	}
@@ -579,11 +601,11 @@ func summarizeWithFallback(ctx context.Context, provider Provider, messages []ze
 	}
 
 	mid := len(messages) / 2
-	left, leftErr := summarizeWithFallback(ctx, provider, messages[:mid], onUsage)
+	left, leftErr := summarizeWithFallback(ctx, provider, messages[:mid], onUsage, onResult)
 	if leftErr != nil {
 		return "", leftErr
 	}
-	right, rightErr := summarizeWithFallback(ctx, provider, messages[mid:], onUsage)
+	right, rightErr := summarizeWithFallback(ctx, provider, messages[mid:], onUsage, onResult)
 	if rightErr != nil {
 		return "", rightErr
 	}
@@ -596,7 +618,7 @@ func summarizeWithFallback(ctx context.Context, provider Provider, messages []ze
 	combined := strings.TrimSpace(left + "\n\n" + right)
 	reduced, reduceErr := summarizeMessagesOnce(ctx, provider, []zeroruntime.Message{
 		{Role: zeroruntime.MessageRoleUser, Content: combined},
-	}, onUsage)
+	}, onUsage, onResult)
 	if reduceErr != nil {
 		if isContextLimitError(reduceErr.Error()) {
 			// Even the two combined partials don't fit (extreme): fall back to the
@@ -612,7 +634,7 @@ func summarizeWithFallback(ctx context.Context, provider Provider, messages []ze
 }
 
 // summarizeMessagesOnce performs a single tool-less summarization call.
-func summarizeMessagesOnce(ctx context.Context, provider Provider, messages []zeroruntime.Message, onUsage func(Usage)) (string, error) {
+func summarizeMessagesOnce(ctx context.Context, provider Provider, messages []zeroruntime.Message, onUsage func(Usage), onResult func(Usage, bool, *float64, string, bool)) (string, error) {
 	request := zeroruntime.CompletionRequest{
 		Messages: []zeroruntime.Message{
 			{Role: zeroruntime.MessageRoleSystem, Content: summaryInstructions},
@@ -626,7 +648,7 @@ func summarizeMessagesOnce(ctx context.Context, provider Provider, messages []ze
 	}
 	// Forward OnUsage (token accounting) but not OnText (keep compaction invisible
 	// to the user); a nil onUsage is a no-op.
-	collected := zeroruntime.CollectStreamWithOptions(ctx, stream, zeroruntime.CollectOptions{OnUsage: onUsage})
+	collected := zeroruntime.CollectStreamWithOptions(ctx, stream, zeroruntime.CollectOptions{OnUsage: onUsage, OnUsageResult: onResult})
 	if collected.Error != "" {
 		return "", errors.New(collected.Error)
 	}

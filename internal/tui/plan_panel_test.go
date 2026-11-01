@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/Taf0711/splice/internal/tools"
+
+	"charm.land/lipgloss/v2"
 )
 
 func TestPlanPanelUpdateFromItems(t *testing.T) {
@@ -182,7 +184,7 @@ func TestPlanPanelRenderEmpty(t *testing.T) {
 
 func TestPlanPanelRenderRunning(t *testing.T) {
 	m := newModel(t.Context(), Options{ModelName: "gpt-4"})
-	m.width = 100
+	m.width = 130
 	base := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
 	m.now = func() time.Time { return base.Add(15 * time.Second) }
 
@@ -234,7 +236,10 @@ func TestPlanPanelClearResetsFrozenAt(t *testing.T) {
 func runningPlanModel(t *testing.T, steps int) model {
 	t.Helper()
 	m := newModel(t.Context(), Options{ModelName: "gpt-4"})
-	m.width = 100
+	m.width = 130
+	// P12 made the launch screen two-column; the pinned-plan tests exercise the
+	// single-column envelope, so pin the sidebar collapsed (the Ctrl+B state).
+	m.sidebarHidden = true
 	base := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
 	m.now = func() time.Time { return base.Add(15 * time.Second) }
 	items := make([]tools.PlanItem, steps)
@@ -275,7 +280,7 @@ func TestPinnedPlanCollapsesToSummaryWhenTooTall(t *testing.T) {
 
 func TestPinnedPlanHiddenWhenEmpty(t *testing.T) {
 	m := newModel(t.Context(), Options{ModelName: "gpt-4"})
-	m.width = 100
+	m.width = 130
 	if got := m.renderPinnedPlanPanel(80, 10); got != "" {
 		t.Fatalf("no plan => empty pinned render, got %q", got)
 	}
@@ -289,6 +294,8 @@ func TestPinnedPlanHiddenWhenSidebarToggledOff(t *testing.T) {
 	m.altScreen = true
 	m.height = 40
 	m.headerPrinted = true
+	// runningPlanModel pins the sidebar collapsed; this probe toggles it itself.
+	m.sidebarHidden = false
 	// Real conversation so the sidebar is available (not gated by the home screen).
 	m.transcript = append(m.transcript, transcriptRow{kind: rowToolCall, tool: "read_file", detail: "main.go"})
 
@@ -324,5 +331,48 @@ func TestFooterIncludesPinnedPlanAboveComposer(t *testing.T) {
 	}
 	if composerIdx >= 0 && planIdx > composerIdx {
 		t.Fatalf("pinned plan should render ABOVE the composer, got:\n%s", footer)
+	}
+}
+
+// Progress counters must not reflow the lines that carry them. A raw %d/%d
+// counter widens by one rune when done crosses a power of ten (9/10 -> 10/10),
+// shifting the elapsed timer and step text rendered after it — visible layout
+// jitter on every plan update around the crossing.
+func TestPlanProgressCountersKeepStableDisplayWidth(t *testing.T) {
+	base := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
+	const total = 12
+	makeState := func(done int) planPanelState {
+		state := planPanelState{}
+		steps := make([]tools.PlanItem, total)
+		for index := range steps {
+			steps[index] = tools.PlanItem{Content: "step", Status: "pending"}
+		}
+		for index := 0; index < done; index++ {
+			steps[index].Status = "completed"
+		}
+		if done < total {
+			steps[done].Status = "in_progress"
+		}
+		state.updateFromItems(steps, base)
+		return state
+	}
+
+	runningWidth := func(done int) int {
+		header := renderPlanHeader(makeState(done), "◆", done, total, 15*time.Second)
+		return lipgloss.Width(header)
+	}
+	if runningWidth(9) != runningWidth(10) {
+		t.Fatalf("running header width changed across the 9->10 crossing: %d vs %d",
+			runningWidth(9), runningWidth(10))
+	}
+	if runningWidth(10) != runningWidth(11) {
+		t.Fatalf("running header width changed across the 10->11 step: %d vs %d",
+			runningWidth(10), runningWidth(11))
+	}
+
+	complete := makeState(total)
+	completedHeader := renderPlanHeader(complete, "◆", total, total, 15*time.Second)
+	if !strings.Contains(completedHeader, "12/12") {
+		t.Fatalf("completed header = %q, want padded 12/12 counter", completedHeader)
 	}
 }

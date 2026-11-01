@@ -1,0 +1,7 @@
+ [>] code_writer  pass 2  18.4K tok  $0.0123 partial
+>[!] lint  command  failed
+       <- code_writer
+ [ ] static_analyzer
+       <- code_writer
+ [ ] test_runner
+       <- lint, static_analyzer

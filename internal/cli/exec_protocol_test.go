@@ -150,7 +150,7 @@ func TestRunExecListsMCPToolsWithoutProviderConstruction(t *testing.T) {
 			providerBuilt = true
 			return nil, errors.New("provider should not be constructed for --list-tools")
 		},
-		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+		resolveMCPConfigTrust: func(workspaceRoot string, _ bool) (config.MCPConfig, error) {
 			if workspaceRoot != cwd {
 				t.Fatalf("workspaceRoot = %q, want %q", workspaceRoot, cwd)
 			}
@@ -193,7 +193,7 @@ func TestRunExecLogsMCPRuntimeCloseError(t *testing.T) {
 		getwd: func() (string, error) {
 			return cwd, nil
 		},
-		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+		resolveMCPConfigTrust: func(workspaceRoot string, _ bool) (config.MCPConfig, error) {
 			if workspaceRoot != cwd {
 				t.Fatalf("workspaceRoot = %q, want %q", workspaceRoot, cwd)
 			}
@@ -361,7 +361,7 @@ func TestRunExecStreamJSONOutputsRunEndAndRecordsSession(t *testing.T) {
 	}
 }
 
-func TestRunExecStreamJSONEmitsAndRecordsPermissionEvents(t *testing.T) {
+func TestRunExecStreamJSONSkipsPermissionEventsForTrustedWrites(t *testing.T) {
 	dataHome := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", dataHome)
 	cwd := t.TempDir()
@@ -397,26 +397,8 @@ func TestRunExecStreamJSONEmitsAndRecordsPermissionEvents(t *testing.T) {
 	}
 
 	events := decodeJSONLines(t, stdout.String())
-	eventTypes := jsonEventTypes(events)
-	if slices.Contains(eventTypes, "permission_request") {
-		t.Fatalf("workspace write should not request permission in %v; output %q", eventTypes, stdout.String())
-	}
-	permissionEvent := findJSONEvent(t, events, "permission_decision")
-	if permissionEvent["id"] == "" || permissionEvent["name"] != "write_file" || permissionEvent["action"] != "allow" {
-		t.Fatalf("unexpected permission event: %#v", permissionEvent)
-	}
-	if permissionEvent["permission"] != "prompt" || permissionEvent["permissionMode"] != "auto" || permissionEvent["sideEffect"] != "write" {
-		t.Fatalf("unexpected permission metadata: %#v", permissionEvent)
-	}
-	if permissionEvent["permissionGranted"] == true {
-		t.Fatalf("workspace allow should not be recorded as user-granted permission: %#v", permissionEvent)
-	}
-	if permissionEvent["reason"] == "" {
-		t.Fatalf("expected permission reason: %#v", permissionEvent)
-	}
-	risk, ok := permissionEvent["risk"].(map[string]any)
-	if !ok || risk["level"] == "" {
-		t.Fatalf("expected permission risk payload, got %#v", permissionEvent)
+	if hasWritePermissionEvent(events) {
+		t.Fatalf("trusted workspace write should not emit a permission event in %v; output %q", jsonEventTypes(events), stdout.String())
 	}
 
 	sessionID, ok := events[0]["sessionId"].(string)
@@ -430,20 +412,21 @@ func TestRunExecStreamJSONEmitsAndRecordsPermissionEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadEvents returned error: %v", err)
 	}
-	permissionRecord := findSessionEvent(t, recorded, sessions.EventPermissionDecision)
-	var payload map[string]any
-	if err := json.Unmarshal(permissionRecord.Payload, &payload); err != nil {
-		t.Fatalf("decode permission payload: %v", err)
-	}
-	if payload["toolCallId"] == "" || payload["name"] != "write_file" || payload["action"] != "allow" {
-		t.Fatalf("unexpected recorded permission payload: %#v", payload)
+	if hasRecordedWritePermissionEvent(t, recorded) {
+		t.Fatalf("trusted workspace write recorded a permission event")
 	}
 
 	stdout.Reset()
 	stderr.Reset()
+	// Run 2 uses its own fresh cwd. The two exec invocations share nothing:
+	// the strict read-before-write guard refuses unread overwrites by design,
+	// so a second run against files created by the first would have to either
+	// read them first (modeling a competent model) or isolate its workspace.
+	// A fresh cwd keeps both runs clean without provider changes.
+	cwd2 := t.TempDir()
 	exitCode = runWithDeps([]string{"exec", "--skip-permissions-unsafe", "--output-format", "stream-json", "write approved"}, &stdout, &stderr, appDeps{
 		getwd: func() (string, error) {
-			return cwd, nil
+			return cwd2, nil
 		},
 		resolveConfig: func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
 			return execResolvedConfig(), nil
@@ -469,12 +452,8 @@ func TestRunExecStreamJSONEmitsAndRecordsPermissionEvents(t *testing.T) {
 		t.Fatalf("approved exec wrote stderr = %q", stderr.String())
 	}
 	approvedEvents := decodeJSONLines(t, stdout.String())
-	approvedPermissionEvent := findJSONEvent(t, approvedEvents, "permission_decision")
-	if approvedPermissionEvent["id"] == "" || approvedPermissionEvent["action"] != "allow" {
-		t.Fatalf("unexpected approved permission event: %#v", approvedPermissionEvent)
-	}
-	if approvedPermissionEvent["permissionGranted"] != true {
-		t.Fatalf("approved permission event did not preserve permissionGranted: %#v", approvedPermissionEvent)
+	if hasWritePermissionEvent(approvedEvents) {
+		t.Fatalf("unsafe workspace writes should not emit a permission event: %v", jsonEventTypes(approvedEvents))
 	}
 	approvedSessionID, ok := approvedEvents[0]["sessionId"].(string)
 	if !ok || approvedSessionID == "" {
@@ -484,14 +463,52 @@ func TestRunExecStreamJSONEmitsAndRecordsPermissionEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadEvents approved session returned error: %v", err)
 	}
-	approvedPermissionRecord := findSessionEvent(t, approvedRecorded, sessions.EventPermissionDecision)
-	payload = map[string]any{}
-	if err := json.Unmarshal(approvedPermissionRecord.Payload, &payload); err != nil {
-		t.Fatalf("decode approved permission payload: %v", err)
+	if hasRecordedWritePermissionEvent(t, approvedRecorded) {
+		t.Fatalf("unsafe workspace write recorded a permission event")
 	}
-	if payload["permissionGranted"] != true {
-		t.Fatalf("approved recorded permission payload did not preserve permissionGranted: %#v", payload)
+}
+
+// writePermissionEvent reports whether a permission event (a stream-json
+// event or a recorded session payload) belongs to a workspace write: the
+// write_file tool or the write side effect. Prompt-gated audit decisions for
+// unrelated tools (the deterministic test_runner's bash call in auto mode,
+// sideEffect shell) are not workspace writes and are intentionally ignored.
+func writePermissionEvent(event map[string]any) bool {
+	name, _ := event["name"].(string)
+	sideEffect, _ := event["sideEffect"].(string)
+	return name == "write_file" || sideEffect == "write"
+}
+
+// hasWritePermissionEvent reports whether any stream-json event is a
+// permission_request or permission_decision for a workspace write.
+func hasWritePermissionEvent(events []map[string]any) bool {
+	for _, event := range events {
+		if eventType, _ := event["type"].(string); eventType == "permission_request" || eventType == "permission_decision" {
+			if writePermissionEvent(event) {
+				return true
+			}
+		}
 	}
+	return false
+}
+
+// hasRecordedWritePermissionEvent reports whether any recorded session event
+// is a permission_request or permission_decision for a workspace write.
+func hasRecordedWritePermissionEvent(t *testing.T, events []sessions.Event) bool {
+	t.Helper()
+	for _, event := range events {
+		if event.Type != sessions.EventPermissionRequest && event.Type != sessions.EventPermissionDecision {
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("permission event payload is not JSON: %#v: %v", event, err)
+		}
+		if writePermissionEvent(payload) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestRunExecStreamJSONRunStartUsesResolvedAPIModel(t *testing.T) {
@@ -577,6 +594,71 @@ func TestRunExecStreamJSONEmitsReasoningEvents(t *testing.T) {
 	final := findJSONEvent(t, events, "final")
 	if strings.Contains(final["text"].(string), "Thinking. ") {
 		t.Fatalf("reasoning must not be folded into final answer: %#v", final)
+	}
+}
+
+// TestRunExecRecordsPromptLayoutAndCacheTelemetry is the end-to-end seam check
+// for the cache telemetry. A real pipeline run must produce usage records that
+// carry a layout hash, a cache hit, and a memory position, and the run must
+// report no prefix flip. The unit tests cover each layer; this proves the
+// layers are wired to one another in a run.
+func TestRunExecRecordsPromptLayoutAndCacheTelemetry(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	cwd := t.TempDir()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"exec", "--output-format", "stream-json", "write notes"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		resolveConfig: func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return newExecStageAwareProvider(execStageProviderOptions{
+				Usage: zeroruntime.Usage{InputTokens: 100, OutputTokens: 20, CachedInputTokens: 40},
+				Files: []schemas.FileChange{
+					{Path: "go.mod", Content: "module example\n\ngo 1.22\n", ChangeType: "create"},
+					{Path: "notes.txt", Content: "hello", ChangeType: "create"},
+					{Path: "main.go", Content: "package main\n\nfunc Hello() string { return \"hello\" }\n", ChangeType: "create"},
+				},
+			}), nil
+		},
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+
+	events := decodeJSONLines(t, stdout.String())
+	final := findJSONEvent(t, events, "final")
+	text, ok := final["text"].(string)
+	if !ok {
+		t.Fatalf("final event has no text: %#v", final)
+	}
+	var result schemas.PipelineResult
+	if err := json.Unmarshal([]byte(text), &result); err != nil {
+		t.Fatalf("decode final result: %v: %s", err, text)
+	}
+	if len(result.UsageRecords) == 0 {
+		t.Fatalf("run produced no usage records: %s", text)
+	}
+	byStage := make(map[string]string, len(result.UsageRecords))
+	for i, rec := range result.UsageRecords {
+		if rec.PromptLayoutHash == "" {
+			t.Fatalf("usage_records[%d] for stage %s has no prompt_layout_hash", i, rec.Stage)
+		}
+		if prev, seen := byStage[rec.Stage]; seen && prev != rec.PromptLayoutHash {
+			t.Fatalf("stage %s changed its layout hash mid-run: %s then %s", rec.Stage, prev, rec.PromptLayoutHash)
+		}
+		byStage[rec.Stage] = rec.PromptLayoutHash
+		if rec.MemoryPosition != schemas.MemoryPositionAfterPrefix {
+			t.Fatalf("usage_records[%d] memory_position = %q, want %q", i, rec.MemoryPosition, schemas.MemoryPositionAfterPrefix)
+		}
+		if rec.CacheHit == nil || !*rec.CacheHit {
+			t.Fatalf("usage_records[%d] cache_hit = %v, want true", i, rec.CacheHit)
+		}
+	}
+	if result.PromptLayoutFlips != 0 {
+		t.Fatalf("prompt_layout_flips = %d, want 0 for a stable prefix", result.PromptLayoutFlips)
 	}
 }
 
@@ -867,4 +949,59 @@ func findSessionEvent(t *testing.T, events []sessions.Event, eventType sessions.
 	}
 	t.Fatalf("session event %q not found in %#v", eventType, events)
 	return sessions.Event{}
+}
+
+// A text-only repo has no language check. The run completes (exit 0), is not
+// verified, and says so in the final JSON result. It must not fail with the
+// required-verification-incomplete exit (4).
+func TestRunExecTextOnlyRepoCompletesNotVerified(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	cwd := t.TempDir()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"exec", "--output-format", "stream-json", "write hello"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return newExecStageAwareProvider(execStageProviderOptions{
+				Files:     []schemas.FileChange{{Path: "hello.txt", Content: "hi\n", ChangeType: "create"}},
+				TestFiles: []schemas.FileChange{{Path: "hello-check.txt", Content: "ok\n", ChangeType: "create"}},
+			}), nil
+		},
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("exit code = %d, want %d (completed, not verified); stderr=%s", exitCode, exitSuccess, stderr.String())
+	}
+
+	var final string
+	for _, event := range decodeJSONLines(t, stdout.String()) {
+		if event["type"] == "final" {
+			final, _ = event["text"].(string)
+		}
+	}
+	var result schemas.PipelineResult
+	if err := json.Unmarshal([]byte(final), &result); err != nil {
+		t.Fatalf("final result is not a pipeline result: %v\n%s", err, final)
+	}
+	if result.Status != "completed" {
+		t.Fatalf("status = %q, want completed", result.Status)
+	}
+	if result.Verified {
+		t.Fatalf("verified = true for a text-only repo with no check; result = %s", final)
+	}
+	if !strings.Contains(result.UnverifiedReason, "static_analyzer") {
+		t.Fatalf("unverified_reason = %q, want it to name the skipped static analyzer", result.UnverifiedReason)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal([]byte(final), &fields); err != nil {
+		t.Fatalf("decode final fields: %v", err)
+	}
+	if v, ok := fields["verified"].(bool); !ok || v {
+		t.Fatalf("final JSON verified = %v (present %v), want an explicit false", fields["verified"], ok)
+	}
 }

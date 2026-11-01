@@ -1,0 +1,152 @@
+{
+ "view_text": "File: clock_test.go (49 lines)\n\n 1 | package main\n 2 | \n 3 | import (\n 4 | \t\"testing\"\n 5 | \t\"time\"\n 6 | )\n 7 | \n 8 | // clockCase is one row of a fake-clock table test.\n 9 | type clockCase struct {\n10 | \tname    string\n11 | \tttl     time.Duration\n12 | \tadvance time.Duration\n13 | \twantErr bool\n14 | \twantLen int\n15 | }\n16 | \n17 | // runClockTable drives one fresh store per case with a fake clock that never\n18 | // sleeps, so expiry is tested deterministically. New expiry tests should reuse\n19 | // this helper instead of duplicating the fake-clock plumbing.\n20 | func runClockTable(t *testing.T, cases []clockCase) {\n21 | \tt.Helper()\n22 | \tfor _, tc := range cases {\n23 | \t\tt.Run(tc.name, func(t *testing.T) {\n24 | \t\t\tstore := NewStore(tc.ttl)\n25 | \t\t\tclock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)\n26 | \t\t\tstore.now = func() time.Time { return clock }\n27 | \t\t\tstore.Create(\"abc\", \"ada\")\n28 | \t\t\tclock = clock.Add(tc.advance)\n29 | \t\t\t_, err := store.Get(\"abc\")\n30 | \t\t\tif tc.wantErr && err == nil {\n31 | \t\t\t\tt.Fatalf(\"Get after %s: err = nil, want an error\", tc.advance)\n32 | \t\t\t}\n33 | \t\t\tif !tc.wantErr && err != nil {\n34 | \t\t\t\tt.Fatalf(\"Get after %s: %v\", tc.advance, err)\n35 | \t\t\t}\n36 | \t\t\tif got := store.Len(); got != tc.wantLen {\n37 | \t\t\t\tt.Fatalf(\"Len after %s = %d, want %d\", tc.advance, got, tc.wantLen)\n38 | \t\t\t}\n39 | \t\t})\n40 | \t}\n41 | }\n42 | \n43 | // TestClockTableHelperSelfCheck proves the helper itself works.\n44 | func TestClockTableHelperSelfCheck(t *testing.T) {\n45 | \trunClockTable(t, []clockCase{\n46 | \t\t{name: \"under-ttl\", ttl: time.Minute, advance: 30 * time.Second, wantLen: 1},\n47 | \t\t{name: \"over-ttl\", ttl: time.Minute, advance: 2 * time.Minute, wantErr: true, wantLen: 0},\n48 | \t})\n49 | }",
+ "raw_text": "package main\n\nimport (\n\t\"testing\"\n\t\"time\"\n)\n\n// clockCase is one row of a fake-clock table test.\ntype clockCase struct {\n\tname    string\n\tttl     time.Duration\n\tadvance time.Duration\n\twantErr bool\n\twantLen int\n}\n\n// runClockTable drives one fresh store per case with a fake clock that never\n// sleeps, so expiry is tested deterministically. New expiry tests should reuse\n// this helper instead of duplicating the fake-clock plumbing.\nfunc runClockTable(t *testing.T, cases []clockCase) {\n\tt.Helper()\n\tfor _, tc := range cases {\n\t\tt.Run(tc.name, func(t *testing.T) {\n\t\t\tstore := NewStore(tc.ttl)\n\t\t\tclock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)\n\t\t\tstore.now = func() time.Time { return clock }\n\t\t\tstore.Create(\"abc\", \"ada\")\n\t\t\tclock = clock.Add(tc.advance)\n\t\t\t_, err := store.Get(\"abc\")\n\t\t\tif tc.wantErr && err == nil {\n\t\t\t\tt.Fatalf(\"Get after %s: err = nil, want an error\", tc.advance)\n\t\t\t}\n\t\t\tif !tc.wantErr && err != nil {\n\t\t\t\tt.Fatalf(\"Get after %s: %v\", tc.advance, err)\n\t\t\t}\n\t\t\tif got := store.Len(); got != tc.wantLen {\n\t\t\t\tt.Fatalf(\"Len after %s = %d, want %d\", tc.advance, got, tc.wantLen)\n\t\t\t}\n\t\t})\n\t}\n}\n\n// TestClockTableHelperSelfCheck proves the helper itself works.\nfunc TestClockTableHelperSelfCheck(t *testing.T) {\n\trunClockTable(t, []clockCase{\n\t\t{name: \"under-ttl\", ttl: time.Minute, advance: 30 * time.Second, wantLen: 1},\n\t\t{name: \"over-ttl\", ttl: time.Minute, advance: 2 * time.Minute, wantErr: true, wantLen: 0},\n\t})\n}\n",
+ "payloads": [
+  {
+   "confidence": 0.98,
+   "dependencies": [],
+   "files": [
+    {
+     "base_ref": "clock_test.go",
+     "change_type": "modify",
+     "content": "",
+     "edits": [
+      {
+       "new": "// newClockStore returns a store with its clock frozen at 2026-01-01T00:00:00Z\n// and a function that advances the clock without sleeping.\nfunc newClockStore(ttl time.Duration) (*Store, func(time.Duration)) {\n\tstore := NewStore(ttl)\n\tclock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)\n\tstore.now = func() time.Time { return clock }\n\tadvance := func(duration time.Duration) {\n\t\tclock = clock.Add(duration)\n\t}\n\treturn store, advance\n}\n\n// runClockTable drives one fresh store per case with a fake clock that never\n// sleeps, so expiry is tested deterministically. New expiry tests should reuse\n// this helper instead of duplicating the fake-clock plumbing.\nfunc runClockTable(t *testing.T, cases []clockCase) {\n\tt.Helper()\n\tfor _, tc := range cases {\n\t\tt.Run(tc.name, func(t *testing.T) {\n\t\t\tstore, advance := newClockStore(tc.ttl)\n\t\t\tstore.Create(\"abc\", \"ada\")\n\t\t\tadvance(tc.advance)\n",
+       "old": "// runClockTable drives one fresh store per case with a fake clock that never\n// sleeps, so expiry is tested deterministically. New expiry tests should reuse\n// this helper instead of duplicating the fake-clock plumbing.\nfunc runClockTable(t *testing.T, cases []clockCase) {\n\tt.Helper()\n\tfor _, tc := range cases {\n\t\tt.Run(tc.name, func(t *testing.T) {\n\t\t\tstore := NewStore(tc.ttl)\n\t\t\tclock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)\n\t\t\tstore.now = func() time.Time { return clock }\n\t\t\tstore.Create(\"abc\", \"ada\")\n\t\t\tclock = clock.Add(tc.advance)\n"
+      }
+     ],
+     "path": "clock_test.go"
+    }
+   ],
+   "intent": "Add a reusable fake-clock store constructor fixed at 2026-01-01T00:00:00Z and refactor runClockTable to use its advance function.",
+   "known_limitations": [],
+   "language": "go",
+   "memory_disposition": []
+  },
+  {
+   "confidence": 0.98,
+   "dependencies": [],
+   "files": [
+    {
+     "base_ref": "clock_test.go",
+     "change_type": "modify",
+     "content": "",
+     "edits": [
+      {
+       "new": "// newClockStore returns a store whose clock starts frozen at\n// 2026-01-01T00:00:00Z and a function that advances that clock.\nfunc newClockStore(ttl time.Duration) (*Store, func(time.Duration)) {\n\tstore := NewStore(ttl)\n\tclock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)\n\tstore.now = func() time.Time { return clock }\n\tadvance := func(d time.Duration) { clock = clock.Add(d) }\n\treturn store, advance\n}\n\n// runClockTable drives one fresh store per case with a fake clock that never\n// sleeps, so expiry is tested deterministically. New expiry tests should reuse\n// this helper instead of duplicating the fake-clock plumbing.\nfunc runClockTable(t *testing.T, cases []clockCase) {\n\tt.Helper()\n\tfor _, tc := range cases {\n\t\tt.Run(tc.name, func(t *testing.T) {\n\t\t\tstore, advance := newClockStore(tc.ttl)\n\t\t\tstore.Create(\"abc\", \"ada\")\n\t\t\tadvance(tc.advance)\n\t\t\t_, err := store.Get(\"abc\")\n\t\t\tif tc.wantErr && err == nil {\n\t\t\t\tt.Fatalf(\"Get after %s: err = nil, want an error\", tc.advance)\n\t\t\t}\n\t\t\tif !tc.wantErr && err != nil {\n\t\t\t\tt.Fatalf(\"Get after %s: %v\", tc.advance, err)\n\t\t\t}\n\t\t\tif got := store.Len(); got != tc.wantLen {\n\t\t\t\tt.Fatalf(\"Len after %s = %d, want %d\", tc.advance, got, tc.wantLen)\n\t\t\t}\n\t\t})\n\t}\n}",
+       "old": "// runClockTable drives one fresh store per case with a fake clock that never\n// sleeps, so expiry is tested deterministically. New expiry tests should reuse\n// this helper instead of duplicating the fake-clock plumbing.\nfunc runClockTable(t *testing.T, cases []clockCase) {\n\tt.Helper()\n\tfor _, tc := range cases {\n\t\tt.Run(tc.name, func(t *testing.T) {\n\t\t\tstore := NewStore(tc.ttl)\n\t\t\tclock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)\n\t\t\tstore.now = func() time.Time { return clock }\n\t\t\tstore.Create(\"abc\", \"ada\")\n\t\t\tclock = clock.Add(tc.advance)\n\t\t\t_, err := store.Get(\"abc\")\n\t\t\tif tc.wantErr && err == nil {\n\t\t\t\tt.Fatalf(\"Get after %s: err = nil, want an error\", tc.advance)\n\t\t\t}\n\t\t\tif !tc.wantErr && err != nil {\n\t\t\t\tt.Fatalf(\"Get after %s: %v\", tc.advance, err)\n\t\t\t}\n\t\t\tif got := store.Len(); got != tc.wantLen {\n\t\t\t\tt.Fatalf(\"Len after %s = %d, want %d\", tc.advance, got, tc.wantLen)\n\t\t\t}\n\t\t})\n\t}\n}"
+      }
+     ],
+     "path": "clock_test.go"
+    }
+   ],
+   "intent": "Add a reusable fake-clock store helper frozen at the requested UTC instant, and refactor runClockTable to create and advance its store through that helper.",
+   "known_limitations": [],
+   "language": "go",
+   "memory_disposition": []
+  },
+  {
+   "confidence": 0.98,
+   "dependencies": [],
+   "files": [
+    {
+     "base_ref": "clock_test.go",
+     "change_type": "modify",
+     "content": "",
+     "edits": [
+      {
+       "new": "// newClockStore returns a store whose clock starts frozen at\n// 2026-01-01T00:00:00Z and a function for advancing that clock.\nfunc newClockStore(ttl time.Duration) (*Store, func(time.Duration)) {\n\tstore := NewStore(ttl)\n\tclock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)\n\tstore.now = func() time.Time { return clock }\n\tadvance := func(d time.Duration) { clock = clock.Add(d) }\n\treturn store, advance\n}\n\n// runClockTable drives one fresh store per case with a fake clock that never\n// sleeps, so expiry is tested deterministically. New expiry tests should reuse\n// this helper instead of duplicating the fake-clock plumbing.\nfunc runClockTable(t *testing.T, cases []clockCase) {\n\tt.Helper()\n\tfor _, tc := range cases {\n\t\tt.Run(tc.name, func(t *testing.T) {\n\t\t\tstore, advance := newClockStore(tc.ttl)\n\t\t\tstore.Create(\"abc\", \"ada\")\n\t\t\tadvance(tc.advance)\n\t\t\t_, err := store.Get(\"abc\")\n",
+       "old": "// runClockTable drives one fresh store per case with a fake clock that never\n// sleeps, so expiry is tested deterministically. New expiry tests should reuse\n// this helper instead of duplicating the fake-clock plumbing.\nfunc runClockTable(t *testing.T, cases []clockCase) {\n\tt.Helper()\n\tfor _, tc := range cases {\n\t\tt.Run(tc.name, func(t *testing.T) {\n\t\t\tstore := NewStore(tc.ttl)\n\t\t\tclock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)\n\t\t\tstore.now = func() time.Time { return clock }\n\t\t\tstore.Create(\"abc\", \"ada\")\n\t\t\tclock = clock.Add(tc.advance)\n\t\t\t_, err := store.Get(\"abc\")\n"
+      }
+     ],
+     "path": "clock_test.go"
+    }
+   ],
+   "intent": "Add a reusable fake-clock store constructor fixed at 2026-01-01T00:00:00Z and refactor runClockTable to advance time through the returned function.",
+   "known_limitations": [
+    "No dedicated test-generator stage is present; existing tests and downstream static analysis/test execution must validate the helper."
+   ],
+   "language": "go",
+   "memory_disposition": []
+  },
+  {
+   "confidence": 0.96,
+   "dependencies": [],
+   "files": [
+    {
+     "base_ref": "clock_test.go",
+     "change_type": "modify",
+     "content": "",
+     "edits": [
+      {
+       "new": "// newClockStore returns a store whose clock starts at 2026-01-01T00:00:00Z\n// and a function that advances the clock by the given duration.\nfunc newClockStore(ttl time.Duration) (*Store, func(time.Duration)) {\n\tstore := NewStore(ttl)\n\tclock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)\n\tstore.now = func() time.Time { return clock }\n\tadvance := func(d time.Duration) {\n\t\tclock = clock.Add(d)\n\t}\n\treturn store, advance\n}\n\n// runClockTable drives one fresh store per case with a fake clock that never\n// sleeps, so expiry is tested deterministically. New expiry tests should reuse\n// this helper instead of duplicating the fake-clock plumbing.\nfunc runClockTable(t *testing.T, cases []clockCase) {\n\tt.Helper()\n\tfor _, tc := range cases {\n\t\tt.Run(tc.name, func(t *testing.T) {\n\t\t\tstore, advance := newClockStore(tc.ttl)\n\t\t\tstore.Create(\"abc\", \"ada\")\n\t\t\tadvance(tc.advance)\n\t\t\t_, err := store.Get(\"abc\")\n\t\t\tif tc.wantErr && err == nil {\n\t\t\t\tt.Fatalf(\"Get after %s: err = nil, want an error\", tc.advance)\n\t\t\t}\n\t\t\tif !tc.wantErr && err != nil {\n\t\t\t\tt.Fatalf(\"Get after %s: %v\", tc.advance, err)\n\t\t\t}\n\t\t\tif got := store.Len(); got != tc.wantLen {\n\t\t\t\tt.Fatalf(\"Len after %s = %d, want %d\", tc.advance, got, tc.wantLen)\n\t\t\t}\n\t\t})\n\t}\n}",
+       "old": "// runClockTable drives one fresh store per case with a fake clock that never\n// sleeps, so expiry is tested deterministically. New expiry tests should reuse\n// this helper instead of duplicating the fake-clock plumbing.\nfunc runClockTable(t *testing.T, cases []clockCase) {\n\tt.Helper()\n\tfor _, tc := range cases {\n\t\tt.Run(tc.name, func(t *testing.T) {\n\t\t\tstore := NewStore(tc.ttl)\n\t\t\tclock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)\n\t\t\tstore.now = func() time.Time { return clock }\n\t\t\tstore.Create(\"abc\", \"ada\")\n\t\t\tclock = clock.Add(tc.advance)\n\t\t\t_, err := store.Get(\"abc\")\n\t\t\tif tc.wantErr && err == nil {\n\t\t\t\tt.Fatalf(\"Get after %s: err = nil, want an error\", tc.advance)\n\t\t\t}\n\t\t\tif !tc.wantErr && err != nil {\n\t\t\t\tt.Fatalf(\"Get after %s: %v\", tc.advance, err)\n\t\t\t}\n\t\t\tif got := store.Len(); got != tc.wantLen {\n\t\t\t\tt.Fatalf(\"Len after %s = %d, want %d\", tc.advance, got, tc.wantLen)\n\t\t\t}\n\t\t})\n\t}\n}"
+      }
+     ],
+     "path": "clock_test.go"
+    }
+   ],
+   "intent": "Add a reusable fake-clock store constructor fixed at 2026-01-01T00:00:00Z and refactor runClockTable to advance time through it.",
+   "known_limitations": [
+    "The supplied intent is truncated after \u201cchange runClockTable to...\u201d; this implementation assumes the requested change is to make runClockTable use newClockStore. No dedicated test-generator stage is present, so no additional tests were added."
+   ],
+   "language": "go",
+   "memory_disposition": []
+  },
+  {
+   "confidence": 0.98,
+   "dependencies": [],
+   "files": [
+    {
+     "base_ref": "clock_test.go",
+     "change_type": "modify",
+     "content": "",
+     "edits": [
+      {
+       "new": "// newClockStore returns a store with its clock frozen at\n// 2026-01-01T00:00:00Z and a function that advances that clock.\nfunc newClockStore(ttl time.Duration) (*Store, func(time.Duration)) {\n\tstore := NewStore(ttl)\n\tclock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)\n\tstore.now = func() time.Time { return clock }\n\tadvance := func(duration time.Duration) {\n\t\tclock = clock.Add(duration)\n\t}\n\treturn store, advance\n}\n\n// runClockTable drives one fresh store per case with a fake clock that never\n// sleeps, so expiry is tested deterministically. New expiry tests should reuse\n// this helper instead of duplicating the fake-clock plumbing.\nfunc runClockTable(t *testing.T, cases []clockCase) {\n\tt.Helper()\n\tfor _, tc := range cases {\n\t\tt.Run(tc.name, func(t *testing.T) {\n\t\t\tstore, advance := newClockStore(tc.ttl)\n\t\t\tstore.Create(\"abc\", \"ada\")\n\t\t\tadvance(tc.advance)\n\t\t\t_, err := store.Get(\"abc\")",
+       "old": "// runClockTable drives one fresh store per case with a fake clock that never\n// sleeps, so expiry is tested deterministically. New expiry tests should reuse\n// this helper instead of duplicating the fake-clock plumbing.\nfunc runClockTable(t *testing.T, cases []clockCase) {\n\tt.Helper()\n\tfor _, tc := range cases {\n\t\tt.Run(tc.name, func(t *testing.T) {\n\t\t\tstore := NewStore(tc.ttl)\n\t\t\tclock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)\n\t\t\tstore.now = func() time.Time { return clock }\n\t\t\tstore.Create(\"abc\", \"ada\")\n\t\t\tclock = clock.Add(tc.advance)\n\t\t\t_, err := store.Get(\"abc\")"
+      }
+     ],
+     "path": "clock_test.go"
+    }
+   ],
+   "intent": "Add a reusable fake-clock store constructor fixed at 2026-01-01T00:00:00Z, with an advance closure, and refactor runClockTable to use it.",
+   "known_limitations": [
+    "The supplied intent is truncated after \u201cchange runClockTable to...\u201d; this implementation interprets that as refactoring runClockTable to construct and advance its store through newClockStore."
+   ],
+   "language": "go",
+   "memory_disposition": []
+  },
+  {
+   "confidence": 0.97,
+   "dependencies": [],
+   "files": [
+    {
+     "base_ref": "clock_test.go",
+     "change_type": "modify",
+     "content": "",
+     "edits": [
+      {
+       "new": "// newClockStore returns a store with its clock frozen at\n// 2026-01-01T00:00:00Z and a function that advances that clock.\nfunc newClockStore(ttl time.Duration) (*Store, func(time.Duration)) {\n\tstore := NewStore(ttl)\n\tclock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)\n\tstore.now = func() time.Time { return clock }\n\tadvance := func(duration time.Duration) {\n\t\tclock = clock.Add(duration)\n\t}\n\treturn store, advance\n}\n\n// runClockTable drives one fresh store per case with a fake clock that never",
+       "old": "// runClockTable drives one fresh store per case with a fake clock that never"
+      },
+      {
+       "new": "\t\t\tstore, advance := newClockStore(tc.ttl)\n\t\t\tstore.Create(\"abc\", \"ada\")\n\t\t\tadvance(tc.advance)",
+       "old": "\t\t\tstore := NewStore(tc.ttl)\n\t\t\tclock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)\n\t\t\tstore.now = func() time.Time { return clock }\n\t\t\tstore.Create(\"abc\", \"ada\")\n\t\t\tclock = clock.Add(tc.advance)"
+      }
+     ],
+     "path": "clock_test.go"
+    }
+   ],
+   "intent": "Add a reusable fake-clock store constructor and update runClockTable to use its clock-advance closure.",
+   "known_limitations": [
+    "The provided intent is truncated after \u201cchange runClockTable to...\u201d; the implementation follows the evident requirement to refactor runClockTable to use newClockStore."
+   ],
+   "language": "go",
+   "memory_disposition": []
+  }
+ ],
+ "note": "Recorded from the wrong-model P4 re-run smoke (tests/evals/results/P4_RERUN_2026-09-16/smoke2-wrongmodel-raw.jsonl): six hedged modify clock_test.go submissions (content + base_ref + edits).",
+ "raw_source": "reconstructed from the delivered view by stripping display prefixes"
+}

@@ -1,81 +1,85 @@
-# Splice Performance Benchmarks
+# Performance checks
 
-The performance harness tracks three release-facing signals:
+The performance command measures three release smoke signals:
 
-- Cold start: process startup time for `splice --version`.
-- Binary first output: time from spawning the built `splice --version` command to
-  the first stdout or stderr chunk.
-- Harness end memory: RSS for the Go benchmark harness after the spawned
-  command exits, plus the delta from the pre-spawn RSS sample.
+- startup time for `splice --version`;
+- time to the first output byte; and
+- memory used by the benchmark harness after the child exits.
 
-Cold start uses the built Go binary at `./splice` or `./splice.exe`. Run
-`go run ./cmd/splice-release build` before the benchmark so it measures the
-production runtime.
-On Linux the harness memory metric reads RSS from `/proc/self/statm`; on other
-hosts `readHarnessMemoryMb()` falls back to `runtime.ReadMemStats()` and reports
-`MemStats.Sys` in MB when process RSS is not available from the standard library.
+It does not measure provider response time, pipeline duration, or model quality.
+Use [Task benchmark harness](BENCHMARK.md) for verified repository tasks.
 
-This smoke benchmark does not measure provider TTFT or Go agent memory. A
-provider-aware Go benchmark should be added separately when the runtime exposes a
-deterministic local streaming path.
-
-## Run Locally
-
-```bash
-go run ./cmd/splice-perf-bench
-```
-
-Run against a freshly built binary:
+## Build the measured binary
 
 ```bash
 go run ./cmd/splice-release build
 go run ./cmd/splice-perf-bench
 ```
 
-Write the JSON report used by CI:
+The harness uses `./splice` on Unix systems and `./splice.exe` on Windows.
+
+Write a JSON report with:
 
 ```bash
-go run ./cmd/splice-perf-bench --output dist/perf/perf-bench.json
+go run ./cmd/splice-perf-bench \
+  --output dist/perf/perf-bench.json
 ```
 
-Default warning thresholds:
+## Default sample
 
-- Cold start p95: 300 ms
-- Binary first-output p95: 500 ms
-- Harness end RSS max: 256 MB
+The default run uses one warmup and five measured samples.
 
-The default sample count is intentionally small for CI smoke coverage. `p95` uses nearest-rank percentile selection, so with the default 5 measured samples it is the slowest sample. Increase `--iterations` for local baseline investigations.
+| Signal | Warning threshold |
+|---|---:|
+| Cold-start p95 | 300 ms |
+| First-output p95 | 500 ms |
+| Harness end memory | 256 MB |
 
-Override thresholds with CLI flags:
+The p95 calculation uses nearest rank. With five samples, the p95 value is the
+slowest sample.
+
+Increase `--iterations` before you use the result as a local baseline.
+
+## Memory source
+
+Linux reads resident memory from `/proc/self/statm`. Other systems use the Go
+runtime system-memory value when the standard library has no process RSS value.
+
+The memory value describes the benchmark process. It does not describe the
+complete Splice child process tree.
+
+## Override thresholds
 
 ```bash
-go run ./cmd/splice-perf-bench --cold-start-warn-ms=350 --first-output-warn-ms=600 --harness-end-rss-warn-mb=384
+go run ./cmd/splice-perf-bench \
+  --cold-start-warn-ms=350 \
+  --first-output-warn-ms=600 \
+  --harness-end-rss-warn-mb=384
 ```
 
-Or with environment variables:
+Supported variables:
+
+```text
+SPLICE_PERF_ITERATIONS
+SPLICE_PERF_WARMUP_ITERATIONS
+SPLICE_PERF_COLD_START_WARN_MS
+SPLICE_PERF_FIRST_OUTPUT_WARN_MS
+SPLICE_PERF_HARNESS_END_RSS_WARN_MB
+```
+
+## CI output
+
+Use `--ci` to emit GitHub Actions warning annotations:
 
 ```bash
-SPLICE_PERF_COLD_START_WARN_MS=350 go run ./cmd/splice-perf-bench
+go run ./cmd/splice-perf-bench \
+  --ci \
+  --output dist/perf/perf-bench.json
 ```
 
-Supported environment variables:
+A threshold warning does not fail the process by default. Add
+`--fail-on-warning` when the workflow must treat warning drift as a failure.
 
-- `SPLICE_PERF_ITERATIONS`
-- `SPLICE_PERF_WARMUP_ITERATIONS`
-- `SPLICE_PERF_COLD_START_WARN_MS`
-- `SPLICE_PERF_FIRST_OUTPUT_WARN_MS`
-- `SPLICE_PERF_HARNESS_END_RSS_WARN_MB`
-
-## CI Behavior
-
-> **Note:** The `Performance Smoke` job described below is **not yet present** in
-> `.github/workflows/`. The only workflows committed today are `ci.yml` (build,
-> vet, test, cross-build, and the memd sidecar job) and `release-please.yml`
-> (changelog/version releases). This section documents the intended CI behavior;
-> the job will be added when performance benchmarking is wired into CI.
-
-The `Performance Smoke` job builds the binary, runs
-`go run ./cmd/splice-perf-bench --output dist/perf/perf-bench.json --ci`, and
-uploads `dist/perf/perf-bench.json`.
-
-Threshold drift is emitted as GitHub Actions warnings. The job fails only if the benchmark cannot run, the build fails, or `--fail-on-warning` is passed explicitly.
+The repository does not run this benchmark in its current GitHub workflows.
+Run it explicitly before a release when startup or binary-size work can affect
+the command.

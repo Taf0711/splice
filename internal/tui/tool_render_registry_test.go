@@ -3,6 +3,8 @@ package tui
 import (
 	"strings"
 	"testing"
+
+	"charm.land/lipgloss/v2"
 )
 
 func TestDefaultToolBodyRegistrySelectsCoreRenderers(t *testing.T) {
@@ -177,5 +179,21 @@ func TestRegistryRenderSanitizesEveryToolRenderer(t *testing.T) {
 				t.Fatalf("%s body leaked the escape payload as text: %q", tt.name, got)
 			}
 		})
+	}
+}
+
+// A failed tool's error message wraps instead of truncating at the card
+// edge, so the reason is readable.
+func TestFailedToolErrorWraps(t *testing.T) {
+	msg := "Error writing go.mod: the file exists and has not been read this session; call read_file first, then retry the write."
+	body := toolCardBody("write_file", "", "", msg, 40, cardRenderOptions{bodyCap: 8}, true)
+	joined := stripANSI(strings.Join(body.lines, " "))
+	if !strings.Contains(joined, "retry the write.") || strings.Contains(joined, "…") {
+		t.Fatalf("error body truncated: %q", joined)
+	}
+	for _, line := range body.lines {
+		if w := lipgloss.Width(line); w > 40 {
+			t.Fatalf("wrapped line overflows the card: %d > 40: %q", w, stripANSI(line))
+		}
 	}
 }

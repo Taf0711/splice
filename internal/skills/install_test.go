@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Taf0711/splice/internal/gitenv/gitenvtest"
 )
 
 // initGitSkillRepo creates a real local git repo holding a skill and returns a
@@ -375,4 +377,10 @@ func TestInfoReturnsFrontmatterSourceAndHash(t *testing.T) {
 	if info.Hash != installed.Hash {
 		t.Fatalf("Info hash = %q, want %q", info.Hash, installed.Hash)
 	}
+}
+
+func TestDefaultGitRunnerHardensEnv(t *testing.T) {
+	record := gitenvtest.InstallRecorder(t)
+	_ = defaultGitRunner(context.Background(), filepath.Join(t.TempDir(), "dest"), "https://example.invalid/skill.git")
+	gitenvtest.AssertHardened(t, gitenvtest.Runs(t, record))
 }

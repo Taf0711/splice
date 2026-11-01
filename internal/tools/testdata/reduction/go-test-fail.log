@@ -1,0 +1,33 @@
+=== RUN   TestPassOne
+--- PASS: TestPassOne (0.00s)
+=== RUN   TestPassTwo
+side output from a passing test
+--- PASS: TestPassTwo (0.00s)
+=== RUN   TestWithSubs
+=== RUN   TestWithSubs/good
+=== RUN   TestWithSubs/bad
+    thing_test.go:13: got 3, want 4
+--- FAIL: TestWithSubs (0.00s)
+    --- PASS: TestWithSubs/good (0.00s)
+    --- FAIL: TestWithSubs/bad (0.00s)
+=== RUN   TestSkipped
+    thing_test.go:16: needs network
+--- SKIP: TestSkipped (0.00s)
+=== RUN   TestParallel
+=== PAUSE TestParallel
+=== RUN   TestLogsFakePassMarker
+--- PASS: NotARealTest (0.00s)
+    fake detail line that must survive
+--- PASS: TestLogsFakePassMarker (0.00s)
+=== RUN   TestTable
+=== RUN   TestTable/a
+=== RUN   TestTable/b
+    thing_test.go:31: table case b failed
+--- FAIL: TestTable (0.00s)
+    --- PASS: TestTable/a (0.00s)
+    --- FAIL: TestTable/b (0.00s)
+=== CONT  TestParallel
+--- PASS: TestParallel (0.00s)
+FAIL
+FAIL	gtfixture	0.340s
+FAIL

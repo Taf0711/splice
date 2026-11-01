@@ -1,0 +1,7 @@
+{
+  "name": "fam-02-write",
+  "phase": "write",
+  "prompt": "The session TTL is hard-coded to 30 minutes in main.go. Add a package-level const sessionTTL = 30 * time.Minute and use it everywhere the TTL is needed, so there is one source of truth for the expiry duration.",
+  "check": "grep -F -q 'sessionTTL' main.go || { echo 'precursor change missing' >&2; exit 1; }\ngo build ./... && go test -count=1 ./...",
+  "fixture": "fixture"
+}

@@ -22,7 +22,9 @@ import (
 	"github.com/Taf0711/splice/internal/providercatalog"
 	"github.com/Taf0711/splice/internal/providermodeldiscovery"
 	"github.com/Taf0711/splice/internal/providers"
+	"github.com/Taf0711/splice/internal/providers/decisions"
 	"github.com/Taf0711/splice/internal/sandbox"
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
 	"github.com/Taf0711/splice/internal/sessions"
 	"github.com/Taf0711/splice/internal/specmode"
 	splicerun "github.com/Taf0711/splice/internal/splice"
@@ -85,23 +87,41 @@ type execOptions struct {
 	autonomy            string
 	enabledTools        []string
 	disabledTools       []string
-	listTools           bool
-	resume              string
-	resumeLatest        bool
-	fork                string
-	callingSessionID    string
-	callingToolUseID    string
-	tag                 string
-	depth               int
-	sessionTitle        string
-	initSessionID       string
-	worktree            bool
-	worktreeName        string
-	worktreeDir         string
+	// flags carries the parsed --flags override. Nil means no override, so the
+	// resolved flag set falls back to config and environment.
+	flags            map[string]bool
+	listTools        bool
+	resume           string
+	resumeLatest     bool
+	fork             string
+	callingSessionID string
+	callingToolUseID string
+	tag              string
+	depth            int
+	sessionTitle     string
+	initSessionID    string
+	worktree         bool
+	worktreeName     string
+	worktreeDir      string
+	// pipeline is the --pipeline selection: a user-library pipeline name or a
+	// path to a topology file.
+	pipeline string
 	// mergeBack opts a --worktree run into merging the worktree's changes back
 	// into the source repository on success. Off by default: inherited
 	// --worktree behavior leaves the worktree for manual merging.
-	mergeBack             bool
+	mergeBack bool
+	// allowUnverifiedMerge permits --merge-back when the run completed without
+	// a passing verification check. It is an explicit unsafe opt-out.
+	allowUnverifiedMerge bool
+	// requireVerified makes a completed but unverified run exit 4. It is the
+	// CI-truth flag; without it, the historical exit 0 is preserved.
+	requireVerified bool
+	// maxWall is the --max-wall pipeline wall-time limit. Zero leaves the
+	// limit to SPLICE_MAX_WALL, then pipeline.max_wall_seconds, then the default.
+	maxWall time.Duration
+	// serve starts the local browser surface for this run and prints its URL to
+	// stderr. The server stops when the run returns.
+	serve                 bool
 	skipPermissionsUnsafe bool
 	// allowEscalation opts the run into mid-run model escalation: it registers
 	// the escalate_model tool and wires agent.Options.ModelSwitcher. Off by
@@ -118,6 +138,8 @@ type execOptions struct {
 	// autonomy gate. Off by default — a run without the flag wires a nil
 	// SelfCorrector, leaving the agent loop byte-identical to before.
 	selfCorrect bool
+	// loop runs the plain agent tool loop instead of the deterministic pipeline.
+	loop bool
 	// notifyMode overrides config.Notify.Mode for this run. Mutually exclusive
 	// with noNotify.
 	notifyMode string
@@ -127,6 +149,14 @@ type execOptions struct {
 	// additional write roots for this run. Unioned with
 	// config.SandboxConfig.AdditionalWriteRoots at scope construction time.
 	addDirs []string
+	// memoryMode is the explicit memory-sidecar control: "on" (default) or
+	// "off". "off" means a deliberate cold run (memory disabled), distinct
+	// from "unavailable" (tried and failed).
+	memoryMode string
+	// inheritWorktreeTrust, when set, lets a worktree prepared from a trusted
+	// source repo inherit that trust (proven via the git common dir). Off by
+	// default; a spike, no full trust-inheritance UX yet.
+	inheritWorktreeTrust bool
 }
 
 type execUsageError struct {
@@ -160,7 +190,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// Refresh the models.dev pricing/limits cache in the background when stale;
 	// the overlay is read at registry construction from the cache file, so this
 	// benefits the next run and never blocks or fails this one.
-	go func() { _ = modelregistry.RefreshModelsDevCache(context.Background()) }()
+	go func() { _, _ = modelregistry.RefreshModelsDevCache(context.Background()) }()
 
 	// A mode seeds model/effort/max-turns/tool filters as a preset. Expand it up
 	// front — before tool-filter validation and the --list-tools branch — so a
@@ -170,6 +200,10 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// only fills fields the caller left unset.
 	if err := applyExecMode(&options); err != nil {
 		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
+	}
+	if options.loop {
+		// The comparison arm measures the plain loop without sidecar memory.
+		options.memoryMode = "off"
 	}
 
 	workspaceRoot, err := resolveWorkspaceRoot(options.cwd, deps)
@@ -191,6 +225,13 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	runCtx, stopSignals := signalContext()
 	defer stopSignals()
 	var preparedWorktree worktrees.Result
+	worktreeLocked := false
+	unlockWarningWritten := false
+	// sessionOriginCwd is the source repo root this run was launched from. For
+	// a worktree run it records the pre-swap workspace so the session stays
+	// discoverable from the source repo's /resume picker (TW4). Empty for live
+	// checkout runs.
+	sessionOriginCwd := ""
 	if options.worktree {
 		preparedWorktree, err = deps.prepareWorktree(runCtx, worktrees.Options{
 			Cwd:     workspaceRoot,
@@ -201,7 +242,54 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		if err != nil {
 			return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 		}
+		worktreeLocked = preparedWorktree.Locked
+		sessionOriginCwd = workspaceRoot
 		workspaceRoot = preparedWorktree.Path
+	}
+	unlockPreparedWorktree := func(ctx context.Context) error {
+		if !worktreeLocked {
+			return nil
+		}
+		err := deps.unlockWorktree(ctx, worktrees.UnlockOptions{
+			RepoRoot: preparedWorktree.RepoRoot,
+			Path:     preparedWorktree.Path,
+		})
+		if err == nil {
+			worktreeLocked = false
+		}
+		return err
+	}
+	defer func() {
+		if !worktreeLocked {
+			return
+		}
+		unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := unlockPreparedWorktree(unlockCtx); err != nil && !unlockWarningWritten {
+			fmt.Fprintf(stderr, "[splice] WARNING: worktree remains locked at %s: %s\n", redactCLIString(preparedWorktree.Path), redactCLIString(err.Error()))
+		}
+	}()
+	// A run launched from a repository subdirectory works in the same
+	// subdirectory of the worktree, as a run without a worktree does. Trust,
+	// project config, the topology, tools, and the run all use that directory.
+	if options.worktree {
+		launchDir, err := worktrees.LaunchDir(preparedWorktree, sessionOriginCwd)
+		if err != nil {
+			message := err.Error()
+			// This run made the worktree and cannot use it: remove it, so a
+			// failed launch leaves nothing behind. A reused worktree stays.
+			if !preparedWorktree.Reused {
+				cleanupErr := unlockPreparedWorktree(runCtx)
+				if cleanupErr == nil {
+					cleanupErr = deps.removeWorktree(runCtx, worktrees.RemoveOptions{RepoRoot: preparedWorktree.RepoRoot, Path: preparedWorktree.Path, Force: true})
+				}
+				if cleanupErr != nil {
+					message += "; the worktree remains at " + preparedWorktree.Path + ": " + cleanupErr.Error()
+				}
+			}
+			return writeExecFormatUsageError(stdout, stderr, options.outputFormat, message)
+		}
+		workspaceRoot = launchDir
 	}
 
 	registry := newCoreRegistry(workspaceRoot)
@@ -213,36 +301,14 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if options.allowEscalation {
 		registry.Register(tools.NewEscalateModelTool())
 	}
-	var specialistRuntime *agentToolRuntime
-	if shouldRegisterExecSpecialistTools(options) {
-		// Specialist tools register before the full config resolve below (so
-		// --list-tools stays offline). swarm.maxTeamSize is not affected by
-		// overrides, so an empty-overrides resolve yields the same value; a resolve
-		// error falls back to the swarm's built-in default (0 => 8).
-		maxTeamSize := 0
-		if swarmCfg, cfgErr := deps.resolveConfig(workspaceRoot, config.Overrides{}); cfgErr == nil {
-			maxTeamSize = swarmCfg.Swarm.MaxTeamSize
-		}
-		var err error
-		specialistRuntime, err = registerSpecialistTools(registry, workspaceRoot, maxTeamSize)
-		if err != nil {
-			return writeExecProviderError(stdout, stderr, options.outputFormat, "specialist_error", err.Error())
-		}
-		defer closeSpecialistRuntime(stderr, specialistRuntime)
-	}
-	permissionMode, err := resolveExecPermissionMode(options)
-	if err != nil {
-		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
-	}
-	if options.useSpec {
-		permissionMode = agent.PermissionModeSpecDraft
-	}
-
-	// Resolve workspace trust before loading project-scope executables. In the
-	// headless path there is no interactive prompt, so "ask" with no prior
-	// decision falls back to untrusted (fail-safe).
+	// Resolve workspace trust before any project config, specialist, or
+	// executable loads. The headless path has no interactive prompt, so "ask"
+	// with no prior decision falls back to untrusted (fail-safe).
+	// defaultProjectTrust comes from the user config only, so a resolve without
+	// the project layer reads it.
 	trustSetting := "ask"
-	if trustCfg, err := deps.resolveConfig(workspaceRoot, config.Overrides{}); err == nil {
+	noProject := false
+	if trustCfg, err := deps.resolveConfig(workspaceRoot, config.Overrides{ProjectTrust: &noProject}); err == nil {
 		trustSetting = trustCfg.DefaultProjectTrust
 	}
 	trusted, _, persist, store, err := resolveWorkspaceTrust(workspaceRoot, trustSetting, options.trust, options.noTrust)
@@ -257,8 +323,55 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			fmt.Fprintf(stderr, "warning: failed to persist trust decision: %s\n", saveErr)
 		}
 	}
+	// Worktree trust inheritance (spike, off by default): a worktree prepared
+	// from a trusted source repo inherits that trust when the flag is set and
+	// the git common dir proves they share a repository. Fail-closed: an
+	// untrusted source or a failed proof leaves the worktree untrusted.
+	if !trusted && options.inheritWorktreeTrust && preparedWorktree.Path != "" {
+		if sameRepo, repoErr := worktrees.SameRepo(runCtx, nil, preparedWorktree.RepoRoot, preparedWorktree.Path); repoErr == nil {
+			// The source decision is the one for the launch directory, so a
+			// worktree run never gets more trust than the same run without -w.
+			if inherited, _ := worktreeTrustInherit(sessionOriginCwd, store, trustSetting, true, sameRepo); inherited {
+				trusted = true
+			}
+		}
+	}
 	if !trusted && projectConfigExists(workspaceRoot) {
-		fmt.Fprintf(stderr, "workspace %s is not trusted; skipped project MCP servers, hooks, plugins. Run with --trust or set defaultProjectTrust=always to load them.\n", workspaceRoot)
+		fmt.Fprintf(stderr, "workspace %s is not trusted; skipped project config, MCP servers, hooks, plugins. Run with --trust or set defaultProjectTrust=always to load them.\n", workspaceRoot)
+	}
+
+	// Every later resolve in this run uses this decision.
+	deps = pinWorkspaceTrust(deps, trusted)
+
+	var specialistRuntime *agentToolRuntime
+	if shouldRegisterExecSpecialistTools(options) {
+		// Specialist tools register before the full config resolve below (so
+		// --list-tools stays offline). swarm.maxTeamSize is not affected by
+		// overrides, so an empty-overrides resolve yields the same value; a resolve
+		// error falls back to the swarm's built-in default (0 => 8).
+		maxTeamSize := 0
+		if swarmCfg, cfgErr := deps.resolveConfig(workspaceRoot, config.Overrides{}); cfgErr == nil {
+			maxTeamSize = swarmCfg.Swarm.MaxTeamSize
+		}
+		var err error
+		specialistRuntime, err = registerSpecialistTools(registry, workspaceRoot, maxTeamSize, trusted)
+		if err != nil {
+			return writeExecProviderError(stdout, stderr, options.outputFormat, "specialist_error", err.Error())
+		}
+		defer closeSpecialistRuntime(stderr, specialistRuntime)
+	}
+	permissionMode, err := resolveExecPermissionMode(options)
+	if err != nil {
+		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
+	}
+	if options.useSpec {
+		permissionMode = agent.PermissionModeSpecDraft
+	}
+	if options.loop {
+		// MemberAuto advertises the standard coding mutators and shell tools,
+		// while the same sandbox engine still denies out-of-scope writes,
+		// destructive commands, and disallowed network access without prompting.
+		permissionMode = agent.PermissionModeMemberAuto
 	}
 
 	mcpRuntime, err := registerMCPToolsForWorkspace(context.Background(), workspaceRoot, registry, deps, trusted, execMCPAutonomy(options))
@@ -292,6 +405,9 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	}
 
 	overrides := config.Overrides{}
+	if len(options.flags) > 0 {
+		overrides.Flags = options.flags
+	}
 	modelOverride := options.model
 	if options.useSpec && options.specModel != "" {
 		modelOverride = options.specModel
@@ -323,6 +439,60 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", err.Error())
 	}
 	registerLocalControlTools(registry, workspaceRoot, resolved.LocalControl)
+	// --serve starts the local browser surface. Its redaction list is read first,
+	// so a credential store error stops the run before any URL prints. Without
+	// --serve, the run reads no credential for redaction.
+	var surface *execSurface
+	var secretValues []string
+	if options.serve {
+		var secretErr error
+		openStore := deps.keyStoreOpener
+		if openStore == nil {
+			openStore = userKeyStoreOpener(deps.userConfigPath)
+		}
+		// The keys of the profiles this run routes to must load. Other saved
+		// profiles are best effort: the run never sends their keys.
+		routeSources := splicerun.TopologySourcesFor(workspaceRoot, trusted)
+		routeSources.FlagName = options.pipeline
+		stageConfigPath := ""
+		if userConfigPath, err := deps.userConfigPath(); err == nil {
+			stageConfigPath = filepath.Join(filepath.Dir(userConfigPath), "stage-models.json")
+		}
+		secretValues, secretErr = runSecretValues(resolved.Provider, resolved.Providers, secretSources{
+			openStore:  openStore,
+			oauthToken: storedOAuthToken(runCtx),
+			routed:     runRoutes(resolved.Provider.Name, resolved.DecisionAdvisor.ProviderProfile, stageConfigPath, routeSources),
+		})
+		if secretErr != nil {
+			return writeExecProviderError(stdout, stderr, options.outputFormat, "secret_error", secretErr.Error())
+		}
+		var serveErr error
+		surface, serveErr = startExecSurface(runCtx, stderr)
+		if serveErr != nil {
+			return writeExecProviderError(stdout, stderr, options.outputFormat, "serve_error", serveErr.Error())
+		}
+		defer surface.stop()
+	}
+	// The loop stage may run on a profile other than the active one (see the
+	// stage override above). Price it from that profile's catalog, so its
+	// derived OpenRouter or other provider prices apply.
+	if name := strings.TrimSpace(resolved.Provider.Name); name != "" && name != providerProfile {
+		if scoped, scopedErr := modelregistry.DefaultRegistry(name); scopedErr == nil {
+			modelRegistry = scoped
+		}
+	}
+	// LL1: overlay live-probed capabilities (tool-calling, vision) and reasoning
+	// efforts onto a local Ollama model's catalog entry so the pipeline preflight
+	// and model pickers see them. Best-effort and Ollama-only: a probe failure or
+	// an unknown model leaves the entry unchanged (fail closed). Never probes a
+	// cloud provider. One /api/show read feeds both capabilities and efforts.
+	// The overlay runs after the stage rebuild above, so it lands on the registry
+	// the run uses, not on the default profile's registry that the rebuild replaces.
+	if strings.TrimSpace(resolved.Provider.CatalogID) == "ollama" && strings.TrimSpace(resolved.Provider.Model) != "" {
+		if caps, capsErr := providermodeldiscovery.DiscoverOllamaCapabilities(runCtx, resolved.Provider.BaseURL, resolved.Provider.Model, providermodeldiscovery.Options{}); capsErr == nil {
+			applyOllamaOverlay(&modelRegistry, resolved.Provider.Model, caps)
+		}
+	}
 	if err := validateExecToolFilters(options, registry); err != nil {
 		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 	}
@@ -414,6 +584,19 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// A new wrapper that snapshots a core tool before this line would silently
 	// ship nil-scope enforcement. Add it below this re-registration instead.
 	registerExecCoreTools(registry, workspaceRoot, execScope)
+	// Headless runs have no TUI exit hook. Stop every yielded exec_command
+	// session on return and on cancellation, so a dev server or watcher cannot
+	// outlive the CLI process.
+	// The controller is looked up once, here, so the run never reads the
+	// registry map from the cleanup paths. Stopping is idempotent: the run
+	// stops sessions when it returns, and the defer and the cancel watcher are
+	// safety nets.
+	stopSessions := execSessionStopper(lookupExecSessionController(registry))
+	defer stopSessions()
+	go func() {
+		<-runCtx.Done()
+		stopSessions()
+	}()
 	sandboxEngine, err := buildExecSandboxEngine(workspaceRoot, resolved, deps, execScope)
 	if err != nil {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "sandbox_error", err.Error())
@@ -441,6 +624,36 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// Effort to forward on the provider request, gated to the resolved model's
 	// supported levels (empty for non-reasoning models).
 	forwardEffort := forwardedReasoningEffort(modelRegistry, resolved.Provider.Model, runReasoningEffort)
+
+	// Load the stage model file before provider construction. The plain loop uses
+	// its default route as the main model, matching the TUI's configured route.
+	var stageModelConfig schemas.StageModelConfigFile
+	var stageModelConfigErr error
+	stageModelConfigPath := ""
+	if userConfigPath, ucpErr := deps.userConfigPath(); ucpErr != nil {
+		_, _ = fmt.Fprintf(stderr, "[splice] warning: failed to resolve user config path for stage model config: %s\n", ucpErr)
+	} else {
+		stageModelConfigPath = filepath.Join(filepath.Dir(userConfigPath), "stage-models.json")
+		stageModelConfig, stageModelConfigErr = schemas.LoadStageModelConfig(stageModelConfigPath)
+		if stageModelConfigErr != nil {
+			_, _ = fmt.Fprintf(stderr, "[splice] warning: failed to load stage model config: %s\n", stageModelConfigErr)
+		}
+	}
+	if options.loop && stageModelConfig.Default.ProviderProfile != "" && stageModelConfig.Default.Model != "" {
+		profile, ok := providerProfileByName(resolved.Providers, stageModelConfig.Default.ProviderProfile)
+		if !ok {
+			return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", fmt.Sprintf("stage model default references unknown provider profile %q", stageModelConfig.Default.ProviderProfile))
+		}
+		profile.Model = stageModelConfig.Default.Model
+		if stageModelConfig.Default.ReasoningEffort != "" {
+			profile.ReasoningEffort = stageModelConfig.Default.ReasoningEffort
+		}
+		resolved.Provider = profile
+		if stageModelConfig.Default.ReasoningEffort != "" {
+			runReasoningEffort = stageModelConfig.Default.ReasoningEffort
+			forwardEffort = forwardedReasoningEffort(modelRegistry, resolved.Provider.Model, runReasoningEffort)
+		}
+	}
 
 	provider, err := buildProvider(resolved, deps)
 	if err != nil {
@@ -487,6 +700,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			stderr:             stderr,
 			deps:               deps,
 			workspaceRoot:      workspaceRoot,
+			trusted:            trusted,
 			registry:           registry,
 			modelRegistry:      modelRegistry,
 			resolved:           resolved,
@@ -515,6 +729,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		SessionID:        options.initSessionID,
 		Title:            sessionTitle,
 		Cwd:              workspaceRoot,
+		OriginCwd:        sessionOriginCwd,
 		ModelID:          resolved.Provider.Model,
 		Provider:         runMetadata.Provider,
 		Tag:              options.tag,
@@ -557,6 +772,14 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if writer.err != nil {
 		return exitCrash
 	}
+	// Default spawn audit: every deterministic pipeline subprocess becomes a
+	// visible line (stderr, plus warning events in stream-json mode) without
+	// any host opting in. The previous sink is restored on the way out so
+	// in-process callers keep whatever they installed.
+	previousSink := procrun.SetAuditSink(func(record procrun.AuditRecord) {
+		writer.spawnAudit(formatSpawnAudit(record))
+	})
+	defer procrun.SetAuditSink(previousSink)
 	// Surface the unsafe-permissions warning whenever the run resolves to unsafe
 	// mode, covering BOTH --skip-permissions-unsafe and --auto high (which also
 	// resolves to PermissionModeUnsafe). Previously only the explicit flag path
@@ -592,37 +815,38 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// failures auto-fix or just report. fileDiagnostics (always on, lazy) gives
 	// edit_file/write_file inline error diagnostics for the file they just wrote.
 	// lspShutdown tears down any language-server sessions either half spawned.
-	selfCorrector, fileDiagnostics, lspShutdown := newExecSelfCorrector(options.selfCorrect, workspaceRoot, options.autonomy)
-	defer lspShutdown()
-
-	// Load per-stage model routing configuration from a file next to the user
-	// config. A missing file is a graceful no-op; any other error is non-fatal
-	// and the run continues with an empty config.
-	var stageModelConfig schemas.StageModelConfigFile
-	if userConfigPath, ucpErr := deps.userConfigPath(); ucpErr != nil {
-		_, _ = fmt.Fprintf(stderr, "[splice] warning: failed to resolve user config path for stage model config: %s\n", ucpErr)
-	} else {
-		stageModelConfigPath := filepath.Join(filepath.Dir(userConfigPath), "stage-models.json")
-		var smcErr error
-		stageModelConfig, smcErr = schemas.LoadStageModelConfig(stageModelConfigPath)
-		if smcErr != nil {
-			_, _ = fmt.Fprintf(stderr, "[splice] warning: failed to load stage model config: %s\n", smcErr)
-			stageModelConfig = schemas.StageModelConfigFile{}
-		}
+	// The project test plan runs outside the sandbox, so self-correct is a no-op
+	// in an untrusted workspace.
+	selfCorrect := options.selfCorrect
+	if selfCorrect && !trusted {
+		fmt.Fprintln(stderr, "[splice] --self-correct skipped: the workspace is not trusted. Run with --trust to enable it.")
+		selfCorrect = false
 	}
+	selfCorrector, fileDiagnostics, lspShutdown := newExecSelfCorrector(selfCorrect, workspaceRoot, options.autonomy, trusted)
+	defer lspShutdown()
 
 	tierResolverConfig := splicerun.TierResolverConfig{
 		PrimaryProfile: resolved.Provider,
 		Registry:       &modelRegistry,
 	}
-	stageModelResolver, escalationModelResolver := splicerun.BuildStageModelResolvers(
+	modelResolvers := splicerun.BuildStageModelResolvers(
 		stageModelConfig,
 		resolved.Providers,
 		deps.newProvider,
 		tierResolverConfig,
 	)
+	stageModelResolver, escalationModelResolver := modelResolvers.Stage, modelResolvers.Escalation
+	if stageModelConfigErr != nil {
+		// An invalid stage-models.json cannot fall back to the run model. The
+		// first stage that needs a route fails the run with the cause.
+		stageModelResolver = func(string) (agent.ModelSelection, error) {
+			return agent.ModelSelection{}, fmt.Errorf("stage routing config invalid: %w", stageModelConfigErr)
+		}
+	}
 
-	estimator := usage.NewCostEstimator(&modelRegistry)
+	// Each request is priced from the catalog of the provider that served it. The
+	// catalogs are built lazily and kept for this run.
+	servedCatalogs := usage.NewProfileCostCatalogs(append(append([]config.ProviderProfile{}, resolved.Providers...), resolved.Provider))
 	// runtimeSessionID feeds the deterministic pipeline's Options.SessionID, which
 	// (internal/splice/run.go, registry.go) becomes the run id AND the prompt
 	// cache key ("<sessionID>:<stage>"). An ephemeral session exists only to
@@ -635,8 +859,32 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if preparedSession.Session.SessionKind == sessions.SessionKindEphemeral {
 		runtimeSessionID = ""
 	}
+	section := resolved.DecisionAdvisor
+	if section.Backend == "provider" {
+		for _, profile := range resolved.Providers {
+			if profile.Name == section.ProviderProfile && !section.TrajectoryDefault {
+				section.Profile = profile.Model
+			}
+		}
+	}
+	evaluator, err := decisions.NewEvaluator(section, resolved)
+	if err != nil {
+		return writeExecProviderError(stdout, stderr, options.outputFormat, "decision_advisor_error", err.Error())
+	}
+	surface.configurePipeline(pipelineViewSources(workspaceRoot, trusted, options.pipeline, options.planPath), stageModelConfigPath, secretValues)
 	runOptions := agent.Options{
-		MaxTurns: resolved.MaxTurns,
+		MaxTurns:      resolved.MaxTurns,
+		VerifyCommand: append([]string(nil), resolved.Verify.TestCommand...),
+		VerifyDir:     resolved.Verify.TestDir,
+		// DecisionEvaluator wires the decision-advisor transport (Jev). The
+		// flag is the kill switch: off (the default) leaves the evaluator
+		// nil and today's behavior byte-identical. The key resolves from
+		// the environment, then the provider key store, matching the
+		// chat-completion credential order.
+		DecisionEvaluator:     evaluator,
+		DecisionAdvisorConfig: section,
+		TrajectoryConfig:      resolved.Trajectory,
+		MaxWall:               execMaxWall(options.maxWall, resolved.MaxWall),
 		// ContextWindow / compaction are agent-loop only: the deterministic
 		// pipeline (internal/splice) never reads Options.ContextWindow, so
 		// compaction is inert under `splice exec` by architecture, not by
@@ -664,6 +912,8 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		SessionTitle:     sessionTitle,
 		ProviderName:     resolved.Provider.Name,
 		Model:            resolved.Provider.Model,
+		ModelRegistry:    modelRegistry,
+		Flags:            resolved.Flags,
 		// ModelSwitcher is agent-loop only: mid-run model escalation is not wired
 		// into the deterministic pipeline, so it is inert under `splice exec`.
 		ModelSwitcher:   modelSwitcher,
@@ -672,17 +922,33 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		// from ~/.config/splice/stage-models.json (AR11b). nil keeps pre-AR11
 		// behavior: every stage uses the default provider.
 		StageModelResolver: stageModelResolver,
+		// NodeModelResolver is the strongest rung of the model ladder: a
+		// topology node's explicit model beats the per-stage file.
+		NodeModelResolver: modelResolvers.Node,
+		// TraceWriteWarn surfaces trace-persistence loss on the exec output
+		// seam exactly once per run, so a stale sidecar announces itself.
+		TraceWriteWarn: writer.warning,
 		// EscalationModelResolver resolves an escalation provider/model/effort
 		// from ~/.config/splice/stage-models.json "escalation" entry (AR10c).
 		// nil/empty keeps pre-AR10c behavior: escalation is skipped.
 		EscalationModelResolver: escalationModelResolver,
-		// Price each pipeline request from the same registry used for routing.
-		EstimateUsageCost: estimator,
-		Cwd:               workspaceRoot,
-		Images:            images,
-		Registry:          registry,
-		PermissionMode:    permissionMode,
-		Autonomy:          options.autonomy,
+		// Price each pipeline request from the catalog of the provider that served it.
+		EstimateServedUsageCost: servedCatalogs.Estimate,
+		Cwd:                     workspaceRoot,
+		Images:                  images,
+		Registry:                registry,
+		PermissionMode:          permissionMode,
+		Autonomy:                options.autonomy,
+		TrustedWorkspace:        trusted,
+		// TrustRoot is the workspace root that trust was resolved for. For a
+		// worktree run, that is the launch directory mapped into the worktree.
+		// With --inherit-worktree-trust, the trust decision of the source
+		// launch directory applies to it. The
+		// pipeline reads .splice/pipeline.json from that checkout, so only
+		// committed files load. The interactive TUI reads it from the launch
+		// directory instead.
+		TrustRoot: workspaceRoot,
+		Pipeline:  options.pipeline,
 		// SelfCorrect is agent-loop only: the deterministic pipeline does not run
 		// the post-edit verify-and-correct loop, so it is inert under `splice exec`.
 		SelfCorrect: selfCorrector,
@@ -701,6 +967,12 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		DisabledTools:           options.disabledTools,
 		OnText:                  writer.text,
 		OnReasoning:             writer.reasoning,
+		OnNotice:                writer.pipelineNotice(),
+		EventSink:               surface.sink(),
+		SecretValues:            secretValues,
+		OnPipelinePlan:          writer.pipelinePlan,
+		OnStageEvent:            writer.stage,
+		OnPresentationState:     surface.presentation(writer.presentationState),
 		OnToolCall: func(call agent.ToolCall) {
 			writer.toolCall(call, registry)
 			sessionRecorder.append(sessions.EventToolCall, map[string]any{
@@ -739,6 +1011,12 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			sessionRecorder.append(sessions.EventToolResult, payload)
 		},
 		OnAttributedUsage: func(au agent.AttributedUsage) {
+			// A request that carries no cost is priced from its serving provider's
+			// catalog before it is saved, so the stored event shows the cost the run
+			// used. A request with a usage error keeps its error.
+			if au.Cost.Status == "" && au.UsageError == "" {
+				au.Cost = servedCatalogs.Estimate(au.ProviderName, au.Model, au.Usage, au.UsageReported)
+			}
 			// Legacy JSON output keeps the basic usage shape. Stream JSON uses
 			// the enriched attributed event below, never both.
 			if writer.format != execOutputStreamJSON {
@@ -802,28 +1080,134 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			sessionRecorder.append(sessions.EventUsage, payload)
 		},
 	}
+	var loopLedger *loopUsageLedger
+	if options.loop {
+		loopLedger = newLoopUsageLedger(servedCatalogs.Estimate)
+		baseAttributed := runOptions.OnAttributedUsage
+		runOptions.OnAttributedUsage = func(attributed agent.AttributedUsage) {
+			loopLedger.append(attributed)
+			if baseAttributed != nil {
+				baseAttributed(attributed)
+			}
+		}
+		runOptions.OnCompactionUsage = func(usage agent.Usage, model string) {
+			attributed := agent.AttributedUsage{
+				Usage: usage, UsageReported: true, ProviderName: resolved.Provider.Name,
+				Model: model, Stage: "compaction", Iteration: 1,
+				SpendSource: schemas.SpendSourceCompaction,
+			}
+			loopLedger.append(attributed)
+			if baseAttributed != nil {
+				baseAttributed(attributed)
+			}
+		}
+	}
 	resolvedMemClient, mErr := deps.resolveMemory(runCtx)
 	var memClient splicerun.MemoryStore
-	if mErr != nil {
-		writer.warning(fmt.Sprintf("memory sidecar unavailable; running without memory injection: %v", mErr))
-	} else if resolvedMemClient == nil {
-		writer.warning("memory sidecar not found; running without memory injection")
+	if options.memoryMode == "off" {
+		// --memory=off is a deliberate cold run: no sidecar resolution, and the
+		// run records "off" rather than "unavailable".
+		memClient = nil
+		runOptions.MemoryStatus = "off"
 	} else {
-		memClient = resolvedMemClient
+		switch {
+		case mErr != nil:
+			writer.warning(fmt.Sprintf("memory sidecar unavailable; running without memory injection: %v", mErr))
+			runOptions.MemoryStatus = "unavailable"
+		case resolvedMemClient == nil:
+			writer.warning("memory sidecar not found; running without memory injection")
+			runOptions.MemoryStatus = "off"
+		default:
+			memClient = resolvedMemClient
+			runOptions.MemoryStatus = "active"
+			// Graph capture rides the same sidecar client. The wrapper
+			// exposes it to the run seam's verified-run capture path; a
+			// client that lacks graph support still satisfies MemoryStore.
+			memClient = splicerun.NewGraphMemoryStore(resolvedMemClient)
+		}
 	}
 
 	recovery := iterationRecoveryForWorktree(options.worktree, preparedWorktree)
+	if preparedWorktree.Path != "" {
+		// Memory identity is the stable repo root, not the per-run worktree path.
+		runOptions.ProjectRoot = preparedWorktree.RepoRoot
+	}
 	var result agent.Result
-	if options.planPath != "" {
+	if options.loop {
+		result, err = agent.Run(runCtx, agentPrompt, provider, runOptions)
+		status := "completed"
+		if err != nil || result.Incomplete {
+			status = "failed"
+		}
+		loopResult := loopLedger.result(writer.runID, resolved.Provider.Model, resolved.Provider.Name, result.FinalAnswer, runOptions.MemoryStatus, status)
+		if err != nil {
+			loopResult.FinalOutput["error"] = err.Error()
+		}
+		if result.Incomplete && result.IncompleteReason != "" {
+			loopResult.FinalOutput["error"] = result.IncompleteReason
+		}
+		if validateErr := validateLoopResult(loopResult); validateErr != nil {
+			return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", validateErr.Error())
+		}
+		encoded, marshalErr := json.MarshalIndent(loopResult, "", "  ")
+		if marshalErr != nil {
+			return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", marshalErr.Error())
+		}
+		result.FinalAnswer = string(encoded)
+	} else if options.planPath != "" {
 		result, err = splicerun.RunDesignPlan(runCtx, designPlan, provider, runOptions, memClient, recovery)
 	} else {
 		result, err = splicerun.Run(runCtx, agentPrompt, provider, runOptions, memClient, recovery)
 	}
+	// Stop background sessions as soon as the run returns, before merge-back
+	// and worktree removal, so no session holds files in the worktree.
+	stopSessions()
+	surface.finish(result.FinalAnswer, err)
 	notifier.Notify(notify.Completion, notify.DefaultMessage(notify.Completion))
 	if writer.err != nil {
 		return exitCrash
 	}
 	if err != nil {
+		if options.loop && !errors.Is(err, context.Canceled) && runCtx.Err() == nil {
+			// The loop still emits a PipelineResult-compatible final payload on
+			// provider and tool errors, so warmcost can account the requests made
+			// before the failure.
+			loopResult := loopLedger.result(writer.runID, resolved.Provider.Model, resolved.Provider.Name, result.FinalAnswer, runOptions.MemoryStatus, "failed")
+			loopResult.FinalOutput["error"] = err.Error()
+			if validateErr := validateLoopResult(loopResult); validateErr != nil {
+				return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", validateErr.Error())
+			}
+			encoded, marshalErr := json.MarshalIndent(loopResult, "", "  ")
+			if marshalErr != nil {
+				return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", marshalErr.Error())
+			}
+			sessionRecorder.append(sessions.EventError, map[string]any{"message": err.Error()})
+			switch options.outputFormat {
+			case execOutputStreamJSON:
+				writer.final(string(encoded))
+				writer.errorEvent("provider_error", err.Error(), false)
+				writer.runEnd("error", exitProvider)
+				if writer.err != nil {
+					return exitCrash
+				}
+				return exitProvider
+			case execOutputJSON:
+				if writeErr := writeJSONLine(stdout, map[string]any{"type": "final", "text": string(encoded)}); writeErr != nil {
+					return exitCrash
+				}
+				if writeErr := writeJSONLine(stdout, map[string]any{"type": "error", "code": "provider_error", "message": err.Error()}); writeErr != nil {
+					return exitCrash
+				}
+				if writeErr := writeJSONLine(stdout, map[string]any{"type": "done", "exit_code": exitProvider}); writeErr != nil {
+					return exitCrash
+				}
+				return exitProvider
+			default:
+				writer.final(string(encoded))
+				fmt.Fprintln(stderr, "Loop failed: "+err.Error())
+				return exitProvider
+			}
+		}
 		// A Ctrl+C / SIGTERM cancellation is a clean shutdown, not a provider error.
 		if errors.Is(err, context.Canceled) || runCtx.Err() != nil {
 			sessionRecorder.append(sessions.EventError, map[string]any{"message": "interrupted"})
@@ -856,15 +1240,22 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			return exitInterrupted
 		}
 		sessionRecorder.append(sessions.EventError, map[string]any{"message": err.Error()})
+		// Run finds an invalid topology, plan, node pin, or stage route before
+		// any provider request. That is invalid input (exit 2), not a provider
+		// failure.
+		code, exitCode := "provider_error", exitProvider
+		if errors.Is(err, splicerun.ErrInvalidRunInput) {
+			code, exitCode = "input_error", exitUsage
+		}
 		if options.outputFormat == execOutputStreamJSON {
-			writer.errorEvent("provider_error", err.Error(), false)
-			writer.runEnd("error", exitProvider)
+			writer.errorEvent(code, err.Error(), false)
+			writer.runEnd("error", exitCode)
 			if writer.err != nil {
 				return exitCrash
 			}
-			return exitProvider
+			return exitCode
 		}
-		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", err.Error())
+		return writeExecError(stdout, stderr, options.outputFormat, code, err.Error(), exitCode)
 	}
 	sessionRecorder.append(sessions.EventMessage, map[string]any{
 		"role":    "assistant",
@@ -911,14 +1302,67 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		}
 		return exitIncomplete
 	}
+	// A completed run that verified nothing is not a success for merge-back or
+	// for an explicit --require-verified run. Incomplete and failed runs
+	// returned above. A plain completed-unverified run keeps the historical
+	// exit 0 unless one of these gates applies.
+	if !result.Verified && ((options.mergeBack && !options.allowUnverifiedMerge) || options.requireVerified) {
+		reason := result.UnverifiedReason
+		if reason == "" {
+			reason = "run completed without a passing verification check"
+		}
+		sessionRecorder.append(sessions.EventError, map[string]any{"message": "unverified: " + reason})
+		switch options.outputFormat {
+		case execOutputStreamJSON:
+			writer.final(result.FinalAnswer)
+			writer.errorEvent("unverified", reason, false)
+			writer.runEnd("unverified", exitIncomplete)
+			if writer.err != nil {
+				return exitCrash
+			}
+		case execOutputJSON:
+			if writeErr := writeJSONLine(stdout, map[string]any{"type": "final", "text": result.FinalAnswer}); writeErr != nil {
+				return exitCrash
+			}
+			if writeErr := writeJSONLine(stdout, map[string]any{"type": "error", "code": "unverified", "message": reason}); writeErr != nil {
+				return exitCrash
+			}
+			if writeErr := writeJSONLine(stdout, map[string]any{"type": "done", "exit_code": exitIncomplete}); writeErr != nil {
+				return exitCrash
+			}
+		default:
+			writer.final(result.FinalAnswer)
+			fmt.Fprintln(stderr, "Run completed without verification (not reported as success): "+reason)
+		}
+		return exitIncomplete
+	}
 	// Merge-back runs only after a fully successful run: incomplete and failed
 	// runs return above, keeping the worktree for inspection or manual merge.
 	if options.mergeBack {
+		if !result.Verified {
+			// Only --allow-unverified-merge reaches here with an unverified
+			// run. Say what is not verified before the merge changes the
+			// source branch.
+			reason := result.UnverifiedReason
+			if reason == "" {
+				reason = "run completed without a passing verification check"
+			}
+			writer.warning("merging an unverified run (--allow-unverified-merge): " + reason)
+		}
 		mergeResult, mergeErr := deps.mergeBackWorktree(runCtx, worktrees.MergeBackOptions{
 			RepoRoot:     preparedWorktree.RepoRoot,
 			WorktreePath: preparedWorktree.Path,
 			Name:         preparedWorktree.Name,
+			SourceBranch: preparedWorktree.SourceBranch,
+			SourceCommit: preparedWorktree.SourceCommit,
 		})
+		unlockCtx, cancelUnlock := context.WithTimeout(context.Background(), 5*time.Second)
+		unlockErr := unlockPreparedWorktree(unlockCtx)
+		cancelUnlock()
+		if unlockErr != nil {
+			unlockWarningWritten = true
+			writer.warning(fmt.Sprintf("worktree unlock failed; %s remains locked: %s", redactCLIString(preparedWorktree.Path), redactCLIString(unlockErr.Error())))
+		}
 		if mergeErr != nil {
 			// The run succeeded and its work survives on the worktree branch, but
 			// the user asked for a merge that did not happen: fail loud.
@@ -955,6 +1399,30 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		switch mergeResult.Status {
 		case worktrees.MergeBackMerged, worktrees.MergeBackNoChanges:
 			writer.text("[splice] merge-back: " + mergeResult.Message + "\n")
+			// The work is in source history, so only cleanup can fail here.
+			if cleanupErr := deps.removeWorktree(runCtx, worktrees.RemoveOptions{
+				RepoRoot: preparedWorktree.RepoRoot,
+				Path:     preparedWorktree.Path,
+			}); cleanupErr != nil {
+				writer.warning(fmt.Sprintf("worktree cleanup failed; %s left in place: %v", preparedWorktree.Path, cleanupErr))
+			}
+			// A real merge writes a kept verdict with the merge SHA and branch.
+			// no_changes writes nothing (unknown verdict).
+			if v := verdictForMergeStatus(mergeResult.Status, mergeResult.CommitSHA, mergeResult.Branch); v != nil {
+				if runOptions.SessionID == "" {
+					// Fail loud: the merge happened, but there is no session ID to
+					// key the verdict on, so it is not recorded.
+					writer.warning("verdict not recorded: run has no session id")
+				} else if tracer, ok := memClient.(splicerun.TraceStore); ok && tracer != nil {
+					v.RunID = runOptions.SessionID
+					v.DecidedAt = time.Now()
+					vctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					if vErr := tracer.UpsertVerdict(vctx, *v); vErr != nil {
+						writer.warning(fmt.Sprintf("verdict write skipped: %v", vErr))
+					}
+					cancel()
+				}
+			}
 		default:
 			writer.warning("merge-back " + string(mergeResult.Status) + ": " + mergeResult.Message)
 		}
@@ -970,6 +1438,32 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	return exitSuccess
 }
 
+// lookupExecSessionController returns the registry's exec_command session
+// controller, or nil. It is a variable so tests can count the lookups and
+// observe the stop calls.
+var lookupExecSessionController = func(registry *tools.Registry) tools.ExecSessionController {
+	if registry == nil {
+		return nil
+	}
+	tool, ok := registry.Get(tools.ExecCommandToolName)
+	if !ok {
+		return nil
+	}
+	controller, _ := tool.(tools.ExecSessionController)
+	return controller
+}
+
+// execSessionStopper returns a function that stops every yielded exec_command
+// session of controller. It is best-effort and safe to call more than once:
+// the run's own error path is unaffected.
+func execSessionStopper(controller tools.ExecSessionController) func() {
+	return func() {
+		if controller != nil {
+			_ = controller.StopAllExecSessions()
+		}
+	}
+}
+
 func registerExecCoreTools(registry *tools.Registry, workspaceRoot string, scope tools.PathScope) {
 	for _, tool := range tools.WithoutEmptyBackedTools(tools.CoreToolsScoped(workspaceRoot, scope)) {
 		// The skill tool is directory-backed, not PathScope-backed. Keep the
@@ -983,6 +1477,9 @@ func registerExecCoreTools(registry *tools.Registry, workspaceRoot string, scope
 		}
 		registry.Register(tool)
 	}
+	// B1: the raw-bytes source reader rides the same scoped registration.
+	// It is host-seam-only and never enters the model-facing toolset.
+	tools.RegisterPipelineSourceReader(registry, workspaceRoot, scope)
 }
 
 // deferredEligibleCount returns the number of registered tools that are
@@ -1001,13 +1498,13 @@ func registerExecCoreTools(registry *tools.Registry, workspaceRoot string, scope
 // unless a changed file's language actually has one installed on PATH. The
 // returned cleanup shuts that manager down (terminating any spawned server
 // sessions); it is a no-op when self-correct is off.
-func newExecSelfCorrector(enabled bool, workspaceRoot string, autonomy string) (*agent.SelfCorrector, func(context.Context, string) string, func()) {
+func newExecSelfCorrector(enabled bool, workspaceRoot string, autonomy string, trusted bool) (*agent.SelfCorrector, func(context.Context, string) string, func()) {
 	// The manager is created regardless of --self-correct: it also backs the
 	// always-on background post-edit diagnostics (agent.NewFileDiagnostics,
 	// collected off the tool-call path by the loop), and it stays lazy — no
 	// language server is spawned unless an edited file's language actually has
 	// one installed on PATH.
-	manager := lsp.NewManager(workspaceRoot)
+	manager := lsp.NewManager(workspaceRoot, trusted)
 	cleanup := func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -1107,6 +1604,20 @@ func iterationRecoveryForWorktree(enabled bool, prepared worktrees.Result) splic
 		return nil
 	}
 	return worktrees.NewIterationRecovery(prepared)
+}
+
+// verdictForMergeStatus maps a merge-back result to a post-run verdict. Only a
+// real merge is kept; no_changes, conflict, and skipped_dirty write nothing
+// (unknown verdict).
+func verdictForMergeStatus(status worktrees.MergeBackStatus, sha, branch string) *schemas.VerdictRecord {
+	if status == worktrees.MergeBackMerged {
+		return &schemas.VerdictRecord{
+			Verdict:        schemas.VerdictKept,
+			MergeCommitSHA: sha,
+			MergeBranch:    branch,
+		}
+	}
+	return nil
 }
 
 func resolveWorkspaceRoot(cwd string, deps appDeps) (string, error) {
@@ -1282,8 +1793,14 @@ func writeExecFormatUsageError(stdout io.Writer, stderr io.Writer, format execOu
 }
 
 func writeExecProviderError(stdout io.Writer, stderr io.Writer, format execOutputFormat, code string, message string) int {
+	return writeExecError(stdout, stderr, format, code, message, exitProvider)
+}
+
+// writeExecError writes one terminal error in the output format and returns
+// exitCode.
+func writeExecError(stdout io.Writer, stderr io.Writer, format execOutputFormat, code string, message string, exitCode int) int {
 	if format == execOutputStreamJSON {
-		return writeStreamJSONError(stdout, code, message, false, exitProvider)
+		return writeStreamJSONError(stdout, code, message, false, exitCode)
 	}
 	if format == execOutputJSON {
 		if err := writeJSONLine(stdout, map[string]any{
@@ -1295,11 +1812,11 @@ func writeExecProviderError(stdout io.Writer, stderr io.Writer, format execOutpu
 		}
 		if err := writeJSONLine(stdout, map[string]any{
 			"type":      "done",
-			"exit_code": exitProvider,
+			"exit_code": exitCode,
 		}); err != nil {
 			return exitCrash
 		}
-		return exitProvider
+		return exitCode
 	}
 	if _, err := fmt.Fprintf(stderr, "[splice] %s\n", message); err != nil {
 		return exitCrash
@@ -1312,7 +1829,7 @@ func writeExecProviderError(stdout io.Writer, stderr io.Writer, format execOutpu
 			return exitCrash
 		}
 	}
-	return exitProvider
+	return exitCode
 }
 
 // applyExecMode expands a --mode preset onto the exec options. The preset only
@@ -1367,6 +1884,15 @@ func resolveSelectedModel(registry modelregistry.Registry, input string) (string
 	return entry.ID, notice
 }
 
+func providerProfileByName(profiles []config.ProviderProfile, name string) (config.ProviderProfile, bool) {
+	for _, profile := range profiles {
+		if profile.Name == name {
+			return profile, true
+		}
+	}
+	return config.ProviderProfile{}, false
+}
+
 // modelContextWindow returns the resolved model's exact context window (max input
 // tokens) from the registry, or 0 when the model isn't catalogued. Compaction call
 // sites wrap this in modelregistry.AgentContextWindow to apply a positive fallback;
@@ -1387,36 +1913,37 @@ func modelContextWindow(registry modelregistry.Registry, modelID string) int {
 // live provider discovery (so an uncatalogued proxy/custom model gets its real
 // window instead of the generic fallback), else the positive FallbackContextWindow.
 // Discovery runs only on a registry miss (catalogued models pay no latency), is
-// bounded by a short timeout, and degrades to the fallback on any error — so a
-// headless run is never blocked or failed by it.
-func resolveAgentContextWindow(ctx context.Context, registry modelregistry.Registry, profile config.ProviderProfile, compaction config.CompactionConfig) int {
+// bounded by a short timeout. Discovery errors degrade to the fallback. A
+// selected credential-backend read error fails loudly.
+func resolveAgentContextWindow(ctx context.Context, registry modelregistry.Registry, profile config.ProviderProfile, compaction config.CompactionConfig) (int, error) {
 	if entry, ok := registry.Resolve(profile.Model); ok && entry.ContextLimits.ContextWindow > 0 {
 		window := entry.ContextLimits.ContextWindow
 		if compaction.StayInCheapestPricingTierOrDefault() {
 			window = modelregistry.CheapestPricingTierContextWindow(entry)
 		}
-		return window
+		return window, nil
 	}
-	if window := discoveredModelContextWindow(ctx, profile); window > 0 {
-		return window
+	window, err := discoveredModelContextWindow(ctx, profile)
+	if err != nil {
+		return 0, err
 	}
-	return modelregistry.AgentContextWindow(0)
+	if window > 0 {
+		return window, nil
+	}
+	return modelregistry.AgentContextWindow(0), nil
 }
 
 // discoveredModelContextWindow queries the provider's live model list for the
-// active model's context window. Returns 0 when the provider isn't catalogued, the
-// credential can't be resolved, discovery fails, or the model reports no window.
-func discoveredModelContextWindow(ctx context.Context, profile config.ProviderProfile) int {
+// active model's context window. It returns zero for discovery misses and errors.
+// A selected credential-backend read error is returned.
+func discoveredModelContextWindow(ctx context.Context, profile config.ProviderProfile) (int, error) {
 	descriptor, ok := providercatalog.Get(strings.TrimSpace(profile.CatalogID))
 	if !ok {
-		return 0
+		return 0, nil
 	}
-	// Authenticate discovery with the resolved key (inline, then stored, then env).
-	authed := profile
-	if strings.TrimSpace(authed.APIKey) == "" {
-		if store, err := config.ProviderKeyStore(); err == nil {
-			authed = config.ApplyStoredAPIKey(authed, store)
-		}
+	authed, err := discoveryCredentialProfile(profile)
+	if err != nil {
+		return 0, err
 	}
 	if strings.TrimSpace(authed.APIKey) == "" && strings.TrimSpace(authed.APIKeyEnv) != "" {
 		authed.APIKey = strings.TrimSpace(os.Getenv(authed.APIKeyEnv))
@@ -1425,15 +1952,15 @@ func discoveredModelContextWindow(ctx context.Context, profile config.ProviderPr
 	defer cancel()
 	models, err := providermodeldiscovery.DiscoverCatalog(dctx, descriptor, authed, providermodeldiscovery.Options{})
 	if err != nil {
-		return 0
+		return 0, nil
 	}
 	target := strings.TrimSpace(profile.Model)
 	for _, model := range models {
 		if strings.EqualFold(strings.TrimSpace(model.ID), target) && model.ContextWindow > 0 {
-			return model.ContextWindow
+			return model.ContextWindow, nil
 		}
 	}
-	return 0
+	return 0, nil
 }
 
 // forwardedReasoningEffort returns the effort to send on the provider request.
@@ -1501,6 +2028,16 @@ func resolveExecRunMetadata(profile config.ProviderProfile) (execRunMetadata, er
 	}, nil
 }
 
+// formatSpawnAudit renders one spawn audit record as a compact single line:
+// profile, binary, argv, working directory, and the engine decision.
+func formatSpawnAudit(record procrun.AuditRecord) string {
+	detail := fmt.Sprintf("%s %s %s dir=%s", record.ProfileID, record.Name, strings.Join(record.Args, " "), record.Dir)
+	if record.Decision.Rejected {
+		return "[spawn-refused] " + detail + " reason=" + record.Decision.Reason
+	}
+	return fmt.Sprintf("[spawn] %s backend=%s wrapped=%t", detail, record.Decision.Backend, record.Decision.Wrapped)
+}
+
 func writeExecStreamJSONFinal(stdout io.Writer, cwd string, metadata execRunMetadata, permissionMode agent.PermissionMode, text string, exitCode int) int {
 	runID, err := streamjson.CreateRunID(time.Now())
 	if err != nil {
@@ -1542,4 +2079,29 @@ func execNotifyMode(options execOptions, resolved config.ResolvedConfig) string 
 		return options.notifyMode
 	}
 	return resolved.Notify.Mode
+}
+
+// applyOllamaOverlay records a local Ollama model's live-probed capabilities
+// and reasoning efforts on the registry. Unknown model ids are a no-op.
+func applyOllamaOverlay(registry *modelregistry.Registry, model string, caps providermodeldiscovery.OllamaCapabilities) {
+	registry.OverlayCapabilities(model, caps.ModelCapabilities()...)
+	if caps.Reasoning {
+		registry.OverlayReasoningEfforts(model)
+	}
+	// Surgical negative: remove tool-calling only when the daemon actually
+	// reported a capability list that omitted it. A missing capabilities
+	// array (Reported false) leaves the entry untouched, so older Ollama
+	// or custom Modelfiles never lose a working setup.
+	if caps.Reported && !caps.ToolCall {
+		registry.RemoveCapability(model, modelregistry.ModelCapabilityToolCalling)
+	}
+}
+
+// execMaxWall applies the --max-wall flag over the resolved limit (from
+// SPLICE_MAX_WALL or pipeline.max_wall_seconds). Zero keeps the default.
+func execMaxWall(flag, resolved time.Duration) time.Duration {
+	if flag > 0 {
+		return flag
+	}
+	return resolved
 }

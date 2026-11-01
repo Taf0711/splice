@@ -102,7 +102,7 @@ func TestGitSweepMergeAndBaseline(t *testing.T) {
 // TestMaybeGitSweepGating: no sweep before the baseline answers, none while one
 // is in flight, and the in-flight flag sets when one is issued.
 func TestMaybeGitSweepGating(t *testing.T) {
-	m := model{cwd: "/tmp"}
+	m := model{cwd: "/tmp", trusted: true}
 	if _, cmd := m.maybeGitSweep(); cmd != nil {
 		t.Fatal("no baseline yet: sweep must not run")
 	}

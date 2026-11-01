@@ -1,0 +1,1562 @@
+[
+  {
+    "schema_version": 1,
+    "lifecycle": "executing",
+    "plan": {
+      "title": "add a Hello function and tests",
+      "task_count": 4,
+      "dependencies": {
+        "acceptance_verifier": [
+          "test_runner"
+        ],
+        "static_analyzer": [
+          "code_writer"
+        ],
+        "test_runner": [
+          "static_analyzer"
+        ]
+      },
+      "stages": [
+        "code_writer",
+        "static_analyzer",
+        "test_runner",
+        "acceptance_verifier"
+      ],
+      "tier": "light",
+      "topology": "default"
+    },
+    "nodes": null,
+    "interventions": null,
+    "evidence": null,
+    "trajectory": {},
+    "files": null,
+    "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_usd": 0
+    }
+  },
+  {
+    "schema_version": 1,
+    "lifecycle": "executing",
+    "plan": {
+      "title": "add a Hello function and tests",
+      "task_count": 4,
+      "dependencies": {
+        "acceptance_verifier": [
+          "test_runner"
+        ],
+        "static_analyzer": [
+          "code_writer"
+        ],
+        "test_runner": [
+          "static_analyzer"
+        ]
+      },
+      "stages": [
+        "code_writer",
+        "static_analyzer",
+        "test_runner",
+        "acceptance_verifier"
+      ],
+      "tier": "light",
+      "topology": "default"
+    },
+    "nodes": [
+      {
+        "id": "code_writer",
+        "label": "code_writer",
+        "kind": "WRITE",
+        "status": "running",
+        "progress": 0,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 0
+        },
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "cost_usd": 0
+        },
+        "workspace": "shared_cwd"
+      }
+    ],
+    "interventions": null,
+    "evidence": null,
+    "trajectory": {},
+    "files": null,
+    "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_usd": 0
+    }
+  },
+  {
+    "schema_version": 1,
+    "lifecycle": "executing",
+    "plan": {
+      "title": "add a Hello function and tests",
+      "task_count": 4,
+      "dependencies": {
+        "acceptance_verifier": [
+          "test_runner"
+        ],
+        "static_analyzer": [
+          "code_writer"
+        ],
+        "test_runner": [
+          "static_analyzer"
+        ]
+      },
+      "stages": [
+        "code_writer",
+        "static_analyzer",
+        "test_runner",
+        "acceptance_verifier"
+      ],
+      "tier": "light",
+      "topology": "default"
+    },
+    "nodes": [
+      {
+        "id": "code_writer",
+        "label": "code_writer",
+        "kind": "WRITE",
+        "status": "running",
+        "progress": 0,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 0
+        },
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "cost_usd": 0
+        },
+        "route": {
+          "input_budget": 20000,
+          "output_budget": 8192
+        },
+        "workspace": "shared_cwd"
+      }
+    ],
+    "interventions": null,
+    "evidence": null,
+    "trajectory": {},
+    "files": null,
+    "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_usd": 0
+    }
+  },
+  {
+    "schema_version": 1,
+    "lifecycle": "executing",
+    "plan": {
+      "title": "add a Hello function and tests",
+      "task_count": 4,
+      "dependencies": {
+        "acceptance_verifier": [
+          "test_runner"
+        ],
+        "static_analyzer": [
+          "code_writer"
+        ],
+        "test_runner": [
+          "static_analyzer"
+        ]
+      },
+      "stages": [
+        "code_writer",
+        "static_analyzer",
+        "test_runner",
+        "acceptance_verifier"
+      ],
+      "tier": "light",
+      "topology": "default"
+    },
+    "nodes": [
+      {
+        "id": "code_writer",
+        "label": "code_writer",
+        "kind": "WRITE",
+        "status": "running",
+        "progress": 0,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 15,
+          "unpriced": true
+        },
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 5,
+          "cached_tokens": 2,
+          "reasoning_tokens": 2,
+          "cost_usd": 0
+        },
+        "route": {
+          "input_budget": 20000,
+          "output_budget": 8192
+        },
+        "workspace": "shared_cwd"
+      }
+    ],
+    "interventions": null,
+    "evidence": null,
+    "trajectory": {},
+    "files": null,
+    "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_usd": 0
+    }
+  },
+  {
+    "schema_version": 1,
+    "lifecycle": "executing",
+    "plan": {
+      "title": "add a Hello function and tests",
+      "task_count": 4,
+      "dependencies": {
+        "acceptance_verifier": [
+          "test_runner"
+        ],
+        "static_analyzer": [
+          "code_writer"
+        ],
+        "test_runner": [
+          "static_analyzer"
+        ]
+      },
+      "stages": [
+        "code_writer",
+        "static_analyzer",
+        "test_runner",
+        "acceptance_verifier"
+      ],
+      "tier": "light",
+      "topology": "default"
+    },
+    "nodes": [
+      {
+        "id": "code_writer",
+        "label": "code_writer",
+        "kind": "WRITE",
+        "status": "complete",
+        "progress": 1,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 15,
+          "unpriced": true
+        },
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 5,
+          "cached_tokens": 2,
+          "reasoning_tokens": 2,
+          "cost_usd": 0
+        },
+        "summary": "add Hello function",
+        "changed_files": [
+          "main.go"
+        ],
+        "route": {
+          "input_budget": 20000,
+          "output_budget": 8192
+        },
+        "workspace": "shared_cwd"
+      }
+    ],
+    "interventions": null,
+    "evidence": null,
+    "trajectory": {},
+    "files": null,
+    "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_usd": 0
+    }
+  },
+  {
+    "schema_version": 1,
+    "lifecycle": "verifying",
+    "plan": {
+      "title": "add a Hello function and tests",
+      "task_count": 4,
+      "dependencies": {
+        "acceptance_verifier": [
+          "test_runner"
+        ],
+        "static_analyzer": [
+          "code_writer"
+        ],
+        "test_runner": [
+          "static_analyzer"
+        ]
+      },
+      "stages": [
+        "code_writer",
+        "static_analyzer",
+        "test_runner",
+        "acceptance_verifier"
+      ],
+      "tier": "light",
+      "topology": "default"
+    },
+    "nodes": [
+      {
+        "id": "code_writer",
+        "label": "code_writer",
+        "kind": "WRITE",
+        "status": "complete",
+        "progress": 1,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 15,
+          "unpriced": true
+        },
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 5,
+          "cached_tokens": 2,
+          "reasoning_tokens": 2,
+          "cost_usd": 0
+        },
+        "summary": "add Hello function",
+        "changed_files": [
+          "main.go"
+        ],
+        "route": {
+          "input_budget": 20000,
+          "output_budget": 8192
+        },
+        "workspace": "shared_cwd"
+      },
+      {
+        "id": "static_analyzer",
+        "label": "static_analyzer",
+        "kind": "ANALYZE",
+        "status": "running",
+        "progress": 0,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 0
+        },
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "cost_usd": 0
+        },
+        "dependencies": [
+          "code_writer"
+        ],
+        "workspace": "shared_cwd"
+      }
+    ],
+    "interventions": null,
+    "evidence": null,
+    "trajectory": {},
+    "files": null,
+    "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_usd": 0
+    }
+  },
+  {
+    "schema_version": 1,
+    "lifecycle": "verifying",
+    "plan": {
+      "title": "add a Hello function and tests",
+      "task_count": 4,
+      "dependencies": {
+        "acceptance_verifier": [
+          "test_runner"
+        ],
+        "static_analyzer": [
+          "code_writer"
+        ],
+        "test_runner": [
+          "static_analyzer"
+        ]
+      },
+      "stages": [
+        "code_writer",
+        "static_analyzer",
+        "test_runner",
+        "acceptance_verifier"
+      ],
+      "tier": "light",
+      "topology": "default"
+    },
+    "nodes": [
+      {
+        "id": "code_writer",
+        "label": "code_writer",
+        "kind": "WRITE",
+        "status": "complete",
+        "progress": 1,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 15,
+          "unpriced": true
+        },
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 5,
+          "cached_tokens": 2,
+          "reasoning_tokens": 2,
+          "cost_usd": 0
+        },
+        "summary": "add Hello function",
+        "changed_files": [
+          "main.go"
+        ],
+        "route": {
+          "input_budget": 20000,
+          "output_budget": 8192
+        },
+        "workspace": "shared_cwd"
+      },
+      {
+        "id": "static_analyzer",
+        "label": "static_analyzer",
+        "kind": "ANALYZE",
+        "status": "running",
+        "progress": 0,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 0
+        },
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "cost_usd": 0
+        },
+        "dependencies": [
+          "code_writer"
+        ],
+        "route": {
+          "input_budget": 0,
+          "output_budget": 0
+        },
+        "workspace": "shared_cwd"
+      }
+    ],
+    "interventions": null,
+    "evidence": null,
+    "trajectory": {},
+    "files": null,
+    "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_usd": 0
+    }
+  },
+  {
+    "schema_version": 1,
+    "lifecycle": "executing",
+    "plan": {
+      "title": "add a Hello function and tests",
+      "task_count": 4,
+      "dependencies": {
+        "acceptance_verifier": [
+          "test_runner"
+        ],
+        "static_analyzer": [
+          "code_writer"
+        ],
+        "test_runner": [
+          "static_analyzer"
+        ]
+      },
+      "stages": [
+        "code_writer",
+        "static_analyzer",
+        "test_runner",
+        "acceptance_verifier"
+      ],
+      "tier": "light",
+      "topology": "default"
+    },
+    "nodes": [
+      {
+        "id": "code_writer",
+        "label": "code_writer",
+        "kind": "WRITE",
+        "status": "complete",
+        "progress": 1,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 15,
+          "unpriced": true
+        },
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 5,
+          "cached_tokens": 2,
+          "reasoning_tokens": 2,
+          "cost_usd": 0
+        },
+        "summary": "add Hello function",
+        "changed_files": [
+          "main.go"
+        ],
+        "route": {
+          "input_budget": 20000,
+          "output_budget": 8192
+        },
+        "workspace": "shared_cwd"
+      },
+      {
+        "id": "static_analyzer",
+        "label": "static_analyzer",
+        "kind": "ANALYZE",
+        "status": "complete",
+        "progress": 1,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 0
+        },
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "cost_usd": 0
+        },
+        "dependencies": [
+          "code_writer"
+        ],
+        "summary": "All applicable verification checks passed.",
+        "route": {
+          "input_budget": 0,
+          "output_budget": 0
+        },
+        "workspace": "shared_cwd"
+      }
+    ],
+    "interventions": null,
+    "evidence": null,
+    "trajectory": {},
+    "files": null,
+    "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_usd": 0
+    }
+  },
+  {
+    "schema_version": 1,
+    "lifecycle": "executing",
+    "plan": {
+      "title": "add a Hello function and tests",
+      "task_count": 4,
+      "dependencies": {
+        "acceptance_verifier": [
+          "test_runner"
+        ],
+        "static_analyzer": [
+          "code_writer"
+        ],
+        "test_runner": [
+          "static_analyzer"
+        ]
+      },
+      "stages": [
+        "code_writer",
+        "static_analyzer",
+        "test_runner",
+        "acceptance_verifier"
+      ],
+      "tier": "light",
+      "topology": "default"
+    },
+    "nodes": [
+      {
+        "id": "code_writer",
+        "label": "code_writer",
+        "kind": "WRITE",
+        "status": "complete",
+        "progress": 1,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 15,
+          "unpriced": true
+        },
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 5,
+          "cached_tokens": 2,
+          "reasoning_tokens": 2,
+          "cost_usd": 0
+        },
+        "summary": "add Hello function",
+        "changed_files": [
+          "main.go"
+        ],
+        "route": {
+          "input_budget": 20000,
+          "output_budget": 8192
+        },
+        "workspace": "shared_cwd"
+      },
+      {
+        "id": "static_analyzer",
+        "label": "static_analyzer",
+        "kind": "ANALYZE",
+        "status": "complete",
+        "progress": 1,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 0
+        },
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "cost_usd": 0
+        },
+        "dependencies": [
+          "code_writer"
+        ],
+        "summary": "All applicable verification checks passed.",
+        "route": {
+          "input_budget": 0,
+          "output_budget": 0
+        },
+        "workspace": "shared_cwd"
+      },
+      {
+        "id": "test_runner",
+        "label": "test_runner",
+        "kind": "TEST",
+        "status": "running",
+        "progress": 0,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 0
+        },
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "cost_usd": 0
+        },
+        "dependencies": [
+          "static_analyzer"
+        ],
+        "workspace": "shared_cwd"
+      }
+    ],
+    "interventions": null,
+    "evidence": null,
+    "trajectory": {},
+    "files": null,
+    "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_usd": 0
+    }
+  },
+  {
+    "schema_version": 1,
+    "lifecycle": "executing",
+    "plan": {
+      "title": "add a Hello function and tests",
+      "task_count": 4,
+      "dependencies": {
+        "acceptance_verifier": [
+          "test_runner"
+        ],
+        "static_analyzer": [
+          "code_writer"
+        ],
+        "test_runner": [
+          "static_analyzer"
+        ]
+      },
+      "stages": [
+        "code_writer",
+        "static_analyzer",
+        "test_runner",
+        "acceptance_verifier"
+      ],
+      "tier": "light",
+      "topology": "default"
+    },
+    "nodes": [
+      {
+        "id": "code_writer",
+        "label": "code_writer",
+        "kind": "WRITE",
+        "status": "complete",
+        "progress": 1,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 15,
+          "unpriced": true
+        },
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 5,
+          "cached_tokens": 2,
+          "reasoning_tokens": 2,
+          "cost_usd": 0
+        },
+        "summary": "add Hello function",
+        "changed_files": [
+          "main.go"
+        ],
+        "route": {
+          "input_budget": 20000,
+          "output_budget": 8192
+        },
+        "workspace": "shared_cwd"
+      },
+      {
+        "id": "static_analyzer",
+        "label": "static_analyzer",
+        "kind": "ANALYZE",
+        "status": "complete",
+        "progress": 1,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 0
+        },
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "cost_usd": 0
+        },
+        "dependencies": [
+          "code_writer"
+        ],
+        "summary": "All applicable verification checks passed.",
+        "route": {
+          "input_budget": 0,
+          "output_budget": 0
+        },
+        "workspace": "shared_cwd"
+      },
+      {
+        "id": "test_runner",
+        "label": "test_runner",
+        "kind": "TEST",
+        "status": "running",
+        "progress": 0,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 0
+        },
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "cost_usd": 0
+        },
+        "dependencies": [
+          "static_analyzer"
+        ],
+        "route": {
+          "input_budget": 0,
+          "output_budget": 0
+        },
+        "workspace": "shared_cwd"
+      }
+    ],
+    "interventions": null,
+    "evidence": null,
+    "trajectory": {},
+    "files": null,
+    "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_usd": 0
+    }
+  },
+  {
+    "schema_version": 1,
+    "lifecycle": "executing",
+    "plan": {
+      "title": "add a Hello function and tests",
+      "task_count": 4,
+      "dependencies": {
+        "acceptance_verifier": [
+          "test_runner"
+        ],
+        "static_analyzer": [
+          "code_writer"
+        ],
+        "test_runner": [
+          "static_analyzer"
+        ]
+      },
+      "stages": [
+        "code_writer",
+        "static_analyzer",
+        "test_runner",
+        "acceptance_verifier"
+      ],
+      "tier": "light",
+      "topology": "default"
+    },
+    "nodes": [
+      {
+        "id": "code_writer",
+        "label": "code_writer",
+        "kind": "WRITE",
+        "status": "complete",
+        "progress": 1,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 15,
+          "unpriced": true
+        },
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 5,
+          "cached_tokens": 2,
+          "reasoning_tokens": 2,
+          "cost_usd": 0
+        },
+        "summary": "add Hello function",
+        "changed_files": [
+          "main.go"
+        ],
+        "route": {
+          "input_budget": 20000,
+          "output_budget": 8192
+        },
+        "workspace": "shared_cwd"
+      },
+      {
+        "id": "static_analyzer",
+        "label": "static_analyzer",
+        "kind": "ANALYZE",
+        "status": "complete",
+        "progress": 1,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 0
+        },
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "cost_usd": 0
+        },
+        "dependencies": [
+          "code_writer"
+        ],
+        "summary": "All applicable verification checks passed.",
+        "route": {
+          "input_budget": 0,
+          "output_budget": 0
+        },
+        "workspace": "shared_cwd"
+      },
+      {
+        "id": "test_runner",
+        "label": "test_runner",
+        "kind": "TEST",
+        "status": "complete",
+        "progress": 1,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 0
+        },
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "cost_usd": 0
+        },
+        "dependencies": [
+          "static_analyzer"
+        ],
+        "summary": "Test command passed.",
+        "route": {
+          "input_budget": 0,
+          "output_budget": 0
+        },
+        "workspace": "shared_cwd"
+      }
+    ],
+    "interventions": null,
+    "evidence": null,
+    "trajectory": {},
+    "files": null,
+    "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_usd": 0
+    }
+  },
+  {
+    "schema_version": 1,
+    "lifecycle": "verifying",
+    "plan": {
+      "title": "add a Hello function and tests",
+      "task_count": 4,
+      "dependencies": {
+        "acceptance_verifier": [
+          "test_runner"
+        ],
+        "static_analyzer": [
+          "code_writer"
+        ],
+        "test_runner": [
+          "static_analyzer"
+        ]
+      },
+      "stages": [
+        "code_writer",
+        "static_analyzer",
+        "test_runner",
+        "acceptance_verifier"
+      ],
+      "tier": "light",
+      "topology": "default"
+    },
+    "nodes": [
+      {
+        "id": "code_writer",
+        "label": "code_writer",
+        "kind": "WRITE",
+        "status": "complete",
+        "progress": 1,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 15,
+          "unpriced": true
+        },
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 5,
+          "cached_tokens": 2,
+          "reasoning_tokens": 2,
+          "cost_usd": 0
+        },
+        "summary": "add Hello function",
+        "changed_files": [
+          "main.go"
+        ],
+        "route": {
+          "input_budget": 20000,
+          "output_budget": 8192
+        },
+        "workspace": "shared_cwd"
+      },
+      {
+        "id": "static_analyzer",
+        "label": "static_analyzer",
+        "kind": "ANALYZE",
+        "status": "complete",
+        "progress": 1,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 0
+        },
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "cost_usd": 0
+        },
+        "dependencies": [
+          "code_writer"
+        ],
+        "summary": "All applicable verification checks passed.",
+        "route": {
+          "input_budget": 0,
+          "output_budget": 0
+        },
+        "workspace": "shared_cwd"
+      },
+      {
+        "id": "test_runner",
+        "label": "test_runner",
+        "kind": "TEST",
+        "status": "complete",
+        "progress": 1,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 0
+        },
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "cost_usd": 0
+        },
+        "dependencies": [
+          "static_analyzer"
+        ],
+        "summary": "Test command passed.",
+        "route": {
+          "input_budget": 0,
+          "output_budget": 0
+        },
+        "workspace": "shared_cwd"
+      },
+      {
+        "id": "acceptance_verifier",
+        "label": "acceptance_verifier",
+        "kind": "VERIFY",
+        "status": "running",
+        "progress": 0,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 0
+        },
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "cost_usd": 0
+        },
+        "dependencies": [
+          "test_runner"
+        ],
+        "workspace": "shared_cwd"
+      }
+    ],
+    "interventions": null,
+    "evidence": null,
+    "trajectory": {},
+    "files": null,
+    "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_usd": 0
+    }
+  },
+  {
+    "schema_version": 1,
+    "lifecycle": "verifying",
+    "plan": {
+      "title": "add a Hello function and tests",
+      "task_count": 4,
+      "dependencies": {
+        "acceptance_verifier": [
+          "test_runner"
+        ],
+        "static_analyzer": [
+          "code_writer"
+        ],
+        "test_runner": [
+          "static_analyzer"
+        ]
+      },
+      "stages": [
+        "code_writer",
+        "static_analyzer",
+        "test_runner",
+        "acceptance_verifier"
+      ],
+      "tier": "light",
+      "topology": "default"
+    },
+    "nodes": [
+      {
+        "id": "code_writer",
+        "label": "code_writer",
+        "kind": "WRITE",
+        "status": "complete",
+        "progress": 1,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 15,
+          "unpriced": true
+        },
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 5,
+          "cached_tokens": 2,
+          "reasoning_tokens": 2,
+          "cost_usd": 0
+        },
+        "summary": "add Hello function",
+        "changed_files": [
+          "main.go"
+        ],
+        "route": {
+          "input_budget": 20000,
+          "output_budget": 8192
+        },
+        "workspace": "shared_cwd"
+      },
+      {
+        "id": "static_analyzer",
+        "label": "static_analyzer",
+        "kind": "ANALYZE",
+        "status": "complete",
+        "progress": 1,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 0
+        },
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "cost_usd": 0
+        },
+        "dependencies": [
+          "code_writer"
+        ],
+        "summary": "All applicable verification checks passed.",
+        "route": {
+          "input_budget": 0,
+          "output_budget": 0
+        },
+        "workspace": "shared_cwd"
+      },
+      {
+        "id": "test_runner",
+        "label": "test_runner",
+        "kind": "TEST",
+        "status": "complete",
+        "progress": 1,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 0
+        },
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "cost_usd": 0
+        },
+        "dependencies": [
+          "static_analyzer"
+        ],
+        "summary": "Test command passed.",
+        "route": {
+          "input_budget": 0,
+          "output_budget": 0
+        },
+        "workspace": "shared_cwd"
+      },
+      {
+        "id": "acceptance_verifier",
+        "label": "acceptance_verifier",
+        "kind": "VERIFY",
+        "status": "running",
+        "progress": 0,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 0
+        },
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "cost_usd": 0
+        },
+        "dependencies": [
+          "test_runner"
+        ],
+        "route": {
+          "input_budget": 0,
+          "output_budget": 0
+        },
+        "workspace": "shared_cwd"
+      }
+    ],
+    "interventions": null,
+    "evidence": null,
+    "trajectory": {},
+    "files": null,
+    "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_usd": 0
+    }
+  },
+  {
+    "schema_version": 1,
+    "lifecycle": "executing",
+    "plan": {
+      "title": "add a Hello function and tests",
+      "task_count": 4,
+      "dependencies": {
+        "acceptance_verifier": [
+          "test_runner"
+        ],
+        "static_analyzer": [
+          "code_writer"
+        ],
+        "test_runner": [
+          "static_analyzer"
+        ]
+      },
+      "stages": [
+        "code_writer",
+        "static_analyzer",
+        "test_runner",
+        "acceptance_verifier"
+      ],
+      "tier": "light",
+      "topology": "default"
+    },
+    "nodes": [
+      {
+        "id": "code_writer",
+        "label": "code_writer",
+        "kind": "WRITE",
+        "status": "complete",
+        "progress": 1,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 15,
+          "unpriced": true
+        },
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 5,
+          "cached_tokens": 2,
+          "reasoning_tokens": 2,
+          "cost_usd": 0
+        },
+        "summary": "add Hello function",
+        "changed_files": [
+          "main.go"
+        ],
+        "route": {
+          "input_budget": 20000,
+          "output_budget": 8192
+        },
+        "workspace": "shared_cwd"
+      },
+      {
+        "id": "static_analyzer",
+        "label": "static_analyzer",
+        "kind": "ANALYZE",
+        "status": "complete",
+        "progress": 1,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 0
+        },
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "cost_usd": 0
+        },
+        "dependencies": [
+          "code_writer"
+        ],
+        "summary": "All applicable verification checks passed.",
+        "route": {
+          "input_budget": 0,
+          "output_budget": 0
+        },
+        "workspace": "shared_cwd"
+      },
+      {
+        "id": "test_runner",
+        "label": "test_runner",
+        "kind": "TEST",
+        "status": "complete",
+        "progress": 1,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 0
+        },
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "cost_usd": 0
+        },
+        "dependencies": [
+          "static_analyzer"
+        ],
+        "summary": "Test command passed.",
+        "route": {
+          "input_budget": 0,
+          "output_budget": 0
+        },
+        "workspace": "shared_cwd"
+      },
+      {
+        "id": "acceptance_verifier",
+        "label": "acceptance_verifier",
+        "kind": "VERIFY",
+        "status": "complete",
+        "progress": 1,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 0
+        },
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "cost_usd": 0
+        },
+        "dependencies": [
+          "test_runner"
+        ],
+        "summary": "Acceptance verification: 0 passed, 0 failed, 0 errored, 0 skipped.",
+        "route": {
+          "input_budget": 0,
+          "output_budget": 0
+        },
+        "workspace": "shared_cwd"
+      }
+    ],
+    "interventions": null,
+    "evidence": null,
+    "trajectory": {},
+    "files": null,
+    "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_usd": 0
+    }
+  },
+  {
+    "schema_version": 1,
+    "lifecycle": "complete",
+    "plan": {
+      "title": "add a Hello function and tests",
+      "task_count": 4,
+      "dependencies": {
+        "acceptance_verifier": [
+          "test_runner"
+        ],
+        "static_analyzer": [
+          "code_writer"
+        ],
+        "test_runner": [
+          "static_analyzer"
+        ]
+      },
+      "stages": [
+        "code_writer",
+        "static_analyzer",
+        "test_runner",
+        "acceptance_verifier"
+      ],
+      "tier": "light",
+      "topology": "default"
+    },
+    "nodes": [
+      {
+        "id": "code_writer",
+        "label": "code_writer",
+        "kind": "WRITE",
+        "status": "complete",
+        "progress": 1,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 15,
+          "unpriced": true
+        },
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 5,
+          "cached_tokens": 2,
+          "reasoning_tokens": 2,
+          "cost_usd": 0
+        },
+        "summary": "add Hello function",
+        "changed_files": [
+          "main.go"
+        ],
+        "route": {
+          "input_budget": 20000,
+          "output_budget": 8192
+        },
+        "workspace": "shared_cwd"
+      },
+      {
+        "id": "static_analyzer",
+        "label": "static_analyzer",
+        "kind": "ANALYZE",
+        "status": "complete",
+        "progress": 1,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 0
+        },
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "cost_usd": 0
+        },
+        "dependencies": [
+          "code_writer"
+        ],
+        "summary": "All applicable verification checks passed.",
+        "route": {
+          "input_budget": 0,
+          "output_budget": 0
+        },
+        "workspace": "shared_cwd"
+      },
+      {
+        "id": "test_runner",
+        "label": "test_runner",
+        "kind": "TEST",
+        "status": "complete",
+        "progress": 1,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 0
+        },
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "cost_usd": 0
+        },
+        "dependencies": [
+          "static_analyzer"
+        ],
+        "summary": "Test command passed.",
+        "route": {
+          "input_budget": 0,
+          "output_budget": 0
+        },
+        "workspace": "shared_cwd"
+      },
+      {
+        "id": "acceptance_verifier",
+        "label": "acceptance_verifier",
+        "kind": "VERIFY",
+        "status": "complete",
+        "progress": 1,
+        "iteration": 0,
+        "cost": {
+          "usd": 0,
+          "tokens": 0
+        },
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "cost_usd": 0
+        },
+        "dependencies": [
+          "test_runner"
+        ],
+        "summary": "Acceptance verification: 0 passed, 0 failed, 0 errored, 0 skipped.",
+        "route": {
+          "input_budget": 0,
+          "output_budget": 0
+        },
+        "workspace": "shared_cwd"
+      }
+    ],
+    "interventions": null,
+    "evidence": null,
+    "trajectory": {},
+    "files": null,
+    "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_usd": 0
+    },
+    "completion": {
+      "status": "completed"
+    }
+  }
+]

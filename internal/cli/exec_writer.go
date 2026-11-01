@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/presentation"
 	"github.com/Taf0711/splice/internal/sessions"
 	"github.com/Taf0711/splice/internal/streamjson"
 	"github.com/Taf0711/splice/internal/tools"
@@ -29,6 +30,11 @@ type execEventWriter struct {
 	sessionID    string
 	streamedText *strings.Builder
 	err          error
+	// lastPresentationState retains the most recent presentation snapshot.
+	// State lives behind the Go callback, not on the wire, so this never
+	// affects stream-json output. P1.2 will render from the snapshots; for
+	// now the writer only proves the plumbing.
+	lastPresentationState presentation.State
 }
 
 func (writer *execEventWriter) runStart(cwd string, metadata execRunMetadata, permissionMode agent.PermissionMode) {
@@ -55,6 +61,21 @@ func (writer *execEventWriter) runStart(cwd string, metadata execRunMetadata, pe
 	}
 }
 
+// spawnAudit surfaces one procrun spawn audit record so the chokepoint is
+// observable in headless output by default: warning events ride the stdout
+// protocol in stream-json and json modes (stderr stays machine-clean), and
+// text mode gets a compact stderr line.
+func (writer *execEventWriter) spawnAudit(message string) {
+	switch writer.format {
+	case execOutputStreamJSON:
+		writer.writeStreamJSON(streamjson.Event{Type: streamjson.EventWarning, RunID: writer.runID, Message: message})
+	case execOutputJSON:
+		writer.writeJSON(map[string]any{"type": "warning", "message": message})
+	default:
+		writer.writeStderr(message + "\n")
+	}
+}
+
 func (writer *execEventWriter) warning(message string) {
 	if writer.format == execOutputJSON {
 		writer.writeJSON(map[string]any{"type": "warning", "message": message})
@@ -78,6 +99,69 @@ func (writer *execEventWriter) text(delta string) {
 		return
 	}
 	writer.writeStdout(delta)
+}
+
+func (writer *execEventWriter) pipelinePlan(event agent.PipelinePlanEvent) {
+	if writer.format == execOutputJSON {
+		writer.writeJSON(map[string]any{
+			"type":   "pipeline_plan",
+			"stages": append([]string(nil), event.Stages...),
+		})
+		return
+	}
+	if writer.format == execOutputStreamJSON {
+		writer.writeStreamJSON(streamjson.Event{
+			Type:   streamjson.EventPipelinePlan,
+			RunID:  writer.runID,
+			Stages: append([]string(nil), event.Stages...),
+		})
+	}
+}
+
+func (writer *execEventWriter) stage(event agent.StageEvent) {
+	if writer.format == execOutputJSON {
+		writer.writeJSON(map[string]any{
+			"type":          "stage",
+			"name":          event.Name,
+			"status":        event.Status,
+			"detail":        event.Detail,
+			"progress":      event.Progress,
+			"changed_files": event.ChangedFiles,
+		})
+		return
+	}
+	if writer.format == execOutputStreamJSON {
+		progress := event.Progress
+		writer.writeStreamJSON(streamjson.Event{
+			Type:         streamjson.EventStage,
+			RunID:        writer.runID,
+			Name:         event.Name,
+			Status:       event.Status,
+			Reason:       event.Detail,
+			Progress:     &progress,
+			ChangedFiles: append([]string(nil), event.ChangedFiles...),
+		})
+	}
+}
+
+// presentationState receives presentation.State snapshots after significant
+// transitions. State lives behind this Go callback, not on the wire, so the
+// stream-json output is unchanged. P1.2 renders from the snapshots; for now
+// the writer only retains the latest one so tests can prove the plumbing.
+func (writer *execEventWriter) presentationState(state presentation.State) {
+	writer.lastPresentationState = state
+}
+
+// pipelineNotice returns the OnNotice sink for a pipeline run. Text mode writes
+// each notice line to stderr. JSON modes return nil, so the notice falls back to
+// the reasoning stream that those modes already carry.
+func (writer *execEventWriter) pipelineNotice() func(string) {
+	if writer.format != execOutputText {
+		return nil
+	}
+	return func(text string) {
+		writer.writeStderr("[splice] " + text + "\n")
+	}
 }
 
 func (writer *execEventWriter) reasoning(delta string) {

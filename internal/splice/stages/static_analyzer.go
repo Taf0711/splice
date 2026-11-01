@@ -36,13 +36,19 @@ var defaultIgnoreDirs = map[string]bool{
 // F14b migrated it from the ambiguous StaticAnalyzerOutput to a typed
 // VerificationReport. The stage runs independent VerificationCheck adapters,
 // aggregates their results, and never calls a provider. A supplied provider
-// or model fixture is ignored. Missing coverage (unsupported language,
-// unavailable tool) is reported as incomplete, not clean.
+// or model fixture is ignored. A check that applies but cannot run (tool
+// unavailable) is reported as incomplete. When no check applies (unknown
+// language, nothing to analyze) the report is not applicable: the stage is
+// skipped, not failed and not clean.
 type StaticAnalyzer struct {
 	checks []VerificationCheck
 }
 
 var _ Stage = (*StaticAnalyzer)(nil)
+
+func (*StaticAnalyzer) Capabilities() Capabilities {
+	return Capabilities{ModelFree: true, Description: "checking code quality"}
+}
 
 // NewStaticAnalyzer constructs a static analyzer from one or more
 // deterministic verification checks. Returns a named error if no checks are
@@ -91,6 +97,7 @@ func (s *StaticAnalyzer) Run(ctx context.Context, input schemas.HarnessStageInpu
 			Paths:    paths,
 			Scope:    "quality",
 			RunTool:  options.RunTool,
+			Sandbox:  options.Sandbox,
 		})
 		if rerr != nil {
 			return schemas.HarnessStageOutput{}, fmt.Errorf("verification check %s: %w", check.Name(), rerr)
@@ -99,9 +106,6 @@ func (s *StaticAnalyzer) Run(ctx context.Context, input schemas.HarnessStageInpu
 	}
 
 	report := aggregateVerificationResults(results)
-	if report.Status == schemas.VerificationNotApplicable {
-		report = markIncompleteLanguage(report, language)
-	}
 
 	relPaths := make([]string, len(paths))
 	for i, p := range paths {
@@ -123,23 +127,6 @@ func (s *StaticAnalyzer) Run(ctx context.Context, input schemas.HarnessStageInpu
 		Confidence: 1.0,
 		Data:       data,
 	}, nil
-}
-
-// markIncompleteLanguage converts an all-not-applicable report into an
-// incomplete report when the detected language has no registered check. This
-// prevents unsupported languages from being reported as clean.
-func markIncompleteLanguage(report schemas.VerificationReport, language string) schemas.VerificationReport {
-	report.Status = schemas.VerificationIncomplete
-	report.Complete = false
-	report.Summary = fmt.Sprintf("No verification check available for language: %s", language)
-	report.Tools = append(report.Tools, schemas.VerificationToolRun{
-		Tool:     "language_profile",
-		Required: true,
-		Scope:    "quality",
-		Status:   schemas.VerificationIncomplete,
-		Summary:  fmt.Sprintf("Missing language profile: %s", language),
-	})
-	return report
 }
 
 func workspaceFiles(workspace, language string, maxFiles int) []string {

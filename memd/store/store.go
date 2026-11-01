@@ -20,6 +20,19 @@ import (
 // does not exist.
 var ErrNotFound = errors.New("store: observation not found")
 
+// sqliteCoder is implemented by modernc.org/sqlite's error type.
+type sqliteCoder interface{ Code() int }
+
+// sqliteBusy is SQLITE_BUSY, returned when a competing connection holds the
+// lock a statement needs.
+const sqliteBusy = 5
+
+// isBusyLocked reports whether err is a wrapped SQLITE_BUSY error.
+func isBusyLocked(err error) bool {
+	var coded sqliteCoder
+	return errors.As(err, &coded) && coded.Code()&0xff == sqliteBusy
+}
+
 // dedupeWindow is the rolling window for normalized-hash exact-dup detection.
 const dedupeWindow = int64(3600) // seconds
 
@@ -64,7 +77,8 @@ type Query struct {
 
 // Store wraps a SQLite database.
 type Store struct {
-	db *sql.DB
+	db  *sql.DB
+	now func() time.Time
 }
 
 // New opens (or creates) a SQLite database at path and runs the schema
@@ -77,15 +91,49 @@ func New(path string) (*Store, error) {
 	// Single writer; WAL allows concurrent reads without blocking, and
 	// busy_timeout lets a second process back off instead of failing instantly.
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("store.New: pragma: %w", err)
+	// Set busy_timeout before switching to WAL: the WAL switch takes an
+	// exclusive lock that a concurrent cold opener may hold, and without a
+	// timeout in place first the competing opener fails immediately with
+	// SQLITE_BUSY instead of waiting for the lock to free. All three pragmas
+	// run on the same connection in one Exec so the timeout is in effect on
+	// the connection that performs the WAL switch.
+	//
+	// modernc's WAL switch does not engage the busy handler (it returns
+	// SQLITE_BUSY immediately when another connection holds the lock), so a
+	// short bounded retry on the busy code covers the concurrent cold-start
+	// case the timeout alone cannot. Non-busy errors fail immediately.
+	const (
+		walPragma   = "PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;"
+		walRetries  = 10
+		walRetryGap = 25 * time.Millisecond
+	)
+	var pragmaErr error
+	for attempt := 0; attempt <= walRetries; attempt++ {
+		if _, pragmaErr = db.Exec(walPragma); pragmaErr == nil {
+			break
+		}
+		if !isBusyLocked(pragmaErr) || attempt == walRetries {
+			db.Close()
+			return nil, fmt.Errorf("store.New: pragma: %w", pragmaErr)
+		}
+		time.Sleep(walRetryGap)
 	}
 	if err := migrateDB(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("store.New: migrate: %w", err)
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, now: time.Now}, nil
+}
+
+// SetClockForTest replaces the store clock. It is intended for deterministic
+// maintenance tests and must not be used by production callers.
+func (s *Store) SetClockForTest(now func() time.Time) { s.now = now }
+
+func (s *Store) currentTime() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
 }
 
 // Close releases the database connection.
@@ -108,6 +156,18 @@ func migrateDB(db *sql.DB) error {
 			return fmt.Errorf("migrate: drop stale fts: %w", err)
 		}
 	}
+	// run_traces predates the intent column. Add it before the FTS table is
+	// created so content='run_traces' can resolve the column. Existing rows keep
+	// NULL intent and never match the index (no backfill).
+	if err := addTraceIntentColumn(db); err != nil {
+		return fmt.Errorf("migrate: trace intent column: %w", err)
+	}
+	if err := addColumnIfMissing(db, "observations", "maintenance_deleted_at", "INTEGER"); err != nil {
+		return fmt.Errorf("migrate: observation maintenance marker: %w", err)
+	}
+	if err := addColumnIfMissing(db, "cognition_nodes", "status_changed_at", "INTEGER"); err != nil {
+		return fmt.Errorf("migrate: node status timestamp: %w", err)
+	}
 	// The schema is split into statements so errors can name the failing DDL
 	// fragment; splitSQL keeps trigger bodies (BEGIN...END) intact.
 	for _, stmt := range splitSQL(ddl) {
@@ -123,6 +183,74 @@ func migrateDB(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+// addTraceIntentColumn adds the intent column to a run_traces table created
+// before the column existed. A fresh database has no run_traces table yet (the
+// DDL creates it with the column), so it is a no-op there. Existing rows keep
+// NULL intent and never match the FTS index (no backfill).
+func addTraceIntentColumn(db *sql.DB) error {
+	var name string
+	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'run_traces'`).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	rows, err := db.Query(`PRAGMA table_info(run_traces)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var colName, colType string
+		var notNull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &colName, &colType, &notNull, &dflt, &pk); err != nil {
+			return err
+		}
+		if colName == "intent" {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.Exec(`ALTER TABLE run_traces ADD COLUMN intent TEXT`)
+	return err
+}
+
+func addColumnIfMissing(db *sql.DB, table, column, definition string) error {
+	var exists string
+	if err := db.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.Exec("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition)
+	return err
 }
 
 // ftsNeedsRebuild reports whether an existing observations_fts table predates
@@ -319,6 +447,66 @@ func (s *Store) UpsertObservation(ctx context.Context, obs *Observation) (*Obser
 	return obs, nil
 }
 
+// LookupTopic returns live observations matching an exact topic key within
+// one project scope. It is the deterministic direct-lookup path (C0): no
+// full-text search, no new table, and it uses the existing idx_obs_topic
+// index (topic_key, project_path, scope). Ordering is stable: created_at
+// DESC with id DESC as the tiebreak, so repeated lookups return the same
+// roster. Visibility mirrors Search: the requesting agent's own rows (any
+// visibility) plus shareable rows from any agent; the admission layer above
+// still applies project/duplicate/review policy to whatever this returns.
+// Returns (observations, truncated, error); an empty result is not an error.
+func (s *Store) LookupTopic(ctx context.Context, projectPath, requestingAgent, scope, topicKey string, limit int) ([]*Observation, bool, error) {
+	if scope == "" || topicKey == "" {
+		return nil, false, nil
+	}
+	if limit <= 0 {
+		limit = 8
+	}
+	args := []any{topicKey, scope, requestingAgent, limit + 1}
+	projectClause := "o.project_path IS NULL"
+	if projectPath != "" {
+		projectClause = "(o.project_path = ? OR o.project_path IS NULL)"
+		args = []any{topicKey, scope, projectPath, requestingAgent, limit + 1}
+	}
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT o.id, o.project_path, o.scope, o.owner_agent, o.visibility,
+		       o.memory_type, o.title, o.content, o.topic_key, o.normalized_hash,
+		       o.source_run_id, o.source_stage, o.source_branch, o.source_commit,
+		       o.pinned, o.confidence, o.revision_count, o.duplicate_count,
+		       o.review_after, o.created_at, o.updated_at, o.deleted_at
+		FROM observations AS o
+		WHERE o.topic_key = ?
+		  AND o.scope = ?
+		  AND %s
+		  AND o.deleted_at IS NULL
+		  AND (o.owner_agent = ? OR o.visibility = 'shareable')
+		ORDER BY o.created_at DESC, o.id DESC
+		LIMIT ?
+	`, projectClause), args...)
+	if err != nil {
+		return nil, false, fmt.Errorf("lookup_topic: query: %w", err)
+	}
+	defer rows.Close()
+
+	var results []*Observation
+	for rows.Next() {
+		obs, err := scanObs(rows)
+		if err != nil {
+			return nil, false, fmt.Errorf("lookup_topic: scan: %w", err)
+		}
+		results = append(results, obs)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	truncated := len(results) > limit
+	if truncated {
+		results = results[:limit]
+	}
+	return results, truncated, nil
+}
+
 // Search returns observations matching q using FTS5 BM25, filtered by
 // project, scope, owner, and visibility:
 //
@@ -331,11 +519,20 @@ func (s *Store) UpsertObservation(ctx context.Context, obs *Observation) (*Obser
 // Returns (observations, truncated, error) where truncated is true if the
 // result set was capped by the limit.
 func (s *Store) Search(ctx context.Context, q *Query) ([]*Observation, bool, error) {
+	obs, truncated, _, err := s.SearchRanked(ctx, q)
+	return obs, truncated, err
+}
+
+// SearchRanked is Search plus the FTS BM25 rank per result (negative; more
+// negative = more relevant). ranks[i] corresponds to observations[i]. The
+// rank lets the orchestrator rerank candidates deterministically (report
+// section 28) without re-deriving BM25.
+func (s *Store) SearchRanked(ctx context.Context, q *Query) ([]*Observation, bool, []float64, error) {
 	if q.QueryText == "" || len(q.Scopes) == 0 {
-		return nil, false, nil
+		return nil, false, nil, nil
 	}
 	if !q.IncludePrivate && !q.IncludeShareable {
-		return nil, false, nil
+		return nil, false, nil, nil
 	}
 	limit := q.Limit
 	if limit <= 0 {
@@ -344,7 +541,7 @@ func (s *Store) Search(ctx context.Context, q *Query) ([]*Observation, bool, err
 
 	ftsQ := sanitizeFTSQuery(q.QueryText)
 	if ftsQ == "" {
-		return nil, false, nil
+		return nil, false, nil, nil
 	}
 	args := []any{ftsQ}
 	scopeClause, memTypeClause, projectClause, visClause := buildFilterClauses(q, &args)
@@ -360,7 +557,7 @@ func (s *Store) Search(ctx context.Context, q *Query) ([]*Observation, bool, err
 		       o.memory_type, o.title, o.content, o.topic_key, o.normalized_hash,
 		       o.source_run_id, o.source_stage, o.source_branch, o.source_commit,
 		       o.pinned, o.confidence, o.revision_count, o.duplicate_count,
-		       o.review_after, o.created_at, o.updated_at, o.deleted_at
+		       o.review_after, o.created_at, o.updated_at, o.deleted_at, fts.rank
 		FROM observations AS o
 		JOIN (
 			SELECT rowid, rank
@@ -376,27 +573,30 @@ func (s *Store) Search(ctx context.Context, q *Query) ([]*Observation, bool, err
 		LIMIT ?
 	`, scopeClause, memTypeClause, projectClause, visClause), args...)
 	if err != nil {
-		return nil, false, fmt.Errorf("search: query: %w", err)
+		return nil, false, nil, fmt.Errorf("search: query: %w", err)
 	}
 	defer rows.Close()
 
 	var results []*Observation
+	var ranks []float64
 	for rows.Next() {
-		obs, err := scanObs(rows)
+		obs, rank, err := scanObsRanked(rows)
 		if err != nil {
-			return nil, false, fmt.Errorf("search: scan: %w", err)
+			return nil, false, nil, fmt.Errorf("search: scan: %w", err)
 		}
 		results = append(results, obs)
+		ranks = append(ranks, rank)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, false, err
+		return nil, false, nil, err
 	}
 	// Truncated if we got limit+1 rows (the extra row indicates more results).
 	truncated := len(results) > limit
 	if truncated {
 		results = results[:limit]
+		ranks = ranks[:limit]
 	}
-	return results, truncated, nil
+	return results, truncated, ranks, nil
 }
 
 // Recent returns the most recently updated observations matching q's filters.
@@ -510,6 +710,76 @@ func (s *Store) MarkReviewed(ctx context.Context, id int64) error {
 	return nil
 }
 
+// ResetProject hard-deletes every observation, every run trace, and every
+// cognition graph node (with its anchored edges, anchors, evidence, and
+// embedding rows via ON DELETE CASCADE) whose project path or repo root
+// matches projectPath. Observation and trace deletes keep the FTS index rows
+// in sync via the delete triggers. The match is exact: no prefix, no
+// normalization. This is the eval-harness isolation primitive: it restores
+// one project's memory state to empty so a fresh seed is the only cognition
+// the project carries.
+// Counts report what was removed, never a silent zero.
+func (s *Store) ResetProject(ctx context.Context, projectPath string) (ResetCounts, error) {
+	if projectPath == "" {
+		return ResetCounts{}, errors.New("reset project: project_path is required")
+	}
+	var counts ResetCounts
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return counts, fmt.Errorf("reset project: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	obsRes, err := tx.ExecContext(ctx,
+		`DELETE FROM observations WHERE project_path = ?`, projectPath)
+	if err != nil {
+		return counts, fmt.Errorf("reset project: delete observations: %w", err)
+	}
+	observations, err := obsRes.RowsAffected()
+	if err != nil {
+		return counts, fmt.Errorf("reset project: count observations: %w", err)
+	}
+
+	traceRes, err := tx.ExecContext(ctx,
+		`DELETE FROM run_traces WHERE repo_root = ?`, projectPath)
+	if err != nil {
+		return counts, fmt.Errorf("reset project: delete traces: %w", err)
+	}
+	traces, err := traceRes.RowsAffected()
+	if err != nil {
+		return counts, fmt.Errorf("reset project: count traces: %w", err)
+	}
+
+	// Graph nodes cascade: edges, anchors, evidence, and embeddings all
+	// reference cognition_nodes(id) ON DELETE CASCADE, so one delete clears
+	// the project's whole graph. The embeddings table is part of the
+	// semantic index; the index never stores node rows outside it.
+	graphRes, err := tx.ExecContext(ctx,
+		`DELETE FROM cognition_nodes WHERE project_path = ?`, projectPath)
+	if err != nil {
+		return counts, fmt.Errorf("reset project: delete graph nodes: %w", err)
+	}
+	graphNodes, err := graphRes.RowsAffected()
+	if err != nil {
+		return counts, fmt.Errorf("reset project: count graph nodes: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return counts, fmt.Errorf("reset project: commit: %w", err)
+	}
+	counts.Observations = observations
+	counts.Traces = traces
+	counts.GraphNodes = graphNodes
+	return counts, nil
+}
+
+// ResetCounts reports what one ResetProject removed.
+type ResetCounts struct {
+	Observations int64 `json:"observations"`
+	Traces       int64 `json:"traces"`
+	GraphNodes   int64 `json:"graph_nodes"`
+}
+
 // byID fetches one observation by primary key. Used after upsert.
 func (s *Store) byID(ctx context.Context, id int64) (*Observation, error) {
 	row := s.db.QueryRowContext(ctx, `
@@ -529,7 +799,7 @@ type scanner interface {
 }
 
 // scanObs scans one observation row in the fixed column order used by byID and
-// Search. pinned is stored as INTEGER (0/1); we convert to bool here.
+// Search/Recent: 22 columns (pinned stored as INTEGER, converted to bool).
 func scanObs(sc scanner) (*Observation, error) {
 	var obs Observation
 	var pinned int64
@@ -545,6 +815,28 @@ func scanObs(sc scanner) (*Observation, error) {
 	}
 	obs.Pinned = pinned != 0
 	return &obs, nil
+}
+
+// scanObsRanked scans an observation row that carries ONE extra trailing
+// column (the FTS rank) beyond the fixed 22. Rows.Scan consumes every column
+// in a single call, so the extra destination must ride in the same Scan.
+func scanObsRanked(sc scanner) (*Observation, float64, error) {
+	var obs Observation
+	var pinned int64
+	var rank float64
+	err := sc.Scan(
+		&obs.ID, &obs.ProjectPath, &obs.Scope, &obs.OwnerAgent, &obs.Visibility,
+		&obs.MemoryType, &obs.Title, &obs.Content, &obs.TopicKey, &obs.NormalizedHash,
+		&obs.SourceRunID, &obs.SourceStage, &obs.SourceBranch, &obs.SourceCommit,
+		&pinned, &obs.Confidence, &obs.RevisionCount, &obs.DuplicateCount,
+		&obs.ReviewAfter, &obs.CreatedAt, &obs.UpdatedAt, &obs.DeletedAt,
+		&rank,
+	)
+	if err != nil {
+		return nil, 0, err
+	}
+	obs.Pinned = pinned != 0
+	return &obs, rank, nil
 }
 
 // normalizeHash computes a content fingerprint for exact-dup detection. Lower-

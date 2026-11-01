@@ -56,8 +56,8 @@ inputs:
     default: low
   self-correct:
     description: >-
-      When true, allow Splice to request a stronger model mid-run if it hits a
-      wall (maps to `splice exec --allow-escalation`).
+      Compatibility input that forwards `splice exec --allow-escalation`.
+      The current deterministic exec pipeline does not use this flag directly.
     required: false
     default: "false"
   add-dir:

@@ -1,0 +1,24 @@
+[
+  {
+    "name": "clock-helper-read",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong"
+    ]
+  },
+  {
+    "name": "clock-helper-write",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong"
+    ]
+  }
+]

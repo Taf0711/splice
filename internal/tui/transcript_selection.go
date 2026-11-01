@@ -93,7 +93,13 @@ type transcriptBodyItem struct {
 	rowIndex          int
 	heightCacheKey    string
 	heightCacheStable bool
-	render            func(startBodyY int) transcriptBodyRenderedItem
+	// heightResolved marks height as the measured line count of this exact
+	// descriptor (same key, same inputs). Settled-prefix descriptors carry it
+	// so per-frame measurement is integer arithmetic instead of re-rendering
+	// each item to count its lines.
+	height         int
+	heightResolved bool
+	render         func(startBodyY int) transcriptBodyRenderedItem
 }
 
 type transcriptBodyRenderedItem struct {
@@ -224,9 +230,18 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string, detailed bool
 	// Steady-state alt-screen frames (notably the idle cursor blink) can reuse
 	// the settled list directly. Keeping this fast path outside the closure-heavy
 	// builder also prevents the large model receiver from escaping to the heap.
-	if m.altScreen && !detailed && !m.fileView.active && !m.pending && m.pendingSpecReview == nil &&
+	// Drill-in views (file view, diff review) swap the body wholesale, so they
+	// must never hit the settled cache or the swap is invisible. A verbosity
+	// switch changes the visible row set without moving the frontier, so the
+	// settled generation must match too (GAP-L).
+	// An empty-state overlay (the slash/file palette) replaces the body for
+	// this frame only and is NOT part of the settled list, so the fast path
+	// must never serve it: doing so dropped the palette (and the cockpit)
+	// and rendered a blank body.
+	if m.altScreen && emptyOverlay == "" && !detailed && !m.fileView.active && !m.diffView.active && !m.detailView.active && !m.pending && m.pendingSpecReview == nil &&
 		m.flushedAny && m.flushed == len(m.transcript) &&
-		m.altScreenSettledWidth == width && m.altScreenSettledFrontier == m.flushed {
+		m.altScreenSettledWidth == width && m.altScreenSettledFrontier == m.flushed &&
+		m.narrationSettledGeneration == m.narrationVerbosityLevel {
 		return m.altScreenSettledItems
 	}
 	return m.buildTranscriptBodyItems(width, emptyOverlay, detailed)
@@ -238,6 +253,16 @@ func (m model) buildTranscriptBodyItems(width int, emptyOverlay string, detailed
 	// the viewport, scroll engine, renderer, and mouse hit-tests consistent.
 	if m.fileView.active {
 		return m.fileViewBodyItems(width)
+	}
+	// Diff review (GAP-G): the chat column's body swaps to the lane diff.
+	// Same single-source swap point, so the viewport and hit-tests agree.
+	if m.diffView.active {
+		return []transcriptBodyItem{transcriptBlockBodyItem(transcriptBodyItemRow, -1, m.renderDiffReview(width))}
+	}
+	// Detail pane (GAP-G rest, Ctrl+O): the chat column's body swaps to the
+	// run's evidence projection. Same single-source swap point.
+	if m.detailView.active {
+		return m.detailViewBodyItems(width)
 	}
 	items := []transcriptBodyItem{}
 	// Transcript ROWS render at the full chat width; row/status glyphs provide
@@ -291,6 +316,10 @@ func (m model) buildTranscriptBodyItems(width int, emptyOverlay string, detailed
 		}
 		if startIdx > 0 {
 			previousKind, havePreviousKind = m.flushedPreviousKind, m.flushedHavePreviousKind
+			// A visible row above the frontier counts as shown, so the
+			// tool-card spacing rules match a full rebuild and the live tail
+			// does not shift by a line when it settles.
+			shownAny = havePreviousKind
 		} else {
 			previousKind, havePreviousKind = previousVisibleTranscriptKind(m.transcript, startIdx, rc)
 		}
@@ -300,6 +329,12 @@ func (m model) buildTranscriptBodyItems(width int, emptyOverlay string, detailed
 			// A welcome row carries no Lime visual (the empty state replaced it)
 			// and a resolved tool call collapses into its result's card.
 			if row.kind == rowWelcome || rc.skip(row) {
+				continue
+			}
+			// GAP-L: the narration verbosity is a pure projection over the
+			// recorded rows — quiet hides standalone tool-call rows and
+			// transient system chatter; the recording is untouched.
+			if !m.narrationVisibleRow(row) {
 				continue
 			}
 			if isSuccessfulExploreResult(row) {
@@ -618,7 +653,9 @@ func layoutTranscriptBodyItems(items []transcriptBodyItem) transcriptBodyLayout 
 }
 
 func measureTranscriptBodyItems(items []transcriptBodyItem, cache *transcriptBodyHeightCache) transcriptBodyLayout {
-	layout := transcriptBodyLayout{}
+	// Sized up front: this runs every frame over the whole history, and
+	// growing from empty allocated ~5x the final slice in doubling garbage.
+	layout := transcriptBodyLayout{spans: make([]transcriptBodyItemSpan, 0, len(items))}
 	startY := 0
 	for _, item := range items {
 		height := transcriptBodyItemHeight(item, cache)
@@ -661,6 +698,11 @@ func layoutVisibleTranscriptBodyItems(items []transcriptBodyItem, metrics transc
 }
 
 func transcriptBodyItemHeight(item transcriptBodyItem, cache *transcriptBodyHeightCache) int {
+	// A descriptor that already carries its measured height (settled-prefix
+	// snapshots) needs no cache round-trip and no render.
+	if item.heightResolved {
+		return item.height
+	}
 	if item.heightCacheStable {
 		if height, ok := cache.get(item.heightCacheKey); ok {
 			return height
@@ -1256,8 +1298,8 @@ func (m model) transcriptEdgeScrollDelta(msg tea.MouseMsg) (int, bool) {
 // drag while the mouse holds past the edge. Takes a plain column rather than a
 // tea.MouseMsg because the smooth-glide tick chain (dragEdgeScrollTickMsg) calls
 // this repeatedly with no real mouse event of its own — see edgeScrollMouseX.
-func (m model) dragToEdgeScroll(delta int, x int) model {
-	m = m.scrollChat(delta)
+func (m model) dragToEdgeScroll(delta int, x int) (model, tea.Cmd) {
+	m, cmd := m.scrollChat(delta)
 	_, window, layout := m.transcriptHitTestLayout()
 	target := window.start
 	if delta < 0 {
@@ -1266,7 +1308,7 @@ func (m model) dragToEdgeScroll(delta int, x int) model {
 	if line, ok := nearestTranscriptSelectableAt(layout, target); ok {
 		m.transcriptSelection.cursor = transcriptSelectionPointForMouse(line, x)
 	}
-	return m
+	return m, cmd
 }
 
 // dragEdgeScrollTickCmd schedules the next step of the smooth-glide edge-scroll,
@@ -1293,11 +1335,12 @@ func (m model) startEdgeScroll(direction int, x int) (model, tea.Cmd) {
 		m.edgeScrollMouseX = x
 		return m, nil
 	}
-	m = m.dragToEdgeScroll(step, x)
+	next, clear := m.dragToEdgeScroll(step, x)
+	m = next
 	m.edgeScrollDelta = step
 	m.edgeScrollMouseX = x
 	m.edgeScrollSeq++
-	return m, dragEdgeScrollTickCmd(m.edgeScrollSeq)
+	return m, tea.Batch(clear, dragEdgeScrollTickCmd(m.edgeScrollSeq))
 }
 
 // stopEdgeScroll ends the smooth-glide tick chain (the drag moved back into the
@@ -1429,17 +1472,17 @@ func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd,
 			m = m.stopEdgeScroll() // off to the side (e.g. over the sidebar), not an edge case
 			return m, nil, true
 		}
+		var cmd tea.Cmd
 		if m.reducedMotion {
 			// No animated glide: a single, larger step per raw motion event,
 			// matching the app's reduced-motion convention elsewhere.
-			m = m.dragToEdgeScroll(delta, mouseX(msg))
-			return m, nil, true
+			m, cmd = m.dragToEdgeScroll(delta, mouseX(msg))
+			return m, cmd, true
 		}
 		direction := 1
 		if delta < 0 {
 			direction = -1
 		}
-		var cmd tea.Cmd
 		m, cmd = m.startEdgeScroll(direction, mouseX(msg))
 		return m, cmd, true
 	case mouseRelease(msg):

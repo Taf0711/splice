@@ -4,8 +4,10 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLSPNavigateConfinesPathToWorkspace(t *testing.T) {
@@ -28,7 +30,7 @@ func TestLSPNavigateConfinesPathToWorkspace(t *testing.T) {
 			} else {
 				args["query"] = "x"
 			}
-			got := tool.Run(context.Background(), args)
+			got := runLSPTrusted(tool, context.Background(), args)
 			if got.Status != StatusError {
 				t.Fatalf("path %q op %s: expected StatusError (confinement), got %s: %s", p, op, got.Status, got.Output)
 			}
@@ -50,7 +52,7 @@ func TestLSPNavigateRejectsBadArgs(t *testing.T) {
 		{"op": "bogus", "path": "x.go", "line": 1, "character": 1}, // unknown op
 	}
 	for i, args := range cases {
-		if got := tool.Run(context.Background(), args); got.Status != StatusError {
+		if got := runLSPTrusted(tool, context.Background(), args); got.Status != StatusError {
 			t.Fatalf("case %d: expected StatusError for %#v, got %s: %s", i, args, got.Status, got.Output)
 		}
 	}
@@ -65,7 +67,7 @@ func TestLSPNavigateUnsupportedFileDegrades(t *testing.T) {
 		t.Fatal(err)
 	}
 	tool := NewLSPNavigateTool(root)
-	got := tool.Run(context.Background(), map[string]any{
+	got := runLSPTrusted(tool, context.Background(), map[string]any{
 		"op": "definition", "path": "notes.unknownext", "line": 1, "character": 1,
 	})
 	if got.Status != StatusOK {
@@ -83,5 +85,48 @@ func TestLSPNavigateIsReadOnly(t *testing.T) {
 	}
 	if tool.Name() != "lsp_navigate" {
 		t.Fatalf("name = %q", tool.Name())
+	}
+}
+
+// runLSPTrusted runs lsp_navigate the way the registry does for a trusted
+// workspace.
+func runLSPTrusted(tool Tool, ctx context.Context, args map[string]any) Result {
+	return tool.(optionsAwareTool).RunWithOptions(ctx, args, RunOptions{TrustedWorkspace: true})
+}
+
+// TestLSPNavigateStartsNoServerInUntrustedWorkspace puts a fake gopls on PATH
+// that leaves a marker file when it runs. An untrusted call must not run it.
+// A trusted control call must run it, so the marker check means something.
+func TestLSPNavigateStartsNoServerInUntrustedWorkspace(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake server script is a POSIX shell script")
+	}
+	binDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "started")
+	script := "#!/bin/sh\n: > '" + marker + "'\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(binDir, "gopls"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tool := NewLSPNavigateTool(root)
+	args := map[string]any{"op": "definition", "path": "main.go", "line": 3, "character": 6}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	got := tool.(optionsAwareTool).RunWithOptions(ctx, args, RunOptions{TrustedWorkspace: false})
+	if got.Status != StatusError || !strings.Contains(got.Output, "untrusted workspace") {
+		t.Fatalf("untrusted call: want the trust refusal, got %s: %s", got.Status, got.Output)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("a language server started in an untrusted workspace")
+	}
+
+	runLSPTrusted(tool, ctx, args)
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatal("control: a trusted call should start the server, but it did not")
 	}
 }

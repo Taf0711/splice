@@ -335,6 +335,145 @@ func TestRegistryDetectsDuplicateModelIDs(t *testing.T) {
 	}
 }
 
+func TestRegistryOverlayCapabilities(t *testing.T) {
+	registry, err := NewRegistry([]ModelEntry{validModelEntry()})
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+
+	// Tool-calling is not declared on the fixture.
+	if entry, ok := registry.Get("gpt-4.1-mini"); !ok || entry.Supports(ModelCapabilityToolCalling) {
+		t.Fatalf("fixture unexpectedly supports tool calling: %#v", entry)
+	}
+
+	registry.OverlayCapabilities("gpt-4.1-mini", ModelCapabilityToolCalling)
+
+	entry, ok := registry.Get("gpt-4.1-mini")
+	if !ok || !entry.Supports(ModelCapabilityToolCalling) {
+		t.Fatalf("Get after overlay = %#v, want tool calling present", entry)
+	}
+	// The overlay must be visible through the alias too (re-registered).
+	byAlias, ok := registry.Get("openai:gpt-4.1-mini")
+	if !ok || !byAlias.Supports(ModelCapabilityToolCalling) {
+		t.Fatalf("alias Get after overlay = %#v, want tool calling present", byAlias)
+	}
+
+	// Idempotent: overlaying an already-present capability must not duplicate it.
+	registry.OverlayCapabilities("gpt-4.1-mini", ModelCapabilityToolCalling)
+	entry, _ = registry.Get("gpt-4.1-mini")
+	count := 0
+	for _, capability := range entry.Capabilities {
+		if capability == ModelCapabilityToolCalling {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("tool calling appears %d times, want exactly 1: %#v", count, entry.Capabilities)
+	}
+
+	// Unknown model is a no-op (fail closed), never a panic.
+	registry.OverlayCapabilities("does-not-exist", ModelCapabilityToolCalling)
+	if _, ok := registry.Get("does-not-exist"); ok {
+		t.Fatal("overlaying an unknown model must not create an entry")
+	}
+}
+
+func TestRegistryRemoveCapability(t *testing.T) {
+	entry := validModelEntry()
+	entry.Capabilities = []ModelCapability{ModelCapabilityChat, ModelCapabilityToolCalling, ModelCapabilityVision}
+	registry, err := NewRegistry([]ModelEntry{entry})
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+
+	registry.RemoveCapability("gpt-4.1-mini", ModelCapabilityToolCalling)
+	got, ok := registry.Get("gpt-4.1-mini")
+	if !ok || got.Supports(ModelCapabilityToolCalling) {
+		t.Fatalf("tool calling still present after removal: %#v", got.Capabilities)
+	}
+	// Only the named capability is removed.
+	if !got.Supports(ModelCapabilityChat) || !got.Supports(ModelCapabilityVision) {
+		t.Fatalf("removal dropped unrelated capabilities: %#v", got.Capabilities)
+	}
+	// Visible via alias.
+	byAlias, _ := registry.Get("openai:gpt-4.1-mini")
+	if byAlias.Supports(ModelCapabilityToolCalling) {
+		t.Fatalf("alias still reports tool calling: %#v", byAlias.Capabilities)
+	}
+	// Idempotent: removing an absent capability is a no-op.
+	registry.RemoveCapability("gpt-4.1-mini", ModelCapabilityToolCalling)
+	if got, _ := registry.Get("gpt-4.1-mini"); got.Supports(ModelCapabilityToolCalling) {
+		t.Fatal("removal should be idempotent")
+	}
+	// Unknown model no-op, never a panic and never creates an entry.
+	registry.RemoveCapability("does-not-exist", ModelCapabilityToolCalling)
+	if _, ok := registry.Get("does-not-exist"); ok {
+		t.Fatal("removal must not create an entry for an unknown model")
+	}
+}
+
+func TestRegistryOverlayReasoningEfforts(t *testing.T) {
+	registry, err := NewRegistry([]ModelEntry{validModelEntry()})
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+
+	// The fixture declares no reasoning efforts.
+	if entry, _ := registry.Get("gpt-4.1-mini"); len(entry.ReasoningEfforts) != 0 {
+		t.Fatalf("fixture unexpectedly declares reasoning efforts: %#v", entry.ReasoningEfforts)
+	}
+
+	registry.OverlayReasoningEfforts("gpt-4.1-mini")
+
+	entry, ok := registry.Get("gpt-4.1-mini")
+	if !ok {
+		t.Fatal("Get after overlay failed")
+	}
+	if got := reasoningEffortIDs(entry.ReasoningEfforts); got != "low,medium,high" {
+		t.Fatalf("ReasoningEfforts = %q, want low,medium,high", got)
+	}
+	// EffectiveReasoningEffort must resolve to a real tier for the overlaid model.
+	if got := EffectiveReasoningEffort(entry, ReasoningEffortHigh); got != ReasoningEffortHigh {
+		t.Fatalf("EffectiveReasoningEffort(high) = %q, want high", got)
+	}
+
+	// Idempotent: overlaying again must not duplicate efforts.
+	registry.OverlayReasoningEfforts("gpt-4.1-mini")
+	entry, _ = registry.Get("gpt-4.1-mini")
+	if got := reasoningEffortIDs(entry.ReasoningEfforts); got != "low,medium,high" {
+		t.Fatalf("after second overlay, ReasoningEfforts = %q, want low,medium,high", got)
+	}
+
+	// Unknown model is a no-op (fail closed), never a panic.
+	registry.OverlayReasoningEfforts("does-not-exist")
+	if _, ok := registry.Get("does-not-exist"); ok {
+		t.Fatal("overlaying an unknown model must not create an entry")
+	}
+}
+
+func TestOverlayReasoningEffortsNeverRemovesExisting(t *testing.T) {
+	entry := validModelEntry()
+	entry.ReasoningEfforts = []ReasoningEffort{ReasoningEffortLow, ReasoningEffortXHigh}
+	registry, err := NewRegistry([]ModelEntry{entry})
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	registry.OverlayReasoningEfforts("gpt-4.1-mini")
+	got, _ := registry.Get("gpt-4.1-mini")
+	// The existing low and xhigh stay; medium and high are added, no removal.
+	if !containsReasoningEffort(got.ReasoningEfforts, ReasoningEffortLow) || !containsReasoningEffort(got.ReasoningEfforts, ReasoningEffortXHigh) {
+		t.Fatalf("existing efforts were removed: %#v", got.ReasoningEfforts)
+	}
+}
+
+func reasoningEffortIDs(efforts []ReasoningEffort) string {
+	ids := make([]string, len(efforts))
+	for i, effort := range efforts {
+		ids[i] = string(effort)
+	}
+	return strings.Join(ids, ",")
+}
+
 func validModelEntry() ModelEntry {
 	return ModelEntry{
 		ID:          "gpt-4.1-mini",

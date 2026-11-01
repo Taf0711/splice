@@ -95,14 +95,14 @@ func TestDefaultResolveOptionsRejectsDirectoryConfigPaths(t *testing.T) {
 func setUserConfigRoot(t *testing.T) string {
 	t.Helper()
 
+	// Always set XDG_CONFIG_HOME: on darwin UserConfigDir prefers it over HOME,
+	// so a developer's exported XDG_CONFIG_HOME would otherwise send writes to
+	// the real user config.
 	root := t.TempDir()
-	switch runtime.GOOS {
-	case "windows":
+	t.Setenv("XDG_CONFIG_HOME", root)
+	t.Setenv("HOME", root)
+	if runtime.GOOS == "windows" {
 		t.Setenv("APPDATA", root)
-	case "darwin":
-		t.Setenv("HOME", root)
-	default:
-		t.Setenv("XDG_CONFIG_HOME", root)
 	}
 
 	configRoot, err := UserConfigDir()

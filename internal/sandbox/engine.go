@@ -64,6 +64,70 @@ func NewEngine(options EngineOptions) *Engine {
 // Scope returns the engine's shared write scope (nil when the engine was
 // built without a workspace root and no explicit Scope option). The TUI uses
 // it for /add-dir.
+// ReRooted returns an engine identical to the receiver except that its
+// workspace scope is rooted at workspaceRoot. The previous workspace root
+// leaves the scope; every other granted root carries over (write roots via
+// NewScope extras, read-only roots via AddRead), as do policy, grant store,
+// session grant state, and the execution backend. Callers use this to run a
+// pipeline inside a bound worktree while keeping --add-dir style grants and
+// the caller's policy intact. A nil engine stays nil, and a root that already
+// matches returns the receiver unchanged.
+func (engine *Engine) ReRooted(workspaceRoot string) *Engine {
+	if engine == nil {
+		return nil
+	}
+	rooted := strings.TrimSpace(workspaceRoot)
+	if rooted == "" || rooted == engine.workspaceRoot {
+		return engine
+	}
+	var extras, readExtras []string
+	if engine.scope != nil {
+		readSet := map[string]bool{}
+		for _, root := range engine.scope.readRoots {
+			readSet[root] = true
+		}
+		for _, root := range engine.scope.extraRoots {
+			if root != "" {
+				extras = append(extras, root)
+			}
+		}
+		for root := range readSet {
+			if root != "" && root != engine.workspaceRoot {
+				readExtras = append(readExtras, root)
+			}
+		}
+	}
+	clone := &Engine{
+		workspaceRoot:   rooted,
+		policy:          engine.policy,
+		store:           engine.store,
+		backend:         engine.backend,
+		sessionGrants:   engine.sessionGrants,
+		sessionProfiles: engine.sessionProfiles,
+		turnProfiles:    engine.turnProfiles,
+		commandPrefixes: engine.commandPrefixes,
+	}
+	clone.scope = newScopeBestEffort(rooted)
+	for _, extra := range extras {
+		_, _ = clone.scope.Add(extra)
+	}
+	for _, readExtra := range readExtras {
+		_, _ = clone.scope.AddRead(readExtra)
+	}
+	return clone
+}
+
+// WorkspaceRoot returns the construction-time workspace root. Callers use it
+// to pin which engine instance reached a tool boundary, for example in
+// regression tests that assert a pipeline run's plan preparation used the
+// run-scoped stage engine rather than the session engine.
+func (engine *Engine) WorkspaceRoot() string {
+	if engine == nil {
+		return ""
+	}
+	return engine.workspaceRoot
+}
+
 func (engine *Engine) Scope() *Scope {
 	if engine == nil {
 		return nil
@@ -143,7 +207,7 @@ func (engine *Engine) ReadExclusions() *ReadExclusions {
 	}
 	return &ReadExclusions{
 		workspaceRoot: engine.workspaceRoot,
-		denyRoots:     resolvePolicyPaths(policy.DenyRead),
+		denyRoots:     resolvePolicyPaths(toolDenyReadEntries(policy)),
 		allowRoots:    resolvePolicyPaths(policy.AllowRead),
 	}
 }
@@ -212,6 +276,27 @@ func newScopeBestEffort(workspaceRoot string) *Scope {
 		return scope
 	}
 	return &Scope{workspaceRoot: normalizeWorkspaceRootBestEffort(workspaceRoot)}
+}
+
+// EnforcementGap returns why the engine does not enforce its policy with the
+// native sandbox, or "" when it does. A caller that must never run outside the
+// sandbox, such as a pipeline agent node, refuses to start on a gap.
+func (engine *Engine) EnforcementGap() string {
+	if engine == nil {
+		return "no sandbox engine is available"
+	}
+	policy := engine.effectivePolicy(engine.policy)
+	if policy.Mode == ModeDisabled {
+		return "the sandbox policy is disabled"
+	}
+	if !engine.shellSandboxActive(policy) {
+		reason := "no native sandbox backend is available"
+		if message := strings.TrimSpace(engine.backend.Message); message != "" {
+			reason += " (" + message + ")"
+		}
+		return reason
+	}
+	return ""
 }
 
 // shellSandboxActive reports whether a native wrapping sandbox would actually
@@ -398,6 +483,9 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	if workspaceWriteAutoAllowed(policy, request, scope) {
 		return Decision{Action: ActionAllow, Risk: risk, Reason: "workspace write is allowed", AutoAllowed: true}
 	}
+	if engine.writePermissionProfileMatches(request) {
+		return Decision{Action: ActionAllow, Risk: risk, Reason: "permission profile allows this write", ProfileMatched: true}
+	}
 	// An unparseable / obfuscated shell command must NOT be auto-allowed, even
 	// when the native sandbox is active. It falls through to the normal
 	// prompt/deny path so the user reviews it.
@@ -472,8 +560,46 @@ func (engine *Engine) lookupSessionGrant(toolName string, reqScope string) Grant
 	return engine.sessionGrants.lookup(toolName, reqScope)
 }
 
+func (engine *Engine) writePermissionProfileMatches(request Request) bool {
+	if engine == nil || request.SideEffect != SideEffectWrite {
+		return false
+	}
+	paths := requestPaths(request)
+	if len(paths) == 0 {
+		return false
+	}
+	for _, profile := range append(engine.sessionProfiles.list(), engine.turnProfiles.list()...) {
+		if profile.FileSystem == nil {
+			continue
+		}
+		matched := true
+		for _, path := range paths {
+			absolute := path
+			if !filepath.IsAbs(absolute) {
+				absolute = filepath.Join(request.WorkspaceRoot, absolute)
+			}
+			covered := false
+			for _, allowed := range profile.FileSystem.Write {
+				root := permissionRoot(allowed)
+				if pathWithinRoot(root, absolute) {
+					covered = true
+					break
+				}
+			}
+			if !covered {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
+}
+
 func workspaceWriteAutoAllowed(policy Policy, request Request, scope *Scope) bool {
-	if !policy.EnforceWorkspace || request.WorkspaceRoot == "" || request.SideEffect != SideEffectWrite {
+	if !request.TrustedWorkspace || !policy.EnforceWorkspace || request.WorkspaceRoot == "" || request.SideEffect != SideEffectWrite {
 		return false
 	}
 	paths := requestPaths(request)

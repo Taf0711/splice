@@ -1,0 +1,7 @@
+{
+  "name": "large-06-write",
+  "phase": "write",
+  "prompt": "Add (t *Throttle) Remaining(to string) int in the notifications package: how many more notifications that recipient may still receive under the limit, never negative, without using any of the allowance. Add a regression test.",
+  "check": "# large-06 A: Add (t *Throttle) Remaining(to string) int in the notifications packag\nmkdir -p internal/notifications\ncat > internal/notifications/probe_remaining_test.go <<'EOF'\npackage notifications\n\nimport \"testing\"\n\nfunc TestProbeRemaining(t *testing.T) {\n\tth := NewThrottle(3)\n\tth.Allow(\"a\")\n\tif got := th.Remaining(\"a\"); got != 2 {\n\t\tt.Fatalf(\"Remaining(a) = %d, want 2\", got)\n\t}\n\tif got := th.Remaining(\"a\"); got != 2 {\n\t\tt.Fatalf(\"Remaining must not use allowance, second call = %d\", got)\n\t}\n\tif got := th.Remaining(\"b\"); got != 3 {\n\t\tt.Fatalf(\"Remaining(b) = %d, want 3\", got)\n\t}\n}\nEOF\ngo test -count=1 ./internal/notifications/ ; rc=$?\nrm -f internal/notifications/probe_remaining_test.go\nif [ $rc -ne 0 ]; then exit $rc; fi\nexit 0\n",
+  "fixture": "../../large-families/fixture"
+}

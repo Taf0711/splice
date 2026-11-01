@@ -1,13 +1,18 @@
 package doctor
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/Taf0711/splice/internal/config"
+	"github.com/Taf0711/splice/internal/flags"
+	"github.com/Taf0711/splice/internal/projectfile"
 )
 
 func TestRunReportRedactsProviderSecretsAndWarnsWithoutConnectivity(t *testing.T) {
@@ -433,6 +438,146 @@ func TestProviderConfigCheckCredentialPresence(t *testing.T) {
 	}
 }
 
+func TestStoredKeyReachabilityCheck(t *testing.T) {
+	markedKeyless := config.ProviderProfile{Name: "main", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4.1", APIKeyStored: true}
+	openOK := func(getErr error, found bool) config.KeyStoreOpener {
+		return func(string) (config.APIKeyGetter, string, error) {
+			return fakeGetter{err: getErr, found: found}, "keyring", nil
+		}
+	}
+	cases := []struct {
+		name       string
+		profile    config.ProviderProfile
+		open       config.KeyStoreOpener
+		userConfig string
+		wantID     string
+		wantStatus Status
+		wantInMsg  string
+	}{
+		{
+			name:       "no stored-key promise skips the check",
+			profile:    config.ProviderProfile{Name: "main", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4.1"},
+			wantID:     "provider.storedkey",
+			wantStatus: StatusPass,
+		},
+		{
+			name:       "key already resolved skips the check",
+			profile:    config.ProviderProfile{Name: "main", APIKeyStored: true, APIKey: "sk-x"},
+			wantID:     "provider.storedkey",
+			wantStatus: StatusPass,
+		},
+		{
+			name:       "marked but backend empty warns with HOME hint",
+			profile:    markedKeyless,
+			open:       openOK(nil, false),
+			userConfig: "/tmp/u/config.json",
+			wantID:     "provider.storedkey",
+			wantStatus: StatusWarn,
+			wantInMsg:  "different user context (check HOME)",
+		},
+		{
+			name:       "backend read error warns with backend name",
+			profile:    markedKeyless,
+			open:       openOK(errors.New("keychain locked"), false),
+			userConfig: "/tmp/u/config.json",
+			wantID:     "provider.storedkey",
+			wantStatus: StatusWarn,
+			wantInMsg:  "keychain locked",
+		},
+		{
+			name:       "key present passes with backend named",
+			profile:    markedKeyless,
+			open:       openOK(nil, true),
+			userConfig: "/tmp/u/config.json",
+			wantID:     "provider.storedkey",
+			wantStatus: StatusPass,
+			wantInMsg:  "keyring",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := storedKeyReachabilityCheck(tc.profile, tc.userConfig, tc.open)
+			if got.ID != tc.wantID {
+				t.Fatalf("check id = %q, want %q", got.ID, tc.wantID)
+			}
+			if got.Status != tc.wantStatus {
+				t.Fatalf("status = %q, want %q (message: %s)", got.Status, tc.wantStatus, got.Message)
+			}
+			if tc.wantInMsg != "" && !strings.Contains(got.Message, tc.wantInMsg) {
+				t.Fatalf("message %q does not contain %q", got.Message, tc.wantInMsg)
+			}
+		})
+	}
+}
+
+func TestRunHydratesStoredKeyForProviderConfig(t *testing.T) {
+	// A stored-key profile reaches Run keyless. Run must load the stored key
+	// before judging provider.config, the same way a run does.
+	storedProfile := config.ProviderProfile{
+		Name:         "openai",
+		ProviderKind: config.ProviderKindOpenAI,
+		BaseURL:      "https://api.openai.com/v1",
+		Model:        "gpt-4.1",
+		APIKeyStored: true,
+	}
+	openWith := func(found bool, getErr error) config.KeyStoreOpener {
+		return func(string) (config.APIKeyGetter, string, error) {
+			return fakeGetter{found: found, err: getErr}, "keyring", nil
+		}
+	}
+	cases := []struct {
+		name       string
+		open       config.KeyStoreOpener
+		wantConfig Status
+		wantStored Status
+	}{
+		{name: "store holds key passes both checks", open: openWith(true, nil), wantConfig: StatusPass, wantStored: StatusPass},
+		{name: "store empty keeps provider.config failing", open: openWith(false, nil), wantConfig: StatusFail, wantStored: StatusWarn},
+		{name: "store read error keeps provider.config failing", open: openWith(false, errors.New("keychain locked")), wantConfig: StatusFail, wantStored: StatusWarn},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			report := Run(Options{
+				Now:          fixedDoctorClock("2026-06-04T16:00:00Z"),
+				Runtime:      "go",
+				UserConfig:   "/tmp/u/config.json",
+				Provider:     storedProfile,
+				OpenKeyStore: tc.open,
+			})
+			pc := report.Check("provider.config")
+			if pc == nil || pc.Status != tc.wantConfig {
+				t.Fatalf("provider.config = %#v, want status %q", pc, tc.wantConfig)
+			}
+			sk := report.Check("provider.storedkey")
+			if sk == nil || sk.Status != tc.wantStored {
+				t.Fatalf("provider.storedkey = %#v, want status %q", sk, tc.wantStored)
+			}
+			if tc.wantConfig == StatusPass && pc.Details["credentialConfigured"] != "set" {
+				t.Fatalf("credentialConfigured = %v, want \"set\"", pc.Details["credentialConfigured"])
+			}
+			if strings.Contains(fmt.Sprint(report.Checks), "sk-test-only-presence") {
+				t.Fatal("doctor report must never include key material")
+			}
+		})
+	}
+}
+
+// fakeGetter backs storedKeyReachabilityCheck tests; it never holds a real key.
+type fakeGetter struct {
+	err   error
+	found bool
+}
+
+func (f fakeGetter) Get(string) (string, bool, error) {
+	if f.err != nil {
+		return "", false, f.err
+	}
+	if f.found {
+		return "sk-test-only-presence", true, nil
+	}
+	return "", false, nil
+}
+
 func TestFormatDetailValueRendersMapForHumans(t *testing.T) {
 	// AUDIT-H8: nested-map details (lsp.servers missing tools, config.validation) must
 	// not leak Go's map[...] syntax.
@@ -480,5 +625,112 @@ func TestDoctorFailsRemoteProviderWithoutCredential(t *testing.T) {
 	})
 	if c := local.Check("provider.config"); c == nil || c.Status != StatusPass {
 		t.Fatalf("keyless local provider should pass provider.config, got %#v", c)
+	}
+}
+
+func TestRunWarnsOnlyWhenExperimentalFlagIsOn(t *testing.T) {
+	base := Options{Now: fixedDoctorClock("2026-06-04T15:00:00Z"), Runtime: "go", UserConfig: "missing"}
+
+	if check := Run(base).Check("flags.experimental"); check != nil {
+		t.Fatalf("no experimental flag is on, want no check, got %#v", check)
+	}
+
+	on := base
+	on.Flags = flags.Set{flags.MemoryPrefetch: true}
+	check := Run(on).Check("flags.experimental")
+	if check == nil {
+		t.Fatal("memory.prefetch is on, want an experimental flags check")
+	}
+	if check.Status != StatusWarn || check.Message != "experimental flags on: memory.prefetch" {
+		t.Fatalf("unexpected check: %#v", check)
+	}
+}
+
+// projectConfigReport runs doctor against one workspace project config and
+// returns the config.validation check. The workspace root is the directory
+// that holds .splice, so the project file goes through the bounded reader.
+func projectConfigReport(t *testing.T, projectConfig string) Check {
+	t.Helper()
+	report := Run(Options{Now: fixedDoctorClock("2026-06-08T10:13:00Z"), Runtime: "go", ProjectConfig: projectConfig})
+	check := report.Check("config.validation")
+	if check == nil {
+		t.Fatalf("missing config.validation check: %#v", report.Checks)
+	}
+	return *check
+}
+
+func TestConfigValidationRefusesOversizedProjectConfig(t *testing.T) {
+	workspace := t.TempDir()
+	projectConfig := filepath.Join(workspace, ".splice", "config.json")
+	if err := os.MkdirAll(filepath.Dir(projectConfig), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A valid JSON prefix padded past the reader limit. The check must refuse
+	// it as unreadable, not parse it.
+	oversized := make([]byte, projectfile.MaxBytes+1)
+	copy(oversized, `{"activeProvider":"work"}`)
+	for i := len(`{"activeProvider":"work"}`); i < len(oversized); i++ {
+		oversized[i] = ' '
+	}
+	if err := os.WriteFile(projectConfig, oversized, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	check := projectConfigReport(t, projectConfig)
+	entry, ok := check.Details[projectConfig].(map[string]any)
+	if check.Status != StatusFail || !ok {
+		t.Fatalf("oversized project config: status %s, details %#v, want a failing per-path entry", check.Status, check.Details)
+	}
+	if message, _ := entry["error"].(string); !strings.Contains(message, "unreadable:") || !strings.Contains(message, "size limit") {
+		t.Fatalf("oversized project config entry = %#v, want an unreadable size-limit error", entry)
+	}
+}
+
+func TestConfigValidationRefusesProjectConfigSymlinkOutsideRoot(t *testing.T) {
+	workspace := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.json")
+	if err := os.WriteFile(outside, []byte(`{"activeProvider":"work"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	projectConfig := filepath.Join(workspace, ".splice", "config.json")
+	if err := os.MkdirAll(filepath.Dir(projectConfig), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, projectConfig); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	check := projectConfigReport(t, projectConfig)
+	entry, ok := check.Details[projectConfig].(map[string]any)
+	if check.Status != StatusFail || !ok {
+		t.Fatalf("symlinked project config: status %s, details %#v, want a failing per-path entry", check.Status, check.Details)
+	}
+	if message, _ := entry["error"].(string); !strings.Contains(message, "unreadable:") || !strings.Contains(message, "outside the workspace") {
+		t.Fatalf("symlinked project config entry = %#v, want an unreadable outside-the-workspace error", entry)
+	}
+}
+
+func TestConfigValidationDoesNotStallOnProjectFIFO(t *testing.T) {
+	workspace := t.TempDir()
+	projectConfig := filepath.Join(workspace, ".splice", "config.json")
+	if err := os.MkdirAll(filepath.Dir(projectConfig), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(projectConfig, 0o600); err != nil {
+		t.Skipf("mkfifo unsupported: %v", err)
+	}
+
+	// A FIFO with no writer blocks an open. The bounded reader refuses it
+	// before opening, so the check returns. The timeout turns a regression into
+	// a failure instead of a hung test run.
+	done := make(chan Check, 1)
+	go func() { done <- projectConfigReport(t, projectConfig) }()
+	select {
+	case check := <-done:
+		if check.Status != StatusFail {
+			t.Fatalf("FIFO project config status = %s, want fail: %#v", check.Status, check.Details)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("doctor stalled on a FIFO project config")
 	}
 }

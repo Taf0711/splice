@@ -3,12 +3,14 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/Taf0711/splice/internal/config"
+	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/oauth"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
@@ -235,6 +237,69 @@ func TestNewCreatesGeminiProviderFromFactoryOptions(t *testing.T) {
 	}
 }
 
+func TestNewOmitsMaxTokensWhenRegistryCapEqualsContextWindow(t *testing.T) {
+	// Regression: models.dev reports Kimi K3 with contextWindow == maxOutputTokens
+	// (both 1_048_576). Forwarding that verbatim puts max_completion_tokens on the
+	// wire at the full context size, which OpenRouter rejects: input + tools +
+	// output must fit the context window. The factory must omit the unusable cap
+	// so the provider applies its own context-safe default.
+	registry, err := modelregistry.NewRegistry([]modelregistry.ModelEntry{{
+		ID:           "test/kimi-k3",
+		DisplayName:  "Test Kimi K3",
+		APIModel:     "test/kimi-k3",
+		Provider:     modelregistry.ProviderOpenAI,
+		APIProviders: []modelregistry.ProviderKind{modelregistry.ProviderOpenAI, modelregistry.ProviderOpenAICompatible},
+		ContextLimits: modelregistry.ContextLimits{
+			ContextWindow:   1_048_576,
+			MaxOutputTokens: 1_048_576,
+		},
+		Capabilities: modelregistry.ModelCapabilities{modelregistry.ModelCapabilityChat},
+		Status:       modelregistry.ModelStatusActive,
+		Aliases:      []string{"test:kimi-k3"},
+		Cost:         modelregistry.ModelCost{Currency: "USD", Unit: "per_1m_tokens"},
+	}})
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+
+	transport := &captureTransport{
+		responseBody: "data: [DONE]\n\n",
+	}
+	provider, err := New(config.ProviderProfile{
+		Name:         "openrouter",
+		ProviderKind: config.ProviderKindOpenAICompatible,
+		BaseURL:      "https://openrouter.example/api/v1",
+		APIKey:       "sk-or",
+		Model:        "test/kimi-k3",
+	}, Options{
+		HTTPClient:    &http.Client{Transport: transport},
+		ModelRegistry: &registry,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion() error = %v", err)
+	}
+	for range stream {
+	}
+
+	if transport.request == nil {
+		t.Fatal("HTTP client was not used")
+	}
+	var body map[string]any
+	if err := json.NewDecoder(transport.body()).Decode(&body); err != nil {
+		t.Fatalf("decode request body: %v", err)
+	}
+	if value, ok := body["max_completion_tokens"]; ok {
+		t.Fatalf("max_completion_tokens = %#v, want omitted (registry cap equals the context window, unusable on the wire)", value)
+	}
+}
+
 func TestNewRejectsMismatchedOfficialProviderAndKnownModel(t *testing.T) {
 	_, err := New(config.ProviderProfile{
 		Name:         "openai",
@@ -442,27 +507,46 @@ func TestCodexAccountForKey(t *testing.T) {
 		t.Fatalf("Save codex: %v", err)
 	}
 
-	if got := codexAccountForKey(oauth.ProviderKey("chatgpt")); got != "acc-catalog-7" {
-		t.Fatalf("account = %q, want acc-catalog-7", got)
+	if got, err := codexAccountForKey(oauth.ProviderKey("chatgpt")); err != nil || got != "acc-catalog-7" {
+		t.Fatalf("account = %q,%v, want acc-catalog-7,nil", got, err)
 	}
 	// The bound key's token has no account → "", NOT the other login's account.
-	if got := codexAccountForKey(oauth.ProviderKey("codex")); got != "" {
-		t.Fatalf("account = %q, want empty (must not cross to another login's account)", got)
+	if got, err := codexAccountForKey(oauth.ProviderKey("codex")); err != nil || got != "" {
+		t.Fatalf("account = %q,%v, want empty,nil (must not cross to another login's account)", got, err)
 	}
 	// Empty key (no OAuth login) → header omitted.
-	if got := codexAccountForKey(""); got != "" {
-		t.Fatalf("account for empty key = %q, want empty", got)
+	if got, err := codexAccountForKey(""); err != nil || got != "" {
+		t.Fatalf("account for empty key = %q,%v, want empty,nil", got, err)
 	}
 	// Unknown key → "".
-	if got := codexAccountForKey(oauth.ProviderKey("nope")); got != "" {
-		t.Fatalf("account for unknown key = %q, want empty", got)
+	if got, err := codexAccountForKey(oauth.ProviderKey("nope")); err != nil || got != "" {
+		t.Fatalf("account for unknown key = %q,%v, want empty,nil", got, err)
 	}
 
 	// The low-level helper sees a replacement token when called again.
 	if err := store.Save(oauth.ProviderKey("chatgpt"), oauth.Token{AccessToken: "tok-refreshed", Account: "acc-rotated"}); err != nil {
 		t.Fatalf("refresh chatgpt: %v", err)
 	}
-	if got := codexAccountForKey(oauth.ProviderKey("chatgpt")); got != "acc-rotated" {
-		t.Fatalf("account = %q, want acc-rotated (replacement token must be read)", got)
+	if got, err := codexAccountForKey(oauth.ProviderKey("chatgpt")); err != nil || got != "acc-rotated" {
+		t.Fatalf("account = %q,%v, want acc-rotated,nil (replacement token must be read)", got, err)
+	}
+}
+
+// P2-4 (d): an official OpenAI profile cannot send a Qwen model to the OpenAI
+// endpoint.
+func TestResolveProfileRejectsQwenOnOfficialOpenAI(t *testing.T) {
+	for _, model := range []string{"qwen/qwen3-coder-30b-a3b-instruct", "qwen3-coder-30b"} {
+		_, err := resolveProfile(config.ProviderProfile{
+			Name:         "openai",
+			ProviderKind: config.ProviderKindOpenAI,
+			Model:        model,
+		}, Options{})
+		if err == nil || !strings.Contains(err.Error(), "is not served by the openai endpoint family") {
+			t.Fatalf("resolveProfile(openai, %s) error = %v, want the endpoint-family refusal", model, err)
+		}
+		var family *modelregistry.EndpointFamilyError
+		if !errors.As(err, &family) {
+			t.Fatalf("resolveProfile(openai, %s) error %T is not a typed endpoint-family error", model, err)
+		}
 	}
 }

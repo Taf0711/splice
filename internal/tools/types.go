@@ -104,7 +104,28 @@ type Result struct {
 	ChangedFiles []string
 	// Display carries a short, structured summary for the TUI / stream.
 	Display Display
+	// Refusal names why the registry refused the call before it ran. It is
+	// empty when the call ran or failed for another reason. A surface reads it
+	// instead of parsing Output.
+	Refusal Refusal
 }
+
+// Refusal classifies a registry refusal. The registry sets it at each gate
+// that stops a call before the tool runs.
+type Refusal string
+
+const (
+	// RefusalPolicy is a hard deny: the tool is not invokable from this path.
+	RefusalPolicy Refusal = "policy"
+	// RefusalPermissionRequired is a prompt-gated tool with no grant. A headless
+	// run with no prompt handler reaches this path.
+	RefusalPermissionRequired Refusal = "permission_required"
+	// RefusalSandboxApproval is a sandbox decision that needs approval, with no
+	// grant.
+	RefusalSandboxApproval Refusal = "sandbox_approval"
+	// RefusalSandboxDenied is a sandbox decision that denies the call outright.
+	RefusalSandboxDenied Refusal = "sandbox_denied"
+)
 
 // Display carries a short, structured summary of a tool result for the TUI/stream.
 type Display struct {
@@ -171,6 +192,13 @@ func okResult(output string) Result {
 
 func errorResult(output string) Result {
 	return Result{Status: StatusError, Output: output}
+}
+
+// refusedResult is errorResult with the refusal category set.
+func refusedResult(output string, refusal Refusal) Result {
+	res := errorResult(output)
+	res.Refusal = refusal
+	return res
 }
 
 func readOnlySafety(reason string) Safety {

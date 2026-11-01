@@ -12,6 +12,8 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/projectfile"
+	"github.com/Taf0711/splice/internal/splice/presentrun"
 	"github.com/Taf0711/splice/internal/usage"
 )
 
@@ -154,16 +156,35 @@ func (m model) titlePRSegment() string {
 func (m model) titleModelSegment() string {
 	provider := strings.TrimSpace(m.providerDisplayName())
 	model := strings.TrimSpace(m.modelName)
+	var body string
 	switch {
 	case provider == "" && model == "":
-		return zeroTheme.muted.Render("no provider")
+		body = "no provider"
 	case model == "":
-		return zeroTheme.ink.Render(provider)
+		body = provider
 	case provider == "":
-		return zeroTheme.ink.Render(model)
+		body = model
 	default:
-		return zeroTheme.ink.Render(provider + "/" + model)
+		body = provider + "/" + model
 	}
+	if chip := m.worktreeChip(); chip != "" {
+		body += " " + chip
+	}
+	if provider == "" && model == "" {
+		return zeroTheme.muted.Render(body)
+	}
+	return zeroTheme.ink.Render(body)
+}
+
+func (m model) worktreeChip() string {
+	if m.activeWorktree == nil {
+		return ""
+	}
+	name := strings.TrimSpace(m.activeWorktree.Name)
+	if name == "" {
+		return ""
+	}
+	return "wt:" + name
 }
 
 func (m model) composerDividerLine(width int) string {
@@ -192,17 +213,31 @@ func (m model) statusLine(width int) string {
 	separator := zeroTheme.line.Render(" │ ")
 	prefix := "  "
 
-	// Left chip: the safety-relevant run-state — permission mode (auto/ask/unsafe)
-	// in its mode colour. This was previously only on the easy-to-miss composer
-	// rule; the persistent footer is where users look for "will it run commands?".
+	// Frame kAYHl/P13 status grammar: "<phase (health)> | <model
+	// (effort)> | <N tok> | $x.xx | <elapsed>". The phase chip carries
+	// color + word (health override).
 	modeText, modeStyle := m.modeLabel()
-	left := prefix + zeroTheme.accent.Render("●") + " " + modeStyle.Render(modeText)
-	// During execution the permission mode demotes to a muted suffix so the safety
-	// signal stays visible while commands may fire during test_runner.
-	if m.pending && !m.designMode {
-		permText, permStyle := m.permissionModeLabel()
-		left += zeroTheme.muted.Render(" · ") + permStyle.Render(permText)
+	left := prefix + modeStyle.Render(modeText)
+	// P1.4 delta (frame esBzN): when the presentation layer has observed a
+	// lifecycle phase, the phase chip replaces the static mode chip — color +
+	// word driven by phase, health alerting overrides the color. The
+	// permission suffix still appends below (the safety signal never drops).
+	if chip := m.phaseChipSegment(); chip != "" {
+		left = prefix + chip
 	}
+	// Context trail: breadcrumb of phases visited (grows, never rewinds).
+	if trail := m.contextTrailSegment(); trail != "" {
+		left += zeroTheme.faint.Render("  ") + trail
+	}
+	// GAP-L: the narration verbosity segment appears only when non-default
+	// (detailed shows nothing — no noise for the common case).
+	if seg := m.narrationVerbosityLevel.label(); seg != "" {
+		left += zeroTheme.faint.Render(" " + seg)
+	}
+	// The permission mode is always shown, ahead of the trust segment, so it
+	// drops under width pressure no earlier than "! untrusted" does.
+	permText, permStyle := m.permissionModeLabel()
+	left += zeroTheme.muted.Render(" · ") + permStyle.Render(permText)
 	if !m.trusted {
 		left += zeroTheme.muted.Render(" · ") + zeroTheme.amber.Render("! untrusted")
 	}
@@ -221,6 +256,15 @@ func (m model) statusLine(width int) string {
 	if m.reasoningEffort != "" {
 		left += zeroTheme.muted.Render(" · ") + zeroTheme.accent.Render(string(m.reasoningEffort))
 	}
+	// P1.4 delta: work segment (phase-appropriate counters) and agent
+	// telemetry (only when work is distributed) — both event-driven, both
+	// optional (frame UAYbi / GwrAE).
+	if seg := m.workSegment(); seg != "" {
+		left += zeroTheme.muted.Render(" · ") + seg
+	}
+	if seg := m.agentTelemetrySegment(); seg != "" {
+		left += zeroTheme.muted.Render(" · ") + seg
+	}
 	if tier != tierTiny {
 		if seg := m.memoryStatusSegment(); seg != "" {
 			if m.memoryStatus == "active" {
@@ -229,6 +273,12 @@ func (m model) statusLine(width int) string {
 				left += zeroTheme.muted.Render(" · ") + zeroTheme.muted.Render(seg)
 			}
 		}
+	}
+	// While a run is in flight, surface the existing Esc-cancel affordance so
+	// it is discoverable before the first Esc press. The confirm state replaces
+	// this segment with its amber instruction above.
+	if m.pending && !m.exitConfirmActive && !m.cancelConfirmActive {
+		left += zeroTheme.muted.Render(" · ") + zeroTheme.faint.Render("esc cancel")
 	}
 	if m.exitConfirmActive {
 		left = prefix + zeroTheme.amber.Render("●") + " " + zeroTheme.amber.Render(ctrlCExitConfirmText)
@@ -245,10 +295,17 @@ func (m model) statusLine(width int) string {
 		}
 	}
 
+	// Frame kAYHl/P13 status grammar — the right side reads
+	// "model (effort) | N tok | $x.xx | elapsed" (segments drop under width
+	// pressure; the model and token figures lead).
 	rightGroups := []string{}
-	// Context-fill gauge: surface it down to the narrow tier (where it matters
-	// most), but skip it when the context sidebar is already showing the % so the
-	// figure isn't duplicated.
+	if model := strings.TrimSpace(m.modelName); model != "" {
+		label := model
+		if m.reasoningEffort != "" {
+			label += " (" + string(m.reasoningEffort) + ")"
+		}
+		rightGroups = append(rightGroups, zeroTheme.muted.Render(label))
+	}
 	gaugeShown := false
 	if tier >= tierNarrow && !m.sidebarActive() {
 		if gauge := m.contextWindowSegment(); gauge != "" {
@@ -266,6 +323,9 @@ func (m model) statusLine(width int) string {
 	}
 	if usage != "" {
 		rightGroups = append(rightGroups, zeroTheme.muted.Render(usage))
+	}
+	if elapsed := m.statusElapsedSegment(); elapsed != "" {
+		rightGroups = append(rightGroups, zeroTheme.muted.Render(elapsed))
 	}
 	right := strings.Join(rightGroups, separator)
 
@@ -334,10 +394,19 @@ func (m model) modeLabel() (string, lipgloss.Style) {
 	return m.permissionModeLabel()
 }
 
+// effectivePermissionMode is the mode the in-flight run actually uses. An
+// /exec run is forced to auto; otherwise the session selector applies.
+func (m model) effectivePermissionMode() agent.PermissionMode {
+	if m.pending && m.activeExecDirect {
+		return agent.PermissionModeAuto
+	}
+	return m.permissionMode
+}
+
 // permissionModeLabel returns the safety chip (ask/auto-approve/unsafe) used as
 // the idle footer primary and as the executing-phase suffix.
 func (m model) permissionModeLabel() (string, lipgloss.Style) {
-	switch m.permissionMode {
+	switch m.effectivePermissionMode() {
 	case agent.PermissionModeAuto:
 		return "auto-approve", zeroTheme.modeAuto
 	case agent.PermissionModeAsk:
@@ -345,7 +414,7 @@ func (m model) permissionModeLabel() (string, lipgloss.Style) {
 	case agent.PermissionModeUnsafe:
 		return "unsafe", zeroTheme.modeUnsafe
 	default:
-		mode := strings.TrimSpace(string(m.permissionMode))
+		mode := strings.TrimSpace(string(m.effectivePermissionMode()))
 		if mode == "" {
 			return "auto-approve", zeroTheme.modeAuto
 		}
@@ -372,6 +441,20 @@ func (m model) usageStatusSegment() string {
 	}
 	cost := usage.FormatCostDisplay(summary.CostCoverage, summary.TotalCost, summary.UnpricedCount).Cost
 	return fmt.Sprintf("%s tok · %s", humanCount(tokens), cost)
+}
+
+// statusElapsedSegment renders the session/run clock for the status line
+// (mock grammar's trailing segment): the in-flight run's elapsed, else the
+// time since the session's first activity this sitting. Empty before any
+// activity — a fresh launch shows no fabricated 0s clock.
+func (m model) statusElapsedSegment() string {
+	if m.pending && !m.turnStartedAt.IsZero() {
+		return formatWorkingElapsed(m.now().Sub(m.turnStartedAt))
+	}
+	if m.turnStartedAt.IsZero() {
+		return ""
+	}
+	return formatWorkingElapsed(m.now().Sub(m.turnStartedAt))
 }
 
 // usageCostSegment returns just the session cost, with the token figure dropped.
@@ -431,22 +514,7 @@ func (m model) contextWindowSegment() string {
 // humanCount renders a token count the way the status line wants it: 999,
 // 12.4K, 200K, 1M, 1.2M.
 func humanCount(n int) string {
-	if n < 0 {
-		n = 0
-	}
-	switch {
-	case n < 1000:
-		return strconv.Itoa(n)
-	case n < 1_000_000:
-		return humanCountScaled(float64(n)/1000, "K")
-	default:
-		return humanCountScaled(float64(n)/1_000_000, "M")
-	}
-}
-
-func humanCountScaled(value float64, suffix string) string {
-	text := fmt.Sprintf("%.1f%s", value, suffix)
-	return strings.Replace(text, ".0"+suffix, suffix, 1)
+	return presentrun.HumanCount(n)
 }
 
 // formatContextWindow renders a model's context window for the title bar
@@ -493,8 +561,11 @@ func gitBranch(cwd string) string {
 	}
 
 	headPath := filepath.Join(gitPath, "HEAD")
+	headRoot := cwd
 	if !info.IsDir() {
-		data, err := os.ReadFile(gitPath)
+		// The .git file comes from the repository, so it is read through the
+		// bounded reader and must stay inside cwd.
+		data, err := projectfile.Read(gitPath, cwd)
 		if err != nil {
 			return ""
 		}
@@ -502,10 +573,16 @@ func gitBranch(cwd string) string {
 		if dir == "" {
 			return ""
 		}
+		// A worktree gitdir can be relative to cwd, and it can name a location
+		// outside cwd. HEAD is then contained by that git dir.
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(cwd, dir)
+		}
 		headPath = filepath.Join(dir, "HEAD")
+		headRoot = dir
 	}
 
-	data, err := os.ReadFile(headPath)
+	data, err := projectfile.Read(headPath, headRoot)
 	if err != nil {
 		return ""
 	}
@@ -585,12 +662,14 @@ func renderSuggestionPalette(items []selectableListItem, selected, width int, ti
 	}
 	labelWidth = minInt(labelWidth, maxInt(8, innerWidth/2))
 
-	lines := make([]string, 0, len(visible)+5)
-	searchInset := lipgloss.Width("❯ ")
-	searchPrefix := transparentSurface(zeroTheme.ink).Render(strings.Repeat(" ", searchInset))
-	lines = append(lines, fillPaletteLine(searchPrefix+renderSuggestionSearchLine(query, maxInt(1, innerWidth-searchInset)), innerWidth, transparentSurface))
-	lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
-
+	// Card grammar matches the receipt/lifecycle cards: rounded card, bold
+	// inset title, 2-cell body indent, [key] action footer. The query rides
+	// the title row ("Commands · mo") instead of a separate search line.
+	empty := len(visible) == 0
+	lines := make([]string, 0, len(visible)+3)
+	if query = strings.TrimSpace(query); query != "" {
+		lines = append(lines, zeroTheme.faint.Render("query  ")+zeroTheme.ink.Render(query))
+	}
 	for index, item := range visible {
 		absoluteIndex := start + index
 		surface := transparentSurface
@@ -612,20 +691,18 @@ func renderSuggestionPalette(items []selectableListItem, selected, width int, ti
 		}
 		lines = append(lines, fillPaletteLine(line, innerWidth, surface))
 	}
-	if len(visible) == 0 {
+	if empty {
 		message := "no matching commands"
 		if strings.EqualFold(strings.TrimSpace(title), "Files") {
 			message = "no matching files"
 		}
-		lines = append(lines, fillPaletteLine(searchPrefix+zeroTheme.faint.Render(message), innerWidth, transparentSurface))
+		lines = append(lines, fillPaletteLine(zeroTheme.faint.Render(message), innerWidth, transparentSurface))
 	}
 
 	if footer = strings.TrimSpace(footer); footer != "" {
-		lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
-		line := zeroTheme.faint.Render(footer)
-		lines = append(lines, fillPaletteLine(line, innerWidth, transparentSurface))
+		lines = append(lines, zeroTheme.faint.Render(footer))
 	}
-	return styledBlockFillTitle(paletteWidth, strings.TrimSpace(title), lines, zeroTheme.lineStrong, lipgloss.NewStyle())
+	return styledBlockFillTitleStyled(paletteWidth, strings.TrimSpace(title), lines, zeroTheme.cardRun, lipgloss.NewStyle(), zeroTheme.ink.Bold(true))
 }
 
 func styledBlockFillTitle(width int, title string, lines []string, borderStyle lipgloss.Style, fill lipgloss.Style) string {
@@ -643,11 +720,18 @@ func styledBlockFillTitleStyled(width int, title string, lines []string, borderS
 		return styledBlockFill(width, lines, borderStyle, fill)
 	}
 	ruleWidth := width - 2
+	if lipgloss.Width(title)+4 > ruleWidth {
+		// Cut the title to fit rather than drop it: on a narrow box the title can
+		// carry state that the body does not repeat. The budget leaves room for
+		// the frame ("╭──" and "╮") and the two padding spaces.
+		budget := ruleWidth - 4
+		if budget <= 0 {
+			return styledBlockFill(width, lines, borderStyle, fill)
+		}
+		title = truncateDisplayWidth(title, budget)
+	}
 	titleText := " " + title + " "
 	titleWidth := lipgloss.Width(titleText)
-	if titleWidth >= ruleWidth {
-		return styledBlockFill(width, lines, borderStyle, fill)
-	}
 
 	leftRule := "──"
 	rightRule := strings.Repeat("─", maxInt(0, ruleWidth-lipgloss.Width(leftRule)-titleWidth))
@@ -664,14 +748,6 @@ func styledBlockFillTitleStyled(width int, title string, lines []string, borderS
 	}
 	body = append(body, bottom)
 	return strings.Join(body, "\n")
-}
-
-func renderSuggestionSearchLine(query string, width int) string {
-	query = strings.TrimSpace(query)
-	label := zeroTheme.userPrompt.Render("search > ")
-	valueWidth := maxInt(1, width-lipgloss.Width(label))
-	value := zeroTheme.ink.Render(truncateRunes(query, valueWidth))
-	return fitStyledLine(label+value, width)
 }
 
 func transparentSurface(style lipgloss.Style) lipgloss.Style {
@@ -766,6 +842,10 @@ func (m model) pickerOverlay(width int) string {
 	lines := make([]string, 0, len(visible)+5)
 	title := strings.TrimSpace(m.picker.title)
 	hint := "↑/↓ · ⏎ · esc"
+	if m.picker.kind == pickerTrust && m.trustPromptRequired {
+		// The mandatory first-run trust menu ignores Esc, so do not advertise it.
+		hint = "↑/↓ · ⏎"
+	}
 	lines = append(lines, zeroTheme.faint.Render(hint))
 	lastGroup := ""
 	for index, item := range visible {
@@ -793,7 +873,13 @@ func (m model) pickerOverlay(width int) string {
 		left += surface(zeroTheme.ink).Render(item.Label)
 		right := ""
 		if item.Meta != "" {
-			right = surface(zeroTheme.faintest).Render(item.Meta)
+			meta := item.Meta
+			// On overflow, cut the Meta from the left so its end (for a path, the
+			// leaf the user is about to trust) survives fitStyledLine.
+			if room := innerWidth - lipgloss.Width(left) - 1; room > 0 && lipgloss.Width(left)+1+lipgloss.Width(meta) > innerWidth {
+				meta = truncateLeftDisplayWidth(meta, room)
+			}
+			right = surface(zeroTheme.faintest).Render(meta)
 		}
 		// Paint the gap on the row surface so selected rows read as one solid
 		// band; joinHeaderLine would pad with bare (untinted) spaces.
@@ -825,7 +911,7 @@ func (m model) modelPickerOverlay(width int) string {
 		visible = m.picker.items[start : start+maxVisible]
 	}
 
-	lines := make([]string, 0, len(visible)+6)
+	lines := make([]string, 0, len(visible)+12)
 	searchInset := lipgloss.Width("❯ ")
 	searchPrefix := transparentSurface(zeroTheme.ink).Render(strings.Repeat(" ", searchInset))
 	lines = append(lines, fillPaletteLine(searchPrefix+renderModelPickerSearchLine(m.picker.query, maxInt(1, innerWidth-searchInset)), innerWidth, transparentSurface))
@@ -833,6 +919,9 @@ func (m model) modelPickerOverlay(width int) string {
 		lines = append(lines, fillPaletteLine(searchPrefix+zeroTheme.faint.Render(status), innerWidth, transparentSurface))
 	}
 	lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
+	if hint, ok := modelPickerScrollHint("↑ more above", start > 0, innerWidth); ok {
+		lines = append(lines, hint)
+	}
 	lastGroup := ""
 	for index, item := range visible {
 		if item.Group != "" && item.Group != lastGroup {
@@ -841,23 +930,76 @@ func (m model) modelPickerOverlay(width int) string {
 		}
 		lines = append(lines, renderModelPickerRow(innerWidth, start+index == m.picker.selected, item))
 	}
+	if hint, ok := modelPickerScrollHint("↓ more below", start+len(visible) < len(m.picker.items), innerWidth); ok {
+		lines = append(lines, hint)
+	}
 	if len(visible) == 0 {
 		lines = append(lines, fillPaletteLine(searchPrefix+zeroTheme.faint.Render("no matching models"), innerWidth, transparentSurface))
 	}
-	if item, ok := m.picker.current(); ok {
+	item, hasItem := m.picker.current()
+	// The detail block below the list is keyed entirely to the highlighted row —
+	// long-context state, price position, and rates all update as the cursor
+	// moves, which is what makes ←/→ and ↑/↓ feel like they are steering one
+	// readout instead of editing a list.
+	if hasItem {
+		lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
+		if toggle := renderContextToggle(item); toggle != "" {
+			lines = append(lines, fillPaletteLine(searchPrefix+toggle, innerWidth, transparentSurface))
+		}
+		lines = append(lines, m.modelPickerPriceLines(item, innerWidth, searchPrefix)...)
 		if detail := modelPickerItemDetail(item); detail != "" {
-			lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
 			lines = append(lines, fillPaletteLine(searchPrefix+zeroTheme.faint.Render(detail), innerWidth, transparentSurface))
+		}
+		if legend := renderBadgeLegend(visible, item.Badge); legend != "" {
+			lines = append(lines, fillPaletteLine(searchPrefix+legend, innerWidth, transparentSurface))
 		}
 	}
 	lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
-	footer := "↑/↓ move   Enter select   Ctrl+F favorite   Esc close"
-	lines = append(lines, fillPaletteLine(zeroTheme.faint.Render(footer), innerWidth, transparentSurface))
+	lines = append(lines, fillPaletteLine(zeroTheme.faint.Render(modelPickerHintBar(item, hasItem, innerWidth)), innerWidth, transparentSurface))
 	title := strings.TrimSpace(m.picker.title)
 	if title == "" {
 		title = "Choose a model"
 	}
 	return centerRenderedBlock(styledBlockFillTitle(overlayWidth, title, lines, zeroTheme.lineStrong, lipgloss.NewStyle()), width)
+}
+
+// modelPickerPriceLines renders the cost rail and rate columns for the
+// highlighted row. A row the registry has no pricing for says so rather than
+// showing an empty rail, which would read as "free".
+func (m model) modelPickerPriceLines(item pickerItem, innerWidth int, prefix string) []string {
+	if item.Cost == nil {
+		return []string{fillPaletteLine(prefix+zeroTheme.faintest.Render("pricing unknown"), innerWidth, transparentSurface)}
+	}
+	lines := []string{}
+	low, high := costRailBounds(m.picker.allItems)
+	railWidth := minInt(costRailWidth, maxInt(8, innerWidth-lipgloss.Width(prefix)))
+	if low > 0 && high > low && !item.Cost.free() {
+		hover := costRailPosition(item.Cost.blendedRate(), low, high)
+		active, hasActive := m.activeModelRailPosition(low, high)
+		lines = append(lines, fillPaletteLine(prefix+renderCostRail(railWidth, hover, active, hasActive), innerWidth, transparentSurface))
+	}
+	return append(lines, fillPaletteLine(prefix+renderPriceColumns(*item.Cost), innerWidth, transparentSurface))
+}
+
+// activeModelRailPosition locates the model currently in use on the cost rail,
+// so the hollow knob has something to mark. Reports false when the active model
+// is absent from the picker or unpriced.
+func (m model) activeModelRailPosition(low, high float64) (float64, bool) {
+	active := strings.TrimSpace(m.modelName)
+	if active == "" || m.picker == nil {
+		return 0, false
+	}
+	for _, candidate := range m.picker.allItems {
+		if candidate.Value != active || candidate.Cost == nil {
+			continue
+		}
+		rate := candidate.Cost.blendedRate()
+		if rate <= 0 {
+			return 0, false
+		}
+		return costRailPosition(rate, low, high), true
+	}
+	return 0, false
 }
 
 func (m model) modelPickerLoadingOverlay(width int) string {
@@ -901,15 +1043,31 @@ func modelPickerOverlayWidth(terminalWidth int, picker *commandPicker) int {
 	}
 	target := lipgloss.Width("Choose a model")
 	target = maxInt(target, lipgloss.Width("  search > model name..."))
-	target = maxInt(target, lipgloss.Width("↑/↓ move   Enter select   Ctrl+F favorite   Esc close"))
 	target = maxInt(target, lipgloss.Width("  Using built-in model list"))
+	// The price rail and the rate columns are fixed-width blocks under the list;
+	// the overlay must be wide enough for them or the readout wraps mid-number.
+	target = maxInt(target, lipgloss.Width("  ")+costRailWidth)
+	target = maxInt(target, lipgloss.Width("  Input  $00.00 / 1M   Cached  $00.00 / 1M   Output  $00.00 / 1M"))
 	if picker != nil {
+		var hinted pickerItem
+		if item, ok := picker.current(); ok {
+			hinted = item
+		}
+		// Ask for the full hint bar's width (0 = uncapped). The overlay is still
+		// clamped to its ceiling afterwards, so this just means "go as wide as
+		// allowed when there are many hints" — the bar itself sheds entries to fit
+		// whatever width it ends up with.
+		target = maxInt(target, lipgloss.Width(modelPickerHintBar(hinted, true, 0)))
 		for _, item := range picker.items {
 			labelWidth := lipgloss.Width(item.Label)
 			if item.Favorite {
 				labelWidth += lipgloss.Width("* ")
 			}
 			target = maxInt(target, lipgloss.Width("❯ ")+labelWidth)
+			// Rows carrying an effort ring reserve the shared effort column plus the
+			// ring itself, so every ring starts at the same x regardless of label
+			// length.
+			target = maxInt(target, modelPickerRowWidth(item))
 			if detail := modelPickerItemDetail(item); detail != "" {
 				target = maxInt(target, lipgloss.Width("  "+detail))
 			}
@@ -945,8 +1103,17 @@ func renderModelPickerRow(width int, selected bool, item pickerItem) string {
 		prefix = "* "
 	}
 	left := marker + surface(zeroTheme.ink).Render(prefix+label)
-	// The provider is shown as a section header above each group, so rows no longer
-	// repeat it as a right-aligned tag (matches a grouped provider+model list).
+	if badge := renderPickerBadge(item.Badge, surface); badge != "" {
+		left += surface(zeroTheme.faintest).Render(" ") + badge
+	}
+	// The effort ring sits in a column to the right of the label, aligned across
+	// rows so the ring lengths (which differ per model) can be compared down the
+	// list. The provider is a section header above each group, so rows do not
+	// repeat it as a right-aligned tag.
+	if ring := renderEffortRing(item, selected, surface); ring != "" {
+		pad := maxInt(1, modelPickerEffortColumn-lipgloss.Width(left))
+		left += surface(zeroTheme.faintest).Render(strings.Repeat(" ", pad)) + ring
+	}
 	return fillPaletteLine(left, width, surface)
 }
 
@@ -1023,6 +1190,31 @@ func looksLikeDiff(text string) bool {
 		}
 	}
 	return false
+}
+
+// truncateLeftDisplayWidth keeps the end of text that fits budget cells and
+// marks the cut with a leading "…".
+func truncateLeftDisplayWidth(text string, budget int) string {
+	if budget <= 0 {
+		return ""
+	}
+	if lipgloss.Width(text) <= budget {
+		return text
+	}
+	if budget == 1 {
+		return "…"
+	}
+	runes := []rune(text)
+	start, used := len(runes), 0
+	for start > 0 {
+		w := lipgloss.Width(string(runes[start-1]))
+		if used+w > budget-1 {
+			break
+		}
+		start--
+		used += w
+	}
+	return "…" + string(runes[start:])
 }
 
 func truncateRunes(text string, limit int) string {

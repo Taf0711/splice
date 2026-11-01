@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -149,6 +150,66 @@ func TestSaveSetupProviderStoresPastedAPIKey(t *testing.T) {
 	}
 	if key, ok, _ := store.Get("ollama-cloud"); !ok || key != "sk-pasted-secret" {
 		t.Fatalf("stored key = %q,%v; want sk-pasted-secret in the credential store", key, ok)
+	}
+}
+
+func TestSaveSetupProviderMergesPastedKeyIntoExistingProfileRetainsStoredMarker(t *testing.T) {
+	// CR5: re-running setup with a pasted key over an existing same-name profile
+	// must keep the APIKeyStored marker. Otherwise, the key remains in the
+	// credential store while runtime lookup refuses to load it.
+	t.Setenv("SPLICE_CRED_STORAGE", "encrypted-file")
+	configPath := filepath.Join(t.TempDir(), "splice", "config.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{
+		"activeProvider": "openrouter",
+		"providers": [{
+			"name": "openrouter",
+			"catalogID": "openrouter",
+			"apiKeyStored": false,
+			"model": "openai/gpt-4.1"
+		}]
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := saveSetupProvider(appDeps{
+		userConfigPath: func() (string, error) {
+			return configPath, nil
+		},
+	}, tui.SetupSelection{
+		CatalogID: "openrouter",
+		Model:     "anthropic/claude-sonnet-4.5",
+		APIKey:    "sk-or-pasted-synthetic",
+	}, setupSaveOptions{})
+	if err != nil {
+		t.Fatalf("saveSetupProvider() error = %v", err)
+	}
+	if result.Provider.APIKey != "sk-or-pasted-synthetic" {
+		t.Fatalf("Provider.APIKey = %q, want the pasted key for this run", result.Provider.APIKey)
+	}
+
+	cfg := readFileConfig(t, configPath)
+	if len(cfg.Providers) != 1 {
+		t.Fatalf("Providers = %#v, want the single merged openrouter profile", cfg.Providers)
+	}
+	profile := cfg.Providers[0]
+	if profile.Model != "anthropic/claude-sonnet-4.5" {
+		t.Fatalf("Model = %q, want the new model merged into the existing profile", profile.Model)
+	}
+	if profile.APIKey != "" || profile.APIKeyEnv != "" {
+		t.Fatalf("config must not persist the key: APIKey %q APIKeyEnv %q", profile.APIKey, profile.APIKeyEnv)
+	}
+	if !profile.APIKeyStored {
+		t.Fatal("expected APIKeyStored marker to survive the merge into the existing profile")
+	}
+	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if key, ok, _ := store.Get("openrouter"); !ok || key != "sk-or-pasted-synthetic" {
+		t.Fatalf("stored key = %q,%v; want sk-or-pasted-synthetic in the credential store", key, ok)
 	}
 }
 

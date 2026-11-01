@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Taf0711/splice/internal/config"
 	"github.com/Taf0711/splice/internal/keyring"
 )
 
@@ -42,24 +43,24 @@ func ValidateKey(key string) error {
 // ProviderKey builds the store key for a provider login.
 func ProviderKey(name string) string { return KeyPrefixProvider + name }
 
-// FirstStored returns the token and its ProviderKey for the FIRST candidate name
-// that has a token in the store, with ok=false when none do. Callers pass
-// ProviderProfile.OAuthLoginCandidates() so that everything derived from a login
-// — the bearer token AND any header claim like chatgpt-account-id — comes from
-// the SAME login; selecting independently per consumer could otherwise pair a
-// bearer from one login with an account header from another. A load error on a
-// candidate is treated as a miss (skip to the next), never a hard failure.
-func FirstStored(store *Store, candidates []string) (Token, string, bool) {
+// FirstStored returns the token and its ProviderKey for the first candidate name
+// that has a token in the store. Callers pass OAuthLoginCandidates so all token
+// metadata comes from one login. A backend read error fails loudly.
+func FirstStored(store *Store, candidates []string) (Token, string, bool, error) {
 	if store == nil {
-		return Token{}, "", false
+		return Token{}, "", false, nil
 	}
 	for _, name := range candidates {
 		key := ProviderKey(name)
-		if token, ok, err := store.Load(key); err == nil && ok {
-			return token, key, true
+		token, ok, err := store.Load(key)
+		if err != nil {
+			return Token{}, "", false, fmt.Errorf("oauth: read %s from the %s backend: %w", key, store.Backend(), err)
+		}
+		if ok {
+			return token, key, true, nil
 		}
 	}
-	return Token{}, "", false
+	return Token{}, "", false, nil
 }
 
 // Status is a redaction-safe summary of a stored token (no secret material).
@@ -166,11 +167,18 @@ func NewStore(options StoreOptions) (*Store, error) {
 		now = time.Now
 	}
 	storage := strings.TrimSpace(options.Storage)
-	if storage == "" {
-		storage = strings.TrimSpace(envValue(options.Env, "SPLICE_OAUTH_STORAGE"))
-	}
 	if storage == "" && options.Encrypted {
 		storage = "encrypted-file" // legacy alias
+	}
+	if storage == "" && options.Env == nil {
+		var err error
+		storage, err = config.ResolveAuthStorage(config.OAuthStorageEnv)
+		if err != nil {
+			return nil, fmt.Errorf("oauth: resolve storage: %w", err)
+		}
+	}
+	if storage == "" {
+		storage = strings.TrimSpace(envValue(options.Env, config.OAuthStorageEnv))
 	}
 	kr := options.Keyring
 	if kr == nil {
@@ -210,7 +218,7 @@ func NewStore(options StoreOptions) (*Store, error) {
 		}, nil
 	case "keyring":
 		if !keyringAvailable(kr) {
-			return nil, fmt.Errorf("oauth: keyring storage requested but not available on %s; use file storage", goos)
+			return nil, fmt.Errorf("oauth: keyring storage requested but not available on %s; use encrypted-file", goos)
 		}
 		// Serialize the keyring's read-modify-write across processes with a lock
 		// file beside where the file backend would live. Best-effort: if no config

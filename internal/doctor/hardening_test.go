@@ -76,6 +76,12 @@ func TestSandboxCheckWarnsWithRemedyWhenBackendMissing(t *testing.T) {
 	if !strings.Contains(remedy, "bwrap") && !strings.Contains(remedy, "bubblewrap") {
 		t.Fatalf("expected actionable bubblewrap remedy, got %q (details %#v)", remedy, check.Details)
 	}
+	// AUDIT-08: the visible message itself names the install command.
+	for _, want := range []string{"apt install bubblewrap", "dnf install bubblewrap", "apk add bubblewrap"} {
+		if !strings.Contains(check.Message, want) || !strings.Contains(remedy, want) {
+			t.Fatalf("sandbox.backend message %q / remedy %q, want %q", check.Message, remedy, want)
+		}
+	}
 	// A missing native sandbox is a degradation, not a hard failure: non-shell
 	// permission checks still run, so the overall report must not fail on it alone.
 	if !report.OK {

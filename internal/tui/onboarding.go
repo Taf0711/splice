@@ -832,6 +832,7 @@ func (m model) completeSetup() (tea.Model, tea.Cmd) {
 	}
 	if result.Provider.Name != "" {
 		m.providerProfile = result.Provider
+		m.savedProviders = upsertSavedProvider(m.savedProviders, result.Provider)
 		m.rebuildModelCatalog()
 		m.providerName = result.Provider.Name
 		m.modelName = result.Provider.Model
@@ -937,7 +938,7 @@ func (m *model) populateSetupPipelinePicks() {
 
 	primaryModelID := m.setupCurrentModel().ID
 	if setupProviderUsesTypedModel(option) {
-		for stage := range splicerun.StageTierLabels() {
+		for stage := range m.stageTierLabels() {
 			m.setup.pipelinePicks[stage] = primaryModelID
 		}
 		m.setup.pipelineOptions = make(map[string][]stageModelOption)
@@ -976,8 +977,15 @@ func (m *model) populateSetupPipelinePicks() {
 		if hasPrimary {
 			sourceProvider = primaryEntry.Provider
 		}
+		// The catalog lists models by model provider, which can include
+		// models that only another endpoint serves (an OpenRouter-only
+		// OpenAI-family entry). Offer only models this endpoint can serve.
+		family := splicerun.RegistryProviderKind(profile.ProviderKind)
 		for _, candidate := range m.modelCatalog.ListByProvider(sourceProvider) {
 			if !candidate.Supports(modelregistry.ModelCapabilityToolCalling) {
+				continue
+			}
+			if family != "" && !candidate.AllowsEndpointFamily(family) {
 				continue
 			}
 			meta := providerWizardModelMeta(
@@ -992,7 +1000,7 @@ func (m *model) populateSetupPipelinePicks() {
 		}
 	}
 
-	for stage := range splicerun.StageTierLabels() {
+	for stage := range m.stageTierLabels() {
 		entry := splicerun.ResolveStageTierModel(stage, profile, m.modelCatalog)
 		pick := primaryModelID
 		if entry != nil {
@@ -1040,9 +1048,11 @@ func (m model) setupModelDiscoveryCmd(gen uint64) tea.Cmd {
 		defer cancel()
 		apiKey := pastedKey
 		if needOAuthToken {
-			if resolved := oauthStoredToken(ctx, providerID); resolved != "" {
-				apiKey = resolved
+			resolved, err := oauthStoredToken(ctx, providerID)
+			if err != nil {
+				return setupModelsDiscoveredMsg{providerID: providerID, gen: gen, redactionSecrets: baseSecrets, err: err}
 			}
+			apiKey = resolved
 		}
 		profile := providerWizardDiscoveryProfile(provider, apiKey)
 		secrets := append(append([]string{}, baseSecrets...), apiKey, profile.APIKey)
@@ -1065,7 +1075,7 @@ func (m model) applySetupModelsDiscovered(msg setupModelsDiscoveredMsg) model {
 		}
 		return m
 	}
-	models := providerWizardModelsFromDiscovery(msg.models)
+	models := providerWizardModelsFromDiscovery(msg.models, m.modelCatalog)
 	if len(models) == 0 {
 		m.setup.modelErr = "models endpoint returned no model ids"
 		m.setup.modelSrc = "fallback"
@@ -1200,6 +1210,9 @@ func (m *model) deleteSetupModelQueryRune() {
 
 func (m model) exitSetupToChat() (tea.Model, tea.Cmd) {
 	m.setup.visible = false
+	if m.trustPromptRequired {
+		m = m.openTrustPromptIfRequired()
+	}
 	m.headerPrinted = false
 	m.flushQueue = nil
 	m.printInFlight = false
@@ -1627,7 +1640,7 @@ func (m model) setupPipelineReadySummary() string {
 		return "single model"
 	}
 	count := 0
-	for stage := range splicerun.StageTierLabels() {
+	for stage := range m.stageTierLabels() {
 		if strings.TrimSpace(m.setup.pipelinePicks[stage]) != "" {
 			count++
 		}
@@ -1693,6 +1706,25 @@ func setupModelSelectedDetail(model providerWizardModel) string {
 }
 
 func (m model) setupPipelineLines(width int, height int) []string {
+	lines := m.setupPipelineBodyLines(width, height)
+	// A topology error is shown above the stages, not only in the run. The
+	// stages still list the default roster, so the user sees both facts.
+	if _, err := m.stageTierLabelsWithError(); err != nil {
+		rowWidth := setupPipelineBlockWidth(width, nil, nil)
+		// Wrap the text so the whole error shows, not only its first columns.
+		text := zeroTheme.amber.Width(maxInt(10, rowWidth-2)).Render(
+			fmt.Sprintf("pipeline topology error: %v; showing the default stages", err))
+		warning := make([]string, 0, 4)
+		for _, row := range strings.Split(text, "\n") {
+			warning = append(warning, padSetupLine("  "+row, rowWidth))
+		}
+		warning = append(warning, blankSetupBlockLine(rowWidth))
+		lines = append(warning, lines...)
+	}
+	return lines
+}
+
+func (m model) setupPipelineBodyLines(width int, height int) []string {
 	if setupProviderUsesTypedModel(m.setupProvider()) {
 		return m.setupPipelineSingleModelLines(width)
 	}
@@ -1938,7 +1970,7 @@ func setupOptionIndex(options []stageModelOption, value string) int {
 }
 
 func (m model) sortedSetupPipelineStages() []string {
-	labels := splicerun.StageTierLabels()
+	labels := m.stageTierLabels()
 	out := make([]string, 0, len(labels))
 	for stage := range labels {
 		out = append(out, stage)
@@ -2239,7 +2271,7 @@ func (m model) setupProgressText() string {
 			break
 		}
 	}
-	return zeroTheme.faint.Render(fmt.Sprintf("%d/%d", position+1, len(stages)))
+	return zeroTheme.faint.Render(formatDoneTotal(position+1, len(stages)))
 }
 
 func padSetupLine(line string, width int) string {

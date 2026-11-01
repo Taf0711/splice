@@ -7,10 +7,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/testrunner"
 	"github.com/Taf0711/splice/internal/zeroruntime"
@@ -21,10 +24,24 @@ type TestRunner struct{}
 
 var _ Stage = TestRunner{}
 
+func (TestRunner) Capabilities() Capabilities {
+	return Capabilities{ModelFree: true, Description: "running tests"}
+}
+
 func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options StageOptions) (schemas.HarnessStageOutput, error) {
 	var cmd []string
 	cmd = append([]string(nil), options.Command...)
-	if len(cmd) == 0 {
+	configuredCommand := len(cmd) > 0
+	commandWorkDir := options.WorkDir
+	if len(cmd) > 0 && options.CommandWorkDir != "" {
+		commandWorkDir = options.CommandWorkDir
+		var err error
+		cmd, err = expandConfiguredTestCommand(cmd, input.PriorChangedFiles, options.WorkDir, commandWorkDir)
+		if err != nil {
+			return schemas.HarnessStageOutput{}, err
+		}
+	}
+	if len(cmd) == 0 && !configuredCommand {
 		detected, err := testCommand(options.WorkDir, options.Language)
 		if err != nil {
 			return schemas.HarnessStageOutput{}, fmt.Errorf("detect test command: %w", err)
@@ -37,17 +54,24 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 		return output, nil
 	}
 
-	timeout := 120
+	timeout := DefaultTimeoutSeconds
 	if options.TimeoutSeconds > 0 {
 		timeout = options.TimeoutSeconds
 	}
 
-	options.report(fmt.Sprintf("running %s in %s", joinShell(cmd), options.WorkDir))
+	options.report(fmt.Sprintf("running %s in %s", joinShell(cmd), commandWorkDir))
+	// A1: run Go tests with -json so per-test results exist for repair
+	// evidence and trajectory signals. The suite-entry synthesis below stays
+	// only as a fallback when -json is unavailable or parsing fails.
+	jsonEligible := isGoTestJSONCommand(cmd) || (len(cmd) > 1 && cmd[0] == "go" && cmd[1] == "test")
+	if jsonEligible {
+		cmd = withGoTestJSON(cmd)
+	}
 	var results schemas.TestRunResults
 	if options.RunTool != nil {
 		bashArgs := map[string]any{
 			"command":    shellJoin(cmd),
-			"cwd":        options.WorkDir,
+			"cwd":        commandWorkDir,
 			"timeout_ms": timeout * 1000,
 		}
 		start := time.Now()
@@ -72,11 +96,11 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 	} else if options.RecordCommand != nil {
 		args := map[string]any{
 			"command":         cmd,
-			"cwd":             options.WorkDir,
+			"cwd":             commandWorkDir,
 			"timeout_seconds": timeout,
 		}
 		recorded, err := options.RecordCommand(ctx, "splice.test", args, func(runCtx context.Context) (ToolResult, error) {
-			results = runCommand(runCtx, cmd, options.WorkDir, timeout)
+			results = runCommand(runCtx, options.Sandbox, cmd, commandWorkDir, timeout)
 			payload, marshalErr := json.Marshal(results)
 			if marshalErr != nil {
 				return ToolResult{OK: false, Output: marshalErr.Error()}, nil
@@ -93,17 +117,30 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 			}
 		}
 	} else {
-		results = runCommand(ctx, cmd, options.WorkDir, timeout)
+		results = runCommand(ctx, options.Sandbox, cmd, commandWorkDir, timeout)
+	}
+
+	// A1: when the command was JSON-eligible, try per-test parsing first.
+	// The suite-entry synthesis below becomes the last-resort fallback when
+	// -json output is unavailable or fails to parse.
+	var parsedGoJSON bool
+	var parsedResults schemas.TestRunResults
+	if jsonEligible {
+		parsedResults, parsedGoJSON = parseGoTestJSON(results.Stdout)
 	}
 
 	var summary string
 	var confidence float64
 	if results.ExitCode == 0 {
-		results.Tests = []schemas.TestCaseResult{{
-			Name:       "suite",
-			Status:     "passed",
-			DurationMs: results.DurationMs,
-		}}
+		if parsedGoJSON && len(parsedResults.Tests) > 0 {
+			results.Tests = parsedResults.Tests
+		} else {
+			results.Tests = []schemas.TestCaseResult{{
+				Name:       "suite",
+				Status:     "passed",
+				DurationMs: results.DurationMs,
+			}}
+		}
 		summary = "Test command passed."
 		confidence = 1.0
 	} else if results.ExitCode == 124 {
@@ -116,13 +153,37 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 		summary = fmt.Sprintf("Test command timed out after %ds.", timeout)
 		confidence = 0.3
 	} else {
-		results.Tests = []schemas.TestCaseResult{{
-			Name:       "suite",
-			Status:     "failed",
-			DurationMs: results.DurationMs,
-			Message:    fmt.Sprintf("exit code %d", results.ExitCode),
-		}}
+		switch {
+		case parsedGoJSON && len(parsedResults.Tests) > 0:
+			// Per-test (or per-compile-error) entries from go test -json.
+			results.Tests = parsedResults.Tests
+		default:
+			results.Tests = []schemas.TestCaseResult{{
+				Name:       "suite",
+				Status:     "failed",
+				DurationMs: results.DurationMs,
+				Message:    fmt.Sprintf("exit code %d", results.ExitCode),
+			}}
+		}
 		summary = fmt.Sprintf("Test command failed with exit code %d.", results.ExitCode)
+		evidence := failingEvidenceExcerpt(results.Stdout + "\n" + results.Stderr)
+		if evidence == "" && parsedGoJSON {
+			// The -json stream wraps compiler output in JSON events, so the
+			// raw-line excerpt finds nothing. The parsed compile-error
+			// entries are the evidence; rebuild it from them.
+			var lines []string
+			for _, tc := range results.Tests {
+				if tc.Status == "errored" {
+					lines = append(lines, tc.Name+": "+tc.Message)
+				}
+			}
+			evidence = truncateEvidenceLines(strings.Join(lines, "\n"))
+		}
+		if evidence != "" {
+			// Surface bounded failure evidence into the revision context: a
+			// re-entered writer that only sees "exit code 1" guesses blind.
+			summary += "\nFailing evidence:\n" + evidence
+		}
 		confidence = 0.8
 	}
 
@@ -143,6 +204,100 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 		Confidence: confidence,
 		Data:       map[string]any{"test_results": results, "test_command": cmd},
 	}, nil
+}
+
+// expandConfiguredTestCommand expands whole-argument placeholders from the
+// files changed by earlier write stages in this run.
+func expandConfiguredTestCommand(command []string, changedByStage map[string][]string, workspaceRoot, testDir string) ([]string, error) {
+	if testDir == "" {
+		testDir = workspaceRoot
+	}
+	root, err := filepath.Abs(workspaceRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workspace root: %w", err)
+	}
+	base, err := filepath.Abs(testDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve test directory: %w", err)
+	}
+	relBase, err := filepath.Rel(root, base)
+	if err != nil || relBase == ".." || strings.HasPrefix(relBase, ".."+string(filepath.Separator)) {
+		return nil, fmt.Errorf("verify test directory %q is outside workspace %q", testDir, workspaceRoot)
+	}
+
+	paths := changedTestFiles(changedByStage, root, base)
+	tests := make([]string, len(paths))
+	modules := make([]string, len(paths))
+	for i, path := range paths {
+		tests[i] = path
+		modules[i] = strings.TrimSuffix(path, ".py")
+		modules[i] = strings.ReplaceAll(modules[i], "/", ".")
+	}
+
+	expanded := make([]string, 0, len(command)+len(paths))
+	for _, arg := range command {
+		switch arg {
+		case "{tests}":
+			expanded = append(expanded, tests...)
+		case "{test_modules}":
+			expanded = append(expanded, modules...)
+		default:
+			expanded = append(expanded, arg)
+		}
+	}
+	return expanded, nil
+}
+
+func changedTestFiles(changedByStage map[string][]string, workspaceRoot, testDir string) []string {
+	stageNames := make([]string, 0, len(changedByStage))
+	for stage := range changedByStage {
+		stageNames = append(stageNames, stage)
+	}
+	sort.Strings(stageNames)
+	seen := map[string]bool{}
+	paths := make([]string, 0)
+	for _, stage := range stageNames {
+		for _, changed := range changedByStage[stage] {
+			relPath := filepath.ToSlash(filepath.Clean(changed))
+			if relPath == "." || filepath.IsAbs(changed) || strings.HasPrefix(relPath, "../") || relPath == ".." {
+				continue
+			}
+			absolute := filepath.Join(workspaceRoot, filepath.FromSlash(relPath))
+			relToTestDir, err := filepath.Rel(testDir, absolute)
+			if err != nil || relToTestDir == ".." || strings.HasPrefix(relToTestDir, ".."+string(filepath.Separator)) {
+				continue
+			}
+			relToTestDir = filepath.ToSlash(relToTestDir)
+			if !isTestFilePath(relPath) || seen[relToTestDir] {
+				continue
+			}
+			seen[relToTestDir] = true
+			paths = append(paths, relToTestDir)
+		}
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+func isTestFilePath(path string) bool {
+	path = filepath.ToSlash(path)
+	base := filepath.Base(path)
+	switch {
+	case strings.HasSuffix(base, "_test.go"):
+		return true
+	case strings.HasSuffix(base, ".py"):
+		if strings.HasPrefix(base, "test_") || strings.HasSuffix(base, "_test.py") || base == "tests.py" {
+			return true
+		}
+		for _, part := range strings.Split(path, "/") {
+			if part == "tests" {
+				return true
+			}
+		}
+	case strings.Contains(base, ".test.") || strings.Contains(base, ".spec."):
+		return true
+	}
+	return false
 }
 
 func testCommand(workDir string, language string) ([]string, error) {
@@ -196,7 +351,7 @@ func skippedTestOutput(language string) schemas.HarnessStageOutput {
 	}
 }
 
-func runCommand(ctx context.Context, command []string, cwd string, timeoutSeconds int) schemas.TestRunResults {
+func runCommand(ctx context.Context, sandboxEngine *sandbox.Engine, command []string, cwd string, timeoutSeconds int) schemas.TestRunResults {
 	if timeoutSeconds <= 0 {
 		timeoutSeconds = 120
 	}
@@ -204,10 +359,21 @@ func runCommand(ctx context.Context, command []string, cwd string, timeoutSecond
 	inner, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(inner, command[0], command[1:]...)
-	if cwd != "" {
-		cmd.Dir = cwd
+	dir := cwd
+	if dir == "" {
+		// Preserve the historical default: inherit the process working
+		// directory when the caller passes no explicit one.
+		dir, _ = os.Getwd()
 	}
+	cmd, plan, cerr := PrepareStageCommand(inner, sandboxEngine, dir, command)
+	if cerr != nil {
+		return schemas.TestRunResults{
+			Command:  command,
+			ExitCode: 1,
+			Stderr:   cerr.Error(),
+		}
+	}
+	defer plan.Cleanup()
 	stdout, stderr := &limitedWriter{limit: 200_000}, &limitedWriter{limit: 200_000}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
@@ -296,4 +462,93 @@ func testResultsFromToolResult(res ToolResult, cmd []string, timeoutSeconds, dur
 		Stderr:     "",
 		DurationMs: durationMs,
 	}, nil
+}
+
+// maxFailureEvidenceChars bounds the whole excerpt so prompts stay small.
+// maxFailureBlocks caps how many distinct failures appear, and
+// maxContinuationLinesPerMarker caps the assertion lines that follow each
+// failure marker. maxFailureEvidenceTailBias is prepended when earlier
+// failures were dropped for space, so the writer knows the list is partial.
+const (
+	maxFailureEvidenceChars        = 800
+	maxFailureBlocks               = 8
+	maxContinuationLinesPerMarker  = 4
+	failureEvidenceTruncatedNotice = "... earlier failures omitted; see full command output."
+)
+
+// failureMarkerPrefixes are the line prefixes runtimes print to announce a
+// failed test: Go ("--- FAIL:"), pytest ("FAILED", "E   assertion"), generic
+// runners ("FAIL."), and Go build failures ("# pkg" headers plus their
+// file:line: compiler error lines).
+var failureMarkerPrefixes = []string{"--- FAIL:", "FAILED ", "FAIL.", "E   ", "# ", "./"}
+
+func isFailureMarkerLine(line string) bool {
+	// "# pkg" marks a Go build-failure block only when the following lines
+	// carry compiler errors; a bare "#" comment line must not match. The
+	// "./" prefix matches Go compiler error lines (./file.go:12: undefined: X).
+	for _, prefix := range failureMarkerPrefixes {
+		if strings.HasPrefix(line, prefix) {
+			// A line that is exactly "#" or "# comment" is not a build block.
+			if prefix == "# " && !goCompilerErrorLineRe.MatchString(line) {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// goCompilerErrorLineRe matches Go compiler diagnostic lines: file.go:12:34:
+// message or # pkg headers followed by diagnostics.
+var goCompilerErrorLineRe = regexp.MustCompile(`^# \S|\.go:\d+`)
+
+// isEvidenceContinuation reports whether line belongs to the failure block
+// above it: indented output, diff lines, or runtime assertion detail.
+func isEvidenceContinuation(line string) bool {
+	if line == "" || !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") &&
+		!strings.HasPrefix(line, "+ ") && !strings.HasPrefix(line, "- ") {
+		return false
+	}
+	return true
+}
+
+// failingEvidenceExcerpt extracts the failing-test markers plus their
+// following assertion lines from captured runner output. Selection is
+// tail-biased because Go prints failures near the end of the run, and the
+// whole excerpt is hard-capped so prompts stay small. Empty output yields an
+// empty excerpt.
+func failingEvidenceExcerpt(output string) string {
+	output = strings.ReplaceAll(output, "\r\n", "\n")
+	lines := strings.Split(output, "\n")
+	var blocks []string
+	for i := 0; i < len(lines); {
+		if !isFailureMarkerLine(lines[i]) {
+			i++
+			continue
+		}
+		block := []string{lines[i]}
+		j := i + 1
+		for j < len(lines) && len(block) <= maxContinuationLinesPerMarker &&
+			!isFailureMarkerLine(lines[j]) && isEvidenceContinuation(lines[j]) {
+			block = append(block, lines[j])
+			j++
+		}
+		blocks = append(blocks, strings.Join(block, "\n"))
+		i = j
+	}
+	var kept []string
+	used := 0
+	for idx := len(blocks) - 1; idx >= 0 && len(kept) < maxFailureBlocks; idx-- {
+		cost := len(blocks[idx]) + 1
+		if used+cost > maxFailureEvidenceChars {
+			continue
+		}
+		used += cost
+		kept = append([]string{blocks[idx]}, kept...)
+	}
+	if len(kept) < len(blocks) {
+		// Any dropped block means the writer sees partial evidence; say so.
+		kept = append([]string{failureEvidenceTruncatedNotice}, kept...)
+	}
+	return strings.Join(kept, "\n")
 }

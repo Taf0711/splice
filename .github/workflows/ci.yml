@@ -24,6 +24,14 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # Native stage sandbox (bubblewrap + splice-linux-sandbox). Shared with
+      # the e2e job; see scripts/ci-linux-sandbox.sh for why each step exists.
+      - name: Install sandbox backend
+        run: scripts/ci-linux-sandbox.sh install
+
+      - name: Verify sandbox enforcement
+        run: scripts/ci-linux-sandbox.sh verify
+
       - name: Check formatting
         run: |
           unformatted="$(gofmt -l .)"
@@ -40,7 +48,7 @@ jobs:
         run: GOOS=windows go vet ./internal/memd/...
 
       - name: Test
-        run: go test -race ./...
+        run: go test -race -timeout 30m ./...
         # Tests must not depend on models.dev. A mid-run fetch previously raced a pricing assertion.
         env:
           SPLICE_DISABLE_MODELS_FETCH: "1"
@@ -52,6 +60,39 @@ jobs:
         run: |
           GOOS=windows GOARCH=amd64 go build ./cmd/splice
           GOOS=linux GOARCH=amd64 go build ./cmd/splice
+
+  e2e:
+    name: E2E (binary)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # cache: true restores the Go build and module caches, so the suite does
+      # not need a GOCACHE under RUNNER_TEMP.
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install sandbox backend
+        run: scripts/ci-linux-sandbox.sh install
+
+      - name: Verify sandbox enforcement
+        run: scripts/ci-linux-sandbox.sh verify
+
+      # Opt-in suite (tests/e2e). Live journeys are not run here.
+      - name: Run binary e2e suite
+        run: make e2e
+        env:
+          SPLICE_E2E: "1"
+          SPLICE_DISABLE_MODELS_FETCH: "1"
+          TMPDIR: ${{ runner.temp }}
 
   memd:
     name: memd sidecar
@@ -76,7 +117,7 @@ jobs:
 
       - name: Test
         working-directory: memd
-        run: go test -race ./...
+        run: go test -race -timeout 30m ./...
 
       - name: Build
         working-directory: memd

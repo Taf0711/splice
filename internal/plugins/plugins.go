@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/Taf0711/splice/internal/projectfile"
 )
 
 type Source string
@@ -27,7 +29,12 @@ const (
 	DiagnosticJSON      DiagnosticKind = "json"
 	DiagnosticSchema    DiagnosticKind = "schema"
 	DiagnosticDuplicate DiagnosticKind = "duplicate"
+	DiagnosticLimit     DiagnosticKind = "limit"
 )
+
+// maxPluginManifests caps how many plugin directories one load examines across
+// all roots. A cloned repository can hold thousands of directories.
+const maxPluginManifests = 64
 
 const (
 	PermissionAllow  ToolPermission = "allow"
@@ -202,6 +209,8 @@ func Load(options LoadOptions) (LoadResult, error) {
 
 	diagnostics := []Diagnostic{}
 	discovered := []LoadedPlugin{}
+	scanned := 0
+scan:
 	for _, root := range roots {
 		rootPath, err := filepath.Abs(root.Path)
 		if err != nil {
@@ -232,9 +241,25 @@ func Load(options LoadOptions) (LoadResult, error) {
 			if !entry.IsDir() {
 				continue
 			}
+			if scanned == maxPluginManifests {
+				diagnostics = append(diagnostics, Diagnostic{
+					Kind:    DiagnosticLimit,
+					Source:  root.Source,
+					Root:    rootPath,
+					Message: fmt.Sprintf("more than %d plugin directories; the rest were not scanned", maxPluginManifests),
+				})
+				break scan
+			}
+			scanned++
 			pluginDir := filepath.Join(rootPath, entry.Name())
 			manifestPath := filepath.Join(pluginDir, "plugin.json")
-			data, err := os.ReadFile(manifestPath)
+			// Project plugins sit at <workspace>/.splice/plugins and must stay in the
+			// workspace. User and custom roots are operator-owned.
+			manifestRoot := ""
+			if root.Source == SourceProject {
+				manifestRoot = filepath.Dir(filepath.Dir(rootPath))
+			}
+			data, err := projectfile.Read(manifestPath, manifestRoot)
 			if err != nil {
 				if errors.Is(err, os.ErrNotExist) {
 					continue

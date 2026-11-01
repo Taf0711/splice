@@ -1,0 +1,7 @@
+{
+  "name": "large-04-write",
+  "phase": "write",
+  "prompt": "Add ProrateDays(monthlyCents int64, days int) int64 in the billing package: the charge for that many days of a 30-day month, truncated to whole cents, and 0 for a negative day count. Add a regression test.",
+  "check": "# large-04 A: Add ProrateDays(monthlyCents int64, days int) int64 in the billing pac\nmkdir -p internal/billing\ncat > internal/billing/probe_prorate_days_test.go <<'EOF'\npackage billing\n\nimport \"testing\"\n\nfunc TestProbeProrateDays(t *testing.T) {\n\tif got := ProrateDays(2900, 15); got != 1450 {\n\t\tt.Fatalf(\"ProrateDays(2900,15) = %d, want 1450\", got)\n\t}\n\tif got := ProrateDays(1000, 7); got != 233 {\n\t\tt.Fatalf(\"ProrateDays(1000,7) = %d, want 233 (truncated)\", got)\n\t}\n\tif got := ProrateDays(1000, -3); got != 0 {\n\t\tt.Fatalf(\"ProrateDays negative = %d, want 0\", got)\n\t}\n}\nEOF\ngo test -count=1 ./internal/billing/ ; rc=$?\nrm -f internal/billing/probe_prorate_days_test.go\nif [ $rc -ne 0 ]; then exit $rc; fi\nexit 0\n",
+  "fixture": "../../large-families/fixture"
+}

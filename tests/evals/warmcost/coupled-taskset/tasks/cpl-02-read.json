@@ -1,0 +1,8 @@
+{
+  "name": "cpl-02-read",
+  "phase": "read",
+  "precursor": "cpl-02-write",
+  "prompt": "In the webhooks package, add the webhook event \"account.deleted\" with the description \"An account was deleted\".",
+  "check": "# cpl-02 B\nmkdir -p internal/webhooks\ncat > internal/webhooks/probe_account_deleted_test.go <<'EOF'\npackage webhooks\n\nimport \"testing\"\n\nfunc TestProbeAccountDeleted(t *testing.T) {\n\tif d, ok := Describe(\"account.deleted\"); !ok || d != \"An account was deleted\" {\n\t\tt.Fatalf(\"Describe(account.deleted) = %q, %v\", d, ok)\n\t}\n}\nEOF\ngo test -count=1 ./... ; rc=$?\nrm -f internal/webhooks/probe_account_deleted_test.go\nexit $rc\n",
+  "fixture": "../../coupled-families/fixture"
+}

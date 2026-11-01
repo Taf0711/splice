@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	zeroSandbox "github.com/Taf0711/splice/internal/sandbox"
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
 )
 
 const (
@@ -473,11 +474,18 @@ func NewScopedExecCommandTool(workspaceRoot string, scope PathScope, manager *ex
 }
 
 func (tool execCommandTool) Run(ctx context.Context, args map[string]any) Result {
-	return tool.run(ctx, args, nil)
+	return tool.run(ctx, args, RunOptions{})
 }
 
 func (tool execCommandTool) RunWithSandbox(ctx context.Context, args map[string]any, engine *zeroSandbox.Engine) Result {
-	return tool.run(ctx, args, engine)
+	return tool.run(ctx, args, RunOptions{Sandbox: engine})
+}
+
+// RunWithOptions lets the registry pass live-output and tool-call context to
+// exec_command while still honoring the sandbox. Called when RunOptions are
+// present.
+func (tool execCommandTool) RunWithOptions(ctx context.Context, args map[string]any, options RunOptions) Result {
+	return tool.run(ctx, args, options)
 }
 
 func (tool execCommandTool) ExecSessions() []ExecSessionSnapshot {
@@ -492,7 +500,9 @@ func (tool execCommandTool) StopAllExecSessions() []int {
 	return tool.manager.stopAll()
 }
 
-func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine *zeroSandbox.Engine) Result {
+func (tool execCommandTool) run(ctx context.Context, args map[string]any, options RunOptions) Result {
+	engine := options.Sandbox
+
 	commandText, err := aliasedStringArg(args, []string{"cmd", "command", "script", "shell"}, "", true, false)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for exec_command: " + err.Error())
@@ -537,6 +547,40 @@ func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine
 	if err != nil {
 		return errorResult("Error starting exec_command: " + err.Error())
 	}
+	// Poll the existing bounded recent buffer while this call is active. The
+	// worker stops before run returns, so a background session cannot send stale
+	// snapshots after its result row.
+	if options.OnToolOutput != nil {
+		done := make(chan struct{})
+		stopped := make(chan struct{})
+		defer func() {
+			close(done)
+			<-stopped
+		}()
+		go func() {
+			defer close(stopped)
+			ticker := time.NewTicker(minOutputSnapshotInterval)
+			defer ticker.Stop()
+			last := ""
+			emit := func() {
+				output := session.output.recentString()
+				if output == "" || output == last {
+					return
+				}
+				last = output
+				options.OnToolOutput(OutputSnapshot{ToolCallID: options.ToolCallID, Output: output})
+			}
+			emit()
+			for {
+				select {
+				case <-done:
+					return
+				case <-ticker.C:
+					emit()
+				}
+			}
+		}()
+	}
 	output, outputTruncated := session.collect(ctx, time.Duration(yieldTimeMS)*time.Millisecond)
 	if ctx != nil && ctx.Err() != nil && !session.doneClosed() {
 		session.terminate()
@@ -566,7 +610,7 @@ func (tool execCommandTool) startSession(commandText string, absoluteCwd string,
 	id := tool.manager.allocateID()
 	commandCtx, cancel := context.WithCancel(context.Background())
 	commandEngine := commandEngineForSandboxPermissions(engine, sandboxPermissions)
-	command, plan, err := buildBashCommand(commandCtx, commandText, absoluteCwd, commandEngine)
+	command, plan, err := buildBashCommand(commandCtx, commandText, absoluteCwd, commandEngine, procrun.ProfileToolsExecCommand)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -839,11 +883,18 @@ type execToolResultInput struct {
 }
 
 func execToolResult(input execToolResultInput) Result {
-	output, truncated := truncateExecOutput(input.output, input.maxOutputTokens)
 	meta := map[string]string{
 		"cwd": input.relativeCwd,
 		"tty": strconv.FormatBool(input.tty),
 	}
+	// Reduce before truncation, matching the bash path. The native reducers
+	// remove whole passing test blocks, and head/tail truncation is
+	// position-blind, so reducing first spends the budget on content that
+	// survives. A reduction that truncation does not follow still removes
+	// bytes from the transcript, so it spills the raw output for recovery.
+	reducedText := reduceOutputText("exec_command", input.output, meta)
+	reduced := reducedText != input.output
+	output, truncated := truncateExecOutput(reducedText, input.maxOutputTokens)
 	addSandboxMeta(meta, input.plan)
 	if input.exited {
 		meta["exit_code"] = strconv.Itoa(input.exitCode)
@@ -869,6 +920,13 @@ func execToolResult(input execToolResultInput) Result {
 		if issue := detectShellOutputIssue(output, runtimeGOOS()); issue != nil {
 			meta["shell_issue"] = issue.Kind
 			body = appendShellIssueHint(body, *issue)
+		}
+	}
+	if reduced && !truncated {
+		// The transcript no longer holds the bytes the reducer removed, so
+		// point at the spilled original the same way the bash path does.
+		if spillPath := spillTruncatedOutput("exec_command", input.output); spillPath != "" {
+			body += "\n[splice] reduced output saved to " + spillPath + " (grep or read_file it instead of re-running)"
 		}
 	}
 	if input.outputBufferTruncated {

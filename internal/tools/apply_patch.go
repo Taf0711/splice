@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/Taf0711/splice/internal/gitenv"
 )
 
 type applyPatchTool struct {
@@ -62,6 +64,23 @@ func (tool applyPatchTool) RunWithOptions(ctx context.Context, args map[string]a
 	if err := validatePatchPaths(applyRoot, patch); err != nil {
 		return errorResult("Error applying patch: " + err.Error())
 	}
+	// Strict read-before-write: a patch may change an existing file only after
+	// the run read it. A new file has nothing to read, so it passes. With no
+	// file tracker, no read is known, so every existing file is refused.
+	if options.RequireReadBeforeWrite {
+		for _, rel := range changedFilesFromPatch(relativeRoot, patch) {
+			absolute, _, rerr := resolveScopedPath(tool.workspaceRoot, tool.scope, rel)
+			if rerr != nil {
+				continue
+			}
+			if _, statErr := os.Stat(absolute); statErr != nil {
+				continue
+			}
+			if _, tracked := options.FileTracker.Version(absolute); !tracked {
+				return errorResult(unreadOverwriteMessage(rel))
+			}
+		}
+	}
 
 	tempFile, err := os.CreateTemp("", "splice-patch-*.patch")
 	if err != nil {
@@ -85,7 +104,7 @@ func (tool applyPatchTool) RunWithOptions(ctx context.Context, args map[string]a
 
 	command := exec.CommandContext(ctx, "git", "apply", "--whitespace=nowarn", patchPath)
 	command.Dir = applyRoot
-	output, err := command.CombinedOutput()
+	output, err := gitenv.CombinedOutput(command)
 	if err != nil {
 		message := strings.TrimSpace(string(output))
 		if message == "" {

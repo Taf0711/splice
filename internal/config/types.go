@@ -3,7 +3,12 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"math"
+	"path/filepath"
 	"strings"
+	"time"
+
+	"github.com/Taf0711/splice/internal/flags"
 )
 
 const OpenAIBaseURL = "https://api.openai.com/v1"
@@ -119,6 +124,10 @@ type PreferencesConfig struct {
 	// the user turned post-turn recaps off. A *bool is its own tri-state, so no
 	// custom unmarshal is needed (unlike ToolsConfig.DeferThreshold's int).
 	Recaps *bool `json:"recaps,omitempty"`
+	// Layout is the persisted TUI layout preset name (default/compact/
+	// execution/review/minimal). Applied at startup; empty = unset (the
+	// built-in defaults).
+	Layout string `json:"layout,omitempty"`
 }
 
 // RecapsEnabled reports whether post-turn recaps are on. Unset defaults to ON.
@@ -175,6 +184,9 @@ type KeyBindingsConfig struct {
 	TogglePlan KeyBindingDef `json:"togglePlan,omitempty"`
 	// ToggleSidebar toggles the right context sidebar (default: ctrl+b).
 	ToggleSidebar KeyBindingDef `json:"toggleSidebar,omitempty"`
+	// ToggleNarration cycles the transcript verbosity quiet/normal/detailed
+	// (default: ctrl+n).
+	ToggleNarration KeyBindingDef `json:"toggleNarration,omitempty"`
 }
 
 // LocalControlConfig controls local browser/desktop/terminal automation helpers.
@@ -236,6 +248,51 @@ type SwarmConfig struct {
 	MaxTeamSize int `json:"maxTeamSize,omitempty"`
 }
 
+// WorktreesConfig controls isolated TUI pipeline worktrees.
+type WorktreesConfig struct {
+	// Enabled gates TUI pipeline isolation. nil defaults to on.
+	Enabled *bool `json:"enabled,omitempty"`
+	// Directory is the base directory for created worktrees.
+	Directory string `json:"directory,omitempty"`
+}
+
+// VerifyConfig controls the deterministic test_runner command. An empty
+// command keeps the built-in test detection behavior.
+type VerifyConfig struct {
+	TestCommand []string `json:"testCommand,omitempty"`
+	TestDir     string   `json:"testDir,omitempty"`
+}
+
+// Validate checks that the test directory is a relative path inside the
+// workspace. The workspace root is applied by the pipeline at run time.
+func (c VerifyConfig) Validate() error {
+	dir := strings.TrimSpace(c.TestDir)
+	if dir == "" {
+		return nil
+	}
+	if filepath.IsAbs(dir) || strings.HasPrefix(dir, `/`) || strings.HasPrefix(dir, `\\`) {
+		return fmt.Errorf("invalid verify.testDir %q: must be relative to the workspace", c.TestDir)
+	}
+	for _, part := range strings.FieldsFunc(dir, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if part == ".." {
+			return fmt.Errorf("invalid verify.testDir %q: must stay inside the workspace", c.TestDir)
+		}
+	}
+	return nil
+}
+
+// PipelineConfig holds the user limits for deterministic pipeline runs.
+type PipelineConfig struct {
+	// MaxWallSeconds is the wall-time limit of one pipeline run, in seconds.
+	// Zero uses the built-in default of 600 seconds.
+	MaxWallSeconds int `json:"max_wall_seconds,omitempty"`
+}
+
+// EnabledOrDefault reports whether TUI pipeline worktrees are on.
+func (c WorktreesConfig) EnabledOrDefault() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
 // ToolsOverride builds a ToolsConfig that explicitly overrides the deferred-tool
 // threshold (including to 0, which disables deferral). Use this for programmatic
 // Overrides — a bare ToolsConfig{DeferThreshold: 0} is indistinguishable from
@@ -261,37 +318,248 @@ func (cfg *ToolsConfig) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+type AuthConfig struct {
+	Storage string `json:"storage,omitempty"`
+}
+
+// DecisionAdvisorLimits are the advisor's spending and footprint caps. The
+// JSON keys match the spec's profile. Omitted fields take the spec's
+// proposed starting values, which are not spending authority: the global
+// task budget contains the advisor allowance and never extends it.
+type DecisionAdvisorLimits struct {
+	ReservationUSDPerMillionInput float64 `json:"reservation_usd_per_million_input,omitempty"`
+	MaxRequestsPerEpisode         int     `json:"max_requests_per_episode,omitempty"`
+	MaxCandidates                 int     `json:"max_candidates,omitempty"`
+	MaxDependencyGroups           int     `json:"max_dependency_groups,omitempty"`
+	MaxSourceFiles                int     `json:"max_source_files,omitempty"`
+	MaxRecentEvents               int     `json:"max_recent_events,omitempty"`
+	MaxRequestBytes               int     `json:"max_request_bytes,omitempty"`
+	MaxResponseBytes              int     `json:"max_response_bytes,omitempty"`
+	TimeoutMS                     int     `json:"timeout_ms,omitempty"`
+	MaxTotalOptionalWaitMS        int     `json:"max_total_optional_wait_ms,omitempty"`
+	MaxInterventionsPerEpisode    int     `json:"max_interventions_per_episode,omitempty"`
+	Retries                       int     `json:"retries,omitempty"`
+	MaxAdvisorCostUSD             float64 `json:"max_advisor_cost_usd,omitempty"`
+	MaxFractionOfBaselineCost     float64 `json:"max_fraction_of_baseline_cost,omitempty"`
+}
+
+// DecisionAdvisorConfig is the decision_advisor configuration section. The
+// zero value is mode "off": absent configuration never calls the provider.
+type DecisionAdvisorConfig struct {
+	Backend         string `json:"backend,omitempty"`
+	Endpoint        string `json:"endpoint,omitempty"`
+	APIKeyEnv       string `json:"api_key_env,omitempty"`
+	ProviderProfile string `json:"provider_profile,omitempty"`
+	// Mode is off, shadow, active_experimental, or active.
+	Mode string `json:"mode,omitempty"`
+	// Profile is the pinned decision model ID (for example
+	// "typesafe/jev-1.13"). Required when mode is not off.
+	Profile string `json:"profile,omitempty"`
+	// QuestionPack pins the versioned question pack.
+	QuestionPack string `json:"question_pack,omitempty"`
+	// Policy pins the versioned host policy.
+	Policy string                `json:"policy,omitempty"`
+	Limits DecisionAdvisorLimits `json:"limits,omitempty"`
+	// ReasoningEffort is sent with each decision request when set (low, medium, high).
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// TrajectoryDefault marks the section the resolver built for the default
+	// trajectory classifier. It is set in code, never read from config, and
+	// it keeps the selector off.
+	TrajectoryDefault bool `json:"-"`
+	// ExplicitInactive is set in code when the default classifier replaced a
+	// configured section that is dormant (pipeline.decision_advisor is off).
+	// The section's own settings are not used. Doctor reports the note.
+	ExplicitInactive bool `json:"-"`
+}
+
+// DefaultDecisionAdvisorLimits are the spec's proposed starting limits.
+func DefaultDecisionAdvisorLimits() DecisionAdvisorLimits {
+	return DecisionAdvisorLimits{
+		ReservationUSDPerMillionInput: 0.042,
+		MaxRequestsPerEpisode:         4,
+		MaxCandidates:                 4,
+		MaxDependencyGroups:           1,
+		MaxSourceFiles:                2,
+		MaxRecentEvents:               4,
+		MaxRequestBytes:               16384,
+		MaxResponseBytes:              65536,
+		TimeoutMS:                     1500,
+		MaxTotalOptionalWaitMS:        3000,
+		MaxInterventionsPerEpisode:    1,
+		Retries:                       0,
+		MaxAdvisorCostUSD:             0.001,
+		MaxFractionOfBaselineCost:     0.10,
+	}
+}
+
+// WithDefaults fills omitted limits without a network call.
+func (c DecisionAdvisorConfig) WithDefaults() DecisionAdvisorConfig {
+	if c.Backend == "" {
+		c.Backend = "openrouter_decisions"
+	}
+	defaults := DefaultDecisionAdvisorLimits()
+	if c.Limits.MaxRequestsPerEpisode == 0 {
+		c.Limits.MaxRequestsPerEpisode = defaults.MaxRequestsPerEpisode
+	}
+	if c.Limits.MaxCandidates == 0 {
+		c.Limits.MaxCandidates = defaults.MaxCandidates
+	}
+	if c.Limits.MaxDependencyGroups == 0 {
+		c.Limits.MaxDependencyGroups = defaults.MaxDependencyGroups
+	}
+	if c.Limits.MaxSourceFiles == 0 {
+		c.Limits.MaxSourceFiles = defaults.MaxSourceFiles
+	}
+	if c.Limits.MaxRecentEvents == 0 {
+		c.Limits.MaxRecentEvents = defaults.MaxRecentEvents
+	}
+	if c.Limits.MaxRequestBytes == 0 {
+		c.Limits.MaxRequestBytes = defaults.MaxRequestBytes
+	}
+	if c.Limits.MaxResponseBytes == 0 {
+		c.Limits.MaxResponseBytes = defaults.MaxResponseBytes
+	}
+	if c.Limits.TimeoutMS == 0 {
+		c.Limits.TimeoutMS = defaults.TimeoutMS
+	}
+	if c.Limits.MaxTotalOptionalWaitMS == 0 {
+		c.Limits.MaxTotalOptionalWaitMS = defaults.MaxTotalOptionalWaitMS
+	}
+	if c.Limits.MaxInterventionsPerEpisode == 0 {
+		c.Limits.MaxInterventionsPerEpisode = defaults.MaxInterventionsPerEpisode
+	}
+	if c.Limits.MaxAdvisorCostUSD == 0 {
+		c.Limits.MaxAdvisorCostUSD = defaults.MaxAdvisorCostUSD
+	}
+	if c.Limits.MaxFractionOfBaselineCost == 0 {
+		c.Limits.MaxFractionOfBaselineCost = defaults.MaxFractionOfBaselineCost
+	}
+	if c.Limits.ReservationUSDPerMillionInput == 0 {
+		c.Limits.ReservationUSDPerMillionInput = defaults.ReservationUSDPerMillionInput
+	}
+	return c
+}
+
+// Validate checks the advisor section with the offending field named.
+// Mode "off" accepts the rest of the section untouched: nothing calls, so
+// nothing else can be wrong at runtime.
+func (c DecisionAdvisorConfig) Validate() error {
+	switch c.Mode {
+	case "", "off", "shadow", "active_experimental", "active":
+	default:
+		return fmt.Errorf("invalid decision_advisor.mode %q: expected off, shadow, active_experimental, or active", c.Mode)
+	}
+	switch c.Backend {
+	case "", "openrouter_decisions":
+	case "http":
+		if strings.TrimSpace(c.Endpoint) == "" {
+			return fmt.Errorf("decision_advisor.endpoint: required for http backend")
+		}
+	case "provider":
+		if strings.TrimSpace(c.ProviderProfile) == "" {
+			return fmt.Errorf("decision_advisor.provider_profile: required for provider backend")
+		}
+	default:
+		return fmt.Errorf("decision_advisor.backend: unknown backend %q", c.Backend)
+	}
+	if c.Limits.ReservationUSDPerMillionInput < 0 || math.IsNaN(c.Limits.ReservationUSDPerMillionInput) || math.IsInf(c.Limits.ReservationUSDPerMillionInput, 0) {
+		return fmt.Errorf("decision_advisor.limits.reservation_usd_per_million_input: invalid price")
+	}
+	if c.Mode == "" || c.Mode == "off" {
+		return nil
+	}
+	if strings.TrimSpace(c.Profile) == "" && c.Backend != "provider" {
+		return fmt.Errorf("invalid decision_advisor.profile: required when mode is %q", c.Mode)
+	}
+	if c.Limits.Retries != 0 {
+		return fmt.Errorf("invalid decision_advisor.limits.retries %d: must be 0, hidden retries are disabled for the advisor", c.Limits.Retries)
+	}
+	if c.Limits.MaxRequestBytes <= 0 {
+		return fmt.Errorf("invalid decision_advisor.limits.max_request_bytes %d: must be positive", c.Limits.MaxRequestBytes)
+	}
+	if c.Limits.MaxResponseBytes <= 0 {
+		return fmt.Errorf("invalid decision_advisor.limits.max_response_bytes %d: must be positive", c.Limits.MaxResponseBytes)
+	}
+	if c.Limits.TimeoutMS <= 0 {
+		return fmt.Errorf("invalid decision_advisor.limits.timeout_ms %d: must be positive", c.Limits.TimeoutMS)
+	}
+	if c.Limits.MaxAdvisorCostUSD < 0 {
+		return fmt.Errorf("invalid decision_advisor.limits.max_advisor_cost_usd %v: must not be negative", c.Limits.MaxAdvisorCostUSD)
+	}
+	if c.Limits.MaxFractionOfBaselineCost < 0 || c.Limits.MaxFractionOfBaselineCost > 1 {
+		return fmt.Errorf("invalid decision_advisor.limits.max_fraction_of_baseline_cost %v: must be within [0,1]", c.Limits.MaxFractionOfBaselineCost)
+	}
+	return nil
+}
+
+// TrajectoryConfig sets the probability thresholds for host actions.
+type TrajectoryConfig struct {
+	Thresholds map[string]float64 `json:"thresholds,omitempty"`
+}
+
+// Validate checks the action labels and probability thresholds.
+func (c TrajectoryConfig) Validate() error {
+	for label, p := range c.Thresholds {
+		switch label {
+		case "continue", "step_back", "rollback", "escalate", "stop":
+		default:
+			return fmt.Errorf("trajectory.thresholds: unknown label %q", label)
+		}
+		if math.IsNaN(p) || math.IsInf(p, 0) || p < 0 || p > 1 {
+			return fmt.Errorf("trajectory.thresholds.%s: probability %v outside [0,1]", label, p)
+		}
+	}
+	return nil
+}
+
 type FileConfig struct {
-	ActiveProvider      string             `json:"activeProvider,omitempty"`
-	Providers           []ProviderProfile  `json:"providers,omitempty"`
-	MaxTurns            int                `json:"maxTurns,omitempty"`
-	MCP                 MCPConfig          `json:"mcp,omitempty"`
-	Sandbox             SandboxConfig      `json:"sandbox,omitempty"`
-	Notify              NotifyConfig       `json:"notify,omitempty"`
-	Tools               ToolsConfig        `json:"tools,omitempty"`
-	Swarm               SwarmConfig        `json:"swarm,omitempty"`
-	Preferences         PreferencesConfig  `json:"preferences,omitempty"`
-	KeyBindings         KeyBindingsConfig  `json:"keybindings,omitempty"`
-	LocalControl        LocalControlConfig `json:"localControl,omitempty"`
-	Compaction          CompactionConfig   `json:"compaction,omitempty"`
-	DefaultProjectTrust string             `json:"defaultProjectTrust,omitempty"`
+	ActiveProvider      string                `json:"activeProvider,omitempty"`
+	Providers           []ProviderProfile     `json:"providers,omitempty"`
+	Auth                AuthConfig            `json:"auth,omitempty"`
+	MaxTurns            int                   `json:"maxTurns,omitempty"`
+	MCP                 MCPConfig             `json:"mcp,omitempty"`
+	Sandbox             SandboxConfig         `json:"sandbox,omitempty"`
+	Notify              NotifyConfig          `json:"notify,omitempty"`
+	Tools               ToolsConfig           `json:"tools,omitempty"`
+	Swarm               SwarmConfig           `json:"swarm,omitempty"`
+	Preferences         PreferencesConfig     `json:"preferences,omitempty"`
+	KeyBindings         KeyBindingsConfig     `json:"keybindings,omitempty"`
+	LocalControl        LocalControlConfig    `json:"localControl,omitempty"`
+	Compaction          CompactionConfig      `json:"compaction,omitempty"`
+	Worktrees           WorktreesConfig       `json:"worktrees,omitempty"`
+	Verify              VerifyConfig          `json:"verify,omitempty"`
+	DecisionAdvisor     DecisionAdvisorConfig `json:"decisionAdvisor,omitempty"`
+	Trajectory          TrajectoryConfig      `json:"trajectory,omitempty"`
+	Pipeline            PipelineConfig        `json:"pipeline,omitempty"`
+	DefaultProjectTrust string                `json:"defaultProjectTrust,omitempty"`
+	// Flags holds per-feature switches as declared in internal/flags. Only
+	// registered names resolve; an unknown name fails loudly. Project config
+	// may set ScopeProject flags only.
+	Flags map[string]bool `json:"flags,omitempty"`
 }
 
 func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 	type rawConfig struct {
-		ActiveProvider      string              `json:"activeProvider,omitempty"`
-		Providers           []ProviderProfile   `json:"providers,omitempty"`
-		MaxTurns            int                 `json:"maxTurns,omitempty"`
-		MCP                 MCPConfig           `json:"mcp,omitempty"`
-		Sandbox             SandboxConfig       `json:"sandbox,omitempty"`
-		Notify              NotifyConfig        `json:"notify,omitempty"`
-		Tools               ToolsConfig         `json:"tools,omitempty"`
-		Swarm               SwarmConfig         `json:"swarm,omitempty"`
-		Preferences         PreferencesConfig   `json:"preferences,omitempty"`
-		KeyBindings         KeyBindingsConfig   `json:"keybindings,omitempty"`
-		LocalControl        *LocalControlConfig `json:"localControl,omitempty"`
-		Compaction          CompactionConfig    `json:"compaction,omitempty"`
-		DefaultProjectTrust string              `json:"defaultProjectTrust,omitempty"`
+		ActiveProvider      string                 `json:"activeProvider,omitempty"`
+		Providers           []ProviderProfile      `json:"providers,omitempty"`
+		Auth                *AuthConfig            `json:"auth,omitempty"`
+		MaxTurns            int                    `json:"maxTurns,omitempty"`
+		MCP                 MCPConfig              `json:"mcp,omitempty"`
+		Sandbox             SandboxConfig          `json:"sandbox,omitempty"`
+		Notify              NotifyConfig           `json:"notify,omitempty"`
+		Tools               ToolsConfig            `json:"tools,omitempty"`
+		Swarm               SwarmConfig            `json:"swarm,omitempty"`
+		Preferences         PreferencesConfig      `json:"preferences,omitempty"`
+		KeyBindings         KeyBindingsConfig      `json:"keybindings,omitempty"`
+		LocalControl        *LocalControlConfig    `json:"localControl,omitempty"`
+		Compaction          CompactionConfig       `json:"compaction,omitempty"`
+		Worktrees           WorktreesConfig        `json:"worktrees,omitempty"`
+		Verify              *VerifyConfig          `json:"verify,omitempty"`
+		DecisionAdvisor     *DecisionAdvisorConfig `json:"decisionAdvisor,omitempty"`
+		Trajectory          *TrajectoryConfig      `json:"trajectory,omitempty"`
+		Pipeline            *PipelineConfig        `json:"pipeline,omitempty"`
+		DefaultProjectTrust string                 `json:"defaultProjectTrust,omitempty"`
+		Flags               map[string]bool        `json:"flags,omitempty"`
 	}
 	raw := rawConfig{
 		ActiveProvider:      cfg.ActiveProvider,
@@ -305,7 +573,28 @@ func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 		Preferences:         cfg.Preferences,
 		KeyBindings:         cfg.KeyBindings,
 		Compaction:          cfg.Compaction,
+		Worktrees:           cfg.Worktrees,
 		DefaultProjectTrust: cfg.DefaultProjectTrust,
+		Flags:               cfg.Flags,
+	}
+	if len(cfg.Verify.TestCommand) > 0 || strings.TrimSpace(cfg.Verify.TestDir) != "" {
+		verify := cfg.Verify
+		raw.Verify = &verify
+	}
+	if cfg.DecisionAdvisor != (DecisionAdvisorConfig{}) {
+		advisor := cfg.DecisionAdvisor
+		raw.DecisionAdvisor = &advisor
+	}
+	if len(cfg.Trajectory.Thresholds) > 0 {
+		trajectory := cfg.Trajectory
+		raw.Trajectory = &trajectory
+	}
+	if cfg.Pipeline != (PipelineConfig{}) {
+		pipeline := cfg.Pipeline
+		raw.Pipeline = &pipeline
+	}
+	if strings.TrimSpace(cfg.Auth.Storage) != "" {
+		raw.Auth = &cfg.Auth
 	}
 	if !cfg.LocalControl.Empty() {
 		raw.LocalControl = &cfg.LocalControl
@@ -316,9 +605,13 @@ func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 type ResolveOptions struct {
 	UserConfigPath    string
 	ProjectConfigPath string
-	ProviderCommand   string
-	Env               map[string]string
-	Overrides         Overrides
+	// ProjectTrusted gates the project layer. ProjectConfigPath is read and
+	// merged only when this is true. The zero value keeps the project layer out,
+	// so an untrusted workspace cannot change behavior through .splice/config.json.
+	ProjectTrusted  bool
+	ProviderCommand string
+	Env             map[string]string
+	Overrides       Overrides
 }
 
 type Overrides struct {
@@ -332,12 +625,19 @@ type Overrides struct {
 	Tools          ToolsConfig
 	KeyBindings    KeyBindingsConfig
 	LocalControl   LocalControlConfig
+	Worktrees      WorktreesConfig
+	Flags          map[string]bool
+	// ProjectTrust carries a launch's workspace trust decision to the CLI
+	// config resolver, which sets ResolveOptions.ProjectTrusted from it. Nil
+	// means the resolver decides trust itself. Resolve does not read it.
+	ProjectTrust *bool
 }
 
 type ResolvedConfig struct {
 	ActiveProvider      string
 	Providers           []ProviderProfile
 	Provider            ProviderProfile
+	Auth                AuthConfig
 	MaxTurns            int
 	Compaction          CompactionConfig
 	MCP                 MCPConfig
@@ -348,7 +648,19 @@ type ResolvedConfig struct {
 	Preferences         PreferencesConfig
 	KeyBindings         KeyBindingsConfig
 	LocalControl        LocalControlConfig
+	Worktrees           WorktreesConfig
+	Verify              VerifyConfig
+	DecisionAdvisor     DecisionAdvisorConfig
+	Trajectory          TrajectoryConfig
 	DefaultProjectTrust string
+	// Flags is the resolved flag set. The zero value means all defaults.
+	Flags flags.Set
+	// FlagResolutions explains each registry flag: its value and the source
+	// that set it. It comes from the same resolution as Flags.
+	FlagResolutions []flags.Resolution
+	// MaxWall is the wall-time limit of one pipeline run from the user
+	// config or SPLICE_MAX_WALL. Zero means the pipeline default.
+	MaxWall time.Duration
 }
 
 type MCPConfig struct {
@@ -385,21 +697,29 @@ type MCPOAuthConfig struct {
 
 func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	type rawConfig struct {
-		ActiveProvider      string                     `json:"activeProvider"`
-		Providers           []ProviderProfile          `json:"providers"`
-		MaxTurns            int                        `json:"maxTurns"`
-		MCP                 MCPConfig                  `json:"mcp"`
-		Sandbox             SandboxConfig              `json:"sandbox"`
-		Notify              NotifyConfig               `json:"notify"`
-		Tools               ToolsConfig                `json:"tools"`
-		Swarm               SwarmConfig                `json:"swarm"`
-		Preferences         PreferencesConfig          `json:"preferences"`
-		KeyBindings         KeyBindingsConfig          `json:"keybindings"`
-		LocalControl        LocalControlConfig         `json:"localControl"`
-		Compaction          CompactionConfig           `json:"compaction"`
-		DefaultProjectTrust string                     `json:"defaultProjectTrust"`
-		MCPServers          map[string]MCPServerConfig `json:"mcpServers"`
-		MCPServersSnake     map[string]MCPServerConfig `json:"mcp_servers"`
+		DecisionAdvisor      DecisionAdvisorConfig      `json:"decisionAdvisor"`
+		DecisionAdvisorSnake *DecisionAdvisorConfig     `json:"decision_advisor"`
+		Trajectory           TrajectoryConfig           `json:"trajectory"`
+		Pipeline             PipelineConfig             `json:"pipeline"`
+		ActiveProvider       string                     `json:"activeProvider"`
+		Providers            []ProviderProfile          `json:"providers"`
+		Auth                 AuthConfig                 `json:"auth"`
+		MaxTurns             int                        `json:"maxTurns"`
+		MCP                  MCPConfig                  `json:"mcp"`
+		Sandbox              SandboxConfig              `json:"sandbox"`
+		Notify               NotifyConfig               `json:"notify"`
+		Tools                ToolsConfig                `json:"tools"`
+		Swarm                SwarmConfig                `json:"swarm"`
+		Preferences          PreferencesConfig          `json:"preferences"`
+		KeyBindings          KeyBindingsConfig          `json:"keybindings"`
+		LocalControl         LocalControlConfig         `json:"localControl"`
+		Compaction           CompactionConfig           `json:"compaction"`
+		Worktrees            WorktreesConfig            `json:"worktrees"`
+		Verify               VerifyConfig               `json:"verify"`
+		DefaultProjectTrust  string                     `json:"defaultProjectTrust"`
+		Flags                map[string]bool            `json:"flags"`
+		MCPServers           map[string]MCPServerConfig `json:"mcpServers"`
+		MCPServersSnake      map[string]MCPServerConfig `json:"mcp_servers"`
 	}
 
 	var raw rawConfig
@@ -408,6 +728,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	}
 	cfg.ActiveProvider = raw.ActiveProvider
 	cfg.Providers = raw.Providers
+	cfg.Auth.Storage = strings.ToLower(strings.TrimSpace(raw.Auth.Storage))
 	// A negative maxTurns is unambiguously invalid; without this it would be
 	// silently dropped by the `MaxTurns > 0` merge gates and fall back to the
 	// default, hiding a misconfiguration. (0 is left as-is: with omitempty it is
@@ -426,7 +747,19 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	cfg.KeyBindings = raw.KeyBindings
 	cfg.LocalControl = raw.LocalControl
 	cfg.Compaction = raw.Compaction
+	cfg.Worktrees = raw.Worktrees
+	cfg.Verify = raw.Verify
+	cfg.DecisionAdvisor = raw.DecisionAdvisor
+	if raw.DecisionAdvisorSnake != nil {
+		cfg.DecisionAdvisor = *raw.DecisionAdvisorSnake
+	}
+	cfg.Trajectory = raw.Trajectory
+	if raw.Pipeline.MaxWallSeconds < 0 {
+		return fmt.Errorf("invalid pipeline.max_wall_seconds %d: must be >= 0", raw.Pipeline.MaxWallSeconds)
+	}
+	cfg.Pipeline = raw.Pipeline
 	cfg.DefaultProjectTrust = raw.DefaultProjectTrust
+	cfg.Flags = raw.Flags
 	if cfg.MCP.Servers == nil && (len(raw.MCPServers) > 0 || len(raw.MCPServersSnake) > 0) {
 		cfg.MCP.Servers = map[string]MCPServerConfig{}
 	}

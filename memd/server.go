@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -21,25 +22,67 @@ import (
 
 var errAlreadyRunning = errors.New("splice-memd already running")
 
-// server holds the HTTP server, the store, and the Unix socket path.
+type idleTracker struct {
+	timeout      time.Duration
+	lastActivity time.Time
+}
+
+func newIdleTracker(timeout time.Duration, now time.Time) *idleTracker {
+	return &idleTracker{
+		timeout:      timeout,
+		lastActivity: now,
+	}
+}
+
+func (t *idleTracker) expired(now time.Time) bool {
+	// A non-positive timeout disables idle expiration.
+	return t.timeout > 0 && now.Sub(t.lastActivity) >= t.timeout
+}
+
+// server holds the HTTP server, the store, the semantic index over the
+// store, and the Unix socket path.
 type server struct {
 	store      *store.Store
+	semantic   *store.SemanticIndex
 	socketPath string
 	httpServer *http.Server
 }
 
 func newServer(store *store.Store, socketPath string) *server {
+	sem := newSemanticIndex(store)
 	s := &server{
 		store:      store,
+		semantic:   sem,
 		socketPath: socketPath,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/upsert", s.handleUpsert)
 	mux.HandleFunc("/search", s.handleSearch)
+	mux.HandleFunc("/search_ranked", s.handleSearchRanked)
+	mux.HandleFunc("/lookup_topic", s.handleLookupTopic)
 	mux.HandleFunc("/recent", s.handleRecent)
 	mux.HandleFunc("/mark_reviewed", s.handleMarkReviewed)
 	mux.HandleFunc("/stats", s.handleStats)
+	mux.HandleFunc("/project/reset", s.handleProjectReset)
+	mux.HandleFunc("/trace/upsert", s.handleTraceUpsert)
+	mux.HandleFunc("/trace/verdict", s.handleTraceVerdict)
+	mux.HandleFunc("/trace/query", s.handleTraceQuery)
+	mux.HandleFunc("/graph/upsert", s.handleGraphUpsert)
+	mux.HandleFunc("/graph/exact", s.handleGraphExact)
+	mux.HandleFunc("/graph/neighbors", s.handleGraphNeighbors)
+	mux.HandleFunc("/graph/status", s.handleGraphStatus)
+	mux.HandleFunc("/graph/contradict", s.handleGraphContradict)
+	mux.HandleFunc("/graph/search_semantic", s.handleGraphSearchSemantic)
+	mux.HandleFunc("/graph/compact", s.handleGraphCompact)
+	mux.HandleFunc("/graph/reanchor", s.handleGraphReanchor)
+	mux.HandleFunc("/graph/reanchor_ids", s.handleGraphReanchorIDs)
+	mux.HandleFunc("/graph/capture_set", s.handleGraphCaptureSet)
+	mux.HandleFunc("/graph/export_capture_set", s.handleGraphExportCaptureSet)
+	mux.HandleFunc("/graph/import_capture_set", s.handleGraphImportCaptureSet)
+	mux.HandleFunc("/graph/collect", s.handleGraphCollect)
+	mux.HandleFunc("/maintenance", s.handleMaintenance)
+	mux.HandleFunc("/forget", s.handleForget)
 	s.httpServer = &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -221,6 +264,111 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleSearchRanked serves /search_ranked: the /search contract plus a
+// per-observation BM25 rank. The wire shape keeps observations and ranks in
+// one array of pairs so a client can never desynchronize the two lists.
+func (s *server) handleSearchRanked(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var req searchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "validation: "+err.Error())
+		return
+	}
+
+	if req.Limit <= 0 {
+		req.Limit = 8
+	}
+	includePrivate := true
+	if req.IncludePrivate != nil {
+		includePrivate = *req.IncludePrivate
+	}
+	includeShareable := true
+	if req.IncludeShareable != nil {
+		includeShareable = *req.IncludeShareable
+	}
+
+	q := &store.Query{
+		ProjectPath:      req.ProjectPath,
+		RequestingAgent:  req.RequestingAgent,
+		QueryText:        req.Query,
+		Scopes:           req.Scopes,
+		IncludePrivate:   includePrivate,
+		IncludeShareable: includeShareable,
+		MemoryTypes:      req.MemoryTypes,
+		Limit:            req.Limit,
+	}
+	results, truncated, ranks, err := s.store.SearchRanked(r.Context(), q)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Non-nil so splice hits marshal as [] rather than null (the Python client
+	// iterates the field directly).
+	ranked := make([]RankedObservation, 0, len(results))
+	for i, obs := range results {
+		rank := 0.0
+		if i < len(ranks) {
+			rank = ranks[i]
+		}
+		ranked = append(ranked, RankedObservation{
+			Observation: toProtocol(obs),
+			Rank:        rank,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":           true,
+		"observations": ranked,
+		"truncated":    truncated,
+	})
+}
+
+func (s *server) handleLookupTopic(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var req lookupTopicRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "validation: "+err.Error())
+		return
+	}
+
+	if req.Limit <= 0 {
+		req.Limit = 8
+	}
+	results, truncated, err := s.store.LookupTopic(r.Context(), req.ProjectPath, req.RequestingAgent, req.Scope, req.TopicKey, req.Limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Non-nil so splice hits marshal as [] rather than null (the Python client
+	// iterates the field directly).
+	protocol := make([]protocolObservation, 0, len(results))
+	for _, obs := range results {
+		protocol = append(protocol, toProtocol(obs))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":           true,
+		"observations": protocol,
+		"truncated":    truncated,
+	})
+}
+
 func (s *server) handleRecent(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -300,6 +448,38 @@ func (s *server) handleMarkReviewed(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, genericResponse{OK: true})
 }
 
+// handleProjectReset hard-deletes one project's observations and traces
+// (POST /project/reset). Eval-harness isolation: the exact project path is
+// the only selector, so a harness can restore a project's memory state to
+// empty without touching any other project's rows. Zero counts are valid.
+func (s *server) handleProjectReset(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var req resetProjectRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "validation: "+err.Error())
+		return
+	}
+	counts, err := s.store.ResetProject(r.Context(), req.ProjectPath)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, resetProjectResponse{
+		OK:           true,
+		Observations: counts.Observations,
+		Traces:       counts.Traces,
+		GraphNodes:   counts.GraphNodes,
+	})
+}
+
 func (s *server) handleStats(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -346,6 +526,132 @@ func (s *server) handleStats(w http.ResponseWriter, r *http.Request) {
 		ByType:      byType,
 		DBSizeBytes: pageCount * pageSize,
 	})
+}
+
+// handleTraceUpsert stores a run outcome trace. A later write replaces the
+// indexed columns and payload, except a "running" partial write never clobbers
+// a settled row. The full body is stored verbatim as the payload so unknown
+// fields from a newer schema survive a round trip.
+func (s *server) handleTraceUpsert(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<20)
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "read body: "+err.Error())
+		return
+	}
+	var req traceUpsertRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "validation: "+err.Error())
+		return
+	}
+	inserted, err := s.store.UpsertTrace(r.Context(), &store.TraceRow{
+		RunID:     req.RunID,
+		SessionID: req.SessionID,
+		RepoRoot:  req.RepoRoot,
+		Tier:      req.Tier,
+		Status:    req.Outcome.Status,
+		Intent:    req.Intent,
+		Payload:   raw,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, traceUpsertResponse{OK: true, Inserted: inserted})
+}
+
+// handleTraceVerdict appends a verdict for a run. Verdicts are append-only;
+// the latest row wins at query time.
+func (s *server) handleTraceVerdict(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "read body: "+err.Error())
+		return
+	}
+	var req verdictUpsertRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "validation: "+err.Error())
+		return
+	}
+	if err := s.store.UpsertVerdict(r.Context(), &store.VerdictRow{
+		RunID:     req.RunID,
+		DecidedAt: req.DecidedAt.Unix(),
+		Verdict:   req.Verdict,
+		Reason:    req.Reason,
+		Payload:   raw,
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, genericResponse{OK: true})
+}
+
+// handleTraceQuery returns traces matching the filter, each joined with its
+// latest verdict.
+func (s *server) handleTraceQuery(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var req traceQueryRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	results, err := s.store.QueryTraces(r.Context(), store.TraceFilter{
+		RepoRoot: req.RepoRoot,
+		Tier:     req.Tier,
+		Status:   req.Status,
+		Verdict:  req.Verdict,
+		Query:    req.Query,
+		Since:    req.Since,
+		Limit:    req.Limit,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out := make([]traceResponse, 0, len(results))
+	for _, row := range results {
+		tr := traceResponse{
+			RunID:     row.Trace.RunID,
+			SessionID: row.Trace.SessionID,
+			RepoRoot:  row.Trace.RepoRoot,
+			Tier:      row.Trace.Tier,
+			Status:    row.Trace.Status,
+			CreatedAt: row.Trace.CreatedAt,
+			Rank:      row.Rank,
+			Payload:   json.RawMessage(row.Trace.Payload),
+		}
+		if row.Verdict != nil {
+			tr.Verdict = &verdictResponse{
+				DecidedAt: row.Verdict.DecidedAt,
+				Verdict:   row.Verdict.Verdict,
+				Reason:    row.Verdict.Reason,
+				Payload:   json.RawMessage(row.Verdict.Payload),
+			}
+		}
+		out = append(out, tr)
+	}
+	writeJSON(w, http.StatusOK, traceQueryResponse{OK: true, Traces: out})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -415,9 +721,36 @@ func runServer() {
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer cancel()
 
 	srv := newServer(st, socketPath)
+	maintenanceDone := make(chan struct{})
+	go func() {
+		defer close(maintenanceDone)
+		if report, err := st.Maintenance(ctx); err != nil {
+			log.Printf("maintenance: %v", err)
+		} else {
+			log.Printf("maintenance: %+v", report)
+		}
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				report, err := st.Maintenance(ctx)
+				if err != nil {
+					log.Printf("maintenance: %v", err)
+				} else {
+					log.Printf("maintenance: %+v", report)
+				}
+			}
+		}
+	}()
+	defer func() {
+		cancel()
+		<-maintenanceDone
+	}()
 
 	if err := srv.listenAndServe(ctx); err != nil {
 		if errors.Is(err, errAlreadyRunning) {

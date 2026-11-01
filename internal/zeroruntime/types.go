@@ -82,16 +82,15 @@ type ToolCall struct {
 }
 
 // ReasoningBlock is a provider-emitted reasoning artifact that must be replayed
-// verbatim on later turns or the provider rejects the (tool-using) conversation:
-// Anthropic requires thinking / redacted_thinking blocks be passed back with
-// their signatures. Only the adapter named by Provider interprets a block; other
-// adapters ignore foreign blocks, so a mid-run provider switch is safe.
+// verbatim on later turns or the provider can reject the tool-use conversation.
+// Only the adapter named by Provider interprets a block. Other adapters ignore
+// foreign blocks, so a mid-run provider switch is safe.
 type ReasoningBlock struct {
-	Provider  string // adapter that produced and can replay this block ("anthropic", "gemini")
-	Type      string // provider block type ("thinking", "redacted_thinking")
+	Provider  string // adapter that produced and can replay this block
+	Type      string // provider block type, such as "thinking" or "reasoning.text"
 	Text      string // human-readable reasoning text (empty for redacted/opaque blocks)
 	Signature string // cryptographic signature the provider requires on replay
-	Data      string // opaque provider payload (e.g. Anthropic redacted_thinking data)
+	Data      string // opaque provider payload or exact structured block JSON
 }
 
 // ServerToolBlock is one provider-executed tool block preserved for verbatim
@@ -218,9 +217,8 @@ type StreamEvent struct {
 	// the token cap, or FinishReasonContentFilter when it was filtered). It is
 	// empty for a normal completion. Providers set it on the terminal/done event.
 	FinishReason string
-	// ReasoningBlocks carries completed reasoning artifacts (Anthropic thinking /
-	// redacted_thinking blocks) that must be preserved for replay. Providers attach
-	// them to the terminal/done event; the collector accumulates them.
+	// ReasoningBlocks carries completed structured reasoning artifacts that must
+	// be preserved for replay. Providers attach them to the terminal/done event.
 	ReasoningBlocks []ReasoningBlock
 	// ServerToolBlocks carries completed provider-executed tool artifacts that
 	// must be preserved for replay. Providers attach them to a terminal event.
@@ -232,6 +230,11 @@ type StreamEvent struct {
 	// and a cost field there would be silently dropped by every one of them.
 	// nil means no reported cost; the caller must fall back to estimating from
 	// the pricing registry, exactly as before this field existed.
+	// RequestID carries the provider's request/correlation identity for this
+	// request (OpenRouter's X-Generation-Id response header), when reported.
+	// It rides the usage event because usage is where per-request metadata
+	// already aggregates; empty means the backend reported none.
+	RequestID       string
 	ReportedCostUSD *float64
 }
 
@@ -257,6 +260,11 @@ type CompletionRequest struct {
 	// re-billing the full prefix each turn. Providers without an equivalent
 	// ignore it.
 	PromptCacheKey string
+	// MaxOutputTokens caps this request's response output tokens. Zero means no
+	// per-request override: the provider uses its configured default cap.
+	// Adapters combine it with the provider default on the wire, keeping the
+	// tighter of the two when both are positive.
+	MaxOutputTokens int
 	// ToolChoice, when non-empty, is the name of the single tool the model MUST
 	// call this request (forced tool use). Adapters map it to their native
 	// forcing mechanism (OpenAI tool_choice function, Anthropic tool_choice
@@ -264,6 +272,14 @@ type CompletionRequest struct {
 	// behavior byte-for-byte. Used by typed stages that require one typed tool
 	// call.
 	ToolChoice string
+	// ToolChoiceRequired, when true and ToolChoice is empty, requires the
+	// model to call at least one tool without naming which one. Adapters map
+	// it to their native any-tool forcing (OpenAI tool_choice "required",
+	// Anthropic tool_choice "any", Gemini functionCallingConfig ANY with no
+	// allowed-name restriction). Used by stages that accept more than one
+	// typed tool and must not strand on prose. When both fields are set the
+	// named forcing wins, because it is the stricter request.
+	ToolChoiceRequired bool
 }
 
 // ServerTool is one provider-executed tool request.

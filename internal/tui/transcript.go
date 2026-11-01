@@ -59,6 +59,7 @@ type transcriptRow struct {
 	final       bool
 	turnTools   int
 	turnElapsed time.Duration
+	toolElapsed time.Duration // live-session call duration; zero after resume when unknown
 }
 
 type transcriptActionKind int

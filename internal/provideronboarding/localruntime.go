@@ -99,6 +99,13 @@ func DetectLocalRuntimes(ctx context.Context, options LocalDetectOptions) []Dete
 	return detected
 }
 
+// InstalledModelIDs returns a copy of the probed installed model ids, or nil
+// when the runtime advertised none. It is the pick-list surface the wizard uses
+// for a reachable local runtime; an empty result keeps the catalog default flow.
+func (runtime DetectedLocalRuntime) InstalledModelIDs() []string {
+	return append([]string{}, runtime.Models...)
+}
+
 // SetupAction returns the no-key onboarding action for a detected local runtime.
 func (runtime DetectedLocalRuntime) SetupAction() Action {
 	descriptor := providercatalog.Descriptor{ID: runtime.CatalogID, RequiresAuth: false}

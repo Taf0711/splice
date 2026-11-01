@@ -127,3 +127,24 @@ func effectiveReasoningEfforts(model ModelEntry) []ReasoningEffort {
 	}
 	return reasoningEffortsForModelName(model.APIModel)
 }
+
+// RequestEffort resolves the effort to send for one model. Empty ("auto")
+// stays empty, so the provider applies the model's own default. A level the
+// model lacks moves to the nearest level it has (up first, the clampEffort
+// rule), so "xhigh" becomes "max" on a model without xhigh and "medium"
+// becomes "high" on one that starts at high. A model with no known levels
+// (a custom endpoint) gets the request unchanged: absence of data is not
+// evidence the model lacks the control.
+func (registry Registry) RequestEffort(model string, requested ReasoningEffort) ReasoningEffort {
+	if requested == "" {
+		return ""
+	}
+	efforts := registry.ReasoningEfforts(model)
+	if len(efforts) == 0 {
+		return requested
+	}
+	if effort := clampEffort(efforts, requested); effort != "" {
+		return effort
+	}
+	return requested
+}

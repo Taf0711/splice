@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "name": "write-vet-test",
+  "description": "Write the change, run go vet, then run the tests and the acceptance checks.",
+  "nodes": [
+    {"name": "code_writer", "type": "code_writer"},
+    {
+      "name": "test_generator",
+      "type": "test_generator",
+      "tiers": ["standard", "substantial", "architectural"]
+    },
+    {
+      "name": "vet",
+      "type": "command",
+      "command": ["go", "vet", "./..."],
+      "tiers": ["light", "standard", "substantial", "architectural"]
+    },
+    {
+      "name": "test_runner",
+      "type": "test_runner",
+      "tiers": ["light", "standard", "substantial", "architectural"]
+    },
+    {
+      "name": "acceptance_verifier",
+      "type": "acceptance_verifier",
+      "tiers": ["light", "standard", "substantial", "architectural"]
+    }
+  ],
+  "edges": [
+    {"from": "code_writer", "to": "test_generator"},
+    {"from": "code_writer", "to": "vet"},
+    {"from": "vet", "to": "test_runner", "payload": "none"},
+    {"from": "test_runner", "to": "acceptance_verifier"}
+  ]
+}

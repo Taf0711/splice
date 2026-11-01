@@ -3,6 +3,8 @@ package splice
 import (
 	"context"
 
+	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/tools"
 )
 
@@ -18,6 +20,7 @@ type ToolResult struct {
 	// receive faithful tool_result payloads without parsing tool output.
 	ChangedFiles []string
 	Display      tools.Display
+	DenialReason agent.DenialCategory
 }
 
 // ToolRunner runs a tool by name for deterministic context fulfillment.
@@ -32,9 +35,23 @@ func (f ToolRunnerFunc) RunTool(ctx context.Context, name string, args map[strin
 	return f(ctx, name, args)
 }
 
+// RunHostSeamTool implements hostSeamRunner for function-adapted runners.
+// The pipeline's own ToolRunnerFunc is orchestrator-side, so its raw-seam
+// reads are host-seam calls: the registry's gate accepts them because the
+// raw_file_read tool implements HostSeamTool, and the model surface never
+// issues this call shape.
+func (f ToolRunnerFunc) RunHostSeamTool(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
+	return f(ctx, name, args)
+}
+
 // RegistryToolRunner adapts Zero's tools.Registry to the ToolRunner interface.
+// It is the read-only context-fulfillment runner. It does not apply SD12 tool
+// filters or hooks. newAgentToolRunner owns those for pipeline tool calls.
 type RegistryToolRunner struct {
 	registry *tools.Registry
+	// sandbox, when set, rides on every RunOptions so registry tools that
+	// spawn processes inherit the caller's engine instead of running bare.
+	sandbox *sandbox.Engine
 }
 
 // NewRegistryToolRunner wraps a tools.Registry. The passed registry should
@@ -43,12 +60,48 @@ func NewRegistryToolRunner(registry *tools.Registry) RegistryToolRunner {
 	return RegistryToolRunner{registry: registry}
 }
 
+// NewRegistryToolRunnerWithSandbox behaves like NewRegistryToolRunner and
+// attaches sandbox to every tool execution's RunOptions. A deterministic
+// pipeline passes its procrun.NewStageEngine result here so no registry tool
+// can spawn a process outside the stage policy.
+func NewRegistryToolRunnerWithSandbox(registry *tools.Registry, sandbox *sandbox.Engine) RegistryToolRunner {
+	return RegistryToolRunner{registry: registry, sandbox: sandbox}
+}
+
 // RunTool implements ToolRunner.
 func (r RegistryToolRunner) RunTool(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
 	if _, ok := r.registry.Get(name); !ok {
 		return ToolResult{}, errToolNotFound{tool: name}
 	}
-	res := r.registry.RunWithOptions(ctx, name, args, tools.RunOptions{})
+	res := r.registry.RunWithOptions(ctx, name, args, tools.RunOptions{Sandbox: r.sandbox, RequireReadBeforeWrite: true})
+	meta := res.Meta
+	if meta == nil {
+		meta = map[string]string{}
+	}
+	return ToolResult{
+		OK:           res.Status == tools.StatusOK,
+		Output:       res.Output,
+		Truncated:    res.Truncated || meta["truncated"] == "true",
+		Meta:         meta,
+		Status:       res.Status,
+		Redacted:     res.Redacted,
+		ChangedFiles: res.ChangedFiles,
+		Display:      res.Display,
+	}, nil
+}
+
+// RunHostSeamTool is the host-seam entry (B1 review fix): it marks the
+// call as orchestrator-initiated so PermissionDeny tools that implement
+// tools.HostSeamTool (raw_file_read) execute through the registry with
+// their full guard set. The agent loop and every model-initiated path
+// never call this, and the registry rejects a host-seam-flagged call to
+// any tool that does not implement the interface, so the marker cannot be
+// used to widen the model surface.
+func (r RegistryToolRunner) RunHostSeamTool(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
+	if _, ok := r.registry.Get(name); !ok {
+		return ToolResult{}, errToolNotFound{tool: name}
+	}
+	res := r.registry.RunWithOptions(ctx, name, args, tools.RunOptions{Sandbox: r.sandbox, RequireReadBeforeWrite: true, HostSeam: true})
 	meta := res.Meta
 	if meta == nil {
 		meta = map[string]string{}

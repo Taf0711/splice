@@ -51,6 +51,7 @@ splice-linux-sandbox
 
 # Renamed binary artifacts
 /splice
+/splice-dev
 /splice.exe
 /splice-skills
 /splice-termux-arm64
@@ -66,5 +67,38 @@ splice-linux-sandbox
 # pi-subagents artifacts
 .pi-subagents/
 
+# pi bridge build artifact
+/splice-pi-bridge
+
 # graphify knowledge-graph output (graph.json is tens of MB, rebuildable)
 graphify-out/
+
+# Demo capture workspace (vhs output, frames, video) - local only, never pushed
+/demo-work/
+/demo-repair-loop.tape
+/DEMO-RUNBOOK.md
+
+# Test transcript exports (tests must use their own temp dirs)
+/internal/tui/splice-transcript-*.txt
+
+# Local planning notes (working documents, not part of the product)
+/plans/
+
+# Demo capture asset (unreferenced, local only)
+/docs/assets/repair-loop.gif
+
+# Sandbox escape-test artifacts
+/internal/cli/.splice-sandbox-outside-*/
+# TUI transcript exports (/export writes these into the working directory)
+splice-transcript-*.txt
+
+# Internal planning docs and raw eval output live in splice-internal.
+/plans/
+/ROADMAP.md
+/MEMORY.md
+/tests/evals/results/
+# Built by the families-taskset verifier test.
+/tests/evals/warmcost/families-taskset/write-gold/*/demo
+
+# Journey results are written under ~/.cache/splice-journeys/.
+tests/evals/journeys/journey-results.json

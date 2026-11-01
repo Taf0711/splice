@@ -1,0 +1,7 @@
+{
+  "name": "large-08-write",
+  "phase": "write",
+  "prompt": "Add (s *Store) Expired(id string) bool in the session package: true when the session is unknown or idle for longer than the store's ttl, judged with the store's own clock, without refreshing or deleting it. Add a regression test.",
+  "check": "# large-08 A: Add (s *Store) Expired(id string) bool in the session package: true wh\nmkdir -p internal/session\ncat > internal/session/probe_expiry_test.go <<'EOF'\npackage session\n\nimport (\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestProbeExpired(t *testing.T) {\n\ts := NewStore(time.Minute)\n\tat := time.Unix(1000, 0)\n\ts.now = func() time.Time { return at }\n\ts.Create(\"a\", \"ada\")\n\tat = at.Add(time.Minute)\n\tif s.Expired(\"a\") {\n\t\tt.Fatal(\"idle exactly ttl is still live\")\n\t}\n\tat = at.Add(time.Second)\n\tif !s.Expired(\"a\") {\n\t\tt.Fatal(\"idle past ttl must be expired\")\n\t}\n\tif s.Len() != 1 {\n\t\tt.Fatal(\"Expired must not delete\")\n\t}\n\tif !s.Expired(\"nobody\") {\n\t\tt.Fatal(\"unknown id is expired\")\n\t}\n}\nEOF\ngo test -count=1 ./internal/session/ ; rc=$?\nrm -f internal/session/probe_expiry_test.go\nif [ $rc -ne 0 ]; then exit $rc; fi\nexit 0\n",
+  "fixture": "../../large-families/fixture"
+}

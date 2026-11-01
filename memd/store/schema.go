@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS observations (
     review_after     INTEGER,
     created_at       INTEGER NOT NULL,
     updated_at       INTEGER NOT NULL,
-    deleted_at       INTEGER
+    deleted_at       INTEGER,
+    maintenance_deleted_at INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_obs_project ON observations(project_path, scope, deleted_at);
@@ -84,4 +85,109 @@ CREATE TRIGGER IF NOT EXISTS obs_fts_update AFTER UPDATE ON observations BEGIN
         new.project_path, new.owner_agent, new.visibility
     );
 END;
+
+CREATE TABLE IF NOT EXISTS run_traces (
+    run_id      TEXT PRIMARY KEY,
+    session_id  TEXT,
+    repo_root   TEXT NOT NULL,
+    tier        TEXT NOT NULL,
+    status      TEXT NOT NULL,
+    intent      TEXT,
+    created_at  INTEGER NOT NULL,
+    payload     TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_traces_repo_root ON run_traces(repo_root, created_at);
+CREATE INDEX IF NOT EXISTS idx_traces_tier      ON run_traces(tier, created_at);
+CREATE INDEX IF NOT EXISTS idx_traces_status    ON run_traces(status, created_at);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS run_traces_fts USING fts5(
+    intent,
+    tier UNINDEXED,
+    content='run_traces',
+    content_rowid='rowid'
+);
+
+CREATE TRIGGER IF NOT EXISTS traces_fts_insert AFTER INSERT ON run_traces BEGIN
+    INSERT INTO run_traces_fts(rowid, intent, tier)
+    VALUES (new.rowid, new.intent, new.tier);
+END;
+
+CREATE TRIGGER IF NOT EXISTS traces_fts_delete AFTER DELETE ON run_traces BEGIN
+    INSERT INTO run_traces_fts(run_traces_fts, rowid, intent, tier)
+    VALUES ('delete', old.rowid, old.intent, old.tier);
+END;
+
+CREATE TABLE IF NOT EXISTS verdicts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id      TEXT NOT NULL,
+    decided_at  INTEGER NOT NULL,
+    verdict     TEXT NOT NULL,
+    reason      TEXT,
+    payload     TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_verdicts_run ON verdicts(run_id, decided_at);
+
+CREATE TABLE IF NOT EXISTS cognition_nodes (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind              TEXT    NOT NULL,
+    claim             TEXT    NOT NULL,
+    scope             TEXT    NOT NULL DEFAULT 'project',
+    project_path      TEXT,
+    status            TEXT    NOT NULL DEFAULT 'active',
+    confidence        REAL,
+    source_run_id     TEXT,
+    created_revision  TEXT,
+    verified_revision TEXT,
+    created_at        INTEGER NOT NULL,
+    verified_at       INTEGER,
+    claim_hash        TEXT    NOT NULL,
+    metadata_json     TEXT,
+    status_changed_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS maintenance_meta (
+    key       TEXT PRIMARY KEY,
+    value     TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_cog_nodes_claim  ON cognition_nodes(kind, claim_hash, project_path);
+CREATE INDEX IF NOT EXISTS idx_cog_nodes_status ON cognition_nodes(status);
+
+CREATE TABLE IF NOT EXISTS cognition_edges (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    src_id     INTEGER NOT NULL REFERENCES cognition_nodes(id) ON DELETE CASCADE,
+    dst_id     INTEGER NOT NULL REFERENCES cognition_nodes(id) ON DELETE CASCADE,
+    kind       TEXT    NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE(src_id, dst_id, kind)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cog_edges_src ON cognition_edges(src_id);
+CREATE INDEX IF NOT EXISTS idx_cog_edges_dst ON cognition_edges(dst_id);
+
+CREATE TABLE IF NOT EXISTS cognition_anchors (
+    node_id INTEGER NOT NULL REFERENCES cognition_nodes(id) ON DELETE CASCADE,
+    kind    TEXT    NOT NULL,
+    value   TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_cog_anchors_kind_value ON cognition_anchors(kind, value);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cog_anchors_node_kind_value ON cognition_anchors(node_id, kind, value);
+
+CREATE TABLE IF NOT EXISTS cognition_evidence (
+    node_id    INTEGER NOT NULL REFERENCES cognition_nodes(id) ON DELETE CASCADE,
+    kind       TEXT    NOT NULL,
+    ref        TEXT,
+    detail     TEXT,
+    created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_cog_evidence_node ON cognition_evidence(node_id);
+
+CREATE TABLE IF NOT EXISTS cognition_embeddings (
+    node_id INTEGER PRIMARY KEY REFERENCES cognition_nodes(id) ON DELETE CASCADE,
+    vector  BLOB
+);
 `

@@ -1,0 +1,8 @@
+{
+  "name": "chn-04-read",
+  "phase": "read",
+  "precursor": "chn-04-write",
+  "prompt": "In the billing package, add the currency \"JPY\" to the currencies customers can pay in.",
+  "check": "# chn-04 B\ncat > internal/billing/probe_jpy_test.go <<'EOF'\npackage billing\n\nimport (\n\t\"slices\"\n\t\"testing\"\n)\n\nfunc TestProbe(t *testing.T) {\n\tif !slices.Contains(Currencies, \"JPY\") {\n\t\tt.Fatal(\"Currencies lacks JPY\")\n\t}\n}\nEOF\ngo test -count=1 ./... ; rc=$?\nrm -f internal/billing/probe_jpy_test.go\nexit $rc\n",
+  "fixture": "../../chain-families/fixture-trap"
+}

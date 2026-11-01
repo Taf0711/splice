@@ -998,6 +998,17 @@ func providerMatchesQuery(provider providercatalog.Descriptor, query string) boo
 	return strings.Contains(haystack, query)
 }
 
+func upsertSavedProvider(profiles []config.ProviderProfile, profile config.ProviderProfile) []config.ProviderProfile {
+	profiles = append([]config.ProviderProfile(nil), profiles...)
+	for i := range profiles {
+		if strings.EqualFold(strings.TrimSpace(profiles[i].Name), strings.TrimSpace(profile.Name)) {
+			profiles[i] = profile
+			return profiles
+		}
+	}
+	return append(profiles, profile)
+}
+
 func (m model) applyProviderWizard() (model, tea.Cmd) {
 	wizard := m.providerWizard
 	if wizard == nil {
@@ -1047,6 +1058,7 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 		m.provider = nextProvider
 	}
 	m.providerProfile = profile
+	m.savedProviders = upsertSavedProvider(m.savedProviders, profile)
 	m.rebuildModelCatalog()
 	m.providerName = profile.Name
 	m.modelName = profile.Model

@@ -63,7 +63,7 @@ func TestDecodeSymbols(t *testing.T) {
 }
 
 func TestNavigateUnknownOp(t *testing.T) {
-	m := NewManager(t.TempDir())
+	m := NewManager(t.TempDir(), true)
 	_, _, ok, err := m.Navigate(nil, NavRequest{Op: "bogus", Path: "x.go"})
 	if err == nil {
 		t.Fatal("expected an error for an unknown nav op")
@@ -75,7 +75,7 @@ func TestNavigateUnknownOp(t *testing.T) {
 
 func TestNavigateUnsupportedExtensionDegrades(t *testing.T) {
 	// A file type with no configured server degrades to ok=false, no error.
-	m := NewManager(t.TempDir())
+	m := NewManager(t.TempDir(), true)
 	_, _, ok, err := m.Navigate(nil, NavRequest{Op: NavDefinition, Path: "notes.unknownext", Line: 1, Character: 1})
 	if err != nil {
 		t.Fatalf("unsupported extension should not error, got %v", err)

@@ -43,6 +43,9 @@ type AgentRunResult struct {
 	// Stages carries diagnostic per-stage token/cost data when the agent is the
 	// Splice pipeline. Accounting does not use this final-event ledger.
 	Stages []StageBreakdown `json:"stages,omitempty"`
+	// TopologyName names the resolved topology the pipeline ran, when the agent
+	// is the Splice pipeline. Empty for other agents.
+	TopologyName string `json:"topologyName,omitempty"`
 	// UsageSamples retains each usage event parsed while the agent ran. Existing
 	// accounting fields are derived from these samples.
 	UsageSamples []UsageSample `json:"usageSamples,omitempty"`
@@ -159,6 +162,9 @@ func (runner CommandAgentRunner) Run(ctx context.Context, input AgentRunInput) A
 	if len(result.Stages) == 0 && len(collector.finalStages) > 0 {
 		result.Stages = collector.finalStages
 	}
+	if result.TopologyName == "" {
+		result.TopologyName = collector.finalTopologyName
+	}
 	if err == nil {
 		result.ExitCode = 0
 	} else {
@@ -219,7 +225,7 @@ func populateAgentRunUsage(result *AgentRunResult) {
 		result.UsageSamples = parseUsageSamplesFromStdout(result.Stdout)
 	}
 	result.InputTokens, result.OutputTokens, result.CachedInputTokens, result.CacheWriteTokens, result.ReasoningTokens = usageTotalsFromSamples(result.UsageSamples)
-	result.Stages = parsePipelineStagesFromStdout(result.Stdout)
+	result.Stages, result.TopologyName = parsePipelineFinalFromStdout(result.Stdout)
 }
 
 func parseUsageSamplesFromStdout(stdout string) []UsageSample {
@@ -262,33 +268,48 @@ func usageTotalsFromSamples(samples []UsageSample) (inputTokens, outputTokens, c
 // carries the PipelineResult JSON (with Stages []StageRecord). Non-pipeline
 // agents or failed runs produce nil (graceful no-op).
 func parsePipelineStagesFromStdout(stdout string) []StageBreakdown {
+	stages, _ := parsePipelineFinalFromStdout(stdout)
+	return stages
+}
+
+// parsePipelineFinalFromStdout returns the pipeline stages and the resolved
+// topology name from a run's stream-json final event.
+func parsePipelineFinalFromStdout(stdout string) ([]StageBreakdown, string) {
 	for _, line := range strings.Split(stdout, "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "{") {
 			continue
 		}
-		if stages := parsePipelineStagesFromJSONLLine([]byte(line)); len(stages) > 0 {
-			return stages
+		if stages, topologyName := parsePipelineFinalFromJSONLLine([]byte(line)); len(stages) > 0 {
+			return stages, topologyName
 		}
 	}
-	return nil
+	return nil, ""
 }
 
 func parsePipelineStagesFromJSONLLine(line []byte) []StageBreakdown {
+	stages, _ := parsePipelineFinalFromJSONLLine(line)
+	return stages
+}
+
+// parsePipelineFinalFromJSONLLine decodes one stream-json final event into its
+// pipeline stages and the resolved topology name.
+func parsePipelineFinalFromJSONLLine(line []byte) ([]StageBreakdown, string) {
 	var event struct {
 		Type streamjson.EventType `json:"type"`
 		Text string               `json:"text"`
 	}
 	if err := json.Unmarshal(line, &event); err != nil || event.Type != streamjson.EventFinal {
-		return nil
+		return nil, ""
 	}
 	var result struct {
-		Stages []StageBreakdown `json:"stages"`
+		Stages       []StageBreakdown `json:"stages"`
+		TopologyName string           `json:"topology_name"`
 	}
 	if err := json.Unmarshal([]byte(event.Text), &result); err != nil {
-		return nil
+		return nil, ""
 	}
-	return result.Stages
+	return result.Stages, result.TopologyName
 }
 
 func intValue(value *int) int {
@@ -335,13 +356,14 @@ type capWriter struct {
 }
 
 type usageCollector struct {
-	limit       int
-	partial     []byte
-	discarding  bool
-	lineNumber  int
-	samples     []UsageSample
-	finalStages []StageBreakdown
-	err         error
+	limit             int
+	partial           []byte
+	discarding        bool
+	lineNumber        int
+	samples           []UsageSample
+	finalStages       []StageBreakdown
+	finalTopologyName string
+	err               error
 }
 
 func newUsageCollector(limit int) *usageCollector {
@@ -436,8 +458,9 @@ func (c *usageCollector) processLine(line []byte) {
 		c.samples = append(c.samples, usageSampleFromEvent(event))
 	}
 	if event.Type == streamjson.EventFinal {
-		if stages := parsePipelineStagesFromJSONLLine(line); len(stages) > 0 {
+		if stages, topologyName := parsePipelineFinalFromJSONLLine(line); len(stages) > 0 {
 			c.finalStages = stages
+			c.finalTopologyName = topologyName
 		}
 	}
 }

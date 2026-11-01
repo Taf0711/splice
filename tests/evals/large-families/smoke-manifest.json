@@ -1,0 +1,14 @@
+{
+  "schema": "splice.eval.mvp-families.v1",
+  "fixture": "fixture",
+  "families": [
+    {
+      "id": "large-02-audit-retention-enforcer",
+      "category": "config-convention",
+      "precursor_task": "The audit trail needs bounded memory: add a method EnforceRetention(maxAge time.Duration, maxCount int) int on the audit Trail that drops events older than maxAge and, if the count still exceeds maxCount, keeps only the newest maxCount events, returning how many events remain. Add a regression test covering both the age cutoff and the count cap.",
+      "target_task": "Operations wants a one-number health view of audit hygiene. Add an exported function RetentionDeficit(trail *Trail, maxAge time.Duration, maxCount int) int in the audit package that reports how many events the next enforcement would drop without dropping them. It must reuse the same cutoff and cap rules the EnforceRetention method established rather than re-deriving them, and it must not mutate the trail. Add a regression test where the deficit is zero and where it is positive.",
+      "precursor_check_file": "verifiers/large-02-a.sh",
+      "target_check_file": "verifiers/large-02-b.sh"
+    }
+  ]
+}

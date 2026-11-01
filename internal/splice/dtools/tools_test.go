@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/tools"
 )
 
@@ -17,19 +18,31 @@ type scannerToolSpec struct {
 	scanner string
 	path    string
 	new     func(string) tools.Tool
+	// allowlistedScanner, when set, is the on-PATH executable name the fixture
+	// uses instead of scanner: the process chokepoint only spawns allowlisted
+	// base names, so a fake scanner must impersonate a real one.
+	allowlistedScanner string
+}
+
+// executableName is the binary name the fixture writes onto PATH.
+func (s scannerToolSpec) executableName() string {
+	if s.allowlistedScanner != "" {
+		return s.allowlistedScanner
+	}
+	return s.scanner
 }
 
 func scannerToolSpecs() []scannerToolSpec {
 	return []scannerToolSpec{
 		{name: "bandit", scanner: "python", path: "main.py", new: NewBanditTool},
 		{name: "gosec", scanner: "gosec", path: "main.go", new: NewGosecTool},
-		{name: "sarif", scanner: "sarif-scanner", path: "main.go", new: NewSarifTool},
+		{name: "sarif", scanner: "sarif-scanner", path: "main.go", new: NewSarifTool, allowlistedScanner: "npx"},
 	}
 }
 
 func (s scannerToolSpec) validArgs(path string) map[string]any {
 	if s.name == "sarif" {
-		return map[string]any{"command": s.scanner, "paths": []any{path}}
+		return map[string]any{"command": s.executableName(), "paths": []any{path}}
 	}
 	return map[string]any{"paths": []any{path}}
 }
@@ -73,6 +86,25 @@ func writeWorkspaceFile(t *testing.T, root, name string) {
 	if err := os.WriteFile(path, []byte("package main\n"), 0o600); err != nil {
 		t.Fatalf("write workspace file: %v", err)
 	}
+}
+
+// requireNativeSandbox skips when the host has no native sandbox backend.
+// Deterministic dtool spawns fail closed without one, so the scanner contract
+// tests cannot run unwrapped.
+func requireNativeSandbox(t *testing.T) {
+	t.Helper()
+	backend := sandbox.SelectBackend(sandbox.BackendOptions{})
+	if !backend.Available {
+		t.Skipf("host native sandbox backend unavailable: %s", backend.Message)
+	}
+}
+
+// prependScannerPath puts the fake scanner dir first while keeping the real
+// PATH, so the stage engine still selects the host native backend and the
+// fake scanners still resolve ahead of any host tool.
+func prependScannerPath(t *testing.T, binDir string) {
+	t.Helper()
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 // This pins the scanner argument contract, including workspace confinement.
@@ -142,8 +174,9 @@ func TestScannerReturnsNonZeroOutput(t *testing.T) {
 			writeWorkspaceFile(t, workspace, spec.path)
 			binDir := t.TempDir()
 			want := spec.structuredOutput()
-			writeScannerScript(t, binDir, spec.scanner, want)
-			t.Setenv("PATH", binDir)
+			writeScannerScript(t, binDir, spec.executableName(), want)
+			requireNativeSandbox(t)
+			prependScannerPath(t, binDir)
 
 			args := spec.validArgs(spec.path)
 			if spec.name == "sarif" {
@@ -174,8 +207,9 @@ func TestScannerReturnsOnlyStructuredStdout(t *testing.T) {
 			writeWorkspaceFile(t, workspace, spec.path)
 			binDir := t.TempDir()
 			want := spec.structuredOutput()
-			writeScannerScriptWithOutput(t, binDir, spec.scanner, want, "[scanner] Including rules: default", 0)
-			t.Setenv("PATH", binDir)
+			writeScannerScriptWithOutput(t, binDir, spec.executableName(), want, "[scanner] Including rules: default", 0)
+			requireNativeSandbox(t)
+			prependScannerPath(t, binDir)
 
 			args := spec.validArgs(spec.path)
 			if spec.name == "sarif" {
@@ -204,8 +238,9 @@ func TestScannerFailureSurfacesStderr(t *testing.T) {
 			writeWorkspaceFile(t, workspace, spec.path)
 			binDir := t.TempDir()
 			wantErr := "scanner failed from " + spec.name
-			writeScannerScriptWithOutput(t, binDir, spec.scanner, "", wantErr, 9)
-			t.Setenv("PATH", binDir)
+			writeScannerScriptWithOutput(t, binDir, spec.executableName(), "", wantErr, 9)
+			requireNativeSandbox(t)
+			prependScannerPath(t, binDir)
 
 			args := spec.validArgs(spec.path)
 			if spec.name == "sarif" {
@@ -234,8 +269,9 @@ func TestScannerContextCancellation(t *testing.T) {
 			workspace := t.TempDir()
 			writeWorkspaceFile(t, workspace, spec.path)
 			binDir := t.TempDir()
-			writeScannerScript(t, binDir, spec.scanner, "should not be returned")
-			t.Setenv("PATH", binDir)
+			writeScannerScript(t, binDir, spec.executableName(), "should not be returned")
+			requireNativeSandbox(t)
+			prependScannerPath(t, binDir)
 
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()

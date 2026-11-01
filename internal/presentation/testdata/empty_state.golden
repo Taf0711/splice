@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "lifecycle": "",
+  "plan": {
+    "task_count": 0
+  },
+  "nodes": null,
+  "interventions": null,
+  "evidence": null,
+  "trajectory": {},
+  "files": null,
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cached_tokens": 0,
+    "reasoning_tokens": 0,
+    "cost_usd": 0
+  }
+}

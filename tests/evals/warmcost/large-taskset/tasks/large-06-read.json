@@ -1,0 +1,8 @@
+{
+  "name": "large-06-read",
+  "phase": "read",
+  "precursor": "large-06-write",
+  "prompt": "Add Headroom(t *Throttle, recipients []string) int in the notifications package: the total notifications the recipients can still receive. Reuse Throttle.Remaining; Headroom must not use any allowance. Add a regression test.",
+  "check": "# large-06 B: Add Headroom(t *Throttle, recipients []string) int in the notification\nmkdir -p internal/notifications\ncat > internal/notifications/probe_headroom_test.go <<'EOF'\npackage notifications\n\nimport \"testing\"\n\nfunc TestProbeHeadroom(t *testing.T) {\n\tth := NewThrottle(3)\n\tth.Allow(\"a\")\n\tif got := Headroom(th, []string{\"a\", \"b\"}); got != 5 {\n\t\tt.Fatalf(\"Headroom = %d, want 5\", got)\n\t}\n\tif got := Headroom(th, []string{\"a\", \"b\"}); got != 5 {\n\t\tt.Fatalf(\"Headroom must not use allowance, second call = %d\", got)\n\t}\n}\nEOF\ngo test -count=1 ./internal/notifications/ ; rc=$?\nrm -f internal/notifications/probe_headroom_test.go\nif [ $rc -ne 0 ]; then exit $rc; fi\nexit 0\n",
+  "fixture": "../../large-families/fixture"
+}

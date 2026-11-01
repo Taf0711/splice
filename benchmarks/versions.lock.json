@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "description": "Pinned upstream versions for Splice benchmark adapters. No pin may float. See benchmarks/versions_lock_test.go.",
+  "pins_updated_at": "2026-09-05",
+  "adapters": {
+    "harness-bench": {
+      "status": "verified",
+      "paper": "arXiv:2605.27922",
+      "upstream_repo": "https://github.com/Qihoo360/harness-bench",
+      "upstream_commit": "1025086a446653702b80cfb48babbeec35db6b2c",
+      "upstream_ref_note": "Repo has no git tags; commit pinned from api.github.com repos/Qihoo360/harness-bench/commits?per_page=1 on 2026-09-05 (head of main).",
+      "adapter_version": "0.1.0",
+      "task_count_upstream": 106,
+      "dev_subset_manifest": "manifests/splice-harnessbench-se-sre.json"
+    },
+    "swebench-pro": {
+      "status": "placeholder",
+      "note": "Filled by another agent. Placeholders must be replaced before any run; the strings starting with TODO are rejected by the smoke check but allowed here until then."
+    },
+    "terminal-bench": {
+      "status": "verified",
+      "dataset": {
+        "name": "terminal-bench",
+        "version": "2.0",
+        "task_count": 89,
+        "task_repo": "https://github.com/laude-institute/terminal-bench-2.git",
+        "task_repo_commit": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c",
+        "source": "harbor-framework/harbor registry.json entry 'terminal-bench' version 2.0"
+      },
+      "harbor": {
+        "package": "harbor",
+        "version": "0.22.0",
+        "upstream_repo": "https://github.com/harbor-framework/harbor",
+        "upstream_commit": "4407eb5227a2ff4f0d3f16b2eb48849382fdf276",
+        "pypi_verified": "https://pypi.org/pypi/harbor/json reports 0.22.0"
+      },
+      "adapter_version": "0.1.0"
+    }
+  },
+  "splice": {
+    "module": "github.com/Taf0711/splice",
+    "commit": "FILLED_AT_RUN_TIME"
+  },
+  "model": {
+    "provider": "FILLED_AT_RUN_TIME",
+    "id": "FILLED_AT_RUN_TIME",
+    "reasoning": "FILLED_AT_RUN_TIME"
+  }
+}

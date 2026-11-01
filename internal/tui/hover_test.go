@@ -115,6 +115,9 @@ func TestUpdateHoverTargetOnPlanStep(t *testing.T) {
 	m := runningPlanModel(t, 3)
 	m.altScreen = true
 	m.height = 40
+	// runningPlanModel pins the sidebar collapsed (pinned-plan geometry); this
+	// probe drives the two-column hover path, so restore the sidebar.
+	m.sidebarHidden = false
 	// sidebarActive requires real conversation; runningPlanModel only sets m.plan,
 	// leaving the transcript at its default (welcome-only, i.e. "empty").
 	m.transcript = appendRow(m.transcript, rowUser, "do something")

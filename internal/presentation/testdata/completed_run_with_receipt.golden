@@ -1,0 +1,119 @@
+{
+  "schema_version": 1,
+  "lifecycle": "complete",
+  "plan": {
+    "title": "hello service",
+    "task_count": 3
+  },
+  "nodes": [
+    {
+      "id": "code_writer",
+      "label": "code_writer",
+      "kind": "WRITE",
+      "status": "complete",
+      "progress": 1,
+      "iteration": 1,
+      "cost": {
+        "usd": 0,
+        "tokens": 0
+      },
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost_usd": 0
+      }
+    },
+    {
+      "id": "test_runner",
+      "label": "test_runner",
+      "kind": "TEST",
+      "status": "complete",
+      "progress": 1,
+      "iteration": 1,
+      "cost": {
+        "usd": 0,
+        "tokens": 0
+      },
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost_usd": 0
+      }
+    },
+    {
+      "id": "security_auditor",
+      "label": "security_auditor",
+      "kind": "SECURITY",
+      "status": "complete",
+      "progress": 1,
+      "iteration": 1,
+      "cost": {
+        "usd": 0,
+        "tokens": 0
+      },
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost_usd": 0
+      }
+    }
+  ],
+  "interventions": null,
+  "evidence": [
+    {
+      "label": "full suite",
+      "status": "passed",
+      "passed": 12,
+      "failed": 0,
+      "incomplete": 0,
+      "findings": null,
+      "duration": 6.1
+    }
+  ],
+  "trajectory": {},
+  "files": [
+    {
+      "path": "main.go",
+      "status": "modified",
+      "additions": 34,
+      "deletions": 2
+    },
+    {
+      "path": "main_test.go",
+      "status": "added",
+      "additions": 58,
+      "deletions": 0
+    }
+  ],
+  "usage": {
+    "input_tokens": 120000,
+    "output_tokens": 24000,
+    "cached_tokens": 30000,
+    "reasoning_tokens": 8000,
+    "cost_usd": 0.42,
+    "by_node": {
+      "code_writer": {
+        "input_tokens": 50000,
+        "output_tokens": 12000,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0
+      },
+      "test_runner": {
+        "input_tokens": 70000,
+        "output_tokens": 12000,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0
+      }
+    }
+  },
+  "completion": {
+    "status": "completed",
+    "detail": "all gates green"
+  }
+}

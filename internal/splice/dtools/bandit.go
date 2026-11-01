@@ -5,17 +5,22 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/Taf0711/splice/internal/sandbox"
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
 	"github.com/Taf0711/splice/internal/tools"
 )
 
 // banditTool runs Bandit security analysis on Python files.
 type banditTool struct {
 	workspaceRoot string
+	// sandbox scopes the scanner subprocess to the workspace with network
+	// denied. It is built once at construction from the workspace root.
+	sandbox *sandbox.Engine
 }
 
 // NewBanditTool returns a Tool that runs Bandit security analysis on Python files.
 func NewBanditTool(workspaceRoot string) tools.Tool {
-	return banditTool{workspaceRoot: workspaceRoot}
+	return banditTool{workspaceRoot: workspaceRoot, sandbox: procrun.NewStageEngine(workspaceRoot)}
 }
 
 func (t banditTool) Name() string {
@@ -86,9 +91,21 @@ func (t banditTool) Run(ctx context.Context, args map[string]any) tools.Result {
 		}
 	}
 
-	cmdArgs := append([]string{"-m", "bandit", "-f", "json"}, resolvedPaths...)
-	cmd := exec.CommandContext(ctx, python, cmdArgs...)
-	cmd.Dir = t.workspaceRoot
+	command := append([]string{python, "-m", "bandit", "-f", "json"}, resolvedPaths...)
+	prepared, cerr := procrun.Prepare(ctx, procrun.Request{
+		ProfileID:       procrun.ProfileSpliceDTools,
+		AllowedBinaries: procrun.StageBinaries,
+		Engine:          t.sandbox,
+		Spec:            sandbox.CommandSpec{Name: command[0], Args: command[1:], Dir: t.workspaceRoot},
+	})
+	if cerr != nil {
+		return tools.Result{
+			Status: tools.StatusError,
+			Output: "Bandit is not installed or not available: " + cerr.Error(),
+		}
+	}
+	defer prepared.Plan.Cleanup()
+	cmd := prepared.Cmd
 
 	out, err := cmd.Output()
 	if ctx.Err() != nil {

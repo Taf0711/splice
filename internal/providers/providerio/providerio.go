@@ -65,9 +65,14 @@ const DefaultStreamIdleTimeout = 5 * time.Minute
 // idle default) was a terrible UX for a doomed turn. At the default idle this is
 // 6 minutes; it still scales with SPLICE_STREAM_IDLE_TIMEOUT. A returned value <= 0
 // (idle watchdog disabled) leaves the content watchdog off too.
+// SPLICE_STREAM_CONTENT_STALL_TIMEOUT replaces the computed window while the
+// idle watchdog is on.
 func ContentStallTimeout(idleTimeout time.Duration) time.Duration {
 	if idleTimeout <= 0 {
 		return 0
+	}
+	if override := parsePositiveTimeout(os.Getenv(streamContentStallTimeoutEnv)); override > 0 {
+		return override
 	}
 	// 1.2× computed as idle + idle/5 (not idle*6/5), plus a clamp: a
 	// pathologically large SPLICE_STREAM_IDLE_TIMEOUT could make idle*6 overflow
@@ -88,6 +93,25 @@ func ContentStallTimeout(idleTimeout time.Duration) time.Duration {
 // entirely (streams may then hang until the HTTP/transport layer gives up).
 const streamIdleTimeoutEnv = "SPLICE_STREAM_IDLE_TIMEOUT"
 
+// streamContentStallTimeoutEnv overrides the content-stall window, for a model
+// that reasons for a long time without output. It accepts a Go duration or a
+// bare number of seconds. A value that does not parse, or is not positive,
+// keeps the computed window.
+const streamContentStallTimeoutEnv = "SPLICE_STREAM_CONTENT_STALL_TIMEOUT"
+
+// parsePositiveTimeout parses a Go duration or a bare number of seconds. It
+// returns 0 for an empty, invalid, or non-positive value.
+func parsePositiveTimeout(raw string) time.Duration {
+	raw = strings.TrimSpace(raw)
+	if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+		return d
+	}
+	if secs, err := strconv.Atoi(raw); err == nil && secs > 0 {
+		return time.Duration(secs) * time.Second
+	}
+	return 0
+}
+
 // ResolveStreamIdleTimeout selects the effective stream idle timeout. Precedence:
 // an explicit positive option (e.g. set by a test) wins; otherwise the
 // SPLICE_STREAM_IDLE_TIMEOUT env override if set and valid; otherwise
@@ -101,11 +125,8 @@ func ResolveStreamIdleTimeout(option time.Duration) time.Duration {
 		case "0", "off", "none", "disabled":
 			return 0
 		}
-		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+		if d := parsePositiveTimeout(raw); d > 0 {
 			return d
-		}
-		if secs, err := strconv.Atoi(raw); err == nil && secs > 0 {
-			return time.Duration(secs) * time.Second
 		}
 		// Unparseable / non-positive: fall through to the default rather than
 		// silently disabling the watchdog on a typo.
@@ -510,4 +531,22 @@ func PositiveOrDefault(value int, fallback int, label string) (int, error) {
 		return 0, fmt.Errorf("%s must be a positive integer", label)
 	}
 	return value, nil
+}
+
+// WireMaxOutputTokens combines a per-request output cap with the provider's
+// configured default into the value to send on the wire. The tighter of the
+// two applies when both are positive; a zero value on either side leaves the
+// other in charge; zero on both means the adapter omits the cap so the
+// provider applies its own context-safe default.
+func WireMaxOutputTokens(requestCap, configured int) int {
+	switch {
+	case requestCap > 0 && configured > 0:
+		return min(requestCap, configured)
+	case requestCap > 0:
+		return requestCap
+	case configured > 0:
+		return configured
+	default:
+		return 0
+	}
 }

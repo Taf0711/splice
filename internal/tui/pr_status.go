@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
+
+	"github.com/Taf0711/splice/internal/gitenv"
 )
 
 type PrStatus string
@@ -291,6 +293,9 @@ func jsonScalarString(raw json.RawMessage) string {
 
 func defaultPRCommandRunner(ctx context.Context, cwd string, name string, args ...string) (string, error) {
 	command := exec.CommandContext(ctx, name, args...)
+	if err := gitenv.Harden(command); err != nil {
+		return "", fmt.Errorf("%s: %w", name, err)
+	}
 	if strings.TrimSpace(cwd) != "" {
 		command.Dir = cwd
 	}

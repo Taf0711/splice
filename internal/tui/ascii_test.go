@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -70,5 +72,66 @@ func TestFoldASCIIIdempotent(t *testing.T) {
 	once := foldASCII(input, true)
 	if twice := foldASCII(once, true); twice != once {
 		t.Fatalf("fold is not idempotent: once %q, twice %q", once, twice)
+	}
+}
+
+// TestModelPickerGlyphsFoldWidthExact pins the /model picker's glyph set
+// (Pen frame j3ZQBu cell 3: "the fold table needs 5 new entries") to
+// width-exact ASCII folds. The ring, arrows, hint bar, and cost rail all
+// sit in aligned columns; a 1-cell glyph collapsing to "??" under
+// SPLICE_ASCII=1 would shift every row after it.
+func TestModelPickerGlyphsFoldWidthExact(t *testing.T) {
+	pickerGlyphs := []rune{'■', '□', '←', '↑', '↓', '→', '●', '○', '─', '▌', '❯'}
+	for _, glyph := range pickerGlyphs {
+		folded := foldASCII(string(glyph), true)
+		if got, want := runewidth.StringWidth(folded), runewidth.RuneWidth(glyph); got != want {
+			t.Errorf("picker glyph %q (U+%04X): folded %q width %d, want %d", glyph, glyph, folded, got, want)
+		}
+		for _, b := range []byte(folded) {
+			if b >= 0x80 {
+				t.Fatalf("picker glyph %q folded to non-ASCII 0x%02x", glyph, b)
+			}
+		}
+	}
+	// The effort ring line folds column-stable: same visible width before
+	// and after, so "← ■■□□ → high" stays aligned under the fold.
+	ring := "← ■■□□ → high"
+	if got, want := runewidth.StringWidth(foldASCII(ring, true)), runewidth.StringWidth(ring); got != want {
+		t.Errorf("ring line width changed under fold: %d, want %d", got, want)
+	}
+}
+
+// Every non-ASCII glyph the TUI source draws has a real fold, not the '?'
+// fallback, so an ASCII terminal never shows what reads as an error.
+func TestASCIIFoldCoversSourceGlyphs(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range files {
+		if strings.HasSuffix(file, "_test.go") || file == "ascii.go" {
+			continue
+		}
+		src, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range strings.Split(string(src), "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "//") {
+				continue
+			}
+			code := line
+			if i := strings.Index(code, "//"); i >= 0 && !strings.ContainsAny(code[:i], "\"'`") {
+				code = code[:i]
+			}
+			for _, glyph := range code {
+				if glyph < 0x80 || runewidth.RuneWidth(glyph) != 1 {
+					continue
+				}
+				if folded := foldASCII(string(glyph), true); strings.Contains(folded, "?") {
+					t.Fatalf("%s draws %q (%U) with no ASCII fold", file, glyph, glyph)
+				}
+			}
+		}
 	}
 }

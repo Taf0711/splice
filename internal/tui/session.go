@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/sessions"
@@ -104,6 +106,10 @@ func (m model) startNewSession() model {
 	m.memoryCount = 0
 	m.memoryByType = nil
 	m.memoryNoticed = false
+	// Run-bound interaction surfaces (pending handoff, diff/file views,
+	// worktree binding, trajectory reveal) belong to the previous session's
+	// run. A kept worktree stays on disk; only the actionable surface resets.
+	m = m.resetRunInteractionState()
 
 	note := "Started a new session."
 	if previousID != "" {
@@ -126,7 +132,8 @@ func (m model) startNewSession() model {
 		m = updated
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: fmt.Sprintf("Stopped %d loop(s) tied to the previous session.", cleared)})
 	}
-	return m
+	// Old browser links belong to the previous conversation.
+	return m.rotateWebSession()
 }
 
 func (m model) appendSessionEvent(eventType sessions.EventType, payload any) (model, error) {
@@ -207,6 +214,21 @@ func flushableSessionEvents(events []pendingSessionEvent) []pendingSessionEvent 
 	return flushable
 }
 
+// titleSessionFromFirstPrompt replaces the design placeholder with the first
+// real prompt, so /resume lists what each session was about instead of ten
+// identical "Design conversation" rows. The model auto-title can still
+// improve it later; this is the deterministic floor. A store error keeps
+// the placeholder (a title is not worth failing a turn over).
+func (m model) titleSessionFromFirstPrompt(prompt string) model {
+	if m.activeSession.Title != designSessionPlaceholderTitle || m.sessionStore == nil || strings.TrimSpace(prompt) == "" {
+		return m
+	}
+	if updated, err := m.sessionStore.UpdateTitle(m.activeSession.SessionID, tuiSessionTitle(prompt)); err == nil {
+		m.activeSession = updated
+	}
+	return m
+}
+
 func tuiSessionTitle(prompt string) string {
 	// cutRunes keeps the cut on a rune boundary — a bare byte slice could split
 	// a multi-byte rune and persist invalid UTF-8 into the session metadata.
@@ -253,7 +275,22 @@ func (m model) handleResumeCommand(args string) (model, string) {
 	loopsCleared := 0
 	if session.SessionID != previousID {
 		m, loopsCleared = m.clearLoopsForSessionSwitch()
+		// Interaction surfaces (handoff card, diff/file views, worktree
+		// binding) belong to the previous session's run; reset them on a
+		// real switch. A no-op switch (resuming the active session) leaves
+		// them untouched.
+		//
+		// ORDER MATTERS (review finding 7): the reset clears run-owned
+		// presentation state, so it must run BEFORE the replay below.
+		// Replaying first and resetting second discarded exactly the
+		// state the replay had just reconstructed.
+		m = m.resetRunInteractionState()
 	}
+	// F3 (§15): replay the persisted presentation states so the pipeline
+	// panel, lifecycle, health, and receipt reconstruct from runtime truth
+	// without touching the runtime. A session with no valid snapshot lands
+	// on the empty projection rather than inheriting the previous session's.
+	m = m.replayPresentationState(events)
 
 	rows := initialTranscript()
 	rows = appendRow(rows, rowSystem, m.formatResumeSummary(*session, len(events)))
@@ -261,11 +298,19 @@ func (m model) handleResumeCommand(args string) (model, string) {
 		rows = appendRow(rows, rowSystem, fmt.Sprintf("Stopped %d loop(s) tied to the previous session.", loopsCleared))
 	}
 	rows = appendTranscriptRowsDedup(rows, transcriptRowsFromSessionEvents(events))
+	// The summary sits at the top; the view opens at the bottom, so the
+	// next step goes where the eye lands.
+	if next := m.resumeNextStep(); next != "" {
+		rows = appendRow(rows, rowSystem, next)
+	}
 	m.transcript = rows
 	// Every rehydrated row is settled by construction, so resetting the flush
 	// frontier sends the whole resumed history to native scrollback in one
 	// batch — scrollable, selectable, and O(1) for every later frame.
 	m.resetFlushFrontier("· resumed ·")
+	if session.SessionID != previousID {
+		m = m.rotateWebSession()
+	}
 	return m, ""
 }
 
@@ -390,8 +435,9 @@ func (m model) newSessionPicker() *commandPicker {
 		// lists this workspace's history, not every project's. Checked BEFORE the
 		// per-session event read below, so a large global history doesn't pay 50
 		// full file reads to build one workspace's list. Sessions with no recorded
-		// Cwd (older runs) stay visible rather than vanishing.
-		if !sessionMatchesWorkspace(meta.Cwd, m.cwd) {
+		// Cwd (older runs) stay visible rather than vanishing. Worktree sessions
+		// match through their origin repo too (TW4).
+		if !sessionWorkspaceMatch(meta, m.cwd) {
 			continue
 		}
 		// A splice-event session has nothing to resume — skip it without a file read.
@@ -410,13 +456,6 @@ func (m model) newSessionPicker() *commandPicker {
 		if readErr == nil && !eventsHaveResumableContent(events) {
 			continue
 		}
-		// Lead with the timestamp so same-titled sessions (e.g. the same first
-		// prompt run several times) are visually distinct; the id (right, faint)
-		// stays for reference and is what selection actually resolves.
-		label := displayValue(meta.Title, "untitled")
-		if when := sessionWhen(meta.UpdatedAt, now); when != "" {
-			label = when + "  " + label
-		}
 		status := ""
 		if readErr == nil {
 			if state, stateErr := splicerun.ReconstructDesignState(events); stateErr == nil {
@@ -426,14 +465,7 @@ func (m model) newSessionPicker() *commandPicker {
 				}
 			}
 		}
-		if status != "" {
-			label += "  [" + status + "]"
-		}
-		items = append(items, pickerItem{
-			Label: label,
-			Value: meta.SessionID,
-			Meta:  meta.SessionID,
-		})
+		items = append(items, sessionPickerItem(meta, status, now))
 	}
 	if len(items) == 0 {
 		return nil // every resumable session was an empty/failed run
@@ -476,21 +508,38 @@ func sessionPlanStatus(state splicerun.DesignState) string {
 	return fmt.Sprintf("%s · %d/%d steps", phase, completed, len(state.Plan.Tasks))
 }
 
-// openLaunchSessionPicker opens the plan picker for a fresh interactive TUI.
-// The existing picker build performs all cheap workspace and metadata filters,
-// then reads each surviving session once and shares those events with both
-// resumable-content and design-state derivation.
-func (m model) openLaunchSessionPicker() model {
-	if m.setup.visible || m.activeSession.SessionID != "" || os.Getenv("SPLICE_NO_RESUME_PROMPT") == "1" {
-		return m
+// openTrustPromptIfRequired opens the required trust menu before the chat.
+// When the workspace has an executable project config (.splice/config.json
+// or hooks.json) and trust is undecided or declined, the UNTRUSTED PROJECT
+// CONFIG card accompanies the menu: the decision deserves the evidence of
+// what the config would change (GAP-I, frame I1). The card never decides —
+// the picker does.
+func (m model) openTrustPromptIfRequired() model {
+	if m.trustPromptRequired || !m.trusted {
+		if cfg := describeProjectTrustConfig(m.projectTrustConfigPath()); !cfg.Empty() || cfg.ParseError != "" {
+			m.trustConfigNotice(cfg)
+		}
 	}
-	picker := m.newSessionPicker()
-	if picker == nil || !picker.planBearing {
-		return m
+	if m.trustPromptRequired {
+		m.picker = m.newTrustPicker()
 	}
-	picker.title = "Continue where you left off"
-	m.picker = picker
 	return m
+}
+
+// openLaunchSessionPicker arms the async session scan for a fresh
+// interactive TUI (F1, §14: no store I/O on the UI loop). The scan feeds
+// the launch resume card; the RESUME PICKER no longer auto-opens on launch
+// — a modal popping open over a user who already started typing swallows
+// their input and reads as a dead screen (owner report 2026-09-06). The
+// resume affordances are the LAST SESSION card and /resume.
+func (m model) openLaunchSessionPicker() (model, tea.Cmd) {
+	if m.setup.visible || m.activeSession.SessionID != "" || os.Getenv("SPLICE_NO_RESUME_PROMPT") == "1" {
+		return m, nil
+	}
+	if m.sessionScanInFlight {
+		return m, nil
+	}
+	return startSessionScan(m, "Continue where you left off")
 }
 
 // sessionHasResumableContent reports whether a session has anything worth
@@ -509,7 +558,7 @@ func (m model) latestResumableInWorkspace() (*sessions.Metadata, error) {
 		return nil, err
 	}
 	for i := range metas {
-		if !sessionMatchesWorkspace(metas[i].Cwd, m.cwd) {
+		if !sessionWorkspaceMatch(metas[i], m.cwd) {
 			continue
 		}
 		if metas[i].EventCount == 0 {
@@ -541,6 +590,32 @@ func sessionMatchesWorkspace(sessionCwd, workspaceCwd string) bool {
 		return strings.EqualFold(a, b)
 	}
 	return a == b
+}
+
+// sessionWorkspaceMatch reports whether a session belongs to the current
+// workspace, accepting either its execution Cwd or its OriginCwd (the source
+// repo a worktree session was launched from). A worktree session therefore
+// matches both its worktree checkout and its source repo, so /resume is
+// scoped to either. Sessions with neither path recorded stay visible.
+func sessionWorkspaceMatch(meta sessions.Metadata, workspaceCwd string) bool {
+	if sessionMatchesWorkspace(meta.Cwd, workspaceCwd) {
+		return true
+	}
+	// Only fall back to the origin repo when one is recorded. An empty
+	// OriginCwd means no source repo was captured; treating it as a match
+	// would make every plain session visible in every workspace (the empty-path
+	// leniency in sessionMatchesWorkspace is for fully-unplaced sessions).
+	if strings.TrimSpace(meta.OriginCwd) == "" {
+		return false
+	}
+	return sessionMatchesWorkspace(meta.OriginCwd, workspaceCwd)
+}
+
+// isWorktreeSession reports whether a session was launched from a source repo
+// into a worktree: it has an origin repo that differs from its execution Cwd.
+func isWorktreeSession(meta sessions.Metadata) bool {
+	origin := strings.TrimSpace(meta.OriginCwd)
+	return origin != "" && origin != strings.TrimSpace(meta.Cwd)
 }
 
 func (m model) sessionHasResumableContent(sessionID string) bool {
@@ -575,15 +650,25 @@ func eventsHaveResumableContent(events []sessions.Event) bool {
 	return false
 }
 
-// openSessionPicker opens the /resume picker; ok is false when there is nothing to
-// resume (the caller then falls back to the text list / "none" message).
-func (m model) openSessionPicker() (model, bool) {
-	picker := m.newSessionPicker()
-	if picker == nil {
-		return m, false
+// openSessionPicker arms the async scan for a bare /resume and returns the
+// scan command directly (review finding 10: the command used to be stashed
+// in a package global and dropped by callers that returned only a boolean,
+// so the receipt's [R] marked a scan in flight and scheduled nothing).
+// ok is false only when there is no store at all.
+func (m model) openSessionPicker() (model, tea.Cmd, bool) {
+	if m.sessionStore == nil {
+		return m, nil, false
 	}
-	m.picker = picker
-	return m, true
+	if m.sessionScanInFlight {
+		// A scan is already running: mark its landing as resume-wanted so
+		// the picker arms when it lands. Joining an in-flight scan needs
+		// no second command.
+		m.resumePickerWanted = true
+		return m, nil, true
+	}
+	next, cmd := startSessionScan(m, "Resume a session")
+	next.resumePickerWanted = true
+	return next, cmd, cmd != nil
 }
 
 func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
@@ -593,6 +678,9 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 	// disambiguation the live runner applies — without it, dedup would drop
 	// every tool card after the first occurrence of an id.
 	callSeq := map[string]int{}
+	// GAP-L DoD 43/45: reasoning block ids rebuild across resume. Legacy
+	// payloads (pre-seq) count ordinally; new payloads pin the exact seq.
+	reasoningSeq := 0
 	// Pre-pass: collect the tool-call ids of Task delegations that actually started
 	// a specialist (each renders as a card below). Only those Task tool-call/result
 	// rows are redundant and skipped; a Task that failed before a specialist started
@@ -626,6 +714,9 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 				continue
 			}
 			switch role {
+			case "receipt":
+				// A cancelled pipeline turn persists its CANCELLED card as a receipt message.
+				rows = append(rows, transcriptRow{kind: rowError, text: content})
 			case "user":
 				rows = append(rows, transcriptRow{kind: rowUser, text: content})
 			case "assistant":
@@ -634,14 +725,27 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 				// Format pipeline result JSON as a one-line summary; non-JSON content
 				// passes through unchanged.
 				rows = append(rows, transcriptRow{kind: rowAssistant, text: formatPipelineFinalAnswer(content), final: true})
+				// A pipeline turn persisted its receipt card with its answer.
+				if receipt := payloadString(payload, "receipt"); receipt != "" {
+					rows = append(rows, transcriptRow{kind: rowError, text: receipt})
+				}
 			default:
 				rows = append(rows, transcriptRow{kind: rowSystem, text: content})
 			}
 		case sessions.EventReasoning:
 			// Rehydrate reasoning as a collapsed row so thinking survives /resume.
 			// The row shape matches the live path (reasoningTranscriptRow).
+			// The persisted seq rebuilds the same stable block id the live path
+			// minted (reasoning_N, DoD 43/45); legacy payloads without a seq fall
+			// back to ordinal counting over this event stream.
 			if content := payloadString(payload, "content"); content != "" {
-				if row, ok := reasoningTranscriptRow("", 0, content); ok {
+				reasoningSeq++
+				id := fmt.Sprintf("reasoning_%d", reasoningSeq)
+				if raw, ok := payloadInt(payload, "seq"); ok && raw > 0 {
+					id = fmt.Sprintf("reasoning_%d", raw)
+					reasoningSeq = raw
+				}
+				if row, ok := reasoningTranscriptRow(id, 0, content); ok {
 					rows = append(rows, row)
 				}
 			}
@@ -705,7 +809,10 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 				changedFiles: payloadStringSlice(payload, "changedFiles"),
 			})
 		case sessions.EventError:
-			if message := payloadString(payload, "message"); message != "" {
+			// A pipeline turn persisted its FAILED or CANCELLED card in place of the raw message.
+			if receipt := payloadString(payload, "receipt"); receipt != "" {
+				rows = append(rows, transcriptRow{kind: rowError, text: receipt})
+			} else if message := payloadString(payload, "message"); message != "" {
 				rows = append(rows, transcriptRow{kind: rowError, text: message})
 			}
 		case sessions.EventCompaction:
@@ -716,6 +823,16 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 			parentID := payloadString(payload, "parentSessionId")
 			if parentID != "" {
 				rows = append(rows, transcriptRow{kind: rowSystem, text: "forked from session: " + parentID})
+			}
+		case sessions.EventDecisionPinned:
+			// GAP-L DoD 46: the pinned-decisions ledger survives resume. The
+			// raw events carry each pin; the WHOLE ledger re-projects from the
+			// reconstructed state (append-only, revised decisions keep their
+			// predecessor visible) as one card instead of one row per event.
+			if state, stateErr := splicerun.ReconstructDesignState(events); stateErr == nil && len(state.Decisions) > 0 {
+				if card := decisionsCardTranscriptText(state.Decisions); card != "" {
+					rows = append(rows, transcriptRow{kind: rowSystem, text: card})
+				}
 			}
 		case sessions.EventSpecialistStart:
 			info := specialistInfoFromPayload(payload)
@@ -922,7 +1039,10 @@ func firstNonEmptyString(values ...string) string {
 
 // specialistInfoFromPayload builds a specialistInfo from a specialist_start or
 // specialist_stop session event payload. Returns nil if the payload lacks a
-// childSessionId (the minimum required field).
+// childSessionId (the minimum required field). It restores the count and a
+// bounded tool-name tail persisted on the stop event so the transcript card
+// survives a resume (the per-call detail is not replayed; the child session
+// holds the full drill-in).
 func specialistInfoFromPayload(payload map[string]any) *specialistInfo {
 	childSessionID := payloadString(payload, "childSessionId")
 	if childSessionID == "" {
@@ -947,5 +1067,51 @@ func specialistInfoFromPayload(payload map[string]any) *specialistInfo {
 	if errMsg := payloadString(payload, "error"); errMsg != "" {
 		info.errorMsg = errMsg
 	}
+	if count, ok := payloadInt(payload, "toolCount"); ok {
+		info.toolCount = count
+	}
+	for _, name := range payloadStringSlice(payload, "tools") {
+		info.toolCalls = append(info.toolCalls, specialistToolCall{name: name})
+	}
+	// toolCount is the true call count; the persisted tool list is the distinct
+	// names tail. When these disagree (repeated tool calls), the card's fold
+	// count already derives from toolCount-len(toolCalls), so it reads correctly.
 	return info
+}
+
+// payloadInt returns an int value for the key. ok is false when the value is
+// missing or not a JSON number.
+func payloadInt(payload map[string]any, key string) (int, bool) {
+	switch typed := payload[key].(type) {
+	case float64:
+		return int(typed), true
+	case int:
+		return typed, true
+	case int64:
+		return int(typed), true
+	default:
+		return 0, false
+	}
+}
+
+// sessionPickerItem is one /resume row: when, title, plan status, and the
+// model it ran on. The timestamp leads so same-titled sessions stay
+// distinct. The session id is what selection resolves, but a 40-character
+// id is noise to read, so the right column names the model instead.
+func sessionPickerItem(meta sessions.Metadata, status string, now time.Time) pickerItem {
+	label := displayValue(meta.Title, "untitled")
+	if when := sessionWhen(meta.UpdatedAt, now); when != "" {
+		label = when + "  " + label
+	}
+	if status != "" {
+		label += "  [" + status + "]"
+	}
+	if isWorktreeSession(meta) {
+		label = "wt: " + label
+	}
+	model := meta.ModelID
+	if i := strings.LastIndex(model, "/"); i >= 0 {
+		model = model[i+1:]
+	}
+	return pickerItem{Label: label, Value: meta.SessionID, Meta: model}
 }

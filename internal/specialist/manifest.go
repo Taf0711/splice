@@ -13,6 +13,7 @@ import (
 
 	"github.com/Taf0711/splice/internal/config"
 	"github.com/Taf0711/splice/internal/modelregistry"
+	"github.com/Taf0711/splice/internal/projectfile"
 )
 
 type Location string
@@ -484,7 +485,12 @@ func loadDirectory(dir string, location Location) ([]Manifest, []string, error) 
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
-		data, err := os.ReadFile(path)
+		// Project manifests sit at <workspace>/.splice/specialists and stay inside it.
+		manifestRoot := ""
+		if location == LocationProject {
+			manifestRoot = filepath.Dir(filepath.Dir(dir))
+		}
+		data, err := projectfile.Read(path, manifestRoot)
 		if err != nil {
 			warnings = append(warnings, fmt.Sprintf("skipped unreadable specialist manifest %s: %s", path, err))
 			continue
@@ -502,6 +508,12 @@ func loadDirectory(dir string, location Location) ([]Manifest, []string, error) 
 		manifests = append(manifests, manifest)
 	}
 	return manifests, warnings, nil
+}
+
+// LoadProjectDir parses the specialist manifests in one project directory
+// (<workspace>/.splice/specialists). A missing directory is not an error.
+func LoadProjectDir(dir string) ([]Manifest, []string, error) {
+	return loadDirectory(dir, LocationProject)
 }
 
 func mergeByName(manifests []Manifest) []Manifest {

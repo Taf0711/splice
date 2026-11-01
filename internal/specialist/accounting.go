@@ -7,9 +7,16 @@ import (
 
 	"github.com/Taf0711/splice/internal/background"
 	"github.com/Taf0711/splice/internal/sessions"
+	"github.com/Taf0711/splice/internal/streamjson"
 )
 
 const specialistAccountingSource = "specialist"
+
+// specialistPersistToolTail bounds how many distinct tool names survive into
+// the specialist_stop resume payload. The full per-call detail lives in the
+// child session; the payload only needs enough to rebuild the transcript card
+// after a restart.
+const specialistPersistToolTail = 8
 
 // accountingMu serializes the stop/usage accounting paths within this process as
 // a cheap fast path. The real dedup guarantee, however, comes from
@@ -35,6 +42,10 @@ type specialistAccountingInput struct {
 
 func (executor Executor) recordSpecialistStart(input specialistAccountingInput) {
 	payload := baseSpecialistPayload(input)
+	// Persist the running state on the start event so a resumed transcript
+	// renders the card as running instead of the error fallback used for a
+	// missing status.
+	payload["status"] = "running"
 	_, _ = appendSpecialistSessionEvent(executor.SessionStore, input.ParentSessionID, sessions.EventSpecialistStart, payload)
 }
 
@@ -55,9 +66,41 @@ func (executor Executor) recordSpecialistStop(input specialistAccountingInput, s
 	if len(summary.Errors) > 0 {
 		payload["errors"] = append([]string(nil), summary.Errors...)
 	}
+	// Persist a bounded snapshot of the child's tool calls so the parent
+	// transcript card survives a resume: total call count plus the distinct
+	// tool names (capped). The exact per-call arguments/outputs stay in the
+	// child session's drill-in transcript.
+	if count, names := toolCallStats(summary.Events); count > 0 {
+		payload["toolCount"] = count
+		if len(names) > 0 {
+			payload["tools"] = names
+		}
+	}
 	// Atomic check+append under the session lock so a concurrent stop path cannot
 	// also pass the existence check and write a duplicate stop event.
 	_, _ = appendSpecialistEventOnce(store, input.ParentSessionID, sessions.EventSpecialistStop, payload, input.ChildSessionID, summary.RunID)
+}
+
+// toolCallStats derives the total tool-call count and the ordered distinct
+// tool names from a child run's stream events. Used to persist a resume-safe
+// tool snapshot on the specialist_stop event.
+func toolCallStats(events []streamjson.Event) (count int, names []string) {
+	seen := map[string]bool{}
+	for _, event := range events {
+		if event.Type != streamjson.EventToolCall {
+			continue
+		}
+		count++
+		name := strings.TrimSpace(event.Name)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		if len(names) < specialistPersistToolTail {
+			names = append(names, name)
+		}
+	}
+	return count, names
 }
 
 func (executor Executor) rollUpSpecialistUsage(input specialistAccountingInput, summary StreamResult) bool {

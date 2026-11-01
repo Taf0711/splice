@@ -108,8 +108,12 @@ func matchCommandPrefix(toolName string, args map[string]any, options Options) (
 	return sandbox.CommandPrefixGrant{}, false, false
 }
 
+// shellExecutionArgsForApproval returns the arguments a prefix-approved shell
+// call runs with. A prefix approval runs the command outside the sandbox when
+// the sandbox allows that. A run that forbids sandbox escape keeps the
+// arguments as they are, so a prefix grant never escalates it.
 func shellExecutionArgsForApproval(toolName string, args map[string]any, action PermissionDecisionAction, options Options) map[string]any {
-	if !isShellCommandTool(toolName) || !shellPrefixApprovalBypassesSandbox(action) {
+	if options.NoSandboxEscape || !isShellCommandTool(toolName) || !shellPrefixApprovalBypassesSandbox(action) {
 		return args
 	}
 	if options.Sandbox == nil || !options.Sandbox.UnsandboxedExecutionAllowed() {

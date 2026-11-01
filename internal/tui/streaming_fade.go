@@ -266,6 +266,61 @@ func (m *model) resetStreamingFade() {
 // streaming block. Already-styled lines (markdown/code/table highlighting) are
 // returned unchanged so live colors match committed colors instead of snapping at
 // turn end.
+// sgrWrap renders single-line text in one style without a lipgloss pass
+// per line. A streamed reply re-styles every visible line on every frame,
+// and lipgloss.Render re-measures each one; the style's SGR codes are the
+// same for every settled line, so they are resolved once per frame.
+type sgrWrap struct {
+	style       lipgloss.Style
+	open, close string
+	ok          bool
+}
+
+func newSGRWrap(style lipgloss.Style) sgrWrap {
+	const marker = "\x01"
+	rendered := style.Render(marker)
+	i := strings.Index(rendered, marker)
+	if i < 0 || strings.Count(rendered, marker) != 1 {
+		return sgrWrap{style: style}
+	}
+	return sgrWrap{style: style, open: rendered[:i], close: rendered[i+len(marker):], ok: true}
+}
+
+func (w sgrWrap) render(line string) string {
+	// Tabs, newlines, and the empty string take lipgloss paths (tab
+	// expansion, multi-line padding) that plain wrapping would not match.
+	if !w.ok || line == "" || strings.ContainsAny(line, "\t\n") {
+		return w.style.Render(line)
+	}
+	return w.open + line + w.close
+}
+
+// styleStreamingLines styles a whole streamed block. Lines past the fade
+// window (almost all of a long reply) go through the per-frame SGR wrap;
+// only the few young lines pay for the fade palette.
+func (m model) styleStreamingLines(lines []string) {
+	ink := newSGRWrap(zeroTheme.ink)
+	var now time.Time
+	if m.fadeActive && m.lineAges != nil {
+		now = m.now()
+	}
+	for index, line := range lines {
+		if strings.Contains(line, "\x1b") {
+			continue
+		}
+		if !m.fadeActive || m.lineAges == nil {
+			lines[index] = ink.render(line)
+			continue
+		}
+		bornAt := streamingLineBornAt(index, len(lines), m.lineAges, m.lastStreamActivity)
+		if bornAt.IsZero() || now.Sub(bornAt) >= streamingFadeDuration {
+			lines[index] = ink.render(line)
+			continue
+		}
+		lines[index] = ageDimLine(line, bornAt, now, zeroTheme.ink)
+	}
+}
+
 func (m model) styleStreamingLine(line string, visualIndex, visualCount int) string {
 	if strings.Contains(line, "\x1b") {
 		return line

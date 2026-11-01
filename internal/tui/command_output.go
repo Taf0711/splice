@@ -44,6 +44,7 @@ type commandCard struct {
 	Summary  []string
 	Sections []commandCardSection
 	Actions  []string
+	Hints    []string
 }
 
 type commandCardSection struct {
@@ -103,6 +104,9 @@ func renderCommandCard(card commandCard) string {
 
 	if actions := compactCommandCardList(card.Actions); len(actions) > 0 {
 		lines = append(lines, "actions: "+strings.Join(actions, " | "))
+	}
+	for _, hint := range compactCommandCardList(card.Hints) {
+		lines = append(lines, "hint: "+hint)
 	}
 
 	return strings.Join(lines, "\n")

@@ -372,3 +372,33 @@ func TestStyleStreamingLinePreservesHighlightedLines(t *testing.T) {
 		t.Errorf("highlighted streaming line should be preserved, got %q want %q", out, line)
 	}
 }
+
+// The per-frame SGR wrap must be byte-identical to lipgloss for every line
+// it handles, in every theme, or streaming colors drift from settled rows.
+func TestSGRWrapMatchesLipgloss(t *testing.T) {
+	lines := []string{"hello", "  indented prose line", "unicode — ✓ 漢字", "x", "trailing space ", "a\ttab", ""}
+	for _, style := range []lipgloss.Style{zeroTheme.ink, zeroTheme.faint, zeroTheme.accent, zeroTheme.ink.Bold(true)} {
+		wrap := newSGRWrap(style)
+		for _, line := range lines {
+			if got, want := wrap.render(line), style.Render(line); got != want {
+				t.Fatalf("sgrWrap(%q) = %q, lipgloss = %q", line, got, want)
+			}
+		}
+	}
+}
+
+// The block styler must equal the per-line styler it replaces.
+func TestStyleStreamingLinesMatchesPerLine(t *testing.T) {
+	m := limeTestModel()
+	for _, fade := range []bool{false, true} {
+		m.fadeActive = fade
+		src := []string{"first line", "\x1b[1mpre-styled\x1b[0m", "", "last line"}
+		got := append([]string(nil), src...)
+		m.styleStreamingLines(got)
+		for i, line := range src {
+			if want := m.styleStreamingLine(line, i, len(src)); got[i] != want {
+				t.Fatalf("fade=%v line %d: block=%q per-line=%q", fade, i, got[i], want)
+			}
+		}
+	}
+}

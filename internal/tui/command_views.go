@@ -2,23 +2,242 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Taf0711/splice/internal/config"
+	"github.com/Taf0711/splice/internal/flags"
 	"github.com/Taf0711/splice/internal/providercatalog"
 	"github.com/Taf0711/splice/internal/sandbox"
+	splicerun "github.com/Taf0711/splice/internal/splice"
 	"github.com/Taf0711/splice/internal/tools"
 	"github.com/Taf0711/splice/internal/zerocommands"
 )
 
+// toolsSourceGroup is one per-source grouping of the registered tool catalog:
+// the built-in tools, or the tools owned by one MCP server.
+type toolsSourceGroup struct {
+	// Source is the display source label: "BUILTIN", the MCP server name, or
+	// "(unknown source)" when a registered MCP tool cannot be attributed to a
+	// configured server. Never invent a server name — unattributable tools land
+	// here so the card stays honest.
+	Source string
+	// Names are the tool names in the group, alpha-sorted, in registry form.
+	Names []string
+	// Hidden counts tools the run defers behind tool_search; 0 when none.
+	Hidden int
+	// State is the MCP connection state from the MCP view ("connected",
+	// "degraded", "disabled", "enabled"); empty for BUILTIN.
+	State string
+}
+
+const toolsUnknownSourceLabel = "(unknown source)"
+
+// toolsGroupBySource partitions the registered tools into per-source groups.
+// Builtin tools (no "mcp_" prefix) form the BUILTIN group. MCP tools are
+// attributed via MCPServerName() when the tool reports it, else via the server
+// token in the "mcp_<server>_<tool>" registry name matched against the
+// configured MCP servers. Anything unattributable goes to "(unknown source)".
+// hidden counts deferred MCP tools whose schemas the run withholds behind
+// tool_search (agent.Options.DeferThreshold > 0 with more eligible tools than
+// the threshold); the card surfaces them as "degraded — N tools hidden" so the
+// registration list never overstates what the model can call without loading.
+func toolsGroupBySource(registered []tools.Tool, state MCPViewState, deferThreshold int) []toolsSourceGroup {
+	builtinNames := []string{}
+	serverTools := map[string][]string{}
+	var unknownNames []string
+
+	sortedServers := make([]string, 0, len(state.Servers))
+	for _, server := range state.Servers {
+		sortedServers = append(sortedServers, server.Name)
+	}
+	sort.Strings(sortedServers)
+
+	serverTokenMap := mcpServerTokens(state)
+
+	// eligible counts deferral-eligible MCP tools so hidden can be derived
+	// against the run's DeferThreshold, mirroring the agent loop's gate.
+	eligible := 0
+	for _, tool := range registered {
+		if tools.IsDeferralEligible(tool) {
+			eligible++
+		}
+	}
+	deferActive := deferThreshold > 0 && eligible >= deferThreshold
+
+	// A deferred MCP tool's schema is withheld: count it as hidden. Deferral
+	// only applies to deferred-eligible tools; builtin tools are always eager.
+	deferredEligibleNames := map[string]bool{}
+	if deferActive {
+		for _, tool := range registered {
+			if tools.IsDeferralEligible(tool) {
+				deferredEligibleNames[tool.Name()] = true
+			}
+		}
+	}
+
+	for _, tool := range registered {
+		name := tool.Name()
+		if !strings.HasPrefix(name, "mcp_") {
+			builtinNames = append(builtinNames, name)
+			continue
+		}
+		if deferredEligibleNames[name] {
+			continue
+		}
+		server := toolsServerFor(tool, state, serverTokenMap)
+		if server == "" {
+			unknownNames = append(unknownNames, name)
+			continue
+		}
+		serverTools[server] = append(serverTools[server], name)
+	}
+	sort.Strings(builtinNames)
+	for _, names := range serverTools {
+		sort.Strings(names)
+	}
+
+	groups := make([]toolsSourceGroup, 0, 1+len(state.Servers)+1)
+	if len(builtinNames) > 0 {
+		groups = append(groups, toolsSourceGroup{Source: "BUILTIN", Names: builtinNames})
+	}
+	for _, server := range sortedServers {
+		view := mcpServerViewByName(state, server)
+		group := toolsSourceGroup{
+			Source: server,
+			Names:  serverTools[server],
+			State:  toolsServerStateLabel(view),
+		}
+		hidden := 0
+		for _, tool := range registered {
+			if !deferredEligibleNames[tool.Name()] {
+				continue
+			}
+			if toolsServerFor(tool, state, serverTokenMap) == server {
+				hidden++
+			}
+		}
+		group.Hidden = hidden
+		if len(group.Names) > 0 || hidden > 0 {
+			groups = append(groups, group)
+		}
+	}
+	if len(unknownNames) > 0 {
+		sort.Strings(unknownNames)
+		groups = append(groups, toolsSourceGroup{Source: toolsUnknownSourceLabel, Names: unknownNames})
+	}
+	return groups
+}
+
+// mcpServerTokens maps each configured server's sanitized name token (the token
+// registryToolName embeds in "mcp_<server>_<tool>") to the server's real name.
+func mcpServerTokens(state MCPViewState) map[string]string {
+	tokens := make(map[string]string, len(state.Servers))
+	for _, server := range state.Servers {
+		tokens[mcpStateSanitizeToolNamePart(server.Name)] = server.Name
+	}
+	return tokens
+}
+
+// toolsServerFor resolves a registered MCP tool's owning server name: the
+// tool's own MCPServerName() report when present, else the configured server
+// whose sanitized token the registry name carries, else "" (unknown).
+func toolsServerFor(tool tools.Tool, state MCPViewState, serverTokenMap map[string]string) string {
+	if named, ok := tool.(mcpServerNamedTool); ok {
+		if reported := strings.TrimSpace(named.MCPServerName()); reported != "" && mcpServerViewByName(state, reported) != nil {
+			return reported
+		}
+	}
+	rest, ok := strings.CutPrefix(tool.Name(), "mcp_")
+	if !ok {
+		return ""
+	}
+	tokens := make([]string, 0, len(serverTokenMap))
+	for token := range serverTokenMap {
+		tokens = append(tokens, token)
+	}
+	sort.Slice(tokens, func(left, right int) bool {
+		if len(tokens[left]) != len(tokens[right]) {
+			return len(tokens[left]) > len(tokens[right])
+		}
+		return tokens[left] < tokens[right]
+	})
+	for _, token := range tokens {
+		if strings.HasPrefix(rest, token+"_") {
+			return serverTokenMap[token]
+		}
+	}
+	return ""
+}
+
+func mcpServerViewByName(state MCPViewState, name string) *MCPServerView {
+	for index := range state.Servers {
+		if state.Servers[index].Name == name {
+			return &state.Servers[index]
+		}
+	}
+	return nil
+}
+
+// toolsServerStateLabel picks the connection label for a server section header:
+// "degraded" when the run defers tools behind tool_search, otherwise the
+// configured state ("disabled" or "connected" for an enabled server).
+func toolsServerStateLabel(view *MCPServerView) string {
+	if view == nil {
+		return ""
+	}
+	if strings.EqualFold(strings.TrimSpace(view.State), "disabled") {
+		return "disabled"
+	}
+	return "connected"
+}
+
+// toolsSummaryLine joins a section's state words ("degraded — 2 tools hidden")
+// with the frame's em-dash separator. Sits on the section title line.
+func toolsSummaryLine(group toolsSourceGroup) string {
+	parts := []string{}
+	switch {
+	case group.Hidden > 0:
+		parts = append(parts, "degraded", fmt.Sprintf("— %d tools hidden", group.Hidden))
+	case group.State != "":
+		parts = append(parts, group.State)
+	}
+	return strings.Join(parts, " ")
+}
+
+// toolsRenderSectionLines renders a group's tool names the way the frame lays
+// them out: four per wrapped line, double-spaced, aligned under the header.
+func toolsRenderSectionLines(group toolsSourceGroup) []string {
+	lines := make([]string, 0, 1+len(group.Names)/4+1)
+	if summary := toolsSummaryLine(group); summary != "" {
+		lines = append(lines, summary)
+	}
+	const perLine = 4
+	for start := 0; start < len(group.Names); start += perLine {
+		end := start + perLine
+		if end > len(group.Names) {
+			end = len(group.Names)
+		}
+		lines = append(lines, strings.Join(group.Names[start:end], "  "))
+	}
+	return lines
+}
+
+// toolsHints renders the registration-vs-access note the /tools frame carries:
+// registration only lists a tool; /permissions decides what runs.
+func toolsHints(groups []toolsSourceGroup) []string {
+	return []string{"every tool here is gated by /permissions — registration is not access"}
+}
+
 func (m model) toolsText() string {
 	registered := m.registeredTools()
 	count := len(registered)
-	if len(registered) == 0 {
+	if count == 0 {
 		return renderCommandCardTranscript(commandCard{
 			Title:   "Tools",
 			Summary: []string{"0 registered", "no tools available"},
@@ -32,33 +251,154 @@ func (m model) toolsText() string {
 		})
 	}
 
-	names := make([]string, 0, count)
-	for _, tool := range registered {
-		names = append(names, tool.Name())
+	state := m.mcpViewState()
+	groups := toolsGroupBySource(registered, state, m.agentOptions.DeferThreshold)
+
+	sections := make([]commandCardSection, 0, len(groups))
+	for _, group := range groups {
+		sections = append(sections, commandCardSection{
+			Title: group.Source,
+			Lines: toolsRenderSectionLines(group),
+		})
 	}
-	sort.Strings(names)
-	available := make([]string, 0, len(names))
-	for _, name := range names {
-		available = append(available, commandBullet(name))
+
+	summary := fmt.Sprintf("%d registered", count)
+	if len(groups) > 1 {
+		summary = fmt.Sprintf("%d registered · %d sources", count, len(groups))
 	}
 
 	return renderCommandCardTranscript(commandCard{
-		Title:   "Tools",
-		Summary: []string{fmt.Sprintf("%d registered", count), "registered catalog"},
-		Sections: []commandCardSection{
-			{
-				Title: "Registry",
-				Fields: []commandField{
-					{Key: "registered", Value: fmt.Sprint(count)},
-				},
-			},
-			{
-				Title: "Available",
-				Lines: available,
-			},
-		},
-		Actions: []string{"/mcp manage servers", "/permissions manage access"},
+		Title:    "Tools",
+		Summary:  []string{summary, "registered catalog"},
+		Sections: sections,
+		Actions:  []string{"/mcp manage servers", "/permissions manage access"},
+		Hints:    toolsHints(groups),
 	})
+}
+
+// flagsText renders the read-only /flags card. It shows the same rows as
+// `splice flags`: name, on or off, source, and an experimental marker.
+func (m model) flagsText() string {
+	if len(m.flagResolutions) == 0 {
+		return renderCommandCardTranscript(commandCard{
+			Title:   "Flags",
+			Summary: []string{"0 flags", "no flag state available"},
+		})
+	}
+	nameWidth, sourceWidth, on := 0, 0, 0
+	for _, r := range m.flagResolutions {
+		nameWidth = max(nameWidth, len(r.Name))
+		sourceWidth = max(sourceWidth, len(r.Source))
+		if r.Value {
+			on++
+		}
+	}
+	lines := make([]string, 0, len(m.flagResolutions))
+	for _, r := range m.flagResolutions {
+		value := "off"
+		if r.Value {
+			value = "on"
+		}
+		line := fmt.Sprintf("%-*s  %-3s  %-*s", nameWidth, r.Name, value, sourceWidth, r.Source)
+		if r.Definition.Stability == flags.Experimental {
+			line += "  experimental"
+		}
+		lines = append(lines, line)
+	}
+	return renderCommandCardTranscript(commandCard{
+		Title:    "Flags",
+		Summary:  []string{fmt.Sprintf("%d flags", len(m.flagResolutions)), fmt.Sprintf("%d on", on)},
+		Sections: []commandCardSection{{Title: "Resolved", Lines: lines}},
+		Hints:    []string{"set flags in config, SPLICE_FLAGS, or --flags; this list is read-only"},
+	})
+}
+
+// pipelineText renders the active topology card: the static graph, its
+// source, the compile warnings, and the command nodes. The card stores data
+// and renders at the live width. A resolve error is shown, never replaced by
+// the embedded default.
+func (m model) pipelineText() string {
+	card, err := buildPipelineGraphCard(m.cwd, m.trusted)
+	if err == nil {
+		var payload string
+		if payload, err = pipelineGraphCardPayload(card); err == nil {
+			return payload
+		}
+	}
+	return renderCommandCardTranscript(commandCard{
+		Title:    "Pipeline",
+		Summary:  []string{"topology did not resolve"},
+		Sections: []commandCardSection{{Title: "Error", Lines: []string{err.Error()}}},
+	})
+}
+
+// pipelineCommandText handles /pipeline. With no argument it is the read-only
+// view. "use <name>" selects a library pipeline through the same path as
+// `splice pipeline use`. It applies from the next run. "/pipeline edit" opens
+// the browser editor; the model handles it before this function.
+func (m model) pipelineCommandText(args string) string {
+	fields := strings.Fields(args)
+	if len(fields) == 0 {
+		return m.pipelineText()
+	}
+	if fields[0] != "use" || len(fields) != 2 {
+		return renderCommandCardTranscript(commandCard{
+			Title:   "Pipeline",
+			Summary: []string{"usage: /pipeline [use <name> | edit [--new] [name]]"},
+		})
+	}
+	card, _, _ := m.usePipeline(fields[1])
+	return card
+}
+
+// usePipeline selects a library pipeline. It returns the card to show, a
+// one-line result, and the refusal or error. /pipeline use and the browser
+// editor's "Use it now" both run it, so both refuse while a run is active.
+func (m model) usePipeline(name string) (card, text string, err error) {
+	if m.pending {
+		err = errors.New("Cannot change the pipeline while a run is active.")
+		return renderCommandCardTranscript(commandCard{
+			Title:   "Pipeline",
+			Summary: []string{err.Error()},
+		}), "", err
+	}
+	topology, path, err := splicerun.ActivateLibraryPipeline(name)
+	if err != nil {
+		return renderCommandCardTranscript(commandCard{
+			Title:    "Pipeline",
+			Summary:  []string{"pipeline not selected"},
+			Sections: []commandCardSection{{Title: "Error", Lines: []string{err.Error()}}},
+		}), "", err
+	}
+	hints := []string{"applies from the next run; /pipeline shows the active topology"}
+	text = "Active pipeline: " + topology.Name + ". It applies from the next run."
+	// A trusted project file outranks the library entry, so the selection does
+	// not run while that file is present.
+	if _, source, _, rerr := splicerun.ResolveTopology(splicerun.TopologySourcesFor(m.cwd, m.trusted)); rerr == nil && source == splicerun.TopologySourceProject {
+		hints = append(hints, "a trusted "+splicerun.TopologySourceProject+" still outranks this library entry")
+		text += " A trusted " + splicerun.TopologySourceProject + " still outranks it."
+	}
+	sections := []commandCardSection{}
+	if nodes := splicerun.CommandNodeLines(topology); len(nodes) > 0 {
+		lines := make([]string, 0, len(nodes))
+		for _, line := range nodes {
+			lines = append(lines, strings.TrimSpace(line))
+		}
+		sections = append(sections, commandCardSection{Title: "Command nodes", Lines: lines})
+	}
+	if nodes := splicerun.AgentNodeLines(topology); len(nodes) > 0 {
+		lines := make([]string, 0, len(nodes))
+		for _, line := range nodes {
+			lines = append(lines, strings.TrimSpace(line))
+		}
+		sections = append(sections, commandCardSection{Title: "Agent nodes", Lines: lines})
+	}
+	return renderCommandCardTranscript(commandCard{
+		Title:    "Pipeline",
+		Summary:  []string{"active pipeline: " + topology.Name, "source: " + path},
+		Sections: sections,
+		Hints:    hints,
+	}), text, nil
 }
 
 func (m *model) mcpText() string {
@@ -620,33 +960,56 @@ func (m model) contextText() string {
 				},
 			},
 		},
-		Actions: []string{"/permissions manage access", "/tools inspect catalog"},
+		Actions: []string{"/permissions show access", "/tools inspect catalog"},
 	})
 }
 
-func (m model) trustText() string {
-	if m.trusted {
-		return "Workspace is already trusted. No changes made."
+// applyTrustPickerChoice saves the selected action and updates the live trust
+// indicator. The pipeline topology follows the decision from the next run. The
+// project config, hooks, plugins, and MCP servers keep the startup decision
+// until the next launch.
+// The [V] view-config row is handled BEFORE the unknown-choice guard: it is an
+// inspection action, not a trust decision — it returns to the menu unchanged.
+func (m model) applyTrustPickerChoice(item pickerItem) (model, string, bool) {
+	if item.Value == trustActionView {
+		// Re-open the trust menu after the editor exits, and append the
+		// evidence card so the summary stays in the transcript.
+		cfg := describeProjectTrustConfig(m.projectTrustConfigPath())
+		m.trustConfigNotice(cfg)
+		return m, "", false
+	}
+	target := m.cwd
+	trusted := item.Value != trustActionDecline
+	if item.Value == trustActionParent {
+		target = filepath.Dir(m.cwd)
+	} else if item.Value != trustActionCurrent && item.Value != trustActionDecline {
+		return m, "Unknown trust choice.", false
 	}
 
-	store := m.trustStore
-	if store == nil {
-		path, err := config.DefaultTrustStorePath()
-		if err != nil {
-			return "Failed to save workspace trust decision: " + err.Error()
+	if m.trustStore == nil {
+		return m, "Failed to save workspace trust decision: trust store unavailable.", false
+	}
+	if err := m.trustStore.SetTrusted(target, trusted); err != nil {
+		return m, "Failed to save workspace trust decision: " + err.Error(), false
+	}
+	if item.Value == trustActionParent {
+		// An earlier decline for this folder is more specific than parent trust.
+		// Replace it so the parent choice also applies to this folder next time.
+		if err := m.trustStore.SetTrusted(m.cwd, true); err != nil {
+			return m, "Failed to save workspace trust decision: " + err.Error(), false
 		}
-		store, err = config.LoadTrustStore(path)
-		if err != nil {
-			return "Failed to save workspace trust decision: " + err.Error()
-		}
 	}
-	if err := store.SetTrusted(m.cwd, true); err != nil {
-		return "Failed to save workspace trust decision: " + err.Error()
+	if err := m.trustStore.Save(); err != nil {
+		return m, "Failed to save workspace trust decision: " + err.Error(), false
 	}
-	if err := store.Save(); err != nil {
-		return "Failed to save workspace trust decision: " + err.Error()
+
+	m.trusted = trusted
+	m.agentOptions.TrustedWorkspace = trusted
+	m.agentOptions.TrustRoot = m.cwd
+	if !trusted {
+		return m, "Workspace trust declined. This session stays untrusted.", true
 	}
-	return "Workspace trust decision saved. Restart Splice for the change to take effect. This session stays untrusted. Project commands, hooks, MCP servers, and plugins stay disabled until you restart."
+	return m, "Workspace trust saved. The pipeline topology applies from the next run. The project config, hooks, plugins, and MCP servers load on the next launch.", true
 }
 
 func (m model) registeredTools() []tools.Tool {

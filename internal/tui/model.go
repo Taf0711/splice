@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -22,11 +24,13 @@ import (
 	"github.com/Taf0711/splice/internal/config"
 	"github.com/Taf0711/splice/internal/doctor"
 	"github.com/Taf0711/splice/internal/errhint"
+	"github.com/Taf0711/splice/internal/flags"
 	"github.com/Taf0711/splice/internal/lsp"
 	internalmcp "github.com/Taf0711/splice/internal/mcp"
 	"github.com/Taf0711/splice/internal/memd"
 	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/notify"
+	"github.com/Taf0711/splice/internal/presentation"
 	"github.com/Taf0711/splice/internal/providerhealth"
 	"github.com/Taf0711/splice/internal/providermodeldiscovery"
 	"github.com/Taf0711/splice/internal/providers/providerio"
@@ -40,6 +44,7 @@ import (
 	"github.com/Taf0711/splice/internal/tools"
 	"github.com/Taf0711/splice/internal/usage"
 	"github.com/Taf0711/splice/internal/usercommands"
+	"github.com/Taf0711/splice/internal/worktrees"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
@@ -47,8 +52,20 @@ const tuiToolOutputLimit = 240
 const defaultResponseStyle = "concise"
 
 var (
-	tuiSpliceRun     = splicerun.Run
+	// tuiSpliceRun is the pipeline runner. Tests replace it. SPLICE_TUI_DEMO=worktree-reject
+	// swaps only this function (see tuiSpliceRunOrDemo) for scripts/tui-worktree-reject.tape.
+	tuiSpliceRun     = tuiSpliceRunOrDemo
 	tuiResolveMemory = memd.Resolve
+	// tuiPrepareWorktree and tuiUnlockWorktree are the exec Prepare/Unlock
+	// path. Tests replace them. disableTUIWorktreesForTest keeps the existing
+	// TUI suite on the live checkout.
+	tuiPrepareWorktree         = worktrees.Prepare
+	tuiUnlockWorktree          = worktrees.Unlock
+	tuiMergeBackWorktree       = worktrees.MergeBack
+	tuiPreserveWorktree        = worktrees.Preserve
+	tuiRemoveWorktree          = worktrees.Remove
+	tuiSourceDirty             = worktrees.SourceDirty
+	disableTUIWorktreesForTest = false
 )
 
 const chatWheelScrollLines = 5
@@ -72,28 +89,39 @@ const dragEdgeScrollInterval = 70 * time.Millisecond
 const dragEdgeScrollStep = 1
 
 type model struct {
-	ctx                         context.Context
-	cwd                         string
-	trusted                     bool
-	trustStore                  *config.TrustStore
-	appVersion                  string
-	userCommands                []usercommands.Command // file-sourced /commands (.splice/commands)
-	loadSkills                  func() []skills.Skill  // lazy installed-skills loader for /skills + /<skill-name>
-	userConfigPath              string
-	doctorUserConfigPath        string
-	projectConfigPath           string
-	gitBranch                   string
-	providerName                string
-	modelName                   string
-	modelCatalog                modelregistry.Registry
+	ctx                     context.Context
+	surface                 *tuiSurface
+	cwd                     string
+	trusted                 bool
+	trustStore              *config.TrustStore
+	trustPromptRequired     bool
+	appVersion              string
+	userCommands            []usercommands.Command // file-sourced /commands (.splice/commands)
+	loadSkills              func() []skills.Skill  // lazy installed-skills loader for /skills + /<skill-name>
+	userConfigPath          string
+	flagResolutions         []flags.Resolution
+	doctorUserConfigPath    string
+	doctorDecisionAdvisor   config.DecisionAdvisorConfig  // resolved section for the doctor's trajectory line
+	doctorTrajectoryProfile config.ProviderProfile        // profile the default classifier runs on, for the doctor line
+	doctorEvaluator         zeroruntime.DecisionEvaluator // the run's evaluator, for the doctor line
+	doctorGOOS              string                        // sandbox-backend check platform override; empty = runtime.GOOS
+	doctorLookupExecutable  func(string) (string, error)  // PATH stub for deterministic doctor checks; nil = exec.LookPath
+	projectConfigPath       string
+	gitBranch               string
+	providerName            string
+	modelName               string
+	modelCatalog            modelregistry.Registry
+	// costCatalogLoad builds a provider profile's pricing catalog. Nil means
+	// modelregistry.DefaultRegistry. Tests inject one.
+	costCatalogLoad             func(profile string) (modelregistry.Registry, error)
 	providerProfile             config.ProviderProfile
 	savedProviders              []config.ProviderProfile
 	provider                    zeroruntime.Provider
 	newProvider                 func(config.ProviderProfile) (zeroruntime.Provider, error)
-	stageModelResolver          agent.StageModelResolver
 	probeProviderHealth         func(context.Context, providerhealth.Options) providerhealth.Result
 	discoverProviderModels      func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
 	discoverOllamaContextWindow func(ctx context.Context, baseURL string, model string) (int, error)
+	discoverOllamaCapabilities  func(ctx context.Context, baseURL string, model string) (providermodeldiscovery.OllamaCapabilities, error)
 	registry                    *tools.Registry
 	// lspManager is created once per session and reused across prompts so gopls (and
 	// other language servers) stay warm — a fresh manager per run would cold-start
@@ -106,6 +134,8 @@ type model struct {
 	mcpPermissionStore   *internalmcp.PermissionStore
 	mcpTokenStore        *internalmcp.TokenStore
 	mcpCommand           func(context.Context, []string) MCPCommandResult
+	backendCommand       func(context.Context, []string) BackendCommandResult
+	refreshModelCatalog  func(context.Context, bool) (bool, error)
 	sandboxSetupCommand  func(context.Context) SandboxSetupCommandResult
 	mcpViewStateCache    MCPViewState
 	mcpViewStateReady    bool
@@ -185,6 +215,9 @@ type model struct {
 	memoryCount         int            // observation count when active
 	memoryByType        map[string]int // by-type breakdown when active
 	memoryNoticed       bool           // whether the transition notice has been emitted
+	worktrees           config.WorktreesConfig
+	activeWorktree      *worktrees.Result
+	worktreeNotice      string
 	pendingPlan         *schemas.DesignPlan
 	pendingCritique     *schemas.PlanCritique
 	planPanelPersistent bool // CP3: pin the crystallized DesignPlan above the chat during design mode
@@ -218,7 +251,18 @@ type model struct {
 	// renders the live elapsed time from it so a long or stalled turn never looks
 	// like a frozen terminal (for ANY provider, not just slow ones). Splice = idle.
 	turnStartedAt time.Time
-	queuedMessage string
+	// activeToolName/ID/Start track the tool call in flight for the active run.
+	// They are set when the call row lands in the transcript (agentRowMsg) and
+	// cleared when its result row lands, the run ends (success, failure,
+	// timeout), or the run is cancelled — so a stale tool can never animate an
+	// orphaned card or mislabel the working line. They drive the working line's
+	// "running <tool>" phase label and the running card's per-call elapsed
+	// clock; the existing spinner tick (~80ms) re-renders, so no second timer is
+	// needed. Only meaningful while pending and for the active run.
+	activeToolID    string
+	activeToolName  string
+	activeToolStart time.Time
+	queuedMessage   string
 	// loops holds the session's active /loop definitions (see loop.go). activeLoopID
 	// tags the in-flight run when it is a loop iteration (empty = a user turn), so the
 	// completion seam knows whether to advance a loop. loopSeq invalidates a stale
@@ -259,6 +303,7 @@ type model struct {
 	pendingPermission *pendingPermissionPrompt
 	pendingAskUser    *pendingAskUserPrompt
 	pendingSpecReview *pendingSpecReviewPrompt
+	herdr             agentLifecycleReporter
 	width             int
 	height            int
 	// hidePinnedPlan suppresses the pinned plan panel above the composer. Set on
@@ -277,6 +322,10 @@ type model struct {
 	// active the chat column's body shows the file's diff/content instead of the
 	// transcript, mirroring the subchat drill-in.
 	fileView fileViewState
+	// detailView is the Ctrl+O detail/evidence pane (GAP-G rest, §17): while
+	// active the chat column's body shows the run's evidence projection
+	// (evidence groups, interventions, receipt) re-read from lastState.
+	detailView detailViewState
 	// Git-sweep state (files_git_sweep.go): the startup snapshot of already-dirty
 	// paths (nil until Init's sweep answers), the newly dirty files discovered by
 	// live sweeps (bash/subagent mutations that carry no changedFiles), the
@@ -292,6 +341,11 @@ type model struct {
 	swarmDoneAt      map[string]time.Time
 	now              func() time.Time
 	chatScrollOffset int
+	// overlayBodyHeight is the measured transcript-body height for the frame
+	// being rendered. The empty-state overlay (the slash palette) sizes its
+	// padding against it so the block matches the viewport exactly: guessing
+	// from m.height clipped the card's lower rows on some geometries.
+	overlayBodyHeight int
 	// chatBodyLines is the live body's line count at the last update; used to pin
 	// the viewport (hold the read position) when content streams in while the user
 	// has scrolled up. 0 means "at the bottom / not pinned".
@@ -374,6 +428,13 @@ type model struct {
 	streamCallName    string
 	streamCallDecoder *streamingDecoder
 
+	// Ephemeral snapshot of the currently-running shell tool's bounded live
+	// output, keyed to the active tool call. Set by toolOutputSnapshotMsg while
+	// a bash/exec_command call runs and cleared when the call/run ends. Never
+	// appended to the transcript or session events.
+	liveToolCallID string
+	liveToolOutput string
+
 	// Slash-command autocomplete (purely additive UI state). suggestions is the
 	// live match list for the current "/token"; suggestionIdx is the highlighted
 	// row. commandPaletteOpen keeps a splice-match command search active so invalid
@@ -415,7 +476,14 @@ type model struct {
 	// (quit the app vs. cancel the current run) that are armed by different
 	// keys — Ctrl+C and Esc respectively.
 	cancelConfirmActive bool
-	cancelConfirmSeq    int
+	// execDirectPending arms CLI-parity behavior for the next launched prompt
+	// (set by /exec, consumed by launchPrompt).
+	execDirectPending bool
+	// activeExecDirect is true while the in-flight run was launched through
+	// /exec. Such a run executes under auto permission mode whatever the
+	// session selector shows (see the /exec notice in runAgentWithOptions).
+	activeExecDirect bool
+	cancelConfirmSeq int
 	// edgeScrollDelta drives the smooth-glide auto-scroll while a drag holds past
 	// the transcript's top/bottom edge: 0 when idle, else the signed per-tick step
 	// (matches transcriptEdgeScrollDelta's sign convention). A self-scheduling
@@ -479,6 +547,75 @@ type model struct {
 	// launched with. Nil in production; used by tests to assert compaction and
 	// run-config threading without a real provider round-trip.
 	captureRunOptions func(agent.Options)
+	// glyphTier selects the marker/progress rune set (v0.5 §9.1). ASCII is
+	// the production default; NO_COLOR also forces ASCII because color is
+	// the only channel the richer tiers add on top of width safety.
+	glyphTier presentation.GlyphTier
+	// trajectoryVisible toggles the trajectory inspection surface (§10,
+	// GAP-G). OFF by default (DoD 11): trajectory is an inspectable
+	// surface, not permanent screen furniture. Regression auto-reveals it
+	// (with an explicit notice); Ctrl+T toggles it back.
+	trajectoryVisible bool
+	// trajectoryAutoRevealed is true when the runtime revealed trajectory
+	// because of a regression, so the UI can say "auto-revealed" instead
+	// of pretending the user opened it.
+	trajectoryAutoRevealed bool
+	// lastState holds the most recent presentation snapshot so inspection
+	// surfaces (trajectory) render at render time from the latest runtime
+	// truth.
+	lastState presentation.State
+	// phaseTrail is the status bar's context trail (P1.4 delta, frame
+	// w0BIJA): the breadcrumb of lifecycle phases visited this session.
+	// Observed on every presentation state change; appended on CHANGE only,
+	// never rewinds; reset on session switch (the new session has its own
+	// story).
+	phaseTrail statusPhaseTrail
+	// narrationVerbosity is the live transcript verbosity (GAP-L, DoD 41):
+	// quiet collapses tool activity, detailed (the default) shows everything.
+	// It changes only what is SHOWN — never what is recorded — so switching
+	// is live-safe and resume-safe. Ctrl+N cycles it. Initialized to
+	// verbosityDetailed in newModel (the zero value is quiet).
+	narrationVerbosityLevel narrationVerbosity
+	// narrationSettledGeneration tracks which verbosity the settled snapshot
+	// was built at, so a switch rebuilds it (the visible row set changed
+	// without the frontier moving).
+	narrationSettledGeneration narrationVerbosity
+	// worktreeOp is the single in-flight worktree mutation scheduled by a
+	// user action (worktree_ops.go). Non-nil means Git work is running in
+	// a command goroutine; every action surface refuses to schedule a
+	// second one until its result lands.
+	worktreeOp *worktreeOpState
+	// pendingHandoff is the live handoff for the most recently exited lane
+	// (GAP-F): the [M] merge-back and [X] discard keys act on it. Nil when
+	// no handoff is offered or it was resolved.
+	pendingHandoff *handoffState
+	// lastTerminalReceipt remembers which terminal receipt card (GAP-E) is
+	// the live outcome surface, so the advertised [A]/[D]/[R]/[I]/[L] keys
+	// dispatch. Runtime state, not transcript scraping. Cleared when a new
+	// run begins or the session switches — the card stops being live then.
+	lastTerminalReceipt receiptKind
+	// sessionScanInFlight arms while the async session scan (F1 boundary:
+	// no store I/O on the UI loop) is running, so a second /resume or
+	// launch pass never spawns a duplicate scan.
+	sessionScanInFlight bool
+	// keySeq counts processed key presses. The session scan stamps its
+	// start seq; the landing picker arms only if the user has pressed
+	// nothing since — a scan landing after the user started typing never
+	// steals the composer (the typed runes may still be in flight when the
+	// msg processes, so an empty-composer check alone is not enough).
+	keySeq          uint64
+	scanStartKeySeq uint64
+	// resumePickerWanted marks a scan started by an explicit /resume: its
+	// landing arms the picker. Launch scans never do (no auto-open modals).
+	resumePickerWanted bool
+	// scannedLatest holds the newest qualifying workspace session from the
+	// last scan — the launch resume card's data source. Nil until a scan
+	// lands or when nothing qualified (honest absence).
+	scannedLatest *scannedSession
+	// diffView is the GAP-G diff review surface (§11): when active, the
+	// transcript body swaps to the worktree diff and the title bar swaps to
+	// the diff nav bar. Inactive is the zero value.
+	diffView diffViewState
 }
 
 type agentTextMsg struct {
@@ -520,6 +657,15 @@ type toolCallStreamDeltaMsg struct {
 	fragment string
 }
 
+// toolOutputSnapshotMsg carries a bounded snapshot of a running shell tool's
+// live output from the agent goroutine to the update loop. It is ephemeral
+// model state: it is never appended to the transcript or session events.
+type toolOutputSnapshotMsg struct {
+	runID    int
+	id       string
+	snapshot string
+}
+
 type agentReasoningMsg struct {
 	runID int
 	delta string
@@ -549,12 +695,24 @@ type agentResponseMsg struct {
 	turnVisibleOutputTokens int
 	// Memory sidecar state captured by the run goroutine and applied on the
 	// main thread so the status line can show whether memory is active.
-	memoryStatus string
-	memoryCount  int
-	memoryByType map[string]int
+	memoryStatus   string
+	memoryCount    int
+	memoryByType   map[string]int
+	worktree       *worktrees.Result
+	worktreeNotice string
+	sourceDirty    bool
 	// designTransition is a transition the design agent queued this turn. It is
 	// run only when the turn succeeded (msg.err == nil), after pending clears.
 	designTransition *splicerun.DesignTransitionRequest
+	// worktreePreserved/mergeAvailable for the HANDOFF card, computed in the
+	// run goroutine (off the UI loop) — F1, §14. mergeAvailable mirrors the
+	// review's dirty-main gate: preserved AND source not dirty.
+	worktreePreserved bool
+	mergeAvailable    bool
+	// receipt is the terminal receipt payload of a pipeline turn (/exec or a
+	// pipeline run), built in the run goroutine from the run's result or error.
+	// The same payload is persisted on the session event, so resume replays it.
+	receipt string
 }
 
 type agentRowMsg struct {
@@ -571,9 +729,13 @@ type planUpdateMsg struct {
 	items []tools.PlanItem
 }
 
-type pipelineStageMarkerMsg struct {
+// presentationStateMsg forwards a presentation.State snapshot from the
+// runtime's OnPresentationState callback to the live model (the callback
+// runs on the agent goroutine and captures model by value, so it cannot
+// mutate m.pipeline directly).
+type presentationStateMsg struct {
 	runID int
-	line  string
+	state presentation.State
 }
 
 // planStepExplanationMsg carries the model's fresh, plain-English write-up of a
@@ -693,6 +855,18 @@ type pendingPermissionPrompt struct {
 	// resting approval choice. Moved by ↑/↓/Tab; confirmed by Enter or a click.
 	// Hotkeys resolve the matching request-provided option directly.
 	cursor int
+	// designApproval, when non-nil, marks this prompt as the hard confirmation
+	// gate before an agent-requested plan execution runs. Resolution with
+	// Allow starts the confirmed execution; any other choice leaves the app
+	// idle (no plan_approved event and no run). See startApproval.
+	designApproval *designApprovalPrompt
+}
+
+// designApprovalPrompt carries the context needed to start plan execution
+// once the user confirms an agent-requested approval. It points at the planID
+// whose plan_approved event the confirmed run will record.
+type designApprovalPrompt struct {
+	planID string
 }
 
 // askUserRequestMsg is the TUI-loop equivalent of permissionRequestMsg: the
@@ -707,14 +881,29 @@ type askUserRequestMsg struct {
 // pendingAskUserPrompt tracks an in-progress questionnaire rendered in the composer
 // region as a row of tabs — one per question plus a trailing Confirm tab. Questions
 // are answered in any order (Tab switches); the answer callback is invoked exactly
-// once when the user submits on the Confirm tab or dismisses (Esc). active is the
-// current tab (0..N-1 = questions, N = Confirm); states holds the per-question
-// picker/free-text state and committed answer. See ask_user_prompt.go.
+// once when the user submits on the Confirm tab. Esc while the questionnaire is
+// active cancels the whole run without invoking the callback (see cancelRun),
+// unless keepOnEsc is set (worktree review: Esc means keep).
+// active is the current tab (0..N-1 = questions, N = Confirm); states holds the
+// per-question picker/free-text state and committed answer. See ask_user_prompt.go.
 type pendingAskUserPrompt struct {
-	request agent.AskUserRequest
-	answer  func([]string)
-	active  int
-	states  []askUserAnswerState
+	// othersRunning is set at render time: specialists still in flight
+	// while this question waits. The gate footer must not claim "no work
+	// running" when they are.
+	othersRunning int
+	request       agent.AskUserRequest
+	answer        func([]string)
+	active        int
+	states        []askUserAnswerState
+	keepOnEsc     bool
+	worktree      *worktrees.Result
+	dirtyMain     bool
+	// reviewDecision is empty on the review decision prompt; it is
+	// worktreeReviewReject on the follow-up reject-reason prompt.
+	reviewDecision string
+	// startedAt is when the gate opened, for the NEEDS YOU wait timer
+	// (P3 gate signature). Zero means unknown and hides the timer.
+	startedAt time.Time
 }
 
 type pendingSpecReviewPrompt struct {
@@ -736,13 +925,24 @@ const (
 type tuiAgentRunOptions struct {
 	registry       *tools.Registry
 	permissionMode agent.PermissionMode
-	systemPrompt   string
-	runKind        tuiRunKind
-	priorMessages  []zeroruntime.Message
-	serverTools    []zeroruntime.ServerTool
+	// execDirect marks a run launched through /exec so it matches headless
+	// `splice exec` semantics instead of inheriting conversation state.
+	execDirect    bool
+	systemPrompt  string
+	runKind       tuiRunKind
+	priorMessages []zeroruntime.Message
+	serverTools   []zeroruntime.ServerTool
 	// transition is the per-turn recorder for the design-transition tools. It
 	// is set only for design-conversation runs, and only they drain it.
 	transition *splicerun.DesignTransitionRecorder
+	// decisions is the per-turn ledger for the pin_design_decision tool
+	// (§7.1). Design-conversation runs drain it into decision_pinned
+	// session events after the turn.
+	decisions *splicerun.DecisionRecorder
+	// openQuestions is the per-turn ledger for the raise_open_question tool
+	// (§7.1). Design-conversation runs drain it into open_question_raised
+	// session events after the turn.
+	openQuestions *splicerun.OpenQuestionRecorder
 }
 
 func newModel(ctx context.Context, options Options) model {
@@ -802,6 +1002,10 @@ func newModel(ctx context.Context, options Options) model {
 	if doctorUserConfigPath == "" {
 		doctorUserConfigPath = options.UserConfigPath
 	}
+	// Deterministic doctor checks: tests can pin the sandbox platform and the
+	// PATH lookups so the sandbox/LSP results do not depend on the host.
+	doctorGOOS := options.DoctorGOOS
+	doctorLookup := options.DoctorLookupExecutable
 
 	permissionMode := options.PermissionMode
 	if permissionMode == "" {
@@ -810,9 +1014,14 @@ func newModel(ctx context.Context, options Options) model {
 	if permissionMode == "" {
 		permissionMode = agent.PermissionModeAuto
 	}
-	asciiEnabled := spliceASCIIEnabled(os.Getenv)
+	asciiEnabled := spliceASCIIEnabled(os.Getenv) || presentation.TerminalNeedsASCII(os.Getenv)
 
 	input := textinput.New()
+	// Pen composer grammar (frames kAYHl / ws5rS / design frames): the
+	// prompt row is a BARE line — "> _" on the launch screen, "❯ <text>"
+	// while typing, "∞ steer this run…" while a run is in flight — never a
+	// bordered box. The glyph swaps at render time (composerVisualLinePrefix
+	// / composerBox); the base prompt is the in-run ∞.
 	input.Prompt = "∞ "
 	input.Placeholder = composerPlaceholder
 	// Bubble's Ctrl+V binding reads the clipboard itself. Keep it disabled so
@@ -833,19 +1042,30 @@ func newModel(ctx context.Context, options Options) model {
 	notifier.SetFocused(true)
 
 	resolvedKeyBindings, keyBindingWarnings := sanitizeKeyBindings(resolveKeyBindings(options.KeyBindings))
+	options.AgentOptions.TrustedWorkspace = options.Trusted
+	// Trust was resolved for the launch directory, which is cwd.
+	options.AgentOptions.TrustRoot = cwd
 
 	m := model{
+		surface:                     newTUISurface(),
 		ctx:                         ctx,
 		cwd:                         cwd,
 		trusted:                     options.Trusted,
 		trustStore:                  options.TrustStore,
+		trustPromptRequired:         options.TrustPrompt,
 		appVersion:                  strings.TrimSpace(options.Version),
 		swarmDoneAt:                 map[string]time.Time{},
 		userCommands:                loadedUserCommands,
 		loadSkills:                  options.LoadSkills,
 		composerCursorVisible:       true,
 		userConfigPath:              options.UserConfigPath,
+		flagResolutions:             options.FlagResolutions,
 		doctorUserConfigPath:        doctorUserConfigPath,
+		doctorDecisionAdvisor:       options.DecisionAdvisor,
+		doctorTrajectoryProfile:     options.DoctorTrajectoryProfile,
+		doctorEvaluator:             options.DoctorEvaluator,
+		doctorGOOS:                  doctorGOOS,
+		doctorLookupExecutable:      doctorLookup,
 		projectConfigPath:           options.ProjectConfigPath,
 		savedProviders:              options.SavedProviders,
 		gitBranch:                   gitBranch(cwd),
@@ -856,11 +1076,13 @@ func newModel(ctx context.Context, options Options) model {
 		favoriteModels:              favoriteModelSet(options.FavoriteModels),
 		recapsEnabled:               options.RecapsEnabled,
 		compaction:                  options.Compaction,
+		worktrees:                   options.Worktrees,
 		provider:                    options.Provider,
 		newProvider:                 options.NewProvider,
 		probeProviderHealth:         options.ProbeProviderHealth,
 		discoverProviderModels:      options.DiscoverProviderModels,
 		discoverOllamaContextWindow: options.DiscoverOllamaContextWindow,
+		discoverOllamaCapabilities:  options.DiscoverOllamaCapabilities,
 		registry:                    registry,
 		sessionStore:                sessionStore,
 		sandboxStore:                sandboxStore,
@@ -868,6 +1090,8 @@ func newModel(ctx context.Context, options Options) model {
 		mcpPermissionStore:          options.MCPPermissionStore,
 		mcpTokenStore:               options.MCPTokenStore,
 		mcpCommand:                  options.MCPCommand,
+		backendCommand:              options.BackendCommand,
+		refreshModelCatalog:         options.RefreshModelCatalog,
 		sandboxSetupCommand:         options.SandboxSetupCommand,
 		agentOptions:                options.AgentOptions,
 		sessionCompactor:            options.SessionCompactor,
@@ -902,6 +1126,16 @@ func newModel(ctx context.Context, options Options) model {
 		applyTheme(m.themeMode, true)
 	}
 	m.reducedMotion = defaultReducedMotion()
+	// GAP-L: the default verbosity is detailed (the zero value is quiet, so
+	// it must be set explicitly at construction).
+	m.narrationVerbosityLevel = verbosityDetailed
+	// GAP-K DoD 36: apply the persisted layout preset. Unknown/empty names
+	// keep the built-in defaults (fail-quiet at startup is correct here: the
+	// preference is a hint, not runtime truth, and a renamed preset must not
+	// brick the TUI).
+	if preset, ok := layoutPresetByName(strings.ToLower(strings.TrimSpace(options.SavedLayout))); ok {
+		m = m.applyLayoutPreset(preset)
+	}
 	// The streaming-text fade (a lime→ink glow on freshly streamed lines) is
 	// disabled: it read as a distracting glow rather than a subtle liveness cue.
 	// Streaming text always renders statically at base ink (the disabled path in
@@ -910,7 +1144,7 @@ func newModel(ctx context.Context, options Options) model {
 	// One session-long LSP manager (cheap to build — servers start lazily on the
 	// first Check), reused across prompts so gopls stays warm between turns.
 	if cwd != "" {
-		m.lspManager = lsp.NewManager(cwd)
+		m.lspManager = lsp.NewManager(cwd, options.Trusted)
 	}
 	m.refreshMCPViewState()
 	for _, warning := range keyBindingWarnings {
@@ -921,6 +1155,12 @@ func newModel(ctx context.Context, options Options) model {
 	// sends a turn in design mode; that keeps construction-time model creation
 	// free of side effects while still making the default phase planning-first.
 	m.designMode = true
+	// Glyph tier selection: SPLICE_GLYPH_TIER overrides; a UTF-8 locale
+	// upgrades to the Pen rich set (◉ ✓ ✗ ▲ ○ ◆); NO_COLOR forces ASCII —
+	// when color is off, markers are the only state channel, so they must
+	// be width-exact everywhere.
+	m.glyphTier = presentation.SelectGlyphTier(os.Getenv)
+	pipelineGlyphTier = m.glyphTier
 	return m
 }
 
@@ -950,28 +1190,58 @@ func (m *model) rebuildModelCatalog() {
 
 func (m model) doctorOptions(connectivity bool) doctor.Options {
 	var health *providerhealth.Result
-	if connectivity && m.probeProviderHealth != nil && config.HasProviderProfile(m.providerProfile) {
-		ctx := m.ctx
-		if ctx == nil {
-			ctx = context.Background()
+	if connectivity && m.probeProviderHealth != nil {
+		// The probe sends the stored credential, as a run does. When the
+		// credential cannot be read, do not probe: a keyless probe returns a
+		// generic 401 that hides the read error. Report the read error as the
+		// connectivity failure instead. The error text names the provider and
+		// the store, never the key.
+		probeProfile, err := m.profileWithCredential(m.providerProfile)
+		if err != nil {
+			health = &providerhealth.Result{
+				Status: providerhealth.StatusFail,
+				Checks: []providerhealth.Check{{
+					ID:       "provider.credential",
+					Label:    "Provider credential",
+					Status:   providerhealth.StatusFail,
+					Category: providerhealth.CategoryConfig,
+					Message:  err.Error(),
+				}},
+			}
+		} else if config.HasProviderProfile(probeProfile) {
+			ctx := m.ctx
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			result := m.probeProviderHealth(ctx, providerhealth.Options{
+				Profile:      probeProfile,
+				Connectivity: true,
+				UserAgent:    m.userAgent,
+			})
+			health = &result
 		}
-		result := m.probeProviderHealth(ctx, providerhealth.Options{
-			Profile:      m.providerProfile,
-			Connectivity: true,
-			UserAgent:    m.userAgent,
-		})
-		health = &result
 	}
 
 	return doctor.Options{
-		Now:            m.now,
-		Runtime:        "go",
-		UserConfig:     m.doctorUserConfigPath,
-		ProjectConfig:  m.projectConfigPath,
-		Provider:       m.providerProfile,
-		WorkspaceRoot:  m.cwd,
-		Connectivity:   connectivity,
-		ProviderHealth: health,
+		Now:               m.now,
+		Runtime:           "go",
+		UserConfig:        m.doctorUserConfigPath,
+		ProjectConfig:     m.projectConfigPath,
+		Provider:          m.providerProfile,
+		DecisionAdvisor:   m.doctorDecisionAdvisor,
+		TrajectoryProfile: m.doctorTrajectoryProfile,
+		Evaluator:         m.doctorEvaluator,
+		Flags:             flagSetFromResolutions(m.flagResolutions),
+		WorkspaceRoot:     m.cwd,
+		Connectivity:      connectivity,
+		ProviderHealth:    health,
+		GOOS:              m.doctorGOOS,
+		LookupExecutable: func(name string) (string, error) {
+			if m.doctorLookupExecutable != nil {
+				return m.doctorLookupExecutable(name)
+			}
+			return exec.LookPath(name)
+		},
 	}
 }
 
@@ -1008,10 +1278,17 @@ func (m model) Init() tea.Cmd {
 	// terminal's unprompted push — mirrors the RequestBackgroundColor request
 	// below for the same reason.
 	cmds = append(cmds, tea.RequestWindowSize)
+	// Refresh a stale model catalog in the background; a newer one rebuilds
+	// the catalog in place (model_catalog_refresh.go).
+	if cmd := m.modelCatalogRefreshCmd(false); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
 	// Baseline git snapshot for the FILES sidebar sweep: whatever is already
 	// dirty when the TUI opens is pre-existing state, not this session's work
 	// (files_git_sweep.go). Async; a non-git workspace just disables the sweep.
-	if strings.TrimSpace(m.cwd) != "" {
+	// An untrusted workspace gets no git at all: a repo filter driver runs
+	// during git status and diff, so git must wait for the trust decision.
+	if strings.TrimSpace(m.cwd) != "" && m.trusted {
 		cmds = append(cmds, gitSweepCmd(m.ctx, m.cwd, true))
 	}
 	// In auto mode, ask the terminal for its background color; the reply arrives
@@ -1035,22 +1312,41 @@ func (m model) Init() tea.Cmd {
 		if cmd := m.ollamaContextWindowDiscoveryCmd(descriptor, m.providerProfile.BaseURL, m.modelName); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
-	}
-	if m.prService != nil && m.runtimeMessageSink != nil {
-		service := m.prService
-		sink := m.runtimeMessageSink
-		ctx := m.ctx
-		if ctx == nil {
-			ctx = context.Background()
+		// The same /api/show probe also carries the declared capability list,
+		// which drives the surgical negative tool-calling overlay (LL4).
+		if cmd := m.ollamaCapabilitiesDiscoveryCmd(descriptor, m.providerProfile.BaseURL, m.modelName); cmd != nil {
+			cmds = append(cmds, cmd)
 		}
-		cmds = append(cmds, func() tea.Msg {
-			stop := WatchPRStateContext(ctx, service, func(state PrState) {
-				sink(prStateMsg{state: state})
-			})
-			return prWatcherStartedMsg{stop: stop}
-		})
+	}
+	if cmd := m.prWatcherCmd(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	// Async session scan (F1, §14): the resume picker and launch card arm
+	// from the sessionsScannedMsg — never from store I/O on the UI loop.
+	if _, scanCmd := m.openLaunchSessionPicker(); scanCmd != nil {
+		cmds = append(cmds, scanCmd)
 	}
 	return tea.Batch(cmds...)
+}
+
+// prWatcherCmd starts the PR and merge-request watcher. It returns nil until the
+// workspace is trusted: gh and glab read the repository's remotes and config.
+func (m model) prWatcherCmd() tea.Cmd {
+	if !m.trusted || m.prService == nil || m.runtimeMessageSink == nil {
+		return nil
+	}
+	service := m.prService
+	sink := m.runtimeMessageSink
+	ctx := m.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return func() tea.Msg {
+		stop := WatchPRStateContext(ctx, service, func(state PrState) {
+			sink(prStateMsg{state: state})
+		})
+		return prWatcherStartedMsg{stop: stop}
+	}
 }
 
 func (m *model) stopPRWatcher() {
@@ -1070,10 +1366,31 @@ func (m model) noBlockingModal() bool {
 		m.providerWizard == nil && m.stageModelWizard == nil && m.mcpAddWizard == nil && m.mcpManager == nil && m.picker == nil
 }
 
+// cardKeysOwnInput reports whether an advertised card action key may claim
+// a printable keypress (review finding 2: "give one explicit surface
+// ownership of each key event"). Three conditions must hold.
+//
+// No modal owns input, including the help overlay, which noBlockingModal
+// alone does not cover (the provider setup wizard is already one of its
+// modal fields).
+//
+// The composer must be EMPTY. While a draft exists the user is writing a
+// sentence, and every printable key belongs to that sentence: an uppercase
+// R inside "Please Revise" must stay text, never a card action. An empty
+// composer is the state the card's advertised keys were rendered for.
+func (m model) cardKeysOwnInput() bool {
+	if !m.noBlockingModal() || m.helpOverlay {
+		return false
+	}
+	return strings.TrimSpace(m.composerValue()) == ""
+}
+
 func (m model) quit() (tea.Model, tea.Cmd) {
+	m.surface.stop()
 	m.stopPRWatcher()
 	m.stopAllBackgroundTerminalSessions()
 	m.shutdownLSPManager()
+	unlockPreparedWorktree(m.activeWorktree)
 	return m, tea.Quit
 }
 
@@ -1180,6 +1497,48 @@ func batchCommands(cmds ...tea.Cmd) tea.Cmd {
 }
 
 func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// HANDOFF keys (GAP-F, DoD 28): [M] merge back now and [X] discard
+	// lane act on the pending handoff when a lane has exited with
+	// preserved work and no modal owns input. Each dispatches the SAME
+	// runtime seam the worktree review uses (tuiMergeBackWorktree /
+	// tuiRemoveWorktree), so the handoff never mutates files independently
+	// of the tested path. Intercepted before the main switch so plain-key
+	// handlers (composer echo) cannot swallow them.
+	//
+	// Ownership (review finding 2): these keys dispatch only while the
+	// COMPOSER IS EMPTY. A card advertises its keys to a user who is not
+	// mid-sentence; once a draft exists the composer owns every printable
+	// key, so typing "Move the..." can never merge a worktree. The run
+	// gate is explicit here too: a new run means the previous lane's card
+	// is no longer the live surface (beginRun does not disarm it).
+	if keyMsg, ok := msg.(tea.KeyMsg); ok && m.pendingHandoff != nil &&
+		m.pendingHandoff.preserved && !m.pending && m.cardKeysOwnInput() {
+		if handled, model, cmd := m.handleHandoffKey(keyMsg); handled {
+			return model, cmd
+		}
+	}
+	// Diff review keys (GAP-G, §11): while the diff viewport is active it
+	// owns n/a/j/o and scrolling, before the main switch (the same
+	// interception point the handoff keys use). Esc/scroll fall through to
+	// the diff handler FIRST so a plain-key handler cannot swallow them;
+	// unhandled keys keep processing (composer stays reachable by Esc out).
+	if keyMsg, ok := msg.(tea.KeyMsg); ok && m.diffView.active {
+		if handled, model, cmd := m.handleDiffReviewKey(keyMsg); handled {
+			return model, cmd
+		}
+	}
+	// Receipt and lifecycle-card keys (GAP-E action rows, P4 approve rows):
+	// the terminal receipt cards and the pending plan/critique cards
+	// advertise [A]/[D]/[R]/[I]/[L]/[F] keys. They dispatch when no modal
+	// owns input, the run is released, and an armed handoff did not just
+	// claim the key (the handoff's [D] means review-diff there, not
+	// discard). Plain lowercase letters fall through to the composer.
+	if keyMsg, ok := msg.(tea.KeyMsg); ok && !m.pending && m.cardKeysOwnInput() &&
+		!(m.pendingHandoff != nil && m.pendingHandoff.preserved) {
+		if handled, model, cmd := m.handleReceiptKey(keyMsg); handled {
+			return model, cmd
+		}
+	}
 	switch msg := msg.(type) {
 	case composerBlinkMsg:
 		m.composerCursorVisible = !m.composerCursorVisible
@@ -1216,6 +1575,20 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.copyStatus = ""
 		}
 		return m, nil
+	case diffCopiedMsg:
+		// GAP-G [E]: the hunk copy reports through the same status readout as
+		// the transcript selection copy. Failure keeps the view open for a
+		// retry; success reports the copied size.
+		m.copyStatusSeq++
+		if msg.err != nil {
+			m.copyStatus = "Copy failed"
+		} else {
+			m.copyStatus = fmt.Sprintf("Copied hunk (%d chars)", msg.chars)
+		}
+		seq := m.copyStatusSeq
+		return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
+			return transcriptCopyStatusExpiredMsg{seq: seq}
+		})
 	case exitConfirmExpiredMsg:
 		if msg.seq == m.exitConfirmSeq {
 			m.exitConfirmActive = false
@@ -1230,8 +1603,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.seq != m.edgeScrollSeq || m.edgeScrollDelta == 0 || !m.transcriptSelection.active {
 			return m, nil // stale, or the chain was stopped since this tick was scheduled
 		}
-		m = m.dragToEdgeScroll(m.edgeScrollDelta, m.edgeScrollMouseX)
-		return m, dragEdgeScrollTickCmd(m.edgeScrollSeq)
+		var clear tea.Cmd
+		m, clear = m.dragToEdgeScroll(m.edgeScrollDelta, m.edgeScrollMouseX)
+		return m, tea.Batch(clear, dragEdgeScrollTickCmd(m.edgeScrollSeq))
 	case providerWizardOAuthMsg:
 		return m.applyProviderWizardOAuth(msg)
 	case providerWizardDeviceCodeMsg:
@@ -1264,7 +1638,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.PasteMsg:
 		return m.routePaste(msg.Content)
 	case tea.KeyPressMsg:
-		if m.setup.visible {
+		m.keySeq++
+		if m.trustPromptRequired && m.picker != nil && m.picker.kind == pickerTrust {
+			if keyCtrl(msg, 'c') || keyIs(msg, tea.KeyEsc) {
+				return m, nil
+			}
+		} else if m.setup.visible {
 			return m.handleSetupKey(msg)
 		}
 		m.transcriptSelection = transcriptSelectionState{}
@@ -1293,6 +1672,22 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleCtrlC()
 		case m.keyMatch(m.keyBindings.toggleDetailed, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'o') }):
 			return m.toggleDetailedTranscript(), nil
+		case keyCtrl(msg, 'g'):
+			// GAP-G rest (§17): the detail/evidence pane toggle. Ctrl+O stays
+			// the detailed-transcript toggle (its pinned contract and tests);
+			// the pane gets its own chord.
+			return m.toggleDetailView(), nil
+		case m.keyMatch(m.keyBindings.toggleNarration, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'n') }) && !m.transcriptDetailed:
+			// GAP-L (DoD 41): cycle the live narration verbosity. A pure
+			// projection change: nothing recorded is dropped, and the height
+			// cache must re-measure because the visible row set changed.
+			m.narrationVerbosityLevel = m.narrationVerbosityLevel.next()
+			m.altScreenSettledWidth = 0
+			return m, nil
+		case m.detailView.active && m.noBlockingModal() && m.composerValue() == "" && m.detailGraphKey(msg):
+			// The Ctrl+G pane's graph selection and node drawer, only while
+			// the composer is empty, so typing is never captured.
+			return m.handleDetailGraphKey(msg), nil
 		case m.fileView.active && m.noBlockingModal() && m.composerValue() == "" && (keyText(msg) == "d" || keyText(msg) == "f"):
 			// Mode toggle for the file drill-in, only while the composer is empty
 			// (so mid-sentence typing is never hijacked) and no modal is up (so a
@@ -1334,6 +1729,14 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.fileView.active && m.noBlockingModal() {
 				return m.exitFileView(), nil
 			}
+			// An open node drawer closes first, then the pane.
+			if m.detailView.active && m.detailView.drawerOpen && m.noBlockingModal() {
+				return m.closePipelineDrawer(), nil
+			}
+			// Detail pane exits on Esc (same drill-in contract).
+			if m.detailView.active && m.noBlockingModal() {
+				return m.exitDetailView(), nil
+			}
 			if m.mcpCommandCancel != nil {
 				m.cancelMCPCommand()
 				if m.mcpAddWizard != nil {
@@ -1348,12 +1751,19 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.transcriptDetailed = false
 				return m, nil
 			}
-			// Esc on an ask-user prompt: from the "type my own" free-text it steps
-			// back to the selector for that question; otherwise it cancels the
-			// questionnaire (not the run), delivering whatever answers were collected
-			// so the agent loop unblocks and degrades to its best-assumption path.
+			// Esc on an ask-user prompt cancels the whole active run immediately. It
+			// must not submit partial/empty answers and must not leave the agent
+			// running: cancelRun releases the run context (which unblocks the loop's
+			// OnAskUser), clears the questionnaire and run state, and writes the
+			// standard "Run cancelled." marker. Worktree review is post-run: Esc
+			// means keep, so invoke the answer callback with no answers instead.
 			if m.pendingAskUser != nil {
-				return m.escapeAskUser()
+				if m.pendingAskUser.keepOnEsc {
+					return m.submitAskUser()
+				}
+				m.clearComposer()
+				m.cancelRun()
+				return m, nil
 			}
 			if m.pendingSpecReview != nil {
 				return m.cancelSpecReview()
@@ -1387,6 +1797,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// A live theme preview was applied while navigating; restore the
 					// committed palette since Esc dismisses without choosing.
 					m.restoreCommittedTheme()
+				}
+				if m.picker.kind == pickerTrust && m.trustPromptRequired {
+					// The mandatory first-run trust menu cannot be dismissed without a
+					// choice, so Esc is ignored and the user stays on the menu.
+					return m, nil
 				}
 				m.picker = nil
 				return m, nil
@@ -1487,10 +1902,33 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// and let the key fall through to their own handlers below.
 			if m.noBlockingModal() {
 				m.permissionMode = nextPermissionMode(m.permissionMode)
+				outcome := "ask: each tool asks first"
+				if m.permissionMode == agent.PermissionModeAuto {
+					outcome = "auto: tools run without asking"
+				}
+				// A run copies the mode at launch, so a toggle during a run
+				// takes effect only from the next run.
+				if m.pending {
+					outcome = string(m.permissionMode) + ": applies from the next run"
+				}
+				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: ackSystemText(ack{
+					verb:    "permissions",
+					outcome: outcome,
+				})})
 				return m, nil
 			}
 		case m.keyMatch(m.keyBindings.cycleReasoning, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 't') }):
 			if m.transcriptDetailed {
+				return m, nil
+			}
+			// During an execution run, Ctrl+T toggles the trajectory
+			// surface (§10, GAP-G): a run in flight is when trajectory is
+			// worth inspecting, and the contract names Ctrl+T for it.
+			// Outside a run (design mode, idle) it keeps cycling reasoning
+			// effort — the pre-existing binding, unchanged.
+			if m.pipeline.active && m.noBlockingModal() {
+				m.trajectoryVisible = !m.trajectoryVisible
+				m.trajectoryAutoRevealed = false
 				return m, nil
 			}
 			// Ctrl+T cycles reasoning effort (auto -> low ->
@@ -1523,6 +1961,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.input.SetWidth(maxInt(20, m.chatColumnWidth()-14))
 				return m, nil
 			}
+			// Compact widths remove the sidebar (collapse, not crush), so the
+			// same key opens its modules as a full-width sheet over the body.
+			if m.altScreen && !m.transcriptDetailed && m.noBlockingModal() && m.compactWidth() && !m.subchat.active {
+				return m.toggleDetailView(), nil
+			}
+		case keyCtrl(msg, 'r') && m.picker != nil && m.picker.kind == pickerModel:
+			// Ctrl+R in /model: fetch the latest catalog now and re-run live
+			// discovery, so new models and their effort levels appear.
+			return m, tea.Batch(m.modelCatalogRefreshCmd(true), m.modelPickerDiscoveryCmds())
 		case keyCtrl(msg, 'f'):
 			if m.picker != nil && m.picker.kind == pickerModel {
 				if m.modelPickerIsLoading() {
@@ -1580,16 +2027,36 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.mcpManager != nil {
 				return m.handleMCPManagerKey(msg)
 			}
+			if m.picker != nil && m.picker.kind == pickerModel && !m.modelPickerIsLoading() {
+				// Tab is inert on the /model picker: the long-context
+				// toggle it drove had no runtime consumer and was removed
+				// (review finding 15). Swallow it so Tab does not fall
+				// through to suggestion cycling while the picker owns input.
+				return m, nil
+			}
 			if m.picker == nil && m.suggestionsActive() {
 				m.moveSuggestion(1)
 				return m, nil
 			}
+		case keyIs(msg, tea.KeyLeft) || keyIs(msg, tea.KeyRight):
+			// ←/→ dial the highlighted /model row's reasoning effort in place, so
+			// "this model, thinking harder" is one pass through one surface instead
+			// of /model followed by /effort. Only the model picker claims these keys;
+			// everywhere else they fall through to the composer's cursor movement.
+			if m.picker != nil && m.picker.kind == pickerModel && !m.modelPickerIsLoading() {
+				delta := 1
+				if keyIs(msg, tea.KeyLeft) {
+					delta = -1
+				}
+				next, _ := m.adjustModelPickerEffort(delta)
+				return next, nil
+			}
 		case keyIs(msg, tea.KeyPgUp):
 			m = m.clearHover()
-			return m.scrollChat(m.chatPageScrollLines()), nil
+			return m.scrollChat(m.chatPageScrollLines())
 		case keyIs(msg, tea.KeyPgDown):
 			m = m.clearHover()
-			return m.scrollChat(-m.chatPageScrollLines()), nil
+			return m.scrollChat(-m.chatPageScrollLines())
 		case keyShift(msg) && keyIs(msg, tea.KeyUp):
 			// Shift+Up scrolls the transcript up one line. Must be checked before
 			// plain KeyUp so shifted arrows aren't consumed by the composer-path.
@@ -1628,7 +2095,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break // let the input handle multiline navigation
 			}
 			m = m.clearHover()
-			return m.scrollChat(1), nil
+			return m.scrollChat(1)
 		case keyShift(msg) && keyIs(msg, tea.KeyDown):
 			// Shift+Down scrolls the transcript down one line. Must be checked
 			// before plain KeyDown so shifted arrows aren't consumed.
@@ -1667,11 +2134,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break // let the input handle multiline navigation
 			}
 			m = m.clearHover()
-			return m.scrollChat(-1), nil
+			return m.scrollChat(-1)
 		case keyIs(msg, tea.KeyDown):
 			if m.transcriptDetailed {
 				m = m.clearHover()
-				return m.scrollChat(-1), nil
+				return m.scrollChat(-1)
 			}
 			if m.pendingPermission != nil {
 				return m.movePermissionCursor(1), nil
@@ -1717,7 +2184,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.transcriptDetailed {
 				m = m.clearHover()
-				return m.scrollChat(1), nil
+				return m.scrollChat(1)
 			}
 			if m.pendingPermission != nil {
 				return m.movePermissionCursor(-1), nil
@@ -1774,7 +2241,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break // let the input handle its own Ctrl+U (delete-to-bol)
 			}
 			m = m.clearHover()
-			return m.scrollChat(m.chatPageScrollLines()), nil
+			return m.scrollChat(m.chatPageScrollLines())
 		case keyCtrl(msg, 'd'):
 			// Ctrl+D scrolls down half a page, or moves the cursor down in
 			// permission/ask-user prompts. Falls through to the active modal
@@ -1795,7 +2262,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break // let the input handle its own Ctrl+D (delete-next-char)
 			}
 			m = m.clearHover()
-			return m.scrollChat(-m.chatPageScrollLines()), nil
+			return m.scrollChat(-m.chatPageScrollLines())
 		}
 		if m.transcriptDetailed {
 			return m, nil
@@ -1893,6 +2360,14 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// "↑ N tok" pulse climbs during a long write, and bump lastStreamActivity so
 		// the quiet-generation hint stays clear of an actively-streaming provider.
 		m.turnStreamedRunes += utf8.RuneCountInString(msg.fragment)
+		m.lastStreamActivity = m.now()
+		return m, nil
+	case toolOutputSnapshotMsg:
+		if msg.runID != m.activeRunID || msg.id != m.activeToolID {
+			return m, nil
+		}
+		m.liveToolCallID = msg.id
+		m.liveToolOutput = msg.snapshot
 		m.lastStreamActivity = m.now()
 		return m, nil
 	case agentTextMsg:
@@ -2047,6 +2522,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			request: msg.request,
 			decide:  msg.decide,
 		}
+		m.reportAgentLifecycle(herdrBlocked)
 		return m, nil
 	case askUserRequestMsg:
 		if msg.runID != m.activeRunID {
@@ -2065,10 +2541,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.transcript = appendTranscriptRow(m.transcript, askUserTranscriptRow(msg.request))
 		m.pendingAskUser = &pendingAskUserPrompt{
-			request: msg.request,
-			answer:  msg.answer,
-			states:  newAskUserStates(msg.request.Questions),
+			request:   msg.request,
+			answer:    msg.answer,
+			states:    newAskUserStates(msg.request.Questions),
+			startedAt: m.now(),
 		}
+		m.reportAgentLifecycle(herdrBlocked)
 		m.clearComposer()
 		m.clearSuggestions()
 		return m, nil
@@ -2084,6 +2562,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(fireCmd, m.scheduleLoopTick())
 	case agentResponseMsg:
 		if msg.runID != m.activeRunID {
+			flushSessionID, flushing := m.flushRunIDs[msg.runID]
+			// A cancelled pipeline run in the session it ran in projects its
+			// receipt card and adopts its lane, as finalizeCancelledRun does:
+			// the worktree stays locked for the card's [A]/[D] keys. Any other
+			// cancelled or superseded run still owns a locked worktree until
+			// we release it here. Review is not offered on this path.
+			adoptLane := flushing && msg.receipt != "" && flushSessionID == m.activeSession.SessionID
+			if !adoptLane {
+				unlockPreparedWorktree(msg.worktree)
+			}
 			// A run cancelled while in flight still finishes in its goroutine and
 			// returns its accumulated session events here. Persist ONLY those events
 			// (notably the EventSessionCheckpoint payloads captured before each
@@ -2091,7 +2579,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// works; the cancel path already wrote the "Run cancelled." marker, so
 			// skip transcript rows, the trailing cancellation error, and any pending
 			// state changes.
-			if flushSessionID, flushing := m.flushRunIDs[msg.runID]; flushing {
+			if flushing {
 				delete(m.flushRunIDs, msg.runID)
 				// The cancelled run still consumed tokens; record them so the usage
 				// readout doesn't undercount interrupted turns.
@@ -2116,6 +2604,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// visible rather than swallowed.
 				var flushRows []transcriptRow
 				events := flushableSessionEvents(msg.sessionEvents)
+				if msg.receipt != "" {
+					// The trailing error event is dropped above, so persist the
+					// CANCELLED card as a receipt message; resume replays it.
+					events = append(events, pendingSessionEvent{Type: sessions.EventMessage, Payload: map[string]any{"role": "receipt", "content": msg.receipt}})
+				}
 				if flushSessionID == m.activeSession.SessionID {
 					m, flushRows = m.appendSessionEvents(events)
 				} else {
@@ -2123,6 +2616,14 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				for _, row := range flushRows {
 					m.transcript = appendTranscriptRow(m.transcript, row)
+				}
+				// A cancelled pipeline turn projects its CANCELLED receipt (the
+				// same card the live turn would have shown), only in the session
+				// it ran in. After /resume the card is in that session's log and
+				// replays there; this transcript and its keys are not its lane.
+				if adoptLane {
+					m.activeWorktree = msg.worktree
+					m = m.appendTurnReceipt(transcriptRow{text: msg.receipt})
 				}
 				// A Ctrl+C during an in-flight run defers its quit until the run's
 				// checkpoint session events have been flushed (above). Now that the
@@ -2140,18 +2641,23 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.memoryCount = msg.memoryCount
 			m.memoryByType = msg.memoryByType
 		}
-		// Emit a one-time transition notice.
-		if !m.memoryNoticed {
-			if m.memoryStatus == "active" {
-				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: fmt.Sprintf("Memory sidecar active: %d observations stored.", m.memoryCount)})
-				m.memoryNoticed = true
-			} else if m.memoryStatus == "off" && prevStatus == "active" {
-				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Memory sidecar unavailable; running without memory injection."})
-				m.memoryNoticed = true
-			}
+		// Emit a one-time transition notice. The initial active notice fires once
+		// per session; a later transition INTO off or unavailable fires its own
+		// row regardless, because memory was working and has now stopped.
+		if !m.memoryNoticed && m.memoryStatus == "active" {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: fmt.Sprintf("Memory sidecar active: %d observations stored.", m.memoryCount)})
+			m.memoryNoticed = true
+		} else if m.memoryStatus == "off" && prevStatus == "active" {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Memory sidecar unavailable; running without memory injection."})
+		} else if m.memoryStatus == "unavailable" && prevStatus == "active" {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Memory retrieval failing; running without memory injection."})
 		}
-		m.clearStreamingToolCall() // active run finished — drop any lingering "writing" block
-		m.pending = false
+		m.activeWorktree = msg.worktree
+		if notice := strings.TrimSpace(msg.worktreeNotice); notice != "" {
+			m.worktreeNotice = notice
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: notice})
+		}
+		m.releaseRun()
 		m = m.disarmCancelConfirmation() // the run finished on its own — nothing left to confirm cancelling
 		// Fully reset the fade state at stream end. The next render
 		// emits the final row in solid ink (no settling animation), and
@@ -2161,14 +2667,6 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// carrying over to the next turn (and stops lineAges from
 		// growing indefinitely across many runs).
 		m.resetStreamingFade()
-		// The run is complete: release its context now instead of waiting for the
-		// parent context — every prompt leaked a CancelFunc (and its timer
-		// resources) until app exit otherwise.
-		if m.runCancel != nil {
-			m.runCancel()
-		}
-		m.runCancel = nil
-		m.activeRunID = 0
 		m.plan.frozenAt = m.now() // freeze the plan clock while idle (no run in flight)
 		// A fully successful turn means the task is done. Weaker models often
 		// forget the final update_plan, leaving the panel stuck mid-progress;
@@ -2198,6 +2696,23 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for _, row := range sessionRows {
 			m.transcript = appendTranscriptRow(m.transcript, row)
 		}
+		// GAP-L DoD 46: a design turn that pinned decisions refreshes the
+		// ledger card in the live transcript. The ledger re-projects whole
+		// from the reconstructed state (append-only, revised markers kept),
+		// replacing the previous ledger card so the transcript carries the
+		// current ledger, not a stack of stale ones.
+		if msg.err == nil && len(msg.sessionEvents) > 0 {
+			hasPins := false
+			for _, event := range msg.sessionEvents {
+				if event.Type == sessions.EventDecisionPinned {
+					hasPins = true
+					break
+				}
+			}
+			if hasPins {
+				m = m.refreshDecisionsLedgerCard()
+			}
+		}
 		for _, row := range msg.rows {
 			if row.kind == rowReasoning {
 				m.streamingReasoning = ""
@@ -2205,11 +2720,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.transcript = appendTranscriptRow(m.transcript, row)
 		}
+		if card, ok := parseReceiptTranscriptPayload(msg.receipt); ok {
+			// Arms the receipt keys ([A]/[D]/[R]/...) for this turn's card.
+			m.lastTerminalReceipt = card.kind
+		}
 		if msg.err != nil {
 			// A failed turn has no final answer row to supersede the streamed
 			// text the user already watched — keep the partial answer instead of
 			// letting it vanish from history.
 			if row, ok := reasoningTranscriptRow("", msg.runID, m.streamingReasoning); ok {
+				row.expanded = true
 				m.transcript = appendTranscriptRow(m.transcript, row)
 			}
 			if text := strings.TrimRight(m.streamingTextString(), "\n"); strings.TrimSpace(text) != "" {
@@ -2219,14 +2739,27 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// metadata a final assistant row would have carried. A recognized
 			// provider failure (auth/rate-limit/connectivity/…) also carries a
 			// one-line next step so the user isn't left staring at a raw blob.
-			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
-				kind:        rowError,
-				text:        msg.err.Error(),
-				hint:        errhint.TUIHint(msg.err),
-				final:       true,
-				turnTools:   msg.turnTools,
-				turnElapsed: msg.turnElapsed,
-			})
+			if msg.receipt != "" {
+				// A pipeline turn shows its FAILED or CANCELLED card in place of
+				// the raw error row. The card keeps the error text, wrapped, and
+				// the row keeps the next-step hint and the turn metadata.
+				m = m.appendTurnReceipt(transcriptRow{
+					text:        msg.receipt,
+					hint:        errhint.TUIHint(msg.err),
+					final:       true,
+					turnTools:   msg.turnTools,
+					turnElapsed: msg.turnElapsed,
+				})
+			} else {
+				m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
+					kind:        rowError,
+					text:        msg.err.Error(),
+					hint:        errhint.TUIHint(msg.err),
+					final:       true,
+					turnTools:   msg.turnTools,
+					turnElapsed: msg.turnElapsed,
+				})
+			}
 		}
 		m.streamingText = nil
 		m.streamingReasoning = ""
@@ -2244,6 +2777,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.specReview != nil {
 			m = m.activateSpecReview(*msg.specReview)
+		}
+		if m.pendingSpecReview == nil {
+			m.reportAgentLifecycle(herdrIdle)
 		}
 		if m.notifier != nil {
 			m.notifier.Notify(notify.Completion, notify.DefaultMessage(notify.Completion))
@@ -2287,8 +2823,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil && msg.designTransition != nil {
 			m, transitionCmd = m.startDesignTransition(*msg.designTransition)
 		}
+		var reviewCmd tea.Cmd
+		m, reviewCmd = m.maybeOfferWorktreeReview(msg.worktree, msg.sourceDirty)
 		next, queuedCmd := m.launchQueuedMessageIfReady()
-		return next, tea.Batch(titleCmd, recapCmd, sweepCmd, queuedCmd, loopTickCmd, transitionCmd)
+		return next, tea.Batch(titleCmd, recapCmd, sweepCmd, queuedCmd, loopTickCmd, transitionCmd, reviewCmd)
 	case memoryResultMsg:
 		if msg.isError {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: msg.text})
@@ -2298,15 +2836,19 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case crystallizeResultMsg:
 		if msg.runID != m.activeRunID {
+			// Same cancellation rule as the plan execution path: a
+			// cancelled crystallization owns its receipt and its drain
+			// obligation. It holds no worktree of its own.
+			if m.wasCancelled(msg.runID) {
+				m = m.finalizeCancelledRun(cancelledRunFinalization{runID: msg.runID})
+				if m.cancelledRunExit() {
+					return m.quit()
+				}
+			}
 			return m, nil
 		}
-		m.clearStreamingToolCall()
-		m.pending = false
-		if m.runCancel != nil {
-			m.runCancel()
-		}
-		m.runCancel = nil
-		m.activeRunID = 0
+		m.releaseRun()
+		m.reportAgentLifecycle(herdrIdle)
 		var flushRows []transcriptRow
 		events := flushableSessionEvents(msg.sessionEvents)
 		m, flushRows = m.appendSessionEvents(events)
@@ -2347,13 +2889,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.pendingPlan = &msg.plan
 		m.pendingCritique = &msg.critique
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: formatDesignPlan(msg.plan)})
+		// P4 lifecycle cards (GAP-E): the plan and its typed critique render
+		// as contract cards instead of flat system notes. The gate logic
+		// below is unchanged — required issues still block /approve.
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: planCardTranscriptText(msg.plan, msg.critique)})
 		if warning := designCoverageWarning(msg.plan); warning != "" {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: warning})
 		}
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: formatPlanCritique(msg.critique)})
 		if msg.critique.MustFixBeforeExecution {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Critic flagged must-fix issues. /approve is blocked. Revise and re-run /crystallize."})
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: critiqueCardTranscriptText(msg.plan, msg.critique)})
 		} else {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan is ready. Type /approve to execute."})
 		}
@@ -2371,14 +2915,34 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case planExecutionResultMsg:
 		if msg.runID != m.activeRunID {
+			// A run the user CANCELLED still returns its terminal
+			// message here, because cancelRun already cleared
+			// activeRunID. That is not a stale session result: it is
+			// the cancellation's own completion, and it owns the
+			// CANCELLED receipt, the handoff surface, and the drain
+			// obligation cancelRun recorded (review finding 3).
+			if m.wasCancelled(msg.runID) {
+				m = m.finalizeCancelledRun(cancelledRunFinalization{
+					runID:          msg.runID,
+					worktree:       msg.worktree,
+					preserved:      msg.worktreePreserved,
+					mergeAvailable: msg.mergeAvailable,
+				})
+				if m.cancelledRunExit() {
+					return m.quit()
+				}
+				return m, nil
+			}
+			unlockPreparedWorktree(msg.worktree)
 			return m, nil
 		}
-		m.pending = false
-		if m.runCancel != nil {
-			m.runCancel()
+		m.activeWorktree = msg.worktree
+		if notice := strings.TrimSpace(msg.worktreeNotice); notice != "" {
+			m.worktreeNotice = notice
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: notice})
 		}
-		m.runCancel = nil
-		m.activeRunID = 0
+		m.releaseRun()
+		m.reportAgentLifecycle(herdrIdle)
 		// Refresh before the failure branch returns. A run that fails still
 		// appended events — the approval, the tasks that did start, and each
 		// stage's usage — and leaving those on disk only makes the live session
@@ -2389,13 +2953,169 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if msg.err != nil {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Plan execution failed: " + msg.err.Error()})
-			return m, nil
+			// Terminal receipt (GAP-E): a failed or user-cancelled plan
+			// execution renders as a styled result card — failing stage,
+			// full untruncated reason, recovery keys — not a bare error
+			// line (audit finding 3). Cancellation (context canceled from
+			// the user's Ctrl+C) projects the CANCELLED card, which is
+			// distinct from failure by contract, with the lane's real
+			// worktree context (slice B of SPEC_TUI_RECEIPTS_OPEN_WORK).
+			card := failedExecutionCard(msg.err)
+			if card.kind == receiptCancelled {
+				card = cancelledReceiptForWorktree(msg.worktree)
+			}
+			// The receipt is the live outcome surface: its advertised
+			// [A]/[D]/[R]/[I]/[L] keys dispatch through handleReceiptKey until
+			// a new run begins.
+			m.lastTerminalReceipt = card.kind
+			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
+				kind: rowError,
+				text: receiptTranscriptPayload(card),
+			})
+			// HANDOFF (GAP-F): the lane exited with the worktree preserved.
+			// The card distinguishes lane death from work loss and names
+			// the resume path, before any review picker.
+			outcome := "failed"
+			if card.kind == receiptCancelled {
+				outcome = "cancelled"
+			}
+			m.offerHandoff(msg.worktree, outcome, 0, 0, msg.worktreePreserved, msg.mergeAvailable)
+			return m.maybeOfferWorktreeReview(msg.worktree, msg.sourceDirty)
 		}
 		m.designMode = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendAssistant, text: msg.result.FinalAnswer})
 		m.pendingPlan = nil
 		m.pendingCritique = nil
+		// Terminal receipt (GAP-E, slice A of SPEC_TUI_RECEIPTS_OPEN_WORK):
+		// a run the runtime marked completed projects the VERIFIED card.
+		// The DoD-13 gate is the presentation state's completion receipt —
+		// deterministic runtime truth, not an inference from the error
+		// boundary. Evidence derives from the persisted plan result; a
+		// parse failure appends nothing (the JSON answer above still
+		// carries the data — honest absence, never an invented card).
+		// A completed run that no check verified projects the UNVERIFIED card
+		// from the completion receipt, never the VERIFIED card.
+		if completion := m.lastState.Completion; completion != nil && completion.Status == "completed" {
+			card, ok := verifiedReceiptCardFor(completion, msg.result.FinalAnswer, m.lastState.Usage, m.turnStartedAt, m.now())
+			if ok {
+				m.lastTerminalReceipt = card.kind
+				// rowError is the receipt row channel (rendering.go
+				// routes receipt payloads from error rows); the card
+				// colors by its own kind, so VERIFIED renders green.
+				m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
+					kind: rowError,
+					text: receiptTranscriptPayload(card),
+				})
+			}
+		}
+		return m.maybeOfferWorktreeReview(msg.worktree, msg.sourceDirty)
+	case diffCapturedMsg:
+		m = m.handleDiffCaptured(msg)
+		return m, nil
+	case diffEditorMsg:
+		if msg.err != nil {
+			m = m.appendSystemNotice("Editor exited with an error: " + msg.err.Error())
+		}
+		return m, nil
+	case worktreeReviewResultMsg:
+		// Clear the in-flight operation before anything else, so a
+		// refused or failed action re-arms the surface immediately.
+		// A result whose scheduled identity no longer matches the live
+		// one (session switched, or a new run started) is stale: its
+		// notice is still shown, but it must not resolve a surface that
+		// now belongs to a different session or run.
+		staleOp := false
+		if msg.op != nil {
+			if m.worktreeOp != nil && *m.worktreeOp == *msg.op {
+				m.worktreeOp = nil
+			}
+			staleOp = msg.op.session != m.activeSession.SessionID
+		}
+		if notice := strings.TrimSpace(msg.notice); notice != "" {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: notice})
+		}
+		if staleOp {
+			return m, nil
+		}
+		// HANDOFF resolution (finding 5): the handoff clears ONLY when
+		// the operation actually completed. A merge conflict, a dirty
+		// source refusal, a failed preserve, or a failed cleanup all
+		// return the worktree in kept, and the user needs the card's
+		// recovery keys exactly then. Announcing the outcome is the
+		// notice's job above; this decides whether the surface survives.
+		if msg.op != nil && m.pendingHandoff != nil && m.pendingHandoff.lane == msg.op.lane {
+			switch msg.op.kind {
+			case worktreeOpHandoffMerge, worktreeOpHandoffDiscard:
+				if msg.succeeded() {
+					m.pendingHandoff = nil
+				}
+			}
+		}
+		// Capture the lane BEFORE the mutation below nils activeWorktree
+		// (Reject keeps no worktree, so kept is nil). The diff viewport
+		// shows the lane's worktree: any decision that resolved the lane
+		// (merged or removed) leaves that diff pointing at a worktree that
+		// no longer exists — close the view so the UI never renders a diff
+		// of a deleted directory. A Keep leaves the worktree on disk and
+		// the view open.
+		resolvedLane := ""
+		if m.pendingHandoff != nil {
+			resolvedLane = m.pendingHandoff.lane
+		} else if m.activeWorktree != nil {
+			resolvedLane = m.activeWorktree.Name
+		}
+		m.activeWorktree = msg.kept
+		// The diff viewport shows the lane's worktree. Any review decision
+		// that resolved the lane (merged or removed) leaves that diff
+		// pointing at a worktree that no longer exists — close the view so
+		// the UI never renders a diff of a deleted directory. A Keep (kept
+		// != nil) leaves the worktree on disk and the view open. The lane
+		// match goes through the pending handoff (the handoff keys set it)
+		// or the active worktree, so a stale diff for an unrelated lane is
+		// never closed.
+		lane := resolvedLane
+		if lane != "" && msg.kept == nil && m.diffView.active && lane == m.diffView.wt.Name {
+			m = m.exitDiffReview()
+		}
+		// Record the decision and reject reason on a session event so a later
+		// trace consumer can lift them into the run_outcome. Best-effort: a
+		// review trace write never fails the turn.
+		if msg.decision != "" {
+			if next, err := m.appendSessionEvent(sessions.EventWorktreeReview, map[string]any{
+				"decision": msg.decision,
+				"reason":   msg.reason,
+			}); err == nil {
+				m = next
+			}
+		}
+		// Accept/reject write a post-run verdict record; keep/Esc write nothing
+		// (unknown verdict). The verdict keys on the same run ID the pipeline
+		// used, which is the session ID for TUI runs.
+		var verdictCmd tea.Cmd
+		if v := verdictForReview(msg.decision, msg.reason); v != nil && m.activeSession.SessionID != "" {
+			v.RunID = m.activeSession.SessionID
+			v.DecidedAt = m.now()
+			verdictCmd = m.writeVerdictCmd(*v)
+		}
+		// HANDOFF re-arm (GAP-F): a Keep/Reject/Esc decision leaves the
+		// worktree on disk with work preserved. The review picker owned
+		// input while it was up; once it resolves, the handoff card's keys
+		// arm so the user can still merge-back, open, or discard from the
+		// persistent card. An Accept resolved the worktree (merged) — the
+		// handoff stays disarmed. The preserved check is a single os.Stat
+		// on a path the review just touched (kept != nil means the review
+		// left it in place); it re-checks on the next render instead of the
+		// UI loop (F1): the card's payload re-validates on offer, and a
+		// vanished worktree renders the WORK LOST form from the payload.
+		if msg.kept != nil && m.pendingHandoff != nil {
+			m.pendingHandoff.preserved = tuiWorktreeExists(msg.kept.Path)
+		}
+		m.reportAgentLifecycle(herdrIdle)
+		return m, verdictCmd
+	case verdictWriteMsg:
+		if msg.err != nil {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Verdict write skipped: " + msg.err.Error()})
+		}
 		return m, nil
 	case sessionTitleGeneratedMsg:
 		return m.handleSessionTitleGenerated(msg)
@@ -2429,11 +3149,24 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.plan.updateFromItems(msg.items, m.now())
 		return m, nil
-	case pipelineStageMarkerMsg:
+	case presentationStateMsg:
 		if msg.runID != m.activeRunID {
 			return m, nil
 		}
-		m.pipeline.applyStageMarker(msg.line)
+		m.pipeline.applyState(msg.state)
+		// Regression auto-reveals trajectory with an explicit notice (§10,
+		// GAP-G): the runtime surfaced a critical failure on the diagnostic
+		// surface, and the UI must say so rather than pretend the user
+		// opened it. DoD 12's "auto-revealed | ctrl+t to hide" wording.
+		if msg.state.Health.Effective() == presentation.HealthRegression && !m.trajectoryVisible {
+			m.trajectoryVisible = true
+			m.trajectoryAutoRevealed = true
+		}
+		// P1.4 status bar: the context trail observes every lifecycle
+		// transition (append-on-change, never rewinds — frame RRoni).
+		m.phaseTrail.observe(msg.state.Lifecycle)
+		m.lastState = msg.state
+		m.observeRunTopology(msg.state)
 		return m, nil
 	case planStepExplanationMsg:
 		// Drop a result from a previous run: beginRun bumps planDetailGen and clears
@@ -2458,7 +3191,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.planDetailOpen && m.planDetailStep == msg.stepIndex &&
 			msg.stepIndex >= 0 && msg.stepIndex < len(m.plan.steps) &&
 			planStepExplanationKey(m.plan.steps[msg.stepIndex]) == msg.key {
-			m.transcript = dropTranscriptRowsByID(m.transcript, planStepDetailRowID)
+			m = m.dropTranscriptRows(planStepDetailRowID)
 			m.transcript = m.appendPlanStepCard(msg.stepIndex, text, false)
 		}
 		return m, nil
@@ -2516,15 +3249,18 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// permanent "0 tool calls" (M18). The tracker is still keyed by the tool-call
 		// id at this point (reconciled to the session id only on completion).
 		m.specialists.incrementToolCount(msg.toolCallID)
+		m.specialists.addToolCall(msg.toolCallID, msg.toolName, msg.detail)
 		m.specialists.setCurrentTool(msg.toolCallID, msg.toolName, msg.detail)
 		return m, nil
+	case editorUseMsg:
+		return m.handleEditorUse(msg), nil
 	case agentRowMsg:
 		if msg.runID != m.activeRunID {
 			return m, nil
 		}
 		if msg.row.kind == rowReasoning {
 			m.streamingReasoning = ""
-			m.streamingReasoningExpanded = false
+			m.streamingReasoningExpanded = true
 		}
 		// A tool call ends the current streamed text segment. The segment is the
 		// assistant's working narration ("Let me check X…") — append it as a
@@ -2532,9 +3268,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// vanishing when the tool card replaces the interim block.
 		if msg.row.kind == rowToolCall {
 			if row, ok := reasoningTranscriptRow("", msg.runID, m.streamingReasoning); ok {
+				row.expanded = true
 				m.transcript = appendTranscriptRow(m.transcript, row)
 				m.streamingReasoning = ""
-				m.streamingReasoningExpanded = false
+				m.streamingReasoningExpanded = true
 			}
 			if text := strings.TrimRight(m.streamingTextString(), "\n"); strings.TrimSpace(text) != "" {
 				m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowAssistant, text: text})
@@ -2547,6 +3284,20 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// The tool call has finalized into its card — drop the live "writing"
 			// preview so it doesn't linger or duplicate beneath the card.
 			m.clearStreamingToolCall()
+			// The call is now in flight: stamp the active-tool state so the
+			// working line names it and the running card's elapsed clock runs.
+			m.activeToolID = msg.row.id
+			m.activeToolName = msg.row.tool
+			m.activeToolStart = m.now()
+		}
+		// The call's result row arrived: the in-flight tool is done (success,
+		// failure, or a rejected/denied call all produce a result row), so the
+		// working line must stop naming it and the card stops ticking.
+		if msg.row.kind == rowToolResult && msg.row.id == m.activeToolID {
+			if !m.activeToolStart.IsZero() {
+				msg.row.toolElapsed = m.now().Sub(m.activeToolStart)
+			}
+			m.clearActiveTool()
 		}
 		// Collapse a repeated swarm status/collect card so re-checks don't flood
 		// the chat with identical blocks.
@@ -2631,8 +3382,26 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ollamaContextWindowByModel[msg.modelName] = msg.contextWindow
 		}
 		return m, nil
+	case ollamaCapabilitiesDiscoveredMsg:
+		// Surgical negative overlay: remove tool-calling only when the daemon
+		// reported a capability list that omitted it. Reported false (older
+		// Ollama / custom Modelfile) means unknown, so the entry is untouched.
+		if msg.err == nil && msg.caps.Reported && !msg.caps.ToolCall {
+			m.modelCatalog.RemoveCapability(msg.modelName, modelregistry.ModelCapabilityToolCalling)
+		}
+		return m, nil
 	case mcpCommandResultMsg:
 		return m.applyMCPCommandResultMessage(msg), nil
+	case modelCatalogRefreshedMsg:
+		return m.applyModelCatalogRefresh(msg)
+	case backendCommandResultMsg:
+		return m.setBackendRow(msg.rowID, backendCard(msg.title, msg.result)), nil
+	case sessionsScannedMsg:
+		// Async session scan landed (F1, §14): arm the resume picker and
+		// launch resume card from the result. No store I/O happened here.
+		return applySessionsScanned(m, msg), nil
+	case initialCmdsBatchMsg:
+		return m, tea.Batch(msg.cmds...)
 	}
 
 	var cmd tea.Cmd
@@ -2764,6 +3533,12 @@ func (m model) transcriptView() string {
 	emptyOverlay := ""
 	if m.transcriptEmpty() && !m.pending && viewportOverlay != "" {
 		emptyOverlay = viewportOverlay
+		// Size the overlay against the REAL body height for this frame so
+		// the palette block matches the viewport exactly (see the
+		// two-column path).
+		if m.altScreen && m.height > 0 {
+			m.overlayBodyHeight = m.scrollableTranscriptFrame(m.normalTranscriptHeader(width), m.footerView(width)).bodyRect.height
+		}
 	}
 	bodyItems := m.transcriptBodyItems(width, emptyOverlay, false)
 
@@ -2778,7 +3553,15 @@ func (m model) transcriptView() string {
 	// not pinned at the top. It appears above the specialist cards like a
 	// chat message, the way todo/plan updates render inline.
 	if m.altScreen && m.height > 0 {
-		return m.scrollableTranscriptItemsView(m.normalTranscriptHeader(width), bodyItems, footer, width, overlayForViewport)
+		// GAP-K slice 2 (owner Tension-3 call): the in-flow evidence band.
+		// During a run, on a wide single-column frame, execution evidence
+		// renders in the transcript flow above the scrolling body — the
+		// header carries it so it stays pinned while the transcript scrolls.
+		header := m.normalTranscriptHeader(width)
+		if band := m.evidenceBandBlock(width); band != "" {
+			header = header + "\n" + band
+		}
+		return m.scrollableTranscriptItemsView(header, bodyItems, footer, width, overlayForViewport)
 	}
 
 	bodyLayout := layoutTranscriptBodyItems(bodyItems)
@@ -2804,7 +3587,18 @@ func (m model) twoColumnTranscriptView() string {
 	width := chatW
 
 	suggestionOverlay := m.suggestionOverlay(width)
-	bodyItems := m.transcriptBodyItems(width, "", false)
+	emptyOverlay := ""
+	if m.transcriptEmpty() && !m.pending && suggestionOverlay != "" {
+		// The command/file palette must also ride the launch cockpit in the
+		// two-column layout; dropping it left a blank body and a wiped
+		// composer row whenever the sidebar was visible.
+		emptyOverlay = suggestionOverlay
+		// Size the overlay against the REAL body height for this frame
+		// (header + footer already measured) so the palette block matches
+		// the viewport exactly instead of guessing from m.height.
+		m.overlayBodyHeight = m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width)).bodyRect.height
+	}
+	bodyItems := m.transcriptBodyItems(width, emptyOverlay, false)
 	footer := m.footerView(width)
 	overlayForViewport := suggestionOverlay
 	if m.transcriptEmpty() && !m.pending {
@@ -2833,6 +3627,15 @@ func (m model) pinnedTitleBar(width int) string {
 	if m.fileView.active {
 		return m.fileViewNavBar(width)
 	}
+	// The diff review (GAP-G) uses the same one-line swap; the diff nav
+	// bar carries the run/base header and the review keys.
+	if m.diffView.active {
+		return m.diffViewNavBar(width)
+	}
+	// The detail pane (GAP-G rest, Ctrl+O) uses the same one-line swap.
+	if m.detailView.active {
+		return m.detailViewNavBar(width)
+	}
 	return m.titleBar(width)
 }
 
@@ -2842,49 +3645,126 @@ func (m model) footerView(width int) string {
 	// text box becomes the questionnaire): render the tabbed prompt + status line and
 	// skip the plan panel / idle hints / composer for a focused modal.
 	if m.pendingAskUser != nil {
-		footer.WriteString(renderAskUserQuestionnaire(*m.pendingAskUser, m.input.Value(), width))
+		prompt := *m.pendingAskUser
+		prompt.othersRunning = m.specialists.running()
+		footer.WriteString(renderAskUserQuestionnaire(prompt, m.input.Value(), width, m.glyphTier))
 		footer.WriteString("\n")
 		footer.WriteString(m.statusLine(width))
 		return footer.String()
 	}
-	// Pinned plan panel: sits directly above the composer so it stays visible
-	// while the transcript scrolls underneath (a streaming turn no longer pushes
-	// the plan off-screen). Budgeted to at most a third of the screen height; a
-	// taller plan collapses to a one-line summary so the composer always stays
-	// on screen. Skipped in the subchat drill-in: m.plan belongs to the PARENT
-	// run, not the subagent/swarm child session being viewed there, so pinning it
-	// above that composer would show unrelated state.
+	// The pinned surface (today the plan panel, later also a pipeline strip)
+	// sits directly above the composer so it stays visible while the transcript
+	// scrolls underneath. Its height comes from the shared pinned-surface
+	// envelope, which reserves the fixed chrome (idle hint, queued preview,
+	// composer, status) and a minimum transcript row, so a short terminal
+	// collapses the plan instead of silently clipping it from the top. Skips the
+	// subchat drill-in: m.plan belongs to the PARENT run, not the child session
+	// viewed there, so pinning it above that composer would show unrelated state.
+	chrome := m.footerChrome(width)
+	chromeLines := len(viewLines(chrome))
 	if !m.subchat.active {
-		if plan := m.renderPinnedPlanPanel(width, m.pinnedPlanMaxHeight()); plan != "" {
-			footer.WriteString(plan)
-			footer.WriteString("\n")
+		header := m.normalTranscriptHeader(width)
+		headerLines := len(viewLines(header))
+		// The pinned pipeline strip renders only when the wide sidebar cannot
+		// host the PIPELINE section. Mirror the eager plan-panel rule: gate on
+		// sidebarAvailable (not sidebarActive) so a Ctrl+B hide hides the
+		// pipeline and the sidebar does not render the same roster twice, and
+		// hide within the two-column chat-column copy.
+		var strip []string
+		if !m.hidePinnedPlan && !m.sidebarAvailable() && !m.pipeline.isEmpty() {
+			chip := m.worktreeChip()
+			if lifecycle := m.pipeline.withRuntime(m.runtimeView()).lifecycleChip(width / 2); lifecycle != "" {
+				if chip != "" {
+					chip += " · "
+				}
+				chip += lifecycle
+			}
+			strip = m.pipeline.presentation().renderStripWithChip(width, m.spinnerPhase, chip)
+			if widthTier(width) == tierMedium && len(strip) > 0 {
+				if tabs := m.compactSectionTabs(width - 1); tabs != "" {
+					strip = append(strip, " "+tabs)
+				}
+			}
+		}
+
+		// Pinned surfaces declare claims against the shared envelope and the
+		// allocator divides it: the strip is an exact claim (renders whole or
+		// not at all, and a skipped strip leaves its space to the plan), the
+		// plan is flexible (takes what remains). When the terminal height is
+		// known, the plan claims the whole envelope so the allocator hands it
+		// exactly the space the strip did not take. When height is unknown
+		// (headless), there is no envelope: both surfaces render at their
+		// declared heights, preserving the historical cap path.
+		claims := make([]pinnedSurfaceClaim, 0, 2)
+		if strip != nil {
+			claims = append(claims, pinnedSurfaceClaim{name: "pipeline-strip", lines: len(strip), exact: true})
+		}
+		if m.height > 0 {
+			envelope := computePinnedSurfaceEnvelope(m.height, headerLines, chromeLines)
+			claims = append(claims, pinnedSurfaceClaim{name: "plan", lines: envelope.available})
+			for _, grant := range allocatePinnedSurfaces(envelope, claims) {
+				switch grant.name {
+				case "pipeline-strip":
+					if grant.lines > 0 {
+						for _, line := range strip {
+							footer.WriteString(line)
+							footer.WriteString("\n")
+						}
+					}
+				case "plan":
+					if grant.lines > 0 {
+						if plan := m.renderPinnedPlanPanel(width, grant.lines); plan != "" {
+							footer.WriteString(plan)
+							footer.WriteString("\n")
+						}
+					}
+				}
+			}
+		} else {
+			if strip != nil {
+				for _, line := range strip {
+					footer.WriteString(line)
+					footer.WriteString("\n")
+				}
+			}
+			if budget := m.pinnedPlanMaxHeight(); budget > 0 {
+				if plan := m.renderPinnedPlanPanel(width, budget); plan != "" {
+					footer.WriteString(plan)
+					footer.WriteString("\n")
+				}
+			}
 		}
 	}
-	// The row above the composer: transient copy feedback takes priority; otherwise
-	// a faint idle affordance — discoverable key hints on the left, a jump-to-bottom
-	// cue on the right when scrolled up. Always one line (blank when nothing shows),
-	// so the footer height is unchanged.
-	if copyStatus := strings.TrimSpace(m.copyStatus); copyStatus != "" {
-		footer.WriteString(rightAlignedLine(zeroTheme.ink.Render(copyStatus), width))
-	} else if left, right := m.composerIdleHint(), m.jumpToBottomHint(); left != "" || right != "" {
-		footer.WriteString(fitStyledLine(joinHeaderLine("  "+left, right, width), width))
-	}
-	footer.WriteString("\n")
-	// A message typed while a run is active is queued for the next turn; show its
-	// preview directly ABOVE the input box (not below), so it reads as "waiting to
-	// send" sitting on top of what you're currently typing.
-	if queued := renderQueuedMessagePreview(m.queuedMessage, width); queued != "" {
-		footer.WriteString(queued)
-		footer.WriteString("\n")
-	}
-	footer.WriteString(m.composerBox(width))
-	if hint := m.composerDescriptionHint(width); hint != "" {
-		footer.WriteString("\n")
-		footer.WriteString(hint)
-	}
-	footer.WriteString("\n")
-	footer.WriteString(m.statusLine(width))
+	footer.WriteString(chrome)
 	return footer.String()
+}
+
+// footerChrome renders the fixed rows that sit below the pinned surface: the
+// idle/copy hint row, the queued-message preview, the composer box, the
+// slash-command description hint, and the status line. It is the byte-wise
+// tail of footerView, extracted so the pinned-surface envelope can measure the
+// chrome height before deciding how much room the plan (and later the pipeline
+// strip) may take.
+func (m model) footerChrome(width int) string {
+	var chrome strings.Builder
+	if copyStatus := strings.TrimSpace(m.copyStatus); copyStatus != "" {
+		chrome.WriteString(rightAlignedLine(zeroTheme.ink.Render(copyStatus), width))
+	} else if left, right := m.composerIdleHint(), m.jumpToBottomHint(); left != "" || right != "" {
+		chrome.WriteString(fitStyledLine(joinHeaderLine("  "+left, right, width), width))
+	}
+	chrome.WriteString("\n")
+	if queued := renderQueuedMessagePreview(m.queuedMessage, width); queued != "" {
+		chrome.WriteString(queued)
+		chrome.WriteString("\n")
+	}
+	chrome.WriteString(m.composerBox(width))
+	if hint := m.composerDescriptionHint(width); hint != "" {
+		chrome.WriteString("\n")
+		chrome.WriteString(hint)
+	}
+	chrome.WriteString("\n")
+	chrome.WriteString(m.statusLine(width))
+	return chrome.String()
 }
 
 // composerIdleHint returns a faint one-line key-shortcut hint shown above the
@@ -2901,19 +3781,25 @@ func (m model) composerIdleHint() string {
 		return ""
 	}
 	sidebarKey := labelOr(m.keyBindings.toggleSidebar, "Ctrl+B")
-	detailKey := labelOr(m.keyBindings.toggleDetailed, "Ctrl+O")
-	mouseKey := labelOr(m.keyBindings.toggleMouse, "Ctrl+E")
 
 	var hint string
 	switch widthTier(m.width) {
 	case tierTiny:
 		return "" // too cramped for a hint
 	case tierNarrow:
-		hint = "? shortcuts"
-	case tierMedium:
-		hint = fmt.Sprintf("? shortcuts · %s sidebar · %s copy", sidebarKey, mouseKey)
+		hint = "? shortcuts · / palette"
 	default:
-		hint = fmt.Sprintf("? shortcuts · %s sidebar · %s detail · %s copy · Shift+Tab mode", sidebarKey, detailKey, mouseKey)
+		// Frame kAYHl item 9: the launch hint names the four entry points.
+		// Below the two-column boundary Ctrl+B opens the context sheet, so
+		// the hint says what the key does at this width.
+		what := "sidebar"
+		if m.compactWidth() {
+			what = "context"
+		}
+		hint = fmt.Sprintf("? shortcuts · %s %s · / palette", sidebarKey, what)
+		if widthTier(m.width) == tierFull {
+			hint += " · /help index"
+		}
 	}
 	return zeroTheme.faint.Render(hint)
 }
@@ -3072,7 +3958,7 @@ func (m model) scrollableTranscriptItemsView(header string, items []transcriptBo
 	if subchat {
 		sourceLen = len(m.subchat.childRows)
 	}
-	if overlay == "" && cache.valid && cache.generation == m.chatLayoutGen &&
+	if overlay == "" && m.overlayBodyHeight == 0 && cache.valid && cache.generation == m.chatLayoutGen &&
 		cache.width == width && cache.sourceLen == sourceLen && cache.flushed == m.flushed &&
 		cache.height == frame.bodyRect.height &&
 		cache.itemCount == len(items) && cache.detailed == detailed && cache.subchat == subchat {
@@ -3212,19 +4098,37 @@ func viewLines(value string) []string {
 	return strings.Split(strings.TrimSuffix(value, "\n"), "\n")
 }
 
-func (m model) scrollChat(delta int) model {
+// scrollChat applies a scroll delta to the chat transcript. When the scroll
+// offset actually changes it returns a ClearScreen command to force Bubble Tea
+// to redraw the whole frame instead of relying on terminal scroll-optimization,
+// which leaves visual artifacts in alternate-screen mode. When the offset does
+// not move (e.g. already at the top or bottom of the transcript) no command is
+// returned, so we do not pay for a full redraw on every wheel event.
+// clearScreenCmd returns a Bubble Tea command that yields the internal
+// clear-screen message, so the full frame is redrawn. Unlike tea.ClearScreen,
+// which is a Msg value the event loop intercepts, this is the Cmd form that a
+// model Update can return.
+func clearScreenCmd() tea.Cmd {
+	return func() tea.Msg { return tea.ClearScreen() }
+}
+
+func (m model) scrollChat(delta int) (model, tea.Cmd) {
 	if !m.altScreen || delta == 0 {
-		return m
+		return m, nil
 	}
 	viewport, ok := m.chatTranscriptViewport()
 	if !ok {
-		return m
+		return m, nil
 	}
+	before := m.chatScrollOffset
 	m.chatScrollOffset = viewport.scroll(delta).offset
 	if m.chatScrollOffset == 0 {
 		m.chatBodyLines = 0
 	}
-	return m
+	if m.chatScrollOffset == before {
+		return m, nil
+	}
+	return m, clearScreenCmd()
 }
 
 func (m model) chatScrollMetrics() (int, int) {
@@ -3368,11 +4272,9 @@ func (m model) interimBlock(width int) string {
 	// is buffered until its closing fence arrives so the code appears as one
 	// highlighted block instead of recoloring token-by-token.
 	lines := renderStreamingAssistantMarkdownText(text, assistantMeasure(width), width)
-	for index, line := range lines {
-		// styleStreamingLine fades plain prose but leaves already-highlighted
-		// markdown/code lines alone, so live colors match the committed row.
-		lines[index] = m.styleStreamingLine(line, index, len(lines))
-	}
+	// Fades plain prose but leaves already-highlighted markdown/code lines
+	// alone, so live colors match the committed row.
+	m.styleStreamingLines(lines)
 	lines = m.appendStreamingCursor(lines, width)
 	blocks = append(blocks, strings.Join(lines, "\n"))
 	// Live preview of a file currently being written, so a long write_file/edit
@@ -3404,14 +4306,35 @@ func (m model) spinnerGlyph() string {
 }
 
 // workingActivity labels what the agent is doing right now for the working
-// status line: "writing" while the final answer streams, otherwise "thinking"
-// (reasoning, waiting on the model, or a tool in flight). Cheap and robust — no
-// transcript scan — so it can't misreport on a long, output-less step.
+// status line: "running <tool>" while a tool call is in flight, "writing"
+// while the final answer streams, otherwise "thinking" (reasoning or waiting
+// on the model). Cheap and robust — reads the active-tool state stamped when
+// the call row landed, no transcript scan — so it can't misreport on a long,
+// output-less step.
 func (m model) workingActivity() string {
+	// Streaming text and an in-flight tool never co-occur (a tool-call row
+	// clears streamingText when the call starts), so text wins when both are
+	// somehow set: the answer is what the user is visibly seeing.
 	if strings.TrimSpace(m.streamingTextString()) != "" {
 		return "writing"
 	}
+	if m.activeToolName != "" && m.activeToolID != "" && m.pending && m.activeRunID != 0 {
+		return "running " + activeToolWorkingLabel(m.activeToolName)
+	}
 	return "thinking"
+}
+
+// activeToolWorkingLabel names the in-flight tool for the working line. The
+// raw tool name is used for built-ins ("running bash", "running grep", "running
+// write_file") so the line reads precisely; MCP tools use their cleaned label
+// ("running web search") instead of exposing the mcp_ plumbing name.
+func activeToolWorkingLabel(name string) string {
+	if strings.HasPrefix(name, "mcp_") {
+		if label := toolDisplayName(name); label != "" {
+			return label
+		}
+	}
+	return name
 }
 
 // toolCardSuppressedInTranscript reports tools whose transcript card is redundant
@@ -3476,7 +4399,7 @@ func (m model) workingPlanLine() string {
 			done++
 		}
 	}
-	text := fmt.Sprintf("· plan %d/%d", done, total)
+	text := "· plan " + formatDoneTotal(done, total)
 	if current := truncateStep(currentStepContent(m.plan.steps), 48); current != "" {
 		text += " · " + current
 	}
@@ -3616,18 +4539,12 @@ func (m model) appendStreamingCursor(lines []string, width int) []string {
 // composerLine renders the borderless composer.
 func (m model) composerLine(width int) string {
 	input := m.input
-	hideInputForSuggestions := m.suggestionsActive() && (!m.suggestionsAreFiles || fileSuggestionOnlyInput(m.input.Value()))
-	if hideInputForSuggestions {
-		input.SetValue("")
-		input.Placeholder = ""
-		input.CursorEnd()
-	}
+	// The palette owns the screen, but the Pen prompt row still shows the
+	// live query ("> /mod") — wiping it made the composer look broken while
+	// the palette was open.
 	state := composerState{text: input.Value(), cursor: input.Position()}
 	if m.composerActive {
 		state = m.composer
-	}
-	if hideInputForSuggestions {
-		state = composerState{}
 	}
 	argumentHint := commandArgumentHintForInput(input.Value())
 	if argumentHint != "" && input.Position() != len([]rune(input.Value())) {
@@ -3647,6 +4564,18 @@ func (m model) composerLine(width int) string {
 			cursor: composerDisplayCursorForPastePreviews(end, previews),
 		}
 	}
+	// Pen composer grammar: the prompt glyph swaps per state — "❯ " while
+	// typing, "∞ " while a run is in flight, "> " on the launch-idle
+	// screen (frame kAYHl). The textinput prompt drives the per-line
+	// prefix, so set it before rendering.
+	switch {
+	case m.transcriptEmpty():
+		input.Prompt = "> "
+	case m.pending:
+		input.Prompt = "∞ "
+	default:
+		input.Prompt = "❯ "
+	}
 	return renderComposerInput(input, displayState, width, m.composerCursorVisible, displaySelection)
 }
 
@@ -3662,9 +4591,9 @@ func renderComposerInput(input textinput.Model, state composerState, width int, 
 		return ""
 	}
 	if state.text == "" {
-		// Empty box: show a (blinking) cursor before the placeholder so the focused
-		// input always has a visible caret. A plain space when blinked off keeps the
-		// placeholder column stable.
+		// Empty prompt: show a (blinking) cursor before the placeholder so the
+		// focused input always has a visible caret. A plain space when blinked
+		// off keeps the placeholder column stable.
 		cursor := " "
 		if cursorVisible {
 			cursor = composerCursor(" ")
@@ -3786,6 +4715,10 @@ func renderComposerVisualLine(input textinput.Model, state composerState, segmen
 	return line.String()
 }
 
+// composerVisualLinePrefix is the prompt-gutter cell used for wrapping and
+// hit-test width math: input.Prompt (set to the in-run ∞ glyph at model
+// construction, "" in layout tests). The state-aware glyph selection lives
+// in renderComposerInput.
 func composerVisualLinePrefix(input textinput.Model, first bool) string {
 	if first {
 		return zeroTheme.userPrompt.Render(input.Prompt)
@@ -3936,29 +4869,20 @@ func commandArgumentHintForInput(value string) string {
 	return commandRequiredInputHint(command.name)
 }
 
+// composerBox renders the Pen composer: a BARE prompt row, never a bordered
+// box (frames kAYHl "> _", design frames "❯ <text>", in-run "∞ steer this
+// run…"). The model name lives in the status line, not the composer.
+// Attachment chips still render as their own row above the input.
 func (m model) composerBox(width int) string {
 	if width < 8 {
 		return fitStyledLine(m.composerLine(width), width)
 	}
-	innerWidth := maxInt(1, width-4)
-	content := m.composerLine(innerWidth)
-	lines := strings.Split(content, "\n")
-
-	rendered := make([]string, 0, len(lines)+3)
-	rendered = append(rendered, zeroTheme.lineStrong.Render("╭"+strings.Repeat("─", width-2)+"╮"))
-	// Attachment chips ([Image #1] …) render INSIDE the box, above the input line,
-	// instead of as a separate row above the box.
+	lines := strings.Split(m.composerLine(width), "\n")
+	rendered := make([]string, 0, len(lines)+1)
 	if chips := renderAttachmentChips(m.pendingImageLabels, m.pendingDocuments); chips != "" {
-		fitted := fitStyledLine(zeroTheme.muted.Render(chips), innerWidth)
-		pad := strings.Repeat(" ", maxInt(0, innerWidth-lipgloss.Width(fitted)))
-		rendered = append(rendered, zeroTheme.lineStrong.Render("│ ")+fitted+pad+zeroTheme.lineStrong.Render(" │"))
+		rendered = append(rendered, fitStyledLine(zeroTheme.muted.Render(chips), width))
 	}
-	for _, line := range lines {
-		fitted := fitStyledLine(line, innerWidth)
-		pad := strings.Repeat(" ", maxInt(0, innerWidth-lipgloss.Width(fitted)))
-		rendered = append(rendered, zeroTheme.lineStrong.Render("│ ")+fitted+pad+zeroTheme.lineStrong.Render(" │"))
-	}
-	rendered = append(rendered, m.composerDividerLine(width))
+	rendered = append(rendered, lines...)
 	return strings.Join(rendered, "\n")
 }
 
@@ -4049,6 +4973,34 @@ func (m model) resolvePermission(decision permissionDecision) (tea.Model, tea.Cm
 		})
 	}
 	m.pendingPermission = nil
+	if pending.designApproval != nil {
+		event := permissionEventFromRequest(pending.request)
+		event.DecisionAction = decision
+		event.DecisionReason = permissionDecisionReason(decision)
+		switch decision {
+		case permissionDecisionAllow:
+			event.Action = agent.PermissionActionAllow
+			event.PermissionGranted = true
+		case permissionDecisionCancel:
+			event.Action = agent.PermissionActionCancel
+		default:
+			event.Action = agent.PermissionActionDeny
+		}
+		updated, err := m.appendSessionEvent(sessions.EventPermissionDecision, event)
+		if err != nil {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot approve: persist user confirmation: " + err.Error()})
+			m.reportAgentLifecycle(herdrIdle)
+			return m, nil
+		}
+		m = updated
+		m.transcript = appendTranscriptRow(m.transcript, permissionTranscriptRow(event))
+		if decision == permissionDecisionAllow {
+			return m.startApprovalConfirmed(splicerun.DesignTransitionSourceAgent, pending.designApproval.planID)
+		}
+		m.reportAgentLifecycle(herdrIdle)
+		return m, nil
+	}
+	m.reportAgentLifecycle(herdrWorking)
 	return m, nil
 }
 
@@ -4110,6 +5062,11 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 			m, text = m.handleModelCommand(item.Value)
 		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		// Enter commits the effort the row was left on as well as the model. The
+		// model switch must land first: handleModelCommand re-derives the supported
+		// effort ring and clears an effort the new model does not accept, so
+		// applying effort before it would be overwritten.
+		m = m.applyPickedModelEffort(item)
 	case pickerEffort:
 		text := ""
 		m, text = m.handleEffortCommand(item.Value)
@@ -4138,6 +5095,39 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 			// light/dark instead of reusing the preview's reading — mirrors the
 			// text /theme dispatch (M17).
 			return m, tea.RequestBackgroundColor
+		}
+	case pickerTrust:
+		// Apply trust current / parent / decline, then continue. A first-run
+		// required choice hands off to the normal launch session picker.
+		var trustNote string
+		var saved bool
+		if item.Value == trustActionView {
+			// [V] view config (GAP-I): hand the config to $EDITOR via the
+			// same exec seam as diff [O], then come back to this menu. Not
+			// a trust decision; the empty note is skipped below. The menu
+			// is re-opened on the RETURNED model (choosePicker nils the
+			// picker on its own copy, so openTrustConfigInViewer's model
+			// is the one to mutate).
+			next, cmd := m.openTrustConfigInViewer(m.projectTrustViewTarget())
+			if nextModel, ok := next.(model); ok {
+				cfg := describeProjectTrustConfig(m.projectTrustConfigPath())
+				nextModel.trustConfigNotice(cfg)
+				nextModel.picker = nextModel.newTrustPicker()
+				next = nextModel
+			}
+			return next, cmd
+		}
+		m, trustNote, saved = m.applyTrustPickerChoice(item)
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: trustNote})
+		if m.trustPromptRequired {
+			if !saved {
+				m.picker = m.newTrustPicker()
+				return m, nil
+			}
+			m.trustPromptRequired = false
+			var scanCmd tea.Cmd
+			m, scanCmd = m.openLaunchSessionPicker()
+			return m, scanCmd
 		}
 	}
 	return m, cmd
@@ -4227,10 +5217,14 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		}
 		m.loopLeavePrompt = commandEmpty
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionClear})
-		// Clearing wipes the visible transcript only — the session's context is
-		// intact, so the next prompt still replays the full history. Say so, and
-		// point to /new, so "cleared screen" isn't mistaken for "fresh context."
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Transcript cleared. The agent still has the full session context — use /new to start a fresh session."})
+		// P15 ack grammar: one line, verb column, outcome, unblock. Clearing
+		// wipes the visible transcript only — the session's context is intact,
+		// so say so and point to /new rather than let "cleared screen" read as
+		// "fresh context."
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: ackSystemText(ack{
+			verb:    "cleared",
+			outcome: "the agent still has the session — /new starts fresh",
+		})})
 		// Scrollback above can't be un-printed; a faint divider marks where the
 		// cleared surface ended and the frontier restarts for the fresh transcript.
 		m.resetFlushFrontier("· cleared ·")
@@ -4240,6 +5234,8 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 			m = m.appendLoopSystem(m.loopFooterSummary() + " still running — /loop stop all to end them.")
 		}
 		return m, nil
+	case commandWeb:
+		return m.openWebSurface(), nil
 	case commandNew:
 		// A fresh session mid-run would strand the in-flight turn's events; make the
 		// user cancel first. Idle, /new saves the current session (already on disk)
@@ -4272,6 +5268,17 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	case commandTools:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.toolsText()})
 		return m, nil
+	case commandFlags:
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.flagsText()})
+		return m, nil
+	case commandPipeline:
+		if fields := strings.Fields(command.text); len(fields) > 0 && fields[0] == "edit" {
+			return m.openPipelineEditor(fields[1:]), nil
+		}
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.pipelineCommandText(command.text)})
+		return m, nil
+	case commandHooks, commandPlugins, commandSpecialists, commandUsage, commandChanges, commandVerify:
+		return m.startBackendCommand(command.kind, command.text)
 	case commandSkills:
 		// With skills installed, /skills opens a searchable picker (like /model);
 		// the text card remains only as the no-skills install hint.
@@ -4349,7 +5356,10 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.contextText()})
 		return m, nil
 	case commandTrust:
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.trustText()})
+		// Bare /trust opens the live trust menu (trust current, trust parent,
+		// decline). A later invocation is cancellable with Esc, unlike the
+		// required first-run menu.
+		m.picker = m.newTrustPicker()
 		return m, nil
 	case commandConfig:
 		if arg := strings.ToLower(strings.TrimSpace(command.text)); arg != "" {
@@ -4369,7 +5379,15 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	case commandDoctor:
 		return m.startDoctorCommand(command.text)
 	case commandSearch:
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.searchText(command.text)})
+		text := m.searchText(command.text)
+		// The frame's '! /search with no query is an error' rule: an
+		// error-style reply naming the usage must be appended as an error row,
+		// not the calm system note an empty result would produce.
+		kind := actionAppendSystem
+		if strings.HasPrefix(text, "Search\nusage: ") {
+			kind = actionAppendError
+		}
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: kind, text: text})
 		return m, nil
 	case commandResume:
 		if m.pending {
@@ -4379,12 +5397,12 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
-		// Bare `/resume` opens an interactive session picker (like /model & /provider);
-		// `/resume <id>` and `/resume latest` still resolve directly. The picker falls
-		// back to the text path when there is nothing to resume.
+		// Bare `/resume` arms the async session scan (F1: no store I/O on
+		// the UI loop); the picker opens when sessionsScannedMsg lands.
+		// `/resume <id>` and `/resume latest` still resolve directly.
 		if strings.TrimSpace(command.text) == "" {
-			if next, ok := m.openSessionPicker(); ok {
-				return next, nil
+			if next, scanCmd, ok := m.openSessionPicker(); ok {
+				return next, scanCmd
 			}
 		}
 		text := ""
@@ -4428,6 +5446,14 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	case commandExec:
 		return m.handleExecCommand(command.text)
 	case commandLayout:
+		// GAP-K DoD 36: with an argument, /layout applies a named preset
+		// (and persists it); bare /layout keeps the plan-panel toggle.
+		if strings.TrimSpace(command.text) != "" {
+			var text string
+			m, text = m.handleLayoutPresetCommand(command.text)
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+			return m, nil
+		}
 		return m.handleLayoutCommand()
 	case commandInit:
 		return m.handleInitCommand()
@@ -4474,7 +5500,12 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		// that sub-agents spawned later in THIS run read, making the run's budget
 		// inconsistent. Require an idle session (the new budget applies next run).
 		if m.pending && strings.TrimSpace(command.text) != "" {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Turns\nFinish or stop the current run before changing the tool-turn budget."})
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: ackSystemText(ack{
+				verb:    "turns",
+				blocked: true,
+				outcome: "a run is in progress",
+				unblock: "finish or stop the run, then set the budget",
+			})})
 			return m, nil
 		}
 		text := ""
@@ -4550,18 +5581,33 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.pending {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Retry\ncannot retry while a run is in progress."})
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: ackSystemText(ack{
+				verb:    "retry",
+				blocked: true,
+				outcome: "a run is in progress",
+				unblock: "esc esc to cancel, then retry",
+			})})
 			return m, nil
 		}
 		if m.compactInFlight {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{
 				kind: actionAppendSystem,
-				text: "Retry\nstatus: warning\nCompaction is running. Retry once it finishes.",
+				text: ackSystemText(ack{
+					verb:    "retry",
+					blocked: true,
+					outcome: "compaction is running",
+					unblock: "retry once it finishes",
+				}),
 			})
 			return m, nil
 		}
 		if strings.TrimSpace(m.lastPrompt) == "" {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Retry\nno previous prompt to resend."})
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: ackSystemText(ack{
+				verb:    "retry",
+				blocked: true,
+				outcome: "no previous prompt in this session",
+				unblock: "send a prompt first, then retry",
+			})})
 			return m, nil
 		}
 		// Re-stage the attachments the last prompt carried so launchPrompt rebuilds
@@ -4574,7 +5620,12 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		return m.launchPrompt(m.lastPrompt)
 	case commandEdit:
 		if strings.TrimSpace(m.lastPrompt) == "" {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Edit\nno previous prompt to recall."})
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: ackSystemText(ack{
+				verb:    "edit",
+				blocked: true,
+				outcome: "no previous prompt to recall",
+				unblock: "send a prompt first, then edit",
+			})})
 			return m, nil
 		}
 		// Re-stage the remembered attachments alongside the recalled text so an
@@ -4590,7 +5641,12 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	case commandCopy:
 		text := m.lastAssistantAnswer()
 		if strings.TrimSpace(text) == "" {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Copy\nno answer to copy yet."})
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: ackSystemText(ack{
+				verb:    "copy",
+				blocked: true,
+				outcome: "nothing to copy yet",
+				unblock: "no answer in this session",
+			})})
 			return m, nil
 		}
 		return m, copyTranscriptSelectionCmd(text)
@@ -4616,6 +5672,9 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 	// attachments too: launchPrompt clears the pending queues below, so /retry
 	// re-stages these to resend an identical vision/PDF-backed request rather than
 	// a degraded text-only one.
+	if m.execDirectPending {
+		defer func() { m.execDirectPending = false }()
+	}
 	m.lastPrompt = prompt
 	m.lastImages = m.pendingImages
 	m.lastImageLabels = m.pendingImageLabels
@@ -4643,6 +5702,7 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 	if expanded, ok := expandSpecialistMention(prompt, m.agentOptions.Specialists); ok {
 		prompt = expanded
 	}
+	titleSource := prompt
 	// Prepend any staged PDF document text as a model-facing preamble. The
 	// visible transcript above keeps the user's clean prompt; the agent (and the
 	// recorded session, for resume fidelity) sees the document text first.
@@ -4652,6 +5712,9 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 	var err error
 	rawPrompt := prompt
 	m, err = m.ensureActiveSession(prompt)
+	if err == nil {
+		m = m.titleSessionFromFirstPrompt(titleSource)
+	}
 	if err != nil {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{
 			kind: actionAppendError,
@@ -4715,6 +5778,16 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 		transition := splicerun.NewDesignTransitionRecorder()
 		approveAvailable := m.pendingPlan != nil && (m.pendingCritique == nil || !m.pendingCritique.MustFixBeforeExecution)
 		designTransitionRegistry(designRegistry, approveAvailable, transition)
+		// The decisions ledger lets the agent pin settled decisions as
+		// first-class runtime data (§7.1); drained into session events
+		// after the turn.
+		decisions := splicerun.NewDecisionRecorder()
+		designRegistry.Register(splicerun.NewPinDesignDecisionTool(decisions))
+		// The open-question ledger lets the agent raise unresolved questions
+		// the design depends on (§7.1); drained into session events the same
+		// way, and rendered on the resume card / launch DECISIONS module.
+		openQuestions := splicerun.NewOpenQuestionRecorder()
+		designRegistry.Register(splicerun.NewRaiseOpenQuestionTool(openQuestions))
 		return m, tea.Batch(m.runAgentWithOptions(m.activeRunID, runCtx, rawPrompt, turnImages, tuiAgentRunOptions{
 			registry:      designRegistry,
 			systemPrompt:  designSystemPrompt,
@@ -4722,9 +5795,13 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 			priorMessages: designPrior,
 			serverTools:   []zeroruntime.ServerTool{{Kind: zeroruntime.ServerToolWebSearch}},
 			transition:    transition,
+			decisions:     decisions,
+			openQuestions: openQuestions,
 		}), m.spinner.Tick)
 	}
-	return m, tea.Batch(m.runAgent(m.activeRunID, runCtx, prompt, turnImages), m.spinner.Tick)
+	runOpts := tuiAgentRunOptions{execDirect: m.execDirectPending}
+	m.execDirectPending = false
+	return m, tea.Batch(m.runAgentWithOptions(m.activeRunID, runCtx, prompt, turnImages, runOpts), m.spinner.Tick)
 }
 
 // beginRun stamps the shared run-start state for a new agent turn: a fresh run
@@ -4738,16 +5815,26 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	m.activeRunID = m.runID
 	m.runCancel = cancel
 	m.pending = true
+	m.activeExecDirect = m.execDirectPending
 	// Clear per-run tracking state so stale specialists and plans from the
 	// previous turn don't bleed into the new one.
 	m.specialists.clear()
 	m.plan.clear()
 	m.pipeline.clear()
+	// lastState described the PREVIOUS run. Clearing the pipeline while
+	// keeping it left an interval where the panel was empty but the
+	// completion, receipt, and phase chip still projected the old run
+	// (review finding 7). Clear the whole projection together.
+	m.lastState = presentation.State{}
+	m.mirrorPipeline()
 	m.stepWork = nil
 	m.stepNarration = nil
 	m.stepExplanation = nil
 	m.planDetailOpen = false
 	m.planDetailGen++ // invalidate any in-flight step-explanation from the prior run
+	// The previous run's terminal receipt card is no longer the live
+	// outcome surface; its action keys stop dispatching.
+	m.lastTerminalReceipt = ""
 	// Swarm task IDs can repeat. Scope their cached completion/session state to
 	// this run so a reused subagent-1 cannot inherit the prior row and disappear.
 	m.swarmDoneAt = map[string]time.Time{}
@@ -4758,7 +5845,20 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	m.sidebarHidden = false
 	m.turnStartedAt = m.now()
 	m.turnStreamedRunes = 0
+	// A fresh run must not inherit the previous run's tool label/elapsed clock
+	// (defensive: the run-end and cancel paths already cleared it).
+	m.activeToolID = ""
+	m.activeToolName = ""
+	m.activeToolStart = time.Time{}
+	m.liveToolCallID = ""
+	m.liveToolOutput = ""
 	m.spinnerTicking = true
+	// Provider-returned reasoning is live narration the user asked to see
+	// continuously: default it to expanded for the run. The user may still
+	// collapse it via the toggle; each new run (and the run-end path) re-seeds
+	// to the expanded default.
+	m.streamingReasoningExpanded = true
+	m.reportAgentLifecycle(herdrWorking)
 	return m
 }
 
@@ -4777,11 +5877,22 @@ func (m *model) ensureSpinnerTick() tea.Cmd {
 }
 
 func (m model) launchQueuedMessageIfReady() (model, tea.Cmd) {
-	if !m.hasQueuedMessage() || m.pending || m.exiting || m.pendingPermission != nil || m.pendingAskUser != nil || m.pendingSpecReview != nil {
+	// Busy guards mirror loopBusy (loop.go) where it matters: a queued prompt
+	// must not launch while a run streams, while exiting, or during
+	// compaction — compactResultMsg rewrites transcript and session events
+	// wholesale, and a run launched mid-compaction races that rewrite (the
+	// same race /retry's compactInFlight guard exists for). The modal guards
+	// here cover the three gates that own the composer; loopBusy additionally
+	// refuses to LAUNCH a run behind any open modal, a stricter bar a queued
+	// prompt (queued before the modal opened) does not need.
+	if !m.hasQueuedMessage() || m.pending || m.exiting || m.compactInFlight || m.pendingPermission != nil || m.pendingAskUser != nil || m.pendingSpecReview != nil {
 		return m, nil
 	}
 	prompt := m.queuedMessage
 	m.queuedMessage = ""
+	// Deliver queued input visibly: a silent submit looks identical to the
+	// user typing something new, which hides why the next run's prompt differs.
+	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Delivered queued input: " + prompt})
 	return m.launchPrompt(prompt)
 }
 
@@ -4834,6 +5945,7 @@ func (m *model) cancelRun() {
 		m.runCancel()
 	}
 	m.clearStreamingToolCall() // a cancelled file-write must not linger into the next run
+	m.clearActiveTool()        // and the cancelled run's tool must not linger either
 	// A cancelled loop iteration bypasses the agentResponseMsg completion seam (its
 	// late message is drained through flushRunIDs, not advanceLoop), so clear the
 	// loop tag here and re-arm the interrupted loop for its next cadence. Otherwise
@@ -4866,6 +5978,7 @@ func (m *model) cancelRun() {
 		// partial streamed answer (if any), then the cancellation marker — the
 		// session log gets the same marker below.
 		if row, ok := reasoningTranscriptRow("", m.activeRunID, m.streamingReasoning); ok {
+			row.expanded = true
 			m.transcript = appendTranscriptRow(m.transcript, row)
 		}
 		if text := strings.TrimRight(m.streamingTextString(), "\n"); strings.TrimSpace(text) != "" {
@@ -4886,6 +5999,9 @@ func (m *model) cancelRun() {
 	m.cancelConfirmActive = false // whatever path got here, there's nothing left to confirm cancelling
 	m.plan.frozenAt = m.now()     // freeze the plan clock while idle (no run in flight)
 	m.pendingPermission = nil
+	if m.pendingAskUser != nil {
+		unlockPreparedWorktree(m.pendingAskUser.worktree)
+	}
 	m.pendingAskUser = nil
 	// The interim block renders streamingText live; a cancelled run's partial
 	// answer must not leak into (and concatenate with) the next turn's stream.
@@ -4896,6 +6012,7 @@ func (m *model) cancelRun() {
 	// first agentTextMsg will seed a fresh lineAges slice and restart
 	// the tick.
 	m.resetStreamingFade()
+	m.reportAgentLifecycle(herdrIdle)
 }
 
 func (m model) runAgent(runID int, runCtx context.Context, prompt string, images []zeroruntime.ImageBlock) tea.Cmd {
@@ -4914,6 +6031,92 @@ func selfCorrectAutonomyForMode(mode agent.PermissionMode) string {
 	default: // ask, etc. — report the failure without starting an auto-fix round
 		return "low"
 	}
+}
+
+const tuiWorktreeFallbackNotice = "Worktree unavailable; running in the live checkout. Rollback is unavailable."
+
+func (m model) bindPipelineWorktree(ctx context.Context, options *agent.Options) (worktrees.Result, string, error) {
+	if options == nil {
+		return worktrees.Result{}, "", fmt.Errorf("pipeline worktree bind requires agent options")
+	}
+	if disableTUIWorktreesForTest || !m.worktrees.EnabledOrDefault() {
+		notice := ""
+		if !disableTUIWorktreesForTest && !m.worktrees.EnabledOrDefault() {
+			notice = tuiWorktreeFallbackNotice
+		}
+		return worktrees.Result{}, notice, nil
+	}
+	sessionID := strings.TrimSpace(options.SessionID)
+	if sessionID == "" {
+		sessionID = "anon"
+	}
+	name := "tui-" + sanitizeTUIWorktreeName(sessionID) + "-" + fmt.Sprintf("%d", m.activeRunID)
+	prepared, err := tuiPrepareWorktree(ctx, worktrees.Options{
+		Cwd:     m.cwd,
+		Name:    name,
+		BaseDir: strings.TrimSpace(m.worktrees.Directory),
+	})
+	if err != nil {
+		return worktrees.Result{}, tuiWorktreeFallbackNotice, nil
+	}
+	if prepared.Path == "" {
+		return worktrees.Result{}, tuiWorktreeFallbackNotice, nil
+	}
+	// A run launched from a repository subdirectory works in the same
+	// subdirectory of the worktree, as a run in the live checkout does.
+	runDir := prepared.Path
+	if strings.TrimSpace(m.cwd) != "" {
+		launchDir, err := worktrees.LaunchDir(prepared, m.cwd)
+		if err != nil {
+			// This run made the worktree and cannot use it: remove it, so a
+			// failed launch leaves nothing behind. A reused worktree stays.
+			var cleanupErr error
+			if prepared.Locked {
+				cleanupErr = tuiUnlockWorktree(ctx, worktrees.UnlockOptions{RepoRoot: prepared.RepoRoot, Path: prepared.Path})
+			}
+			if cleanupErr == nil && !prepared.Reused {
+				cleanupErr = tuiRemoveWorktree(ctx, worktrees.RemoveOptions{RepoRoot: prepared.RepoRoot, Path: prepared.Path, Force: true})
+			}
+			if cleanupErr != nil {
+				return worktrees.Result{}, "", fmt.Errorf("pipeline worktree: %w; the worktree remains at %s: %v", err, prepared.Path, cleanupErr)
+			}
+			return worktrees.Result{}, "", fmt.Errorf("pipeline worktree: %w", err)
+		}
+		runDir = launchDir
+	}
+	options.Cwd = runDir
+	options.Registry = tuiWorktreeRegistry(options.Registry, runDir)
+	return prepared, "", nil
+}
+
+// tuiWorktreeRegistry rebuilds the pipeline registry for a worktree run. The
+// core tools and the raw source reader are rebound to runDir, so the run
+// never reads or writes the live checkout.
+func tuiWorktreeRegistry(base *tools.Registry, runDir string) *tools.Registry {
+	reg := tools.NewRegistry()
+	if base != nil {
+		for _, tool := range base.All() {
+			reg.Register(tool)
+		}
+	}
+	for _, tool := range tools.CoreTools(runDir) {
+		reg.Register(tool)
+	}
+	tools.RegisterPipelineSourceReader(reg, runDir, nil)
+	return reg
+}
+
+var tuiWorktreeNameClean = regexp.MustCompile(`[^A-Za-z0-9._-]`)
+
+func sanitizeTUIWorktreeName(value string) string {
+	out := strings.Trim(tuiWorktreeNameClean.ReplaceAllString(value, "-"), "-._")
+	if out == "" {
+		return "session"
+	}
+	if len(out) > 40 {
+		return out[:40]
+	}
+	return out
 }
 
 func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt string, images []zeroruntime.ImageBlock, runOptions tuiAgentRunOptions) tea.Cmd {
@@ -4938,12 +6141,29 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		if runOptions.permissionMode != "" {
 			options.PermissionMode = runOptions.permissionMode
 		}
+		if runOptions.execDirect {
+			// CLI-exec parity: a direct /exec pipeline runs under auto
+			// permission mode. State the deviation from the session selector
+			// instead of switching silently.
+			previous := options.PermissionMode
+			options.PermissionMode = agent.PermissionModeAuto
+			notice := "/exec: pipeline runs under auto permission mode"
+			if previous != agent.PermissionModeAuto {
+				notice += fmt.Sprintf(" (session mode %s deferred)", previous)
+			}
+			rows = append(rows, transcriptRow{kind: rowSystem, text: notice, runID: runID})
+			sessionEvents = append(sessionEvents, pendingSessionEvent{
+				Type:    sessions.EventMessage,
+				Payload: map[string]any{"role": "system", "content": notice},
+			})
+		}
 		if runOptions.systemPrompt != "" {
 			options.SystemPrompt = runOptions.systemPrompt
 		}
 		options.SessionID = m.activeSession.SessionID
 		options.ProviderName = m.providerName
 		options.Model = m.modelName
+		options.ModelRegistry = m.modelCatalog
 		options.ReasoningEffort = string(m.reasoningEffort)
 		options.ResponseStyle = m.responseStyle
 		options.Cwd = m.cwd
@@ -4956,7 +6176,14 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			stageConfigPath := filepath.Join(filepath.Dir(m.userConfigPath), "stage-models.json")
 			stageConfig, err := schemas.LoadStageModelConfig(stageConfigPath)
 			if err != nil {
-				warning := "stage routing config ignored: " + err.Error()
+				warning := "stage routing config invalid: " + err.Error()
+				// Neither a node pin nor a stage route can fall back to the run
+				// model. Their resolvers return the cause, so the run fails at
+				// the first stage that needs a route.
+				options.NodeModelResolver = func(string, agent.ModelOverride) (agent.ModelSelection, error) {
+					return agent.ModelSelection{}, fmt.Errorf("stage routing config invalid: %w", err)
+				}
+				options.StageModelResolver = invalidStageRoutingResolver(err)
 				rows = append(rows, transcriptRow{kind: rowSystem, text: warning, runID: runID})
 				sessionEvents = append(sessionEvents, pendingSessionEvent{
 					Type: sessions.EventMessage,
@@ -4981,8 +6208,10 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 					PrimaryProfile: m.providerProfile,
 					Registry:       &m.modelCatalog,
 				}
-				options.StageModelResolver, options.EscalationModelResolver = splicerun.BuildStageModelResolvers(stageConfig, profiles, m.newProvider, tierResolverConfig)
-				m.stageModelResolver = options.StageModelResolver
+				resolvers := splicerun.BuildStageModelResolvers(stageConfig, profiles, m.newProvider, tierResolverConfig)
+				options.StageModelResolver = resolvers.Stage
+				options.NodeModelResolver = resolvers.Node
+				options.EscalationModelResolver = resolvers.Escalation
 			}
 		}
 		if m.captureRunImages != nil {
@@ -5005,10 +6234,25 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			// maybeCompact and recover strict no-ops.
 			options.ContextWindow = 0
 		}
-		if m.captureRunOptions != nil {
-			m.captureRunOptions(options)
+		var preparedWorktree worktrees.Result
+		var worktreeNotice string
+		if runOptions.runKind == tuiRunPipeline {
+			prepared, notice, bindErr := m.bindPipelineWorktree(runCtx, &options)
+			if bindErr != nil {
+				sessionEvents = append(sessionEvents, pendingSessionEvent{
+					Type:    sessions.EventError,
+					Payload: map[string]any{"message": bindErr.Error()},
+				})
+				return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: bindErr, turnTools: toolCalls, turnElapsed: m.now().Sub(started), worktreeNotice: notice}
+			}
+			preparedWorktree = prepared
+			worktreeNotice = notice
+			if preparedWorktree.Path != "" {
+				// Memory identity is the stable repo root, not the per-run
+				// worktree path. Tools keep executing in options.Cwd (the worktree).
+				options.ProjectRoot = preparedWorktree.RepoRoot
+			}
 		}
-
 		// Post-edit self-correction is on by default in the TUI but kept FAST: it
 		// runs LSP diagnostics over the changed files only — cheap, change-scoped,
 		// and a no-op when no language server is installed. The project test plan
@@ -5024,16 +6268,18 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			// model directly — fall back to a per-run manager that is shut down here.
 			lspManager := m.lspManager
 			if lspManager == nil {
-				lspManager = lsp.NewManager(options.Cwd)
+				lspManager = lsp.NewManager(options.Cwd, m.trusted)
 				defer func() {
 					shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 					defer cancel()
 					_ = lspManager.Shutdown(shutdownCtx)
 				}()
 			}
+			// The project test plan runs outside the sandbox, so it runs only in
+			// a trusted workspace.
 			options.SelfCorrect = agent.NewSelfCorrector(options.Cwd, agent.NewLSPDiagnosticsChecker(lspManager), agent.NewProjectVerifier(options.Cwd), agent.SelfCorrectConfig{
 				Enabled:      true,
-				IncludeTests: m.selfCorrectTests,
+				IncludeTests: m.selfCorrectTests && options.TrustedWorkspace,
 				IncludeLSP:   true,
 				Autonomy:     selfCorrectAutonomyForMode(options.PermissionMode),
 			})
@@ -5055,6 +6301,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		var reasoningLast time.Time
 		flushReasoning := func(closedAt time.Time) {
 			if row, ok := reasoningTranscriptRow(fmt.Sprintf("reasoning_%d", reasoningSeq+1), runID, reasoningText); ok {
+				row.expanded = true
 				if !reasoningStarted.IsZero() {
 					if closedAt.IsZero() {
 						closedAt = reasoningLast
@@ -5071,10 +6318,15 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				m.sendAgentRow(runID, row)
 				// Persist the reasoning text so it survives /resume. One event per
 				// flushed segment; the text mirrors the row (trimmed by
-				// reasoningTranscriptRow).
+				// reasoningTranscriptRow). The ordinal rides along so rehydration
+				// rebuilds the SAME stable block id (DoD 43/45): identity is not
+				// positional guesswork on the consumer side.
 				sessionEvents = append(sessionEvents, pendingSessionEvent{
-					Type:    sessions.EventReasoning,
-					Payload: map[string]any{"content": row.text},
+					Type: sessions.EventReasoning,
+					Payload: map[string]any{
+						"content": row.text,
+						"seq":     reasoningSeq,
+					},
 				})
 			}
 			reasoningText = ""
@@ -5082,26 +6334,25 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			reasoningLast = time.Time{}
 		}
 
-		onText := options.OnText
-		options.OnText = func(delta string) {
+		beforeText := func(string) {
 			if firstTokenAt.IsZero() {
 				firstTokenAt = m.now()
 			}
 			if strings.TrimSpace(reasoningText) != "" {
 				flushReasoning(m.now())
 			}
-			m.sendAgentText(runID, delta)
-			if onText != nil {
-				onText(delta)
-			}
 		}
 		// Stream a tool call's arguments live so a long write_file/edit shows the
 		// code being written instead of a frozen spinner (see streamingToolCallView).
-		options.OnToolCallStart = func(id, name string) {
-			m.sendToolCallStreamStart(runID, id, name)
-		}
-		options.OnToolCallDelta = func(id, fragment string) {
-			m.sendToolCallStreamDelta(runID, id, fragment)
+		onToolOutput := options.OnToolOutput
+		options.OnToolOutput = func(snapshot tools.OutputSnapshot) {
+			if m.runtimeMessageSink != nil {
+				id := effectiveToolRowID(snapshot.ToolCallID, callSeq[snapshot.ToolCallID])
+				m.runtimeMessageSink(toolOutputSnapshotMsg{runID: runID, id: id, snapshot: snapshot.Output})
+			}
+			if onToolOutput != nil {
+				onToolOutput(snapshot)
+			}
 		}
 		onPermissionRequest := options.OnPermissionRequest
 		options.OnPermissionRequest = func(ctx context.Context, request agent.PermissionRequest) (agent.PermissionDecision, error) {
@@ -5179,12 +6430,38 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			}
 		}
 
+		onSurfaceToUser := options.OnSurfaceToUser
+		options.OnSurfaceToUser = func(ctx context.Context, req agent.SurfaceToUserRequest) (agent.SurfaceToUserDecision, error) {
+			if onSurfaceToUser != nil {
+				return onSurfaceToUser(ctx, req)
+			}
+			if m.runtimeMessageSink == nil {
+				return agent.SurfaceToUserDecision{Action: agent.SurfaceToUserAbort, Message: "interactive surface unavailable"}, nil
+			}
+			if m.notifier != nil {
+				m.notifier.Notify(notify.AwaitingInput, notify.DefaultMessage(notify.AwaitingInput))
+			}
+			askRequest := surfaceToUserAskRequest(req)
+			sessionEvents = append(sessionEvents, pendingSessionEvent{
+				Type:    sessions.EventMessage,
+				Payload: askUserSessionPayload(askRequest),
+			})
+			decision, answers := m.awaitSurfaceToUser(ctx, runID, askRequest)
+			if answers != nil {
+				sessionEvents = append(sessionEvents, pendingSessionEvent{
+					Type: sessions.EventMessage,
+					Payload: map[string]any{
+						"role":       "ask_user_answers",
+						"toolCallId": askRequest.ToolCallID,
+						"answers":    answers,
+					},
+				})
+			}
+			return decision, nil
+		}
+
 		onReasoning := options.OnReasoning
 		options.OnReasoning = func(delta string) {
-			if m.pipeline.applyStageMarker(delta) {
-				m.sendPipelineStageMarker(runID, delta)
-				return
-			}
 			now := m.now()
 			if firstTokenAt.IsZero() && strings.TrimSpace(delta) != "" {
 				firstTokenAt = now
@@ -5196,12 +6473,17 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				reasoningLast = now
 			}
 			reasoningText += delta
-			m.sendAgentReasoning(runID, delta)
 			if onReasoning != nil {
 				onReasoning(delta)
 			}
 		}
 
+		// Pipeline notices (command nodes a run will execute) are visible system
+		// rows, not part of the collapsed reasoning stream.
+		options.OnNotice = func(text string) {
+			m.sendAgentRow(runID, transcriptRow{kind: rowSystem, text: text, runID: runID})
+		}
+		finishRun := m.applyRunEvents(&options, runID)
 		onToolCall := options.OnToolCall
 		options.OnToolCall = func(call agent.ToolCall) {
 			flushReasoning(m.now())
@@ -5403,7 +6685,10 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				}
 			}
 		} else {
-			estimator := usage.NewCostEstimator(&m.modelCatalog)
+			catalogs := m.newCostCatalogs()
+			estimator := func(model string, event agent.Usage, reported bool) agent.UsageCostEstimate {
+				return catalogs.Estimate(m.providerName, model, event, reported)
+			}
 			options.OnUsage = func(event zeroruntime.Usage) {
 				usageEvents = append(usageEvents, event)
 				turnVisibleOutputTokens += event.VisibleOutputTokens()
@@ -5449,10 +6734,11 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		// Pipeline runs persist request attribution and use routed model prices.
 		// Other run kinds keep the legacy usage callback.
 		if runOptions.runKind == tuiRunPipeline {
-			estimator := usage.NewCostEstimator(&m.modelCatalog)
-			options.EstimateUsageCost = estimator
+			catalogs := m.newCostCatalogs()
+			options.EstimateServedUsageCost = catalogs.Estimate
 			downstreamAU := options.OnAttributedUsage
 			options.OnAttributedUsage = func(au agent.AttributedUsage) {
+				au = priceUnpricedAttributedUsage(au, catalogs.Estimate)
 				usageEvents = append(usageEvents, au.Usage)
 				turnVisibleOutputTokens += au.Usage.VisibleOutputTokens()
 				payload := usage.AttributedUsagePayload(au)
@@ -5465,6 +6751,22 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 					downstreamAU(au)
 				}
 			}
+			// P1.1: pipeline runs surface presentation snapshots to the
+			// session event log so the run record carries runtime truth.
+			// The persistence itself lives in runtimeWiring
+			// (recordPresentationState), shared with the approval path;
+			// this path only supplies the sink.
+		}
+		options = (runtimeWiring{
+			runID:      runID,
+			send:       m.runtimeMessageSink,
+			beforeText: beforeText,
+			recordEvent: func(event pendingSessionEvent) {
+				sessionEvents = append(sessionEvents, event)
+			},
+		}).decorate(options)
+		if m.captureRunOptions != nil {
+			m.captureRunOptions(options)
 		}
 
 		var result agent.Result
@@ -5473,26 +6775,105 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		memCount := 0
 		var memByType map[string]int
 		var mem splicerun.MemoryStore
-		if runOptions.runKind == tuiRunSpecDraft || runOptions.runKind == tuiRunDesignConversation {
+		if !usesPipeline(runOptions.runKind, options.Flags, runOptions.execDirect) {
 			result, err = agent.Run(runCtx, prompt, m.provider, options)
 		} else {
 			memClient, mErr := tuiResolveMemory(runCtx)
-			if mErr != nil || memClient == nil {
-				// Memory is never load-bearing; degrade silently.
+			if runOptions.execDirect && os.Getenv("SPLICE_EXEC_MEMORY") == "off" {
+				// Cold demo runs: /exec honors SPLICE_EXEC_MEMORY=off so a
+				// fixture workspace is not steered by stored observations.
 				memStatus = "off"
-			} else {
+				options.MemoryStatus = "off"
+				memClient = nil
+				mErr = nil
+				rows = append(rows, transcriptRow{kind: rowSystem, text: "/exec: memory off (SPLICE_EXEC_MEMORY=off).", runID: runID})
+			}
+			switch {
+			case mErr != nil:
+				// A daemon was expected but unreachable: unavailable, not off.
+				memStatus = "unavailable"
+				options.MemoryStatus = "unavailable"
+			case memClient == nil:
+				// Memory disabled or not configured: a deliberate cold run.
+				memStatus = "off"
+				options.MemoryStatus = "off"
+			default:
 				mem = memClient
 				memStatus = "active"
+				options.MemoryStatus = "active"
 				if stats, sErr := memClient.Stats(runCtx); sErr == nil {
 					memCount = stats.Total
 					memByType = stats.ByType
 				}
 			}
 			m.pipeline.reset()
-			// The TUI runs in the user's live checkout. It never receives the
-			// destructive WorkspaceRecovery capability; a rollback decision aborts
-			// honestly instead of resetting this workspace.
-			result, err = tuiSpliceRun(runCtx, prompt, m.provider, options, mem, nil)
+			// Worktree runs get iteration recovery so a rollback trajectory decision
+			// restores the best snapshot instead of aborting. Live-checkout fallback
+			// keeps nil, so rollback still aborts with the isolated-worktree reason.
+			var recovery splicerun.WorkspaceRecovery
+			if preparedWorktree.Path != "" {
+				recovery = worktrees.NewIterationRecovery(preparedWorktree)
+			}
+			result, err = tuiSpliceRun(runCtx, prompt, m.provider, options, mem, recovery)
+			finishRun(result.FinalAnswer, err)
+			var preparedPtr *worktrees.Result
+			if preparedWorktree.Path != "" {
+				copy := preparedWorktree
+				preparedPtr = &copy
+			}
+			sourceDirty := inspectSourceDirty(preparedWorktree)
+			// HANDOFF card inputs (F1): computed HERE, off the UI loop.
+			// preserved = the worktree path still exists (lane death vs
+			// work loss); mergeAvailable = preserved AND source not dirty
+			// (the review's dirty-main gate).
+			wtPreserved := preparedPtr != nil && tuiWorktreeExists(preparedPtr.Path)
+			wtMergeable := wtPreserved && !sourceDirty
+			if err != nil {
+				flushReasoning(m.now())
+				errPayload := map[string]any{"message": err.Error()}
+				var receipt string
+				if card, ok := pipelineTurnReceipt("", "", err, preparedPtr, started, m.now()); ok {
+					receipt = receiptTranscriptPayload(card)
+					errPayload["receipt"] = receipt
+				}
+				sessionEvents = append(sessionEvents, pendingSessionEvent{
+					Type:    sessions.EventError,
+					Payload: errPayload,
+				})
+				return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, turnTools: toolCalls, turnElapsed: m.now().Sub(started), memoryStatus: memStatus, memoryCount: memCount, memoryByType: memByType, worktree: preparedPtr, worktreeNotice: worktreeNotice, sourceDirty: sourceDirty, worktreePreserved: wtPreserved, mergeAvailable: wtMergeable, receipt: receipt}
+			}
+			flushReasoning(m.now())
+			elapsed := m.now().Sub(started)
+			ttft := time.Duration(0)
+			if !firstTokenAt.IsZero() {
+				ttft = firstTokenAt.Sub(started)
+			}
+			displayAnswer := formatPipelineFinalAnswer(result.FinalAnswer)
+			rows = append(rows, transcriptRow{
+				kind:        rowAssistant,
+				text:        displayAnswer,
+				final:       true,
+				turnTools:   toolCalls,
+				turnElapsed: elapsed,
+			})
+			assistantPayload := map[string]any{
+				"role":    "assistant",
+				"content": result.FinalAnswer,
+			}
+			var receipt string
+			if card, ok := pipelineTurnReceipt(result.FinalAnswer, result.IncompleteReason, nil, preparedPtr, started, m.now()); ok {
+				receipt = receiptTranscriptPayload(card)
+				rows = append(rows, transcriptRow{kind: rowError, text: receipt})
+				assistantPayload["receipt"] = receipt
+			}
+			if truncation := result.TruncationNotice(); truncation != "" {
+				rows = append(rows, transcriptRow{kind: rowSystem, text: truncation})
+			}
+			sessionEvents = append(sessionEvents, pendingSessionEvent{
+				Type:    sessions.EventMessage,
+				Payload: assistantPayload,
+			})
+			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, turnTools: toolCalls, turnElapsed: elapsed, ttft: ttft, turnVisibleOutputTokens: turnVisibleOutputTokens, memoryStatus: memStatus, memoryCount: memCount, memoryByType: memByType, worktree: preparedPtr, worktreeNotice: worktreeNotice, sourceDirty: sourceDirty, worktreePreserved: wtPreserved, mergeAvailable: wtMergeable, receipt: receipt}
 		}
 		if err != nil {
 			flushReasoning(m.now())
@@ -5547,6 +6928,27 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		var designTransition *splicerun.DesignTransitionRequest
 		if runOptions.runKind == tuiRunDesignConversation && runOptions.transition != nil {
 			designTransition = runOptions.transition.Take()
+		}
+		// A design-conversation turn also drains its decisions ledger into
+		// decision_pinned session events (§7.1): the pinned decisions become
+		// durable runtime data that survives compaction and reconstructs.
+		if runOptions.runKind == tuiRunDesignConversation && runOptions.decisions != nil {
+			for _, d := range runOptions.decisions.Take() {
+				sessionEvents = append(sessionEvents, pendingSessionEvent{
+					Type:    sessions.EventDecisionPinned,
+					Payload: d,
+				})
+			}
+		}
+		// And its open questions into open_question_raised session events
+		// (§7.1): the open set becomes durable runtime data the same way.
+		if runOptions.runKind == tuiRunDesignConversation && runOptions.openQuestions != nil {
+			for _, q := range runOptions.openQuestions.Take() {
+				sessionEvents = append(sessionEvents, pendingSessionEvent{
+					Type:    sessions.EventOpenQuestionRaised,
+					Payload: q,
+				})
+			}
 		}
 		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, turnTools: toolCalls, turnElapsed: elapsed, ttft: ttft, turnVisibleOutputTokens: turnVisibleOutputTokens, memoryStatus: memStatus, memoryCount: memCount, memoryByType: memByType, designTransition: designTransition}
 	}
@@ -5660,18 +7062,52 @@ func (m *model) clearStreamingToolCall() {
 	m.streamCallDecoder = nil
 }
 
+// clearActiveTool drops the in-flight tool tracking. Called when the tool's
+// result row lands, the run ends (success, failure, timeout), or the run is
+// cancelled, so a stale tool can never animate a card or label the working
+// line after it finished.
+func (m *model) clearActiveTool() {
+	m.activeToolID = ""
+	m.activeToolName = ""
+	m.activeToolStart = time.Time{}
+	// The active tool's ephemeral live output ends with it (success, failure,
+	// rejection, cancellation, timeout, or run completion).
+	m.liveToolCallID = ""
+	m.liveToolOutput = ""
+}
+
+// releaseRun is the single run-release invariant for the terminal-run
+// handlers (agentResponseMsg, crystallizeResultMsg, planExecutionResultMsg):
+// every path that ends the active run must clear the transient per-run state
+// in exactly this way, because each piece exists to stop a leak or a stale
+// render:
+//
+//   - clearStreamingToolCall / clearActiveTool: no "writing" block or running
+//     tool survives the run that owned it;
+//   - runCancel released: the run's context CancelFunc is invoked and dropped
+//     now rather than at app exit (every prompt leaked one before this);
+//   - pending false + activeRunID 0: late messages for this run take the
+//     stale-async path (runID != activeRunID), never the live path.
+//
+// Handlers keep their own extras (lifecycle report, session-event flush,
+// plan reconciliation); this covers only the pieces every terminal handler
+// shares. Pointer receiver: runCancel invokes and nils.
+func (m *model) releaseRun() {
+	m.clearStreamingToolCall()
+	m.clearActiveTool()
+	m.pending = false
+	if m.runCancel != nil {
+		m.runCancel()
+	}
+	m.runCancel = nil
+	m.activeRunID = 0
+}
+
 func (m model) sendAgentReasoning(runID int, delta string) {
 	if m.runtimeMessageSink == nil {
 		return
 	}
 	m.runtimeMessageSink(agentReasoningMsg{runID: runID, delta: delta})
-}
-
-func (m model) sendPipelineStageMarker(runID int, line string) {
-	if m.runtimeMessageSink == nil {
-		return
-	}
-	m.runtimeMessageSink(pipelineStageMarkerMsg{runID: runID, line: line})
 }
 
 func (m model) sendAgentUsage(runID int, modelID string, event zeroruntime.Usage, costs ...*agent.UsageCostEstimate) {
@@ -5701,4 +7137,40 @@ func toolResultRowText(result agent.ToolResult) string {
 		status = tools.StatusOK
 	}
 	return fmt.Sprintf("tool result: %s %s %s", result.Name, status, truncateTUIOutput(result.Output, tuiToolOutputLimit))
+}
+
+// priceUnpricedAttributedUsage fills in the cost of an attributed usage event
+// that reached the TUI with no cost. The splice ledger prices every stream
+// first, so this path only sees runs that skip the ledger. Such a run sends an
+// empty cost, which the usage tracker rejects, so the cost is priced here, as
+// design runs do. Malformed usage stays an error, never a priced zero.
+func priceUnpricedAttributedUsage(au agent.AttributedUsage, estimate agent.ServedUsageCostEstimator) agent.AttributedUsage {
+	if au.Cost.Status != "" {
+		return au
+	}
+	if au.UsageError != "" {
+		au.Cost = agent.UsageCostEstimate{Status: agent.CostStatusError, UnpricedReason: au.UsageError}
+		return au
+	}
+	au.Cost = estimate(au.ProviderName, au.Model, au.Usage, au.UsageReported)
+	return au
+}
+
+// flagSetFromResolutions returns the resolved flag set the doctor reads.
+func flagSetFromResolutions(resolutions []flags.Resolution) flags.Set {
+	set := make(flags.Set, len(resolutions))
+	for _, r := range resolutions {
+		set[r.Name] = r.Value
+	}
+	return set
+}
+
+// newCostCatalogs returns the run's pricing catalogs: one registry per serving
+// provider profile, built on first use.
+func (m model) newCostCatalogs() *usage.CostCatalogs {
+	providers := append([]config.ProviderProfile{m.providerProfile}, m.savedProviders...)
+	if m.costCatalogLoad != nil {
+		return usage.NewCostCatalogs(m.costCatalogLoad).WithProviders(providers)
+	}
+	return usage.NewProfileCostCatalogs(providers)
 }

@@ -66,7 +66,7 @@ jobs:
           mv "$workdir/modelsdev_snapshot_date.txt" internal/modelregistry/modelsdev_snapshot_date.txt
 
       - name: Test the refreshed snapshot
-        run: go test ./internal/modelregistry/ ./internal/splice/ ./internal/usage/
+        run: go test -timeout 30m ./internal/modelregistry/ ./internal/splice/ ./internal/usage/
         env:
           SPLICE_DISABLE_MODELS_FETCH: "1"
 

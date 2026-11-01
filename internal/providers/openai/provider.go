@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Taf0711/splice/internal/flags"
 	"github.com/Taf0711/splice/internal/providers/providerio"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
@@ -226,6 +227,13 @@ func (provider *Provider) streamWithServerTool(ctx context.Context, body []byte,
 
 	state := newToolState(provider.parseThinkTags)
 	state.serverToolEnabled = serverToolEnabled
+	// OpenRouter returns the generation identity on every endpoint via the
+	// X-Generation-Id response header. It is correlation metadata, not
+	// authorization: capture it whenever present so the ledger can key a
+	// later reconciliation to the exact billed request. Other backends that
+	// do not send the header leave it empty, which records "not reported".
+	requestID := response.Header.Get("X-Generation-Id")
+	state.requestID = requestID
 	// Use the shared SSE reader (also used by the Anthropic/Gemini providers) so
 	// multi-line "data:" continuation fields are joined into one payload, and the
 	// idle watchdog / context cancellation are handled uniformly.
@@ -259,9 +267,13 @@ func (provider *Provider) streamWithServerTool(ctx context.Context, body []byte,
 		if searches := state.webSearchRequestCount(); searches > 0 && (!state.usageSeen || state.usageReportedSearches != searches) {
 			state.lastUsage.WebSearchRequests = searches
 			state.lastUsage.WebSearchEngine = provider.webSearchEngine
-			sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: state.lastUsage, ReportedCostUSD: state.lastReportedCostUSD})
+			sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: state.lastUsage, ReportedCostUSD: state.lastReportedCostUSD, RequestID: state.requestID})
 		}
-		sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone, FinishReason: state.finishReason})
+		sendEvent(ctx, events, zeroruntime.StreamEvent{
+			Type:            zeroruntime.StreamEventDone,
+			FinishReason:    state.finishReason,
+			ReasoningBlocks: append([]zeroruntime.ReasoningBlock(nil), state.reasoningBlocks...),
+		})
 	}
 }
 
@@ -302,15 +314,27 @@ func (provider *Provider) emitChunk(
 ) {
 	for _, choice := range chunk.Choices {
 		annotations := choice.Delta.Annotations
+		structuredReasoning := false
 		if choice.Message != nil {
 			annotations = append(annotations, choice.Message.Annotations...)
+			for _, detail := range choice.Message.ReasoningDetails {
+				structuredReasoning = provider.emitReasoningDetail(ctx, detail, state, events) || structuredReasoning
+			}
 		}
 		state.emitAnnotationBatch(ctx, events, annotations)
-		if reasoning := choice.Delta.reasoningText(); reasoning != "" {
-			sendEvent(ctx, events, zeroruntime.StreamEvent{
-				Type:    zeroruntime.StreamEventReasoning,
-				Content: reasoning,
-			})
+		for _, detail := range choice.Delta.ReasoningDetails {
+			structuredReasoning = provider.emitReasoningDetail(ctx, detail, state, events) || structuredReasoning
+		}
+		// Some compatible APIs send both the legacy reasoning string and modern
+		// structured details. Prefer readable structured details to avoid showing
+		// the same provider-returned narration twice.
+		if !structuredReasoning {
+			if reasoning := choice.Delta.reasoningText(); reasoning != "" {
+				sendEvent(ctx, events, zeroruntime.StreamEvent{
+					Type:    zeroruntime.StreamEventReasoning,
+					Content: reasoning,
+				})
+			}
 		}
 		if choice.Delta.Content != "" {
 			state.emitContent(ctx, events, choice.Delta.Content)
@@ -341,6 +365,7 @@ func (provider *Provider) emitChunk(
 			PromptTokens:      chunk.Usage.PromptTokens,
 			CompletionTokens:  chunk.Usage.CompletionTokens,
 			CachedInputTokens: chunk.Usage.PromptTokensDetails.CachedTokens,
+			CacheWriteTokens:  chunk.Usage.PromptTokensDetails.CacheWriteTokens,
 			ReasoningTokens:   chunk.Usage.CompletionTokensDetails.ReasoningTokens,
 			WebSearchRequests: searches,
 			WebSearchEngine:   searchEngine,
@@ -350,14 +375,17 @@ func (provider *Provider) emitChunk(
 		// Only OpenRouter's "cost" field is trusted (see the field comment in
 		// types.go); every other provider leaves lastReportedCostUSD nil, so
 		// cost estimation is byte-identical to before this change.
-		if provider.isOpenRouter() && chunk.Usage.Cost != nil {
-			reported := *chunk.Usage.Cost
-			state.lastReportedCostUSD = &reported
+		if provider.isOpenRouter() {
+			state.lastReportedCostUSD = keepReportedCost(state.lastReportedCostUSD, reportedUsageCost(*chunk.Usage))
+		}
+		if state.requestID == "" && provider.isOpenRouter() && strings.HasPrefix(chunk.ID, "gen-") {
+			state.requestID = chunk.ID
 		}
 		sendEvent(ctx, events, zeroruntime.StreamEvent{
 			Type:            zeroruntime.StreamEventUsage,
 			Usage:           state.lastUsage,
 			ReportedCostUSD: state.lastReportedCostUSD,
+			RequestID:       state.requestID,
 		})
 	}
 }
@@ -367,6 +395,33 @@ func (delta streamDelta) reasoningText() string {
 		return delta.ReasoningContent
 	}
 	return delta.Reasoning
+}
+
+// emitReasoningDetail preserves one OpenRouter reasoning artifact and surfaces
+// only its provider-returned readable text or summary. It returns true when it
+// emitted readable content, which lets the caller suppress duplicate aliases.
+func (provider *Provider) emitReasoningDetail(ctx context.Context, detail reasoningDetail, state *toolState, events chan<- zeroruntime.StreamEvent) bool {
+	content := ""
+	switch detail.Type {
+	case "reasoning.text":
+		content = detail.Text
+	case "reasoning.summary":
+		content = detail.Summary
+	}
+	if provider.isOpenRouter() && len(detail.Raw) > 0 {
+		state.reasoningBlocks = append(state.reasoningBlocks, zeroruntime.ReasoningBlock{
+			Provider:  "openrouter",
+			Type:      detail.Type,
+			Text:      content,
+			Signature: detail.Signature,
+			Data:      string(detail.Raw),
+		})
+	}
+	if content == "" {
+		return false
+	}
+	sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventReasoning, Content: content})
+	return true
 }
 
 // mapFinishReason maps OpenAI's finish_reason onto the runtime's normalized
@@ -446,7 +501,16 @@ func (provider *Provider) openAIRequest(request zeroruntime.CompletionRequest) c
 			strings.TrimSpace(message.Content) == "" && len(message.ToolCalls) == 0 {
 			continue
 		}
-		messages = append(messages, mapMessage(message))
+		mappedMessage := mapMessage(message)
+		if provider.isOpenRouter() {
+			for _, block := range message.Reasoning {
+				if block.Provider != "openrouter" || !json.Valid([]byte(block.Data)) {
+					continue
+				}
+				mappedMessage.ReasoningDetails = append(mappedMessage.ReasoningDetails, json.RawMessage(block.Data))
+			}
+		}
+		messages = append(messages, mappedMessage)
 	}
 
 	mapped := chatCompletionRequest{
@@ -457,20 +521,27 @@ func (provider *Provider) openAIRequest(request zeroruntime.CompletionRequest) c
 		// which silently zeroes token accounting.
 		StreamOptions: &streamOptions{IncludeUsage: true},
 	}
-	if provider.maxTokens > 0 {
-		mapped.MaxCompletionTokens = provider.maxTokens
+	if cap := providerio.WireMaxOutputTokens(request.MaxOutputTokens, provider.maxTokens); cap > 0 {
+		mapped.MaxCompletionTokens = cap
 	}
 	// reasoning_effort is only valid for reasoning models; callers gate it against
 	// the model's capabilities, so an empty value (the default for non-reasoning
 	// models) is simply omitted. Only forward the values the API accepts.
 	if effort := openAIReasoningEffort(request.ReasoningEffort); effort != "" {
-		mapped.ReasoningEffort = effort
+		if provider.isOpenRouter() {
+			mapped.Reasoning = &reasoningOptions{Effort: effort}
+		} else {
+			mapped.ReasoningEffort = effort
+		}
 	}
 	// prompt_cache_key is a documented OpenAI parameter; compatible servers
 	// ignore unknown fields, but a strict endpoint that rejects it can be
 	// accommodated with SPLICE_DISABLE_PROMPT_CACHE_KEY=1.
 	if key := strings.TrimSpace(request.PromptCacheKey); key != "" && !promptCacheKeyDisabled() {
 		mapped.PromptCacheKey = key
+	}
+	if order := openRouterProviderOrder(); len(order) > 0 && provider.isOpenRouter() {
+		mapped.Provider = &openRouterRouting{Order: order, AllowFallbacks: false}
 	}
 	if len(request.Tools) > 0 || provider.hasOpenRouterWebSearch(request) {
 		mapped.Tools = make([]toolDefinition, 0, len(request.Tools)+1)
@@ -504,6 +575,10 @@ func (provider *Provider) openAIRequest(request zeroruntime.CompletionRequest) c
 			"type":     "function",
 			"function": map[string]any{"name": name},
 		}
+	} else if request.ToolChoiceRequired {
+		// Any-tool forcing: the model must call one of the offered tools,
+		// without naming which. The OpenAI wire form is the string form.
+		mapped.ToolChoice = "required"
 	}
 	return mapped
 }
@@ -547,13 +622,28 @@ func configuredWebSearchMaxResults() int {
 	return value
 }
 
-// promptCacheKeyDisabled reports whether the SPLICE_DISABLE_PROMPT_CACHE_KEY
-// kill switch is set to a truthy value. "0" and "false" (any case) are
-// no-ops, matching how SPLICE_FORMAT_ON_WRITE parses boolean flags, so an
-// explicitly-disabled toggle never flips the behavior it names.
+// OpenRouterProviderOrderEnvVar pins the OpenRouter upstreams, as a comma
+// list of provider slugs in order ("deepseek" or "deepinfra/fp8"), with no
+// fallback to other upstreams. OpenRouter otherwise routes one model to
+// many upstreams with different quantizations, so two runs of one
+// configuration can measure two different models.
+const OpenRouterProviderOrderEnvVar = "SPLICE_OPENROUTER_PROVIDER_ORDER"
+
+func openRouterProviderOrder() []string {
+	var order []string
+	for _, slug := range strings.Split(os.Getenv(OpenRouterProviderOrderEnvVar), ",") {
+		if slug = strings.TrimSpace(slug); slug != "" {
+			order = append(order, slug)
+		}
+	}
+	return order
+}
+
+// promptCacheKeyDisabled reports whether the provider.prompt_cache_key flag is
+// off for this process. Its legacy kill switch, SPLICE_DISABLE_PROMPT_CACHE_KEY,
+// resolves into that flag.
 func promptCacheKeyDisabled() bool {
-	value := strings.TrimSpace(os.Getenv("SPLICE_DISABLE_PROMPT_CACHE_KEY"))
-	return value != "" && value != "0" && !strings.EqualFold(value, "false")
+	return !flags.Process().Enabled(flags.ProviderPromptCacheKey)
 }
 
 // openAIReasoningEffort normalizes a reasoning effort for the OpenAI chat

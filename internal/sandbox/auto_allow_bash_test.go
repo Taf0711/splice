@@ -135,3 +135,25 @@ func TestShellSandboxActive(t *testing.T) {
 		t.Fatal("nil engine must NOT be sandbox-active")
 	}
 }
+
+// TestEnforcementGapNamesWhyTheSandboxDoesNotEnforce pins the start check of
+// a pipeline agent node. A disabled policy and a missing native backend each
+// give a reason. An enforcing policy on a native backend gives none.
+func TestEnforcementGapNamesWhyTheSandboxDoesNotEnforce(t *testing.T) {
+	root := t.TempDir()
+	cases := []struct {
+		name   string
+		engine *Engine
+		want   string
+	}{
+		{"nil engine", nil, "no sandbox engine is available"},
+		{"disabled", NewEngine(EngineOptions{WorkspaceRoot: root, Policy: Policy{Mode: ModeDisabled}, Backend: nativeWrappingBackend}), "the sandbox policy is disabled"},
+		{"no backend", NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy(), Backend: Backend{Name: BackendUnavailable, Message: "bwrap missing"}}), "no native sandbox backend is available (bwrap missing)"},
+		{"enforcing", NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy(), Backend: nativeWrappingBackend}), ""},
+	}
+	for _, tc := range cases {
+		if got := tc.engine.EnforcementGap(); got != tc.want {
+			t.Errorf("%s: EnforcementGap() = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}

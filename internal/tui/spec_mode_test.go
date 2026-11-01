@@ -280,3 +280,38 @@ func TestSpecLaunchesSeedElapsedClock(t *testing.T) {
 		t.Fatal("impl launch did not seed turnStartedAt (elapsed clock would not render)")
 	}
 }
+
+// TestSpecApproveRotatesTheWebSession: approval switches to the
+// implementation session. A running browser surface moves to that session,
+// and its old links stop working.
+func TestSpecApproveRotatesTheWebSession(t *testing.T) {
+	store := testSessionStore(t)
+	provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{
+		submitSpecScript("call-1", "Review Flow", "# Goal\n\nAdd review flow."),
+		textScript("implemented from approved spec"),
+	}}
+	m := newSpecModeTestModel(t.TempDir(), provider, store)
+	m.surface.interactive = func() bool { return false }
+	t.Cleanup(m.surface.stop)
+	m.input.SetValue("/spec add review flow")
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	updated, _ = next.Update(execCmd(cmd))
+	next = updated.(model)
+	next = next.openWebSurface()
+
+	updated, _ = next.Update(testKeyText("a"))
+	next = updated.(model)
+	if next.activeSession.SessionKind != sessions.SessionKindSpecImpl {
+		t.Fatalf("expected active implementation session, got %#v", next.activeSession)
+	}
+	next.surface.mu.Lock()
+	served := next.surface.running().SessionID()
+	next.surface.mu.Unlock()
+	if served != next.activeSession.SessionID {
+		t.Fatalf("browser serves session %q, want the implementation session %q", served, next.activeSession.SessionID)
+	}
+	if !transcriptContains(next.transcript, "Old links no longer work") {
+		t.Fatal("approval did not show the new browser link")
+	}
+}

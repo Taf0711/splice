@@ -1,134 +1,143 @@
-# Splice Task Benchmark
+# Task benchmark harness
 
-This is the **task** benchmark: how often Splice completes a real coding task
-end-to-end, headless, unattended. It is separate from
-[`docs/PERFORMANCE.md`](PERFORMANCE.md), which measures process startup and
-memory, not task success.
+The task benchmark runs `splice exec` against prepared repositories and checks
+the result with repository commands.
 
-The methodology is the point, not the digit. A task-success score is **largely
-model-bounded** — most of the number comes from whichever model you bring. So we
-record the model with every result and we publish the score **with and without
-the self-correct loop**, because the delta between those two runs is the part
-Splice actually contributes: the agent noticing its own broken edit and fixing it
-before it hands the task back.
+This harness measures a complete model and Splice configuration. It does not
+isolate model quality from pipeline quality.
 
-## What is recorded
+No task-success number is published in this repository.
 
-Every run produces a self-describing JSON record so a published number is
-reproducible and auditable from the record alone:
+## Result record
 
-| Field            | Meaning                                                       |
-| ---------------- | ------------------------------------------------------------- |
-| `suite`          | Task set id (which tasks produced the number)                 |
-| `model`          | The model that ran — the score is model-bounded, so this is required |
-| `mode`           | Exec mode preset, if any                                      |
-| `selfCorrect`    | Whether the post-edit verify-and-correct loop was enabled     |
-| `version`        | Splice version                                                |
-| `commit`         | Splice commit the run was built from                          |
-| `date`           | UTC timestamp of the run                                      |
-| `tasksAttempted` | Tasks attempted                                               |
-| `tasksPassed`    | Tasks whose verification passed                               |
-| `passRate`       | `tasksPassed / tasksAttempted`                                |
-| `tasks`          | Per-task pass/fail/error with detail                          |
+Each run produces JSON with these fields:
 
-## Integration point: headless `splice exec`
+| Field | Purpose |
+|---|---|
+| `suite` | Task-set ID |
+| `model` | Requested model |
+| `mode` | Optional execution preset |
+| `selfCorrect` | Value passed to the harness |
+| `version` | Splice version |
+| `commit` | Source commit |
+| `date` | UTC run time |
+| `tasksAttempted` | Number of attempted tasks |
+| `tasksPassed` | Number of verified tasks |
+| `passRate` | Passed tasks divided by attempted tasks |
+| `tasks` | Per-task status and evidence |
 
-The harness drives Splice through its headless surface — the same path CI uses:
+Keep the JSON record with every published result. A pass rate without its model,
+commit, suite, and verifier is not reproducible.
+
+## Execution path
+
+The harness starts this form of command for each task:
 
 ```bash
-splice exec --output-format stream-json --model <model> [--self-correct] "<task prompt>"
+splice exec --output-format stream-json --model <model> "<task prompt>"
 ```
 
-> **Note:** `--self-correct` is meaningful in the TUI/`agent.Run` loop (it enables the post-edit verify-and-correct loop). Under `splice exec`, which runs the deterministic pipeline, `--self-correct` is inert and has no effect on execution.
+It reads the terminal `run_end.exitCode`. When a task defines a
+`verificationCommand`, that command is authoritative.
 
+A task passes only when the external verifier exits successfully. A successful
+agent exit does not override a failed verifier.
 
-Per task, the harness reads the terminal `run_end` event's exit code from the
-stream-json output to decide pass/fail. When a task carries a
-`verificationCommand` (e.g. `go test ./...`), that command's exit status is
-authoritative — mirroring Terminal-Bench's external-verifier model: the task is
-"passed" only when the project's own checks pass after the agent finishes.
+## Current self-correct limit
 
-## Task set format
+The harness accepts `--self-correct` and forwards the value to `splice exec`.
+The deterministic pipeline does not use the interactive post-edit self-correct
+loop.
 
-A task set is a JSON manifest. A runnable sample lives at
-[`cmd/splice-perf-bench/testdata/terminal-bench-sample.json`](../cmd/splice-perf-bench/testdata/terminal-bench-sample.json):
+Therefore, do not publish a baseline versus self-correct delta from this harness.
+The two runs do not test different correction behavior.
 
-```json
-{
-  "id": "terminal-bench-sample",
-  "name": "Terminal-Bench (sample)",
-  "tasks": [
-    {
-      "id": "hello-fix",
-      "name": "make the failing test pass",
-      "prompt": "The test in ./hello fails. Fix the implementation so `go test ./...` passes.",
-      "workspaceFixture": "./hello",
-      "verificationCommand": ["go", "test", "./..."]
-    }
-  ]
-}
-```
+Use the trajectory results inside the pipeline record when you need evidence of
+pipeline retries or recovery.
 
-## The exact command
+## Task-set format
 
-Build the binary, then run the task harness **twice** against the same task set
-and the same model — once without self-correct, once with — and stamp the version
-and commit so the records are reproducible:
+A task set is a JSON manifest. Each task can provide:
+
+- an ID and prompt;
+- a workspace fixture;
+- a verification command; and
+- descriptive metadata.
+
+The checked-in sample is suitable for parser and dry-run checks:
+
+[`cmd/splice-perf-bench/testdata/terminal-bench-sample.json`](../cmd/splice-perf-bench/testdata/terminal-bench-sample.json)
+
+Its referenced workspace directories are not included. Do not use it for a live
+score without replacement fixtures.
+
+Validate the record path without a model:
 
 ```bash
-# build the production binary
+go run ./cmd/splice-perf-bench tasks \
+  --suite cmd/splice-perf-bench/testdata/terminal-bench-sample.json \
+  --model dry-run \
+  --dry-run \
+  --json
+```
+
+A dry run records each task as skipped.
+
+## Run a real suite
+
+Create a task set whose `workspaceFixture` paths exist. Then build the release
+binary and run the harness:
+
+```bash
 go run ./cmd/splice-release build
 
 VERSION=$(git describe --tags --always)
 COMMIT=$(git rev-parse --short HEAD)
-SUITE=cmd/splice-perf-bench/testdata/terminal-bench-sample.json
-MODEL=<your-model>
+SUITE=/path/to/task-suite.json
+MODEL=MODEL_ID
 
-# baseline: self-correct OFF
 go run ./cmd/splice-perf-bench tasks \
-  --suite "$SUITE" --binary ./splice --model "$MODEL" \
-  --version "$VERSION" --commit "$COMMIT" \
-  --output dist/bench/tasks-baseline.json
-
-# self-correct ON (auto-fix needs --auto medium or high; see note below)
-go run ./cmd/splice-perf-bench tasks \
-  --suite "$SUITE" --binary ./splice --model "$MODEL" --self-correct \
-  --version "$VERSION" --commit "$COMMIT" \
-  --output dist/bench/tasks-selfcorrect.json
+  --suite "$SUITE" \
+  --binary ./splice \
+  --model "$MODEL" \
+  --version "$VERSION" \
+  --commit "$COMMIT" \
+  --output dist/bench/tasks.json
 ```
 
-`--version`/`--commit` also read from `SPLICE_BENCH_VERSION` / `SPLICE_BENCH_COMMIT`
-when the flags are omitted, so CI can stamp them once in the environment.
+The version and commit can also come from:
 
-Use `--dry-run` to exercise the record path without invoking a model (every task
-is recorded as skipped) — useful for validating a task set before a real run.
+```text
+SPLICE_BENCH_VERSION
+SPLICE_BENCH_COMMIT
+```
 
-> **Self-correct and autonomy.** `--self-correct` runs the verify-and-correct
-> loop after each mutating edit (active in the TUI/`agent.Run` path; inert under
-> `splice exec` pipeline runs). Whether a detected failure is **auto-fixed** or
-> only **reported** is gated by the run's autonomy: pass `--auto medium` (or
-> `high`) for the loop to drive corrective rounds. At the default low autonomy it
-> reports failures without auto-fixing, so the with/without delta is measured at
-> `--auto medium` or higher.
+Use a fixed machine, provider route, model ID, task-set revision, and timeout for
+a comparison.
 
-## Published result
+## Publish a result
 
-Fill in after a clean run on a fixed machine. Keep both records; the delta is the
-headline.
+Publish these items together:
 
-| Run                     | Model     | Self-correct | Pass rate | Commit |
-| ----------------------- | --------- | ------------ | --------- | ------ |
-| Baseline                | _TBD_     | off          | _TBD_     | _TBD_  |
-| With self-correct       | _TBD_     | on           | _TBD_     | _TBD_  |
-| **Self-correct delta**  |           |              | **_TBD_** |        |
+1. The task-set file and fixture revision.
+2. The Splice commit and version.
+3. The requested provider and model route.
+4. The execution mode and autonomy value.
+5. The result JSON.
+6. The host operating system and architecture.
+7. Any external verifier dependencies.
 
-Report the model alongside the number every time. A score without its model is
-not a claim about Splice — it is a claim about the model. The honest signal is the
-delta: how much the self-correct loop moved the same model on the same tasks.
+Report failures and blocked tasks. Do not remove them from the denominator after
+the run.
 
-## Reproducing a published number
+## Reproduce a result
 
-1. Check out the `commit` from the record.
-2. `go run ./cmd/splice-release build`.
-3. Run the two commands above with the recorded `model` and `suite`.
-4. Compare `passRate` in the new records against the published ones.
+1. Check out the recorded commit.
+2. Restore the recorded suite and fixtures.
+3. Build the release binary.
+4. Use the recorded model and configuration.
+5. Run the same command.
+6. Compare per-task evidence before you compare `passRate`.
+
+Read [Performance checks](PERFORMANCE.md) for process startup measurements. Read
+[Offline agent evaluations](AGENT_EVALS.md) for fixture and score contracts.

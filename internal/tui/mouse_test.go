@@ -49,6 +49,34 @@ func TestMouseClickSelectsThenAppliesCommandSuggestionRow(t *testing.T) {
 	}
 }
 
+func TestSuggestionClickTargetsWithSidebarActive(t *testing.T) {
+	m := mouseTestModel()
+	m.transcript = append(m.transcript, transcriptRow{kind: rowToolCall, tool: "read_file", detail: "main.go"})
+	m = typeRunes(t, m, "/")
+	if !m.suggestionsActive() {
+		t.Fatalf("expected command suggestions, got %#v", m.suggestions)
+	}
+	if len(m.suggestions) < 2 {
+		t.Fatalf("expected at least two command suggestions, got %#v", m.suggestions)
+	}
+	if !m.sidebarAvailable() {
+		t.Fatal("sidebar should remain available while the suggestion palette is open")
+	}
+
+	width := chatWidth(m.width - sidebarWidth(m.width) - 3)
+	top := m.overlayMouseTop(len(viewLines(m.suggestionOverlay(width))), width)
+	// The palette caps at suggestionPaletteMaxWidth and centers in the chat
+	// column; at wide terminals the block's left inset is nonzero, so the
+	// click must land inside the palette, not at the column edge.
+	paletteWidth := minInt(width, suggestionPaletteMaxWidth)
+	click := testMouseClick(tea.MouseLeft, (width-paletteWidth)/2+1, top+4)
+	updated, _ := m.Update(click)
+	next := updated.(model)
+	if next.suggestionIdx != 1 {
+		t.Fatalf("suggestion index after clicking the second row = %d, want 1", next.suggestionIdx)
+	}
+}
+
 func TestMouseClickSelectsThenAppliesPickerRow(t *testing.T) {
 	m := mouseTestModel()
 	m.modelName = "claude-sonnet-4.5"
@@ -894,7 +922,9 @@ func TestTranscriptCopyStatusUsesComposerSpacerWithoutFooterGrowth(t *testing.T)
 		t.Fatalf("view should show copy status, got:\n%s", view)
 	}
 	footerLines := viewLines(footer)
-	if len(footerLines) < 2 || !strings.Contains(footerLines[0], "Copied!") || !strings.HasPrefix(footerLines[1], "╭") {
+	// Bare-row composer (Pen): the copy status replaces the spacer directly
+	// above the prompt row.
+	if len(footerLines) < 2 || !strings.Contains(footerLines[0], "Copied!") {
 		t.Fatalf("copy status should replace the spacer directly above composer, got:\n%s", footer)
 	}
 	if strings.Contains(plainRender(t, m.statusLine(80)), "Copied!") {
@@ -988,18 +1018,19 @@ func composerMousePoint(t *testing.T, m model, column int) (int, int) {
 	if frame.composerRect.height <= 0 {
 		t.Fatalf("expected visible composer rect, frame=%#v", frame)
 	}
-	contentY := 1
+	// Bare-row composer (Pen): one row, no border, prompt glyph leads.
+	contentY := 0
 	if renderAttachmentChips(m.pendingImageLabels, m.pendingDocuments) != "" {
 		contentY++
 	}
-	x := frame.composerRect.x + 2 + lipgloss.Width(composerVisualLinePrefix(m.input, true)) + column
+	x := frame.composerRect.x + lipgloss.Width(composerVisualLinePrefix(m.input, true)) + column
 	y := frame.composerRect.y + contentY
 	return x, y
 }
 
 func mouseTestModel() model {
 	m := newModel(context.Background(), Options{})
-	m.width = 100
+	m.width = 130
 	m.height = 30
 	m.altScreen = true
 	m.headerPrinted = true
@@ -1056,7 +1087,7 @@ func setupMouseTestModel() model {
 			},
 		},
 	})
-	m.width = 100
+	m.width = 130
 	m.height = 30
 	m.altScreen = true
 	return m

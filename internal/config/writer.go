@@ -29,6 +29,16 @@ func UpsertProvider(path string, profile ProviderProfile, setActive bool) (FileC
 	}
 
 	mergeProvider(&cfg, profile)
+	// Only a credential write can promote this marker. The general profile merge
+	// also handles project config, which must not reactivate a stale stored key.
+	if profile.APIKeyStored {
+		for index := range cfg.Providers {
+			if cfg.Providers[index].Name == profile.Name {
+				cfg.Providers[index].APIKeyStored = true
+				break
+			}
+		}
+	}
 	if setActive || strings.TrimSpace(cfg.ActiveProvider) == "" {
 		cfg.ActiveProvider = profile.Name
 	}
@@ -170,6 +180,28 @@ func SetTheme(path string, theme string) (FileConfig, error) {
 		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
 	}
 	cfg.Preferences.Theme = strings.TrimSpace(theme)
+	if err := writeConfigFile(path, cfg); err != nil {
+		return FileConfig{}, err
+	}
+	return cfg, nil
+}
+
+// SetLayout persists the TUI layout preset name (Preferences.Layout),
+// mirroring SetTheme. A blank name clears the stored preference.
+func SetLayout(path string, layout string) (FileConfig, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return FileConfig{}, fmt.Errorf("config path is required")
+	}
+	cfg := FileConfig{}
+	if data, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
+	}
+	cfg.Preferences.Layout = strings.TrimSpace(layout)
 	if err := writeConfigFile(path, cfg); err != nil {
 		return FileConfig{}, err
 	}

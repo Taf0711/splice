@@ -138,11 +138,15 @@ func (c sarifCheck) runScanner(ctx context.Context, req VerificationCheckRequest
 		return nil, fmt.Errorf("SARIF scanner is not installed or not available: %w", err)
 	}
 
-	cmdArgs := append(scanner.args, relPaths...)
+	command := append([]string{scannerPath}, scanner.args...)
+	command = append(command, relPaths...)
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, scannerPath, cmdArgs...)
-	cmd.Dir = req.WorkDir
+	cmd, plan, cerr := PrepareStageCommand(ctx, req.Sandbox, req.WorkDir, command)
+	if cerr != nil {
+		return nil, fmt.Errorf("SARIF scanner is not installed or not available: %w", cerr)
+	}
+	defer plan.Cleanup()
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {
 		return nil, ctx.Err()

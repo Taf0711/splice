@@ -10,6 +10,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/Taf0711/splice/internal/gitenv"
 	"github.com/Taf0711/splice/internal/redaction"
 )
 
@@ -416,6 +417,9 @@ func defaultRunGitEnv(ctx context.Context, dir string, env []string, args ...str
 	command.Dir = dir
 	if len(env) > 0 {
 		command.Env = append(os.Environ(), env...)
+	}
+	if err := gitenv.Harden(command); err != nil {
+		return CommandResult{ExitCode: -1}, err
 	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

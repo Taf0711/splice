@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -23,110 +24,428 @@ func ComputeScore(state schemas.IterationState) float64 {
 			state.LintIssuesBySeverity[schemas.SeverityHigh]*3 -
 			state.LintIssuesBySeverity[schemas.SeverityMedium]*1 -
 			state.SecurityIssuesBySeverity[schemas.SeverityCritical]*50 -
-			state.SecurityIssuesBySeverity[schemas.SeverityHigh]*20 -
-			state.TypeErrors*2,
+			state.SecurityIssuesBySeverity[schemas.SeverityHigh]*20,
 	)
 }
 
-// EvaluateTrajectory evaluates trajectory rules over an iteration-state history.
-func EvaluateTrajectory(history []schemas.IterationState, maxIterations int, tokenBudget *int) schemas.TrajectoryDecision {
-	var currentScore, initialScore *float64
-	if len(history) > 0 {
-		s := ComputeScore(history[len(history)-1])
-		currentScore = &s
-	}
-	if len(history) > 0 {
-		s := ComputeScore(history[0])
-		initialScore = &s
-	}
+type trajectoryRule struct {
+	name     string
+	evaluate func(trajectoryRuleContext) *schemas.TrajectoryDecision
+}
 
-	decision := func(action schemas.TrajectoryAction, reason string, evidence []string) schemas.TrajectoryDecision {
-		return schemas.TrajectoryDecision{
-			Action:         action,
-			Reason:         reason,
-			IterationCount: len(history),
-			CurrentScore:   currentScore,
-			InitialScore:   initialScore,
-			Evidence:       evidence,
+type trajectoryRuleContext struct {
+	// writer names the code writer node in rule reasons. It is empty unless
+	// the pass evidence flag is on, so flag-off reason text does not change.
+	writer            string
+	history           []schemas.IterationState
+	maxIterations     int
+	tokenBudget       *int
+	cost              *RunCostSignal
+	currentScore      *float64
+	initialScore      *float64
+	tokensConsumed    int
+	tokensGenerated   int
+	stateHashes       []string
+	recentConfidences []float64
+}
+
+func (rc trajectoryRuleContext) decision(action schemas.TrajectoryAction, reason string, evidence []string) schemas.TrajectoryDecision {
+	return schemas.TrajectoryDecision{
+		Action:         action,
+		Reason:         reason,
+		IterationCount: len(rc.history),
+		CurrentScore:   rc.currentScore,
+		InitialScore:   rc.initialScore,
+		Evidence:       evidence,
+	}
+}
+
+// Hard limits run before all judgment rules.
+var hardLimitRules = []trajectoryRule{
+	{name: "iteration_limit", evaluate: ruleIterationLimit},
+	{name: "token_budget", evaluate: ruleTokenBudget},
+}
+
+var judgmentRules = []trajectoryRule{
+	{name: "oscillation", evaluate: ruleOscillation},
+	{name: "cycle", evaluate: ruleCycle},
+	{name: "no_progress", evaluate: ruleNoProgress},
+	{name: "cost_without_progress", evaluate: ruleCostWithoutProgress},
+	{name: "rollback", evaluate: ruleRollback},
+	{name: "step_back", evaluate: ruleStepBack},
+	{name: "confidence", evaluate: ruleConfidence},
+}
+
+// trajectoryRules preserves the public policy order for compatibility.
+var trajectoryRules = append(append([]trajectoryRule{}, hardLimitRules...), judgmentRules...)
+
+// EvaluateTrajectory evaluates trajectory rules over an iteration-state
+// history. It runs without a cost signal, so the cost rule stays inactive.
+func EvaluateTrajectory(history []schemas.IterationState, maxIterations int, tokenBudget *int) schemas.TrajectoryDecision {
+	return evaluateTrajectoryFor(history, maxIterations, tokenBudget, nil, "")
+}
+
+// EvaluateTrajectoryWithCost evaluates the rules with the billed-cost and
+// provider-request signal available to the cost rule. A signal that fails
+// validation is a loud error: the caller must not silently degrade to the
+// round-only rules.
+func EvaluateTrajectoryWithCost(history []schemas.IterationState, maxIterations int, tokenBudget *int, cost *RunCostSignal) (schemas.TrajectoryDecision, error) {
+	return evaluateTrajectoryWithCostFor(history, maxIterations, tokenBudget, cost, "")
+}
+
+// evaluateTrajectoryWithCostFor is EvaluateTrajectoryWithCost with the writer
+// node named in rule reasons.
+func evaluateTrajectoryWithCostFor(history []schemas.IterationState, maxIterations int, tokenBudget *int, cost *RunCostSignal, writer string) (schemas.TrajectoryDecision, error) {
+	if cost != nil {
+		if err := cost.Validate(); err != nil {
+			return schemas.TrajectoryDecision{}, err
 		}
 	}
+	return evaluateTrajectoryFor(history, maxIterations, tokenBudget, cost, writer), nil
+}
 
+func evaluateTrajectoryFor(history []schemas.IterationState, maxIterations int, tokenBudget *int, cost *RunCostSignal, writer string) schemas.TrajectoryDecision {
+	rc := newTrajectoryRuleContext(history, maxIterations, tokenBudget, cost)
+	rc.writer = writer
 	if len(history) == 0 {
-		return decision(schemas.ActionContinue, "No iteration history to evaluate.", nil)
+		return rc.decision(schemas.ActionContinue, "No iteration history to evaluate.", nil)
 	}
+	for _, rule := range trajectoryRules {
+		if decision := rule.evaluate(rc); decision != nil {
+			return *decision
+		}
+	}
+	return rc.decision(schemas.ActionContinue, "Trajectory remains within safe bounds.", nil)
+}
 
-	if len(history) >= maxIterations {
-		return decision(schemas.ActionAbortHardLimit, "Maximum iteration count reached.",
-			[]string{fmt.Sprintf("iterations=%d", len(history)), fmt.Sprintf("max_iterations=%d", maxIterations)})
-	}
+// The classifier host checks hard limits before it asks for an action.
+func evaluateTrajectoryJudgments(history []schemas.IterationState, cost *RunCostSignal) schemas.TrajectoryDecision {
+	return evaluateTrajectoryJudgmentsFor(history, cost, "")
+}
 
-	tokensConsumed := 0
-	for _, state := range history {
-		tokensConsumed += state.TokensConsumed
+// evaluateTrajectoryJudgmentsFor is evaluateTrajectoryJudgments with the writer
+// node named in rule reasons.
+func evaluateTrajectoryJudgmentsFor(history []schemas.IterationState, cost *RunCostSignal, writer string) schemas.TrajectoryDecision {
+	rc := newTrajectoryRuleContext(history, 0, nil, cost)
+	rc.writer = writer
+	if len(history) == 0 {
+		return rc.decision(schemas.ActionContinue, "No iteration history to evaluate.", nil)
 	}
-	if tokenBudget != nil && tokensConsumed >= *tokenBudget {
-		return decision(schemas.ActionAbortBudget, "Token budget reached.",
-			[]string{fmt.Sprintf("tokens_consumed=%d", tokensConsumed), fmt.Sprintf("token_budget=%d", *tokenBudget)})
+	for _, rule := range judgmentRules {
+		if decision := rule.evaluate(rc); decision != nil {
+			return *decision
+		}
 	}
+	return rc.decision(schemas.ActionContinue, "Trajectory remains within safe bounds.", nil)
+}
 
-	stateHashes := make([]string, len(history))
+func newTrajectoryRuleContext(history []schemas.IterationState, maxIterations int, tokenBudget *int, cost *RunCostSignal) trajectoryRuleContext {
+	rc := trajectoryRuleContext{
+		history:       history,
+		maxIterations: maxIterations,
+		tokenBudget:   tokenBudget,
+		cost:          cost,
+		stateHashes:   make([]string, len(history)),
+	}
+	if len(history) > 0 {
+		current := ComputeScore(history[len(history)-1])
+		initial := ComputeScore(history[0])
+		rc.currentScore = &current
+		rc.initialScore = &initial
+	}
 	for i, state := range history {
-		stateHashes[i] = state.StateHash
+		rc.tokensConsumed += state.TokensConsumed
+		rc.tokensGenerated += state.TokensGenerated
+		rc.stateHashes[i] = state.StateHash
 	}
-	if detectOscillation(stateHashes) {
-		return decision(schemas.ActionEscalateOscillation, "State hashes show a repeated oscillation pattern.",
-			[]string{fmt.Sprintf("recent_hashes=%v", recentItems(stateHashes, 4))})
+	start := max(0, len(history)-3)
+	rc.recentConfidences = make([]float64, 0, len(history)-start)
+	for _, state := range history[start:] {
+		rc.recentConfidences = append(rc.recentConfidences, state.Confidence)
 	}
+	return rc
+}
 
-	if slices.Contains(stateHashes[:len(stateHashes)-1], stateHashes[len(stateHashes)-1]) {
-		return decision(schemas.ActionEscalateCycleDetected, "Current state hash was seen before.",
-			[]string{fmt.Sprintf("state_hash=%s", stateHashes[len(stateHashes)-1])})
+func ruleIterationLimit(rc trajectoryRuleContext) *schemas.TrajectoryDecision {
+	if len(rc.history) < rc.maxIterations {
+		return nil
 	}
+	decision := rc.decision(schemas.ActionAbortHardLimit, "Maximum iteration count reached.",
+		[]string{fmt.Sprintf("iterations=%d", len(rc.history)), fmt.Sprintf("max_iterations=%d", rc.maxIterations)})
+	return &decision
+}
 
-	if len(history) >= 3 && currentScore != nil && initialScore != nil && *currentScore < *initialScore {
-		return decision(schemas.ActionRollback, "Current score regressed below the initial score.",
-			[]string{fmt.Sprintf("initial_score=%v", *initialScore), fmt.Sprintf("current_score=%v", *currentScore)})
+// ruleTokenBudget gates on GENERATION ONLY. Input volume is bounded per call
+// by stage-input compaction (stage_input.go) and never triggers an abort:
+// memory-injected runs legitimately re-charge input on every consuming stage,
+// so a cumulative-input gate would veto them regardless of behavior. Output
+// overflow stays fatal as runaway-generation protection.
+func ruleTokenBudget(rc trajectoryRuleContext) *schemas.TrajectoryDecision {
+	if rc.tokenBudget == nil || rc.tokensGenerated < *rc.tokenBudget {
+		return nil
 	}
+	decision := rc.decision(schemas.ActionAbortBudget, "Token budget reached.",
+		[]string{fmt.Sprintf("tokens_generated=%d", rc.tokensGenerated), fmt.Sprintf("output_budget=%d", *rc.tokenBudget),
+			fmt.Sprintf("tokens_consumed_input_inclusive=%d", rc.tokensConsumed)})
+	return &decision
+}
 
-	if len(history) >= 3 && !scoreImproving(history[len(history)-3:]) {
-		return decision(schemas.ActionStepBack, "Score has not improved across the last three iterations.",
-			[]string{fmt.Sprintf("recent_scores=%v", scores(history[len(history)-3:]))})
+func ruleOscillation(rc trajectoryRuleContext) *schemas.TrajectoryDecision {
+	if !detectOscillation(rc.stateHashes) {
+		return nil
 	}
+	decision := rc.decision(schemas.ActionEscalateOscillation, "State hashes show a repeated oscillation pattern.",
+		[]string{fmt.Sprintf("recent_hashes=%v", recentItems(rc.stateHashes, 4))})
+	return &decision
+}
 
-	recentConfidences := make([]float64, 0, 3)
-	for _, state := range history[max(0, len(history)-3):] {
-		recentConfidences = append(recentConfidences, state.Confidence)
+func ruleCycle(rc trajectoryRuleContext) *schemas.TrajectoryDecision {
+	if len(rc.stateHashes) == 0 || !slices.Contains(rc.stateHashes[:len(rc.stateHashes)-1], rc.stateHashes[len(rc.stateHashes)-1]) {
+		return nil
 	}
-	if len(recentConfidences) == 3 && strictlyDecreasing(recentConfidences) {
-		return decision(schemas.ActionSurfaceToUser,
-			"Confidence is strictly decreasing across the last three iterations. Rolling back to best snapshot and retrying with revised context.",
-			[]string{fmt.Sprintf("recent_confidences=%v", recentConfidences)})
+	prevSig := verificationFailureSignature(rc.history[len(rc.history)-2])
+	curSig := verificationFailureSignature(rc.history[len(rc.history)-1])
+	reason := "Current state hash was seen before. The identical state came with changing verification failures, so model thrash is more likely."
+	switch {
+	case curSig == emptyVerificationFailureSignature && prevSig == emptyVerificationFailureSignature:
+		reason = "Current state hash was seen before. Neither iteration reported verification failures, so this is likely a no-op pass or model thrash against a non-verifying gate."
+	case curSig == prevSig:
+		reason = "Current state hash was seen before. The identical state came with identical verification failures, so the environment or verifier may be stuck."
 	}
+	decision := rc.decision(schemas.ActionEscalateCycleDetected, reason,
+		[]string{
+			fmt.Sprintf("state_hash=%s", rc.stateHashes[len(rc.stateHashes)-1]),
+			fmt.Sprintf("verification_failure_signature_current=%s", curSig),
+			fmt.Sprintf("verification_failure_signature_previous=%s", prevSig),
+		})
+	return &decision
+}
 
-	return decision(schemas.ActionContinue, "Trajectory remains within safe bounds.", nil)
+func ruleRollback(rc trajectoryRuleContext) *schemas.TrajectoryDecision {
+	if len(rc.history) < 3 || rc.currentScore == nil || rc.initialScore == nil || *rc.currentScore >= *rc.initialScore {
+		return nil
+	}
+	decision := rc.decision(schemas.ActionRollback, "Current score regressed below the initial score.",
+		[]string{fmt.Sprintf("initial_score=%v", *rc.initialScore), fmt.Sprintf("current_score=%v", *rc.currentScore)})
+	return &decision
+}
+
+func ruleStepBack(rc trajectoryRuleContext) *schemas.TrajectoryDecision {
+	if len(rc.history) < 3 || scoreImproving(rc.history[len(rc.history)-3:]) {
+		return nil
+	}
+	decision := rc.decision(schemas.ActionStepBack, "Score has not improved across the last three iterations.",
+		[]string{fmt.Sprintf("recent_scores=%v", scores(rc.history[len(rc.history)-3:]))})
+	return &decision
+}
+
+func ruleNoProgress(rc trajectoryRuleContext) *schemas.TrajectoryDecision {
+	n := trailingNoProgressCount(rc.history)
+	if n < 3 {
+		return nil
+	}
+	evidence := []string{
+		fmt.Sprintf("no_progress_iterations=%d", n),
+		"files_changed=0",
+		"lines_changed=0",
+	}
+	// With a named writer the reason ends with the writer and its no-change
+	// fact. Without one, the reason text is the same as before.
+	suffix := ""
+	if rc.writer != "" {
+		suffix = " " + rc.writer + " changed no files this pass."
+	}
+	if noProgressAlreadyFired(rc.history) {
+		decision := rc.decision(schemas.ActionAbortNoProgress, "The last three iterations produced no workspace change after a prior no-progress step-back."+suffix, evidence)
+		return &decision
+	}
+	decision := rc.decision(schemas.ActionStepBack, "The last three iterations produced no workspace change."+suffix, evidence)
+	return &decision
+}
+
+func noProgressAlreadyFired(history []schemas.IterationState) bool {
+	for i := 3; i < len(history); i++ {
+		if trailingNoProgressCount(history[:i]) >= 3 {
+			return true
+		}
+	}
+	return false
+}
+
+func trailingNoProgressCount(history []schemas.IterationState) int {
+	n := 0
+	for i := len(history) - 1; i >= 0; i-- {
+		if hasWorkspaceProgress(history[i]) {
+			break
+		}
+		n++
+	}
+	return n
+}
+
+func hasWorkspaceProgress(state schemas.IterationState) bool {
+	if state.PassChanged != nil {
+		return *state.PassChanged
+	}
+	return len(state.FilesChanged) > 0 || state.LinesAdded+state.LinesRemoved > 0
+}
+
+// ruleCostWithoutProgress reads all three signals: the billed cost delta from
+// the F2 report (never raw tokens), the provider request delta, and the
+// correctness signal from the iteration state. It fires only when spend grew
+// while correctness did not improve. It never fires on the round count alone:
+// fewer rounds with higher cost still fires, and more rounds with a
+// correctness gain does not.
+func ruleCostWithoutProgress(rc trajectoryRuleContext) *schemas.TrajectoryDecision {
+	if rc.cost == nil || len(rc.history) < 2 {
+		return nil
+	}
+	if rc.cost.BilledCostDeltaUSD <= 0 && rc.cost.ProviderRequestDelta <= 0 {
+		return nil
+	}
+	prev := rc.history[len(rc.history)-2]
+	cur := rc.history[len(rc.history)-1]
+	if correctnessImproved(prev, cur) {
+		return nil
+	}
+	decision := rc.decision(schemas.ActionStepBack,
+		"Billed spend grew without a correctness gain.",
+		[]string{
+			fmt.Sprintf("billed_cost_delta_usd=%g", rc.cost.BilledCostDeltaUSD),
+			fmt.Sprintf("provider_request_delta=%d", rc.cost.ProviderRequestDelta),
+			fmt.Sprintf("acceptance_facts_passing=%d->%d", prev.AcceptanceFactsPassing, cur.AcceptanceFactsPassing),
+			fmt.Sprintf("tests_passing=%d->%d", prev.TestsPassing, cur.TestsPassing),
+			fmt.Sprintf("tests_failing=%d->%d", prev.TestsFailing, cur.TestsFailing),
+		})
+	return &decision
+}
+
+// correctnessImproved reports whether the later state improved any correctness
+// signal: more acceptance facts or tests passing, or fewer failing or
+// errored. A flat or worse state is not an improvement.
+func correctnessImproved(prev, cur schemas.IterationState) bool {
+	return cur.AcceptanceFactsPassing > prev.AcceptanceFactsPassing ||
+		cur.TestsPassing > prev.TestsPassing ||
+		cur.AcceptanceFactsFailing < prev.AcceptanceFactsFailing ||
+		cur.TestsFailing < prev.TestsFailing ||
+		cur.TestsErrored < prev.TestsErrored
+}
+
+func ruleConfidence(rc trajectoryRuleContext) *schemas.TrajectoryDecision {
+	if len(rc.recentConfidences) != 3 || !strictlyDecreasing(rc.recentConfidences) {
+		return nil
+	}
+	decision := rc.decision(schemas.ActionSurfaceToUser,
+		"Confidence is strictly decreasing across the last three iterations.",
+		[]string{fmt.Sprintf("recent_confidences=%v", rc.recentConfidences)})
+	return &decision
+}
+
+type iterationSignals struct {
+	testResults         []schemas.TestRunResults
+	staticOutputs       []schemas.VerificationReport
+	securityOutputs     []schemas.VerificationReport
+	verificationReports []schemas.VerificationReport
+	codeWriterOutputs   []schemas.CodeWriterOutput
+	testGenOutputs      []schemas.TestGeneratorOutput
+	acceptanceResults   [][]schemas.TestCaseResult
+}
+
+// trajectoryCanonicalOutputKeys are output keys any stage may emit, so no single
+// registry stage claims them. The pairing test accepts them from this map
+// instead of trajectoryRelevantOutputKeys.
+var trajectoryCanonicalOutputKeys = map[string]string{
+	VerificationReportKey: "emitted by any node whose capabilities declare produces_verification",
+}
+
+type trajectoryExtractor func(outputs []schemas.HarnessStageOutput, dest *iterationSignals) error
+
+// trajectoryExtractors maps a stage output key to the parser that feeds the
+// monitor. A new trajectory-relevant stage must add exactly one entry here.
+var trajectoryExtractors = map[string]trajectoryExtractor{
+	"test_results": func(outputs []schemas.HarnessStageOutput, dest *iterationSignals) error {
+		values, err := typedPayloads[schemas.TestRunResults](outputs, "test_results")
+		if err != nil {
+			return err
+		}
+		dest.testResults = values
+		return nil
+	},
+	"static_analyzer_output": func(outputs []schemas.HarnessStageOutput, dest *iterationSignals) error {
+		values, err := typedPayloads[schemas.VerificationReport](outputs, "static_analyzer_output")
+		if err != nil {
+			return err
+		}
+		dest.staticOutputs = values
+		return nil
+	},
+	"security_auditor_output": func(outputs []schemas.HarnessStageOutput, dest *iterationSignals) error {
+		values, err := typedPayloads[schemas.VerificationReport](outputs, "security_auditor_output")
+		if err != nil {
+			return err
+		}
+		dest.securityOutputs = values
+		return nil
+	},
+	// The canonical key is the universal verification channel: every node
+	// whose capabilities declare produces_verification reaches the monitor
+	// through it, so collection no longer depends on which builtin emitted the
+	// report. The per-builtin keys above stay because the lint and security
+	// severity counts read them by name.
+	VerificationReportKey: func(outputs []schemas.HarnessStageOutput, dest *iterationSignals) error {
+		values, err := typedPayloads[schemas.VerificationReport](outputs, VerificationReportKey)
+		if err != nil {
+			return err
+		}
+		dest.verificationReports = values
+		return nil
+	},
+	"code_writer_output": func(outputs []schemas.HarnessStageOutput, dest *iterationSignals) error {
+		values, err := typedPayloads[schemas.CodeWriterOutput](outputs, "code_writer_output")
+		if err != nil {
+			return err
+		}
+		dest.codeWriterOutputs = values
+		return nil
+	},
+	"test_generator_output": func(outputs []schemas.HarnessStageOutput, dest *iterationSignals) error {
+		values, err := typedPayloads[schemas.TestGeneratorOutput](outputs, "test_generator_output")
+		if err != nil {
+			return err
+		}
+		dest.testGenOutputs = values
+		return nil
+	},
+	"acceptance_results": func(outputs []schemas.HarnessStageOutput, dest *iterationSignals) error {
+		values, err := typedPayloads[[]schemas.TestCaseResult](outputs, "acceptance_results")
+		if err != nil {
+			return err
+		}
+		dest.acceptanceResults = values
+		return nil
+	},
+}
+
+func extractIterationSignals(outputs []schemas.HarnessStageOutput) (iterationSignals, error) {
+	var dest iterationSignals
+	keys := make([]string, 0, len(trajectoryExtractors))
+	for key := range trajectoryExtractors {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if err := trajectoryExtractors[key](outputs, &dest); err != nil {
+			return iterationSignals{}, fmt.Errorf("%s: %w", key, err)
+		}
+	}
+	return dest, nil
 }
 
 // ComputeIterationState computes the deterministic state vector for one pipeline pass.
 func ComputeIterationState(iteration int, stageOutputs []schemas.HarnessStageOutput, stageRecords []schemas.StageRecord, changeSummary schemas.ChangeSummary, timestamp *float64) (schemas.IterationState, error) {
-	testResults, err := typedPayloads[schemas.TestRunResults](stageOutputs, "test_results")
+	signals, err := extractIterationSignals(stageOutputs)
 	if err != nil {
-		return schemas.IterationState{}, fmt.Errorf("test_results: %w", err)
-	}
-	staticOutputs, err := typedPayloads[schemas.VerificationReport](stageOutputs, "static_analyzer_output")
-	if err != nil {
-		return schemas.IterationState{}, fmt.Errorf("static_analyzer_output: %w", err)
-	}
-	securityOutputs, err := typedPayloads[schemas.VerificationReport](stageOutputs, "security_auditor_output")
-	if err != nil {
-		return schemas.IterationState{}, fmt.Errorf("security_auditor_output: %w", err)
-	}
-	codeWriterOutputs, err := typedPayloads[schemas.CodeWriterOutput](stageOutputs, "code_writer_output")
-	if err != nil {
-		return schemas.IterationState{}, fmt.Errorf("code_writer_output: %w", err)
-	}
-	acceptanceResults, err := typedPayloads[[]schemas.TestCaseResult](stageOutputs, "acceptance_results")
-	if err != nil {
-		return schemas.IterationState{}, fmt.Errorf("acceptance_results: %w", err)
+		return schemas.IterationState{}, err
 	}
 
 	linesAdded, linesRemoved := countDiffLines(changeSummary.DiffText)
@@ -136,22 +455,26 @@ func ComputeIterationState(iteration int, stageOutputs []schemas.HarnessStageOut
 		ts = *timestamp
 	}
 
+	preexisting, authored := splitTestCounts(signals.testResults, authoredTestFiles(signals.testGenOutputs))
+
 	return schemas.IterationState{
 		Iteration:                iteration,
 		Timestamp:                float64(ts),
-		TestsPassing:             countTests(testResults, "passed"),
-		TestsFailing:             countTests(testResults, "failed"),
-		TestsErrored:             countTests(testResults, "errored"),
-		AcceptanceFactsPassing:   countAcceptanceResults(acceptanceResults, "passed"),
-		AcceptanceFactsFailing:   countAcceptanceResults(acceptanceResults, "failed", "errored"),
-		LintIssuesBySeverity:     countBySeverity(staticOutputs),
-		SecurityIssuesBySeverity: countBySeverity(securityOutputs),
-		TypeErrors:               0,
-		CodeSizeBytes:            codeSizeBytes(codeWriterOutputs),
-		StateHash:                stateHash(codeWriterOutputs),
+		TestsPassing:             countTests(signals.testResults, "passed"),
+		TestsFailing:             countTests(signals.testResults, "failed"),
+		TestsErrored:             countTests(signals.testResults, "errored"),
+		Preexisting:              preexisting,
+		Authored:                 authored,
+		AcceptanceFactsPassing:   countAcceptanceResults(signals.acceptanceResults, "passed"),
+		AcceptanceFactsFailing:   countAcceptanceResults(signals.acceptanceResults, "failed", "errored"),
+		LintIssuesBySeverity:     countBySeverity(signals.staticOutputs),
+		SecurityIssuesBySeverity: countBySeverity(signals.securityOutputs),
+		CodeSizeBytes:            codeSizeBytes(signals.codeWriterOutputs),
+		StateHash:                stateHash(signals.codeWriterOutputs, signals.verificationReports),
 		Confidence:               aggregateConfidence(stageOutputs),
 		TokensConsumed:           tokensConsumed(stageRecords),
-		VerificationIncomplete:   countStageStatus(stageRecords, schemas.StageIncomplete),
+		TokensGenerated:          tokensGenerated(stageRecords),
+		VerificationIncomplete:   verificationIncompleteCount(stageRecords, signals.verificationReports),
 		FilesChanged:             sortedPaths(changeSummary.ChangedFiles),
 		LinesAdded:               linesAdded,
 		LinesRemoved:             linesRemoved,
@@ -172,6 +495,21 @@ func countAcceptanceResults(results [][]schemas.TestCaseResult, statuses ...stri
 		}
 	}
 	return count
+}
+
+// verificationFailureSignature is a compact fingerprint of the verification
+// failures in an iteration state. It covers failing and errored tests,
+// failing acceptance facts, and high-plus-critical lint and security findings.
+const emptyVerificationFailureSignature = "tests_failing=0,tests_errored=0,acceptance_facts_failing=0,lint_high_critical=0,security_high_critical=0"
+
+func verificationFailureSignature(state schemas.IterationState) string {
+	return fmt.Sprintf("tests_failing=%d,tests_errored=%d,acceptance_facts_failing=%d,lint_high_critical=%d,security_high_critical=%d",
+		state.TestsFailing,
+		state.TestsErrored,
+		state.AcceptanceFactsFailing,
+		state.LintIssuesBySeverity[schemas.SeverityCritical]+state.LintIssuesBySeverity[schemas.SeverityHigh],
+		state.SecurityIssuesBySeverity[schemas.SeverityCritical]+state.SecurityIssuesBySeverity[schemas.SeverityHigh],
+	)
 }
 
 func detectOscillation(hashes []string) bool {
@@ -221,6 +559,71 @@ func countTests(results []schemas.TestRunResults, status string) int {
 	return count
 }
 
+// authoredTestFiles flattens the test generator's written files. These are the
+// only files whose tests count as authored this run.
+func authoredTestFiles(outputs []schemas.TestGeneratorOutput) []schemas.FileChange {
+	var files []schemas.FileChange
+	for _, output := range outputs {
+		files = append(files, output.Files...)
+	}
+	return files
+}
+
+// splitTestCounts partitions test results into preexisting and authored. A
+// test is authored when its top-level name is declared as a function in one of
+// the files the test generator wrote this run; everything else is preexisting.
+// The aggregate pass/fail/errored totals are unchanged; this is additive.
+func splitTestCounts(results []schemas.TestRunResults, authoredFiles []schemas.FileChange) (preexisting, authored schemas.TestCounts) {
+	authoredNames := authoredFuncNames(authoredFiles)
+	for _, result := range results {
+		for _, tc := range result.Tests {
+			name := topLevelTestName(tc.Name)
+			counts := &preexisting
+			if _, ok := authoredNames[name]; ok {
+				counts = &authored
+			}
+			switch tc.Status {
+			case "passed":
+				counts.Pass++
+			case "failed":
+				counts.Fail++
+			case "errored":
+				counts.Errored++
+			}
+		}
+	}
+	return preexisting, authored
+}
+
+// authoredFuncNames returns the set of function names declared in the given
+// files, so a test runner result can be matched back to the file that declared
+// it. Matching is declaration-based (func Name( ... )), which is deterministic
+// and framework-agnostic for Go-style test functions.
+func authoredFuncNames(files []schemas.FileChange) map[string]struct{} {
+	names := make(map[string]struct{})
+	for _, file := range files {
+		for _, match := range funcDeclRe.FindAllStringSubmatch(file.Content, -1) {
+			if len(match) >= 2 {
+				names[match[1]] = struct{}{}
+			}
+		}
+	}
+	return names
+}
+
+// topLevelTestName strips a subtest suffix (Go's TestXxx/subtest) so a
+// subtest result attributes to its declaring function.
+func topLevelTestName(name string) string {
+	if i := strings.Index(name, "/"); i >= 0 {
+		return name[:i]
+	}
+	return name
+}
+
+// funcDeclRe matches a top-level function declaration name like
+// "func TestAdd(t *testing.T)". It does not match methods or non-func uses.
+var funcDeclRe = regexp.MustCompile(`func\s+(\w+)\s*\(`)
+
 func countBySeverity(outputs []schemas.VerificationReport) map[schemas.Severity]int {
 	counts := make(map[schemas.Severity]int)
 	for _, report := range outputs {
@@ -253,12 +656,45 @@ func codeSizeBytes(outputs []schemas.CodeWriterOutput) int {
 	return size
 }
 
-func stateHash(outputs []schemas.CodeWriterOutput) string {
+// verificationIncompleteCount counts incomplete verification for one pass. The
+// canonical report collection is authoritative when any report exists, because
+// a verification-only graph has no stage record of its own to read. A legacy
+// pass with no canonical reports keeps the stage-record count.
+func verificationIncompleteCount(records []schemas.StageRecord, reports []schemas.VerificationReport) int {
+	if len(reports) == 0 {
+		return countStageStatus(records, schemas.StageIncomplete)
+	}
+	count := 0
+	for _, report := range reports {
+		if report.Status == schemas.VerificationIncomplete {
+			count++
+		}
+	}
+	return count
+}
+
+func stateHash(outputs []schemas.CodeWriterOutput, reports []schemas.VerificationReport) string {
 	digest := sha256.New()
 	var entries [][3]string
 	for _, output := range outputs {
 		for _, file := range output.Files {
 			entries = append(entries, [3]string{file.Path, file.ChangeType, file.Content})
+		}
+	}
+	if len(entries) == 0 {
+		// A verification-only graph has no code-writer file set, so hashing
+		// the files would produce the same value on every pass and the cycle
+		// detector would abort a legitimate revision loop. Fall back to the
+		// verification findings: rule, path, and line, which change as the
+		// graph makes progress.
+		for _, report := range reports {
+			for _, finding := range report.Findings {
+				line := ""
+				if finding.Line != nil {
+					line = fmt.Sprintf("%d", *finding.Line)
+				}
+				entries = append(entries, [3]string{finding.RuleID, finding.Path, line})
+			}
 		}
 	}
 	sort.Slice(entries, func(i, j int) bool {
@@ -294,7 +730,20 @@ func aggregateConfidence(outputs []schemas.HarnessStageOutput) float64 {
 func tokensConsumed(records []schemas.StageRecord) int {
 	total := 0
 	for _, record := range records {
-		total += record.TokensInput + record.TokensOutput + record.TokensCached
+		// TokensCached and TokensCacheWrite are subsets of TokensInput; TokensReasoning
+		// is a subset of TokensOutput. Summing the subsets would double-count.
+		total += record.TokensInput + record.TokensOutput
+	}
+	return total
+}
+
+// tokensGenerated sums output-side spend only (completion plus reasoning;
+// reasoning is already a subset of TokensOutput). The trajectory budget gates
+// on this, not on input-inclusive consumption.
+func tokensGenerated(records []schemas.StageRecord) int {
+	total := 0
+	for _, record := range records {
+		total += record.TokensOutput
 	}
 	return total
 }
@@ -350,4 +799,25 @@ func typedPayloads[T any](outputs []schemas.HarnessStageOutput, key string) ([]T
 		results = append(results, target)
 	}
 	return results, nil
+}
+
+// RulesActionForReplay returns the action the judgment rules reach over a
+// history. The replay tool compares this action across evidence sources. A
+// writer name adds the flag-on rule text, which does not change the action.
+func RulesActionForReplay(history []schemas.IterationState, writer string) schemas.TrajectoryAction {
+	return RulesDecisionForReplay(history, writer).Action
+}
+
+// RulesDecisionForReplay returns the full judgment-rules decision over a
+// history, with the cost signal left out. A live decision includes the billed
+// cost signal, which a saved record does not carry. Replay therefore rebuilds
+// the rules from the History it replays, in every evidence mode.
+func RulesDecisionForReplay(history []schemas.IterationState, writer string) schemas.TrajectoryDecision {
+	return evaluateTrajectoryJudgmentsFor(history, nil, writer)
+}
+
+// WorkspaceProgress reports whether one iteration state shows workspace
+// progress, the same test the no-progress rule applies.
+func WorkspaceProgress(state schemas.IterationState) bool {
+	return hasWorkspaceProgress(state)
 }

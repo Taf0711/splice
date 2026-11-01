@@ -1,0 +1,239 @@
+package tui
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"reflect"
+	"strings"
+	"sync"
+
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/presentation"
+	"github.com/Taf0711/splice/internal/sessions"
+	"github.com/Taf0711/splice/internal/tools"
+)
+
+// runtimeWiring is the single seam every TUI-initiated agent run passes
+// through. Both the /exec path (runAgentWithOptions) and the /approve path
+// (startApprovalConfirmed) build one and call decorate. The decorator owns
+// shared UI transport and interactive fallbacks. Path-specific callbacks keep
+// their nil semantics. TestRunPathsFollowCallbackPolicies fails when a callback
+// is added without an explicit policy.
+type runtimeWiring struct {
+	runID      int
+	send       func(tea.Msg)
+	beforeText func(string)
+	// recordEvent durably records a run event. It is the shared seam for
+	// the persistence half of the runtime contract (review finding 6):
+	// the decorator used to transport presentation snapshots to the UI
+	// while each run path assembled its own persistence, so the approval
+	// path emitted live snapshots and saved none, and reopening the
+	// session could not reconstruct what was never written. Live
+	// transport and durable recording now live together, and each run
+	// kind supplies only the sink. A nil sink records nothing, which is
+	// the honest behavior for a run with no session to record into.
+	recordEvent func(pendingSessionEvent)
+}
+
+// recordPresentationState is the durable half of the presentation
+// contract. The FULL canonical state is persisted (F3, §15) so resume can
+// replay it; the event keeps its summary fields for existing consumers.
+func (w runtimeWiring) recordPresentationState(state presentation.State) {
+	if w.recordEvent == nil {
+		return
+	}
+	payload := map[string]any{
+		"presentation_schema_version": state.SchemaVersion,
+		"lifecycle":                   string(state.Lifecycle),
+	}
+	if stateJSON, err := json.Marshal(state); err == nil {
+		payload["presentation_state"] = json.RawMessage(stateJSON)
+	}
+	w.recordEvent(pendingSessionEvent{Type: sessions.EventMessage, Payload: payload})
+}
+
+// presentationPersistGate coalesces durable snapshots. Every provider request
+// emits a snapshot that changes only node spend; persisting each one wrote
+// the full state JSON per request. A snapshot is persisted when anything
+// other than spend changed, and always when the run has ended, so the
+// last-state-wins replay still rebuilds the final state with its spend.
+type presentationPersistGate struct {
+	mu   sync.Mutex
+	last *presentation.State
+}
+
+func (g *presentationPersistGate) admit(state presentation.State) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.last != nil && state.Completion == nil && reflect.DeepEqual(withoutSpend(*g.last), withoutSpend(state)) {
+		return false
+	}
+	kept := state
+	g.last = &kept
+	return true
+}
+
+// withoutSpend returns the state with every node's usage and cost cleared.
+func withoutSpend(state presentation.State) presentation.State {
+	state.Nodes = append([]presentation.ExecutionNode(nil), state.Nodes...)
+	for i := range state.Nodes {
+		state.Nodes[i].Usage = presentation.UsageSummary{}
+		state.Nodes[i].Cost = presentation.CostSummary{}
+	}
+	return state
+}
+
+// decorate wraps the callbacks that have shared TUI behavior. Each wrapper
+// calls the prior value when non-nil. Callbacks without shared behavior remain
+// unchanged, including intentional nil values that disable optional work.
+func (w runtimeWiring) decorate(options agent.Options) agent.Options {
+	priorText := options.OnText
+	options.OnText = func(delta string) {
+		if w.beforeText != nil {
+			w.beforeText(delta)
+		}
+		if w.send != nil {
+			w.send(agentTextMsg{runID: w.runID, delta: delta})
+		}
+		if priorText != nil {
+			priorText(delta)
+		}
+	}
+
+	priorReasoning := options.OnReasoning
+	options.OnReasoning = func(delta string) {
+		if strings.HasPrefix(delta, "\x00STAGE") {
+			return
+		}
+		if w.send != nil {
+			w.send(agentReasoningMsg{runID: w.runID, delta: delta})
+		}
+		if priorReasoning != nil {
+			priorReasoning(delta)
+		}
+	}
+
+	priorToolCallStart := options.OnToolCallStart
+	options.OnToolCallStart = func(id, name string) {
+		if w.send != nil {
+			w.send(toolCallStreamStartMsg{runID: w.runID, id: id, name: name})
+		}
+		if priorToolCallStart != nil {
+			priorToolCallStart(id, name)
+		}
+	}
+	priorToolCallDelta := options.OnToolCallDelta
+	options.OnToolCallDelta = func(id, fragment string) {
+		if w.send != nil {
+			w.send(toolCallStreamDeltaMsg{runID: w.runID, id: id, fragment: fragment})
+		}
+		if priorToolCallDelta != nil {
+			priorToolCallDelta(id, fragment)
+		}
+	}
+
+	priorPermissionRequest := options.OnPermissionRequest
+	options.OnPermissionRequest = func(ctx context.Context, request agent.PermissionRequest) (agent.PermissionDecision, error) {
+		if priorPermissionRequest != nil {
+			return priorPermissionRequest(ctx, request)
+		}
+		if w.send == nil {
+			return agent.PermissionDecision{Action: agent.PermissionDecisionDeny, Reason: "permission prompt unavailable"}, nil
+		}
+		decisionCh := make(chan agent.PermissionDecision, 1)
+		w.send(permissionRequestMsg{runID: w.runID, request: request, decide: func(decision agent.PermissionDecision) {
+			select {
+			case decisionCh <- decision:
+			default:
+			}
+		}})
+		select {
+		case decision := <-decisionCh:
+			if strings.TrimSpace(decision.Reason) == "" {
+				decision.Reason = permissionDecisionReason(permissionDecision(decision.Action))
+			}
+			return decision, nil
+		case <-ctx.Done():
+			return agent.PermissionDecision{Action: agent.PermissionDecisionDeny, Reason: ctx.Err().Error()}, ctx.Err()
+		}
+	}
+
+	priorAskUser := options.OnAskUser
+	options.OnAskUser = func(ctx context.Context, request agent.AskUserRequest) (agent.AskUserResponse, error) {
+		if priorAskUser != nil {
+			return priorAskUser(ctx, request)
+		}
+		if w.send == nil {
+			return agent.AskUserResponse{}, fmt.Errorf("ask_user prompt unavailable")
+		}
+		answerCh := make(chan []string, 1)
+		w.send(askUserRequestMsg{runID: w.runID, request: request, answer: func(answers []string) {
+			select {
+			case answerCh <- answers:
+			default:
+			}
+		}})
+		select {
+		case answers := <-answerCh:
+			return agent.AskUserResponse{Answers: answers}, nil
+		case <-ctx.Done():
+			return agent.AskUserResponse{}, ctx.Err()
+		}
+	}
+
+	priorToolOutput := options.OnToolOutput
+	options.OnToolOutput = func(snapshot tools.OutputSnapshot) {
+		if priorToolOutput == nil && w.send != nil {
+			w.send(toolOutputSnapshotMsg{runID: w.runID, id: snapshot.ToolCallID, snapshot: snapshot.Output})
+		}
+		if priorToolOutput != nil {
+			priorToolOutput(snapshot)
+		}
+	}
+	priorSurfaceToUser := options.OnSurfaceToUser
+	options.OnSurfaceToUser = func(ctx context.Context, request agent.SurfaceToUserRequest) (agent.SurfaceToUserDecision, error) {
+		if priorSurfaceToUser != nil {
+			return priorSurfaceToUser(ctx, request)
+		}
+		if w.send == nil {
+			return agent.SurfaceToUserDecision{Action: agent.SurfaceToUserAbort, Message: "interactive surface unavailable"}, nil
+		}
+		answerCh := make(chan []string, 1)
+		askRequest := surfaceToUserAskRequest(request)
+		w.send(askUserRequestMsg{runID: w.runID, request: askRequest, answer: func(answers []string) {
+			select {
+			case answerCh <- answers:
+			default:
+			}
+		}})
+		select {
+		case answers := <-answerCh:
+			return surfaceToUserFromAnswers(answers), nil
+		case <-ctx.Done():
+			return agent.SurfaceToUserDecision{Action: agent.SurfaceToUserAbort, Message: ctx.Err().Error()}, ctx.Err()
+		}
+	}
+	// OnPresentationState forwards the presentation snapshot to the TUI and
+	// records it durably through the shared sink, so every run kind that
+	// supplies a sink gets the same live-versus-replayed equivalence. The
+	// TUI renders before the log entry is appended.
+	// OnPipelinePlan and OnStageEvent pass through unwrapped: the TUI no
+	// longer derives panel content from raw pipeline events (P1.2).
+	priorPresentation := options.OnPresentationState
+	var persist presentationPersistGate
+	options.OnPresentationState = func(state presentation.State) {
+		if w.send != nil {
+			w.send(presentationStateMsg{runID: w.runID, state: state})
+		}
+		if persist.admit(state) {
+			w.recordPresentationState(state)
+		}
+		if priorPresentation != nil {
+			priorPresentation(state)
+		}
+	}
+	return options
+}

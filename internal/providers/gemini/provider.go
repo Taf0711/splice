@@ -341,7 +341,7 @@ func (provider *Provider) geminiRequest(request zeroruntime.CompletionRequest) (
 	mapped := generateContentRequest{
 		SystemInstruction: systemInstruction,
 		Contents:          contents,
-		GenerationConfig:  generationConfig{MaxOutputTokens: provider.maxTokens},
+		GenerationConfig:  generationConfig{MaxOutputTokens: providerio.WireMaxOutputTokens(request.MaxOutputTokens, provider.maxTokens)},
 	}
 	// Thinking: enable a budget when a reasoning effort was requested. Omitted
 	// otherwise so default requests are unchanged.
@@ -371,6 +371,13 @@ func (provider *Provider) geminiRequest(request zeroruntime.CompletionRequest) (
 				Mode:                 "ANY",
 				AllowedFunctionNames: []string{name},
 			},
+		}
+	} else if request.ToolChoiceRequired {
+		// Any-tool forcing: the model must call one of the offered tools,
+		// without naming which. ANY with no allowed-name list means any of
+		// the declared functions.
+		mapped.ToolConfig = &toolConfig{
+			FunctionCallingConfig: functionCallingConfig{Mode: "ANY"},
 		}
 	}
 	return mapped, nil

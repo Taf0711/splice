@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Taf0711/splice/internal/config"
 	"github.com/Taf0711/splice/internal/modelregistry"
@@ -1058,5 +1060,93 @@ func TestNormalizeProfileForProviderCanonicalizesPlaceholderName(t *testing.T) {
 		if got.Name != "openai" {
 			t.Fatalf("Name = %q for placeholder %q, want canonicalized to %q", got.Name, name, "openai")
 		}
+	}
+}
+
+// pickerHintLine returns the stripped hint row of an open picker overlay.
+func pickerHintLine(t *testing.T, m model) string {
+	t.Helper()
+	for _, line := range strings.Split(ansi.Strip(m.pickerOverlay(100)), "\n") {
+		if strings.Contains(line, "↑/↓") {
+			return line
+		}
+	}
+	t.Fatal("picker overlay has no hint row")
+	return ""
+}
+
+func TestTrustPickerHintOmitsEscOnlyWhenRequired(t *testing.T) {
+	tests := []struct {
+		name     string
+		required bool
+		wantEsc  bool
+	}{
+		{name: "required first-run menu ignores esc", required: true, wantEsc: false},
+		{name: "/trust menu keeps esc", required: false, wantEsc: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newModel(context.Background(), Options{})
+			m.trustPromptRequired = tc.required
+			m.picker = m.newTrustPicker()
+			if got := strings.Contains(pickerHintLine(t, m), "esc"); got != tc.wantEsc {
+				t.Fatalf("hint has esc = %v, want %v", got, tc.wantEsc)
+			}
+		})
+	}
+}
+
+func TestBlockTitleTruncatesInsteadOfDropping(t *testing.T) {
+	title := "Trust :: not decided :: /Users/someone/projects/a-very-long-repository-name/nested/leaf"
+	block := ansi.Strip(styledBlockFillTitle(80, title, []string{"body"}, lipgloss.NewStyle(), lipgloss.NewStyle()))
+	top := strings.Split(block, "\n")[0]
+	if !strings.Contains(top, "Trust :: not decided") || !strings.Contains(top, "…") {
+		t.Fatalf("top border = %q, want truncated title with an ellipsis", top)
+	}
+	if lipgloss.Width(top) != 80 {
+		t.Fatalf("top border width = %d, want 80", lipgloss.Width(top))
+	}
+}
+
+func TestTruncateLeftDisplayWidth(t *testing.T) {
+	tests := []struct {
+		name   string
+		text   string
+		budget int
+		want   string
+	}{
+		{name: "fits", text: "abc", budget: 3, want: "abc"},
+		{name: "keeps tail", text: "/a/b/leaf", budget: 6, want: "…/leaf"},
+		{name: "wide runes count as two cells", text: "ab日本", budget: 4, want: "…本"},
+		{name: "one cell", text: "abc", budget: 1, want: "…"},
+		{name: "no room", text: "abc", budget: 0, want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := truncateLeftDisplayWidth(tc.text, tc.budget)
+			if got != tc.want {
+				t.Fatalf("truncateLeftDisplayWidth(%q, %d) = %q, want %q", tc.text, tc.budget, got, tc.want)
+			}
+			if lipgloss.Width(got) > tc.budget {
+				t.Fatalf("result width %d exceeds budget %d", lipgloss.Width(got), tc.budget)
+			}
+		})
+	}
+}
+
+func TestPickerRowKeepsEndOfLongMeta(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.picker = &commandPicker{
+		kind:  pickerTrust,
+		title: "Trust",
+		items: []pickerItem{{
+			Label: "Trust this folder",
+			Value: "current",
+			Meta:  "/Users/someone/projects/" + strings.Repeat("deep/", 12) + "leaf-folder",
+		}},
+	}
+	overlay := ansi.Strip(m.pickerOverlay(80))
+	if !strings.Contains(overlay, "leaf-folder") {
+		t.Fatalf("long meta row lost its leaf folder:\n%s", overlay)
 	}
 }

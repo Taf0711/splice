@@ -7,6 +7,7 @@ import (
 
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/config"
+	"github.com/Taf0711/splice/internal/flags"
 	"github.com/Taf0711/splice/internal/mcp"
 	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/providerhealth"
@@ -21,10 +22,27 @@ import (
 
 // Options configures the reusable Splice terminal UI shell.
 type Options struct {
-	Cwd                         string
-	Version                     string // CLI build version, shown on the home screen; empty hides it
-	UserConfigPath              string
-	DoctorUserConfigPath        string
+	Cwd                  string
+	Version              string // CLI build version, shown on the home screen; empty hides it
+	UserConfigPath       string
+	DoctorUserConfigPath string
+	// FlagResolutions explains each feature flag for the read-only /flags command.
+	FlagResolutions []flags.Resolution
+	// DecisionAdvisor is the resolved decision_advisor section. The doctor
+	// view reports the trajectory classifier from it.
+	DecisionAdvisor config.DecisionAdvisorConfig
+	// DoctorTrajectoryProfile is the profile the default trajectory classifier
+	// runs on, for the doctor's classifier line.
+	DoctorTrajectoryProfile config.ProviderProfile
+	// DoctorEvaluator is the evaluator the run uses, for the doctor's line.
+	DoctorEvaluator zeroruntime.DecisionEvaluator
+	// DoctorGOOS pins the platform for the doctor sandbox-backend check
+	// (internal/doctor). Empty means runtime.GOOS; tests set it so the check
+	// is deterministic regardless of the host.
+	DoctorGOOS string
+	// DoctorLookupExecutable resolves binaries on PATH for the doctor
+	// sandbox/LSP checks. Nil means exec.LookPath; tests inject a stub.
+	DoctorLookupExecutable      func(string) (string, error)
 	ProjectConfigPath           string
 	ProviderName                string
 	ModelName                   string
@@ -37,6 +55,7 @@ type Options struct {
 	ProbeProviderHealth         func(context.Context, providerhealth.Options) providerhealth.Result
 	DiscoverProviderModels      func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
 	DiscoverOllamaContextWindow func(ctx context.Context, baseURL string, model string) (int, error)
+	DiscoverOllamaCapabilities  func(ctx context.Context, baseURL string, model string) (providermodeldiscovery.OllamaCapabilities, error)
 	RuntimeMessageSink          func(tea.Msg)
 	Registry                    *tools.Registry
 	SessionStore                *sessions.Store
@@ -45,10 +64,16 @@ type Options struct {
 	MCPPermissionStore          *mcp.PermissionStore
 	MCPTokenStore               *mcp.TokenStore
 	MCPCommand                  func(context.Context, []string) MCPCommandResult
-	SandboxSetupCommand         func(context.Context) SandboxSetupCommandResult
-	UsageTracker                *usage.Tracker
-	SessionCompactor            SessionCompactor
-	PrService                   *PrService
+	// BackendCommand runs an allowlisted read-only CLI command in-process
+	// (hooks, plugins, specialists, usage, changes, verify).
+	BackendCommand func(context.Context, []string) BackendCommandResult
+	// RefreshModelCatalog refreshes the models.dev catalog cache and
+	// reports whether a newer one was written (force skips the age check).
+	RefreshModelCatalog func(ctx context.Context, force bool) (bool, error)
+	SandboxSetupCommand func(context.Context) SandboxSetupCommandResult
+	UsageTracker        *usage.Tracker
+	SessionCompactor    SessionCompactor
+	PrService           *PrService
 
 	AgentOptions agent.Options
 	// LoadSkills returns the installed skills (default skills dir merged with any
@@ -67,7 +92,11 @@ type Options struct {
 	// SavedTheme is the theme persisted in user config (Preferences.Theme). Applied
 	// at startup below --theme and SPLICE_THEME, so a /theme choice survives restart.
 	SavedTheme string
-	UserAgent  string
+	// SavedLayout is the layout preset persisted in user config
+	// (Preferences.Layout). Applied at startup so a /layout <preset> choice
+	// survives restart. Empty/unknown = built-in defaults.
+	SavedLayout string
+	UserAgent   string
 
 	// Notify configures completion / awaiting-input notifications.
 	Notify config.NotifyConfig
@@ -76,6 +105,9 @@ type Options struct {
 	// applied to every agent run. Default zero value means compaction stays ON
 	// with the built-in ratio/message-count defaults.
 	Compaction config.CompactionConfig
+
+	// Worktrees controls isolated TUI pipeline worktrees. Unset defaults to on.
+	Worktrees config.WorktreesConfig
 
 	// KeyBindings configures remappable TUI keybindings. An empty/splice
 	// KeyBindingsConfig means "use built-in defaults" for each action.
@@ -97,6 +129,9 @@ type Options struct {
 	// TrustStore is the store resolved by the CLI for this workspace. The TUI
 	// uses it for /trust so the command writes the same store as startup.
 	TrustStore *config.TrustStore
+	// TrustPrompt reports that workspace trust is undecided. The main TUI shows
+	// a required trust menu before it opens the chat surface.
+	TrustPrompt bool
 }
 
 type MCPCommandResult struct {

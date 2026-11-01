@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/Taf0711/splice/internal/gitenv"
 )
 
 // IterationRecovery captures and restores the git-visible state of an isolated
@@ -59,40 +61,10 @@ func (r *IterationRecovery) Capture(ctx context.Context, runID string, iteration
 	}
 
 	dir := r.result.Path
-	indexFile, cleanup, err := tempIndexFile()
+	message := fmt.Sprintf("splice recovery snapshot %s/%s/%d", r.result.Name, runID, iteration)
+	commitSHA, err := snapshotCommit(ctx, r.runGit, r.envGit, dir, "recovery", "Splice Recovery", message)
 	if err != nil {
 		return "", err
-	}
-	defer cleanup()
-
-	env := gitIndexEnv(indexFile)
-	if _, err := r.gitOutputEnv(ctx, dir, env, "read-tree", "HEAD"); err != nil {
-		return "", fmt.Errorf("seed recovery index: %w", err)
-	}
-	if _, err := r.gitOutputEnv(ctx, dir, env, "add", "-A"); err != nil {
-		return "", fmt.Errorf("stage recovery snapshot: %w", err)
-	}
-	tree, err := r.gitOutputEnv(ctx, dir, env, "write-tree")
-	if err != nil {
-		return "", fmt.Errorf("write recovery tree: %w", err)
-	}
-
-	head, err := r.gitOutput(ctx, dir, "rev-parse", "HEAD")
-	if err != nil {
-		return "", fmt.Errorf("resolve HEAD: %w", err)
-	}
-
-	commitEnv := map[string]string{
-		"GIT_AUTHOR_NAME":     "Splice Recovery",
-		"GIT_AUTHOR_EMAIL":    "recovery@local",
-		"GIT_COMMITTER_NAME":  "Splice Recovery",
-		"GIT_COMMITTER_EMAIL": "recovery@local",
-		"GIT_INDEX_FILE":      indexFile,
-	}
-	message := fmt.Sprintf("splice recovery snapshot %s/%s/%d", r.result.Name, runID, iteration)
-	commitSHA, err := r.gitOutputEnv(ctx, dir, commitEnv, "commit-tree", tree, "-p", head, "-m", message)
-	if err != nil {
-		return "", fmt.Errorf("create recovery commit: %w", err)
 	}
 
 	if _, err := r.gitOutput(ctx, dir, "update-ref", ref, commitSHA); err != nil {
@@ -203,6 +175,101 @@ func recoveryRefName(name, runID string, iteration int) (string, error) {
 	return fmt.Sprintf("refs/splice/recovery/%s/%s/%d", name, runKey, iteration), nil
 }
 
+// SnapshotCommit records the git-visible worktree of dir (tracked and
+// untracked files, ignored files excluded) as a commit whose parent is HEAD.
+// It does not move HEAD, modify the real index, or change workspace files.
+// When the worktree matches HEAD, it returns HEAD and creates nothing: HEAD
+// already names those bytes. A new commit is pinned under
+// refs/splice/snapshots/ so git gc keeps it. It runs on the host, like
+// Capture: the stage sandbox refuses the object writes that
+// `git stash create` needs.
+func SnapshotCommit(ctx context.Context, dir, message string) (string, error) {
+	tree, err := snapshotTree(ctx, defaultEnvRunGit, dir, "snapshot")
+	if err != nil {
+		return "", err
+	}
+	head, err := commandOutput(defaultRunGit(ctx, dir, "rev-parse", "HEAD"))
+	if err != nil {
+		return "", fmt.Errorf("resolve HEAD: %w", err)
+	}
+	headTree, err := commandOutput(defaultRunGit(ctx, dir, "rev-parse", "HEAD^{tree}"))
+	if err != nil {
+		return "", fmt.Errorf("resolve HEAD tree: %w", err)
+	}
+	if tree == headTree {
+		return head, nil
+	}
+	commitSHA, err := commitTree(ctx, defaultEnvRunGit, dir, tree, head, "snapshot", "Splice Snapshot", message)
+	if err != nil {
+		return "", err
+	}
+	if _, err := commandOutput(defaultRunGit(ctx, dir, "update-ref", "refs/splice/snapshots/"+commitSHA, commitSHA)); err != nil {
+		return "", fmt.Errorf("pin snapshot ref: %w", err)
+	}
+	return commitSHA, nil
+}
+
+// SnapshotTree writes the worktree's tree (tracked and untracked files, the
+// same view as SnapshotCommit) and returns its SHA. It creates no commit and
+// no ref: the tree only needs to live for one run, as the base of a diff.
+func SnapshotTree(ctx context.Context, dir string) (string, error) {
+	return snapshotTree(ctx, defaultEnvRunGit, dir, "snapshot")
+}
+
+// snapshotCommit is the shared plumbing for Capture: the worktree tree
+// (snapshotTree) committed with HEAD as its parent. label names the caller
+// in error messages.
+func snapshotCommit(ctx context.Context, runGit GitRunner, envGit envGitRunner, dir, label, author, message string) (string, error) {
+	tree, err := snapshotTree(ctx, envGit, dir, label)
+	if err != nil {
+		return "", err
+	}
+	head, err := commandOutput(runGit(ctx, dir, "rev-parse", "HEAD"))
+	if err != nil {
+		return "", fmt.Errorf("resolve HEAD: %w", err)
+	}
+	return commitTree(ctx, envGit, dir, tree, head, label, author, message)
+}
+
+// snapshotTree writes the git-visible worktree as a tree object through a
+// temporary index seeded from HEAD, so the real index never changes.
+func snapshotTree(ctx context.Context, envGit envGitRunner, dir, label string) (string, error) {
+	indexFile, cleanup, err := tempIndexFile()
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
+	env := gitIndexEnv(indexFile)
+	if _, err := commandOutput(envGit(ctx, dir, env, "read-tree", "HEAD")); err != nil {
+		return "", fmt.Errorf("seed %s index: %w", label, err)
+	}
+	if _, err := commandOutput(envGit(ctx, dir, env, "add", "-A")); err != nil {
+		return "", fmt.Errorf("stage %s snapshot: %w", label, err)
+	}
+	tree, err := commandOutput(envGit(ctx, dir, env, "write-tree"))
+	if err != nil {
+		return "", fmt.Errorf("write %s tree: %w", label, err)
+	}
+	return tree, nil
+}
+
+// commitTree creates a commit for tree with parent head and a Splice-local
+// identity.
+func commitTree(ctx context.Context, envGit envGitRunner, dir, tree, head, label, author, message string) (string, error) {
+	email := strings.ToLower(label) + "@local"
+	commitEnv := map[string]string{
+		"GIT_AUTHOR_NAME":     author,
+		"GIT_AUTHOR_EMAIL":    email,
+		"GIT_COMMITTER_NAME":  author,
+		"GIT_COMMITTER_EMAIL": email,
+	}
+	commitSHA, err := commandOutput(envGit(ctx, dir, commitEnv, "commit-tree", tree, "-p", head, "-m", message))
+	if err != nil {
+		return "", fmt.Errorf("create %s commit: %w", label, err)
+	}
+	return commitSHA, nil
+}
+
 func tempIndexFile() (string, func(), error) {
 	file, err := os.CreateTemp("", "splice-recovery-index-*")
 	if err != nil {
@@ -247,6 +314,9 @@ func defaultEnvRunGit(ctx context.Context, dir string, env map[string]string, ar
 	command := exec.CommandContext(ctx, "git", args...)
 	command.Dir = dir
 	command.Env = mergeEnv(os.Environ(), env)
+	if err := gitenv.Harden(command); err != nil {
+		return CommandResult{ExitCode: -1}, err
+	}
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr

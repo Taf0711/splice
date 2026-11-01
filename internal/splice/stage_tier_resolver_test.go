@@ -2,6 +2,7 @@ package splice
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/Taf0711/splice/internal/agent"
@@ -37,13 +38,13 @@ func TestStageTierResolver(t *testing.T) {
 			name:      "openai code_writer medium from gpt-5.6-sol",
 			profile:   config.ProviderProfile{Name: "openai", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-5.6-sol"},
 			stage:     "code_writer",
-			wantModel: "qwen/qwen3-coder-30b-a3b-instruct",
+			wantModel: "gpt-4.1-nano",
 		},
 		{
 			name:      "openai code_writer medium from gpt-5.6-luna",
 			profile:   config.ProviderProfile{Name: "openai", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-5.6-luna"},
 			stage:     "code_writer",
-			wantModel: "qwen/qwen3-coder-30b-a3b-instruct",
+			wantModel: "gpt-4.1-nano",
 		},
 		{
 			name:      "openai reasoning from gpt-5.6-luna",
@@ -171,7 +172,7 @@ func TestResolveStageTierModel(t *testing.T) {
 			name:      "openai code_writer medium resolves cheapest tool model",
 			profile:   config.ProviderProfile{Name: "openai", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-5.6-sol"},
 			stage:     "code_writer",
-			wantModel: "qwen/qwen3-coder-30b-a3b-instruct",
+			wantModel: "gpt-4.1-nano",
 		},
 		{
 			name:    "openai primary already cheapest returns nil",
@@ -238,5 +239,53 @@ func TestResolveStageTierModel(t *testing.T) {
 				t.Fatalf("model = %q, want %q", entry.ID, tc.wantModel)
 			}
 		})
+	}
+}
+
+func TestStageTierCandidatesMatchPrimaryEndpointFamily(t *testing.T) {
+	registry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry: %v", err)
+	}
+	profiles := []config.ProviderProfile{
+		{Name: "openai", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-5.6-sol"},
+		{Name: "anthropic", ProviderKind: config.ProviderKindAnthropic, Model: "claude-opus-4.1"},
+		{Name: "google", ProviderKind: config.ProviderKindGoogle, Model: "gemini-2.5-pro"},
+	}
+	for _, profile := range profiles {
+		kind := RegistryProviderKind(profile.ProviderKind)
+		for stage := range stageTierLabels {
+			entry := ResolveStageTierModel(stage, profile, registry)
+			if entry == nil {
+				continue
+			}
+			if !entry.AllowsEndpointFamily(kind) {
+				t.Fatalf("%s %s resolved %q from %s endpoint family", profile.Name, stage, entry.ID, kind)
+			}
+			if strings.Contains(entry.ID, "qwen/") || strings.Contains(entry.ID, "moonshotai/") {
+				t.Fatalf("%s %s resolved an OpenRouter-only model %q", profile.Name, stage, entry.ID)
+			}
+		}
+	}
+}
+
+func TestBuildCachedProviderRefusesCrossEndpointModel(t *testing.T) {
+	registry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry: %v", err)
+	}
+	qwen, ok := registry.Resolve("qwen/qwen3-coder-30b-a3b-instruct")
+	if !ok {
+		t.Fatal("qwen entry not found")
+	}
+	profile := config.ProviderProfile{Name: "openai", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-5.6-sol"}
+	_, err = buildCachedProvider(profile, qwen, func(config.ProviderProfile) (agent.Provider, error) {
+		return &tierTestProvider{}, nil
+	}, nil)
+	if err == nil {
+		t.Fatal("expected cross-endpoint refusal")
+	}
+	if !strings.Contains(err.Error(), "endpoint family") {
+		t.Fatalf("error = %q, want endpoint family refusal", err)
 	}
 }

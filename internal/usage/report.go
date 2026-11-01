@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/Taf0711/splice/internal/agent"
-	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/sessions"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
@@ -186,7 +185,14 @@ type Report struct {
 // reconstruction from the owning session's Metadata.ModelID. Sessions whose
 // model id is empty or unknown contribute token counts but no cost. The
 // per-net-LOC ratios are guarded against a non-positive netLOC.
-func BuildReport(events []sessions.Event, meta []sessions.Metadata, registry *modelregistry.Registry, netLOC int) (Report, error) {
+// Pricer prices one stored request from the catalog of the provider that served
+// it. An empty provider is resolved by the caller to the active profile.
+type Pricer func(provider string, model string, usage zeroruntime.Usage) agent.UsageCostEstimate
+
+// BuildReportPriced builds the usage report. A stored priced estimate is kept
+// as written. An event without a cost is priced by price, from the catalog of
+// the provider that served it.
+func BuildReportPriced(events []sessions.Event, meta []sessions.Metadata, price Pricer, netLOC int) (Report, error) {
 	modelBySession := map[string]string{}
 	for _, m := range meta {
 		modelBySession[m.SessionID] = m.ModelID
@@ -268,14 +274,7 @@ func BuildReport(events []sessions.Event, meta []sessions.Metadata, registry *mo
 		if modelID == "" {
 			modelID = modelBySession[event.SessionID]
 		}
-		if modelID == "" || registry == nil {
-			continue
-		}
-		model, err := registry.Require(modelID)
-		if err != nil {
-			continue
-		}
-		cost, err := modelregistry.CalculateCost(model, zeroruntime.Usage{
+		estimate := price(payload.Provider, modelID, zeroruntime.Usage{
 			InputTokens:       payload.PromptTokens,
 			OutputTokens:      payload.CompletionTokens,
 			CachedInputTokens: payload.CachedInputTokens,
@@ -284,12 +283,13 @@ func BuildReport(events []sessions.Event, meta []sessions.Metadata, registry *mo
 			WebSearchRequests: payload.WebSearchRequests,
 			WebSearchEngine:   payload.WebSearchEngine,
 		})
-		if err != nil {
+		if estimate.Status != CostStatusPriced || estimate.CostUSD == nil {
 			continue
 		}
-		bucket.TotalCost += cost.TotalCost
-		report.Total.TotalCost += cost.TotalCost
-		unit.TotalCost += cost.TotalCost
+		cost := *estimate.CostUSD
+		bucket.TotalCost += cost
+		report.Total.TotalCost += cost
+		unit.TotalCost += cost
 	}
 
 	report.WorkUnits = make([]WorkUnit, 0, len(workUnits))

@@ -5,13 +5,26 @@ import (
 	"sync"
 )
 
-const defaultTranscriptBodyHeightCacheMaxEntries = 512
+// defaultTranscriptBodyHeightCacheMaxEntries bounds entry count, and
+// defaultTranscriptBodyHeightCacheMaxKeyCharacters bounds retained key bytes.
+// The entry cap alone was a real defect: keys embed the row's full render-cache
+// fingerprint (including its text), and a session whose body-item count crosses
+// the cap thrashes the cache — every streaming/spinner frame then re-renders
+// the ENTIRE transcript during measurement (~23ms/frame at 600 rows, measured).
+// The character budget keeps worst-case memory bounded while letting realistic
+// long sessions (thousands of body items) stay fully cached.
+const (
+	defaultTranscriptBodyHeightCacheMaxEntries       = 4096
+	defaultTranscriptBodyHeightCacheMaxKeyCharacters = 4 << 20 // 4 MiB of key bytes
+)
 
 type transcriptBodyHeightCache struct {
-	mu         sync.Mutex
-	maxEntries int
-	items      map[string]*list.Element
-	lru        *list.List
+	mu               sync.Mutex
+	maxEntries       int
+	maxKeyChars      int
+	retainedKeyChars int
+	items            map[string]*list.Element
+	lru              *list.List
 }
 
 type transcriptBodyHeightCacheEntry struct {
@@ -20,10 +33,15 @@ type transcriptBodyHeightCacheEntry struct {
 }
 
 func newTranscriptBodyHeightCache(maxEntries int) *transcriptBodyHeightCache {
+	return newTranscriptBodyHeightCacheWithBudget(maxEntries, defaultTranscriptBodyHeightCacheMaxKeyCharacters)
+}
+
+func newTranscriptBodyHeightCacheWithBudget(maxEntries int, maxKeyChars int) *transcriptBodyHeightCache {
 	return &transcriptBodyHeightCache{
-		maxEntries: maxEntries,
-		items:      map[string]*list.Element{},
-		lru:        list.New(),
+		maxEntries:  maxEntries,
+		maxKeyChars: maxKeyChars,
+		items:       map[string]*list.Element{},
+		lru:         list.New(),
 	}
 }
 
@@ -53,13 +71,15 @@ func (c *transcriptBodyHeightCache) set(key string, height int) {
 		return
 	}
 	c.items[key] = c.lru.PushFront(&transcriptBodyHeightCacheEntry{key: key, height: height})
-	for len(c.items) > c.maxEntries {
+	c.retainedKeyChars += len(key)
+	for len(c.items) > c.maxEntries || (c.maxKeyChars > 0 && c.retainedKeyChars > c.maxKeyChars) {
 		element := c.lru.Back()
 		if element == nil {
-			return
+			break
 		}
 		entry := element.Value.(*transcriptBodyHeightCacheEntry)
 		delete(c.items, entry.key)
 		c.lru.Remove(element)
+		c.retainedKeyChars -= len(entry.key)
 	}
 }

@@ -3,12 +3,15 @@ package openai
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Taf0711/splice/internal/flags"
+	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
@@ -192,7 +195,7 @@ func TestStreamCompletionAppliesCustomAuthAndHeaders(t *testing.T) {
 func TestStreamCompletionEmitsTextUsageAndDone(t *testing.T) {
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"choices":[{"delta":{"content":"hello "}}]}`)
-		writeSSE(w, `{"choices":[{"delta":{"content":"splice"}}],"usage":{"prompt_tokens":12,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":3}}}`)
+		writeSSE(w, `{"choices":[{"delta":{"content":"splice"}}],"usage":{"prompt_tokens":12,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":3,"cache_write_tokens":4}}}`)
 		writeSSE(w, `[DONE]`)
 	})
 
@@ -201,6 +204,12 @@ func TestStreamCompletionEmitsTextUsageAndDone(t *testing.T) {
 	assertEvent(t, events[1], zeroruntime.StreamEventText, "splice")
 	if events[2].Type != zeroruntime.StreamEventUsage || events[2].Usage.PromptTokens != 12 || events[2].Usage.CompletionTokens != 5 || events[2].Usage.CachedInputTokens != 3 {
 		t.Fatalf("unexpected usage event: %#v", events[2])
+	}
+	// OpenRouter's prompt_tokens_details extension carries cache-write
+	// tokens next to cached_tokens; dropping them would misprice cache
+	// creation and hide the write discount from later reads.
+	if events[2].Usage.CacheWriteTokens != 4 {
+		t.Fatalf("CacheWriteTokens = %d, want 4 ingested from prompt_tokens_details", events[2].Usage.CacheWriteTokens)
 	}
 	if events[3].Type != zeroruntime.StreamEventDone {
 		t.Fatalf("last event = %#v, want done", events[3])
@@ -319,6 +328,112 @@ func TestStreamCompletionPrefersReasoningContentOverAlias(t *testing.T) {
 	}
 }
 
+func TestStreamCompletionEmitsReasoningTextDeltas(t *testing.T) {
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, `{"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","text":"Working through it. "}]}}]}`)
+		writeSSE(w, `{"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","text":"Next step."}]}}]}`)
+		writeSSE(w, `[DONE]`)
+	})
+
+	events := collectProviderEvents(t, provider)
+	reasoning := eventsOfType(events, zeroruntime.StreamEventReasoning)
+	if len(reasoning) != 2 {
+		t.Fatalf("reasoning events = %#v, want two reasoning deltas", reasoning)
+	}
+	if reasoning[0].Content != "Working through it. " || reasoning[1].Content != "Next step." {
+		t.Fatalf("unexpected reasoning events: %#v", reasoning)
+	}
+	if text := eventsOfType(events, zeroruntime.StreamEventText); len(text) != 0 {
+		t.Fatalf("reasoning_details must not emit text events, got %#v", text)
+	}
+}
+
+func TestStreamCompletionEmitsReasoningSummaryAndSkipsEncrypted(t *testing.T) {
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, `{"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.summary","summary":"I decided to use the custom branch."},{"type":"reasoning.encrypted","id":"reasoning.0","encrypted_content":"secret","model":"openrouter/auto","signature":"sig","duration":120},{"type":"reasoning.text","text":"Final note."}]}}]}`)
+		writeSSE(w, `[DONE]`)
+	})
+
+	events := collectProviderEvents(t, provider)
+	reasoning := eventsOfType(events, zeroruntime.StreamEventReasoning)
+	if len(reasoning) != 2 {
+		t.Fatalf("reasoning events = %#v, want summary+text only (encrypted skipped)", reasoning)
+	}
+	if reasoning[0].Content != "I decided to use the custom branch." || reasoning[1].Content != "Final note." {
+		t.Fatalf("unexpected reasoning events: %#v", reasoning)
+	}
+}
+
+func TestStreamCompletionPrefersStructuredReasoningOverLegacyAlias(t *testing.T) {
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, `{"choices":[{"delta":{"reasoning":"same narration","reasoning_details":[{"type":"reasoning.summary","summary":"same narration"}]}}]}`)
+		writeSSE(w, `[DONE]`)
+	})
+
+	reasoning := eventsOfType(collectProviderEvents(t, provider), zeroruntime.StreamEventReasoning)
+	if len(reasoning) != 1 || reasoning[0].Content != "same narration" {
+		t.Fatalf("reasoning events = %#v, want one structured detail without alias duplication", reasoning)
+	}
+}
+
+func TestStreamCompletionPreservesOpenRouterReasoningDetails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, `{"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.summary","id":null,"format":"anthropic-claude-v1","index":0,"summary":"Checked the plan."},{"type":"reasoning.encrypted","id":"reasoning-1","format":"anthropic-claude-v1","index":1,"data":"opaque","signature":"sig"}]}}]}`)
+		writeSSE(w, `[DONE]`)
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{
+		Model: "test", BaseURL: "https://openrouter.ai/api/v1", Endpoint: server.URL + "/chat/completions",
+	})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	events := collectProviderEvents(t, provider)
+	done := events[len(events)-1]
+	if done.Type != zeroruntime.StreamEventDone || len(done.ReasoningBlocks) != 2 {
+		t.Fatalf("done event = %#v, want two preserved reasoning blocks", done)
+	}
+	if done.ReasoningBlocks[0].Text != "Checked the plan." || done.ReasoningBlocks[1].Text != "" {
+		t.Fatalf("unexpected readable reasoning metadata: %#v", done.ReasoningBlocks)
+	}
+	if !strings.Contains(done.ReasoningBlocks[1].Data, `"data":"opaque"`) ||
+		!strings.Contains(done.ReasoningBlocks[1].Data, `"signature":"sig"`) {
+		t.Fatalf("encrypted reasoning metadata was not preserved: %#v", done.ReasoningBlocks[1])
+	}
+
+	mapped := provider.openAIRequest(zeroruntime.CompletionRequest{Messages: []zeroruntime.Message{{
+		Role:      zeroruntime.MessageRoleAssistant,
+		ToolCalls: []zeroruntime.ToolCall{{ID: "call-1", Name: "read_file", Arguments: `{}`}},
+		Reasoning: done.ReasoningBlocks,
+	}}})
+	body, err := json.Marshal(mapped.Messages[0])
+	if err != nil {
+		t.Fatalf("marshal replay message: %v", err)
+	}
+	if !strings.Contains(string(body), `"reasoning_details":[`) ||
+		!strings.Contains(string(body), `"data":"opaque"`) ||
+		!strings.Contains(string(body), `"signature":"sig"`) {
+		t.Fatalf("replay message lost reasoning details: %s", body)
+	}
+}
+
+func TestStreamCompletionEmitsMessageReasoningDetailsNonStream(t *testing.T) {
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, `{"choices":[{"message":{"reasoning_details":[{"type":"reasoning.text","text":"Non-stream thought."}]},"delta":{"content":"Answer"}}]}`)
+		writeSSE(w, `[DONE]`)
+	})
+
+	events := collectProviderEvents(t, provider)
+	reasoning := eventsOfType(events, zeroruntime.StreamEventReasoning)
+	if len(reasoning) != 1 || reasoning[0].Content != "Non-stream thought." {
+		t.Fatalf("reasoning events = %#v, want message reasoning_details surfaced", reasoning)
+	}
+	if text := eventsOfType(events, zeroruntime.StreamEventText); len(text) != 1 || text[0].Content != "Answer" {
+		t.Fatalf("text events = %#v, want the content preserved", text)
+	}
+}
+
 func TestStreamCompletionEmitsReasoningBeforeRegularContent(t *testing.T) {
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"choices":[{"delta":{"reasoning_content":"Thinking. ","content":"Answer."}}]}`)
@@ -430,7 +545,8 @@ func TestStreamCompletionTracksMultipleToolCallsByIndex(t *testing.T) {
 	}
 }
 
-func TestStreamCompletionClassifiesHTTPErrorsAndRedactsToken(t *testing.T) {
+func TestEmitHTTPErrorClassifiesAndRedactsToken(t *testing.T) {
+	provider := &Provider{apiKey: "sk-secret"}
 	cases := []struct {
 		name       string
 		status     int
@@ -446,14 +562,15 @@ func TestStreamCompletionClassifiesHTTPErrorsAndRedactsToken(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			provider := newTestProviderWithKey(t, "sk-secret", func(w http.ResponseWriter, r *http.Request) {
-				http.Error(w, tc.body, tc.status)
-			})
-			stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{})
-			if err != nil {
-				t.Fatalf("StreamCompletion returned setup error: %v", err)
-			}
-			events := readAll(stream)
+			recorder := httptest.NewRecorder()
+			http.Error(recorder, tc.body, tc.status)
+			response := recorder.Result()
+			eventCh := make(chan zeroruntime.StreamEvent, 1)
+			provider.emitHTTPError(context.Background(), response, eventCh)
+			_ = response.Body.Close()
+			close(eventCh)
+
+			events := readAll(eventCh)
 			if len(events) != 1 || events[0].Type != zeroruntime.StreamEventError {
 				t.Fatalf("events = %#v, want one error", events)
 			}
@@ -467,6 +584,17 @@ func TestStreamCompletionClassifiesHTTPErrorsAndRedactsToken(t *testing.T) {
 				t.Fatalf("error leaked token: %q", events[0].Error)
 			}
 		})
+	}
+}
+
+func TestStreamCompletionEmitsHTTPError(t *testing.T) {
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":{"message":"bad request"}}`, http.StatusBadRequest)
+	})
+
+	events := collectProviderEvents(t, provider)
+	if len(events) != 1 || events[0].Type != zeroruntime.StreamEventError || !strings.HasPrefix(events[0].Error, "provider request error:") {
+		t.Fatalf("events = %#v, want one provider request error", events)
 	}
 }
 
@@ -853,6 +981,50 @@ func TestStreamCompletionSendsMaxCompletionTokens(t *testing.T) {
 	}
 }
 
+func TestStreamCompletionCarriesReasoningEffortFromPopulatedEntry(t *testing.T) {
+	// A probed local reasoning model's entry carries the standard low/medium/high
+	// efforts; EffectiveReasoningEffort resolves the requested tier, and the
+	// OpenAI-compat request forwards it as reasoning_effort.
+	entry := modelregistry.ModelEntry{
+		ID:       "local-reasoner",
+		APIModel: "local-reasoner",
+		ReasoningEfforts: []modelregistry.ReasoningEffort{
+			modelregistry.ReasoningEffortLow,
+			modelregistry.ReasoningEffortMedium,
+			modelregistry.ReasoningEffortHigh,
+		},
+	}
+	effort := modelregistry.EffectiveReasoningEffort(entry, modelregistry.ReasoningEffortHigh)
+	if effort != modelregistry.ReasoningEffortHigh {
+		t.Fatalf("EffectiveReasoningEffort = %q, want high", effort)
+	}
+
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		writeSSE(w, `[DONE]`)
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{BaseURL: server.URL + "/", Model: "local-reasoner"})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages:        []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+		ReasoningEffort: string(effort),
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion returned error: %v", err)
+	}
+	drain(stream)
+	if got := gotBody["reasoning_effort"]; got != "high" {
+		t.Fatalf("reasoning_effort = %#v, want \"high\"", got)
+	}
+}
+
 func TestStreamCompletionSendsReasoningEffort(t *testing.T) {
 	var gotBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -878,6 +1050,39 @@ func TestStreamCompletionSendsReasoningEffort(t *testing.T) {
 
 	if got := gotBody["reasoning_effort"]; got != "high" {
 		t.Fatalf("reasoning_effort = %#v, want \"high\"", got)
+	}
+}
+
+func TestStreamCompletionUsesOpenRouterReasoningObject(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		writeSSE(w, `[DONE]`)
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{
+		Model: "test", BaseURL: "https://openrouter.ai/api/v1", Endpoint: server.URL + "/chat/completions",
+	})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}}, ReasoningEffort: "high",
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion returned error: %v", err)
+	}
+	drain(stream)
+
+	reasoning, ok := gotBody["reasoning"].(map[string]any)
+	if !ok || reasoning["effort"] != "high" {
+		t.Fatalf("reasoning = %#v, want {effort: high}", gotBody["reasoning"])
+	}
+	if _, ok := gotBody["reasoning_effort"]; ok {
+		t.Fatalf("OpenRouter request must not send reasoning_effort: %#v", gotBody)
 	}
 }
 
@@ -1377,26 +1582,25 @@ func TestOpenAIRequestPromptCacheKey(t *testing.T) {
 		t.Fatalf("keyless request must omit prompt_cache_key: %s", data)
 	}
 
-	t.Setenv("SPLICE_DISABLE_PROMPT_CACHE_KEY", "1")
+	flags.SetProcess(flags.Set{flags.ProviderPromptCacheKey: false})
+	t.Cleanup(func() { flags.SetProcess(nil) })
 	req = provider.openAIRequest(zeroruntime.CompletionRequest{
 		Messages:       messages,
 		PromptCacheKey: "sess_123",
 	})
 	if req.PromptCacheKey != "" {
-		t.Fatalf("kill switch ignored; PromptCacheKey = %q", req.PromptCacheKey)
+		t.Fatalf("flag off ignored; PromptCacheKey = %q", req.PromptCacheKey)
 	}
 
-	// Explicitly-falsy kill switch values must NOT disable forwarding — only
-	// truthy values flip the toggle (same parsing as SPLICE_FORMAT_ON_WRITE).
-	for _, value := range []string{"0", "false", "FALSE"} {
-		t.Setenv("SPLICE_DISABLE_PROMPT_CACHE_KEY", value)
-		req = provider.openAIRequest(zeroruntime.CompletionRequest{
-			Messages:       messages,
-			PromptCacheKey: "sess_123",
-		})
-		if req.PromptCacheKey != "sess_123" {
-			t.Fatalf("SPLICE_DISABLE_PROMPT_CACHE_KEY=%q must be a no-op; PromptCacheKey = %q", value, req.PromptCacheKey)
-		}
+	// With the flag on (the default), the key is forwarded. Legacy spellings of
+	// the flag are parsed and tested in internal/flags.
+	flags.SetProcess(flags.Set{flags.ProviderPromptCacheKey: true})
+	req = provider.openAIRequest(zeroruntime.CompletionRequest{
+		Messages:       messages,
+		PromptCacheKey: "sess_123",
+	})
+	if req.PromptCacheKey != "sess_123" {
+		t.Fatalf("flag on must forward the key; PromptCacheKey = %q", req.PromptCacheKey)
 	}
 }
 
@@ -1633,4 +1837,103 @@ func TestOpenRouterWebSearchUsageReportsConfiguredEngine(t *testing.T) {
 		}
 	}
 	t.Fatal("provider emitted no usage event")
+}
+
+// TestStreamCompletionCombinesRequestOutputCap pins the wire rule for the
+// per-request output cap: the tighter of the request cap and the configured
+// default wins, a lone non-zero side wins, and zero on both omits the field.
+func TestStreamCompletionCombinesRequestOutputCap(t *testing.T) {
+	tests := []struct {
+		name       string
+		requestCap int
+		configured int
+		want       int
+		omit       bool
+	}{
+		{name: "request cap tighter", requestCap: 512, configured: 1234, want: 512},
+		{name: "configured default tighter", requestCap: 8192, configured: 1234, want: 1234},
+		{name: "request alone when default zero", requestCap: 512, configured: 0, want: 512},
+		{name: "default alone when request zero", requestCap: 0, configured: 1234, want: 1234},
+		{name: "omitted when both zero", configured: 0, omit: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotBody map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+					t.Fatalf("decode request body: %v", err)
+				}
+				writeSSE(w, `[DONE]`)
+			}))
+			defer server.Close()
+
+			provider, err := New(Options{BaseURL: server.URL + "/", Model: "gpt-test", MaxTokens: tt.configured})
+			if err != nil {
+				t.Fatalf("New returned error: %v", err)
+			}
+			stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+				Messages:        []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+				MaxOutputTokens: tt.requestCap,
+			})
+			if err != nil {
+				t.Fatalf("StreamCompletion returned error: %v", err)
+			}
+			drain(stream)
+
+			got, ok := gotBody["max_completion_tokens"]
+			if tt.omit {
+				if ok {
+					t.Fatalf("max_completion_tokens = %#v, want omitted", got)
+				}
+				return
+			}
+			if !ok {
+				t.Fatalf("max_completion_tokens missing from request: %#v", gotBody)
+			}
+			if n, _ := got.(float64); int(n) != tt.want {
+				t.Fatalf("max_completion_tokens = %#v, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestOpenRouterUpstreamPinAndGenerationID: the pin sends OpenRouter's
+// provider routing with no fallbacks, only to openrouter.ai; and the usage
+// event carries the generation ID from the chunks when the header is absent.
+func TestOpenRouterUpstreamPinAndGenerationID(t *testing.T) {
+	t.Setenv(OpenRouterProviderOrderEnvVar, "deepseek, deepinfra/fp8")
+	var body string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		body = string(raw)
+		writeSSE(w, `{"id":"gen-123","choices":[{"delta":{"content":"hi"}}]}`)
+		writeSSE(w, `{"id":"gen-123","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":1}}`)
+		writeSSE(w, `[DONE]`)
+	}))
+	defer server.Close()
+	provider, err := New(Options{Model: "test", BaseURL: "https://openrouter.ai/api/v1", Endpoint: server.URL + "/chat/completions"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := collectProviderEvents(t, provider)
+	if !strings.Contains(body, `"provider":{"order":["deepseek","deepinfra/fp8"],"allow_fallbacks":false}`) {
+		t.Fatalf("request body lacks the pin: %s", body)
+	}
+	var requestID string
+	for _, e := range events {
+		if e.Type == zeroruntime.StreamEventUsage {
+			requestID = e.RequestID
+		}
+	}
+	if requestID != "gen-123" {
+		t.Fatalf("usage request id = %q, want gen-123", requestID)
+	}
+
+	other, err := New(Options{Model: "test", BaseURL: "https://api.example.com/v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.openAIRequest(zeroruntime.CompletionRequest{}).Provider != nil {
+		t.Fatal("the pin must not reach a non-OpenRouter backend")
+	}
 }

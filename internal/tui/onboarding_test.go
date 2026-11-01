@@ -13,6 +13,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/Taf0711/splice/internal/config"
+	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/providermodeldiscovery"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
@@ -1684,9 +1685,9 @@ func TestSetupPipelineStepRendersFourStageRows(t *testing.T) {
 
 func TestSetupPipelinePicksPrefilledByResolver(t *testing.T) {
 	m, _ := newSetupModelForPipeline(t, "gpt-5.6-sol")
-	// code_writer is "medium": cheapest tool-capable OpenAI model below sol's $5 = qwen/qwen3-coder-30b-a3b-instruct.
-	if got := m.setup.pipelinePicks["code_writer"]; got != "qwen/qwen3-coder-30b-a3b-instruct" {
-		t.Fatalf("code_writer pick = %q, want qwen/qwen3-coder-30b-a3b-instruct", got)
+	// code_writer is "medium": cheapest tool-capable OpenAI endpoint model below sol's rate.
+	if got := m.setup.pipelinePicks["code_writer"]; got != "gpt-4.1-nano" {
+		t.Fatalf("code_writer pick = %q, want gpt-4.1-nano", got)
 	}
 	// plan_critic is "reasoning": strongest reasoning in-family above sol; sol is strongest, so nil -> primary.
 	if got := m.setup.pipelinePicks["plan_critic"]; got != "gpt-5.6-sol" {
@@ -1949,8 +1950,8 @@ func TestSetupPipelineCompleteWritesStageModelsJSON(t *testing.T) {
 	if cfg.Default.ProviderProfile != "openai" {
 		t.Fatalf("Default.ProviderProfile = %q, want openai", cfg.Default.ProviderProfile)
 	}
-	if got := cfg.Stages["code_writer"]; got.Model != "qwen/qwen3-coder-30b-a3b-instruct" {
-		t.Fatalf("Stages[code_writer].Model = %q, want qwen/qwen3-coder-30b-a3b-instruct", got.Model)
+	if got := cfg.Stages["code_writer"]; got.Model != "gpt-4.1-nano" {
+		t.Fatalf("Stages[code_writer].Model = %q, want gpt-4.1-nano", got.Model)
 	}
 	// All four model-backed stages present.
 	for _, stage := range []string{"code_writer", "test_generator", "design_crystallize", "plan_critic"} {
@@ -2200,6 +2201,37 @@ func TestCompleteSetupLandsInDesignMode(t *testing.T) {
 	}
 }
 
+func TestCompleteSetupOpensRequiredTrustMenu(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		TrustPrompt: true,
+		Setup: SetupOptions{
+			Visible:  true,
+			Required: true,
+			Providers: []SetupProviderOption{
+				{ID: "ollama", Name: "Ollama Local", DefaultModel: "llama3.1", Local: true},
+			},
+			Save: func(selection SetupSelection) (SetupResult, error) {
+				return SetupResult{Provider: config.ProviderProfile{
+					Name: selection.CatalogID, CatalogID: selection.CatalogID, Model: selection.Model,
+				}}, nil
+			},
+		},
+	})
+	m.width = 100
+	m.height = 30
+	for m.setup.stage != setupStageReady {
+		m = pressSetupContinue(m)
+	}
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	got := updated.(model)
+	if got.setup.visible {
+		t.Fatal("setup should hide after completion")
+	}
+	if got.picker == nil || got.picker.kind != pickerTrust {
+		t.Fatalf("setup completion did not open trust menu: %#v", got.picker)
+	}
+}
+
 func indexOfString(slice []string, s string) int {
 	for i, v := range slice {
 		if v == s {
@@ -2207,4 +2239,68 @@ func indexOfString(slice []string, s string) int {
 		}
 	}
 	return -1
+}
+
+// The setup stage counter must keep one stable display width across the 9->10
+// crossing: the non-OAuth path with a custom-endpoint provider has exactly ten
+// stages, so "9/10" -> "10/10" happens on a real journey and a raw %d/%d
+// counter would reflow the centered progress line.
+func TestSetupProgressTextStableAcrossPowerOfTen(t *testing.T) {
+	m := newModel(t.Context(), Options{ModelName: "gpt-4"})
+	m.setup.oauthMode = false
+	custom := SetupProviderOption{ID: "custom-openai-compatible", Name: "Custom"}
+	m.setup.providers = []SetupProviderOption{custom}
+	m.setup.selected = 0
+
+	stages := m.setupStages()
+	if len(stages) != 10 {
+		t.Fatalf("setup stages = %d, want the ten-stage non-OAuth path for this test", len(stages))
+	}
+	m.setup.stage = stages[8]
+	if got := plainRender(t, m.setupProgressText()); !strings.Contains(got, "09/10") {
+		t.Fatalf("stage 9 progress = %q, want zero-padded 09/10", got)
+	}
+	m.setup.stage = stages[9]
+	if got := plainRender(t, m.setupProgressText()); !strings.Contains(got, "10/10") {
+		t.Fatalf("final stage progress = %q, want 10/10 at stable width", got)
+	}
+}
+
+// P3-4: with no discovered models (offline), the pipeline picker falls back
+// to the catalog. For an official OpenAI profile it offers only models the
+// OpenAI endpoint serves, not OpenRouter-only entries such as Qwen.
+func TestSetupPipelineOfflineFallbackFiltersEndpointFamily(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		UserConfigPath: filepath.Join(t.TempDir(), "config.json"),
+		DiscoverProviderModels: func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+			return nil, nil
+		},
+		Setup: SetupOptions{
+			Visible:    true,
+			Required:   true,
+			ConfigPath: filepath.Join(t.TempDir(), "config.json"),
+			Providers: []SetupProviderOption{
+				{ID: "openai", Name: "OpenAI", DefaultModel: "gpt-4.1", EnvVar: "OPENAI_API_KEY", RequiresAuth: true},
+			},
+		},
+	})
+	m.setup.visible = true
+	m.setup.models = nil
+	m.populateSetupPipelinePicks()
+	sawOption := false
+	for stage, opts := range m.setup.pipelineOptions {
+		for _, opt := range opts {
+			sawOption = true
+			entry, ok := m.modelCatalog.Resolve(opt.value)
+			if !ok {
+				t.Fatalf("stage %q option %q is not in the catalog", stage, opt.value)
+			}
+			if !entry.AllowsEndpointFamily(modelregistry.ProviderOpenAI) {
+				t.Fatalf("stage %q offers %q, which the OpenAI endpoint does not serve", stage, opt.value)
+			}
+		}
+	}
+	if !sawOption {
+		t.Fatal("offline fallback offered no catalog models")
+	}
 }

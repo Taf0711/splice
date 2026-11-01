@@ -1,0 +1,610 @@
+[
+ {
+  "ID": "golden-typo-readme",
+  "Nouls": {
+   "code_change": 0.11,
+   "new_tests": 0.05,
+   "security_review": 0.02
+  }
+ },
+ {
+  "ID": "golden-parser-bug",
+  "Nouls": {
+   "code_change": 0.96,
+   "new_tests": 0.2,
+   "security_review": 0.27
+  }
+ },
+ {
+  "ID": "golden-oauth-service",
+  "Nouls": {
+   "code_change": 0.62,
+   "new_tests": 0.93,
+   "security_review": 0.96
+  }
+ },
+ {
+  "ID": "golden-storage-layer",
+  "Nouls": {
+   "code_change": 0.92,
+   "new_tests": 0.81,
+   "security_review": 0.33
+  }
+ },
+ {
+  "ID": "content-type-enforcement",
+  "Nouls": {
+   "code_change": 0.96,
+   "new_tests": 0.95,
+   "security_review": 0.81
+  }
+ },
+ {
+  "ID": "create-conflict-error",
+  "Nouls": {
+   "code_change": 0.98,
+   "new_tests": 0.91,
+   "security_review": 0.81
+  }
+ },
+ {
+  "ID": "create-rate-limit",
+  "Nouls": {
+   "code_change": 0.97,
+   "new_tests": 0.95,
+   "security_review": 0.88
+  }
+ },
+ {
+  "ID": "expire-sweep-endpoint",
+  "Nouls": {
+   "code_change": 0.98,
+   "new_tests": 0.96,
+   "security_review": 0.85
+  }
+ },
+ {
+  "ID": "expiry-predicate-single-source",
+  "Nouls": {
+   "code_change": 0.98,
+   "new_tests": 0.1,
+   "security_review": 0.21
+  }
+ },
+ {
+  "ID": "expiry-regression-table",
+  "Nouls": {
+   "code_change": 0.87,
+   "new_tests": 0.05,
+   "security_review": 0.13
+  }
+ },
+ {
+  "ID": "field-projection",
+  "Nouls": {
+   "code_change": 0.97,
+   "new_tests": 0.95,
+   "security_review": 0.6
+  }
+ },
+ {
+  "ID": "get-auth-token",
+  "Nouls": {
+   "code_change": 0.98,
+   "new_tests": 0.86,
+   "security_review": 0.99
+  }
+ },
+ {
+  "ID": "get-no-refresh",
+  "Nouls": {
+   "code_change": 0.98,
+   "new_tests": 0.95,
+   "security_review": 0.92
+  }
+ },
+ {
+  "ID": "get-or-create",
+  "Nouls": {
+   "code_change": 0.96,
+   "new_tests": 0.94,
+   "security_review": 0.85
+  }
+ },
+ {
+  "ID": "graceful-shutdown",
+  "Nouls": {
+   "code_change": 0.97,
+   "new_tests": 0.87,
+   "security_review": 0.09
+  }
+ },
+ {
+  "ID": "healthz-detail-gating",
+  "Nouls": {
+   "code_change": 0.97,
+   "new_tests": 0.95,
+   "security_review": 0.95
+  }
+ },
+ {
+  "ID": "len-skips-expired",
+  "Nouls": {
+   "code_change": 0.97,
+   "new_tests": 0.94,
+   "security_review": 0.53
+  }
+ },
+ {
+  "ID": "list-sessions-paged",
+  "Nouls": {
+   "code_change": 0.95,
+   "new_tests": 0.94,
+   "security_review": 0.19
+  }
+ },
+ {
+  "ID": "listen-addr-from-env",
+  "Nouls": {
+   "code_change": 0.98,
+   "new_tests": 0.83,
+   "security_review": 0.59
+  }
+ },
+ {
+  "ID": "no-id-in-logs",
+  "Nouls": {
+   "code_change": 0.97,
+   "new_tests": 0.92,
+   "security_review": 0.93
+  }
+ },
+ {
+  "ID": "per-user-session-cap",
+  "Nouls": {
+   "code_change": 0.98,
+   "new_tests": 0.95,
+   "security_review": 0.92
+  }
+ },
+ {
+  "ID": "readme-delete-endpoint-doc",
+  "Nouls": {
+   "code_change": 0.98,
+   "new_tests": 0.07,
+   "security_review": 0.63
+  }
+ },
+ {
+  "ID": "readme-expiry-semantics",
+  "Nouls": {
+   "code_change": 0.97,
+   "new_tests": 0.05,
+   "security_review": 0.24
+  }
+ },
+ {
+  "ID": "remove-expired-hook",
+  "Nouls": {
+   "code_change": 0.98,
+   "new_tests": 0.8,
+   "security_review": 0.68
+  }
+ },
+ {
+  "ID": "request-body-cap",
+  "Nouls": {
+   "code_change": 0.97,
+   "new_tests": 0.95,
+   "security_review": 0.96
+  }
+ },
+ {
+  "ID": "route-registration-single-source",
+  "Nouls": {
+   "code_change": 0.98,
+   "new_tests": 0.16,
+   "security_review": 0.06
+  }
+ },
+ {
+  "ID": "session-id-validation",
+  "Nouls": {
+   "code_change": 0.98,
+   "new_tests": 0.93,
+   "security_review": 0.97
+  }
+ },
+ {
+  "ID": "sessions-active-since",
+  "Nouls": {
+   "code_change": 0.96,
+   "new_tests": 0.96,
+   "security_review": 0.35
+  }
+ },
+ {
+  "ID": "sessions-by-user-endpoint",
+  "Nouls": {
+   "code_change": 0.97,
+   "new_tests": 0.96,
+   "security_review": 0.67
+  }
+ },
+ {
+  "ID": "sessions-expiring-within",
+  "Nouls": {
+   "code_change": 0.94,
+   "new_tests": 0.94,
+   "security_review": 0.43
+  }
+ },
+ {
+  "ID": "store-counters",
+  "Nouls": {
+   "code_change": 0.97,
+   "new_tests": 0.91,
+   "security_review": 0.06
+  }
+ },
+ {
+  "ID": "structured-json-logs",
+  "Nouls": {
+   "code_change": 0.98,
+   "new_tests": 0.89,
+   "security_review": 0.05
+  }
+ },
+ {
+  "ID": "typed-lookup-error",
+  "Nouls": {
+   "code_change": 0.98,
+   "new_tests": 0.72,
+   "security_review": 0.14
+  }
+ },
+ {
+  "ID": "unix-timestamps-wire",
+  "Nouls": {
+   "code_change": 0.98,
+   "new_tests": 0.93,
+   "security_review": 0.16
+  }
+ },
+ {
+  "ID": "user-lookup-index",
+  "Nouls": {
+   "code_change": 0.98,
+   "new_tests": 0.86,
+   "security_review": 0.18
+  }
+ },
+ {
+  "ID": "validate-user-helper-read",
+  "Nouls": {
+   "code_change": 0.97,
+   "new_tests": 0.92,
+   "security_review": 0.89
+  }
+ },
+ {
+  "ID": "validate-user-helper-write",
+  "Nouls": {
+   "code_change": 0.98,
+   "new_tests": 0.07,
+   "security_review": 0.87
+  }
+ },
+ {
+  "ID": "error-envelope-from-doc",
+  "Nouls": {
+   "code_change": 0.98,
+   "new_tests": 0.93,
+   "security_review": 0.15
+  }
+ },
+ {
+  "ID": "listen-address-from-config",
+  "Nouls": {
+   "code_change": 0.98,
+   "new_tests": 0.94,
+   "security_review": 0.37
+  }
+ },
+ {
+  "ID": "clock-helper-read",
+  "Nouls": {
+   "code_change": 0.95,
+   "new_tests": 0.07,
+   "security_review": 0.03
+  }
+ },
+ {
+  "ID": "example-01",
+  "Nouls": {
+   "code_change": 0.97,
+   "new_tests": 0.15,
+   "security_review": 0.02
+  }
+ },
+ {
+  "ID": "fam-02-read",
+  "Nouls": {
+   "code_change": 0.97,
+   "new_tests": 0.12,
+   "security_review": 0.6
+  }
+ },
+ {
+  "ID": "fam-08-read",
+  "Nouls": {
+   "code_change": 0.95,
+   "new_tests": 0.93,
+   "security_review": 0.03
+  }
+ },
+ {
+  "ID": "fam-10-read",
+  "Nouls": {
+   "code_change": 0.98,
+   "new_tests": 0.92,
+   "security_review": 0.81
+  }
+ },
+ {
+  "ID": "commit-8b5487d",
+  "Nouls": {
+   "code_change": 0.2,
+   "new_tests": 0.15,
+   "security_review": 0.03
+  }
+ },
+ {
+  "ID": "commit-9d6ce55",
+  "Nouls": {
+   "code_change": 0.15,
+   "new_tests": 0.2,
+   "security_review": 0.03
+  }
+ },
+ {
+  "ID": "commit-a1bc23d",
+  "Nouls": {
+   "code_change": 0.17,
+   "new_tests": 0.29,
+   "security_review": 0.24
+  }
+ },
+ {
+  "ID": "commit-0f1f02e",
+  "Nouls": {
+   "code_change": 0.3,
+   "new_tests": 0.5,
+   "security_review": 0.18
+  }
+ },
+ {
+  "ID": "commit-30a33d8",
+  "Nouls": {
+   "code_change": 0.88,
+   "new_tests": 0.89,
+   "security_review": 0.55
+  }
+ },
+ {
+  "ID": "commit-c6c3693",
+  "Nouls": {
+   "code_change": 0.74,
+   "new_tests": 0.89,
+   "security_review": 0.1
+  }
+ },
+ {
+  "ID": "commit-c62d381",
+  "Nouls": {
+   "code_change": 0.8,
+   "new_tests": 0.94,
+   "security_review": 0.02
+  }
+ },
+ {
+  "ID": "commit-4f553e0",
+  "Nouls": {
+   "code_change": 0.91,
+   "new_tests": 0.94,
+   "security_review": 0.12
+  }
+ },
+ {
+  "ID": "commit-35ce459",
+  "Nouls": {
+   "code_change": 0.89,
+   "new_tests": 0.91,
+   "security_review": 0.03
+  }
+ },
+ {
+  "ID": "commit-a200452",
+  "Nouls": {
+   "code_change": 0.41,
+   "new_tests": 0.88,
+   "security_review": 0.13
+  }
+ },
+ {
+  "ID": "commit-eee883d",
+  "Nouls": {
+   "code_change": 0.9,
+   "new_tests": 0.89,
+   "security_review": 0.26
+  }
+ },
+ {
+  "ID": "commit-5e627cf",
+  "Nouls": {
+   "code_change": 0.49,
+   "new_tests": 0.85,
+   "security_review": 0.05
+  }
+ },
+ {
+  "ID": "commit-0e6911c",
+  "Nouls": {
+   "code_change": 0.91,
+   "new_tests": 0.92,
+   "security_review": 0.09
+  }
+ },
+ {
+  "ID": "commit-81b10ba",
+  "Nouls": {
+   "code_change": 0.68,
+   "new_tests": 0.85,
+   "security_review": 0.06
+  }
+ },
+ {
+  "ID": "commit-c0ba692",
+  "Nouls": {
+   "code_change": 0.26,
+   "new_tests": 0.81,
+   "security_review": 0.69
+  }
+ },
+ {
+  "ID": "commit-d6eb25b",
+  "Nouls": {
+   "code_change": 0.92,
+   "new_tests": 0.95,
+   "security_review": 0.14
+  }
+ },
+ {
+  "ID": "commit-d22a5fe",
+  "Nouls": {
+   "code_change": 0.17,
+   "new_tests": 0.58,
+   "security_review": 0.06
+  }
+ },
+ {
+  "ID": "commit-362a243",
+  "Nouls": {
+   "code_change": 0.94,
+   "new_tests": 0.93,
+   "security_review": 0.66
+  }
+ },
+ {
+  "ID": "commit-11cb387",
+  "Nouls": {
+   "code_change": 0.9,
+   "new_tests": 0.92,
+   "security_review": 0.91
+  }
+ },
+ {
+  "ID": "commit-f265ce9",
+  "Nouls": {
+   "code_change": 0.79,
+   "new_tests": 0.92,
+   "security_review": 0.79
+  }
+ },
+ {
+  "ID": "commit-14d02b2",
+  "Nouls": {
+   "code_change": 0.69,
+   "new_tests": 0.71,
+   "security_review": 0.14
+  }
+ },
+ {
+  "ID": "commit-084211e",
+  "Nouls": {
+   "code_change": 0.76,
+   "new_tests": 0.87,
+   "security_review": 0.12
+  }
+ },
+ {
+  "ID": "commit-7860649",
+  "Nouls": {
+   "code_change": 0.73,
+   "new_tests": 0.83,
+   "security_review": 0.31
+  }
+ },
+ {
+  "ID": "commit-bc9ce31",
+  "Nouls": {
+   "code_change": 0.73,
+   "new_tests": 0.86,
+   "security_review": 0.6
+  }
+ },
+ {
+  "ID": "commit-54c6407",
+  "Nouls": {
+   "code_change": 0.66,
+   "new_tests": 0.9,
+   "security_review": 0.07
+  }
+ },
+ {
+  "ID": "commit-3267784",
+  "Nouls": {
+   "code_change": 0.66,
+   "new_tests": 0.88,
+   "security_review": 0.18
+  }
+ },
+ {
+  "ID": "commit-f0a7dd8",
+  "Nouls": {
+   "code_change": 0.79,
+   "new_tests": 0.88,
+   "security_review": 0.27
+  }
+ },
+ {
+  "ID": "commit-698bc92",
+  "Nouls": {
+   "code_change": 0.92,
+   "new_tests": 0.84,
+   "security_review": 0.19
+  }
+ },
+ {
+  "ID": "commit-3c2bcb3",
+  "Nouls": {
+   "code_change": 0.52,
+   "new_tests": 0.87,
+   "security_review": 0.17
+  }
+ },
+ {
+  "ID": "commit-e3e97b1",
+  "Nouls": {
+   "code_change": 0.1,
+   "new_tests": 0.38,
+   "security_review": 0.04
+  }
+ },
+ {
+  "ID": "commit-28594fb",
+  "Nouls": {
+   "code_change": 0.51,
+   "new_tests": 0.66,
+   "security_review": 0.22
+  }
+ },
+ {
+  "ID": "commit-ca61022",
+  "Nouls": {
+   "code_change": 0.1,
+   "new_tests": 0.71,
+   "security_review": 0.02
+  }
+ }
+]

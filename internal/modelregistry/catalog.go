@@ -65,6 +65,11 @@ func defaultModelEntries(providerProfile ...string) ([]ModelEntry, int) {
 		openAIModel("gpt-4o", "GPT-4o", "gpt-4o", ModelStatusActive, []string{"openai:gpt-4o"}, ContextLimits{ContextWindow: 128_000, MaxOutputTokens: 16_384}, ModelCost{}, []ModelCapability{ModelCapabilityVision, ModelCapabilityJSONMode}, "OpenAI multimodal model kept for compatibility with existing configs."),
 		openAIModel("gpt-4o-mini", "GPT-4o mini", "gpt-4o-mini", ModelStatusActive, []string{"openai:gpt-4o-mini"}, ContextLimits{ContextWindow: 128_000, MaxOutputTokens: 16_384}, ModelCost{}, []ModelCapability{ModelCapabilityVision, ModelCapabilityJSONMode}, "OpenAI low-cost multimodal model for lightweight sessions."),
 		openAIModel("gpt-4-turbo", "GPT-4 Turbo", "gpt-4-turbo", ModelStatusDeprecated, []string{"openai:gpt-4-turbo"}, ContextLimits{ContextWindow: 128_000, MaxOutputTokens: 4_096}, ModelCost{}, []ModelCapability{ModelCapabilityVision, ModelCapabilityJSONMode}, "Deprecated OpenAI model retained for config migration and historical usage display."),
+		// Current Claude models (adaptive thinking; effort low through max).
+		anthropicModel("claude-fable-5.1", "Claude Fable 5.1", "claude-fable-5-1", ModelStatusActive, []string{"anthropic:claude-fable-5.1", "fable-5.1", "fable"}, ContextLimits{ContextWindow: 1_000_000, MaxOutputTokens: 128_000}, ModelCost{}, []ModelCapability{ModelCapabilityVision, ModelCapabilityReasoning, ModelCapabilityPromptCache, ModelCapabilityLongContext}, adaptiveReasoningEfforts(), "Anthropic's most capable model for the hardest long-horizon agent work."),
+		anthropicModel("claude-opus-5.5", "Claude Opus 5.5", "claude-opus-5-5", ModelStatusActive, []string{"anthropic:claude-opus-5.5", "opus-5.5"}, ContextLimits{ContextWindow: 1_000_000, MaxOutputTokens: 128_000}, ModelCost{}, []ModelCapability{ModelCapabilityVision, ModelCapabilityReasoning, ModelCapabilityPromptCache, ModelCapabilityLongContext}, adaptiveReasoningEfforts(), "Anthropic Opus model for deep coding and planning."),
+		anthropicModel("claude-opus-5", "Claude Opus 5", "claude-opus-5", ModelStatusActive, []string{"anthropic:claude-opus-5", "opus-5"}, ContextLimits{ContextWindow: 1_000_000, MaxOutputTokens: 128_000}, ModelCost{}, []ModelCapability{ModelCapabilityVision, ModelCapabilityReasoning, ModelCapabilityPromptCache, ModelCapabilityLongContext}, adaptiveReasoningEfforts(), "Anthropic Opus model for deep coding and planning."),
+		anthropicModel("claude-sonnet-5", "Claude Sonnet 5", "claude-sonnet-5", ModelStatusActive, []string{"anthropic:claude-sonnet-5", "sonnet-5"}, ContextLimits{ContextWindow: 1_000_000, MaxOutputTokens: 128_000}, ModelCost{}, []ModelCapability{ModelCapabilityVision, ModelCapabilityReasoning, ModelCapabilityPromptCache, ModelCapabilityLongContext}, adaptiveReasoningEfforts(), "Anthropic balanced model for daily agent work."),
 		anthropicModel("claude-opus-4.1", "Claude Opus 4.1", "claude-opus-4-1-20250805", ModelStatusActive, []string{"anthropic:claude-opus-4.1", "opus-4.1"}, ContextLimits{ContextWindow: 200_000, MaxOutputTokens: 32_000}, ModelCost{}, []ModelCapability{ModelCapabilityVision, ModelCapabilityReasoning, ModelCapabilityPromptCache}, standardReasoningEfforts(), "Anthropic high-capability Opus model for deep coding and planning."),
 		anthropicModel("claude-sonnet-4.5", "Claude Sonnet 4.5", "claude-sonnet-4-5-20250929", ModelStatusActive, []string{"anthropic:claude-sonnet-4.5", "sonnet-4.5"}, ContextLimits{ContextWindow: 200_000, MaxOutputTokens: 64_000}, ModelCost{}, []ModelCapability{ModelCapabilityVision, ModelCapabilityReasoning, ModelCapabilityPromptCache}, standardReasoningEfforts(), "Anthropic balanced coding model for high-quality daily agent work."),
 		anthropicModel("claude-haiku-4.5", "Claude Haiku 4.5", "claude-haiku-4-5-20251001", ModelStatusActive, []string{"anthropic:claude-haiku-4.5", "haiku-4.5"}, ContextLimits{ContextWindow: 200_000, MaxOutputTokens: 64_000}, ModelCost{}, []ModelCapability{ModelCapabilityVision, ModelCapabilityReasoning, ModelCapabilityPromptCache}, standardReasoningEfforts(), "Anthropic fast model for lightweight coding support and summaries."),
@@ -72,8 +77,8 @@ func defaultModelEntries(providerProfile ...string) ([]ModelEntry, int) {
 		googleModel("gemini-2.5-pro", "Gemini 2.5 Pro", "gemini-2.5-pro", ModelStatusActive, []string{"google:gemini-2.5-pro", "gemini-pro"}, ContextLimits{ContextWindow: 1_048_576, MaxOutputTokens: 65_536}, ModelCost{}, []ModelCapability{ModelCapabilityVision, ModelCapabilityJSONMode, ModelCapabilityReasoning, ModelCapabilityLongContext}, standardReasoningEfforts(), "Google general-purpose Pro model with tiered long-context pricing."),
 		googleModel("gemini-2.5-flash", "Gemini 2.5 Flash", "gemini-2.5-flash", ModelStatusActive, []string{"google:gemini-2.5-flash", "gemini-flash"}, ContextLimits{ContextWindow: 1_048_576, MaxOutputTokens: 65_536}, ModelCost{}, []ModelCapability{ModelCapabilityVision, ModelCapabilityJSONMode, ModelCapabilityReasoning, ModelCapabilityLongContext}, standardReasoningEfforts(), "Google Flash model for low-latency coding interactions."),
 		googleModel("gemini-2.5-flash-lite", "Gemini 2.5 Flash-Lite", "gemini-2.5-flash-lite", ModelStatusActive, []string{"google:gemini-2.5-flash-lite", "gemini-flash-lite"}, ContextLimits{ContextWindow: 1_048_576, MaxOutputTokens: 65_536}, ModelCost{}, []ModelCapability{ModelCapabilityVision, ModelCapabilityJSONMode, ModelCapabilityReasoning, ModelCapabilityLongContext}, standardReasoningEfforts(), "Google low-cost Flash model for background routing and summaries."),
-		openAIModel("moonshotai/kimi-k3", "Kimi K3", "moonshotai/kimi-k3", ModelStatusActive, []string{"kimi-k3"}, ContextLimits{ContextWindow: 1_048_576, MaxOutputTokens: 131_072}, ModelCost{}, []ModelCapability{ModelCapabilityVision, ModelCapabilityReasoning, ModelCapabilityJSONMode, ModelCapabilityLongContext, ModelCapabilityPromptCache}, "Moonshot AI Kimi K3 model via OpenRouter for coding and reasoning."),
-		openAIModel("qwen/qwen3-coder-30b-a3b-instruct", "Qwen3 Coder 30B", "qwen/qwen3-coder-30b-a3b-instruct", ModelStatusActive, []string{"qwen3-coder-30b"}, ContextLimits{ContextWindow: 160_000, MaxOutputTokens: 32_768}, ModelCost{}, []ModelCapability{ModelCapabilityJSONMode, ModelCapabilityLongContext}, "Qwen3 Coder 30B model via OpenRouter for cost-effective code writing."),
+		openRouterModel("moonshotai/kimi-k3", "Kimi K3", "moonshotai/kimi-k3", ModelStatusActive, []string{"kimi-k3"}, ContextLimits{ContextWindow: 1_048_576, MaxOutputTokens: 131_072}, ModelCost{}, []ModelCapability{ModelCapabilityVision, ModelCapabilityReasoning, ModelCapabilityJSONMode, ModelCapabilityLongContext, ModelCapabilityPromptCache}, "Moonshot AI Kimi K3 model via OpenRouter for coding and reasoning."),
+		openRouterModel("qwen/qwen3-coder-30b-a3b-instruct", "Qwen3 Coder 30B", "qwen/qwen3-coder-30b-a3b-instruct", ModelStatusActive, []string{"qwen3-coder-30b"}, ContextLimits{ContextWindow: 160_000, MaxOutputTokens: 32_768}, ModelCost{}, []ModelCapability{ModelCapabilityJSONMode, ModelCapabilityLongContext}, "Qwen3 Coder 30B model via OpenRouter for cost-effective code writing."),
 	}
 	decorateModelDepth(entries)
 	// Apply prices and limits from the embedded baseline or a newer disk cache.
@@ -94,6 +99,11 @@ func decorateModelDepth(entries []ModelEntry) {
 		deprecation   *DeprecationRule
 		upgradeTarget string
 	}{
+		// Defaults mirror the API's own: high, except Opus 5.5 (medium).
+		"claude-fable-5.1": {defaultEffort: ReasoningEffortHigh},
+		"claude-opus-5.5":  {defaultEffort: ReasoningEffortMedium},
+		"claude-opus-5":    {defaultEffort: ReasoningEffortHigh, upgradeTarget: "claude-opus-5.5"},
+		"claude-sonnet-5":  {defaultEffort: ReasoningEffortHigh, upgradeTarget: "claude-opus-5.5"},
 		"claude-sonnet-4.5": {
 			defaultEffort: ReasoningEffortMedium,
 			patterns:      []string{`(?i)^sonnet[^a-z0-9]*4[.\s]?5$`},
@@ -290,6 +300,16 @@ func openAIModel(id string, displayName string, apiModel string, status ModelSta
 	}
 }
 
+// openRouterModel curates a model that only OpenRouter serves. The model keeps
+// the OpenAI provider family for listing and capability metadata, but its
+// endpoint family is the OpenAI-compatible transport. An official OpenAI
+// profile therefore never selects it as a tier fallback.
+func openRouterModel(id string, displayName string, apiModel string, status ModelStatus, aliases []string, limits ContextLimits, cost ModelCost, extraCapabilities []ModelCapability, description string) ModelEntry {
+	entry := openAIModel(id, displayName, apiModel, status, aliases, limits, cost, extraCapabilities, description)
+	entry.EndpointFamily = ProviderOpenAICompatible
+	return entry
+}
+
 func anthropicModel(id string, displayName string, apiModel string, status ModelStatus, aliases []string, limits ContextLimits, cost ModelCost, extraCapabilities []ModelCapability, efforts []ReasoningEffort, description string) ModelEntry {
 	cost.Currency = "USD"
 	cost.Unit = "per_1m_tokens"
@@ -334,6 +354,12 @@ func withBaseCapabilities(extra ...ModelCapability) []ModelCapability {
 		ModelCapabilitySystemPrompt,
 	}
 	return append(capabilities, extra...)
+}
+
+// adaptiveReasoningEfforts is the effort ladder of Claude's adaptive-thinking
+// models (Opus 4.7+, Opus 5.x, Sonnet 5, Fable 5.x).
+func adaptiveReasoningEfforts() []ReasoningEffort {
+	return []ReasoningEffort{ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh, ReasoningEffortXHigh, ReasoningEffortMax}
 }
 
 func standardReasoningEfforts() []ReasoningEffort {

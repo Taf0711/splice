@@ -1,0 +1,677 @@
+== snapshot stall_after_edit traj_action_v2
+{
+  "Trajectory": {
+    "boundary": {
+      "RunID": "golden-run",
+      "ProjectID": "/golden/project",
+      "Intent": "fix the failing test",
+      "Iteration": 4,
+      "Repair": 0,
+      "History": [
+        {
+          "iteration": 1,
+          "timestamp": 1700000001,
+          "tests_passing": 0,
+          "tests_failing": 1,
+          "tests_errored": 0,
+          "preexisting": {
+            "pass": 0,
+            "fail": 0,
+            "errored": 0
+          },
+          "authored": {
+            "pass": 0,
+            "fail": 0,
+            "errored": 0
+          },
+          "acceptance_facts_passing": 0,
+          "acceptance_facts_failing": 0,
+          "code_size_bytes": 100,
+          "verification_incomplete": 0,
+          "state_hash": "h1",
+          "confidence": 0,
+          "tokens_consumed": 0,
+          "tokens_generated": 1000,
+          "files_changed": [
+            "a.go"
+          ],
+          "lines_added": 4,
+          "lines_removed": 1,
+          "pass_changed": true
+        },
+        {
+          "iteration": 2,
+          "timestamp": 1700000002,
+          "tests_passing": 0,
+          "tests_failing": 1,
+          "tests_errored": 0,
+          "preexisting": {
+            "pass": 0,
+            "fail": 0,
+            "errored": 0
+          },
+          "authored": {
+            "pass": 0,
+            "fail": 0,
+            "errored": 0
+          },
+          "acceptance_facts_passing": 0,
+          "acceptance_facts_failing": 0,
+          "code_size_bytes": 200,
+          "verification_incomplete": 0,
+          "state_hash": "h2",
+          "confidence": 0,
+          "tokens_consumed": 0,
+          "tokens_generated": 2000,
+          "files_changed": [
+            "a.go"
+          ],
+          "lines_added": 0,
+          "lines_removed": 0,
+          "pass_changed": false
+        },
+        {
+          "iteration": 3,
+          "timestamp": 1700000003,
+          "tests_passing": 0,
+          "tests_failing": 1,
+          "tests_errored": 0,
+          "preexisting": {
+            "pass": 0,
+            "fail": 0,
+            "errored": 0
+          },
+          "authored": {
+            "pass": 0,
+            "fail": 0,
+            "errored": 0
+          },
+          "acceptance_facts_passing": 0,
+          "acceptance_facts_failing": 0,
+          "code_size_bytes": 300,
+          "verification_incomplete": 0,
+          "state_hash": "h3",
+          "confidence": 0,
+          "tokens_consumed": 0,
+          "tokens_generated": 3000,
+          "files_changed": [
+            "a.go"
+          ],
+          "lines_added": 0,
+          "lines_removed": 0,
+          "pass_changed": false
+        },
+        {
+          "iteration": 4,
+          "timestamp": 1700000004,
+          "tests_passing": 0,
+          "tests_failing": 1,
+          "tests_errored": 0,
+          "preexisting": {
+            "pass": 0,
+            "fail": 0,
+            "errored": 0
+          },
+          "authored": {
+            "pass": 0,
+            "fail": 0,
+            "errored": 0
+          },
+          "acceptance_facts_passing": 0,
+          "acceptance_facts_failing": 0,
+          "code_size_bytes": 400,
+          "verification_incomplete": 0,
+          "state_hash": "h4",
+          "confidence": 0,
+          "tokens_consumed": 0,
+          "tokens_generated": 4000,
+          "files_changed": [
+            "a.go"
+          ],
+          "lines_added": 0,
+          "lines_removed": 0,
+          "pass_changed": false
+        }
+      ],
+      "Previous": {
+        "Change": "wrote a.go",
+        "Failure": "1 test failing"
+      },
+      "Latest": {
+        "Change": "wrote a.go",
+        "Failure": "1 test failing"
+      },
+      "Rules": {
+        "action": "step_back",
+        "reason": "The last three iterations produced no workspace change.",
+        "iteration_count": 4,
+        "current_score": -8,
+        "initial_score": -8,
+        "evidence": [
+          "no_progress_iterations=3",
+          "files_changed=0",
+          "lines_changed=0"
+        ]
+      },
+      "StepBackUsed": false,
+      "Escalated": false,
+      "RollbackTarget": false,
+      "failure_history": null,
+      "boundaries_since_new_failure": 0,
+      "distinct_failures": 0
+    },
+    "scores": [
+      -8,
+      -8,
+      -8,
+      -8
+    ],
+    "hash_repeats": {
+      "h1": 1,
+      "h2": 1,
+      "h3": 1,
+      "h4": 1
+    }
+  },
+  "RunID": "golden-run",
+  "EpisodeID": "trajectory:4:0",
+  "Stage": "code_writer",
+  "StageInvocation": 0,
+  "Iteration": 4,
+  "EventID": "boundary:4:0",
+  "SnapshotSchema": "semantic_snapshot_v1",
+  "QuestionPack": "traj_action_v2",
+  "HostPolicy": "trajectory_actions_v1",
+  "CalibrationDataset": "",
+  "CanonicalProjectID": "/golden/project",
+  "SourceDigest": "f8949b4e2295e1527044016aadff0e9b646ddc387f3d258fc435fd2cdf96918e",
+  "DistilledIntent": "fix the failing test",
+  "UnresolvedRelation": "the next trajectory action",
+  "CandidateRefs": [
+    {
+      "Ref": "previous",
+      "Origin": "trajectory boundary",
+      "Claim": "Change: wrote a.go\nTest failure: 1 test failing"
+    },
+    {
+      "Ref": "latest",
+      "Origin": "trajectory boundary",
+      "Claim": "Change: wrote a.go\nTest failure: 1 test failing"
+    }
+  ],
+  "RecentEvents": null,
+  "DeterministicOutcomes": null,
+  "PromptLayoutHash": ""
+}
+== snapshot stall_after_edit traj_v1
+{
+  "RunID": "golden-run",
+  "EpisodeID": "trajectory:4:0",
+  "Stage": "code_writer",
+  "StageInvocation": 0,
+  "Iteration": 4,
+  "EventID": "boundary:4:0",
+  "SnapshotSchema": "semantic_snapshot_v1",
+  "QuestionPack": "traj_v1",
+  "HostPolicy": "trajectory_actions_v1",
+  "CalibrationDataset": "",
+  "CanonicalProjectID": "/golden/project",
+  "SourceDigest": "f8949b4e2295e1527044016aadff0e9b646ddc387f3d258fc435fd2cdf96918e",
+  "DistilledIntent": "fix the failing test",
+  "UnresolvedRelation": "the next trajectory action",
+  "CandidateRefs": [
+    {
+      "Ref": "previous",
+      "Origin": "trajectory boundary",
+      "Claim": "Change: wrote a.go\nTest failure: 1 test failing"
+    },
+    {
+      "Ref": "latest",
+      "Origin": "trajectory boundary",
+      "Claim": "Change: wrote a.go\nTest failure: 1 test failing"
+    }
+  ],
+  "RecentEvents": [
+    {
+      "EventID": "boundary",
+      "Summary": "{\"boundary\":{\"RunID\":\"golden-run\",\"ProjectID\":\"/golden/project\",\"Intent\":\"fix the failing test\",\"Iteration\":4,\"Repair\":0,\"History\":[{\"iteration\":1,\"timestamp\":1700000001,\"tests_passing\":0,\"tests_failing\":1,\"tests_errored\":0,\"preexisting\":{\"pass\":0,\"fail\":0,\"errored\":0},\"authored\":{\"pass\":0,\"fail\":0,\"errored\":0},\"acceptance_facts_passing\":0,\"acceptance_facts_failing\":0,\"code_size_bytes\":100,\"verification_incomplete\":0,\"state_hash\":\"h1\",\"confidence\":0,\"tokens_consumed\":0,\"tokens_generated\":1000,\"files_changed\":[\"a.go\"],\"lines_added\":4,\"lines_removed\":1,\"pass_changed\":true},{\"iteration\":2,\"timestamp\":1700000002,\"tests_passing\":0,\"tests_failing\":1,\"tests_errored\":0,\"preexisting\":{\"pass\":0,\"fail\":0,\"errored\":0},\"authored\":{\"pass\":0,\"fail\":0,\"errored\":0},\"acceptance_facts_passing\":0,\"acceptance_facts_failing\":0,\"code_size_bytes\":200,\"verification_incomplete\":0,\"state_hash\":\"h2\",\"confidence\":0,\"tokens_consumed\":0,\"tokens_generated\":2000,\"files_changed\":[\"a.go\"],\"lines_added\":0,\"lines_removed\":0,\"pass_changed\":false},{\"iteration\":3,\"timestamp\":1700000003,\"tests_passing\":0,\"tests_failing\":1,\"tests_errored\":0,\"preexisting\":{\"pass\":0,\"fail\":0,\"errored\":0},\"authored\":{\"pass\":0,\"fail\":0,\"errored\":0},\"acceptance_facts_passing\":0,\"acceptance_facts_failing\":0,\"code_size_bytes\":300,\"verification_incomplete\":0,\"state_hash\":\"h3\",\"confidence\":0,\"tokens_consumed\":0,\"tokens_generated\":3000,\"files_changed\":[\"a.go\"],\"lines_added\":0,\"lines_removed\":0,\"pass_changed\":false},{\"iteration\":4,\"timestamp\":1700000004,\"tests_passing\":0,\"tests_failing\":1,\"tests_errored\":0,\"preexisting\":{\"pass\":0,\"fail\":0,\"errored\":0},\"authored\":{\"pass\":0,\"fail\":0,\"errored\":0},\"acceptance_facts_passing\":0,\"acceptance_facts_failing\":0,\"code_size_bytes\":400,\"verification_incomplete\":0,\"state_hash\":\"h4\",\"confidence\":0,\"tokens_consumed\":0,\"tokens_generated\":4000,\"files_changed\":[\"a.go\"],\"lines_added\":0,\"lines_removed\":0,\"pass_changed\":false}],\"Previous\":{\"Change\":\"wrote a.go\",\"Failure\":\"1 test failing\"},\"Latest\":{\"Change\":\"wrote a.go\",\"Failure\":\"1 test failing\"},\"Rules\":{\"action\":\"step_back\",\"reason\":\"The last three iterations produced no workspace change.\",\"iteration_count\":4,\"current_score\":-8,\"initial_score\":-8,\"evidence\":[\"no_progress_iterations=3\",\"files_changed=0\",\"lines_changed=0\"]},\"StepBackUsed\":false,\"Escalated\":false,\"RollbackTarget\":false,\"failure_history\":null,\"boundaries_since_new_failure\":0,\"distinct_failures\":0},\"scores\":[-8,-8,-8,-8],\"hash_repeats\":{\"h1\":1,\"h2\":1,\"h3\":1,\"h4\":1}}"
+    }
+  ],
+  "DeterministicOutcomes": null,
+  "PromptLayoutHash": ""
+}
+== rules stall_after_edit
+{
+  "action": "step_back",
+  "reason": "The last three iterations produced no workspace change.",
+  "iteration_count": 4,
+  "current_score": -8,
+  "initial_score": -8,
+  "evidence": [
+    "no_progress_iterations=3",
+    "files_changed=0",
+    "lines_changed=0"
+  ]
+}
+== snapshot head_fallback_no_flag traj_action_v2
+{
+  "Trajectory": {
+    "boundary": {
+      "RunID": "golden-run",
+      "ProjectID": "/golden/project",
+      "Intent": "fix the failing test",
+      "Iteration": 4,
+      "Repair": 0,
+      "History": [
+        {
+          "iteration": 1,
+          "timestamp": 1700000001,
+          "tests_passing": 0,
+          "tests_failing": 1,
+          "tests_errored": 0,
+          "preexisting": {
+            "pass": 0,
+            "fail": 0,
+            "errored": 0
+          },
+          "authored": {
+            "pass": 0,
+            "fail": 0,
+            "errored": 0
+          },
+          "acceptance_facts_passing": 0,
+          "acceptance_facts_failing": 0,
+          "code_size_bytes": 100,
+          "verification_incomplete": 0,
+          "state_hash": "h1",
+          "confidence": 0,
+          "tokens_consumed": 0,
+          "tokens_generated": 1000,
+          "files_changed": [
+            "a.go"
+          ],
+          "lines_added": 4,
+          "lines_removed": 1
+        },
+        {
+          "iteration": 2,
+          "timestamp": 1700000002,
+          "tests_passing": 0,
+          "tests_failing": 1,
+          "tests_errored": 0,
+          "preexisting": {
+            "pass": 0,
+            "fail": 0,
+            "errored": 0
+          },
+          "authored": {
+            "pass": 0,
+            "fail": 0,
+            "errored": 0
+          },
+          "acceptance_facts_passing": 0,
+          "acceptance_facts_failing": 0,
+          "code_size_bytes": 200,
+          "verification_incomplete": 0,
+          "state_hash": "h2",
+          "confidence": 0,
+          "tokens_consumed": 0,
+          "tokens_generated": 2000,
+          "lines_added": 0,
+          "lines_removed": 0
+        },
+        {
+          "iteration": 3,
+          "timestamp": 1700000003,
+          "tests_passing": 0,
+          "tests_failing": 1,
+          "tests_errored": 0,
+          "preexisting": {
+            "pass": 0,
+            "fail": 0,
+            "errored": 0
+          },
+          "authored": {
+            "pass": 0,
+            "fail": 0,
+            "errored": 0
+          },
+          "acceptance_facts_passing": 0,
+          "acceptance_facts_failing": 0,
+          "code_size_bytes": 300,
+          "verification_incomplete": 0,
+          "state_hash": "h3",
+          "confidence": 0,
+          "tokens_consumed": 0,
+          "tokens_generated": 3000,
+          "lines_added": 0,
+          "lines_removed": 0
+        },
+        {
+          "iteration": 4,
+          "timestamp": 1700000004,
+          "tests_passing": 0,
+          "tests_failing": 1,
+          "tests_errored": 0,
+          "preexisting": {
+            "pass": 0,
+            "fail": 0,
+            "errored": 0
+          },
+          "authored": {
+            "pass": 0,
+            "fail": 0,
+            "errored": 0
+          },
+          "acceptance_facts_passing": 0,
+          "acceptance_facts_failing": 0,
+          "code_size_bytes": 400,
+          "verification_incomplete": 0,
+          "state_hash": "h4",
+          "confidence": 0,
+          "tokens_consumed": 0,
+          "tokens_generated": 4000,
+          "lines_added": 0,
+          "lines_removed": 0
+        }
+      ],
+      "Previous": {
+        "Change": "wrote a.go",
+        "Failure": "1 test failing"
+      },
+      "Latest": {
+        "Change": "wrote a.go",
+        "Failure": "1 test failing"
+      },
+      "Rules": {
+        "action": "step_back",
+        "reason": "The last three iterations produced no workspace change.",
+        "iteration_count": 4,
+        "current_score": -8,
+        "initial_score": -8,
+        "evidence": [
+          "no_progress_iterations=3",
+          "files_changed=0",
+          "lines_changed=0"
+        ]
+      },
+      "StepBackUsed": false,
+      "Escalated": false,
+      "RollbackTarget": false,
+      "failure_history": null,
+      "boundaries_since_new_failure": 0,
+      "distinct_failures": 0
+    },
+    "scores": [
+      -8,
+      -8,
+      -8,
+      -8
+    ],
+    "hash_repeats": {
+      "h1": 1,
+      "h2": 1,
+      "h3": 1,
+      "h4": 1
+    }
+  },
+  "RunID": "golden-run",
+  "EpisodeID": "trajectory:4:0",
+  "Stage": "code_writer",
+  "StageInvocation": 0,
+  "Iteration": 4,
+  "EventID": "boundary:4:0",
+  "SnapshotSchema": "semantic_snapshot_v1",
+  "QuestionPack": "traj_action_v2",
+  "HostPolicy": "trajectory_actions_v1",
+  "CalibrationDataset": "",
+  "CanonicalProjectID": "/golden/project",
+  "SourceDigest": "b1f363cb1e7b14b63f74de73cf25188765a176f5079461c4f3cdbeaf773c6a24",
+  "DistilledIntent": "fix the failing test",
+  "UnresolvedRelation": "the next trajectory action",
+  "CandidateRefs": [
+    {
+      "Ref": "previous",
+      "Origin": "trajectory boundary",
+      "Claim": "Change: wrote a.go\nTest failure: 1 test failing"
+    },
+    {
+      "Ref": "latest",
+      "Origin": "trajectory boundary",
+      "Claim": "Change: wrote a.go\nTest failure: 1 test failing"
+    }
+  ],
+  "RecentEvents": null,
+  "DeterministicOutcomes": null,
+  "PromptLayoutHash": ""
+}
+== snapshot head_fallback_no_flag traj_v1
+{
+  "RunID": "golden-run",
+  "EpisodeID": "trajectory:4:0",
+  "Stage": "code_writer",
+  "StageInvocation": 0,
+  "Iteration": 4,
+  "EventID": "boundary:4:0",
+  "SnapshotSchema": "semantic_snapshot_v1",
+  "QuestionPack": "traj_v1",
+  "HostPolicy": "trajectory_actions_v1",
+  "CalibrationDataset": "",
+  "CanonicalProjectID": "/golden/project",
+  "SourceDigest": "b1f363cb1e7b14b63f74de73cf25188765a176f5079461c4f3cdbeaf773c6a24",
+  "DistilledIntent": "fix the failing test",
+  "UnresolvedRelation": "the next trajectory action",
+  "CandidateRefs": [
+    {
+      "Ref": "previous",
+      "Origin": "trajectory boundary",
+      "Claim": "Change: wrote a.go\nTest failure: 1 test failing"
+    },
+    {
+      "Ref": "latest",
+      "Origin": "trajectory boundary",
+      "Claim": "Change: wrote a.go\nTest failure: 1 test failing"
+    }
+  ],
+  "RecentEvents": [
+    {
+      "EventID": "boundary",
+      "Summary": "{\"boundary\":{\"RunID\":\"golden-run\",\"ProjectID\":\"/golden/project\",\"Intent\":\"fix the failing test\",\"Iteration\":4,\"Repair\":0,\"History\":[{\"iteration\":1,\"timestamp\":1700000001,\"tests_passing\":0,\"tests_failing\":1,\"tests_errored\":0,\"preexisting\":{\"pass\":0,\"fail\":0,\"errored\":0},\"authored\":{\"pass\":0,\"fail\":0,\"errored\":0},\"acceptance_facts_passing\":0,\"acceptance_facts_failing\":0,\"code_size_bytes\":100,\"verification_incomplete\":0,\"state_hash\":\"h1\",\"confidence\":0,\"tokens_consumed\":0,\"tokens_generated\":1000,\"files_changed\":[\"a.go\"],\"lines_added\":4,\"lines_removed\":1},{\"iteration\":2,\"timestamp\":1700000002,\"tests_passing\":0,\"tests_failing\":1,\"tests_errored\":0,\"preexisting\":{\"pass\":0,\"fail\":0,\"errored\":0},\"authored\":{\"pass\":0,\"fail\":0,\"errored\":0},\"acceptance_facts_passing\":0,\"acceptance_facts_failing\":0,\"code_size_bytes\":200,\"verification_incomplete\":0,\"state_hash\":\"h2\",\"confidence\":0,\"tokens_consumed\":0,\"tokens_generated\":2000,\"lines_added\":0,\"lines_removed\":0},{\"iteration\":3,\"timestamp\":1700000003,\"tests_passing\":0,\"tests_failing\":1,\"tests_errored\":0,\"preexisting\":{\"pass\":0,\"fail\":0,\"errored\":0},\"authored\":{\"pass\":0,\"fail\":0,\"errored\":0},\"acceptance_facts_passing\":0,\"acceptance_facts_failing\":0,\"code_size_bytes\":300,\"verification_incomplete\":0,\"state_hash\":\"h3\",\"confidence\":0,\"tokens_consumed\":0,\"tokens_generated\":3000,\"lines_added\":0,\"lines_removed\":0},{\"iteration\":4,\"timestamp\":1700000004,\"tests_passing\":0,\"tests_failing\":1,\"tests_errored\":0,\"preexisting\":{\"pass\":0,\"fail\":0,\"errored\":0},\"authored\":{\"pass\":0,\"fail\":0,\"errored\":0},\"acceptance_facts_passing\":0,\"acceptance_facts_failing\":0,\"code_size_bytes\":400,\"verification_incomplete\":0,\"state_hash\":\"h4\",\"confidence\":0,\"tokens_consumed\":0,\"tokens_generated\":4000,\"lines_added\":0,\"lines_removed\":0}],\"Previous\":{\"Change\":\"wrote a.go\",\"Failure\":\"1 test failing\"},\"Latest\":{\"Change\":\"wrote a.go\",\"Failure\":\"1 test failing\"},\"Rules\":{\"action\":\"step_back\",\"reason\":\"The last three iterations produced no workspace change.\",\"iteration_count\":4,\"current_score\":-8,\"initial_score\":-8,\"evidence\":[\"no_progress_iterations=3\",\"files_changed=0\",\"lines_changed=0\"]},\"StepBackUsed\":false,\"Escalated\":false,\"RollbackTarget\":false,\"failure_history\":null,\"boundaries_since_new_failure\":0,\"distinct_failures\":0},\"scores\":[-8,-8,-8,-8],\"hash_repeats\":{\"h1\":1,\"h2\":1,\"h3\":1,\"h4\":1}}"
+    }
+  ],
+  "DeterministicOutcomes": null,
+  "PromptLayoutHash": ""
+}
+== rules head_fallback_no_flag
+{
+  "action": "step_back",
+  "reason": "The last three iterations produced no workspace change.",
+  "iteration_count": 4,
+  "current_score": -8,
+  "initial_score": -8,
+  "evidence": [
+    "no_progress_iterations=3",
+    "files_changed=0",
+    "lines_changed=0"
+  ]
+}
+== snapshot progress traj_action_v2
+{
+  "Trajectory": {
+    "boundary": {
+      "RunID": "golden-run",
+      "ProjectID": "/golden/project",
+      "Intent": "fix the failing test",
+      "Iteration": 2,
+      "Repair": 0,
+      "History": [
+        {
+          "iteration": 1,
+          "timestamp": 1700000001,
+          "tests_passing": 0,
+          "tests_failing": 1,
+          "tests_errored": 0,
+          "preexisting": {
+            "pass": 0,
+            "fail": 0,
+            "errored": 0
+          },
+          "authored": {
+            "pass": 0,
+            "fail": 0,
+            "errored": 0
+          },
+          "acceptance_facts_passing": 0,
+          "acceptance_facts_failing": 0,
+          "code_size_bytes": 100,
+          "verification_incomplete": 0,
+          "state_hash": "h1",
+          "confidence": 0,
+          "tokens_consumed": 0,
+          "tokens_generated": 1000,
+          "files_changed": [
+            "a.go"
+          ],
+          "lines_added": 4,
+          "lines_removed": 1,
+          "pass_changed": true
+        },
+        {
+          "iteration": 2,
+          "timestamp": 1700000002,
+          "tests_passing": 0,
+          "tests_failing": 1,
+          "tests_errored": 0,
+          "preexisting": {
+            "pass": 0,
+            "fail": 0,
+            "errored": 0
+          },
+          "authored": {
+            "pass": 0,
+            "fail": 0,
+            "errored": 0
+          },
+          "acceptance_facts_passing": 0,
+          "acceptance_facts_failing": 0,
+          "code_size_bytes": 200,
+          "verification_incomplete": 0,
+          "state_hash": "h2",
+          "confidence": 0,
+          "tokens_consumed": 0,
+          "tokens_generated": 2000,
+          "files_changed": [
+            "a.go",
+            "b.go"
+          ],
+          "lines_added": 9,
+          "lines_removed": 2,
+          "pass_changed": true
+        }
+      ],
+      "Previous": {
+        "Change": "wrote a.go",
+        "Failure": "1 test failing"
+      },
+      "Latest": {
+        "Change": "wrote a.go",
+        "Failure": "1 test failing"
+      },
+      "Rules": {
+        "action": "continue",
+        "reason": "Trajectory remains within safe bounds.",
+        "iteration_count": 2,
+        "current_score": -8,
+        "initial_score": -8
+      },
+      "StepBackUsed": false,
+      "Escalated": false,
+      "RollbackTarget": false,
+      "failure_history": null,
+      "boundaries_since_new_failure": 0,
+      "distinct_failures": 0
+    },
+    "scores": [
+      -8,
+      -8
+    ],
+    "hash_repeats": {
+      "h1": 1,
+      "h2": 1
+    }
+  },
+  "RunID": "golden-run",
+  "EpisodeID": "trajectory:2:0",
+  "Stage": "code_writer",
+  "StageInvocation": 0,
+  "Iteration": 2,
+  "EventID": "boundary:2:0",
+  "SnapshotSchema": "semantic_snapshot_v1",
+  "QuestionPack": "traj_action_v2",
+  "HostPolicy": "trajectory_actions_v1",
+  "CalibrationDataset": "",
+  "CanonicalProjectID": "/golden/project",
+  "SourceDigest": "75833a90ca02854027a9fe94af8ca07ba2d44ae4d6658455b0004363ee0393db",
+  "DistilledIntent": "fix the failing test",
+  "UnresolvedRelation": "the next trajectory action",
+  "CandidateRefs": [
+    {
+      "Ref": "previous",
+      "Origin": "trajectory boundary",
+      "Claim": "Change: wrote a.go\nTest failure: 1 test failing"
+    },
+    {
+      "Ref": "latest",
+      "Origin": "trajectory boundary",
+      "Claim": "Change: wrote a.go\nTest failure: 1 test failing"
+    }
+  ],
+  "RecentEvents": null,
+  "DeterministicOutcomes": null,
+  "PromptLayoutHash": ""
+}
+== snapshot progress traj_v1
+{
+  "RunID": "golden-run",
+  "EpisodeID": "trajectory:2:0",
+  "Stage": "code_writer",
+  "StageInvocation": 0,
+  "Iteration": 2,
+  "EventID": "boundary:2:0",
+  "SnapshotSchema": "semantic_snapshot_v1",
+  "QuestionPack": "traj_v1",
+  "HostPolicy": "trajectory_actions_v1",
+  "CalibrationDataset": "",
+  "CanonicalProjectID": "/golden/project",
+  "SourceDigest": "75833a90ca02854027a9fe94af8ca07ba2d44ae4d6658455b0004363ee0393db",
+  "DistilledIntent": "fix the failing test",
+  "UnresolvedRelation": "the next trajectory action",
+  "CandidateRefs": [
+    {
+      "Ref": "previous",
+      "Origin": "trajectory boundary",
+      "Claim": "Change: wrote a.go\nTest failure: 1 test failing"
+    },
+    {
+      "Ref": "latest",
+      "Origin": "trajectory boundary",
+      "Claim": "Change: wrote a.go\nTest failure: 1 test failing"
+    }
+  ],
+  "RecentEvents": [
+    {
+      "EventID": "boundary",
+      "Summary": "{\"boundary\":{\"RunID\":\"golden-run\",\"ProjectID\":\"/golden/project\",\"Intent\":\"fix the failing test\",\"Iteration\":2,\"Repair\":0,\"History\":[{\"iteration\":1,\"timestamp\":1700000001,\"tests_passing\":0,\"tests_failing\":1,\"tests_errored\":0,\"preexisting\":{\"pass\":0,\"fail\":0,\"errored\":0},\"authored\":{\"pass\":0,\"fail\":0,\"errored\":0},\"acceptance_facts_passing\":0,\"acceptance_facts_failing\":0,\"code_size_bytes\":100,\"verification_incomplete\":0,\"state_hash\":\"h1\",\"confidence\":0,\"tokens_consumed\":0,\"tokens_generated\":1000,\"files_changed\":[\"a.go\"],\"lines_added\":4,\"lines_removed\":1,\"pass_changed\":true},{\"iteration\":2,\"timestamp\":1700000002,\"tests_passing\":0,\"tests_failing\":1,\"tests_errored\":0,\"preexisting\":{\"pass\":0,\"fail\":0,\"errored\":0},\"authored\":{\"pass\":0,\"fail\":0,\"errored\":0},\"acceptance_facts_passing\":0,\"acceptance_facts_failing\":0,\"code_size_bytes\":200,\"verification_incomplete\":0,\"state_hash\":\"h2\",\"confidence\":0,\"tokens_consumed\":0,\"tokens_generated\":2000,\"files_changed\":[\"a.go\",\"b.go\"],\"lines_added\":9,\"lines_removed\":2,\"pass_changed\":true}],\"Previous\":{\"Change\":\"wrote a.go\",\"Failure\":\"1 test failing\"},\"Latest\":{\"Change\":\"wrote a.go\",\"Failure\":\"1 test failing\"},\"Rules\":{\"action\":\"continue\",\"reason\":\"Trajectory remains within safe bounds.\",\"iteration_count\":2,\"current_score\":-8,\"initial_score\":-8},\"StepBackUsed\":false,\"Escalated\":false,\"RollbackTarget\":false,\"failure_history\":null,\"boundaries_since_new_failure\":0,\"distinct_failures\":0},\"scores\":[-8,-8],\"hash_repeats\":{\"h1\":1,\"h2\":1}}"
+    }
+  ],
+  "DeterministicOutcomes": null,
+  "PromptLayoutHash": ""
+}
+== rules progress
+{
+  "action": "continue",
+  "reason": "Trajectory remains within safe bounds.",
+  "iteration_count": 2,
+  "current_score": -8,
+  "initial_score": -8
+}

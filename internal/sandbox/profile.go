@@ -60,6 +60,11 @@ func PermissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Sco
 	if extra := normalizeProfileDirs(policy.AllowWrite); len(extra) > 0 {
 		roots = dedupeStrings(append(roots, extra...))
 	}
+	allowTemp := true
+	if tempRoot := normalizeProfilePath(policy.TempRoot); tempRoot != "" {
+		roots = append(withoutSystemTempRoots(roots), tempRoot)
+		allowTemp = false
+	}
 	readRoots := permissionProfileReadRoots(workspaceRoot, policy, scope, roots)
 	writeRoots := make([]WritableRoot, 0, len(roots))
 	for _, root := range roots {
@@ -76,10 +81,30 @@ func PermissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Sco
 			DenyRead:             normalizeProfilePaths(policy.DenyRead),
 			DenyWrite:            normalizeProfilePaths(policy.DenyWrite),
 			IncludePlatformRoots: true,
-			AllowTemp:            true,
+			AllowTemp:            allowTemp,
 		},
 		Network: NetworkPolicy{Mode: NormalizeNetworkMode(policy.Network)},
 	}
+}
+
+// withoutSystemTempRoots drops the system temp roots that a scope adds by
+// default. The workspace root and other granted roots stay.
+func withoutSystemTempRoots(roots []string) []string {
+	temp := map[string]bool{}
+	for _, root := range defaultTempWriteRootCandidates() {
+		temp[normalizeProfilePath(root)] = true
+	}
+	for _, root := range defaultTempWriteRoots() {
+		temp[root] = true
+	}
+	out := make([]string, 0, len(roots))
+	for i, root := range roots {
+		if i > 0 && temp[normalizeProfilePath(root)] {
+			continue
+		}
+		out = append(out, root)
+	}
+	return out
 }
 
 func (profile PermissionProfile) RequiresPlatformSandbox() bool {

@@ -2,6 +2,7 @@ package usage
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -57,7 +58,7 @@ func TestBuildReportBucketsByDayAndSumsTokens(t *testing.T) {
 		{SessionID: "s3", ModelID: "gpt-4.1"},
 	}
 
-	report, err := BuildReport(events, meta, &registry, 70)
+	report, err := BuildReportPriced(events, meta, testRegistryPricer(&registry), 70)
 	if err != nil {
 		t.Fatalf("BuildReport: %v", err)
 	}
@@ -101,13 +102,13 @@ func TestBuildReportKeepsCompactionStageFromPersistedPayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal payload: %v", err)
 	}
-	report, err := BuildReport([]sessions.Event{{
+	report, err := BuildReportPriced([]sessions.Event{{
 		SessionID: "s1",
 		Sequence:  1,
 		Type:      sessions.EventUsage,
 		CreatedAt: "2026-06-01T09:00:00Z",
 		Payload:   raw,
-	}}, nil, &registry, 1)
+	}}, nil, testRegistryPricer(&registry), 1)
 	if err != nil {
 		t.Fatalf("BuildReport: %v", err)
 	}
@@ -165,7 +166,7 @@ func TestBuildReportReconstructsCostFromMetadataModel(t *testing.T) {
 	}
 	meta := []sessions.Metadata{{SessionID: "s1", ModelID: "gpt-4.1"}}
 
-	report, err := BuildReport(events, meta, &registry, 10)
+	report, err := BuildReportPriced(events, meta, testRegistryPricer(&registry), 10)
 	if err != nil {
 		t.Fatalf("BuildReport: %v", err)
 	}
@@ -209,7 +210,7 @@ func TestBuildReportPricesFromEventModelWhenPresent(t *testing.T) {
 	}}
 	meta := []sessions.Metadata{{SessionID: "s1", ModelID: ""}} // no session-level model
 
-	report, err := BuildReport(events, meta, &registry, 10)
+	report, err := BuildReportPriced(events, meta, testRegistryPricer(&registry), 10)
 	if err != nil {
 		t.Fatalf("BuildReport: %v", err)
 	}
@@ -256,7 +257,7 @@ func TestBuildReportPrefersPersistedCostEstimate(t *testing.T) {
 		CreatedAt: "2026-06-01T09:00:00Z",
 		Payload:   payload,
 	}}
-	report, err := BuildReport(events, nil, &registry, 10)
+	report, err := BuildReportPriced(events, nil, testRegistryPricer(&registry), 10)
 	if err != nil {
 		t.Fatalf("BuildReport: %v", err)
 	}
@@ -273,7 +274,7 @@ func TestBuildReportRatiosGuardNetZero(t *testing.T) {
 	events := []sessions.Event{usageEvent(t, "s1", 1, "2026-06-01T09:00:00Z", 1000, 200)}
 	meta := []sessions.Metadata{{SessionID: "s1", ModelID: "gpt-4.1"}}
 
-	report, err := BuildReport(events, meta, &registry, 0)
+	report, err := BuildReportPriced(events, meta, testRegistryPricer(&registry), 0)
 	if err != nil {
 		t.Fatalf("BuildReport: %v", err)
 	}
@@ -284,7 +285,7 @@ func TestBuildReportRatiosGuardNetZero(t *testing.T) {
 		t.Fatalf("expected NetLOCPositive=false for net=0")
 	}
 
-	report, err = BuildReport(events, meta, &registry, 600)
+	report, err = BuildReportPriced(events, meta, testRegistryPricer(&registry), 600)
 	if err != nil {
 		t.Fatalf("BuildReport: %v", err)
 	}
@@ -304,7 +305,7 @@ func TestBuildReportIgnoresNonUsageEvents(t *testing.T) {
 	}
 	meta := []sessions.Metadata{{SessionID: "s1", ModelID: "gpt-4.1"}}
 
-	report, err := BuildReport(events, meta, &registry, 10)
+	report, err := BuildReportPriced(events, meta, testRegistryPricer(&registry), 10)
 	if err != nil {
 		t.Fatalf("BuildReport: %v", err)
 	}
@@ -331,9 +332,9 @@ func TestBuildReportGroupsByWorkUnit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	report, err := BuildReport(
+	report, err := BuildReportPriced(
 		[]sessions.Event{{Type: sessions.EventUsage, Payload: raw, CreatedAt: "2026-07-31T00:00:00Z", Sequence: 1}},
-		nil, nil, 1,
+		nil, testRegistryPricer(nil), 1,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -408,5 +409,25 @@ func TestAttributedUsagePayloadKeysAreRead(t *testing.T) {
 			continue
 		}
 		t.Fatalf("payload key %q is not read; add it to the reader, or add it to writerOnlyPayloadKeys with a reason", key)
+	}
+}
+
+// testRegistryPricer prices every request from one registry, whatever provider
+// served it. These tests cover the single-catalog report rule.
+func testRegistryPricer(registry *modelregistry.Registry) Pricer {
+	return func(_ string, model string, usage zeroruntime.Usage) agent.UsageCostEstimate {
+		if registry == nil {
+			return agent.UsageCostEstimate{Status: agent.CostStatusUnpriced, UnpricedReason: "model registry unavailable"}
+		}
+		entry, err := registry.Require(model)
+		if err != nil {
+			return agent.UsageCostEstimate{Status: agent.CostStatusUnpriced, UnpricedReason: fmt.Sprintf("model %q not in registry", model)}
+		}
+		breakdown, err := modelregistry.CalculateCost(entry, usage)
+		if err != nil {
+			return agent.UsageCostEstimate{Status: agent.CostStatusUnpriced, UnpricedReason: err.Error()}
+		}
+		cost := breakdown.TotalCost
+		return agent.UsageCostEstimate{CostUSD: &cost, Status: agent.CostStatusPriced, Provenance: agent.CostProvenanceRuntimeEstimate}
 	}
 }

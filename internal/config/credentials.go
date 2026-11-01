@@ -19,7 +19,11 @@ import (
 // not carry keys), so runtime lookups deliberately use the user store regardless of
 // where a provider profile was resolved from.
 func ProviderKeyStoreAt(dir string) (*credstore.Store, error) {
-	return credstore.New(credstore.Options{Dir: dir})
+	storage, err := ResolveAuthStorageAt(filepath.Join(dir, "config.json"), CredentialStorageEnv)
+	if err != nil {
+		return nil, err
+	}
+	return credstore.New(credstore.Options{Dir: dir, Storage: storage})
 }
 
 // ProviderKeyStore opens the credential store beside the default user config.
@@ -35,6 +39,20 @@ func ProviderKeyStore() (*credstore.Store, error) {
 // satisfies it. Kept here so callers can inject a fake in tests.
 type APIKeyGetter interface {
 	Get(provider string) (string, bool, error)
+}
+
+// KeyStoreOpener opens the credential store beside a user config directory and
+// reports the resolved backend name alongside the read surface, so callers (the
+// doctor stored-key check) can diagnose reachability without touching secrets.
+type KeyStoreOpener func(userConfigDir string) (APIKeyGetter, string, error)
+
+// ProviderKeyStoreOpener adapts ProviderKeyStoreAt to KeyStoreOpener.
+func ProviderKeyStoreOpener(userConfigDir string) (APIKeyGetter, string, error) {
+	store, err := ProviderKeyStoreAt(userConfigDir)
+	if err != nil {
+		return nil, "", err
+	}
+	return store, store.Backend(), nil
 }
 
 // APIKeySetter is the write surface of the credential store.
@@ -213,22 +231,51 @@ func (profile ProviderProfile) OAuthLoginCandidates() []string {
 }
 
 // ApplyStoredAPIKey fills profile.APIKey from the credential store when it is not
-// already resolved — an inline config key or a resolved APIKeyEnv always wins, so
-// this only supplies a key for providers whose secret lives in the store. A nil
-// store, a miss, or a store error leaves the profile unchanged.
-func ApplyStoredAPIKey(profile ProviderProfile, store APIKeyGetter) ProviderProfile {
+// already resolved. An inline config key or a resolved APIKeyEnv always wins.
+// A missing key leaves the profile unchanged. A backend read error fails loudly.
+func ApplyStoredAPIKey(profile ProviderProfile, store APIKeyGetter) (ProviderProfile, error) {
 	// Only load for profiles that opted into stored-key auth (APIKeyStored). Without
 	// this gate a stale keyring/file entry could silently reactivate credentials for a
 	// profile that no longer uses the store.
 	if store == nil || !profile.APIKeyStored || strings.TrimSpace(profile.APIKey) != "" {
-		return profile
+		return profile, nil
 	}
 	name := strings.TrimSpace(profile.Name)
 	if name == "" {
-		return profile
+		return profile, nil
 	}
-	if key, ok, err := store.Get(name); err == nil && ok && strings.TrimSpace(key) != "" {
+	key, ok, err := store.Get(name)
+	if err != nil {
+		backend := "selected"
+		if named, ok := store.(interface{ Backend() string }); ok {
+			backend = named.Backend()
+		}
+		return profile, fmt.Errorf("read API key for provider %q from the %s backend (set auth.storage to encrypted-file or export %s=encrypted-file): %w", name, backend, CredentialStorageEnv, err)
+	}
+	if ok && strings.TrimSpace(key) != "" {
 		profile.APIKey = key
 	}
-	return profile
+	return profile, nil
+}
+
+// ChatGPTSubscriptionUnpricedReason is the cost reason for a request served by a
+// ChatGPT sign-in profile. That access is a subscription, billed per plan and
+// not per request.
+const ChatGPTSubscriptionUnpricedReason = "ChatGPT subscription: not billed per request"
+
+// IsChatGPTSubscription reports whether the profile is a ChatGPT sign-in
+// subscription (catalog id chatgpt, the chatgpt.com codex backend).
+func (profile ProviderProfile) IsChatGPTSubscription() bool {
+	return strings.EqualFold(strings.TrimSpace(profile.CatalogID), "chatgpt")
+}
+
+// ChatGPTSubscriptionProfiles returns the names of the subscription profiles.
+func ChatGPTSubscriptionProfiles(providers []ProviderProfile) map[string]bool {
+	names := map[string]bool{}
+	for _, profile := range providers {
+		if profile.IsChatGPTSubscription() {
+			names[profile.Name] = true
+		}
+	}
+	return names
 }

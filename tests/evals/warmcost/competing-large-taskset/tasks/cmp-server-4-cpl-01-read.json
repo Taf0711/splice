@@ -1,0 +1,8 @@
+{
+  "name": "cmp-server-4-cpl-01-read",
+  "phase": "read",
+  "precursor": "cmp-server-1-cpl-01-write",
+  "prompt": "In the notifications package, add an account-locked template: kind \"account_locked\", greeting \"Hello\", action \"your account was locked after repeated failed sign-ins\", footer \"demo service security team\".",
+  "check": "# cpl-01 B\nmkdir -p internal/notifications\ncat > internal/notifications/probe_account_locked_test.go <<'EOF'\npackage notifications\n\nimport (\n\t\"strings\"\n\t\"testing\"\n)\n\nfunc TestProbeAccountLocked(t *testing.T) {\n\tgot, ok := RenderKind(\"account_locked\", \"bo\")\n\tif !ok || !strings.Contains(got, \"your account was locked after repeated failed sign-ins\") {\n\t\tt.Fatalf(\"RenderKind(account_locked) = %q, %v\", got, ok)\n\t}\n}\nEOF\ngo test -count=1 -run '^(TestProbeAccountLocked|TestEveryNotificationKindIsInTheCatalog)$' ./... ; rc=$?\nrm -f internal/notifications/probe_account_locked_test.go\nexit $rc\n",
+  "fixture": "../../coupled-families/fixture-large"
+}

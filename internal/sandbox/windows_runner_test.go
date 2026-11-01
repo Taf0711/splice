@@ -123,6 +123,35 @@ func TestResolveWindowsSandboxHomeHonorsOverride(t *testing.T) {
 	}
 }
 
+// Windows environment names are case-insensitive. A stage env list with
+// mixed-case names must resolve the same sandbox home as upper-case names,
+// or the runner and the setup helper disagree on the home.
+func TestResolveWindowsSandboxHomeReadsMixedCaseEnvNames(t *testing.T) {
+	root := t.TempDir()
+	override := filepath.Join(root, "sandbox")
+	home, err := ResolveWindowsSandboxHome(windowsEnvLookupMap([]string{"Splice_Windows_Sandbox_Home=" + override}))
+	if err != nil || home != override {
+		t.Fatalf("override: home = %q, %v; want %q", home, err, override)
+	}
+	profile := filepath.Join(root, "profile")
+	home, err = ResolveWindowsSandboxHome(windowsEnvLookupMap([]string{"UserProfile=" + profile, "Path=/bin"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := ResolveWindowsSandboxHome(map[string]string{"USERPROFILE": profile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if home != want || !strings.HasPrefix(home, profile) {
+		t.Fatalf("UserProfile home = %q, want %q under %s", home, want, profile)
+	}
+	configHome := filepath.Join(root, "config")
+	home, err = ResolveWindowsSandboxHome(windowsEnvLookupMap([]string{"UserProfile=" + profile, "xdg_config_home=" + configHome}))
+	if err != nil || !strings.HasPrefix(home, configHome) {
+		t.Fatalf("xdg_config_home: home = %q, %v; want it under %s", home, err, configHome)
+	}
+}
+
 func TestBuildWindowsSandboxCommandArgsRequiresSandboxHome(t *testing.T) {
 	_, err := ParseWindowsSandboxCommandArgs([]string{
 		"--command-cwd", `C:\workspace`,

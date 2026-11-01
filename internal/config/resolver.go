@@ -4,13 +4,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/Taf0711/splice/internal/flags"
 	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/notify"
+	"github.com/Taf0711/splice/internal/projectfile"
 	"github.com/Taf0711/splice/internal/providercatalog"
 	"github.com/Taf0711/splice/internal/sandbox"
 )
@@ -66,22 +71,31 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		MaxTurns:            defaultMaxTurns,
 		DefaultProjectTrust: "ask",
 	}
+	// Flag sources are kept separate from the merged config so flag resolution
+	// can enforce per-source scope and name the offending source in an error.
+	var userFlags, projectFlags map[string]bool
 
 	if options.UserConfigPath != "" {
-		fileConfig, err := loadConfigFile(options.UserConfigPath)
+		fileConfig, err := loadConfigFile(options.UserConfigPath, "")
 		if err != nil {
 			return ResolvedConfig{}, err
 		}
+		userFlags = fileConfig.Flags
 		mergeConfig(&cfg, fileConfig)
+		cfg.Auth = fileConfig.Auth
 	}
-	if options.ProjectConfigPath != "" {
-		fileConfig, err := loadConfigFile(options.ProjectConfigPath)
+	if _, err := ValidateAuthStorage(cfg.Auth.Storage); err != nil {
+		return ResolvedConfig{}, err
+	}
+	if options.ProjectConfigPath != "" && options.ProjectTrusted {
+		fileConfig, err := loadConfigFile(options.ProjectConfigPath, projectRootOf(options.ProjectConfigPath))
 		if err != nil {
 			return ResolvedConfig{}, err
 		}
 		if err := mergeProjectConfig(&cfg, fileConfig); err != nil {
 			return ResolvedConfig{}, err
 		}
+		projectFlags = fileConfig.Flags
 	}
 
 	applyEnv(&cfg, options.Env)
@@ -95,8 +109,28 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 	}
 
 	applyOverrides(&cfg, options.Overrides)
+	if err := cfg.Verify.Validate(); err != nil {
+		return ResolvedConfig{}, err
+	}
 	for _, issue := range validateReasoningEfforts(cfg.Providers) {
 		return ResolvedConfig{}, fmt.Errorf("invalid %s: %s", issue.FieldPath, issue.Message)
+	}
+
+	flagResolutions, err := flags.Explain(flags.Sources{
+		User:    userFlags,
+		Project: projectFlags,
+		LegacyEnv: flags.LegacyEnvValues(func(name string) string {
+			return envValue(options.Env, name)
+		}),
+		Env: envValue(options.Env, flags.EnvVar),
+		CLI: options.Overrides.Flags,
+	})
+	if err != nil {
+		return ResolvedConfig{}, err
+	}
+	flagSet := make(flags.Set, len(flagResolutions))
+	for _, r := range flagResolutions {
+		flagSet[r.Name] = r.Value
 	}
 
 	if !cfg.Tools.deferThresholdSet && cfg.Tools.DeferThreshold == 0 {
@@ -139,19 +173,63 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		}
 	}
 
+	// The advisor section validates with the offending field named, and
+	// omitted limit fields take the spec's proposed starting values.
+	if cfg.DecisionAdvisor != (DecisionAdvisorConfig{}) {
+		a := cfg.DecisionAdvisor.WithDefaults()
+		if err := a.Validate(); err != nil {
+			return ResolvedConfig{}, err
+		}
+		cfg.DecisionAdvisor = a
+	}
+
+	if err := cfg.Trajectory.Validate(); err != nil {
+		return ResolvedConfig{}, err
+	}
+	maxWall, err := resolveMaxWall(cfg.Pipeline, options.Env)
+	if err != nil {
+		return ResolvedConfig{}, err
+	}
 	providers, active, err := normalizeProviders(cfg.Providers, cfg.ActiveProvider, options.Env)
 	if err != nil {
 		// On ErrNoActiveProvider, providers may still hold the successfully
 		// normalized (but active-less) profile list — keep it so a caller can fall
 		// back to an already-configured usable provider instead of treating this
 		// like a config with nothing set up at all.
-		return ResolvedConfig{Providers: providers, DefaultProjectTrust: cfg.DefaultProjectTrust}, err
+		return ResolvedConfig{
+			Providers:           providers,
+			Auth:                cfg.Auth,
+			DefaultProjectTrust: cfg.DefaultProjectTrust,
+			Flags:               flagSet,
+			FlagResolutions:     flagResolutions,
+		}, err
+	}
+
+	if !envDefinedAdvisor(flagSet, options.Env) {
+		cfg.DecisionAdvisor = trajectoryClassifierDefault(cfg.DecisionAdvisor, providers, flagSet)
+	}
+	if cfg.DecisionAdvisor.Backend == "provider" {
+		found := false
+		for _, profile := range providers {
+			if profile.Name == cfg.DecisionAdvisor.ProviderProfile {
+				found = true
+				// The default keeps its validated model, not the profile's chat model.
+				if !cfg.DecisionAdvisor.TrajectoryDefault {
+					cfg.DecisionAdvisor.Profile = profile.Model
+				}
+				break
+			}
+		}
+		if !found {
+			return ResolvedConfig{}, fmt.Errorf("decision_advisor.provider_profile: unknown profile %q", cfg.DecisionAdvisor.ProviderProfile)
+		}
 	}
 
 	return ResolvedConfig{
 		ActiveProvider:      active.Name,
 		Providers:           providers,
 		Provider:            active,
+		Auth:                cfg.Auth,
 		MaxTurns:            cfg.MaxTurns,
 		Compaction:          cfg.Compaction,
 		MCP:                 cfg.MCP,
@@ -162,7 +240,14 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		Preferences:         cfg.Preferences,
 		KeyBindings:         cfg.KeyBindings,
 		LocalControl:        cfg.LocalControl,
+		Worktrees:           cfg.Worktrees,
+		Verify:              cfg.Verify,
+		DecisionAdvisor:     cfg.DecisionAdvisor,
+		Trajectory:          cfg.Trajectory,
+		MaxWall:             maxWall,
 		DefaultProjectTrust: cfg.DefaultProjectTrust,
+		Flags:               flagSet,
+		FlagResolutions:     flagResolutions,
 	}, nil
 }
 
@@ -172,11 +257,19 @@ func ResolveMCP(options ResolveOptions) (MCPConfig, error) {
 	// can override any field or disable a default by writing over it.
 	cfg := FileConfig{MCP: MCPConfig{Servers: DefaultMCPServers()}}
 
-	for _, path := range []string{options.UserConfigPath, options.ProjectConfigPath} {
+	paths := []string{options.UserConfigPath}
+	if options.ProjectTrusted {
+		paths = append(paths, options.ProjectConfigPath)
+	}
+	for _, path := range paths {
 		if path == "" {
 			continue
 		}
-		fileConfig, err := loadConfigFile(path)
+		root := ""
+		if path == options.ProjectConfigPath {
+			root = projectRootOf(path)
+		}
+		fileConfig, err := loadConfigFile(path, root)
 		if err != nil {
 			return MCPConfig{}, err
 		}
@@ -186,8 +279,16 @@ func ResolveMCP(options ResolveOptions) (MCPConfig, error) {
 	return cfg.MCP, nil
 }
 
-func loadConfigFile(path string) (FileConfig, error) {
-	data, err := os.ReadFile(path)
+// projectRootOf returns the workspace root for a project config path, which
+// always sits at <root>/.splice/config.json.
+func projectRootOf(projectConfigPath string) string {
+	return filepath.Dir(filepath.Dir(projectConfigPath))
+}
+
+// loadConfigFile reads a config file. Pass a non-empty root for project files
+// so symlinks cannot reach outside the workspace.
+func loadConfigFile(path, root string) (FileConfig, error) {
+	data, err := projectfile.Read(path, root)
 	if err != nil {
 		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
 	}
@@ -249,6 +350,17 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 	}
 	mergeCompactionConfig(&dst.Compaction, src.Compaction)
 	mergeLocalControlConfig(&dst.LocalControl, src.LocalControl)
+	mergeWorktreesConfig(&dst.Worktrees, src.Worktrees)
+	mergeVerifyConfig(&dst.Verify, src.Verify)
+	if src.DecisionAdvisor != (DecisionAdvisorConfig{}) {
+		dst.DecisionAdvisor = src.DecisionAdvisor
+	}
+	if len(src.Trajectory.Thresholds) > 0 {
+		dst.Trajectory = src.Trajectory
+	}
+	if src.Pipeline.MaxWallSeconds > 0 {
+		dst.Pipeline.MaxWallSeconds = src.Pipeline.MaxWallSeconds
+	}
 	mergeKeyBindings(&dst.KeyBindings, src.KeyBindings)
 }
 
@@ -303,6 +415,17 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 		dst.Swarm.MaxTeamSize = src.Swarm.MaxTeamSize
 	}
 	mergeCompactionConfig(&dst.Compaction, src.Compaction)
+	// Worktrees.Directory is intentionally NOT merged from project config: it
+	// picks where Splice creates and writes worktrees, so a cloned project must
+	// not point it outside the workspace. Same rule as the sandbox roots above.
+	mergeWorktreesConfig(&dst.Worktrees, WorktreesConfig{Enabled: src.Worktrees.Enabled})
+	mergeVerifyConfig(&dst.Verify, src.Verify)
+	if src.DecisionAdvisor != (DecisionAdvisorConfig{}) {
+		dst.DecisionAdvisor = src.DecisionAdvisor
+	}
+	if len(src.Trajectory.Thresholds) > 0 {
+		dst.Trajectory = src.Trajectory
+	}
 	mergeKeyBindings(&dst.KeyBindings, src.KeyBindings)
 	// Local control is intentionally user-config/override only. A cloned project
 	// must not be able to make browser, desktop, or terminal automation tools
@@ -543,6 +666,36 @@ func SetActiveProviderEnv(name string) {
 // MaxTurnsEnv overrides the per-run tool-turn budget by name (read in applyEnv).
 const MaxTurnsEnv = "SPLICE_MAX_TURNS"
 
+// MaxWallEnv sets the wall-time limit of one pipeline run as a Go duration,
+// for example "30m". It replaces pipeline.max_wall_seconds from config.json.
+const MaxWallEnv = "SPLICE_MAX_WALL"
+
+// maxWallSecondsLimit is the largest pipeline.max_wall_seconds that fits a
+// time.Duration.
+const maxWallSecondsLimit = math.MaxInt64 / int64(time.Second)
+
+// resolveMaxWall returns the pipeline wall-time limit from SPLICE_MAX_WALL or
+// pipeline.max_wall_seconds. Zero means the pipeline default. An env value
+// that does not parse, or is not positive, is an error.
+func resolveMaxWall(section PipelineConfig, env map[string]string) (time.Duration, error) {
+	if section.MaxWallSeconds < 0 {
+		return 0, fmt.Errorf("invalid pipeline.max_wall_seconds %d: must be >= 0", section.MaxWallSeconds)
+	}
+	// A larger value overflows time.Duration and would wrap to a negative or
+	// zero limit.
+	if int64(section.MaxWallSeconds) > maxWallSecondsLimit {
+		return 0, fmt.Errorf("invalid pipeline.max_wall_seconds %d: must be at most %d", section.MaxWallSeconds, maxWallSecondsLimit)
+	}
+	if value := strings.TrimSpace(envValue(env, MaxWallEnv)); value != "" {
+		d, err := time.ParseDuration(value)
+		if err != nil || d <= 0 {
+			return 0, fmt.Errorf("invalid %s %q: expected a positive Go duration such as 30m", MaxWallEnv, value)
+		}
+		return d, nil
+	}
+	return time.Duration(section.MaxWallSeconds) * time.Second, nil
+}
+
 // SetMaxTurnsEnv exports the per-run tool-turn budget to the process environment so
 // a spawned child (sub-agent / swarm member, which inherits the environment) runs
 // with the SAME budget the user set via /turns. Without it a child re-resolves
@@ -704,6 +857,7 @@ func applyOverrides(cfg *FileConfig, overrides Overrides) {
 		cfg.Tools.deferThresholdSet = true
 	}
 	mergeLocalControlConfig(&cfg.LocalControl, overrides.LocalControl)
+	mergeWorktreesConfig(&cfg.Worktrees, overrides.Worktrees)
 	mergeKeyBindings(&cfg.KeyBindings, overrides.KeyBindings)
 	for _, provider := range overrides.Providers {
 		mergeProvider(cfg, provider)
@@ -767,6 +921,24 @@ func mergeCompactionConfig(dst *CompactionConfig, src CompactionConfig) {
 	}
 	if src.KeepRecentTokens != 0 {
 		dst.KeepRecentTokens = src.KeepRecentTokens
+	}
+}
+
+func mergeWorktreesConfig(dst *WorktreesConfig, src WorktreesConfig) {
+	if src.Enabled != nil {
+		dst.Enabled = src.Enabled
+	}
+	if strings.TrimSpace(src.Directory) != "" {
+		dst.Directory = strings.TrimSpace(src.Directory)
+	}
+}
+
+func mergeVerifyConfig(dst *VerifyConfig, src VerifyConfig) {
+	if len(src.TestCommand) > 0 {
+		dst.TestCommand = append([]string(nil), src.TestCommand...)
+	}
+	if strings.TrimSpace(src.TestDir) != "" {
+		dst.TestDir = strings.TrimSpace(src.TestDir)
 	}
 }
 

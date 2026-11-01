@@ -31,6 +31,12 @@ type CollectedStream struct {
 	// stream, when the provider supplied one (currently only OpenRouter). nil
 	// means no reported cost was seen, so cost must be estimated as before.
 	ReportedCostUSD *float64
+	// RequestID is the provider's request/correlation identity for this
+	// stream, when the provider supplies one (OpenRouter's X-Generation-Id
+	// response header). Empty means the backend did not report one. It is
+	// the ledger's reconciliation key: a later reconciliation replaces the
+	// estimate for THIS request, never another.
+	RequestID string
 }
 
 // Truncated reports whether the response ended for a non-normal reason (the
@@ -51,8 +57,12 @@ type CollectOptions struct {
 	// Legacy OnUsage only fires when usage was seen; OnUsageResult fires always,
 	// giving callers a clean "stream ended" signal with or without usage. The
 	// *float64 is the provider-reported cost (nil if none was reported); it
-	// supersedes OnUsage when set.
-	OnUsageResult func(Usage, bool, *float64)
+	// supersedes OnUsage when set. The string is the provider's request
+	// identity for the stream (empty when the backend reports none), so the
+	// ledger can key later reconciliation to the exact billed request. The
+	// last bool is true when the stream ended with an error or a canceled
+	// context, so the request did not complete.
+	OnUsageResult func(Usage, bool, *float64, string, bool)
 	// OnUsageError replaces OnUsageResult when a provider reports malformed usage.
 	OnUsageError func(string)
 	// OnToolCallStart fires when a tool call opens (id + tool name), and
@@ -63,6 +73,12 @@ type CollectOptions struct {
 	OnToolCallDelta    func(id, fragment string)
 	OnServerToolUse    func(kind string, query string)
 	OnServerToolResult func(kind string, resultCount int)
+	// OnPromptLayout reports the stable-prefix layout hash of the request that
+	// is about to run. It fires once per provider request, before the stream
+	// starts. The hash covers the system prompt and the tool schema, the two
+	// components of a cacheable prefix, so a caller can detect a prefix flip
+	// between rounds. nil is a no-op.
+	OnPromptLayout func(hash string)
 }
 
 // SeedMessages creates the initial system and user turns for a request. It is a
@@ -122,7 +138,7 @@ func CollectStreamWithOptions(ctx context.Context, events <-chan StreamEvent, op
 			}
 		} else {
 			if options.OnUsageResult != nil {
-				options.OnUsageResult(collected.Usage, usageSeen, collected.ReportedCostUSD)
+				options.OnUsageResult(collected.Usage, usageSeen, collected.ReportedCostUSD, collected.RequestID, collected.Error != "")
 			} else if usageSeen && options.OnUsage != nil {
 				options.OnUsage(collected.Usage)
 			}
@@ -147,19 +163,24 @@ func CollectStreamWithOptions(ctx context.Context, events <-chan StreamEvent, op
 			if event.FinishReason != "" {
 				collected.FinishReason = event.FinishReason
 			}
-			// Reasoning blocks (Anthropic thinking) can ride on any terminal event;
-			// accumulate them regardless of type so they survive for replay.
+			// Structured reasoning blocks can ride on any terminal event. Accumulate
+			// them regardless of type so they survive for replay.
 			if len(event.ReasoningBlocks) > 0 {
 				collected.ReasoningBlocks = append(collected.ReasoningBlocks, event.ReasoningBlocks...)
 			}
 			if len(event.ServerToolBlocks) > 0 {
 				collected.ServerToolBlocks = append(collected.ServerToolBlocks, event.ServerToolBlocks...)
 			}
-			// A provider-reported cost can ride on any usage event; keep the
-			// latest non-nil value seen so a later chunk without it (e.g. the
-			// web-search-count correction re-emit) never erases an earlier one.
-			if event.ReportedCostUSD != nil {
+			// A provider-reported cost can ride on any usage event. Keep the latest
+			// non-nil value, so a later chunk without it (e.g. the web-search-count
+			// correction re-emit) never erases an earlier one. A later zero never
+			// replaces a real charge either: OpenRouter sends more than one usage
+			// chunk on a stream, and the last one can carry cost 0.
+			if event.ReportedCostUSD != nil && !(*event.ReportedCostUSD == 0 && collected.ReportedCostUSD != nil && *collected.ReportedCostUSD > 0) {
 				collected.ReportedCostUSD = event.ReportedCostUSD
+			}
+			if event.RequestID != "" && collected.RequestID == "" {
+				collected.RequestID = event.RequestID
 			}
 
 			switch event.Type {

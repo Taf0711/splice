@@ -14,9 +14,10 @@ func doctorCommandOutput(report doctor.Report, backend *zerocommands.BackendLife
 		Lines: doctorSummaryLines(report.Checks),
 	}}
 
-	provider, platform, other := doctorCheckSections(report.Checks)
+	provider, platform, pipeline, other := doctorCheckSections(report.Checks)
 	sections = appendNonEmptyDoctorSection(sections, "Provider", provider)
 	sections = appendNonEmptyDoctorSection(sections, "Platform", platform)
+	sections = appendNonEmptyDoctorSection(sections, "Pipeline", pipeline)
 	sections = appendNonEmptyDoctorSection(sections, "Other", other)
 	if backend != nil {
 		sections = append(sections, doctorBackendSection(*backend))
@@ -51,9 +52,11 @@ func doctorCommandStatus(report doctor.Report) commandStatus {
 	return commandStatusOK
 }
 
-func doctorCheckSections(checks []doctor.Check) (provider []commandRow, platform []commandRow, other []commandRow) {
+func doctorCheckSections(checks []doctor.Check) (provider []commandRow, platform []commandRow, pipeline []commandRow, other []commandRow) {
+	// The frame shows all five checks with status glyphs — a passing check is
+	// information ("this was verified"), not noise. Only skip rows with no id.
 	for _, check := range checks {
-		if check.Status == doctor.StatusPass && check.ID != "provider.connectivity" {
+		if check.ID == "" {
 			continue
 		}
 		row := commandRow{Text: doctorCheckRow(check)}
@@ -62,19 +65,23 @@ func doctorCheckSections(checks []doctor.Check) (provider []commandRow, platform
 			provider = append(provider, row)
 		case "platform":
 			platform = append(platform, row)
+		case "pipeline":
+			pipeline = append(pipeline, row)
 		default:
 			other = append(other, row)
 		}
 	}
-	return provider, platform, other
+	return provider, platform, pipeline, other
 }
 
 func doctorCheckGroup(id string) string {
 	switch id {
-	case "provider.config", "provider.model", "provider.connectivity", "provider.auth", "provider.runtime":
+	case "provider.config", "provider.model", "provider.connectivity", "provider.auth", "provider.runtime", "provider.storedkey":
 		return "provider"
 	case "sandbox.backend", "lsp.servers", "runtime.go", "config.files", "config.validation":
 		return "platform"
+	case "trajectory.classifier":
+		return "pipeline"
 	default:
 		return ""
 	}

@@ -1,0 +1,204 @@
+// Package presentrun adapts the runtime's existing pipeline events into the
+// presentation contract and accumulates presentation.State snapshots. It is
+// observability, not control flow: a malformed event is counted and logged
+// through the caller's warning path, never allowed to abort a pipeline run.
+package presentrun
+
+import (
+	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/presentation"
+	"github.com/Taf0711/splice/internal/splice/schemas"
+)
+
+// stageKindMap maps pipeline stage names to presentation node kinds. The
+// kinds mirror the stage registry's roles (internal/splice/registry.go):
+// code_writer writes code, static_analyzer analyzes, and so on. Unknown
+// stage names fall back to CUSTOM so custom topologies need no code change.
+var stageKindMap = map[string]presentation.NodeKind{
+	"code_writer":         presentation.NodeKindWrite,
+	"test_generator":      presentation.NodeKindWrite,
+	"static_analyzer":     presentation.NodeKindAnalyze,
+	"security_auditor":    presentation.NodeKindSecurity,
+	"test_runner":         presentation.NodeKindTest,
+	"acceptance_verifier": presentation.NodeKindVerify,
+}
+
+// NodeKindForStage resolves the presentation node kind for a stage name.
+func NodeKindForStage(name string) presentation.NodeKind {
+	if kind, ok := stageKindMap[name]; ok {
+		return kind
+	}
+	return presentation.NodeKindCustom
+}
+
+// AdaptStageEvent maps a runtime stage event onto the presentation contract.
+// Repair-loop statuses "message" and "repaired" are interventions, not stage
+// transitions: a revision request proposes a rollback, and a resolved
+// revision continues the run. Progress arrives as an integer 0-100 and stays
+// an integer on the event; the reducer divides by 100 when it stores the
+// node's float64 progress. This conversion is documented here once.
+func AdaptStageEvent(event agent.StageEvent) presentation.StreamEventLike {
+	switch event.Status {
+	case "message":
+		return presentation.InterventionEvent{
+			Kind:   presentation.InterventionRollback,
+			NodeID: event.Name,
+			Status: string(presentation.InterventionProposed),
+			Reason: event.Detail,
+		}
+	case "repaired":
+		return presentation.InterventionEvent{
+			Kind:   presentation.InterventionContinue,
+			NodeID: event.Name,
+			Status: string(presentation.InterventionApplied),
+			Reason: event.Detail,
+		}
+	}
+	return presentation.StageEvent{
+		ID:       event.Name,
+		Kind:     NodeKindForStage(event.Name),
+		Status:   event.Status,
+		Detail:   event.Detail,
+		Progress: event.Progress,
+		// Iteration carries the pass so the reducer keeps one node per pass.
+		Iteration: event.Iteration,
+		// Workspace flows through for DoD 26's isolation badge. The
+		// reducer stores it on the node verbatim; the renderer decides
+		// how to badge it.
+		Workspace:    event.Workspace,
+		WorktreePath: event.WorktreePath,
+		ChangedFiles: event.ChangedFiles,
+	}
+}
+
+// AdaptPlanEvent maps the announced stage roster onto a plan event. The
+// title comes from the plan identity available at emission time (the request
+// intent for now; the full plan projection arrives in P1.4).
+func AdaptPlanEvent(title string, stages []string) presentation.StreamEventLike {
+	return AdaptPlanEventWithDependencies(title, stages, nil)
+}
+
+// AdaptPlanEventWithDependencies is AdaptPlanEvent with the compiled stage
+// graph, so the presentation layer carries each node's dependencies instead
+// of a flat roster.
+func AdaptPlanEventWithDependencies(title string, stages []string, dependencies map[string][]string) presentation.StreamEventLike {
+	return presentation.PlanEvent{
+		Title:        title,
+		StageNames:   append([]string(nil), stages...),
+		Dependencies: cloneDependencies(dependencies),
+	}
+}
+
+// AdaptPipelinePlan maps the announced roster of a compiled plan onto a plan
+// event. It carries the graph, the tier, and the topology name, so the graph
+// view can say which nodes the tier skipped.
+func AdaptPipelinePlan(plan schemas.ExecutionPlan, event agent.PipelinePlanEvent) presentation.StreamEventLike {
+	return presentation.PlanEvent{
+		Title:        plan.RequestIntent,
+		StageNames:   append([]string(nil), event.Stages...),
+		Dependencies: cloneDependencies(event.Dependencies),
+		Tier:         string(plan.Tier),
+		Topology:     plan.TopologyName,
+		Removed:      plan.RemovedStages,
+	}
+}
+
+// AdaptAttributedUsage maps one attributed provider request onto a usage
+// event. The runtime counts passes from 1 and the presentation contract from
+// 0, so the iteration shifts by one. A request without a price keeps a nil
+// cost, so the node reports a partial cost instead of a false zero.
+func AdaptAttributedUsage(usage agent.AttributedUsage) presentation.StreamEventLike {
+	event := presentation.UsageEvent{
+		NodeID:    usage.Stage,
+		Iteration: max(usage.Iteration-1, 0),
+		Usage: presentation.TokenUsage{
+			InputTokens:     int64(usage.Usage.EffectiveInputTokens()),
+			OutputTokens:    int64(usage.Usage.EffectiveOutputTokens()),
+			CachedTokens:    int64(usage.Usage.CachedInputTokens),
+			ReasoningTokens: int64(usage.Usage.ReasoningTokens),
+		},
+	}
+	if usage.Cost.CostUSD != nil && usage.Cost.Status == agent.CostStatusPriced {
+		cost := *usage.Cost.CostUSD
+		event.CostUSD = &cost
+	}
+	return event
+}
+
+// cloneDependencies copies a stage-to-dependencies map so the presentation
+// snapshot never aliases the runtime's plan.
+func cloneDependencies(source map[string][]string) map[string][]string {
+	if source == nil {
+		return nil
+	}
+	out := make(map[string][]string, len(source))
+	for name, deps := range source {
+		out[name] = append([]string(nil), deps...)
+	}
+	return out
+}
+
+// AdaptRunEvent maps the terminal run outcome onto a run event.
+func AdaptRunEvent(status, detail string) presentation.StreamEventLike {
+	return presentation.RunEvent{Status: status, Detail: detail}
+}
+
+// AdaptRunOutcomeEvent maps a finished run that carries its verification
+// truth. unverified marks a completed run that verified nothing; detail then
+// names why.
+func AdaptRunOutcomeEvent(status, detail string, unverified bool) presentation.StreamEventLike {
+	return presentation.RunEvent{Status: status, Detail: detail, Unverified: unverified}
+}
+
+// IsTrajectoryIntervention reports whether a trajectory action represents an
+// intervention worth presenting. Continue is the normal loop and abort is a
+// terminal outcome (covered by the run event); neither is an intervention.
+func IsTrajectoryIntervention(action schemas.TrajectoryAction) bool {
+	switch action {
+	case schemas.ActionRollback, schemas.ActionStepBack,
+		schemas.ActionEscalateCycleDetected, schemas.ActionEscalateOscillation,
+		schemas.ActionSurfaceToUser:
+		return true
+	}
+	return false
+}
+
+// AdaptTrajectoryDecision maps a trajectory intervention onto the
+// presentation contract. It returns ok=false when no target node is
+// available, so the caller counts it as skipped rather than applied.
+func AdaptTrajectoryDecision(action schemas.TrajectoryAction, reason, target string) (presentation.StreamEventLike, bool) {
+	if target == "" {
+		return nil, false
+	}
+	switch action {
+	case schemas.ActionRollback:
+		return presentation.InterventionEvent{
+			Kind:   presentation.InterventionRollback,
+			NodeID: target,
+			Status: string(presentation.InterventionApplied),
+			Reason: reason,
+		}, true
+	case schemas.ActionStepBack:
+		return presentation.InterventionEvent{
+			Kind:   presentation.InterventionStepBack,
+			NodeID: target,
+			Status: string(presentation.InterventionApplied),
+			Reason: reason,
+		}, true
+	case schemas.ActionEscalateCycleDetected, schemas.ActionEscalateOscillation:
+		return presentation.InterventionEvent{
+			Kind:   presentation.InterventionEscalate,
+			NodeID: target,
+			Status: string(presentation.InterventionApplied),
+			Reason: reason,
+		}, true
+	case schemas.ActionSurfaceToUser:
+		return presentation.InterventionEvent{
+			Kind:   presentation.InterventionAskUser,
+			NodeID: target,
+			Status: string(presentation.InterventionApplied),
+			Reason: reason,
+		}, true
+	}
+	return nil, false
+}

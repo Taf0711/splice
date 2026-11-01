@@ -1104,3 +1104,96 @@ func TestCodexProviderEmitsLengthFinishWhenStreamEndsWithoutCompletion(t *testin
 		t.Fatalf("finish reason = %q, want %q", finishReason, zeroruntime.FinishReasonLength)
 	}
 }
+
+// TestCodexProviderTakesArgumentsFromArgumentsDone: the backend can send a
+// call's arguments only on response.function_call_arguments.done, with no
+// delta and a done item without arguments, or only on the done item. The arguments then go out as one
+// delta. They never go out twice, whatever other event also carries them.
+func TestCodexProviderTakesArgumentsFromArgumentsDone(t *testing.T) {
+	added := `{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"call-1","call_id":"call-1","name":"get_weather"}}`
+	argsDone := `{"type":"response.function_call_arguments.done","item_id":"call-1","output_index":0,"arguments":"argsA"}`
+	completed := `{"type":"response.completed","response":{"id":"resp-1","status":"completed","usage":{"input_tokens":3,"output_tokens":2}}}`
+	for _, tc := range []struct {
+		name   string
+		events []string
+		want   string
+	}{
+		{"done only", []string{added, argsDone, `{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"call-1","call_id":"call-1","name":"get_weather"}}`, completed}, "argsA"},
+		{"done and item", []string{added, argsDone, `{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"call-1","call_id":"call-1","name":"get_weather","arguments":"argsA"}}`, completed}, "argsA"},
+		{"item only", []string{added, `{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"call-1","call_id":"call-1","name":"get_weather","arguments":"argsA"}}`, completed}, "argsA"},
+		{"delta and done", []string{added, `{"type":"response.function_call_arguments.delta","item_id":"call-1","output_index":0,"delta":"argsA"}`, argsDone, `{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"call-1","call_id":"call-1","name":"get_weather","arguments":"argsA"}}`, completed}, "argsA"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var rec codexRequest
+			srv := newCodexResponsesServer(t, &rec, tc.events...)
+			defer srv.Close()
+			provider, err := NewCodexProvider(CodexOptions{Options: Options{APIKey: "sk-test", BaseURL: srv.URL, Model: "gpt-5"}, AccountID: "acc-x"})
+			if err != nil {
+				t.Fatalf("NewCodexProvider: %v", err)
+			}
+			stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+				Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "weather in SF?"}},
+				Tools:    []zeroruntime.ToolDefinition{{Name: "get_weather", Parameters: map[string]any{"type": "object"}}},
+			})
+			if err != nil {
+				t.Fatalf("StreamCompletion: %v", err)
+			}
+			var fragments []string
+			for ev := range stream {
+				switch ev.Type {
+				case zeroruntime.StreamEventToolCallDelta:
+					fragments = append(fragments, ev.ArgumentsFragment)
+				case zeroruntime.StreamEventError:
+					t.Fatalf("unexpected error event: %q", ev.Error)
+				}
+			}
+			if got := strings.Join(fragments, ""); got != tc.want || len(fragments) != 1 {
+				t.Fatalf("argument deltas = %q, want one delta %q", fragments, tc.want)
+			}
+		})
+	}
+}
+
+// TestCodexProviderParallelCallsKeepTheirArguments pins the event shape the
+// Codex backend sent for parallel function calls: no argument deltas, and the
+// arguments only on function_call_arguments.done and output_item.done. Each
+// collected call must keep its own arguments. The test needs no agent loop
+// and no sandbox.
+func TestCodexProviderParallelCallsKeepTheirArguments(t *testing.T) {
+	var rec codexRequest
+	srv := newCodexResponsesServer(t, &rec,
+		`{"type":"response.created","sequence_number":0,"response":{"id":"resp-1","status":"in_progress"}}`,
+		`{"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"type":"function_call","id":"fc_a","call_id":"call_a","name":"read_file","arguments":"","status":"in_progress"}}`,
+		`{"type":"response.output_item.added","sequence_number":2,"output_index":1,"item":{"type":"function_call","id":"fc_b","call_id":"call_b","name":"read_file","arguments":"","status":"in_progress"}}`,
+		`{"type":"response.function_call_arguments.done","sequence_number":3,"item_id":"fc_a","output_index":0,"arguments":"{\"path\":\"a.txt\"}"}`,
+		`{"type":"response.output_item.done","sequence_number":4,"output_index":0,"item":{"type":"function_call","id":"fc_a","call_id":"call_a","name":"read_file","arguments":"{\"path\":\"a.txt\"}","status":"completed"}}`,
+		`{"type":"response.function_call_arguments.done","sequence_number":5,"item_id":"fc_b","output_index":1,"arguments":"{\"path\":\"b.txt\"}"}`,
+		`{"type":"response.output_item.done","sequence_number":6,"output_index":1,"item":{"type":"function_call","id":"fc_b","call_id":"call_b","name":"read_file","arguments":"{\"path\":\"b.txt\"}","status":"completed"}}`,
+		`{"type":"response.completed","sequence_number":7,"response":{"id":"resp-1","status":"completed","usage":{"input_tokens":40,"output_tokens":30}}}`,
+	)
+	defer srv.Close()
+	provider, err := NewCodexProvider(CodexOptions{Options: Options{APIKey: "sk-test", BaseURL: srv.URL, Model: "gpt-5"}, AccountID: "acc-x"})
+	if err != nil {
+		t.Fatalf("NewCodexProvider: %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "read a and b"}},
+		Tools:    []zeroruntime.ToolDefinition{{Name: "read_file", Parameters: map[string]any{"type": "object"}}},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion: %v", err)
+	}
+	collected := zeroruntime.CollectStream(context.Background(), stream)
+	if collected.Error != "" {
+		t.Fatalf("stream error: %q", collected.Error)
+	}
+	if len(collected.ToolCalls) != 2 {
+		t.Fatalf("tool calls = %+v, want 2", collected.ToolCalls)
+	}
+	for i, want := range []string{`{"path":"a.txt"}`, `{"path":"b.txt"}`} {
+		call := collected.ToolCalls[i]
+		if call.Name != "read_file" || call.Arguments != want {
+			t.Fatalf("tool call %d = %+v, want read_file with %s", i, call, want)
+		}
+	}
+}

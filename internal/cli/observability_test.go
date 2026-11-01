@@ -59,6 +59,77 @@ func TestRunDoctorFormatsRedactedProviderDiagnostics(t *testing.T) {
 	}
 }
 
+// The --connectivity probe must send the stored credential, so the profile it
+// receives carries the key read from the credential store. The store lives
+// under a temp XDG_CONFIG_HOME, so doctor's own stored-key check finds the same
+// key and never touches the developer's real config or keychain.
+func TestRunDoctorConnectivityProbesWithStoredKey(t *testing.T) {
+	t.Setenv("SPLICE_CRED_STORAGE", "encrypted-file") // never touch the real OS keychain
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	configDir := filepath.Join(xdg, "splice")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(configDir, "config.json")
+	if err := os.WriteFile(configPath, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.ProviderKeyStoreAt(configDir)
+	if err != nil {
+		t.Fatalf("ProviderKeyStoreAt: %v", err)
+	}
+	if err := store.Set("local", "sk-stored-test"); err != nil {
+		t.Fatalf("seed stored key: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	gotKey := ""
+	probed := false
+
+	exitCode := runWithDeps([]string{"doctor", "--connectivity"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return t.TempDir(), nil
+		},
+		userConfigPath: func() (string, error) {
+			return configPath, nil
+		},
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			profile := config.ProviderProfile{
+				Name:         "local",
+				ProviderKind: config.ProviderKindOpenAICompatible,
+				BaseURL:      "https://api.example.com/v1",
+				APIKeyStored: true,
+				Model:        "custom-model",
+			}
+			return config.ResolvedConfig{Provider: profile, Providers: []config.ProviderProfile{profile}, ActiveProvider: "local"}, nil
+		},
+		probeProviderHealth: func(_ context.Context, options providerhealth.Options) providerhealth.Result {
+			probed = true
+			gotKey = options.Profile.APIKey
+			return providerhealth.Result{Status: providerhealth.StatusPass}
+		},
+		now: fixedCLITime("2026-06-04T16:00:00Z"),
+	})
+
+	if !probed {
+		t.Fatalf("doctor --connectivity did not probe; stdout: %s", stdout.String())
+	}
+	if gotKey != "sk-stored-test" {
+		t.Fatalf("connectivity probe APIKey = %q, want the stored key", gotKey)
+	}
+	output := stdout.String()
+	for _, want := range []string{"[pass] provider.config", "[pass] provider.storedkey"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("doctor report missing %q:\n%s", want, output)
+		}
+	}
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d:\n%s%s", exitSuccess, exitCode, output, stderr.String())
+	}
+}
+
 func TestRunDoctorConnectivityProbesProvider(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

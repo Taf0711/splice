@@ -3,10 +3,10 @@ package config
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/Taf0711/splice/internal/modelregistry"
+	"github.com/Taf0711/splice/internal/projectfile"
 )
 
 // Issue is a single structured problem found while validating a config file.
@@ -23,7 +23,7 @@ type Issue struct {
 // so callers can extract *json.SyntaxError / *json.UnmarshalTypeError offsets
 // via errors.As.
 func ValidateFile(path string) (FileConfig, []Issue) {
-	data, err := os.ReadFile(path)
+	data, err := projectfile.Read(path, "")
 	if err != nil {
 		return FileConfig{}, []Issue{{Message: fmt.Sprintf("read config %s: %v", path, err)}}
 	}

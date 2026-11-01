@@ -109,3 +109,9 @@ func fileConflictMessage(relativePath string) string {
 	return "Error writing " + relativePath + ": " + ErrFileChangedOnDisk.Error() +
 		" (it may have been edited outside Splice). Re-read it with read_file, then re-apply your change so you do not overwrite the newer content."
 }
+
+// unreadOverwriteMessage is the actionable error the strict read-before-write
+// guard returns: it names the path and tells the model exactly how to proceed.
+func unreadOverwriteMessage(relativePath string) string {
+	return "Error writing " + relativePath + ": the file exists and has not been read this session; call read_file first, then re-apply your change so you preserve its existing content."
+}

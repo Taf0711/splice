@@ -1,0 +1,20 @@
+package splice
+
+// EvidenceSubstitutionEnvVar is the explicit opt-in for production evidence
+// substitution. The measured effect is a net cost: an admitted substitution
+// delivers evidence and spends a validation read, while the eliminated
+// operations are prompt-neutral and the model-visible context and tool use do
+// not change. The path is therefore OFF by default. Set it to "on" only for a
+// controlled experiment or for a future revision that demonstrates a win.
+const EvidenceSubstitutionEnvVar = "SPLICE_EVIDENCE_SUBSTITUTION"
+
+// MemoryPrefetchEnvVar is the explicit opt-in for memory-assisted
+// dependency prefetch: when a retained verified record names a source
+// file, the host fetches that file's current bounded view into the initial
+// context handshake, so the model starts with the declaration instead of
+// spending expansion rounds to rediscover it. The selection rule is
+// uncalibrated (delivery is capped and the trigger is record delivery,
+// not a measured expected value), so this is an experimental treatment,
+// OFF by default, and never reported as a substitution: no operation is
+// removed, source is acquired earlier.
+const MemoryPrefetchEnvVar = "SPLICE_MEMORY_PREFETCH"

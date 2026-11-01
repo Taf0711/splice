@@ -8,10 +8,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/config"
+	"github.com/Taf0711/splice/internal/flags"
+	"github.com/Taf0711/splice/internal/hooks"
+	"github.com/Taf0711/splice/internal/memd"
+	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/splice/stages"
 	"github.com/Taf0711/splice/internal/tools"
@@ -75,7 +82,7 @@ func (runFailingProvider) StreamCompletion(ctx context.Context, request zerorunt
 	case "submit_code":
 		out := schemas.CodeWriterOutput{
 			Files: []schemas.FileChange{
-				{Path: "main.go", Content: "package main\n\nfunc Hello() string { return \"wrong\" }\n", ChangeType: "create"},
+				{Path: "main.go", Content: "package main\n\nfunc Hello() string { return \"wrong\" }\n", ChangeType: "modify"},
 			},
 			Language:   "go",
 			Intent:     "add broken Hello function",
@@ -86,7 +93,7 @@ func (runFailingProvider) StreamCompletion(ctx context.Context, request zerorunt
 	case "submit_tests":
 		out := schemas.TestGeneratorOutput{
 			Files: []schemas.FileChange{
-				{Path: "main_test.go", Content: "package main\n\nimport \"testing\"\n\nfunc TestHello(t *testing.T) {\n\tif Hello() != \"hello\" {\n\t\tt.Fatal(\"wrong greeting\")\n\t}\n}\n", ChangeType: "create"},
+				{Path: "main_test.go", Content: "package main\n\nimport \"testing\"\n\nfunc TestHello(t *testing.T) {\n\tif Hello() != \"hello\" {\n\t\tt.Fatal(\"wrong greeting\")\n\t}\n}\n", ChangeType: "modify"},
 			},
 			Language:   "go",
 			Intent:     "add Hello test",
@@ -131,7 +138,10 @@ func (s *stubStore) Upsert(ctx context.Context, obs schemas.MemoryObservation) (
 
 type capturingStage struct {
 	inputs *[]schemas.HarnessStageInput
+	caps   stages.Capabilities
 }
+
+func (s *capturingStage) Capabilities() stages.Capabilities { return s.caps }
 
 func (s *capturingStage) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options stages.StageOptions) (schemas.HarnessStageOutput, error) {
 	*s.inputs = append(*s.inputs, input)
@@ -144,6 +154,8 @@ func (s *capturingStage) Run(ctx context.Context, input schemas.HarnessStageInpu
 
 type stageFunc func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error)
 
+func (stageFunc) Capabilities() stages.Capabilities { return stages.Capabilities{} }
+
 func (f stageFunc) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options stages.StageOptions) (schemas.HarnessStageOutput, error) {
 	return f(ctx, input, provider, options)
 }
@@ -151,6 +163,8 @@ func (f stageFunc) Run(ctx context.Context, input schemas.HarnessStageInput, pro
 type outputStage struct {
 	output schemas.HarnessStageOutput
 }
+
+func (outputStage) Capabilities() stages.Capabilities { return stages.Capabilities{} }
 
 func (s outputStage) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options stages.StageOptions) (schemas.HarnessStageOutput, error) {
 	return s.output, nil
@@ -163,7 +177,10 @@ type capturedStageCall struct {
 
 type stageCallCapturer struct {
 	calls map[string]capturedStageCall
+	caps  stages.Capabilities
 }
+
+func (s *stageCallCapturer) Capabilities() stages.Capabilities { return s.caps }
 
 func (s *stageCallCapturer) Run(_ context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options stages.StageOptions) (schemas.HarnessStageOutput, error) {
 	s.calls[input.StageName] = capturedStageCall{provider: provider, options: options}
@@ -174,13 +191,15 @@ type contextRequestStage struct {
 	inputs *[]schemas.HarnessStageInput
 }
 
+func (*contextRequestStage) Capabilities() stages.Capabilities { return stages.Capabilities{} }
+
 func (s *contextRequestStage) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options stages.StageOptions) (schemas.HarnessStageOutput, error) {
 	*s.inputs = append(*s.inputs, input)
 	if input.Context == nil {
 		symbol := "foo"
 		usage := schemas.StageUsage{InputTokens: 4, OutputTokens: 3, CachedInputTokens: 1, CacheWriteTokens: 1, ReasoningTokens: 1}
 		if options.Stream.OnUsageResult != nil {
-			options.Stream.OnUsageResult(zeroruntime.Usage{InputTokens: 4, OutputTokens: 3, CachedInputTokens: 1, CacheWriteTokens: 1, ReasoningTokens: 1}, true, nil)
+			options.Stream.OnUsageResult(zeroruntime.Usage{InputTokens: 4, OutputTokens: 3, CachedInputTokens: 1, CacheWriteTokens: 1, ReasoningTokens: 1}, true, nil, "", false)
 		}
 		return schemas.HarnessStageOutput{
 			Summary:    "needs context",
@@ -199,7 +218,7 @@ func (s *contextRequestStage) Run(ctx context.Context, input schemas.HarnessStag
 	}
 	usage := schemas.StageUsage{InputTokens: 6, OutputTokens: 5, CachedInputTokens: 2, CacheWriteTokens: 1, ReasoningTokens: 2}
 	if options.Stream.OnUsageResult != nil {
-		options.Stream.OnUsageResult(zeroruntime.Usage{InputTokens: 6, OutputTokens: 5, CachedInputTokens: 2, CacheWriteTokens: 1, ReasoningTokens: 2}, true, nil)
+		options.Stream.OnUsageResult(zeroruntime.Usage{InputTokens: 6, OutputTokens: 5, CachedInputTokens: 2, CacheWriteTokens: 1, ReasoningTokens: 2}, true, nil, "", false)
 	}
 	return schemas.HarnessStageOutput{
 		Summary:    "context handled",
@@ -210,6 +229,8 @@ func (s *contextRequestStage) Run(ctx context.Context, input schemas.HarnessStag
 }
 
 type contextRetryFailureStage struct{ calls int }
+
+func (*contextRetryFailureStage) Capabilities() stages.Capabilities { return stages.Capabilities{} }
 
 func (s *contextRetryFailureStage) Run(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
 	s.calls++
@@ -229,7 +250,7 @@ func TestRunStageWithContextFailurePreservesBothAttemptsUsage(t *testing.T) {
 	_, err := runStageWithContext(context.Background(), schemas.HarnessStageInput{
 		RunID:     "run-context-failure",
 		StageName: "context_stage",
-	}, stage, 1, agent.ModelSelection{Provider: runFakeProvider{}}, agent.Options{}, t.TempDir(), nil, nil)
+	}, stage, 1, agent.ModelSelection{Provider: runFakeProvider{}}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, nil, stage.Capabilities(), 0, nil, nil, 0)
 	if err == nil {
 		t.Fatal("runStageWithContext returned nil error")
 	}
@@ -251,23 +272,26 @@ func TestRunPassInjectsMemoryBundleAndSkipsRetrievalErrors(t *testing.T) {
 		RequestIntent: intent,
 		Stages:        []schemas.ExecutionStage{{Name: "code_writer"}},
 	}
+	project := workDir
 	bundle := schemas.MemoryBundle{
 		RequestingAgent: "code_writer",
 		Observations: []schemas.MemoryObservation{{
-			Scope:      "project",
-			OwnerAgent: "code_writer",
-			Visibility: "shareable",
-			MemoryType: "decision",
-			Title:      "Use cached context",
-			Content:    "Prefer the previously selected implementation path.",
+			ID:          11,
+			ProjectPath: &project,
+			Scope:       "project",
+			OwnerAgent:  "code_writer",
+			Visibility:  "shareable",
+			MemoryType:  "decision",
+			Title:       "Use cached context",
+			Content:     "Prefer the previously selected implementation path.",
 		}},
 	}
 	retriever := &stubStore{bundle: bundle}
 	var inputs []schemas.HarnessStageInput
 
 	records, outputs, completed, err := runPass(context.Background(), "run-memory", 1, plan, stageRegistry{
-		"code_writer": &capturingStage{inputs: &inputs},
-	}, runFakeProvider{}, agent.Options{}, workDir, nil, nil, retriever)
+		"code_writer": &capturingStage{inputs: &inputs, caps: stages.Capabilities{ConsumesMemory: true, PullContext: true}},
+	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir, nil, time.Time{}, nil, retriever, nil, NewStageExecutionBudget(0))
 	if err != nil {
 		t.Fatalf("runPass with memory: %v", err)
 	}
@@ -286,7 +310,7 @@ func TestRunPassInjectsMemoryBundleAndSkipsRetrievalErrors(t *testing.T) {
 	if retriever.gotQuery.RequestingAgent != "code_writer" {
 		t.Fatalf("requesting agent = %q, want code_writer", retriever.gotQuery.RequestingAgent)
 	}
-	if retriever.gotQuery.ProjectPath == nil || *retriever.gotQuery.ProjectPath != workDir {
+	if retriever.gotQuery.ProjectPath == nil || *retriever.gotQuery.ProjectPath != memd.CanonicalProjectPath(workDir) {
 		t.Fatalf("project path = %#v, want %q", retriever.gotQuery.ProjectPath, workDir)
 	}
 	if retriever.gotQuery.Limit != 5 {
@@ -309,8 +333,8 @@ func TestRunPassInjectsMemoryBundleAndSkipsRetrievalErrors(t *testing.T) {
 	var errorInputs []schemas.HarnessStageInput
 	var progress []string
 	_, _, completed, err = runPass(context.Background(), "run-memory-error", 1, plan, stageRegistry{
-		"code_writer": &capturingStage{inputs: &errorInputs},
-	}, runFakeProvider{}, agent.Options{OnReasoning: func(text string) { progress = append(progress, text) }}, workDir, nil, nil, errorRetriever)
+		"code_writer": &capturingStage{inputs: &errorInputs, caps: stages.Capabilities{ConsumesMemory: true, PullContext: true}},
+	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{OnReasoning: func(text string) { progress = append(progress, text) }}), workDir, nil, time.Time{}, nil, errorRetriever, nil, NewStageExecutionBudget(0))
 	if err != nil || !completed {
 		t.Fatalf("memory retrieval error should not fail run: completed=%v err=%v", completed, err)
 	}
@@ -323,8 +347,8 @@ func TestRunPassInjectsMemoryBundleAndSkipsRetrievalErrors(t *testing.T) {
 
 	var nilInputs []schemas.HarnessStageInput
 	_, _, completed, err = runPass(context.Background(), "run-memory-nil", 1, plan, stageRegistry{
-		"code_writer": &capturingStage{inputs: &nilInputs},
-	}, runFakeProvider{}, agent.Options{}, workDir, nil, nil, nil)
+		"code_writer": &capturingStage{inputs: &nilInputs, caps: stages.Capabilities{ConsumesMemory: true, PullContext: true}},
+	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir, nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
 	if err != nil || !completed {
 		t.Fatalf("nil retriever should complete: completed=%v err=%v", completed, err)
 	}
@@ -355,10 +379,14 @@ func TestRunPassSearchesOnlyMemoryConsumingStages(t *testing.T) {
 	registry := stageRegistry{}
 	var inputs []schemas.HarnessStageInput
 	for _, name := range inputNames {
-		registry[name] = &capturingStage{inputs: &inputs}
+		stage := &capturingStage{inputs: &inputs}
+		if name == "code_writer" || name == "test_generator" {
+			stage.caps = stages.Capabilities{ConsumesMemory: true, PullContext: true}
+		}
+		registry[name] = stage
 	}
 
-	_, _, completed, err := runPass(context.Background(), "run-memory-consumers", 1, plan, registry, runFakeProvider{}, agent.Options{}, workDir, nil, nil, retriever)
+	_, _, completed, err := runPass(context.Background(), "run-memory-consumers", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir, nil, time.Time{}, nil, retriever, nil, NewStageExecutionBudget(0))
 	if err != nil || !completed {
 		t.Fatalf("runPass: completed=%v err=%v", completed, err)
 	}
@@ -377,8 +405,13 @@ func TestRunPassSearchesOnlyMemoryConsumingStages(t *testing.T) {
 	for _, input := range inputs {
 		switch input.StageName {
 		case "code_writer", "test_generator":
-			if input.MemoryBundle == nil {
-				t.Fatalf("consuming stage %s received no memory bundle", input.StageName)
+			// Zero eligible items after deterministic admission means no
+			// delivered memory: the bundle stays absent rather than empty.
+			if input.MemoryBundle != nil && len(input.MemoryBundle.Observations)+len(input.MemoryBundle.Exemplars) == 0 {
+				t.Fatalf("consuming stage %s received an empty memory bundle; want none", input.StageName)
+			}
+			if retriever.queries[0].RequestingAgent == "" {
+				t.Fatal("expected at least one memory query")
 			}
 		default:
 			if input.MemoryBundle != nil {
@@ -401,7 +434,7 @@ func TestRunPassPopulatesPipelineRoster(t *testing.T) {
 		plan.Stages = append(plan.Stages, schemas.ExecutionStage{Name: name})
 	}
 
-	_, _, completed, err := runPass(context.Background(), "run-roster-standard", 1, plan, registry, runFakeProvider{}, agent.Options{}, workDir, nil, nil, nil)
+	_, _, completed, err := runPass(context.Background(), "run-roster-standard", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir, nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
 	if err != nil || !completed {
 		t.Fatalf("runPass: completed=%v err=%v", completed, err)
 	}
@@ -452,7 +485,7 @@ func TestRunPassCarriesWriterChangedPathsToTestGenerator(t *testing.T) {
 		Tier: schemas.TierStandard, RequestIntent: "write storage tests",
 		Stages: []schemas.ExecutionStage{{Name: "code_writer"}, {Name: "test_generator"}},
 	}
-	_, _, completed, err := runPass(context.Background(), "run-writer-paths", 1, plan, registry, runFakeProvider{}, agent.Options{}, workDir, nil, nil, nil)
+	_, _, completed, err := runPass(context.Background(), "run-writer-paths", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir, nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
 	if err != nil || !completed {
 		t.Fatalf("runPass: completed=%v err=%v", completed, err)
 	}
@@ -468,8 +501,85 @@ func TestBuildRevisionContextCarriesPriorOutputFiles(t *testing.T) {
 		},
 	}}
 	got := buildRevisionContext("revise tests", nil, nil, []schemas.HarnessStageOutput{output}, "retry")
-	if !strings.Contains(got, "storage_test.go") || !strings.Contains(got, "overwrite: true") {
-		t.Fatalf("revision context did not surface prior file and overwrite guidance: %q", got)
+	if !strings.Contains(got, "storage_test.go") {
+		t.Fatalf("revision context did not surface the prior file: %q", got)
+	}
+}
+
+// TestBuildRevisionContextPriorFilesUseSatisfiableRepresentation pins the
+// repair-path fix. The revision context is built before the stage runs, so the
+// host holds no delivered view for a prior-written path and cannot mint a
+// base_ref. The instruction must therefore ask for the full-content create
+// form. Steering the model at modify produced base_ref-is-required aborts,
+// because a bare path list gives it no handle to submit.
+func TestBuildRevisionContextPriorFilesUseSatisfiableRepresentation(t *testing.T) {
+	output := schemas.HarnessStageOutput{Data: map[string]any{
+		"code_writer_output": schemas.CodeWriterOutput{
+			Files: []schemas.FileChange{{Path: "internal/audit/retention.go", ChangeType: "modify"}},
+		},
+	}}
+	got := buildRevisionContext("fix the service", nil, nil, []schemas.HarnessStageOutput{output}, "")
+	if strings.Contains(got, "change_type modify") {
+		t.Fatalf("revision context must not steer prior files at modify without a handle:\n%s", got)
+	}
+	if !strings.Contains(got, "change_type create") {
+		t.Fatalf("revision context must request the full-content create form:\n%s", got)
+	}
+	if !strings.Contains(got, "internal/audit/retention.go") {
+		t.Fatalf("revision context must name the prior-written path:\n%s", got)
+	}
+}
+
+// TestFailureCauseClassSeparatesRootCauses pins that repeated failures which
+// share the wrapper name but differ in root cause carry different labels, so
+// aggregate telemetry can tell them apart.
+func TestFailureCauseClassSeparatesRootCauses(t *testing.T) {
+	tests := []struct {
+		name    string
+		summary string
+		want    string
+	}{
+		{name: "missing base_ref", summary: "*stages.TypedOutputError: proposal modify x.go: base_ref is required", want: "validation"},
+		{name: "typed output", summary: "*stages.TypedOutputError: model returned no tool call", want: "typed_output"},
+		{name: "provider", summary: `provider request error: {"detail":"Unsupported parameter"}`, want: "provider"},
+		{name: "auth", summary: "stream error: auth error: invalid API key", want: "auth"},
+		{name: "unclassified", summary: "something else entirely", want: "unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := failureCauseClass(tt.summary); got != tt.want {
+				t.Fatalf("failureCauseClass(%q) = %q, want %q", tt.summary, got, tt.want)
+			}
+		})
+	}
+	if failureCauseClass(tests[0].summary) == failureCauseClass(tests[1].summary) {
+		t.Fatalf("validation and typed_output must not share a label")
+	}
+}
+
+// TestRepeatedFailureLabelNamesUnclassifiedNode pins that an unclassified
+// repeated failure carries the closed failure kind stage_error and names the
+// node, and that a known cause family keeps its label.
+func TestRepeatedFailureLabelNamesUnclassifiedNode(t *testing.T) {
+	plan := schemas.ExecutionPlan{Stages: []schemas.ExecutionStage{
+		{Name: "code_writer", Type: "code_writer"},
+		{Name: "fail", Type: schemas.NodeTypeCommand},
+	}}
+	summary := func(s string) *string { return &s }
+	for _, tc := range []struct {
+		record schemas.StageRecord
+		want   string
+	}{
+		{schemas.StageRecord{Name: "fail", OutputSummary: summary("sh -c 'exit 3' exited 3")}, "stage_error: command node fail"},
+		{schemas.StageRecord{Name: "code_writer", OutputSummary: summary("something else entirely")}, "stage_error: stage code_writer"},
+		{schemas.StageRecord{Name: "code_writer", OutputSummary: summary("stream error: auth error: bad key")}, "auth"},
+	} {
+		if got := repeatedFailureLabel(plan, tc.record); got != tc.want {
+			t.Fatalf("repeatedFailureLabel(%s) = %q, want %q", tc.record.Name, got, tc.want)
+		}
+	}
+	if err := (schemas.TrajectoryFailure{Kind: "stage_error"}).Validate(); err != nil {
+		t.Fatalf("stage_error left the closed failure kind set: %v", err)
 	}
 }
 
@@ -483,7 +593,7 @@ func TestRunPassPopulatesPipelineRosterTrivialTier(t *testing.T) {
 	}
 	registry := stageRegistry{"code_writer": &capturingStage{inputs: &inputs}}
 
-	_, _, completed, err := runPass(context.Background(), "run-roster-trivial", 1, plan, registry, runFakeProvider{}, agent.Options{}, workDir, nil, nil, nil)
+	_, _, completed, err := runPass(context.Background(), "run-roster-trivial", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir, nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
 	if err != nil || !completed {
 		t.Fatalf("runPass: completed=%v err=%v", completed, err)
 	}
@@ -498,6 +608,57 @@ func TestRunPassPopulatesPipelineRosterTrivialTier(t *testing.T) {
 	}
 }
 
+func TestRunPassSkipsStagesAfterWallDeadline(t *testing.T) {
+	capturer := &stageCallCapturer{calls: map[string]capturedStageCall{}}
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		RequestIntent: "wall deadline test",
+		Stages:        []schemas.ExecutionStage{{Name: "a"}, {Name: "b"}},
+	}
+	_, _, completed, err := runPass(context.Background(), "run-wall", 1, plan, stageRegistry{
+		"a": capturer,
+		"b": capturer,
+	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Now().Add(-time.Second), nil, nil, nil, NewStageExecutionBudget(0))
+	if !errors.Is(err, errWallTimeExceeded) {
+		t.Fatalf("err = %v, want wall-time sentinel", err)
+	}
+	if len(capturer.calls) != 0 {
+		t.Fatalf("stages ran after deadline: %v", capturer.calls)
+	}
+	if completed {
+		t.Fatal("completed = true, want false")
+	}
+}
+
+func TestRunPassStageCrossingWallDeadlineAborts(t *testing.T) {
+	started := false
+	stage := stageFunc(func(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options stages.StageOptions) (schemas.HarnessStageOutput, error) {
+		started = true
+		<-ctx.Done()
+		return schemas.HarnessStageOutput{}, context.Canceled
+	})
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		RequestIntent: "wall deadline crossing",
+		Stages:        []schemas.ExecutionStage{{Name: "blocker"}},
+	}
+	parentCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, _, _, err := runPass(parentCtx, "run-wall-cross", 1, plan, stageRegistry{
+		"blocker": stage,
+	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Now().Add(50*time.Millisecond), nil, nil, nil, NewStageExecutionBudget(0))
+	if !started {
+		t.Fatal("stage did not start")
+	}
+	if parentCtx.Err() != nil {
+		t.Fatalf("parent context ended: %v", parentCtx.Err())
+	}
+	if !errors.Is(err, errWallTimeExceeded) {
+		t.Fatalf("err = %#v, want errWallTimeExceeded", err)
+	}
+}
+
 // captureRequestProvider records the last CompletionRequest and always returns the
 // provided submit_code tool call with no file changes.
 type captureRequestProvider struct {
@@ -507,7 +668,7 @@ type captureRequestProvider struct {
 func (p *captureRequestProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
 	p.request = request
 	output := schemas.CodeWriterOutput{
-		Files:      []schemas.FileChange{},
+		Files:      []schemas.FileChange{{Path: "main.go", ChangeType: "create", Content: "package main\n"}},
 		Language:   "go",
 		Intent:     "no changes",
 		Confidence: 0.9,
@@ -535,15 +696,18 @@ func TestRunPassInjectsSelectedMemoryIntoConsumingStage(t *testing.T) {
 		RequestIntent: intent,
 		Stages:        []schemas.ExecutionStage{{Name: "code_writer"}},
 	}
+	project := workDir
 	bundle := schemas.MemoryBundle{
 		RequestingAgent: "code_writer",
 		Observations: []schemas.MemoryObservation{{
-			Scope:      "project",
-			OwnerAgent: "orchestrator",
-			Visibility: "shareable",
-			MemoryType: "decision",
-			Title:      "Use gofmt",
-			Content:    "Run gofmt on all generated files.",
+			ID:          7,
+			ProjectPath: &project,
+			Scope:       "project",
+			OwnerAgent:  "orchestrator",
+			Visibility:  "shareable",
+			MemoryType:  "decision",
+			Title:       "Use gofmt",
+			Content:     "Run gofmt on all generated files.",
 		}},
 	}
 	store := &stubStore{bundle: bundle}
@@ -554,7 +718,7 @@ func TestRunPassInjectsSelectedMemoryIntoConsumingStage(t *testing.T) {
 
 	records, _, completed, err := runPass(context.Background(), "run-memory-consume", 1, plan, stageRegistry{
 		"code_writer": stages.CodeWriter{},
-	}, provider, agent.Options{}, workDir, fakeRunner, nil, store)
+	}, provider, PipelineConfigFromAgentOptions(agent.Options{}), workDir, fakeRunner, time.Time{}, nil, store, nil, NewStageExecutionBudget(0))
 	if err != nil {
 		t.Fatalf("runPass: %v", err)
 	}
@@ -590,15 +754,18 @@ func TestRunPassPersistsDiscoveredTestCommand(t *testing.T) {
 		var upserts []schemas.MemoryObservation
 		store := &stubStore{upserts: &upserts}
 
-		_, _, completed, err := runPass(context.Background(), runID, 1, plan, stageRegistry{
+		records, _, completed, err := runPass(context.Background(), runID, 1, plan, stageRegistry{
 			"test_runner": outputStage{output: schemas.HarnessStageOutput{
 				Summary:    "passed",
 				Confidence: 1,
 				Data:       map[string]any{"test_command": []string{"go", "test", "./..."}},
 			}},
-		}, runFakeProvider{}, agent.Options{}, workDir, nil, nil, store)
+		}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir, nil, time.Time{}, nil, store, nil, NewStageExecutionBudget(0))
 		if err != nil || !completed {
 			t.Fatalf("runPass: completed=%v err=%v", completed, err)
+		}
+		if got := pipelineTestCommand(schemas.PipelineResult{Stages: records}, "test_runner"); got != "go test ./..." {
+			t.Fatalf("pipeline test command = %q, want %q", got, "go test ./...")
 		}
 		if len(upserts) != 1 {
 			t.Fatalf("upserts = %d, want 1: %#v", len(upserts), upserts)
@@ -628,7 +795,7 @@ func TestRunPassPersistsDiscoveredTestCommand(t *testing.T) {
 		if obs.SourceRunID == nil || *obs.SourceRunID != runID {
 			t.Fatalf("SourceRunID = %#v, want %q", obs.SourceRunID, runID)
 		}
-		if obs.ProjectPath == nil || *obs.ProjectPath != workDir {
+		if obs.ProjectPath == nil || *obs.ProjectPath != memd.CanonicalProjectPath(workDir) {
 			t.Fatalf("ProjectPath = %#v, want %q", obs.ProjectPath, workDir)
 		}
 	})
@@ -648,7 +815,7 @@ func TestRunPassPersistsDiscoveredTestCommand(t *testing.T) {
 				Confidence: 1,
 				Data:       map[string]any{"test_command": []string{"go", "test", "./..."}},
 			}},
-		}, runFakeProvider{}, agent.Options{}, workDir, nil, nil, store)
+		}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir, nil, time.Time{}, nil, store, nil, NewStageExecutionBudget(0))
 		if err != nil || !completed {
 			t.Fatalf("runPass: completed=%v err=%v", completed, err)
 		}
@@ -656,6 +823,55 @@ func TestRunPassPersistsDiscoveredTestCommand(t *testing.T) {
 			t.Fatalf("upserts = %d, want 0: %#v", len(upserts), upserts)
 		}
 	})
+}
+
+func TestPipelineTestCommandUsesLastCompletedInvocation(t *testing.T) {
+	result := schemas.PipelineResult{Stages: []schemas.StageRecord{
+		{Name: "test_runner", Status: schemas.StageCompleted, TestCommand: "python bin/test -C tests/old.py"},
+		{Name: "test_runner", Status: schemas.StageFailed, TestCommand: "python bin/test -C tests/failed.py"},
+		{Name: "test_runner", Status: schemas.StageCompleted, TestCommand: "python bin/test -C tests/new.py"},
+	}}
+	if got := pipelineTestCommand(result, "test_runner"); got != "python bin/test -C tests/new.py" {
+		t.Fatalf("pipeline test command = %q, want latest completed command", got)
+	}
+	ver := captureVerificationFromResult(result, "test_runner")
+	if ver.TestCommand != "python bin/test -C tests/new.py" {
+		t.Fatalf("verification command = %q, want latest completed command", ver.TestCommand)
+	}
+}
+
+func TestRepairTestRunnerReplacesRecordedCommand(t *testing.T) {
+	records := []schemas.StageRecord{{
+		Name: "test_runner", Status: schemas.StageCompleted, Iteration: 1,
+		TestCommand: "python bin/test -C tests/old.py",
+	}}
+	mergeRepairRecord(&records, 1, "test_runner", schemas.HarnessStageOutput{
+		Summary:    "passed",
+		Confidence: 1,
+		Data:       map[string]any{"test_command": []string{"python", "bin/test", "-C", "tests/new.py"}},
+	}, true)
+	if got := pipelineTestCommand(schemas.PipelineResult{Stages: records}, "test_runner"); got != "python bin/test -C tests/new.py" {
+		t.Fatalf("pipeline test command after repair = %q, want repaired command", got)
+	}
+}
+
+func TestPipelineTestCommandAbsentWithoutTestRunner(t *testing.T) {
+	result := schemas.PipelineResult{Stages: []schemas.StageRecord{{
+		Name: "code_writer", Status: schemas.StageCompleted,
+	}}}
+	if got := pipelineTestCommand(result, "test_runner"); got != "" {
+		t.Fatalf("pipeline test command = %q, want empty", got)
+	}
+	ver := captureVerificationFromResult(result, "test_runner")
+	if ver.TestStageRan || ver.TestCommand != "" {
+		t.Fatalf("verification from no test runner = %+v, want zero test observation", ver)
+	}
+	captures := captureFromVerifiedRunVerified(t.TempDir(), "completed", []string{"main.go"}, "", "rev", "run", ver, CaptureOriginRuntime)
+	for _, capture := range captures {
+		if capture.Kind == "procedure" {
+			t.Fatalf("no-test run produced a procedure capture: %+v", capture)
+		}
+	}
 }
 
 func TestRunExecutionPlanPersistsConfigObservation(t *testing.T) {
@@ -677,7 +893,7 @@ func TestRunExecutionPlanPersistsConfigObservation(t *testing.T) {
 	var upserts []schemas.MemoryObservation
 	store := &stubStore{upserts: &upserts}
 
-	_, err = runExecutionPlan(context.Background(), runID, plan, runFakeProvider{}, agent.Options{Cwd: workDir, MaxTurns: 1}, store, nil)
+	_, err = runExecutionPlan(context.Background(), runID, plan, nil, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{Cwd: workDir, MaxTurns: 1}), store, nil)
 	if err != nil {
 		t.Fatalf("runExecutionPlan: %v", err)
 	}
@@ -709,7 +925,7 @@ func TestRunExecutionPlanPersistsConfigObservation(t *testing.T) {
 	if obs.SourceStage != nil {
 		t.Fatalf("SourceStage = %#v, want nil", obs.SourceStage)
 	}
-	if obs.ProjectPath == nil || *obs.ProjectPath != absWorkDir {
+	if obs.ProjectPath == nil || *obs.ProjectPath != memd.CanonicalProjectPath(absWorkDir) {
 		t.Fatalf("ProjectPath = %#v, want %q", obs.ProjectPath, absWorkDir)
 	}
 }
@@ -728,9 +944,9 @@ func TestRunStageWithContextPersistsToolDegradationObservation(t *testing.T) {
 	output, err := runStageWithContext(context.Background(), schemas.HarnessStageInput{
 		RunID:     runID,
 		StageName: stageName,
-	}, stage, 1, selection, agent.Options{OnAttributedUsage: func(usage agent.AttributedUsage) {
+	}, stage, 1, selection, PipelineConfigFromAgentOptions(agent.Options{OnAttributedUsage: func(usage agent.AttributedUsage) {
 		attributed = append(attributed, usage)
-	}}, workDir, nil, store)
+	}}), workDir, nil, store, stage.Capabilities(), 0, nil, nil, 0)
 	if err != nil {
 		t.Fatalf("runStageWithContext: %v", err)
 	}
@@ -768,7 +984,7 @@ func TestRunStageWithContextPersistsToolDegradationObservation(t *testing.T) {
 	if obs.TopicKey == nil || *obs.TopicKey != "tool_degradation:get_symbol" {
 		t.Fatalf("TopicKey = %#v, want tool_degradation:get_symbol", obs.TopicKey)
 	}
-	wantContent := "get_symbol requires AST inspection, deferred for v1; use find_symbol + read_file"
+	wantContent := "get_symbol \"foo\" requires a path-qualified query; use find_symbol to locate the file first"
 	if obs.Content != wantContent {
 		t.Fatalf("Content = %q, want %q", obs.Content, wantContent)
 	}
@@ -778,8 +994,9 @@ func TestRunStageWithContextPersistsToolDegradationObservation(t *testing.T) {
 	if obs.SourceStage == nil || *obs.SourceStage != stageName {
 		t.Fatalf("SourceStage = %#v, want %q", obs.SourceStage, stageName)
 	}
-	if obs.ProjectPath == nil || *obs.ProjectPath != workDir {
-		t.Fatalf("ProjectPath = %#v, want %q", obs.ProjectPath, workDir)
+	// Persisted observations carry the canonical project identity.
+	if obs.ProjectPath == nil || *obs.ProjectPath != memd.CanonicalProjectPath(workDir) {
+		t.Fatalf("ProjectPath = %#v, want %q", obs.ProjectPath, memd.CanonicalProjectPath(workDir))
 	}
 }
 
@@ -862,6 +1079,89 @@ func TestRunHonorsPermissionModeAsk(t *testing.T) {
 	}
 	if permissionEvents[1].Action != agent.PermissionActionDeny {
 		t.Fatalf("second permission event action = %s, want deny", permissionEvents[1].Action)
+	}
+}
+
+func TestTrustedWorkspaceReadAndWriteDoNotPromptInAskMode(t *testing.T) {
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "a.go"), []byte("package x\n"), 0644); err != nil {
+		t.Fatalf("write source file: %v", err)
+	}
+
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool(workDir))
+	registry.Register(tools.NewListDirectoryTool(workDir))
+	registry.Register(tools.NewGrepTool(workDir))
+	registry.Register(tools.NewWriteFileTool(workDir))
+
+	readRequests := 0
+	writeRequests := 0
+	runner := newAgentToolRunner(PipelineConfigFromAgentOptions(agent.Options{
+		Cwd:              workDir,
+		Registry:         registry,
+		PermissionMode:   agent.PermissionModeAsk,
+		TrustedWorkspace: true,
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: workDir,
+			Policy:        sandbox.DefaultPolicy(),
+		}),
+		OnPermissionRequest: func(ctx context.Context, req agent.PermissionRequest) (agent.PermissionDecision, error) {
+			switch req.ToolName {
+			case "read_file":
+				readRequests++
+			case "write_file":
+				writeRequests++
+			}
+			return agent.PermissionDecision{Action: agent.PermissionDecisionDeny}, nil
+		},
+	}), workDir)
+
+	// Deterministic pipeline reads (read_file, list_directory) run inside the
+	// workspace and declare PermissionAllow, so they must not reach the
+	// permission request callback even in Ask mode.
+	for _, call := range []struct {
+		name string
+		args map[string]any
+	}{
+		{"read_file", map[string]any{"path": filepath.Join(workDir, "a.go")}},
+		{"list_directory", map[string]any{"path": workDir}},
+	} {
+		res, err := runner.RunTool(context.Background(), call.name, call.args)
+		if err != nil {
+			t.Fatalf("%s error = %v", call.name, err)
+		}
+		if !res.OK {
+			t.Fatalf("%s failed: %s", call.name, res.Output)
+		}
+	}
+	if readRequests != 0 {
+		t.Fatalf("trusted in-workspace reads triggered %d permission requests, want 0", readRequests)
+	}
+
+	// Trust auto-allows an in-workspace file mutation. The registry and sandbox
+	// still run the call and keep the path inside the workspace.
+	if res, err := runner.RunTool(context.Background(), "write_file", map[string]any{"path": "b.go", "content": "package x\n"}); err != nil || !res.OK {
+		t.Fatalf("trusted write_file failed: result=%#v err=%v", res, err)
+	}
+	if writeRequests != 0 {
+		t.Fatalf("trusted write_file triggered %d permission requests, want 0", writeRequests)
+	}
+
+	// An external path still prompts and is denied by the callback.
+	outParent, err := os.MkdirTemp(".", ".splice-trust-outside-")
+	if err != nil {
+		t.Fatalf("create external directory: %v", err)
+	}
+	defer os.RemoveAll(outParent)
+	outside, err := filepath.Abs(filepath.Join(outParent, "outside.go"))
+	if err != nil {
+		t.Fatalf("resolve external path: %v", err)
+	}
+	if res, _ := runner.RunTool(context.Background(), "write_file", map[string]any{"path": outside, "content": "package x\n"}); res.OK {
+		t.Fatal("external write_file unexpectedly succeeded")
+	}
+	if writeRequests != 1 {
+		t.Fatalf("external write_file triggered %d permission requests, want 1", writeRequests)
 	}
 }
 
@@ -1067,7 +1367,7 @@ func TestRunRejectsInvalidStageOutput(t *testing.T) {
 
 func TestRunPassModelFreeStageCapabilities(t *testing.T) {
 	workDir := t.TempDir()
-	capturer := &stageCallCapturer{calls: map[string]capturedStageCall{}}
+	capturer := &stageCallCapturer{calls: map[string]capturedStageCall{}, caps: stages.Capabilities{ModelFree: true}}
 	registry := stageRegistry{}
 	modelFreeNames := []string{"static_analyzer", "security_auditor", "test_runner"}
 	plan := schemas.ExecutionPlan{Tier: schemas.TierSubstantial, RequestIntent: "verify deterministically"}
@@ -1076,7 +1376,7 @@ func TestRunPassModelFreeStageCapabilities(t *testing.T) {
 		registry[name] = capturer
 	}
 	resolverCalls := 0
-	records, _, completed, err := runPass(context.Background(), "run-model-free", 1, plan, registry, &namedProvider{name: "default"}, agent.Options{
+	records, _, completed, err := runPass(context.Background(), "run-model-free", 1, plan, registry, &namedProvider{name: "default"}, PipelineConfigFromAgentOptions(agent.Options{
 		Model:           "default-model",
 		ReasoningEffort: "high",
 		ProviderName:    "default-provider",
@@ -1084,7 +1384,7 @@ func TestRunPassModelFreeStageCapabilities(t *testing.T) {
 			resolverCalls++
 			return agent.ModelSelection{Provider: &namedProvider{name: "unexpected"}, ProviderName: "unexpected-provider", Model: "unexpected-model", ReasoningEffort: "low"}, nil
 		},
-	}, workDir, nil, nil, nil)
+	}), workDir, nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
 	if err != nil {
 		t.Fatalf("runPass: %v", err)
 	}
@@ -1125,7 +1425,7 @@ func TestRunPassModelBackedAndCustomStageRouting(t *testing.T) {
 	}
 	routedProvider := &namedProvider{name: "routed"}
 	var resolved []string
-	records, _, completed, err := runPass(context.Background(), "run-model-backed", 1, plan, registry, &namedProvider{name: "default"}, agent.Options{
+	records, _, completed, err := runPass(context.Background(), "run-model-backed", 1, plan, registry, &namedProvider{name: "default"}, PipelineConfigFromAgentOptions(agent.Options{
 		Model:           "default-model",
 		ReasoningEffort: "medium",
 		ProviderName:    "default-provider",
@@ -1133,7 +1433,7 @@ func TestRunPassModelBackedAndCustomStageRouting(t *testing.T) {
 			resolved = append(resolved, stageName)
 			return agent.ModelSelection{Provider: routedProvider, ProviderName: "routed-provider", Model: "routed-model", ReasoningEffort: "high"}, nil
 		},
-	}, workDir, nil, nil, nil)
+	}), workDir, nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
 	if err != nil {
 		t.Fatalf("runPass: %v", err)
 	}
@@ -1307,7 +1607,7 @@ func TestRunStreamsStageToolArguments(t *testing.T) {
 	}
 }
 
-func TestRunHonorsMaxTurnsAsIterationCap(t *testing.T) {
+func TestRunMaxTurnsDoesNotCapPipelineIterations(t *testing.T) {
 	workDir, registry := newRunTestWorkspace(t)
 
 	result, err := Run(context.Background(), "add a security service with tests", runFailingProvider{}, agent.Options{
@@ -1315,12 +1615,13 @@ func TestRunHonorsMaxTurnsAsIterationCap(t *testing.T) {
 		Registry:       registry,
 		PermissionMode: agent.PermissionModeAuto,
 		MaxTurns:       1,
+		FileTracker:    tools.NewFileTracker(),
 	}, nil, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if !result.Incomplete {
-		t.Fatal("expected incomplete result when MaxTurns caps a failing run")
+		t.Fatal("expected incomplete result for a run that never succeeds")
 	}
 	var pipeline schemas.PipelineResult
 	if err := json.Unmarshal([]byte(result.FinalAnswer), &pipeline); err != nil {
@@ -1329,10 +1630,14 @@ func TestRunHonorsMaxTurnsAsIterationCap(t *testing.T) {
 	if pipeline.Status != "aborted" {
 		t.Fatalf("pipeline status = %s, want aborted", pipeline.Status)
 	}
+	maxIteration := 0
 	for _, record := range pipeline.Stages {
-		if record.Iteration > 1 {
-			t.Fatalf("found iteration %d despite MaxTurns=1", record.Iteration)
+		if record.Iteration > maxIteration {
+			maxIteration = record.Iteration
 		}
+	}
+	if maxIteration != defaultMaxIterations {
+		t.Fatalf("max pipeline iteration = %d, want %d despite MaxTurns=1", maxIteration, defaultMaxIterations)
 	}
 	if pipeline.AbortReason == nil || !strings.Contains(*pipeline.AbortReason, "Maximum iteration count reached") {
 		t.Fatalf("unexpected abort reason: %#v", pipeline.AbortReason)
@@ -1353,6 +1658,9 @@ func newRunTestWorkspace(t *testing.T) (string, *tools.Registry) {
 	registry.Register(tools.NewWriteFileTool(workDir))
 	registry.Register(tools.NewDeleteFileTool(workDir))
 	registry.Register(tools.NewBashTool(workDir))
+	// D-gate: the guarded raw seam backs the proposal base registry
+	// (host-seam-only; the model surface never sees this tool).
+	registry.Register(tools.NewScopedRawFileReadTool(workDir, nil))
 	return workDir, registry
 }
 
@@ -1423,6 +1731,12 @@ func TestSummarizeWorkspaceChangesGitAware(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
+	// Git-derived output requires the deterministic stage spawn to run, which
+	// needs a host native sandbox backend.
+	backend := sandbox.SelectBackend(sandbox.BackendOptions{})
+	if !backend.Available {
+		t.Skipf("host native sandbox backend unavailable: %s", backend.Message)
+	}
 	workDir := t.TempDir()
 	run := func(args ...string) {
 		cmd := exec.Command(args[0], args[1:]...)
@@ -1450,6 +1764,9 @@ func TestSummarizeWorkspaceChangesGitAware(t *testing.T) {
 	if !summary.IsRepo {
 		t.Fatal("expected IsRepo=true")
 	}
+	if summary.DegradedReason != "" {
+		t.Fatalf("DegradedReason = %q, want empty on the git happy path", summary.DegradedReason)
+	}
 	paths := make(map[string]string)
 	for _, f := range summary.ChangedFiles {
 		paths[f.Path] = f.Status
@@ -1468,14 +1785,137 @@ func TestSummarizeWorkspaceChangesGitAware(t *testing.T) {
 	}
 }
 
-func TestEmitStageEventProducesMarker(t *testing.T) {
+// noBackendPath builds a PATH directory that hides every native sandbox
+// backend executable while keeping the tools the test needs. It returns the
+// directory path and sets PATH for the caller's test.
+func noBackendPath(t *testing.T) string {
+	t.Helper()
+	binDir := t.TempDir()
+	for _, name := range []string{"git", "sh", "env", "uname", "python3"} {
+		resolved, err := exec.LookPath(name)
+		if err != nil {
+			t.Skipf("%s unavailable: %v", name, err)
+		}
+		if err := os.Symlink(resolved, filepath.Join(binDir, name)); err != nil {
+			t.Skipf("cannot symlink %s into the no-backend PATH: %v", name, err)
+		}
+	}
+	t.Setenv("PATH", binDir)
+	return binDir
+}
+
+// TestSummarizeWorkspaceChangesRepositoryWithoutConfinement is the T1 pin: a
+// real repository must stay a repository when the Git read is refused. The
+// summary walks the tree instead, reports IsRepo true, and names the cause in
+// DegradedReason.
+func TestSummarizeWorkspaceChangesRepositoryWithoutConfinement(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	workDir := t.TempDir()
+	run := func(args ...string) {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = workDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %s", args, out)
+		}
+	}
+	run("git", "init")
+	run("git", "config", "user.email", "test@splice.local")
+	run("git", "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(workDir, "main.go"), []byte("package main\n"), 0644); err != nil {
+		t.Fatalf("write main.go: %v", err)
+	}
+	run("git", "add", "main.go")
+	run("git", "commit", "-m", "initial")
+	if err := os.WriteFile(filepath.Join(workDir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644); err != nil {
+		t.Fatalf("modify main.go: %v", err)
+	}
+	noBackendPath(t)
+
+	summary := summarizeWorkspaceChanges(context.Background(), workDir)
+	if !summary.IsRepo {
+		t.Fatal("a repository must stay a repository without confinement: IsRepo=false")
+	}
+	if summary.DegradedReason == "" {
+		t.Fatal("DegradedReason must be non-empty when the Git read could not run")
+	}
+	if !strings.Contains(summary.DegradedReason, "git") {
+		t.Fatalf("DegradedReason must name the cause, got %q", summary.DegradedReason)
+	}
+	if len(summary.ChangedFiles) == 0 {
+		t.Fatal("changed-file list must still be populated from the walk")
+	}
+	if err := summary.Validate(); err != nil {
+		t.Fatalf("degraded repository summary must validate: %v", err)
+	}
+}
+
+// TestSummarizeWorkspaceChangesPlainDirectoryUnchanged is the T2 pin: a plain
+// directory keeps IsRepo false and an empty DegradedReason.
+func TestSummarizeWorkspaceChangesPlainDirectoryUnchanged(t *testing.T) {
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "a.txt"), []byte("hello\n"), 0644); err != nil {
+		t.Fatalf("write a.txt: %v", err)
+	}
+	summary := summarizeWorkspaceChanges(context.Background(), workDir)
+	if summary.IsRepo {
+		t.Fatal("plain directory must not be a repository")
+	}
+	if summary.DegradedReason != "" {
+		t.Fatalf("DegradedReason = %q, want empty for a non-repository", summary.DegradedReason)
+	}
+	if err := summary.Validate(); err != nil {
+		t.Fatalf("plain directory summary must validate: %v", err)
+	}
+}
+
+func TestEmitPipelinePlanProducesTypedStageRoster(t *testing.T) {
+	var events []agent.PipelinePlanEvent
+	options := PipelineConfigFromAgentOptions(agent.Options{
+		OnPipelinePlan: func(event agent.PipelinePlanEvent) { events = append(events, event) },
+	})
+	plan := schemas.ExecutionPlan{
+		Tier: schemas.TierStandard,
+		Stages: []schemas.ExecutionStage{
+			{Name: "code_writer"},
+			{Name: "test_runner"},
+			{Name: "acceptance_verifier"},
+		},
+	}
+
+	emitPipelinePlan(options, plan)
+
+	if len(events) != 1 {
+		t.Fatalf("pipeline plan events = %d, want 1", len(events))
+	}
+	want := []string{"code_writer", "test_runner", "acceptance_verifier"}
+	if !slices.Equal(events[0].Stages, want) {
+		t.Fatalf("planned stages = %v, want %v", events[0].Stages, want)
+	}
+}
+
+func TestEmitStageEventProducesTypedEventAndMarker(t *testing.T) {
 	var got []string
-	options := agent.Options{OnReasoning: func(s string) { got = append(got, s) }}
+	var events []agent.StageEvent
+	options := PipelineConfigFromAgentOptions(agent.Options{
+		OnReasoning:  func(s string) { got = append(got, s) },
+		OnStageEvent: func(event agent.StageEvent) { events = append(events, event) },
+	})
 
-	emitStageEvent(options, "code_writer", "running", "writing files", 50, []string{"main.go"})
+	emitStageEvent(options, 0, "code_writer", "running", "writing files", 50, []string{"main.go"})
 
+	if len(events) != 1 {
+		t.Fatalf("expected 1 typed stage event, got %d", len(events))
+	}
+	if events[0].Name != "code_writer" || events[0].Status != "running" || events[0].Progress != 50 {
+		t.Fatalf("typed event = %+v", events[0])
+	}
+	if len(events[0].ChangedFiles) != 1 || events[0].ChangedFiles[0] != "main.go" {
+		t.Fatalf("changed files = %v", events[0].ChangedFiles)
+	}
 	if len(got) != 1 {
-		t.Fatalf("expected 1 reasoning call, got %d", len(got))
+		t.Fatalf("expected 1 reasoning marker, got %d", len(got))
 	}
 	line := got[0]
 	if !strings.HasPrefix(line, stageEventMarkerBegin) || !strings.HasSuffix(line, stageEventMarkerEnd) {
@@ -1498,8 +1938,8 @@ func TestEmitStageEventProducesMarker(t *testing.T) {
 }
 
 func TestEmitStageEventNilOnReasoning(t *testing.T) {
-	options := agent.Options{}
-	emitStageEvent(options, "code_writer", "running", "", 0, nil)
+	options := PipelineConfigFromAgentOptions(agent.Options{})
+	emitStageEvent(options, 0, "code_writer", "running", "", 0, nil)
 	// Should not panic.
 }
 
@@ -1512,11 +1952,15 @@ func (failure meteredStageFailure) StageUsage() *schemas.StageUsage { return fai
 
 type meteredFailingStage struct{}
 
+func (meteredFailingStage) Capabilities() stages.Capabilities { return stages.Capabilities{} }
+
 func (meteredFailingStage) Run(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
 	return schemas.HarnessStageOutput{}, meteredStageFailure{usage: &schemas.StageUsage{InputTokens: 12, OutputTokens: 7, CachedInputTokens: 3}}
 }
 
 type terminalDetailStage struct{}
+
+func (terminalDetailStage) Capabilities() stages.Capabilities { return stages.Capabilities{} }
 
 func (terminalDetailStage) Run(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
 	return schemas.HarnessStageOutput{}, errors.New(`provider request error: {"detail":"Unsupported parameter: max_output_tokens"}`)
@@ -1530,7 +1974,7 @@ func TestRunTerminalStageFailureIncludesOutputSummary(t *testing.T) {
 	}
 	result, err := runIterationLoop(context.Background(), "run-terminal-failure", plan, stageRegistry{
 		"terminal_failure": terminalDetailStage{},
-	}, runFakeProvider{}, agent.Options{MaxTurns: 1}, t.TempDir(), nil, nil, nil)
+	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 1}), t.TempDir(), nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -1541,8 +1985,350 @@ func TestRunTerminalStageFailureIncludesOutputSummary(t *testing.T) {
 		t.Fatalf("abort reason = %#v, want terminal stage detail", result.AbortReason)
 	}
 	reason := *result.AbortReason
-	if !strings.HasPrefix(reason, "stage failed in iteration 1: ") || !strings.Contains(reason, `provider request error: {"detail":"Unsupported parameter: max_output_tokens"}`) {
-		t.Fatalf("abort reason = %q, want terminal stage detail", reason)
+	// MaxTurns=1 no longer suppresses stage-failure recovery, so the identical
+	// terminal failure is retried once and then reported as repeated. The
+	// terminal detail must still be preserved in the abort reason.
+	if !strings.Contains(reason, "repeated unchanged stage failure") || !strings.Contains(reason, `provider request error: {"detail":"Unsupported parameter: max_output_tokens"}`) {
+		t.Fatalf("abort reason = %q, want repeated unchanged stage failure with terminal detail", reason)
+	}
+}
+
+type repeatedContextFailureStage struct {
+	calls int
+	err   error
+}
+
+func (*repeatedContextFailureStage) Capabilities() stages.Capabilities { return stages.Capabilities{} }
+
+func (stage *repeatedContextFailureStage) Run(_ context.Context, input schemas.HarnessStageInput, _ zeroruntime.Provider, _ stages.StageOptions) (schemas.HarnessStageOutput, error) {
+	stage.calls++
+	if input.Context == nil {
+		return schemas.HarnessStageOutput{
+			Summary:    "inspect files",
+			Confidence: 0.5,
+			ContextRequest: &schemas.ContextRequest{
+				Reason:  "inspect files",
+				Queries: []schemas.ContextQuery{{QueryType: schemas.ContextListFiles, MaxResults: 100, MaxChars: 1000}},
+			},
+		}, nil
+	}
+	return schemas.HarnessStageOutput{}, stage.err
+}
+
+func TestRunIterationLoopStopsRepeatedIdenticalStageFailure(t *testing.T) {
+	stage := &repeatedContextFailureStage{err: errors.New("stream error: auth error: invalid API key")}
+	toolCalls := 0
+	runner := ToolRunnerFunc(func(context.Context, string, map[string]any) (ToolResult, error) {
+		toolCalls++
+		return ToolResult{OK: true, Output: "Contents of .:\nmain.go"}, nil
+	})
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		RequestIntent: "reproduce repeated stage failure",
+		Stages:        []schemas.ExecutionStage{{Name: "code_writer"}},
+	}
+
+	result, err := runIterationLoop(context.Background(), "run-repeated-failure", plan, stageRegistry{
+		"code_writer": stage,
+	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 50}), t.TempDir(), runner, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	if result.Status != "failed" {
+		t.Fatalf("status = %q, want failed", result.Status)
+	}
+	if stage.calls != 4 || toolCalls != 2 {
+		t.Fatalf("stage calls = %d, tool calls = %d; want 4/2 before abort", stage.calls, toolCalls)
+	}
+	if reason := DerefString(result.AbortReason); !strings.Contains(reason, "repeated unchanged stage failure") {
+		t.Fatalf("abort reason = %q, want repeated failure", reason)
+	}
+}
+
+type changingFailureStage struct{ calls int }
+
+func (*changingFailureStage) Capabilities() stages.Capabilities { return stages.Capabilities{} }
+
+func (stage *changingFailureStage) Run(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+	stage.calls++
+	return schemas.HarnessStageOutput{}, fmt.Errorf("failure %d", stage.calls)
+}
+
+func TestRunIterationLoopCapsChangingStageFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		maxTurns int
+	}{
+		{name: "max turns below pipeline cap", maxTurns: 3},
+		{name: "max turns above pipeline cap", maxTurns: 50},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stage := &changingFailureStage{}
+			plan := schemas.ExecutionPlan{
+				Tier:          schemas.TierLight,
+				RequestIntent: "bound changing stage failures",
+				Stages:        []schemas.ExecutionStage{{Name: "code_writer"}},
+			}
+
+			result, err := runIterationLoop(context.Background(), "run-changing-failure", plan, stageRegistry{
+				"code_writer": stage,
+			}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{MaxTurns: tc.maxTurns}), t.TempDir(), nil, nil, nil, nil, nil, nil)
+			if err != nil {
+				t.Fatalf("runIterationLoop: %v", err)
+			}
+			if result.Status != "failed" {
+				t.Fatalf("status = %q, want failed", result.Status)
+			}
+			if stage.calls != defaultMaxIterations {
+				t.Fatalf("changing failing stage calls = %d, want %d", stage.calls, defaultMaxIterations)
+			}
+		})
+	}
+}
+
+// incompleteCheckerStage is a model-free verification producer whose required
+// check cannot run. The report is valid: incomplete requires complete=false and
+// at least one required incomplete tool run.
+type incompleteCheckerStage struct {
+	calls int
+}
+
+func (*incompleteCheckerStage) Capabilities() stages.Capabilities {
+	return stages.Capabilities{ModelFree: true}
+}
+
+func (stage *incompleteCheckerStage) Run(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+	stage.calls++
+	report := schemas.VerificationReport{
+		Status:   schemas.VerificationIncomplete,
+		Complete: false,
+		Summary:  "required checker unavailable",
+		Tools: []schemas.VerificationToolRun{{
+			Tool: "checker", Required: true, Scope: "quality",
+			Status: schemas.VerificationIncomplete, Summary: "checker not installed",
+		}},
+	}
+	if err := report.Validate(); err != nil {
+		return schemas.HarnessStageOutput{}, err
+	}
+	return schemas.HarnessStageOutput{
+		Summary:    report.Summary,
+		Confidence: 1,
+		Data:       map[string]any{VerificationReportKey: report},
+	}, nil
+}
+
+// TestRunIterationLoopRefusesCompletionOnIncompleteVerification pins the P0
+// rule that a pass whose required verification could not run is not a success.
+// The run must not report completed. An unavailable checker is not repaired by
+// another model pass, so the run fails once with a reason that names the stage
+// and the tool summary.
+func TestRunIterationLoopRefusesCompletionOnIncompleteVerification(t *testing.T) {
+	stage := &incompleteCheckerStage{}
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		RequestIntent: "incomplete required verification",
+		Stages:        []schemas.ExecutionStage{{Name: "static_analyzer", Caps: &schemas.NodeCapabilities{ModelFree: true, ProducesVerification: true}}},
+	}
+	result, err := runIterationLoop(context.Background(), "run-incomplete-verification", plan, stageRegistry{
+		"static_analyzer": stage,
+	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 50}), t.TempDir(), nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	if result.Status == "completed" {
+		t.Fatalf("status = completed while required verification was incomplete; stages = %+v", result.Stages)
+	}
+	if result.Status != "failed" {
+		t.Fatalf("status = %q, want failed", result.Status)
+	}
+	if stage.calls != 1 {
+		t.Fatalf("verification stage calls = %d, want 1: a pass cannot repair an unavailable checker", stage.calls)
+	}
+	reason := DerefString(result.AbortReason)
+	for _, want := range []string{"static_analyzer", "required checker unavailable", "incomplete"} {
+		if !strings.Contains(reason, want) {
+			t.Fatalf("abort reason = %q, want it to contain %q", reason, want)
+		}
+	}
+}
+
+// notApplicableCheckerStage is a model-free verification producer for a
+// workspace where no check applies. Its report is valid and carries no
+// incomplete tool.
+type notApplicableCheckerStage struct{}
+
+func (notApplicableCheckerStage) Capabilities() stages.Capabilities {
+	return stages.Capabilities{ModelFree: true}
+}
+
+func (notApplicableCheckerStage) Run(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+	report := schemas.VerificationReport{
+		Status:   schemas.VerificationNotApplicable,
+		Complete: true,
+		Summary:  "No applicable files to verify.",
+	}
+	if err := report.Validate(); err != nil {
+		return schemas.HarnessStageOutput{}, err
+	}
+	return schemas.HarnessStageOutput{
+		Summary:    report.Summary,
+		Confidence: 1,
+		Data:       map[string]any{VerificationReportKey: report},
+	}, nil
+}
+
+// TestRunIterationLoopSkipsNotApplicableVerification pins the rule that no
+// applicable check is a skip, not a failure: the run does not fail, and the
+// stage record reads skipped.
+func TestRunIterationLoopSkipsNotApplicableVerification(t *testing.T) {
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		RequestIntent: "nothing to verify",
+		Stages:        []schemas.ExecutionStage{{Name: "static_analyzer", Caps: &schemas.NodeCapabilities{ModelFree: true, ProducesVerification: true}}},
+	}
+	result, err := runIterationLoop(context.Background(), "run-not-applicable", plan, stageRegistry{
+		"static_analyzer": notApplicableCheckerStage{},
+	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 50}), t.TempDir(), nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	if result.Status != "completed" {
+		t.Fatalf("status = %q, want completed: a skipped check must not fail the run; abort = %q", result.Status, DerefString(result.AbortReason))
+	}
+	if len(result.Stages) != 1 || result.Stages[0].Status != schemas.StageSkipped {
+		t.Fatalf("stages = %+v, want one skipped static_analyzer record", result.Stages)
+	}
+	if result.Verified {
+		t.Fatal("verified = true with no check applied; a completed run that verified nothing is not verified")
+	}
+	if !strings.Contains(result.UnverifiedReason, "static_analyzer") {
+		t.Fatalf("unverified reason = %q, want it to name static_analyzer", result.UnverifiedReason)
+	}
+}
+
+// passedCheckerStage is a model-free verification producer whose check ran and
+// passed.
+type passedCheckerStage struct{}
+
+func (passedCheckerStage) Capabilities() stages.Capabilities {
+	return stages.Capabilities{ModelFree: true}
+}
+
+func (passedCheckerStage) Run(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+	report := schemas.VerificationReport{
+		Status:   schemas.VerificationPassed,
+		Complete: true,
+		Summary:  "All applicable verification checks passed.",
+		Tools:    []schemas.VerificationToolRun{{Tool: "go_syntax", Required: true, Scope: "quality", Status: schemas.VerificationPassed, Summary: "ok"}},
+	}
+	if err := report.Validate(); err != nil {
+		return schemas.HarnessStageOutput{}, err
+	}
+	return schemas.HarnessStageOutput{Summary: report.Summary, Confidence: 1, Data: map[string]any{VerificationReportKey: report}}, nil
+}
+
+// TestRunIterationLoopVerifiedOnlyWhenACheckPasses pins the verified flag: a
+// passing check makes the completed run verified, and nothing else does.
+func TestRunIterationLoopVerifiedOnlyWhenACheckPasses(t *testing.T) {
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		RequestIntent: "one passing check",
+		Stages:        []schemas.ExecutionStage{{Name: "static_analyzer", Caps: &schemas.NodeCapabilities{ModelFree: true, ProducesVerification: true}}},
+	}
+	result, err := runIterationLoop(context.Background(), "run-verified", plan, stageRegistry{
+		"static_analyzer": passedCheckerStage{},
+	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 50}), t.TempDir(), nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	if result.Status != "completed" || !result.Verified {
+		t.Fatalf("status = %q verified = %v, want completed and verified", result.Status, result.Verified)
+	}
+	if result.UnverifiedReason != "" {
+		t.Fatalf("unverified reason = %q on a verified run, want empty", result.UnverifiedReason)
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(raw), `"verified":true`) {
+		t.Fatalf("result JSON %s lacks verified:true", raw)
+	}
+}
+
+// TestPassVerificationRules pins which records and reports verify a pass.
+func TestPassVerificationRules(t *testing.T) {
+	passedReport := func() schemas.HarnessStageOutput {
+		return schemas.HarnessStageOutput{Data: map[string]any{VerificationReportKey: schemas.VerificationReport{Status: schemas.VerificationPassed, Complete: true, Summary: "ok"}}}
+	}
+	noTests := schemas.HarnessStageOutput{Data: map[string]any{"test_results": schemas.TestRunResults{Command: []string{"<none>"}, Tests: []schemas.TestCaseResult{{Name: "suite", Status: "skipped"}}}}}
+	ranTests := schemas.HarnessStageOutput{Data: map[string]any{"test_results": schemas.TestRunResults{Command: []string{"go", "test"}, Tests: []schemas.TestCaseResult{{Name: "TestA", Status: "passed"}}}}}
+	failedTests := schemas.HarnessStageOutput{Data: map[string]any{"test_results": schemas.TestRunResults{Command: []string{"go", "test"}, Tests: []schemas.TestCaseResult{{Name: "TestA", Status: "failed"}}}}}
+	skipped := schemas.StageRecord{Name: "static_analyzer", Status: schemas.StageSkipped, OutputSummary: Ptr("No applicable files to verify.")}
+	// A report with no applicable checks is never a pass, even when an
+	// optional tool was missing.
+	notApplicable := schemas.HarnessStageOutput{Data: map[string]any{VerificationReportKey: schemas.VerificationReport{Status: schemas.VerificationNotApplicable, Complete: true, Summary: "nothing to verify"}}}
+
+	tests := []struct {
+		name       string
+		records    []schemas.StageRecord
+		outputs    []schemas.HarnessStageOutput
+		wantOK     bool
+		wantReason string
+	}{
+		{name: "passed report", outputs: []schemas.HarnessStageOutput{passedReport()}, wantOK: true},
+		{name: "not-applicable report never verifies", outputs: []schemas.HarnessStageOutput{notApplicable}, wantReason: "no verification check passed"},
+		{name: "tests ran and passed", outputs: []schemas.HarnessStageOutput{ranTests}, wantOK: true},
+		{name: "tests failed do not verify", outputs: []schemas.HarnessStageOutput{failedTests}, wantReason: "no verification check passed"},
+		{name: "skipped check names the stage", records: []schemas.StageRecord{skipped}, wantReason: "no check applied: static_analyzer (No applicable files to verify.)"},
+		{name: "no tests ran", outputs: []schemas.HarnessStageOutput{noTests}, wantReason: "no check applied: tests (no tests ran)"},
+		{name: "incomplete stage never verifies", records: []schemas.StageRecord{{Name: "static_analyzer", Status: schemas.StageIncomplete}}, outputs: []schemas.HarnessStageOutput{passedReport()}, wantReason: "verification did not finish at stage static_analyzer"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ok, reason := passVerification(tt.records, tt.outputs)
+			if ok != tt.wantOK {
+				t.Fatalf("verified = %v, want %v (reason %q)", ok, tt.wantOK, reason)
+			}
+			if tt.wantReason != "" && reason != tt.wantReason {
+				t.Fatalf("reason = %q, want %q", reason, tt.wantReason)
+			}
+			if ok && reason != "" {
+				t.Fatalf("verified run has reason %q", reason)
+			}
+		})
+	}
+}
+
+// TestCaptureOutcomeRequiresVerifiedRun pins that graph capture reads the
+// verified flag: a completed run that verified nothing captures nothing.
+func TestCaptureOutcomeRequiresVerifiedRun(t *testing.T) {
+	if got := captureOutcomeStatus(schemas.PipelineResult{Status: "completed", Verified: false}); got != "unverified" {
+		t.Fatalf("completed unverified run maps to %q, want unverified", got)
+	}
+	if got := captureOutcomeStatus(schemas.PipelineResult{Status: "completed", Verified: true}); got != "completed" {
+		t.Fatalf("verified run maps to %q, want completed", got)
+	}
+	if got := captureOutcomeStatus(schemas.PipelineResult{Status: "failed", Verified: true}); got != "failed" {
+		t.Fatalf("failed run maps to %q, want failed", got)
+	}
+	if captures := captureFromVerifiedRun("/repo", captureOutcomeStatus(schemas.PipelineResult{Status: "completed"}), []string{"main.go"}, "go test ./...", "rev", "run-1"); len(captures) != 0 {
+		t.Fatalf("unverified run captured %d record(s), want none", len(captures))
+	}
+}
+
+// TestCaptureFromVerifiedRunRequiresCompletedStatus pairs the graph-capture
+// consumer with the completion gate. Only a completed run may write durable
+// cognition, so no other outcome captures a fact or a procedure.
+func TestCaptureFromVerifiedRunRequiresCompletedStatus(t *testing.T) {
+	for _, status := range []string{"failed", "aborted", "incomplete", "unverified"} {
+		if captures := captureFromVerifiedRun("/repo", status, []string{"main.go"}, "go test ./...", "rev", "run-1"); len(captures) != 0 {
+			t.Fatalf("status %q captured %d record(s), want none", status, len(captures))
+		}
+	}
+	if captures := captureFromVerifiedRun("/repo", "completed", []string{"main.go"}, "", "rev", "run-1"); len(captures) != 1 {
+		t.Fatalf("completed run captured %d record(s), want 1", len(captures))
 	}
 }
 
@@ -1554,7 +2340,7 @@ func TestRunPassRecordsUsageFromFailedTypedOutput(t *testing.T) {
 	}
 	records, _, completed, err := runPass(context.Background(), "run-metered-failure", 1, plan, stageRegistry{
 		"metered_failure": meteredFailingStage{},
-	}, runFakeProvider{}, agent.Options{Model: "qwen-local", ProviderName: "ollama"}, t.TempDir(), nil, nil, nil)
+	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{Model: "qwen-local", ProviderName: "ollama"}), t.TempDir(), nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
 	if err != nil || completed {
 		t.Fatalf("runPass err=%v completed=%v, want recorded stage failure", err, completed)
 	}
@@ -1583,7 +2369,7 @@ func TestRunPassEmitsStageEvents(t *testing.T) {
 	retriever := &stubStore{}
 	_, _, completed, err := runPass(context.Background(), "run-stage-test", 1, plan, stageRegistry{
 		"memory_stage": &capturingStage{inputs: &inputs},
-	}, runFakeProvider{}, agent.Options{OnReasoning: func(s string) { reasoning = append(reasoning, s) }}, workDir, nil, nil, retriever)
+	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{OnReasoning: func(s string) { reasoning = append(reasoning, s) }}), workDir, nil, time.Time{}, nil, retriever, nil, NewStageExecutionBudget(0))
 	if err != nil || !completed {
 		t.Fatalf("runPass failed: err=%v completed=%v", err, completed)
 	}
@@ -1619,6 +2405,154 @@ func TestRunPassEmitsStageEvents(t *testing.T) {
 	}
 }
 
+func TestRunningStageEventCarriesDescription(t *testing.T) {
+	const description = "checking the stage detail"
+	var events []agent.StageEvent
+	var inputs []schemas.HarnessStageInput
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		RequestIntent: "test stage detail",
+		Stages:        []schemas.ExecutionStage{{Name: "described_stage"}},
+	}
+	_, _, completed, err := runPass(context.Background(), "run-stage-detail", 1, plan, stageRegistry{
+		"described_stage": &capturingStage{inputs: &inputs, caps: stages.Capabilities{Description: description}},
+	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{
+		OnStageEvent: func(event agent.StageEvent) { events = append(events, event) },
+	}), t.TempDir(), nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
+	if err != nil || !completed {
+		t.Fatalf("runPass failed: err=%v completed=%v", err, completed)
+	}
+	if len(events) < 2 {
+		t.Fatalf("events = %d, want running and completed", len(events))
+	}
+	running := events[0]
+	if running.Status != "running" || running.Detail != description || running.Progress != 0 {
+		t.Fatalf("running event = %+v, want detail %q and progress 0", running, description)
+	}
+}
+
+func TestRunningStageEventOmitsEmptyDescription(t *testing.T) {
+	var events []agent.StageEvent
+	var inputs []schemas.HarnessStageInput
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		RequestIntent: "test empty stage detail",
+		Stages:        []schemas.ExecutionStage{{Name: "empty_description_stage"}},
+	}
+	_, _, completed, err := runPass(context.Background(), "run-empty-stage-detail", 1, plan, stageRegistry{
+		"empty_description_stage": &capturingStage{inputs: &inputs},
+	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{
+		OnStageEvent: func(event agent.StageEvent) { events = append(events, event) },
+	}), t.TempDir(), nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
+	if err != nil || !completed {
+		t.Fatalf("runPass failed: err=%v completed=%v", err, completed)
+	}
+	if len(events) < 2 {
+		t.Fatalf("events = %d, want running and completed", len(events))
+	}
+	running := events[0]
+	if running.Status != "running" || running.Detail != "" || running.Progress != 0 {
+		t.Fatalf("running event = %+v, want empty detail and progress 0", running)
+	}
+}
+
+func TestModelBackedStageEventNamesModel(t *testing.T) {
+	t.Run("model-backed", func(t *testing.T) {
+		const description = "writing code changes"
+		const model = "claude-opus-5"
+		var events []agent.StageEvent
+		var inputs []schemas.HarnessStageInput
+		plan := schemas.ExecutionPlan{
+			Tier:          schemas.TierLight,
+			RequestIntent: "test resolved model detail",
+			Stages:        []schemas.ExecutionStage{{Name: "model_stage"}},
+		}
+		_, _, completed, err := runPass(context.Background(), "run-model-stage-detail", 1, plan, stageRegistry{
+			"model_stage": &capturingStage{inputs: &inputs, caps: stages.Capabilities{Description: description}},
+		}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{
+			StageModelResolver: func(string) (agent.ModelSelection, error) {
+				return agent.ModelSelection{Provider: &namedProvider{name: "resolved-provider"}, ProviderName: "resolved-provider", Model: model}, nil
+			},
+			OnStageEvent: func(event agent.StageEvent) { events = append(events, event) },
+		}), t.TempDir(), nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
+		if err != nil || !completed {
+			t.Fatalf("runPass failed: err=%v completed=%v", err, completed)
+		}
+		if len(events) < 3 {
+			t.Fatalf("events = %d, want two running events and completed", len(events))
+		}
+		if events[0].Status != "running" || events[0].Detail != description || events[0].Progress != 0 {
+			t.Fatalf("initial running event = %+v", events[0])
+		}
+		if events[1].Status != "running" || events[1].Detail != description+" · "+model || events[1].Progress != 0 {
+			t.Fatalf("resolved running event = %+v", events[1])
+		}
+	})
+
+	t.Run("model-free", func(t *testing.T) {
+		var events []agent.StageEvent
+		var inputs []schemas.HarnessStageInput
+		resolverCalls := 0
+		plan := schemas.ExecutionPlan{
+			Tier:          schemas.TierLight,
+			RequestIntent: "test model-free stage detail",
+			Stages:        []schemas.ExecutionStage{{Name: "model_free_stage"}},
+		}
+		_, _, completed, err := runPass(context.Background(), "run-model-free-stage-detail", 1, plan, stageRegistry{
+			"model_free_stage": &capturingStage{inputs: &inputs, caps: stages.Capabilities{ModelFree: true, Description: "running local checks"}},
+		}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{
+			StageModelResolver: func(string) (agent.ModelSelection, error) {
+				resolverCalls++
+				return agent.ModelSelection{Provider: &namedProvider{name: "unexpected"}, Model: "unexpected-model"}, nil
+			},
+			OnStageEvent: func(event agent.StageEvent) { events = append(events, event) },
+		}), t.TempDir(), nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
+		if err != nil || !completed {
+			t.Fatalf("runPass failed: err=%v completed=%v", err, completed)
+		}
+		if resolverCalls != 0 {
+			t.Fatalf("resolver calls = %d, want 0", resolverCalls)
+		}
+		runningCount := 0
+		for _, event := range events {
+			if event.Status == "running" {
+				runningCount++
+			}
+		}
+		if runningCount != 1 {
+			t.Fatalf("running event count = %d, want 1: %+v", runningCount, events)
+		}
+	})
+
+	t.Run("model-backed-empty-description", func(t *testing.T) {
+		const model = "claude-opus-5"
+		var events []agent.StageEvent
+		var inputs []schemas.HarnessStageInput
+		plan := schemas.ExecutionPlan{
+			Tier:          schemas.TierLight,
+			RequestIntent: "test empty resolved model detail",
+			Stages:        []schemas.ExecutionStage{{Name: "empty_model_stage"}},
+		}
+		_, _, completed, err := runPass(context.Background(), "run-empty-model-stage-detail", 1, plan, stageRegistry{
+			"empty_model_stage": &capturingStage{inputs: &inputs, caps: stages.Capabilities{}},
+		}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{
+			StageModelResolver: func(string) (agent.ModelSelection, error) {
+				return agent.ModelSelection{Provider: &namedProvider{name: "resolved-provider"}, Model: model}, nil
+			},
+			OnStageEvent: func(event agent.StageEvent) { events = append(events, event) },
+		}), t.TempDir(), nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
+		if err != nil || !completed {
+			t.Fatalf("runPass failed: err=%v completed=%v", err, completed)
+		}
+		if len(events) < 3 {
+			t.Fatalf("events = %d, want two running events and completed", len(events))
+		}
+		if events[1].Detail != model {
+			t.Fatalf("resolved running detail = %q, want %q", events[1].Detail, model)
+		}
+	})
+}
+
 func TestRunPassEmitsStageEventsWithChangedFiles(t *testing.T) {
 	workDir := t.TempDir()
 	intent := "test task"
@@ -1650,7 +2584,7 @@ func TestRunPassEmitsStageEventsWithChangedFiles(t *testing.T) {
 	retriever := &stubStore{}
 	_, _, completed, err := runPass(context.Background(), "run-changed-files", 1, plan, stageRegistry{
 		"code_writer": stage,
-	}, runFakeProvider{}, agent.Options{OnReasoning: func(s string) { reasoning = append(reasoning, s) }}, workDir, nil, nil, retriever)
+	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{OnReasoning: func(s string) { reasoning = append(reasoning, s) }}), workDir, nil, time.Time{}, nil, retriever, nil, NewStageExecutionBudget(0))
 	if err != nil || !completed {
 		t.Fatalf("runPass failed: err=%v completed=%v", err, completed)
 	}
@@ -1694,7 +2628,7 @@ func TestStepBackIntegration(t *testing.T) {
 		TokenBudget: schemas.TokenBudget{
 			TotalInputBudget:  100000,
 			TotalOutputBudget: 100000,
-			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000, ModelTier: "small"}},
+			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000}},
 			OverflowPolicy:    "abort",
 		},
 	}
@@ -1713,12 +2647,12 @@ func TestStepBackIntegration(t *testing.T) {
 		plan,
 		stageRegistry{"code_writer": ps},
 		provider,
-		agent.Options{Cwd: workDir, MaxTurns: 5},
+		PipelineConfigFromAgentOptions(agent.Options{Cwd: workDir, MaxTurns: 5}),
 		workDir,
 		nil,
 		nil,
-		nil,
-	)
+		nil, nil,
+		nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -1743,6 +2677,60 @@ func TestStepBackIntegration(t *testing.T) {
 	}
 }
 
+// TestStepBackCarriesRunControls pins that the auxiliary step-back request
+// carries the same run controls as a stage call: the resolved reasoning
+// effort, a bounded per-request output cap, and the pipeline deadline. Without
+// them the request ignored the run's effort and could outlive the wall budget.
+func TestStepBackCarriesRunControls(t *testing.T) {
+	workDir := t.TempDir()
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		RequestIntent: "step back controls test",
+		Stages:        []schemas.ExecutionStage{{Name: "code_writer"}},
+		TokenBudget: schemas.TokenBudget{
+			TotalInputBudget:  100000,
+			TotalOutputBudget: 100000,
+			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000}},
+			OverflowPolicy:    "abort",
+		},
+	}
+	provider := &stepBackRunFakeProvider{analysis: schemas.StepBackAnalysis{
+		HypothesizedRootCause: "test hypothesis",
+		RecommendedApproach:   "test approach",
+		Confidence:            0.8,
+	}}
+
+	result, err := runIterationLoop(
+		context.Background(),
+		"step-back-controls",
+		plan,
+		stageRegistry{"code_writer": &plateauStage{}},
+		provider,
+		PipelineConfigFromAgentOptions(agent.Options{Cwd: workDir, MaxTurns: 5, ReasoningEffort: "low"}),
+		workDir,
+		nil,
+		nil,
+		nil, nil,
+		nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	if provider.stepBackCallCount == 0 {
+		t.Fatalf("step-back did not run; status=%q reason=%q", result.Status, DerefString(result.AbortReason))
+	}
+	for i, request := range provider.requests {
+		if request.ReasoningEffort != "low" {
+			t.Fatalf("request %d reasoning effort = %q, want low", i, request.ReasoningEffort)
+		}
+		if request.MaxOutputTokens != stepBackOutputMax {
+			t.Fatalf("request %d output cap = %d, want %d", i, request.MaxOutputTokens, stepBackOutputMax)
+		}
+		if !provider.deadlines[i] {
+			t.Fatalf("request %d has no pipeline deadline", i)
+		}
+	}
+}
+
 // plateauStage implements stages.Stage and produces distinct code content on
 // every call while keeping the test score flat (1 pass, 1 fail). The distinct
 // content avoids the trajectory cycle-detection rule, so the plateau rule
@@ -1751,8 +2739,15 @@ type plateauStage struct {
 	calls int
 }
 
+func (*plateauStage) Capabilities() stages.Capabilities { return stages.Capabilities{} }
+
 func (s *plateauStage) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options stages.StageOptions) (schemas.HarnessStageOutput, error) {
 	s.calls++
+	if options.WorkDir != "" {
+		if err := os.WriteFile(filepath.Join(options.WorkDir, fmt.Sprintf("plateau-%d.go", s.calls)), []byte("package x\n"), 0o644); err != nil {
+			return schemas.HarnessStageOutput{}, err
+		}
+	}
 	return schemas.HarnessStageOutput{
 		Summary:    "plateau output",
 		Confidence: 0.7,
@@ -1779,6 +2774,8 @@ func (s *plateauStage) Run(ctx context.Context, input schemas.HarnessStageInput,
 type stepBackRunFakeProvider struct {
 	analysis          schemas.StepBackAnalysis
 	stepBackCallCount int
+	requests          []zeroruntime.CompletionRequest
+	deadlines         []bool
 }
 
 func (f *stepBackRunFakeProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
@@ -1791,6 +2788,9 @@ func (f *stepBackRunFakeProvider) StreamCompletion(ctx context.Context, request 
 	switch toolName {
 	case "submit_step_back":
 		f.stepBackCallCount++
+		_, hasDeadline := ctx.Deadline()
+		f.requests = append(f.requests, request)
+		f.deadlines = append(f.deadlines, hasDeadline)
 		b, _ := json.Marshal(f.analysis)
 		args = string(b)
 	case "submit_code":
@@ -1825,6 +2825,8 @@ type cycleStage struct {
 	calls     int
 	providers []agent.Provider
 }
+
+func (*cycleStage) Capabilities() stages.Capabilities { return stages.Capabilities{} }
 
 func (s *cycleStage) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options stages.StageOptions) (schemas.HarnessStageOutput, error) {
 	s.calls++
@@ -1889,7 +2891,7 @@ func TestRunEscalatesOnCycle(t *testing.T) {
 		TokenBudget: schemas.TokenBudget{
 			TotalInputBudget:  100000,
 			TotalOutputBudget: 100000,
-			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000, ModelTier: "small"}},
+			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000}},
 			OverflowPolicy:    "abort",
 		},
 	}
@@ -1916,12 +2918,12 @@ func TestRunEscalatesOnCycle(t *testing.T) {
 		plan,
 		stageRegistry{"code_writer": cs},
 		defaultProvider,
-		agent.Options{Cwd: workDir, MaxTurns: 5, StageModelResolver: stageResolver, EscalationModelResolver: escalationResolver},
+		PipelineConfigFromAgentOptions(agent.Options{Cwd: workDir, MaxTurns: 5, StageModelResolver: stageResolver, EscalationModelResolver: escalationResolver}),
 		workDir,
 		nil,
 		nil,
-		nil,
-	)
+		nil, nil,
+		nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -1967,7 +2969,7 @@ func TestRunEscalationNilResolverNonFatal(t *testing.T) {
 		TokenBudget: schemas.TokenBudget{
 			TotalInputBudget:  100000,
 			TotalOutputBudget: 100000,
-			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000, ModelTier: "small"}},
+			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000}},
 			OverflowPolicy:    "abort",
 		},
 	}
@@ -1981,25 +2983,26 @@ func TestRunEscalationNilResolverNonFatal(t *testing.T) {
 		plan,
 		stageRegistry{"code_writer": cs},
 		&namedProvider{name: "default"},
-		agent.Options{Cwd: workDir, MaxTurns: 3},
+		PipelineConfigFromAgentOptions(agent.Options{Cwd: workDir, MaxTurns: 3}),
 		workDir,
 		nil,
 		nil,
-		nil,
-	)
+		nil, nil,
+		nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
 	if result.Status != "aborted" {
 		t.Fatalf("expected aborted after cycle with max iterations, got status=%q", result.Status)
 	}
-	if cs.calls != 3 {
-		t.Fatalf("stage calls = %d, want 3", cs.calls)
+	if cs.calls != defaultMaxIterations {
+		t.Fatalf("stage calls = %d, want %d at the default pipeline cap", cs.calls, defaultMaxIterations)
 	}
 }
 
 func TestRunEscalationErrorResolverNonFatal(t *testing.T) {
 	workDir := t.TempDir()
+	var notices, reasoning []string
 	plan := schemas.ExecutionPlan{
 		Tier:          schemas.TierLight,
 		RequestIntent: "escalation error resolver test",
@@ -2007,7 +3010,7 @@ func TestRunEscalationErrorResolverNonFatal(t *testing.T) {
 		TokenBudget: schemas.TokenBudget{
 			TotalInputBudget:  100000,
 			TotalOutputBudget: 100000,
-			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000, ModelTier: "small"}},
+			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000}},
 			OverflowPolicy:    "abort",
 		},
 	}
@@ -2024,20 +3027,37 @@ func TestRunEscalationErrorResolverNonFatal(t *testing.T) {
 		plan,
 		stageRegistry{"code_writer": cs},
 		&namedProvider{name: "default"},
-		agent.Options{Cwd: workDir, MaxTurns: 3, EscalationModelResolver: escalationResolver},
+		PipelineConfigFromAgentOptions(agent.Options{
+			Cwd:                     workDir,
+			MaxTurns:                3,
+			EscalationModelResolver: escalationResolver,
+			OnNotice:                func(text string) { notices = append(notices, text) },
+			OnReasoning:             func(text string) { reasoning = append(reasoning, text) },
+		}),
 		workDir,
 		nil,
 		nil,
-		nil,
-	)
+		nil, nil,
+		nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
 	if result.Status != "aborted" {
 		t.Fatalf("expected aborted after cycle with max iterations, got status=%q", result.Status)
 	}
-	if cs.calls != 3 {
-		t.Fatalf("stage calls = %d, want 3", cs.calls)
+	// The warning is visible as a notice, not hidden in the reasoning stream.
+	if !slices.ContainsFunc(notices, func(s string) bool {
+		return strings.Contains(s, "[escalation] resolver error") && strings.Contains(s, errMsg)
+	}) {
+		t.Fatalf("notices = %q, want the escalation resolver error", notices)
+	}
+	for _, text := range reasoning {
+		if strings.Contains(text, "[escalation]") {
+			t.Fatalf("escalation warning leaked to the reasoning stream: %q", text)
+		}
+	}
+	if cs.calls != defaultMaxIterations {
+		t.Fatalf("stage calls = %d, want %d at the default pipeline cap", cs.calls, defaultMaxIterations)
 	}
 }
 
@@ -2049,11 +3069,20 @@ func TestRunEscalationErrorResolverNonFatal(t *testing.T) {
 // Confidence = max(0.1, 0.9 - 0.2*(calls-1)). Pass count increments to create
 // improving scores: iter1=0 pass, iter2=1 pass, iter3+=2 pass.
 type surfaceToUserStage struct {
-	calls int
+	calls               int
+	lastRevisionContext *string
 }
+
+func (*surfaceToUserStage) Capabilities() stages.Capabilities { return stages.Capabilities{} }
 
 func (s *surfaceToUserStage) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options stages.StageOptions) (schemas.HarnessStageOutput, error) {
 	s.calls++
+	s.lastRevisionContext = input.RevisionContext
+	if options.WorkDir != "" {
+		if err := os.WriteFile(filepath.Join(options.WorkDir, fmt.Sprintf("call-%d.go", s.calls)), []byte("package x\n"), 0o644); err != nil {
+			return schemas.HarnessStageOutput{}, err
+		}
+	}
 	confidence := 0.9 - 0.2*float64(s.calls-1)
 	if confidence < 0.1 {
 		confidence = 0.1
@@ -2098,6 +3127,85 @@ func (s *surfaceToUserStage) Run(ctx context.Context, input schemas.HarnessStage
 	}, nil
 }
 
+type noProgressStage struct {
+	calls int
+}
+
+func (*noProgressStage) Capabilities() stages.Capabilities { return stages.Capabilities{} }
+
+func (s *noProgressStage) Run(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+	s.calls++
+	return schemas.HarnessStageOutput{
+		Summary:    fmt.Sprintf("thrash output %d", s.calls),
+		Confidence: 0.8,
+		Data: map[string]any{
+			"code_writer_output": schemas.CodeWriterOutput{
+				Files:      []schemas.FileChange{{Path: "main.go", Content: fmt.Sprintf("package main\n// %d\n", s.calls), ChangeType: "create"}},
+				Language:   "go",
+				Intent:     "create",
+				Confidence: 0.8,
+			},
+			"test_results": schemas.TestRunResults{
+				Command: []string{"go", "test"},
+				Tests: []schemas.TestCaseResult{
+					{Name: "TestA", Status: "passed", DurationMs: 1},
+					{Name: "TestB", Status: "failed", DurationMs: 2, Message: "not working"},
+				},
+				ExitCode: 1,
+			},
+		},
+	}, nil
+}
+
+func TestNoProgressBrakeStepsBackOnceThenAborts(t *testing.T) {
+	workDir := t.TempDir()
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		RequestIntent: "no progress thrash",
+		Stages:        []schemas.ExecutionStage{{Name: "code_writer"}},
+		TokenBudget: schemas.TokenBudget{
+			TotalInputBudget:  100000,
+			TotalOutputBudget: 100000,
+			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000}},
+			OverflowPolicy:    "abort",
+		},
+	}
+	stage := &noProgressStage{}
+	provider := &stepBackRunFakeProvider{analysis: schemas.StepBackAnalysis{
+		HypothesizedRootCause: "no workspace change",
+		Evidence:              []string{"empty diff"},
+		RecommendedApproach:   "stop thrashing",
+		Confidence:            0.8,
+	}}
+	result, err := runIterationLoop(
+		context.Background(),
+		"no-progress-run",
+		plan,
+		stageRegistry{"code_writer": stage},
+		provider,
+		PipelineConfigFromAgentOptions(agent.Options{Cwd: workDir, MaxTurns: 5}),
+		workDir,
+		nil,
+		nil,
+		nil, nil,
+		nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	if result.Status != "aborted" {
+		t.Fatalf("expected aborted, got status=%q abort_reason=%v", result.Status, DerefString(result.AbortReason))
+	}
+	if result.AbortReason == nil || !strings.Contains(*result.AbortReason, "abort_no_progress") {
+		t.Fatalf("expected abort_no_progress, got %q", DerefString(result.AbortReason))
+	}
+	if provider.stepBackCallCount != 1 {
+		t.Fatalf("step-back count = %d, want 1", provider.stepBackCallCount)
+	}
+	if stage.calls != 4 {
+		t.Fatalf("stage calls = %d, want 4 (step-back at 3, abort at 4)", stage.calls)
+	}
+}
+
 func TestSurfaceToUserNilCallbackAborts(t *testing.T) {
 	workDir := t.TempDir()
 	plan := schemas.ExecutionPlan{
@@ -2107,7 +3215,7 @@ func TestSurfaceToUserNilCallbackAborts(t *testing.T) {
 		TokenBudget: schemas.TokenBudget{
 			TotalInputBudget:  100000,
 			TotalOutputBudget: 100000,
-			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000, ModelTier: "small"}},
+			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000}},
 			OverflowPolicy:    "abort",
 		},
 	}
@@ -2119,12 +3227,12 @@ func TestSurfaceToUserNilCallbackAborts(t *testing.T) {
 		plan,
 		stageRegistry{"code_writer": stage},
 		runFakeProvider{},
-		agent.Options{Cwd: workDir, MaxTurns: 5},
+		PipelineConfigFromAgentOptions(agent.Options{Cwd: workDir, MaxTurns: 5}),
 		workDir,
 		nil,
 		nil,
-		nil,
-	)
+		nil, nil,
+		nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -2148,7 +3256,7 @@ func TestSurfaceToUserContinue(t *testing.T) {
 		TokenBudget: schemas.TokenBudget{
 			TotalInputBudget:  100000,
 			TotalOutputBudget: 100000,
-			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000, ModelTier: "small"}},
+			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000}},
 			OverflowPolicy:    "abort",
 		},
 	}
@@ -2170,12 +3278,12 @@ func TestSurfaceToUserContinue(t *testing.T) {
 		plan,
 		stageRegistry{"code_writer": stage},
 		runFakeProvider{},
-		agent.Options{Cwd: workDir, MaxTurns: 5, OnSurfaceToUser: onSurfaceToUser},
+		PipelineConfigFromAgentOptions(agent.Options{Cwd: workDir, MaxTurns: 5, OnSurfaceToUser: onSurfaceToUser}),
 		workDir,
 		nil,
 		nil,
-		nil,
-	)
+		nil, nil,
+		nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -2187,6 +3295,12 @@ func TestSurfaceToUserContinue(t *testing.T) {
 	}
 	if stage.calls != 5 {
 		t.Fatalf("stage calls = %d, want 5 (continue callback allows remaining iterations)", stage.calls)
+	}
+	if stage.lastRevisionContext == nil {
+		t.Fatal("expected the user guidance in the next iteration revision context, got nil")
+	}
+	if *stage.lastRevisionContext != "try a different approach: focus on edge cases" {
+		t.Fatalf("next iteration revision context = %q, want the user guidance", *stage.lastRevisionContext)
 	}
 	if gotRequest.Reason == "" {
 		t.Fatalf("expected non-empty reason in request, got %+v", gotRequest)
@@ -2205,7 +3319,7 @@ func TestSurfaceToUserAbort(t *testing.T) {
 		TokenBudget: schemas.TokenBudget{
 			TotalInputBudget:  100000,
 			TotalOutputBudget: 100000,
-			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000, ModelTier: "small"}},
+			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000}},
 			OverflowPolicy:    "abort",
 		},
 	}
@@ -2224,12 +3338,12 @@ func TestSurfaceToUserAbort(t *testing.T) {
 		plan,
 		stageRegistry{"code_writer": stage},
 		runFakeProvider{},
-		agent.Options{Cwd: workDir, MaxTurns: 5, OnSurfaceToUser: onSurfaceToUser},
+		PipelineConfigFromAgentOptions(agent.Options{Cwd: workDir, MaxTurns: 5, OnSurfaceToUser: onSurfaceToUser}),
 		workDir,
 		nil,
 		nil,
-		nil,
-	)
+		nil, nil,
+		nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -2256,7 +3370,7 @@ func TestSurfaceToUserCallbackError(t *testing.T) {
 		TokenBudget: schemas.TokenBudget{
 			TotalInputBudget:  100000,
 			TotalOutputBudget: 100000,
-			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000, ModelTier: "small"}},
+			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000}},
 			OverflowPolicy:    "abort",
 		},
 	}
@@ -2273,12 +3387,12 @@ func TestSurfaceToUserCallbackError(t *testing.T) {
 		plan,
 		stageRegistry{"code_writer": stage},
 		runFakeProvider{},
-		agent.Options{Cwd: workDir, MaxTurns: 5, OnSurfaceToUser: onSurfaceToUser},
+		PipelineConfigFromAgentOptions(agent.Options{Cwd: workDir, MaxTurns: 5, OnSurfaceToUser: onSurfaceToUser}),
 		workDir,
 		nil,
 		nil,
-		nil,
-	)
+		nil, nil,
+		nil, nil)
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
@@ -2302,7 +3416,7 @@ func TestSurfaceToUserCancellation(t *testing.T) {
 		TokenBudget: schemas.TokenBudget{
 			TotalInputBudget:  100000,
 			TotalOutputBudget: 100000,
-			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000, ModelTier: "small"}},
+			PerStage:          map[string]schemas.StageBudget{"code_writer": {InputMax: 10000, OutputMax: 10000}},
 			OverflowPolicy:    "abort",
 		},
 	}
@@ -2318,12 +3432,12 @@ func TestSurfaceToUserCancellation(t *testing.T) {
 		plan,
 		stageRegistry{"code_writer": stage},
 		runFakeProvider{},
-		agent.Options{Cwd: workDir, MaxTurns: 5, OnSurfaceToUser: onSurfaceToUser},
+		PipelineConfigFromAgentOptions(agent.Options{Cwd: workDir, MaxTurns: 5, OnSurfaceToUser: onSurfaceToUser}),
 		workDir,
 		nil,
 		nil,
-		nil,
-	)
+		nil, nil,
+		nil, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
@@ -2338,12 +3452,12 @@ func TestRequestLedgerRecordsOnceAndPreservesCallbackModes(t *testing.T) {
 	ledger := newRequestLedger()
 	var attributed []agent.AttributedUsage
 	legacyCalls := 0
-	options := ledger.recordingOptions(agent.Options{
+	options := ledger.recordingOptions(PipelineConfigFromAgentOptions(agent.Options{
 		OnUsage: func(agent.Usage) { legacyCalls++ },
 		OnAttributedUsage: func(usage agent.AttributedUsage) {
 			attributed = append(attributed, usage)
 		},
-	})
+	}))
 	options.OnAttributedUsage(agent.AttributedUsage{
 		Usage: zeroruntime.Usage{InputTokens: 100, OutputTokens: 50}, UsageReported: true,
 		Stage: "code_writer", Iteration: 1,
@@ -2356,7 +3470,7 @@ func TestRequestLedgerRecordsOnceAndPreservesCallbackModes(t *testing.T) {
 	}
 
 	legacyLedger := newRequestLedger()
-	legacyOptions := legacyLedger.recordingOptions(agent.Options{OnUsage: func(agent.Usage) { legacyCalls++ }})
+	legacyOptions := legacyLedger.recordingOptions(PipelineConfigFromAgentOptions(agent.Options{OnUsage: func(agent.Usage) { legacyCalls++ }}))
 	legacyOptions.OnAttributedUsage(agent.AttributedUsage{UsageReported: false, Stage: "code_writer", Iteration: 1})
 	legacyOptions.OnAttributedUsage(agent.AttributedUsage{Usage: zeroruntime.Usage{InputTokens: 1}, UsageReported: true, Stage: "code_writer", Iteration: 1})
 	if legacyCalls != 1 || len(legacyLedger.records) != 2 {
@@ -2368,13 +3482,13 @@ func TestRequestLedgerRejectsMalformedUsageBeforePricing(t *testing.T) {
 	ledger := newRequestLedger()
 	estimatorCalls := 0
 	var got agent.AttributedUsage
-	options := ledger.recordingOptions(agent.Options{
+	options := ledger.recordingOptions(PipelineConfigFromAgentOptions(agent.Options{
 		EstimateUsageCost: func(string, agent.Usage, bool) agent.UsageCostEstimate {
 			estimatorCalls++
 			return agent.UsageCostEstimate{}
 		},
 		OnAttributedUsage: func(usage agent.AttributedUsage) { got = usage },
-	})
+	}))
 	options.OnAttributedUsage(agent.AttributedUsage{
 		Usage: zeroruntime.Usage{InputTokens: 10, CachedInputTokens: 11}, UsageReported: true,
 		Stage: "code_writer", Iteration: 1,
@@ -2394,7 +3508,7 @@ func TestRequestLedgerUsesReportedCostOverEstimate(t *testing.T) {
 	estimatorCalls := 0
 	var captured agent.AttributedUsage
 	reported := 0.00054
-	options := ledger.recordingOptions(agent.Options{
+	options := ledger.recordingOptions(PipelineConfigFromAgentOptions(agent.Options{
 		EstimateUsageCost: func(string, agent.Usage, bool) agent.UsageCostEstimate {
 			estimatorCalls++
 			// A deliberately different value: if this ever leaks into the
@@ -2407,7 +3521,7 @@ func TestRequestLedgerUsesReportedCostOverEstimate(t *testing.T) {
 			}
 		},
 		OnAttributedUsage: func(usage agent.AttributedUsage) { captured = usage },
-	})
+	}))
 	options.OnAttributedUsage(agent.AttributedUsage{
 		Usage:           zeroruntime.Usage{InputTokens: 100, OutputTokens: 50},
 		UsageReported:   true,
@@ -2449,7 +3563,7 @@ func TestRequestLedgerFallsBackToEstimateWithoutReportedCost(t *testing.T) {
 	estimatorCalls := 0
 	estimated := 0.42
 	var captured agent.AttributedUsage
-	options := ledger.recordingOptions(agent.Options{
+	options := ledger.recordingOptions(PipelineConfigFromAgentOptions(agent.Options{
 		EstimateUsageCost: func(string, agent.Usage, bool) agent.UsageCostEstimate {
 			estimatorCalls++
 			return agent.UsageCostEstimate{
@@ -2459,7 +3573,7 @@ func TestRequestLedgerFallsBackToEstimateWithoutReportedCost(t *testing.T) {
 			}
 		},
 		OnAttributedUsage: func(usage agent.AttributedUsage) { captured = usage },
-	})
+	}))
 	options.OnAttributedUsage(agent.AttributedUsage{
 		Usage:         zeroruntime.Usage{InputTokens: 100, OutputTokens: 50},
 		UsageReported: true,
@@ -2650,20 +3764,133 @@ func TestRequestLedgerRecordingOptionsCases(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "carries the prompt layout hash",
+			usages: []agent.AttributedUsage{{
+				Usage:            zeroruntime.Usage{InputTokens: 10, OutputTokens: 5},
+				UsageReported:    true,
+				Stage:            "code_writer",
+				Iteration:        1,
+				PromptLayoutHash: "layout-abc",
+			}},
+			check: func(t *testing.T, ledger *requestLedger, _ []agent.AttributedUsage) {
+				if len(ledger.records) != 1 {
+					t.Fatalf("records = %d, want 1", len(ledger.records))
+				}
+				if got := ledger.records[0].PromptLayoutHash; got != "layout-abc" {
+					t.Fatalf("prompt_layout_hash = %q, want layout-abc", got)
+				}
+			},
+		},
+		{
+			name: "records a cache hit from cached tokens",
+			usages: []agent.AttributedUsage{{
+				Usage:         zeroruntime.Usage{InputTokens: 100, CachedInputTokens: 60, OutputTokens: 10},
+				UsageReported: true, Stage: "code_writer", Iteration: 1,
+			}},
+			check: func(t *testing.T, ledger *requestLedger, _ []agent.AttributedUsage) {
+				rec := ledger.records[0]
+				if rec.CacheHit == nil || !*rec.CacheHit {
+					t.Fatalf("cache_hit = %v, want true", rec.CacheHit)
+				}
+				if rec.MemoryPosition != schemas.MemoryPositionAfterPrefix {
+					t.Fatalf("memory_position = %q, want %q", rec.MemoryPosition, schemas.MemoryPositionAfterPrefix)
+				}
+			},
+		},
+		{
+			name: "records a cache miss when usage is reported without cached tokens",
+			usages: []agent.AttributedUsage{{
+				Usage:         zeroruntime.Usage{InputTokens: 100, OutputTokens: 10},
+				UsageReported: true, Stage: "code_writer", Iteration: 1,
+			}},
+			check: func(t *testing.T, ledger *requestLedger, _ []agent.AttributedUsage) {
+				rec := ledger.records[0]
+				if rec.CacheHit == nil || *rec.CacheHit {
+					t.Fatalf("cache_hit = %v, want false", rec.CacheHit)
+				}
+			},
+		},
+		{
+			name: "leaves cache_hit unknown when usage is missing",
+			usages: []agent.AttributedUsage{{
+				UsageReported: false, Stage: "test_runner", Iteration: 1,
+			}},
+			check: func(t *testing.T, ledger *requestLedger, _ []agent.AttributedUsage) {
+				if got := ledger.records[0].CacheHit; got != nil {
+					t.Fatalf("cache_hit = %v, want nil for missing usage", *got)
+				}
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			ledger := newRequestLedger()
 			var captured []agent.AttributedUsage
-			options := ledger.recordingOptions(agent.Options{
+			options := ledger.recordingOptions(PipelineConfigFromAgentOptions(agent.Options{
 				EstimateUsageCost: tc.estimator,
 				OnAttributedUsage: func(usage agent.AttributedUsage) { captured = append(captured, usage) },
-			})
+			}))
 			for _, usage := range tc.usages {
 				options.OnAttributedUsage(usage)
 			}
 			tc.check(t, ledger, captured)
 		})
+	}
+}
+
+// TestCountPromptLayoutFlips pins the detector's failure modes: a change
+// within one stage counts, a difference between stages must not, and a record
+// with no layout must be skipped rather than read as a change.
+func TestCountPromptLayoutFlips(t *testing.T) {
+	rec := func(stage, hash string) schemas.PipelineUsageRecord {
+		return schemas.PipelineUsageRecord{Stage: stage, Iteration: 1, PromptLayoutHash: hash}
+	}
+	tests := []struct {
+		name    string
+		records []schemas.PipelineUsageRecord
+		want    int
+	}{
+		{"stable layout", []schemas.PipelineUsageRecord{rec("code_writer", "a"), rec("code_writer", "a")}, 0},
+		{"flip within a stage", []schemas.PipelineUsageRecord{rec("code_writer", "a"), rec("code_writer", "b")}, 1},
+		{"distinct stages do not flip", []schemas.PipelineUsageRecord{rec("code_writer", "a"), rec("test_generator", "b")}, 0},
+		{"empty hash is skipped, not a flip", []schemas.PipelineUsageRecord{rec("code_writer", "a"), rec("code_writer", ""), rec("code_writer", "a")}, 0},
+		{"empty hash never becomes the baseline", []schemas.PipelineUsageRecord{rec("code_writer", ""), rec("code_writer", "a"), rec("code_writer", "b")}, 1},
+		{"flip back counts again", []schemas.PipelineUsageRecord{rec("code_writer", "a"), rec("code_writer", "b"), rec("code_writer", "a")}, 2},
+		{"no records", nil, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := countPromptLayoutFlips(tc.records); got != tc.want {
+				t.Fatalf("flips = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestApplyRequestLedgerRecordsPromptLayoutFlips proves the count reaches the
+// run result, which is what a surface or a report reads.
+func TestApplyRequestLedgerRecordsPromptLayoutFlips(t *testing.T) {
+	l := newRequestLedger()
+	for _, hash := range []string{"a", "b"} {
+		l.append(schemas.PipelineUsageRecord{
+			Stage: "code_writer", Iteration: 1, UsageReported: true,
+			InputTokens: 10, OutputTokens: 5,
+			CostStatus: schemas.CostStatusUnpriced, PromptLayoutHash: hash,
+		})
+	}
+	result := schemas.PipelineResult{
+		RunID: "test", Status: "completed", Tier: schemas.TierLight,
+		Stages: []schemas.StageRecord{{
+			Name: "code_writer", Status: schemas.StageCompleted, Iteration: 1,
+			TokensInput: 20, TokensOutput: 10,
+		}},
+	}
+	if err := applyRequestLedger(&result, l); err != nil {
+		t.Fatalf("applyRequestLedger: %v", err)
+	}
+	if result.PromptLayoutFlips != 1 {
+		t.Fatalf("PromptLayoutFlips = %d, want 1", result.PromptLayoutFlips)
 	}
 }
 
@@ -2737,5 +3964,1317 @@ func TestRequestLedgerDerivesCoverageStates(t *testing.T) {
 				tc.checkCounts(t, result)
 			}
 		})
+	}
+}
+
+// TestRunPassThreadsStageOutputBudgetToCompletionRequest proves an
+// ExecutionStage output budget lands as the CompletionRequest output cap.
+func TestRunPassThreadsStageOutputBudgetToCompletionRequest(t *testing.T) {
+	workDir := t.TempDir()
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		RequestIntent: "write code",
+		Stages: []schemas.ExecutionStage{{
+			Name:   "code_writer",
+			Budget: schemas.StageBudget{InputMax: 1000, OutputMax: 8192},
+		}},
+	}
+	provider := &captureRequestProvider{}
+	fakeRunner := ToolRunnerFunc(func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
+		return ToolResult{OK: true, Output: ""}, nil
+	})
+
+	_, _, completed, err := runPass(context.Background(), "run-budget-8192", 1, plan, stageRegistry{
+		"code_writer": stages.CodeWriter{},
+	}, provider, PipelineConfigFromAgentOptions(agent.Options{}), workDir, fakeRunner, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
+	if err != nil || !completed {
+		t.Fatalf("runPass: completed=%v err=%v", completed, err)
+	}
+	if provider.request.MaxOutputTokens != 8192 {
+		t.Fatalf("request.MaxOutputTokens = %d, want stage budget 8192", provider.request.MaxOutputTokens)
+	}
+}
+
+// TestRunPassZeroOutputBudgetSendsNoOverride proves OutputMax=0 (model-free
+// stages, or a stage without a budget) leaves the request cap at zero.
+func TestRunPassZeroOutputBudgetSendsNoOverride(t *testing.T) {
+	workDir := t.TempDir()
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		RequestIntent: "write code",
+		Stages:        []schemas.ExecutionStage{{Name: "code_writer"}},
+	}
+	provider := &captureRequestProvider{}
+	fakeRunner := ToolRunnerFunc(func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
+		return ToolResult{OK: true, Output: ""}, nil
+	})
+
+	_, _, completed, err := runPass(context.Background(), "run-budget-zero", 1, plan, stageRegistry{
+		"code_writer": stages.CodeWriter{},
+	}, provider, PipelineConfigFromAgentOptions(agent.Options{}), workDir, fakeRunner, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
+	if err != nil || !completed {
+		t.Fatalf("runPass: completed=%v err=%v", completed, err)
+	}
+	if provider.request.MaxOutputTokens != 0 {
+		t.Fatalf("request.MaxOutputTokens = %d, want 0 (no override)", provider.request.MaxOutputTokens)
+	}
+}
+
+func TestPipelineDisablesBashContextFulfillment(t *testing.T) {
+	workDir, registry := newRunTestWorkspace(t)
+	var results []agent.ToolResult
+	runner := newAgentToolRunner(PipelineConfigFromAgentOptions(agent.Options{
+		Cwd:           workDir,
+		Registry:      registry,
+		DisabledTools: []string{"bash"},
+		OnToolResult: func(result agent.ToolResult) {
+			results = append(results, result)
+		},
+	}), workDir)
+
+	res, err := runner.RunTool(context.Background(), "bash", map[string]any{"command": "echo hi"})
+	if err != nil {
+		t.Fatalf("RunTool error: %v", err)
+	}
+	if res.OK {
+		t.Fatal("disabled bash unexpectedly succeeded")
+	}
+	if res.DenialReason != agent.DenialFiltered {
+		t.Fatalf("DenialReason = %q, want %q; output=%q", res.DenialReason, agent.DenialFiltered, res.Output)
+	}
+	if !strings.Contains(res.Output, `Tool "bash" is not enabled`) {
+		t.Fatalf("output = %q, want filter denial", res.Output)
+	}
+	if len(results) != 1 || results[0].DenialReason != agent.DenialFiltered || results[0].Name != "bash" {
+		t.Fatalf("OnToolResult missing attributed bash filter denial: %+v", results)
+	}
+
+	py := filepath.Join(workDir, "broken.py")
+	if err := os.WriteFile(py, []byte("def broken(\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	analyzer, err := stages.NewStaticAnalyzer(stages.DefaultQualityChecks()...)
+	if err != nil {
+		t.Fatalf("analyzer: %v", err)
+	}
+	output, err := analyzer.Run(context.Background(), schemas.HarnessStageInput{
+		RunID:         "run-sd12-bash",
+		StageName:     "static_analyzer",
+		Sequence:      1,
+		PlanTier:      schemas.TierStandard,
+		RequestIntent: "check python",
+	}, nil, stages.StageOptions{
+		WorkDir:  workDir,
+		Language: "python",
+		RunTool: func(ctx context.Context, name string, args map[string]any) (stages.ToolResult, error) {
+			res, err := runner.RunTool(ctx, name, args)
+			return stages.ToolResult{OK: res.OK, Output: res.Output, Truncated: res.Truncated, Meta: res.Meta}, err
+		},
+	})
+	if err != nil {
+		t.Fatalf("static analyzer: %v", err)
+	}
+	report, ok := output.Data["static_analyzer_output"].(schemas.VerificationReport)
+	if !ok {
+		t.Fatalf("missing report, got %T", output.Data["static_analyzer_output"])
+	}
+	if report.Status == schemas.VerificationPassed {
+		t.Fatal("quality check passed despite disabled bash")
+	}
+	found := false
+	for _, f := range report.Findings {
+		if f.RuleID == "PY_COMPILE" {
+			found = true
+			if !strings.Contains(f.Message, `Tool "bash" is not enabled`) && !strings.Contains(f.Message, "not enabled for this run") {
+				t.Fatalf("PY_COMPILE message = %q, want bash filter denial", f.Message)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected PY_COMPILE finding from disabled bash, got status=%q summary=%q findings=%+v", report.Status, report.Summary, report.Findings)
+	}
+}
+
+func TestPipelineBeforeToolHookFires(t *testing.T) {
+	workDir, registry := newRunTestWorkspace(t)
+	source := filepath.Join(workDir, "a.go")
+	if err := os.WriteFile(source, []byte("package x\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	audit, err := hooks.NewAuditStore(hooks.AuditStoreOptions{
+		AuditPath: filepath.Join(t.TempDir(), "hooks-audit.jsonl"),
+	})
+	if err != nil {
+		t.Fatalf("audit store: %v", err)
+	}
+	dispatcher := hooks.NewDispatcher(hooks.DispatcherOptions{
+		Config: hooks.Config{
+			Enabled: true,
+			Hooks: []hooks.Definition{{
+				ID:      "sd12-before-read",
+				Event:   hooks.EventBeforeTool,
+				Matcher: "read_file",
+				Command: "true",
+				Enabled: true,
+			}},
+		},
+		Audit: audit,
+		Cwd:   workDir,
+	})
+	runner := newAgentToolRunner(PipelineConfigFromAgentOptions(agent.Options{
+		Cwd:      workDir,
+		Registry: registry,
+		Hooks:    dispatcher,
+	}), workDir)
+	res, err := runner.RunTool(context.Background(), "read_file", map[string]any{"path": source})
+	if err != nil {
+		t.Fatalf("RunTool error: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("read_file failed: %s", res.Output)
+	}
+	events, err := audit.ReadEvents()
+	if err != nil {
+		t.Fatalf("read audit: %v", err)
+	}
+	started := false
+	for _, event := range events {
+		if event.HookID == "sd12-before-read" && event.Event == hooks.EventBeforeTool {
+			started = true
+			break
+		}
+	}
+	if !started {
+		t.Fatalf("beforeTool hook did not fire; audit=%+v", events)
+	}
+}
+
+func TestPipelineAutoGrantPermissionEventIsGranted(t *testing.T) {
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "a.go"), []byte("package x\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewWriteFileTool(workDir))
+	var events []agent.PermissionEvent
+	runner := newAgentToolRunner(PipelineConfigFromAgentOptions(agent.Options{
+		Cwd:            workDir,
+		Registry:       registry,
+		PermissionMode: agent.PermissionModeAuto,
+		OnPermission: func(event agent.PermissionEvent) {
+			events = append(events, event)
+		},
+	}), workDir)
+	res, err := runner.RunTool(context.Background(), "write_file", map[string]any{"path": "b.go", "content": "package x\n"})
+	if err != nil {
+		t.Fatalf("RunTool: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("write_file failed: %s", res.Output)
+	}
+	if len(events) == 0 {
+		t.Fatal("expected an auto-grant permission event")
+	}
+	last := events[len(events)-1]
+	if last.Action != agent.PermissionActionAllow || !last.PermissionGranted {
+		t.Fatalf("auto-grant event = action=%s granted=%v, want allow/true", last.Action, last.PermissionGranted)
+	}
+}
+
+// repairTestPlan is a two-stage plan (code_writer, test_runner) with a valid
+// token budget so the repair loop can re-enter code_writer.
+func repairTestPlan() schemas.ExecutionPlan {
+	return schemas.ExecutionPlan{
+		Tier:          schemas.TierStandard,
+		RequestIntent: "implement the feature",
+		Stages: []schemas.ExecutionStage{
+			{Name: "code_writer", Budget: schemas.StageBudget{InputMax: 1000, OutputMax: 1000}},
+			{Name: "test_runner", Budget: schemas.StageBudget{}},
+		},
+		TokenBudget: schemas.TokenBudget{TotalInputBudget: 10000, TotalOutputBudget: 10000, OverflowPolicy: "abort"},
+	}
+}
+
+func repairCodeWriterOutput() schemas.HarnessStageOutput {
+	return schemas.HarnessStageOutput{
+		Summary:    "wrote implementation",
+		Confidence: 0.9,
+		Usage:      &schemas.StageUsage{InputTokens: 100, OutputTokens: 50},
+		Data:       map[string]any{"code_writer_output": schemas.CodeWriterOutput{Files: []schemas.FileChange{{Path: "main.go", ChangeType: "create"}}}},
+	}
+}
+
+func repairTestResults(status string) schemas.HarnessStageOutput {
+	return schemas.HarnessStageOutput{
+		Summary:    "tests run",
+		Confidence: 0.8,
+		Data: map[string]any{"test_results": schemas.TestRunResults{
+			Command: []string{"go", "test"},
+			Tests:   []schemas.TestCaseResult{{Name: "TestAdd", Status: status, Message: "assertion failed"}},
+		}},
+	}
+}
+
+func TestRunPassRepairsFailingTests(t *testing.T) {
+	plan := repairTestPlan()
+	writerCalls := 0
+	testCalls := 0
+	registry := stageRegistry{
+		"code_writer": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			writerCalls++
+			return repairCodeWriterOutput(), nil
+		}),
+		"test_runner": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			testCalls++
+			status := "failed"
+			if testCalls >= 2 {
+				status = "passed"
+			}
+			return repairTestResults(status), nil
+		}),
+	}
+
+	records, _, completed, err := runPass(context.Background(), "run-repair", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
+	if err != nil || !completed {
+		t.Fatalf("runPass: completed=%v err=%v", completed, err)
+	}
+	if writerCalls != 2 || testCalls != 2 {
+		t.Fatalf("calls = code_writer %d test_runner %d, want 2/2", writerCalls, testCalls)
+	}
+
+	// The landmine: a SECOND code_writer record for the iteration makes
+	// applyRequestLedger error. The repair must merge, never append.
+	var writerRecords, runnerRecords int
+	for _, rec := range records {
+		switch rec.Name {
+		case "code_writer":
+			writerRecords++
+			if rec.TokensInput != 200 || rec.TokensOutput != 100 {
+				t.Fatalf("merged code_writer usage = %d/%d, want 200/100", rec.TokensInput, rec.TokensOutput)
+			}
+		case "test_runner":
+			runnerRecords++
+		}
+	}
+	if writerRecords != 1 || runnerRecords != 1 {
+		t.Fatalf("records = %#v, want exactly one code_writer and one test_runner record", records)
+	}
+}
+
+func TestRunPassRepairRevisionContextNamesFailingTest(t *testing.T) {
+	plan := repairTestPlan()
+	var writerInputs []schemas.HarnessStageInput
+	testCalls := 0
+	registry := stageRegistry{
+		"code_writer": stageFunc(func(_ context.Context, input schemas.HarnessStageInput, _ zeroruntime.Provider, _ stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			writerInputs = append(writerInputs, input)
+			return repairCodeWriterOutput(), nil
+		}),
+		"test_runner": stageFunc(func(_ context.Context, _ schemas.HarnessStageInput, _ zeroruntime.Provider, _ stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			testCalls++
+			status := "failed"
+			if testCalls >= 2 {
+				status = "passed"
+			}
+			return repairTestResults(status), nil
+		}),
+	}
+
+	if _, _, _, err := runPass(context.Background(), "run-repair-ctx", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0)); err != nil {
+		t.Fatalf("runPass: %v", err)
+	}
+	if len(writerInputs) != 2 {
+		t.Fatalf("code_writer inputs = %d, want 2 (initial + repair)", len(writerInputs))
+	}
+	rev := writerInputs[1].RevisionContext
+	if rev == nil || !strings.Contains(*rev, "TestAdd") {
+		t.Fatalf("repair RevisionContext = %#v, want it to name the failing test", rev)
+	}
+}
+
+func TestRunPassRepairCapsAtTwo(t *testing.T) {
+	plan := repairTestPlan()
+	writerCalls := 0
+	testCalls := 0
+	registry := stageRegistry{
+		"code_writer": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			writerCalls++
+			return repairCodeWriterOutput(), nil
+		}),
+		"test_runner": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			testCalls++
+			return repairTestResults("failed"), nil // always failing
+		}),
+	}
+
+	records, _, completed, err := runPass(context.Background(), "run-repair-cap", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0))
+	if err != nil || !completed {
+		t.Fatalf("runPass: completed=%v err=%v", completed, err)
+	}
+	// A3: the scripted writer reapplies the identical failure with no new
+	// evidence each round, so the no-progress guard stops the loop after one
+	// evidence-informed retry instead of consuming both repair slots.
+	if writerCalls != 2 || testCalls != 2 {
+		t.Fatalf("calls = code_writer %d test_runner %d, want 2/2 (initial + 1 guarded repair)", writerCalls, testCalls)
+	}
+	var writerRecords, runnerRecords int
+	for _, rec := range records {
+		switch rec.Name {
+		case "code_writer":
+			writerRecords++
+		case "test_runner":
+			runnerRecords++
+		}
+	}
+	if writerRecords != 1 || runnerRecords != 1 {
+		t.Fatalf("records = %#v, want one record each after capped repairs", records)
+	}
+}
+
+func TestRunPassNoRepairWhenTestsPass(t *testing.T) {
+	plan := repairTestPlan()
+	writerCalls := 0
+	registry := stageRegistry{
+		"code_writer": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			writerCalls++
+			return repairCodeWriterOutput(), nil
+		}),
+		"test_runner": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			return repairTestResults("passed"), nil
+		}),
+	}
+
+	if _, _, _, err := runPass(context.Background(), "run-repair-pass", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0)); err != nil {
+		t.Fatalf("runPass: %v", err)
+	}
+	if writerCalls != 1 {
+		t.Fatalf("code_writer calls = %d, want 1 (no repair when tests pass)", writerCalls)
+	}
+}
+
+func TestRunPassNoRepairWhenTestResultsAbsent(t *testing.T) {
+	plan := repairTestPlan()
+	writerCalls := 0
+	registry := stageRegistry{
+		"code_writer": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			writerCalls++
+			return repairCodeWriterOutput(), nil
+		}),
+		"test_runner": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			return schemas.HarnessStageOutput{Summary: "no test results", Confidence: 1}, nil
+		}),
+	}
+
+	if _, _, _, err := runPass(context.Background(), "run-repair-absent", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0)); err != nil {
+		t.Fatalf("runPass: %v", err)
+	}
+	if writerCalls != 1 {
+		t.Fatalf("code_writer calls = %d, want 1 (no repair when test_results absent)", writerCalls)
+	}
+}
+
+// repairTraceRegistry builds a code_writer + test_runner registry whose
+// test_runner status flips to passed on its second call, exercising one
+// successful repair.
+func repairTraceRegistry(writerCalls, testCalls *int) stageRegistry {
+	return stageRegistry{
+		"code_writer": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			*writerCalls++
+			return repairCodeWriterOutput(), nil
+		}),
+		"test_runner": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			*testCalls++
+			status := "failed"
+			if *testCalls >= 2 {
+				status = "passed"
+			}
+			return repairTestResults(status), nil
+		}),
+	}
+}
+
+func TestRunRepairPersistsInteraction(t *testing.T) {
+	plan := repairTestPlan()
+	store := &recordingTraceStore{}
+	tr := newRunTraceAccumulator(store, "run-interaction", "sess-1", "/repo", plan, "active", nil)
+	var writerCalls, testCalls int
+
+	records, _, completed, err := runPass(context.Background(), "run-interaction", 1, plan, repairTraceRegistry(&writerCalls, &testCalls), runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, tr, NewStageExecutionBudget(0))
+	if err != nil || !completed {
+		t.Fatalf("runPass: completed=%v err=%v", completed, err)
+	}
+
+	outcome, err := tr.buildOutcome(records, "completed", "")
+	if err != nil {
+		t.Fatalf("buildOutcome: %v", err)
+	}
+	if len(outcome.Interactions) != 1 {
+		t.Fatalf("Interactions = %d, want 1", len(outcome.Interactions))
+	}
+	interaction := outcome.Interactions[0]
+	if interaction.Message.Kind != schemas.MessageKindRevisionRequest {
+		t.Fatalf("Interaction.Message.Kind = %q, want revision_request", interaction.Message.Kind)
+	}
+	if !interaction.Resolved {
+		t.Fatal("Interaction.Resolved = false, want true")
+	}
+	if interaction.Repairs < 1 {
+		t.Fatalf("Interaction.Repairs = %d, want >= 1", interaction.Repairs)
+	}
+	if err := outcome.Validate(); err != nil {
+		t.Fatalf("outcome invalid: %v", err)
+	}
+}
+
+func TestRunNoRepairLeavesInteractionsEmpty(t *testing.T) {
+	plan := repairTestPlan()
+	store := &recordingTraceStore{}
+	tr := newRunTraceAccumulator(store, "run-nointeraction", "sess-1", "/repo", plan, "active", nil)
+	var writerCalls int
+	registry := stageRegistry{
+		"code_writer": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			writerCalls++
+			return repairCodeWriterOutput(), nil
+		}),
+		"test_runner": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			return repairTestResults("passed"), nil
+		}),
+	}
+
+	records, _, _, err := runPass(context.Background(), "run-nointeraction", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, tr, NewStageExecutionBudget(0))
+	if err != nil {
+		t.Fatalf("runPass: %v", err)
+	}
+	outcome, err := tr.buildOutcome(records, "completed", "")
+	if err != nil {
+		t.Fatalf("buildOutcome: %v", err)
+	}
+	if len(outcome.Interactions) != 0 {
+		t.Fatalf("Interactions = %d, want 0", len(outcome.Interactions))
+	}
+	if err := outcome.Validate(); err != nil {
+		t.Fatalf("outcome invalid: %v", err)
+	}
+}
+
+func TestRunRepairExhaustedInteractionUnresolved(t *testing.T) {
+	plan := repairTestPlan()
+	store := &recordingTraceStore{}
+	tr := newRunTraceAccumulator(store, "run-exhausted", "sess-1", "/repo", plan, "active", nil)
+	registry := stageRegistry{
+		"code_writer": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			return repairCodeWriterOutput(), nil
+		}),
+		"test_runner": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			return repairTestResults("failed"), nil // always failing
+		}),
+	}
+
+	records, _, completed, err := runPass(context.Background(), "run-exhausted", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), t.TempDir(), nil, time.Time{}, nil, nil, tr, NewStageExecutionBudget(0))
+	if err != nil || !completed {
+		t.Fatalf("runPass: completed=%v err=%v", completed, err)
+	}
+	outcome, err := tr.buildOutcome(records, "completed", "")
+	if err != nil {
+		t.Fatalf("buildOutcome: %v", err)
+	}
+	if len(outcome.Interactions) != 1 {
+		t.Fatalf("Interactions = %d, want 1", len(outcome.Interactions))
+	}
+	if outcome.Interactions[0].Resolved {
+		t.Fatal("Resolved = true, want false (exhausted)")
+	}
+	// A3: the identical failure with no new evidence stops the loop after
+	// one evidence-informed retry.
+	if outcome.Interactions[0].Repairs != 1 {
+		t.Fatalf("Repairs = %d, want 1 (no-progress guard)", outcome.Interactions[0].Repairs)
+	}
+}
+
+// TestBuildRevisionContextCarriesFailureEvidence pins the repair-loop
+// transport: a failed test_runner record's OutputSummary — which now embeds
+// the bounded failing-evidence excerpt — must reach the revision context the
+// re-entered code_writer receives, verbatim.
+func TestBuildRevisionContextCarriesFailureEvidence(t *testing.T) {
+	summary := "Test command failed with exit code 1.\nFailing evidence:\n--- FAIL: TestAuditTombstone (0.00s)\n    audit_test.go:20: last audit action = \"delete\", want tombstone"
+	records := []schemas.StageRecord{{
+		Name:          "test_runner",
+		Status:        schemas.StageFailed,
+		OutputSummary: &summary,
+	}}
+	got := buildRevisionContext("fix the service", nil, records, nil, "")
+	for _, want := range []string{"--- FAIL: TestAuditTombstone", `last audit action = "delete", want tombstone`, "test_runner:"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("revision context missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// engineRootProbeTool records the workspace root and granted write roots of
+// whatever engine reaches RunWithOptions, so tests can pin the engine
+// instance at the tool boundary.
+type engineRootProbeTool struct {
+	recordedRoot  *string
+	recordedRoots *[]string
+}
+
+func (t engineRootProbeTool) Name() string        { return "engine_root_probe" }
+func (t engineRootProbeTool) Description() string { return "records the sandbox engine root" }
+func (t engineRootProbeTool) Parameters() tools.Schema {
+	return tools.Schema{Type: "object"}
+}
+func (t engineRootProbeTool) Safety() tools.Safety {
+	return tools.Safety{Permission: tools.PermissionAllow}
+}
+func (t engineRootProbeTool) Run(ctx context.Context, args map[string]any) tools.Result {
+	return tools.Result{Status: tools.StatusOK}
+}
+func (t engineRootProbeTool) RunWithOptions(ctx context.Context, args map[string]any, options tools.RunOptions) tools.Result {
+	if options.Sandbox != nil {
+		*t.recordedRoot = options.Sandbox.WorkspaceRoot()
+		*t.recordedRoots = options.Sandbox.Scope().Roots()
+	} else {
+		*t.recordedRoot = ""
+		*t.recordedRoots = nil
+	}
+	return tools.Result{Status: tools.StatusOK}
+}
+
+// TestPipelineStageToolsUseRunScopedEngine pins the plan-preparation half of
+// the /exec worktree fix: the engine handed to stage tool execution must be
+// rooted at the run workdir, not the session workspace. A session-rooted
+// engine reaching procrun.Prepare refuses the worktree cwd before any command
+// runs. Add-dir style grants on the caller engine must survive the re-root.
+func TestPipelineStageToolsUseRunScopedEngine(t *testing.T) {
+	base := t.TempDir()
+	sessionRoot := filepath.Join(base, "session")
+	worktree := filepath.Join(base, "worktree")
+	for _, dir := range []string{sessionRoot, worktree} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	sessionEngine := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot: sessionRoot,
+		Policy:        sandbox.DefaultPolicy(),
+	})
+
+	// Grant an add-dir style extra write root on the session engine; the
+	// re-rooted engine must carry it so --add-dir grants survive worktree
+	// binding. The grant must live outside the default temp write roots:
+	// every t.TempDir path sits under one on macOS, and Scope.Add silently
+	// treats covered roots as already granted.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("user home unavailable: %v", err)
+	}
+	extraRoot, err := os.MkdirTemp(filepath.Join(home, ".cache"), "splice-reroot-test-")
+	if err != nil {
+		t.Skipf("home cache dir unavailable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(extraRoot) })
+	if _, err := sessionEngine.Scope().Add(extraRoot); err != nil {
+		t.Fatalf("scope add: %v", err)
+	}
+
+	var recordedRoot string
+	var recordedRoots []string
+	registry := tools.NewRegistry()
+	registry.Register(engineRootProbeTool{recordedRoot: &recordedRoot, recordedRoots: &recordedRoots})
+
+	config := PipelineConfigFromAgentOptions(agent.Options{
+		Cwd:            worktree,
+		Registry:       registry,
+		Sandbox:        sessionEngine,
+		PermissionMode: agent.PermissionModeAuto,
+	})
+	runner := newAgentToolRunner(config, worktree)
+
+	res, err := runner.RunTool(context.Background(), "engine_root_probe", map[string]any{})
+	if err != nil {
+		t.Fatalf("RunTool error: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("probe failed: %+v", res)
+	}
+	if recordedRoot != worktree {
+		t.Fatalf("stage tool engine root = %q, want run workdir %q", recordedRoot, worktree)
+	}
+
+	// Add-dir style grants survive the re-root: the extra root stays in the
+	// granted write roots alongside the new run directory.
+	// Scope grants are symlink-resolved on Add; compare against resolved paths.
+	resolvedWorktree, err := filepath.EvalSymlinks(worktree)
+	if err != nil {
+		t.Fatalf("resolve worktree: %v", err)
+	}
+	resolvedExtra, err := filepath.EvalSymlinks(extraRoot)
+	if err != nil {
+		t.Fatalf("resolve extra root: %v", err)
+	}
+	foundExtra := false
+	foundWorktree := false
+	for _, root := range recordedRoots {
+		switch root {
+		case resolvedExtra:
+			foundExtra = true
+		case resolvedWorktree:
+			foundWorktree = true
+		}
+	}
+	if !foundExtra || !foundWorktree {
+		t.Fatalf("re-rooted scope roots = %v, want both %q and %q", recordedRoots, worktree, extraRoot)
+	}
+}
+
+// TestPipelineToolScopeFollowsRunWorktree pins the TUI /exec worktree fix:
+// a pipeline run bound to a worktree after startup keeps the sandbox engine
+// rooted at the session workspace, but stage tool execution must evaluate
+// against the run worktree. Commands inside the worktree succeed; a write
+// outside BOTH the session root and the worktree is still refused.
+func TestPipelineToolScopeFollowsRunWorktree(t *testing.T) {
+	sessionRoot := t.TempDir()
+	worktree := t.TempDir()
+	outsideBoth := t.TempDir()
+
+	engine := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot: sessionRoot,
+		Policy:        sandbox.DefaultPolicy(),
+	})
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewBashTool(worktree))
+
+	runner := newAgentToolRunner(PipelineConfigFromAgentOptions(agent.Options{
+		Cwd:            worktree,
+		Registry:       registry,
+		Sandbox:        engine,
+		PermissionMode: agent.PermissionModeAuto,
+	}), worktree)
+
+	res, err := runner.RunTool(context.Background(), "bash", map[string]any{"command": "echo run > marker.txt && cat marker.txt"})
+	if err != nil {
+		t.Fatalf("RunTool error: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("worktree bash refused: %s", res.Output)
+	}
+	if _, err := os.Stat(filepath.Join(worktree, "marker.txt")); err != nil {
+		t.Fatalf("marker missing from worktree: %v", err)
+	}
+
+	// Stage tool calls carry the run directory in the cwd argument; that is
+	// the exact shape the demo captures showed being refused pre-fix.
+	res, err = runner.RunTool(context.Background(), "bash", map[string]any{"command": "echo run > marker2.txt", "cwd": worktree})
+	if err != nil {
+		t.Fatalf("RunTool error: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("bash scoped to the run worktree refused: %s", res.Output)
+	}
+	if _, err := os.Stat(filepath.Join(worktree, "marker2.txt")); err != nil {
+		t.Fatalf("marker2 missing from worktree: %v", err)
+	}
+
+	res, err = runner.RunTool(context.Background(), "bash", map[string]any{"command": "echo x > escape.txt", "cwd": outsideBoth})
+	if err != nil {
+		t.Fatalf("RunTool error: %v", err)
+	}
+	if res.OK {
+		t.Fatal("write outside both roots unexpectedly succeeded")
+	}
+	// Either the tool-scoped path guard or the sandbox decision must refuse;
+	// both name the boundary instead of silently succeeding.
+	if !strings.Contains(res.Output, "outside_workspace") && !strings.Contains(res.Output, "must stay inside the workspace") {
+		t.Fatalf("output = %q, want an out-of-workspace refusal", res.Output)
+	}
+	if _, err := os.Stat(filepath.Join(outsideBoth, "escape.txt")); err == nil {
+		t.Fatal("escape file was created despite sandbox block")
+	}
+}
+
+// TestPipelineConfigMapsTraceWriteWarn pins the seam wiring: the exec surface
+// sets Options.TraceWriteWarn and the pipeline config must carry it through so
+// the accumulator can warn exactly once on telemetry loss.
+func TestPipelineConfigMapsTraceWriteWarn(t *testing.T) {
+	fn := func(msg string) {}
+	cfg := PipelineConfigFromAgentOptions(agent.Options{TraceWriteWarn: fn})
+	if cfg.TraceWriteWarn == nil {
+		t.Fatal("TraceWriteWarn lost the callback in config mapping")
+	}
+	if cfg2 := PipelineConfigFromAgentOptions(agent.Options{}); cfg2.TraceWriteWarn != nil {
+		t.Fatal("nil TraceWriteWarn must map to nil TraceWriteWarn")
+	}
+}
+
+// handshakeStage models the writer's first round: it returns a ContextRequest
+// with no provider usage, then emits usage once context is present. It exists
+// to pin that the first provider-bearing round is labeled generation, not
+// expansion, even though the loop round is 1.
+type handshakeStage struct{ calls int }
+
+func (*handshakeStage) Capabilities() stages.Capabilities { return stages.Capabilities{} }
+
+func (s *handshakeStage) Run(_ context.Context, input schemas.HarnessStageInput, _ zeroruntime.Provider, options stages.StageOptions) (schemas.HarnessStageOutput, error) {
+	s.calls++
+	if input.Context == nil {
+		symbol := "foo"
+		return schemas.HarnessStageOutput{
+			Summary: "needs context",
+			ContextRequest: &schemas.ContextRequest{
+				Reason: "handshake",
+				Queries: []schemas.ContextQuery{{
+					QueryType:  schemas.ContextGetSymbol,
+					Symbol:     &symbol,
+					MaxResults: 5,
+					MaxChars:   1000,
+				}},
+			},
+		}, nil
+	}
+	usage := schemas.StageUsage{InputTokens: 6, OutputTokens: 5}
+	if options.Stream.OnUsageResult != nil {
+		options.Stream.OnUsageResult(zeroruntime.Usage{InputTokens: 6, OutputTokens: 5}, true, nil, "", false)
+	}
+	return schemas.HarnessStageOutput{Summary: "done", Usage: &usage}, nil
+}
+
+// TestRunStageWithContextLabelsFirstProviderRoundGeneration pins the live
+// attribution fix: a context-handshake round issues no provider request, so
+// the round that follows it is the generation pass (source generation, round
+// 0), never expansion. Before the fix the live ledger carried no generation
+// record at all.
+func TestRunStageWithContextLabelsFirstProviderRoundGeneration(t *testing.T) {
+	workDir := t.TempDir()
+	store := &stubStore{}
+	stage := &handshakeStage{}
+	var attributed []agent.AttributedUsage
+	selection := agent.ModelSelection{Provider: runFakeProvider{}, ProviderName: "provider-a", Model: "model-a"}
+
+	if _, err := runStageWithContext(context.Background(), schemas.HarnessStageInput{
+		RunID:     "run-handshake",
+		StageName: "code_writer",
+	}, stage, 1, selection, PipelineConfigFromAgentOptions(agent.Options{OnAttributedUsage: func(usage agent.AttributedUsage) {
+		attributed = append(attributed, usage)
+	}}), workDir, nil, store, stage.Capabilities(), 0, nil, nil, 0); err != nil {
+		t.Fatalf("runStageWithContext: %v", err)
+	}
+	if stage.calls != 2 {
+		t.Fatalf("stage calls = %d, want 2 (handshake then provider round)", stage.calls)
+	}
+	if len(attributed) != 1 {
+		t.Fatalf("attributed usage calls = %d, want 1", len(attributed))
+	}
+	if got := attributed[0]; got.SpendSource != schemas.SpendSourceGeneration || got.ContextRound != 0 {
+		t.Fatalf("first provider round = source %q round %d, want %q/0", got.SpendSource, got.ContextRound, schemas.SpendSourceGeneration)
+	}
+}
+
+func TestRunIterationLoopAdvisorOffPreservesFailedStagePath(t *testing.T) {
+	for _, mode := range []string{"nil", "off"} {
+		t.Run(mode, func(t *testing.T) {
+			eval := &trajectoryEvaluator{label: "step_back"}
+			var advisor *DecisionAdvisor
+			if mode == "off" {
+				advisor = classifierAdvisor(t, eval)
+				advisor.config.Mode = AdvisorModeOff
+			}
+			options := PipelineRunConfig{Advisor: advisor}
+			options.ClassifierPolicy = newHostTrajectoryPolicy(advisor, options.TrajectoryConfig, false)
+			if options.ClassifierPolicy != nil {
+				t.Fatal("an off advisor must have no classifier policy")
+			}
+			var progress strings.Builder
+			options.OnReasoning = func(s string) { progress.WriteString(s) }
+			plan := schemas.ExecutionPlan{
+				Tier:          schemas.TierLight,
+				RequestIntent: "Preserve the stage failure path.",
+				Stages:        []schemas.ExecutionStage{{Name: "probe"}, {Name: "terminal_failure"}},
+			}
+			// This payload makes an extra boundary projection fail. The old path
+			// does not project a failed pass and must preserve the stage error.
+			registry := stageRegistry{
+				"probe": outputStage{output: schemas.HarnessStageOutput{
+					Summary: "probe complete",
+					Data:    map[string]any{"code_writer_output": "invalid typed payload"},
+				}},
+				"terminal_failure": terminalDetailStage{},
+			}
+			trace := newRunTraceAccumulator(nil, "off-run", "session", "/project", plan, "off", nil)
+			result, err := runIterationLoop(context.Background(), "off-run", plan, registry, nil, options, t.TempDir(), nil, nil, nil, trace, nil, nil)
+			if err != nil || !strings.Contains(DerefString(result.AbortReason), "repeated unchanged stage failure") {
+				t.Fatalf("result=%+v error=%v", result, err)
+			}
+			var decisions []schemas.DecisionDispositionRecord
+			if advisor != nil {
+				decisions = advisor.Records()
+			}
+			if len(result.Stages) != 4 || eval.calls != 0 || len(decisions) != 0 {
+				t.Fatalf("stages=%d calls=%d decisions=%+v", len(result.Stages), eval.calls, decisions)
+			}
+			if strings.Contains(progress.String(), "[trajectory]") {
+				t.Fatalf("off mode emitted classifier progress: %s", progress.String())
+			}
+			for key, meta := range trace.stages {
+				if len(meta.JevDecisions) != 0 {
+					t.Fatalf("off mode recorded decisions at %+v: %+v", key, meta.JevDecisions)
+				}
+			}
+		})
+	}
+}
+
+func TestRunIterationLoopClassifierProjectionFailurePreservesStageFailure(t *testing.T) {
+	eval := &trajectoryEvaluator{label: "step_back"}
+	advisor := classifierAdvisor(t, eval)
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		RequestIntent: "Preserve the stage failure path.",
+		Stages:        []schemas.ExecutionStage{{Name: "probe"}, {Name: "terminal_failure"}},
+	}
+	registry := stageRegistry{
+		"probe": outputStage{output: schemas.HarnessStageOutput{
+			Summary: "probe complete",
+			Data:    map[string]any{"code_writer_output": "invalid typed payload"},
+		}},
+		"terminal_failure": terminalDetailStage{},
+	}
+	trace := newRunTraceAccumulator(nil, "projection-run", "session", "/project", plan, "off", nil)
+	result, err := runIterationLoop(context.Background(), "projection-run", plan, registry, nil, PipelineRunConfig{Advisor: advisor}, t.TempDir(), nil, nil, nil, trace, nil, nil)
+	if err != nil || !strings.Contains(DerefString(result.AbortReason), "repeated unchanged stage failure") || len(result.Stages) != 4 {
+		t.Fatalf("result=%+v error=%v", result, err)
+	}
+	if eval.calls != 0 || len(advisor.Records()) != 2 {
+		t.Fatalf("calls=%d records=%+v", eval.calls, advisor.Records())
+	}
+	// A projection failure is a record of a boundary, so it carries the
+	// boundary's evidence shadow: the pass builder for the failed pass.
+	for i, record := range advisor.Records() {
+		if len(record.EvidenceShadow) != 1 || record.EvidenceShadow[0].Builder != "pass" || record.EvidenceShadow[0].Iteration != i+1 {
+			t.Fatalf("projection failure record %d has evidence shadow %+v", i, record.EvidenceShadow)
+		}
+	}
+	for i := 1; i <= 2; i++ {
+		records := trace.stages[stageKeyFor("trajectory", i, 0)].JevDecisions
+		if len(records) != 1 || !strings.Contains(records[0].Reason, "trajectory boundary projection: code_writer_output") {
+			t.Fatalf("iteration %d lost the projection cause: %+v", i, records)
+		}
+	}
+}
+
+// decisionRecordRunProvider fails twice before the existing helper repairs the code.
+type decisionRecordRunProvider struct {
+	codeCalls int
+	broken    bool
+}
+
+func (p *decisionRecordRunProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	if len(request.Tools) > 0 && request.Tools[0].Name == "submit_code" {
+		p.codeCalls++
+	}
+	if p.broken || p.codeCalls <= 2 {
+		return (runFailingProvider{}).StreamCompletion(ctx, request)
+	}
+	return (runFakeProvider{}).StreamCompletion(ctx, request)
+}
+
+type decisionRecordCancelEvaluator struct {
+	trajectoryEvaluator
+	cancel context.CancelFunc
+}
+
+func (e *decisionRecordCancelEvaluator) Evaluate(ctx context.Context, request zeroruntime.DecisionRequest) (zeroruntime.DecisionResult, error) {
+	result, err := e.trajectoryEvaluator.Evaluate(ctx, request)
+	e.cancel()
+	return result, err
+}
+
+func TestRunDecisionRecordsSink(t *testing.T) {
+	for _, kind := range []string{"completed", "failed", "aborted", "cancelled", "unset", "advisor absent", "write error"} {
+		t.Run(kind, func(t *testing.T) {
+			t.Setenv(DecisionAdvisorModeEnvVar, "")
+			t.Setenv(DecisionAdvisorModelEnvVar, "")
+			t.Setenv(TrajectoryPackEnvVar, "")
+			workDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(workDir, "go.mod"), []byte("module example\n\ngo 1.25\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(workDir, "main_test.go"), []byte("package main\nimport \"testing\"\nfunc TestHello(t *testing.T) { if Hello() != \"hello\" { t.Fatal(\"wrong greeting\") } }\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			dir := filepath.Join(workDir, "decisions")
+			t.Setenv(DecisionRecordsDirEnvVar, dir)
+			if kind == "unset" {
+				t.Setenv(DecisionRecordsDirEnvVar, "")
+			}
+
+			if kind == "write error" {
+				if err := os.WriteFile(dir, []byte("blocked"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			registry := tools.NewRegistry()
+			registry.Register(tools.NewReadFileTool(workDir))
+			registry.Register(tools.NewListDirectoryTool(workDir))
+			registry.Register(tools.NewGrepTool(workDir))
+			registry.Register(tools.NewWriteFileTool(workDir))
+			registry.Register(tools.NewBashTool(workDir))
+			evaluator := &trajectoryEvaluator{label: "continue"}
+			var eval zeroruntime.DecisionEvaluator = evaluator
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if kind == "cancelled" {
+				eval = &decisionRecordCancelEvaluator{trajectoryEvaluator: trajectoryEvaluator{label: "continue"}, cancel: cancel}
+			}
+			var progress strings.Builder
+			options := agent.Options{SessionID: "record-run", Cwd: workDir, Registry: registry, FileTracker: tools.NewFileTracker(), PermissionMode: agent.PermissionModeAuto,
+				Flags: flags.Set{flags.DecisionAdvisorEnabled: true}, DecisionEvaluator: eval,
+				DecisionAdvisorConfig: config.DecisionAdvisorConfig{Mode: "shadow", Backend: "http", QuestionPack: QuestionPackTrajActionV1, Profile: "test-model"},
+				OnReasoning:           func(s string) { progress.WriteString(s) },
+			}
+			if kind == "advisor absent" {
+				options.Flags[flags.DecisionAdvisorEnabled] = false
+				options.Flags[flags.TrajectoryClassifierEnabled] = false
+			}
+			var provider agent.Provider = &decisionRecordRunProvider{broken: kind == "aborted"}
+			if kind == "failed" {
+				provider = badOutputProvider{}
+			}
+			result, err := Run(ctx, "add a Hello function and tests", provider, options, nil, nil)
+			if kind == "cancelled" {
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("cancel: %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if kind == "failed" || kind == "aborted" {
+				if !result.Incomplete {
+					t.Fatalf("expected a failed run: %s\n%s", result.FinalAnswer, progress.String())
+				}
+			} else if kind != "cancelled" && result.Incomplete {
+				t.Fatalf("expected completion: %s", result.IncompleteReason)
+			}
+			if kind == "failed" || kind == "aborted" {
+				var pipeline schemas.PipelineResult
+				if err := json.Unmarshal([]byte(result.FinalAnswer), &pipeline); err != nil {
+					t.Fatal(err)
+				}
+				if pipeline.Status != kind {
+					t.Fatalf("status=%s, want %s", pipeline.Status, kind)
+				}
+			}
+
+			if kind == "write error" {
+				if strings.Count(progress.String(), "cannot write decision records") != 1 {
+					t.Fatalf("warning: %s", progress.String())
+				}
+				return
+			}
+			path := filepath.Join(dir, "record-run.jsonl")
+			if kind == "unset" || kind == "advisor absent" {
+				if _, err := os.Stat(dir); !os.IsNotExist(err) {
+					t.Fatalf("unexpected records directory: %v", err)
+				}
+				return
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+			if len(raw) == 0 {
+				t.Fatalf("no decision records: %s\n%s", result.FinalAnswer, progress.String())
+			}
+			for _, line := range lines {
+				var record schemas.DecisionDispositionRecord
+				if err := json.Unmarshal([]byte(line), &record); err != nil {
+					t.Fatal(err)
+				}
+				if record.Snapshot.RunID != "record-run" || record.Snapshot.Trajectory == nil {
+					t.Fatalf("lost snapshot: %+v", record)
+				}
+			}
+			if kind != "cancelled" && len(lines) != evaluator.calls {
+				t.Fatalf("records=%d calls=%d", len(lines), evaluator.calls)
+			}
+			for _, target := range []struct {
+				path string
+				mode os.FileMode
+			}{{dir, 0700}, {path, 0600}} {
+				info, err := os.Stat(target.path)
+				if err != nil || info.Mode().Perm() != target.mode {
+					t.Fatalf("permissions %s: %v %v", target.path, info, err)
+				}
+			}
+		})
+	}
+}
+
+func TestAdvisorDecisionRecordSinkRejectsInvalidSessionID(t *testing.T) {
+	for _, sessionID := range []string{"", ".", "..", "../outside", "nested/run", "/absolute"} {
+		t.Run(sessionID, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "records")
+			if err := writeDecisionRecords(dir, sessionID, nil); err == nil || !strings.Contains(err.Error(), "session id") {
+				t.Fatalf("session %q: %v", sessionID, err)
+			}
+			if _, err := os.Stat(dir); !os.IsNotExist(err) {
+				t.Fatalf("invalid session created a directory: %v", err)
+			}
+		})
+	}
+}
+
+// flakyCheckerStage fails its first call with a stage error, then runs the
+// clean check. The repair pass is the one that verifies the run.
+type flakyCheckerStage struct {
+	calls int
+}
+
+func (s *flakyCheckerStage) Capabilities() stages.Capabilities {
+	return stages.Capabilities{ModelFree: true}
+}
+
+func (s *flakyCheckerStage) Run(ctx context.Context, in schemas.HarnessStageInput, p zeroruntime.Provider, o stages.StageOptions) (schemas.HarnessStageOutput, error) {
+	s.calls++
+	if s.calls == 1 {
+		return schemas.HarnessStageOutput{}, errors.New("transient checker failure")
+	}
+	return passedCheckerStage{}.Run(ctx, in, p, o)
+}
+
+// TestRunIterationLoopVerifiesOnTheFinalPass pins that an earlier pass's stage
+// error does not make a repaired run unverified. The run keeps the failed
+// record in its history, and the verified flag judges the final pass.
+func TestRunIterationLoopVerifiesOnTheFinalPass(t *testing.T) {
+	stage := &flakyCheckerStage{}
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		RequestIntent: "repaired check",
+		Stages:        []schemas.ExecutionStage{{Name: "static_analyzer", Caps: &schemas.NodeCapabilities{ModelFree: true, ProducesVerification: true}}},
+	}
+	result, err := runIterationLoop(context.Background(), "run-final-pass", plan, stageRegistry{
+		"static_analyzer": stage,
+	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 50}), t.TempDir(), nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	if result.Status != "completed" {
+		t.Fatalf("status = %q, want completed; abort = %q", result.Status, DerefString(result.AbortReason))
+	}
+	if !result.Verified {
+		t.Fatalf("verified = false (reason %q): the final pass verified and the earlier error must not count", result.UnverifiedReason)
+	}
+	if stage.calls != 2 {
+		t.Fatalf("checker calls = %d, want 2 (failed pass, then repair)", stage.calls)
+	}
+	sawFailed := false
+	for _, r := range result.Stages {
+		if r.Status == schemas.StageFailed {
+			sawFailed = true
+		}
+	}
+	if !sawFailed {
+		t.Fatalf("stages = %+v, want the earlier failed record kept in history", result.Stages)
+	}
+}
+
+// noChecksStage is a model-free code writer. It produces output and no
+// verification report, as the trivial tier's writer does.
+type noChecksStage struct{}
+
+func (noChecksStage) Capabilities() stages.Capabilities {
+	return stages.Capabilities{ModelFree: true}
+}
+
+func (noChecksStage) Run(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+	return schemas.HarnessStageOutput{Summary: "wrote the change", Confidence: 1}, nil
+}
+
+// TestRunIterationLoopTrivialTierNamesItsCause pins the not-verified reason of
+// a trivial run. The run completes, is not verified, and says that the tier
+// runs no checks.
+// TestUnverifiedReasonNamesTierForPlannedPlans pins the not-verified reason on
+// plans the planner builds. The embedded default at trivial and a custom
+// topology whose only verifier is off at the run tier name the tier; a
+// topology with no verifier at any tier names the topology.
+func TestUnverifiedReasonNamesTierForPlannedPlans(t *testing.T) {
+	run := func(t *testing.T, plan schemas.ExecutionPlan) string {
+		t.Helper()
+		result, err := runIterationLoop(context.Background(), "run-reason", plan, stageRegistry{
+			"code_writer": noChecksStage{},
+		}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 50}), t.TempDir(), nil, nil, nil, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("runIterationLoop: %v", err)
+		}
+		if result.Status != "completed" || result.Verified {
+			t.Fatalf("status %q verified %v, want an unverified completion", result.Status, result.Verified)
+		}
+		return result.UnverifiedReason
+	}
+	t.Run("default at trivial", func(t *testing.T) {
+		plan, err := BuildExecutionPlan("fix a typo", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if plan.Tier != schemas.TierTrivial || plan.TopologyName != DefaultTopologyName {
+			t.Fatalf("plan tier %s topology %q, want the trivial default", plan.Tier, plan.TopologyName)
+		}
+		if got := run(t, plan); got != "trivial tier runs no checks" {
+			t.Fatalf("reason = %q, want the tier named", got)
+		}
+	})
+	planAt := func(t *testing.T, topology *schemas.PipelineTopology, tier schemas.PipelineTier) schemas.ExecutionPlan {
+		t.Helper()
+		compiled, err := CompileTopology(topology, tier)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return schemas.ExecutionPlan{Tier: tier, RequestIntent: "x", Stages: compiled.Stages, TokenBudget: compiled.Budget, Warnings: compiled.Warnings, TopologyName: topology.Name}
+	}
+	t.Run("tier-limited verifier", func(t *testing.T) {
+		topology := &schemas.PipelineTopology{
+			Version: schemas.TopologySchemaVersion,
+			Name:    "late-checks",
+			Nodes: []schemas.PipelineNode{
+				{Name: "code_writer", Type: "code_writer"},
+				{Name: "test_runner", Type: "test_runner", Tiers: []schemas.PipelineTier{schemas.TierStandard, schemas.TierSubstantial, schemas.TierArchitectural}},
+			},
+			Edges: []schemas.PipelineEdge{{From: "code_writer", To: "test_runner"}},
+		}
+		if got := run(t, planAt(t, topology, schemas.TierLight)); got != "light tier runs no checks" {
+			t.Fatalf("reason = %q, want the tier named", got)
+		}
+	})
+	t.Run("no verifier at any tier", func(t *testing.T) {
+		topology := &schemas.PipelineTopology{
+			Version: schemas.TopologySchemaVersion,
+			Name:    "writer-only",
+			Nodes:   []schemas.PipelineNode{{Name: "code_writer", Type: "code_writer"}},
+		}
+		if got := run(t, planAt(t, topology, schemas.TierLight)); got != "topology writer-only has no verification node" {
+			t.Fatalf("reason = %q, want the topology named", got)
+		}
+	})
+}
+
+func TestRunIterationLoopTrivialTierNamesItsCause(t *testing.T) {
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierTrivial,
+		RequestIntent: "fix a typo",
+		Stages:        []schemas.ExecutionStage{{Name: "code_writer"}},
+	}
+	result, err := runIterationLoop(context.Background(), "run-trivial", plan, stageRegistry{
+		"code_writer": noChecksStage{},
+	}, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 50}), t.TempDir(), nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	if result.Status != "completed" {
+		t.Fatalf("status = %q, want completed; abort = %q", result.Status, DerefString(result.AbortReason))
+	}
+	if result.Verified {
+		t.Fatal("verified = true on a trivial run with no checks")
+	}
+	if result.UnverifiedReason != "trivial tier runs no checks" {
+		t.Fatalf("unverified reason = %q, want the cause named", result.UnverifiedReason)
+	}
+}
+
+// slowStage blocks until its context ends, or for 5 seconds when no
+// deadline reaches it.
+type slowStage struct{}
+
+func (slowStage) Capabilities() stages.Capabilities { return stages.Capabilities{} }
+
+func (slowStage) Run(ctx context.Context, _ schemas.HarnessStageInput, _ zeroruntime.Provider, _ stages.StageOptions) (schemas.HarnessStageOutput, error) {
+	select {
+	case <-ctx.Done():
+		return schemas.HarnessStageOutput{}, ctx.Err()
+	case <-time.After(5 * time.Second):
+		return schemas.HarnessStageOutput{}, errors.New("slow stage was not stopped by the wall-time limit")
+	}
+}
+
+// AUDIT-06: a configured wall-time limit stops an active stage and aborts the
+// run with "wall time exceeded".
+func TestRunIterationLoopHonorsConfiguredWallTime(t *testing.T) {
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		RequestIntent: "run past a short wall-time limit",
+		Stages:        []schemas.ExecutionStage{{Name: "slow"}},
+	}
+	options := PipelineConfigFromAgentOptions(agent.Options{MaxWall: 100 * time.Millisecond})
+	start := time.Now()
+	result, err := runIterationLoop(context.Background(), "run-wall", plan, stageRegistry{"slow": slowStage{}}, runFakeProvider{}, options, t.TempDir(), nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	if result.Status != "aborted" || result.AbortReason == nil || *result.AbortReason != "wall time exceeded" {
+		t.Fatalf("result = %s / %v, want aborted with wall time exceeded", result.Status, result.AbortReason)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("run took %v, want the 100ms limit to stop it", elapsed)
+	}
+}
+
+// AUDIT-06: the run-start notice names the wall-time limit only when it is
+// not the default.
+func TestRunNoticesNonDefaultWallTime(t *testing.T) {
+	for _, tc := range []struct {
+		maxWall time.Duration
+		want    bool
+	}{{0, false}, {defaultMaxWall, false}, {30 * time.Minute, true}} {
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		workDir, registry := newRunTestWorkspace(t)
+		var notices []string
+		_, err := Run(context.Background(), "check the project", runFakeProvider{}, agent.Options{
+			Cwd:              workDir,
+			Registry:         registry,
+			PermissionMode:   agent.PermissionModeAuto,
+			FileTracker:      tools.NewFileTracker(),
+			TrustedWorkspace: true,
+			MaxWall:          tc.maxWall,
+			OnNotice:         func(text string) { notices = append(notices, text) },
+		}, nil, nil)
+		if err != nil {
+			t.Fatalf("Run(%v): %v", tc.maxWall, err)
+		}
+		found := false
+		for _, line := range notices {
+			found = found || line == "[limits] wall-time limit 30m0s (default 10m0s)"
+		}
+		if found != tc.want {
+			t.Fatalf("MaxWall %v: notices = %q, want wall-time notice %v", tc.maxWall, notices, tc.want)
+		}
+	}
+}
+
+// P2-4 (c): a pass that fails with a stage error, driven with a classifier
+// policy, records the typed kind stage_error in the failure history. The
+// error text does not look like a stage error, so only the typed record kind
+// can produce it.
+func TestRunIterationLoopRecordsStageErrorKindInFailureHistory(t *testing.T) {
+	eval := &trajectoryEvaluator{label: "continue"}
+	advisor := classifierAdvisor(t, eval)
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		RequestIntent: "Record the typed failure kind.",
+		Stages:        []schemas.ExecutionStage{{Name: "terminal_failure"}},
+	}
+	options := PipelineRunConfig{Advisor: advisor}
+	policy := newHostTrajectoryPolicy(advisor, options.TrajectoryConfig, false)
+	if policy == nil {
+		t.Fatal("precondition: the advisor must build a classifier policy")
+	}
+	options.ClassifierPolicy = policy
+	if _, err := runIterationLoop(context.Background(), "kind-run", plan, stageRegistry{"terminal_failure": terminalDetailStage{}}, runFakeProvider{}, options, t.TempDir(), nil, nil, nil, nil, nil, nil); err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	if len(policy.failureHistory) == 0 {
+		t.Fatal("failure history is empty; the classifier did not observe the failed pass")
+	}
+	if got := policy.failureHistory[0].Kind; got != schemas.NodeFailureStageError {
+		t.Fatalf("FailureHistory[0].Kind = %q, want stage_error (history %+v)", got, policy.failureHistory)
 	}
 }

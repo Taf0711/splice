@@ -1,8 +1,11 @@
 package tools
 
 import (
+	"context"
 	"slices"
 	"testing"
+
+	"github.com/Taf0711/splice/internal/gitenv/gitenvtest"
 )
 
 func TestPatchHeaderPathsHandlesQuotedAndSpacedNames(t *testing.T) {
@@ -29,4 +32,11 @@ func TestPatchHeaderPathsUnspacedStillWorks(t *testing.T) {
 	if slices.Contains(got, "/dev/null") {
 		t.Fatalf("/dev/null should not be a header path: %v", got)
 	}
+}
+
+func TestApplyPatchGitHardensEnv(t *testing.T) {
+	record := gitenvtest.InstallRecorder(t)
+	patch := "--- a/d.txt\n+++ b/d.txt\n@@ -1 +1 @@\n-x\n+y\n"
+	_ = NewApplyPatchTool(t.TempDir()).Run(context.Background(), map[string]any{"patch": patch})
+	gitenvtest.AssertHardened(t, gitenvtest.Runs(t, record))
 }

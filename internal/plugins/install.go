@@ -19,6 +19,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/Taf0711/splice/internal/gitenv"
 )
 
 // manifestFileName is the plugin manifest filename, matching the loader.
@@ -285,6 +287,9 @@ func fetchSource(ctx context.Context, source string, runner GitRunner) (string, 
 func defaultGitRunner(ctx context.Context, destination string, source string) error {
 	command := exec.CommandContext(ctx, "git", "clone", "--depth", "1", "--", source, destination)
 	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if err := gitenv.Harden(command); err != nil {
+		return err
+	}
 	if output, err := command.CombinedOutput(); err != nil {
 		return fmt.Errorf("git clone failed: %v: %s", err, strings.TrimSpace(string(output)))
 	}

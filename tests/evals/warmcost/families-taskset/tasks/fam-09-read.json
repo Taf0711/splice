@@ -1,0 +1,8 @@
+{
+  "name": "fam-09-read",
+  "phase": "read",
+  "precursor": "fam-09-write",
+  "prompt": "Extend /healthz with uptime_seconds (integer seconds since process start, tracked via a package-level start time in main). Status stays exactly \"ok\" and sessions is unchanged: existing fields never change name or type.",
+  "check": "# fam-09: /healthz reports status \"ok\" (precursor schema), the sessions\n# key, and uptime_seconds (non-negative integer), 200 always. The sessions\n# key must keep its exact name and meaning.\ncat > probe_healthz_test.go <<'EOF'\npackage main\n\nimport (\n\t\"encoding/json\"\n\t\"net/http/httptest\"\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestProbeHealthzSchema(t *testing.T) {\n\trec := httptest.NewRecorder()\n\thealthHandler(NewStore(time.Minute))(rec, httptest.NewRequest(\"GET\", \"/healthz\", nil))\n\tif rec.Code != 200 {\n\t\tt.Fatalf(\"healthz status = %d, want 200\", rec.Code)\n\t}\n\tvar payload map[string]any\n\tif err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {\n\t\tt.Fatalf(\"decode body %q: %v\", rec.Body.String(), err)\n\t}\n\tif payload[\"status\"] != \"ok\" {\n\t\tt.Fatalf(\"status = %v, want ok\", payload[\"status\"])\n\t}\n\tif _, ok := payload[\"sessions\"]; !ok {\n\t\tt.Fatalf(\"sessions key lost: %v\", payload)\n\t}\n\tuptime, ok := payload[\"uptime_seconds\"]\n\tif !ok {\n\t\tt.Fatalf(\"no uptime_seconds key: %v\", payload)\n\t}\n\tn, ok := uptime.(float64)\n\tif !ok {\n\t\tt.Fatalf(\"uptime_seconds = %v, want a number\", uptime)\n\t}\n\tif n < 0 || n != float64(int64(n)) {\n\t\tt.Fatalf(\"uptime_seconds = %v, want a non-negative integer\", uptime)\n\t}\n}\nEOF\ngo test -count=1 . ; rc=$? ; rm -f probe_healthz_test.go ; exit $rc",
+  "fixture": "fixture"
+}

@@ -13,8 +13,11 @@ func TestEmptyStateShowsBrandAndTaglineOnly(t *testing.T) {
 	m.width, m.height = 100, 30
 
 	view := plainRender(t, m.View())
-	assertContains(t, view, "▀") // braid mark, half-block pixels
+	// P12: the launch body is the cockpit — wordmark, tagline, facts, START.
+	assertContains(t, view, "splice | design mode")
 	assertContains(t, view, emptyStateTagline)
+	assertContains(t, view, "not run this session")
+	assertNotContains(t, view, "▀") // the braid splash is retired from launch
 	assertNotContains(t, view, "running splice against ")
 	assertNotContains(t, view, "add a --version flag")
 	assertNotContains(t, view, "explain internal/agent/loop.go")
@@ -26,7 +29,10 @@ func TestEmptyStateShowsVersion(t *testing.T) {
 	m.width, m.height = 100, 30
 
 	view := plainRender(t, m.View())
-	assertContains(t, view, "v0.2.0")
+	// The launch cockpit does not carry the version line; the model identity
+	// and workspace facts took its slot (frame kAYHl).
+	assertContains(t, view, "model")
+	assertContains(t, view, "START")
 }
 
 func TestDisplayVersion(t *testing.T) {
@@ -105,6 +111,24 @@ func assertRenderedLineWidths(t *testing.T, block string, width int) {
 	for _, line := range strings.Split(block, "\n") {
 		if got := lipgloss.Width(line); got != width {
 			t.Fatalf("expected line width %d, got %d for %q", width, got, line)
+		}
+	}
+}
+
+func TestFormatDoneTotalPadsToTotalDigitWidth(t *testing.T) {
+	cases := []struct {
+		done, total int
+		want        string
+	}{
+		{0, 3, "0/3"},
+		{3, 3, "3/3"},
+		{9, 10, "09/10"},
+		{10, 10, "10/10"},
+		{99, 100, "099/100"},
+	}
+	for _, tc := range cases {
+		if got := formatDoneTotal(tc.done, tc.total); got != tc.want {
+			t.Errorf("formatDoneTotal(%d, %d) = %q, want %q", tc.done, tc.total, got, tc.want)
 		}
 	}
 }

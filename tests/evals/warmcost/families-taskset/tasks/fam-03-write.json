@@ -1,0 +1,7 @@
+{
+  "name": "fam-03-write",
+  "phase": "write",
+  "prompt": "Verify Store.Delete in session.go is idempotent: deleting an unknown or already-deleted id is a silent no-op (no error, no state change). Pin it with TestDeleteIdempotent in session_test.go: delete twice, delete an unknown id, assert no panic and Len unchanged.",
+  "check": "grep -F -q 'func TestDeleteIdempotent' session_test.go || { echo 'precursor change missing' >&2; exit 1; }\ngo build ./... && go test -count=1 ./...",
+  "fixture": "fixture"
+}

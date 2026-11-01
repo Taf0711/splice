@@ -28,6 +28,10 @@ var _ Stage = (*SecurityAuditor)(nil)
 // NewSecurityAuditor constructs a security auditor from one or more
 // deterministic verification checks. Returns a named error if no checks are
 // provided.
+func (*SecurityAuditor) Capabilities() Capabilities {
+	return Capabilities{ModelFree: true, Description: "auditing security"}
+}
+
 func NewSecurityAuditor(checks ...VerificationCheck) (*SecurityAuditor, error) {
 	if len(checks) == 0 {
 		return nil, fmt.Errorf("security auditor requires at least one verification check")
@@ -73,6 +77,7 @@ func (s *SecurityAuditor) Run(ctx context.Context, input schemas.HarnessStageInp
 			Paths:    paths,
 			Scope:    "security",
 			RunTool:  options.RunTool,
+			Sandbox:  options.Sandbox,
 		})
 		if rerr != nil {
 			return schemas.HarnessStageOutput{}, fmt.Errorf("verification check %s: %w", check.Name(), rerr)

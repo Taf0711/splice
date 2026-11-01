@@ -269,14 +269,15 @@ func (m model) composerPositionAtMouse(msg tea.MouseMsg) (int, bool) {
 	if width < 8 {
 		return m.composerPositionAtVisualCell(localX, localY, width)
 	}
-	contentY := localY - 1
+	contentY := localY
 	if renderAttachmentChips(m.pendingImageLabels, m.pendingDocuments) != "" {
 		contentY--
 	}
 	if contentY < 0 {
 		return 0, false
 	}
-	return m.composerPositionAtVisualCell(localX-2, contentY, maxInt(1, width-4))
+	// Bare-row composer (Pen): no border inset, full chat width.
+	return m.composerPositionAtVisualCell(localX, contentY, width)
 }
 
 func (m model) composerMouseSelectionBlocked() bool {
@@ -411,7 +412,7 @@ func (m model) applyComposerText(state composerState, text string, paste bool) m
 	} else {
 		text = sanitizeComposerInput(text)
 	}
-	if shouldInsertCommandArgumentSpace(state, text) {
+	if shouldInsertCommandArgumentSpace(state, text, m.slashCommandNames()) {
 		text = " " + text
 		if previewLabel != "" {
 			previewLabel = " " + previewLabel
@@ -683,7 +684,27 @@ func composerPastePreviewsAfterDelete(previews []composerPastePreview, deleteInd
 	return next
 }
 
-func shouldInsertCommandArgumentSpace(state composerState, text string) bool {
+// slashCommandNames lists every slash name the composer can complete to:
+// builtins and aliases, user commands, and installed skills.
+func (m model) slashCommandNames() []string {
+	var names []string
+	for name := range m.takenSlashNames() {
+		names = append(names, "/"+name)
+	}
+	for _, skill := range m.installedSkills() {
+		if name := skillSlashName(skill.Name); name != "" {
+			names = append(names, "/"+name)
+		}
+	}
+	return names
+}
+
+// shouldInsertCommandArgumentSpace reports whether the typed text should be
+// preceded by a space. It does so only when the composer holds a complete
+// command that takes input. If another slash name starts with the text after
+// typing ("/spec" + "i" -> "/speci", a prefix of "/specialists"), no space is
+// inserted, so the longer name is not split.
+func shouldInsertCommandArgumentSpace(state composerState, text string, names []string) bool {
 	if text == "" {
 		return false
 	}
@@ -698,7 +719,16 @@ func shouldInsertCommandArgumentSpace(state composerState, text string) bool {
 	if strings.TrimRightFunc(state.text, unicode.IsSpace) != state.text {
 		return false
 	}
-	return commandArgumentHintForInput(state.text) != ""
+	if commandArgumentHintForInput(state.text) == "" {
+		return false
+	}
+	typed := strings.ToLower(state.text + text)
+	for _, name := range names {
+		if strings.HasPrefix(strings.ToLower(name), typed) {
+			return false
+		}
+	}
+	return true
 }
 
 func completedFileMentionRangeBefore(state composerState) (int, int, bool) {

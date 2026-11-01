@@ -238,18 +238,19 @@ func TestPromptSubmitPersistsReasoningEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadEvents returned error: %v", err)
 	}
-	// Sequence: user message, reasoning, assistant message.
+	// Sequence: user message, reasoning, stream usage, assistant message.
 	if got := eventTypes(events); !equalEventTypes(got, []sessions.EventType{
 		sessions.EventMessage,
 		sessions.EventReasoning,
+		sessions.EventUsage,
 		sessions.EventMessage,
 	}) {
 		t.Fatalf("unexpected event sequence: %#v", got)
 	}
 	assertPayloadField(t, events[0], "role", "user")
 	assertPayloadField(t, events[1], "content", "private thought")
-	assertPayloadField(t, events[2], "role", "assistant")
-	assertPayloadField(t, events[2], "content", "public answer")
+	assertPayloadField(t, events[3], "role", "assistant")
+	assertPayloadField(t, events[3], "content", "public answer")
 	if !transcriptContains(next.transcript, "public answer") {
 		t.Fatalf("expected assistant text in transcript, got %#v", next.transcript)
 	}
@@ -351,7 +352,9 @@ func TestInitialRenderShowsLimeChatSurface(t *testing.T) {
 	assertContains(t, view, "openai/gpt-4.1")
 	assertContains(t, view, emptyStateTagline)
 	assertNotContains(t, view, "running splice against ")
-	assertNotContains(t, view, " 0 ")
+	// P12: the facts block renders "0 · 0 sources" honestly on a fresh
+	// install; the old "no fake zeros" rule applied to the retired splash.
+	assertContains(t, view, "0 · 0 sources")
 	assertContains(t, view, composerPlaceholder)
 	assertNotContains(t, view, "interactive")
 	if strings.Contains(view, "Welcome to Splice") {
@@ -361,7 +364,7 @@ func TestInitialRenderShowsLimeChatSurface(t *testing.T) {
 
 func TestEmptyStateCollapsesAfterFirstPrompt(t *testing.T) {
 	m := newModel(context.Background(), Options{})
-	m.width = 100
+	m.width = 130
 	m.height = 30
 	m.input.SetValue("inspect the repo")
 
@@ -383,9 +386,10 @@ func TestEmptyStateCollapsesAfterFirstPrompt(t *testing.T) {
 	if strings.Contains(view, emptyStateTagline) {
 		t.Fatalf("empty state should collapse after first prompt, got %q", view)
 	}
-	// Working view shows provider status and the composer divider model fallback.
+	// Working view shows provider status and the bare prompt row (the model
+	// moved to the status line right side per the Pen grammar).
 	assertNotContains(t, view, "interactive")
-	assertContains(t, view, "no model")
+	assertContains(t, view, "❯")
 }
 
 func TestEmptyStateStaysVisibleOnEmptySubmit(t *testing.T) {
@@ -446,6 +450,34 @@ func TestToolsCommandListsRegisteredTools(t *testing.T) {
 
 	if !transcriptContains(next.transcript, "read_file") {
 		t.Fatalf("expected tools transcript to list read_file, got %#v", next.transcript)
+	}
+}
+
+func TestToolsCommandRendersBUILTINGroupForBuiltinOnlyRegistry(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool("."))
+	m := newModel(context.Background(), Options{Registry: registry})
+	m.input.SetValue("/tools")
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /tools to be handled without starting an agent run")
+	}
+	if got := countTranscriptRows(next.transcript, rowSystem); got != 1 {
+		t.Fatalf("expected exactly one system row for the /tools card, got %d: %#v", got, next.transcript)
+	}
+	text := transcriptText(next.transcript)
+	for _, want := range []string{
+		"Tools",
+		"1 registered",
+		"BUILTIN",
+		"read_file",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected builtin-only /tools card to render BUILTIN group with %q, got:\n%s", want, text)
+		}
 	}
 }
 
@@ -894,7 +926,14 @@ func TestDoctorCommandUsesCurrentProviderProfile(t *testing.T) {
 			t.Fatalf("expected doctor transcript to contain %q, got %#v", want, next.transcript)
 		}
 	}
-	for _, unwanted := range []string{"provider.config", "provider.model", "Generated", "Checks"} {
+	// The frame's five-check card shows passing checks too ("this was
+	// verified"), so provider.config/provider.model render with [pass] glyphs.
+	for _, want := range []string{"[pass] provider.config", "[pass] provider.model"} {
+		if !transcriptContains(next.transcript, want) {
+			t.Fatalf("expected doctor transcript to show %q, got %#v", want, next.transcript)
+		}
+	}
+	for _, unwanted := range []string{"Generated", "Checks"} {
 		if transcriptContains(next.transcript, unwanted) {
 			t.Fatalf("expected doctor transcript to hide %q, got %#v", unwanted, next.transcript)
 		}
@@ -940,6 +979,17 @@ func TestSearchCommandRequiresQuery(t *testing.T) {
 	if !transcriptContains(next.transcript, "usage: /search <query>") {
 		t.Fatalf("expected search usage, got %#v", next.transcript)
 	}
+	// The no-query invocation is an ERROR, not an empty result list: the
+	// reply must land in an error-style row, never a calm system note.
+	foundError := false
+	for _, row := range next.transcript {
+		if row.kind == rowError && strings.Contains(row.text, "usage: /search <query>") {
+			foundError = true
+		}
+	}
+	if !foundError {
+		t.Fatalf("no-query /search must append an error row with the usage, got %#v", next.transcript)
+	}
 }
 
 func TestResumeCommandListsRecentSessions(t *testing.T) {
@@ -964,8 +1014,17 @@ func TestResumeCommandListsRecentSessions(t *testing.T) {
 	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
-	if cmd != nil {
-		t.Fatal("expected /resume to be handled without starting an agent run")
+	if cmd == nil {
+		t.Fatal("expected /resume to arm the async session scan (a cmd), not block on store I/O")
+	}
+	// The scan lands as a message; feed it back through Update exactly as
+	// the runtime does.
+	if msg := cmd(); msg != nil {
+		updated, cmd = next.Update(msg)
+		next = updated.(model)
+		if cmd != nil {
+			t.Fatal("expected the scan landing to be handled without starting an agent run")
+		}
 	}
 	// Bare /resume now opens the interactive session picker (like /model & /provider).
 	if next.picker == nil || next.picker.kind != pickerSession {
@@ -989,13 +1048,15 @@ func TestResumeCommandListsRecentSessions(t *testing.T) {
 		if !strings.Contains(item.Label, want.title) {
 			t.Fatalf("picker Label %q should contain the title %q", item.Label, want.title)
 		}
-		if !strings.Contains(item.Meta, want.id) {
-			t.Fatalf("picker %q Meta should show the id %q, got %q", want.title, want.id, item.Meta)
+		// Selection resolves by id; the visible right column names the
+		// model, not a 40-character id.
+		if item.Value != want.id || strings.Contains(item.Meta, want.id) {
+			t.Fatalf("picker %q: Value=%q Meta=%q, want Value=id and Meta without the id", want.title, item.Value, item.Meta)
 		}
 	}
-	// The picker overlay renders the titles and ids.
+	// The picker overlay renders the titles.
 	view := viewString(next.View())
-	for _, want := range []string{"Resume a session", "Newer", "Older", first.SessionID, second.SessionID} {
+	for _, want := range []string{"Resume a session", "Newer", "Older"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("session picker view missing %q:\n%s", want, view)
 		}
@@ -1016,9 +1077,7 @@ func TestResumePickerSelectionHydratesSession(t *testing.T) {
 	}
 
 	m := newModel(context.Background(), Options{SessionStore: store})
-	m.input.SetValue("/resume")
-	updated, _ := m.Update(testKey(tea.KeyEnter))
-	m = updated.(model)
+	m = openResumePicker(t, m)
 	if m.picker == nil || m.picker.kind != pickerSession {
 		t.Fatalf("expected the session picker to open, got %#v", m.picker)
 	}
@@ -1028,9 +1087,9 @@ func TestResumePickerSelectionHydratesSession(t *testing.T) {
 		}
 	}
 
-	updated, cmd := m.Update(testKey(tea.KeyEnter)) // choosePicker
+	updated, cmd2 := m.Update(testKey(tea.KeyEnter)) // choosePicker
 	next := updated.(model)
-	if cmd != nil {
+	if cmd2 != nil {
 		t.Fatal("selecting a session to resume should not start an agent run")
 	}
 	if next.picker != nil {
@@ -1371,12 +1430,12 @@ func TestEscCancelConfirmationDisarmsOnInterveningKey(t *testing.T) {
 	}
 }
 
-// TestEscCancelConfirmationDisarmsWhenStolenByAskUser: a mid-turn ask_user
-// prompt lands between the two Esc presses. The user's second Esc denies the
-// questionnaire (an earlier branch in the Esc handler), not a confirm, so it
-// must not leave cancelConfirmActive armed for a later, unrelated Esc to
-// silently cancel the run.
-func TestEscCancelConfirmationDisarmsWhenStolenByAskUser(t *testing.T) {
+// TestEscCancelConfirmationStolenByAskUserCancelsRun: a mid-turn ask_user prompt
+// lands between the two Esc presses. The second Esc is consumed by the ask-user
+// branch, which now cancels the whole run immediately (the questionnaire is not a
+// dismiss-and-keep-running surface); the run-cancel path clears the stale cancel
+// confirmation along with the run state.
+func TestEscCancelConfirmationStolenByAskUserCancelsRun(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	cancelled := false
 	m.pending = true
@@ -1398,20 +1457,14 @@ func TestEscCancelConfirmationDisarmsWhenStolenByAskUser(t *testing.T) {
 
 	updated, _ = next.Update(testKey(tea.KeyEsc))
 	next = updated.(model)
-	if cancelled {
-		t.Fatal("an Esc consumed by the ask-user prompt must not cancel the run")
+	if !cancelled {
+		t.Fatal("an Esc on the ask-user prompt must cancel the run")
+	}
+	if next.pending || next.pendingAskUser != nil {
+		t.Fatalf("cancelling must clear run and questionnaire, pending=%v prompt=%#v", next.pending, next.pendingAskUser)
 	}
 	if next.cancelConfirmActive {
-		t.Fatal("an Esc consumed by the ask-user prompt must disarm the stale cancel confirmation")
-	}
-
-	updated, _ = next.Update(testKey(tea.KeyEsc))
-	next = updated.(model)
-	if cancelled {
-		t.Fatal("the next Esc should arm a fresh confirmation, not immediately cancel")
-	}
-	if !next.cancelConfirmActive {
-		t.Fatal("the next Esc should arm a fresh confirmation")
+		t.Fatal("cancelling must clear the stale cancel confirmation")
 	}
 }
 
@@ -1533,6 +1586,54 @@ func TestBeginRunResetsSidebarHidden(t *testing.T) {
 	}
 	if m.planDetailGen <= gen {
 		t.Errorf("beginRun should bump planDetailGen, was %d now %d", gen, m.planDetailGen)
+	}
+}
+
+// TestBeginRunSeedsReasoningExpanded: provider-returned narration is supposed to
+// stay fully visible during a run, so beginRun must seed the streaming reasoning
+// block to its expanded state instead of leaving the collapsed tail default.
+func TestBeginRunSeedsReasoningExpanded(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.streamingReasoningExpanded = false
+	m = m.beginRun(nil)
+	if !m.streamingReasoningExpanded {
+		t.Fatal("beginRun should seed streamingReasoningExpanded to true (narration visible during run)")
+	}
+}
+
+// TestToolCallPreservesReasoningAndNarration: when a tool call row arrives it
+// ends the current streamed segment. The in-flight reasoning AND assistant
+// narration must be retained as committed transcript rows instead of vanishing
+// when the tool card replaces the interim block.
+func TestToolCallPreservesReasoningAndNarration(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.activeRunID = 3
+	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: "do it"})
+	// Simulate live streaming state: reasoning and narration both in flight.
+	m.streamingReasoning = "I should check the file. "
+	m.streamingText = []byte("Let me read it.")
+
+	updated, _ := m.Update(agentRowMsg{
+		runID: 3,
+		row:   transcriptRow{kind: rowToolCall, id: "call_1", tool: "read_file", runID: 3},
+	})
+	next := updated.(model)
+
+	reasoning, ok := findTranscriptRow(next.transcript, rowReasoning)
+	if !ok || !strings.Contains(reasoning.text, "I should check the file.") {
+		t.Fatalf("in-flight reasoning must be retained before the tool call, got %#v", next.transcript)
+	}
+	if !reasoning.expanded {
+		t.Fatal("provider-returned reasoning must stay expanded after the tool call")
+	}
+	if !transcriptContains(next.transcript, "Let me read it.") {
+		t.Fatalf("in-flight assistant narration must be retained before the tool call, got %#v", next.transcript)
+	}
+	if len(next.streamingReasoning) != 0 || len(next.streamingText) != 0 {
+		t.Errorf("streamed segment should clear after being committed, reasoning=%q text=%q", next.streamingReasoning, next.streamingText)
+	}
+	if !next.streamingReasoningExpanded {
+		t.Fatal("the next reasoning segment in the same run must remain expanded")
 	}
 }
 
@@ -1946,11 +2047,8 @@ func TestShiftTabCyclesPermissionMode(t *testing.T) {
 		agent.PermissionModeAsk,
 		agent.PermissionModeAuto,
 	} {
-		updated, cmd := m.Update(testKeyShift(tea.KeyTab))
+		updated, _ := m.Update(testKeyShift(tea.KeyTab))
 		m = updated.(model)
-		if cmd != nil {
-			t.Fatalf("expected shift+tab to cycle mode synchronously, got command")
-		}
 		if m.permissionMode != want {
 			t.Fatalf("expected permission mode %q after shift+tab, got %q", want, m.permissionMode)
 		}
@@ -1963,6 +2061,79 @@ func TestShiftTabCyclesPermissionMode(t *testing.T) {
 	label, _ := m.modeLabel()
 	if label != "auto-approve" {
 		t.Fatalf("expected mode label to track cycled mode, got %q", label)
+	}
+}
+
+// A toggle during a run says it applies from the next run, because the run
+// copied the mode at launch.
+func TestShiftTabDuringRunAcksNextRun(t *testing.T) {
+	m := newModel(context.Background(), Options{PermissionMode: agent.PermissionModeAuto})
+	m.width = 120
+	m.pending = true
+
+	updated, _ := m.Update(testKeyShift(tea.KeyTab))
+	m = updated.(model)
+	if m.permissionMode != agent.PermissionModeAsk {
+		t.Fatalf("permission mode = %q, want ask", m.permissionMode)
+	}
+	last := stripANSI(m.transcript[len(m.transcript)-1].text)
+	if !strings.Contains(last, "ask: applies from the next run") {
+		t.Fatalf("in-run toggle ack = %q, want \"ask: applies from the next run\"", last)
+	}
+}
+
+// An /exec run is forced to auto, so the status line shows auto while the
+// session selector still says ask.
+func TestStatusShowsEffectiveModeOfExecRun(t *testing.T) {
+	m := newModel(context.Background(), Options{PermissionMode: agent.PermissionModeAsk})
+	m.width = 120
+	m.pending = true
+	m.activeExecDirect = true
+
+	if label, _ := m.permissionModeLabel(); label != "auto-approve" {
+		t.Fatalf("exec run label = %q, want auto-approve", label)
+	}
+	if status := stripANSI(m.statusLine(120)); !strings.Contains(status, "auto-approve") {
+		t.Fatalf("exec run status line %q lacks auto-approve", status)
+	}
+	m.pending = false
+	if label, _ := m.permissionModeLabel(); label != "ask" {
+		t.Fatalf("idle label = %q, want ask", label)
+	}
+
+	// beginRun carries the /exec flag into the run it starts.
+	launched := newModel(context.Background(), Options{PermissionMode: agent.PermissionModeAsk})
+	launched.execDirectPending = true
+	if launched = launched.beginRun(func() {}); !launched.activeExecDirect {
+		t.Fatal("beginRun dropped the pending /exec flag")
+	}
+}
+
+// Each toggle acknowledges the new mode in the transcript, and the status line
+// shows the mode for both Ask and Auto.
+func TestShiftTabAcknowledgesAndShowsPermissionMode(t *testing.T) {
+	m := newModel(context.Background(), Options{PermissionMode: agent.PermissionModeAuto})
+	m.width = 120
+	m.designMode = false
+
+	cases := []struct {
+		mode    agent.PermissionMode
+		segment string
+		ack     string
+	}{
+		{agent.PermissionModeAsk, "ask", "ask: each tool asks first"},
+		{agent.PermissionModeAuto, "auto-approve", "auto: tools run without asking"},
+	}
+	for _, tc := range cases {
+		updated, _ := m.Update(testKeyShift(tea.KeyTab))
+		m = updated.(model)
+		last := m.transcript[len(m.transcript)-1]
+		if got := stripANSI(last.text); !strings.Contains(got, "permissions") || !strings.Contains(got, tc.ack) {
+			t.Fatalf("mode %q: transcript ack = %q, want permissions %q", tc.mode, got, tc.ack)
+		}
+		if status := stripANSI(m.statusLine(120)); !strings.Contains(status, tc.segment) {
+			t.Fatalf("mode %q: status line %q lacks %q", tc.mode, status, tc.segment)
+		}
 	}
 }
 
@@ -2792,5 +2963,67 @@ func TestOverlayViewportLinesCompositesAndPreservesBackdropText(t *testing.T) {
 	}
 	if !strings.Contains(panelRow, "backdrop") {
 		t.Fatalf("overlaid row should keep backdrop margin text alongside the panel, got %q", panelRow)
+	}
+}
+
+// TestStatusLineSurfacesCancelAffordanceWhilePending pins the TP7 footer-hint
+// work: an active run advertises the existing esc-cancel affordance before the
+// first Esc press, the armed confirmation replaces it with the stronger amber
+// instruction, and the idle status carries neither.
+func TestStatusLineSurfacesCancelAffordanceWhilePending(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	idle := plainRender(t, m.statusLine(96))
+	if strings.Contains(idle, "esc cancel") {
+		t.Fatalf("idle status must not advertise cancel, got %q", idle)
+	}
+
+	m.pending = true
+	m.activeRunID = 1
+	m.runCancel = func() {}
+	pending := plainRender(t, m.statusLine(96))
+	if !strings.Contains(pending, "esc cancel") {
+		t.Fatalf("pending status must advertise the cancel affordance, got %q", pending)
+	}
+	if strings.Contains(pending, escCancelConfirmText) {
+		t.Fatalf("pending status must not pre-arm the confirmation, got %q", pending)
+	}
+
+	m.cancelConfirmActive = true
+	confirm := plainRender(t, m.statusLine(96))
+	if !strings.Contains(confirm, escCancelConfirmText) {
+		t.Fatalf("armed status must show the confirm instruction, got %q", confirm)
+	}
+	if strings.Contains(confirm, "esc cancel") {
+		t.Fatalf("armed status must replace the hint, got %q", confirm)
+	}
+}
+
+// TestHandleExecCommandArmsCliParity pins F1 wiring: /exec arms the
+// CLI-parity flag consumed by the launched pipeline run.
+func TestHandleExecCommandArmsCliParity(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	next, _ := m.handleExecCommand("implement the stubbed DeleteUser flow")
+	if !next.execDirectPending {
+		t.Fatal("/exec must arm the exec-direct flag")
+	}
+	if next.designMode {
+		t.Fatal("/exec must leave design mode")
+	}
+}
+
+// TestLaunchQueuedMessageEchoesDelivery pins F2: delivering input queued while
+// busy appends a visible system line quoting what was delivered, so the next
+// run's prompt provenance is never silent.
+func TestLaunchQueuedMessageEchoesDelivery(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.provider = &fakeProvider{}
+	m.queuedMessage = "fix the users service"
+
+	next, _ := m.launchQueuedMessageIfReady()
+	if next.queuedMessage != "" {
+		t.Fatal("queued message must be consumed")
+	}
+	if !transcriptContains(next.transcript, "Delivered queued input: fix the users service") {
+		t.Fatalf("transcript lacks the delivery echo")
 	}
 }

@@ -187,7 +187,7 @@ func TestFormatWorkingElapsed(t *testing.T) {
 // AFTER partial text has streamed, so an upstream stall never looks frozen.
 func TestInterimBlockShowsWorkingLineWithStreamedText(t *testing.T) {
 	m := newModel(t.Context(), Options{ModelName: "gpt-4.1"})
-	m.width = 100
+	m.width = 130
 	base := time.Date(2026, 6, 14, 10, 0, 0, 0, time.UTC)
 	m.now = func() time.Time { return base.Add(12 * time.Second) }
 	m.turnStartedAt = base
@@ -283,7 +283,7 @@ func TestPreviewTail(t *testing.T) {
 // shown beneath the working line, so the screen shows live, changing content.
 func TestInterimBlockShowsReasoningPreviewWhileThinking(t *testing.T) {
 	m := newModel(t.Context(), Options{ModelName: "gpt-4.1"})
-	m.width = 100
+	m.width = 130
 	base := time.Date(2026, 6, 18, 23, 0, 0, 0, time.UTC)
 	m.now = func() time.Time { return base.Add(90 * time.Second) }
 	m.turnStartedAt = base
@@ -303,7 +303,7 @@ func TestInterimBlockShowsReasoningPreviewWhileThinking(t *testing.T) {
 // collapsed tail preview must NOT be duplicated.
 func TestInterimBlockNoPreviewWhenReasoningExpanded(t *testing.T) {
 	m := newModel(t.Context(), Options{ModelName: "gpt-4.1"})
-	m.width = 100
+	m.width = 130
 	m.now = func() time.Time { return time.Date(2026, 6, 18, 23, 0, 0, 0, time.UTC) }
 	m.streamingReasoningExpanded = true
 	m.streamingReasoning = "only line of reasoning here"

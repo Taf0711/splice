@@ -2,7 +2,7 @@ package stages
 
 import (
 	"context"
-	"os/exec"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -32,10 +32,17 @@ func relPath(path, workDir string) string {
 
 func runRecordedOutput(ctx context.Context, options StageOptions, name string, args map[string]any, cwd string, command []string) ([]byte, error) {
 	run := func(runCtx context.Context) (ToolResult, error) {
-		cmd := exec.CommandContext(runCtx, command[0], command[1:]...)
-		if cwd != "" {
-			cmd.Dir = cwd
+		dir := cwd
+		if dir == "" {
+			// Preserve the historical default: inherit the process working
+			// directory when the caller passes no explicit one.
+			dir, _ = os.Getwd()
 		}
+		cmd, plan, cerr := PrepareStageCommand(runCtx, options.Sandbox, dir, command)
+		if cerr != nil {
+			return ToolResult{OK: false}, cerr
+		}
+		defer plan.Cleanup()
 		out, err := cmd.Output()
 		return ToolResult{OK: err == nil, Output: string(out)}, err
 	}

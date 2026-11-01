@@ -132,11 +132,22 @@ func TestGrantRequestPermissionsSessionPersists(t *testing.T) {
 		WorkspaceRoot: workspace,
 		ToolName:      "write_file",
 		SideEffect:    SideEffectWrite,
-		Permission:    PermissionAllow,
+		Permission:    PermissionPrompt,
 		Args:          map[string]any{"path": target},
 	})
-	if decision.Action != ActionAllow {
+	if decision.Action != ActionAllow || !decision.ProfileMatched {
 		t.Fatalf("session grant should persist after cleanup no-op, got %#v", decision)
+	}
+
+	sibling := engine.Evaluate(context.Background(), Request{
+		WorkspaceRoot: workspace,
+		ToolName:      "write_file",
+		SideEffect:    SideEffectWrite,
+		Permission:    PermissionPrompt,
+		Args:          map[string]any{"path": filepath.Join(filepath.Dir(outside), "sibling", "notes.txt")},
+	})
+	if sibling.Action != ActionPrompt || sibling.ProfileMatched {
+		t.Fatalf("session profile matched an ungranted sibling: %#v", sibling)
 	}
 }
 

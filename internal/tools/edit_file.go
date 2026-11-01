@@ -71,6 +71,13 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	if err != nil {
 		return errorResult("Error reading " + relativePath + ": " + err.Error())
 	}
+	// Read-before-write guard (strict stage mode): refuse to edit a file the
+	// model never read in this session, same as write_file.
+	if options.RequireReadBeforeWrite {
+		if _, tracked := options.FileTracker.Version(absolutePath); !tracked {
+			return errorResult(unreadOverwriteMessage(relativePath))
+		}
+	}
 	// Refuse to edit a file that changed on disk outside Splice since it was last
 	// read: the model's old_string was formed against a stale view, so applying it
 	// now could silently corrupt the newer content.
@@ -153,7 +160,7 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	// Optional format-on-write (SPLICE_FORMAT_ON_WRITE). Must run BEFORE the
 	// FileTracker re-baseline: recording pre-format content would make the very
 	// next edit look like an external modification and trip the conflict guard.
-	updated = maybeFormatWrittenFile(ctx, absolutePath, updated)
+	updated, formatNotice := maybeFormatWrittenFile(ctx, absolutePath, updated, options.TrustedWorkspace)
 	// Re-baseline to the content we just wrote so subsequent edits in this session
 	// compare against the current on-disk state, not the pre-edit version.
 	newInfo, _ := os.Stat(absolutePath)
@@ -163,7 +170,7 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	if replacedCount != 1 {
 		suffix = "s"
 	}
-	summary := fmt.Sprintf("Successfully edited %s (replaced %d occurrence%s).", relativePath, replacedCount, suffix)
+	summary := fmt.Sprintf("Successfully edited %s (replaced %d occurrence%s).", relativePath, replacedCount, suffix) + formatNotice
 	summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
 	result := okResult(summary)
 	result.ChangedFiles = []string{relativePath}

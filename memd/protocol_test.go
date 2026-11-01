@@ -211,6 +211,29 @@ func TestSearchRequestValidate(t *testing.T) {
 			wantErr:  "",
 			wantDiff: 50,
 		},
+		{
+			name: "NUL byte is rejected",
+			req: searchRequest{
+				Query:           "hello\x00world",
+				RequestingAgent: "agent-1",
+			},
+			wantErr: "control character",
+		},
+		{
+			name: "other C0 control is rejected",
+			req: searchRequest{
+				Query:           "hello\x01world",
+				RequestingAgent: "agent-1",
+			},
+			wantErr: "control character",
+		},
+		{
+			name: "tab and newline remain valid",
+			req: searchRequest{
+				Query:           "hello\tworld\nnext",
+				RequestingAgent: "agent-1",
+			},
+		},
 	}
 
 	for _, tt := range tests {

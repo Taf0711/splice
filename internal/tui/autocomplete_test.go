@@ -318,9 +318,69 @@ func TestSuggestionOverlayRenders(t *testing.T) {
 	if strings.Contains(plain, "/model") {
 		t.Fatalf("suggestion overlay should display command names without slash prefixes, got %q", plain)
 	}
-	for _, want := range []string{"╭── Commands", "╰", "search > mo", "↑/↓ move", "Enter run", "Esc close"} {
+	for _, want := range []string{"╭── Commands", "╰", "query  mo", "↑/↓ move", "Enter run", "Esc close"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("suggestion overlay should include %q in %q", want, plain)
+		}
+	}
+}
+
+// Regression: on tall terminals the overlay block was padded to the full
+// startup height, grew taller than the viewport, and the viewport pinned to
+// its blank bottom rows — typing "/" showed an empty body (owner capture,
+// ~100-row window). The palette must stay visible at any height.
+func TestSuggestionOverlayVisibleOnTallTerminal(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.width, m.height = 260, 100
+	m = typeRunes(t, m, "/wwww")
+
+	plain := plainRender(t, m.View())
+	if !strings.Contains(plain, "Commands") || !strings.Contains(plain, "no matching commands") {
+		t.Fatalf("palette must stay visible on a tall terminal, got %q", plain)
+	}
+}
+
+// Regression: the palette card rendered with its lower rows cut off (owner
+// report "the bottom is cut off"). Two caches served stale geometry for the
+// overlay frame: the settled body-items list and the viewport span cache.
+// The card must render WHOLE — top border, rows, action footer, bottom
+// border — and sit around the vertical middle at every height.
+func TestSuggestionOverlayRendersWholeCardAtEveryHeight(t *testing.T) {
+	for _, height := range []int{46, 52, 60, 100} {
+		m := newModel(context.Background(), Options{AltScreen: true})
+		m.width, m.height = 250, height
+		m.headerPrinted = true
+		// Settle the frame the way a live session does, so the settled-items
+		// and span caches are warm before the palette opens.
+		m.flushedAny = true
+		m.altScreenSettledWidth = m.chatColumnWidth()
+		m.altScreenSettledFrontier = m.flushed
+		_ = plainRender(t, m.View())
+
+		m = typeRunes(t, m, "/")
+		lines := strings.Split(plainRender(t, m.View()), "\n")
+
+		top, bottom, footer := -1, -1, -1
+		for index, line := range lines {
+			switch {
+			case top < 0 && strings.Contains(line, "╭── Commands"):
+				top = index
+			case top >= 0 && footer < 0 && strings.Contains(line, "Esc close"):
+				footer = index
+			case top >= 0 && bottom < 0 && strings.Contains(line, "╰──"):
+				bottom = index
+			}
+		}
+		if top < 0 || footer < 0 || bottom < 0 {
+			t.Fatalf("height %d: palette card must render whole (top=%d footer=%d bottom=%d):\n%s",
+				height, top, footer, bottom, strings.Join(lines, "\n"))
+		}
+		if !(top < footer && footer < bottom) {
+			t.Fatalf("height %d: card rows out of order: top=%d footer=%d bottom=%d", height, top, footer, bottom)
+		}
+		// Vertically middle-ish: never pinned to the very top of the body.
+		if top < 3 {
+			t.Fatalf("height %d: palette should sit toward the middle, got top row %d", height, top)
 		}
 	}
 }
@@ -337,7 +397,7 @@ func TestSuggestionOverlayStaysVisibleWhenTranscriptScrolled(t *testing.T) {
 	m = typeRunes(t, m, "/")
 
 	plain := plainRender(t, m.View())
-	if !strings.Contains(plain, "Commands") || !strings.Contains(plain, "search >") {
+	if !strings.Contains(plain, "Commands") {
 		t.Fatalf("suggestion overlay should stay visible above composer while transcript is scrolled, got %q", plain)
 	}
 	lines := strings.Split(plain, "\n")
@@ -350,9 +410,9 @@ func TestSuggestionOverlayStaysVisibleWhenTranscriptScrolled(t *testing.T) {
 		switch {
 		case strings.Contains(line, "Commands"):
 			paletteLine = index
-		case strings.Contains(line, "no model"):
-			// The composer rule shows the model; the mode ("auto-approve") is now on
-			// the status line below it, so locate the composer by its model label.
+		case strings.Contains(line, "❯") || strings.Contains(line, "> "):
+			// The Pen composer is a bare prompt row (no model rule); locate
+			// it by its prompt glyph.
 			composerLine = index
 		}
 	}
@@ -428,13 +488,15 @@ func TestCommandPaletteStaysOpenForNoMatches(t *testing.T) {
 		t.Fatalf("expected no command matches, got %v", suggestionNames(m))
 	}
 	plain := plainRender(t, m.View())
-	for _, want := range []string{"search > ,", "no matching commands"} {
+	for _, want := range []string{"query  ,", "no matching commands"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("no-match palette should include %q in %q", want, plain)
 		}
 	}
-	if strings.Contains(plain, "/,") {
-		t.Fatalf("slash query should stay inside palette display, got %q", plain)
+	// The bare prompt row (Pen grammar) keeps the live query visible while
+	// the palette is open — the composer must not look wiped.
+	if !strings.Contains(plain, "> /,") {
+		t.Fatalf("prompt row should show the live slash query, got %q", plain)
 	}
 }
 
@@ -471,13 +533,15 @@ func TestFilePaletteStaysOpenForNoMatches(t *testing.T) {
 		t.Fatalf("expected no file matches, got %v", suggestionNames(m))
 	}
 	plain := plainRender(t, m.View())
-	for _, want := range []string{"Files", "search > missing", "no matching files"} {
+	for _, want := range []string{"Files", "query  missing", "no matching files"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("no-match file palette should include %q in %q", want, plain)
 		}
 	}
-	if strings.Contains(plain, "@missing") {
-		t.Fatalf("bare @ query should stay inside palette display without @ prefix, got %q", plain)
+	// The bare prompt row (Pen grammar) keeps the live query visible while
+	// the palette is open.
+	if !strings.Contains(plain, "> @missing") {
+		t.Fatalf("prompt row should show the live @ query, got %q", plain)
 	}
 }
 
@@ -558,8 +622,8 @@ func TestFilePaletteDisplaysFilenamesAndPaths(t *testing.T) {
 	m = typeRunes(t, m, "@main")
 
 	plain := plainRender(t, m.View())
-	if strings.Contains(plain, "@main") {
-		t.Fatalf("file palette should not render @ prefixes, got %q", plain)
+	if !strings.Contains(plain, "> @main") {
+		t.Fatalf("prompt row should show the @ query, got %q", plain)
 	}
 	if !strings.Contains(plain, "main.go") || !strings.Contains(plain, "cmd/server") {
 		t.Fatalf("file palette should show filename plus parent path, got %q", plain)

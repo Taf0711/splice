@@ -1,0 +1,7 @@
+{
+  "name": "fam-07-write",
+  "phase": "write",
+  "prompt": "The expiry tests are scattered. Consolidate them: create expiry_table_test.go in package main with a table-driven TestSessionExpiryTable covering fresh-readable, exactly-ttl-live, one-second-past-expired, and expired-dropped cases, all against a controllable store.now clock. All cases must live in ONE table.",
+  "check": "grep -F -q 'func TestSessionExpiryTable' expiry_table_test.go || { echo 'precursor change missing' >&2; exit 1; }\ngo build ./... && go test -count=1 ./...",
+  "fixture": "fixture"
+}

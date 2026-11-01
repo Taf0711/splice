@@ -3,12 +3,50 @@ package splice
 import (
 	"fmt"
 
+	"github.com/Taf0711/splice/internal/flags"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
+// stageFlag maps a filterable stage name to the flag that can disable it.
+//
+// Only optional stages appear here. code_writer is deliberately absent: it is
+// the stage that produces the change, and a plan without it is not a pipeline
+// run. TestStageFlagMappingIsValid pins both properties.
+var stageFlag = map[string]flags.Flag{
+	"security_auditor": flags.StageSecurityAuditor,
+	"test_generator":   flags.StageTestGenerator,
+}
+
+// FilterStageNames removes stages that a resolved flag disables, keeping the
+// input order. It is pure: the caller owns provenance and wiring.
+//
+// A stage with no flag mapping is always kept. With the zero flag set every
+// declared flag reads its default, so the result equals the input and a caller
+// that does not set flags keeps today's stage shape.
+func FilterStageNames(names []string, set flags.Set) []string {
+	filtered := make([]string, 0, len(names))
+	for _, name := range names {
+		if flag, ok := stageFlag[name]; ok && !set.Enabled(flag) {
+			continue
+		}
+		filtered = append(filtered, name)
+	}
+	return filtered
+}
+
 // stageBudgets holds per-stage baseline budgets.
+//
+// Light-tier derivation (run 3 measured data, splice-eval-taskset-run3):
+// cold successes show prompt-in median 3.7k / p90 4.2k tokens per stage call;
+// warm runs that aborted showed prompt-in median 18.3k / p90 23.7k because
+// memory injection inflates composed input roughly 5x. InputMax 20000 sits
+// above the warm p90 so a legitimate memory payload survives compaction
+// instead of being stripped to nothing, while compaction (stage_input.go)
+// still trims runaway bundles deterministically. OutputMax stays at 8192:
+// successful-run output p90 is ~4.8k, so 8192 already carries ~1.7x headroom,
+// and output overflow remains the runaway-generation tripwire.
 func stageBudgets(tier schemas.PipelineTier) map[string]schemas.StageBudget {
-	codeWriterInput := 4_000
+	codeWriterInput := 20_000
 	codeWriterOutput := 8_192
 	if tier == schemas.TierTrivial {
 		codeWriterInput = 2_000
@@ -19,36 +57,30 @@ func stageBudgets(tier schemas.PipelineTier) map[string]schemas.StageBudget {
 		"code_writer": {
 			InputMax:  codeWriterInput,
 			OutputMax: codeWriterOutput,
-			ModelTier: "medium",
 		},
 		"test_generator": {
 			InputMax:  3_000,
 			OutputMax: 8_192,
-			ModelTier: "medium",
 			Skippable: true,
 		},
 		"static_analyzer": {
 			InputMax:  0,
 			OutputMax: 0,
-			ModelTier: "",
 			Skippable: true,
 		},
 		"security_auditor": {
 			InputMax:  0,
 			OutputMax: 0,
-			ModelTier: "",
 			Skippable: true,
 		},
 		"test_runner": {
 			InputMax:  0,
 			OutputMax: 0,
-			ModelTier: "",
 			Skippable: true,
 		},
 		"acceptance_verifier": {
 			InputMax:  0,
 			OutputMax: 0,
-			ModelTier: "",
 			Skippable: true,
 		},
 	}

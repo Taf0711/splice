@@ -150,7 +150,28 @@ func (registry *toolBodyRegistry) render(req toolBodyRequest) cardBody {
 	if strings.TrimSpace(req.detail) == "" {
 		return cardBody{}
 	}
+	// A failed tool's detail is an error message, and a message cut at the
+	// card edge hides the reason ("call read_fil…"). Wrap it instead. Shell
+	// tools keep their renderer: their body is program output with exit
+	// status, where long lines conventionally truncate.
+	if req.failed && !isShellCommandTool(req.name) && !looksLikeDiff(req.detail) {
+		return errorCardBody(req.detail, req.opts)
+	}
 	return registry.rendererFor(req.name).renderToolBody(req)
+}
+
+func errorCardBody(detail string, opts cardRenderOptions) cardBody {
+	var lines []string
+	for _, line := range strings.Split(sanitizeTerminalOutput(detail, true), "\n") {
+		wrapped := []string{line}
+		if opts.width > 0 {
+			wrapped = wrapPlainText(line, opts.width)
+		}
+		for _, part := range wrapped {
+			lines = append(lines, zeroTheme.muted.Render(part))
+		}
+	}
+	return cardBody{lines: capCardLines(lines, opts.bodyCap)}
 }
 
 func (registry *toolBodyRegistry) rendererFor(name string) toolBodyRenderer {

@@ -3,13 +3,14 @@ package openai
 import "encoding/json"
 
 type chatCompletionRequest struct {
-	Model               string           `json:"model"`
-	Messages            []chatMessage    `json:"messages"`
-	Tools               []toolDefinition `json:"tools,omitempty"`
-	MaxCompletionTokens int              `json:"max_completion_tokens,omitempty"`
-	ReasoningEffort     string           `json:"reasoning_effort,omitempty"`
-	Stream              bool             `json:"stream"`
-	StreamOptions       *streamOptions   `json:"stream_options,omitempty"`
+	Model               string            `json:"model"`
+	Messages            []chatMessage     `json:"messages"`
+	Tools               []toolDefinition  `json:"tools,omitempty"`
+	MaxCompletionTokens int               `json:"max_completion_tokens,omitempty"`
+	ReasoningEffort     string            `json:"reasoning_effort,omitempty"`
+	Reasoning           *reasoningOptions `json:"reasoning,omitempty"`
+	Stream              bool              `json:"stream"`
+	StreamOptions       *streamOptions    `json:"stream_options,omitempty"`
 	// PromptCacheKey asks the backend to route the request to a replica that
 	// already holds this conversation's prefix in its prompt cache (the OpenAI
 	// `prompt_cache_key` parameter). Omitted when the caller carries no session
@@ -20,6 +21,15 @@ type chatCompletionRequest struct {
 	// {"type":"function","function":{"name":<ToolChoice>}} object. Nil keeps
 	// the current auto behavior byte-for-byte (omitted via omitempty).
 	ToolChoice any `json:"tool_choice,omitempty"`
+	// Provider is OpenRouter's upstream routing (openrouter.ai only). Nil
+	// keeps OpenRouter's default price-weighted routing across upstreams.
+	Provider *openRouterRouting `json:"provider,omitempty"`
+}
+
+// openRouterRouting pins the upstreams OpenRouter may use, in order.
+type openRouterRouting struct {
+	Order          []string `json:"order"`
+	AllowFallbacks bool     `json:"allow_fallbacks"`
 }
 
 // streamOptions requests the final usage chunk on a streaming response. Without
@@ -29,6 +39,10 @@ type streamOptions struct {
 	IncludeUsage bool `json:"include_usage"`
 }
 
+type reasoningOptions struct {
+	Effort string `json:"effort"`
+}
+
 type chatMessage struct {
 	Role string `json:"role"`
 	// Content has no omitempty: strict OpenAI-compatible servers (e.g. some
@@ -36,9 +50,10 @@ type chatMessage struct {
 	// or null with "invalid message content type: <nil>". mapMessage always sets
 	// this (to "" when there's no text), so a contentless message serializes as
 	// `"content":""` rather than being dropped.
-	Content    any               `json:"content"`
-	ToolCalls  []requestToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string            `json:"tool_call_id,omitempty"`
+	Content          any               `json:"content"`
+	ToolCalls        []requestToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string            `json:"tool_call_id,omitempty"`
+	ReasoningDetails []json.RawMessage `json:"reasoning_details,omitempty"`
 }
 
 // contentPart is one element of an OpenAI multimodal `content` array. A part is
@@ -92,6 +107,9 @@ type toolFunction struct {
 }
 
 type streamChunk struct {
+	// ID is OpenRouter's generation ID ("gen-..."), the same identity as
+	// the X-Generation-Id header, which a streamed response can omit.
+	ID      string         `json:"id"`
 	Choices []streamChoice `json:"choices"`
 	Usage   *usage         `json:"usage"`
 	Error   *apiError      `json:"error"`
@@ -104,15 +122,42 @@ type streamChoice struct {
 }
 
 type streamMessage struct {
-	Annotations []streamAnnotation `json:"annotations"`
+	Annotations      []streamAnnotation `json:"annotations"`
+	ReasoningDetails []reasoningDetail  `json:"reasoning_details"`
 }
 
 type streamDelta struct {
 	Content          string                `json:"content"`
 	ReasoningContent string                `json:"reasoning_content"`
 	Reasoning        string                `json:"reasoning"`
+	ReasoningDetails []reasoningDetail     `json:"reasoning_details"`
 	ToolCalls        []streamToolCallDelta `json:"tool_calls"`
 	Annotations      []streamAnnotation    `json:"annotations"`
+}
+
+// reasoningDetail is one OpenRouter structured reasoning entry. Raw preserves
+// signatures and opaque fields so tool-call continuations can replay it exactly.
+type reasoningDetail struct {
+	ID        *string         `json:"id"`
+	Type      string          `json:"type"`
+	Format    string          `json:"format"`
+	Index     *int            `json:"index"`
+	Text      string          `json:"text"`
+	Summary   string          `json:"summary"`
+	Signature string          `json:"signature"`
+	Data      string          `json:"data"`
+	Raw       json.RawMessage `json:"-"`
+}
+
+func (detail *reasoningDetail) UnmarshalJSON(data []byte) error {
+	type wire reasoningDetail
+	var decoded wire
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*detail = reasoningDetail(decoded)
+	detail.Raw = append(detail.Raw[:0], data...)
+	return nil
 }
 
 type streamToolCallDelta struct {
@@ -150,10 +195,54 @@ type usage struct {
 	// name is an OpenRouter extension, not part of the OpenAI schema, so an
 	// unrelated proxy reusing it could mean something else entirely.
 	Cost *float64 `json:"cost,omitempty"`
+	// IsBYOK is true when the request ran on the user's own upstream key. Then
+	// Cost can read 0 and the real charge is CostDetails.UpstreamInferenceCost.
+	IsBYOK      bool             `json:"is_byok,omitempty"`
+	CostDetails *openRouterCosts `json:"cost_details,omitempty"`
+}
+
+// openRouterCosts is OpenRouter's cost breakdown. Only the upstream total is
+// read; the split fields are not needed for pricing.
+type openRouterCosts struct {
+	UpstreamInferenceCost *float64 `json:"upstream_inference_cost,omitempty"`
+}
+
+// reportedUsageCost returns the exact charge OpenRouter reported for a usage
+// chunk, or nil when it reported none. For a BYOK request the billed charge is
+// the upstream inference cost, because Cost reads 0 in that case.
+func reportedUsageCost(u usage) *float64 {
+	if u.IsBYOK && u.CostDetails != nil && u.CostDetails.UpstreamInferenceCost != nil && *u.CostDetails.UpstreamInferenceCost > 0 {
+		cost := *u.CostDetails.UpstreamInferenceCost
+		return &cost
+	}
+	if u.Cost == nil {
+		return nil
+	}
+	cost := *u.Cost
+	return &cost
+}
+
+// keepReportedCost folds a later usage chunk's reported cost into the value
+// already seen. A later zero never overwrites a real charge, so the stored
+// cost does not depend on which usage chunk arrives last.
+func keepReportedCost(previous, next *float64) *float64 {
+	if next == nil {
+		return previous
+	}
+	if *next == 0 && previous != nil && *previous > 0 {
+		return previous
+	}
+	return next
 }
 
 type promptTokenDetails struct {
 	CachedTokens int `json:"cached_tokens"`
+	// CacheWriteTokens counts tokens written to the prompt cache on this
+	// request. The field name follows the OpenAI-compatible extension shape
+	// that OpenRouter documents for prompt_tokens_details; backends that do
+	// not report cache writes omit it, and the zero value then means "not
+	// reported", which is distinct from a reported zero.
+	CacheWriteTokens int `json:"cache_write_tokens"`
 }
 
 type completionTokenDetails struct {

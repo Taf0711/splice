@@ -9,7 +9,9 @@ import (
 
 	"github.com/Taf0711/splice/internal/config"
 	"github.com/Taf0711/splice/internal/doctor"
+	"github.com/Taf0711/splice/internal/flags"
 	"github.com/Taf0711/splice/internal/providerhealth"
+	"github.com/Taf0711/splice/internal/providers/decisions"
 	zsearch "github.com/Taf0711/splice/internal/search"
 	"github.com/Taf0711/splice/internal/sessions"
 )
@@ -47,32 +49,57 @@ func runDoctor(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) 
 
 	var provider config.ProviderProfile
 	var sandboxConfig config.SandboxConfig
-	if resolved, resolveErr := deps.resolveConfig(workspaceRoot, config.Overrides{}); resolveErr == nil {
-		provider = resolved.Provider
-		sandboxConfig = resolved.Sandbox
+	var flagSet flags.Set
+	var configErr error
+	resolved, resolveErr := deps.resolveConfig(workspaceRoot, config.Overrides{})
+	// A missing provider still leaves a resolved flag set, so the experimental
+	// flag warning shows. Any other resolve failure is reported by doctor.
+	provider = resolved.Provider
+	sandboxConfig = resolved.Sandbox
+	flagSet = resolved.Flags
+	if resolveErr != nil && !isProviderResolveError(resolveErr) {
+		configErr = resolveErr
 	}
+	// Only the connectivity probe reads the credential store. The probe sends
+	// the stored credential, as a run does. A failed read keeps the keyless
+	// profile; doctor's stored-key check reports the cause.
 	var health *providerhealth.Result
-	if options.connectivity && config.HasProviderProfile(provider) {
-		ctx, stop := signalContext()
-		defer stop()
-		probe := deps.probeProviderHealth(ctx, providerhealth.Options{
-			Profile:      provider,
-			Connectivity: true,
-			UserAgent:    userAgent(),
-		})
-		health = &probe
+	if options.connectivity {
+		probeProfile, _ := applyStoredProviderKeyAt(provider, deps.userConfigPath)
+		if config.HasProviderProfile(probeProfile) {
+			ctx, stop := signalContext()
+			defer stop()
+			probe := deps.probeProviderHealth(ctx, providerhealth.Options{
+				Profile:      probeProfile,
+				Connectivity: true,
+				UserAgent:    userAgent(),
+			})
+			health = &probe
+		}
 	}
 
+	trajectoryProfile, _ := config.TrajectoryClassifierProfile(resolved.DecisionAdvisor, resolved.Providers)
+	// The evaluator is built by the same call a run makes, so doctor's
+	// classifier line uses the runtime's own gates. No request is sent.
+	doctorEvaluator, evaluatorErr := decisions.NewEvaluator(resolved.DecisionAdvisor, resolved)
+	if evaluatorErr != nil {
+		doctorEvaluator = nil
+	}
 	report := doctor.Run(doctor.Options{
-		Now:            deps.now,
-		Runtime:        "go",
-		UserConfig:     userConfig,
-		ProjectConfig:  projectConfig,
-		Provider:       provider,
-		WorkspaceRoot:  workspaceRoot,
-		Sandbox:        sandboxConfig,
-		Connectivity:   options.connectivity,
-		ProviderHealth: health,
+		Now:               deps.now,
+		Runtime:           "go",
+		UserConfig:        userConfig,
+		ProjectConfig:     projectConfig,
+		Provider:          provider,
+		DecisionAdvisor:   resolved.DecisionAdvisor,
+		TrajectoryProfile: trajectoryProfile,
+		Evaluator:         doctorEvaluator,
+		WorkspaceRoot:     workspaceRoot,
+		Sandbox:           sandboxConfig,
+		Connectivity:      options.connectivity,
+		ProviderHealth:    health,
+		Flags:             flagSet,
+		ConfigError:       configErr,
 	})
 	if options.json {
 		if err := writePrettyJSON(stdout, report); err != nil {

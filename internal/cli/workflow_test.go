@@ -14,6 +14,7 @@ import (
 	"github.com/Taf0711/splice/internal/config"
 	"github.com/Taf0711/splice/internal/redaction"
 	"github.com/Taf0711/splice/internal/selfverify"
+	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/testrunner"
 	"github.com/Taf0711/splice/internal/verify"
 	"github.com/Taf0711/splice/internal/worktrees"
@@ -151,6 +152,161 @@ func TestRunWorktreesPrepareRejectsDuplicateNames(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "worktree name was provided more than once") {
 		t.Fatalf("expected duplicate name error, got %q", stderr.String())
+	}
+}
+
+func TestRunWorktreesPruneTextAndJSON(t *testing.T) {
+	cwd := t.TempDir()
+	base := t.TempDir()
+	removedPath := filepath.Join(base, "splice-worktree-abc", "removed-one")
+	keptPath := filepath.Join(base, "splice-worktree-abc", "kept")
+
+	for _, tc := range []struct {
+		args []string
+		json bool
+	}{
+		{args: []string{"worktrees", "prune", "--dir", base}},
+		{args: []string{"worktrees", "prune", "--dir=" + base, "--json"}, json: true},
+	} {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
+			var pruneOptions worktrees.PruneOptions
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			exitCode := runWithDeps(tc.args, &stdout, &stderr, appDeps{
+				getwd: func() (string, error) { return cwd, nil },
+				pruneWorktrees: func(ctx context.Context, options worktrees.PruneOptions) (worktrees.PruneResult, error) {
+					pruneOptions = options
+					return worktrees.PruneResult{
+						Removed: []string{removedPath},
+						Skipped: []worktrees.PruneSkip{{Path: keptPath, Reason: "locked"}},
+					}, nil
+				},
+			})
+
+			if exitCode != exitSuccess {
+				t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+			}
+			if pruneOptions.Cwd != cwd || pruneOptions.BaseDir != base {
+				t.Fatalf("unexpected prune options: %#v", pruneOptions)
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("expected empty stderr, got %q", stderr.String())
+			}
+			if tc.json {
+				var decoded worktrees.PruneResult
+				if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
+					t.Fatalf("decode prune JSON: %v\n%s", err, stdout.String())
+				}
+				if len(decoded.Removed) != 1 || decoded.Removed[0] != removedPath {
+					t.Fatalf("unexpected removed list: %v", decoded.Removed)
+				}
+				if len(decoded.Skipped) != 1 || decoded.Skipped[0].Path != keptPath || decoded.Skipped[0].Reason != "locked" {
+					t.Fatalf("unexpected skipped list: %v", decoded.Skipped)
+				}
+			} else {
+				if !strings.Contains(stdout.String(), "removed: "+removedPath) {
+					t.Fatalf("expected removed path in output, got %q", stdout.String())
+				}
+				if !strings.Contains(stdout.String(), "skipped: "+keptPath+" (locked)") {
+					t.Fatalf("expected skipped path and reason in output, got %q", stdout.String())
+				}
+			}
+		})
+	}
+}
+
+func TestRunWorktreesPruneWiresCwdFlag(t *testing.T) {
+	target := t.TempDir()
+	var pruneOptions worktrees.PruneOptions
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"worktrees", "prune", "-C", target}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return t.TempDir(), nil },
+		pruneWorktrees: func(ctx context.Context, options worktrees.PruneOptions) (worktrees.PruneResult, error) {
+			pruneOptions = options
+			return worktrees.PruneResult{}, nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if pruneOptions.Cwd != target {
+		t.Fatalf("Cwd = %q, want %q", pruneOptions.Cwd, target)
+	}
+}
+
+func TestRunWorktreesPruneRedactsPathsAndReasons(t *testing.T) {
+	secret := "sk-proj-abcdefghijklmnopqrstuvwxyz"
+	cwd := filepath.Join(t.TempDir(), secret, "repo")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	removedPath := filepath.Join(t.TempDir(), secret, "removed")
+	keptPath := filepath.Join(t.TempDir(), secret, "kept")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"worktrees", "prune"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		pruneWorktrees: func(context.Context, worktrees.PruneOptions) (worktrees.PruneResult, error) {
+			return worktrees.PruneResult{
+				Removed: []string{removedPath},
+				Skipped: []worktrees.PruneSkip{{Path: keptPath, Reason: "remove: " + secret}},
+			}, nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if strings.Contains(stdout.String(), secret) {
+		t.Fatalf("prune output leaked secret: %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), redaction.RedactedSecret) {
+		t.Fatalf("expected redaction marker in prune output, got %q", stdout.String())
+	}
+}
+
+func TestRunWorktreesPruneRejectsPositionalArgs(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"worktrees", "prune", "extra"}, &stdout, &stderr, appDeps{
+		pruneWorktrees: func(context.Context, worktrees.PruneOptions) (worktrees.PruneResult, error) {
+			t.Fatal("pruneWorktrees should not be called for invalid flags")
+			return worktrees.PruneResult{}, nil
+		},
+	})
+
+	if exitCode != exitUsage {
+		t.Fatalf("expected usage exit %d, got %d", exitUsage, exitCode)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout, got %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "no positional arguments") {
+		t.Fatalf("expected positional rejection error, got %q", stderr.String())
+	}
+}
+
+func TestRunWorktreesPruneTopLevelErrorFailsLoud(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"worktrees", "prune"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return t.TempDir(), nil },
+		pruneWorktrees: func(context.Context, worktrees.PruneOptions) (worktrees.PruneResult, error) {
+			return worktrees.PruneResult{}, errors.New("not a git repository")
+		},
+	})
+
+	if exitCode != exitUsage {
+		t.Fatalf("expected usage exit %d, got %d", exitUsage, exitCode)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout, got %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "not a git repository") {
+		t.Fatalf("expected top-level prune error on stderr, got %q", stderr.String())
 	}
 }
 
@@ -651,6 +807,85 @@ func TestRunExecWorktreeUsesPreparedWorkspace(t *testing.T) {
 	}
 }
 
+// execProjectTopologyMarker is the progress line the pipeline prints when it
+// loads a project topology. The JSON writer emits it as a reasoning event.
+const execProjectTopologyMarker = "active pipeline from project .splice/pipeline.json"
+
+// writeExecUncommittedTopology writes a project topology into root after the
+// git fixture commits, so only the source repo has it, not the worktree.
+func writeExecUncommittedTopology(t *testing.T, root string) {
+	t.Helper()
+	path := filepath.Join(root, ".splice", "pipeline.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const topology = `{"version": 1, "name": "repo-lint", "nodes": [{"name": "lint", "type": "command", "command": ["true"]}]}`
+	if err := os.WriteFile(path, []byte(topology), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRunExecWorktreeTopologyComesFromCheckout pins the trust root for a
+// worktree run. Trust is decided for the worktree path, so the topology must
+// come from that checkout, not from the source repo's uncommitted file.
+func TestRunExecWorktreeTopologyComesFromCheckout(t *testing.T) {
+	setCLIUserConfigRoot(t)
+	root := t.TempDir()
+	worktreeDir := t.TempDir()
+	initTestGitWorktree(t, root, worktreeDir)
+	writeExecUncommittedTopology(t, root)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"exec", "--worktree", "task-a", "--trust", "--output-format", "json", "hello"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return root, nil },
+		prepareWorktree: func(context.Context, worktrees.Options) (worktrees.Result, error) {
+			return worktrees.Result{Name: "task-a", Path: worktreeDir, RepoRoot: root, SourceBranch: "main", SourceCommit: "abc1234"}, nil
+		},
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return newExecStageAwareProvider(execStageProviderOptions{}), nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("exitCode = %d, stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), execProjectTopologyMarker) {
+		t.Fatalf("worktree run loaded the source repo's project topology; want the worktree checkout\n%s", stdout.String())
+	}
+}
+
+// TestRunExecTopologyLoadsFromWorkspaceRoot is the non-worktree control. The
+// same uncommitted file must load when the run uses the launch directory as its
+// trust root, which proves the worktree test is not passing by accident.
+func TestRunExecTopologyLoadsFromWorkspaceRoot(t *testing.T) {
+	setCLIUserConfigRoot(t)
+	root := t.TempDir()
+	writeExecUncommittedTopology(t, root)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"exec", "--trust", "--output-format", "json", "hello"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return root, nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return newExecStageAwareProvider(execStageProviderOptions{}), nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("exitCode = %d, stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), execProjectTopologyMarker) {
+		t.Fatalf("non-worktree run did not load the workspace project topology\n%s", stdout.String())
+	}
+}
+
 func TestRunExecRejectsForkWithWorktree(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -695,13 +930,15 @@ func TestRunExecWorktreeMergeBackOnSuccess(t *testing.T) {
 	worktreeDir := t.TempDir()
 	initTestGitWorktree(t, root, worktreeDir)
 	var mergeOptions worktrees.MergeBackOptions
+	var unlockOptions worktrees.UnlockOptions
+	var removedOptions worktrees.RemoveOptions
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	exitCode := runWithDeps([]string{"exec", "--worktree", "task-a", "--merge-back", "hello"}, &stdout, &stderr, appDeps{
 		getwd: func() (string, error) { return root, nil },
 		prepareWorktree: func(ctx context.Context, options worktrees.Options) (worktrees.Result, error) {
-			return worktrees.Result{Name: "task-a", Path: worktreeDir, RepoRoot: root, SourceBranch: "main", SourceCommit: "abc1234"}, nil
+			return worktrees.Result{Name: "task-a", Path: worktreeDir, RepoRoot: root, SourceBranch: "main", SourceCommit: "abc1234", Locked: true}, nil
 		},
 		mergeBackWorktree: func(ctx context.Context, options worktrees.MergeBackOptions) (worktrees.MergeBackResult, error) {
 			mergeOptions = options
@@ -711,6 +948,17 @@ func TestRunExecWorktreeMergeBackOnSuccess(t *testing.T) {
 				CommitSHA: "fedcba9876",
 				Message:   "merged splice/task-a (commit fedcba9876)",
 			}, nil
+		},
+		unlockWorktree: func(ctx context.Context, options worktrees.UnlockOptions) error {
+			unlockOptions = options
+			return nil
+		},
+		removeWorktree: func(ctx context.Context, options worktrees.RemoveOptions) error {
+			if unlockOptions.Path == "" {
+				t.Fatal("removeWorktree called before unlockWorktree")
+			}
+			removedOptions = options
+			return nil
 		},
 		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
 			return execResolvedConfig(), nil
@@ -726,8 +974,117 @@ func TestRunExecWorktreeMergeBackOnSuccess(t *testing.T) {
 	if mergeOptions.RepoRoot != root || mergeOptions.WorktreePath != worktreeDir || mergeOptions.Name != "task-a" {
 		t.Fatalf("unexpected merge-back options: %#v", mergeOptions)
 	}
+	if unlockOptions.RepoRoot != root || unlockOptions.Path != worktreeDir {
+		t.Fatalf("unexpected unlock options: %#v", unlockOptions)
+	}
+	if removedOptions.RepoRoot != root || removedOptions.Path != worktreeDir {
+		t.Fatalf("unexpected cleanup options: %#v", removedOptions)
+	}
 	if !strings.Contains(stdout.String(), "merged splice/task-a") {
 		t.Fatalf("expected merge-back message in output, got %q", stdout.String())
+	}
+}
+
+func TestRunExecWorktreeMergeBackCleanupPolicy(t *testing.T) {
+	cases := []struct {
+		name          string
+		status        worktrees.MergeBackStatus
+		mergeErr      error
+		removeErr     error
+		wantExit      int
+		wantRemoved   bool
+		wantCleanWarn bool
+	}{
+		{name: "no changes removes worktree", status: worktrees.MergeBackNoChanges, wantExit: exitSuccess, wantRemoved: true},
+		{name: "skipped dirty keeps worktree", status: worktrees.MergeBackSkippedDirty, wantExit: exitIncomplete},
+		{name: "conflict keeps worktree", status: worktrees.MergeBackConflict, wantExit: exitIncomplete},
+		{name: "merge error keeps worktree", mergeErr: errors.New("git exploded"), wantExit: exitCrash},
+		{name: "removal error warns and keeps success", status: worktrees.MergeBackMerged, removeErr: errors.New("git exploded"), wantExit: exitSuccess, wantRemoved: true, wantCleanWarn: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			worktreeDir := t.TempDir()
+			initTestGitWorktree(t, root, worktreeDir)
+			var removedOptions worktrees.RemoveOptions
+
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			exitCode := runWithDeps([]string{"exec", "--worktree", "task-a", "--merge-back", "hello"}, &stdout, &stderr, appDeps{
+				getwd: func() (string, error) { return root, nil },
+				prepareWorktree: func(context.Context, worktrees.Options) (worktrees.Result, error) {
+					return worktrees.Result{Name: "task-a", Path: worktreeDir, RepoRoot: root}, nil
+				},
+				mergeBackWorktree: func(context.Context, worktrees.MergeBackOptions) (worktrees.MergeBackResult, error) {
+					if tc.mergeErr != nil {
+						return worktrees.MergeBackResult{}, tc.mergeErr
+					}
+					return worktrees.MergeBackResult{Status: tc.status, Branch: "splice/task-a", Message: "status " + string(tc.status)}, nil
+				},
+				removeWorktree: func(ctx context.Context, options worktrees.RemoveOptions) error {
+					removedOptions = options
+					return tc.removeErr
+				},
+				resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+					return execResolvedConfig(), nil
+				},
+				newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+					return newExecStageAwareProvider(execStageProviderOptions{}), nil
+				},
+			})
+
+			if exitCode != tc.wantExit {
+				t.Fatalf("exit = %d, want %d: %s", exitCode, tc.wantExit, stderr.String())
+			}
+			removed := removedOptions.Path != ""
+			if removed != tc.wantRemoved {
+				t.Fatalf("worktree removal called = %v, want %v (options %#v)", removed, tc.wantRemoved, removedOptions)
+			}
+			if tc.wantCleanWarn {
+				if !strings.Contains(stderr.String(), "worktree cleanup failed") || !strings.Contains(stderr.String(), worktreeDir) {
+					t.Fatalf("expected cleanup warning naming the path on stderr, got %q", stderr.String())
+				}
+			}
+		})
+	}
+}
+
+func TestRunExecWorktreeMergeBackWarnsWhenVerdictSkippedNoSession(t *testing.T) {
+	root := t.TempDir()
+	worktreeDir := t.TempDir()
+	initTestGitWorktree(t, root, worktreeDir)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"exec", "--worktree", "task-a", "--merge-back", "hello"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return root, nil },
+		prepareWorktree: func(context.Context, worktrees.Options) (worktrees.Result, error) {
+			return worktrees.Result{Name: "task-a", Path: worktreeDir, RepoRoot: root, SourceBranch: "main", SourceCommit: "abc1234", Locked: true}, nil
+		},
+		mergeBackWorktree: func(context.Context, worktrees.MergeBackOptions) (worktrees.MergeBackResult, error) {
+			return worktrees.MergeBackResult{
+				Status:    worktrees.MergeBackMerged,
+				Branch:    "splice/task-a",
+				CommitSHA: "fedcba9876",
+				Message:   "merged splice/task-a",
+			}, nil
+		},
+		unlockWorktree: func(context.Context, worktrees.UnlockOptions) error { return nil },
+		removeWorktree: func(context.Context, worktrees.RemoveOptions) error { return nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return newExecStageAwareProvider(execStageProviderOptions{}), nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	// A merge happened, but the run has no session ID to key the verdict on.
+	// The skip must fail loud, not silently drop the verdict.
+	if !strings.Contains(stderr.String(), "verdict not recorded: run has no session id") {
+		t.Fatalf("expected verdict-skip warning in stderr, got %q", stderr.String())
 	}
 }
 
@@ -762,6 +1119,129 @@ func TestRunExecWorktreeMergeBackSkippedDirtyExitsIncomplete(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "merge-back skipped_dirty") || !strings.Contains(stderr.String(), "merge manually") {
 		t.Fatalf("expected skipped-dirty warning on stderr, got %q", stderr.String())
+	}
+}
+
+func TestRunExecWorktreeMergeBackRefusesUnverifiedRun(t *testing.T) {
+	root := t.TempDir()
+	worktreeDir := t.TempDir()
+	initTestGitWorktree(t, root, worktreeDir)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	mergeCalled := false
+	removed := false
+	exitCode := runWithDeps([]string{"exec", "--worktree", "task-a", "--merge-back", "hello"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return root, nil },
+		prepareWorktree: func(context.Context, worktrees.Options) (worktrees.Result, error) {
+			return worktrees.Result{Name: "task-a", Path: worktreeDir, RepoRoot: root, SourceBranch: "main", SourceCommit: "abc1234", Locked: true}, nil
+		},
+		mergeBackWorktree: func(context.Context, worktrees.MergeBackOptions) (worktrees.MergeBackResult, error) {
+			mergeCalled = true
+			return worktrees.MergeBackResult{Status: worktrees.MergeBackMerged, Message: "merged"}, nil
+		},
+		unlockWorktree: func(context.Context, worktrees.UnlockOptions) error { return nil },
+		removeWorktree: func(context.Context, worktrees.RemoveOptions) error { removed = true; return nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return newExecStageAwareProvider(execStageProviderOptions{
+				Files:     []schemas.FileChange{{Path: "hello.txt", Content: "hi\n", ChangeType: "create"}},
+				TestFiles: []schemas.FileChange{{Path: "hello-check.txt", Content: "ok\n", ChangeType: "create"}},
+			}), nil
+		},
+	})
+	if exitCode != exitIncomplete {
+		t.Fatalf("exit = %d, want %d: %s", exitCode, exitIncomplete, stderr.String())
+	}
+	if mergeCalled {
+		t.Fatal("merge-back ran for an unverified completed run")
+	}
+	if removed {
+		t.Fatal("worktree was removed for an unverified completed run")
+	}
+	if !strings.Contains(stderr.String(), "without verification") {
+		t.Fatalf("expected unverified refusal on stderr, got %q", stderr.String())
+	}
+}
+
+func TestRunExecWorktreeMergeBackAllowsUnverifiedWhenExplicit(t *testing.T) {
+	root := t.TempDir()
+	worktreeDir := t.TempDir()
+	initTestGitWorktree(t, root, worktreeDir)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	mergeCalled := false
+	removed := false
+	warningBeforeMerge := -1
+	var mergeOptions worktrees.MergeBackOptions
+	exitCode := runWithDeps([]string{"exec", "--worktree", "task-a", "--merge-back", "--allow-unverified-merge", "hello"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return root, nil },
+		prepareWorktree: func(context.Context, worktrees.Options) (worktrees.Result, error) {
+			return worktrees.Result{Name: "task-a", Path: worktreeDir, RepoRoot: root, SourceBranch: "main", SourceCommit: "abc1234", Locked: true}, nil
+		},
+		mergeBackWorktree: func(_ context.Context, options worktrees.MergeBackOptions) (worktrees.MergeBackResult, error) {
+			mergeCalled = true
+			mergeOptions = options
+			warningBeforeMerge = strings.Index(stderr.String(), "merging an unverified run")
+			return worktrees.MergeBackResult{Status: worktrees.MergeBackMerged, Message: "merged"}, nil
+		},
+		unlockWorktree: func(context.Context, worktrees.UnlockOptions) error { return nil },
+		removeWorktree: func(context.Context, worktrees.RemoveOptions) error { removed = true; return nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return newExecStageAwareProvider(execStageProviderOptions{
+				Files:     []schemas.FileChange{{Path: "hello.txt", Content: "hi\n", ChangeType: "create"}},
+				TestFiles: []schemas.FileChange{{Path: "hello-check.txt", Content: "ok\n", ChangeType: "create"}},
+			}), nil
+		},
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("exit = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
+	}
+	if !mergeCalled {
+		t.Fatal("explicit unverified merge did not run merge-back")
+	}
+	// P2-2: the warning names the unverified reason before the merge.
+	warning := strings.Index(stderr.String(), "WARNING: merging an unverified run (--allow-unverified-merge): no check applied")
+	if warning < 0 {
+		t.Fatalf("stderr = %q, want the unverified-merge warning with the reason", stderr.String())
+	}
+	if warningBeforeMerge < 0 {
+		t.Fatal("the unverified-merge warning was not written before merge-back ran")
+	}
+	// P2-4 (b): the prepared source identity reaches MergeBack.
+	if mergeOptions.SourceBranch != "main" || mergeOptions.SourceCommit != "abc1234" {
+		t.Fatalf("merge-back source = %q / %q, want main / abc1234", mergeOptions.SourceBranch, mergeOptions.SourceCommit)
+	}
+	if !removed {
+		t.Fatal("explicit unverified merge did not remove the worktree")
+	}
+}
+
+func TestRunExecRequireVerifiedExitsIncomplete(t *testing.T) {
+	cwd := t.TempDir()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"exec", "--require-verified", "write hello"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return newExecStageAwareProvider(execStageProviderOptions{
+				Files:     []schemas.FileChange{{Path: "hello.txt", Content: "hi\n", ChangeType: "create"}},
+				TestFiles: []schemas.FileChange{{Path: "hello-check.txt", Content: "ok\n", ChangeType: "create"}},
+			}), nil
+		},
+	})
+	if exitCode != exitIncomplete {
+		t.Fatalf("exit = %d, want %d: %s", exitCode, exitIncomplete, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "without verification") {
+		t.Fatalf("expected unverified refusal on stderr, got %q", stderr.String())
 	}
 }
 

@@ -3,11 +3,13 @@ package splice
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/projectdocs"
 	"github.com/Taf0711/splice/internal/sessions"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/splice/stages"
@@ -99,6 +101,7 @@ func (w *DesignWorkflow) CrystallizeAndCritique(
 	workDir string,
 	images []zeroruntime.ImageBlock,
 ) (schemas.DesignPlan, schemas.PlanCritique, error) {
+	projectInstructions := projectdocs.Load(workDir)
 	if err := w.source.Validate(); err != nil {
 		return schemas.DesignPlan{}, schemas.PlanCritique{}, fmt.Errorf("crystallize transition: %w", err)
 	}
@@ -123,17 +126,27 @@ func (w *DesignWorkflow) CrystallizeAndCritique(
 		return schemas.DesignPlan{}, schemas.PlanCritique{}, fmt.Errorf("crystallize input: %w", err)
 	}
 
-	selection := w.resolveProvider(provider, stageModelResolver, "design_crystallize")
+	// Resolve both routes before the first model request. A route that cannot
+	// resolve fails the run with its stage name, as a run stage does.
+	selection, err := w.resolveProvider(provider, stageModelResolver, "design_crystallize")
+	if err != nil {
+		return schemas.DesignPlan{}, schemas.PlanCritique{}, err
+	}
+	criticSelection, err := w.resolveProvider(provider, stageModelResolver, "plan_critic")
+	if err != nil {
+		return schemas.DesignPlan{}, schemas.PlanCritique{}, err
+	}
 	var stream zeroruntime.CollectOptions
 	if streamFactory != nil {
 		stream = streamFactory("design_crystallize", selection)
 	}
 	opts := stages.StageOptions{
-		WorkDir:         workDir,
-		Stream:          stream,
-		Images:          images,
-		ModelOverride:   selection.Model,
-		ReasoningEffort: selection.ReasoningEffort,
+		WorkDir:             workDir,
+		ProjectInstructions: projectInstructions,
+		Stream:              stream,
+		Images:              images,
+		ModelOverride:       selection.Model,
+		ReasoningEffort:     selection.ReasoningEffort,
 	}
 
 	plan, err := stages.DesignCrystallizer{}.Crystallize(ctx, selection.Provider, opts, input)
@@ -160,19 +173,19 @@ func (w *DesignWorkflow) CrystallizeAndCritique(
 		return schemas.DesignPlan{}, schemas.PlanCritique{}, fmt.Errorf("persist plan_crystallized: %w", err)
 	}
 
-	criticSelection := w.resolveProvider(provider, stageModelResolver, "plan_critic")
 	var criticStream zeroruntime.CollectOptions
 	if streamFactory != nil {
 		criticStream = streamFactory("plan_critic", criticSelection)
 	}
 	criticOpts := stages.StageOptions{
-		WorkDir:          workDir,
-		Stream:           criticStream,
-		Images:           images,
-		Plan:             &plan,
-		PreviousPlan:     previousPlan,
-		PreviousCritique: previousCritique,
-		RelevantContext:  planCriticRelevantContext(designCtx.History),
+		WorkDir:             workDir,
+		ProjectInstructions: projectInstructions,
+		Stream:              criticStream,
+		Images:              images,
+		Plan:                &plan,
+		PreviousPlan:        previousPlan,
+		PreviousCritique:    previousCritique,
+		RelevantContext:     planCriticRelevantContext(designCtx.History),
 	}
 	criticOpts.ModelOverride = criticSelection.Model
 	criticOpts.ReasoningEffort = criticSelection.ReasoningEffort
@@ -255,18 +268,25 @@ func suffixRunes(value string, max int) string {
 	return string(runes[len(runes)-max:])
 }
 
+// resolveProvider returns the route for one design stage. A route that cannot
+// resolve is an error that names the stage. The automatic tier layer falls back
+// to the primary selection, as it does for a run stage.
 func (w *DesignWorkflow) resolveProvider(
 	defaultProvider agent.Provider,
 	resolver agent.StageModelResolver,
 	stageName string,
-) agent.ModelSelection {
+) (agent.ModelSelection, error) {
 	if resolver != nil {
 		selection, err := resolver(stageName)
+		var tierFallback *stageTierFallback
+		if err != nil && !errors.As(err, &tierFallback) {
+			return agent.ModelSelection{}, fmt.Errorf("stage %s model: %w", stageName, err)
+		}
 		if err == nil && selection.Provider != nil {
-			return selection
+			return selection, nil
 		}
 	}
 	selection := w.primarySelection
 	selection.Provider = defaultProvider
-	return selection
+	return selection, nil
 }

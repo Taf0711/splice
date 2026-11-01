@@ -27,7 +27,7 @@ func TestManagerCheckRealGopls(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m := NewManager(root)
+	m := NewManager(root, true)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

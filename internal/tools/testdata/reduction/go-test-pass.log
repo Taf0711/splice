@@ -1,0 +1,376 @@
+=== RUN   TestDecideEveryGate
+=== RUN   TestDecideEveryGate/below_floor_inconclusive
+=== RUN   TestDecideEveryGate/warm_success_drop_is_regression
+=== RUN   TestDecideEveryGate/cost_margin_not_met_inconclusive
+=== RUN   TestDecideEveryGate/needier_inconclusive
+=== RUN   TestDecideEveryGate/conclusive_warm_wins
+=== RUN   TestDecideEveryGate/tie_goes_cold
+=== RUN   TestDecideEveryGate/exactly_10_percent_cheaper_is_inconclusive
+=== RUN   TestDecideEveryGate/just_over_10_percent_cheaper_is_conclusive
+=== RUN   TestDecideEveryGate/zero_success_cold_arm_is_inconclusive
+--- PASS: TestDecideEveryGate (0.00s)
+    --- PASS: TestDecideEveryGate/below_floor_inconclusive (0.00s)
+    --- PASS: TestDecideEveryGate/warm_success_drop_is_regression (0.00s)
+    --- PASS: TestDecideEveryGate/cost_margin_not_met_inconclusive (0.00s)
+    --- PASS: TestDecideEveryGate/needier_inconclusive (0.00s)
+    --- PASS: TestDecideEveryGate/conclusive_warm_wins (0.00s)
+    --- PASS: TestDecideEveryGate/tie_goes_cold (0.00s)
+    --- PASS: TestDecideEveryGate/exactly_10_percent_cheaper_is_inconclusive (0.00s)
+    --- PASS: TestDecideEveryGate/just_over_10_percent_cheaper_is_conclusive (0.00s)
+    --- PASS: TestDecideEveryGate/zero_success_cold_arm_is_inconclusive (0.00s)
+=== RUN   TestDecideConclusiveReasonCarriesAllFourMeasures
+--- PASS: TestDecideConclusiveReasonCarriesAllFourMeasures (0.00s)
+=== RUN   TestDecideGateTrail
+--- PASS: TestDecideGateTrail (0.00s)
+=== RUN   TestDecideEmptyTasksAtCostGateIsInconclusive
+--- PASS: TestDecideEmptyTasksAtCostGateIsInconclusive (0.00s)
+=== RUN   TestDecideRun7ShapeRefusesTokensPerSuccessWin
+--- PASS: TestDecideRun7ShapeRefusesTokensPerSuccessWin (0.00s)
+=== RUN   TestCostMeasuresMedianHandlesEvenAndOddSamples
+=== RUN   TestCostMeasuresMedianHandlesEvenAndOddSamples/empty
+=== RUN   TestCostMeasuresMedianHandlesEvenAndOddSamples/single
+=== RUN   TestCostMeasuresMedianHandlesEvenAndOddSamples/odd
+=== RUN   TestCostMeasuresMedianHandlesEvenAndOddSamples/even
+--- PASS: TestCostMeasuresMedianHandlesEvenAndOddSamples (0.00s)
+    --- PASS: TestCostMeasuresMedianHandlesEvenAndOddSamples/empty (0.00s)
+    --- PASS: TestCostMeasuresMedianHandlesEvenAndOddSamples/single (0.00s)
+    --- PASS: TestCostMeasuresMedianHandlesEvenAndOddSamples/odd (0.00s)
+    --- PASS: TestCostMeasuresMedianHandlesEvenAndOddSamples/even (0.00s)
+=== RUN   TestMeasureCostDoesNotMutateInput
+--- PASS: TestMeasureCostDoesNotMutateInput (0.00s)
+=== RUN   TestHarnessArmOrderingAndSessionID
+--- PASS: TestHarnessArmOrderingAndSessionID (0.00s)
+=== RUN   TestHarnessCheckSuccessMapping
+--- PASS: TestHarnessCheckSuccessMapping (0.00s)
+=== RUN   TestHarnessExecErrorMarksArmFailedAndCompletes
+--- PASS: TestHarnessExecErrorMarksArmFailedAndCompletes (0.00s)
+=== RUN   TestHarnessErrorsSurviveReportRenderers
+--- PASS: TestHarnessErrorsSurviveReportRenderers (0.00s)
+=== RUN   TestHarnessPairLogAppendsAcrossInterruption
+--- PASS: TestHarnessPairLogAppendsAcrossInterruption (0.01s)
+=== RUN   TestHarnessMissingTelemetryWarnsNotSilentZeros
+--- PASS: TestHarnessMissingTelemetryWarnsNotSilentZeros (0.00s)
+=== RUN   TestHarnessPerTaskIsolationPinsPristineStart
+--- PASS: TestHarnessPerTaskIsolationPinsPristineStart (0.06s)
+=== RUN   TestReportGoldenKeys
+--- PASS: TestReportGoldenKeys (0.00s)
+=== RUN   TestReportMarkdownContainsSections
+--- PASS: TestReportMarkdownContainsSections (0.00s)
+=== RUN   TestLoadTaskSetValid
+--- PASS: TestLoadTaskSetValid (0.00s)
+=== RUN   TestLoadTaskSetValidationNamesFile
+=== RUN   TestLoadTaskSetValidationNamesFile/missing_name
+=== RUN   TestLoadTaskSetValidationNamesFile/missing_prompt
+=== RUN   TestLoadTaskSetValidationNamesFile/missing_check
+--- PASS: TestLoadTaskSetValidationNamesFile (0.00s)
+    --- PASS: TestLoadTaskSetValidationNamesFile/missing_name (0.00s)
+    --- PASS: TestLoadTaskSetValidationNamesFile/missing_prompt (0.00s)
+    --- PASS: TestLoadTaskSetValidationNamesFile/missing_check (0.00s)
+=== RUN   TestLoadTaskSetNoTasks
+--- PASS: TestLoadTaskSetNoTasks (0.00s)
+PASS
+ok  	github.com/Taf0711/splice/internal/eval	0.387s
+=== RUN   TestBuildWorkspaceIsIdempotentAndResetPreservesJournal
+--- PASS: TestBuildWorkspaceIsIdempotentAndResetPreservesJournal (0.19s)
+=== RUN   TestBuildWorkspaceRejectsBinaryMismatchAndDirtySource
+--- PASS: TestBuildWorkspaceRejectsBinaryMismatchAndDirtySource (0.14s)
+=== RUN   TestChildEnvironmentIsSortedAllowlistedAndRootBound
+--- PASS: TestChildEnvironmentIsSortedAllowlistedAndRootBound (0.00s)
+=== RUN   TestDenyRulesCoverAccessShapesAndCanonicalContainment
+--- PASS: TestDenyRulesCoverAccessShapesAndCanonicalContainment (0.01s)
+=== RUN   TestPreflightReportRequiresCompleteDeniedMatrix
+--- PASS: TestPreflightReportRequiresCompleteDeniedMatrix (0.00s)
+=== RUN   TestMemorySnapshotRoundTripCanonicalAndImport
+--- PASS: TestMemorySnapshotRoundTripCanonicalAndImport (0.00s)
+=== RUN   TestMemorySnapshotAdversarialValidation
+=== RUN   TestMemorySnapshotAdversarialValidation/duplicate_delivered_ID
+=== RUN   TestMemorySnapshotAdversarialValidation/bad_content_hash
+=== RUN   TestMemorySnapshotAdversarialValidation/holdout_leakage
+=== RUN   TestMemorySnapshotAdversarialValidation/bad_pool_tag
+=== RUN   TestMemorySnapshotAdversarialValidation/mismatched_provenance
+=== RUN   TestMemorySnapshotAdversarialValidation/rekeyed_without_map
+--- PASS: TestMemorySnapshotAdversarialValidation (0.00s)
+    --- PASS: TestMemorySnapshotAdversarialValidation/duplicate_delivered_ID (0.00s)
+    --- PASS: TestMemorySnapshotAdversarialValidation/bad_content_hash (0.00s)
+    --- PASS: TestMemorySnapshotAdversarialValidation/holdout_leakage (0.00s)
+    --- PASS: TestMemorySnapshotAdversarialValidation/bad_pool_tag (0.00s)
+    --- PASS: TestMemorySnapshotAdversarialValidation/mismatched_provenance (0.00s)
+    --- PASS: TestMemorySnapshotAdversarialValidation/rekeyed_without_map (0.00s)
+=== RUN   TestSelectionAuditValidationAndStableHash
+--- PASS: TestSelectionAuditValidationAndStableHash (0.00s)
+=== RUN   TestMemoryWritePolicyClaimDenialAndTraceExemption
+--- PASS: TestMemoryWritePolicyClaimDenialAndTraceExemption (0.00s)
+=== RUN   TestVerifySelectionExactSetsAndSortedSymmetricDiff
+=== RUN   TestVerifySelectionExactSetsAndSortedSymmetricDiff/missing
+=== RUN   TestVerifySelectionExactSetsAndSortedSymmetricDiff/extra
+=== RUN   TestVerifySelectionExactSetsAndSortedSymmetricDiff/post_drift
+--- PASS: TestVerifySelectionExactSetsAndSortedSymmetricDiff (0.00s)
+    --- PASS: TestVerifySelectionExactSetsAndSortedSymmetricDiff/missing (0.00s)
+    --- PASS: TestVerifySelectionExactSetsAndSortedSymmetricDiff/extra (0.00s)
+    --- PASS: TestVerifySelectionExactSetsAndSortedSymmetricDiff/post_drift (0.00s)
+=== RUN   TestProtocolAcceptsValidDefinition
+--- PASS: TestProtocolAcceptsValidDefinition (0.00s)
+=== RUN   TestSafetyProtocolRejectsEfficacyShape
+--- PASS: TestSafetyProtocolRejectsEfficacyShape (0.00s)
+=== RUN   TestProtocolRejectsInvalid
+=== RUN   TestProtocolRejectsInvalid/unknown_family
+=== RUN   TestProtocolRejectsInvalid/unknown_version
+=== RUN   TestProtocolRejectsInvalid/missing_experiment_id
+=== RUN   TestProtocolRejectsInvalid/unknown_kind
+=== RUN   TestProtocolRejectsInvalid/unknown_mode
+=== RUN   TestProtocolRejectsInvalid/unknown_arm_name
+=== RUN   TestProtocolRejectsInvalid/duplicate_arms
+=== RUN   TestProtocolRejectsInvalid/missing_primary_arm
+=== RUN   TestProtocolRejectsInvalid/arm_without_delivered_memory_shape
+=== RUN   TestProtocolRejectsInvalid/negative_margin
+=== RUN   TestProtocolRejectsInvalid/confidence_out_of_range
+=== RUN   TestProtocolRejectsInvalid/reordered_gate_sequence
+=== RUN   TestProtocolRejectsInvalid/short_gate_sequence
+=== RUN   TestProtocolRejectsInvalid/unknown_interval_method
+=== RUN   TestProtocolRejectsInvalid/too_few_resamples
+=== RUN   TestProtocolRejectsInvalid/zero_seed
+=== RUN   TestProtocolRejectsInvalid/zero_repetitions
+=== RUN   TestProtocolRejectsInvalid/zero_spend_cap
+=== RUN   TestProtocolRejectsInvalid/primary_cannot_include_safety_arm
+=== RUN   TestProtocolRejectsInvalid/nonfinite_spend_cap
+--- PASS: TestProtocolRejectsInvalid (0.00s)
+    --- PASS: TestProtocolRejectsInvalid/unknown_family (0.00s)
+    --- PASS: TestProtocolRejectsInvalid/unknown_version (0.00s)
+    --- PASS: TestProtocolRejectsInvalid/missing_experiment_id (0.00s)
+    --- PASS: TestProtocolRejectsInvalid/unknown_kind (0.00s)
+    --- PASS: TestProtocolRejectsInvalid/unknown_mode (0.00s)
+    --- PASS: TestProtocolRejectsInvalid/unknown_arm_name (0.00s)
+    --- PASS: TestProtocolRejectsInvalid/duplicate_arms (0.00s)
+    --- PASS: TestProtocolRejectsInvalid/missing_primary_arm (0.00s)
+    --- PASS: TestProtocolRejectsInvalid/arm_without_delivered_memory_shape (0.00s)
+    --- PASS: TestProtocolRejectsInvalid/negative_margin (0.00s)
+    --- PASS: TestProtocolRejectsInvalid/confidence_out_of_range (0.00s)
+    --- PASS: TestProtocolRejectsInvalid/reordered_gate_sequence (0.00s)
+    --- PASS: TestProtocolRejectsInvalid/short_gate_sequence (0.00s)
+    --- PASS: TestProtocolRejectsInvalid/unknown_interval_method (0.00s)
+    --- PASS: TestProtocolRejectsInvalid/too_few_resamples (0.00s)
+    --- PASS: TestProtocolRejectsInvalid/zero_seed (0.00s)
+    --- PASS: TestProtocolRejectsInvalid/zero_repetitions (0.00s)
+    --- PASS: TestProtocolRejectsInvalid/zero_spend_cap (0.00s)
+    --- PASS: TestProtocolRejectsInvalid/primary_cannot_include_safety_arm (0.00s)
+    --- PASS: TestProtocolRejectsInvalid/nonfinite_spend_cap (0.00s)
+=== RUN   TestTaskSetValidation
+=== RUN   TestTaskSetValidation/rejects_empty_set
+=== RUN   TestTaskSetValidation/rejects_malformed_approval_date
+=== RUN   TestTaskSetValidation/rejects_unsafe_or_duplicate_file_paths
+=== RUN   TestTaskSetValidation/rejects_overlapping_context_files
+=== RUN   TestTaskSetValidation/accepts_sealed_task
+=== RUN   TestTaskSetValidation/rejects_duplicate_task_identity
+=== RUN   TestTaskSetValidation/rejects_missing_grader_hash_on_sealed_task
+=== RUN   TestTaskSetValidation/rejects_malformed_hash
+=== RUN   TestTaskSetValidation/sealed_task_needs_independent_auditor
+=== RUN   TestTaskSetValidation/unsealed_candidate_may_omit_approvers
+--- PASS: TestTaskSetValidation (0.00s)
+    --- PASS: TestTaskSetValidation/rejects_empty_set (0.00s)
+    --- PASS: TestTaskSetValidation/rejects_malformed_approval_date (0.00s)
+    --- PASS: TestTaskSetValidation/rejects_unsafe_or_duplicate_file_paths (0.00s)
+    --- PASS: TestTaskSetValidation/rejects_overlapping_context_files (0.00s)
+    --- PASS: TestTaskSetValidation/accepts_sealed_task (0.00s)
+    --- PASS: TestTaskSetValidation/rejects_duplicate_task_identity (0.00s)
+    --- PASS: TestTaskSetValidation/rejects_missing_grader_hash_on_sealed_task (0.00s)
+    --- PASS: TestTaskSetValidation/rejects_malformed_hash (0.00s)
+    --- PASS: TestTaskSetValidation/sealed_task_needs_independent_auditor (0.00s)
+    --- PASS: TestTaskSetValidation/unsealed_candidate_may_omit_approvers (0.00s)
+=== RUN   TestScheduleValidation
+=== RUN   TestScheduleValidation/complete_schedule_passes
+=== RUN   TestScheduleValidation/missing_cell_detected
+=== RUN   TestScheduleValidation/extra_cell_detected
+=== RUN   TestScheduleValidation/wrong_arm_detected
+=== RUN   TestScheduleValidation/paired_arms_require_one_environment_block
+=== RUN   TestScheduleValidation/nonpositive_repetition_invalid
+--- PASS: TestScheduleValidation (0.00s)
+    --- PASS: TestScheduleValidation/complete_schedule_passes (0.00s)
+    --- PASS: TestScheduleValidation/missing_cell_detected (0.00s)
+    --- PASS: TestScheduleValidation/extra_cell_detected (0.00s)
+    --- PASS: TestScheduleValidation/wrong_arm_detected (0.00s)
+    --- PASS: TestScheduleValidation/paired_arms_require_one_environment_block (0.00s)
+    --- PASS: TestScheduleValidation/nonpositive_repetition_invalid (0.00s)
+=== RUN   TestManifestLockedValidation
+=== RUN   TestManifestLockedValidation/fully_locked_manifest_passes
+=== RUN   TestManifestLockedValidation/dirty_tree
+=== RUN   TestManifestLockedValidation/missing_binary_hash
+=== RUN   TestManifestLockedValidation/missing_route_map
+=== RUN   TestManifestLockedValidation/route_missing_model
+=== RUN   TestManifestLockedValidation/sidecar_without_capabilities
+=== RUN   TestManifestLockedValidation/sidecar_hash_malformed
+=== RUN   TestManifestLockedValidation/unsealed_task_in_lock
+=== RUN   TestManifestLockedValidation/rule_hashes_absent
+=== RUN   TestManifestLockedValidation/required_rule_hash_absent
+=== RUN   TestManifestLockedValidation/extra_rule_hash_rejected
+=== RUN   TestManifestLockedValidation/sample_size_drift
+=== RUN   TestManifestLockedValidation/schedule_cell_dropped
+=== RUN   TestManifestLockedValidation/cost_over_cap
+=== RUN   TestManifestLockedValidation/nonfinite_estimated_cost
+=== RUN   TestManifestLockedValidation/no_expected_calls
+=== RUN   TestManifestLockedValidation/selection_audit_absent
+--- PASS: TestManifestLockedValidation (0.00s)
+    --- PASS: TestManifestLockedValidation/fully_locked_manifest_passes (0.00s)
+    --- PASS: TestManifestLockedValidation/dirty_tree (0.00s)
+    --- PASS: TestManifestLockedValidation/missing_binary_hash (0.00s)
+    --- PASS: TestManifestLockedValidation/missing_route_map (0.00s)
+    --- PASS: TestManifestLockedValidation/route_missing_model (0.00s)
+    --- PASS: TestManifestLockedValidation/sidecar_without_capabilities (0.00s)
+    --- PASS: TestManifestLockedValidation/sidecar_hash_malformed (0.00s)
+    --- PASS: TestManifestLockedValidation/unsealed_task_in_lock (0.00s)
+    --- PASS: TestManifestLockedValidation/rule_hashes_absent (0.00s)
+    --- PASS: TestManifestLockedValidation/required_rule_hash_absent (0.00s)
+    --- PASS: TestManifestLockedValidation/extra_rule_hash_rejected (0.00s)
+    --- PASS: TestManifestLockedValidation/sample_size_drift (0.00s)
+    --- PASS: TestManifestLockedValidation/schedule_cell_dropped (0.00s)
+    --- PASS: TestManifestLockedValidation/cost_over_cap (0.00s)
+    --- PASS: TestManifestLockedValidation/nonfinite_estimated_cost (0.00s)
+    --- PASS: TestManifestLockedValidation/no_expected_calls (0.00s)
+    --- PASS: TestManifestLockedValidation/selection_audit_absent (0.00s)
+=== RUN   TestTelemetryRecordValidation
+=== RUN   TestTelemetryRecordValidation/complete_record_passes
+=== RUN   TestTelemetryRecordValidation/missing_total_is_never_zero-filled
+=== RUN   TestTelemetryRecordValidation/total_must_equal_input_plus_output
+=== RUN   TestTelemetryRecordValidation/cache_subsets_are_disjoint
+=== RUN   TestTelemetryRecordValidation/cached_subset_cannot_exceed_input
+=== RUN   TestTelemetryRecordValidation/reasoning_subset_cannot_exceed_output
+=== RUN   TestTelemetryRecordValidation/absent_routes_fail_loudly
+=== RUN   TestTelemetryRecordValidation/incomplete_dispositions_need_a_claim_count
+=== RUN   TestTelemetryRecordValidation/unknown_source_rejected
+=== RUN   TestTelemetryRecordValidation/aggregate_request_fields_must_reconcile
+--- PASS: TestTelemetryRecordValidation (0.00s)
+    --- PASS: TestTelemetryRecordValidation/complete_record_passes (0.00s)
+    --- PASS: TestTelemetryRecordValidation/missing_total_is_never_zero-filled (0.00s)
+    --- PASS: TestTelemetryRecordValidation/total_must_equal_input_plus_output (0.00s)
+    --- PASS: TestTelemetryRecordValidation/cache_subsets_are_disjoint (0.00s)
+    --- PASS: TestTelemetryRecordValidation/cached_subset_cannot_exceed_input (0.00s)
+    --- PASS: TestTelemetryRecordValidation/reasoning_subset_cannot_exceed_output (0.00s)
+    --- PASS: TestTelemetryRecordValidation/absent_routes_fail_loudly (0.00s)
+    --- PASS: TestTelemetryRecordValidation/incomplete_dispositions_need_a_claim_count (0.00s)
+    --- PASS: TestTelemetryRecordValidation/unknown_source_rejected (0.00s)
+    --- PASS: TestTelemetryRecordValidation/aggregate_request_fields_must_reconcile (0.00s)
+=== RUN   TestTrialResultValidation
+=== RUN   TestTrialResultValidation/valid_result_requires_telemetry
+=== RUN   TestTrialResultValidation/valid_result_with_telemetry_passes
+=== RUN   TestTrialResultValidation/invalid_result_names_its_failure_rule
+=== RUN   TestTrialResultValidation/security_invalid_names_its_rule_too
+=== RUN   TestTrialResultValidation/arbitrary_infrastructure_rule_is_rejected
+=== RUN   TestTrialResultValidation/valid_result_cannot_carry_a_failure_rule
+=== RUN   TestTrialResultValidation/check_result_must_match_telemetry
+=== RUN   TestTrialResultValidation/deterministic_failure_remains_a_valid_product_outcome
+=== RUN   TestTrialResultValidation/changed_file_hash_names_are_canonical_paths
+=== RUN   TestTrialResultValidation/context_rejects_an_opposite-family_arm
+--- PASS: TestTrialResultValidation (0.00s)
+    --- PASS: TestTrialResultValidation/valid_result_requires_telemetry (0.00s)
+    --- PASS: TestTrialResultValidation/valid_result_with_telemetry_passes (0.00s)
+    --- PASS: TestTrialResultValidation/invalid_result_names_its_failure_rule (0.00s)
+    --- PASS: TestTrialResultValidation/security_invalid_names_its_rule_too (0.00s)
+    --- PASS: TestTrialResultValidation/arbitrary_infrastructure_rule_is_rejected (0.00s)
+    --- PASS: TestTrialResultValidation/valid_result_cannot_carry_a_failure_rule (0.00s)
+    --- PASS: TestTrialResultValidation/check_result_must_match_telemetry (0.00s)
+    --- PASS: TestTrialResultValidation/deterministic_failure_remains_a_valid_product_outcome (0.00s)
+    --- PASS: TestTrialResultValidation/changed_file_hash_names_are_canonical_paths (0.00s)
+    --- PASS: TestTrialResultValidation/context_rejects_an_opposite-family_arm (0.00s)
+=== RUN   TestAnalysisPlanAndReport
+=== RUN   TestAnalysisPlanAndReport/matching_plan_passes
+=== RUN   TestAnalysisPlanAndReport/drifted_resamples_rejected
+=== RUN   TestAnalysisPlanAndReport/drifted_seed_rejected
+=== RUN   TestAnalysisPlanAndReport/duplicate_sensitivity_check_rejected
+=== RUN   TestAnalysisPlanAndReport/efficacy_report_needs_gates
+=== RUN   TestAnalysisPlanAndReport/safety_plan_uses_safety_diagnostics
+=== RUN   TestAnalysisPlanAndReport/excluded_trials_require_protocol-family_context
+=== RUN   TestAnalysisPlanAndReport/integrity_verdict_may_omit_gates_but_not_the_manifest_hash
+--- PASS: TestAnalysisPlanAndReport (0.00s)
+    --- PASS: TestAnalysisPlanAndReport/matching_plan_passes (0.00s)
+    --- PASS: TestAnalysisPlanAndReport/drifted_resamples_rejected (0.00s)
+    --- PASS: TestAnalysisPlanAndReport/drifted_seed_rejected (0.00s)
+    --- PASS: TestAnalysisPlanAndReport/duplicate_sensitivity_check_rejected (0.00s)
+    --- PASS: TestAnalysisPlanAndReport/efficacy_report_needs_gates (0.00s)
+    --- PASS: TestAnalysisPlanAndReport/safety_plan_uses_safety_diagnostics (0.00s)
+    --- PASS: TestAnalysisPlanAndReport/excluded_trials_require_protocol-family_context (0.00s)
+    --- PASS: TestAnalysisPlanAndReport/integrity_verdict_may_omit_gates_but_not_the_manifest_hash (0.00s)
+=== RUN   TestManifestTaskHashPairing
+--- PASS: TestManifestTaskHashPairing (0.00s)
+=== RUN   TestGenerateSchedule
+--- PASS: TestGenerateSchedule (0.00s)
+=== RUN   TestGenerateScheduleRejectsTaskIDs
+=== RUN   TestGenerateScheduleRejectsTaskIDs/empty
+=== RUN   TestGenerateScheduleRejectsTaskIDs/duplicate
+=== RUN   TestGenerateScheduleRejectsTaskIDs/arm_collision
+--- PASS: TestGenerateScheduleRejectsTaskIDs (0.00s)
+    --- PASS: TestGenerateScheduleRejectsTaskIDs/empty (0.00s)
+    --- PASS: TestGenerateScheduleRejectsTaskIDs/duplicate (0.00s)
+    --- PASS: TestGenerateScheduleRejectsTaskIDs/arm_collision (0.00s)
+=== RUN   TestTrialJournalResumeAndCodec
+--- PASS: TestTrialJournalResumeAndCodec (0.00s)
+=== RUN   TestTrialJournalRejectsInvalidEntries
+=== RUN   TestTrialJournalRejectsInvalidEntries/unknown_status
+=== RUN   TestTrialJournalRejectsInvalidEntries/bad_timestamp
+--- PASS: TestTrialJournalRejectsInvalidEntries (0.00s)
+    --- PASS: TestTrialJournalRejectsInvalidEntries/unknown_status (0.00s)
+    --- PASS: TestTrialJournalRejectsInvalidEntries/bad_timestamp (0.00s)
+=== RUN   TestCanonicalTaskHash
+--- PASS: TestCanonicalTaskHash (0.00s)
+=== RUN   TestTA1RegistryRejectsHashChangeAcrossTransition
+--- PASS: TestTA1RegistryRejectsHashChangeAcrossTransition (0.00s)
+=== RUN   TestTB1AcceptanceRefusesInvalidHistory
+--- PASS: TestTB1AcceptanceRefusesInvalidHistory (0.00s)
+=== RUN   TestTC1AcceptanceBindsCandidateContent
+=== RUN   TestTC1AcceptanceBindsCandidateContent/matching_content_succeeds_and_records_the_hash
+=== RUN   TestTC1AcceptanceBindsCandidateContent/mismatched_registered_content_fails
+=== RUN   TestTC1AcceptanceBindsCandidateContent/carried_hash_must_match_canonical_content
+--- PASS: TestTC1AcceptanceBindsCandidateContent (0.00s)
+    --- PASS: TestTC1AcceptanceBindsCandidateContent/matching_content_succeeds_and_records_the_hash (0.00s)
+    --- PASS: TestTC1AcceptanceBindsCandidateContent/mismatched_registered_content_fails (0.00s)
+    --- PASS: TestTC1AcceptanceBindsCandidateContent/carried_hash_must_match_canonical_content (0.00s)
+=== RUN   TestTD1AcceptanceRefusesUnsealedSpec
+--- PASS: TestTD1AcceptanceRefusesUnsealedSpec (0.00s)
+=== RUN   TestTE1LockedManifestRecomputesTaskHashes
+--- PASS: TestTE1LockedManifestRecomputesTaskHashes (0.00s)
+=== RUN   TestTF1SealedTaskRequiresQAEvidence
+=== RUN   TestTF1SealedTaskRequiresQAEvidence/forbidden_changed_files
+=== RUN   TestTF1SealedTaskRequiresQAEvidence/context_checks.required_files
+--- PASS: TestTF1SealedTaskRequiresQAEvidence (0.00s)
+    --- PASS: TestTF1SealedTaskRequiresQAEvidence/forbidden_changed_files (0.00s)
+    --- PASS: TestTF1SealedTaskRequiresQAEvidence/context_checks.required_files (0.00s)
+=== RUN   TestTG1UnsealedCandidateSolutionHashRules
+=== RUN   TestTG1UnsealedCandidateSolutionHashRules/all_three_omitted_passes
+=== RUN   TestTG1UnsealedCandidateSolutionHashRules/partially_present_still_fails
+=== RUN   TestTG1UnsealedCandidateSolutionHashRules/sealed_with_omissions_still_fails
+--- PASS: TestTG1UnsealedCandidateSolutionHashRules (0.00s)
+    --- PASS: TestTG1UnsealedCandidateSolutionHashRules/all_three_omitted_passes (0.00s)
+    --- PASS: TestTG1UnsealedCandidateSolutionHashRules/partially_present_still_fails (0.00s)
+    --- PASS: TestTG1UnsealedCandidateSolutionHashRules/sealed_with_omissions_still_fails (0.00s)
+=== RUN   TestTH1BaselineCommandMustBeReal
+=== RUN   TestTH1BaselineCommandMustBeReal/whitespace_baseline_fails
+=== RUN   TestTH1BaselineCommandMustBeReal/trimmed_non-empty_passes
+--- PASS: TestTH1BaselineCommandMustBeReal (0.00s)
+    --- PASS: TestTH1BaselineCommandMustBeReal/whitespace_baseline_fails (0.00s)
+    --- PASS: TestTH1BaselineCommandMustBeReal/trimmed_non-empty_passes (0.00s)
+=== RUN   TestTI1MutationProbeDescriptionContract
+=== RUN   TestTI1MutationProbeDescriptionContract/hello_rejected
+=== RUN   TestTI1MutationProbeDescriptionContract/spec-conforming_description_passes
+--- PASS: TestTI1MutationProbeDescriptionContract (0.00s)
+    --- PASS: TestTI1MutationProbeDescriptionContract/hello_rejected (0.00s)
+    --- PASS: TestTI1MutationProbeDescriptionContract/spec-conforming_description_passes (0.00s)
+=== RUN   TestTJ1GraderIsolationDetectsNestedMaterial
+--- PASS: TestTJ1GraderIsolationDetectsNestedMaterial (0.00s)
+=== RUN   TestLookupFilterCarriesFullExactIdentityAndRejectsDuplicates
+--- PASS: TestLookupFilterCarriesFullExactIdentityAndRejectsDuplicates (0.00s)
+=== RUN   TestVerifyRoutesReportsEveryDriftClass
+=== RUN   TestVerifyRoutesReportsEveryDriftClass/provider_drift
+=== RUN   TestVerifyRoutesReportsEveryDriftClass/model_drift
+=== RUN   TestVerifyRoutesReportsEveryDriftClass/effort_drift
+=== RUN   TestVerifyRoutesReportsEveryDriftClass/missing_stage
+=== RUN   TestVerifyRoutesReportsEveryDriftClass/extra_stage
+--- PASS: TestVerifyRoutesReportsEveryDriftClass (0.00s)
+    --- PASS: TestVerifyRoutesReportsEveryDriftClass/provider_drift (0.00s)
+    --- PASS: TestVerifyRoutesReportsEveryDriftClass/model_drift (0.00s)
+    --- PASS: TestVerifyRoutesReportsEveryDriftClass/effort_drift (0.00s)
+    --- PASS: TestVerifyRoutesReportsEveryDriftClass/missing_stage (0.00s)
+    --- PASS: TestVerifyRoutesReportsEveryDriftClass/extra_stage (0.00s)
+=== RUN   TestCompletenessReportsAllGapsAndZeroFillAdvisory
+--- PASS: TestCompletenessReportsAllGapsAndZeroFillAdvisory (0.00s)
+=== RUN   TestFallbackComparisonExactFieldsAndSummary
+--- PASS: TestFallbackComparisonExactFieldsAndSummary (0.00s)
+PASS
+ok  	github.com/Taf0711/splice/internal/eval/v2	0.904s

@@ -3,10 +3,13 @@ package plugins
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Taf0711/splice/internal/projectfile"
 )
 
 func TestParseManifestNormalizesExtensionsAndPaths(t *testing.T) {
@@ -421,4 +424,60 @@ func hasPluginDiagnostic(diagnostics []Diagnostic, kind DiagnosticKind, pluginID
 		}
 	}
 	return false
+}
+
+func TestLoadPluginsRefusesOversizedEscapingManifestAndCapsScan(t *testing.T) {
+	ws := t.TempDir()
+	projectRoot := filepath.Join(ws, ".splice", "plugins")
+
+	big := filepath.Join(projectRoot, "big")
+	if err := os.MkdirAll(big, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pad := strings.Repeat("x", projectfile.MaxBytes)
+	if err := os.WriteFile(filepath.Join(big, "plugin.json"), []byte(`{"pad":"`+pad+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	outside := filepath.Join(t.TempDir(), "plugin.json")
+	if err := os.WriteFile(outside, []byte(`{"schemaVersion":1,"id":"splice.evil"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	escape := filepath.Join(projectRoot, "escape")
+	if err := os.MkdirAll(escape, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(escape, "plugin.json")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	for i := 0; i < maxPluginManifests+1; i++ {
+		if err := os.MkdirAll(filepath.Join(projectRoot, fmt.Sprintf("p%03d", i)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result, err := Load(LoadOptions{Roots: []Root{{Source: SourceProject, Path: projectRoot}}})
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	var sawSize, sawEscape, sawLimit bool
+	for _, d := range result.Diagnostics {
+		switch {
+		case d.Kind == DiagnosticIO && strings.Contains(d.Message, "limit"):
+			sawSize = true
+		case d.Kind == DiagnosticIO && strings.Contains(d.Message, "outside the workspace root"):
+			sawEscape = true
+		case d.Kind == DiagnosticLimit:
+			sawLimit = true
+		}
+	}
+	if !sawSize || !sawEscape || !sawLimit {
+		t.Fatalf("want size, escape, and limit diagnostics; got %#v", result.Diagnostics)
+	}
+	for _, p := range result.Plugins {
+		if p.ID == "splice.evil" {
+			t.Fatalf("escaping manifest must not load")
+		}
+	}
 }

@@ -1,6 +1,7 @@
 package splice
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -105,7 +106,7 @@ func TestBudgetForTier(t *testing.T) {
 	}
 	for _, name := range []string{"static_analyzer", "test_runner", "acceptance_verifier"} {
 		stageBudget := budget.PerStage[name]
-		if stageBudget.InputMax != 0 || stageBudget.OutputMax != 0 || stageBudget.ModelTier != "" {
+		if stageBudget.InputMax != 0 || stageBudget.OutputMax != 0 {
 			t.Fatalf("deterministic stage %q budget = %+v, want zero token budget", name, stageBudget)
 		}
 	}
@@ -124,7 +125,7 @@ func TestBudgetForTier(t *testing.T) {
 	}
 	for _, name := range []string{"static_analyzer", "security_auditor", "test_runner", "acceptance_verifier"} {
 		stageBudget := substantial.PerStage[name]
-		if stageBudget.InputMax != 0 || stageBudget.OutputMax != 0 || stageBudget.ModelTier != "" {
+		if stageBudget.InputMax != 0 || stageBudget.OutputMax != 0 {
 			t.Fatalf("deterministic stage %q budget = %+v, want zero token budget", name, stageBudget)
 		}
 	}
@@ -134,7 +135,7 @@ func TestBudgetForTier(t *testing.T) {
 }
 
 func TestBuildExecutionPlan(t *testing.T) {
-	plan, err := BuildExecutionPlan("Update database schema for user profiles")
+	plan, err := BuildExecutionPlan("", nil)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
@@ -161,7 +162,7 @@ func TestBuildExecutionPlanForTaskFloorsAutomatedAcceptanceAtLight(t *testing.T)
 			VerificationCommand:   &command,
 		}},
 	}
-	plan, facts, err := BuildExecutionPlanForTaskWithFacts(task)
+	plan, facts, err := BuildExecutionPlanForTaskWithFacts(task, nil)
 	if err != nil {
 		t.Fatalf("BuildExecutionPlanForTaskWithFacts: %v", err)
 	}
@@ -177,22 +178,31 @@ func TestBuildExecutionPlanForTaskFloorsAutomatedAcceptanceAtLight(t *testing.T)
 }
 
 func TestBuildExecutionPlanForTask(t *testing.T) {
-	tier := schemas.TierStandard
-	task := schemas.Task{ID: "t1", Title: "T", Intent: "add search", EstimatedTier: &tier}
-	plan, err := BuildExecutionPlanForTask(task)
+	task := schemas.Task{ID: "t1", Title: "T", Intent: "add search"}
+	plan, err := BuildExecutionPlanForTask(task, nil)
 	if err != nil {
 		t.Fatalf("build plan for task: %v", err)
 	}
 	if plan.RequestIntent != task.Intent {
 		t.Fatalf("intent mismatch: %q vs %q", plan.RequestIntent, task.Intent)
 	}
-	if plan.Tier != schemas.TierStandard {
-		t.Fatalf("expected standard tier, got %q", plan.Tier)
+	if plan.Tier != schemas.TierLight {
+		t.Fatalf("expected classifier light tier, got %q", plan.Tier)
 	}
-	bogus := schemas.PipelineTier("bogus")
-	task2 := schemas.Task{ID: "t2", Title: "T2", Intent: "do it", EstimatedTier: &bogus}
-	if _, err := BuildExecutionPlanForTask(task2); err == nil {
-		t.Fatal("expected error for bogus tier")
+}
+
+func TestBuildExecutionPlanForTaskIgnoresPersistedEstimatedTier(t *testing.T) {
+	raw := `{"id":"t1","title":"task one","intent":"do it","estimated_tier":"architectural"}`
+	var task schemas.Task
+	if err := json.Unmarshal([]byte(raw), &task); err != nil {
+		t.Fatalf("unmarshal persisted task: %v", err)
+	}
+	plan, err := BuildExecutionPlanForTask(task, nil)
+	if err != nil {
+		t.Fatalf("build plan for task: %v", err)
+	}
+	if plan.Tier != schemas.TierLight {
+		t.Fatalf("tier = %q, want classifier light; persisted estimated_tier must be ignored", plan.Tier)
 	}
 }
 

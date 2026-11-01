@@ -1,0 +1,8 @@
+{
+  "name": "large-03-read",
+  "phase": "read",
+  "precursor": "large-03-write",
+  "prompt": "Add OverageCents(m *Meter, accountID, sku string, included int, unitCents int64) int64 in the billing package: unitCents for each unit used beyond the included amount. Reuse OverageUnits; do not re-derive the overage rule. Add a regression test.",
+  "check": "# large-03 B: Add OverageCents(m *Meter, accountID, sku string, included int, unitCe\nmkdir -p internal/billing\ncat > internal/billing/probe_overage_cents_test.go <<'EOF'\npackage billing\n\nimport \"testing\"\n\nfunc TestProbeOverageCents(t *testing.T) {\n\tm := NewMeter()\n\tm.Record(\"acct\", \"api\", 13)\n\tm.Record(\"acct\", \"storage\", 40)\n\tif got := OverageCents(m, \"acct\", \"api\", 10, 5); got != 15 {\n\t\tt.Fatalf(\"OverageCents = %d, want 15 (3 units over x 5c)\", got)\n\t}\n\tif got := OverageCents(m, \"acct\", \"api\", 20, 5); got != 0 {\n\t\tt.Fatalf(\"OverageCents under = %d, want 0\", got)\n\t}\n}\nEOF\ngo test -count=1 ./internal/billing/ ; rc=$?\nrm -f internal/billing/probe_overage_cents_test.go\nif [ $rc -ne 0 ]; then exit $rc; fi\nexit 0\n",
+  "fixture": "../../large-families/fixture"
+}

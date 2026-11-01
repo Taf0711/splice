@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/Taf0711/splice/internal/gitenv/gitenvtest"
 )
 
 // initGitPluginRepo creates a real local git repo holding a plugin and returns a
@@ -369,4 +371,10 @@ func TestInstallCopiesEntireTree(t *testing.T) {
 	if _, err := os.Stat(copied); err != nil {
 		t.Fatalf("entry script not copied into install dir: %v", err)
 	}
+}
+
+func TestDefaultGitRunnerHardensEnv(t *testing.T) {
+	record := gitenvtest.InstallRecorder(t)
+	_ = defaultGitRunner(context.Background(), filepath.Join(t.TempDir(), "dest"), "https://example.invalid/plugin.git")
+	gitenvtest.AssertHardened(t, gitenvtest.Runs(t, record))
 }

@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Taf0711/splice/internal/gitenv"
 )
 
 const (
@@ -360,6 +362,9 @@ func hasCargoWorkspace(dir string) bool {
 func defaultRunGit(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
+	if err := gitenv.Harden(cmd); err != nil {
+		return "", err
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

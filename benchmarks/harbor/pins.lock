@@ -1,0 +1,20 @@
+# Splice Harbor adapter pins. Mirrored in benchmarks/versions.lock.json.
+# Verified 2026-09-05 against PyPI and api.github.com. No floating refs.
+
+[dataset]
+name = "terminal-bench"
+version = "2.0"
+task_repo = "https://github.com/laude-institute/terminal-bench-2.git"
+task_repo_commit = "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+task_count = 89
+
+[harbor]
+package = "harbor"
+version = "0.22.0"
+upstream_repo = "https://github.com/harbor-framework/harbor"
+upstream_commit = "4407eb5227a2ff4f0d3f16b2eb48849382fdf276"
+
+[adapter]
+name = "splice_agent:SpliceAgent"
+version = "0.1.0"
+interface = "BaseInstalledAgent"

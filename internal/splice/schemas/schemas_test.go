@@ -41,6 +41,39 @@ func TestCodeWriterOutputValidation(t *testing.T) {
 	}
 }
 
+func TestReasoningStageInputsValidateSelectedMemory(t *testing.T) {
+	item := SelectedMemory{
+		ID: "observation:1", Title: "lesson", Content: "use table tests",
+		MemoryType: "lesson", Scope: MemoryScopeGlobal,
+	}
+	tests := []struct {
+		name     string
+		validate func([]SelectedMemory) error
+	}{
+		{name: "code writer", validate: func(memory []SelectedMemory) error {
+			return (CodeWriterInput{Intent: "add x", Language: "go", Memory: memory}).Validate()
+		}},
+		{name: "test generator", validate: func(memory []SelectedMemory) error {
+			return (TestGeneratorInput{Intent: "test x", Language: "go", Memory: memory}).Validate()
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.validate([]SelectedMemory{item}); err != nil {
+				t.Fatalf("valid memory: %v", err)
+			}
+			if err := tt.validate([]SelectedMemory{item, item}); err == nil || !strings.Contains(err.Error(), "duplicate memory id") {
+				t.Fatalf("duplicate memory error = %v", err)
+			}
+			invalid := item
+			invalid.ID = "observation:0"
+			if err := tt.validate([]SelectedMemory{invalid}); err == nil || !strings.Contains(err.Error(), "positive decimal") {
+				t.Fatalf("invalid memory id error = %v", err)
+			}
+		})
+	}
+}
+
 func TestVerificationReportValidation(t *testing.T) {
 	line := 5
 	fp := VerificationFingerprint("go_syntax", "GO_SYNTAX", "a.go", &line, "bad")
@@ -115,13 +148,10 @@ func TestStageBudgetValidation(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "deterministic zero", budget: StageBudget{}},
-		{name: "model backed", budget: StageBudget{InputMax: 1, OutputMax: 1, ModelTier: "nano"}},
-		{name: "zero with tier", budget: StageBudget{ModelTier: "nano"}, wantErr: true},
-		{name: "zero input", budget: StageBudget{OutputMax: 1, ModelTier: "nano"}, wantErr: true},
-		{name: "zero output", budget: StageBudget{InputMax: 1, ModelTier: "nano"}, wantErr: true},
+		{name: "model backed", budget: StageBudget{InputMax: 1, OutputMax: 1}},
+		{name: "zero input", budget: StageBudget{OutputMax: 1}, wantErr: true},
+		{name: "zero output", budget: StageBudget{InputMax: 1}, wantErr: true},
 		{name: "negative", budget: StageBudget{InputMax: -1, OutputMax: -1}, wantErr: true},
-		{name: "positive without tier", budget: StageBudget{InputMax: 1, OutputMax: 1}, wantErr: true},
-		{name: "invalid tier", budget: StageBudget{InputMax: 1, OutputMax: 1, ModelTier: "fast"}, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -136,65 +166,8 @@ func TestStageBudgetValidation(t *testing.T) {
 	}
 }
 
-func TestExecutionPlanDAGIntegrity(t *testing.T) {
-	budget := StageBudget{InputMax: 100, OutputMax: 100, ModelTier: "small"}
-	plan := ExecutionPlan{
-		Tier:          TierStandard,
-		RequestIntent: "do it",
-		Stages: []ExecutionStage{
-			{Name: "write", Budget: budget},
-			{Name: "test", DependsOn: []string{"write", "missing"}, Budget: budget},
-		},
-		TokenBudget: TokenBudget{
-			TotalInputBudget:  1000,
-			TotalOutputBudget: 1000,
-			PerStage:          map[string]StageBudget{"write": budget, "test": budget},
-			OverflowPolicy:    "abort",
-		},
-	}
-	if err := plan.Validate(); err == nil || !strings.Contains(err.Error(), "depends_on unknown") {
-		t.Fatalf("expected DAG error, got %v", err)
-	}
-	plan.Stages[1].DependsOn = []string{"write"}
-	if err := plan.Validate(); err != nil {
-		t.Fatalf("valid plan: %v", err)
-	}
-}
-
-func TestExecutionPlanRejectsDependencyCycle(t *testing.T) {
-	budget := StageBudget{InputMax: 100, OutputMax: 100, ModelTier: "small"}
-	plan := ExecutionPlan{
-		Tier:          TierStandard,
-		RequestIntent: "do it",
-		Stages: []ExecutionStage{
-			{Name: "a", DependsOn: []string{"b"}, Budget: budget},
-			{Name: "b", DependsOn: []string{"a"}, Budget: budget},
-		},
-		TokenBudget: TokenBudget{
-			TotalInputBudget:  1000,
-			TotalOutputBudget: 1000,
-			PerStage:          map[string]StageBudget{"a": budget, "b": budget},
-			OverflowPolicy:    "abort",
-		},
-	}
-	if err := plan.Validate(); err == nil || !strings.Contains(err.Error(), "cycle") {
-		t.Fatalf("expected cycle error, got %v", err)
-	}
-
-	// Self-dependency is a trivial cycle.
-	plan2 := ExecutionPlan{
-		Tier:          TierLight,
-		RequestIntent: "x",
-		Stages:        []ExecutionStage{{Name: "a", DependsOn: []string{"a"}, Budget: budget}},
-		TokenBudget:   TokenBudget{TotalInputBudget: 10, TotalOutputBudget: 10, PerStage: map[string]StageBudget{"a": budget}, OverflowPolicy: "abort"},
-	}
-	if err := plan2.Validate(); err == nil || !strings.Contains(err.Error(), "cycle") {
-		t.Fatalf("expected self-cycle error, got %v", err)
-	}
-}
-
 func TestExecutionPlanDuplicateStageName(t *testing.T) {
-	budget := StageBudget{InputMax: 1, OutputMax: 1, ModelTier: "nano"}
+	budget := StageBudget{InputMax: 1, OutputMax: 1}
 	plan := ExecutionPlan{
 		Tier:          TierLight,
 		RequestIntent: "x",
@@ -207,6 +180,74 @@ func TestExecutionPlanDuplicateStageName(t *testing.T) {
 	if err := plan.Validate(); err == nil || !strings.Contains(err.Error(), "duplicate") {
 		t.Fatalf("expected duplicate error, got %v", err)
 	}
+}
+
+// TestExecutionPlanFlagsMustBeSortedAndUnique pins the plan's flag provenance
+// contract: the recorded enabled-flag names are sorted and carry no duplicate,
+// so a plan is byte-stable and a resumed run can trust the list.
+func TestExecutionPlanFlagsMustBeSortedAndUnique(t *testing.T) {
+	budget := StageBudget{InputMax: 1, OutputMax: 1}
+	base := func(flagNames []string) ExecutionPlan {
+		return ExecutionPlan{
+			Tier:          TierLight,
+			RequestIntent: "x",
+			Stages:        []ExecutionStage{{Name: "a", Budget: budget}},
+			TokenBudget:   TokenBudget{TotalInputBudget: 10, TotalOutputBudget: 10, PerStage: map[string]StageBudget{"a": budget}, OverflowPolicy: "abort"},
+			Flags:         flagNames,
+		}
+	}
+
+	if err := base([]string{"a.flag", "b.flag"}).Validate(); err != nil {
+		t.Fatalf("sorted flags must validate: %v", err)
+	}
+	if err := base(nil).Validate(); err != nil {
+		t.Fatalf("absent flags must validate: %v", err)
+	}
+	for _, tc := range []struct {
+		name  string
+		flags []string
+	}{
+		{name: "unsorted", flags: []string{"b.flag", "a.flag"}},
+		{name: "duplicate", flags: []string{"a.flag", "a.flag"}},
+		{name: "empty name", flags: []string{""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := base(tc.flags).Validate(); err == nil {
+				t.Fatalf("flags %v must be rejected", tc.flags)
+			}
+		})
+	}
+}
+
+// TestExecutionPlanDependsOnIntegrity pins the H2 guard: edge scoping reads
+// DependsOn, so an unknown or self dependency must fail validation instead of
+// scoping the stage to nothing. A forward reference is valid because the
+// dependency set is resolved after every stage name is known.
+func TestExecutionPlanDependsOnIntegrity(t *testing.T) {
+	budget := StageBudget{InputMax: 1, OutputMax: 1}
+	plan := func(stages []ExecutionStage) ExecutionPlan {
+		return ExecutionPlan{
+			Tier:          TierLight,
+			RequestIntent: "x",
+			Stages:        stages,
+			TokenBudget:   TokenBudget{TotalInputBudget: 10, TotalOutputBudget: 10, PerStage: map[string]StageBudget{"a": budget, "b": budget}, OverflowPolicy: "abort"},
+		}
+	}
+	t.Run("unknown dependency fails", func(t *testing.T) {
+		if err := plan([]ExecutionStage{{Name: "a", Budget: budget, DependsOn: []string{"ghost"}}}).Validate(); err == nil || !strings.Contains(err.Error(), "unknown stage") {
+			t.Fatalf("expected unknown-dependency error, got %v", err)
+		}
+	})
+	t.Run("self dependency fails", func(t *testing.T) {
+		if err := plan([]ExecutionStage{{Name: "a", Budget: budget, DependsOn: []string{"a"}}}).Validate(); err == nil || !strings.Contains(err.Error(), "itself") {
+			t.Fatalf("expected self-dependency error, got %v", err)
+		}
+	})
+	t.Run("forward reference passes", func(t *testing.T) {
+		if err := plan([]ExecutionStage{{Name: "b", Budget: budget, DependsOn: []string{"a"}}, {Name: "a", Budget: budget}}).Validate(); err != nil {
+			t.Fatalf("forward reference rejected: %v", err)
+		}
+	})
 }
 
 func TestDesignPlanTaskGraphIntegrity(t *testing.T) {
@@ -393,10 +434,24 @@ func TestPipelineUsageRecordValidation(t *testing.T) {
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("valid record: %v", err)
 	}
+	withCache := valid
+	cachedTokens := 30
+	hit := true
+	withCache.InputTokens = 100
+	withCache.CachedTokens = cachedTokens
+	withCache.CacheHit = &hit
+	withCache.MemoryPosition = MemoryPositionAfterPrefix
+	if err := withCache.Validate(); err != nil {
+		t.Fatalf("record with cache telemetry: %v", err)
+	}
 	unpriced := PipelineUsageRecord{
 		Sequence: 1, Stage: "s", Iteration: 1, UsageReported: true,
 		InputTokens: 10, OutputTokens: 5,
 		CostStatus: CostStatusUnpriced, UnpricedReason: "no model", CostUSD: &zero,
+	}
+	unreported := PipelineUsageRecord{
+		Sequence: 1, Stage: "s", Iteration: 1, UsageReported: false,
+		CostStatus: CostStatusUnpriced, UnpricedReason: "not reported",
 	}
 	tests := []struct {
 		name    string
@@ -415,6 +470,9 @@ func TestPipelineUsageRecordValidation(t *testing.T) {
 		{name: "unpriced cost usd", base: unpriced, wantErr: "unpriced record must not have cost_usd"},
 		{name: "unpriced reason", base: unpriced, mutate: func(r *PipelineUsageRecord) { r.CostUSD = nil; r.UnpricedReason = "" }, wantErr: "unpriced_reason"},
 		{name: "cost status", mutate: func(r *PipelineUsageRecord) { r.CostStatus = "unknown" }, wantErr: "cost_status"},
+		{name: "invalid memory position", mutate: func(r *PipelineUsageRecord) { r.MemoryPosition = "sideways" }, wantErr: "memory_position"},
+		{name: "cache hit contradicts cached tokens", mutate: func(r *PipelineUsageRecord) { flag := true; r.CacheHit = &flag; r.CachedTokens = 0 }, wantErr: "cache_hit"},
+		{name: "cache hit without reported usage", base: unreported, mutate: func(r *PipelineUsageRecord) { flag := true; r.CacheHit = &flag }, wantErr: "cache_hit requires reported usage"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -656,9 +714,8 @@ func TestJSONRoundTrip(t *testing.T) {
 	})
 
 	t.Run("design", func(t *testing.T) {
-		tier := TierStandard
 		ver := "go test ./..."
-		task := Task{ID: "t1", Title: "T", Intent: "do it", AcceptanceFacts: []AcceptanceFact{{Statement: "works", AutomatedVerification: true, VerificationCommand: &ver}}, EstimatedTier: &tier}
+		task := Task{ID: "t1", Title: "T", Intent: "do it", AcceptanceFacts: []AcceptanceFact{{Statement: "works", AutomatedVerification: true, VerificationCommand: &ver}}}
 		cases := []interface{ Validate() error }{
 			AcceptanceFact{Statement: "ok"},
 			task,
@@ -724,7 +781,7 @@ func TestJSONRoundTrip(t *testing.T) {
 		path := "x.go"
 		pattern := "foo"
 		symbol := "bar"
-		budget := StageBudget{InputMax: 100, OutputMax: 100, ModelTier: "nano"}
+		budget := StageBudget{InputMax: 100, OutputMax: 100}
 		cases := []interface{ Validate() error }{
 			ComplexityClassifierInput{Request: "fix typo"},
 			ComplexityClassifierOutput{Tier: TierTrivial, Rationale: "r", Confidence: 0.8, DesignIntensity: DesignNone},
@@ -732,7 +789,7 @@ func TestJSONRoundTrip(t *testing.T) {
 			ContextRequest{Reason: "r", Queries: []ContextQuery{{QueryType: ContextListFiles, MaxResults: 5, MaxChars: 100}}},
 			ContextItem{Query: ContextQuery{QueryType: ContextListFiles, MaxResults: 5, MaxChars: 100}, Summary: "s", Payload: map[string]interface{}{"text": "hello", "count": 1.0}},
 			ContextBundle{Request: ContextRequest{Reason: "r", Queries: []ContextQuery{{QueryType: ContextListFiles, MaxResults: 5, MaxChars: 100}}}, Items: []ContextItem{{Query: ContextQuery{QueryType: ContextListFiles, MaxResults: 5, MaxChars: 100}, Summary: "s"}}},
-			StageBudget{InputMax: 100, OutputMax: 100, ModelTier: "small"},
+			StageBudget{InputMax: 100, OutputMax: 100},
 			TokenBudget{TotalInputBudget: 1000, TotalOutputBudget: 1000, PerStage: map[string]StageBudget{"s": budget}, Reserve: 100, OverflowPolicy: "abort"},
 			ExecutionStage{Name: "s", Budget: budget},
 			ExecutionPlan{Tier: TierLight, RequestIntent: "x", Stages: []ExecutionStage{{Name: "s", Budget: budget}}, TokenBudget: TokenBudget{TotalInputBudget: 1000, TotalOutputBudget: 1000, PerStage: map[string]StageBudget{"s": budget}, Reserve: 100, OverflowPolicy: "abort"}},
@@ -887,4 +944,34 @@ func roundTripAndValidate(t *testing.T, v interface{ Validate() error }) error {
 		return fmt.Errorf("round-trip mismatch: original %+v, got %+v", v, reflect.ValueOf(dest).Elem().Interface())
 	}
 	return nil
+}
+
+// TestChangeSummaryRejectsDegradedReasonWithoutRepo is the T4 schema pin: a
+// summary cannot set DegradedReason while IsRepo is false, because that
+// combination never occurs in the pipeline.
+func TestChangeSummaryRejectsDegradedReasonWithoutRepo(t *testing.T) {
+	valid := ChangeSummary{IsRepo: true, DegradedReason: "git read refused: procrun: refused splice.stage spawn"}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("repository summary with DegradedReason must validate: %v", err)
+	}
+	invalid := ChangeSummary{IsRepo: false, DegradedReason: "git read refused"}
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("DegradedReason without IsRepo must be rejected")
+	}
+}
+
+// TestChangeSummaryOldJSONStillDecodes pins the additive contract: JSON from
+// before the DegradedReason field still decodes and validates.
+func TestChangeSummaryOldJSONStillDecodes(t *testing.T) {
+	raw := `{"is_repo": true, "changed_files": [{"path": "a.go", "status": "modified"}], "diff_text": "x", "truncated": false}`
+	var summary ChangeSummary
+	if err := json.Unmarshal([]byte(raw), &summary); err != nil {
+		t.Fatalf("old JSON must decode: %v", err)
+	}
+	if !summary.IsRepo || summary.DegradedReason != "" {
+		t.Fatalf("decoded = %+v, want is_repo true and empty degraded_reason", summary)
+	}
+	if err := summary.Validate(); err != nil {
+		t.Fatalf("decoded old JSON must validate: %v", err)
+	}
 }

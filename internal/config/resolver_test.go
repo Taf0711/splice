@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -8,7 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Taf0711/splice/internal/flags"
 	"github.com/Taf0711/splice/internal/modelregistry"
+	"github.com/Taf0711/splice/internal/projectfile"
 )
 
 func TestResolveAppliesLayerPrecedence(t *testing.T) {
@@ -37,6 +40,7 @@ func TestResolveAppliesLayerPrecedence(t *testing.T) {
 	resolved, err := Resolve(ResolveOptions{
 		UserConfigPath:    userPath,
 		ProjectConfigPath: projectPath,
+		ProjectTrusted:    true,
 		Env: map[string]string{
 			"SPLICE_PROVIDER": "env",
 			"OPENAI_MODEL":    "env-model",
@@ -80,7 +84,7 @@ func TestResolveSelectsActiveProviderProfile(t *testing.T) {
 		]
 	}`)
 
-	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
+	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path, ProjectTrusted: true, Env: map[string]string{}})
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -137,6 +141,7 @@ func TestResolveLoadsFavoriteModelsFromUserConfigOnly(t *testing.T) {
 	resolved, err := Resolve(ResolveOptions{
 		UserConfigPath:    userPath,
 		ProjectConfigPath: projectPath,
+		ProjectTrusted:    true,
 		Env:               map[string]string{},
 	})
 	if err != nil {
@@ -254,6 +259,7 @@ func TestResolveMergesProviderCatalogFieldsByLayerPrecedence(t *testing.T) {
 	resolved, err := Resolve(ResolveOptions{
 		UserConfigPath:    userPath,
 		ProjectConfigPath: projectPath,
+		ProjectTrusted:    true,
 		Env:               map[string]string{},
 		Overrides: Overrides{
 			Provider: ProviderProfile{
@@ -310,6 +316,7 @@ func TestResolveAPIKeyEnvLooksUpEnvOnlyWhenAPIKeyMissing(t *testing.T) {
 
 	resolved, err := Resolve(ResolveOptions{
 		ProjectConfigPath: path,
+		ProjectTrusted:    true,
 		Env: map[string]string{
 			"SPLICE_FROM_ENV_API_KEY": "sk-from-env",
 			"SPLICE_DIRECT_API_KEY":   "sk-should-not-win",
@@ -344,6 +351,7 @@ func TestResolveAPIKeyEnvRedactsResolvedSecretOnErrors(t *testing.T) {
 
 	_, err := Resolve(ResolveOptions{
 		ProjectConfigPath: path,
+		ProjectTrusted:    true,
 		Env: map[string]string{
 			"SPLICE_CUSTOM_API_KEY": "sk-env-secret-value",
 		},
@@ -373,6 +381,7 @@ func TestResolveRejectsProjectCompatibleProviderArbitraryAPIKeyEnv(t *testing.T)
 
 	_, err := Resolve(ResolveOptions{
 		ProjectConfigPath: path,
+		ProjectTrusted:    true,
 		Env: map[string]string{
 			"ANTHROPIC_API_KEY": "sk-ant-victim-secret",
 		},
@@ -409,6 +418,7 @@ func TestResolveRejectsProjectBaseURLOverrideWithInheritedCompatibleCredentials(
 	_, err := Resolve(ResolveOptions{
 		UserConfigPath:    userPath,
 		ProjectConfigPath: projectPath,
+		ProjectTrusted:    true,
 		Env: map[string]string{
 			"OPENROUTER_API_KEY": "sk-openrouter-victim-secret",
 		},
@@ -436,6 +446,7 @@ func TestResolveAllowsProjectCatalogAPIKeyEnvOnCatalogEndpoint(t *testing.T) {
 
 	resolved, err := Resolve(ResolveOptions{
 		ProjectConfigPath: path,
+		ProjectTrusted:    true,
 		Env: map[string]string{
 			"OPENROUTER_API_KEY": "sk-openrouter",
 		},
@@ -481,6 +492,7 @@ func TestResolveReplacesMCPServerOverlayCollections(t *testing.T) {
 	resolved, err := Resolve(ResolveOptions{
 		UserConfigPath:    userPath,
 		ProjectConfigPath: projectPath,
+		ProjectTrusted:    true,
 		Env:               map[string]string{},
 	})
 	if err != nil {
@@ -530,6 +542,7 @@ func TestResolveMCPServerLayersCanClearAndReenable(t *testing.T) {
 	resolved, err := Resolve(ResolveOptions{
 		UserConfigPath:    userPath,
 		ProjectConfigPath: projectPath,
+		ProjectTrusted:    true,
 		Env:               map[string]string{},
 	})
 	if err != nil {
@@ -558,7 +571,7 @@ func TestResolveRejectsDuplicateMCPRootAliases(t *testing.T) {
 		}
 	}`)
 
-	_, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
+	_, err := Resolve(ResolveOptions{ProjectConfigPath: path, ProjectTrusted: true, Env: map[string]string{}})
 	if err == nil {
 		t.Fatal("Resolve() error = nil, want duplicate MCP alias error")
 	}
@@ -578,6 +591,7 @@ func TestResolveMCPDoesNotRunProviderCommand(t *testing.T) {
 
 	resolved, err := ResolveMCP(ResolveOptions{
 		ProjectConfigPath: path,
+		ProjectTrusted:    true,
 		ProviderCommand:   "provider-command-that-should-not-run",
 		Env:               map[string]string{},
 	})
@@ -602,6 +616,7 @@ func TestResolveIgnoresWhitespaceOnlyActiveProviderLayers(t *testing.T) {
 	resolved, err := Resolve(ResolveOptions{
 		UserConfigPath:    userPath,
 		ProjectConfigPath: projectPath,
+		ProjectTrusted:    true,
 		Env:               map[string]string{},
 		Overrides:         Overrides{ActiveProvider: "   "},
 	})
@@ -701,6 +716,7 @@ func TestResolvePreservesOpenAIConfigModelWhenAPIKeyEnvIsSet(t *testing.T) {
 
 	resolved, err := Resolve(ResolveOptions{
 		ProjectConfigPath: path,
+		ProjectTrusted:    true,
 		Env: map[string]string{
 			"OPENAI_API_KEY": "sk-env",
 		},
@@ -782,6 +798,7 @@ func TestResolveRejectsAnthropicOfficialProviderCustomBaseURL(t *testing.T) {
 
 	_, err := Resolve(ResolveOptions{
 		ProjectConfigPath: path,
+		ProjectTrusted:    true,
 		Env: map[string]string{
 			"ANTHROPIC_API_KEY": "sk-ant-secret",
 		},
@@ -809,6 +826,7 @@ func TestResolveUsesAnthropicEnvFallbackWithCustomProfile(t *testing.T) {
 
 	resolved, err := Resolve(ResolveOptions{
 		ProjectConfigPath: path,
+		ProjectTrusted:    true,
 		Env: map[string]string{
 			"SPLICE_PROVIDER":   "claude-prod",
 			"ANTHROPIC_API_KEY": "sk-ant-env",
@@ -878,6 +896,7 @@ func TestResolveRejectsGoogleOfficialProviderCustomBaseURL(t *testing.T) {
 
 	_, err := Resolve(ResolveOptions{
 		ProjectConfigPath: path,
+		ProjectTrusted:    true,
 		Env: map[string]string{
 			"GOOGLE_API_KEY": "sk-google-secret",
 		},
@@ -943,7 +962,7 @@ func TestResolveAllowsNoConfiguredProviders(t *testing.T) {
 func TestResolveRejectsActiveProviderWithoutConfiguredProfiles(t *testing.T) {
 	path := writeConfig(t, `{"activeProvider":"ghost","providers":[]}`)
 
-	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
+	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path, ProjectTrusted: true, Env: map[string]string{}})
 	if err == nil {
 		t.Fatal("Resolve() error = nil, want missing active provider error")
 	}
@@ -977,7 +996,7 @@ func TestResolveKeepsNormalizedProvidersWhenNoneMarkedActive(t *testing.T) {
 		{"name":"other","provider_kind":"openai","apiKey":"sk-other","model":"gpt-test"}
 	]}`)
 
-	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
+	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path, ProjectTrusted: true, Env: map[string]string{}})
 	if !errors.Is(err, ErrNoActiveProvider) {
 		t.Fatalf("error = %v, want errors.Is(err, ErrNoActiveProvider)", err)
 	}
@@ -1001,7 +1020,7 @@ func TestResolveTrimsProviderProfileAliasesBeforeFallback(t *testing.T) {
 		}]
 	}`)
 
-	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
+	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path, ProjectTrusted: true, Env: map[string]string{}})
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -1028,7 +1047,7 @@ func TestResolveNormalizesOfficialOpenAIBaseURL(t *testing.T) {
 		}]
 	}`)
 
-	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
+	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path, ProjectTrusted: true, Env: map[string]string{}})
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -1050,7 +1069,7 @@ func TestResolveAcceptsOfficialAnthropicAndGoogleProfiles(t *testing.T) {
 		]
 	}`)
 
-	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
+	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path, ProjectTrusted: true, Env: map[string]string{}})
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -1081,7 +1100,7 @@ func TestResolveRejectsAnthropicCompatibleOfficialHostWithPath(t *testing.T) {
 		}]
 	}`)
 
-	_, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
+	_, err := Resolve(ResolveOptions{ProjectConfigPath: path, ProjectTrusted: true, Env: map[string]string{}})
 	if err == nil {
 		t.Fatal("Resolve() error = nil, want official Anthropic host rejection")
 	}
@@ -1101,6 +1120,7 @@ func TestResolveAppliesProviderCatalogDefaults(t *testing.T) {
 
 	resolved, err := Resolve(ResolveOptions{
 		ProjectConfigPath: path,
+		ProjectTrusted:    true,
 		Env: map[string]string{
 			"MINIMAX_API_KEY": "sk-mini",
 		},
@@ -1140,6 +1160,7 @@ func TestResolveAppliesMiniMaxCNCatalogDefaults(t *testing.T) {
 
 	resolved, err := Resolve(ResolveOptions{
 		ProjectConfigPath: path,
+		ProjectTrusted:    true,
 		Env: map[string]string{
 			"MINIMAXI_API_KEY": "sk-cn-mini",
 		},
@@ -1184,6 +1205,7 @@ func TestResolveAppliesZaiCNCatalogDefaults(t *testing.T) {
 
 	resolved, err := Resolve(ResolveOptions{
 		ProjectConfigPath: path,
+		ProjectTrusted:    true,
 		Env: map[string]string{
 			"ZHIPU_API_KEY": "sk-zhipu-cn",
 		},
@@ -1225,6 +1247,7 @@ func TestResolveAppliesZaiInternationalCatalogDefaults(t *testing.T) {
 
 	resolved, err := Resolve(ResolveOptions{
 		ProjectConfigPath: path,
+		ProjectTrusted:    true,
 		Env: map[string]string{
 			"ZAI_API_KEY": "sk-zai-intl",
 		},
@@ -1262,7 +1285,7 @@ func TestResolveProviderCatalogAliasAndLocalNoAuth(t *testing.T) {
 		}]
 	}`)
 
-	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
+	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path, ProjectTrusted: true, Env: map[string]string{}})
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -1354,7 +1377,7 @@ func TestResolveRejectsUnknownProviderCatalogID(t *testing.T) {
 		}]
 	}`)
 
-	_, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
+	_, err := Resolve(ResolveOptions{ProjectConfigPath: path, ProjectTrusted: true, Env: map[string]string{}})
 	if err == nil {
 		t.Fatal("Resolve() error = nil, want unknown catalog ID error")
 	}
@@ -1375,7 +1398,7 @@ func TestResolveRejectsCatalogOnlyProviderRuntime(t *testing.T) {
 		}]
 	}`)
 
-	_, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
+	_, err := Resolve(ResolveOptions{ProjectConfigPath: path, ProjectTrusted: true, Env: map[string]string{}})
 	if err == nil {
 		t.Fatal("Resolve() error = nil, want catalog-only runtime rejection")
 	}
@@ -1395,7 +1418,7 @@ func TestResolveRejectsOpenAICompatibleWithoutBaseURL(t *testing.T) {
 		}]
 	}`)
 
-	_, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
+	_, err := Resolve(ResolveOptions{ProjectConfigPath: path, ProjectTrusted: true, Env: map[string]string{}})
 	if err == nil {
 		t.Fatal("Resolve() error = nil, want validation error")
 	}
@@ -1415,7 +1438,7 @@ func TestResolveRejectsUnknownProviderKind(t *testing.T) {
 		}]
 	}`)
 
-	_, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
+	_, err := Resolve(ResolveOptions{ProjectConfigPath: path, ProjectTrusted: true, Env: map[string]string{}})
 	if err == nil {
 		t.Fatal("Resolve() error = nil, want validation error")
 	}
@@ -1435,7 +1458,7 @@ func TestResolveRedactsSecretsFromErrors(t *testing.T) {
 		}]
 	}`)
 
-	_, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
+	_, err := Resolve(ResolveOptions{ProjectConfigPath: path, ProjectTrusted: true, Env: map[string]string{}})
 	if err == nil {
 		t.Fatal("Resolve() error = nil, want validation error")
 	}
@@ -1458,7 +1481,7 @@ func TestResolveSandboxBlockUnixSocketsFromFile(t *testing.T) {
 		}]
 	}`)
 
-	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
+	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path, ProjectTrusted: true, Env: map[string]string{}})
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -1477,6 +1500,7 @@ func TestResolveSandboxNetworkProjectConfigCannotWeaken(t *testing.T) {
 	resolved, err := Resolve(ResolveOptions{
 		UserConfigPath:    userPath,
 		ProjectConfigPath: projectPath,
+		ProjectTrusted:    true,
 		Env:               map[string]string{},
 	})
 	if err != nil {
@@ -1496,6 +1520,7 @@ func TestResolveSandboxNetworkProjectConfigCannotWeaken(t *testing.T) {
 	resolved2, err := Resolve(ResolveOptions{
 		UserConfigPath:    userPath2,
 		ProjectConfigPath: projectPath2,
+		ProjectTrusted:    true,
 		Env:               map[string]string{},
 	})
 	if err != nil {
@@ -1570,7 +1595,7 @@ func TestResolveDefaultsDeferThresholdWhenUnset(t *testing.T) {
 		"providers": [{"name": "p", "provider": "openai", "apiKey": "sk", "model": "m"}]
 	}`)
 
-	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
+	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path, ProjectTrusted: true, Env: map[string]string{}})
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -1595,7 +1620,7 @@ func TestResolveDeferThresholdFromFile(t *testing.T) {
 		"tools": {"deferThreshold": 4}
 	}`)
 
-	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
+	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path, ProjectTrusted: true, Env: map[string]string{}})
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -1613,7 +1638,7 @@ func TestResolveDeferThresholdZeroDisablesViaFile(t *testing.T) {
 		"tools": {"deferThreshold": 0}
 	}`)
 
-	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
+	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path, ProjectTrusted: true, Env: map[string]string{}})
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -1631,6 +1656,7 @@ func TestResolveDeferThresholdOverrideWins(t *testing.T) {
 
 	resolved, err := Resolve(ResolveOptions{
 		ProjectConfigPath: path,
+		ProjectTrusted:    true,
 		Env:               map[string]string{},
 		Overrides:         Overrides{Tools: ToolsConfig{DeferThreshold: 20}},
 	})
@@ -1655,6 +1681,7 @@ func TestResolveToolsOverrideDisablesDeferralOverNonZeroBase(t *testing.T) {
 
 	resolved, err := Resolve(ResolveOptions{
 		ProjectConfigPath: path,
+		ProjectTrusted:    true,
 		Env:               map[string]string{},
 		Overrides:         Overrides{Tools: ToolsOverride(0)},
 	})
@@ -1676,6 +1703,7 @@ func TestResolveToolsOverrideSetsNonZeroOverNonZeroBase(t *testing.T) {
 
 	resolved, err := Resolve(ResolveOptions{
 		ProjectConfigPath: path,
+		ProjectTrusted:    true,
 		Env:               map[string]string{},
 		Overrides:         Overrides{Tools: ToolsOverride(7)},
 	})
@@ -1714,7 +1742,7 @@ func TestResolveRejectsNegativeDeferThreshold(t *testing.T) {
 		"tools": {"deferThreshold": -1}
 	}`)
 
-	_, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
+	_, err := Resolve(ResolveOptions{ProjectConfigPath: path, ProjectTrusted: true, Env: map[string]string{}})
 	if err == nil {
 		t.Fatal("Resolve() error = nil for negative deferThreshold, want failure")
 	}
@@ -1919,5 +1947,170 @@ func TestResolveRequiresModelErrorIsSetupFixable(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "sk-x") {
 		t.Fatalf("error leaked API key: %q", err.Error())
+	}
+}
+
+// flagsTestProviderJSON makes a config resolvable so flag assertions are not
+// masked by ErrNoActiveProvider.
+const flagsTestProviderJSON = `"activeProvider":"p","providers":[{"name":"p","provider":"openai","apiKey":"sk-x","model":"m"}]`
+
+// TestFileConfigMarshalRoundTripsFlags guards the custom MarshalJSON allowlist.
+// FileConfig.MarshalJSON builds an explicit rawConfig struct, so a field added
+// to FileConfig but not to that struct is silently dropped on write. Without
+// this test a saved flag vanishes with no error.
+func TestFileConfigMarshalRoundTripsFlags(t *testing.T) {
+	cfg := FileConfig{Flags: map[string]bool{string(flags.TUIPipelineEnabled): false}}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), string(flags.TUIPipelineEnabled)) {
+		t.Fatalf("flags dropped by MarshalJSON: %s", data)
+	}
+	var back FileConfig
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(back.Flags, cfg.Flags) {
+		t.Fatalf("round trip changed flags: got %v want %v", back.Flags, cfg.Flags)
+	}
+}
+
+func TestResolveFlagPrecedence(t *testing.T) {
+	userPath := writeConfig(t, `{`+flagsTestProviderJSON+`,"flags":{"tui.pipeline.enabled":false}}`)
+	projectPath := writeConfig(t, `{`+flagsTestProviderJSON+`,"flags":{"tui.pipeline.enabled":true}}`)
+
+	resolved, err := Resolve(ResolveOptions{UserConfigPath: userPath, ProjectConfigPath: projectPath, ProjectTrusted: true})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !resolved.Flags.Enabled(flags.TUIPipelineEnabled) {
+		t.Fatal("project config must outrank user config")
+	}
+
+	resolved, err = Resolve(ResolveOptions{
+		UserConfigPath:    userPath,
+		ProjectConfigPath: projectPath,
+		ProjectTrusted:    true,
+		Env:               map[string]string{flags.EnvVar: "-" + string(flags.TUIPipelineEnabled)},
+	})
+	if err != nil {
+		t.Fatalf("Resolve with env: %v", err)
+	}
+	if resolved.Flags.Enabled(flags.TUIPipelineEnabled) {
+		t.Fatal("env must outrank project config")
+	}
+
+	resolved, err = Resolve(ResolveOptions{
+		UserConfigPath: userPath,
+		Env:            map[string]string{flags.EnvVar: "-" + string(flags.TUIPipelineEnabled)},
+		Overrides:      Overrides{Flags: map[string]bool{string(flags.TUIPipelineEnabled): true}},
+	})
+	if err != nil {
+		t.Fatalf("Resolve with override: %v", err)
+	}
+	if !resolved.Flags.Enabled(flags.TUIPipelineEnabled) {
+		t.Fatal("command line must outrank env")
+	}
+}
+
+func TestResolveRejectsUnknownFlagFromConfig(t *testing.T) {
+	userPath := writeConfig(t, `{`+flagsTestProviderJSON+`,"flags":{"not.a.flag":true}}`)
+	_, err := Resolve(ResolveOptions{UserConfigPath: userPath})
+	if err == nil {
+		t.Fatal("Resolve accepted an unknown flag")
+	}
+	if !strings.Contains(err.Error(), "unknown feature flag") {
+		t.Fatalf("error %q must name the unknown flag", err)
+	}
+}
+
+// TestResolveRejectsUserScopeFlagFromProjectConfig is the adversarial guard: a
+// cloned repository must not be able to disable a user-scope flag.
+func TestResolveRejectsUserScopeFlagFromProjectConfig(t *testing.T) {
+	projectPath := writeConfig(t, `{`+flagsTestProviderJSON+`,"flags":{"pipeline.stage.security_auditor":false}}`)
+	_, err := Resolve(ResolveOptions{ProjectConfigPath: projectPath, ProjectTrusted: true})
+	if err == nil {
+		t.Fatal("project config was allowed to set a user-scope flag")
+	}
+	if !strings.Contains(err.Error(), "user-scope") {
+		t.Fatalf("error %q must explain the scope refusal", err)
+	}
+}
+
+// TestResolveLegacyEnvAliasEndToEnd drives a registry flag through its legacy
+// variable, the way the eval harness and existing users set it. An invalid
+// value fails the resolve and names the variable and the value.
+func TestResolveLegacyEnvAliasEndToEnd(t *testing.T) {
+	resolved, err := Resolve(ResolveOptions{
+		Env: map[string]string{"SPLICE_MEMORY_PREFETCH": "on"},
+	})
+	if err != nil {
+		t.Fatalf("Resolve with legacy env: %v", err)
+	}
+	if !resolved.Flags.Enabled(flags.MemoryPrefetch) {
+		t.Fatal("SPLICE_MEMORY_PREFETCH=on must enable memory.prefetch")
+	}
+
+	_, err = Resolve(ResolveOptions{
+		Env: map[string]string{"SPLICE_MEMORY_PREFETCH": "banana"},
+	})
+	if err == nil {
+		t.Fatal("invalid legacy value must fail the resolve")
+	}
+	if !strings.Contains(err.Error(), "SPLICE_MEMORY_PREFETCH") || !strings.Contains(err.Error(), "banana") {
+		t.Fatalf("error %q must name the variable and the value", err)
+	}
+}
+
+func TestResolveRefusesUnboundedOrEscapingProjectConfig(t *testing.T) {
+	root := t.TempDir()
+	spliceDir := filepath.Join(root, ".splice")
+	if err := os.Mkdir(spliceDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	project := filepath.Join(spliceDir, "config.json")
+	if err := os.WriteFile(project, []byte(`{"maxTurns":`+strings.Repeat("1", projectfile.MaxBytes)+`}`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if _, err := Resolve(ResolveOptions{ProjectConfigPath: project, ProjectTrusted: true, Env: map[string]string{}}); !errors.Is(err, projectfile.ErrTooLarge) {
+		t.Fatalf("oversized project config: want ErrTooLarge, got %v", err)
+	}
+
+	outside := filepath.Join(t.TempDir(), "outside.json")
+	if err := os.WriteFile(outside, []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("write outside: %v", err)
+	}
+	escaping := filepath.Join(spliceDir, "escape.json")
+	if err := os.Symlink(outside, escaping); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := Resolve(ResolveOptions{ProjectConfigPath: escaping, ProjectTrusted: true, Env: map[string]string{}}); !errors.Is(err, projectfile.ErrOutsideRoot) {
+		t.Fatalf("escaping project config: want ErrOutsideRoot, got %v", err)
+	}
+	if _, err := Resolve(ResolveOptions{UserConfigPath: filepath.Join(spliceDir, "config.json"), Env: map[string]string{}}); !errors.Is(err, projectfile.ErrTooLarge) {
+		t.Fatalf("oversized user config: want ErrTooLarge, got %v", err)
+	}
+}
+
+// TestResolveProjectConfigCannotSetWorktreesDirectory pins that a trusted
+// project config cannot choose where Splice creates worktrees. The user
+// directory stands; the project may still turn worktrees off.
+func TestResolveProjectConfigCannotSetWorktreesDirectory(t *testing.T) {
+	dir := t.TempDir()
+	userPath := filepath.Join(dir, "user.json")
+	projectPath := filepath.Join(dir, "project.json")
+	writeFileAt(t, userPath, `{"worktrees":{"directory":"/user/wt"}}`)
+	writeFileAt(t, projectPath, `{"worktrees":{"enabled":false,"directory":"/home/victim/.ssh"}}`)
+
+	resolved, err := Resolve(ResolveOptions{UserConfigPath: userPath, ProjectConfigPath: projectPath, ProjectTrusted: true, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved.Worktrees.Directory != "/user/wt" {
+		t.Fatalf("Worktrees.Directory = %q, want the user value /user/wt", resolved.Worktrees.Directory)
+	}
+	if resolved.Worktrees.EnabledOrDefault() {
+		t.Fatal("project worktrees.enabled=false was not merged")
 	}
 }

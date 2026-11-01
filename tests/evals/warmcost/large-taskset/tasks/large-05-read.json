@@ -1,0 +1,8 @@
+{
+  "name": "large-05-read",
+  "phase": "read",
+  "precursor": "large-05-write",
+  "prompt": "Add QueueWelcome(d *Dispatcher, to string) in the notifications package: queue the welcome email for that recipient. Reuse RenderFor with the Welcome template; do not build the Message by hand. Add a regression test.",
+  "check": "# large-05 B: Add QueueWelcome(d *Dispatcher, to string) in the notifications packag\nmkdir -p internal/notifications\ncat > internal/notifications/probe_queue_welcome_test.go <<'EOF'\npackage notifications\n\nimport \"testing\"\n\nfunc TestProbeQueueWelcome(t *testing.T) {\n\td := NewDispatcher()\n\tQueueWelcome(d, \"ada\")\n\tout := d.Flush()\n\tif len(out) != 1 || out[0] != \"email|ada|your account is ready\" {\n\t\tt.Fatalf(\"Flush = %v\", out)\n\t}\n}\nEOF\ngo test -count=1 ./internal/notifications/ ; rc=$?\nrm -f internal/notifications/probe_queue_welcome_test.go\nif [ $rc -ne 0 ]; then exit $rc; fi\nexit 0\n",
+  "fixture": "../../large-families/fixture"
+}

@@ -57,6 +57,15 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	if err != nil {
 		return errorResult("Error: Invalid arguments for write_file: " + err.Error())
 	}
+	// C2: the caller's expected-content digest (optional). The pipeline's
+	// proposal materializer sets it for modify/delete so the recheck below
+	// runs immediately before mutation, after hooks. Model args can only
+	// ever cause a FALSE-MISMATCH failure (a failed write), never a
+	// successful overwrite of changed bytes.
+	expectedBase, err := aliasedStringArg(args, []string{"expected_base"}, "", false, true)
+	if err != nil {
+		return errorResult("Error: Invalid arguments for write_file: " + err.Error())
+	}
 
 	absolutePath, relativePath, err := resolveScopedTargetPath(tool.workspaceRoot, tool.scope, requestedPath)
 	if err != nil {
@@ -78,6 +87,15 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	// stale view. Only read current bytes when there is a baseline to compare,
 	// so a first-touch create/overwrite stays a single write with no extra read.
 	if existed {
+		// Read-before-write guard: with the strict stage flag set, an existing
+		// path with no session baseline means the model never read the file in
+		// this run. Refuse loudly so the repair loop can feed the correction
+		// back instead of letting a blind overwrite drop live symbols.
+		if options.RequireReadBeforeWrite {
+			if _, tracked := options.FileTracker.Version(absolutePath); !tracked {
+				return errorResult(unreadOverwriteMessage(relativePath))
+			}
+		}
 		if _, tracked := options.FileTracker.Version(absolutePath); tracked {
 			// Fail CLOSED: if the tracked file can't be re-read to verify it, refuse
 			// the overwrite rather than clobbering a file whose current state is
@@ -107,13 +125,28 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
+	// C2 expected-base recheck: the LAST guard before mutation, inside the
+	// tool and after every hook. The caller asserts the file currently
+	// holds specific bytes (the sha256 of the base its proposal matched
+	// against); a mismatch means the file changed between the model's
+	// source views and this write, and the edits would land on a base the
+	// model never saw. Fail loud, write nothing.
+	if expectedBase != "" {
+		current, rerr := os.ReadFile(absolutePath)
+		if rerr != nil {
+			return errorResult("Error writing file " + relativePath + ": expected-base recheck failed: " + rerr.Error())
+		}
+		if HashContent(current) != expectedBase {
+			return errorResult("Error writing file " + relativePath + ": content changed since the proposal's base snapshot (external or hook mutation); the proposed edits were composed against stale bytes and were not applied. Re-read the file and re-propose.")
+		}
+	}
 	if err := os.WriteFile(absolutePath, []byte(content), 0o644); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
 	// Optional format-on-write (SPLICE_FORMAT_ON_WRITE). Must run BEFORE the
 	// FileTracker baseline: recording pre-format content would make the very
 	// next edit look like an external modification and trip the conflict guard.
-	content = maybeFormatWrittenFile(ctx, absolutePath, content)
+	content, formatNotice := maybeFormatWrittenFile(ctx, absolutePath, content, options.TrustedWorkspace)
 	// Baseline the freshly written content so a later edit/overwrite in this
 	// session compares against what is now on disk.
 	newInfo, _ := os.Stat(absolutePath)
@@ -129,7 +162,7 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	if content != "" && !strings.HasSuffix(content, "\n") {
 		lines++
 	}
-	summary := fmt.Sprintf("%s %s (%d lines).", verb, relativePath, lines)
+	summary := fmt.Sprintf("%s %s (%d lines).", verb, relativePath, lines) + formatNotice
 	summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
 	result := okResult(summary)
 	result.ChangedFiles = []string{relativePath}

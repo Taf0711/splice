@@ -21,11 +21,12 @@ type execStageProviderOptions struct {
 }
 
 type execStageAwareProvider struct {
-	mu        sync.Mutex
-	images    []zeroruntime.ImageBlock
-	intents   []string
-	submitted map[string]bool
-	options   execStageProviderOptions
+	mu            sync.Mutex
+	images        []zeroruntime.ImageBlock
+	intents       []string
+	submitted     map[string]bool
+	options       execStageProviderOptions
+	stepBackCalls int
 }
 
 func newExecStageAwareProvider(options execStageProviderOptions) *execStageAwareProvider {
@@ -55,6 +56,13 @@ func (provider *execStageAwareProvider) StreamCompletion(ctx context.Context, re
 
 	args := "{}"
 	switch toolName {
+	case "submit_step_back":
+		provider.mu.Lock()
+		provider.stepBackCalls++
+		provider.mu.Unlock()
+		out := schemas.StepBackAnalysis{HypothesizedRootCause: "The test still fails.", Evidence: []string{"failed test"}, RecommendedApproach: "Check the expected value.", Confidence: .8}
+		b, _ := json.Marshal(out)
+		args = string(b)
 	case "submit_code":
 		out := schemas.CodeWriterOutput{
 			Files:      provider.codeFiles(),

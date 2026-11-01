@@ -1,0 +1,27 @@
+{
+  "campaign": "jev-m6-confirmation",
+  "arms": ["cold", "warm", "warm-jev"],
+  "repeats": 2,
+  "task_sets": ["holdout-taskset"],
+  "model_pin": "typesafe/jev-1.13",
+  "calibration_p_useful": 0.9,
+  "cap_usd": 0.05,
+  "budget_fit_off": true,
+  "notes": "M6 confirmation per SPEC_DECISION_SELECTOR_M5_DIAGNOSTIC_2026-09-22 and Jev plan Section 15. Gates frozen before inspecting held-out outcomes: CPVC point estimate at least 10% below the best eligible baseline; paired 95% CI upper bound for the cost ratio below 1.0; one-sided 95% completion-rate bound above -2 percentage points; no new permission, source-integrity, or mandatory-verification failure; no observed intervention increase; p95 episode latency at most 10% above baseline; every launched billable attempt accounted. Stage route: z-ai/glm-5.3-flash via OpenRouter (PRICED, ~$0.00205/attempt per the approved P4 smoke; estimated campaign stage spend $0.03-0.06). Held-out pair: validate-user-helper write/read on the retention fixture, never run before this campaign. Attribution metric: delivery-line presence, delivered-file re-read avoidance, and delivered-symbol reuse in the changed files.",
+  "confirmation_gates": {
+    "cpvc_min_improvement_fraction": 0.10,
+    "cost_ratio_ci_upper_max": 1.0,
+    "quality_margin_percentage_points": -2.0,
+    "latency_p95_max_increase_fraction": 0.10,
+    "intervention_increase_allowed": false
+  },
+  "price_snapshot": {
+    "stage_model": "z-ai/glm-5.3-flash",
+    "stage_route": "openrouter",
+    "stage_billed_usd_per_attempt_pilot_reference": 0.002054,
+    "advisor_model": "typesafe/jev-1.13",
+    "advisor_billed_usd_per_decision_pilot_reference": 0.0000153,
+    "captured_at": "2026-09-23",
+    "source": "openrouter live usage (cost_provenance=reported) and the approved P4 smoke aggregate"
+  }
+}

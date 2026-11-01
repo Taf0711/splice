@@ -56,11 +56,11 @@ func TestMergeStageUsageNilSideCarriesWebSearchFields(t *testing.T) {
 
 func TestRequestLedgerRecordCarriesWebSearchFields(t *testing.T) {
 	ledger := newRequestLedger()
-	options := ledger.recordingOptions(agent.Options{
+	options := ledger.recordingOptions(PipelineConfigFromAgentOptions(agent.Options{
 		EstimateUsageCost: func(string, agent.Usage, bool) agent.UsageCostEstimate {
 			return agent.UsageCostEstimate{Status: agent.CostStatusUnpriced, UnpricedReason: "test"}
 		},
-	})
+	}))
 	options.OnAttributedUsage(agent.AttributedUsage{
 		Usage: zeroruntime.Usage{
 			InputTokens:       10,
@@ -83,11 +83,11 @@ func TestRequestLedgerRecordCarriesWebSearchFields(t *testing.T) {
 
 func TestRequestLedgerRecordWithoutWebSearchIsUnchanged(t *testing.T) {
 	ledger := newRequestLedger()
-	options := ledger.recordingOptions(agent.Options{
+	options := ledger.recordingOptions(PipelineConfigFromAgentOptions(agent.Options{
 		EstimateUsageCost: func(string, agent.Usage, bool) agent.UsageCostEstimate {
 			return agent.UsageCostEstimate{Status: agent.CostStatusUnpriced, UnpricedReason: "test"}
 		},
-	})
+	}))
 	options.OnAttributedUsage(agent.AttributedUsage{
 		Usage:         zeroruntime.Usage{InputTokens: 10, OutputTokens: 5},
 		UsageReported: true,

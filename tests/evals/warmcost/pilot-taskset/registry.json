@@ -1,0 +1,35 @@
+[
+  {
+    "name": "clock-table-helper-reuse",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong"
+    ]
+  },
+  {
+    "name": "error-envelope-from-doc",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong"
+    ]
+  },
+  {
+    "name": "listen-address-from-config",
+    "base-fails-verifier": true,
+    "gold-passes-verifier": true,
+    "wrong-patch-fails": true,
+    "status": "validated",
+    "audit-keys-present": [
+      "gold",
+      "wrong"
+    ]
+  }
+]

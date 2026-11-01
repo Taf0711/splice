@@ -1,0 +1,8 @@
+{
+  "name": "fut-hidden-03-read",
+  "phase": "read",
+  "precursor": "fut-hidden-03-write",
+  "prompt": "In the flags package, add the feature flag \"smart_retry\" to the known flags.",
+  "check": "# fut-hidden-03 B\ncat > internal/flags/probe_smart_retry_test.go <<'EOF'\npackage flags\n\nimport (\n\t\"slices\"\n\t\"testing\"\n)\n\nfunc TestProbe(t *testing.T) {\n\tif !slices.Contains(Names, \"smart_retry\") {\n\t\tt.Fatal(\"Names lacks smart_retry\")\n\t}\n}\nEOF\ngo test -count=1 ./... ; rc=$?\nrm -f internal/flags/probe_smart_retry_test.go\nexit $rc\n",
+  "fixture": "../../chain-families/fixture-hidden"
+}

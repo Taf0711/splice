@@ -13,13 +13,19 @@ import (
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/config"
 	"github.com/Taf0711/splice/internal/notify"
+	"github.com/Taf0711/splice/internal/presentation"
 	"github.com/Taf0711/splice/internal/sessions"
 	splicerun "github.com/Taf0711/splice/internal/splice"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/tools"
 	"github.com/Taf0711/splice/internal/usage"
+	"github.com/Taf0711/splice/internal/worktrees"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
+
+// designSessionPlaceholderTitle names a design session before its first
+// prompt; the first prompt replaces it (see titleSessionFromFirstPrompt).
+const designSessionPlaceholderTitle = "Design conversation"
 
 const designModeNotice = "Planning mode: the agent can read and search files, but it cannot edit files or run commands in this phase. Use /crystallize, then /approve, to create and execute a plan; use /exec <prompt> as a direct-run shortcut."
 
@@ -30,7 +36,7 @@ const designModeNotice = "Planning mode: the agent can read and search files, bu
 func (m model) enterDesignMode(notice string) model {
 	m.designMode = true
 	var err error
-	m, err = m.ensureActiveSession("Design conversation")
+	m, err = m.ensureActiveSession(designSessionPlaceholderTitle)
 	if err != nil {
 		m.designMode = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "session create error: " + err.Error()})
@@ -44,6 +50,15 @@ func (m model) enterDesignMode(notice string) model {
 	}
 	m.pendingPlan = nil
 	m.pendingCritique = nil
+	// Design is a lifecycle phase, and entering it must reach the phase
+	// trail (review finding 9). Without this, the chip kept showing the
+	// PREVIOUS run's complete phase while the user was in design, because
+	// phaseTrail.observe is fed only by execution snapshots. The previous
+	// run's completion also stops being the live outcome here.
+	m.lastState = presentation.State{}
+	m.mirrorPipeline()
+	m.lastTerminalReceipt = ""
+	m.phaseTrail.observe(presentation.LifecycleDesign)
 	if notice != "" {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: notice})
 	}
@@ -62,11 +77,14 @@ func (m model) handleDesignCommand() (model, tea.Cmd) {
 func (m model) handleExecCommand(text string) (model, tea.Cmd) {
 	text = strings.TrimSpace(text)
 	m.designMode = false
+	// /exec means CLI-exec parity: the pipeline runs under auto permission
+	// mode regardless of the conversation-mode selector.
+	m.execDirectPending = true
 	if text == "" {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Execution mode. Type a prompt to run it through the pipeline, or /design to return to design conversation."})
 		return m, nil
 	}
-	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: "/exec " + text})
+	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Execution mode."})
 	return m.launchPrompt(text)
 }
 
@@ -74,9 +92,8 @@ func (m model) handleApproveCommand() (model, tea.Cmd) {
 	return m.startApproval(splicerun.DesignTransitionSourceManual)
 }
 
-// startApproval validates the approval preconditions, then begins the plan
-// execution run. source distinguishes a manual /approve from an agent-requested
-// approval for the transcript and the persisted lifecycle audit.
+// startApproval validates the approval preconditions. Manual approval starts
+// execution. Agent-requested approval stops at an explicit user prompt.
 func (m model) startApproval(source splicerun.DesignTransitionSource) (model, tea.Cmd) {
 	if m.pending {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot approve while a run is active."})
@@ -113,9 +130,54 @@ func (m model) startApproval(source splicerun.DesignTransitionSource) (model, te
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot approve: no active session store."})
 		return m, nil
 	}
+	if source == splicerun.DesignTransitionSourceAgent {
+		return m.requestDesignApproval(planID)
+	}
+	return m.startApprovalConfirmed(source, planID)
+}
+
+// requestDesignApproval stops an agent-requested transition at a user prompt.
+// The plan runner stays inactive until resolvePermission receives Allow.
+func (m model) requestDesignApproval(planID string) (model, tea.Cmd) {
+	if m.pendingPermission != nil {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot approve: another permission request is active."})
+		return m, nil
+	}
+	request := agent.PermissionRequest{
+		ToolCallID:         fmt.Sprintf("design-approval-%d", m.runID),
+		ToolName:           "approve_design",
+		Action:             agent.PermissionActionPrompt,
+		Permission:         "execute_design_plan",
+		PermissionMode:     agent.PermissionModeAsk,
+		SideEffect:         string(tools.SideEffectWrite),
+		Reason:             "The design agent requested execution of this plan.",
+		Scope:              planID,
+		Args:               map[string]any{"plan_id": planID},
+		AvailableDecisions: []agent.PermissionDecisionAction{agent.PermissionDecisionAllow, agent.PermissionDecisionDeny},
+	}
+	updated, err := m.appendSessionEvent(sessions.EventPermissionRequest, request)
+	if err != nil {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot approve: persist user confirmation request: " + err.Error()})
+		return m, nil
+	}
+	m = updated
+	row := permissionTranscriptRow(permissionEventFromRequest(request))
+	m.transcript = appendTranscriptRow(m.transcript, row)
+	m.pendingPermission = &pendingPermissionPrompt{
+		request:        request,
+		designApproval: &designApprovalPrompt{planID: planID},
+	}
+	m.reportAgentLifecycle(herdrBlocked)
+	return m, nil
+}
+
+// startApprovalConfirmed records approval and starts the write-capable plan
+// runner. Call it only after manual approval or the explicit confirmation gate.
+func (m model) startApprovalConfirmed(source splicerun.DesignTransitionSource, planID string) (model, tea.Cmd) {
 	updated, err := m.appendSessionEvent(sessions.EventPlanApproved, splicerun.PlanApprovedPayload{PlanID: planID, Source: source})
 	if err != nil {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot approve: persist plan_approved: " + err.Error()})
+		m.reportAgentLifecycle(herdrIdle)
 		return m, nil
 	}
 	m = updated
@@ -145,33 +207,35 @@ func (m model) startApproval(source splicerun.DesignTransitionSource) (model, te
 	options.ProviderName = m.providerName
 	options.Model = m.modelName
 	options.ReasoningEffort = string(m.reasoningEffort)
+	// The approved plan runs stage routes from the current stage-models.json, as
+	// a pipeline run does. An invalid file fails the first model-backed stage.
+	options.StageModelResolver = m.currentStageResolver()
 
 	// The approved plan runs through the same callback seam as a normal TUI
 	// pipeline run. Keep the accumulated events with the result so the update
 	// path can persist them together with the completed plan.
 	sessionEvents := []pendingSessionEvent{}
-	estimator := usage.NewCostEstimator(&m.modelCatalog)
+	catalogs := m.newCostCatalogs()
 	callSeq := map[string]int{}
-
-	onText := options.OnText
-	options.OnText = func(delta string) {
-		m.sendAgentText(runID, delta)
-		if onText != nil {
-			onText(delta)
-		}
-	}
 	onReasoning := options.OnReasoning
 	options.OnReasoning = func(delta string) {
-		m.sendAgentReasoning(runID, delta)
 		if onReasoning != nil {
 			onReasoning(delta)
 		}
 	}
-	options.OnToolCallStart = func(id, name string) {
-		m.sendToolCallStreamStart(runID, id, name)
+	// Pipeline notices (command nodes a run will execute) stay visible as rows.
+	options.OnNotice = func(text string) {
+		m.sendAgentRow(runID, transcriptRow{kind: rowSystem, text: text, runID: runID})
 	}
-	options.OnToolCallDelta = func(id, fragment string) {
-		m.sendToolCallStreamDelta(runID, id, fragment)
+	onToolOutput := options.OnToolOutput
+	options.OnToolOutput = func(snapshot tools.OutputSnapshot) {
+		if m.runtimeMessageSink != nil {
+			id := effectiveToolRowID(snapshot.ToolCallID, callSeq[snapshot.ToolCallID])
+			m.runtimeMessageSink(toolOutputSnapshotMsg{runID: runID, id: id, snapshot: snapshot.Output})
+		}
+		if onToolOutput != nil {
+			onToolOutput(snapshot)
+		}
 	}
 
 	// Keep this guard and cancellation branch aligned with runAgentWithOptions.
@@ -344,13 +408,27 @@ func (m model) startApproval(source splicerun.DesignTransitionSource) (model, te
 			onPermission(event)
 		}
 	}
+	// The approval run records the same durable presentation snapshots the
+	// direct path does (review finding 6): it used to transport them live
+	// and persist nothing, so reopening the session could not reconstruct
+	// the run. Both paths now share runtimeWiring's recording seam.
+	options = (runtimeWiring{
+		runID: runID,
+		send:  m.runtimeMessageSink,
+		recordEvent: func(event pendingSessionEvent) {
+			sessionEvents = append(sessionEvents, event)
+		},
+	}).decorate(options)
+	// finishRun ends the run in the browser viewer: a cancelled or failed run
+	// skips the pipeline's own end event.
+	finishRun := m.applyRunEvents(&options, runID)
 
-	options.EstimateUsageCost = estimator
+	options.EstimateServedUsageCost = catalogs.Estimate
 	onAttributedUsage := options.OnAttributedUsage
 	options.OnAttributedUsage = func(attributed agent.AttributedUsage) {
 		cost := attributed.Cost
 		if cost.Status == "" {
-			cost = estimator(attributed.Model, attributed.Usage, attributed.UsageReported)
+			cost = catalogs.Estimate(attributed.ProviderName, attributed.Model, attributed.Usage, attributed.UsageReported)
 			attributed.Cost = cost
 		}
 		sessionEvents = append(sessionEvents, pendingSessionEvent{
@@ -396,11 +474,25 @@ func (m model) startApproval(source splicerun.DesignTransitionSource) (model, te
 
 	return m, tea.Batch(
 		func() tea.Msg {
+			prepared, notice, bindErr := m.bindPipelineWorktree(runCtx, &options)
+			if bindErr != nil {
+				finishRun("", bindErr)
+				return planExecutionResultMsg{runID: runID, err: bindErr, store: store, sessionID: sessionID, sessionEvents: sessionEvents, worktreeNotice: notice}
+			}
+			var preparedPtr *worktrees.Result
+			if prepared.Path != "" {
+				copy := prepared
+				preparedPtr = &copy
+			}
+			if m.captureRunOptions != nil {
+				m.captureRunOptions(options)
+			}
 			result, err := splicerun.RunDesignPlanWithResume(runCtx, plan, provider, options, mem, nil, splicerun.RunDesignPlanOptions{
 				PlanID:          planID,
 				OnTaskStart:     onTaskStart,
 				OnTaskLifecycle: onTaskLifecycle,
 			})
+			finishRun(result.FinalAnswer, err)
 			if store != nil && sessionID != "" {
 				inputs := make([]sessions.AppendEventInput, 0, len(sessionEvents))
 				for _, event := range flushableSessionEvents(sessionEvents) {
@@ -416,7 +508,11 @@ func (m model) startApproval(source splicerun.DesignTransitionSource) (model, te
 					}
 				}
 			}
-			return planExecutionResultMsg{runID: runID, result: result, err: err, store: store, sessionID: sessionID, sessionEvents: sessionEvents}
+			// HANDOFF card inputs (F1): computed HERE in the cmd goroutine,
+			// off the UI loop.
+			sourceDirty := inspectSourceDirty(prepared)
+			wtPreserved := preparedPtr != nil && tuiWorktreeExists(preparedPtr.Path)
+			return planExecutionResultMsg{runID: runID, result: result, err: err, store: store, sessionID: sessionID, sessionEvents: sessionEvents, worktree: preparedPtr, worktreeNotice: notice, sourceDirty: sourceDirty, worktreePreserved: wtPreserved, mergeAvailable: wtPreserved && !sourceDirty}
 		},
 		m.spinner.Tick,
 	)
@@ -512,33 +608,8 @@ func (m model) startCrystallization(source splicerun.DesignTransitionSource, app
 	cwd := m.cwd
 	runID := m.activeRunID
 
-	resolver := m.stageModelResolver
-	if resolver == nil {
-		stageConfigPath := filepath.Join(filepath.Dir(m.userConfigPath), "stage-models.json")
-		stageConfig, err := schemas.LoadStageModelConfig(stageConfigPath)
-		if err != nil {
-			stageConfig = schemas.StageModelConfigFile{}
-		}
-		profiles := append([]config.ProviderProfile(nil), m.savedProviders...)
-		if m.providerProfile.Name != "" {
-			found := false
-			for _, p := range profiles {
-				if p.Name == m.providerProfile.Name {
-					found = true
-					break
-				}
-			}
-			if !found {
-				profiles = append(profiles, m.providerProfile)
-			}
-		}
-		tierResolverConfig := splicerun.TierResolverConfig{
-			PrimaryProfile: m.providerProfile,
-			Registry:       &m.modelCatalog,
-		}
-		resolver, _ = splicerun.BuildStageModelResolvers(stageConfig, profiles, m.newProvider, tierResolverConfig)
-		m.stageModelResolver = resolver
-	}
+	// Read stage-models.json on every run, so the file as it is now always wins.
+	resolver := m.currentStageResolver()
 
 	return m, tea.Batch(
 		func() tea.Msg {
@@ -546,7 +617,7 @@ func (m model) startCrystallization(source splicerun.DesignTransitionSource, app
 			// Both design stages run sequentially inside this one goroutine. The
 			// callback appends therefore need no mutex.
 			sessionEvents := []pendingSessionEvent{}
-			estimator := usage.NewCostEstimator(&m.modelCatalog)
+			catalogs := m.newCostCatalogs()
 			streamFactory := splicerun.StageStreamFactory(func(stageName string, selection agent.ModelSelection) zeroruntime.CollectOptions {
 				return zeroruntime.CollectOptions{
 					OnToolCallStart: func(id, name string) {
@@ -559,7 +630,7 @@ func (m model) startCrystallization(source splicerun.DesignTransitionSource, app
 						m.sendAgentReasoning(runID, delta)
 					},
 					OnUsage: func(event zeroruntime.Usage) {
-						cost := estimator(selection.Model, event, true)
+						cost := catalogs.Estimate(selection.ProviderName, selection.Model, event, true)
 						attributed := agent.AttributedUsage{
 							Usage:         event,
 							UsageReported: true,
@@ -598,12 +669,19 @@ type crystallizeResultMsg struct {
 }
 
 type planExecutionResultMsg struct {
-	runID         int
-	result        agent.Result
-	err           error
-	store         *sessions.Store
-	sessionID     string
-	sessionEvents []pendingSessionEvent
+	runID          int
+	result         agent.Result
+	err            error
+	store          *sessions.Store
+	sessionID      string
+	sessionEvents  []pendingSessionEvent
+	worktree       *worktrees.Result
+	worktreeNotice string
+	sourceDirty    bool
+	// worktreePreserved/mergeAvailable are computed in the producing cmd
+	// (off the UI loop) and consumed by offerHandoff (F1, §14).
+	worktreePreserved bool
+	mergeAvailable    bool
 }
 
 // designCoverageWarning reports plan fields that the conversation did not
@@ -719,7 +797,10 @@ func (m model) handleLayoutCommand() (model, tea.Cmd) {
 	if m.planPanelPersistent {
 		state = "on"
 	}
-	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Persistent plan panel " + state + "."})
+	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: ackSystemText(ack{
+		verb:    "layout",
+		outcome: "persistent plan panel  " + state,
+	})})
 	return m, nil
 }
 
@@ -837,28 +918,34 @@ func designConversationContext(events []sessions.Event, livePlan *schemas.Design
 			Content: message.Content,
 		})
 	}
-	state, err := workflowStateMessage(ctx.CurrentPlan, ctx.CurrentCritique)
+	state := ctx.State
+	state.Plan = ctx.CurrentPlan
+	state.Critique = ctx.CurrentCritique
+	stateMessage, err := workflowStateMessage(state)
 	if err != nil {
 		return nil, "", err
 	}
-	return messages, state, nil
+	return messages, stateMessage, nil
 }
 
-// workflowStateMessage serializes the complete current plan and critique for
-// the live design agent. JSON keeps this model-facing form independent from
-// the shorter display format used by the TUI.
-func workflowStateMessage(plan *schemas.DesignPlan, critique *schemas.PlanCritique) (string, error) {
-	if plan == nil && critique == nil {
+// workflowStateMessage serializes the current design state for the live design
+// agent. It includes execution outcomes so later turns know which tasks ran.
+func workflowStateMessage(state splicerun.DesignState) (string, error) {
+	if state.Plan == nil && state.Critique == nil && len(state.TaskOutcomes) == 0 {
 		return "", nil
 	}
-	state := struct {
-		CurrentPlan     *schemas.DesignPlan   `json:"current_plan,omitempty"`
-		CurrentCritique *schemas.PlanCritique `json:"current_critique,omitempty"`
+	modelState := struct {
+		Phase           schemas.DesignPhase              `json:"phase,omitempty"`
+		CurrentPlan     *schemas.DesignPlan              `json:"current_plan,omitempty"`
+		CurrentCritique *schemas.PlanCritique            `json:"current_critique,omitempty"`
+		TaskOutcomes    map[string]schemas.TaskRunStatus `json:"task_outcomes,omitempty"`
 	}{
-		CurrentPlan:     plan,
-		CurrentCritique: critique,
+		Phase:           state.Phase,
+		CurrentPlan:     state.Plan,
+		CurrentCritique: state.Critique,
+		TaskOutcomes:    state.TaskOutcomes,
 	}
-	payload, err := json.MarshalIndent(state, "", "  ")
+	payload, err := json.MarshalIndent(modelState, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("marshal design revision context: %w", err)
 	}
@@ -900,4 +987,80 @@ func designConversationRegistry(registry *tools.Registry) *tools.Registry {
 		filtered.Register(tool)
 	}
 	return filtered
+}
+
+// resumeNextStep names what the user can do with the restored design state,
+// using only commands whose preconditions hold (startApproval's checks).
+// Empty when the session has no design state worth a hint.
+func (m model) resumeNextStep() string {
+	if len(m.sessionEvents) == 0 {
+		return ""
+	}
+	state, err := splicerun.ReconstructDesignState(m.sessionEvents)
+	if err != nil {
+		return ""
+	}
+	plan := state.Plan
+	switch state.Phase {
+	case schemas.DesignPhaseConversation, schemas.DesignPhaseReview:
+		switch {
+		case plan == nil:
+			return "Next: keep describing the change, or /crystallize when the decisions are settled."
+		case m.pendingCritique != nil && m.pendingCritique.MustFixBeforeExecution:
+			return "Next: the plan has must-fix critique issues. Revise it, then /crystallize again."
+		default:
+			return fmt.Sprintf("Next: /approve runs the %d-step plan, or keep talking to refine it.", len(plan.Tasks))
+		}
+	case schemas.DesignPhaseExecuting:
+		if plan == nil {
+			return ""
+		}
+		done := 0
+		for _, task := range plan.Tasks {
+			if outcome, ok := state.TaskOutcomes[task.ID]; ok && outcome.Status == "completed" {
+				done++
+			}
+		}
+		return fmt.Sprintf("This plan was approved and stopped at %d/%d steps. /changes shows what reached the workspace; /design starts a new plan.", done, len(plan.Tasks))
+	}
+	return ""
+}
+
+// currentStageResolver builds the stage route resolver from the current
+// stage-models.json. A file that does not load yields a resolver that fails
+// each stage with the cause, so no stage silently uses the primary model.
+func (m model) currentStageResolver() agent.StageModelResolver {
+	if strings.TrimSpace(m.userConfigPath) == "" {
+		return nil
+	}
+	stageConfigPath := filepath.Join(filepath.Dir(m.userConfigPath), "stage-models.json")
+	stageConfig, err := schemas.LoadStageModelConfig(stageConfigPath)
+	if err != nil {
+		return invalidStageRoutingResolver(err)
+	}
+	profiles := append([]config.ProviderProfile(nil), m.savedProviders...)
+	if m.providerProfile.Name != "" {
+		found := false
+		for _, p := range profiles {
+			if p.Name == m.providerProfile.Name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			profiles = append(profiles, m.providerProfile)
+		}
+	}
+	tierResolverConfig := splicerun.TierResolverConfig{
+		PrimaryProfile: m.providerProfile,
+		Registry:       &m.modelCatalog,
+	}
+	return splicerun.BuildStageModelResolvers(stageConfig, profiles, m.newProvider, tierResolverConfig).Stage
+}
+
+// invalidStageRoutingResolver fails every stage route with the load cause.
+func invalidStageRoutingResolver(cause error) agent.StageModelResolver {
+	return func(string) (agent.ModelSelection, error) {
+		return agent.ModelSelection{}, fmt.Errorf("stage routing config invalid: %w", cause)
+	}
 }

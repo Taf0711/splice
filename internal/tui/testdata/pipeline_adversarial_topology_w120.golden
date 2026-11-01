@@ -1,0 +1,8 @@
+ ◜ deploy_hook data_transform
+ ○ release_gate review
+ ✓ sync_worker data_pipeline
+
+ [########────────]  50%
+
+CURRENT
+ stage: deploy_hook

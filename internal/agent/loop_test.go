@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/specmode"
 	"github.com/Taf0711/splice/internal/tools"
@@ -456,9 +457,30 @@ func TestIsRetriableToolError(t *testing.T) {
 		{"denial: sandbox", ToolResult{Status: tools.StatusError, Output: "anything", DenialReason: DenialSandboxBlock}, false},
 	}
 	for _, c := range cases {
-		if got := isRetriableToolError(c.result); got != c.want {
-			t.Errorf("%s: isRetriableToolError = %v, want %v", c.name, got, c.want)
+		for _, typed := range []bool{false, true} {
+			if got := isRetriableToolError(c.result, typed); got != c.want {
+				t.Errorf("%s (typed %v): isRetriableToolError = %v, want %v", c.name, typed, got, c.want)
+			}
 		}
+	}
+}
+
+// TestIsRetriableToolErrorKeepsInteractiveClassification pins that a typed
+// registry refusal changes the classification only for an agent node. The
+// host-seam refusal has no message the text checks know, so an interactive
+// run still counts it as retriable, as before the registry set the category.
+// An agent node treats it as a refusal.
+func TestIsRetriableToolErrorKeepsInteractiveClassification(t *testing.T) {
+	hostSeam := ToolResult{Status: tools.StatusError, Output: "Error: raw_file_read is a host-seam tool; it is not invokable from the model surface.", DenialReason: DenialPolicy}
+	if !isRetriableToolError(hostSeam, false) {
+		t.Fatal("interactive run: host-seam refusal is not retriable; want the classification from before the typed category")
+	}
+	if isRetriableToolError(hostSeam, true) {
+		t.Fatal("agent node: host-seam refusal is retriable; want the typed category to win")
+	}
+	sandboxDecision := ToolResult{Status: tools.StatusError, Output: "Sandbox decision: outside workspace", DenialReason: DenialSandboxDenied}
+	if !isRetriableToolError(sandboxDecision, false) || isRetriableToolError(sandboxDecision, true) {
+		t.Fatal("sandbox decision refusal: want retriable only for an interactive run")
 	}
 }
 
@@ -1480,7 +1502,7 @@ func TestRunRequestsPromptToolPermissionBeforeExecution(t *testing.T) {
 	}
 }
 
-func TestRunAllowsWorkspaceWriteWithoutPromptWhenSandboxPolicyPermits(t *testing.T) {
+func TestRunAllowsTrustedWorkspaceWriteWithoutPromptWhenSandboxPolicyPermits(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewWriteFileTool(root))
@@ -1488,9 +1510,10 @@ func TestRunAllowsWorkspaceWriteWithoutPromptWhenSandboxPolicyPermits(t *testing
 	var permissionEvents []PermissionEvent
 
 	result, err := Run(context.Background(), "write notes", provider, Options{
-		Registry:       registry,
-		PermissionMode: PermissionModeAsk,
-		Autonomy:       "medium",
+		Registry:         registry,
+		PermissionMode:   PermissionModeAsk,
+		Autonomy:         "medium",
+		TrustedWorkspace: true,
 		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
 			WorkspaceRoot: root,
 			Policy:        sandbox.DefaultPolicy(),
@@ -3515,4 +3538,22 @@ func TestRunWithoutPriorMessagesUnchanged(t *testing.T) {
 	}
 	assertMessage(t, msgs[0], zeroruntime.MessageRoleSystem, "")
 	assertMessage(t, msgs[1], zeroruntime.MessageRoleUser, "only user")
+}
+
+// The run fits its effort to the model before any request: a level the
+// model lacks never reaches the provider.
+func TestRunFitsReasoningEffortToTheModel(t *testing.T) {
+	modelregistry.EnableModelsDevOverlay()
+	reg, err := modelregistry.DefaultRegistry("openrouter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := &mockProvider{}
+	_, _ = Run(context.Background(), "hi", provider, Options{Model: "z-ai/glm-5.2", ReasoningEffort: "low", ModelRegistry: reg})
+	if len(provider.requests) == 0 {
+		t.Fatal("no request sent")
+	}
+	if got := provider.requests[0].ReasoningEffort; got != "high" {
+		t.Fatalf("request effort = %q, want high (glm-5.2 starts at high)", got)
+	}
 }

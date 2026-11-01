@@ -1,0 +1,28 @@
+╭── Pipeline ──────────────────────────────────────────────╮
+│ default  source: embedded default                        │
+│                                                          │
+│ Warnings                                                 │
+│   at trivial: no verification node is active at this     │
+│   tier; revision loops are disabled                      │
+│                                                          │
+│ Graph                                                    │
+│    code_writer                                           │
+│    test_generator  skipped at trivial, light             │
+│      <- code_writer                                      │
+│    static_analyzer  skipped at trivial                   │
+│      <- code_writer                                      │
+│    security_auditor  skipped at trivial, light, standard │
+│      <- test_generator, code_writer, static_analyzer     │
+│    test_runner  skipped at trivial                       │
+│      <- static_analyzer                                  │
+│    acceptance_verifier  skipped at trivial               │
+│      <- test_runner                                      │
+│                                                          │
+│ Command nodes                                            │
+│   none                                                   │
+│                                                          │
+│ hint: change it with /pipeline use <name>; this view is  │
+│ read-only                                                │
+│ hint: Ctrl+G shows each node's model, budget, and last   │
+│ result                                                   │
+╰──────────────────────────────────────────────────────────╯

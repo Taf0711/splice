@@ -1,0 +1,7 @@
+{
+  "name": "cmp-server-3-cpl-03-write",
+  "prompt": "In the worker package, schedule a \"rotate-keys\" job that runs every 24 hours. The security team owns it.",
+  "check": "# cpl-03 A\nmkdir -p internal/worker\ncat > internal/worker/probe_rotate_keys_test.go <<'EOF'\npackage worker\n\nimport (\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestProbeRotateKeys(t *testing.T) {\n\tfor _, s := range DefaultSchedules {\n\t\tif s.Name == \"rotate-keys\" && s.Every == 24*time.Hour {\n\t\t\treturn\n\t\t}\n\t}\n\tt.Fatal(\"no rotate-keys schedule every 24h\")\n}\nEOF\ngo test -count=1 -run '^(TestProbeRotateKeys|TestEveryScheduledJobHasAnOwner)$' ./... ; rc=$?\nrm -f internal/worker/probe_rotate_keys_test.go\nexit $rc\n",
+  "fixture": "../../coupled-families/fixture-large",
+  "precursor": "cmp-server-1-cpl-01-write"
+}

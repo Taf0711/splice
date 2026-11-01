@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Taf0711/splice/internal/tools"
 )
@@ -266,28 +267,41 @@ func (m model) renderFileRow(f touchedFile, room int) string {
 }
 
 // sidebarFileSelectables returns the clickable FILES rows with their ABSOLUTE
-// index inside the rendered sidebar. The FILES section renders after PLAN in
-// renderContextSidebar: AGENTS header + body, blank + PLAN header + body, then
-// blank + FILES header, then the file rows. The offset accounting mirrors
-// sidebarPlanSelectables exactly, extended one section down.
+// index inside the rendered sidebar. The FILES section renders after the
+// AGENTS/PLAN/DECISIONS/RUN modules in renderContextSidebar, so the base
+// offset is located by scanning the REAL rendered lines for the FILES header
+// instead of duplicating the module-composition arithmetic here — the registry
+// composes sections declaratively, and any drift between the two walks would
+// silently skew every click (the shared-working-tree lesson: one owner for
+// layout truth).
 func (m model) sidebarFileSelectables(width int) []fileHit {
 	lines, hits := m.sidebarFileLines(width)
 	if len(lines) == 0 {
 		return nil
 	}
-	agentBody := len(m.sidebarAgentLines(width))
-	if agentBody == 0 {
-		agentBody = 1 // the "no agents spawned" placeholder occupies one line
+	base := sidebarHeaderLineOffset(m, width, "FILES")
+	if base < 0 {
+		return nil
 	}
-	planBody := len(m.sidebarPlanLines(width))
-	if planBody == 0 {
-		planBody = 1 // the "no active plan" placeholder occupies one line
-	}
-	base := 1 + agentBody + 2 + planBody + 2 // sections above + (blank + FILES header)
 	for i := range hits {
-		hits[i].lineOffset += base
+		hits[i].lineOffset += base + 1 // +1: skip the FILES header itself
 	}
 	return hits
+}
+
+// sidebarHeaderLineOffset finds the ABSOLUTE rendered-sidebar line carrying a
+// section header (matched on its stripped, upper-cased text). Returns -1 when
+// the section is absent. The real render is the only layout authority: the
+// render path may drop sections under budget, and header text is width-exact.
+func sidebarHeaderLineOffset(m model, width int, header string) int {
+	rendered := m.renderContextSidebar(width, m.height)
+	for i, line := range rendered {
+		stripped := strings.ToUpper(strings.TrimSpace(ansi.Strip(line)))
+		if strings.HasPrefix(stripped, strings.ToUpper(header)) {
+			return i
+		}
+	}
+	return -1
 }
 
 // fileRowAtMouse maps a left-click in the context sidebar to a touched file,

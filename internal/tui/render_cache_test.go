@@ -196,3 +196,35 @@ func replaceDefaultRenderCache(t *testing.T, cache *staticRenderCache) *staticRe
 	})
 	return cache
 }
+
+// TestSpecialistCompletedCacheKeysDiffer: two completed specialists in the
+// same runID must not share a cache key, or the second would render the first
+// one's card. Their identity lives in specialistInfo, not the empty generic
+// row fields.
+func TestSpecialistCompletedCacheKeysDiffer(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	rc := buildRowContext(m.transcript)
+	opts := cardRenderOptions{bodyCap: cardBodyMaxLines, cwd: m.cwd}
+
+	makeRow := func(info *specialistInfo) (string, bool) {
+		row := transcriptRow{kind: rowSpecialist, runID: 7, specialistInfo: info}
+		return m.renderRowCacheKey(row, 80, rc, opts, false)
+	}
+
+	alpha := &specialistInfo{name: "design", childSessionID: "s-a", status: specialistCompleted, toolCount: 2,
+		toolCalls: []specialistToolCall{{name: "web_search", detail: "alpha query"}}}
+	beta := &specialistInfo{name: "worker", childSessionID: "s-b", status: specialistCompleted, toolCount: 1,
+		toolCalls: []specialistToolCall{{name: "write_file", detail: "beta.txt"}}}
+
+	aKey, _ := makeRow(alpha)
+	bKey, _ := makeRow(beta)
+	if aKey == bKey {
+		t.Fatalf("two completed specialists share the same cache key %q; second would render the first's card", aKey)
+	}
+
+	// Identical cards must still cache (stable, same key).
+	a2Key, _ := makeRow(alpha)
+	if aKey != a2Key {
+		t.Fatalf("identical specialist cards produced different keys %q vs %q", aKey, a2Key)
+	}
+}

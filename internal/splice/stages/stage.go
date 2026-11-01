@@ -3,19 +3,45 @@ package stages
 import (
 	"context"
 
+	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
+// DefaultTimeoutSeconds is the default bound for deterministic subprocesses.
+const DefaultTimeoutSeconds = 600
+
+// Capabilities is the declared runtime contract for one stage. TimeoutSeconds
+// 0 means the DefaultTimeoutSeconds bound for deterministic subprocesses.
+type Capabilities struct {
+	ModelFree      bool
+	ConsumesMemory bool
+	PullContext    bool
+	TimeoutSeconds int
+	// Description is a short present-tense phrase naming what this stage does,
+	// shown as the live action in the pipeline panel. Example: "writing code
+	// changes". Keep it under 40 characters and do not end it with a period.
+	Description string
+}
+
 // Stage is one deterministic or LLM-backed pipeline step.
 type Stage interface {
 	Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options StageOptions) (schemas.HarnessStageOutput, error)
+	Capabilities() Capabilities
 }
 
 // StageOptions carries cross-stage dependencies and configuration.
 type StageOptions struct {
 	// WorkDir is the workspace root where file changes are applied.
 	WorkDir string
+	// ProjectInstructions contains repository instruction text loaded once by
+	// the orchestrator for this run.
+	ProjectInstructions string
+	// Sandbox is the stage sandbox engine for deterministic subprocesses: an
+	// enforce-mode engine that scopes the filesystem to the workspace and
+	// denies network. Nil skips OS-level confinement; the binary allowlist at
+	// the procrun chokepoint still applies.
+	Sandbox *sandbox.Engine
 	// Language is the dominant project language.
 	Language string
 	// TargetPaths are optional explicit files this stage should focus on.
@@ -41,18 +67,34 @@ type StageOptions struct {
 	// ReasoningEffort is the per-stage reasoning effort (minimal/low/medium/high).
 	// Empty means "let the provider decide".
 	ReasoningEffort string
+	// MaxOutputTokens caps output tokens for this stage's LLM requests. Zero
+	// means no per-request override; the provider default applies.
+	MaxOutputTokens int
 	// PromptCacheKey groups requests that share a system-prompt prefix so the provider can reuse its cached prefix. Empty disables the hint.
 	PromptCacheKey string
 	// Command is an explicit command for deterministic stages like test_runner.
 	Command []string
+	// CommandWorkDir is the working directory for an explicit deterministic
+	// command. Empty uses WorkDir.
+	CommandWorkDir string
 	// TimeoutSeconds bounds deterministic subprocess execution.
 	TimeoutSeconds int
+	// OnFormatRetry, when set, is invoked before each typed-output format
+	// retry attempt (attempt 2 and up) of callValidatedToolUse. The
+	// orchestrator uses it to reclassify the request attribution cell so
+	// retry spend lands under the format_retry source instead of
+	// generation. Nil means the stage never reclassifies (legacy shape).
+	OnFormatRetry func(attempt int)
 	// Plan is used by the plan_critic stage.
 	Plan *schemas.DesignPlan
 	// PreviousPlan is the plan from the prior crystallization, when available.
 	PreviousPlan *schemas.DesignPlan
 	// PreviousCritique is the prior plan review, when available.
 	PreviousCritique *schemas.PlanCritique
+	// RunAgent runs one agent node's bounded tool loop. The orchestrator wires
+	// it, so this package never imports the agent loop. Nil refuses an agent
+	// node instead of running it outside the registry path.
+	RunAgent func(ctx context.Context, request AgentNodeRequest) (AgentNodeResult, error)
 }
 
 // ToolResult is the minimal deterministic-adapter result a stage needs.

@@ -36,41 +36,72 @@ func (f *fakeKeySetter) Set(provider, key string) error {
 	return nil
 }
 
+func TestApplyStoredAPIKeyReadError(t *testing.T) {
+	cause := errors.New("keychain locked")
+	_, err := ApplyStoredAPIKey(ProviderProfile{Name: "openai", APIKeyStored: true}, fakeKeyGetter{err: cause})
+	if !errors.Is(err, cause) {
+		t.Fatalf("error = %v, want wrapped keychain error", err)
+	}
+	for _, want := range []string{"openai", "selected backend", "SPLICE_CRED_STORAGE"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want %q", err, want)
+		}
+	}
+}
+
 func TestApplyStoredAPIKey(t *testing.T) {
 	store := fakeKeyGetter{keys: map[string]string{"openai": "sk-stored"}}
 
 	// Stored marker + empty key => filled from the store.
-	got := ApplyStoredAPIKey(ProviderProfile{Name: "openai", APIKeyStored: true}, store)
+	got, err := ApplyStoredAPIKey(ProviderProfile{Name: "openai", APIKeyStored: true}, store)
+	if err != nil {
+		t.Fatalf("ApplyStoredAPIKey: %v", err)
+	}
 	if got.APIKey != "sk-stored" {
 		t.Fatalf("expected stored key to fill empty APIKey, got %q", got.APIKey)
 	}
 
 	// No APIKeyStored marker => store is NOT consulted (don't reactivate a stale key).
-	got = ApplyStoredAPIKey(ProviderProfile{Name: "openai"}, store)
+	got, err = ApplyStoredAPIKey(ProviderProfile{Name: "openai"}, store)
+	if err != nil {
+		t.Fatalf("ApplyStoredAPIKey: %v", err)
+	}
 	if got.APIKey != "" {
 		t.Fatalf("expected no load without APIKeyStored, got %q", got.APIKey)
 	}
 
 	// Inline key present => store is NOT consulted (inline wins).
-	got = ApplyStoredAPIKey(ProviderProfile{Name: "openai", APIKeyStored: true, APIKey: "sk-inline"}, store)
+	got, err = ApplyStoredAPIKey(ProviderProfile{Name: "openai", APIKeyStored: true, APIKey: "sk-inline"}, store)
+	if err != nil {
+		t.Fatalf("ApplyStoredAPIKey: %v", err)
+	}
 	if got.APIKey != "sk-inline" {
 		t.Fatalf("inline key must win, got %q", got.APIKey)
 	}
 
 	// Marker set but no stored key for this provider => unchanged (empty).
-	got = ApplyStoredAPIKey(ProviderProfile{Name: "anthropic", APIKeyStored: true}, store)
+	got, err = ApplyStoredAPIKey(ProviderProfile{Name: "anthropic", APIKeyStored: true}, store)
+	if err != nil {
+		t.Fatalf("ApplyStoredAPIKey: %v", err)
+	}
 	if got.APIKey != "" {
 		t.Fatalf("expected no key for unstored provider, got %q", got.APIKey)
 	}
 
 	// Nil store => unchanged.
-	got = ApplyStoredAPIKey(ProviderProfile{Name: "openai", APIKeyStored: true}, nil)
+	got, err = ApplyStoredAPIKey(ProviderProfile{Name: "openai", APIKeyStored: true}, nil)
+	if err != nil {
+		t.Fatalf("ApplyStoredAPIKey: %v", err)
+	}
 	if got.APIKey != "" {
 		t.Fatalf("nil store must leave profile unchanged, got %q", got.APIKey)
 	}
 
 	// Empty name => unchanged (don't query the store).
-	got = ApplyStoredAPIKey(ProviderProfile{APIKeyStored: true}, store)
+	got, err = ApplyStoredAPIKey(ProviderProfile{APIKeyStored: true}, store)
+	if err != nil {
+		t.Fatalf("ApplyStoredAPIKey: %v", err)
+	}
 	if got.APIKey != "" {
 		t.Fatalf("empty name must not be filled, got %q", got.APIKey)
 	}

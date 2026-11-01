@@ -1,0 +1,1187 @@
+diff --git a/.gitignore b/.gitignore
+index 4cd3b7b..cfc3067 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -76,3 +76,6 @@ graphify-out/
+ /demo-work/
+ /demo-repair-loop.tape
+ /DEMO-RUNBOOK.md
++
++# Test transcript exports (tests must use their own temp dirs)
++/internal/tui/splice-transcript-*.txt
+diff --git a/internal/eval/decide.go b/internal/eval/decide.go
+index ee4bcd4..18ea94b 100644
+--- a/internal/eval/decide.go
++++ b/internal/eval/decide.go
+@@ -6,6 +6,7 @@ package eval
+ 
+ import (
+ 	"fmt"
++	"sort"
+ )
+ 
+ // Verdict vocabulary. Every non-conclusive verdict resolves to the incumbent
+@@ -36,11 +37,130 @@ type ArmStats struct {
+ 	WeightedInterventions int // sum of intervention weights across all tasks
+ }
+ 
++// CostMeasures separates the cost comparisons that one total-tokens-per-success
++// ratio conflates. Each measure is reported on its own.
++//
++// A lone per-success ratio can improve only because the denominator changed.
++// An arm that turns one failure into a success, or that fails more cheaply on
++// a task it never passed, moves the ratio without making the same work cheaper.
++// Run 7 is the counterexample: its headline was 43.2 percent, while the tasks
++// both arms passed cost 0.5 percent MORE warm.
++type CostMeasures struct {
++	// TotalCold and TotalWarm are raw arm spend over every pair, failures
++	// included. Report absolute spend, never a ratio alone.
++	TotalCold int `json:"total_cold"`
++	TotalWarm int `json:"total_warm"`
++
++	// Mean per-success cost is total tokens divided by that arm's successes.
++	// Keep it for continuity. It no longer decides the gate.
++	MeanColdPerSuccess float64 `json:"mean_cold_per_success"`
++	MeanWarmPerSuccess float64 `json:"mean_warm_per_success"`
++
++	// Median per-success cost covers each arm's successful tasks. One aborted
++	// task can dominate a mean. The median says what a typical success cost.
++	MedianColdPerSuccess float64 `json:"median_cold_per_success"`
++	MedianWarmPerSuccess float64 `json:"median_warm_per_success"`
++
++	// MatchedPairs counts tasks where BOTH arms succeeded. This is the only
++	// like-for-like comparison, and the cost gate decides on it.
++	MatchedPairs int `json:"matched_pairs"`
++	MatchedCold  int `json:"matched_cold_tokens"`
++	MatchedWarm  int `json:"matched_warm_tokens"`
++}
++
++// ratio returns warm divided by cold. A zero cold value returns 0, which the
++// caller reads as undefined.
++func ratio(warm, cold float64) float64 {
++	if cold == 0 {
++		return 0
++	}
++	return warm / cold
++}
++
++// TotalRatio is warm total spend over cold total spend.
++func (c CostMeasures) TotalRatio() float64 { return ratio(float64(c.TotalWarm), float64(c.TotalCold)) }
++
++// MeanRatio is warm mean per-success cost over cold.
++func (c CostMeasures) MeanRatio() float64 { return ratio(c.MeanWarmPerSuccess, c.MeanColdPerSuccess) }
++
++// MedianRatio is warm median per-success cost over cold.
++func (c CostMeasures) MedianRatio() float64 {
++	return ratio(c.MedianWarmPerSuccess, c.MedianColdPerSuccess)
++}
++
++// MatchedRatio is warm matched-pair spend over cold. This ratio decides the
++// cost gate.
++func (c CostMeasures) MatchedRatio() float64 {
++	return ratio(float64(c.MatchedWarm), float64(c.MatchedCold))
++}
++
++// measureCost computes every cost measure from the per-pair rows plus the arm
++// aggregates.
++func measureCost(tasks []TaskPair, cold, warm ArmStats) CostMeasures {
++	m := CostMeasures{TotalCold: cold.Tokens, TotalWarm: warm.Tokens}
++	if cold.Successes > 0 {
++		m.MeanColdPerSuccess = float64(cold.Tokens) / float64(cold.Successes)
++	}
++	if warm.Successes > 0 {
++		m.MeanWarmPerSuccess = float64(warm.Tokens) / float64(warm.Successes)
++	}
++
++	coldSuccess := make([]int, 0, cold.Successes)
++	warmSuccess := make([]int, 0, warm.Successes)
++	for _, task := range tasks {
++		if task.ColdSuccess {
++			coldSuccess = append(coldSuccess, task.ColdTokens)
++		}
++		if task.WarmSuccess {
++			warmSuccess = append(warmSuccess, task.WarmTokens)
++		}
++		if task.ColdSuccess && task.WarmSuccess {
++			m.MatchedPairs++
++			m.MatchedCold += task.ColdTokens
++			m.MatchedWarm += task.WarmTokens
++		}
++	}
++	m.MedianColdPerSuccess = median(coldSuccess)
++	m.MedianWarmPerSuccess = median(warmSuccess)
++	return m
++}
++
++// median returns the middle value of an integer sample. An empty sample is 0.
++func median(values []int) float64 {
++	if len(values) == 0 {
++		return 0
++	}
++	sorted := append([]int(nil), values...)
++	sort.Ints(sorted)
++	mid := len(sorted) / 2
++	if len(sorted)%2 == 1 {
++		return float64(sorted[mid])
++	}
++	return (float64(sorted[mid-1]) + float64(sorted[mid])) / 2
++}
++
++// conclusiveReason states all four cost measures so a reader never has to
++// trust the headline alone.
++func conclusiveReason(c CostMeasures) string {
++	return fmt.Sprintf(
++		"warm wins: matched-pair cost %.1f%% lower at equal-or-better success (matched %d to %d over %d pairs, total %d to %d, mean per success %.0f to %.0f, median per success %.0f to %.0f)",
++		(1-c.MatchedRatio())*100,
++		c.MatchedCold, c.MatchedWarm, c.MatchedPairs,
++		c.TotalCold, c.TotalWarm,
++		c.MeanColdPerSuccess, c.MeanWarmPerSuccess,
++		c.MedianColdPerSuccess, c.MedianWarmPerSuccess)
++}
++
+ // DecisionInput is the paired result handed to the decision gates.
+ type DecisionInput struct {
+ 	Pairs int
+ 	Cold  ArmStats
+ 	Warm  ArmStats
++	// Tasks carries the per-pair rows. The cost gate needs them: total tokens
++	// per success alone cannot separate a real saving from a denominator
++	// change. An empty slice at the cost gate is named in the refusal reason,
++	// never silently defaulted.
++	Tasks []TaskPair
+ }
+ 
+ // GateResult is one gate's outcome in the lexicographic trail.
+@@ -55,6 +175,9 @@ type Decision struct {
+ 	Verdict string       `json:"verdict"`
+ 	Reason  string       `json:"reason"`
+ 	Gates   []GateResult `json:"gates"`
++	// Cost carries every cost measure, so a reader can audit the verdict
++	// against the numbers instead of trusting the reason line.
++	Cost CostMeasures `json:"cost"`
+ }
+ 
+ // Decide applies the lexicographic gates over paired arm results. GATE 0
+@@ -78,30 +201,33 @@ func Decide(in DecisionInput) Decision {
+ 	}
+ 	gates = append(gates, GateResult{Name: "success", Passed: true})
+ 
++	// GATE 2: cost margin, decided on matched-success pairs. Total tokens per
++	// success is reported but never decides: it can improve only because the
++	// denominator changed. Run 7 is the counterexample.
++	cost := measureCost(in.Tasks, in.Cold, in.Warm)
++
+ 	// Division-by-zero guard: a cold arm with no successes cannot establish a
+-	// cost-per-success ratio. Pinned as inconclusive.
++	// cost comparison. Pinned as inconclusive.
+ 	if in.Cold.Successes == 0 {
+ 		gates = append(gates, GateResult{Name: "cost", Passed: false, Reason: "cold arm had 0 successes"})
+-		return Decision{Verdict: VerdictInconclusive, Reason: fmt.Sprintf("cold arm had 0 successes; cost comparison undefined (%d pairs)", in.Pairs), Gates: gates}
++		return Decision{Verdict: VerdictInconclusive, Reason: fmt.Sprintf("cold arm had 0 successes; cost comparison undefined (%d pairs)", in.Pairs), Gates: gates, Cost: cost}
+ 	}
+-
+-	coldPer := float64(in.Cold.Tokens) / float64(in.Cold.Successes)
+-	warmPer := float64(in.Warm.Tokens) / float64(in.Warm.Successes)
+-
+-	// GATE 2: cost margin.
+-	if warmPer >= coldPer*CostMargin {
+-		gates = append(gates, GateResult{Name: "cost", Passed: false, Reason: "not cheaper than the 10% margin"})
+-		return Decision{Verdict: VerdictInconclusive, Reason: "not cheaper than the 10% margin", Gates: gates}
++	if cost.MatchedPairs == 0 {
++		gates = append(gates, GateResult{Name: "cost", Passed: false, Reason: "no matched-success pairs"})
++		return Decision{Verdict: VerdictInconclusive, Reason: fmt.Sprintf("no task succeeded in both arms; like-for-like cost is undefined (%d pairs)", in.Pairs), Gates: gates, Cost: cost}
++	}
++	if float64(cost.MatchedWarm) >= float64(cost.MatchedCold)*CostMargin {
++		gates = append(gates, GateResult{Name: "cost", Passed: false, Reason: "matched-pair cost not cheaper than the 10% margin"})
++		return Decision{Verdict: VerdictInconclusive, Reason: fmt.Sprintf("matched-pair cost not cheaper than the 10%% margin (warm %d vs cold %d over %d matched pairs)", cost.MatchedWarm, cost.MatchedCold, cost.MatchedPairs), Gates: gates, Cost: cost}
+ 	}
+ 	gates = append(gates, GateResult{Name: "cost", Passed: true})
+ 
+ 	// GATE 3: burden.
+ 	if in.Warm.WeightedInterventions > in.Cold.WeightedInterventions {
+ 		gates = append(gates, GateResult{Name: "burden", Passed: false, Reason: "cheaper but needier"})
+-		return Decision{Verdict: VerdictInconclusive, Reason: "cheaper but needier", Gates: gates}
++		return Decision{Verdict: VerdictInconclusive, Reason: "cheaper but needier", Gates: gates, Cost: cost}
+ 	}
+ 	gates = append(gates, GateResult{Name: "burden", Passed: true})
+ 
+-	pct := (1 - warmPer/coldPer) * 100
+-	return Decision{Verdict: VerdictConclusive, Reason: fmt.Sprintf("warm wins: %.1f%% fewer tokens at equal success", pct), Gates: gates}
++	return Decision{Verdict: VerdictConclusive, Reason: conclusiveReason(cost), Gates: gates, Cost: cost}
+ }
+diff --git a/internal/eval/decide_test.go b/internal/eval/decide_test.go
+index a658093..5ec3201 100644
+--- a/internal/eval/decide_test.go
++++ b/internal/eval/decide_test.go
+@@ -1,16 +1,77 @@
+ package eval
+ 
+ import (
++	"fmt"
++	"math"
+ 	"strings"
+ 	"testing"
+ )
+ 
++// spread divides total across n parts with an exact sum. The remainder lands on
++// the last part, so the per-pair rows always reproduce the arm aggregate.
++func spread(total, n int) []int {
++	if n <= 0 {
++		return nil
++	}
++	out := make([]int, n)
++	base := total / n
++	for i := range out {
++		out[i] = base
++	}
++	out[n-1] += total - base*n
++	return out
++}
++
++// in builds a DecisionInput whose per-pair rows reproduce the arm aggregates
++// exactly, so the cost measures and the aggregates can never disagree.
+ func in(pairs, coldSucc, warmSucc, coldTok, warmTok, coldInt, warmInt int) DecisionInput {
++	coldTokens := spread(coldTok, coldSucc)
++	warmTokens := spread(warmTok, warmSucc)
++	matched := coldSucc
++	if warmSucc < matched {
++		matched = warmSucc
++	}
++
++	tasks := make([]TaskPair, 0, pairs)
++	for i := 0; i < matched; i++ {
++		tasks = append(tasks, TaskPair{
++			Name:        fmt.Sprintf("matched-%d", i),
++			ColdSuccess: true,
++			WarmSuccess: true,
++			ColdTokens:  coldTokens[i],
++			WarmTokens:  warmTokens[i],
++		})
++	}
++	for i := matched; i < coldSucc; i++ {
++		tasks = append(tasks, TaskPair{Name: fmt.Sprintf("cold-only-%d", i), ColdSuccess: true, ColdTokens: coldTokens[i]})
++	}
++	for i := matched; i < warmSucc; i++ {
++		tasks = append(tasks, TaskPair{Name: fmt.Sprintf("warm-only-%d", i), WarmSuccess: true, WarmTokens: warmTokens[i]})
++	}
++
+ 	return DecisionInput{
+ 		Pairs: pairs,
+ 		Cold:  ArmStats{Successes: coldSucc, Tokens: coldTok, WeightedInterventions: coldInt},
+ 		Warm:  ArmStats{Successes: warmSucc, Tokens: warmTok, WeightedInterventions: warmInt},
++		Tasks: tasks,
++	}
++}
++
++// armStats derives arm aggregates from per-pair rows, the same way the harness
++// accumulates them.
++func armStats(tasks []TaskPair) (ArmStats, ArmStats) {
++	var cold, warm ArmStats
++	for _, task := range tasks {
++		if task.ColdSuccess {
++			cold.Successes++
++		}
++		if task.WarmSuccess {
++			warm.Successes++
++		}
++		cold.Tokens += task.ColdTokens
++		warm.Tokens += task.WarmTokens
+ 	}
++	return cold, warm
+ }
+ 
+ func TestDecideEveryGate(t *testing.T) {
+@@ -36,7 +97,7 @@ func TestDecideEveryGate(t *testing.T) {
+ 			name:    "cost margin not met inconclusive",
+ 			input:   in(10, 8, 8, 1000, 920, 0, 0),
+ 			verdict: VerdictInconclusive,
+-			reason:  "not cheaper than the 10% margin",
++			reason:  "matched-pair cost not cheaper than the 10% margin (warm 920 vs cold 1000 over 8 matched pairs)",
+ 		},
+ 		{
+ 			name:    "needier inconclusive",
+@@ -48,25 +109,25 @@ func TestDecideEveryGate(t *testing.T) {
+ 			name:    "conclusive warm wins",
+ 			input:   in(10, 8, 8, 1000, 600, 0, 0),
+ 			verdict: VerdictConclusive,
+-			reason:  "warm wins: 40.0% fewer tokens at equal success",
++			reason:  "warm wins: matched-pair cost 40.0% lower at equal-or-better success (matched 1000 to 600 over 8 pairs, total 1000 to 600, mean per success 125 to 75, median per success 125 to 75)",
+ 		},
+ 		{
+ 			name:    "tie goes cold",
+ 			input:   in(10, 8, 8, 1000, 1000, 0, 0),
+ 			verdict: VerdictInconclusive,
+-			reason:  "not cheaper than the 10% margin",
++			reason:  "matched-pair cost not cheaper than the 10% margin (warm 1000 vs cold 1000 over 8 matched pairs)",
+ 		},
+ 		{
+ 			name:    "exactly 10 percent cheaper is inconclusive",
+ 			input:   in(10, 10, 10, 1000, 900, 0, 0),
+ 			verdict: VerdictInconclusive,
+-			reason:  "not cheaper than the 10% margin",
++			reason:  "matched-pair cost not cheaper than the 10% margin (warm 900 vs cold 1000 over 10 matched pairs)",
+ 		},
+ 		{
+ 			name:    "just over 10 percent cheaper is conclusive",
+ 			input:   in(10, 10, 10, 1000, 899, 0, 0),
+ 			verdict: VerdictConclusive,
+-			reason:  "warm wins: 10.1% fewer tokens at equal success",
++			reason:  "warm wins: matched-pair cost 10.1% lower at equal-or-better success (matched 1000 to 899 over 10 pairs, total 1000 to 899, mean per success 100 to 90, median per success 100 to 89)",
+ 		},
+ 		{
+ 			name:    "zero success cold arm is inconclusive",
+@@ -84,20 +145,26 @@ func TestDecideEveryGate(t *testing.T) {
+ 			if d.Reason != tc.reason {
+ 				t.Fatalf("reason = %q, want %q", d.Reason, tc.reason)
+ 			}
++			if d.Verdict == VerdictConclusive {
++				if !strings.HasPrefix(d.Reason, "warm wins: ") {
++					t.Fatalf("conclusive reason = %q, want warm-wins prefix", d.Reason)
++				}
++				if !strings.Contains(d.Reason, "matched-pair cost") {
++					t.Fatalf("conclusive reason = %q, want the matched-pair measure named", d.Reason)
++				}
++			}
+ 		})
+ 	}
+ }
+ 
+-func TestDecideConclusiveReasonCarriesPercentage(t *testing.T) {
++func TestDecideConclusiveReasonCarriesAllFourMeasures(t *testing.T) {
+ 	d := Decide(in(10, 10, 10, 1000, 500, 0, 0))
+ 	if d.Verdict != VerdictConclusive {
+ 		t.Fatalf("verdict = %q, want conclusive", d.Verdict)
+ 	}
+-	if !strings.HasPrefix(d.Reason, "warm wins: ") || !strings.HasSuffix(d.Reason, "% fewer tokens at equal success") {
+-		t.Fatalf("reason = %q, want percentage form", d.Reason)
+-	}
+-	if d.Reason != "warm wins: 50.0% fewer tokens at equal success" {
+-		t.Fatalf("reason = %q, want 50.0%%", d.Reason)
++	want := "warm wins: matched-pair cost 50.0% lower at equal-or-better success (matched 1000 to 500 over 10 pairs, total 1000 to 500, mean per success 100 to 50, median per success 100 to 50)"
++	if d.Reason != want {
++		t.Fatalf("reason = %q, want %q", d.Reason, want)
+ 	}
+ }
+ 
+@@ -112,3 +179,128 @@ func TestDecideGateTrail(t *testing.T) {
+ 		}
+ 	}
+ }
++
++// TestDecideEmptyTasksAtCostGateIsInconclusive pins the fail-loud guard. A
++// caller that supplies only arm aggregates cannot support a like-for-like cost
++// decision, and the refusal names the missing data instead of defaulting to the
++// denominator-sensitive ratio.
++func TestDecideEmptyTasksAtCostGateIsInconclusive(t *testing.T) {
++	d := Decide(DecisionInput{
++		Pairs: 10,
++		Cold:  ArmStats{Successes: 8, Tokens: 1000},
++		Warm:  ArmStats{Successes: 8, Tokens: 600},
++	})
++	if d.Verdict != VerdictInconclusive {
++		t.Fatalf("verdict = %q, want inconclusive", d.Verdict)
++	}
++	if !strings.Contains(d.Reason, "no task succeeded in both arms") {
++		t.Fatalf("reason = %q, want the missing matched pairs named", d.Reason)
++	}
++	if d.Cost.MatchedPairs != 0 {
++		t.Fatalf("matched pairs = %d, want 0", d.Cost.MatchedPairs)
++	}
++}
++
++// run7Pairs is the run 7 paired result verbatim from
++// ~/Documents/splice-eval-taskset-run7/report/pe-report.md.
++func run7Pairs() []TaskPair {
++	return []TaskPair{
++		{Name: "audit-ring-buffer", ColdSuccess: false, WarmSuccess: false, ColdTokens: 5127, WarmTokens: 5248},
++		{Name: "capacity-eviction", ColdSuccess: true, WarmSuccess: true, ColdTokens: 5921, WarmTokens: 5906},
++		{Name: "conflict-on-recreate", ColdSuccess: false, WarmSuccess: false, ColdTokens: 5682, WarmTokens: 5121},
++		{Name: "count-by-user", ColdSuccess: true, WarmSuccess: true, ColdTokens: 4463, WarmTokens: 4588},
++		{Name: "delete-session-endpoint", ColdSuccess: false, WarmSuccess: false, ColdTokens: 3266, WarmTokens: 3102},
++		{Name: "healthz-uptime", ColdSuccess: true, WarmSuccess: true, ColdTokens: 5119, WarmTokens: 5170},
++		{Name: "list-sessions-sorted", ColdSuccess: true, WarmSuccess: true, ColdTokens: 4814, WarmTokens: 4864},
++		{Name: "parse-ttl-from-env", ColdSuccess: true, WarmSuccess: true, ColdTokens: 5520, WarmTokens: 5435},
++		{Name: "per-session-ttl", ColdSuccess: false, WarmSuccess: false, ColdTokens: 7235, WarmTokens: 7407},
++		{Name: "session-json-tags", ColdSuccess: false, WarmSuccess: true, ColdTokens: 34159, WarmTokens: 5541},
++		{Name: "snapshot-persistence", ColdSuccess: false, WarmSuccess: false, ColdTokens: 56449, WarmTokens: 23607},
++		{Name: "token-auth-middleware", ColdSuccess: false, WarmSuccess: false, ColdTokens: 62482, WarmTokens: 60530},
++	}
++}
++
++// TestDecideRun7ShapeRefusesTokensPerSuccessWin is the regression this fix
++// exists for. Run 7's headline was "43.2% fewer tokens at equal success", which
++// is total tokens divided by successes (200237/5 vs 136519/6). The five tasks
++// both arms passed cost 25837 cold and 25963 warm, which is a 0.5 percent
++// REGRESSION. The corrected gate must refuse to certify it.
++func TestDecideRun7ShapeRefusesTokensPerSuccessWin(t *testing.T) {
++	tasks := run7Pairs()
++	cold, warm := armStats(tasks)
++
++	// Replay the old headline first, so the test fails loudly if the recorded
++	// totals are ever edited to make the point for us.
++	coldPer := float64(cold.Tokens) / float64(cold.Successes)
++	warmPer := float64(warm.Tokens) / float64(warm.Successes)
++	pct := (1 - warmPer/coldPer) * 100
++	if got := math.Round(pct*10) / 10; got != 43.2 {
++		t.Fatalf("replayed headline = %.1f%%, want 43.2%%", got)
++	}
++
++	d := Decide(DecisionInput{Pairs: len(tasks), Cold: cold, Warm: warm, Tasks: tasks})
++	if d.Verdict != VerdictInconclusive {
++		t.Fatalf("verdict = %q, want inconclusive", d.Verdict)
++	}
++	if !strings.Contains(d.Reason, "matched-pair cost not cheaper") {
++		t.Fatalf("reason = %q, want the matched-pair refusal", d.Reason)
++	}
++
++	if d.Cost.MatchedPairs != 5 {
++		t.Fatalf("matched pairs = %d, want 5", d.Cost.MatchedPairs)
++	}
++	if d.Cost.MatchedCold != 25837 || d.Cost.MatchedWarm != 25963 {
++		t.Fatalf("matched tokens = %d/%d, want 25837/25963", d.Cost.MatchedCold, d.Cost.MatchedWarm)
++	}
++	if d.Cost.TotalCold != 200237 || d.Cost.TotalWarm != 136519 {
++		t.Fatalf("totals = %d/%d, want 200237/136519", d.Cost.TotalCold, d.Cost.TotalWarm)
++	}
++	if d.Cost.MedianColdPerSuccess != 5119 {
++		t.Fatalf("median cold = %v, want 5119", d.Cost.MedianColdPerSuccess)
++	}
++	if d.Cost.MedianWarmPerSuccess != 5302.5 {
++		t.Fatalf("median warm = %v, want 5302.5", d.Cost.MedianWarmPerSuccess)
++	}
++	if d.Cost.MatchedRatio() <= 1 {
++		t.Fatalf("matched ratio = %v, want > 1 (warm more expensive)", d.Cost.MatchedRatio())
++	}
++}
++
++// TestCostMeasuresMedianHandlesEvenAndOddSamples pins the median helper at its
++// boundary, because the median is a reported measure and a silent off-by-one
++// would misreport typical cost.
++func TestCostMeasuresMedianHandlesEvenAndOddSamples(t *testing.T) {
++	cases := []struct {
++		name   string
++		values []int
++		want   float64
++	}{
++		{name: "empty", values: nil, want: 0},
++		{name: "single", values: []int{7}, want: 7},
++		{name: "odd", values: []int{9, 1, 5}, want: 5},
++		{name: "even", values: []int{10, 1, 4, 9}, want: 6.5},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			if got := median(tc.values); got != tc.want {
++				t.Fatalf("median(%v) = %v, want %v", tc.values, got, tc.want)
++			}
++		})
++	}
++}
++
++// TestMeasureCostDoesNotMutateInput pins that the measure pass copies the
++// per-arm success samples instead of sorting the caller's rows.
++func TestMeasureCostDoesNotMutateInput(t *testing.T) {
++	tasks := []TaskPair{
++		{Name: "a", ColdSuccess: true, WarmSuccess: true, ColdTokens: 30, WarmTokens: 10},
++		{Name: "b", ColdSuccess: true, WarmSuccess: true, ColdTokens: 10, WarmTokens: 30},
++	}
++	before := append([]TaskPair(nil), tasks...)
++	_ = measureCost(tasks, ArmStats{Successes: 2, Tokens: 40}, ArmStats{Successes: 2, Tokens: 40})
++	for i := range tasks {
++		if tasks[i] != before[i] {
++			t.Fatalf("task %d mutated: %+v, want %+v", i, tasks[i], before[i])
++		}
++	}
++}
+diff --git a/internal/eval/harness.go b/internal/eval/harness.go
+index 4c661c9..3c93e93 100644
+--- a/internal/eval/harness.go
++++ b/internal/eval/harness.go
+@@ -136,7 +136,7 @@ func (h *Harness) Run(ctx context.Context, taskset TaskSet, model, provider stri
+ 		}
+ 	}
+ 
+-	decision := Decide(DecisionInput{Pairs: len(taskset.Tasks), Cold: cold, Warm: warm})
++	decision := Decide(DecisionInput{Pairs: len(taskset.Tasks), Cold: cold, Warm: warm, Tasks: pairs})
+ 	return Report{
+ 		Contract:  ReportContractVersion,
+ 		Taskset:   taskset.Name,
+@@ -150,6 +150,7 @@ func (h *Harness) Run(ctx context.Context, taskset TaskSet, model, provider stri
+ 		Gates:     decision.Gates,
+ 		Verdict:   decision.Verdict,
+ 		Reason:    decision.Reason,
++		Cost:      decision.Cost,
+ 		Constants: ReportConstants(),
+ 	}, nil
+ }
+diff --git a/internal/eval/report.go b/internal/eval/report.go
+index 8b5eb0d..526dbeb 100644
+--- a/internal/eval/report.go
++++ b/internal/eval/report.go
+@@ -45,6 +45,9 @@ type Report struct {
+ 	Gates     []GateResult `json:"gates"`
+ 	Verdict   string       `json:"verdict"`
+ 	Reason    string       `json:"reason"`
++	// Cost carries every cost measure separately. A single per-success ratio
++	// is never the only number a reader sees.
++	Cost      CostMeasures `json:"cost"`
+ 	Constants Constants    `json:"constants"`
+ }
+ 
+@@ -112,6 +115,15 @@ func (r Report) RenderMarkdown() string {
+ 	fmt.Fprintf(&b, "cold: %d successes, %d tokens, %d weighted interventions\n", r.Cold.Successes, r.Cold.Tokens, r.Cold.WeightedInterventions)
+ 	fmt.Fprintf(&b, "warm: %d successes, %d tokens, %d weighted interventions\n", r.Warm.Successes, r.Warm.Tokens, r.Warm.WeightedInterventions)
+ 
++	fmt.Fprintf(&b, "\n## Cost\n\n")
++	fmt.Fprintf(&b, "The cost gate decides on matched-success pairs (tasks both arms passed). ")
++	fmt.Fprintf(&b, "That is the only like-for-like comparison. The other measures are reported for context.\n\n")
++	fmt.Fprintf(&b, "| measure | cold | warm | warm/cold |\n| --- | ---: | ---: | ---: |\n")
++	fmt.Fprintf(&b, "| total spend | %d | %d | %.3f |\n", r.Cost.TotalCold, r.Cost.TotalWarm, r.Cost.TotalRatio())
++	fmt.Fprintf(&b, "| mean per success | %.0f | %.0f | %.3f |\n", r.Cost.MeanColdPerSuccess, r.Cost.MeanWarmPerSuccess, r.Cost.MeanRatio())
++	fmt.Fprintf(&b, "| median per success | %.0f | %.0f | %.3f |\n", r.Cost.MedianColdPerSuccess, r.Cost.MedianWarmPerSuccess, r.Cost.MedianRatio())
++	fmt.Fprintf(&b, "| matched-success pairs (%d) | %d | %d | %.3f |\n", r.Cost.MatchedPairs, r.Cost.MatchedCold, r.Cost.MatchedWarm, r.Cost.MatchedRatio())
++
+ 	var failed []TaskPair
+ 	for _, task := range r.Tasks {
+ 		if task.ColdError != "" || task.WarmError != "" {
+diff --git a/internal/eval/report_test.go b/internal/eval/report_test.go
+index 92536b6..f845193 100644
+--- a/internal/eval/report_test.go
++++ b/internal/eval/report_test.go
+@@ -20,7 +20,18 @@ func sampleReport() Report {
+ 		Tasks:     []TaskPair{{Name: "t", ColdSuccess: true, WarmSuccess: true, ColdTokens: 100, WarmTokens: 60}},
+ 		Gates:     []GateResult{{Name: "evidence", Passed: true}, {Name: "success", Passed: true}, {Name: "cost", Passed: true}, {Name: "burden", Passed: true}},
+ 		Verdict:   VerdictConclusive,
+-		Reason:    "warm wins: 40.0% fewer tokens at equal success",
++		Reason:    "warm wins: matched-pair cost 40.0% lower at equal-or-better success (matched 1000 to 600 over 8 pairs, total 1000 to 600, mean per success 125 to 75, median per success 125 to 75)",
++		Cost: CostMeasures{
++			TotalCold:            1000,
++			TotalWarm:            600,
++			MeanColdPerSuccess:   125,
++			MeanWarmPerSuccess:   75,
++			MedianColdPerSuccess: 125,
++			MedianWarmPerSuccess: 75,
++			MatchedPairs:         8,
++			MatchedCold:          1000,
++			MatchedWarm:          600,
++		},
+ 		Constants: ReportConstants(),
+ 	}
+ }
+@@ -36,7 +47,7 @@ func TestReportGoldenKeys(t *testing.T) {
+ 	if err := json.Unmarshal(data, &keys); err != nil {
+ 		t.Fatalf("unmarshal: %v", err)
+ 	}
+-	for _, want := range []string{"contract", "taskset", "model", "provider", "timestamp", "pairs", "cold", "warm", "tasks", "gates", "verdict", "reason", "constants"} {
++	for _, want := range []string{"contract", "taskset", "model", "provider", "timestamp", "pairs", "cold", "warm", "tasks", "gates", "verdict", "reason", "cost", "constants"} {
+ 		if _, ok := keys[want]; !ok {
+ 			t.Errorf("report JSON missing key %q: %s", want, data)
+ 		}
+@@ -45,7 +56,7 @@ func TestReportGoldenKeys(t *testing.T) {
+ 
+ func TestReportMarkdownContainsSections(t *testing.T) {
+ 	md := sampleReport().RenderMarkdown()
+-	for _, want := range []string{"## Verdict", "## Gates", "## Tasks", "## Arms", "## Constants", "warm wins"} {
++	for _, want := range []string{"## Verdict", "## Gates", "## Tasks", "## Arms", "## Cost", "## Constants", "warm wins"} {
+ 		if !strings.Contains(md, want) {
+ 			t.Errorf("markdown missing %q", want)
+ 		}
+diff --git a/internal/splice/cognition_cache_integration_test.go b/internal/splice/cognition_cache_integration_test.go
+index 9372b87..e8352cd 100644
+--- a/internal/splice/cognition_cache_integration_test.go
++++ b/internal/splice/cognition_cache_integration_test.go
+@@ -108,8 +108,16 @@ func TestPrepareStageInputOneSpawnPerUniqueCommit(t *testing.T) {
+ 	if err != nil {
+ 		t.Fatalf("prepareStageInput re-entry: %v", err)
+ 	}
+-	if prepared2.MemoryBundle == nil || len(prepared2.MemoryBundle.Observations) != 1 {
+-		t.Fatalf("re-entry expected 1 observation (single key), got %v", prepared2.MemoryBundle)
++	// Run-local replay guard: the first invocation delivered observation 1 to
++	// code_writer, so the re-entry (repair semantics: same stage, same run)
++	// must SUPPRESS it from prompt delivery even though the direct hit and
++	// its zero-spawn freshness memo still work. Suppression is delivery-level
++	// only — the git spawn count below proves retrieval stayed real.
++	if prepared2.MemoryBundle == nil || len(prepared2.MemoryBundle.Observations) != 0 {
++		t.Fatalf("re-entry expected the already-consumed observation to be suppressed, got %v", prepared2.MemoryBundle)
++	}
++	if got := tr.replaySuppressedCount(); got != 1 {
++		t.Fatalf("replay suppressed count = %d, want 1", got)
+ 	}
+ 	if got := runner.spawns; got != 0 {
+ 		t.Fatalf("git spawns on re-entry = %d, want 0 (memoized)", got)
+diff --git a/internal/splice/exemplar_mode.go b/internal/splice/exemplar_mode.go
+new file mode 100644
+index 0000000..192d0bf
+--- /dev/null
++++ b/internal/splice/exemplar_mode.go
+@@ -0,0 +1,66 @@
++package splice
++
++import (
++	"fmt"
++	"os"
++	"strings"
++)
++
++// ExemplarMode is the C1c ablation switch (report section 30): which memory
++// classes the miss path delivers. The default reproduces current behavior
++// exactly; the other modes exist for the 4-way ablation benchmark. The mode
++// is recorded on the trace so benchmark results group by mode.
++type ExemplarMode string
++
++const (
++	// ExemplarModeBoth delivers observations AND exemplars (today's behavior).
++	ExemplarModeBoth ExemplarMode = "both"
++	// ExemplarModeObsOnly delivers observations only.
++	ExemplarModeObsOnly ExemplarMode = "obs-only"
++	// ExemplarModeExemplarOnly delivers exemplars only (observations still
++	// serve the direct path; this mode governs the miss-path injection).
++	ExemplarModeExemplarOnly ExemplarMode = "exemplar-only"
++	// ExemplarModeNone delivers neither on the miss path.
++	ExemplarModeNone ExemplarMode = "none"
++	// ExemplarModeRetrieveNoPrompt runs full retrieval and records what was
++	// retrieved, but delivers NO cognition prose to the model. It measures
++	// control reuse (deterministic downstream effects of retrieval) with
++	// reasoning reuse (prompt text) removed. It is an ablation mode only.
++	ExemplarModeRetrieveNoPrompt ExemplarMode = "retrieve-no-prompt"
++)
++
++const exemplarModeEnv = "SPLICE_EXEMPLAR_MODE"
++
++// resolveExemplarMode reads the ablation mode from the environment. Unset or
++// empty means "both" (today's behavior, so the ablation is strictly opt-in).
++// An invalid value is a loud configuration error naming the offender: a
++// silently wrong mode would poison benchmark attribution.
++func resolveExemplarMode() (ExemplarMode, error) {
++	raw := strings.TrimSpace(os.Getenv(exemplarModeEnv))
++	switch ExemplarMode(raw) {
++	case "":
++		return ExemplarModeBoth, nil
++	case ExemplarModeBoth, ExemplarModeObsOnly, ExemplarModeExemplarOnly, ExemplarModeNone, ExemplarModeRetrieveNoPrompt:
++		return ExemplarMode(raw), nil
++	default:
++		return "", fmt.Errorf("%s: invalid exemplar mode %q (want one of both, obs-only, exemplar-only, none, retrieve-no-prompt)", exemplarModeEnv, raw)
++	}
++}
++
++// deliverObservations reports whether the mode includes miss-path
++// observations. retrieve-no-prompt retrieves observations (the retrieval
++// side effects and telemetry stay real) but never delivers them.
++func (m ExemplarMode) deliverObservations() bool {
++	return m == ExemplarModeBoth || m == ExemplarModeObsOnly
++}
++
++// deliverExemplars reports whether the mode retrieves miss-path exemplars.
++func (m ExemplarMode) deliverExemplars() bool {
++	return m == ExemplarModeBoth || m == ExemplarModeExemplarOnly || m == ExemplarModeRetrieveNoPrompt
++}
++
++// deliverToModel reports whether ANY cognition prose may reach the model.
++// retrieve-no-prompt is the only mode that retrieves without delivering.
++func (m ExemplarMode) deliverToModel() bool {
++	return m != ExemplarModeRetrieveNoPrompt
++}
+diff --git a/internal/splice/stage_input.go b/internal/splice/stage_input.go
+index 1df3f99..f75344a 100644
+--- a/internal/splice/stage_input.go
++++ b/internal/splice/stage_input.go
+@@ -235,10 +235,35 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
+ 		}
+ 
+ 		// C0: direct cognition fast path (retrieval only, never control flow).
++		// retrieve-no-prompt keeps the retrieval telemetry honest but strips
++		// the delivery: the miss path below runs and records what it found,
++		// while the bundle never reaches the stage input.
+ 		if direct, ok := p.tryDirectCognition(ctx, input, root); ok {
+-			input.MemoryBundle = &direct.bundle
+-			if p.Trace != nil {
+-				p.Trace.recordMemoryLookup(input.StageName, p.Iteration, "direct", direct.fresh, direct.stale)
++			if mode, modeErr := resolveExemplarMode(); modeErr != nil {
++				return schemas.HarnessStageInput{}, modeErr
++			} else if !mode.deliverToModel() {
++				if p.Trace != nil {
++					p.Trace.recordMemoryLookup(input.StageName, p.Iteration, "direct", direct.fresh, direct.stale)
++					p.Trace.recordMemory(input.StageName, p.Iteration, direct.bundle)
++				}
++			} else {
++				// Run-local replay guard: a direct hit the stage already
++				// consumed this run is NOT a retrieval miss. The hit still
++				// counts for telemetry, the bundle empties, and because the
++				// direct path returned true the broad search below is
++				// skipped: suppression must not push the same cognition back
++				// through FTS redelivery.
++				suppressed := p.Trace.filterAlreadyDelivered(input.StageName, &direct.bundle)
++				if suppressed > 0 {
++					emitProgress(p.Options, fmt.Sprintf("[%s] cognition: %d already-consumed item(s) suppressed on re-entry\n", input.StageName, suppressed))
++				}
++				if direct.bundle.Observations == nil && len(direct.bundle.Observations) == 0 {
++					direct.bundle.Observations = []schemas.MemoryObservation{}
++				}
++				input.MemoryBundle = &direct.bundle
++				if p.Trace != nil {
++					p.Trace.recordMemoryLookup(input.StageName, p.Iteration, "direct", direct.fresh, direct.stale)
++				}
+ 			}
+ 		} else {
+ 			bundle, mErr := p.Memory.Search(ctx, newMemoryQuery(input.StageName, input.RequestIntent, root))
+@@ -251,17 +276,47 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
+ 				}
+ 			} else {
+ 				bundle.RequestingAgent = input.StageName
+-				// PC3: append kept-run exemplars. Best-effort and silent on
+-				// failure; an empty exemplar set is correct, not a bug.
+-				if querier, ok := p.Memory.(learn.TraceQuerier); ok && querier != nil {
+-					if exemplars, eErr := retrieveExemplars(ctx, querier, root, input.RequestIntent); eErr == nil {
+-						bundle.Exemplars = exemplars
+-						if len(exemplars) > 0 {
+-							emitProgress(p.Options, fmt.Sprintf("exemplars: %d from kept runs\n", len(exemplars)))
++				// C1c D4: the ablation mode governs which memory classes the
++				// miss path delivers. The default (both) reproduces today's
++				// behavior; other modes exist for the benchmark only.
++				mode, modeErr := resolveExemplarMode()
++				if modeErr != nil {
++					return schemas.HarnessStageInput{}, modeErr
++				}
++				if mode.deliverExemplars() {
++					// PC3: append kept-run exemplars. Best-effort and silent on
++					// failure; an empty exemplar set is correct, not a bug.
++					if querier, ok := p.Memory.(learn.TraceQuerier); ok && querier != nil {
++						if exemplars, eErr := retrieveExemplars(ctx, querier, root, input.RequestIntent); eErr == nil {
++							bundle.Exemplars = exemplars
++							if len(exemplars) > 0 {
++								emitProgress(p.Options, fmt.Sprintf("exemplars: %d from kept runs\n", len(exemplars)))
++							}
+ 						}
+ 					}
+ 				}
++				if !mode.deliverObservations() {
++					bundle.Observations = nil
++				}
+ 				admitted := memoryreason.Admit(&bundle, root, p.NowUnix)
++				if !mode.deliverToModel() {
++					// retrieve-no-prompt: record what admission WOULD have
++					// delivered, then deliver nothing. The trace keeps the
++					// retrieval truth; the stage input stays cognition-free.
++					if p.Trace != nil && admitted.Bundle != nil {
++						p.Trace.recordMemory(input.StageName, p.Iteration, *admitted.Bundle)
++					}
++					bundle.Observations = nil
++					bundle.Exemplars = nil
++					admitted.Bundle = &bundle
++				}
++				// Run-local replay guard: items this stage already consumed
++				// earlier in the run are suppressed from delivery. Retrieval
++				// and admission ran for real (counts and miss-path telemetry
++				// stay honest); only the prompt replay is removed. Genuinely
++				// new cognition stays fully eligible (consumed-set semantics,
++				// not a memory-off switch).
++				p.Trace.filterAlreadyDelivered(input.StageName, admitted.Bundle)
+ 				input.MemoryBundle = admitted.Bundle
+ 				emitProgress(p.Options, admissionProgressLine(input.StageName, admitted))
+ 			}
+@@ -283,6 +338,12 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
+ 	if p.Trace != nil && input.MemoryBundle != nil {
+ 		p.Trace.recordMemory(input.StageName, p.Iteration, *input.MemoryBundle)
+ 	}
++	// Mark consumption AFTER compaction so only model-visible items enter the
++	// run-local consumed set: an item compaction dropped never reached the
++	// model and stays eligible for a later legitimate delivery.
++	if p.Trace != nil {
++		p.Trace.markDelivered(input.StageName, input.MemoryBundle)
++	}
+ 	return input, nil
+ }
+ 
+diff --git a/internal/splice/stage_input_wiring_test.go b/internal/splice/stage_input_wiring_test.go
+index 8c3bdba..f13d2af 100644
+--- a/internal/splice/stage_input_wiring_test.go
++++ b/internal/splice/stage_input_wiring_test.go
+@@ -177,10 +177,20 @@ func int64Ptr(n int64) *int64 { return &n }
+ type memoryScriptedProvider struct {
+ 	claims  []schemas.MemoryDisposition
+ 	request zeroruntime.CompletionRequest
++	// capturePayload optionally records each request's user-message content
++	// (the typed payload) for tests that need to assert on delivered memory.
++	capturePayload *[]string
+ }
+ 
+ func (p *memoryScriptedProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+ 	p.request = request
++	if p.capturePayload != nil {
++		for _, message := range request.Messages {
++			if strings.Contains(message.Content, `"intent"`) {
++				*p.capturePayload = append(*p.capturePayload, message.Content)
++			}
++		}
++	}
+ 	core := map[string]any{
+ 		"files": []schemas.FileChange{}, "language": "go",
+ 		"intent": "no changes", "confidence": 0.9,
+@@ -251,18 +261,28 @@ func TestRepairReentryRetrievesAndTracesEachMemoryInvocation(t *testing.T) {
+ 			break
+ 		}
+ 	}
+-	if len(writer.MemoryReviews) != 2 {
+-		t.Fatalf("writer reviews = %+v, want initial plus repair", writer.MemoryReviews)
++	// Run-local replay guard: the initial invocation delivered observation:8
++	// to code_writer, so the repair re-entry (same stage, same run) must
++	// suppress it from prompt delivery even though retrieval still ran. The
++	// repair invocation receives an EMPTY bundle, emits a nil review (nothing
++	// was delivered to reconcile), and mergeRepairRecord appends nothing:
++	// the record therefore carries exactly ONE model-visible review.
++	if len(writer.MemoryReviews) != 1 {
++		t.Fatalf("writer reviews = %+v, want exactly the initial invocation's review", writer.MemoryReviews)
+ 	}
+-	for i, review := range writer.MemoryReviews {
+-		if len(review.Items) != 1 || review.Items[0].MemoryID != "observation:8" {
+-			t.Fatalf("review %d = %+v", i, review)
+-		}
++	if len(writer.MemoryReviews[0].Items) != 1 || writer.MemoryReviews[0].Items[0].MemoryID != "observation:8" {
++		t.Fatalf("initial review = %+v", writer.MemoryReviews[0])
++	}
++	if got := tr.replaySuppressedCount(); got != 1 {
++		t.Fatalf("replay suppressed count = %d, want 1", got)
+ 	}
++	// Retrieval stayed real (2 searches) but delivery happened once: the
++	// delivered-memory counters count MODEL-VISIBLE items (one invocation's
++	// worth), not retrievals.
+ 	meta := tr.stages[stageKey{"code_writer", 1}]
+-	wantChars := 2 * (len(observation.Title) + len(observation.Content))
+-	if meta.MemoryItems != 2 || meta.MemoryChars != wantChars || tr.memoryItems != 2 || tr.memoryChars != wantChars {
+-		t.Fatalf("memory counters: meta=%+v total_items=%d total_chars=%d, want two invocations and %d chars", meta, tr.memoryItems, tr.memoryChars, wantChars)
++	wantChars := len(observation.Title) + len(observation.Content)
++	if meta.MemoryItems != 1 || meta.MemoryChars != wantChars || tr.memoryItems != 1 || tr.memoryChars != wantChars {
++		t.Fatalf("memory counters: meta=%+v total_items=%d total_chars=%d, want one delivered invocation and %d chars", meta, tr.memoryItems, tr.memoryChars, wantChars)
+ 	}
+ }
+ 
+diff --git a/internal/splice/stages/helpers.go b/internal/splice/stages/helpers.go
+index 8f6db94..44d7fc5 100644
+--- a/internal/splice/stages/helpers.go
++++ b/internal/splice/stages/helpers.go
+@@ -153,6 +153,12 @@ func candidatePaths(intent string) []string {
+ 	return seen
+ }
+ 
++// selectRelevantContext composes the model-visible context entries for one
++// stage request. Package F3 (warm-cost handoff Section 10): after assembly,
++// the composition passes through the shared dedup filter so static
++// instructions and prior-stage summaries repeated across requests are
++// delivered once. Required evidence, acceptance constraints, and active
++// failure evidence are protected by the filter and never removed.
+ func selectRelevantContext(static []string, prior map[string]string, context *schemas.ContextBundle, roster []string) []string {
+ 	selected := append([]string(nil), static...)
+ 	keys := make([]string, 0, len(prior))
+@@ -191,7 +197,65 @@ func selectRelevantContext(static []string, prior map[string]string, context *sc
+ 	if context != nil {
+ 		selected = append(selected, formatContextBundle(context)...)
+ 	}
+-	return selected
++	return dedupeRepeatedContext(selected)
++}
++
++// dedupeRepeatedContext removes exact-duplicate entries and static
++// instructions repeated across request compositions (F3). The filter is
++// content-addressed: two entries survive identically only when they are
++// byte-equal after trimming surrounding whitespace. Protected classes
++// (required evidence, acceptance constraints, active failure evidence) are
++// exempt: a repeated protected entry is delivered every time it appears.
++// Order is otherwise preserved, so composition stays deterministic and
++// byte-comparable.
++func dedupeRepeatedContext(entries []string) []string {
++	out := make([]string, 0, len(entries))
++	seen := map[string]int{}
++	for _, entry := range entries {
++		key := strings.TrimSpace(entry)
++		if key == "" {
++			continue
++		}
++		if isProtectedContextEntry(key) {
++			// Protected evidence survives every occurrence.
++			out = append(out, entry)
++			continue
++		}
++		if first, dup := seen[key]; dup {
++			// Byte-identical repeat: keep the first occurrence's position.
++			_ = first
++			continue
++		}
++		seen[key] = len(out)
++		out = append(out, entry)
++	}
++	return out
++}
++
++// isProtectedContextEntry reports whether an entry carries required
++// evidence, acceptance constraints, or active failure evidence. These
++// classes survive repeated-content removal (handoff Section 4: required
++// intent, acceptance constraints, active failure evidence, and source edit
++// preconditions survive prompt compaction).
++func isProtectedContextEntry(entry string) bool {
++	for _, marker := range protectedContextMarkers {
++		if strings.Contains(entry, marker) {
++			return true
++		}
++	}
++	return false
++}
++
++// protectedContextMarkers are the stable content markers of protected entry
++// classes. They match the composition formats in this file and the repair
++// evidence formats in repair.go.
++var protectedContextMarkers = []string{
++	"acceptance",
++	"failing",
++	"failure",
++	"error=",
++	"fingerprint",
++	"revision",
+ }
+ 
+ func formatContextBundle(bundle *schemas.ContextBundle) []string {
+diff --git a/internal/splice/trace.go b/internal/splice/trace.go
+index 09a5e50..47b5bcc 100644
+--- a/internal/splice/trace.go
++++ b/internal/splice/trace.go
+@@ -9,6 +9,7 @@ import (
+ 
+ 	"github.com/Taf0711/splice/internal/agent"
+ 	"github.com/Taf0711/splice/internal/splice/cognition"
++	"github.com/Taf0711/splice/internal/splice/memoryreason"
+ 	"github.com/Taf0711/splice/internal/splice/schemas"
+ )
+ 
+@@ -81,6 +82,27 @@ type runTraceAccumulator struct {
+ 	muSig          sync.Mutex
+ 	mutationSig    string
+ 	mutationSigSet bool
++
++	// Run-local cognition replay guard. deliveredMemory records the stable
++	// IDs of cognition items the model ACTUALLY received per consuming stage
++	// (post-admission, post-compaction), keyed (stage, memoryID). Repair
++	// re-entry shares this accumulator, so a stage that has already consumed
++	// an item does not receive it again during the same run: repair should
++	// react to new verifier and failure evidence, not re-read the same prior.
++	// The set lives and dies with the run (the accumulator is built fresh per
++	// splicerun.Run), so a new run starts with an empty consumed set.
++	muDelivered      sync.Mutex
++	deliveredMemory  map[deliveredMemoryKey]struct{}
++	replaySuppressed int
++}
++
++// deliveredMemoryKey identifies one cognition consumption: which stage
++// received which stable memory item. The same item stays deliverable to
++// other memory-consuming stages; only replay to the same stage is
++// suppressed.
++type deliveredMemoryKey struct {
++	StageName string
++	MemoryID  string
+ }
+ 
+ func newRunTraceAccumulator(store TraceStore, runID, sessionID, projectRoot string, plan schemas.ExecutionPlan, memoryStatus string, warnWriteFailure func(msg string)) *runTraceAccumulator {
+@@ -93,7 +115,93 @@ func newRunTraceAccumulator(store TraceStore, runID, sessionID, projectRoot stri
+ 		memoryStatus:     memoryStatus,
+ 		warnWriteFailure: warnWriteFailure,
+ 		stages:           make(map[stageKey]schemas.InputMeta),
++		deliveredMemory:  make(map[deliveredMemoryKey]struct{}),
++	}
++}
++
++// filterAlreadyDelivered removes every item the given stage has already
++// consumed earlier in this run from the bundle, in place. It is the run-local
++// replay guard: retrieval stays real (telemetry records what was retrieved),
++// but an item the model has already seen is suppressed from prompt delivery.
++// Observations are keyed by memoryreason.StableID (observation:<id>) and
++// exemplars by exemplar:<run_id>; content, rank, and retrieval path never
++// participate in the identity. Returns the number of items suppressed.
++func (tr *runTraceAccumulator) filterAlreadyDelivered(stageName string, bundle *schemas.MemoryBundle) int {
++	if tr == nil || bundle == nil || (len(bundle.Observations) == 0 && len(bundle.Exemplars) == 0) {
++		return 0
++	}
++	tr.muDelivered.Lock()
++	defer tr.muDelivered.Unlock()
++	suppressed := 0
++	kept := bundle.Observations[:0]
++	for _, obs := range bundle.Observations {
++		id := memoryreason.StableID(obs)
++		if id == "" {
++			// No stable identity: keep the item. Replay suppression keys on
++			// stable IDs only; an identity-less item cannot be recognized as
++			// a replay, and dropping it here would silently change delivery.
++			kept = append(kept, obs)
++			continue
++		}
++		key := deliveredMemoryKey{StageName: stageName, MemoryID: id}
++		if _, consumed := tr.deliveredMemory[key]; consumed {
++			suppressed++
++			continue
++		}
++		kept = append(kept, obs)
++	}
++	bundle.Observations = kept
++	keptEx := bundle.Exemplars[:0]
++	for _, ex := range bundle.Exemplars {
++		id := "exemplar:" + ex.RunID
++		key := deliveredMemoryKey{StageName: stageName, MemoryID: id}
++		if _, consumed := tr.deliveredMemory[key]; consumed {
++			suppressed++
++			continue
++		}
++		keptEx = append(keptEx, ex)
++	}
++	bundle.Exemplars = keptEx
++	tr.replaySuppressed += suppressed
++	return suppressed
++}
++
++// markDelivered records the stable IDs of the bundle a stage's invocation
++// FINALIZED as model-visible (after admission, replay filtering, and
++// compaction). Only model-visible items become consumed: an item that
++// admission rejected or compaction dropped never reached the model and
++// stays eligible for a later legitimate delivery.
++func (tr *runTraceAccumulator) markDelivered(stageName string, bundle *schemas.MemoryBundle) {
++	if tr == nil || bundle == nil {
++		return
++	}
++	if len(bundle.Observations) == 0 && len(bundle.Exemplars) == 0 {
++		return
++	}
++	tr.muDelivered.Lock()
++	defer tr.muDelivered.Unlock()
++	for _, obs := range bundle.Observations {
++		id := memoryreason.StableID(obs)
++		if id == "" {
++			continue
++		}
++		tr.deliveredMemory[deliveredMemoryKey{StageName: stageName, MemoryID: id}] = struct{}{}
++	}
++	for _, ex := range bundle.Exemplars {
++		tr.deliveredMemory[deliveredMemoryKey{StageName: stageName, MemoryID: "exemplar:" + ex.RunID}] = struct{}{}
++	}
++}
++
++// replaySuppressedCount reports how many cognition items this run suppressed
++// as replays. Test/debug seam for proving the mechanism fired; not written
++// into traces.
++func (tr *runTraceAccumulator) replaySuppressedCount() int {
++	if tr == nil {
++		return 0
+ 	}
++	tr.muDelivered.Lock()
++	defer tr.muDelivered.Unlock()
++	return tr.replaySuppressed
+ }
+ 
+ func (tr *runTraceAccumulator) noteStage(stage string, iteration int) {
+diff --git a/internal/tui/receipt_keys_test.go b/internal/tui/receipt_keys_test.go
+index 029f78a..7d9482c 100644
+--- a/internal/tui/receipt_keys_test.go
++++ b/internal/tui/receipt_keys_test.go
+@@ -11,6 +11,8 @@ package tui
+ import (
+ 	"context"
+ 	"encoding/json"
++	"os"
++	"path/filepath"
+ 	"strings"
+ 	"testing"
+ 	"time"
+@@ -282,6 +284,11 @@ func TestReceiptKeysInertBehindArmedHandoff(t *testing.T) {
+ func verifiedRunFixture(t *testing.T) model {
+ 	t.Helper()
+ 	m := mouseTestModel()
++	// The verified receipt advertises [E] export, and handleExportCommand
++	// resolves its default path against the model cwd. Point that cwd at a
++	// per-test temp dir so the test cannot write an artifact into the package
++	// directory (the origin of the tracked splice-transcript-*.txt files).
++	m.cwd = t.TempDir()
+ 	m.sessionStore = testSessionStore(t)
+ 	m.activeRunID = 7
+ 	m.width, m.height, m.altScreen = 100, 40, true
+@@ -351,6 +358,23 @@ func TestVerifiedReceiptExportResumeAndNoWorktreeOpen(t *testing.T) {
+ 	if !strings.Contains(transcriptText(exported.transcript), "export") {
+ 		t.Fatal("verified receipt: [E] produced no export ack")
+ 	}
++	// The default export path resolves against the model cwd. The fixture
++	// must not use the package directory (the test process cwd), or the
++	// suite writes splice-transcript-*.txt into the checkout.
++	packageDir, err := os.Getwd()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if filepath.Clean(exported.cwd) == filepath.Clean(packageDir) {
++		t.Fatalf("verified receipt fixture cwd is the package dir %q; export would litter the checkout", packageDir)
++	}
++	matches, err := filepath.Glob(filepath.Join(exported.cwd, "splice-transcript-*.txt"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(matches) != 1 {
++		t.Fatalf("verified receipt export wrote %d files under %q, want 1", len(matches), exported.cwd)
++	}
+ 	updated, _ = exported.Update(reviewRealShiftKey('R'))
+ 	resumed := updated.(model)
+ 	if resumed.picker == nil && resumed.input.Value() == "R" {
+diff --git a/internal/tui/splice-transcript-20260908-052331.txt b/internal/tui/splice-transcript-20260908-052331.txt
+deleted file mode 100644
+index 8908fc1..0000000
+--- a/internal/tui/splice-transcript-20260908-052331.txt
++++ /dev/null
+@@ -1,10 +0,0 @@
+-splice: {"plan_id":"plan-abc","status":"completed","completed_tasks":[{"task_id":"t1","run_id":"plan-abc-t1","status":"completed"},{"task_id":"t2","run_id":"plan-abc-t2","status":"completed"}]}
+-
+-error: VERIFIED (1m30s)
+-  [+] design plan plan-abc completed
+-  [+] 2 task(s) completed: t1, t2
+-  12,345 tok in · 678 tok out
+-[O] open diff
+-[E] export receipt
+-[R] resume
+-
+diff --git a/internal/tui/splice-transcript-20260908-052601.txt b/internal/tui/splice-transcript-20260908-052601.txt
+deleted file mode 100644
+index 8908fc1..0000000
+--- a/internal/tui/splice-transcript-20260908-052601.txt
++++ /dev/null
+@@ -1,10 +0,0 @@
+-splice: {"plan_id":"plan-abc","status":"completed","completed_tasks":[{"task_id":"t1","run_id":"plan-abc-t1","status":"completed"},{"task_id":"t2","run_id":"plan-abc-t2","status":"completed"}]}
+-
+-error: VERIFIED (1m30s)
+-  [+] design plan plan-abc completed
+-  [+] 2 task(s) completed: t1, t2
+-  12,345 tok in · 678 tok out
+-[O] open diff
+-[E] export receipt
+-[R] resume
+-
+diff --git a/internal/tui/splice-transcript-20260908-052641.txt b/internal/tui/splice-transcript-20260908-052641.txt
+deleted file mode 100644
+index 8908fc1..0000000
+--- a/internal/tui/splice-transcript-20260908-052641.txt
++++ /dev/null
+@@ -1,10 +0,0 @@
+-splice: {"plan_id":"plan-abc","status":"completed","completed_tasks":[{"task_id":"t1","run_id":"plan-abc-t1","status":"completed"},{"task_id":"t2","run_id":"plan-abc-t2","status":"completed"}]}
+-
+-error: VERIFIED (1m30s)
+-  [+] design plan plan-abc completed
+-  [+] 2 task(s) completed: t1, t2
+-  12,345 tok in · 678 tok out
+-[O] open diff
+-[E] export receipt
+-[R] resume
+-
+diff --git a/internal/tui/splice-transcript-20260908-052727.txt b/internal/tui/splice-transcript-20260908-052727.txt
+deleted file mode 100644
+index 8908fc1..0000000
+--- a/internal/tui/splice-transcript-20260908-052727.txt
++++ /dev/null
+@@ -1,10 +0,0 @@
+-splice: {"plan_id":"plan-abc","status":"completed","completed_tasks":[{"task_id":"t1","run_id":"plan-abc-t1","status":"completed"},{"task_id":"t2","run_id":"plan-abc-t2","status":"completed"}]}
+-
+-error: VERIFIED (1m30s)
+-  [+] design plan plan-abc completed
+-  [+] 2 task(s) completed: t1, t2
+-  12,345 tok in · 678 tok out
+-[O] open diff
+-[E] export receipt
+-[R] resume
+-

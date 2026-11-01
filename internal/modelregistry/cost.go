@@ -41,9 +41,13 @@ type CostBreakdown struct {
 	CachedInputCost   float64
 	CacheWriteCost    float64
 	OutputCost        float64
-	WebSearchCost     float64
-	TotalCost         float64
-	PricingTier       *ModelCostTier
+	// OutputFree marks that the model's output is explicitly known to bill
+	// at zero. It is provenance, not absence: downstream accounting must
+	// treat free output as complete pricing, never as an unpriced gap.
+	OutputFree    bool
+	WebSearchCost float64
+	TotalCost     float64
+	PricingTier   *ModelCostTier
 }
 
 func (registry Registry) EstimateCost(pattern string, usage zeroruntime.Usage) (CostBreakdown, error) {
@@ -68,7 +72,12 @@ func CalculateCost(model ModelEntry, usage zeroruntime.Usage) (CostBreakdown, er
 		return CostBreakdown{}, err
 	}
 	if reasoningTokens > outputTokens {
-		return CostBreakdown{}, fmt.Errorf("reasoning tokens %d exceeds output tokens %d", reasoningTokens, outputTokens)
+		// Unreachable through the normalization seam after the
+		// reasoning-exclusive reconciliation, but the cost arithmetic must
+		// not silently price an inverted subset: sum the counts the same
+		// way the seam does, so a direct caller with a raw exclusive report
+		// is billed for the work actually done.
+		outputTokens += reasoningTokens
 	}
 	webSearchRequests, err := nonNegativeUsage(usage.WebSearchRequests, "web search requests")
 	if err != nil {
@@ -141,6 +150,7 @@ func CalculateCost(model ModelEntry, usage zeroruntime.Usage) (CostBreakdown, er
 		CachedInputCost:   cachedInputCost,
 		CacheWriteCost:    cacheWriteCost,
 		OutputCost:        outputCost,
+		OutputFree:        model.Cost.OutputFree,
 		WebSearchCost:     webSearchCost,
 		TotalCost:         inputCost + cachedInputCost + cacheWriteCost + outputCost + webSearchCost,
 	}
@@ -228,6 +238,11 @@ func selectCostTier(cost ModelCost, inputTokens int) (*ModelCostTier, error) {
 }
 
 func costRates(cost ModelCost, tier *ModelCostTier) (float64, float64, float64, float64, error) {
+	if cost.Free {
+		// A free listing bills every token at zero. Validate has already
+		// rejected any non-zero rate or tier on it.
+		return 0, 0, 0, 0, nil
+	}
 	inputRate := cost.InputPerMillion
 	outputRate := cost.OutputPerMillion
 	cachedRate := cost.CachedInputPerMillion
@@ -241,8 +256,14 @@ func costRates(cost ModelCost, tier *ModelCostTier) (float64, float64, float64, 
 	if !validRate(inputRate) || inputRate == 0 {
 		return 0, 0, 0, 0, fmt.Errorf("missing model input pricing rate")
 	}
-	if !validRate(outputRate) || outputRate == 0 {
+	if !validRate(outputRate) {
+		return 0, 0, 0, 0, fmt.Errorf("invalid model output pricing rate")
+	}
+	if outputRate == 0 && !cost.OutputFree {
 		return 0, 0, 0, 0, fmt.Errorf("missing model output pricing rate")
+	}
+	if cost.OutputFree && outputRate > 0 {
+		return 0, 0, 0, 0, fmt.Errorf("model output is marked free but tier prices output at %g per million", outputRate)
 	}
 	if !validRate(cachedRate) {
 		return 0, 0, 0, 0, fmt.Errorf("invalid model cached input pricing rate")

@@ -4,14 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	zeroSandbox "github.com/Taf0711/splice/internal/sandbox"
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
 	"github.com/Taf0711/splice/internal/secrets"
 )
 
@@ -60,14 +61,21 @@ func NewScopedBashTool(workspaceRoot string, scope PathScope) Tool {
 }
 
 func (tool bashTool) Run(ctx context.Context, args map[string]any) Result {
-	return tool.run(ctx, args, nil)
+	return tool.run(ctx, args, RunOptions{})
 }
 
 func (tool bashTool) RunWithSandbox(ctx context.Context, args map[string]any, engine *zeroSandbox.Engine) Result {
-	return tool.run(ctx, args, engine)
+	return tool.run(ctx, args, RunOptions{Sandbox: engine})
 }
 
-func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroSandbox.Engine) Result {
+// RunWithOptions lets the registry pass live-output and tool-call context to
+// bash while still honoring the sandbox. Called when RunOptions are present.
+func (tool bashTool) RunWithOptions(ctx context.Context, args map[string]any, options RunOptions) Result {
+	return tool.run(ctx, args, options)
+}
+
+func (tool bashTool) run(ctx context.Context, args map[string]any, options RunOptions) Result {
+	engine := options.Sandbox
 	commandText, err := aliasedStringArg(args, []string{"command", "cmd", "script", "shell"}, "", true, false)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for bash: " + err.Error())
@@ -115,7 +123,7 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 	if commandEngine == nil && sandboxPermissions == SandboxPermissionsRequireEscalated {
 		meta["sandbox_permissions"] = string(SandboxPermissionsRequireEscalated)
 	}
-	command, plan, err := buildBashCommand(commandCtx, commandText, absoluteCwd, commandEngine)
+	command, plan, err := buildBashCommand(commandCtx, commandText, absoluteCwd, commandEngine, procrun.ProfileToolsBash)
 	if err != nil {
 		meta["exit_code"] = "-1"
 		return Result{
@@ -133,8 +141,13 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 	// streams, and the true size is counted for the truncation marker.
 	stdout := newBoundedBuffer(bashCaptureBudgetBytes, bashCaptureBudgetBytes)
 	stderr := newBoundedBuffer(bashCaptureBudgetBytes, bashCaptureBudgetBytes)
-	command.Stdout = stdout
-	command.Stderr = stderr
+	var snapshotEmit func(string)
+	if options.OnToolOutput != nil {
+		snapshotEmit = func(output string) {
+			options.OnToolOutput(OutputSnapshot{ToolCallID: options.ToolCallID, Output: output})
+		}
+	}
+	command.Stdout, command.Stderr = newShellSnapshotWriters(stdout, stderr, snapshotEmit)
 
 	// Kill the shell as a process group on timeout and bound the post-kill I/O
 	// wait, so a backgrounded child cannot outlive the command or hang Run().
@@ -251,43 +264,31 @@ func shellIssueBlockResult(issue shellIssue) Result {
 }
 
 // buildBashCommand returns the exec.Cmd and the sandbox plan for running
-// commandText. On Windows, when the command is not wrapped by the sandbox
-// engine (plan.Wrapped == false), it also overrides the child's raw command
-// line so commandText reaches cmd.exe unescaped; see
+// commandText. All process creation for the bash and exec_command tools goes
+// through the procrun runner, which builds the plan via the engine and emits
+// one audit record per spawn attempt. On Windows, when the command is not
+// wrapped by the sandbox engine (plan.Wrapped == false), it also overrides
+// the child's raw command line so commandText reaches cmd.exe unescaped; see
 // zeroSandbox.WindowsShellCommandLine for why that matters. The wrapped case
 // gets the same treatment inside the sandboxed runner process itself
 // (internal/sandbox/windows_process_windows.go), since that command line is
 // built there, not here.
-func buildBashCommand(ctx context.Context, commandText string, absoluteCwd string, engine *zeroSandbox.Engine) (*exec.Cmd, zeroSandbox.CommandPlan, error) {
+func buildBashCommand(ctx context.Context, commandText string, absoluteCwd string, engine *zeroSandbox.Engine, profileID string) (*exec.Cmd, zeroSandbox.CommandPlan, error) {
 	spec := zeroSandbox.CommandSpec{
 		Name: shellExecutable(),
 		Args: shellArguments(commandText),
 		Dir:  absoluteCwd,
 	}
-	if engine != nil {
-		command, plan, err := engine.CommandContext(ctx, spec)
-		if err == nil {
-			applyWindowsShellCommandLine(command, commandText, plan.Wrapped)
-		}
-		return command, plan, err
+	prepared, err := procrun.Prepare(ctx, procrun.Request{
+		ProfileID: profileID,
+		Spec:      spec,
+		Engine:    engine,
+	})
+	if err != nil {
+		return nil, zeroSandbox.CommandPlan{}, err
 	}
-	plan := zeroSandbox.CommandPlan{
-		Backend: zeroSandbox.Backend{
-			Name:    zeroSandbox.BackendUnavailable,
-			Message: "sandbox engine not provided",
-		},
-		Wrapped: false,
-		Name:    spec.Name,
-		Args:    spec.Args,
-		Dir:     spec.Dir,
-	}
-	command := exec.CommandContext(ctx, spec.Name, spec.Args...)
-	command.Dir = spec.Dir
-	// Escalated (non-sandboxed) commands inherit the process env by default.
-	// Scrub credential-bearing variables so the child cannot exfiltrate keys.
-	command.Env = secrets.ScrubChildEnv(os.Environ())
-	applyWindowsShellCommandLine(command, commandText, plan.Wrapped)
-	return command, plan, nil
+	applyWindowsShellCommandLine(prepared.Cmd, commandText, prepared.Plan.Wrapped)
+	return prepared.Cmd, prepared.Plan, nil
 }
 
 func addSandboxMeta(meta map[string]string, plan zeroSandbox.CommandPlan) {
@@ -421,11 +422,32 @@ func budgetBashOutput(stdout string, stderr string, meta map[string]string) (str
 // raw_bytes therefore reflects everything the command produced, not just what was
 // kept in memory.
 func budgetBashCapture(out string, outTotal int, errStr string, errTotal int, meta map[string]string) (string, string, bool) {
-	outText, outRaw, outTrunc := truncateHeadTailWithTotal(out, outTotal, bashOutputBudgetBytes)
-	errText, errRaw, errTrunc := truncateHeadTailWithTotal(errStr, errTotal, bashOutputBudgetBytes)
+	// Keep the captured text for the spill artifact before any reduction. A
+	// reduction defers content out of the transcript, so the recovery file must
+	// hold what the transcript no longer does.
+	rawOut, rawOutTotal := out, outTotal
+	rawErr, rawErrTotal := errStr, errTotal
+
+	// Reduce before truncation. Head+tail truncation is position-blind: it drops
+	// whatever sits in the middle, which for a unified diff is an arbitrary set
+	// of files and hunks. The budget below stays the hard backstop. The totals
+	// track the reduced text so meta's raw_bytes cannot overstate what was
+	// emitted.
+	reduced := false
+	if r := reduceOutputText("bash", out, meta); r != out {
+		out, outTotal, reduced = r, len(r), true
+	}
+	if r := reduceOutputText("bash", errStr, meta); r != errStr {
+		errStr, errTotal, reduced = r, len(r), true
+	}
+
+	outText, outRaw, outTrunc := truncateDiffStructurally(out, outTotal, bashOutputBudgetBytes)
+	errText, errRaw, errTrunc := truncateDiffStructurally(errStr, errTotal, bashOutputBudgetBytes)
 	truncated := outTrunc || errTrunc
-	if truncated {
-		if spillPath := spillBashStreams(out, outTotal, errStr, errTotal); spillPath != "" {
+	// Spill on truncation OR on reduction: both remove content from the
+	// transcript, so both need a recovery artifact.
+	if truncated || reduced {
+		if spillPath := spillBashStreams(rawOut, rawOutTotal, rawErr, rawErrTotal); spillPath != "" {
 			hint := "\n[splice] captured output saved to " + spillPath + " (grep or read_file it instead of re-running)"
 			if errTrunc {
 				errText += hint
@@ -491,9 +513,9 @@ func sectionWithCaptureGap(text string, total int) string {
 // a command emitting unbounded output (`cat huge.log`, `yes`) cannot grow Splice's
 // memory: the middle is discarded as it arrives instead of buffered whole and then
 // truncated. total records the full size for the truncation marker even though the
-// middle is never held. Not safe for concurrent writes; exec drives Stdout and
-// Stderr from separate goroutines, so each stream gets its own buffer.
+// middle is never held. The mutex permits live reads while exec writes the stream.
 type boundedBuffer struct {
+	mu      sync.Mutex
 	head    []byte
 	headCap int
 	tail    []byte
@@ -506,6 +528,8 @@ func newBoundedBuffer(headCap, tailCap int) *boundedBuffer {
 }
 
 func (b *boundedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	n := len(p)
 	b.total += n
 	// Fill the head until it reaches headCap; the head is written once and frozen.
@@ -533,6 +557,8 @@ func (b *boundedBuffer) Write(p []byte) (int, error) {
 // between head and tail lands in the middle, which the display budget trims away;
 // callers that need the true size read total separately.
 func (b *boundedBuffer) retained() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if len(b.tail) > b.tailCap {
 		// Not yet compacted since the last overflow; expose only the last tailCap.
 		return string(b.head) + string(b.tail[len(b.tail)-b.tailCap:])

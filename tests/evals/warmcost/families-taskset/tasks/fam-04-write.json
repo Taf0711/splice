@@ -1,0 +1,7 @@
+{
+  "name": "fam-04-write",
+  "phase": "write",
+  "prompt": "The Session struct serializes with Go's default field names. Give Session explicit JSON field tags in session.go: ID stays \"ID\", User stays \"User\", Created and LastSeen become \"Created\" and \"LastSeen\" (unchanged names, now explicit). The wire format must not change.",
+  "check": "grep -F -q 'json:\"' session.go || { echo 'precursor change missing' >&2; exit 1; }\ngo build ./... && go test -count=1 ./...",
+  "fixture": "fixture"
+}

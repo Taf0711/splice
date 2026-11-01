@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/Taf0711/splice/memd/store"
@@ -819,6 +821,147 @@ func TestSearch_LimitZeroClamps(t *testing.T) {
 	}
 }
 
+func TestLookupTopic_ExactMatch(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+
+	obs := baseObs("code_writer", "session refresh", "use context.Background for session renewal")
+	obs.TopicKey = ns("session-refresh")
+	obs.ProjectPath = ns("/repo/proj")
+	ins, err := s.UpsertObservation(ctx, obs)
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	results, truncated, err := s.LookupTopic(ctx, "/repo/proj", "code_writer", "project", "session-refresh", 5)
+	if err != nil {
+		t.Fatalf("LookupTopic: %v", err)
+	}
+	if len(results) != 1 || truncated {
+		t.Fatalf("got %d rows truncated=%v, want 1", len(results), truncated)
+	}
+	if results[0].ID != ins.ID {
+		t.Fatalf("id = %d, want %d", results[0].ID, ins.ID)
+	}
+}
+
+func TestLookupTopic_EmptyResultNotError(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+
+	results, truncated, err := s.LookupTopic(ctx, "/repo", "code_writer", "project", "nonexistent-key", 5)
+	if err != nil {
+		t.Fatalf("LookupTopic: %v", err)
+	}
+	if len(results) != 0 || truncated {
+		t.Fatalf("expected empty result, got %d truncated=%v", len(results), truncated)
+	}
+}
+
+func TestLookupTopic_DeletedExcluded(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+
+	obs := baseObs("code_writer", "deleted topic", "should be excluded")
+	obs.TopicKey = ns("will-be-deleted")
+	obs.ProjectPath = ns("/repo")
+	_, err := s.UpsertObservation(ctx, obs)
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	// Mark as deleted via direct SQL.
+	if _, err := s.DB().ExecContext(ctx, `UPDATE observations SET deleted_at = 1 WHERE topic_key = 'will-be-deleted'`); err != nil {
+		t.Fatalf("mark deleted: %v", err)
+	}
+
+	results, _, err := s.LookupTopic(ctx, "/repo", "code_writer", "project", "will-be-deleted", 5)
+	if err != nil {
+		t.Fatalf("LookupTopic: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("expected deleted to be excluded, got %d", len(results))
+	}
+}
+
+func TestLookupTopic_VisibilityRespectsPrivateOwn(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+
+	// Own private row should be visible.
+	own := baseObs("code_writer", "my private", "code_writer private")
+	own.TopicKey = ns("topic-x")
+	own.ProjectPath = ns("/repo")
+	own.Visibility = "private"
+	if _, err := s.UpsertObservation(ctx, own); err != nil {
+		t.Fatalf("upsert own: %v", err)
+	}
+	// Other agent's private row should NOT be visible.
+	other := baseObs("test_runner", "their private", "test_runner private")
+	other.TopicKey = ns("topic-x")
+	other.ProjectPath = ns("/repo")
+	other.Visibility = "private"
+	if _, err := s.UpsertObservation(ctx, other); err != nil {
+		t.Fatalf("upsert other: %v", err)
+	}
+
+	results, _, err := s.LookupTopic(ctx, "/repo", "code_writer", "project", "topic-x", 5)
+	if err != nil {
+		t.Fatalf("LookupTopic: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 (own private), got %d", len(results))
+	}
+	if results[0].OwnerAgent != "code_writer" {
+		t.Fatalf("expected own row, got %s", results[0].OwnerAgent)
+	}
+}
+
+func TestLookupTopic_ShareableOtherVisible(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+
+	other := baseObs("test_runner", "shared insight", "test_runner shared")
+	other.TopicKey = ns("topic-y")
+	other.ProjectPath = ns("/repo")
+	other.Visibility = "shareable"
+	if _, err := s.UpsertObservation(ctx, other); err != nil {
+		t.Fatalf("upsert shareable: %v", err)
+	}
+
+	results, _, err := s.LookupTopic(ctx, "/repo", "code_writer", "project", "topic-y", 5)
+	if err != nil {
+		t.Fatalf("LookupTopic: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 shareable row, got %d", len(results))
+	}
+}
+
+func TestLookupTopic_Truncation(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+
+	// The topic-key upsert merges rows sharing owner_agent + project + scope,
+	// so distinct owners (all shareable) yield three rows under one key.
+	for i := 0; i < 3; i++ {
+		obs := baseObs(fmt.Sprintf("owner-%d", i), fmt.Sprintf("dup %d", i), fmt.Sprintf("content %d", i))
+		obs.TopicKey = ns("many-rows")
+		obs.ProjectPath = ns("/repo")
+		obs.Visibility = "shareable"
+		if _, err := s.UpsertObservation(ctx, obs); err != nil {
+			t.Fatalf("upsert %d: %v", i, err)
+		}
+	}
+
+	results, truncated, err := s.LookupTopic(ctx, "/repo", "code_writer", "project", "many-rows", 2)
+	if err != nil {
+		t.Fatalf("LookupTopic: %v", err)
+	}
+	if len(results) != 2 || !truncated {
+		t.Fatalf("limit 2: got %d truncated=%v, want 2 true", len(results), truncated)
+	}
+}
+
 // TestMarkReviewed_NotFound verifies that marking a nonexistent id reports
 // ErrNotFound instead of silently succeeding (F-MR13).
 func TestMarkReviewed_NotFound(t *testing.T) {
@@ -828,5 +971,47 @@ func TestMarkReviewed_NotFound(t *testing.T) {
 	err := s.MarkReviewed(ctx, 424242)
 	if !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("MarkReviewed on missing id: err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestConcurrentOpen verifies that several simultaneous store.New calls against
+// one fresh database all succeed. A single Exec that switched to WAL before
+// setting busy_timeout let a concurrent cold opener fail immediately with
+// SQLITE_BUSY; the timeout must be installed on the connection first so openers
+// back off instead of failing. Launched behind a barrier so all openers contend
+// for the same fresh file at once, and repeated over several rounds.
+func TestConcurrentOpen(t *testing.T) {
+	const (
+		openers = 4
+		rounds  = 8
+	)
+
+	for round := 0; round < rounds; round++ {
+		dbPath := filepath.Join(t.TempDir(), "concurrent.db")
+
+		start := make(chan struct{})
+		results := make(chan error, openers)
+		var wg sync.WaitGroup
+		for i := 0; i < openers; i++ {
+			wg.Add(1)
+			go func(path string) {
+				defer wg.Done()
+				<-start
+				s, err := store.New(path)
+				if err == nil {
+					s.Close()
+				}
+				results <- err
+			}(dbPath)
+		}
+		close(start)
+		wg.Wait()
+		close(results)
+
+		for err := range results {
+			if err != nil {
+				t.Fatalf("round %d: concurrent store.New failed: %v", round, err)
+			}
+		}
 	}
 }

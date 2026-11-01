@@ -125,7 +125,7 @@ func backendLifecycleSnapshot(deps appDeps) (zerocommands.BackendLifecycleSnapsh
 		return zerocommands.BackendLifecycleSnapshot{}, fmt.Errorf("failed to resolve workspace: %w", err)
 	}
 
-	cfg, err := deps.resolveMCPConfig(cwd)
+	cfg, err := resolveWorkspaceMCPConfig(deps, cwd)
 	if err != nil {
 		return zerocommands.BackendLifecycleSnapshot{}, err
 	}
@@ -152,7 +152,7 @@ func backendDoctorReport(deps appDeps) (zerocommands.BackendDoctorReport, error)
 		return zerocommands.BackendDoctorReport{}, fmt.Errorf("failed to resolve workspace: %w", err)
 	}
 
-	cfg, err := deps.resolveMCPConfig(cwd)
+	cfg, err := resolveWorkspaceMCPConfig(deps, cwd)
 	if err != nil {
 		return zerocommands.BackendDoctorReport{}, err
 	}

@@ -5,17 +5,20 @@ import (
 	"os/exec"
 	"time"
 
+	"github.com/Taf0711/splice/internal/sandbox"
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
 	"github.com/Taf0711/splice/internal/tools"
 )
 
 // sarifTool runs an arbitrary SARIF-emitting scanner in the workspace.
 type sarifTool struct {
 	workspaceRoot string
+	sandbox       *sandbox.Engine
 }
 
 // NewSarifTool returns a Tool that runs a configurable SARIF scanner.
 func NewSarifTool(workspaceRoot string) tools.Tool {
-	return sarifTool{workspaceRoot: workspaceRoot}
+	return sarifTool{workspaceRoot: workspaceRoot, sandbox: procrun.NewStageEngine(workspaceRoot)}
 }
 
 func (t sarifTool) Name() string {
@@ -110,11 +113,24 @@ func (t sarifTool) Run(ctx context.Context, args map[string]any) tools.Result {
 		}
 	}
 
-	cmdArgs := append(scannerArgs, resolvedPaths...)
+	argv := append([]string{scannerPath}, scannerArgs...)
+	argv = append(argv, resolvedPaths...)
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, scannerPath, cmdArgs...)
-	cmd.Dir = t.workspaceRoot
+	prepared, cerr := procrun.Prepare(ctx, procrun.Request{
+		ProfileID:       procrun.ProfileSpliceDTools,
+		AllowedBinaries: procrun.StageBinaries,
+		Engine:          t.sandbox,
+		Spec:            sandbox.CommandSpec{Name: argv[0], Args: argv[1:], Dir: t.workspaceRoot},
+	})
+	if cerr != nil {
+		return tools.Result{
+			Status: tools.StatusError,
+			Output: "SARIF scanner is not installed or not available: " + cerr.Error(),
+		}
+	}
+	defer prepared.Plan.Cleanup()
+	cmd := prepared.Cmd
 
 	out, err := cmd.Output()
 	if ctx.Err() != nil {

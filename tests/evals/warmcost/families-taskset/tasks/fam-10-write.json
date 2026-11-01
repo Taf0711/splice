@@ -1,0 +1,7 @@
+{
+  "name": "fam-10-write",
+  "phase": "write",
+  "prompt": "Session ids arrive raw from query strings. Add ValidSessionID(id string) bool to session.go (2..64 chars, ASCII letters/digits/hyphens only) and enforce it in Store.Get (return a new ErrInvalidID) and in main.go's POST/GET branches (400). Document the rule in a comment on ValidSessionID.",
+  "check": "grep -F -q 'func ValidSessionID' session.go || { echo 'precursor change missing' >&2; exit 1; }\ngo build ./... && go test -count=1 ./...",
+  "fixture": "fixture"
+}

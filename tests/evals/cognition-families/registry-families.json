@@ -1,0 +1,86 @@
+{
+  "schema": "splice.eval.cognition-families-registry.v1",
+  "validated": "2026-09-04",
+  "families": [
+    {
+      "id": "fam-01-password-reset-invalidation",
+      "letters": "FPF",
+      "base": "F",
+      "gold": "P",
+      "wrong": "F",
+      "ok": true
+    },
+    {
+      "id": "fam-02-ttl-config-source",
+      "letters": "FPF",
+      "base": "F",
+      "gold": "P",
+      "wrong": "F",
+      "ok": true
+    },
+    {
+      "id": "fam-03-delete-idempotence",
+      "letters": "FPF",
+      "base": "F",
+      "gold": "P",
+      "wrong": "F",
+      "ok": true
+    },
+    {
+      "id": "fam-04-json-envelope-convention",
+      "letters": "FPF",
+      "base": "F",
+      "gold": "P",
+      "wrong": "F",
+      "ok": true
+    },
+    {
+      "id": "fam-05-handler-error-mapping",
+      "letters": "FPF",
+      "base": "F",
+      "gold": "P",
+      "wrong": "F",
+      "ok": true
+    },
+    {
+      "id": "fam-06-race-safety-rule",
+      "letters": "FPF",
+      "base": "F",
+      "gold": "P",
+      "wrong": "F",
+      "ok": true
+    },
+    {
+      "id": "fam-07-probe-test-style",
+      "letters": "FPF",
+      "base": "F",
+      "gold": "P",
+      "wrong": "F",
+      "ok": true
+    },
+    {
+      "id": "fam-08-toolchain-pin",
+      "letters": "FPF",
+      "base": "F",
+      "gold": "P",
+      "wrong": "F",
+      "ok": true
+    },
+    {
+      "id": "fam-09-healthz-schema",
+      "letters": "FPF",
+      "base": "F",
+      "gold": "P",
+      "wrong": "F",
+      "ok": true
+    },
+    {
+      "id": "fam-10-id-validation-rule",
+      "letters": "FPF",
+      "base": "F",
+      "gold": "P",
+      "wrong": "F",
+      "ok": true
+    }
+  ]
+}

@@ -1,0 +1,264 @@
+package presentation
+
+import (
+	"fmt"
+	"math"
+	"strings"
+)
+
+// NodeKind is the open set of execution node kinds. The known kinds are
+// constants; any non-empty uppercase-safe value is valid so future
+// topologies need no code change here.
+type NodeKind string
+
+const (
+	NodeKindWrite    NodeKind = "WRITE"
+	NodeKindAnalyze  NodeKind = "ANALYZE"
+	NodeKindSecurity NodeKind = "SECURITY"
+	NodeKindLint     NodeKind = "LINT"
+	NodeKindCustom   NodeKind = "CUSTOM"
+	NodeKindTest     NodeKind = "TEST"
+	NodeKindVerify   NodeKind = "VERIFY"
+	NodeKindReview   NodeKind = "REVIEW"
+)
+
+// Validate checks the kind format, not membership: non-empty and
+// uppercase-safe (letters, digits, underscores, starting with a letter).
+func (k NodeKind) Validate() error {
+	if k == "" {
+		return fmt.Errorf("node kind is required")
+	}
+	value := string(k)
+	for i, r := range value {
+		upper := r >= 'A' && r <= 'Z'
+		digit := r >= '0' && r <= '9'
+		underscore := r == '_'
+		if i == 0 && !upper {
+			return fmt.Errorf("node kind %q must start with an uppercase letter", k)
+		}
+		if !upper && !digit && !underscore {
+			return fmt.Errorf("node kind %q must be uppercase-safe (A-Z, 0-9, underscore), got %q", k, r)
+		}
+	}
+	return nil
+}
+
+// NodeStatus is the closed set of execution node lifecycle statuses.
+type NodeStatus string
+
+const (
+	NodeStatusPending  NodeStatus = "pending"
+	NodeStatusRunning  NodeStatus = "running"
+	NodeStatusComplete NodeStatus = "complete"
+	NodeStatusFailed   NodeStatus = "failed"
+	NodeStatusDegraded NodeStatus = "degraded"
+	// NodeStatusSkipped is a stage that ran and had nothing to check (for
+	// example no file in a language it knows). It is not pending: it will
+	// not run in this pass.
+	NodeStatusSkipped NodeStatus = "skipped"
+)
+
+// Validate reports an error for any value outside the closed set.
+func (s NodeStatus) Validate() error {
+	switch s {
+	case NodeStatusPending, NodeStatusRunning, NodeStatusComplete, NodeStatusFailed, NodeStatusDegraded, NodeStatusSkipped:
+		return nil
+	}
+	return fmt.Errorf("unknown node status %q", s)
+}
+
+// CostSummary is the monetary and token cost of one node.
+type CostSummary struct {
+	USD    float64 `json:"usd"`
+	Tokens int64   `json:"tokens"`
+	// Unpriced is true when at least one request of the node had no price.
+	// USD then counts only the priced requests and is a lower bound.
+	Unpriced bool `json:"unpriced,omitempty"`
+}
+
+// Validate checks non-negative, finite values.
+func (c CostSummary) Validate() error {
+	if math.IsNaN(c.USD) || math.IsInf(c.USD, 0) || c.USD < 0 {
+		return fmt.Errorf("cost usd must be finite and non-negative, got %v", c.USD)
+	}
+	if c.Tokens < 0 {
+		return fmt.Errorf("cost tokens must be non-negative, got %d", c.Tokens)
+	}
+	return nil
+}
+
+// TokenUsage is one node's token breakdown.
+type TokenUsage struct {
+	InputTokens     int64 `json:"input_tokens"`
+	OutputTokens    int64 `json:"output_tokens"`
+	CachedTokens    int64 `json:"cached_tokens"`
+	ReasoningTokens int64 `json:"reasoning_tokens"`
+}
+
+// Validate checks non-negative counts.
+func (u TokenUsage) Validate() error {
+	if u.InputTokens < 0 {
+		return fmt.Errorf("usage input_tokens must be non-negative, got %d", u.InputTokens)
+	}
+	if u.OutputTokens < 0 {
+		return fmt.Errorf("usage output_tokens must be non-negative, got %d", u.OutputTokens)
+	}
+	if u.CachedTokens < 0 {
+		return fmt.Errorf("usage cached_tokens must be non-negative, got %d", u.CachedTokens)
+	}
+	if u.ReasoningTokens < 0 {
+		return fmt.Errorf("usage reasoning_tokens must be non-negative, got %d", u.ReasoningTokens)
+	}
+	return nil
+}
+
+// UsageSummary aggregates token and cost usage for a node or the whole run.
+type UsageSummary struct {
+	InputTokens     int64                 `json:"input_tokens"`
+	OutputTokens    int64                 `json:"output_tokens"`
+	CachedTokens    int64                 `json:"cached_tokens"`
+	ReasoningTokens int64                 `json:"reasoning_tokens"`
+	CostUSD         float64               `json:"cost_usd"`
+	ByNode          map[string]TokenUsage `json:"by_node,omitempty"`
+}
+
+// Validate checks non-negative counts and a finite, non-negative cost.
+func (u UsageSummary) Validate() error {
+	if u.InputTokens < 0 {
+		return fmt.Errorf("usage input_tokens must be non-negative, got %d", u.InputTokens)
+	}
+	if u.OutputTokens < 0 {
+		return fmt.Errorf("usage output_tokens must be non-negative, got %d", u.OutputTokens)
+	}
+	if u.CachedTokens < 0 {
+		return fmt.Errorf("usage cached_tokens must be non-negative, got %d", u.CachedTokens)
+	}
+	if u.ReasoningTokens < 0 {
+		return fmt.Errorf("usage reasoning_tokens must be non-negative, got %d", u.ReasoningTokens)
+	}
+	if math.IsNaN(u.CostUSD) || math.IsInf(u.CostUSD, 0) || u.CostUSD < 0 {
+		return fmt.Errorf("usage cost_usd must be finite and non-negative, got %v", u.CostUSD)
+	}
+	for nodeID, breakdown := range u.ByNode {
+		if strings.TrimSpace(nodeID) == "" {
+			return fmt.Errorf("usage by_node has an empty node id")
+		}
+		if err := breakdown.Validate(); err != nil {
+			return fmt.Errorf("usage by_node[%s]: %w", nodeID, err)
+		}
+	}
+	return nil
+}
+
+// NodeRoute is the applied route of one node pass.
+type NodeRoute struct {
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Effort   string `json:"effort,omitempty"`
+	// InputBudget and OutputBudget are the applied token allowance.
+	InputBudget  int `json:"input_budget"`
+	OutputBudget int `json:"output_budget"`
+	// Escalated is true when run escalation chose the model, overriding the
+	// configured route or a node pin.
+	Escalated bool `json:"escalated,omitempty"`
+}
+
+// Validate checks non-negative budgets.
+func (r NodeRoute) Validate() error {
+	if r.InputBudget < 0 || r.OutputBudget < 0 {
+		return fmt.Errorf("route budget must be non-negative, got input %d output %d", r.InputBudget, r.OutputBudget)
+	}
+	return nil
+}
+
+// ExecutionNode is one node of the execution graph. Dependencies reference
+// other node IDs; the reducer preserves append order, so node ordering is
+// stable across applies.
+type ExecutionNode struct {
+	ID        string       `json:"id"`
+	Label     string       `json:"label"`
+	Kind      NodeKind     `json:"kind"`
+	Status    NodeStatus   `json:"status"`
+	Progress  float64      `json:"progress"`
+	Iteration int          `json:"iteration"`
+	Cost      CostSummary  `json:"cost"`
+	Usage     UsageSummary `json:"usage"`
+	// Dependencies names the upstream stages this node waits for. The reducer
+	// carries them into presentation state. The pipeline graph view model
+	// (internal/splice/presentrun.BuildGraph) reads them for the terminal
+	// graph and, later, the web viewer. Registered in internal/wiring.
+	Dependencies []string `json:"dependencies,omitempty"`
+	// Summary is the detail of the node's last terminal stage event: the
+	// stage summary, or the failure for a failed stage. A command node's
+	// summary names the command result.
+	Summary string `json:"summary,omitempty"`
+	// ChangedFiles are the files this node's latest completed stage reported
+	// changed. A node that completed with no changes has none.
+	ChangedFiles []string `json:"changed_files,omitempty"`
+	// Route is what the node applied on its latest start: the model the
+	// run sent, the fitted effort, and the budget after learned fits. It is
+	// nil until the node starts. A model-free node has a budget only.
+	Route *NodeRoute `json:"route,omitempty"`
+	// Workspace is the agent's isolation state (v0.5 agent_workspace,
+	// DoD 26): "isolated" (own worktree) or "shared_cwd" (authoritative
+	// working directory shared with other lanes). Empty projects as
+	// shared_cwd at render time; the runtime stamps the true value.
+	Workspace string `json:"workspace,omitempty"`
+	// WorktreePath is the isolated lane's worktree when Workspace is
+	// "isolated"; empty for shared-cwd nodes.
+	WorktreePath string `json:"worktree_path,omitempty"`
+}
+
+// Validate checks every field: required identifiers, kind format, closed
+// status, in-range progress, non-negative iteration and cost, and a closed
+// workspace set.
+func (n ExecutionNode) Validate() error {
+	if strings.TrimSpace(n.ID) == "" {
+		return fmt.Errorf("node id is required")
+	}
+	if strings.TrimSpace(n.Label) == "" {
+		return fmt.Errorf("node %s: label is required", n.ID)
+	}
+	if err := n.Kind.Validate(); err != nil {
+		return fmt.Errorf("node %s: %w", n.ID, err)
+	}
+	if err := n.Status.Validate(); err != nil {
+		return fmt.Errorf("node %s: %w", n.ID, err)
+	}
+	if math.IsNaN(n.Progress) || n.Progress < 0 || n.Progress > 1 {
+		return fmt.Errorf("node %s: progress must be within [0,1], got %v", n.ID, n.Progress)
+	}
+	if n.Iteration < 0 {
+		return fmt.Errorf("node %s: iteration must be non-negative, got %d", n.ID, n.Iteration)
+	}
+	if err := n.Cost.Validate(); err != nil {
+		return fmt.Errorf("node %s: %w", n.ID, err)
+	}
+	if err := n.Usage.Validate(); err != nil {
+		return fmt.Errorf("node %s: %w", n.ID, err)
+	}
+	if n.Route != nil {
+		if err := n.Route.Validate(); err != nil {
+			return fmt.Errorf("node %s: %w", n.ID, err)
+		}
+	}
+	seen := make(map[string]bool, len(n.Dependencies))
+	for _, dep := range n.Dependencies {
+		if strings.TrimSpace(dep) == "" {
+			return fmt.Errorf("node %s: dependency id must not be empty", n.ID)
+		}
+		if seen[dep] {
+			return fmt.Errorf("node %s: duplicate dependency %q", n.ID, dep)
+		}
+		seen[dep] = true
+	}
+	// Workspace is a closed set (v0.5 agent_workspace): empty means unset
+	// (the renderer projects shared_cwd); anything non-empty must be one of
+	// the two isolation states.
+	switch n.Workspace {
+	case "", "isolated", "shared_cwd":
+	default:
+		return fmt.Errorf("node %s: unknown workspace %q", n.ID, n.Workspace)
+	}
+	return nil
+}

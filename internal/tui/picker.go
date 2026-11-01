@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -26,6 +27,15 @@ const (
 	pickerSession
 	pickerTheme
 	pickerSkill
+	pickerTrust
+)
+
+// trustAction values identify the trust menu rows. They are stable keys the
+// picker passes to applyTrustPickerChoice.
+const (
+	trustActionCurrent = "trust-current"
+	trustActionParent  = "trust-parent"
+	trustActionDecline = "decline"
 )
 
 // pickerItem is one selectable row: Label is shown, Value is passed to the
@@ -45,6 +55,69 @@ type pickerItem struct {
 	Remote        bool
 	Local         bool
 	Favorite      bool
+
+	// Efforts is the reasoning-effort ring the model exposes, in ascending order.
+	// It drives the inline ←/→ effort control on the /model picker row: the ring
+	// length varies per model, so the rendered segment count is itself a signal of
+	// how much headroom a model has. Empty for models with no effort controls.
+	Efforts []modelregistry.ReasoningEffort
+	// EffortIndex points into Efforts. effortAuto (-1) means "auto" — Splice's
+	// empty-string effort, i.e. let the provider default apply.
+	EffortIndex int
+	// Cost carries the per-million rates for the price readout. Nil when the model
+	// has no pricing data (custom endpoints, local Ollama tags), which renders as
+	// "pricing unknown" rather than a misleading $0.
+	Cost *pickerCost
+	// Badge marks catalog status (preview/deprecated) for the row's asterisk and
+	// the legend under the list.
+	Badge pickerBadge
+	// LongContext reports that the model advertises the long-context
+	// capability. It is DISPLAY ONLY: the picker states the capability but
+	// offers no toggle, because no run configuration consumes a
+	// per-selection long-context request (review finding 15). A control
+	// whose selected state never reaches the runtime is removed, not left
+	// advertised. Restore a toggle only alongside real runtime semantics.
+	LongContext bool
+}
+
+// effortAuto is the EffortIndex value meaning "no explicit effort" — it maps to
+// Splice's empty-string reasoningEffort, so the provider default applies. It sits
+// one step below the first real effort so ← from the lowest tier reaches it.
+const effortAuto = -1
+
+// pickerCost is the subset of ModelCost the picker renders: the three rates a
+// user actually compares when choosing a model.
+type pickerCost struct {
+	InputPerMillion       float64
+	CachedInputPerMillion float64
+	OutputPerMillion      float64
+}
+
+// free reports whether every rate is zero, which renders as a single "Free" line
+// instead of the three-column price readout.
+func (c pickerCost) free() bool {
+	return c.InputPerMillion == 0 && c.CachedInputPerMillion == 0 && c.OutputPerMillion == 0
+}
+
+// pickerBadge is a row's catalog-status marker. Splice only badges what the
+// registry can actually back — preview and deprecated status — rather than
+// inventing promotional states it has no source for.
+type pickerBadge int
+
+const (
+	badgeNone pickerBadge = iota
+	badgeBeta
+	badgeDeprecated
+)
+
+func (b pickerBadge) label() string {
+	switch b {
+	case badgeBeta:
+		return "Beta"
+	case badgeDeprecated:
+		return "Deprecated"
+	}
+	return ""
 }
 
 // commandPicker is a generic single-select overlay reused by /model and /effort
@@ -388,8 +461,14 @@ func (m model) modelPickerDiscoveryCmds() tea.Cmd {
 // OAuth bearer for token-login providers (e.g. xAI).
 func (m model) modelPickerProviderDiscoveryCmd(descriptor providercatalog.Descriptor, profile config.ProviderProfile) tea.Cmd {
 	authed := profile
-	if store, err := config.ProviderKeyStore(); err == nil {
-		authed = config.ApplyStoredAPIKey(authed, store)
+	var credentialErr error
+	if authed.APIKeyStored {
+		store, err := config.ProviderKeyStore()
+		if err != nil {
+			credentialErr = fmt.Errorf("open API key store: %w", err)
+		} else {
+			authed, credentialErr = config.ApplyStoredAPIKey(authed, store)
+		}
 	}
 	key := strings.TrimSpace(authed.APIKey)
 	if key == "" && strings.TrimSpace(authed.APIKeyEnv) != "" {
@@ -404,13 +483,18 @@ func (m model) modelPickerProviderDiscoveryCmd(descriptor providercatalog.Descri
 	}
 	providerID := descriptor.ID
 	return func() tea.Msg {
+		if credentialErr != nil {
+			return modelPickerModelsDiscoveredMsg{providerID: providerID, err: credentialErr}
+		}
 		ctx, cancel := context.WithTimeout(m.ctx, 8*time.Second)
 		defer cancel()
 		k := key
 		if needOAuth {
-			if resolved := oauthStoredToken(ctx, providerID); resolved != "" {
-				k = resolved
+			resolved, err := oauthStoredToken(ctx, providerID)
+			if err != nil {
+				return modelPickerModelsDiscoveredMsg{providerID: providerID, err: err}
 			}
+			k = resolved
 		}
 		models, err := discover(ctx, providerWizardDiscoveryProfile(descriptor, k))
 		return modelPickerModelsDiscoveredMsg{providerID: providerID, models: models, err: err}
@@ -430,6 +514,25 @@ func (m *model) clearModelPickerLoadState() {
 func (m model) assembleModelPickerItems(recent []pickerItem, catalog []pickerItem) []pickerItem {
 	result := []pickerItem{}
 	seen := map[string]bool{}
+	// Enrich once, here, rather than in each of the four constructors: every model
+	// row funnels through this assembler, so the inline effort ring and price
+	// readout reach catalog, provider-catalog, and live-discovered rows alike.
+	activeModel := strings.TrimSpace(m.modelName)
+	enrich := func(items []pickerItem) []pickerItem {
+		out := make([]pickerItem, 0, len(items))
+		for _, item := range items {
+			item = m.enrichModelPickerItem(item)
+			if item.Value == activeModel {
+				// The row for the model already in use opens on the session's live
+				// effort, not the catalog default.
+				item.EffortIndex = m.activeModelEffortIndex(item)
+			}
+			out = append(out, item)
+		}
+		return out
+	}
+	recent = enrich(recent)
+	catalog = enrich(catalog)
 	all := append(append([]pickerItem{}, recent...), catalog...)
 	for _, item := range all {
 		if item.Value == "" || !m.favoriteModels[item.Value] || seen[item.Value] {
@@ -708,6 +811,44 @@ func (m model) ollamaContextWindowDiscoveryCmd(descriptor providercatalog.Descri
 	}
 }
 
+// ollamaCapabilitiesDiscoveredMsg carries the result of an async /api/show
+// capability probe against a local Ollama daemon (see
+// ollamaCapabilitiesDiscoveryCmd). A non-nil err (or Reported false) means the
+// probe found nothing authoritative and the registry is left untouched.
+type ollamaCapabilitiesDiscoveredMsg struct {
+	modelName string
+	caps      providermodeldiscovery.OllamaCapabilities
+	err       error
+}
+
+// ollamaCapabilitiesDiscoveryCmd probes a local Ollama daemon's native
+// /api/show endpoint for modelName's declared capabilities and applies the
+// surgical negative overlay: tool-calling is removed from the model's registry
+// entry only when the daemon reported a capability list that omitted it.
+// Scoped to the local Ollama provider only (catalog ID "ollama").
+func (m model) ollamaCapabilitiesDiscoveryCmd(descriptor providercatalog.Descriptor, baseURL string, modelName string) tea.Cmd {
+	if descriptor.ID != "ollama" {
+		return nil
+	}
+	modelName = strings.TrimSpace(modelName)
+	baseURL = strings.TrimSpace(baseURL)
+	if modelName == "" || baseURL == "" {
+		return nil
+	}
+	discover := m.discoverOllamaCapabilities
+	if discover == nil {
+		discover = func(ctx context.Context, baseURL string, model string) (providermodeldiscovery.OllamaCapabilities, error) {
+			return providermodeldiscovery.DiscoverOllamaCapabilities(ctx, baseURL, model, providermodeldiscovery.Options{})
+		}
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.ctx, 8*time.Second)
+		defer cancel()
+		caps, err := discover(ctx, baseURL, modelName)
+		return ollamaCapabilitiesDiscoveredMsg{modelName: modelName, caps: caps, err: err}
+	}
+}
+
 func (m model) normalizeProfileForProvider(provider providercatalog.Descriptor) config.ProviderProfile {
 	profile := m.providerProfile
 	normalizeIdentity := profileMatchesProviderBaseURL(profile, provider) ||
@@ -929,6 +1070,50 @@ func (m model) newThemePicker() *commandPicker {
 	// allItems lets the query filter restore rows on Backspace (one-way narrowing
 	// otherwise, since applyQuery falls back to the current items without it).
 	return &commandPicker{kind: pickerTheme, title: "select theme", items: items, allItems: append([]pickerItem{}, items...), selected: selected}
+}
+
+// trustStateLabel renders the effective trust state for the menu title.
+func (m model) trustStateLabel() string {
+	switch {
+	case m.trusted:
+		return "trusted"
+	case m.trustPromptRequired:
+		return "not decided"
+	default:
+		return "untrusted"
+	}
+}
+
+// newTrustPicker builds the live trust menu: show the current state and path in
+// the title and offer trust-current, trust-parent, and decline actions. It is
+// used both by the required first-run menu and by a later /trust invocation.
+func (m model) newTrustPicker() *commandPicker {
+	items := []pickerItem{
+		{Label: "Trust this folder", Value: trustActionCurrent, Meta: m.cwd},
+		{Label: "Trust parent folder", Value: trustActionParent, Meta: filepath.Dir(m.cwd)},
+		{Label: "Do not trust this folder", Value: trustActionDecline, Meta: "keep this session untrusted"},
+	}
+	// [V] view config (GAP-I): when an executable project config exists, the
+	// decision deserves its evidence. The row names what it does; it opens
+	// the config and returns to this menu (it is not a trust decision).
+	if cfg := describeProjectTrustConfig(m.projectTrustConfigPath()); !cfg.Empty() || cfg.ParseError != "" {
+		// Without a config.json, the row names the sibling files it describes.
+		// Judge by the file on disk: a config.json that exists but failed to
+		// resolve is still present.
+		meta := "no config.json; other project files found"
+		if cfg.ConfigFile {
+			meta = filepath.Base(cfg.Path)
+		}
+		items = append(items[:len(items)-1],
+			pickerItem{Label: "View what the project config would change", Value: trustActionView, Meta: meta},
+			items[len(items)-1])
+	}
+	selected := len(items) - 1
+	if m.trusted {
+		selected = 0
+	}
+	title := "Trust :: " + m.trustStateLabel() + " :: " + m.cwd
+	return &commandPicker{kind: pickerTrust, title: title, items: items, allItems: append([]pickerItem{}, items...), selected: selected}
 }
 
 // pickerMoved advances the open picker's cursor by delta and live-previews the new

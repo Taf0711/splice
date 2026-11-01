@@ -1,0 +1,7 @@
+{
+  "name": "chn-04-write",
+  "phase": "write",
+  "prompt": "In the billing package, add the currency \"GBP\" to the currencies customers can pay in.",
+  "check": "# chn-04 A\ncat > internal/billing/probe_gbp_test.go <<'EOF'\npackage billing\n\nimport (\n\t\"slices\"\n\t\"testing\"\n)\n\nfunc TestProbe(t *testing.T) {\n\tif !slices.Contains(Currencies, \"GBP\") {\n\t\tt.Fatal(\"Currencies lacks GBP\")\n\t}\n}\nEOF\ngo test -count=1 ./... ; rc=$?\nrm -f internal/billing/probe_gbp_test.go\nexit $rc\n",
+  "fixture": "../../chain-families/fixture-trap"
+}

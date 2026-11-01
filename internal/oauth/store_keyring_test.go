@@ -1,17 +1,24 @@
 package oauth
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
 
 // fakeKR is an in-memory KeyringClient for exercising the keyring backend
 // without touching a real OS keychain.
-type fakeKR struct{ data map[string]string }
+type fakeKR struct {
+	data   map[string]string
+	getErr error
+}
 
 func newFakeKR() *fakeKR { return &fakeKR{data: map[string]string{}} }
 
 func (f *fakeKR) Get(service, account string) (string, bool, error) {
+	if f.getErr != nil {
+		return "", false, f.getErr
+	}
 	v, ok := f.data[service+"/"+account]
 	return v, ok, nil
 }
@@ -24,6 +31,22 @@ func (f *fakeKR) Delete(service, account string) (bool, error) {
 	_, ok := f.data[key]
 	delete(f.data, key)
 	return ok, nil
+}
+
+func TestFirstStoredPropagatesKeyringReadError(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	cause := errors.New("keychain locked")
+	store, err := NewStore(StoreOptions{Storage: "keyring", Keyring: &fakeKR{data: map[string]string{}, getErr: cause}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, err = FirstStored(store, []string{"chatgpt"})
+	if !errors.Is(err, cause) {
+		t.Fatalf("error = %v, want wrapped keychain error", err)
+	}
+	if !strings.Contains(err.Error(), "keyring") || !strings.Contains(err.Error(), "provider:chatgpt") {
+		t.Fatalf("error = %q, want backend and key", err)
+	}
 }
 
 func TestStoreKeyringBackendRoundTrip(t *testing.T) {

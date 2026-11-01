@@ -8,7 +8,6 @@
 package tui
 
 import (
-	"fmt"
 	"strings"
 	"time"
 
@@ -344,9 +343,9 @@ func (m model) renderPlanSummaryLine(width int) string {
 		}
 	}
 	if state.isComplete() {
-		return zeroTheme.green.Render(fmt.Sprintf("✓ PLAN · %d/%d complete", done, total))
+		return zeroTheme.green.Render("✓ PLAN · " + formatDoneTotal(done, total) + " complete")
 	}
-	label := fmt.Sprintf("%s PLAN · %d/%d · ", m.spinnerGlyph(), done, total)
+	label := m.spinnerGlyph() + " PLAN · " + formatDoneTotal(done, total) + " · "
 	room := width - len([]rune(label)) - 1
 	if room < 4 {
 		room = 4
@@ -388,9 +387,9 @@ func renderPlanHeader(state planPanelState, spinnerView string, done, total int,
 		current = truncateStep(currentStepContent(state.steps), 40)
 	}
 	if state.isComplete() {
-		return zeroTheme.green.Render(fmt.Sprintf("✓ PLAN COMPLETE · %d/%d · %s", done, total, formatElapsedSeconds(elapsed)))
+		return zeroTheme.green.Render("✓ PLAN COMPLETE · " + formatDoneTotal(done, total) + " · " + formatElapsedSeconds(elapsed))
 	}
-	return zeroTheme.accent.Render(fmt.Sprintf("%s PLAN · %s · %d/%d · %s", spinnerView, current, done, total, formatElapsedSeconds(elapsed)))
+	return zeroTheme.accent.Render(spinnerView + " PLAN · " + current + " · " + formatDoneTotal(done, total) + " · " + formatElapsedSeconds(elapsed))
 }
 
 // renderPlanStepLine renders one step row: an indent, a status icon, the

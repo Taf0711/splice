@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -81,7 +80,7 @@ func (c tsTypeCheck) Run(ctx context.Context, req VerificationCheckRequest) (Ver
 	var out []byte
 	if req.RunTool != nil {
 		res, terr := req.RunTool(runCtx, "bash", map[string]any{
-			"command": command,
+			"command": shellJoin(command),
 			"cwd":     req.WorkDir,
 		})
 		if terr != nil {
@@ -106,8 +105,19 @@ func (c tsTypeCheck) Run(ctx context.Context, req VerificationCheckRequest) (Ver
 			}
 		}
 	} else {
-		cmd := exec.CommandContext(runCtx, command[0], command[1:]...)
-		cmd.Dir = req.WorkDir
+		cmd, plan, cerr := PrepareStageCommand(runCtx, req.Sandbox, req.WorkDir, command)
+		if cerr != nil {
+			return VerificationCheckResult{
+				ToolRun: schemas.VerificationToolRun{
+					Tool:     c.Name(),
+					Required: true,
+					Scope:    "quality",
+					Status:   schemas.VerificationIncomplete,
+					Summary:  fmt.Sprintf("TypeScript type check refused: %v", cerr),
+				},
+			}, nil
+		}
+		defer plan.Cleanup()
 		combined, rerr := cmd.CombinedOutput()
 		out = combined
 		if rerr != nil {

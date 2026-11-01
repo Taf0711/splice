@@ -392,7 +392,6 @@ func TestCalculateCostRejectsAllMalformedSubsets(t *testing.T) {
 	}{
 		{"cached exceeds input", zeroruntime.Usage{InputTokens: 10, CachedInputTokens: 15, OutputTokens: 5}, "cached input tokens"},
 		{"cache write plus cached exceeds input", zeroruntime.Usage{InputTokens: 100, CachedInputTokens: 60, CacheWriteTokens: 50, OutputTokens: 10}, "cache write tokens"},
-		{"reasoning exceeds output", zeroruntime.Usage{InputTokens: 100, OutputTokens: 10, ReasoningTokens: 20}, "reasoning tokens"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -421,5 +420,100 @@ func TestCalculateCostPricedZeroForKnownModelWithZeroUsage(t *testing.T) {
 	}
 	if cost.TotalCost != 0 {
 		t.Fatalf("total cost = %v, want 0 for zero usage", cost.TotalCost)
+	}
+}
+
+func TestCalculateCostAcceptsKnownFreeOutput(t *testing.T) {
+	// A decision model with documented free output must estimate cleanly at
+	// an output rate of zero, without tripping the missing-rate guard.
+	model := ModelEntry{
+		ID: "test-free-out", Provider: ProviderOpenAI,
+		Cost: ModelCost{Currency: "USD", InputPerMillion: 0.042, OutputPerMillion: 0, OutputFree: true},
+	}
+	cost, err := CalculateCost(model, zeroruntime.Usage{InputTokens: 2_000_000, OutputTokens: 500_000})
+	if err != nil {
+		t.Fatalf("CalculateCost with OutputFree: %v", err)
+	}
+	if cost.OutputCost != 0 {
+		t.Fatalf("output cost = %v, want 0 for a known-free output", cost.OutputCost)
+	}
+	assertClose(t, cost.TotalCost, 0.084)
+	if !cost.OutputFree {
+		t.Fatalf("breakdown must carry the free-output marker for provenance")
+	}
+}
+
+func TestCalculateCostRejectsFreeOutputContradiction(t *testing.T) {
+	model := ModelEntry{
+		ID: "test-free-contradiction", Provider: ProviderOpenAI,
+		Cost: ModelCost{Currency: "USD", InputPerMillion: 0.042, OutputPerMillion: 1, OutputFree: true},
+	}
+	_, err := CalculateCost(model, zeroruntime.Usage{InputTokens: 1_000, OutputTokens: 10})
+	if err == nil || !strings.Contains(err.Error(), "marked free") {
+		t.Fatalf("err = %v, want a contradiction error naming the free marker and the price", err)
+	}
+}
+
+func TestCalculateCostStillRejectsMissingOutputRate(t *testing.T) {
+	// Legacy zeros stay "missing" unless the entry explicitly marks the
+	// output free; wholesale reinterpretation would silently unprice
+	// models whose rate data is simply absent.
+	model := ModelEntry{
+		ID: "test-missing-out", Provider: ProviderOpenAI,
+		Cost: ModelCost{Currency: "USD", InputPerMillion: 0.042},
+	}
+	if _, err := CalculateCost(model, zeroruntime.Usage{InputTokens: 1_000, OutputTokens: 10}); err == nil || !strings.Contains(err.Error(), "missing model output pricing rate") {
+		t.Fatalf("err = %v, want the missing-rate error", err)
+	}
+}
+
+func TestCalculateCostReconcilesReasoningExclusiveReports(t *testing.T) {
+	// The cost arithmetic prices reconciled exclusive reports instead of
+	// rejecting them: reasoning 20 exclusive of output 10 is 30 billed
+	// output tokens.
+	model := ModelEntry{
+		ID:       "test-model",
+		Provider: ProviderOpenAI,
+		Cost: ModelCost{
+			Currency: "USD", Unit: "per_1m_tokens",
+			InputPerMillion: 1.0, OutputPerMillion: 2.0,
+		},
+	}
+	breakdown, err := CalculateCost(model, zeroruntime.Usage{InputTokens: 100, OutputTokens: 10, ReasoningTokens: 20})
+	if err != nil {
+		t.Fatalf("exclusive report must price: %v", err)
+	}
+	wantInput := 100.0 * 1.0 / 1_000_000
+	wantOutput := 30.0 * 2.0 / 1_000_000
+	if breakdown.InputCost != wantInput || breakdown.OutputCost != wantOutput {
+		t.Fatalf("cost = %v/%v, want %v/%v", breakdown.InputCost, breakdown.OutputCost, wantInput, wantOutput)
+	}
+}
+
+// A free listing prices every request at zero. Any non-zero rate on a free
+// listing is rejected, so the flag cannot hide a real price.
+func TestFreeListedModelPricesZero(t *testing.T) {
+	model := validModelEntry()
+	model.Cost.InputPerMillion = 0
+	model.Cost.OutputPerMillion = 0
+	model.Cost.Free = true
+
+	if err := model.Validate(); err != nil {
+		t.Fatalf("free listing Validate: %v", err)
+	}
+	if model.Cost.IsUnpriced() {
+		t.Fatal("free listing must not read as unpriced")
+	}
+	breakdown, err := CalculateCost(model, zeroruntime.Usage{InputTokens: 500, OutputTokens: 500})
+	if err != nil {
+		t.Fatalf("CalculateCost free listing: %v", err)
+	}
+	if breakdown.TotalCost != 0 {
+		t.Fatalf("free listing total = %v, want 0", breakdown.TotalCost)
+	}
+
+	model.Cost.OutputPerMillion = 1.6
+	if err := model.Validate(); err == nil {
+		t.Fatal("free listing with a positive output rate must be rejected")
 	}
 }

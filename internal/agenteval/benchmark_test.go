@@ -487,9 +487,9 @@ func TestWriteBenchmarkCSV(t *testing.T) {
 	if err := WriteBenchmarkCSV(&buf, report); err != nil {
 		t.Fatalf("WriteBenchmarkCSV returned error: %v", err)
 	}
-	want := "taskId,runner,requestedModel,modelsUsed,status,pass,inputTokens,outputTokens,cachedInputTokens,cacheWriteTokens,reasoningTokens,estimatedCostUSD,costCoverage,pricedUsageRecords,unpricedUsageRecords,errorUsageRecords,latencyMs,stageBreakdown\n" +
-		"task-a,splice_pipeline,gpt-4.1,\"gpt-4.1,gpt-4.1-mini\",pass,true,100,50,25,0,0,0.125000,complete,0,0,0,1200,\n" +
-		"task-b,external_command,claude-sonnet-4.5,,fail,false,10,5,0,0,0,0.750000,complete,0,0,0,300,\n"
+	want := "taskId,runner,requestedModel,modelsUsed,status,pass,inputTokens,outputTokens,cachedInputTokens,cacheWriteTokens,reasoningTokens,estimatedCostUSD,costCoverage,pricedUsageRecords,unpricedUsageRecords,errorUsageRecords,latencyMs,stageBreakdown,topologyName\n" +
+		"task-a,splice_pipeline,gpt-4.1,\"gpt-4.1,gpt-4.1-mini\",pass,true,100,50,25,0,0,0.125000,complete,0,0,0,1200,,\n" +
+		"task-b,external_command,claude-sonnet-4.5,,fail,false,10,5,0,0,0,0.750000,complete,0,0,0,300,,\n"
 	if buf.String() != want {
 		t.Fatalf("CSV = %q, want %q", buf.String(), want)
 	}

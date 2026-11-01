@@ -282,8 +282,9 @@ func TestStyleCommandListsAndSetsSessionPreference(t *testing.T) {
 	if next.responseStyle != "explanatory" {
 		t.Fatalf("expected explanatory style, got %q", next.responseStyle)
 	}
-	if !transcriptContains(next.transcript, "active style: explanatory") {
-		t.Fatalf("expected style switch transcript, got %#v", next.transcript)
+	// P15 ack grammar: the switch acks as one verb-column line.
+	if !transcriptContains(next.transcript, "balanced -> explanatory") {
+		t.Fatalf("expected style switch ack, got %#v", next.transcript)
 	}
 }
 
@@ -1219,5 +1220,19 @@ func anthropicTestProfile(modelID string) config.ProviderProfile {
 		BaseURL:      config.AnthropicBaseURL,
 		APIKey:       "sk-test",
 		Model:        modelID,
+	}
+}
+
+// TestSelfCorrectTextSaysTestsNeedTrust pins the notice: the project test
+// plan runs outside the sandbox, so /selfcorrect on does not run it in an
+// untrusted workspace, and the status says so.
+func TestSelfCorrectTextSaysTestsNeedTrust(t *testing.T) {
+	m := model{selfCorrectTests: true}
+	if text := m.selfCorrectText(); !strings.Contains(text, "until you trust this workspace") {
+		t.Fatalf("untrusted /selfcorrect status = %q, want the trust notice", text)
+	}
+	m.agentOptions.TrustedWorkspace = true
+	if text := m.selfCorrectText(); strings.Contains(text, "until you trust this workspace") || !strings.Contains(text, "project test plan") {
+		t.Fatalf("trusted /selfcorrect status = %q, want the test plan", text)
 	}
 }

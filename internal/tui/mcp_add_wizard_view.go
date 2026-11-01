@@ -13,10 +13,10 @@ func (m model) mcpAddWizardOverlay(width int) string {
 	if m.mcpAddWizard == nil {
 		return ""
 	}
-	return m.mcpAddWizard.render(width)
+	return m.mcpAddWizard.render(m, width)
 }
 
-func (wizard *mcpAddWizardState) render(width int) string {
+func (wizard *mcpAddWizardState) render(m model, width int) string {
 	if wizard == nil {
 		return ""
 	}
@@ -39,14 +39,23 @@ func (wizard *mcpAddWizardState) render(width int) string {
 	case mcpAddWizardStepHeader:
 		lines = append(lines, wizard.renderHeaderStep(innerWidth)...)
 	case mcpAddWizardStepConfirm:
+		// GAP-H staged card: the wizard facts + the staged contract body.
 		lines = append(lines, wizard.renderConfirmStep(innerWidth)...)
+		lines = append(lines, stagedAddFromWizard(m, wizard).renderLines(innerWidth)...)
 	case mcpAddWizardStepResult:
 		lines = append(lines, wizard.renderResultStep(innerWidth)...)
 	}
-	lines = append(lines,
-		zeroTheme.line.Render(strings.Repeat("-", innerWidth)),
-		zeroTheme.faint.Render(wizard.footer()),
-	)
+	if wizard.step == mcpAddWizardStepConfirm {
+		lines = append(lines,
+			zeroTheme.line.Render(strings.Repeat("-", innerWidth)),
+			fitStyledLine(zeroTheme.faint.Render(stagedAddFooter()), innerWidth),
+		)
+	} else {
+		lines = append(lines,
+			zeroTheme.line.Render(strings.Repeat("-", innerWidth)),
+			zeroTheme.faint.Render(wizard.footer()),
+		)
+	}
 	block := styledBlockFillTitle(overlayWidth, "Add MCP Server", lines, zeroTheme.lineStrong, lipgloss.NewStyle())
 	return centerRenderedBlock(block, width)
 }
@@ -103,6 +112,9 @@ func (wizard *mcpAddWizardState) renderHeaderStep(width int) []string {
 }
 
 func (wizard *mcpAddWizardState) renderConfirmStep(width int) []string {
+	// GAP-H: the confirm step renders the STAGED ADD contract (frame VCeGi):
+	// banner + will-run/adds/config/scope, keys in the footer. The wizard
+	// facts (server/type/source) stay as a compact header block above.
 	lines := []string{
 		zeroTheme.accent.Render("Review setup"),
 		"server: " + zeroTheme.ink.Render(wizard.serverName),
@@ -128,10 +140,7 @@ func (wizard *mcpAddWizardState) renderConfirmStep(width int) []string {
 			lines = append(lines, "  - "+zeroTheme.ink.Render(item))
 		}
 	}
-	lines = append(lines, "", zeroTheme.faint.Render("Enter saves and tests the server."))
-	for index, line := range lines {
-		lines[index] = fitStyledLine(line, width)
-	}
+	lines = append(lines, "")
 	return lines
 }
 

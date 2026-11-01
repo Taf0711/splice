@@ -748,3 +748,57 @@ func TestGeminiRequestOmitsToolChoiceWhenEmpty(t *testing.T) {
 		t.Fatalf("keyless request must omit toolConfig: %s", data)
 	}
 }
+
+// TestStreamCompletionCombinesRequestOutputCap pins the wire rule for the
+// per-request output cap on the Gemini generation config: the tighter of the
+// request cap and the configured default wins, a lone non-zero side wins.
+func TestStreamCompletionCombinesRequestOutputCap(t *testing.T) {
+	tests := []struct {
+		name       string
+		requestCap int
+		configured int
+		want       int
+	}{
+		{name: "request cap tighter", requestCap: 512, configured: 65536, want: 512},
+		{name: "configured default tighter", requestCap: 65536, configured: 8192, want: 8192},
+		{name: "request alone when default zero", requestCap: 512, configured: 0, want: 512},
+		{name: "default alone when request zero", requestCap: 0, configured: 65536, want: 65536},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotBody map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+					t.Fatalf("decode request body: %v", err)
+				}
+				writeSSE(w, `{}`)
+			}))
+			defer server.Close()
+
+			provider, err := New(Options{APIKey: "k", BaseURL: server.URL + "/", Model: "models/gemini-2.5-flash", MaxTokens: tt.configured})
+			if err != nil {
+				t.Fatalf("New returned error: %v", err)
+			}
+			stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+				Messages:        []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+				MaxOutputTokens: tt.requestCap,
+			})
+			if err != nil {
+				t.Fatalf("StreamCompletion returned error: %v", err)
+			}
+			drain(stream)
+
+			config, ok := gotBody["generationConfig"].(map[string]any)
+			if !ok {
+				t.Fatalf("generationConfig missing from request: %#v", gotBody)
+			}
+			got, ok := config["maxOutputTokens"]
+			if !ok {
+				t.Fatalf("maxOutputTokens missing from generationConfig: %#v", config)
+			}
+			if n, _ := got.(float64); int(n) != tt.want {
+				t.Fatalf("maxOutputTokens = %#v, want %d", got, tt.want)
+			}
+		})
+	}
+}

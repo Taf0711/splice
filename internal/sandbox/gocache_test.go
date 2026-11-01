@@ -134,3 +134,66 @@ func TestSandboxGoCacheDirectoryCreationFailureIsClear(t *testing.T) {
 		t.Fatalf("cache creation error = %v, want a clear cache directory error", err)
 	}
 }
+
+func TestSandboxGoCachePathSharesRepositoryAcrossWorktrees(t *testing.T) {
+	repo := t.TempDir()
+	gitDir := filepath.Join(repo, ".git")
+	if err := os.MkdirAll(gitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	worktree := filepath.Join(t.TempDir(), "task")
+	worktreeGitDir := filepath.Join(gitDir, "worktrees", "task")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(worktreeGitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeGitDir, "commondir"), []byte("../..\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+worktreeGitDir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	base, err := sandboxGoCachePath(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	linked, err := sandboxGoCachePath(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base != linked {
+		t.Fatalf("repository cache paths differ: base=%q worktree=%q", base, linked)
+	}
+}
+
+func TestSandboxGoCachePathSeparatesRepositoriesAndSupportsNonGit(t *testing.T) {
+	repoA := t.TempDir()
+	repoB := t.TempDir()
+	for _, repo := range []string{repoA, repoB} {
+		if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cacheA, err := sandboxGoCachePath(repoA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheB, err := sandboxGoCachePath(repoB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cacheA == cacheB {
+		t.Fatalf("different repositories share cache path %q", cacheA)
+	}
+	if _, err := sandboxGoCachePath(t.TempDir()); err != nil {
+		t.Fatalf("non-git workspace should still resolve cache path: %v", err)
+	}
+}

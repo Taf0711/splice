@@ -1,0 +1,7 @@
+{
+  "name": "fam-06-write",
+  "phase": "write",
+  "prompt": "Audit the locking in session.go: Get keeps Lock (it mutates LastSeen and can delete); ensure Len takes RLock; add a comment on each method stating which lock it takes and why. No behavior change; the audit comments plus any lock correction are the deliverable.",
+  "check": "grep -F -q 'RLock()' session.go || { echo 'precursor change missing' >&2; exit 1; }\ngo build ./... && go test -count=1 ./...",
+  "fixture": "fixture"
+}

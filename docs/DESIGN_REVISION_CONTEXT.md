@@ -1,61 +1,55 @@
-# Design Revision Context
+# Design revision context
 
-This document describes how design agents receive the current design plan and
-critique during a revision.
+A revision must retain the current plan, critique, and conversation. Otherwise,
+the next design response can repeat an issue that the critic already found.
 
-## Goal
+## Design epoch
 
-A design conversation agent must see the plan and the critique when the user
-revises a rejected design. Before this fix, the critique appeared on the
-screen but not in the agent request. Re-crystallization also lost that context.
+A design epoch starts when Splice enters design mode. It contains:
 
-## Sources
+- conversation events after that entry;
+- the latest plan in that epoch; and
+- the latest critique in that epoch.
 
-The context assembler reads three sources.
+A resumed session continues its current epoch. The first resumed message does
+not create a new epoch.
 
-- Current epoch conversation history (session events after the latest
-  `design_mode_entered`).
-- The latest persisted `DesignPlan` (from `plan_crystallized`).
-- The latest persisted `PlanCritique` (from `critique_recorded`).
+A new design-mode entry starts a new epoch. Plans and critiques from an older
+epoch do not become current state.
 
-The live TUI state can supply optional plan and critique overlays. The assembler keeps all plan and critique fields.
+## Saved and live state
 
-A resumed session continues its existing design epoch. The first resumed prompt does not create a new epoch.
+Splice reconstructs revision context from saved lifecycle events. The active TUI
+can also provide a live plan or critique that has not reached storage.
 
-## Precedence
+Live state has priority over saved state. Saved state remains the default after
+a restart.
 
-The assembler uses this precedence.
-
-1. Live overlays win over persisted values.
-2. Persisted values are the default.
-3. A new `design_mode_entered` event resets the epoch. It excludes earlier
-   plans and critiques from the current epoch.
+This order lets the current process continue after a storage error without
+pretending that the unsaved value will survive a restart.
 
 ## Consumers
 
-These paths consume the assembled context.
+The active design conversation receives the current conversation, plan, and
+critique.
 
-- The live design agent receives conversation messages as prior messages.
-- The live design agent receives the plan and critique in the system prompt.
-- The design crystallizer receives the plan and critique as structured input.
-- The plan critic receives the previous plan and previous critique.
+A new crystallization request receives the same plan and critique. The critic
+also receives the prior revision data that it needs for comparison.
+
+The orchestrator, not one design stage, assembles this context.
 
 ## Failure behavior
 
-A malformed lifecycle event returns a named error. The live turn and crystallization stop. Nothing silently defaults.
+A malformed lifecycle event stops state reconstruction with a named error.
+Splice does not discard the invalid event and continue with partial state.
 
-If a `critique_recorded` write fails, the live state keeps the critique. The
-assembler overlay carries it for the current process. Resume reads persisted
-events only.
+If Splice cannot save a critique, the current process can retain it as live
+state. A later process can reconstruct only the events that reached storage.
 
-## Acceptance tests
+## User effect
 
-- A TUI test proves the next provider request contains the full plan.
-- The same test checks each must-fix issue and mitigation string.
-- The test covers persisted state and a live persistence-failure overlay.
-- A resume test proves the first prompt keeps the plan and the critique.
-- A workflow test proves a second crystallizer request contains the current
-  plan and the current critique.
-- An assembler test proves the live overlay wins when persistence failed.
-- An assembler test proves a new epoch resets the plan and the critique.
-- An assembler test proves malformed lifecycle state returns a named error.
+After a rejected plan, revise the design in the same session and run
+`/crystallize` again. The new plan keeps its family identity and increases its
+revision number.
+
+Use `/design` when you intend to start a separate design epoch.

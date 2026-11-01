@@ -1,0 +1,7 @@
+{
+  "name": "fam-09-write",
+  "phase": "write",
+  "prompt": "/healthz currently answers {\"sessions\": N}. Give the health payload a stable schema: add a Status field (\"ok\") alongside sessions, so the response is {\"status\":\"ok\",\"sessions\":N}. Keep 200 always.",
+  "check": "grep -F -q '\"status\"' main.go || { echo 'precursor change missing' >&2; exit 1; }\ngo build ./... && go test -count=1 ./...",
+  "fixture": "fixture"
+}

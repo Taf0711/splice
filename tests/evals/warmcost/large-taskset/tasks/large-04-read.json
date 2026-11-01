@@ -1,0 +1,8 @@
+{
+  "name": "large-04-read",
+  "phase": "read",
+  "precursor": "large-04-write",
+  "prompt": "Add PlanChangeCost(fromPlan, toPlan string, daysLeft int) (int64, bool) in the billing package: the prorated charge of the new plan minus the old plan for the remaining days, and false when a plan name is unknown. Reuse ProrateDays and Lookup. Add a regression test.",
+  "check": "# large-04 B: Add PlanChangeCost(fromPlan, toPlan string, daysLeft int) (int64, bool\nmkdir -p internal/billing\ncat > internal/billing/probe_plan_change_test.go <<'EOF'\npackage billing\n\nimport \"testing\"\n\nfunc TestProbePlanChangeCost(t *testing.T) {\n\tgot, ok := PlanChangeCost(\"team\", \"scale\", 15)\n\tif !ok || got != 3500 {\n\t\tt.Fatalf(\"team->scale 15d = %d,%v, want 3500,true\", got, ok)\n\t}\n\tgot, ok = PlanChangeCost(\"scale\", \"team\", 7)\n\tif !ok || got != -1634 {\n\t\tt.Fatalf(\"scale->team 7d = %d,%v, want -1634,true\", got, ok)\n\t}\n\tif _, ok := PlanChangeCost(\"team\", \"gold\", 10); ok {\n\t\tt.Fatal(\"unknown plan must report false\")\n\t}\n}\nEOF\ngo test -count=1 ./internal/billing/ ; rc=$?\nrm -f internal/billing/probe_plan_change_test.go\nif [ $rc -ne 0 ]; then exit $rc; fi\nexit 0\n",
+  "fixture": "../../large-families/fixture"
+}

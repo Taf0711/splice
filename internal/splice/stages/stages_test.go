@@ -15,7 +15,11 @@ import (
 	"testing"
 
 	"github.com/Taf0711/splice/internal/config"
+	"github.com/Taf0711/splice/internal/projectdocs"
 	"github.com/Taf0711/splice/internal/providers"
+	"github.com/Taf0711/splice/internal/sandbox"
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
+	"github.com/Taf0711/splice/internal/splice/memoryreason"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/tools"
 	"github.com/Taf0711/splice/internal/zeroruntime"
@@ -87,6 +91,31 @@ func TestCodeWriterWritesFiles(t *testing.T) {
 	assertPipelineMetaPrompt(t, provider.request)
 }
 
+func TestStagePromptIncludesProjectInstructions(t *testing.T) {
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "AGENTS.md"), []byte("Use tabs for indentation."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output := schemas.CodeWriterOutput{Files: []schemas.FileChange{{Path: "main.go", Content: "package main\n", ChangeType: "create"}}, Language: "go", Intent: "create main", Confidence: 0.9}
+	args, _ := json.Marshal(output)
+	provider := &requestCapturingProvider{events: toolCallEvent("submit_code", string(args))}
+	if _, err := (CodeWriter{}).Run(context.Background(), newHarnessInput("create main"), provider, StageOptions{
+		WorkDir: workDir, Language: "go", ProjectInstructions: projectdocs.Load(workDir),
+	}); err != nil {
+		t.Fatalf("stage run: %v", err)
+	}
+	if !strings.Contains(provider.request.Messages[0].Content, "Use tabs for indentation.") {
+		t.Fatalf("system prompt omitted project instructions: %q", provider.request.Messages[0].Content)
+	}
+}
+
+func TestComposeSystemPromptWithoutProjectInstructionsIsByteIdentical(t *testing.T) {
+	want := spliceOverviewPrompt + "\n\n" + pipelineMetaPrompt + "\n\nSTAGE BODY"
+	if got := composeSystemPrompt("STAGE BODY"); got != want {
+		t.Fatalf("prompt changed without project instructions: got %q want %q", got, want)
+	}
+}
+
 func registryRunTool(t *testing.T, workDir string) func(context.Context, string, map[string]any) (ToolResult, error) {
 	t.Helper()
 	registry := tools.NewRegistry()
@@ -95,6 +124,28 @@ func registryRunTool(t *testing.T, workDir string) func(context.Context, string,
 	return func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
 		res := registry.RunWithOptions(ctx, name, args, tools.RunOptions{PermissionGranted: true})
 		return ToolResult{OK: res.Status == tools.StatusOK, Output: res.Output}, nil
+	}
+}
+
+const bashCommandMustBeString = "Error: Invalid arguments for bash: command must be a string"
+
+// schemaEnforcingBashRunTool rejects a non-string bash command the same way
+// the real bash tool does, then calls next. Quality-check tests use this so a
+// []string command cannot hide behind a permissive mock.
+func schemaEnforcingBashRunTool(next func(context.Context, string, map[string]any) (ToolResult, error)) func(context.Context, string, map[string]any) (ToolResult, error) {
+	return func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
+		if name == "bash" {
+			if _, ok := args["command"].(string); !ok {
+				return ToolResult{OK: false, Output: bashCommandMustBeString}, nil
+			}
+		}
+		if next == nil {
+			if name == "bash" {
+				return ToolResult{OK: true}, nil
+			}
+			return ToolResult{OK: false, Output: name + " is not installed or not available"}, nil
+		}
+		return next(ctx, name, args)
 	}
 }
 
@@ -109,16 +160,23 @@ func TestSelectMemoryNilForNilBundle(t *testing.T) {
 
 func TestSelectMemoryTruncatesContentOver500Runes(t *testing.T) {
 	long := strings.Repeat("界", 501)
+	project := "/repo"
 	bundle := &schemas.MemoryBundle{
 		RequestingAgent: "x",
 		Observations: []schemas.MemoryObservation{{
-			Title:      "long note",
-			Content:    long,
-			MemoryType: "note",
-			Scope:      "project",
+			ID:          9,
+			ProjectPath: &project,
+			Scope:       "project",
+			OwnerAgent:  "splice",
+			Visibility:  "shareable",
+			Title:       "long note",
+			Content:     long,
+			MemoryType:  "note",
 		}},
 	}
-	got := selectMemory(bundle)
+	// Truncation is an admission concern now: admit, then select.
+	admitted := memoryreason.Admit(bundle, "/repo", 0)
+	got := selectMemory(admitted.Bundle)
 	if len(got) != 1 {
 		t.Fatalf("expected 1 selected observation, got %d", len(got))
 	}
@@ -128,6 +186,32 @@ func TestSelectMemoryTruncatesContentOver500Runes(t *testing.T) {
 	}
 	if !strings.HasSuffix(got[0].Content, "...") {
 		t.Fatalf("expected truncation suffix, got %q", got[0].Content)
+	}
+}
+
+func TestSelectMemoryRendersExemplars(t *testing.T) {
+	bundle := &schemas.MemoryBundle{
+		RequestingAgent: "x",
+		Observations: []schemas.MemoryObservation{{
+			Title: "note", Content: "body", MemoryType: "note", Scope: "project",
+		}},
+		Exemplars: []schemas.Exemplar{
+			{RunID: "run-1", Content: "intent: add a Hello function"},
+		},
+	}
+	got := selectMemory(bundle)
+	if len(got) != 2 {
+		t.Fatalf("expected 1 observation + 1 exemplar = 2 items, got %d", len(got))
+	}
+	exemplar := got[1]
+	if exemplar.MemoryType != "exemplar" {
+		t.Fatalf("memory_type = %q, want exemplar", exemplar.MemoryType)
+	}
+	if exemplar.RunID != "run-1" {
+		t.Fatalf("run_id = %q, want run-1", exemplar.RunID)
+	}
+	if exemplar.Content != "intent: add a Hello function" {
+		t.Fatalf("content = %q", exemplar.Content)
 	}
 }
 
@@ -203,7 +287,7 @@ func (provider *retryScriptProvider) StreamCompletion(_ context.Context, request
 }
 
 func TestValidatedToolUseRetriesContractFailuresAndAccumulatesUsage(t *testing.T) {
-	valid := schemas.CodeWriterOutput{Files: []schemas.FileChange{}, Language: "go", Intent: "no changes", Confidence: 0.9}
+	valid := schemas.CodeWriterOutput{Files: []schemas.FileChange{{Path: "main.go", ChangeType: "create", Content: "package main\n"}}, Language: "go", Intent: "no changes", Confidence: 0.9}
 	validArgs, _ := json.Marshal(valid)
 	provider := &retryScriptProvider{scripts: [][]zeroruntime.StreamEvent{
 		{
@@ -214,7 +298,7 @@ func TestValidatedToolUseRetriesContractFailuresAndAccumulatesUsage(t *testing.T
 		append([]zeroruntime.StreamEvent{{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 6, OutputTokens: 5, CachedInputTokens: 2, CacheWriteTokens: 1, ReasoningTokens: 3}}}, toolCallEvent(codeWriterToolName, string(validArgs))...),
 	}}
 
-	collected, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(), nil, func(collected *zeroruntime.CollectedStream) error {
+	collected, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, []zeroruntime.ToolDefinition{submitCodeToolDefinition()}, 0, nil, func(collected *zeroruntime.CollectedStream) error {
 		_, err := parseCodeWriterOutput(collected)
 		return err
 	}, "")
@@ -238,13 +322,13 @@ func TestValidatedToolUseRetriesContractFailuresAndAccumulatesUsage(t *testing.T
 
 func TestValidatedToolUseRetriesSchemaInvalidArguments(t *testing.T) {
 	invalid := `{"files":[],"language":"","intent":"","confidence":2}`
-	valid := schemas.CodeWriterOutput{Files: []schemas.FileChange{}, Language: "go", Intent: "no changes", Confidence: 0.9}
+	valid := schemas.CodeWriterOutput{Files: []schemas.FileChange{{Path: "main.go", ChangeType: "create", Content: "package main\n"}}, Language: "go", Intent: "no changes", Confidence: 0.9}
 	validArgs, _ := json.Marshal(valid)
 	provider := &retryScriptProvider{scripts: [][]zeroruntime.StreamEvent{
 		toolCallEvent(codeWriterToolName, invalid),
 		toolCallEvent(codeWriterToolName, string(validArgs)),
 	}}
-	_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(), nil, func(collected *zeroruntime.CollectedStream) error {
+	_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, []zeroruntime.ToolDefinition{submitCodeToolDefinition()}, 0, nil, func(collected *zeroruntime.CollectedStream) error {
 		_, err := parseCodeWriterOutput(collected)
 		return err
 	}, "")
@@ -253,6 +337,44 @@ func TestValidatedToolUseRetriesSchemaInvalidArguments(t *testing.T) {
 	}
 	if len(provider.requests) != 2 || !strings.Contains(provider.requests[1].Messages[1].Content, "language is required") {
 		t.Fatalf("schema-invalid retry requests = %#v", provider.requests)
+	}
+}
+
+// TestValidatedToolUseUsageMatchesStreamCallbacks pins the retry accounting:
+// the accumulated stage usage (usageFromCollected over the summed total) must
+// equal the per-stream usage-callback sum (the ledger's view). A validation
+// retry (fail once, then succeed) must not diverge, or applyRequestLedger trips.
+func TestValidatedToolUseUsageMatchesStreamCallbacks(t *testing.T) {
+	valid := schemas.CodeWriterOutput{Files: []schemas.FileChange{{Path: "main.go", ChangeType: "create", Content: "package main\n"}}, Language: "go", Intent: "no changes", Confidence: 0.9}
+	validArgs, _ := json.Marshal(valid)
+	provider := &retryScriptProvider{scripts: [][]zeroruntime.StreamEvent{
+		{
+			{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 4, OutputTokens: 3, ReasoningTokens: 1}},
+			{Type: zeroruntime.StreamEventDone},
+		},
+		append([]zeroruntime.StreamEvent{{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 5, OutputTokens: 4, ReasoningTokens: 2}}}, toolCallEvent(codeWriterToolName, string(validArgs))...),
+	}}
+
+	var ledgerIn, ledgerOut, ledgerReasoning int
+	callbacks := &zeroruntime.CollectOptions{
+		OnUsageResult: func(u zeroruntime.Usage, _ bool, _ *float64, _ string, _ bool) {
+			ledgerIn += u.EffectiveInputTokens()
+			ledgerOut += u.EffectiveOutputTokens()
+			ledgerReasoning += u.ReasoningTokens
+		},
+	}
+
+	collected, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, []zeroruntime.ToolDefinition{submitCodeToolDefinition()}, 0, callbacks, func(c *zeroruntime.CollectedStream) error {
+		_, e := parseCodeWriterOutput(c)
+		return e
+	}, "")
+	if err != nil {
+		t.Fatalf("callValidatedToolUse: %v", err)
+	}
+
+	usage := usageFromCollected(collected)
+	if usage.InputTokens != ledgerIn || usage.OutputTokens != ledgerOut || usage.ReasoningTokens != ledgerReasoning {
+		t.Fatalf("stage usage %+v diverges from stream-callback sum {in:%d out:%d reasoning:%d}", usage, ledgerIn, ledgerOut, ledgerReasoning)
 	}
 }
 
@@ -283,7 +405,7 @@ func TestCodeWriterDoesNotRetryApplicationFailure(t *testing.T) {
 
 func TestValidatedToolUseDoesNotRetryTransportErrors(t *testing.T) {
 	provider := &retryScriptProvider{errs: []error{errors.New("connection refused")}}
-	_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(), nil, func(*zeroruntime.CollectedStream) error { return nil }, "")
+	_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, []zeroruntime.ToolDefinition{submitCodeToolDefinition()}, 0, nil, func(*zeroruntime.CollectedStream) error { return nil }, "")
 	if err == nil || !strings.Contains(err.Error(), "connection refused") {
 		t.Fatalf("transport error = %v", err)
 	}
@@ -296,7 +418,7 @@ func TestValidatedToolUseDoesNotRetryCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	provider := &retryScriptProvider{}
-	_, err := callValidatedToolUse(ctx, provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(), nil, func(*zeroruntime.CollectedStream) error { return errors.New("invalid") }, "")
+	_, err := callValidatedToolUse(ctx, provider, "qwen-local", "", "system", "payload", nil, []zeroruntime.ToolDefinition{submitCodeToolDefinition()}, 0, nil, func(*zeroruntime.CollectedStream) error { return errors.New("invalid") }, "")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancellation error = %v", err)
 	}
@@ -305,13 +427,53 @@ func TestValidatedToolUseDoesNotRetryCancellation(t *testing.T) {
 	}
 }
 
+func TestValidatedToolUseForcedChoiceFallbackIsBoundedAndNarrow(t *testing.T) {
+	t.Run("repeated rejection aborts after one fallback", func(t *testing.T) {
+		provider := &retryScriptProvider{scripts: [][]zeroruntime.StreamEvent{
+			{{Type: zeroruntime.StreamEventError, Error: "provider request error: Provider returned error"}},
+			{{Type: zeroruntime.StreamEventError, Error: "provider request error: Provider returned error"}},
+		}}
+		_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, []zeroruntime.ToolDefinition{submitCodeToolDefinition()}, 0, nil, func(*zeroruntime.CollectedStream) error { return nil }, "")
+		if err == nil || !strings.Contains(err.Error(), "provider request error: Provider returned error") {
+			t.Fatalf("repeated rejection error = %v", err)
+		}
+		if len(provider.requests) != 2 {
+			t.Fatalf("provider calls = %d, want exactly 2 (no loop)", len(provider.requests))
+		}
+	})
+	t.Run("different request rejection is not retried", func(t *testing.T) {
+		provider := &retryScriptProvider{scripts: [][]zeroruntime.StreamEvent{
+			{{Type: zeroruntime.StreamEventError, Error: "provider request error: model does not exist"}},
+		}}
+		_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, []zeroruntime.ToolDefinition{submitCodeToolDefinition()}, 0, nil, func(*zeroruntime.CollectedStream) error { return nil }, "")
+		if err == nil || !strings.Contains(err.Error(), "model does not exist") {
+			t.Fatalf("request error = %v", err)
+		}
+		if len(provider.requests) != 1 {
+			t.Fatalf("request error calls = %d, want 1", len(provider.requests))
+		}
+	})
+	t.Run("auth rejection is not retried", func(t *testing.T) {
+		provider := &retryScriptProvider{scripts: [][]zeroruntime.StreamEvent{
+			{{Type: zeroruntime.StreamEventError, Error: "auth error: your API key is missing or invalid"}},
+		}}
+		_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, []zeroruntime.ToolDefinition{submitCodeToolDefinition()}, 0, nil, func(*zeroruntime.CollectedStream) error { return nil }, "")
+		if err == nil || !strings.Contains(err.Error(), "auth error:") {
+			t.Fatalf("auth error = %v", err)
+		}
+		if len(provider.requests) != 1 {
+			t.Fatalf("auth error calls = %d, want 1", len(provider.requests))
+		}
+	})
+}
+
 func TestValidatedToolUseExhaustionIsActionableAndMetered(t *testing.T) {
 	missing := []zeroruntime.StreamEvent{
 		{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 4, OutputTokens: 3, CachedInputTokens: 1, CacheWriteTokens: 1, ReasoningTokens: 1}},
 		{Type: zeroruntime.StreamEventDone},
 	}
 	provider := &retryScriptProvider{scripts: [][]zeroruntime.StreamEvent{missing, missing, missing}}
-	_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, submitCodeToolDefinition(), nil, func(collected *zeroruntime.CollectedStream) error {
+	_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, []zeroruntime.ToolDefinition{submitCodeToolDefinition()}, 0, nil, func(collected *zeroruntime.CollectedStream) error {
 		_, err := parseCodeWriterOutput(collected)
 		return err
 	}, "")
@@ -330,7 +492,7 @@ func TestValidatedToolUseExhaustionIsActionableAndMetered(t *testing.T) {
 }
 
 func TestCodeWriterRetriesThroughKeylessLocalOpenAIAdapter(t *testing.T) {
-	valid := schemas.CodeWriterOutput{Files: []schemas.FileChange{}, Language: "go", Intent: "no changes", Confidence: 0.9}
+	valid := schemas.CodeWriterOutput{Files: []schemas.FileChange{{Path: "main.go", ChangeType: "create", Content: "package main\n"}}, Language: "go", Intent: "no changes", Confidence: 0.9}
 	validArgs, _ := json.Marshal(valid)
 	requests := 0
 	var authHeaders []string
@@ -402,7 +564,7 @@ func TestCodeWriterRetriesThroughKeylessLocalOpenAIAdapter(t *testing.T) {
 func TestCodeWriterRunIncludesMemoryInPayload(t *testing.T) {
 	workDir := t.TempDir()
 	output := schemas.CodeWriterOutput{
-		Files:      []schemas.FileChange{},
+		Files:      []schemas.FileChange{{Path: "main.go", ChangeType: "create", Content: "package main\n"}},
 		Language:   "go",
 		Intent:     "no changes",
 		Confidence: 0.9,
@@ -412,6 +574,7 @@ func TestCodeWriterRunIncludesMemoryInPayload(t *testing.T) {
 	bundle := &schemas.MemoryBundle{
 		RequestingAgent: "code_writer",
 		Observations: []schemas.MemoryObservation{{
+			ID:         1,
 			Title:      "Use gofmt",
 			Content:    "Run gofmt on all generated files.",
 			MemoryType: "decision",
@@ -447,7 +610,7 @@ func TestCodeWriterRunIncludesMemoryInPayload(t *testing.T) {
 
 // TestCodeWriterPayloadCarriesPipelineRoster pins the roster in the marshalled model payload.
 func TestCodeWriterPayloadCarriesPipelineRoster(t *testing.T) {
-	output := schemas.CodeWriterOutput{Files: []schemas.FileChange{}, Language: "go", Intent: "no changes", Confidence: 0.9}
+	output := schemas.CodeWriterOutput{Files: []schemas.FileChange{{Path: "main.go", ChangeType: "create", Content: "package main\n"}}, Language: "go", Intent: "no changes", Confidence: 0.9}
 	args, _ := json.Marshal(output)
 	provider := &requestCapturingProvider{events: toolCallEvent("submit_code", string(args))}
 	input := newHarnessInput("write code")
@@ -484,7 +647,7 @@ func TestCodeWriterPayloadCarriesPipelineRoster(t *testing.T) {
 
 // TestLastPipelineStageOmitsNextStage pins omitempty for the last roster stage.
 func TestLastPipelineStageOmitsNextStage(t *testing.T) {
-	output := schemas.CodeWriterOutput{Files: []schemas.FileChange{}, Language: "go", Intent: "no changes", Confidence: 0.9}
+	output := schemas.CodeWriterOutput{Files: []schemas.FileChange{{Path: "main.go", ChangeType: "create", Content: "package main\n"}}, Language: "go", Intent: "no changes", Confidence: 0.9}
 	args, _ := json.Marshal(output)
 	provider := &requestCapturingProvider{events: toolCallEvent("submit_code", string(args))}
 	input := newHarnessInput("write code")
@@ -526,7 +689,7 @@ func TestSelectRelevantContextIncludesAndOrdersPriorSummaries(t *testing.T) {
 
 // TestTestGeneratorPayloadDoesNotDuplicateCodeWriterSummary pins the existing single summary edge.
 func TestTestGeneratorPayloadDoesNotDuplicateCodeWriterSummary(t *testing.T) {
-	output := schemas.TestGeneratorOutput{Files: []schemas.FileChange{}, Language: "go", Intent: "no changes", Confidence: 0.9}
+	output := schemas.TestGeneratorOutput{Files: []schemas.FileChange{{Path: "main_test.go", ChangeType: "create", Content: "package main\n"}}, Language: "go", Intent: "no changes", Confidence: 0.9}
 	args, _ := json.Marshal(output)
 	provider := &requestCapturingProvider{events: toolCallEvent("submit_tests", string(args))}
 	input := newHarnessInput("write tests")
@@ -544,7 +707,7 @@ func TestTestGeneratorPayloadDoesNotDuplicateCodeWriterSummary(t *testing.T) {
 // Regression: the stage received only a prose summary, so it wrote tests for
 // symbols that did not exist and the run never went green.
 func TestTestGeneratorPayloadCarriesWriterChangedPaths(t *testing.T) {
-	output := schemas.TestGeneratorOutput{Files: []schemas.FileChange{}, Language: "go", Intent: "no changes", Confidence: 0.9}
+	output := schemas.TestGeneratorOutput{Files: []schemas.FileChange{{Path: "main_test.go", ChangeType: "create", Content: "package main\n"}}, Language: "go", Intent: "no changes", Confidence: 0.9}
 	args, _ := json.Marshal(output)
 	provider := &requestCapturingProvider{events: toolCallEvent("submit_tests", string(args))}
 	input := newHarnessInput("write tests for the implementation")
@@ -567,7 +730,7 @@ func TestTestGeneratorPayloadCarriesWriterChangedPaths(t *testing.T) {
 }
 
 func TestTestGeneratorPayloadBoundsWriterChangedPaths(t *testing.T) {
-	output := schemas.TestGeneratorOutput{Files: []schemas.FileChange{}, Language: "go", Intent: "no changes", Confidence: 0.9}
+	output := schemas.TestGeneratorOutput{Files: []schemas.FileChange{{Path: "main_test.go", ChangeType: "create", Content: "package main\n"}}, Language: "go", Intent: "no changes", Confidence: 0.9}
 	args, _ := json.Marshal(output)
 	provider := &requestCapturingProvider{events: toolCallEvent("submit_tests", string(args))}
 	paths := make([]string, maxWriterChangedPaths+25)
@@ -705,7 +868,7 @@ func modelUserPayload(t *testing.T, request zeroruntime.CompletionRequest) strin
 func TestCodeWriterRunOmitsMemoryFieldWhenNil(t *testing.T) {
 	workDir := t.TempDir()
 	output := schemas.CodeWriterOutput{
-		Files:      []schemas.FileChange{},
+		Files:      []schemas.FileChange{{Path: "main.go", ChangeType: "create", Content: "package main\n"}},
 		Language:   "go",
 		Intent:     "no changes",
 		Confidence: 0.9,
@@ -732,6 +895,30 @@ func TestCodeWriterRunOmitsMemoryFieldWhenNil(t *testing.T) {
 	}
 	if cwInput.Memory != nil {
 		t.Fatalf("expected nil memory slice, got %#v", cwInput.Memory)
+	}
+}
+
+// TestApplyFileChangesCreateReplacesExisting pins the repair-path fix: a
+// create carries full content, and the repair loop re-emits prior-written
+// files with change_type create. The write must replace the existing bytes
+// instead of colliding on "already exists".
+func TestApplyFileChangesCreateReplacesExisting(t *testing.T) {
+	workDir := t.TempDir()
+	path := filepath.Join(workDir, "recreated.go")
+	if err := os.WriteFile(path, []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	files := []schemas.FileChange{{Path: "recreated.go", Content: "new\n", ChangeType: "create"}}
+	res, err := applyFileChanges(context.Background(), workDir, files, registryRunTool(t, workDir))
+	if err != nil {
+		t.Fatalf("apply create over an existing file: %v", err)
+	}
+	if len(res.Applied) != 1 {
+		t.Fatalf("applied = %d, want 1", len(res.Applied))
+	}
+	content, rerr := os.ReadFile(path)
+	if rerr != nil || string(content) != "new\n" {
+		t.Fatalf("create did not replace the existing bytes: err=%v content=%q", rerr, string(content))
 	}
 }
 
@@ -986,9 +1173,16 @@ func TestTestGeneratorWritesTests(t *testing.T) {
 }
 
 func TestTestRunnerPassesAndFails(t *testing.T) {
+	// The runner executes stage commands under the deterministic profile,
+	// which fails closed without native platform confinement.
+	backend := sandbox.SelectBackend(sandbox.BackendOptions{})
+	if !backend.Available {
+		t.Skipf("host native sandbox backend unavailable: %s", backend.Message)
+	}
 	stage := TestRunner{}
+	workDir := t.TempDir()
 
-	pass, err := stage.Run(context.Background(), newHarnessInput("run tests"), &fakeProvider{}, StageOptions{Command: []string{"true"}, TimeoutSeconds: 5})
+	pass, err := stage.Run(context.Background(), newHarnessInput("run tests"), &fakeProvider{}, StageOptions{Command: []string{"true"}, TimeoutSeconds: 5, WorkDir: workDir, Sandbox: procrun.NewStageEngine(workDir)})
 	if err != nil {
 		t.Fatalf("pass run: %v", err)
 	}
@@ -1002,7 +1196,7 @@ func TestTestRunnerPassesAndFails(t *testing.T) {
 		t.Fatalf("expected test_command in output data, got %#v", pass.Data)
 	}
 
-	fail, err := stage.Run(context.Background(), newHarnessInput("run tests"), &fakeProvider{}, StageOptions{Command: []string{"false"}, TimeoutSeconds: 5})
+	fail, err := stage.Run(context.Background(), newHarnessInput("run tests"), &fakeProvider{}, StageOptions{Command: []string{"false"}, TimeoutSeconds: 5, WorkDir: workDir, Sandbox: procrun.NewStageEngine(workDir)})
 	if err != nil {
 		t.Fatalf("fail run: %v", err)
 	}
@@ -1154,6 +1348,33 @@ func TestStaticAnalyzerDetectsGoSyntaxError(t *testing.T) {
 	}
 	if result.Confidence != 1.0 {
 		t.Fatalf("confidence = %v, want 1.0", result.Confidence)
+	}
+}
+
+func TestStaticAnalyzerUnknownLanguageIsNotApplicable(t *testing.T) {
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "hello.txt"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	stage, err := NewStaticAnalyzer(DefaultQualityChecks()...)
+	if err != nil {
+		t.Fatalf("construct: %v", err)
+	}
+	result, err := stage.Run(context.Background(), newHarnessInput("write hello"), nil, StageOptions{WorkDir: workDir, Language: "unknown"})
+	if err != nil {
+		t.Fatalf("stage run: %v", err)
+	}
+	report, ok := result.Data["static_analyzer_output"].(schemas.VerificationReport)
+	if !ok {
+		t.Fatalf("static_analyzer_output missing or wrong type, got %T", result.Data["static_analyzer_output"])
+	}
+	if report.Status != schemas.VerificationNotApplicable {
+		t.Fatalf("status = %q, want not_applicable: no check applies to an unknown language", report.Status)
+	}
+	for _, tool := range report.Tools {
+		if tool.Status == schemas.VerificationIncomplete {
+			t.Fatalf("tool %s incomplete, want no incomplete tool when nothing applies: %+v", tool.Tool, tool)
+		}
 	}
 }
 
@@ -1531,6 +1752,36 @@ func TestDesignCrystallizer(t *testing.T) {
 	assertPipelineMetaPrompt(t, provider.request)
 }
 
+// The design conversation can use auto tool calls on models whose OpenRouter
+// endpoint rejects forced tool_choice requests. Crystallization must retry once
+// in auto mode and keep its typed plan validation.
+func TestDesignCrystallizerFallsBackWhenForcedToolChoiceIsRejected(t *testing.T) {
+	plan := schemas.DesignPlan{
+		Epic:         "feature",
+		Requirements: []string{"works"},
+		InScope:      []string{"code"},
+		Tasks:        []schemas.Task{{ID: "t1", Title: "task one", Intent: "do it"}},
+	}
+	args, _ := json.Marshal(plan)
+	toolName := designPlanToolDefinition().Name
+	provider := &retryScriptProvider{scripts: [][]zeroruntime.StreamEvent{
+		{{Type: zeroruntime.StreamEventError, Error: "provider request error: Provider returned error"}},
+		toolCallEvent(toolName, string(args)),
+	}}
+	input := schemas.DesignConversationInput{History: []schemas.ConversationMessage{{Role: "user", Content: "Do it."}}}
+
+	got, err := (DesignCrystallizer{}).Crystallize(context.Background(), provider, StageOptions{}, input)
+	if err != nil {
+		t.Fatalf("crystallize: %v", err)
+	}
+	if got.Epic != plan.Epic || got.Source != "conversation" {
+		t.Fatalf("plan = %#v", got)
+	}
+	if len(provider.requests) != 2 || provider.requests[0].ToolChoice != toolName || provider.requests[1].ToolChoice != "" {
+		t.Fatalf("requests = %#v, want forced then auto", provider.requests)
+	}
+}
+
 func TestDesignCrystallizerSetsSourceBeforeValidation(t *testing.T) {
 	plan := schemas.DesignPlan{
 		Source:       "", // empty; Validate would reject this if not set first
@@ -1772,6 +2023,45 @@ func TestCrystallizeToolSchemaUsesIntentAndStatement(t *testing.T) {
 	}
 }
 
+func TestDesignCrystallizerDropsVestigialTierFields(t *testing.T) {
+	raw := `{
+		"epic": "feature",
+		"requirements": ["works"],
+		"in_scope": ["code"],
+		"out_of_scope": ["docs"],
+		"system_design": "keep it simple",
+		"recommended_tier": "substantial",
+		"recommended_model_tier": "large",
+		"tasks": [{
+			"id": "t1",
+			"title": "task one",
+			"intent": "do it",
+			"estimated_tier": "architectural"
+		}]
+	}`
+	provider := &requestCapturingProvider{events: toolCallEvent("submit_design_plan", raw)}
+	input := schemas.DesignConversationInput{
+		History: []schemas.ConversationMessage{{Role: "user", Content: "Do it."}},
+	}
+	got, err := (DesignCrystallizer{}).Crystallize(context.Background(), provider, StageOptions{}, input)
+	if err != nil {
+		t.Fatalf("crystallize: %v", err)
+	}
+	schemaJSON, err := json.Marshal(provider.request.Tools[0].Parameters)
+	if err != nil {
+		t.Fatalf("marshal tool parameters: %v", err)
+	}
+	schemaStr := string(schemaJSON)
+	for _, field := range []string{"recommended_tier", "recommended_model_tier", "estimated_tier"} {
+		if strings.Contains(schemaStr, "\""+field+"\"") {
+			t.Fatalf("tool schema still contains %s: %s", field, schemaStr)
+		}
+	}
+	if len(got.Tasks) != 1 || got.Tasks[0].ID != "t1" {
+		t.Fatalf("unexpected plan tasks: %+v", got.Tasks)
+	}
+}
+
 // TestGoFormatFinding verifies the in-process Go profile reports files that
 // are not gofmt-clean via GO_FORMAT (low severity) without spawning a process.
 func TestGoFormatFinding(t *testing.T) {
@@ -1829,17 +2119,15 @@ func TestPythonBatchedCompile(t *testing.T) {
 	}
 
 	var calls int
-	var lastCommand []string
-	runTool := func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
+	var lastCommand string
+	runTool := schemaEnforcingBashRunTool(func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
 		if name == "bash" {
 			calls++
-			if cmd, ok := args["command"].([]string); ok {
-				lastCommand = cmd
-			}
+			lastCommand = args["command"].(string)
 			return ToolResult{OK: false, Output: "SyntaxError: invalid syntax"}, nil
 		}
 		return ToolResult{OK: false, Output: name + " is not installed or not available"}, nil
-	}
+	})
 
 	paths := []string{filepath.Join(workDir, "a.py"), filepath.Join(workDir, "b.py"), filepath.Join(workDir, "c.py"), bad}
 	res, err := (pythonSyntaxCheck{}).Run(context.Background(), VerificationCheckRequest{
@@ -1854,19 +2142,117 @@ func TestPythonBatchedCompile(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("expected exactly 1 py_compile call, got %d", calls)
 	}
-	if len(lastCommand) < 4 || lastCommand[0] != "python" || lastCommand[1] != "-m" || lastCommand[2] != "py_compile" {
-		t.Fatalf("unexpected command %v", lastCommand)
+	if !strings.Contains(lastCommand, "'python'") || !strings.Contains(lastCommand, "'-m'") || !strings.Contains(lastCommand, "'py_compile'") {
+		t.Fatalf("unexpected command %q", lastCommand)
 	}
 	for _, f := range files {
-		if !slices.Contains(lastCommand, filepath.Join(workDir, f)) {
-			t.Fatalf("command missing %s: %v", f, lastCommand)
+		if !strings.Contains(lastCommand, "'"+filepath.Join(workDir, f)+"'") {
+			t.Fatalf("command missing %s: %q", f, lastCommand)
 		}
 	}
-	if !slices.Contains(lastCommand, bad) {
-		t.Fatalf("command missing bad.py: %v", lastCommand)
+	if !strings.Contains(lastCommand, "'"+bad+"'") {
+		t.Fatalf("command missing bad.py: %q", lastCommand)
 	}
 	if len(res.Findings) == 0 {
 		t.Fatalf("expected at least one finding, got %+v", res.Findings)
+	}
+}
+
+func TestSchemaEnforcingBashRunToolRejectsArrayCommand(t *testing.T) {
+	runTool := schemaEnforcingBashRunTool(func(context.Context, string, map[string]any) (ToolResult, error) {
+		t.Fatal("next must not run for a non-string command")
+		return ToolResult{}, nil
+	})
+	res, err := runTool(context.Background(), "bash", map[string]any{
+		"command": []string{"python", "-m", "py_compile", "a.py"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.OK {
+		t.Fatal("expected rejected array command")
+	}
+	if res.Output != bashCommandMustBeString {
+		t.Fatalf("output = %q, want %q", res.Output, bashCommandMustBeString)
+	}
+}
+
+func TestPythonRuffPassUsesStringCommand(t *testing.T) {
+	workDir := t.TempDir()
+	py := filepath.Join(workDir, "a.py")
+	if err := os.WriteFile(py, []byte("print('ok')\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "ruff.toml"), []byte("[lint]\n"), 0o644); err != nil {
+		t.Fatalf("write ruff config: %v", err)
+	}
+	var commands []string
+	runTool := schemaEnforcingBashRunTool(func(_ context.Context, name string, args map[string]any) (ToolResult, error) {
+		if name != "bash" {
+			return ToolResult{OK: false, Output: name + " is not installed or not available"}, nil
+		}
+		command := args["command"].(string)
+		commands = append(commands, command)
+		if strings.Contains(command, "'ruff'") {
+			return ToolResult{OK: true, Output: `{"results":[]}`}, nil
+		}
+		return ToolResult{OK: true}, nil
+	})
+	res, err := (pythonSyntaxCheck{}).Run(context.Background(), VerificationCheckRequest{
+		WorkDir:  workDir,
+		Language: "python",
+		Paths:    []string{py},
+		RunTool:  runTool,
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.ToolRun.Status != schemas.VerificationPassed {
+		t.Fatalf("status = %q, want passed; findings=%+v", res.ToolRun.Status, res.Findings)
+	}
+	if len(commands) != 2 {
+		t.Fatalf("expected py_compile then ruff, got %v", commands)
+	}
+	if !strings.Contains(commands[1], "'ruff'") || !strings.Contains(commands[1], "'check'") {
+		t.Fatalf("unexpected ruff command %q", commands[1])
+	}
+}
+
+func TestPythonSyntaxCheckRealBashTool(t *testing.T) {
+	workDir := t.TempDir()
+	bad := filepath.Join(workDir, "bad.py")
+	if err := os.WriteFile(bad, []byte("def broken(\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewBashTool(workDir))
+	runTool := func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
+		res := registry.RunWithOptions(ctx, name, args, tools.RunOptions{PermissionGranted: true})
+		return ToolResult{OK: res.Status == tools.StatusOK, Output: res.Output}, nil
+	}
+	res, err := (pythonSyntaxCheck{}).Run(context.Background(), VerificationCheckRequest{
+		WorkDir:  workDir,
+		Language: "python",
+		Paths:    []string{bad},
+		RunTool:  runTool,
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if strings.Contains(res.ToolRun.Summary, bashCommandMustBeString) || strings.Contains(res.ToolRun.Summary, "command must be a string") {
+		t.Fatalf("real bash tool rejected the command: %s", res.ToolRun.Summary)
+	}
+	if res.ToolRun.Status != schemas.VerificationFindings {
+		t.Fatalf("status = %q summary=%q, want findings", res.ToolRun.Status, res.ToolRun.Summary)
+	}
+	found := false
+	for _, f := range res.Findings {
+		if f.RuleID == "PY_COMPILE" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected PY_COMPILE finding, got %+v summary=%q output-like=%q", res.Findings, res.ToolRun.Summary, res.ToolRun.Summary)
 	}
 }
 
@@ -1878,12 +2264,12 @@ func TestJSSyntaxCheck(t *testing.T) {
 		if err := os.WriteFile(bad, []byte("const x = ;\n"), 0o644); err != nil {
 			t.Fatalf("write: %v", err)
 		}
-		runTool := func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
+		runTool := schemaEnforcingBashRunTool(func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
 			if name == "bash" {
 				return ToolResult{OK: false, Output: "SyntaxError: Unexpected token"}, nil
 			}
 			return ToolResult{}, fmt.Errorf("unexpected %s", name)
-		}
+		})
 		res, err := (jsSyntaxCheck{}).Run(context.Background(), VerificationCheckRequest{
 			WorkDir:  workDir,
 			Language: "javascript",
@@ -1916,12 +2302,12 @@ func TestJSSyntaxCheck(t *testing.T) {
 		if err := os.WriteFile(f, []byte("const x = 1;\n"), 0o644); err != nil {
 			t.Fatalf("write: %v", err)
 		}
-		runTool := func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
+		runTool := schemaEnforcingBashRunTool(func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
 			if name == "bash" {
 				return ToolResult{OK: false, Output: "bash: node: command not found"}, nil
 			}
 			return ToolResult{}, fmt.Errorf("unexpected %s", name)
-		}
+		})
 		res, err := (jsSyntaxCheck{}).Run(context.Background(), VerificationCheckRequest{
 			WorkDir:  workDir,
 			Language: "javascript",
@@ -1972,12 +2358,12 @@ func TestTSTypeCheck(t *testing.T) {
 		if err := os.WriteFile(tsFile, []byte("const x: number = y;\n"), 0o644); err != nil {
 			t.Fatalf("write: %v", err)
 		}
-		runTool := func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
+		runTool := schemaEnforcingBashRunTool(func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
 			if name == "bash" {
 				return ToolResult{OK: true, Output: "index.ts(1,20): error TS2304: Cannot find name 'y'.\n"}, nil
 			}
 			return ToolResult{}, fmt.Errorf("unexpected %s", name)
-		}
+		})
 		res, err := (tsTypeCheck{}).Run(context.Background(), VerificationCheckRequest{
 			WorkDir:  workDir,
 			Language: "typescript",
@@ -2092,7 +2478,7 @@ func TestCallToolUseForcesToolChoice(t *testing.T) {
 	provider := &requestCapturingProvider{}
 	tool := zeroruntime.ToolDefinition{Name: "submit_design_plan", Parameters: map[string]any{"type": "object"}}
 
-	_, err := callToolUse(context.Background(), provider, "model-test", "", "system", "user", nil, tool, nil, "")
+	_, err := callToolUse(context.Background(), provider, "model-test", "", "system", "user", nil, []zeroruntime.ToolDefinition{tool}, 0, nil, "", true)
 	if err != nil {
 		t.Fatalf("callToolUse: %v", err)
 	}
@@ -2117,12 +2503,83 @@ func TestCallToolUsePromptCacheKey(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			provider := &requestCapturingProvider{}
 			tool := zeroruntime.ToolDefinition{Name: "submit_code", Parameters: map[string]any{"type": "object"}}
-			if _, err := callToolUse(context.Background(), provider, "model-test", "", "system", "user", nil, tool, nil, tt.key); err != nil {
+			if _, err := callToolUse(context.Background(), provider, "model-test", "", "system", "user", nil, []zeroruntime.ToolDefinition{tool}, 0, nil, tt.key, true); err != nil {
 				t.Fatalf("callToolUse: %v", err)
 			}
 			if got := provider.request.PromptCacheKey; got != tt.want {
 				t.Fatalf("PromptCacheKey = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestStageOptionsMaxOutputTokensReachesCompletionRequest proves a
+// StageOptions cap appears on the CompletionRequest the stage sends.
+func TestStageOptionsMaxOutputTokensReachesCompletionRequest(t *testing.T) {
+	output := schemas.CodeWriterOutput{Files: []schemas.FileChange{{Path: "main.go", ChangeType: "create", Content: "package main\n"}}, Language: "go", Intent: "no changes", Confidence: 0.9}
+	args, _ := json.Marshal(output)
+	provider := &requestCapturingProvider{events: toolCallEvent("submit_code", string(args))}
+	input := newHarnessInput("write code")
+
+	if _, err := (CodeWriter{}).Run(context.Background(), input, provider, StageOptions{
+		WorkDir:         t.TempDir(),
+		Language:        "go",
+		MaxOutputTokens: 8192,
+	}); err != nil {
+		t.Fatalf("stage run: %v", err)
+	}
+	if provider.request.MaxOutputTokens != 8192 {
+		t.Fatalf("request.MaxOutputTokens = %d, want 8192", provider.request.MaxOutputTokens)
+	}
+}
+
+// TestValidatedToolUseRetainsOutputCapOnEveryAttempt proves the stage cap is
+// sent unchanged on every typed-output retry attempt.
+func TestValidatedToolUseRetainsOutputCapOnEveryAttempt(t *testing.T) {
+	valid := schemas.CodeWriterOutput{Files: []schemas.FileChange{{Path: "main.go", ChangeType: "create", Content: "package main\n"}}, Language: "go", Intent: "no changes", Confidence: 0.9}
+	validArgs, _ := json.Marshal(valid)
+	provider := &retryScriptProvider{scripts: [][]zeroruntime.StreamEvent{
+		{{Type: zeroruntime.StreamEventDone}},
+		append([]zeroruntime.StreamEvent{}, toolCallEvent(codeWriterToolName, `{`)...),
+		toolCallEvent(codeWriterToolName, string(validArgs)),
+	}}
+	_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, []zeroruntime.ToolDefinition{submitCodeToolDefinition()}, 8192, nil, func(collected *zeroruntime.CollectedStream) error {
+		_, err := parseCodeWriterOutput(collected)
+		return err
+	}, "")
+	if err != nil {
+		t.Fatalf("retrying typed output: %v", err)
+	}
+	if len(provider.requests) != 3 {
+		t.Fatalf("provider calls = %d, want 3", len(provider.requests))
+	}
+	for i, request := range provider.requests {
+		if request.MaxOutputTokens != 8192 {
+			t.Fatalf("attempt %d request.MaxOutputTokens = %d, want 8192 on every retry", i+1, request.MaxOutputTokens)
+		}
+	}
+}
+
+// TestCodeWriterRetriesASubmissionWithoutLanguage: the chain pilot's
+// "language is required" failure. The retry check applies the whole output
+// contract, so a submission without a language is a format retry with
+// feedback, not a fatal error after the call.
+func TestCodeWriterRetriesASubmissionWithoutLanguage(t *testing.T) {
+	valid := schemas.CodeWriterOutput{Files: []schemas.FileChange{{Path: "main.go", ChangeType: "create", Content: "package main\n"}}, Language: "go", Intent: "add main", Confidence: 0.9}
+	validArgs, _ := json.Marshal(valid)
+	noLanguage := `{"files":[{"path":"main.go","change_type":"create","content":"package main\n"}],"intent":"add main","confidence":0.9}`
+	provider := &retryScriptProvider{scripts: [][]zeroruntime.StreamEvent{
+		toolCallEvent(codeWriterToolName, noLanguage),
+		toolCallEvent(codeWriterToolName, string(validArgs)),
+	}}
+	result, err := (CodeWriter{}).Run(context.Background(), newHarnessInput("write code"), provider, StageOptions{WorkDir: t.TempDir(), Language: "go"})
+	if err != nil {
+		t.Fatalf("a missing language must be retried, got %v", err)
+	}
+	if len(provider.requests) != 2 || result.Summary != valid.Intent {
+		t.Fatalf("requests = %d summary = %q, want 2 and the valid submission", len(provider.requests), result.Summary)
+	}
+	if user := provider.requests[1].Messages[1].Content; !strings.Contains(user, "language is required") {
+		t.Fatalf("the retry lacks the contract feedback: %q", user)
 	}
 }

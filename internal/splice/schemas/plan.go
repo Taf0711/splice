@@ -17,6 +17,16 @@ const (
 	TierArchitectural PipelineTier = "architectural"
 )
 
+// Validate reports an error for a tier outside the closed set.
+func (t PipelineTier) Validate() error {
+	switch t {
+	case TierTrivial, TierLight, TierStandard, TierSubstantial, TierArchitectural:
+		return nil
+	default:
+		return fmt.Errorf("unknown pipeline tier %q", t)
+	}
+}
+
 // StageStatus is the execution status of a stage.
 type StageStatus string
 
@@ -125,6 +135,47 @@ type ContextQuery struct {
 	Regex      bool             `json:"regex"`
 	MaxResults int              `json:"max_results"`
 	MaxChars   int              `json:"max_chars"`
+	// StartLine/EndLine are the optional 1-based inclusive byte-range
+	// selectors for read_file queries (B1). Both must be set together;
+	// one without the other is a validation error. EndLine >= StartLine.
+	// Ranges let a large file deliver only the relevant span instead of
+	// paying whole-file delivery.
+	StartLine *int `json:"start_line,omitempty"`
+	EndLine   *int `json:"end_line,omitempty"`
+}
+
+// HasRange reports whether the query carries a line-range selector.
+func (c ContextQuery) HasRange() bool {
+	return c.StartLine != nil && c.EndLine != nil
+}
+
+// MaxAggregateContextQueries bounds the QUERIES PER REQUEST, not each
+// query. One request with a hundred tiny reads is the same flood as one
+// huge read, so the aggregate gets its own bound.
+const MaxAggregateContextQueries = 16
+
+// MaxAggregateContextBytes bounds the request's total MaxChars budget: the
+// sum of per-query budgets across the request. Per-query validation alone
+// would let 16 x 20000-byte reads through as "bounded".
+const MaxAggregateContextBytes = 64000
+
+// validateRange checks the optional line-range selector's internal
+// consistency. File-relative bounds (EOF clamping) are the fulfillment
+// path's job; this validates the request shape.
+func (c ContextQuery) validateRange() error {
+	if (c.StartLine == nil) != (c.EndLine == nil) {
+		return errors.New("start_line and end_line must be set together")
+	}
+	if c.StartLine == nil {
+		return nil
+	}
+	if *c.StartLine < 1 {
+		return errors.New("start_line must be >= 1")
+	}
+	if *c.EndLine < *c.StartLine {
+		return fmt.Errorf("end_line %d precedes start_line %d", *c.EndLine, *c.StartLine)
+	}
+	return nil
 }
 
 // Validate checks that the query type has the required fields.
@@ -161,7 +212,43 @@ func (c ContextQuery) Validate() error {
 	if c.MaxChars < 1 || c.MaxChars > 20000 {
 		return errors.New("max_chars must be between 1 and 20000")
 	}
+	if err := c.validateRange(); err != nil {
+		return err
+	}
 	return nil
+}
+
+// AggregateValidate checks the bounds that only exist across a request:
+// the number of queries and the SUM of their MaxChars budgets. Per-query
+// Validate is necessary but not sufficient; a request of many legal
+// queries can still be unbounded in aggregate.
+func (c ContextRequest) AggregateValidate() error {
+	if len(c.Queries) > MaxAggregateContextQueries {
+		return fmt.Errorf("request carries %d queries, more than the %d-query aggregate bound", len(c.Queries), MaxAggregateContextQueries)
+	}
+	total := 0
+	for _, q := range c.Queries {
+		total += q.MaxChars
+	}
+	if total > MaxAggregateContextBytes {
+		return fmt.Errorf("request aggregates %d max-chars across queries, more than the %d-byte bound", total, MaxAggregateContextBytes)
+	}
+	return nil
+}
+
+// FitAggregate drops queries from the end until the request is within the
+// aggregate bounds, and returns how many it dropped. Callers compose
+// requests in priority order (listing, named and evidence paths, files
+// memory knows are needed, fallback reads last), so the drop removes the
+// least valuable reads. Without it, a composed request (an evidence plan
+// plus memory prefetch) exceeded the bound and failed the whole stage.
+func (c *ContextRequest) FitAggregate() int {
+	dropped := 0
+	for len(c.Queries) > 0 && c.AggregateValidate() != nil {
+		c.Queries = c.Queries[:len(c.Queries)-1]
+		dropped++
+	}
+	return dropped
 }
 
 // ContextRequest is a bounded pull-channel request emitted by an agent.
@@ -210,6 +297,12 @@ func (c ContextItem) Validate() error {
 type ContextBundle struct {
 	Request ContextRequest `json:"request"`
 	Items   []ContextItem  `json:"items,omitempty"`
+	// HostNotes are authoritative host-side statements about the delivered
+	// context, rendered with the items. The M6 campaigns showed a model
+	// confabulating "elided ranges" in complete delivered views and
+	// spending its whole expansion allowance re-requesting files it
+	// already held; the no-new-bytes note answers that directly.
+	HostNotes []string `json:"host_notes,omitempty"`
 }
 
 // Validate checks the context bundle.
@@ -227,41 +320,30 @@ func (c ContextBundle) Validate() error {
 
 // StageBudget is a token budget for a single stage.
 type StageBudget struct {
-	InputMax  int    `json:"input_max"`
-	OutputMax int    `json:"output_max"`
-	ModelTier string `json:"model_tier"`
-	Skippable bool   `json:"skippable"`
+	InputMax  int  `json:"input_max"`
+	OutputMax int  `json:"output_max"`
+	Skippable bool `json:"skippable"`
 }
 
 // Validate checks the stage budget.
 //
 // F14a: a stage budget is valid in exactly one of two shapes:
 //
-//   - Deterministic zero budget: InputMax == 0, OutputMax == 0, and an empty
-//     ModelTier. Used by model-free stages (static analysis, security audit,
-//     test execution) so plan totals stop reserving fictional model tokens.
-//   - Model-backed budget: both InputMax and OutputMax are > 0, and ModelTier
-//     names a currently valid model tier.
+//   - Deterministic zero budget: InputMax == 0 and OutputMax == 0. Used by
+//     model-free stages (static analysis, security audit, test execution) so
+//     plan totals stop reserving fictional model tokens.
+//   - Model-backed budget: both InputMax and OutputMax are > 0.
 //
-// Mixed or partial-zero forms (one value zero and the other positive), or any
-// zero value paired with a non-empty model tier, are invalid because they
-// would reserve tokens for a stage that cannot spend them, or spend tokens on
-// a stage that claims to be deterministic.
+// Mixed or partial-zero forms (one value zero and the other positive) are
+// invalid because they would reserve tokens for a stage that cannot spend
+// them, or spend tokens on a stage that claims to be deterministic.
 func (s StageBudget) Validate() error {
 	isZero := s.InputMax == 0 && s.OutputMax == 0
 	if isZero {
-		if s.ModelTier != "" {
-			return errors.New("deterministic zero budget must not specify a model_tier")
-		}
 		return nil
 	}
 	if s.InputMax <= 0 || s.OutputMax <= 0 {
 		return errors.New("input_max and output_max must both be > 0 for a model-backed budget")
-	}
-	switch s.ModelTier {
-	case "nano", "small", "medium", "large", "reasoning":
-	default:
-		return fmt.Errorf("invalid model_tier %q", s.ModelTier)
 	}
 	return nil
 }
@@ -301,9 +383,26 @@ func (t TokenBudget) Validate() error {
 
 // ExecutionStage is one planned pipeline stage.
 type ExecutionStage struct {
-	Name      string      `json:"name"`
-	DependsOn []string    `json:"depends_on,omitempty"`
-	Budget    StageBudget `json:"budget"`
+	Name string `json:"name"`
+	// Type names the node's stage type from the topology. It differs from Name
+	// when a topology renames a node. Empty for a plan built before node types
+	// were carried, where Name is the builtin type.
+	Type   string      `json:"type,omitempty"`
+	Budget StageBudget `json:"budget"`
+	// DependsOn lists the stages that must run before this one. It is empty
+	// for a linear plan and populated when the planner compiles a topology.
+	DependsOn []string `json:"depends_on,omitempty"`
+	// EdgePayloads maps each dependency name to the information payload its
+	// edge carries. A missing entry means EdgePayloadSummary.
+	EdgePayloads map[string]EdgePayload `json:"edge_payloads,omitempty"`
+	// Caps is the compiled node capability set, resolved from the topology.
+	// Nil means the plan predates capability compilation, and the executor
+	// falls back to the stage's own declaration.
+	Caps *NodeCapabilities `json:"capabilities,omitempty"`
+	// Model is the node's explicit model declaration, resolved from the
+	// topology. It is the strongest rung of the model ladder: a node model
+	// beats the per-stage file. Nil means the node declares no model.
+	Model *StageModelConfig `json:"model,omitempty"`
 }
 
 // Validate checks the execution stage.
@@ -322,9 +421,24 @@ type ExecutionPlan struct {
 	TokenBudget            TokenBudget      `json:"token_budget"`
 	AcceptanceFacts        []AcceptanceFact `json:"acceptance_facts,omitempty"`
 	RequiredKnowledgeFiles []string         `json:"required_knowledge_files,omitempty"`
+	// Flags records the enabled feature-flag names that shaped this plan, sorted.
+	// It is the plan's provenance: a resumed run reads the recorded set rather
+	// than re-resolving against a changed ambient environment.
+	Flags []string `json:"flags,omitempty"`
+	// Warnings carries the non-fatal compile warnings for the plan's
+	// topology. The runtime surfaces them once at run start; they never
+	// block execution, and an empty field serializes nothing.
+	Warnings []string `json:"warnings,omitempty"`
+	// TopologyName names the resolved topology that produced this plan. It is
+	// empty for a plan built before topology resolution existed.
+	TopologyName string `json:"topology_name,omitempty"`
+	// RemovedStages names each stage the flag set removed from the compiled
+	// topology, with the reason: "flag <name> is off" or "dependency <name>
+	// was removed". A stage the tier filtered out is not listed.
+	RemovedStages map[string]string `json:"removed_stages,omitempty"`
 }
 
-// Validate checks the execution plan and stage DAG integrity.
+// Validate checks the execution plan.
 func (e ExecutionPlan) Validate() error {
 	if err := e.TokenBudget.Validate(); err != nil {
 		return err
@@ -355,76 +469,61 @@ func (e ExecutionPlan) Validate() error {
 		}
 		stageNames[stage.Name] = struct{}{}
 	}
-	deps := make(map[string][]string, len(e.Stages))
-	for i, stage := range e.Stages {
-		for _, dep := range stage.DependsOn {
-			if _, exists := stageNames[dep]; !exists {
-				return fmt.Errorf("stages[%d] depends_on unknown stage %q", i, dep)
-			}
-			deps[stage.Name] = append(deps[stage.Name], dep)
+	for i, name := range e.Flags {
+		if name == "" {
+			return fmt.Errorf("flags[%d]: name is required", i)
+		}
+		if i > 0 && e.Flags[i-1] >= name {
+			return fmt.Errorf("flags must be sorted and unique: %q is not after %q", name, e.Flags[i-1])
 		}
 	}
-	if cycle := detectCycle(deps); cycle != "" {
-		return fmt.Errorf("stage dependency cycle detected involving %q", cycle)
+	// DependsOn is validated here, not per stage, because one stage cannot see
+	// its siblings. Edge scoping reads DependsOn, so an unknown or self
+	// dependency would scope a stage to nothing and look like success.
+	for i, stage := range e.Stages {
+		for _, dependency := range stage.DependsOn {
+			if dependency == stage.Name {
+				return fmt.Errorf("stages[%d] %q depends on itself", i, stage.Name)
+			}
+			if _, exists := stageNames[dependency]; !exists {
+				return fmt.Errorf("stages[%d] %q depends_on unknown stage %q", i, stage.Name, dependency)
+			}
+		}
 	}
 	return nil
 }
 
-// detectCycle performs a DFS over the dependency graph and returns the name of
-// the first stage that participates in a cycle, or "" if the graph is a DAG.
-const (
-	cycleStateUnvisited = 0
-	cycleStateVisiting  = 1
-	cycleStateVisited   = 2
-)
-
-func detectCycle(deps map[string][]string) string {
-	state := make(map[string]int, len(deps))
-	var visit func(name string) string
-	visit = func(name string) string {
-		if state[name] == cycleStateVisiting {
-			return name
-		}
-		if state[name] == cycleStateVisited {
-			return ""
-		}
-		state[name] = cycleStateVisiting
-		for _, dep := range deps[name] {
-			if found := visit(dep); found != "" {
-				return found
-			}
-		}
-		state[name] = cycleStateVisited
-		return ""
-	}
-	for name := range deps {
-		if found := visit(name); found != "" {
-			return found
-		}
-	}
-	return ""
-}
-
 // StageRecord is a persistable summary of an executed stage.
+// TestCommand is the expanded command used by a completed test_runner
+// invocation. It is empty for other stages and skipped test runs.
 type StageRecord struct {
-	Name              string      `json:"name"`
-	Status            StageStatus `json:"status"`
-	Iteration         int         `json:"iteration"`
-	Provider          *string     `json:"provider,omitempty"`
-	Model             *string     `json:"model,omitempty"`
-	Confidence        *float64    `json:"confidence,omitempty"`
-	OutputSummary     *string     `json:"output_summary,omitempty"`
-	Activity          *string     `json:"activity,omitempty"`
-	TokensInput       int         `json:"tokens_input"`
-	TokensOutput      int         `json:"tokens_output"`
-	TokensCached      int         `json:"tokens_cached"`
-	TokensCacheWrite  int         `json:"tokens_cache_write"`
-	TokensReasoning   int         `json:"tokens_reasoning"`
-	WebSearchRequests int         `json:"web_search_requests"`
-	WebSearchEngine   string      `json:"web_search_engine,omitempty"`
-	CostUSD           float64     `json:"cost_usd"`
-	LatencyMs         int         `json:"latency_ms"`
-	CommitSHA         *string     `json:"commit_sha,omitempty"`
+	Name          string      `json:"name"`
+	Status        StageStatus `json:"status"`
+	Iteration     int         `json:"iteration"`
+	Provider      *string     `json:"provider,omitempty"`
+	Model         *string     `json:"model,omitempty"`
+	Confidence    *float64    `json:"confidence,omitempty"`
+	OutputSummary *string     `json:"output_summary,omitempty"`
+	// FailureKind classifies a failed stage for the trajectory monitor. Empty
+	// for a stage that did not fail. The closed set is NodeFailureStageError,
+	// NodeFailureTestFailure, and NodeFailureNone.
+	FailureKind       string  `json:"failure_kind,omitempty"`
+	Activity          *string `json:"activity,omitempty"`
+	TokensInput       int     `json:"tokens_input"`
+	TokensOutput      int     `json:"tokens_output"`
+	TokensCached      int     `json:"tokens_cached"`
+	TokensCacheWrite  int     `json:"tokens_cache_write"`
+	TokensReasoning   int     `json:"tokens_reasoning"`
+	WebSearchRequests int     `json:"web_search_requests"`
+	WebSearchEngine   string  `json:"web_search_engine,omitempty"`
+	CostUSD           float64 `json:"cost_usd"`
+	LatencyMs         int     `json:"latency_ms"`
+	CommitSHA         *string `json:"commit_sha,omitempty"`
+	TestCommand       string  `json:"test_command,omitempty"`
+	// MemoryReviews is invocation-ordered. Repair re-entry appends another
+	// review to the same {stage, iteration} record. Legacy traces without the
+	// field remain valid: it is optional and additive.
+	MemoryReviews []MemoryReview `json:"memory_reviews,omitempty"`
 }
 
 // Validate checks the stage record.
@@ -432,10 +531,22 @@ func (s StageRecord) Validate() error {
 	if s.Name == "" {
 		return errors.New("name is required")
 	}
+	for i := range s.MemoryReviews {
+		if err := s.MemoryReviews[i].Validate(); err != nil {
+			return fmt.Errorf("memory_reviews[%d]: %w", i, err)
+		}
+	}
 	switch s.Status {
 	case StagePending, StageRunning, StageCompleted, StageFailed, StageSkipped, StageIncomplete:
 	default:
 		return fmt.Errorf("invalid status %q", s.Status)
+	}
+	if s.FailureKind != "" {
+		switch s.FailureKind {
+		case NodeFailureStageError, NodeFailureTestFailure, NodeFailureNone:
+		default:
+			return fmt.Errorf("invalid failure_kind %q", s.FailureKind)
+		}
 	}
 	if s.Iteration < 0 {
 		return errors.New("iteration must be >= 0")
@@ -478,9 +589,13 @@ type HarnessStageInput struct {
 	// PriorChangedFiles carries structured paths from completed earlier stages.
 	// It complements PriorSummaries, which remains the prose hand-off channel.
 	PriorChangedFiles map[string][]string `json:"prior_changed_files,omitempty"`
-	RevisionContext   *string             `json:"revision_context,omitempty"`
-	Context           *ContextBundle      `json:"context,omitempty"`
-	MemoryBundle      *MemoryBundle       `json:"memory_bundle,omitempty"`
+	// WriterStage is the plan name of the code writer when a topology renames
+	// it. Empty means the builtin name. Stages show it to the model, so it is
+	// the name the model sees.
+	WriterStage     string         `json:"writer_stage,omitempty"`
+	RevisionContext *string        `json:"revision_context,omitempty"`
+	Context         *ContextBundle `json:"context,omitempty"`
+	MemoryBundle    *MemoryBundle  `json:"memory_bundle,omitempty"`
 	// PipelineStages is the full ordered roster of stage names for this run,
 	// so a stage can see what will (and will not) run after it. Empty outside
 	// a tier pipeline (e.g. design-phase stages), where no roster applies.
@@ -549,7 +664,15 @@ type HarnessStageOutput struct {
 	Confidence     float64                `json:"confidence"`
 	Data           map[string]interface{} `json:"data,omitempty"`
 	ContextRequest *ContextRequest        `json:"context_request,omitempty"`
-	Usage          *StageUsage            `json:"-"`
+	Messages       []StageMessage         `json:"messages,omitempty"`
+	// MemoryReview is the normalized per-invocation memory review. Nil when no
+	// memory was delivered; never an empty review.
+	MemoryReview *MemoryReview `json:"memory_review,omitempty"`
+	// ChangedFiles lists the repo-relative paths this stage changed. The
+	// field is additive: custom stages set it directly, builtins keep their
+	// legacy Data keys, and stageChangedFiles prefers this field.
+	ChangedFiles []string    `json:"changed_files,omitempty"`
+	Usage        *StageUsage `json:"-"`
 }
 
 // Validate checks the harness stage output.
@@ -560,9 +683,22 @@ func (h HarnessStageOutput) Validate() error {
 	if err := validateConfidence(h.Confidence); err != nil {
 		return err
 	}
+	if h.MemoryReview != nil {
+		if err := h.MemoryReview.Validate(); err != nil {
+			return fmt.Errorf("memory_review: %w", err)
+		}
+	}
 	if h.ContextRequest != nil {
 		if err := h.ContextRequest.Validate(); err != nil {
 			return err
+		}
+	}
+	if len(h.Messages) > 4 {
+		return fmt.Errorf("stage output has %d messages; max 4", len(h.Messages))
+	}
+	for i, message := range h.Messages {
+		if err := message.Validate(); err != nil {
+			return fmt.Errorf("messages[%d]: %w", i, err)
 		}
 	}
 	return nil
@@ -580,6 +716,54 @@ const (
 	CostStatusError    = "error"
 )
 
+// MemoryPosition states describe where dynamic content sits relative to the
+// cacheable prefix of a request. Dynamic content after the prefix keeps the
+// prefix cacheable. Content before the prefix changes the prefix itself.
+const (
+	MemoryPositionAfterPrefix  = "after_prefix"
+	MemoryPositionBeforePrefix = "before_prefix"
+)
+
+// Spend sources classify why a provider request exists (Package F1, warm-cost
+// handoff Section 10). The accounting identity of WorkflowCostReport sums
+// these sources; every priced request must carry exactly one.
+const (
+	// SpendSourceGeneration is the initial pass of a planned stage.
+	SpendSourceGeneration = "generation"
+	// SpendSourceFormatRetry is a repeated request under the same D3 request
+	// identity: typed-output format retries and forced-choice compatibility
+	// retries within one stage invocation.
+	SpendSourceFormatRetry = "format_retry"
+	// SpendSourceExpansion is a bounded context-expansion round (D2).
+	SpendSourceExpansion = "expansion"
+	// SpendSourceRepair is a repair re-entry of a stage (test-failure loop).
+	SpendSourceRepair = "repair"
+	// SpendSourceCapture is a provider request issued for memory capture or
+	// maintenance work. Capture is currently deterministic (digests plus
+	// sidecar writes); the source stays reserved so a future capture-time
+	// model call lands in the ledger instead of outside it.
+	SpendSourceCapture = "capture"
+	// SpendSourceAuxiliary is any model call outside the planned stage
+	// sequence, such as step-back analysis.
+	SpendSourceAuxiliary = "auxiliary"
+	// SpendSourceDecision is a decision-advisor (Jev) request. Its record
+	// names the question pack in DecisionPack.
+	SpendSourceDecision = "decision"
+	// SpendSourceCompaction is a summarizer request made by the plain agent loop.
+	SpendSourceCompaction = "compaction"
+)
+
+// ValidSpendSource reports whether s is a recognized spend source.
+func ValidSpendSource(s string) bool {
+	switch s {
+	case "", SpendSourceGeneration, SpendSourceFormatRetry, SpendSourceExpansion,
+		SpendSourceRepair, SpendSourceCapture, SpendSourceAuxiliary, SpendSourceDecision,
+		SpendSourceCompaction:
+		return true
+	}
+	return false
+}
+
 // PipelineUsageRecord is one provider request priced at the orchestrator ledger.
 type PipelineUsageRecord struct {
 	Sequence          int      `json:"sequence"`
@@ -587,6 +771,9 @@ type PipelineUsageRecord struct {
 	Model             string   `json:"model,omitempty"`
 	Stage             string   `json:"stage"`
 	Iteration         int      `json:"iteration"`
+	InvocationOrdinal int      `json:"invocation_ordinal,omitempty"`
+	ContextRound      int      `json:"context_round,omitempty"`
+	SpendSource       string   `json:"spend_source,omitempty"`
 	UsageReported     bool     `json:"usage_reported"`
 	InputTokens       int      `json:"input_tokens"`
 	OutputTokens      int      `json:"output_tokens"`
@@ -601,6 +788,30 @@ type PipelineUsageRecord struct {
 	PricingSource     string   `json:"pricing_source,omitempty"`
 	PricingAsOf       string   `json:"pricing_as_of,omitempty"`
 	UnpricedReason    string   `json:"unpriced_reason,omitempty"`
+	// PromptLayoutHash is the stable-prefix layout hash (system prompt plus
+	// tool schema) of this request. Records for one stage within a run must
+	// share one hash; a change between rounds means the cacheable prefix
+	// flipped and the provider's prefix cache was forfeited.
+	PromptLayoutHash string `json:"prompt_layout_hash,omitempty"`
+	// RequestID is the provider's request/correlation identity (OpenRouter's
+	// X-Generation-Id response header), when the backend reports one. A
+	// reconciliation replaces the estimate keyed to THIS request; an empty
+	// value means the backend reported none, and reconciliation cannot
+	// target the request.
+	RequestID string `json:"request_id,omitempty"`
+	// DecisionPack names the question pack of a decision-advisor request
+	// (spend source "decision"), for example prefetch_need_v1 or traj_v1.
+	DecisionPack string `json:"decision_pack,omitempty"`
+	// CacheHit reports whether this request read a cached prefix. Nil means the
+	// provider reported no usage, or the report could not be normalized. A
+	// missing report is not a cache miss, so the field stays nil rather than
+	// defaulting to false.
+	CacheHit *bool `json:"cache_hit,omitempty"`
+	// MemoryPosition records where dynamic content (memory, prior summaries,
+	// revision context) sits relative to the cacheable prefix. Splice places it
+	// after the prefix by construction, so this is a constant today. It is
+	// recorded so a reader does not have to infer the placement.
+	MemoryPosition string `json:"memory_position,omitempty"`
 }
 
 // Validate checks the pipeline usage record.
@@ -636,6 +847,23 @@ func (r PipelineUsageRecord) Validate() error {
 		if r.CostStatus != CostStatusUnpriced {
 			return errors.New("usage_reported false requires unpriced cost status")
 		}
+	}
+	if r.MemoryPosition != "" && r.MemoryPosition != MemoryPositionAfterPrefix && r.MemoryPosition != MemoryPositionBeforePrefix {
+		return fmt.Errorf("invalid memory_position %q", r.MemoryPosition)
+	}
+	if r.CacheHit != nil {
+		if !r.UsageReported {
+			return errors.New("cache_hit requires reported usage")
+		}
+		if *r.CacheHit != (r.CachedTokens > 0) {
+			return fmt.Errorf("cache_hit %t does not match cached input tokens %d", *r.CacheHit, r.CachedTokens)
+		}
+	}
+	if !ValidSpendSource(r.SpendSource) {
+		return fmt.Errorf("invalid spend_source %q", r.SpendSource)
+	}
+	if r.InvocationOrdinal < 0 || r.ContextRound < 0 {
+		return errors.New("invocation ordinal and context round must be non-negative")
 	}
 	switch r.CostStatus {
 	case CostStatusPriced:
@@ -674,9 +902,12 @@ func (r PipelineUsageRecord) Validate() error {
 
 // PipelineResult is the final pipeline result returned by the CLI.
 type PipelineResult struct {
-	RunID                 string                 `json:"run_id"`
-	Status                string                 `json:"status"`
-	Tier                  PipelineTier           `json:"tier"`
+	RunID  string       `json:"run_id"`
+	Status string       `json:"status"`
+	Tier   PipelineTier `json:"tier"`
+	// TopologyName names the resolved topology that produced this run, so a
+	// result is self-describing. Empty for a plan built before resolution.
+	TopologyName          string                 `json:"topology_name,omitempty"`
 	Stages                []StageRecord          `json:"stages"`
 	FinalOutput           map[string]interface{} `json:"final_output,omitempty"`
 	TotalCostUSD          float64                `json:"total_cost_usd"`
@@ -690,11 +921,34 @@ type PipelineResult struct {
 	PricedRequestCount    int                    `json:"priced_request_count"`
 	UnpricedRequestCount  int                    `json:"unpriced_request_count"`
 	ErrorRequestCount     int                    `json:"error_request_count"`
-	AbortReason           *string                `json:"abort_reason,omitempty"`
-	MergeStatus           *string                `json:"merge_status,omitempty"`
-	MergeBranch           *string                `json:"merge_branch,omitempty"`
-	MergeCommitSHA        *string                `json:"merge_commit_sha,omitempty"`
-	MergeMessage          *string                `json:"merge_message,omitempty"`
+	// PromptLayoutFlips counts requests whose cacheable prefix layout (system
+	// prompt plus tool schema) differs from the previous request of the same
+	// stage in this run. Zero is the contract: a non-zero count means the
+	// provider's prefix cache was forfeited mid-stage. A request without a
+	// prompt_layout_hash carries no layout to compare and is skipped.
+	PromptLayoutFlips int     `json:"prompt_layout_flips,omitempty"`
+	AbortReason       *string `json:"abort_reason,omitempty"`
+	// Verified is true only when at least one verification check passed and
+	// no stage was incomplete or failed. A completed run that verified nothing
+	// has Status "completed" and Verified false: it is never shown as verified.
+	Verified bool `json:"verified"`
+	// UnverifiedReason names why a completed run is not verified: which checks
+	// did not apply. Empty when Verified is true.
+	UnverifiedReason string `json:"unverified_reason,omitempty"`
+	// UserAborted marks an aborted run the USER chose to stop. It is set
+	// only at the site that applies a user abort decision. Every other
+	// aborted run is an internal stop (max iterations, wall time, rollback
+	// refuse) and must project FAILED, not CANCELLED.
+	UserAborted    bool    `json:"user_aborted,omitempty"`
+	MergeStatus    *string `json:"merge_status,omitempty"`
+	MergeBranch    *string `json:"merge_branch,omitempty"`
+	MergeCommitSHA *string `json:"merge_commit_sha,omitempty"`
+	MergeMessage   *string `json:"merge_message,omitempty"`
+	// FinalState is the last computed iteration state, attached additively
+	// so post-run consumers (graph capture) can read EXECUTED verification
+	// counts instead of inferring them from stage status. Optional: legacy
+	// producers omit it and legacy consumers ignore it.
+	FinalState *IterationState `json:"final_state,omitempty"`
 }
 
 // Validate checks the pipeline result.
@@ -730,7 +984,7 @@ func (p PipelineResult) Validate() error {
 			return fmt.Errorf("invalid merge_status %q", *p.MergeStatus)
 		}
 	}
-	if p.PricedRequestCount < 0 || p.UnpricedRequestCount < 0 || p.ErrorRequestCount < 0 {
+	if p.PricedRequestCount < 0 || p.UnpricedRequestCount < 0 || p.ErrorRequestCount < 0 || p.PromptLayoutFlips < 0 {
 		return errors.New("request counts must be non-negative")
 	}
 	var input, output, cached, cacheWrite, reasoning int

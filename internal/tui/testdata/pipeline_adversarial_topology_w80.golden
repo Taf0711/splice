@@ -1,0 +1,3 @@
+PIPELINE 1/3
+ ◜ deploy_hook  ○ release_gate  ✓ sync_worker
+ [########────────]  50%
