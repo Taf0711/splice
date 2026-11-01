@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.0](https://github.com/Taf0711/splice/compare/v0.1.4...v0.2.0) (2026-08-10)
 
+
 ### Features
 
 * **design:** the design agent can now request to crystallize the plan or approve it for execution. Revisions keep the current plan and critique context. The approve transition stays available after a resume when no critique requires a fix. Splice records who requested each transition. ([3a1421f](https://github.com/Taf0711/splice/commit/3a1421f8479a8c6cb4681518690fc05d920702d4))
+
 
 ### Bug Fixes
 
