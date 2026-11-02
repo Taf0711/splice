@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"charm.land/lipgloss/v2"
 
@@ -176,6 +177,28 @@ func (m model) titleModelSegment() string {
 	return zeroTheme.ink.Render(body)
 }
 
+// fitModelEffortLabel renders "model (effort)" within budget cells. The model
+// name gives way first ("test-m… (high)"). The effort stays whole while
+// "(effort)" alone fits; only below that does the label keep its full form and
+// let the line truncate.
+func fitModelEffortLabel(model string, effort string, budget int) string {
+	if effort == "" {
+		return model
+	}
+	suffix := " (" + effort + ")"
+	full := model + suffix
+	if lipgloss.Width(full) <= budget {
+		return full
+	}
+	if name := budget - lipgloss.Width(suffix); name >= 2 {
+		return truncateDisplayWidth(model, name) + suffix
+	}
+	if effortOnly := "(" + effort + ")"; lipgloss.Width(effortOnly) <= budget {
+		return effortOnly
+	}
+	return full
+}
+
 func (m model) worktreeChip() string {
 	if m.activeWorktree == nil {
 		return ""
@@ -183,6 +206,11 @@ func (m model) worktreeChip() string {
 	name := strings.TrimSpace(m.activeWorktree.Name)
 	if name == "" {
 		return ""
+	}
+	// Generated names carry a timestamp and id; past 20 runes the chip reads
+	// as the word "worktree" instead of a noisy name.
+	if utf8.RuneCountInString(name) > 20 {
+		return "worktree"
 	}
 	return "wt:" + name
 }
@@ -252,10 +280,7 @@ func (m model) statusLine(width int) string {
 		return fitStyledLine(left, width)
 	}
 
-	// Non-tiny: append the active reasoning effort (brand lime, omitted on auto).
-	if m.reasoningEffort != "" {
-		left += zeroTheme.muted.Render(" · ") + zeroTheme.accent.Render(string(m.reasoningEffort))
-	}
+	// Non-tiny: the reasoning effort shows once, in the right-side "model (effort)".
 	// P1.4 delta: work segment (phase-appropriate counters) and agent
 	// telemetry (only when work is distributed) — both event-driven, both
 	// optional (frame UAYbi / GwrAE).
@@ -299,13 +324,6 @@ func (m model) statusLine(width int) string {
 	// "model (effort) | N tok | $x.xx | elapsed" (segments drop under width
 	// pressure; the model and token figures lead).
 	rightGroups := []string{}
-	if model := strings.TrimSpace(m.modelName); model != "" {
-		label := model
-		if m.reasoningEffort != "" {
-			label += " (" + string(m.reasoningEffort) + ")"
-		}
-		rightGroups = append(rightGroups, zeroTheme.muted.Render(label))
-	}
 	gaugeShown := false
 	if tier >= tierNarrow && !m.sidebarActive() {
 		if gauge := m.contextWindowSegment(); gauge != "" {
@@ -328,6 +346,19 @@ func (m model) statusLine(width int) string {
 		rightGroups = append(rightGroups, zeroTheme.muted.Render(elapsed))
 	}
 	right := strings.Join(rightGroups, separator)
+	if model := strings.TrimSpace(m.modelName); model != "" {
+		// The model label is fitted to whatever room the left side and the
+		// other right groups leave, so "(effort)" survives narrow widths.
+		restWidth := 0
+		if right != "" {
+			restWidth = lipgloss.Width(separator) + lipgloss.Width(right)
+		}
+		label := zeroTheme.muted.Render(fitModelEffortLabel(model, string(m.reasoningEffort), width-lipgloss.Width(left)-2-restWidth))
+		if right != "" {
+			label += separator + right
+		}
+		right = label
+	}
 
 	return fitStyledLine(joinHeaderLine(left, right, width), width)
 }
@@ -699,7 +730,16 @@ func renderSuggestionPalette(items []selectableListItem, selected, width int, ti
 		lines = append(lines, fillPaletteLine(zeroTheme.faint.Render(message), innerWidth, transparentSurface))
 	}
 
-	if footer = strings.TrimSpace(footer); footer != "" {
+	footer = strings.TrimSpace(footer)
+	if empty {
+		// Nothing to run: drop the run hint and keep the close hint.
+		footer = strings.Replace(footer, "Enter run   ", "", 1)
+	}
+	if len(items) > len(visible) {
+		// Show the position in the full list, so a long list can be walked to its end.
+		footer = fmt.Sprintf("%d/%d · ", selected+1, len(items)) + footer
+	}
+	if footer != "" {
 		lines = append(lines, zeroTheme.faint.Render(footer))
 	}
 	return styledBlockFillTitleStyled(paletteWidth, strings.TrimSpace(title), lines, zeroTheme.cardRun, lipgloss.NewStyle(), zeroTheme.ink.Bold(true))
@@ -841,6 +881,9 @@ func (m model) pickerOverlay(width int) string {
 
 	lines := make([]string, 0, len(visible)+5)
 	title := strings.TrimSpace(m.picker.title)
+	if m.picker.kind == pickerTrust {
+		title = trustPickerTitleFit(title, overlayWidth)
+	}
 	hint := "↑/↓ · ⏎ · esc"
 	if m.picker.kind == pickerTrust && m.trustPromptRequired {
 		// The mandatory first-run trust menu ignores Esc, so do not advertise it.
@@ -1190,6 +1233,19 @@ func looksLikeDiff(text string) bool {
 		}
 	}
 	return false
+}
+
+// trustPickerTitleFit shortens the path in "Trust :: <state> :: <path>" and cuts
+// it from the left, so the folder name at the tail survives a narrow overlay.
+func trustPickerTitleFit(title string, overlayWidth int) string {
+	idx := strings.LastIndex(title, " :: ")
+	if idx < 0 {
+		return title
+	}
+	head, path := title[:idx+4], shortenPath(title[idx+4:])
+	// The overlay title budget is overlayWidth-6 (frame and padding, see
+	// styledBlockFillTitleStyled).
+	return head + truncateLeftDisplayWidth(path, overlayWidth-6-lipgloss.Width(head))
 }
 
 // truncateLeftDisplayWidth keeps the end of text that fits budget cells and

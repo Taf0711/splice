@@ -1906,19 +1906,17 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// and let the key fall through to their own handlers below.
 			if m.noBlockingModal() {
 				m.permissionMode = nextPermissionMode(m.permissionMode)
-				outcome := "ask: each tool asks first"
-				if m.permissionMode == agent.PermissionModeAuto {
-					outcome = "auto: tools run without asking"
-				}
-				// A run copies the mode at launch, so a toggle during a run
-				// takes effect only from the next run.
+				// Idle toggles need no row: the footer chip already shows the mode.
+				// A run copies the mode at launch, so a toggle during a run takes
+				// effect only from the next run; the chip does not say that, so
+				// the row stays.
 				if m.pending {
-					outcome = string(m.permissionMode) + ": applies from the next run"
+					outcome := string(m.permissionMode) + ": applies from the next run"
+					m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: ackSystemText(ack{
+						verb:    "permissions",
+						outcome: outcome,
+					})})
 				}
-				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: ackSystemText(ack{
-					verb:    "permissions",
-					outcome: outcome,
-				})})
 				return m, nil
 			}
 		case m.keyMatch(m.keyBindings.cycleReasoning, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 't') }):
@@ -2272,14 +2270,14 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.pendingAskUser != nil {
-			_, state, ok := m.pendingAskUser.activeQuestion()
+			question, state, ok := m.pendingAskUser.activeQuestion()
 			if !ok {
 				return m, nil // Confirm tab: ignore stray keys
 			}
 			// In picker mode a printable keystroke means the user wants to type their
 			// own answer, so flip into free-text first instead of letting the text
 			// accumulate invisibly and then be discarded when Enter picks an option.
-			if !state.typing && keyPrintable(msg) {
+			if !state.typing && keyPrintable(msg) && !question.FixedChoices {
 				state.typing = true
 				m.input.SetValue("")
 			}
@@ -2902,8 +2900,6 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.critique.MustFixBeforeExecution {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: critiqueCardTranscriptText(msg.plan, msg.critique)})
-		} else {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan is ready. Type /approve to execute."})
 		}
 		if msg.store != nil && msg.sessionID != "" {
 			if events, err := msg.store.ReadEvents(msg.sessionID); err == nil {
@@ -4361,11 +4357,8 @@ func toolCardSuppressedInTranscript(name string) bool {
 }
 
 func (m model) workingStatusLine() string {
-	// Cosine ripple FX: "Working" breathes through a cold-to-warm theme ramp, the
-	// wave moving one character per spinner tick (shared m.spinnerPhase clock). A
-	// 6-char wavelength fits the 7-letter word so a full oscillation is visible.
-	// Under reduced motion the phase is frozen, so this renders a static gradient.
-	working := rippleText("Working", ripplePalette(), m.spinnerPhase, 6)
+	// The spinner carries liveness; the label stays still.
+	working := zeroTheme.accent.Render("Working")
 	line := zeroTheme.accent.Render(m.spinnerGlyph()) + " " + working
 	// Phase label so a long, output-less step reads as live progress rather than a
 	// frozen screen: "writing" while the answer streams, "thinking" otherwise
@@ -4496,7 +4489,7 @@ func formatWorkingElapsed(d time.Duration) string {
 // tokens arrive. Returns nil when there is no reasoning text.
 func reasoningPreviewLines(reasoning string, width int) []string {
 	var lines []string
-	for _, raw := range strings.Split(strings.TrimSpace(reasoning), "\n") {
+	for _, raw := range strings.Split(strings.TrimSpace(visibleReasoningText(reasoning)), "\n") {
 		if t := strings.TrimSpace(raw); t != "" {
 			lines = append(lines, t)
 		}

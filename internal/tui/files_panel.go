@@ -87,6 +87,15 @@ func (m model) touchedFiles() []touchedFile {
 			files[at].lastRowIndex = i
 		}
 	}
+	// A file this run created started empty, so its net added lines are its
+	// current line count. Show that with no removals, instead of summing every
+	// write (a create then an overwrite must not read +27 −1 for a 26-line file).
+	for i := range files {
+		if files[i].created {
+			files[i].adds = maxInt(0, files[i].adds-files[i].dels)
+			files[i].dels = 0
+		}
+	}
 	// Most recently touched first: the file being worked on now belongs at the
 	// top, like the sidebar's ACTIVITY feed. Sorted by last touch (not reversed
 	// first-seen order): a file touched early and touched again last must list
@@ -195,7 +204,7 @@ func (m model) sidebarFilesHeader(width int) string {
 // sidebarFileLines renders the FILES section body: the live "writing" pulse row
 // first, then the touched files newest-first, capped at maxSidebarFiles with a
 // "+N more" trailer. Returns nil when the session has touched nothing (the
-// caller shows a placeholder). The paired hits slice records each clickable
+// FILES section is then absent). The paired hits slice records each clickable
 // row's index WITHIN the returned lines.
 func (m model) sidebarFileLines(width int) ([]string, []fileHit) {
 	files := m.touchedFiles()

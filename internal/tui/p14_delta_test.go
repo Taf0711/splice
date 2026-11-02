@@ -55,12 +55,13 @@ func TestSidebarDecisionsModuleProjectsPinLedger(t *testing.T) {
 	if strings.Contains(plain, "in progress") || strings.Contains(plain, "[ ]") {
 		t.Fatalf("DECISIONS module invented a deferred state:\n%s", plain)
 	}
-	// Slot order: DECISIONS sits between PLAN and FILES (after Plan).
+	// Slot order: DECISIONS sits after PLAN (FILES is absent with no touched files).
+	m.plan.steps = []planStep{{content: "x", status: "pending"}}
+	plain = stripSidebar(m.renderContextModules(40, 60))
 	plan := strings.Index(plain, "PLAN")
 	decisions := strings.Index(plain, "DECISIONS")
-	files := strings.Index(plain, "FILES")
-	if !(plan < decisions && decisions < files) {
-		t.Fatalf("DECISIONS slot wrong: plan@%d decisions@%d files@%d", plan, decisions, files)
+	if !(plan >= 0 && plan < decisions) {
+		t.Fatalf("DECISIONS slot wrong: plan@%d decisions@%d", plan, decisions)
 	}
 }
 

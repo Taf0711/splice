@@ -840,7 +840,7 @@ A topology can have a check stage that is not active at the run tier. That
 tier then gets a different warning:
 
 ```text
-[topology] warning: no verification node is active at this tier; revision loops are disabled
+[topology] warning: trivial tasks: no verification node runs, so revision loops are off
 ```
 
 The reason for that run is `<tier> tier runs no checks`, because the tier

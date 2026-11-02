@@ -1096,6 +1096,19 @@ func TestTrustPickerHintOmitsEscOnlyWhenRequired(t *testing.T) {
 	}
 }
 
+// TestTrustPickerTitleKeepsFolderName pins A6: a long cwd is cut from the left
+// in the trust picker title, so the final folder name stays visible.
+func TestTrustPickerTitleKeepsFolderName(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.width = 120
+	m.cwd = "/Users/someone/projects/a-very-long-repository-name/nested/deeper/leaf-folder-name"
+	m.picker = m.newTrustPicker()
+	top := strings.Split(ansi.Strip(m.pickerOverlay(120)), "\n")[0]
+	if !strings.Contains(top, "leaf-folder-name") {
+		t.Fatalf("trust picker title = %q, want the folder name kept", top)
+	}
+}
+
 func TestBlockTitleTruncatesInsteadOfDropping(t *testing.T) {
 	title := "Trust :: not decided :: /Users/someone/projects/a-very-long-repository-name/nested/leaf"
 	block := ansi.Strip(styledBlockFillTitle(80, title, []string{"body"}, lipgloss.NewStyle(), lipgloss.NewStyle()))

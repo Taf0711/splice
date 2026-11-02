@@ -35,7 +35,7 @@ func reducedMotionEnabled(env func(string) string, profile colorprofile.Profile)
 //
 // While the assistant reply streams in, the latest line appears in the brand
 // lime ("fresh") and gradually settles to the standard off-white ink over
-// ~1.2 seconds. The effect mirrors the lime spinner glyph in the liveness
+// ~0.5 seconds. The effect mirrors the lime spinner glyph in the liveness
 // block: it's a quiet visual signal that the model is still emitting, not a
 // stylized "neon glow". Per-line granularity by design — per-rune would be
 // more correct for single-token streams but is ~10x the work and visually
@@ -55,10 +55,9 @@ const (
 
 	// streamingFadeDuration is how long a freshly-streamed line takes to
 	// settle from the brand-lime "fresh" color to the off-white "ink" base.
-	// 1.2s is the minimum that reads as a deliberate fade instead of a
-	// flicker — the eye registers the change and the text is already solid
-	// before the user re-reads it.
-	streamingFadeDuration = 1200 * time.Millisecond
+	// 500ms is long enough to read as a deliberate fade instead of a flicker,
+	// and short enough that the text is solid before the user re-reads it.
+	streamingFadeDuration = 500 * time.Millisecond
 
 	// streamingFadeTickInterval is the cadence at which we re-render the
 	// fading text. Independent of the 80ms spinner tick — a slower cadence
@@ -165,8 +164,8 @@ func ageDimLine(line string, bornAt, now time.Time, base lipgloss.Style) string 
 		return base.Render(line)
 	}
 	// Map age in [0, dimDuration) to bucket in [0, steps). With 12 steps
-	// over 1.2s the bucket width is exactly 100ms, so age = 0 → bucket 0,
-	// age = 99ms → bucket 0, age = 100ms → bucket 1, …
+	// over streamingFadeDuration each bucket is streamingFadeDuration/12 wide,
+	// so age = 0 → bucket 0, age just under one bucket → bucket 0, then 1, …
 	bucket := int(age * time.Duration(streamingFadeSteps) / streamingFadeDuration)
 	if bucket >= streamingFadeSteps {
 		// Floating-point edge: age = dimDuration - 1ns could still land

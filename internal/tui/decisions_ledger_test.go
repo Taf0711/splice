@@ -136,3 +136,19 @@ func mustJSON(t *testing.T, v any) json.RawMessage {
 	}
 	return raw
 }
+
+// A long decision wraps with a hanging indent instead of being cut, so its last
+// word shows in the transcript card at width 80.
+func TestDecisionsCardWrapsLongStatement(t *testing.T) {
+	text := decisionsCardTranscriptText([]splicerun.DecisionPinnedPayload{{
+		Statement: "preserving correct UTF-8 handling in every reader and writer, including the legacy paths that still decode bytes by hand, keep the wording exact",
+	}})
+	render, ok := parseLifecycleCardPayload(text)
+	if !ok {
+		t.Fatal("decisions card payload not detected")
+	}
+	plain := stripANSI(render(80))
+	if strings.Contains(plain, "…") || !strings.Contains(plain, "exact") {
+		t.Fatalf("long decision was cut at width 80, want it wrapped:\n%s", plain)
+	}
+}

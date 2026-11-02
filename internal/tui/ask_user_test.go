@@ -12,6 +12,7 @@ import (
 
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/tools"
+	"github.com/Taf0711/splice/internal/worktrees"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
@@ -888,4 +889,72 @@ func TestAskUserConfirmAnswersWrapInsideCard(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The ask_user transcript row keeps the header only (the questions live on the
+// NEEDS YOU card), and records the submitted answer on that same row by id.
+func TestAskUserTranscriptRowRecordsAnswerNotQuestions(t *testing.T) {
+	var answers [][]string
+	next := newAskUserModel(t, askUserSingle([]string{"Postgres", "SQLite", "MySQL"}, "SQLite"), &answers)
+
+	askRow := func(m model) transcriptRow {
+		t.Helper()
+		for index := len(m.transcript) - 1; index >= 0; index-- {
+			if m.transcript[index].kind == rowAskUser {
+				return m.transcript[index]
+			}
+		}
+		t.Fatalf("no ask_user row in transcript")
+		return transcriptRow{}
+	}
+	if detail := askRow(next).detail; detail != "" {
+		t.Fatalf("ask_user row detail = %q, want empty (questions are on the NEEDS YOU card)", detail)
+	}
+
+	updated, _ := next.Update(testKey(tea.KeyEnter))
+	submitted := updated.(model)
+	if len(answers) != 1 {
+		t.Fatalf("answers delivered = %v, want one submission", answers)
+	}
+	if detail := askRow(submitted).detail; detail != "→ SQLite" {
+		t.Fatalf("ask_user row detail after submit = %q, want %q", detail, "→ SQLite")
+	}
+}
+
+// The worktree review question names no path or branch, offers only its three
+// fixed choices (no "Type your own answer" row, cursor cannot reach it), and
+// its footer says "esc keep". A model-originated question keeps "esc cancel run".
+func TestWorktreeReviewQuestionIsFixedWithKeepFooter(t *testing.T) {
+	wt := worktrees.Result{Name: "tui-zero_20261102205825_1793653105698450000_-3", Path: "/Users/me/.splice/worktrees/tui-zero", RepoRoot: "/Users/me/repo"}
+	req := worktreeReviewAskRequest(wt, false)
+	question := req.Questions[0]
+	if strings.Contains(question.Question, wt.Path) || strings.Contains(question.Question, "splice/") {
+		t.Fatalf("review question names a path or branch: %q", question.Question)
+	}
+	if !question.FixedChoices {
+		t.Fatal("review question is not FixedChoices")
+	}
+	if got, want := question.OptionDescriptions[2], "Leave it in place at "+shortenPath(wt.Path); got != want {
+		t.Fatalf("keep description = %q, want %q", got, want)
+	}
+
+	var answers [][]string
+	m := newAskUserModel(t, req, &answers)
+	m.pendingAskUser.keepOnEsc = true
+	for i := 0; i < 5; i++ {
+		m = m.moveAskUserCursor(1)
+	}
+	if cursor := m.pendingAskUser.states[0].cursor; cursor >= len(question.Options) {
+		t.Fatalf("cursor reached the free-text slot: %d of %d options", cursor, len(question.Options))
+	}
+	view := stripANSI(m.View().Content)
+	assertNotContains(t, view, askUserTypeMyOwnLabel)
+	assertContains(t, view, "esc keep")
+	assertNotContains(t, view, "esc cancel run")
+
+	var modelAnswers [][]string
+	model := newAskUserModel(t, askUserSingle([]string{"Postgres", "SQLite"}, "SQLite"), &modelAnswers)
+	modelView := stripANSI(model.View().Content)
+	assertContains(t, modelView, "esc cancel run")
+	assertNotContains(t, modelView, "esc keep")
 }

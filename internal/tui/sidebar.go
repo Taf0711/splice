@@ -366,7 +366,7 @@ type sidebarAgentHit struct {
 // sidebarAgentLines renders one line per active agent. Specialist delegations
 // show a live status glyph (• running, ✓ done, ✗ error) plus a "↳ <tool>" working
 // line; swarm/team members (from swarm_spawn) show a ready dot and their id.
-// Returns nil when there are none (the caller shows a placeholder).
+// Returns nil when there are none (the AGENTS section is then absent).
 func (m model) sidebarAgentLines(width int) []string {
 	lines, _ := m.sidebarAgentRows(width)
 	return lines
@@ -575,10 +575,10 @@ var nameFillerWords = map[string]bool{
 
 // renderContextSidebar builds the sidebar block: exactly height lines, each
 // exactly width cells (after fitStyledLine + padding). Sections render top to
-// bottom — FILES, PLAN — with the token readout pinned to the bottom line. Each
-// section header is a faint uppercase label; items use ink/muted. Empty
-// sections render a quiet placeholder rather than vanishing so the layout stays
-// stable.
+// bottom — AGENTS, PLAN, FILES, and the run modules — with the token readout
+// pinned to the bottom line. Each section header is a faint uppercase label;
+// items use ink/muted. A section with nothing to show is absent; when no section
+// has anything, one quiet hint line stands in.
 func (m model) renderContextSidebar(width, height int) []string {
 	if width <= 0 || height <= 0 {
 		return nil
@@ -601,6 +601,9 @@ func (m model) renderContextSidebar(width, height int) []string {
 			lines = m.launchSidebarModules(width, bodyBudget)
 		} else {
 			lines = m.renderContextModules(width, bodyBudget)
+			if len(lines) == 0 && bodyBudget > 0 {
+				lines = []string{fitStyledLine(" "+zeroTheme.faint.Render("Run details show here."), width)}
+			}
 		}
 	}
 
@@ -687,11 +690,6 @@ func sidebarHeaderWithCount(label, count string, countStyle lipgloss.Style, widt
 		return left
 	}
 	return left + strings.Repeat(" ", gap) + right
-}
-
-// sidebarPlaceholder renders a quiet placeholder line for an empty section.
-func sidebarPlaceholder(text string, width int) string {
-	return " " + zeroTheme.faint.Render(truncateRunes(text, maxInt(1, width-1)))
 }
 
 // sidebarPlanState returns the live runtime plan, or the reviewed design plan
@@ -876,13 +874,9 @@ func (m model) activityCommandForRow(id string, runID int) string {
 func (m model) sidebarTokenLine(width int) string {
 	label := m.sidebarTokenText()
 	if label == "" {
-		// No provider step has run in this process. On a resumed session the
-		// history is real, so "0 tokens" would be false: the footprint is
-		// measured on the next turn.
-		label = "0 tokens"
-		if !m.transcriptEmpty() {
-			label = "tokens: after next turn"
-		}
+		// No figure yet: no line. A "0 tokens" readout would be false on a resumed
+		// session, and "after next turn" is noise.
+		return ""
 	}
 	// Append the graded context-fill % — the at-a-glance "how full is the window"
 	// the compaction trigger reasons about. Reserve its width so the token label

@@ -161,8 +161,6 @@ func (m model) requestDesignApproval(planID string) (model, tea.Cmd) {
 		return m, nil
 	}
 	m = updated
-	row := permissionTranscriptRow(permissionEventFromRequest(request))
-	m.transcript = appendTranscriptRow(m.transcript, row)
 	m.pendingPermission = &pendingPermissionPrompt{
 		request:        request,
 		designApproval: &designApprovalPrompt{planID: planID},

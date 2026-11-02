@@ -2,8 +2,8 @@
 │ default  source: embedded default                        │
 │                                                          │
 │ Warnings                                                 │
-│   at trivial: no verification node is active at this     │
-│   tier; revision loops are disabled                      │
+│   trivial tasks: no verification node runs, so revision  │
+│   loops are off                                          │
 │                                                          │
 │ Graph                                                    │
 │    code_writer                                           │

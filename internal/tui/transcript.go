@@ -264,7 +264,6 @@ func askUserTranscriptRow(request agent.AskUserRequest) transcriptRow {
 		kind:    rowAskUser,
 		id:      request.ToolCallID,
 		text:    askUserRowText(request),
-		detail:  askUserDetailText(request),
 		askUser: &request,
 	}
 }
@@ -279,16 +278,26 @@ func askUserRowText(request agent.AskUserRequest) string {
 	return strings.Join(parts, " ")
 }
 
-func askUserDetailText(request agent.AskUserRequest) string {
-	lines := make([]string, 0, len(request.Questions))
-	for index, question := range request.Questions {
-		line := fmt.Sprintf("%d. %s", index+1, question.Question)
-		if len(question.Options) > 0 {
-			line += "  (" + strings.Join(question.Options, ", ") + ")"
+// recordAskUserAnswer adds the submitted answers to the ask_user row that asked
+// them (matched by tool call id). The questions stay on the NEEDS YOU card, so
+// this row shows only what was answered. Unanswered blanks are skipped.
+func recordAskUserAnswer(rows []transcriptRow, id string, answers []string) []transcriptRow {
+	kept := make([]string, 0, len(answers))
+	for _, answer := range answers {
+		if answer = strings.TrimSpace(answer); answer != "" {
+			kept = append(kept, answer)
 		}
-		lines = append(lines, line)
 	}
-	return strings.Join(lines, "\n")
+	if id == "" || len(kept) == 0 {
+		return rows
+	}
+	for index := len(rows) - 1; index >= 0; index-- {
+		if rows[index].kind == rowAskUser && rows[index].id == id {
+			rows[index].detail = "→ " + strings.Join(kept, "; ")
+			break
+		}
+	}
+	return rows
 }
 
 func askUserSessionPayload(request agent.AskUserRequest) map[string]any {

@@ -94,7 +94,9 @@ func TestCrystallizeCoverageWarningAppearsOnSuccessAndPartialFailure(t *testing.
 			if !transcriptContains(next.transcript, "Design coverage note: the conversation did not settle these:") {
 				t.Fatalf("transcript = %#v, want coverage warning", next.transcript)
 			}
-			if !transcriptContains(next.transcript, "Plan is ready.") {
+			// Only the error path adds a plan-ready row; on success the plan card's
+			// [A] is the one approval prompt.
+			if tt.err != nil && !transcriptContains(next.transcript, "Plan is ready.") {
 				t.Fatalf("transcript = %#v, want plan-ready message", next.transcript)
 			}
 		})

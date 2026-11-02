@@ -311,3 +311,27 @@ func TestSidebarShowsLiveWriteBeforeResult(t *testing.T) {
 		t.Fatalf("live write missing before its result row:\n%s", plain)
 	}
 }
+
+// A file created during the run shows its current line count, not the sum of
+// every write: create (+26) then overwrite (+1 −1) reads +26 −0, not +27 −1.
+func TestTouchedFilesCreatedFileShowsCurrentLineCount(t *testing.T) {
+	created := strings.Repeat("+line\n", 26)
+	m := mouseTestModel()
+	m.transcript = append(m.transcript,
+		transcriptRow{kind: rowToolResult, tool: "write_file", id: "w1", status: tools.StatusOK,
+			text:         "tool result: write_file ok Created reverse_test.go (26 lines).",
+			detail:       strings.TrimSuffix(created, "\n"),
+			changedFiles: []string{"reverse_test.go"}},
+		transcriptRow{kind: rowToolResult, tool: "write_file", id: "w2", status: tools.StatusOK,
+			text:         "tool result: write_file ok Wrote reverse_test.go.",
+			detail:       "-old line\n+new line",
+			changedFiles: []string{"reverse_test.go"}},
+	)
+	files := m.touchedFiles()
+	if len(files) != 1 {
+		t.Fatalf("expected 1 touched file, got %+v", files)
+	}
+	if files[0].adds != 26 || files[0].dels != 0 {
+		t.Fatalf("created file stat = +%d −%d, want +26 −0", files[0].adds, files[0].dels)
+	}
+}

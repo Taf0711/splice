@@ -62,6 +62,9 @@ func recommendedAskUserIndex(question agent.AskUserQuestion) int {
 
 // askUserSelectableCount is the options count plus the trailing "type your own" row.
 func askUserSelectableCount(question agent.AskUserQuestion) int {
+	if question.FixedChoices {
+		return len(question.Options)
+	}
 	return len(question.Options) + 1
 }
 
@@ -230,6 +233,7 @@ func (m model) submitAskUser() (tea.Model, tea.Cmd) {
 		copy := *pending.worktree
 		review = &copy
 	}
+	m.transcript = recordAskUserAnswer(m.transcript, pending.request.ToolCallID, answers)
 	m.pendingAskUser = nil
 	m.reportAgentLifecycle(herdrWorking)
 	m.clearComposer()

@@ -14,6 +14,7 @@ import (
 	"github.com/Taf0711/splice/internal/sessions"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/tools"
+	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
 // TestSidebarActivityLines: the ACTIVITY feed is a bounded, newest-first list of
@@ -308,6 +309,7 @@ func TestChatColumnWidthLeavesRoomForSidebar(t *testing.T) {
 
 func TestRenderContextSidebarDimensions(t *testing.T) {
 	m := sidebarTestModel()
+	m, _ = m.recordUsageEvent(m.modelName, zeroruntime.Usage{InputTokens: 100, OutputTokens: 20}) // the token floor needs a figure
 	width := sidebarWidth(m.width)
 	const height = 20
 	lines := m.renderContextSidebar(width, height)
@@ -319,10 +321,11 @@ func TestRenderContextSidebarDimensions(t *testing.T) {
 			t.Fatalf("sidebar line %d width = %d, want exactly %d", i, w, width)
 		}
 	}
-	// Section headers and the token floor should be present.
+	// Section headers and the token floor should be present. AGENTS is absent
+	// here (no agents), so it is not expected.
 	plain := stripSidebar(lines)
-	if !strings.Contains(plain, "AGENTS") {
-		t.Fatalf("sidebar missing AGENTS header:\n%s", plain)
+	if strings.Contains(plain, "AGENTS") {
+		t.Fatalf("sidebar rendered an AGENTS header with no agents:\n%s", plain)
 	}
 	if !strings.Contains(plain, "PLAN") {
 		t.Fatalf("sidebar missing PLAN header:\n%s", plain)

@@ -200,7 +200,7 @@ func CompileTopology(topology *schemas.PipelineTopology, tier schemas.PipelineTi
 			Reserve:           tierBudget.Reserve,
 			OverflowPolicy:    tierBudget.OverflowPolicy,
 		},
-		Warnings:    compileWarnings(active, activeEdges, topology.Nodes),
+		Warnings:    compileWarnings(active, activeEdges, topology.Nodes, tier),
 		TierInput:   totalInput,
 		TierOutput:  totalOutput,
 		AgentInput:  agentInput,
@@ -342,14 +342,20 @@ func topologicalOrderNodes(nodes []schemas.PipelineNode, edges []schemas.Pipelin
 // prints it once, and the not-verified reason names the topology from it.
 const noVerificationWarning = "topology has no verification node; revision loops are disabled"
 
-// tierNoVerificationWarning is the compile warning for a tier where no
+// tierNoVerificationTail ends the compile warning for a tier where no
 // verification node of the topology is active, while another tier has one.
 // The tier, not the topology, is then the cause of an unverified run.
-const tierNoVerificationWarning = "no verification node is active at this tier; revision loops are disabled"
+const tierNoVerificationTail = "no verification node runs, so revision loops are off"
+
+// tierNoVerificationWarning names the tier in the warning: "trivial tasks: ...".
+// The name travels with the text, so every path that prints it shows the tier.
+func tierNoVerificationWarning(tier string) string {
+	return tier + " tasks: " + tierNoVerificationTail
+}
 
 // compileWarnings returns the non-fatal compile warnings for a topology. nodes
 // and edges are the active set; all is every node of the topology.
-func compileWarnings(nodes []schemas.PipelineNode, edges []schemas.PipelineEdge, all []schemas.PipelineNode) []string {
+func compileWarnings(nodes []schemas.PipelineNode, edges []schemas.PipelineEdge, all []schemas.PipelineNode, tier schemas.PipelineTier) []string {
 	byName := make(map[string]schemas.PipelineNode, len(nodes))
 	for _, node := range nodes {
 		byName[node.Name] = node
@@ -407,7 +413,7 @@ func compileWarnings(nodes []schemas.PipelineNode, edges []schemas.PipelineEdge,
 	case !verifies(all):
 		warnings = append(warnings, noVerificationWarning)
 	case !verifies(nodes):
-		warnings = append(warnings, tierNoVerificationWarning)
+		warnings = append(warnings, tierNoVerificationWarning(string(tier)))
 	}
 	if len(warnings) == 0 {
 		return nil

@@ -231,6 +231,11 @@ func TestDesignAgentApproveRequestsUserConfirmation(t *testing.T) {
 	if next.pendingPermission == nil || next.pendingPermission.request.ToolName != "approve_design" {
 		t.Fatal("agent-requested approval did not show the confirmation prompt")
 	}
+	for _, row := range next.transcript {
+		if row.kind == rowPermission {
+			t.Fatalf("approval prompt added a raw permission transcript row %q; the pending prompt is the only UI", row.text)
+		}
+	}
 	if !next.sidebarActive() {
 		t.Fatal("approval confirmation made the design-plan sidebar disappear")
 	}
@@ -1245,8 +1250,9 @@ func TestCrystallizeResultMsgOutcomes(t *testing.T) {
 			wantSessionEvents: true,
 			wantTranscript: []string{
 				"IMPLEMENTATION PLAN",
-				"Plan is ready. Type /approve to execute.",
 			},
+			// The plan card's [A] is the one way to approve; no extra prompt row.
+			notWantTranscript: []string{"Plan is ready. Type /approve to execute."},
 		},
 	}
 

@@ -100,19 +100,20 @@ type planStepHit struct {
 }
 
 // sidebarPlanSelectables returns each plan step's clickable sidebar line. The
-// PLAN section renders after AGENTS in renderContextSidebar: the AGENTS header +
-// its body (the agent lines, or a 1-line placeholder), then a blank line and the
-// PLAN header, then one line per step (sidebarPlanLines is one line per step).
-// The offset accounting mirrors that layout exactly.
+// Sections with nothing to show are absent, so AGENTS may be missing. AGENTS
+// renders first when present: its header, its rows, and the blank separator come
+// before the PLAN header. One line per step follows the PLAN header. The layout
+// is computed here, not by rendering the sidebar, which would recurse through
+// the hover lookup.
 func (m model) sidebarPlanSelectables(width int) []planStepHit {
 	if m.plan.isEmpty() {
 		return nil
 	}
-	agentBody := len(m.sidebarAgentLines(width))
-	if agentBody == 0 {
-		agentBody = 1 // the "no agents spawned" placeholder occupies one line
+	base := 0
+	if agentRows := len(m.sidebarAgentLines(width)); agentRows > 0 {
+		base = 1 + agentRows + 1 // AGENTS header + rows + blank separator
 	}
-	base := 1 + agentBody + 2 // AGENTS header + body + (blank line + PLAN header)
+	base++ // PLAN header
 	hits := make([]planStepHit, 0, len(m.plan.steps))
 	for i := range m.plan.steps {
 		hits = append(hits, planStepHit{lineOffset: base + i, stepIndex: i})

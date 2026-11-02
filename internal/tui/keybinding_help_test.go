@@ -87,6 +87,19 @@ func TestHelpOverlayViewRendersGroupsAndKeys(t *testing.T) {
 	}
 }
 
+// Shift+Tab help names the modes the footer chip shows, in the chip's words.
+func TestKeybindingHelpShiftTabNamesChipModes(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-4o"})
+	want := "cycle permission mode (ask \u2194 auto-approve)"
+	for _, group := range m.buildKeybindingGroups() {
+		for _, binding := range group.bindings {
+			if binding.keys == "Shift+Tab" && binding.desc != want {
+				t.Fatalf("Shift+Tab help = %q, want %q", binding.desc, want)
+			}
+		}
+	}
+}
+
 // Ctrl+T help lists the same levels the cycle uses, not a fixed list.
 func TestKeybindingHelpEffortListsModelLevels(t *testing.T) {
 	m := newModel(context.Background(), Options{ModelName: "gpt-5.5"})

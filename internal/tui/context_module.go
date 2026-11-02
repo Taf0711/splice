@@ -27,9 +27,8 @@ const (
 
 // contextModule is one registered sidebar section. Render returns the
 // section's lines at the given width (header included); Has reports whether
-// the module has anything to show (an absent module renders nothing, not a
-// placeholder — the sidebar only renders placeholders where a module is
-// always present, e.g. AGENTS/PLAN/FILES).
+// the module has anything to show. An absent module renders nothing: the
+// sidebar draws no placeholders for empty sections.
 type contextModule struct {
 	name   string
 	slot   ContextSlot
@@ -45,25 +44,19 @@ func contextRegistry() []contextModule {
 		{
 			name: "agents",
 			slot: ContextSlotAgents,
-			has:  func(m model) bool { return true }, // always present (placeholder when empty)
+			has:  func(m model) bool { return len(m.sidebarAgentLines(80)) > 0 },
 			render: func(m model, width int) []string {
 				lines := []string{m.sidebarAgentHeader(width)}
-				if agentLines := m.sidebarAgentLines(width); len(agentLines) > 0 {
-					return append(lines, agentLines...)
-				}
-				return append(lines, sidebarPlaceholder("no agents spawned", width))
+				return append(lines, m.sidebarAgentLines(width)...)
 			},
 		},
 		{
 			name: "plan",
 			slot: ContextSlotPlan,
-			has:  func(m model) bool { return true },
+			has:  func(m model) bool { return len(m.sidebarPlanLines(80)) > 0 },
 			render: func(m model, width int) []string {
 				lines := []string{m.sidebarPlanHeader(width)}
-				if planLines := m.sidebarPlanLines(width); len(planLines) > 0 {
-					return append(lines, planLines...)
-				}
-				return append(lines, sidebarPlaceholder("no active plan", width))
+				return append(lines, m.sidebarPlanLines(width)...)
 			},
 		},
 		{
@@ -131,14 +124,14 @@ func contextRegistry() []contextModule {
 		{
 			name: "files",
 			slot: ContextSlotFiles,
-			has:  func(m model) bool { return true },
+			has: func(m model) bool {
+				fileLines, _ := m.sidebarFileLines(80)
+				return len(fileLines) > 0
+			},
 			render: func(m model, width int) []string {
 				lines := []string{m.sidebarFilesHeader(width)}
 				fileLines, _ := m.sidebarFileLines(width)
-				if len(fileLines) > 0 {
-					return append(lines, fileLines...)
-				}
-				return append(lines, sidebarPlaceholder("no files touched", width))
+				return append(lines, fileLines...)
 			},
 		},
 		{
