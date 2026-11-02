@@ -55,7 +55,9 @@ func decisionsCardTranscriptText(decisions []splicerun.DecisionPinnedPayload) st
 	if len(decisions) == 0 {
 		return ""
 	}
-	return decisionsCardMarker + strings.Join(decisionsCardBody(decisions, 100), "\n")
+	// 80 columns: the stored body is width-independent, so it wraps to the
+	// narrowest width the card is expected at.
+	return decisionsCardMarker + strings.Join(decisionsCardBody(decisions, 80), "\n")
 }
 
 // refreshDecisionsLedgerCard replaces the transcript's current decisions
@@ -94,6 +96,15 @@ func (m model) refreshDecisionsLedgerCard() model {
 	}
 	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, text: card})
 	return m
+}
+
+// wrapPlainTextOrBlank wraps text to measure cells and keeps one (blank) line
+// for empty text so the marker still shows.
+func wrapPlainTextOrBlank(text string, measure int) []string {
+	if lines := wrapPlainText(text, measure); len(lines) > 0 {
+		return lines
+	}
+	return []string{""}
 }
 
 // designDecisions returns the pinned-decision ledger reconstructed from the
@@ -180,7 +191,7 @@ func (m model) sidebarRunLines(width int) []string {
 		row("elapsed", formatRunElapsed(m.now().Sub(m.turnStartedAt)))
 	}
 	if tokens := m.sidebarTokenText(); tokens != "" {
-		row("tokens", tokens)
+		row("context", tokens)
 	}
 	row("stage", m.runStageLabel())
 	return lines
@@ -191,6 +202,13 @@ func (m model) sidebarRunLines(width int) []string {
 // while a run executes, plain design when idle-but-active. workingActivity
 // is the canonical activity wording ("thinking"/"writing"/"running <tool>").
 func (m model) runStageLabel() string {
+	// An active pipeline is execution even while design mode is still on.
+	if m.pending {
+		pipeline := m.pipeline.presentation()
+		if pipeline.active && pipeline.total > 0 {
+			return "executing · " + m.workingActivity()
+		}
+	}
 	if m.designMode {
 		if m.pending {
 			return "design · " + m.workingActivity()
@@ -198,10 +216,6 @@ func (m model) runStageLabel() string {
 		return "design"
 	}
 	if m.pending {
-		pipeline := m.pipeline.presentation()
-		if pipeline.active && pipeline.total > 0 {
-			return "executing · " + m.workingActivity()
-		}
 		return "executing"
 	}
 	return ""
@@ -451,7 +465,7 @@ func implementationPlanCardBody(plan schemas.DesignPlan, critiqueClean bool, wid
 	}
 	lines = append(lines, "")
 	lines = append(lines,
-		zeroTheme.muted.Render("[A]")+" "+zeroTheme.ink.Render("approve (explicit)")+"  "+
+		zeroTheme.muted.Render("[A]")+" "+zeroTheme.ink.Render("approve")+"  "+
 			zeroTheme.muted.Render("[R]")+" "+zeroTheme.ink.Render("revise"))
 	return lines
 }
@@ -531,11 +545,24 @@ func decisionsCardBody(decisions []splicerun.DecisionPinnedPayload, width int) [
 			zeroTheme.faint.Render(fmt.Sprintf("%d settled", settled)),
 	}
 	for _, d := range decisions {
+		// Statements wrap with a hanging indent under the marker, never cut.
 		if d.Revised {
-			lines = append(lines, "  "+zeroTheme.faint.Render("[~] REVISED  "+truncateRunes(d.Statement, bodyBudget-14)))
+			for index, wrapped := range wrapPlainTextOrBlank(d.Statement, bodyBudget-15) {
+				head := "               "
+				if index == 0 {
+					head = "  " + zeroTheme.faint.Render("[~] REVISED") + "  "
+				}
+				lines = append(lines, head+zeroTheme.faint.Render(wrapped))
+			}
 			continue
 		}
-		lines = append(lines, "  "+zeroTheme.green.Render("[+]")+" "+zeroTheme.ink.Render(truncateRunes(d.Statement, bodyBudget-6)))
+		for index, wrapped := range wrapPlainTextOrBlank(d.Statement, bodyBudget-6) {
+			head := "      "
+			if index == 0 {
+				head = "  " + zeroTheme.green.Render("[+]") + " "
+			}
+			lines = append(lines, head+zeroTheme.ink.Render(wrapped))
+		}
 		if detail := strings.TrimSpace(d.Detail); detail != "" {
 			for _, wrapped := range wrapPlainText(detail, bodyBudget-8) {
 				lines = append(lines, "      "+zeroTheme.faint.Render(wrapped))

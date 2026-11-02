@@ -13,41 +13,63 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/Taf0711/splice/internal/presentation"
+	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
-// The registry composes every always-present module in slot order: AGENTS,
-// PLAN, FILES render placeholders when empty; PIPELINE/TRAJECTORY/MEMORY/
-// ACTIVITY are absent when they have nothing.
+// withPlanAndFile seeds one plan step and one touched file, so PLAN and FILES
+// have content to render.
+func withPlanAndFile(m model) model {
+	m.plan.steps = []planStep{{content: "x", status: "pending"}}
+	m.transcript = append(m.transcript, transcriptRow{kind: rowToolResult, tool: "write_file", changedFiles: []string{"main.go"}})
+	return m
+}
+
+// Sections with nothing to show are absent: an idle model renders no AGENTS,
+// PLAN, or FILES placeholder, and no PIPELINE, MEMORY, or ACTIVITY section.
+// With a plan and a touched file, PLAN precedes FILES.
 func TestContextRegistrySlotOrderAndPresence(t *testing.T) {
 	m := mouseTestModel()
-	lines := m.renderContextModules(30, 40)
-	plain := stripSidebar(lines)
-	// Always-present sections, in order.
-	agents := strings.Index(plain, "AGENTS")
+	m.designMode = false // design mode shows the RUN module on an otherwise idle model
+	if lines := m.renderContextModules(30, 40); len(lines) != 0 {
+		t.Fatalf("idle model rendered sections, want none: %q", stripSidebar(lines))
+	}
+	m = withPlanAndFile(m)
+	plain := stripSidebar(m.renderContextModules(30, 40))
 	plan := strings.Index(plain, "PLAN")
 	files := strings.Index(plain, "FILES")
-	if agents < 0 || plan < 0 || files < 0 {
-		t.Fatalf("registry missing a base section: %q", plain)
+	if plan < 0 || files < 0 || strings.Contains(plain, "AGENTS") {
+		t.Fatalf("expected PLAN and FILES only: %q", plain)
 	}
-	if !(agents < plan && plan < files) {
-		t.Fatalf("slot order wrong: agents@%d plan@%d files@%d", agents, plan, files)
+	if !(plan < files) {
+		t.Fatalf("slot order wrong: plan@%d files@%d", plan, files)
 	}
-	// Conditional sections absent on an idle model.
-	if strings.Contains(plain, "PIPELINE") {
-		t.Fatalf("idle model rendered the PIPELINE section: %q", plain)
+}
+
+// With a transcript but nothing to show, the sidebar carries one hint line in
+// place of the empty sections, and no token readout (there is no figure yet).
+func TestSidebarIdleShowsHintNotPlaceholders(t *testing.T) {
+	m := mouseTestModel()
+	m.designMode = false
+	m.transcript = append(m.transcript, transcriptRow{kind: rowToolCall, tool: "read_file", detail: "main.go"})
+	lines := m.renderContextSidebar(sidebarWidth(m.width), m.height)
+	plain := stripSidebar(lines)
+	if !strings.Contains(plain, "Run details show here.") {
+		t.Fatalf("idle sidebar missing the hint line: %q", plain)
 	}
-	if strings.Contains(plain, "Memory") {
-		t.Fatalf("idle model rendered the MEMORY section: %q", plain)
+	for _, placeholder := range []string{"no agents spawned", "no active plan", "no files touched", "after next turn", "0 tokens"} {
+		if strings.Contains(plain, placeholder) {
+			t.Fatalf("idle sidebar still renders %q: %q", placeholder, plain)
+		}
 	}
-	if strings.Contains(plain, "ACTIVITY") {
-		t.Fatalf("idle model rendered the ACTIVITY section: %q", plain)
+	if last := strings.TrimSpace(stripSidebar(lines[len(lines)-1:])); last != "" {
+		t.Fatalf("token row = %q, want blank with no figure", last)
 	}
 }
 
 // A pipeline-carrying model renders PIPELINE between PLAN and FILES, and the
 // trajectory surface below it.
 func TestContextRegistryPipelineAndTrajectory(t *testing.T) {
-	m := mouseTestModel()
+	m := withPlanAndFile(mouseTestModel())
 	m.pipeline.applyState(benchNodeState(4))
 	lines := m.renderContextModules(40, 60)
 	plain := stripSidebar(lines)
@@ -63,16 +85,17 @@ func TestContextRegistryPipelineAndTrajectory(t *testing.T) {
 }
 
 // Budget: a module that no longer fits is dropped WHOLE (no truncated
-// section). With a budget that fits only AGENTS, nothing after it renders.
+// section). With a budget that fits only the one-step PLAN, nothing after it renders.
 func TestContextRegistryDropsWholeUnderBudget(t *testing.T) {
 	m := mouseTestModel()
+	m = withPlanAndFile(m)
 	m.pipeline.applyState(benchNodeState(4))
 	lines := m.renderContextModules(30, 3)
 	plain := stripSidebar(lines)
-	if !strings.Contains(plain, "AGENTS") {
+	if !strings.Contains(plain, "PLAN") {
 		t.Fatalf("first module must fit: %q", plain)
 	}
-	if strings.Contains(plain, "PLAN") || strings.Contains(plain, "PIPELINE") || strings.Contains(plain, "FILES") {
+	if strings.Contains(plain, "PIPELINE") || strings.Contains(plain, "FILES") {
 		t.Fatalf("sections past the budget rendered partially: %q", plain)
 	}
 }
@@ -85,12 +108,13 @@ func TestContextSidebarRegistryPreservesGeometry(t *testing.T) {
 	m.height = 30
 	m.altScreen = true
 	m.pipeline.applyState(benchNodeState(4))
+	m, _ = m.recordUsageEvent(m.modelName, zeroruntime.Usage{InputTokens: 100, OutputTokens: 20})
 	lines := m.renderContextSidebar(sidebarWidth(m.width), m.height)
 	if len(lines) != m.height {
 		t.Fatalf("sidebar rows = %d, want %d", len(lines), m.height)
 	}
 	last := stripSidebar([]string{lines[len(lines)-1]})
-	if !strings.Contains(last, "tokens") && !strings.Contains(last, "0 tokens") {
+	if !strings.Contains(last, "tokens") {
 		t.Fatalf("token line not pinned at the floor: %q", last)
 	}
 	for i, line := range lines {

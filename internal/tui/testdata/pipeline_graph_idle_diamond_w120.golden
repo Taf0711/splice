@@ -14,6 +14,6 @@
 │   command node lint: go vet ./...                                                                                    │
 │   1 command node runs shell commands when this topology is active                                                    │
 │                                                                                                                      │
-│ hint: change it with /pipeline use <name>; this view is read-only                                                    │
+│ hint: edit it in the browser with /pipeline edit; pick another with /pipeline use <name>                             │
 │ hint: Ctrl+G shows each node's model, budget, and last result                                                        │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

@@ -23,8 +23,9 @@ type commandSuggestion struct {
 
 const (
 	// maxCommandSuggestions caps command matches kept in memory; rendering still
-	// shows a smaller window so a bare "/" can report the remaining commands.
-	maxCommandSuggestions = 32
+	// shows a smaller window. It must exceed the builtin count (about 55) so a
+	// bare "/" can reach every command.
+	maxCommandSuggestions = 256
 	maxFileSuggestions    = 16
 )
 

@@ -275,7 +275,7 @@ func TestTopologyWarningsNameTheirTiers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"at trivial: " + tierNoVerificationWarning}
+	want := []string{tierNoVerificationWarning("trivial")}
 	if !reflect.DeepEqual(warnings, want) {
 		t.Fatalf("warnings = %q, want %q", warnings, want)
 	}

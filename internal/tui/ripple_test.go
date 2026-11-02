@@ -3,6 +3,9 @@ package tui
 import (
 	"strings"
 	"testing"
+
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/colorprofile"
 )
 
 // TestRippleLevelAtTrough verifies the cosine trough: with q = waveLen/2,
@@ -103,23 +106,24 @@ func TestRippleAdvancesPhaseAcrossFrames(t *testing.T) {
 	}
 }
 
-// TestWorkingStatusLineRipplesWorkingWord is the integration test: the working
-// status line must carry styling around "Working" (not the literal word) and the
-// styling must change as the shared spinner phase advances.
-func TestWorkingStatusLineRipplesWorkingWord(t *testing.T) {
+// TestWorkingLabelStaysStillAcrossPhases pins A1: the working label is a static
+// accent, so its styled bytes are identical as the spinner phase advances. Only
+// the spinner glyph carries liveness.
+func TestWorkingLabelStaysStillAcrossPhases(t *testing.T) {
+	old := lipgloss.Writer.Profile
+	lipgloss.Writer.Profile = colorprofile.TrueColor
+	defer func() { lipgloss.Writer.Profile = old }()
+
 	m := newModel(t.Context(), Options{})
 	m.width = 130
 	m.pending = true
+	label := zeroTheme.accent.Render("Working")
 
-	m.spinnerPhase = 0
-	a := m.workingStatusLine()
-	if !strings.Contains(plainRender(t, a), "Working") {
-		t.Fatalf("working status line missing 'Working' substring; got %q", a)
-	}
-
-	m.spinnerPhase = 3
-	b := m.workingStatusLine()
-	if a == b {
-		t.Fatalf("working status line did not change as spinnerPhase advanced; got %q", a)
+	for _, phase := range []int{0, 3, 7} {
+		m.spinnerPhase = phase
+		line := m.workingStatusLine()
+		if !strings.Contains(line, label) {
+			t.Fatalf("phase %d: working label is not the static accent render; got %q", phase, line)
+		}
 	}
 }

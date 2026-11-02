@@ -840,7 +840,7 @@ A topology can have a check stage that is not active at the run tier. That
 tier then gets a different warning:
 
 ```text
-[topology] warning: no verification node is active at this tier; revision loops are disabled
+[topology] warning: trivial tasks: no verification node runs, so revision loops are off
 ```
 
 The reason for that run is `<tier> tier runs no checks`, because the tier
@@ -985,6 +985,7 @@ To open the editor, use one of these entry points:
 |---|---|
 | `/pipeline edit` in the TUI | A draft of the active topology. A library entry is edited. A project file or the embedded default is copied. |
 | `/pipeline edit <name>` in the TUI | A draft of the library entry `<name>`. `default` copies the embedded default. |
+| Ctrl+X in the TUI | The same as `/pipeline edit`. Remap it with `keybindings.openPipelineEditor`. |
 | The Edit a copy link in the viewer | A copy of the active topology. |
 | `splice pipeline edit [--new] [name\|default]` | The same drafts, without the TUI. |
 

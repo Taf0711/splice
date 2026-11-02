@@ -611,7 +611,7 @@ func TestPipelineCommandRendersEmbeddedDefaultReadOnly(t *testing.T) {
 		"acceptance_verifier",
 		"<- test_runner",
 		"Command nodes",
-		"change it with /pipeline use <name>; this view is read-only",
+		"edit it in the browser with /pipeline edit; pick another with /pipeline use <name>",
 	} {
 		assertContains(t, text, want)
 	}

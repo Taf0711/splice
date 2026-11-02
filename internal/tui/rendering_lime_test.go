@@ -16,6 +16,7 @@ import (
 	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/streamjson"
 	"github.com/Taf0711/splice/internal/tools"
+	"github.com/Taf0711/splice/internal/worktrees"
 )
 
 // ansiPattern strips SGR styling and OSC sequences (hyperlinks) so
@@ -1418,12 +1419,15 @@ func TestStatusLineGroups(t *testing.T) {
 	}
 }
 
-func TestStatusLineShowsEffortWhenSet(t *testing.T) {
+func TestStatusLineShowsEffortOnce(t *testing.T) {
 	m := limeTestModel()
 	m.reasoningEffort = modelregistry.ReasoningEffortHigh
 	status := plainRender(t, m.statusLine(110))
-	if !strings.Contains(status, "high") {
-		t.Fatalf("status line = %q, missing effort segment when set", status)
+	if n := strings.Count(status, "high"); n != 1 {
+		t.Fatalf("status line = %q, effort %q appears %d times, want once (right-side model label)", status, "high", n)
+	}
+	if !strings.Contains(status, "test-model (high)") {
+		t.Fatalf("status line = %q, missing \"model (effort)\" label", status)
 	}
 }
 
@@ -1924,5 +1928,68 @@ func TestComposerDescriptionHintStaysEmptyForFilePalette(t *testing.T) {
 	m.recomputeSuggestions()
 	if got := m.composerDescriptionHint(96); got != "" {
 		t.Fatalf("description hint should be empty for file palette, got %q", got)
+	}
+}
+
+func TestStatusLineKeepsEffortAtNarrowWidths(t *testing.T) {
+	for _, width := range []int{60, 70} {
+		m := limeTestModel()
+		m.reasoningEffort = modelregistry.ReasoningEffortHigh
+		status := plainRender(t, m.statusLine(width))
+		t.Logf("width %d: %q", width, status)
+		if !strings.Contains(status, "(high)") {
+			t.Fatalf("width %d: status line = %q, want \"(high)\" visible", width, status)
+		}
+	}
+}
+
+// Pipeline progress shares the reasoning channel with model thinking. The
+// Thinking block shows only the model's line; the progress line is filtered at
+// render time (session events keep it).
+func TestReasoningBlockOmitsPipelineProgressLines(t *testing.T) {
+	text := "[code_writer] context round fulfilled: 2 item(s) delivered\nplan the parser first\n[1] see the docs\n[x] done"
+	plain := plainRender(t, renderReasoningBlock(text, true, 80, false, 0, 0))
+	if strings.Contains(plain, "context round fulfilled") {
+		t.Fatalf("thinking block shows pipeline progress: %q", plain)
+	}
+	for _, want := range []string{"plan the parser first", "[1] see the docs", "[x] done"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("thinking block lost the model's line %q: %q", want, plain)
+		}
+	}
+}
+
+// A passing acceptance check renders as one line (status + command) and does
+// not repeat the stdout already shown by the "Ran $" card. A failure keeps it.
+func TestAcceptanceResultPassingIsOneLine(t *testing.T) {
+	rc := rowContext{hints: map[string]string{rcKey(0, "acc1"): "go test ./..."}}
+	opts := cardRenderOptions{bodyCap: cardBodyMaxLines}
+	ok := transcriptRow{kind: rowToolResult, tool: "splice.acceptance", id: "acc1", status: tools.StatusOK,
+		text: "tool result: splice.acceptance ok stdout:", detail: "stdout:\nok  \tpkg\t0.2s"}
+	plain := plainRender(t, renderToolResultCard(ok, 100, rc, opts))
+	if strings.Count(strings.TrimRight(plain, "\n"), "\n") != 0 {
+		t.Fatalf("passing acceptance check = %q, want one line", plain)
+	}
+	if !strings.Contains(plain, "go test ./...") || strings.Contains(plain, "stdout") || strings.Contains(plain, "pkg") {
+		t.Fatalf("passing acceptance check = %q, want status and command only", plain)
+	}
+
+	failed := ok
+	failed.status = tools.StatusError
+	failed.text = "tool result: splice.acceptance error stdout:"
+	if out := plainRender(t, renderToolResultCard(failed, 100, rc, opts)); !strings.Contains(out, "pkg") {
+		t.Fatalf("failed acceptance check = %q, want its output kept", out)
+	}
+}
+
+func TestWorktreeChipShortensGeneratedNames(t *testing.T) {
+	m := limeTestModel()
+	m.activeWorktree = &worktrees.Result{Name: "tui-zero"}
+	if got := m.worktreeChip(); got != "wt:tui-zero" {
+		t.Fatalf("short name chip = %q, want %q", got, "wt:tui-zero")
+	}
+	m.activeWorktree = &worktrees.Result{Name: "tui-zero_20261102205825_1793653105698450000_-3"}
+	if got := m.worktreeChip(); got != "worktree" {
+		t.Fatalf("generated name chip = %q, want %q", got, "worktree")
 	}
 }

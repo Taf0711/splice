@@ -320,6 +320,9 @@ type AskUserQuestion struct {
 	OptionDescriptions []string `json:"optionDescriptions,omitempty"`
 	Recommended        string   `json:"recommended,omitempty"`
 	MultiSelect        bool     `json:"multiSelect,omitempty"`
+	// FixedChoices means the UI offers only the listed options, with no
+	// free-text entry.
+	FixedChoices bool `json:"fixedChoices,omitempty"`
 }
 
 // AskUserRequest is handed to OnAskUser when the model invokes the ask_user tool.

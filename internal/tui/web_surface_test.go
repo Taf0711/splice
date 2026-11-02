@@ -803,6 +803,44 @@ func TestPipelineEditOpensTheEditorOnADraft(t *testing.T) {
 	}
 }
 
+// TestCtrlXOpensThePipelineEditor pins the Ctrl+X shortcut: it opens the same
+// browser editor on the active topology that /pipeline edit does.
+func TestCtrlXOpensThePipelineEditor(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	m, opened := newWebTestModel(t, true)
+	m.cwd = t.TempDir()
+	updated, cmd := m.Update(testKeyCtrl('x'))
+	if cmd != nil {
+		t.Fatal("Ctrl+X must not start a run")
+	}
+	m = updated.(model)
+	row := lastSystemRow(t, m)
+	if !strings.HasPrefix(row, "Pipeline editor: http://127.0.0.1:") || len(*opened) != 1 {
+		t.Fatalf("row = %q, opened = %v", row, *opened)
+	}
+	drafts, _ := filepath.Glob(filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "splice", "pipelines", ".drafts", "*.json"))
+	if len(drafts) != 1 {
+		t.Fatalf("drafts = %v, want one", drafts)
+	}
+}
+
+// TestCtrlXDoesNothingWhileAModalIsOpen pins that Ctrl+X leaves an open
+// picker's keys alone: no editor, no browser, no draft.
+func TestCtrlXDoesNothingWhileAModalIsOpen(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	m, opened := newWebTestModel(t, true)
+	m.cwd = t.TempDir()
+	m.picker = &commandPicker{}
+	m.Update(testKeyCtrl('x'))
+	if len(*opened) != 0 {
+		t.Fatalf("opened = %v, want none", *opened)
+	}
+	drafts, _ := filepath.Glob(filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "splice", "pipelines", ".drafts", "*.json"))
+	if len(drafts) != 0 {
+		t.Fatalf("drafts = %v, want none", drafts)
+	}
+}
+
 // TestEditorUseNowGoesThroughPipelineUse pins that "Use it now" in the
 // browser runs /pipeline use in the UI loop, with its refusal during a run.
 func TestEditorUseNowGoesThroughPipelineUse(t *testing.T) {

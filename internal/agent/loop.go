@@ -1496,7 +1496,7 @@ func sandboxDeniedNetworkRetryEvent(call ToolCall, tool tools.Tool, args map[str
 		SideEffect:     string(tools.SideEffectShell),
 		Reason:         sandbox.ReasonNetworkBlocked,
 		DecisionReason: reason,
-		Scope:          permissionScope(call.Name, args),
+		Scope:          PermissionScope(call.Name, args),
 		Risk:           risk,
 		CommandPrefix:  proposedCommandPrefix(call.Name, args),
 	}
@@ -1558,7 +1558,7 @@ func sandboxRestrictionRetryEvent(call ToolCall, tool tools.Tool, args map[strin
 		Autonomy:       options.Autonomy,
 		SideEffect:     string(tools.SideEffectShell),
 		Reason:         reason,
-		Scope:          permissionScope(call.Name, args),
+		Scope:          PermissionScope(call.Name, args),
 		Risk:           risk,
 		CommandPrefix:  proposedCommandPrefix(call.Name, args),
 	}
@@ -2370,13 +2370,13 @@ func canceledPermissionResult(call ToolCall, reason string, requestEvent Permiss
 	}
 }
 
-// permissionScope returns a concise, human-readable description of what a tool
+// PermissionScope returns a concise, human-readable description of what a tool
 // call will actually touch -- a file path, directory, working dir, or network
 // host lifted from its arguments -- so the permission card and persisted
 // decision can show the user exactly what "allow" covers. It is empty when the
 // tool exposes no scoped argument (the grant is then plainly tool-wide). The
 // first matching key wins, ordered most-specific (a concrete file) first.
-func permissionScope(toolName string, args map[string]any) string {
+func PermissionScope(toolName string, args map[string]any) string {
 	// sandbox.DeriveScope is the single source of truth for which arguments carry
 	// a scope, shared with grant persistence and matching so the card display can
 	// never diverge from what an "always allow" actually covers.
@@ -2454,7 +2454,7 @@ func buildPermissionEvent(call ToolCall, tool tools.Tool, args map[string]any, p
 		return PermissionEvent{}, false
 	}
 
-	scopeText := permissionScope(call.Name, args)
+	scopeText := PermissionScope(call.Name, args)
 	if profile, ok, err := inlineAdditionalPermissionsProfile(args, options.Cwd); ok && err == nil {
 		scopeText = requestPermissionsScope(profile)
 	}

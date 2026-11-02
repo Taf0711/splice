@@ -369,6 +369,21 @@ func TestSanitizeKeyBindingsDropsCollisionWithOtherDefault(t *testing.T) {
 	}
 }
 
+// Ctrl+G is a reserved chord, so openPipelineEditor cannot take it.
+func TestSanitizeKeyBindingsRevertsOpenPipelineEditorOnCtrlG(t *testing.T) {
+	cfg := config.KeyBindingsConfig{
+		OpenPipelineEditor: "ctrl+g",
+	}
+	sanitized, warnings := sanitizeKeyBindings(resolveKeyBindings(cfg))
+
+	if !sanitized.openPipelineEditor.isZero() {
+		t.Errorf("openPipelineEditor should be reverted to default, got %q", sanitized.openPipelineEditor.Label())
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("want exactly 1 warning, got %d: %v", len(warnings), warnings)
+	}
+}
+
 // Bare hardcoded keys handled directly in updateModel (e.g. Tab navigation)
 // are reserved too and must not be shadowed by configurable bindings.
 func TestSanitizeKeyBindingsDropsBareHardcodedCollision(t *testing.T) {

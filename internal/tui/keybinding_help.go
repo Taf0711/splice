@@ -61,6 +61,7 @@ func (m model) buildKeybindingGroups() []keybindingGroup {
 		{labelOr(m.keyBindings.toggleDetailed, "Ctrl+O"), "toggle the detailed (full-screen) transcript"},
 		{labelOr(m.keyBindings.toggleSidebar, "Ctrl+B"), sidebarKey},
 		{"Ctrl+G", "open the run evidence pane (Esc closes)"},
+		{labelOr(m.keyBindings.openPipelineEditor, "Ctrl+X"), "open the pipeline editor in the browser"},
 	}
 	// The graph keys work only inside the Ctrl+G pane, so they show only there.
 	if paneGraph {
@@ -86,7 +87,7 @@ func (m model) buildKeybindingGroups() []keybindingGroup {
 			title: "Model & run controls",
 			bindings: []keybinding{
 				{labelOr(m.keyBindings.cycleReasoning, "Ctrl+T"), effortKey},
-				{"Shift+Tab", "cycle permission mode (auto \u2194 ask)"},
+				{"Shift+Tab", "cycle permission mode (ask \u2194 auto-approve)"},
 				{labelOr(m.keyBindings.togglePlan, "Ctrl+P"), "expand / collapse the plan panel"},
 			},
 		},

@@ -1042,7 +1042,7 @@ func (m model) renderSelectableStreamingReasoning(width int, startBodyY int) []t
 }
 
 func (m model) renderSelectableReasoningBlock(rowIndex int, text string, expanded bool, running bool, elapsed time.Duration, width int, startBodyY int) ([]string, []transcriptSelectableLine) {
-	text = strings.TrimSpace(text)
+	text = strings.TrimSpace(visibleReasoningText(text))
 	if text == "" {
 		return nil, nil
 	}

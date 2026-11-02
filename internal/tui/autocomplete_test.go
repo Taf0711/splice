@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,6 +97,34 @@ func TestTabCyclesSuggestions(t *testing.T) {
 	}
 	if m.suggestionIdx != m.suggestionIdx%len(m.suggestions) {
 		t.Fatal("selection index out of range after cycling")
+	}
+}
+
+// TestBareSlashReachesEveryCommand pins A8: a bare "/" lists every command, the
+// palette footer shows the position in that list, and Up from the first row
+// wraps to the last command.
+func TestBareSlashReachesEveryCommand(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.width, m.height = 96, 30
+	m = typeRunes(t, m, "/")
+	// Every command the palette may show: sandbox setup is hidden unless the
+	// model carries a setup command, as it does not here.
+	want := 0
+	for _, command := range commandDefinitions {
+		if command.kind != commandSandboxSetup {
+			want++
+		}
+	}
+	if len(m.suggestions) != want {
+		t.Fatalf("bare / listed %d suggestions, want all %d commands", len(m.suggestions), want)
+	}
+	updated, _ := m.Update(testKey(tea.KeyUp))
+	m = updated.(model)
+	if m.suggestionIdx != len(m.suggestions)-1 {
+		t.Fatalf("Up from first should wrap to last (%d), got %d", len(m.suggestions)-1, m.suggestionIdx)
+	}
+	if plain := plainRender(t, m.View()); !strings.Contains(plain, fmt.Sprintf("%d/%d · ", len(m.suggestions), len(m.suggestions))) {
+		t.Fatalf("palette footer lacks the position %d/%d:\n%s", len(m.suggestions), len(m.suggestions), plain)
 	}
 }
 

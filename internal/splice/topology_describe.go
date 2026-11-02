@@ -101,6 +101,10 @@ func TopologyWarnings(topology *schemas.PipelineTopology) ([]string, error) {
 	}
 	out := make([]string, 0, len(order))
 	for _, warning := range order {
+		if strings.HasSuffix(warning, tierNoVerificationTail) {
+			out = append(out, warning) // already names its tier
+			continue
+		}
 		out = append(out, "at "+strings.Join(tiers[warning], ", ")+": "+warning)
 	}
 	return out, nil

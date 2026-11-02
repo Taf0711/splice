@@ -58,15 +58,15 @@ func inspectSourceDirty(wt worktrees.Result) bool {
 func worktreeReviewAskRequest(wt worktrees.Result, dirty bool) agent.AskUserRequest {
 	options := []string{worktreeReviewAccept, worktreeReviewReject, worktreeReviewKeep}
 	descs := []string{
-		"Merge into the main checkout and remove the worktree.",
-		"Remove the worktree. Work remains on branch splice/" + wt.Name + ".",
-		"Leave the worktree in place.",
+		"Merge into your checkout and remove the worktree.",
+		"Remove the worktree. The work stays on its branch.",
+		"Leave it in place at " + shortenPath(wt.Path),
 	}
-	question := "The pipeline finished in worktree " + wt.Path + ". Accept merges into the main checkout. Reject removes the worktree and keeps branch splice/" + wt.Name + ". Keep leaves the worktree in place. Esc keeps the worktree."
+	question := "The work is ready in a separate worktree. Accept merges it into your checkout. Reject removes the worktree and keeps the branch. Keep leaves it in place."
 	if dirty {
 		options = []string{worktreeReviewReject, worktreeReviewKeep}
 		descs = descs[1:]
-		question = "The pipeline finished in worktree " + wt.Path + ". Merge-back is unavailable because the main checkout has uncommitted changes. Reject removes the worktree and keeps branch splice/" + wt.Name + ". Keep leaves the worktree in place. Esc keeps the worktree."
+		question = "The work is ready in a separate worktree. Your checkout has uncommitted changes, so it cannot merge now. Reject removes the worktree and keeps the branch. Keep leaves it in place."
 	}
 	return agent.AskUserRequest{
 		ToolCallID: "worktree_review:" + wt.Name,
@@ -77,6 +77,7 @@ func worktreeReviewAskRequest(wt worktrees.Result, dirty bool) agent.AskUserRequ
 			Options:            options,
 			OptionDescriptions: descs,
 			Recommended:        worktreeReviewKeep,
+			FixedChoices:       true,
 		}},
 	}
 }

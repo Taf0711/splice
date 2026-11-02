@@ -158,7 +158,9 @@ func gateKindLabel(kind presentation.GateKind) string {
 // phase renders as just that phase — no arrow, no self-referential trail.
 // Empty when no phase has been observed.
 func (m model) contextTrailSegment() string {
-	if len(m.phaseTrail.phases) == 0 {
+	// The trail is a during-run breadcrumb. When idle the phase chip already
+	// shows the phase, so the trail is dropped.
+	if !m.pending || len(m.phaseTrail.phases) == 0 {
 		return ""
 	}
 	parts := make([]string, len(m.phaseTrail.phases))

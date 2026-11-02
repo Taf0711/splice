@@ -187,6 +187,9 @@ type KeyBindingsConfig struct {
 	// ToggleNarration cycles the transcript verbosity quiet/normal/detailed
 	// (default: ctrl+n).
 	ToggleNarration KeyBindingDef `json:"toggleNarration,omitempty"`
+	// OpenPipelineEditor opens the browser pipeline editor on the active
+	// topology, as /pipeline edit does (default: ctrl+x).
+	OpenPipelineEditor KeyBindingDef `json:"openPipelineEditor,omitempty"`
 }
 
 // LocalControlConfig controls local browser/desktop/terminal automation helpers.

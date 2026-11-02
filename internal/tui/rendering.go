@@ -618,7 +618,7 @@ func renderReasoningRow(row transcriptRow, width int) string {
 // toggle header stays on-screen instead of filling the terminal. maxBodyLines = 0
 // shows the whole body.
 func renderReasoningBlock(text string, expanded bool, width int, running bool, elapsed time.Duration, maxBodyLines int) string {
-	text = strings.TrimSpace(text)
+	text = strings.TrimSpace(visibleReasoningText(text))
 	if strings.TrimSpace(text) == "" {
 		return ""
 	}
@@ -637,6 +637,28 @@ func renderReasoningBlock(text string, expanded bool, width int, running bool, e
 		lines = append(lines, fitStyledLine("  "+styleAssistantMarkdownLine(line, zeroTheme.sayText), width))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// pipelineProgressLine matches a pipeline progress line such as
+// "[code_writer] context round fulfilled: 2 item(s) delivered". It matches only
+// stage-name identifiers: lowercase, starting with a letter, at least 3 characters,
+// with no spaces or dots. Other bracketed text such as "[1] see the docs" or
+// "[x] done" is model reasoning and stays visible.
+var pipelineProgressLine = regexp.MustCompile(`^\[[a-z][a-z0-9_-]{2,}\] `)
+
+// visibleReasoningText drops pipeline progress lines from a reasoning buffer.
+// Progress arrives on the same OnReasoning channel as model thinking, so the
+// "[stage] " prefix is the only signal. This filters at render time only: the
+// session events and the Ctrl+G evidence pane still record those lines.
+func visibleReasoningText(text string) string {
+	lines := strings.Split(text, "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if !pipelineProgressLine.MatchString(line) {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "\n")
 }
 
 // reasoningHiddenMarker is the faint line shown in place of capped reasoning body
@@ -1358,6 +1380,12 @@ func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width
 	if len(questions) == 0 {
 		return styledBlockFill(width, []string{zeroTheme.badge.Render(" ASK ")}, zeroTheme.lineStrong, lipgloss.NewStyle())
 	}
+	// Esc on a review prompt keeps the worktree (keepOnEsc); on a model question
+	// it cancels the run.
+	escLabel := "esc cancel run"
+	if prompt.keepOnEsc {
+		escLabel = "esc keep"
+	}
 	// Gate elevation (P3 cell C / §8, GAP-E): a blocking ask_user is the
 	// contract's NEEDS YOU gate. The card carries the unique blocked
 	// signature — [?] NEEDS YOU header with the wait timer — and the
@@ -1445,7 +1473,7 @@ func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width
 			}
 		}
 		lines = append(lines, "")
-		lines = append(lines, fill(zeroTheme.faint).Render("⇆ tab · enter submit · esc cancel run"))
+		lines = append(lines, fill(zeroTheme.faint).Render("⇆ tab · enter submit · "+escLabel))
 		return styledBlockFill(width, lines, zeroTheme.lineStrong, lipgloss.NewStyle())
 	}
 
@@ -1476,16 +1504,18 @@ func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width
 				lines = append(lines, "     "+fill(zeroTheme.faint).Render(question.OptionDescriptions[index]))
 			}
 		}
-		typeOwn := fmt.Sprintf("%d. %s", len(question.Options)+1, askUserTypeMyOwnLabel)
-		if cursor >= len(question.Options) {
-			lines = append(lines, fill(zeroTheme.accent).Render("▸ ")+zeroTheme.badge.Render(" "+typeOwn+" "))
-		} else {
-			lines = append(lines, "  "+fill(zeroTheme.muted).Render(typeOwn))
+		if !question.FixedChoices {
+			typeOwn := fmt.Sprintf("%d. %s", len(question.Options)+1, askUserTypeMyOwnLabel)
+			if cursor >= len(question.Options) {
+				lines = append(lines, fill(zeroTheme.accent).Render("▸ ")+zeroTheme.badge.Render(" "+typeOwn+" "))
+			} else {
+				lines = append(lines, "  "+fill(zeroTheme.muted).Render(typeOwn))
+			}
 		}
 		lines = append(lines, "")
-		footer := "↑↓ select · enter confirm · esc cancel run"
+		footer := "↑↓ select · enter confirm · " + escLabel
 		if multi {
-			footer = "⇆ tab · ↑↓ select · enter confirm · esc cancel run"
+			footer = "⇆ tab · ↑↓ select · enter confirm · " + escLabel
 		}
 		lines = append(lines, fill(zeroTheme.faint).Render(footer))
 		return styledBlockFill(width, lines, zeroTheme.lineStrong, lipgloss.NewStyle())
@@ -1509,9 +1539,9 @@ func renderAskUserQuestionnaire(prompt pendingAskUserPrompt, input string, width
 		}
 	}
 	lines[len(lines)-1] += fill(zeroTheme.accent).Render("▌")
-	footer := "enter submit · esc cancel run"
+	footer := "enter submit · " + escLabel
 	if multi {
-		footer = "⇆ tab · enter submit · esc cancel run"
+		footer = "⇆ tab · enter submit · " + escLabel
 	}
 	lines = append(lines, fill(zeroTheme.faint).Render(footer))
 	return styledBlockFill(width, lines, zeroTheme.lineStrong, lipgloss.NewStyle())
@@ -1616,6 +1646,12 @@ func renderToolResultCard(row transcriptRow, width int, rc rowContext, opts card
 	// what the head already shows (action + target + status dot), so drop the body and let
 	// the card collapse to a single line — matching the reference agents' density.
 	// Only for clean OK results: errors and anything multi-line keep their body.
+	// A passing acceptance check is one line (status + command). Its output is
+	// the same text the "Ran $" card above already shows; a failure keeps it.
+	if !failed && name == "splice.acceptance" {
+		head := toolCardHead(name, headTarget, headArg, toolResultHeadTag(row, ""), row.detail, row.text, false, nameStyle, rc.auto[key], width, opts)
+		return toolCard(head, glyph, nil, "", borderStyle, width)
+	}
 	if !failed && opts.bodyCap > 0 && !toolCardAlwaysExpands(name) && looksLikeRedundantConfirmation(row.detail) {
 		head := toolCardHead(name, headTarget, headArg, toolResultHeadTag(row, ""), row.detail, row.text, false, nameStyle, rc.auto[key], width, opts)
 		return toolCard(head, glyph, nil, "", borderStyle, width)

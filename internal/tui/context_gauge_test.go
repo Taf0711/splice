@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Taf0711/splice/internal/usage"
 	"github.com/Taf0711/splice/internal/zeroruntime"
@@ -52,4 +53,30 @@ func TestStatusLineDoesNotDuplicateTokenFigureNextToGauge(t *testing.T) {
 	if strings.Contains(status, "tok") {
 		t.Fatalf("status line = %q, the plain token segment should be suppressed once the gauge shows the same figure", status)
 	}
+}
+
+// The RUN module's token row is the context-window fill of the latest request,
+// not a running total, so it is labelled "context".
+func TestSidebarRunTokenRowLabelledContext(t *testing.T) {
+	base := time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
+	m := newModel(t.Context(), Options{ModelName: "claude-sonnet-4.5"})
+	if _, err := m.usageTracker.Record(usage.RecordInput{
+		ModelID: "claude-sonnet-4.5",
+		Usage:   zeroruntime.Usage{InputTokens: 160_000, OutputTokens: 1000},
+	}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	m.now = func() time.Time { return base.Add(12 * time.Second) }
+	m.activeRunID = 7
+	m.pending = true
+	m.turnStartedAt = base
+	for _, line := range strings.Split(stripSidebar(m.renderContextModules(40, 60)), "\n") {
+		if strings.Contains(line, "161K / 200K tokens") {
+			if !strings.Contains(line, "context") {
+				t.Fatalf("RUN token row not labelled context: %q", line)
+			}
+			return
+		}
+	}
+	t.Fatal("RUN module has no token row")
 }

@@ -2109,9 +2109,9 @@ func TestStatusShowsEffectiveModeOfExecRun(t *testing.T) {
 	}
 }
 
-// Each toggle acknowledges the new mode in the transcript, and the status line
-// shows the mode for both Ask and Auto.
-func TestShiftTabAcknowledgesAndShowsPermissionMode(t *testing.T) {
+// An idle toggle writes no transcript row (the footer chip shows the mode), but
+// the status line still shows the mode for both Ask and Auto.
+func TestShiftTabIdleWritesNoRowAndShowsMode(t *testing.T) {
 	m := newModel(context.Background(), Options{PermissionMode: agent.PermissionModeAuto})
 	m.width = 120
 	m.designMode = false
@@ -2119,17 +2119,16 @@ func TestShiftTabAcknowledgesAndShowsPermissionMode(t *testing.T) {
 	cases := []struct {
 		mode    agent.PermissionMode
 		segment string
-		ack     string
 	}{
-		{agent.PermissionModeAsk, "ask", "ask: each tool asks first"},
-		{agent.PermissionModeAuto, "auto-approve", "auto: tools run without asking"},
+		{agent.PermissionModeAsk, "ask"},
+		{agent.PermissionModeAuto, "auto-approve"},
 	}
 	for _, tc := range cases {
+		before := len(m.transcript)
 		updated, _ := m.Update(testKeyShift(tea.KeyTab))
 		m = updated.(model)
-		last := m.transcript[len(m.transcript)-1]
-		if got := stripANSI(last.text); !strings.Contains(got, "permissions") || !strings.Contains(got, tc.ack) {
-			t.Fatalf("mode %q: transcript ack = %q, want permissions %q", tc.mode, got, tc.ack)
+		if len(m.transcript) != before {
+			t.Fatalf("mode %q: idle toggle wrote %d transcript row(s), want none", tc.mode, len(m.transcript)-before)
 		}
 		if status := stripANSI(m.statusLine(120)); !strings.Contains(status, tc.segment) {
 			t.Fatalf("mode %q: status line %q lacks %q", tc.mode, status, tc.segment)

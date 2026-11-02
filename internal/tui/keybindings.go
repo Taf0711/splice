@@ -236,24 +236,26 @@ func labelOr(b parsedBinding, defaultLabel string) string {
 // dispatch time. When a binding's parsedBinding is splice, the built-in default
 // check in model.go's updateModel should be used.
 type keyBindings struct {
-	toggleDetailed  parsedBinding
-	toggleMouse     parsedBinding
-	cycleReasoning  parsedBinding
-	togglePlan      parsedBinding
-	toggleSidebar   parsedBinding
-	toggleNarration parsedBinding
+	toggleDetailed     parsedBinding
+	toggleMouse        parsedBinding
+	cycleReasoning     parsedBinding
+	togglePlan         parsedBinding
+	toggleSidebar      parsedBinding
+	toggleNarration    parsedBinding
+	openPipelineEditor parsedBinding
 }
 
 // resolveKeyBindings converts a user-facing KeyBindingsConfig into the
 // dispatch-ready parsed form, using empty-is-default semantics.
 func resolveKeyBindings(cfg config.KeyBindingsConfig) keyBindings {
 	return keyBindings{
-		toggleDetailed:  parseBinding(string(cfg.ToggleDetailed)),
-		toggleMouse:     parseBinding(string(cfg.ToggleMouse)),
-		cycleReasoning:  parseBinding(string(cfg.CycleReasoning)),
-		togglePlan:      parseBinding(string(cfg.TogglePlan)),
-		toggleSidebar:   parseBinding(string(cfg.ToggleSidebar)),
-		toggleNarration: parseBinding(string(cfg.ToggleNarration)),
+		toggleDetailed:     parseBinding(string(cfg.ToggleDetailed)),
+		toggleMouse:        parseBinding(string(cfg.ToggleMouse)),
+		cycleReasoning:     parseBinding(string(cfg.CycleReasoning)),
+		togglePlan:         parseBinding(string(cfg.TogglePlan)),
+		toggleSidebar:      parseBinding(string(cfg.ToggleSidebar)),
+		toggleNarration:    parseBinding(string(cfg.ToggleNarration)),
+		openPipelineEditor: parseBinding(string(cfg.OpenPipelineEditor)),
 	}
 }
 
@@ -289,6 +291,7 @@ var reservedBindings = []struct {
 	{parseBinding("left"), "reasoning effort down (in the /model picker)"},
 	{parseBinding("right"), "reasoning effort up (in the /model picker)"},
 	{parseBinding("?"), "help overlay"},
+	{parseBinding("ctrl+g"), "run evidence pane"},
 }
 
 // sanitizeKeyBindings drops (reverts to default) any configured binding that
@@ -309,6 +312,7 @@ func sanitizeKeyBindings(b keyBindings) (keyBindings, []string) {
 		{"togglePlan", &b.togglePlan, parseBinding("ctrl+p")},
 		{"toggleSidebar", &b.toggleSidebar, parseBinding("ctrl+b")},
 		{"toggleNarration", &b.toggleNarration, parseBinding("ctrl+n")},
+		{"openPipelineEditor", &b.openPipelineEditor, parseBinding("ctrl+x")},
 	}
 
 	var warnings []string

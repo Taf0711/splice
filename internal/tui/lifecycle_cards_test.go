@@ -73,7 +73,7 @@ func TestPlanCardRendersTasksAndChecks(t *testing.T) {
 		"IMPLEMENTATION PLAN", "2 tasks · 1 acceptance checks", "critique clean",
 		"01", "classify retries", "policy.go",
 		"02", "thread deadline",
-		"[A] approve (explicit)", "[R] revise",
+		"[A] approve", "[R] revise",
 	} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("plan card missing %q:\n%s", want, plain)
@@ -218,5 +218,17 @@ func TestIsolationBadgeOnStageRows(t *testing.T) {
 	plain2 := stripANSI(strings.Join(panel2.renderSection(110, 0), "\n"))
 	if !strings.Contains(plain2, "shared cwd") {
 		t.Fatalf("unset workspace did not project shared cwd:\n%s", plain2)
+	}
+}
+
+// An active pipeline run is labelled "executing" even while design mode is still
+// on.
+func TestRunStageLabelExecutingWithActivePipelineInDesignMode(t *testing.T) {
+	m := mouseTestModel()
+	m.designMode = true
+	m.pending = true
+	m.pipeline.applyState(benchNodeState(4))
+	if label := m.runStageLabel(); !strings.HasPrefix(label, "executing") {
+		t.Fatalf("run stage label = %q, want it to start with \"executing\"", label)
 	}
 }

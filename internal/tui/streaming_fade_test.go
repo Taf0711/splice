@@ -149,17 +149,28 @@ func TestAgeDimLineFreshReturnsAccent(t *testing.T) {
 }
 
 func TestAgeDimLineMidRangeReturnsIntermediate(t *testing.T) {
-	// At t = 600ms (halfway through the 1.2s window), the bucket
-	// index is int(600 * 12 / 1200) = 6, which is one of the
-	// intermediate buckets (not palette[0] = accent, not
-	// zeroTheme.ink). The output must be non-empty and contain the
-	// input.
+	// Halfway through the fade window the bucket index is
+	// streamingFadeSteps/2 = 6, one of the intermediate buckets (not
+	// palette[0] = accent, not zeroTheme.ink). The output must be
+	// non-empty and contain the input.
 	now := time.Unix(0, 0)
 	base := lipgloss.NewStyle().Foreground(lipgloss.Color(darkPalette.ink))
-	bornAt := now.Add(-600 * time.Millisecond)
+	bornAt := now.Add(-streamingFadeDuration / 2)
 	out := ageDimLine("hello", bornAt, now, base)
 	if !strings.Contains(out, "hello") {
 		t.Errorf("mid-range ageDimLine output %q does not contain the input", out)
+	}
+}
+
+// TestAgeDimLineSettlesWithinHalfSecond pins A2: a line 600ms old has already
+// settled to the base render. Under the old 1200ms fade it was still mid-ramp.
+func TestAgeDimLineSettlesWithinHalfSecond(t *testing.T) {
+	base := lipgloss.NewStyle().Foreground(lipgloss.Color(darkPalette.ink))
+	now := time.Unix(0, 0)
+	bornAt := now.Add(-600 * time.Millisecond)
+	out := ageDimLine("hello", bornAt, now, base)
+	if want := base.Render("hello"); out != want {
+		t.Errorf("600ms-old ageDimLine = %q, want settled base render %q", out, want)
 	}
 }
 
@@ -191,8 +202,8 @@ func TestAgeDimLineZeroBornAtReturnsBase(t *testing.T) {
 
 func TestAgeDimLineBuckets(t *testing.T) {
 	// Walk 0..dimDuration by 1ms and assert the bucket index is
-	// monotonically non-decreasing. With 12 steps over 1200ms, each
-	// bucket covers 100ms. We don't assert on the rendered colors
+	// monotonically non-decreasing. Each of the streamingFadeSteps
+	// buckets covers streamingFadeDuration/streamingFadeSteps. We don't assert on the rendered colors
 	// (lipgloss's per-color bytes are an implementation detail); we
 	// just check the bucket math and that nothing panics.
 	base := lipgloss.NewStyle().Foreground(lipgloss.Color(darkPalette.ink))

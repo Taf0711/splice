@@ -187,7 +187,8 @@ func TestSidebarPlanSelectablesOffsets(t *testing.T) {
 	if len(hits) != 3 {
 		t.Fatalf("want 3 hits, got %d", len(hits))
 	}
-	for i, want := range []int{4, 5, 6} {
+	// No agents: AGENTS is absent, so the PLAN header is line 0 and steps start at 1.
+	for i, want := range []int{1, 2, 3} {
 		if hits[i].lineOffset != want || hits[i].stepIndex != i {
 			t.Errorf("hit %d: want offset %d idx %d, got offset %d idx %d", i, want, i, hits[i].lineOffset, hits[i].stepIndex)
 		}

@@ -226,3 +226,52 @@ func TestReplayArmsUnverifiedReceipt(t *testing.T) {
 		t.Fatalf("verified completion = %q, want verified", got)
 	}
 }
+
+// A verified completion shows the VERIFIED card and not the raw plan JSON. A
+// result that no card can be built from (not valid JSON) keeps its raw text.
+func TestVerifiedRunShowsReceiptNotRawPlanJSON(t *testing.T) {
+	const planJSON = `{"plan_id":"p","status":"completed","completed_tasks":[{"task_id":"t1","run_id":"r1","status":"completed"}]}`
+	completed := presentation.State{
+		SchemaVersion: presentation.PresentationSchemaVersionV1,
+		Lifecycle:     presentation.LifecycleComplete,
+		Completion:    &presentation.CompletionReceipt{Status: "completed"},
+	}
+
+	m := mouseTestModel()
+	m.sessionStore = testSessionStore(t)
+	m.activeRunID = 10
+	m.lastState = completed
+	updated, _ := m.Update(planExecutionResultMsg{runID: 10, result: agent.Result{FinalAnswer: planJSON}})
+	next := updated.(model)
+	if next.lastTerminalReceipt != receiptVerified {
+		t.Fatalf("lastTerminalReceipt = %q, want verified", next.lastTerminalReceipt)
+	}
+	receiptRows := 0
+	for _, row := range next.transcript {
+		if row.kind == rowAssistant && strings.HasPrefix(row.text, `{"plan_id"`) {
+			t.Fatalf("verified run appended the raw plan JSON: %q", row.text)
+		}
+		if card, ok := parseReceiptTranscriptPayload(row.text); ok && card.kind == receiptVerified {
+			receiptRows++
+		}
+	}
+	if receiptRows != 1 {
+		t.Fatalf("verified receipt rows = %d, want 1", receiptRows)
+	}
+
+	m = mouseTestModel()
+	m.sessionStore = testSessionStore(t)
+	m.activeRunID = 11
+	m.lastState = completed
+	updated, _ = m.Update(planExecutionResultMsg{runID: 11, result: agent.Result{FinalAnswer: "plain answer"}})
+	next = updated.(model)
+	found := false
+	for _, row := range next.transcript {
+		if row.kind == rowAssistant && row.text == "plain answer" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("a result no card can be built from lost its raw text")
+	}
+}

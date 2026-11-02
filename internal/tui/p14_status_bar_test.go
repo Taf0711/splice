@@ -31,12 +31,19 @@ func TestStatusBarPhaseChipAndTrail(t *testing.T) {
 	m.phaseTrail.observe(presentation.LifecycleExecute)
 	m.lastState = p14PhaseState(presentation.LifecycleExecute, presentation.HealthNormal)
 
+	m.pending = true
 	plain := stripANSI(m.statusLine(160))
 	if !strings.Contains(plain, "executing") {
 		t.Fatalf("phase chip missing the lifecycle word:\n%s", plain)
 	}
 	if !strings.Contains(plain, "design→exec") {
-		t.Fatalf("context trail missing the breadcrumb:\n%s", plain)
+		t.Fatalf("context trail missing the breadcrumb during a run:\n%s", plain)
+	}
+
+	// Idle: the phase chip stays, the trail does not.
+	m.pending = false
+	if plain := stripANSI(m.statusLine(160)); strings.Contains(plain, "design→exec") {
+		t.Fatalf("idle status line shows the phase trail:\n%s", plain)
 	}
 }
 
