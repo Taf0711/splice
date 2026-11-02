@@ -1165,6 +1165,32 @@ func TestTrustedWorkspaceReadAndWriteDoNotPromptInAskMode(t *testing.T) {
 	}
 }
 
+// A pipeline write prompt carries the file it would touch. The permission card
+// shows the request scope, so an empty scope hides the path being approved.
+func TestPipelineWritePromptCarriesFileScope(t *testing.T) {
+	workDir := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewWriteFileTool(workDir))
+	var scopes []string
+	runner := newAgentToolRunner(PipelineConfigFromAgentOptions(agent.Options{
+		Cwd:            workDir,
+		Registry:       registry,
+		PermissionMode: agent.PermissionModeAsk,
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: workDir,
+			Policy:        sandbox.DefaultPolicy(),
+		}),
+		OnPermissionRequest: func(ctx context.Context, req agent.PermissionRequest) (agent.PermissionDecision, error) {
+			scopes = append(scopes, req.Scope)
+			return agent.PermissionDecision{Action: agent.PermissionDecisionDeny}, nil
+		},
+	}), workDir)
+	_, _ = runner.RunTool(context.Background(), "write_file", map[string]any{"path": "notes.txt", "content": "x"})
+	if len(scopes) != 1 || !strings.Contains(scopes[0], "notes.txt") {
+		t.Fatalf("permission scope = %q, want one prompt naming notes.txt", scopes)
+	}
+}
+
 func TestRunRecordsStageFailedOnRequiredFileApplicationFailure(t *testing.T) {
 	workDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workDir, "go.mod"), []byte("module example\n\ngo 1.22\n"), 0644); err != nil {

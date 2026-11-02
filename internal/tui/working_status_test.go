@@ -313,3 +313,35 @@ func TestInterimBlockNoPreviewWhenReasoningExpanded(t *testing.T) {
 		t.Fatalf("reasoning should appear exactly once when expanded (no preview dup):\n%s", got)
 	}
 }
+
+// A new turn measures its quiet timer from its own start. Stream activity left
+// over from the previous turn must not show as "still generating" at once.
+func TestBeginRunClearsStaleStreamActivity(t *testing.T) {
+	base := time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
+	m := model{now: func() time.Time { return base }}
+	m.lastStreamActivity = base.Add(-20 * time.Second)
+	m = m.beginRun(func() {})
+	if got := m.quietGenerationHint(); got != "" {
+		t.Fatalf("fresh turn: quiet hint = %q, want none", got)
+	}
+}
+
+// While a prompt waits on the user nothing is generating, so the spinner goes
+// static and the quiet cue stays hidden. Clearing the prompt restores both.
+func TestWaitingOnUserStopsLivenessCues(t *testing.T) {
+	base := time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
+	m := model{now: func() time.Time { return base }}
+	m.activeRunID = 1
+	m.turnStartedAt = base.Add(-30 * time.Second)
+	m.pendingPermission = &pendingPermissionPrompt{}
+	if got := m.quietGenerationHint(); got != "" {
+		t.Fatalf("waiting on user: quiet hint = %q, want none", got)
+	}
+	if g := m.spinnerGlyph(); g != "•" {
+		t.Fatalf("waiting on user: spinner glyph = %q, want a steady dot", g)
+	}
+	m.pendingPermission = nil
+	if got := m.quietGenerationHint(); got == "" {
+		t.Fatal("prompt cleared: quiet hint is empty, so the guard test proves nothing")
+	}
+}

@@ -168,7 +168,7 @@ var commandDefinitions = []commandDefinition{
 		name:        "/pipeline",
 		usage:       "/pipeline [use <name> | edit [--new] [name]]",
 		group:       commandGroupRuntime,
-		description: "Show the active pipeline graph, where it comes from, its warnings, and its command nodes. Use /pipeline use <name> to select a library pipeline. Use /pipeline edit [name] to edit a pipeline in the browser.",
+		description: "Show the active pipeline graph. Use /pipeline edit [name] to edit a pipeline in the browser. Use /pipeline use <name> to select a library pipeline. The card also shows where the pipeline comes from, its warnings, and its command nodes.",
 		kind:        commandPipeline,
 	},
 	{

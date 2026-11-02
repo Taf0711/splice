@@ -3220,6 +3220,7 @@ func newAgentToolRunner(options PipelineRunConfig, cwd string) ToolRunner {
 				Reason:             tool.Safety().Reason,
 				Risk:               sandboxRisk(tool.Safety().SideEffect),
 				Args:               args,
+				Scope:              agent.PermissionScope(name, args),
 				AvailableDecisions: []agent.PermissionDecisionAction{agent.PermissionDecisionAllow, agent.PermissionDecisionDeny},
 			}
 			switch options.PermissionMode {

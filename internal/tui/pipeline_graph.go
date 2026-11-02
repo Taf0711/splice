@@ -332,7 +332,7 @@ func pipelineGraphCardFor(topology *schemas.PipelineTopology, source string, loa
 		Warnings: append(append([]string(nil), loadWarnings...), compileWarnings...),
 		// A trusted project file outranks the library entry that "use" sets,
 		// so the hint must point at the file when it is the source.
-		Hints: []string{"change it with /pipeline use <name>; this view is read-only", "Ctrl+G shows each node's model, budget, and last result"},
+		Hints: []string{"edit it in the browser with /pipeline edit; pick another with /pipeline use <name>", "Ctrl+G shows each node's model, budget, and last result"},
 	}
 	if source == splicerun.TopologySourceProject {
 		card.Hints[0] = "edit .splice/pipeline.json to change it; this view is read-only"

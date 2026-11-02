@@ -1684,6 +1684,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.narrationVerbosityLevel = m.narrationVerbosityLevel.next()
 			m.altScreenSettledWidth = 0
 			return m, nil
+		case m.keyMatch(m.keyBindings.openPipelineEditor, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'x') }) && m.noBlockingModal():
+			// Same as /pipeline edit with no args: the browser editor on the
+			// active topology. Guarded so an open modal keeps its own keys.
+			return m.openPipelineEditor(nil), nil
 		case m.detailView.active && m.noBlockingModal() && m.composerValue() == "" && m.detailGraphKey(msg):
 			// The Ctrl+G pane's graph selection and node drawer, only while
 			// the composer is empty, so typing is never captured.
@@ -2983,16 +2987,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.maybeOfferWorktreeReview(msg.worktree, msg.sourceDirty)
 		}
 		m.designMode = false
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendAssistant, text: msg.result.FinalAnswer})
+		receiptAppended := false
 		m.pendingPlan = nil
 		m.pendingCritique = nil
 		// Terminal receipt (GAP-E, slice A of SPEC_TUI_RECEIPTS_OPEN_WORK):
 		// a run the runtime marked completed projects the VERIFIED card.
 		// The DoD-13 gate is the presentation state's completion receipt —
 		// deterministic runtime truth, not an inference from the error
-		// boundary. Evidence derives from the persisted plan result; a
-		// parse failure appends nothing (the JSON answer above still
-		// carries the data — honest absence, never an invented card).
+		// boundary. Evidence derives from the persisted plan result. When no
+		// card can be built, the raw JSON answer is shown instead (honest
+		// absence, never an invented card).
 		// A completed run that no check verified projects the UNVERIFIED card
 		// from the completion receipt, never the VERIFIED card.
 		if completion := m.lastState.Completion; completion != nil && completion.Status == "completed" {
@@ -3006,7 +3010,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 					kind: rowError,
 					text: receiptTranscriptPayload(card),
 				})
+				receiptAppended = true
 			}
+		}
+		if !receiptAppended {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendAssistant, text: msg.result.FinalAnswer})
 		}
 		return m.maybeOfferWorktreeReview(msg.worktree, msg.sourceDirty)
 	case diffCapturedMsg:
@@ -4294,12 +4302,19 @@ func (m model) interimBlock(width int) string {
 // looks like a frozen terminal — the spinner tick (~80ms, time-based) drives the
 // re-render, so the elapsed clock keeps advancing for ANY provider/model even
 // when no stream data arrives.
+// waitingOnUser reports whether a prompt is blocking the run on the user's
+// answer. Nothing is generating then, so liveness cues must stop.
+func (m model) waitingOnUser() bool {
+	return m.pendingPermission != nil || m.pendingAskUser != nil || m.pendingSpecReview != nil
+}
+
 // spinnerGlyph is the liveness glyph every renderer should use instead of
 // m.spinner.View() directly: the animated frame normally, or a steady dot under
-// reduced motion. The caller applies its own color; liveness is preserved by the
-// advancing elapsed timer, so the static glyph never reads as frozen.
+// reduced motion or while a prompt waits on the user. The caller applies its own
+// color; liveness is preserved by the advancing elapsed timer, so the static
+// glyph never reads as frozen.
 func (m model) spinnerGlyph() string {
-	if m.reducedMotion {
+	if m.reducedMotion || m.waitingOnUser() {
 		return "•"
 	}
 	return m.spinner.View()
@@ -4442,7 +4457,7 @@ const quietWorkingHint = 8 * time.Second
 // the ticking number was the only signal, and it looks identical whether real
 // (if slow) content is coming or nothing ever will.
 func (m model) quietGenerationHint() string {
-	if m.activeRunID == 0 {
+	if m.activeRunID == 0 || m.waitingOnUser() {
 		return ""
 	}
 	last := m.lastStreamActivity
@@ -5844,6 +5859,8 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	// suppressed by a stale preference.
 	m.sidebarHidden = false
 	m.turnStartedAt = m.now()
+	// The quiet timer must measure from this turn's start, not stale activity.
+	m.lastStreamActivity = time.Time{}
 	m.turnStreamedRunes = 0
 	// A fresh run must not inherit the previous run's tool label/elapsed clock
 	// (defensive: the run-end and cancel paths already cleared it).

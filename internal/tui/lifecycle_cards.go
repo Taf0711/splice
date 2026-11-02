@@ -180,7 +180,7 @@ func (m model) sidebarRunLines(width int) []string {
 		row("elapsed", formatRunElapsed(m.now().Sub(m.turnStartedAt)))
 	}
 	if tokens := m.sidebarTokenText(); tokens != "" {
-		row("tokens", tokens)
+		row("context", tokens)
 	}
 	row("stage", m.runStageLabel())
 	return lines

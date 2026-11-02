@@ -261,7 +261,7 @@ commands work only in the interactive session.
 | `/add-dir` | none | `/add-dir [path]` | Grant write access to a directory outside the workspace for this session. Without a path, list the current write roots. |
 | `/flags` | none | `/flags` | Show feature flags, their values, and the source of each value. |
 | `/web` | none | `/web` | Start the local browser surface and show its one-time link. The link works once, and a browser opens too when the terminal is interactive. The surface stops when the TUI exits. The surface includes the pipeline viewer: the live graph of a run, or the active topology when no run exists. |
-| `/pipeline` | none | `/pipeline [use <name> \| edit [--new] [name]]` | Show the active pipeline graph, where it comes from, its warnings, and its command nodes. Use `/pipeline use <name>` to select a library pipeline. Use `/pipeline edit [name]` to edit a pipeline in the browser editor. See [Pipeline behavior](PIPELINE.md#edit-a-pipeline-in-a-browser). |
+| `/pipeline` | none | `/pipeline [use <name> \| edit [--new] [name]]` | Show the active pipeline graph. Use `/pipeline edit [name]` to edit a pipeline in the browser. Use `/pipeline use <name>` to select a library pipeline. The card also shows where the pipeline comes from, its warnings, and its command nodes. See [Pipeline behavior](PIPELINE.md#edit-a-pipeline-in-a-browser). |
 | `/doctor` | `/health` | `/doctor [fix\|--connectivity]` | Show diagnostics. Use `fix` to open safe fixes, or `--connectivity` to test the provider. |
 | `/config` | none | `/config [recaps on\|off]` | Show the active configuration. Use `recaps on` or `recaps off` to change recaps. |
 | `/debug` | `/debug-mode` | `/debug` | Show the debug mode status. |

@@ -28,8 +28,8 @@ func TestPermissionScope(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := permissionScope(tt.tool, tt.args); got != tt.want {
-				t.Fatalf("permissionScope(%q, %v) = %q, want %q", tt.tool, tt.args, got, tt.want)
+			if got := PermissionScope(tt.tool, tt.args); got != tt.want {
+				t.Fatalf("PermissionScope(%q, %v) = %q, want %q", tt.tool, tt.args, got, tt.want)
 			}
 		})
 	}
@@ -37,7 +37,7 @@ func TestPermissionScope(t *testing.T) {
 
 func TestPermissionScopeTruncatesLongPaths(t *testing.T) {
 	long := strings.Repeat("a", 200)
-	got := permissionScope("write_file", map[string]any{"path": long})
+	got := PermissionScope("write_file", map[string]any{"path": long})
 	if runes := len([]rune(got)); runes > 80 {
 		t.Fatalf("scope not truncated: %d runes", runes)
 	}

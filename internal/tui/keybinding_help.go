@@ -61,6 +61,7 @@ func (m model) buildKeybindingGroups() []keybindingGroup {
 		{labelOr(m.keyBindings.toggleDetailed, "Ctrl+O"), "toggle the detailed (full-screen) transcript"},
 		{labelOr(m.keyBindings.toggleSidebar, "Ctrl+B"), sidebarKey},
 		{"Ctrl+G", "open the run evidence pane (Esc closes)"},
+		{labelOr(m.keyBindings.openPipelineEditor, "Ctrl+X"), "open the pipeline editor in the browser"},
 	}
 	// The graph keys work only inside the Ctrl+G pane, so they show only there.
 	if paneGraph {
