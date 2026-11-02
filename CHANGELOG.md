@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1](https://github.com/Taf0711/splice/compare/v0.3.0...v0.3.1) (2026-11-02)
+
+
+### Action required
+
+* **tui:** Ctrl+X now opens the browser pipeline editor. Remap it with `keybindings.openPipelineEditor`. Ctrl+G stays the run evidence pane. A custom key binding set to Ctrl+X or Ctrl+G now reverts to its default, and Splice shows a warning. Choose a different key for that binding.
+
+### Bug Fixes
+
+* **tui:** calmer run screen, one prompt per decision, plain wording ([b12f34c](https://github.com/Taf0711/splice/commit/b12f34cb29bd3120c0e08e6c7f8c63f523ca7147))
+* **tui:** show the pipeline editor, and keep run cues truthful ([1d36da9](https://github.com/Taf0711/splice/commit/1d36da9c92824aa61e02f68364938cbea330e955))
+
 ## [0.3.0](https://github.com/Taf0711/splice/compare/v0.2.0...v0.3.0) (2026-11-01)
 
 This release changes most parts of Splice. Read "Breaking changes / action required" before you upgrade from 0.2.0.
