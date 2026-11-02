@@ -910,6 +910,9 @@ func mergeKeyBindings(dst *KeyBindingsConfig, src KeyBindingsConfig) {
 	if src.ToggleSidebar != "" {
 		dst.ToggleSidebar = src.ToggleSidebar
 	}
+	if src.ToggleNarration != "" {
+		dst.ToggleNarration = src.ToggleNarration
+	}
 	if src.OpenPipelineEditor != "" {
 		dst.OpenPipelineEditor = src.OpenPipelineEditor
 	}

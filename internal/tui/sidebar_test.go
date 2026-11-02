@@ -768,3 +768,16 @@ func TestSidebarRendersPipelineWithoutPlanOrAgents(t *testing.T) {
 func stripSidebar(lines []string) string {
 	return ansiPattern.ReplaceAllString(strings.Join(lines, "\n"), "")
 }
+
+// A bash call carries its command in detail (argHint); the ACTIVITY line must show
+// that command, not the bare tool name.
+func TestActivitySummaryShowsBashCommandFromDetail(t *testing.T) {
+	m := model{}
+	m.transcript = []transcriptRow{
+		{kind: rowToolCall, tool: "bash", id: "c1", runID: 1, detail: "go test ./...", arg: ""},
+		{kind: rowToolResult, tool: "bash", id: "c1", runID: 1, status: tools.StatusOK},
+	}
+	if got := m.activitySummary(m.transcript[1]); !strings.Contains(got, "go test ./...") {
+		t.Fatalf("activitySummary = %q, want the bash command", got)
+	}
+}

@@ -853,8 +853,7 @@ func (m model) activitySummary(row transcriptRow) string {
 }
 
 // activityCommandForRow recovers a command tool's command-line from its paired
-// call row (whose arg hint carries the command), matched by BOTH id and runID so
-// a reused tool-call id from a later run can't attribute the wrong command.
+// call row (arg when set, else detail, since bash has no secondary arg), matched by BOTH id and runID so a reused tool-call id from a later run can't attribute the wrong command.
 func (m model) activityCommandForRow(id string, runID int) string {
 	if id == "" {
 		return ""
@@ -862,7 +861,10 @@ func (m model) activityCommandForRow(id string, runID int) string {
 	for i := len(m.transcript) - 1; i >= 0; i-- {
 		row := m.transcript[i]
 		if row.kind == rowToolCall && row.id == id && row.runID == runID {
-			return row.arg
+			if row.arg != "" {
+				return row.arg
+			}
+			return row.detail
 		}
 	}
 	return ""
