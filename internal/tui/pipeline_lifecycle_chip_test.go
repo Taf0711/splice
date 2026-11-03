@@ -110,9 +110,10 @@ func TestLifecycleChipDropsSegmentsByPriority(t *testing.T) {
 	}
 }
 
-// TestSidebarRendersLifecycleChip proves the chip is WIRED: the sidebar's
-// pipeline section header carries the phase/health/gate readout end-to-end
-// from the presentation snapshot.
+// TestSidebarRendersLifecycleChip proves the health alert is WIRED: the sidebar's
+// pipeline header carries a non-normal health word end-to-end from the
+// presentation snapshot. The phase is not repeated there (the header is
+// PIPELINE plus the done/total count).
 func TestSidebarRendersLifecycleChip(t *testing.T) {
 	m := sidebarTestModel()
 	// Width 140 gives a 40-cell sidebar (the max), so the full
@@ -123,7 +124,10 @@ func TestSidebarRendersLifecycleChip(t *testing.T) {
 	m.pipeline.applyState(phaseChipState(presentation.LifecycleExecute, presentation.HealthRegression, nil))
 	plain := stripSidebar(m.renderContextSidebar(sidebarWidth(m.width), m.height))
 	// Header labels render upper-cased (sidebarHeaderWithCount).
-	if !strings.Contains(plain, "EXECUTING") || !strings.Contains(plain, "REGRESSION") {
-		t.Fatalf("sidebar pipeline header missing phase/health chip, got:\n%s", plain)
+	if !strings.Contains(plain, "REGRESSION") {
+		t.Fatalf("sidebar pipeline header missing the health alert, got:\n%s", plain)
+	}
+	if strings.Contains(plain, "EXECUTING") {
+		t.Fatalf("sidebar pipeline header should not repeat the phase, got:\n%s", plain)
 	}
 }

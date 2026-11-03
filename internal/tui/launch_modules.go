@@ -11,8 +11,6 @@ package tui
 //	DECISIONS
 //	  3 settled
 //	  1 open
-//	AGENTS
-//	  none running
 //	TOOLS
 //	  46 registered
 //	  1 mcp degraded
@@ -62,7 +60,7 @@ func (m model) launchSidebarModules(width, budget int) []string {
 	if !appendSection(m.launchDecisionsModule(width)) {
 		return lines
 	}
-	// AGENTS — honest "none running" on launch.
+	// AGENTS — present only while agents run.
 	if !appendSection(m.launchAgentsModule(width)) {
 		return lines
 	}
@@ -132,12 +130,14 @@ func (m model) launchDecisionsModule(width int) []string {
 	return lines
 }
 
-// launchAgentsModule renders AGENTS: "none running" on launch (the frame's
-// honest empty state).
+// launchAgentsModule renders AGENTS only while agents run. With none, the
+// module is absent, the same rule the run sidebar follows.
 func (m model) launchAgentsModule(width int) []string {
-	lines := []string{sidebarHeader("AGENTS", width)}
-	lines = append(lines, "  "+zeroTheme.faint.Render("none running"))
-	return lines
+	body := m.sidebarAgentLines(width)
+	if len(body) == 0 {
+		return nil
+	}
+	return append([]string{m.sidebarAgentHeader(width)}, body...)
 }
 
 // launchToolsModule renders TOOLS: the registered count and, when an MCP

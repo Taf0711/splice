@@ -92,22 +92,24 @@ func contextRegistry() []contextModule {
 			},
 			render: func(m model, width int) []string {
 				pipeline := m.pipeline.presentation()
-				budget := width - len("PIPELINE ") - len("99/99")
-				chip := m.worktreeChip()
-				if lifecycle := m.pipeline.withRuntime(m.runtimeView()).lifecycleChip(budget); lifecycle != "" {
-					if chip != "" {
-						chip += " · "
-					}
-					chip += lifecycle
+				// An open gate shows as NEEDS YOU in the status bar, so the sidebar
+				// header carries a health alert only when no gate is open.
+				health := ""
+				if rv := m.runtimeView(); rv.gate == nil {
+					health = m.pipeline.withRuntime(rv).healthText()
 				}
-				lines := []string{pipeline.headerLineWithChip(width, chip)}
+				lines := []string{pipeline.sidebarHeaderLine(width, health)}
 				return append(lines, m.sidebarPipelineBody(pipeline, width)...)
 			},
 		},
 		{
 			name: "trajectory",
 			slot: ContextSlotTrajectory,
-			has:  func(m model) bool { return !m.pipeline.isEmpty() },
+			// The "ctrl+t to enable" hint lasts only until the first pipeline
+			// node finishes; once it has, a hidden trajectory renders nothing.
+			has: func(m model) bool {
+				return !m.pipeline.isEmpty() && (m.trajectoryVisible || m.pipeline.presentation().done == 0)
+			},
 			render: func(m model, width int) []string {
 				return []string{m.renderTrajectorySurface(m.lastState, width)}
 			},

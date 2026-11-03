@@ -135,7 +135,7 @@ func (m model) designOpenQuestions() ([]splicerun.OpenQuestionPayload, bool) {
 // sidebarDecisionsLines renders the sidebar DECISIONS module (P1.4 delta,
 // frame gEVp1 S1):
 //
-//	DECISIONS  2
+//	DECISIONS
 //	  [+] retry idempotent methods
 //	  [~] REVISED  backoff cap 5s
 //
@@ -149,12 +149,7 @@ func (m model) sidebarDecisionsLines(width int) []string {
 		return nil
 	}
 	room := maxInt(4, width-6)
-	lines := []string{sidebarHeaderWithCount(
-		"DECISIONS",
-		fmt.Sprintf("%d", len(decisions)),
-		zeroTheme.muted,
-		width,
-	)}
+	lines := []string{sidebarHeader("DECISIONS", width)}
 	for _, d := range decisions {
 		if d.Revised {
 			lines = append(lines, "  "+zeroTheme.faint.Render("[~] REVISED  "+truncateRunes(d.Statement, room-12)))
@@ -169,10 +164,10 @@ func (m model) sidebarDecisionsLines(width int) []string {
 //
 //	RUN
 //	  elapsed   5m 12s
-//	  tokens    18.4K
 //	  stage     design · thinking
 //
-// Present only while a run is live or design mode is active — the module is
+// The context figure is not repeated here: the sidebar's bottom line shows it
+// with its percent gauge. Present only while a run is live or design mode is active — the module is
 // an event-driven projection, not a permanent fixture (frame esBzN: "every
 // segment is optional and event-driven"). All three values read existing
 // runtime state; nothing is invented.
@@ -189,9 +184,6 @@ func (m model) sidebarRunLines(width int) []string {
 	}
 	if m.pending && !m.turnStartedAt.IsZero() {
 		row("elapsed", formatRunElapsed(m.now().Sub(m.turnStartedAt)))
-	}
-	if tokens := m.sidebarTokenText(); tokens != "" {
-		row("context", tokens)
 	}
 	row("stage", m.runStageLabel())
 	return lines
@@ -447,7 +439,7 @@ func implementationPlanCardBody(plan schemas.DesignPlan, critiqueClean bool, wid
 
 	lines := []string{
 		zeroTheme.amber.Bold(true).Render("IMPLEMENTATION PLAN") + "  " +
-			zeroTheme.faint.Render(fmt.Sprintf("%d tasks · %d acceptance checks", len(plan.Tasks), checks)),
+			zeroTheme.faint.Render(pluralCount(len(plan.Tasks), "task")+" · "+pluralCount(checks, "acceptance check")),
 	}
 	if critiqueClean {
 		lines = append(lines, zeroTheme.green.Render("critique clean"))
@@ -502,7 +494,7 @@ func renderCrystallizingCard(settled, scope bool, drafting bool, taskCount int, 
 		"",
 		zeroTheme.amber.Render("not a contract yet"),
 		"",
-		zeroTheme.faint.Render(fmt.Sprintf("drafting %d tasks from settled decisions", taskCount)),
+		zeroTheme.faint.Render("drafting " + pluralCount(taskCount, "task") + " from settled decisions"),
 	}
 	return styledBlock(width, lines, zeroTheme.cardRun)
 }

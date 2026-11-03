@@ -609,7 +609,6 @@ func TestPipelineCommandRendersEmbeddedDefaultReadOnly(t *testing.T) {
 		"default  source: embedded default",
 		"Graph",
 		"acceptance_verifier",
-		"<- test_runner",
 		"Command nodes",
 		"edit it in the browser with /pipeline edit; pick another with /pipeline use <name>",
 	} {

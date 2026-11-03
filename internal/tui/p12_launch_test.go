@@ -133,7 +133,7 @@ func TestLaunchResumeCardAbsentWithoutSessions(t *testing.T) {
 }
 
 // The facts block renders as the frame's two-column grid (repo|branch,
-// model|effort, tools|mcp, skills|tests) with the branch fact from the real
+// tools|mcp, skills|tests) with the branch fact from the real
 // git branch. A missing right fact leaves its cell empty.
 func TestLaunchFactsTwoColumnGrid(t *testing.T) {
 	m := launchTestModel(t)
@@ -153,4 +153,27 @@ func TestLaunchFactsTwoColumnGrid(t *testing.T) {
 	view := plainRender(t, m.View())
 	assertContains(t, view, "repo")
 	assertContains(t, view, "branch   feat/tui-workflow-surfaces")
+}
+
+// U4: a long repo path cuts from the left so the folder name survives, and the
+// value keeps two spaces before the branch cell.
+func TestLaunchRepoPathTruncatesFromLeftKeepingGap(t *testing.T) {
+	m := newModel(context.Background(), Options{ProviderName: "anthropic", ModelName: "claude-sonnet-4.5"})
+	m.width, m.height = 120, 30
+	m.cwd = "/private/tmp/claude-501/-Users-tafseerhaque-Documents-splice/splice-app"
+	m.gitBranch = "main"
+	view := plainRender(t, m.View())
+	if !strings.Contains(view, "splice-app") || !strings.Contains(view, "  branch   main") {
+		t.Fatalf("repo row should keep the folder name and a gap before branch, got:\n%s", view)
+	}
+}
+
+// U5: model and effort are not launch facts; the header and footer carry them.
+func TestLaunchFactsOmitModelAndEffort(t *testing.T) {
+	m := launchTestModel(t)
+	for _, fact := range m.launchFacts() {
+		if fact.key == "model" || fact.key == "effort" {
+			t.Fatalf("launch facts must not include %q", fact.key)
+		}
+	}
 }

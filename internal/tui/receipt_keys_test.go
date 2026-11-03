@@ -314,7 +314,7 @@ func TestVerifiedReceiptEmittedOnCompletedRun(t *testing.T) {
 		t.Fatalf("verified receipt: lastTerminalReceipt = %q, want verified", next.lastTerminalReceipt)
 	}
 	view := plainRender(t, next.View())
-	for _, want := range []string{"VERIFIED", "design plan plan-abc completed", "2 task(s) completed", "t1, t2", "[O] open diff"} {
+	for _, want := range []string{"VERIFIED", "plan completed", "2 tasks completed", "[O] open diff"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("verified receipt missing %q in live View:\n%s", want, view)
 		}

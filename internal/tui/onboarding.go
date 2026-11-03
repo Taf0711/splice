@@ -217,7 +217,7 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.openSetupPipelinePicker()
 			return m, nil
 		}
-		if m.setup.stage == setupStageMethod || m.setup.stage == setupStageProvider || m.setup.stage == setupStageModel || m.setup.stage == setupStagePipeline || m.setup.stage == setupStageReady {
+		if m.setup.stage == setupStageWelcome || m.setup.stage == setupStageMethod || m.setup.stage == setupStageProvider || m.setup.stage == setupStageModel || m.setup.stage == setupStagePipeline || m.setup.stage == setupStageSafety || m.setup.stage == setupStageReady {
 			return m.advanceSetup()
 		}
 		return m, nil
@@ -2064,6 +2064,10 @@ func (m model) setupProviderLines(width int, height int) []string {
 		padSetupLine("  "+zeroTheme.ink.Bold(true).Render("Choose a provider"), rowWidth),
 		blankSetupBlockLine(rowWidth),
 	}
+	// Rows with a tagline share one tagline column: each is padded to the
+	// widest tagged row before its gap, so the taglines start together.
+	bases := make([]string, 0, len(visibleProviders))
+	taglineColumn := 0
 	for index, option := range visibleProviders {
 		absoluteIndex := start + index
 		marker := "  "
@@ -2076,9 +2080,19 @@ func (m model) setupProviderLines(width int, height int) []string {
 		if option.Recommended {
 			label = "★ " + label
 		}
-		line := marker + style.Render(label)
+		base := marker + style.Render(label)
 		if option.Recommended {
-			line += zeroTheme.faint.Render("  (recommended)")
+			base += zeroTheme.faint.Render("  (recommended)")
+		}
+		bases = append(bases, base)
+		if setupProviderTagline(option.ID) != "" {
+			taglineColumn = maxInt(taglineColumn, lipgloss.Width(base))
+		}
+	}
+	for index, option := range visibleProviders {
+		line := bases[index]
+		if tagline := setupProviderTagline(option.ID); tagline != "" {
+			line += strings.Repeat(" ", taglineColumn-lipgloss.Width(line)) + zeroTheme.faint.Render("  "+tagline)
 		}
 		lines = append(lines, padSetupLine(line, rowWidth))
 	}
@@ -2137,11 +2151,30 @@ func setupProviderMaxVisible(height int, total int) int {
 	return maxVisible
 }
 
+// setupProviderTagline is the one-line reason to pick a provider in the list.
+func setupProviderTagline(id string) string {
+	switch id {
+	case "openrouter":
+		return "many models with one key"
+	case "huggingface":
+		return "open models via Inference Providers"
+	case "chatgpt":
+		return "uses your ChatGPT plan"
+	case "xai":
+		return "Grok models"
+	}
+	return ""
+}
+
 func setupProviderBlockWidth(terminalWidth int, providers []SetupProviderOption) int {
-	available := maxInt(24, minInt(terminalWidth-8, 44))
+	available := maxInt(24, minInt(terminalWidth-8, 64))
 	target := maxInt(lipgloss.Width("  2/6"), lipgloss.Width("  Choose a provider"))
 	for _, provider := range providers {
-		target = maxInt(target, 2+lipgloss.Width(displayValue(provider.Name, provider.ID)))
+		row := 2 + lipgloss.Width(displayValue(provider.Name, provider.ID))
+		if tagline := setupProviderTagline(provider.ID); tagline != "" {
+			row += 2 + lipgloss.Width(tagline)
+		}
+		target = maxInt(target, row)
 	}
 	target = maxInt(target, 32)
 	return minInt(target, available)
@@ -2248,9 +2281,9 @@ func (m model) setupFooter() string {
 		}
 		return zeroTheme.faint.Render("↑/↓ stage   ") + zeroTheme.accent.Render("Enter") + zeroTheme.faint.Render(" pick model   → continue")
 	case setupStageWelcome:
-		return zeroTheme.accent.Render("Space") + zeroTheme.faint.Render(" to set up Splice")
+		return zeroTheme.accent.Render("Enter") + zeroTheme.faint.Render(" to set up Splice")
 	default:
-		return zeroTheme.accent.Render("Space") + zeroTheme.faint.Render(" to continue")
+		return zeroTheme.accent.Render("Enter") + zeroTheme.faint.Render(" to continue")
 	}
 }
 
@@ -2262,6 +2295,9 @@ func centerSetupLines(lines []string, width int) []string {
 	return fitted
 }
 
+// setupProgressText shows only the step number. The total depends on the
+// provider (the endpoint and name stages appear for some providers), so a
+// "n/total" counter would change while the user moves through the flow.
 func (m model) setupProgressText() string {
 	stages := m.setupStages()
 	position := 0
@@ -2271,7 +2307,7 @@ func (m model) setupProgressText() string {
 			break
 		}
 	}
-	return zeroTheme.faint.Render(formatDoneTotal(position+1, len(stages)))
+	return zeroTheme.faint.Render(fmt.Sprintf("step %d", position+1))
 }
 
 func padSetupLine(line string, width int) string {

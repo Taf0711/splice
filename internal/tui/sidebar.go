@@ -182,14 +182,10 @@ func (m model) sidebarHasAgents() bool {
 	return len(m.sidebarSpecialists())+len(m.swarmSpawnedAgents()) > 0
 }
 
-// sidebarAgentHeader renders the AGENTS section header with the total count of
-// active agents — specialist delegations plus swarm/team members.
+// sidebarAgentHeader renders the AGENTS section header. Section headers carry a
+// count only for progress (PLAN, PIPELINE), so AGENTS has no count.
 func (m model) sidebarAgentHeader(width int) string {
-	n := len(m.sidebarSpecialists()) + len(m.swarmSpawnedAgents())
-	if n == 0 {
-		return sidebarHeader("AGENTS", width)
-	}
-	return sidebarHeaderWithCount("AGENTS", fmt.Sprintf("%d", n), zeroTheme.muted, width)
+	return sidebarHeader("AGENTS", width)
 }
 
 // swarmSpawnRe extracts a member id from a swarm_spawn tool result, whose text
@@ -696,21 +692,29 @@ func sidebarHeaderWithCount(label, count string, countStyle lipgloss.Style, widt
 // while no runtime plan is available. beginRun clears the runtime plan, but it
 // must not make an approved design plan disappear before execution reports its
 // first update_plan result.
+//
+// With no runtime plan, the design plan's progress comes from the pipeline: the
+// same done count the status footer shows as "tasks N/M", so PLAN and the
+// footer agree and PLAN never sits frozen at 0/N while tasks complete.
 func (m model) sidebarPlanState() planPanelState {
 	if !m.plan.isEmpty() {
 		return m.plan
 	}
-	// The reviewed plan is an idle fallback, not live execution state. Hide it
-	// during a run until update_plan supplies real statuses, so PLAN never stays
-	// frozen at 0/N while PIPELINE advances.
-	if m.activeRunID != 0 {
+	// -1: no pipeline progress known, so every task is pending.
+	done := -1
+	if pipeline := m.pipeline.presentation(); pipeline.active && pipeline.total > 0 {
+		done = pipeline.done
+	}
+	// A run with no pipeline progress keeps the plan hidden until update_plan
+	// supplies real statuses.
+	if m.activeRunID != 0 && done < 0 {
 		return planPanelState{}
 	}
 	if m.pendingPlan == nil || len(m.pendingPlan.Tasks) == 0 {
 		return planPanelState{}
 	}
 	state := planPanelState{steps: make([]planStep, 0, len(m.pendingPlan.Tasks))}
-	for _, task := range m.pendingPlan.Tasks {
+	for i, task := range m.pendingPlan.Tasks {
 		content := strings.TrimSpace(task.Title)
 		if content == "" {
 			content = strings.TrimSpace(task.Intent)
@@ -718,7 +722,14 @@ func (m model) sidebarPlanState() planPanelState {
 		if content == "" {
 			content = task.ID
 		}
-		state.steps = append(state.steps, planStep{content: content, status: "pending"})
+		status := "pending"
+		switch {
+		case i < done:
+			status = "completed"
+		case i == done:
+			status = "in_progress"
+		}
+		state.steps = append(state.steps, planStep{content: content, status: status})
 	}
 	return state
 }
@@ -795,7 +806,11 @@ func (m model) sidebarActivityLines(width, budget int) []string {
 	}
 	room := maxInt(4, width-3)
 	limit := minInt(maxSidebarActivityLines, budget)
-	var work []string
+	type activityEntry struct {
+		glyph, summary string
+		count          int
+	}
+	var work []activityEntry
 	// Bound the rows inspected per render so a long, work-sparse transcript can't
 	// turn this hot path into a full O(transcript) walk; recent work sits near the
 	// end, so a window comfortably finds the latest items.
@@ -806,11 +821,18 @@ func (m model) sidebarActivityLines(width, budget int) []string {
 		if row.kind != rowToolResult || !isPlanWorkTool(row.tool) {
 			continue
 		}
+		summary := m.activitySummary(row)
+		// The scan runs newest first, so the first row of a run of repeats is the
+		// newest and keeps its status glyph.
+		if n := len(work); n > 0 && work[n-1].summary == summary {
+			work[n-1].count++
+			continue
+		}
 		glyph := zeroTheme.green.Render("✓")
 		if row.status == tools.StatusError {
 			glyph = zeroTheme.red.Render("✗")
 		}
-		work = append(work, " "+glyph+" "+zeroTheme.muted.Render(truncateStep(m.activitySummary(row), room)))
+		work = append(work, activityEntry{glyph: glyph, summary: summary, count: 1})
 	}
 	live := ""
 	if m.activeRunID != 0 {
@@ -822,7 +844,15 @@ func (m model) sidebarActivityLines(width, budget int) []string {
 	if live != "" {
 		lines = append(lines, live)
 	}
-	lines = append(lines, work...)
+	for _, entry := range work {
+		// A collapsed run keeps its " ×N" count; the summary truncates first.
+		suffix := ""
+		if entry.count > 1 {
+			suffix = fmt.Sprintf(" ×%d", entry.count)
+		}
+		body := truncateStep(entry.summary, maxInt(4, room-len(suffix))) + suffix
+		lines = append(lines, " "+entry.glyph+" "+zeroTheme.muted.Render(body))
+	}
 	if len(lines) > budget {
 		lines = lines[:budget]
 	}
@@ -836,7 +866,7 @@ func (m model) sidebarActivityLines(width, budget int) []string {
 func (m model) activitySummary(row transcriptRow) string {
 	if isPlanCommandTool(row.tool) {
 		if cmd := m.activityCommandForRow(row.id, row.runID); cmd != "" {
-			return row.tool + " · " + cmd
+			return row.tool + " · " + unquoteShellWords(cmd)
 		}
 		return row.tool
 	}
@@ -852,9 +882,26 @@ func (m model) activitySummary(row transcriptRow) string {
 	return text
 }
 
+// unquoteShellWords turns a command shown as shell-quoted words (every token
+// wrapped in single quotes, as in `'go' 'test' './...'`) into plain words. Any
+// other text, including a quote inside a token, is returned unchanged.
+func unquoteShellWords(cmd string) string {
+	words := strings.Fields(cmd)
+	if len(words) == 0 {
+		return cmd
+	}
+	plain := make([]string, 0, len(words))
+	for _, word := range words {
+		if len(word) < 2 || word[0] != '\'' || word[len(word)-1] != '\'' || strings.Contains(word[1:len(word)-1], "'") {
+			return cmd
+		}
+		plain = append(plain, word[1:len(word)-1])
+	}
+	return strings.Join(plain, " ")
+}
+
 // activityCommandForRow recovers a command tool's command-line from its paired
-// call row (whose arg hint carries the command), matched by BOTH id and runID so
-// a reused tool-call id from a later run can't attribute the wrong command.
+// call row (arg when set, else detail, since bash has no secondary arg), matched by BOTH id and runID so a reused tool-call id from a later run can't attribute the wrong command.
 func (m model) activityCommandForRow(id string, runID int) string {
 	if id == "" {
 		return ""
@@ -862,7 +909,10 @@ func (m model) activityCommandForRow(id string, runID int) string {
 	for i := len(m.transcript) - 1; i >= 0; i-- {
 		row := m.transcript[i]
 		if row.kind == rowToolCall && row.id == id && row.runID == runID {
-			return row.arg
+			if row.arg != "" {
+				return row.arg
+			}
+			return row.detail
 		}
 	}
 	return ""

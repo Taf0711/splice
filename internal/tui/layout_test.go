@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/Taf0711/splice/internal/agent"
 )
 
 func TestTranscriptFrameLayoutPinsMainRegions(t *testing.T) {
@@ -181,5 +183,35 @@ func TestTranscriptLineAtMouseUsesFrameBodyRegion(t *testing.T) {
 	}
 	if _, ok := m.transcriptLineAtMouse(testMouseClick(tea.MouseLeft, target.textStart, frame.headerRect.y)); ok {
 		t.Fatal("header click should not map to transcript body")
+	}
+}
+
+// U6: with an ask-user card open (which shows its own Esc instruction), the
+// footer drops "esc cancel" and keeps "(effort)" at width 120.
+func TestFooterKeepsEffortWhilePromptOpen(t *testing.T) {
+	m := mouseTestModel()
+	m.width, m.height = 120, 30
+	m.modelName = "test-model"
+	m.reasoningEffort = "high"
+	m.pending = true
+	request := agent.AskUserRequest{Questions: []agent.AskUserQuestion{{Question: "which flag wins?"}}}
+	m.pendingAskUser = &pendingAskUserPrompt{request: request, answer: func([]string) {}, states: newAskUserStates(request.Questions)}
+	lines := strings.Split(plainRender(t, m.View()), "\n")
+	footer := lines[len(lines)-1]
+	if !strings.Contains(footer, "(high)") {
+		t.Fatalf("footer should keep the effort, got %q", footer)
+	}
+	if strings.Contains(footer, "esc cancel") {
+		t.Fatalf("footer should omit esc cancel while a prompt card is open, got %q", footer)
+	}
+	// A crowded left side (memory and esc-cancel segments) at a narrow width
+	// must yield before "(high)" does.
+	m.width = 64
+	m.pendingAskUser = nil
+	m.memoryStatus = "unavailable"
+	lines = strings.Split(plainRender(t, m.View()), "\n")
+	footer = lines[len(lines)-1]
+	if !strings.Contains(footer, "(high)") {
+		t.Fatalf("narrow footer should keep the effort, got %q", footer)
 	}
 }

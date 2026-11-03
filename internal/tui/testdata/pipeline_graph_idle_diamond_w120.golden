@@ -5,7 +5,7 @@
 │   depth 0                                                                                                            │
 │     code_writer                                                                                                      │
 │   depth 1                                                                                                            │
-│     lint             command  <- code_writer                                                                         │
+│     lint             command                                                                                         │
 │     static_analyzer  <- code_writer                                                                                  │
 │   depth 2                                                                                                            │
 │     test_runner      <- lint, static_analyzer                                                                        │

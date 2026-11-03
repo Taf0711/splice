@@ -2114,3 +2114,36 @@ func TestResolveProjectConfigCannotSetWorktreesDirectory(t *testing.T) {
 		t.Fatal("project worktrees.enabled=false was not merged")
 	}
 }
+
+// Drift guard: every KeyBindingsConfig field must survive mergeKeyBindings. A new
+// field that is not copied fails here and names the field.
+func TestMergeKeyBindingsCopiesEveryField(t *testing.T) {
+	var src KeyBindingsConfig
+	v := reflect.ValueOf(&src).Elem()
+	for i := 0; i < v.NumField(); i++ {
+		v.Field(i).SetString("ctrl+" + string(rune('a'+i)))
+	}
+	var dst KeyBindingsConfig
+	mergeKeyBindings(&dst, src)
+	dv := reflect.ValueOf(dst)
+	for i := 0; i < dv.NumField(); i++ {
+		if dv.Field(i).String() != v.Field(i).String() {
+			t.Errorf("mergeKeyBindings drops %s: got %q, want %q", v.Type().Field(i).Name, dv.Field(i).String(), v.Field(i).String())
+		}
+	}
+}
+
+func TestResolveUserToggleNarrationKeyBinding(t *testing.T) {
+	userPath := writeConfig(t, `{
+		"activeProvider": "user",
+		"providers": [{"name": "user", "provider": "openai", "apiKey": "sk-user", "model": "gpt-user"}],
+		"keybindings": {"toggleNarration": "ctrl+y"}
+	}`)
+	resolved, err := Resolve(ResolveOptions{UserConfigPath: userPath, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved.KeyBindings.ToggleNarration != "ctrl+y" {
+		t.Fatalf("KeyBindings.ToggleNarration = %q, want ctrl+y", resolved.KeyBindings.ToggleNarration)
+	}
+}

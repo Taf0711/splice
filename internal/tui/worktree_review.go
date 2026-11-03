@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"time"
@@ -383,6 +384,16 @@ func applyReviewedWorktree(wt worktrees.Result, decision string, dirtyOffered bo
 	return msg
 }
 
+// mergedNotice words a successful merge-back for the user. The branch name is
+// internal, so the commit short SHA stands in for it; a result without a SHA
+// keeps the core message.
+func mergedNotice(result worktrees.MergeBackResult) string {
+	if result.Status != worktrees.MergeBackMerged || result.CommitSHA == "" {
+		return result.Message
+	}
+	return fmt.Sprintf("Merged into your checkout (commit %.10s)", result.CommitSHA)
+}
+
 func runWorktreeReview(wt worktrees.Result, decision string, dirtyOffered bool, reviewedTree string) worktreeReviewResultMsg {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -420,13 +431,14 @@ func runWorktreeReview(wt worktrees.Result, decision string, dirtyOffered bool, 
 		if result.Status != worktrees.MergeBackMerged && result.Status != worktrees.MergeBackNoChanges {
 			return keep("Merge-back refused: " + result.Message + ". Worktree kept at " + wt.Path)
 		}
+		notice := mergedNotice(result)
 		if err := unlock(); err != nil {
-			return worktreeReviewResultMsg{notice: result.Message + ". Unlock failed: " + err.Error() + "; worktree left at " + wt.Path, kept: &wt}
+			return worktreeReviewResultMsg{notice: notice + ". Unlock failed: " + err.Error() + "; worktree left at " + wt.Path, kept: &wt}
 		}
 		if err := tuiRemoveWorktree(ctx, worktrees.RemoveOptions{RepoRoot: wt.RepoRoot, Path: wt.Path}); err != nil {
-			return worktreeReviewResultMsg{notice: result.Message + ". Cleanup failed; worktree left at " + wt.Path + ": " + err.Error(), kept: &wt}
+			return worktreeReviewResultMsg{notice: notice + ". Cleanup failed; worktree left at " + wt.Path + ": " + err.Error(), kept: &wt}
 		}
-		return worktreeReviewResultMsg{notice: result.Message}
+		return worktreeReviewResultMsg{notice: notice}
 	case worktreeReviewReject:
 		branch, err := tuiPreserveWorktree(ctx, worktrees.MergeBackOptions{
 			RepoRoot:     wt.RepoRoot,

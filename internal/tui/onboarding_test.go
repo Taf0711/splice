@@ -97,7 +97,7 @@ func TestSetupTakeoverRendersAndCompletes(t *testing.T) {
 	m.width = 100
 	m.height = 30
 
-	if view := plainRender(t, m.View()); !strings.Contains(view, "Welcome to Splice") || !strings.Contains(view, "Space to set up Splice") || !strings.Contains(view, "terminal agent for changing real code") {
+	if view := plainRender(t, m.View()); !strings.Contains(view, "Welcome to Splice") || !strings.Contains(view, "Enter to set up Splice") || !strings.Contains(view, "terminal agent for changing real code") {
 		t.Fatalf("setup welcome view missing expected text:\n%s", view)
 	}
 
@@ -379,8 +379,8 @@ func TestSetupTakeoverBlocksPromptSubmission(t *testing.T) {
 	if m.pending {
 		t.Fatal("setup enter should not start a prompt")
 	}
-	if m.setup.stage != setupStageWelcome {
-		t.Fatalf("stage = %v, want welcome because Enter is not advertised here", m.setup.stage)
+	if m.setup.stage != setupStageMethod {
+		t.Fatalf("stage = %v, want method chooser: Enter continues setup and never submits the prompt", m.setup.stage)
 	}
 }
 
@@ -512,9 +512,7 @@ func TestSetupModelMouseWheelIgnoredWhileLoading(t *testing.T) {
 func TestSetupEnterDoesNotAdvanceSpaceOnlyStages(t *testing.T) {
 	saveCalls := 0
 	for _, stage := range []setupStage{
-		setupStageWelcome,
 		setupStageCredentials,
-		setupStageSafety,
 	} {
 		m := newModel(context.Background(), Options{
 			Setup: SetupOptions{
@@ -1315,13 +1313,13 @@ func TestSetupProgressRendersAboveFooter(t *testing.T) {
 	stepIndex := -1
 	footerIndex := -1
 	for index, line := range lines {
-		if strings.Contains(line, "3/8") {
+		if strings.Contains(line, "step 3") {
 			stepIndex = index
 		}
 		if strings.Contains(line, "Enter continue") {
 			footerIndex = index
 		}
-		if strings.Contains(line, "Choose a provider") && strings.Contains(line, "3/8") {
+		if strings.Contains(line, "Choose a provider") && strings.Contains(line, "step 3") {
 			t.Fatalf("progress should not render in setup body: %q", line)
 		}
 	}
@@ -2257,12 +2255,43 @@ func TestSetupProgressTextStableAcrossPowerOfTen(t *testing.T) {
 		t.Fatalf("setup stages = %d, want the ten-stage non-OAuth path for this test", len(stages))
 	}
 	m.setup.stage = stages[8]
-	if got := plainRender(t, m.setupProgressText()); !strings.Contains(got, "09/10") {
-		t.Fatalf("stage 9 progress = %q, want zero-padded 09/10", got)
+	if got := plainRender(t, m.setupProgressText()); got != "step 9" {
+		t.Fatalf("stage 9 progress = %q, want \"step 9\"", got)
 	}
 	m.setup.stage = stages[9]
-	if got := plainRender(t, m.setupProgressText()); !strings.Contains(got, "10/10") {
-		t.Fatalf("final stage progress = %q, want 10/10 at stable width", got)
+	if got := plainRender(t, m.setupProgressText()); got != "step 10" {
+		t.Fatalf("final stage progress = %q, want \"step 10\"", got)
+	}
+}
+
+// U1: the step counter shows no total, so walking welcome -> method -> provider
+// never changes a "n/total" counter.
+func TestSetupProgressStepNumberWalksWithoutTotal(t *testing.T) {
+	m := newModel(t.Context(), Options{Setup: SetupOptions{Visible: true, Providers: []SetupProviderOption{
+		{ID: "openai", Name: "OpenAI", DefaultModel: "gpt-4.1", EnvVar: "OPENAI_API_KEY", RequiresAuth: true},
+	}}})
+	m.setup.stage = setupStageWelcome
+	want := []string{"step 1", "step 2", "step 3"}
+	for i, stage := range []setupStage{setupStageWelcome, setupStageMethod, setupStageProvider} {
+		m.setup.stage = stage
+		if got := plainRender(t, m.setupProgressText()); got != want[i] {
+			t.Fatalf("stage %d progress = %q, want %q", stage, got, want[i])
+		}
+	}
+}
+
+// U2: Enter continues from the welcome stage, the same key the footer names.
+func TestSetupWelcomeEnterAdvances(t *testing.T) {
+	m := newModel(t.Context(), Options{Setup: SetupOptions{Visible: true, Providers: []SetupProviderOption{
+		{ID: "openai", Name: "OpenAI", DefaultModel: "gpt-4.1", EnvVar: "OPENAI_API_KEY", RequiresAuth: true},
+	}}})
+	m.setup.stage = setupStageWelcome
+	if view := plainRender(t, m.View()); !strings.Contains(view, "Enter to set up Splice") {
+		t.Fatalf("welcome footer should name Enter, got:\n%s", view)
+	}
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	if got := updated.(model).setup.stage; got != setupStageMethod {
+		t.Fatalf("stage after Enter = %v, want method chooser", got)
 	}
 }
 
@@ -2302,5 +2331,39 @@ func TestSetupPipelineOfflineFallbackFiltersEndpointFamily(t *testing.T) {
 	}
 	if !sawOption {
 		t.Fatal("offline fallback offered no catalog models")
+	}
+}
+
+// U3: each provider row in the OAuth chooser names what the choice means, and
+// the selected row keeps its marker.
+func TestSetupProviderListShowsTaglineForSelectedRow(t *testing.T) {
+	m := newModel(t.Context(), Options{Setup: SetupOptions{Visible: true, Providers: []SetupProviderOption{
+		{ID: "openrouter", Name: "OpenRouter", DefaultModel: "x", RequiresAuth: true},
+		{ID: "xai", Name: "xAI", DefaultModel: "grok-4", RequiresAuth: true},
+	}}})
+	m.width = 100
+	m.height = 30
+	m.setup.oauthMode = true
+	m.setup.providers = m.setup.allProviders
+	m.setup.stage = setupStageProvider
+	view := plainRender(t, m.View())
+	if !strings.Contains(view, "❯ OpenRouter  many models with one key") {
+		t.Fatalf("selected provider row should show its tagline, got:\n%s", view)
+	}
+	if !strings.Contains(view, "xAI") || !strings.Contains(view, "Grok models") {
+		t.Fatalf("unselected provider row should show its tagline, got:\n%s", view)
+	}
+	// Taglines of different rows start in one display column.
+	column := func(needle string) int {
+		for _, line := range strings.Split(view, "\n") {
+			if index := strings.Index(line, needle); index >= 0 {
+				return lipgloss.Width(line[:index])
+			}
+		}
+		t.Fatalf("no line contains %q:\n%s", needle, view)
+		return -1
+	}
+	if a, b := column("many models"), column("Grok models"); a != b {
+		t.Fatalf("tagline columns differ: %d vs %d\n%s", a, b, view)
 	}
 }

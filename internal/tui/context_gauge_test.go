@@ -55,9 +55,9 @@ func TestStatusLineDoesNotDuplicateTokenFigureNextToGauge(t *testing.T) {
 	}
 }
 
-// The RUN module's token row is the context-window fill of the latest request,
-// not a running total, so it is labelled "context".
-func TestSidebarRunTokenRowLabelledContext(t *testing.T) {
+// The context figure is the context-window fill of the latest request. RUN
+// does not repeat it; the bottom sidebar line keeps it with the % gauge.
+func TestSidebarRunOmitsContextRowKeepsBottomFigure(t *testing.T) {
 	base := time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
 	m := newModel(t.Context(), Options{ModelName: "claude-sonnet-4.5"})
 	if _, err := m.usageTracker.Record(usage.RecordInput{
@@ -70,13 +70,13 @@ func TestSidebarRunTokenRowLabelledContext(t *testing.T) {
 	m.activeRunID = 7
 	m.pending = true
 	m.turnStartedAt = base
-	for _, line := range strings.Split(stripSidebar(m.renderContextModules(40, 60)), "\n") {
-		if strings.Contains(line, "161K / 200K tokens") {
-			if !strings.Contains(line, "context") {
-				t.Fatalf("RUN token row not labelled context: %q", line)
-			}
-			return
-		}
+	// RUN carries no token row: the figure is shown once, on the bottom line
+	// with its percent gauge.
+	if plain := stripSidebar(m.renderContextModules(40, 60)); strings.Contains(plain, "161K / 200K tokens") {
+		t.Fatalf("RUN module repeats the token figure:\n%s", plain)
 	}
-	t.Fatal("RUN module has no token row")
+	bottom := stripSidebar([]string{m.sidebarTokenLine(40)})
+	if !strings.Contains(bottom, "161K / 200K tokens") || !strings.Contains(bottom, "%") {
+		t.Fatalf("bottom line lost the token figure or gauge: %q", bottom)
+	}
 }
