@@ -348,28 +348,32 @@ func (s pipelinePanelState) healthChipText() string {
 	return "normal"
 }
 
-func (s pipelinePanelState) headerLineWithChip(width int, chip string) string {
-	return s.presentation().headerLineWithChip(width, chip)
-}
-
-func (p pipelinePresentation) headerLineWithChip(width int, chip string) string {
-	label := "PIPELINE"
-	if strings.TrimSpace(chip) != "" {
-		label = "PIPELINE " + chip
-	}
+// sidebarHeaderLine renders the sidebar PIPELINE header: the label, and the
+// done/total count. A failed or complete run puts its state as a glyph on the
+// count, and a failed run also says "failed" so NO_COLOR users can read it.
+// health is the alert word (e.g. "regression") and shows only when it is not
+// normal, so the alert is never lost. The worktree and phase words stay out of
+// the sidebar: the header bar shows the worktree, and a gate shows as NEEDS YOU.
+func (p pipelinePresentation) sidebarHeaderLine(width int, health string) string {
 	if !p.active || p.total == 0 {
-		return sidebarHeader(label, width)
+		return sidebarHeader("PIPELINE", width)
 	}
+	label := "PIPELINE"
+	if health != "" {
+		label += " " + health
+	}
+	count := formatDoneTotal(p.done, p.total)
 	style := zeroTheme.amber
 	switch {
 	case p.failed:
+		label += " failed"
+		count = "✗ " + count
 		style = zeroTheme.red
-	case p.warning:
-		style = zeroTheme.amber
 	case p.allDone:
+		count = "✓ " + count
 		style = zeroTheme.green
 	}
-	return sidebarHeaderWithCount(label, formatDoneTotal(p.done, p.total), style, width)
+	return sidebarHeaderWithCount(label, count, style, width)
 }
 
 func (s pipelinePanelState) renderSection(width int, phase int) []string {
@@ -544,21 +548,12 @@ func (p pipelinePresentation) renderStageRows(width int, phase int) []string {
 	return lines
 }
 
-// renderSectionTail renders the progress bar, the current stage, and the
-// repair messages under the roster or the graph.
+// renderSectionTail renders the progress bar and the repair messages under
+// the roster or the graph. The graph marks the current stage, so no separate
+// CURRENT block repeats it.
 func (p pipelinePresentation) renderSectionTail(width int) []string {
 	room := maxInt(4, width-3)
 	lines := []string{"", " " + p.progressBar(width)}
-	if p.current != nil {
-		lines = append(lines, "")
-		lines = append(lines, zeroTheme.muted.Bold(true).Render("CURRENT"))
-		lines = append(lines, " "+zeroTheme.faint.Render("stage: ")+zeroTheme.ink.Render(truncateStep(p.current.name, maxInt(4, width-8))))
-		// The presentation contract does not carry a per-node action detail, so
-		// the action line renders only when a detail is available.
-		if strings.TrimSpace(p.current.detail) != "" {
-			lines = append(lines, " "+zeroTheme.faint.Render("action: ")+zeroTheme.muted.Render(truncateStep(p.current.detail, maxInt(4, width-9))))
-		}
-	}
 	if len(p.messages) > 0 {
 		lines = append(lines, "")
 		lines = append(lines, zeroTheme.muted.Bold(true).Render("MESSAGES"))

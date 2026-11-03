@@ -61,7 +61,10 @@ func renderPipelineGraphFocus(graph presentrun.Graph, width int, tier presentati
 			depth = node.Depth
 			lines = append(lines, zeroTheme.faint.Render(fmt.Sprintf("depth %d", depth)))
 		}
-		rows := renderPipelineGraphNode(graph, node, i == selected, layered, nameWidth, width, tier)
+		// A node whose only dependency is the row above needs no "<-" row: the
+		// order already shows the edge. Fan-in, fan-out, and skips still show it.
+		chained := i > 0 && len(node.Dependencies) == 1 && node.Dependencies[0] == graph.Nodes[i-1].Name
+		rows := renderPipelineGraphNode(graph, node, i == selected, chained, layered, nameWidth, width, tier)
 		if i == selected {
 			focusStart, focusEnd = len(lines), len(lines)+len(rows)-1
 		}
@@ -74,7 +77,7 @@ func renderPipelineGraphFocus(graph presentrun.Graph, width int, tier presentati
 // metadata, and dependencies. The layered view keeps the dependencies on the
 // row when they fit; otherwise, and always in the flat list, they move to an
 // indented line of their own, so they are never cut off.
-func renderPipelineGraphNode(graph presentrun.Graph, node presentrun.GraphNode, selected, layered bool, nameWidth, width int, tier presentation.GlyphTier) []string {
+func renderPipelineGraphNode(graph presentrun.Graph, node presentrun.GraphNode, selected, chained, layered bool, nameWidth, width int, tier presentation.GlyphTier) []string {
 	skipped := graph.Live && (len(node.SkippedAt) > 0 || node.Removed != "" || node.NotRun || node.Interrupted)
 	nameStyle, metaStyle := zeroTheme.ink, zeroTheme.faint
 	if skipped {
@@ -100,7 +103,7 @@ func renderPipelineGraphNode(graph presentrun.Graph, node presentrun.GraphNode, 
 	metaParts := pipelineGraphMeta(graph, node, tier)
 	meta := strings.Join(metaParts, "  ")
 	deps := ""
-	if len(node.Dependencies) > 0 {
+	if len(node.Dependencies) > 0 && !chained {
 		deps = "<- " + strings.Join(node.Dependencies, ", ")
 	}
 
@@ -215,8 +218,12 @@ func pipelineGraphMeta(graph presentrun.Graph, node presentrun.GraphNode, tier p
 	return parts
 }
 
-// pipelineGraphCost renders a node's cost through the shared formatter.
+// pipelineGraphCost renders a node's cost through the shared formatter. An
+// unknown cost renders nothing, so no "cost n/a" part shows.
 func pipelineGraphCost(node presentrun.GraphNode) string {
+	if node.CostUSD <= 0 {
+		return ""
+	}
 	return presentrun.CostText(node)
 }
 

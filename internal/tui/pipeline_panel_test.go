@@ -235,8 +235,8 @@ func TestPipelinePanelHeaderReportsFailedTerminalRosterInRed(t *testing.T) {
 			{name: "completed", status: pipelineStageCompleted},
 		},
 	}
-	got := state.headerLineWithChip(40, "")
-	want := sidebarHeaderWithCount("PIPELINE", "4/4", zeroTheme.red, 40)
+	got := state.presentation().sidebarHeaderLine(40, "")
+	want := sidebarHeaderWithCount("PIPELINE failed", "✗ 4/4", zeroTheme.red, 40)
 	if got != want {
 		t.Fatalf("failed pipeline header = %q, want %q", got, want)
 	}
@@ -1357,7 +1357,7 @@ func TestPipelineSidebarHeaderCountStableAcrossPowerOfTen(t *testing.T) {
 	}
 	state.stages = nodes
 
-	header := state.headerLineWithChip(60, "")
+	header := state.presentation().sidebarHeaderLine(60, "")
 	if got := plainRender(t, header); !strings.Contains(got, "09/10") {
 		t.Fatalf("sidebar header = %q, want zero-padded 09/10 counter", got)
 	}
@@ -1517,4 +1517,31 @@ func TestTUIPipelineTopologyWarningIsSystemRow(t *testing.T) {
 		}
 	}
 	t.Fatalf("sink messages = %#v, want a system row carrying the override warning", sunk)
+}
+
+// The sidebar PIPELINE section has no CURRENT block: the graph marks the
+// current stage, and RUN names it.
+func TestPipelineSectionOmitsCurrentBlock(t *testing.T) {
+	state := pipelinePanelState{active: true, stages: []pipelineStageRow{
+		{name: "code_writer", status: pipelineStageRunning},
+	}}
+	plain := plainRender(t, strings.Join(state.presentation().renderSectionTail(40), "\n"))
+	if strings.Contains(plain, "CURRENT") || strings.Contains(plain, "stage:") {
+		t.Fatalf("section repeats the current stage:\n%s", plain)
+	}
+}
+
+// The sidebar PIPELINE header is the label and the count, with the state as a
+// glyph; a failed run also says "failed" for NO_COLOR users.
+func TestSidebarPipelineHeaderShowsStateGlyphAndCount(t *testing.T) {
+	complete := pipelinePanelState{active: true, stages: []pipelineStageRow{
+		{name: "a", status: pipelineStageCompleted},
+		{name: "b", status: pipelineStageCompleted},
+	}}
+	if got := plainRender(t, complete.presentation().sidebarHeaderLine(40, "")); !strings.Contains(got, "PIPELINE") || !strings.Contains(got, "✓ 2/2") {
+		t.Fatalf("complete header = %q, want PIPELINE ✓ 2/2", got)
+	}
+	if got := plainRender(t, complete.presentation().sidebarHeaderLine(40, "")); strings.Contains(got, "COMPLETE") || strings.Contains(got, "worktree") {
+		t.Fatalf("complete header carries worktree or lifecycle words: %q", got)
+	}
 }

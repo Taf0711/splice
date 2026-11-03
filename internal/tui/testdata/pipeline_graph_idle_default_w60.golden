@@ -8,7 +8,6 @@
 │ Graph                                                    │
 │    code_writer                                           │
 │    test_generator  skipped at trivial, light             │
-│      <- code_writer                                      │
 │    static_analyzer  skipped at trivial                   │
 │      <- code_writer                                      │
 │    security_auditor  skipped at trivial, light, standard │
@@ -16,7 +15,6 @@
 │    test_runner  skipped at trivial                       │
 │      <- static_analyzer                                  │
 │    acceptance_verifier  skipped at trivial               │
-│      <- test_runner                                      │
 │                                                          │
 │ Command nodes                                            │
 │   none                                                   │

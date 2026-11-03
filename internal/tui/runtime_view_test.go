@@ -45,9 +45,11 @@ func TestRuntimeViewProjectsLiveGates(t *testing.T) {
 			if chip := stripANSI(m.phaseChipSegment()); !strings.Contains(chip, "needs you") {
 				t.Fatalf("status chip = %q, want NEEDS YOU", chip)
 			}
+			// The gate reads NEEDS YOU in the status bar; the sidebar header does
+			// not repeat it.
 			header := stripSidebar(m.renderContextSidebar(sidebarWidth(m.width), m.height))
-			if !strings.Contains(strings.ToLower(header), "gate "+string(tc.kind)) {
-				t.Fatalf("pipeline header missing gate %s:\n%s", tc.kind, header)
+			if strings.Contains(header, "BLOCKED") {
+				t.Fatalf("pipeline header repeats the gate %s:\n%s", tc.kind, header)
 			}
 		})
 	}

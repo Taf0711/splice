@@ -301,8 +301,10 @@ func (m model) statusLine(width int) string {
 	}
 	// While a run is in flight, surface the existing Esc-cancel affordance so
 	// it is discoverable before the first Esc press. The confirm state replaces
-	// this segment with its amber instruction above.
-	if m.pending && !m.exitConfirmActive && !m.cancelConfirmActive {
+	// this segment with its amber instruction above. An open prompt card shows
+	// its own Esc instruction, so the footer stays quiet then.
+	promptOpen := m.pendingAskUser != nil || m.pendingPermission != nil || m.pendingSpecReview != nil
+	if m.pending && !m.exitConfirmActive && !m.cancelConfirmActive && !promptOpen {
 		left += zeroTheme.muted.Render(" · ") + zeroTheme.faint.Render("esc cancel")
 	}
 	if m.exitConfirmActive {
@@ -358,6 +360,11 @@ func (m model) statusLine(width int) string {
 			label += separator + right
 		}
 		right = label
+	}
+	// The left side yields first: when both sides cannot fit, cut the left so
+	// the right keeps "(effort)" instead of the line cutting from its end.
+	if rightWidth := lipgloss.Width(right); rightWidth < width-2 && lipgloss.Width(left)+2+rightWidth > width {
+		left = fitStyledLine(left, width-2-rightWidth)
 	}
 
 	return fitStyledLine(joinHeaderLine(left, right, width), width)

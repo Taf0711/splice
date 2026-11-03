@@ -405,10 +405,10 @@ func TestSidebarShowsSpawnedAgents(t *testing.T) {
 	if !strings.Contains(plain, "grep") {
 		t.Fatalf("running subagent working detail missing:\n%s", plain)
 	}
-	// Header shows the total agent count.
+	// Section headers carry no count (only progress does), so AGENTS is bare.
 	hdr := stripSidebar([]string{m.sidebarAgentHeader(width)})
-	if !strings.Contains(hdr, "AGENTS") || !strings.Contains(hdr, "2") {
-		t.Fatalf("agent header should show AGENTS 2, got: %s", hdr)
+	if strings.TrimSpace(hdr) != "AGENTS" {
+		t.Fatalf("agent header should be bare AGENTS, got: %q", hdr)
 	}
 }
 
@@ -443,8 +443,8 @@ func TestSidebarShowsSwarmSpawnedAgents(t *testing.T) {
 		t.Fatalf("swarm member short task names missing from sidebar:\n%s", plain)
 	}
 	hdr := stripSidebar([]string{m.sidebarAgentHeader(width)})
-	if !strings.Contains(hdr, "AGENTS") || !strings.Contains(hdr, "2") {
-		t.Fatalf("header should show AGENTS 2, got: %s", hdr)
+	if strings.TrimSpace(hdr) != "AGENTS" {
+		t.Fatalf("agent header should be bare AGENTS, got: %q", hdr)
 	}
 }
 
@@ -779,5 +779,78 @@ func TestActivitySummaryShowsBashCommandFromDetail(t *testing.T) {
 	}
 	if got := m.activitySummary(m.transcript[1]); !strings.Contains(got, "go test ./...") {
 		t.Fatalf("activitySummary = %q, want the bash command", got)
+	}
+}
+
+// During a run the approved design plan stays in PLAN, with statuses from the
+// pipeline progress the footer shows as "tasks N/M": done tasks ✓, the next •.
+func TestSidebarPlanStaysDuringRunWithPipelineProgress(t *testing.T) {
+	m := sidebarTestModel()
+	m.plan = planPanelState{} // no runtime plan: the design plan is the source
+	m.activeRunID = 7
+	m.pendingPlan = &schemas.DesignPlan{Tasks: []schemas.Task{{Title: "first task"}, {Title: "second task"}}}
+	m.pipeline = pipelinePanelState{active: true, stages: []pipelineStageRow{
+		{name: "code_writer", status: pipelineStageCompleted},
+		{name: "test_runner", status: pipelineStageRunning},
+	}}
+	plain := stripSidebar(m.sidebarPlanLines(sidebarWidth(m.width)))
+	if !strings.Contains(plain, "✓ first task") || !strings.Contains(plain, "• second task") {
+		t.Fatalf("PLAN should show the done task then the current one:\n%s", plain)
+	}
+	if hdr := stripSidebar([]string{m.sidebarPlanHeader(sidebarWidth(m.width))}); !strings.Contains(hdr, "1/2") {
+		t.Fatalf("PLAN header = %q, want 1/2", hdr)
+	}
+}
+
+// ACTIVITY collapses consecutive repeats into one row with a ×N count.
+func TestActivityCollapsesRepeatsWithCount(t *testing.T) {
+	m := model{}
+	for i := 0; i < 4; i++ {
+		m.transcript = append(m.transcript,
+			transcriptRow{kind: rowToolCall, tool: "bash", id: "c" + string(rune('a'+i)), runID: 1, detail: "go test ./..."},
+			transcriptRow{kind: rowToolResult, tool: "bash", id: "c" + string(rune('a'+i)), runID: 1, status: tools.StatusOK})
+	}
+	plain := stripSidebar(m.sidebarActivityLines(40, maxSidebarActivityLines))
+	if got := strings.Count(plain, "go test ./..."); got != 1 || !strings.Contains(plain, "×4") {
+		t.Fatalf("ACTIVITY should collapse four repeats into one ×4 row:\n%s", plain)
+	}
+}
+
+// A command shown as shell-quoted words reads as plain words in ACTIVITY.
+func TestActivityShowsQuotedCommandUnquoted(t *testing.T) {
+	m := model{}
+	m.transcript = []transcriptRow{
+		{kind: rowToolCall, tool: "bash", id: "c1", runID: 1, detail: "'go' 'test' '-json' './...'"},
+		{kind: rowToolResult, tool: "bash", id: "c1", runID: 1, status: tools.StatusOK},
+	}
+	if got := m.activitySummary(m.transcript[1]); got != "bash · go test -json ./..." {
+		t.Fatalf("activitySummary = %q, want the unquoted command", got)
+	}
+}
+
+// The launch screen omits AGENTS while no agent runs.
+func TestLaunchSidebarOmitsAgentsWhenNoneRun(t *testing.T) {
+	m := sidebarTestModel()
+	m.transcript = nil
+	plain := stripSidebar(m.launchSidebarModules(sidebarWidth(m.width), 30))
+	if strings.Contains(plain, "AGENTS") || strings.Contains(plain, "none running") {
+		t.Fatalf("launch screen shows an idle AGENTS module:\n%s", plain)
+	}
+}
+
+// The trajectory hint lasts until the first pipeline node finishes.
+func TestTrajectoryHintEndsWhenFirstNodeFinishes(t *testing.T) {
+	m := sidebarTestModel()
+	m.trajectoryVisible = false
+	m.pipeline = pipelinePanelState{active: true, stages: []pipelineStageRow{
+		{name: "code_writer", status: pipelineStageRunning},
+		{name: "test_runner", status: pipelineStagePending},
+	}}
+	if plain := stripSidebar(m.renderContextModules(40, 30)); !strings.Contains(plain, "ctrl+t to enable") {
+		t.Fatalf("hint missing before the first node finishes:\n%s", plain)
+	}
+	m.pipeline.stages[0].status = pipelineStageCompleted
+	if plain := stripSidebar(m.renderContextModules(40, 30)); strings.Contains(plain, "trajectory hidden") {
+		t.Fatalf("hint still shown after the first node finished:\n%s", plain)
 	}
 }

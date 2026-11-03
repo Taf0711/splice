@@ -13,6 +13,8 @@ package tui
 import (
 	"fmt"
 	"strings"
+
+	"charm.land/lipgloss/v2"
 )
 
 // launchFact is one key/value row of the facts block.
@@ -30,7 +32,8 @@ func (m model) launchWordmark() string {
 }
 
 // launchFacts assembles the facts block as the frame's TWO-COLUMN grid
-// (frame kAYHl: repo|branch, model|effort, tools|mcp, skills|tests). The
+// (frame kAYHl: repo|branch, tools|mcp, skills|tests; model and effort live
+// in the header and footer). The
 // right cell is empty when its fact is absent (no MCP servers configured
 // drops the mcp cell; there is no placeholder). Rows omit rather than pad:
 // an unknown value never renders as a fake number (tests is the honest
@@ -38,8 +41,6 @@ func (m model) launchWordmark() string {
 func (m model) launchFacts() []launchFact {
 	facts := []launchFact{
 		{key: "repo", value: shortenPath(m.cwd)},
-		{key: "model", value: displayValue(strings.TrimSpace(m.modelName), "none")},
-		{key: "effort", value: displayValue(strings.TrimSpace(string(m.reasoningEffort)), "auto")},
 		{key: "tools", value: fmt.Sprintf("%d · %d sources", len(m.registeredTools()), m.launchSourceCount())},
 	}
 	if branch := strings.TrimSpace(m.gitBranch); branch != "" {
@@ -62,7 +63,7 @@ func (m model) launchFacts() []launchFact {
 }
 
 // launchFactPairs folds the flat fact list into the frame's two-column grid:
-// pairs are (repo,branch), (model,effort), (tools,mcp), (skills,tests) —
+// pairs are (repo,branch), (tools,mcp), (skills,tests) —
 // key order from the frame, left cell first. A missing right fact leaves the
 // right cell empty (no placeholder text).
 func launchFactPairs(facts []launchFact) [][2]launchFact {
@@ -70,8 +71,8 @@ func launchFactPairs(facts []launchFact) [][2]launchFact {
 	for _, fact := range facts {
 		byKey[fact.key] = fact
 	}
-	left := []string{"repo", "model", "tools", "skills"}
-	right := []string{"branch", "effort", "mcp", "tests"}
+	left := []string{"repo", "tools", "skills"}
+	right := []string{"branch", "mcp", "tests"}
 	var rows [][2]launchFact
 	for i, leftKey := range left {
 		var row [2]launchFact
@@ -167,22 +168,28 @@ func (m model) launchFactCell(fact launchFact, padTo int) string {
 		return ""
 	}
 	value := fact.value
+	label := fmt.Sprintf("%-8s", fact.key)
 	if padTo > 0 {
-		// The cell budget bounds key + space + value; a value that does not
-		// fit truncates with an ellipsis so the grid's second column stays
-		// aligned (the frame's repo value is short; a long path yields).
-		budget := padTo - len([]rune(fact.key)) - 1
-		if budget > 1 && len([]rune(value)) > budget {
-			value = string([]rune(value)[:budget-1]) + "…"
+		// The label column and its space take lipgloss.Width(label)+1 cells;
+		// the value keeps at least two spaces before the right cell. A repo
+		// path cuts from the left so the folder name survives; other values
+		// cut from the right.
+		budget := padTo - lipgloss.Width(label) - 1 - 2
+		if budget > 1 && lipgloss.Width(value) > budget {
+			if fact.key == "repo" {
+				value = truncateLeftDisplayWidth(value, budget)
+			} else {
+				value = string([]rune(value)[:budget-1]) + "…"
+			}
 		}
 	}
 	valueRendered := zeroTheme.ink.Render(value)
 	if fact.warn {
 		valueRendered = zeroTheme.amber.Render(value)
 	}
-	cell := zeroTheme.muted.Render(fmt.Sprintf("%-8s", fact.key)) + " " + valueRendered
+	cell := zeroTheme.muted.Render(label) + " " + valueRendered
 	if padTo > 0 {
-		plain := len([]rune(fact.key)) + 1 + len([]rune(value))
+		plain := lipgloss.Width(label) + 1 + lipgloss.Width(value)
 		if pad := padTo - plain; pad > 0 {
 			cell += strings.Repeat(" ", pad)
 		}
@@ -215,8 +222,8 @@ func (m model) launchStart() []string {
 // facts, resume card (when one exists), START, honest-state line.
 func (m model) launchScreenLines() []string {
 	lines := []string{m.launchWordmark(), "", zeroTheme.muted.Render(emptyStateTagline), ""}
-	// Facts render as the frame's two-column grid (repo|branch, model|effort,
-	// tools|mcp, skills|tests). Column 2 starts at cell 32 (past the widest
+	// Facts render as the frame's two-column grid (repo|branch, tools|mcp,
+	// skills|tests). Column 2 starts at cell 32 (past the widest
 	// left cell the frame shows); a longer left value truncates with an
 	// ellipsis so the grid stays aligned. A missing fact leaves its cell empty.
 	for _, row := range launchFactPairs(m.launchFacts()) {

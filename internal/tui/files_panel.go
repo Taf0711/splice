@@ -194,11 +194,7 @@ type fileHit struct {
 
 // sidebarFilesHeader renders the FILES section header with the touched count.
 func (m model) sidebarFilesHeader(width int) string {
-	n := len(m.touchedFiles())
-	if n == 0 {
-		return sidebarHeader("FILES", width)
-	}
-	return sidebarHeaderWithCount("FILES", fmt.Sprintf("%d", n), zeroTheme.muted, width)
+	return sidebarHeader("FILES", width)
 }
 
 // sidebarFileLines renders the FILES section body: the live "writing" pulse row

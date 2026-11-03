@@ -694,7 +694,9 @@ func reasoningHeaderParts(_ string, expanded bool, running bool, elapsed time.Du
 		icon = "▾"
 	}
 	label := "Thought"
-	if elapsed > 0 {
+	// Providers that send reasoning in one burst measure ~0s; a sub-second
+	// duration is noise, so the label shows a duration only from one second up.
+	if elapsed >= time.Second {
 		label = fmt.Sprintf("Thought for %s", formatElapsedSeconds(elapsed))
 	}
 	return icon, label

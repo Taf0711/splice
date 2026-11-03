@@ -8,13 +8,13 @@
 │   depth 0                                                                                                            │
 │     code_writer                                                                                                      │
 │   depth 1                                                                                                            │
-│     test_generator       skipped at trivial, light  <- code_writer                                                   │
+│     test_generator       skipped at trivial, light                                                                   │
 │     static_analyzer      skipped at trivial  <- code_writer                                                          │
 │   depth 2                                                                                                            │
 │     security_auditor     skipped at trivial, light, standard  <- test_generator, code_writer, static_analyzer        │
 │     test_runner          skipped at trivial  <- static_analyzer                                                      │
 │   depth 3                                                                                                            │
-│     acceptance_verifier  skipped at trivial  <- test_runner                                                          │
+│     acceptance_verifier  skipped at trivial                                                                          │
 │                                                                                                                      │
 │ Command nodes                                                                                                        │
 │   none                                                                                                               │

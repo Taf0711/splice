@@ -25,6 +25,7 @@ var asciiGlyphs = map[rune]string{
 	'└':      "+",
 	'✓':      "v",
 	'✗':      "x",
+	'×':      "x",
 	'●':      "*",
 	'○':      "o",
 	'❯':      ">",

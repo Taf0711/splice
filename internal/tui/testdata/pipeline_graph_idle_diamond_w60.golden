@@ -4,7 +4,6 @@
 │ Graph                                                    │
 │    code_writer                                           │
 │    lint  command                                         │
-│      <- code_writer                                      │
 │    static_analyzer                                       │
 │      <- code_writer                                      │
 │    test_runner                                           │

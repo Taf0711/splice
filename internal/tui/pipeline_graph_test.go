@@ -165,7 +165,7 @@ func TestPipelineGraphNarrowKeepsDependencies(t *testing.T) {
 		t.Fatal(err)
 	}
 	plain := ansiPattern.ReplaceAllString(strings.Join(renderPipelineGraph(live, sidebarMinWidth, presentation.GlyphTierASCII, -1), "\n"), "")
-	for _, want := range []string{"<- static_analyzer", "<- test_runner", "skipped at light", "pass 2", "[!] static_analyzer"} {
+	for _, want := range []string{"<- static_analyzer", "skipped at light", "pass 2", "[!] static_analyzer"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("narrow graph lacks %q:\n%s", want, plain)
 		}
@@ -273,7 +273,7 @@ func TestDetailPaneShowsGraph(t *testing.T) {
 	idle.cwd = t.TempDir()
 	idle = idle.openDetailView()
 	plain = ansiPattern.ReplaceAllString(idle.renderDetailView(60), "")
-	for _, want := range []string{"PIPELINE default · no run", "acceptance_verifier", "<- test_runner", "No run evidence yet."} {
+	for _, want := range []string{"PIPELINE default · no run", "acceptance_verifier", "No run evidence yet."} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("idle pane lacks %q:\n%s", want, plain)
 		}
@@ -449,5 +449,31 @@ func TestDetailPaneLettersAlwaysType(t *testing.T) {
 	nav := ansiPattern.ReplaceAllString(m.detailViewNavBar(80), "")
 	if strings.Contains(nav, "…") || !strings.Contains(nav, "esc") {
 		t.Fatalf("nav bar at 80 columns = %q, want whole key hints", nav)
+	}
+}
+
+// A node whose only dependency is the row above shows no "<-" row, while a
+// skip (dependency not the row above) keeps its edge.
+func TestPipelineGraphOmitsEdgeRowOnlyForChain(t *testing.T) {
+	graph := presentrun.Graph{Nodes: []presentrun.GraphNode{
+		{Name: "a"},
+		{Name: "b", Dependencies: []string{"a"}},
+		{Name: "c", Dependencies: []string{"b"}},
+		{Name: "d", Dependencies: []string{"a"}},
+	}}
+	plain := ansiPattern.ReplaceAllString(strings.Join(renderPipelineGraph(graph, 40, presentation.GlyphTierASCII, -1), "\n"), "")
+	if strings.Contains(plain, "<- b") {
+		t.Fatalf("straight chain c shows an edge row:\n%s", plain)
+	}
+	if !strings.Contains(plain, "<- a") {
+		t.Fatalf("skip edge d lost its row:\n%s", plain)
+	}
+}
+
+// An unknown cost renders no cost part, so no "cost n/a" shows.
+func TestPipelineGraphOmitsUnknownCost(t *testing.T) {
+	node := presentrun.GraphNode{Name: "lint", CostUnpriced: true}
+	if got := pipelineGraphCost(node); got != "" {
+		t.Fatalf("unknown cost = %q, want empty", got)
 	}
 }

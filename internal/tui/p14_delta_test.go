@@ -47,9 +47,10 @@ func TestSidebarDecisionsModuleProjectsPinLedger(t *testing.T) {
 			t.Fatalf("DECISIONS module missing %q:\n%s", want, plain)
 		}
 	}
-	// Header count covers every pin in the ledger.
-	if !strings.Contains(plain, "DECISIONS") || !strings.Contains(plain, "3") {
-		t.Fatalf("DECISIONS header count wrong:\n%s", plain)
+	// Section headers carry no count (only progress does), so the DECISIONS
+	// header stands alone on its line.
+	if !strings.Contains(plain, "DECISIONS\n") {
+		t.Fatalf("DECISIONS header should have no count:\n%s", plain)
 	}
 	// The deferred states must NOT be invented: no in-progress, no open rows.
 	if strings.Contains(plain, "in progress") || strings.Contains(plain, "[ ]") {

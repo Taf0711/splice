@@ -3,6 +3,3 @@
  ○ acceptance_verifier
 
  [########────────]  50%
-
-CURRENT
- stage: test_runner

@@ -9,6 +9,7 @@ import (
 	"github.com/Taf0711/splice/internal/sessions"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/tools"
+	"github.com/Taf0711/splice/internal/worktrees"
 )
 
 func TestVerdictForReview(t *testing.T) {
@@ -133,5 +134,21 @@ func TestTUIWorktreeRegistryRebindsRawReaderToRunDir(t *testing.T) {
 	live2 := reg.RunWithOptions(context.Background(), tools.RawFileReadToolName, map[string]any{"path": filepath.Join(live, "b.txt")}, tools.RunOptions{HostSeam: true})
 	if live2.Status == tools.StatusOK {
 		t.Fatalf("worktree registry read the live checkout: %q", live2.Output)
+	}
+}
+
+// U10: a successful Accept names the merge by commit, not by the internal
+// lane branch name.
+func TestWorktreeAcceptNoticeNamesCommitNotBranch(t *testing.T) {
+	origMerge, origRemove := tuiMergeBackWorktree, tuiRemoveWorktree
+	defer func() { tuiMergeBackWorktree, tuiRemoveWorktree = origMerge, origRemove }()
+	tuiMergeBackWorktree = func(_ context.Context, _ worktrees.MergeBackOptions) (worktrees.MergeBackResult, error) {
+		return worktrees.MergeBackResult{Status: worktrees.MergeBackMerged, Branch: "splice/tui-zero_lane_-3", CommitSHA: "0123456789abcdef", Message: "merged splice/tui-zero_lane_-3 (commit 0123456789)"}, nil
+	}
+	tuiRemoveWorktree = func(_ context.Context, _ worktrees.RemoveOptions) error { return nil }
+
+	msg := runWorktreeReview(worktrees.Result{Name: "lane", Path: "/nonexistent/lane", RepoRoot: "/nonexistent"}, worktreeReviewAccept, false, "tree")
+	if msg.notice != "Merged into your checkout (commit 0123456789)" {
+		t.Fatalf("accept notice = %q, want the checkout wording with a short SHA", msg.notice)
 	}
 }

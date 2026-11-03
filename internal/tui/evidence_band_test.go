@@ -46,7 +46,7 @@ func TestEvidenceBandRendersInLiveViewDuringRun(t *testing.T) {
 	t.Cleanup(func() { pipelineGlyphTier = saved })
 	plain := plainRender(t, m.View())
 	// The band's pipeline module header is "PIPELINE <lifecycle> ... n/m" with
-	// the counter right-packed to the column edge (headerLineWithChip), so the
+	// the counter right-packed to the column edge (sidebarHeaderLine), so the
 	// count is asserted separately rather than as one contiguous substring.
 	if !strings.Contains(plain, "PIPELINE") || !strings.Contains(plain, "2/4") {
 		t.Fatalf("evidence band missing the pipeline section during a run:\n%s", plain[:minInt(2200, len(plain))])

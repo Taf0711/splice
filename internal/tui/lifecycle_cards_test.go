@@ -1,9 +1,12 @@
 package tui
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/presentation"
 	"github.com/Taf0711/splice/internal/splice"
 	"github.com/Taf0711/splice/internal/splice/schemas"
@@ -70,7 +73,7 @@ func TestCritiqueCardCleanPinsApprovalReady(t *testing.T) {
 func TestPlanCardRendersTasksAndChecks(t *testing.T) {
 	plain := stripANSI(renderImplementationPlanCard(testPlan(), true, 90))
 	for _, want := range []string{
-		"IMPLEMENTATION PLAN", "2 tasks · 1 acceptance checks", "critique clean",
+		"IMPLEMENTATION PLAN", "2 tasks · 1 acceptance check", "critique clean",
 		"01", "classify retries", "policy.go",
 		"02", "thread deadline",
 		"[A] approve", "[R] revise",
@@ -230,5 +233,35 @@ func TestRunStageLabelExecutingWithActivePipelineInDesignMode(t *testing.T) {
 	m.pipeline.applyState(benchNodeState(4))
 	if label := m.runStageLabel(); !strings.HasPrefix(label, "executing") {
 		t.Fatalf("run stage label = %q, want it to start with \"executing\"", label)
+	}
+}
+
+// U8/U9: one item reads singular, and the VERIFIED receipt shows no internal
+// plan or task IDs.
+func TestSingularCountsAndReceiptWithoutIDs(t *testing.T) {
+	one := schemas.DesignPlan{Tasks: []schemas.Task{{ID: "t1", Title: "only", AcceptanceFacts: []schemas.AcceptanceFact{{Statement: "ok"}}}}}
+	if plain := stripANSI(renderImplementationPlanCard(one, false, 90)); !strings.Contains(plain, "1 task · 1 acceptance check") {
+		t.Fatalf("single task/check plan card should use singular nouns:\n%s", plain)
+	}
+	if plain := stripANSI(renderCrystallizingCard(true, true, true, 1, 90, presentation.GlyphTierASCII)); !strings.Contains(plain, "drafting 1 task from") {
+		t.Fatalf("single drafting task should use singular noun:\n%s", plain)
+	}
+	if got := askUserRowText(agent.AskUserRequest{Questions: []agent.AskUserQuestion{{Question: "why?"}}}); got != "ask_user: 1 question" {
+		t.Fatalf("single question row = %q, want \"ask_user: 1 question\"", got)
+	}
+	raw, err := json.Marshal(schemas.DesignPlanResult{PlanID: "plan-xyz", Status: "completed", CompletedTasks: []schemas.TaskRunOutcome{{TaskID: "t-secret"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	card, ok := verifiedReceiptFromResult(string(raw), presentation.UsageSummary{}, time.Time{}, time.Time{})
+	if !ok {
+		t.Fatal("completed plan result should build a verified receipt")
+	}
+	joined := strings.Join(card.lines, "\n")
+	if !strings.Contains(joined, "plan completed") || !strings.Contains(joined, "1 task completed") {
+		t.Fatalf("verified evidence = %q, want \"plan completed\" and \"1 task completed\"", joined)
+	}
+	if strings.Contains(joined, "plan-xyz") || strings.Contains(joined, "t-secret") {
+		t.Fatalf("verified evidence leaks internal IDs: %q", joined)
 	}
 }

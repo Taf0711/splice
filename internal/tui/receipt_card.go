@@ -349,20 +349,10 @@ func verifiedReceiptFromResult(finalAnswer string, usage presentation.UsageSumma
 	}
 	evidence := make([]string, 0, 2)
 	if planResult.PlanID != "" {
-		evidence = append(evidence, "design plan "+planResult.PlanID+" completed")
+		evidence = append(evidence, "plan completed")
 	}
 	if n := len(planResult.CompletedTasks); n > 0 {
-		line := fmt.Sprintf("%d task(s) completed", n)
-		ids := make([]string, 0, n)
-		for _, task := range planResult.CompletedTasks {
-			ids = append(ids, task.TaskID)
-		}
-		if len(ids) <= 4 {
-			line += ": " + strings.Join(ids, ", ")
-		} else {
-			line += ": " + strings.Join(ids[:3], ", ") + ", …"
-		}
-		evidence = append(evidence, line)
+		evidence = append(evidence, pluralCount(n, "task")+" completed")
 	}
 	var usageLine string
 	if usage.InputTokens > 0 || usage.OutputTokens > 0 {

@@ -273,7 +273,7 @@ func askUserRowText(request agent.AskUserRequest) string {
 	if header := strings.TrimSpace(request.Header); header != "" {
 		parts = append(parts, header)
 	} else {
-		parts = append(parts, fmt.Sprintf("%d question(s)", len(request.Questions)))
+		parts = append(parts, pluralCount(len(request.Questions), "question"))
 	}
 	return strings.Join(parts, " ")
 }

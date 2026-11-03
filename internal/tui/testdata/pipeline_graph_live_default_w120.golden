@@ -2,7 +2,6 @@
        pass 2  18.4K tok
        $0.0123 partial
 >[ ] test_generator
-       <- code_writer
  [!] static_analyzer  failed
        <- code_writer
  [-] security_auditor
@@ -12,4 +11,3 @@
  [ ] test_runner
        <- static_analyzer
  [ ] acceptance_verifier
-       <- test_runner

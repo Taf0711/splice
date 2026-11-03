@@ -1993,3 +1993,14 @@ func TestWorktreeChipShortensGeneratedNames(t *testing.T) {
 		t.Fatalf("generated name chip = %q, want %q", got, "worktree")
 	}
 }
+
+// U7: a sub-second reasoning burst shows the bare label; a real duration from
+// one second up keeps "for <time>".
+func TestReasoningHeaderShowsDurationOnlyFromOneSecond(t *testing.T) {
+	if _, label := reasoningHeaderParts("", false, false, 40*time.Millisecond); label != "Thought" {
+		t.Fatalf("40ms label = %q, want \"Thought\"", label)
+	}
+	if _, label := reasoningHeaderParts("", false, false, 3200*time.Millisecond); label != "Thought for 3.2s" {
+		t.Fatalf("3.2s label = %q, want \"Thought for 3.2s\"", label)
+	}
+}
