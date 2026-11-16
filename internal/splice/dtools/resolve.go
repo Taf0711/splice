@@ -4,6 +4,10 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	"github.com/Taf0711/splice/internal/sandbox"
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
+	"github.com/Taf0711/splice/internal/tools"
 )
 
 func resolveWorkspacePath(workspaceRoot, requested string) (string, error) {
@@ -50,4 +54,16 @@ func resolveWorkspacePath(workspaceRoot, requested string) (string, error) {
 		return "", fmt.Errorf("%s escapes workspace", requested)
 	}
 	return real, nil
+}
+
+// spawnEngine returns the sandbox for one scanner spawn. A call that carries an
+// engine (the user engine for a model call, or a stage engine for a stage call)
+// derives its spawn policy from that engine, so the read and write denials
+// carry over. procrun.NewStageEngineFrom keeps only tightenings. A call without
+// an engine uses the engine built at construction.
+func spawnEngine(fallback *sandbox.Engine, workspaceRoot string, options tools.RunOptions) *sandbox.Engine {
+	if options.Sandbox == nil {
+		return fallback
+	}
+	return procrun.NewStageEngineFrom(options.Sandbox, workspaceRoot)
 }

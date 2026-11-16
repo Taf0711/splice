@@ -62,6 +62,12 @@ func (t sarifTool) Safety() tools.Safety {
 }
 
 func (t sarifTool) Run(ctx context.Context, args map[string]any) tools.Result {
+	return t.RunWithOptions(ctx, args, tools.RunOptions{})
+}
+
+// RunWithOptions runs the scanner under the engine the call carries, so the
+// user's read and write denials reach the spawn (see spawnEngine).
+func (t sarifTool) RunWithOptions(ctx context.Context, args map[string]any, options tools.RunOptions) tools.Result {
 	commandRaw, ok := args["command"]
 	if !ok {
 		return tools.Result{Status: tools.StatusError, Output: "command is required"}
@@ -120,7 +126,7 @@ func (t sarifTool) Run(ctx context.Context, args map[string]any) tools.Result {
 	prepared, cerr := procrun.Prepare(ctx, procrun.Request{
 		ProfileID:       procrun.ProfileSpliceDTools,
 		AllowedBinaries: procrun.StageBinaries,
-		Engine:          t.sandbox,
+		Engine:          spawnEngine(t.sandbox, t.workspaceRoot, options),
 		Spec:            sandbox.CommandSpec{Name: argv[0], Args: argv[1:], Dir: t.workspaceRoot},
 	})
 	if cerr != nil {
@@ -133,6 +139,7 @@ func (t sarifTool) Run(ctx context.Context, args map[string]any) tools.Result {
 	cmd := prepared.Cmd
 
 	out, err := cmd.Output()
+	procrun.ReportRun(ctx, cmd, err)
 	if ctx.Err() != nil {
 		return tools.Result{
 			Status: tools.StatusError,

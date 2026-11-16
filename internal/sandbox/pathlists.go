@@ -412,3 +412,71 @@ func dedupeStrings(xs []string) []string {
 	}
 	return out
 }
+
+// WithReadableDir returns a copy of the engine in which dir is readable even
+// when a DenyRead entry covers it. A plugin installed under the Splice config
+// directory (a default DenyRead entry) uses it to read and run its own files.
+//
+// The OS profiles (seatbelt deny rules, bubblewrap masks) do not honor an
+// AllowRead entry inside a DenyRead entry, so this does not use AllowRead.
+// Each DenyRead entry that strictly contains dir is replaced by the entries
+// next to the path from that entry down to dir. Thus dir and the directories
+// above it inside the entry become readable (their listings show names), and
+// every other file or directory in the entry stays denied, on every backend
+// and for the in-process file tools.
+//
+// Nothing else changes: write roots, network, scope, grants, and backend are
+// the receiver's, and dir gets no write access. An entry that cannot be listed
+// stays denied whole. A nil engine, a dir that does not exist, or a dir that
+// no entry covers returns the receiver.
+func (engine *Engine) WithReadableDir(dir string) *Engine {
+	if engine == nil {
+		return nil
+	}
+	target, ok := resolvePolicyPath(dir)
+	if !ok {
+		return engine
+	}
+	denies := make([]string, 0, len(engine.policy.DenyRead))
+	changed := false
+	for _, entry := range engine.policy.DenyRead {
+		root, ok := resolvePolicyPath(entry)
+		if !ok || root == target || !pathWithinRoot(root, target) {
+			denies = append(denies, entry)
+			continue
+		}
+		denies = append(denies, denyAroundPath(root, target)...)
+		changed = true
+	}
+	if !changed {
+		return engine
+	}
+	clone := *engine
+	clone.policy.DenyRead = denies
+	return &clone
+}
+
+// denyAroundPath lists every entry of root, and of each directory on the way
+// from root to target, except the next step toward target. root must contain
+// target. When a directory cannot be listed, it returns root (fail closed).
+func denyAroundPath(root, target string) []string {
+	relative, err := filepath.Rel(root, target)
+	if err != nil {
+		return []string{root}
+	}
+	var out []string
+	current := root
+	for _, part := range strings.Split(relative, string(filepath.Separator)) {
+		entries, err := os.ReadDir(current)
+		if err != nil {
+			return []string{root}
+		}
+		for _, entry := range entries {
+			if entry.Name() != part {
+				out = append(out, filepath.Join(current, entry.Name()))
+			}
+		}
+		current = filepath.Join(current, part)
+	}
+	return out
+}

@@ -577,7 +577,7 @@ func splitTestCounts(results []schemas.TestRunResults, authoredFiles []schemas.F
 	authoredNames := authoredFuncNames(authoredFiles)
 	for _, result := range results {
 		for _, tc := range result.Tests {
-			name := topLevelTestName(tc.Name)
+			name := topLevelTestName(tc.TestName())
 			counts := &preexisting
 			if _, ok := authoredNames[name]; ok {
 				counts = &authored

@@ -67,10 +67,17 @@ type PipelineRunConfig struct {
 	TrustedWorkspace    bool
 	Sandbox             *sandbox.Engine
 	// StageSandbox is the enforce-mode engine for deterministic stage
-	// subprocesses: workspace-scoped filesystem, network denied. It is
-	// distinct from Sandbox, which keeps the interactive user policy for
-	// model-driven tool calls.
+	// subprocesses and for the registry tool calls of model-free stages. It
+	// is derived from Sandbox (sandbox.Engine.StageEngine): the user's read
+	// and write denials stay, network is denied, writes are workspace-scoped,
+	// and nothing that widens the user policy carries over. Sandbox keeps
+	// the interactive user policy for model-driven tool calls.
 	StageSandbox *sandbox.Engine
+	// AcceptNestedSandbox is the user acceptance of a nested run (see
+	// agent.Options.AcceptNestedSandbox). It accepts only the nested-sandbox
+	// gap (sandbox.Engine.NestedSandbox), never a missing backend or a
+	// disabled policy.
+	AcceptNestedSandbox bool
 	// StageRequireReadBeforeWrite turns on the strict read-before-write guard
 	// for this run's write_file and edit_file calls: an existing path with no
 	// session baseline is refused so a blind rewrite becomes a loud,
@@ -123,6 +130,16 @@ type PipelineRunConfig struct {
 	stageRoute func(stage string, iteration int, route presentation.NodeRoute)
 	// escalatedModel is the model run escalation switched to, or empty.
 	escalatedModel string
+	// stageToolRunner is the tool runner of the model-free stages (tests,
+	// scanners, acceptance, command nodes): it runs registry tools under
+	// StageSandbox. Set by buildStageToolRunner. Nil only in tests that
+	// drive a pass without Run; those stages then use the run's runner.
+	stageToolRunner ToolRunner
+	// toolRunSandbox, when set, is the engine a registry tool call runs
+	// under. Sandbox still decides whether the call asks for approval, so
+	// the stage runner keeps the prompts of the user policy and only
+	// changes where the command runs.
+	toolRunSandbox *sandbox.Engine
 }
 
 // PipelineConfigFromAgentOptions copies the fields the pipeline consumes.
@@ -151,6 +168,7 @@ func PipelineConfigFromAgentOptions(options agent.Options) PipelineRunConfig {
 		Autonomy:                options.Autonomy,
 		TrustedWorkspace:        options.TrustedWorkspace,
 		Sandbox:                 options.Sandbox,
+		AcceptNestedSandbox:     options.AcceptNestedSandbox,
 		FileTracker:             options.FileTracker,
 		Hooks:                   options.Hooks,
 		EnabledTools:            options.EnabledTools,
@@ -393,4 +411,37 @@ func applyCalibrationCap(a *DecisionAdvisor, env func(string) string) error {
 	}
 	a.config.Limits.MaxAdvisorCostUSD = cap
 	return nil
+}
+
+// runEngine is the engine a registry tool call of this runner runs under:
+// the stage engine for the stage runner, the user engine otherwise.
+func (c PipelineRunConfig) runEngine() *sandbox.Engine {
+	if c.toolRunSandbox != nil {
+		return c.toolRunSandbox
+	}
+	return c.Sandbox
+}
+
+// nestedSandboxAccepted reports whether this run runs its stage commands
+// under an outer sandbox that the user accepted: the user accepted a nested
+// run, and the nested-sandbox gap is the one gap of the stage engine.
+func (c PipelineRunConfig) nestedSandboxAccepted() bool {
+	return c.AcceptNestedSandbox && c.StageSandbox.NestedSandbox()
+}
+
+// nestedSandboxHint names the user settings that accept a nested run.
+const nestedSandboxHint = "to run under the outer sandbox, set sandbox.acceptNestedSandbox to true in the user config.json, or pass --accept-nested-sandbox to splice exec"
+
+// runSandboxGap returns why engine does not enforce for a pipeline spawn, or
+// "" when it enforces. The nested-sandbox gap is "" when acceptNested is set,
+// and otherwise names the settings that accept it. No other gap is accepted.
+func runSandboxGap(engine *sandbox.Engine, acceptNested bool) string {
+	gap := engine.EnforcementGap()
+	if gap == "" || !engine.NestedSandbox() {
+		return gap
+	}
+	if acceptNested {
+		return ""
+	}
+	return gap + " (" + nestedSandboxHint + ")"
 }

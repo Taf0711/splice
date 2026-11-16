@@ -410,10 +410,24 @@ func (t TestRunnerInput) Validate() error {
 
 // TestCaseResult is the result for a single deterministic test case.
 type TestCaseResult struct {
+	// Name identifies the test. A Go test from `go test -json` has the
+	// package-qualified name "<import path>.<TestName>" when the event names
+	// its package, so the same test name in two packages stays two entries.
 	Name       string `json:"name"`
 	Status     string `json:"status"` // passed, failed, errored, skipped
 	DurationMs int    `json:"duration_ms"`
 	Message    string `json:"message,omitempty"`
+	// Package is the Go import path that qualifies Name. Empty for an entry
+	// that has no package (non-Go runners, suite and build entries).
+	Package string `json:"package,omitempty"`
+}
+
+// TestName returns the test name without its package qualifier.
+func (t TestCaseResult) TestName() string {
+	if t.Package == "" {
+		return t.Name
+	}
+	return strings.TrimPrefix(t.Name, t.Package+".")
 }
 
 // Validate checks the test case result.
@@ -432,6 +446,18 @@ func (t TestCaseResult) Validate() error {
 	return nil
 }
 
+// Test evidence levels. They tell how much a test run proves.
+const (
+	// TestEvidencePerTest: the runner reported each test (go test -json).
+	TestEvidencePerTest = "per_test"
+	// TestEvidenceCommandOnly: only the exit code is known. A zero exit
+	// means the command succeeded, not that individual tests passed.
+	TestEvidenceCommandOnly = "command_only"
+	// TestEvidenceNone: no test evidence (no command, no tests ran, or a
+	// timeout).
+	TestEvidenceNone = "none"
+)
+
 // TestRunResults is deterministic test runner output.
 type TestRunResults struct {
 	Command    []string         `json:"command"`
@@ -440,6 +466,10 @@ type TestRunResults struct {
 	Stdout     string           `json:"stdout"`
 	Stderr     string           `json:"stderr"`
 	DurationMs int              `json:"duration_ms"`
+	// Evidence is the evidence level of Tests (TestEvidence*). The empty
+	// value is a result written before the field existed: consumers judge it
+	// by its entries only, and never treat it as command_only.
+	Evidence string `json:"evidence,omitempty"`
 }
 
 // Validate checks the test run results.
@@ -449,6 +479,14 @@ func (t TestRunResults) Validate() error {
 	}
 	if t.DurationMs < 0 {
 		return errors.New("duration_ms must be non-negative")
+	}
+	switch t.Evidence {
+	case "", TestEvidencePerTest, TestEvidenceCommandOnly, TestEvidenceNone:
+	default:
+		return fmt.Errorf("invalid test evidence %q", t.Evidence)
+	}
+	if t.Evidence == TestEvidenceCommandOnly && t.Passed() > 0 {
+		return errors.New("command_only evidence must not report passed tests")
 	}
 	for i, tc := range t.Tests {
 		if err := tc.Validate(); err != nil {

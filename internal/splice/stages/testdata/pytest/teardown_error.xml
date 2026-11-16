@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="2" failures="1" skipped="0" tests="3" time="0.025" timestamp="2026-11-12T17:38:02.442115-07:00" hostname="Mac.localdomain"><testcase classname="tests.test_teardown" name="test_passes_then_teardown_error" time="0.000"><error message="failed on teardown with &quot;RuntimeError: teardown boom&quot;">@pytest.fixture
+    def td():
+        yield
+&gt;       raise RuntimeError("teardown boom")
+E       RuntimeError: teardown boom
+
+tests/test_teardown.py:6: RuntimeError</error></testcase><testcase classname="tests.test_teardown" name="test_fails_then_teardown_error" time="0.000"><failure message="assert False">td = None
+
+    def test_fails_then_teardown_error(td):
+&gt;       assert False
+E       assert False
+
+tests/test_teardown.py:12: AssertionError</failure></testcase><testcase classname="tests.test_teardown" name="test_fails_then_teardown_error" time="0.000"><error message="failed on teardown with &quot;RuntimeError: teardown boom&quot;">@pytest.fixture
+    def td():
+        yield
+&gt;       raise RuntimeError("teardown boom")
+E       RuntimeError: teardown boom
+
+tests/test_teardown.py:6: RuntimeError</error></testcase></testsuite></testsuites>

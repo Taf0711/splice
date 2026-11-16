@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Taf0711/splice/internal/hooks"
+	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/skills"
 	"github.com/Taf0711/splice/internal/tools"
 )
@@ -64,8 +65,11 @@ func TestActivateRegistersToolThatInvokesCommand(t *testing.T) {
 		InputSchema: map[string]any{"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string"}}},
 		Permission:  PermissionPrompt,
 	})
+	plugin.Source = SourceUser // host opt-in applies to user plugins only
 
-	result := Activate(registry, []LoadedPlugin{plugin}, ActivateOptions{runTool: runner.run})
+	// The fake runner spawns nothing; the host opt-in only lets invoke reach it
+	// without a sandbox engine.
+	result := Activate(registry, []LoadedPlugin{plugin}, ActivateOptions{runTool: runner.run, HostExecution: map[string]bool{"splice.demo": true}})
 
 	tool, ok := registry.Get("lookup")
 	if !ok {
@@ -114,8 +118,9 @@ func TestActivateToolMapsNonZeroExitToError(t *testing.T) {
 	registry := tools.NewRegistry()
 	runner := &fakeToolRunner{out: commandOutput{Stderr: "boom", ExitCode: 2}}
 	plugin := toolPlugin(t.TempDir(), ToolExtension{Name: "lookup", Command: "lookup", Permission: PermissionPrompt})
+	plugin.Source = SourceUser // host opt-in applies to user plugins only
 
-	Activate(registry, []LoadedPlugin{plugin}, ActivateOptions{runTool: runner.run})
+	Activate(registry, []LoadedPlugin{plugin}, ActivateOptions{runTool: runner.run, HostExecution: map[string]bool{"splice.demo": true}})
 
 	res := registry.RunWithOptions(context.Background(), "lookup", map[string]any{}, tools.RunOptions{PermissionGranted: true})
 	if res.Status != tools.StatusError {
@@ -158,8 +163,11 @@ func TestActivateAllowPermissionMapsToAllowSafety(t *testing.T) {
 	// set, so an allow-permission tool here represents an explicitly auto-approved
 	// plugin tool and must map to allow-level Safety (runnable without a prompt).
 	plugin := toolPlugin(t.TempDir(), ToolExtension{Name: "report", Command: "report", Permission: PermissionAllow})
+	plugin.Source = SourceUser // host opt-in applies to user plugins only
 
-	Activate(registry, []LoadedPlugin{plugin}, ActivateOptions{runTool: runner.run})
+	// registry.Run carries no sandbox engine, so the fake runner is reached only
+	// through the host opt-in.
+	Activate(registry, []LoadedPlugin{plugin}, ActivateOptions{runTool: runner.run, HostExecution: map[string]bool{"splice.demo": true}})
 
 	tool, _ := registry.Get("report")
 	if tool.Safety().Permission != tools.PermissionAllow {
@@ -535,4 +543,148 @@ func containsSubstring(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestPluginToolRefusesWithoutEnforcingSandbox checks that, with no engine, or an
+// engine that does not enforce, a plugin without the user host opt-in is
+// refused before any spawn. The error names the plugin and the config key.
+func TestPluginToolRefusesWithoutEnforcingSandbox(t *testing.T) {
+	disabled := sandbox.DefaultPolicy()
+	disabled.Mode = sandbox.ModeDisabled
+	engines := map[string]*sandbox.Engine{
+		"nil engine":      nil,
+		"disabled policy": sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: t.TempDir(), Policy: disabled}),
+	}
+	for name, engine := range engines {
+		t.Run(name, func(t *testing.T) {
+			registry := tools.NewRegistry()
+			runner := &fakeToolRunner{}
+			plugin := toolPlugin(t.TempDir(), ToolExtension{Name: "lookup", Command: "lookup", Permission: PermissionPrompt})
+			Activate(registry, []LoadedPlugin{plugin}, ActivateOptions{runTool: runner.run})
+
+			res := registry.RunWithOptions(context.Background(), "lookup", map[string]any{}, tools.RunOptions{PermissionGranted: true, Sandbox: engine})
+			if res.Status != tools.StatusError {
+				t.Fatalf("status = %q, want a refusal", res.Status)
+			}
+			if len(runner.calls) != 0 {
+				t.Fatalf("runner calls = %d, want zero spawn", len(runner.calls))
+			}
+			for _, want := range []string{`"splice.demo"`, "plugins.splice.demo.hostExecution"} {
+				if !strings.Contains(res.Output, want) {
+					t.Fatalf("output = %q, want it to name %s", res.Output, want)
+				}
+			}
+			if res.Meta["plugin.execution"] != "refused" {
+				t.Fatalf("plugin.execution meta = %q, want refused", res.Meta["plugin.execution"])
+			}
+		})
+	}
+	// The plain Run path never has an engine.
+	registry := tools.NewRegistry()
+	runner := &fakeToolRunner{}
+	Activate(registry, []LoadedPlugin{toolPlugin(t.TempDir(), ToolExtension{Name: "lookup", Command: "lookup"})}, ActivateOptions{runTool: runner.run})
+	tool, _ := registry.Get("lookup")
+	if res := tool.Run(context.Background(), map[string]any{}); res.Status != tools.StatusError || len(runner.calls) != 0 {
+		t.Fatalf("Run without engine = %q with %d calls, want a refusal and zero spawn", res.Status, len(runner.calls))
+	}
+}
+
+// TestPluginHostOptInComesFromUserConfigOnly checks that a manifest that
+// declares host execution gets nothing. Only ActivateOptions.HostExecution
+// (from the user config) moves the plugin tools and hooks to the host, and
+// the approval prompt says so.
+func TestPluginHostOptInComesFromUserConfigOnly(t *testing.T) {
+	pluginDir := t.TempDir()
+	manifest := map[string]any{
+		"schemaVersion": float64(1),
+		"id":            "splice.sneaky",
+		"name":          "Sneaky",
+		"version":       "1.0.0",
+		"hostExecution": true,
+		"runOnHost":     true,
+		"tools": []any{map[string]any{
+			"name": "sneak", "command": "sneak", "hostExecution": true, "runOnHost": true,
+		}},
+		"hooks": []any{map[string]any{
+			"name": "pre", "event": "beforeTool", "command": "pre", "hostExecution": true, "runOnHost": true,
+		}},
+	}
+	plugin, err := ParseManifest(manifest, ParseManifestOptions{Source: SourceUser, Root: filepath.Dir(pluginDir), PluginDir: pluginDir, ManifestPath: filepath.Join(pluginDir, "plugin.json")})
+	if err != nil {
+		t.Fatalf("ParseManifest: %v", err)
+	}
+
+	registry := tools.NewRegistry()
+	result := Activate(registry, []LoadedPlugin{plugin}, ActivateOptions{runTool: (&fakeToolRunner{}).run})
+	tool, _ := registry.Get("sneak")
+	if reason := tool.Safety().Reason; strings.Contains(reason, "HOST") || !strings.Contains(reason, "inside the sandbox") {
+		t.Fatalf("reason = %q, want sandboxed despite the manifest opt-in", reason)
+	}
+	if len(result.Hooks) != 1 || result.Hooks[0].RunOnHost || result.Hooks[0].PluginID != "splice.sneaky" {
+		t.Fatalf("hooks = %#v, want a sandboxed hook with plugin provenance", result.Hooks)
+	}
+	if res := registry.RunWithOptions(context.Background(), "sneak", map[string]any{}, tools.RunOptions{PermissionGranted: true}); res.Status != tools.StatusError {
+		t.Fatalf("status = %q, want a refusal without an engine", res.Status)
+	}
+
+	registry = tools.NewRegistry()
+	result = Activate(registry, []LoadedPlugin{plugin}, ActivateOptions{runTool: (&fakeToolRunner{}).run, HostExecution: map[string]bool{"splice.sneaky": true}})
+	tool, _ = registry.Get("sneak")
+	if reason := tool.Safety().Reason; !strings.Contains(reason, "ON THE HOST") || !strings.Contains(reason, "plugins.splice.sneaky.hostExecution") {
+		t.Fatalf("reason = %q, want the host prompt text", reason)
+	}
+	if len(result.Hooks) != 1 || !result.Hooks[0].RunOnHost {
+		t.Fatalf("hooks = %#v, want the user opt-in on the plugin hook", result.Hooks)
+	}
+}
+
+// TestHostOptInAppliesOnlyToUserSourcePlugins pins the rule that a project
+// plugin cannot take over a user host opt-in. The project plugin shares the id
+// of a user plugin that the user opted in, so the opt-in key matches it. The
+// tool and the hook of the project plugin must stay sandboxed.
+func TestHostOptInAppliesOnlyToUserSourcePlugins(t *testing.T) {
+	newPlugin := func(source Source) LoadedPlugin {
+		return LoadedPlugin{
+			SchemaVersion: 1,
+			ID:            "acme",
+			Name:          "Acme",
+			Version:       "1.0.0",
+			Enabled:       true,
+			Source:        source,
+			PluginDir:     t.TempDir(),
+			Tools:         []ToolExtension{{Name: "lookup", Command: "lookup", Permission: PermissionAllow}},
+			Hooks:         []HookExtension{{Name: "pre", Event: HookBeforeTool, Command: "pre"}},
+		}
+	}
+	optIn := ActivateOptions{runTool: (&fakeToolRunner{}).run, HostExecution: map[string]bool{"acme": true}}
+
+	t.Run("project plugin stays sandboxed", func(t *testing.T) {
+		registry := tools.NewRegistry()
+		result := Activate(registry, []LoadedPlugin{newPlugin(SourceProject)}, optIn)
+		tool, ok := registry.Get("lookup")
+		if !ok {
+			t.Fatal("lookup tool not registered")
+		}
+		if reason := tool.Safety().Reason; strings.Contains(reason, "ON THE HOST") || !strings.Contains(reason, "inside the sandbox") {
+			t.Fatalf("reason = %q, want sandboxed for a project plugin", reason)
+		}
+		if len(result.Hooks) != 1 || result.Hooks[0].RunOnHost {
+			t.Fatalf("hooks = %#v, want a sandboxed hook for a project plugin", result.Hooks)
+		}
+		if res := registry.RunWithOptions(context.Background(), "lookup", map[string]any{}, tools.RunOptions{PermissionGranted: true}); res.Status != tools.StatusError {
+			t.Fatalf("status = %q, want a refusal without an engine", res.Status)
+		}
+	})
+
+	t.Run("user plugin keeps the host opt-in", func(t *testing.T) {
+		registry := tools.NewRegistry()
+		result := Activate(registry, []LoadedPlugin{newPlugin(SourceUser)}, optIn)
+		tool, _ := registry.Get("lookup")
+		if reason := tool.Safety().Reason; !strings.Contains(reason, "ON THE HOST") {
+			t.Fatalf("reason = %q, want the host prompt text for a user plugin", reason)
+		}
+		if len(result.Hooks) != 1 || !result.Hooks[0].RunOnHost {
+			t.Fatalf("hooks = %#v, want the host opt-in on a user plugin hook", result.Hooks)
+		}
+	})
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Taf0711/splice/internal/sandbox"
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/testrunner"
 	"github.com/Taf0711/splice/internal/zeroruntime"
@@ -63,14 +65,56 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 	// A1: run Go tests with -json so per-test results exist for repair
 	// evidence and trajectory signals. The suite-entry synthesis below stays
 	// only as a fallback when -json is unavailable or parsing fails.
-	jsonEligible := isGoTestJSONCommand(cmd) || (len(cmd) > 1 && cmd[0] == "go" && cmd[1] == "test")
-	if jsonEligible {
-		cmd = withGoTestJSON(cmd)
+	// pytest and jest runs write a report file into a private directory
+	// instead. Splice reads the file after the run, never the stdout.
+	runner := detectPerTestRunner(cmd, commandWorkDir)
+	jsonEligible := runner == perTestGo
+	// recordedArgv is the argv that results and memory report. It is the
+	// user's argv, plus the Go -json flag as the Go path has always recorded
+	// it. execArgv is the argv that runs: recordedArgv plus any report flags.
+	// The report flags never reach recordedArgv.
+	recordedArgv := cmd
+	execArgv := cmd
+	var reportDir string
+	defer func() {
+		if reportDir != "" {
+			_ = os.RemoveAll(reportDir)
+		}
+	}()
+	switch runner {
+	case perTestGo:
+		recordedArgv = withGoTestJSON(cmd)
+		execArgv = recordedArgv
+		// The -json stream goes to a report file. The bash tool keeps only the
+		// head and tail of a large output. If the directory cannot be made, the
+		// run keeps the stdout path.
+		if dir, err := os.MkdirTemp("", "splice-test-report-"); err == nil {
+			reportDir = dir
+		}
+	case perTestPytest, perTestJest:
+		if !reportConflict(runner, cmd) {
+			// If the directory cannot be made, the run keeps command_only evidence.
+			if dir, err := os.MkdirTemp("", "splice-test-report-"); err == nil {
+				reportDir = dir
+				execArgv = withReportFlags(runner, cmd, dir)
+			}
+		}
+	}
+	// goReport is the file the go test -json stream is written to. Empty when
+	// the run has no report directory.
+	var goReport string
+	if runner == perTestGo && reportDir != "" {
+		goReport = filepath.Join(reportDir, goTestReportFile)
 	}
 	var results schemas.TestRunResults
 	if options.RunTool != nil {
+		bashCommand := shellJoin(execArgv)
+		if goReport != "" {
+			// stderr stays on the tool output. Only the stream goes to the file.
+			bashCommand += " > " + shellJoin([]string{goReport})
+		}
 		bashArgs := map[string]any{
-			"command":    shellJoin(cmd),
+			"command":    bashCommand,
 			"cwd":        commandWorkDir,
 			"timeout_ms": timeout * 1000,
 		}
@@ -89,18 +133,19 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 		if err != nil {
 			return schemas.HarnessStageOutput{}, err
 		}
-		results, err = testResultsFromToolResult(recorded, cmd, timeout, durationMs)
+		results, err = testResultsFromToolResult(recorded, recordedArgv, timeout, durationMs)
 		if err != nil {
 			return schemas.HarnessStageOutput{}, err
 		}
 	} else if options.RecordCommand != nil {
 		args := map[string]any{
-			"command":         cmd,
+			"command":         execArgv,
 			"cwd":             commandWorkDir,
 			"timeout_seconds": timeout,
 		}
 		recorded, err := options.RecordCommand(ctx, "splice.test", args, func(runCtx context.Context) (ToolResult, error) {
-			results = runCommand(runCtx, options.Sandbox, cmd, commandWorkDir, timeout)
+			results = runCommand(runCtx, options.Sandbox, execArgv, commandWorkDir, timeout, goReport)
+			results.Command = recordedArgv
 			payload, marshalErr := json.Marshal(results)
 			if marshalErr != nil {
 				return ToolResult{OK: false, Output: marshalErr.Error()}, nil
@@ -117,33 +162,68 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 			}
 		}
 	} else {
-		results = runCommand(ctx, options.Sandbox, cmd, commandWorkDir, timeout)
+		results = runCommand(ctx, options.Sandbox, execArgv, commandWorkDir, timeout, goReport)
+		results.Command = recordedArgv
 	}
 
 	// A1: when the command was JSON-eligible, try per-test parsing first.
 	// The suite-entry synthesis below becomes the last-resort fallback when
 	// -json output is unavailable or fails to parse.
-	var parsedGoJSON bool
+	var parsedPerTest bool
 	var parsedResults schemas.TestRunResults
 	if jsonEligible {
-		parsedResults, parsedGoJSON = parseGoTestJSON(results.Stdout)
+		// The report file is the complete stream. Without it (missing, unsafe
+		// or oversized) the stdout that the run captured is parsed as before.
+		stream := results.Stdout
+		if data, ok := readGoTestReport(reportDir); ok {
+			stream = string(data)
+			results.Stdout = lastBytes(stream, maxStoredGoStdoutBytes)
+		}
+		parsedResults, parsedPerTest = parseGoTestJSON(stream)
+	} else if results.ExitCode != 124 {
+		parsedResults, parsedPerTest = readPerTestReport(runner, reportDir, commandWorkDir)
 	}
 
 	var summary string
 	var confidence float64
-	if results.ExitCode == 0 {
-		if parsedGoJSON && len(parsedResults.Tests) > 0 {
+	frameworkSummary, frameworkConfidence, handled := "", 0.0, false
+	if parsedPerTest && (runner == perTestPytest || runner == perTestJest) && results.ExitCode != 124 {
+		frameworkSummary, frameworkConfidence, handled = applyFrameworkOutcome(&results, parsedResults, runner)
+	}
+	if handled {
+		summary, confidence = frameworkSummary, frameworkConfidence
+	} else if results.ExitCode == 0 {
+		// An exit code proves only that the command succeeded. A "passed"
+		// entry comes only from per-test evidence (go test -json).
+		switch {
+		case parsedPerTest && len(parsedResults.Tests) > 0:
 			results.Tests = parsedResults.Tests
-		} else {
+			results.Evidence = schemas.TestEvidencePerTest
+			summary = "Test command passed."
+			confidence = 1.0
+		case jsonEligible:
 			results.Tests = []schemas.TestCaseResult{{
 				Name:       "suite",
-				Status:     "passed",
+				Status:     "skipped",
 				DurationMs: results.DurationMs,
+				Message:    "no tests ran",
 			}}
+			results.Evidence = schemas.TestEvidenceNone
+			summary = "Test command passed. No tests ran."
+			confidence = 0.5
+		default:
+			results.Tests = []schemas.TestCaseResult{{
+				Name:       "suite",
+				Status:     "skipped",
+				DurationMs: results.DurationMs,
+				Message:    "command succeeded; per-test evidence unavailable",
+			}}
+			results.Evidence = schemas.TestEvidenceCommandOnly
+			summary = "Test command passed. Per-test evidence is not available."
+			confidence = 0.7
 		}
-		summary = "Test command passed."
-		confidence = 1.0
 	} else if results.ExitCode == 124 {
+		results.Evidence = schemas.TestEvidenceNone
 		results.Tests = []schemas.TestCaseResult{{
 			Name:       "suite",
 			Status:     "errored",
@@ -154,9 +234,20 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 		confidence = 0.3
 	} else {
 		switch {
-		case parsedGoJSON && len(parsedResults.Tests) > 0:
+		case parsedPerTest && len(parsedResults.Tests) > 0:
 			// Per-test (or per-compile-error) entries from go test -json.
 			results.Tests = parsedResults.Tests
+			results.Evidence = schemas.TestEvidencePerTest
+			if results.Failed() == 0 {
+				// Every reported test passed but the command failed (for
+				// example TestMain calls os.Exit(1)). The exit code wins.
+				results.Tests = append(results.Tests, schemas.TestCaseResult{
+					Name:       "suite",
+					Status:     "failed",
+					DurationMs: results.DurationMs,
+					Message:    fmt.Sprintf("test command exited %d; no failed test was reported", results.ExitCode),
+				})
+			}
 		default:
 			results.Tests = []schemas.TestCaseResult{{
 				Name:       "suite",
@@ -164,10 +255,11 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 				DurationMs: results.DurationMs,
 				Message:    fmt.Sprintf("exit code %d", results.ExitCode),
 			}}
+			results.Evidence = schemas.TestEvidenceCommandOnly
 		}
 		summary = fmt.Sprintf("Test command failed with exit code %d.", results.ExitCode)
 		evidence := failingEvidenceExcerpt(results.Stdout + "\n" + results.Stderr)
-		if evidence == "" && parsedGoJSON {
+		if evidence == "" && parsedPerTest {
 			// The -json stream wraps compiler output in JSON events, so the
 			// raw-line excerpt finds nothing. The parsed compile-error
 			// entries are the evidence; rebuild it from them.
@@ -202,7 +294,7 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 		Summary:    summary,
 		Detail:     detail,
 		Confidence: confidence,
-		Data:       map[string]any{"test_results": results, "test_command": cmd},
+		Data:       map[string]any{"test_results": results, "test_command": recordedArgv},
 	}, nil
 }
 
@@ -332,7 +424,8 @@ func skippedTestOutput(language string) schemas.HarnessStageOutput {
 		reason = fmt.Sprintf("No test command could be detected for language %q; verification could not run.", language)
 	}
 	results := schemas.TestRunResults{
-		Command: []string{"<no test command detected>"},
+		Command:  []string{"<no test command detected>"},
+		Evidence: schemas.TestEvidenceNone,
 		Tests: []schemas.TestCaseResult{{
 			Name:    "suite",
 			Status:  "skipped",
@@ -351,7 +444,9 @@ func skippedTestOutput(language string) schemas.HarnessStageOutput {
 	}
 }
 
-func runCommand(ctx context.Context, sandboxEngine *sandbox.Engine, command []string, cwd string, timeoutSeconds int) schemas.TestRunResults {
+// runCommand runs command under the sandbox. A non-empty stdoutPath also
+// receives the whole stdout. The in-memory capture keeps only its head.
+func runCommand(ctx context.Context, sandboxEngine *sandbox.Engine, command []string, cwd string, timeoutSeconds int, stdoutPath string) schemas.TestRunResults {
 	if timeoutSeconds <= 0 {
 		timeoutSeconds = 120
 	}
@@ -376,8 +471,18 @@ func runCommand(ctx context.Context, sandboxEngine *sandbox.Engine, command []st
 	defer plan.Cleanup()
 	stdout, stderr := &limitedWriter{limit: 200_000}, &limitedWriter{limit: 200_000}
 	cmd.Stdout = stdout
+	if stdoutPath != "" {
+		// O_EXCL refuses a path that already exists, including a symbolic link,
+		// so the write never follows a link. If the file cannot be made, the
+		// run keeps the head capture only.
+		if f, err := os.OpenFile(stdoutPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600); err == nil {
+			defer f.Close()
+			cmd.Stdout = io.MultiWriter(f, stdout)
+		}
+	}
 	cmd.Stderr = stderr
 	err := cmd.Run()
+	procrun.ReportRun(inner, cmd, err)
 	durationMs := int(time.Since(start).Milliseconds())
 	exitCode := 0
 	if err != nil {
@@ -447,7 +552,10 @@ func testResultsFromToolResult(res ToolResult, cmd []string, timeoutSeconds, dur
 		if strings.Contains(out, "permission required") || strings.Contains(out, "permission denied") {
 			return schemas.TestRunResults{}, fmt.Errorf("test command denied: %s", res.Output)
 		}
-		if strings.Contains(res.Output, "timed out") {
+		// The tool's own timeout has no real exit code. A command that exited
+		// non-zero keeps its code, even when its output says "timed out"
+		// (go test -timeout prints "panic: test timed out").
+		if exitCode <= 0 && strings.Contains(res.Output, "timed out") {
 			exitCode = 124
 		} else if exitCode == 0 {
 			// A non-OK result with no exit code (e.g. tool not found) is an

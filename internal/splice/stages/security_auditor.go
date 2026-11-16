@@ -52,11 +52,12 @@ func (s *SecurityAuditor) Run(ctx context.Context, input schemas.HarnessStageInp
 	changedPaths, gitErr := gitChangedSourceFiles(ctx, workDir, options)
 
 	var paths []string
+	truncated := false
 	if gitErr == nil && len(changedPaths) > 0 {
 		paths = changedPaths
 		scopedToChanges = true
 	} else {
-		paths = boundedSourceFiles(workDir)
+		paths, truncated = boundedSourceFiles(workDir)
 	}
 	analyzedPaths := make([]string, len(paths))
 	for i, p := range paths {
@@ -85,12 +86,16 @@ func (s *SecurityAuditor) Run(ctx context.Context, input schemas.HarnessStageInp
 		results = append(results, result)
 	}
 
+	if truncated {
+		results = append([]VerificationCheckResult{{ToolRun: truncatedCoverageRun("security", len(paths), maxScanFiles)}}, results...)
+	}
 	report := aggregateVerificationResults(results)
 
 	data := map[string]any{
 		"security_auditor_output": report,
 		"analyzed_paths":          analyzedPaths,
 		"scoped_to_changes":       scopedToChanges,
+		"truncated":               truncated,
 	}
 	return schemas.HarnessStageOutput{
 		Summary:    report.Summary,
@@ -100,7 +105,9 @@ func (s *SecurityAuditor) Run(ctx context.Context, input schemas.HarnessStageInp
 	}, nil
 }
 
-func boundedSourceFiles(root string) []string {
+// boundedSourceFiles returns up to maxScanFiles eligible files under root.
+// truncated is true when at least one more eligible file exists beyond the cap.
+func boundedSourceFiles(root string) (files []string, truncated bool) {
 	var found []string
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
@@ -123,30 +130,24 @@ func boundedSourceFiles(root string) []string {
 			return nil
 		}
 		found = append(found, path)
-		if len(found) >= maxScanFiles {
+		if len(found) > maxScanFiles {
 			return filepath.SkipAll
 		}
 		return nil
 	})
-	return found
+	if len(found) > maxScanFiles {
+		return found[:maxScanFiles], true
+	}
+	return found, false
 }
 
 func gitChangedSourceFiles(ctx context.Context, root string, options StageOptions) ([]string, error) {
-	command := []string{"git", "diff", "--name-only", "HEAD"}
-	out, err := runRecordedOutput(ctx, options, "splice.shell", map[string]any{
-		"command": command,
-		"cwd":     root,
-		"purpose": "changed source file discovery",
-	}, root, command)
+	lines, err := gitChangedFileLines(ctx, root, "changed source file discovery", options)
 	if err != nil {
 		return nil, err
 	}
 	var paths []string
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
+	for _, line := range lines {
 		p := filepath.Join(root, line)
 		if _, err := os.Stat(p); err == nil {
 			paths = append(paths, p)

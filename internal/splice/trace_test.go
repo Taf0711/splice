@@ -123,6 +123,33 @@ func TestPersistPartialDegradesOnWriteFailure(t *testing.T) {
 	}
 }
 
+// TestRunOutcomeMirrorsVerificationChecks pins the producer-consumer pair:
+// the trace outcome carries the result's verification checks.
+func TestRunOutcomeMirrorsVerificationChecks(t *testing.T) {
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		RequestIntent: "x",
+		Stages:        []schemas.ExecutionStage{{Name: "code_writer", Budget: schemas.StageBudget{InputMax: 1, OutputMax: 1}}},
+		TokenBudget:   schemas.TokenBudget{TotalInputBudget: 1, TotalOutputBudget: 1, OverflowPolicy: "abort"},
+	}
+	tr := newRunTraceAccumulator(&traceMemoryStore{}, "run-1", "sess-1", "/repo", plan, "active", nil)
+	checks := []schemas.VerificationCheck{
+		{Name: "test_runner", Kind: schemas.CheckKindTests, Outcome: schemas.CheckNoTests, Detail: "no tests ran"},
+		{Name: "security_auditor", Kind: schemas.CheckKindSecurityScan, Outcome: schemas.CheckPassed, Detail: "bandit"},
+	}
+	result := schemas.PipelineResult{RunID: "run-1", Status: "completed", Tier: plan.Tier, Verified: true, VerificationOutcome: schemas.VerificationOutcomeVerified, VerificationChecks: checks}
+	trace, err := tr.buildRunOutcome(result)
+	if err != nil {
+		t.Fatalf("buildRunOutcome: %v", err)
+	}
+	if !reflect.DeepEqual(trace.Outcome.VerificationChecks, checks) {
+		t.Fatalf("trace checks = %+v, want %+v", trace.Outcome.VerificationChecks, checks)
+	}
+	if err := trace.Validate(); err != nil {
+		t.Fatalf("trace with checks invalid: %v", err)
+	}
+}
+
 // TestSplitTestCounts pins the Q2 test split: a test declared in a file the
 // test generator wrote this run is authored; everything else is preexisting.
 // The aggregate totals are unchanged by the split.
@@ -220,6 +247,27 @@ func TestSplitTestCounts(t *testing.T) {
 	}
 	if total != (schemas.TestCounts{Pass: 1, Fail: 2, Errored: 1}) {
 		t.Fatalf("aggregate = %#v, want {Pass:1 Fail:2 Errored:1}", total)
+	}
+}
+
+// Package-qualified go test names ("<import path>.<TestName>") must still
+// match the authored declaration. Import paths contain "/", so a split on the
+// raw name would read the package path as the test name.
+func TestSplitTestCountsQualifiedNames(t *testing.T) {
+	authored := []schemas.FileChange{
+		{Path: "add_test.go", ChangeType: "create", Content: "package add\n\nfunc TestAdd(t *testing.T) {}\n"},
+	}
+	results := []schemas.TestRunResults{{
+		Command: []string{"go", "test"},
+		Tests: []schemas.TestCaseResult{
+			{Name: "example.com/m/add.TestAdd", Package: "example.com/m/add", Status: "passed"},
+			{Name: "example.com/m/add.TestAdd/negative", Package: "example.com/m/add", Status: "failed"},
+			{Name: "example.com/m/other.TestExisting", Package: "example.com/m/other", Status: "failed"},
+		},
+	}}
+	preexisting, authoredCounts := splitTestCounts(results, authored)
+	if preexisting != (schemas.TestCounts{Fail: 1}) || authoredCounts != (schemas.TestCounts{Pass: 1, Fail: 1}) {
+		t.Fatalf("preexisting = %#v, authored = %#v; want {Fail:1} and {Pass:1 Fail:1}", preexisting, authoredCounts)
 	}
 }
 

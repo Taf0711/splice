@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
@@ -76,6 +77,7 @@ func (c banditCheck) Run(ctx context.Context, req VerificationCheckRequest) (Ver
 		}
 		defer plan.Cleanup()
 		out, err = cmd.CombinedOutput()
+		procrun.ReportRun(ctx, cmd, err)
 		if err != nil && !strings.Contains(string(out), `"results"`) {
 			outLower := strings.ToLower(string(out))
 			if strings.Contains(outLower, "no module named bandit") || strings.Contains(outLower, "not found") {

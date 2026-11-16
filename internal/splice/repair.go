@@ -369,8 +369,11 @@ func attemptLocalRepair(
 		if selErr != nil {
 			return false, nil, fmt.Errorf("repair: code_writer re-entry: %w", selErr)
 		}
-		writerOutput, werr := runRepairStage(ctx, wallDeadline, writerInput, codeWriterStage, iteration, writerSelection, options, workDir, runner, mem, writerCaps, stageBudgetByName(plan, writerName), plan.Tier, tr, repairScope, repairN, &writerScope, execBudget)
+		writerEvidence := newSandboxEvidenceCollector(writerName, iteration)
+		writerEvidence.nestedAccepted = options.nestedSandboxAccepted()
+		writerOutput, werr := runRepairStage(withSandboxEvidence(ctx, writerEvidence), wallDeadline, writerInput, codeWriterStage, iteration, writerSelection, options, workDir, runner, mem, writerCaps, stageBudgetByName(plan, writerName), plan.Tier, tr, repairScope, repairN, &writerScope, execBudget)
 		totalLatency += int(time.Since(writerStart).Milliseconds())
+		attachRepairEvidence(records, iteration, writerName, writerEvidence)
 		if werr != nil {
 			if ctx.Err() != nil || errors.Is(werr, context.Canceled) || errors.Is(werr, errWallTimeExceeded) {
 				return false, nil, fmt.Errorf("repair: code_writer re-entry: %w", werr)
@@ -427,6 +430,7 @@ func attemptLocalRepair(
 				}
 			}
 		}
+		writerOutput.Stage = writerName
 		*outputs = append(*outputs, writerOutput)
 		lastWriterOutput = writerOutput
 		progress.recordApproach(DerefString(mergedWriter.OutputSummary))
@@ -441,8 +445,11 @@ func attemptLocalRepair(
 		var runnerScope *StageScopePlan
 		testPlanStage, _ := stageByPlanName(plan, testName)
 		testCaps := effectiveCaps(testPlanStage, testRunnerStage.Capabilities())
-		newTestOutput, terr := runRepairStage(ctx, wallDeadline, testInput, testRunnerStage, iteration, agent.ModelSelection{}, options, workDir, runner, mem, testCaps, stageBudgetByName(plan, testName), plan.Tier, tr, repairScope, repairN, &runnerScope, execBudget)
+		testEvidence := newSandboxEvidenceCollector(testName, iteration)
+		testEvidence.nestedAccepted = options.nestedSandboxAccepted()
+		newTestOutput, terr := runRepairStage(withSandboxEvidence(ctx, testEvidence), wallDeadline, testInput, testRunnerStage, iteration, agent.ModelSelection{}, options, workDir, runner, mem, testCaps, stageBudgetByName(plan, testName), plan.Tier, tr, repairScope, repairN, &runnerScope, execBudget)
 		totalLatency += int(time.Since(testStart).Milliseconds())
+		attachRepairEvidence(records, iteration, testName, testEvidence)
 		if terr != nil {
 			return false, nil, fmt.Errorf("repair: test_runner re-run: %w", terr)
 		}
@@ -465,6 +472,7 @@ func attemptLocalRepair(
 				*outputs = slices.Delete(*outputs, idx, idx+1)
 			}
 		}
+		newTestOutput.Stage = testName
 		*outputs = append(*outputs, newTestOutput)
 		currentOutput = newTestOutput
 
@@ -568,7 +576,9 @@ func attemptLocalRepair(
 }
 
 // extractFailingTests returns the "Name: Message" evidence strings (message
-// truncated to 200 chars) and the bare names, capped at 10 failures.
+// truncated to 200 chars) and the bare names, capped at 10 failures. The
+// evidence keeps the package-qualified name; the bare names drop the package
+// so they match test declarations.
 func extractFailingTests(results schemas.TestRunResults) (evidence []string, names []string) {
 	for _, tc := range results.Tests {
 		if tc.Status != "failed" && tc.Status != "errored" {
@@ -577,12 +587,13 @@ func extractFailingTests(results schemas.TestRunResults) (evidence []string, nam
 		if len(names) >= 10 {
 			break
 		}
-		entry := tc.Name
+		name := stages.BoundEntryName(tc.Name)
+		entry := name
 		if message := strings.TrimSpace(tc.Message); message != "" {
-			entry = tc.Name + ": " + truncateString(message, 200)
+			entry = name + ": " + truncateString(message, 200)
 		}
 		evidence = append(evidence, entry)
-		names = append(names, tc.Name)
+		names = append(names, stages.BoundEntryName(tc.TestName()))
 	}
 	return evidence, names
 }
@@ -883,6 +894,19 @@ func addRepairUsage(records *[]schemas.StageRecord, iteration int, stageName str
 		return *rec, true
 	}
 	return schemas.StageRecord{}, false
+}
+
+// attachRepairEvidence adds the sandbox evidence of a repair re-entry to the
+// stage record of the pass, so the record lists every spawn of the stage in
+// the iteration. Both re-entered stages (writer and test runner) already
+// have a record in the pass when a repair starts.
+func attachRepairEvidence(records *[]schemas.StageRecord, iteration int, stageName string, collector *sandboxEvidenceCollector) {
+	for i := range *records {
+		if rec := &(*records)[i]; rec.Name == stageName && rec.Iteration == iteration {
+			collector.attach(rec)
+			return
+		}
+	}
 }
 
 func mergeRepairRecord(records *[]schemas.StageRecord, iteration int, stageName string, output schemas.HarnessStageOutput, modelFree bool) schemas.StageRecord {

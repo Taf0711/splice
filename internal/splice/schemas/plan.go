@@ -524,6 +524,12 @@ type StageRecord struct {
 	// review to the same {stage, iteration} record. Legacy traces without the
 	// field remain valid: it is optional and additive.
 	MemoryReviews []MemoryReview `json:"memory_reviews,omitempty"`
+	// SandboxEvidence records the command spawns of the stage in spawn order,
+	// at most MaxSandboxEvidencePerStage. SandboxEvidenceDropped counts the
+	// spawns past that bound. The record is for the user and for audit; it is
+	// never part of a model prompt.
+	SandboxEvidence        []SandboxEvidence `json:"sandbox_evidence,omitempty"`
+	SandboxEvidenceDropped int               `json:"sandbox_evidence_dropped,omitempty"`
 }
 
 // Validate checks the stage record.
@@ -534,6 +540,20 @@ func (s StageRecord) Validate() error {
 	for i := range s.MemoryReviews {
 		if err := s.MemoryReviews[i].Validate(); err != nil {
 			return fmt.Errorf("memory_reviews[%d]: %w", i, err)
+		}
+	}
+	if len(s.SandboxEvidence) > MaxSandboxEvidencePerStage {
+		return fmt.Errorf("sandbox_evidence has %d entries, the limit is %d", len(s.SandboxEvidence), MaxSandboxEvidencePerStage)
+	}
+	if s.SandboxEvidenceDropped < 0 {
+		return errors.New("sandbox_evidence_dropped must be non-negative")
+	}
+	for i, evidence := range s.SandboxEvidence {
+		if err := evidence.Validate(); err != nil {
+			return fmt.Errorf("sandbox_evidence[%d]: %w", i, err)
+		}
+		if evidence.Stage != s.Name || evidence.Iteration != s.Iteration {
+			return fmt.Errorf("sandbox_evidence[%d] names stage %s iteration %d, the record is %s iteration %d", i, evidence.Stage, evidence.Iteration, s.Name, s.Iteration)
 		}
 	}
 	switch s.Status {
@@ -673,6 +693,10 @@ type HarnessStageOutput struct {
 	// legacy Data keys, and stageChangedFiles prefers this field.
 	ChangedFiles []string    `json:"changed_files,omitempty"`
 	Usage        *StageUsage `json:"-"`
+	// Stage is the plan stage that produced the output. The orchestrator
+	// sets it when it keeps the output for the pass; a stage never sets it.
+	// It is not serialized.
+	Stage string `json:"-"`
 }
 
 // Validate checks the harness stage output.
@@ -900,6 +924,17 @@ func (r PipelineUsageRecord) Validate() error {
 	return nil
 }
 
+// Verification outcomes of a completed run.
+const (
+	// VerificationOutcomeVerified: a check passed with real evidence.
+	VerificationOutcomeVerified = "verified"
+	// VerificationOutcomeCommandPassed: the test command exited 0 but
+	// reported no per-test evidence. The run is not verified.
+	VerificationOutcomeCommandPassed = "command_passed"
+	// VerificationOutcomeUnverified: no check verified the run.
+	VerificationOutcomeUnverified = "unverified"
+)
+
 // PipelineResult is the final pipeline result returned by the CLI.
 type PipelineResult struct {
 	RunID  string       `json:"run_id"`
@@ -935,6 +970,21 @@ type PipelineResult struct {
 	// UnverifiedReason names why a completed run is not verified: which checks
 	// did not apply. Empty when Verified is true.
 	UnverifiedReason string `json:"unverified_reason,omitempty"`
+	// VerificationOutcome is the typed verification state of a completed run
+	// (VerificationOutcome*). It is empty for a run that did not complete and
+	// for results written before the field existed. Verified stays the
+	// boolean truth: it is true only for the "verified" outcome.
+	VerificationOutcome string `json:"verification_outcome,omitempty"`
+	// VerificationChecks lists each verification-relevant stage of the final
+	// pass with its outcome, so a verified result names what verified it. It
+	// is empty for a run that did not complete and for results written before
+	// the field existed.
+	VerificationChecks []VerificationCheck `json:"verification_checks,omitempty"`
+	// NestedSandboxAccepted marks a run in which Splice already ran inside a
+	// sandbox and the user accepted a nested run: stage commands, command
+	// nodes, and agent nodes ran under the outer sandbox only, not under the
+	// stage sandbox. It does not change verification.
+	NestedSandboxAccepted bool `json:"nested_sandbox_accepted,omitempty"`
 	// UserAborted marks an aborted run the USER chose to stop. It is set
 	// only at the site that applies a user abort decision. Every other
 	// aborted run is an internal stop (max iterations, wall time, rollback
@@ -976,6 +1026,21 @@ func (p PipelineResult) Validate() error {
 	}
 	if p.TotalTokensInput < 0 || p.TotalTokensOutput < 0 || p.TotalTokensCached < 0 || p.TotalTokensCacheWrite < 0 || p.TotalTokensReasoning < 0 {
 		return errors.New("token counts must be non-negative")
+	}
+	switch p.VerificationOutcome {
+	case "":
+	case VerificationOutcomeVerified, VerificationOutcomeCommandPassed, VerificationOutcomeUnverified:
+		if p.Status != "completed" {
+			return fmt.Errorf("verification_outcome %q requires status completed, got %q", p.VerificationOutcome, p.Status)
+		}
+		if p.Verified != (p.VerificationOutcome == VerificationOutcomeVerified) {
+			return fmt.Errorf("verification_outcome %q contradicts verified=%v", p.VerificationOutcome, p.Verified)
+		}
+	default:
+		return fmt.Errorf("invalid verification_outcome %q", p.VerificationOutcome)
+	}
+	if err := ValidateVerificationChecks(p.VerificationChecks, p.Verified); err != nil {
+		return err
 	}
 	if p.MergeStatus != nil {
 		switch *p.MergeStatus {

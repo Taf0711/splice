@@ -102,16 +102,135 @@ incomplete or not-applicable evidence.
 ### Test runner
 
 The test runner detects and executes the repository test command through the
-registered shell tool. Sandbox and permission rules still apply.
+registered shell tool. The command runs in the stage sandbox (see
+[Stage sandbox](#stage-sandbox)). The permission rules of the session still
+apply.
 
-The result records each known test as passed, failed, or errored.
+The result records each known test as passed, failed, errored, or skipped.
+For `go test`, Splice adds `-json` and records each test by package and
+name. A test that starts and does not finish is errored. A timeout or a
+killed test process causes this.
+
+Splice also gives per-test evidence for these pytest and jest commands:
+
+- `pytest` or `py.test`, with any arguments. Splice adds `--junitxml` and `-o junit_family=xunit2`.
+- `python -m pytest`, `python3 -m pytest`, or `python3.x -m pytest`. Splice adds the same flags.
+- `jest`, `npx jest`, `yarn jest`, `pnpm jest`, `pnpm exec jest`, or `bunx jest`. Splice adds `--json` and `--outputFile`.
+- `npm test`, `npm run test`, `yarn test`, or `pnpm test`, when the `test` script in `package.json` is `jest`. The script can have more arguments. Splice adds `-- --json --outputFile` for npm and pnpm, and `--json --outputFile` for yarn.
+
+Splice writes the report into a private temporary directory, and reads the
+report file after the command ends. It does not read the command output for
+these runners. A report that is missing, too large, or does not match its own
+totals gives only the exit code evidence.
+
+Splice does not add a flag that the command already has. A pytest command with
+`--junitxml` or `-p no:junitxml`, or a jest command with `--outputFile`, gives
+no per-test evidence.
+The `test` script must not chain or pipe commands. It must not use `&&`, `||`,
+`;`, `|`, or `&`.
+
+Every other test command gives only an exit code. Examples are `uv run pytest`,
+`tox`, `make test`, `npx vitest`, and a `test` script that runs other tools.
+When such a command exits 0, the result records that the command passed. It
+does not record a passed test. The `evidence` field of the test results is then
+`command_only`. A `go test` run that exits 0 and runs no tests records "no tests
+ran". A pytest run that exits 5 (no tests collected) also records "no tests ran".
+
+A test command that exits with a code that is not 0 always gives a failed
+entry. This is also true when each reported test passed.
 
 ### Acceptance verifier
 
 Each acceptance fact can include a verification command. This stage executes the
-commands through the same safety layer.
+commands through the same safety layer and the same stage sandbox.
 
 A failed or errored acceptance fact blocks completion.
+
+### Stage sandbox
+
+The stages that run repository code make no model request. These stages are
+the test runner, the acceptance verifier, the security auditor, the static
+analyzer, and command nodes. Their commands run in the stage sandbox.
+
+Splice makes the stage sandbox from your sandbox policy:
+
+- Your `denyRead` and `denyWrite` entries stay.
+- The command can write only in the workspace and in temporary directories.
+- The command has no network access.
+- The command cannot read the credential directories (for example `~/.ssh`
+  and `~/.aws`) or the credential files (for example `~/.netrc`,
+  `~/.git-credentials`, and `~/.npmrc`).
+- Your extra roots, write grants, network access, and a disabled policy do
+  not apply to the stage sandbox.
+
+The Bandit, gosec, and SARIF scanner tools use the same stage sandbox. Your
+`denyRead` and `denyWrite` entries stay for them too.
+
+A fallback scan can stop at its file limit. The stage is then incomplete, and
+the run fails with `required verification incomplete`.
+
+The stage sandbox needs a native sandbox backend. When no backend is
+available, the stage refuses each command and the error names the sandbox. A
+stage command cannot ask to run outside the sandbox.
+
+#### Nested runs
+
+Splice can run inside a sandbox, for example when you start it from a shell
+that Splice wrapped. Then Splice cannot apply its own sandbox. Stage commands,
+command nodes, and agent nodes refuse to run before they start. The error says
+`Splice already runs inside a sandbox, so it cannot apply its own`, and it
+names the settings that accept a nested run.
+
+To accept a nested run, set `sandbox.acceptNestedSandbox` to `true` in the user
+`config.json`. For one `splice exec` run, use `--accept-nested-sandbox`. These
+commands then run under the outer sandbox only. The acceptance applies only
+to this case. It does not help when no backend is available or when the
+policy is disabled.
+
+An accepted nested run is never shown as enforced. The headless summary and
+the receipt show this line in every state, also for VERIFIED:
+
+```text
+Stage sandbox not enforced: nested run accepted by the user.
+```
+
+The result has `nested_sandbox_accepted`, and each such command in the
+sandbox evidence has `wrapped` false and `nested_accepted` true. The tests
+still decide whether the run is VERIFIED. The scanner tools, Git reads, and
+the other fixed stage programs still refuse in a nested run, because they
+need the stage sandbox.
+
+In an accepted nested run, a sandboxed hook does not run. A `beforeTool` hook
+then blocks the tool call. To run a user hook on the host, set `runOnHost` to
+`true` for that hook in the user `hooks.json`.
+
+The permission mode of the session controls the approval prompts. A stage
+command asks for approval when the same command asks for approval outside
+the pipeline. Model-backed stages, such as the code writer, keep your
+sandbox policy.
+
+Interactive shell commands can read the credential files. Only stage
+commands cannot read them.
+
+#### Sandbox evidence
+
+The run record keeps the sandbox evidence of each stage. For each command
+that a stage starts or tries to start, the stage record gives the policy,
+the sandbox backend, and the result. The result is that the command ran, was
+refused, was denied by the sandbox, or timed out. The record keeps only the
+program name. It does not keep the command line or the environment, because
+a command can contain a token. The record is not sent to a model.
+
+The text summary of `splice exec` shows one line for each stage that started
+a command, for example:
+
+```text
+sandbox test_runner: stage policy, macos-seatbelt, network off; 1 command
+sandbox test_runner: stage policy, network off; 1 command; 1 refused (no enforcing sandbox)
+```
+
+The `sandbox_evidence` field in `docs/STREAM_JSON_PROTOCOL.md` gives the
+format.
 
 ## Context and local memory
 
@@ -151,12 +270,40 @@ check, is not applicable. The stage record reads skipped.
 ## Verified result
 
 A completed pass is verified only when at least one check passed, or a test run
-executed tests and none failed. No stage may be incomplete or failed. A
-completed pass that is not verified keeps status completed. The result sets
+reported tests that passed. No stage may be incomplete or failed, and no test
+may fail. A failed test makes the pass not verified, also when a check passed.
+
+A pytest or jest run that reports passing tests verifies a pass, the same as a
+`go test` run. A test command that exits 0 and gives no per-test result does not
+verify a pass. When it is the only test evidence, the result sets
+`verification_outcome` to `command_passed`. The reason is "test command
+passed; per-test evidence unavailable". The TUI shows the DONE · TEST COMMAND
+PASSED receipt for this case.
+
+A completed pass that is not verified keeps status completed. The result sets
 `verified` to false and gives `unverified_reason`, which names the checks that
-did not apply. Graph capture requires `verified` to be true. The TUI shows the
-DONE · NOT VERIFIED receipt for this case. `splice exec` exits 0 for it. Read
-the `verified` field in the final JSON result.
+did not apply. The `verification_outcome` field is `verified`,
+`command_passed`, or `unverified`. Graph capture requires `verified` to be
+true. The TUI shows the DONE · NOT VERIFIED receipt for an unverified pass.
+
+The result lists each check of the last pass in `verification_checks`, with
+its outcome. A verified result names the checks that verified it. The
+VERIFIED receipt and the `splice exec` summary show them, for example:
+
+```text
+Verified by: static analysis (go_syntax)
+Tests: no tests ran.
+```
+
+When no test passed, the second line tells what the tests did. Thus a pass
+that only a scanner verified does not look like a tested change. The DONE ·
+NOT VERIFIED and DONE · TEST COMMAND PASSED receipts list each check and its
+outcome, for example `tests: failed (10 passed, 2 failed, per-test
+evidence)`.
+
+`splice exec` exits 0 for a pass that is not verified. With
+`--require-verified`, it exits 4 for `unverified` and for `command_passed`.
+Read the `verified` field in the final JSON result.
 
 When a stage fails before the pass completes, Splice records the failure and
 provides revision context for the next allowed pass. That failed pass does not
@@ -292,7 +439,7 @@ These interactive features do not apply to the fixed stage sequence:
 | `--allow-escalation` | No direct effect. Pipeline escalation comes from stage-model configuration. |
 | Between-turn file diagnostics | No effect between fixed stages. |
 | Agent-loop compaction | No effect in a direct pipeline run. |
-| Tool filters and hooks | The pipeline tool runner honors `EnabledTools`, `DisabledTools`, and beforeTool or afterTool hooks. Read-only context lookup does not apply those filters. |
+| Tool filters and hooks | The pipeline tool runner honors `EnabledTools`, `DisabledTools`, and beforeTool or afterTool hooks. Hooks run inside the stage sandbox, in the run directory. A user hook with `runOnHost` runs on the host. Read-only context lookup does not apply those filters. |
 
 The TUI agent loop and specification draft flow can use these features outside
 the fixed pipeline.
@@ -637,8 +784,11 @@ For example, `["sh", "-c", "go vet ./... && go test ./..."]` runs two commands.
 On Windows, Splice joins the elements with spaces. The `cmd.exe` shell reads
 that line, and Splice does not quote the elements.
 
-Splice runs the command through its `bash` tool. The sandbox and the
-permission mode of the session apply.
+Splice runs the command through its `bash` tool in the stage sandbox (see
+[Stage sandbox](#stage-sandbox)). The permission mode of the session applies.
+A command node never runs outside the sandbox. When the stage sandbox has no
+native backend, the run stops before the first stage, and the error names
+the node.
 
 A nonzero exit status fails the node. A permission denial also fails the
 node, and the error says `denied by permission policy`. A failed node fails
@@ -736,7 +886,9 @@ An agent node never runs outside the sandbox. Splice applies these rules:
 - The node needs an enforcing sandbox. The sandbox policy must not be
   disabled, and a native sandbox backend must be available. Otherwise the node
   fails before it starts. The error says `agent nodes need an enforcing
-  sandbox` and gives the reason.
+  sandbox` and gives the reason. When Splice runs inside a sandbox, the node
+  runs only when you accept a nested run (see
+  [Nested runs](#nested-runs)).
 - A run in `unsafe` mode is capped at `auto` for agent nodes.
 - The node runs in `auto` when the run is `auto` or `unsafe`, unless the node says `ask`.
 - `permission: "ask"` on the node: the node asks, for every run mode.

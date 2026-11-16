@@ -78,6 +78,13 @@ activity. Standard output does not change.
 The surface includes the pipeline viewer, which shows the live graph of the
 run. See [Pipeline behavior](PIPELINE.md#see-the-pipeline-in-a-browser).
 
+`--accept-nested-sandbox` applies to one run when Splice runs inside a
+sandbox. Stage commands, command nodes, and agent nodes then run under the
+outer sandbox, and the summary says that the stage sandbox was not enforced.
+Without the flag, these commands refuse to run. The user configuration key
+`sandbox.acceptNestedSandbox` gives the same permission for each run. See
+[Stage sandbox](PIPELINE.md#stage-sandbox).
+
 Use `--auto low` for conservative automation. Review the policy before you use
 `medium`, `high`, or `--skip-permissions-unsafe`.
 

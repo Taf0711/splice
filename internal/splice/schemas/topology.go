@@ -108,7 +108,8 @@ type NodeCapabilities struct {
 	// PullMemory is nil when the builtin profile decides.
 	PullMemory *bool `json:"pull_memory,omitempty"`
 	// ProducesVerification marks a node whose report feeds the trajectory
-	// monitor. Custom nodes may set it. A builtin profile may also set it.
+	// monitor. Custom nodes may set it. A builtin node may set it only when its
+	// builtin profile is a verification stage (see Validate).
 	ProducesVerification bool `json:"produces_verification,omitempty"`
 }
 
@@ -332,6 +333,9 @@ func (n PipelineNode) Validate() error {
 		}
 		if profile, ok := builtinCapabilityProfile[n.Type]; ok && !profile.ModelFree && n.Caps.ModelFree {
 			return fmt.Errorf("node %s: type %q is model-backed in the builtin profile; model_free must be false", n.Name, n.Type)
+		}
+		if profile, ok := builtinCapabilityProfile[n.Type]; ok && !profile.ProducesVerification && n.Caps.ProducesVerification {
+			return fmt.Errorf("node %s: field produces_verification is not valid for type %q, which does not produce verification; only the verification stages (static_analyzer, security_auditor, test_runner, acceptance_verifier) may set it", n.Name, n.Type)
 		}
 	case n.Type == NodeTypePrompt:
 		if strings.TrimSpace(n.Prompt) == "" {

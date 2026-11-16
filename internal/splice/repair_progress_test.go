@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/splice/schemas"
@@ -203,6 +204,33 @@ func TestRepairInstructionDirectionFollowsAuthorship(t *testing.T) {
 	got = repairInstructionDirection(nil, "./session.go:9:2: undefined: NewStore", writerOutput)
 	if got != repairInstruction {
 		t.Fatalf("instruction = %q, want the implementation directive for non-authored compile errors", got)
+	}
+}
+
+// extractFailingTests keeps the package-qualified name in the evidence (two
+// packages stay distinct) and returns bare names, so repair attribution still
+// matches the authored test declaration.
+func TestExtractFailingTestsQualifiedNames(t *testing.T) {
+	results := schemas.TestRunResults{Tests: []schemas.TestCaseResult{
+		{Name: "example.com/m/a.TestLookup", Package: "example.com/m/a", Status: "failed", Message: "boom"},
+		{Name: "example.com/m/b.TestLookup", Package: "example.com/m/b", Status: "passed"},
+		{Name: "suite", Status: "failed", Message: "test command exited 1; no failed test was reported"},
+	}}
+	evidence, names := extractFailingTests(results)
+	wantEvidence := []string{"example.com/m/a.TestLookup: boom", "suite: test command exited 1; no failed test was reported"}
+	if strings.Join(evidence, "|") != strings.Join(wantEvidence, "|") {
+		t.Fatalf("evidence = %q, want %q", evidence, wantEvidence)
+	}
+	if strings.Join(names, "|") != "TestLookup|suite" {
+		t.Fatalf("names = %q, want bare names", names)
+	}
+	writerOutput := schemas.HarnessStageOutput{
+		Data: map[string]any{"code_writer_output": schemas.CodeWriterOutput{
+			Files: []schemas.FileChange{{Path: "lookup_test.go", Content: "package a\n\nfunc TestLookup(t *testing.T) {}\n", ChangeType: "create"}},
+		}},
+	}
+	if got := repairInstructionDirection(names[:1], strings.Join(evidence, "\n"), writerOutput); got != repairTestFileInstruction {
+		t.Fatalf("instruction = %q, want the test-file directive for a qualified authored failure", got)
 	}
 }
 
@@ -449,5 +477,24 @@ func TestAttemptLocalRepairClassifierPreservesOriginalPath(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A long test name cannot reach the repair evidence untruncated, even when the
+// result did not come through the parser's bound.
+func TestExtractFailingTestsBoundsLongName(t *testing.T) {
+	long := strings.Repeat("n", 3<<20)
+	results := schemas.TestRunResults{Tests: []schemas.TestCaseResult{
+		{Name: long, Status: "failed"},
+	}}
+	evidence, names := extractFailingTests(results)
+	if len(evidence) != 1 || len(names) != 1 {
+		t.Fatalf("evidence = %d, names = %d, want one failure", len(evidence), len(names))
+	}
+	if n := utf8.RuneCountInString(evidence[0]); n > 303 {
+		t.Fatalf("evidence entry is %d runes, want at most 303", n)
+	}
+	if n := utf8.RuneCountInString(names[0]); n > 303 {
+		t.Fatalf("name is %d runes, want at most 303", n)
 	}
 }

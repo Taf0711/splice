@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -24,7 +25,7 @@ func recordedGitOutputs(outputs map[string]ToolResult) func(context.Context, str
 		if name != "splice.shell" || !ok {
 			return ToolResult{}, errors.New("unexpected recorded command")
 		}
-		key := command[1]
+		key := gitSubcommand(command)
 		if result, ok := outputs[key]; ok {
 			return result, nil
 		}
@@ -38,7 +39,7 @@ func TestGitScopedFilesIncludesCreatedFileWithModifiedTrackedFile(t *testing.T) 
 	tracked := writeStaticAnalyzerFile(t, workDir, "tracked.go")
 	created := writeStaticAnalyzerFile(t, workDir, "created.go")
 
-	got, err := gitScopedFiles(context.Background(), workDir, "go", StageOptions{
+	got, _, err := gitScopedFiles(context.Background(), workDir, "go", StageOptions{
 		RecordCommand: recordedGitOutputs(map[string]ToolResult{
 			"diff":     {OK: true, Output: "tracked.go\n"},
 			"ls-files": {OK: true, Output: "created.go\n"},
@@ -57,7 +58,7 @@ func TestGitScopedFilesDeduplicatesTrackedAndUntrackedFiles(t *testing.T) {
 	workDir := t.TempDir()
 	path := writeStaticAnalyzerFile(t, workDir, "same.go")
 
-	got, err := gitScopedFiles(context.Background(), workDir, "go", StageOptions{
+	got, _, err := gitScopedFiles(context.Background(), workDir, "go", StageOptions{
 		RecordCommand: recordedGitOutputs(map[string]ToolResult{
 			"diff":     {OK: true, Output: "same.go\n"},
 			"ls-files": {OK: true, Output: "same.go\n"},
@@ -71,28 +72,28 @@ func TestGitScopedFilesDeduplicatesTrackedAndUntrackedFiles(t *testing.T) {
 	}
 }
 
-func TestGitScopedFilesKeepsTrackedFilesWhenUntrackedLookupFails(t *testing.T) {
+func TestGitScopedFilesFailsWhenUntrackedLookupFails(t *testing.T) {
 	workDir := t.TempDir()
-	tracked := writeStaticAnalyzerFile(t, workDir, "tracked.go")
-	created := writeStaticAnalyzerFile(t, workDir, "created.go")
+	writeStaticAnalyzerFile(t, workDir, "tracked.go")
+	writeStaticAnalyzerFile(t, workDir, "created.go")
 
-	got, err := gitScopedFiles(context.Background(), workDir, "go", StageOptions{
+	got, _, err := gitScopedFiles(context.Background(), workDir, "go", StageOptions{
 		RecordCommand: func(ctx context.Context, name string, args map[string]any, run func(context.Context) (ToolResult, error)) (ToolResult, error) {
 			command := args["command"].([]string)
-			if command[1] == "diff" {
+			if gitSubcommand(command) == "diff" {
 				return ToolResult{OK: true, Output: "tracked.go\n"}, nil
 			}
 			return ToolResult{Output: "created.go\n"}, errors.New("git ls-files unavailable")
 		},
 	})
-	if err != nil {
-		t.Fatalf("gitScopedFiles returned an error after untracked lookup failure: %v", err)
+	if err == nil {
+		t.Fatalf("untracked lookup failed but gitScopedFiles returned %v with no error; a partial list must not look complete", got)
 	}
-	if want := []string{tracked}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("got %v, want tracked files %v", got, want)
+	if !strings.Contains(err.Error(), "untracked file discovery") {
+		t.Fatalf("error %q does not name untracked file discovery", err)
 	}
-	if _, err := os.Stat(created); err != nil {
-		t.Fatalf("created file setup: %v", err)
+	if got != nil {
+		t.Fatalf("got partial list %v alongside error; want none", got)
 	}
 }
 
@@ -101,7 +102,7 @@ func TestGitScopedFilesFiltersUntrackedExtensions(t *testing.T) {
 	goPath := writeStaticAnalyzerFile(t, workDir, "created.go")
 	_ = writeStaticAnalyzerFile(t, workDir, "created.txt")
 
-	got, err := gitScopedFiles(context.Background(), workDir, "go", StageOptions{
+	got, _, err := gitScopedFiles(context.Background(), workDir, "go", StageOptions{
 		RecordCommand: recordedGitOutputs(map[string]ToolResult{
 			"diff":     {OK: true},
 			"ls-files": {OK: true, Output: "created.txt\ncreated.go\n"},

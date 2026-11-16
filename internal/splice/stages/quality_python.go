@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
@@ -85,6 +86,7 @@ func (c pythonSyntaxCheck) Run(ctx context.Context, req VerificationCheckRequest
 		}
 		defer plan.Cleanup()
 		out, err := cmd.CombinedOutput()
+		procrun.ReportRun(runCtx, cmd, err)
 		compileOut = string(out)
 		compileOK = err == nil
 		if err != nil {
@@ -236,6 +238,7 @@ func runRuff(ctx context.Context, req VerificationCheckRequest, pyPaths []string
 		}
 		defer plan.Cleanup()
 		combined, rerr := cmd.CombinedOutput()
+		procrun.ReportRun(ctx, cmd, rerr)
 		out = combined
 		if rerr != nil {
 			if errors.Is(rerr, exec.ErrNotFound) ||

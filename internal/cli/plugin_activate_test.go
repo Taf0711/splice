@@ -205,7 +205,7 @@ func TestNewHookDispatcherWithExtraFoldsPluginHooks(t *testing.T) {
 		Enabled: true,
 	}}
 
-	dispatcher := newHookDispatcherWithExtra(workspace, false, extra)
+	dispatcher := newHookDispatcherWithExtra(workspace, false, extra, nil)
 	if dispatcher == nil {
 		t.Fatal("dispatcher should never be nil for a clean workspace")
 	}

@@ -145,9 +145,15 @@ func AdaptRunEvent(status, detail string) presentation.StreamEventLike {
 
 // AdaptRunOutcomeEvent maps a finished run that carries its verification
 // truth. unverified marks a completed run that verified nothing; detail then
-// names why.
-func AdaptRunOutcomeEvent(status, detail string, unverified bool) presentation.StreamEventLike {
-	return presentation.RunEvent{Status: status, Detail: detail, Unverified: unverified}
+// names why. commandPassed marks an unverified run whose test command passed
+// with no per-test evidence. checks are the verification checks of the final
+// pass; only an unverified run carries them.
+func AdaptRunOutcomeEvent(status, detail string, unverified, commandPassed bool, checks []schemas.VerificationCheck) presentation.StreamEventLike {
+	event := presentation.RunEvent{Status: status, Detail: detail, Unverified: unverified, CommandPassed: unverified && commandPassed}
+	if unverified {
+		event.Checks = checks
+	}
+	return event
 }
 
 // IsTrajectoryIntervention reports whether a trajectory action represents an

@@ -25,6 +25,7 @@ import (
 	"github.com/Taf0711/splice/internal/providers/decisions"
 	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/sandbox/procrun"
+	"github.com/Taf0711/splice/internal/secrets"
 	"github.com/Taf0711/splice/internal/sessions"
 	"github.com/Taf0711/splice/internal/specmode"
 	splicerun "github.com/Taf0711/splice/internal/splice"
@@ -157,6 +158,11 @@ type execOptions struct {
 	// source repo inherit that trust (proven via the git common dir). Off by
 	// default; a spike, no full trust-inheritance UX yet.
 	inheritWorktreeTrust bool
+	// acceptNestedSandbox accepts a nested run for this run only: when Splice
+	// already runs inside a sandbox, stage commands, command nodes, and
+	// agent nodes run under the outer sandbox. The user config key
+	// sandbox.acceptNestedSandbox is the persistent form.
+	acceptNestedSandbox bool
 }
 
 type execUsageError struct {
@@ -961,8 +967,9 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		// if the model keeps stalling. The interactive TUI leaves this off.
 		RequireCompletionSignal: true,
 		Sandbox:                 sandboxEngine,
+		AcceptNestedSandbox:     resolved.Sandbox.AcceptNestedSandbox || options.acceptNestedSandbox,
 		FileTracker:             tools.NewFileTracker(),
-		Hooks:                   newHookDispatcherWithExtra(workspaceRoot, !trusted, pluginActivation.hooks),
+		Hooks:                   newHookDispatcherWithExtra(workspaceRoot, !trusted, pluginActivation.hooks, stderr),
 		EnabledTools:            options.enabledTools,
 		DisabledTools:           options.disabledTools,
 		OnText:                  writer.text,
@@ -2029,13 +2036,16 @@ func resolveExecRunMetadata(profile config.ProviderProfile) (execRunMetadata, er
 }
 
 // formatSpawnAudit renders one spawn audit record as a compact single line:
-// profile, binary, argv, working directory, and the engine decision.
+// profile, binary, argv, working directory, and the engine decision. A
+// command line can carry a token, so the line passes through secrets.Redact.
 func formatSpawnAudit(record procrun.AuditRecord) string {
 	detail := fmt.Sprintf("%s %s %s dir=%s", record.ProfileID, record.Name, strings.Join(record.Args, " "), record.Dir)
+	line := fmt.Sprintf("[spawn] %s backend=%s wrapped=%t", detail, record.Decision.Backend, record.Decision.Wrapped)
 	if record.Decision.Rejected {
-		return "[spawn-refused] " + detail + " reason=" + record.Decision.Reason
+		line = "[spawn-refused] " + detail + " reason=" + record.Decision.Reason
 	}
-	return fmt.Sprintf("[spawn] %s backend=%s wrapped=%t", detail, record.Decision.Backend, record.Decision.Wrapped)
+	redacted, _ := secrets.Redact(line)
+	return redacted
 }
 
 func writeExecStreamJSONFinal(stdout io.Writer, cwd string, metadata execRunMetadata, permissionMode agent.PermissionMode, text string, exitCode int) int {

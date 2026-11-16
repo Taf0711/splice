@@ -2,10 +2,14 @@ package agent
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/Taf0711/splice/internal/hooks"
+	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/tools"
 )
 
@@ -91,5 +95,49 @@ func TestDispatchHelpersAreNoopWithoutDispatcher(t *testing.T) {
 	}
 	if feedback := dispatchAfterTool(context.Background(), options, ToolCall{Name: "bash"}, nil, tools.Result{}); feedback != "" {
 		t.Fatalf("a nil dispatcher must yield no feedback, got %q", feedback)
+	}
+}
+
+// TestBeforeToolHookPassesAgentEngineToPluginHooks pins the wiring in the
+// interactive loop: dispatchBeforeTool hands options.Sandbox to the
+// dispatcher, so a plugin hook that writes outside the workspace is denied,
+// while a user hook still runs on the host.
+func TestBeforeToolHookPassesAgentEngineToPluginHooks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses /bin/sh")
+	}
+	backend := sandbox.SelectBackend(sandbox.BackendOptions{})
+	if !backend.Available {
+		t.Skipf("host native sandbox backend unavailable: %s", backend.Message)
+	}
+	workspace, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("user home unavailable: %v", err)
+	}
+	outsideDir, err := os.MkdirTemp(home, ".splice-agent-hook-test-")
+	if err != nil {
+		t.Skipf("home dir not writable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(outsideDir) })
+	policy := sandbox.DefaultPolicy()
+	policy.TempRoot = t.TempDir()
+	engine := sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: workspace, Policy: policy, Backend: backend})
+
+	for _, pluginID := range []string{"acme", ""} {
+		target := filepath.Join(outsideDir, "pwned-"+pluginID)
+		hook := hooks.Definition{ID: "probe", Event: hooks.EventBeforeTool, Command: "/bin/sh", Args: []string{"-c", `echo pwned > "$1"`, "hook", target}, Enabled: true, PluginID: pluginID}
+		dispatcher := hooks.NewDispatcher(hooks.DispatcherOptions{Config: hooks.Config{Enabled: true, Hooks: []hooks.Definition{hook}}, Cwd: workspace})
+		_, blocked := RunBeforeToolHooks(context.Background(), Options{Hooks: dispatcher, Sandbox: engine, Cwd: workspace}, ToolCall{ID: "c1", Name: "bash"}, nil)
+		_, statErr := os.Stat(target)
+		if pluginID != "" && (!blocked || !os.IsNotExist(statErr)) {
+			t.Fatalf("plugin hook: blocked=%v stat=%v, want a sandbox denial", blocked, statErr)
+		}
+		if pluginID == "" && (blocked || statErr != nil) {
+			t.Fatalf("user hook: blocked=%v stat=%v, want a host run", blocked, statErr)
+		}
 	}
 }

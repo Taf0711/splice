@@ -3,6 +3,8 @@ package presentation
 import (
 	"fmt"
 	"strings"
+
+	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
 // EventKind discriminates the event classes the reducer understands. The
@@ -55,6 +57,11 @@ type Event struct {
 	InterventionKind InterventionKind
 	// Unverified marks a run event whose completed run verified nothing.
 	Unverified bool
+	// CommandPassed marks an unverified run whose test command passed with
+	// no per-test evidence.
+	CommandPassed bool
+	// Checks lists the verification checks of an unverified run.
+	Checks []schemas.VerificationCheck
 	// Workspace isolation state (DoD 26), stamped by the adapter.
 	Workspace    string
 	WorktreePath string
@@ -166,11 +173,16 @@ type RunEvent struct {
 	Detail string
 	// Unverified marks a completed run that verified nothing. Detail names why.
 	Unverified bool
+	// CommandPassed marks an unverified run whose test command passed with
+	// no per-test evidence. It is only valid with Unverified.
+	CommandPassed bool
+	// Checks lists the verification checks of an unverified run.
+	Checks []schemas.VerificationCheck
 }
 
 // PresentationEvent projects the run event into the normalized form.
 func (e RunEvent) PresentationEvent() Event {
-	return Event{Kind: EventKindRun, Status: e.Status, Detail: e.Detail, Unverified: e.Unverified}
+	return Event{Kind: EventKindRun, Status: e.Status, Detail: e.Detail, Unverified: e.Unverified, CommandPassed: e.CommandPassed, Checks: e.Checks}
 }
 
 // InterventionEvent proposes or applies one intervention against a node.
@@ -483,7 +495,11 @@ func applyRun(state State, event Event) (State, error) {
 	case "cancelled":
 		out.Health = HealthCancelled
 	}
-	out.Completion = &CompletionReceipt{Status: status, Detail: event.Detail, Unverified: status == "completed" && event.Unverified}
+	unverified := status == "completed" && event.Unverified
+	out.Completion = &CompletionReceipt{Status: status, Detail: event.Detail, Unverified: unverified, CommandPassed: unverified && event.CommandPassed}
+	if unverified {
+		out.Completion.Checks = append([]schemas.VerificationCheck(nil), event.Checks...)
+	}
 	return out, nil
 }
 

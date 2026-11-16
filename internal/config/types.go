@@ -102,6 +102,21 @@ type SandboxConfig struct {
 	// are visible to the agent. Off by default. No-op on platforms/OS versions that
 	// do not deliver seatbelt denials to the queryable log.
 	MonitorDenials bool `json:"monitorDenials,omitempty"`
+	// AcceptNestedSandbox lets pipeline stage commands, command nodes, and
+	// agent nodes run when Splice already runs inside a sandbox, so it cannot
+	// apply its own. The commands then run under the outer sandbox only, and
+	// the run result says so. It accepts only that gap. Honored from the user
+	// config only (like plugins.<id>.hostExecution): project config, provider
+	// command output, and the environment cannot set it.
+	AcceptNestedSandbox bool `json:"acceptNestedSandbox,omitempty"`
+}
+
+// PluginSettings holds the operator's per-plugin settings. Splice reads them
+// from the user config only: a project config.json cannot set them.
+type PluginSettings struct {
+	// HostExecution lets the plugin's tool commands and hooks run on the host,
+	// outside the sandbox.
+	HostExecution bool `json:"hostExecution,omitempty"`
 }
 
 type NotifyConfig struct {
@@ -535,6 +550,9 @@ type FileConfig struct {
 	Trajectory          TrajectoryConfig      `json:"trajectory,omitempty"`
 	Pipeline            PipelineConfig        `json:"pipeline,omitempty"`
 	DefaultProjectTrust string                `json:"defaultProjectTrust,omitempty"`
+	// Plugins maps a plugin id to its settings. Resolve reads it from the
+	// user config only.
+	Plugins map[string]PluginSettings `json:"plugins,omitempty"`
 	// Flags holds per-feature switches as declared in internal/flags. Only
 	// registered names resolve; an unknown name fails loudly. Project config
 	// may set ScopeProject flags only.
@@ -543,26 +561,27 @@ type FileConfig struct {
 
 func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 	type rawConfig struct {
-		ActiveProvider      string                 `json:"activeProvider,omitempty"`
-		Providers           []ProviderProfile      `json:"providers,omitempty"`
-		Auth                *AuthConfig            `json:"auth,omitempty"`
-		MaxTurns            int                    `json:"maxTurns,omitempty"`
-		MCP                 MCPConfig              `json:"mcp,omitempty"`
-		Sandbox             SandboxConfig          `json:"sandbox,omitempty"`
-		Notify              NotifyConfig           `json:"notify,omitempty"`
-		Tools               ToolsConfig            `json:"tools,omitempty"`
-		Swarm               SwarmConfig            `json:"swarm,omitempty"`
-		Preferences         PreferencesConfig      `json:"preferences,omitempty"`
-		KeyBindings         KeyBindingsConfig      `json:"keybindings,omitempty"`
-		LocalControl        *LocalControlConfig    `json:"localControl,omitempty"`
-		Compaction          CompactionConfig       `json:"compaction,omitempty"`
-		Worktrees           WorktreesConfig        `json:"worktrees,omitempty"`
-		Verify              *VerifyConfig          `json:"verify,omitempty"`
-		DecisionAdvisor     *DecisionAdvisorConfig `json:"decisionAdvisor,omitempty"`
-		Trajectory          *TrajectoryConfig      `json:"trajectory,omitempty"`
-		Pipeline            *PipelineConfig        `json:"pipeline,omitempty"`
-		DefaultProjectTrust string                 `json:"defaultProjectTrust,omitempty"`
-		Flags               map[string]bool        `json:"flags,omitempty"`
+		ActiveProvider      string                    `json:"activeProvider,omitempty"`
+		Providers           []ProviderProfile         `json:"providers,omitempty"`
+		Auth                *AuthConfig               `json:"auth,omitempty"`
+		MaxTurns            int                       `json:"maxTurns,omitempty"`
+		MCP                 MCPConfig                 `json:"mcp,omitempty"`
+		Sandbox             SandboxConfig             `json:"sandbox,omitempty"`
+		Notify              NotifyConfig              `json:"notify,omitempty"`
+		Tools               ToolsConfig               `json:"tools,omitempty"`
+		Swarm               SwarmConfig               `json:"swarm,omitempty"`
+		Preferences         PreferencesConfig         `json:"preferences,omitempty"`
+		KeyBindings         KeyBindingsConfig         `json:"keybindings,omitempty"`
+		LocalControl        *LocalControlConfig       `json:"localControl,omitempty"`
+		Compaction          CompactionConfig          `json:"compaction,omitempty"`
+		Worktrees           WorktreesConfig           `json:"worktrees,omitempty"`
+		Verify              *VerifyConfig             `json:"verify,omitempty"`
+		DecisionAdvisor     *DecisionAdvisorConfig    `json:"decisionAdvisor,omitempty"`
+		Trajectory          *TrajectoryConfig         `json:"trajectory,omitempty"`
+		Pipeline            *PipelineConfig           `json:"pipeline,omitempty"`
+		DefaultProjectTrust string                    `json:"defaultProjectTrust,omitempty"`
+		Plugins             map[string]PluginSettings `json:"plugins,omitempty"`
+		Flags               map[string]bool           `json:"flags,omitempty"`
 	}
 	raw := rawConfig{
 		ActiveProvider:      cfg.ActiveProvider,
@@ -578,6 +597,7 @@ func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 		Compaction:          cfg.Compaction,
 		Worktrees:           cfg.Worktrees,
 		DefaultProjectTrust: cfg.DefaultProjectTrust,
+		Plugins:             cfg.Plugins,
 		Flags:               cfg.Flags,
 	}
 	if len(cfg.Verify.TestCommand) > 0 || strings.TrimSpace(cfg.Verify.TestDir) != "" {
@@ -656,6 +676,8 @@ type ResolvedConfig struct {
 	DecisionAdvisor     DecisionAdvisorConfig
 	Trajectory          TrajectoryConfig
 	DefaultProjectTrust string
+	// Plugins holds the per-plugin settings from the user config only.
+	Plugins map[string]PluginSettings
 	// Flags is the resolved flag set. The zero value means all defaults.
 	Flags flags.Set
 	// FlagResolutions explains each registry flag: its value and the source
@@ -720,6 +742,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 		Worktrees            WorktreesConfig            `json:"worktrees"`
 		Verify               VerifyConfig               `json:"verify"`
 		DefaultProjectTrust  string                     `json:"defaultProjectTrust"`
+		Plugins              map[string]PluginSettings  `json:"plugins"`
 		Flags                map[string]bool            `json:"flags"`
 		MCPServers           map[string]MCPServerConfig `json:"mcpServers"`
 		MCPServersSnake      map[string]MCPServerConfig `json:"mcp_servers"`
@@ -762,6 +785,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	}
 	cfg.Pipeline = raw.Pipeline
 	cfg.DefaultProjectTrust = raw.DefaultProjectTrust
+	cfg.Plugins = raw.Plugins
 	cfg.Flags = raw.Flags
 	if cfg.MCP.Servers == nil && (len(raw.MCPServers) > 0 || len(raw.MCPServersSnake) > 0) {
 		cfg.MCP.Servers = map[string]MCPServerConfig{}

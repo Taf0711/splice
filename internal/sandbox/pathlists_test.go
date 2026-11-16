@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -421,5 +423,66 @@ func TestSandboxExecProfileEmitsDenyWriteRule(t *testing.T) {
 	denyIdx := strings.Index(profile, wantDeny)
 	if allowIdx < 0 || denyIdx < 0 || denyIdx < allowIdx {
 		t.Fatalf("DenyWrite rule must follow the write-allow (allow@%d deny@%d):\n%s", allowIdx, denyIdx, profile)
+	}
+}
+
+// TestWithReadableDirSplitsOnlyCoveringDenyEntries pins the plugin read
+// carve-out: a DenyRead entry that contains dir is split so dir and its
+// ancestors inside the entry are readable and every sibling stays denied.
+// Other entries, write roots, network, and the backend do not change.
+func TestWithReadableDirSplitsOnlyCoveringDenyEntries(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	denied := filepath.Join(root, "config", "splice")
+	target := filepath.Join(denied, "plugins", "acme")
+	for _, dir := range []string{target, filepath.Join(denied, "plugins", "other"), filepath.Join(denied, "sessions"), filepath.Join(root, "ssh")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(denied, "config.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	policy := DefaultPolicy()
+	policy.DenyRead = []string{denied, filepath.Join(root, "ssh")}
+	policy.AllowWrite = []string{filepath.Join(root, "ssh")}
+	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: policy})
+
+	carved := engine.WithReadableDir(target)
+	want := []string{
+		filepath.Join(denied, "config.json"),
+		filepath.Join(denied, "sessions"),
+		filepath.Join(denied, "plugins", "other"),
+		filepath.Join(root, "ssh"),
+	}
+	got := append([]string(nil), carved.policy.DenyRead...)
+	sort.Strings(got)
+	sort.Strings(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("DenyRead = %v, want %v", got, want)
+	}
+	if !reflect.DeepEqual(engine.policy.DenyRead, policy.DenyRead) {
+		t.Fatalf("receiver policy changed: %v", engine.policy.DenyRead)
+	}
+	rest, original := carved.policy, engine.policy
+	rest.DenyRead, original.DenyRead = nil, nil
+	if !reflect.DeepEqual(rest, original) || !reflect.DeepEqual(carved.backend, engine.backend) || carved.scope != engine.scope || carved.workspaceRoot != engine.workspaceRoot {
+		t.Fatal("WithReadableDir changed more than DenyRead")
+	}
+	exclusions := carved.ReadExclusions()
+	if exclusions.PathExcluded(target) || !exclusions.PathExcluded(filepath.Join(denied, "config.json")) {
+		t.Fatal("in-process read check does not match the carve-out")
+	}
+
+	for name, dir := range map[string]string{"uncovered": root, "missing": filepath.Join(denied, "nope"), "the entry itself": denied} {
+		if got := engine.WithReadableDir(dir); got != engine {
+			t.Fatalf("%s dir: want the receiver unchanged", name)
+		}
+	}
+	var nilEngine *Engine
+	if nilEngine.WithReadableDir(target) != nil {
+		t.Fatal("nil engine must stay nil")
 	}
 }

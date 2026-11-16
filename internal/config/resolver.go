@@ -83,6 +83,12 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		userFlags = fileConfig.Flags
 		mergeConfig(&cfg, fileConfig)
 		cfg.Auth = fileConfig.Auth
+		// Plugin settings grant host execution, so only the user layer sets
+		// them. The project layer and provider commands never merge them.
+		cfg.Plugins = fileConfig.Plugins
+		// The same rule for the nested-sandbox acceptance: mergeConfig and
+		// mergeProjectConfig never copy it.
+		cfg.Sandbox.AcceptNestedSandbox = fileConfig.Sandbox.AcceptNestedSandbox
 	}
 	if _, err := ValidateAuthStorage(cfg.Auth.Storage); err != nil {
 		return ResolvedConfig{}, err
@@ -246,6 +252,7 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		Trajectory:          cfg.Trajectory,
 		MaxWall:             maxWall,
 		DefaultProjectTrust: cfg.DefaultProjectTrust,
+		Plugins:             cfg.Plugins,
 		Flags:               flagSet,
 		FlagResolutions:     flagResolutions,
 	}, nil

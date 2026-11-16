@@ -84,6 +84,9 @@ func hardenPTYProcessLifetime(command *exec.Cmd, slave *os.File) {
 		command.SysProcAttr = &syscall.SysProcAttr{}
 	}
 	command.SysProcAttr.Setsid = true
+	// procrun sets Setpgid on every command. A new session already makes a
+	// new process group, and setpgid fails (EPERM) on a session leader.
+	command.SysProcAttr.Setpgid = false
 	command.SysProcAttr.Setctty = true
 	command.SysProcAttr.Ctty = 0
 	command.WaitDelay = bashWaitDelay

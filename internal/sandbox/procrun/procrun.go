@@ -16,6 +16,7 @@ package procrun
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -36,6 +37,7 @@ const (
 	ProfileSpliceStage      = "splice.stage"
 	ProfileSpliceDTools     = "splice.dtools"
 	ProfileHooksDispatch    = "hooks.dispatch"
+	ProfilePluginTool       = "plugins.tool"
 	ProfileImageInput       = "tui.imageinput"
 )
 
@@ -50,11 +52,12 @@ var StageBinaries = []string{
 }
 
 // NewStageEngine returns an enforce-mode sandbox engine for deterministic
-// pipeline subprocesses: the filesystem is scoped to workspaceRoot and the
-// network is denied. The engine selects the host native backend with the
-// standard sandbox selection interface; a deterministic spawn whose plan
-// cannot reach native platform confinement is refused by Prepare, never run
-// unwrapped.
+// pipeline subprocesses: the filesystem is scoped to workspaceRoot, the
+// network is denied, and the credential directories and files are not
+// readable (sandbox.StagePolicy). The engine selects the host native backend
+// with the standard sandbox selection interface; a deterministic spawn whose
+// plan cannot reach native platform confinement is refused by Prepare, never
+// run unwrapped.
 func NewStageEngine(workspaceRoot string) *sandbox.Engine {
 	return NewStageEngineWithTempRoot(workspaceRoot, "")
 }
@@ -63,17 +66,15 @@ func NewStageEngine(workspaceRoot string) *sandbox.Engine {
 // the command can write tempRoot and no system temp directory. An empty
 // tempRoot keeps the system temp roots.
 func NewStageEngineWithTempRoot(workspaceRoot, tempRoot string) *sandbox.Engine {
-	backend := sandbox.SelectBackend(sandbox.BackendOptions{})
-	return sandbox.NewEngine(sandbox.EngineOptions{
-		WorkspaceRoot: workspaceRoot,
-		Policy: sandbox.Policy{
-			Mode:             sandbox.ModeEnforce,
-			Network:          sandbox.NetworkDeny,
-			EnforceWorkspace: true,
-			TempRoot:         tempRoot,
-		},
-		Backend: backend,
-	})
+	var none *sandbox.Engine
+	return none.StageEngine(workspaceRoot, tempRoot)
+}
+
+// NewStageEngineFrom is NewStageEngine derived from the user engine base: the
+// read and write denials of base carry over, nothing that widens base does
+// (see sandbox.Engine.StageEngine). A nil base is NewStageEngine.
+func NewStageEngineFrom(base *sandbox.Engine, workspaceRoot string) *sandbox.Engine {
+	return base.StageEngine(workspaceRoot, "")
 }
 
 // Request is one prepared spawn.
@@ -97,6 +98,21 @@ type Request struct {
 	AllowedBinaries []string
 }
 
+// RefusalKind is the typed category of a refused spawn.
+type RefusalKind string
+
+const (
+	// RefusalBinaryNotAllowed: the binary is not in the profile allowlist.
+	RefusalBinaryNotAllowed RefusalKind = "binary_not_allowed"
+	// RefusalNoNativeSandbox: the spawn needs native confinement and the
+	// engine cannot give it (no engine, no backend, or an unwrapped plan).
+	RefusalNoNativeSandbox RefusalKind = "no_native_sandbox"
+	// RefusalPolicy: the engine refused to build a plan for the command.
+	RefusalPolicy RefusalKind = "policy"
+	// RefusalEnvironment: the hardened environment could not be built.
+	RefusalEnvironment RefusalKind = "environment"
+)
+
 // Decision records what the engine decided about one spawn.
 type Decision struct {
 	Backend          string
@@ -104,9 +120,10 @@ type Decision struct {
 	Wrapped          bool
 	EnforcementLevel string
 	// Rejected is true when the engine refused to build a plan. Reason then
-	// carries the refusal message.
+	// carries the refusal message and Refusal its category.
 	Rejected bool
 	Reason   string
+	Refusal  RefusalKind
 }
 
 // AuditRecord is the structured audit line emitted once per Prepare call.
@@ -171,15 +188,18 @@ func Prepare(ctx context.Context, req Request) (Prepared, error) {
 	if len(req.AllowedBinaries) > 0 && !binaryAllowed(req.Spec.Name, req.AllowedBinaries) {
 		base.Decision.Rejected = true
 		base.Decision.Reason = fmt.Sprintf("binary %q is not in the %s profile allowlist", req.Spec.Name, req.ProfileID)
+		base.Decision.Refusal = RefusalBinaryNotAllowed
 		emitAudit(base)
+		observeSpawn(ctx, base, req.Engine, nil)
 		return Prepared{}, fmt.Errorf("procrun: refused %s spawn: binary %q is not in the profile allowlist", req.ProfileID, req.Spec.Name)
 	}
 	// A deterministic profile must have a sandbox engine. Refuse before any
 	// process object exists so an unwrapped stage spawn is impossible.
 	if deterministicProfile(req.ProfileID) && req.Engine == nil {
 		reason := fmt.Sprintf("deterministic profile %s requires a sandbox engine", req.ProfileID)
-		base.Decision = Decision{Rejected: true, Reason: reason}
+		base.Decision = Decision{Rejected: true, Reason: reason, Refusal: RefusalNoNativeSandbox}
 		emitAudit(base)
+		observeSpawn(ctx, base, nil, nil)
 		return Prepared{}, fmt.Errorf("procrun: refused %s spawn: %s", req.ProfileID, reason)
 	}
 	// Every deterministic spawn carries the gitenv hardening. This covers the
@@ -199,8 +219,9 @@ func Prepare(ctx context.Context, req Request) (Prepared, error) {
 		hardened, err := gitenv.Env(envBase)
 		if err != nil {
 			reason := fmt.Sprintf("harden git environment: %v", err)
-			base.Decision = Decision{Rejected: true, Reason: reason}
+			base.Decision = Decision{Rejected: true, Reason: reason, Refusal: RefusalEnvironment}
 			emitAudit(base)
+			observeSpawn(ctx, base, req.Engine, nil)
 			return Prepared{}, fmt.Errorf("procrun: refused %s spawn: %s", req.ProfileID, reason)
 		}
 		req.Spec.Env = hardened
@@ -212,7 +233,9 @@ func Prepare(ctx context.Context, req Request) (Prepared, error) {
 		if err != nil {
 			record.Decision.Rejected = true
 			record.Decision.Reason = err.Error()
+			record.Decision.Refusal = RefusalPolicy
 			emitAudit(record)
+			observeSpawn(ctx, record, req.Engine, nil)
 			return Prepared{}, err
 		}
 		// The deterministic guard asserts confinement positively: a
@@ -231,10 +254,13 @@ func Prepare(ctx context.Context, req Request) (Prepared, error) {
 			reason := deterministicRefusalReason(req.ProfileID, plan)
 			record.Decision.Rejected = true
 			record.Decision.Reason = reason
+			record.Decision.Refusal = RefusalNoNativeSandbox
 			emitAudit(record)
+			observeSpawn(ctx, record, req.Engine, nil)
 			return Prepared{}, fmt.Errorf("procrun: refused %s spawn: %s", req.ProfileID, reason)
 		}
 		emitAudit(record)
+		observeSpawn(ctx, record, req.Engine, command)
 		return Prepared{Cmd: command, Plan: plan, Audit: record}, nil
 	}
 	// Direct unsandboxed path. This mirrors the construction the migrated
@@ -252,6 +278,7 @@ func Prepare(ctx context.Context, req Request) (Prepared, error) {
 		Dir:     req.Spec.Dir,
 	}
 	command := exec.CommandContext(ctx, req.Spec.Name, req.Spec.Args...)
+	sandbox.HardenProcessLifetime(command)
 	command.Dir = req.Spec.Dir
 	if req.Spec.Env != nil {
 		// An explicit environment travels verbatim. Callers that need the
@@ -264,6 +291,9 @@ func Prepare(ctx context.Context, req Request) (Prepared, error) {
 		command.Env = secrets.ScrubChildEnv(os.Environ())
 	}
 	emitAudit(base)
+	observed := base
+	observed.Decision = decisionFromPlan(plan)
+	observeSpawn(ctx, observed, nil, command)
 	return Prepared{Cmd: command, Plan: plan, Audit: base}, nil
 }
 
@@ -293,6 +323,9 @@ func deterministicRefusalReason(profileID string, plan sandbox.CommandPlan) stri
 	if hint := sandbox.MissingLinuxBackendHint(plan.Backend); hint != "" {
 		reason += "; " + hint
 	}
+	if sandbox.IsAlreadySandboxed() {
+		reason += "; " + sandbox.NestedSandboxGap
+	}
 	return reason
 }
 
@@ -311,4 +344,98 @@ func binaryAllowed(name string, allowed []string) bool {
 		}
 	}
 	return false
+}
+
+// Spawn is one spawn attempt as a SpawnObserver sees it.
+type Spawn struct {
+	Audit AuditRecord
+	// Policy summarizes the policy of the request engine. It is the zero
+	// summary for a spawn with no engine.
+	Policy sandbox.PolicySummary
+	// Cmd is the prepared command, or nil when the spawn was refused. A
+	// later ReportExit for the same command names how it ended.
+	Cmd *exec.Cmd
+}
+
+// SpawnExit is how a prepared command ended.
+type SpawnExit struct {
+	ExitCode int
+	TimedOut bool
+	// LikelyDenied is true when the caller saw the signs of a sandbox
+	// denial in a failed command (the bash tool sets it).
+	LikelyDenied bool
+	// Escalated is true when an approved escalation ran the command with
+	// no sandbox engine.
+	Escalated bool
+	// Refused is set when the caller refused the prepared command and
+	// did not start it.
+	Refused RefusalKind
+}
+
+// SpawnObserver receives the spawns made under one context. Calls can come
+// from more than one goroutine, and must not block.
+type SpawnObserver interface {
+	ObserveSpawn(Spawn)
+	ObserveExit(cmd *exec.Cmd, exit SpawnExit)
+}
+
+type spawnObserverKey struct{}
+
+// WithSpawnObserver returns a context whose spawns, refusals, and exits
+// observer receives. Prepare and the Report functions find it in the
+// context, so a derived context keeps it.
+func WithSpawnObserver(ctx context.Context, observer SpawnObserver) context.Context {
+	return context.WithValue(ctx, spawnObserverKey{}, observer)
+}
+
+func spawnObserver(ctx context.Context) SpawnObserver {
+	if ctx == nil {
+		return nil
+	}
+	observer, _ := ctx.Value(spawnObserverKey{}).(SpawnObserver)
+	return observer
+}
+
+// observeSpawn tells the context observer about one spawn attempt. The
+// policy summary is computed only when an observer is present.
+func observeSpawn(ctx context.Context, audit AuditRecord, engine *sandbox.Engine, cmd *exec.Cmd) {
+	if observer := spawnObserver(ctx); observer != nil {
+		observer.ObserveSpawn(Spawn{Audit: audit, Policy: engine.PolicySummary(), Cmd: cmd})
+	}
+}
+
+// ReportExit tells the context observer how a prepared command ended. A
+// context with no observer, or a nil command, does nothing.
+func ReportExit(ctx context.Context, cmd *exec.Cmd, exit SpawnExit) {
+	if observer := spawnObserver(ctx); observer != nil && cmd != nil {
+		observer.ObserveExit(cmd, exit)
+	}
+}
+
+// ReportRun is ReportExit for a command whose Run, Output, or
+// CombinedOutput returned err. The exit code is 0 for a nil error, the
+// process exit code for an exit error, and -1 otherwise. ctx is the
+// command's context: its deadline marks a timeout.
+func ReportRun(ctx context.Context, cmd *exec.Cmd, err error) {
+	exit := SpawnExit{TimedOut: ctx != nil && errors.Is(ctx.Err(), context.DeadlineExceeded)}
+	var exitErr *exec.ExitError
+	switch {
+	case err == nil:
+	case errors.As(err, &exitErr):
+		exit.ExitCode = exitErr.ExitCode()
+	default:
+		exit.ExitCode = -1
+	}
+	ReportExit(ctx, cmd, exit)
+}
+
+// ReportRefused tells the context observer that a caller refused a spawn
+// before Prepare: profileID and name identify it, engine is the engine it
+// would have used, and kind names why.
+func ReportRefused(ctx context.Context, profileID, name string, engine *sandbox.Engine, kind RefusalKind, reason string) {
+	observeSpawn(ctx, AuditRecord{
+		ProfileID: profileID,
+		Name:      name,
+		Decision:  Decision{Rejected: true, Reason: reason, Refusal: kind},
+	}, engine, nil)
 }

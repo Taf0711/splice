@@ -19,7 +19,8 @@ import (
 // run outcomes render as styled result cards with a next-action row —
 // never a bare error line, never a raw JSON receipt leaking into the
 // transcript (audit finding 3). Four receipts: VERIFIED, UNVERIFIED (the run
-// completed but no check verified it), FAILED, CANCELLED. `cancelled` is not
+// completed but no check verified it; TEST COMMAND PASSED is its variant for a
+// test command with no per-test evidence), FAILED, CANCELLED. `cancelled` is not
 // failure: it distinguishes staged work from applied work and always offers
 // the resume path.
 
@@ -256,7 +257,8 @@ func verifiedReceiptCard(evidence []string, files string, usage string, elapsed 
 // no check verified. The body names why, so the reader sees which checks did
 // not apply. It offers the same keys as VERIFIED: the work is complete, only
 // its verification is missing.
-func unverifiedReceiptCard(reason string, elapsed string) receiptCard {
+// The checks, when the result carries them, follow the reason one per line.
+func unverifiedReceiptCard(reason string, checks []schemas.VerificationCheck, elapsed string) receiptCard {
 	if strings.TrimSpace(reason) == "" {
 		reason = "no verification check passed"
 	}
@@ -264,20 +266,33 @@ func unverifiedReceiptCard(reason string, elapsed string) receiptCard {
 		kind:    receiptUnverified,
 		title:   "DONE · NOT VERIFIED",
 		elapsed: elapsed,
-		lines:   []string{reason},
+		lines:   append([]string{reason}, presentation.CheckLines(checks)...),
 		actions: [][2]string{{"O", "open diff"}, {"E", "export receipt"}, {"R", "resume"}},
 	}
 }
 
+// commandPassedReceiptCard builds the card for a completed run whose test
+// command exited 0 with no per-test evidence. It is not verified, so it has
+// the UNVERIFIED kind and visual weight, never the VERIFIED success color.
+func commandPassedReceiptCard(checks []schemas.VerificationCheck, elapsed string) receiptCard {
+	card := unverifiedReceiptCard("Per-test evidence is not available. The run is not verified.", checks, elapsed)
+	card.title = "DONE · TEST COMMAND PASSED"
+	return card
+}
+
 // unverifiedReceiptFromState builds the UNVERIFIED card from the run's
 // completion receipt, which carries the reason. The reason is runtime truth,
-// so the card never presents an unverified run as VERIFIED.
-func unverifiedReceiptFromState(reason string, startedAt time.Time, now time.Time) receiptCard {
+// so the card never presents an unverified run as VERIFIED. commandPassed
+// selects the TEST COMMAND PASSED card.
+func unverifiedReceiptFromState(reason string, commandPassed bool, checks []schemas.VerificationCheck, startedAt time.Time, now time.Time) receiptCard {
 	elapsed := ""
 	if !startedAt.IsZero() {
 		elapsed = formatWorkingElapsed(now.Sub(startedAt))
 	}
-	return unverifiedReceiptCard(reason, elapsed)
+	if commandPassed {
+		return commandPassedReceiptCard(checks, elapsed)
+	}
+	return unverifiedReceiptCard(reason, checks, elapsed)
 }
 
 // failedReceiptCard builds the FAILED card: failing stage, the full reason
@@ -374,7 +389,7 @@ func verifiedReceiptFromResult(finalAnswer string, usage presentation.UsageSumma
 // evidence to show.
 func verifiedReceiptCardFor(completion *presentation.CompletionReceipt, finalAnswer string, usage presentation.UsageSummary, startedAt time.Time, now time.Time) (receiptCard, bool) {
 	if completion.Unverified {
-		return unverifiedReceiptFromState(completion.Detail, startedAt, now), true
+		return unverifiedReceiptFromState(completion.Detail, completion.CommandPassed, completion.Checks, startedAt, now), true
 	}
 	return verifiedReceiptFromResult(finalAnswer, usage, startedAt, now)
 }
@@ -401,19 +416,29 @@ func pipelineTurnReceipt(finalAnswer, incompleteReason string, runErr error, wor
 	if err := json.Unmarshal([]byte(finalAnswer), &pr); err != nil {
 		return failedReceiptCard("", "pipeline result could not be read: "+err.Error(), "", elapsed), true
 	}
+	card := pipelineResultReceipt(pr, incompleteReason, worktree, started, now, elapsed)
+	if pr.NestedSandboxAccepted {
+		// A plain body line in every state: it never takes the [+] marker.
+		card.lines = append(card.lines, presentation.NestedSandboxAcceptedLine)
+	}
+	return card, true
+}
+
+// pipelineResultReceipt picks the card of a parsed pipeline result.
+func pipelineResultReceipt(pr schemas.PipelineResult, incompleteReason string, worktree *worktrees.Result, started, now time.Time, elapsed string) receiptCard {
 	// Status mapping matches finishPresentation in internal/splice/run.go:
-	// completed projects VERIFIED or NOT VERIFIED, a user abort projects
+	// completed projects VERIFIED, NOT VERIFIED, or TEST COMMAND PASSED, a user abort projects
 	// CANCELLED, and every other status projects FAILED with its reason.
 	if pr.Status == "completed" {
 		if !pr.Verified {
-			return unverifiedReceiptFromState(pr.UnverifiedReason, started, now), true
+			return unverifiedReceiptFromState(pr.UnverifiedReason, pr.VerificationOutcome == schemas.VerificationOutcomeCommandPassed, pr.VerificationChecks, started, now)
 		}
-		return verifiedReceiptCard(pipelineEvidence(pr), "", "", elapsed), true
+		return verifiedPipelineReceiptCard(pr, elapsed)
 	}
 	if pr.Status == "aborted" && pr.UserAborted {
 		card := cancelledReceiptForWorktree(worktree)
 		card.elapsed = elapsed
-		return card, true
+		return card
 	}
 	reason := incompleteReason
 	if pr.AbortReason != nil && strings.TrimSpace(*pr.AbortReason) != "" {
@@ -422,7 +447,37 @@ func pipelineTurnReceipt(finalAnswer, incompleteReason string, runErr error, wor
 	if strings.TrimSpace(reason) == "" {
 		reason = fmt.Sprintf("the pipeline run ended with status %q and no recorded reason", pr.Status)
 	}
-	return failedReceiptCard("", reason, "", elapsed), true
+	return failedReceiptCard("", reason, "", elapsed)
+}
+
+// verifiedPipelineReceiptCard builds the VERIFIED card of a pipeline result.
+// A result that carries its checks names what verified it on the first line.
+// The lines about tests that did not count and other checks follow without
+// the [+] evidence marker, so they never read as a success. A result written
+// before the checks existed keeps the evidence list.
+func verifiedPipelineReceiptCard(pr schemas.PipelineResult, elapsed string) receiptCard {
+	lines := presentation.VerifiedLines(pr.VerificationChecks)
+	if len(lines) == 0 {
+		return verifiedReceiptCard(pipelineEvidence(pr), "", "", elapsed)
+	}
+	evidence := []string{lines[0]}
+	if command := pipelineTestCommand(pr); command != "" {
+		evidence = append(evidence, "test command: "+command)
+	}
+	card := verifiedReceiptCard(evidence, "", "", elapsed)
+	card.lines = append(card.lines, lines[1:]...)
+	return card
+}
+
+// pipelineTestCommand is the test command of the last completed stage that
+// recorded one.
+func pipelineTestCommand(pr schemas.PipelineResult) string {
+	for i := len(pr.Stages) - 1; i >= 0; i-- {
+		if command := strings.TrimSpace(pr.Stages[i].TestCommand); command != "" && pr.Stages[i].Status == schemas.StageCompleted {
+			return command
+		}
+	}
+	return ""
 }
 
 // pipelineEvidence lists the checks a verified pipeline result records: the
@@ -439,11 +494,8 @@ func pipelineEvidence(pr schemas.PipelineResult) []string {
 			evidence = append(evidence, fmt.Sprintf("%d acceptance fact(s) passed", state.AcceptanceFactsPassing))
 		}
 	}
-	for i := len(pr.Stages) - 1; i >= 0; i-- {
-		if command := strings.TrimSpace(pr.Stages[i].TestCommand); command != "" && pr.Stages[i].Status == schemas.StageCompleted {
-			evidence = append(evidence, "test command: "+command)
-			break
-		}
+	if command := pipelineTestCommand(pr); command != "" {
+		evidence = append(evidence, "test command: "+command)
 	}
 	if len(evidence) == 0 {
 		evidence = append(evidence, "the pipeline result records no check detail")

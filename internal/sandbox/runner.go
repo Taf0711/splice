@@ -81,6 +81,7 @@ func (engine *Engine) CommandContext(ctx context.Context, spec CommandSpec) (*ex
 	command := exec.CommandContext(ctx, plan.Name, plan.Args...)
 	command.Dir = plan.Dir
 	command.Env = plan.Env
+	HardenProcessLifetime(command)
 	return command, plan, nil
 }
 
@@ -250,6 +251,13 @@ func withSandboxExecutionMetadata(plan CommandPlan, request SandboxExecutionRequ
 }
 
 func directCommandPlan(spec CommandSpec, backend Backend, policy Policy, workspaceRoot string) CommandPlan {
+	// An unwrapped command with no explicit environment scrubs credential-bearing
+	// variables, the same as the wrapped and escalated paths. An explicit Env
+	// travels verbatim.
+	env := cloneStrings(spec.Env)
+	if spec.Env == nil {
+		env = secrets.ScrubChildEnv(os.Environ())
+	}
 	return CommandPlan{
 		Backend:           backend,
 		TargetBackend:     backend.TargetBackend(),
@@ -262,7 +270,7 @@ func directCommandPlan(spec CommandSpec, backend Backend, policy Policy, workspa
 		Name:              spec.Name,
 		Args:              cloneStrings(spec.Args),
 		Dir:               spec.Dir,
-		Env:               cloneStrings(spec.Env),
+		Env:               env,
 	}
 }
 

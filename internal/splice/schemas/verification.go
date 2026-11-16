@@ -228,3 +228,105 @@ func (r VerificationReport) Validate() error {
 	}
 	return nil
 }
+
+// VerificationCheckKind names what one verification check is.
+type VerificationCheckKind string
+
+const (
+	CheckKindTests          VerificationCheckKind = "tests"
+	CheckKindAcceptance     VerificationCheckKind = "acceptance"
+	CheckKindSecurityScan   VerificationCheckKind = "security_scan"
+	CheckKindStaticAnalysis VerificationCheckKind = "static_analysis"
+	// CheckKindCustom is a topology node that declares produces_verification
+	// and is not a builtin verification stage.
+	CheckKindCustom VerificationCheckKind = "custom"
+)
+
+// VerificationCheckOutcome is the result of one check in the final pass.
+type VerificationCheckOutcome string
+
+const (
+	CheckPassed VerificationCheckOutcome = "passed"
+	CheckFailed VerificationCheckOutcome = "failed"
+	// CheckFindings is a report with findings that did not stop the run
+	// (no high or critical severity). It is not a pass and not a failure.
+	CheckFindings   VerificationCheckOutcome = "findings"
+	CheckSkipped    VerificationCheckOutcome = "skipped"
+	CheckIncomplete VerificationCheckOutcome = "incomplete"
+	// CheckCommandPassed is a test command that exited 0 with no per-test
+	// evidence.
+	CheckCommandPassed VerificationCheckOutcome = "command_passed"
+	// CheckNoTests is a test run where no test ran.
+	CheckNoTests       VerificationCheckOutcome = "no_tests"
+	CheckNotApplicable VerificationCheckOutcome = "not_applicable"
+)
+
+// maxVerificationCheckDetail bounds the detail of one check, in runes.
+const maxVerificationCheckDetail = 200
+
+// VerificationCheck is one verification-relevant stage of the final pass:
+// which check it was and what it found. Detail is built from typed data
+// only (counts, tool names, the recorded skip reason), never from command
+// output.
+type VerificationCheck struct {
+	// Name is the stage or node name.
+	Name    string                   `json:"name"`
+	Kind    VerificationCheckKind    `json:"kind"`
+	Outcome VerificationCheckOutcome `json:"outcome"`
+	Detail  string                   `json:"detail,omitempty"`
+}
+
+// Validate checks the closed kind and outcome sets and the bounds.
+func (c VerificationCheck) Validate() error {
+	if strings.TrimSpace(c.Name) == "" {
+		return errors.New("check name is required")
+	}
+	switch c.Kind {
+	case CheckKindTests, CheckKindAcceptance, CheckKindSecurityScan, CheckKindStaticAnalysis, CheckKindCustom:
+	default:
+		return fmt.Errorf("check %s: invalid kind %q", c.Name, c.Kind)
+	}
+	switch c.Outcome {
+	case CheckPassed, CheckFailed, CheckFindings, CheckSkipped, CheckIncomplete, CheckNotApplicable:
+	case CheckCommandPassed, CheckNoTests:
+		if c.Kind != CheckKindTests {
+			return fmt.Errorf("check %s: outcome %q is only valid for kind tests, got %q", c.Name, c.Outcome, c.Kind)
+		}
+	default:
+		return fmt.Errorf("check %s: invalid outcome %q", c.Name, c.Outcome)
+	}
+	if n := len([]rune(c.Detail)); n > maxVerificationCheckDetail {
+		return fmt.Errorf("check %s: detail is %d runes, the limit is %d", c.Name, n, maxVerificationCheckDetail)
+	}
+	return nil
+}
+
+// ValidateVerificationChecks validates each check and, for a verified run,
+// the consistency rule: at least one check passed and no check failed. A
+// result with no checks (written before the field existed) is not judged.
+func ValidateVerificationChecks(checks []VerificationCheck, verified bool) error {
+	passed, failed := false, ""
+	for i, check := range checks {
+		if err := check.Validate(); err != nil {
+			return fmt.Errorf("verification_checks[%d]: %w", i, err)
+		}
+		switch check.Outcome {
+		case CheckPassed:
+			passed = true
+		case CheckFailed:
+			if failed == "" {
+				failed = check.Name
+			}
+		}
+	}
+	if !verified || len(checks) == 0 {
+		return nil
+	}
+	if failed != "" {
+		return fmt.Errorf("verified run has a failed check %q", failed)
+	}
+	if !passed {
+		return errors.New("verified run has no passed check")
+	}
+	return nil
+}

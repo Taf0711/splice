@@ -23,6 +23,8 @@ import (
 	"github.com/Taf0711/splice/internal/memd"
 	"github.com/Taf0711/splice/internal/modelregistry"
 	"github.com/Taf0711/splice/internal/plugins"
+	"github.com/Taf0711/splice/internal/presentation"
+	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/sandbox/procrun"
 	"github.com/Taf0711/splice/internal/sessions"
 	splicerun "github.com/Taf0711/splice/internal/splice"
@@ -2516,6 +2518,41 @@ func TestFormatSpawnAuditAndSinkRestore(t *testing.T) {
 	procrun.SetAuditSink(nil)
 }
 
+// TestFormatSpawnAuditRedactsTokens: the [spawn] line carries the full
+// command line, so a token-like argument is redacted on both the accepted and
+// the refused line.
+func TestFormatSpawnAuditRedactsTokens(t *testing.T) {
+	token := "ghp_" + strings.Repeat("a1B2", 9)
+	for _, rejected := range []bool{false, true} {
+		line := formatSpawnAudit(procrun.AuditRecord{
+			ProfileID: procrun.ProfileToolsBash,
+			Name:      "sh",
+			Args:      []string{"-c", "curl -H 'Authorization: token " + token + "' https://example.test"},
+			Dir:       "/workspace",
+			Decision:  procrun.Decision{Backend: "macos-seatbelt", Wrapped: true, Rejected: rejected, Reason: "refused " + token},
+		})
+		if strings.Contains(line, token) {
+			t.Fatalf("spawn line (rejected=%v) leaks the token: %q", rejected, line)
+		}
+		if !strings.Contains(line, "[REDACTED:github_token]") || !strings.Contains(line, "curl -H") {
+			t.Fatalf("spawn line (rejected=%v) = %q, want the command with the token redacted", rejected, line)
+		}
+	}
+}
+
+// TestParseExecArgsAcceptNestedSandbox: the flag sets the option for one run;
+// without it the option stays off.
+func TestParseExecArgsAcceptNestedSandbox(t *testing.T) {
+	options, _, err := parseExecArgs([]string{"--accept-nested-sandbox", "prompt"})
+	if err != nil || !options.acceptNestedSandbox {
+		t.Fatalf("parse --accept-nested-sandbox: err=%v accept=%v", err, options.acceptNestedSandbox)
+	}
+	options, _, err = parseExecArgs([]string{"prompt"})
+	if err != nil || options.acceptNestedSandbox {
+		t.Fatalf("parse without the flag: err=%v accept=%v", err, options.acceptNestedSandbox)
+	}
+}
+
 func TestParseExecArgsFlags(t *testing.T) {
 	options, help, err := parseExecArgs([]string{"--flags", "pipeline.stage.test_generator=0,-tui.pipeline.enabled", "prompt"})
 	if err != nil || help {
@@ -2692,6 +2729,60 @@ func TestRunExecPrintsCommandNodeNoticeOnce(t *testing.T) {
 				t.Fatalf("stream-json reasoning carries the notice %d times, want 1", count)
 			}
 		})
+	}
+}
+
+// TestRunExecAcceptNestedSandboxFlag: with the inherited sandbox markers set,
+// a command node topology refuses by default and names the flag. With
+// --accept-nested-sandbox the same run completes, and the summary says that
+// the stage sandbox was not enforced.
+func TestRunExecAcceptNestedSandboxFlag(t *testing.T) {
+	if !sandbox.SelectBackend(sandbox.BackendOptions{}).Available {
+		t.Skip("no native sandbox backend on this host; the nested-sandbox gap needs one")
+	}
+	t.Setenv(sandbox.EnvSandboxed, "1")
+	t.Setenv(sandbox.EnvSandboxBackend, "outer-sandbox")
+	run := func(extra ...string) (int, string, string) {
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		t.Setenv("XDG_DATA_HOME", t.TempDir())
+		cwd := t.TempDir()
+		topologyPath := filepath.Join(t.TempDir(), "topology.json")
+		data, err := json.Marshal(schemas.PipelineTopology{
+			Version: schemas.TopologySchemaVersion,
+			Name:    "nested",
+			Nodes:   []schemas.PipelineNode{{Name: "check_cmd", Type: schemas.NodeTypeCommand, Command: []string{"true"}}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(topologyPath, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		args := append(append([]string{"exec", "--pipeline", topologyPath, "--memory", "off"}, extra...), "check")
+		var stdout, stderr bytes.Buffer
+		code := runWithDeps(args, &stdout, &stderr, appDeps{
+			getwd: func() (string, error) { return cwd, nil },
+			resolveConfig: func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+				return execResolvedConfig(), nil
+			},
+			newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+				return newExecStageAwareProvider(execStageProviderOptions{}), nil
+			},
+		})
+		return code, stdout.String(), stderr.String()
+	}
+
+	code, stdout, stderr := run()
+	if code == exitSuccess || !strings.Contains(stdout+stderr, sandbox.NestedSandboxGap) || !strings.Contains(stdout+stderr, "--accept-nested-sandbox") {
+		t.Fatalf("default: exit=%d, want a refusal that names the cause and the flag\nstdout=%s\nstderr=%s", code, stdout, stderr)
+	}
+	if strings.Contains(stdout, presentation.NestedSandboxAcceptedLine) {
+		t.Fatalf("default: a refused run printed the accepted line")
+	}
+
+	code, stdout, stderr = run("--accept-nested-sandbox")
+	if code != exitSuccess || !strings.Contains(stdout, presentation.NestedSandboxAcceptedLine) {
+		t.Fatalf("--accept-nested-sandbox: exit=%d, want success and the line %q\nstdout=%s\nstderr=%s", code, presentation.NestedSandboxAcceptedLine, stdout, stderr)
 	}
 }
 

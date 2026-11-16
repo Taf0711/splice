@@ -260,7 +260,10 @@ The event is a JSON object, but `final.text` is itself a JSON string for pipelin
 and design-plan results. Decode `text` when the client needs result fields.
 
 A pipeline result can contain `run_id`, `status`, `tier`, stage records, usage
-totals, `abort_reason`, `user_aborted`, `verified`, and `unverified_reason`.
+totals, `abort_reason`, `user_aborted`, `verified`, `unverified_reason`, and
+`verification_outcome`. A completed run has `verification_outcome` set to
+`verified`, `command_passed`, or `unverified`. `command_passed` means that the
+test command exited 0 but gave no per-test result. That run is not verified.
 A failed stage record can have `failure_kind`. The values are `stage_error`,
 `test_failure`, and `none`. Each `usage_records` entry can
 contain `prompt_layout_hash`, `cache_hit`, and `memory_position`. The result can
@@ -268,6 +271,61 @@ contain `prompt_layout_flips`, the count of prefix changes during the run.
 `user_aborted` is true only when
 the user chose to stop the run. Clients must treat `status=aborted` with
 `user_aborted=false` as a failure, not a user cancellation.
+
+A completed run also has `verification_checks`: one entry for each
+verification stage of the last pass. Each entry has these fields:
+
+- `name`: the stage or node name.
+- `kind`: `tests`, `acceptance`, `security_scan`, `static_analysis`, or
+  `custom`.
+- `outcome`: `passed`, `failed`, `findings`, `skipped`, `incomplete`,
+  `command_passed`, `no_tests`, or `not_applicable`. Only `tests` can have
+  `command_passed` or `no_tests`.
+- `detail`: a short text from typed data, for example `12 passed, 0 failed,
+  per-test evidence` or `bandit, gosec`. It can be empty.
+
+A verified result has at least one `passed` check and no `failed` check. A
+verified result can have a `tests` check with `no_tests`: a scanner verified
+that run, and no test ran. Results from earlier versions do not have the
+field.
+
+`nested_sandbox_accepted` is true when Splice ran inside a sandbox and the
+user accepted a nested run. Stage commands, command nodes, and agent nodes
+then ran under the outer sandbox only, not under the stage sandbox. The field
+does not change `verified`. Splice writes it for every status, and the run
+trace outcome has the same field. The field is absent when it is false. See
+[Stage sandbox](PIPELINE.md#stage-sandbox).
+
+Each stage record can contain `sandbox_evidence`, one entry for each command
+that the stage started or tried to start, and `sandbox_evidence_dropped`. An
+entry has these fields:
+
+- `stage` and `iteration`: the same values as the stage record.
+- `source`: `bash_tool`, `exec_command_tool`, `stage_command`,
+  `scanner_tool`, `plugin_tool`, `hook`, or `other`.
+- `program`: the file name of the program only, for example `pytest`. For a
+  shell command, it is the first word of the command. The value is
+  `redacted` when that word is not a plain program name. The record never
+  contains the command line, the arguments, or the environment.
+- `policy`: `source` (`stage`, `user`, or `none`), `mode`, `network`,
+  `enforce_workspace`, and the counts `write_roots`, `deny_read`, and
+  `deny_write`. The record contains no path.
+- `backend`, `enforcement_level`, and `wrapped`: the sandbox that ran the
+  command.
+- `escalated`: true when an approved escalation ran the command with no
+  sandbox.
+- `nested_accepted`: true when the command ran without a wrapper because
+  Splice ran inside a sandbox and the user accepted a nested run. Only the
+  outer sandbox applied. `wrapped` is then false.
+- `outcome`: `ran`, `refused`, `denied`, or `timed_out`. `denied` means that
+  the command failed with the signs of a sandbox denial.
+- `refusal`, only for `refused`: `no_enforcing_sandbox`,
+  `escalation_refused`, `permission_denied`, `hook_blocked`,
+  `binary_not_allowed`, `policy_refused`, or `environment_refused`.
+- `exit`, not for `refused`: `ok`, `non_zero`, or `unknown`.
+
+A stage record has at most 50 entries. `sandbox_evidence_dropped` counts the
+commands after the limit.
 
 A design-plan run returns a design-plan result with completed, failed, and
 skipped task IDs. Each task runs as an independent pipeline run.

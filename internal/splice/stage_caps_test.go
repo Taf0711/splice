@@ -132,3 +132,35 @@ func TestBuiltinCapabilityProfileMatchesStageDeclarations(t *testing.T) {
 		}
 	}
 }
+
+// TestBuiltinVerificationProfileMatchesStageKind pairs the verification flag in
+// the builtin profile with the stage implementations. Stage declarations carry
+// no verification field, so the check uses the stage kind: a builtin that
+// claims verification must be a deterministic (model-free) stage, and a
+// model-backed builtin must not claim it.
+func TestBuiltinVerificationProfileMatchesStageKind(t *testing.T) {
+	registry, err := buildStageRegistry(PipelineRunConfig{}, t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("buildStageRegistry: %v", err)
+	}
+	for name, stage := range registry {
+		profile, ok := schemas.BuiltinCapabilities(name)
+		if !ok {
+			continue
+		}
+		if profile.ProducesVerification && !stage.Capabilities().ModelFree {
+			t.Errorf("%s: profile claims verification but the stage is model-backed", name)
+		}
+		if !profile.ProducesVerification && isVerificationStageName(name) {
+			t.Errorf("%s: stage verifies but the profile does not claim verification", name)
+		}
+	}
+}
+
+func isVerificationStageName(name string) bool {
+	switch name {
+	case "static_analyzer", "security_auditor", "test_runner", "acceptance_verifier":
+		return true
+	}
+	return false
+}

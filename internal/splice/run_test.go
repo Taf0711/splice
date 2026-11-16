@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -2283,47 +2285,269 @@ func TestRunIterationLoopVerifiedOnlyWhenACheckPasses(t *testing.T) {
 	}
 }
 
-// TestPassVerificationRules pins which records and reports verify a pass.
+// pytestFixtureTestRun runs the captured pytest all-pass JUnit report (from the
+// stages package testdata) through the test runner stage. The stub writes the
+// report to the path the command names, as pytest would.
+func pytestFixtureTestRun(t *testing.T) schemas.HarnessStageOutput {
+	t.Helper()
+	report, err := os.ReadFile(filepath.Join("stages", "testdata", "pytest", "all_pass.xml"))
+	if err != nil {
+		t.Fatalf("setup: read pytest fixture: %v", err)
+	}
+	out, err := (stages.TestRunner{}).Run(context.Background(), schemas.HarnessStageInput{}, nil, stages.StageOptions{
+		WorkDir: t.TempDir(),
+		Command: []string{"python3", "-m", "pytest"},
+		RunTool: func(_ context.Context, _ string, args map[string]any) (stages.ToolResult, error) {
+			command, _ := args["command"].(string)
+			match := regexp.MustCompile(`--junitxml=([^'\s]+)`).FindStringSubmatch(command)
+			if match == nil {
+				return stages.ToolResult{}, fmt.Errorf("setup: no --junitxml path in %q", command)
+			}
+			if err := os.WriteFile(match[1], report, 0o600); err != nil {
+				return stages.ToolResult{}, err
+			}
+			return stages.ToolResult{OK: true, Meta: map[string]string{"exit_code": "0"}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("setup: stage run: %v", err)
+	}
+	return out
+}
+
+// TestPassVerificationRules pins which records and reports verify a pass, and
+// the outcome each pass gets.
 func TestPassVerificationRules(t *testing.T) {
 	passedReport := func() schemas.HarnessStageOutput {
 		return schemas.HarnessStageOutput{Data: map[string]any{VerificationReportKey: schemas.VerificationReport{Status: schemas.VerificationPassed, Complete: true, Summary: "ok"}}}
 	}
-	noTests := schemas.HarnessStageOutput{Data: map[string]any{"test_results": schemas.TestRunResults{Command: []string{"<none>"}, Tests: []schemas.TestCaseResult{{Name: "suite", Status: "skipped"}}}}}
-	ranTests := schemas.HarnessStageOutput{Data: map[string]any{"test_results": schemas.TestRunResults{Command: []string{"go", "test"}, Tests: []schemas.TestCaseResult{{Name: "TestA", Status: "passed"}}}}}
-	failedTests := schemas.HarnessStageOutput{Data: map[string]any{"test_results": schemas.TestRunResults{Command: []string{"go", "test"}, Tests: []schemas.TestCaseResult{{Name: "TestA", Status: "failed"}}}}}
+	testsOutput := func(results schemas.TestRunResults) schemas.HarnessStageOutput {
+		return schemas.HarnessStageOutput{Data: map[string]any{"test_results": results}}
+	}
+	noTests := testsOutput(schemas.TestRunResults{Command: []string{"<none>"}, Tests: []schemas.TestCaseResult{{Name: "suite", Status: "skipped"}}})
+	ranTests := testsOutput(schemas.TestRunResults{Command: []string{"go", "test"}, Evidence: schemas.TestEvidencePerTest, Tests: []schemas.TestCaseResult{{Name: "example.com/m.TestA", Package: "example.com/m", Status: "passed"}}})
+	failedTests := testsOutput(schemas.TestRunResults{Command: []string{"go", "test"}, ExitCode: 1, Evidence: schemas.TestEvidencePerTest, Tests: []schemas.TestCaseResult{{Name: "TestA", Status: "failed"}}})
+	// Go exit 0 with zero parsed tests (the test runner stage output).
+	zeroGoTests := testsOutput(schemas.TestRunResults{Command: []string{"go", "test", "-json", "./..."}, Evidence: schemas.TestEvidenceNone, Tests: []schemas.TestCaseResult{{Name: "suite", Status: "skipped", Message: "no tests ran"}}})
+	// Non-Go exit 0: the command succeeded, no per-test evidence.
+	commandOnly := testsOutput(schemas.TestRunResults{Command: []string{"pytest"}, Evidence: schemas.TestEvidenceCommandOnly, Tests: []schemas.TestCaseResult{{Name: "suite", Status: "skipped", Message: "command succeeded; per-test evidence unavailable"}}})
+	// A command_only run that exited non-zero is a failed suite, never
+	// command_passed.
+	commandOnlyFailed := testsOutput(schemas.TestRunResults{Command: []string{"pytest"}, ExitCode: 1, Evidence: schemas.TestEvidenceCommandOnly, Tests: []schemas.TestCaseResult{{Name: "suite", Status: "failed", Message: "exit code 1"}}})
 	skipped := schemas.StageRecord{Name: "static_analyzer", Status: schemas.StageSkipped, OutputSummary: Ptr("No applicable files to verify.")}
 	// A report with no applicable checks is never a pass, even when an
 	// optional tool was missing.
 	notApplicable := schemas.HarnessStageOutput{Data: map[string]any{VerificationReportKey: schemas.VerificationReport{Status: schemas.VerificationNotApplicable, Complete: true, Summary: "nothing to verify"}}}
 
+	// A real pytest run: the fixture goes through the test runner stage, so
+	// the parser builds the results that passVerification reads.
+	pytestRun := pytestFixtureTestRun(t)
+	const (
+		verified      = schemas.VerificationOutcomeVerified
+		unverified    = schemas.VerificationOutcomeUnverified
+		commandPassed = schemas.VerificationOutcomeCommandPassed
+	)
 	tests := []struct {
-		name       string
-		records    []schemas.StageRecord
-		outputs    []schemas.HarnessStageOutput
-		wantOK     bool
-		wantReason string
+		name        string
+		records     []schemas.StageRecord
+		outputs     []schemas.HarnessStageOutput
+		wantOutcome string
+		wantReason  string
 	}{
-		{name: "passed report", outputs: []schemas.HarnessStageOutput{passedReport()}, wantOK: true},
-		{name: "not-applicable report never verifies", outputs: []schemas.HarnessStageOutput{notApplicable}, wantReason: "no verification check passed"},
-		{name: "tests ran and passed", outputs: []schemas.HarnessStageOutput{ranTests}, wantOK: true},
-		{name: "tests failed do not verify", outputs: []schemas.HarnessStageOutput{failedTests}, wantReason: "no verification check passed"},
-		{name: "skipped check names the stage", records: []schemas.StageRecord{skipped}, wantReason: "no check applied: static_analyzer (No applicable files to verify.)"},
-		{name: "no tests ran", outputs: []schemas.HarnessStageOutput{noTests}, wantReason: "no check applied: tests (no tests ran)"},
-		{name: "incomplete stage never verifies", records: []schemas.StageRecord{{Name: "static_analyzer", Status: schemas.StageIncomplete}}, outputs: []schemas.HarnessStageOutput{passedReport()}, wantReason: "verification did not finish at stage static_analyzer"},
+		{name: "passed report", outputs: []schemas.HarnessStageOutput{passedReport()}, wantOutcome: verified},
+		{name: "not-applicable report never verifies", outputs: []schemas.HarnessStageOutput{notApplicable}, wantOutcome: unverified, wantReason: "no verification check passed"},
+		{name: "per-test pass verifies", outputs: []schemas.HarnessStageOutput{ranTests}, wantOutcome: verified},
+		{name: "parsed pytest run verifies", outputs: []schemas.HarnessStageOutput{pytestRun}, wantOutcome: verified},
+		{name: "tests failed do not verify", outputs: []schemas.HarnessStageOutput{failedTests}, wantOutcome: unverified, wantReason: "tests failed"},
+		{name: "failed tests beat a passed report", outputs: []schemas.HarnessStageOutput{passedReport(), failedTests}, wantOutcome: unverified, wantReason: "tests failed"},
+		{name: "failed tests beat passed tests in another run", outputs: []schemas.HarnessStageOutput{ranTests, failedTests}, wantOutcome: unverified, wantReason: "tests failed"},
+		{name: "skipped check names the stage", records: []schemas.StageRecord{skipped}, wantOutcome: unverified, wantReason: "no check applied: static_analyzer (No applicable files to verify.)"},
+		{name: "no tests ran", outputs: []schemas.HarnessStageOutput{noTests}, wantOutcome: unverified, wantReason: "no check applied: tests (no tests ran)"},
+		{name: "zero go tests ran", outputs: []schemas.HarnessStageOutput{zeroGoTests}, wantOutcome: unverified, wantReason: "no check applied: tests (no tests ran)"},
+		{name: "command only alone is command_passed", outputs: []schemas.HarnessStageOutput{commandOnly}, wantOutcome: commandPassed, wantReason: "test command passed; per-test evidence unavailable"},
+		{name: "command only with a skipped check keeps the command reason", records: []schemas.StageRecord{skipped}, outputs: []schemas.HarnessStageOutput{commandOnly}, wantOutcome: commandPassed, wantReason: "test command passed; per-test evidence unavailable"},
+		{name: "command only plus passed report verifies", outputs: []schemas.HarnessStageOutput{commandOnly, passedReport()}, wantOutcome: verified},
+		{name: "command only that failed is tests failed", outputs: []schemas.HarnessStageOutput{commandOnlyFailed}, wantOutcome: unverified, wantReason: "tests failed"},
+		{name: "incomplete stage never verifies", records: []schemas.StageRecord{{Name: "static_analyzer", Status: schemas.StageIncomplete}}, outputs: []schemas.HarnessStageOutput{passedReport()}, wantOutcome: unverified, wantReason: "verification did not finish at stage static_analyzer"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ok, reason := passVerification(tt.records, tt.outputs)
-			if ok != tt.wantOK {
-				t.Fatalf("verified = %v, want %v (reason %q)", ok, tt.wantOK, reason)
+			outcome, reason, _ := passVerification(schemas.ExecutionPlan{}, tt.records, tt.outputs)
+			if outcome != tt.wantOutcome {
+				t.Fatalf("outcome = %q, want %q (reason %q)", outcome, tt.wantOutcome, reason)
 			}
 			if tt.wantReason != "" && reason != tt.wantReason {
 				t.Fatalf("reason = %q, want %q", reason, tt.wantReason)
 			}
-			if ok && reason != "" {
+			if outcome == verified && reason != "" {
 				t.Fatalf("verified run has reason %q", reason)
 			}
+			if outcome != verified && reason == "" {
+				t.Fatalf("outcome %q has no reason", outcome)
+			}
 		})
+	}
+}
+
+// TestPassVerificationChecks pins the per-check list of a pass: every check
+// outcome, the kind of each stage, and the consistency rule that a verified
+// pass has a passed check and no failed check. The scanner-only case is
+// VERIFIED, and its tests check says no tests ran.
+func TestPassVerificationChecks(t *testing.T) {
+	plan := schemas.ExecutionPlan{Stages: []schemas.ExecutionStage{
+		{Name: "code_writer", Type: "code_writer"},
+		{Name: "unit_tests", Type: "test_runner"},
+		{Name: "acceptance_verifier", Type: "acceptance_verifier"},
+		{Name: "security_auditor", Type: "security_auditor"},
+		{Name: "static_analyzer", Type: "static_analyzer"},
+		{Name: "lint_gate", Type: schemas.NodeTypePrompt, Caps: &schemas.NodeCapabilities{ProducesVerification: true}},
+	}}
+	completed := func(name string) schemas.StageRecord {
+		return schemas.StageRecord{Name: name, Status: schemas.StageCompleted}
+	}
+	out := func(stage string, data map[string]any) schemas.HarnessStageOutput {
+		return schemas.HarnessStageOutput{Stage: stage, Data: data}
+	}
+	tests := func(results schemas.TestRunResults) schemas.HarnessStageOutput {
+		return out("unit_tests", map[string]any{"test_results": results})
+	}
+	passedTests := tests(schemas.TestRunResults{Command: []string{"go", "test"}, Evidence: schemas.TestEvidencePerTest, Tests: []schemas.TestCaseResult{{Name: "a.TestA", Status: "passed"}, {Name: "a.TestB", Status: "passed"}}})
+	failedTests := tests(schemas.TestRunResults{Command: []string{"go", "test"}, ExitCode: 1, Evidence: schemas.TestEvidencePerTest, Tests: []schemas.TestCaseResult{{Name: "a.TestA", Status: "passed"}, {Name: "a.TestB", Status: "failed"}}})
+	noTests := tests(schemas.TestRunResults{Command: []string{"go", "test"}, Evidence: schemas.TestEvidenceNone, Tests: []schemas.TestCaseResult{{Name: "suite", Status: "skipped"}}})
+	commandOnly := tests(schemas.TestRunResults{Command: []string{"make", "test"}, Evidence: schemas.TestEvidenceCommandOnly, Tests: []schemas.TestCaseResult{{Name: "suite", Status: "skipped"}}})
+	report := func(status schemas.VerificationStatus, tools []schemas.VerificationToolRun, findings int) schemas.VerificationReport {
+		r := schemas.VerificationReport{Status: status, Complete: status != schemas.VerificationIncomplete, Summary: "report", Tools: tools}
+		for i := 0; i < findings; i++ {
+			r.Findings = append(r.Findings, schemas.VerificationFinding{Tool: "bandit", Message: fmt.Sprintf("finding %d", i)})
+		}
+		return r
+	}
+	bandit := schemas.VerificationToolRun{Tool: "bandit", Required: true, Scope: "python", Status: schemas.VerificationPassed, Summary: "ok"}
+	gosec := schemas.VerificationToolRun{Tool: "gosec", Required: true, Scope: "go", Status: schemas.VerificationPassed, Summary: "ok"}
+	security := func(r schemas.VerificationReport) schemas.HarnessStageOutput {
+		return out("security_auditor", map[string]any{"security_auditor_output": r, VerificationReportKey: r})
+	}
+	static := func(r schemas.VerificationReport) schemas.HarnessStageOutput {
+		return out("static_analyzer", map[string]any{"static_analyzer_output": r, VerificationReportKey: r})
+	}
+	acceptance := out("acceptance_verifier", map[string]any{"acceptance_results": []schemas.TestCaseResult{{Name: "fact", Status: "passed"}, {Name: "manual", Status: "skipped"}}})
+	custom := out("lint_gate", map[string]any{VerificationReportKey: report(schemas.VerificationPassed, []schemas.VerificationToolRun{{Tool: "custom-lint", Scope: "repo", Status: schemas.VerificationPassed, Summary: "ok"}}, 0)})
+	findings := report(schemas.VerificationFindings, []schemas.VerificationToolRun{bandit}, 2)
+	findings.Tools[0].Status = schemas.VerificationFindings
+	incomplete := report(schemas.VerificationIncomplete, []schemas.VerificationToolRun{{Tool: "gosec", Required: true, Scope: "go", Status: schemas.VerificationIncomplete, Summary: "missing"}}, 0)
+	notApplicable := report(schemas.VerificationNotApplicable, nil, 0)
+
+	type want struct {
+		name    string
+		kind    schemas.VerificationCheckKind
+		outcome schemas.VerificationCheckOutcome
+		detail  string
+	}
+	cases := []struct {
+		name        string
+		records     []schemas.StageRecord
+		outputs     []schemas.HarnessStageOutput
+		wantOutcome string
+		want        []want
+	}{
+		{
+			name:        "tests and scanner verified",
+			records:     []schemas.StageRecord{completed("code_writer"), completed("unit_tests"), completed("security_auditor")},
+			outputs:     []schemas.HarnessStageOutput{out("code_writer", map[string]any{}), passedTests, security(report(schemas.VerificationPassed, []schemas.VerificationToolRun{bandit, gosec}, 0))},
+			wantOutcome: schemas.VerificationOutcomeVerified,
+			want: []want{
+				{"unit_tests", schemas.CheckKindTests, schemas.CheckPassed, "2 passed, 0 failed, per-test evidence"},
+				{"security_auditor", schemas.CheckKindSecurityScan, schemas.CheckPassed, "bandit, gosec"},
+			},
+		},
+		{
+			name:        "scanner only is verified and says no tests ran",
+			records:     []schemas.StageRecord{completed("unit_tests"), completed("security_auditor")},
+			outputs:     []schemas.HarnessStageOutput{noTests, security(report(schemas.VerificationPassed, []schemas.VerificationToolRun{bandit}, 0))},
+			wantOutcome: schemas.VerificationOutcomeVerified,
+			want: []want{
+				{"unit_tests", schemas.CheckKindTests, schemas.CheckNoTests, "no tests ran"},
+				{"security_auditor", schemas.CheckKindSecurityScan, schemas.CheckPassed, "bandit"},
+			},
+		},
+		{
+			name:        "failed tests with a passed scanner",
+			records:     []schemas.StageRecord{completed("unit_tests"), completed("security_auditor")},
+			outputs:     []schemas.HarnessStageOutput{failedTests, security(report(schemas.VerificationPassed, []schemas.VerificationToolRun{bandit}, 0))},
+			wantOutcome: schemas.VerificationOutcomeUnverified,
+			want: []want{
+				{"unit_tests", schemas.CheckKindTests, schemas.CheckFailed, "1 passed, 1 failed, per-test evidence"},
+				{"security_auditor", schemas.CheckKindSecurityScan, schemas.CheckPassed, "bandit"},
+			},
+		},
+		{
+			name:        "command passed",
+			records:     []schemas.StageRecord{completed("unit_tests")},
+			outputs:     []schemas.HarnessStageOutput{commandOnly},
+			wantOutcome: schemas.VerificationOutcomeCommandPassed,
+			want:        []want{{"unit_tests", schemas.CheckKindTests, schemas.CheckCommandPassed, "exit code 0, per-test evidence unavailable"}},
+		},
+		{
+			name:        "findings, not applicable, acceptance, custom",
+			records:     []schemas.StageRecord{completed("acceptance_verifier"), completed("security_auditor"), {Name: "static_analyzer", Status: schemas.StageSkipped, OutputSummary: Ptr("No applicable files to verify.")}, completed("lint_gate")},
+			outputs:     []schemas.HarnessStageOutput{acceptance, security(findings), static(notApplicable), custom},
+			wantOutcome: schemas.VerificationOutcomeVerified,
+			want: []want{
+				{"acceptance_verifier", schemas.CheckKindAcceptance, schemas.CheckPassed, "1 passed, 0 failed, 1 skipped"},
+				{"security_auditor", schemas.CheckKindSecurityScan, schemas.CheckFindings, "bandit; 2 findings"},
+				{"static_analyzer", schemas.CheckKindStaticAnalysis, schemas.CheckNotApplicable, "No applicable files to verify."},
+				{"lint_gate", schemas.CheckKindCustom, schemas.CheckPassed, "custom-lint"},
+			},
+		},
+		{
+			name:        "skipped stage with no output and an incomplete report",
+			records:     []schemas.StageRecord{{Name: "unit_tests", Status: schemas.StageSkipped, OutputSummary: Ptr("Stage skipped: no configured agent for unit_tests")}, {Name: "security_auditor", Status: schemas.StageIncomplete}, {Name: "code_writer", Status: schemas.StageSkipped}},
+			outputs:     []schemas.HarnessStageOutput{security(incomplete)},
+			wantOutcome: schemas.VerificationOutcomeUnverified,
+			want: []want{
+				{"unit_tests", schemas.CheckKindTests, schemas.CheckSkipped, "Stage skipped: no configured agent for unit_tests"},
+				{"security_auditor", schemas.CheckKindSecurityScan, schemas.CheckIncomplete, "did not run: gosec"},
+			},
+		},
+		{
+			name:        "failed verification stage",
+			records:     []schemas.StageRecord{{Name: "lint_gate", Status: schemas.StageFailed, OutputSummary: Ptr("lint gate crashed")}},
+			wantOutcome: schemas.VerificationOutcomeUnverified,
+			want:        []want{{"lint_gate", schemas.CheckKindCustom, schemas.CheckFailed, "lint gate crashed"}},
+		},
+		{
+			name:        "output without a stage is named by its kind",
+			outputs:     []schemas.HarnessStageOutput{{Data: map[string]any{"test_results": passedTests.Data["test_results"]}}},
+			wantOutcome: schemas.VerificationOutcomeVerified,
+			want:        []want{{"tests", schemas.CheckKindTests, schemas.CheckPassed, "2 passed, 0 failed, per-test evidence"}},
+		},
+	}
+	seen := map[schemas.VerificationCheckOutcome]bool{}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			outcome, _, checks := passVerification(plan, tc.records, tc.outputs)
+			if outcome != tc.wantOutcome {
+				t.Fatalf("outcome = %q, want %q", outcome, tc.wantOutcome)
+			}
+			if len(checks) != len(tc.want) {
+				t.Fatalf("checks = %+v, want %d checks", checks, len(tc.want))
+			}
+			for i, w := range tc.want {
+				got := checks[i]
+				if got.Name != w.name || got.Kind != w.kind || got.Outcome != w.outcome || got.Detail != w.detail {
+					t.Errorf("checks[%d] = %+v, want %+v", i, got, w)
+				}
+				seen[got.Outcome] = true
+			}
+			if err := schemas.ValidateVerificationChecks(checks, outcome == schemas.VerificationOutcomeVerified); err != nil {
+				t.Fatalf("checks break the consistency rule: %v", err)
+			}
+		})
+	}
+	for _, outcome := range []schemas.VerificationCheckOutcome{schemas.CheckPassed, schemas.CheckFailed, schemas.CheckFindings, schemas.CheckSkipped, schemas.CheckIncomplete, schemas.CheckCommandPassed, schemas.CheckNoTests, schemas.CheckNotApplicable} {
+		if !seen[outcome] {
+			t.Errorf("no case covers check outcome %q", outcome)
+		}
 	}
 }
 
@@ -4172,6 +4396,78 @@ func TestPipelineBeforeToolHookFires(t *testing.T) {
 	}
 	if !started {
 		t.Fatalf("beforeTool hook did not fire; audit=%+v", events)
+	}
+}
+
+// TestPipelineHooksRunUnderStageSandbox checks the pipeline wiring:
+// buildStageToolRunner binds the hook dispatcher to the stage engine. A user
+// hook that writes outside the workspace is denied with a loud block naming
+// the hook and runOnHost; a runOnHost user hook and a formatter hook that
+// writes inside the workspace still work.
+func TestPipelineHooksRunUnderStageSandbox(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses /bin/sh")
+	}
+	if backend := sandbox.SelectBackend(sandbox.BackendOptions{}); !backend.Available {
+		t.Skipf("host native sandbox backend unavailable: %s", backend.Message)
+	}
+	workDir, registry := newRunTestWorkspace(t)
+	workDir, err := filepath.EvalSymlinks(workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(workDir, "a.go")
+	if err := os.WriteFile(source, []byte("package x\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("user home unavailable: %v", err)
+	}
+	outsideDir, err := os.MkdirTemp(home, ".splice-pipeline-hook-test-")
+	if err != nil {
+		t.Skipf("home dir not writable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(outsideDir) })
+	writer := func(id string, target string, runOnHost bool) hooks.Definition {
+		return hooks.Definition{ID: id, Event: hooks.EventBeforeTool, Matcher: "read_file", Command: "/bin/sh", Args: []string{"-c", `echo pwned > "$1"`, "hook", target}, Enabled: true, RunOnHost: runOnHost}
+	}
+	run := func(hook hooks.Definition) ToolResult {
+		dispatcher := hooks.NewDispatcher(hooks.DispatcherOptions{
+			Config: hooks.Config{Enabled: true, Hooks: []hooks.Definition{hook}},
+			Cwd:    t.TempDir(),
+		})
+		_, runner := buildStageToolRunner(PipelineConfigFromAgentOptions(agent.Options{Cwd: workDir, Registry: registry, Hooks: dispatcher}), workDir)
+		res, err := runner.RunTool(context.Background(), "read_file", map[string]any{"path": source})
+		if err != nil {
+			t.Fatalf("RunTool: %v", err)
+		}
+		return res
+	}
+
+	denied := filepath.Join(outsideDir, "denied.txt")
+	res := run(writer("user-notify", denied, false))
+	if res.OK || !strings.Contains(res.Output, "user-notify") || !strings.Contains(res.Output, "runOnHost") {
+		t.Fatalf("result = %+v, want a loud block naming the hook and runOnHost", res)
+	}
+	if _, err := os.Stat(denied); !os.IsNotExist(err) {
+		t.Fatalf("hook wrote outside the workspace in a pipeline run (stat err=%v)", err)
+	}
+
+	allowed := filepath.Join(outsideDir, "allowed.txt")
+	if res := run(writer("user-trusted", allowed, true)); !res.OK {
+		t.Fatalf("runOnHost hook result = %+v, want the tool to run", res)
+	}
+	if _, err := os.Stat(allowed); err != nil {
+		t.Fatalf("runOnHost hook did not write on the host: %v", err)
+	}
+
+	formatter := hooks.Definition{ID: "fmt", Event: hooks.EventAfterTool, Command: "/bin/sh", Args: []string{"-c", "echo ok > formatted.txt"}, Enabled: true}
+	if res := run(formatter); !res.OK {
+		t.Fatalf("formatter result = %+v", res)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, "formatted.txt")); err != nil {
+		t.Fatalf("formatter hook did not write inside the workspace: %v", err)
 	}
 }
 

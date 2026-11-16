@@ -68,17 +68,44 @@ func (s *StaticAnalyzer) Run(ctx context.Context, input schemas.HarnessStageInpu
 	workDir := options.WorkDir
 	language := options.language("python")
 
-	scoped, err := gitScopedFiles(ctx, workDir, language, options)
+	scoped, changedFound, err := gitScopedFiles(ctx, workDir, language, options)
 	if err != nil {
 		scoped = nil
+		changedFound = false
 	}
 	var paths []string
 	scopedToChanges := false
-	if len(scoped) > 0 {
+	truncated := false
+	switch {
+	case len(scoped) > 0:
 		paths = scoped
 		scopedToChanges = true
-	} else {
-		paths = workspaceFiles(workDir, language, defaultStaticMaxFiles)
+	case changedFound:
+		// Changes exist, but none is in the analyzed language. Analyze
+		// nothing: never walk unrelated files.
+		scopedToChanges = true
+	default:
+		paths, truncated = workspaceFiles(workDir, language, defaultStaticMaxFiles)
+	}
+	if scopedToChanges && len(paths) == 0 {
+		summary := fmt.Sprintf("no changed %s files to analyze", language)
+		return schemas.HarnessStageOutput{
+			Summary:    summary,
+			Detail:     summary,
+			Confidence: 1.0,
+			Data: map[string]any{
+				"static_analyzer_output": schemas.VerificationReport{
+					Status:   schemas.VerificationNotApplicable,
+					Complete: true,
+					Summary:  summary,
+					Tools:    []schemas.VerificationToolRun{},
+					Findings: []schemas.VerificationFinding{},
+				},
+				"analyzed_paths":    []string{},
+				"scoped_to_changes": true,
+				"truncated":         false,
+			},
+		}, nil
 	}
 
 	options.report(fmt.Sprintf("inspecting %d file(s)", len(paths)))
@@ -105,6 +132,9 @@ func (s *StaticAnalyzer) Run(ctx context.Context, input schemas.HarnessStageInpu
 		results = append(results, result)
 	}
 
+	if truncated {
+		results = append([]VerificationCheckResult{{ToolRun: truncatedCoverageRun("quality", len(paths), defaultStaticMaxFiles)}}, results...)
+	}
 	report := aggregateVerificationResults(results)
 
 	relPaths := make([]string, len(paths))
@@ -120,6 +150,7 @@ func (s *StaticAnalyzer) Run(ctx context.Context, input schemas.HarnessStageInpu
 		"static_analyzer_output": report,
 		"analyzed_paths":         relPaths,
 		"scoped_to_changes":      scopedToChanges,
+		"truncated":              truncated,
 	}
 	return schemas.HarnessStageOutput{
 		Summary:    report.Summary,
@@ -129,10 +160,12 @@ func (s *StaticAnalyzer) Run(ctx context.Context, input schemas.HarnessStageInpu
 	}, nil
 }
 
-func workspaceFiles(workspace, language string, maxFiles int) []string {
+// workspaceFiles returns up to maxFiles eligible files under workspace.
+// truncated is true when at least one more eligible file exists beyond the cap.
+func workspaceFiles(workspace, language string, maxFiles int) (files []string, truncated bool) {
 	extensions := languageExtensions[language]
 	if extensions == nil {
-		return nil
+		return nil, false
 	}
 	var candidates []string
 	_ = filepath.WalkDir(workspace, func(path string, d os.DirEntry, err error) error {
@@ -158,61 +191,43 @@ func workspaceFiles(workspace, language string, maxFiles int) []string {
 				break
 			}
 		}
-		if len(candidates) >= maxFiles {
+		if len(candidates) > maxFiles {
 			return filepath.SkipAll
 		}
 		return nil
 	})
-	return candidates
+	if len(candidates) > maxFiles {
+		return candidates[:maxFiles], true
+	}
+	return candidates, false
 }
 
-func gitScopedFiles(ctx context.Context, workspace, language string, options StageOptions) ([]string, error) {
+// gitScopedFiles returns the changed or untracked files in the analyzed
+// language that exist on disk. changed reports whether git found any changed or
+// untracked file at all, whatever its language. A failed discovery returns an
+// error and no list.
+func gitScopedFiles(ctx context.Context, workspace, language string, options StageOptions) (paths []string, changed bool, err error) {
 	if workspace == "" {
-		return nil, fmt.Errorf("no workspace")
+		return nil, false, fmt.Errorf("no workspace")
 	}
 	extensions := languageExtensions[language]
 	if extensions == nil {
-		return nil, fmt.Errorf("no workspace")
+		return nil, false, fmt.Errorf("no workspace")
 	}
-	command := []string{"git", "diff", "--name-only", "HEAD"}
-	out, err := runRecordedOutput(ctx, options, "splice.shell", map[string]any{
-		"command": command,
-		"cwd":     workspace,
-		"purpose": "changed file discovery",
-	}, workspace, command)
+	lines, err := gitChangedFileLines(ctx, workspace, "changed file discovery", options)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	var paths []string
-	seen := make(map[string]struct{})
-	appendPaths := func(output []byte) {
-		for _, line := range strings.Split(string(output), "\n") {
-			line = strings.TrimSpace(line)
-			for _, ext := range extensions {
-				if strings.HasSuffix(line, ext) {
-					p := filepath.Join(workspace, line)
-					if _, err := os.Stat(p); err == nil {
-						if _, ok := seen[p]; !ok {
-							seen[p] = struct{}{}
-							paths = append(paths, p)
-						}
-					}
-					break
+	for _, line := range lines {
+		for _, ext := range extensions {
+			if strings.HasSuffix(line, ext) {
+				p := filepath.Join(workspace, line)
+				if _, err := os.Stat(p); err == nil {
+					paths = append(paths, p)
 				}
+				break
 			}
 		}
 	}
-	appendPaths(out)
-
-	untrackedCommand := []string{"git", "ls-files", "--others", "--exclude-standard"}
-	untrackedOut, untrackedErr := runRecordedOutput(ctx, options, "splice.shell", map[string]any{
-		"command": untrackedCommand,
-		"cwd":     workspace,
-		"purpose": "untracked file discovery",
-	}, workspace, untrackedCommand)
-	if untrackedErr == nil {
-		appendPaths(untrackedOut)
-	}
-
-	return paths, nil
+	return paths, len(lines) > 0, nil
 }

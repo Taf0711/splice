@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/Taf0711/splice/internal/secrets"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
@@ -89,7 +90,10 @@ func (s CommandStage) Run(ctx context.Context, input schemas.HarnessStageInput, 
 		timeout = DefaultTimeoutSeconds
 	}
 	command := CommandLine(s.Command)
-	options.report("running " + command)
+	// The summary and the errors go into the run record, so a secret in the
+	// command line is redacted there. The command itself runs unchanged.
+	label, _ := secrets.Redact(command)
+	options.report("running " + label)
 	args := map[string]any{
 		"command":    command,
 		"cwd":        options.WorkDir,
@@ -119,12 +123,12 @@ func (s CommandStage) Run(ctx context.Context, input schemas.HarnessStageInput, 
 		// orchestrator's failed-stage path, so the run never verifies on it.
 		lower := strings.ToLower(result.Output)
 		if strings.Contains(lower, "permission required") || strings.Contains(lower, "permission denied") {
-			return schemas.HarnessStageOutput{}, fmt.Errorf("command node %s: command %q denied by permission policy: %s", s.Name, command, output)
+			return schemas.HarnessStageOutput{}, fmt.Errorf("command node %s: command %q denied by permission policy: %s", s.Name, label, output)
 		}
-		return schemas.HarnessStageOutput{}, fmt.Errorf("command node %s: command %q failed: %s", s.Name, command, output)
+		return schemas.HarnessStageOutput{}, fmt.Errorf("command node %s: command %q failed: %s", s.Name, label, output)
 	}
 	return schemas.HarnessStageOutput{
-		Summary:    fmt.Sprintf("command %q succeeded", command),
+		Summary:    fmt.Sprintf("command %q succeeded", label),
 		Detail:     output,
 		Confidence: 1.0,
 		Data: map[string]any{

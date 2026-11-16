@@ -1565,6 +1565,69 @@ func TestAgentNodeRefusesWithoutEnforcingSandbox(t *testing.T) {
 	}
 }
 
+// TestAgentNodeRefusesUnderSandboxMarkers: with the inherited sandbox markers
+// set, an agent node and a run with an agent node refuse before the first
+// provider request, and the error names the cause and the user setting. The
+// user acceptance lets the node start; it does not help when the backend is
+// unavailable.
+func TestAgentNodeRefusesUnderSandboxMarkers(t *testing.T) {
+	t.Setenv(sandbox.EnvSandboxed, "1")
+	t.Setenv(sandbox.EnvSandboxBackend, "outer-sandbox")
+	native := func(root string) *sandbox.Engine {
+		return sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: root, Policy: sandbox.DefaultPolicy(), Backend: fakeNativeBackend()})
+	}
+	unavailable := sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: ".", Policy: sandbox.DefaultPolicy(), Backend: sandbox.Backend{Name: sandbox.BackendUnavailable}})
+	nodeRun := func(engine *sandbox.Engine, accept bool) (error, int) {
+		provider := &scriptedAgentProvider{turns: [][]zeroruntime.StreamEvent{textTurn("done", 5)}}
+		var runs atomic.Int32
+		opts := PipelineRunConfig{
+			Registry:            newAgentTestRegistry(&runs, fakeAgentTool{name: "read_file", permission: tools.PermissionAllow, side: tools.SideEffectRead, runs: &runs}),
+			PermissionMode:      agent.PermissionModeAuto,
+			TrustedWorkspace:    true,
+			Sandbox:             engine,
+			AcceptNestedSandbox: accept,
+		}
+		run := agentNodeRun{stage: "investigate", iteration: 1, selection: agent.ModelSelection{Provider: provider, Model: "test-model"}, options: opts, workDir: t.TempDir()}
+		_, err := run.run(context.Background(), stages.AgentNodeRequest{Name: "investigate", Prompt: "look", Tools: []string{"read_file"}, MaxTurns: 4})
+		return err, provider.requests
+	}
+
+	err, requests := nodeRun(native("."), false)
+	if err == nil || !strings.Contains(err.Error(), sandbox.NestedSandboxGap) || !strings.Contains(err.Error(), "sandbox.acceptNestedSandbox") || requests != 0 {
+		t.Fatalf("markers, not accepted: run() = %v with %d request(s), want a refusal naming the cause and the setting before any request", err, requests)
+	}
+	if err, requests = nodeRun(native("."), true); err != nil || requests == 0 {
+		t.Fatalf("markers, accepted: run() = %v with %d request(s), want the node to start", err, requests)
+	}
+	if err, requests = nodeRun(unavailable, true); err == nil || !strings.Contains(err.Error(), "no native sandbox backend") || requests != 0 {
+		t.Fatalf("no backend, accepted: run() = %v with %d request(s), want the backend refusal", err, requests)
+	}
+
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	workDir, registry := newRunTestWorkspace(t)
+	data, err := json.Marshal(agentTopologyForWiring())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pipeline := filepath.Join(t.TempDir(), "pipeline.json")
+	if err := os.WriteFile(pipeline, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	provider := &scriptedAgentProvider{}
+	_, err = Run(context.Background(), "find the handler", provider, agent.Options{
+		Cwd:              workDir,
+		Registry:         registry,
+		PermissionMode:   agent.PermissionModeAuto,
+		FileTracker:      tools.NewFileTracker(),
+		TrustedWorkspace: true,
+		Pipeline:         pipeline,
+		Sandbox:          native(workDir),
+	}, nil, nil)
+	if err == nil || !strings.HasPrefix(err.Error(), "agent node investigate: agent nodes need an enforcing sandbox; "+sandbox.NestedSandboxGap) || provider.requests != 0 {
+		t.Fatalf("Run() = %v with %d request(s), want the run refused at start with the nested-sandbox cause", err, provider.requests)
+	}
+}
+
 // TestRunRefusesAgentTopologyWithoutEnforcingSandbox pins the run-start
 // check: a topology with an agent node and a sandbox that does not enforce
 // stops the run before the first provider request, with the node error named.

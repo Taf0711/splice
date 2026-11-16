@@ -1005,3 +1005,85 @@ func TestRunExecTextOnlyRepoCompletesNotVerified(t *testing.T) {
 		t.Fatalf("final JSON verified = %v (present %v), want an explicit false", fields["verified"], ok)
 	}
 }
+
+// TestRunExecSummaryNamesVerificationChecks pins the headless per-check
+// lines. The text summary of a verified run names what verified it and says
+// when no tests ran. The stream-json final event carries the same checks in
+// verification_checks. A run that is not verified lists each check.
+func TestRunExecSummaryNamesVerificationChecks(t *testing.T) {
+	run := func(t *testing.T, format string, options execStageProviderOptions) (int, string) {
+		t.Helper()
+		t.Setenv("XDG_DATA_HOME", t.TempDir())
+		cwd := t.TempDir()
+		var stdout, stderr bytes.Buffer
+		args := []string{"exec", "write hello"}
+		if format != "" {
+			args = []string{"exec", "--output-format", format, "write hello"}
+		}
+		code := runWithDeps(args, &stdout, &stderr, appDeps{
+			getwd:         func() (string, error) { return cwd, nil },
+			resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) { return execResolvedConfig(), nil },
+			newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+				return newExecStageAwareProvider(options), nil
+			},
+		})
+		return code, stdout.String()
+	}
+
+	t.Run("verified text summary", func(t *testing.T) {
+		code, stdout := run(t, "", execStageProviderOptions{})
+		if code != exitSuccess {
+			t.Fatalf("exit = %d, want %d; stdout=%s", code, exitSuccess, stdout)
+		}
+		// The default fixture writes Go code and no test: the go syntax check
+		// verifies the run, and the summary must say that no tests ran.
+		for _, want := range []string{"Pipeline completed after", "\nVerified by: static analysis (go_syntax)\n", "\nTests: no tests ran.\n"} {
+			if !strings.Contains(stdout, want) {
+				t.Fatalf("summary lacks %q:\n%s", want, stdout)
+			}
+		}
+	})
+
+	t.Run("verified final event", func(t *testing.T) {
+		code, stdout := run(t, "stream-json", execStageProviderOptions{})
+		if code != exitSuccess {
+			t.Fatalf("exit = %d, want %d", code, exitSuccess)
+		}
+		final := findJSONEvent(t, decodeJSONLines(t, stdout), "final")
+		var result schemas.PipelineResult
+		if err := json.Unmarshal([]byte(final["text"].(string)), &result); err != nil {
+			t.Fatalf("decode final result: %v", err)
+		}
+		if !result.Verified || len(result.VerificationChecks) == 0 {
+			t.Fatalf("final result verified=%v checks=%+v, want a verified result with checks", result.Verified, result.VerificationChecks)
+		}
+		var passed bool
+		for _, check := range result.VerificationChecks {
+			if check.Kind == schemas.CheckKindTests && check.Outcome != schemas.CheckNoTests {
+				t.Fatalf("tests check = %+v, want no_tests", check)
+			}
+			passed = passed || (check.Kind == schemas.CheckKindStaticAnalysis && check.Outcome == schemas.CheckPassed)
+		}
+		if !passed {
+			t.Fatalf("checks = %+v, want a passed static analysis check", result.VerificationChecks)
+		}
+	})
+
+	t.Run("not verified text summary", func(t *testing.T) {
+		code, stdout := run(t, "", execStageProviderOptions{
+			Files:     []schemas.FileChange{{Path: "hello.txt", Content: "hi\n", ChangeType: "create"}},
+			TestFiles: []schemas.FileChange{{Path: "hello-check.txt", Content: "ok\n", ChangeType: "create"}},
+		})
+		if code != exitSuccess {
+			t.Fatalf("exit = %d, want %d; stdout=%s", code, exitSuccess, stdout)
+		}
+		for _, want := range []string{"Not verified: ", "\nstatic analysis: not applicable"} {
+			if !strings.Contains(stdout, want) {
+				t.Fatalf("summary lacks %q:\n%s", want, stdout)
+			}
+		}
+		if strings.Contains(stdout, "Verified by") {
+			t.Fatalf("an unverified summary names a verifier:\n%s", stdout)
+		}
+	})
+}

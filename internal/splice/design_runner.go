@@ -94,6 +94,7 @@ func RunDesignPlan(ctx context.Context, plan schemas.DesignPlan, provider agent.
 // RunDesignPlanWithResume executes a design plan with resume support, per-task
 // callbacks, acceptance fact propagation, and a unique plan revision ID.
 func RunDesignPlanWithResume(ctx context.Context, plan schemas.DesignPlan, provider agent.Provider, options agent.Options, mem MemoryStore, rec WorkspaceRecovery, runOpts RunDesignPlanOptions) (agent.Result, error) {
+	ctx = withUserSandbox(ctx, options.Sandbox)
 	return bracketRun(options, func() (agent.Result, error) {
 		return runDesignPlanWithResume(ctx, plan, provider, options, mem, rec, runOpts)
 	})

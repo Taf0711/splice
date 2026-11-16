@@ -219,6 +219,11 @@ func classifyComplexityWithDecisions(ctx context.Context, evaluator zeroruntime.
 		return fallback("the tier answer carries no probabilities")
 	}
 	out := ClassifyRequestTyped(request)
+	if tier == schemas.TierTrivial && hasAuthOrSecurityRisk(out.DetectedRiskDomains) {
+		// Trivial skips every verification stage, so the keyword floor holds here too.
+		out.Rationale = fmt.Sprintf("risk floor: auth or security request cannot be trivial (model chose %s; keyword tier %s)", answer.Choice, out.Tier)
+		return out
+	}
 	out.Tier = tier
 	out.Confidence = answer.Confidence
 	out.Rationale = fmt.Sprintf("tier_v1: model chose %s; policy routed %s at under-tier risk %.2f", answer.Choice, tier, underTierRisk)

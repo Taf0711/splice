@@ -35,6 +35,9 @@ const (
 	DiagnosticJSON      DiagnosticKind = "json"
 	DiagnosticSchema    DiagnosticKind = "schema"
 	DiagnosticDuplicate DiagnosticKind = "duplicate"
+	// DiagnosticIgnored marks a setting that the layer is not permitted to
+	// set, such as runOnHost in the project hooks.json.
+	DiagnosticIgnored DiagnosticKind = "ignored"
 )
 
 const (
@@ -62,6 +65,20 @@ type Definition struct {
 	Command     string   `json:"command"`
 	Args        []string `json:"args"`
 	Enabled     bool     `json:"enabled"`
+	// RunOnHost marks a user hook as host-trusted: it runs on the host also
+	// during a pipeline run. Only the user hooks.json can set it; the project
+	// layer value is ignored with a diagnostic. For a plugin hook, plugin
+	// activation sets it from the user config (plugins.<id>.hostExecution).
+	RunOnHost bool `json:"runOnHost,omitempty"`
+	// PluginID is the plugin that contributed this hook, or empty for a
+	// hooks.json hook. Plugin activation sets it; JSON can never set it, so
+	// the dispatcher can tell third-party hooks from user hooks.
+	PluginID string `json:"-"`
+	// PluginDir is the install directory of the plugin that contributed this
+	// hook. Plugin activation sets it; JSON can never set it. A sandboxed
+	// plugin hook may read this directory only, and gets it as
+	// AGENT_PLUGIN_ROOT.
+	PluginDir string `json:"-"`
 }
 
 type Config struct {
@@ -138,6 +155,11 @@ type AuditEvent struct {
 	Status     AuditStatus    `json:"status,omitempty"`
 	Results    []AuditResult  `json:"results,omitempty"`
 	DurationMs int            `json:"durationMs,omitempty"`
+	// Execution records where the hook command ran: "sandboxed", "host", or
+	// "refused" when the sandbox was required but not available.
+	Execution string `json:"execution,omitempty"`
+	// PluginID names the plugin that contributed the hook, if any.
+	PluginID string `json:"pluginId,omitempty"`
 }
 
 type AppendStartedInput struct {
@@ -146,6 +168,8 @@ type AppendStartedInput struct {
 	Matcher    string
 	ToolCallID string
 	Commands   []AuditCommand
+	Execution  string
+	PluginID   string
 }
 
 type AppendCompletedInput struct {
@@ -156,6 +180,8 @@ type AppendCompletedInput struct {
 	Status     AuditStatus
 	Results    []AuditResult
 	DurationMs int
+	Execution  string
+	PluginID   string
 }
 
 type AuditStoreOptions struct {
@@ -447,6 +473,9 @@ func FormatList(config Config, diagnostics []Diagnostic) string {
 			if hook.Enabled {
 				hookState = "enabled"
 			}
+			if hook.RunOnHost {
+				hookState += ", runOnHost"
+			}
 			lines = append(lines, fmt.Sprintf("  %s [%s%s] %s - %s", hook.ID, hook.Event, matcher, hookState, command))
 		}
 	}
@@ -493,6 +522,8 @@ func (store *AuditStore) AppendStarted(input AppendStartedInput) (AuditEvent, er
 		Matcher:    input.Matcher,
 		ToolCallID: input.ToolCallID,
 		Commands:   input.Commands,
+		Execution:  input.Execution,
+		PluginID:   input.PluginID,
 	})
 }
 
@@ -506,6 +537,8 @@ func (store *AuditStore) AppendCompleted(input AppendCompletedInput) (AuditEvent
 		Status:     input.Status,
 		Results:    input.Results,
 		DurationMs: input.DurationMs,
+		Execution:  input.Execution,
+		PluginID:   input.PluginID,
 	})
 }
 
@@ -708,6 +741,18 @@ func mergeLayers(layers []hookLayer, diagnostics *[]Diagnostic) Config {
 			enabled = layer.config.Enabled
 		}
 		for _, hook := range layer.config.Hooks {
+			if hook.RunOnHost && layer.source != SourceUser {
+				// Host trust is the operator's decision. A cloned repo's
+				// hooks.json must not move its own hook out of the sandbox.
+				hook.RunOnHost = false
+				*diagnostics = append(*diagnostics, Diagnostic{
+					Kind:    DiagnosticIgnored,
+					Source:  layer.source,
+					Path:    layer.path,
+					HookID:  hook.ID,
+					Message: fmt.Sprintf("Hook %q: runOnHost is ignored in the %s hooks.json. Set it in the user hooks.json.", hook.ID, layer.source),
+				})
+			}
 			if previous, ok := sourceByID[hook.ID]; ok {
 				*diagnostics = append(*diagnostics, Diagnostic{
 					Kind:    DiagnosticDuplicate,
@@ -835,7 +880,15 @@ func normalizeDefinition(raw any, field string) (Definition, error) {
 		}
 		enabled = parsed
 	}
-	return Definition{ID: id, Name: name, Description: description, Event: event, Matcher: matcher, Command: command, Args: args, Enabled: enabled}, nil
+	runOnHost := false
+	if rawRunOnHost, ok := obj["runOnHost"]; ok {
+		parsed, ok := rawRunOnHost.(bool)
+		if !ok {
+			return Definition{}, manifestError{fieldPath: field + ".runOnHost", message: "Expected a boolean."}
+		}
+		runOnHost = parsed
+	}
+	return Definition{ID: id, Name: name, Description: description, Event: event, Matcher: matcher, Command: command, Args: args, Enabled: enabled, RunOnHost: runOnHost}, nil
 }
 
 func matchesHookMatcher(matcher string, toolName string) bool {
@@ -1011,6 +1064,9 @@ func definitionToRaw(definition Definition) map[string]any {
 	}
 	if definition.Matcher != "" {
 		value["matcher"] = definition.Matcher
+	}
+	if definition.RunOnHost {
+		value["runOnHost"] = true
 	}
 	return value
 }

@@ -930,7 +930,7 @@
         "dependencies": [
           "static_analyzer"
         ],
-        "summary": "Test command passed.",
+        "summary": "Test command passed. No tests ran.",
         "route": {
           "input_budget": 0,
           "output_budget": 0
@@ -1055,7 +1055,7 @@
         "dependencies": [
           "static_analyzer"
         ],
-        "summary": "Test command passed.",
+        "summary": "Test command passed. No tests ran.",
         "route": {
           "input_budget": 0,
           "output_budget": 0
@@ -1203,7 +1203,7 @@
         "dependencies": [
           "static_analyzer"
         ],
-        "summary": "Test command passed.",
+        "summary": "Test command passed. No tests ran.",
         "route": {
           "input_budget": 0,
           "output_budget": 0
@@ -1355,7 +1355,7 @@
         "dependencies": [
           "static_analyzer"
         ],
-        "summary": "Test command passed.",
+        "summary": "Test command passed. No tests ran.",
         "route": {
           "input_budget": 0,
           "output_budget": 0
@@ -1508,7 +1508,7 @@
         "dependencies": [
           "static_analyzer"
         ],
-        "summary": "Test command passed.",
+        "summary": "Test command passed. No tests ran.",
         "route": {
           "input_budget": 0,
           "output_budget": 0

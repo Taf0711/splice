@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
 func TestApplyStageEvents(t *testing.T) {
@@ -166,6 +168,31 @@ func TestApplyPlanAndRun(t *testing.T) {
 		}
 		if err := state.Validate(); err != nil {
 			t.Fatalf("reducer output invalid: %v", err)
+		}
+	})
+
+	t.Run("unverified run carries its checks", func(t *testing.T) {
+		checks := []schemas.VerificationCheck{{Name: "test_runner", Kind: schemas.CheckKindTests, Outcome: schemas.CheckNoTests}}
+		state, _ := Apply(State{}, PlanEvent{StageNames: []string{"code_writer"}})
+		unverified, err := Apply(state, RunEvent{Status: "completed", Detail: "no check applied", Unverified: true, Checks: checks})
+		if err != nil {
+			t.Fatalf("Apply run: %v", err)
+		}
+		if unverified.Completion == nil || len(unverified.Completion.Checks) != 1 || unverified.Completion.Checks[0] != checks[0] {
+			t.Fatalf("completion = %+v, want the checks", unverified.Completion)
+		}
+		if err := unverified.Validate(); err != nil {
+			t.Fatalf("reducer output invalid: %v", err)
+		}
+		verified, err := Apply(state, RunEvent{Status: "completed", Checks: checks})
+		if err != nil {
+			t.Fatalf("Apply run: %v", err)
+		}
+		if len(verified.Completion.Checks) != 0 {
+			t.Fatalf("verified completion carries checks %+v, want none", verified.Completion.Checks)
+		}
+		if err := (CompletionReceipt{Status: "completed", Checks: checks}).Validate(); err == nil {
+			t.Fatal("checks on a verified completion validated, want error")
 		}
 	})
 

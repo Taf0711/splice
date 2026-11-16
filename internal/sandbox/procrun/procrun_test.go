@@ -634,3 +634,58 @@ func TestDeterministicRefusalNamesLinuxInstallCommand(t *testing.T) {
 		}
 	}
 }
+
+type recordingObserver struct {
+	spawns []Spawn
+	exits  []SpawnExit
+}
+
+func (o *recordingObserver) ObserveSpawn(spawn Spawn)             { o.spawns = append(o.spawns, spawn) }
+func (o *recordingObserver) ObserveExit(_ *exec.Cmd, e SpawnExit) { o.exits = append(o.exits, e) }
+
+// TestSpawnObserverSeesSpawnsRefusalsAndExits pins the context observer: a
+// prepared spawn arrives with its command, a refusal arrives with its typed
+// category and no command, and ReportRun passes the exit code. A context
+// without an observer is unaffected.
+func TestSpawnObserverSeesSpawnsRefusalsAndExits(t *testing.T) {
+	observer := &recordingObserver{}
+	ctx := WithSpawnObserver(context.Background(), observer)
+	derived, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	prepared, err := Prepare(derived, Request{ProfileID: ProfileHooksDispatch, Spec: sandbox.CommandSpec{Name: "sh", Args: []string{"-c", "exit 3"}}})
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	ReportRun(derived, prepared.Cmd, prepared.Cmd.Run())
+	if _, err := Prepare(derived, Request{ProfileID: ProfileSpliceStage, AllowedBinaries: StageBinaries, Spec: sandbox.CommandSpec{Name: "curl"}}); err == nil {
+		t.Fatal("curl passed the stage allowlist")
+	}
+	if _, err := Prepare(derived, Request{ProfileID: ProfileSpliceStage, AllowedBinaries: StageBinaries, Spec: sandbox.CommandSpec{Name: "git"}}); err == nil {
+		t.Fatal("a stage spawn with no engine was prepared")
+	}
+
+	if len(observer.spawns) != 3 {
+		t.Fatalf("spawns = %+v, want 3", observer.spawns)
+	}
+	if first := observer.spawns[0]; first.Cmd != prepared.Cmd || first.Audit.Decision.Rejected || first.Audit.Decision.Backend != string(sandbox.BackendUnavailable) {
+		t.Fatalf("first spawn = %+v, want the prepared direct command", first)
+	}
+	if got := observer.spawns[1].Audit.Decision; !got.Rejected || got.Refusal != RefusalBinaryNotAllowed || observer.spawns[1].Cmd != nil {
+		t.Fatalf("allowlist refusal = %+v", got)
+	}
+	if got := observer.spawns[2].Audit.Decision; !got.Rejected || got.Refusal != RefusalNoNativeSandbox {
+		t.Fatalf("no-engine refusal = %+v", got)
+	}
+	if len(observer.exits) != 1 || observer.exits[0].ExitCode != 3 || observer.exits[0].TimedOut {
+		t.Fatalf("exits = %+v, want exit code 3", observer.exits)
+	}
+
+	// No observer: Prepare and the reports still work.
+	plain, err := Prepare(context.Background(), Request{ProfileID: ProfileHooksDispatch, Spec: sandbox.CommandSpec{Name: "true"}})
+	if err != nil {
+		t.Fatalf("Prepare without observer: %v", err)
+	}
+	ReportRun(context.Background(), plain.Cmd, plain.Cmd.Run())
+	ReportRefused(context.Background(), ProfileHooksDispatch, "true", nil, RefusalPolicy, "x")
+}

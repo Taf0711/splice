@@ -29,6 +29,7 @@ import (
 	"github.com/Taf0711/splice/internal/redaction"
 	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/sandbox/procrun"
+	"github.com/Taf0711/splice/internal/secrets"
 	"github.com/Taf0711/splice/internal/splice/cognition"
 	"github.com/Taf0711/splice/internal/splice/learn"
 	"github.com/Taf0711/splice/internal/splice/presentrun"
@@ -399,6 +400,7 @@ func preflightRunError(err error) error {
 // Run executes one prompt through the pipeline. It brackets the run with the
 // run start and end events on Options.EventSink.
 func Run(ctx context.Context, prompt string, provider agent.Provider, options agent.Options, mem MemoryStore, rec WorkspaceRecovery) (agent.Result, error) {
+	ctx = withUserSandbox(ctx, options.Sandbox)
 	return bracketRun(options, func() (agent.Result, error) {
 		return runPipeline(ctx, prompt, provider, options, mem, rec)
 	})
@@ -747,6 +749,9 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 
 	result, err := runIterationLoop(ctx, runID, plan, registry, provider, ledgerOpts, absWorkDir, runner, mem, rec, tr, acc, ledger)
 	if err == nil {
+		// The run result says when stage commands ran under an outer sandbox
+		// the user accepted, in every status.
+		result.NestedSandboxAccepted = options.nestedSandboxAccepted()
 		finishPresentation(acc, options, result)
 	}
 	if err != nil {
@@ -874,8 +879,14 @@ func pipelineTestCommand(result schemas.PipelineResult, testStage string) string
 
 // testCommandFromOutput returns the expanded argv recorded by test_runner.
 // The stage output is the source of truth because detection and configured
-// placeholders are resolved before the command runs.
+// placeholders are resolved before the command runs. The value goes into the
+// run record, so any secret in it is redacted.
 func testCommandFromOutput(output schemas.HarnessStageOutput) string {
+	command, _ := secrets.Redact(rawTestCommand(output))
+	return command
+}
+
+func rawTestCommand(output schemas.HarnessStageOutput) string {
 	raw, ok := output.Data["test_command"]
 	if !ok {
 		return ""
@@ -1043,18 +1054,27 @@ func emitAgentNodeNotices(options PipelineRunConfig, topology *schemas.PipelineT
 }
 
 // preflightAgentNodeSandbox refuses a run whose topology has an agent node
-// when the run sandbox does not enforce. The run stops before the first
-// provider request, with the error the node itself would return.
+// when the run sandbox does not enforce, or a command node when the stage
+// sandbox does not enforce. The run stops before the first provider request,
+// with the error the node itself would return.
 func preflightAgentNodeSandbox(options PipelineRunConfig, topology *schemas.PipelineTopology) error {
 	if topology == nil {
 		return nil
 	}
 	for _, node := range topology.Nodes {
-		if node.Type != schemas.NodeTypeAgent {
-			continue
-		}
-		if err := agentNodeSandboxError(options.Sandbox); err != nil {
-			return fmt.Errorf("agent node %s: %w", node.Name, err)
+		switch node.Type {
+		case schemas.NodeTypeAgent:
+			if err := agentNodeSandboxError(options.Sandbox, options.AcceptNestedSandbox); err != nil {
+				return fmt.Errorf("agent node %s: %w", node.Name, err)
+			}
+		case schemas.NodeTypeCommand:
+			// A command node runs under the stage sandbox, which is derived
+			// from the run sandbox (buildStageToolRunner). Only its backend
+			// or a nested sandbox can leave a gap: the stage policy always
+			// enforces. The user can accept the nested gap alone.
+			if gap := runSandboxGap(procrun.NewStageEngineFrom(options.Sandbox, options.Cwd), options.AcceptNestedSandbox); gap != "" {
+				return fmt.Errorf("command node %s: stage sandbox is not enforcing: %s; a command node never runs unsandboxed", node.Name, gap)
+			}
 		}
 	}
 	return nil
@@ -1863,7 +1883,9 @@ func runPass(
 		// same instance, so pass + repairs of one stage share one allowance,
 		// while different stages never starve each other.
 		stageBudget := NewStageExecutionBudget(0)
-		output, err := runStageWithContextBudgeted(stageCtx, input, agentStage, iteration, selection, options, workDir, runner, mem, caps, stage.Budget.OutputMax, tr, priorScope, 0, stageBudget)
+		evidence := newSandboxEvidenceCollector(stageName, iteration)
+		evidence.nestedAccepted = options.nestedSandboxAccepted()
+		output, err := runStageWithContextBudgeted(withSandboxEvidence(stageCtx, evidence), input, agentStage, iteration, selection, options, workDir, runner, mem, caps, stage.Budget.OutputMax, tr, priorScope, 0, stageBudget)
 		if cancelStage != nil {
 			cancelStage()
 		}
@@ -1884,6 +1906,7 @@ func runPass(
 			Iteration: iteration,
 			LatencyMs: latencyMs,
 		}
+		evidence.attach(&record)
 		if !modelFree {
 			if selection.Model != "" {
 				record.Model = Ptr(selection.Model)
@@ -1975,6 +1998,7 @@ func runPass(
 		priorChangedFiles[stageName] = append([]string(nil), changedFiles...)
 		summariesByStage[stageName] = *record.OutputSummary
 		changedByStage[stageName] = append([]string(nil), changedFiles...)
+		output.Stage = stageName
 		outputsByStage[stageName] = output
 		outputs = append(outputs, output)
 
@@ -2081,6 +2105,14 @@ func runStageWithContextBudgeted(
 	invocationOrdinal int,
 	execBudget *StageExecutionBudget,
 ) (schemas.HarnessStageOutput, error) {
+	// A model-free stage runs repository code (tests, scanners, acceptance,
+	// command nodes): its tool calls use the stage runner and the stage
+	// sandbox. The stage implementation decides, not the topology caps.
+	// This is the one place the runner is chosen, so the stage options and
+	// the cognition-scoped wrapper below both get it.
+	if stage.Capabilities().ModelFree && options.stageToolRunner != nil {
+		runner = options.stageToolRunner
+	}
 	// F1: the orchestrator owns the classification cell for this invocation.
 	// The stage's usage closure reads it at emission time, so reclassification
 	// between expansion rounds re-labels the spend source without threading
@@ -2844,18 +2876,35 @@ func gitChangeSummary(ctx context.Context, workDir string) (schemas.ChangeSummar
 	}, nil
 }
 
+// userSandboxKey is the context key of the user's sandbox engine.
+type userSandboxKey struct{}
+
+// withUserSandbox returns ctx carrying the user's sandbox engine. Splice's own
+// git reads derive their stage engine from it, so the user's denials apply.
+func withUserSandbox(ctx context.Context, engine *sandbox.Engine) context.Context {
+	return context.WithValue(ctx, userSandboxKey{}, engine)
+}
+
+// userSandboxFrom returns the user's sandbox engine carried by ctx. It is nil
+// when ctx has none, and a nil engine gives the fresh stage policy.
+func userSandboxFrom(ctx context.Context) *sandbox.Engine {
+	engine, _ := ctx.Value(userSandboxKey{}).(*sandbox.Engine)
+	return engine
+}
+
 // prepareGitRead builds one of Splice's own read-only git commands under the
 // stage sandbox profile. A repository clean or smudge filter runs inside it,
 // because git-lfs and similar filters must keep working. The filter gets a
 // private temp directory per call: TMPDIR, TMP, and TEMP name it, and it is
 // the only temp directory the sandbox lets the command write. done ends the
-// plan and removes the directory.
+// plan and removes the directory. The stage engine keeps the user's deny
+// entries carried on ctx (see withUserSandbox).
 func prepareGitRead(ctx context.Context, workDir string, args ...string) (*exec.Cmd, func(), error) {
 	tempRoot, err := os.MkdirTemp("", "splice-git-")
 	if err != nil {
 		return nil, nil, fmt.Errorf("make the git temp directory: %w", err)
 	}
-	engine := procrun.NewStageEngineWithTempRoot(workDir, tempRoot)
+	engine := userSandboxFrom(ctx).StageEngine(workDir, tempRoot)
 	cmd, plan, err := stages.PrepareStageCommand(ctx, engine, workDir, append([]string{"git", "-C", workDir}, args...))
 	if err != nil {
 		_ = os.RemoveAll(tempRoot)
@@ -3114,8 +3163,10 @@ func finishPresentation(acc *presentrun.Accumulator, options PipelineRunConfig, 
 	}
 	if status == "completed" && !result.Verified {
 		// A completed run that verified nothing keeps its status and projects
-		// the NOT VERIFIED receipt, with the reason as its detail.
-		acc.Apply(presentrun.AdaptRunOutcomeEvent(status, result.UnverifiedReason, true))
+		// the NOT VERIFIED receipt, with the reason as its detail. A test
+		// command that passed with no per-test evidence has its own receipt.
+		acc.Apply(presentrun.AdaptRunOutcomeEvent(status, result.UnverifiedReason, true,
+			result.VerificationOutcome == schemas.VerificationOutcomeCommandPassed, result.VerificationChecks))
 		options.OnPresentationState(acc.Snapshot())
 		return
 	}
@@ -3129,11 +3180,15 @@ func finishPresentation(acc *presentrun.Accumulator, options PipelineRunConfig, 
 // newAgentToolRunner captures options by value.
 func buildStageToolRunner(options PipelineRunConfig, absWorkDir string) (PipelineRunConfig, ToolRunner) {
 	// Deterministic stage subprocesses run under their own enforce-mode
-	// engine: workspace-scoped filesystem, network denied. This is separate
-	// from options.Sandbox, which keeps the interactive user policy for
-	// model-driven tool calls. Set BEFORE the tool runner is built so the
-	// runner's captured config carries it.
-	options.StageSandbox = procrun.NewStageEngine(absWorkDir)
+	// engine, derived from the user policy: the user's denials stay,
+	// network is denied, writes are workspace-scoped, and no widening
+	// carries over. options.Sandbox keeps the interactive user policy for
+	// model-driven tool calls. Set BEFORE the tool runners are built so the
+	// runners' captured config carries it.
+	options.StageSandbox = procrun.NewStageEngineFrom(options.Sandbox, absWorkDir)
+	// Hooks in a pipeline run execute under the stage engine,
+	// except a user hook marked runOnHost.
+	options.Hooks = options.Hooks.ForPipeline(options.StageSandbox, absWorkDir)
 
 	// Strict read-before-write for every write_file/edit_file in this run: a
 	// model that skips the read now gets a loud, repairable error instead of
@@ -3141,7 +3196,43 @@ func buildStageToolRunner(options PipelineRunConfig, absWorkDir string) (Pipelin
 	// so the runner's captured config carries it.
 	options.StageRequireReadBeforeWrite = true
 
+	options.stageToolRunner = newStageToolRunner(options, absWorkDir)
 	return options, newAgentToolRunner(options, absWorkDir)
+}
+
+// newStageToolRunner builds the tool runner of the model-free stages. It is
+// the agent tool runner (permission flow, hooks, events) whose registry
+// calls run under StageSandbox, so every registry tool call of a stage that
+// runs repository code carries the stage engine. The user engine still
+// decides whether a call asks for approval, so a stage command prompts
+// exactly when it prompted before. A call never runs when the stage engine
+// does not enforce, and a call never asks for more than the stage policy
+// (sandbox_permissions, additional_permissions).
+func newStageToolRunner(options PipelineRunConfig, cwd string) ToolRunner {
+	stageOptions := options
+	stageOptions.toolRunSandbox = options.StageSandbox
+	inner := newAgentToolRunner(stageOptions, cwd)
+	return ToolRunnerFunc(func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
+		refusal := ""
+		category := schemas.SandboxRefusalEscalation
+		if gap := runSandboxGap(options.StageSandbox, options.AcceptNestedSandbox); gap != "" {
+			refusal = "stage sandbox is not enforcing: " + gap + "; a stage command never runs unsandboxed"
+			category = schemas.SandboxRefusalNoEnforcingSandbox
+		} else if _, ok := args["sandbox_permissions"]; ok {
+			refusal = "stage tool call refused: sandbox_permissions is not allowed for a stage command"
+		} else if _, ok := args["additional_permissions"]; ok {
+			refusal = "stage tool call refused: additional_permissions is not allowed for a stage command"
+		}
+		if refusal == "" {
+			return inner.RunTool(ctx, name, args)
+		}
+		sandboxEvidenceFrom(ctx).refuseToolCall(options.Registry, name, args, options.StageSandbox, category)
+		call := toolCallFor(name, args)
+		emitToolCall(options, call)
+		res := ToolResult{OK: false, Output: refusal, Meta: map[string]string{}, Status: tools.StatusError}
+		emitToolResult(options, call, res)
+		return res, nil
+	})
 }
 
 // newAgentToolRunner builds the agent tool runner for a pipeline run. It
@@ -3167,6 +3258,7 @@ func newAgentToolRunner(options PipelineRunConfig, cwd string) ToolRunner {
 		call := toolCallFor(name, args)
 		emitToolCall(options, call)
 		if denied, blocked := agent.DeniedByToolFilters(name, options.EnabledTools, options.DisabledTools); blocked {
+			sandboxEvidenceFrom(ctx).refuseToolCall(options.Registry, name, args, options.runEngine(), schemas.SandboxRefusalPermissionDenied)
 			res := ToolResult{
 				OK:           false,
 				Output:       denied.Output,
@@ -3226,6 +3318,7 @@ func newAgentToolRunner(options PipelineRunConfig, cwd string) ToolRunner {
 			switch options.PermissionMode {
 			case agent.PermissionModeAsk:
 				if options.OnPermissionRequest == nil {
+					sandboxEvidenceFrom(ctx).refuseToolCall(options.Registry, name, args, options.runEngine(), schemas.SandboxRefusalPermissionDenied)
 					res := ToolResult{OK: false, Output: "permission request not handled", Meta: map[string]string{}, Status: tools.StatusError}
 					emitToolResult(options, call, res)
 					return res, nil
@@ -3241,6 +3334,7 @@ func newAgentToolRunner(options PipelineRunConfig, cwd string) ToolRunner {
 						reason = "permission denied"
 					}
 					emitPermissionDecision(options, request, agent.PermissionDecisionDeny, reason, false)
+					sandboxEvidenceFrom(ctx).refuseToolCall(options.Registry, name, args, options.runEngine(), schemas.SandboxRefusalPermissionDenied)
 					res := ToolResult{OK: false, Output: "permission denied", Meta: map[string]string{"permission_action": string(agent.PermissionActionDeny)}, Status: tools.StatusError}
 					emitToolResult(options, call, res)
 					return res, nil
@@ -3270,6 +3364,7 @@ func newAgentToolRunner(options PipelineRunConfig, cwd string) ToolRunner {
 			}
 		}
 		if outcome, blocked := agent.RunBeforeToolHooks(ctx, agentOpts, call, args); blocked {
+			sandboxEvidenceFrom(ctx).refuseToolCall(options.Registry, name, args, options.runEngine(), schemas.SandboxRefusalHookBlocked)
 			blockedResult := agent.HookBlockedResult(call, outcome)
 			res := ToolResult{
 				OK:           false,
@@ -3295,6 +3390,11 @@ func newAgentToolRunner(options PipelineRunConfig, cwd string) ToolRunner {
 			// keeps the caller's policy, add-dir grants, grant store, and
 			// backend; only the workspace root moves.
 			runOptions.Sandbox = runOptions.Sandbox.ReRooted(cwd)
+		}
+		if options.toolRunSandbox != nil {
+			// A stage call runs under the stage engine, which is already
+			// rooted at the run directory.
+			runOptions.Sandbox = options.toolRunSandbox
 		}
 		res := options.Registry.RunWithOptions(ctx, name, args, runOptions)
 		feedback := agent.RunAfterToolHooks(ctx, agentOpts, call, args, res)
@@ -3662,22 +3762,28 @@ func emitPermissionDecision(options PipelineRunConfig, request agent.PermissionR
 // as its history. The verified flag judges only the final pass: an earlier
 // pass that failed and was repaired does not make the run unverified.
 func finishCompleted(runID string, plan schemas.ExecutionPlan, records []schemas.StageRecord, finalState schemas.IterationState, finalRecords []schemas.StageRecord, finalOutputs []schemas.HarnessStageOutput) (schemas.PipelineResult, error) {
-	verified, reason := passVerification(finalRecords, finalOutputs)
-	if !verified && !planHasVerification(plan) {
+	outcome, reason, checks := passVerification(plan, finalRecords, finalOutputs)
+	if outcome == schemas.VerificationOutcomeUnverified && !planHasVerification(plan) {
 		// The plan has no verification stage at all, so the reason names that
 		// cause instead of a generic line.
 		reason = absentVerificationReason(plan)
 	}
 	return schemas.PipelineResult{
-		RunID:            runID,
-		Status:           "completed",
-		Tier:             plan.Tier,
-		Stages:           records,
-		FinalState:       &finalState,
-		Verified:         verified,
-		UnverifiedReason: reason,
+		RunID:               runID,
+		Status:              "completed",
+		Tier:                plan.Tier,
+		Stages:              records,
+		FinalState:          &finalState,
+		Verified:            outcome == schemas.VerificationOutcomeVerified,
+		UnverifiedReason:    reason,
+		VerificationOutcome: outcome,
+		VerificationChecks:  checks,
 	}, nil
 }
+
+// commandPassedReason is the unverified reason of a pass whose only test
+// evidence is a test command that exited 0.
+const commandPassedReason = "test command passed; per-test evidence unavailable"
 
 // absentVerificationReason names why a plan with no verification stage is not
 // verified. A topology with no verification node at any tier is named as the
@@ -3690,20 +3796,33 @@ func absentVerificationReason(plan schemas.ExecutionPlan) string {
 	return string(plan.Tier) + " tier runs no checks"
 }
 
-// passVerification reports whether a completed pass verified anything. The
-// pass is verified when a verification report passed, or a test run executed
-// tests and none failed, and no stage is incomplete or failed. A completed
-// pass that is not verified returns the reason, naming the checks that did not
-// apply. The completion gate already refuses incomplete stages, so this is a
-// second guard for the verified flag.
-func passVerification(records []schemas.StageRecord, outputs []schemas.HarnessStageOutput) (bool, string) {
+// passVerification returns the verification outcome of a completed pass and,
+// when it is not verified, the reason. The pass is verified when a
+// verification report passed, or a test run reported passing tests, and no
+// stage is incomplete or failed and no test failed. A failed test makes the
+// pass unverified even when a report passed. A test command that exited 0
+// with no per-test evidence is not verification: alone it gives the
+// command_passed outcome. A completed pass that is not verified names the
+// checks that did not apply. The completion gate already refuses incomplete
+// stages, so this is a second guard for the verified flag.
+//
+// It also returns one check per verification-relevant stage of the pass
+// (passChecks). The checks describe the pass; they do not decide the outcome.
+func passVerification(plan schemas.ExecutionPlan, records []schemas.StageRecord, outputs []schemas.HarnessStageOutput) (string, string, []schemas.VerificationCheck) {
+	outcome, reason := passOutcome(records, outputs)
+	return outcome, reason, passChecks(plan, records, outputs)
+}
+
+func passOutcome(records []schemas.StageRecord, outputs []schemas.HarnessStageOutput) (string, string) {
 	for _, r := range records {
 		if r.Status == schemas.StageIncomplete || r.Status == schemas.StageFailed {
-			return false, "verification did not finish at stage " + r.Name
+			return schemas.VerificationOutcomeUnverified, "verification did not finish at stage " + r.Name
 		}
 	}
 	passed := false
+	testsFailed := false
 	noTests := false
+	commandPassed := false
 	for _, out := range outputs {
 		if report, ok := verificationReport(out); ok && report.Status == schemas.VerificationPassed {
 			passed = true
@@ -3711,15 +3830,24 @@ func passVerification(records []schemas.StageRecord, outputs []schemas.HarnessSt
 		if results, ok := out.Data["test_results"].(schemas.TestRunResults); ok {
 			switch {
 			case results.Failed() > 0:
+				testsFailed = true
 			case results.Passed() > 0:
 				passed = true
+			case results.Evidence == schemas.TestEvidenceCommandOnly && results.ExitCode == 0:
+				commandPassed = true
 			default:
 				noTests = true
 			}
 		}
 	}
+	if testsFailed {
+		return schemas.VerificationOutcomeUnverified, "tests failed"
+	}
 	if passed {
-		return true, ""
+		return schemas.VerificationOutcomeVerified, ""
+	}
+	if commandPassed {
+		return schemas.VerificationOutcomeCommandPassed, commandPassedReason
 	}
 	var notApplied []string
 	for _, r := range records {
@@ -3731,9 +3859,9 @@ func passVerification(records []schemas.StageRecord, outputs []schemas.HarnessSt
 		notApplied = append(notApplied, "tests (no tests ran)")
 	}
 	if len(notApplied) > 0 {
-		return false, "no check applied: " + strings.Join(notApplied, "; ")
+		return schemas.VerificationOutcomeUnverified, "no check applied: " + strings.Join(notApplied, "; ")
 	}
-	return false, "no verification check passed"
+	return schemas.VerificationOutcomeUnverified, "no verification check passed"
 }
 
 func finishWithReason(runID string, plan schemas.ExecutionPlan, records []schemas.StageRecord, status, reason string) (schemas.PipelineResult, error) {
@@ -3936,6 +4064,25 @@ func completionSummary(result schemas.PipelineResult) string {
 	}
 	if result.Status == "completed" && !result.Verified {
 		summary += " Not verified: " + result.UnverifiedReason + "."
+	}
+	var lines []string
+	if result.Status == "completed" {
+		if result.Verified {
+			lines = presentation.VerifiedLines(result.VerificationChecks)
+		} else {
+			lines = presentation.CheckLines(result.VerificationChecks)
+		}
+	}
+	if result.NestedSandboxAccepted {
+		lines = append(lines, presentation.NestedSandboxAcceptedLine)
+	}
+	for _, record := range result.Stages {
+		if line := sandboxEvidenceLine(record); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	for _, line := range lines {
+		summary += "\n" + line
 	}
 	return summary + "\n"
 }

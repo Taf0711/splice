@@ -975,3 +975,150 @@ func TestChangeSummaryOldJSONStillDecodes(t *testing.T) {
 		t.Fatalf("decoded old JSON must validate: %v", err)
 	}
 }
+
+// TestVerificationChecksValidate pins the check schema and the consistency
+// rule: a verified result has a passed check and no failed check. A result
+// with no checks (written before the field existed) stays valid.
+func TestVerificationChecksValidate(t *testing.T) {
+	passed := VerificationCheck{Name: "test_runner", Kind: CheckKindTests, Outcome: CheckPassed, Detail: "3 passed, 0 failed"}
+	scanner := VerificationCheck{Name: "security_auditor", Kind: CheckKindSecurityScan, Outcome: CheckPassed, Detail: "bandit"}
+	noTests := VerificationCheck{Name: "test_runner", Kind: CheckKindTests, Outcome: CheckNoTests}
+	failed := VerificationCheck{Name: "test_runner", Kind: CheckKindTests, Outcome: CheckFailed}
+	cases := []struct {
+		name     string
+		checks   []VerificationCheck
+		verified bool
+		wantErr  string
+	}{
+		{name: "verified with a passed check", checks: []VerificationCheck{passed, scanner}, verified: true},
+		{name: "scanner only verified", checks: []VerificationCheck{noTests, scanner}, verified: true},
+		{name: "legacy result without checks", verified: true},
+		{name: "unverified with a failed check", checks: []VerificationCheck{failed, scanner}},
+		{name: "verified with a failed check", checks: []VerificationCheck{failed, scanner}, verified: true, wantErr: "failed check"},
+		{name: "verified with no passed check", checks: []VerificationCheck{noTests}, verified: true, wantErr: "no passed check"},
+		{name: "empty name", checks: []VerificationCheck{{Kind: CheckKindTests, Outcome: CheckPassed}}, wantErr: "name is required"},
+		{name: "unknown kind", checks: []VerificationCheck{{Name: "x", Kind: "lint", Outcome: CheckPassed}}, wantErr: "invalid kind"},
+		{name: "unknown outcome", checks: []VerificationCheck{{Name: "x", Kind: CheckKindTests, Outcome: "green"}}, wantErr: "invalid outcome"},
+		{name: "no_tests on a scanner", checks: []VerificationCheck{{Name: "x", Kind: CheckKindSecurityScan, Outcome: CheckNoTests}}, wantErr: "only valid for kind tests"},
+		{name: "command_passed on acceptance", checks: []VerificationCheck{{Name: "x", Kind: CheckKindAcceptance, Outcome: CheckCommandPassed}}, wantErr: "only valid for kind tests"},
+		{name: "detail too long", checks: []VerificationCheck{{Name: "x", Kind: CheckKindTests, Outcome: CheckPassed, Detail: strings.Repeat("d", 201)}}, wantErr: "the limit is 200"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateVerificationChecks(tc.checks, tc.verified)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want one naming %q", err, tc.wantErr)
+			}
+			// PipelineResult and the trace outcome run the same rule.
+			result := PipelineResult{RunID: "r", Status: "completed", Tier: TierLight, CostCoverage: CostCoverageNotApplicable, Verified: tc.verified, VerificationChecks: tc.checks}
+			if (result.Validate() == nil) != (tc.wantErr == "") {
+				t.Fatalf("PipelineResult.Validate() = %v, want error %v", result.Validate(), tc.wantErr != "")
+			}
+			outcome := OutcomeRecord{Status: "completed", Verified: tc.verified, VerificationChecks: tc.checks}
+			if (outcome.Validate() == nil) != (tc.wantErr == "") {
+				t.Fatalf("OutcomeRecord.Validate() = %v, want error %v", outcome.Validate(), tc.wantErr != "")
+			}
+		})
+	}
+}
+
+// TestSandboxEvidenceValidate pins the evidence schema: the closed sets, the
+// program shape (no path, no assignment, no space), the refusal rules, and
+// the per-stage bound on StageRecord.
+func TestSandboxEvidenceValidate(t *testing.T) {
+	valid := func() SandboxEvidence {
+		return SandboxEvidence{
+			Stage: "test_runner", Iteration: 1, Source: SandboxSourceBashTool, Program: "pytest",
+			Policy:  SandboxPolicySummary{Source: SandboxPolicyStage, Mode: "enforce", Network: "deny", EnforceWorkspace: true, WriteRoots: 2, DenyRead: 9},
+			Backend: "macos-seatbelt", EnforcementLevel: "native", Wrapped: true,
+			Outcome: SandboxOutcomeRan, Exit: SandboxExitOK,
+		}
+	}
+	cases := []struct {
+		name    string
+		mutate  func(*SandboxEvidence)
+		wantErr string
+	}{
+		{name: "valid"},
+		{name: "refused", mutate: func(e *SandboxEvidence) {
+			e.Outcome, e.Refusal, e.Exit = SandboxOutcomeRefused, SandboxRefusalNoEnforcingSandbox, ""
+		}},
+		{name: "denied with exit ok (network denial)", mutate: func(e *SandboxEvidence) { e.Outcome = SandboxOutcomeDenied }},
+		{name: "no policy", mutate: func(e *SandboxEvidence) { e.Policy = SandboxPolicySummary{Source: SandboxPolicyNone} }},
+		{name: "missing stage", mutate: func(e *SandboxEvidence) { e.Stage = "" }, wantErr: "stage is required"},
+		{name: "unknown source", mutate: func(e *SandboxEvidence) { e.Source = "shell" }, wantErr: "invalid source"},
+		{name: "path program", mutate: func(e *SandboxEvidence) { e.Program = "/usr/bin/pytest" }, wantErr: "not a plain program name"},
+		{name: "assignment program", mutate: func(e *SandboxEvidence) { e.Program = "TOKEN=abc" }, wantErr: "not a plain program name"},
+		{name: "command line program", mutate: func(e *SandboxEvidence) { e.Program = "pytest -k x" }, wantErr: "not a plain program name"},
+		{name: "long program", mutate: func(e *SandboxEvidence) { e.Program = strings.Repeat("a", 33) }, wantErr: "not a plain program name"},
+		{name: "refused with no category", mutate: func(e *SandboxEvidence) { e.Outcome, e.Exit = SandboxOutcomeRefused, "" }, wantErr: "invalid refusal"},
+		{name: "refused with an exit", mutate: func(e *SandboxEvidence) {
+			e.Outcome, e.Refusal = SandboxOutcomeRefused, SandboxRefusalPermissionDenied
+		}, wantErr: "has no exit status"},
+		{name: "ran with a refusal", mutate: func(e *SandboxEvidence) { e.Refusal = SandboxRefusalPolicy }, wantErr: "has refusal"},
+		{name: "ran with no exit", mutate: func(e *SandboxEvidence) { e.Exit = "" }, wantErr: "invalid exit"},
+		{name: "unknown outcome", mutate: func(e *SandboxEvidence) { e.Outcome = "skipped" }, wantErr: "invalid outcome"},
+		{name: "policy none with a mode", mutate: func(e *SandboxEvidence) { e.Policy.Source = SandboxPolicyNone }, wantErr: "no mode or network"},
+		{name: "bad backend label", mutate: func(e *SandboxEvidence) { e.Backend = "Seatbelt /usr/bin" }, wantErr: "invalid sandbox label"},
+		{name: "negative count", mutate: func(e *SandboxEvidence) { e.Policy.DenyRead = -1 }, wantErr: "non-negative"},
+		{name: "nested accepted", mutate: func(e *SandboxEvidence) {
+			e.Wrapped, e.EnforcementLevel, e.NestedAccepted = false, "disabled", true
+		}},
+		{name: "nested accepted but wrapped", mutate: func(e *SandboxEvidence) { e.NestedAccepted = true }, wantErr: "is not wrapped"},
+		{name: "nested accepted with no policy", mutate: func(e *SandboxEvidence) {
+			e.Wrapped, e.NestedAccepted, e.Policy = false, true, SandboxPolicySummary{Source: SandboxPolicyNone}
+		}, wantErr: "has a sandbox policy"},
+		{name: "nested accepted but refused", mutate: func(e *SandboxEvidence) {
+			e.Wrapped, e.NestedAccepted = false, true
+			e.Outcome, e.Refusal, e.Exit = SandboxOutcomeRefused, SandboxRefusalPolicy, ""
+		}, wantErr: "accepted nested spawn ran"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			evidence := valid()
+			if tc.mutate != nil {
+				tc.mutate(&evidence)
+			}
+			err := evidence.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want one naming %q", err, tc.wantErr)
+			}
+		})
+	}
+
+	record := StageRecord{Name: "test_runner", Iteration: 1, Status: StageCompleted, SandboxEvidence: []SandboxEvidence{valid()}}
+	if err := record.Validate(); err != nil {
+		t.Fatalf("record with evidence: %v", err)
+	}
+	other := record
+	other.Iteration = 2
+	if err := other.Validate(); err == nil || !strings.Contains(err.Error(), "names stage test_runner iteration 1") {
+		t.Fatalf("evidence of another iteration validated: %v", err)
+	}
+	over := record
+	for len(over.SandboxEvidence) <= MaxSandboxEvidencePerStage {
+		over.SandboxEvidence = append(over.SandboxEvidence, valid())
+	}
+	if err := over.Validate(); err == nil || !strings.Contains(err.Error(), "the limit is") {
+		t.Fatalf("record over the bound validated: %v", err)
+	}
+	dropped := record
+	dropped.SandboxEvidenceDropped = -1
+	if err := dropped.Validate(); err == nil {
+		t.Fatal("negative dropped count validated")
+	}
+	// A legacy record without the field stays valid.
+	if err := (StageRecord{Name: "test_runner", Status: StageCompleted}).Validate(); err != nil {
+		t.Fatalf("legacy record: %v", err)
+	}
+}

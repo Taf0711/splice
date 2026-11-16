@@ -1245,6 +1245,51 @@ func TestRunExecRequireVerifiedExitsIncomplete(t *testing.T) {
 	}
 }
 
+// A full mocked run whose only check is a non-Go test command that exits 0
+// ends completed with outcome command_passed. It is not verified: with
+// --require-verified it exits 4 like any unverified run, with its own reason.
+func TestRunExecRequireVerifiedCommandPassedIsNotVerified(t *testing.T) {
+	cwd := t.TempDir()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"exec", "--require-verified", "--output-format", "stream-json", "write hello"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			resolved := execResolvedConfig()
+			resolved.Verify.TestCommand = []string{"sh", "-c", "echo 3 passed"}
+			return resolved, nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return newExecStageAwareProvider(execStageProviderOptions{
+				Files:     []schemas.FileChange{{Path: "hello.txt", Content: "hi\n", ChangeType: "create"}},
+				TestFiles: []schemas.FileChange{{Path: "hello-check.txt", Content: "ok\n", ChangeType: "create"}},
+			}), nil
+		},
+	})
+	if exitCode != exitIncomplete {
+		t.Fatalf("exit = %d, want %d: %s\n%s", exitCode, exitIncomplete, stderr.String(), stdout.String())
+	}
+	var result schemas.PipelineResult
+	var errorMessage string
+	for _, event := range decodeJSONLines(t, stdout.String()) {
+		switch event["type"] {
+		case "final":
+			if err := json.Unmarshal([]byte(event["text"].(string)), &result); err != nil {
+				t.Fatalf("decode final result: %v", err)
+			}
+		case "error":
+			errorMessage, _ = event["message"].(string)
+		}
+	}
+	if result.Status != "completed" || result.Verified || result.VerificationOutcome != schemas.VerificationOutcomeCommandPassed {
+		t.Fatalf("result status=%q verified=%v outcome=%q, want completed, false, command_passed (reason %q)", result.Status, result.Verified, result.VerificationOutcome, result.UnverifiedReason)
+	}
+	const reason = "test command passed; per-test evidence unavailable"
+	if result.UnverifiedReason != reason || errorMessage != reason {
+		t.Fatalf("reason = %q, error message = %q; want %q", result.UnverifiedReason, errorMessage, reason)
+	}
+}
+
 func TestRunExecWorktreeMergeBackErrorFailsLoud(t *testing.T) {
 	root := t.TempDir()
 	worktreeDir := t.TempDir()

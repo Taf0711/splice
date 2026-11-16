@@ -282,3 +282,49 @@ func TestScannerContextCancellation(t *testing.T) {
 		})
 	}
 }
+
+// TestBanditSpawnKeepsUserDenyRead pins that a model call carrying the user's
+// sandbox engine keeps the user's DenyRead entries on the scanner spawn. The
+// fake python prints a workspace file (positive control) and a user-denied file.
+func TestBanditSpawnKeepsUserDenyRead(t *testing.T) {
+	requireNativeSandbox(t)
+	workDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("setup: resolve workspace: %v", err)
+	}
+	secrets := filepath.Join(workDir, "secrets")
+	if err := os.MkdirAll(secrets, 0o700); err != nil {
+		t.Fatalf("setup: mkdir secrets: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(secrets, "x"), []byte("USERSECRET"), 0o600); err != nil {
+		t.Fatalf("setup: write secret: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "ok.txt"), []byte("WSOK"), 0o644); err != nil {
+		t.Fatalf("setup: write workspace file: %v", err)
+	}
+	binDir := t.TempDir()
+	script := "#!/bin/sh\ncat '" + filepath.Join(workDir, "ok.txt") + "'\ncat '" + filepath.Join(secrets, "x") + "'\n"
+	if err := os.WriteFile(filepath.Join(binDir, "python"), []byte(script), 0o755); err != nil {
+		t.Fatalf("setup: write fake python: %v", err)
+	}
+	prependScannerPath(t, binDir)
+
+	policy := sandbox.DefaultPolicy()
+	policy.DenyRead = append(policy.DenyRead, secrets)
+	user := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot: workDir,
+		Policy:        policy,
+		Backend:       sandbox.SelectBackend(sandbox.BackendOptions{}),
+	})
+
+	tool := NewBanditTool(workDir).(interface {
+		RunWithOptions(context.Context, map[string]any, tools.RunOptions) tools.Result
+	})
+	result := tool.RunWithOptions(context.Background(), map[string]any{"paths": []any{"ok.txt"}}, tools.RunOptions{Sandbox: user})
+	if !strings.Contains(result.Output, "WSOK") {
+		t.Fatalf("setup: positive control failed: status=%v output=%q", result.Status, result.Output)
+	}
+	if strings.Contains(result.Output, "USERSECRET") {
+		t.Fatalf("bandit spawn read the user-denied path %s: output=%q", secrets, result.Output)
+	}
+}

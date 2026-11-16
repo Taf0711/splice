@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"time"
 
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
@@ -106,6 +107,7 @@ func (c trivyCheck) runTrivy(ctx context.Context, req VerificationCheckRequest) 
 	}
 	defer plan.Cleanup()
 	out, err := cmd.CombinedOutput()
+	procrun.ReportRun(ctx, cmd, err)
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}

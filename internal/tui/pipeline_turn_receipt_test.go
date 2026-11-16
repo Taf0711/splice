@@ -91,6 +91,18 @@ func TestPipelineTurnReceiptNotVerifiedCarriesReason(t *testing.T) {
 	}
 }
 
+func TestPipelineTurnReceiptCommandPassed(t *testing.T) {
+	answer := pipelineResultJSON(t, schemas.PipelineResult{RunID: "r4", Status: "completed", Verified: false,
+		UnverifiedReason: "test command passed; per-test evidence unavailable", VerificationOutcome: schemas.VerificationOutcomeCommandPassed})
+	card, ok := pipelineTurnReceipt(answer, "", nil, nil, time.Time{}, time.Time{})
+	if !ok || card.kind != receiptUnverified || card.title != "DONE · TEST COMMAND PASSED" {
+		t.Fatalf("command-passed run: ok=%v kind=%q title=%q, want DONE · TEST COMMAND PASSED", ok, card.kind, card.title)
+	}
+	if !strings.Contains(flatCardText(card), "Per-test evidence is not available. The run is not verified.") {
+		t.Fatalf("command-passed card lost its detail: %q", flatCardText(card))
+	}
+}
+
 func TestPipelineTurnReceiptFailedCarriesAbortReason(t *testing.T) {
 	abort := "stage code_writer exhausted its budget"
 	answer := pipelineResultJSON(t, schemas.PipelineResult{RunID: "r3", Status: "failed", AbortReason: &abort})

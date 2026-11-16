@@ -1,6 +1,7 @@
 package stages
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -633,5 +634,62 @@ func fileChangeArraySchema() map[string]any {
 			},
 			"required": []string{"path", "content", "change_type"},
 		},
+	}
+}
+
+// gitChangedFileLines lists the files changed since HEAD and the untracked
+// files, as paths relative to workDir. Changed paths come first, and each path
+// appears once. A failed diff returns its error. A failed untracked listing
+// returns an error that names untracked file discovery, so a caller never gets
+// a partial list that looks complete.
+func gitChangedFileLines(ctx context.Context, workDir, diffPurpose string, options StageOptions) ([]string, error) {
+	// core.quotepath=off keeps non-ASCII names unquoted, so the extension match
+	// and the stat see the real name.
+	diffCommand := []string{"git", "-c", "core.quotepath=off", "diff", "--name-only", "--relative", "HEAD"}
+	diffOut, err := runRecordedOutput(ctx, options, "splice.shell", map[string]any{
+		"command": diffCommand,
+		"cwd":     workDir,
+		"purpose": diffPurpose,
+	}, workDir, diffCommand)
+	if err != nil {
+		return nil, err
+	}
+	untrackedCommand := []string{"git", "-c", "core.quotepath=off", "ls-files", "--others", "--exclude-standard"}
+	untrackedOut, err := runRecordedOutput(ctx, options, "splice.shell", map[string]any{
+		"command": untrackedCommand,
+		"cwd":     workDir,
+		"purpose": "untracked file discovery",
+	}, workDir, untrackedCommand)
+	if err != nil {
+		return nil, fmt.Errorf("untracked file discovery in %s: %w", workDir, err)
+	}
+	seen := make(map[string]struct{})
+	var lines []string
+	for _, out := range [][]byte{diffOut, untrackedOut} {
+		for _, line := range strings.Split(string(out), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			if _, ok := seen[line]; ok {
+				continue
+			}
+			seen[line] = struct{}{}
+			lines = append(lines, line)
+		}
+	}
+	return lines, nil
+}
+
+// truncatedCoverageRun reports a file walk that stopped at its limit. Its
+// required incomplete status makes the aggregated report incomplete. The caller
+// prepends it to the tool runs, so its summary becomes the report summary.
+func truncatedCoverageRun(scope string, scanned, limit int) schemas.VerificationToolRun {
+	return schemas.VerificationToolRun{
+		Tool:     "coverage",
+		Required: true,
+		Scope:    scope,
+		Status:   schemas.VerificationIncomplete,
+		Summary:  fmt.Sprintf("scanned %d file(s); more files were not scanned (limit %d)", scanned, limit),
 	}
 }

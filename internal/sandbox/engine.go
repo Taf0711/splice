@@ -26,6 +26,8 @@ type Engine struct {
 	sessionProfiles *permissionProfileGrantSet
 	turnProfiles    *permissionProfileGrantSet
 	commandPrefixes *commandPrefixGrantSet
+	// stage marks an engine built by StageEngine.
+	stage bool
 }
 
 func NewEngine(options EngineOptions) *Engine {
@@ -106,6 +108,7 @@ func (engine *Engine) ReRooted(workspaceRoot string) *Engine {
 		sessionProfiles: engine.sessionProfiles,
 		turnProfiles:    engine.turnProfiles,
 		commandPrefixes: engine.commandPrefixes,
+		stage:           engine.stage,
 	}
 	clone.scope = newScopeBestEffort(rooted)
 	for _, extra := range extras {
@@ -115,6 +118,75 @@ func (engine *Engine) ReRooted(workspaceRoot string) *Engine {
 		_, _ = clone.scope.AddRead(readExtra)
 	}
 	return clone
+}
+
+// StageEngine returns the engine for deterministic stage commands that run
+// repository code. Its policy is StagePolicy over the receiver's static policy
+// plus the DenyRead entries of the session and turn permission profiles. The
+// scope has workspaceRoot only. The engine has no grant store and no grants,
+// so no persistent, session, or prefix grant and no added directory reaches a
+// stage command. The backend is the receiver's backend. A nil receiver gives
+// StagePolicy(Policy{}, tempRoot) on the host native backend.
+func (engine *Engine) StageEngine(workspaceRoot, tempRoot string) *Engine {
+	base := Policy{}
+	var backend Backend
+	if engine == nil {
+		backend = SelectBackend(BackendOptions{})
+	} else {
+		base = engine.policy
+		// Profiles can widen reads, writes, and network; only their read
+		// denials are restrictions, so only those carry over.
+		base.DenyRead = append([]string(nil), base.DenyRead...)
+		for _, profile := range append(engine.sessionProfiles.list(), engine.turnProfiles.list()...) {
+			if profile.FileSystem != nil {
+				base.DenyRead = append(base.DenyRead, profile.FileSystem.DenyRead...)
+			}
+		}
+		backend = engine.backend
+	}
+	stage := NewEngine(EngineOptions{
+		WorkspaceRoot: workspaceRoot,
+		Policy:        StagePolicy(base, tempRoot),
+		Backend:       backend,
+	})
+	stage.stage = true
+	return stage
+}
+
+// PolicySummary is a count-only view of an engine's effective policy. It
+// names no path, so a run record can keep it.
+type PolicySummary struct {
+	// Stage is true for an engine built by StageEngine.
+	Stage            bool
+	Mode             PolicyMode
+	Network          NetworkMode
+	EnforceWorkspace bool
+	// WriteRoots counts the command write roots: the workspace, the granted
+	// extra roots, and the AllowWrite roots that exist.
+	WriteRoots int
+	DenyRead   int
+	DenyWrite  int
+}
+
+// PolicySummary returns the summary of the policy a command plan of this
+// engine uses. A nil engine has the zero summary.
+func (engine *Engine) PolicySummary() PolicySummary {
+	if engine == nil {
+		return PolicySummary{}
+	}
+	policy := engine.effectivePolicy(engine.policy)
+	if policy.Mode == "" {
+		policy = DefaultPolicy()
+	}
+	return PolicySummary{
+		Stage:            engine.stage,
+		Mode:             policy.Mode,
+		Network:          NormalizeNetworkMode(policy.Network),
+		EnforceWorkspace: policy.EnforceWorkspace,
+		WriteRoots:       len(engine.writeRoots(engine.workspaceRoot)),
+		DenyRead:         len(policy.DenyRead),
+		DenyWrite:        len(policy.DenyWrite),
+	}
 }
 
 // WorkspaceRoot returns the construction-time workspace root. Callers use it
@@ -278,9 +350,16 @@ func newScopeBestEffort(workspaceRoot string) *Scope {
 	return &Scope{workspaceRoot: normalizeWorkspaceRootBestEffort(workspaceRoot)}
 }
 
+// NestedSandboxGap is the EnforcementGap of an engine that would enforce, but
+// Splice itself runs inside a sandbox (IsAlreadySandboxed), so every plan is a
+// pass-through.
+const NestedSandboxGap = "Splice already runs inside a sandbox, so it cannot apply its own"
+
 // EnforcementGap returns why the engine does not enforce its policy with the
 // native sandbox, or "" when it does. A caller that must never run outside the
-// sandbox, such as a pipeline agent node, refuses to start on a gap.
+// sandbox, such as a pipeline agent node, refuses to start on a gap. The
+// nested-sandbox gap comes last, so NestedSandbox is true only when it is the
+// one gap.
 func (engine *Engine) EnforcementGap() string {
 	if engine == nil {
 		return "no sandbox engine is available"
@@ -296,7 +375,18 @@ func (engine *Engine) EnforcementGap() string {
 		}
 		return reason
 	}
+	if IsAlreadySandboxed() {
+		// BuildCommandPlan returns a pass-through plan under the markers.
+		return NestedSandboxGap
+	}
 	return ""
+}
+
+// NestedSandbox reports whether the only enforcement gap of the engine is
+// that Splice already runs inside a sandbox. A caller can accept this gap
+// alone; a missing backend or a disabled policy never reports true.
+func (engine *Engine) NestedSandbox() bool {
+	return engine != nil && engine.EnforcementGap() == NestedSandboxGap
 }
 
 // shellSandboxActive reports whether a native wrapping sandbox would actually

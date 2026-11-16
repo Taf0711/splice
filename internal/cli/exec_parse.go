@@ -28,6 +28,8 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 			options.listTools = true
 		case arg == "--inherit-worktree-trust":
 			options.inheritWorktreeTrust = true
+		case arg == "--accept-nested-sandbox":
+			options.acceptNestedSandbox = true
 		case arg == "--memory":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {

@@ -1186,11 +1186,16 @@ func TestTestRunnerPassesAndFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pass run: %v", err)
 	}
-	if pass.Confidence != 1.0 {
-		t.Fatalf("expected confidence 1.0, got %v", pass.Confidence)
+	// A non-Go command that exits 0 proves only that the command succeeded:
+	// no passed entry, confidence below 1.0.
+	if pass.Confidence != 0.7 {
+		t.Fatalf("expected confidence 0.7, got %v", pass.Confidence)
 	}
-	if !strings.Contains(pass.Summary, "passed") {
-		t.Fatalf("expected passed summary, got %q", pass.Summary)
+	if pass.Summary != "Test command passed. Per-test evidence is not available." {
+		t.Fatalf("expected command-only passed summary, got %q", pass.Summary)
+	}
+	if results := pass.Data["test_results"].(schemas.TestRunResults); results.Evidence != schemas.TestEvidenceCommandOnly || results.Passed() != 0 {
+		t.Fatalf("expected command_only evidence with no passed entry, got %+v", results)
 	}
 	if _, ok := pass.Data["test_command"]; !ok {
 		t.Fatalf("expected test_command in output data, got %#v", pass.Data)
@@ -1248,11 +1253,15 @@ func TestTestRunnerRunToolPath(t *testing.T) {
 		if err != nil {
 			t.Fatalf("stage run: %v", err)
 		}
-		if result.Confidence != 1.0 {
-			t.Fatalf("expected confidence 1.0, got %v", result.Confidence)
+		// go test exit 0 with no test events: no tests ran, never a pass.
+		if result.Confidence != 0.5 {
+			t.Fatalf("expected confidence 0.5, got %v", result.Confidence)
 		}
-		if !strings.Contains(result.Summary, "passed") {
-			t.Fatalf("expected passed summary, got %q", result.Summary)
+		if result.Summary != "Test command passed. No tests ran." {
+			t.Fatalf("expected no-tests summary, got %q", result.Summary)
+		}
+		if results := result.Data["test_results"].(schemas.TestRunResults); results.Passed() != 0 || results.Evidence != schemas.TestEvidenceNone {
+			t.Fatalf("expected no passed entry and evidence none, got %+v", results)
 		}
 	})
 

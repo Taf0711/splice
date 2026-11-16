@@ -153,7 +153,7 @@ func runExecSpecDraft(run execSpecDraftRun) int {
 		Autonomy:                   "low",
 		Sandbox:                    run.sandboxEngine,
 		FileTracker:                tools.NewFileTracker(),
-		Hooks:                      newHookDispatcherWithExtra(run.workspaceRoot, !run.trusted, nil),
+		Hooks:                      newHookDispatcherWithExtra(run.workspaceRoot, !run.trusted, nil, run.stderr),
 		EnabledTools:               run.options.enabledTools,
 		DisabledTools:              run.options.disabledTools,
 		OnText:                     writer.text,

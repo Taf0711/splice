@@ -1024,8 +1024,9 @@ func runInteractiveTUIWithSetup(stdout io.Writer, stderr io.Writer, deps appDeps
 			PermissionMode:             permissionMode,
 			Autonomy:                   "low",
 			Sandbox:                    sandboxEngine,
+			AcceptNestedSandbox:        resolved.Sandbox.AcceptNestedSandbox,
 			FileTracker:                tools.NewFileTracker(),
-			Hooks:                      newHookDispatcherWithExtra(workspaceRoot, !trusted, pluginActivation.hooks),
+			Hooks:                      newHookDispatcherWithExtra(workspaceRoot, !trusted, pluginActivation.hooks, stderr),
 			DeferThreshold:             resolved.Tools.DeferThreshold,
 			CompactionReserveTokens:    resolved.Compaction.ReserveTokens,
 			CompactionKeepRecentTokens: resolved.Compaction.KeepRecentTokens,
@@ -1714,6 +1715,7 @@ Flags:
       --disabled-tools <tools>       Hide these comma or space separated tools
       --list-tools                   List model-visible tools and exit
       --inherit-worktree-trust       Let a worktree inherit trust from its trusted source repo (spike; off by default)
+      --accept-nested-sandbox        Run stage commands under an outer sandbox when Splice already runs inside one (this run only)
       --profile <profile>            Accept legacy model profile selection
   -r, --reasoning-effort <effort>    Accept legacy reasoning effort selection
   -C, --cwd <path>                   Set the workspace directory

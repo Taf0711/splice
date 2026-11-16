@@ -920,6 +920,9 @@ func (tr *runTraceAccumulator) buildOutcome(stageRecords []schemas.StageRecord, 
 func (tr *runTraceAccumulator) buildRunOutcome(result schemas.PipelineResult) (schemas.RunOutcome, error) {
 	outcome, err := tr.buildOutcome(result.Stages, result.Status, abortReason(result))
 	outcome.Outcome.Verified = result.Verified
+	outcome.Outcome.VerificationOutcome = result.VerificationOutcome
+	outcome.Outcome.VerificationChecks = append([]schemas.VerificationCheck(nil), result.VerificationChecks...)
+	outcome.Outcome.NestedSandboxAccepted = result.NestedSandboxAccepted
 	return outcome, err
 }
 
