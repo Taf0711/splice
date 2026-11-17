@@ -1122,3 +1122,47 @@ func TestSandboxEvidenceValidate(t *testing.T) {
 		t.Fatalf("legacy record: %v", err)
 	}
 }
+
+// sizedTopology builds a valid chain of command nodes with the given counts.
+// Its edges go from each node to a later one, so it has no cycle.
+func sizedTopology(nodes, edges int) PipelineTopology {
+	topology := PipelineTopology{Version: TopologySchemaVersion, Name: "sized", MinSplice: AgentNodeMinSplice}
+	for i := 0; i < nodes; i++ {
+		topology.Nodes = append(topology.Nodes, PipelineNode{Name: fmt.Sprintf("n%d", i), Type: NodeTypeCommand, Command: []string{"true"}})
+	}
+	for i := 0; len(topology.Edges) < edges; i++ {
+		for j := i + 1; j < nodes && len(topology.Edges) < edges; j++ {
+			topology.Edges = append(topology.Edges, PipelineEdge{From: fmt.Sprintf("n%d", i), To: fmt.Sprintf("n%d", j)})
+		}
+	}
+	return topology
+}
+
+// TestTopologySizeLimitsAreInclusive pins that a topology at the node and edge
+// limits loads, and one over either limit is refused with its count.
+func TestTopologySizeLimitsAreInclusive(t *testing.T) {
+	tests := []struct {
+		name         string
+		nodes, edges int
+		want         string
+	}{
+		{"nodes at the limit", MaxTopologyNodes, 0, ""},
+		{"nodes over the limit", MaxTopologyNodes + 1, 0, fmt.Sprintf("%d nodes exceed the limit of %d", MaxTopologyNodes+1, MaxTopologyNodes)},
+		{"edges at the limit", MaxTopologyNodes, MaxTopologyEdges, ""},
+		{"edges over the limit", MaxTopologyNodes, MaxTopologyEdges + 1, fmt.Sprintf("%d edges exceed the limit of %d", MaxTopologyEdges+1, MaxTopologyEdges)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := sizedTopology(tc.nodes, tc.edges).Validate()
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate() = %v, want an error containing %q", err, tc.want)
+			}
+		})
+	}
+}

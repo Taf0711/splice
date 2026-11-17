@@ -77,7 +77,10 @@ func (v *PipelineView) Configure(sources splicerun.TopologySources, stageConfigP
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.sources, v.stageConfigPath = sources, stageConfigPath
-	v.runTopologyName = "" // resolve the run topology again from the new sources
+	// A run in view keeps the topology it resolved. A new run resolves again in BeginRun.
+	if !v.liveStateLocked() {
+		v.runTopologyName = ""
+	}
 }
 
 // secretSource is the run's list of exact secret values, loaded once.
@@ -116,6 +119,7 @@ func (v *PipelineView) BeginRun(secrets func() ([]string, error)) {
 		v.source = &secretSource{load: secrets}
 	}
 	v.timeline = nil
+	v.runTopologyName, v.runTopology, v.runTopologyNote = "", nil, ""
 	v.sentLayout, v.sentHeader, v.sentFrames = "", pipelineHeader{}, map[string]nodeFrame{}
 }
 
@@ -209,12 +213,27 @@ func (v *PipelineView) liveStateLocked() bool {
 
 // observeLocked is Observe. The caller holds mu.
 //
-// ponytail: each snapshot rebuilds the whole graph and layout (BuildGraph and
-// layoutGraph are linear in the nodes, and a snapshot comes per stage event
-// and per usage report). Diff the presentation state instead if a topology
-// grows to hundreds of nodes.
+// ponytail: each snapshot rebuilds the whole graph and layout, and a snapshot
+// comes per stage event and per usage report. BuildGraph is linear in the
+// nodes and edges. layoutGraph is not: an edge takes a slot in each column it
+// skips, so a complete graph of n nodes has about n*n*n/6 slots, and the
+// label placement is about quadratic in the labels of one gap. Its work is
+// bounded (maxIndexedSegments, TestLayoutOfALargeGraphIsFast): 60 complete
+// nodes take about 25 ms. Diff the presentation state, or cache the layout by
+// its key, if a topology grows to hundreds of nodes.
 func (v *PipelineView) observeLocked(state presentation.State) {
 	v.state = state
+	// Pin the run topology at the first snapshot of the run, page or no page,
+	// so a later change of the file on disk does not reach the page. It reads
+	// the disk once per run: resolveRunTopologyLocked resolves only when the
+	// plan's topology name differs from the resolved one, and BeginRun and
+	// Reset clear that name for the next run.
+	//
+	// A window stays: the run loads its topology before its first snapshot,
+	// and a change of the file between the two is not seen here.
+	if v.liveStateLocked() {
+		v.resolveRunTopologyLocked()
+	}
 	if !v.streaming() {
 		return // a page that loads later renders the stored state
 	}
@@ -377,19 +396,22 @@ type pipelineHeader struct {
 }
 
 // graphData is the payload of the pipeline-graph event, and of the graph
-// endpoint, which adds the SVG.
+// endpoint, which adds the SVG and the node frames.
 //
 //   - run_seq: the run sequence. A page that shows another run loads the graph.
 //   - layout: the layout key. A page with another layout loads the graph.
 //   - resync: the page must load the graph, because node events were left out.
+//   - nodes: the frame of each node, as the node events send them. The editor
+//     paints the run on its own canvas from them.
 type graphData struct {
 	Run    int    `json:"run_seq"`
 	Layout string `json:"layout"`
 	Resync bool   `json:"resync,omitempty"`
 	pipelineHeader
-	Notes       []string `json:"notes"`
-	HasTimeline bool     `json:"has_timeline"`
-	SVG         string   `json:"svg,omitempty"`
+	Notes       []string    `json:"notes"`
+	HasTimeline bool        `json:"has_timeline"`
+	SVG         string      `json:"svg,omitempty"`
+	Nodes       []nodeFrame `json:"nodes,omitempty"`
 }
 
 // pipelineCurrent is the graph the view shows now, with its context.
@@ -402,6 +424,7 @@ type pipelineCurrent struct {
 	agents   []agentView
 	// agentInput and agentOutput are the token caps of all agent nodes.
 	agentInput, agentOutput int
+	source                  string // the topology that commands and agents come from
 	problem                 string
 	secrets                 []string // the exact values this view was redacted with
 }
@@ -444,6 +467,11 @@ func (v *PipelineView) liveLocked() pipelineCurrent {
 		graph.Notes = append([]string{v.runTopologyNote}, graph.Notes...)
 	}
 	cur.graph, cur.notes = graph, graph.Notes
+	// The run's command and agent nodes, when the graph shows the run's
+	// topology: not for a plan-only graph (no topology, or one that changed).
+	if v.runTopology != nil && graph.FromTopology {
+		cur.disclose(v.runTopology, "Topology of the run in view.")
+	}
 	cur.header = pipelineHeader{Topology: graph.Topology, RunState: "running", Run: "Running."}
 	if graph.Tier != "" {
 		cur.header.Facts = graph.Tier + " tier"
@@ -488,15 +516,22 @@ func (v *PipelineView) staticLocked() pipelineCurrent {
 	cur.header.Topology = graph.Topology
 	cur.header.Facts = "source: " + source
 	cur.notes = append(append(append([]string(nil), graph.Notes...), warnings...), compileWarnings...)
+	cur.disclose(topology, "Active topology at page load.")
+	if len(graph.Nodes) == 0 {
+		cur.problem = "The topology has no nodes."
+	}
+	return cur
+}
+
+// disclose lists the command nodes and the agent nodes of a topology, as the
+// trust card does, and sums the agent budgets. source says which topology it is.
+func (cur *pipelineCurrent) disclose(topology *schemas.PipelineTopology, source string) {
+	cur.source = source
 	cur.commands = splicerun.CommandNodes(topology)
 	for _, agent := range splicerun.AgentNodes(topology) {
 		cur.agents = append(cur.agents, agentViewOf(agent))
 	}
 	cur.agentInput, cur.agentOutput = splicerun.AgentBudgetSums(topology)
-	if len(graph.Nodes) == 0 {
-		cur.problem = "The topology has no nodes."
-	}
-	return cur
 }
 
 // agentView is the page text of one agent node disclosure.
@@ -532,6 +567,9 @@ type pipelinePage struct {
 	Commands []splicerun.CommandNode
 	// CommandCount says how many command nodes run shell commands.
 	CommandCount string
+	// Source says which topology the command and agent lists come from: the
+	// active topology at page load, or the topology of the run in view.
+	Source string
 	// Agents disclose the agent nodes as the terminal trust card does.
 	Agents      []agentView
 	AgentCount  string
@@ -551,6 +589,7 @@ func (v *PipelineView) servePage(w http.ResponseWriter, _ *http.Request, _ strin
 		Notes:          cur.notes,
 		Commands:       cur.commands,
 		CommandCount:   splicerun.CommandNodeCountText(len(cur.commands)),
+		Source:         cur.source,
 		Agents:         cur.agents,
 		AgentCount:     splicerun.AgentNodeCountText(len(cur.agents)),
 		AgentBudget:    fmt.Sprintf("Together they may use up to %d input and %d output tokens, on top of the tier envelope", cur.agentInput, cur.agentOutput),
@@ -601,6 +640,9 @@ func (v *PipelineView) serveSub(w http.ResponseWriter, r *http.Request, sub stri
 		data.SVG = svg.String()
 		if cur.problem != "" {
 			data.SVG = ""
+		}
+		for _, box := range layout.Nodes {
+			data.Nodes = append(data.Nodes, box.Frame)
 		}
 		writeJSON(w, data)
 	case "node":

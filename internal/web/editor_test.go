@@ -3,17 +3,22 @@ package web
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Taf0711/splice/internal/presentation"
 	splicerun "github.com/Taf0711/splice/internal/splice"
+	"github.com/Taf0711/splice/internal/splice/presentrun"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/splice/stages"
 )
@@ -700,6 +705,294 @@ func TestEditorUseWithoutAHostSaysHow(t *testing.T) {
 	}
 }
 
+func TestUseMakesTheEntryActiveForTheEditor(t *testing.T) {
+	config := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", config)
+	// No project file, so the embedded default is the active topology.
+	sources := splicerun.TopologySources{UserConfigDir: config}
+	team := pipelineDiamond()
+	team.Name = "team"
+	data, err := json.Marshal(team)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(config, "splice", "pipelines")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "team.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	editor := NewEditor(EditorConfig{Sources: sources, Use: func(name string) (string, error) {
+		topology, _, err := splicerun.ActivateLibraryPipeline(name)
+		if err != nil {
+			return "", err
+		}
+		return "active pipeline: " + topology.Name, nil
+	}})
+	s, boot := startServer(t, time.Hour)
+	if err := editor.Attach(s); err != nil {
+		t.Fatal(err)
+	}
+	env := &editorEnv{s: s, cookie: sessionFor(t, s, boot), config: config, sources: sources}
+	if status, body := env.call(t, http.MethodPost, "use", map[string]string{"name": "missing"}); status != http.StatusConflict {
+		t.Fatalf("use of a missing entry: %d %s", status, body)
+	}
+	if _, page := env.raw(t, http.MethodGet, "", nil, nil); strings.Contains(string(page), "missing, ") {
+		t.Fatal("a failed use changed the active topology")
+	}
+	if status, body := env.call(t, http.MethodPost, "use", map[string]string{"name": "team"}); status != http.StatusOK {
+		t.Fatalf("use: %d %s", status, body)
+	}
+	if _, page := env.raw(t, http.MethodGet, "", nil, nil); !strings.Contains(string(page), "team, ") {
+		t.Error("the home page does not name team as the active topology")
+	}
+	id := env.newDraft(t, fromActive, "")
+	d, err := loadDraft(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name := draftName(d.Doc); name != "team" {
+		t.Errorf("a draft from the active topology is a copy of %q, want team", name)
+	}
+}
+
+// libraryUseEnv starts an editor over sources with a library entry "team".
+// Its Use host accepts "team" and refuses every other name.
+func libraryUseEnv(t *testing.T, sources splicerun.TopologySources) (*editorEnv, *Editor) {
+	t.Helper()
+	config := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", config)
+	sources.UserConfigDir = config
+	team := pipelineDiamond()
+	team.Name = "team"
+	data, err := json.Marshal(team)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(config, "splice", "pipelines")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "team.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The host is the CLI's Use: it writes config.json, as the real host does.
+	editor := NewEditor(EditorConfig{Sources: sources, Use: func(name string) (string, error) {
+		topology, _, err := splicerun.ActivateLibraryPipeline(name)
+		if err != nil {
+			return "", err
+		}
+		return "active pipeline: " + topology.Name, nil
+	}})
+	s, boot := startServer(t, time.Hour)
+	if err := editor.Attach(s); err != nil {
+		t.Fatal(err)
+	}
+	return &editorEnv{s: s, cookie: sessionFor(t, s, boot), config: config, sources: sources}, editor
+}
+
+// TestFailedUseKeepsTheActiveTopology pins that a refused Use leaves the
+// active topology as it was: the home page still names the embedded default.
+func TestFailedUseKeepsTheActiveTopology(t *testing.T) {
+	env, _ := libraryUseEnv(t, splicerun.TopologySources{})
+	if status, body := env.call(t, http.MethodPost, "use", map[string]string{"name": "ghost"}); status != http.StatusConflict {
+		t.Fatalf("use of a missing entry: %d %s", status, body)
+	}
+	_, page := env.raw(t, http.MethodGet, "", nil, nil)
+	if !strings.Contains(string(page), "default, "+splicerun.TopologySourceDefault) || strings.Contains(string(page), "did not resolve") {
+		t.Fatalf("after a failed use the home page does not name the embedded default:\n%s", page)
+	}
+}
+
+// TestUseKeepsATrustedProjectFileFirst pins that after Use the editor still
+// resolves a trusted project file first, as a run does.
+func TestUseKeepsATrustedProjectFileFirst(t *testing.T) {
+	env, _ := libraryUseEnv(t, pipelineWorkspace(t))
+	if status, body := env.call(t, http.MethodPost, "use", map[string]string{"name": "team"}); status != http.StatusOK {
+		t.Fatalf("use: %d %s", status, body)
+	}
+	if _, page := env.raw(t, http.MethodGet, "", nil, nil); !strings.Contains(string(page), "diamond, "+splicerun.TopologySourceProject) {
+		t.Fatalf("the home page does not name the trusted project file as active:\n%s", page)
+	}
+	d, err := loadDraft(env.newDraft(t, fromActive, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name := draftName(d.Doc); name != "diamond" || !strings.HasPrefix(d.Source, "copy of the project file") {
+		t.Errorf("a draft from the active topology is %q (%s), want a copy of the project file", name, d.Source)
+	}
+}
+
+// TestUseRacesWithTheActiveReaders runs Use beside the readers of the
+// active topology (the home page, a draft from the active topology, and
+// OpenDraft) and beside Configure, the one writer of the configuration. The
+// race detector fails it on an unguarded access.
+func TestUseRacesWithTheActiveReaders(t *testing.T) {
+	env, editor := libraryUseEnv(t, splicerun.TopologySources{})
+	do := func(method, path, body string) error {
+		req, err := http.NewRequest(method, env.s.at("/s/editor/"+path), strings.NewReader(body))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Origin", env.s.origin)
+		req.Header.Set(actionHeader, actionOf(env.s))
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(env.cookie)
+		resp, err := noRedirect().Do(req)
+		if err != nil {
+			return err
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode >= 500 {
+			return errors.New(method + " " + path + ": " + resp.Status)
+		}
+		return nil
+	}
+	const rounds = 20
+	errs := make(chan error, 5*rounds)
+	done := make(chan struct{})
+	for _, work := range []func() error{
+		func() error { return do(http.MethodPost, "use", `{"name":"team"}`) },
+		func() error { return do(http.MethodGet, "", "") },
+		func() error { return do(http.MethodPost, "drafts", `{"from":"active","name":"","new":true}`) },
+		func() error { _, err := editor.OpenDraft("", false); return err },
+		func() error { editor.Configure(editor.config()); return nil },
+	} {
+		go func() {
+			for range rounds {
+				errs <- work()
+			}
+			done <- struct{}{}
+		}()
+	}
+	for range 5 {
+		<-done
+	}
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Error(err)
+		}
+	}
+	if _, page := env.raw(t, http.MethodGet, "", nil, nil); !strings.Contains(string(page), "team, "+splicerun.TopologySourceLibrary) {
+		t.Error("after the uses the home page does not name team as the active topology")
+	}
+}
+
+// TestActivationOutsideTheEditorShowsOnTheHomePage pins that a change of the
+// active pipeline made by the CLI or the TUI, not by this editor's Use, is
+// shown on the next page load.
+func TestActivationOutsideTheEditorShowsOnTheHomePage(t *testing.T) {
+	env, _ := libraryUseEnv(t, splicerun.TopologySources{})
+	if _, _, err := splicerun.ActivateLibraryPipeline("team"); err != nil {
+		t.Fatal(err)
+	}
+	if _, page := env.raw(t, http.MethodGet, "", nil, nil); !strings.Contains(string(page), "team, "+splicerun.TopologySourceLibrary) {
+		t.Fatalf("the home page does not name team after an outside activation:\n%s", page)
+	}
+}
+
+// TestHomeShowsABrokenConfigAndStaysUsable pins that a config.json that does
+// not parse or cannot be read shows its error on the home page, and that the
+// drafts that do not need the active pipeline still open.
+func TestHomeShowsABrokenConfigAndStaysUsable(t *testing.T) {
+	for name, write := range map[string]func(path string) error{
+		"invalid JSON": func(path string) error { return os.WriteFile(path, []byte("{"), 0o600) },
+		"unreadable":   func(path string) error { return os.WriteFile(path, []byte("{}"), 0o000) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			env, _ := libraryUseEnv(t, splicerun.TopologySources{})
+			path := filepath.Join(env.config, "splice", "config.json")
+			if err := write(path); err != nil {
+				t.Fatal(err)
+			}
+			if name == "unreadable" {
+				if _, err := os.ReadFile(path); err == nil {
+					t.Skip("the file is readable for this user")
+				}
+			}
+			status, page := env.raw(t, http.MethodGet, "", nil, nil)
+			if status != http.StatusOK || !strings.Contains(string(page), "The active topology did not resolve") || !strings.Contains(string(page), "config.json") {
+				t.Fatalf("home page: %d\n%s", status, page)
+			}
+			if status, body := env.call(t, http.MethodPost, "drafts", map[string]string{"from": "active"}); status != http.StatusUnprocessableEntity {
+				t.Errorf("a draft from the unknown active pipeline: %d %s", status, body)
+			}
+			env.newDraft(t, fromDefault, "")
+			env.newDraft(t, fromLibrary, "team")
+		})
+	}
+}
+
+// TestLayoutSkipsRoutingOverTheSizeLimit pins that the layout endpoint does not
+// route a topology over the size limit: it returns a position for every node
+// and no routed paths.
+func TestLayoutSkipsRoutingOverTheSizeLimit(t *testing.T) {
+	env, _ := libraryUseEnv(t, splicerun.TopologySources{})
+	node := func(i int) schemas.PipelineNode {
+		return schemas.PipelineNode{Name: "n" + strconv.Itoa(i), Type: schemas.NodeTypeCommand, Command: []string{"true"}}
+	}
+	// Too many nodes, no edges.
+	var wide schemas.PipelineTopology
+	for i := 0; i <= schemas.MaxTopologyNodes; i++ {
+		wide.Nodes = append(wide.Nodes, node(i))
+	}
+	// Too many edges: forward edges over 65 nodes, one more than the cap.
+	var dense schemas.PipelineTopology
+	for i := 0; i < 65; i++ {
+		dense.Nodes = append(dense.Nodes, node(i))
+	}
+	for i := 0; i < 65 && len(dense.Edges) <= schemas.MaxTopologyEdges; i++ {
+		for j := i + 1; j < 65 && len(dense.Edges) <= schemas.MaxTopologyEdges; j++ {
+			dense.Edges = append(dense.Edges, schemas.PipelineEdge{From: "n" + strconv.Itoa(i), To: "n" + strconv.Itoa(j)})
+		}
+	}
+	for name, topology := range map[string]schemas.PipelineTopology{"wide": wide, "dense": dense} {
+		status, body := env.call(t, http.MethodPost, "layout", map[string]any{"doc": topology})
+		if status != http.StatusOK {
+			t.Fatalf("%s: layout status %d: %s", name, status, body)
+		}
+		var reply struct {
+			Positions []position    `json:"positions"`
+			Paths     []layoutRoute `json:"paths"`
+		}
+		if err := json.Unmarshal(body, &reply); err != nil {
+			t.Fatal(err)
+		}
+		if len(reply.Positions) != len(topology.Nodes) {
+			t.Errorf("%s: %d positions for %d nodes", name, len(reply.Positions), len(topology.Nodes))
+		}
+		if len(reply.Paths) != 0 {
+			t.Errorf("%s: %d routed paths, want none over the size limit", name, len(reply.Paths))
+		}
+	}
+}
+
+// TestEditorShowsTheTopologySizeLimitAsAPipelineProblem pins that a topology
+// over the size limit is one pipeline-level problem that names the count.
+func TestEditorShowsTheTopologySizeLimitAsAPipelineProblem(t *testing.T) {
+	topology := pipelineDiamond()
+	topology.Nodes = nil
+	for i := 0; i <= schemas.MaxTopologyNodes; i++ {
+		topology.Nodes = append(topology.Nodes, schemas.PipelineNode{Name: "n" + strconv.Itoa(i), Type: schemas.NodeTypeCommand, Command: []string{"true"}})
+	}
+	topology.Edges = nil
+	data, err := json.Marshal(topology)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := checkDoc(data)
+	if check.Valid || len(check.Problems) != 1 {
+		t.Fatalf("problems = %+v, want one pipeline problem", check.Problems)
+	}
+	p := check.Problems[0]
+	if p.Index != nil || p.Edge != nil || p.Node != "" || !strings.Contains(p.Message, "exceed the limit") {
+		t.Fatalf("problem = %+v, want a pipeline-level problem that names the limit", p)
+	}
+}
+
 func TestBootstrapURLForOpensThePageOnce(t *testing.T) {
 	s, _ := startServer(t, time.Hour)
 	link, err := s.BootstrapURLFor(EditorSurface, url.Values{"draft": {strings.Repeat("a", 32)}})
@@ -757,6 +1050,38 @@ func TestViewerLinksToTheEditorOnlyWhenServed(t *testing.T) {
 	}
 }
 
+// TestEditorBootSaysWhetherTheViewerIsServed pins the boot flag that keeps
+// the standalone editor from asking for the viewer's graph: false on a
+// server with the editor only, true when the server also has the viewer.
+func TestEditorBootSaysWhetherTheViewerIsServed(t *testing.T) {
+	env := startEditor(t)
+	id := env.newDraft(t, fromNew, "")
+	viewerOf := func() bool {
+		t.Helper()
+		_, body := env.raw(t, http.MethodGet, "?draft="+id, nil, nil)
+		m := regexp.MustCompile(`data-boot="([^"]*)"`).FindSubmatch(body)
+		if m == nil {
+			t.Fatal("editor page has no boot data")
+		}
+		var boot struct {
+			Viewer *bool `json:"viewer"`
+		}
+		if err := json.Unmarshal([]byte(htmlUnescape(string(m[1]))), &boot); err != nil || boot.Viewer == nil {
+			t.Fatalf("boot data: %v, viewer %v", err, boot.Viewer)
+		}
+		return *boot.Viewer
+	}
+	if viewerOf() {
+		t.Fatal("a server with the editor only says that it has the viewer")
+	}
+	if err := NewPipelineView(env.sources, "").Attach(env.s); err != nil {
+		t.Fatal(err)
+	}
+	if !viewerOf() {
+		t.Fatal("a server with the viewer says that it has none")
+	}
+}
+
 // TestEditorJSONIsThePublishedFile pins the JSON tab: the document in the
 // check is byte for byte the file that publish writes.
 func TestEditorJSONIsThePublishedFile(t *testing.T) {
@@ -807,16 +1132,153 @@ func TestEditorAutoLayoutIsTheViewerLayout(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("layout: %d %s", status, body)
 	}
-	var reply struct{ Positions []position }
+	var reply struct {
+		Positions []position
+		Paths     []layoutRoute
+	}
 	if err := json.Unmarshal(body, &reply); err != nil {
 		t.Fatal(err)
 	}
-	want := initialPositions(pipelineDiamond())
+	want, routes := layoutTopology(pipelineDiamond())
 	if len(reply.Positions) != len(want) || reply.Positions[3] != want[3] || reply.Positions[0] == reply.Positions[3] {
 		t.Fatalf("positions = %+v, want the viewer layout %+v", reply.Positions, want)
 	}
+	// The routed paths are the viewer's edges, one per edge, keyed by its ends.
+	graph, err := presentrun.BuildGraph(pipelineDiamond(), presentation.State{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	viewer := layoutGraph(graph)
+	if len(reply.Paths) != len(viewer.Edges) || fmt.Sprint(reply.Paths) != fmt.Sprint(routes) {
+		t.Fatalf("paths = %+v, want %+v", reply.Paths, routes)
+	}
+	for i, e := range viewer.Edges {
+		if p := reply.Paths[i]; p.From != e.From || p.To != e.To || p.D != e.Path || p.X != e.MidX || p.Y != e.MidY {
+			t.Fatalf("path %d = %+v, want the viewer edge %s -> %s %q at (%d, %d)", i, p, e.From, e.To, e.Path, e.MidX, e.MidY)
+		}
+	}
 	if status, _ := env.call(t, http.MethodPost, "layout", map[string]any{"doc": "x"}); status != http.StatusBadRequest {
 		t.Fatalf("layout of a bad document: %d, want 400", status)
+	}
+}
+
+// TestEditorLaysOutAnOldDraftOnceWhenItOpens pins the upgrade of a draft from
+// the top-to-bottom layout: the first open lays it out left to right and
+// stores the marker, a save keeps the marker, and a later open keeps the
+// positions that the user set.
+func TestEditorLaysOutAnOldDraftOnceWhenItOpens(t *testing.T) {
+	env := startEditor(t)
+	id := env.newDraft(t, fromActive, "")
+	d, err := loadDraft(id)
+	if err != nil || !d.LeftToRight {
+		t.Fatalf("a new draft: marker %v, err %v; want the marker", d.LeftToRight, err)
+	}
+	old := []position{{X: 12, Y: 12}, {X: 12, Y: 140}, {X: 232, Y: 140}, {X: 12, Y: 268}}
+	d.Positions, d.LeftToRight = old, false
+	if err := saveDraft(d); err != nil {
+		t.Fatal(err)
+	}
+	open := func() draft {
+		t.Helper()
+		if status, body := env.raw(t, http.MethodGet, "?draft="+id, nil, nil); status != http.StatusOK {
+			t.Fatalf("open: %d %s", status, body)
+		}
+		d, err := loadDraft(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	want := initialPositions(pipelineDiamond())
+	if got := open(); !got.LeftToRight || fmt.Sprint(got.Positions) != fmt.Sprint(want) || !got.Updated.Equal(d.Updated) {
+		t.Fatalf("after the first open: marker %v, positions %v, updated %v; want the marker, %v, and no new edit time", got.LeftToRight, got.Positions, got.Updated, want)
+	}
+	moved := []position{{X: 500, Y: 40}, {X: 12, Y: 12}, {X: 12, Y: 300}, {X: 900, Y: 40}}
+	if status, body := env.call(t, http.MethodPut, "draft?id="+id, map[string]any{"doc": pipelineDiamond(), "positions": moved}); status != http.StatusOK {
+		t.Fatalf("save: %d %s", status, body)
+	}
+	if got := open(); !got.LeftToRight || fmt.Sprint(got.Positions) != fmt.Sprint(moved) {
+		t.Fatalf("after a save and a second open: marker %v, positions %v; want the marker and %v", got.LeftToRight, got.Positions, moved)
+	}
+}
+
+// TestEditorUpgradeIsSafeWithTwoTabsAndAFailedWrite pins the one-time
+// layout upgrade under concurrent page loads and saves (run with -race), and
+// that a write error keeps the old draft on disk and still serves the page.
+func TestEditorUpgradeIsSafeWithTwoTabsAndAFailedWrite(t *testing.T) {
+	env := startEditor(t)
+	old := []position{{X: 12, Y: 12}, {X: 12, Y: 140}, {X: 232, Y: 140}, {X: 12, Y: 268}}
+	makeOld := func() (string, draft) {
+		t.Helper()
+		d, err := loadDraft(env.newDraft(t, fromDefault, ""))
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.Doc, _ = json.Marshal(pipelineDiamond())
+		d.Positions, d.LeftToRight = old, false
+		if err := saveDraft(d); err != nil {
+			t.Fatal(err)
+		}
+		return d.ID, d
+	}
+	id, before := makeOld()
+	page := func() error {
+		req, err := http.NewRequest(http.MethodGet, env.s.at("/s/editor/?draft="+id), nil)
+		if err != nil {
+			return err
+		}
+		req.AddCookie(env.cookie)
+		resp, err := noRedirect().Do(req)
+		if err != nil {
+			return err
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return errors.New("open: " + resp.Status)
+		}
+		return nil
+	}
+	errs := make(chan error, 20)
+	for range 10 {
+		go func() { errs <- page() }()
+	}
+	for range 10 {
+		if err := <-errs; err != nil {
+			t.Error(err)
+		}
+	}
+	after, err := loadDraft(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.LeftToRight || fmt.Sprint(after.Positions) != fmt.Sprint(initialPositions(pipelineDiamond())) || !after.Updated.Equal(before.Updated) {
+		t.Fatalf("after concurrent opens: marker %v, positions %v, updated changed %v", after.LeftToRight, after.Positions, !after.Updated.Equal(before.Updated))
+	}
+
+	// A write error: the drafts directory refuses the new file.
+	id, _ = makeOld()
+	dir, err := draftsDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	if probe := filepath.Join(dir, "probe"); os.WriteFile(probe, nil, 0o600) == nil {
+		_ = os.Remove(probe)
+		t.Skip("the drafts directory is writable for this user")
+	}
+	if err := page(); err != nil {
+		t.Fatal(err)
+	}
+	kept, err := loadDraft(id)
+	if err != nil {
+		t.Fatalf("the draft is lost after a failed upgrade write: %v", err)
+	}
+	if kept.LeftToRight || fmt.Sprint(kept.Positions) != fmt.Sprint(old) {
+		t.Fatalf("after a failed write: marker %v, positions %v; want the old draft unchanged", kept.LeftToRight, kept.Positions)
 	}
 }
 
@@ -886,5 +1348,30 @@ func TestParseEditArgs(t *testing.T) {
 		if (err != nil) != tc.bad || ref != tc.ref || fresh != tc.fresh {
 			t.Errorf("ParseEditArgs(%q) = %q, %v, %v", tc.args, ref, fresh, err)
 		}
+	}
+}
+
+// TestEditorSavesAnOversizeDraft pins that a draft over the topology size
+// limit still saves, as an invalid draft whose problem names the limit, so
+// no work is lost.
+func TestEditorSavesAnOversizeDraft(t *testing.T) {
+	env := startEditor(t)
+	id := env.newDraft(t, fromNew, "")
+	big := pipelineDiamond()
+	big.Nodes, big.Edges = nil, nil
+	for i := 0; i <= schemas.MaxTopologyNodes; i++ {
+		big.Nodes = append(big.Nodes, schemas.PipelineNode{Name: "n" + strconv.Itoa(i), Type: schemas.NodeTypeCommand, Command: []string{"true"}})
+	}
+	reply := env.save(t, id, big)
+	if reply.Valid || len(reply.Problems) == 0 || !strings.Contains(reply.Problems[0].Message, "exceed the limit") {
+		t.Fatalf("save of an oversize draft: valid %v, problems %+v", reply.Valid, reply.Problems)
+	}
+	d, err := loadDraft(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved schemas.PipelineTopology
+	if err := json.Unmarshal(d.Doc, &saved); err != nil || len(saved.Nodes) != schemas.MaxTopologyNodes+1 {
+		t.Fatalf("the oversize draft was not saved whole: %d nodes, err %v", len(saved.Nodes), err)
 	}
 }

@@ -14,6 +14,13 @@ import (
 // accepts. Any other value is a hard error that names the supported set.
 const TopologySchemaVersion = 1
 
+// Topology size limits. The browser layout takes seconds for a much larger
+// graph, and it runs under the viewer lock, so a larger file is refused.
+const (
+	MaxTopologyNodes = 256
+	MaxTopologyEdges = 2048
+)
+
 // Custom pipeline node types. Every other Type value must name a builtin
 // stage (see IsBuiltinStageType).
 const (
@@ -464,6 +471,12 @@ func (t PipelineTopology) Validate() error {
 	}
 	if len(t.Nodes) == 0 {
 		return fmt.Errorf("topology %s: at least one node is required", t.Name)
+	}
+	if len(t.Nodes) > MaxTopologyNodes {
+		return fmt.Errorf("topology %s: %d nodes exceed the limit of %d", t.Name, len(t.Nodes), MaxTopologyNodes)
+	}
+	if len(t.Edges) > MaxTopologyEdges {
+		return fmt.Errorf("topology %s: %d edges exceed the limit of %d", t.Name, len(t.Edges), MaxTopologyEdges)
 	}
 	nodeByName := make(map[string]PipelineNode, len(t.Nodes))
 	for i, node := range t.Nodes {

@@ -47,7 +47,7 @@
 </body></html>
 {{end}}{{define "editor"}}{{template "head" .}}<body class="ed" id="editor" data-boot="{{.Boot}}">
 <header class="ed-top">
-<a href="./" class="back">Drafts</a><h1 id="title">{{.Name}}</h1><span id="validity" class="validity"></span><span id="saved" class="saved"></span>
+<a href="./" class="back">Drafts</a><h1 id="title" title="{{.Name}}">{{.Name}}</h1><span id="validity" class="validity"></span><span id="saved" class="saved"></span>
 <span class="bar">
 <button type="button" id="nodes-open" class="narrow">Nodes <kbd>n</kbd></button>
 <button type="button" id="undo">Undo <kbd>u</kbd></button>
@@ -56,11 +56,12 @@
 <button type="button" id="validate">Validate</button>
 <button type="button" id="publish" class="primary">Publish <kbd>p</kbd></button>
 </span>
+<span id="live" class="run live" hidden></span>
 </header>
 <p id="status" class="status" role="status"></p>
 <main class="ed-body">
 <aside id="palette" class="ed-side ed-pal" aria-labelledby="pal-title">
-<div class="panel-head"><h2 id="pal-title">Nodes</h2><button type="button" class="sheet-close" data-close>Close <kbd>Esc</kbd></button></div>
+<div class="panel-head"><h2 id="pal-title">Nodes</h2><button type="button" class="fold" data-fold="palette" aria-expanded="true" aria-label="Hide the Nodes panel">‹</button><button type="button" class="sheet-close" data-close>Close <kbd>Esc</kbd></button></div>
 <input id="pal-search" type="search" placeholder="Search node types" aria-label="Search node types" autocomplete="off" spellcheck="false">
 <p id="pal-hint" class="hint">Choose a type to add a node.</p>
 <h3>Builtin stages</h3><ul class="pal">{{range .Types}}{{if .Builtin}}<li><button type="button" data-type="{{.Name}}"><span class="mono">{{.Name}}</span><span class="about">{{.About}}</span></button></li>{{end}}{{end}}</ul>
@@ -70,17 +71,18 @@
 <section class="ed-center">
 <div class="ed-stage">
 <div class="ed-wrap" id="wrap" aria-label="Canvas">
-<svg id="plane" class="graph" role="group" aria-label="Pipeline graph"><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 1 L9 5 L0 9 z"/></marker></defs><g id="edge-g" class="edges"></g><path id="rubber" class="rubber" d=""/><g id="node-g" class="nodes"></g></svg>
+<svg id="plane" class="graph" role="group" aria-label="Pipeline graph"><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 1 L9 5 L0 9 z"/></marker><clipPath id="name-clip"><rect width="204" height="26"/></clipPath></defs><g id="edge-g" class="edges"></g><path id="rubber" class="rubber" d=""/><g id="node-g" class="nodes"></g></svg>
 <div id="empty" class="ed-empty" hidden><p>This pipeline has no nodes.</p><p>Choose a type in Nodes, or press <kbd>n</kbd>.</p></div>
 </div>
-<div class="ed-tools" role="toolbar" aria-label="Canvas tools">
+<div class="canvas-tools" role="toolbar" aria-label="Canvas tools">
 <button type="button" id="z-out" aria-label="Zoom out">−</button><button type="button" id="z-in" aria-label="Zoom in">+</button><button type="button" id="z-fit">Fit</button><button type="button" id="z-reset">Reset</button><button type="button" id="relayout">Auto-layout</button><button type="button" id="help" aria-label="Keyboard shortcuts">?</button>
 </div>
 </div>
+<p class="legend"><span class="legend-title">Edges carry:</span><span><svg width="28" height="8" aria-hidden="true"><path class="edge summary" d="M0 4H28"/></svg>summary</span><span><svg width="28" height="8" aria-hidden="true"><path class="edge output" d="M0 4H28"/></svg>output: summary and data</span><span><svg width="28" height="8" aria-hidden="true"><path class="edge none" d="M0 4H28"/></svg>order: order only, no data</span></p>
 <section class="ed-problems" aria-labelledby="problems-title"><h2 id="problems-title">Problems</h2><ul id="problems" class="list"></ul><ul id="warnings" class="notes"></ul></section>
 </section>
 <aside id="panel" class="ed-side" aria-labelledby="panel-title">
-<div class="panel-head"><h2 id="panel-title">Pipeline</h2><button type="button" class="sheet-close" data-close>Close <kbd>Esc</kbd></button></div>
+<div class="panel-head"><h2 id="panel-title">Pipeline</h2><button type="button" class="fold" data-fold="panel" aria-expanded="true" aria-label="Hide the inspector">›</button><button type="button" class="sheet-close" data-close>Close <kbd>Esc</kbd></button></div>
 <div class="tabs" role="tablist"><button type="button" role="tab" id="tab-form" aria-selected="true" aria-controls="forms">Inspector</button><button type="button" role="tab" id="tab-json" aria-selected="false" aria-controls="json-pane">JSON</button></div>
 <div id="forms" role="tabpanel" aria-labelledby="tab-form">
 <p class="err" data-err="_"></p>

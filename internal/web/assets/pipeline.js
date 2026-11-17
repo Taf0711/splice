@@ -48,23 +48,47 @@
 		if (t) t.textContent = value;
 	}
 
-	// cut keeps a line inside the box, as the server does (layoutLineRunes).
-	function cut(s) {
+	// Text columns, as the server counts them (runeColumns): a combining mark
+	// is 0, an East Asian wide rune 2, else 1.
+	var WIDE = [[0x1100, 0x115f], [0x2e80, 0x303e], [0x3041, 0x33ff], [0x3400, 0x4dbf], [0x4e00, 0x9fff], [0xa000, 0xa4cf], [0xac00, 0xd7a3], [0xf900, 0xfaff], [0xfe30, 0xfe4f], [0xff00, 0xff60], [0xffe0, 0xffe6], [0x1f300, 0x1f64f], [0x1f900, 0x1f9ff], [0x20000, 0x3fffd]];
+	function cols(ch) {
+		var c = ch.codePointAt(0);
+		return /[\p{Mn}\p{Me}]/u.test(ch) ? 0 : WIDE.some(function (w) { return c >= w[0] && c <= w[1]; }) ? 2 : 1;
+	}
+	function take(r, n) {
+		var k = 0, c = 0;
+		while (k < r.length && c + cols(r[k]) <= n) { c += cols(r[k]); k++; }
+		return k;
+	}
+	// cutEnd keeps a line inside the box, as the server does (cutEnd).
+	function cutEnd(s, n) {
 		var r = Array.from(s || "");
-		return r.length > 26 ? r.slice(0, 25).join("") + "…" : s || "";
+		return take(r, n) === r.length ? s || "" : r.slice(0, take(r, n - 1)).join("") + "…";
+	}
+	// mark is the marker that starts a label, as the server does (labelMarker).
+	function mark(label) {
+		var r = Array.from(label || "");
+		return r.length >= 3 && r[0] === "[" && r[2] === "]" ? r.slice(0, 3).join("") : "";
+	}
+	// words is a label without its marker, as the server does (labelWords).
+	function words(label) {
+		var m = mark(label);
+		return m ? label.slice(m.length).replace(/^ /, "") : label || "";
 	}
 	// applyFrame mutates one node box and the edges that leave it.
 	function applyFrame(el, f) {
 		el.setAttribute("data-iteration", String(f.iteration));
-		el.setAttribute("class", "node s-" + f.status + (f.name === selected ? " selected" : ""));
-		el.setAttribute("aria-label", f.name + ", " + f.label);
-		text(el, ".n-status", cut(f.label));
-		text(el, ".n-meta", cut(f.meta));
+		el.setAttribute("class", "node s-" + f.status + (f.name === selected ? " selected" : "") + (el.classList.contains("dim") ? " dim" : ""));
+		text(el, ".n-mark", mark(f.label));
+		text(el, ".n-status", cutEnd(words(f.label), 30));
+		text(el, ".n-meta", cutEnd(f.meta, 30));
 		var title = el.querySelector("title");
 		if (title) {
+			// The title lines: the name, the type, the status, and the receives line.
 			var lines = title.textContent.split("\n");
 			lines[2] = f.label;
 			title.textContent = lines.join("\n");
+			el.setAttribute("aria-label", f.name + ", " + f.label + ", " + lines[3]);
 		}
 		edgesFrom(f.name).forEach(function (e) {
 			e.classList.toggle("flowed", f.status === "complete");
@@ -107,6 +131,7 @@
 
 	function applyHeader(d) {
 		$("topology").textContent = d.topology || "";
+		$("topology").title = d.topology || "";
 		$("facts").textContent = d.facts || "";
 		runEl.textContent = d.run;
 		runEl.setAttribute("data-state", d.run_state);
@@ -132,6 +157,7 @@
 				return;
 			}
 			if (graph) graph.innerHTML = d.svg;
+			applyZoom();
 			scrollToRoot();
 			currentRun = d.run_seq;
 			saved = null;
@@ -147,14 +173,47 @@
 		fetch("timeline").then(function (r) { return r.json(); }).then(function (d) { setSteps(d.steps); }).catch(function () {});
 	}
 
-	// scrollToRoot opens a graph wider than its frame with the root node in
-	// view, instead of the left edge.
+	// scrollToRoot opens the graph with the root column in view. The root is in
+	// the left column, and a column is centered vertically, so a graph taller
+	// than its frame also scrolls down to the root node.
 	function scrollToRoot() {
 		var root = nodes()[0];
-		if (!graph || !root || graph.scrollWidth <= graph.clientWidth) return;
+		if (!graph || !root) return;
+		graph.scrollLeft = 0;
+		if (graph.scrollHeight <= graph.clientHeight) return;
 		var box = root.getBoundingClientRect();
 		var frame = graph.getBoundingClientRect();
-		graph.scrollLeft += box.left - frame.left - (graph.clientWidth - box.width) / 2;
+		graph.scrollTop += box.top - frame.top - (graph.clientHeight - box.height) / 2;
+	}
+
+	// Zoom scales the drawn size of the svg; its viewBox keeps the layout.
+	// The page opens at 100 percent with the root in view. Zoom has no animation.
+	var zoom = 1;
+	function graphSize() {
+		var svg = graph && graph.querySelector("svg");
+		var box = svg ? svg.getAttribute("viewBox").split(" ").map(Number) : [];
+		return svg ? { svg: svg, w: box[2], h: box[3] } : null;
+	}
+	function applyZoom() {
+		var g = graphSize();
+		if (!g) return;
+		g.svg.setAttribute("width", g.w * zoom);
+		g.svg.setAttribute("height", g.h * zoom);
+	}
+	function setZoom(z) {
+		zoom = Math.min(Math.max(z, 0.3), 2);
+		applyZoom();
+	}
+	function fitGraph() {
+		var g = graphSize();
+		if (!g) return;
+		var room = parseFloat(getComputedStyle(graph).maxHeight) - 16;
+		setZoom(Math.min((graph.clientWidth - 16) / g.w, room > 0 ? room / g.h : 1, 1));
+		graph.scrollTo(0, 0);
+	}
+	function resetZoom() {
+		setZoom(1);
+		scrollToRoot();
 	}
 
 	// Selection uses a roving tabindex: Tab reaches the graph once, j and k move.
@@ -173,6 +232,45 @@
 				el.scrollIntoView({ block: "nearest", inline: "nearest" });
 			}
 		});
+		trace();
+	}
+	// reach returns the names that the edges reach from start, in one
+	// direction: from "data-from" to "data-to" is downstream.
+	function reach(links, start, from, to) {
+		var seen = {}, queue = [start];
+		seen[start] = true;
+		while (queue.length) {
+			var name = queue.pop();
+			links.forEach(function (e) {
+				var next = e.getAttribute(to);
+				if (e.getAttribute(from) === name && !seen[next]) {
+					seen[next] = true;
+					queue.push(next);
+				}
+			});
+		}
+		return seen;
+	}
+	// trace keeps the path of the selected node at full strength: its
+	// ancestors, its descendants, and the edges between them. The rest dims.
+	function trace() {
+		if (!graph) return;
+		var on = !!(selected && nodeEl(selected));
+		var links = Array.prototype.slice.call(graph.querySelectorAll("path.edge"));
+		var up = on ? reach(links, selected, "data-to", "data-from") : {};
+		var down = on ? reach(links, selected, "data-from", "data-to") : {};
+		nodes().forEach(function (el) {
+			var n = el.getAttribute("data-name");
+			el.classList.toggle("dim", on && !up[n] && !down[n]);
+		});
+		Array.prototype.forEach.call(graph.querySelectorAll("[data-from]"), function (e) {
+			var a = e.getAttribute("data-from"), b = e.getAttribute("data-to");
+			e.classList.toggle("dim", on && !(up[a] && up[b]) && !(down[a] && down[b]));
+		});
+	}
+	function clearSelection() {
+		selected = null;
+		markSelected(false);
 	}
 	function select(name, focus) {
 		selected = name;
@@ -322,6 +420,7 @@
 					cls: el.getAttribute("class"),
 					it: el.getAttribute("data-iteration"),
 					aria: el.getAttribute("aria-label"),
+					mark: el.querySelector(".n-mark").textContent,
 					status: el.querySelector(".n-status").textContent,
 					meta: el.querySelector(".n-meta").textContent
 				};
@@ -333,6 +432,7 @@
 			s.el.setAttribute("class", s.cls);
 			s.el.setAttribute("data-iteration", s.it);
 			s.el.setAttribute("aria-label", s.aria);
+			text(s.el, ".n-mark", s.mark);
 			text(s.el, ".n-status", s.status);
 			text(s.el, ".n-meta", s.meta);
 			edgesFrom(s.el.getAttribute("data-name")).forEach(function (e) {
@@ -376,18 +476,31 @@
 		notice.textContent = message;
 	}
 
+	// The arrow keys select only while the graph has the focus; elsewhere they
+	// scroll the page, so a scroll never selects a node.
+	function inGraph(target) {
+		return !!(graph && target && target !== scrub && graph.contains(target));
+	}
+	// A page that the browser restores from its back-forward cache keeps the
+	// selection of the earlier visit. Nothing is selected until the user
+	// selects, so drop it.
+	window.addEventListener("pageshow", function (e) {
+		if (!e.persisted) return;
+		selected = null;
+		if (drawerFor) closeDrawer();
+		clearSelection();
+	});
 	document.addEventListener("keydown", function (e) {
 		if (e.metaKey || e.ctrlKey || e.altKey) return;
-		var onRange = e.target === scrub;
 		switch (e.key) {
 			case "j":
 			case "ArrowDown":
-				if (onRange && e.key !== "j") return;
+				if (e.key !== "j" && !inGraph(e.target)) return;
 				move(1);
 				break;
 			case "k":
 			case "ArrowUp":
-				if (onRange && e.key !== "k") return;
+				if (e.key !== "k" && !inGraph(e.target)) return;
 				move(-1);
 				break;
 			case "Enter":
@@ -396,13 +509,28 @@
 				if (selected) openDrawer(selected);
 				break;
 			case "Escape":
-				closeDrawer();
+				if (drawerFor) closeDrawer();
+				else if (selected) clearSelection();
+				else return;
 				break;
 			case "[":
 				stepBy(-1);
 				break;
 			case "]":
 				stepBy(1);
+				break;
+			case "+":
+			case "=":
+				setZoom(zoom * 1.2);
+				break;
+			case "-":
+				setZoom(zoom / 1.2);
+				break;
+			case "0":
+				resetZoom();
+				break;
+			case "f":
+				fitGraph();
 				break;
 			default:
 				return;
@@ -412,16 +540,31 @@
 	if (graph) {
 		graph.addEventListener("click", function (e) {
 			var el = e.target.closest ? e.target.closest("g.node") : null;
-			if (!el) return;
+			if (!el) {
+				// A click on the empty canvas clears the selection and its path.
+				selected = null;
+				if (drawerFor) closeDrawer();
+				clearSelection();
+				return;
+			}
 			select(el.getAttribute("data-name"), true);
 			openDrawer(el.getAttribute("data-name"));
 		});
+		// Keyboard focus on a node selects it. A focus that the user did not
+		// move with the keyboard (a pointer press, a restored page) does not:
+		// a click selects through its own handler.
 		graph.addEventListener("focusin", function (e) {
 			var el = e.target.closest ? e.target.closest("g.node") : null;
-			if (el && el.getAttribute("data-name") !== selected) select(el.getAttribute("data-name"), false);
+			if (el && el.matches(":focus-visible") && el.getAttribute("data-name") !== selected) select(el.getAttribute("data-name"), false);
 		});
 	}
 	$("drawer-close").addEventListener("click", closeDrawer);
+	if (graph) {
+		$("z-in").addEventListener("click", function () { setZoom(zoom * 1.2); });
+		$("z-out").addEventListener("click", function () { setZoom(zoom / 1.2); });
+		$("z-fit").addEventListener("click", fitGraph);
+		$("z-reset").addEventListener("click", resetZoom);
+	}
 	markSelected(false);
 	scrollToRoot();
 

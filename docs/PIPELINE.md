@@ -633,6 +633,9 @@ A name has 1 to 64 characters. It can contain lowercase letters, digits, `-`,
 and `_`. The first character must be a letter or a digit. The name `default`
 is reserved.
 
+A topology has at most 256 nodes and at most 2048 edges. Splice refuses a
+larger file and names the count and the limit.
+
 An older Splice release refuses a file with a higher `splice_min_version`. The
 error names the required version. A source build skips this check.
 
@@ -1087,22 +1090,54 @@ command nodes, and its agent nodes. For each agent node, the page shows the
 same facts as the trust card: the tools and what they can reach, the
 permission, the turn limit, the budget, and the start of the prompt.
 
+During a run, these lists show the command nodes and the agent nodes of
+the topology of the run. When the run topology is not known, the page shows
+no lists.
+
+The graph goes from left to right. Each column holds the nodes of one
+dependency depth. The first column holds the nodes that run first. When the
+graph is wider than the page, scroll it to the right. The tools under the
+graph zoom in, zoom out, fit the graph in the frame, and reset the zoom. The
+page opens at 100 percent, with the first column in view.
+
+Each node is a card. The top of the card shows the name and the status
+symbol. The lines under it show the node type, the status, what the node
+receives, and the tokens and the cost.
+
+Each edge has a label at its middle. The label tells what the edge carries:
+
+| Label | Line | The next node receives |
+|---|---|---|
+| `summary` | Thin | The summary of the node before it. |
+| `output` | Thick | The summary and the bounded data. |
+| `order` | Dashed | Nothing. The edge sets the order only. |
+
+A legend on the page shows these lines. A run that has no topology edges
+shows no labels.
+
 During a run, each node shows its status, its pass, its tokens, and its
 cost. A status has a word and a symbol, so color is not the only signal.
 When a node completes, the edges to the nodes after it pulse once. When the
 system setting for reduced motion is on, the edges change color only.
 
+When you select a node, the page shows its path: all the nodes before it,
+all the nodes after it, and the edges between them. The page shows the
+other nodes and edges with less contrast. To clear the selection, push Esc
+when the details are closed, or click an empty area of the graph.
+
 Use these keys on the page:
 
 | Key | Action |
 |---|---|
-| `j` or the down arrow | Select the next node. |
-| `k` or the up arrow | Select the previous node. |
+| `j`, or the down arrow in the graph | Select the next node. |
+| `k`, or the up arrow in the graph | Select the previous node. |
 | Enter | Open the details of the selected node. |
-| Esc | Close the details. |
+| Esc | Close the details. When the details are closed, clear the selection. |
 | `[` and `]` | Move one step back or forward on the timeline. |
+| `+`, `-`, `0`, `f` | Zoom in, zoom out, reset the zoom, fit the graph. |
 
-You can also click a node to open its details. The details show the same
+No node is selected until you select one. You can also click a node to
+open its details. The details show the same
 facts as the Ctrl+G pane in the TUI. For an agent node, the details also show
 its tools, its permission, and its turn limit. For a node that completed, the
 details show the files that it changed. Two bars show the input and the output
@@ -1162,9 +1197,11 @@ Splice checks each change with the same checks as `splice pipeline import`.
 The checks include the schema, the compile at each tier, the token envelope,
 and the name rule. The top bar shows the result and the draft state, for
 example `[+] valid` and `saved 4s ago`. Each problem shows next to its field
-in the inspector. A node with a problem shows `[!]` and the number of its
-problems. The Problems list under the canvas shows all problems. Select a
-problem to go to its node and field.
+in the inspector. A node with a problem has a dashed red outline. It shows
+`[!]` and the number of its problems. The Problems list under the canvas
+shows all node problems at once. It shows a pipeline problem, such as a
+cycle, a bad budget, or a bad name, one at a time. It also shows the
+warnings. Select a problem to go to its node and field.
 
 #### The editor page
 
@@ -1173,14 +1210,28 @@ The page has three areas:
 - Nodes, on the left: the node types, with a search field and a line about
   each type. Select a type to add a node.
 - The canvas, in the center: the graph, drawn as the pipeline viewer draws
-  it. The tools under the graph zoom, fit, reset, and lay out the graph.
-  The `?` tool lists the keys.
+  it, from left to right, with the same cards and edge labels. The tools
+  under the canvas zoom, fit, reset, and lay out the graph. The `?` tool
+  lists the keys. When the graph is larger than the canvas, the editor
+  zooms out at the start, but not below 85 percent, so that the text
+  stays easy to read. A larger graph then starts at its first column.
+  Scroll to see the rest, or use Fit.
 - The inspector, on the right: the pipeline settings, or the selected node.
   The JSON tab shows the exact file that publish writes. You cannot edit
   it there. Use Copy to copy it.
 
+On a wide screen, you can fold Nodes and the inspector to a narrow rail.
+Use the arrow button at the top of the panel. The canvas then gets the
+width. The browser keeps your choice for the next time. A folded panel opens
+again when you need it: `n`, `a`, and `+` open Nodes. A node selection,
+Enter, `s`, and `j` open the inspector.
+
 On a screen that is narrower than 900 pixels, Nodes and the inspector open
-as sheets at the bottom of the screen.
+as sheets at the bottom of the screen. The buttons are larger, and they do
+not show the keys.
+
+When you select a node, the canvas shows its path, as the viewer does. When
+you select an edge, the canvas shows the paths of its two nodes.
 
 | Key | Action |
 |---|---|
@@ -1202,9 +1253,18 @@ as sheets at the bottom of the screen.
 | Esc | Stop the current action, or clear the selection. |
 
 You can also drag a node with the pointer. To connect two nodes, drag from
-the small circle under a node to another node. The `+` under a node adds a
-node after it. The editor refuses an edge that makes a cycle before Splice
-checks it.
+the small circle on the right side of a node to another node. The `+` on the
+right side of a node adds a node after it, in the next column. The editor
+refuses an edge that makes a cycle before Splice checks it.
+
+The edges go around the cards. When you move a node, its edges and the
+edges in its way find a new path at once. When no clear path is near, an
+edge takes the direct curve until you move the nodes or use Auto-layout.
+
+A new node goes to the right of the node that it follows. With no selected
+node, it goes to the right of the rightmost node. It never covers a node.
+A draft from an earlier version of Splice has positions from top to bottom.
+The editor lays it out from left to right one time, when you open it.
 
 The inspector shows only the fields that apply to the node type. When you
 change the type, the inspector keeps the fields that still apply. It names
@@ -1218,6 +1278,26 @@ nodes with the keyboard. It offers only the nodes that do not make a cycle.
 For a command node, the inspector shows each argument in its own row. Under
 the rows, it shows the command line exactly as it runs. For a prompt node
 or an agent node, the inspector shows the prompt and its variables.
+
+#### The run on the canvas
+
+When you open the editor from the TUI, the canvas also shows the run that
+the pipeline viewer shows. A node of the draft gets the run status of the
+run node with the same name. The node then shows the status and the tokens
+of that node. The other nodes do not change.
+
+The edges of the run also change. An edge from a node that completed
+changes color. Along an edge into a node that runs, a dashed line moves. An
+`order` edge does not move, because it carries no data.
+
+The top bar shows the run line, for example
+`Run (standard tier): Running.` When the draft does not have the name of
+the topology that runs, the line also names that topology, for example
+`Run (diamond, standard tier): Running.`, and says
+`The draft differs from the run. Live state shows on the nodes with the same name.`
+
+You can edit the draft during a run. A draft never changes a run. The
+server of `splice pipeline edit` has no viewer, so its canvas shows no run.
 
 #### Publish
 Publish needs a valid draft. The publish dialog shows these items:

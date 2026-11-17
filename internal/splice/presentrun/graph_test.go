@@ -169,12 +169,44 @@ func TestBuildGraphDiamond(t *testing.T) {
 	if got := rows(graph); !reflect.DeepEqual(got, want) {
 		t.Fatalf("rows = %v, want %v", got, want)
 	}
+	if !graph.FromTopology {
+		t.Fatal("a graph built from its topology does not say so")
+	}
 	lint := graph.Nodes[1]
 	if lint.Status != presentation.NodeStatusFailed || lint.Command != "go vet ./..." || !lint.ModelFree || !strings.Contains(lint.Summary, "failed") {
 		t.Fatalf("lint node = %+v", lint)
 	}
 	if graph.Nodes[2].Status != "" || graph.Nodes[0].Summary != "wrote hello.go" {
 		t.Fatalf("not-started node has a status or the summary is lost: %+v", graph.Nodes)
+	}
+}
+
+// TestBuildGraphCarriesTheEdgePayloads pins that each dependency carries the
+// payload of its topology edge, with the default applied, and that a graph
+// from the run plan only carries none, because the plan has no payloads.
+func TestBuildGraphCarriesTheEdgePayloads(t *testing.T) {
+	topology := diamondTopology()
+	topology.Edges[2].Payload = schemas.EdgePayloadOutput
+	topology.Edges[3].Payload = schemas.EdgePayloadNone
+	graph, err := presentrun.BuildGraph(topology, presentation.State{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := graph.Nodes[3]
+	if want := []schemas.EdgePayload{schemas.EdgePayloadOutput, schemas.EdgePayloadNone}; runner.Name != "test_runner" || !reflect.DeepEqual(runner.DependencyPayloads, want) {
+		t.Fatalf("test_runner payloads = %v for %v, want %v", runner.DependencyPayloads, runner.Dependencies, want)
+	}
+	if want := []schemas.EdgePayload{schemas.EdgePayloadSummary}; !reflect.DeepEqual(graph.Nodes[1].DependencyPayloads, want) {
+		t.Fatalf("lint payloads = %v, want the default %v", graph.Nodes[1].DependencyPayloads, want)
+	}
+	planOnly, err := presentrun.BuildGraph(nil, liveState(t, topology, schemas.TierStandard))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, node := range planOnly.Nodes {
+		if len(node.DependencyPayloads) != 0 {
+			t.Fatalf("plan-only node %s has payloads %v, want none", node.Name, node.DependencyPayloads)
+		}
 	}
 }
 
@@ -245,7 +277,7 @@ func TestBuildGraphDropsTopologyThatChangedAfterRunStart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(graph.Notes) != 1 || graph.Topology != "default" {
+	if len(graph.Notes) != 1 || graph.Topology != "default" || graph.FromTopology {
 		t.Fatalf("notes = %v topology = %q, want the changed-topology notice", graph.Notes, graph.Topology)
 	}
 	// The plan is the truth: only the planned nodes, with their run deps.

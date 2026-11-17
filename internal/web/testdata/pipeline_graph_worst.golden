@@ -1,0 +1,75 @@
+<svg class="graph" data-layout="f4c5043dc927f678" width="2014" height="456" viewBox="0 0 2014 456" role="group" aria-label="Pipeline graph">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 1 L9 5 L0 9 z"/></marker><clipPath id="name-clip"><rect width="204" height="26"/></clipPath></defs>
+<g class="edges">
+<path class="edge summary" data-from="integration_contract_verification_for_billing" data-to="コードレビュー担当ノード" d="M252 160 C307 160 307 160 362 160" marker-end="url(#arrow)"/>
+<path class="edge output" data-from="integration_contract_verification_for_billing" data-to="lint" d="M252 160 C307 160 307 296 362 296" marker-end="url(#arrow)"/>
+<path class="edge none" data-from="t" data-to="lint" d="M252 296 C307 296 307 296 362 296" marker-end="url(#arrow)"/>
+<path class="edge summary" data-from="コードレビュー担当ノード" data-to="build" d="M602 160 C657 160 657 204 712 204" marker-end="url(#arrow)"/>
+<path class="edge none" data-from="lint" data-to="build" d="M602 296 C657 296 657 204 712 204" marker-end="url(#arrow)"/>
+<path class="edge summary" data-from="build" data-to="test" d="M952 204 C1007 204 1007 272 1062 272" marker-end="url(#arrow)"/>
+<path class="edge output" data-from="t" data-to="test" d="M252 296 C307 296 307 378 362 378 H602 C657 378 657 286 712 286 H952 C1007 286 1007 272 1062 272" marker-end="url(#arrow)"/>
+<path class="edge summary" data-from="integration_contract_verification_for_billing" data-to="security" d="M252 160 C307 160 307 78 362 78 H602 C657 78 657 122 712 122 H952 C1007 122 1007 136 1062 136" marker-end="url(#arrow)"/>
+<path class="edge none" data-from="build" data-to="security" d="M952 204 C1007 204 1007 136 1062 136" marker-end="url(#arrow)"/>
+<path class="edge summary" data-from="test" data-to="integration_contract_verification_for_billinh" d="M1302 272 C1357 272 1357 228 1412 228" marker-end="url(#arrow)"/>
+<path class="edge output" data-from="security" data-to="integration_contract_verification_for_billinh" d="M1302 136 C1357 136 1357 228 1412 228" marker-end="url(#arrow)"/>
+<path class="edge summary" data-from="lint" data-to="integration_contract_verification_for_billinh" d="M602 296 C657 296 657 334 712 334 H952 C1007 334 1007 354 1062 354 H1302 C1357 354 1357 228 1412 228" marker-end="url(#arrow)"/>
+<path class="edge summary" data-from="integration_contract_verification_for_billinh" data-to="report" d="M1652 228 C1707 228 1707 228 1762 228" marker-end="url(#arrow)"/>
+<path class="edge none" data-from="integration_contract_verification_for_billing" data-to="report" d="M252 160 C307 160 307 30 362 30 H602 C657 30 657 74 712 74 H952 C1007 74 1007 54 1062 54 H1302 C1357 54 1357 146 1412 146 H1652 C1707 146 1707 228 1762 228" marker-end="url(#arrow)"/>
+<path class="edge summary" data-from="t" data-to="report" d="M252 296 C307 296 307 426 362 426 H602 C657 426 657 382 712 382 H952 C1007 382 1007 402 1062 402 H1302 C1357 402 1357 310 1412 310 H1652 C1707 310 1707 228 1762 228" marker-end="url(#arrow)"/>
+</g>
+<g class="pills">
+<g class="pill" data-from="integration_contract_verification_for_billing" data-to="コードレビュー担当ノード" transform="translate(307 160)"><rect x="-29" y="-8" width="59" height="16" rx="8"/><text y="4" text-anchor="middle">summary</text></g>
+<g class="pill" data-from="integration_contract_verification_for_billing" data-to="lint" transform="translate(307 228)"><rect x="-26" y="-8" width="52" height="16" rx="8"/><text y="4" text-anchor="middle">output</text></g>
+<g class="pill" data-from="t" data-to="lint" transform="translate(307 296)"><rect x="-22" y="-8" width="45" height="16" rx="8"/><text y="4" text-anchor="middle">order</text></g>
+<g class="pill" data-from="コードレビュー担当ノード" data-to="build" transform="translate(657 182)"><rect x="-29" y="-8" width="59" height="16" rx="8"/><text y="4" text-anchor="middle">summary</text></g>
+<g class="pill" data-from="lint" data-to="build" transform="translate(657 250)"><rect x="-22" y="-8" width="45" height="16" rx="8"/><text y="4" text-anchor="middle">order</text></g>
+<g class="pill" data-from="build" data-to="test" transform="translate(1007 238)"><rect x="-29" y="-8" width="59" height="16" rx="8"/><text y="4" text-anchor="middle">summary</text></g>
+<g class="pill" data-from="t" data-to="test" transform="translate(1007 279)"><rect x="-26" y="-8" width="52" height="16" rx="8"/><text y="4" text-anchor="middle">output</text></g>
+<g class="pill" data-from="integration_contract_verification_for_billing" data-to="security" transform="translate(1007 129)"><rect x="-29" y="-8" width="59" height="16" rx="8"/><text y="4" text-anchor="middle">summary</text></g>
+<g class="pill" data-from="build" data-to="security" transform="translate(1007 170)"><rect x="-22" y="-8" width="45" height="16" rx="8"/><text y="4" text-anchor="middle">order</text></g>
+<g class="pill" data-from="test" data-to="integration_contract_verification_for_billinh" transform="translate(1357 250)"><rect x="-29" y="-8" width="59" height="16" rx="8"/><text y="4" text-anchor="middle">summary</text></g>
+<g class="pill" data-from="security" data-to="integration_contract_verification_for_billinh" transform="translate(1357 182)"><rect x="-26" y="-8" width="52" height="16" rx="8"/><text y="4" text-anchor="middle">output</text></g>
+<g class="pill" data-from="lint" data-to="integration_contract_verification_for_billinh" transform="translate(1357 291)"><rect x="-29" y="-8" width="59" height="16" rx="8"/><text y="4" text-anchor="middle">summary</text></g>
+<g class="pill" data-from="integration_contract_verification_for_billinh" data-to="report" transform="translate(1707 228)"><rect x="-29" y="-8" width="59" height="16" rx="8"/><text y="4" text-anchor="middle">summary</text></g>
+<g class="pill" data-from="integration_contract_verification_for_billing" data-to="report" transform="translate(1707 187)"><rect x="-22" y="-8" width="45" height="16" rx="8"/><text y="4" text-anchor="middle">order</text></g>
+<g class="pill" data-from="t" data-to="report" transform="translate(1707 269)"><rect x="-29" y="-8" width="59" height="16" rx="8"/><text y="4" text-anchor="middle">summary</text></g>
+</g>
+<g class="nodes">
+<g class="node s-static" data-name="integration_contract_verification_for_billing" data-iteration="0" transform="translate(12 108)" tabindex="-1" role="button" aria-label="integration_contract_verification_for_billing, every tier, receives nothing, runs first"><title>integration_contract_verification_for_billing
+prompt
+every tier
+receives nothing, runs first</title><rect class="ring" x="-5" y="-5" width="250" height="114" rx="12"/><rect class="box" width="240" height="104" rx="8"/><path class="band" d="M1 26 V8 Q1 1 8 1 H232 Q239 1 239 8 V26 Z"/><text class="n-name" x="14" y="18" clip-path="url(#name-clip)">integratio…or_billing</text><text class="n-mark" x="228" y="18" text-anchor="end"></text><text class="n-sub" x="14" y="44">prompt</text><text class="n-status" x="14" y="61">every tier</text><text class="n-recv" x="14" y="78">receives nothing, runs first</text><text class="n-meta" x="14" y="95"></text></g>
+<g class="node s-static" data-name="t" data-iteration="0" transform="translate(12 244)" tabindex="-1" role="button" aria-label="t, every tier, receives nothing, runs first"><title>t
+prompt
+every tier
+receives nothing, runs first</title><rect class="ring" x="-5" y="-5" width="250" height="114" rx="12"/><rect class="box" width="240" height="104" rx="8"/><path class="band" d="M1 26 V8 Q1 1 8 1 H232 Q239 1 239 8 V26 Z"/><text class="n-name" x="14" y="18" clip-path="url(#name-clip)">t</text><text class="n-mark" x="228" y="18" text-anchor="end"></text><text class="n-sub" x="14" y="44">prompt</text><text class="n-status" x="14" y="61">every tier</text><text class="n-recv" x="14" y="78">receives nothing, runs first</text><text class="n-meta" x="14" y="95"></text></g>
+<g class="node s-static" data-name="コードレビュー担当ノード" data-iteration="0" transform="translate(362 108)" tabindex="-1" role="button" aria-label="コードレビュー担当ノード, every tier, receives summary"><title>コードレビュー担当ノード
+prompt
+every tier
+receives summary</title><rect class="ring" x="-5" y="-5" width="250" height="114" rx="12"/><rect class="box" width="240" height="104" rx="8"/><path class="band" d="M1 26 V8 Q1 1 8 1 H232 Q239 1 239 8 V26 Z"/><text class="n-name" x="14" y="18" clip-path="url(#name-clip)">コードレビ…担当ノード</text><text class="n-mark" x="228" y="18" text-anchor="end"></text><text class="n-sub" x="14" y="44">prompt</text><text class="n-status" x="14" y="61">every tier</text><text class="n-recv" x="14" y="78">receives summary</text><text class="n-meta" x="14" y="95"></text></g>
+<g class="node s-static" data-name="lint" data-iteration="0" transform="translate(362 244)" tabindex="-1" role="button" aria-label="lint, every tier, receives output, order"><title>lint
+prompt
+every tier
+receives output, order</title><rect class="ring" x="-5" y="-5" width="250" height="114" rx="12"/><rect class="box" width="240" height="104" rx="8"/><path class="band" d="M1 26 V8 Q1 1 8 1 H232 Q239 1 239 8 V26 Z"/><text class="n-name" x="14" y="18" clip-path="url(#name-clip)">lint</text><text class="n-mark" x="228" y="18" text-anchor="end"></text><text class="n-sub" x="14" y="44">prompt</text><text class="n-status" x="14" y="61">every tier</text><text class="n-recv" x="14" y="78">receives output, order</text><text class="n-meta" x="14" y="95"></text></g>
+<g class="node s-static" data-name="build" data-iteration="0" transform="translate(712 152)" tabindex="-1" role="button" aria-label="build, every tier, receives summary, order"><title>build
+prompt
+every tier
+receives summary, order</title><rect class="ring" x="-5" y="-5" width="250" height="114" rx="12"/><rect class="box" width="240" height="104" rx="8"/><path class="band" d="M1 26 V8 Q1 1 8 1 H232 Q239 1 239 8 V26 Z"/><text class="n-name" x="14" y="18" clip-path="url(#name-clip)">build</text><text class="n-mark" x="228" y="18" text-anchor="end"></text><text class="n-sub" x="14" y="44">prompt</text><text class="n-status" x="14" y="61">every tier</text><text class="n-recv" x="14" y="78">receives summary, order</text><text class="n-meta" x="14" y="95"></text></g>
+<g class="node s-static" data-name="security" data-iteration="0" transform="translate(1062 84)" tabindex="-1" role="button" aria-label="security, every tier, receives summary, order"><title>security
+prompt
+every tier
+receives summary, order</title><rect class="ring" x="-5" y="-5" width="250" height="114" rx="12"/><rect class="box" width="240" height="104" rx="8"/><path class="band" d="M1 26 V8 Q1 1 8 1 H232 Q239 1 239 8 V26 Z"/><text class="n-name" x="14" y="18" clip-path="url(#name-clip)">security</text><text class="n-mark" x="228" y="18" text-anchor="end"></text><text class="n-sub" x="14" y="44">prompt</text><text class="n-status" x="14" y="61">every tier</text><text class="n-recv" x="14" y="78">receives summary, order</text><text class="n-meta" x="14" y="95"></text></g>
+<g class="node s-static" data-name="test" data-iteration="0" transform="translate(1062 220)" tabindex="-1" role="button" aria-label="test, every tier, receives summary, output"><title>test
+prompt
+every tier
+receives summary, output</title><rect class="ring" x="-5" y="-5" width="250" height="114" rx="12"/><rect class="box" width="240" height="104" rx="8"/><path class="band" d="M1 26 V8 Q1 1 8 1 H232 Q239 1 239 8 V26 Z"/><text class="n-name" x="14" y="18" clip-path="url(#name-clip)">test</text><text class="n-mark" x="228" y="18" text-anchor="end"></text><text class="n-sub" x="14" y="44">prompt</text><text class="n-status" x="14" y="61">every tier</text><text class="n-recv" x="14" y="78">receives summary, output</text><text class="n-meta" x="14" y="95"></text></g>
+<g class="node s-static" data-name="integration_contract_verification_for_billinh" data-iteration="0" transform="translate(1412 176)" tabindex="-1" role="button" aria-label="integration_contract_verification_for_billinh, every tier, receives summary x2, output"><title>integration_contract_verification_for_billinh
+prompt
+every tier
+receives summary x2, output</title><rect class="ring" x="-5" y="-5" width="250" height="114" rx="12"/><rect class="box" width="240" height="104" rx="8"/><path class="band" d="M1 26 V8 Q1 1 8 1 H232 Q239 1 239 8 V26 Z"/><text class="n-name" x="14" y="18" clip-path="url(#name-clip)">integratio…or_billinh</text><text class="n-mark" x="228" y="18" text-anchor="end"></text><text class="n-sub" x="14" y="44">prompt</text><text class="n-status" x="14" y="61">every tier</text><text class="n-recv" x="14" y="78">receives summary x2, output</text><text class="n-meta" x="14" y="95"></text></g>
+<g class="node s-static" data-name="report" data-iteration="0" transform="translate(1762 176)" tabindex="-1" role="button" aria-label="report, every tier, receives summary x2, order"><title>report
+prompt
+every tier
+receives summary x2, order</title><rect class="ring" x="-5" y="-5" width="250" height="114" rx="12"/><rect class="box" width="240" height="104" rx="8"/><path class="band" d="M1 26 V8 Q1 1 8 1 H232 Q239 1 239 8 V26 Z"/><text class="n-name" x="14" y="18" clip-path="url(#name-clip)">report</text><text class="n-mark" x="228" y="18" text-anchor="end"></text><text class="n-sub" x="14" y="44">prompt</text><text class="n-status" x="14" y="61">every tier</text><text class="n-recv" x="14" y="78">receives summary x2, order</text><text class="n-meta" x="14" y="95"></text></g>
+</g>
+</svg>

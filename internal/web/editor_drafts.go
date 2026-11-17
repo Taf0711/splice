@@ -43,6 +43,10 @@ type draft struct {
 	Valid     bool            `json:"valid"`
 	Doc       json.RawMessage `json:"doc"`
 	Positions []position      `json:"positions"`
+	// LeftToRight marks positions from the left-to-right layout. A draft
+	// without it holds top-to-bottom positions, and the editor lays it out
+	// again once when it opens (upgradeLayout).
+	LeftToRight bool `json:"left_to_right,omitempty"`
 }
 
 // position is the canvas position of the node at the same index in the
@@ -319,7 +323,7 @@ func createDraft(from, name string, sources splicerun.TopologySources, fresh boo
 	if err != nil {
 		return draft{}, err
 	}
-	d.ID, d.Doc, d.Positions = id, doc, initialPositions(topology)
+	d.ID, d.Doc, d.Positions, d.LeftToRight = id, doc, initialPositions(topology), true
 	d.Valid = checkDoc(doc).Valid
 	if err := saveDraft(d); err != nil {
 		return draft{}, err
@@ -330,45 +334,76 @@ func createDraft(from, name string, sources splicerun.TopologySources, fresh boo
 // initialPositions places the nodes where the pipeline viewer draws them, so
 // the editor and the viewer start from one layout.
 func initialPositions(topology *schemas.PipelineTopology) []position {
+	positions, _ := layoutTopology(topology)
+	return positions
+}
+
+// layoutTopology returns the viewer layout of a topology: the node
+// positions, and the routed path of each edge. The fallback grid has no
+// routed paths.
+func layoutTopology(topology *schemas.PipelineTopology) ([]position, []layoutRoute) {
 	positions := make([]position, len(topology.Nodes))
 	if len(topology.Nodes) == 0 {
-		return positions
+		return positions, []layoutRoute{}
+	}
+	// A topology over the size limit is not routed, as Validate refuses it.
+	if len(topology.Nodes) > schemas.MaxTopologyNodes || len(topology.Edges) > schemas.MaxTopologyEdges {
+		return gridPositions(len(topology.Nodes)), []layoutRoute{}
 	}
 	graph, err := presentrun.BuildGraph(topology, presentation.State{})
 	if err != nil {
-		return gridPositions(len(topology.Nodes))
+		return gridPositions(len(topology.Nodes)), []layoutRoute{}
 	}
+	layout := layoutGraph(graph)
 	at := map[string]position{}
-	for _, box := range layoutGraph(graph).Nodes {
+	for _, box := range layout.Nodes {
 		at[box.Frame.Name] = position{X: float64(box.X), Y: float64(box.Y)}
 	}
 	for i, node := range topology.Nodes {
 		p, ok := at[node.Name]
 		if !ok {
-			return gridPositions(len(topology.Nodes))
+			return gridPositions(len(topology.Nodes)), []layoutRoute{}
 		}
 		positions[i] = p
 	}
-	return positions
+	return positions, routesOf(layout)
 }
 
 // layoutDoc places the nodes of any document, valid or not, with the viewer
-// layout. It is the editor's Auto-layout.
-func layoutDoc(doc []byte) ([]position, error) {
+// layout, and routes its edges. It is the editor's Auto-layout.
+func layoutDoc(doc []byte) ([]position, []layoutRoute, error) {
 	var loose schemas.PipelineTopology
 	if err := json.Unmarshal(doc, &loose); err != nil {
-		return nil, fmt.Errorf("the document does not parse: %w", err)
+		return nil, nil, fmt.Errorf("the document does not parse: %w", err)
 	}
-	return initialPositions(&loose), nil
+	positions, routes := layoutTopology(&loose)
+	return positions, routes, nil
 }
 
-// gridPositions is the fallback: one column in declaration order.
+// gridPositions is the fallback: one row in declaration order, left to right.
 func gridPositions(n int) []position {
 	positions := make([]position, n)
 	for i := range positions {
-		positions[i] = position{X: layoutPad, Y: float64(layoutPad + i*(layoutNodeHeight+layoutGapY))}
+		positions[i] = position{X: float64(layoutPad + i*(layoutNodeWidth+layoutGapX)), Y: layoutPad}
 	}
 	return positions
+}
+
+// upgradeLayout lays out a draft from before the left-to-right layout once,
+// with the viewer layout, and saves the marker with it. A document that does
+// not parse keeps its positions and gets no marker. The caller holds the
+// editor lock.
+func upgradeLayout(d draft) draft {
+	if d.LeftToRight {
+		return d
+	}
+	positions, _, err := layoutDoc(d.Doc)
+	if err != nil {
+		return d
+	}
+	d.Positions, d.LeftToRight = positions, true
+	_ = saveDraft(d) // the page shows the new layout even when the save fails
+	return d
 }
 
 // cleanPositions clamps the positions to the canvas.
