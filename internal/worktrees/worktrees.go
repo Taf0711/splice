@@ -826,7 +826,50 @@ func pruneRepo(ctx context.Context, runGit GitRunner, repoRoot, baseDir string, 
 		result.Removed = append(result.Removed, entry.Path)
 	}
 
+	pruneRecoveryRefs(ctx, runGit, repoRoot, result.Removed)
 	return result, nil
+}
+
+// pruneRecoveryRefs deletes the recovery refs of the worktree names that this
+// prune removed. A name keeps its refs when a fresh worktree list, read after
+// the removals, still shows an entry with that name in any base directory.
+// Errors are ignored: a ref left behind is harmless, and a prune must not
+// fail on it.
+func pruneRecoveryRefs(ctx context.Context, runGit GitRunner, repoRoot string, removed []string) {
+	out, err := gitOutput(ctx, runGit, repoRoot, "for-each-ref", "--format=%(refname)", "refs/splice/recovery/")
+	if err != nil {
+		return
+	}
+	removedNames := make(map[string]struct{}, len(removed))
+	for _, path := range removed {
+		removedNames[filepath.Base(path)] = struct{}{}
+	}
+	var doomed []string
+	for _, ref := range strings.Split(strings.TrimSpace(out), "\n") {
+		name, _, _ := strings.Cut(strings.TrimPrefix(ref, "refs/splice/recovery/"), "/")
+		if _, ok := removedNames[name]; ok {
+			doomed = append(doomed, ref)
+		}
+	}
+	if len(doomed) == 0 {
+		return
+	}
+
+	list, err := gitOutput(ctx, runGit, repoRoot, "worktree", "list", "--porcelain")
+	if err != nil {
+		return
+	}
+	live := make(map[string]struct{})
+	for _, entry := range parseWorktreeList(list) {
+		live[filepath.Base(filepath.Clean(entry.Path))] = struct{}{}
+	}
+	for _, ref := range doomed {
+		name, _, _ := strings.Cut(strings.TrimPrefix(ref, "refs/splice/recovery/"), "/")
+		if _, ok := live[name]; ok {
+			continue
+		}
+		_, _ = gitOutput(ctx, runGit, repoRoot, "update-ref", "-d", ref)
+	}
 }
 
 type worktreeListEntry struct {

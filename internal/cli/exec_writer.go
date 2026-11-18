@@ -35,6 +35,54 @@ type execEventWriter struct {
 	// affects stream-json output. P1.2 will render from the snapshots; for
 	// now the writer only proves the plumbing.
 	lastPresentationState presentation.State
+	// activeStage names the pipeline stage that runs now. Tool events carry
+	// it while hasActiveStage is true.
+	activeStage     string
+	activeIteration int
+	hasActiveStage  bool
+}
+
+// trackStage follows the stage lifecycle. A running event makes its stage the
+// active one. A later event with a different status ends that stage, except
+// a message, which is a note inside the stage.
+func (writer *execEventWriter) trackStage(event agent.StageEvent) {
+	switch {
+	case event.Status == "running":
+		writer.activeStage = event.Name
+		// The orchestrator counts passes from 0. Usage events count from 1,
+		// so the stamp uses the 1-based pass number.
+		writer.activeIteration = event.Iteration + 1
+		writer.hasActiveStage = true
+	case event.Status != "message" && writer.hasActiveStage &&
+		event.Name == writer.activeStage && event.Iteration+1 == writer.activeIteration:
+		writer.hasActiveStage = false
+	}
+}
+
+// stamp adds the active stage to a plain json payload. It adds nothing when no
+// stage runs, so plain agent-loop output does not change.
+func (writer *execEventWriter) stamp(payload map[string]any) map[string]any {
+	if writer.hasActiveStage {
+		payload["stage"] = writer.activeStage
+		payload["iteration"] = writer.activeIteration
+	}
+	return payload
+}
+
+// stampStream sets the active stage on a stream-json event. Fields stay nil
+// when no stage runs, so they are omitted from the line.
+func (writer *execEventWriter) stampStream(event streamjson.Event) streamjson.Event {
+	if writer.hasActiveStage {
+		iteration := writer.activeIteration
+		event.Stage = writer.activeStage
+		event.Iteration = &iteration
+	}
+	return event
+}
+
+// runningStage reports the active stage for the session record.
+func (writer *execEventWriter) runningStage() (string, int, bool) {
+	return writer.activeStage, writer.activeIteration, writer.hasActiveStage
 }
 
 func (writer *execEventWriter) runStart(cwd string, metadata execRunMetadata, permissionMode agent.PermissionMode) {
@@ -119,6 +167,7 @@ func (writer *execEventWriter) pipelinePlan(event agent.PipelinePlanEvent) {
 }
 
 func (writer *execEventWriter) stage(event agent.StageEvent) {
+	writer.trackStage(event)
 	if writer.format == execOutputJSON {
 		writer.writeJSON(map[string]any{
 			"type":          "stage",
@@ -176,23 +225,23 @@ func (writer *execEventWriter) reasoning(delta string) {
 
 func (writer *execEventWriter) toolCall(call agent.ToolCall, registry *tools.Registry) {
 	if writer.format == execOutputJSON {
-		writer.writeJSON(map[string]any{
+		writer.writeJSON(writer.stamp(map[string]any{
 			"type":      "tool_call",
 			"id":        call.ID,
 			"name":      call.Name,
 			"arguments": call.Arguments,
-		})
+		}))
 		return
 	}
 	if writer.format == execOutputStreamJSON {
-		writer.writeStreamJSON(streamjson.Event{
+		writer.writeStreamJSON(writer.stampStream(streamjson.Event{
 			Type:       streamjson.EventToolCall,
 			RunID:      writer.runID,
 			ID:         call.ID,
 			Name:       call.Name,
 			Args:       parseToolCallArgs(call.Arguments),
 			SideEffect: streamJSONSideEffect(call.Name, registry),
-		})
+		}))
 		return
 	}
 	writer.writeStderr("[tool] " + call.Name + "\n")
@@ -298,12 +347,12 @@ func (writer *execEventWriter) toolResult(result agent.ToolResult) {
 		if result.Display.Summary != "" || result.Display.Kind != "" {
 			payload["display"] = map[string]string{"summary": result.Display.Summary, "kind": result.Display.Kind}
 		}
-		writer.writeJSON(payload)
+		writer.writeJSON(writer.stamp(payload))
 		return
 	}
 	if writer.format == execOutputStreamJSON {
 		output, truncated := truncateForStreamJSONOutput(result.Output)
-		event := streamjson.Event{
+		event := writer.stampStream(streamjson.Event{
 			Type:         streamjson.EventToolResult,
 			RunID:        writer.runID,
 			ID:           result.ToolCallID,
@@ -313,7 +362,7 @@ func (writer *execEventWriter) toolResult(result agent.ToolResult) {
 			Truncated:    &truncated,
 			ChangedFiles: result.ChangedFiles,
 			Meta:         result.Meta,
-		}
+		})
 		if result.Redacted {
 			redacted := true
 			event.Redacted = &redacted

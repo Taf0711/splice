@@ -326,7 +326,7 @@ func windowsRestrictedTokenCommandPlan(execRequest SandboxExecutionRequest, poli
 	if err != nil {
 		return CommandPlan{}, err
 	}
-	childEnv, err := windowsSandboxChildEnv(spec.Env, policy, execRequest.WorkspaceRoot)
+	childEnv, err := windowsSandboxChildEnv(spec.Env, policy, execRequest.WorkspaceRoot, execRequest.PermissionProfile)
 	if err != nil {
 		return CommandPlan{}, err
 	}
@@ -370,7 +370,7 @@ func windowsRestrictedTokenCommandPlan(execRequest SandboxExecutionRequest, poli
 	}, execRequest), nil
 }
 
-func windowsSandboxChildEnv(specEnv []string, policy Policy, workspaceRoot string) ([]string, error) {
+func windowsSandboxChildEnv(specEnv []string, policy Policy, workspaceRoot string, profile PermissionProfile) ([]string, error) {
 	var env []string
 	if specEnv != nil {
 		env = cloneStrings(specEnv)
@@ -388,7 +388,7 @@ func windowsSandboxChildEnv(specEnv []string, policy Policy, workspaceRoot strin
 		"SystemRoot="+firstEnv("SystemRoot", `C:\Windows`),
 		"WINDIR="+firstEnv("WINDIR", `C:\Windows`),
 	)
-	env, err := withSandboxGoCache(env, policy, BackendWindowsRestrictedToken, workspaceRoot)
+	env, err := withSandboxGoCache(env, policy, BackendWindowsRestrictedToken, workspaceRoot, profile)
 	if err != nil {
 		return nil, err
 	}

@@ -74,13 +74,14 @@ func (r *IterationRecovery) Capture(ctx context.Context, runID string, iteration
 }
 
 // Restore resets the worktree to targetRef after verifying the current state
-// matches expectedCurrentRef. It removes later non-ignored untracked files with
-// git clean -fd and verifies the resulting tree matches targetRef.
+// matches expectedCurrentRef. It removes later non-ignored untracked files,
+// nested repositories included, with git clean -ffd and verifies the resulting tree matches targetRef. On success
+// HEAD moves to the parent of targetRef, never onto the snapshot commit.
 //
 // All git commands run with the supplied context. A mismatch, cancellation, or
 // command failure returns a named error and leaves the isolated worktree for
 // inspection. A failure after reset may leave the target partially restored.
-func (r *IterationRecovery) Restore(ctx context.Context, expectedCurrentRef, targetRef string) error {
+func (r *IterationRecovery) Restore(ctx context.Context, expectedCurrentRef, targetRef string) (err error) {
 	if strings.TrimSpace(expectedCurrentRef) == "" {
 		return fmt.Errorf("expectedCurrentRef is required")
 	}
@@ -112,8 +113,16 @@ func (r *IterationRecovery) Restore(ctx context.Context, expectedCurrentRef, tar
 	} else if result.ExitCode != 0 {
 		return fmt.Errorf("reset to target: %s", strings.TrimSpace(firstNonEmpty(result.Stderr, result.Stdout)))
 	}
+	// HEAD now sits on the snapshot. Any later error moves it back, so a
+	// MergeBack after a failed restore cannot merge the snapshot.
+	defer func() {
+		if err != nil {
+			_ = r.moveHeadToParent(context.WithoutCancel(ctx), dir, targetRef)
+		}
+	}()
 
-	if result, err := r.runGit(ctx, dir, "clean", "-fd"); err != nil {
+	// Two -f flags also remove untracked directories that hold a .git.
+	if result, err := r.runGit(ctx, dir, "clean", "-ffd"); err != nil {
 		return fmt.Errorf("clean untracked files: %w", err)
 	} else if result.ExitCode != 0 {
 		return fmt.Errorf("clean untracked files: %s", strings.TrimSpace(firstNonEmpty(result.Stderr, result.Stdout)))
@@ -125,6 +134,19 @@ func (r *IterationRecovery) Restore(ctx context.Context, expectedCurrentRef, tar
 	}
 	if verifyTree != targetTree {
 		return fmt.Errorf("restored tree mismatch: got %s, want %s", verifyTree, targetTree)
+	}
+
+	return r.moveHeadToParent(ctx, dir, targetRef)
+}
+
+// moveHeadToParent moves HEAD off the synthetic snapshot commit, so a later
+// MergeBack never merges it. The index is reset to the parent too, so the
+// restored files are not left staged.
+func (r *IterationRecovery) moveHeadToParent(ctx context.Context, dir, targetRef string) error {
+	if result, err := r.runGit(ctx, dir, "reset", "--mixed", targetRef+"^"); err != nil {
+		return fmt.Errorf("reset HEAD to snapshot parent: %w", err)
+	} else if result.ExitCode != 0 {
+		return fmt.Errorf("reset HEAD to snapshot parent: %s", strings.TrimSpace(firstNonEmpty(result.Stderr, result.Stdout)))
 	}
 	return nil
 }

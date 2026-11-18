@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -400,4 +401,74 @@ func TestSessionFileLockSerializesAcrossStores(t *testing.T) {
 		t.Fatalf("storeB AppendEvent did not proceed after lock release")
 	}
 	wg.Wait()
+}
+
+// A failed file write must keep the checkpoint, so the rewind can be retried.
+func TestApplyRewindKeepsCheckpointWhenWriteFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permissions do not block writes on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	store, ws := newCkStore(t)
+	dir := filepath.Join(ws, "d")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, filepath.Join(dir, "a.txt"), "original")
+	mustCapture(t, store, ws, "write_file", "d/a.txt")
+	mustWriteFile(t, filepath.Join(dir, "a.txt"), "changed")
+
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	report, err := store.ApplyRewind("s", ws, 0)
+	if err == nil {
+		t.Fatal("ApplyRewind returned nil error for a failed write")
+	}
+	if !strings.Contains(err.Error(), "d/a.txt") {
+		t.Fatalf("ApplyRewind error %q does not name the failed path", err)
+	}
+	failed := false
+	for _, path := range report.Failed {
+		if path == "d/a.txt" {
+			failed = true
+		}
+	}
+	if !failed {
+		t.Fatalf("report.Failed = %v, want d/a.txt", report.Failed)
+	}
+
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ApplyRewind("s", ws, 0); err != nil {
+		t.Fatalf("retry ApplyRewind returned error: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "a.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "original" {
+		t.Fatalf("a.txt = %q, want original after retry", data)
+	}
+}
+
+func TestSummarizePathsCapsList(t *testing.T) {
+	cases := []struct {
+		paths []string
+		want  string
+	}{
+		{[]string{"a", "b"}, "a, b"},
+		{[]string{"a", "b", "c", "d", "e"}, "a, b, c, d, e"},
+		{[]string{"a", "b", "c", "d", "e", "f", "g"}, "a, b, c, d, e, and 2 more"},
+	}
+	for _, tc := range cases {
+		if got := summarizePaths(tc.paths, 5); got != tc.want {
+			t.Fatalf("summarizePaths(%v) = %q, want %q", tc.paths, got, tc.want)
+		}
+	}
 }

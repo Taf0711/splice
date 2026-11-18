@@ -100,6 +100,10 @@ Use `--auto low` for conservative automation. Review the policy before you use
 | `splice auth` | Manage supported OAuth logins. |
 | `splice doctor` | Check configuration and provider health. |
 
+The `pipeline.toolchain` check looks for `git`, `go`, `gosec`, `trivy`, `python`, `node`, and `npx` on PATH.
+A missing tool gives a warning, not a failure.
+A stage that needs a missing tool reports its check as incomplete, unavailable, or failed.
+
 Read [Configuration](CONFIGURATION.md) and
 [OAuth and provider login](oauth-subscriptions.md) before you add a custom
 endpoint.
@@ -120,7 +124,7 @@ Run `splice changes --help` before a command that changes Git state.
 
 | Command | Purpose |
 |---|---|
-| `splice sessions` | List lineage, preview rewind, rewind, compact, or prune. |
+| `splice sessions` | List lineage, preview rewind, rewind, compact, or prune. Rewind restores only file-tool changes. Shell command changes are not restored. |
 | `splice search` | Search local session events. `splice find` is an alias. |
 | `splice spec` | Review and decide on saved specification drafts. |
 | `splice worktrees` | Prepare or prune isolated Git worktrees. |
@@ -244,7 +248,7 @@ commands work only in the interactive session.
 | `/init` | none | `/init` | Read the repository and create an `AGENTS.md` file for the agent. |
 | `/compact` | none | `/compact [status\|now]` | Compact the transcript now. `/compact status` shows the compaction state. |
 | `/transcript` | none | `/transcript` | Turn the detailed transcript view on or off. |
-| `/rewind` | none | `/rewind [latest\|<sequence>]` | Restore workspace files to a checkpoint. Remove the later session events. |
+| `/rewind` | none | `/rewind [latest\|<sequence>]` | Restore workspace files to a checkpoint. Remove the later session events. Only changes from `write_file`, `edit_file`, `delete_file`, and `apply_patch` are restored. Shell command changes are not restored. |
 | `/style` | none | `/style [list\|balanced\|concise\|explanatory\|review]` | Show or set the response style. |
 | `/selfcorrect` | `/sc` | `/selfcorrect [status\|on\|off\|tests\|full\|lsp]` | Show or set the depth of post-edit self-correction. |
 | `/turns` | none | `/turns [n]` | Show or set the tool-turn budget for each run in this session. Raise it for long tasks. |

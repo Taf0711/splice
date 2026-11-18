@@ -256,6 +256,9 @@ func emitWarning(w io.Writer, message string) {
 // while the run is in flight.
 type FixtureProvider struct {
 	BlockUntilCancel bool
+	// Gate, when set, holds the stream until it closes or the context is
+	// canceled. The bridge closes it after all of stdin has been handled.
+	Gate <-chan struct{}
 }
 
 // StreamCompletion implements agent.Provider for the fixture.
@@ -267,6 +270,14 @@ func (f FixtureProvider) StreamCompletion(ctx context.Context, _ zeroruntime.Com
 			close(ch)
 		}()
 		return ch, nil
+	}
+	if f.Gate != nil {
+		select {
+		case <-f.Gate:
+		case <-ctx.Done():
+			close(ch)
+			return ch, nil
+		}
 	}
 	arguments := `{"files":[{"path":"hello.go","content":"package hello\n\n// Hello returns a greeting.\nfunc Hello() string { return \"hello\" }\n","change_type":"create"}],"language":"go","intent":"fix the spelling typo","confidence":0.95}`
 	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "fixture-1", ToolName: "submit_code"}

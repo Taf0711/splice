@@ -216,12 +216,83 @@ func TestLSPCheckPassesWhenAllServersPresent(t *testing.T) {
 	}
 }
 
+func TestPipelineToolchainPassesWhenAllToolsPresent(t *testing.T) {
+	report := Run(Options{
+		Now:              fixedDoctorClock("2026-11-17T09:00:00Z"),
+		Runtime:          "go",
+		Provider:         validProvider(),
+		LookupExecutable: stubLookup("git", "go", "gosec", "trivy", "python", "node", "npx"),
+	})
+
+	check := report.Check("pipeline.toolchain")
+	if check == nil || check.Status != StatusPass {
+		t.Fatalf("expected pipeline.toolchain pass, got %#v", report.Checks)
+	}
+}
+
+func TestPipelineToolchainWarnsAndNamesMissingTool(t *testing.T) {
+	report := Run(Options{
+		Now:              fixedDoctorClock("2026-11-17T09:05:00Z"),
+		Runtime:          "go",
+		Provider:         validProvider(),
+		LookupExecutable: stubLookup("git", "go", "trivy", "python", "node", "npx"), // gosec missing
+	})
+
+	check := report.Check("pipeline.toolchain")
+	if check == nil || check.Status != StatusWarn {
+		t.Fatalf("expected pipeline.toolchain warn, got %#v", report.Checks)
+	}
+	missing, ok := check.Details["missing"].(map[string]any)
+	if !ok || len(missing) != 1 {
+		t.Fatalf("expected exactly one missing tool, got %#v", check.Details)
+	}
+	if _, named := missing["gosec"]; !named {
+		t.Fatalf("expected gosec named as missing, got %#v", missing)
+	}
+	if !strings.Contains(check.Message, "1 pipeline tool(s) missing") {
+		t.Fatalf("expected the missing count in the message, got %q", check.Message)
+	}
+	if !report.OK {
+		t.Fatalf("a missing pipeline tool must warn, not fail: %#v", report.Checks)
+	}
+}
+
+// The stages call "python", not "python3". With only python3 on PATH, the
+// python entry must say so, because the Python checks still fail.
+func TestPipelineToolchainExplainsPython3OnlyAndNpx(t *testing.T) {
+	report := Run(Options{
+		Now:              fixedDoctorClock("2026-11-17T09:10:00Z"),
+		Runtime:          "go",
+		Provider:         validProvider(),
+		LookupExecutable: stubLookup("git", "go", "gosec", "trivy", "python3", "node"), // python and npx missing
+	})
+
+	check := report.Check("pipeline.toolchain")
+	if check == nil || check.Status != StatusWarn {
+		t.Fatalf("expected pipeline.toolchain warn, got %#v", report.Checks)
+	}
+	missing, ok := check.Details["missing"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected a missing map, got %#v", check.Details)
+	}
+	python, named := missing["python"].(string)
+	if !named || !strings.Contains(python, "only python3 is on PATH; the stages call python") {
+		t.Fatalf("expected python3-only detail for python, got %#v", missing["python"])
+	}
+	if _, named := missing["npx"]; !named {
+		t.Fatalf("expected npx named as missing, got %#v", missing)
+	}
+	if _, named := missing["python3"]; named {
+		t.Fatalf("python3 is not a stage program and must not be listed, got %#v", missing)
+	}
+}
+
 func TestHardeningChecksSkipWhenNoLookupProvided(t *testing.T) {
 	// Without an injected lookup the checks fall back to the real PATH. That is
 	// environment-dependent, so we only assert the checks are present and never
 	// fail the report (they degrade to warn/pass, never fail).
 	report := Run(Options{Now: fixedDoctorClock("2026-06-12T10:20:00Z"), Runtime: "go"})
-	for _, id := range []string{"sandbox.backend", "lsp.servers"} {
+	for _, id := range []string{"sandbox.backend", "lsp.servers", "pipeline.toolchain"} {
 		check := report.Check(id)
 		if check == nil {
 			t.Fatalf("expected %s check to be present, got %#v", id, report.Checks)

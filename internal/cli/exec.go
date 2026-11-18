@@ -982,11 +982,17 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		OnPresentationState:     surface.presentation(writer.presentationState),
 		OnToolCall: func(call agent.ToolCall) {
 			writer.toolCall(call, registry)
-			sessionRecorder.append(sessions.EventToolCall, map[string]any{
+			payload := map[string]any{
 				"id":        call.ID,
 				"name":      call.Name,
 				"arguments": call.Arguments,
-			})
+			}
+			// Record the pipeline stage that made the call, when one runs.
+			if stage, iteration, ok := writer.runningStage(); ok {
+				payload["stage"] = stage
+				payload["iteration"] = iteration
+			}
+			sessionRecorder.append(sessions.EventToolCall, payload)
 			// Snapshot before-state of files this call will mutate (safe rewind).
 			if checkpoint, ok := sessionRecorder.captureCheckpoint(workspaceRoot, call); ok {
 				writer.checkpoint(checkpoint)

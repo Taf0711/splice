@@ -80,7 +80,7 @@ func doctorCheckGroup(id string) string {
 		return "provider"
 	case "sandbox.backend", "lsp.servers", "runtime.go", "config.files", "config.validation":
 		return "platform"
-	case "trajectory.classifier":
+	case "trajectory.classifier", "pipeline.toolchain":
 		return "pipeline"
 	default:
 		return ""

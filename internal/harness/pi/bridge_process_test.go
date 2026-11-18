@@ -89,8 +89,9 @@ func startBridge(t *testing.T, env map[string]string, args ...string) *bridgePro
 	t.Helper()
 	bin := findBridgeBinary(t)
 	cmd := exec.Command(bin, args...)
-	if waitCancel := env["SPLICE_PI_FIXTURE_WAIT_CANCEL"]; waitCancel != "" {
-		cmd.Env = append(os.Environ(), "SPLICE_PI_FIXTURE_WAIT_CANCEL="+waitCancel)
+	cmd.Env = os.Environ()
+	for key, value := range env {
+		cmd.Env = append(cmd.Env, key+"="+value)
 	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -247,12 +248,18 @@ func TestBridgeProcessFixtureStreamOrdering(t *testing.T) {
 // warned about and never kill the run.
 func TestBridgeProcessSurvivesMalformedAndUnknownControl(t *testing.T) {
 	workDir := t.TempDir()
-	process := startBridge(t, nil, "-fixture", "-prompt", "fix the spelling typo", "-cwd", workDir)
+	// The control gate holds the fixture run until stdin ends and the bridge
+	// has handled every line. No timing assumption: the run cannot end first.
+	process := startBridge(t,
+		map[string]string{"SPLICE_PI_FIXTURE_WAIT_CONTROL": "1"},
+		"-fixture", "-prompt", "fix the spelling typo", "-cwd", workDir)
 
 	process.sendControl(t, "not json")
 	process.sendControl(t, `{"kind":"make_coffee"}`)
 	process.sendControl(t, `{"kind":"grant_permission","permId":"call_1"}`)
 	process.sendControl(t, `{"kind":"set_model","model":"gpt-4.1"}`)
+	// Closing stdin ends the control loop. The gate opens only after that.
+	_ = process.stdin.Close()
 
 	var runEnd *streamjson.Event
 	for {

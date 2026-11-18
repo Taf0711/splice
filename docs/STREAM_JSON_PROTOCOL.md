@@ -180,6 +180,12 @@ Real tool executions use a `tool_call` and `tool_result` pair.
 A tool result can also include `changedFiles`, a compact `display` object, and
 redaction or truncation flags.
 
+When a pipeline stage runs, `tool_call` and `tool_result` include `stage` (the
+stage name) and `iteration` (the pass number, starting at 1). The pass number
+matches the `usage` event of that pass. Both fields are absent when no stage
+runs. A tool call made by repair or step-back after a stage ended carries no
+stage.
+
 ## Permissions
 
 A prompt-gated tool can emit a permission request.

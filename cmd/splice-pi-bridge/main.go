@@ -79,6 +79,10 @@ func bridgeOptions(cwd string) agent.Options {
 // for the process-boundary tests and changes nothing by default.
 const fixtureWaitCancelEnv = "SPLICE_PI_FIXTURE_WAIT_CANCEL"
 
+// fixtureWaitControlEnv holds the fixture run until stdin ends and every
+// control line has been handled. It exists for the process-boundary tests.
+const fixtureWaitControlEnv = "SPLICE_PI_FIXTURE_WAIT_CONTROL"
+
 func main() {
 	var (
 		prompt  = flag.String("prompt", "", "the request to run")
@@ -106,9 +110,16 @@ func main() {
 
 	sink := pi.NewStreamSink(os.Stdout)
 
+	// controlDone closes when the control reader has handled all of stdin.
+	controlDone := make(chan struct{})
+
 	var provider agent.Provider
 	if *fixture {
-		provider = pi.FixtureProvider{BlockUntilCancel: os.Getenv(fixtureWaitCancelEnv) == "1"}
+		var gate <-chan struct{}
+		if os.Getenv(fixtureWaitControlEnv) == "1" {
+			gate = controlDone
+		}
+		provider = pi.FixtureProvider{BlockUntilCancel: os.Getenv(fixtureWaitCancelEnv) == "1", Gate: gate}
 	} else {
 		// Fail loudly: silent fallbacks in a deterministic pipeline are bugs
 		// that look like features. Live provider resolution is not wired in
@@ -138,6 +149,7 @@ func main() {
 	caps := harness.CapabilitySet{}
 	go func() {
 		_ = pi.CommandLoop(ctx, os.Stdin, os.Stderr, caps, ctrl)
+		close(controlDone)
 	}()
 
 	result, err := splicerun.Run(ctx, *prompt, provider, wired, nil, nil)
