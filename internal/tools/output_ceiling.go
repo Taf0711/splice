@@ -31,6 +31,11 @@ const outputCeilingEnv = "SPLICE_TOOL_OUTPUT_CEILING_TOKENS"
 // package can opt out, so an MCP-served tool can never exempt itself.
 type selfBudgeting interface{ managesOutputBudget() }
 
+// exactOutputTool marks a host-seam tool whose output must reach the caller
+// byte for byte. On a HostSeam call the registry skips the output reducer
+// and the ceiling for it. Only raw_file_read implements it.
+type exactOutputTool interface{ exactOutput() }
+
 // The exemption list, kept in one place. Each of these applies its own budget
 // before returning: bash (bashOutputBudgetBytes per stream + spill),
 // exec_command (model-raisable token budget + spill), read tools (128 KiB),

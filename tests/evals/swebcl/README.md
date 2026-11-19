@@ -55,8 +55,11 @@ go build -o /tmp/warmcost-eval ./tests/evals/warmcost/cmd/warmcost-eval
   --retention shared \
   --sidecar-root /path/to/warmcost-sidecars \
   --arms cold,warm \
-  --repeats 1
+  --repeats 1 \
+  --trust-project
 ```
 
 The task `setup` script checks out the task commit and writes `.splice/config.json`.
+Splice reads project config only when the project is trusted, so `--trust-project` is required for the project test command to apply.
+The option trusts each attempt workspace through the environment and does not change the trust store.
 The task prompt contains the problem statement only. Hints and gold patches stay outside the workspace.

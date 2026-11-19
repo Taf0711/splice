@@ -135,6 +135,7 @@ func equalTestRunnerStrings(left []string, right []string) bool {
 func TestExpandConfiguredTestCommand(t *testing.T) {
 	root := t.TempDir()
 	testDir := filepath.Join(root, "tests")
+	writeExpansionFixtures(t, root, "tests/test_auth.py", "tests/unit/test_more.py")
 	command := []string{"python", "tests/runtests.py", "{tests}", "{test_modules}"}
 	changed := map[string][]string{
 		"test_generator": {"tests/test_auth.py", "tests/unit/test_more.py", "src/not_a_test.py"},
@@ -147,6 +148,37 @@ func TestExpandConfiguredTestCommand(t *testing.T) {
 	want := []string{"python", "tests/runtests.py", "test_auth.py", "unit/test_more.py", "test_auth", "unit.test_more"}
 	if !equalTestRunnerStrings(got, want) {
 		t.Fatalf("expanded command = %#v, want %#v", got, want)
+	}
+}
+
+// writeExpansionFixtures creates the named files under root, so the expansion
+// sees them as present.
+func writeExpansionFixtures(t *testing.T, root string, names ...string) {
+	t.Helper()
+	for _, name := range names {
+		path := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(path, []byte("def test_x():\n    pass\n"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+}
+
+// A changed test file that was later removed, by a rollback or a delete, must
+// not reach the command. pytest would exit 4 on a missing path.
+func TestExpandConfiguredTestCommandSkipsMissingFiles(t *testing.T) {
+	root := t.TempDir()
+	writeExpansionFixtures(t, root, "tests/test_kept.py")
+	got, err := expandConfiguredTestCommand([]string{"python", "{tests}"}, map[string][]string{
+		"code_writer": {"tests/test_kept.py", "tests/test_gone.py", "tests/test_gone2.py"},
+	}, root, filepath.Join(root, "tests"))
+	if err != nil {
+		t.Fatalf("expandConfiguredTestCommand: %v", err)
+	}
+	if !equalTestRunnerStrings(got, []string{"python", "test_kept.py"}) {
+		t.Fatalf("expanded command = %#v, want only the existing test file", got)
 	}
 }
 

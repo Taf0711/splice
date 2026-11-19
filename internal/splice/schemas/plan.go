@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
+	"unicode/utf8"
 )
 
 // PipelineTier is a request complexity tier.
@@ -415,8 +417,11 @@ func (e ExecutionStage) Validate() error {
 
 // ExecutionPlan is the DAG plan produced by the orchestrator.
 type ExecutionPlan struct {
-	Tier                   PipelineTier     `json:"tier"`
-	RequestIntent          string           `json:"request_intent"`
+	Tier          PipelineTier `json:"tier"`
+	RequestIntent string       `json:"request_intent"`
+	// Request is the full task text for the model stages, bounded by
+	// MaxRequestBytes. RequestIntent stays the distilled key value.
+	Request                string           `json:"request,omitempty"`
 	Stages                 []ExecutionStage `json:"stages"`
 	TokenBudget            TokenBudget      `json:"token_budget"`
 	AcceptanceFacts        []AcceptanceFact `json:"acceptance_facts,omitempty"`
@@ -599,16 +604,23 @@ func (s StageRecord) Validate() error {
 
 // HarnessStageInput is minimal typed input passed through the harness runner.
 type HarnessStageInput struct {
-	RunID           string            `json:"run_id"`
-	StageName       string            `json:"stage_name"`
-	Sequence        int               `json:"sequence"`
-	PlanTier        PipelineTier      `json:"plan_tier"`
-	RequestIntent   string            `json:"request_intent"`
+	RunID         string       `json:"run_id"`
+	StageName     string       `json:"stage_name"`
+	Sequence      int          `json:"sequence"`
+	PlanTier      PipelineTier `json:"plan_tier"`
+	RequestIntent string       `json:"request_intent"`
+	// Request is the full task text for the model stages. Empty on plans
+	// built before it existed, and then the stages use RequestIntent.
+	Request         string            `json:"request,omitempty"`
 	AcceptanceFacts []AcceptanceFact  `json:"acceptance_facts,omitempty"`
 	PriorSummaries  map[string]string `json:"prior_summaries,omitempty"`
 	// PriorChangedFiles carries structured paths from completed earlier stages.
 	// It complements PriorSummaries, which remains the prose hand-off channel.
 	PriorChangedFiles map[string][]string `json:"prior_changed_files,omitempty"`
+	// RunChangedFiles maps each earlier stage of the run to the paths it
+	// changed, edge scope aside. Only the test runner reads it, to expand the
+	// configured {tests} placeholder. Models never see it.
+	RunChangedFiles map[string][]string `json:"run_changed_files,omitempty"`
 	// WriterStage is the plan name of the code writer when a topology renames
 	// it. Empty means the builtin name. Stages show it to the model, so it is
 	// the name the model sees.
@@ -1101,4 +1113,61 @@ func (p PipelineResult) Validate() error {
 		return fmt.Errorf("cost_coverage %q must be %q", p.CostCoverage, wantCoverage)
 	}
 	return nil
+}
+
+// MaxRequestBytes bounds the full task text a plan and its stages carry.
+const MaxRequestBytes = 32 << 10
+
+// requestTruncatedMarker ends a request that BoundRequest cut.
+const requestTruncatedMarker = "\n[request truncated at 32 KiB]"
+
+// fenceClose closes a code fence that a cut leaves open.
+const fenceClose = "\n```"
+
+// BoundRequest returns the task text the model stages read. A request within
+// MaxRequestBytes is returned unchanged, with its whitespace and code fences.
+// A longer one is cut at a rune boundary. A cut inside a code fence closes the
+// fence. The result ends with requestTruncatedMarker.
+func BoundRequest(request string) string {
+	if len(request) <= MaxRequestBytes {
+		return request
+	}
+	cut := MaxRequestBytes - len(requestTruncatedMarker) - len(fenceClose)
+	for cut > 0 && !utf8.RuneStart(request[cut]) {
+		cut--
+	}
+	kept := request[:cut]
+	if insideFence(kept) {
+		return kept + fenceClose + requestTruncatedMarker
+	}
+	return kept + requestTruncatedMarker
+}
+
+// insideFence reports whether text ends inside an open ``` code fence.
+func insideFence(text string) bool {
+	open := false
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			open = !open
+		}
+	}
+	return open
+}
+
+// TaskText is the task text a model stage reads: the full request when the
+// plan carries one, else the distilled intent (plans built before Request).
+func (e ExecutionPlan) TaskText() string {
+	if e.Request != "" {
+		return e.Request
+	}
+	return e.RequestIntent
+}
+
+// TaskText is the task text a model stage reads: the full request when the
+// orchestrator carried it, else the distilled intent.
+func (h HarnessStageInput) TaskText() string {
+	if h.Request != "" {
+		return h.Request
+	}
+	return h.RequestIntent
 }

@@ -52,6 +52,15 @@ type StageOptions struct {
 	PullContext bool
 	// OverrideContextRequest is emitted instead of the default when set.
 	OverrideContextRequest *schemas.ContextRequest
+	// FinalContextCall is set when the orchestrator cannot grant another
+	// context request after this call. A stage that offers a context tool
+	// then offers only its submission tool and says so in the prompt.
+	FinalContextCall bool
+	// CarriedQueries are reads a previous invocation of this stage was granted
+	// in the same run, with their line range and character bound. The default
+	// context request repeats them after the named paths and before the
+	// ranked fallback.
+	CarriedQueries []schemas.ContextQuery
 	// RunTool executes a deterministic tool from the registry.
 	RunTool func(ctx context.Context, name string, args map[string]any) (ToolResult, error)
 	// ReportActivity emits observable stage activity.

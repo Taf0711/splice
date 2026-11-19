@@ -63,6 +63,11 @@ type Config struct {
 	// SidecarRoot is the directory the runner assigns per-class sidecar
 	// sockets and databases under. Empty keeps the ambient operator sidecar.
 	SidecarRoot string
+	// TrustProject trusts each attempt's workspace through the environment
+	// (SPLICE_TRUST_WORKSPACE=1), so its .splice/config.json loads (for
+	// example verify.testCommand). The trust store is not written. False
+	// keeps the --no-trust invocation.
+	TrustProject bool
 }
 
 // ExecRequest is one child process invocation.
@@ -107,6 +112,7 @@ type Provenance struct {
 	SidecarRevision string        `json:"sidecar_revision"`
 	ModelID         string        `json:"model_id"`
 	ModelSettings   ModelSettings `json:"model_settings"`
+	TrustProject    bool          `json:"trust_project"`
 	Arms            []Arm         `json:"arms"`
 	Tasks           int           `json:"tasks"`
 	Repeats         int           `json:"repeats"`
@@ -447,6 +453,7 @@ func (r *Runner) Run(ctx context.Context) (Aggregate, error) {
 		SidecarRevision: r.cfg.SidecarRevision,
 		ModelID:         r.cfg.Model,
 		ModelSettings:   r.cfg.ModelSettings,
+		TrustProject:    r.cfg.TrustProject,
 		Arms:            append([]Arm(nil), r.cfg.Arms...),
 		Tasks:           len(r.cfg.Tasks),
 		Repeats:         r.cfg.Repeats,
@@ -857,13 +864,19 @@ func (r *Runner) binaryRevision() string {
 }
 
 // execArgs mirrors the production headless invocation used by the eval seam.
-func execArgs(arm Arm, model, sessionID, prompt string) []string {
-	args := []string{
-		"--no-trust", "exec",
+// With trustProject, no root trust flag is passed: the attempt trusts its
+// workspace through SPLICE_TRUST_WORKSPACE (see attemptEnv). Otherwise the
+// invocation keeps --no-trust.
+func execArgs(arm Arm, model, sessionID, prompt string, trustProject bool) []string {
+	var args []string
+	if !trustProject {
+		args = append(args, "--no-trust")
+	}
+	args = append(args, "exec",
 		"--output-format", "stream-json",
 		"--memory", arm.MemoryMode(),
 		"--init-session-id", sessionID,
-	}
+	)
 	if strings.TrimSpace(model) != "" {
 		args = append(args, "--model", model)
 	}
@@ -1050,6 +1063,25 @@ func envWithOverrides(base []string, overrides ...string) []string {
 	return append(out, overrides...)
 }
 
+// attemptEnv builds one attempt's child environment. The operator's
+// SPLICE_TRUST_WORKSPACE never reaches the child, so an ambient value cannot
+// change the trust of a measured run. With trustProject the child gets
+// SPLICE_TRUST_WORKSPACE=1, which trusts the workspace before the user's
+// defaultProjectTrust is read and does not write the trust store
+// (config.ResolveTrust, step 3).
+func attemptEnv(base []string, trustProject bool, overrides ...string) []string {
+	kept := make([]string, 0, len(base))
+	for _, kv := range base {
+		if !strings.HasPrefix(kv, "SPLICE_TRUST_WORKSPACE=") {
+			kept = append(kept, kv)
+		}
+	}
+	if trustProject {
+		overrides = append(overrides, "SPLICE_TRUST_WORKSPACE=1")
+	}
+	return envWithOverrides(kept, overrides...)
+}
+
 // runSequence prepares one workspace for the sequence and runs every task in
 // it, in order. Each task still produces its own attempt, verifier, and
 // ledger. A task failure does not stop the sequence: the workspace keeps
@@ -1147,6 +1179,7 @@ func (r *Runner) runTaskInWorkspace(ctx context.Context, task Task, arm Arm, rep
 		FixtureDigest:   fixtureDigest,
 		ModelID:         r.cfg.Model,
 		ModelSettings:   r.cfg.ModelSettings,
+		TrustProject:    r.cfg.TrustProject,
 		TreatmentEnv:    r.armEnv(arm),
 		SessionID:       sessionID,
 		StartedAt:       started,
@@ -1156,7 +1189,7 @@ func (r *Runner) runTaskInWorkspace(ctx context.Context, task Task, arm Arm, rep
 	if err := r.prepareSidecar(class); err != nil {
 		return attempt, err
 	}
-	env := envWithOverrides(os.Environ(), append(r.armEnv(arm), r.sidecarEnv(class)...)...)
+	env := attemptEnv(os.Environ(), r.cfg.TrustProject, append(r.armEnv(arm), r.sidecarEnv(class)...)...)
 	if arm.MemoryMode() == "on" {
 		if err := r.ensureSidecar(ctx, class, env); err != nil {
 			return attempt, &harnessError{taskID: task.ID, err: err}
@@ -1172,7 +1205,7 @@ func (r *Runner) runTaskInWorkspace(ctx context.Context, task Task, arm Arm, rep
 	defer cancel()
 	res, err := r.exec(runCtx, ExecRequest{
 		Binary:     r.cfg.Binary,
-		Args:       execArgs(arm, r.cfg.Model, sessionID, task.Prompt),
+		Args:       execArgs(arm, r.cfg.Model, sessionID, task.Prompt, r.cfg.TrustProject),
 		Env:        env,
 		Dir:        workspace,
 		OutputPath: rawPath,
@@ -1467,6 +1500,7 @@ func (r *Runner) failedAttempt(task Task, arm Arm, repeat, seqIndex, seqOrdinal,
 		SidecarRevision: prov.SidecarRevision,
 		ModelID:         r.cfg.Model,
 		ModelSettings:   r.cfg.ModelSettings,
+		TrustProject:    r.cfg.TrustProject,
 		TreatmentEnv:    r.armEnv(arm),
 		RunStatus:       "infrastructure_failed",
 		CostCoverage:    schemas.CostCoveragePartial,

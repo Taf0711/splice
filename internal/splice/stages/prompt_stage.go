@@ -108,7 +108,7 @@ func callTextCompletion(ctx context.Context, provider zeroruntime.Provider, mode
 // unknown {{name}} is left as written, so a typo is visible rather than
 // silently empty.
 func renderPromptTemplate(template string, input schemas.HarnessStageInput) string {
-	out := strings.ReplaceAll(template, "{{intent}}", input.RequestIntent)
+	out := strings.ReplaceAll(template, "{{intent}}", input.TaskText())
 	out = strings.ReplaceAll(out, "{{summaries}}", renderPromptSummaries(input.PriorSummaries))
 	out = strings.ReplaceAll(out, "{{memory}}", renderPromptMemory(input.MemoryBundle))
 	return out

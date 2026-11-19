@@ -496,6 +496,149 @@ func TestRunPassCarriesWriterChangedPathsToTestGenerator(t *testing.T) {
 	}
 }
 
+// runExpandedTestCommand runs a configured test command with {tests} through
+// runPass and returns the argv the test runner recorded. The writer output
+// comes from writer, and the test runner depends only on static_analyzer, as
+// the default topology does.
+func runExpandedTestCommand(t *testing.T, writer string, writerOut schemas.HarnessStageOutput, runnerName string) []string {
+	t.Helper()
+	workDir := t.TempDir()
+	// The changed test file must exist, or the expansion drops it.
+	if err := os.MkdirAll(filepath.Join(workDir, "pkg", "tests"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "pkg", "tests", "test_x.py"), []byte("def test_x():\n    pass\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	var argv []string
+	runTests := stageFunc(func(ctx context.Context, input schemas.HarnessStageInput, _ zeroruntime.Provider, _ stages.StageOptions) (schemas.HarnessStageOutput, error) {
+		out, err := stages.TestRunner{}.Run(ctx, input, nil, stages.StageOptions{
+			WorkDir:        workDir,
+			CommandWorkDir: workDir,
+			Command:        []string{"python", "bin/test", "-C", "{tests}"},
+			RunTool: func(context.Context, string, map[string]any) (stages.ToolResult, error) {
+				return stages.ToolResult{OK: true, Output: "ok"}, nil
+			},
+		})
+		if err == nil {
+			argv = out.Data["test_results"].(schemas.TestRunResults).Command
+		}
+		return out, err
+	})
+	plan := schemas.ExecutionPlan{
+		Tier: schemas.TierStandard, RequestIntent: "fix and test",
+		Stages: []schemas.ExecutionStage{{Name: "code_writer"}},
+	}
+	registry := stageRegistry{
+		"code_writer": outputStage{output: schemas.HarnessStageOutput{Summary: "wrote code", Confidence: 1}},
+	}
+	if writer != "code_writer" {
+		plan.Stages = append(plan.Stages, schemas.ExecutionStage{Name: writer, DependsOn: []string{"code_writer"}})
+		registry[writer] = outputStage{output: writerOut}
+	} else {
+		registry["code_writer"] = outputStage{output: writerOut}
+	}
+	plan.Stages = append(plan.Stages,
+		schemas.ExecutionStage{Name: "static_analyzer", DependsOn: []string{"code_writer"}},
+	)
+	if runnerName != "test_runner" {
+		// A first test runner node, so the second one is not the role's first.
+		plan.Stages = append(plan.Stages, schemas.ExecutionStage{Name: "test_runner", Type: "test_runner", DependsOn: []string{"static_analyzer"}})
+	}
+	plan.Stages = append(plan.Stages, schemas.ExecutionStage{Name: runnerName, Type: "test_runner", DependsOn: []string{"static_analyzer"}})
+	registry["static_analyzer"] = outputStage{output: schemas.HarnessStageOutput{Summary: "clean", Confidence: 1}}
+	registry[runnerName] = runTests
+	if runnerName != "test_runner" {
+		registry["test_runner"] = outputStage{output: schemas.HarnessStageOutput{Summary: "first runner", Confidence: 1}}
+	}
+	if _, _, completed, err := runPass(context.Background(), "run-expand-tests", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir, nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0)); err != nil || !completed {
+		t.Fatalf("runPass: completed=%v err=%v", completed, err)
+	}
+	return argv
+}
+
+// The configured {tests} placeholder must see the test file that an earlier
+// write stage changed, even when the test runner does not depend on that
+// stage. Without this the whole suite runs.
+func TestRunPassTestRunnerExpandsTestsFromEarlierWriters(t *testing.T) {
+	const testFile = "pkg/tests/test_x.py"
+	out := schemas.HarnessStageOutput{Summary: "wrote test", Confidence: 1, ChangedFiles: []string{testFile}}
+	t.Run("default topology code writer", func(t *testing.T) {
+		argv := runExpandedTestCommand(t, "code_writer", out, "test_runner")
+		if !slices.Contains(argv, testFile) {
+			t.Fatalf("test command = %v, want it to include %s", argv, testFile)
+		}
+	})
+	t.Run("standard tier test generator", func(t *testing.T) {
+		argv := runExpandedTestCommand(t, "test_generator", out, "test_runner")
+		if !slices.Contains(argv, testFile) {
+			t.Fatalf("test command = %v, want it to include %s", argv, testFile)
+		}
+	})
+	// A second test runner node, named by its kind rather than the role name,
+	// gets the same run-wide changed files.
+	t.Run("custom test runner node", func(t *testing.T) {
+		argv := runExpandedTestCommand(t, "code_writer", out, "verify")
+		if !slices.Contains(argv, testFile) {
+			t.Fatalf("test command = %v, want it to include %s", argv, testFile)
+		}
+	})
+}
+
+// A test file that pass 1 wrote must still reach the test runner in pass 2,
+// when pass 2 changes nothing itself.
+func TestRunIterationLoopCarriesChangedFilesAcrossPasses(t *testing.T) {
+	writes := 0
+	var runnerSeen []map[string][]string
+	registry := stageRegistry{
+		"code_writer": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			writes++
+			out := schemas.HarnessStageOutput{Summary: "wrote code", Confidence: 1}
+			if writes == 1 {
+				out.ChangedFiles = []string{"pkg/tests/test_x.py"}
+			}
+			return out, nil
+		}),
+		"static_analyzer": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			report := schemas.VerificationReport{Status: schemas.VerificationPassed, Complete: true, Summary: "clean"}
+			if writes == 1 {
+				report = schemas.VerificationReport{
+					Status: schemas.VerificationFindings, Complete: true, Summary: "one finding",
+					Tools:    []schemas.VerificationToolRun{{Tool: "python_syntax", Required: true, Scope: "quality", Status: schemas.VerificationFindings, Summary: "one finding"}},
+					Findings: []schemas.VerificationFinding{{Tool: "python_syntax", Authority: "deterministic", RuleID: "PY_COMPILE", Category: "quality", Path: "pkg/tests/test_x.py", Message: "fix it", Severity: schemas.SeverityHigh}},
+				}
+			}
+			if err := report.Validate(); err != nil {
+				return schemas.HarnessStageOutput{}, err
+			}
+			return schemas.HarnessStageOutput{Summary: report.Summary, Confidence: 1, Data: map[string]any{VerificationReportKey: report}}, nil
+		}),
+		"test_runner": stageFunc(func(_ context.Context, input schemas.HarnessStageInput, _ zeroruntime.Provider, _ stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			runnerSeen = append(runnerSeen, input.RunChangedFiles)
+			return schemas.HarnessStageOutput{Summary: "tests ran", Confidence: 1}, nil
+		}),
+	}
+	plan := schemas.ExecutionPlan{
+		Tier: schemas.TierStandard, RequestIntent: "fix the syntax error and test it",
+		Stages: []schemas.ExecutionStage{
+			{Name: "code_writer"},
+			{Name: "test_runner", DependsOn: []string{"code_writer"}},
+			{Name: "static_analyzer", DependsOn: []string{"code_writer"}},
+		},
+	}
+	result, err := runIterationLoop(context.Background(), "run-pass-accumulation", plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 50}), t.TempDir(), nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	if writes < 2 || len(runnerSeen) < 2 {
+		t.Fatalf("writes = %d, test runs = %d, want a second pass (status %q)", writes, len(runnerSeen), result.Status)
+	}
+	last := runnerSeen[len(runnerSeen)-1]
+	if !slices.Contains(last["code_writer"], "pkg/tests/test_x.py") {
+		t.Fatalf("pass 2 test runner changed files = %v, want the pass 1 test file", last)
+	}
+}
+
 func TestBuildRevisionContextCarriesPriorOutputFiles(t *testing.T) {
 	output := schemas.HarnessStageOutput{Data: map[string]any{
 		"test_generator_output": schemas.TestGeneratorOutput{
@@ -4331,17 +4474,12 @@ func TestPipelineDisablesBashContextFulfillment(t *testing.T) {
 	if report.Status == schemas.VerificationPassed {
 		t.Fatal("quality check passed despite disabled bash")
 	}
-	found := false
-	for _, f := range report.Findings {
-		if f.RuleID == "PY_COMPILE" {
-			found = true
-			if !strings.Contains(f.Message, `Tool "bash" is not enabled`) && !strings.Contains(f.Message, "not enabled for this run") {
-				t.Fatalf("PY_COMPILE message = %q, want bash filter denial", f.Message)
-			}
-		}
+	// The check could not run, so it is incomplete. It is not a code finding.
+	if report.Status != schemas.VerificationIncomplete || len(report.Findings) != 0 {
+		t.Fatalf("status=%q findings=%+v, want incomplete with no findings", report.Status, report.Findings)
 	}
-	if !found {
-		t.Fatalf("expected PY_COMPILE finding from disabled bash, got status=%q summary=%q findings=%+v", report.Status, report.Summary, report.Findings)
+	if !strings.Contains(report.Summary, `Tool "bash" is not enabled`) {
+		t.Fatalf("summary = %q, want bash filter denial", report.Summary)
 	}
 }
 
@@ -5598,5 +5736,105 @@ func TestRunIterationLoopRecordsStageErrorKindInFailureHistory(t *testing.T) {
 	}
 	if got := policy.failureHistory[0].Kind; got != schemas.NodeFailureStageError {
 		t.Fatalf("FailureHistory[0].Kind = %q, want stage_error (history %+v)", got, policy.failureHistory)
+	}
+}
+
+// TestRunIgnoresProposalBasesFromAnotherRun pins per-run scope: a snapshot
+// left in the process registry by an earlier run must not judge this run's
+// create of the same path.
+func TestRunIgnoresProposalBasesFromAnotherRun(t *testing.T) {
+	stale := stages.NewProposalBaseRegistry()
+	stale.RecordFromBundle(&schemas.ContextBundle{Items: []schemas.ContextItem{{
+		Query:   schemas.ContextQuery{QueryType: schemas.ContextReadFile},
+		Summary: "main.go",
+		Payload: map[string]any{"path": "main.go", "version": "old", "text": "package old\n", "raw": "package old\n", "start": 1, "end": 2},
+	}}})
+	reset := stages.SetProposalBases(stale)
+	defer reset()
+
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "go.mod"), []byte("module example\n\ngo 1.22\n"), 0644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool(workDir))
+	registry.Register(tools.NewWriteFileTool(workDir))
+	result, err := Run(context.Background(), "add a Hello function and tests", runFakeProvider{}, agent.Options{
+		Cwd:            workDir,
+		Registry:       registry,
+		PermissionMode: agent.PermissionModeAuto,
+	}, nil, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if strings.Contains(result.IncompleteReason, "changed or was read incompletely") {
+		t.Fatalf("a stale base from another run judged this run's write: %s", result.IncompleteReason)
+	}
+}
+
+// staleBaseBundle is a delivered view of path that an earlier scope left behind.
+func staleBaseBundle(path string) *schemas.ContextBundle {
+	return &schemas.ContextBundle{Items: []schemas.ContextItem{{
+		Query:   schemas.ContextQuery{QueryType: schemas.ContextReadFile},
+		Summary: path,
+		Payload: map[string]any{"path": path, "version": "old", "text": "old\n", "raw": "old\n", "start": 1, "end": 2},
+	}}}
+}
+
+// TestBracketRunScopesProposalBasesPerRun pins the per-run scope on its own:
+// a registry left before the run is not visible inside it.
+func TestBracketRunScopesProposalBasesPerRun(t *testing.T) {
+	stale := stages.NewProposalBaseRegistry()
+	stale.RecordFromBundle(staleBaseBundle("x.py"))
+	defer stages.SetProposalBases(stale)()
+	var seen []string
+	if _, err := bracketRun(agent.Options{}, func() (agent.Result, error) {
+		seen = stages.ProbeBasePaths()
+		return agent.Result{}, nil
+	}); err != nil {
+		t.Fatalf("bracketRun: %v", err)
+	}
+	if len(seen) != 0 {
+		t.Fatalf("a run saw bases from before it started: %v", seen)
+	}
+}
+
+// scopeProbeRunner records the base paths visible when its stage runs.
+type scopeProbeRunner struct {
+	seen *[]string
+	ran  *bool
+}
+
+func (scopeProbeRunner) Capabilities() stages.Capabilities {
+	return stages.Capabilities{ModelFree: true}
+}
+
+func (p scopeProbeRunner) Run(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+	*p.seen = stages.ProbeBasePaths()
+	*p.ran = true
+	return repairTestResults("passed"), nil
+}
+
+// TestRunPassScopesProposalBasesPerPass pins the per-pass scope on its own: a
+// view left before the pass is not visible inside it.
+func TestRunPassScopesProposalBasesPerPass(t *testing.T) {
+	stale := stages.NewProposalBaseRegistry()
+	stale.RecordFromBundle(staleBaseBundle("x.py"))
+	defer stages.SetProposalBases(stale)()
+	workDir := t.TempDir()
+	plan := repairTestPlan()
+	var seen []string
+	ran := false
+	tr := newRunTraceAccumulator(nil, "scope-pass", "session", workDir, plan, "active", nil)
+	runPass(context.Background(), "scope-pass", 1, plan,
+		stageRegistry{"code_writer": scopeProbeRunner{seen: &seen, ran: &ran}, "test_runner": &memoryRepairTestRunner{}},
+		&memoryScriptedProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir,
+		ToolRunnerFunc(func(context.Context, string, map[string]any) (ToolResult, error) { return ToolResult{OK: true}, nil }),
+		time.Time{}, nil, &stubStore{}, tr, NewStageExecutionBudget(0))
+	if !ran {
+		t.Fatal("the probe stage never ran")
+	}
+	if len(seen) != 0 {
+		t.Fatalf("a pass saw views from before it started: %v", seen)
 	}
 }

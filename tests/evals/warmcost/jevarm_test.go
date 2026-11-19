@@ -8,6 +8,7 @@ package warmcost
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -189,13 +190,74 @@ func containsEnv(env []string, want string) bool {
 }
 
 func TestLoopExecArgsSelectPlainAgentLoop(t *testing.T) {
-	args := execArgs(ArmLoop, "model-x", "session-x", "task")
+	args := execArgs(ArmLoop, "model-x", "session-x", "task", false)
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "--loop") {
 		t.Fatalf("loop args = %v, missing --loop", args)
 	}
-	if strings.Contains(strings.Join(execArgs(ArmCold, "model-x", "session-x", "task"), " "), "--loop") {
+	if strings.Contains(strings.Join(execArgs(ArmCold, "model-x", "session-x", "task", false), " "), "--loop") {
 		t.Fatal("cold args unexpectedly selected the plain loop")
+	}
+}
+
+func TestExecArgsTrustProjectSelectsTrustFlag(t *testing.T) {
+	// Default: the exact invocation every existing campaign uses.
+	wantUntrusted := []string{
+		"--no-trust", "exec",
+		"--output-format", "stream-json",
+		"--memory", "off",
+		"--init-session-id", "session-x",
+		"--model", "model-x",
+		"task",
+	}
+	if got := execArgs(ArmCold, "model-x", "session-x", "task", false); !reflect.DeepEqual(got, wantUntrusted) {
+		t.Fatalf("untrusted args = %v, want %v", got, wantUntrusted)
+	}
+
+	// Trusted through the environment: no root trust flag at all. The
+	// attempt sets SPLICE_TRUST_WORKSPACE=1, which trusts without writing the
+	// trust store, so passing --trust would write it.
+	wantTrusted := wantUntrusted[1:]
+	if got := execArgs(ArmCold, "model-x", "session-x", "task", true); !reflect.DeepEqual(got, wantTrusted) {
+		t.Fatalf("trusted args = %v, want %v", got, wantTrusted)
+	}
+}
+
+func TestAttemptEnvTrustProjectSetsTrustEnv(t *testing.T) {
+	// An operator value must never reach the child, in either mode.
+	base := []string{"PATH=/bin", "SPLICE_TRUST_WORKSPACE=0"}
+	count := func(env []string, prefix string) (n int, last string) {
+		for _, kv := range env {
+			if strings.HasPrefix(kv, prefix) {
+				n++
+				last = kv
+			}
+		}
+		return n, last
+	}
+
+	off := attemptEnv(base, false)
+	if n, _ := count(off, "SPLICE_TRUST_WORKSPACE="); n != 0 {
+		t.Fatalf("untrusted env kept inherited SPLICE_TRUST_WORKSPACE: %v", off)
+	}
+	if !containsEnv(off, "PATH=/bin") {
+		t.Fatalf("untrusted env dropped PATH: %v", off)
+	}
+
+	on := attemptEnv(base, true)
+	if n, last := count(on, "SPLICE_TRUST_WORKSPACE="); n != 1 || last != "SPLICE_TRUST_WORKSPACE=1" {
+		t.Fatalf("trusted env = %v, want exactly SPLICE_TRUST_WORKSPACE=1", on)
+	}
+}
+
+func TestTrustEnvBeatsNeverSetting(t *testing.T) {
+	// attemptEnv relies on this order: env 1 trusts before the user setting
+	// is read, and it does not persist. If this fails, --trust-project no
+	// longer trusts a workspace whose user config says defaultProjectTrust
+	// "never".
+	decision, persist := config.ResolveTrust("/work/ws", nil, "never", false, false, "1")
+	if decision != config.TrustTrusted || persist {
+		t.Fatalf("env 1 with setting never = (%v, persist %v), want (trusted, no persist)", decision, persist)
 	}
 }
 

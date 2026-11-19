@@ -78,12 +78,24 @@ func (r *ProposalBaseRegistry) RecordFromBundle(bundle *schemas.ContextBundle) {
 	// Group delivered text per path, in bundle order.
 	pathText := map[string]*strings.Builder{}
 	rawByPath := map[string]string{}
+	partialByPath := map[string]bool{}
+	lastEnd := map[string]int{}
 	var order []string
 	for _, item := range bundle.Items {
 		if item.Error != nil {
 			continue
 		}
 		path, _ := item.Payload["path"].(string)
+		if redacted, _ := item.Payload["redacted_source"].(bool); redacted && path != "" {
+			// No exact bytes for this path: record it so an edit is refused
+			// with the reason, unless a view of it was already registered.
+			if _, exists := r.byPath[path]; !exists {
+				handle := HandleFor(contentDigest("redacted\x00" + path))
+				r.byHandle[handle] = ProposalSnapshot{Path: path, Redacted: true}
+				r.byPath[path] = handle
+			}
+			continue
+		}
 		version, _ := item.Payload["version"].(string)
 		text, _ := item.Payload["text"].(string)
 		raw, hasRaw := item.Payload["raw"].(string)
@@ -103,7 +115,21 @@ func (r *ProposalBaseRegistry) RecordFromBundle(bundle *schemas.ContextBundle) {
 			order = append(order, path)
 			pathText[path] = &strings.Builder{}
 		}
+		start := payloadLine(item.Payload["start"])
+		if pathText[path].Len() > 0 {
+			// Views with a gap between them get an elision marker. A plain
+			// newline would let an edit's old text span the gap and match.
+			if start > lastEnd[path]+1 {
+				pathText[path].WriteString("\n" + elisionMarker + "\n")
+			} else {
+				pathText[path].WriteString("\n")
+			}
+		}
 		pathText[path].WriteString(text)
+		lastEnd[path] = payloadLine(item.Payload["end"])
+		if viewIsPartial(item, raw) {
+			partialByPath[path] = true
+		}
 		if hasRaw {
 			rawByPath[path] = raw
 		}
@@ -118,6 +144,7 @@ func (r *ProposalBaseRegistry) RecordFromBundle(bundle *schemas.ContextBundle) {
 			ViewDigest: viewDigest,
 			Base:       text,
 		}
+		snap.Partial = partialByPath[path]
 		if raw, ok := rawByPath[path]; ok {
 			snap.ContentDigest = contentDigest(raw)
 			snap.Raw = raw
@@ -235,4 +262,44 @@ func (r *ProposalBaseRegistry) ResolveByPath(path string) (ProposalSnapshot, boo
 	}
 	snap, ok := r.byHandle[handle]
 	return snap, ok
+}
+
+// elisionMarker stands in for lines a ranged read did not deliver between
+// two views of one file.
+const elisionMarker = "[lines not delivered]"
+
+// viewIsPartial reports whether a delivered view leaves part of the file
+// unseen: it was truncated, or its line range does not cover the file's
+// first and last lines. A view that carries no range at all is whole-file,
+// as before ranges existed. Fulfilled reads always carry their range.
+func viewIsPartial(item schemas.ContextItem, raw string) bool {
+	if item.Truncated {
+		return true
+	}
+	start, end := payloadLine(item.Payload["start"]), payloadLine(item.Payload["end"])
+	if start == 0 && end == 0 {
+		return false
+	}
+	return start > 1 || end < rawLineCount(raw)
+}
+
+// payloadLine reads a line number from a payload value (JSON decodes it as a
+// float64; in-process it is an int).
+func payloadLine(v any) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case float64:
+		return int(n)
+	}
+	return 0
+}
+
+// rawLineCount counts the lines of raw bytes the way the splice package does:
+// one more than the newline count, and 0 for an empty file.
+func rawLineCount(raw string) int {
+	if raw == "" {
+		return 0
+	}
+	return strings.Count(raw, "\n") + 1
 }

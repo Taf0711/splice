@@ -169,11 +169,15 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 	// ceiling runs after the scrub so the transcript and the spill file agree on
 	// what was hidden.
 	ceilingExempt := false
+	exactOutput := false
 	defer func() {
 		result = scrubResultSecrets(result)
 		// The external reducer runs after the scrub (so it never sees hidden
 		// content) and before the ceiling (so the ceiling stays the backstop).
-		result = reduceToolResultOutput(name, result)
+		// An exact host-seam read skips both: its bytes must stay the file's.
+		if !exactOutput {
+			result = reduceToolResultOutput(name, result)
+		}
 		if !ceilingExempt {
 			result = enforceOutputCeiling(name, result)
 		}
@@ -184,6 +188,10 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 		return errorResult(`Error: Unknown tool "` + name + `".`)
 	}
 	if _, ok := tool.(selfBudgeting); ok {
+		ceilingExempt = true
+	}
+	if _, ok := tool.(exactOutputTool); ok && options.HostSeam {
+		exactOutput = true
 		ceilingExempt = true
 	}
 	if rejecter, ok := tool.(PrePermissionRejecter); ok {

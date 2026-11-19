@@ -1,6 +1,7 @@
 package stages
 
 import (
+	"fmt"
 	"strings"
 )
 
@@ -27,15 +28,15 @@ import (
 // never an intent to wipe the file; it is dropped before any diff can
 // derive a deletion. Everything else passes through unchanged; Validate
 // still rejects every other contract breach.
-func normalizeProposal(p ProposedFileChange, baseRefToSnapshot func(baseRef string) (ProposalSnapshot, bool)) ProposedFileChange {
+func normalizeProposal(p ProposedFileChange, baseRefToSnapshot func(baseRef string) (ProposalSnapshot, bool)) (ProposedFileChange, error) {
 	if p.ChangeType != "modify" || p.Content == nil {
-		return p
+		return p, nil
 	}
 	if strings.TrimSpace(*p.Content) == "" {
 		// Degenerate hedge: empty content beside (possibly) real edits.
 		// Diffing it against any base would derive a full-file deletion.
 		p.Content = nil
-		return p
+		return p, nil
 	}
 	var snap ProposalSnapshot
 	var ok bool
@@ -45,7 +46,7 @@ func normalizeProposal(p ProposedFileChange, baseRefToSnapshot func(baseRef stri
 		snap, ok = currentProposalBases.ResolveByPath(p.Path)
 	}
 	if !ok {
-		return p // unresolvable base: Validate reports it exactly as before
+		return p, nil // unresolvable base: Validate reports it exactly as before
 	}
 	editsMatchOnce := func(source string) bool {
 		for _, e := range p.Edits {
@@ -66,8 +67,13 @@ func normalizeProposal(p ProposedFileChange, baseRefToSnapshot func(baseRef stri
 			if p.BaseRef == "" {
 				p.BaseRef = HandleFor(snap.ViewDigest)
 			}
-			return p
+			return p, nil
 		}
+	}
+	if snap.Partial {
+		// F1: a content modify derives its edits against the whole file, so a
+		// view of part of the file would delete the rest. Refuse it.
+		return p, fmt.Errorf("proposal modify %s: composed against a partial view of %s; send edits or request the whole file", p.Path, p.Path)
 	}
 	// The explicit edits resolve against neither text, so the content is
 	// the only remaining authority. Aim the diff at the raw bytes when
@@ -84,7 +90,7 @@ func normalizeProposal(p ProposedFileChange, baseRefToSnapshot func(baseRef stri
 		// Validate reports the edit-count error (the accurate complaint),
 		// not the mixed-representation one.
 		p.Content = nil
-		return p
+		return p, nil
 	}
 	p.Edits = edits
 	p.Content = nil
@@ -93,7 +99,7 @@ func normalizeProposal(p ProposedFileChange, baseRefToSnapshot func(baseRef stri
 		// downstream baseRefToSnapshot resolves the same snapshot.
 		p.BaseRef = HandleFor(snap.ViewDigest)
 	}
-	return p
+	return p, nil
 }
 
 // deriveEditsFromContent diffs base text against provided content line by

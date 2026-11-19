@@ -22,6 +22,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -120,6 +121,10 @@ type ToolRunnerSourceReader struct {
 // display normalization.
 const rawFileReadToolName = "raw_file_read"
 
+// errSourceRedacted marks a seam result that was redacted. The file holds
+// text that looks like a secret, so its exact bytes are not available.
+var errSourceRedacted = errors.New("the file holds text that looks like a secret, so the pipeline cannot edit it exactly")
+
 // errNoRawRead is the typed error for a runner without the raw-read
 // capability. Callers treat it as "unsupported here", never as permission
 // to bypass the seam.
@@ -143,17 +148,27 @@ func (r ToolRunnerSourceReader) ReadSource(ctx context.Context, path string) (So
 		if err != nil {
 			return SourceSnapshot{}, fmt.Errorf("read source %s: %w", path, err)
 		}
-		if !res.OK {
-			return SourceSnapshot{}, fmt.Errorf("read source %s: %s", path, res.Output)
-		}
-		return NewSourceSnapshot(path, []byte(res.Output)), nil
+		return sourceSnapshotFromResult(path, res)
 	}
 	res, err := r.Inner.RunTool(ctx, rawFileReadToolName, map[string]any{"path": path})
 	if err != nil {
 		return SourceSnapshot{}, fmt.Errorf("read source %s: %w", path, err)
 	}
+	return sourceSnapshotFromResult(path, res)
+}
+
+// sourceSnapshotFromResult builds a snapshot only from a complete, exact
+// read. A truncated or redacted result is an error: a base built from
+// partial or altered bytes would be written back over the real file.
+func sourceSnapshotFromResult(path string, res ToolResult) (SourceSnapshot, error) {
 	if !res.OK {
 		return SourceSnapshot{}, fmt.Errorf("read source %s: %s", path, res.Output)
+	}
+	if res.Truncated {
+		return SourceSnapshot{}, fmt.Errorf("read source %s: output was truncated; no base is built from partial bytes", path)
+	}
+	if res.Redacted {
+		return SourceSnapshot{}, fmt.Errorf("read source %s: %w", path, errSourceRedacted)
 	}
 	return NewSourceSnapshot(path, []byte(res.Output)), nil
 }

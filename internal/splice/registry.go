@@ -18,6 +18,18 @@ import (
 // stageRegistry maps stage names to runnable Stage implementations.
 type stageRegistry map[string]stages.Stage
 
+// taskRequestFor returns the full request for a stage input, or empty. Only
+// stages whose model reads the task get it (R4): the code writer, the test
+// generator, and prompt nodes. Other inputs keep the distilled intent, so
+// their marshaled size and token estimate do not grow.
+func taskRequestFor(impl stages.Stage, plan schemas.ExecutionPlan) string {
+	switch impl.(type) {
+	case stages.CodeWriter, stages.TestGenerator, stages.PromptStage:
+		return plan.Request
+	}
+	return ""
+}
+
 // buildStageRegistry creates a registry of Splice pipeline stages from agent
 // options and the run's active topology. The topology is the seam that makes a
 // loaded custom topology runnable: registerTopologyNodes adds one stage per

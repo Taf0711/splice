@@ -23,6 +23,9 @@ type FileChange struct {
 	Path       string `json:"path"`
 	Content    string `json:"content"`
 	ChangeType string `json:"change_type"` // create, modify, delete
+	// BaseDigest is the sha256 of the file bytes the change was composed on.
+	// Empty for full-content changes with no recorded base.
+	BaseDigest string `json:"base_digest,omitempty"`
 }
 
 // Validate checks that the file change is well-formed.

@@ -14,7 +14,7 @@ import (
 // so the proposal flows through the standard strict path.
 func TestNormalizeMixedModifyDerivesEdits(t *testing.T) {
 	base := "package audit\n\nfunc Apply(trail *Trail) int {\n\treturn 0\n}\n"
-	snap := ProposalSnapshot{Path: "internal/audit/retention.go", Base: base}
+	snap := ProposalSnapshot{Path: "internal/audit/retention.go", Base: base, ContentDigest: ContentDigest(base)}
 	provided := "package audit\n\nfunc Apply(trail *Trail) int {\n\treturn 1\n}\n"
 	p := ProposedFileChange{
 		Path:       "internal/audit/retention.go",
@@ -39,7 +39,7 @@ func TestNormalizeMixedModifyDerivesEdits(t *testing.T) {
 // validation with the at-least-one-edit error, not the mixed error.
 func TestNormalizeMixedModifyIdenticalDerivesNothing(t *testing.T) {
 	base := "package audit\n\nfunc Apply() {}\n"
-	snap := ProposalSnapshot{Path: "x.go", Base: base}
+	snap := ProposalSnapshot{Path: "x.go", Base: base, ContentDigest: ContentDigest(base)}
 	provided := base
 	p := ProposedFileChange{
 		Path: "internal/x.go", ChangeType: "modify", BaseRef: "h", Content: &provided,
@@ -57,7 +57,7 @@ func TestNormalizeMixedModifyIdenticalDerivesNothing(t *testing.T) {
 // every line of a single-occurrence block satisfies that by construction.
 func TestNormalizeMixedModifyPreservesExactOnce(t *testing.T) {
 	base := "alpha\nbeta\ngamma\n"
-	snap := ProposalSnapshot{Path: "f.txt", Base: base}
+	snap := ProposalSnapshot{Path: "f.txt", Base: base, ContentDigest: ContentDigest(base)}
 	provided := "alpha\nBETA\ngamma\n"
 	p := ProposedFileChange{
 		Path: "f.txt", ChangeType: "modify", BaseRef: "h", Content: &provided,
@@ -80,14 +80,15 @@ func TestNormalizeModifyWithoutBaseRefResolvesByPath(t *testing.T) {
 	p := ProposedFileChange{
 		Path: "internal/audit/retention.go", ChangeType: "modify", Content: &provided,
 	}
-	RecordProposalBases(nil) // reset
-	// Record the delivered bundle the way the runner does.
-	bundle := &schemas.ContextBundle{Items: []schemas.ContextItem{{
-		Query:   schemas.ContextQuery{QueryType: "read_file"},
-		Summary: "internal/audit/retention.go",
-		Payload: map[string]any{"text": base, "path": "internal/audit/retention.go", "version": "rev-1"},
-	}}}
-	RecordProposalBases(bundle)
+	// Register the base directly: a snapshot with the file's digest, as the
+	// runner's raw seam produces. The by-path lookup is what is under test.
+	reg := NewProposalBaseRegistry()
+	view := contentDigest(base)
+	snap := ProposalSnapshot{Path: "internal/audit/retention.go", Version: view, ViewDigest: view, Base: base, ContentDigest: ContentDigest(base)}
+	reg.byHandle[HandleFor(view)] = snap
+	reg.byPath[snap.Path] = HandleFor(view)
+	reset := SetProposalBases(reg)
+	defer reset()
 	got, err := MaterializeProposal(p, currentProposalSnapshot)
 	if err != nil {
 		t.Fatalf("materialize: %v", err)
@@ -198,7 +199,7 @@ func TestNormalizeHedgedModifyPrefersExactEdits(t *testing.T) {
 		Content:    ptr("package main\n\nfunc Hello() string { return \"HELLO\" }\n"),
 		Edits:      []TextReplacement{{Old: "return \"hello\"", New: "return \"HELLO\""}},
 	}
-	got := normalizeProposal(mixed, currentProposalSnapshot)
+	got, _ := normalizeProposal(mixed, currentProposalSnapshot)
 	if got.Content != nil {
 		t.Fatalf("hedged modify kept both representations: %+v", got)
 	}
@@ -224,7 +225,7 @@ func TestNormalizeHedgedModifyFallsBackToContentDiff(t *testing.T) {
 		Content:    ptr("package main\n\nfunc Hello() string { return \"HELLO\" }\n"),
 		Edits:      []TextReplacement{{Old: "span that was never delivered", New: "x"}},
 	}
-	got := normalizeProposal(mixed, currentProposalSnapshot)
+	got, _ := normalizeProposal(mixed, currentProposalSnapshot)
 	if got.Content != nil {
 		t.Fatalf("content fallback kept both representations: %+v", got)
 	}
@@ -274,7 +275,7 @@ func TestNormalizeHedgedModifyKeepsRawAnchoredEdits(t *testing.T) {
 		Content:    ptr(""),
 		Edits:      []TextReplacement{{Old: "return \"hello\"", New: "return \"HELLO\""}},
 	}
-	got := normalizeProposal(hedged, currentProposalSnapshot)
+	got, _ := normalizeProposal(hedged, currentProposalSnapshot)
 	if got.Content != nil {
 		t.Fatalf("hedge content survived normalization: %+v", got)
 	}
@@ -305,7 +306,7 @@ func TestNormalizeDropsEmptyContentNeverWipes(t *testing.T) {
 		Content: ptr(""),
 		Edits:   []TextReplacement{{Old: "span that was never delivered", New: "x"}},
 	}
-	got := normalizeProposal(withEdits, currentProposalSnapshot)
+	got, _ := normalizeProposal(withEdits, currentProposalSnapshot)
 	if got.Content != nil {
 		t.Fatalf("empty content survived: %+v", got)
 	}
@@ -317,7 +318,7 @@ func TestNormalizeDropsEmptyContentNeverWipes(t *testing.T) {
 		Path: "main.go", ChangeType: "modify", BaseRef: "main.go",
 		Content: ptr(""),
 	}
-	got = normalizeProposal(noEdits, currentProposalSnapshot)
+	got, _ = normalizeProposal(noEdits, currentProposalSnapshot)
 	if got.Content != nil || len(got.Edits) != 0 {
 		t.Fatalf("empty content with no edits must stay empty, got %+v", got)
 	}

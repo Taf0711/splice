@@ -65,7 +65,7 @@ func (TestGenerator) Run(ctx context.Context, input schemas.HarnessStageInput, p
 		}, nil
 	}
 	if input.Context == nil {
-		req := options.contextRequest(input.RequestIntent, derefString(input.RevisionContext))
+		req := options.contextRequest(input.TaskText(), derefString(input.RevisionContext))
 		if req != nil {
 			options.report("requesting context: " + req.Reason)
 			return schemas.HarnessStageOutput{
@@ -97,7 +97,7 @@ func (TestGenerator) Run(ctx context.Context, input schemas.HarnessStageInput, p
 		writerChangedPaths = writerChangedPaths[:maxWriterChangedPaths]
 	}
 	tgInput := schemas.TestGeneratorInput{
-		Intent:             input.RequestIntent,
+		Intent:             input.TaskText(),
 		Language:           options.language("python"),
 		TargetPaths:        options.TargetPaths,
 		WriterChangedPaths: writerChangedPaths,
@@ -114,13 +114,13 @@ func (TestGenerator) Run(ctx context.Context, input schemas.HarnessStageInput, p
 	options.report("generating tests")
 	payload, _ := json.MarshalIndent(tgInput, "", "  ")
 	collected, err := callValidatedToolUse(ctx, provider, options.model("medium"), options.ReasoningEffort, composeSystemPrompt(testGeneratorSystemPrompt, options.ProjectInstructions), string(payload), options.Images, []zeroruntime.ToolDefinition{testGeneratorToolDefinition()}, options.MaxOutputTokens, &options.Stream, func(collected *zeroruntime.CollectedStream) error {
-		_, err := parseTestGeneratorOutput(collected)
+		_, err := parseTestGeneratorOutput(collected, options.WorkDir)
 		return err
 	}, options.PromptCacheKey, options.OnFormatRetry)
 	if err != nil {
 		return schemas.HarnessStageOutput{}, withCollectedUsage(err, collected)
 	}
-	output, err := parseTestGeneratorOutput(collected)
+	output, err := parseTestGeneratorOutput(collected, options.WorkDir)
 	if err != nil {
 		return schemas.HarnessStageOutput{}, withCollectedUsage(err, collected)
 	}
@@ -198,7 +198,7 @@ func relatedExistingTestPaths(workDir string, writerPaths []string) []string {
 	return out
 }
 
-func parseTestGeneratorOutput(collected *zeroruntime.CollectedStream) (schemas.TestGeneratorOutput, error) {
+func parseTestGeneratorOutput(collected *zeroruntime.CollectedStream, workDir string) (schemas.TestGeneratorOutput, error) {
 	tc := findToolCall(collected, testGeneratorToolName)
 	if tc == nil {
 		return schemas.TestGeneratorOutput{}, fmt.Errorf("model did not call %s", testGeneratorToolName)
@@ -230,8 +230,15 @@ func parseTestGeneratorOutput(collected *zeroruntime.CollectedStream) (schemas.T
 			return schemas.TestGeneratorOutput{}, fmt.Errorf("normalize compact proposals: %w", merr)
 		}
 		output.Files = changes
-	} else if err := requireLegacyContent(probe.Files); err != nil {
-		return schemas.TestGeneratorOutput{}, err
+	} else {
+		if err := requireLegacyContent(probe.Files); err != nil {
+			return schemas.TestGeneratorOutput{}, err
+		}
+		changes, lerr := legacyChanges(probe.Files, workDir)
+		if lerr != nil {
+			return schemas.TestGeneratorOutput{}, lerr
+		}
+		output.Files = changes
 	}
 	if err := output.Validate(); err != nil {
 		return schemas.TestGeneratorOutput{}, err

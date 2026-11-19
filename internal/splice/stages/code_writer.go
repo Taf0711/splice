@@ -30,7 +30,7 @@ func (CodeWriter) Capabilities() Capabilities {
 
 func (CodeWriter) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options StageOptions) (schemas.HarnessStageOutput, error) {
 	if input.Context == nil {
-		req := options.contextRequest(input.RequestIntent, derefString(input.RevisionContext))
+		req := options.contextRequest(input.TaskText(), derefString(input.RevisionContext))
 		if req != nil {
 			options.report("requesting context: " + req.Reason)
 			return schemas.HarnessStageOutput{
@@ -47,7 +47,7 @@ func (CodeWriter) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 	}
 
 	cwInput := schemas.CodeWriterInput{
-		Intent:          input.RequestIntent,
+		Intent:          input.TaskText(),
 		Language:        options.language("python"),
 		TargetPaths:     options.TargetPaths,
 		RelevantContext: selectRelevantContext(options.RelevantContext, input.PriorSummaries, input.Context, input.PipelineStages),
@@ -65,16 +65,30 @@ func (CodeWriter) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 	if err != nil {
 		return schemas.HarnessStageOutput{}, err
 	}
+	tools := codeWriterTools()
+	userPrompt := string(payload)
+	if options.FinalContextCall {
+		// Submit is the only action left: a context request could not be granted.
+		submit := submitCodeToolDefinition()
+		submit.Description = "Submit the complete CodeWriterOutput for the requested implementation. No more context can be fetched."
+		tools = []zeroruntime.ToolDefinition{submit}
+		userPrompt += "\n\n" + FinalContextCallNotice
+	}
 	// D1: the validate callback decodes the action across both typed tools.
 	// A context request is VALID typed output (no format retry); the
 	// orchestrator fulfills it and re-invokes. A submission goes through the
 	// existing proposal parse.
-	collected, err := callValidatedToolUse(ctx, provider, options.model("medium"), options.ReasoningEffort, composeSystemPrompt(codeWriterSystemPrompt, options.ProjectInstructions), string(payload), options.Images, codeWriterTools(), options.MaxOutputTokens, &options.Stream, func(collected *zeroruntime.CollectedStream) error {
+	collected, err := callValidatedToolUse(ctx, provider, options.model("medium"), options.ReasoningEffort, composeSystemPrompt(codeWriterSystemPrompt, options.ProjectInstructions), userPrompt, options.Images, tools, options.MaxOutputTokens, &options.Stream, func(collected *zeroruntime.CollectedStream) error {
 		action, err := TryDecodeStageActionFromTools(collected, codeWriterToolName, contextRequestToolName)
 		if err != nil {
 			return err
 		}
 		if action.Request != nil {
+			if options.FinalContextCall {
+				// No context can be granted now. A context action on the final
+				// call is a format error, so the retry must submit.
+				return fmt.Errorf("context expansion budget exhausted: no more context can be fetched, call %s to submit your change", codeWriterToolName)
+			}
 			return nil // valid context action; no retry
 		}
 		// The whole output contract, as parseCodeWriterOutput applies it
@@ -115,7 +129,7 @@ func (CodeWriter) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 			Usage:          usageFromCollected(collected),
 		}, nil
 	}
-	output, err := parseCodeWriterOutput(collected)
+	output, err := parseCodeWriterOutput(collected, options.WorkDir)
 	if err != nil {
 		return schemas.HarnessStageOutput{}, withCollectedUsage(err, collected)
 	}
@@ -170,7 +184,7 @@ func (CodeWriter) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 	}, nil
 }
 
-func parseCodeWriterOutput(collected *zeroruntime.CollectedStream) (schemas.CodeWriterOutput, error) {
+func parseCodeWriterOutput(collected *zeroruntime.CollectedStream, workDir string) (schemas.CodeWriterOutput, error) {
 	tc := findToolCall(collected, codeWriterToolName)
 	if tc == nil {
 		return schemas.CodeWriterOutput{}, fmt.Errorf("model did not call %s", codeWriterToolName)
@@ -182,6 +196,17 @@ func parseCodeWriterOutput(collected *zeroruntime.CollectedStream) (schemas.Code
 	output, err := parseCodeWriterArgs(stripped)
 	if err != nil {
 		return schemas.CodeWriterOutput{}, err
+	}
+	// Legacy full/1 entries meet the base rules before any write.
+	var legacy struct {
+		Files []json.RawMessage `json:"files"`
+	}
+	if json.Unmarshal([]byte(stripped), &legacy) == nil && !proposalsContainEdits(legacy.Files) {
+		changes, err := legacyChanges(legacy.Files, workDir)
+		if err != nil {
+			return schemas.CodeWriterOutput{}, err
+		}
+		output.Files = changes
 	}
 	if err := output.Validate(); err != nil {
 		return schemas.CodeWriterOutput{}, err
@@ -210,7 +235,8 @@ func parseCodeWriterArgs(raw string) (schemas.CodeWriterOutput, error) {
 		return schemas.CodeWriterOutput{}, fmt.Errorf("parse submit_code args: %w", err)
 	}
 	if !proposalsContainEdits(probe.Files) {
-		// Legacy full/1: every file carries full content; decode as-is.
+		// Legacy full/1: every file carries full content; decode as-is. The
+		// base rules are applied in parseCodeWriterOutput, which knows the work dir.
 		if err := requireLegacyContent(probe.Files); err != nil {
 			return schemas.CodeWriterOutput{}, err
 		}
@@ -436,6 +462,16 @@ func applyFileChanges(ctx context.Context, workDir string, files []schemas.FileC
 				return schemas.FileChangeApplyResult{Workspace: absWorkDir, Applied: []schemas.AppliedFileChange{}}, fmt.Errorf("preflight %s %s: read prior content: %w", f.ChangeType, f.Path, rerr)
 			}
 		}
+		if p.resolveErr == nil && f.ChangeType == "create" {
+			if prior, rerr := os.ReadFile(p.absTarget); rerr == nil {
+				p.expectedBase = tools.HashContent(prior)
+			}
+		}
+		// A change composed on a base must match the file's bytes now. An
+		// empty digest here means the file could not be read.
+		if p.resolveErr == nil && f.BaseDigest != "" && p.expectedBase != f.BaseDigest {
+			return schemas.FileChangeApplyResult{Workspace: absWorkDir, Applied: []schemas.AppliedFileChange{}}, fmt.Errorf("%s changed or was read incompletely since the model saw it; nothing was written", f.Path)
+		}
 		preparedFiles = append(preparedFiles, p)
 	}
 
@@ -535,6 +571,13 @@ func applyFileChanges(ctx context.Context, workDir string, files []schemas.FileC
 			}
 		}
 
+		if resolveErr == nil {
+			if f.ChangeType == "delete" {
+				forgetHostWrite(absTarget)
+			} else {
+				recordHostWrite(absTarget)
+			}
+		}
 		recordPath := absTarget
 		if resolveErr != nil {
 			// A scope-granted target outside the workspace has no workspace-relative
@@ -606,3 +649,7 @@ func resolveApplyTarget(workDir, requestedPath string) (string, string, error) {
 
 	return target, filepath.ToSlash(relative), nil
 }
+
+// FinalContextCallNotice is appended to the stage prompt on the last model
+// call, when no further context request can be granted.
+const FinalContextCallNotice = "This is your final call: no more context can be fetched. Submit your best complete change now with the files you have."

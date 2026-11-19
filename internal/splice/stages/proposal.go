@@ -33,9 +33,13 @@ package stages
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
@@ -138,9 +142,29 @@ type ProposalSnapshot struct {
 	// time. The C2 expected-base recheck compares it against the file at
 	// mutation time. Empty when the raw bytes were unavailable.
 	ContentDigest string
+	// Partial is set when a delivered view of the path does not cover the
+	// whole file: a ranged read, or a read that MaxChars truncated. A content
+	// modify against a partial snapshot would replace the unseen lines with
+	// nothing, so it is refused (F1). Edits still apply.
+	Partial bool
 	// Raw is the file's raw bytes at delivery time (host-side only,
 	// never delivered to the model). Empty when unavailable.
 	Raw string
+	// Redacted marks a path whose exact bytes were withheld because they
+	// hold text that looks like a secret. Edits to it are refused.
+	Redacted bool
+}
+
+// errRedactedBase refuses a modify or delete of a file whose exact bytes
+// are withheld.
+func errRedactedBase(op, path string) error {
+	return fmt.Errorf("proposal %s %s: %s holds text that looks like a secret, so the pipeline cannot edit it exactly; the change was not applied", op, path, path)
+}
+
+// errNoBaseBytes refuses a modify or delete whose base has no file digest.
+// Without it the apply step cannot check the file it would overwrite.
+func errNoBaseBytes(path string) error {
+	return fmt.Errorf("%s changed or was read incompletely since the model saw it; nothing was written", path)
 }
 
 // MaterializeProposal validates one proposal against the supplied base
@@ -158,24 +182,55 @@ type ProposalSnapshot struct {
 //   - line endings ride byte-for-byte inside the matched spans; the
 //     materializer never normalizes.
 func MaterializeProposal(p ProposedFileChange, baseRefToSnapshot func(baseRef string) (ProposalSnapshot, bool)) (schemas.FileChange, error) {
-	p = normalizeProposal(p, baseRefToSnapshot)
+	p, err := normalizeProposal(p, baseRefToSnapshot)
+	if err != nil {
+		return schemas.FileChange{}, err
+	}
 	if err := p.Validate(); err != nil {
 		return schemas.FileChange{}, err
 	}
 	switch p.ChangeType {
 	case "create":
-		return schemas.FileChange{Path: p.Path, ChangeType: "create", Content: *p.Content}, nil
+		// R1: a create replaces the file. A file the model saw only in part
+		// would lose the lines it never saw, so refuse it. A path with no
+		// snapshot, or a whole-file snapshot (repair re-emit), still creates.
+		if snap, ok := baseRefToSnapshot(p.Path); ok && snap.Partial {
+			return schemas.FileChange{}, fmt.Errorf("proposal create %s: %s exists and was seen only in part; send edits or request the whole file", p.Path, p.Path)
+		}
+		// A redacted file was shown to the model with its secret replaced by
+		// the marker. A create would write that marker into the file.
+		if snap, ok := baseRefToSnapshot(p.Path); ok && snap.Redacted {
+			return schemas.FileChange{}, errRedactedBase("create", p.Path)
+		}
+		change := schemas.FileChange{Path: p.Path, ChangeType: "create", Content: *p.Content}
+		if snap, ok := baseRefToSnapshot(p.Path); ok {
+			change.BaseDigest = snap.ContentDigest
+		}
+		return change, nil
 	case "delete":
-		if _, ok := baseRefToSnapshot(p.BaseRef); !ok {
+		snap, ok := baseRefToSnapshot(p.BaseRef)
+		if !ok {
 			return schemas.FileChange{}, fmt.Errorf("proposal delete %s: unknown base_ref %q", p.Path, p.BaseRef)
 		}
-		return schemas.FileChange{Path: p.Path, ChangeType: "delete"}, nil
+		if snap.Redacted {
+			return schemas.FileChange{}, errRedactedBase("delete", p.Path)
+		}
+		if snap.ContentDigest == "" {
+			return schemas.FileChange{}, errNoBaseBytes(p.Path)
+		}
+		return schemas.FileChange{Path: p.Path, ChangeType: "delete", BaseDigest: snap.ContentDigest}, nil
 	}
 
 	// modify: resolve the base once and match all edits against it.
 	snap, ok := baseRefToSnapshot(p.BaseRef)
 	if !ok {
 		return schemas.FileChange{}, fmt.Errorf("proposal modify %s: unknown base_ref %q", p.Path, p.BaseRef)
+	}
+	if snap.Redacted {
+		return schemas.FileChange{}, errRedactedBase("modify", p.Path)
+	}
+	if snap.ContentDigest == "" {
+		return schemas.FileChange{}, errNoBaseBytes(p.Path)
 	}
 	base := snap.Base
 	// C1/D1 integration: the delivered view may be read_file DISPLAY text
@@ -202,7 +257,7 @@ func MaterializeProposal(p ProposedFileChange, baseRefToSnapshot func(baseRef st
 			// ambiguous raw match still fails loudly.
 			if raw := snap.Raw; raw != "" {
 				if rawSpans, rawErr := matchProposalEdits(raw, p.Edits); rawErr == nil {
-					return schemas.FileChange{Path: p.Path, ChangeType: "modify", Content: applyProposalEdits(raw, rawSpans)}, nil
+					return schemas.FileChange{Path: p.Path, ChangeType: "modify", Content: applyProposalEdits(raw, rawSpans), BaseDigest: snap.ContentDigest}, nil
 				}
 			}
 			return schemas.FileChange{}, fmt.Errorf("proposal modify %s: edits[%d] old text not found in the delivered source (no fuzzy matching; request the current source first)", p.Path, i)
@@ -241,7 +296,7 @@ func MaterializeProposal(p ProposedFileChange, baseRefToSnapshot func(baseRef st
 			prev = s.end
 		}
 		b.WriteString(base[prev:])
-		return schemas.FileChange{Path: p.Path, ChangeType: "modify", Content: b.String()}, nil
+		return schemas.FileChange{Path: p.Path, ChangeType: "modify", Content: b.String(), BaseDigest: snap.ContentDigest}, nil
 	}
 	// Display-view path: for each matched span, take the FIRST matched
 	// view line's content (with its display prefix stripped) as the raw
@@ -267,7 +322,7 @@ func MaterializeProposal(p ProposedFileChange, baseRefToSnapshot func(baseRef st
 		}
 		result = strings.Replace(result, content, s.new, 1)
 	}
-	return schemas.FileChange{Path: p.Path, ChangeType: "modify", Content: result}, nil
+	return schemas.FileChange{Path: p.Path, ChangeType: "modify", Content: result, BaseDigest: snap.ContentDigest}, nil
 }
 
 // proposalEditSpan is one exact edit match in a source string.
@@ -395,4 +450,155 @@ func MaterializeProposals(proposals []ProposedFileChange, baseRefToSnapshot func
 func HashBytes(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
+}
+
+// HostWriteLedger holds the digest of the bytes the host last wrote to each
+// file during one run, keyed by absolute path. A run installs its own ledger,
+// so a write made by an earlier run never lets a later run re-emit the file.
+type HostWriteLedger struct {
+	mu     sync.Mutex
+	digest map[string]string
+}
+
+// NewHostWriteLedger returns an empty ledger for one run.
+func NewHostWriteLedger() *HostWriteLedger {
+	return &HostWriteLedger{digest: map[string]string{}}
+}
+
+// activeHostWrites is the ledger of the run in progress. Nil means no run is
+// recording host writes, so nothing is recorded or re-emitted.
+var activeHostWrites struct {
+	sync.Mutex
+	ledger *HostWriteLedger
+}
+
+// SetHostWrites installs the ledger for the upcoming run and returns a reset
+// func that restores the previous ledger.
+func SetHostWrites(ledger *HostWriteLedger) func() {
+	activeHostWrites.Lock()
+	prev := activeHostWrites.ledger
+	activeHostWrites.ledger = ledger
+	activeHostWrites.Unlock()
+	return func() {
+		activeHostWrites.Lock()
+		activeHostWrites.ledger = prev
+		activeHostWrites.Unlock()
+	}
+}
+
+func currentHostWrites() *HostWriteLedger {
+	activeHostWrites.Lock()
+	defer activeHostWrites.Unlock()
+	return activeHostWrites.ledger
+}
+
+// recordHostWrite stores the digest of the file as it now is on disk. The file
+// is read back, so formatting done by the write is recorded too.
+func recordHostWrite(absTarget string) {
+	ledger := currentHostWrites()
+	if ledger == nil {
+		return
+	}
+	data, err := os.ReadFile(absTarget)
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	if err != nil {
+		delete(ledger.digest, absTarget)
+		return
+	}
+	ledger.digest[absTarget] = HashBytes(data)
+}
+
+// forgetHostWrite drops the record for a file the host deleted.
+func forgetHostWrite(absTarget string) {
+	ledger := currentHostWrites()
+	if ledger == nil {
+		return
+	}
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	delete(ledger.digest, absTarget)
+}
+
+// hostWriteDigest returns the digest of the bytes the host last wrote to path
+// under workDir, if it wrote them during this run.
+func hostWriteDigest(workDir, path string) (string, bool) {
+	ledger := currentHostWrites()
+	if ledger == nil || workDir == "" {
+		return "", false
+	}
+	absTarget, _, err := resolveApplyTarget(workDir, path)
+	if err != nil {
+		return "", false
+	}
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	digest, ok := ledger.digest[absTarget]
+	return digest, ok
+}
+
+// legacyChange applies the base rules to one full-content entry. The model
+// must have been shown the whole file, so the file's digest guards the
+// write. A create may skip the snapshot only when the path does not exist.
+func legacyChange(p ProposedFileChange, workDir string) (schemas.FileChange, error) {
+	refuse := fmt.Errorf("%s was not read in full before this change; nothing was written", p.Path)
+	content := ""
+	if p.Content != nil {
+		content = *p.Content
+	}
+	snap, ok := currentProposalSnapshot(p.Path)
+	if !ok {
+		// The host wrote this file itself, so the bytes it last wrote are the
+		// base. The apply digest check still refuses a changed file.
+		if digest, wrote := hostWriteDigest(workDir, p.Path); wrote {
+			return schemas.FileChange{Path: p.Path, ChangeType: p.ChangeType, Content: content, BaseDigest: digest}, nil
+		}
+		// A path that does not exist has no bytes to lose: a create, or a
+		// modify of a missing file, applies as a create.
+		if p.ChangeType != "delete" && !legacyPathExists(workDir, p.Path) {
+			return schemas.FileChange{Path: p.Path, ChangeType: "create", Content: content}, nil
+		}
+		return schemas.FileChange{}, refuse
+	}
+	if snap.Partial {
+		return schemas.FileChange{}, refuse
+	}
+	if snap.Redacted {
+		return schemas.FileChange{}, errRedactedBase(p.ChangeType, p.Path)
+	}
+	if snap.ContentDigest == "" {
+		return schemas.FileChange{}, errNoBaseBytes(p.Path)
+	}
+	return schemas.FileChange{Path: p.Path, ChangeType: p.ChangeType, Content: content, BaseDigest: snap.ContentDigest}, nil
+}
+
+// legacyPathExists reports whether path already exists under workDir. With no
+// workDir it reports true, so the caller refuses.
+func legacyPathExists(workDir, path string) bool {
+	if workDir == "" {
+		return true
+	}
+	target := path
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(workDir, target)
+	}
+	_, err := os.Lstat(target)
+	return err == nil
+}
+
+// legacyChanges applies the base rules to full-content entries.
+func legacyChanges(files []json.RawMessage, workDir string) ([]schemas.FileChange, error) {
+	proposals, err := decodeProposals(files)
+	if err != nil {
+		return nil, err
+	}
+	changes := make([]schemas.FileChange, 0, len(proposals))
+	for _, p := range proposals {
+		change, err := legacyChange(p, workDir)
+		if err != nil {
+			return nil, err
+		}
+		changes = append(changes, change)
+	}
+	return changes, nil
 }

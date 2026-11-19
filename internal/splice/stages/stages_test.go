@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -299,7 +301,7 @@ func TestValidatedToolUseRetriesContractFailuresAndAccumulatesUsage(t *testing.T
 	}}
 
 	collected, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, []zeroruntime.ToolDefinition{submitCodeToolDefinition()}, 0, nil, func(collected *zeroruntime.CollectedStream) error {
-		_, err := parseCodeWriterOutput(collected)
+		_, err := parseCodeWriterOutput(collected, t.TempDir())
 		return err
 	}, "")
 	if err != nil {
@@ -329,7 +331,7 @@ func TestValidatedToolUseRetriesSchemaInvalidArguments(t *testing.T) {
 		toolCallEvent(codeWriterToolName, string(validArgs)),
 	}}
 	_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, []zeroruntime.ToolDefinition{submitCodeToolDefinition()}, 0, nil, func(collected *zeroruntime.CollectedStream) error {
-		_, err := parseCodeWriterOutput(collected)
+		_, err := parseCodeWriterOutput(collected, t.TempDir())
 		return err
 	}, "")
 	if err != nil {
@@ -365,7 +367,7 @@ func TestValidatedToolUseUsageMatchesStreamCallbacks(t *testing.T) {
 	}
 
 	collected, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, []zeroruntime.ToolDefinition{submitCodeToolDefinition()}, 0, callbacks, func(c *zeroruntime.CollectedStream) error {
-		_, e := parseCodeWriterOutput(c)
+		_, e := parseCodeWriterOutput(c, t.TempDir())
 		return e
 	}, "")
 	if err != nil {
@@ -474,7 +476,7 @@ func TestValidatedToolUseExhaustionIsActionableAndMetered(t *testing.T) {
 	}
 	provider := &retryScriptProvider{scripts: [][]zeroruntime.StreamEvent{missing, missing, missing}}
 	_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, []zeroruntime.ToolDefinition{submitCodeToolDefinition()}, 0, nil, func(collected *zeroruntime.CollectedStream) error {
-		_, err := parseCodeWriterOutput(collected)
+		_, err := parseCodeWriterOutput(collected, t.TempDir())
 		return err
 	}, "")
 	var typedErr *TypedOutputError
@@ -777,6 +779,11 @@ func TestTestGeneratorRetryCanRewritePriorFile(t *testing.T) {
 	secondProvider := &requestCapturingProvider{events: toolCallEvent("submit_tests", string(secondArgs))}
 	input := newHarnessInput("revise storage tests")
 	input.RevisionContext = &revision
+	// The revision is a modify of a file the model was shown in full.
+	shown := NewProposalBaseRegistry()
+	shown.RecordFromBundle(wholeFileBundle("storage_test.go", "package storage\n"))
+	resetShown := SetProposalBases(shown)
+	defer resetShown()
 	if _, err := (TestGenerator{}).Run(context.Background(), input, secondProvider, StageOptions{WorkDir: workDir, Language: "go"}); err != nil {
 		t.Fatalf("retry stage run: %v", err)
 	}
@@ -2133,7 +2140,7 @@ func TestPythonBatchedCompile(t *testing.T) {
 		if name == "bash" {
 			calls++
 			lastCommand = args["command"].(string)
-			return ToolResult{OK: false, Output: "SyntaxError: invalid syntax"}, nil
+			return ToolResult{OK: false, Output: fmt.Sprintf("File \"%s\", line 2\nSyntaxError: invalid syntax\nexit_code: 1", bad)}, nil
 		}
 		return ToolResult{OK: false, Output: name + " is not installed or not available"}, nil
 	})
@@ -2151,7 +2158,7 @@ func TestPythonBatchedCompile(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("expected exactly 1 py_compile call, got %d", calls)
 	}
-	if !strings.Contains(lastCommand, "'python'") || !strings.Contains(lastCommand, "'-m'") || !strings.Contains(lastCommand, "'py_compile'") {
+	if !strings.Contains(lastCommand, "'python'") || !strings.Contains(lastCommand, "'-c'") || strings.Contains(lastCommand, "py_compile") {
 		t.Fatalf("unexpected command %q", lastCommand)
 	}
 	for _, f := range files {
@@ -2164,6 +2171,181 @@ func TestPythonBatchedCompile(t *testing.T) {
 	}
 	if len(res.Findings) == 0 {
 		t.Fatalf("expected at least one finding, got %+v", res.Findings)
+	}
+}
+
+// The syntax check must not write bytecode. A sandbox that denies writes
+// outside the workspace fails py_compile, and a valid file must still pass.
+func TestPythonSyntaxCheckWritesNoBytecode(t *testing.T) {
+	workDir := t.TempDir()
+	ok := filepath.Join(workDir, "ok.py")
+	if err := os.WriteFile(ok, []byte("print('ok')\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	runTool := schemaEnforcingBashRunTool(func(_ context.Context, name string, args map[string]any) (ToolResult, error) {
+		command := args["command"].(string)
+		if strings.Contains(command, "py_compile") {
+			return ToolResult{OK: false, Output: "PermissionError: [Errno 1] Operation not permitted"}, nil
+		}
+		return ToolResult{OK: true}, nil
+	})
+	res, err := (pythonSyntaxCheck{}).Run(context.Background(), VerificationCheckRequest{
+		WorkDir:  workDir,
+		Language: "python",
+		Paths:    []string{ok},
+		RunTool:  runTool,
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.ToolRun.Status != schemas.VerificationPassed || len(res.Findings) != 0 {
+		t.Fatalf("status = %q findings = %+v, want passed with no findings", res.ToolRun.Status, res.Findings)
+	}
+}
+
+// A real syntax error must produce one finding on the line that holds it. The
+// output is what the compile script prints for this file.
+func TestPythonSyntaxCheckReportsSyntaxErrorLine(t *testing.T) {
+	workDir := t.TempDir()
+	bad := filepath.Join(workDir, "bad.py")
+	if err := os.WriteFile(bad, []byte("x = 1\ny = )\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	runTool := schemaEnforcingBashRunTool(func(context.Context, string, map[string]any) (ToolResult, error) {
+		return ToolResult{OK: false, Output: fmt.Sprintf("File \"%s\", line 2\nSyntaxError: unmatched ')'\nexit_code: 1", bad)}, nil
+	})
+	res, err := (pythonSyntaxCheck{}).Run(context.Background(), VerificationCheckRequest{
+		WorkDir:  workDir,
+		Language: "python",
+		Paths:    []string{bad},
+		RunTool:  runTool,
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.ToolRun.Status != schemas.VerificationFindings || len(res.Findings) != 1 {
+		t.Fatalf("status = %q findings = %+v, want one finding", res.ToolRun.Status, res.Findings)
+	}
+	f := res.Findings[0]
+	if f.Line == nil || *f.Line != 2 || f.Severity != schemas.SeverityHigh {
+		t.Fatalf("finding line/severity = %v/%v, want 2/high", f.Line, f.Severity)
+	}
+}
+
+// Mixed tabs and spaces raise TabError, a subclass of the names the old
+// matcher knew. The script exits 1 for it, so it is a finding on its line.
+func TestPythonSyntaxCheckTabErrorIsFinding(t *testing.T) {
+	workDir := t.TempDir()
+	tab := filepath.Join(workDir, "tab.py")
+	if err := os.WriteFile(tab, []byte("if True:\n\tx = 1\n        y = 2\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	runTool := schemaEnforcingBashRunTool(func(context.Context, string, map[string]any) (ToolResult, error) {
+		return ToolResult{OK: false, Output: fmt.Sprintf("File \"%s\", line 3\nTabError: inconsistent use of tabs and spaces in indentation\nexit_code: 1", tab)}, nil
+	})
+	res, err := (pythonSyntaxCheck{}).Run(context.Background(), VerificationCheckRequest{
+		WorkDir:  workDir,
+		Language: "python",
+		Paths:    []string{tab},
+		RunTool:  runTool,
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.ToolRun.Status != schemas.VerificationFindings || len(res.Findings) != 1 {
+		t.Fatalf("status = %q findings = %+v, want one finding", res.ToolRun.Status, res.Findings)
+	}
+	if f := res.Findings[0]; f.Line == nil || *f.Line != 3 {
+		t.Fatalf("finding line = %v, want 3", f.Line)
+	}
+}
+
+// The direct path runs the compile script without a RunTool. A fake python
+// on PATH stands in for the interpreter, so each exit code is exact.
+func TestPythonSyntaxCheckDirectExecOutcomes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a /bin/sh shim")
+	}
+	cases := []struct {
+		name        string
+		shim        string // empty means no python on PATH
+		wantStatus  schemas.VerificationStatus
+		wantFinding bool
+	}{
+		{"code error exits 1", "echo 'File \"a.py\", line 2'; echo 'SyntaxError: bad'; exit 1", schemas.VerificationFindings, true},
+		{"interpreter reports unavailable", "echo 'check unavailable: OSError: denied'; exit 2", schemas.VerificationIncomplete, false},
+		{"no python on PATH", "", schemas.VerificationIncomplete, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			workDir := t.TempDir()
+			py := filepath.Join(workDir, "a.py")
+			if err := os.WriteFile(py, []byte("x = 1\n"), 0o644); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			binDir := t.TempDir()
+			if tc.shim != "" {
+				if err := os.WriteFile(filepath.Join(binDir, "python"), []byte("#!/bin/sh\n"+tc.shim+"\n"), 0o755); err != nil {
+					t.Fatalf("write shim: %v", err)
+				}
+			}
+			t.Setenv("PATH", binDir)
+			res, err := (pythonSyntaxCheck{}).Run(context.Background(), VerificationCheckRequest{
+				WorkDir:  workDir,
+				Language: "python",
+				Paths:    []string{py},
+				Sandbox:  procrun.NewStageEngine(workDir),
+			})
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			// Without native confinement the stage refuses to spawn, so the
+			// branches below cannot run on this host.
+			if strings.Contains(res.ToolRun.Summary, "requires native platform confinement") {
+				t.Skipf("host lacks native stage confinement: %s", res.ToolRun.Summary)
+			}
+			if res.ToolRun.Status != tc.wantStatus {
+				t.Fatalf("status = %q summary=%q, want %q", res.ToolRun.Status, res.ToolRun.Summary, tc.wantStatus)
+			}
+			if got := len(res.Findings) == 1; got != tc.wantFinding {
+				t.Fatalf("findings = %+v, want finding=%v", res.Findings, tc.wantFinding)
+			}
+			if tc.wantFinding && (res.Findings[0].Line == nil || *res.Findings[0].Line != 2) {
+				t.Fatalf("finding line = %v, want 2", res.Findings[0].Line)
+			}
+		})
+	}
+}
+
+// A check that cannot run is incomplete. It is never a code finding.
+func TestPythonSyntaxCheckUnavailableIsNotAFinding(t *testing.T) {
+	cases := map[string]string{
+		"missing interpreter": "bash: python: command not found",
+		"unreadable file":     "check unavailable: PermissionError: [Errno 1] Operation not permitted",
+	}
+	for name, output := range cases {
+		t.Run(name, func(t *testing.T) {
+			workDir := t.TempDir()
+			py := filepath.Join(workDir, "a.py")
+			if err := os.WriteFile(py, []byte("print('ok')\n"), 0o644); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			runTool := schemaEnforcingBashRunTool(func(context.Context, string, map[string]any) (ToolResult, error) {
+				return ToolResult{OK: false, Output: output}, nil
+			})
+			res, err := (pythonSyntaxCheck{}).Run(context.Background(), VerificationCheckRequest{
+				WorkDir:  workDir,
+				Language: "python",
+				Paths:    []string{py},
+				RunTool:  runTool,
+			})
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if res.ToolRun.Status != schemas.VerificationIncomplete || len(res.Findings) != 0 {
+				t.Fatalf("status = %q findings = %+v, want incomplete with no findings", res.ToolRun.Status, res.Findings)
+			}
+		})
 	}
 }
 
@@ -2233,6 +2415,10 @@ func TestPythonSyntaxCheckRealBashTool(t *testing.T) {
 	if err := os.WriteFile(bad, []byte("def broken(\n"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
+	// A machine without a python command must report the check incomplete,
+	// never a code finding.
+	_, lookErr := exec.LookPath("python")
+	hasPython := lookErr == nil
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewBashTool(workDir))
 	runTool := func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
@@ -2250,6 +2436,12 @@ func TestPythonSyntaxCheckRealBashTool(t *testing.T) {
 	}
 	if strings.Contains(res.ToolRun.Summary, bashCommandMustBeString) || strings.Contains(res.ToolRun.Summary, "command must be a string") {
 		t.Fatalf("real bash tool rejected the command: %s", res.ToolRun.Summary)
+	}
+	if !hasPython {
+		if res.ToolRun.Status != schemas.VerificationIncomplete || len(res.Findings) != 0 {
+			t.Fatalf("no python on PATH: status = %q findings = %+v, want incomplete", res.ToolRun.Status, res.Findings)
+		}
+		return
 	}
 	if res.ToolRun.Status != schemas.VerificationFindings {
 		t.Fatalf("status = %q summary=%q, want findings", res.ToolRun.Status, res.ToolRun.Summary)
@@ -2553,7 +2745,7 @@ func TestValidatedToolUseRetainsOutputCapOnEveryAttempt(t *testing.T) {
 		toolCallEvent(codeWriterToolName, string(validArgs)),
 	}}
 	_, err := callValidatedToolUse(context.Background(), provider, "qwen-local", "", "system", "payload", nil, []zeroruntime.ToolDefinition{submitCodeToolDefinition()}, 8192, nil, func(collected *zeroruntime.CollectedStream) error {
-		_, err := parseCodeWriterOutput(collected)
+		_, err := parseCodeWriterOutput(collected, t.TempDir())
 		return err
 	}, "")
 	if err != nil {

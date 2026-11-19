@@ -329,6 +329,7 @@ type Attempt struct {
 	FixtureDigest   string          `json:"fixture_digest"`
 	ModelID         string          `json:"model_id"`
 	ModelSettings   ModelSettings   `json:"model_settings"`
+	TrustProject    bool            `json:"trust_project"`
 	TreatmentEnv    []string        `json:"treatment_env"`
 	SessionID       string          `json:"session_id"`
 	RunStatus       string          `json:"run_status"`

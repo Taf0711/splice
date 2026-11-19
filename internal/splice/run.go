@@ -410,6 +410,10 @@ func Run(ctx context.Context, prompt string, provider agent.Provider, options ag
 // Run and RunDesignPlanWithResume use it. The redaction options are built here,
 // once per run.
 func bracketRun(options agent.Options, run func() (agent.Result, error)) (agent.Result, error) {
+	// Each run gets its own proposal base registry, so an earlier run's
+	// snapshot never judges this run's writes.
+	defer stages.SetProposalBases(stages.NewProposalBaseRegistry())()
+	defer stages.SetHostWrites(stages.NewHostWriteLedger())()
 	secrets := append([]string(nil), options.SecretValues...)
 	emitSink(options.EventSink, secrets, agent.StageEvent{Kind: "run", Status: "running"})
 	result, err := run()
@@ -570,6 +574,8 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 	if _, err := ResolveExpansionRounds(); err != nil {
 		return schemas.PipelineResult{}, err
 	}
+	// Carried context lives for this run only.
+	options.carriedPaths = newCarriedContextPaths()
 	workDir := options.Cwd
 	if workDir == "" {
 		workDir = "."
@@ -1282,6 +1288,7 @@ func runIterationLoop(
 			return finishWithReason(runID, plan, allRecords, "failed", err.Error())
 		}
 		allRecords = append(allRecords, passRecords...)
+		options.runChanged = runChangedByStage(options.runChanged, passOutputs)
 
 		// Measure this pass against the end of the previous pass, whatever the
 		// flag says. The HEAD summary is read once and shared by both branches.
@@ -1545,7 +1552,7 @@ func runIterationLoop(
 			if options.ClassifierPolicy != nil {
 				options.ClassifierPolicy.stepBackUsed = true
 			}
-			report := buildStepBackReport(plan.RequestIntent, history, passOutputs, decision)
+			report := buildStepBackReport(plan.TaskText(), history, passOutputs, decision)
 			sbSelection := agent.ModelSelection{
 				Provider:        provider,
 				ProviderName:    options.ProviderName,
@@ -1699,6 +1706,9 @@ func runPass(
 	tr *runTraceAccumulator,
 	execBudget *StageExecutionBudget,
 ) ([]schemas.StageRecord, []schemas.HarnessStageOutput, bool, error) {
+	// Each pass starts with an empty base registry: a view delivered in an
+	// earlier pass never judges this pass's proposals.
+	defer stages.SetProposalBases(stages.NewProposalBaseRegistry())()
 	priorSummaries := map[string]string{}
 	priorChangedFiles := map[string][]string{}
 	summariesByStage := map[string]string{}
@@ -1770,6 +1780,7 @@ func runPass(
 			Sequence:          seq + 1,
 			PlanTier:          plan.Tier,
 			RequestIntent:     plan.RequestIntent,
+			Request:           taskRequestFor(agentStage, plan),
 			AcceptanceFacts:   append([]schemas.AcceptanceFact(nil), plan.AcceptanceFacts...),
 			PriorSummaries:    withRoleAlias(prior, plan, "code_writer"),
 			PriorChangedFiles: withRoleAlias(priorChanged, plan, "code_writer"),
@@ -1777,6 +1788,10 @@ func runPass(
 			RevisionContext:   revisionContext,
 			PipelineStages:    stageNames,
 			NextStage:         nextStage,
+		}
+
+		if stageRole(stage) == "test_runner" {
+			input.RunChangedFiles = runChangedByStage(options.runChanged, outputs)
 		}
 
 		caps := effectiveCaps(stage, agentStage.Capabilities())
@@ -2104,7 +2119,17 @@ func runStageWithContextBudgeted(
 	priorScope *StageScopePlan,
 	invocationOrdinal int,
 	execBudget *StageExecutionBudget,
-) (schemas.HarnessStageOutput, error) {
+) (_ schemas.HarnessStageOutput, err error) {
+	// E01b: an invocation that ends without a submission hands the files it
+	// fetched to the next invocation of this stage in the run.
+	var fetched []schemas.ContextQuery
+	defer func() {
+		if err != nil {
+			options.carriedPaths.put(input.StageName, workDir, fetched)
+			return
+		}
+		options.carriedPaths.clear(input.StageName)
+	}()
 	// A model-free stage runs repository code (tests, scanners, acceptance,
 	// command nodes): its tool calls use the stage runner and the stage
 	// sandbox. The stage implementation decides, not the topology caps.
@@ -2135,6 +2160,7 @@ func runStageWithContextBudgeted(
 		}
 	}
 	stageOpts := withVerifyCommand(stageOptions(input.StageName, iteration, selection, stageRunOptions, workDir, runner, caps, invocationAttribution), stage, options, workDir)
+	stageOpts.CarriedQueries = options.carriedPaths.get(input.StageName, workDir)
 	// Part A context bridge: fresh cognition narrows the default context
 	// request. The scoped request replaces the default ONLY when the scope
 	// resolved a question; otherwise the cold path stays byte-identical.
@@ -2219,7 +2245,7 @@ func runStageWithContextBudgeted(
 			for _, f := range priorScope.MemoryPrefetch {
 				paths = append(paths, f.Path)
 			}
-			req = stages.DefaultContextRequestPreferring(input.RequestIntent, revisionEvidence, workDir, detectLanguage(workDir), paths)
+			req = stages.DefaultContextRequestPreferring(input.TaskText(), revisionEvidence, workDir, detectLanguage(workDir), paths)
 			req.Reason = "Memory-assisted dependency prefetch: retained verified work names these sources; the host fetched their current views before your first request. " + req.Reason
 		}
 		have := map[string]bool{}
@@ -2264,7 +2290,7 @@ func runStageWithContextBudgeted(
 	if priorScope != nil && len(priorScope.JevPrefetch) > 0 {
 		jevQueries := ContextQueriesFor(priorScope.JevPrefetch)
 		if stageOpts.OverrideContextRequest == nil {
-			req := stages.DefaultContextRequestFor(input.RequestIntent, revisionEvidence, workDir, detectLanguage(workDir))
+			req := stages.DefaultContextRequestFor(input.TaskText(), revisionEvidence, workDir, detectLanguage(workDir))
 			req.Reason = "Decision-approved dependency prefetch: the calibrated selector resolved this dependency; the host fetched the exact declarations before your first request."
 			stageOpts.OverrideContextRequest = &req
 		}
@@ -2305,6 +2331,10 @@ func runStageWithContextBudgeted(
 			}
 			emitProgress(options, fmt.Sprintf("[%s] decision prefetch: fetching %d selector-approved view(s) before the first model request", input.StageName, added))
 		}
+	}
+	if stageOpts.OverrideContextRequest != nil && len(stageOpts.CarriedQueries) > 0 {
+		req := withCarriedReads(*stageOpts.OverrideContextRequest, stageOpts.CarriedQueries)
+		stageOpts.OverrideContextRequest = &req
 	}
 	if stageOpts.OverrideContextRequest != nil {
 		if dropped := stageOpts.OverrideContextRequest.FitAggregate(); dropped > 0 {
@@ -2352,6 +2382,9 @@ func runStageWithContextBudgeted(
 			}
 		}
 		requestsBefore := providerRequests
+		// E01a: when no later context request can be granted, this call is the
+		// last one that can submit.
+		stageOpts.FinalContextCall = finalContextCall(budget)
 		output, err := stage.Run(ctx, input, selection.Provider, stageOpts)
 		if err != nil {
 			return schemas.HarnessStageOutput{}, withStageUsage(err, usageTotal)
@@ -2389,6 +2422,11 @@ func runStageWithContextBudgeted(
 			return schemas.HarnessStageOutput{}, withStageUsage(eerr, usageTotal)
 		}
 		input = expanded
+		// Round 0 is the seed the stage starts from, not a read the model
+		// asked for, so only expansion rounds are carried.
+		if round > 0 {
+			fetched = append(fetched, requestedQueries(output.ContextRequest)...)
+		}
 		// The stage re-runs on the next loop iteration with the new
 		// evidence; the historical "requested context more than once"
 		// error becomes a bounded continuation instead.
@@ -2418,11 +2456,10 @@ func expandContextRound(
 	if !budget.SpendRequest() {
 		return input, fmt.Errorf("%w: %d provider request(s) spent", errExpansionBudgetExhausted, budget.RequestsUsed())
 	}
-	if ledger != nil {
-		if err := ledger.Check(*request); err != nil {
-			return input, fmt.Errorf("expansion rejected: %w", err)
-		}
-	}
+	// F3: a repeated query is not an error. Its content is fulfilled again, and
+	// the no-new-bytes check below appends the note that the content is
+	// already delivered. The shared budget still bounds the loop, so a repeat
+	// that delivers nothing new ends predictably.
 	// Every request is fitted to the aggregate bound here, where they all
 	// pass. (Chain pilot 2: the test generator's post-write reads of many
 	// changed files asked for 72000 characters and failed the stage in
@@ -2434,9 +2471,6 @@ func expandContextRound(
 	if err != nil {
 		return input, fmt.Errorf("fulfill context: %w", err)
 	}
-	if ledger != nil {
-		ledger.Record(*request)
-	}
 	// No-new-bytes detection: an expansion whose every source item repeats
 	// already-delivered content carries the authoritative note that the
 	// context is complete. Without it a model that confabulates elided
@@ -2444,8 +2478,7 @@ func expandContextRound(
 	// M6 campaign evidence), and the stage dies at the budget wall with
 	// zero code written.
 	if ledger != nil && input.Context != nil && len(input.Context.Items) > 0 && !ledger.NewBytes(&bundle) {
-		bundle.HostNotes = append(bundle.HostNotes,
-			"This expansion delivered no new content: every requested file was already delivered above in its complete current form, byte for byte. The delivered views are not truncated and contain no elided ranges. Do not request these files again; proceed with the task using the delivered evidence.")
+		bundle.HostNotes = append(bundle.HostNotes, noNewBytesNote(&bundle))
 	}
 	if ledger != nil {
 		ledger.RecordDigests(&bundle)
@@ -2645,6 +2678,21 @@ func failureCauseClass(summary string) string {
 	default:
 		return "unknown"
 	}
+}
+
+// runChangedByStage returns prior with the paths that outputs changed added to
+// it. Each output is keyed by its stage. The result is a new map.
+func runChangedByStage(prior map[string][]string, outputs []schemas.HarnessStageOutput) map[string][]string {
+	out := cloneChangedFiles(prior)
+	if out == nil {
+		out = map[string][]string{}
+	}
+	for _, output := range outputs {
+		if files := stageChangedFiles(output); len(files) > 0 {
+			out[output.Stage] = append(out[output.Stage], files...)
+		}
+	}
+	return out
 }
 
 func cloneChangedFiles(input map[string][]string) map[string][]string {
@@ -3398,7 +3446,8 @@ func newAgentToolRunner(options PipelineRunConfig, cwd string) ToolRunner {
 		}
 		res := options.Registry.RunWithOptions(ctx, name, args, runOptions)
 		feedback := agent.RunAfterToolHooks(ctx, agentOpts, call, args, res)
-		if feedback != "" {
+		// A host-seam read returns exact file bytes, so hook feedback never joins them.
+		if feedback != "" && !runOptions.HostSeam {
 			combined, redacted := agent.AppendHookFeedback(res.Output, feedback)
 			res.Output = combined
 			res.Redacted = res.Redacted || redacted
@@ -3417,9 +3466,24 @@ func newAgentToolRunner(options PipelineRunConfig, cwd string) ToolRunner {
 			ChangedFiles: res.ChangedFiles,
 			Display:      res.Display,
 		}
-		emitToolResult(options, call, toolResult)
+		emitted := toolResult
+		if runOptions.HostSeam {
+			// The event stream gets a summary of a raw read, not the whole file.
+			emitted.Output = hostSeamSummary(args, toolResult)
+		}
+		emitToolResult(options, call, emitted)
 		return toolResult, nil
 	})
+}
+
+// hostSeamSummary describes a host-seam read for the event stream: the path,
+// the byte count, and the digest. The reader gets the bytes, not this text.
+func hostSeamSummary(args map[string]any, res ToolResult) string {
+	if !res.OK {
+		return res.Output
+	}
+	path, _ := args["path"].(string)
+	return fmt.Sprintf("host read %s: %d bytes, sha256 %s", path, len(res.Output), tools.HashContent([]byte(res.Output)))
 }
 
 func sandboxRisk(sideEffect tools.SideEffect) sandbox.Risk {
@@ -4090,6 +4154,28 @@ func completionSummary(result schemas.PipelineResult) string {
 // insertAfterListing places queries right after the leading listing
 // queries, ahead of every other read, so FitAggregate trims other reads
 // first.
+// withCarriedReads adds each carried read the request does not read yet.
+// The reads keep their granted line range and character bound, and follow
+// the listing query.
+func withCarriedReads(req schemas.ContextRequest, carried []schemas.ContextQuery) schemas.ContextRequest {
+	have := map[string]bool{}
+	for _, q := range req.Queries {
+		if q.QueryType == schemas.ContextReadFile && q.Path != nil {
+			have[*q.Path] = true
+		}
+	}
+	var missing []schemas.ContextQuery
+	for _, q := range carried {
+		if q.Path == nil || have[*q.Path] {
+			continue
+		}
+		have[*q.Path] = true
+		missing = append(missing, q)
+	}
+	req.Queries = insertAfterListing(req.Queries, missing)
+	return req
+}
+
 func insertAfterListing(queries, first []schemas.ContextQuery) []schemas.ContextQuery {
 	lead := 0
 	for lead < len(queries) && queries[lead].QueryType == schemas.ContextListFiles {

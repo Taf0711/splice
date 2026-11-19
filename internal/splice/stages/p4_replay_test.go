@@ -59,7 +59,7 @@ func TestReplayRecordedP4HedgedPayloads(t *testing.T) {
 			t.Fatalf("payload %d: no files", i)
 		}
 		for _, f := range args.Files {
-			norm := normalizeProposal(f, currentProposalSnapshot)
+			norm, _ := normalizeProposal(f, currentProposalSnapshot)
 			if norm.Content != nil {
 				t.Fatalf("payload %d: hedge did not collapse to one representation (content still set)", i)
 			}

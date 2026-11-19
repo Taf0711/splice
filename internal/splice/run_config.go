@@ -31,9 +31,15 @@ type PipelineRunConfig struct {
 	// passEvidence measures each pass's workspace change for the run. It is
 	// set by runIterationLoop and nil outside it.
 	passEvidence *passEvidenceTracker
+	// carriedPaths holds each stage's fetched files between invocations of
+	// one run (E01b). runExecutionPlan creates it; nil means no carry.
+	carriedPaths *carriedContextPaths
 	// passNodes collects each stage node's result for the pass in progress.
 	// runIterationLoop sets it per pass; nil means no pass attribution.
 	passNodes *[]schemas.NodeEvidence
+	// runChanged maps each stage to the paths its earlier passes changed.
+	// runIterationLoop merges each pass into it; nil means no earlier pass.
+	runChanged map[string][]string
 	// Advisor is the run's decision advisor (Jev). Nil means the advisor is
 	// off: no snapshot is built, no decision is bought, no call is made.
 	// Construction is resolveDecisionAdvisor's job (config mode gated by

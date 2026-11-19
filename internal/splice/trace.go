@@ -880,6 +880,9 @@ func (tr *runTraceAccumulator) buildOutcome(stageRecords []schemas.StageRecord, 
 		outcome.AbortReason = abortReason
 	}
 
+	// F4: the trace keeps the distilled intent, never the full request text.
+	tracePlan := tr.plan
+	tracePlan.Request = ""
 	trace := schemas.RunOutcome{
 		SchemaVersion: schemas.TraceSchemaVersion,
 		RunID:         tr.runID,
@@ -887,7 +890,7 @@ func (tr *runTraceAccumulator) buildOutcome(stageRecords []schemas.StageRecord, 
 		RepoRoot:      tr.projectRoot,
 		Intent:        tr.plan.RequestIntent,
 		Tier:          string(tr.plan.Tier),
-		Plan:          &tr.plan,
+		Plan:          &tracePlan,
 		Iterations:    tr.history,
 		PassEvidence:  tr.passEvidence,
 		Stages:        stages,

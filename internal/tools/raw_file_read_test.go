@@ -13,6 +13,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -104,3 +105,41 @@ func (denyOnlyTool) Safety() Safety {
 	return Safety{Permission: PermissionDeny, Reason: "always denied"}
 }
 func (denyOnlyTool) Run(context.Context, map[string]any) Result { return okResult("should never run") }
+
+// TestRawFileReadHostSeamReturnsExactBytes pins the exact-bytes rule: a
+// host-seam read of a file above the registry output ceiling returns every
+// byte. It never returns a head and tail window with a spill notice.
+func TestRawFileReadHostSeamReturnsExactBytes(t *testing.T) {
+	dir := t.TempDir()
+	content := strings.Repeat("value = 1\n", 30_000) // about 300 KB
+	if err := os.WriteFile(filepath.Join(dir, "big.py"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	registry := NewRegistry()
+	registry.Register(NewScopedRawFileReadTool(dir, nil))
+	res := registry.RunWithOptions(context.Background(), RawFileReadToolName, map[string]any{"path": "big.py"}, RunOptions{HostSeam: true})
+	if res.Status != StatusOK || res.Truncated {
+		t.Fatalf("host-seam read status=%v truncated=%v: %.120q", res.Status, res.Truncated, res.Output)
+	}
+	if res.Output != content {
+		t.Fatalf("host-seam read returned %d bytes, want the file's %d exact bytes", len(res.Output), len(content))
+	}
+}
+
+// TestRawFileReadRefusesOverCapFile pins the size cap: a file above 8 MiB
+// is an error, never partial bytes.
+func TestRawFileReadRefusesOverCapFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "huge.txt"), []byte(strings.Repeat("a", rawFileReadMaxBytes+1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	registry := NewRegistry()
+	registry.Register(NewScopedRawFileReadTool(dir, nil))
+	res := registry.RunWithOptions(context.Background(), RawFileReadToolName, map[string]any{"path": "huge.txt"}, RunOptions{HostSeam: true})
+	if res.Status == StatusOK {
+		t.Fatalf("over-cap read returned %d bytes, want an error", len(res.Output))
+	}
+	if !strings.Contains(res.Output, "file too large for an exact read") {
+		t.Fatalf("over-cap error = %q, want the exact-read message", res.Output)
+	}
+}

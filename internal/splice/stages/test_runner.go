@@ -38,7 +38,7 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 	if len(cmd) > 0 && options.CommandWorkDir != "" {
 		commandWorkDir = options.CommandWorkDir
 		var err error
-		cmd, err = expandConfiguredTestCommand(cmd, input.PriorChangedFiles, options.WorkDir, commandWorkDir)
+		cmd, err = expandConfiguredTestCommand(cmd, input.RunChangedFiles, options.WorkDir, commandWorkDir)
 		if err != nil {
 			return schemas.HarnessStageOutput{}, err
 		}
@@ -355,6 +355,10 @@ func changedTestFiles(changedByStage map[string][]string, workspaceRoot, testDir
 				continue
 			}
 			absolute := filepath.Join(workspaceRoot, filepath.FromSlash(relPath))
+			// A file removed by a rollback or a delete must not reach the command.
+			if info, serr := os.Stat(absolute); serr != nil || !info.Mode().IsRegular() {
+				continue
+			}
 			relToTestDir, err := filepath.Rel(testDir, absolute)
 			if err != nil || relToTestDir == ".." || strings.HasPrefix(relToTestDir, ".."+string(filepath.Separator)) {
 				continue

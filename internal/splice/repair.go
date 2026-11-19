@@ -441,6 +441,7 @@ func attemptLocalRepair(
 		// WHY a second test_runner run exists mid-iteration.
 		emitStageEvent(options, iteration-1, testName, "message", fmt.Sprintf("repair re-entry %d: re-running tests", attempts), 0, nil)
 		testInput := repairStageInput(runID, testName, plan, stageNames, *priorSummaries, *priorChangedFiles, nil)
+		testInput.RunChangedFiles = runChangedByStage(options.runChanged, *outputs)
 		testStart := time.Now()
 		var runnerScope *StageScopePlan
 		testPlanStage, _ := stageByPlanName(plan, testName)
@@ -707,6 +708,7 @@ func repairStageInput(runID, stageName string, plan schemas.ExecutionPlan, stage
 		Sequence:          sequence,
 		PlanTier:          plan.Tier,
 		RequestIntent:     plan.RequestIntent,
+		Request:           plan.Request,
 		AcceptanceFacts:   append([]schemas.AcceptanceFact(nil), plan.AcceptanceFacts...),
 		PriorSummaries:    withRoleAlias(maps.Clone(priorSummaries), plan, "code_writer"),
 		PriorChangedFiles: withRoleAlias(cloneChangedFiles(priorChangedFiles), plan, "code_writer"),

@@ -753,10 +753,12 @@ func TestWorkRecordBecomesTheNextRunsFirstRoundFiles(t *testing.T) {
 	if strings.Join(with, ",") != "internal/audit/retention.go,internal/audit/log.go,go.mod" {
 		t.Fatalf("with memory the first round reads %v", with)
 	}
-	// The intent names the audit package, so the ranked fallback reaches the
-	// same files without memory. Memory still sets the order: the file the
-	// related run changed comes first.
-	if strings.Join(without, ",") != "internal/audit/retention.go,internal/audit/log.go,go.mod" {
+	// The intent's identifier EnforceRetention ranks retention.go alone. The
+	// package tier runs only when no file ranks, and it never mixes with
+	// identifier hits, so log.go (no request identifier) is not read without
+	// memory. Memory still adds it. (Audit item S2 rule; previously this
+	// asserted the mixed result.)
+	if strings.Join(without, ",") != "internal/audit/retention.go,go.mod" {
 		t.Fatalf("without memory the ranked fallback reads %v", without)
 	}
 	t.Logf("first-round reads: with memory %v; without memory %d files %v", with, len(without), without)

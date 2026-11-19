@@ -11,7 +11,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/hooks"
 	"github.com/Taf0711/splice/internal/splice/schemas"
+	"github.com/Taf0711/splice/internal/splice/stages"
 	"github.com/Taf0711/splice/internal/tools"
 )
 
@@ -265,5 +268,233 @@ func TestContextQueryRangeValidation(t *testing.T) {
 	zeroStart := schemas.ContextQuery{QueryType: schemas.ContextReadFile, Path: b1StrPtr("a.go"), MaxResults: 10, MaxChars: 1000, StartLine: &zero, EndLine: &end}
 	if err := zeroStart.Validate(); err == nil {
 		t.Fatal("start_line 0 must be invalid")
+	}
+}
+
+// fixedHostSeamRunner returns one canned result for every call.
+type fixedHostSeamRunner struct{ res ToolResult }
+
+func (f fixedHostSeamRunner) RunTool(context.Context, string, map[string]any) (ToolResult, error) {
+	return f.res, nil
+}
+
+func (f fixedHostSeamRunner) RunHostSeamTool(context.Context, string, map[string]any) (ToolResult, error) {
+	return f.res, nil
+}
+
+// TestSourceReaderFailsOnIncompleteResult pins defense in depth: a seam
+// result that was truncated or redacted never becomes a snapshot, so no
+// base can be built from bytes that are not the file.
+func TestSourceReaderFailsOnIncompleteResult(t *testing.T) {
+	cases := map[string]ToolResult{
+		"truncated": {OK: true, Output: "partial bytes", Truncated: true},
+		"redacted":  {OK: true, Output: "x = 1", Redacted: true},
+	}
+	for name, res := range cases {
+		reader := ToolRunnerSourceReader{Inner: fixedHostSeamRunner{res: res}}
+		snap, err := reader.ReadSource(context.Background(), "a.py")
+		if err == nil {
+			t.Fatalf("%s: ReadSource built a snapshot %q from an incomplete result", name, snap.Raw)
+		}
+	}
+}
+
+// TestSourceReaderExactBytesThroughRealRegistry pins the exact-bytes rule
+// through the real seam: a 300 KB file comes back byte for byte.
+func TestSourceReaderExactBytesThroughRealRegistry(t *testing.T) {
+	root := t.TempDir()
+	content := strings.Repeat("value = 1\n", 30_000) // about 300 KB
+	if err := os.WriteFile(filepath.Join(root, "big.py"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewScopedRawFileReadTool(root, nil))
+	reader := ToolRunnerSourceReader{Inner: NewRegistryToolRunner(registry)}
+	snap, err := reader.ReadSource(context.Background(), "big.py")
+	if err != nil {
+		t.Fatalf("read big.py through the seam: %v", err)
+	}
+	if string(snap.Raw) != content {
+		t.Fatalf("seam returned %d bytes, want the file's %d exact bytes", len(snap.Raw), len(content))
+	}
+	if snap.SHA256 != tools.HashContent([]byte(content)) {
+		t.Fatal("snapshot digest does not match the file bytes")
+	}
+}
+
+// TestSourceReaderNeverReturnsRedactedBytes pins the redaction rule: a file
+// with a secret-looking token either reads back exactly or fails. It never
+// returns the redaction marker in place of the secret.
+func TestSourceReaderNeverReturnsRedactedBytes(t *testing.T) {
+	root := t.TempDir()
+	content := "import os\nTOKEN = \"sk-proj-abcdefghijklmnop1234\"\nprint(os.name)\n"
+	if err := os.WriteFile(filepath.Join(root, "secret.py"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewScopedRawFileReadTool(root, nil))
+	reader := ToolRunnerSourceReader{Inner: NewRegistryToolRunner(registry)}
+	snap, err := reader.ReadSource(context.Background(), "secret.py")
+	if err == nil && string(snap.Raw) != content {
+		t.Fatalf("seam built a base from redacted bytes: %q", snap.Raw)
+	}
+}
+
+// TestRedactedSourceModifyNamesTheSecret pins the user-facing outcome for a
+// file that holds secret-looking text. The seam fails closed; the modify
+// must say why, and name the file.
+func TestRedactedSourceModifyNamesTheSecret(t *testing.T) {
+	root := t.TempDir()
+	content := "import os\nTOKEN = \"sk-proj-abcdefghijklmnop1234\"\nprint(os.name)\n"
+	if err := os.WriteFile(filepath.Join(root, "secret.py"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
+	tools.RegisterPipelineSourceReader(registry, root, nil)
+	runner := NewRegistryToolRunner(registry)
+	path := "secret.py"
+	item, err := fulfillQuery(context.Background(), schemas.ContextQuery{QueryType: schemas.ContextReadFile, Path: &path}, runner)
+	if err != nil {
+		t.Fatalf("fulfill read_file: %v", err)
+	}
+	reg := stages.NewProposalBaseRegistry()
+	reg.RecordFromBundle(&schemas.ContextBundle{Items: []schemas.ContextItem{item}})
+	proposal := stages.ProposedFileChange{
+		Path: "secret.py", ChangeType: "modify", BaseRef: "secret.py",
+		Edits: []stages.TextReplacement{{Old: "print(os.name)", New: "print(os.sep)"}},
+	}
+	_, _, err = stages.MaterializeProposals([]stages.ProposedFileChange{proposal}, reg.Resolve)
+	if err == nil {
+		t.Fatal("a modify of a file that holds a secret must be refused")
+	}
+	if !strings.Contains(err.Error(), "secret.py") || !strings.Contains(err.Error(), "looks like a secret") {
+		t.Fatalf("refusal must name the path and the secret: %v", err)
+	}
+}
+
+// TestRedactedSourceCreateIsRefused pins the create rule: a create over a
+// file whose bytes were withheld would write the redaction marker into the
+// file, so it is refused. A create of a new file still works.
+func TestRedactedSourceCreateIsRefused(t *testing.T) {
+	root := t.TempDir()
+	content := "import os\nTOKEN = \"sk-proj-abcdefghijklmnop1234\"\nprint(os.name)\n"
+	path := filepath.Join(root, "secret.py")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
+	tools.RegisterPipelineSourceReader(registry, root, nil)
+	name := "secret.py"
+	item, err := fulfillQuery(context.Background(), schemas.ContextQuery{QueryType: schemas.ContextReadFile, Path: &name}, NewRegistryToolRunner(registry))
+	if err != nil {
+		t.Fatalf("fulfill read_file: %v", err)
+	}
+	reg := stages.NewProposalBaseRegistry()
+	reg.RecordFromBundle(&schemas.ContextBundle{Items: []schemas.ContextItem{item}})
+	redactedView := "import os\nTOKEN = \"[REDACTED]\"\nprint(os.sep)\n"
+	create := stages.ProposedFileChange{Path: "secret.py", ChangeType: "create", Content: &redactedView}
+	if _, _, err := stages.MaterializeProposals([]stages.ProposedFileChange{create}, reg.Resolve); err == nil {
+		t.Fatal("a create over a redacted file must be refused")
+	} else if !strings.Contains(err.Error(), "looks like a secret") {
+		t.Fatalf("refusal must give the secret reason: %v", err)
+	}
+	after, _ := os.ReadFile(path)
+	if string(after) != content {
+		t.Fatalf("file changed on disk: %q", after)
+	}
+	fresh := "print('new file')\n"
+	newFile := stages.ProposedFileChange{Path: "fresh.py", ChangeType: "create", Content: &fresh}
+	if _, _, err := stages.MaterializeProposals([]stages.ProposedFileChange{newFile}, reg.Resolve); err != nil {
+		t.Fatalf("create of a new file must still work: %v", err)
+	}
+}
+
+// TestRedactedSourceDeleteIsRefused pins the delete rule for a file whose
+// bytes were withheld: the delete is refused with the secret reason, and the
+// file stays on disk.
+func TestRedactedSourceDeleteIsRefused(t *testing.T) {
+	root := t.TempDir()
+	content := "import os\nTOKEN = \"sk-proj-abcdefghijklmnop1234\"\nprint(os.name)\n"
+	path := filepath.Join(root, "secret.py")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
+	tools.RegisterPipelineSourceReader(registry, root, nil)
+	name := "secret.py"
+	item, err := fulfillQuery(context.Background(), schemas.ContextQuery{QueryType: schemas.ContextReadFile, Path: &name}, NewRegistryToolRunner(registry))
+	if err != nil {
+		t.Fatalf("fulfill read_file: %v", err)
+	}
+	reg := stages.NewProposalBaseRegistry()
+	reg.RecordFromBundle(&schemas.ContextBundle{Items: []schemas.ContextItem{item}})
+	del := stages.ProposedFileChange{Path: "secret.py", ChangeType: "delete", BaseRef: "secret.py"}
+	if _, _, err := stages.MaterializeProposals([]stages.ProposedFileChange{del}, reg.Resolve); err == nil {
+		t.Fatal("a delete of a file that holds a secret must be refused")
+	} else if !strings.Contains(err.Error(), "looks like a secret") {
+		t.Fatalf("refusal must give the secret reason: %v", err)
+	}
+	if after, _ := os.ReadFile(path); string(after) != content {
+		t.Fatal("refused delete changed the file")
+	}
+}
+
+// seamRunnerWith builds the stage runner over a registry with the raw
+// reader, with optional agent options (hooks, result callbacks).
+func seamRunnerWith(t *testing.T, root string, opts agent.Options) ToolRunner {
+	t.Helper()
+	registry := tools.NewRegistry()
+	tools.RegisterPipelineSourceReader(registry, root, nil)
+	opts.Cwd = root
+	opts.Registry = registry
+	return newAgentToolRunner(PipelineConfigFromAgentOptions(opts), root)
+}
+
+// TestRawReadEventCarriesSummaryNotBytes pins G2: a host-seam raw read emits
+// a bounded summary to the event stream (path, byte count, digest), never the
+// file's full bytes. The reader still gets the exact bytes.
+func TestRawReadEventCarriesSummaryNotBytes(t *testing.T) {
+	root := t.TempDir()
+	content := strings.Repeat("value = 1\n", 30_000) // about 300 KB
+	if err := os.WriteFile(filepath.Join(root, "big.py"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var events []agent.ToolResult
+	runner := seamRunnerWith(t, root, agent.Options{OnToolResult: func(res agent.ToolResult) { events = append(events, res) }})
+	snap, err := ToolRunnerSourceReader{Inner: runner}.ReadSource(context.Background(), "big.py")
+	if err != nil || string(snap.Raw) != content {
+		t.Fatalf("seam read: err=%v, %d bytes", err, len(snap.Raw))
+	}
+	for _, ev := range events {
+		if len(ev.Output) > len(content)/10 {
+			t.Fatalf("raw read event carries %d bytes of file output, want a summary", len(ev.Output))
+		}
+	}
+}
+
+// TestHookFeedbackNeverEntersARawRead pins G3: an after-tool hook still runs
+// on a raw read, but its feedback is not added to the bytes the reader gets.
+func TestHookFeedbackNeverEntersARawRead(t *testing.T) {
+	root := t.TempDir()
+	content := "package x\n"
+	if err := os.WriteFile(filepath.Join(root, "x.go"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "ran.txt")
+	hook := hooks.Definition{ID: "feed", Event: hooks.EventAfterTool, Matcher: "raw_file_read", Command: "/bin/sh", Args: []string{"-c", `echo HOOK-FEEDBACK; echo ran > "$1"`, "hook", marker}, Enabled: true}
+	dispatcher := hooks.NewDispatcher(hooks.DispatcherOptions{Config: hooks.Config{Enabled: true, Hooks: []hooks.Definition{hook}}, Cwd: t.TempDir()})
+	runner := seamRunnerWith(t, root, agent.Options{Hooks: dispatcher})
+	snap, err := ToolRunnerSourceReader{Inner: runner}.ReadSource(context.Background(), "x.go")
+	if err != nil {
+		t.Fatalf("seam read: %v", err)
+	}
+	if string(snap.Raw) != content {
+		t.Fatalf("hook feedback entered the raw read: %q", snap.Raw)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("after-tool hook did not run on the raw read: %v", err)
 	}
 }

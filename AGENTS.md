@@ -41,9 +41,12 @@ almost certainly wrong.
    constructs the input struct, and invokes. Summaries flow forward, not raw
    outputs.
 
-3. **Information minimalism.** Each stage receives only what it needs. The
-   user's verbose original request never propagates past the orchestrator
-   (`DistillRequestIntent`).
+3. **Information minimalism.** Each stage receives only what it needs.
+   Stages whose model must read the task receive the request as written,
+   bounded at 32 KiB. These stages are the code writer, the test generator,
+   prompt nodes, repair passes, and the step-back advisor. All other stages,
+   and every key, summary, receipt, memory record, and stored trace, use the
+   distilled intent (`DistillRequestIntent`, 320 characters).
 
 4. **Local-first.** No required external services. SQLite (via the `splice-memd`
    sidecar) and the filesystem only.
@@ -186,7 +189,7 @@ splice/
     splice/                     # the deterministic pipeline layer
       schemas/                  # typed stage/pipeline/design/event/memory structs + Validate()
       classifier.go             # request -> tier, risk domains, rune-count thresholds
-      planner.go                # tier -> ExecutionPlan, DistillRequestIntent
+      planner.go                # tier -> ExecutionPlan, DistillRequestIntent, schemas.BoundRequest
       budget.go                 # per-tier stage token budgets
       trajectory.go             # iteration state vectors, scoring, trajectory decisions
       context.go                # deterministic ContextRequest fulfillment

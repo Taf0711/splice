@@ -2,10 +2,12 @@ package splice
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/Taf0711/splice/internal/agent"
@@ -482,4 +484,32 @@ func TestTraceWriteFailureWarnsOnce(t *testing.T) {
 	})
 	quiet.recordStageCompletion(schemas.StageRecord{Name: "code_writer", Status: schemas.StageCompleted, TokensInput: 10, TokensOutput: 5})
 	quiet.persistPartial(context.Background())
+}
+
+// TestStoredTraceOmitsTheRequestText pins audit item F4: the trace records the
+// distilled intent, never the full request text, so the request stays out of
+// the memd run_traces store.
+func TestStoredTraceOmitsTheRequestText(t *testing.T) {
+	secret := "PRIVATE-REPRO: token=sk-123 and a long bug report"
+	plan, err := BuildExecutionPlan("add the helper", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.RequestIntent = "distilled intent"
+	plan.Request = secret + " " + strings.Repeat("filler ", 40)
+	tr := newRunTraceAccumulator(nil, "run-f4", "session", "/root", plan, "active", nil)
+	outcome, err := tr.buildOutcome(nil, "completed", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(outcome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "PRIVATE-REPRO") {
+		t.Fatal("the stored trace carries the full request text")
+	}
+	if outcome.Intent != "distilled intent" {
+		t.Fatalf("trace intent = %q, want the distilled intent", outcome.Intent)
+	}
 }

@@ -26,7 +26,7 @@ func cResolver(snaps map[string]ProposalSnapshot) func(string) (ProposalSnapshot
 
 func cSnapshot(path, text string) (string, ProposalSnapshot) {
 	digest := contentDigest(text)
-	return HandleFor(digest), ProposalSnapshot{Path: path, Version: digest, Base: text}
+	return HandleFor(digest), ProposalSnapshot{Path: path, Version: digest, Base: text, ContentDigest: digest}
 }
 
 // TestSmallEditInLargeFileProducesSmallProposal pins the byte-shape goal:
@@ -178,7 +178,7 @@ func TestProposalCannotEditUnseenSpans(t *testing.T) {
 	// The model received ONLY the first three lines of a much larger file.
 	bundle := &schemas.ContextBundle{Items: []schemas.ContextItem{{
 		Query:   schemas.ContextQuery{QueryType: schemas.ContextReadFile},
-		Payload: map[string]any{"text": "seen line 1\nseen line 2\nseen line 3\n", "path": "big.go", "version": "v1", "start": 1, "end": 3},
+		Payload: map[string]any{"text": "seen line 1\nseen line 2\nseen line 3\n", "raw": "seen line 1\nseen line 2\nseen line 3\n", "path": "big.go", "version": "v1", "start": 1, "end": 3},
 	}}}
 	reg.RecordFromBundle(bundle)
 	reset := SetProposalBases(reg)
@@ -406,3 +406,349 @@ func TestRepairHashesStillWork(t *testing.T) {
 }
 
 func strPtrC(s string) *string { return &s }
+
+// incidentSource is a 100 KB Python file with one edit target near the top.
+func incidentSource() string {
+	var b strings.Builder
+	b.WriteString("def f():\n    return 1\n")
+	for b.Len() < 100*1024 {
+		b.WriteString("x = 0  # filler line for the 100 KB file\n")
+	}
+	return b.String()
+}
+
+// wholeFileBundle builds a view that delivers a whole file, with the end
+// line the read tool reports for it.
+func wholeFileBundle(path, content string) *schemas.ContextBundle {
+	return &schemas.ContextBundle{Items: []schemas.ContextItem{{
+		Summary: "source",
+		Payload: map[string]any{
+			"path": path, "version": "v1", "text": content, "raw": content,
+			"start": 1, "end": rawLineCount(content),
+		},
+	}}}
+}
+
+// bundleWithRaw builds one fulfilled source view: the text the model saw
+// and the raw bytes the host registered as the base.
+func bundleWithRaw(path, text, raw string) *schemas.ContextBundle {
+	return &schemas.ContextBundle{Items: []schemas.ContextItem{{
+		Summary: "source",
+		Payload: map[string]any{
+			"path": path, "version": "v1", "text": text, "raw": raw,
+			"start": 1, "end": countLines(text),
+		},
+	}}}
+}
+
+// TestTruncatedRawBaseIsRefusedBeforeAnyWrite reproduces the E05 data loss.
+// The old raw read returned the first 60 KB plus a spill notice. A one-line
+// edit composed on that base must be refused, and the file must stay
+// byte-identical.
+func TestTruncatedRawBaseIsRefusedBeforeAnyWrite(t *testing.T) {
+	dir := t.TempDir()
+	original := incidentSource()
+	path := filepath.Join(dir, "function.py")
+	if err := os.WriteFile(path, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	truncatedRaw := original[:60*1024] + "\n[splice] output truncated, full output saved to /tmp/spill.txt (grep or read_file it instead of re-running)\n"
+	reg := NewProposalBaseRegistry()
+	reg.RecordFromBundle(bundleWithRaw("function.py", original, truncatedRaw))
+	proposals := []ProposedFileChange{{
+		Path: "function.py", ChangeType: "modify", BaseRef: "function.py",
+		Edits: []TextReplacement{{Old: "    return 1", New: "    return 2"}},
+	}}
+	changes, _, err := MaterializeProposals(proposals, reg.Resolve)
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	_, err = applyFileChanges(context.Background(), dir, changes, registryRunTool(t, dir))
+	after, _ := os.ReadFile(path)
+	if string(after) != original {
+		t.Fatalf("file changed to %d bytes (original %d); an edit composed on a truncated base reached disk", len(after), len(original))
+	}
+	if err == nil {
+		t.Fatal("a change composed on a truncated base must be refused")
+	}
+}
+
+// TestCorrectRawBaseModifyAppliesOnlyEditedLines is the guard for the normal
+// path: a complete read applies, and only the edited line changes.
+func TestCorrectRawBaseModifyAppliesOnlyEditedLines(t *testing.T) {
+	dir := t.TempDir()
+	original := incidentSource()
+	path := filepath.Join(dir, "function.py")
+	if err := os.WriteFile(path, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := NewProposalBaseRegistry()
+	reg.RecordFromBundle(bundleWithRaw("function.py", original, original))
+	proposals := []ProposedFileChange{{
+		Path: "function.py", ChangeType: "modify", BaseRef: "function.py",
+		Edits: []TextReplacement{{Old: "    return 1", New: "    return 2"}},
+	}}
+	changes, _, err := MaterializeProposals(proposals, reg.Resolve)
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	if len(changes) != 1 || changes[0].BaseDigest != tools.HashContent([]byte(original)) {
+		t.Fatalf("materialized change must carry the base file digest, got %+v", changes)
+	}
+	if _, err := applyFileChanges(context.Background(), dir, changes, registryRunTool(t, dir)); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	after, _ := os.ReadFile(path)
+	want := strings.Replace(original, "    return 1", "    return 2", 1)
+	if string(after) != want {
+		t.Fatalf("applied file differs from the one-line edit (got %d bytes, want %d)", len(after), len(want))
+	}
+}
+
+// TestDeleteRefusedWhenBaseChanged pins the delete rule: a delete composed
+// on a base the file no longer has is refused, and the file stays.
+func TestDeleteRefusedWhenBaseChanged(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "old.py")
+	if err := os.WriteFile(path, []byte("current bytes\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := NewProposalBaseRegistry()
+	reg.RecordFromBundle(bundleWithRaw("old.py", "seen bytes\n", "seen bytes\n"))
+	changes, _, err := MaterializeProposals([]ProposedFileChange{{Path: "old.py", ChangeType: "delete", BaseRef: "old.py"}}, reg.Resolve)
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	if _, err := applyFileChanges(context.Background(), dir, changes, registryRunTool(t, dir)); err == nil {
+		t.Fatal("a delete composed on a stale base must be refused")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("refused delete removed the file: %v", err)
+	}
+}
+
+// TestSnapshotWithoutContentDigestIsRefused pins the no-bytes rule: a modify
+// or delete whose base has no content digest cannot be checked against the
+// file, so it is refused before any write.
+func TestSnapshotWithoutContentDigestIsRefused(t *testing.T) {
+	snaps := map[string]ProposalSnapshot{"h1": {Path: "x.py", Version: "v", Base: "a = 1\n"}}
+	resolve := cResolver(snaps)
+	modify := ProposedFileChange{Path: "x.py", ChangeType: "modify", BaseRef: "h1", Edits: []TextReplacement{{Old: "a = 1", New: "a = 2"}}}
+	if _, _, err := MaterializeProposals([]ProposedFileChange{modify}, resolve); err == nil {
+		t.Fatal("a modify on a base with no content digest must be refused")
+	}
+	del := ProposedFileChange{Path: "x.py", ChangeType: "delete", BaseRef: "h1"}
+	if _, _, err := MaterializeProposals([]ProposedFileChange{del}, resolve); err == nil {
+		t.Fatal("a delete on a base with no content digest must be refused")
+	}
+}
+
+// TestFormatContextBundleNeverPromptsHostOnlyRaw pins the host-only rule: a
+// context item with no text field must not carry its raw bytes into the
+// prompt through the payload fallback.
+func TestFormatContextBundleNeverPromptsHostOnlyRaw(t *testing.T) {
+	secretLine := `TOKEN = "sk-proj-abcdefghijklmnop1234"`
+	bundle := &schemas.ContextBundle{Items: []schemas.ContextItem{{
+		Query:   schemas.ContextQuery{QueryType: schemas.ContextReadFile},
+		Summary: "Read secret.py.",
+		Payload: map[string]any{"path": "secret.py", "version": "v1", "raw": "import os\n" + secretLine + "\n"},
+	}}}
+	for _, block := range formatContextBundle(bundle) {
+		if strings.Contains(block, "sk-proj-abcdefghijklmnop1234") {
+			t.Fatalf("host-only raw bytes reached the prompt: %q", block)
+		}
+	}
+}
+
+// legacyApply runs one full-content (legacy) submission through the parser
+// and the apply step, as the code writer does.
+func legacyApply(t *testing.T, dir, files string) error {
+	t.Helper()
+	stream := dStream(`{"intent":"legacy","language":"python","confidence":0.9,"files":` + files + `}`)
+	output, err := parseCodeWriterOutput(stream, dir)
+	if err != nil {
+		return err
+	}
+	_, err = applyFileChanges(context.Background(), dir, output.Files, registryRunTool(t, dir))
+	return err
+}
+
+// TestLegacyFullContentChangesFollowTheBaseRules pins G1. A full-content
+// entry with no base_ref must meet the same rules as a compact proposal:
+// a partial view or no view refuses it, and the file stays unchanged.
+func TestLegacyFullContentChangesFollowTheBaseRules(t *testing.T) {
+	dir := t.TempDir()
+	big := incidentSource()
+	path := filepath.Join(dir, "big.py")
+	if err := os.WriteFile(path, []byte(big), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := NewProposalBaseRegistry()
+	reg.RecordFromBundle(bundleWithRaw("big.py", big[:5000], big))
+	reset := SetProposalBases(reg)
+	defer reset()
+
+	probes := map[string]string{
+		"modify": `[{"path":"big.py","change_type":"modify","content":"print('x')\\n"}]`,
+		"create": `[{"path":"big.py","change_type":"create","content":"print('x')\\n"}]`,
+		"delete": `[{"path":"big.py","change_type":"delete"}]`,
+	}
+	for name, files := range probes {
+		err := legacyApply(t, dir, files)
+		after, _ := os.ReadFile(path)
+		if err == nil {
+			t.Fatalf("legacy %s of a partly seen file must be refused (file now %d bytes)", name, len(after))
+		}
+		if string(after) != big {
+			t.Fatalf("legacy %s changed the file to %d bytes", name, len(after))
+		}
+	}
+	// A create of a new file that was never read still works.
+	if err := legacyApply(t, dir, `[{"path":"fresh.py","change_type":"create","content":"print('new')\\n"}]`); err != nil {
+		t.Fatalf("create of a new file must still work: %v", err)
+	}
+	// A legacy modify of a file whose whole content was delivered applies.
+	small := "def f():\n    return 1\n"
+	smallPath := filepath.Join(dir, "small.py")
+	if err := os.WriteFile(smallPath, []byte(small), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg2 := NewProposalBaseRegistry()
+	reg2.RecordFromBundle(wholeFileBundle("small.py", small))
+	reset2 := SetProposalBases(reg2)
+	defer reset2()
+	if err := legacyApply(t, dir, `[{"path":"small.py","change_type":"modify","content":"def f():\n    return 2\n"}]`); err != nil {
+		t.Fatalf("legacy modify of a fully delivered file must apply: %v", err)
+	}
+	if got, _ := os.ReadFile(smallPath); string(got) != "def f():\n    return 2\n" {
+		t.Fatalf("legacy modify wrote %q", got)
+	}
+}
+
+// TestHostWriteAllowsReemitUntilDiskChanges pins the host-write record: a
+// file the host wrote may be re-emitted, and the digest guard still refuses
+// the re-emit once anything else changed the file.
+func TestHostWriteAllowsReemitUntilDiskChanges(t *testing.T) {
+	defer SetHostWrites(NewHostWriteLedger())()
+	dir := t.TempDir()
+	if _, err := applyFileChanges(context.Background(), dir, []schemas.FileChange{{Path: "hw.py", ChangeType: "create", Content: "v1\n"}}, registryRunTool(t, dir)); err != nil {
+		t.Fatalf("host write: %v", err)
+	}
+	if err := legacyApply(t, dir, `[{"path":"hw.py","change_type":"create","content":"v2\n"}]`); err != nil {
+		t.Fatalf("re-emit of a file the host wrote must apply: %v", err)
+	}
+	path := filepath.Join(dir, "hw.py")
+	if got, _ := os.ReadFile(path); string(got) != "v2\n" {
+		t.Fatalf("re-emit wrote %q", got)
+	}
+	if err := os.WriteFile(path, []byte("external\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacyApply(t, dir, `[{"path":"hw.py","change_type":"create","content":"v3\n"}]`); err == nil {
+		t.Fatal("a re-emit after an outside change to the file must be refused")
+	}
+	if got, _ := os.ReadFile(path); string(got) != "external\n" {
+		t.Fatalf("refused re-emit changed the file to %q", got)
+	}
+}
+
+// TestHostWriteRecordsDoNotCollideAcrossDirectories: the same relative path in
+// two work directories keeps separate records.
+func TestHostWriteRecordsDoNotCollideAcrossDirectories(t *testing.T) {
+	defer SetHostWrites(NewHostWriteLedger())()
+	dirA := t.TempDir()
+	if _, err := applyFileChanges(context.Background(), dirA, []schemas.FileChange{{Path: "main.go", ChangeType: "create", Content: "a\n"}}, registryRunTool(t, dirA)); err != nil {
+		t.Fatalf("host write in dirA: %v", err)
+	}
+	dirB := t.TempDir()
+	if err := legacyApply(t, dirB, `[{"path":"main.go","change_type":"create","content":"b\n"}]`); err != nil {
+		t.Fatalf("create of a new file in another directory must apply: %v", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dirB, "main.go")); string(got) != "b\n" {
+		t.Fatalf("dirB file = %q", got)
+	}
+}
+
+// TestCreateOverUnseenFileStillRefused: a file the host did not write, and
+// the model never saw, is not replaced by a create.
+func TestCreateOverUnseenFileStillRefused(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pre.py")
+	if err := os.WriteFile(path, []byte("pre\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacyApply(t, dir, `[{"path":"pre.py","change_type":"create","content":"new\n"}]`); err == nil {
+		t.Fatal("a create over a file the model never saw must be refused")
+	}
+	if got, _ := os.ReadFile(path); string(got) != "pre\n" {
+		t.Fatalf("refused create changed the file to %q", got)
+	}
+}
+
+// TestLegacyModifyOfMissingFileCreatesIt: a modify of a path that does not
+// exist has no bytes to lose, so it applies as a create.
+func TestLegacyModifyOfMissingFileCreatesIt(t *testing.T) {
+	dir := t.TempDir()
+	if err := legacyApply(t, dir, `[{"path":"gone.go","change_type":"modify","content":"package gone\n"}]`); err != nil {
+		t.Fatalf("modify of a missing file must apply as a create: %v", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "gone.go")); string(got) != "package gone\n" {
+		t.Fatalf("file = %q", got)
+	}
+}
+
+// TestHostWriteRecordsEndWithTheirRun pins H1. A host write in run 1 must not
+// let run 2 re-emit the same path, which run 2 never read.
+func TestHostWriteRecordsEndWithTheirRun(t *testing.T) {
+	dir := t.TempDir()
+	reset1 := SetHostWrites(NewHostWriteLedger())
+	if _, err := applyFileChanges(context.Background(), dir, []schemas.FileChange{{Path: "x.py", ChangeType: "create", Content: "v1\n"}}, registryRunTool(t, dir)); err != nil {
+		t.Fatalf("run 1 write: %v", err)
+	}
+	reset1()
+	defer SetHostWrites(NewHostWriteLedger())()
+	if err := legacyApply(t, dir, `[{"path":"x.py","change_type":"create","content":"v2\n"}]`); err == nil {
+		t.Fatal("run 2 must not overwrite a file it never read, because run 1 wrote it")
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "x.py")); string(got) != "v1\n" {
+		t.Fatalf("run 2 changed the file to %q", got)
+	}
+}
+
+// TestTestGeneratorLegacyFollowsBaseRules pins the test generator's legacy
+// branch: a full-content test file with no base is refused when the model never
+// saw the file.
+func TestTestGeneratorLegacyFollowsBaseRules(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "keep_test.go"), []byte("package keep\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	args := `{"files":[{"path":"keep_test.go","change_type":"modify","content":"package keep\n\n// rewritten\n"}],"language":"go","intent":"i","confidence":0.9}`
+	if _, err := parseTestGeneratorOutput(collectedWithArgs(testGeneratorToolName, args), dir); err == nil {
+		t.Fatal("a legacy test-file modify of a file the model never saw must be refused")
+	}
+}
+
+// TestHostDeleteForgetsItsRecord: after the host deletes a file, a same-bytes
+// file that appears from outside is not the host's write, so a re-emit of it is
+// refused.
+func TestHostDeleteForgetsItsRecord(t *testing.T) {
+	defer SetHostWrites(NewHostWriteLedger())()
+	dir := t.TempDir()
+	if _, err := applyFileChanges(context.Background(), dir, []schemas.FileChange{{Path: "d.py", ChangeType: "create", Content: "v1\n"}}, registryRunTool(t, dir)); err != nil {
+		t.Fatalf("host write: %v", err)
+	}
+	if _, err := applyFileChanges(context.Background(), dir, []schemas.FileChange{{Path: "d.py", ChangeType: "delete"}}, registryRunTool(t, dir)); err != nil {
+		t.Fatalf("host delete: %v", err)
+	}
+	path := filepath.Join(dir, "d.py")
+	if err := os.WriteFile(path, []byte("v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacyApply(t, dir, `[{"path":"d.py","change_type":"create","content":"v2\n"}]`); err == nil {
+		t.Fatal("a file that appeared after the host deleted its record must not be re-emitted")
+	}
+	if got, _ := os.ReadFile(path); string(got) != "v1\n" {
+		t.Fatalf("refused re-emit changed the file to %q", got)
+	}
+}
