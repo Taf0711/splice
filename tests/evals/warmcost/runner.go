@@ -234,6 +234,10 @@ type Runner struct {
 	// sidecarStops holds the stop function of each sidecar the runner
 	// started, by class.
 	sidecarStops map[string]func() error
+	// rateLimitMax and rateLimitWait bound the usage-limit retries of one
+	// sequence. NewRunner sets them from the constants; tests lower them.
+	rateLimitMax  int
+	rateLimitWait time.Duration
 }
 
 // A sequence with an attempt whose requests never reached the model runs
@@ -242,7 +246,61 @@ type Runner struct {
 const (
 	networkRetries   = 12
 	networkRetryWait = 5 * time.Minute
+	// A provider usage limit lasts hours. 32 waits of 15 minutes cover 8 hours.
+	rateLimitRetries   = 32
+	rateLimitRetryWait = 15 * time.Minute
 )
+
+// rateLimitMarkers name a provider usage limit in an error message or a
+// failed stage reason.
+var rateLimitMarkers = []string{"rate limit error:", "usage limit has been reached"}
+
+// endedOnRateLimit reports a run that the provider's usage limit stopped. It
+// reads error events and failed stage reasons only. A model that quotes the
+// phrase in its own text (a reasoning or text delta) does not match.
+func endedOnRateLimit(stdout []byte) bool {
+	for _, line := range bytes.Split(stdout, []byte("\n")) {
+		var ev struct{ Type, Status, Message, Reason string }
+		if json.Unmarshal(line, &ev) != nil {
+			continue
+		}
+		var text string
+		switch {
+		case ev.Type == "error":
+			text = ev.Message
+		case ev.Type == "stage" && (ev.Status == "failed" || ev.Status == "incomplete"):
+			text = ev.Reason
+		default:
+			continue
+		}
+		text = strings.ToLower(text)
+		for _, marker := range rateLimitMarkers {
+			if strings.Contains(text, marker) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func rateLimited(attempts []Attempt) bool {
+	for _, a := range attempts {
+		if a.RateLimited {
+			return true
+		}
+	}
+	return false
+}
+
+// wait pauses for d through the sleep seam. Tests replace the seam so that no
+// retry sleeps.
+func (r *Runner) wait(d time.Duration) {
+	if r.sleep != nil {
+		r.sleep(d)
+		return
+	}
+	time.Sleep(d)
+}
 
 // endedOnConnectivity reports a run whose error event is a provider
 // connection drop that outlasted splice's own replays. Such a run measures
@@ -340,7 +398,7 @@ func NewRunner(cfg Config, seam ExecFunc) (*Runner, error) {
 	if seam == nil {
 		seam = runExec
 	}
-	runner := &Runner{cfg: cfg, exec: seam, now: time.Now}
+	runner := &Runner{cfg: cfg, exec: seam, now: time.Now, rateLimitMax: rateLimitRetries, rateLimitWait: rateLimitRetryWait}
 	runner.reanchorFn = runner.reanchorSequence
 	runner.startSidecarFn = func(ctx context.Context, socket string, env []string) (func() error, error) {
 		return startMemd(ctx, cfg.Binary, socket, env)
@@ -492,17 +550,29 @@ func (r *Runner) Run(ctx context.Context) (Aggregate, error) {
 		for _, seq := range sequences {
 			for _, arm := range arms {
 				seqAttempts, seqErr := r.runSequence(ctx, seq, arm, repeat, seqBase, provenance)
-				for try := 1; upstreamUnreachable(seqAttempts); try++ {
-					if try > networkRetries {
-						return Aggregate{}, fmt.Errorf("warmcost: sequence %d arm %s repeat %d: the model upstream stayed unreachable after %d retries", seq.Index, arm, repeat, networkRetries)
-					}
-					fmt.Fprintf(os.Stderr, "warmcost: sequence %d arm %s repeat %d: model upstream unreachable; retry %d of %d in %s\n", seq.Index, arm, repeat, try, networkRetries, networkRetryWait)
-					if r.sleep != nil {
-						r.sleep(networkRetryWait)
+				// An outage and a usage limit each rerun the sequence on their
+				// own schedule. The rerun replaces the discarded attempts, so
+				// neither kind reaches the aggregate. One counter numbers every
+				// rerun, so each one gets a new session id.
+				netTry, limitTry, reruns := 0, 0, 0
+				for upstreamUnreachable(seqAttempts) || rateLimited(seqAttempts) {
+					if upstreamUnreachable(seqAttempts) {
+						netTry++
+						if netTry > networkRetries {
+							return Aggregate{}, fmt.Errorf("warmcost: sequence %d arm %s repeat %d: the model upstream stayed unreachable after %d retries", seq.Index, arm, repeat, networkRetries)
+						}
+						fmt.Fprintf(os.Stderr, "warmcost: sequence %d arm %s repeat %d: model upstream unreachable; retry %d of %d in %s\n", seq.Index, arm, repeat, netTry, networkRetries, networkRetryWait)
+						r.wait(networkRetryWait)
 					} else {
-						time.Sleep(networkRetryWait)
+						limitTry++
+						if limitTry > r.rateLimitMax {
+							return Aggregate{}, fmt.Errorf("warmcost: sequence %d arm %s repeat %d: the provider usage limit stayed reached after %d retries; stopping the campaign (%d attempts written)", seq.Index, arm, repeat, r.rateLimitMax, len(attempts))
+						}
+						fmt.Fprintf(os.Stderr, "warmcost: sequence %d arm %s repeat %d: provider usage limit reached; retry %d of %d in %s\n", seq.Index, arm, repeat, limitTry, r.rateLimitMax, r.rateLimitWait)
+						r.wait(r.rateLimitWait)
 					}
-					r.retry = try
+					reruns++
+					r.retry = reruns
 					seqAttempts, seqErr = r.runSequence(ctx, seq, arm, repeat, seqBase, provenance)
 				}
 				r.retry = 0
@@ -1214,6 +1284,7 @@ func (r *Runner) runTaskInWorkspace(ctx context.Context, task Task, arm Arm, rep
 	attempt.EndedAt = ended
 	attempt.DurationMS = ended.Sub(started).Milliseconds()
 	attempt.UpstreamUnreachable = bytes.Contains(res.Stdout, []byte("upstream unreachable: ")) || endedOnConnectivity(res.Stdout)
+	attempt.RateLimited = endedOnRateLimit(res.Stdout)
 	attempt.MemoryUnavailable = arm.MemoryMode() == "on" && bytes.Contains(res.Stdout, []byte("memory sidecar unavailable"))
 	attempt.CredentialsMissing = bytes.Contains(res.Stdout, []byte("auth error: your API key is missing or invalid"))
 	if arm.MemoryMode() == "on" {

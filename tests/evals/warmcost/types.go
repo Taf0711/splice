@@ -364,6 +364,10 @@ type Attempt struct {
 	// the model (a network failure). Such an attempt measures the network,
 	// not the arm, so the runner retries its sequence.
 	UpstreamUnreachable bool `json:"upstream_unreachable,omitempty"`
+	// RateLimited marks a run that the provider's usage limit stopped. Such
+	// an attempt measures the provider state, not the arm, so the runner
+	// retries its sequence on a longer schedule and never records it.
+	RateLimited bool `json:"rate_limited,omitempty"`
 	// MemoryUnavailable marks a memory-arm run whose sidecar could not be
 	// reached: splice ran it without memory, so it does not measure the arm.
 	MemoryUnavailable bool `json:"memory_unavailable,omitempty"`
