@@ -585,17 +585,23 @@ func completeDAG(n int) *schemas.PipelineTopology {
 // bounds, the complete graph of 40 nodes took 7 ms (43 ms with -race), of 60
 // nodes 25 ms (155 ms with -race), and the bipartite graph of 40 by 40 (1,600
 // labels in one gap) 26 ms (165 ms with -race); each bound is more than ten
-// times that.
+// times that. Under the race detector, which slows code by a factor of 2 to
+// 20 depending on the machine, the bounds scale by ten. The layout still runs
+// and the edge count is still checked.
 func TestLayoutOfALargeGraphIsFast(t *testing.T) {
+	scale := time.Duration(1)
+	if raceEnabled {
+		scale = 10
+	}
 	for _, tc := range []struct {
 		name     string
 		topology *schemas.PipelineTopology
 		edges    int
 		bound    time.Duration
 	}{
-		{"complete 40", completeDAG(40), 40 * 39 / 2, time.Second},
-		{"complete 60", completeDAG(60), 60 * 59 / 2, 2 * time.Second},
-		{"bipartite 40", bipartite(40), 40 * 40, 2 * time.Second},
+		{"complete 40", completeDAG(40), 40 * 39 / 2, scale * time.Second},
+		{"complete 60", completeDAG(60), 60 * 59 / 2, scale * 2 * time.Second},
+		{"bipartite 40", bipartite(40), 40 * 40, scale * 2 * time.Second},
 	} {
 		graph, err := presentrun.BuildGraph(tc.topology, presentation.State{})
 		if err != nil {
