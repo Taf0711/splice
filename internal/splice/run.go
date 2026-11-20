@@ -584,6 +584,14 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 	if err != nil {
 		return schemas.PipelineResult{}, fmt.Errorf("resolve work dir: %w", err)
 	}
+	// The pre-run state is captured before any pass changes the workspace.
+	// It tells a failure the run caused from one that was already there.
+	if hasTestRunnerStage(plan) {
+		options.testBaseline = captureTestBaseline(ctx, absWorkDir, func(msg string) {
+			emitProgress(options, msg+"\n")
+		})
+		defer options.testBaseline.Release(ctx)
+	}
 
 	// Memory identity is the stable repo root (options.ProjectRoot for worktree
 	// runs), never the per-run worktree path. Tool execution and workspace
@@ -945,7 +953,9 @@ func captureVerificationFromResult(result schemas.PipelineResult, testStage stri
 		break
 	}
 	if state := result.FinalState; state != nil {
-		ver.TestsExecuted = state.TestsPassing + state.TestsFailing + state.TestsErrored
+		// Tests that failed before the run ran too, so they count as executed.
+		// They are not failed for this run.
+		ver.TestsExecuted = state.TestsPassing + state.TestsFailing + state.TestsErrored + state.TestsAlreadyFailing
 		ver.TestsFailed = state.TestsFailing + state.TestsErrored
 		ver.AcceptanceTotal = state.AcceptanceFactsPassing + state.AcceptanceFactsFailing
 		ver.AcceptancePassed = state.AcceptanceFactsPassing
@@ -953,6 +963,9 @@ func captureVerificationFromResult(result schemas.PipelineResult, testStage stri
 	if ver.TestStageRan {
 		ver.EnvironmentStdLib = true
 		ver.ObservedResult = fmt.Sprintf("executed %d test(s), %d failed", ver.TestsExecuted, ver.TestsFailed)
+		if state := result.FinalState; state != nil && state.TestsAlreadyFailing > 0 {
+			ver.ObservedResult += fmt.Sprintf(", %d already failing before the run", state.TestsAlreadyFailing)
+		}
 	}
 	return ver
 }

@@ -1106,3 +1106,143 @@ func TestRunCommandDoesNotWriteThroughReportSymlink(t *testing.T) {
 		t.Fatalf("symlink target was written through: %q", data)
 	}
 }
+
+// goJSONFailureStream is go test -json output with one failing test, one
+// passing test, and one more failing test, for package example.com/fixture.
+func goJSONStream(failing ...string) string {
+	lines := []string{`{"Action":"run","Package":"example.com/fixture","Test":"TestPass"}`,
+		`{"Action":"pass","Package":"example.com/fixture","Test":"TestPass","Elapsed":0}`}
+	for _, name := range failing {
+		lines = append(lines,
+			`{"Action":"run","Package":"example.com/fixture","Test":"`+name+`"}`,
+			`{"Action":"output","Package":"example.com/fixture","Test":"`+name+`","Output":"    fixture_test.go:9: boom\n"}`,
+			`{"Action":"fail","Package":"example.com/fixture","Test":"`+name+`","Elapsed":0}`)
+	}
+	lines = append(lines, `{"Action":"fail","Package":"example.com/fixture","Elapsed":0.1}`)
+	return strings.Join(lines, "\n")
+}
+
+// A run marks the failures that the pre-run baseline already has. Only the
+// new failure is counted, and the summary names the one that was there before.
+func TestTestRunnerMarksFailuresAlreadyInBaseline(t *testing.T) {
+	var baselineArgv []string
+	calls := 0
+	options := StageOptions{
+		WorkDir: t.TempDir(),
+		Command: []string{"go", "test", "./..."},
+		RunTool: func(context.Context, string, map[string]any) (ToolResult, error) {
+			return ToolResult{OK: false, Output: goJSONStream("TestOld", "TestNew"), Meta: map[string]string{"exit_code": "1"}}, nil
+		},
+		TestBaseline: func(_ context.Context, _ StageOptions, argv []string, _ string) (schemas.TestRunResults, bool) {
+			calls++
+			baselineArgv = argv
+			base, _ := parseGoTestJSON(goJSONStream("TestOld"))
+			return base, true
+		},
+	}
+	out, err := (TestRunner{}).Run(context.Background(), schemas.HarnessStageInput{}, nil, options)
+	if err != nil {
+		t.Fatalf("stage run: %v", err)
+	}
+	results := out.Data["test_results"].(schemas.TestRunResults)
+	if calls != 1 {
+		t.Fatalf("baseline calls = %d, want 1", calls)
+	}
+	if !equalTestRunnerStrings(baselineArgv, results.Command) {
+		t.Fatalf("baseline argv = %v, want the recorded argv %v", baselineArgv, results.Command)
+	}
+	if results.Failed() != 1 || results.FailedBefore() != 1 {
+		t.Fatalf("Failed = %d, FailedBefore = %d, want 1 and 1: %+v", results.Failed(), results.FailedBefore(), results.Tests)
+	}
+	if !strings.Contains(out.Summary, "already failing") || !strings.Contains(out.Summary, "TestOld") {
+		t.Fatalf("summary must name the pre-existing failure: %q", out.Summary)
+	}
+	if !strings.Contains(out.Summary, "TestNew") {
+		t.Fatalf("summary must keep the new failure as evidence: %q", out.Summary)
+	}
+	if strings.Contains(out.Summary, "Failing evidence:\n") && strings.Contains(out.Summary, "TestOld: ") {
+		t.Fatalf("failing evidence must not list the pre-existing failure: %q", out.Summary)
+	}
+}
+
+// With no baseline, every failure stays new and the summary is unchanged.
+func TestTestRunnerNoBaselineKeepsEveryFailureNew(t *testing.T) {
+	options := StageOptions{
+		WorkDir: t.TempDir(),
+		Command: []string{"go", "test", "./..."},
+		RunTool: func(context.Context, string, map[string]any) (ToolResult, error) {
+			return ToolResult{OK: false, Output: goJSONStream("TestOld", "TestNew"), Meta: map[string]string{"exit_code": "1"}}, nil
+		},
+		TestBaseline: func(context.Context, StageOptions, []string, string) (schemas.TestRunResults, bool) {
+			return schemas.TestRunResults{}, false
+		},
+	}
+	out, err := (TestRunner{}).Run(context.Background(), schemas.HarnessStageInput{}, nil, options)
+	if err != nil {
+		t.Fatalf("stage run: %v", err)
+	}
+	results := out.Data["test_results"].(schemas.TestRunResults)
+	if results.Failed() != 2 || results.FailedBefore() != 0 {
+		t.Fatalf("Failed = %d, FailedBefore = %d, want 2 and 0", results.Failed(), results.FailedBefore())
+	}
+	if strings.Contains(out.Summary, "already failing") {
+		t.Fatalf("summary must not mention baseline failures: %q", out.Summary)
+	}
+}
+
+// Command-only evidence has no per-test failures to compare, so the baseline
+// never runs and the result is unchanged.
+func TestTestRunnerCommandOnlyNeverRunsBaseline(t *testing.T) {
+	calls := 0
+	options := StageOptions{
+		WorkDir: t.TempDir(),
+		Command: []string{"make", "check"},
+		RunTool: func(context.Context, string, map[string]any) (ToolResult, error) {
+			return ToolResult{OK: false, Output: "make: failed", Meta: map[string]string{"exit_code": "2"}}, nil
+		},
+		TestBaseline: func(context.Context, StageOptions, []string, string) (schemas.TestRunResults, bool) {
+			calls++
+			return schemas.TestRunResults{}, true
+		},
+	}
+	out, err := (TestRunner{}).Run(context.Background(), schemas.HarnessStageInput{}, nil, options)
+	if err != nil {
+		t.Fatalf("stage run: %v", err)
+	}
+	results := out.Data["test_results"].(schemas.TestRunResults)
+	if calls != 0 {
+		t.Fatalf("baseline ran %d time(s) for command_only evidence", calls)
+	}
+	if results.Evidence != schemas.TestEvidenceCommandOnly || results.FailedBefore() != 0 {
+		t.Fatalf("evidence = %q, FailedBefore = %d", results.Evidence, results.FailedBefore())
+	}
+}
+
+// A command that exits 0 but whose per-test report has a failed test is still
+// compared with the baseline. The failure that predates the run is marked.
+func TestTestRunnerMarksFailuresOnPassingExitCode(t *testing.T) {
+	calls := 0
+	options := StageOptions{
+		WorkDir: t.TempDir(),
+		Command: []string{"go", "test", "./..."},
+		RunTool: func(context.Context, string, map[string]any) (ToolResult, error) {
+			return ToolResult{OK: true, Output: goJSONStream("TestOld")}, nil
+		},
+		TestBaseline: func(context.Context, StageOptions, []string, string) (schemas.TestRunResults, bool) {
+			calls++
+			base, _ := parseGoTestJSON(goJSONStream("TestOld"))
+			return base, true
+		},
+	}
+	out, err := (TestRunner{}).Run(context.Background(), schemas.HarnessStageInput{}, nil, options)
+	if err != nil {
+		t.Fatalf("stage run: %v", err)
+	}
+	results := out.Data["test_results"].(schemas.TestRunResults)
+	if results.ExitCode != 0 || calls != 1 {
+		t.Fatalf("exit = %d, baseline calls = %d; want exit 0 and one baseline call", results.ExitCode, calls)
+	}
+	if results.FailedBefore() != 1 || results.Failed() != 0 {
+		t.Fatalf("FailedBefore = %d, Failed = %d; want 1 and 0", results.FailedBefore(), results.Failed())
+	}
+}

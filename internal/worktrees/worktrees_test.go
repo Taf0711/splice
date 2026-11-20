@@ -1756,3 +1756,171 @@ func assertSourceRefusalLeftWorktreeUntouched(t *testing.T, root, worktree, bran
 		t.Fatalf("worktree status = %q, want feature.txt still uncommitted", status)
 	}
 }
+
+// initCheckoutRepo makes a git repo with one committed file and returns its
+// root and the commit. The commit is the content the checkout must show.
+func initCheckoutRepo(t *testing.T) (string, string) {
+	t.Helper()
+	root := resolvedPath(t, t.TempDir())
+	gitInRepo(t, root, "init", "-q")
+	if err := os.MkdirAll(filepath.Join(root, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "sub", "f.txt"), []byte("committed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitInRepo(t, root, "add", "-A")
+	gitInRepo(t, root, "commit", "-qm", "base")
+	return root, strings.TrimSpace(gitInRepo(t, root, "rev-parse", "HEAD"))
+}
+
+func gitInRepo(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, out)
+	}
+	return string(out)
+}
+
+// The checkout shows the commit, not the dirty worktree. The path maps a
+// subdirectory of the repo to the same subdirectory of the checkout. Cleanup
+// removes the directory and unregisters the worktree.
+func TestCheckoutAtShowsCommitAndCleansUp(t *testing.T) {
+	root, commit := initCheckoutRepo(t)
+	if err := os.WriteFile(filepath.Join(root, "sub", "f.txt"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := gitInRepo(t, root, "worktree", "list", "--porcelain")
+
+	checkout, cleanup, err := CheckoutAt(context.Background(), filepath.Join(root, "sub"), commit)
+	if err != nil {
+		t.Fatalf("CheckoutAt: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(checkout, "f.txt"))
+	if err != nil {
+		t.Fatalf("read checkout file: %v", err)
+	}
+	if string(got) != "committed\n" {
+		t.Fatalf("checkout file = %q, want the committed content", got)
+	}
+	if filepath.Base(checkout) != "sub" {
+		t.Fatalf("checkout path = %q, want the sub directory of the checkout", checkout)
+	}
+	cleanup()
+	if _, err := os.Stat(checkout); !os.IsNotExist(err) {
+		t.Fatalf("checkout dir still exists after cleanup: %v", err)
+	}
+	if after := gitInRepo(t, root, "worktree", "list", "--porcelain"); after != before {
+		t.Fatalf("worktree list changed after cleanup:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
+// A cancelled context leaves no checkout and no worktree registration.
+func TestCheckoutAtCancelledLeavesNothing(t *testing.T) {
+	root, commit := initCheckoutRepo(t)
+	before := gitInRepo(t, root, "worktree", "list", "--porcelain")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, cleanup, err := CheckoutAt(ctx, root, commit); err == nil {
+		cleanup()
+		t.Fatal("CheckoutAt with a cancelled context must fail")
+	}
+	if after := gitInRepo(t, root, "worktree", "list", "--porcelain"); after != before {
+		t.Fatalf("worktree list changed after a failed checkout:\n%s", after)
+	}
+}
+
+// A user worktree whose directory went missing keeps its registration when a
+// checkout is removed normally. Cleanup prunes only when its own removal fails.
+func TestCheckoutCleanupKeepsUnrelatedMissingWorktree(t *testing.T) {
+	root, commit := initCheckoutRepo(t)
+	userWT := filepath.Join(resolvedPath(t, t.TempDir()), "user-wt")
+	gitInRepo(t, root, "worktree", "add", "--detach", userWT, commit)
+	if err := os.RemoveAll(userWT); err != nil {
+		t.Fatal(err)
+	}
+	_, cleanup, err := CheckoutAt(context.Background(), root, commit)
+	if err != nil {
+		t.Fatalf("CheckoutAt: %v", err)
+	}
+	cleanup()
+	if list := gitInRepo(t, root, "worktree", "list", "--porcelain"); !strings.Contains(list, userWT) {
+		t.Fatalf("the user's missing worktree registration was pruned:\n%s", list)
+	}
+}
+
+// A checkout whose run crashed before cleanup stays registered. A later sweep
+// removes the stale checkout and its registration, and keeps a fresh one.
+func TestPruneStaleCheckoutsRecoversCrashedRun(t *testing.T) {
+	t.Setenv("TMPDIR", resolvedPath(t, t.TempDir()))
+	root, commit := initCheckoutRepo(t)
+
+	// The crash: CheckoutAt ran, and its cleanup never did.
+	crashed, _, err := CheckoutAt(context.Background(), root, commit)
+	if err != nil {
+		t.Fatalf("CheckoutAt: %v", err)
+	}
+	fresh, freshCleanup, err := CheckoutAt(context.Background(), root, commit)
+	if err != nil {
+		t.Fatalf("CheckoutAt fresh: %v", err)
+	}
+	defer freshCleanup()
+
+	home := CheckoutHome(root)
+	crashedRoot := checkoutChild(t, home, crashed)
+	freshRoot := checkoutChild(t, home, fresh)
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(crashedRoot, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := PruneStaleCheckouts(context.Background(), root, time.Hour)
+	if err != nil {
+		t.Fatalf("PruneStaleCheckouts: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("pruned %d checkouts, want 1", n)
+	}
+	if _, err := os.Stat(crashedRoot); !os.IsNotExist(err) {
+		t.Fatalf("crashed checkout still exists: %v", err)
+	}
+	if _, err := os.Stat(freshRoot); err != nil {
+		t.Fatalf("fresh checkout was removed: %v", err)
+	}
+	if list := gitInRepo(t, root, "worktree", "list", "--porcelain"); strings.Contains(list, crashedRoot) {
+		t.Fatalf("crashed checkout is still registered:\n%s", list)
+	}
+}
+
+// checkoutChild returns the managed child directory of home that holds path.
+func checkoutChild(t *testing.T, home, path string) string {
+	t.Helper()
+	rel, err := filepath.Rel(home, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(home, strings.Split(rel, string(filepath.Separator))[0])
+}
+
+// Cleanup removes a registration that a cancelled "worktree add" left locked
+// with its directory gone. The unlock and prune are what remove it.
+func TestRemoveCheckoutDropsLockedHalfCreatedRegistration(t *testing.T) {
+	root, commit := initCheckoutRepo(t)
+	checkout := filepath.Join(resolvedPath(t, t.TempDir()), "half-made")
+	gitInRepo(t, root, "worktree", "add", "--detach", "--lock", "--reason", "initializing", checkout, commit)
+	// Without its .git file git refuses to remove the worktree, as it does
+	// for a checkout cancelled during "worktree add".
+	if err := os.Remove(filepath.Join(checkout, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	removeCheckout(root, checkout)
+	if list := gitInRepo(t, root, "worktree", "list", "--porcelain"); strings.Contains(list, "half-made") {
+		t.Fatalf("locked registration survived cleanup:\n%s", list)
+	}
+}

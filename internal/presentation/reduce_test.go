@@ -178,7 +178,7 @@ func TestApplyPlanAndRun(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Apply run: %v", err)
 		}
-		if unverified.Completion == nil || len(unverified.Completion.Checks) != 1 || unverified.Completion.Checks[0] != checks[0] {
+		if unverified.Completion == nil || len(unverified.Completion.Checks) != 1 || !reflect.DeepEqual(unverified.Completion.Checks[0], checks[0]) {
 			t.Fatalf("completion = %+v, want the checks", unverified.Completion)
 		}
 		if err := unverified.Validate(); err != nil {

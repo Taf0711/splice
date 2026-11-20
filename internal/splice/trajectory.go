@@ -463,6 +463,7 @@ func ComputeIterationState(iteration int, stageOutputs []schemas.HarnessStageOut
 		TestsPassing:             countTests(signals.testResults, "passed"),
 		TestsFailing:             countTests(signals.testResults, "failed"),
 		TestsErrored:             countTests(signals.testResults, "errored"),
+		TestsAlreadyFailing:      countAlreadyFailing(signals.testResults),
 		Preexisting:              preexisting,
 		Authored:                 authored,
 		AcceptanceFactsPassing:   countAcceptanceResults(signals.acceptanceResults, "passed"),
@@ -547,14 +548,26 @@ func strictlyDecreasing(values []float64) bool {
 	return true
 }
 
+// countTests counts the tests with status. A failure that was already in the
+// baseline is left out, so it never counts as a failure of this run.
 func countTests(results []schemas.TestRunResults, status string) int {
 	count := 0
 	for _, result := range results {
 		for _, tc := range result.Tests {
-			if tc.Status == status {
+			if tc.Status == status && !tc.AlreadyFailing {
 				count++
 			}
 		}
+	}
+	return count
+}
+
+// countAlreadyFailing counts the failed or errored tests that were already
+// failing before the run.
+func countAlreadyFailing(results []schemas.TestRunResults) int {
+	count := 0
+	for _, result := range results {
+		count += result.FailedBefore()
 	}
 	return count
 }

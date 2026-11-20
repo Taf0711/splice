@@ -52,6 +52,7 @@ func outputCheck(name string, out schemas.HarnessStageOutput, recordSummary *str
 	if results, ok := out.Data["test_results"].(schemas.TestRunResults); ok {
 		check.Kind = schemas.CheckKindTests
 		check.Outcome, check.Detail = testsCheckOutcome(results)
+		check.AlreadyFailing = alreadyFailingNames(results)
 	} else if results, ok := out.Data["acceptance_results"].([]schemas.TestCaseResult); ok {
 		check.Kind = schemas.CheckKindAcceptance
 		check.Outcome, check.Detail = acceptanceCheckOutcome(results)
@@ -87,6 +88,9 @@ func testsCheckOutcome(results schemas.TestRunResults) (schemas.VerificationChec
 	if results.Evidence != "" {
 		counts += ", " + strings.ReplaceAll(results.Evidence, "_", "-") + " evidence"
 	}
+	if before := results.FailedBefore(); before > 0 {
+		counts += fmt.Sprintf(", %d already failing before this run", before)
+	}
 	switch {
 	case failed > 0:
 		return schemas.CheckFailed, counts
@@ -95,8 +99,23 @@ func testsCheckOutcome(results schemas.TestRunResults) (schemas.VerificationChec
 	case results.Evidence == schemas.TestEvidenceCommandOnly && results.ExitCode == 0:
 		return schemas.CheckCommandPassed, "exit code 0, per-test evidence unavailable"
 	default:
+		if results.FailedBefore() > 0 {
+			return schemas.CheckNoTests, counts
+		}
 		return schemas.CheckNoTests, "no tests ran"
 	}
+}
+
+// alreadyFailingNames returns the names of the tests that failed before the
+// run, in report order.
+func alreadyFailingNames(results schemas.TestRunResults) []string {
+	var names []string
+	for _, tc := range results.Tests {
+		if tc.AlreadyFailing {
+			names = append(names, tc.Name)
+		}
+	}
+	return names
 }
 
 func acceptanceCheckOutcome(results []schemas.TestCaseResult) (schemas.VerificationCheckOutcome, string) {

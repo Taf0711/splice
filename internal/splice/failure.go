@@ -225,7 +225,7 @@ func FingerprintFromTestResults(results schemas.TestRunResults) FailureFingerpri
 	compile := false
 	testFail := false
 	for _, tc := range results.Tests {
-		if tc.Status != "failed" && tc.Status != "errored" {
+		if !tc.NewFailure() {
 			continue
 		}
 		if strings.HasPrefix(tc.Name, "build ") {
@@ -237,9 +237,10 @@ func FingerprintFromTestResults(results schemas.TestRunResults) FailureFingerpri
 		symbols = append(symbols, symbolsFromDiagnostic(tc.Message)...)
 		files = append(files, goFileMentions(tc.Message)...)
 	}
-	if len(diagLines) == 0 {
+	if len(diagLines) == 0 && results.FailedBefore() == 0 {
 		// No structured entries: fall back to the raw captured output so the
-		// fingerprint still distinguishes this failure from others.
+		// fingerprint still distinguishes this failure from others. Output
+		// that holds failures from before the run is not used.
 		raw := strings.TrimSpace(results.Stdout + "\n" + results.Stderr)
 		if raw != "" {
 			diagLines = append(diagLines, raw)

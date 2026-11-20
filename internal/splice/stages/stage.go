@@ -88,6 +88,11 @@ type StageOptions struct {
 	CommandWorkDir string
 	// TimeoutSeconds bounds deterministic subprocess execution.
 	TimeoutSeconds int
+	// TestBaseline gives the test runner the per-test results of its command
+	// at the run's pre-run state, for the command argv run in dir. The runner
+	// calls it only when the run has per-test failures. ok is false when no
+	// baseline is available, and every failure then stays new.
+	TestBaseline func(ctx context.Context, options StageOptions, argv []string, dir string) (schemas.TestRunResults, bool)
 	// OnFormatRetry, when set, is invoked before each typed-output format
 	// retry attempt (attempt 2 and up) of callValidatedToolUse. The
 	// orchestrator uses it to reclassify the request attribution cell so

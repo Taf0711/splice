@@ -257,26 +257,43 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 			}}
 			results.Evidence = schemas.TestEvidenceCommandOnly
 		}
+		marked := markAlreadyFailing(ctx, &results, options, recordedArgv, commandWorkDir)
 		summary = fmt.Sprintf("Test command failed with exit code %d.", results.ExitCode)
-		evidence := failingEvidenceExcerpt(results.Stdout + "\n" + results.Stderr)
-		if evidence == "" && parsedPerTest {
-			// The -json stream wraps compiler output in JSON events, so the
-			// raw-line excerpt finds nothing. The parsed compile-error
-			// entries are the evidence; rebuild it from them.
-			var lines []string
-			for _, tc := range results.Tests {
-				if tc.Status == "errored" {
-					lines = append(lines, tc.Name+": "+tc.Message)
+		var evidence string
+		if marked {
+			// The raw output also holds the tests that failed before the run.
+			// The evidence keeps the new failures only.
+			evidence = newFailureEvidence(results)
+		} else {
+			evidence = failingEvidenceExcerpt(results.Stdout + "\n" + results.Stderr)
+			if evidence == "" && parsedPerTest {
+				// The -json stream wraps compiler output in JSON events, so the
+				// raw-line excerpt finds nothing. The parsed compile-error
+				// entries are the evidence; rebuild it from them.
+				var lines []string
+				for _, tc := range results.Tests {
+					if tc.Status == "errored" {
+						lines = append(lines, tc.Name+": "+tc.Message)
+					}
 				}
+				evidence = truncateEvidenceLines(strings.Join(lines, "\n"))
 			}
-			evidence = truncateEvidenceLines(strings.Join(lines, "\n"))
 		}
 		if evidence != "" {
 			// Surface bounded failure evidence into the revision context: a
 			// re-entered writer that only sees "exit code 1" guesses blind.
 			summary += "\nFailing evidence:\n" + evidence
 		}
+		if note := alreadyFailingNote(results); note != "" {
+			summary += "\n" + note
+		}
 		confidence = 0.8
+	}
+
+	if results.ExitCode == 0 {
+		// A passing command can still report failed tests (a pytest or jest
+		// report with failures). Those are compared with the baseline too.
+		markAlreadyFailing(ctx, &results, options, recordedArgv, commandWorkDir)
 	}
 
 	detail := results.Stdout
@@ -296,6 +313,54 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 		Confidence: confidence,
 		Data:       map[string]any{"test_results": results, "test_command": recordedArgv},
 	}, nil
+}
+
+// markAlreadyFailing compares the run's failing tests with the pre-run
+// baseline. It runs only for per-test evidence with a failing test, and it
+// returns true when at least one failure was marked as already failing.
+func markAlreadyFailing(ctx context.Context, results *schemas.TestRunResults, options StageOptions, argv []string, dir string) bool {
+	if options.TestBaseline == nil || results.Evidence != schemas.TestEvidencePerTest || results.Failed() == 0 {
+		return false
+	}
+	baseline, ok := options.TestBaseline(ctx, options, argv, dir)
+	if !ok {
+		return false
+	}
+	return schemas.MarkAlreadyFailing(results, baseline) > 0
+}
+
+// newFailureEvidence lists the new failing tests as "name: message" lines,
+// bounded like the other failure evidence.
+func newFailureEvidence(results schemas.TestRunResults) string {
+	var lines []string
+	for _, tc := range results.Tests {
+		if tc.Status == "failed" || tc.Status == "errored" {
+			if !tc.AlreadyFailing {
+				lines = append(lines, tc.Name+": "+tc.Message)
+			}
+		}
+	}
+	return truncateEvidenceLines(strings.Join(lines, "\n"))
+}
+
+// alreadyFailingNote names the failures that were already in the baseline.
+// It returns "" when none were.
+func alreadyFailingNote(results schemas.TestRunResults) string {
+	n := results.FailedBefore()
+	if n == 0 {
+		return ""
+	}
+	var names []string
+	for _, tc := range results.Tests {
+		if tc.AlreadyFailing && len(names) < 10 {
+			names = append(names, tc.Name)
+		}
+	}
+	list := strings.Join(names, ", ")
+	if n > len(names) {
+		list += fmt.Sprintf(", and %d more", n-len(names))
+	}
+	return fmt.Sprintf("%d test(s) already failing before this run (not caused by it): %s", n, list)
 }
 
 // expandConfiguredTestCommand expands whole-argument placeholders from the

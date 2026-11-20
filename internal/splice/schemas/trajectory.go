@@ -46,6 +46,7 @@ type IterationState struct {
 	TestsPassing             int              `json:"tests_passing"`
 	TestsFailing             int              `json:"tests_failing"`
 	TestsErrored             int              `json:"tests_errored"`
+	TestsAlreadyFailing      int              `json:"tests_already_failing,omitempty"` // failed before the run; not in the counts above
 	Preexisting              TestCounts       `json:"preexisting,omitempty"`
 	Authored                 TestCounts       `json:"authored,omitempty"`
 	AcceptanceFactsPassing   int              `json:"acceptance_facts_passing"`
@@ -82,7 +83,7 @@ func (i IterationState) Validate() error {
 	if err := validateConfidence(i.Confidence); err != nil {
 		return err
 	}
-	if i.TestsPassing < 0 || i.TestsFailing < 0 || i.TestsErrored < 0 {
+	if i.TestsPassing < 0 || i.TestsFailing < 0 || i.TestsErrored < 0 || i.TestsAlreadyFailing < 0 {
 		return errors.New("test counts must be non-negative")
 	}
 	if err := i.Preexisting.Validate(); err != nil {

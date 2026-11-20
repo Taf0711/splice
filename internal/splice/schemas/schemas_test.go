@@ -1166,3 +1166,86 @@ func TestTopologySizeLimitsAreInclusive(t *testing.T) {
 		})
 	}
 }
+
+// A failure that was already present before the run is not a new failure.
+// The same test name in two Go packages is two tests.
+func TestMarkAlreadyFailingUsesPackageIdentity(t *testing.T) {
+	baseline := TestRunResults{Command: []string{"go", "test"}, Evidence: TestEvidencePerTest, Tests: []TestCaseResult{
+		{Name: "example.com/a.TestSame", Package: "example.com/a", Status: "failed"},
+		{Name: "example.com/b.TestSame", Package: "example.com/b", Status: "passed"},
+	}}
+	results := TestRunResults{Command: []string{"go", "test"}, Evidence: TestEvidencePerTest, Tests: []TestCaseResult{
+		{Name: "example.com/a.TestSame", Package: "example.com/a", Status: "failed"},
+		{Name: "example.com/b.TestSame", Package: "example.com/b", Status: "failed"},
+		{Name: "example.com/c.TestNew", Package: "example.com/c", Status: "errored"},
+	}}
+	if got := MarkAlreadyFailing(&results, baseline); got != 1 {
+		t.Fatalf("MarkAlreadyFailing = %d, want 1", got)
+	}
+	if !results.Tests[0].AlreadyFailing {
+		t.Fatal("package a test failed in the baseline and must be marked")
+	}
+	if results.Tests[1].AlreadyFailing {
+		t.Fatal("package b test passed in the baseline and must not be marked")
+	}
+	if results.Tests[2].AlreadyFailing {
+		t.Fatal("a new failing test must not be marked")
+	}
+	if got := results.Failed(); got != 2 {
+		t.Fatalf("Failed() = %d, want 2 new failures", got)
+	}
+	if got := results.FailedBefore(); got != 1 {
+		t.Fatalf("FailedBefore() = %d, want 1", got)
+	}
+}
+
+// Pytest entries have no package. Their node ids keep them apart.
+func TestMarkAlreadyFailingPytestNodeIDs(t *testing.T) {
+	baseline := TestRunResults{Command: []string{"pytest"}, Evidence: TestEvidencePerTest, Tests: []TestCaseResult{
+		{Name: "tests/test_a.py::test_x", Status: "failed"},
+	}}
+	results := TestRunResults{Command: []string{"pytest"}, Evidence: TestEvidencePerTest, Tests: []TestCaseResult{
+		{Name: "tests/test_a.py::test_x", Status: "failed"},
+		{Name: "tests/test_b.py::test_x", Status: "failed"},
+	}}
+	if got := MarkAlreadyFailing(&results, baseline); got != 1 {
+		t.Fatalf("MarkAlreadyFailing = %d, want 1", got)
+	}
+	if !results.Tests[0].AlreadyFailing || results.Tests[1].AlreadyFailing {
+		t.Fatalf("marks = %v, %v; want test_a marked and test_b not", results.Tests[0].AlreadyFailing, results.Tests[1].AlreadyFailing)
+	}
+}
+
+func TestAlreadyFailingOnlyOnFailedOrErrored(t *testing.T) {
+	bad := TestCaseResult{Name: "t", Status: "passed", AlreadyFailing: true}
+	if err := bad.Validate(); err == nil {
+		t.Fatal("a passed test must not carry AlreadyFailing")
+	}
+	ok := TestCaseResult{Name: "t", Status: "failed", AlreadyFailing: true}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("failed test with AlreadyFailing: %v", err)
+	}
+}
+
+// A test whose failure kind changed is new: errored at base and failed now,
+// or failed at base and errored now. Only the same failing status is marked.
+func TestMarkAlreadyFailingStatusChangeIsNew(t *testing.T) {
+	baseline := TestRunResults{Tests: []TestCaseResult{
+		{Name: "example.com/a.TestX", Package: "example.com/a", Status: "errored"},
+		{Name: "example.com/a.TestY", Package: "example.com/a", Status: "failed"},
+	}}
+	results := TestRunResults{Tests: []TestCaseResult{
+		{Name: "example.com/a.TestX", Package: "example.com/a", Status: "failed"},
+		{Name: "example.com/a.TestY", Package: "example.com/a", Status: "errored"},
+		{Name: "example.com/a.TestY", Package: "example.com/a", Status: "failed"},
+	}}
+	if got := MarkAlreadyFailing(&results, baseline); got != 1 {
+		t.Fatalf("MarkAlreadyFailing = %d, want 1 (only the unchanged failure)", got)
+	}
+	if results.Tests[0].AlreadyFailing || results.Tests[1].AlreadyFailing {
+		t.Fatal("a status change must count as a new failure")
+	}
+	if !results.Tests[2].AlreadyFailing {
+		t.Fatal("the unchanged failure must be marked")
+	}
+}

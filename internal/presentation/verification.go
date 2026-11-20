@@ -1,6 +1,7 @@
 package presentation
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/Taf0711/splice/internal/splice/schemas"
@@ -56,11 +57,31 @@ func checkPhrase(check schemas.VerificationCheck) string {
 	return phrase
 }
 
+// maxNamedFailures bounds the test names that one receipt line lists.
+const maxNamedFailures = 10
+
+// alreadyFailingLine names the tests that failed before the run and that the
+// run did not cause. The list is capped, and the rest are counted.
+func alreadyFailingLine(names []string) string {
+	shown, more := names, 0
+	if len(names) > maxNamedFailures {
+		shown, more = names[:maxNamedFailures], len(names)-maxNamedFailures
+	}
+	line := "Already failing before this run (not caused by it): " + strings.Join(shown, ", ")
+	if more > 0 {
+		line += fmt.Sprintf(", and %d more", more)
+	}
+	return line + "."
+}
+
 // CheckLines returns one line per check, for a run that is not verified.
 func CheckLines(checks []schemas.VerificationCheck) []string {
 	lines := make([]string, 0, len(checks))
 	for _, check := range checks {
 		lines = append(lines, checkPhrase(check))
+		if check.Kind == schemas.CheckKindTests && len(check.AlreadyFailing) > 0 {
+			lines = append(lines, alreadyFailingLine(check.AlreadyFailing))
+		}
 	}
 	return lines
 }
@@ -97,6 +118,9 @@ func VerifiedLines(checks []schemas.VerificationCheck) []string {
 		lines = append(lines, "Tests: the test command passed, but per-test evidence is not available.")
 	case tests.Outcome != schemas.CheckPassed:
 		lines = append(lines, "Tests: "+strings.TrimPrefix(checkPhrase(*tests), "tests: ")+".")
+	}
+	if tests != nil && len(tests.AlreadyFailing) > 0 {
+		lines = append(lines, alreadyFailingLine(tests.AlreadyFailing))
 	}
 	if len(other) > 0 {
 		lines = append(lines, "Other checks: "+strings.Join(other, "; "))

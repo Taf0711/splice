@@ -34,6 +34,9 @@ type PipelineRunConfig struct {
 	// carriedPaths holds each stage's fetched files between invocations of
 	// one run (E01b). runExecutionPlan creates it; nil means no carry.
 	carriedPaths *carriedContextPaths
+	// testBaseline answers what the test command reported before the run.
+	// Nil when the run has no test stage.
+	testBaseline *testBaseline
 	// passNodes collects each stage node's result for the pass in progress.
 	// runIterationLoop sets it per pass; nil means no pass attribution.
 	passNodes *[]schemas.NodeEvidence

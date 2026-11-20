@@ -309,6 +309,24 @@ When a stage fails before the pass completes, Splice records the failure and
 provides revision context for the next allowed pass. That failed pass does not
 create a trajectory state.
 
+### Failures that predate the run
+
+A test can fail before the run starts. Splice runs the test command again on
+the workspace as it was before the first pass. This baseline run starts only
+when the test run has a failed test with per-test evidence. Per-test evidence
+comes from `go test`, pytest, and jest. Any other command keeps its old
+behavior: no baseline runs, and every failure stays new. Each distinct
+command runs at most once for each run.
+
+A failed test that also failed in the baseline does not count as a failure of
+the run. The run verifies when no new test fails and at least one check passes.
+The repair loop receives only the new failures.
+
+The result and the receipt name the failures that predate the run. A list of
+more than ten names shows the first ten and the number of the rest. When the
+baseline cannot run, every failure stays new. Splice removes the temporary
+checkout after each baseline run.
+
 ## Trajectory state
 
 For each complete but unsuccessful pass, Splice records:

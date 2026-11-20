@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Taf0711/splice/internal/gitenv"
 )
@@ -231,11 +233,136 @@ func SnapshotCommit(ctx context.Context, dir, message string) (string, error) {
 	return commitSHA, nil
 }
 
+// ReleaseSnapshot deletes the pin that SnapshotCommit made for commit. It
+// leaves the commit object alone, and it does nothing when the pin is absent.
+func ReleaseSnapshot(ctx context.Context, dir, commit string) error {
+	_, err := commandOutput(defaultRunGit(ctx, dir, "update-ref", "-d", "refs/splice/snapshots/"+commit, commit))
+	return err
+}
+
 // SnapshotTree writes the worktree's tree (tracked and untracked files, the
 // same view as SnapshotCommit) and returns its SHA. It creates no commit and
 // no ref: the tree only needs to live for one run, as the base of a diff.
 func SnapshotTree(ctx context.Context, dir string) (string, error) {
 	return snapshotTree(ctx, defaultEnvRunGit, dir, "snapshot")
+}
+
+// CheckoutHome is the managed directory that holds the baseline checkouts of
+// the repository whose top-level path is top. Each repository has its own.
+func CheckoutHome(top string) string {
+	sum := sha256.Sum256([]byte(top))
+	return filepath.Join(os.TempDir(), "splice-baseline", hex.EncodeToString(sum[:6]))
+}
+
+// CheckoutAt checks commit out in a new detached worktree of the repository
+// that holds dir. It returns the path inside that checkout that matches dir.
+// The cleanup function removes the worktree and its directory. The caller
+// runs it when done, also after an error or a cancelled context. It runs on
+// the host, like SnapshotCommit.
+func CheckoutAt(ctx context.Context, dir, commit string) (string, func(), error) {
+	top, err := repoTop(ctx, dir)
+	if err != nil {
+		return "", nil, err
+	}
+	absDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", nil, fmt.Errorf("resolve directory %q: %w", dir, err)
+	}
+	rel, err := filepath.Rel(top, absDir)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", nil, fmt.Errorf("directory %q is outside repository %q", dir, top)
+	}
+	home := CheckoutHome(top)
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		return "", nil, fmt.Errorf("create checkout home: %w", err)
+	}
+	checkout, err := os.MkdirTemp(home, "checkout-")
+	if err != nil {
+		return "", nil, fmt.Errorf("create checkout dir: %w", err)
+	}
+	cleanup := func() { removeCheckout(top, checkout) }
+	if _, err := commandOutput(defaultRunGit(ctx, top, "worktree", "add", "--detach", checkout, commit)); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("check out %s: %w", commit, err)
+	}
+	return filepath.Join(checkout, rel), cleanup, nil
+}
+
+// PruneStaleCheckouts removes the checkouts of the repository that holds dir
+// when their directory is older than maxAge. A run that crashed before its
+// cleanup leaves such a checkout. It returns the number removed.
+func PruneStaleCheckouts(ctx context.Context, dir string, maxAge time.Duration) (int, error) {
+	top, err := repoTop(ctx, dir)
+	if err != nil {
+		return 0, err
+	}
+	entries, err := os.ReadDir(CheckoutHome(top))
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read checkout home: %w", err)
+	}
+	cutoff := time.Now().Add(-maxAge)
+	removed := 0
+	for _, entry := range entries {
+		path := filepath.Join(CheckoutHome(top), entry.Name())
+		info, err := entry.Info()
+		if err != nil || !info.IsDir() || info.ModTime().After(cutoff) {
+			continue
+		}
+		removeCheckout(top, path)
+		removed++
+	}
+	return removed, nil
+}
+
+// repoTop returns the top-level path of the repository that holds dir.
+func repoTop(ctx context.Context, dir string) (string, error) {
+	top, err := commandOutput(defaultRunGit(ctx, dir, "rev-parse", "--show-toplevel"))
+	if err != nil {
+		return "", fmt.Errorf("resolve repository root: %w", err)
+	}
+	return top, nil
+}
+
+// removeCheckout removes one checkout directory and its worktree
+// registration. Prune runs only when git could not remove the worktree and
+// its registration is still there. A normal removal leaves other worktrees
+// alone.
+func removeCheckout(top, checkout string) {
+	cleanCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	// A second --force removes a worktree that git still holds locked.
+	if _, err := commandOutput(defaultRunGit(cleanCtx, top, "worktree", "remove", "--force", "--force", checkout)); err == nil {
+		_ = os.RemoveAll(checkout)
+		return
+	}
+	registered := registeredWorktree(cleanCtx, top, checkout)
+	_ = os.RemoveAll(checkout)
+	if !registered {
+		return
+	}
+	// A checkout cancelled during "worktree add" keeps a lock and its
+	// registration. Unlock and prune drop it once the directory is gone.
+	_, _ = defaultRunGit(cleanCtx, top, "worktree", "unlock", checkout)
+	_, _ = defaultRunGit(cleanCtx, top, "worktree", "prune")
+}
+
+// registeredWorktree reports whether git lists a worktree at checkout. Git
+// may print the real path, so the match is on the unique directory name.
+func registeredWorktree(ctx context.Context, top, checkout string) bool {
+	out, err := commandOutput(defaultRunGit(ctx, top, "worktree", "list", "--porcelain"))
+	if err != nil {
+		return false
+	}
+	base := filepath.Base(checkout)
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "worktree ") && strings.HasSuffix(line, string(filepath.Separator)+base) {
+			return true
+		}
+	}
+	return false
 }
 
 // snapshotCommit is the shared plumbing for Capture: the worktree tree

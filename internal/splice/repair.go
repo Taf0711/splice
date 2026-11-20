@@ -292,15 +292,7 @@ func attemptLocalRepair(
 		}
 		fingerprint := FingerprintFromTestResults(results)
 		fingerprintHash := fingerprint.Hash()
-		var diagnostics strings.Builder
-		for _, tc := range results.Tests {
-			if tc.Status == "failed" || tc.Status == "errored" {
-				diagnostics.WriteString(tc.Name + ": " + tc.Message + "\n")
-			}
-		}
-		if raw := strings.TrimSpace(results.Stdout); raw != "" {
-			diagnostics.WriteString(raw + "\n")
-		}
+		diagnostics := repairDiagnostics(results)
 
 		repeatedNoEvidence, stalledCount := progress.observe(fingerprintHash, evidenceHashes(evidence), writerContentHashes(lastWriterOutput))
 		// Stop condition: the identical failure with no new evidence after
@@ -320,12 +312,12 @@ func attemptLocalRepair(
 		}
 
 		// A4: deterministic diagnostic resolution over the workspace.
-		resolverEvidence := ResolveGoDiagnostics(workDir, diagnostics.String())
+		resolverEvidence := ResolveGoDiagnostics(workDir, diagnostics)
 
 		// A5: focused payload. Original intent, change summary, exact
 		// failure, fingerprint, resolver evidence, attempted approaches, and
 		// (on the final attempt) the no-progress constraint. No transcript.
-		instruction := repairInstructionDirection(names, diagnostics.String(), lastWriterOutput)
+		instruction := repairInstructionDirection(names, diagnostics, lastWriterOutput)
 		revisionContext := buildFocusedRevisionContext(focusedRepairPayload{
 			Intent:           plan.RequestIntent,
 			ChangeSummary:    changeSummaryForStage(*priorSummaries, writerName),
@@ -576,13 +568,29 @@ func attemptLocalRepair(
 	}, nil
 }
 
+// repairDiagnostics is the failure text a repair pass reads. It lists the new
+// failures only. The raw output joins it only when no failure predates the
+// run, because the raw output may still hold the failures that predate it.
+func repairDiagnostics(results schemas.TestRunResults) string {
+	var diagnostics strings.Builder
+	for _, tc := range results.Tests {
+		if tc.NewFailure() {
+			diagnostics.WriteString(tc.Name + ": " + tc.Message + "\n")
+		}
+	}
+	if raw := strings.TrimSpace(results.Stdout); raw != "" && results.FailedBefore() == 0 {
+		diagnostics.WriteString(raw + "\n")
+	}
+	return diagnostics.String()
+}
+
 // extractFailingTests returns the "Name: Message" evidence strings (message
 // truncated to 200 chars) and the bare names, capped at 10 failures. The
 // evidence keeps the package-qualified name; the bare names drop the package
 // so they match test declarations.
 func extractFailingTests(results schemas.TestRunResults) (evidence []string, names []string) {
 	for _, tc := range results.Tests {
-		if tc.Status != "failed" && tc.Status != "errored" {
+		if !tc.NewFailure() {
 			continue
 		}
 		if len(names) >= 10 {

@@ -274,6 +274,9 @@ type VerificationCheck struct {
 	Kind    VerificationCheckKind    `json:"kind"`
 	Outcome VerificationCheckOutcome `json:"outcome"`
 	Detail  string                   `json:"detail,omitempty"`
+	// AlreadyFailing names the tests that failed before the run and that the
+	// run did not cause. They are not counted in the outcome.
+	AlreadyFailing []string `json:"already_failing,omitempty"`
 }
 
 // Validate checks the closed kind and outcome sets and the bounds.

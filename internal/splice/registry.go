@@ -224,6 +224,8 @@ func stageOptions(name string, iteration int, selection agent.ModelSelection, op
 		// then reads the reclassified value.
 		OnFormatRetry:  formatRetryNotify,
 		TimeoutSeconds: timeoutSeconds,
+		// A nil baseline answers no, so the test runner keeps every failure new.
+		TestBaseline: options.testBaseline.Results,
 	}
 	return stageOptions
 }
