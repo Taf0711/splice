@@ -498,3 +498,79 @@ func TestExtractFailingTestsBoundsLongName(t *testing.T) {
 		t.Fatalf("name is %d runes, want at most 303", n)
 	}
 }
+
+// A repair that stalls on the identical failure must end the run in pass 1.
+// No second pass starts, so the code writer runs only the first write and one
+// repair.
+func TestRunStopsAfterRepairNoProgress(t *testing.T) {
+	writerCalls := 0
+	registry := stageRegistry{
+		"code_writer": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			writerCalls++
+			return repairCodeWriterOutput(), nil
+		}),
+		"test_runner": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			return repairTestResults("failed"), nil
+		}),
+	}
+	var progress strings.Builder
+	options := PipelineConfigFromAgentOptions(agent.Options{Cwd: t.TempDir(), MaxTurns: 4})
+	options.OnReasoning = func(s string) { progress.WriteString(s) }
+
+	result, err := runIterationLoop(context.Background(), "repair-stall", repairTestPlan(), registry,
+		runFakeProvider{}, options, t.TempDir(), nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	if result.Status != "aborted" || result.AbortReason == nil {
+		t.Fatalf("status = %q, abort reason = %v, want aborted", result.Status, result.AbortReason)
+	}
+	if !strings.Contains(*result.AbortReason, repairNoProgressReason) || !strings.Contains(*result.AbortReason, "iteration 1") {
+		t.Fatalf("abort reason = %q, want the repair_no_progress reason for iteration 1", *result.AbortReason)
+	}
+	if strings.Contains(progress.String(), "Starting pipeline iteration 2") {
+		t.Fatalf("a second pass started after the repair stall:\n%s", progress.String())
+	}
+	if writerCalls != 2 {
+		t.Fatalf("code_writer calls = %d, want 2 (first write and one repair in pass 1)", writerCalls)
+	}
+}
+
+// A repair that resolves the failure must complete the run as before, and no
+// record may carry the stall flag.
+func TestRunContinuesWhenRepairFixesTests(t *testing.T) {
+	var writerCalls, testCalls int
+	options := PipelineConfigFromAgentOptions(agent.Options{Cwd: t.TempDir(), MaxTurns: 4})
+	result, err := runIterationLoop(context.Background(), "repair-fixed", repairTestPlan(),
+		repairTraceRegistry(&writerCalls, &testCalls), runFakeProvider{}, options, t.TempDir(), nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	if result.Status != "completed" {
+		t.Fatalf("status = %q, abort reason = %v, want completed", result.Status, result.AbortReason)
+	}
+	for _, r := range result.Stages {
+		if r.RepairNoProgress {
+			t.Fatalf("record %s iteration %d carries RepairNoProgress after a successful repair", r.Name, r.Iteration)
+		}
+	}
+}
+
+func TestPassRepairStalled(t *testing.T) {
+	cases := []struct {
+		name    string
+		records []schemas.StageRecord
+		want    bool
+	}{
+		{"no records", nil, false},
+		{"no flag", []schemas.StageRecord{{Name: "code_writer"}, {Name: "test_runner", Status: schemas.StageCompleted}}, false},
+		{"flagged test_runner", []schemas.StageRecord{{Name: "code_writer"}, {Name: "test_runner", RepairNoProgress: true}}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := passRepairStalled(tc.records); got != tc.want {
+				t.Fatalf("passRepairStalled() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

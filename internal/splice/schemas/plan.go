@@ -512,7 +512,10 @@ type StageRecord struct {
 	// FailureKind classifies a failed stage for the trajectory monitor. Empty
 	// for a stage that did not fail. The closed set is NodeFailureStageError,
 	// NodeFailureTestFailure, and NodeFailureNone.
-	FailureKind       string  `json:"failure_kind,omitempty"`
+	FailureKind string `json:"failure_kind,omitempty"`
+	// RepairNoProgress is true on the test_runner record of an iteration whose
+	// repair loop stopped with repair_no_progress. The pass loop ends the run.
+	RepairNoProgress  bool    `json:"repair_no_progress,omitempty"`
 	Activity          *string `json:"activity,omitempty"`
 	TokensInput       int     `json:"tokens_input"`
 	TokensOutput      int     `json:"tokens_output"`

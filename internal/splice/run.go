@@ -1343,6 +1343,11 @@ func runIterationLoop(
 
 		var failedBoundaryDecision *schemas.TrajectoryDecision
 		if !completed {
+			// Rule-mode backstop: an active classifier owns this decision.
+			// A stalled repair ends the run. Another pass repeats the failure.
+			if options.ClassifierPolicy == nil && passRepairStalled(passRecords) {
+				return finishWithReason(runID, plan, allRecords, "aborted", fmt.Sprintf(repairStallReason, i))
+			}
 			failed := findFailed(passRecords)
 			if options.ClassifierPolicy != nil {
 				latestPass := TrajectoryStep{Change: passChange(passRecords, roleStageName(plan, "code_writer")), Failure: passFailure(passRecords, passOutputs), FailureKind: passFailureKind(passRecords, passOutputs)}
@@ -1467,6 +1472,11 @@ func runIterationLoop(
 				return finishWithReason(runID, plan, allRecords, "failed", reason)
 			}
 			return finishCompleted(runID, plan, allRecords, state, passRecords, passOutputs)
+		}
+		// Rule-mode backstop: an active classifier owns this decision.
+		// The pass did not succeed. A stalled repair ends the run here too.
+		if options.ClassifierPolicy == nil && passRepairStalled(passRecords) {
+			return finishWithReason(runID, plan, allRecords, "aborted", fmt.Sprintf(repairStallReason, i))
 		}
 
 		// W3: the cost rule reads BILLED cost from the authoritative request
@@ -1713,6 +1723,21 @@ func runIterationLoop(
 	}
 
 	return finishWithReason(runID, plan, allRecords, "aborted", fmt.Sprintf("reached max iterations (%d) without success", maxIterations))
+}
+
+// repairStallReason is the abort reason when a pass ends with a stalled repair.
+// It takes the iteration number.
+const repairStallReason = "repair_no_progress: the repair loop could not change the failing tests in iteration %d; no new pass started"
+
+// passRepairStalled reports whether a pass's repair loop stopped with
+// repair_no_progress. The pass loop then ends the run.
+func passRepairStalled(records []schemas.StageRecord) bool {
+	for _, r := range records {
+		if r.RepairNoProgress {
+			return true
+		}
+	}
+	return false
 }
 
 func runPass(
@@ -2051,9 +2076,21 @@ func runPass(
 				if _, hasWriter := priorSummaries[roleStageName(plan, "code_writer")]; hasWriter {
 					if _, interaction, rerr := attemptLocalRepair(ctx, runID, iteration, plan, registry, provider, options, workDir, runner, mem, tr, priorScope, wallDeadline, execBudget, &records, &outputs, &priorSummaries, &priorChangedFiles, output); rerr != nil {
 						return records, outputs, false, rerr
-					} else if interaction != nil && tr != nil {
-						tr.recordInteraction(*interaction)
-						tr.persistPartial(ctx)
+					} else if interaction != nil {
+						// The interaction is not a pass record. Copy its stall
+						// flag onto this iteration's test_runner record so the
+						// pass loop sees it in passRecords.
+						if interaction.RepairNoProgress {
+							for k := range records {
+								if records[k].Name == roleStageName(plan, "test_runner") && records[k].Iteration == iteration {
+									records[k].RepairNoProgress = true
+								}
+							}
+						}
+						if tr != nil {
+							tr.recordInteraction(*interaction)
+							tr.persistPartial(ctx)
+						}
 					}
 				}
 			}

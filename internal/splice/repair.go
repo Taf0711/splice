@@ -303,11 +303,12 @@ func attemptLocalRepair(
 			// retry: stop writing and surface the typed outcome.
 			emitStageEvent(options, iteration-1, testName, "message", fmt.Sprintf("%s: identical failure with no new evidence after %d repair(s); stopping repair loop", repairNoProgressReason, attempts), 0, nil)
 			return false, &schemas.InteractionRecord{
-				Message:   lastMessage,
-				Iteration: iteration,
-				Repairs:   attempts,
-				Resolved:  false,
-				LatencyMs: totalLatency,
+				Message:          lastMessage,
+				Iteration:        iteration,
+				Repairs:          attempts,
+				Resolved:         false,
+				LatencyMs:        totalLatency,
+				RepairNoProgress: true,
 			}, nil
 		}
 

@@ -389,6 +389,9 @@ type InteractionRecord struct {
 	Repairs   int          `json:"repairs"`
 	Resolved  bool         `json:"resolved"`
 	LatencyMs int          `json:"latency_ms"`
+	// RepairNoProgress is true only when the repair loop stopped with
+	// repair_no_progress. No other return sets it.
+	RepairNoProgress bool `json:"repair_no_progress,omitempty"`
 }
 
 // Validate checks the interaction record.

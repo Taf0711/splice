@@ -115,6 +115,67 @@ func (runFailingProvider) StreamCompletion(ctx context.Context, request zerorunt
 	return ch, nil
 }
 
+// varyingFailureProvider fails every code_writer call with a compile error
+// that names a call-specific symbol. Each repair therefore brings new
+// evidence and the no-progress guard does not stall. A call count below
+// failFirst still fails. Later calls succeed, as in the fake provider. always
+// keeps every call failing.
+type varyingFailureProvider struct {
+	codeCalls int
+	failFirst int
+	always    bool
+}
+
+func (p *varyingFailureProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	if len(request.Tools) > 0 && request.Tools[0].Name == "submit_code" {
+		p.codeCalls++
+	}
+	if len(request.Tools) > 0 && request.Tools[0].Name == "submit_step_back" {
+		// The rule engine can ask for a step-back analysis. Answer it, so the
+		// auxiliary call does not fail the run.
+		b, _ := json.Marshal(schemas.StepBackAnalysis{
+			HypothesizedRootCause: "Hello refers to an undefined symbol.",
+			RecommendedApproach:   "Return a string literal from Hello.",
+		})
+		return singleToolStream("submit_step_back", string(b)), nil
+	}
+	if p.always || p.codeCalls <= p.failFirst {
+		if len(request.Tools) > 0 && request.Tools[0].Name == "submit_code" {
+			out := schemas.CodeWriterOutput{
+				Files: []schemas.FileChange{
+					{Path: "main.go", Content: fmt.Sprintf("package main\n\nfunc Hello() string { return undefinedValue%d }\n", p.codeCalls), ChangeType: "modify"},
+				},
+				Language:   "go",
+				Intent:     "add broken Hello function",
+				Confidence: 0.95,
+			}
+			b, _ := json.Marshal(out)
+			ch := make(chan zeroruntime.StreamEvent, 8)
+			ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "1", ToolName: "submit_code"}
+			ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "1", ArgumentsFragment: string(b)}
+			ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "1"}
+			ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 10, OutputTokens: 5}}
+			ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+			close(ch)
+			return ch, nil
+		}
+		return (runFailingProvider{}).StreamCompletion(ctx, request)
+	}
+	return (runFakeProvider{}).StreamCompletion(ctx, request)
+}
+
+// singleToolStream streams one tool call with the given arguments.
+func singleToolStream(name, args string) <-chan zeroruntime.StreamEvent {
+	ch := make(chan zeroruntime.StreamEvent, 8)
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "1", ToolName: name}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "1", ArgumentsFragment: args}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "1"}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 5, OutputTokens: 3}}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+	close(ch)
+	return ch
+}
+
 type stubStore struct {
 	bundle   schemas.MemoryBundle
 	err      error
@@ -1781,7 +1842,7 @@ func TestRunStreamsStageToolArguments(t *testing.T) {
 func TestRunMaxTurnsDoesNotCapPipelineIterations(t *testing.T) {
 	workDir, registry := newRunTestWorkspace(t)
 
-	result, err := Run(context.Background(), "add a security service with tests", runFailingProvider{}, agent.Options{
+	result, err := Run(context.Background(), "add a security service with tests", &varyingFailureProvider{always: true}, agent.Options{
 		Cwd:            workDir,
 		Registry:       registry,
 		PermissionMode: agent.PermissionModeAuto,
@@ -5385,6 +5446,52 @@ func (e *decisionRecordCancelEvaluator) Evaluate(ctx context.Context, request ze
 	return result, err
 }
 
+// With the classifier active, a stalled repair must not end the run at the
+// rule-mode guard. The classifier decides the boundary. Its decision here is
+// continue, so the run reaches that boundary. The evaluator cancels the
+// context there, which proves the run continued past the stall.
+func TestRunStalledRepairWithClassifierContinues(t *testing.T) {
+	t.Setenv(DecisionAdvisorModeEnvVar, "")
+	t.Setenv(DecisionAdvisorModelEnvVar, "")
+	t.Setenv(TrajectoryPackEnvVar, "")
+	t.Setenv(DecisionRecordsDirEnvVar, "")
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "go.mod"), []byte("module example\n\ngo 1.25\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "main_test.go"), []byte("package main\nimport \"testing\"\nfunc TestHello(t *testing.T) { if Hello() != \"hello\" { t.Fatal(\"wrong greeting\") } }\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool(workDir))
+	registry.Register(tools.NewListDirectoryTool(workDir))
+	registry.Register(tools.NewGrepTool(workDir))
+	registry.Register(tools.NewWriteFileTool(workDir))
+	registry.Register(tools.NewBashTool(workDir))
+	eval := &trajectoryEvaluator{label: "continue"}
+	var progress strings.Builder
+	options := agent.Options{SessionID: "stall-classifier", Cwd: workDir, Registry: registry, FileTracker: tools.NewFileTracker(), PermissionMode: agent.PermissionModeAuto,
+		Flags: flags.Set{flags.DecisionAdvisorEnabled: true}, DecisionEvaluator: eval,
+		DecisionAdvisorConfig: config.DecisionAdvisorConfig{Mode: "shadow", Backend: "http", QuestionPack: QuestionPackTrajActionV1, Profile: "test-model"},
+		OnReasoning:           func(s string) { progress.WriteString(s) },
+	}
+
+	result, err := Run(context.Background(), "add a Hello function and tests", runFailingProvider{}, options, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(progress.String(), repairNoProgressReason) {
+		t.Fatalf("fixture did not stall the repair loop:\n%s", progress.String())
+	}
+	// The classifier decided continue at the stalled boundary, so pass 2 starts.
+	if !strings.Contains(progress.String(), "Starting pipeline iteration 2") {
+		t.Fatalf("a stalled repair with an active classifier did not reach pass 2:\n%s", progress.String())
+	}
+	if result.Incomplete && strings.Contains(result.IncompleteReason, "no new pass started") {
+		t.Fatalf("the rule-mode guard ended a classifier-owned run: %s", result.IncompleteReason)
+	}
+}
+
 func TestRunDecisionRecordsSink(t *testing.T) {
 	for _, kind := range []string{"completed", "failed", "aborted", "cancelled", "unset", "advisor absent", "write error"} {
 		t.Run(kind, func(t *testing.T) {
@@ -5433,6 +5540,11 @@ func TestRunDecisionRecordsSink(t *testing.T) {
 				options.Flags[flags.TrajectoryClassifierEnabled] = false
 			}
 			var provider agent.Provider = &decisionRecordRunProvider{broken: kind == "aborted"}
+			if kind == "advisor absent" {
+				// Each failing repair must bring new evidence, or the rule-mode
+				// backstop ends the run before the fix lands.
+				provider = &varyingFailureProvider{failFirst: 2}
+			}
 			if kind == "failed" {
 				provider = badOutputProvider{}
 			}
