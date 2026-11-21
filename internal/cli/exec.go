@@ -1041,9 +1041,11 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		OnAttributedUsage: func(au agent.AttributedUsage) {
 			// A request that carries no cost is priced from its serving provider's
 			// catalog before it is saved, so the stored event shows the cost the run
-			// used. A request with a usage error keeps its error.
+			// used. A request with a usage error keeps its error. The provider's
+			// reported charge, when present, wins even for a model the registry
+			// does not list (same rule as the ledger path).
 			if au.Cost.Status == "" && au.UsageError == "" {
-				au.Cost = servedCatalogs.Estimate(au.ProviderName, au.Model, au.Usage, au.UsageReported)
+				au.Cost = splicerun.ResolveRequestCostFor(nil, servedCatalogs.Estimate, au)
 			}
 			// Legacy JSON output keeps the basic usage shape. Stream JSON uses
 			// the enriched attributed event below, never both.

@@ -813,6 +813,20 @@ func priceWithRegistry(registry *modelregistry.Registry, model string, usage zer
 	return priceServed(registry, model, usage, reported, "", "")
 }
 
+// pricingModelID returns the registry ID that prices a model ID. OpenRouter
+// routing suffixes (":floor", ":nitro") pick a provider route for the same
+// model, so they are stripped. Other suffixes such as ":free" name a different
+// model or price, so they are kept. The caller still sends the full ID.
+// ponytail: suffix list is fixed; add a suffix here if OpenRouter adds one.
+func pricingModelID(model string) string {
+	for _, suffix := range []string{":floor", ":nitro"} {
+		if strings.HasSuffix(strings.ToLower(model), suffix) {
+			return model[:len(model)-len(suffix)]
+		}
+	}
+	return model
+}
+
 // priceServed prices a request served by profile from catalog catalogID. A
 // curated entry prices it only when its owner catalog is the served one. An
 // empty catalogID skips that check.
@@ -842,7 +856,7 @@ func priceServed(registry *modelregistry.Registry, model string, usage zerorunti
 			UnpricedReason: "model registry unavailable",
 		}
 	}
-	entry, err := registry.Require(model)
+	entry, err := registry.Require(pricingModelID(model))
 	if err != nil {
 		return agent.UsageCostEstimate{
 			Status:         agent.CostStatusUnpriced,

@@ -457,6 +457,44 @@ func TestNewCostEstimatorNilRegistry(t *testing.T) {
 	}
 }
 
+func TestPricingModelIDStripsOnlyRoutingSuffixes(t *testing.T) {
+	cases := map[string]string{
+		"deepseek/deepseek-v4.1-flash:floor": "deepseek/deepseek-v4.1-flash",
+		"gpt-4.1:nitro":                      "gpt-4.1",
+		"gpt-4.1:NITRO":                      "gpt-4.1",
+		"gpt-4.1:free":                       "gpt-4.1:free",
+		"gpt-4.1":                            "gpt-4.1",
+	}
+	for model, want := range cases {
+		if got := pricingModelID(model); got != want {
+			t.Fatalf("pricingModelID(%q) = %q, want %q", model, got, want)
+		}
+	}
+}
+
+func TestNewCostEstimatorPricesRoutingSuffixAsBaseModel(t *testing.T) {
+	estimator := newDefaultCostEstimator(t)
+	usage := zeroruntime.Usage{InputTokens: 1_000_000, OutputTokens: 1_000_000}
+
+	base := estimator("gpt-4.1", usage, true)
+	routed := estimator("gpt-4.1:floor", usage, true)
+	if routed.Status != agent.CostStatusPriced || routed.CostUSD == nil || base.CostUSD == nil {
+		t.Fatalf("routed = %+v, base = %+v, want both priced", routed, base)
+	}
+	if *routed.CostUSD != *base.CostUSD || routed.PricingSource != base.PricingSource || routed.PricingAsOf != base.PricingAsOf {
+		t.Fatalf("routed = %+v, want the base model estimate %+v", routed, base)
+	}
+}
+
+func TestNewCostEstimatorDoesNotStripFreeSuffix(t *testing.T) {
+	estimator := newDefaultCostEstimator(t)
+
+	result := estimator("gpt-4.1:free", zeroruntime.Usage{InputTokens: 100, OutputTokens: 50}, true)
+	if result.Status != agent.CostStatusUnpriced || result.CostUSD != nil {
+		t.Fatalf("gpt-4.1:free = %+v, want unpriced (':free' names a different model)", result)
+	}
+}
+
 func newDefaultCostEstimator(t *testing.T) func(string, zeroruntime.Usage, bool) agent.UsageCostEstimate {
 	t.Helper()
 	registry, err := testPricedRegistry(t)
