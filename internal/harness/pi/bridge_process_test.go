@@ -6,13 +6,14 @@ package pi
 // malformed and unknown control input, terminal state, cleanup, and the
 // shipped cancellation control.
 //
-// The tests are optional and local-first. They skip when the bridge binary is
-// not built; run `go build -o splice-pi-bridge ./cmd/splice-pi-bridge` first,
-// or point SPLICE_PI_BRIDGE_BIN at a prebuilt path.
+// The bridge binary is built from the repo source once per test binary run,
+// into a temp directory that TestMain removes. Set SPLICE_PI_BRIDGE_BIN to use
+// a prebuilt binary instead (for example, a -race build).
 
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -28,6 +29,27 @@ import (
 const bridgeBinaryEnv = "SPLICE_PI_BRIDGE_BIN"
 
 const bridgeWatchdog = 60 * time.Second
+
+// bridgeBuildDir holds the bridge binary built by findBridgeBinary. TestMain
+// creates it and removes it after the run.
+var (
+	bridgeBuildDir  string
+	bridgeBuildOnce sync.Once
+	bridgeBuildPath string
+	bridgeBuildErr  error
+)
+
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "splice-pi-bridge-*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "create bridge build dir: %v\n", err)
+		os.Exit(1)
+	}
+	bridgeBuildDir = dir
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
+}
 
 type bridgeProcess struct {
 	cmd      *exec.Cmd
@@ -78,11 +100,30 @@ func findBridgeBinary(t *testing.T) string {
 		}
 		t.Skipf("%s points at %q which does not exist", bridgeBinaryEnv, env)
 	}
-	candidate := filepath.Join(findRepoRoot(t), "splice-pi-bridge")
-	if _, err := os.Stat(candidate); err != nil {
-		t.Skipf("bridge binary %q is not built; run go build -o splice-pi-bridge ./cmd/splice-pi-bridge", candidate)
+	root := findRepoRoot(t)
+	bridgeBuildOnce.Do(func() {
+		bridgeBuildPath, bridgeBuildErr = buildBridge(root, bridgeBuildDir)
+	})
+	if bridgeBuildErr != nil {
+		if testing.Short() {
+			t.Skipf("skipping bridge process test in short mode: %v", bridgeBuildErr)
+		}
+		t.Fatal(bridgeBuildErr)
 	}
-	return candidate
+	return bridgeBuildPath
+}
+
+// buildBridge compiles ./cmd/splice-pi-bridge from the repo root into dir.
+// A failed build returns the compiler output so the test failure shows why.
+func buildBridge(root, dir string) (string, error) {
+	bin := filepath.Join(dir, "splice-pi-bridge")
+	cmd := exec.Command("go", "build", "-o", bin, "./cmd/splice-pi-bridge")
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("build splice-pi-bridge from %s: %w\n%s", root, err, out)
+	}
+	return bin, nil
 }
 
 func startBridge(t *testing.T, env map[string]string, args ...string) *bridgeProcess {
