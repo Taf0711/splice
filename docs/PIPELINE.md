@@ -139,6 +139,10 @@ ran". A pytest run that exits 5 (no tests collected) also records "no tests ran"
 A test command that exits with a code that is not 0 always gives a failed
 entry. This is also true when each reported test passed.
 
+A configured command with `{tests}` or `{test_modules}` does not run when no
+test file applies to the change. The run records that no tests ran, and the
+pass is not verified. See `docs/CONFIGURATION.md` for the naming rules.
+
 ### Acceptance verifier
 
 Each acceptance fact can include a verification command. This stage executes the

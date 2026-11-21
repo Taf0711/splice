@@ -57,15 +57,40 @@ still uses the stage sandbox and the normal command allowlist.
 
 Set `verify.testDir` to a relative directory below the workspace. The default is
 the workspace root. Use `{tests}` or `{test_modules}` as a whole command item.
-Splice replaces these items with changed test files from the current pass.
+Splice replaces these items with the test files for the current pass.
 
 ```json
 {"verify":{"testCommand":["python","tests/runtests.py","{test_modules}"],"testDir":"tests"}}
 ```
 
 `{tests}` uses paths relative to `testDir`. `{test_modules}` drops `.py` and
-changes path separators to dots. Splice removes a placeholder when no test file
-changed in the pass.
+changes path separators to dots.
+
+Splice uses two kinds of test file:
+
+- Each changed test file.
+- Each existing test file that has the name of a changed source file.
+
+Rules for the second kind, for a changed source file `dir/name.ext`:
+
+- Python (`.py`): `dir/tests/test_name.py`, `dir/test_name.py`,
+  `dir/name_test.py`, `dir/tests/name_test.py`, and `tests/test_name.py` at
+  the workspace root (for `src` or `lib` layouts).
+- Go (`.go`): the package directory, for example `./dir`. A changed Go source
+  file or Go test file in `dir` gives `./dir` when `dir/name_test.go` exists.
+  Splice passes the package, not one file, because `go test` cannot build a
+  single test file alone.
+- JavaScript and TypeScript (`.js`, `.jsx`, `.ts`, `.tsx`, `.mjs`, `.cjs`):
+  `dir/name.test.ext`, `dir/name.spec.ext`, `dir/__tests__/name.test.ext`, and
+  `dir/__tests__/name.ext`. The extension is the same as the source file.
+  A file under a `__tests__` directory is a test file.
+
+Each file must lie inside `testDir`. Splice lists the changed test files first,
+then the related files. It passes at most 20 paths. The cap never drops a
+changed test file for a related one.
+
+When no test file applies, the command does not run. The run records that no
+tests ran. The pass is not verified, and Splice does not start a repair.
 
 ## Pipeline wall-time limit
 

@@ -113,7 +113,11 @@ func (b *testBaseline) run(ctx context.Context, options stages.StageOptions, arg
 	stageOpts.TestBaseline = nil
 	stageOpts.WorkDir = baseDir
 	stageOpts.CommandWorkDir = ""
-	stageOpts.Command = baselineArgv(argv, baseDir)
+	baseArgv, ok := baselineArgv(argv, baseDir)
+	if !ok {
+		return schemas.TestRunResults{}, false
+	}
+	stageOpts.Command = baseArgv
 	stageOpts.RunTool = nil
 	stageOpts.RecordCommand = nil
 	if options.Sandbox != nil {
@@ -135,10 +139,14 @@ func (b *testBaseline) run(ctx context.Context, options stages.StageOptions, arg
 // baselineArgv drops the path arguments that dir does not have. A test file
 // that this run added has no baseline failures, so its path must not reach
 // the baseline command. The program name, flags, patterns, and values stay.
-func baselineArgv(argv []string, dir string) []string {
-	out := make([]string, 0, len(argv))
+// ok is false when the command had path arguments and every one was dropped.
+// The bare command would then run the whole suite, so there is no baseline.
+func baselineArgv(argv []string, dir string) (out []string, ok bool) {
+	out = make([]string, 0, len(argv))
+	paths, kept := 0, 0
 	for i, arg := range argv {
 		if i > 0 && isPathArgument(arg) {
+			paths++
 			path := arg
 			if cut := strings.Index(path, "::"); cut >= 0 {
 				path = path[:cut]
@@ -146,10 +154,11 @@ func baselineArgv(argv []string, dir string) []string {
 			if _, err := os.Stat(filepath.Join(dir, path)); err != nil {
 				continue
 			}
+			kept++
 		}
 		out = append(out, arg)
 	}
-	return out
+	return out, paths == 0 || kept > 0
 }
 
 // isPathArgument reports whether arg names a file or directory. Flags and

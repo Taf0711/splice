@@ -198,9 +198,12 @@ func TestExpandConfiguredTestCommandEmptySetAndOutsideDir(t *testing.T) {
 func TestTestRunnerUsesConfiguredCommandAndWorkingDirectory(t *testing.T) {
 	root := t.TempDir()
 	testDir := filepath.Join(root, "tests")
+	writeExpansionFixtures(t, root, "tests/test_x.py")
+	input := newHarnessInput("verify workspace")
+	input.RunChangedFiles = map[string][]string{"code_writer": {"tests/test_x.py"}}
 	var got map[string]any
 	var toolName string
-	output, err := (TestRunner{}).Run(context.Background(), newHarnessInput("verify workspace"), &fakeProvider{}, StageOptions{
+	output, err := (TestRunner{}).Run(context.Background(), input, &fakeProvider{}, StageOptions{
 		WorkDir:        root,
 		Command:        []string{"python", "{tests}"},
 		CommandWorkDir: testDir,
@@ -220,8 +223,8 @@ func TestTestRunnerUsesConfiguredCommandAndWorkingDirectory(t *testing.T) {
 		t.Fatalf("tool = %q, want bash through the existing command path", toolName)
 	}
 	results := output.Data["test_results"].(schemas.TestRunResults)
-	if !equalTestRunnerStrings(results.Command, []string{"python"}) {
-		t.Fatalf("recorded command = %#v, want configured command with empty expansion", results.Command)
+	if !equalTestRunnerStrings(results.Command, []string{"python", "test_x.py"}) {
+		t.Fatalf("recorded command = %#v, want the changed test file relative to the test dir", results.Command)
 	}
 }
 
@@ -1244,5 +1247,419 @@ func TestTestRunnerMarksFailuresOnPassingExitCode(t *testing.T) {
 	}
 	if results.FailedBefore() != 1 || results.Failed() != 0 {
 		t.Fatalf("FailedBefore = %d, Failed = %d; want 1 and 0", results.FailedBefore(), results.Failed())
+	}
+}
+
+// Related test files are found by naming convention. Each case builds the
+// test files that exist, runs the expansion, and checks the argv it returns.
+func TestExpandConfiguredTestCommandRelatedTests(t *testing.T) {
+	cases := []struct {
+		name    string
+		files   []string
+		changed map[string][]string
+		testDir string
+		command []string
+		want    []string
+	}{
+		{
+			name:    "python source finds its test in a tests dir",
+			files:   []string{"sympy/core/tests/test_function.py"},
+			changed: map[string][]string{"code_writer": {"sympy/core/function.py"}},
+			command: []string{"python", "{tests}"},
+			want:    []string{"python", "sympy/core/tests/test_function.py"},
+		},
+		{
+			name: "python source finds every naming convention",
+			files: []string{
+				"pkg/tests/test_mod.py", "pkg/test_mod.py", "pkg/mod_test.py", "pkg/tests/mod_test.py",
+			},
+			changed: map[string][]string{"code_writer": {"pkg/mod.py"}},
+			command: []string{"python", "{tests}"},
+			want: []string{
+				"python", "pkg/mod_test.py", "pkg/test_mod.py", "pkg/tests/mod_test.py", "pkg/tests/test_mod.py",
+			},
+		},
+		{
+			name:    "changed test file and related test file form a union",
+			files:   []string{"tests/test_auth.py", "pkg/test_mod.py"},
+			changed: map[string][]string{"test_generator": {"tests/test_auth.py"}, "code_writer": {"pkg/mod.py"}},
+			command: []string{"python", "{tests}"},
+			want:    []string{"python", "tests/test_auth.py", "pkg/test_mod.py"},
+		},
+		{
+			name:    "go source names its package directory",
+			files:   []string{"pkg/name_test.go"},
+			changed: map[string][]string{"code_writer": {"pkg/name.go"}},
+			command: []string{"go", "test", "{tests}"},
+			want:    []string{"go", "test", "./pkg"},
+		},
+		{
+			name:    "changed go test file names its package directory",
+			files:   []string{"pkg/name_test.go"},
+			changed: map[string][]string{"test_generator": {"pkg/name_test.go"}},
+			command: []string{"go", "test", "{tests}"},
+			want:    []string{"go", "test", "./pkg"},
+		},
+		{
+			name:    "go files in one package give one package argument",
+			files:   []string{"pkg/name_test.go", "pkg/other_test.go"},
+			changed: map[string][]string{"code_writer": {"pkg/name.go", "pkg/other.go"}},
+			command: []string{"go", "test", "{tests}"},
+			want:    []string{"go", "test", "./pkg"},
+		},
+		{
+			name:    "go package at the root is dot",
+			files:   []string{"name_test.go"},
+			changed: map[string][]string{"code_writer": {"name.go"}},
+			command: []string{"go", "test", "{tests}"},
+			want:    []string{"go", "test", "."},
+		},
+		{
+			name:    "ts source finds same-extension test files",
+			files:   []string{"web/app.test.tsx", "web/app.spec.tsx", "web/__tests__/app.tsx", "web/app.test.js"},
+			changed: map[string][]string{"code_writer": {"web/app.tsx"}},
+			command: []string{"npx", "jest", "{tests}"},
+			want: []string{
+				"npx", "jest", "web/__tests__/app.tsx", "web/app.spec.tsx", "web/app.test.tsx",
+			},
+		},
+		{
+			name:    "test_modules maps the same related list",
+			files:   []string{"sympy/core/tests/test_function.py"},
+			changed: map[string][]string{"code_writer": {"sympy/core/function.py"}},
+			command: []string{"python", "{test_modules}"},
+			want:    []string{"python", "sympy.core.tests.test_function"},
+		},
+		{
+			name:    "related path that does not exist is not added",
+			files:   []string{"pkg/tests/test_other.py"},
+			changed: map[string][]string{"code_writer": {"pkg/mod.py"}},
+			command: []string{"python", "{tests}"},
+			want:    []string{"python"},
+		},
+		{
+			name:    "related test outside the test dir is not added",
+			files:   []string{"pkg/test_mod.py"},
+			changed: map[string][]string{"code_writer": {"pkg/mod.py"}},
+			testDir: "tests",
+			command: []string{"python", "{tests}"},
+			want:    []string{"python"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			fixtures := append([]string(nil), tc.files...)
+			for _, list := range tc.changed {
+				fixtures = append(fixtures, list...)
+			}
+			writeExpansionFixtures(t, root, fixtures...)
+			testDir := root
+			if tc.testDir != "" {
+				testDir = filepath.Join(root, tc.testDir)
+			}
+			got, err := expandConfiguredTestCommand(tc.command, tc.changed, root, testDir)
+			if err != nil {
+				t.Fatalf("expandConfiguredTestCommand: %v", err)
+			}
+			if !equalTestRunnerStrings(got, tc.want) {
+				t.Fatalf("expanded command = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
+// The related list holds at most 20 paths, in sorted order.
+func TestExpandConfiguredTestCommandCapsRelatedTests(t *testing.T) {
+	root := t.TempDir()
+	changed := map[string][]string{"code_writer": {}}
+	var tests []string
+	for i := 0; i < 25; i++ {
+		src := fmt.Sprintf("pkg/m%02d.py", i)
+		tests = append(tests, fmt.Sprintf("pkg/test_m%02d.py", i))
+		changed["code_writer"] = append(changed["code_writer"], src)
+	}
+	writeExpansionFixtures(t, root, append(tests, changed["code_writer"]...)...)
+	got, err := expandConfiguredTestCommand([]string{"python", "{tests}"}, changed, root, root)
+	if err != nil {
+		t.Fatalf("expandConfiguredTestCommand: %v", err)
+	}
+	want := []string{"python"}
+	for i := 0; i < 20; i++ {
+		want = append(want, fmt.Sprintf("pkg/test_m%02d.py", i))
+	}
+	if !equalTestRunnerStrings(got, want) {
+		t.Fatalf("expanded command = %#v, want the first 20 sorted paths", got)
+	}
+}
+
+// A changed README with a {tests} command must not run the command. The
+// run records no tests ran and no evidence, and it names the placeholder.
+func TestTestRunnerSkipsConfiguredCommandWithoutRelatedTests(t *testing.T) {
+	cases := []struct {
+		name        string
+		command     []string
+		placeholder string
+	}{
+		{name: "tests", command: []string{"python", "-m", "pytest", "-q", "{tests}"}, placeholder: "{tests}"},
+		{name: "test_modules", command: []string{"python", "-m", "unittest", "{test_modules}"}, placeholder: "{test_modules}"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeExpansionFixtures(t, root, "README.md")
+			calls := 0
+			input := newHarnessInput("update the docs")
+			input.RunChangedFiles = map[string][]string{"code_writer": {"README.md"}}
+			var reported []string
+			out, err := (TestRunner{}).Run(context.Background(), input, &fakeProvider{}, StageOptions{
+				WorkDir:        root,
+				Command:        tc.command,
+				CommandWorkDir: root,
+				ReportActivity: func(message string) { reported = append(reported, message) },
+				RunTool: func(context.Context, string, map[string]any) (ToolResult, error) {
+					calls++
+					return ToolResult{OK: true, Output: "1 passed"}, nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("stage run: %v", err)
+			}
+			if calls != 0 {
+				t.Fatalf("configured command ran %d time(s), want 0", calls)
+			}
+			results, ok := out.Data["test_results"].(schemas.TestRunResults)
+			if !ok {
+				t.Fatalf("test_results = %#v, want schemas.TestRunResults", out.Data["test_results"])
+			}
+			if results.Evidence != schemas.TestEvidenceNone {
+				t.Errorf("evidence = %q, want %q", results.Evidence, schemas.TestEvidenceNone)
+			}
+			if results.Passed() != 0 || results.Failed() != 0 {
+				t.Errorf("passed, failed = %d, %d; want 0, 0 (a failure would start a repair)", results.Passed(), results.Failed())
+			}
+			if len(results.Tests) != 1 || results.Tests[0].Status != "skipped" || results.Tests[0].Message != "no tests ran" {
+				t.Errorf("tests = %+v, want one skipped suite entry with message %q", results.Tests, "no tests ran")
+			}
+			want := fmt.Sprintf("No test file matches the change, so the configured test command did not run (it uses %s).", tc.placeholder)
+			if out.Summary != want || out.Detail != want {
+				t.Errorf("summary = %q, detail = %q; want %q", out.Summary, out.Detail, want)
+			}
+			if out.Confidence != 0 {
+				t.Errorf("confidence = %v, want 0", out.Confidence)
+			}
+			if !slices.Contains(reported, want) {
+				t.Errorf("progress reports = %q, want the no-match summary %q", reported, want)
+			}
+			if err := results.Validate(); err != nil {
+				t.Errorf("results do not validate: %v", err)
+			}
+		})
+	}
+}
+
+// A command without placeholders is not changed by the no-match rule. It runs.
+func TestTestRunnerRunsCommandWithoutPlaceholdersWhenNoTestChanged(t *testing.T) {
+	root := t.TempDir()
+	writeExpansionFixtures(t, root, "README.md")
+	calls := 0
+	var gotCommand string
+	input := newHarnessInput("update the docs")
+	input.RunChangedFiles = map[string][]string{"code_writer": {"README.md"}}
+	out, err := (TestRunner{}).Run(context.Background(), input, &fakeProvider{}, StageOptions{
+		WorkDir:        root,
+		Command:        []string{"python", "-m", "pytest", "-q"},
+		CommandWorkDir: root,
+		RunTool: func(_ context.Context, _ string, args map[string]any) (ToolResult, error) {
+			calls++
+			gotCommand, _ = args["command"].(string)
+			return ToolResult{OK: true, Output: "ok"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("stage run: %v", err)
+	}
+	if calls != 1 || !strings.Contains(gotCommand, "'-q'") {
+		t.Fatalf("calls = %d, command = %q; want the command to run once", calls, gotCommand)
+	}
+	if got, _ := out.Data["test_command"].([]string); !equalTestRunnerStrings(got, []string{"python", "-m", "pytest", "-q"}) {
+		t.Fatalf("test_command = %#v, want the configured argv", out.Data["test_command"])
+	}
+}
+
+// A related test file reaches the command that runs and the argv that the
+// results and the pre-run baseline record.
+func TestTestRunnerRunsRelatedTestFile(t *testing.T) {
+	root := t.TempDir()
+	writeExpansionFixtures(t, root, "sympy/core/function.py", "sympy/core/tests/test_function.py")
+	calls := 0
+	var gotCommand string
+	input := newHarnessInput("fix the function")
+	input.RunChangedFiles = map[string][]string{"code_writer": {"sympy/core/function.py"}}
+	out, err := (TestRunner{}).Run(context.Background(), input, &fakeProvider{}, StageOptions{
+		WorkDir:        root,
+		Command:        []string{"python", "-m", "pytest", "-q", "{tests}"},
+		CommandWorkDir: root,
+		RunTool: func(_ context.Context, _ string, args map[string]any) (ToolResult, error) {
+			calls++
+			gotCommand, _ = args["command"].(string)
+			return ToolResult{OK: true, Output: "ok"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("stage run: %v", err)
+	}
+	const path = "sympy/core/tests/test_function.py"
+	if calls != 1 || !strings.Contains(gotCommand, path) {
+		t.Fatalf("calls = %d, command = %q; want one run that names %s", calls, gotCommand, path)
+	}
+	got, _ := out.Data["test_command"].([]string)
+	if !slices.Contains(got, path) {
+		t.Fatalf("test_command = %#v, want it to name %s", got, path)
+	}
+}
+
+// Changed test files come before related files, so the cap never drops a
+// changed test file in favor of a related one.
+func TestExpandConfiguredTestCommandChangedFilesSurviveCap(t *testing.T) {
+	root := t.TempDir()
+	var sources, related []string
+	for i := 0; i < 25; i++ {
+		sources = append(sources, fmt.Sprintf("pkg/m%02d.py", i))
+		related = append(related, fmt.Sprintf("pkg/test_m%02d.py", i))
+	}
+	changedTests := []string{"tests/test_zz_one.py", "tests/test_zz_two.py"}
+	writeExpansionFixtures(t, root, append(append(append([]string(nil), sources...), related...), changedTests...)...)
+	changed := map[string][]string{"code_writer": sources, "test_generator": changedTests}
+	got, err := expandConfiguredTestCommand([]string{"python", "{tests}"}, changed, root, root)
+	if err != nil {
+		t.Fatalf("expandConfiguredTestCommand: %v", err)
+	}
+	want := []string{"python", "tests/test_zz_one.py", "tests/test_zz_two.py"}
+	for i := 0; i < 18; i++ {
+		want = append(want, fmt.Sprintf("pkg/test_m%02d.py", i))
+	}
+	if !equalTestRunnerStrings(got, want) {
+		t.Fatalf("expanded command = %#v, want both changed test files first, then 18 related", got)
+	}
+}
+
+// When the changed test files alone exceed the cap, the first 20 sorted
+// changed files win and no related file is added.
+func TestExpandConfiguredTestCommandCapKeepsFirstChangedFiles(t *testing.T) {
+	root := t.TempDir()
+	var changedTests []string
+	for i := 0; i < 22; i++ {
+		changedTests = append(changedTests, fmt.Sprintf("tests/test_c%02d.py", i))
+	}
+	writeExpansionFixtures(t, root, append([]string{"pkg/mod.py", "pkg/test_mod.py"}, changedTests...)...)
+	changed := map[string][]string{"test_generator": changedTests, "code_writer": {"pkg/mod.py"}}
+	got, err := expandConfiguredTestCommand([]string{"python", "{tests}"}, changed, root, root)
+	if err != nil {
+		t.Fatalf("expandConfiguredTestCommand: %v", err)
+	}
+	want := []string{"python"}
+	for i := 0; i < 20; i++ {
+		want = append(want, fmt.Sprintf("tests/test_c%02d.py", i))
+	}
+	if !equalTestRunnerStrings(got, want) {
+		t.Fatalf("expanded command = %#v, want the first 20 changed test files", got)
+	}
+}
+
+// go test on a single _test.go file cannot build its package. A changed Go
+// source file must run its whole package, and this test runs the real
+// command in a temporary module, so it fails when the argument is not a
+// buildable package.
+func TestTestRunnerGoTestPackageRunsForRealModule(t *testing.T) {
+	backend := sandbox.SelectBackend(sandbox.BackendOptions{})
+	if !backend.Available {
+		t.Skipf("host native sandbox backend unavailable: %s", backend.Message)
+	}
+	root := t.TempDir()
+	writeExpansionFixtures(t, root, "pkg/add.go", "pkg/add_test.go")
+	writeTestRunnerFixture(t, filepath.Join(root, "go.mod"), "module example.com/fixture\n\ngo 1.25\n")
+	writeTestRunnerFixture(t, filepath.Join(root, "pkg", "add.go"), "package pkg\n\nfunc Add(a, b int) int { return a + b }\n")
+	writeTestRunnerFixture(t, filepath.Join(root, "pkg", "add_test.go"), "package pkg\n\nimport \"testing\"\n\nfunc TestAdd(t *testing.T) {\n\tif Add(1, 2) != 3 {\n\t\tt.Fatal(\"bad sum\")\n\t}\n}\n")
+	input := newHarnessInput("add a helper")
+	input.RunChangedFiles = map[string][]string{"code_writer": {"pkg/add.go"}}
+	out, err := (TestRunner{}).Run(context.Background(), input, &fakeProvider{}, StageOptions{
+		WorkDir:        root,
+		Command:        []string{"go", "test", "{tests}"},
+		CommandWorkDir: root,
+		TimeoutSeconds: 300,
+		Sandbox:        procrun.NewStageEngine(root),
+	})
+	if err != nil {
+		t.Fatalf("stage run: %v", err)
+	}
+	results := out.Data["test_results"].(schemas.TestRunResults)
+	if results.ExitCode != 0 || results.Failed() != 0 || results.Passed() != 1 {
+		t.Fatalf("exit = %d, passed = %d, failed = %d, want exit 0 and one passed test; output: %s %s",
+			results.ExitCode, results.Passed(), results.Failed(), results.Stdout, results.Stderr)
+	}
+}
+
+// A src or lib layout keeps its tests in a tests directory at the workspace
+// root. A changed source file finds tests/test_<name>.py there.
+func TestExpandConfiguredTestCommandPythonRootTestsDir(t *testing.T) {
+	root := t.TempDir()
+	writeExpansionFixtures(t, root, "src/pkg/mod.py", "tests/test_mod.py")
+	got, err := expandConfiguredTestCommand([]string{"python", "{tests}"}, map[string][]string{
+		"code_writer": {"src/pkg/mod.py"},
+	}, root, root)
+	if err != nil {
+		t.Fatalf("expandConfiguredTestCommand: %v", err)
+	}
+	if !equalTestRunnerStrings(got, []string{"python", "tests/test_mod.py"}) {
+		t.Fatalf("expanded command = %#v, want the root tests dir file", got)
+	}
+}
+
+// A changed Jest test under __tests__ is a test file, even without a .test.
+// or .spec. name. It must reach the command.
+func TestExpandConfiguredTestCommandChangedJestTestsDirFile(t *testing.T) {
+	root := t.TempDir()
+	writeExpansionFixtures(t, root, "web/__tests__/helper.js", "web/__tests__/setup.ts")
+	got, err := expandConfiguredTestCommand([]string{"npx", "jest", "{tests}"}, map[string][]string{
+		"test_generator": {"web/__tests__/helper.js", "web/__tests__/setup.ts"},
+	}, root, root)
+	if err != nil {
+		t.Fatalf("expandConfiguredTestCommand: %v", err)
+	}
+	if !equalTestRunnerStrings(got, []string{"npx", "jest", "web/__tests__/helper.js", "web/__tests__/setup.ts"}) {
+		t.Fatalf("expanded command = %#v, want both changed __tests__ files", got)
+	}
+}
+
+// A TypeScript source finds the test under __tests__ that keeps the name.test
+// form, and it does not find a test of another extension.
+func TestExpandConfiguredTestCommandJestTestsDirCandidate(t *testing.T) {
+	root := t.TempDir()
+	writeExpansionFixtures(t, root, "web/app.tsx", "web/__tests__/app.test.tsx", "web/__tests__/app.test.js")
+	got, err := expandConfiguredTestCommand([]string{"npx", "jest", "{tests}"}, map[string][]string{
+		"code_writer": {"web/app.tsx"},
+	}, root, root)
+	if err != nil {
+		t.Fatalf("expandConfiguredTestCommand: %v", err)
+	}
+	if !equalTestRunnerStrings(got, []string{"npx", "jest", "web/__tests__/app.test.tsx"}) {
+		t.Fatalf("expanded command = %#v, want only the same-extension __tests__ test", got)
+	}
+}
+
+// A changed test file is never a source for related tests. Its own name
+// would otherwise find a test that the change did not touch.
+func TestExpandConfiguredTestCommandChangedTestIsNotRelatedSource(t *testing.T) {
+	root := t.TempDir()
+	writeExpansionFixtures(t, root, "pkg/mod_test.py", "pkg/test_mod_test.py")
+	got, err := expandConfiguredTestCommand([]string{"python", "{tests}"}, map[string][]string{
+		"test_generator": {"pkg/mod_test.py"},
+	}, root, root)
+	if err != nil {
+		t.Fatalf("expandConfiguredTestCommand: %v", err)
+	}
+	if !equalTestRunnerStrings(got, []string{"python", "pkg/mod_test.py"}) {
+		t.Fatalf("expanded command = %#v, want only the changed test file", got)
 	}
 }

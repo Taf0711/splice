@@ -2458,6 +2458,40 @@ func pytestFixtureTestRun(t *testing.T) schemas.HarnessStageOutput {
 	return out
 }
 
+// unmatchedConfiguredTestsRun runs a {tests} command for a change with no
+// matching test file. The command must not run, and the stage output must
+// record that no tests ran.
+func unmatchedConfiguredTestsRun(t *testing.T) schemas.HarnessStageOutput {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("docs\n"), 0o600); err != nil {
+		t.Fatalf("setup: write README: %v", err)
+	}
+	input := schemas.HarnessStageInput{RunChangedFiles: map[string][]string{"code_writer": {"README.md"}}}
+	out, err := (stages.TestRunner{}).Run(context.Background(), input, nil, stages.StageOptions{
+		WorkDir:        root,
+		Command:        []string{"python", "-m", "pytest", "-q", "{tests}"},
+		CommandWorkDir: root,
+		RunTool: func(context.Context, string, map[string]any) (stages.ToolResult, error) {
+			t.Fatal("configured test command ran with no matching test file")
+			return stages.ToolResult{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("setup: stage run: %v", err)
+	}
+	return out
+}
+
+// The receipt reads "Tests: no tests ran" for an unmatched configured command.
+func TestUnmatchedConfiguredTestsCheckRecordsNoTests(t *testing.T) {
+	results := unmatchedConfiguredTestsRun(t).Data["test_results"].(schemas.TestRunResults)
+	outcome, detail := testsCheckOutcome(results)
+	if outcome != schemas.CheckNoTests || detail != "no tests ran" {
+		t.Fatalf("outcome = %q, detail = %q; want no_tests and %q", outcome, detail, "no tests ran")
+	}
+}
+
 // TestPassVerificationRules pins which records and reports verify a pass, and
 // the outcome each pass gets.
 func TestPassVerificationRules(t *testing.T) {
@@ -2485,6 +2519,7 @@ func TestPassVerificationRules(t *testing.T) {
 	// A real pytest run: the fixture goes through the test runner stage, so
 	// the parser builds the results that passVerification reads.
 	pytestRun := pytestFixtureTestRun(t)
+	unmatchedTests := unmatchedConfiguredTestsRun(t)
 	const (
 		verified      = schemas.VerificationOutcomeVerified
 		unverified    = schemas.VerificationOutcomeUnverified
@@ -2506,6 +2541,7 @@ func TestPassVerificationRules(t *testing.T) {
 		{name: "failed tests beat passed tests in another run", outputs: []schemas.HarnessStageOutput{ranTests, failedTests}, wantOutcome: unverified, wantReason: "tests failed"},
 		{name: "skipped check names the stage", records: []schemas.StageRecord{skipped}, wantOutcome: unverified, wantReason: "no check applied: static_analyzer (No applicable files to verify.)"},
 		{name: "no tests ran", outputs: []schemas.HarnessStageOutput{noTests}, wantOutcome: unverified, wantReason: "no check applied: tests (no tests ran)"},
+		{name: "unmatched configured test command never verifies", outputs: []schemas.HarnessStageOutput{unmatchedTests}, wantOutcome: unverified, wantReason: "no check applied: tests (no tests ran)"},
 		{name: "zero go tests ran", outputs: []schemas.HarnessStageOutput{zeroGoTests}, wantOutcome: unverified, wantReason: "no check applied: tests (no tests ran)"},
 		{name: "command only alone is command_passed", outputs: []schemas.HarnessStageOutput{commandOnly}, wantOutcome: commandPassed, wantReason: "test command passed; per-test evidence unavailable"},
 		{name: "command only with a skipped check keeps the command reason", records: []schemas.StageRecord{skipped}, outputs: []schemas.HarnessStageOutput{commandOnly}, wantOutcome: commandPassed, wantReason: "test command passed; per-test evidence unavailable"},

@@ -343,9 +343,9 @@ func TestBaselineArgvDropsMissingPathsOnly(t *testing.T) {
 	dir := t.TempDir()
 	writeBaselineFile(t, dir, "tests/test_old.py", "def test_a():\n    pass\n")
 	argv := []string{"./bin/missing", "-k", "fast or slow", "tests/test_old.py", "tests/test_new.py", "tests/test_old.py::test_a", "tests/test_new.py::test_b", "other_new.py", "./..."}
-	got := baselineArgv(argv, dir)
+	got, ok := baselineArgv(argv, dir)
 	want := []string{"./bin/missing", "-k", "fast or slow", "tests/test_old.py", "tests/test_old.py::test_a", "./..."}
-	if strings.Join(got, "|") != strings.Join(want, "|") {
+	if !ok || strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("baselineArgv = %q, want %q", got, want)
 	}
 }
@@ -552,5 +552,29 @@ func TestRunCapturesPreRunBaseline(t *testing.T) {
 	}, nil, nil)
 	if joined := strings.Join(reasoning, ""); !strings.Contains(joined, "pre-run state unavailable") {
 		t.Fatalf("the run must capture the pre-run baseline and report it, progress was:\n%s", joined)
+	}
+}
+
+// When every path argument is new, the baseline must not run the bare command.
+// That command would run the whole suite. No baseline means every failure is
+// new. A command without path arguments still gets a baseline.
+func TestBaselineNoAnswerWhenEveryPathIsNew(t *testing.T) {
+	dir := baselineRepo(t, map[string]string{"add.go": fixtureAdd, "add_test.go": fixtureAddTest})
+	b := captureTestBaseline(context.Background(), dir, func(string) {})
+	calls := 0
+	runBaselineStage = func(ctx context.Context, input schemas.HarnessStageInput, opts stages.StageOptions) (schemas.HarnessStageOutput, error) {
+		calls++
+		return schemas.HarnessStageOutput{}, fmt.Errorf("stage must not run")
+	}
+	defer func() { runBaselineStage = defaultBaselineStage }()
+	if _, ok := b.Results(context.Background(), stages.StageOptions{TimeoutSeconds: 120}, []string{"python", "-m", "pytest", "-q", "tests/test_new.py"}, dir); ok {
+		t.Fatal("baseline answered for a command whose only path is new")
+	}
+	if calls != 0 {
+		t.Fatalf("baseline stage ran %d time(s) for a command whose only path is new, want 0", calls)
+	}
+	b.Results(context.Background(), stages.StageOptions{TimeoutSeconds: 120}, []string{"go", "test", "./..."}, dir)
+	if calls != 1 {
+		t.Fatalf("baseline stage ran %d time(s) for a command without path arguments, want 1", calls)
 	}
 }

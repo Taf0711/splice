@@ -7,8 +7,10 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -38,9 +40,15 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 	if len(cmd) > 0 && options.CommandWorkDir != "" {
 		commandWorkDir = options.CommandWorkDir
 		var err error
+		configured := cmd
 		cmd, err = expandConfiguredTestCommand(cmd, input.RunChangedFiles, options.WorkDir, commandWorkDir)
 		if err != nil {
 			return schemas.HarnessStageOutput{}, err
+		}
+		if !expandsToTests(configured, cmd) {
+			output := unmatchedTestOutput(configured)
+			options.report(output.Detail)
+			return output, nil
 		}
 	}
 	if len(cmd) == 0 && !configuredCommand {
@@ -363,8 +371,11 @@ func alreadyFailingNote(results schemas.TestRunResults) string {
 	return fmt.Sprintf("%d test(s) already failing before this run (not caused by it): %s", n, list)
 }
 
+// maxConfiguredTestPaths caps the paths that the test placeholders expand to.
+const maxConfiguredTestPaths = 20
+
 // expandConfiguredTestCommand expands whole-argument placeholders from the
-// files changed by earlier write stages in this run.
+// test files for this run. See configuredTestPaths for the selection.
 func expandConfiguredTestCommand(command []string, changedByStage map[string][]string, workspaceRoot, testDir string) ([]string, error) {
 	if testDir == "" {
 		testDir = workspaceRoot
@@ -382,13 +393,12 @@ func expandConfiguredTestCommand(command []string, changedByStage map[string][]s
 		return nil, fmt.Errorf("verify test directory %q is outside workspace %q", testDir, workspaceRoot)
 	}
 
-	paths := changedTestFiles(changedByStage, root, base)
+	paths := configuredTestPaths(changedByStage, root, base)
 	tests := make([]string, len(paths))
 	modules := make([]string, len(paths))
-	for i, path := range paths {
-		tests[i] = path
-		modules[i] = strings.TrimSuffix(path, ".py")
-		modules[i] = strings.ReplaceAll(modules[i], "/", ".")
+	for i, file := range paths {
+		tests[i] = file
+		modules[i] = moduleArg(file)
 	}
 
 	expanded := make([]string, 0, len(command)+len(paths))
@@ -405,14 +415,83 @@ func expandConfiguredTestCommand(command []string, changedByStage map[string][]s
 	return expanded, nil
 }
 
-func changedTestFiles(changedByStage map[string][]string, workspaceRoot, testDir string) []string {
+// expandsToTests reports whether a command with a test placeholder still has
+// test paths after expansion. A command without a placeholder always does.
+func expandsToTests(configured, expanded []string) bool {
+	placeholders := 0
+	for _, arg := range configured {
+		if arg == "{tests}" || arg == "{test_modules}" {
+			placeholders++
+		}
+	}
+	return placeholders == 0 || len(expanded) > len(configured)-placeholders
+}
+
+// unmatchedTestOutput is the result of a configured test command that does not
+// run because no test file matches the change. It records no evidence and no
+// tests ran, so the pass is not verified and no repair starts.
+func unmatchedTestOutput(command []string) schemas.HarnessStageOutput {
+	placeholder := "{test_modules}"
+	if slices.Contains(command, "{tests}") {
+		placeholder = "{tests}"
+	}
+	summary := fmt.Sprintf("No test file matches the change, so the configured test command did not run (it uses %s).", placeholder)
+	results := schemas.TestRunResults{
+		Command:  append([]string(nil), command...),
+		Evidence: schemas.TestEvidenceNone,
+		Tests: []schemas.TestCaseResult{{
+			Name:    "suite",
+			Status:  "skipped",
+			Message: "no tests ran",
+		}},
+	}
+	return schemas.HarnessStageOutput{
+		Summary:    summary,
+		Detail:     summary,
+		Confidence: 0.0,
+		Data: map[string]any{
+			"test_results":      results,
+			"test_command":      nil,
+			"known_limitations": []string{summary},
+		},
+	}
+}
+
+// configuredTestPaths lists the changed test files (sorted), then the existing
+// test files that match a changed source file by naming convention (sorted).
+// Duplicates are dropped, and the list is capped at maxConfiguredTestPaths, so
+// the cap never drops a changed test file for a related one.
+func configuredTestPaths(changedByStage map[string][]string, workspaceRoot, testDir string) []string {
+	seen := map[string]bool{}
+	paths := make([]string, 0)
+	for _, group := range [][]string{
+		changedTestFiles(changedByStage, workspaceRoot, testDir),
+		relatedTestFiles(changedByStage, workspaceRoot, testDir),
+	} {
+		for _, file := range group {
+			if seen[file] {
+				continue
+			}
+			seen[file] = true
+			paths = append(paths, file)
+		}
+	}
+	if len(paths) > maxConfiguredTestPaths {
+		paths = paths[:maxConfiguredTestPaths]
+	}
+	return paths
+}
+
+// changedWorkspaceFiles returns the changed files that exist as regular files
+// inside the workspace, as slash paths relative to it. Each file appears once.
+func changedWorkspaceFiles(changedByStage map[string][]string, workspaceRoot string) []string {
 	stageNames := make([]string, 0, len(changedByStage))
 	for stage := range changedByStage {
 		stageNames = append(stageNames, stage)
 	}
 	sort.Strings(stageNames)
 	seen := map[string]bool{}
-	paths := make([]string, 0)
+	files := make([]string, 0)
 	for _, stage := range stageNames {
 		for _, changed := range changedByStage[stage] {
 			relPath := filepath.ToSlash(filepath.Clean(changed))
@@ -424,20 +503,120 @@ func changedTestFiles(changedByStage map[string][]string, workspaceRoot, testDir
 			if info, serr := os.Stat(absolute); serr != nil || !info.Mode().IsRegular() {
 				continue
 			}
-			relToTestDir, err := filepath.Rel(testDir, absolute)
-			if err != nil || relToTestDir == ".." || strings.HasPrefix(relToTestDir, ".."+string(filepath.Separator)) {
+			if seen[relPath] {
 				continue
 			}
-			relToTestDir = filepath.ToSlash(relToTestDir)
-			if !isTestFilePath(relPath) || seen[relToTestDir] {
+			seen[relPath] = true
+			files = append(files, relPath)
+		}
+	}
+	return files
+}
+
+// insideTestDir returns the slash path of absolute relative to testDir. ok is
+// false when absolute lies outside testDir.
+func insideTestDir(testDir, absolute string) (string, bool) {
+	rel, err := filepath.Rel(testDir, absolute)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return filepath.ToSlash(rel), true
+}
+
+func changedTestFiles(changedByStage map[string][]string, workspaceRoot, testDir string) []string {
+	paths := make([]string, 0)
+	for _, relPath := range changedWorkspaceFiles(changedByStage, workspaceRoot) {
+		if !isTestFilePath(relPath) {
+			continue
+		}
+		relToTestDir, ok := insideTestDir(testDir, filepath.Join(workspaceRoot, filepath.FromSlash(relPath)))
+		if !ok {
+			continue
+		}
+		paths = append(paths, testArg(relToTestDir))
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+// testArg is the command argument for one test file, relative to testDir. A Go
+// file names its package directory: go test on a single _test.go file cannot
+// build the package, because the package sources are missing from the build.
+func testArg(relToTestDir string) string {
+	if path.Ext(relToTestDir) != ".go" {
+		return relToTestDir
+	}
+	dir := path.Dir(relToTestDir)
+	if dir == "." {
+		return "."
+	}
+	return "./" + dir
+}
+
+// moduleArg is the {test_modules} form of one argument. A Python file becomes
+// a dotted module name. A Go package argument stays as it is.
+func moduleArg(arg string) string {
+	if arg == "." || strings.HasPrefix(arg, "./") {
+		return arg
+	}
+	module := strings.TrimSuffix(arg, ".py")
+	return strings.ReplaceAll(module, "/", ".")
+}
+
+// relatedTestFiles returns the existing test files that match a changed source
+// file by naming convention. Each candidate must be a regular file inside
+// testDir.
+func relatedTestFiles(changedByStage map[string][]string, workspaceRoot, testDir string) []string {
+	seen := map[string]bool{}
+	paths := make([]string, 0)
+	for _, relPath := range changedWorkspaceFiles(changedByStage, workspaceRoot) {
+		if isTestFilePath(relPath) {
+			continue
+		}
+		for _, candidate := range relatedTestCandidates(relPath) {
+			absolute := filepath.Join(workspaceRoot, filepath.FromSlash(candidate))
+			if info, err := os.Stat(absolute); err != nil || !info.Mode().IsRegular() {
+				continue
+			}
+			relToTestDir, ok := insideTestDir(testDir, absolute)
+			if !ok || seen[relToTestDir] {
 				continue
 			}
 			seen[relToTestDir] = true
-			paths = append(paths, relToTestDir)
+			paths = append(paths, testArg(relToTestDir))
 		}
 	}
 	sort.Strings(paths)
 	return paths
+}
+
+// relatedTestCandidates lists the test paths that the naming convention gives
+// for one source file, as slash paths. An unknown extension has none.
+func relatedTestCandidates(relPath string) []string {
+	dir, base := path.Split(relPath)
+	ext := path.Ext(base)
+	name := strings.TrimSuffix(base, ext)
+	switch ext {
+	case ".py":
+		return []string{
+			path.Join(dir, "tests", "test_"+name+".py"),
+			path.Join(dir, "test_"+name+".py"),
+			path.Join(dir, name+"_test.py"),
+			path.Join(dir, "tests", name+"_test.py"),
+			// A src or lib layout keeps its tests at the workspace root.
+			path.Join("tests", "test_"+name+".py"),
+		}
+	case ".go":
+		return []string{path.Join(dir, name+"_test.go")}
+	case ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs":
+		return []string{
+			path.Join(dir, name+".test"+ext),
+			path.Join(dir, name+".spec"+ext),
+			path.Join(dir, "__tests__", name+".test"+ext),
+			path.Join(dir, "__tests__", name+ext),
+		}
+	}
+	return nil
 }
 
 func isTestFilePath(path string) bool {
@@ -457,8 +636,24 @@ func isTestFilePath(path string) bool {
 		}
 	case strings.Contains(base, ".test.") || strings.Contains(base, ".spec."):
 		return true
+	case isJSSourceExt(base) && hasPathPart(path, "__tests__"):
+		return true
 	}
 	return false
+}
+
+// isJSSourceExt reports whether base has a JavaScript or TypeScript extension.
+func isJSSourceExt(base string) bool {
+	switch path.Ext(base) {
+	case ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs":
+		return true
+	}
+	return false
+}
+
+// hasPathPart reports whether one segment of the slash path equals part.
+func hasPathPart(slashPath, part string) bool {
+	return slices.Contains(strings.Split(slashPath, "/"), part)
 }
 
 func testCommand(workDir string, language string) ([]string, error) {
