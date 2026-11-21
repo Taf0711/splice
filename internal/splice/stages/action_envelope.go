@@ -173,6 +173,7 @@ func decodeContextRequestAction(toolName, args string, raw json.RawMessage) (Sta
 	if err := json.Unmarshal(raw, &request); err != nil {
 		return StageAction{}, fmt.Errorf("parse %s request_context: %w", toolName, err)
 	}
+	request = clampActionContextRequest(request)
 	if err := ValidateActionContextRequest(request); err != nil {
 		return StageAction{}, err
 	}
@@ -232,6 +233,40 @@ func ValidateActionContextRequest(request schemas.ContextRequest) error {
 		return err
 	}
 	return nil
+}
+
+// clampActionContextRequest scales each query's MaxChars down so the summed
+// budget fits maxActionContextBytes. Proportions are kept. No query drops
+// below the schema minimum of 1 character. If the scaled request still does
+// not fit, or a query has a non-positive MaxChars, the request returns
+// unchanged so ValidateActionContextRequest reports the error.
+func clampActionContextRequest(request schemas.ContextRequest) schemas.ContextRequest {
+	total := 0
+	for _, q := range request.Queries {
+		if q.MaxChars < 1 {
+			return request
+		}
+		total += q.MaxChars
+	}
+	if total <= maxActionContextBytes {
+		return request
+	}
+	scaled := make([]schemas.ContextQuery, len(request.Queries))
+	sum := 0
+	for i, q := range request.Queries {
+		v := int(int64(q.MaxChars) * maxActionContextBytes / int64(total))
+		if v < 1 {
+			v = 1
+		}
+		q.MaxChars = v
+		scaled[i] = q
+		sum += v
+	}
+	if sum > maxActionContextBytes {
+		return request
+	}
+	request.Queries = scaled
+	return request
 }
 
 // TryDecodeStageAction is the non-allocating probe used by the typed
@@ -327,6 +362,7 @@ func TryDecodeStageActionFromTools(collected *zeroruntime.CollectedStream, submi
 		if err := json.Unmarshal([]byte(stripped), &request); err != nil {
 			return StageAction{}, fmt.Errorf("parse %s request_context: %w", contextToolName, err)
 		}
+		request = clampActionContextRequest(request)
 		if err := ValidateActionContextRequest(request); err != nil {
 			return StageAction{}, err
 		}

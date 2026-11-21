@@ -1,12 +1,15 @@
 package splice
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/splice/schemas"
+	"github.com/Taf0711/splice/internal/splice/stages"
 )
 
 // oversizedMemoryBundle returns a memory bundle whose payload dwarfs the
@@ -189,5 +192,37 @@ func TestNoCompactionUnderAllowance(t *testing.T) {
 	}
 	if got.RunID != input.RunID || got.StageName != input.StageName {
 		t.Fatal("pass-through mutated the input identity")
+	}
+}
+
+// TestModelFreeStageSkipsInputBudget pins that a model-free stage makes no
+// provider call and so is not held to the input token allowance. The same
+// oversized required intent fails for a model stage with the same budget.
+func TestModelFreeStageSkipsInputBudget(t *testing.T) {
+	intent := strings.Repeat("verify the session list endpoint. ", 250) // ~8000 chars
+	prep := func(caps stages.Capabilities) stageInputPreparation {
+		input := compactTestInput()
+		input.StageName = "static_analyzer"
+		input.RequestIntent = intent
+		return stageInputPreparation{
+			Input:   input,
+			Stage:   &capturingStage{caps: caps},
+			Caps:    caps,
+			Budget:  schemas.StageBudget{InputMax: 0},
+			Tier:    schemas.TierLight,
+			Options: PipelineConfigFromAgentOptions(agent.Options{}),
+		}
+	}
+
+	if _, _, _, err := prepareStageInput(context.Background(), prep(stages.Capabilities{ModelFree: true})); err != nil {
+		t.Fatalf("model-free stage: prepareStageInput: %v, want no error", err)
+	}
+
+	_, _, _, err := prepareStageInput(context.Background(), prep(stages.Capabilities{ModelFree: false}))
+	if err == nil {
+		t.Fatal("model stage: expected input overflow error, got nil")
+	}
+	if !strings.Contains(err.Error(), "input overflow") {
+		t.Fatalf("model stage: error %q missing %q", err, "input overflow")
 	}
 }

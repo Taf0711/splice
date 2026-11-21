@@ -1,8 +1,11 @@
 package schemas
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // AcceptanceFact is one machine-checkable acceptance criterion for a task.
@@ -103,6 +106,50 @@ type PlanCritique struct {
 	// critical severity. Medium, low, info, and empty critique sets cannot block.
 	MustFixBeforeExecution bool   `json:"must_fix_before_execution"`
 	OverallAssessment      string `json:"overall_assessment"`
+}
+
+// UnmarshalJSON accepts critiques and cross_cutting_concerns either as a JSON
+// array or as a JSON string whose content is that array. Some models encode
+// the array as a string. An empty string means an empty list. Any other shape
+// is an error.
+func (p *PlanCritique) UnmarshalJSON(data []byte) error {
+	type plain PlanCritique
+	aux := struct {
+		*plain
+		Critiques            json.RawMessage `json:"critiques,omitempty"`
+		CrossCuttingConcerns json.RawMessage `json:"cross_cutting_concerns,omitempty"`
+	}{plain: (*plain)(p)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if err := decodeArrayOrStringArray(aux.Critiques, &p.Critiques); err != nil {
+		return fmt.Errorf("critiques: %w", err)
+	}
+	if err := decodeArrayOrStringArray(aux.CrossCuttingConcerns, &p.CrossCuttingConcerns); err != nil {
+		return fmt.Errorf("cross_cutting_concerns: %w", err)
+	}
+	return nil
+}
+
+// decodeArrayOrStringArray decodes raw into dst. raw is a JSON array, or a
+// JSON string whose content is a JSON array. An absent field leaves dst alone.
+func decodeArrayOrStringArray[T any](raw json.RawMessage, dst *[]T) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) > 0 && trimmed[0] == '"' {
+		var encoded string
+		if err := json.Unmarshal(trimmed, &encoded); err != nil {
+			return err
+		}
+		if strings.TrimSpace(encoded) == "" {
+			*dst = []T{}
+			return nil
+		}
+		trimmed = []byte(encoded)
+	}
+	return json.Unmarshal(trimmed, dst)
 }
 
 // Validate checks the plan critique.

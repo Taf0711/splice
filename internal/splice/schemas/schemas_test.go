@@ -881,6 +881,68 @@ func TestPlanCritiqueGenuineHighDefectBlocks(t *testing.T) {
 	}
 }
 
+// TestPlanCritiqueUnmarshalAcceptsStringEncodedLists pins that critiques and
+// cross_cutting_concerns decode from a JSON array or from a JSON string that
+// holds that array, and that every other shape is an error.
+func TestPlanCritiqueUnmarshalAcceptsStringEncodedLists(t *testing.T) {
+	const array = `[{"category":"security","severity":"low","issue":"token in log"}]`
+	const concerns = `["retry storm"]`
+	want := PlanCritique{
+		Critiques:            []Critique{{Category: "security", Severity: SeverityLow, Issue: "token in log"}},
+		CrossCuttingConcerns: []string{"retry storm"},
+		OverallAssessment:    "ok",
+	}
+
+	cases := []struct {
+		name    string
+		payload string
+	}{
+		{"normal arrays", `{"critiques":` + array + `,"cross_cutting_concerns":` + concerns + `,"overall_assessment":"ok"}`},
+		{"string-encoded arrays", `{"critiques":` + jsonString(array) + `,"cross_cutting_concerns":` + jsonString(concerns) + `,"overall_assessment":"ok"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got PlanCritique
+			if err := json.Unmarshal([]byte(tc.payload), &got); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("got %+v, want %+v", got, want)
+			}
+		})
+	}
+
+	t.Run("empty string is an empty list", func(t *testing.T) {
+		var got PlanCritique
+		payload := `{"critiques":"","cross_cutting_concerns":"","overall_assessment":"ok"}`
+		if err := json.Unmarshal([]byte(payload), &got); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if len(got.Critiques) != 0 || len(got.CrossCuttingConcerns) != 0 {
+			t.Fatalf("want empty lists, got %+v", got)
+		}
+	})
+
+	for name, bad := range map[string]string{
+		"string that is not an array": `{"critiques":"not a list","overall_assessment":"ok"}`,
+		"number":                      `{"critiques":5,"overall_assessment":"ok"}`,
+		"string-encoded number":       `{"cross_cutting_concerns":"5","overall_assessment":"ok"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var got PlanCritique
+			if err := json.Unmarshal([]byte(bad), &got); err == nil {
+				t.Fatalf("expected error for %s, got %+v", bad, got)
+			}
+		})
+	}
+}
+
+// jsonString returns s encoded as a JSON string literal.
+func jsonString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
 func TestPlanCritiqueEmptySetDoesNotBlock(t *testing.T) {
 	critique := PlanCritique{OverallAssessment: "no issues"}
 	if err := critique.Validate(); err != nil {
