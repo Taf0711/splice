@@ -953,6 +953,11 @@ func execArgs(arm Arm, model, sessionID, prompt string, trustProject bool) []str
 	if arm == ArmLoop {
 		args = append(args, "--loop")
 	}
+	if arm == ArmDesign {
+		// The request is the value of --design. A positional prompt would be
+		// a usage error with --design.
+		return append(args, "--design", prompt)
+	}
 	return append(args, prompt)
 }
 
@@ -1059,6 +1064,214 @@ func parsePipelineResult(stdout []byte) (schemas.PipelineResult, error) {
 		return schemas.PipelineResult{}, fmt.Errorf("final pipeline result invalid: %w", err)
 	}
 	return result, nil
+}
+
+// applyAttemptLedger fills an attempt from its run's stream. The design arm
+// reads a design result, and every other arm reads a pipeline result. A run
+// reads only the result that its own arm produces.
+func applyAttemptLedger(attempt *Attempt, arm Arm, stdout []byte) error {
+	if arm == ArmDesign {
+		return applyDesignLedger(attempt, stdout)
+	}
+	return applyPipelineLedger(attempt, stdout)
+}
+
+// applyPipelineLedger fills an attempt from the final pipeline result.
+func applyPipelineLedger(attempt *Attempt, stdout []byte) error {
+	parsed, err := parsePipelineResult(stdout)
+	if err != nil {
+		return err
+	}
+	attempt.Requests = requestRecords(parsed.UsageRecords)
+	attempt.RunID = parsed.RunID
+	attempt.RunStatus = parsed.Status
+	attempt.CostCoverage = parsed.CostCoverage
+	attempt.Totals = totalsFromResult(parsed)
+	// Option B: decode the cache telemetry from the same final event with
+	// harness-local structs and merge it onto the typed records. A decode
+	// failure leaves the telemetry unreported, never reported as zero.
+	if tel, terr := parseCacheTelemetry(stdout); terr != nil {
+		attempt.LedgerError = terr.Error()
+	} else {
+		attempt.Requests = mergeCacheTelemetry(attempt.Requests, tel)
+		attempt.CacheTelemetryReported = tel.Reported
+		attempt.PromptLayoutFlips = tel.Flips
+	}
+	attempt.Rounds = computeRounds(attempt.Requests)
+	attempt.LayoutStability = computeLayoutStability(attempt.Requests)
+	return nil
+}
+
+// designStreamUsage is the part of a stream-json usage event that the design
+// ledger reads.
+type designStreamUsage struct {
+	Type             string   `json:"type"`
+	Stage            string   `json:"stage"`
+	Iteration        int      `json:"iteration"`
+	Provider         string   `json:"provider"`
+	Model            string   `json:"model"`
+	UsageReported    bool     `json:"usageReported"`
+	PromptTokens     int      `json:"promptTokens"`
+	CompletionTokens int      `json:"completionTokens"`
+	CachedTokens     int      `json:"cachedInputTokens"`
+	CacheWriteTokens int      `json:"cacheWriteTokens"`
+	ReasoningTokens  int      `json:"reasoningTokens"`
+	CostUSD          *float64 `json:"costUsd"`
+	CostStatus       string   `json:"costStatus"`
+}
+
+// applyDesignLedger fills an attempt from a --design run. The final event is
+// a design plan result, which carries no usage records. The ledger therefore
+// comes from the stream usage events, which name each request's stage. The
+// totals are summed from those records, because the design result has no
+// ledger totals to copy.
+//
+// The usage records are read first and kept even when the run has no final
+// result. A run that ends in an error still spent the requests it made, so
+// those records count toward the attempt, and the missing result is returned
+// as the ledger error.
+func applyDesignLedger(attempt *Attempt, stdout []byte) error {
+	records, err := designUsageRecords(stdout)
+	if err != nil {
+		return err
+	}
+	attempt.Requests = requestRecords(records)
+	attempt.Totals = totalsFromRecords(records)
+	attempt.Rounds = computeRounds(attempt.Requests)
+	attempt.LayoutStability = computeLayoutStability(attempt.Requests)
+
+	final, finalErr := designFinalResult(stdout)
+	if finalErr == nil {
+		attempt.RunID = final.PlanID
+		attempt.RunStatus = final.Status
+		attempt.CritiqueUnresolved = designCritiqueUnresolved(stdout)
+	}
+	attempt.CostCoverage = designCostCoverage(records, finalErr == nil)
+	return finalErr
+}
+
+// designFinalResult reads and validates the final design plan result.
+func designFinalResult(stdout []byte) (schemas.DesignPlanResult, error) {
+	finalText, err := finalEventText(stdout)
+	if err != nil {
+		return schemas.DesignPlanResult{}, fmt.Errorf("design run has no final result: %w", err)
+	}
+	var result schemas.DesignPlanResult
+	if err := json.Unmarshal([]byte(finalText), &result); err != nil {
+		return schemas.DesignPlanResult{}, fmt.Errorf("parse final design plan result: %w", err)
+	}
+	if err := result.Validate(); err != nil {
+		return schemas.DesignPlanResult{}, fmt.Errorf("final design plan result invalid: %w", err)
+	}
+	return result, nil
+}
+
+// designCostCoverage follows the pipeline ledger rule: not applicable with no
+// record, complete when every record is priced, partial when some are, and
+// unavailable when none is. A run without a valid final result is partial,
+// because it did not finish, whatever its records say.
+func designCostCoverage(records []schemas.PipelineUsageRecord, finished bool) string {
+	if !finished {
+		return schemas.CostCoveragePartial
+	}
+	priced := 0
+	for _, rec := range records {
+		if rec.CostStatus == schemas.CostStatusPriced {
+			priced++
+		}
+	}
+	switch {
+	case len(records) == 0:
+		return schemas.CostCoverageNotApplicable
+	case priced == len(records):
+		return schemas.CostCoverageComplete
+	case priced > 0:
+		return schemas.CostCoveragePartial
+	default:
+		return schemas.CostCoverageUnavailable
+	}
+}
+
+// designCritiqueUnresolved reads the critiqueResolved flag of the design_plan
+// event. A stream without the event, or with the flag unset, is not unresolved.
+func designCritiqueUnresolved(stdout []byte) bool {
+	scanner := bufio.NewScanner(bytes.NewReader(stdout))
+	scanner.Buffer(make([]byte, 0, 1<<20), 32<<20)
+	unresolved := false
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 || line[0] != '{' {
+			continue
+		}
+		var ev struct {
+			Type             string `json:"type"`
+			CritiqueResolved *bool  `json:"critiqueResolved"`
+		}
+		if err := json.Unmarshal(line, &ev); err != nil {
+			continue
+		}
+		if ev.Type == "design_plan" && ev.CritiqueResolved != nil && !*ev.CritiqueResolved {
+			unresolved = true
+		}
+	}
+	return unresolved
+}
+
+// designUsageRecords reads the usage events of a stream in order.
+func designUsageRecords(stdout []byte) ([]schemas.PipelineUsageRecord, error) {
+	scanner := bufio.NewScanner(bytes.NewReader(stdout))
+	scanner.Buffer(make([]byte, 0, 1<<20), 32<<20)
+	var records []schemas.PipelineUsageRecord
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 || line[0] != '{' {
+			continue
+		}
+		var ev designStreamUsage
+		if err := json.Unmarshal(line, &ev); err != nil {
+			continue
+		}
+		if ev.Type != "usage" {
+			continue
+		}
+		records = append(records, schemas.PipelineUsageRecord{
+			Sequence:      len(records) + 1,
+			Provider:      ev.Provider,
+			Model:         ev.Model,
+			Stage:         ev.Stage,
+			Iteration:     ev.Iteration,
+			UsageReported: ev.UsageReported,
+			InputTokens:   ev.PromptTokens,
+			OutputTokens:  ev.CompletionTokens,
+			CachedTokens:  ev.CachedTokens,
+			CacheWrite:    ev.CacheWriteTokens,
+			Reasoning:     ev.ReasoningTokens,
+			CostUSD:       ev.CostUSD,
+			CostStatus:    ev.CostStatus,
+		})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan exec output: %w", err)
+	}
+	return records, nil
+}
+
+// totalsFromRecords sums the usage records of a design run. A request without
+// a reported cost is not priced, so it counts toward no billed amount.
+func totalsFromRecords(records []schemas.PipelineUsageRecord) Totals {
+	totals := Totals{Requests: len(records)}
+	for _, rec := range records {
+		totals.InputTokens += rec.InputTokens
+		totals.OutputTokens += rec.OutputTokens
+		totals.CachedTokens += rec.CachedTokens
+		totals.CacheWrite += rec.CacheWrite
+		totals.Reasoning += rec.Reasoning
+		if rec.CostUSD != nil {
+			totals.BilledUSD += *rec.CostUSD
+			totals.PricedRecords++
+		}
+	}
+	return totals
 }
 
 // totalsFromResult copies the authoritative ledger totals. Nothing is summed
@@ -1313,26 +1526,8 @@ func (r *Runner) runTaskInWorkspace(ctx context.Context, task Task, arm Arm, rep
 		return attempt, fmt.Errorf("warmcost: write raw stream for task %s: %w", task.ID, werr)
 	}
 
-	if parsed, perr := parsePipelineResult(res.Stdout); perr != nil {
-		attempt.LedgerError = perr.Error()
-	} else {
-		attempt.Requests = requestRecords(parsed.UsageRecords)
-		attempt.RunID = parsed.RunID
-		attempt.RunStatus = parsed.Status
-		attempt.CostCoverage = parsed.CostCoverage
-		attempt.Totals = totalsFromResult(parsed)
-		// Option B: decode the cache telemetry from the same final event with
-		// harness-local structs and merge it onto the typed records. A decode
-		// failure leaves the telemetry unreported, never reported as zero.
-		if tel, terr := parseCacheTelemetry(res.Stdout); terr != nil {
-			attempt.LedgerError = terr.Error()
-		} else {
-			attempt.Requests = mergeCacheTelemetry(attempt.Requests, tel)
-			attempt.CacheTelemetryReported = tel.Reported
-			attempt.PromptLayoutFlips = tel.Flips
-		}
-		attempt.Rounds = computeRounds(attempt.Requests)
-		attempt.LayoutStability = computeLayoutStability(attempt.Requests)
+	if err := applyAttemptLedger(&attempt, arm, res.Stdout); err != nil {
+		attempt.LedgerError = err.Error()
 	}
 
 	verified, output, verr := runVerifier(runCtx, workspace, task.Check)

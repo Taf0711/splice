@@ -33,6 +33,7 @@ const (
 	EventRestore            EventType = "restore"
 	EventUsage              EventType = "usage"
 	EventPipelinePlan       EventType = "pipeline_plan"
+	EventDesignPlan         EventType = "design_plan"
 	EventStage              EventType = "stage"
 	EventFinal              EventType = "final"
 	EventWarning            EventType = "warning"
@@ -122,6 +123,14 @@ type Event struct {
 	Code          string `json:"code,omitempty"`
 	Recoverable   *bool  `json:"recoverable,omitempty"`
 	ExitCode      *int   `json:"exitCode,omitempty"`
+
+	// Design plan fields are present only on design_plan events.
+	PlanID           string   `json:"planId,omitempty"`
+	Tasks            []string `json:"tasks,omitempty"`
+	Revised          *bool    `json:"revised,omitempty"`
+	CritiqueResolved *bool    `json:"critiqueResolved,omitempty"`
+	CritiqueIssues   *int     `json:"critiqueIssues,omitempty"`
+	CritiqueSummary  string   `json:"critiqueSummary,omitempty"`
 }
 
 type InputEvent struct {

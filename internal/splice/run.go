@@ -77,6 +77,18 @@ func (ledger *requestLedger) append(record schemas.PipelineUsageRecord) {
 	ledger.records = append(ledger.records, record)
 }
 
+// DesignUsageRecorder returns the usage hook for one design-phase request. It
+// normalizes and prices the request with the rule a pipeline stage request
+// uses, then calls the run's OnAttributedUsage. It returns nil when the run
+// has no usage hook.
+func DesignUsageRecorder(options agent.Options) func(agent.AttributedUsage) {
+	cfg := PipelineConfigFromAgentOptions(options)
+	if cfg.OnAttributedUsage == nil {
+		return nil
+	}
+	return newRequestLedger().recordingOptions(cfg).OnAttributedUsage
+}
+
 func (ledger *requestLedger) recordingOptions(options PipelineRunConfig) PipelineRunConfig {
 	recorded := options
 	downstreamAttributed := options.OnAttributedUsage

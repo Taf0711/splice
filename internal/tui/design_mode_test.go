@@ -2615,3 +2615,77 @@ func TestFailedApprovedPlanEndsInTheViewer(t *testing.T) {
 		t.Fatalf("the viewer must show the failed run:\n%s", page)
 	}
 }
+
+// executedDesignSession records a design conversation whose one task ran to
+// completion. It returns the model with those events loaded.
+func executedDesignSession(t *testing.T) model {
+	t.Helper()
+	store := testSessionStore(t)
+	m := newDesignModeTestModel(t.TempDir(), &fakeProvider{}, store)
+	m, err := m.ensureActiveSession("test")
+	if err != nil {
+		t.Fatalf("ensureActiveSession: %v", err)
+	}
+	m, _ = m.appendSessionEvent(sessions.EventDesignModeEntered, nil)
+	plan := schemas.DesignPlan{
+		Source:       "conversation",
+		Epic:         "test",
+		Requirements: []string{"req"},
+		InScope:      []string{"in"},
+		OutOfScope:   []string{"out"},
+		SystemDesign: "design",
+		Tasks:        []schemas.Task{{ID: "t1", Title: "T", Intent: "i"}},
+	}
+	planJSON, _ := json.Marshal(plan)
+	m, _ = m.appendSessionEvent(sessions.EventPlanCrystallized, splicerun.PlanCrystallizedPayload{PlanID: "plan-1", Revision: 1, Plan: planJSON})
+	m, _ = m.appendSessionEvent(sessions.EventPlanApproved, splicerun.PlanApprovedPayload{PlanID: "plan-1"})
+	m, _ = m.appendSessionEvent(sessions.EventTaskStarted, splicerun.TaskStartedPayload{TaskID: "t1", RunID: "plan-1-t1"})
+	m, _ = m.appendSessionEvent(sessions.EventTaskCompleted, splicerun.TaskCompletedPayload{TaskID: "t1", RunID: "plan-1-t1"})
+	return m
+}
+
+// TestResumeOfExecutedPlanHasNoPendingPlan pins the resume of a finished design.
+// The plan already ran, so no plan waits for approval and no approval card or
+// /approve can reach it.
+func TestResumeOfExecutedPlanHasNoPendingPlan(t *testing.T) {
+	m := executedDesignSession(t)
+	m.pendingPlan = nil
+	m.pendingCritique = nil
+	m = m.reconstructDesignState()
+	if m.pendingPlan != nil || m.pendingCritique != nil {
+		t.Fatalf("resume of an executed design kept a pending plan: %+v", m.pendingPlan)
+	}
+}
+
+// TestApproveRefusesAnExecutedPlan pins the approval guard. A plan that already
+// ran is refused even when a stale plan is still held in memory. The refusal
+// starts no run and records no second plan_approved event.
+func TestApproveRefusesAnExecutedPlan(t *testing.T) {
+	m := executedDesignSession(t)
+	m.pendingPlan = &schemas.DesignPlan{Epic: "stale"}
+	before := countStoredEvents(t, m, sessions.EventPlanApproved)
+
+	m, cmd := m.startApproval(splicerun.DesignTransitionSourceManual)
+	if cmd != nil {
+		t.Fatal("approval of an executed plan must start no run")
+	}
+	if after := countStoredEvents(t, m, sessions.EventPlanApproved); after != before {
+		t.Fatalf("plan_approved events = %d, want %d: a second approval was recorded", after, before)
+	}
+}
+
+// countStoredEvents counts the session events of one type in the store.
+func countStoredEvents(t *testing.T, m model, eventType sessions.EventType) int {
+	t.Helper()
+	events, err := m.sessionStore.ReadEvents(m.activeSession.SessionID)
+	if err != nil {
+		t.Fatalf("read session: %v", err)
+	}
+	count := 0
+	for _, event := range events {
+		if event.Type == eventType {
+			count++
+		}
+	}
+	return count
+}

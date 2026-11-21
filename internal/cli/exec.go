@@ -163,6 +163,10 @@ type execOptions struct {
 	// agent nodes run under the outer sandbox. The user config key
 	// sandbox.acceptNestedSandbox is the persistent form.
 	acceptNestedSandbox bool
+
+	// design is the --design request. The run crystallizes it, critiques the
+	// plan, and then executes it, as a --plan run does.
+	design string
 }
 
 type execUsageError struct {
@@ -525,6 +529,8 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	var streamImages []zeroruntime.ImageBlock
 	if options.planPath != "" {
 		prompt = designPlan.Epic
+	} else if options.design != "" {
+		prompt = options.design
 	} else {
 		prompt, streamImages, err = resolveExecPrompt(options, workspaceRoot, deps.stdin)
 		if err != nil {
@@ -761,6 +767,11 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		fmt.Fprintf(stderr, "[splice] WARNING: session not recorded: %v\n", err)
 		preparedSession = sessions.PreparedExec{}
 	}
+	// The design phase reads and writes its conversation through the session
+	// store. Without a store it cannot crystallize, so it stops here.
+	if options.design != "" && (preparedSession.Store == nil || preparedSession.Session.SessionID == "") {
+		return writeExecError(stdout, stderr, options.outputFormat, "session_error", "--design needs a session to record the design conversation, and the session could not be recorded.", exitCrash)
+	}
 	agentPrompt := sessions.FormatExecPrompt(prompt, preparedSession)
 	runID, err := streamjson.CreateRunID(time.Now())
 	if err != nil {
@@ -804,6 +815,10 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	sessionRecorder := execSessionRecorder{prepared: preparedSession}
 	// Surface a best-effort session-recording failure once, on every exit path.
 	defer sessionRecorder.warnIfRecordingFailed(stderr)
+	if options.design != "" {
+		// The design history starts after this marker, as in the TUI design mode.
+		sessionRecorder.append(sessions.EventDesignModeEntered, nil)
+	}
 	sessionRecorder.append(sessions.EventMessage, map[string]any{
 		"role":    "user",
 		"content": prompt,
@@ -1167,6 +1182,24 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", marshalErr.Error())
 		}
 		result.FinalAnswer = string(encoded)
+	} else if options.design != "" {
+		result, err = runExecDesign(runCtx, execDesignRun{
+			now:           deps.now(),
+			store:         preparedSession.Store,
+			sessionID:     preparedSession.Session.SessionID,
+			workspaceRoot: workspaceRoot,
+			images:        images,
+			provider:      provider,
+			stageResolver: stageModelResolver,
+			primaryName:   resolved.Provider.Name,
+			primaryModel:  resolved.Provider.Model,
+			primaryEffort: forwardEffort,
+			options:       runOptions,
+			memClient:     memClient,
+			recovery:      recovery,
+			writer:        &writer,
+			record:        sessionRecorder.append,
+		})
 	} else if options.planPath != "" {
 		result, err = splicerun.RunDesignPlan(runCtx, designPlan, provider, runOptions, memClient, recovery)
 	} else {
@@ -1270,10 +1303,14 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		}
 		return writeExecError(stdout, stderr, options.outputFormat, code, err.Error(), exitCode)
 	}
-	sessionRecorder.append(sessions.EventMessage, map[string]any{
-		"role":    "assistant",
-		"content": result.FinalAnswer,
-	})
+	// A design run's final answer is a plan result, not a conversation turn. Storing
+	// it would put the result JSON into the design history.
+	if options.design == "" {
+		sessionRecorder.append(sessions.EventMessage, map[string]any{
+			"role":    "assistant",
+			"content": result.FinalAnswer,
+		})
+	}
 
 	if notice := result.TruncationNotice(); notice != "" {
 		writer.warning(notice)

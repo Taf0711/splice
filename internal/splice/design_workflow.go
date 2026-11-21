@@ -280,7 +280,7 @@ func (w *DesignWorkflow) resolveProvider(
 		selection, err := resolver(stageName)
 		var tierFallback *stageTierFallback
 		if err != nil && !errors.As(err, &tierFallback) {
-			return agent.ModelSelection{}, fmt.Errorf("stage %s model: %w", stageName, err)
+			return agent.ModelSelection{}, preflightRunError(fmt.Errorf("stage %s model: %w", stageName, err))
 		}
 		if err == nil && selection.Provider != nil {
 			return selection, nil

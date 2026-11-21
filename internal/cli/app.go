@@ -1706,6 +1706,7 @@ Flags:
       --spec-reasoning-effort <effort>
                                     Override draft reasoning effort when --use-spec is set
       --plan <path>                  Execute a design plan JSON file
+      --design <request>             Design the request, critique the plan, then execute it
       --pipeline <name|path>         Run a pipeline topology from the user library or a file
       --loop                         Run the plain coding-agent tool loop instead of the fixed pipeline
       --max-turns <number>           Override the maximum agent loop turns

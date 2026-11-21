@@ -67,6 +67,7 @@ permission_decision
 permission
 usage
 pipeline_plan
+design_plan
 stage
 checkpoint
 restore
@@ -129,6 +130,30 @@ The list order matches the execution plan.
 
 A client can use this roster to calculate stable pipeline progress. Do not
 estimate progress from the stages seen so far.
+
+### Design plan events
+
+A `design_plan` event reports the design phase of `splice exec --design`. It
+appears once, before the plan runs. It lists the task titles, and it states
+whether one revision ran and whether the plan critic was resolved.
+
+```json
+{"schemaVersion":2,"type":"design_plan","runId":"run_20260810_abc123","planId":"plan-1a2b3c","tasks":["Add the Hello function","Add the test"],"revised":true,"critiqueResolved":true,"critiqueIssues":1,"critiqueSummary":"The plan is ready."}
+```
+
+| Field | Meaning |
+|---|---|
+| `planId` | Identity of the plan revision family |
+| `tasks` | Task titles, in plan order |
+| `revised` | `true` when one revision ran after a blocking critique |
+| `critiqueResolved` | `false` when the critique still requires a fix after the revision. The plan runs anyway. |
+| `critiqueIssues` | Number of critique issues |
+| `critiqueSummary` | The overall assessment of the critic |
+
+The design stages also emit `stage` events, named `design_crystallize` and
+`plan_critic`. Their `usage` events carry the same stage names, so a client
+can attribute design cost to each stage. A `warning` event also names a
+critique that is not resolved.
 
 ### Stage events
 

@@ -733,3 +733,39 @@ func TestRunDesignPlanNamesTheUnusedActivePipeline(t *testing.T) {
 		}
 	}
 }
+
+// TestPreflightDesignRoutesReportsFallbacksAndRefusesBadRoutes pins the design
+// route check. A tier fallback names its stage and does not stop the run. A
+// route that does not resolve is invalid input, and it names its stage.
+func TestPreflightDesignRoutesReportsFallbacksAndRefusesBadRoutes(t *testing.T) {
+	t.Run("tier fallback is reported", func(t *testing.T) {
+		resolver := func(stage string) (agent.ModelSelection, error) {
+			if stage == "plan_critic" {
+				return agent.ModelSelection{}, &stageTierFallback{err: errors.New("tier model missing")}
+			}
+			return agent.ModelSelection{}, nil
+		}
+		fallbacks, err := PreflightDesignRoutes(agent.Options{}, resolver, []string{"design_crystallize", "plan_critic"})
+		if err != nil {
+			t.Fatalf("a tier fallback must not fail the run: %v", err)
+		}
+		if len(fallbacks) != 1 || !strings.HasPrefix(fallbacks[0], "plan_critic: ") {
+			t.Fatalf("fallbacks = %v, want plan_critic named", fallbacks)
+		}
+	})
+	t.Run("bad route is invalid input", func(t *testing.T) {
+		resolver := func(stage string) (agent.ModelSelection, error) {
+			if stage == "code_writer" {
+				return agent.ModelSelection{}, errors.New("references unknown provider profile")
+			}
+			return agent.ModelSelection{}, nil
+		}
+		_, err := PreflightDesignRoutes(agent.Options{}, resolver, []string{"design_crystallize"})
+		if !errors.Is(err, ErrInvalidRunInput) {
+			t.Fatalf("err = %v, want invalid run input", err)
+		}
+		if !strings.Contains(err.Error(), "stage code_writer model") {
+			t.Fatalf("err = %q, want the stage named", err)
+		}
+	})
+}

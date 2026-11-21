@@ -15,6 +15,7 @@ splice <command> --help
 |---|---|
 | `splice` | Open the interactive TUI. |
 | `splice exec` | Run one prompt, a saved plan, or a stream request. |
+| `splice exec --design "<request>"` | Design the request, critique the plan, then run it. |
 | `splice pipeline` | List, show, use, export, import, or edit pipeline topologies. |
 | `splice daemon` | Manage the local background worker. |
 | `splice cron` | Manage local scheduled jobs. |
@@ -197,7 +198,7 @@ uses its fixed stage and tool contracts. See [Pipeline behavior](PIPELINE.md).
 | Code | Meaning |
 |---:|---|
 | `0` | The run completed successfully. |
-| `2` | The command or input was invalid. This includes a topology that does not load or validate, and a node pin or stage route that does not resolve (also with `--plan`). Splice finds these before it sends a provider request. |
+| `2` | The command or input was invalid. This includes a topology that does not load or validate, and a node pin or stage route that does not resolve (also with `--plan` and `--design`). With `--design`, Splice checks the design stage routes and every pipeline stage route before it sends a provider request. |
 | `3` | Setup failed, so no stage result exists. Examples are the config, a provider that cannot start (also for a valid route), the sandbox, the stage registry, and the trajectory classifier. A failed `--loop` run also exits `3`. |
 | `4` | The pipeline ran, but the run ended without a complete result. This includes a stage that failed (also when its provider request failed), a trajectory stop, and the iteration or wall-time limit. The final result gives the reason. |
 | `130` | The user or process interrupted the run. |

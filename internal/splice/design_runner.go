@@ -82,12 +82,66 @@ type RunDesignPlanOptions struct {
 
 // RunDesignPlan executes each task in a design plan as an independent pipeline run.
 func RunDesignPlan(ctx context.Context, plan schemas.DesignPlan, provider agent.Provider, options agent.Options, mem MemoryStore, rec WorkspaceRecovery) (agent.Result, error) {
+	return RunDesignPlanWithLifecycle(ctx, plan, provider, options, mem, rec, nil, nil)
+}
+
+// PreflightDesignRoutes resolves every stage route that a --design run can use,
+// before the run sends a provider request. It checks the named design stages
+// and the pipeline stages a plan task can run. The task tiers are not known
+// until the plan exists, so the check covers the stages of every tier under the
+// run's flags. A route that does not resolve is invalid input. A tier fallback
+// is not an error: the stage runs on the run model, and the returned slice names
+// it with its reason so the caller can report it.
+func PreflightDesignRoutes(options agent.Options, resolver agent.StageModelResolver, designStages []string) ([]string, error) {
+	if resolver == nil {
+		return nil, nil
+	}
+	set := PipelineConfigFromAgentOptions(options).Flags
+	names := append([]string(nil), designStages...)
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		seen[name] = true
+	}
+	for _, tier := range []schemas.PipelineTier{schemas.TierTrivial, schemas.TierLight, schemas.TierStandard, schemas.TierSubstantial, schemas.TierArchitectural} {
+		stages, _, _, err := stagesForTier(tier, set)
+		if err != nil {
+			return nil, preflightRunError(fmt.Errorf("design preflight for tier %s: %w", tier, err))
+		}
+		for _, stage := range stages {
+			if stage.Model != nil || stageModelFree(stage) || seen[stage.Name] {
+				continue
+			}
+			seen[stage.Name] = true
+			names = append(names, stage.Name)
+		}
+	}
+	var fallbacks []string
+	for _, name := range names {
+		if _, err := resolver(name); err != nil {
+			var tierFallback *stageTierFallback
+			if errors.As(err, &tierFallback) {
+				fallbacks = append(fallbacks, name+": "+tierFallback.Error())
+				continue
+			}
+			return fallbacks, preflightRunError(fmt.Errorf("preflight: stage %s model: %w", name, err))
+		}
+	}
+	return fallbacks, nil
+}
+
+// RunDesignPlanWithLifecycle is RunDesignPlan with the task lifecycle hooks.
+// The hooks run before a task dispatches and after it ends, so a caller can
+// persist task_started, task_completed and task_failed in execution order. A
+// nil hook is not called.
+func RunDesignPlanWithLifecycle(ctx context.Context, plan schemas.DesignPlan, provider agent.Provider, options agent.Options, mem MemoryStore, rec WorkspaceRecovery, onStart schemas.TaskStartCallback, onLifecycle schemas.TaskLifecycleCallback) (agent.Result, error) {
 	if _, err := ResolveExpansionRounds(); err != nil {
 		return agent.Result{}, runInputError{err}
 	}
 	cfg := PipelineConfigFromAgentOptions(options)
 	return RunDesignPlanWithResume(ctx, plan, provider, options, mem, rec, RunDesignPlanOptions{
-		PlanID: cfg.SessionID,
+		PlanID:          cfg.SessionID,
+		OnTaskStart:     onStart,
+		OnTaskLifecycle: onLifecycle,
 	})
 }
 

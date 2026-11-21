@@ -19,6 +19,17 @@ checks the plan before approval. `/approve` starts the approved task graph.
 The design agent can request the same transitions only after an explicit user
 request. See [Design transitions](DESIGN_TRANSITIONS.md).
 
+### Headless design run
+
+`splice exec --design "<request>"` runs both phases in one headless run. The
+request is the first user message of the design conversation. The
+crystallizer writes a plan, and the plan critic checks it. If the critic
+requires a fix, Splice runs one revision. A plan that still has a blocking
+critique runs when it has at least one task. The output records that the
+critique is not resolved. Each design stage uses its own route in
+`stage-models.json`, so a larger model can design and a smaller model can
+implement.
+
 ### Execution phase
 
 `splice exec` enters the execution phase directly. `splice exec --plan` executes

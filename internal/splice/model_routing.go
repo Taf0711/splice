@@ -170,6 +170,10 @@ type stageTierFallback struct {
 	err error
 }
 
+// NewTierFallbackError marks a failure of the automatic tier layer, so that a
+// caller can report the fallback to the user instead of failing the stage.
+func NewTierFallbackError(err error) error { return &stageTierFallback{err: err} }
+
 func (e *stageTierFallback) Error() string { return e.err.Error() }
 
 func (e *stageTierFallback) Unwrap() error { return e.err }

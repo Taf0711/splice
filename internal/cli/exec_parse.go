@@ -236,6 +236,19 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 				return options, false, err
 			}
 			options.planPath = value
+		case arg == "--design":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.design = value
+			index = next
+		case strings.HasPrefix(arg, "--design="):
+			value, err := requiredInlineFlagValue(arg, "--design")
+			if err != nil {
+				return options, false, err
+			}
+			options.design = value
 		case arg == "--max-turns":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
@@ -531,6 +544,31 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 		// combination rather than pretend it took effect.
 		return options, false, execUsageError{"--plan cannot be combined with --resume or --fork."}
 	}
+	if options.design != "" {
+		// --design crystallizes the request, critiques it, and runs the plan. A
+		// flag that would be ignored, or that would change the design record,
+		// is refused rather than silently dropped.
+		switch {
+		case options.planPath != "":
+			return options, false, execUsageError{"--design cannot be combined with --plan."}
+		case options.useSpec:
+			return options, false, execUsageError{"--design cannot be combined with --use-spec."}
+		case options.loop:
+			return options, false, execUsageError{"--design cannot be combined with --loop."}
+		case options.pipeline != "":
+			// A design plan runs the default topology, so --pipeline would be
+			// silently ignored.
+			return options, false, execUsageError{"--design cannot be combined with --pipeline."}
+		case options.file != "":
+			return options, false, execUsageError{"--design cannot be combined with --file."}
+		case strings.TrimSpace(strings.Join(options.promptParts, " ")) != "":
+			return options, false, execUsageError{"--design cannot be combined with a prompt argument."}
+		case options.inputFormat == execInputStreamJSON:
+			return options, false, execUsageError{"--design cannot be combined with --input-format stream-json."}
+		case options.resume != "" || options.resumeLatest || options.fork != "":
+			return options, false, execUsageError{"--design cannot be combined with --resume or --fork."}
+		}
+	}
 	if !options.useSpec && options.specModel != "" {
 		return options, false, execUsageError{"--spec-model requires --use-spec."}
 	}
@@ -578,7 +616,7 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 	if options.inputFormat == execInputStreamJSON && strings.TrimSpace(strings.Join(options.promptParts, " ")) != "" {
 		return options, false, execUsageError{"Stream-json input does not accept positional prompt text. Pipe JSONL or use --file."}
 	}
-	if !options.listTools && options.planPath == "" && options.file == "" && options.inputFormat != execInputStreamJSON && strings.TrimSpace(strings.Join(options.promptParts, " ")) == "" {
+	if !options.listTools && options.planPath == "" && options.design == "" && options.file == "" && options.inputFormat != execInputStreamJSON && strings.TrimSpace(strings.Join(options.promptParts, " ")) == "" {
 		return options, false, execUsageError{"Prompt required. Use `splice exec \"prompt\"` or `splice exec --file prompt.txt`."}
 	}
 	return options, false, nil
