@@ -70,7 +70,7 @@ func (c banditCheck) Run(ctx context.Context, req VerificationCheckRequest) (Ver
 		}
 		out = []byte(res.Output)
 	} else {
-		command := append([]string{"python", "-m", "bandit", "-f", "json"}, pyPaths...)
+		command := append([]string{"python", "-m", "bandit", "-q", "-f", "json"}, pyPaths...)
 		cmd, plan, cerr := PrepareStageCommand(ctx, req.Sandbox, req.WorkDir, command)
 		if cerr != nil {
 			return VerificationCheckResult{}, fmt.Errorf("bandit tool refused: %w", cerr)

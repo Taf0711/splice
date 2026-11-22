@@ -1,6 +1,7 @@
 package dtools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os/exec"
@@ -99,7 +100,7 @@ func (t banditTool) RunWithOptions(ctx context.Context, args map[string]any, opt
 		}
 	}
 
-	command := append([]string{python, "-m", "bandit", "-f", "json"}, resolvedPaths...)
+	command := append([]string{python, "-m", "bandit", "-q", "-f", "json"}, resolvedPaths...)
 	prepared, cerr := procrun.Prepare(ctx, procrun.Request{
 		ProfileID:       procrun.ProfileSpliceDTools,
 		AllowedBinaries: procrun.StageBinaries,
@@ -181,10 +182,18 @@ type banditCompact struct {
 // Output that is not a Bandit report is returned unchanged, so the check
 // still reports the real error.
 func compactBanditJSON(raw []byte) []byte {
+	// Bandit can print progress text before its JSON. Skip to the first line
+	// that starts with "{".
+	body := raw
+	if trimmed := bytes.TrimSpace(raw); len(trimmed) > 0 && trimmed[0] != '{' {
+		if i := bytes.Index(raw, []byte("\n{")); i >= 0 {
+			body = raw[i+1:]
+		}
+	}
 	var full struct {
 		Results []banditFinding `json:"results"`
 	}
-	if err := json.Unmarshal(raw, &full); err != nil || full.Results == nil {
+	if err := json.Unmarshal(body, &full); err != nil || full.Results == nil {
 		return raw
 	}
 	encode := func(kept int) []byte {
