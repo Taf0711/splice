@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/zeroruntime"
@@ -75,8 +76,16 @@ func decodePlanCritique(collected *zeroruntime.CollectedStream) (schemas.PlanCri
 	}
 	var critique schemas.PlanCritique
 	if err := json.Unmarshal([]byte(tc.Arguments), &critique); err != nil {
-		return schemas.PlanCritique{}, fmt.Errorf("parse %s: %w", planCriticToolName, err)
+		excerpt := tc.Arguments
+		if len(excerpt) > 160 {
+			excerpt = excerpt[:160]
+		}
+		excerpt = strings.ReplaceAll(excerpt, "\n", " ")
+		return schemas.PlanCritique{}, fmt.Errorf("parse %s: %w (arguments began: %q)", planCriticToolName, err, excerpt)
 	}
+	// The flag is fully determined by the severities, so derive it rather
+	// than reject a model that sent it inconsistently.
+	critique.MustFixBeforeExecution = critique.BlocksExecution()
 	if err := critique.Validate(); err != nil {
 		return schemas.PlanCritique{}, err
 	}

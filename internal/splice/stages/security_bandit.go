@@ -135,6 +135,9 @@ func (c banditCheck) Run(ctx context.Context, req VerificationCheckRequest) (Ver
 		status = schemas.VerificationFindings
 		summary = fmt.Sprintf("Bandit found %d security issue(s).", len(findings))
 	}
+	if report.OmittedResults > 0 {
+		summary += fmt.Sprintf(" %d lower-severity Bandit findings omitted.", report.OmittedResults)
+	}
 	return VerificationCheckResult{
 		ToolRun: schemas.VerificationToolRun{
 			Tool:     c.Name(),
@@ -155,6 +158,9 @@ type banditReport struct {
 		IssueSeverity string `json:"issue_severity"`
 		TestID        string `json:"test_id"`
 	} `json:"results"`
+	// OmittedResults counts lower-severity results the tool dropped to fit
+	// its output budget.
+	OmittedResults int `json:"omitted_results"`
 }
 
 func filterPythonPaths(paths []string) []string {

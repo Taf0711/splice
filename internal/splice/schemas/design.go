@@ -160,17 +160,21 @@ func (p PlanCritique) Validate() error {
 	if err := p.ValidateStructure(); err != nil {
 		return err
 	}
-	qualifies := false
-	for _, c := range p.Critiques {
-		if c.Severity == SeverityHigh || c.Severity == SeverityCritical {
-			qualifies = true
-			break
-		}
-	}
-	if p.MustFixBeforeExecution != qualifies {
+	if p.MustFixBeforeExecution != p.BlocksExecution() {
 		return fmt.Errorf("must_fix_before_execution=%t does not match highest critique severity; high or critical severity requires true and lower or empty severity requires false", p.MustFixBeforeExecution)
 	}
 	return nil
+}
+
+// BlocksExecution reports whether a critique has high or critical severity.
+// MustFixBeforeExecution must equal this value.
+func (p PlanCritique) BlocksExecution() bool {
+	for _, c := range p.Critiques {
+		if c.Severity == SeverityHigh || c.Severity == SeverityCritical {
+			return true
+		}
+	}
+	return false
 }
 
 // ValidateStructure checks persisted critique fields without applying the
