@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 
 	"github.com/Taf0711/splice/internal/secrets"
+	"github.com/Taf0711/splice/internal/tempgc"
 )
 
 var errNativeSandboxUnavailable = errors.New("native sandbox backend is unavailable")
@@ -458,6 +459,8 @@ func sandboxGoCacheDir(workspaceRoot string) (string, error) {
 	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
 		return "", fmt.Errorf("create sandbox Go cache directory %q: %w", cacheDir, err)
 	}
+	tempgc.TouchCache(cacheDir)
+	tempgc.MaybeCollectAsync()
 	return cacheDir, nil
 }
 

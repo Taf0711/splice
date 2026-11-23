@@ -484,6 +484,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runContext(args[1:], stdout, stderr, deps)
 	case "repo-map", "repomap":
 		return runRepoMap(args[1:], stdout, stderr, deps)
+	case "gc":
+		return runGC(args[1:], stdout, stderr)
 	case "search", "find":
 		return runSearch(args[1:], stdout, stderr, deps)
 	case "sessions", "session":
@@ -1407,6 +1409,7 @@ Commands:
   doctor     Run backend health checks for config and provider setup
   context    Report workspace context budget usage
   repo-map   Build a deterministic repository map for agent context
+  gc         Remove stale temp Go caches and run directories
   search     Search persisted local Splice session events
   find       Alias for search
   sessions   Inspect local Splice session lineage
