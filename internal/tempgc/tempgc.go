@@ -13,7 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -59,7 +59,23 @@ type Report struct {
 	Errors                          []string // one line per path that could not be removed
 }
 
-var asyncOnce sync.Once
+// collecting is true while one background collection runs in this process.
+var collecting atomic.Bool
+
+// skipUnderTests makes MaybeCollectAsync a no-op in test binaries. Only the
+// package tests clear it.
+var skipUnderTests = true
+
+// collectRoot overrides the temp root for background collection. Only the
+// package tests set it. "" means os.TempDir().
+var collectRoot = ""
+
+func tempRoot() string {
+	if collectRoot != "" {
+		return collectRoot
+	}
+	return os.TempDir()
+}
 
 // Collect removes stale Go build caches and stale run directories under the
 // temp root. It returns an error only when the temp root cannot be read.
@@ -94,17 +110,21 @@ func TouchCache(dir string) {
 // MaybeCollectAsync starts one background collection when the throttle allows
 // it. It returns at once and never blocks the caller.
 func MaybeCollectAsync() {
-	if os.Getenv(envGC) == "off" || testing.Testing() {
+	if os.Getenv(envGC) == "off" || (skipUnderTests && testing.Testing()) {
 		return
 	}
-	dir := filepath.Join(os.TempDir(), spliceDirName)
+	dir := filepath.Join(tempRoot(), spliceDirName)
 	if info, err := os.Stat(filepath.Join(dir, stampName)); err == nil && time.Since(info.ModTime()) < gcInterval {
 		return
 	}
-	asyncOnce.Do(func() { go collectInBackground(dir) })
+	if !collecting.CompareAndSwap(false, true) {
+		return
+	}
+	go collectInBackground(dir)
 }
 
 func collectInBackground(dir string) {
+	defer collecting.Store(false)
 	defer func() { _ = recover() }()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return
@@ -115,7 +135,7 @@ func collectInBackground(dir string) {
 	}
 	defer func() { _ = os.Remove(lock) }()
 	touch(filepath.Join(dir, stampName))
-	_, _ = Collect(Options{})
+	_, _ = Collect(Options{Root: collectRoot})
 }
 
 // acquireLock creates the lock file. It removes a lock older than gcInterval
