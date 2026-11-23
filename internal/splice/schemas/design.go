@@ -125,10 +125,29 @@ func (p *PlanCritique) UnmarshalJSON(data []byte) error {
 	if err := decodeArrayOrStringArray(aux.Critiques, &p.Critiques); err != nil {
 		return fmt.Errorf("critiques: %w", err)
 	}
-	if err := decodeArrayOrStringArray(aux.CrossCuttingConcerns, &p.CrossCuttingConcerns); err != nil {
+	if err := decodeConcernList(aux.CrossCuttingConcerns, &p.CrossCuttingConcerns); err != nil {
 		return fmt.Errorf("cross_cutting_concerns: %w", err)
 	}
 	return nil
+}
+
+// decodeConcernList decodes cross_cutting_concerns. A JSON string that is not
+// a JSON array becomes a one-item list that holds the trimmed string. A blank
+// string is an empty list. Other shapes use decodeArrayOrStringArray.
+func decodeConcernList(raw json.RawMessage, dst *[]string) error {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) > 0 && trimmed[0] == '"' {
+		var s string
+		if err := json.Unmarshal(trimmed, &s); err != nil {
+			return err
+		}
+		content := strings.TrimSpace(s)
+		if content != "" && !(content[0] == '[' && json.Valid([]byte(content))) {
+			*dst = []string{content}
+			return nil
+		}
+	}
+	return decodeArrayOrStringArray(raw, dst)
 }
 
 // decodeArrayOrStringArray decodes raw into dst. raw is a JSON array, or a

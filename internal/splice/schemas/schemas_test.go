@@ -926,7 +926,7 @@ func TestPlanCritiqueUnmarshalAcceptsStringEncodedLists(t *testing.T) {
 	for name, bad := range map[string]string{
 		"string that is not an array": `{"critiques":"not a list","overall_assessment":"ok"}`,
 		"number":                      `{"critiques":5,"overall_assessment":"ok"}`,
-		"string-encoded number":       `{"cross_cutting_concerns":"5","overall_assessment":"ok"}`,
+		"concerns number":             `{"cross_cutting_concerns":5,"overall_assessment":"ok"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			var got PlanCritique
@@ -935,6 +935,64 @@ func TestPlanCritiqueUnmarshalAcceptsStringEncodedLists(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPlanCritiqueConcernsAcceptPlainSentence pins that a plain sentence in
+// cross_cutting_concerns becomes a one-item list, while critiques still reject
+// a plain sentence.
+func TestPlanCritiqueConcernsAcceptPlainSentence(t *testing.T) {
+	t.Run("plain sentence is one item", func(t *testing.T) {
+		var got PlanCritique
+		payload := `{"cross_cutting_concerns":"The plan touches two modules.","overall_assessment":"ok"}`
+		if err := json.Unmarshal([]byte(payload), &got); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		want := []string{"The plan touches two modules."}
+		if !reflect.DeepEqual(got.CrossCuttingConcerns, want) {
+			t.Fatalf("got %q, want %q", got.CrossCuttingConcerns, want)
+		}
+	})
+
+	t.Run("string-encoded array still decodes", func(t *testing.T) {
+		var got PlanCritique
+		payload := `{"cross_cutting_concerns":` + jsonString(`["a","b"]`) + `,"overall_assessment":"ok"}`
+		if err := json.Unmarshal([]byte(payload), &got); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if want := []string{"a", "b"}; !reflect.DeepEqual(got.CrossCuttingConcerns, want) {
+			t.Fatalf("got %q, want %q", got.CrossCuttingConcerns, want)
+		}
+	})
+
+	t.Run("normal array still decodes", func(t *testing.T) {
+		var got PlanCritique
+		payload := `{"cross_cutting_concerns":["a"],"overall_assessment":"ok"}`
+		if err := json.Unmarshal([]byte(payload), &got); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if want := []string{"a"}; !reflect.DeepEqual(got.CrossCuttingConcerns, want) {
+			t.Fatalf("got %q, want %q", got.CrossCuttingConcerns, want)
+		}
+	})
+
+	t.Run("whole critique with plain sentence decodes", func(t *testing.T) {
+		var got PlanCritique
+		payload := `{"critiques":[],"cross_cutting_concerns":"The plan touches two modules.","must_fix_before_execution":false,"overall_assessment":"ok"}`
+		if err := json.Unmarshal([]byte(payload), &got); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if got.OverallAssessment != "ok" || len(got.CrossCuttingConcerns) != 1 {
+			t.Fatalf("unexpected critique %+v", got)
+		}
+	})
+
+	t.Run("plain sentence in critiques is still an error", func(t *testing.T) {
+		var got PlanCritique
+		payload := `{"critiques":"The plan is fine.","overall_assessment":"ok"}`
+		if err := json.Unmarshal([]byte(payload), &got); err == nil {
+			t.Fatalf("expected error, got %+v", got)
+		}
+	})
 }
 
 // jsonString returns s encoded as a JSON string literal.
