@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
@@ -424,6 +425,40 @@ var trajectoryExtractors = map[string]trajectoryExtractor{
 		dest.acceptanceResults = values
 		return nil
 	},
+}
+
+// acceptanceFailureSignatures returns the sorted "status\x00name" keys of the
+// acceptance checks that failed or errored in one pass. It is empty when no
+// check failed.
+func acceptanceFailureSignatures(outputs []schemas.HarnessStageOutput) ([]string, error) {
+	signals, err := extractIterationSignals(outputs)
+	if err != nil {
+		return nil, err
+	}
+	var keys []string
+	for _, results := range signals.acceptanceResults {
+		for _, result := range results {
+			if result.Status == "failed" || result.Status == "errored" {
+				keys = append(keys, result.Status+"\x00"+result.Name)
+			}
+		}
+	}
+	sort.Strings(keys)
+	return keys, nil
+}
+
+// acceptanceFirstStatement returns the statement of a signature key, cut to
+// 160 bytes at a rune boundary.
+func acceptanceFirstStatement(key string) string {
+	_, name, _ := strings.Cut(key, "\x00")
+	if len(name) <= 160 {
+		return name
+	}
+	cut := 160
+	for cut > 0 && !utf8.RuneStart(name[cut]) {
+		cut--
+	}
+	return name[:cut]
 }
 
 func extractIterationSignals(outputs []schemas.HarnessStageOutput) (iterationSignals, error) {

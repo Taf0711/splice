@@ -1283,6 +1283,10 @@ func runIterationLoop(
 	usePass := options.Flags.Enabled(flags.PassEvidence)
 	// prevPassStep is the previous failed pass, for the pass-boundary judgment.
 	var prevPassStep *TrajectoryStep
+	// prevAcceptanceSig is the acceptance failure signature of the previous
+	// completed pass, and prevAcceptanceIter is that pass's iteration.
+	var prevAcceptanceSig string
+	var prevAcceptanceIter int
 	for i := 1; i <= maxIterations; i++ {
 		if ctx.Err() != nil {
 			return schemas.PipelineResult{}, context.Canceled
@@ -1478,6 +1482,18 @@ func runIterationLoop(
 		if options.ClassifierPolicy == nil && passRepairStalled(passRecords) {
 			return finishWithReason(runID, plan, allRecords, "aborted", fmt.Sprintf(repairStallReason, i))
 		}
+		// Rule-mode backstop: an active classifier owns this decision.
+		// The same acceptance checks failed again and the pass changed no files.
+		accKeys, accErr := acceptanceFailureSignatures(passOutputs)
+		if accErr != nil {
+			return finishWithReason(runID, plan, allRecords, "failed", fmt.Sprintf("acceptance signature: %v", accErr))
+		}
+		accSig := strings.Join(accKeys, "\n")
+		if options.ClassifierPolicy == nil && accSig != "" && accSig == prevAcceptanceSig &&
+			state.PassChanged != nil && !*state.PassChanged {
+			return finishWithReason(runID, plan, allRecords, "aborted", fmt.Sprintf(acceptanceStallReason, prevAcceptanceIter, i, acceptanceFirstStatement(accKeys[0])))
+		}
+		prevAcceptanceSig, prevAcceptanceIter = accSig, i
 
 		// W3: the cost rule reads BILLED cost from the authoritative request
 		// ledger, never raw tokens, because a cache-read round costs a
@@ -1728,6 +1744,11 @@ func runIterationLoop(
 // repairStallReason is the abort reason when a pass ends with a stalled repair.
 // It takes the iteration number.
 const repairStallReason = "repair_no_progress: the repair loop could not change the failing tests in iteration %d; no new pass started"
+
+// acceptanceStallReason is the abort reason when the same acceptance checks
+// fail in two passes and the workspace does not change. It takes the previous
+// iteration, the current iteration, and the first failing statement.
+const acceptanceStallReason = "acceptance_no_progress: the same acceptance checks failed in iterations %d and %d and the pass changed no files; no new pass started: %s"
 
 // passRepairStalled reports whether a pass's repair loop stopped with
 // repair_no_progress. The pass loop then ends the run.

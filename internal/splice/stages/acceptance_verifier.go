@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/zeroruntime"
@@ -22,6 +23,52 @@ const defaultAcceptanceTimeoutSeconds = 30
 // acceptanceUnwindGrace bounds how long the verifier waits for a cancelled
 // acceptance command to return. It is a var so tests can shorten it.
 var acceptanceUnwindGrace = 2 * time.Second
+
+// acceptanceDetailMaxLines bounds the failed-check lines in the Detail.
+const acceptanceDetailMaxLines = 5
+
+// acceptanceDetailMaxBytes bounds the statement and the message of each line.
+const acceptanceDetailMaxBytes = 200
+
+// acceptanceDetail returns the summary, then one line for each failed or
+// errored check. Passed and skipped checks are not listed.
+func acceptanceDetail(summary string, results []schemas.TestCaseResult) string {
+	var b strings.Builder
+	b.WriteString(summary)
+	shown, hidden := 0, 0
+	for _, result := range results {
+		if result.Status != "failed" && result.Status != "errored" {
+			continue
+		}
+		if shown == acceptanceDetailMaxLines {
+			hidden++
+			continue
+		}
+		shown++
+		message := result.Message
+		if i := strings.IndexByte(message, '\n'); i >= 0 {
+			message = message[:i]
+		}
+		fmt.Fprintf(&b, "\n- %s: %s: %s", result.Status,
+			cutAtRune(result.Name, acceptanceDetailMaxBytes), cutAtRune(message, acceptanceDetailMaxBytes))
+	}
+	if hidden > 0 {
+		fmt.Fprintf(&b, "\n- %d more not shown", hidden)
+	}
+	return b.String()
+}
+
+// cutAtRune shortens s to at most max bytes without splitting a rune.
+func cutAtRune(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
 
 func (AcceptanceVerifier) Capabilities() Capabilities {
 	return Capabilities{ModelFree: true, TimeoutSeconds: defaultAcceptanceTimeoutSeconds, Description: "verifying acceptance criteria"}
@@ -169,7 +216,7 @@ func (AcceptanceVerifier) Run(ctx context.Context, input schemas.HarnessStageInp
 		confidence = 0.5
 	}
 	summary := fmt.Sprintf("Acceptance verification: %d passed, %d failed, %d errored, %d skipped.", passed, failed, errored, skipped)
-	detail := summary
+	detail := acceptanceDetail(summary, results)
 	return schemas.HarnessStageOutput{
 		Summary:    summary,
 		Detail:     detail,

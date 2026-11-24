@@ -2,11 +2,13 @@ package stages
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
@@ -356,5 +358,72 @@ func TestAcceptanceVerifierContinuesAfterUnwoundCommand(t *testing.T) {
 	results := output.Data["acceptance_results"].([]schemas.TestCaseResult)
 	if calls.Load() != 2 || results[0].Status != "errored" || results[1].Status != "passed" {
 		t.Fatalf("calls=%d results=%+v", calls.Load(), results)
+	}
+}
+
+// acceptanceDetailRun runs the verifier with one command per fact. The output
+// function decides each command's result, so a test sets each status and text.
+func acceptanceDetailRun(t *testing.T, facts []schemas.AcceptanceFact, output func(command string) ToolResult) string {
+	t.Helper()
+	out, err := (AcceptanceVerifier{}).Run(context.Background(), acceptanceInput(facts...), nil, StageOptions{
+		RunTool: func(_ context.Context, _ string, args map[string]any) (ToolResult, error) {
+			return output(args["command"].(string)), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	return out.Detail
+}
+
+func TestAcceptanceVerifierDetailListsFailedChecks(t *testing.T) {
+	facts := []schemas.AcceptanceFact{
+		automatedFact("alpha", "fail-one"),
+		automatedFact("beta", "fail-two"),
+		automatedFact("gamma", "pass"),
+	}
+	detail := acceptanceDetailRun(t, facts, func(command string) ToolResult {
+		if command == "pass" {
+			return ToolResult{OK: true, Output: "ok"}
+		}
+		return ToolResult{OK: false, Output: command + " first line\nsecond line"}
+	})
+	want := "Acceptance verification: 1 passed, 2 failed, 0 errored, 0 skipped.\n" +
+		"- failed: alpha: fail-one first line\n" +
+		"- failed: beta: fail-two first line"
+	if detail != want {
+		t.Fatalf("detail =\n%s\nwant\n%s", detail, want)
+	}
+}
+
+func TestAcceptanceVerifierDetailCapsFailedChecks(t *testing.T) {
+	var facts []schemas.AcceptanceFact
+	for i := range 7 {
+		facts = append(facts, automatedFact(fmt.Sprintf("check %d", i), "fail"))
+	}
+	detail := acceptanceDetailRun(t, facts, func(string) ToolResult {
+		return ToolResult{OK: false, Output: "boom"}
+	})
+	lines := strings.Split(detail, "\n")
+	if len(lines) != 1+acceptanceDetailMaxLines+1 {
+		t.Fatalf("detail has %d lines, want summary, 5 checks, and one overflow line:\n%s", len(lines), detail)
+	}
+	if lines[len(lines)-1] != "- 2 more not shown" {
+		t.Fatalf("last line = %q, want the overflow count", lines[len(lines)-1])
+	}
+	if lines[1] != "- failed: check 0: boom" {
+		t.Fatalf("first check line = %q, want result order", lines[1])
+	}
+}
+
+func TestAcceptanceVerifierDetailCutsLongMessage(t *testing.T) {
+	long := strings.Repeat("é", 250) // 500 bytes, two bytes per rune
+	detail := acceptanceDetailRun(t, []schemas.AcceptanceFact{automatedFact("long", "fail")}, func(string) ToolResult {
+		return ToolResult{OK: false, Output: long}
+	})
+	lines := strings.Split(detail, "\n")
+	message := strings.TrimPrefix(lines[1], "- failed: long: ")
+	if len(message) != 200 || !utf8.ValidString(message) {
+		t.Fatalf("message is %d bytes (valid UTF-8: %v), want 200 valid bytes", len(message), utf8.ValidString(message))
 	}
 }

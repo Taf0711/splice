@@ -5492,6 +5492,111 @@ func TestRunStalledRepairWithClassifierContinues(t *testing.T) {
 	}
 }
 
+// fixtureStage is a model-free stage whose output the test scripts per call.
+type fixtureStage struct {
+	calls int
+	run   func(call int) (schemas.HarnessStageOutput, error)
+}
+
+func (*fixtureStage) Capabilities() stages.Capabilities {
+	return stages.Capabilities{ModelFree: true}
+}
+
+func (s *fixtureStage) Run(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+	s.calls++
+	return s.run(s.calls)
+}
+
+// acceptanceFixture runs tests that pass and one acceptance check that
+// always fails. The writer scripts result.txt, so a test controls whether a
+// pass changes the workspace. It returns the registry, the writer, and the
+// workspace directory.
+func acceptanceFixture(t *testing.T, writeContent func(call int) string) (stageRegistry, *fixtureStage, string) {
+	t.Helper()
+	workDir := t.TempDir()
+	writer := &fixtureStage{run: func(call int) (schemas.HarnessStageOutput, error) {
+		return schemas.HarnessStageOutput{Summary: "wrote result"}, os.WriteFile(filepath.Join(workDir, "result.txt"), []byte(writeContent(call)), 0600)
+	}}
+	tests := &fixtureStage{run: func(int) (schemas.HarnessStageOutput, error) {
+		return schemas.HarnessStageOutput{Summary: "tests passed", Data: map[string]any{"test_results": schemas.TestRunResults{
+			Command: []string{"go", "test"}, Tests: []schemas.TestCaseResult{{Name: "TestHello", Status: "passed"}},
+		}}}, nil
+	}}
+	acceptance := &fixtureStage{run: func(int) (schemas.HarnessStageOutput, error) {
+		return schemas.HarnessStageOutput{Summary: "acceptance", Data: map[string]any{"acceptance_results": []schemas.TestCaseResult{
+			{Name: "returns 42", Status: "failed", Message: "exit code 1"},
+		}}}, nil
+	}}
+	return stageRegistry{"code_writer": writer, "test_runner": tests, "acceptance_verifier": acceptance}, writer, workDir
+}
+
+func TestRunStopsWhenAcceptanceFailsUnchanged(t *testing.T) {
+	registry, writer, workDir := acceptanceFixture(t, func(int) string { return "same content" })
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		TokenBudget:   schemas.TokenBudget{TotalOutputBudget: 1000000},
+		RequestIntent: "acceptance fails on an unchanged workspace",
+		Stages:        []schemas.ExecutionStage{{Name: "code_writer"}, {Name: "test_runner"}, {Name: "acceptance_verifier"}},
+	}
+	result, err := runIterationLoop(context.Background(), "run-acceptance-stall", plan, registry,
+		runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 50}), workDir, nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	if result.Status != "aborted" {
+		t.Fatalf("status = %q, want aborted", result.Status)
+	}
+	reason := DerefString(result.AbortReason)
+	if writer.calls != 2 || !strings.Contains(reason, "acceptance_no_progress") || !strings.Contains(reason, "returns 42") {
+		t.Fatalf("writer calls = %d, reason = %q; want 2 passes and the acceptance reason", writer.calls, reason)
+	}
+}
+
+func TestRunContinuesWhenAcceptanceFailsButFilesChange(t *testing.T) {
+	registry, writer, workDir := acceptanceFixture(t, func(call int) string { return fmt.Sprintf("attempt %d", call) })
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		TokenBudget:   schemas.TokenBudget{TotalOutputBudget: 1000000},
+		RequestIntent: "acceptance fails while the workspace changes",
+		Stages:        []schemas.ExecutionStage{{Name: "code_writer"}, {Name: "test_runner"}, {Name: "acceptance_verifier"}},
+	}
+	result, err := runIterationLoop(context.Background(), "run-acceptance-changing", plan, registry,
+		runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 50}), workDir, nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	if reason := DerefString(result.AbortReason); strings.Contains(reason, "acceptance_no_progress") {
+		t.Fatalf("guard fired on a pass that changed files: %q", reason)
+	}
+	if writer.calls < 3 {
+		t.Fatalf("writer calls = %d, want the loop to continue past iteration 2", writer.calls)
+	}
+}
+
+func TestAcceptanceStallGuardOffWithClassifier(t *testing.T) {
+	registry, _, workDir := acceptanceFixture(t, func(int) string { return "same content" })
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		TokenBudget:   schemas.TokenBudget{TotalOutputBudget: 1000000},
+		RequestIntent: "acceptance fails under an active classifier",
+		Stages:        []schemas.ExecutionStage{{Name: "code_writer"}, {Name: "test_runner"}, {Name: "acceptance_verifier"}},
+	}
+	eval := &trajectoryEvaluator{label: "continue"}
+	cfg := PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 50})
+	cfg.Advisor = classifierAdvisor(t, eval)
+	result, err := runIterationLoop(context.Background(), "run-acceptance-classifier", plan, registry,
+		runFakeProvider{}, cfg, workDir, nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	if eval.calls == 0 {
+		t.Fatal("classifier was not consulted, so the fixture does not test the classifier-owned path")
+	}
+	if reason := DerefString(result.AbortReason); strings.Contains(reason, "acceptance_no_progress") {
+		t.Fatalf("rule-mode guard ended a classifier-owned run: %q", reason)
+	}
+}
+
 func TestRunDecisionRecordsSink(t *testing.T) {
 	for _, kind := range []string{"completed", "failed", "aborted", "cancelled", "unset", "advisor absent", "write error"} {
 		t.Run(kind, func(t *testing.T) {
