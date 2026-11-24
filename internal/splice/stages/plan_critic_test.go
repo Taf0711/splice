@@ -1,9 +1,11 @@
 package stages
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -37,7 +39,7 @@ func TestDecodePlanCritiqueDerivesBlockingFlag(t *testing.T) {
 				"overall_assessment":        "Reviewed.",
 			})
 			collected := &zeroruntime.CollectedStream{ToolCalls: []zeroruntime.ToolCall{{Name: planCriticToolName, Arguments: string(args)}}}
-			critique, err := decodePlanCritique(collected)
+			critique, _, err := decodePlanCritique(collected)
 			if err != nil {
 				t.Fatalf("decodePlanCritique: %v", err)
 			}
@@ -53,7 +55,7 @@ func TestDecodePlanCritiqueDerivesBlockingFlag(t *testing.T) {
 func TestDecodePlanCritiqueInvalidArgumentsShowExcerpt(t *testing.T) {
 	args := "The plan\nlooks fine " + strings.Repeat("x", 300)
 	collected := &zeroruntime.CollectedStream{ToolCalls: []zeroruntime.ToolCall{{Name: planCriticToolName, Arguments: args}}}
-	_, err := decodePlanCritique(collected)
+	_, _, err := decodePlanCritique(collected)
 	if err == nil || !strings.Contains(err.Error(), "arguments began:") {
 		t.Fatalf("expected excerpt in error, got %v", err)
 	}
@@ -90,7 +92,7 @@ func TestDecodePlanCritiqueSyntaxErrorShowsNearByte(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			collected := &zeroruntime.CollectedStream{ToolCalls: []zeroruntime.ToolCall{{Name: planCriticToolName, Arguments: tt.args}}}
-			_, err := decodePlanCritique(collected)
+			_, _, err := decodePlanCritique(collected)
 			if err == nil || !strings.Contains(err.Error(), "near byte") {
 				t.Fatalf("expected near-byte context, got %v", err)
 			}
@@ -114,7 +116,7 @@ func TestDecodePlanCritiqueRepairsUnquotedLastValue(t *testing.T) {
 	const assessment = "The plan correctly identifies the core change but is dangerous because X."
 	args := capturedCritiqueArgs(assessment)
 	collected := &zeroruntime.CollectedStream{ToolCalls: []zeroruntime.ToolCall{{Name: planCriticToolName, Arguments: args}}}
-	critique, err := decodePlanCritique(collected)
+	critique, _, err := decodePlanCritique(collected)
 	if err != nil {
 		t.Fatalf("decodePlanCritique: %v", err)
 	}
@@ -134,7 +136,7 @@ func TestDecodePlanCritiqueRepairsUnquotedLastValue(t *testing.T) {
 func TestDecodePlanCritiqueDoesNotRepairBareMiddleValue(t *testing.T) {
 	args := `{"overall_assessment": The plan is fine, "critiques": []}`
 	collected := &zeroruntime.CollectedStream{ToolCalls: []zeroruntime.ToolCall{{Name: planCriticToolName, Arguments: args}}}
-	_, err := decodePlanCritique(collected)
+	_, _, err := decodePlanCritique(collected)
 	if err == nil || !strings.Contains(err.Error(), "near byte") {
 		t.Fatalf("expected original near-byte error, got %v", err)
 	}
@@ -148,7 +150,7 @@ func TestDecodePlanCritiqueDoesNotRepairBareMiddleValue(t *testing.T) {
 func TestDecodePlanCritiqueDoesNotRepairSwallowedFields(t *testing.T) {
 	args := `{"critiques": [], "overall_assessment": The plan "must_fix_before_execution": true}`
 	collected := &zeroruntime.CollectedStream{ToolCalls: []zeroruntime.ToolCall{{Name: planCriticToolName, Arguments: args}}}
-	critique, err := decodePlanCritique(collected)
+	critique, _, err := decodePlanCritique(collected)
 	if err == nil {
 		t.Fatalf("expected an error, got critique %+v", critique)
 	}
@@ -162,12 +164,12 @@ func TestDecodePlanCritiqueDoesNotRepairSwallowedFields(t *testing.T) {
 func TestDecodePlanCritiqueLiteralLastValueNotRepaired(t *testing.T) {
 	valid := `{"critiques": [], "overall_assessment": "The plan is fine.", "must_fix_before_execution": true}`
 	collected := &zeroruntime.CollectedStream{ToolCalls: []zeroruntime.ToolCall{{Name: planCriticToolName, Arguments: valid}}}
-	if _, err := decodePlanCritique(collected); err != nil {
+	if _, _, err := decodePlanCritique(collected); err != nil {
 		t.Fatalf("valid arguments: %v", err)
 	}
 	invalid := `{"critiques": [], "overall_assessment": "The plan is fine.", "must_fix_before_execution": nul}`
 	collected = &zeroruntime.CollectedStream{ToolCalls: []zeroruntime.ToolCall{{Name: planCriticToolName, Arguments: invalid}}}
-	_, err := decodePlanCritique(collected)
+	_, _, err := decodePlanCritique(collected)
 	if err == nil || !strings.Contains(err.Error(), "near byte") {
 		t.Fatalf("expected original near-byte error, got %v", err)
 	}
@@ -221,4 +223,147 @@ func TestJSONErrorContextUnmarshalTypeErrorShowsField(t *testing.T) {
 	if !strings.Contains(got, `field "critiques"`) || !strings.Contains(got, "near byte 15") {
 		t.Fatalf("jsonErrorContext = %q, want field and near byte", got)
 	}
+}
+
+// repairTestFields returns a valid critique with one high-severity item and a
+// blocking flag that matches it. Tests change one field at a time.
+func repairTestFields() map[string]any {
+	return map[string]any{
+		"critiques": []map[string]any{{
+			"category":             schemas.CritiqueCategories()[0],
+			"severity":             "high",
+			"issue":                "Step order is unclear.",
+			"suggested_mitigation": "Reorder the steps.",
+		}},
+		"cross_cutting_concerns":    []string{},
+		"must_fix_before_execution": true,
+		"overall_assessment":        "Reviewed.",
+	}
+}
+
+// TestDecodePlanCritiqueReportsRepairs pins which repair phrases the decode
+// reports for each kind of model mistake.
+func TestDecodePlanCritiqueReportsRepairs(t *testing.T) {
+	encodedCritiques := `[{"category": "` + schemas.CritiqueCategories()[0] + `", "severity": "high", "issue": "Step order is unclear."}]`
+	tests := []struct {
+		name   string
+		args   func() string
+		repair []string
+	}{
+		{
+			name:   "valid arguments",
+			args:   func() string { b, _ := json.Marshal(repairTestFields()); return string(b) },
+			repair: nil,
+		},
+		{
+			name: "critiques as a string-encoded array",
+			args: func() string {
+				f := repairTestFields()
+				f["critiques"] = encodedCritiques
+				b, _ := json.Marshal(f)
+				return string(b)
+			},
+			repair: []string{"critiques sent as a string"},
+		},
+		{
+			name: "cross_cutting_concerns as one sentence",
+			args: func() string {
+				f := repairTestFields()
+				f["cross_cutting_concerns"] = "Watch the migration order."
+				b, _ := json.Marshal(f)
+				return string(b)
+			},
+			repair: []string{"cross_cutting_concerns sent as one sentence"},
+		},
+		{
+			name: "cross_cutting_concerns as a string-encoded array",
+			args: func() string {
+				f := repairTestFields()
+				f["cross_cutting_concerns"] = `["Watch the migration order."]`
+				b, _ := json.Marshal(f)
+				return string(b)
+			},
+			repair: []string{"cross_cutting_concerns sent as a string"},
+		},
+		{
+			name: "high severity with must_fix false",
+			args: func() string {
+				f := repairTestFields()
+				f["must_fix_before_execution"] = false
+				b, _ := json.Marshal(f)
+				return string(b)
+			},
+			repair: []string{"must_fix_before_execution corrected to match severities"},
+		},
+		{
+			name: "low severity with must_fix false",
+			args: func() string {
+				f := repairTestFields()
+				f["must_fix_before_execution"] = false
+				f["critiques"] = []map[string]any{{
+					"category": schemas.CritiqueCategories()[0],
+					"severity": "low",
+					"issue":    "Minor wording.",
+				}}
+				b, _ := json.Marshal(f)
+				return string(b)
+			},
+			repair: nil,
+		},
+		{
+			name:   "captured unquoted last value",
+			args:   func() string { return capturedCritiqueArgs("The plan is dangerous because X.") },
+			repair: []string{"last value had no quotes"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			collected := &zeroruntime.CollectedStream{ToolCalls: []zeroruntime.ToolCall{{Name: planCriticToolName, Arguments: tt.args()}}}
+			_, got, err := decodePlanCritique(collected)
+			if err != nil {
+				t.Fatalf("decodePlanCritique: %v", err)
+			}
+			if !slices.Equal(got, tt.repair) {
+				t.Fatalf("repairs = %q, want %q", got, tt.repair)
+			}
+		})
+	}
+}
+
+// TestPlanCriticStageReportsRepairs pins the Summary suffix and the Data key
+// that the stage builds from the repairs.
+func TestPlanCriticStageReportsRepairs(t *testing.T) {
+	plan := schemas.DesignPlan{
+		Source: "conversation", Epic: "add feature", Requirements: []string{"it works"},
+		InScope: []string{"code"}, Tasks: []schemas.Task{{ID: "t1", Title: "write code", Intent: "impl"}},
+	}
+	t.Run("repaired output", func(t *testing.T) {
+		provider := &fakeProvider{events: toolCallEvent("submit_critique", capturedCritiqueArgs("The plan is dangerous."))}
+		result, err := (PlanCritic{}).Run(context.Background(), newHarnessInput("review plan"), provider, StageOptions{Plan: &plan})
+		if err != nil {
+			t.Fatalf("stage run: %v", err)
+		}
+		wantSummary := "Plan critique: 1 issue(s) Repaired model output: last value had no quotes."
+		if result.Summary != wantSummary {
+			t.Fatalf("summary = %q, want %q", result.Summary, wantSummary)
+		}
+		repairs, ok := result.Data["model_output_repairs"].([]string)
+		if !ok || !slices.Equal(repairs, []string{"last value had no quotes"}) {
+			t.Fatalf("model_output_repairs = %#v", result.Data["model_output_repairs"])
+		}
+	})
+	t.Run("valid output", func(t *testing.T) {
+		args, _ := json.Marshal(schemas.PlanCritique{CrossCuttingConcerns: []string{}, OverallAssessment: "sound"})
+		provider := &fakeProvider{events: toolCallEvent("submit_critique", string(args))}
+		result, err := (PlanCritic{}).Run(context.Background(), newHarnessInput("review plan"), provider, StageOptions{Plan: &plan})
+		if err != nil {
+			t.Fatalf("stage run: %v", err)
+		}
+		if result.Summary != "Plan critique: 0 issue(s)" {
+			t.Fatalf("summary = %q", result.Summary)
+		}
+		if _, ok := result.Data["model_output_repairs"]; ok {
+			t.Fatalf("valid output must not carry model_output_repairs")
+		}
+	})
 }

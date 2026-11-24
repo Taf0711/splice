@@ -1,6 +1,7 @@
 package stages
 
 import (
+	"bytes"
 	"context"
 	_ "embed"
 	"encoding/json"
@@ -51,79 +52,132 @@ func (PlanCritic) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 	if err != nil {
 		return schemas.HarnessStageOutput{}, err
 	}
-	critique, err := decodePlanCritique(collected)
+	critique, repairs, err := decodePlanCritique(collected)
 	if err != nil {
 		return schemas.HarnessStageOutput{}, err
 	}
+	summary := fmt.Sprintf("Plan critique: %d issue(s)", len(critique.Critiques))
+	data := map[string]any{
+		"plan_critic_input":  critiqueInput,
+		"plan_critic_output": critique,
+	}
+	if len(repairs) > 0 {
+		summary += " Repaired model output: " + strings.Join(repairs, "; ") + "."
+		data["model_output_repairs"] = repairs
+	}
 	return schemas.HarnessStageOutput{
-		Summary:    fmt.Sprintf("Plan critique: %d issue(s)", len(critique.Critiques)),
+		Summary:    summary,
 		Detail:     critique.OverallAssessment,
 		Confidence: 1.0,
-		Data: map[string]any{
-			"plan_critic_input":  critiqueInput,
-			"plan_critic_output": critique,
-		},
-		Usage: usageFromCollected(collected),
+		Data:       data,
+		Usage:      usageFromCollected(collected),
 	}, nil
 }
 
 func parsePlanCritique(collected *zeroruntime.CollectedStream) error {
-	_, err := decodePlanCritique(collected)
+	_, _, err := decodePlanCritique(collected)
 	return err
 }
 
-func decodePlanCritique(collected *zeroruntime.CollectedStream) (schemas.PlanCritique, error) {
+// decodePlanCritique decodes the submit_critique arguments. It returns the
+// critique and a short phrase for each repair it applied to the model output.
+// The phrases are empty when the model output needed no repair.
+func decodePlanCritique(collected *zeroruntime.CollectedStream) (schemas.PlanCritique, []string, error) {
 	tc := findToolCall(collected, planCriticToolName)
 	if tc == nil {
-		return schemas.PlanCritique{}, fmt.Errorf("model did not call %s", planCriticToolName)
+		return schemas.PlanCritique{}, nil, fmt.Errorf("model did not call %s", planCriticToolName)
 	}
+	text := tc.Arguments
+	var repairs []string
 	var critique schemas.PlanCritique
-	if err := json.Unmarshal([]byte(tc.Arguments), &critique); err != nil {
-		if repaired, ok := repairPlanCritique(tc.Arguments, err); ok {
-			return repaired, nil
+	if err := json.Unmarshal([]byte(text), &critique); err != nil {
+		fixed, repaired, ok := repairPlanCritique(text, err)
+		if !ok {
+			excerpt := tc.Arguments
+			if len(excerpt) > 160 {
+				excerpt = excerpt[:160]
+			}
+			excerpt = strings.ReplaceAll(excerpt, "\n", " ")
+			return schemas.PlanCritique{}, nil, fmt.Errorf("parse %s: %w (arguments began: %q)%s", planCriticToolName, err, excerpt, jsonErrorContext(tc.Arguments, err))
 		}
-		excerpt := tc.Arguments
-		if len(excerpt) > 160 {
-			excerpt = excerpt[:160]
-		}
-		excerpt = strings.ReplaceAll(excerpt, "\n", " ")
-		return schemas.PlanCritique{}, fmt.Errorf("parse %s: %w (arguments began: %q)%s", planCriticToolName, err, excerpt, jsonErrorContext(tc.Arguments, err))
+		text, critique = fixed, repaired
+		repairs = append(repairs, "last value had no quotes")
 	}
-	return finishPlanCritique(critique)
+	shapeRepairs, err := planCriticShapeRepairs(text)
+	if err != nil {
+		return schemas.PlanCritique{}, nil, err
+	}
+	repairs = append(repairs, shapeRepairs...)
+	critique, flagCorrected, err := finishPlanCritique(critique)
+	if err != nil {
+		return schemas.PlanCritique{}, nil, err
+	}
+	if flagCorrected {
+		repairs = append(repairs, "must_fix_before_execution corrected to match severities")
+	}
+	return critique, repairs, nil
+}
+
+// planCriticShapeRepairs names each list field that the model sent in a shape
+// that the schema decodes by repair. It reads the raw JSON, so it runs on the
+// same text that the schema decoded.
+func planCriticShapeRepairs(text string) ([]string, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(text), &fields); err != nil {
+		return nil, fmt.Errorf("read %s fields: %w", planCriticToolName, err)
+	}
+	var repairs []string
+	if raw := bytes.TrimSpace(fields["critiques"]); len(raw) > 0 && raw[0] == '"' {
+		repairs = append(repairs, "critiques sent as a string")
+	}
+	if raw := bytes.TrimSpace(fields["cross_cutting_concerns"]); len(raw) > 0 && raw[0] == '"' {
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return nil, fmt.Errorf("read cross_cutting_concerns: %w", err)
+		}
+		// A blank string is an empty list sent as a string.
+		content := strings.TrimSpace(s)
+		if content == "" || (content[0] == '[' && json.Valid([]byte(content))) {
+			repairs = append(repairs, "cross_cutting_concerns sent as a string")
+		} else {
+			repairs = append(repairs, "cross_cutting_concerns sent as one sentence")
+		}
+	}
+	return repairs, nil
 }
 
 // finishPlanCritique runs the post-decode steps shared by every decode path.
-func finishPlanCritique(critique schemas.PlanCritique) (schemas.PlanCritique, error) {
+// It reports whether the model flag differed from the derived flag.
+func finishPlanCritique(critique schemas.PlanCritique) (schemas.PlanCritique, bool, error) {
 	// The flag is fully determined by the severities, so derive it rather
 	// than reject a model that sent it inconsistently.
-	critique.MustFixBeforeExecution = critique.BlocksExecution()
+	derived := critique.BlocksExecution()
+	corrected := critique.MustFixBeforeExecution != derived
+	critique.MustFixBeforeExecution = derived
 	if err := critique.Validate(); err != nil {
-		return schemas.PlanCritique{}, err
+		return schemas.PlanCritique{}, false, err
 	}
-	return critique, nil
+	return critique, corrected, nil
 }
 
 // repairPlanCritique tries one repair of arguments that failed with a syntax
-// error. It returns false when the first error is not a syntax error, when the
-// repair does not apply, or when the repaired text does not pass decoding.
-func repairPlanCritique(args string, first error) (schemas.PlanCritique, bool) {
+// error. It returns the repaired text and its decoded critique. It returns false
+// when the first error is not a syntax error, or when the repair does not apply
+// or does not decode.
+func repairPlanCritique(args string, first error) (string, schemas.PlanCritique, bool) {
 	var syn *json.SyntaxError
 	if !errors.As(first, &syn) {
-		return schemas.PlanCritique{}, false
+		return "", schemas.PlanCritique{}, false
 	}
 	fixed, ok := repairUnquotedTrailingValue(args)
 	if !ok {
-		return schemas.PlanCritique{}, false
+		return "", schemas.PlanCritique{}, false
 	}
 	var critique schemas.PlanCritique
 	if err := json.Unmarshal([]byte(fixed), &critique); err != nil {
-		return schemas.PlanCritique{}, false
+		return "", schemas.PlanCritique{}, false
 	}
-	critique, err := finishPlanCritique(critique)
-	if err != nil {
-		return schemas.PlanCritique{}, false
-	}
-	return critique, true
+	return fixed, critique, true
 }
 
 // planCriticKeyPattern matches a JSON key string, its colon, and the spaces
