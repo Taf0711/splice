@@ -4,8 +4,10 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/zeroruntime"
@@ -81,7 +83,7 @@ func decodePlanCritique(collected *zeroruntime.CollectedStream) (schemas.PlanCri
 			excerpt = excerpt[:160]
 		}
 		excerpt = strings.ReplaceAll(excerpt, "\n", " ")
-		return schemas.PlanCritique{}, fmt.Errorf("parse %s: %w (arguments began: %q)", planCriticToolName, err, excerpt)
+		return schemas.PlanCritique{}, fmt.Errorf("parse %s: %w (arguments began: %q)%s", planCriticToolName, err, excerpt, jsonErrorContext(tc.Arguments, err))
 	}
 	// The flag is fully determined by the severities, so derive it rather
 	// than reject a model that sent it inconsistently.
@@ -90,6 +92,43 @@ func decodePlanCritique(collected *zeroruntime.CollectedStream) (schemas.PlanCri
 		return schemas.PlanCritique{}, err
 	}
 	return critique, nil
+}
+
+// jsonErrorContext returns the text around the byte where a JSON decode
+// failed. It returns "" when err has no offset. The text is 60 bytes on each
+// side of the failing byte, cut at rune boundaries, with newlines replaced by
+// spaces. The result starts with a space so that the caller can append it.
+func jsonErrorContext(args string, err error) string {
+	var (
+		offset int64
+		field  string
+		syn    *json.SyntaxError
+		typ    *json.UnmarshalTypeError
+	)
+	switch {
+	case errors.As(err, &syn):
+		offset = syn.Offset
+	case errors.As(err, &typ):
+		offset = typ.Offset
+		field = typ.Field
+	default:
+		return ""
+	}
+	pos := min(max(int(offset), 0), len(args))
+	idx := max(pos-1, 0)
+	start := max(idx-60, 0)
+	end := min(idx+60, len(args))
+	for start < end && !utf8.RuneStart(args[start]) {
+		start++
+	}
+	for end < len(args) && !utf8.RuneStart(args[end]) {
+		end++
+	}
+	snippet := strings.ReplaceAll(args[start:end], "\n", " ")
+	if field != "" {
+		return fmt.Sprintf(" (field %q, near byte %d: %q)", field, pos, snippet)
+	}
+	return fmt.Sprintf(" (near byte %d: %q)", pos, snippet)
 }
 
 func planCriticToolDefinition() zeroruntime.ToolDefinition {

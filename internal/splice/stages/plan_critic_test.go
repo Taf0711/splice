@@ -2,6 +2,7 @@ package stages
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -59,5 +60,61 @@ func TestDecodePlanCritiqueInvalidArgumentsShowExcerpt(t *testing.T) {
 	want := fmt.Sprintf("%q", "The plan looks fine "+strings.Repeat("x", 160-len("The plan looks fine ")))
 	if !strings.Contains(err.Error(), want) {
 		t.Fatalf("error %q does not contain %s", err.Error(), want)
+	}
+}
+
+// TestDecodePlanCritiqueSyntaxErrorShowsNearByte pins that a syntax error
+// quotes the text around the failing byte.
+func TestDecodePlanCritiqueSyntaxErrorShowsNearByte(t *testing.T) {
+	tests := []struct {
+		name string
+		args string
+		want string
+	}{
+		{
+			name: "bare literal",
+			args: `{"critiques": [], "must_fix_before_execution": True, "overall_assessment": "x"}`,
+			want: "True",
+		},
+		{
+			name: "unquoted value",
+			args: `{"critiques": [], "must_fix_before_execution": false, "overall_assessment": The plan is fine}`,
+			want: "The plan",
+		},
+		{
+			name: "failure past the excerpt",
+			args: `{"overall_assessment": "` + strings.Repeat("x", 300) + `", "must_fix_before_execution": True}`,
+			want: "True",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			collected := &zeroruntime.CollectedStream{ToolCalls: []zeroruntime.ToolCall{{Name: planCriticToolName, Arguments: tt.args}}}
+			_, err := decodePlanCritique(collected)
+			if err == nil || !strings.Contains(err.Error(), "near byte") {
+				t.Fatalf("expected near-byte context, got %v", err)
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error %q does not contain %q", err.Error(), tt.want)
+			}
+		})
+	}
+}
+
+// TestJSONErrorContextNoOffset pins that an error without an offset adds nothing.
+func TestJSONErrorContextNoOffset(t *testing.T) {
+	if got := jsonErrorContext(`{"a": 1}`, errors.New("boom")); got != "" {
+		t.Fatalf("jsonErrorContext for non-JSON error = %q, want empty", got)
+	}
+}
+
+// TestJSONErrorContextUnmarshalTypeErrorShowsField pins the field and offset
+// for a type mismatch.
+func TestJSONErrorContextUnmarshalTypeErrorShowsField(t *testing.T) {
+	args := `{"critiques": "not a list"}`
+	err := &json.UnmarshalTypeError{Field: "critiques", Offset: 15}
+	got := jsonErrorContext(args, err)
+	if !strings.Contains(got, `field "critiques"`) || !strings.Contains(got, "near byte 15") {
+		t.Fatalf("jsonErrorContext = %q, want field and near byte", got)
 	}
 }
