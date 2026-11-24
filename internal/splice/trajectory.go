@@ -750,13 +750,16 @@ func tokensConsumed(records []schemas.StageRecord) int {
 	return total
 }
 
-// tokensGenerated sums output-side spend only (completion plus reasoning;
-// reasoning is already a subset of TokensOutput). The trajectory budget gates
-// on this, not on input-inclusive consumption.
+// tokensGenerated sums visible output: TokensOutput minus TokensReasoning for
+// each record. Reasoning tokens are a subset of TokensOutput, so they are
+// excluded here. The per-request output cap already bounds them. A record
+// with more reasoning than output (bad provider data) counts 0, never a
+// negative value. A provider that reports no reasoning split keeps
+// TokensReasoning 0 and counts its full output.
 func tokensGenerated(records []schemas.StageRecord) int {
 	total := 0
 	for _, record := range records {
-		total += record.TokensOutput
+		total += max(0, record.TokensOutput-record.TokensReasoning)
 	}
 	return total
 }

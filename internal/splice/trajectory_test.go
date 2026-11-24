@@ -405,6 +405,66 @@ func TestTrajectoryBudgetIgnoresInputVolume(t *testing.T) {
 	}
 }
 
+// TestTokensGeneratedCountsVisibleOutputOnly pins the budget unit: reasoning
+// tokens are a subset of TokensOutput and never count toward the budget.
+func TestTokensGeneratedCountsVisibleOutputOnly(t *testing.T) {
+	tests := []struct {
+		name    string
+		records []schemas.StageRecord
+		want    int
+	}{
+		{"reasoning is excluded", []schemas.StageRecord{
+			{TokensOutput: 7000, TokensReasoning: 6000},
+			{TokensOutput: 8000, TokensReasoning: 7000},
+		}, 2000},
+		{"reasoning above output counts zero", []schemas.StageRecord{
+			{TokensOutput: 100, TokensReasoning: 500},
+		}, 0},
+		{"no reasoning split keeps full output", []schemas.StageRecord{
+			{TokensOutput: 300},
+		}, 300},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tokensGenerated(tt.records); got != tt.want {
+				t.Fatalf("tokensGenerated = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestTrajectoryBudgetCountsVisibleOutput pins the live gate: a history whose
+// total output is large but whose visible output is small must not abort, and
+// visible output above the budget must abort.
+func TestTrajectoryBudgetCountsVisibleOutput(t *testing.T) {
+	const budgetTokens = 9192
+	tests := []struct {
+		name      string
+		records   []schemas.StageRecord
+		wantAbort bool
+	}{
+		{"total 20000 with visible 3000 does not abort", []schemas.StageRecord{
+			{Name: "code_writer", Status: schemas.StageCompleted, TokensOutput: 20000, TokensReasoning: 17000},
+		}, false},
+		{"visible 10000 aborts", []schemas.StageRecord{
+			{Name: "code_writer", Status: schemas.StageCompleted, TokensOutput: 20000, TokensReasoning: 10000},
+		}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state, err := ComputeIterationState(0, nil, tt.records, schemas.ChangeSummary{}, nil)
+			if err != nil {
+				t.Fatalf("build state: %v", err)
+			}
+			budget := budgetTokens
+			decision := EvaluateTrajectory([]schemas.IterationState{state}, 5, &budget)
+			if got := decision.Action == schemas.ActionAbortBudget; got != tt.wantAbort {
+				t.Fatalf("abort_budget = %v, want %v: %+v", got, tt.wantAbort, decision)
+			}
+		})
+	}
+}
+
 // TestIterationStateStillReportsInputTotals pins the reporting contract: the
 // projection keeps filling TokensConsumed (input-inclusive) alongside the new
 // generation field, so telemetry keeps seeing real total burn.
