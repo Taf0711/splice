@@ -77,8 +77,8 @@ func TestDecodePlanCritiqueSyntaxErrorShowsNearByte(t *testing.T) {
 			want: "True",
 		},
 		{
-			name: "unquoted value",
-			args: `{"critiques": [], "must_fix_before_execution": false, "overall_assessment": The plan is fine}`,
+			name: "unquoted value before another field",
+			args: `{"critiques": [], "overall_assessment": The plan is fine, "must_fix_before_execution": false}`,
 			want: "The plan",
 		},
 		{
@@ -99,6 +99,110 @@ func TestDecodePlanCritiqueSyntaxErrorShowsNearByte(t *testing.T) {
 			}
 		})
 	}
+}
+
+// plan critic arguments with a valid high-severity critique and a last string
+// value that has no quotes.
+func capturedCritiqueArgs(bare string) string {
+	return fmt.Sprintf(`{"critiques": [{"category": %q, "severity": "high", "issue": "Step order is unclear.", "suggested_mitigation": "Reorder the steps."}], "cross_cutting_concerns": [], "must_fix_before_execution": true, "overall_assessment": %s}`,
+		schemas.CritiqueCategories()[0], bare)
+}
+
+// TestDecodePlanCritiqueRepairsUnquotedLastValue pins the captured failure: the
+// last string value has no quotes and runs to the closing brace.
+func TestDecodePlanCritiqueRepairsUnquotedLastValue(t *testing.T) {
+	const assessment = "The plan correctly identifies the core change but is dangerous because X."
+	args := capturedCritiqueArgs(assessment)
+	collected := &zeroruntime.CollectedStream{ToolCalls: []zeroruntime.ToolCall{{Name: planCriticToolName, Arguments: args}}}
+	critique, err := decodePlanCritique(collected)
+	if err != nil {
+		t.Fatalf("decodePlanCritique: %v", err)
+	}
+	if critique.OverallAssessment != assessment {
+		t.Fatalf("overall_assessment = %q, want %q", critique.OverallAssessment, assessment)
+	}
+	if !critique.MustFixBeforeExecution {
+		t.Fatalf("must_fix_before_execution = false, want true")
+	}
+	if len(critique.Critiques) != 1 {
+		t.Fatalf("critiques = %d, want 1", len(critique.Critiques))
+	}
+}
+
+// TestDecodePlanCritiqueDoesNotRepairBareMiddleValue pins that a bare value
+// before another field keeps the original error.
+func TestDecodePlanCritiqueDoesNotRepairBareMiddleValue(t *testing.T) {
+	args := `{"overall_assessment": The plan is fine, "critiques": []}`
+	collected := &zeroruntime.CollectedStream{ToolCalls: []zeroruntime.ToolCall{{Name: planCriticToolName, Arguments: args}}}
+	_, err := decodePlanCritique(collected)
+	if err == nil || !strings.Contains(err.Error(), "near byte") {
+		t.Fatalf("expected original near-byte error, got %v", err)
+	}
+	if strings.Contains(err.Error(), "repair") {
+		t.Fatalf("error %q mentions a repair", err.Error())
+	}
+}
+
+// TestDecodePlanCritiqueDoesNotRepairSwallowedFields pins that a bare value
+// which contains another key is not repaired.
+func TestDecodePlanCritiqueDoesNotRepairSwallowedFields(t *testing.T) {
+	args := `{"critiques": [], "overall_assessment": The plan "must_fix_before_execution": true}`
+	collected := &zeroruntime.CollectedStream{ToolCalls: []zeroruntime.ToolCall{{Name: planCriticToolName, Arguments: args}}}
+	critique, err := decodePlanCritique(collected)
+	if err == nil {
+		t.Fatalf("expected an error, got critique %+v", critique)
+	}
+	if !strings.Contains(err.Error(), "near byte") {
+		t.Fatalf("expected original near-byte error, got %v", err)
+	}
+}
+
+// TestDecodePlanCritiqueLiteralLastValueNotRepaired pins that a last value that
+// starts with a JSON literal is not treated as bare text.
+func TestDecodePlanCritiqueLiteralLastValueNotRepaired(t *testing.T) {
+	valid := `{"critiques": [], "overall_assessment": "The plan is fine.", "must_fix_before_execution": true}`
+	collected := &zeroruntime.CollectedStream{ToolCalls: []zeroruntime.ToolCall{{Name: planCriticToolName, Arguments: valid}}}
+	if _, err := decodePlanCritique(collected); err != nil {
+		t.Fatalf("valid arguments: %v", err)
+	}
+	invalid := `{"critiques": [], "overall_assessment": "The plan is fine.", "must_fix_before_execution": nul}`
+	collected = &zeroruntime.CollectedStream{ToolCalls: []zeroruntime.ToolCall{{Name: planCriticToolName, Arguments: invalid}}}
+	_, err := decodePlanCritique(collected)
+	if err == nil || !strings.Contains(err.Error(), "near byte") {
+		t.Fatalf("expected original near-byte error, got %v", err)
+	}
+}
+
+// TestRepairUnquotedTrailingValue pins the rebuild rules of the repair helper.
+func TestRepairUnquotedTrailingValue(t *testing.T) {
+	t.Run("no closing brace", func(t *testing.T) {
+		if _, ok := repairUnquotedTrailingValue(`{"overall_assessment": The plan`); ok {
+			t.Fatal("repair applied to text that does not end with }")
+		}
+	})
+	t.Run("captured shape", func(t *testing.T) {
+		in := `{"critiques": [], "must_fix_before_execution": true, "overall_assessment": The plan is dangerous.}`
+		want := `{"critiques": [], "must_fix_before_execution": true, "overall_assessment": "The plan is dangerous."}`
+		got, ok := repairUnquotedTrailingValue(in)
+		if !ok || got != want {
+			t.Fatalf("repairUnquotedTrailingValue = %q, %t; want %q, true", got, ok, want)
+		}
+	})
+	t.Run("quotes and backslashes are escaped", func(t *testing.T) {
+		const bare = `Don't use C:\tmp and say "no"`
+		in := `{"critiques": [], "overall_assessment": ` + bare + `}`
+		got, ok := repairUnquotedTrailingValue(in)
+		if !ok {
+			t.Fatal("repair not applied")
+		}
+		var critique schemas.PlanCritique
+		if err := json.Unmarshal([]byte(got), &critique); err != nil {
+			t.Fatalf("rebuilt text %q does not decode: %v", got, err)
+		}
+		if critique.OverallAssessment != bare {
+			t.Fatalf("overall_assessment = %q, want %q", critique.OverallAssessment, bare)
+		}
+	})
 }
 
 // TestJSONErrorContextNoOffset pins that an error without an offset adds nothing.

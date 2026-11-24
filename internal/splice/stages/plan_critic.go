@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -78,6 +79,9 @@ func decodePlanCritique(collected *zeroruntime.CollectedStream) (schemas.PlanCri
 	}
 	var critique schemas.PlanCritique
 	if err := json.Unmarshal([]byte(tc.Arguments), &critique); err != nil {
+		if repaired, ok := repairPlanCritique(tc.Arguments, err); ok {
+			return repaired, nil
+		}
 		excerpt := tc.Arguments
 		if len(excerpt) > 160 {
 			excerpt = excerpt[:160]
@@ -85,6 +89,11 @@ func decodePlanCritique(collected *zeroruntime.CollectedStream) (schemas.PlanCri
 		excerpt = strings.ReplaceAll(excerpt, "\n", " ")
 		return schemas.PlanCritique{}, fmt.Errorf("parse %s: %w (arguments began: %q)%s", planCriticToolName, err, excerpt, jsonErrorContext(tc.Arguments, err))
 	}
+	return finishPlanCritique(critique)
+}
+
+// finishPlanCritique runs the post-decode steps shared by every decode path.
+func finishPlanCritique(critique schemas.PlanCritique) (schemas.PlanCritique, error) {
 	// The flag is fully determined by the severities, so derive it rather
 	// than reject a model that sent it inconsistently.
 	critique.MustFixBeforeExecution = critique.BlocksExecution()
@@ -92,6 +101,85 @@ func decodePlanCritique(collected *zeroruntime.CollectedStream) (schemas.PlanCri
 		return schemas.PlanCritique{}, err
 	}
 	return critique, nil
+}
+
+// repairPlanCritique tries one repair of arguments that failed with a syntax
+// error. It returns false when the first error is not a syntax error, when the
+// repair does not apply, or when the repaired text does not pass decoding.
+func repairPlanCritique(args string, first error) (schemas.PlanCritique, bool) {
+	var syn *json.SyntaxError
+	if !errors.As(first, &syn) {
+		return schemas.PlanCritique{}, false
+	}
+	fixed, ok := repairUnquotedTrailingValue(args)
+	if !ok {
+		return schemas.PlanCritique{}, false
+	}
+	var critique schemas.PlanCritique
+	if err := json.Unmarshal([]byte(fixed), &critique); err != nil {
+		return schemas.PlanCritique{}, false
+	}
+	critique, err := finishPlanCritique(critique)
+	if err != nil {
+		return schemas.PlanCritique{}, false
+	}
+	return critique, true
+}
+
+// planCriticKeyPattern matches a JSON key string, its colon, and the spaces
+// around the colon.
+var planCriticKeyPattern = regexp.MustCompile(`"([^"\\]|\\.)*"\s*:\s*`)
+
+// repairUnquotedTrailingValue rebuilds arguments whose last string value has
+// no quotes, such as `"overall_assessment": The plan is fine.}`. It quotes the
+// bare text that follows the last key whose value is not a JSON value. It
+// returns false when the text does not fit that shape.
+func repairUnquotedTrailingValue(args string) (string, bool) {
+	args = strings.TrimSpace(args)
+	if !strings.HasSuffix(args, "}") {
+		return "", false
+	}
+	body := args[:len(args)-1]
+	valueStart := -1
+	for _, m := range planCriticKeyPattern.FindAllStringIndex(body, -1) {
+		if !startsJSONValue(body[m[1]:]) {
+			valueStart = m[1]
+		}
+	}
+	if valueStart < 0 {
+		return "", false
+	}
+	bare := strings.TrimRight(body[valueStart:], " \t\r\n")
+	if bare == "" {
+		return "", false
+	}
+	// A quote followed later by a colon means the bare text swallowed another
+	// key. Repairing that would hide the other fields.
+	if q := strings.IndexByte(bare, '"'); q >= 0 && strings.Contains(bare[q+1:], ":") {
+		return "", false
+	}
+	quoted, err := json.Marshal(bare)
+	if err != nil {
+		return "", false
+	}
+	return body[:valueStart] + string(quoted) + "}", true
+}
+
+// startsJSONValue reports whether s begins with a JSON value, or with text
+// that the repair must leave alone.
+func startsJSONValue(s string) bool {
+	if s == "" {
+		return true
+	}
+	if strings.IndexByte(`"{[-`, s[0]) >= 0 || (s[0] >= '0' && s[0] <= '9') {
+		return true
+	}
+	for _, lit := range []string{"true", "false", "null"} {
+		if strings.HasPrefix(s, lit) {
+			return true
+		}
+	}
+	return false
 }
 
 // jsonErrorContext returns the text around the byte where a JSON decode
