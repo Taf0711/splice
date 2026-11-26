@@ -1287,6 +1287,10 @@ func runIterationLoop(
 	// completed pass, and prevAcceptanceIter is that pass's iteration.
 	var prevAcceptanceSig string
 	var prevAcceptanceIter int
+	// accRepeat counts the consecutive completed passes with the same
+	// non-empty acceptance signature. accFirstIter is the first iteration
+	// of that run.
+	var accRepeat, accFirstIter int
 	for i := 1; i <= maxIterations; i++ {
 		if ctx.Err() != nil {
 			return schemas.PipelineResult{}, context.Canceled
@@ -1483,15 +1487,28 @@ func runIterationLoop(
 			return finishWithReason(runID, plan, allRecords, "aborted", fmt.Sprintf(repairStallReason, i))
 		}
 		// Rule-mode backstop: an active classifier owns this decision.
-		// The same acceptance checks failed again and the pass changed no files.
+		// The same acceptance checks failed again. The run stops at once when
+		// the pass changed no files. It also stops at the repeat limit when
+		// the files changed.
 		accKeys, accErr := acceptanceFailureSignatures(passOutputs)
 		if accErr != nil {
 			return finishWithReason(runID, plan, allRecords, "failed", fmt.Sprintf("acceptance signature: %v", accErr))
 		}
 		accSig := strings.Join(accKeys, "\n")
-		if options.ClassifierPolicy == nil && accSig != "" && accSig == prevAcceptanceSig &&
+		switch {
+		case accSig == "":
+			accRepeat, accFirstIter = 0, 0
+		case accSig == prevAcceptanceSig:
+			accRepeat++
+		default:
+			accRepeat, accFirstIter = 1, i
+		}
+		if options.ClassifierPolicy == nil && accRepeat >= 2 &&
 			state.PassChanged != nil && !*state.PassChanged {
 			return finishWithReason(runID, plan, allRecords, "aborted", fmt.Sprintf(acceptanceStallReason, prevAcceptanceIter, i, acceptanceFirstStatement(accKeys[0])))
+		}
+		if options.ClassifierPolicy == nil && accRepeat >= acceptanceRepeatLimit {
+			return finishWithReason(runID, plan, allRecords, "aborted", fmt.Sprintf(acceptanceRepeatReason, accFirstIter, i, acceptanceFirstStatement(accKeys[0])))
 		}
 		prevAcceptanceSig, prevAcceptanceIter = accSig, i
 
@@ -1749,6 +1766,16 @@ const repairStallReason = "repair_no_progress: the repair loop could not change 
 // fail in two passes and the workspace does not change. It takes the previous
 // iteration, the current iteration, and the first failing statement.
 const acceptanceStallReason = "acceptance_no_progress: the same acceptance checks failed in iterations %d and %d and the pass changed no files; no new pass started: %s"
+
+// acceptanceRepeatLimit is the number of consecutive passes with the same
+// acceptance failures that ends the run, even when the files changed.
+const acceptanceRepeatLimit = 3
+
+// acceptanceRepeatReason is the abort reason when the same acceptance checks
+// fail in acceptanceRepeatLimit consecutive passes, although the files
+// changed. It takes the first iteration of the run, the current iteration,
+// and the first failing statement.
+const acceptanceRepeatReason = "acceptance_no_progress: the same acceptance checks failed in iterations %d to %d although the code changed; no new pass started: %s"
 
 // passRepairStalled reports whether a pass's repair loop stopped with
 // repair_no_progress. The pass loop then ends the run.
@@ -2073,6 +2100,13 @@ func runPass(
 			emitStageEvent(options, iteration-1, stageName, "skipped", summary, 0, nil)
 		} else {
 			emitStageEvent(options, iteration-1, stageName, "completed", summary, 100, stageChangedFiles(output))
+		}
+		// The run log shows the summary only. The verifier also lists each
+		// failed check, so the log names the checks that failed.
+		if stageName == roleStageName(plan, "acceptance_verifier") {
+			if at := strings.Index(output.Detail, "\n- "); at >= 0 {
+				emitStageEvent(options, iteration-1, stageName, "message", output.Detail[at+1:], 0, nil)
+			}
 		}
 		for _, obs := range extractWriteObservations(stageName, roleStageName(plan, "test_runner"), runID, memoryProjectRoot(options, workDir), output) {
 			persistObservation(ctx, mem, obs, func(msg string) {

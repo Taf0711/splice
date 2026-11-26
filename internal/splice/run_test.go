@@ -5565,11 +5565,113 @@ func TestRunContinuesWhenAcceptanceFailsButFilesChange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runIterationLoop: %v", err)
 	}
-	if reason := DerefString(result.AbortReason); strings.Contains(reason, "acceptance_no_progress") {
-		t.Fatalf("guard fired on a pass that changed files: %q", reason)
+	// The files change on every pass, so the no-change rule does not apply.
+	// The run continues past iteration 2 and stops at the repeat limit.
+	reason := DerefString(result.AbortReason)
+	if result.Status != "aborted" || writer.calls != acceptanceRepeatLimit || !strings.Contains(reason, "although the code changed") {
+		t.Fatalf("status = %q, writer calls = %d, reason = %q; want abort at iteration %d by the repeat rule", result.Status, writer.calls, reason, acceptanceRepeatLimit)
 	}
-	if writer.calls < 3 {
-		t.Fatalf("writer calls = %d, want the loop to continue past iteration 2", writer.calls)
+}
+
+func TestRunStopsWhenAcceptanceRepeatsWithChanges(t *testing.T) {
+	registry, writer, workDir := acceptanceFixture(t, func(call int) string { return fmt.Sprintf("attempt %d", call) })
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		TokenBudget:   schemas.TokenBudget{TotalOutputBudget: 1000000},
+		RequestIntent: "acceptance repeats while the workspace changes",
+		Stages:        []schemas.ExecutionStage{{Name: "code_writer"}, {Name: "test_runner"}, {Name: "acceptance_verifier"}},
+	}
+	result, err := runIterationLoop(context.Background(), "run-acceptance-repeat", plan, registry,
+		runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 50}), workDir, nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	reason := DerefString(result.AbortReason)
+	if result.Status != "aborted" || writer.calls != acceptanceRepeatLimit {
+		t.Fatalf("status = %q, writer calls = %d; want aborted after iteration %d", result.Status, writer.calls, acceptanceRepeatLimit)
+	}
+	if !strings.Contains(reason, "although the code changed") || !strings.Contains(reason, "returns 42") {
+		t.Fatalf("reason = %q; want the repeat reason and the failing statement", reason)
+	}
+}
+
+// The failing check changes on every pass, so the signature changes and the
+// acceptance guard never counts a repeat, even while the files change.
+func TestRunAcceptanceGuardIgnoresChangingFailures(t *testing.T) {
+	registry, writer, workDir := acceptanceFixture(t, func(call int) string { return fmt.Sprintf("attempt %d", call) })
+	registry["acceptance_verifier"] = &fixtureStage{run: func(call int) (schemas.HarnessStageOutput, error) {
+		return schemas.HarnessStageOutput{Summary: "acceptance", Data: map[string]any{"acceptance_results": []schemas.TestCaseResult{
+			{Name: fmt.Sprintf("returns %d", call), Status: "failed", Message: "exit code 1"},
+		}}}, nil
+	}}
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		TokenBudget:   schemas.TokenBudget{TotalOutputBudget: 1000000},
+		RequestIntent: "acceptance fails with a different check each pass",
+		Stages:        []schemas.ExecutionStage{{Name: "code_writer"}, {Name: "test_runner"}, {Name: "acceptance_verifier"}},
+	}
+	result, err := runIterationLoop(context.Background(), "run-acceptance-moving", plan, registry,
+		runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 50}), workDir, nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	if reason := DerefString(result.AbortReason); strings.Contains(reason, "acceptance_no_progress") {
+		t.Fatalf("guard fired although the failing checks changed: %q", reason)
+	}
+	if writer.calls <= acceptanceRepeatLimit {
+		t.Fatalf("writer calls = %d, want the loop to pass iteration %d", writer.calls, acceptanceRepeatLimit)
+	}
+}
+
+// The run log gets one message event that lists the failed checks. A pass
+// with no failed check emits no message event.
+func TestRunEmitsFailedAcceptanceChecksAsMessage(t *testing.T) {
+	for _, tc := range []struct {
+		name, status, detail string
+	}{
+		{"failed", "failed", "acceptance\n- failed: returns 42: exit code 1"},
+		{"passed", "passed", "acceptance"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			registry, _, workDir := acceptanceFixture(t, func(int) string { return "same content" })
+			registry["acceptance_verifier"] = &fixtureStage{run: func(int) (schemas.HarnessStageOutput, error) {
+				return schemas.HarnessStageOutput{Summary: "acceptance", Detail: tc.detail, Data: map[string]any{"acceptance_results": []schemas.TestCaseResult{
+					{Name: "returns 42", Status: tc.status, Message: "exit code 1"},
+				}}}, nil
+			}}
+			plan := schemas.ExecutionPlan{
+				Tier:          schemas.TierLight,
+				TokenBudget:   schemas.TokenBudget{TotalOutputBudget: 1000000},
+				RequestIntent: "acceptance messages",
+				Stages:        []schemas.ExecutionStage{{Name: "code_writer"}, {Name: "test_runner"}, {Name: "acceptance_verifier"}},
+			}
+			var events []agent.StageEvent
+			cfg := PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 50, OnStageEvent: func(e agent.StageEvent) { events = append(events, e) }})
+			if _, err := runIterationLoop(context.Background(), "run-acceptance-message-"+tc.name, plan, registry,
+				runFakeProvider{}, cfg, workDir, nil, nil, nil, nil, nil, nil); err != nil {
+				t.Fatalf("runIterationLoop: %v", err)
+			}
+			var messages []string
+			for _, e := range events {
+				if e.Name == "acceptance_verifier" && e.Status == "message" {
+					messages = append(messages, e.Detail)
+				}
+			}
+			if tc.status == "failed" {
+				if len(messages) == 0 {
+					t.Fatal("no message event for a failed acceptance check")
+				}
+				for _, m := range messages {
+					if m != "- failed: returns 42: exit code 1" {
+						t.Fatalf("message = %q, want the failed-check line", m)
+					}
+				}
+				return
+			}
+			if len(messages) != 0 {
+				t.Fatalf("message events for passing checks: %q", messages)
+			}
+		})
 	}
 }
 
